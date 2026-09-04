@@ -299,16 +299,22 @@ int vfs_umount(const char *path)
     /* The filesystem releases its pins and private state while the root
      * is still alive; the root's eviction follows and must tolerate
      * mnt->fs_priv being gone. */
-    mnt->fs->unmount(mnt);
+    int urc = mnt->fs->unmount(mnt);
     struct vnode *root_vn = mnt->root;
     mnt->root = NULL;
     vnode_put(root_vn);
     if (mnt->bdev)
         blkdev_put(mnt->bdev);
     vnode_put(mp);
-    kinfo("vfs: unmounted %s", path);
+    if (urc)
+        kerror("vfs: %s: the filesystem reported %d while unmounting; uncommitted changes may be lost", path,
+               urc);
+    else
+        kinfo("vfs: unmounted %s", path);
     kobject_put(&mnt->obj);
-    return 0;
+    /* The mount is gone either way; the caller learns that the final
+     * commit failed. */
+    return urc;
 }
 
 int vfs_sync(void)

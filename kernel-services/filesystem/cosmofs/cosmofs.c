@@ -38,7 +38,9 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
         cfs_buf_put(fs, b);
     }
     for (unsigned i = 0; i < k; i++) {
-        if (ext[i].start < 2 || ext[i].start + ext[i].count > fs->nblocks)
+        /* Overflow-safe: start below the end and count within the remainder. */
+        if (ext[i].start < 2 || ext[i].start >= fs->nblocks || ext[i].count == 0 ||
+            ext[i].count > fs->nblocks - ext[i].start)
             return -EIO;
     }
     *n = k;
@@ -518,6 +520,12 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         goto out;
     }
     unsigned type = ((struct cfs_dirent *)block)[slot].type;
+
+    /* Order for failure safety: publish the destination first (the only
+     * step that can hit ENOSPC in a fresh block), then retire the source;
+     * a failure before the source is removed leaves the namespace as it
+     * was, and a failure after it is rolled back by removing the new
+     * entry again. */
     if (replaced) {
         if (replaced->type == VNODE_DIR) {
             uint8_t *vb = kmalloc(CFS_BLOCK, 0);
@@ -528,31 +536,53 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
                 goto out;
             }
         }
+        /* Overwrite the existing entry in place: same name, new inode. */
         uint64_t rl;
         unsigned rs;
         rc = dir_find(fs, ndir, nname, nlen, block, &rl, &rs);
         if (rc)
             goto out;
-        rc = dir_remove_slot(fs, ndir, rl, rs, block);
+        struct cfs_dirent *rd = &((struct cfs_dirent *)block)[rs];
+        rd->ino = victim->ino;
+        rd->type = (uint8_t)type;
+        rc = dir_write_block(fs, ndir, rl, block);
         if (rc)
             goto out;
+    } else {
+        rc = dir_add(fs, ndir, nname, nlen, victim->ino, type, block);
+        if (rc)
+            goto out;
+    }
+    /* The source block may have been the one just rewritten (same
+     * directory): locate the source entry again before removing it. */
+    rc = dir_find(fs, odir, oname, olen, block, &lblk, &slot);
+    if (rc == 0)
+        rc = dir_remove_slot(fs, odir, lblk, slot, block);
+    if (rc) {
+        /* Roll the destination back so the source stays the only entry. */
+        uint64_t rl;
+        unsigned rs;
+        if (dir_find(fs, ndir, nname, nlen, block, &rl, &rs) == 0) {
+            if (replaced) {
+                struct cfs_dirent *rd = &((struct cfs_dirent *)block)[rs];
+                rd->ino = replaced->ino;
+                rd->type = (uint8_t)(replaced->type == VNODE_DIR ? CFS_TYPE_DIR : CFS_TYPE_REG);
+                dir_write_block(fs, ndir, rl, block);
+            } else {
+                dir_remove_slot(fs, ndir, rl, rs, block);
+            }
+        }
+        kerror("cosmofs: rename of %.*s failed (%d); namespace restored", (int)olen, oname, rc);
+        goto out;
+    }
+    if (replaced) {
         replaced->nlink = replaced->type == VNODE_DIR ? 0 : replaced->nlink - 1;
         if (replaced->type == VNODE_DIR)
             ndir->nlink--;
         rc = inode_sync(fs, replaced);
         if (rc)
             goto out;
-        /* The old entry may have moved: find it again. */
-        rc = dir_find(fs, odir, oname, olen, block, &lblk, &slot);
-        if (rc)
-            goto out;
     }
-    rc = dir_remove_slot(fs, odir, lblk, slot, block);
-    if (rc)
-        goto out;
-    rc = dir_add(fs, ndir, nname, nlen, victim->ino, type, block);
-    if (rc)
-        goto out;
     if (odir != ndir) {
         cfs_inode_of(victim)->parent = ndir->ino;
         if (victim->type == VNODE_DIR) {
