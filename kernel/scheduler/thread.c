@@ -6,6 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -127,6 +128,7 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags)
     t->flags = flags;
     list_init(&t->rq_link);
     list_init(&t->all_link);
+    list_init(&t->proc_link);
     completion_init(&t->exited, "thread-exit");
     thread_register(t);
     return t;
@@ -215,6 +217,21 @@ void thread_put(struct thread *t)
     thread_unregister(t);
     if (t->stack_base != 0 && (t->flags & THREAD_FLAG_BOOT) == 0)
         vm_kernel_free(t->stack_base);
+
+    /* A user thread holds a reference on its process. Leaving the
+     * process's thread list here (reaper context, interrupts enabled)
+     * is what lets the last thread's departure tear the process down
+     * on a stack and CR3 that were never the dead thread's. */
+    struct process *p = t->proc;
+    if (p != NULL) {
+        arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+        list_remove(&t->proc_link);
+        bool last = --p->nr_threads == 0;
+        spin_unlock_irqrestore(&p->lock, s);
+        if (last)
+            process_last_thread_gone(p);
+        process_put(p);
+    }
     kmem_cache_free(g_thread_cache, t);
 }
 

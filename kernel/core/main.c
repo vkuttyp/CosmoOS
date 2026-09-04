@@ -18,6 +18,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/pmm.h>
+#include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <kernel/smp.h>
@@ -116,6 +117,7 @@ void kernel_main(const struct cosmoboot_info *info)
     ipi_init();
     timer_init();
     sched_init();
+    process_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");
@@ -130,6 +132,27 @@ void kernel_main(const struct cosmoboot_info *info)
 #else
     kinfo("self-tests disabled in this build");
 #endif
+
+    /* The first user process. There is no filesystem yet: the loader
+     * delivered init as a boot module. */
+    if (info->module_size != 0) {
+        const void *image = bootinfo_phys_to_virt(info->module_phys);
+        static const char *const argv[] = { "init", NULL };
+        struct process *init = NULL;
+        int rc = process_create_from_elf(image, (size_t)info->module_size, "init", argv, NULL, &init);
+        if (rc == 0) {
+            int status = process_wait_exit(init);
+            kinfo("init exited with status %d", status);
+            process_put(init);
+            if (status != 0)
+                failed++;
+        } else {
+            kerror("cannot start init (%d)", rc);
+            failed++;
+        }
+    } else {
+        kwarn("no boot module: init not started");
+    }
 
 #if CONFIG_CRASH_TEST
     /* Deliberate page fault on a canonical but unmapped address. Proves

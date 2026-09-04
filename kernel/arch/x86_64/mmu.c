@@ -93,6 +93,8 @@ static pte_t leaf_flags(vm_prot_t prot, vm_cache_t cache, unsigned flags, bool l
         f |= PTE_NX;
     if (flags & ARCH_MMU_MAP_GLOBAL)
         f |= PTE_G;
+    if (flags & ARCH_MMU_MAP_USER)
+        f |= PTE_US;
     if (large)
         f |= PTE_PS;
     switch (cache) {
@@ -139,8 +141,10 @@ static void walk(const struct arch_mmu_context *ctx, vaddr_t va, struct walk *w)
 }
 
 /* Descend to `target_level`, creating tables. Returns the entry pointer
- * at that level, or NULL with *rc set on conflict/OOM. */
-static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_level, int *rc)
+ * at that level, or NULL with *rc set on conflict/OOM. Intermediate
+ * entries for user mappings carry U/S (the leaf decides the rest);
+ * kernel intermediates never do. */
+static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_level, bool user, int *rc)
 {
     pte_t *t = table_at(ctx->root);
     pte_t *e = &t[PML4_INDEX(va)];
@@ -152,7 +156,7 @@ static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_
                 *rc = -ENOMEM;
                 return NULL;
             }
-            *e = child | PTE_P | PTE_RW;
+            *e = child | PTE_P | PTE_RW | (user ? PTE_US : 0);
         } else if (level != LEVEL_PML4 && (*e & PTE_PS)) {
             *rc = -EEXIST; /* a large page already covers this range */
             return NULL;
@@ -176,6 +180,57 @@ int arch_mmu_context_init(struct arch_mmu_context *ctx)
     page->flags |= PG_PAGETABLE;
     ctx->root = page_to_phys(page);
     return 0;
+}
+
+int arch_mmu_context_init_user(struct arch_mmu_context *ctx, const struct arch_mmu_context *kernel)
+{
+    int rc = arch_mmu_context_init(ctx);
+    if (rc)
+        return rc;
+    /* Kernel half: share the kernel's PDPTs. Those PML4 entries are
+     * fixed after vmm_init (invariant P9), so the copy stays valid. */
+    pte_t *dst = table_at(ctx->root);
+    const pte_t *src = table_at(kernel->root);
+    for (unsigned i = PT_ENTRIES / 2; i < PT_ENTRIES; i++)
+        dst[i] = src[i];
+    return 0;
+}
+
+static void free_table_tree(paddr_t table_pa, unsigned level)
+{
+    pte_t *t = table_at(table_pa);
+    if (level > LEVEL_PT) {
+        for (unsigned i = 0; i < PT_ENTRIES; i++) {
+            if ((t[i] & PTE_P) == 0 || (t[i] & PTE_PS))
+                continue;
+            free_table_tree(t[i] & PTE_ADDR_MASK, level - 1);
+        }
+    }
+    struct page *page = phys_to_page(table_pa);
+    KASSERT(page != NULL && (page->flags & PG_PAGETABLE));
+    page->flags &= ~PG_PAGETABLE;
+    pmm_free_page(page);
+}
+
+void arch_mmu_context_destroy(struct arch_mmu_context *ctx)
+{
+    KASSERT(ctx->root != 0);
+    KASSERT(read_cr3() != ctx->root);
+
+    /* Lower half only: the upper-half PDPTs belong to the kernel. */
+    pte_t *pml4 = table_at(ctx->root);
+    for (unsigned i = 0; i < PT_ENTRIES / 2; i++) {
+        if ((pml4[i] & PTE_P) == 0)
+            continue;
+        free_table_tree(pml4[i] & PTE_ADDR_MASK, LEVEL_PDPT);
+        pml4[i] = 0;
+    }
+
+    struct page *root = phys_to_page(ctx->root);
+    KASSERT(root != NULL);
+    root->flags &= ~PG_PAGETABLE;
+    pmm_free_page(root);
+    ctx->root = 0;
 }
 
 /* --- cross-CPU shootdown --- */
@@ -264,7 +319,7 @@ int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t le
         }
 
         int rc = 0;
-        pte_t *e = descend(ctx, va, level, &rc);
+        pte_t *e = descend(ctx, va, level, (flags & ARCH_MMU_MAP_USER) != 0, &rc);
         if (e == NULL)
             return rc;
         if (*e & PTE_P)
@@ -381,6 +436,8 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
             p |= VM_PROT_WRITE;
         if ((e & PTE_NX) == 0)
             p |= VM_PROT_EXEC;
+        if (e & PTE_US)
+            p |= VM_PROT_USER;
         *prot = p;
     }
     if (cache) {

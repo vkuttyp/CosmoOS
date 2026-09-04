@@ -447,6 +447,13 @@ static bool access_allowed(const struct vm_region *r, unsigned fl)
     return (r->prot & VM_PROT_READ) != 0;
 }
 
+static const struct vm_user_hooks *g_user_hooks;
+
+void vm_set_user_hooks(const struct vm_user_hooks *hooks)
+{
+    g_user_hooks = hooks;
+}
+
 static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
@@ -455,9 +462,15 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
     vaddr_t addr = (vaddr_t)arch_trap_fault_address(frame);
     unsigned fl = arch_trap_fault_flags(frame);
     vaddr_t page = page_align_down(addr);
-    struct vm_space *space = addr >= arch_mmu_kernel_base() ? &kernel_space : NULL;
+    bool kernel_addr = addr >= arch_mmu_kernel_base();
+    struct vm_space *space = NULL;
     const struct vm_region *r = NULL;
     char desc[128];
+
+    if (kernel_addr)
+        space = &kernel_space;
+    else if (g_user_hooks != NULL)
+        space = g_user_hooks->current_space(); /* NULL for a kernel thread */
 
     if (space != NULL && g_initialized) {
         if (spin_is_held(&space->lock))
@@ -471,15 +484,21 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
             struct page *frame_page = pmm_alloc_page(PMM_FLAGS_ZERO);
             if (frame_page == NULL) {
                 spin_unlock_irqrestore(&space->lock, s);
+                if (!kernel_addr && (fl & VM_FAULT_USER))
+                    g_user_hooks->fatal(addr, fl, frame); /* the process, not the kernel, runs out */
                 panic_frame(frame, "out of memory populating %p in region '%s'", (void *)addr, r->name);
             }
+            unsigned mflags = space->user ? ARCH_MMU_MAP_USER : ARCH_MMU_MAP_GLOBAL;
             int rc = arch_mmu_map(&space->mmu, page, page_to_phys(frame_page), PAGE_SIZE, r->prot,
-                                  r->cache, ARCH_MMU_MAP_GLOBAL);
+                                  r->cache, mflags);
             if (rc) {
                 spin_unlock_irqrestore(&space->lock, s);
                 panic_frame(frame, "cannot map %p in region '%s' (%d)", (void *)addr, r->name, rc);
             }
-            g_stats.anon_pages++;
+            if (space->user)
+                space->anon_pages++;
+            else
+                g_stats.anon_pages++;
             g_stats.faults_handled++;
             spin_unlock_irqrestore(&space->lock, s);
             return;
@@ -488,8 +507,13 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
         describe_region(r, desc, sizeof(desc));
         spin_unlock_irqrestore(&space->lock, s);
     } else {
-        strlcpy(desc, space ? "vmm not initialised" : "user address, no user spaces yet", sizeof(desc));
+        strlcpy(desc, kernel_addr ? "vmm not initialised" : "user address from a kernel thread", sizeof(desc));
     }
+
+    /* A fault raised by user code that no region services ends the
+     * process; the kernel never panics on user behaviour. */
+    if ((fl & VM_FAULT_USER) && g_user_hooks != NULL)
+        g_user_hooks->fatal(addr, fl, frame);
 
     panic_frame(frame, "page fault: %s %s at %p (%s): %s",
                 (fl & VM_FAULT_USER) ? "user" : "kernel",
@@ -497,6 +521,258 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
                 (void *)addr,
                 (fl & VM_FAULT_RESERVED) ? "reserved bit" : (fl & VM_FAULT_PRESENT) ? "protection" : "not present",
                 desc);
+}
+
+/* --- user address spaces --- */
+
+static struct kmem_cache *g_space_cache;
+
+int vm_space_create_user(struct vm_space **out)
+{
+    KASSERT(g_initialized);
+    if (g_space_cache == NULL) {
+        g_space_cache = kmem_cache_create("vm_space", sizeof(struct vm_space), 64);
+        if (g_space_cache == NULL)
+            return -ENOMEM;
+    }
+
+    struct vm_space *space = kmem_cache_alloc(g_space_cache, KMEM_ZERO);
+    if (space == NULL)
+        return -ENOMEM;
+
+    spinlock_init(&space->lock, "user_space");
+    list_init(&space->regions);
+    space->arena_lo = 0;
+    space->arena_hi = 0;
+    space->user = true;
+
+    int rc = arch_mmu_context_init_user(&space->mmu, &kernel_space.mmu);
+    if (rc) {
+        kmem_cache_free(g_space_cache, space);
+        return rc;
+    }
+    *out = space;
+    return 0;
+}
+
+static void user_region_teardown(struct vm_space *space, struct vm_region *r)
+{
+    /* Same chunked protocol as the kernel arena; frames are owned by
+     * the region for ANON. */
+    vaddr_t base = r->base;
+    size_t size = r->size;
+
+    for (vaddr_t va = base; va < base + size; va += TEARDOWN_CHUNK_PAGES * PAGE_SIZE) {
+        size_t chunk = MIN((size_t)(TEARDOWN_CHUNK_PAGES * PAGE_SIZE), (size_t)(base + size - va));
+        struct page *frames[TEARDOWN_CHUNK_PAGES];
+        unsigned n = 0;
+
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        if (r->kind == VM_REGION_ANON) {
+            for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
+                paddr_t pa;
+                if (!arch_mmu_query(&space->mmu, p, &pa, NULL, NULL, NULL))
+                    continue;
+                struct page *page = phys_to_page(pa);
+                KASSERT(page != NULL);
+                frames[n++] = page;
+                space->anon_pages--;
+            }
+        }
+        int rc = arch_mmu_unmap(&space->mmu, va, chunk);
+        KASSERT(rc == 0);
+        spin_unlock_irqrestore(&space->lock, s);
+
+        arch_mmu_shootdown(&space->mmu, va, chunk);
+
+        for (unsigned i = 0; i < n; i++)
+            pmm_free_page(frames[i]);
+    }
+}
+
+void vm_space_destroy(struct vm_space *space)
+{
+    KASSERT(space != NULL && space->user);
+
+    for (;;) {
+        arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+        if (list_empty(&space->regions)) {
+            spin_unlock_irqrestore(&space->lock, s);
+            break;
+        }
+        struct vm_region *r = list_first_entry(&space->regions, struct vm_region, link);
+        spin_unlock_irqrestore(&space->lock, s);
+
+        user_region_teardown(space, r);
+
+        s = spin_lock_irqsave(&space->lock);
+        list_remove(&r->link);
+        spin_unlock_irqrestore(&space->lock, s);
+        kmem_cache_free(g_region_cache, r);
+    }
+    KASSERT(space->anon_pages == 0);
+
+    arch_mmu_context_destroy(&space->mmu);
+    kmem_cache_free(g_space_cache, space);
+}
+
+static bool user_range_valid(uint64_t base, size_t size)
+{
+    return is_page_aligned(base) && is_page_aligned(size) && size > 0 && base >= VM_USER_LO &&
+           base + size > base && base + size <= VM_USER_HI;
+}
+
+int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
+                     const char *name)
+{
+    KASSERT(space->user);
+    if (!user_range_valid(base, size) || prot == VM_PROT_NONE)
+        return -EINVAL;
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
+        return -EINVAL;
+
+    unsigned rflags = VM_REGION_USER | (flags & (VM_REGION_POPULATED | VM_REGION_GUARD_BELOW));
+    struct vm_region *r = region_new((vaddr_t)base, size, prot & ~VM_PROT_USER, VM_CACHE_WB, VM_REGION_ANON,
+                                     rflags, 0, name);
+    if (r == NULL)
+        return -ENOMEM;
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    int rc = space_insert(space, r);
+    if (rc) {
+        spin_unlock_irqrestore(&space->lock, s);
+        kmem_cache_free(g_region_cache, r);
+        return rc;
+    }
+
+    if (flags & VM_REGION_POPULATED) {
+        for (vaddr_t va = (vaddr_t)base; va < base + size; va += PAGE_SIZE) {
+            struct page *page = pmm_alloc_page(PMM_FLAGS_ZERO);
+            rc = page ? arch_mmu_map(&space->mmu, va, page_to_phys(page), PAGE_SIZE, r->prot, VM_CACHE_WB,
+                                     ARCH_MMU_MAP_USER)
+                      : -ENOMEM;
+            if (rc) {
+                if (page)
+                    pmm_free_page(page);
+                spin_unlock_irqrestore(&space->lock, s);
+                /* Unwind: tear down what was populated and drop the region. */
+                user_region_teardown(space, r);
+                s = spin_lock_irqsave(&space->lock);
+                list_remove(&r->link);
+                spin_unlock_irqrestore(&space->lock, s);
+                kmem_cache_free(g_region_cache, r);
+                return rc;
+            }
+            space->anon_pages++;
+        }
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    return 0;
+}
+
+int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size)
+{
+    KASSERT(space->user);
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, (vaddr_t)base);
+    if (r == NULL || r->base != base || r->size != size) {
+        spin_unlock_irqrestore(&space->lock, s);
+        return -EINVAL;
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+
+    user_region_teardown(space, r);
+
+    s = spin_lock_irqsave(&space->lock);
+    list_remove(&r->link);
+    spin_unlock_irqrestore(&space->lock, s);
+    kmem_cache_free(g_region_cache, r);
+    return 0;
+}
+
+int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot)
+{
+    KASSERT(space->user);
+    if ((prot & VM_PROT_WRITE) && (prot & VM_PROT_EXEC))
+        return -EINVAL;
+    if (prot == VM_PROT_NONE)
+        return -EINVAL;
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    struct vm_region *r = space_find(space, (vaddr_t)base);
+    if (r == NULL || r->base != base || r->size != size) {
+        spin_unlock_irqrestore(&space->lock, s);
+        return -EINVAL;
+    }
+    r->prot = prot & ~VM_PROT_USER;
+    int rc = arch_mmu_protect(&space->mmu, (vaddr_t)base, size, prot);
+    spin_unlock_irqrestore(&space->lock, s);
+    if (rc == 0)
+        arch_mmu_shootdown(&space->mmu, (vaddr_t)base, size);
+    return rc;
+}
+
+uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size)
+{
+    KASSERT(space->user);
+    if (!is_page_aligned(size) || size == 0)
+        return 0;
+    if (from < VM_USER_LO)
+        from = VM_USER_LO;
+    from = page_align_up(from);
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    vaddr_t cursor = (vaddr_t)from;
+    struct vm_region *r;
+    uint64_t result = 0;
+    list_for_each_entry(r, &space->regions, link) {
+        vaddr_t rlo, rhi;
+        region_footprint(r, &rlo, &rhi);
+        rhi += PAGE_SIZE; /* keep one unmapped page between user regions */
+        if (rhi <= cursor)
+            continue;
+        if (rlo >= cursor && rlo - cursor >= size + PAGE_SIZE) {
+            result = cursor;
+            break;
+        }
+        if (rhi > cursor)
+            cursor = rhi;
+    }
+    if (result == 0 && cursor + size + PAGE_SIZE <= VM_USER_HI)
+        result = cursor;
+    spin_unlock_irqrestore(&space->lock, s);
+    return result;
+}
+
+bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot)
+{
+    KASSERT(space->user);
+    if (len == 0)
+        return true;
+    uint64_t end = addr + len;
+    if (end < addr)
+        return false;
+
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    uint64_t cursor = page_align_down(addr);
+    struct vm_region *r;
+    bool ok = false;
+    list_for_each_entry(r, &space->regions, link) {
+        if (r->base + r->size <= cursor)
+            continue;
+        if (r->base > cursor)
+            break; /* gap */
+        if ((r->prot & prot) != prot)
+            break;
+        cursor = r->base + r->size;
+        if (cursor >= end) {
+            ok = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&space->lock, s);
+    return ok;
 }
 
 /* --- diagnostics --- */

@@ -129,6 +129,21 @@ void pmm_init(void)
     if (pmm_max_pfn == 0)
         panic("pmm: memory map describes no RAM");
 
+    /* The loader must have typed the kernel image so it is never freed;
+     * a map that lists it as usable or reclaimable would let bootmem
+     * hand out the pages this code runs from. */
+    {
+        uint32_t n;
+        const struct cosmoboot_mem_entry *map = bootinfo_mem_map(&n);
+        for (uint32_t i = 0; i < n; i++) {
+            paddr_t lo = map[i].base, hi = map[i].base + map[i].length;
+            bool overlaps = info->kernel_phys_base < hi && lo < info->kernel_phys_base + info->kernel_size;
+            if (overlaps && (map[i].type == COSMOBOOT_MEM_USABLE || map[i].type == COSMOBOOT_MEM_LOADER_RECLAIMABLE))
+                panic("pmm: memory map marks the kernel image at 0x%llx as %s; refusing to boot",
+                      (unsigned long long)info->kernel_phys_base, bootinfo_mem_type_name(map[i].type));
+        }
+    }
+
     bootmem_init();
 
     size_t array_bytes = (size_t)pmm_max_pfn * sizeof(struct page);

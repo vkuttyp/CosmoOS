@@ -25,17 +25,18 @@ include $(ROOT)/build/rules.mk
 
 include $(ROOT)/kernel/kernel.mk
 include $(ROOT)/boot/uefi/boot.mk
+include $(ROOT)/userland/userland.mk
 include $(ROOT)/tests/host/host.mk
 
-all: kernel boot
+all: kernel boot userland
 
 IMAGE := $(OUT)/cosmoos.img
 
 image: $(IMAGE)
 
-$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(ROOT)/scripts/mkimage.sh
+$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(INIT_ELF) $(ROOT)/scripts/mkimage.sh
 	$(call log,IMAGE,$@)
-	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF)
+	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(INIT_ELF)
 
 run: $(IMAGE)
 	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \

@@ -45,4 +45,11 @@ bool selftest_smp_wake(const char **reason);
 bool selftest_smp_ticks(const char **reason);
 bool selftest_smp_mutex(const char **reason);
 
+/* Phase 4: kernel/process/proctest.c */
+bool selftest_objects(const char **reason);
+bool selftest_elf(const char **reason);
+bool selftest_process_reject(const char **reason);
+bool selftest_process_selftest(const char **reason);
+bool selftest_process_fault(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

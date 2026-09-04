@@ -91,5 +91,12 @@ See [docs/development.md](docs/development.md).
   trampoline, per-CPU tables and ticks, IPIs for reschedule, function
   call, TLB shootdown and halt, cross-CPU scheduling, a scheduler hang
   watchdog. Self-tests run on four CPUs under QEMU.
-- **Next, Phase 4:** processes, ELF loader, user mode, system calls,
-  init.
+- **Phase 4 (done):** kernel objects and handle tables, processes with
+  their own address spaces, an in-kernel static ELF loader, user mode via
+  SYSCALL/SYSRET with SWAPGS, a personality-based syscall dispatcher with
+  eleven native calls, validated user-memory access, fatal-fault
+  termination, and an `init` program delivered by the loader as a boot
+  module (protocol v2). The user program's own self-test exercises every
+  syscall.
+- **Next, Phase 5:** kernel modules: ELF module loader, symbol
+  resolution, relocations, dependencies, signing.

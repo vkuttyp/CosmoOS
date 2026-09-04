@@ -23,9 +23,12 @@ wins and the document is wrong.
 | `kernel/timer/` | Monotonic TSC clock, LAPIC tick, one-shot timers, sleep, PIT calibration |
 | `kernel/smp/` | AP bring-up (trampoline, per-CPU tables), IPIs, cross-CPU calls, TLB shootdown, stopping CPUs, the hang watchdog |
 | `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides) |
+| `kernel/object/` | Reference-counted kernel objects, the per-process handle table with rights, the console object |
+| `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module |
+| `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities, the native system-call ABI (`uapi/cosmo/syscall.h`) and user-side wrappers |
 
 Further subsystem directories are added as subsystems come into existence
-(`kernel/process/`, `kernel-services/vfs/`, and so on).
+(`kernel/module/`, `kernel-services/vfs/`, and so on).
 
 ## Per-subsystem convention
 

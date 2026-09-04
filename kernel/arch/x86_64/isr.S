@@ -50,10 +50,24 @@ isr_common:
     pushq %r14
     pushq %r15
 
+    /* From ring 3 the GS base is the user's: swap to the kernel's. The
+     * saved CS sits above the 15 registers, vector, and error code:
+     * offset 15*8 + 16 + 8 = 144. */
+    testb $3, 144(%rsp)
+    jz 1f
+    swapgs
+1:
     cld
     mov %rsp, %rdi
     call x86_trap_dispatch
 
+    /* Returning to ring 3: swap back. Interrupts are off here (the
+     * dispatch tail leaves IF clear), so nothing can run between the
+     * swap and iretq. */
+    testb $3, 144(%rsp)
+    jz 2f
+    swapgs
+2:
     popq %r15
     popq %r14
     popq %r13

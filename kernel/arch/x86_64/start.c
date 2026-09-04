@@ -15,6 +15,7 @@
 #include <kernel/percpu.h>
 
 #include <arch/console.h>
+#include <arch/user.h>
 
 #include <x86/cpu.h>
 #include <x86/gdt.h>
@@ -39,6 +40,7 @@ void x86_start(const struct cosmoboot_info *info)
     kdebug("x86: legacy PIC masked");
 
     x86_cpu_init();
+    arch_syscall_init_cpu();
     const struct x86_cpu_info *c = x86_cpu_info();
     kdebug("x86: %s family %u model %u stepping %u", c->vendor, c->family, c->model, c->stepping);
     kdebug("x86: nx=%d smep=%d smap=%d umip=%d pge=%d apic=%d x2apic=%d",

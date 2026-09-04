@@ -57,10 +57,11 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF and the UEFI loader (default) |
+| `all` | Build the kernel ELF, the UEFI loader, and the user programs (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
-| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh` |
+| `userland` | `out/<arch>-<build>/userland/init.elf`, the first user program (`userland/userland.mk`) |
+| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\init.elf` |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
@@ -85,6 +86,28 @@ with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
 package on Ubuntu both qualify. Set `HOST_CC` to override the compiler.
 The tests live in `out/<arch>-<build>/host/` and can be run directly for a
 single binary. See `docs/kernel/memory/testing.md` for what they cover.
+
+### User programs
+
+`userland/` holds programs that run in ring 3; `libc/include/` is the
+start of the native C library (only the raw system-call wrappers so
+far). They are compiled with the same clang and the kernel target
+triple, but with user flags (`USER_CFLAGS` in `userland/userland.mk`):
+no `-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie`, static
+link at 4 MiB through `userland/init/user.ld` with
+`-z noexecstack -z separate-code` so the ELF has separate r-x, r--,
+rw- segments (the kernel refuses W+X segments and executable stacks).
+`init` is delivered to the kernel as the boot module (protocol v2,
+`docs/boot/design.md`); there is no filesystem yet.
+
+To write a new program: add a directory under `userland/`, start from
+`userland/init/crt0.S` (reads `argc`/`argv` from the initial stack,
+calls `main`, exits with its return value) and the wrappers in
+`libc/include/cosmo/syscall.h`, add a rule modelled on `INIT_ELF` in
+`userland.mk`, and pass the ELF to `scripts/mkimage.sh`. The system
+calls available are listed in `docs/kernel/syscall/api.md`; the kernel
+starts only `\cosmo\init.elf` today, so a second program is reachable
+only by replacing `init`.
 
 ## Variables
 
@@ -117,6 +140,7 @@ A successful debug boot looks like this (abridged):
 ```
 cosmoboot-uefi v1
 kernel: 114632 bytes read
+module: 57056 bytes read
 kernel: virt 0xffffffff80000000-0xffffffff8001e000 -> phys 0xdd0f000, entry 0xffffffff80000000, 3 segments
 paging: pml4 at 0xdd01000, 13/24 pool pages used, NX on
 exiting boot services
@@ -128,7 +152,7 @@ jumping to kernel entry 0xffffffff80000000, info at 0xffff80000dcfc000
 CosmoOS kernel 0.0.1 (build 47a16b5)
 Architecture: x86_64
 Build: DEBUG
-Boot: UEFI (cosmoboot-uefi v1, protocol v1)
+Boot: UEFI (cosmoboot-uefi v1, protocol v2)
 CPU: QEMU Virtual CPU version 2.5+
 Memory: 205 MiB usable in 32 regions, RAM ends at 256 MiB
 [ INFO] pmm: 256 MiB RAM span, 246 MiB free, 9 MiB reserved, 0 MiB deferred, page array 2048 KiB
@@ -149,11 +173,28 @@ SELFTEST: irq-route        ... ok
 SELFTEST: thread           ... ok
 ...
 SELFTEST: smp-mutex        ... ok
-SELFTEST: PASS (27 tests)
+...
+USERTEST: PASS
+SELFTEST: process-user     ... ok
+init: crashing on purpose
+SELFTEST: process-fault    ... ok
+SELFTEST: PASS (32 tests)
+[ INFO] process: pid 3 'init' created, entry 0x400000, 3 segments
+init: hello from user mode, pid 3, argc 1
+init: nothing to supervise yet; exiting
+[ INFO] process: pid 3 'init' exited with status 0 (5 syscalls)
+[ INFO] init exited with status 0
 [ INFO] boot complete; nothing more to do in this phase
 [ INFO] shutdown: exit status 0
 [ INFO] shutdown: halting CPU
 ```
+
+Lines starting with `init:` and `USERTEST:` are written by the user
+program through the `write` system call on handle 1; the self-test run
+(`init --selftest`) and the crash run (`init --crash`) happen inside
+the `process-user` and `process-fault` self-tests, and the plain run
+is the real first process. Release builds skip the self-tests and show
+only the plain run.
 
 Lines with a `[LEVEL]` prefix come from `klog()`; unprefixed lines are
 `kprintf()` output (banner, self-tests, panic dumps). Everything before
@@ -187,10 +228,12 @@ QEMU then exits with status `(value << 1) | 1`.
 QEMU processes the exit asynchronously, so the kernel still prints
 `shutdown: halting CPU` and halts before the emulator terminates. The
 harness requires both the correct exit status and the expected log
-markers (loader banner, kernel banner, `boot complete`, and
-`SELFTEST: PASS` when a `SELFTEST:` line appears), and rejects any log
-containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`, or
-`cosmoboot: FATAL`. On hardware or an emulator without the device the port
+markers (loader banner, kernel banner, `init: hello from user mode,
+pid N`, `init exited with status 0`, `boot complete`, and, when a
+`SELFTEST:` line appears, both `SELFTEST: PASS` and `USERTEST: PASS`),
+and rejects any log containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`,
+or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
+kernel report failure through the same port. On hardware or an emulator without the device the port
 write is ignored and the kernel simply halts.
 
 ## Continuous integration

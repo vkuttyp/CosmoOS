@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 1). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 2). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 1 |
+| `version` | `COSMOBOOT_VERSION` = 2 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: adds the boot module) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -21,12 +21,16 @@ compiler.
 | `mem_map_phys`, `mem_map_entries`, `mem_map_entry_size` | array of `struct cosmoboot_mem_entry { base, length, type, reserved }` |
 | `acpi_rsdp` | physical RSDP from the EFI configuration table (ACPI 2.0 preferred, 1.0 fallback), 0 if absent |
 | `firmware_system_table` | physical `EFI_SYSTEM_TABLE *` for future runtime-services use |
-| `reserved1[8]` | zero; reserved for framebuffer, command line, initrd under a version bump |
+| `module_phys`, `module_size` | (v2) the one boot module, the initial user executable `\cosmo\init.elf`, in `COSMOBOOT_MEM_MODULE` memory below 4 GiB; both zero when the file is absent |
+| `reserved1[6]` | zero; reserved for framebuffer and command line under a version bump |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
 `KERNEL` 7, `BOOTINFO` 8, `BOOT_PAGETABLES` 9, `FIRMWARE_RUNTIME` 10,
-`MMIO` 11, `PERSISTENT` 12.
+`MMIO` 11, `PERSISTENT` 12, `MODULE` 13 (v2). The PMM frees only
+`USABLE` and `LOADER_RECLAIMABLE` ranges (`kernel/memory/bootmem.c`),
+so `MODULE` memory, like `KERNEL`, stays reserved and the image is
+intact when the kernel copies it into the process's address space.
 
 The ELF note: name `"COSMO\0"` (namesz 6), type `COSMOBOOT_NOTE_TYPE` = 1,
 desc = `uint32_t COSMOBOOT_VERSION`. `entry.S` emits it into
@@ -62,10 +66,17 @@ address and no calling convention across the boundary.
    slow boot.
 2. `HandleProtocol(LoadedImage)` on the loader's own handle: needed for the
    device handle (step 3) and for the image base/size (step 6).
-3. `read_kernel_file()`: LoadedImage → `DeviceHandle` → SimpleFileSystem
-   → `OpenVolume` → `Open(L"\\cosmo\\kernel.elf", READ)` → `GetInfo`
-   for the size (rejected if 0 or above 64 MiB) → `alloc_pages_low`
-   (`EfiLoaderData`) → `Read`, verified to return exactly `FileSize`.
+3. `read_boot_file(KERNEL_PATH, EfiLoaderData, ...)`: LoadedImage →
+   `DeviceHandle` → SimpleFileSystem → `OpenVolume` →
+   `Open(L"\\cosmo\\kernel.elf", READ)` → `GetInfo` for the size
+   (rejected if 0 or above 64 MiB) → `alloc_pages_low` → `Read`,
+   verified to return exactly `FileSize`. Failure is fatal.
+3a. The same function with `MODULE_PATH` (`\cosmo\init.elf`) and type
+   `EFI_MEMORY_TYPE_COSMO_MODULE`: a missing file is *not* fatal (the
+   loader prints `module: \cosmo\init.elf not found; the kernel will run
+   without init` and passes zeros); any other error is. The module is
+   not parsed by the loader at all: it is opaque bytes for the kernel's
+   own ELF validator.
 4. `elf_load()` (below). Produces `struct elf_image`.
 5. Allocations that must precede ExitBootServices, in order: page-table
    pool (`paging_pool_size()` pages, type `COSMO_PAGETABLES`), bootinfo
@@ -73,9 +84,9 @@ address and no calling convention across the boundary.
    by up to `BOOTINFO_MAX_ENTRIES` map entries), handoff stack
    (`HANDOFF_STACK_PAGES` = 4, `EfiLoaderData`).
 6. `paging_build()` (below).
-7. Fill the info header. `find_acpi_rsdp()` scans
-   `ConfigurationTable` for the ACPI 2.0 GUID, remembering a 1.0 hit as
-   fallback.
+7. Fill the info header, including `module_phys`/`module_size`.
+   `find_acpi_rsdp()` scans `ConfigurationTable` for the ACPI 2.0 GUID,
+   remembering a 1.0 hit as fallback.
 8. Memory map: `GetMemoryMap(size=0)` to learn the size, add 16
    descriptors of slack, allocate the buffer (`EfiLoaderData`, itself a
    map change the slack absorbs). Then up to two rounds of
@@ -153,8 +164,8 @@ documented W^X exception; see `invariants.md` BT4.
 `LOADER_ALLOC_LIMIT - 1` (4 GiB), so everything the loader hands to the
 kernel is inside the identity map and HHDM. Loader-defined types
 (`EFI_MEMORY_TYPE_COSMO_KERNEL` `0x80000000`, `_BOOTINFO` `0x80000001`,
-`_PAGETABLES` `0x80000002`) live in the range UEFI reserves for OS
-loaders; a firmware that returns `EFI_INVALID_PARAMETER` gets a retry
+`_PAGETABLES` `0x80000002`, `_MODULE` `0x80000003`) live in the range
+UEFI reserves for OS loaders; a firmware that returns `EFI_INVALID_PARAMETER` gets a retry
 with `EfiLoaderData` and `*fallback_used` is set, which the loader
 reports as a warning. The result is always zeroed.
 
@@ -165,8 +176,8 @@ regardless of type. Otherwise: Conventional → `USABLE`; LoaderCode/Data
 and BootServicesCode/Data → `LOADER_RECLAIMABLE`; RuntimeServices* →
 `FIRMWARE_RUNTIME`; ACPIReclaim → `ACPI_RECLAIMABLE`; ACPIMemoryNVS →
 `ACPI_NVS`; Unusable → `BAD`; MemoryMappedIO(PortSpace) → `MMIO`;
-PersistentMemory → `PERSISTENT`; the three loader types → `KERNEL`,
-`BOOTINFO`, `BOOT_PAGETABLES`; everything else (Reserved, PalCode,
+PersistentMemory → `PERSISTENT`; the four loader types → `KERNEL`,
+`BOOTINFO`, `BOOT_PAGETABLES`, `MODULE`; everything else (Reserved, PalCode,
 Unaccepted, unknown) → `RESERVED`. Adjacent descriptors with the same
 translated type are merged. Descriptors with zero pages are skipped.
 
@@ -228,7 +239,19 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
 - MMIO ranges inside the 0-4 GiB identity map are mapped write-back like
   RAM. The kernel must not access device memory through the bootstrap
   tables without remapping it first.
-- No framebuffer, command line, or initrd; `reserved1` is zero.
+- No framebuffer or command line; `reserved1` is zero. Exactly one
+  module, always read from the fixed path `\cosmo\init.elf`; there is
+  no module list, name, or command line for it.
+- If the loader-defined memory types fall back to `EfiLoaderData`
+  (firmware rejected `0x8000000x`), the translated map would list the
+  kernel image, bootinfo, page-table pool, and module as
+  `LOADER_RECLAIMABLE`. The loader therefore retypes those four ranges
+  from their known placements after translation (`mark_range` in
+  `main.c`, splitting entries as needed), so the map the kernel sees is
+  identical to the non-fallback case. As a second line, `pmm_init`
+  refuses to boot if the entry covering the kernel image is usable or
+  reclaimable. OVMF accepts the types, so the fallback path is covered
+  by review only.
 - A memory map with more than about 630 merged entries would not fit in
   `BOOTINFO_PAGES` and is fatal; real firmware produces well under 200.
 - `BOOTX64.EFI` only; no 32-bit UEFI, no legacy BIOS.
@@ -242,11 +265,12 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
   `elf.c` (with `EM_AARCH64`), `memory.c`, and `console.c` (UART via
   the EFI SerialIo or a PL011 at a firmware-reported address);
   `paging.c` and `cpu.c` become per-architecture files.
-- **Protocol version 2** (framebuffer, command line, initrd, SMP
-  trampoline info): bump `COSMOBOOT_VERSION`, replace `reserved1` fields,
-  and keep `size` so a kernel can read a v1 loader's struct and refuse it
-  cleanly.
-- **Memory manager handoff (Phase 2)**: the PMM must reserve
-  `kernel_phys_base..+kernel_size`, the bootinfo pages, and the page-table
-  pool from the explicit fields, not only from map types, because of the
-  `EfiLoaderData` fallback.
+- **Protocol version 3** (framebuffer, command line, a module list
+  once there is a filesystem-less multi-module need): bump
+  `COSMOBOOT_VERSION`, replace `reserved1` fields, and keep `size` so a
+  kernel can read an older loader's struct and refuse it cleanly. The
+  kernel refuses any version other than its own (`bootinfo_init`).
+- **Memory manager handoff**: reservation is by map type, and the
+  loader guarantees the types are right even under the `EfiLoaderData`
+  fallback by retyping its own ranges (`mark_range`). The PMM's
+  kernel-image check is the safety net.

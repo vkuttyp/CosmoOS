@@ -32,4 +32,17 @@ _Static_assert(sizeof(struct arch_trap_frame) == 22 * 8, "trap frame layout");
 /* Called from isr.S with the frame at the top of the stack. */
 void x86_trap_dispatch(struct arch_trap_frame *frame);
 
+/* Register state saved by syscall_entry.S. Order matches the pushes. */
+struct x86_syscall_frame {
+    uint64_t r15, r14, r13, r12, rbp, rbx;   /* callee-saved, diagnostics */
+    uint64_t r9, r8, r10, rdx, rsi, rdi;     /* arguments 6..1 */
+    uint64_t rax;                            /* number in, result out */
+    uint64_t rip, cs, rflags, rsp, ss;       /* user return state */
+};
+
+_Static_assert(sizeof(struct x86_syscall_frame) == 18 * 8, "syscall frame layout");
+
+/* Called from syscall_entry.S with interrupts enabled. */
+void x86_syscall_c(struct x86_syscall_frame *frame);
+
 #endif /* X86_TRAPFRAME_H */

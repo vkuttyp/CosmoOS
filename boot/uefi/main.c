@@ -36,8 +36,10 @@ static bool guid_eq(const EFI_GUID *a, const EFI_GUID *b)
     return memcmp(a, b, sizeof(EFI_GUID)) == 0;
 }
 
-/* Read the whole kernel file into a fresh low allocation. */
-static EFI_STATUS read_kernel_file(uint8_t **out, size_t *out_size)
+/* Read a whole file from the boot volume into a fresh low allocation of
+ * the given EFI memory type. */
+static EFI_STATUS read_boot_file(CHAR16 *path, uint32_t mem_type, bool *fallback, uint8_t **out,
+                                 size_t *out_size)
 {
     EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_GUID sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
@@ -57,9 +59,7 @@ static EFI_STATUS read_kernel_file(uint8_t **out, size_t *out_size)
     st = sfs->OpenVolume(sfs, &root);
     if (EFI_ERROR(st))
         return st;
-    /* The protocol takes a non-const path; copy the literal. */
-    static CHAR16 kernel_path[] = KERNEL_PATH;
-    st = root->Open(root, &file, kernel_path, EFI_FILE_MODE_READ, 0);
+    st = root->Open(root, &file, path, EFI_FILE_MODE_READ, 0);
     if (EFI_ERROR(st)) {
         root->Close(root);
         return st;
@@ -78,7 +78,7 @@ static EFI_STATUS read_kernel_file(uint8_t **out, size_t *out_size)
     }
 
     EFI_PHYSICAL_ADDRESS buf;
-    st = alloc_pages_low(BYTES_TO_PAGES(file_size), EfiLoaderData, &buf, NULL);
+    st = alloc_pages_low(BYTES_TO_PAGES(file_size), mem_type, &buf, fallback);
     if (EFI_ERROR(st))
         goto out;
 
@@ -135,6 +135,7 @@ static uint32_t translate_type(uint32_t efi_type, uint64_t attr)
     case EFI_MEMORY_TYPE_COSMO_KERNEL:     return COSMOBOOT_MEM_KERNEL;
     case EFI_MEMORY_TYPE_COSMO_BOOTINFO:   return COSMOBOOT_MEM_BOOTINFO;
     case EFI_MEMORY_TYPE_COSMO_PAGETABLES: return COSMOBOOT_MEM_BOOT_PAGETABLES;
+    case EFI_MEMORY_TYPE_COSMO_MODULE:     return COSMOBOOT_MEM_MODULE;
     default:                           return COSMOBOOT_MEM_RESERVED;
     }
 }
@@ -170,6 +171,62 @@ static uint32_t translate_memory_map(const uint8_t *map, UINTN map_size, UINTN d
     return n;
 }
 
+/*
+ * Retype [base, base+len) inside the translated map, splitting entries as
+ * needed. Used when the firmware refused the loader-defined EFI memory
+ * types: the ranges then arrived as EfiLoaderData (reclaimable), which
+ * the kernel would free. Returns false if the entry array is full.
+ */
+static bool mark_range(struct cosmoboot_mem_entry *e, uint32_t *n, uint32_t max, uint64_t base, uint64_t len,
+                       uint32_t type)
+{
+    if (len == 0)
+        return true;
+    uint64_t end = base + len;
+
+    for (uint32_t i = 0; i < *n; i++) {
+        uint64_t elo = e[i].base;
+        uint64_t ehi = e[i].base + e[i].length;
+        if (end <= elo || base >= ehi || e[i].type == type)
+            continue;
+
+        uint64_t lo = base > elo ? base : elo;
+        uint64_t hi = end < ehi ? end : ehi;
+        uint32_t old_type = e[i].type;
+
+        /* Pieces: [elo, lo) old, [lo, hi) new, [hi, ehi) old. */
+        uint32_t extra = (lo > elo ? 1 : 0) + (hi < ehi ? 1 : 0);
+        if (*n + extra > max)
+            return false;
+
+        /* Shift the tail to make room for the extra pieces after i. */
+        for (uint32_t j = *n; j > i + 1; j--)
+            e[j - 1 + extra] = e[j - 1];
+        *n += extra;
+
+        uint32_t k = i;
+        if (lo > elo) {
+            e[k].base = elo;
+            e[k].length = lo - elo;
+            e[k].type = old_type;
+            k++;
+        }
+        e[k].base = lo;
+        e[k].length = hi - lo;
+        e[k].type = type;
+        e[k].reserved = 0;
+        k++;
+        if (hi < ehi) {
+            e[k].base = hi;
+            e[k].length = ehi - hi;
+            e[k].type = old_type;
+            e[k].reserved = 0;
+        }
+        i = k - 1;
+    }
+    return true;
+}
+
 static const char *mem_type_name(uint32_t t)
 {
     switch (t) {
@@ -185,6 +242,7 @@ static const char *mem_type_name(uint32_t t)
     case COSMOBOOT_MEM_FIRMWARE_RUNTIME:   return "fw-runtime";
     case COSMOBOOT_MEM_MMIO:               return "mmio";
     case COSMOBOOT_MEM_PERSISTENT:         return "persistent";
+    case COSMOBOOT_MEM_MODULE:             return "module";
     default:                               return "?";
     }
 }
@@ -213,10 +271,24 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* --- kernel file --- */
     uint8_t *file = NULL;
     size_t file_size = 0;
-    status = read_kernel_file(&file, &file_size);
+    static CHAR16 kernel_path[] = KERNEL_PATH;
+    status = read_boot_file(kernel_path, EfiLoaderData, NULL, &file, &file_size);
     if (EFI_ERROR(status))
         die("cannot read \\cosmo\\kernel.elf from the boot volume", status);
     lprintf("kernel: %u bytes read\n", (unsigned)file_size);
+
+    /* --- boot module (optional): the initial user executable --- */
+    uint8_t *module = NULL;
+    size_t module_size = 0;
+    static CHAR16 module_path[] = MODULE_PATH;
+    status = read_boot_file(module_path, EFI_MEMORY_TYPE_COSMO_MODULE, &type_fallback, &module, &module_size);
+    if (EFI_ERROR(status)) {
+        lputs("module: \\cosmo\\init.elf not found; the kernel will run without init\n");
+        module = NULL;
+        module_size = 0;
+    } else {
+        lprintf("module: %u bytes read\n", (unsigned)module_size);
+    }
 
     struct elf_image img;
     status = elf_load(file, file_size, &img, &type_fallback);
@@ -276,9 +348,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();
     info->firmware_system_table = (uint64_t)(uintptr_t)st;
+    info->module_phys = (uint64_t)(uintptr_t)module;
+    info->module_size = module_size;
 
     if (type_fallback)
-        lputs("warning: firmware rejected loader memory types; map shows them as loader-reclaimable\n");
+        lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and module "
+              "ranges will be retyped from their placements\n");
 
     /* --- memory map + ExitBootServices --- */
     UINTN map_size = 0, map_key = 0, desc_size = 0;
@@ -319,6 +394,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     uint32_t n = translate_memory_map(map, map_size, desc_size, entries, (uint32_t)BOOTINFO_MAX_ENTRIES);
     if (n == 0)
         die("memory map does not fit in bootinfo", EFI_BUFFER_TOO_SMALL);
+
+    if (type_fallback) {
+        /* The firmware refused loader-defined types, so these ranges are
+         * currently reclaimable in the map. Retype them from the explicit
+         * placements so the kernel never frees its own image. */
+        uint32_t max = (uint32_t)BOOTINFO_MAX_ENTRIES;
+        bool ok = mark_range(entries, &n, max, img.phys_base, img.virt_end - img.virt_base, COSMOBOOT_MEM_KERNEL) &&
+                  mark_range(entries, &n, max, info_phys, BOOTINFO_PAGES * PAGE_SIZE, COSMOBOOT_MEM_BOOTINFO) &&
+                  mark_range(entries, &n, max, pg.pool_phys, pg.pool_pages * PAGE_SIZE,
+                             COSMOBOOT_MEM_BOOT_PAGETABLES) &&
+                  mark_range(entries, &n, max, (uint64_t)(uintptr_t)module, BYTES_TO_PAGES(module_size) * PAGE_SIZE,
+                             COSMOBOOT_MEM_MODULE);
+        if (!ok)
+            die("memory map has no room to retype loader ranges", EFI_BUFFER_TOO_SMALL);
+    }
     info->mem_map_entries = n;
 
     lprintf("memory map: %u entries\n", n);
