@@ -91,7 +91,13 @@ root current. A filesystem's `evict` must tolerate
 `mnt->fs_priv` already being NULL (cosmofs root eviction after
 `cfs_destroy`). Check: `cosmofs-crash` relies on it (the discard hook
 would be bypassed otherwise); `cosmofs-format` (unmount of an untouched
-filesystem commits nothing). Gap: none.
+filesystem commits nothing). Once abandoned, every cosmofs operation
+returns `-EIO`. Gap: the in-memory fields of vnodes that were already
+open (`nlink`, `size`, times) still reflect the half-applied mutation,
+so `fstat` on an existing handle can show it until the forced unmount;
+nothing of it can become durable, and making `vnode_stat` consult the
+filesystem would put filesystem state into the VFS (invariant 4), so
+this is accepted.
 
 **V12. Directory mutations are validated by the VFS before a filesystem
 sees them.** Existence, kinds (`-EISDIR`/`-ENOTDIR`), emptiness for
