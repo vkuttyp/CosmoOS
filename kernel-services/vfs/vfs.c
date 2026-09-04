@@ -250,7 +250,7 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
     return 0;
 }
 
-int vfs_umount(const char *path)
+int vfs_umount2(const char *path, unsigned flags)
 {
     struct vnode *root;
     int rc = vfs_lookup(NULL, path, &root);
@@ -289,14 +289,17 @@ int vfs_umount(const char *path)
     }
     /* Commit while the mount is still whole: if that fails the mount stays
      * and the caller can retry (or fix the device); nothing is lost. */
-    if (mnt->fs->sync) {
+    if (mnt->fs->sync && !(flags & VFS_UMOUNT_FORCE)) {
         rc = mnt->fs->sync(mnt);
         if (rc) {
             mutex_unlock(&g_mounts_lock);
-            kerror("vfs: %s: commit failed (%d); mount kept", path, rc);
+            kerror("vfs: %s: commit failed (%d); mount kept (VFS_UMOUNT_FORCE drops the transaction)", path,
+                   rc);
             return rc;
         }
     }
+    if (flags & VFS_UMOUNT_FORCE)
+        kwarn("vfs: %s: forced unmount, open transaction dropped", path);
     struct vnode *mp = mnt->mountpoint;
     mutex_lock(&mp->lock);
     mp->covered_by = NULL;

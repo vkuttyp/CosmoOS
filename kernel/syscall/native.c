@@ -383,7 +383,8 @@ static int64_t sys_umount(struct syscall_args *a)
         return -EPERM;
     char target[VFS_PATH_MAX];
     int rc = get_path(a->a[0], target);
-    return rc ? rc : vfs_umount(target);
+    unsigned flags = (unsigned)a->a[1] & COSMO_UMOUNT_FORCE;
+    return rc ? rc : vfs_umount2(target, flags ? VFS_UMOUNT_FORCE : 0);
 }
 
 static const syscall_fn native_table[SYS_COUNT] = {

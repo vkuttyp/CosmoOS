@@ -108,7 +108,10 @@ write-through hitting ENOSPC or I/O error) by abandoning the open
 transaction (`cfs_fail`): commits refuse from then on, and unmount drops
 the transaction, so the on-disk state stays at the last committed root.
 The crash-test hook makes `fs->sync` a no-op so unmount drops the
-transaction the same way.
+transaction the same way, and `vfs_umount2(path, VFS_UMOUNT_FORCE)`
+(user space: `umount` with `COSMO_UMOUNT_FORCE`, uid 0) skips the
+commit on purpose so an abandoned transaction can be dropped and the
+device released.
 
 Vnode cache: `vnode_lookup_cached(mnt, ino)` returns a referenced vnode
 if one is live; a filesystem's `lookup` calls it before instantiating.

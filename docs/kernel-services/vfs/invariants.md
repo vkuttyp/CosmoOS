@@ -82,7 +82,9 @@ open, `-EBUSY` for `/`, `-EINVAL` for a non-root). Gap: none.
 
 **V11. `vfs_umount` commits through `fs->sync` before dismantling
 anything and keeps the mount if that fails; `fs->unmount` then runs
-with the root alive and only drops state.** A discarded (test hook) or
+with the root alive and only drops state.** `VFS_UMOUNT_FORCE` is the
+deliberate exception: it skips the commit so an abandoned transaction
+can be dropped and the device released. A discarded (test hook) or
 abandoned (`cfs_fail`, after a mutation that could not be completed
 consistently) transaction is dropped there, leaving the last committed
 root current. A filesystem's `evict` must tolerate

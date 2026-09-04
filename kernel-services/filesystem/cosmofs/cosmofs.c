@@ -562,17 +562,23 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         /* Roll the destination back so the source stays the only entry. */
         uint64_t rl;
         unsigned rs;
-        if (dir_find(fs, ndir, nname, nlen, block, &rl, &rs) == 0) {
+        int rb = dir_find(fs, ndir, nname, nlen, block, &rl, &rs);
+        if (rb == 0) {
             if (replaced) {
                 struct cfs_dirent *rd = &((struct cfs_dirent *)block)[rs];
                 rd->ino = replaced->ino;
                 rd->type = (uint8_t)(replaced->type == VNODE_DIR ? CFS_TYPE_DIR : CFS_TYPE_REG);
-                dir_write_block(fs, ndir, rl, block);
+                rb = dir_write_block(fs, ndir, rl, block);
             } else {
-                dir_remove_slot(fs, ndir, rl, rs, block);
+                rb = dir_remove_slot(fs, ndir, rl, rs, block);
             }
         }
-        kerror("cosmofs: rename of %.*s failed (%d); namespace restored", (int)olen, oname, rc);
+        if (rb) {
+            /* Neither state can be reached: drop the whole transaction. */
+            cfs_fail(fs, rb);
+        } else {
+            kerror("cosmofs: rename of %.*s failed (%d); namespace restored", (int)olen, oname, rc);
+        }
         goto out;
     }
     /* The namespace change is published. The metadata updates below are

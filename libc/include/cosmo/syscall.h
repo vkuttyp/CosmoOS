@@ -136,9 +136,13 @@ static inline long cosmo_mount(const char *source, const char *target, const cha
 {
     return cosmo_syscall4(SYS_mount, source, target, fstype, flags);
 }
+static inline long cosmo_umount2(const char *target, unsigned flags)
+{
+    return cosmo_syscall2(SYS_umount, target, flags);
+}
 static inline long cosmo_umount(const char *target)
 {
-    return cosmo_syscall1(SYS_umount, target);
+    return cosmo_umount2(target, 0);
 }
 
 #endif /* COSMO_SYSCALL_H */

@@ -77,6 +77,10 @@ failure the mount stays and the error is returned, so nothing is lost
 and the caller can retry), uncover the mountpoint, call `fs->unmount`
 (which only drops state: a deliberately discarded or abandoned
 transaction is dropped here), drop the root, release the device.
+`vfs_umount2(path, VFS_UMOUNT_FORCE)` skips the commit and drops the
+open transaction: the recovery path when a commit keeps failing (for
+example after cosmofs abandoned a transaction). User space reaches it
+through `umount(target, COSMO_UMOUNT_FORCE)`, uid 0 only.
 
 **`int vfs_sync(void)`** `fs->sync` on every mount; the first error is
 returned after all mounts were tried.

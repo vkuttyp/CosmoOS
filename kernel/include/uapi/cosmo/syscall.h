@@ -37,7 +37,7 @@
 #define SYS_getdents  19  /* (int h, void *buf, size_t len) -> bytes, 0 at end */
 #define SYS_sync      20  /* () -> 0 */
 #define SYS_mount     21  /* (const char *source, const char *target, const char *fstype, unsigned flags) -> 0 */
-#define SYS_umount    22  /* (const char *target) -> 0 */
+#define SYS_umount    22  /* (const char *target, unsigned flags) -> 0 */
 #define SYS_COUNT     23
 
 /* open() flags. */
@@ -86,6 +86,10 @@ struct cosmo_dirent {
 
 /* mount() flags. */
 #define COSMO_MOUNT_RDONLY (1u << 0)
+
+/* umount() flags. FORCE skips the final commit and drops the open
+ * transaction (recovery when a commit keeps failing). */
+#define COSMO_UMOUNT_FORCE (1u << 0)
 
 /* mmap protection and flags. */
 #define COSMO_PROT_NONE  0

@@ -122,8 +122,13 @@ struct vnode *vfs_root(void);                  /* referenced */
  * -ENOENT/-ENOTDIR for the target, -EBUSY if already a mountpoint,
  * -ENODEV for an unknown filesystem, or the filesystem's error. */
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags);
-/* -EBUSY while any vnode other than the root is referenced. Commits. */
-int vfs_umount(const char *path);
+/* Commit, then dismantle. -EBUSY while any vnode is referenced beyond
+ * the filesystem's own references; a failed commit returns its error
+ * and leaves the mount in place. VFS_UMOUNT_FORCE skips the commit and
+ * drops whatever transaction is open (recovery from an abandoned one). */
+#define VFS_UMOUNT_FORCE (1u << 0)
+int vfs_umount2(const char *path, unsigned flags);
+static inline int vfs_umount(const char *path) { return vfs_umount2(path, 0); }
 int vfs_sync(void);
 
 /* --- vnodes (for filesystems) ----------------------------------------- */
