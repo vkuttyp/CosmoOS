@@ -268,6 +268,14 @@ int vfs_umount2(const char *path, unsigned flags)
     vnode_put(root);   /* the lookup reference; the mount still holds one */
 
     mutex_lock(&g_mounts_lock);
+    /* Cut new walkers off first: with covered_by cleared no path can
+     * enter this mount, and follow_mount takes the root reference under
+     * the same lock, so the reference scan below is final. */
+    struct vnode *mp = mnt->mountpoint;
+    mutex_lock(&mp->lock);
+    mp->covered_by = NULL;
+    mutex_unlock(&mp->lock);
+
     /* Busy if any vnode is referenced beyond what the filesystem itself
      * holds: a pinned vnode's own pin, the mount's reference on the root. */
     mutex_lock(&mnt->lock);
@@ -284,26 +292,21 @@ int vfs_umount2(const char *path, unsigned flags)
     }
     mutex_unlock(&mnt->lock);
     if (busy) {
-        mutex_unlock(&g_mounts_lock);
-        return -EBUSY;
+        rc = -EBUSY;
+        goto restore;
     }
     /* Commit while the mount is still whole: if that fails the mount stays
      * and the caller can retry (or fix the device); nothing is lost. */
     if (mnt->fs->sync && !(flags & VFS_UMOUNT_FORCE)) {
         rc = mnt->fs->sync(mnt);
         if (rc) {
-            mutex_unlock(&g_mounts_lock);
             kerror("vfs: %s: commit failed (%d); mount kept (VFS_UMOUNT_FORCE drops the transaction)", path,
                    rc);
-            return rc;
+            goto restore;
         }
     }
     if (flags & VFS_UMOUNT_FORCE)
         kwarn("vfs: %s: forced unmount, open transaction dropped", path);
-    struct vnode *mp = mnt->mountpoint;
-    mutex_lock(&mp->lock);
-    mp->covered_by = NULL;
-    mutex_unlock(&mp->lock);
     list_remove(&mnt->link);
     g_nr_mounts--;
     mutex_unlock(&g_mounts_lock);
@@ -324,9 +327,15 @@ int vfs_umount2(const char *path, unsigned flags)
     else
         kinfo("vfs: unmounted %s", path);
     kobject_put(&mnt->obj);
-    /* The mount is gone either way; the caller learns that the final
-     * commit failed. */
     return urc;
+
+restore:
+    /* Refused or failed: the mount is whole again and reachable. */
+    mutex_lock(&mp->lock);
+    mp->covered_by = mnt;
+    mutex_unlock(&mp->lock);
+    mutex_unlock(&g_mounts_lock);
+    return rc;
 }
 
 int vfs_sync(void)
