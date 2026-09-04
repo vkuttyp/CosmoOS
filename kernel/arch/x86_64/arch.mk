@@ -9,6 +9,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/idt.c \
 	kernel/arch/x86_64/pic.c \
 	kernel/arch/x86_64/trap.c \
+	kernel/arch/x86_64/mmu.c \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \
 	kernel/arch/x86_64/shutdown.c

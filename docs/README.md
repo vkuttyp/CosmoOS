@@ -15,9 +15,13 @@ wins and the document is wrong.
 | `first-task.md` | Constitution section 72 deliverables for the section 70 first engineering task |
 | `build/` | Build system subsystem documentation |
 | `boot/` | Boot protocol and UEFI loader subsystem documentation |
+| `kernel/arch/` | Architecture abstraction and its x86-64 implementation |
+| `kernel/interrupt/` | Vector-to-handler dispatch |
+| `kernel/diagnostics/` | Console, logging, printf, panic, self-tests, crash test |
+| `kernel/memory/` | Physical memory (bootmem, zones, buddy), virtual memory (page-table takeover, arena, faults), slab heap and kmalloc; host unit tests in `tests/host/` |
 
 Further subsystem directories are added as subsystems come into existence
-(`kernel/`, `interrupt/`, `diagnostics/`, `memory/`, and so on).
+(`kernel/scheduler/`, `kernel/process/`, and so on).
 
 ## Per-subsystem convention
 

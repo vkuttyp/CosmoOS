@@ -20,7 +20,15 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/string.c \
 	kernel/core/shutdown.c \
 	kernel/core/selftest.c \
-	kernel/interrupt/interrupt.c
+	kernel/core/spinlock.c \
+	kernel/interrupt/interrupt.c \
+	kernel/memory/bootmem.c \
+	kernel/memory/buddy.c \
+	kernel/memory/pmm.c \
+	kernel/memory/vmm.c \
+	kernel/memory/slab.c \
+	kernel/memory/kmalloc.c \
+	kernel/memory/memtest.c
 
 KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS))
 KERNEL_ARCH_OBJS    := $(call objs_of,$(KERNEL_ARCH_SRCS))

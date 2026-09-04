@@ -69,13 +69,18 @@ make run                     # interactive boot on the terminal
 ```
 
 Other targets: `make BUILD=release`, `make analyze`, `make reproducible`,
-`make test-crash`, `make compile-commands`, `make help`.
+`make test-crash`, `make host-test`, `make compile-commands`, `make help`.
 See [docs/development.md](docs/development.md).
 
 ## Status
 
-The first engineering task (constitution section 70) is complete: the
-x86-64 kernel cross-builds with one LLVM toolchain, boots via our own UEFI
-loader and boot protocol under QEMU, initializes the CPU and interrupt
-infrastructure, prints its banner over serial, runs boot-time self-tests,
-halts cleanly, and is verified in CI. Phase 2 (memory) is next.
+- **Phase 0/1 (done):** LLVM cross build, our own UEFI loader and boot
+  protocol, x86-64 kernel entry with GDT/IDT, serial console, diagnostics,
+  QEMU test harness, CI.
+- **Phase 2 (done):** physical memory manager (zones, buddy allocator,
+  page descriptors), kernel-owned page tables mapping all RAM with large
+  pages, kernel virtual-address arena with guard pages and demand-zero
+  faults, MMIO mapping, slab caches and `kmalloc`. Host unit tests under
+  ASan/UBSan cover the buddy and slab algorithms.
+- **Next, Phase 3:** interrupts from devices, timers, threads, context
+  switching, scheduler, SMP.

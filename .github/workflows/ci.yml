@@ -2,7 +2,8 @@
 #
 # Runs the full Phase 0 pipeline on every push and pull request:
 #   tool check -> debug build -> QEMU boot test -> release build + test
-#   -> static analysis -> reproducibility check -> panic-path test.
+#   -> host unit tests (ASan/UBSan) -> static analysis
+#   -> reproducibility check -> panic-path test.
 #
 # The runner is x86-64 Linux. The primary development environment is an
 # ARM64 Linux VM; the toolchain is host-agnostic so the outputs match.
@@ -52,6 +53,9 @@ jobs:
 
       - name: Build and boot test (release)
         run: make BUILD=release all test
+
+      - name: Host unit tests (ASan + UBSan)
+        run: make host-test
 
       - name: Static analysis
         run: make analyze

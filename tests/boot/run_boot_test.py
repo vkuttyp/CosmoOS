@@ -49,7 +49,7 @@ FORBIDDEN_MARKERS = [
 # complete and the failure exit code must be delivered.
 PANIC_REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] crash test: writing to an unmapped address",
-    r"^KERNEL PANIC: unhandled exception 14 \(#PF page fault\)",
+    r"^KERNEL PANIC: page fault: kernel write at 0xffff900000000000 \(not present\): no region",
     r"^trap 14 ",
     r"^RIP=[0-9a-f]{16} CS=",
     r"^CR2=ffff900000000000 \(not-present write kernel\)",

@@ -78,7 +78,7 @@ uint64_t bootinfo_usable_bytes(void)
     return total;
 }
 
-static bool type_is_ram(uint32_t type)
+bool bootinfo_mem_type_is_ram(uint32_t type)
 {
     switch (type) {
     case COSMOBOOT_MEM_USABLE:
@@ -99,7 +99,7 @@ uint64_t bootinfo_phys_limit(void)
 {
     uint64_t limit = 0;
     for (uint32_t i = 0; i < g_map_count; i++) {
-        if (!type_is_ram(g_map[i].type))
+        if (!bootinfo_mem_type_is_ram(g_map[i].type))
             continue;
         uint64_t end = g_map[i].base + g_map[i].length;
         if (end > limit)
