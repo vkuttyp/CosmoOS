@@ -68,9 +68,11 @@ first entry into user mode via IRETQ, SMAP-aware user access windows.
 personality's table; argument validation; `copy_from_user`/
 `copy_to_user` against the process's regions; errno return convention.
 
-**Boot module** (`boot/`): protocol version 2 carries one module
-(`init.elf`) read from the boot volume; memory type `MODULE` keeps it
-reserved.
+**Boot archive** (`boot/`, `kernel/core/bootarchive.c`): protocol
+version 3 carries one ustar archive (`\cosmo\boot.tar`) read from the
+boot volume; memory type `ARCHIVE` keeps it reserved. `init` is the
+archive entry named `init` (`bootarchive_find("init", ...)`). Version 2
+carried `init.elf` as a single raw module.
 
 ## 4. Non-responsibilities (later)
 
@@ -134,9 +136,10 @@ kernel stack with interrupts enabled and may block.
 - The ELF image is borrowed for the duration of loading; segment bytes
   are copied into freshly allocated user frames.
 - Handles own object references; closing a handle drops one.
-- The boot module's memory is `COSMOBOOT_MEM_MODULE`, reserved by the
-  PMM for the life of the kernel (it is read at each `init` start in
-  this phase; a later phase copies it into a ramfs and frees it).
+- The boot archive's memory is `COSMOBOOT_MEM_ARCHIVE`, reserved by the
+  PMM for the life of the kernel (the `init` entry is read at each
+  `init` start in this phase; a later phase copies it into a ramfs and
+  frees it).
 
 ## 9. Error handling
 

@@ -80,3 +80,12 @@ bool spin_is_held(const spinlock_t *lock)
     return __atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0 &&
            __atomic_load_n(&lock->owner_cpu, __ATOMIC_RELAXED) == arch_cpu_id();
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(spinlock_init);
+EXPORT_SYMBOL(spin_lock);
+EXPORT_SYMBOL(spin_unlock);
+EXPORT_SYMBOL(spin_trylock);
+EXPORT_SYMBOL(spin_lock_irqsave);
+EXPORT_SYMBOL(spin_unlock_irqrestore);

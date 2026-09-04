@@ -222,3 +222,9 @@ unsigned timer_pending_count(void)
     spin_unlock_irqrestore(&q->lock, s);
     return n;
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(clock_now_ns);
+EXPORT_SYMBOL(ndelay);
+EXPORT_SYMBOL(udelay);

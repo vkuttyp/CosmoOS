@@ -319,3 +319,10 @@ uint64_t slab_total_pages(void)
     spin_unlock_irqrestore(&g_caches_lock, s);
     return total;
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(kmem_cache_create);
+EXPORT_SYMBOL(kmem_cache_destroy);
+EXPORT_SYMBOL(kmem_cache_alloc);
+EXPORT_SYMBOL(kmem_cache_free);

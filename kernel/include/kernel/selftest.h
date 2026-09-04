@@ -52,4 +52,12 @@ bool selftest_process_reject(const char **reason);
 bool selftest_process_selftest(const char **reason);
 bool selftest_process_fault(const char **reason);
 
+/* Phase 5: kernel/module/modtest.c */
+bool selftest_bootarchive(const char **reason);
+bool selftest_ksym(const char **reason);
+bool selftest_modsig(const char **reason);
+bool selftest_module_reject(const char **reason);
+bool selftest_module_load(const char **reason);
+bool selftest_module_fail(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

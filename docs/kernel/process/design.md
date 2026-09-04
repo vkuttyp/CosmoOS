@@ -259,13 +259,16 @@ prot); `copy_from_user`/`copy_to_user` do both checks, then copy inside
 an access window. Demand-zero faults taken during the copy are handled
 by the fault handler as kernel-mode faults on a user ANON region.
 
-## 7. Boot module and protocol v2
+## 7. Boot archive and protocol v3
 
-`cosmoboot_info` version 2 replaces two reserved words with
-`module_phys` and `module_size`; memory type `COSMOBOOT_MEM_MODULE`
-(13). The loader reads `\cosmo\init.elf` (optional: absent → fields 0)
-into low memory of that type. The kernel's PMM reserves it; `kernel_main`
-after the self-tests creates `init` from it with `argv = {"init"}`,
+`cosmoboot_info` version 3 carries `archive_phys` and `archive_size`
+(version 2 used the same words for one raw ELF, `module_phys` and
+`module_size`); memory type `COSMOBOOT_MEM_ARCHIVE` (13). The loader
+reads `\cosmo\boot.tar` (optional: absent → fields 0) into low memory
+of that type. The kernel's PMM reserves it, `bootarchive_init` parses
+it, and `kernel_main` after the boot modules and the self-tests looks up
+the entry named `init` (`bootarchive_find`) and creates `init` from it
+with `argv = {"init"}`,
 waits for it to exit, logs the status, and shuts down (this phase has
 nothing else to run). The self-test creates it with `argv = {"init",
 "--selftest"}` and requires status 0, then with `--crash` and requires
@@ -281,14 +284,15 @@ dereferences address 0. `libc/include/cosmo/syscall.h`: inline
 `syscall0..6` wrappers around the `SYSCALL` instruction using the
 `uapi` numbers. Built with the kernel's freestanding flags for
 `x86_64-unknown-none-elf`, linked at `0x400000` with a user linker
-script (three W^X segments, non-executable stack), and copied to the
-boot image as `\cosmo\init.elf`.
+script (three W^X segments, non-executable stack), and packed into the
+boot archive as the entry `init` (`scripts/mkbootarchive.py`, see
+`docs/kernel/module/design.md`).
 
 ## 9. Failure modes
 
 | Condition | Behaviour |
 |---|---|
-| module missing on the boot volume | loader logs, kernel skips `init` with a warning; self-tests that need it report skipped |
+| archive missing on the boot volume, or no `init` entry in it | loader logs, kernel skips `init` with a warning; self-tests that need it report skipped |
 | ELF rejected | `process_create_from_elf` returns `-ENOEXEC` with a log line naming the rule |
 | out of memory during load | `-ENOMEM`, partial space destroyed |
 | user fault without region | process terminated with status 139, logged |

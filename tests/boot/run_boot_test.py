@@ -39,6 +39,8 @@ BOOT_MARKERS = [
 # module: the self-test run prints USERTEST: PASS and the real run
 # prints its banner and exits 0.
 REQUIRED_MARKERS = BOOT_MARKERS + [
+    r"^\[ INFO\] module: loaded hello 1\.0 ",
+    r"^\[ INFO\] hello: module init \(ABI v1, load 1\)",
     r"^init: hello from user mode, pid \d+",
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",

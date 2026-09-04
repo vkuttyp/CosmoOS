@@ -120,3 +120,7 @@ void thread_sleep_ns(uint64_t ns)
     /* The callback has run (done is set after nothing else), so the
      * timer is idle and the stack objects may go. */
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(thread_sleep_ns);

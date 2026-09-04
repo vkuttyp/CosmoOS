@@ -20,6 +20,18 @@
 #include <arch/shutdown.h>
 #include <arch/trap.h>
 
+static unsigned g_taint;
+
+void kernel_taint(unsigned flag)
+{
+    __atomic_fetch_or(&g_taint, flag, __ATOMIC_RELAXED);
+}
+
+unsigned kernel_taint_flags(void)
+{
+    return __atomic_load_n(&g_taint, __ATOMIC_RELAXED);
+}
+
 #define BACKTRACE_MAX 32
 
 static volatile int g_panicking;      /* 0 = none, else 1 + CPU id of the first panicker */
@@ -76,6 +88,9 @@ panic_common(const struct arch_trap_frame *frame, const char *fmt, va_list ap)
 
     backtrace_print(frame);
 
+    if (g_taint)
+        kprintf("taint: 0x%x%s\n", g_taint, (g_taint & TAINT_UNSIGNED_MODULE) ? " (unsigned module loaded)" : "");
+
     kprintf("halting.\n");
     arch_emulator_exit(ARCH_EMULATOR_EXIT_FAILURE);
     arch_cpu_halt_forever();
@@ -95,3 +110,7 @@ void panic_frame(const struct arch_trap_frame *frame, const char *fmt, ...)
     va_start(ap, fmt);
     panic_common(frame, fmt, ap);
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(panic);

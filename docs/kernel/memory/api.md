@@ -26,7 +26,8 @@ Common contracts, stated once:
 |---|---|---|
 | `0xFFFF800000000000` | 64 TiB reserved | Higher-half direct map (HHDM): every RAM entry of the boot map, RW, NX, write-back, large pages where aligned |
 | `0xFFFFC00000000000` – `0xFFFFE00000000000` | 32 TiB | Kernel VA arena: `vm_kernel_alloc`, `vm_map_phys` |
-| `0xFFFFFFFF80000000` | 2 GiB | Kernel image at its link address, W^X from ELF flags |
+| `0xFFFFFFFF80000000` | 128 MiB | Kernel image at its link address, W^X from ELF flags (`vmm_init` panics if it reaches the near arena) |
+| `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000` | ~1.9 GiB | Near arena: `vm_kernel_alloc(VM_KALLOC_NEAR_KERNEL)`, kernel module text/rodata/data (`docs/kernel/module/`) |
 
 Below `0xFFFF800000000000` (`arch_mmu_kernel_base()`) is user space,
 which does not exist yet.
@@ -241,10 +242,12 @@ region flags (`VM_REGION_GUARD_BELOW`, `VM_REGION_GUARD_ABOVE`,
 - **Purpose:** kernel virtual memory backed by fresh zeroed frames.
 - **Inputs:** `size` a non-zero page multiple; `VM_KALLOC_GUARD` adds one
   unmapped page below and above; `VM_KALLOC_POPULATE` maps frames now,
-  otherwise the region populates on first touch through the fault path.
-- **Outputs:** base address inside the arena, or `0` (bad arguments, arena
-  full, region record allocation failure, frame or table allocation
-  failure with everything rolled back).
+  otherwise the region populates on first touch through the fault path;
+  `VM_KALLOC_NEAR_KERNEL` places the region in the near arena (top 2 GiB,
+  above the image) instead of the main arena.
+- **Outputs:** base address inside the chosen arena, or `0` (bad
+  arguments, arena full, region record allocation failure, frame or
+  table allocation failure with everything rolled back).
 - **Ownership:** the region owns its frames; `vm_kernel_free` releases them.
 - **Concurrency:** `vm_space.lock`, then `kmem_cache.lock` (region record),
   then `pmm_zone.lock`.
@@ -253,7 +256,25 @@ region flags (`VM_REGION_GUARD_BELOW`, `VM_REGION_GUARD_ABOVE`,
 
 Frees every frame the region populated (found by `arch_mmu_query` per
 page), unmaps, removes the record. Panics if `base` is not the base of a
-live `VM_REGION_ANON` region.
+live `VM_REGION_ANON` region. Works for both arenas.
+
+### `int vm_kernel_protect(vaddr_t base, vm_prot_t prot)`
+
+- **Purpose:** change the protection of a whole populated kernel
+  allocation once its contents are final (module text RW → RX, module
+  rodata RW → R).
+- **Inputs:** `base` of a live `vm_kernel_alloc` region created with
+  `VM_KALLOC_POPULATE`; `prot` without `VM_PROT_USER`, not
+  `VM_PROT_NONE`, not both `WRITE` and `EXEC`.
+- **Outputs:** `0`; `-EINVAL` for any input outside the above (including
+  an unpopulated region); an `arch_mmu_protect` error otherwise.
+- **Ownership:** unchanged.
+- **Concurrency:** takes `kernel_space.lock` for the lookup and rewrite,
+  releases it, then runs a TLB shootdown over the range. Needs
+  interrupts enabled (shootdown) and must not be called with
+  `kernel_space.lock` held. Thread context only.
+- **Guarantee:** when it returns `0`, no CPU holds a stale translation
+  with the old protection.
 
 ### `vaddr_t vm_map_phys(paddr_t pa, size_t size, vm_prot_t prot, vm_cache_t cache)`
 

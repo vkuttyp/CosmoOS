@@ -21,6 +21,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/trampoline.S \
 	kernel/arch/x86_64/smp.c \
 	kernel/arch/x86_64/user.c \
+	kernel/arch/x86_64/modreloc.c \
 	kernel/arch/x86_64/syscall_entry.S \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \

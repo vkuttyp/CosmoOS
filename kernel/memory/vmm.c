@@ -24,6 +24,12 @@
 #define KERNEL_ARENA_LO 0xFFFFC00000000000ULL
 #define KERNEL_ARENA_HI 0xFFFFE00000000000ULL
 
+/* The near arena sits in the top 2 GiB above the kernel image so code
+ * built with -mcmodel=kernel (modules) can reach both itself and the
+ * image with 32-bit relocations. The image may grow to 128 MiB. */
+#define KERNEL_NEAR_LO 0xFFFFFFFF88000000ULL
+#define KERNEL_NEAR_HI 0xFFFFFFFFFF000000ULL
+
 struct vm_space kernel_space;
 
 static struct kmem_cache *g_region_cache;
@@ -70,27 +76,32 @@ static int space_insert(struct vm_space *space, struct vm_region *region)
     return 0;
 }
 
-/* First-fit gap of `footprint` bytes inside the arena. 0 if none. */
-static vaddr_t arena_find_free(struct vm_space *space, size_t footprint)
+/* First-fit gap of `footprint` bytes inside [lo, hi). 0 if none. */
+static vaddr_t range_find_free(struct vm_space *space, vaddr_t lo, vaddr_t hi, size_t footprint)
 {
-    vaddr_t cursor = space->arena_lo;
+    vaddr_t cursor = lo;
     struct vm_region *r;
 
     list_for_each_entry(r, &space->regions, link) {
         vaddr_t rlo, rhi;
         region_footprint(r, &rlo, &rhi);
-        if (rhi <= space->arena_lo)
+        if (rhi <= lo)
             continue;
-        if (rlo >= space->arena_hi)
+        if (rlo >= hi)
             break;
         if (rlo >= cursor && rlo - cursor >= footprint)
             return cursor;
         if (rhi > cursor)
             cursor = rhi;
     }
-    if (cursor < space->arena_hi && space->arena_hi - cursor >= footprint)
+    if (cursor < hi && hi - cursor >= footprint)
         return cursor;
     return 0;
+}
+
+static vaddr_t arena_find_free(struct vm_space *space, size_t footprint)
+{
+    return range_find_free(space, space->arena_lo, space->arena_hi, footprint);
 }
 
 static struct vm_region *region_new(vaddr_t base, size_t size, vm_prot_t prot, vm_cache_t cache,
@@ -185,6 +196,11 @@ void vmm_init(void)
     list_init(&kernel_space.regions);
     kernel_space.arena_lo = (vaddr_t)KERNEL_ARENA_LO;
     kernel_space.arena_hi = (vaddr_t)KERNEL_ARENA_HI;
+    kernel_space.near_lo = (vaddr_t)KERNEL_NEAR_LO;
+    kernel_space.near_hi = (vaddr_t)KERNEL_NEAR_HI;
+    if ((vaddr_t)__kernel_end > kernel_space.near_lo)
+        panic("vmm: kernel image ends at %p, past the near arena start %p", (void *)__kernel_end,
+              (void *)kernel_space.near_lo);
 
     g_region_cache = kmem_cache_create("vm_region", sizeof(struct vm_region), 0);
     if (g_region_cache == NULL)
@@ -259,7 +275,9 @@ vaddr_t vm_kernel_alloc(size_t size, unsigned flags, vm_prot_t prot)
 
     arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
 
-    vaddr_t fp = arena_find_free(&kernel_space, footprint);
+    vaddr_t fp = (flags & VM_KALLOC_NEAR_KERNEL)
+                     ? range_find_free(&kernel_space, kernel_space.near_lo, kernel_space.near_hi, footprint)
+                     : arena_find_free(&kernel_space, footprint);
     if (fp == 0) {
         spin_unlock_irqrestore(&kernel_space.lock, s);
         return 0;
@@ -356,6 +374,32 @@ void vm_kernel_free(vaddr_t base)
     list_remove(&r->link);
     spin_unlock_irqrestore(&kernel_space.lock, s);
     kmem_cache_free(g_region_cache, r);
+}
+
+int vm_kernel_protect(vaddr_t base, vm_prot_t prot)
+{
+    KASSERT(g_initialized);
+    if (prot == VM_PROT_NONE || (prot & VM_PROT_WRITE && prot & VM_PROT_EXEC) || (prot & VM_PROT_USER))
+        return -EINVAL;
+
+    arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
+    struct vm_region *r = space_find(&kernel_space, base);
+    if (r == NULL || r->base != base || r->kind != VM_REGION_ANON || (r->flags & VM_REGION_POPULATED) == 0) {
+        spin_unlock_irqrestore(&kernel_space.lock, s);
+        return -EINVAL;
+    }
+    int rc = arch_mmu_protect(&kernel_space.mmu, r->base, r->size, prot);
+    if (rc == 0)
+        r->prot = prot;
+    size_t size = r->size;
+    spin_unlock_irqrestore(&kernel_space.lock, s);
+    if (rc)
+        return rc;
+
+    /* Dropping write or adding execute must reach every CPU before the
+     * caller relies on it. */
+    arch_mmu_shootdown(&kernel_space.mmu, base, size);
+    return 0;
 }
 
 vaddr_t vm_map_phys(paddr_t pa, size_t size, vm_prot_t prot, vm_cache_t cache)

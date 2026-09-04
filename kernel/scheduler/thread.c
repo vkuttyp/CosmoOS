@@ -259,3 +259,7 @@ void thread_dump_all(void)
     }
     spin_unlock_irqrestore(&g_thread_list_lock, s);
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(thread_create);

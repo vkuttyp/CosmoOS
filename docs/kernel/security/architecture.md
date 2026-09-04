@@ -1,0 +1,82 @@
+# Security: architecture
+
+Constitution sections 13 (the core owns capability/security primitives),
+23 ("never permit unsigned arbitrary Ring-0 modules in secure mode"),
+41 (security model: credentials, capabilities, secure module loading,
+audit), and Invariant 13 (security boundaries never depend on
+convention). Phase 5 adds the first code to `kernel/security/`: the
+primitives that make module signing possible. Everything else section
+41 lists is a later phase.
+
+## Where it sits
+
+```text
+    kernel/module/modsig.c  ──►  keyring_find()  ──►  ed25519_verify()  ──►  sha512()
+                                 kernel/security/keyring.c   ed25519.c        sha512.c
+                                        ▲
+                                        │ generated at build
+                                 out/<arch>-<build>/gen/keyring_builtin.c  ◄──  tools/keys/*.pub
+    kernel/core/panic.c      ──►  kernel_taint() / kernel_taint_flags()  (panic.h)
+```
+
+The directory is a leaf: it depends on `kernel/string.h` and nothing
+else, and nothing in it knows what a module is. The module loader is
+its only caller in this phase.
+
+## Purpose
+
+Provide the cryptographic primitives and the trust anchor the kernel
+needs to decide whether ring-0 code from outside the image may run,
+with correctness established by published test vectors rather than by
+convention.
+
+## Responsibilities
+
+- **SHA-512** (`sha512.c`): FIPS 180-4, streaming and one-shot; used
+  inside Ed25519 and for key ids.
+- **Ed25519 verification** (`ed25519.c`): RFC 8032 section 5.1.7,
+  verification only. Field arithmetic over 2^255-19 in five 51-bit limbs
+  with 128-bit intermediates; points in extended twisted Edwards
+  coordinates; a single unified addition law used for doubling too;
+  double-and-add scalar multiplication; point decompression with the
+  canonical-encoding check; scalar reduction by shift-and-subtract; the
+  `S < L` check that closes the malleability gap. All constants (`d`,
+  `2d`, `sqrt(-1)`, the base point) are precomputed limbs so there is
+  no initialisation step and no mutable state.
+- **Key ring** (`keyring.c`): the compiled-in table of trusted Ed25519
+  public keys with their 8-byte ids (first bytes of SHA-512 over the
+  key), generated from the `.pub` files in `tools/keys/` by
+  `scripts/gen-keyring.py`; lookup by id.
+- **Taint** (`kernel/core/panic.c`, declared in `panic.h`): a sticky
+  bitmask (`TAINT_UNSIGNED_MODULE`) set when policy was relaxed, printed
+  in every panic report so a trace from a tainted kernel is recognisable.
+
+## Non-responsibilities
+
+- Credentials, capabilities, permission checks, audit logging,
+  sandboxing, resource limits: section 41's model arrives with the
+  security phase; the module loader's future `sys_module_load` waits for
+  it.
+- Signing. The kernel never signs anything; the secret key lives in the
+  build (`scripts/modsign.py`).
+- Constant-time arithmetic. Verification sees only public inputs, so
+  variable-time code leaks nothing; a signing or key-agreement
+  implementation would need a different one.
+- Secure Boot, TPM, firmware-provided keys: the key id in the signature
+  trailer already selects a key, so a firmware-loaded ring can be added
+  without changing formats.
+- Hash agility beyond SHA-512 and signature schemes beyond Ed25519; the
+  trailer carries `algo` and `version` fields for when they are needed.
+
+## Interfaces at a glance
+
+| Interface | Header | Used by |
+|---|---|---|
+| `sha512_init/update/final`, `sha512` | `kernel/crypto.h` | `ed25519.c`, `keyring_key_id`, host tests |
+| `ed25519_verify` | `kernel/crypto.h` | `modsig_check`, host tests |
+| `keyring_find`, `keyring_count`, `keyring_entry`, `keyring_key_id` | `kernel/keyring.h` | `modsig_check`, `module_init` (log), self-test `modsig` |
+| `kernel_taint`, `kernel_taint_flags`, `TAINT_UNSIGNED_MODULE` | `kernel/panic.h` | `module_load`, the panic report |
+
+Tests: `tests/host/test_crypto.c` (RFC 8032 and FIPS vectors, bit
+flips, malleability), self-test `modsig` on the target. Details in
+`docs/kernel/module/testing.md`.

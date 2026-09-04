@@ -209,3 +209,21 @@ Self-tests that compare free-page counts allow for this bounded retention
 (`+64` pages of slack in `selftest_kmalloc`).
 Checked by: host `cache_growth_and_shrink` (`nr_slabs <= 2` after
 freeing everything).
+
+## Kernel arenas (Phase 5)
+
+**M30. The near arena lies inside the top 2 GiB and above the kernel
+image.** `KERNEL_NEAR_LO` = `0xFFFFFFFF88000000`, `KERNEL_NEAR_HI` =
+`0xFFFFFFFFFF000000`; `vmm_init` panics if `__kernel_end` exceeds
+`KERNEL_NEAR_LO`. Code built with `-mcmodel=kernel` placed there can
+address itself and the image with sign-extended 32-bit relocations.
+Checked by: assert (`vmm_init`), test `module-load` (a module's exported
+function is called through a `PC32`-relocated call and returns the right
+value), review.
+
+**M31. A kernel allocation is never writable and executable at once.**
+`vm_kernel_alloc` and `vm_kernel_protect` refuse `VM_PROT_WRITE |
+VM_PROT_EXEC`; a protection change to RX is followed by a shootdown
+before the caller sees `0`.
+Checked by: test `module-load` (`vm_query` reports RX for module text, R
+for rodata, RW for data), review.

@@ -103,3 +103,50 @@ size_t strlcpy(char *dst, const char *src, size_t size)
     }
     return len;
 }
+
+void *memchr(const void *s, int c, size_t n)
+{
+    const unsigned char *p = s;
+    for (size_t i = 0; i < n; i++) {
+        if (p[i] == (unsigned char)c)
+            return (void *)(uintptr_t)(p + i);
+    }
+    return NULL;
+}
+
+char *strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)(uintptr_t)s;
+        if (*s == '\0')
+            return NULL;
+    }
+}
+
+char *strstr(const char *haystack, const char *needle)
+{
+    size_t n = strlen(needle);
+    if (n == 0)
+        return (char *)(uintptr_t)haystack;
+    for (; *haystack; haystack++) {
+        if (strncmp(haystack, needle, n) == 0)
+            return (char *)(uintptr_t)haystack;
+    }
+    return NULL;
+}
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(memset);
+EXPORT_SYMBOL(memcmp);
+EXPORT_SYMBOL(memchr);
+EXPORT_SYMBOL(strlen);
+EXPORT_SYMBOL(strnlen);
+EXPORT_SYMBOL(strcmp);
+EXPORT_SYMBOL(strncmp);
+EXPORT_SYMBOL(strchr);
+EXPORT_SYMBOL(strstr);
+EXPORT_SYMBOL(strlcpy);

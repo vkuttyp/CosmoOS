@@ -20,7 +20,7 @@
 
 /* Paths on the EFI system partition. */
 #define KERNEL_PATH L"\\cosmo\\kernel.elf"
-#define MODULE_PATH L"\\cosmo\\init.elf"
+#define ARCHIVE_PATH L"\\cosmo\\boot.tar"
 
 /* Everything the loader allocates stays below this so it is covered by the
  * bootstrap identity map and HHDM. */

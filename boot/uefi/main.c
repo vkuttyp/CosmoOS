@@ -135,7 +135,7 @@ static uint32_t translate_type(uint32_t efi_type, uint64_t attr)
     case EFI_MEMORY_TYPE_COSMO_KERNEL:     return COSMOBOOT_MEM_KERNEL;
     case EFI_MEMORY_TYPE_COSMO_BOOTINFO:   return COSMOBOOT_MEM_BOOTINFO;
     case EFI_MEMORY_TYPE_COSMO_PAGETABLES: return COSMOBOOT_MEM_BOOT_PAGETABLES;
-    case EFI_MEMORY_TYPE_COSMO_MODULE:     return COSMOBOOT_MEM_MODULE;
+    case EFI_MEMORY_TYPE_COSMO_ARCHIVE:     return COSMOBOOT_MEM_ARCHIVE;
     default:                           return COSMOBOOT_MEM_RESERVED;
     }
 }
@@ -242,7 +242,7 @@ static const char *mem_type_name(uint32_t t)
     case COSMOBOOT_MEM_FIRMWARE_RUNTIME:   return "fw-runtime";
     case COSMOBOOT_MEM_MMIO:               return "mmio";
     case COSMOBOOT_MEM_PERSISTENT:         return "persistent";
-    case COSMOBOOT_MEM_MODULE:             return "module";
+    case COSMOBOOT_MEM_ARCHIVE:            return "archive";
     default:                               return "?";
     }
 }
@@ -277,17 +277,17 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         die("cannot read \\cosmo\\kernel.elf from the boot volume", status);
     lprintf("kernel: %u bytes read\n", (unsigned)file_size);
 
-    /* --- boot module (optional): the initial user executable --- */
-    uint8_t *module = NULL;
-    size_t module_size = 0;
-    static CHAR16 module_path[] = MODULE_PATH;
-    status = read_boot_file(module_path, EFI_MEMORY_TYPE_COSMO_MODULE, &type_fallback, &module, &module_size);
+    /* --- boot archive (optional): init and boot-time kernel modules --- */
+    uint8_t *archive = NULL;
+    size_t archive_size = 0;
+    static CHAR16 archive_path[] = ARCHIVE_PATH;
+    status = read_boot_file(archive_path, EFI_MEMORY_TYPE_COSMO_ARCHIVE, &type_fallback, &archive, &archive_size);
     if (EFI_ERROR(status)) {
-        lputs("module: \\cosmo\\init.elf not found; the kernel will run without init\n");
-        module = NULL;
-        module_size = 0;
+        lputs("archive: \\cosmo\\boot.tar not found; the kernel will run without init or modules\n");
+        archive = NULL;
+        archive_size = 0;
     } else {
-        lprintf("module: %u bytes read\n", (unsigned)module_size);
+        lprintf("archive: %u bytes read\n", (unsigned)archive_size);
     }
 
     struct elf_image img;
@@ -348,11 +348,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();
     info->firmware_system_table = (uint64_t)(uintptr_t)st;
-    info->module_phys = (uint64_t)(uintptr_t)module;
-    info->module_size = module_size;
+    info->archive_phys = (uint64_t)(uintptr_t)archive;
+    info->archive_size = archive_size;
 
     if (type_fallback)
-        lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and module "
+        lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and archive "
               "ranges will be retyped from their placements\n");
 
     /* --- memory map + ExitBootServices --- */
@@ -404,8 +404,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                   mark_range(entries, &n, max, info_phys, BOOTINFO_PAGES * PAGE_SIZE, COSMOBOOT_MEM_BOOTINFO) &&
                   mark_range(entries, &n, max, pg.pool_phys, pg.pool_pages * PAGE_SIZE,
                              COSMOBOOT_MEM_BOOT_PAGETABLES) &&
-                  mark_range(entries, &n, max, (uint64_t)(uintptr_t)module, BYTES_TO_PAGES(module_size) * PAGE_SIZE,
-                             COSMOBOOT_MEM_MODULE);
+                  mark_range(entries, &n, max, (uint64_t)(uintptr_t)archive, BYTES_TO_PAGES(archive_size) * PAGE_SIZE,
+                             COSMOBOOT_MEM_ARCHIVE);
         if (!ok)
             die("memory map has no room to retype loader ranges", EFI_BUFFER_TOO_SMALL);
     }
