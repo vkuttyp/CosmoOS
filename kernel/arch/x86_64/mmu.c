@@ -38,19 +38,29 @@ static const uint64_t level_size[5] = {
 
 static bool g_probed;
 static bool g_has_1g;
-static bool g_has_nx;
 
+/*
+ * W^X is not optional. Without NX every writable mapping would be
+ * executable, so a processor that lacks it is refused here, before any
+ * kernel-owned table exists. The loader checks the same bit earlier and
+ * reports it on the firmware console; this is the second line.
+ */
 static void probe(void)
 {
     if (g_probed)
         return;
     struct cpuid_regs r;
+    bool has_nx = false;
     cpuid(0x80000000u, 0, &r);
     if (r.eax >= 0x80000001u) {
         cpuid(0x80000001u, 0, &r);
         g_has_1g = (r.edx & (1u << 26)) != 0;
-        g_has_nx = (r.edx & (1u << 20)) != 0;
+        has_nx = (r.edx & (1u << 20)) != 0;
     }
+    if (!has_nx)
+        panic("mmu: processor has no NX support; W^X cannot be enforced, refusing to continue");
+    if ((rdmsr(MSR_EFER) & EFER_NXE) == 0)
+        panic("mmu: EFER.NXE is clear; CPU init must enable it before paging setup");
     g_probed = true;
 }
 
@@ -74,7 +84,7 @@ static pte_t leaf_flags(vm_prot_t prot, vm_cache_t cache, unsigned flags, bool l
     pte_t f = PTE_P;
     if (prot & VM_PROT_WRITE)
         f |= PTE_RW;
-    if (!(prot & VM_PROT_EXEC) && g_has_nx)
+    if (!(prot & VM_PROT_EXEC))
         f |= PTE_NX;
     if (flags & ARCH_MMU_MAP_GLOBAL)
         f |= PTE_G;
@@ -269,7 +279,7 @@ int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_pr
         pte_t f = PTE_P;
         if (prot & VM_PROT_WRITE)
             f |= PTE_RW;
-        if (!(prot & VM_PROT_EXEC) && g_has_nx)
+        if (!(prot & VM_PROT_EXEC))
             f |= PTE_NX;
         *w.entry = keep | f;
         v += level_size[w.level];

@@ -93,8 +93,13 @@ permissions from the linker-script segments (`kernel-text` RX,
 allocation, and every `vm_map_phys` window are NX. No code path creates a
 writable+executable leaf: `leaf_flags` sets NX whenever `VM_PROT_EXEC` is
 absent and no caller passes `VM_PROT_WRITE | VM_PROT_EXEC`.
+A processor without NX cannot honour this, so it is refused outright:
+the loader dies before building tables (`boot/uefi/main.c`) and the
+kernel's MMU probe panics before creating a context and also verifies
+`EFER.NXE` is set (`kernel/arch/x86_64/mmu.c`). There is no NX-less mode.
 Checked by: `selftest_vmm` queries text (RX), rodata (R), data (RW), and
-the direct map (RW); the rest is review.
+the direct map (RW); the NX refusal is review (QEMU's `-cpu qemu64,+nx`
+always has it).
 
 **M14. Guard pages are unmapped.** `VM_KALLOC_GUARD` reserves one page
 below and above in the arena footprint and never maps them; the demand

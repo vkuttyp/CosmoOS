@@ -230,6 +230,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     struct paging_ctx pg;
     memset(&pg, 0, sizeof(pg));
     pg.nx = cpu_has_nx();
+    if (!pg.nx)
+        die("processor has no NX support; the kernel requires W^X and will not run on it", EFI_UNSUPPORTED);
     pg.pool_pages = paging_pool_size(&img);
     status = alloc_pages_low(pg.pool_pages, EFI_MEMORY_TYPE_COSMO_PAGETABLES, &pg.pool_phys, &type_fallback);
     if (EFI_ERROR(status))
