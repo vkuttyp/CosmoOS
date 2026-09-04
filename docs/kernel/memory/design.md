@@ -190,6 +190,9 @@ struct vm_space {
     struct list_node regions;
     spinlock_t lock;
     vaddr_t arena_lo, arena_hi;    /* kernel VA arena for vm_kernel_alloc */
+    vaddr_t near_lo, near_hi;      /* near arena: top 2 GiB above the image (modules) */
+    bool user;                     /* a process address space (Phase 4) */
+    uint64_t anon_pages;
 };
 ```
 
@@ -199,7 +202,8 @@ Kernel layout (x86-64, 48-bit):
 |---|---|
 | `0xFFFF800000000000` + 64 TiB | HHDM: direct map of RAM, RW NX WB, large pages |
 | `0xFFFFC00000000000` + 32 TiB | kernel VA arena (vm_kernel_alloc, MMIO windows) |
-| `0xFFFFFFFF80000000` + 2 GiB | kernel image (link address) |
+| `0xFFFFFFFF80000000` + 128 MiB | kernel image (link address); `vmm_init` panics if `__kernel_end` passes `KERNEL_NEAR_LO` |
+| `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000` | near arena (`VM_KALLOC_NEAR_KERNEL`): kernel modules, which are built with `-mcmodel=kernel` and must sit in the top 2 GiB so `R_X86_64_32S`/`PC32` relocations reach both themselves and the image (Phase 5) |
 
 `vmm_init()` sequence:
 1. `arch_mmu_context_init(&kernel_space.mmu)`.
@@ -211,9 +215,14 @@ Kernel layout (x86-64, 48-bit):
 7. Register the page-fault handler on `arch_trap_vector(ARCH_TRAP_PAGE_FAULT)`.
 
 Region operations hold `space.lock`. Insertion keeps the list sorted and
-rejects overlap. Free-range search for the arena is first-fit over the
-gaps between regions inside `[arena_lo, arena_hi)`, counting guard pages
-as part of the footprint.
+rejects overlap. Free-range search is first-fit over the gaps between
+regions inside a range (`range_find_free`), counting guard pages as part
+of the footprint; the range is `[arena_lo, arena_hi)` by default and
+`[near_lo, near_hi)` for `VM_KALLOC_NEAR_KERNEL`. Both arenas share one
+region list and one PML4 entry set: the near arena lives under the
+image's PML4 slot, whose PDPT exists from `vmm_init`, so invariant P9
+(no new kernel-half PML4 entries after init) holds for it without
+pre-allocation.
 
 ### 3.3 Kernel allocations
 
@@ -221,7 +230,21 @@ as part of the footprint.
 - `VM_KALLOC_GUARD`: one unmapped page below and above.
 - `VM_KALLOC_POPULATE`: allocate and map zeroed frames now; otherwise the
   region is `VM_REGION_ANON` and populates on first touch.
+- `VM_KALLOC_NEAR_KERNEL`: search the near arena instead of the main one.
 - Returns the base virtual address (after the lower guard) or 0.
+
+`vm_kernel_protect(base, prot)`: changes the protection of one whole
+populated `vm_kernel_alloc` region (the module loader's RW → RX and
+RW → R flip after relocation). Under `kernel_space.lock` it finds the
+region by base, refuses anything that is not a `VM_REGION_POPULATED`
+ANON region, refuses `VM_PROT_NONE`, W+X, and `VM_PROT_USER`, rewrites
+the leaf entries with `arch_mmu_protect`, and records the new `prot`;
+then, outside the lock, it runs `arch_mmu_shootdown` over the range so
+no CPU keeps a writable translation of pages that are now executable.
+Unpopulated regions are refused because their unmapped pages have no
+leaf entries to rewrite; the fault path would use the recorded `prot`,
+but a half-mapped region with two protections is not a state worth
+supporting.
 
 `vm_kernel_free(base)`: finds the region by base, unmaps, frees every
 frame the region populated (found by `arch_mmu_query` per page), removes

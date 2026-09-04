@@ -50,6 +50,8 @@ struct vm_space {
     spinlock_t lock;
     vaddr_t arena_lo;        /* kernel VA arena for dynamic allocations */
     vaddr_t arena_hi;
+    vaddr_t near_lo;         /* arena inside the top 2 GiB, above the image (modules) */
+    vaddr_t near_hi;
     bool user;               /* a process address space (lower half) */
     uint64_t anon_pages;     /* frames populated for this space's ANON regions */
 };
@@ -108,8 +110,9 @@ bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_
 void vmm_init(void);
 
 /* vm_kernel_alloc flags */
-#define VM_KALLOC_GUARD    (1u << 0)  /* unmapped page below and above */
-#define VM_KALLOC_POPULATE (1u << 1)  /* map zeroed frames now instead of on fault */
+#define VM_KALLOC_GUARD       (1u << 0)  /* unmapped page below and above */
+#define VM_KALLOC_POPULATE    (1u << 1)  /* map zeroed frames now instead of on fault */
+#define VM_KALLOC_NEAR_KERNEL (1u << 2)  /* place in the near arena (top 2 GiB, -mcmodel=kernel reach) */
 
 /* Allocate `size` bytes (page multiple) of kernel virtual memory backed by
  * fresh zeroed frames. Returns the base or 0 on failure. */
@@ -118,6 +121,13 @@ vaddr_t vm_kernel_alloc(size_t size, unsigned flags, vm_prot_t prot);
 /* Free a vm_kernel_alloc result, unmapping and releasing every frame it
  * populated. Panics if `base` is not a live allocation. */
 void vm_kernel_free(vaddr_t base);
+
+/* Change the protection of a whole populated vm_kernel_alloc region
+ * (typically RW -> RX or RW -> R once its bytes are final). Rewrites the
+ * leaf entries and runs a TLB shootdown, so it needs interrupts enabled
+ * and may not be called with kernel_space.lock held. Returns 0, -EINVAL
+ * (not a populated kernel allocation, W+X requested, or VM_PROT_NONE). */
+int vm_kernel_protect(vaddr_t base, vm_prot_t prot);
 
 /* Map physical [pa, pa+size) (page aligned) into the arena, for MMIO.
  * Returns the virtual base or 0. */

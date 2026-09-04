@@ -45,8 +45,10 @@
 
 /* Version history:
  *   1  memory map, HHDM, kernel placement, page-table root, ACPI RSDP
- *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE */
-#define COSMOBOOT_VERSION 2
+ *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE
+ *   3  the module becomes a ustar boot archive (archive_phys/archive_size,
+ *      COSMOBOOT_MEM_ARCHIVE) holding init and the boot-time kernel modules */
+#define COSMOBOOT_VERSION 3
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -73,7 +75,7 @@
 #define COSMOBOOT_MEM_FIRMWARE_RUNTIME  10u  /* firmware runtime services code/data */
 #define COSMOBOOT_MEM_MMIO              11u  /* memory-mapped I/O */
 #define COSMOBOOT_MEM_PERSISTENT        12u  /* persistent memory, not general RAM */
-#define COSMOBOOT_MEM_MODULE            13u  /* boot module (init executable), v2 */
+#define COSMOBOOT_MEM_ARCHIVE           13u  /* boot archive (init, modules), v3 */
 
 #define COSMOBOOT_ARCH_X86_64  1u
 #define COSMOBOOT_ARCH_AARCH64 2u
@@ -123,13 +125,16 @@ struct cosmoboot_info {
     uint64_t acpi_rsdp;
     uint64_t firmware_system_table; /* EFI_SYSTEM_TABLE for UEFI */
 
-    /* Version 2: one boot module, the initial user executable, in memory
-     * of type COSMOBOOT_MEM_MODULE. Both zero when no module was found. */
-    uint64_t module_phys;
-    uint64_t module_size;
+    /* Version 3: the boot archive, a ustar archive holding the initial
+     * user executable ("init") and boot-time kernel modules
+     * ("modules/<name>.ko"), in memory of type COSMOBOOT_MEM_ARCHIVE.
+     * Both zero when no archive was found. (Version 2 carried a single
+     * raw ELF here as module_phys/module_size.) */
+    uint64_t archive_phys;
+    uint64_t archive_size;
 
     /* Reserved for framebuffer and command line in later versions.
-     * Must be zero in version 2. */
+     * Must be zero in version 3. */
     uint64_t reserved1[6];
 };
 

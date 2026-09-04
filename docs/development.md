@@ -57,15 +57,16 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF, the UEFI loader, and the user programs (default) |
+| `all` | Build the kernel ELF, the UEFI loader, the user programs, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
 | `userland` | `out/<arch>-<build>/userland/init.elf`, the first user program (`userland/userland.mk`) |
-| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\init.elf` |
+| `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
+| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init` plus the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, and module-validation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -75,17 +76,40 @@ Notes:
 
 ### Host unit tests
 
-`make host-test` (`tests/host/host.mk`) compiles `kernel/memory/buddy.c`,
-`slab.c`, and `kmalloc.c` unchanged with the *host* `clang` (no
-`--target`), links them with `tests/host/harness.c` and
-`tests/host/shim_spinlock.c`, and runs the resulting `test_buddy` and
-`test_slab` binaries under `-fsanitize=address,undefined`. The
+`make host-test` (`tests/host/host.mk`) compiles kernel sources
+unchanged with the *host* `clang` (no `--target`), links them with
+`tests/host/harness.c` and `tests/host/shim_spinlock.c`, and runs the
+resulting binaries under `-fsanitize=address,undefined`: `test_buddy`
+and `test_slab` (`kernel/memory/buddy.c`, `slab.c`, `kmalloc.c`),
+`test_crypto` (`kernel/security/sha512.c`, `ed25519.c` against the
+FIPS and RFC 8032 vectors), and `test_modelf` (`kernel/module/modelf.c`
+against synthetic module images, built with `-DMODELF_HOST_TEST=1`). The
 architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
 package on Ubuntu both qualify. Set `HOST_CC` to override the compiler.
 The tests live in `out/<arch>-<build>/host/` and can be run directly for a
-single binary. See `docs/kernel/memory/testing.md` for what they cover.
+single binary. See `docs/kernel/memory/testing.md` and
+`docs/kernel/module/testing.md` for what they cover.
+
+### Kernel modules
+
+`build/module.mk` builds every module named in `MODULES`: its sources
+are compiled with the kernel flags plus `-DCOSMO_MODULE_BUILD=1`, merged
+with `ld.lld -r` into an `ET_REL` object, signed by `scripts/modsign.py`
+with `MODSIGN_KEY` (default `tools/keys/cosmo-dev.key`, a development
+key whose secret half is public), and checked by
+`scripts/check-module-elf.py`. The results go into the boot archive at
+the names listed in `MODULE_ARCHIVE_ENTRIES`: `modules/<name>.ko`
+entries are loaded by the kernel at boot in archive order (list
+dependencies first), `tests/<name>.ko` entries are fixtures loaded only
+by the self-tests. The kernel's trusted key ring is generated from the
+`.pub` files in `tools/keys/` into `out/<arch>-<build>/gen/keyring_builtin.c`
+(`scripts/gen-keyring.py`). To add a module, add its sources under
+`modules/<name>/`, define `MODULE_<name>_SRCS`, append `<name>` to
+`MODULES` and an entry to `MODULE_ARCHIVE_ENTRIES`; the module itself
+declares `COSMO_MODULE(...)` from `kernel/include/kernel/module.h`.
+Everything is in `docs/kernel/module/api.md`.
 
 ### User programs
 
@@ -97,17 +121,19 @@ no `-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie`, static
 link at 4 MiB through `userland/init/user.ld` with
 `-z noexecstack -z separate-code` so the ELF has separate r-x, r--,
 rw- segments (the kernel refuses W+X segments and executable stacks).
-`init` is delivered to the kernel as the boot module (protocol v2,
-`docs/boot/design.md`); there is no filesystem yet.
+`init` is delivered to the kernel as the `init` entry of the boot
+archive (protocol v3, `docs/boot/design.md`); there is no filesystem
+yet.
 
 To write a new program: add a directory under `userland/`, start from
 `userland/init/crt0.S` (reads `argc`/`argv` from the initial stack,
 calls `main`, exits with its return value) and the wrappers in
 `libc/include/cosmo/syscall.h`, add a rule modelled on `INIT_ELF` in
-`userland.mk`, and pass the ELF to `scripts/mkimage.sh`. The system
-calls available are listed in `docs/kernel/syscall/api.md`; the kernel
-starts only `\cosmo\init.elf` today, so a second program is reachable
-only by replacing `init`.
+`userland.mk`, and add it to `BOOT_ARCHIVE_ENTRIES` in the top-level
+`Makefile` (`name=path`). The system calls available are listed in
+`docs/kernel/syscall/api.md`; the kernel starts only the archive entry
+named `init` today, so a second program is reachable only by replacing
+`init`.
 
 ## Variables
 
@@ -121,6 +147,8 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `V` | `0` | `V=1` prints full command lines |
 | `SELFTEST` | `1` for debug, `0` for release | Compile boot-time self-tests (`CONFIG_SELFTEST`) |
 | `CRASH_TEST` | `0` | Compile a deliberate fault after the banner (`CONFIG_CRASH_TEST`) to exercise the panic path |
+| `MODULE_SIG_ENFORCE` | `1` | `CONFIG_MODULE_SIG_ENFORCE`: refuse a kernel module without a valid signature from a key in `tools/keys/`. `0` loads unsigned modules with a warning and taints the kernel; a bad signature is refused either way |
+| `MODSIGN_KEY` | `tools/keys/cosmo-dev.key` | Ed25519 seed used by `build/module.mk` to sign modules |
 | `LLVM_PREFIX` | empty | Directory prefix (with trailing `/`) for `clang`, `ld.lld`, `lld-link`, `llvm-objcopy`, `llvm-nm`, `llvm-objdump` |
 | `QEMU_MEM` | `256M` | Guest RAM |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |

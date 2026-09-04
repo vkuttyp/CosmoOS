@@ -58,3 +58,10 @@ bool mutex_is_locked(struct mutex *m)
 {
     return __atomic_load_n(&m->owner, __ATOMIC_ACQUIRE) != NULL;
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(mutex_init);
+EXPORT_SYMBOL(mutex_lock);
+EXPORT_SYMBOL(mutex_trylock);
+EXPORT_SYMBOL(mutex_unlock);

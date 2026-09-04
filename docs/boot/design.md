@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 2 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: adds the boot module) |
+| `version` | `COSMOBOOT_VERSION` = 3 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -21,16 +21,18 @@ compiler.
 | `mem_map_phys`, `mem_map_entries`, `mem_map_entry_size` | array of `struct cosmoboot_mem_entry { base, length, type, reserved }` |
 | `acpi_rsdp` | physical RSDP from the EFI configuration table (ACPI 2.0 preferred, 1.0 fallback), 0 if absent |
 | `firmware_system_table` | physical `EFI_SYSTEM_TABLE *` for future runtime-services use |
-| `module_phys`, `module_size` | (v2) the one boot module, the initial user executable `\cosmo\init.elf`, in `COSMOBOOT_MEM_MODULE` memory below 4 GiB; both zero when the file is absent |
+| `archive_phys`, `archive_size` | (v3) the boot archive `\cosmo\boot.tar`, a ustar archive holding `init` and the boot-time kernel modules (`modules/<name>.ko`) and test fixtures (`tests/*.ko`), in `COSMOBOOT_MEM_ARCHIVE` memory below 4 GiB; both zero when the file is absent. Written by `scripts/mkbootarchive.py`, parsed by `kernel/core/bootarchive.c` |
 | `reserved1[6]` | zero; reserved for framebuffer and command line under a version bump |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
 `KERNEL` 7, `BOOTINFO` 8, `BOOT_PAGETABLES` 9, `FIRMWARE_RUNTIME` 10,
-`MMIO` 11, `PERSISTENT` 12, `MODULE` 13 (v2). The PMM frees only
-`USABLE` and `LOADER_RECLAIMABLE` ranges (`kernel/memory/bootmem.c`),
-so `MODULE` memory, like `KERNEL`, stays reserved and the image is
-intact when the kernel copies it into the process's address space.
+`MMIO` 11, `PERSISTENT` 12, `ARCHIVE` 13 (v3; the same value was
+`MODULE` in v2). The PMM frees only `USABLE` and `LOADER_RECLAIMABLE`
+ranges (`kernel/memory/bootmem.c`), so `ARCHIVE` memory, like `KERNEL`,
+stays reserved for the life of the kernel: `init` is copied out of it
+into the process's address space and modules are copied out of it into
+their own regions, but the archive itself is never freed or written.
 
 The ELF note: name `"COSMO\0"` (namesz 6), type `COSMOBOOT_NOTE_TYPE` = 1,
 desc = `uint32_t COSMOBOOT_VERSION`. `entry.S` emits it into
@@ -71,12 +73,14 @@ address and no calling convention across the boundary.
    `Open(L"\\cosmo\\kernel.elf", READ)` → `GetInfo` for the size
    (rejected if 0 or above 64 MiB) → `alloc_pages_low` → `Read`,
    verified to return exactly `FileSize`. Failure is fatal.
-3a. The same function with `MODULE_PATH` (`\cosmo\init.elf`) and type
-   `EFI_MEMORY_TYPE_COSMO_MODULE`: a missing file is *not* fatal (the
-   loader prints `module: \cosmo\init.elf not found; the kernel will run
-   without init` and passes zeros); any other error is. The module is
-   not parsed by the loader at all: it is opaque bytes for the kernel's
-   own ELF validator.
+3a. The same function with `ARCHIVE_PATH` (`\cosmo\boot.tar`) and type
+   `EFI_MEMORY_TYPE_COSMO_ARCHIVE`: a missing file is *not* fatal (the
+   loader prints `archive: \cosmo\boot.tar not found; the kernel will
+   run without init or modules` and passes zeros); any other error is.
+   The archive is not parsed by the loader at all: it is opaque bytes
+   for the kernel's tar parser (`bootarchive_init`), whose entries are
+   in turn opaque bytes for the ELF validators (`elf_validate` for
+   `init`, `modelf_validate` for modules).
 4. `elf_load()` (below). Produces `struct elf_image`.
 5. Allocations that must precede ExitBootServices, in order: page-table
    pool (`paging_pool_size()` pages, type `COSMO_PAGETABLES`), bootinfo
@@ -84,7 +88,7 @@ address and no calling convention across the boundary.
    by up to `BOOTINFO_MAX_ENTRIES` map entries), handoff stack
    (`HANDOFF_STACK_PAGES` = 4, `EfiLoaderData`).
 6. `paging_build()` (below).
-7. Fill the info header, including `module_phys`/`module_size`.
+7. Fill the info header, including `archive_phys`/`archive_size`.
    `find_acpi_rsdp()` scans `ConfigurationTable` for the ACPI 2.0 GUID,
    remembering a 1.0 hit as fallback.
 8. Memory map: `GetMemoryMap(size=0)` to learn the size, add 16
@@ -164,7 +168,7 @@ documented W^X exception; see `invariants.md` BT4.
 `LOADER_ALLOC_LIMIT - 1` (4 GiB), so everything the loader hands to the
 kernel is inside the identity map and HHDM. Loader-defined types
 (`EFI_MEMORY_TYPE_COSMO_KERNEL` `0x80000000`, `_BOOTINFO` `0x80000001`,
-`_PAGETABLES` `0x80000002`, `_MODULE` `0x80000003`) live in the range
+`_PAGETABLES` `0x80000002`, `_ARCHIVE` `0x80000003`) live in the range
 UEFI reserves for OS loaders; a firmware that returns `EFI_INVALID_PARAMETER` gets a retry
 with `EfiLoaderData` and `*fallback_used` is set, which the loader
 reports as a warning. The result is always zeroed.
@@ -177,7 +181,7 @@ and BootServicesCode/Data → `LOADER_RECLAIMABLE`; RuntimeServices* →
 `FIRMWARE_RUNTIME`; ACPIReclaim → `ACPI_RECLAIMABLE`; ACPIMemoryNVS →
 `ACPI_NVS`; Unusable → `BAD`; MemoryMappedIO(PortSpace) → `MMIO`;
 PersistentMemory → `PERSISTENT`; the four loader types → `KERNEL`,
-`BOOTINFO`, `BOOT_PAGETABLES`, `MODULE`; everything else (Reserved, PalCode,
+`BOOTINFO`, `BOOT_PAGETABLES`, `ARCHIVE`; everything else (Reserved, PalCode,
 Unaccepted, unknown) → `RESERVED`. Adjacent descriptors with the same
 translated type are merged. Descriptors with zero pages are skipped.
 
@@ -240,11 +244,13 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
   RAM. The kernel must not access device memory through the bootstrap
   tables without remapping it first.
 - No framebuffer or command line; `reserved1` is zero. Exactly one
-  module, always read from the fixed path `\cosmo\init.elf`; there is
-  no module list, name, or command line for it.
+  archive, always read from the fixed path `\cosmo\boot.tar`; the
+  loader knows nothing about its contents (names, order, or what is a
+  module) and passes no command line for it. Entry naming and load
+  order are a kernel/build convention (`docs/kernel/module/design.md`).
 - If the loader-defined memory types fall back to `EfiLoaderData`
   (firmware rejected `0x8000000x`), the translated map would list the
-  kernel image, bootinfo, page-table pool, and module as
+  kernel image, bootinfo, page-table pool, and archive as
   `LOADER_RECLAIMABLE`. The loader therefore retypes those four ranges
   from their known placements after translation (`mark_range` in
   `main.c`, splitting entries as needed), so the map the kernel sees is
@@ -265,11 +271,13 @@ under TCG; byte-wise `memcpy` of a 115 KiB kernel is not measurable.
   `elf.c` (with `EM_AARCH64`), `memory.c`, and `console.c` (UART via
   the EFI SerialIo or a PL011 at a firmware-reported address);
   `paging.c` and `cpu.c` become per-architecture files.
-- **Protocol version 3** (framebuffer, command line, a module list
-  once there is a filesystem-less multi-module need): bump
+- **Protocol version 4** (framebuffer, command line): bump
   `COSMOBOOT_VERSION`, replace `reserved1` fields, and keep `size` so a
   kernel can read an older loader's struct and refuse it cleanly. The
   kernel refuses any version other than its own (`bootinfo_init`).
+  Version 3 already answered the multi-module need with the archive, so
+  no module list field is planned: more boot files mean more archive
+  entries, not more protocol.
 - **Memory manager handoff**: reservation is by map type, and the
   loader guarantees the types are right even under the `EfiLoaderData`
   fallback by retyping its own ranges (`mark_range`). The PMM's

@@ -20,6 +20,12 @@ else
 SELFTEST ?= 0
 endif
 
+# Module signatures. 1 (default in every build type) refuses a module
+# without a valid signature from a key in tools/keys/. 0 is a development
+# convenience: unsigned modules load with a warning and the kernel reports
+# itself as tainted. A bad signature is refused either way.
+MODULE_SIG_ENFORCE ?= 1
+
 # CRASH_TEST=1 makes kernel_main fault on purpose after the self-tests so
 # the panic path and the harness's failure detection can be verified.
 # Never enable in a build you intend to run for real.

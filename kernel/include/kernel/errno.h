@@ -28,5 +28,7 @@
 #define ENAMETOOLONG 36 /* string too long */
 #define ENOSYS    38  /* not implemented */
 #define ETIMEDOUT 110 /* operation timed out */
+#define ENOKEY    126 /* required key not available */
+#define EKEYREJECTED 129 /* key or signature rejected */
 
 #endif /* KERNEL_ERRNO_H */

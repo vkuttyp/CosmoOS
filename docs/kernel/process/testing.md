@@ -99,9 +99,9 @@ self-test marker is not demanded there.
 | `make analyze` | clean |
 | `make reproducible` | byte-identical |
 
-The user ELF (`out/x86_64-debug/userland/init.elf`, 57 KiB) has three
-`PT_LOAD` segments (r-x, r--, rw-) and a non-executable
-`PT_GNU_STACK`.
+The user ELF (`out/x86_64-debug/userland/init.elf`, 57 KiB, packed
+into the boot archive as `init`) has three `PT_LOAD` segments (r-x,
+r--, rw-) and a non-executable `PT_GNU_STACK`.
 
 ## Gaps and planned tests
 

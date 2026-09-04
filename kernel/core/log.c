@@ -87,3 +87,10 @@ void kprintf(const char *fmt, ...)
     kvprintf(fmt, ap);
     va_end(ap);
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(klog);
+EXPORT_SYMBOL(kvlog);
+EXPORT_SYMBOL(kprintf);
+EXPORT_SYMBOL(kvprintf);

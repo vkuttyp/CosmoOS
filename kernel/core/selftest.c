@@ -264,6 +264,12 @@ static const struct selftest tests[] = {
     { "process-reject",  selftest_process_reject },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
+    { "bootarchive",     selftest_bootarchive },
+    { "ksym",            selftest_ksym },
+    { "modsig",          selftest_modsig },
+    { "module-reject",   selftest_module_reject },
+    { "module-load",     selftest_module_load },
+    { "module-fail",     selftest_module_fail },
 };
 
 int selftest_run_all(void)

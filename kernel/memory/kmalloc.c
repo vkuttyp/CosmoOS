@@ -173,3 +173,10 @@ void kmalloc_dump(void)
     slab_dump();
     kprintf("large allocations: %llu pages\n", (unsigned long long)g_large_pages);
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(kmalloc);
+EXPORT_SYMBOL(kzalloc);
+EXPORT_SYMBOL(krealloc);
+EXPORT_SYMBOL(kfree);

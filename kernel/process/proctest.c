@@ -3,6 +3,7 @@
  * validator, and processes running the boot module.
  */
 
+#include <kernel/bootarchive.h>
 #include <kernel/bootinfo.h>
 #include <kernel/elf.h>
 #include <kernel/errno.h>
@@ -184,16 +185,16 @@ bool selftest_elf(const char **reason)
 
 static bool run_module(const char *const argv[], int *status_out, const char **reason)
 {
-    const struct cosmoboot_info *info = bootinfo_get();
-    if (info->module_size == 0) {
-        kinfo("selftest: no boot module; skipping");
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
         *status_out = -1;
         return true;
     }
-    const void *image = bootinfo_phys_to_virt(info->module_phys);
     struct process *p = NULL;
     unsigned before = process_count();
-    int rc = process_create_from_elf(image, (size_t)info->module_size, argv[0], argv, NULL, &p);
+    int rc = process_create_from_elf(image, image_size, argv[0], argv, NULL, &p);
     CHECK(rc == 0);
     CHECK(p != NULL && p->pid > 0);
 

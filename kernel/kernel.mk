@@ -13,6 +13,7 @@ include $(ROOT)/kernel/arch/$(ARCH)/arch.mk
 KERNEL_GENERIC_SRCS := \
 	kernel/core/main.c \
 	kernel/core/bootinfo.c \
+	kernel/core/bootarchive.c \
 	kernel/core/console.c \
 	kernel/core/log.c \
 	kernel/core/panic.c \
@@ -52,23 +53,48 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \
 	kernel/syscall/uaccess.c \
+	kernel/security/sha512.c \
+	kernel/security/ed25519.c \
+	kernel/security/keyring.c \
+	kernel/module/ksym.c \
+	kernel/module/modsig.c \
+	kernel/module/modelf.c \
+	kernel/module/module.c \
+	kernel/module/modtest.c \
 	drivers/acpi/acpi.c
 
-KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS))
+# The trusted key ring is generated from the .pub files in tools/keys (see
+# scripts/gen-keyring.py and docs/kernel/module/design.md).
+KEYRING_PUBS := $(sort $(wildcard $(ROOT)/tools/keys/*.pub))
+KEYRING_SRC  := $(OUT)/gen/keyring_builtin.c
+KEYRING_OBJ  := $(OUT)/gen/keyring_builtin.o
+
+$(KEYRING_SRC): $(KEYRING_PUBS) $(ROOT)/scripts/gen-keyring.py
+	$(call log,GEN,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(PYTHON) $(ROOT)/scripts/gen-keyring.py $@ $(KEYRING_PUBS)
+
+# The generated source lives under $(OUT); map that prefix too so the
+# debug info does not depend on the output directory (make reproducible).
+$(KEYRING_OBJ): $(KEYRING_SRC)
+	$(call log,CC,$<)
+	$(Q)$(CC) $(KERNEL_CFLAGS) -ffile-prefix-map=$(OUT)=/cosmo/out -c $< -o $@
+
+KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS)) $(KEYRING_OBJ)
 KERNEL_ARCH_OBJS    := $(call objs_of,$(KERNEL_ARCH_SRCS))
 KERNEL_OBJS         := $(KERNEL_GENERIC_OBJS) $(KERNEL_ARCH_OBJS)
 
 KERNEL_ARCH_C_OBJS := $(call objs_of,$(filter %.c,$(KERNEL_ARCH_SRCS)))
 KERNEL_ARCH_S_OBJS := $(call objs_of,$(filter %.S,$(KERNEL_ARCH_SRCS)))
 
-$(eval $(call compile_rules,$(KERNEL_GENERIC_OBJS),KERNEL_CFLAGS))
+$(eval $(call compile_rules,$(call objs_of,$(KERNEL_GENERIC_SRCS)),KERNEL_CFLAGS))
 $(eval $(call compile_rules,$(KERNEL_ARCH_C_OBJS),KERNEL_CFLAGS))
 $(eval $(call assemble_rules,$(KERNEL_ARCH_S_OBJS),KERNEL_CFLAGS))
 
 $(KERNEL_ARCH_OBJS) $(patsubst %.o,%.analyzed,$(KERNEL_ARCH_C_OBJS)): \
 	EXTRA_CFLAGS := -I$(ROOT)/kernel/arch/$(ARCH)/include
 
-KERNEL_ANALYZE := $(patsubst %.o,%.analyzed,$(KERNEL_GENERIC_OBJS) $(KERNEL_ARCH_C_OBJS))
+KERNEL_ANALYZE := $(patsubst %.o,%.analyzed,$(call objs_of,$(KERNEL_GENERIC_SRCS)) $(KERNEL_ARCH_C_OBJS))
 
 $(KERNEL_ELF): $(KERNEL_OBJS) $(KERNEL_LINKER_SCRIPT)
 	$(call log,LD,$@)

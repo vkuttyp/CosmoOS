@@ -38,6 +38,14 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.*)
     } :rodata
+    /* Exported symbol table for modules (EXPORT_SYMBOL). KEEP: nothing
+     * references the records, --gc-sections would drop them. */
+    . = ALIGN(16);
+    __ksymtab_start = .;
+    .ksymtab : {
+        KEEP(*(.ksymtab))
+    } :rodata
+    __ksymtab_end = .;
     .note.cosmoboot : {
         KEEP(*(.note.cosmoboot))
     } :rodata :notes

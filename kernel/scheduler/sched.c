@@ -399,3 +399,7 @@ void sched_dump(void)
     }
     thread_dump_all();
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(sched_yield);

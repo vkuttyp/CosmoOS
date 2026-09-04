@@ -10,6 +10,7 @@
  */
 
 #include <kernel/acpi.h>
+#include <kernel/bootarchive.h>
 #include <kernel/bootinfo.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
@@ -17,6 +18,7 @@
 #include <kernel/kernel.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/module.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
@@ -100,6 +102,7 @@ void kernel_main(const struct cosmoboot_info *info)
     bootinfo_init(info);
     print_banner();
     log_memory_map();
+    bootarchive_init();
 
     interrupt_init();
 
@@ -118,6 +121,7 @@ void kernel_main(const struct cosmoboot_info *info)
     timer_init();
     sched_init();
     process_init();
+    module_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");
@@ -126,20 +130,23 @@ void kernel_main(const struct cosmoboot_info *info)
      * the shootdowns and cross-CPU calls bring-up needs require it. */
     smp_init();
 
-    int failed = 0;
+    /* Boot-time kernel modules from the archive, before the self-tests
+     * (which load and unload their own fixtures) and before init. */
+    int failed = (int)module_load_boot();
 #if CONFIG_SELFTEST
-    failed = selftest_run_all();
+    failed += selftest_run_all();
 #else
     kinfo("self-tests disabled in this build");
 #endif
 
     /* The first user process. There is no filesystem yet: the loader
-     * delivered init as a boot module. */
-    if (info->module_size != 0) {
-        const void *image = bootinfo_phys_to_virt(info->module_phys);
+     * delivered init inside the boot archive. */
+    const void *image;
+    size_t image_size;
+    if (bootarchive_find("init", &image, &image_size)) {
         static const char *const argv[] = { "init", NULL };
         struct process *init = NULL;
-        int rc = process_create_from_elf(image, (size_t)info->module_size, "init", argv, NULL, &init);
+        int rc = process_create_from_elf(image, image_size, "init", argv, NULL, &init);
         if (rc == 0) {
             int status = process_wait_exit(init);
             kinfo("init exited with status %d", status);
@@ -151,7 +158,7 @@ void kernel_main(const struct cosmoboot_info *info)
             failed++;
         }
     } else {
-        kwarn("no boot module: init not started");
+        kwarn("no init in the boot archive: init not started");
     }
 
 #if CONFIG_CRASH_TEST

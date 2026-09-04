@@ -37,6 +37,12 @@ void panic_frame(const struct arch_trap_frame *frame, const char *fmt, ...) __no
 /* Print a stack trace to the log. `from` may be NULL for "here". */
 void backtrace_print(const struct arch_trap_frame *from);
 
+/* Taint: conditions under which a panic report is not from a pristine
+ * kernel. Set once, never cleared, printed by the panic path. */
+#define TAINT_UNSIGNED_MODULE (1u << 0)
+void kernel_taint(unsigned flag);
+unsigned kernel_taint_flags(void);
+
 #define BUG() panic("BUG: at %s:%d (%s)", __FILE__, __LINE__, __func__)
 
 #define BUG_ON(cond)                                                           \

@@ -299,3 +299,8 @@ int ksnprintf(char *buf, size_t size, const char *fmt, ...)
     va_end(ap);
     return n;
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(ksnprintf);
+EXPORT_SYMBOL(kvsnprintf);

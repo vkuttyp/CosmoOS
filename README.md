@@ -95,8 +95,17 @@ See [docs/development.md](docs/development.md).
   their own address spaces, an in-kernel static ELF loader, user mode via
   SYSCALL/SYSRET with SWAPGS, a personality-based syscall dispatcher with
   eleven native calls, validated user-memory access, fatal-fault
-  termination, and an `init` program delivered by the loader as a boot
-  module (protocol v2). The user program's own self-test exercises every
-  syscall.
-- **Next, Phase 5:** kernel modules: ELF module loader, symbol
-  resolution, relocations, dependencies, signing.
+  termination, and an `init` program delivered by the loader. The user
+  program's own self-test exercises every syscall.
+- **Phase 5 (done):** kernel modules. A ustar boot archive (protocol v3)
+  carries `init` and the modules; modules are signed `ET_REL` objects
+  with a versioned metadata section, verified with an in-kernel SHA-512
+  and Ed25519 implementation against a compiled-in key ring before any
+  byte is parsed, laid out as three W^X regions in a near-kernel arena,
+  relocated against the kernel's export table (`EXPORT_SYMBOL`, module
+  ABI v1) and declared dependencies, reference counted for unload.
+  Signature enforcement is on by default; RFC 8032 vectors and crafted
+  ELF images run on the host, six self-tests load, call, and unload
+  fixture modules on the target.
+- **Next, Phase 6:** device infrastructure: the device/driver/bus model,
+  resource management, PCI enumeration, virtio, drivers as modules.

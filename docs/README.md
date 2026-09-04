@@ -26,9 +26,11 @@ wins and the document is wrong.
 | `kernel/object/` | Reference-counted kernel objects, the per-process handle table with rights, the console object |
 | `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module |
 | `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities, the native system-call ABI (`uapi/cosmo/syscall.h`) and user-side wrappers |
+| `kernel/module/` | The boot archive, the module ABI (`COSMO_MODULE`, `EXPORT_SYMBOL`, ABI version), the signed `ET_REL` module loader (validation, relocation, symbol resolution, dependencies, W^X, unload), signing tools and keys |
+| `kernel/security/` | SHA-512, Ed25519 verification, the compiled-in key ring, kernel taint; credentials and capabilities arrive in a later phase |
 
 Further subsystem directories are added as subsystems come into existence
-(`kernel/module/`, `kernel-services/vfs/`, and so on).
+(`kernel-services/vfs/`, `drivers/`, and so on).
 
 ## Per-subsystem convention
 

@@ -20,23 +20,34 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot image run test test-crash analyze reproducible compile-commands check-tools clean help
+.PHONY: all kernel boot modules image run test test-crash analyze reproducible compile-commands check-tools clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
 include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/userland/userland.mk
+include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
 
-all: kernel boot userland
+all: kernel boot userland modules
 
 IMAGE := $(OUT)/cosmoos.img
 
 image: $(IMAGE)
 
-$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(INIT_ELF) $(ROOT)/scripts/mkimage.sh
+# The boot archive: init plus the boot-time and test modules, in the
+# order the kernel loads them (dependencies first). See
+# scripts/mkbootarchive.py and docs/kernel/module/.
+BOOT_ARCHIVE := $(OUT)/boot.tar
+BOOT_ARCHIVE_ENTRIES := init=$(INIT_ELF) $(MODULE_ARCHIVE_ENTRIES)
+
+$(BOOT_ARCHIVE): $(INIT_ELF) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+	$(call log,ARCHIVE,$@)
+	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
+
+$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(ROOT)/scripts/mkimage.sh
 	$(call log,IMAGE,$@)
-	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(INIT_ELF)
+	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE)
 
 run: $(IMAGE)
 	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
@@ -55,7 +66,7 @@ test-crash:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
 
-analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE)
+analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE)
 	@echo "static analysis: clean"
 
 reproducible:
@@ -70,6 +81,7 @@ compile-commands:
 	  $(foreach s,$(KERNEL_GENERIC_SRCS),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS)';) \
 	  $(foreach s,$(filter %.c,$(KERNEL_ARCH_SRCS)),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS) $(ARCH_INC)';) \
 	  $(foreach s,$(LOADER_SRCS),printf '%s\t%s\n' '$(s)' '$(LOADER_CFLAGS)';) \
+	  $(foreach m,$(MODULES),$(foreach s,$(MODULE_$(m)_SRCS),printf '%s\t%s\n' '$(s)' '$(MODULE_CFLAGS)';)) \
 	) | $(PYTHON) $(ROOT)/scripts/gen-compile-commands.py $(ROOT) $(CC) > $(ROOT)/compile_commands.json
 
 check-tools:

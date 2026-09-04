@@ -6,9 +6,11 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 2 (version 1 plus the boot module
-fields `module_phys`/`module_size` and memory type
-`COSMOBOOT_MEM_MODULE` = 13, taken from `reserved1`). Any layout change
+**ABI stability: stable.** Version 3 (version 1 plus the boot archive
+fields `archive_phys`/`archive_size` and memory type
+`COSMOBOOT_MEM_ARCHIVE` = 13, taken from `reserved1`; version 2 used the
+same slots for one raw ELF module, `module_phys`/`module_size` and
+`COSMOBOOT_MEM_MODULE`). Any layout change
 bumps `COSMOBOOT_VERSION`; the loader and kernel refuse each other on
 mismatch (loader via the ELF note, kernel via `bootinfo_init()`).
 Additions use `reserved1` and bump the version. Field meanings are in
@@ -24,15 +26,18 @@ exited; interrupts disabled; kernel mapped at its link addresses with
 W^X from the ELF flags; `[0, hhdm_size)` mapped RW+NX at `hhdm_base`;
 bootstrap tables in `COSMOBOOT_MEM_BOOT_PAGETABLES` memory; `.bss`
 zeroed; first argument register = HHDM virtual address of the struct;
-a valid stack of at least 16 KiB. Module (v2): either `module_size` is
-0 and `module_phys` is 0, or `[module_phys, module_phys+module_size)`
+a valid stack of at least 16 KiB. Archive (v3): either `archive_size`
+is 0 and `archive_phys` is 0, or `[archive_phys, archive_phys+archive_size)`
 is page-aligned memory inside the direct map holding the unmodified
-bytes of the file `\cosmo\init.elf`, reported as `COSMOBOOT_MEM_MODULE`
-(the loader retypes the range itself when the firmware rejected its
-memory types, see `mark_range` in `design.md`); the loader does not
-validate the module's contents. The
-kernel keeps `MODULE` ranges reserved by map type and treats the bytes
-as untrusted input (`elf_validate`).
+bytes of the file `\cosmo\boot.tar`, reported as
+`COSMOBOOT_MEM_ARCHIVE` (the loader retypes the range itself when the
+firmware rejected its memory types, see `mark_range` in `design.md`);
+the loader does not validate the archive's contents. The kernel keeps
+`ARCHIVE` ranges reserved by map type and treats the bytes as untrusted
+input: `bootarchive_init` validates every tar header, `elf_validate`
+the `init` entry, `modelf_validate` and `modsig_check` each module. The
+archive format is plain ustar as `scripts/mkbootarchive.py` writes it
+(`docs/kernel/module/design.md`).
 
 ## Kernel-side accessors (`kernel/include/kernel/bootinfo.h`)
 
@@ -132,12 +137,12 @@ memory map.
 Failure: `EFI_INVALID_PARAMETER` for bad arguments; the firmware's
 status (typically `EFI_OUT_OF_RESOURCES`) otherwise.
 
-### `KERNEL_PATH`, `MODULE_PATH`
+### `KERNEL_PATH`, `ARCHIVE_PATH`
 
-`L"\\cosmo\\kernel.elf"` and `L"\\cosmo\\init.elf"` on the loader's own
+`L"\\cosmo\\kernel.elf"` and `L"\\cosmo\\boot.tar"` on the loader's own
 volume (`scripts/mkimage.sh` places both). The kernel is mandatory; the
-module is optional and read by the same static helper
-(`read_boot_file` in `main.c`) with `EFI_MEMORY_TYPE_COSMO_MODULE`
+archive is optional and read by the same static helper
+(`read_boot_file` in `main.c`) with `EFI_MEMORY_TYPE_COSMO_ARCHIVE`
 (`0x80000003`, `efi.h`). Size limits are the kernel's (0 < size ≤ 64
 MiB).
 
