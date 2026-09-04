@@ -22,8 +22,10 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/selftest.c \
 	kernel/core/spinlock.c \
 	kernel/core/percpu.c \
+	kernel/core/smp.c \
 	kernel/interrupt/interrupt.c \
 	kernel/interrupt/irq.c \
+	kernel/interrupt/ipi.c \
 	kernel/memory/bootmem.c \
 	kernel/memory/buddy.c \
 	kernel/memory/pmm.c \
@@ -40,6 +42,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/semaphore.c \
 	kernel/scheduler/completion.c \
 	kernel/scheduler/schedtest.c \
+	kernel/scheduler/smptest.c \
 	drivers/acpi/acpi.c
 
 KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS))

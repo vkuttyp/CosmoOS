@@ -7,6 +7,7 @@
  * context switch; whoever runs next releases it in sched_finish_switch().
  */
 
+#include <kernel/ipi.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -44,6 +45,17 @@ struct runqueue *sched_runqueue(unsigned cpu)
 static void idle_main(void *arg)
 {
     (void)arg;
+
+    /* An AP's bootstrap stack is unused once its idle thread runs on its
+     * own stack; return it. The boot CPU has none (thread 0 owns the
+     * static boot stack). */
+    struct percpu *pc = this_cpu();
+    if (pc->boot_stack != 0) {
+        vaddr_t stack = pc->boot_stack;
+        pc->boot_stack = 0;
+        vm_kernel_free(stack);
+    }
+
     for (;;) {
         if (this_cpu()->need_resched)
             schedule();
@@ -96,6 +108,7 @@ void sched_init(void)
 
     timer_set_tick_hook(sched_tick);
     g_initialized = true;
+    thread_reaper_start();
     kinfo("sched: policy '%s', slice %u ms, tick %u Hz", g_policy->name, SCHED_SLICE_NS / 1000000, CONFIG_HZ);
 }
 
@@ -144,7 +157,10 @@ static void request_resched(struct runqueue *rq)
 {
     struct percpu *pc = percpu_get(rq->cpu);
     pc->need_resched = true;
-    /* Cross-CPU kick arrives with the SMP work (IPI_RESCHEDULE). */
+    /* Another CPU may be idle in hlt or running lower priority work:
+     * interrupt it so its interrupt-return path sees the flag. */
+    if (rq->cpu != arch_cpu_id() && cpu_online(rq->cpu))
+        ipi_send(rq->cpu, IPI_RESCHEDULE);
 }
 
 void sched_enqueue_new(struct thread *t)
@@ -171,11 +187,23 @@ void sched_finish_switch(void)
     struct thread *exited = rq->prev_exited;
     rq->prev_exited = NULL;
     spin_unlock(&rq->lock);
+    /* Interrupts may still be disabled here (resumed inside a trap
+     * handler); freeing a stack needs a TLB shootdown, so defer. */
     if (exited != NULL)
-        thread_put(exited);
+        thread_reap_later(exited);
 }
 
-void schedule(void)
+/*
+ * `preempt` distinguishes an involuntary switch (interrupt return,
+ * preempt_enable) from a voluntary one (block, yield, exit). The
+ * difference matters for a thread that has marked itself BLOCKED in
+ * waitqueue_prepare but has not yet evaluated its condition: a
+ * preemption in that window must keep it runnable, otherwise it is
+ * switched out on no queue and no wait list and is lost. When it runs
+ * again its wait loop sees state RUNNING, yields once, re-prepares, and
+ * re-checks the condition, so no wakeup is missed.
+ */
+static void schedule_internal(bool preempt)
 {
     struct percpu *pc = this_cpu();
     KASSERT(g_initialized);
@@ -192,20 +220,17 @@ void schedule(void)
     uint64_t now = clock_now_ns();
     prev->run_time_ns += now - prev->last_start_ns;
 
-    switch (prev->state) {
-    case THREAD_RUNNING:
+    if (prev->state == THREAD_EXITED) {
+        KASSERT(!preempt);
+        rq->prev_exited = prev;
+    } else if (prev->state == THREAD_READY) {
+        /* Woken between blocking and reaching here: already queued. */
+    } else if (preempt || prev->state == THREAD_RUNNING) {
         prev->state = THREAD_READY;
         if (prev != rq->idle)
             g_policy->enqueue(rq, prev, prev->slice_left_ns > 0);
-        break;
-    case THREAD_READY:
-        /* Woken between blocking and reaching here: already queued. */
-        break;
-    case THREAD_BLOCKED:
-        break;
-    case THREAD_EXITED:
-        rq->prev_exited = prev;
-        break;
+    } else {
+        /* THREAD_BLOCKED, voluntary: the wait queue owns it now. */
     }
 
     struct thread *next = g_policy->pick_next(rq);
@@ -241,17 +266,22 @@ void schedule(void)
     arch_irq_restore(s);
 }
 
+void schedule(void)
+{
+    schedule_internal(false);
+}
+
 void sched_yield(void)
 {
     thread_current()->slice_left_ns = 0;
-    schedule();
+    schedule_internal(false);
 }
 
 void sched_preempt(void)
 {
     struct percpu *pc = this_cpu();
     KASSERT(pc->irq_depth == 0 && pc->preempt_count == 0);
-    schedule();
+    schedule_internal(true);
 }
 
 void sched_block_current(void)
@@ -297,13 +327,48 @@ void sched_set_running_current(void)
     spin_unlock_irqrestore(&rq->lock, s);
 }
 
+/* --- hang watchdog --- */
+
+static uint64_t g_watchdog_timeout;
+static uint64_t g_watchdog_last_kick;
+static volatile bool g_watchdog_fired;
+
+void sched_watchdog_arm(uint64_t timeout_ns)
+{
+    g_watchdog_last_kick = clock_now_ns();
+    g_watchdog_fired = false;
+    __atomic_store_n(&g_watchdog_timeout, timeout_ns, __ATOMIC_RELEASE);
+}
+
+void sched_watchdog_kick(void)
+{
+    g_watchdog_last_kick = clock_now_ns();
+}
+
+void sched_watchdog_disarm(void)
+{
+    __atomic_store_n(&g_watchdog_timeout, 0, __ATOMIC_RELEASE);
+}
+
+static void watchdog_check(uint64_t now)
+{
+    uint64_t timeout = __atomic_load_n(&g_watchdog_timeout, __ATOMIC_ACQUIRE);
+    if (timeout == 0 || g_watchdog_fired || now - g_watchdog_last_kick < timeout)
+        return;
+    g_watchdog_fired = true;
+    kprintf("\n[WATCHDOG] no progress for %llu ms; scheduler state:\n",
+            (unsigned long long)((now - g_watchdog_last_kick) / 1000000));
+    sched_dump();
+}
+
 void sched_tick(uint64_t now_ns)
 {
-    (void)now_ns;
     struct percpu *pc = this_cpu();
     struct runqueue *rq = pc->rq;
     if (rq == NULL)
         return;
+    if (pc->cpu_id == 0)
+        watchdog_check(now_ns);
 
     spin_lock(&rq->lock);
     struct thread *cur = rq->current;
@@ -323,9 +388,12 @@ void sched_dump(void)
 {
     for (unsigned c = 0; c < cpu_count(); c++) {
         struct runqueue *rq = &g_rqs[c];
-        kprintf("cpu %u: current '%s' queued %u switches %llu bitmap 0x%llx\n", c,
-                rq->current ? rq->current->name : "-", rq->nr_running,
-                (unsigned long long)rq->switches, (unsigned long long)rq->bitmap);
+        struct percpu *pc = percpu_get(c);
+        kprintf("cpu %u: %s current '%s' queued %u switches %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu\n",
+                c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
+                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)rq->bitmap,
+                pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
+                (unsigned long long)(pc ? pc->ticks : 0));
     }
     thread_dump_all();
 }

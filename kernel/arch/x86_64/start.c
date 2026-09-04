@@ -23,17 +23,14 @@
 
 void x86_start(const struct cosmoboot_info *info)
 {
+    /* Order matters: the console lock, like every spinlock, reads the
+     * per-CPU block through GS, and the GS base is reset by gdt_init's
+     * segment reload. So: bring the UART up (no lock), load the GDT,
+     * install the per-CPU block, and only then log anything. */
     arch_console_early_init();
-    kdebug("x86: console up");
-
     gdt_init();
-    kdebug("x86: GDT/TSS loaded");
-
-    /* The per-CPU block must exist before anything calls arch_cpu_id()
-     * or takes a spinlock; both read it through GS. It must be installed
-     * AFTER gdt_init: loading the GS selector resets the GS base. Nothing
-     * above this line may take a lock. */
     percpu_init_boot();
+    kdebug("x86: console up, GDT/TSS loaded, per-CPU block installed");
 
     idt_init();
     kdebug("x86: IDT loaded");

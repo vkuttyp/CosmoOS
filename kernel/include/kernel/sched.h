@@ -73,4 +73,11 @@ struct runqueue *sched_runqueue(unsigned cpu);
 void sched_dump(void);
 uint64_t sched_switch_count(unsigned cpu);
 
+/* Hang watchdog: if sched_watchdog_kick() is not called for `timeout_ns`
+ * while armed, the boot CPU's tick prints every thread and run queue
+ * once. Used by the self-test runner; costs one comparison per tick. */
+void sched_watchdog_arm(uint64_t timeout_ns);
+void sched_watchdog_kick(void);
+void sched_watchdog_disarm(void);
+
 #endif /* KERNEL_SCHED_H */

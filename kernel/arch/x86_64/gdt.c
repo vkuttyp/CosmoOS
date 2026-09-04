@@ -1,12 +1,20 @@
 /*
- * gdt.c - GDT and TSS for the boot CPU.
+ * gdt.c - GDT and TSS, one set per CPU.
  *
- * Memory: the GDT, TSS, and double-fault stack are static. When SMP
- * arrives each CPU gets its own TSS (the GDT can be shared, the TSS
- * descriptor in it cannot), so this file becomes per-CPU data.
+ * The GDT layout is identical on every CPU; only the TSS descriptor
+ * points at a different TSS, whose IST1 is that CPU's double-fault
+ * stack. CPU 0's tables are static so they exist before the heap; APs'
+ * tables are allocated by the boot CPU before each AP is started.
  */
 
+#include <kernel/errno.h>
+#include <kernel/kmalloc.h>
+#include <kernel/panic.h>
+#include <kernel/percpu.h>
 #include <kernel/string.h>
+#include <kernel/vmm.h>
+
+#include <arch/cpu.h>
 
 #include <x86/gdt.h>
 
@@ -44,13 +52,19 @@ struct gdtr {
     uint64_t base;
 } __attribute__((packed));
 
-static struct gdt g_gdt;
-static struct tss g_tss __attribute__((aligned(16)));
-
 /* Separate stack for double faults so a kernel stack overflow still gets
  * a readable report instead of a triple fault. */
 #define DF_STACK_SIZE 8192
-static uint8_t g_df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
+
+struct x86_cpu_tables {
+    struct gdt gdt;
+    struct tss tss __attribute__((aligned(16)));
+    uintptr_t df_stack_top;
+};
+
+static struct x86_cpu_tables g_boot_tables __attribute__((aligned(16)));
+static uint8_t g_boot_df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
+static struct x86_cpu_tables *g_tables[CONFIG_MAX_CPUS];
 
 static void set_tss_descriptor(struct gdt *g, const struct tss *t)
 {
@@ -66,25 +80,30 @@ static void set_tss_descriptor(struct gdt *g, const struct tss *t)
     g->tss_high = (base >> 32) & 0xFFFFFFFF;
 }
 
-void gdt_init(void)
+static void tables_init(struct x86_cpu_tables *t, uintptr_t df_stack_top)
 {
-    memset(&g_gdt, 0, sizeof(g_gdt));
-    g_gdt.kernel_code = DESC_KERNEL_CODE;
-    g_gdt.kernel_data = DESC_KERNEL_DATA;
-    g_gdt.user_data = DESC_USER_DATA;
-    g_gdt.user_code = DESC_USER_CODE;
+    memset(&t->gdt, 0, sizeof(t->gdt));
+    t->gdt.kernel_code = DESC_KERNEL_CODE;
+    t->gdt.kernel_data = DESC_KERNEL_DATA;
+    t->gdt.user_data = DESC_USER_DATA;
+    t->gdt.user_code = DESC_USER_CODE;
 
-    memset(&g_tss, 0, sizeof(g_tss));
-    g_tss.ist[IST_DOUBLE_FAULT - 1] = (uint64_t)(uintptr_t)(g_df_stack + DF_STACK_SIZE);
-    g_tss.iomap_base = sizeof(g_tss); /* no I/O bitmap */
-    set_tss_descriptor(&g_gdt, &g_tss);
+    memset(&t->tss, 0, sizeof(t->tss));
+    t->df_stack_top = df_stack_top;
+    t->tss.ist[IST_DOUBLE_FAULT - 1] = df_stack_top;
+    t->tss.iomap_base = sizeof(t->tss); /* no I/O bitmap */
+    set_tss_descriptor(&t->gdt, &t->tss);
+}
 
+static void tables_load(struct x86_cpu_tables *t)
+{
     struct gdtr gdtr = {
-        .limit = sizeof(g_gdt) - 1,
-        .base = (uint64_t)(uintptr_t)&g_gdt,
+        .limit = sizeof(t->gdt) - 1,
+        .base = (uint64_t)(uintptr_t)&t->gdt,
     };
 
-    /* Load GDT, reload CS via a far return, reload data selectors. */
+    /* Load GDT, reload CS via a far return, reload data selectors. This
+     * resets the GS base: install the per-CPU pointer after this. */
     __asm__ volatile(
         "lgdt %0\n\t"
         "pushq %1\n\t"
@@ -106,7 +125,43 @@ void gdt_init(void)
     __asm__ volatile("ltr %w0" : : "r"(GDT_TSS) : "memory");
 }
 
+void gdt_init(void)
+{
+    tables_init(&g_boot_tables, (uintptr_t)(g_boot_df_stack + DF_STACK_SIZE));
+    g_tables[0] = &g_boot_tables;
+    tables_load(&g_boot_tables);
+}
+
+int gdt_alloc_cpu(unsigned cpu)
+{
+    KASSERT(cpu > 0 && cpu < CONFIG_MAX_CPUS);
+    if (g_tables[cpu] != NULL)
+        return 0;
+
+    struct x86_cpu_tables *t = kmalloc(sizeof(*t), KMEM_ZERO);
+    if (t == NULL)
+        return -ENOMEM;
+    KASSERT(((uintptr_t)t & 0xF) == 0);
+
+    vaddr_t df = vm_kernel_alloc(DF_STACK_SIZE, VM_KALLOC_GUARD | VM_KALLOC_POPULATE, VM_PROT_RW);
+    if (df == 0) {
+        kfree(t);
+        return -ENOMEM;
+    }
+
+    tables_init(t, df + DF_STACK_SIZE);
+    g_tables[cpu] = t;
+    return 0;
+}
+
+void gdt_init_cpu(unsigned cpu)
+{
+    KASSERT(cpu < CONFIG_MAX_CPUS && g_tables[cpu] != NULL);
+    tables_load(g_tables[cpu]);
+}
+
 void gdt_set_kernel_stack(uint64_t rsp0)
 {
-    g_tss.rsp[0] = rsp0;
+    struct x86_cpu_tables *t = g_tables[arch_cpu_id()];
+    t->tss.rsp[0] = rsp0;
 }

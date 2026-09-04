@@ -28,9 +28,17 @@
 #define IST_NONE         0u
 #define IST_DOUBLE_FAULT 1u
 
-/* Load the GDT, reload segment registers, load the TSS with the
- * double-fault IST stack. Per-CPU once SMP exists; today CPU 0 only. */
+/* Boot CPU: load the static GDT, reload segment registers, load the TSS
+ * with the double-fault IST stack. */
 void gdt_init(void);
+
+/* Boot CPU, before starting `cpu`: allocate that CPU's GDT, TSS, and
+ * double-fault stack. Returns 0 or -ENOMEM. */
+int gdt_alloc_cpu(unsigned cpu);
+
+/* Calling AP: load the tables gdt_alloc_cpu prepared for it. Resets the
+ * GS base as a side effect; install the per-CPU pointer afterwards. */
+void gdt_init_cpu(unsigned cpu);
 
 /* Set the stack the CPU switches to on a ring 3 -> ring 0 transition.
  * Unused until user mode exists; provided so the TSS layout is settled. */

@@ -44,6 +44,8 @@ struct percpu {
     struct timer_queue *timers;
     uint64_t ticks;             /* local timer ticks since this CPU started */
     uint64_t irq_count;         /* interrupts handled on this CPU */
+    uintptr_t boot_stack;       /* AP bootstrap stack; freed by its idle thread */
+    uint32_t hw_id;             /* local interrupt controller id (APIC id) */
 };
 
 /* Set up and install the boot CPU's instance. First call in arch start. */

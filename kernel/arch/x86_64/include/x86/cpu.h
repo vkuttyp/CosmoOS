@@ -32,10 +32,18 @@ struct x86_cpu_info {
     bool has_invariant_tsc;
 };
 
-/* Identify the CPU and enable the protection features it supports
- * (WP, PGE, SMEP, SMAP, UMIP). Called once per CPU during start-up. */
+/* Boot CPU once: identify the processor into the shared info block and
+ * enable its protection features. */
 void x86_cpu_init(void);
+
+/* Any CPU: enable WP, NXE, PGE, SMEP, SMAP, UMIP according to the shared
+ * info block (APs call this instead of x86_cpu_init). */
+void x86_cpu_enable_features(void);
+
 const struct x86_cpu_info *x86_cpu_info(void);
+
+/* AP entry from the trampoline, on the bootstrap stack, interrupts off. */
+void x86_ap_entry(unsigned cpu) __noreturn;
 
 /* CR0 */
 #define CR0_PE (1ULL << 0)

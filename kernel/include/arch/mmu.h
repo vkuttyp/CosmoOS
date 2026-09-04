@@ -65,9 +65,28 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
 /* Make ctx the active translation on the calling CPU. */
 void arch_mmu_activate(const struct arch_mmu_context *ctx);
 
-/* Invalidate cached translations for [va, va+len) on the calling CPU.
- * Cross-CPU shootdown is a Phase 3 addition. */
+/* Invalidate cached translations for [va, va+len) on the calling CPU
+ * only. */
 void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t len);
+
+/* Invalidate [va, va+len) on every online CPU and wait for each to
+ * acknowledge. Must be called with interrupts enabled and without any
+ * spinlock held that an interrupt handler on another CPU could be
+ * waiting for (the VMM releases its lock first). Panics if a CPU does
+ * not answer within a generous bound. */
+void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len);
+
+struct arch_mmu_shootdown_stats {
+    uint64_t initiated;       /* shootdowns started on this CPU */
+    uint64_t handled;         /* flush IPIs handled on this CPU */
+    uint64_t acks_received;   /* acknowledgements collected by this CPU */
+};
+
+void arch_mmu_shootdown_stats(struct arch_mmu_shootdown_stats *out);
+
+/* Body of the IPI_TLB_FLUSH handler; called by the generic IPI layer on
+ * the target CPU in interrupt context. */
+void arch_mmu_shootdown_ipi_handler(void);
 
 /* Bitmask of supported leaf sizes beyond 4 KiB: PAGE_2M_SIZE | PAGE_1G_SIZE. */
 size_t arch_mmu_large_page_sizes(void);

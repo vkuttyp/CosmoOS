@@ -298,21 +298,62 @@ vaddr_t vm_kernel_alloc(size_t size, unsigned flags, vm_prot_t prot)
     return base;
 }
 
+#define TEARDOWN_CHUNK_PAGES 32u
+
+/*
+ * Tear down a region's mappings in chunks. Each chunk is unmapped under
+ * the space lock (local invalidation), then, with the lock released so
+ * other CPUs can take interrupts, shot down everywhere; only then are
+ * the frames returned. Frames are never reused while a stale
+ * translation to them may exist.
+ */
+static void region_teardown(struct vm_region *r, bool free_frames)
+{
+    vaddr_t base = r->base;
+    size_t size = r->size;
+
+    for (vaddr_t va = base; va < base + size; va += TEARDOWN_CHUNK_PAGES * PAGE_SIZE) {
+        size_t chunk = MIN((size_t)(TEARDOWN_CHUNK_PAGES * PAGE_SIZE), (size_t)(base + size - va));
+        struct page *frames[TEARDOWN_CHUNK_PAGES];
+        unsigned n = 0;
+
+        arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
+        if (free_frames) {
+            for (vaddr_t p = va; p < va + chunk; p += PAGE_SIZE) {
+                paddr_t pa;
+                if (!arch_mmu_query(&kernel_space.mmu, p, &pa, NULL, NULL, NULL))
+                    continue;
+                struct page *page = phys_to_page(pa);
+                KASSERT(page != NULL);
+                frames[n++] = page;
+                g_stats.anon_pages--;
+            }
+        }
+        int rc = arch_mmu_unmap(&kernel_space.mmu, va, chunk);
+        KASSERT(rc == 0);
+        spin_unlock_irqrestore(&kernel_space.lock, s);
+
+        arch_mmu_shootdown(&kernel_space.mmu, va, chunk);
+
+        for (unsigned i = 0; i < n; i++)
+            pmm_free_page(frames[i]);
+    }
+}
+
 void vm_kernel_free(vaddr_t base)
 {
     KASSERT(g_initialized);
 
     arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
-
     struct vm_region *r = space_find(&kernel_space, base);
     if (r == NULL || r->base != base || r->kind != VM_REGION_ANON)
         panic("vm_kernel_free: %p is not a live kernel allocation", (void *)base);
+    spin_unlock_irqrestore(&kernel_space.lock, s);
 
-    free_populated_frames(r);
-    int rc = arch_mmu_unmap(&kernel_space.mmu, r->base, r->size);
-    KASSERT(rc == 0);
+    region_teardown(r, true);
+
+    s = spin_lock_irqsave(&kernel_space.lock);
     list_remove(&r->link);
-
     spin_unlock_irqrestore(&kernel_space.lock, s);
     kmem_cache_free(g_region_cache, r);
 }
@@ -363,11 +404,12 @@ void vm_unmap_phys(vaddr_t base)
     if (r == NULL || r->base != base || r->kind != VM_REGION_PHYS ||
         base < kernel_space.arena_lo || base >= kernel_space.arena_hi)
         panic("vm_unmap_phys: %p is not a live physical mapping", (void *)base);
+    spin_unlock_irqrestore(&kernel_space.lock, s);
 
-    int rc = arch_mmu_unmap(&kernel_space.mmu, r->base, r->size);
-    KASSERT(rc == 0);
+    region_teardown(r, false);
+
+    s = spin_lock_irqsave(&kernel_space.lock);
     list_remove(&r->link);
-
     spin_unlock_irqrestore(&kernel_space.lock, s);
     kmem_cache_free(g_region_cache, r);
 }

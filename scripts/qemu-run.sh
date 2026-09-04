@@ -19,6 +19,7 @@ firmware=$("$here/find-firmware.sh" x86_64)
 exec qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
     -cpu qemu64,+nx \
+    -smp "${QEMU_SMP:-4}" \
     -m "${QEMU_MEM:-256M}" \
     -drive if=pflash,format=raw,readonly=on,file="$firmware" \
     -drive format=raw,file="$image" \

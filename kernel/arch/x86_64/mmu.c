@@ -13,10 +13,15 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/ipi.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/spinlock.h>
+#include <kernel/timer.h>
 
+#include <arch/cpu.h>
 #include <arch/mmu.h>
 
 #include <x86/cpu.h>
@@ -163,8 +168,76 @@ static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_
 int arch_mmu_context_init(struct arch_mmu_context *ctx)
 {
     probe();
-    ctx->root = alloc_table();
-    return ctx->root ? 0 : -ENOMEM;
+    /* The root must sit below 4 GiB: the AP trampoline loads it into
+     * CR3 from 32-bit protected mode before entering long mode. */
+    struct page *page = pmm_alloc_page(PMM_FLAGS_ZERO | PMM_FLAGS_ZONE_DMA32);
+    if (page == NULL)
+        return -ENOMEM;
+    page->flags |= PG_PAGETABLE;
+    ctx->root = page_to_phys(page);
+    return 0;
+}
+
+/* --- cross-CPU shootdown --- */
+
+static spinlock_t g_shootdown_lock = SPINLOCK_INIT("shootdown");
+static vaddr_t g_shootdown_va;
+static size_t g_shootdown_len;
+static volatile uint32_t g_shootdown_acks;
+static struct arch_mmu_shootdown_stats g_shootdown_stats[CONFIG_MAX_CPUS];
+
+/* IPI_TLB_FLUSH handler: invalidate the pending range and acknowledge. */
+void arch_mmu_shootdown_ipi_handler(void)
+{
+    vaddr_t va = g_shootdown_va;
+    size_t len = g_shootdown_len;
+    barrier();
+    arch_mmu_invalidate(NULL, va, len);
+    g_shootdown_stats[arch_cpu_id()].handled++;
+    __atomic_fetch_add(&g_shootdown_acks, 1u, __ATOMIC_ACQ_REL);
+}
+
+void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
+{
+    cpumask_t online = cpu_online_mask();
+    unsigned targets = (unsigned)__builtin_popcountll(online) - 1;
+
+    if (targets == 0) {
+        arch_mmu_invalidate(ctx, va, len);
+        return;
+    }
+
+    /* Waiting with interrupts disabled would deadlock against a target
+     * that is itself spinning with interrupts off; the caller must have
+     * released any such lock. */
+    KASSERT(arch_irq_enabled());
+
+    spin_lock(&g_shootdown_lock); /* preemption off, interrupts on */
+    g_shootdown_va = va;
+    g_shootdown_len = len;
+    __atomic_store_n(&g_shootdown_acks, 0u, __ATOMIC_RELEASE);
+    g_shootdown_stats[arch_cpu_id()].initiated++;
+
+    ipi_broadcast_others(IPI_TLB_FLUSH);
+    arch_mmu_invalidate(ctx, va, len);
+
+    uint64_t deadline = clock_now_ns() + 1000000000ULL;
+    while (__atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE) < targets) {
+        if (clock_now_ns() > deadline) {
+            unsigned got = __atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE);
+            spin_unlock(&g_shootdown_lock);
+            panic("mmu: TLB shootdown of %p+0x%zx acknowledged by %u of %u CPUs", (void *)va, len, got,
+                  targets);
+        }
+        arch_cpu_relax();
+    }
+    g_shootdown_stats[arch_cpu_id()].acks_received += targets;
+    spin_unlock(&g_shootdown_lock);
+}
+
+void arch_mmu_shootdown_stats(struct arch_mmu_shootdown_stats *out)
+{
+    *out = g_shootdown_stats[arch_cpu_id()];
 }
 
 int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t len,

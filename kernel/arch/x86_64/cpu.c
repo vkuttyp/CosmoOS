@@ -84,8 +84,14 @@ void x86_cpu_init(void)
     }
     read_brand_string();
 
-    /* Protection features. The loader already set WP and NXE; asserting
-     * them here makes the kernel independent of loader behaviour. */
+    x86_cpu_enable_features();
+}
+
+void x86_cpu_enable_features(void)
+{
+    /* Protection features. The loader already set WP and NXE on the
+     * boot CPU; asserting them here makes every CPU independent of who
+     * started it. */
     write_cr0(read_cr0() | CR0_WP);
     if (g_cpu.has_nx)
         wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_NXE);

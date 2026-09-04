@@ -40,6 +40,7 @@ endif
 
 # QEMU test-run settings.
 QEMU_MEM ?= 256M
+QEMU_SMP ?= 4
 QEMU_ACCEL ?= tcg
 QEMU_EXTRA ?=
 

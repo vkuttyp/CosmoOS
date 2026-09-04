@@ -7,10 +7,12 @@
  * until then the addresses are resolved offline against kernel.map.
  */
 
+#include <kernel/console.h>
+#include <kernel/kernel.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
-#include <kernel/kernel.h>
+#include <kernel/smp.h>
 
 #include <arch/backtrace.h>
 #include <arch/cpu.h>
@@ -20,7 +22,7 @@
 
 #define BACKTRACE_MAX 32
 
-static volatile int g_panicking;
+static volatile int g_panicking;      /* 0 = none, else 1 + CPU id of the first panicker */
 
 void backtrace_print(const struct arch_trap_frame *from)
 {
@@ -43,14 +45,27 @@ panic_common(const struct arch_trap_frame *frame, const char *fmt, va_list ap)
 {
     arch_irq_disable();
 
-    if (g_panicking) {
-        kprintf("\nKERNEL PANIC (recursive) on CPU %u: ", arch_cpu_id());
+    unsigned cpu = arch_cpu_id();
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&g_panicking, &expected, (int)cpu + 1, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE)) {
+        /* Someone else is panicking. If it is this CPU, the panic path
+         * itself faulted; otherwise we lost the race and stay out of
+         * the report. */
+        console_set_panic_mode();
+        kprintf("\nKERNEL PANIC (%s) on CPU %u: ", expected == (int)cpu + 1 ? "recursive" : "concurrent", cpu);
         kvprintf(fmt, ap);
         kprintf("\n");
-        arch_emulator_exit(ARCH_EMULATOR_EXIT_FAILURE);
+        if (expected == (int)cpu + 1)
+            arch_emulator_exit(ARCH_EMULATOR_EXIT_FAILURE);
         arch_cpu_halt_forever();
     }
-    g_panicking = 1;
+
+    /* Stop the other CPUs before printing so they cannot interleave or
+     * keep mutating the state being reported, then drop the console lock
+     * (one of them may have been holding it). */
+    smp_stop_others();
+    console_set_panic_mode();
 
     kprintf("\nKERNEL PANIC: ");
     kvprintf(fmt, ap);
