@@ -643,6 +643,10 @@ static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void 
         }
         const struct cfs_dirent *d = (const struct cfs_dirent *)block;
         if (d[s].ino) {
+            if (d[s].namelen == 0 || d[s].namelen > CFS_NAME_MAX) {
+                rc = -EIO;   /* on-disk length must never size a copy */
+                break;
+            }
             enum vnode_type t = d[s].type == CFS_TYPE_DIR ? VNODE_DIR : VNODE_REG;
             if (cb(arg, d[s].name, d[s].namelen, d[s].ino, t))
                 break;
