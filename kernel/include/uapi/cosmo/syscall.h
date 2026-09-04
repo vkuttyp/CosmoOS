@@ -38,7 +38,35 @@
 #define SYS_sync      20  /* () -> 0 */
 #define SYS_mount     21  /* (const char *source, const char *target, const char *fstype, unsigned flags) -> 0 */
 #define SYS_umount    22  /* (const char *target, unsigned flags) -> 0 */
-#define SYS_COUNT     23
+/* Phase 8: sockets. */
+#define SYS_socket    23  /* (int family, int type, int proto) -> handle */
+#define SYS_bind      24  /* (int h, const struct cosmo_sockaddr *, size_t len) -> 0 */
+#define SYS_listen    25  /* (int h, int backlog) -> 0 */
+#define SYS_accept    26  /* (int h, struct cosmo_sockaddr *peer, size_t *len) -> handle */
+#define SYS_connect   27  /* (int h, const struct cosmo_sockaddr *, size_t len) -> 0 */
+#define SYS_sendto    28  /* (int h, const void *buf, size_t len, const struct cosmo_sockaddr *to (NULL ok), size_t tolen) -> bytes */
+#define SYS_recvfrom  29  /* (int h, void *buf, size_t len, struct cosmo_sockaddr *from (NULL ok), size_t *fromlen) -> bytes */
+#define SYS_shutdown  30  /* (int h, int how) -> 0 */
+#define SYS_getsockname 31 /* (int h, struct cosmo_sockaddr *, size_t *len) -> 0 */
+#define SYS_COUNT     32
+
+#define COSMO_AF_INET  2
+#define COSMO_AF_INET6 10
+#define COSMO_SOCK_STREAM 1
+#define COSMO_SOCK_DGRAM  2
+#define COSMO_SHUT_RD   0
+#define COSMO_SHUT_WR   1
+#define COSMO_SHUT_RDWR 2
+
+/* One address shape for both families: addr holds 4 (AF_INET) or 16
+ * (AF_INET6) bytes in network byte order; port is in host byte order. */
+struct cosmo_sockaddr {
+    uint16_t family;
+    uint16_t port;
+    uint32_t flowinfo;
+    uint8_t  addr[16];
+    uint32_t scope;
+};
 
 /* open() flags. */
 #define COSMO_O_RDONLY    0x0000
@@ -122,6 +150,18 @@ struct cosmo_dirent {
 #define COSMO_EROFS   30
 #define COSMO_ENOTEMPTY 39
 #define COSMO_ENAMETOOLONG 36
+#define COSMO_EPIPE   32
+#define COSMO_EMSGSIZE 90
+#define COSMO_EOPNOTSUPP 95
+#define COSMO_EAFNOSUPPORT 97
+#define COSMO_EADDRINUSE 98
+#define COSMO_EADDRNOTAVAIL 99
+#define COSMO_ECONNRESET 104
+#define COSMO_EISCONN 106
+#define COSMO_ENOTCONN 107
+#define COSMO_ETIMEDOUT 110
+#define COSMO_ECONNREFUSED 111
+#define COSMO_EHOSTUNREACH 113
 
 /* Exit status reported for a process terminated by a fatal fault. */
 #define COSMO_EXIT_FAULT 139

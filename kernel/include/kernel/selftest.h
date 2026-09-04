@@ -79,4 +79,13 @@ bool selftest_cosmofs_format(const char **reason);
 bool selftest_cosmofs_ops(const char **reason);
 bool selftest_cosmofs_crash(const char **reason);
 
+/* Phase 8: kernel-services/network/nettest.c */
+bool selftest_net_mbuf(const char **reason);
+bool selftest_net_cksum(const char **reason);
+bool selftest_net_arp(const char **reason);
+bool selftest_net_lo_udp(const char **reason);
+bool selftest_net_lo_tcp(const char **reason);
+bool selftest_net_lo_tcp_loss(const char **reason);
+bool selftest_net_harness(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

@@ -8,8 +8,9 @@
 | Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash` | `make test` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 
-The boot test's total is `SELFTEST: PASS (51 tests)`. The process tests
-(`process-reject`, `process-user`, `process-fault`) are now the **last**
+The boot test's total was `SELFTEST: PASS (51 tests)` at the end of
+Phase 7 (58 since Phase 8 added the network tests). The process tests
+(`process-reject`, `process-user`, `process-fault`) are the **last**
 entries of the self-test table so that `init --selftest`, which they
 run, finds the scratch disk already formatted and populated by the
 cosmofs tests.
@@ -117,7 +118,7 @@ log line: `usertest: cosmofs mounted and read from user mode`.
 
 ```sh
 make host-test                       # 5 binaries incl. test_cosmofs
-make test                            # 51 self-tests + USERTEST on the scratch disk
+make test                            # all self-tests (58 since Phase 8) + USERTEST on the scratch disk
 make BUILD=release test              # cosmofs still formats and mounts, no self-tests
 QEMU_TESTDISK=/tmp/d.img make run    # keep a formatted disk between runs
 ```

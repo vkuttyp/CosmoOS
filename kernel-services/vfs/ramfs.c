@@ -303,8 +303,8 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
 static void ramfs_release_tree(struct vnode *dir)
 {
     struct ramfs_node *n = dir->fs_priv;
-    while (!list_empty(&n->entries)) {
-        struct ramfs_dirent *e = list_entry(n->entries.next, struct ramfs_dirent, link);
+    struct ramfs_dirent *e, *tmp;
+    list_for_each_entry_safe(e, tmp, &n->entries, link) {
         struct vnode *child = e->child;
         list_remove(&e->link);
         n->nr_entries--;

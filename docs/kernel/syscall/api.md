@@ -50,13 +50,26 @@ kernel stack.
 | 20 | `sync` | none | 0 | filesystem error |
 | 21 | `mount` | `source, target, fstype, flags` | 0 | `EPERM`, `ENODEV`, `EBUSY`, `EIO` |
 | 22 | `umount` | `const char *target, unsigned flags` (`COSMO_UMOUNT_FORCE`) | 0 | `EPERM`, `EINVAL`, `EBUSY`, the commit's error |
+| 23 | `socket` | `int family, int type, int proto` | handle (READ and WRITE) | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
+| 24 | `bind` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EPERM`, `EADDRINUSE`, `EADDRNOTAVAIL` |
+| 25 | `listen` | `int h, int backlog` | 0 | `EBADF`, `EOPNOTSUPP`, `EINVAL` |
+| 26 | `accept` | `int h, struct cosmo_sockaddr *peer, size_t *len` | handle (READ and WRITE) | `EBADF`, `EOPNOTSUPP`, `EINVAL`, `EFAULT`, `EMFILE` |
+| 27 | `connect` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EISCONN`, `ECONNREFUSED`, `ETIMEDOUT`, `ENETUNREACH` |
+| 28 | `sendto` | `int h, const void *buf, size_t len, const struct cosmo_sockaddr *to, size_t tolen` | bytes sent | `EBADF`, `EFAULT`, `EINVAL`, `EMSGSIZE`, `ENOTCONN`, `EISCONN`, `EPIPE`, `ECONNRESET` |
+| 29 | `recvfrom` | `int h, void *buf, size_t len, struct cosmo_sockaddr *from, size_t *fromlen` | bytes, 0 at end of stream | `EBADF`, `EFAULT`, `EINVAL`, `ENOTCONN`, `ECONNRESET` |
+| 30 | `shutdown` | `int h, int how` | 0 | `EBADF`, `EINVAL` |
+| 31 | `getsockname` | `int h, struct cosmo_sockaddr *sa, size_t *len` | 0 | `EBADF`, `EFAULT` |
 
 Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
 `struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
-in `docs/kernel-services/vfs/api.md`. `SYS_COUNT` is 23. A file opened
-with `open` is a `struct file` kobject of a `kobject_io_type`, so `read`,
-`write` and `close` operate on it unchanged; the handle carries READ
-and/or WRITE rights from the access mode.
+in `docs/kernel-services/vfs/api.md`. Calls 23–31 (Phase 8), with
+`struct cosmo_sockaddr`, `COSMO_AF_*`, `COSMO_SOCK_*`, `COSMO_SHUT_*`
+and their errno values, are in `docs/kernel-services/network/api.md`.
+`SYS_COUNT` is 32. A file opened with `open` is a `struct file` kobject
+of a `kobject_io_type`, so `read`, `write` and `close` operate on it
+unchanged; the handle carries READ and/or WRITE rights from the access
+mode. A socket from `socket` or `accept` is likewise a `struct socket`
+kobject with `read`/`write` (`recvfrom`/`sendto` without an address).
 
 Unknown numbers (including `SYS_COUNT` and above, and negative values
 seen as large unsigned) return `-ENOSYS` with no side effects.
@@ -121,7 +134,10 @@ page is populated.
 `cosmo_munmap`, `cosmo_log`, `cosmo_close`, and since Phase 7 `cosmo_open`,
 `cosmo_stat`, `cosmo_fstat`, `cosmo_lseek`, `cosmo_mkdir`, `cosmo_unlink`,
 `cosmo_rmdir`, `cosmo_rename`, `cosmo_getdents`, `cosmo_sync`,
-`cosmo_mount`, `cosmo_umount` return the raw kernel result
+`cosmo_mount`, `cosmo_umount`, and since Phase 8 `cosmo_socket`,
+`cosmo_bind`, `cosmo_listen`, `cosmo_accept`, `cosmo_connect`,
+`cosmo_sendto`, `cosmo_recvfrom`, `cosmo_shutdown`, `cosmo_getsockname`
+(over `cosmo_syscall5`) return the raw kernel result
 as `long`; there is no `errno` variable yet. ABI stability: the wrapper
 names are the start of the native libc and are meant to stay.
 

@@ -28,6 +28,7 @@
 #define EMFILE    24  /* too many open handles */
 #define EFBIG     27  /* file too large */
 #define ENOSPC    28  /* no space left */
+#define EPIPE     32  /* broken pipe */
 #define ESPIPE    29  /* not seekable */
 #define EROFS     30  /* read-only device */
 #define ERANGE    34  /* result out of range */
@@ -35,7 +36,22 @@
 #define ENOSYS    38  /* not implemented */
 #define ENOTEMPTY 39  /* directory not empty */
 #define ELOOP     40  /* too many levels */
+#define EMSGSIZE  90  /* message too long */
 #define ENOTSUP   95  /* operation not supported */
+#define EOPNOTSUPP 95 /* alias */
+#define EAFNOSUPPORT 97 /* address family not supported */
+#define EADDRINUSE 98 /* address already in use */
+#define EADDRNOTAVAIL 99 /* cannot assign requested address */
+#define ENETUNREACH 101 /* network unreachable */
+#define ECONNRESET 104 /* connection reset by peer */
+#define ENOBUFS   105 /* no buffer space */
+#define EISCONN   106 /* already connected */
+#define ENOTCONN  107 /* not connected */
+#define ETIMEDOUT_NET 110 /* see ETIMEDOUT */
+#define ECONNREFUSED 111 /* connection refused */
+#define EHOSTUNREACH 113 /* host unreachable */
+#define EALREADY  114 /* operation already in progress */
+#define EINPROGRESS 115 /* operation in progress */
 #define ETIMEDOUT 110 /* operation timed out */
 #define ENOKEY    126 /* required key not available */
 #define EKEYREJECTED 129 /* key or signature rejected */

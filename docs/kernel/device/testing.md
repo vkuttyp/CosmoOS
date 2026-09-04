@@ -23,11 +23,15 @@ There is no host test for this subsystem yet (see gaps).
   `init --selftest` mounts, see `docs/kernel-services/vfs/testing.md`);
 - `virtio-rng-pci`;
 - `virtio-serial-pci` with one `virtconsole` whose `chardev` is a file,
-  `QEMU_VCON` (`boot-test.log.vcon` under the harness).
+  `QEMU_VCON` (`boot-test.log.vcon` under the harness);
+- since Phase 8, `virtio-net-pci` on QEMU user-mode networking
+  (`docs/kernel-services/network/testing.md`).
 
-Under q35 that is 9 PCI functions: host bridge, VGA, e1000e, the three
-virtio functions at `00:03.0`–`00:05.0`, the ISA bridge, AHCI, SMBus.
-The tests do not depend on the e1000e or VGA beyond enumerating them.
+Under q35 that is 9 PCI functions: host bridge, VGA, the four virtio
+functions at `00:02.0`–`00:05.0` (the explicit `-netdev`/`-device`
+pair replaces QEMU's default e1000e, so the slots moved down by one in
+Phase 8), the ISA bridge, AHCI, SMBus. The tests do not depend on the
+VGA beyond enumerating it.
 
 ## Self-tests (`kernel/device/devtest.c`)
 

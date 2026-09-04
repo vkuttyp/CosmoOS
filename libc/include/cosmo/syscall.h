@@ -145,4 +145,44 @@ static inline long cosmo_umount(const char *target)
     return cosmo_umount2(target, 0);
 }
 
+
+/* Phase 8: sockets. */
+#define cosmo_syscall5(n, a, b, c, d, e) cosmo_syscall6((n), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e), 0)
+static inline long cosmo_socket(int family, int type, int proto)
+{
+    return cosmo_syscall3(SYS_socket, family, type, proto);
+}
+static inline long cosmo_bind(int h, const struct cosmo_sockaddr *sa)
+{
+    return cosmo_syscall3(SYS_bind, h, sa, sizeof(*sa));
+}
+static inline long cosmo_listen(int h, int backlog)
+{
+    return cosmo_syscall2(SYS_listen, h, backlog);
+}
+static inline long cosmo_accept(int h, struct cosmo_sockaddr *peer, size_t *len)
+{
+    return cosmo_syscall3(SYS_accept, h, peer, len);
+}
+static inline long cosmo_connect(int h, const struct cosmo_sockaddr *sa)
+{
+    return cosmo_syscall3(SYS_connect, h, sa, sizeof(*sa));
+}
+static inline long cosmo_sendto(int h, const void *buf, size_t len, const struct cosmo_sockaddr *to)
+{
+    return cosmo_syscall5(SYS_sendto, h, buf, len, to, to ? sizeof(*to) : 0);
+}
+static inline long cosmo_recvfrom(int h, void *buf, size_t len, struct cosmo_sockaddr *from, size_t *fromlen)
+{
+    return cosmo_syscall5(SYS_recvfrom, h, buf, len, from, fromlen);
+}
+static inline long cosmo_shutdown(int h, int how)
+{
+    return cosmo_syscall2(SYS_shutdown, h, how);
+}
+static inline long cosmo_getsockname(int h, struct cosmo_sockaddr *sa, size_t *len)
+{
+    return cosmo_syscall3(SYS_getsockname, h, sa, len);
+}
+
 #endif /* COSMO_SYSCALL_H */

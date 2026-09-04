@@ -106,4 +106,6 @@ Called by the transport's MSI-X handler: counts and runs `callback`.
 
 `virtio_blk` registers `struct blkdev` `vd<letter>` (`kernel/blk.h`);
 `virtio_rng` calls `random_add_entropy`; `virtio_console` registers a
-`struct console_sink` named `virtio-console`. None exports symbols.
+`struct console_sink` named `virtio-console`; `virtio_net` registers a
+`struct netif` named `eth0` (`kernel/netif.h`) and delivers frames with
+`netif_rx`. None exports symbols.

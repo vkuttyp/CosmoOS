@@ -129,5 +129,19 @@ See [docs/development.md](docs/development.md).
   system calls (`open` … `umount`, numbers 11–22) and seven self-tests
   (51 in total) including crash consistency and a torn-superblock
   fallback; `init` mounts the disk from user mode.
-- **Next, Phase 8:** networking: mbufs, Ethernet, IPv4/IPv6, UDP, TCP,
-  sockets (with virtio-net as the first NIC).
+- **Phase 8 (done):** networking. Reference-counted mbufs with
+  clusters and explicit ownership, `struct netif` with one receive
+  queue drained by the `netrx` worker thread (all protocol input on one
+  thread, output on the caller), Ethernet and ARP, IPv4 with ICMP, IPv6
+  with ICMPv6 and neighbour discovery, UDP, TCP (RFC 793 states, RTO
+  estimation, fast retransmit, slow start, delayed ACK, TIME_WAIT,
+  listen backlog), and sockets as kobjects behind nine new system calls
+  (`socket` … `getsockname`, numbers 23–31) plus `read`/`write`/`close`.
+  `virtio_net` is a boot module driving `eth0`; the loopback interface
+  makes the protocol tests deterministic. Seven self-tests (58 in
+  total) include a 1 MiB TCP transfer under injected loss, and the boot
+  test drives the guest's echo services from the host through QEMU
+  user-mode networking while the guest connects back; `init` exercises
+  the socket calls from user mode.
+- **Next, Phase 9:** userland: libc, shell, coreutils, init and
+  services.

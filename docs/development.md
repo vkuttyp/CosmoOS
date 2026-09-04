@@ -63,8 +63,8 @@ Notes:
 | `userland` | `out/<arch>-<build>/userland/init.elf`, the first user program (`userland/userland.mk`) |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
 | `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init` plus the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
-| `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`) |
-| `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status |
+| `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
+| `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
 | `host-test` | Compile the memory, crypto, and module-validation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
@@ -172,9 +172,12 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `QEMU_MEM` | `256M` | Guest RAM |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
-| `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-device virtio-net-pci` to see the transport bind an undriven device) |
+| `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
 | `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
+| `QEMU_NET_HOSTFWD` | empty | Comma-separated QEMU `hostfwd` rules for the user-mode netdev, e.g. `tcp:127.0.0.1:2007-:7,udp:127.0.0.1:2008-:7`. The boot test sets it to reach the guest's echo services |
+| `QEMU_FWCFG_NETTEST` | empty | Value of the fw_cfg item `opt/cosmo/nettest` (`tcp=<hostport>`); its presence makes the `net-harness` self-test run and connect back to the host. The boot test sets it |
+| `QEMU_PCAP` | empty | When set, QEMU records every frame on the guest NIC into this pcap file (`filter-dump`), for Wireshark or `tcpdump -r` |
 | `OVMF_CODE` | auto | Path to the UEFI firmware image; overrides `scripts/find-firmware.sh` |
 | `SOURCE_DATE_EPOCH` | `0` | Exported to the compiler for reproducible builds |
 

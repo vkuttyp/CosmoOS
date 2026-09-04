@@ -22,6 +22,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/netif.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
@@ -142,6 +143,10 @@ void kernel_main(const struct cosmoboot_info *info)
     vfs_init();
     cosmofs_init();
     ramfs_populate_boot();
+
+    /* The network stack: mbufs, the worker thread, loopback. NIC drivers
+     * are boot modules and register their interfaces when they load. */
+    net_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");
