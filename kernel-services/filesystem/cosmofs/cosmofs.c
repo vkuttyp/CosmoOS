@@ -358,8 +358,8 @@ static bool dir_is_empty(struct cfs *fs, struct vnode *dir, uint8_t *block)
 static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     struct cfs *fs = cfs_of(dir->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
     int rc;
     if (len == 2 && name[0] == '.' && name[1] == '.') {
@@ -385,8 +385,8 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
                              struct vnode **out)
 {
     struct cfs *fs = cfs_of(dir->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     if (len > CFS_NAME_MAX)
         return -ENAMETOOLONG;
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
@@ -445,8 +445,8 @@ static int cfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t m
 static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, struct vnode *victim, bool rmdir)
 {
     struct cfs *fs = cfs_of(dir->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
     if (block == NULL)
         return -ENOMEM;
@@ -502,8 +502,8 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
                       const char *nname, size_t nlen, struct vnode *replaced)
 {
     struct cfs *fs = cfs_of(odir->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     if (nlen > CFS_NAME_MAX)
         return -ENAMETOOLONG;
     uint8_t *block = kmalloc(CFS_BLOCK, 0);
@@ -615,8 +615,8 @@ out:
 static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
 {
     struct cfs *fs = cfs_of(dir->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     if (*pos == 0) {
         if (cb(arg, ".", 1, dir->ino, VNODE_DIR))
             return 0;
@@ -659,8 +659,8 @@ static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void 
 static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
 {
     struct cfs *fs = cfs_of(vn->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
     uint64_t pblk = 0;
     int rc = cfs_map(fs, cfs_inode_of(vn), index, &pblk);
@@ -675,8 +675,8 @@ static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
     struct cfs *fs = cfs_of(vn->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
     struct cfs_inode *in = cfs_inode_of(vn);
     /* Runs cannot express holes: pages before `index` that were never
@@ -731,8 +731,8 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 static int cfs_truncate(struct vnode *vn, uint64_t size)
 {
     struct cfs *fs = cfs_of(vn->mnt);
-    if (fs == NULL)
-        return -EIO;
+    if (fs == NULL || fs->failed)
+        return -EIO;   /* unmounted, or the transaction was abandoned */
     pagecache_truncate(vn, size);
     mutex_lock(&fs->lock);
     uint64_t keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;

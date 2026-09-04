@@ -352,13 +352,18 @@ int vfs_sync(void)
 static struct vnode *follow_mount(struct vnode *dir)
 {
     for (unsigned depth = 0; depth < 16; depth++) {
+        /* The root reference is taken under dir->lock: vfs_umount clears
+         * covered_by under the same lock before it scans for references,
+         * so a walker either sees the mount and holds its root (busy) or
+         * does not see it at all. */
         mutex_lock(&dir->lock);
         struct mount *m = dir->covered_by;
+        struct vnode *root = m ? m->root : NULL;
+        if (root)
+            vnode_get(root);
         mutex_unlock(&dir->lock);
-        if (m == NULL)
+        if (root == NULL)
             return dir;
-        struct vnode *root = m->root;
-        vnode_get(root);
         vnode_put(dir);
         dir = root;
     }
