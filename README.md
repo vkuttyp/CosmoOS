@@ -54,7 +54,28 @@ depends on Parallels-specific hardware and never runs natively on macOS.
 
 Each directory has a `README.md` stating its ownership boundary.
 
+## Quick start
+
+On an ARM64 or x86-64 Debian/Ubuntu host (the primary environment is an
+ARM64 Ubuntu VM under Parallels):
+
+```sh
+scripts/setup-dev-linux.sh   # clang, lld, llvm, make, mtools, qemu, ovmf
+make check-tools             # verify the cross toolchain
+make                         # kernel ELF + UEFI loader (x86-64, debug)
+make image                   # FAT boot image
+make test                    # boot under QEMU, PASS/FAIL from serial + exit code
+make run                     # interactive boot on the terminal
+```
+
+Other targets: `make BUILD=release`, `make analyze`, `make reproducible`,
+`make test-crash`, `make compile-commands`, `make help`.
+See [docs/development.md](docs/development.md).
+
 ## Status
 
-Phase 0 (build system and development environment) is in progress. See
-section 70 of the master prompt for the first engineering task.
+The first engineering task (constitution section 70) is complete: the
+x86-64 kernel cross-builds with one LLVM toolchain, boots via our own UEFI
+loader and boot protocol under QEMU, initializes the CPU and interrupt
+infrastructure, prints its banner over serial, runs boot-time self-tests,
+halts cleanly, and is verified in CI. Phase 2 (memory) is next.

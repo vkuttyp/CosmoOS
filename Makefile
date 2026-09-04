@@ -1,0 +1,82 @@
+# CosmoOS top-level build.
+#
+#   make [ARCH=x86_64] [BUILD=debug|release] [V=1]   build loader + kernel
+#   make image        FAT boot image with loader and kernel
+#   make run          boot the image under QEMU on the terminal (serial)
+#   make test         automated QEMU boot test with PASS/FAIL exit code
+#   make test-crash   build a deliberately faulting kernel, verify panic path
+#   make analyze      clang static analyzer over all target sources
+#   make reproducible build twice into separate trees and compare outputs
+#   make compile-commands  compile_commands.json for clangd with cross flags
+#   make check-tools  verify the cross toolchain is usable
+#   make clean        remove $(OUT)
+#
+# Host and target are separate concepts throughout. See docs/build/.
+
+ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
+include $(ROOT)/build/config.mk
+include $(ROOT)/build/toolchain.mk
+include $(ROOT)/build/rules.mk
+
+.PHONY: all kernel boot image run test test-crash analyze reproducible compile-commands check-tools clean help
+.DEFAULT_GOAL := all
+
+include $(ROOT)/kernel/kernel.mk
+include $(ROOT)/boot/uefi/boot.mk
+
+all: kernel boot
+
+IMAGE := $(OUT)/cosmoos.img
+
+image: $(IMAGE)
+
+$(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(ROOT)/scripts/mkimage.sh
+	$(call log,IMAGE,$@)
+	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF)
+
+run: $(IMAGE)
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(ROOT)/scripts/qemu-run.sh $(IMAGE)
+
+test: $(IMAGE)
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
+
+# Build a deliberately crashing kernel into a sibling output tree and
+# verify that the panic path reports properly and the harness sees FAIL.
+test-crash:
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CRASH_TEST=1 OUT=$(OUT)-crash image
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
+		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
+
+analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE)
+	@echo "static analysis: clean"
+
+reproducible:
+	$(Q)$(ROOT)/scripts/check-reproducible.sh $(ARCH) $(BUILD)
+
+# compile_commands.json for clangd/IDEs, using the real cross flags so
+# editor diagnostics match the build. The file is git-ignored.
+ARCH_INC := -I$(ROOT)/kernel/arch/$(ARCH)/include
+compile-commands:
+	$(call log,GEN,$(ROOT)/compile_commands.json)
+	$(Q)( \
+	  $(foreach s,$(KERNEL_GENERIC_SRCS),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS)';) \
+	  $(foreach s,$(filter %.c,$(KERNEL_ARCH_SRCS)),printf '%s\t%s\n' '$(s)' '$(KERNEL_CFLAGS) $(ARCH_INC)';) \
+	  $(foreach s,$(LOADER_SRCS),printf '%s\t%s\n' '$(s)' '$(LOADER_CFLAGS)';) \
+	) | $(PYTHON) $(ROOT)/scripts/gen-compile-commands.py $(ROOT) $(CC) > $(ROOT)/compile_commands.json
+
+check-tools:
+	$(Q)$(ROOT)/scripts/check-tools.sh "$(CC)" "$(LD)" "$(LDLINK)" "$(OBJCOPY)" "$(PYTHON)"
+
+clean:
+	$(Q)rm -rf $(OUT)
+
+help:
+	@sed -n '2,15p' $(ROOT)/Makefile | sed 's/^# \{0,1\}//'
+	@echo
+	@echo "ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT)"
+	@echo "HOST=$(HOST_OS)/$(HOST_ARCH) CC=$(CC) LD=$(LD)"

@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+QEMU boot test for CosmoOS.
+
+Boots the disk image under QEMU with serial output captured, then decides
+PASS/FAIL from two independent signals:
+
+  1. the kernel's exit status via the isa-debug-exit device
+     (QEMU exits with (value << 1) | 1; the kernel writes 0x10 for success
+     and 0x11 for failure), and
+  2. required markers in the serial log (loader banner, kernel banner,
+     SELFTEST verdict when self-tests are enabled).
+
+Both must agree. A timeout, a panic marker, or a missing marker is a
+failure. The full serial log is always written to --log and echoed on
+failure so CI output is self-explanatory.
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+
+EXIT_SUCCESS_VALUE = 0x10
+EXIT_FAILURE_VALUE = 0x11
+
+BOOT_MARKERS = [
+    r"^cosmoboot-uefi v\d+",
+    r"^jumping to kernel entry",
+    r"^CosmoOS kernel ",
+    r"^Architecture: x86_64",
+    r"^Boot: UEFI",
+]
+
+# Normal run: must reach the end cleanly, nothing alarming in the log.
+REQUIRED_MARKERS = BOOT_MARKERS + [
+    r"^\[ INFO\] boot complete",
+]
+FORBIDDEN_MARKERS = [
+    r"KERNEL PANIC",
+    r"BUG:",
+    r"SELFTEST: FAIL",
+    r"cosmoboot: FATAL",
+]
+
+# --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
+# complete and the failure exit code must be delivered.
+PANIC_REQUIRED_MARKERS = BOOT_MARKERS + [
+    r"^\[ INFO\] crash test: writing to an unmapped address",
+    r"^KERNEL PANIC: unhandled exception 14 \(#PF page fault\)",
+    r"^trap 14 ",
+    r"^RIP=[0-9a-f]{16} CS=",
+    r"^CR2=ffff900000000000 \(not-present write kernel\)",
+    r"^stack trace:",
+    r"^  #0 +0xffffffff8[0-9a-f]{7}",
+    r"^halting\.",
+]
+PANIC_FORBIDDEN_MARKERS = [
+    r"^\[ INFO\] boot complete",
+    r"crash test: write did not fault",
+    r"KERNEL PANIC \(recursive\)",
+    r"cosmoboot: FATAL",
+]
+
+
+def qemu_exit_value(returncode):
+    """Map QEMU's return code back to the value written by the guest."""
+    if returncode <= 0 or (returncode & 1) == 0:
+        return None
+    return returncode >> 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--log", required=True)
+    ap.add_argument("--timeout", type=float, default=90.0, help="seconds before the run is killed")
+    ap.add_argument("--expect-selftest", choices=["auto", "yes", "no"], default="auto",
+                    help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
+    ap.add_argument("--expect-panic", action="store_true",
+                    help="the kernel was built with CRASH_TEST=1: require a full panic report "
+                         "and the failure exit code instead of a clean boot")
+    args = ap.parse_args()
+
+    if args.expect_panic:
+        required, forbidden = PANIC_REQUIRED_MARKERS, PANIC_FORBIDDEN_MARKERS
+        expected_exit = EXIT_FAILURE_VALUE
+        args.expect_selftest = "no"
+    else:
+        required, forbidden = REQUIRED_MARKERS, FORBIDDEN_MARKERS
+        expected_exit = EXIT_SUCCESS_VALUE
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    runner = os.path.join(here, "..", "..", "scripts", "qemu-run.sh")
+
+    env = dict(os.environ)
+    env.setdefault("QEMU_ACCEL", "tcg")
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
+
+    print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
+    start = time.monotonic()
+    with open(args.log, "wb") as log:
+        proc = subprocess.Popen(
+            [runner, args.image],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+        try:
+            returncode = proc.wait(timeout=args.timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            returncode = None
+            timed_out = True
+    elapsed = time.monotonic() - start
+
+    with open(args.log, "rb") as f:
+        text = f.read().decode("utf-8", errors="replace")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    failures = []
+
+    if timed_out:
+        failures.append(f"timed out after {args.timeout:.0f}s")
+
+    value = None if returncode is None else qemu_exit_value(returncode)
+    if not timed_out and value != expected_exit:
+        if value == EXIT_FAILURE_VALUE:
+            failures.append("kernel reported failure via debug-exit")
+        elif value == EXIT_SUCCESS_VALUE:
+            failures.append("kernel reported success via debug-exit but a panic was expected")
+        else:
+            failures.append(f"unexpected QEMU exit code {returncode} (debug-exit value {value})")
+
+    for pat in required:
+        if not any(re.search(pat, ln) for ln in lines):
+            failures.append(f"missing marker /{pat}/")
+
+    for pat in forbidden:
+        hits = [ln for ln in lines if re.search(pat, ln)]
+        if hits:
+            failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
+
+    selftest_lines = [ln for ln in lines if ln.startswith("SELFTEST: ")]
+    want_selftest = args.expect_selftest == "yes" or (args.expect_selftest == "auto" and selftest_lines)
+    if want_selftest and not any(ln.startswith("SELFTEST: PASS") for ln in selftest_lines):
+        failures.append("no 'SELFTEST: PASS' line")
+
+    if failures:
+        print(f"boot-test: FAIL after {elapsed:.1f}s")
+        for f in failures:
+            print(f"  - {f}")
+        print("---- serial log ----")
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            print()
+        print("---- end of log ----")
+        return 1
+
+    print(f"boot-test: PASS in {elapsed:.1f}s (log: {args.log})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
