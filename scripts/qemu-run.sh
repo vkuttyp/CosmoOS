@@ -16,6 +16,19 @@ image=$1
 here=$(cd "$(dirname "$0")" && pwd)
 firmware=$("$here/find-firmware.sh" x86_64)
 
+# Phase 6 devices: a scratch virtio-blk disk (8 MiB, created next to the
+# image unless QEMU_TESTDISK names one), a virtio-rng, and a virtio
+# console whose output lands in QEMU_VCON (default: vcon.log next to
+# the image) so the boot test can read it back.
+outdir=$(dirname "$image")
+testdisk=${QEMU_TESTDISK:-$outdir/testdisk.img}
+if [ ! -f "$testdisk" ]; then
+    dd if=/dev/zero of="$testdisk" bs=1048576 count=8 status=none 2>/dev/null \
+        || dd if=/dev/zero of="$testdisk" bs=1048576 count=8 2>/dev/null
+fi
+vcon=${QEMU_VCON:-$outdir/vcon.log}
+: > "$vcon"
+
 exec qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
     -cpu qemu64,+nx \
@@ -23,6 +36,12 @@ exec qemu-system-x86_64 \
     -m "${QEMU_MEM:-256M}" \
     -drive if=pflash,format=raw,readonly=on,file="$firmware" \
     -drive format=raw,file="$image" \
+    -drive if=none,id=testdisk,format=raw,file="$testdisk" \
+    -device virtio-blk-pci,drive=testdisk \
+    -device virtio-rng-pci \
+    -device virtio-serial-pci \
+    -chardev file,id=vcon,path="$vcon" \
+    -device virtconsole,chardev=vcon \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio \
     -display none \

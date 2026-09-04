@@ -107,5 +107,16 @@ See [docs/development.md](docs/development.md).
   Signature enforcement is on by default; RFC 8032 vectors and crafted
   ELF images run on the host, six self-tests load, call, and unload
   fixture modules on the target.
-- **Next, Phase 6:** device infrastructure: the device/driver/bus model,
-  resource management, PCI enumeration, virtio, drivers as modules.
+- **Phase 6 (done):** device infrastructure. A bus/device/driver model
+  with resources and probing, a DMA API (no IOMMU yet, but no driver
+  assumes virtual equals physical), PCI enumeration over ECAM with BAR
+  sizing, capabilities and MSI/MSI-X through the interrupt layer, a
+  block layer (`blkdev`/`bio` with synchronous helpers), an entropy pool
+  and console sinks. VirtIO is the first real driver stack and lives
+  entirely in boot modules: `virtio` (bus, split virtqueues, virtio-pci
+  modern transport) plus `virtio_blk` (`vda`), `virtio_rng` and
+  `virtio_console`. QEMU attaches a scratch disk, an RNG and a console
+  whose output the boot test reads back; six self-tests cover the model,
+  PCI, DMA, entropy, block I/O and the console sink (44 in total).
+- **Next, Phase 7:** VFS and storage: the VFS layer, block layer
+  integration, a page cache, the copy-on-write filesystem.

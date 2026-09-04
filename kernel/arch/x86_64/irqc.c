@@ -102,6 +102,19 @@ int arch_irqc_unmask(unsigned gsi)
     return ioapic_unmask(gsi);
 }
 
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+{
+    if (cpu >= CONFIG_MAX_CPUS || vector < VECTOR_DYNAMIC_FIRST || vector > VECTOR_DYNAMIC_LAST)
+        return -EINVAL;
+    uint32_t apic = x86_cpu_apic_id(cpu);
+    if (apic > 0xff)
+        return -EINVAL;   /* xAPIC physical destination only */
+    /* Physical destination mode, fixed delivery, edge triggered. */
+    *addr = 0xFEE00000ULL | ((uint64_t)apic << 12);
+    *data = vector;
+    return 0;
+}
+
 void arch_irqc_eoi(unsigned vector)
 {
     if (vector < X86_EXCEPTION_COUNT)

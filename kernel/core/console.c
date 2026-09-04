@@ -24,6 +24,30 @@ void console_register(struct console_sink *sink)
     g_sinks = sink;
 }
 
+void console_unregister(struct console_sink *sink)
+{
+    /* Under the console lock so no writer holds a pointer to a sink
+     * that is being unlinked (module unload). */
+    arch_irq_state_t st = spin_lock_irqsave(&g_console_lock);
+    for (struct console_sink **pp = &g_sinks; *pp != NULL; pp = &(*pp)->next) {
+        if (*pp == sink) {
+            *pp = sink->next;
+            sink->next = NULL;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_console_lock, st);
+}
+
+bool console_has_sink(const char *name)
+{
+    for (struct console_sink *k = g_sinks; k != NULL; k = k->next) {
+        if (k->name && strcmp(k->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static void write_unlocked(const char *s, size_t len)
 {
     for (struct console_sink *k = g_sinks; k != NULL; k = k->next)
@@ -50,3 +74,8 @@ void console_set_panic_mode(void)
 {
     g_panic_mode = true;
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(console_register);
+EXPORT_SYMBOL(console_unregister);

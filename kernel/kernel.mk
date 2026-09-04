@@ -61,7 +61,13 @@ KERNEL_GENERIC_SRCS := \
 	kernel/module/modelf.c \
 	kernel/module/module.c \
 	kernel/module/modtest.c \
-	drivers/acpi/acpi.c
+	kernel/device/device.c \
+	kernel/device/dma.c \
+	kernel/device/devtest.c \
+	kernel/block/blk.c \
+	kernel/core/random.c \
+	drivers/acpi/acpi.c \
+	drivers/pci/pci.c
 
 # The trusted key ring is generated from the .pub files in tools/keys (see
 # scripts/gen-keyring.py and docs/kernel/module/design.md).

@@ -34,6 +34,10 @@ int  arch_irqc_unmask(unsigned gsi);
  * every vector; a no-op for exceptions and for controllers not yet up. */
 void arch_irqc_eoi(unsigned vector);
 
+/* Compose the message a device must write to raise `vector` on `cpu`
+ * (x86: APIC address + data). -EINVAL for an unknown CPU. */
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data);
+
 /* Highest GSI + 1 the controllers cover (0 if none). */
 unsigned arch_irqc_gsi_count(void);
 

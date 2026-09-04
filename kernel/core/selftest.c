@@ -270,6 +270,12 @@ static const struct selftest tests[] = {
     { "module-reject",   selftest_module_reject },
     { "module-load",     selftest_module_load },
     { "module-fail",     selftest_module_fail },
+    { "device",          selftest_device },
+    { "pci",             selftest_pci },
+    { "dma",             selftest_dma },
+    { "random",          selftest_random },
+    { "blk",             selftest_blk },
+    { "virtio-console",  selftest_virtio_console },
 };
 
 int selftest_run_all(void)

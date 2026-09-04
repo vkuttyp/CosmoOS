@@ -17,15 +17,24 @@ MODULE_OUT := $(OUT)/modules
 MODSIGN_KEY ?= $(ROOT)/tools/keys/cosmo-dev.key
 MODSIGN := $(PYTHON) $(ROOT)/scripts/modsign.py
 
-MODULES := hello cosmotest cosmotest_dep cosmotest_fail
+MODULES := hello virtio virtio_blk virtio_rng virtio_console cosmotest cosmotest_dep cosmotest_fail
 
-MODULE_hello_SRCS         := modules/hello/hello.c
-MODULE_cosmotest_SRCS     := tests/modules/cosmotest.c
-MODULE_cosmotest_dep_SRCS := tests/modules/cosmotest_dep.c
+MODULE_hello_SRCS          := modules/hello/hello.c
+MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
+MODULE_virtio_blk_SRCS     := drivers/virtio/virtio_blk.c
+MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c
+MODULE_virtio_console_SRCS := drivers/virtio/virtio_console.c
+MODULE_cosmotest_SRCS      := tests/modules/cosmotest.c
+MODULE_cosmotest_dep_SRCS  := tests/modules/cosmotest_dep.c
 MODULE_cosmotest_fail_SRCS := tests/modules/cosmotest_fail.c
 
+# Boot order is dependency order: virtio before its device drivers.
 MODULE_ARCHIVE_ENTRIES := \
 	modules/hello.ko=$(MODULE_OUT)/hello.ko \
+	modules/virtio.ko=$(MODULE_OUT)/virtio.ko \
+	modules/virtio_blk.ko=$(MODULE_OUT)/virtio_blk.ko \
+	modules/virtio_rng.ko=$(MODULE_OUT)/virtio_rng.ko \
+	modules/virtio_console.ko=$(MODULE_OUT)/virtio_console.ko \
 	tests/cosmotest.ko=$(MODULE_OUT)/cosmotest.ko \
 	tests/cosmotest_dep.ko=$(MODULE_OUT)/cosmotest_dep.ko \
 	tests/cosmotest_fail.ko=$(MODULE_OUT)/cosmotest_fail.ko

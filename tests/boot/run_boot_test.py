@@ -40,6 +40,12 @@ BOOT_MARKERS = [
 # prints its banner and exits 0.
 REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] module: loaded hello 1\.0 ",
+    r"^\[ INFO\] module: loaded virtio 1\.0 ",
+    r"^\[ INFO\] module: loaded virtio_blk 1\.0 ",
+    r"^\[ INFO\] module: loaded virtio_rng 1\.0 ",
+    r"^\[ INFO\] module: loaded virtio_console 1\.0 ",
+    r"^\[ INFO\] blk: vda: 16384 sectors of 512 bytes",
+    r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
     r"^\[ INFO\] hello: module init \(ABI v1, load 1\)",
     r"^init: hello from user mode, pid \d+",
     r"^\[ INFO\] init exited with status 0",
@@ -111,6 +117,16 @@ def main():
 
     os.makedirs(os.path.dirname(os.path.abspath(args.log)), exist_ok=True)
 
+    # Phase 6 devices: a fresh 8 MiB scratch disk for virtio-blk (the blk
+    # self-test writes to it) and a file for the virtio console output,
+    # both next to the serial log.
+    testdisk = args.log + ".testdisk.img"
+    with open(testdisk, "wb") as f:
+        f.truncate(8 * 1024 * 1024)
+    vcon = args.log + ".vcon"
+    env["QEMU_TESTDISK"] = testdisk
+    env["QEMU_VCON"] = vcon
+
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
     with open(args.log, "wb") as log:
@@ -164,6 +180,16 @@ def main():
         failures.append("no 'SELFTEST: PASS' line")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
+
+    # The virtio console must have carried the kernel's output too.
+    if not args.expect_panic:
+        try:
+            with open(vcon, "rb") as f:
+                vlines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            vlines = []
+        if not any(re.search(r"^\[ INFO\] boot complete", ln) for ln in vlines):
+            failures.append("virtio console output lacks the boot-complete line (" + vcon + ")")
 
     if failures:
         print(f"boot-test: FAIL after {elapsed:.1f}s")

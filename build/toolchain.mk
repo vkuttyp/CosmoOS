@@ -59,6 +59,7 @@ KERNEL_CFLAGS := \
 	$(COMMON_CFLAGS) \
 	$(KERNEL_ARCH_CFLAGS) \
 	-I$(ROOT)/kernel/include \
+	-I$(ROOT)/drivers/include \
 	-I$(ROOT)/boot/protocol
 
 KERNEL_LDFLAGS := \

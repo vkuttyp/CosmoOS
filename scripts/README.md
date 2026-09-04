@@ -13,5 +13,5 @@ Automation: toolchain setup, QEMU runners, CI helpers.
 | `check-module-elf.py` | Post-build checks on a signed module (ET_REL, W^X, metadata, trailer) |
 | `check-kernel-elf.sh` | Post-link checks on the kernel (W^X segments, PT_NOTE) |
 | `check-reproducible.sh` | Build twice, compare |
-| `qemu-run.sh`, `find-firmware.sh` | Run under QEMU, locate OVMF |
+| `qemu-run.sh`, `find-firmware.sh` | Run under QEMU (q35, the boot image on AHCI, plus a virtio-blk scratch disk `QEMU_TESTDISK`, virtio-rng, and a virtio console written to `QEMU_VCON`), locate OVMF |
 | `gen-compile-commands.py` | `compile_commands.json` for editors |

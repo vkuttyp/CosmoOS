@@ -86,6 +86,46 @@ int irq_request(irq_t irq, interrupt_handler_fn fn, void *arg, const char *name,
     return 0;
 }
 
+int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsigned cpu,
+                    struct irq_msi_msg *msg)
+{
+    KASSERT(g_initialized);
+    if (fn == NULL || msg == NULL)
+        return -EINVAL;
+
+    arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
+    int vector = arch_vector_alloc();
+    if (vector < 0) {
+        spin_unlock_irqrestore(&g_irq_lock, s);
+        return vector;
+    }
+    int rc = interrupt_register((unsigned)vector, fn, arg, name);
+    if (rc == 0) {
+        rc = arch_irqc_msi_compose((unsigned)vector, cpu, &msg->addr, &msg->data);
+        if (rc)
+            interrupt_unregister((unsigned)vector, fn);
+    }
+    if (rc) {
+        arch_vector_free((unsigned)vector);
+        spin_unlock_irqrestore(&g_irq_lock, s);
+        return rc;
+    }
+    spin_unlock_irqrestore(&g_irq_lock, s);
+    kdebug("irq: MSI vector %d on CPU %u (%s)", vector, cpu, name ? name : "?");
+    return vector;
+}
+
+int irq_release_msi(int vector)
+{
+    if (vector < 0 || vector >= 256)
+        return -EINVAL;
+    arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
+    interrupt_unregister_vector((unsigned)vector);
+    arch_vector_free((unsigned)vector);
+    spin_unlock_irqrestore(&g_irq_lock, s);
+    return 0;
+}
+
 int irq_release(irq_t irq)
 {
     if (irq >= IRQ_MAX)

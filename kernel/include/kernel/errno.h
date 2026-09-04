@@ -24,9 +24,11 @@
 #define EINVAL    22  /* invalid argument */
 #define EMFILE    24  /* too many open handles */
 #define ENOSPC    28  /* no space left */
+#define EROFS     30  /* read-only device */
 #define ERANGE    34  /* result out of range */
 #define ENAMETOOLONG 36 /* string too long */
 #define ENOSYS    38  /* not implemented */
+#define ENOTSUP   95  /* operation not supported */
 #define ETIMEDOUT 110 /* operation timed out */
 #define ENOKEY    126 /* required key not available */
 #define EKEYREJECTED 129 /* key or signature rejected */
