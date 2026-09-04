@@ -11,6 +11,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/object.h>
+#include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
@@ -58,6 +59,11 @@ static int64_t sys_write(struct syscall_args *a)
         rc = io->write(obj, tmp, n);
         if (rc < 0)
             break;
+        KASSERT(rc <= (int64_t)n);
+        if (rc > (int64_t)n) {
+            rc = -EIO;
+            break;
+        }
         done += (size_t)rc;
         if ((size_t)rc < n)
             break;
@@ -87,6 +93,11 @@ static int64_t sys_read(struct syscall_args *a)
     char tmp[IO_CHUNK];
     size_t n = len < IO_CHUNK ? len : IO_CHUNK;
     int64_t rc = io->read(obj, tmp, n);
+    /* An object may never report more than it was offered; the count
+     * bounds the copy out of the kernel stack buffer. */
+    KASSERT(rc <= (int64_t)n);
+    if (rc > (int64_t)n)
+        rc = -EIO;
     if (rc > 0 && copy_to_user(ubuf, tmp, (size_t)rc))
         rc = -EFAULT;
     kobject_put(obj);

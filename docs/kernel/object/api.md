@@ -15,7 +15,12 @@ the functions below.
 Static, immortal type descriptor. `release` runs from the last put,
 in the putter's context, and may block; it must free or otherwise
 retire the object. Subtypes embed it as `base` and add operations
-(`struct kobject_io_type` adds `read`/`write`).
+(`struct kobject_io_type` adds `read`/`write`). Contract for
+`read(obj, buf, len)` / `write(obj, buf, len)`: return the bytes
+transferred, `0 <= count <= len`, or a negative errno. The system call
+layer bounds every copy by `len`, not by the returned count: a count
+above `len` trips a `KASSERT` and fails the call with `-EIO`, so a
+buggy object can never make the kernel read past its stack buffer.
 
 ### `void kobject_init(struct kobject *obj, const struct kobject_type *type)`
 - Purpose: set the type and a reference count of 1 owned by the caller.

@@ -31,6 +31,12 @@ uint32_t kobject_refcount(const struct kobject *obj);
 
 /* --- console object: standard I/O until the VFS exists --- */
 
+/*
+ * read/write return the byte count transferred (0 <= count <= len) or a
+ * negative errno. A count above len is an object bug: the callers
+ * (sys_read/sys_write) assert on it and fail the call with -EIO, they
+ * never trust it to size a copy.
+ */
 struct kobject_io_type {
     struct kobject_type base;
     int64_t (*read)(struct kobject *obj, void *buf, size_t len);
