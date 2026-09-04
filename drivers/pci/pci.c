@@ -168,25 +168,15 @@ void pci_unregister_driver(struct pci_driver *pdrv)
     driver_unregister(&pdrv->drv);
 }
 
-/* The model binds dev->driver only after probe succeeds, so the thunk
- * finds its pci_driver by matching the id tables. */
-static struct pci_driver *pci_driver_for(struct device *dev)
-{
-    struct device_driver *d;
-    list_for_each_entry(d, &pci_bus.drivers, bus_link) {
-        if (d->probe == pci_probe_thunk && pci_match(dev, d) && (dev->driver == NULL || dev->driver == d))
-            return container_of(d, struct pci_driver, drv);
-    }
-    return NULL;
-}
-
+/* The model names the driver in dev->driver before calling probe. */
 static int pci_probe_thunk(struct device *dev)
 {
-    struct pci_driver *pdrv = pci_driver_for(dev);
-    if (pdrv == NULL)
-        return -ENODEV;
+    struct pci_driver *pdrv = container_of(dev->driver, struct pci_driver, drv);
     struct pci_device *p = to_pci_device(dev);
-    return pdrv->probe(p, matching_id(pdrv, p));
+    const struct pci_id *id = matching_id(pdrv, p);
+    if (id == NULL)
+        return -ENODEV;
+    return pdrv->probe(p, id);
 }
 
 static void pci_remove_thunk(struct device *dev)

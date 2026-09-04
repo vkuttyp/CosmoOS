@@ -29,16 +29,11 @@ struct bus_type virtio_bus = {
     .match = virtio_match,
 };
 
+/* The model names the driver in dev->driver before calling probe. */
 static int virtio_probe_thunk(struct device *dev)
 {
-    struct device_driver *d;
-    list_for_each_entry(d, &virtio_bus.drivers, bus_link) {
-        if (virtio_match(dev, d)) {
-            struct virtio_driver *vdrv = container_of(d, struct virtio_driver, drv);
-            return vdrv->probe(to_virtio_device(dev));
-        }
-    }
-    return -ENODEV;
+    struct virtio_driver *vdrv = container_of(dev->driver, struct virtio_driver, drv);
+    return vdrv->probe(to_virtio_device(dev));
 }
 
 static void virtio_remove_thunk(struct device *dev)

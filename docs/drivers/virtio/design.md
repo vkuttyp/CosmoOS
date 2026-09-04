@@ -38,9 +38,9 @@ with flexible rings) are the spec's, packed, little endian (x86).
 
 `virtio_bus.match` compares `device_id` against the driver's
 0-terminated id list. `virtio_register_driver` fills the embedded
-`device_driver` with a probe thunk that re-matches to find the
-`virtio_driver` (the model sets `dev->driver` only after success) and a
-remove thunk that uses `dev->driver`. `virtio_device_register` names the
+`device_driver` with probe and remove thunks that recover the
+`virtio_driver` from `dev->driver`, which the model sets to the driver
+being tried before calling probe (and clears if probe fails). `virtio_device_register` names the
 device `virtio<N>` from a counter, copies the transport device's DMA
 mask, and calls `device_register`; because that runs inside the PCI
 probe, the device model lock is re-entered (recursive by design).

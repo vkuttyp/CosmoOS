@@ -158,40 +158,53 @@ void virtq_kick(struct virtqueue *vq)
 void *virtq_pop(struct virtqueue *vq, uint32_t *len)
 {
     arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
-    if (vq->last_used == read_le16(&vq->used->idx)) {
-        spin_unlock_irqrestore(&vq->lock, s);
-        return NULL;
-    }
-    rmb();
-    struct virtq_used_elem e = vq->used->ring[vq->last_used % vq->size];
-    vq->last_used++;
-    if (e.id >= vq->size || vq->cookies[e.id] == NULL) {
-        spin_unlock_irqrestore(&vq->lock, s);
-        kerror("virtio: %s: queue %u: device returned bad descriptor id %u", vq->vdev->dev.name, vq->index, e.id);
-        return NULL;
-    }
-    void *cookie = vq->cookies[e.id];
-    vq->cookies[e.id] = NULL;
-
-    /* Return the chain to the free list. */
-    uint16_t i = (uint16_t)e.id;
-    unsigned count = 1;
-    while (vq->desc[i].flags & VIRTQ_DESC_F_NEXT) {
-        i = vq->desc[i].next;
-        if (i >= vq->size || count > vq->size) {
+    for (;;) {
+        if (vq->last_used == read_le16(&vq->used->idx)) {
             spin_unlock_irqrestore(&vq->lock, s);
-            kerror("virtio: %s: queue %u: corrupt descriptor chain", vq->vdev->dev.name, vq->index);
             return NULL;
         }
-        count++;
+        rmb();
+        struct virtq_used_elem e = vq->used->ring[vq->last_used % vq->size];
+        vq->last_used++;
+
+        /* A bad entry from the device is skipped, never a reason to stop
+         * draining: later valid completions must still reach the driver. */
+        if (e.id >= vq->size || vq->cookies[e.id] == NULL) {
+            vq->bad_used++;
+            kerror("virtio: %s: queue %u: device returned bad descriptor id %u", vq->vdev->dev.name, vq->index,
+                   e.id);
+            continue;
+        }
+        void *cookie = vq->cookies[e.id];
+
+        /* Walk the chain; a corrupt link means the descriptors cannot be
+         * trusted back onto the free list, so they are abandoned (the
+         * queue shrinks) but the completion is still delivered. */
+        uint16_t i = (uint16_t)e.id;
+        unsigned count = 1;
+        bool chain_ok = true;
+        while (vq->desc[i].flags & VIRTQ_DESC_F_NEXT) {
+            i = vq->desc[i].next;
+            if (i >= vq->size || count >= vq->size) {
+                chain_ok = false;
+                break;
+            }
+            count++;
+        }
+        vq->cookies[e.id] = NULL;
+        if (chain_ok) {
+            vq->desc[i].next = vq->free_head;
+            vq->free_head = (uint16_t)e.id;
+            vq->num_free = (uint16_t)(vq->num_free + count);
+        } else {
+            vq->bad_used++;
+            kerror("virtio: %s: queue %u: corrupt descriptor chain at %u", vq->vdev->dev.name, vq->index, e.id);
+        }
+        spin_unlock_irqrestore(&vq->lock, s);
+        if (len)
+            *len = e.len;
+        return cookie;
     }
-    vq->desc[i].next = vq->free_head;
-    vq->free_head = (uint16_t)e.id;
-    vq->num_free = (uint16_t)(vq->num_free + count);
-    spin_unlock_irqrestore(&vq->lock, s);
-    if (len)
-        *len = e.len;
-    return cookie;
 }
 
 unsigned virtq_free_count(struct virtqueue *vq)

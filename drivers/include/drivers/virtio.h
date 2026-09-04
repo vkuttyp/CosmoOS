@@ -130,7 +130,7 @@ struct virtqueue {
     spinlock_t lock;
     int vector;                                 /* MSI-X vector or -1 */
     unsigned msix_index;                        /* transport use */
-    uint64_t kicks, interrupts;
+    uint64_t kicks, interrupts, bad_used;      /* bad_used: invalid device completions */
 };
 
 /* --- device drivers ------------------------------------------------- */

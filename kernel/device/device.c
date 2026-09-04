@@ -135,15 +135,19 @@ static bool try_bind(struct device *dev, struct device_driver *drv)
 {
     if (!drv->bus->match(dev, drv))
         return false;
+    /* The driver is named before probe so a bus thunk can find its typed
+     * driver through dev->driver instead of re-matching (several drivers
+     * may match one device). */
+    dev->driver = drv;
     int rc = drv->probe(dev);
     if (rc) {
+        dev->driver = NULL;
         dev->state = DEV_FAILED;
         dev->probe_error = rc;
         dev->drvdata = NULL;
         kerror("device: %s: driver %s probe failed (%d)", dev->name, drv->name, rc);
         return true;
     }
-    dev->driver = drv;
     dev->state = DEV_BOUND;
     drv->bound++;
     kinfo("device: %s bound to %s", dev->name, drv->name);

@@ -98,10 +98,11 @@ the probe. Every device becomes a `struct pci_device` on the `pci` bus.
 The `pci` bus `match` compares the driver's `struct pci_id` table
 against vendor/device (with `PCI_ANY`) and, when `PCI_ID_CLASS` is
 set, class/subclass. `pci_register_driver` installs `pci_probe_thunk`
-as the model-level probe; since the model sets `dev->driver` only after
-a successful probe, the thunk re-runs the match over the bus's PCI
-drivers to find the `struct pci_driver` and the matching id, then calls
-the typed `probe(struct pci_device *, const struct pci_id *)`.
+as the model-level probe; the model sets `dev->driver` to the driver
+being tried before calling probe (and clears it on failure), so the
+thunk recovers its `struct pci_driver` from `dev->driver`, finds the
+matching id, and calls the typed `probe(struct pci_device *, const
+struct pci_id *)`. The virtio bus thunk works the same way.
 
 MSI-X: `pci_msix_enable(pdev, want)` maps the table BAR, allocates
 `min(want, table_size)` vectors through `irq_request_msi` with a caller

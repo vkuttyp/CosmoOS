@@ -57,7 +57,7 @@ struct device {
     char name[DEVICE_NAME_MAX];
     struct bus_type *bus;
     struct device *parent;
-    struct device_driver *driver;
+    struct device_driver *driver;   /* set for the duration of probe and while bound */
     void *drvdata;
     struct resource res[DEVICE_MAX_RESOURCES];
     unsigned nr_res;
