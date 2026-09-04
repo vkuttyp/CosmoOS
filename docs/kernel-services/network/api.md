@@ -249,18 +249,22 @@ entry (replacing and freeing an older pending packet, `pending_dropped`)
 and took ownership, sending a request when the entry is new (an
 incomplete entry already has one in flight). No other value is
 returned today; when the table is full the least recently updated
-entry is evicted with its pending packet. Broadcast destinations
+reachable entry (else the oldest incomplete one) is evicted with its
+pending packet. Broadcast destinations
 resolve to `ff:ff:ff:ff:ff:ff` at once. Reachable entries age out after 20 minutes;
 incomplete ones retry every second and give up after 3 requests
 (pending packet freed, `timeouts` counted). **`arp_input`** (worker)
-answers requests for our addresses and completes entries for replies
-we asked for, transmitting the pending packet. **`bool arp_lookup(ip,
+answers requests for our address and records the asker (without
+evicting: a full table learns nothing), completes an incomplete entry
+from a reply addressed to us and transmits its pending packet, and
+ignores everything else: unsolicited replies (`unsolicited`) and
+requests for other hosts never create or change an entry. **`bool arp_lookup(ip,
 mac)`** reads the table without sending. **`void arp_flush(nif)`**
 drops that interface's entries. **`void arp_age(uint64_t now_ns)`**
 runs the ageing pass as if `now_ns` were the current time (the 1 s
 timer queues it on the worker together with `nd_age`; tests call it
 directly). **`arp_get_stats`**: `requests_sent`, `replies_sent`,
-`requests_rcvd`, `replies_rcvd`, `entries`, `pending_dropped`,
+`requests_rcvd`, `replies_rcvd`, `entries`, `pending_dropped`, `unsolicited`,
 `timeouts`. Everything but `arp_input`/`arp_age` is any context.
 
 ## IP, ICMP and neighbour discovery (`kernel/include/kernel/net/ip.h`, `ipv4.c`, `ipv6.c`)
@@ -470,7 +474,9 @@ sets `error` (`-ECONNREFUSED` in SYN_RCVD, `-ECONNRESET` otherwise)
 and closes; in-order data is appended to `rcvbuf` and acknowledged
 immediately every second segment or after 40 ms, out-of-order data is
 acknowledged with `rcv_nxt` and dropped (`out_of_order`); FIN moves
-through CLOSE_WAIT / TIME_WAIT (2 s) and wakes the socket.
+through CLOSE_WAIT / TIME_WAIT (2 s) and wakes the socket. When
+TIME_WAIT ends the pcb is freed if its socket is gone; otherwise it
+becomes CLOSED and waits for `tcp_close`.
 
 **`tcp_get_stats`** (`segs_in`, `segs_out`, `retransmits`,
 `bad_cksum`, `rsts_in`, `rsts_out`, `conns_active`, `conns_passive`,

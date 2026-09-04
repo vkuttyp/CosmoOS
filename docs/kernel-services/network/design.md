@@ -96,8 +96,11 @@ struct arp_entry { uint32_t ip; uint8_t mac[6]; enum { ARP_INCOMPLETE, ARP_REACH
                    uint64_t updated_ns; struct mbuf *pending; unsigned tries; struct netif *nif; };
 ```
 
-A fixed table (`ARP_TABLE_SIZE` 64, spinlock; a full table evicts the
-least recently updated entry). `arp_resolve(nif, ip, mac_out, m)`
+A fixed table (`ARP_TABLE_SIZE` 64, spinlock). When our own
+resolution finds the table full it evicts the least recently updated
+reachable entry (an incomplete one has a resolution in flight);
+learning from received traffic never evicts and simply learns nothing
+when the table is full. `arp_resolve(nif, ip, mac_out, m)`
 returns the MAC when known (broadcast addresses immediately);
 otherwise it queues `m` on the entry (replacing an older pending
 packet, which is freed), sends a request for a new entry and returns
@@ -105,8 +108,12 @@ packet, which is freed), sends a request for a new entry and returns
 entry and transmits the pending packet. Entries age out after 20 min
 (`REACHABLE`) or 3 unanswered requests at 1 s (`INCOMPLETE`, pending
 packet freed), driven by a 1 s timer that hands the work to the worker.
-Replies for addresses we asked about are accepted; others are
-ignored. ND (`ipv6.c`, `ND_TABLE_SIZE` 32) mirrors this for IPv6 with
+ARP carries no authentication, so the table learns only what RFC 826
+requires: a request addressed to us records or refreshes the asker, a
+reply addressed to us completes an entry we are resolving; unsolicited
+replies (counted, `unsolicited`) and requests for other hosts change
+nothing. A neighbour that changes its MAC is relearned from its next
+request to us or when its entry ages out. ND (`ipv6.c`, `ND_TABLE_SIZE` 32) mirrors this for IPv6 with
 neighbour solicitation/advertisement over ICMPv6 (hop limit 255
 required) and the solicited-node multicast MAC (`33:33:ff:xx:xx:xx`).
 
@@ -277,7 +284,11 @@ harness but only require the `virtio_net` and `eth0` boot markers.
 mbufs: as above. netifs: static or driver-owned; `netif_unregister`
 drains pending transmissions and removes ARP entries. pcbs: owned by
 the socket until close; a TCP pcb outlives its socket in TIME_WAIT and
-is freed by the timer (`sock` becomes NULL). Sockets: kobjects held by
+is freed by the timer once `sock` is NULL. If the application still
+holds the socket when TIME_WAIT ends (shutdown without close), the pcb
+merely becomes CLOSED (reads return 0, writes `-EPIPE`) and is freed
+by the eventual `tcp_close`; a pcb is never freed while a socket points
+at it. Sockets: kobjects held by
 handles and by in-kernel users; the last put closes the protocol
 (`tcp_close` sends FIN or RST as appropriate). Accept-queue children
 are owned by the listener until accepted or the listener closes (then

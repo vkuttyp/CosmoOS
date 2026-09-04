@@ -41,6 +41,7 @@ void arp_flush(struct netif *nif);
 void arp_age(uint64_t now_ns);
 struct arp_stats {
     uint64_t requests_sent, replies_sent, requests_rcvd, replies_rcvd, entries, pending_dropped, timeouts;
+    uint64_t unsolicited;   /* replies that answered no request of ours */
 };
 void arp_get_stats(struct arp_stats *out);
 

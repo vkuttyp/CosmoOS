@@ -128,3 +128,21 @@ require WRITE; every socket call resolves the handle with
 Check: `net_selftest` (`bind` on the console handle is `-EBADF`).
 Gap: no test drops a right from a socket handle (no `handle_dup` with
 reduced rights exists yet).
+
+**N13. Received ARP and ND traffic learns only what the protocols
+require, and never at the cost of state in use.** A request or
+neighbour solicitation addressed to us records the asker; a reply or
+advertisement completes only an entry we are resolving; unsolicited
+replies and requests for other hosts change nothing (`arp_stats.
+unsolicited`). Learning from received traffic never evicts an entry; a
+full table learns nothing. Only our own resolution evicts, preferring
+the least recently updated reachable entry over one with a resolution
+in flight. Check: `net-arp` (forged reply ignored, request to us
+learned). Gap: an on-link host that lies in a request addressed to us
+still poisons its own IP's mapping; ARP offers no defence and none is
+attempted.
+
+**N14. A TCP pcb is never freed while a socket points at it.** Every
+free path checks `pcb->sock`; when TIME_WAIT ends under a live socket
+the pcb becomes CLOSED and waits for `tcp_close`. Check: `net-lo-tcp`
+keeps a shut-down socket 2.5 s past TIME_WAIT and uses it.

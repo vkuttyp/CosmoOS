@@ -55,17 +55,28 @@ static struct arp_entry *find(uint32_t ip)
     return NULL;
 }
 
-static struct arp_entry *alloc_entry(uint32_t ip, struct netif *nif)
+/*
+ * A free slot, or with `evict` the least recently updated reachable entry
+ * (an incomplete one has a resolution in flight). Without `evict` a full
+ * table yields NULL: traffic we did not ask for never displaces an entry.
+ */
+static struct arp_entry *alloc_entry(uint32_t ip, struct netif *nif, bool evict)
 {
     struct arp_entry *victim = NULL;
     for (unsigned i = 0; i < ARP_TABLE_SIZE; i++) {
-        if (g_table[i].state == ARP_FREE) {
-            victim = &g_table[i];
+        struct arp_entry *e = &g_table[i];
+        if (e->state == ARP_FREE) {
+            victim = e;
             break;
         }
-        if (victim == NULL || g_table[i].updated_ns < victim->updated_ns)
-            victim = &g_table[i];
+        if (!evict)
+            continue;
+        if (victim == NULL || (victim->state == ARP_INCOMPLETE && e->state == ARP_REACHABLE) ||
+            (victim->state == e->state && e->updated_ns < victim->updated_ns))
+            victim = e;
     }
+    if (victim == NULL)
+        return NULL;
     if (victim->state != ARP_FREE) {
         m_freem(victim->pending);
         victim->pending = NULL;
@@ -115,7 +126,7 @@ int arp_resolve(struct netif *nif, uint32_t ip, uint8_t mac[ETH_ALEN], struct mb
     }
     bool send = false;
     if (e == NULL) {
-        e = alloc_entry(ip, nif);
+        e = alloc_entry(ip, nif, true);
         send = true;
     }
     if (m) {
@@ -162,13 +173,29 @@ void arp_input(struct netif *nif, struct mbuf *m)
     if (a.spa == 0 || a.spa == nif->ip4.addr)
         return;   /* probes and our own address: nothing to learn */
 
+    uint16_t op = ntohs(a.op);
+    bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     struct arp_entry *e = find(a.spa);
-    bool for_us = a.tpa == nif->ip4.addr && nif->ip4.addr != 0;
-    if (e == NULL && for_us)
-        e = alloc_entry(a.spa, nif);   /* a request to us: remember the asker */
-    if (e) {
+    /*
+     * ARP carries no authentication, so the table learns only what RFC 826
+     * requires: a request addressed to us records (or refreshes) the asker,
+     * and a reply addressed to us completes an entry we are resolving.
+     * Unsolicited replies and requests for other hosts change nothing, and
+     * learning an asker never evicts an entry in use.
+     */
+    bool learn = false;
+    if (op == ARP_OP_REQUEST) {
+        learn = for_us;
+    } else if (op == ARP_OP_REPLY) {
+        learn = for_us && e != NULL && e->state == ARP_INCOMPLETE;
+        if (!learn)
+            g_stats.unsolicited++;
+    }
+    if (learn && e == NULL)
+        e = alloc_entry(a.spa, nif, false);   /* NULL when the table is full */
+    if (learn && e) {
         memcpy(e->mac, a.sha, ETH_ALEN);
         e->state = ARP_REACHABLE;
         e->updated_ns = clock_now_ns();
@@ -178,7 +205,6 @@ void arp_input(struct netif *nif, struct mbuf *m)
     }
     spin_unlock_irqrestore(&g_lock, s);
 
-    uint16_t op = ntohs(a.op);
     if (op == ARP_OP_REQUEST) {
         __atomic_fetch_add(&g_stats.requests_rcvd, 1, __ATOMIC_RELAXED);
         if (for_us) {

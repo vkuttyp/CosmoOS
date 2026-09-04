@@ -451,8 +451,16 @@ static void pcb_work(void *arg)
         return;
     }
     if ((flags & WORK_TIMEWAIT) && pcb->state == TCP_TIME_WAIT) {
-        pcb_free_locked(pcb);
+        if (pcb->sock == NULL) {
+            pcb_free_locked(pcb);
+        } else {
+            /* The application still holds the socket (shutdown without
+             * close): the connection is over, the pcb stays until close. */
+            pcb->state = TCP_CLOSED;
+            wake = sock_ref(pcb);
+        }
         spin_unlock_irqrestore(&g_lock, s);
+        sock_wake_after(wake);
         return;
     }
     if (flags & WORK_DELACK)

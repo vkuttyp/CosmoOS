@@ -90,17 +90,24 @@ static struct nd_entry *nd_find(const struct in6_addr *ip)
     return NULL;
 }
 
-static struct nd_entry *nd_alloc(const struct in6_addr *ip, struct netif *nif)
+/* As arp.c's alloc_entry: without `evict` a full table yields NULL. */
+static struct nd_entry *nd_alloc(const struct in6_addr *ip, struct netif *nif, bool evict)
 {
     struct nd_entry *v = NULL;
     for (unsigned i = 0; i < ND_TABLE_SIZE; i++) {
-        if (g_nd[i].state == ND_FREE) {
-            v = &g_nd[i];
+        struct nd_entry *e = &g_nd[i];
+        if (e->state == ND_FREE) {
+            v = e;
             break;
         }
-        if (v == NULL || g_nd[i].updated_ns < v->updated_ns)
-            v = &g_nd[i];
+        if (!evict)
+            continue;
+        if (v == NULL || (v->state == ND_INCOMPLETE && e->state == ND_REACHABLE) ||
+            (v->state == e->state && e->updated_ns < v->updated_ns))
+            v = e;
     }
+    if (v == NULL)
+        return NULL;
     if (v->state != ND_FREE)
         m_freem(v->pending);
     memset(v, 0, sizeof(*v));
@@ -170,7 +177,7 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[ETH_ALE
     }
     bool send = e == NULL;
     if (e == NULL)
-        e = nd_alloc(ip, nif);
+        e = nd_alloc(ip, nif, true);
     if (m) {
         m_freem(e->pending);
         e->pending = m;
@@ -198,15 +205,17 @@ void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     m_freem(m);
     if (!in6_equal(&nd.target, &nif->ip6_ll) || in6_is_unspecified(&ip6->src))
         return;
-    /* Learn the asker, answer with our address. */
+    /* Learn the asker (never at the cost of an entry in use), answer with our address. */
     if (nd.opt_type == 1 && nd.opt_len == 1) {
         arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
         struct nd_entry *e = nd_find(&ip6->src);
         if (e == NULL)
-            e = nd_alloc(&ip6->src, nif);
-        memcpy(e->mac, nd.opt_mac, ETH_ALEN);
-        e->state = ND_REACHABLE;
-        e->updated_ns = clock_now_ns();
+            e = nd_alloc(&ip6->src, nif, false);
+        if (e) {
+            memcpy(e->mac, nd.opt_mac, ETH_ALEN);
+            e->state = ND_REACHABLE;
+            e->updated_ns = clock_now_ns();
+        }
         spin_unlock_irqrestore(&g_nd_lock, s);
         nd_send(nif, ICMPV6_NA, &nif->ip6_ll, &ip6->src, nd.opt_mac);
     }
@@ -226,7 +235,7 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     struct mbuf *pending = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
     struct nd_entry *e = nd_find(&nd.target);
-    if (e) {
+    if (e && e->state == ND_INCOMPLETE) {   /* only the answer to our own solicitation */
         memcpy(e->mac, nd.opt_mac, ETH_ALEN);
         e->state = ND_REACHABLE;
         e->updated_ns = clock_now_ns();

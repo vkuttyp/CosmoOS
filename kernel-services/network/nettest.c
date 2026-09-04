@@ -176,6 +176,45 @@ bool selftest_net_arp(const char **reason)
     arp_get_stats(&s1);
     CHECK(s1.timeouts == s0.timeouts + 1 && s1.entries == s0.entries && s1.pending_dropped == s0.pending_dropped + 1);
     CHECK(!arp_lookup(ip, mac));
+
+    /* Admission: an unsolicited reply teaches nothing; a request addressed
+     * to us records the asker. Frames are handed straight to arp_input. */
+    static const uint8_t forged_mac[6] = { 0xde, 0xad, 0xbe, 0xef, 0x00, 0x01 };
+    uint32_t liar = IPV4_ADDR(10, 99, 0, 8), asker = IPV4_ADDR(10, 99, 0, 9);
+    struct mbuf *f = m_getcl();
+    CHECK(f != NULL);
+    f->len = f->pkt.len = 28;
+    memset(f->data, 0, 28);
+    f->data[1] = 1;   /* Ethernet */
+    f->data[2] = 0x08; /* IPv4 */
+    f->data[4] = 6;
+    f->data[5] = 4;
+    f->data[7] = 2;   /* reply */
+    memcpy(f->data + 8, forged_mac, 6);
+    memcpy(f->data + 14, &liar, 4);
+    memcpy(f->data + 18, nif->mac, 6);
+    memcpy(f->data + 24, &nif->ip4.addr, 4);
+    arp_input(nif, f);
+    CHECK(!arp_lookup(liar, mac));
+    arp_get_stats(&s1);
+    CHECK(s1.unsolicited == s0.unsolicited + 1 && s1.entries == s0.entries);
+    f = m_getcl();
+    CHECK(f != NULL);
+    f->len = f->pkt.len = 28;
+    memset(f->data, 0, 28);
+    f->data[1] = 1;
+    f->data[2] = 0x08;
+    f->data[4] = 6;
+    f->data[5] = 4;
+    f->data[7] = 1;   /* request */
+    memcpy(f->data + 8, forged_mac, 6);
+    memcpy(f->data + 14, &asker, 4);
+    memcpy(f->data + 24, &nif->ip4.addr, 4);
+    arp_input(nif, f);
+    CHECK(arp_lookup(asker, mac) && memcmp(mac, forged_mac, 6) == 0);
+    arp_get_stats(&s1);
+    CHECK(s1.replies_sent == s0.replies_sent + 1 && s1.entries == s0.entries + 1);
+    arp_flush(nif);   /* the test's entries; a real gateway entry is re-learned below */
     /* The gateway resolves for real when a NIC is present (asynchronous). */
     if (nif->ip4.gateway) {
         struct mbuf *probe = m_getcl();
@@ -337,7 +376,7 @@ done:
     thread_exit(0);
 }
 
-static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t bytes)
+static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t bytes, unsigned linger_ms)
 {
     struct tcp_server srv;
     memset(&srv, 0, sizeof(srv));
@@ -388,6 +427,16 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
     CHECK(got == 4 && total == bytes);
     CHECK(ksock_recvfrom(c, tmp, 8, NULL) == 0);   /* EOF */
     CHECK(ksock_sendto(c, "x", 1, NULL) == -EPIPE);
+    /* Keep the socket past TIME_WAIT: the pcb must stay valid until close. */
+    for (unsigned i = 0; i < linger_ms; i += 100) {
+        thread_sleep_ms(100);
+        sched_watchdog_kick();
+    }
+    if (linger_ms) {
+        CHECK(ksock_getsockname(c, &me) == 0 && me.port >= NET_EPHEMERAL_LO);
+        CHECK(ksock_recvfrom(c, tmp, 8, NULL) == 0);
+        CHECK(ksock_sendto(c, "x", 1, NULL) == -EPIPE);
+    }
     ksock_put(c);
     for (unsigned i = 0; i < 500 && !srv.done; i++) {
         thread_sleep_ms(10);
@@ -412,9 +461,9 @@ bool selftest_net_lo_tcp(const char **reason)
     tcp_get_stats(&t1);
     CHECK(t1.rsts_in == t0.rsts_in + 1);
 
-    if (!tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6000), TCP_TEST_BYTES))
+    if (!tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6000), TCP_TEST_BYTES, 0))
         return false;
-    if (!tcp_transfer(reason, v6loop(6001), 256u * 1024u))
+    if (!tcp_transfer(reason, v6loop(6001), 256u * 1024u, 2500))
         return false;
 
     /* Listen backlog: a listener that never accepts still completes the
@@ -480,7 +529,7 @@ bool selftest_net_lo_tcp_loss(const char **reason)
     g_seen = g_dropped = 0;
     g_drop_every = 7;
     loopback_set_filter(lossy_filter, NULL);
-    bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6010), 256u * 1024u);
+    bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6010), 256u * 1024u, 0);
     loopback_set_filter(NULL, NULL);
     if (!ok)
         return false;

@@ -35,7 +35,11 @@ the same checksum as the flat buffer, from offset 0 and from offset 7.
 **`net-arp`**: an unknown address is not in the table; `arp_resolve`
 for `10.0.2.99` returns `-EINPROGRESS`, sends one request and adds
 one entry; `arp_age` advanced by four seconds times out the entry,
-drops the pending packet and removes it; then the real gateway is
+drops the pending packet and removes it; a forged unsolicited reply
+handed to `arp_input` creates no entry and bumps `unsolicited`, while
+a request addressed to us from `10.99.0.9` is answered (`replies_sent`)
+and records the asker's MAC (the test entries are flushed afterwards);
+then the real gateway is
 resolved (waiting up to a second) and its MAC is logged, or a warning
 is logged when QEMU did not answer (the check is on the request
 counters, not on the reply, so the test does not depend on the host
@@ -58,7 +62,9 @@ is `-EISCONN`), streams 1 MiB (IPv4) or 256 KiB (IPv6) of a pattern
 in varying chunk sizes while reading the echo back and verifying every
 byte, shuts down for writing, drains to EOF (`recvfrom` returns 0),
 and `sendto` afterwards is `-EPIPE`; the server saw the same byte
-count. Then: `connect` to a closed port is `-ECONNREFUSED` and
+count. The IPv6 client then keeps its socket for 2.5 s, past the 2 s
+TIME_WAIT, and `getsockname`, `recvfrom` (0) and `sendto` (`-EPIPE`)
+still behave: the pcb is not freed under a live socket. Then: `connect` to a closed port is `-ECONNREFUSED` and
 `rsts_in` grew by one; a listener with backlog 2 accepts one of two
 queued connections, exchanges `hi`, and closing the listener resets
 the other (`c2` sees an error on read or write); `conns_established`
