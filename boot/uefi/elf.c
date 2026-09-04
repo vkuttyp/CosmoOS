@@ -176,8 +176,20 @@ EFI_STATUS elf_load(const uint8_t *file, size_t size, struct elf_image *img, boo
         lputs("cosmoboot: no PT_LOAD segments\n");
         return EFI_LOAD_ERROR;
     }
-    if (eh->e_entry < lo || eh->e_entry >= hi) {
-        lputs("cosmoboot: entry point outside loaded segments\n");
+    /* The entry must land inside an executable segment: gaps between
+     * segments are unmapped and non-executable segments are NX, so any
+     * other entry would fault on the first instruction. */
+    bool entry_ok = false;
+    for (uint32_t i = 0; i < img->segment_count; i++) {
+        const struct elf_segment *seg = &img->segments[i];
+        if ((seg->flags & PF_X) && eh->e_entry >= seg->vaddr &&
+            eh->e_entry < seg->vaddr + seg->size) {
+            entry_ok = true;
+            break;
+        }
+    }
+    if (!entry_ok) {
+        lputs("cosmoboot: entry point not inside an executable segment\n");
         return EFI_LOAD_ERROR;
     }
     if (img->note_version == 0) {
