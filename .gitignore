@@ -1,0 +1,33 @@
+# Build output
+out/
+*.o
+*.a
+*.so
+*.ko
+*.elf
+*.efi
+*.img
+*.iso
+*.bin
+*.d
+*.map
+
+# Host tooling
+toolchain/
+.cache/
+compile_commands.json
+.clangd/
+
+# QEMU / debugging
+*.log
+*.qcow2
+serial*.txt
+core
+vgcore.*
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
