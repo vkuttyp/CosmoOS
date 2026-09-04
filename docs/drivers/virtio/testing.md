@@ -11,15 +11,17 @@
 | Block request format, slot pool, splitting | `blk` self-test: `max_sectors + 1` sector transfers, overwrite, flush, statistics |
 | Entropy feed and budget | `random` self-test: `random_source_bytes() > 0` (4104 bytes reach the pool on a normal boot: 64 × 65 completions) |
 | Console sink registration | `virtio-console` self-test and the boot marker `virtio-console: virtioN: registered as a console sink` |
-| Module dependency handling | boot: the three drivers declare `deps = "virtio"` and load after it |
+| Network device: receive posting, transmit chains, header handling | Phase 8 `net-arp` (ARP through `eth0`) and `net-harness` (TCP and UDP echo with the host over QEMU user-mode networking); boot marker `virtio-net: virtioN is eth0` |
+| Module dependency handling | boot: the four drivers declare `deps = "virtio"` and load after it |
 
 Details of the self-tests are in `docs/kernel/device/testing.md`.
 
 ## Boot markers
 
 `tests/boot/run_boot_test.py` requires the module load lines for
-`virtio`, `virtio_blk`, `virtio_rng`, `virtio_console`, the `blk: vda:
-16384 sectors of 512 bytes` line, the console sink line, and the `boot
+`virtio`, `virtio_blk`, `virtio_rng`, `virtio_console`, `virtio_net`,
+the `blk: vda: 16384 sectors of 512 bytes` line, the `net: eth0
+registered` line, the console sink line, and the `boot
 complete` line inside the virtio console output file
 (`boot-test.log.vcon`). A regression that silently breaks notification
 or the used ring therefore fails the boot test even in release builds,

@@ -147,6 +147,23 @@ pointer.
 
 ---
 
+## `arch/fwcfg.h` (Phase 8)
+
+### `int arch_fwcfg_read(const char *name, void *buf, size_t len)`
+- Purpose: copy a firmware configuration item (QEMU fw_cfg on x86-64:
+  I/O ports 0x510/0x511, the `FW_CFG_FILE_DIR` directory) into `buf`.
+- Inputs: the item name (for example `opt/cosmo/nettest`), a buffer and
+  its size.
+- Outputs: the item's full size (which may exceed `len`; only `len`
+  bytes were copied), `-ENOENT` when the item is absent, `-ENODEV`
+  when no such device exists (the normal state on real hardware).
+- Concurrency: a spinlock serialises the selector/data port sequence;
+  any context, but every call walks the directory, so it is for boot
+  configuration. Generic code uses `fwcfg_get_string` from
+  `kernel/fwcfg.h` (`kernel/core/fwcfg.c`), which prefixes
+  `opt/cosmo/` and NUL-terminates. See
+  `docs/kernel-services/network/api.md`.
+
 ## Private x86-64 headers (not part of the interface)
 
 `kernel/arch/x86_64/include/x86/`: `cpu.h` (`x86_start`, `x86_cpu_init`,

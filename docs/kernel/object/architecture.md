@@ -19,10 +19,11 @@ pointer (constitution section 11).
 
 - `struct kobject`: type pointer and atomic reference count.
 - `struct kobject_type`: name and `release`; subtypes extend it (the
-  console type and, since Phase 7, `struct file` add `read`/`write`
-  through `kobject_io_type`). Other kobjects today: `struct vnode` and
-  `struct mount` (`kernel-services/vfs/`), `struct device`
-  (`kernel/device/`), `struct blkdev` (`kernel/block/`), `struct process`.
+  console type, since Phase 7 `struct file`, and since Phase 8
+  `struct socket` add `read`/`write` through `kobject_io_type`). Other
+  kobjects today: `struct vnode` and `struct mount`
+  (`kernel-services/vfs/`), `struct device` (`kernel/device/`),
+  `struct blkdev` (`kernel/block/`), `struct process`.
 - `struct handle_table`: fixed 64 slots, spinlock, install/lookup/close,
   destroy on process exit.
 - Rights: READ and WRITE now; the set grows with the object kinds.

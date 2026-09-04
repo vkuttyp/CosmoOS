@@ -280,6 +280,13 @@ static const struct selftest tests[] = {
     { "cosmofs-format",  selftest_cosmofs_format },
     { "cosmofs-ops",     selftest_cosmofs_ops },
     { "cosmofs-crash",   selftest_cosmofs_crash },
+    { "net-mbuf",        selftest_net_mbuf },
+    { "net-cksum",       selftest_net_cksum },
+    { "net-arp",         selftest_net_arp },
+    { "net-lo-udp",      selftest_net_lo_udp },
+    { "net-lo-tcp",      selftest_net_lo_tcp },
+    { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },
+    { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */
     { "process-reject",  selftest_process_reject },

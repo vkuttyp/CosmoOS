@@ -9,7 +9,7 @@ in kernel modules loaded from the boot archive:
 | `virtio_blk` | `virtio_blk.c` | block device `vda` on the block layer |
 | `virtio_rng` | `virtio_rng.c` | feeds the kernel entropy pool (4 KiB per boot) |
 | `virtio_console` | `virtio_console.c` | a polled console sink (`virtio-console`) |
+| `virtio_net` | `virtio_net.c` | network interface `eth0` for `kernel-services/network/` (Phase 8) |
 
-`virtio_net` waits for the networking phase. Independent of CPU
-virtualization (invariant 9). Header: `drivers/include/drivers/virtio.h`.
+Independent of CPU virtualization (invariant 9). Header: `drivers/include/drivers/virtio.h`.
 Documentation: `docs/drivers/virtio/`.

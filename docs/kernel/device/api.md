@@ -268,9 +268,12 @@ True if a sink of that name is registered. Diagnostics and self-tests.
 |---|---|---|
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img`, created as 8 MiB of zeros if missing | Backing file of the `virtio-blk-pci` scratch disk (`vda`). The boot test creates a fresh `boot-test.log.testdisk.img` every run |
 | `QEMU_VCON` | `<image dir>/vcon.log`, truncated on start | File the `virtconsole` port writes to. The boot test uses `boot-test.log.vcon` and requires the `boot complete` line in it |
+| `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`, `QEMU_PCAP` | empty | Phase 8 network knobs (port forwards, the fw_cfg harness parameter, a pcap of the NIC); see `docs/kernel-services/network/testing.md` |
 
 `qemu-run.sh` always attaches, in this order after the AHCI boot disk:
 `virtio-blk-pci` (scratch disk), `virtio-rng-pci`, `virtio-serial-pci`
-with one `virtconsole`. Under QEMU q35 these appear as
-`pci:00:03.0`, `pci:00:04.0`, `pci:00:05.0` (vendor `1af4`,
-transitional ids `1001`, `1005`, `1003`).
+with one `virtconsole`, and since Phase 8 `virtio-net-pci` on a
+user-mode `netdev` (MAC `52:54:00:c0:5f:05`), which replaces QEMU's
+default e1000e. Under QEMU q35 these appear as `pci:00:02.0` to
+`pci:00:05.0` (vendor `1af4`, transitional ids `1001`, `1005`, `1003`,
+`1000`).

@@ -67,6 +67,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/block/blk.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
+	kernel/core/fwcfg.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
@@ -75,6 +76,19 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
+	kernel-services/network/mbuf.c \
+	kernel-services/network/cksum.c \
+	kernel-services/network/inet.c \
+	kernel-services/network/netif.c \
+	kernel-services/network/loopback.c \
+	kernel-services/network/ether.c \
+	kernel-services/network/arp.c \
+	kernel-services/network/ipv4.c \
+	kernel-services/network/ipv6.c \
+	kernel-services/network/udp.c \
+	kernel-services/network/tcp.c \
+	kernel-services/network/socket.c \
+	kernel-services/network/nettest.c \
 	drivers/acpi/acpi.c \
 	drivers/pci/pci.c
 

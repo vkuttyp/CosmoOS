@@ -166,9 +166,55 @@ static void fs_selftest(void)
     CHECK(cosmo_umount("/") == -COSMO_EBUSY);
 }
 
+/* Phase 8: sockets over loopback from user mode. */
+static void net_selftest(void)
+{
+    struct cosmo_sockaddr me, peer;
+    size_t plen = sizeof(peer);
+    char buf[64];
+
+    long u = cosmo_socket(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0);
+    CHECK(u >= 3);
+    me.family = COSMO_AF_INET;
+    me.port = 40000;
+    me.flowinfo = me.scope = 0;
+    me.addr[0] = 127; me.addr[1] = 0; me.addr[2] = 0; me.addr[3] = 1;
+    CHECK(cosmo_bind((int)u, &me) == 0);
+    CHECK(cosmo_bind((int)u, &me) == -COSMO_EINVAL);
+    CHECK(cosmo_sendto((int)u, "ping", 4, &me) == 4);
+    CHECK(cosmo_recvfrom((int)u, buf, sizeof(buf), &peer, &plen) == 4 && umemcmp(buf, "ping", 4) == 0);
+    CHECK(peer.family == COSMO_AF_INET && peer.port == 40000 && peer.addr[0] == 127);
+    CHECK(cosmo_getsockname((int)u, &peer, &plen) == 0 && peer.port == 40000);
+    /* read/write work on a connected datagram socket. */
+    CHECK(cosmo_connect((int)u, &me) == 0);
+    CHECK(cosmo_write((int)u, "pong", 4) == 4);
+    CHECK(cosmo_read((int)u, buf, sizeof(buf)) == 4 && umemcmp(buf, "pong", 4) == 0);
+    CHECK(cosmo_sendto((int)u, (void *)0x10, 4, &me) == -COSMO_EFAULT);
+    CHECK(cosmo_close((int)u) == 0);
+
+    long t = cosmo_socket(COSMO_AF_INET, COSMO_SOCK_STREAM, 0);
+    CHECK(t >= 3);
+    me.port = 5999;   /* nothing listens here */
+    CHECK(cosmo_connect((int)t, &me) == -COSMO_ECONNREFUSED);
+    CHECK(cosmo_close((int)t) == 0);
+    t = cosmo_socket(COSMO_AF_INET, COSMO_SOCK_STREAM, 0);
+    CHECK(t >= 3);
+    me.port = 80;
+    CHECK(cosmo_bind((int)t, &me) == 0);   /* init is uid 0 */
+    CHECK(cosmo_listen((int)t, 4) == 0);
+    CHECK(cosmo_listen((int)t, 4) == -COSMO_EINVAL);
+    CHECK(cosmo_sendto((int)t, "x", 1, 0) == -COSMO_ENOTCONN);
+    CHECK(cosmo_close((int)t) == 0);
+    CHECK(cosmo_socket(99, COSMO_SOCK_STREAM, 0) == -COSMO_EAFNOSUPPORT);
+    CHECK(cosmo_socket(COSMO_AF_INET, 7, 0) == -COSMO_EINVAL);
+    CHECK(cosmo_bind(1, &me) == -COSMO_EBADF);   /* the console is not a socket */
+    puts_h(1, "usertest: sockets ok\n");
+}
+
 static void selftest(void)
 {
     fs_selftest();
+    net_selftest();
     /* --- write --- */
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
     CHECK(cosmo_write(1, "", 0) == 0);

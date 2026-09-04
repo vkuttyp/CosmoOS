@@ -141,6 +141,22 @@ marks itself dead and drops output rather than wedging the console. A
 single sink instance is allowed (`-EBUSY` for a second console device).
 Remove unregisters the sink, resets, frees.
 
+**virtio_net** (`virtio_net.c`, Phase 8): features `MAC` and `STATUS`
+(a device without `MAC` is refused with `-ENODEV`); no offloads and no
+`MRG_RXBUF`, so each received frame is one buffer with a 12-byte
+`virtio_net_hdr` in front. Queue 0 receive: 32 mbuf clusters posted
+whole (`data = buf`), `dma_map`ped device-writable; the completion
+callback drops frames shorter than header plus 14 bytes, sets the
+length, strips the header with `m_adj` and hands the mbuf to
+`netif_rx`, then re-posts. Queue 1 transmit: the header is prepended
+into the mbuf's headroom, a chain of more than four buffers is
+linearised first, each buffer is one descriptor, and completions free
+the chain; a full ring is `-ENOBUFS`. Both queues are interrupt driven.
+The driver registers `struct netif` `eth0` (MTU 1500, MAC from the
+configuration space) and marks it up; remove takes it down,
+unregisters, resets the device and frees every posted mbuf. Design of
+the stack side: `docs/kernel-services/network/design.md`.
+
 ## Ownership and lifetime
 
 The transport owns `struct vpci` (with the embedded `virtio_device`) from
@@ -165,7 +181,8 @@ A 256-entry queue is 3 pages (4 KiB descriptors, the available ring on
 the first page's tail, the used ring on its own page). virtio_blk adds a
 64-slot × 32-byte DMA pool (one page) plus an inflight array;
 virtio_rng one 64-byte DMA buffer (one page); virtio_console 2 KiB + 256
-bytes (two pages).
+bytes (two pages); virtio_net no pool of its own but 32 mbuf clusters
+(64 KiB) held by the device while posted.
 
 ## Error handling
 

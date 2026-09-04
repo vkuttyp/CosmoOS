@@ -18,6 +18,8 @@ failure so CI output is self-explanatory.
 
 import argparse
 import os
+import sys
+import threading
 import re
 import subprocess
 import sys
@@ -44,6 +46,8 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] module: loaded virtio_blk 1\.0 ",
     r"^\[ INFO\] module: loaded virtio_rng 1\.0 ",
     r"^\[ INFO\] module: loaded virtio_console 1\.0 ",
+    r"^\[ INFO\] module: loaded virtio_net 1\.0 ",
+    r"^\[ INFO\] net: eth0 registered ",
     r"^\[ INFO\] blk: vda: 16384 sectors of 512 bytes",
     r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
     r"^\[ INFO\] hello: module init \(ABI v1, load 1\)",
@@ -93,7 +97,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", required=True)
     ap.add_argument("--log", required=True)
-    ap.add_argument("--timeout", type=float, default=90.0, help="seconds before the run is killed")
+    ap.add_argument("--timeout", type=float, default=180.0, help="seconds before the run is killed")
     ap.add_argument("--expect-selftest", choices=["auto", "yes", "no"], default="auto",
                     help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
     ap.add_argument("--expect-panic", action="store_true",
@@ -127,6 +131,14 @@ def main():
     env["QEMU_TESTDISK"] = testdisk
     env["QEMU_VCON"] = vcon
 
+    # Phase 8: the network harness (only for normal runs with self-tests).
+    nettest = None
+    if not args.expect_panic and args.expect_selftest != "no":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from nettest import NetTest
+        nettest = NetTest()
+        env.update(nettest.env())
+
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
     with open(args.log, "wb") as log:
@@ -137,6 +149,11 @@ def main():
             stderr=subprocess.STDOUT,
             env=env,
         )
+        net_thread = None
+        if nettest is not None:
+            net_thread = threading.Thread(target=nettest.run_when_ready, args=(args.log, proc, args.timeout - 30),
+                                          daemon=True)
+            net_thread.start()
         try:
             returncode = proc.wait(timeout=args.timeout)
             timed_out = False
@@ -180,6 +197,16 @@ def main():
         failures.append("no 'SELFTEST: PASS' line")
     if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
+
+    # The network exchange happens inside the self-tests; without them
+    # (release builds) the harness only provided the devices.
+    if nettest is not None and want_selftest:
+        if net_thread is not None:
+            net_thread.join(5)
+        failures.extend(nettest.failures())
+        for pat in (r"^NETTEST: client ok", r"^NETTEST: done .*quit=1"):
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (network harness)")
 
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:

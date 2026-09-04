@@ -29,6 +29,26 @@ fi
 vcon=${QEMU_VCON:-$outdir/vcon.log}
 : > "$vcon"
 
+# Phase 8: QEMU user-mode networking on a virtio-net NIC. The harness
+# adds host port forwards (QEMU_NET_HOSTFWD, a comma-separated list of
+# "tcp:127.0.0.1:P-:7" style rules) and passes its own listening port to
+# the guest through fw_cfg (QEMU_FWCFG_NETTEST, e.g. "tcp=34567").
+netdev="user,id=n0,ipv4=on,ipv6=on"
+if [ -n "${QEMU_NET_HOSTFWD:-}" ]; then
+    for rule in $(printf '%s' "$QEMU_NET_HOSTFWD" | tr ',' ' '); do
+        netdev="$netdev,hostfwd=$rule"
+    done
+fi
+fwcfg=""
+if [ -n "${QEMU_FWCFG_NETTEST:-}" ]; then
+    fwcfg="-fw_cfg name=opt/cosmo/nettest,string=$QEMU_FWCFG_NETTEST"
+fi
+# QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
+pcap=""
+if [ -n "${QEMU_PCAP:-}" ]; then
+    pcap="-object filter-dump,id=f0,netdev=n0,file=$QEMU_PCAP"
+fi
+
 exec qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
     -cpu qemu64,+nx \
@@ -42,6 +62,10 @@ exec qemu-system-x86_64 \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \
     -device virtconsole,chardev=vcon \
+    -netdev "$netdev" \
+    -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 \
+    $fwcfg \
+    $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -serial stdio \
     -display none \

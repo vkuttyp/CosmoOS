@@ -69,8 +69,9 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v1: the exported symbols
 
-The kernel image exports 101 symbols (Phase 5's 43 plus the Phase 6
-device, PCI, DMA, block, entropy and console-sink interfaces). Adding
+The kernel image exports 117 symbols (Phase 5's 43, the Phase 6
+device, PCI, DMA, block, entropy and console-sink interfaces, and the
+Phase 8 mbuf and network-interface surface a NIC driver needs). Adding
 one is compatible; removing or changing one bumps the version.
 
 | Area | Symbols |
@@ -86,22 +87,24 @@ one is compatible; removing or changing one bumps the version.
 | Block (`kernel/blk.h`) | `blk_register`, `blk_unregister`, `blk_submit`, `bio_complete`, `blk_read`, `blk_write`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
 | Console (`kernel/console.h`) | `console_register`, `console_unregister` |
+| Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
+| Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_rx`, `netif_set_ipv4`, `netif_set_up` |
 
 Modules export too: the `virtio` module provides 15 symbols
 (`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
 `virtio_device_init`, `virtio_device_ready`, `virtio_device_reset`,
 `virtio_read_config`, `virtio_read_config32`, `virtio_read_config64`,
 `virtq_alloc`, `virtq_free`, `virtq_add`, `virtq_kick`, `virtq_pop`,
-`virtq_free_count`) that `virtio_blk`, `virtio_rng` and
-`virtio_console` resolve by declaring `deps = "virtio"`; the loader
+`virtq_free_count`) that `virtio_blk`, `virtio_rng`, `virtio_console`
+and `virtio_net` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant
 M3), and a module cannot be unloaded while a dependant holds it. In
-total the tree carries 116 `EXPORT_SYMBOL` records.
+total the tree carries 132 `EXPORT_SYMBOL` records.
 
 Semantics are those of the headers the symbols come from
 (`docs/kernel/diagnostics/api.md`, `memory/api.md`, `scheduler/api.md`,
 `timer/api.md`, `device/api.md`, `docs/drivers/pci/api.md`,
-`docs/drivers/virtio/api.md`). `EXPORT_SYMBOL` sites sit at the end of
+`docs/drivers/virtio/api.md`, `docs/kernel-services/network/api.md`). `EXPORT_SYMBOL` sites sit at the end of
 the defining `.c` files.
 
 ## Loader API (`kernel/include/kernel/module.h`, `kernel/module/module.c`)

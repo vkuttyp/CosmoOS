@@ -9,8 +9,11 @@ for performance but talk to the core only through documented interfaces.
   use instead of block devices. Phase 7.
 - `filesystem/`: on-disk filesystems; `cosmofs/` is the copy-on-write
   filesystem. Phase 7.
-- `network/`: the network stack (Phase 8).
+- `network/`: the network stack: mbufs, interfaces and the `netrx`
+  worker, Ethernet/ARP, IPv4/IPv6 with ICMP and ND, UDP, TCP, sockets.
+  Phase 8.
 - `virtualization/`: later.
 
-Documentation: `docs/kernel-services/vfs/` and
-`docs/kernel-services/filesystem/cosmofs/`.
+Documentation: `docs/kernel-services/vfs/`,
+`docs/kernel-services/filesystem/cosmofs/` and
+`docs/kernel-services/network/`.

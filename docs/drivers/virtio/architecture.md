@@ -10,9 +10,9 @@ VirtIO 1.1 (OASIS), sections 2.1 (status), 2.6 (split virtqueues),
 ## Where it sits
 
 ```text
-   modules      virtio_blk.ko      virtio_rng.ko      virtio_console.ko
-                (struct blkdev)    (random_add_entropy) (console sink)
-                      │                  │                  │
+   modules      virtio_blk.ko      virtio_rng.ko      virtio_console.ko   virtio_net.ko
+                (struct blkdev)    (random_add_entropy) (console sink)      (struct netif eth0)
+                      │                  │                  │                  │
                 virtio.ko:  virtio.c     the "virtio" bus, device init, drivers
                             virtqueue.c  split rings: alloc/add/kick/pop/free
                             virtio_pci.c the virtio-pci modern transport, module entry
@@ -22,7 +22,7 @@ VirtIO 1.1 (OASIS), sections 2.1 (status), 2.6 (split virtqueues),
 ```
 
 All of VirtIO is outside the kernel image: `virtio` is a boot module,
-the three device drivers are boot modules depending on it (`deps =
+the four device drivers are boot modules depending on it (`deps =
 "virtio"`), and everything they use from the kernel is an exported
 symbol. `drivers/include/drivers/virtio.h` is the shared header.
 
@@ -52,7 +52,9 @@ entropy buffer, a console byte stream).
   subsystem id (transitional).
 - **Device drivers**: `virtio_blk` (a block device `vda`), `virtio_rng`
   (feeds the entropy pool up to a per-boot budget), `virtio_console`
-  (port 0 transmit as a console sink).
+  (port 0 transmit as a console sink), and since Phase 8 `virtio_net`
+  (a `struct netif` named `eth0` for the network stack,
+  `docs/kernel-services/network/`).
 
 ## Non-responsibilities
 
