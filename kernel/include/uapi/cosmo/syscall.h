@@ -12,6 +12,8 @@
 #ifndef UAPI_COSMO_SYSCALL_H
 #define UAPI_COSMO_SYSCALL_H
 
+#include <stdint.h>
+
 #define SYS_exit      0   /* (int status) -> never returns */
 #define SYS_write     1   /* (int h, const void *buf, size_t len) -> bytes */
 #define SYS_read      2   /* (int h, void *buf, size_t len) -> bytes */
@@ -23,7 +25,67 @@
 #define SYS_munmap    8   /* (void *addr, size_t len) -> 0 */
 #define SYS_log       9   /* (const char *s, size_t len) -> 0 */
 #define SYS_close     10  /* (int h) -> 0 */
-#define SYS_COUNT     11
+/* Phase 7: the filesystem calls. */
+#define SYS_open      11  /* (const char *path, int flags, uint32_t mode) -> handle */
+#define SYS_stat      12  /* (const char *path, struct cosmo_stat *st) -> 0 */
+#define SYS_fstat     13  /* (int h, struct cosmo_stat *st) -> 0 */
+#define SYS_lseek     14  /* (int h, int64_t off, int whence) -> new position */
+#define SYS_mkdir     15  /* (const char *path, uint32_t mode) -> 0 */
+#define SYS_unlink    16  /* (const char *path) -> 0 */
+#define SYS_rmdir     17  /* (const char *path) -> 0 */
+#define SYS_rename    18  /* (const char *old, const char *new) -> 0 */
+#define SYS_getdents  19  /* (int h, void *buf, size_t len) -> bytes, 0 at end */
+#define SYS_sync      20  /* () -> 0 */
+#define SYS_mount     21  /* (const char *source, const char *target, const char *fstype, unsigned flags) -> 0 */
+#define SYS_umount    22  /* (const char *target) -> 0 */
+#define SYS_COUNT     23
+
+/* open() flags. */
+#define COSMO_O_RDONLY    0x0000
+#define COSMO_O_WRONLY    0x0001
+#define COSMO_O_RDWR      0x0002
+#define COSMO_O_ACCMODE   0x0003
+#define COSMO_O_CREAT     0x0040
+#define COSMO_O_EXCL      0x0080
+#define COSMO_O_TRUNC     0x0200
+#define COSMO_O_APPEND    0x0400
+#define COSMO_O_DIRECTORY 0x10000
+
+/* lseek() whence. */
+#define COSMO_SEEK_SET 0
+#define COSMO_SEEK_CUR 1
+#define COSMO_SEEK_END 2
+
+/* Directory entry and stat types. */
+#define COSMO_DT_UNKNOWN 0
+#define COSMO_DT_REG     1
+#define COSMO_DT_DIR     2
+#define COSMO_DT_CHR     3
+
+struct cosmo_stat {
+    uint64_t ino;
+    uint32_t type;      /* COSMO_DT_* */
+    uint32_t mode;      /* permission bits */
+    uint32_t nlink;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t pad;
+    uint64_t size;
+    uint64_t mtime_ns;
+    uint64_t ctime_ns;
+};
+
+/* getdents() record: reclen bytes, name NUL terminated, 8-byte aligned. */
+struct cosmo_dirent {
+    uint64_t ino;
+    uint16_t reclen;
+    uint8_t  type;      /* COSMO_DT_* */
+    uint8_t  namelen;
+    char     name[];
+};
+
+/* mount() flags. */
+#define COSMO_MOUNT_RDONLY (1u << 0)
 
 /* mmap protection and flags. */
 #define COSMO_PROT_NONE  0
@@ -48,6 +110,14 @@
 #define COSMO_EMFILE  24
 #define COSMO_ENOSPC  28
 #define COSMO_ENOSYS  38
+#define COSMO_EXDEV   18
+#define COSMO_ENODEV  19
+#define COSMO_ENOTDIR 20
+#define COSMO_EISDIR  21
+#define COSMO_EFBIG   27
+#define COSMO_EROFS   30
+#define COSMO_ENOTEMPTY 39
+#define COSMO_ENAMETOOLONG 36
 
 /* Exit status reported for a process terminated by a fatal fault. */
 #define COSMO_EXIT_FAULT 139

@@ -38,6 +38,25 @@ kernel stack.
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200) |
 | 10 | `close` | `int h` | 0 | `EBADF` |
+| 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
+| 12 | `stat` | `const char *path, struct cosmo_stat *st` | 0 | path errors, `EFAULT` |
+| 13 | `fstat` | `int h, struct cosmo_stat *st` | 0 | `EBADF`, `EFAULT` |
+| 14 | `lseek` | `int h, int64_t off, int whence` | new position | `EBADF`, `EINVAL`, `ESPIPE` |
+| 15 | `mkdir` | `const char *path, uint32_t mode` | 0 | path errors, `EEXIST`, `EROFS` |
+| 16 | `unlink` | `const char *path` | 0 | path errors, `EISDIR`, `EBUSY` |
+| 17 | `rmdir` | `const char *path` | 0 | path errors, `ENOTDIR`, `ENOTEMPTY`, `EBUSY` |
+| 18 | `rename` | `const char *old, const char *new` | 0 | path errors, `EXDEV`, `ENOTEMPTY`, `EBUSY` |
+| 19 | `getdents` | `int h, void *buf, size_t len` | bytes, 0 at end | `EBADF`, `EFAULT`, `ENOTDIR`, `EINVAL` |
+| 20 | `sync` | none | 0 | filesystem error |
+| 21 | `mount` | `source, target, fstype, flags` | 0 | `EPERM`, `ENODEV`, `EBUSY`, `EIO` |
+| 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY` |
+
+Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
+`struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
+in `docs/kernel-services/vfs/api.md`. `SYS_COUNT` is 23. A file opened
+with `open` is a `struct file` kobject of a `kobject_io_type`, so `read`,
+`write` and `close` operate on it unchanged; the handle carries READ
+and/or WRITE rights from the access mode.
 
 Unknown numbers (including `SYS_COUNT` and above, and negative values
 seen as large unsigned) return `-ENOSYS` with no side effects.
@@ -99,7 +118,10 @@ page is populated.
 `cosmo_syscall0..4` are macros over it. Typed wrappers `cosmo_exit`
 (noreturn), `cosmo_write`, `cosmo_read`, `cosmo_getpid`,
 `cosmo_yield`, `cosmo_sleep_ns`, `cosmo_clock_ns`, `cosmo_mmap`,
-`cosmo_munmap`, `cosmo_log`, `cosmo_close` return the raw kernel result
+`cosmo_munmap`, `cosmo_log`, `cosmo_close`, and since Phase 7 `cosmo_open`,
+`cosmo_stat`, `cosmo_fstat`, `cosmo_lseek`, `cosmo_mkdir`, `cosmo_unlink`,
+`cosmo_rmdir`, `cosmo_rename`, `cosmo_getdents`, `cosmo_sync`,
+`cosmo_mount`, `cosmo_umount` return the raw kernel result
 as `long`; there is no `errno` variable yet. ABI stability: the wrapper
 names are the start of the native libc and are meant to stay.
 

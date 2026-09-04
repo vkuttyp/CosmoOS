@@ -6,6 +6,7 @@
  * errno on failure. User memory is touched only through uaccess.h.
  */
 
+#include <kernel/blk.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
@@ -18,6 +19,7 @@
 #include <kernel/syscall.h>
 #include <kernel/timer.h>
 #include <kernel/uaccess.h>
+#include <kernel/vfs.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
 
@@ -209,6 +211,181 @@ static int64_t sys_close(struct syscall_args *a)
     return handle_close(&process_current()->handles, (int)a->a[0]);
 }
 
+/* --- Phase 7: files ------------------------------------------------------- */
+
+static int get_path(uint64_t uptr, char *buf)
+{
+    int rc = strncpy_from_user(buf, uptr, VFS_PATH_MAX);
+    if (rc < 0)
+        return rc;
+    return buf[0] == '\0' ? -ENOENT : 0;
+}
+
+static struct file *file_of(int h, unsigned rights)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
+    if (obj == NULL)
+        return NULL;
+    struct file *f = file_from_kobject(obj);
+    if (f == NULL)
+        kobject_put(obj);
+    return f;
+}
+
+static int64_t sys_open(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    unsigned flags = (unsigned)a->a[1];
+    uint32_t mode = (uint32_t)a->a[2];
+    struct file *f;
+    rc = vfs_open(NULL, path, flags, mode, &f);
+    if (rc)
+        return rc;
+    unsigned rights = 0;
+    unsigned acc = flags & COSMO_O_ACCMODE;
+    if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
+        rights |= HANDLE_RIGHT_READ;
+    if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR)
+        rights |= HANDLE_RIGHT_WRITE;
+    int h = handle_install(&process_current()->handles, &f->obj, rights);
+    file_put(f);   /* the table holds its own reference */
+    return h;
+}
+
+static int64_t sys_stat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct cosmo_stat st;
+    rc = vfs_stat(NULL, path, &st);
+    if (rc)
+        return rc;
+    return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
+}
+
+static int64_t sys_fstat(struct syscall_args *a)
+{
+    struct file *f = file_of((int)a->a[0], 0);
+    if (f == NULL)
+        return -EBADF;
+    struct cosmo_stat st;
+    file_stat(f, &st);
+    file_put(f);
+    return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
+}
+
+static int64_t sys_lseek(struct syscall_args *a)
+{
+    struct file *f = file_of((int)a->a[0], 0);
+    if (f == NULL)
+        return -EBADF;
+    int64_t rc = file_seek(f, (int64_t)a->a[1], (int)a->a[2]);
+    file_put(f);
+    return rc;
+}
+
+static int64_t sys_mkdir(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    return rc ? rc : vfs_mkdir(NULL, path, (uint32_t)a->a[1]);
+}
+
+static int64_t sys_unlink(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    return rc ? rc : vfs_unlink(NULL, path);
+}
+
+static int64_t sys_rmdir(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    return rc ? rc : vfs_rmdir(NULL, path);
+}
+
+static int64_t sys_rename(struct syscall_args *a)
+{
+    char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], oldp);
+    if (rc)
+        return rc;
+    rc = get_path(a->a[1], newp);
+    return rc ? rc : vfs_rename(NULL, oldp, newp);
+}
+
+static int64_t sys_getdents(struct syscall_args *a)
+{
+    uint64_t ubuf = a->a[1];
+    size_t len = (size_t)a->a[2];
+    if (len > 65536)
+        len = 65536;
+    if (!user_range_ok(ubuf, len))
+        return -EFAULT;
+    struct file *f = file_of((int)a->a[0], HANDLE_RIGHT_READ);
+    if (f == NULL)
+        return -EBADF;
+    void *tmp = kmalloc(len, 0);
+    if (tmp == NULL) {
+        file_put(f);
+        return -ENOMEM;
+    }
+    int64_t n = file_readdir(f, tmp, len);
+    file_put(f);
+    if (n > 0 && copy_to_user(ubuf, tmp, (size_t)n))
+        n = -EFAULT;
+    kfree(tmp);
+    return n;
+}
+
+static int64_t sys_sync(struct syscall_args *a)
+{
+    (void)a;
+    return vfs_sync();
+}
+
+static int64_t sys_mount(struct syscall_args *a)
+{
+    if (process_current()->cred.uid != 0)
+        return -EPERM;
+    char source[BLKDEV_NAME_MAX], target[VFS_PATH_MAX], fstype[16];
+    int rc = strncpy_from_user(source, a->a[0], sizeof(source));
+    if (rc < 0)
+        return rc;
+    rc = get_path(a->a[1], target);
+    if (rc)
+        return rc;
+    rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
+    if (rc < 0)
+        return rc;
+    unsigned flags = (unsigned)a->a[3] & COSMO_MOUNT_RDONLY;
+    struct blkdev *bd = NULL;
+    if (source[0] != '\0' && strcmp(source, "none") != 0) {
+        bd = blk_find(source);
+        if (bd == NULL)
+            return -ENODEV;
+    }
+    rc = vfs_mount(target, fstype, bd, flags);
+    if (bd)
+        blkdev_put(bd);   /* the mount took its own reference */
+    return rc;
+}
+
+static int64_t sys_umount(struct syscall_args *a)
+{
+    if (process_current()->cred.uid != 0)
+        return -EPERM;
+    char target[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], target);
+    return rc ? rc : vfs_umount(target);
+}
+
 static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_exit] = sys_exit,
     [SYS_write] = sys_write,
@@ -221,6 +398,18 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_munmap] = sys_munmap,
     [SYS_log] = sys_log,
     [SYS_close] = sys_close,
+    [SYS_open] = sys_open,
+    [SYS_stat] = sys_stat,
+    [SYS_fstat] = sys_fstat,
+    [SYS_lseek] = sys_lseek,
+    [SYS_mkdir] = sys_mkdir,
+    [SYS_unlink] = sys_unlink,
+    [SYS_rmdir] = sys_rmdir,
+    [SYS_rename] = sys_rename,
+    [SYS_getdents] = sys_getdents,
+    [SYS_sync] = sys_sync,
+    [SYS_mount] = sys_mount,
+    [SYS_umount] = sys_umount,
 };
 
 const struct personality personality_native = {

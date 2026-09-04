@@ -261,9 +261,6 @@ static const struct selftest tests[] = {
     { "smp-mutex",       selftest_smp_mutex },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },
-    { "process-reject",  selftest_process_reject },
-    { "process-user",    selftest_process_selftest },
-    { "process-fault",   selftest_process_fault },
     { "bootarchive",     selftest_bootarchive },
     { "ksym",            selftest_ksym },
     { "modsig",          selftest_modsig },
@@ -276,6 +273,18 @@ static const struct selftest tests[] = {
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },
+    { "crc32c",          selftest_crc32c },
+    { "pagecache",       selftest_pagecache },
+    { "vfs-ramfs",       selftest_vfs_ramfs },
+    { "pool",            selftest_pool },
+    { "cosmofs-format",  selftest_cosmofs_format },
+    { "cosmofs-ops",     selftest_cosmofs_ops },
+    { "cosmofs-crash",   selftest_cosmofs_crash },
+    /* Last: init's user-mode self-test mounts the cosmofs the tests above
+     * leave on the scratch disk. */
+    { "process-reject",  selftest_process_reject },
+    { "process-user",    selftest_process_selftest },
+    { "process-fault",   selftest_process_fault },
 };
 
 int selftest_run_all(void)

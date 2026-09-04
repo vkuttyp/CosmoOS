@@ -66,6 +66,15 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
 	kernel/core/random.c \
+	kernel/core/crc32c.c \
+	kernel-services/vfs/vfs.c \
+	kernel-services/vfs/pagecache.c \
+	kernel-services/vfs/ramfs.c \
+	kernel-services/vfs/vfstest.c \
+	kernel-services/storage/pool.c \
+	kernel-services/filesystem/cosmofs/cosmofs_core.c \
+	kernel-services/filesystem/cosmofs/cosmofs.c \
+	kernel-services/filesystem/cosmofs/cosmofstest.c \
 	drivers/acpi/acpi.c \
 	drivers/pci/pci.c
 

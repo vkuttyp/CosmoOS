@@ -68,4 +68,15 @@ bool selftest_random(const char **reason);
 bool selftest_blk(const char **reason);
 bool selftest_virtio_console(const char **reason);
 
+/* Phase 7: kernel-services/vfs/vfstest.c */
+bool selftest_vfs_ramfs(const char **reason);
+bool selftest_pagecache(const char **reason);
+bool selftest_crc32c(const char **reason);
+
+/* Phase 7: kernel-services/filesystem/cosmofs/cosmofstest.c */
+bool selftest_pool(const char **reason);
+bool selftest_cosmofs_format(const char **reason);
+bool selftest_cosmofs_ops(const char **reason);
+bool selftest_cosmofs_crash(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

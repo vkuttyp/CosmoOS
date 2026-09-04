@@ -90,4 +90,55 @@ static inline long cosmo_close(int h)
     return cosmo_syscall1(SYS_close, h);
 }
 
+
+/* Phase 7: files. */
+static inline long cosmo_open(const char *path, int flags, unsigned mode)
+{
+    return cosmo_syscall3(SYS_open, path, flags, mode);
+}
+static inline long cosmo_stat(const char *path, struct cosmo_stat *st)
+{
+    return cosmo_syscall2(SYS_stat, path, st);
+}
+static inline long cosmo_fstat(int h, struct cosmo_stat *st)
+{
+    return cosmo_syscall2(SYS_fstat, h, st);
+}
+static inline long cosmo_lseek(int h, long off, int whence)
+{
+    return cosmo_syscall3(SYS_lseek, h, off, whence);
+}
+static inline long cosmo_mkdir(const char *path, unsigned mode)
+{
+    return cosmo_syscall2(SYS_mkdir, path, mode);
+}
+static inline long cosmo_unlink(const char *path)
+{
+    return cosmo_syscall1(SYS_unlink, path);
+}
+static inline long cosmo_rmdir(const char *path)
+{
+    return cosmo_syscall1(SYS_rmdir, path);
+}
+static inline long cosmo_rename(const char *oldp, const char *newp)
+{
+    return cosmo_syscall2(SYS_rename, oldp, newp);
+}
+static inline long cosmo_getdents(int h, void *buf, size_t len)
+{
+    return cosmo_syscall3(SYS_getdents, h, buf, len);
+}
+static inline long cosmo_sync(void)
+{
+    return cosmo_syscall0(SYS_sync);
+}
+static inline long cosmo_mount(const char *source, const char *target, const char *fstype, unsigned flags)
+{
+    return cosmo_syscall4(SYS_mount, source, target, fstype, flags);
+}
+static inline long cosmo_umount(const char *target)
+{
+    return cosmo_syscall1(SYS_umount, target);
+}
+
 #endif /* COSMO_SYSCALL_H */
