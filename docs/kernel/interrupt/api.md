@@ -79,8 +79,82 @@ if (v >= 0)
 ```
 
 Literal vector numbers in generic code violate Invariant 1. Vectors for
-external devices will come from the interrupt-controller layer (Phase 3/6),
-which does not exist yet.
+external devices come from the IRQ layer below (`irq_request` allocates
+one through `arch_vector_alloc`).
+
+### `int interrupt_unregister_vector(unsigned vector)`
+- **Purpose**: remove whatever handler `vector` has, for owners of a
+  vector that do not track the function pointer (the IRQ layer).
+- **Outputs**: `0`, `-EINVAL`, `-ENOENT` (nothing registered).
+- **Concurrency**: as `interrupt_unregister`.
+
+---
+
+## Phase 3: hardware IRQ lines (`kernel/include/kernel/irq.h`)
+
+GSI-numbered interrupt lines behind the controllers. All functions take
+`g_irq_lock` (irqsave). `irq_request`/`irq_release` are not for
+interrupt context (they program the controller and touch the vector
+table); `irq_enable`/`irq_disable` are interrupt-safe.
+
+### `void irq_init(void)`
+- Clears the GSI table and calls `arch_irqc_init()` (LAPIC + IOAPICs from
+  ACPI). Once, after `acpi_init`, before `timer_init`. Panics without a
+  local APIC.
+
+### `int irq_request(irq_t irq, interrupt_handler_fn fn, void *arg, const char *name, unsigned flags, unsigned cpu)`
+- **Purpose**: allocate a dynamic vector, install `fn` on it, and program
+  the controller so `irq` delivers that vector to `cpu`, initially
+  masked.
+- **Inputs**: `irq` is a GSI (`< IRQ_MAX` = 256); `flags` is
+  `IRQ_TRIGGER_EDGE` (0) or `IRQ_TRIGGER_LEVEL`, optionally
+  `IRQ_POLARITY_LOW`; `cpu` must be a registered CPU.
+- **Outputs**: `0`, `-EINVAL`, `-EBUSY` (GSI already requested),
+  `-ENOSPC` (no vector), `-ENODEV` (no I/O APIC covers the GSI).
+- **Ownership**: `arg` and `name` as for `interrupt_register`.
+
+### `int irq_release(irq_t irq)`
+- Masks the line, removes the handler (`interrupt_unregister_vector`),
+  frees the vector. `-ENOENT` if not requested.
+
+### `int irq_enable(irq_t irq)` / `int irq_disable(irq_t irq)`
+- Unmask / mask the redirection entry. `-EINVAL` if not requested.
+
+### `irq_t irq_legacy_to_gsi(unsigned isa_irq, unsigned *flags_out)`
+- Apply the MADT interrupt source overrides (bus 0) to an ISA IRQ; the
+  identity mapping and edge/high otherwise. `flags_out` receives the
+  trigger/polarity to pass to `irq_request`. On QEMU, ISA IRQ 0 maps to
+  GSI 2.
+
+### `int irq_vector_of(irq_t irq)`
+- Diagnostics: the assigned vector or `-1`.
+
+## Phase 3: controller interface (`kernel/include/arch/irqc.h`)
+
+Implemented by `kernel/arch/x86_64/irqc.c` over `lapic.c` and
+`ioapic.c`; generic code never includes those.
+
+| Function | Contract |
+|---|---|
+| `arch_irqc_init()` | boot CPU: LAPIC at the MADT base, all IOAPICs registered and fully masked |
+| `arch_irqc_init_cpu()` | calling AP: its LAPIC |
+| `arch_vector_alloc()` / `arch_vector_free(v)` | dynamic vectors under a spinlock; `-ENOSPC` when exhausted |
+| `arch_irqc_route(gsi, vector, cpu, flags)` | program the redirection entry masked; `-ENODEV`, `-EINVAL` |
+| `arch_irqc_mask(gsi)` / `arch_irqc_unmask(gsi)` | bit 16 of the entry |
+| `arch_irqc_eoi(vector)` | no-op for exceptions and the spurious vector; PIC EOI for 32–47; LAPIC EOI otherwise. Called by the arch dispatch tail after every interrupt handler |
+| `arch_irqc_gsi_count()` | highest covered GSI + 1 |
+| `arch_irqc_spurious_vector()` | 255 |
+| `arch_ipi_send(cpu, vector)` / `arch_ipi_broadcast_others(vector)` | fixed-delivery IPIs (used by the SMP work) |
+
+## x86-64 vector map
+
+| Range | Use |
+|---|---|
+| 0–31 | exceptions |
+| 32–47 | legacy PIC, masked; kept for spurious identification |
+| 48–238 | dynamic: `irq_request`, the LAPIC tick (`arch_timer_vector`), IPIs |
+| 239–254 | reserved |
+| 255 | LAPIC spurious vector (no EOI) |
 
 ## Example handler
 

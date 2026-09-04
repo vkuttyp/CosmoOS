@@ -28,9 +28,38 @@ panic with a complete report; `tests/boot/run_boot_test.py --expect-panic`
 verifies the markers and exit code 35. This covers the `fn == NULL`
 branch of `interrupt_dispatch` for an exception.
 
+### `acpi` self-test (`kernel/scheduler/schedtest.c`)
+
+`acpi_available()`, a non-zero `acpi_madt_lapic_base()`, at least one
+MADT processor entry, `acpi_find_table("APIC")` non-NULL and a bogus
+signature NULL. Proves the RSDP → XSDT → MADT walk and checksum path
+that the controllers depend on.
+
+### `irq-route` self-test (`kernel/scheduler/schedtest.c`)
+
+End-to-end hardware interrupt through the I/O APIC, using the PIT as a
+test source via `arch/testhooks.h` (`kernel/arch/x86_64/pit.c`):
+
+| Step | Proves |
+|---|---|
+| `arch_test_periodic_irq_start(200)` → ISA IRQ 0 | PIT channel 0 in rate-generator mode at 200 Hz |
+| `irq_legacy_to_gsi(0)` → GSI 2 with edge/high flags | MADT interrupt source override applied (QEMU remaps IRQ 0 to GSI 2) |
+| `irq_request(gsi, pit_handler, ...)` == 0 | vector allocated (49 on a fresh boot), handler installed, redirection entry programmed masked |
+| second `irq_request` on the GSI → `-EBUSY` | one owner per line |
+| `irq_vector_of(gsi) >= 48` | dynamic range |
+| `irq_enable`, `udelay(50 ms)`, `hits >= 5` | unmask → IOAPIC → LAPIC → vector → `interrupt_dispatch` → handler, with `arch_irqc_eoi` after each (10 expected, 5 required for TCG slack) |
+| `irq_disable`, no new hits over a further 20 ms window | mask stops delivery |
+| `irq_release` == 0, `irq_vector_of` == -1 | handler removed, vector returned |
+| `arch_test_periodic_irq_stop()` | PIT quiesced |
+
+The test skips itself (logging why) when there is no periodic ISA
+source or no I/O APIC covers the GSI, so it does not fail on platforms
+that lack them; QEMU q35 has both.
+
 ### Static analysis
 
-`make analyze` runs the clang analyzer on `interrupt.c`.
+`make analyze` runs the clang analyzer on `interrupt.c`, `irq.c`, and
+the controller drivers.
 
 ## Not yet covered
 
@@ -63,5 +92,6 @@ make test-crash        # unhandled exception path
 make analyze
 ```
 
-Look for `SELFTEST: breakpoint-trap ... ok` in
-`out/x86_64-debug/boot-test.log`.
+Look for `SELFTEST: breakpoint-trap ... ok`, `SELFTEST: acpi ... ok`, and
+`SELFTEST: irq-route ... ok` in `out/x86_64-debug/boot-test.log`; the
+debug log also shows `irq: GSI 2 -> vector 49 on CPU 0 (selftest-pit)`.

@@ -133,10 +133,17 @@ Memory: 205 MiB usable in 32 regions, RAM ends at 256 MiB
 [ INFO] pmm: 256 MiB RAM span, 246 MiB free, 9 MiB reserved, 0 MiB deferred, page array 2048 KiB
 [ INFO] kmalloc: 15 size classes up to 8192 bytes, page path up to 4096 KiB
 [ INFO] vmm: 246 MiB free after takeover, arena 0xffffc00000000000-0xffffe00000000000
+[ INFO] acpi: XSDT rev 2, 6 tables, LAPIC at 0xfee00000, 1 CPUs, 1 IOAPICs, 5 overrides
+[ INFO] irq: controllers up, 24 GSIs
+[ INFO] timer: tsc at 996.000 MHz, tick 250 Hz
+[ INFO] sched: policy 'rr', slice 10 ms, tick 250 Hz
 [ INFO] interrupts enabled
 SELFTEST: printf           ... ok
 ...
-SELFTEST: PASS (8 tests)
+SELFTEST: irq-route        ... ok
+SELFTEST: thread           ... ok
+...
+SELFTEST: PASS (19 tests)
 [ INFO] boot complete; nothing more to do in this phase
 [ INFO] shutdown: exit status 0
 [ INFO] shutdown: halting CPU

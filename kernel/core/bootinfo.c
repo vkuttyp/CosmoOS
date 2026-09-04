@@ -95,6 +95,15 @@ bool bootinfo_mem_type_is_ram(uint32_t type)
     }
 }
 
+bool bootinfo_phys_is_ram(uint64_t pa)
+{
+    for (uint32_t i = 0; i < g_map_count; i++) {
+        if (pa >= g_map[i].base && pa < g_map[i].base + g_map[i].length)
+            return bootinfo_mem_type_is_ram(g_map[i].type);
+    }
+    return false;
+}
+
 uint64_t bootinfo_phys_limit(void)
 {
     uint64_t limit = 0;

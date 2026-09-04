@@ -12,7 +12,10 @@
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
+#include <kernel/sched.h>
 
+#include <arch/irqc.h>
 #include <arch/trap.h>
 
 #include <x86/cpu.h>
@@ -56,11 +59,27 @@ static uint64_t g_spurious_count;
 void x86_trap_dispatch(struct arch_trap_frame *frame)
 {
     unsigned vector = (unsigned)frame->vector;
+    bool is_interrupt = vector >= X86_EXCEPTION_COUNT;
+    struct percpu *pc = this_cpu();
+
+    if (is_interrupt) {
+        pc->irq_depth++;
+        pc->irq_count++;
+    }
 
     interrupt_dispatch(vector, frame);
 
-    if (vector >= X86_VECTOR_IRQ_BASE && vector < X86_VECTOR_IRQ_BASE + X86_VECTOR_IRQ_COUNT)
-        pic_eoi(vector - X86_VECTOR_IRQ_BASE);
+    if (is_interrupt) {
+        arch_irqc_eoi(vector);
+        pc->irq_depth--;
+
+        /* Preemption point: returning to a preemptible context with a
+         * reschedule pending. The switch happens here, on the interrupted
+         * thread's stack; the iretq completes when it is switched back. */
+        if (pc->irq_depth == 0 && pc->need_resched && pc->preempt_count == 0 &&
+            (frame->rflags & RFLAGS_IF))
+            sched_preempt();
+    }
 }
 
 /* --- arch/trap.h --- */

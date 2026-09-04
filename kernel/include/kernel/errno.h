@@ -10,15 +10,18 @@
 #ifndef KERNEL_ERRNO_H
 #define KERNEL_ERRNO_H
 
-#define EPERM   1   /* operation not permitted */
-#define ENOENT  2   /* no such entry */
-#define EIO     5   /* I/O error */
-#define ENOMEM  12  /* out of memory */
-#define EBUSY   16  /* resource busy */
-#define EEXIST  17  /* already exists */
-#define EINVAL  22  /* invalid argument */
-#define ENOSPC  28  /* no space left */
-#define ERANGE  34  /* result out of range */
-#define ENOSYS  38  /* not implemented */
+#define EPERM     1   /* operation not permitted */
+#define ENOENT    2   /* no such entry */
+#define EIO       5   /* I/O error */
+#define EAGAIN    11  /* try again */
+#define ENOMEM    12  /* out of memory */
+#define EBUSY     16  /* resource busy */
+#define EEXIST    17  /* already exists */
+#define ENODEV    19  /* no such device */
+#define EINVAL    22  /* invalid argument */
+#define ENOSPC    28  /* no space left */
+#define ERANGE    34  /* result out of range */
+#define ENOSYS    38  /* not implemented */
+#define ETIMEDOUT 110 /* operation timed out */
 
 #endif /* KERNEL_ERRNO_H */

@@ -10,6 +10,14 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/pic.c \
 	kernel/arch/x86_64/trap.c \
 	kernel/arch/x86_64/mmu.c \
+	kernel/arch/x86_64/percpu.c \
+	kernel/arch/x86_64/lapic.c \
+	kernel/arch/x86_64/ioapic.c \
+	kernel/arch/x86_64/irqc.c \
+	kernel/arch/x86_64/timer.c \
+	kernel/arch/x86_64/pit.c \
+	kernel/arch/x86_64/switch.S \
+	kernel/arch/x86_64/context.c \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \
 	kernel/arch/x86_64/shutdown.c

@@ -16,12 +16,15 @@ wins and the document is wrong.
 | `build/` | Build system subsystem documentation |
 | `boot/` | Boot protocol and UEFI loader subsystem documentation |
 | `kernel/arch/` | Architecture abstraction and its x86-64 implementation |
-| `kernel/interrupt/` | Vector-to-handler dispatch |
+| `kernel/interrupt/` | Vector-to-handler dispatch; `controllers.md` covers the Phase 3 IRQ layer (GSI routing, LAPIC/IOAPIC, vector map, IPIs) |
 | `kernel/diagnostics/` | Console, logging, printf, panic, self-tests, crash test |
 | `kernel/memory/` | Physical memory (bootmem, zones, buddy), virtual memory (page-table takeover, arena, faults), slab heap and kmalloc; host unit tests in `tests/host/` |
+| `kernel/scheduler/` | Threads, per-CPU run queues, round-robin policy, preemption, wait queues, mutex, semaphore, completion, per-CPU data |
+| `kernel/timer/` | Monotonic TSC clock, LAPIC tick, one-shot timers, sleep, PIT calibration |
+| `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides) |
 
 Further subsystem directories are added as subsystems come into existence
-(`kernel/scheduler/`, `kernel/process/`, and so on).
+(`kernel/process/`, `kernel-services/vfs/`, and so on).
 
 ## Per-subsystem convention
 

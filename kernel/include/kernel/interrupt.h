@@ -44,6 +44,10 @@ int interrupt_register(unsigned vector, interrupt_handler_fn fn, void *arg, cons
  * the registered handler. */
 int interrupt_unregister(unsigned vector, interrupt_handler_fn fn);
 
+/* Remove whatever handler `vector` has. For owners of the vector (the
+ * IRQ layer) that do not track the function pointer. */
+int interrupt_unregister_vector(unsigned vector);
+
 /* Called by the architecture layer for every interrupt and exception. If
  * no handler is registered it calls arch_trap_unhandled(). */
 void interrupt_dispatch(unsigned vector, struct arch_trap_frame *frame);
