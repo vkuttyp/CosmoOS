@@ -22,7 +22,9 @@
 #define __printf(a, b)  __attribute__((format(printf, a, b)))
 #define __must_check    __attribute__((warn_unused_result))
 #define __noinline      __attribute__((noinline))
-#define __always_inline inline __attribute__((always_inline))
+/* Not named __always_inline: glibc's sys/cdefs.h defines that, and the
+ * host unit tests compile these headers against libc. */
+#define __force_inline  inline __attribute__((always_inline))
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)

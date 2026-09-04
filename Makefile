@@ -5,6 +5,7 @@
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
 #   make test-crash   build a deliberately faulting kernel, verify panic path
+#   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make analyze      clang static analyzer over all target sources
 #   make reproducible build twice into separate trees and compare outputs
 #   make compile-commands  compile_commands.json for clangd with cross flags
@@ -24,6 +25,7 @@ include $(ROOT)/build/rules.mk
 
 include $(ROOT)/kernel/kernel.mk
 include $(ROOT)/boot/uefi/boot.mk
+include $(ROOT)/tests/host/host.mk
 
 all: kernel boot
 
@@ -76,7 +78,7 @@ clean:
 	$(Q)rm -rf $(OUT)
 
 help:
-	@sed -n '2,15p' $(ROOT)/Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,16p' $(ROOT)/Makefile | sed 's/^# \{0,1\}//'
 	@echo
 	@echo "ARCH=$(ARCH) BUILD=$(BUILD) OUT=$(OUT)"
 	@echo "HOST=$(HOST_OS)/$(HOST_ARCH) CC=$(CC) LD=$(LD)"

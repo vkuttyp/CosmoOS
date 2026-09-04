@@ -13,6 +13,7 @@
 #ifndef KERNEL_BOOTINFO_H
 #define KERNEL_BOOTINFO_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <cosmoboot.h>
@@ -36,5 +37,9 @@ uint64_t bootinfo_phys_limit(void);
 void *bootinfo_phys_to_virt(uint64_t phys);
 
 const char *bootinfo_mem_type_name(uint32_t type);
+
+/* True for types that are RAM (usable, reclaimable, kernel, boot data,
+ * ACPI, firmware runtime), false for MMIO, reserved, bad, persistent. */
+bool bootinfo_mem_type_is_ram(uint32_t type);
 
 #endif /* KERNEL_BOOTINFO_H */

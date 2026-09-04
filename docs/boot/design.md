@@ -39,8 +39,10 @@ mis-boot.
 
 Set by `cpu_jump_to_kernel()` in `boot/uefi/cpu.c`:
 
-- Long mode, CR3 = `boot_pagetable_root`, `CR0.WP` = 1, `EFER.NXE` = 1 if
-  the CPU has NX (`cpu_has_nx()`), interrupts disabled (`cli`).
+- Long mode, CR3 = `boot_pagetable_root`, `CR0.WP` = 1, `EFER.NXE` = 1,
+  interrupts disabled (`cli`). NX is mandatory: a processor without it
+  (`cpu_has_nx()` false) makes the loader `die()` before any table is
+  built, because the kernel's W^X guarantee cannot be met without it.
 - `RDI` = HHDM virtual address of the info struct, `RSP` = top of a 16 KiB
   loader stack (4 pages, `EfiLoaderData`), `RBP` = 0.
 - Segment registers are still the firmware's flat descriptors; the kernel
@@ -85,7 +87,8 @@ address and no calling convention across the boundary.
 10. `translate_memory_map()` into the bootinfo entry array; 0 entries
     means overflow and is fatal.
 11. Print the translated map on the serial line.
-12. `cpu_enable_nx()` (if supported) then `cpu_enable_wp()`: NXE must be
+12. `cpu_enable_nx()` then `cpu_enable_wp()` (NX presence was verified in
+    step 4, before any allocation): NXE must be
     set before a CR3 whose entries carry bit 63 is loaded, otherwise the
     CPU raises a reserved-bit page fault.
 13. `cpu_jump_to_kernel()`.

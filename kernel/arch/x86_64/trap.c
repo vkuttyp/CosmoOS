@@ -169,3 +169,27 @@ void arch_debug_break(void)
 {
     __asm__ volatile("int3" ::: "memory");
 }
+
+uintptr_t arch_trap_fault_address(const struct arch_trap_frame *frame)
+{
+    KASSERT(frame->vector == X86_TRAP_PF);
+    return (uintptr_t)read_cr2();
+}
+
+unsigned arch_trap_fault_flags(const struct arch_trap_frame *frame)
+{
+    KASSERT(frame->vector == X86_TRAP_PF);
+    uint64_t err = frame->error_code;
+    unsigned f = 0;
+    if (err & 1)
+        f |= ARCH_FAULT_PRESENT;
+    if (err & 2)
+        f |= ARCH_FAULT_WRITE;
+    if (err & 4)
+        f |= ARCH_FAULT_USER;
+    if (err & 8)
+        f |= ARCH_FAULT_RESERVED;
+    if (err & 16)
+        f |= ARCH_FAULT_EXEC;
+    return f;
+}

@@ -236,6 +236,9 @@ static const struct selftest tests[] = {
     { "bootinfo",        test_bootinfo },
     { "irq-state",       test_irq_state },
     { "breakpoint-trap", test_breakpoint_trap },
+    { "pmm",             selftest_pmm },
+    { "vmm",             selftest_vmm },
+    { "kmalloc",         selftest_kmalloc },
 };
 
 int selftest_run_all(void)

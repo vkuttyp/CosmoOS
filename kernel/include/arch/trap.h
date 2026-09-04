@@ -53,4 +53,15 @@ void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame);
 /* Raise the breakpoint trap synchronously from kernel code. */
 void arch_debug_break(void);
 
+/* Page-fault decoding. Valid only for a frame whose vector is the
+ * ARCH_TRAP_PAGE_FAULT vector. */
+#define ARCH_FAULT_PRESENT  (1u << 0)  /* protection violation on a present page */
+#define ARCH_FAULT_WRITE    (1u << 1)  /* access was a write */
+#define ARCH_FAULT_EXEC     (1u << 2)  /* access was an instruction fetch */
+#define ARCH_FAULT_USER     (1u << 3)  /* access came from user mode */
+#define ARCH_FAULT_RESERVED (1u << 4)  /* reserved bit set in a table entry */
+
+uintptr_t arch_trap_fault_address(const struct arch_trap_frame *frame);
+unsigned arch_trap_fault_flags(const struct arch_trap_frame *frame);
+
 #endif /* ARCH_TRAP_H */

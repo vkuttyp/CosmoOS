@@ -64,11 +64,27 @@ Notes:
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
+| `host-test` | Compile the memory algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
+| `compile-commands` | Write `compile_commands.json` for clangd using the real cross flags |
 | `clean` | Remove `$(OUT)` |
 | `help` | Print this table and the effective configuration |
+
+### Host unit tests
+
+`make host-test` (`tests/host/host.mk`) compiles `kernel/memory/buddy.c`,
+`slab.c`, and `kmalloc.c` unchanged with the *host* `clang` (no
+`--target`), links them with `tests/host/harness.c` and
+`tests/host/shim_spinlock.c`, and runs the resulting `test_buddy` and
+`test_slab` binaries under `-fsanitize=address,undefined`. The
+architecture headers are replaced by `tests/host/shim/arch/*.h`; every
+other header is the real kernel header. This requires a host compiler
+with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
+package on Ubuntu both qualify. Set `HOST_CC` to override the compiler.
+The tests live in `out/<arch>-<build>/host/` and can be run directly for a
+single binary. See `docs/kernel/memory/testing.md` for what they cover.
 
 ## Variables
 
@@ -114,10 +130,13 @@ Build: DEBUG
 Boot: UEFI (cosmoboot-uefi v1, protocol v1)
 CPU: QEMU Virtual CPU version 2.5+
 Memory: 205 MiB usable in 32 regions, RAM ends at 256 MiB
+[ INFO] pmm: 256 MiB RAM span, 246 MiB free, 9 MiB reserved, 0 MiB deferred, page array 2048 KiB
+[ INFO] kmalloc: 15 size classes up to 8192 bytes, page path up to 4096 KiB
+[ INFO] vmm: 246 MiB free after takeover, arena 0xffffc00000000000-0xffffe00000000000
 [ INFO] interrupts enabled
 SELFTEST: printf           ... ok
 ...
-SELFTEST: PASS (5 tests)
+SELFTEST: PASS (8 tests)
 [ INFO] boot complete; nothing more to do in this phase
 [ INFO] shutdown: exit status 0
 [ INFO] shutdown: halting CPU
@@ -158,8 +177,8 @@ write is ignored and the kernel simply halts.
 `.github/workflows/ci.yml` runs on every push and pull request on the
 GitHub-hosted `ubuntu-24.04` (x86-64) runner. It installs the same apt
 packages as `scripts/setup-dev-linux.sh`, then runs `check-tools`, a
-debug build with `test`, a release build with `test`, `analyze`, and
-`reproducible`. The x86-64 runner is a deliberate simplification: the
+debug build with `test`, a release build with `test`, `host-test`,
+`analyze`, `reproducible`, and `test-crash`. The x86-64 runner is a deliberate simplification: the
 toolchain is host-agnostic, which is the point of using clang, but it
 means CI does not currently exercise an ARM64 host. GitHub's hosted ARM64
 runners are not enabled for this private repository; when they are, the
@@ -173,6 +192,6 @@ Constitution section 66 applies to every subsystem change. In practice:
    `invariants.md`.
 2. Work on a feature branch and open a pull request; Greptile reviews every
    PR on the repository.
-3. Before pushing: `make test`, `make BUILD=release test`, `make analyze`,
-   `make reproducible`.
+3. Before pushing: `make test`, `make BUILD=release test`, `make host-test`,
+   `make analyze`, `make reproducible`, `make test-crash`.
 4. Update the subsystem documentation in the same PR.

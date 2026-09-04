@@ -12,8 +12,11 @@
 #include <kernel/bootinfo.h>
 #include <kernel/interrupt.h>
 #include <kernel/kernel.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/pmm.h>
 #include <kernel/selftest.h>
+#include <kernel/vmm.h>
 #include <kernel/shutdown.h>
 #include <kernel/string.h>
 #include <kernel/version.h>
@@ -92,6 +95,14 @@ void kernel_main(const struct cosmoboot_info *info)
     log_memory_map();
 
     interrupt_init();
+
+    /* Memory, in dependency order: frames, then a heap on the bootstrap
+     * direct map, then kernel-owned page tables (which need the heap for
+     * region records and install the page-fault handler). */
+    pmm_init();
+    kmalloc_init();
+    vmm_init();
+
     arch_irq_enable();
     kinfo("interrupts enabled");
 
