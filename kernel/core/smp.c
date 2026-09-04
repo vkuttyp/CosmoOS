@@ -75,8 +75,12 @@ void smp_init(void)
 
         rc = arch_smp_start_cpu(cpu, cpus[i].apic_id, stack + THREAD_STACK_SIZE);
         if (rc) {
-            kwarn("smp: CPU %u (APIC %u) did not start (%d)", cpu, cpus[i].apic_id, rc);
-            continue;
+            /* The trampoline is shared. A CPU that has not answered its
+             * SIPI may still do so later, so it must never find another
+             * CPU's stack and index there: stop bring-up here. */
+            kwarn("smp: CPU %u (APIC %u) did not start (%d); not starting further CPUs", cpu,
+                  cpus[i].apic_id, rc);
+            break;
         }
         if (!wait_online(cpu)) {
             kwarn("smp: CPU %u (APIC %u) started but never came online", cpu, cpus[i].apic_id);

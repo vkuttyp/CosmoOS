@@ -35,6 +35,21 @@ extern const uint32_t x86_trampoline_off_stack, x86_trampoline_off_cpu;
 
 static volatile uint32_t g_ap_started[CONFIG_MAX_CPUS];
 static bool g_trampoline_mapped;
+static bool g_ap_stranded;
+
+/*
+ * Entry for an AP that answers a SIPI only after its start timed out.
+ * The trampoline data block is repointed here on timeout and the page is
+ * never unmapped afterwards, so a late arrival halts instead of running
+ * with resources meant for someone else.
+ */
+static void x86_ap_halt_entry(unsigned cpu) __noreturn;
+static void x86_ap_halt_entry(unsigned cpu)
+{
+    (void)cpu;
+    for (;;)
+        __asm__ volatile("cli; hlt" ::: "memory");
+}
 
 uint32_t arch_smp_boot_hw_id(void)
 {
@@ -107,6 +122,14 @@ int arch_smp_start_cpu(unsigned cpu, uint32_t hw_id, uintptr_t stack_top)
             return 0;
         udelay(100);
     }
+
+    /* The SIPI may still be honoured later. Make sure that whenever it
+     * is, the AP finds a halt entry rather than a stack and CPU index
+     * meant for a later start, and keep the page mapped for it. */
+    uint64_t halt = (uint64_t)(uintptr_t)x86_ap_halt_entry;
+    memcpy((uint8_t *)phys_to_virt(TRAMPOLINE_BASE) + x86_trampoline_off_entry, &halt, 8);
+    barrier();
+    g_ap_stranded = true;
     return -ETIMEDOUT;
 }
 
@@ -114,6 +137,10 @@ void arch_smp_finish(void)
 {
     if (!g_trampoline_mapped)
         return;
+    if (g_ap_stranded) {
+        kwarn("smp: a CPU never answered its SIPI; trampoline page left mapped with a halt entry");
+        return;
+    }
 
     arch_irq_state_t s = spin_lock_irqsave(&kernel_space.lock);
     int rc = arch_mmu_unmap(&kernel_space.mmu, (vaddr_t)TRAMPOLINE_BASE, PAGE_SIZE);

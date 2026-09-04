@@ -162,7 +162,7 @@ them.
 
 | Condition | Behaviour |
 |---|---|
-| AP never starts (no SIPI response) | `-ETIMEDOUT`, logged, CPU skipped |
+| AP never starts (no SIPI response) | `-ETIMEDOUT`; the trampoline entry is repointed at a halt stub, the page stays mapped, and bring-up stops so a late arrival can never find another CPU's stack and index (review finding, PR #4) |
 | AP starts but never reaches online | logged after 500 ms, skipped (its stack and percpu leak) |
 | more MADT CPUs than CONFIG_MAX_CPUS | extra ignored with a warning |
 | shootdown not acknowledged in 1 s | panic listing acks/targets |
