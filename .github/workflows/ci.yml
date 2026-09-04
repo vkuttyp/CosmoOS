@@ -1,0 +1,83 @@
+# CosmoOS continuous integration.
+#
+# Runs the full Phase 0 pipeline on every push and pull request:
+#   tool check -> debug build -> QEMU boot test -> release build + test
+#   -> static analysis -> reproducibility check -> panic-path test.
+#
+# The runner is x86-64 Linux. The primary development environment is an
+# ARM64 Linux VM; the toolchain is host-agnostic so the outputs match.
+# GitHub-hosted ARM64 runners (ubuntu-24.04-arm) are not enabled for this
+# private repository yet; when they are, add them to the matrix below.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-boot:
+    name: build, boot, analyze (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # git describe needs history for BUILD_ID
+
+      - name: Install cross toolchain and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld llvm make mtools qemu-system-x86 ovmf python3
+
+      - name: Verify toolchain
+        run: make check-tools
+
+      - name: Build (debug)
+        run: make BUILD=debug all
+
+      - name: Boot test (debug)
+        run: make BUILD=debug test
+
+      - name: Build and boot test (release)
+        run: make BUILD=release all test
+
+      - name: Static analysis
+        run: make analyze
+
+      - name: Reproducible build check
+        run: make reproducible
+
+      - name: Panic path test
+        run: make BUILD=debug test-crash
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: serial-logs-${{ matrix.os }}
+          path: out/**/boot-test*.log
+          if-no-files-found: ignore
+
+      - name: Upload binaries
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: images-${{ matrix.os }}
+          path: |
+            out/x86_64-debug/kernel/kernel.elf
+            out/x86_64-debug/boot/BOOTX64.EFI
+            out/x86_64-debug/cosmoos.img
+            out/x86_64-release/kernel/kernel.elf
+            out/x86_64-release/boot/BOOTX64.EFI

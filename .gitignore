@@ -22,7 +22,7 @@ compile_commands.json
 *.log
 *.qcow2
 serial*.txt
-core
+core.[0-9]*
 vgcore.*
 
 # Editors and OS
