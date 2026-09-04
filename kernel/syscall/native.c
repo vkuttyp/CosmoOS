@@ -433,9 +433,16 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *a)
         return 0;
     struct cosmo_sockaddr sa;
     netaddr_to_user_shape(&sa, a);
-    size_t len = sizeof(sa);
-    if (copy_to_user(uptr, &sa, sizeof(sa)))
+    /* The caller's length bounds the copy (a short buffer gets a prefix);
+     * the full size is reported back, as POSIX does. */
+    size_t room = sizeof(sa);
+    if (ulen && copy_from_user(&room, ulen, sizeof(room)))
         return -EFAULT;
+    if (room > sizeof(sa))
+        room = sizeof(sa);
+    if (room && copy_to_user(uptr, &sa, room))
+        return -EFAULT;
+    size_t len = sizeof(sa);
     if (ulen && copy_to_user(ulen, &len, sizeof(len)))
         return -EFAULT;
     return 0;

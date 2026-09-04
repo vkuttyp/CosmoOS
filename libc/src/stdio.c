@@ -310,6 +310,10 @@ int fileno(FILE *f) { return f->fd; }
 
 int fseek(FILE *f, long off, int whence)
 {
+    /* The descriptor sits past the buffered input; a relative seek is
+     * meant from the logical position. */
+    if (whence == SEEK_CUR && (f->flags & F_READING))
+        off -= (long)(f->len - f->pos) + (f->ungot >= 0 ? 1 : 0);
     if (fflush(f) < 0)
         return -1;
     f->ungot = -1;

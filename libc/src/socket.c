@@ -131,8 +131,8 @@ static int pton6(const char *s, uint8_t *out)
     }
     if (*s)
         return 0;
-    if (gap < 0 && n != 8)
-        return 0;
+    if (gap < 0 ? n != 8 : n == 8)
+        return 0;   /* eight groups need no "::"; fewer need it */
     memset(out, 0, 16);
     int tail = gap < 0 ? 0 : n - gap;
     for (int i = 0; i < (gap < 0 ? n : gap); i++) {

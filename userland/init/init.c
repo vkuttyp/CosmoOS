@@ -116,6 +116,11 @@ static void fs_selftest(void)
         CHECK(fgets(buf, sizeof(buf), f) != NULL && strcmp(buf, "line 1\n") == 0);
         CHECK(fgets(buf, sizeof(buf), f) != NULL && strcmp(buf, "line two\n") == 0);
         CHECK(fgets(buf, sizeof(buf), f) == NULL && feof(f));
+        /* A relative seek counts from the logical position, not the
+         * descriptor's (which sits past the buffered input). */
+        rewind(f);
+        CHECK(fgetc(f) == 'l' && fgetc(f) == 'i');
+        CHECK(fseek(f, 2, SEEK_CUR) == 0 && fgetc(f) == ' ' && ftell(f) == 5);
         CHECK(fclose(f) == 0);
         CHECK(unlink("/tmp/stdio.txt") == 0);
     }
@@ -184,6 +189,19 @@ static void net_selftest(void)
     char text[INET6_ADDRSTRLEN];
     uint8_t v6[16];
     CHECK(inet_pton(AF_INET6, "fe80::1", v6) == 1 && v6[0] == 0xfe && v6[15] == 1);
+    uint8_t v6b[16];
+    CHECK(inet_pton(AF_INET6, "1::2:3:4:5:6:7:8", v6b) == 0);   /* "::" with eight groups */
+    CHECK(inet_pton(AF_INET6, "1:2:3:4:5:6:7", v6b) == 0 && inet_pton(AF_INET6, "1:2:3:4:5:6:7:8", v6b) == 1);
+    /* A short address buffer receives a prefix and learns the full size. */
+    {
+        int g = socket(AF_INET, SOCK_DGRAM, 0);
+        struct { struct sockaddr sa; uint32_t canary; } box;
+        memset(&box, 0xee, sizeof(box));
+        socklen_t sl = 4;
+        CHECK(g >= 3 && getsockname(g, &box.sa, &sl) == 0 && sl == sizeof(struct sockaddr));
+        CHECK(box.sa.sa_family == AF_INET && box.sa.sa_addr[0] == 0xee && box.canary == 0xeeeeeeeeu);
+        close(g);
+    }
     CHECK(inet_ntop(AF_INET6, v6, text, sizeof(text)) != NULL && strcmp(text, "fe80::1") == 0);
     CHECK(inet_ntop(AF_INET, me.sa_addr, text, sizeof(text)) != NULL && strcmp(text, "127.0.0.1") == 0);
     puts("usertest: sockets ok");
