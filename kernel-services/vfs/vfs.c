@@ -268,12 +268,13 @@ int vfs_umount2(const char *path, unsigned flags)
     vnode_put(root);   /* the lookup reference; the mount still holds one */
 
     mutex_lock(&g_mounts_lock);
-    /* Cut new walkers off first: with covered_by cleared no path can
-     * enter this mount, and follow_mount takes the root reference under
-     * the same lock, so the reference scan below is final. */
+    /* Turn new walkers away first: follow_mount refuses (-EBUSY) while
+     * `unmounting` is set and takes the root reference under the same
+     * lock, so the reference scan below is final and nothing falls
+     * through to the covered directory while the decision is pending. */
     struct vnode *mp = mnt->mountpoint;
     mutex_lock(&mp->lock);
-    mp->covered_by = NULL;
+    mnt->unmounting = true;
     mutex_unlock(&mp->lock);
 
     /* Busy if any vnode is referenced beyond what the filesystem itself
@@ -307,6 +308,9 @@ int vfs_umount2(const char *path, unsigned flags)
     }
     if (flags & VFS_UMOUNT_FORCE)
         kwarn("vfs: %s: forced unmount, open transaction dropped", path);
+    mutex_lock(&mp->lock);
+    mp->covered_by = NULL;
+    mutex_unlock(&mp->lock);
     list_remove(&mnt->link);
     g_nr_mounts--;
     mutex_unlock(&g_mounts_lock);
@@ -332,7 +336,7 @@ int vfs_umount2(const char *path, unsigned flags)
 restore:
     /* Refused or failed: the mount is whole again and reachable. */
     mutex_lock(&mp->lock);
-    mp->covered_by = mnt;
+    mnt->unmounting = false;
     mutex_unlock(&mp->lock);
     mutex_unlock(&g_mounts_lock);
     return rc;
@@ -356,27 +360,36 @@ int vfs_sync(void)
 
 /* --- path walk ------------------------------------------------------------ */
 
-/* Cross into a mount whose root covers `dir`. Consumes and returns
- * references. */
-static struct vnode *follow_mount(struct vnode *dir)
+/* Cross into a mount whose root covers *vnp. Consumes the reference on
+ * failure. -EBUSY while an unmount of that mount is being decided: the
+ * walker must not fall through to the covered directory, since the
+ * unmount may yet be refused and the mount restored. */
+static int follow_mount(struct vnode **vnp)
 {
+    struct vnode *dir = *vnp;
     for (unsigned depth = 0; depth < 16; depth++) {
-        /* The root reference is taken under dir->lock: vfs_umount clears
-         * covered_by under the same lock before it scans for references,
-         * so a walker either sees the mount and holds its root (busy) or
-         * does not see it at all. */
+        /* Taken under dir->lock: vfs_umount sets `unmounting` and, when
+         * it proceeds, clears covered_by under the same lock, so a walker
+         * either already holds the root (the reference scan sees it) or
+         * is turned away. */
         mutex_lock(&dir->lock);
         struct mount *m = dir->covered_by;
+        if (m && m->unmounting) {
+            mutex_unlock(&dir->lock);
+            vnode_put(dir);
+            return -EBUSY;
+        }
         struct vnode *root = m ? m->root : NULL;
         if (root)
             vnode_get(root);
         mutex_unlock(&dir->lock);
         if (root == NULL)
-            return dir;
+            break;
         vnode_put(dir);
         dir = root;
     }
-    return dir;
+    *vnp = dir;
+    return 0;
 }
 
 /* One component from `dir` (referenced, consumed). Returns a referenced
@@ -411,8 +424,7 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
     vnode_put(dir);
     if (rc)
         return rc;
-    *out = follow_mount(*out);
-    return 0;
+    return follow_mount(out);
 }
 
 /* Walk every component but the last. On success *parent is referenced
@@ -599,7 +611,9 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
             vnode_put(parent);
             if (rc)
                 return rc;
-            vn = follow_mount(vn);
+            rc = follow_mount(&vn);
+            if (rc)
+                return rc;
         }
     }
 

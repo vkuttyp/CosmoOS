@@ -101,6 +101,7 @@ struct mount {
     struct list_node link;
     unsigned nr_vnodes;
     uint64_t next_ino;        /* for filesystems that number in memory */
+    bool unmounting;          /* set under mountpoint->lock while vfs_umount decides */
 };
 
 struct file {
