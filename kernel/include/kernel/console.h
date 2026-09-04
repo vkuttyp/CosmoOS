@@ -17,6 +17,7 @@
 #ifndef KERNEL_CONSOLE_H
 #define KERNEL_CONSOLE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 struct console_sink {
@@ -26,8 +27,11 @@ struct console_sink {
     struct console_sink *next; /* owned by the console; do not touch */
 };
 
-/* Register a sink. The sink object must outlive the kernel (static). */
+/* Register a sink. The sink object must stay valid until
+ * console_unregister (module unload) or forever (static). */
 void console_register(struct console_sink *sink);
+void console_unregister(struct console_sink *sink);
+bool console_has_sink(const char *name);
 
 void console_write(const char *s, size_t len);
 void console_puts(const char *s);

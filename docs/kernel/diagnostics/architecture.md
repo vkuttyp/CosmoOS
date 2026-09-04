@@ -73,9 +73,10 @@ See `api.md`. In brief: `console_register/console_write/console_puts`;
 
 ## Data structures
 
-- `struct console_sink { name, write, next }`: static objects owned by
-  their registrant, linked into a singly linked list owned by
-  `console.c`. Never removed.
+- `struct console_sink { name, write, next }`: objects owned by their
+  registrant (static for the UART, module memory for `virtio-console`),
+  linked into a singly linked list owned by `console.c`; removed only by
+  `console_unregister` at module unload.
 - `g_level` (`enum klog_level`): one global threshold.
 - `g_panicking` flag: recursion guard.
 - Formatting state (`struct out`, `struct spec` in `printf.c`): stack only.

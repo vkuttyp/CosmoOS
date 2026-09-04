@@ -63,7 +63,7 @@ Notes:
 | `userland` | `out/<arch>-<build>/userland/init.elf`, the first user program (`userland/userland.mk`) |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
 | `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init` plus the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
-| `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`) |
+| `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
 | `host-test` | Compile the memory, crypto, and module-validation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
@@ -106,10 +106,21 @@ dependencies first), `tests/<name>.ko` entries are fixtures loaded only
 by the self-tests. The kernel's trusted key ring is generated from the
 `.pub` files in `tools/keys/` into `out/<arch>-<build>/gen/keyring_builtin.c`
 (`scripts/gen-keyring.py`). To add a module, add its sources under
-`modules/<name>/`, define `MODULE_<name>_SRCS`, append `<name>` to
-`MODULES` and an entry to `MODULE_ARCHIVE_ENTRIES`; the module itself
-declares `COSMO_MODULE(...)` from `kernel/include/kernel/module.h`.
-Everything is in `docs/kernel/module/api.md`.
+`modules/<name>/` (or with their subsystem under `drivers/`), define
+`MODULE_<name>_SRCS`, append `<name>` to `MODULES` and an entry to
+`MODULE_ARCHIVE_ENTRIES`; the module itself declares `COSMO_MODULE(...)`
+from `kernel/include/kernel/module.h`. Everything is in
+`docs/kernel/module/api.md`.
+
+The boot modules today are `hello` (`modules/hello/`) and the VirtIO
+stack from `drivers/virtio/`: `virtio` (bus, virtqueues, virtio-pci
+transport) followed by `virtio_blk`, `virtio_rng`, `virtio_console`,
+which declare `virtio` as a dependency and are listed after it. Driver
+headers shared between the kernel and modules live in
+`drivers/include/drivers/` (`pci.h`, `virtio.h`); that directory is on
+`KERNEL_CFLAGS`, so both kernel code and modules include them as
+`<drivers/pci.h>`. See `docs/kernel/device/`, `docs/drivers/pci/`,
+`docs/drivers/virtio/`.
 
 ### User programs
 
@@ -153,7 +164,9 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `QEMU_MEM` | `256M` | Guest RAM |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
-| `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim |
+| `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-device virtio-net-pci` to see the transport bind an undriven device) |
+| `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
+| `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
 | `OVMF_CODE` | auto | Path to the UEFI firmware image; overrides `scripts/find-firmware.sh` |
 | `SOURCE_DATE_EPOCH` | `0` | Exported to the compiler for reproducible builds |
 
@@ -161,14 +174,18 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 
 `make run` boots the image with `-serial stdio -display none`. All loader
 and kernel output arrives on the terminal. `make test` captures the same
-stream into `out/<arch>-<build>/boot-test.log`.
+stream into `out/<arch>-<build>/boot-test.log`, creates a fresh scratch
+disk `boot-test.log.testdisk.img` for the virtio-blk self-test, and
+sends the virtio console to `boot-test.log.vcon`, which must contain the
+`boot complete` line for the run to pass (the kernel log reaches the
+serial port and the virtio console alike).
 
 A successful debug boot looks like this (abridged):
 
 ```
 cosmoboot-uefi v1
 kernel: 114632 bytes read
-module: 57056 bytes read
+archive: 240128 bytes read
 kernel: virt 0xffffffff80000000-0xffffffff8001e000 -> phys 0xdd0f000, entry 0xffffffff80000000, 3 segments
 paging: pml4 at 0xdd01000, 13/24 pool pages used, NX on
 exiting boot services

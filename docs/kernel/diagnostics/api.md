@@ -8,13 +8,27 @@ checked at compile time; a non-literal format is a build error.
 
 ## `kernel/console.h`
 
-### `void console_register(struct console_sink *sink)`
-- **Purpose**: add an output device.
+### `void console_register(struct console_sink *sink)` *(Module ABI v1)*
+- **Purpose**: add an output device. The UART registers at boot; the
+  `virtio_console` module registers a `virtio-console` sink when it
+  loads.
 - **Inputs**: `sink` with `name` and non-NULL `write`; `next` is owned by
   the console.
-- **Ownership/lifetime**: the object must be static; it is never removed.
-- **Concurrency**: boot only, before other CPUs exist.
+- **Ownership/lifetime**: the object must stay valid until
+  `console_unregister` (module unload) or forever (static).
+- **Concurrency**: the list is prepended without the console lock; safe
+  at boot and from a module `init` while other CPUs are not logging.
 - **Failure modes**: NULL `sink` or NULL `write` is ignored.
+
+### `void console_unregister(struct console_sink *sink)` *(Module ABI v1)*
+- **Purpose**: unlink a sink before its memory goes away.
+- **Concurrency**: unlinks without taking the console spinlock, so it
+  races a concurrent `console_write` on another CPU (documented gap,
+  `docs/kernel/device/invariants.md` D12). Unknown sinks are ignored.
+
+### `bool console_has_sink(const char *name)`
+- **Purpose**: whether a sink of that name is registered (self-tests).
+- **Concurrency**: lock-free walk; any context.
 
 ### `void console_write(const char *s, size_t len)` / `void console_puts(const char *s)`
 - **Purpose**: emit bytes to every sink.

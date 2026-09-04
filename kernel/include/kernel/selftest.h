@@ -60,4 +60,12 @@ bool selftest_module_reject(const char **reason);
 bool selftest_module_load(const char **reason);
 bool selftest_module_fail(const char **reason);
 
+/* Phase 6: kernel/device/devtest.c */
+bool selftest_device(const char **reason);
+bool selftest_pci(const char **reason);
+bool selftest_dma(const char **reason);
+bool selftest_random(const char **reason);
+bool selftest_blk(const char **reason);
+bool selftest_virtio_console(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

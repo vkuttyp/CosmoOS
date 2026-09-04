@@ -11,7 +11,9 @@
 
 #include <kernel/acpi.h>
 #include <kernel/bootarchive.h>
+#include <kernel/blk.h>
 #include <kernel/bootinfo.h>
+#include <kernel/device.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
 #include <kernel/irq.h>
@@ -21,6 +23,7 @@
 #include <kernel/module.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
+#include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <kernel/smp.h>
@@ -32,6 +35,8 @@
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
+
+#include <drivers/pci.h>
 
 static const char *firmware_name(uint32_t firmware)
 {
@@ -122,6 +127,14 @@ void kernel_main(const struct cosmoboot_info *info)
     sched_init();
     process_init();
     module_init();
+
+    /* Devices: the model, then the PCI bus (ECAM from ACPI, BARs, MSI
+     * capabilities), then the services drivers feed: block registry and
+     * the entropy pool. Drivers themselves arrive as boot modules. */
+    device_init();
+    pci_init();
+    blk_init();
+    random_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");

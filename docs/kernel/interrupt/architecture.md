@@ -25,10 +25,13 @@ Files: `kernel/interrupt/interrupt.c`, `kernel/include/kernel/interrupt.h`.
   (`docs/kernel/arch/`).
 - Deferred work, threaded handlers, softirqs: Phase 3, on top of the
   scheduler.
-- Interrupt controller programming (PIC today, LAPIC/IOAPIC/GIC later),
+- Interrupt controller programming (PIC, LAPIC/IOAPIC; GIC later),
   IRQ-to-vector allocation, MSI: the interrupt-controller abstraction
-  from constitution section 17 arrives in Phase 3/6 and will sit beside
-  this table, not inside it.
+  from constitution section 17 (`kernel/irq.h`, `arch/irqc.h`, Phase 3)
+  sits beside this table, not inside it. Phase 6 added
+  `irq_request_msi`/`irq_release_msi`: an MSI or MSI-X message is
+  composed by `arch_irqc_msi_compose` and, once raised, arrives as a
+  plain vector through this dispatcher; nothing here knows the device.
 
 ## Position in the system
 

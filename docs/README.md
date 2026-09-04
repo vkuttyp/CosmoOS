@@ -28,9 +28,12 @@ wins and the document is wrong.
 | `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities, the native system-call ABI (`uapi/cosmo/syscall.h`) and user-side wrappers |
 | `kernel/module/` | The boot archive, the module ABI (`COSMO_MODULE`, `EXPORT_SYMBOL`, ABI version), the signed `ET_REL` module loader (validation, relocation, symbol resolution, dependencies, W^X, unload), signing tools and keys |
 | `kernel/security/` | SHA-512, Ed25519 verification, the compiled-in key ring, kernel taint; credentials and capabilities arrive in a later phase |
+| `kernel/device/` | The bus/device/driver model with resources and probing, the DMA API, the block layer (`kernel/block/`), the entropy pool, console sinks, MSI in the interrupt layer, and the QEMU device configuration the tests rely on |
+| `drivers/pci/` | PCI core: ECAM or legacy configuration access, enumeration, BAR sizing, capabilities, MSI/MSI-X, the `pci` bus and `struct pci_driver` |
+| `drivers/virtio/` | The `virtio` module (bus, device initialisation, split virtqueues, virtio-pci modern transport) and the `virtio_blk`, `virtio_rng`, `virtio_console` driver modules |
 
 Further subsystem directories are added as subsystems come into existence
-(`kernel-services/vfs/`, `drivers/`, and so on).
+(`kernel-services/vfs/`, `drivers/nvme/`, `drivers/network/`, and so on).
 
 ## Per-subsystem convention
 

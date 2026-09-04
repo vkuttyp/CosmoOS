@@ -98,6 +98,7 @@ Globals set by `pmm_init`/`vmm_init`: `pmm_page_array`, `pmm_max_pfn`,
 | `phys_to_virt(pa)`, `virt_to_phys(va)` | direct-map translation; valid only for `pa < pmm_hhdm_limit` (4 GiB before `vmm_init`, all RAM after) |
 | `page_to_virt(page)`, `virt_to_page(va)` | compositions of the above; `virt_to_page` returns `NULL` for non-RAM |
 | `phys_in_direct_map(pa)` | `pa < pmm_hhdm_limit` |
+| `virt_is_direct_map(va)` | `va` lies in the direct map's RAM span (`pmm_hhdm_base <= va < pmm_hhdm_base + pmm_hhdm_limit`); what `dma_map` (Phase 6) requires of a buffer |
 
 All inline, lock-free, no failure other than the documented `NULL`s.
 

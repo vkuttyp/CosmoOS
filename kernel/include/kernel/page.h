@@ -100,4 +100,10 @@ static inline bool phys_in_direct_map(paddr_t pa)
     return pa < pmm_hhdm_limit;
 }
 
+/* True for a virtual address inside the direct map's RAM span. */
+static inline bool virt_is_direct_map(vaddr_t va)
+{
+    return va >= pmm_hhdm_base && va - pmm_hhdm_base < pmm_hhdm_limit;
+}
+
 #endif /* KERNEL_PAGE_H */

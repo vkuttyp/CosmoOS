@@ -3,11 +3,16 @@
 ## console.c: sink fan-out
 
 `console_register` prepends a `struct console_sink` to a singly linked
-list; `console_write` walks the list and calls each sink's `write`. The
-list is never modified after boot, so the walk needs no lock. Prepending
-means the most recently registered (usually more capable) device sees
-output first, which matters only for ordering between a framebuffer and
-the UART later. `console_puts` is `console_write(s, strlen(s))`.
+list; `console_write` walks the list under the console spinlock and
+calls each sink's `write`. Since Phase 6 the list can change after boot:
+the `virtio_console` module registers a sink when it loads and
+`console_unregister` unlinks it on unload under the console lock, so a
+concurrent writer never sees a half-removed list; registration prepends
+without the lock (a single pointer store, safe against readers).
+Prepending means the most
+recently registered (usually more capable) device sees output first;
+the virtio console therefore precedes the UART. `console_puts` is
+`console_write(s, strlen(s))`.
 
 A sink's `write` must be non-blocking beyond polling its device, because
 `console_write` is called from interrupt and panic context.

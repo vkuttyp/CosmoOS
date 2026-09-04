@@ -129,6 +129,25 @@ table); `irq_enable`/`irq_disable` are interrupt-safe.
 ### `int irq_vector_of(irq_t irq)`
 - Diagnostics: the assigned vector or `-1`.
 
+## Phase 6: message-signalled interrupts (`kernel/include/kernel/irq.h`)
+
+### `int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsigned cpu, struct irq_msi_msg *msg)`
+- **Purpose**: give a device a vector it can raise by writing a message.
+  Allocates a vector from the dynamic range with `arch_vector_alloc`,
+  registers `fn` on it, and fills `msg->addr`/`msg->data` through
+  `arch_irqc_msi_compose`. The PCI core programs the message into an
+  MSI-X table entry or the MSI capability.
+- **Inputs**: non-NULL `fn` and `msg`; `cpu` the target CPU.
+- **Outputs**: the vector (>= 0), `-EINVAL`, or `-ENOSPC`.
+- **Concurrency**: `g_irq_lock` spinlock; no allocation; thread context
+  by convention. Dispatch and EOI are the ordinary vector path: an MSI
+  is indistinguishable from any other vector once it arrives.
+
+### `int irq_release_msi(int vector)`
+- **Purpose**: unregister the handler and free the vector. The device
+  must be masked first (the PCI core does this in `pci_msix_release`).
+- **Outputs**: 0 or `-EINVAL`.
+
 ## Phase 3: controller interface (`kernel/include/arch/irqc.h`)
 
 Implemented by `kernel/arch/x86_64/irqc.c` over `lapic.c` and
@@ -145,6 +164,14 @@ Implemented by `kernel/arch/x86_64/irqc.c` over `lapic.c` and
 | `arch_irqc_gsi_count()` | highest covered GSI + 1 |
 | `arch_irqc_spurious_vector()` | 255 |
 | `arch_ipi_send(cpu, vector)` / `arch_ipi_broadcast_others(vector)` | fixed-delivery IPIs (used by the SMP work) |
+
+### `int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)`
+- **Purpose**: the architecture's message format for `vector` on `cpu`.
+  x86-64 (`kernel/arch/x86_64/irqc.c`): `addr = 0xFEE00000 | apic_id <<
+  12` (physical destination, fixed delivery, edge), `data = vector`.
+- **Outputs**: 0, or `-EINVAL` for a CPU without an APIC id below 256
+  (xAPIC physical mode only) or a vector outside 48 to 238.
+- **Concurrency**: pure; any context.
 
 ## x86-64 vector map
 

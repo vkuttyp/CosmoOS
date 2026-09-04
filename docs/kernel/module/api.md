@@ -69,8 +69,9 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v1: the exported symbols
 
-43 symbols. Adding one is compatible; removing or changing one bumps
-the version.
+The kernel image exports 101 symbols (Phase 5's 43 plus the Phase 6
+device, PCI, DMA, block, entropy and console-sink interfaces). Adding
+one is compatible; removing or changing one bumps the version.
 
 | Area | Symbols |
 |---|---|
@@ -79,11 +80,29 @@ the version.
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
 | Locks | `spinlock_init`, `spin_lock`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_trylock`, `mutex_unlock` |
 | Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay` |
+| Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
+| DMA (`kernel/dma.h`) | `dma_alloc`, `dma_free`, `dma_map`, `dma_unmap`, `dma_sync_for_device`, `dma_sync_for_cpu`, `dma_set_mask` |
+| PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
+| Block (`kernel/blk.h`) | `blk_register`, `blk_unregister`, `blk_submit`, `bio_complete`, `blk_read`, `blk_write`, `blk_flush`, `blk_find` |
+| Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
+| Console (`kernel/console.h`) | `console_register`, `console_unregister` |
 
-Semantics are those of the kernel headers the symbols come from
+Modules export too: the `virtio` module provides 15 symbols
+(`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
+`virtio_device_init`, `virtio_device_ready`, `virtio_device_reset`,
+`virtio_read_config`, `virtio_read_config32`, `virtio_read_config64`,
+`virtq_alloc`, `virtq_free`, `virtq_add`, `virtq_kick`, `virtq_pop`,
+`virtq_free_count`) that `virtio_blk`, `virtio_rng` and
+`virtio_console` resolve by declaring `deps = "virtio"`; the loader
+resolves a foreign symbol only from a declared dependency (invariant
+M3), and a module cannot be unloaded while a dependant holds it. In
+total the tree carries 116 `EXPORT_SYMBOL` records.
+
+Semantics are those of the headers the symbols come from
 (`docs/kernel/diagnostics/api.md`, `memory/api.md`, `scheduler/api.md`,
-`timer/api.md`). `EXPORT_SYMBOL` sites sit at the end of the defining
-`.c` files.
+`timer/api.md`, `device/api.md`, `docs/drivers/pci/api.md`,
+`docs/drivers/virtio/api.md`). `EXPORT_SYMBOL` sites sit at the end of
+the defining `.c` files.
 
 ## Loader API (`kernel/include/kernel/module.h`, `kernel/module/module.c`)
 
