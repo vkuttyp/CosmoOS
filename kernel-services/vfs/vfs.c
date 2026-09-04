@@ -287,7 +287,16 @@ int vfs_umount(const char *path)
         mutex_unlock(&g_mounts_lock);
         return -EBUSY;
     }
-    /* The filesystem's unmount commits (or deliberately discards). */
+    /* Commit while the mount is still whole: if that fails the mount stays
+     * and the caller can retry (or fix the device); nothing is lost. */
+    if (mnt->fs->sync) {
+        rc = mnt->fs->sync(mnt);
+        if (rc) {
+            mutex_unlock(&g_mounts_lock);
+            kerror("vfs: %s: commit failed (%d); mount kept", path, rc);
+            return rc;
+        }
+    }
     struct vnode *mp = mnt->mountpoint;
     mutex_lock(&mp->lock);
     mp->covered_by = NULL;

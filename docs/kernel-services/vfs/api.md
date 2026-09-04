@@ -72,10 +72,11 @@ a ramfs given a device or a cosmofs given none). Logs `vfs: mounted`.
 root (`-EINVAL` otherwise, `-EBUSY` for `/`). `-EBUSY` while any vnode of
 the mount is referenced beyond what the filesystem itself holds (a
 pinned vnode's pin, the mount's root reference), for example an open
-file. Otherwise: uncover the mountpoint, call `fs->unmount` (which
-commits, or discards under the test hook), drop the root, release the
-device. `vfs_umount` does **not** call `fs->sync`; committing is the
-filesystem's unmount's job.
+file. Otherwise: call `fs->sync` while the mount is still whole (on
+failure the mount stays and the error is returned, so nothing is lost
+and the caller can retry), uncover the mountpoint, call `fs->unmount`
+(which only drops state: a deliberately discarded or abandoned
+transaction is dropped here), drop the root, release the device.
 
 **`int vfs_sync(void)`** `fs->sync` on every mount; the first error is
 returned after all mounts were tried.

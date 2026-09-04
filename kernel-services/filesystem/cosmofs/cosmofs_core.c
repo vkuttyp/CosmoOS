@@ -449,8 +449,18 @@ static int super_write(struct cfs *fs, unsigned slot)
     return rc;
 }
 
+void cfs_fail(struct cfs *fs, int rc)
+{
+    if (fs->failed == 0) {
+        fs->failed = rc ? rc : -EIO;
+        kerror("cosmofs: transaction abandoned after error %d; the last committed root stays current", rc);
+    }
+}
+
 int cfs_commit(struct cfs *fs)
 {
+    if (fs->failed)
+        return fs->failed;
     if (fs->nr_dirty == 0 && fs->nr_pending == 0) {
         bool any = false;
         for (unsigned c = 0; c < fs->nr_chunks; c++)
@@ -793,6 +803,8 @@ static int cosmofs_sync(struct mount *mnt)
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
         return 0;
+    if (fs->discard_on_unmount)
+        return 0;   /* test hook: behave as if the root write never happened */
     int rc = cfs_sync_vnodes(fs);
     if (rc)
         return rc;
@@ -802,18 +814,20 @@ static int cosmofs_sync(struct mount *mnt)
     return rc;
 }
 
+/* The VFS committed through cosmofs_sync before calling this; what is
+ * left is either nothing, a deliberately discarded transaction (test
+ * hook) or an abandoned one (cfs_fail), and both are dropped here so the
+ * on-disk state stays at the last committed root. */
 static int cosmofs_unmount(struct mount *mnt)
 {
     struct cfs *fs = cfs_of(mnt);
-    int rc = 0;
-    if (fs->discard_on_unmount) {
+    if (fs->discard_on_unmount)
         kwarn("cosmofs: discarding the open transaction (test hook)");
-    } else {
-        rc = cosmofs_sync(mnt);
-    }
+    else if (fs->failed)
+        kwarn("cosmofs: dropping the abandoned transaction (%d)", fs->failed);
     mnt->fs_priv = NULL;   /* the root's eviction sees no filesystem */
     cfs_destroy(fs);
-    return rc;
+    return 0;
 }
 
 int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)

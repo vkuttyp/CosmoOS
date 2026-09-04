@@ -96,12 +96,19 @@ Mount and unmount: `vfs_mount` refuses a target that is already covered
 by a mount, is itself a mount's root, or is `/` (`-EBUSY`): mounts do
 not stack. `vfs_umount` resolves the path to a mount root (`-EINVAL`
 otherwise, `-EBUSY` for the root filesystem), checks the busy rule
-above, uncovers the mountpoint, and then calls `fs->unmount` **with the
-root still alive** so the filesystem can commit (or, under
-`cosmofs_test_discard_on_unmount`, discard) and release its own pins;
-only afterwards does the VFS drop the root reference, so a filesystem's
-`evict` must tolerate `mnt->fs_priv` already being NULL. The VFS does
-not call `fs->sync` on unmount; committing is the unmount's job.
+above, commits through `fs->sync` while the mount is still whole (a
+failed commit returns the error and leaves the mount in place, so no
+data is lost and the caller can retry), uncovers the mountpoint, and
+then calls `fs->unmount` **with the root still alive** so the
+filesystem can drop its state and release its own pins; only afterwards
+does the VFS drop the root reference, so a filesystem's `evict` must
+tolerate `mnt->fs_priv` already being NULL. cosmofs treats a mutation
+that fails after its namespace change was published (a metadata
+write-through hitting ENOSPC or I/O error) by abandoning the open
+transaction (`cfs_fail`): commits refuse from then on, and unmount drops
+the transaction, so the on-disk state stays at the last committed root.
+The crash-test hook makes `fs->sync` a no-op so unmount drops the
+transaction the same way.
 
 Vnode cache: `vnode_lookup_cached(mnt, ino)` returns a referenced vnode
 if one is live; a filesystem's `lookup` calls it before instantiating.

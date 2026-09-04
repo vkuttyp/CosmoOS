@@ -575,15 +575,18 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         kerror("cosmofs: rename of %.*s failed (%d); namespace restored", (int)olen, oname, rc);
         goto out;
     }
+    /* The namespace change is published. The metadata updates below are
+     * write-throughs into copy-on-write buffers; if one of them fails the
+     * in-memory state can no longer be made consistent, so the whole open
+     * transaction is abandoned: nothing of it reaches the disk and the
+     * last committed root remains the truth. */
     if (replaced) {
         replaced->nlink = replaced->type == VNODE_DIR ? 0 : replaced->nlink - 1;
         if (replaced->type == VNODE_DIR)
             ndir->nlink--;
         rc = inode_sync(fs, replaced);
-        if (rc)
-            goto out;
     }
-    if (odir != ndir) {
+    if (rc == 0 && odir != ndir) {
         cfs_inode_of(victim)->parent = ndir->ino;
         if (victim->type == VNODE_DIR) {
             odir->nlink--;
@@ -595,6 +598,8 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
         if (rc == 0)
             rc = inode_sync(fs, ndir);
     }
+    if (rc)
+        cfs_fail(fs, rc);
 out:
     mutex_unlock(&fs->lock);
     kfree(block);

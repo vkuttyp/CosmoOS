@@ -80,9 +80,12 @@ filesystem's own (pins, the mount's root reference). Check:
 `vfs-ramfs` (`-EBUSY` on the second mount, `-EBUSY` while a file is
 open, `-EBUSY` for `/`, `-EINVAL` for a non-root). Gap: none.
 
-**V11. `fs->unmount` runs with the root alive and is responsible for
-committing or discarding; the VFS then drops the root.** `vfs_umount`
-does not call `fs->sync`. A filesystem's `evict` must tolerate
+**V11. `vfs_umount` commits through `fs->sync` before dismantling
+anything and keeps the mount if that fails; `fs->unmount` then runs
+with the root alive and only drops state.** A discarded (test hook) or
+abandoned (`cfs_fail`, after a mutation that could not be completed
+consistently) transaction is dropped there, leaving the last committed
+root current. A filesystem's `evict` must tolerate
 `mnt->fs_priv` already being NULL (cosmofs root eviction after
 `cfs_destroy`). Check: `cosmofs-crash` relies on it (the discard hook
 would be bypassed otherwise); `cosmofs-format` (unmount of an untouched

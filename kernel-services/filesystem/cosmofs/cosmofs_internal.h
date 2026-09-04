@@ -46,8 +46,13 @@ struct cfs {
 
     struct mutex lock;
     bool discard_on_unmount;
+    int failed;             /* nonzero: the open transaction is abandoned, never committed */
     uint64_t commits;
 };
+
+/* Abandon the open transaction after a mutation that could not be
+ * completed consistently; commits refuse until unmount discards it. */
+void cfs_fail(struct cfs *fs, int rc);
 
 /* Per-vnode private state: the inode as last written through. */
 struct cfs_vnode {
