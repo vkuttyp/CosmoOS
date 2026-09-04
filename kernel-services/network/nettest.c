@@ -436,6 +436,11 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
         CHECK(ksock_getsockname(c, &me) == 0 && me.port >= NET_EPHEMERAL_LO);
         CHECK(ksock_recvfrom(c, tmp, 8, NULL) == 0);
         CHECK(ksock_sendto(c, "x", 1, NULL) == -EPIPE);
+        /* The ended connection no longer reserves its port. */
+        struct socket *again;
+        CHECK(ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &again) == 0);
+        CHECK(ksock_bind(again, &me) == 0);
+        ksock_put(again);
     }
     ksock_put(c);
     for (unsigned i = 0; i < 500 && !srv.done; i++) {

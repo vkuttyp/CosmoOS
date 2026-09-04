@@ -202,6 +202,32 @@ static void pcb_free_locked(struct tcp_pcb *pcb)
     kfree(pcb);
 }
 
+/*
+ * Lock held. The connection is over but a socket still holds the pcb: it
+ * becomes CLOSED and leaves the table, so it neither reserves its port nor
+ * matches a segment; tcp_close frees it. A later connect re-inserts it.
+ */
+static void pcb_retire_locked(struct tcp_pcb *pcb)
+{
+    pcb->state = TCP_CLOSED;
+    timer_cancel(&pcb->rexmit);
+    timer_cancel(&pcb->delack);
+    timer_cancel(&pcb->timewait);
+    if (!list_empty(&pcb->link)) {
+        list_remove(&pcb->link);
+        list_init(&pcb->link);
+    }
+}
+
+/* Lock held. The connection has ended: free the pcb, or retire it under a live socket. */
+static void pcb_end_locked(struct tcp_pcb *pcb)
+{
+    if (pcb->sock == NULL)
+        pcb_free_locked(pcb);
+    else
+        pcb_retire_locked(pcb);
+}
+
 static bool port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr, const struct tcp_pcb *self)
 {
     for (struct list_node *node = g_pcbs.next; node != &g_pcbs; node = node->next) {
@@ -451,14 +477,10 @@ static void pcb_work(void *arg)
         return;
     }
     if ((flags & WORK_TIMEWAIT) && pcb->state == TCP_TIME_WAIT) {
-        if (pcb->sock == NULL) {
-            pcb_free_locked(pcb);
-        } else {
-            /* The application still holds the socket (shutdown without
-             * close): the connection is over, the pcb stays until close. */
-            pcb->state = TCP_CLOSED;
-            wake = sock_ref(pcb);
-        }
+        /* Under a socket that was shut down but not closed the pcb is
+         * retired, not freed; it lives until close. */
+        wake = sock_ref(pcb);
+        pcb_end_locked(pcb);
         spin_unlock_irqrestore(&g_lock, s);
         sock_wake_after(wake);
         return;
@@ -475,11 +497,7 @@ static void pcb_work(void *arg)
                 STAT(timeouts);
                 pcb->error = -ETIMEDOUT;
                 wake = sock_ref(pcb);
-                pcb->state = TCP_CLOSED;
-                if (pcb->sock == NULL)
-                    pcb_free_locked(pcb);
-                else
-                    disarm_rexmit(pcb);
+                pcb_end_locked(pcb);
                 spin_unlock_irqrestore(&g_lock, s);
                 sock_wake_after(wake);
                 return;
@@ -965,9 +983,8 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             if (flags & TH_ACK) {
                 STAT(rsts_in);
                 pcb->error = -ECONNREFUSED;
-                pcb->state = TCP_CLOSED;
-                disarm_rexmit(pcb);
                 wake = sock_ref(pcb);
+                pcb_end_locked(pcb);
             }
             goto out;
         }
@@ -1046,23 +1063,16 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             goto out;
         }
         pcb->error = pcb->state == TCP_SYN_RCVD ? -ECONNREFUSED : -ECONNRESET;
-        pcb->state = TCP_CLOSED;
-        disarm_rexmit(pcb);
-        timer_cancel(&pcb->delack);
         wake = sock_ref(pcb);
-        if (pcb->sock == NULL)
-            pcb_free_locked(pcb);
+        pcb_end_locked(pcb);
         goto out;
     }
     if (flags & TH_SYN) {
         /* SYN in the window: error and reset. */
         build_rst(&b, &dst, &src, &hdr, seglen);
         pcb->error = -ECONNRESET;
-        pcb->state = TCP_CLOSED;
-        disarm_rexmit(pcb);
         wake = sock_ref(pcb);
-        if (pcb->sock == NULL)
-            pcb_free_locked(pcb);
+        pcb_end_locked(pcb);
         goto out;
     }
     if (!(flags & TH_ACK))
@@ -1118,9 +1128,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             else if (pcb->state == TCP_CLOSING)
                 enter_time_wait(pcb);
             else if (pcb->state == TCP_LAST_ACK) {
-                pcb->state = TCP_CLOSED;
-                if (pcb->sock == NULL)
-                    pcb_free_locked(pcb);
+                pcb_end_locked(pcb);
                 goto out;
             }
         }

@@ -142,7 +142,11 @@ learned). Gap: an on-link host that lies in a request addressed to us
 still poisons its own IP's mapping; ARP offers no defence and none is
 attempted.
 
-**N14. A TCP pcb is never freed while a socket points at it.** Every
-free path checks `pcb->sock`; when TIME_WAIT ends under a live socket
-the pcb becomes CLOSED and waits for `tcp_close`. Check: `net-lo-tcp`
-keeps a shut-down socket 2.5 s past TIME_WAIT and uses it.
+**N14. A TCP pcb is never freed while a socket points at it, and an
+ended connection holds nothing.** Every path that ends a connection
+(TIME_WAIT expiry, the last ACK, a reset, the retransmit limit) goes
+through `pcb_end_locked`: it frees the pcb when `sock` is NULL and
+otherwise retires it (CLOSED, timers off, out of the pcb table so the
+port is free and no segment matches it) until `tcp_close`. Check:
+`net-lo-tcp` keeps a shut-down socket 2.5 s past TIME_WAIT, uses it,
+and binds a new socket to its former port.

@@ -64,7 +64,8 @@ byte, shuts down for writing, drains to EOF (`recvfrom` returns 0),
 and `sendto` afterwards is `-EPIPE`; the server saw the same byte
 count. The IPv6 client then keeps its socket for 2.5 s, past the 2 s
 TIME_WAIT, and `getsockname`, `recvfrom` (0) and `sendto` (`-EPIPE`)
-still behave: the pcb is not freed under a live socket. Then: `connect` to a closed port is `-ECONNREFUSED` and
+still behave, and a new socket can bind the client's former port:
+the pcb is not freed under a live socket and no longer holds the port. Then: `connect` to a closed port is `-ECONNREFUSED` and
 `rsts_in` grew by one; a listener with backlog 2 accepts one of two
 queued connections, exchanges `hi`, and closing the listener resets
 the other (`c2` sees an error on read or write); `conns_established`

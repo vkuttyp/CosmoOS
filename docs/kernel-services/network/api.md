@@ -475,8 +475,9 @@ and closes; in-order data is appended to `rcvbuf` and acknowledged
 immediately every second segment or after 40 ms, out-of-order data is
 acknowledged with `rcv_nxt` and dropped (`out_of_order`); FIN moves
 through CLOSE_WAIT / TIME_WAIT (2 s) and wakes the socket. When
-TIME_WAIT ends the pcb is freed if its socket is gone; otherwise it
-becomes CLOSED and waits for `tcp_close`.
+TIME_WAIT ends the pcb is freed if its socket is gone; otherwise it is
+retired: CLOSED, out of the pcb table (its port is free again), waiting
+for `tcp_close`. Reset and timeout end a connection the same way.
 
 **`tcp_get_stats`** (`segs_in`, `segs_out`, `retransmits`,
 `bad_cksum`, `rsts_in`, `rsts_out`, `conns_active`, `conns_passive`,

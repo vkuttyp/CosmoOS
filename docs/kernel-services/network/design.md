@@ -285,9 +285,11 @@ mbufs: as above. netifs: static or driver-owned; `netif_unregister`
 drains pending transmissions and removes ARP entries. pcbs: owned by
 the socket until close; a TCP pcb outlives its socket in TIME_WAIT and
 is freed by the timer once `sock` is NULL. If the application still
-holds the socket when TIME_WAIT ends (shutdown without close), the pcb
-merely becomes CLOSED (reads return 0, writes `-EPIPE`) and is freed
-by the eventual `tcp_close`; a pcb is never freed while a socket points
+holds the socket when TIME_WAIT ends (shutdown without close), or the
+connection ends by reset or timeout, the pcb is *retired*: it becomes
+CLOSED (reads return 0 or the error, writes `-EPIPE`), leaves the pcb
+table so it reserves no port and matches no segment, and is freed by
+the eventual `tcp_close`; a pcb is never freed while a socket points
 at it. Sockets: kobjects held by
 handles and by in-kernel users; the last put closes the protocol
 (`tcp_close` sends FIN or RST as appropriate). Accept-queue children
