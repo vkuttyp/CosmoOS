@@ -19,20 +19,26 @@ pointer (constitution section 11).
 
 - `struct kobject`: type pointer and atomic reference count.
 - `struct kobject_type`: name and `release`; subtypes extend it (the
-  console type, since Phase 7 `struct file`, and since Phase 8
-  `struct socket` add `read`/`write` through `kobject_io_type`). Other
-  kobjects today: `struct vnode` and `struct mount`
-  (`kernel-services/vfs/`), `struct device` (`kernel/device/`),
-  `struct blkdev` (`kernel/block/`), `struct process`.
+  console type, since Phase 7 `struct file`, since Phase 8
+  `struct socket`, and since Phase 9 the two pipe ends add `read`/`write`
+  and an optional `stat` through `kobject_io_type`). Other kobjects
+  today: `struct vnode` and `struct mount` (`kernel-services/vfs/`),
+  `struct device` (`kernel/device/`), `struct blkdev` (`kernel/block/`),
+  `struct process`.
 - `struct handle_table`: fixed 64 slots, spinlock, install/lookup/close,
-  destroy on process exit.
+  `handle_get` (object plus rights, for `dup` and `spawn`), destroy when
+  the process's last thread is gone.
 - Rights: READ and WRITE now; the set grows with the object kinds.
+  Since Phase 9 handles cross process boundaries: `spawn` copies chosen
+  handles with their rights into the child (a capability-style map), and
+  `dup` copies within a process.
 
 ## Non-responsibilities
 
-- Global object namespace, object naming, capability transfer between
-  processes, per-object permissions beyond handle rights (Phase 5
-  security work builds on this).
+- Global object namespace, object naming, capability transfer over IPC
+  messages, per-object permissions beyond handle rights (Phase 5
+  security work builds on this). Transfer at creation time exists
+  (`spawn`'s handle map).
 - Dynamic growth of the handle table.
 
 ## Data structures and rules
@@ -47,8 +53,9 @@ pointer (constitution section 11).
 - Synchronisation: refcounts are atomic; the handle table lock protects
   slot contents only; object-internal state is the object's own
   concern.
-- Destruction: `handle_table_destroy` closes every slot; the process
-  release calls it before freeing the process.
+- Destruction: `handle_table_destroy` closes every slot as soon as the
+  process's last thread is gone (`process_last_thread_gone`), before the
+  zombie is reaped; the process release finds the table empty.
 - Handle representation: `int`, 0 to 63, `-EBADF` for anything else.
 
 ## Error handling
@@ -73,6 +80,6 @@ releasing everything. See `docs/kernel/process/testing.md`.
 
 ## Future
 
-Files, sockets, devices, timers, shared memory, IPC channels, VMs and
-vCPUs are all kobjects with handle rights; capability passing over IPC
-transfers references.
+Devices, timers, shared memory, IPC channels, VMs and vCPUs join files,
+sockets and pipe ends as kobjects with handle rights; capability passing
+over IPC transfers references the way `spawn` does at creation.

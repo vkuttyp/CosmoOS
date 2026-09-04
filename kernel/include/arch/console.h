@@ -11,5 +11,8 @@
 #define ARCH_CONSOLE_H
 
 void arch_console_early_init(void);
+/* After irq_init and tty_init: route the console device's receive
+ * interrupt into the console tty. Harmless when there is no device. */
+void arch_console_input_init(void);
 
 #endif /* ARCH_CONSOLE_H */

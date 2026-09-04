@@ -1,0 +1,5 @@
+# /etc/rc - run by init before the console shell (docs/userland/).
+echo "CosmoOS userland ready"
+# The shell test script exists only in self-test builds (SELFTEST=1).
+ls /etc/rc.test 2> /tmp/.rc.probe && sh /etc/rc.test
+rm /tmp/.rc.probe

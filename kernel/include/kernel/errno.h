@@ -53,6 +53,12 @@
 #define EALREADY  114 /* operation already in progress */
 #define EINPROGRESS 115 /* operation in progress */
 #define ETIMEDOUT 110 /* operation timed out */
+#define ESRCH     3   /* no such process */
+#define EINTR     4   /* interrupted (the process is being killed) */
+#define E2BIG     7   /* argument list too long */
+#define ECHILD    10  /* no child processes */
+#define EACCES    13  /* permission denied */
+#define ENOTTY    25  /* not a terminal */
 #define ENOKEY    126 /* required key not available */
 #define EKEYREJECTED 129 /* key or signature rejected */
 

@@ -1,3 +1,6 @@
 # userland/system
 
-mount, umount, ps, kill, dmesg, sysctl, vmctl.
+`/sbin`: `mount` `umount` `ps` `kill` `dmesg` `sysctl`
+(docs/userland/api.md). `ps`, `dmesg` and `sysctl` use the native
+`procinfo`, `klog` and `sysctl` system calls through `cosmo/*.h`.
+`vmctl` arrives with the hypervisor.

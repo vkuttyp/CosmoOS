@@ -14,6 +14,7 @@
 #ifndef KERNEL_WAIT_H
 #define KERNEL_WAIT_H
 
+#include <kernel/errno.h>
 #include <kernel/list.h>
 #include <kernel/spinlock.h>
 
@@ -66,8 +67,34 @@ bool waitqueue_empty(struct waitqueue *wq);
         waitqueue_finish((wq), &__we);                                         \
     } while (0)
 
+/* Killable variant: evaluates to 0, or -EINTR when the calling process is
+ * being killed (process_kill sets the flag and wakes the thread). The
+ * flag is checked after the thread is queued and BLOCKED, so a kill that
+ * lands between the check and the block finds a waiter to wake. */
+bool process_kill_pending(void);
+#define wait_event_killable(wq, cond)                                          \
+    ({                                                                         \
+        int __rc = 0;                                                          \
+        struct wait_entry __we;                                                \
+        wait_entry_init(&__we);                                                \
+        for (;;) {                                                             \
+            waitqueue_prepare((wq), &__we);                                    \
+            if (cond)                                                          \
+                break;                                                         \
+            if (process_kill_pending()) {                                      \
+                __rc = -EINTR;                                                 \
+                break;                                                         \
+            }                                                                  \
+            sched_block_current();                                             \
+        }                                                                      \
+        waitqueue_finish((wq), &__we);                                         \
+        __rc;                                                                  \
+    })
+
 /* Sleep for at least `ns` (granularity: one tick). */
 void thread_sleep_ns(uint64_t ns);
+/* Same, but returns -EINTR early when the calling process is being killed. */
+int thread_sleep_ns_killable(uint64_t ns);
 static inline void thread_sleep_ms(uint64_t ms) { thread_sleep_ns(ms * 1000000ULL); }
 
 #endif /* KERNEL_WAIT_H */

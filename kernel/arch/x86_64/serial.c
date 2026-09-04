@@ -7,6 +7,10 @@
  */
 
 #include <kernel/console.h>
+#include <kernel/interrupt.h>
+#include <kernel/irq.h>
+#include <kernel/log.h>
+#include <kernel/tty.h>
 
 #include <arch/console.h>
 
@@ -28,6 +32,9 @@
 #define MCR_DTR_RTS_OUT2 0x0B
 #define MCR_LOOPBACK 0x10
 #define LSR_THR_EMPTY 0x20
+#define LSR_DATA_READY 0x01
+#define IER_RX_AVAIL  0x01
+#define COM1_ISA_IRQ  4
 
 static bool g_present;
 
@@ -92,4 +99,38 @@ void arch_console_early_init(void)
 {
     serial_init();
     console_register(&g_serial_sink);
+}
+
+/* --- receive: the console tty's input (docs/kernel/tty/) --- */
+
+static void serial_rx_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    struct tty *t = arg;
+    while (inb(COM1 + UART_LSR) & LSR_DATA_READY) {
+        uint8_t c = inb(COM1 + UART_DATA);
+        tty_input(t, &c, 1);
+    }
+}
+
+void arch_console_input_init(void)
+{
+    if (!g_present)
+        return;
+    unsigned flags = 0;
+    irq_t gsi = irq_legacy_to_gsi(COM1_ISA_IRQ, &flags);
+    int rc = irq_request(gsi, serial_rx_irq, tty_console(), "serial0-rx", flags, 0);
+    if (rc) {
+        kwarn("serial: cannot request IRQ %u for receive (%d); console input disabled", COM1_ISA_IRQ, rc);
+        return;
+    }
+    (void)inb(COM1 + UART_DATA);               /* drain anything pending */
+    outb(COM1 + UART_IER, IER_RX_AVAIL);
+    rc = irq_enable(gsi);                      /* irq_request leaves the line masked */
+    if (rc) {
+        kwarn("serial: cannot enable IRQ %u (%d); console input disabled", COM1_ISA_IRQ, rc);
+        return;
+    }
+    kinfo("serial: console input on IRQ %u", COM1_ISA_IRQ);
 }

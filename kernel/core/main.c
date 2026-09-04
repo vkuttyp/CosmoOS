@@ -28,6 +28,8 @@
 #include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <kernel/tty.h>
+#include <arch/console.h>
 #include <kernel/smp.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
@@ -128,6 +130,7 @@ void kernel_main(const struct cosmoboot_info *info)
     ipi_init();
     timer_init();
     sched_init();
+    tty_init();
     process_init();
     module_init();
 
@@ -150,6 +153,7 @@ void kernel_main(const struct cosmoboot_info *info)
 
     arch_irq_enable();
     kinfo("interrupts enabled");
+    arch_console_input_init();
 
     /* Bring up the other CPUs now that this one can take interrupts:
      * the shootdowns and cross-CPU calls bring-up needs require it. */
@@ -164,16 +168,31 @@ void kernel_main(const struct cosmoboot_info *info)
     kinfo("self-tests disabled in this build");
 #endif
 
-    /* The first user process. There is no filesystem yet: the loader
-     * delivered init inside the boot archive. */
+#if CONFIG_CRASH_TEST
+    /* Deliberate page fault on a canonical but unmapped address. Proves
+     * the exception path, the panic report, and the harness's failure
+     * detection. Built only with CRASH_TEST=1 (make test-crash). Runs
+     * before init: since Phase 9 init waits for a console shell that the
+     * crash harness never types at. */
+    kinfo("crash test: writing to an unmapped address on purpose");
+    volatile uint64_t *unmapped = (volatile uint64_t *)0xFFFF900000000000ULL;
+    *unmapped = 1;
+    kerror("crash test: write did not fault; page tables are wrong");
+    failed++;
+#endif
+
+    /* The first user process: init from the boot archive (the kernel
+     * finds it by name; the rest of the archive is the filesystem). */
     const void *image;
     size_t image_size;
     if (bootarchive_find("init", &image, &image_size)) {
         static const char *const argv[] = { "init", NULL };
         struct process *init = NULL;
-        int rc = process_create_from_elf(image, image_size, "init", argv, NULL, &init);
+        int rc = process_create_from_elf(image, image_size, "init", argv, NULL, NULL, &init);
         if (rc == 0) {
+            process_set_init(init);
             int status = process_wait_exit(init);
+            process_set_init(NULL);
             kinfo("init exited with status %d", status);
             process_put(init);
             if (status != 0)
@@ -186,16 +205,6 @@ void kernel_main(const struct cosmoboot_info *info)
         kwarn("no init in the boot archive: init not started");
     }
 
-#if CONFIG_CRASH_TEST
-    /* Deliberate page fault on a canonical but unmapped address. Proves
-     * the exception path, the panic report, and the harness's failure
-     * detection. Built only with CRASH_TEST=1 (make test-crash). */
-    kinfo("crash test: writing to an unmapped address on purpose");
-    volatile uint64_t *unmapped = (volatile uint64_t *)0xFFFF900000000000ULL;
-    *unmapped = 1;
-    kerror("crash test: write did not fault; page tables are wrong");
-    failed++;
-#endif
 
     kinfo("boot complete; nothing more to do in this phase");
     kernel_shutdown(failed ? KERNEL_EXIT_FAILURE : KERNEL_EXIT_SUCCESS);

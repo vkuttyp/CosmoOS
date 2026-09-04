@@ -12,6 +12,7 @@
 #ifndef UAPI_COSMO_SYSCALL_H
 #define UAPI_COSMO_SYSCALL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define SYS_exit      0   /* (int status) -> never returns */
@@ -48,7 +49,57 @@
 #define SYS_recvfrom  29  /* (int h, void *buf, size_t len, struct cosmo_sockaddr *from (NULL ok), size_t *fromlen) -> bytes */
 #define SYS_shutdown  30  /* (int h, int how) -> 0 */
 #define SYS_getsockname 31 /* (int h, struct cosmo_sockaddr *, size_t *len) -> 0 */
-#define SYS_COUNT     32
+/* Phase 9: processes, pipes, the working directory, introspection. */
+#define SYS_spawn     32  /* (const struct cosmo_spawn *req) -> pid */
+#define SYS_wait      33  /* (int pid, int *status, unsigned flags) -> pid, 0 with WNOHANG */
+#define SYS_kill      34  /* (int pid, int sig) -> 0 */
+#define SYS_pipe      35  /* (int h[2]) -> 0; h[0] reads, h[1] writes */
+#define SYS_dup       36  /* (int h, int target) -> handle; target -1 = lowest free */
+#define SYS_getppid   37  /* () -> parent pid, 0 for kernel-created processes */
+#define SYS_chdir     38  /* (const char *path) -> 0 */
+#define SYS_getcwd    39  /* (char *buf, size_t len) -> length written (without NUL) */
+#define SYS_procinfo  40  /* (struct cosmo_procinfo *buf, size_t count) -> total processes */
+#define SYS_klog      41  /* (char *buf, size_t len) -> bytes of the newest whole log lines */
+#define SYS_sysctl    42  /* (const char *name, char *buf, size_t len) -> value length */
+#define SYS_COUNT     43
+
+/* spawn: the child receives exactly the mapped handles (same rights).
+ * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */
+struct cosmo_spawn_handle {
+    int child;      /* slot in the child */
+    int parent;     /* handle in the caller */
+};
+struct cosmo_spawn {
+    const char *path;
+    const char *const *argv;                   /* NULL-terminated, argv[0] required */
+    const char *const *envp;                   /* NULL-terminated or NULL */
+    const struct cosmo_spawn_handle *handles;
+    size_t nr_handles;
+    const char *cwd;                           /* NULL: inherit */
+    unsigned flags;                            /* must be 0 */
+};
+#define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
+#define COSMO_ARG_ENTRIES 128
+#define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */
+
+#define COSMO_WNOHANG 1u
+/* Signals are numbers only in this phase: every one terminates the target
+ * with status 128 + sig; there are no handlers. */
+#define COSMO_SIGHUP  1
+#define COSMO_SIGINT  2
+#define COSMO_SIGKILL 9
+#define COSMO_SIGSEGV 11
+#define COSMO_SIGTERM 15
+#define COSMO_NSIG    32
+
+struct cosmo_procinfo {
+    uint32_t pid, ppid, uid, gid;
+    uint32_t state;         /* 0 running, 1 exiting, 2 exited (zombie) */
+    uint32_t nr_threads;
+    uint64_t syscalls;
+    uint64_t run_ns;        /* CPU time of its threads */
+    char name[32];
+};
 
 #define COSMO_AF_INET  2
 #define COSMO_AF_INET6 10
@@ -89,6 +140,8 @@ struct cosmo_sockaddr {
 #define COSMO_DT_REG     1
 #define COSMO_DT_DIR     2
 #define COSMO_DT_CHR     3
+#define COSMO_DT_FIFO    4
+#define COSMO_DT_SOCK    5
 
 struct cosmo_stat {
     uint64_t ino;
@@ -131,6 +184,15 @@ struct cosmo_dirent {
 /* Error numbers (subset, values as in kernel/errno.h). */
 #define COSMO_EPERM   1
 #define COSMO_ENOENT  2
+#define COSMO_ESRCH   3
+#define COSMO_EINTR   4
+#define COSMO_E2BIG   7
+#define COSMO_ENOEXEC 8
+#define COSMO_ECHILD  10
+#define COSMO_EACCES  13
+#define COSMO_ENOTTY  25
+#define COSMO_ESPIPE  29
+#define COSMO_ERANGE  34
 #define COSMO_EIO     5
 #define COSMO_EBADF   9
 #define COSMO_EAGAIN  11

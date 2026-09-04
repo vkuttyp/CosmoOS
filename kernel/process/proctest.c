@@ -194,7 +194,7 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
     }
     struct process *p = NULL;
     unsigned before = process_count();
-    int rc = process_create_from_elf(image, image_size, argv[0], argv, NULL, &p);
+    int rc = process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p);
     CHECK(rc == 0);
     CHECK(p != NULL && p->pid > 0);
 
@@ -244,8 +244,53 @@ bool selftest_process_reject(const char **reason)
     static const char *const argv[] = { "bogus", NULL };
     char junk[128];
     memset(junk, 0, sizeof(junk));
-    CHECK(process_create_from_elf(junk, sizeof(junk), "junk", argv, NULL, &p) == -ENOEXEC);
+    CHECK(process_create_from_elf(junk, sizeof(junk), "junk", argv, NULL, NULL, &p) == -ENOEXEC);
     CHECK(p == NULL);
     (void)info;
+    return true;
+}
+
+/* --- Phase 9: kill delivery and path normalisation --- */
+
+/* Run the boot module with `argv` and kill it with `sig` once it has had
+ * time to block or spin; the exit status must be 128 + sig. */
+static bool kill_module(const char *const argv[], int sig, const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size))
+        return true;
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    thread_sleep_ms(50);
+    CHECK(!completion_done(&p->exited));
+    process_kill(p, sig);
+    uint64_t t0 = clock_now_ns();
+    int status = process_wait_exit(p);
+    CHECK(clock_now_ns() - t0 < 2000000000ULL);
+    CHECK(status == 128 + sig);
+    process_put(p);
+    return true;
+}
+
+bool selftest_process_spawn(const char **reason)
+{
+    char out[64];
+    CHECK(path_normalize("/", "usr/bin", out, sizeof(out)) == 0 && strcmp(out, "/usr/bin") == 0);
+    CHECK(path_normalize("/usr/bin", "..", out, sizeof(out)) == 0 && strcmp(out, "/usr") == 0);
+    CHECK(path_normalize("/usr/bin", "../../..", out, sizeof(out)) == 0 && strcmp(out, "/") == 0);
+    CHECK(path_normalize("/a", "./b//c/./d", out, sizeof(out)) == 0 && strcmp(out, "/a/b/c/d") == 0);
+    CHECK(path_normalize("/a/b", "/x/../y", out, sizeof(out)) == 0 && strcmp(out, "/y") == 0);
+    CHECK(path_normalize("/", ".", out, sizeof(out)) == 0 && strcmp(out, "/") == 0);
+    CHECK(path_normalize("/a", "b", out, 4) == -ENAMETOOLONG);
+
+    /* A process blocked in a console read dies from a kill (killable
+     * wait); a spinning one dies at its next return to user mode. */
+    static const char *const block_argv[] = { "init", "--block", NULL };
+    static const char *const spin_argv[] = { "init", "--spin", NULL };
+    if (!kill_module(block_argv, COSMO_SIGTERM, reason))
+        return false;
+    if (!kill_module(spin_argv, COSMO_SIGKILL, reason))
+        return false;
     return true;
 }

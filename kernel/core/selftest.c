@@ -289,7 +289,10 @@ static const struct selftest tests[] = {
     { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */
+    { "tty-ldisc",       selftest_tty_ldisc },
+    { "ipc-pipe",        selftest_ipc_pipe },
     { "process-reject",  selftest_process_reject },
+    { "process-spawn",   selftest_process_spawn },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
 };

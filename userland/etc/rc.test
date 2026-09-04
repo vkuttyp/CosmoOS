@@ -1,0 +1,41 @@
+# /etc/rc.test - the shell and utilities exercise themselves. Only
+# present in self-test builds (SELFTEST=1). Straight-line shell: every
+# check is a command whose failure records a FAIL line; the last line
+# reports the verdict. Output lines the boot harness requires are marked.
+FAILS=0
+mkdir -p /tmp/shtest/dir/sub || FAILS=1
+echo hello > /tmp/shtest/a || FAILS=1
+cat /tmp/shtest/a | cat > /tmp/shtest/b || FAILS=1
+cat /tmp/shtest/b
+echo world >> /tmp/shtest/b || FAILS=1
+cat /tmp/shtest/a /tmp/shtest/b | cat | cat > /tmp/shtest/c || FAILS=1
+cat /tmp/shtest/c
+cp /tmp/shtest/c /tmp/shtest/dir/ || FAILS=1
+cp -r /tmp/shtest/dir /tmp/shtest/copy || FAILS=1
+ls /tmp/shtest/copy/sub || FAILS=1
+mv /tmp/shtest/copy/c /tmp/shtest/moved || FAILS=1
+rm /tmp/shtest/copy/c && FAILS=1
+cat /tmp/shtest/moved | cat > /tmp/shtest/d || FAILS=1
+rm -r /tmp/shtest/copy || FAILS=1
+ls /tmp/shtest/copy && FAILS=1
+false && FAILS=1
+true || FAILS=1
+false; echo "status $?"
+cat /nonexistent 2> /tmp/shtest/err && FAILS=1
+cat /tmp/shtest/err
+sh -c "exit 3"; echo "exit $?"
+nosuchcommand 2> /tmp/shtest/nf; echo "notfound $?"
+X=42; echo "var $X ${X}1 $$"
+export Y=hello; sh -c 'echo "exported $Y"'
+cd /tmp/shtest && pwd
+cd dir && pwd
+cd .. && pwd
+cd /
+ls -l /tmp/shtest/a | cat > /tmp/shtest/l || FAILS=1
+cat /tmp/shtest/l
+echo -n "no newline"; echo
+ps
+sysctl kernel.name
+kill 99999 2> /tmp/shtest/k && FAILS=1
+rm -r /tmp/shtest || FAILS=1
+sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

@@ -31,14 +31,18 @@ struct handle_table { spinlock_t lock; struct handle_entry entries[HANDLE_TABLE_
 `handle_install` takes a reference and returns the lowest free index or
 `-EMFILE`; `handle_lookup(table, h, rights_needed)` returns a referenced
 object (caller `kobject_put`s) or NULL when the index is empty or lacks
-the rights; `handle_close` drops the table's reference; `handle_table_
-destroy` closes everything. Handles 0, 1, 2 of a new process are the
-console object with read, write, write rights.
+the rights; `handle_get` returns a referenced object with its rights
+(for `dup` and `spawn`); `handle_close` drops the table's reference;
+`handle_table_destroy` closes everything. Handles 0, 1, 2 of a
+kernel-created process are the console object with read, write, write
+rights; a spawned child gets exactly what its parent maps (section 10).
 
 The console object (`kernel/object/console_obj.c`) is a `kobject` whose
-type carries `read`/`write` function pointers used by `sys_read`/
-`sys_write`; `write` goes to `console_write`, `read` returns 0 (no input
-path yet). This is the seed of `struct file`; the VFS replaces it.
+type (`struct kobject_io_type`) carries `read`/`write`/`stat` function
+pointers used by `sys_read`/`sys_write`/`sys_fstat`; `write` goes to
+`console_write`, `read` to the console tty (`docs/kernel/tty/`), `stat`
+reports a character device. `struct file`, `struct socket` and the pipe
+ends are the other I/O kobjects.
 
 ## 2. Process
 
@@ -61,15 +65,27 @@ struct process {
     spinlock_t lock;
     struct list_node all_link;         /* process table */
     pid_t parent_pid;
+    /* Phase 9, section 10 */
+    struct process *parent;            /* referenced; NULL for kernel-created processes */
+    struct list_node children, sibling;
+    struct waitqueue child_wq;
+    bool reaped;
+    int kill_sig;
+    struct vnode *cwd;
+    char cwd_path[1024];
 };
 ```
 
-Process table: global list + spinlock + next pid (1 is the first
-process created, which is `init`).
+Process table: global list + spinlock + next pid. Pid 1 is the first
+process created; in self-test builds that is a self-test's process, so
+`kernel_main` registers the real init with `process_set_init` instead
+of assuming pid 1.
 
 ### Creation from an ELF image
 
-`process_create_from_elf(image, size, name, argv[], envp[])`:
+`process_create_from_elf(image, size, name, argv[], envp[], attr)`
+(`attr` NULL for kernel creators; section 10 describes the spawn
+attributes):
 
 1. `elf_validate(image, size, &info)`: ELF64 LE, `ET_EXEC`, `EM_X86_64`,
    program headers in bounds, each `PT_LOAD` in bounds, no W+X segment,
@@ -97,7 +113,8 @@ process created, which is `init`).
      auxv: AT_PAGESZ, AT_ENTRY, AT_NULL
      strings (argv, envp bytes)
    ```
-5. Handles 0/1/2 → console. Create the main thread with `thread_prepare`
+5. Handles: 0/1/2 → console for a kernel creator, else the parent's map.
+   Create the main thread with `thread_prepare`
    plus `t->proc = process`, `t->user_entry = elf.entry`, `t->user_sp =
    initial rsp`, entry function `user_thread_start`. Enqueue.
 
@@ -107,13 +124,16 @@ interrupts; it calls `arch_user_enter(entry, sp)` which never returns.
 
 ### Exit
 
-`process_exit(status)` (from `sys_exit` or from a fatal fault): set
-state EXITING and exit status under `process.lock`, then `thread_exit()`
-on the calling thread. `thread_put` of the last thread of a process
-(reaper context) calls `process_release_last_thread()` → state EXITED,
-`complete(&exited)`, log `process N ('name') exited with status S`,
-then `kobject_put(&process->obj)`. The process type's release
-destroys the handle table and the address space (`vm_space_destroy`:
+`process_exit(status)` (from `sys_exit`, from a fatal fault, or from a
+kill delivery point): set state EXITING and exit status under
+`process.lock`, then `thread_exit()` on the calling thread. `thread_put`
+of the last thread of a process (reaper context) calls
+`process_last_thread_gone()` → reparent the children, state EXITED,
+close the handle table and drop the working directory (so pipes deliver
+EOF now, not at reaping), `complete(&exited)`, log `process N ('name')
+exited with status S`; then either keep the table's reference as a
+zombie for the parent's `wait` or, with no parent, `kobject_put`. The
+process type's release destroys the address space (`vm_space_destroy`:
 unmap all regions with frames freed and shootdown, then
 `arch_mmu_context_destroy` frees the lower-half tables) and frees the
 struct. The reaper never runs on the dead process's CR3 because every
@@ -276,23 +296,30 @@ status 139.
 
 ## 8. Userland
 
-`userland/init/crt0.S`: `_start` reads `argc`/`argv` from the initial
-stack per the ABI, aligns the stack, calls `main`, then `exit`.
-`userland/init/init.c`: banner via `write(1)`, `--selftest` mode runs
-the syscall checks and prints `USERTEST: PASS`/`FAIL`, `--crash` mode
-dereferences address 0. `libc/include/cosmo/syscall.h`: inline
-`syscall0..6` wrappers around the `SYSCALL` instruction using the
-`uapi` numbers. Built with the kernel's freestanding flags for
-`x86_64-unknown-none-elf`, linked at `0x400000` with a user linker
-script (three W^X segments, non-executable stack), and packed into the
-boot archive as the entry `init` (`scripts/mkbootarchive.py`, see
-`docs/kernel/module/design.md`).
+Since Phase 9 the userland is a C library and a set of programs
+(`docs/libc/`, `docs/userland/`). `libc/src/crt0.S`: `_start` reads
+`argc`/`argv`/`envp` from the initial stack per the ABI, aligns the
+stack, calls `__libc_start`, which calls `main` and `exit`.
+`userland/init/init.c`: runs `/etc/rc` and the console shell (`--selftest`
+runs the system-call checks and prints `USERTEST: PASS`/`FAIL`, `--crash`
+dereferences address 0, `--block` reads the console, `--spin` loops).
+`libc/include/cosmo/syscall.h`: inline `cosmo_syscall0..6` wrappers around
+the `SYSCALL` instruction using the `uapi` numbers. Programs are built
+with the kernel's freestanding flags for `x86_64-unknown-none-elf`
+without `-mcmodel=kernel`, linked at `0x400000` with `userland/user.ld`
+(three W^X segments, non-executable stack), and packed into the boot
+archive as `init`, `bin/<name>`, `sbin/<name>` and `etc/<name>`
+(`scripts/mkbootarchive.py`, see `docs/kernel/module/design.md`).
 
 ## 9. Failure modes
 
 | Condition | Behaviour |
 |---|---|
 | archive missing on the boot volume, or no `init` entry in it | loader logs, kernel skips `init` with a warning; self-tests that need it report skipped |
+| `spawn` of a missing, non-regular or non-executable file | `-ENOENT`, `-EACCES` |
+| `spawn` with a bad handle map | `-EBADF` (parent handle free), `-EINVAL` (child slot out of range or duplicate) |
+| `wait` with nothing to wait for | `-ECHILD`; `-EINTR` when killed while waiting |
+| `kill` of an unknown pid, a foreign uid, or signal 0 | `-ESRCH`, `-EPERM`, `-EINVAL` |
 | ELF rejected | `process_create_from_elf` returns `-ENOEXEC` with a log line naming the rule |
 | out of memory during load | `-ENOMEM`, partial space destroyed |
 | user fault without region | process terminated with status 139, logged |
@@ -302,3 +329,195 @@ boot archive as the entry `init` (`scripts/mkbootarchive.py`, see
 | handle table full | `-EMFILE` |
 | kernel fault on unvalidated user pointer | panic (kernel bug) |
 | SYSCALL from a CPU without SCE | impossible: every CPU runs `arch_syscall_init_cpu` |
+
+## 10. Phase 9: spawn, wait, kill, the working directory
+
+### Process fields
+
+```c
+struct process {
+    ...
+    struct process *parent;            /* referenced; NULL for kernel-created processes and orphans of a dead init */
+    struct list_node children;         /* struct process.sibling, under parent->lock */
+    struct list_node sibling;
+    struct waitqueue child_wq;         /* parents block here in wait() */
+    bool reaped;                       /* status collected (or no one will) */
+    int kill_sig;                      /* 0, or the signal that is terminating the process */
+    struct vnode *cwd;                 /* referenced; dropped when the last thread is gone */
+    char cwd_path[1024];               /* VFS_PATH_MAX: normalised absolute path of cwd */
+};
+```
+
+`process_set_init(p)` records the process `kernel_main` started as init
+(a referenced global); orphans go to it while it is RUNNING.
+
+Lock order stays `process_table.lock → process.lock → handle_table.lock`;
+a parent's lock is taken before a child's (`parent.lock → child.lock`)
+and never the reverse, which the reparenting code respects by taking the
+table lock first and then each child's lock alone.
+
+### spawn
+
+```text
+sys_spawn(user struct cosmo_spawn *):
+  copy the request; strncpy path (VFS_PATH_MAX); copy argv/envp pointer arrays and strings
+    (COSMO_ARG_MAX 2048 string bytes and COSMO_ARG_ENTRIES 128 entries in all, else -E2BIG; the
+    first-stack-page limit) into one kzalloc'd struct spawn_copy
+  copy the handle map (≤ HANDLE_TABLE_SIZE entries); each parent handle must exist
+    (rights copied as-is), child numbers must be distinct and < HANDLE_TABLE_SIZE
+  open the path relative to cwd: regular file, mode & 0111 else -EACCES, size ≤ 16 MiB
+  read it fully into a kernel arena buffer (vm_kalloc); file_put
+  process_create_from_elf(image, size, basename, argv, envp, &attr, &p) with
+    `struct process_spawn_attr { struct process *parent; const struct process_handle_map *handles;
+    unsigned nr_handles; struct vnode *cwd; const char *cwd_path; }` (kernel creators pass NULL: console
+    handles 0-2, root cwd, no parent); the child's credentials are the parent's
+  free the buffer (vm_kernel_free); return pid (the creator's reference is dropped)
+```
+
+Handles are installed (from the parent's table with `handle_get`, same
+rights) before the main thread is enqueued, so the child never runs with
+a half-built table; an install failure fails the creation. `argv[0]` is
+required (the program name). The child's `name` is the last path
+component (truncated to `PROCESS_NAME_MAX`). `process_spawn` asserts a
+current process: only system calls reach it.
+
+### exit, zombies, wait, reparenting
+
+`process_last_thread_gone` (reaper context) now does, under the table
+lock: set EXITED; detach every child under `p->lock`, then for each
+child alone under its own lock hand it to init (`process_set_init`'s
+process, if RUNNING and not the exiting process; `parent_pid` becomes
+init's pid) or make it kernel-owned (`parent = NULL`, and an exited
+unreaped child is dropped at once); push the children onto init's list
+under init's lock and wake init's `child_wq`. Then, outside the table
+lock, close the handle table and drop `cwd` (handles close at exit, so
+a pipe whose writer exited delivers EOF before the parent waits; the
+zombie keeps only identity and status). Finally `complete(&p->exited)`
+(for `process_wait_exit`, kernel callers), and either wake
+`parent->child_wq` (zombie: the table reference stays until `wait`) or,
+with no parent, drop the table reference (`reaped = true`).
+
+```text
+sys_wait(pid, user status*, flags):
+  for (;;)
+    lock parent; scan children for state == EXITED && !reaped (pid == -1: any; else that pid, which must be a child else -ECHILD)
+    if found: reaped = true, unlink from children, unlock; copy status; process_put (the table ref); return its pid
+    if no children at all (or the named pid is not a child): unlock; return -ECHILD
+    unlock
+    if flags & WNOHANG: return 0
+    wait_event_killable(&cur->child_wq, a child is reapable)   -> -EINTR when killed
+```
+
+The wait status is the process's `exit_status`: `exit(n)` gives `n & 0xff`,
+a fatal fault gives 139 (`COSMO_EXIT_FAULT`, as before), a kill gives
+`128 + sig`. No encoding macros are needed; the shell prints it.
+
+### kill
+
+```text
+sys_kill(pid, sig):
+  1 ≤ sig ≤ 31 else -EINVAL; pid ≤ 0 → -EINVAL (no groups); target = process_lookup(pid) else -ESRCH
+  permission: cur->cred.uid == 0 || cur->cred.uid == target->cred.uid else -EPERM
+  process_kill(target, sig)
+process_kill(p, sig):
+  lock p; if state != RUNNING or kill_sig already set: unlock, return
+  kill_sig = sig; exit_status = 128 + sig
+  for each thread t of p: sched_wake(t)      (a BLOCKED thread becomes READY; anything else is untouched)
+  unlock
+```
+
+Delivery: `process_check_kill()` (`if (cur->proc && cur->proc->kill_sig) process_exit(cur->proc->exit_status)`)
+is called by `syscall_dispatch` before and after the handler, by the
+arch trap dispatcher when it is about to return to ring 3 (any
+interrupt, so a CPU-bound loop dies at the next timer tick), and by
+`wait_event_killable`, which returns `-EINTR` instead of sleeping when
+the flag is set. The kick is `sched_wake(t)` on the thread itself, not
+on its wait queue: a BLOCKED thread becomes READY and its
+`wait_event_killable` loop re-checks the condition and then the flag; a
+thread that is running or ready is untouched and meets the flag at its
+next boundary. `process_exit` keeps its single-thread shape (one thread
+per process is still the rule); killing a process that is already
+exiting, or twice, is a no-op.
+
+`kill(pid, 0)` is not special: 0 is `-EINVAL` (no existence probe yet).
+
+### wait_event_killable
+
+```c
+#define wait_event_killable(wq, cond) ({                                     \
+    int __rc = 0; struct wait_entry __we; wait_entry_init(&__we);          \
+    for (;;) {                                                             \
+        waitqueue_prepare((wq), &__we);                                    \
+        if (cond) break;                                                   \
+        if (process_kill_pending()) { __rc = -EINTR; break; }              \
+        sched_block_current();                                             \
+    }                                                                      \
+    waitqueue_finish((wq), &__we); __rc; })
+```
+
+The flag check sits after `prepare` (the thread is queued and BLOCKED,
+`waiting_on` set) so a kill that lands between the check and the block
+finds the thread on the queue and wakes it. Used by the tty, pipes,
+`wait`, `thread_sleep_ns_killable` (behind `sys_sleep_ns`), and the
+socket layer's blocking paths (`accept`, `connect`, `recv`, `send`) so
+that a killed network client dies too.
+
+### Working directory
+
+`cwd` starts as the root (kernel-created processes) or the parent's
+(`spawn`; the request may name another directory, resolved relative to
+the parent's cwd). Every path system call passes `cur->cwd` as the
+`start` vnode for relative paths (`vfs_*` already take a start vnode;
+absolute paths ignore it). `chdir(path)`: resolve, must be a directory,
+compute the new normalised path (`normalize_path(cwd_path, path)`:
+split on `/`, drop `.` and empty components, pop on `..`, bounded by
+`VFS_PATH_MAX`), swap the reference under `process.lock`. `getcwd`
+copies `cwd_path`. The string is authoritative for display; the vnode
+for resolution (so a renamed ancestor is not noticed by `getcwd`, as on
+Unix systems that cache the path; recorded).
+
+### dup
+
+`dup(h, target)`: `target == -1` → lowest free slot; otherwise `target`
+must be `< HANDLE_TABLE_SIZE`, an existing object there is closed first
+(after the source has been looked up, so `dup(h, h)` returns `h`
+unchanged). Rights are copied. `-EMFILE` when the table is full.
+
+### Introspection
+
+- `getppid`: `parent_pid` (0 for kernel-created processes and for
+  orphans of a dead init; init's pid after reparenting).
+- `procinfo(buf, count)`: fills up to `count` entries of
+  `struct cosmo_procinfo { uint32_t pid, ppid, uid, gid, state, nr_threads; uint64_t syscalls, run_ns; char name[32]; }`
+  in pid order under the table lock (copied out after unlocking), returns
+  the total number of processes (zombies included, state 2) so the caller
+  can size its buffer. `run_ns` sums the threads' `run_time_ns`.
+- `klog(buf, len)`: the kernel log gains a 32 KiB ring of formatted
+  lines (`kernel/core/log.c`, filled under the log lock at emit time, in
+  all builds); the call copies the newest complete lines that fit in
+  `len`, oldest first, and returns the byte count. Reading does not
+  consume.
+- `sysctl(name, buf, len)`: a static table of read-only values rendered
+  as strings: `kernel.name`, `kernel.version`, `kernel.build`,
+  `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
+  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, and `sysctl.names`
+  (the list, newline-separated). Returns the length of the value (not
+  counting the NUL that is written when it fits); `-ENOENT` for an
+  unknown name. Writable values arrive when there is policy to set.
+
+### The return-to-user hook
+
+`x86_trap_dispatch` ends by checking the saved CS
+(`arch_trap_frame_is_user`) with `irq_depth` and `preempt_count` at 0:
+when returning to ring 3 and the current process has `kill_sig` set,
+`process_return_to_user` enables interrupts (the trap tail runs with
+them off) and calls `process_exit`, which never returns; the thread's kernel stack is the trap stack, which
+is the same stack a system call uses, so nothing special is needed. The
+hook is `process_return_to_user()` in generic code; the arch code only
+decides "this frame returns to user mode".
+
+### Error codes added
+
+`EINTR 4`, `ESRCH 3`, `ECHILD 10`, `EACCES 13`, `E2BIG 7`, `ENOEXEC 8`
+(existed in the kernel, now in the UAPI), `ENOTTY 25`, `ESPIPE 29`
+(UAPI), `ERANGE 34` (UAPI).

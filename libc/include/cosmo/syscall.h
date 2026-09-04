@@ -185,4 +185,51 @@ static inline long cosmo_getsockname(int h, struct cosmo_sockaddr *sa, size_t *l
     return cosmo_syscall3(SYS_getsockname, h, sa, len);
 }
 
+
+/* Phase 9: processes, pipes, the working directory, introspection. */
+static inline long cosmo_spawn(const struct cosmo_spawn *req)
+{
+    return cosmo_syscall1(SYS_spawn, req);
+}
+static inline long cosmo_wait(int pid, int *status, unsigned flags)
+{
+    return cosmo_syscall3(SYS_wait, pid, status, flags);
+}
+static inline long cosmo_kill(int pid, int sig)
+{
+    return cosmo_syscall2(SYS_kill, pid, sig);
+}
+static inline long cosmo_pipe(int h[2])
+{
+    return cosmo_syscall1(SYS_pipe, h);
+}
+static inline long cosmo_dup(int h, int target)
+{
+    return cosmo_syscall2(SYS_dup, h, target);
+}
+static inline long cosmo_getppid(void)
+{
+    return cosmo_syscall0(SYS_getppid);
+}
+static inline long cosmo_chdir(const char *path)
+{
+    return cosmo_syscall1(SYS_chdir, path);
+}
+static inline long cosmo_getcwd(char *buf, size_t len)
+{
+    return cosmo_syscall2(SYS_getcwd, buf, len);
+}
+static inline long cosmo_procinfo(struct cosmo_procinfo *buf, size_t count)
+{
+    return cosmo_syscall2(SYS_procinfo, buf, count);
+}
+static inline long cosmo_klog(char *buf, size_t len)
+{
+    return cosmo_syscall2(SYS_klog, buf, len);
+}
+static inline long cosmo_sysctl(const char *name, char *buf, size_t len)
+{
+    return cosmo_syscall3(SYS_sysctl, name, buf, len);
+}
+
 #endif /* COSMO_SYSCALL_H */

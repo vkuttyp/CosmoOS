@@ -47,8 +47,13 @@ KERNEL_GENERIC_SRCS := \
 	kernel/object/object.c \
 	kernel/object/handle.c \
 	kernel/object/console_obj.c \
+	kernel/tty/tty.c \
+	kernel/tty/ttytest.c \
+	kernel/ipc/pipe.c \
+	kernel/ipc/pipetest.c \
 	kernel/process/elf.c \
 	kernel/process/process.c \
+	kernel/process/spawn.c \
 	kernel/process/proctest.c \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \

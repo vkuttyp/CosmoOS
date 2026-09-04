@@ -45,7 +45,8 @@ functions.
 
 ## Non-responsibilities
 
-- Signals, restartable calls, `SA_RESTART` semantics.
+- Signal handlers, restartable calls, `SA_RESTART` semantics (a kill is
+  delivered at the boundary as process termination, `docs/kernel/process/`).
 - vDSO/fast paths.
 - Compatibility numbering of any other operating system.
 - Audit and seccomp-style filtering (the dispatcher has the hook point).
@@ -111,3 +112,23 @@ through `file_from_kobject`, results are copied out. `struct file` is a
 `kobject_io_type`, so the dispatcher's `read`/`write`/`close` need no
 knowledge of files. `mount`/`umount` check `cred.uid == 0`. See
 `docs/kernel-services/vfs/api.md`.
+
+## Sockets (Phase 8) and processes (Phase 9)
+
+Calls 23–31 translate to `kernel-services/network/socket.c` (`ksock_*`,
+`docs/kernel-services/network/api.md`). Calls 32–42 (`spawn`, `wait`,
+`kill`, `pipe`, `dup`, `getppid`, `chdir`, `getcwd`, `procinfo`, `klog`,
+`sysctl`) translate to `kernel/process/` (`process_spawn`,
+`process_wait_child`, `process_kill`, `process_chdir`, `process_info`),
+`kernel/ipc/pipe.c` (`pipe_create`), the handle table (`handle_get`,
+`handle_install`, `handle_install_at`, `handle_close` for `dup`),
+`kernel/core/log.c` (`klog_copy`) and a static table of read-only values
+in `native.c` (`sysctl`). `sys_spawn` copies the whole request (path,
+`argv`, `envp`, handle map, optional `cwd`) into one kernel allocation
+before anything else runs; `sys_fstat` accepts every I/O object with a
+`stat` operation; every path system call resolves relative paths from
+`process_current()->cwd`; blocking calls (`read` on the console or a
+pipe, `write` on a full pipe, `wait`, `sleep_ns`, the socket waits) use
+`wait_event_killable` and return `-EINTR` when the process is killed,
+after which the dispatcher's `process_check_kill` ends the process.
+`SYS_COUNT` is 43.

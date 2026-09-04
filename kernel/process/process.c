@@ -15,6 +15,7 @@
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
 #include <arch/irq.h>
@@ -41,6 +42,10 @@ static void process_release(struct kobject *obj)
     handle_table_destroy(&p->handles);
     if (p->space != NULL)
         vm_space_destroy(p->space);
+    if (p->cwd)
+        vnode_put(p->cwd);
+    if (p->parent)
+        process_put(p->parent);
 
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     list_remove(&p->all_link);
@@ -171,8 +176,38 @@ static void user_thread_main(void *arg)
 
 /* --- creation --- */
 
+/* Install the child's handles from the parent's table (docs: spawn). */
+static int install_handles(struct process *p, const struct process_spawn_attr *attr)
+{
+    struct process *parent = attr->parent;
+    if (attr->handles == NULL || attr->nr_handles == 0) {
+        for (int h = 0; h < 3; h++) {
+            unsigned rights;
+            struct kobject *obj = handle_get(&parent->handles, h, &rights);
+            if (obj == NULL)
+                continue;
+            int rc = handle_install_at(&p->handles, h, obj, rights);
+            kobject_put(obj);
+            if (rc < 0)
+                return rc;
+        }
+        return 0;
+    }
+    for (unsigned i = 0; i < attr->nr_handles; i++) {
+        unsigned rights;
+        struct kobject *obj = handle_get(&parent->handles, attr->handles[i].parent, &rights);
+        if (obj == NULL)
+            return -EBADF;
+        int rc = handle_install_at(&p->handles, attr->handles[i].child, obj, rights);
+        kobject_put(obj);
+        if (rc < 0)
+            return rc;
+    }
+    return 0;
+}
+
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
-                            const char *const envp[], struct process **out)
+                            const char *const envp[], const struct process_spawn_attr *attr, struct process **out)
 {
     struct elf_info info;
     const char *why = NULL;
@@ -189,6 +224,9 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     strlcpy(p->name, name ? name : "?", sizeof(p->name));
     list_init(&p->threads);
     list_init(&p->all_link);
+    list_init(&p->children);
+    list_init(&p->sibling);
+    waitqueue_init(&p->child_wq, "children");
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");
@@ -196,9 +234,27 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     p->state = PROCESS_RUNNING;
     p->parent_pid = 0;
 
-    struct process *cur = process_current();
-    if (cur)
-        p->parent_pid = cur->pid;
+    struct process *parent = attr ? attr->parent : NULL;
+    if (parent) {
+        p->parent_pid = parent->pid;
+        p->cred = parent->cred;
+    }
+    /* Working directory: the request's, else the parent's, else the root. */
+    if (attr && attr->cwd) {
+        vnode_get(attr->cwd);
+        p->cwd = attr->cwd;
+        strlcpy(p->cwd_path, attr->cwd_path, sizeof(p->cwd_path));
+    } else if (parent) {
+        arch_irq_state_t ps = spin_lock_irqsave(&parent->lock);
+        p->cwd = parent->cwd;
+        if (p->cwd)
+            vnode_get(p->cwd);
+        strlcpy(p->cwd_path, parent->cwd_path, sizeof(p->cwd_path));
+        spin_unlock_irqrestore(&parent->lock, ps);
+    } else {
+        p->cwd = vfs_root();
+        strlcpy(p->cwd_path, "/", sizeof(p->cwd_path));
+    }
 
     rc = vm_space_create_user(&p->space);
     if (rc)
@@ -249,11 +305,18 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         w[aux + 3] = info.entry; /* AT_ENTRY value */
     }
 
-    /* Standard handles. */
-    struct kobject *con = console_object();
-    handle_install_at(&p->handles, COSMO_STDIN, con, HANDLE_RIGHT_READ);
-    handle_install_at(&p->handles, COSMO_STDOUT, con, HANDLE_RIGHT_WRITE);
-    handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE);
+    /* Handles: exactly what the parent maps; kernel-created processes
+     * get the console as 0, 1, 2. */
+    if (parent) {
+        rc = install_handles(p, attr);
+        if (rc)
+            goto fail;
+    } else {
+        struct kobject *con = console_object();
+        handle_install_at(&p->handles, COSMO_STDIN, con, HANDLE_RIGHT_READ);
+        handle_install_at(&p->handles, COSMO_STDOUT, con, HANDLE_RIGHT_WRITE);
+        handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE);
+    }
 
     /* Register. */
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
@@ -280,6 +343,14 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     spin_unlock_irqrestore(&p->lock, s);
     thread_put(t); /* the creator's thread reference; the process owns it now */
 
+    if (parent) {
+        process_get(parent);
+        p->parent = parent;
+        s = spin_lock_irqsave(&parent->lock);
+        list_push_back(&parent->children, &p->sibling);
+        spin_unlock_irqrestore(&parent->lock, s);
+    }
+
     kinfo("process: pid %u '%s' created, entry %p, %u segments", p->pid, p->name, (void *)info.entry,
           info.nr_segments);
     process_get(p); /* the table's reference */
@@ -296,6 +367,8 @@ fail:
     handle_table_destroy(&p->handles);
     if (p->space)
         vm_space_destroy(p->space);
+    if (p->cwd)
+        vnode_put(p->cwd);
     kmem_cache_free(g_process_cache, p);
     return rc;
 }
@@ -320,23 +393,311 @@ void process_exit(int status)
     thread_exit(status);
 }
 
+static struct process *g_init;   /* referenced; set by process_set_init */
+
+void process_set_init(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    if (g_init)
+        process_put(g_init);
+    g_init = p;
+    if (p)
+        process_get(p);
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+}
+
+/* Table lock held: init if it is alive and not `except`. */
+static struct process *find_init_locked(struct process *except)
+{
+    struct process *q = g_init;
+    if (q && q != except && q->state == PROCESS_RUNNING)
+        return q;
+    return NULL;
+}
+
+/*
+ * Reaper context, once every thread of `p` is gone. Children are handed
+ * to init or to the kernel; `p` becomes a zombie its parent must collect,
+ * or is dropped at once when it has no parent.
+ */
 void process_last_thread_gone(struct process *p)
 {
+    LIST_HEAD(orphans);
+    LIST_HEAD(to_drop);   /* exited, unreaped children with no one left to wait */
+    arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
+    struct process *init = find_init_locked(p);
+
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     p->state = PROCESS_EXITED;
     int status = p->exit_status;
+    /* Detach the children first; their locks are taken after ours only
+     * one at a time, and init's lock never while ours is held. */
+    struct process *c, *tmp;
+    list_for_each_entry_safe(c, tmp, &p->children, sibling) {
+        list_remove(&c->sibling);
+        list_push_back(&orphans, &c->sibling);
+    }
     spin_unlock_irqrestore(&p->lock, s);
+
+    list_for_each_entry_safe(c, tmp, &orphans, sibling) {
+        arch_irq_state_t cs = spin_lock_irqsave(&c->lock);
+        process_put(c->parent);   /* was p; p is alive (thread and table refs) */
+        c->parent = NULL;
+        bool zombie = c->state == PROCESS_EXITED && !c->reaped;
+        if (init) {
+            process_get(init);
+            c->parent = init;
+            c->parent_pid = init->pid;
+        } else {
+            c->parent_pid = 0;
+            if (zombie)
+                c->reaped = true;
+        }
+        spin_unlock_irqrestore(&c->lock, cs);
+        list_remove(&c->sibling);
+        if (init) {
+            arch_irq_state_t is = spin_lock_irqsave(&init->lock);
+            list_push_back(&init->children, &c->sibling);
+            spin_unlock_irqrestore(&init->lock, is);
+        } else if (zombie) {
+            list_push_back(&to_drop, &c->sibling);
+        } else {
+            list_init(&c->sibling);
+        }
+    }
+    struct process *parent = p->parent;
+    bool zombie = parent != NULL;
+    if (!zombie)
+        p->reaped = true;
+    spin_unlock_irqrestore(&g_process_table_lock, ts);
+
+    /* Handles close at exit, not at reaping: a pipe whose writer has
+     * exited must deliver EOF while the reader has yet to wait for it.
+     * The zombie keeps only its identity and status. */
+    handle_table_destroy(&p->handles);
+    if (p->cwd) {
+        vnode_put(p->cwd);
+        p->cwd = NULL;
+    }
+
+    if (init)
+        waitqueue_wake_all(&init->child_wq);
+    list_for_each_entry_safe(c, tmp, &to_drop, sibling) {
+        list_remove(&c->sibling);
+        list_init(&c->sibling);
+        process_put(c);   /* the table's reference */
+    }
 
     kinfo("process: pid %u '%s' exited with status %d (%llu syscalls)", p->pid, p->name, status,
           (unsigned long long)p->syscalls);
     complete(&p->exited);
-    process_put(p); /* the table's reference */
+    if (zombie)
+        waitqueue_wake_all(&parent->child_wq);
+    else
+        process_put(p); /* the table's reference */
 }
 
 int process_wait_exit(struct process *p)
 {
     wait_for_completion(&p->exited);
     return p->exit_status;
+}
+
+/* --- Phase 9: wait, kill, cwd, introspection --- */
+
+/* Parent lock held. */
+static struct process *find_reapable_locked(struct process *parent, int pid, bool *matched)
+{
+    struct process *c;
+    *matched = false;
+    list_for_each_entry(c, &parent->children, sibling) {
+        if (pid > 0 && (int)c->pid != pid)
+            continue;
+        *matched = true;
+        if (__atomic_load_n(&c->state, __ATOMIC_ACQUIRE) == PROCESS_EXITED && !c->reaped)
+            return c;
+    }
+    return NULL;
+}
+
+static bool child_reapable(struct process *parent, int pid)
+{
+    bool matched;
+    arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
+    struct process *c = find_reapable_locked(parent, pid, &matched);
+    spin_unlock_irqrestore(&parent->lock, s);
+    return c != NULL || !matched;
+}
+
+int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
+{
+    struct process *cur = process_current();
+    for (;;) {
+        bool matched;
+        arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
+        struct process *c = find_reapable_locked(cur, pid, &matched);
+        if (c) {
+            c->reaped = true;
+            list_remove(&c->sibling);
+            list_init(&c->sibling);
+            spin_unlock_irqrestore(&cur->lock, s);
+            *pid_out = c->pid;
+            *status_out = c->exit_status;
+            process_put(c);   /* the table's reference: the zombie goes */
+            return 0;
+        }
+        spin_unlock_irqrestore(&cur->lock, s);
+        if (!matched)
+            return -ECHILD;
+        if (flags & PROCESS_WAIT_NOHANG) {
+            *pid_out = 0;
+            return 0;
+        }
+        int rc = wait_event_killable(&cur->child_wq, child_reapable(cur, pid));
+        if (rc)
+            return rc;
+    }
+}
+
+void process_kill(struct process *p, int sig)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->state != PROCESS_RUNNING || p->kill_sig != 0) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return;
+    }
+    p->kill_sig = sig;
+    p->exit_status = 128 + sig;
+    /* Kick every blocked thread; wait_event_killable re-checks the flag. */
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link)
+        sched_wake(t);
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
+bool process_kill_pending(void)
+{
+    struct process *p = process_current();
+    return p != NULL && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0;
+}
+
+void process_check_kill(void)
+{
+    struct process *p = process_current();
+    if (p && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0)
+        process_exit(p->exit_status);
+}
+
+void process_return_to_user(void)
+{
+    struct process *p = process_current();
+    if (p && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0) {
+        /* The trap tail runs with interrupts off; a user frame had them on. */
+        arch_irq_enable();
+        process_exit(p->exit_status);
+    }
+}
+
+/*
+ * Join `rel` to `base` (absolute, normalised) resolving "." and "..",
+ * into `out` (size n). Returns 0 or -ENAMETOOLONG.
+ */
+int path_normalize(const char *base, const char *rel, char *out, size_t n)
+{
+    size_t len = 0;
+    if (rel[0] != '/') {
+        len = strlen(base);
+        if (len >= n)
+            return -ENAMETOOLONG;
+        memcpy(out, base, len);
+        while (len > 0 && out[len - 1] == '/')
+            len--;   /* the root becomes empty; components add their slash */
+    }
+    const char *s = rel;
+    while (*s) {
+        while (*s == '/')
+            s++;
+        const char *e = s;
+        while (*e && *e != '/')
+            e++;
+        size_t cl = (size_t)(e - s);
+        if (cl == 0)
+            break;
+        if (cl == 1 && s[0] == '.') {
+            /* nothing */
+        } else if (cl == 2 && s[0] == '.' && s[1] == '.') {
+            while (len > 0 && out[len - 1] != '/')
+                len--;
+            if (len > 0)
+                len--;   /* drop the slash before the component */
+        } else {
+            if (len + 1 + cl >= n)
+                return -ENAMETOOLONG;
+            out[len++] = '/';
+            memcpy(out + len, s, cl);
+            len += cl;
+        }
+        s = e;
+    }
+    if (len == 0)
+        out[len++] = '/';
+    out[len] = '\0';
+    return 0;
+}
+
+int process_chdir(const char *path)
+{
+    struct process *cur = process_current();
+    KASSERT(cur != NULL);   /* a system call: always on a process */
+    char newpath[sizeof(cur->cwd_path)];
+    int rc = path_normalize(cur->cwd_path, path, newpath, sizeof(newpath));
+    if (rc)
+        return rc;
+    struct vnode *vn;
+    rc = vfs_lookup(cur->cwd, path, &vn);
+    if (rc)
+        return rc;
+    if (vn->type != VNODE_DIR) {
+        vnode_put(vn);
+        return -ENOTDIR;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
+    struct vnode *old = cur->cwd;
+    cur->cwd = vn;
+    strlcpy(cur->cwd_path, newpath, sizeof(cur->cwd_path));
+    spin_unlock_irqrestore(&cur->lock, s);
+    if (old)
+        vnode_put(old);
+    return 0;
+}
+
+unsigned process_info(struct cosmo_procinfo *buf, unsigned count)
+{
+    unsigned total = 0;
+    arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link) {
+        if (total < count) {
+            struct cosmo_procinfo *pi = &buf[total];
+            memset(pi, 0, sizeof(*pi));
+            pi->pid = p->pid;
+            pi->ppid = p->parent_pid;
+            pi->uid = p->cred.uid;
+            pi->gid = p->cred.gid;
+            pi->state = (uint32_t)p->state;
+            pi->syscalls = p->syscalls;
+            strlcpy(pi->name, p->name, sizeof(pi->name));
+            arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+            pi->nr_threads = p->nr_threads;
+            struct thread *t;
+            list_for_each_entry(t, &p->threads, proc_link)
+                pi->run_ns += t->run_time_ns;
+            spin_unlock_irqrestore(&p->lock, s);
+        }
+        total++;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, ts);
+    return total;
 }
 
 struct process *process_current(void)

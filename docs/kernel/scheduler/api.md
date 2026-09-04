@@ -131,7 +131,7 @@ kernel ABI; nothing here is visible to user space.
 - Called by `preempt_enable` and the interrupt-return path. Asserts
   `irq_depth == 0 && preempt_count == 0`, then `schedule()`.
 
-### `void sched_wake(struct thread *t)`
+### `bool sched_wake(struct thread *t)`
 - **Purpose**: BLOCKED → READY on the run queue of `t->cpu`; sets that
   CPU's `need_resched` if `t` outranks its current thread or the CPU is
   idle. **No-op** for any other state, which is what makes the
@@ -195,11 +195,32 @@ kernel ABI; nothing here is visible to user space.
 ### `bool waitqueue_empty(wq)`
 - Snapshot under the lock.
 
+### `wait_event_killable(wq, cond)` (macro, Phase 9)
+- The `wait_event` loop that also ends when the calling process is
+  being killed: after `waitqueue_prepare` and a false `cond` it checks
+  `process_kill_pending()` (declared in `wait.h`, defined in
+  `kernel/process/process.c`: the current process's `kill_sig`) and
+  breaks with `-EINTR` instead of blocking; otherwise identical. The
+  check sits after the thread is queued and BLOCKED, so `process_kill`'s
+  `sched_wake(t)` (a direct wake of the thread, not of the queue) cannot
+  be lost: it either finds the thread BLOCKED and makes it READY, after
+  which the loop re-checks the flag, or lands before the check, which
+  then sees the flag. Evaluates to 0 or `-EINTR`. Same restrictions as
+  `wait_event`; kernel threads (no process) never see `-EINTR`. Used by
+  the tty, pipes, `process_wait_child`, the killable sleep and the socket
+  layer's blocking paths.
+
 ### `void thread_sleep_ns(uint64_t ns)`, `thread_sleep_ms(ms)`
 - Arms a stack `struct timer` whose callback sets a flag and
   `waitqueue_wake_all`s a stack wait queue, then `wait_event`s on the
   flag. Granularity is one tick (`TICK_NS` = 4 ms); the sleep is never
   shorter than `ns`. Not usable in interrupt context.
+
+### `int thread_sleep_ns_killable(uint64_t ns)` (Phase 9)
+- The same sleep with `wait_event_killable`; returns 0, or `-EINTR`
+  early when the calling process is being killed, in which case the
+  stack timer is cancelled before the frame goes away. `sys_sleep_ns`
+  uses it.
 
 ---
 
