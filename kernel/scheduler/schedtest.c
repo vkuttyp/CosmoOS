@@ -72,8 +72,31 @@ static void tagged_cb(struct timer *t, void *arg)
         p->fired_at[p->seq++] = tt->tag;
 }
 
+struct rearm_probe {
+    struct timer t;
+    volatile unsigned fires;
+    unsigned limit;
+};
+
+static void rearm_cb(struct timer *t, void *arg)
+{
+    (void)arg;
+    struct rearm_probe *p = (struct rearm_probe *)t;
+    p->fires++;
+    if (p->fires < p->limit)
+        timer_start(t, MS(2)); /* re-arm from inside the callback */
+}
+
 bool selftest_timer(const char **reason)
 {
+    /* A callback may re-arm its own timer (periodic pattern). */
+    struct rearm_probe rp = { .fires = 0, .limit = 4 };
+    timer_setup(&rp.t, rearm_cb, NULL);
+    timer_start(&rp.t, MS(2));
+    udelay(40000);
+    CHECK(rp.fires == 4);
+    CHECK(rp.t.state == TIMER_IDLE);
+
     /* Monotonic clock. */
     uint64_t last = clock_now_ns();
     for (int i = 0; i < 1000; i++) {
@@ -383,6 +406,25 @@ bool selftest_semaphore(const char **reason)
     thread_join(c);
     CHECK(st.consumed == 5);
     CHECK(semaphore_count(&st.items) == 0);
+
+    /* Two consumers blocked at once, then posts back to back with no
+     * sleep in between: every post must reach a distinct blocked waiter
+     * even though the first woken one is still linked in the queue. */
+    struct sem_test st2;
+    semaphore_init(&st2.items, 0, "selftest-sem2");
+    st2.consumed = 0;
+    struct thread *c1 = thread_create(consumer_entry, &st2, "consumer-1", SCHED_PRIO_DEFAULT);
+    struct thread *c2 = thread_create(consumer_entry, &st2, "consumer-2", SCHED_PRIO_DEFAULT);
+    CHECK(c1 != NULL && c2 != NULL);
+    thread_sleep_ms(5); /* both blocked in semaphore_down */
+    for (int i = 0; i < 10; i++)
+        semaphore_up(&st2.items);
+    uint64_t t0 = clock_now_ns();
+    thread_join(c1);
+    thread_join(c2);
+    CHECK(clock_now_ns() - t0 < MS(500));
+    CHECK(st2.consumed == 10);
+    CHECK(semaphore_count(&st2.items) == 0);
     CHECK(thread_count() == before);
     return true;
 }

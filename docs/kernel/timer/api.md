@@ -45,7 +45,9 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 - **Concurrency**: disables interrupts, takes the local queue lock,
   sorted insert (ascending expiry, FIFO on ties).
 - **Interrupt context**: allowed (a callback may re-arm its own timer).
-- **Failure modes**: panics if `t->state != TIMER_IDLE` or `fn` is NULL.
+- **Failure modes**: panics if `t->state == TIMER_PENDING` (double start)
+  or `fn` is NULL. `TIMER_RUNNING` is accepted: a callback may re-arm its
+  own timer.
 - **Ownership**: the caller owns `t` and must not free it while PENDING
   or RUNNING.
 

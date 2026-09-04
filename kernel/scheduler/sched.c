@@ -264,10 +264,11 @@ void sched_block_current(void)
     schedule();
 }
 
-void sched_wake(struct thread *t)
+bool sched_wake(struct thread *t)
 {
     KASSERT(t->cpu >= 0);
     struct runqueue *rq = &g_rqs[t->cpu];
+    bool woke = false;
 
     arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
     if (t->state == THREAD_BLOCKED) {
@@ -275,8 +276,10 @@ void sched_wake(struct thread *t)
         g_policy->enqueue(rq, t, false);
         if (rq->current == rq->idle || t->priority < rq->current->priority)
             request_resched(rq);
+        woke = true;
     }
     spin_unlock_irqrestore(&rq->lock, s);
+    return woke;
 }
 
 void sched_set_running_current(void)

@@ -51,13 +51,21 @@ void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e)
     sched_set_running_current();
 }
 
+/*
+ * A waiter that was already woken stays linked until it runs and calls
+ * waitqueue_finish. wake_one must not stop at such an entry: it counts
+ * only waiters it actually transitioned, and keeps scanning past ones
+ * that are already READY or RUNNING, so consecutive wake_one calls reach
+ * consecutive blocked waiters.
+ */
 static unsigned wake(struct waitqueue *wq, bool all)
 {
     unsigned n = 0;
     arch_irq_state_t s = spin_lock_irqsave(&wq->lock);
     struct wait_entry *e, *tmp;
     list_for_each_entry_safe(e, tmp, &wq->waiters, link) {
-        sched_wake(e->thread);
+        if (!sched_wake(e->thread))
+            continue;
         n++;
         if (!all)
             break;

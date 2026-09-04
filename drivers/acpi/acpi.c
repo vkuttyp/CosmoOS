@@ -76,6 +76,9 @@ const void *acpi_map(paddr_t pa, size_t len)
 {
     if (len == 0)
         return NULL;
+    /* Firmware-supplied address and length: refuse a span that wraps. */
+    if (pa + len < pa || page_align_up(pa + len) < pa)
+        return NULL;
     if (bootinfo_phys_is_ram(pa) && bootinfo_phys_is_ram(pa + len - 1))
         return phys_to_virt(pa);
 

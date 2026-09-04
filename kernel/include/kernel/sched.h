@@ -54,8 +54,10 @@ void sched_yield(void);
  * need_resched is set and the context is preemptible. */
 void sched_preempt(void);
 
-/* Make a BLOCKED thread READY. No-op for other states. */
-void sched_wake(struct thread *t);
+/* Make a BLOCKED thread READY. Returns true if it did; false (no-op) if
+ * the thread was already READY or RUNNING, which wakers use to keep
+ * looking for a waiter that actually needs waking. */
+bool sched_wake(struct thread *t);
 
 /* Caller has set current->state = THREAD_BLOCKED under a wait-queue
  * lock and released that lock; this schedules away and returns when the

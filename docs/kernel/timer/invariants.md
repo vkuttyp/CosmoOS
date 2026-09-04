@@ -24,8 +24,9 @@ until it fires or is cancelled.** `timer_start` records `t->cpu`;
 `timer_cancel` locks `g_queues[t->cpu]`. Callbacks run on the arming
 CPU. Check: review; test `timer`.
 
-**T4. `timer_start` on a timer that is not `TIMER_IDLE` panics.** A
-double arm would link the node twice. Check: assert.
+**T4. `timer_start` on a `TIMER_PENDING` timer panics.** A double arm
+would link the node twice. IDLE is the normal case; RUNNING is accepted
+so a callback can re-arm its own timer (T13). Check: assert.
 
 **T5. A timer's memory is owned by the caller and must outlive any
 PENDING or RUNNING state.** `timer_cancel` returning false for a
@@ -66,6 +67,15 @@ checked for NULL on every tick. Check: review.
 never block or take locks, so they are usable before the scheduler and
 in interrupt context. Check: review; used by the `timer` and
 `irq-route` tests inside thread 0 before any sleep facility is proven.
+
+**T13. A callback may re-arm its own timer.** `timer_start` accepts a
+timer in state IDLE or RUNNING (RUNNING means "its callback is
+executing"); only PENDING is a double start and panics. After the
+callback returns, `run_expired` sets IDLE only if the state is still
+RUNNING, so a re-armed (PENDING) timer is left on the queue. An earlier
+draft accepted only IDLE, which made the documented periodic pattern
+panic (found in review, PR #3). Check: test `timer`, self-rearming
+callback fires exactly four times and ends IDLE.
 
 ## Gaps
 

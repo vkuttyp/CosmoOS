@@ -138,6 +138,16 @@ waits on `done`, set by the callback before the wake, so the stack
 `struct timer` is `TIMER_IDLE` when the function returns and may be
 discarded. Check: review; test `sleep`.
 
+**S21. `waitqueue_wake_one` wakes a waiter that actually needed waking.**
+A woken waiter stays linked until it runs `waitqueue_finish`, so the
+head of the list may already be READY. `wake()` uses `sched_wake`'s
+return value to skip such entries and only stops after a real
+BLOCKED→READY transition; otherwise two back-to-back `semaphore_up`
+calls would both land on the same waiter and leave a second blocked
+consumer waiting forever (found in review, PR #3). Check: test
+`semaphore`, second half (two blocked consumers, ten posts with no
+sleep between them, both consumers finish).
+
 ## Gaps (documented, not invariants)
 
 - Cross-CPU `need_resched` is set but not signalled by IPI until the

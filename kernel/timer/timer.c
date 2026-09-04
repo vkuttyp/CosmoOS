@@ -85,8 +85,12 @@ void timer_start(struct timer *t, uint64_t delay_ns)
     struct timer_queue *q = local_queue();
     spin_lock(&q->lock);
 
-    if (t->state != TIMER_IDLE)
-        panic("timer_start: timer %p is %s", (void *)t, t->state == TIMER_PENDING ? "pending" : "running");
+    /* IDLE is the normal case. RUNNING means the callback is executing
+     * and is re-arming its own timer, which is allowed: run_expired
+     * leaves a timer alone after the callback when it is no longer
+     * RUNNING. PENDING is a double start and a bug. */
+    if (t->state == TIMER_PENDING)
+        panic("timer_start: timer %p is already pending", (void *)t);
 
     t->expires_ns = clock_now_ns() + delay_ns;
     t->cpu = arch_cpu_id();

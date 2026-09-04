@@ -64,7 +64,8 @@ struct timer {
 struct timer_queue { spinlock_t lock; struct list_node pending; unsigned count; };
 ```
 
-`timer_start(t, delay_ns)`: panics if state != IDLE; sets expiry =
+`timer_start(t, delay_ns)`: panics if state is PENDING (RUNNING is
+allowed so a callback can re-arm its own timer); sets expiry =
 now + delay; inserts sorted (ascending) into the local CPU's queue;
 state PENDING. Runs with interrupts disabled around the queue lock and
 records `t->cpu`.
