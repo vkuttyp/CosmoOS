@@ -99,3 +99,15 @@ result; the kernel self-test runs it and requires status 0. See
 Per-thread syscall accounting, tracing hooks, Linux personality table,
 `copy_from_user` with fault recovery (exception tables) so validation
 can be relaxed for performance.
+
+## Files (Phase 7)
+
+The filesystem calls (`open`, `stat`, `fstat`, `lseek`, `mkdir`, `unlink`,
+`rmdir`, `rename`, `getdents`, `sync`, `mount`, `umount`; numbers 11–22)
+live in `kernel/syscall/native.c` beside the Phase 4 calls and translate
+to `kernel-services/vfs/` entry points: paths are copied with
+`strncpy_from_user` (1024 bytes), handles resolve to `struct file`
+through `file_from_kobject`, results are copied out. `struct file` is a
+`kobject_io_type`, so the dispatcher's `read`/`write`/`close` need no
+knowledge of files. `mount`/`umount` check `cred.uid == 0`. See
+`docs/kernel-services/vfs/api.md`.

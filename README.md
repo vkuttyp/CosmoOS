@@ -118,5 +118,16 @@ See [docs/development.md](docs/development.md).
   `virtio_console`. QEMU attaches a scratch disk, an RNG and a console
   whose output the boot test reads back; six self-tests cover the model,
   PCI, DMA, entropy, block I/O and the console sink (44 in total).
-- **Next, Phase 7:** VFS and storage: the VFS layer, block layer
-  integration, a page cache, the copy-on-write filesystem.
+- **Phase 7 (done):** VFS and storage. A VFS with mounts, path
+  resolution, vnodes and `struct file` kobjects (so the existing
+  `read`/`write`/`close` work on files), a per-vnode page cache, ramfs
+  as the root with `/boot` populated from the boot archive, a
+  single-member storage pool, and cosmofs: a copy-on-write filesystem
+  with two superblock slots, a two-level inode map, extent-mapped files,
+  a bitmap allocator, CRC32C on every metadata block and a transaction
+  model in which a committed root is never overwritten. Twelve new
+  system calls (`open` … `umount`, numbers 11–22) and seven self-tests
+  (51 in total) including crash consistency and a torn-superblock
+  fallback; `init` mounts the disk from user mode.
+- **Next, Phase 8:** networking: mbufs, Ethernet, IPv4/IPv6, UDP, TCP,
+  sockets (with virtio-net as the first NIC).

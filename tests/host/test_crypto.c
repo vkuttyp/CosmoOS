@@ -5,6 +5,7 @@
 
 #include "harness.h"
 
+#include <kernel/crc32c.h>
 #include <kernel/crypto.h>
 
 #include <stdio.h>
@@ -156,7 +157,20 @@ static void test_ed25519_malleability(void)
     EXPECT(!ed25519_verify(sig, msg, 1, off));
 }
 
+static void test_crc32c(void)
+{
+    EXPECT(crc32c("123456789", 9) == 0xE3069283u);
+    EXPECT(crc32c("", 0) == 0);
+    static const uint8_t zeros[32] = { 0 };
+    EXPECT(crc32c(zeros, 32) == 0x8A9136AAu);
+    /* Incremental equals one-shot. */
+    uint32_t a = crc32c("12345", 5);
+    uint32_t b = crc32c_update(a, "6789", 4);
+    EXPECT(b == 0xE3069283u);
+}
+
 static const struct host_test tests[] = {
+    { "crc32c", test_crc32c },
     { "sha512-vectors", test_sha512_vectors },
     { "ed25519-vectors", test_ed25519_vectors },
     { "ed25519-malleability", test_ed25519_malleability },

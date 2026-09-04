@@ -39,12 +39,16 @@ process object; the log shows `rejected: bad ELF magic`.
 
 ### `process-user`
 
-Runs the boot module as `init --selftest` and requires exit status 0
+Runs the archive's `init` as `init --selftest` and requires exit status 0
 within 5 s, then waits for the process count to return to its baseline
 (the object is released by the reaper). Skipped with a log line when
 the loader found no module. The user program's checks
-(`userland/init/init.c`, `selftest()`), all of which must pass for
-status 0:
+(`userland/init/init.c`, `selftest()`, which first calls `fs_selftest()`
+for the Phase 7 filesystem calls, see
+`docs/kernel-services/vfs/testing.md`), all of which must pass for
+status 0. Since Phase 7 the process tests are the last entries of the
+self-test table so that `init --selftest` finds the cosmofs the
+`cosmofs-*` tests leave on the scratch disk:
 
 - **write**: 19 bytes to handle 1 → 19; zero length → 0; handle 7
   (unopened), handle 0 (stdin, no WRITE right), handle -1 → `-EBADF`;

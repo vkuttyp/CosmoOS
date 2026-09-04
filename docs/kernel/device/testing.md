@@ -18,7 +18,9 @@ There is no host test for this subsystem yet (see gaps).
 
 - `virtio-blk-pci` backed by `QEMU_TESTDISK` (the harness creates a
   fresh 8 MiB zero file `boot-test.log.testdisk.img` per run, so the
-  `blk` test's writes never persist between runs);
+  `blk` test's writes never persist between runs; since Phase 7 the
+  `cosmofs-*` self-tests format this disk and leave a filesystem that
+  `init --selftest` mounts, see `docs/kernel-services/vfs/testing.md`);
 - `virtio-rng-pci`;
 - `virtio-serial-pci` with one `virtconsole` whose `chardev` is a file,
   `QEMU_VCON` (`boot-test.log.vcon` under the harness).

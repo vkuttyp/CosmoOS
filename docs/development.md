@@ -83,7 +83,10 @@ resulting binaries under `-fsanitize=address,undefined`: `test_buddy`
 and `test_slab` (`kernel/memory/buddy.c`, `slab.c`, `kmalloc.c`),
 `test_crypto` (`kernel/security/sha512.c`, `ed25519.c` against the
 FIPS and RFC 8032 vectors), and `test_modelf` (`kernel/module/modelf.c`
-against synthetic module images, built with `-DMODELF_HOST_TEST=1`). The
+against synthetic module images, built with `-DMODELF_HOST_TEST=1`), and
+`test_cosmofs` (the cosmofs on-disk layout header: structure sizes,
+inode-map arithmetic, extent mapping); `test_crypto` also checks
+CRC32C. The
 architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
@@ -133,8 +136,13 @@ link at 4 MiB through `userland/init/user.ld` with
 `-z noexecstack -z separate-code` so the ELF has separate r-x, r--,
 rw- segments (the kernel refuses W+X segments and executable stacks).
 `init` is delivered to the kernel as the `init` entry of the boot
-archive (protocol v3, `docs/boot/design.md`); there is no filesystem
-yet.
+archive (protocol v3, `docs/boot/design.md`). Since Phase 7 the kernel
+has a namespace: a ramfs root with `/boot` (every archive entry, so
+`/boot/init` and `/boot/modules/*.ko`), `/tmp`, `/mnt` and `/dev`, and
+the `open`/`read`/`write`/`stat`/`mkdir`/`unlink`/`rename`/`getdents`/
+`lseek`/`sync`/`mount`/`umount` calls (`docs/kernel-services/vfs/api.md`).
+The scratch virtio disk can carry a cosmofs (`mount("vda", "/mnt",
+"cosmofs", 0)`); the kernel formats it during the self-tests.
 
 To write a new program: add a directory under `userland/`, start from
 `userland/init/crt0.S` (reads `argc`/`argv` from the initial stack,

@@ -13,6 +13,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/blk.h>
 #include <kernel/bootinfo.h>
+#include <kernel/cosmofs.h>
 #include <kernel/device.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
@@ -32,6 +33,7 @@
 #include <kernel/shutdown.h>
 #include <kernel/string.h>
 #include <kernel/version.h>
+#include <kernel/vfs.h>
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -135,6 +137,11 @@ void kernel_main(const struct cosmoboot_info *info)
     pci_init();
     blk_init();
     random_init();
+
+    /* The namespace: a ramfs root with the boot archive under /boot. */
+    vfs_init();
+    cosmofs_init();
+    ramfs_populate_boot();
 
     arch_irq_enable();
     kinfo("interrupts enabled");

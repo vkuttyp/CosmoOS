@@ -20,14 +20,21 @@
 #define EFAULT    14  /* bad address */
 #define EBUSY     16  /* resource busy */
 #define EEXIST    17  /* already exists */
+#define EXDEV     18  /* cross-device link */
 #define ENODEV    19  /* no such device */
+#define ENOTDIR   20  /* not a directory */
+#define EISDIR    21  /* is a directory */
 #define EINVAL    22  /* invalid argument */
 #define EMFILE    24  /* too many open handles */
+#define EFBIG     27  /* file too large */
 #define ENOSPC    28  /* no space left */
+#define ESPIPE    29  /* not seekable */
 #define EROFS     30  /* read-only device */
 #define ERANGE    34  /* result out of range */
 #define ENAMETOOLONG 36 /* string too long */
 #define ENOSYS    38  /* not implemented */
+#define ENOTEMPTY 39  /* directory not empty */
+#define ELOOP     40  /* too many levels */
 #define ENOTSUP   95  /* operation not supported */
 #define ETIMEDOUT 110 /* operation timed out */
 #define ENOKEY    126 /* required key not available */
