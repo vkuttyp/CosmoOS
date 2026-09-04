@@ -11,7 +11,14 @@ queue size and backed by a cookie, chain walks length-guarded, config
 reads bounded by the DEVICE window and generation-stable, NOTIFY writes
 inside the NOTIFY window, queue vectors confirmed by read-back. Check:
 review of `virtq_pop`, `vpci_read_config`, `vpci_notify`,
-`vpci_setup_queue`. Gap: no fault injection of a hostile used ring.
+`vpci_setup_queue`. Bad and duplicate ids for heads that are not in
+flight are skipped and counted (`vq->bad_used`) without stopping the
+drain. Gap: no fault injection of a hostile used ring; and a duplicate
+completion naming a head that has since been legitimately reused is
+indistinguishable from a valid one at this layer (the split ring carries
+no generation), so such a device can corrupt its own driver's requests.
+Containing that needs per-request generation tags in the driver
+(virtio_blk could compare the slot's expected head) and is future work.
 
 **V3. Every bus address in a descriptor came from `dma_alloc` or
 `dma_map`.** Rings and per-request headers are `dma_alloc`ed; bio data
