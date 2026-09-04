@@ -92,7 +92,11 @@ void timer_start(struct timer *t, uint64_t delay_ns)
     if (t->state == TIMER_PENDING)
         panic("timer_start: timer %p is already pending", (void *)t);
 
-    t->expires_ns = clock_now_ns() + delay_ns;
+    /* A zero delay would expire at "now", which can equal the time
+     * run_expired captured for the current pass; a callback re-arming
+     * with 0 would then be popped again inside the same pass, forever.
+     * One nanosecond puts every re-arm into a later pass. */
+    t->expires_ns = clock_now_ns() + (delay_ns == 0 ? 1 : delay_ns);
     t->cpu = arch_cpu_id();
     t->state = TIMER_PENDING;
 
