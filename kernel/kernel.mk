@@ -21,14 +21,26 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/shutdown.c \
 	kernel/core/selftest.c \
 	kernel/core/spinlock.c \
+	kernel/core/percpu.c \
 	kernel/interrupt/interrupt.c \
+	kernel/interrupt/irq.c \
 	kernel/memory/bootmem.c \
 	kernel/memory/buddy.c \
 	kernel/memory/pmm.c \
 	kernel/memory/vmm.c \
 	kernel/memory/slab.c \
 	kernel/memory/kmalloc.c \
-	kernel/memory/memtest.c
+	kernel/memory/memtest.c \
+	kernel/timer/timer.c \
+	kernel/scheduler/thread.c \
+	kernel/scheduler/sched.c \
+	kernel/scheduler/policy_rr.c \
+	kernel/scheduler/wait.c \
+	kernel/scheduler/mutex.c \
+	kernel/scheduler/semaphore.c \
+	kernel/scheduler/completion.c \
+	kernel/scheduler/schedtest.c \
+	drivers/acpi/acpi.c
 
 KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS))
 KERNEL_ARCH_OBJS    := $(call objs_of,$(KERNEL_ARCH_SRCS))

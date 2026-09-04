@@ -9,6 +9,8 @@
  */
 
 #include <kernel/kernel.h>
+#include <kernel/percpu.h>
+#include <kernel/thread.h>
 
 #include <arch/backtrace.h>
 
@@ -19,12 +21,23 @@ struct stack_frame {
     uint64_t rip;
 };
 
+/* A frame must lie in the kernel image (boot stack, static data) or in
+ * the current thread's stack. The percpu block exists from the first
+ * instructions of x86_start, but `current` is NULL until sched_init. */
+static bool in_known_stack(uintptr_t a, size_t len)
+{
+    if (kernel_image_contains(a) && kernel_image_contains(a + len - 1))
+        return true;
+    struct thread *cur = this_cpu()->current;
+    return cur != NULL && thread_stack_contains(cur, a) && thread_stack_contains(cur, a + len - 1);
+}
+
 static bool frame_ok(const struct stack_frame *fp, const struct stack_frame *prev)
 {
     uintptr_t a = (uintptr_t)fp;
     if (a == 0 || (a & 0xF) != 0)
         return false;
-    if (!kernel_image_contains(a) || !kernel_image_contains(a + sizeof(*fp) - 1))
+    if (!in_known_stack(a, sizeof(*fp)))
         return false;
     if (prev != NULL && fp <= prev)
         return false;

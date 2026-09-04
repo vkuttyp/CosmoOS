@@ -12,6 +12,7 @@
 
 #include <kernel/kernel.h>
 #include <kernel/log.h>
+#include <kernel/percpu.h>
 
 #include <arch/console.h>
 
@@ -27,6 +28,12 @@ void x86_start(const struct cosmoboot_info *info)
 
     gdt_init();
     kdebug("x86: GDT/TSS loaded");
+
+    /* The per-CPU block must exist before anything calls arch_cpu_id()
+     * or takes a spinlock; both read it through GS. It must be installed
+     * AFTER gdt_init: loading the GS selector resets the GS base. Nothing
+     * above this line may take a lock. */
+    percpu_init_boot();
 
     idt_init();
     kdebug("x86: IDT loaded");

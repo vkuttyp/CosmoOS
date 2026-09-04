@@ -22,4 +22,17 @@ bool selftest_pmm(const char **reason);
 bool selftest_vmm(const char **reason);
 bool selftest_kmalloc(const char **reason);
 
+/* Phase 3: kernel/scheduler/schedtest.c */
+bool selftest_acpi(const char **reason);
+bool selftest_timer(const char **reason);
+bool selftest_irq_route(const char **reason);
+bool selftest_thread(const char **reason);
+bool selftest_yield(const char **reason);
+bool selftest_preempt(const char **reason);
+bool selftest_sleep(const char **reason);
+bool selftest_mutex(const char **reason);
+bool selftest_semaphore(const char **reason);
+bool selftest_completion(const char **reason);
+bool selftest_waitqueue(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

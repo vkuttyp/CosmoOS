@@ -119,10 +119,7 @@ void arch_cpu_brand_string(char *buf, size_t len)
     strlcpy(buf, g_cpu.brand[0] ? g_cpu.brand : "(unidentified)", len);
 }
 
-unsigned arch_cpu_id(void)
-{
-    return 0;
-}
+/* arch_cpu_id lives in percpu.c: it reads the per-CPU block through GS. */
 
 void arch_cpu_relax(void)
 {

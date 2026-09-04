@@ -239,6 +239,17 @@ static const struct selftest tests[] = {
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "kmalloc",         selftest_kmalloc },
+    { "acpi",            selftest_acpi },
+    { "timer",           selftest_timer },
+    { "irq-route",       selftest_irq_route },
+    { "thread",          selftest_thread },
+    { "yield",           selftest_yield },
+    { "preempt",         selftest_preempt },
+    { "sleep",           selftest_sleep },
+    { "mutex",           selftest_mutex },
+    { "semaphore",       selftest_semaphore },
+    { "completion",      selftest_completion },
+    { "waitqueue",       selftest_waitqueue },
 };
 
 int selftest_run_all(void)

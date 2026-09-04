@@ -82,5 +82,10 @@ See [docs/development.md](docs/development.md).
   pages, kernel virtual-address arena with guard pages and demand-zero
   faults, MMIO mapping, slab caches and `kmalloc`. Host unit tests under
   ASan/UBSan cover the buddy and slab algorithms.
-- **Next, Phase 3:** interrupts from devices, timers, threads, context
-  switching, scheduler, SMP.
+- **Phase 3, part 1 (done):** ACPI table parsing, local APIC and I/O APIC
+  with a generic IRQ API, TSC clock and LAPIC tick, one-shot timers,
+  kernel threads with guarded stacks, a preemptive priority scheduler with
+  a pluggable policy, wait queues, mutex, semaphore, completion, timed
+  sleep, per-CPU data.
+- **Next, Phase 3, part 2:** SMP bring-up, IPIs, TLB shootdown,
+  cross-CPU scheduling.

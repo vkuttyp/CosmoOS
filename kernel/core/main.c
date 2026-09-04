@@ -9,13 +9,17 @@
  * works, and stop cleanly with a verdict.
  */
 
+#include <kernel/acpi.h>
 #include <kernel/bootinfo.h>
 #include <kernel/interrupt.h>
+#include <kernel/irq.h>
 #include <kernel/kernel.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/pmm.h>
+#include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <kernel/shutdown.h>
 #include <kernel/string.h>
@@ -102,6 +106,13 @@ void kernel_main(const struct cosmoboot_info *info)
     pmm_init();
     kmalloc_init();
     vmm_init();
+
+    /* Execution: firmware tables, interrupt controllers, the clock and
+     * tick, then the scheduler (which adopts this context as thread 0). */
+    acpi_init();
+    irq_init();
+    timer_init();
+    sched_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");

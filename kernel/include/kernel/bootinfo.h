@@ -42,4 +42,8 @@ const char *bootinfo_mem_type_name(uint32_t type);
  * ACPI, firmware runtime), false for MMIO, reserved, bad, persistent. */
 bool bootinfo_mem_type_is_ram(uint32_t type);
 
+/* True if `pa` lies inside a memory-map entry of a RAM type, i.e. the
+ * direct map covers it after vmm_init. */
+bool bootinfo_phys_is_ram(uint64_t pa);
+
 #endif /* KERNEL_BOOTINFO_H */

@@ -197,12 +197,81 @@ Four program headers: `text PT_LOAD R X`, `rodata PT_LOAD R`,
 boot note from `--gc-sections`. `.eh_frame`, `.comment`, `.note.GNU-stack`
 and `.interp` are discarded.
 
+## Phase 3 additions
+
+**percpu.c.** `arch_percpu_install` writes `MSR_GS_BASE` (0xC0000101)
+with the address of the CPU's `struct percpu`, whose first field points
+to itself; `arch_percpu_get` is `mov %gs:0, %rax` and `arch_cpu_id`
+reads `%gs:offsetof(struct percpu, cpu_id)`. Hazard: any `mov %ax, %gs`
+replaces the GS base with the descriptor base (0), so `gdt_init` must
+run before `percpu_init_boot` and GS is never reloaded afterwards
+(`x86_start` orders console → GDT → per-CPU → IDT → PIC → CPU features,
+and nothing before the per-CPU install may take a lock). There is still
+no SWAPGS: with no user mode the kernel value stays in `GS_BASE`; when
+user mode arrives it moves to `KERNEL_GS_BASE` and the trap entry swaps.
+
+**switch.S / context.c.** `arch_context_switch(from, to)` pushes
+rbp, rbx, r12–r15, stores rsp into `from->sp`, loads `to->sp`, pops, and
+`ret`s. `arch_context_init` builds the first-run frame at a 16-byte
+aligned `stack_top`: `top-8` entry, `top-16` `&x86_context_start`,
+six zero callee-saved slots down to `top-64` = saved sp. After the six
+pops and the `ret`, rsp = `top-8`; `x86_context_start` pops the entry
+(rsp = top), pushes a zero return address (rsp = `top-8`, i.e. 8 mod 16)
+and jumps, which is exactly the ABI state at a function entry after a
+`call`. The zero return address terminates frame-pointer backtraces;
+`arch_backtrace` now also accepts frames inside the current thread's
+stack (`thread_stack_contains`).
+
+**lapic.c.** xAPIC MMIO mode: the register page is mapped once with
+`vm_map_phys(base, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC)`; every access
+goes through `lapic_read`/`lapic_write` so x2APIC (detected, not
+enabled) is a two-function change. Init: ensure `MSR_APIC_BASE` enable
+bit, TPR 0, all LVTs masked, ESR cleared, SVR = enable | vector 255,
+timer divide 16. Timer: one-shot raw count for calibration, periodic
+with a vector for the tick. ICR: fixed IPIs to a physical APIC id or
+all-excluding-self, plus INIT and SIPI for the SMP work.
+
+**ioapic.c.** Indirect `IOREGSEL`/`IOWIN` access, one entry per
+discovered controller (max 8), entry count from the version register,
+everything masked at `ioapic_add`. `ioapic_route` writes the 64-bit
+redirection entry (vector, fixed delivery, physical destination in the
+high dword, trigger/polarity from `ARCH_IRQ_*`, masked); mask/unmask
+toggle bit 16; a spinlock serialises the register pair.
+
+**irqc.c.** Implements `arch/irqc.h`: dynamic vectors 48–238 from a
+bitmap under a spinlock, the CPU index → APIC id table
+(`x86_cpu_apic_id`), routing to a CPU's APIC id, and
+`arch_irqc_eoi` (nothing for exceptions and vector 255, PIC EOI for
+32–47, LAPIC EOI otherwise).
+
+**timer.c (arch).** `arch_timer_calibrate` gates PIT channel 2 for
+11 932 ticks (10 ms), starts the LAPIC timer one-shot from
+`0xFFFFFFFF`, samples `lfence; rdtsc` and the LAPIC current count before
+and after the PIT output flips, and scales both deltas by 100. Bounds
+are asserted (TSC 100 MHz–10 GHz, LAPIC 1 MHz–10 GHz), a bounded spin
+protects against a dead PIT, and the tick vector is allocated here. The
+tick is the LAPIC timer in periodic mode at `lapic_hz / hz`.
+
+**pit.c.** `arch/testhooks.h` only: PIT channel 0 in rate-generator mode
+as an ISA IRQ 0 source for the `irq-route` self-test, and a stop that
+leaves it in one-shot mode with count 0.
+
+**trap.c dispatch tail.** For vectors ≥ 32, `x86_trap_dispatch`
+increments `percpu->irq_depth` and `irq_count`, calls
+`interrupt_dispatch`, then `arch_irqc_eoi(vector)`, decrements
+`irq_depth`, and, if `irq_depth == 0 && need_resched &&
+preempt_count == 0 && (frame->rflags & RFLAGS_IF)`, calls
+`sched_preempt()`. The context switch happens inside the handler on the
+interrupted thread's stack; the `iretq` completes when the thread is
+switched back in. Exceptions (vectors < 32) do not count as interrupt
+nesting, so a page fault in a thread does not block a later preemption.
+
 ## Deliberately absent
 
-- **SWAPGS**: no user mode exists, so every trap comes from ring 0 and GS
-  is not used for per-CPU data yet.
-- **LAPIC/IOAPIC/MSI**: Phase 3 and Phase 6.
-- **Per-CPU data**: `arch_cpu_id` returns 0.
+- **SWAPGS**: no user mode exists, so every trap comes from ring 0 and
+  the kernel per-CPU pointer lives in `GS_BASE` directly.
+- **MSI/MSI-X**: Phase 6 with PCI.
+- **x2APIC mode**: detected by `cpu.c`, not enabled; xAPIC MMIO is used.
 - **FPU/SSE state**: the kernel is compiled with `-mgeneral-regs-only`, so
   there is no vector state to save or restore in the trap path.
 - **Symbolised backtraces**: addresses are resolved offline against

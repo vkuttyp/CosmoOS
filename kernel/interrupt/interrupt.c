@@ -88,6 +88,27 @@ int interrupt_unregister(unsigned vector, interrupt_handler_fn fn)
     return rc;
 }
 
+int interrupt_unregister_vector(unsigned vector)
+{
+    if (vector >= g_vector_count)
+        return -EINVAL;
+
+    arch_irq_state_t s = arch_irq_save();
+    struct interrupt_slot *slot = &g_slots[vector];
+    int rc;
+    if (slot->fn == NULL) {
+        rc = -ENOENT;
+    } else {
+        __atomic_store_n(&slot->fn, NULL, __ATOMIC_RELEASE);
+        barrier();
+        slot->arg = NULL;
+        slot->name = NULL;
+        rc = 0;
+    }
+    arch_irq_restore(s);
+    return rc;
+}
+
 void interrupt_dispatch(unsigned vector, struct arch_trap_frame *frame)
 {
     if (vector >= g_vector_count) {
@@ -95,7 +116,7 @@ void interrupt_dispatch(unsigned vector, struct arch_trap_frame *frame)
     }
 
     struct interrupt_slot *slot = &g_slots[vector];
-    slot->count++;
+    __atomic_fetch_add(&slot->count, 1u, __ATOMIC_RELAXED);
 
     interrupt_handler_fn fn = __atomic_load_n(&slot->fn, __ATOMIC_ACQUIRE);
     if (fn == NULL) {
