@@ -35,4 +35,14 @@ bool selftest_semaphore(const char **reason);
 bool selftest_completion(const char **reason);
 bool selftest_waitqueue(const char **reason);
 
+/* Phase 3 part 2: kernel/scheduler/smptest.c */
+bool selftest_smp_online(const char **reason);
+bool selftest_smp_affinity(const char **reason);
+bool selftest_smp_parallel(const char **reason);
+bool selftest_smp_call(const char **reason);
+bool selftest_smp_shootdown(const char **reason);
+bool selftest_smp_wake(const char **reason);
+bool selftest_smp_ticks(const char **reason);
+bool selftest_smp_mutex(const char **reason);
+
 #endif /* KERNEL_SELFTEST_H */

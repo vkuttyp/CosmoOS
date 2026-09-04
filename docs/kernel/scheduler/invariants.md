@@ -148,10 +148,34 @@ consumer waiting forever (found in review, PR #3). Check: test
 `semaphore`, second half (two blocked consumers, ten posts with no
 sleep between them, both consumers finish).
 
+**S22. Preemption keeps the current thread runnable regardless of a
+transient BLOCKED state.** `waitqueue_prepare` marks the caller BLOCKED
+before the condition is evaluated. `schedule_internal(preempt = true)`
+(interrupt return, `preempt_enable`) therefore re-queues the current
+thread whatever its state, and only a voluntary `schedule()` with state
+BLOCKED leaves it to its wait queue. Without this, a tick landing between
+`waitqueue_prepare` and `waitqueue_finish` switched the thread out on no
+run queue and no wait list; the hang watchdog showed thread 0 BLOCKED
+with `waiting_on -` and every CPU idle, and about one in three four-CPU
+boots stalled (found in bring-up of the SMP PR). A re-queued thread
+resumes with state RUNNING, so its `sched_block_current` behaves as a
+yield and the `wait_event` loop re-prepares and re-checks the condition.
+Check: 24 consecutive stall-free four-CPU boots; `KASSERT(!preempt)`
+for an EXITED thread (exit disables interrupts first).
+
+**S23. Exited threads are reaped by the reaper thread.**
+`sched_finish_switch` may run with interrupts disabled, and freeing a
+stack requires a TLB shootdown that waits for other CPUs with interrupts
+enabled, so it calls `thread_reap_later`; the reaper (`reaper_main`,
+priority `SCHED_PRIO_DEFAULT - 8`) performs the final `thread_put`. The
+`rq_link` is reused for the reap list. `thread_count()` therefore
+settles after `thread_join`. Check: review; tests use `threads_settle`.
+
 ## Gaps (documented, not invariants)
 
-- Cross-CPU `need_resched` is set but not signalled by IPI until the
-  SMP PR; on one CPU the tick observes it within `TICK_NS`.
+- Cross-CPU `need_resched` is signalled by `IPI_RESCHEDULE` when the
+  target is idle or running lower priority; equal-priority wakes wait
+  for the target's slice to end (at most `SCHED_SLICE_NS`).
 - Threads are placed at creation and never migrate.
 - No priority inheritance: a high-priority thread blocked on a mutex
   held by a low-priority thread waits for that thread's turn.

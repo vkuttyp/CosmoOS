@@ -14,6 +14,7 @@
 #include <kernel/kernel.h>
 #include <kernel/log.h>
 #include <kernel/printf.h>
+#include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 
@@ -250,14 +251,27 @@ static const struct selftest tests[] = {
     { "semaphore",       selftest_semaphore },
     { "completion",      selftest_completion },
     { "waitqueue",       selftest_waitqueue },
+    { "smp-online",      selftest_smp_online },
+    { "smp-affinity",    selftest_smp_affinity },
+    { "smp-parallel",    selftest_smp_parallel },
+    { "smp-call",        selftest_smp_call },
+    { "smp-shootdown",   selftest_smp_shootdown },
+    { "smp-wake",        selftest_smp_wake },
+    { "smp-ticks",       selftest_smp_ticks },
+    { "smp-mutex",       selftest_smp_mutex },
 };
 
 int selftest_run_all(void)
 {
     int failed = 0;
 
+    /* A test that hangs is worth more with a scheduler dump than as a
+     * bare harness timeout. */
+    sched_watchdog_arm(8ull * 1000 * 1000 * 1000);
+
     for (size_t i = 0; i < ARRAY_SIZE(tests); i++) {
         const char *reason = "";
+        sched_watchdog_kick();
         bool ok = tests[i].fn(&reason);
         if (ok) {
             kprintf("SELFTEST: %-16s ... ok\n", tests[i].name);
@@ -266,6 +280,8 @@ int selftest_run_all(void)
             failed++;
         }
     }
+
+    sched_watchdog_disarm();
 
     if (failed == 0)
         kprintf("SELFTEST: PASS (%zu tests)\n", ARRAY_SIZE(tests));

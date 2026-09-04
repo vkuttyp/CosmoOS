@@ -18,6 +18,8 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/pit.c \
 	kernel/arch/x86_64/switch.S \
 	kernel/arch/x86_64/context.c \
+	kernel/arch/x86_64/trampoline.S \
+	kernel/arch/x86_64/smp.c \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \
 	kernel/arch/x86_64/shutdown.c

@@ -100,6 +100,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `CRASH_TEST` | `0` | Compile a deliberate fault after the banner (`CONFIG_CRASH_TEST`) to exercise the panic path |
 | `LLVM_PREFIX` | empty | Directory prefix (with trailing `/`) for `clang`, `ld.lld`, `lld-link`, `llvm-objcopy`, `llvm-nm`, `llvm-objdump` |
 | `QEMU_MEM` | `256M` | Guest RAM |
+| `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim |
 | `OVMF_CODE` | auto | Path to the UEFI firmware image; overrides `scripts/find-firmware.sh` |
@@ -138,12 +139,17 @@ Memory: 205 MiB usable in 32 regions, RAM ends at 256 MiB
 [ INFO] timer: tsc at 996.000 MHz, tick 250 Hz
 [ INFO] sched: policy 'rr', slice 10 ms, tick 250 Hz
 [ INFO] interrupts enabled
+[DEBUG] smp: CPU 1 (APIC 1) up
+[DEBUG] smp: CPU 2 (APIC 2) up
+[DEBUG] smp: CPU 3 (APIC 3) up
+[ INFO] smp: 4 CPUs online of 4 reported
 SELFTEST: printf           ... ok
 ...
 SELFTEST: irq-route        ... ok
 SELFTEST: thread           ... ok
 ...
-SELFTEST: PASS (19 tests)
+SELFTEST: smp-mutex        ... ok
+SELFTEST: PASS (27 tests)
 [ INFO] boot complete; nothing more to do in this phase
 [ INFO] shutdown: exit status 0
 [ INFO] shutdown: halting CPU
@@ -157,7 +163,15 @@ serial port; afterwards it writes the UART directly.
 
 A panic prints `KERNEL PANIC: <reason>`, the CPU, a register dump when a
 trap frame is available, and a frame-pointer stack trace. Resolve the
-addresses against `out/<arch>-<build>/kernel/kernel.map`.
+addresses against `out/<arch>-<build>/kernel/kernel.map`, or with
+`llvm-symbolizer --obj=out/<arch>-<build>/kernel/kernel.elf <addr>`.
+
+A self-test that stops making progress for 8 s triggers the scheduler
+hang watchdog, which prints `[WATCHDOG] no progress ...` followed by
+every CPU's run queue (`need_resched`, `preempt`, `irq_depth`, `ticks`)
+and every thread with its state and `waiting_on`. All CPUs on `idle`
+with empty queues and a thread `blocked` on `-` is a lost wakeup; see
+`docs/kernel/smp/testing.md` for the QEMU-monitor steps that go with it.
 
 ### Exit-code contract
 

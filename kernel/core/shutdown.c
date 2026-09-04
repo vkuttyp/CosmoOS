@@ -4,6 +4,7 @@
 
 #include <kernel/log.h>
 #include <kernel/shutdown.h>
+#include <kernel/smp.h>
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -12,6 +13,7 @@
 void kernel_shutdown(enum kernel_exit_status status)
 {
     kinfo("shutdown: exit status %d", (int)status);
+    smp_stop_others();
     arch_irq_disable();
 
     /* An emulator may honour this asynchronously, so the halt below is

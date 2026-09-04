@@ -43,6 +43,57 @@ void thread_init_subsystem(void)
         panic("thread: cannot create thread cache");
 }
 
+/* --- reaper ---
+ * An exited thread's last reference may be dropped from
+ * sched_finish_switch, which runs with interrupts disabled and cannot
+ * perform the TLB shootdown that freeing a stack requires. Exited
+ * threads are therefore handed to a kernel thread that frees them in
+ * ordinary context. The rq_link is reused for the reap list. */
+
+static LIST_HEAD(g_reap_list);
+static spinlock_t g_reap_lock = SPINLOCK_INIT("reap");
+static struct waitqueue g_reap_wq = WAITQUEUE_INIT(g_reap_wq);
+
+static bool reap_pending(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_reap_lock);
+    bool pending = !list_empty(&g_reap_list);
+    spin_unlock_irqrestore(&g_reap_lock, s);
+    return pending;
+}
+
+static void reaper_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        wait_event(&g_reap_wq, reap_pending());
+
+        arch_irq_state_t s = spin_lock_irqsave(&g_reap_lock);
+        struct list_node *n = list_pop_front(&g_reap_list);
+        spin_unlock_irqrestore(&g_reap_lock, s);
+        if (n == NULL)
+            continue;
+        thread_put(list_entry(n, struct thread, rq_link));
+    }
+}
+
+void thread_reap_later(struct thread *t)
+{
+    KASSERT(t->state == THREAD_EXITED);
+    arch_irq_state_t s = spin_lock_irqsave(&g_reap_lock);
+    list_push_back(&g_reap_list, &t->rq_link);
+    spin_unlock_irqrestore(&g_reap_lock, s);
+    waitqueue_wake_all(&g_reap_wq);
+}
+
+void thread_reaper_start(void)
+{
+    struct thread *r = thread_create(reaper_main, NULL, "reaper", SCHED_PRIO_DEFAULT - 8);
+    if (r == NULL)
+        panic("thread: cannot create the reaper");
+    thread_put(r); /* detached: nobody joins it */
+}
+
 static void thread_register(struct thread *t)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_thread_list_lock);
@@ -104,13 +155,22 @@ struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *n
     return t;
 }
 
-struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority)
+struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,
+                                cpumask_t affinity)
 {
+    if ((affinity & cpu_online_mask()) == 0)
+        return NULL;
     struct thread *t = thread_prepare(entry, arg, name, priority, 0);
     if (t == NULL)
         return NULL;
+    t->affinity = affinity;
     sched_enqueue_new(t);
     return t;
+}
+
+struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority)
+{
+    return thread_create_on(entry, arg, name, priority, CPUMASK_ALL);
 }
 
 void thread_exit(int code)
@@ -173,10 +233,12 @@ void thread_dump_all(void)
     static const char *const states[] = { "ready", "running", "blocked", "exited" };
     arch_irq_state_t s = spin_lock_irqsave(&g_thread_list_lock);
     struct thread *t;
-    kprintf("%4s %-20s %-8s %3s %3s %10s %8s\n", "tid", "name", "state", "pri", "cpu", "run_ms", "switch");
+    kprintf("%4s %-20s %-8s %3s %3s %10s %8s %s\n", "tid", "name", "state", "pri", "cpu", "run_ms", "switch",
+            "waiting_on");
     list_for_each_entry(t, &g_all_threads, all_link) {
-        kprintf("%4u %-20s %-8s %3d %3d %10llu %8llu\n", t->tid, t->name, states[t->state], t->priority,
-                t->cpu, (unsigned long long)(t->run_time_ns / 1000000), (unsigned long long)t->switches);
+        kprintf("%4u %-20s %-8s %3d %3d %10llu %8llu %s\n", t->tid, t->name, states[t->state], t->priority,
+                t->cpu, (unsigned long long)(t->run_time_ns / 1000000), (unsigned long long)t->switches,
+                t->waiting_on ? (t->waiting_on->lock.name ? t->waiting_on->lock.name : "?") : "-");
     }
     spin_unlock_irqrestore(&g_thread_list_lock, s);
 }

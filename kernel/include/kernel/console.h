@@ -32,4 +32,8 @@ void console_register(struct console_sink *sink);
 void console_write(const char *s, size_t len);
 void console_puts(const char *s);
 
+/* Panic mode: stop taking the console lock so a report can be printed
+ * even if another (now halted) CPU holds it. Irreversible. */
+void console_set_panic_mode(void);
+
 #endif /* KERNEL_CONSOLE_H */

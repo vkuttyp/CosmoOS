@@ -12,6 +12,7 @@
 #include <kernel/acpi.h>
 #include <kernel/bootinfo.h>
 #include <kernel/interrupt.h>
+#include <kernel/ipi.h>
 #include <kernel/irq.h>
 #include <kernel/kernel.h>
 #include <kernel/kmalloc.h>
@@ -19,6 +20,7 @@
 #include <kernel/pmm.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <kernel/smp.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <kernel/shutdown.h>
@@ -111,11 +113,16 @@ void kernel_main(const struct cosmoboot_info *info)
      * tick, then the scheduler (which adopts this context as thread 0). */
     acpi_init();
     irq_init();
+    ipi_init();
     timer_init();
     sched_init();
 
     arch_irq_enable();
     kinfo("interrupts enabled");
+
+    /* Bring up the other CPUs now that this one can take interrupts:
+     * the shootdowns and cross-CPU calls bring-up needs require it. */
+    smp_init();
 
     int failed = 0;
 #if CONFIG_SELFTEST

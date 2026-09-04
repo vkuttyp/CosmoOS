@@ -72,6 +72,11 @@ struct thread {
  * failure. `name` is copied. */
 struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority);
 
+/* Same, restricted to the CPUs in `affinity` (must include at least one
+ * online CPU, else NULL). */
+struct thread *thread_create_on(void (*entry)(void *arg), void *arg, const char *name, int priority,
+                                cpumask_t affinity);
+
 /* Terminate the calling thread. Never returns. */
 void thread_exit(int code) __noreturn;
 

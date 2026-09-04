@@ -87,5 +87,9 @@ See [docs/development.md](docs/development.md).
   kernel threads with guarded stacks, a preemptive priority scheduler with
   a pluggable policy, wait queues, mutex, semaphore, completion, timed
   sleep, per-CPU data.
-- **Next, Phase 3, part 2:** SMP bring-up, IPIs, TLB shootdown,
-  cross-CPU scheduling.
+- **Phase 3, part 2 (done):** SMP bring-up through a real-mode
+  trampoline, per-CPU tables and ticks, IPIs for reschedule, function
+  call, TLB shootdown and halt, cross-CPU scheduling, a scheduler hang
+  watchdog. Self-tests run on four CPUs under QEMU.
+- **Next, Phase 4:** processes, ELF loader, user mode, system calls,
+  init.

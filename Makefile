@@ -38,11 +38,11 @@ $(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(ROOT)/scripts/mkimage.sh
 	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF)
 
 run: $(IMAGE)
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(ROOT)/scripts/qemu-run.sh $(IMAGE)
 
 test: $(IMAGE)
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
 
 # Build a deliberately crashing kernel into a sibling output tree and
@@ -50,7 +50,7 @@ test: $(IMAGE)
 test-crash:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
 		CRASH_TEST=1 OUT=$(OUT)-crash image
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
 

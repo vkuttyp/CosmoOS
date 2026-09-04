@@ -37,6 +37,19 @@
 
 #define MS(n) ((uint64_t)(n) * 1000000ULL)
 
+/* Exited threads are freed by the reaper thread after join returns, so
+ * the thread count settles asynchronously. Wait briefly for it. */
+static bool threads_settle(unsigned expected)
+{
+    uint64_t deadline = clock_now_ns() + MS(200);
+    while (thread_count() != expected) {
+        if (clock_now_ns() > deadline)
+            return false;
+        sched_yield();
+    }
+    return true;
+}
+
 /* --- acpi --- */
 
 bool selftest_acpi(const char **reason)
@@ -218,13 +231,13 @@ bool selftest_thread(const char **reason)
     CHECK(t != NULL);
     CHECK(thread_join(t) == 7);
     CHECK(st.ran == 1);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
 
     /* Returning from the entry function exits with code 0. */
     struct thread *t2 = thread_create((void (*)(void *))sched_yield, NULL, "selftest-ret", SCHED_PRIO_DEFAULT);
     CHECK(t2 != NULL);
     CHECK(thread_join(t2) == 0);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
 
     /* thread 0 is the current thread, on CPU 0's queue, with the boot flag. */
     struct thread *self = thread_current();
@@ -267,7 +280,7 @@ bool selftest_yield(const char **reason)
     thread_join(a);
     thread_join(b);
     CHECK(pp.a == 200 && pp.b == 200);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }
 
@@ -297,7 +310,7 @@ bool selftest_preempt(const char **reason)
     CHECK(s->switches >= 1);
     stop = 1;
     thread_join(s);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }
 
@@ -366,7 +379,7 @@ bool selftest_mutex(const char **reason)
     CHECK(mt.counter == 400);
     CHECK(!mt.violated);
     CHECK(!mutex_is_locked(&mt.m));
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }
 
@@ -425,7 +438,7 @@ bool selftest_semaphore(const char **reason)
     CHECK(clock_now_ns() - t0 < MS(500));
     CHECK(st2.consumed == 10);
     CHECK(semaphore_count(&st2.items) == 0);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }
 
@@ -452,7 +465,7 @@ bool selftest_completion(const char **reason)
     CHECK(completion_done(&c));
     wait_for_completion(&c); /* already done: returns immediately */
     thread_join(t);
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }
 
@@ -500,6 +513,6 @@ bool selftest_waitqueue(const char **reason)
     thread_join(b);
     CHECK(wt.woke == 2);
     CHECK(waitqueue_empty(&wt.wq));
-    CHECK(thread_count() == before);
+    CHECK(threads_settle(before));
     return true;
 }

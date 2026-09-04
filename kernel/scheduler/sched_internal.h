@@ -14,6 +14,10 @@ struct thread *thread_alloc(const char *name, int priority, unsigned flags);
 /* Allocate a thread with stack and initial context but do not enqueue. */
 struct thread *thread_prepare(void (*entry)(void *arg), void *arg, const char *name, int priority,
                               unsigned flags);
+/* Hand an exited thread to the reaper (safe with interrupts disabled). */
+void thread_reap_later(struct thread *t);
+/* Create the reaper thread; called once at the end of sched_init. */
+void thread_reaper_start(void);
 
 /* sched.c */
 void sched_finish_switch(void);
