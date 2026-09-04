@@ -23,6 +23,7 @@ typedef unsigned vm_prot_t;
 #define VM_PROT_EXEC  (1u << 2)
 #define VM_PROT_RW    (VM_PROT_READ | VM_PROT_WRITE)
 #define VM_PROT_RX    (VM_PROT_READ | VM_PROT_EXEC)
+#define VM_PROT_USER  (1u << 3)   /* accessible from user mode; reported by query */
 
 typedef enum vm_cache {
     VM_CACHE_WB,   /* write-back: normal memory */
@@ -33,13 +34,23 @@ typedef enum vm_cache {
 /* arch_mmu_map flags */
 #define ARCH_MMU_MAP_LARGE  (1u << 0)  /* may use 2 MiB / 1 GiB entries where aligned */
 #define ARCH_MMU_MAP_GLOBAL (1u << 1)  /* kernel mapping shared by all spaces */
+#define ARCH_MMU_MAP_USER   (1u << 2)  /* user-accessible leaf and intermediate entries */
 
 struct arch_mmu_context {
     paddr_t root;  /* physical address of the top-level table */
 };
 
-/* Allocate an empty top-level table. Returns 0 or -ENOMEM. */
+/* Allocate an empty top-level table for the kernel space. Returns 0 or
+ * -ENOMEM. */
 int arch_mmu_context_init(struct arch_mmu_context *ctx);
+
+/* Allocate a top-level table for a user space whose kernel half mirrors
+ * the kernel context's entries (which never change after vmm_init). */
+int arch_mmu_context_init_user(struct arch_mmu_context *ctx, const struct arch_mmu_context *kernel);
+
+/* Free every lower-half table page and the root of a user context. The
+ * caller has unmapped all leaves and ensured no CPU has it active. */
+void arch_mmu_context_destroy(struct arch_mmu_context *ctx);
 
 /* Map [va, va+len) -> [pa, pa+len). Both page aligned. Fails with -EEXIST
  * if any page in the range is already mapped (nothing is changed in that

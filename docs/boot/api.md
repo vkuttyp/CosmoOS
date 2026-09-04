@@ -6,10 +6,13 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 1. Any layout change bumps
-`COSMOBOOT_VERSION`; the loader and kernel refuse each other on mismatch
-(loader via the ELF note, kernel via `bootinfo_init()`). Additions use
-`reserved1` and bump the version. Field meanings are in `design.md`.
+**ABI stability: stable.** Version 2 (version 1 plus the boot module
+fields `module_phys`/`module_size` and memory type
+`COSMOBOOT_MEM_MODULE` = 13, taken from `reserved1`). Any layout change
+bumps `COSMOBOOT_VERSION`; the loader and kernel refuse each other on
+mismatch (loader via the ELF note, kernel via `bootinfo_init()`).
+Additions use `reserved1` and bump the version. Field meanings are in
+`design.md`.
 
 Constants a loader must honour: `COSMOBOOT_MAGIC`, `COSMOBOOT_VERSION`,
 `COSMOBOOT_NOTE_NAME`/`COSMOBOOT_NOTE_TYPE`, the `COSMOBOOT_MEM_*`,
@@ -21,7 +24,15 @@ exited; interrupts disabled; kernel mapped at its link addresses with
 W^X from the ELF flags; `[0, hhdm_size)` mapped RW+NX at `hhdm_base`;
 bootstrap tables in `COSMOBOOT_MEM_BOOT_PAGETABLES` memory; `.bss`
 zeroed; first argument register = HHDM virtual address of the struct;
-a valid stack of at least 16 KiB.
+a valid stack of at least 16 KiB. Module (v2): either `module_size` is
+0 and `module_phys` is 0, or `[module_phys, module_phys+module_size)`
+is page-aligned memory inside the direct map holding the unmodified
+bytes of the file `\cosmo\init.elf`, reported as `COSMOBOOT_MEM_MODULE`
+(the loader retypes the range itself when the firmware rejected its
+memory types, see `mark_range` in `design.md`); the loader does not
+validate the module's contents. The
+kernel keeps `MODULE` ranges reserved by map type and treats the bytes
+as untrusted input (`elf_validate`).
 
 ## Kernel-side accessors (`kernel/include/kernel/bootinfo.h`)
 
@@ -120,6 +131,15 @@ Ownership: the loader never frees; the pages reach the kernel via the
 memory map.
 Failure: `EFI_INVALID_PARAMETER` for bad arguments; the firmware's
 status (typically `EFI_OUT_OF_RESOURCES`) otherwise.
+
+### `KERNEL_PATH`, `MODULE_PATH`
+
+`L"\\cosmo\\kernel.elf"` and `L"\\cosmo\\init.elf"` on the loader's own
+volume (`scripts/mkimage.sh` places both). The kernel is mandatory; the
+module is optional and read by the same static helper
+(`read_boot_file` in `main.c`) with `EFI_MEMORY_TYPE_COSMO_MODULE`
+(`0x80000003`, `efi.h`). Size limits are the kernel's (0 < size ≤ 64
+MiB).
 
 ### `EFI_STATUS elf_load(const uint8_t *file, size_t size, struct elf_image *img, bool *fallback_used)`
 

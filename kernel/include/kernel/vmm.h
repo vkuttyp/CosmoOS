@@ -30,6 +30,7 @@ enum vm_region_kind {
 #define VM_REGION_GUARD_BELOW (1u << 0)
 #define VM_REGION_GUARD_ABOVE (1u << 1)
 #define VM_REGION_POPULATED   (1u << 2)  /* ANON: fully populated at creation */
+#define VM_REGION_USER        (1u << 3)  /* accessible from user mode (U/S) */
 
 struct vm_region {
     struct list_node link;   /* in vm_space.regions, sorted by base */
@@ -49,9 +50,57 @@ struct vm_space {
     spinlock_t lock;
     vaddr_t arena_lo;        /* kernel VA arena for dynamic allocations */
     vaddr_t arena_hi;
+    bool user;               /* a process address space (lower half) */
+    uint64_t anon_pages;     /* frames populated for this space's ANON regions */
 };
 
 extern struct vm_space kernel_space;
+
+/* --- user address spaces (Phase 4) --- */
+
+/* The user window: canonical lower half minus the first 4 MiB (null
+ * page and legacy space) and the last page. */
+#define VM_USER_LO 0x0000000000400000ULL
+#define VM_USER_HI 0x00007FFFFFFFF000ULL
+
+/* The process layer tells the fault handler which user space the
+ * current thread runs in and how to terminate it on a fatal fault. */
+struct arch_trap_frame;
+struct vm_user_hooks {
+    struct vm_space *(*current_space)(void);              /* NULL for kernel threads */
+    void (*fatal)(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame) __noreturn;
+};
+void vm_set_user_hooks(const struct vm_user_hooks *hooks);
+
+/* Fresh user space whose kernel half mirrors the kernel tables.
+ * Returns 0 or -ENOMEM. */
+int vm_space_create_user(struct vm_space **out);
+
+/* Tear down every region, free frames, free lower-half tables, free the
+ * struct. Must not be the space active on the calling CPU. */
+void vm_space_destroy(struct vm_space *space);
+
+/* Map an anonymous user region at exactly [base, base+size). `prot`
+ * must not be W+X. flags: VM_REGION_POPULATED for eager zeroed frames,
+ * VM_REGION_GUARD_BELOW for a guard page below. Returns 0, -EEXIST if it
+ * overlaps, -EINVAL, -ENOMEM. */
+int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
+                     const char *name);
+
+/* Unmap a region that starts at `base` with exactly `size` bytes. */
+int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size);
+
+/* Change the protection of a whole region (exact base and size).
+ * -EINVAL for W+X or a partial range. */
+int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot);
+
+/* Lowest free range of `size` bytes at or above `from` inside
+ * [USER_LO, USER_HI) with a guard gap; 0 if none. */
+uint64_t vm_user_find_free(struct vm_space *space, uint64_t from, size_t size);
+
+/* True if every page of [addr, addr+len) is inside one or more regions
+ * of `space` that all carry `prot`. */
+bool vm_user_range_mapped(struct vm_space *space, uint64_t addr, size_t len, vm_prot_t prot);
 
 /* Take over paging from the loader. Requires pmm_init and kmalloc_init.
  * After return: kernel tables active, all RAM in the direct map, boot

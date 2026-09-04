@@ -30,4 +30,10 @@ void arch_context_switch(struct arch_context *from, struct arch_context *to);
 /* Bounds of the boot stack the initial context runs on (thread 0). */
 void arch_boot_stack(uintptr_t *base, size_t *size);
 
+/* Called by the scheduler with the run-queue lock held, just before
+ * switching to `next`: publish its kernel stack for traps and system
+ * calls (TSS rsp0, per-CPU block) and activate its address space. */
+struct thread;
+void arch_thread_switch_prepare(struct thread *next);
+
 #endif /* ARCH_CONTEXT_H */

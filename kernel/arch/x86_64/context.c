@@ -17,11 +17,34 @@
  */
 
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
+#include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/vmm.h>
 
 #include <arch/context.h>
+#include <arch/mmu.h>
+
+#include <x86/cpu.h>
+#include <x86/gdt.h>
 
 void x86_context_start(void);
+
+void arch_thread_switch_prepare(struct thread *next)
+{
+    /* Kernel stack for traps from ring 3 and for SYSCALL. */
+    uintptr_t kstack = next->stack_base + next->stack_size;
+    this_cpu()->kernel_stack_top = kstack;
+    gdt_set_kernel_stack(kstack);
+
+    /* Address space: a process's own tables, or the kernel's. Skipped
+     * when unchanged so kernel-thread to kernel-thread switches do not
+     * flush non-global entries needlessly. */
+    struct vm_space *space = next->proc ? next->proc->space : &kernel_space;
+    if (read_cr3() != space->mmu.root)
+        arch_mmu_activate(&space->mmu);
+}
 extern char x86_boot_stack_bottom[], x86_boot_stack_top[];
 
 void arch_boot_stack(uintptr_t *base, size_t *size)

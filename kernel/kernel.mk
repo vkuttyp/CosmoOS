@@ -43,6 +43,15 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/completion.c \
 	kernel/scheduler/schedtest.c \
 	kernel/scheduler/smptest.c \
+	kernel/object/object.c \
+	kernel/object/handle.c \
+	kernel/object/console_obj.c \
+	kernel/process/elf.c \
+	kernel/process/process.c \
+	kernel/process/proctest.c \
+	kernel/syscall/syscall.c \
+	kernel/syscall/native.c \
+	kernel/syscall/uaccess.c \
 	drivers/acpi/acpi.c
 
 KERNEL_GENERIC_OBJS := $(call objs_of,$(KERNEL_GENERIC_SRCS))

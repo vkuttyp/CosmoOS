@@ -89,6 +89,7 @@ bool bootinfo_mem_type_is_ram(uint32_t type)
     case COSMOBOOT_MEM_BOOTINFO:
     case COSMOBOOT_MEM_BOOT_PAGETABLES:
     case COSMOBOOT_MEM_FIRMWARE_RUNTIME:
+    case COSMOBOOT_MEM_MODULE:
         return true;
     default:
         return false;
@@ -141,6 +142,7 @@ const char *bootinfo_mem_type_name(uint32_t type)
     case COSMOBOOT_MEM_FIRMWARE_RUNTIME:   return "fw-runtime";
     case COSMOBOOT_MEM_MMIO:               return "mmio";
     case COSMOBOOT_MEM_PERSISTENT:         return "persistent";
+    case COSMOBOOT_MEM_MODULE:             return "module";
     default:                               return "unknown";
     }
 }

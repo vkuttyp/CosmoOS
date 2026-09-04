@@ -259,6 +259,11 @@ static const struct selftest tests[] = {
     { "smp-wake",        selftest_smp_wake },
     { "smp-ticks",       selftest_smp_ticks },
     { "smp-mutex",       selftest_smp_mutex },
+    { "objects",         selftest_objects },
+    { "elf",             selftest_elf },
+    { "process-reject",  selftest_process_reject },
+    { "process-user",    selftest_process_selftest },
+    { "process-fault",   selftest_process_fault },
 };
 
 int selftest_run_all(void)

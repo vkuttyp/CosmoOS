@@ -43,7 +43,10 @@
 /* Constants usable from assembly (the kernel's entry file emits the
  * protocol note). Everything below the __ASSEMBLER__ guard is C only. */
 
-#define COSMOBOOT_VERSION 1
+/* Version history:
+ *   1  memory map, HHDM, kernel placement, page-table root, ACPI RSDP
+ *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE */
+#define COSMOBOOT_VERSION 2
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -70,6 +73,7 @@
 #define COSMOBOOT_MEM_FIRMWARE_RUNTIME  10u  /* firmware runtime services code/data */
 #define COSMOBOOT_MEM_MMIO              11u  /* memory-mapped I/O */
 #define COSMOBOOT_MEM_PERSISTENT        12u  /* persistent memory, not general RAM */
+#define COSMOBOOT_MEM_MODULE            13u  /* boot module (init executable), v2 */
 
 #define COSMOBOOT_ARCH_X86_64  1u
 #define COSMOBOOT_ARCH_AARCH64 2u
@@ -119,9 +123,14 @@ struct cosmoboot_info {
     uint64_t acpi_rsdp;
     uint64_t firmware_system_table; /* EFI_SYSTEM_TABLE for UEFI */
 
-    /* Reserved for framebuffer, command line, and initrd in later versions.
-     * Must be zero in version 1. */
-    uint64_t reserved1[8];
+    /* Version 2: one boot module, the initial user executable, in memory
+     * of type COSMOBOOT_MEM_MODULE. Both zero when no module was found. */
+    uint64_t module_phys;
+    uint64_t module_size;
+
+    /* Reserved for framebuffer and command line in later versions.
+     * Must be zero in version 2. */
+    uint64_t reserved1[6];
 };
 
 #endif /* __ASSEMBLER__ */

@@ -1,0 +1,52 @@
+/*
+ * elf.h - Static ELF64 executable validation and loading into a user
+ * address space.
+ *
+ * elf_validate is a pure function over a byte buffer (host-testable):
+ * it either fills `struct elf_info` or returns -ENOEXEC with the failing
+ * rule logged. elf_load_into maps and copies segments into a user
+ * vm_space and never touches the image through user mappings.
+ */
+
+#ifndef KERNEL_ELF_H
+#define KERNEL_ELF_H
+
+#include <kernel/types.h>
+
+#define ELF_MAX_SEGMENTS 16
+
+#define ELF_PF_X 1u
+#define ELF_PF_W 2u
+#define ELF_PF_R 4u
+
+struct elf_segment {
+    uint64_t vaddr;    /* page aligned */
+    uint64_t memsz;    /* page rounded span from vaddr */
+    uint64_t offset;   /* file offset of the first byte */
+    uint64_t filesz;
+    uint64_t file_vaddr; /* unaligned p_vaddr, where file bytes land */
+    uint32_t flags;    /* ELF_PF_* */
+};
+
+struct elf_info {
+    uint64_t entry;
+    uint64_t lo;       /* lowest segment start */
+    uint64_t hi;       /* highest segment end */
+    unsigned nr_segments;
+    struct elf_segment segments[ELF_MAX_SEGMENTS];
+};
+
+/* Validate an x86-64 static executable for the user range
+ * [user_lo, user_hi). On failure returns -ENOEXEC and, when `why` is
+ * non-NULL, points it at an immortal string naming the rule. */
+int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, struct elf_info *info,
+                 const char **why);
+
+struct vm_space;
+
+/* Map every segment of a validated image into `space` and copy its
+ * bytes. Returns 0, -ENOMEM, or -EEXIST (overlap with an existing
+ * region). On failure the caller destroys the space. */
+int elf_load_into(struct vm_space *space, const void *image, const struct elf_info *info);
+
+#endif /* KERNEL_ELF_H */

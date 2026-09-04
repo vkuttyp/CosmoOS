@@ -18,8 +18,9 @@
 #define LOADER_NAME    "cosmoboot-uefi"
 #define LOADER_VERSION 1u
 
-/* Path of the kernel on the EFI system partition. */
+/* Paths on the EFI system partition. */
 #define KERNEL_PATH L"\\cosmo\\kernel.elf"
+#define MODULE_PATH L"\\cosmo\\init.elf"
 
 /* Everything the loader allocates stays below this so it is covered by the
  * bootstrap identity map and HHDM. */

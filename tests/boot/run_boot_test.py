@@ -35,9 +35,18 @@ BOOT_MARKERS = [
 ]
 
 # Normal run: must reach the end cleanly, nothing alarming in the log.
+# The user-mode markers come from the init program delivered as the boot
+# module: the self-test run prints USERTEST: PASS and the real run
+# prints its banner and exits 0.
 REQUIRED_MARKERS = BOOT_MARKERS + [
+    r"^init: hello from user mode, pid \d+",
+    r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
 ]
+
+# Only produced by the self-test run of init (debug builds); required
+# whenever self-tests ran at all.
+USERTEST_MARKER = r"^USERTEST: PASS"
 FORBIDDEN_MARKERS = [
     r"KERNEL PANIC",
     r"BUG:",
@@ -151,6 +160,8 @@ def main():
     want_selftest = args.expect_selftest == "yes" or (args.expect_selftest == "auto" and selftest_lines)
     if want_selftest and not any(ln.startswith("SELFTEST: PASS") for ln in selftest_lines):
         failures.append("no 'SELFTEST: PASS' line")
+    if want_selftest and not any(re.search(USERTEST_MARKER, ln) for ln in lines):
+        failures.append(f"missing marker /{USERTEST_MARKER}/ (user-mode self-test)")
 
     if failures:
         print(f"boot-test: FAIL after {elapsed:.1f}s")

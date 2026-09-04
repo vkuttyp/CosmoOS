@@ -20,6 +20,7 @@
 #include <arch/irqc.h>
 #include <arch/percpu.h>
 #include <arch/smp.h>
+#include <arch/user.h>
 
 #include <x86/cpu.h>
 #include <x86/gdt.h>
@@ -162,6 +163,7 @@ void x86_ap_entry(unsigned cpu)
     arch_percpu_install(pc);   /* after gdt_init_cpu: GS base was reset */
 
     x86_cpu_enable_features();
+    arch_syscall_init_cpu();
     arch_irqc_init_cpu();
     pc->hw_id = lapic_id();
     timer_init_cpu();

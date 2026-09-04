@@ -42,10 +42,16 @@ enum thread_state {
 #define THREAD_FLAG_BOOT  (1u << 1)  /* thread 0: stack is the boot stack */
 
 struct waitqueue;
+struct process;
 
 struct thread {
     tid_t tid;
     char name[THREAD_NAME_MAX];
+    struct process *proc;               /* NULL for kernel threads; holds a process ref */
+    struct list_node proc_link;         /* in process.threads, under process.lock */
+    uintptr_t user_entry;               /* first user-mode instruction (user threads) */
+    uintptr_t user_sp;                  /* initial user stack pointer */
+    uintptr_t tls_base;                 /* user TLS base; unused yet */
     enum thread_state state;            /* (rq) */
     struct arch_context ctx;
     vaddr_t stack_base;
