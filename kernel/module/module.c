@@ -58,6 +58,13 @@ static bool in_module(const struct module *m, uintptr_t addr, size_t len)
     return false;
 }
 
+/* Callbacks must land in the executable region: rodata and data are
+ * mapped non-executable, so a pointer there would fault when called. */
+static bool in_text(const struct module *m, uintptr_t addr)
+{
+    return m->text != 0 && addr >= m->text && addr < m->text + m->text_size;
+}
+
 static void free_module(struct module_priv *p)
 {
     struct module *m = &p->m;
@@ -346,9 +353,8 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
     const struct modelf_section *is = modelf_find_section(l, l->info_section);
     KASSERT(is != NULL && is->group == MODELF_RODATA);
     m->info = (const struct cosmo_module_info *)(m->rodata + is->offset);
-    if (m->info->init == NULL || m->info->shutdown == NULL ||
-        !in_module(m, (uintptr_t)m->info->init, 1) || !in_module(m, (uintptr_t)m->info->shutdown, 1)) {
-        kerror("module: %s: init/shutdown do not point into the module", origin);
+    if (!in_text(m, (uintptr_t)m->info->init) || !in_text(m, (uintptr_t)m->info->shutdown)) {
+        kerror("module: %s: init/shutdown do not point into the module's text", origin);
         rc = -ENOEXEC;
         goto fail;
     }
