@@ -36,6 +36,14 @@ static void count_done(struct bio *bio)
     __atomic_fetch_add(&g_done_count, 1u, __ATOMIC_SEQ_CST);
 }
 
+static void *volatile g_arg_seen;
+
+static void arg_done(struct bio *bio)
+{
+    g_arg_seen = bio->arg;
+    __atomic_fetch_add(&g_done_count, 1u, __ATOMIC_SEQ_CST);
+}
+
 bool selftest_blk_queue(const char **reason)
 {
     struct blkdev *bd = ramblk_create(64);
@@ -88,6 +96,30 @@ bool selftest_blk_queue(const char **reason)
     ramblk_log_free(log);
     kfree(page);
     ramblk_set_deferred(bd, 0);
+
+    /* The caller's `arg` survives a flagged write (the sequence borrows
+     * the field and gives it back; Greptile on PR #22). */
+    static int marker;
+    struct bio flagged;
+    memset(&flagged, 0, sizeof(flagged));
+    flagged.dev = bd;
+    flagged.dir = BIO_WRITE;
+    flagged.sector = 144;
+    flagged.nsectors = 8;
+    flagged.buf = kmalloc(4096, KMEM_ZERO);
+    CHECK(flagged.buf != NULL);
+    flagged.flags = BIO_PREFLUSH | BIO_FUA;
+    flagged.done = arg_done;
+    flagged.arg = &marker;
+    list_init(&flagged.link);
+    g_arg_seen = NULL;
+    g_done_count = 0;
+    CHECK(blk_submit(&flagged) == 0);
+    deadline = clock_now_ns() + 2000000000ULL;
+    while (__atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) < 1 && clock_now_ns() < deadline)
+        thread_sleep_ms(1);
+    CHECK(g_done_count == 1 && g_arg_seen == &marker && flagged.arg == &marker && flagged.done == arg_done);
+    kfree(flagged.buf);
 
     /* Synchronous mode: flags still mean flush, write, flush; a flagged
      * read or a flagged write past the end is refused before anything. */

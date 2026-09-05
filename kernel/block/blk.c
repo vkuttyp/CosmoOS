@@ -199,13 +199,21 @@ struct bio_seq {
     struct bio flush;
     struct bio *user;
     void (*user_done)(struct bio *bio);
+    void *user_arg;               /* the caller's context, parked while the sequence borrows the field */
     unsigned pending_flags;
 };
+
+/* Give the user's bio its own done and arg back. */
+static void seq_restore(struct bio_seq *seq)
+{
+    seq->user->done = seq->user_done;
+    seq->user->arg = seq->user_arg;
+}
 
 static void seq_finish(struct bio_seq *seq, int status)
 {
     struct bio *u = seq->user;
-    u->done = seq->user_done;
+    seq_restore(seq);
     kfree(seq);
     bio_complete(u, status);
 }
@@ -267,9 +275,10 @@ static int submit_flagged(struct blkdev *bd, struct bio *bio)
         return -ENOMEM;
     seq->user = bio;
     seq->user_done = bio->done;
+    seq->user_arg = bio->arg;
     seq->pending_flags = bio->flags;
     bio->done = seq_write_done;
-    bio->arg = seq;   /* the user's arg is not consulted by the layer; done gets the bio */
+    bio->arg = seq;   /* borrowed until seq_restore; the caller's arg is parked in the sequence */
     bio->status = -EAGAIN;
     if (bio->flags & BIO_PREFLUSH) {
         seq->flush.dev = bd;
@@ -280,14 +289,14 @@ static int submit_flagged(struct blkdev *bd, struct bio *bio)
         seq->flush.status = -EAGAIN;
         int rc = driver_submit(bd, &seq->flush);
         if (rc) {
-            bio->done = seq->user_done;
+            seq_restore(seq);
             kfree(seq);
         }
         return rc;
     }
     int rc = driver_submit(bd, bio);
     if (rc) {
-        bio->done = seq->user_done;
+        seq_restore(seq);
         kfree(seq);
     }
     return rc;
