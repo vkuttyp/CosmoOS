@@ -47,6 +47,9 @@ x86_syscall_entry:
     pushq %r13
     pushq %r14
     pushq %r15
+    pushq %r11                  /* saved for the full-restore path (SYSRET overwrites them) */
+    pushq %rcx
+    pushq $0                    /* flags */
 
     cld
     sti
@@ -59,7 +62,12 @@ x86_syscall_entry:
 
     cli
 
-    /* x86_syscall_c stored the result in the frame's rax slot. */
+    /* x86_syscall_c stored the result in the frame's rax slot, and set
+     * X86_SYSCALL_FULL_RESTORE when the frame must be returned through
+     * IRETQ: a rewritten register set, or a rip SYSRET may not load. */
+    testq $1, (%rsp)
+    jnz full_restore
+    addq $24, %rsp              /* flags, rcx, r11: SYSRET reloads the latter two from rip/rflags */
     popq %r15
     popq %r14
     popq %r13
@@ -81,6 +89,28 @@ x86_syscall_entry:
 
     swapgs
     sysretq
+
+full_restore:
+    addq $8, %rsp               /* flags */
+    popq %rcx
+    popq %r11
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    popq %r9
+    popq %r8
+    popq %r10
+    popq %rdx
+    popq %rsi
+    popq %rdi
+    popq %rax
+    /* rip cs rflags rsp ss remain: an IRETQ frame. A non-canonical rip
+     * faults in user mode here, never in the kernel. */
+    swapgs
+    iretq
     .size x86_syscall_entry, . - x86_syscall_entry
 
     .section .note.GNU-stack, "", @progbits

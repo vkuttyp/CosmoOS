@@ -176,6 +176,40 @@ bad_\n:
      * First entry into user mode: EL0t, interrupts enabled, every
      * general register zero. Interrupts are masked by the caller.
      */
+    /*
+     * void aarch64_user_enter_regs(const struct arch_user_regs *r)
+     * First entry into user mode with every register loaded from *r
+     * (x[31] at 0, sp at 0xF8, pc at 0x100, pstate at 0x108; the caller
+     * sanitised pstate). Interrupts are masked by the caller.
+     */
+    .globl aarch64_user_enter_regs
+    .type aarch64_user_enter_regs, @function
+aarch64_user_enter_regs:
+    ldr x1, [x0, #0x100]
+    msr elr_el1, x1
+    ldr x1, [x0, #0xF8]
+    msr sp_el0, x1
+    ldr x1, [x0, #0x108]
+    msr spsr_el1, x1
+    ldp x2, x3, [x0, #0x10]
+    ldp x4, x5, [x0, #0x20]
+    ldp x6, x7, [x0, #0x30]
+    ldp x8, x9, [x0, #0x40]
+    ldp x10, x11, [x0, #0x50]
+    ldp x12, x13, [x0, #0x60]
+    ldp x14, x15, [x0, #0x70]
+    ldp x16, x17, [x0, #0x80]
+    ldp x18, x19, [x0, #0x90]
+    ldp x20, x21, [x0, #0xA0]
+    ldp x22, x23, [x0, #0xB0]
+    ldp x24, x25, [x0, #0xC0]
+    ldp x26, x27, [x0, #0xD0]
+    ldp x28, x29, [x0, #0xE0]
+    ldr x30, [x0, #0xF0]
+    ldp x0, x1, [x0, #0x00]
+    eret
+    .size aarch64_user_enter_regs, . - aarch64_user_enter_regs
+
     .globl aarch64_user_enter
     .type aarch64_user_enter, @function
 aarch64_user_enter:

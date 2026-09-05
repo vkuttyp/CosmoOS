@@ -231,6 +231,43 @@ bool x86_fpu_restore_current(void)
     return true;
 }
 
+bool x86_fpu_legacy_get(void *out)
+{
+    struct thread *t = thread_current();
+    if (t == NULL || t->fpu == NULL)
+        return false;
+    arch_irq_state_t s = arch_irq_save();
+    x86_fpu_area_save(t->fpu->area);
+    memcpy(out, t->fpu->area, X86_FXSAVE_SIZE);
+    arch_irq_restore(s);
+    return true;
+}
+
+bool x86_fpu_legacy_set(const void *in)
+{
+    struct thread *t = thread_current();
+    if (t == NULL || t->fpu == NULL)
+        return false;
+    uint8_t image[X86_FXSAVE_SIZE];
+    memcpy(image, in, sizeof(image));
+    uint32_t mxcsr;
+    memcpy(&mxcsr, image + 24, 4);
+    mxcsr &= 0xFFFFu;   /* bits 16-31 are reserved; a set one makes FXRSTOR/XRSTOR fault */
+    memcpy(image + 24, &mxcsr, 4);
+    arch_irq_state_t s = arch_irq_save();
+    x86_fpu_area_save(t->fpu->area);   /* the other components' live values */
+    memcpy(t->fpu->area, image, X86_FXSAVE_SIZE);
+    if (g_fpu.xsave) {
+        uint64_t bv;
+        memcpy(&bv, t->fpu->area + X86_FXSAVE_SIZE, 8);
+        bv |= 0x3;   /* x87 and SSE are in the legacy region now */
+        memcpy(t->fpu->area + X86_FXSAVE_SIZE, &bv, 8);
+    }
+    x86_fpu_area_restore(t->fpu->area);
+    arch_irq_restore(s);
+    return true;
+}
+
 /* --- arch/testhooks.h: register-state isolation under test --- */
 
 #define FPU_PROBE_ROUNDS 400
