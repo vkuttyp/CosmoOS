@@ -161,17 +161,37 @@ when the index has none.
 
 ### Resolution (`pkg install`)
 
+Every constraint seen on a name is remembered in a constraint set
+(`cons_add`), seeded with the `depends:` of every installed package so
+that an upgrade never breaks an installed dependant. A package is
+chosen as the newest index version satisfying all constraints on its
+name (`index_best_all`). The result does not depend on traversal order:
+
 ```text
-want = requested names/versions
-closure = {}
-resolve(name, constraints):
-    if name in closure: check constraints against chosen version; conflict -> error
-    if installed and satisfies constraints: mark "installed", return (unless --reinstall)
-    candidates = index versions of name satisfying constraints, newest first; none -> "unsatisfiable"
-    chosen = candidates[0]; closure[name] = chosen (marked "visiting" to detect cycles)
-    for dep in chosen.depends: resolve(dep.name, dep.constraint)
-    order.append(name)                              (post-order: dependencies first)
+plan_build(requests):
+    add every installed package's constraints
+    repeat up to 16 times:
+        plan = []; retry = false
+        for req in requests: resolve(req)
+        if not retry: return plan
+    fail "cannot settle versions"
+resolve(d):
+    add d to the constraints on d.name
+    if d.name is planned: if the planned version violates the constraints now known: retry = true; return
+    cycle through d.name -> error
+    if installed (and not --reinstall) and the installed version satisfies all constraints: return
+        (installed but violating: the newest satisfying index version is planned: "will be upgraded")
+    chosen = index_best_all(d.name); none -> error listing the constraints
+    mark visiting; for dep in chosen.depends: resolve(dep); unmark
+    plan.append(chosen)                             (dependencies first)
 ```
+
+A later constraint that invalidates an earlier choice triggers a rebuild
+with the enlarged constraint set (`demo-a` wants `demolib >= 2`, `demo-b`
+wants `demolib < 3`: 2.5 is chosen in either order). Constraints
+gathered from a candidate that a later round discards stay in the set
+for that run: a slightly over-constrained plan can fail where a search
+would succeed (recorded).
 
 Then, in order: open the package file (`<repo>/<file>`), check size and
 SHA-512 against the index stanza, `load_package`, install.
@@ -185,14 +205,20 @@ writes nothing.
 
 ```text
 install(pkg):
-  for each file: mkdir -p its directory (recording every directory that did not exist in DIRS)
-                 write to "<path>.pkgtmp" with the manifest mode, verify size, rename over the destination
-  on any failure: unlink the .pkgtmp files and the files already renamed in this package,
-                  remove the directories created, report, stop the operation
+  stage the record: write installed/<name>/MANIFEST.new (a database that cannot be written stops here)
+  for each file: mkdir -p its directory (recording every directory that did not exist)
+                 write to "<path>.pkgtmp" with the manifest mode, rename over the destination
+  write DIRS.new
+  on any failure so far: unlink the files this package placed, remove the directories it created,
+                         delete the staged record, report, stop the operation
   if a previous version was installed: unlink files of the old manifest that the new one lacks,
-                                       remove old DIRS that are now empty
-  write installed/<name>/MANIFEST and DIRS (through rename)
+                                       remove old DIRS that are now empty, restage DIRS.new
+  commit: rename DIRS.new -> DIRS, MANIFEST.new -> MANIFEST
 ```
+
+The record is committed last and by rename, so the database holds either
+the old record or the new one; a failure before the commit leaves the
+old record and (for a fresh install) no files.
 
 A file that already exists and belongs to another installed package is
 a conflict, reported before writing (`pkg` scans the installed manifests
@@ -201,9 +227,11 @@ for each path).
 ### Removing
 
 `pkg remove NAME`: refuse when another installed package `depends:` on
-it (list them; `-f` overrides); unlink every manifest file (a missing
-file is reported, not fatal), `rmdir` the recorded DIRS deepest first
-(non-empty ones are left), then remove the record.
+it (list them; `-f` overrides); unlink every manifest file (a file
+already missing is fine); if any file could not be removed, keep the
+record (the file stays owned and `verify` reports the state) and fail;
+otherwise `rmdir` the recorded DIRS deepest first (non-empty ones are
+left) and remove the record.
 
 ### Upgrade
 

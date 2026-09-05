@@ -50,7 +50,11 @@ list`; `pkg info fortune`; `pkg verify`; `pkg install badsig` must fail
 hello=1.0`; `hello` prints `hello, world (hello 1.0)`; `pkg upgrade`;
 `hello` prints `hello, world (hello 1.1)`; `pkg remove fortunes` must
 fail (`fortune depends on it`); `pkg remove fortune`; `pkg remove
-fortunes`; `fortune` is now not found; `pkg remove hello`; `pkg list`.
+fortunes`; `fortune` is now not found; `pkg remove hello`; then the
+resolver: `pkg install demo-a demo-b` (`demolib >= 2` and `< 3`) must
+pick `demolib` 2.5 (`pkg info demolib` shows `installed: 2.5`), the three
+are removed, `pkg install demo-b demo-a` must pick 2.5 again
+(`/usr/share/demolib/VERSION` reads `2.5`), removed again; `pkg list`.
 
 The harness requires these lines in self-test builds
 (`PKGTEST_MARKERS`):
@@ -64,6 +68,7 @@ The harness requires these lines in self-test builds
 | `hello, world (hello 1.0)`, then `hello, world (hello 1.1)` | install of a pinned version, then `upgrade` |
 | `pkg: fortunes: fortune depends on it` | removal refused |
 | `pkg: verify: 0 problems` | `verify` |
+| `installed: 2.5`, then `2.5` | order-independent resolution (`demo-a`/`demo-b` in both orders) |
 
 ## The interactive harness
 

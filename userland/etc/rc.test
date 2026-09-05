@@ -58,6 +58,13 @@ pkg remove fortune || FAILS=1
 pkg remove fortunes || FAILS=1
 fortune 2> /tmp/shtest/gone && FAILS=1
 pkg remove hello || FAILS=1
+# Resolution is order independent: demo-a wants demolib >= 2, demo-b wants < 3; 2.5 satisfies both.
+pkg install demo-a demo-b || FAILS=1
+pkg info demolib
+pkg remove demo-a demo-b demolib || FAILS=1
+pkg install demo-b demo-a || FAILS=1
+cat /usr/share/demolib/VERSION
+pkg remove demo-b demo-a demolib || FAILS=1
 pkg list
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

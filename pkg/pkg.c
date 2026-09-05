@@ -197,21 +197,52 @@ static int installed_names(char names[][PKG_NAME_MAX], int max)
     return n;
 }
 
-static int installed_store(const char *name, const char *manifest_text, size_t len, const struct dirlist *dirs)
+/* The record is staged as MANIFEST.new and DIRS.new and committed by
+ * rename once the files are on disk, so a failure at any step leaves
+ * either the old record or the new one, never a mixture. */
+static int installed_stage_manifest(const char *name, const char *manifest_text, size_t len)
 {
     char dir[PKG_PATH_MAX], path[PKG_PATH_MAX];
     snprintf(dir, sizeof(dir), PKG_DB_INSTALLED "/%s", name);
     if (mkdir(dir, 0755) < 0 && errno != EEXIST)
         return -1;
-    installed_path(name, "MANIFEST", path, sizeof(path));
-    if (write_atomic(path, manifest_text, len, 0644) < 0)
-        return -1;
+    installed_path(name, "MANIFEST.new", path, sizeof(path));
+    return write_atomic(path, manifest_text, len, 0644);
+}
+
+static int installed_stage_dirs(const char *name, const struct dirlist *dirs)
+{
+    char path[PKG_PATH_MAX];
     char buf[PKG_MAX_DIRS * 64];
     size_t used = 0;
     for (int i = 0; i < dirs->n && used + strlen(dirs->paths[i]) + 2 < sizeof(buf); i++)
         used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s\n", dirs->paths[i]);
-    installed_path(name, "DIRS", path, sizeof(path));
+    installed_path(name, "DIRS.new", path, sizeof(path));
     return write_atomic(path, buf, used, 0644);
+}
+
+static int installed_commit(const char *name)
+{
+    char from[PKG_PATH_MAX], to[PKG_PATH_MAX];
+    installed_path(name, "DIRS.new", from, sizeof(from));
+    installed_path(name, "DIRS", to, sizeof(to));
+    if (rename(from, to) < 0)
+        return -1;
+    installed_path(name, "MANIFEST.new", from, sizeof(from));
+    installed_path(name, "MANIFEST", to, sizeof(to));
+    return rename(from, to);
+}
+
+static void installed_unstage(const char *name)
+{
+    char path[PKG_PATH_MAX];
+    installed_path(name, "MANIFEST.new", path, sizeof(path));
+    unlink(path);
+    installed_path(name, "DIRS.new", path, sizeof(path));
+    unlink(path);
+    /* a directory with no record left behind is removed */
+    snprintf(path, sizeof(path), PKG_DB_INSTALLED "/%s", name);
+    rmdir(path);
 }
 
 static void installed_dirs(const char *name, struct dirlist *dirs)
@@ -539,6 +570,14 @@ static int install_loaded(struct loaded *l)
             manifest_free(&old);
         return 0;
     }
+    /* Stage the record first: if the database cannot be written, nothing is touched. */
+    if (installed_stage_manifest(l->m.name, l->manifest_text, l->manifest_len) < 0) {
+        fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
+        installed_unstage(l->m.name);
+        if (had_old)
+            manifest_free(&old);
+        return EXIT_FAILED;
+    }
 
     struct dirlist created = { .n = 0 };
     int done = 0;
@@ -553,14 +592,20 @@ static int install_loaded(struct loaded *l)
             break;
         }
     }
+    if (rc == 0 && installed_stage_dirs(l->m.name, &created) < 0) {
+        fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
+        rc = EXIT_FAILED;
+    }
     if (rc) {
-        /* Roll back this package's files; a previous version's files with the same paths are lost too. */
+        /* Roll back this package's files and the staged record; a previous
+         * version's files with the same paths are lost too (recorded gap). */
         for (int i = 0; i < done; i++) {
             char path[PKG_PATH_MAX];
             snprintf(path, sizeof(path), "/%s", l->m.files[i].path);
             unlink(path);
         }
         remove_dirs(&created);
+        installed_unstage(l->m.name);
         if (had_old)
             manifest_free(&old);
         return rc;
@@ -584,9 +629,15 @@ static int install_loaded(struct loaded *l)
                 strlcpy(created.paths[created.n++], old_dirs.paths[i], PKG_PATH_MAX);
         }
         manifest_free(&old);
+        /* The directory list grew: restage it before the commit. */
+        if (installed_stage_dirs(l->m.name, &created) < 0) {
+            fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
+            return EXIT_FAILED;   /* files of the new version are on disk; the old record stands (verify reports it) */
+        }
     }
-    if (installed_store(l->m.name, l->manifest_text, l->manifest_len, &created) < 0) {
-        fprintf(stderr, "pkg: %s: cannot record installation: %s\n", l->m.name, strerror(errno));
+    if (installed_commit(l->m.name) < 0) {
+        fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
+        installed_unstage(l->m.name);
         return EXIT_FAILED;
     }
     return 0;
@@ -594,11 +645,89 @@ static int install_loaded(struct loaded *l)
 
 /* --- resolution ------------------------------------------------------------- */
 
+/*
+ * Every constraint seen on a name is remembered; a package is chosen as
+ * the newest index version satisfying all of them. When a constraint
+ * arrives after its name was already planned and the planned version no
+ * longer fits, the plan is rebuilt with the constraints now known, so
+ * the result does not depend on traversal order.
+ */
+struct constraint_set {
+    char name[PKG_NAME_MAX];
+    struct depend list[16];
+    int n;
+};
+
+static struct constraint_set g_cons[PKG_MAX_INDEX];
+static int g_ncons;
+
+static struct constraint_set *cons_for(const char *name)
+{
+    for (int i = 0; i < g_ncons; i++)
+        if (strcmp(g_cons[i].name, name) == 0)
+            return &g_cons[i];
+    if (g_ncons == PKG_MAX_INDEX)
+        return NULL;
+    struct constraint_set *cs = &g_cons[g_ncons++];
+    memset(cs, 0, sizeof(*cs));
+    strlcpy(cs->name, name, sizeof(cs->name));
+    return cs;
+}
+
+static void cons_add(const char *name, const struct depend *d)
+{
+    struct constraint_set *cs = cons_for(name);
+    if (cs == NULL || d->op == OP_NONE)
+        return;
+    for (int i = 0; i < cs->n; i++)
+        if (cs->list[i].op == d->op && strcmp(cs->list[i].version, d->version) == 0)
+            return;
+    if (cs->n < 16)
+        cs->list[cs->n++] = *d;
+}
+
+static bool satisfies_all(const char *name, const char *version)
+{
+    struct constraint_set *cs = cons_for(name);
+    if (cs == NULL)
+        return true;
+    for (int i = 0; i < cs->n; i++)
+        if (!depend_satisfied(&cs->list[i], version))
+            return false;
+    return true;
+}
+
+static void print_constraints(const char *name)
+{
+    struct constraint_set *cs = cons_for(name);
+    if (cs == NULL || cs->n == 0)
+        return;
+    fprintf(stderr, "pkg: constraints on %s:", name);
+    for (int i = 0; i < cs->n; i++)
+        fprintf(stderr, " %s %s", op_text(cs->list[i].op), cs->list[i].version);
+    fprintf(stderr, "\n");
+}
+
+/* Newest index entry of `name` satisfying every constraint seen. */
+static struct index_entry *index_best_all(const char *name)
+{
+    struct index_entry *best = NULL;
+    for (int i = 0; i < g_index.n; i++) {
+        struct index_entry *e = &g_index.entries[i];
+        if (strcmp(e->name, name) != 0 || !satisfies_all(name, e->version))
+            continue;
+        if (best == NULL || version_cmp(e->version, best->version) > 0)
+            best = e;
+    }
+    return best;
+}
+
 struct plan {
     struct index_entry *entries[PKG_MAX_INDEX];
     int n;
     const char *visiting[PKG_MAX_INDEX];
     int nvisiting;
+    bool retry;   /* a planned version no longer satisfies a later constraint */
 };
 
 static bool plan_has(const struct plan *p, const char *name, struct index_entry **out)
@@ -615,13 +744,11 @@ static bool plan_has(const struct plan *p, const char *name, struct index_entry 
 
 static int resolve(struct plan *p, const struct depend *d, const char *why)
 {
+    cons_add(d->name, d);
     struct index_entry *chosen;
     if (plan_has(p, d->name, &chosen)) {
-        if (!depend_satisfied(d, chosen->version)) {
-            fprintf(stderr, "pkg: %s needs %s %s %s but %s-%s is planned\n", why, d->name, op_text(d->op), d->version,
-                    chosen->name, chosen->version);
-            return EXIT_FAILED;
-        }
+        if (!satisfies_all(d->name, chosen->version))
+            p->retry = true;   /* rebuild with this constraint known */
         return 0;
     }
     for (int i = 0; i < p->nvisiting; i++) {
@@ -632,27 +759,32 @@ static int resolve(struct plan *p, const struct depend *d, const char *why)
     }
     struct manifest inst;
     if (!g_reinstall && installed_load(d->name, &inst)) {
-        bool ok = depend_satisfied(d, inst.version);
+        bool ok = satisfies_all(d->name, inst.version);
         char ver[PKG_VERSION_MAX];
         strlcpy(ver, inst.version, sizeof(ver));
         manifest_free(&inst);
         if (ok)
             return 0;   /* already there and good enough */
-        struct index_entry *e = index_best(d->name, d);
+        struct index_entry *e = index_best_all(d->name);
         if (e == NULL) {
-            fprintf(stderr, "pkg: %s needs %s %s %s; installed %s, nothing better in the index\n", why, d->name,
-                    op_text(d->op), d->version, ver);
+            fprintf(stderr, "pkg: %s needs %s %s %s; installed %s, nothing in the index satisfies every constraint\n",
+                    why, d->name, op_text(d->op), d->version, ver);
+            print_constraints(d->name);
             return EXIT_FAILED;
         }
         printf("pkg: %s will be upgraded from %s to %s\n", d->name, ver, e->version);
     }
-    chosen = index_best(d->name, d);
+    chosen = index_best_all(d->name);
     if (chosen == NULL) {
-        if (d->op == OP_NONE)
+        bool any = false;
+        for (int i = 0; i < g_index.n && !any; i++)
+            any = strcmp(g_index.entries[i].name, d->name) == 0;
+        if (!any)
             fprintf(stderr, "pkg: %s: no such package in the index\n", d->name);
         else
-            fprintf(stderr, "pkg: %s needs %s %s %s: no such version in the index\n", why, d->name, op_text(d->op),
-                    d->version);
+            fprintf(stderr, "pkg: %s: no version in the index satisfies every constraint (needed by %s)\n", d->name,
+                    why);
+        print_constraints(d->name);
         return EXIT_FAILED;
     }
     p->visiting[p->nvisiting++] = d->name;
@@ -664,6 +796,43 @@ static int resolve(struct plan *p, const struct depend *d, const char *why)
     p->nvisiting--;
     p->entries[p->n++] = chosen;   /* dependencies first */
     return 0;
+}
+
+/* Every installed package's constraints count too, so an upgrade never
+ * breaks an installed dependant. */
+static void cons_add_installed(void)
+{
+    char names[128][PKG_NAME_MAX];
+    int n = installed_names(names, 128);
+    for (int i = 0; i < n; i++) {
+        struct manifest m;
+        if (!installed_load(names[i], &m))
+            continue;
+        for (int k = 0; k < m.ndepends; k++)
+            cons_add(m.depends[k].name, &m.depends[k]);
+        manifest_free(&m);
+    }
+}
+
+/* Build the plan for `reqs`, rebuilding until every planned version
+ * satisfies every constraint seen (bounded). */
+static int plan_build(struct plan *p, const struct depend *reqs, int nreq)
+{
+    cons_add_installed();
+    for (int iter = 0; iter < 16; iter++) {
+        p->n = 0;
+        p->nvisiting = 0;
+        p->retry = false;
+        for (int i = 0; i < nreq; i++) {
+            int rc = resolve(p, &reqs[i], "the request");
+            if (rc)
+                return rc;
+        }
+        if (!p->retry)
+            return 0;
+    }
+    fprintf(stderr, "pkg: cannot settle versions after 16 rounds\n");
+    return EXIT_FAILED;
 }
 
 static int install_entry(const struct index_entry *e)
@@ -695,54 +864,66 @@ static int cmd_install(int argc, char **argv)
         fprintf(stderr, "usage: pkg install [-n] [-f] [--reinstall] NAME[=VERSION]... | FILE.cpk...\n");
         return EXIT_USAGE;
     }
+    struct plan p;
+    p.n = 0;
+    struct depend reqs[64];
+    int nreq = 0;
     int rc = 0;
-    struct plan p = { .n = 0, .nvisiting = 0 };
+    /* Package files first: each is loaded, its missing dependencies planned from the index. */
     for (int i = 0; i < argc && rc == 0; i++) {
-        if (strchr(argv[i], '/')) {
-            /* A package file: its dependencies must already be installed or in the index. */
-            struct loaded l;
-            rc = load_package(argv[i], NULL, &l);
-            if (rc)
-                return rc;
-            for (int k = 0; k < l.m.ndepends && rc == 0; k++) {
-                struct manifest inst;
-                bool ok = installed_load(l.m.depends[k].name, &inst);
-                if (ok) {
-                    ok = depend_satisfied(&l.m.depends[k], inst.version);
-                    manifest_free(&inst);
-                }
-                if (!ok) {
-                    if (index_load() == 0)
-                        rc = resolve(&p, &l.m.depends[k], l.m.name);
-                    else
-                        rc = EXIT_FAILED;
-                }
+        if (strchr(argv[i], '/') == NULL)
+            continue;
+        struct loaded l;
+        rc = load_package(argv[i], NULL, &l);
+        if (rc)
+            return rc;
+        int ndeps = 0;
+        struct depend deps[PKG_MAX_DEPENDS];
+        for (int k = 0; k < l.m.ndepends; k++) {
+            struct manifest inst;
+            bool ok = installed_load(l.m.depends[k].name, &inst);
+            if (ok) {
+                ok = depend_satisfied(&l.m.depends[k], inst.version);
+                manifest_free(&inst);
             }
+            if (!ok)
+                deps[ndeps++] = l.m.depends[k];
+        }
+        if (ndeps) {
+            rc = index_load() ? EXIT_FAILED : plan_build(&p, deps, ndeps);
             for (int k = 0; k < p.n && rc == 0; k++)
                 rc = install_entry(p.entries[k]);
-            p.n = 0;
-            if (rc == 0)
-                rc = install_loaded(&l);
-            loaded_free(&l);
-            continue;
         }
-        struct depend d;
+        if (rc == 0)
+            rc = install_loaded(&l);
+        loaded_free(&l);
+    }
+    for (int i = 0; i < argc && rc == 0; i++) {
+        if (strchr(argv[i], '/'))
+            continue;
+        if (nreq == 64) {
+            fprintf(stderr, "pkg: too many packages in one request\n");
+            return EXIT_USAGE;
+        }
         char spec[PKG_NAME_MAX + PKG_VERSION_MAX + 4];
         const char *eq = strchr(argv[i], '=');
         if (eq)
             snprintf(spec, sizeof(spec), "%.*s = %s", (int)(eq - argv[i]), argv[i], eq + 1);   /* name=version */
         else
             strlcpy(spec, argv[i], sizeof(spec));
-        if (!depend_parse(spec, &d)) {
+        if (!depend_parse(spec, &reqs[nreq])) {
             fprintf(stderr, "pkg: bad package specification '%s'\n", argv[i]);
             return EXIT_USAGE;
         }
+        nreq++;
+    }
+    if (rc == 0 && nreq) {
         if (index_load())
             return EXIT_FAILED;
-        rc = resolve(&p, &d, "the request");
+        rc = plan_build(&p, reqs, nreq);
+        for (int k = 0; k < p.n && rc == 0; k++)
+            rc = install_entry(p.entries[k]);
     }
-    for (int k = 0; k < p.n && rc == 0; k++)
-        rc = install_entry(p.entries[k]);
     return rc;
 }
 
@@ -788,16 +969,26 @@ static int cmd_remove(int argc, char **argv)
         }
         printf("pkg: removing %s-%s (%d files)\n", m.name, m.version, m.nfiles);
         if (!g_dry_run) {
+            int stuck = 0;
             for (int k = 0; k < m.nfiles; k++) {
                 char path[PKG_PATH_MAX];
                 snprintf(path, sizeof(path), "/%s", m.files[k].path);
-                if (unlink(path) < 0 && errno != ENOENT)
+                if (unlink(path) < 0 && errno != ENOENT) {
                     fprintf(stderr, "pkg: %s: cannot remove %s: %s\n", m.name, path, strerror(errno));
+                    stuck++;
+                }
             }
-            struct dirlist dirs;
-            installed_dirs(m.name, &dirs);
-            remove_dirs(&dirs);
-            installed_drop(m.name);
+            if (stuck) {
+                /* The record stays so the file remains owned and visible to verify. */
+                fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded\n", m.name,
+                        stuck, stuck == 1 ? "" : "s");
+                rc = EXIT_FAILED;
+            } else {
+                struct dirlist dirs;
+                installed_dirs(m.name, &dirs);
+                remove_dirs(&dirs);
+                installed_drop(m.name);
+            }
         }
         manifest_free(&m);
     }
@@ -828,11 +1019,12 @@ static int cmd_upgrade(int argc, char **argv)
         manifest_free(&inst);
         if (!newer)
             continue;
-        struct plan p = { .n = 0, .nvisiting = 0 };
+        struct plan p;
+        p.n = 0;
         struct depend d = { .op = OP_EQ };
         strlcpy(d.name, name, sizeof(d.name));
         strlcpy(d.version, best->version, sizeof(d.version));
-        rc = resolve(&p, &d, "upgrade");
+        rc = plan_build(&p, &d, 1);
         for (int k = 0; k < p.n && rc == 0; k++)
             rc = install_entry(p.entries[k]);
         if (rc == 0)

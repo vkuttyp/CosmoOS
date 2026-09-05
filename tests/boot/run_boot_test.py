@@ -72,6 +72,8 @@ PKGTEST_MARKERS = [
     r"^hello, world \(hello 1\.1\)$",
     r"^pkg: fortunes: fortune depends on it",
     r"^pkg: verify: 0 problems",
+    r"^installed: 2\.5$",
+    r"^2\.5$",
 ]
 
 # Only produced by the self-test run of init (debug builds); required

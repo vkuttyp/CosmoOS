@@ -39,14 +39,17 @@ program in `/bin` with one in `/usr/bin` (the shell's `PATH` decides).
 
 **PK4. Installation is atomic per file and rolled back per package.**
 Each file is written to `<path>.pkgtmp` and renamed into place; a
-failure unlinks the files this package has already placed and removes
-the directories it created, and the operation stops. Database records
-are written through rename too, so a crash leaves the old or the new
-record. Check: review; `rc.test` sees complete installs. Gap: no test
-injects a write failure mid-install; a failure while replacing a
-previous version leaves that version's overlapping files gone (a
-recorded limit of the single-package rollback); multi-package
-operations stop at the first failure with earlier packages installed.
+failure unlinks the files this package has already placed, removes the
+directories it created and the staged record, and the operation stops.
+The database record is staged as `MANIFEST.new`/`DIRS.new` before the
+first file is written and committed by rename after the last, so the
+database never describes a mixture of old and new. `remove` keeps the
+record when a file could not be deleted. Check: review; `rc.test` sees
+complete installs and removals. Gap: no test injects a write failure
+mid-install or mid-remove; a failure while replacing a previous version
+leaves that version's overlapping files gone (a recorded limit of the
+single-package rollback); multi-package operations stop at the first
+failure with earlier packages installed.
 
 **PK5. The database describes what is on disk.** `installed/<name>/
 MANIFEST` is the manifest of the package as extracted; `DIRS` the
@@ -58,16 +61,20 @@ removes `fortune` and `fortunes` and then `fortune` is `not found`;
 deleted behind `pkg`'s back is reported by `verify` but not repaired.
 
 **PK6. Dependencies are honoured in both directions.** `install`
-computes the closure (dependencies first, newest satisfying version,
-constraints from the request and from every dependant in the plan,
-cycles refused); `remove` refuses a package another installed package
-depends on unless `-f`. Check: `rc.test` installs `fortune` and sees
-`fortunes` installed first; `pkg remove fortunes` fails with `fortune
+computes the closure (dependencies first, newest version satisfying
+every constraint seen on a name: from the request, from every dependant
+in the plan and from every installed package; the plan is rebuilt when a
+later constraint invalidates an earlier choice, so the result is
+independent of traversal order; cycles refused); `remove` refuses a
+package another installed package depends on unless `-f`. Check:
+`rc.test` installs `fortune` and sees `fortunes` installed first;
+`pkg install demo-a demo-b` and `demo-b demo-a` both choose `demolib`
+2.5 (`>= 2` and `< 3`); `pkg remove fortunes` fails with `fortune
 depends on it`; `test_pkg` covers the constraint grammar and
-comparisons. Gap: constraints are checked against the plan and the
-installed set, not against dependants of packages being upgraded that
-are not themselves in the plan (an upgrade may leave another package's
-`<` constraint violated; the resolver reports only what it visits).
+comparisons. Gap: constraints gathered from a candidate a later round
+discards remain for that run (an over-constrained plan can fail where a
+search would succeed); `-f` removal leaves dependants with an unmet
+dependency by design.
 
 **PK7. Repository and package contents are reproducible functions of
 the tree and the key.** Sorted members, mtime 0, uid/gid 0, the same
