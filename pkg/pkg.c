@@ -90,11 +90,6 @@ static int write_atomic(const char *path, const void *data, size_t len, unsigned
     return rc;
 }
 
-struct dirlist {
-    char paths[PKG_MAX_DIRS][PKG_PATH_MAX];
-    int n;
-};
-
 /* mkdir -p for the directory of `path`, recording the directories created. */
 static int ensure_parent_dirs(const char *path, struct dirlist *created)
 {
@@ -197,67 +192,52 @@ static int installed_names(char names[][PKG_NAME_MAX], int max)
     return n;
 }
 
-/* The record is staged as MANIFEST.new and DIRS.new and committed by
- * rename once the files are on disk, so a failure at any step leaves
- * either the old record or the new one, never a mixture. */
-static int installed_stage_manifest(const char *name, const char *manifest_text, size_t len)
+/*
+ * The installed record is one file, installed/<name>/MANIFEST: the
+ * package's manifest plus "dir:" lines for the directories it created.
+ * It is staged as MANIFEST.new (rewritten as often as needed) and
+ * committed by a single rename, so the database holds either the old
+ * record or the new one, never a mixture.
+ */
+static int record_stage(const char *name, const struct manifest *m, const struct dirlist *dirs)
 {
     char dir[PKG_PATH_MAX], path[PKG_PATH_MAX];
     snprintf(dir, sizeof(dir), PKG_DB_INSTALLED "/%s", name);
     if (mkdir(dir, 0755) < 0 && errno != EEXIST)
         return -1;
+    size_t cap = 4096 + (size_t)m->nfiles * (PKG_PATH_MAX + 160) + (dirs ? (size_t)dirs->n * (PKG_PATH_MAX + 8) : 0);
+    char *text = malloc(cap);
+    if (text == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int len = manifest_format(m, dirs, text, cap);
+    if (len < 0) {
+        free(text);
+        errno = EFBIG;
+        return -1;
+    }
     installed_path(name, "MANIFEST.new", path, sizeof(path));
-    return write_atomic(path, manifest_text, len, 0644);
+    int rc = write_atomic(path, text, (size_t)len, 0644);
+    free(text);
+    return rc;
 }
 
-static int installed_stage_dirs(const char *name, const struct dirlist *dirs)
-{
-    char path[PKG_PATH_MAX];
-    char buf[PKG_MAX_DIRS * 64];
-    size_t used = 0;
-    for (int i = 0; i < dirs->n && used + strlen(dirs->paths[i]) + 2 < sizeof(buf); i++)
-        used += (size_t)snprintf(buf + used, sizeof(buf) - used, "%s\n", dirs->paths[i]);
-    installed_path(name, "DIRS.new", path, sizeof(path));
-    return write_atomic(path, buf, used, 0644);
-}
-
-static int installed_commit(const char *name)
+static int record_commit(const char *name)
 {
     char from[PKG_PATH_MAX], to[PKG_PATH_MAX];
-    installed_path(name, "DIRS.new", from, sizeof(from));
-    installed_path(name, "DIRS", to, sizeof(to));
-    if (rename(from, to) < 0)
-        return -1;
     installed_path(name, "MANIFEST.new", from, sizeof(from));
     installed_path(name, "MANIFEST", to, sizeof(to));
     return rename(from, to);
 }
 
-static void installed_unstage(const char *name)
+static void record_unstage(const char *name)
 {
     char path[PKG_PATH_MAX];
     installed_path(name, "MANIFEST.new", path, sizeof(path));
     unlink(path);
-    installed_path(name, "DIRS.new", path, sizeof(path));
-    unlink(path);
-    /* a directory with no record left behind is removed */
     snprintf(path, sizeof(path), PKG_DB_INSTALLED "/%s", name);
-    rmdir(path);
-}
-
-static void installed_dirs(const char *name, struct dirlist *dirs)
-{
-    dirs->n = 0;
-    char path[PKG_PATH_MAX];
-    installed_path(name, "DIRS", path, sizeof(path));
-    uint8_t *text;
-    size_t len;
-    if (read_whole(path, &text, &len, 1 << 20) < 0)
-        return;
-    char *save;
-    for (char *l = strtok_r((char *)text, "\n", &save); l && dirs->n < PKG_MAX_DIRS; l = strtok_r(NULL, "\n", &save))
-        strlcpy(dirs->paths[dirs->n++], l, PKG_PATH_MAX);
-    free(text);
+    rmdir(path);   /* only when no record is left */
 }
 
 static void installed_drop(const char *name)
@@ -265,7 +245,7 @@ static void installed_drop(const char *name)
     char path[PKG_PATH_MAX];
     installed_path(name, "MANIFEST", path, sizeof(path));
     unlink(path);
-    installed_path(name, "DIRS", path, sizeof(path));
+    installed_path(name, "MANIFEST.new", path, sizeof(path));
     unlink(path);
     snprintf(path, sizeof(path), PKG_DB_INSTALLED "/%s", name);
     rmdir(path);
@@ -552,8 +532,8 @@ static int install_loaded(struct loaded *l)
     struct manifest old;
     bool had_old = installed_load(l->m.name, &old);
     struct dirlist old_dirs = { .n = 0 };
-    if (had_old)
-        installed_dirs(l->m.name, &old_dirs);
+    if (had_old && old.dirs)
+        old_dirs = *old.dirs;
 
     for (int i = 0; i < l->m.nfiles; i++) {
         char owner[PKG_NAME_MAX];
@@ -571,15 +551,15 @@ static int install_loaded(struct loaded *l)
         return 0;
     }
     /* Stage the record first: if the database cannot be written, nothing is touched. */
-    if (installed_stage_manifest(l->m.name, l->manifest_text, l->manifest_len) < 0) {
+    struct dirlist created = { .n = 0 };
+    if (record_stage(l->m.name, &l->m, &created) < 0) {
         fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
-        installed_unstage(l->m.name);
+        record_unstage(l->m.name);
         if (had_old)
             manifest_free(&old);
         return EXIT_FAILED;
     }
 
-    struct dirlist created = { .n = 0 };
     int done = 0;
     int rc = 0;
     for (; done < l->m.nfiles; done++) {
@@ -592,7 +572,7 @@ static int install_loaded(struct loaded *l)
             break;
         }
     }
-    if (rc == 0 && installed_stage_dirs(l->m.name, &created) < 0) {
+    if (rc == 0 && record_stage(l->m.name, &l->m, &created) < 0) {
         fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
         rc = EXIT_FAILED;
     }
@@ -605,7 +585,7 @@ static int install_loaded(struct loaded *l)
             unlink(path);
         }
         remove_dirs(&created);
-        installed_unstage(l->m.name);
+        record_unstage(l->m.name);
         if (had_old)
             manifest_free(&old);
         return rc;
@@ -630,14 +610,14 @@ static int install_loaded(struct loaded *l)
         }
         manifest_free(&old);
         /* The directory list grew: restage it before the commit. */
-        if (installed_stage_dirs(l->m.name, &created) < 0) {
+        if (record_stage(l->m.name, &l->m, &created) < 0) {
             fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
             return EXIT_FAILED;   /* files of the new version are on disk; the old record stands (verify reports it) */
         }
     }
-    if (installed_commit(l->m.name) < 0) {
+    if (record_commit(l->m.name) < 0) {
         fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
-        installed_unstage(l->m.name);
+        record_unstage(l->m.name);
         return EXIT_FAILED;
     }
     return 0;
@@ -970,23 +950,28 @@ static int cmd_remove(int argc, char **argv)
         printf("pkg: removing %s-%s (%d files)\n", m.name, m.version, m.nfiles);
         if (!g_dry_run) {
             int stuck = 0;
+            int kept = 0;
             for (int k = 0; k < m.nfiles; k++) {
                 char path[PKG_PATH_MAX];
                 snprintf(path, sizeof(path), "/%s", m.files[k].path);
                 if (unlink(path) < 0 && errno != ENOENT) {
                     fprintf(stderr, "pkg: %s: cannot remove %s: %s\n", m.name, path, strerror(errno));
+                    m.files[kept++] = m.files[k];   /* still on disk: stays in the record */
                     stuck++;
                 }
             }
             if (stuck) {
-                /* The record stays so the file remains owned and visible to verify. */
-                fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded\n", m.name,
-                        stuck, stuck == 1 ? "" : "s");
+                /* The record shrinks to what is still on disk, so the database
+                 * keeps describing the filesystem and a later remove finishes. */
+                m.nfiles = kept;
+                if (record_stage(m.name, &m, m.dirs) < 0 || record_commit(m.name) < 0)
+                    fprintf(stderr, "pkg: %s: cannot update the record: %s\n", m.name, strerror(errno));
+                fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded with them\n",
+                        m.name, stuck, stuck == 1 ? "" : "s");
                 rc = EXIT_FAILED;
             } else {
-                struct dirlist dirs;
-                installed_dirs(m.name, &dirs);
-                remove_dirs(&dirs);
+                if (m.dirs)
+                    remove_dirs(m.dirs);
                 installed_drop(m.name);
             }
         }

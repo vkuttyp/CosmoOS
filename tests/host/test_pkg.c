@@ -95,6 +95,18 @@ int main(void)
     CHECK(manifest_parse(bad5, strlen(bad5), &m, err, sizeof(err)) < 0);
     const char *bad6 = "name: fortune\nversion: 1.0\nnocolon\n";
     CHECK(manifest_parse(bad6, strlen(bad6), &m, err, sizeof(err)) < 0 && strstr(err, "line 3"));
+    /* Installed records carry dir: lines; formatting round-trips the record. */
+    char rec[1024];
+    snprintf(rec, sizeof(rec), "%sdir: /usr/share/x\ndir: /usr/share\n", mtext);
+    CHECK(manifest_parse(rec, strlen(rec), &m, err, sizeof(err)) == 0 && m.dirs && m.dirs->n == 2 &&
+          strcmp(m.dirs->paths[1], "/usr/share") == 0);
+    char out2[2048];
+    int flen = manifest_format(&m, m.dirs, out2, sizeof(out2));
+    CHECK(flen == (int)strlen(rec) && strcmp(out2, rec) == 0);
+    CHECK(manifest_format(&m, m.dirs, out2, 64) < 0);
+    manifest_free(&m);
+    const char *bad7 = "name: fortune\nversion: 1.0\ndir: relative\n";
+    CHECK(manifest_parse(bad7, strlen(bad7), &m, err, sizeof(err)) < 0);
 
     /* index */
     const char *itext =

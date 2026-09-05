@@ -41,10 +41,11 @@ program in `/bin` with one in `/usr/bin` (the shell's `PATH` decides).
 Each file is written to `<path>.pkgtmp` and renamed into place; a
 failure unlinks the files this package has already placed, removes the
 directories it created and the staged record, and the operation stops.
-The database record is staged as `MANIFEST.new`/`DIRS.new` before the
-first file is written and committed by rename after the last, so the
-database never describes a mixture of old and new. `remove` keeps the
-record when a file could not be deleted. Check: review; `rc.test` sees
+The database record is one file, staged as `MANIFEST.new` before the
+first file is written and committed by a single rename after the last,
+so the database never describes a mixture of old and new. A `remove`
+that could not delete every file rewrites the record to the files still
+present and fails. Check: review; `rc.test` sees
 complete installs and removals. Gap: no test injects a write failure
 mid-install or mid-remove; a failure while replacing a previous version
 leaves that version's overlapping files gone (a recorded limit of the
@@ -52,8 +53,8 @@ single-package rollback); multi-package operations stop at the first
 failure with earlier packages installed.
 
 **PK5. The database describes what is on disk.** `installed/<name>/
-MANIFEST` is the manifest of the package as extracted; `DIRS` the
-directories the package created; `remove` unlinks exactly the manifest's
+MANIFEST` is the manifest of the package as extracted plus `dir:` lines
+for the directories the package created; `remove` unlinks exactly the manifest's
 files and removes exactly the recorded directories that are empty;
 `upgrade` unlinks files the new manifest lacks. Check: `rc.test`
 removes `fortune` and `fortunes` and then `fortune` is `not found`;

@@ -70,6 +70,11 @@ struct file_entry {
     uint8_t sha[SHA512_LEN];
 };
 
+struct dirlist {
+    char paths[PKG_MAX_DIRS][PKG_PATH_MAX];
+    int n;
+};
+
 struct manifest {
     char name[PKG_NAME_MAX];
     char version[PKG_VERSION_MAX];
@@ -78,6 +83,7 @@ struct manifest {
     int ndepends;
     struct file_entry *files;     /* malloc'd, nfiles entries */
     int nfiles;
+    struct dirlist *dirs;         /* malloc'd when a record carries "dir:" lines (installed records only) */
 };
 
 struct index_entry {
@@ -98,6 +104,8 @@ struct index {
 
 int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, size_t errlen);
 void manifest_free(struct manifest *m);
+/* Render a manifest (plus "dir:" lines for `dirs`, may be NULL) as text; returns the length or -1 (too small). */
+int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *out, size_t cap);
 int index_parse(const char *text, size_t len, struct index *ix, char *err, size_t errlen);
 void index_free(struct index *ix);
 bool path_allowed(const char *path);                          /* relative, no "..", not under boot/dev/tmp/mnt */

@@ -68,13 +68,17 @@ sha512: <128 hex>
 ### The metadata database (`/var/db/pkg/`)
 
 ```text
-/var/db/pkg/index                 the last verified INDEX (trailer stripped)
-/var/db/pkg/installed/<name>/MANIFEST   the package's manifest as installed
-/var/db/pkg/installed/<name>/DIRS       directories this package created, deepest first
+/var/db/pkg/index                       the last verified INDEX (trailer stripped)
+/var/db/pkg/installed/<name>/MANIFEST   the package's manifest as installed, plus "dir: /path" lines for
+                                        the directories this package created (deepest last)
+/var/db/pkg/lock                        present while a mutating pkg runs
 ```
 
-Written through a temporary name and `rename`, so a crash leaves either
-the old or the new record.
+One file per package, staged as `MANIFEST.new` and committed by a single
+`rename`, so a crash or a failure leaves either the old record or the
+new one, never a mixture (`dir:` is a record-only key; the builder never
+emits it and a package carrying it is not rejected but its directories
+are ignored).
 
 ### Configuration
 
@@ -208,17 +212,17 @@ install(pkg):
   stage the record: write installed/<name>/MANIFEST.new (a database that cannot be written stops here)
   for each file: mkdir -p its directory (recording every directory that did not exist)
                  write to "<path>.pkgtmp" with the manifest mode, rename over the destination
-  write DIRS.new
+  restage MANIFEST.new with the "dir:" lines for the directories created
   on any failure so far: unlink the files this package placed, remove the directories it created,
                          delete the staged record, report, stop the operation
   if a previous version was installed: unlink files of the old manifest that the new one lacks,
-                                       remove old DIRS that are now empty, restage DIRS.new
-  commit: rename DIRS.new -> DIRS, MANIFEST.new -> MANIFEST
+                                       remove its recorded directories that are now empty, restage
+  commit: rename MANIFEST.new -> MANIFEST (one rename, one file)
 ```
 
-The record is committed last and by rename, so the database holds either
-the old record or the new one; a failure before the commit leaves the
-old record and (for a fresh install) no files.
+The record is committed last and by one rename, so the database holds
+either the old record or the new one; a failure before the commit leaves
+the old record and (for a fresh install) no files.
 
 A file that already exists and belongs to another installed package is
 a conflict, reported before writing (`pkg` scans the installed manifests
@@ -228,10 +232,12 @@ for each path).
 
 `pkg remove NAME`: refuse when another installed package `depends:` on
 it (list them; `-f` overrides); unlink every manifest file (a file
-already missing is fine); if any file could not be removed, keep the
-record (the file stays owned and `verify` reports the state) and fail;
-otherwise `rmdir` the recorded DIRS deepest first (non-empty ones are
-left) and remove the record.
+already missing is fine); if any file could not be removed, the record
+is rewritten to list only the files still on disk (so the database keeps
+describing the filesystem, the files stay owned, and a later `remove`
+finishes the job) and the command fails; otherwise `rmdir` the recorded
+directories deepest first (non-empty ones are left) and remove the
+record.
 
 ### Upgrade
 

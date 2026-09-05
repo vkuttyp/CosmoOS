@@ -188,6 +188,16 @@ int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, 
             if (!hex_decode(sha, f->sha, SHA512_LEN))
                 goto bad;
             m->nfiles++;
+        } else if (strcmp(key, "dir") == 0) {
+            /* installed records only: a directory this package created */
+            if (m->dirs == NULL) {
+                m->dirs = calloc(1, sizeof(*m->dirs));
+                if (m->dirs == NULL)
+                    goto bad;
+            }
+            if (value[0] != '/' || strlen(value) >= PKG_PATH_MAX || m->dirs->n == PKG_MAX_DIRS)
+                goto bad;
+            strcpy(m->dirs->paths[m->dirs->n++], value);
         } else {
             goto bad;
         }
@@ -208,8 +218,40 @@ int manifest_parse(const char *text, size_t len, struct manifest *m, char *err, 
 void manifest_free(struct manifest *m)
 {
     free(m->files);
+    free(m->dirs);
     m->files = NULL;
+    m->dirs = NULL;
     m->nfiles = 0;
+}
+
+int manifest_format(const struct manifest *m, const struct dirlist *dirs, char *out, size_t cap)
+{
+    size_t used = 0;
+#define PUT(...)                                                                          \
+    do {                                                                                  \
+        int _n = snprintf(out + used, cap > used ? cap - used : 0, __VA_ARGS__);         \
+        if (_n < 0 || (size_t)_n >= cap - used)                                           \
+            return -1;                                                                    \
+        used += (size_t)_n;                                                               \
+    } while (0)
+    PUT("name: %s\nversion: %s\nsummary: %s\n", m->name, m->version, m->summary);
+    for (int i = 0; i < m->ndepends; i++) {
+        if (m->depends[i].op == OP_NONE)
+            PUT("depends: %s\n", m->depends[i].name);
+        else
+            PUT("depends: %s %s %s\n", m->depends[i].name, op_text(m->depends[i].op), m->depends[i].version);
+    }
+    for (int i = 0; i < m->nfiles; i++) {
+        char hex[2 * SHA512_LEN + 1];
+        hex_encode(m->files[i].sha, SHA512_LEN, hex);
+        PUT("file: %s %04o %llu %s\n", m->files[i].path, m->files[i].mode, (unsigned long long)m->files[i].size,
+            hex);
+    }
+    if (dirs)
+        for (int i = 0; i < dirs->n; i++)
+            PUT("dir: %s\n", dirs->paths[i]);
+#undef PUT
+    return (int)used;
 }
 
 int index_parse(const char *text, size_t len, struct index *ix, char *err, size_t errlen)

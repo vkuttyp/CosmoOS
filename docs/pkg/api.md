@@ -94,7 +94,7 @@ Options come after the command: `-n` prints the plan without writing
 | `update` | For each repository in `repos.conf`: read `INDEX`, verify its trailer against the key ring, parse it; concatenate the verified indexes (a blank line between them) into `/var/db/pkg/index` | `pkg: index updated: N packages from M repository/ies` |
 | `install NAME[=VERSION]...` | Plan all requests together from the stored index (`NAME=VERSION` is the constraint `NAME = VERSION`; every constraint seen on a name, including those of installed packages, must hold; the plan is rebuilt when a later constraint invalidates an earlier choice), then for each package in dependency order: find `file` in a repository, check size and SHA-512 against the index, verify the signature, cross-check the manifest, install | `pkg: installing NAME-VERSION (N files)`; `pkg: NAME will be upgraded from A to B` when a constraint needs a newer installed package; `pkg: constraints on NAME: ...` with an unsatisfiable set |
 | `install FILE.cpk` | An argument containing `/` is a package file: verified without an index entry; its dependencies must be installed or resolvable from the index | as above |
-| `remove NAME` | Refuse when another installed package depends on it unless `-f`; unlink the manifest's files (already missing is fine); if any could not be removed, keep the record and fail; otherwise `rmdir` the recorded directories deepest first and drop the record | `pkg: NAME: OTHER depends on it`; `pkg: removing NAME-VERSION (N files)`; `pkg: NAME: N files could not be removed; the package stays recorded` |
+| `remove NAME` | Refuse when another installed package depends on it unless `-f`; unlink the manifest's files (already missing is fine); if any could not be removed, rewrite the record to the files still on disk and fail; otherwise `rmdir` the recorded directories deepest first and drop the record | `pkg: NAME: OTHER depends on it`; `pkg: removing NAME-VERSION (N files)`; `pkg: NAME: N files could not be removed; the package stays recorded with them` |
 | `upgrade [NAME...]` | For every installed package (or the named ones) with a newer index version: install it; files the new manifest lacks are unlinked, the old recorded directories are removed when empty | `pkg: N packages upgraded` |
 | `list` | One line per installed package: name, version, summary | `hello  1.1  prints a greeting` (columns) |
 | `info NAME` | `name:`, `installed:`, `available: V (file, size bytes)`, `summary:`, `depends:` lines, `file: /path mode size` lines | |
@@ -133,7 +133,7 @@ operation stops. A file owned by another installed package is a conflict
 | `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); Phase 10 ships `cosmo-dev.pub` |
 | `/var/db/pkg/index` | the last verified `INDEX` text (trailer stripped) |
 | `/var/db/pkg/installed/<name>/MANIFEST` | the installed package's manifest, as extracted |
-| `/var/db/pkg/installed/<name>/DIRS` | directories this package created, one per line, deepest last |
+| `/var/db/pkg/installed/<name>/MANIFEST.new` | the staged record while an operation runs; committed by rename |
 | `/var/db/pkg/lock` | present while a mutating command runs |
 
 Limits (`pkg/pkg.h`): a package at most 64 MiB, an index at most 4 MiB,
