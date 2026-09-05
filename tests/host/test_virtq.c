@@ -46,8 +46,10 @@ void *dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_out, unsigned f
 {
     (void)dev;
     (void)flags;
-    void *p = NULL;
-    if (posix_memalign(&p, 4096, size) != 0)
+    /* C11 aligned_alloc (posix_memalign is not visible under -std=c11 on
+     * glibc); the ring size is a multiple of 4096 by construction. */
+    void *p = aligned_alloc(4096, size);
+    if (p == NULL)
         return NULL;
     memset(p, 0, size);
     *dma_out = (dma_addr_t)(uintptr_t)p;
