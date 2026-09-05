@@ -7,6 +7,7 @@
 
 #include <kernel/list.h>
 #include <kernel/mutex.h>
+#include <kernel/thread.h>
 #include <kernel/storage.h>
 #include <kernel/types.h>
 #include <kernel/vfs.h>
@@ -48,6 +49,26 @@ struct cfs {
     bool discard_on_unmount;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
     uint64_t commits;
+    uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
+    uint64_t csum_failures;
+    /* The writeback thread (design.md, "The writeback thread"). */
+    struct thread *wb_thread;
+    bool wb_stop;
+    bool wb_enabled;        /* test hook: autonomous commits on */
+    unsigned wb_interval_ms;
+    uint64_t first_dirty_ns; /* when the open transaction first became non-empty; 0 when empty */
+    uint64_t wb_commits;
+};
+
+#define CFS_WB_POLL_MS       50u
+#define CFS_WB_DIRTY_BUFS    64u
+#define CFS_WB_PENDING       512u
+#define CFS_WB_DIRTY_PAGES   256u
+#define CFS_WB_INTERVAL_MS   5000u
+
+enum cfs_alloc_class {
+    CFS_ALLOC_META,   /* may use the reserve */
+    CFS_ALLOC_DATA,   /* refused at or below the reserve */
 };
 
 /* Abandon the open transaction after a mutation that could not be
@@ -72,7 +93,12 @@ struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b);
  * updated to the new block number. */
 int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
-int cfs_alloc_block(struct cfs *fs, uint64_t *out);
+int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
+/* Up to `want` consecutive data blocks at or after `hint` (0: the hint of
+ * the last allocation); at least one. -ENOSPC when only the reserve is left. */
+int cfs_alloc_data(struct cfs *fs, uint64_t hint, uint32_t want, uint64_t *start, uint64_t *got);
+int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint32_t want, uint64_t *start,
+                  uint64_t *got);
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk);
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
 int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in);
@@ -87,5 +113,10 @@ int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
 int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t pblk, uint64_t *old);
 int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep_blocks);
+/* The per-inode checksum tree (cosmofs.c). */
+int cfs_csum_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t crc);
+int cfs_csum_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t *crc);   /* -ENOENT: none stored */
+int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *block);
+void cfs_csum_free(struct cfs *fs, struct cfs_inode *in);
 
 #endif /* COSMOFS_INTERNAL_H */

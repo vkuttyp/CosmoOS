@@ -27,11 +27,20 @@ struct cosmofs_stats {
     uint64_t inode_count;
     unsigned dirty_buffers;
     unsigned pending_frees;
+    uint64_t reserve_blocks;  /* blocks only metadata may take */
+    uint64_t commits;         /* since mount */
+    uint64_t wb_commits;      /* of which by the writeback thread */
+    uint64_t csum_failures;   /* data or directory blocks refused for a bad checksum */
 };
 int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out);
 
 /* Test hook: the next unmount discards the open transaction instead of
  * committing it, as a crash before the root write would. */
 void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard);
+/* Test hooks for the writeback thread: autonomous commits on/off (the
+ * replay harness wants every root write to be one it asked for), and the
+ * age trigger in milliseconds. */
+void cosmofs_test_set_writeback(struct mount *mnt, bool on);
+void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
 
 #endif /* KERNEL_COSMOFS_H */

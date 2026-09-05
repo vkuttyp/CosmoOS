@@ -18,6 +18,9 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
+#include <kernel/wait.h>
 
 #include "cosmofs_internal.h"
 
@@ -160,12 +163,15 @@ void cfs_buf_put(struct cfs *fs, struct cfs_buf *b)
     b->refs--;
 }
 
+static void note_dirty(struct cfs *fs);
+
 static void buf_mark_dirty(struct cfs *fs, struct cfs_buf *b)
 {
     if (!b->dirty) {
         b->dirty = true;
         fs->nr_dirty++;
     }
+    note_dirty(fs);
 }
 
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out)
@@ -219,27 +225,73 @@ static inline bool bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3
 static inline void bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }
 static inline void bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
 
-int cfs_alloc_block(struct cfs *fs, uint64_t *out)
+static void cfs_writeback_thread(void *arg);
+
+/* The open transaction just became (or stayed) non-empty. The writeback
+ * thread starts here, on the first change, so a mount that only reads
+ * (the replay harness mounts hundreds of prefix images) never has one to
+ * join at unmount. */
+static void note_dirty(struct cfs *fs)
 {
-    if (fs->free_blocks == 0)
-        return -ENOSPC;
-    uint64_t start = fs->alloc_hint < fs->nblocks ? fs->alloc_hint : 2;
-    for (uint64_t n = 0; n < fs->nblocks; n++) {
-        uint64_t i = start + n;
-        if (i >= fs->nblocks)
-            i -= fs->nblocks;
-        if (i < 2)
-            continue;
-        if (!bit_test(fs->bitmap, i)) {
-            bit_set(fs->bitmap, i);
-            fs->bitmap_dirty[i / CFS_BITS_PER_BITMAP] = 1;
-            fs->free_blocks--;
-            fs->alloc_hint = i + 1;
-            *out = i;
-            return 0;
+    if (fs->first_dirty_ns == 0)
+        fs->first_dirty_ns = clock_now_ns();
+    if (fs->wb_thread == NULL && fs->wb_enabled && !fs->wb_stop && fs->mnt) {
+        fs->wb_thread = thread_create(cfs_writeback_thread, fs, "cfs-wb", SCHED_PRIO_DEFAULT);
+        if (fs->wb_thread == NULL) {
+            fs->wb_enabled = false;
+            kwarn("cosmofs: no writeback thread; commits happen on sync, fsync and unmount only");
         }
     }
+}
+
+/* First fit from `hint` (or the running hint), taking up to `want`
+ * consecutive free blocks. Data allocations stop at the reserve so
+ * deletion and commit always have metadata blocks (design.md,
+ * "Allocation: contiguity and the metadata reserve"). */
+int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint32_t want, uint64_t *start,
+                  uint64_t *got)
+{
+    uint64_t usable = cls == CFS_ALLOC_DATA ? (fs->free_blocks > fs->reserve ? fs->free_blocks - fs->reserve : 0)
+                                            : fs->free_blocks;
+    if (usable == 0)
+        return -ENOSPC;
+    if (want == 0)
+        want = 1;
+    if (want > usable)
+        want = (uint32_t)usable;
+    uint64_t from = hint >= 2 && hint < fs->nblocks ? hint : (fs->alloc_hint < fs->nblocks ? fs->alloc_hint : 2);
+    for (uint64_t n = 0; n < fs->nblocks; n++) {
+        uint64_t i = from + n;
+        if (i >= fs->nblocks)
+            i -= fs->nblocks;
+        if (i < 2 || bit_test(fs->bitmap, i))
+            continue;
+        uint64_t len = 1;
+        while (len < want && i + len < fs->nblocks && !bit_test(fs->bitmap, i + len))
+            len++;
+        for (uint64_t k = 0; k < len; k++) {
+            bit_set(fs->bitmap, i + k);
+            fs->bitmap_dirty[(i + k) / CFS_BITS_PER_BITMAP] = 1;
+        }
+        fs->free_blocks -= len;
+        fs->alloc_hint = i + len;
+        note_dirty(fs);
+        *start = i;
+        *got = len;
+        return 0;
+    }
     return -ENOSPC;
+}
+
+int cfs_alloc_block(struct cfs *fs, uint64_t *out)
+{
+    uint64_t got;
+    return cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, out, &got);
+}
+
+int cfs_alloc_data(struct cfs *fs, uint64_t hint, uint32_t want, uint64_t *start, uint64_t *got)
+{
+    return cfs_alloc_run(fs, CFS_ALLOC_DATA, hint, want, start, got);
 }
 
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
@@ -257,6 +309,7 @@ void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
         fs->pending_cap = cap;
     }
     fs->pending_free[fs->nr_pending++] = blk;
+    note_dirty(fs);
 }
 
 /* --- inode map ----------------------------------------------------------- */
@@ -435,7 +488,9 @@ out:
     return rc;
 }
 
-static int super_write(struct cfs *fs, unsigned slot)
+/* The root write: flushed before (every block of the transaction is
+ * stable first) and durable when it completes (BIO_PREFLUSH | BIO_FUA). */
+static int super_write(struct cfs *fs, unsigned slot, unsigned flags)
 {
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
@@ -444,7 +499,7 @@ static int super_write(struct cfs *fs, unsigned slot)
     *sb = fs->sb;
     sb->crc = 0;
     sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
-    int rc = pool_write(fs->pool, slot, block);
+    int rc = pool_write_flags(fs->pool, slot, block, flags);
     kfree(block);
     return rc;
 }
@@ -483,24 +538,20 @@ int cfs_commit(struct cfs *fs)
         if (rc)
             return rc;
     }
-    rc = pool_flush(fs->pool);
-    if (rc)
-        return rc;
 
-    /* The root, into the other slot. free_blocks excludes this
-     * transaction's pending frees: they are still referenced by the
+    /* The root, into the other slot, flushed before and after (one call:
+     * the block layer runs flush, write, flush). free_blocks excludes
+     * this transaction's pending frees: they are still referenced by the
      * previous root until this one is on disk. */
     fs->sb.generation = fs->gen;
     fs->sb.free_blocks = fs->free_blocks;
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
-    rc = super_write(fs, slot);
-    if (rc)
-        return rc;
-    rc = pool_flush(fs->pool);
+    rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc)
         return rc;
     fs->sb_slot = slot;
     fs->commits++;
+    fs->first_dirty_ns = 0;
 
     /* The new root is durable: the old generation's blocks are free. */
     list_for_each_entry(b, &fs->bufs, link) {
@@ -519,6 +570,9 @@ int cfs_commit(struct cfs *fs)
     }
     fs->nr_pending = 0;
     fs->gen++;
+    /* The frees dirtied bitmap chunks for the next commit; that is
+     * bookkeeping of this commit, not a new change to age. */
+    fs->first_dirty_ns = 0;
     kdebug("cosmofs: committed generation %llu (%llu free blocks)", (unsigned long long)fs->sb.generation,
            (unsigned long long)fs->free_blocks);
     return 0;
@@ -622,6 +676,7 @@ int cosmofs_format(struct blkdev *bd)
         root->ino = CFS_ROOT_INO;
         root->parent = CFS_ROOT_INO;
         root->generation = 1;
+        root->csum_algo = CFS_CSUM_CRC32C;
         mhdr_seal(&tmp, block, CFS_KIND_INODES, inodes0);
         rc = pool_write(pool, inodes0, block);
     }
@@ -657,9 +712,7 @@ int cosmofs_format(struct blkdev *bd)
         memset(block, 0, CFS_BLOCK);
         rc = pool_write(pool, CFS_SUPER_B, block);
         if (rc == 0)
-            rc = super_write(&tmp, CFS_SUPER_A);
-        if (rc == 0)
-            rc = pool_flush(pool);
+            rc = super_write(&tmp, CFS_SUPER_A, BIO_PREFLUSH | BIO_FUA);
     }
     kfree(block);
     pool_close(pool);
@@ -679,6 +732,9 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
     int rc = pool_read(fs->pool, slot, block);
     if (rc == 0) {
         const struct cfs_super *sb = (const struct cfs_super *)block;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->version != CFS_VERSION && sb->version != 0)
+            kerror("cosmofs: slot %u is format version %u; this kernel reads version %u only (reformat)", slot,
+                   sb->version, CFS_VERSION);
         if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version != CFS_VERSION || sb->block_size != CFS_BLOCK ||
             sb->total_blocks != fs->nblocks || sb->generation == 0 ||
             block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc || sb->imap_root >= fs->nblocks ||
@@ -744,6 +800,74 @@ static void cfs_destroy(struct cfs *fs)
     kfree(fs);
 }
 
+/* Drop every buffer and the bitmap so a different root can be loaded. */
+static void cfs_reset_root(struct cfs *fs)
+{
+    struct cfs_buf *b, *tmp;
+    list_for_each_entry_safe(b, tmp, &fs->bufs, link) {
+        list_remove(&b->link);
+        kfree(b->data);
+        kfree(b);
+    }
+    fs->nr_bufs = fs->nr_dirty = 0;
+    kfree(fs->bitmap);
+    kfree(fs->bitmap_dirty);
+    fs->bitmap = NULL;
+    fs->bitmap_dirty = NULL;
+}
+
+/* Load the allocator and the root directory of the root in fs->sb. */
+static int load_root(struct cfs *fs, struct vnode **root)
+{
+    fs->gen = fs->sb.generation + 1;
+    fs->alloc_hint = 2;
+    int rc = load_bitmap(fs);
+    if (rc)
+        return rc;
+    return cfs_vnode_get(fs, CFS_ROOT_INO, root);
+}
+
+static int cosmofs_sync(struct mount *mnt);
+
+/*
+ * The writeback thread (design.md): commits when the open transaction
+ * has grown past a threshold or aged past the interval. It takes the
+ * mount's sync lock with a trylock so it never waits on an unmount or a
+ * vfs_sync in progress, and never commits when the test hook has turned
+ * autonomous commits off.
+ */
+static bool wb_due(struct cfs *fs)
+{
+    if (fs->failed || fs->first_dirty_ns == 0)
+        return false;
+    if (fs->nr_dirty >= CFS_WB_DIRTY_BUFS || fs->nr_pending >= CFS_WB_PENDING)
+        return true;
+    if (__atomic_load_n(&fs->mnt->cache_dirty, __ATOMIC_RELAXED) >= CFS_WB_DIRTY_PAGES)
+        return true;
+    return clock_now_ns() - fs->first_dirty_ns >= (uint64_t)fs->wb_interval_ms * 1000000ull;
+}
+
+static void cfs_writeback_thread(void *arg)
+{
+    struct cfs *fs = arg;
+    struct mount *mnt = fs->mnt;
+    while (!__atomic_load_n(&fs->wb_stop, __ATOMIC_ACQUIRE)) {
+        thread_sleep_ms(CFS_WB_POLL_MS);
+        if (!fs->wb_enabled || !wb_due(fs))
+            continue;
+        if (!mutex_trylock(&mnt->sync_lock))
+            continue;   /* an unmount or vfs_sync is at it: they commit */
+        if (!mnt->unmounted && !__atomic_load_n(&fs->wb_stop, __ATOMIC_ACQUIRE)) {
+            int rc = cosmofs_sync(mnt);
+            if (rc == 0)
+                fs->wb_commits++;
+            else
+                kwarn("cosmofs: writeback commit failed (%d)", rc);
+        }
+        mutex_unlock(&mnt->sync_lock);
+    }
+}
+
 static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {
     (void)fst;
@@ -756,12 +880,15 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     list_init(&fs->bufs);
     mutex_init(&fs->lock, "cosmofs");
     fs->mnt = mnt;
+    fs->wb_enabled = true;
+    fs->wb_interval_ms = CFS_WB_INTERVAL_MS;
     int rc = pool_open(bdev, &fs->pool);
     if (rc) {
         kfree(fs);
         return rc;
     }
     fs->nblocks = fs->pool->nblocks;
+    fs->reserve = fs->nblocks / 32 > 32 ? fs->nblocks / 32 : 32;
 
     struct cfs_super a, b;
     int ra = super_read(fs, CFS_SUPER_A, &a);
@@ -771,32 +898,33 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
         cfs_destroy(fs);
         return -EIO;
     }
-    if (ra == 0 && (rb != 0 || a.generation >= b.generation)) {
-        fs->sb = a;
-        fs->sb_slot = CFS_SUPER_A;
-    } else {
-        fs->sb = b;
-        fs->sb_slot = CFS_SUPER_B;
-    }
-    fs->gen = fs->sb.generation + 1;
-    fs->alloc_hint = 2;
-    rc = load_bitmap(fs);
-    if (rc) {
-        cfs_destroy(fs);
-        return rc;
-    }
+    /* The newer valid root first; if its tree does not load, the older
+     * one (design.md, "Older-slot fallback at mount"). */
+    unsigned first = (ra == 0 && (rb != 0 || a.generation >= b.generation)) ? CFS_SUPER_A : CFS_SUPER_B;
+    unsigned other = first == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
+    int rother = first == CFS_SUPER_A ? rb : ra;
+    fs->sb = first == CFS_SUPER_A ? a : b;
+    fs->sb_slot = first;
     mnt->fs_priv = fs;
-    struct vnode *root;
-    rc = cfs_vnode_get(fs, CFS_ROOT_INO, &root);
+    struct vnode *root = NULL;
+    rc = load_root(fs, &root);
+    if (rc && rother == 0) {
+        kwarn("cosmofs: %s: generation %llu does not load (%d); falling back to generation %llu", bdev->name,
+              (unsigned long long)fs->sb.generation, rc, (unsigned long long)(other == CFS_SUPER_A ? a : b).generation);
+        cfs_reset_root(fs);
+        fs->sb = other == CFS_SUPER_A ? a : b;
+        fs->sb_slot = other;
+        rc = load_root(fs, &root);
+    }
     if (rc) {
         mnt->fs_priv = NULL;
         cfs_destroy(fs);
         return rc;
     }
     mnt->root = root;
-    kinfo("cosmofs: %s: generation %llu, %llu/%llu blocks free, %llu inodes", bdev->name,
+    kinfo("cosmofs: %s: generation %llu, %llu/%llu blocks free (%llu reserved), %llu inodes", bdev->name,
           (unsigned long long)fs->sb.generation, (unsigned long long)fs->free_blocks,
-          (unsigned long long)fs->nblocks, (unsigned long long)fs->sb.inode_count);
+          (unsigned long long)fs->nblocks, (unsigned long long)fs->reserve, (unsigned long long)fs->sb.inode_count);
     return 0;
 }
 
@@ -819,10 +947,17 @@ static int cosmofs_sync(struct mount *mnt)
 /* The VFS committed through cosmofs_sync before calling this; what is
  * left is either nothing, a deliberately discarded transaction (test
  * hook) or an abandoned one (cfs_fail), and both are dropped here so the
- * on-disk state stays at the last committed root. */
+ * on-disk state stays at the last committed root. The writeback thread
+ * is stopped first (it skips a mount whose sync lock is held, which it
+ * is here, so the join is short). */
 static int cosmofs_unmount(struct mount *mnt)
 {
     struct cfs *fs = cfs_of(mnt);
+    if (fs->wb_thread) {
+        __atomic_store_n(&fs->wb_stop, true, __ATOMIC_RELEASE);
+        thread_join(fs->wb_thread);
+        fs->wb_thread = NULL;
+    }
     if (fs->discard_on_unmount)
         kwarn("cosmofs: discarding the open transaction (test hook)");
     else if (fs->failed)
@@ -844,6 +979,10 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->inode_count = fs->sb.inode_count;
     out->dirty_buffers = fs->nr_dirty;
     out->pending_frees = fs->nr_pending;
+    out->reserve_blocks = fs->reserve;
+    out->commits = fs->commits;
+    out->wb_commits = fs->wb_commits;
+    out->csum_failures = fs->csum_failures;
     mutex_unlock(&fs->lock);
     return 0;
 }
@@ -853,6 +992,20 @@ void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
     struct cfs *fs = cfs_of(mnt);
     if (fs)
         fs->discard_on_unmount = discard;
+}
+
+void cosmofs_test_set_writeback(struct mount *mnt, bool on)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs)
+        fs->wb_enabled = on;
+}
+
+void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs)
+        fs->wb_interval_ms = ms;
 }
 
 struct fs_type cosmofs_fs_type = {

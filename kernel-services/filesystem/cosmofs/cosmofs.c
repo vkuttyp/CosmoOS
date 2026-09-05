@@ -12,6 +12,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/cred.h>
+#include <kernel/crc32c.h>
 #include <kernel/page.h>
 #include <kernel/string.h>
 
@@ -22,33 +23,80 @@ static const struct vnode_ops cfs_file_ops;
 
 /* --- extents ------------------------------------------------------------- */
 
-/* Gather the inode's runs into ext[] (up to CFS_MAX_EXTENTS). */
-static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_extent *ext, unsigned *n)
+/*
+ * A run maps logical blocks [lblk, lblk + count) to pool blocks
+ * [start, start + count). Runs are kept sorted by lblk; a logical block no
+ * run covers is a hole. The inode holds CFS_DIRECT runs and the head of
+ * a chain of CFS_KIND_EXTENTS blocks (253 runs each) for the rest.
+ */
+
+static bool extent_valid(const struct cfs *fs, const struct cfs_extent *e)
 {
-    unsigned k = 0;
+    /* Overflow-safe: start below the end and count within the remainder;
+     * the logical range must not wrap the 32-bit lblk either. */
+    return e->start >= 2 && e->start < fs->nblocks && e->count > 0 && e->count <= fs->nblocks - e->start &&
+           (uint64_t)e->lblk + e->count <= 0x100000000ull;
+}
+
+/* Gather the inode's runs into a kmalloc'd array (the caller frees). */
+static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_extent **out, unsigned *n)
+{
+    unsigned cap = CFS_DIRECT + CFS_EXTENTS_PER_BLOCK, k = 0;
+    struct cfs_extent *ext = kmalloc(cap * sizeof(*ext), 0);
+    if (ext == NULL)
+        return -ENOMEM;
     for (unsigned i = 0; i < CFS_DIRECT && in->direct[i].count; i++)
         ext[k++] = in->direct[i];
-    if (in->indirect) {
+    uint64_t next = in->indirect;
+    unsigned chain = 0;
+    while (next) {
+        if (++chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || next < 2 || next >= fs->nblocks) {
+            kfree(ext);
+            return -EIO;   /* a cycle or a wild pointer */
+        }
         struct cfs_buf *b;
-        int rc = cfs_buf_get(fs, in->indirect, CFS_KIND_EXTENTS, &b);
-        if (rc)
+        int rc = cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &b);
+        if (rc) {
+            kfree(ext);
             return rc;
-        const struct cfs_extent *ind = (const struct cfs_extent *)(b->data + CFS_MHDR_SIZE);
-        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && ind[i].count; i++)
-            ext[k++] = ind[i];
+        }
+        const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
+        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && eb->ext[i].count; i++) {
+            if (k == cap) {
+                if (cap >= CFS_MAX_EXTENTS) {
+                    cfs_buf_put(fs, b);
+                    kfree(ext);
+                    return -EFBIG;
+                }
+                unsigned ncap = cap * 2 > CFS_MAX_EXTENTS ? CFS_MAX_EXTENTS : cap * 2;
+                struct cfs_extent *grown = krealloc(ext, ncap * sizeof(*ext), 0);
+                if (grown == NULL) {
+                    cfs_buf_put(fs, b);
+                    kfree(ext);
+                    return -ENOMEM;
+                }
+                ext = grown;
+                cap = ncap;
+            }
+            ext[k++] = eb->ext[i];
+        }
+        next = eb->next;
         cfs_buf_put(fs, b);
     }
     for (unsigned i = 0; i < k; i++) {
-        /* Overflow-safe: start below the end and count within the remainder. */
-        if (ext[i].start < 2 || ext[i].start >= fs->nblocks || ext[i].count == 0 ||
-            ext[i].count > fs->nblocks - ext[i].start)
-            return -EIO;
+        if (!extent_valid(fs, &ext[i]) || (i > 0 && ext[i].lblk < (uint64_t)ext[i - 1].lblk + ext[i - 1].count)) {
+            kfree(ext);
+            return -EIO;   /* out of range, unsorted or overlapping */
+        }
     }
+    *out = ext;
     *n = k;
     return 0;
 }
 
-/* Store runs back: direct first, the rest in the indirect block. */
+/* Store runs back: the first CFS_DIRECT in the inode, the rest in the
+ * chain (existing blocks copy-on-write, new ones allocated, surplus
+ * blocks freed). */
 static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *ext, unsigned n)
 {
     if (n > CFS_MAX_EXTENTS)
@@ -56,45 +104,82 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
     memset(in->direct, 0, sizeof(in->direct));
     for (unsigned i = 0; i < n && i < CFS_DIRECT; i++)
         in->direct[i] = ext[i];
-    if (n <= CFS_DIRECT) {
-        if (in->indirect) {
-            cfs_free_block_deferred(fs, in->indirect);
-            in->indirect = 0;
+    unsigned left = n > CFS_DIRECT ? n - CFS_DIRECT : 0;
+    const struct cfs_extent *rest = ext + CFS_DIRECT;
+    uint64_t *slot = &in->indirect;   /* the pointer to the block we are about to fill */
+    while (left > 0) {
+        struct cfs_buf *b;
+        int rc;
+        if (*slot) {
+            rc = cfs_buf_get(fs, *slot, CFS_KIND_EXTENTS, &b);
+            if (rc == 0)
+                rc = cfs_buf_cow(fs, &b, slot);
+        } else {
+            rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &b);
+            if (rc == 0)
+                *slot = b->blkno;
         }
-        return 0;
+        if (rc)
+            return rc;
+        struct cfs_extent_block *eb = (struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
+        uint64_t next = eb->next;
+        unsigned take = left < CFS_EXTENTS_PER_BLOCK ? left : CFS_EXTENTS_PER_BLOCK;
+        memset(eb->ext, 0, sizeof(eb->ext));
+        memcpy(eb->ext, rest, take * sizeof(*rest));
+        rest += take;
+        left -= take;
+        if (left == 0) {
+            /* Retire the rest of an old chain. */
+            eb->next = 0;
+            cfs_buf_put(fs, b);
+            while (next) {
+                struct cfs_buf *ob;
+                if (cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &ob))
+                    break;
+                uint64_t after = ((struct cfs_extent_block *)(ob->data + CFS_MHDR_SIZE))->next;
+                cfs_buf_put(fs, ob);
+                cfs_free_block_deferred(fs, next);
+                next = after;
+            }
+            break;
+        }
+        slot = &eb->next;   /* stays valid: the buffer is cached and dirty for this transaction */
+        cfs_buf_put(fs, b);
     }
-    struct cfs_buf *b;
-    int rc;
-    if (in->indirect) {
-        rc = cfs_buf_get(fs, in->indirect, CFS_KIND_EXTENTS, &b);
-        if (rc == 0)
-            rc = cfs_buf_cow(fs, &b, &in->indirect);
-    } else {
-        rc = cfs_buf_new(fs, CFS_KIND_EXTENTS, &b);
-        if (rc == 0)
-            in->indirect = b->blkno;
+    if (n <= CFS_DIRECT && in->indirect) {
+        uint64_t next = in->indirect;
+        in->indirect = 0;
+        while (next) {
+            struct cfs_buf *ob;
+            if (cfs_buf_get(fs, next, CFS_KIND_EXTENTS, &ob))
+                break;
+            uint64_t after = ((struct cfs_extent_block *)(ob->data + CFS_MHDR_SIZE))->next;
+            cfs_buf_put(fs, ob);
+            cfs_free_block_deferred(fs, next);
+            next = after;
+        }
     }
-    if (rc)
-        return rc;
-    struct cfs_extent *ind = (struct cfs_extent *)(b->data + CFS_MHDR_SIZE);
-    memset(ind, 0, CFS_PAYLOAD);
-    for (unsigned i = CFS_DIRECT; i < n; i++)
-        ind[i - CFS_DIRECT] = ext[i];
-    cfs_buf_put(fs, b);
     return 0;
 }
 
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk)
 {
-    struct cfs_extent ext[CFS_MAX_EXTENTS];
+    /* The direct runs answer most lookups without loading the chain. */
+    if (cfs_map_block(in->direct, CFS_DIRECT, lblk, pblk) == 1)
+        return 1;
+    if (in->indirect == 0)
+        return 0;
+    struct cfs_extent *ext;
     unsigned n;
-    int rc = extents_load(fs, in, ext, &n);
+    int rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
-    return cfs_map_block(ext, n, lblk, pblk);
+    rc = cfs_map_block(ext, n, lblk, pblk);
+    kfree(ext);
+    return rc;
 }
 
-/* Merge physically adjacent runs in place. */
+/* Merge runs that are adjacent both logically and physically, in place. */
 static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
 {
     unsigned w = 0;
@@ -102,7 +187,8 @@ static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
         if (ext[i].count == 0)
             continue;
         if (w > 0 && ext[w - 1].start + ext[w - 1].count == ext[i].start &&
-            ext[w - 1].count + ext[i].count < 0xffffffffu) {
+            (uint64_t)ext[w - 1].lblk + ext[w - 1].count == ext[i].lblk &&
+            (uint64_t)ext[w - 1].count + ext[i].count < 0xffffffffu) {
             ext[w - 1].count += ext[i].count;
         } else {
             ext[w++] = ext[i];
@@ -111,70 +197,69 @@ static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
     return w;
 }
 
+/* Map logical block `lblk` to `pblk`, replacing a previous mapping (its
+ * block is returned in *old) or filling a hole. */
 int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t pblk, uint64_t *old)
 {
-    struct cfs_extent ext[CFS_MAX_EXTENTS + 2];
+    if (lblk >= 0x100000000ull)
+        return -EFBIG;
+    struct cfs_extent *ext;
     unsigned n;
-    int rc = extents_load(fs, in, ext, &n);
+    int rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
-    uint64_t covered = cfs_extent_blocks(ext, n);
     *old = 0;
-
-    if (lblk >= covered) {
-        /* Beyond the mapped span: holes in between are not representable
-         * as runs, so the span must be extended contiguously. */
-        if (lblk != covered)
-            return -EINVAL;
-        ext[n].start = pblk;
-        ext[n].count = 1;
-        ext[n].pad = 0;
-        n++;
-    } else {
-        /* Split the run that covers lblk into up to three pieces. */
-        struct cfs_extent out[CFS_MAX_EXTENTS + 2];
-        unsigned m = 0;
-        uint64_t base = 0;
-        for (unsigned i = 0; i < n; i++) {
-            struct cfs_extent e = ext[i];
-            if (lblk >= base && lblk < base + e.count) {
-                uint64_t off = lblk - base;
-                *old = e.start + off;
-                if (off > 0)
-                    out[m++] = (struct cfs_extent){ e.start, (uint32_t)off, 0 };
-                out[m++] = (struct cfs_extent){ pblk, 1, 0 };
-                if (off + 1 < e.count)
-                    out[m++] = (struct cfs_extent){ e.start + off + 1, (uint32_t)(e.count - off - 1), 0 };
-            } else {
-                out[m++] = e;
-            }
-            base += e.count;
-            if (m > CFS_MAX_EXTENTS + 1)
-                return -EFBIG;
-        }
-        memcpy(ext, out, m * sizeof(*out));
-        n = m;
+    struct cfs_extent *out = kmalloc((n + 2) * sizeof(*out), 0);
+    if (out == NULL) {
+        kfree(ext);
+        return -ENOMEM;
     }
-    n = extents_merge(ext, n);
-    return extents_store(fs, in, ext, n);
+    unsigned m = 0;
+    bool placed = false;
+    for (unsigned i = 0; i < n; i++) {
+        struct cfs_extent e = ext[i];
+        if (!placed && lblk < e.lblk) {
+            out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };   /* a hole before this run */
+            placed = true;
+        }
+        if (lblk >= e.lblk && lblk < (uint64_t)e.lblk + e.count) {
+            uint32_t off = (uint32_t)(lblk - e.lblk);
+            *old = e.start + off;
+            if (off > 0)
+                out[m++] = (struct cfs_extent){ e.start, off, e.lblk };
+            out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };
+            if (off + 1 < e.count)
+                out[m++] = (struct cfs_extent){ e.start + off + 1, e.count - off - 1, e.lblk + off + 1 };
+            placed = true;
+        } else {
+            out[m++] = e;
+        }
+    }
+    if (!placed)
+        out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };   /* beyond every run */
+    m = extents_merge(out, m);
+    rc = extents_store(fs, in, out, m);
+    kfree(out);
+    kfree(ext);
+    return rc;
 }
 
+/* Keep logical blocks below `keep`; free the rest. */
 int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
 {
-    struct cfs_extent ext[CFS_MAX_EXTENTS];
+    struct cfs_extent *ext;
     unsigned n;
-    int rc = extents_load(fs, in, ext, &n);
+    int rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
-    uint64_t base = 0;
     unsigned m = 0;
     for (unsigned i = 0; i < n; i++) {
         struct cfs_extent e = ext[i];
-        if (base >= keep) {
+        if (e.lblk >= keep) {
             for (uint32_t k = 0; k < e.count; k++)
                 cfs_free_block_deferred(fs, e.start + k);
-        } else if (base + e.count > keep) {
-            uint32_t keepc = (uint32_t)(keep - base);
+        } else if ((uint64_t)e.lblk + e.count > keep) {
+            uint32_t keepc = (uint32_t)(keep - e.lblk);
             for (uint32_t k = keepc; k < e.count; k++)
                 cfs_free_block_deferred(fs, e.start + k);
             e.count = keepc;
@@ -182,9 +267,121 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
         } else {
             ext[m++] = e;
         }
-        base += e.count;
     }
-    return extents_store(fs, in, ext, m);
+    rc = extents_store(fs, in, ext, m);
+    kfree(ext);
+    if (rc == 0 && keep == 0)
+        cfs_csum_free(fs, in);
+    return rc;
+}
+
+/* --- checksums (docs/kernel-services/filesystem/cosmofs/design.md, version 2) --- */
+
+/* The CSUM block for `lblk`, created (and CoW'd) when `writable`. */
+static int csum_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool writable, struct cfs_buf **out)
+{
+    if (lblk >= CFS_CSUM_MAX_BLOCKS)
+        return -EFBIG;
+    struct cfs_buf *idx, *cb;
+    int rc;
+    if (in->csum_root == 0) {
+        if (!writable)
+            return -ENOENT;
+        rc = cfs_buf_new(fs, CFS_KIND_CSUMIDX, &idx);
+        if (rc)
+            return rc;
+        in->csum_root = idx->blkno;
+    } else {
+        rc = cfs_buf_get(fs, in->csum_root, CFS_KIND_CSUMIDX, &idx);
+        if (rc)
+            return rc;
+        if (writable && (rc = cfs_buf_cow(fs, &idx, &in->csum_root)) != 0) {
+            cfs_buf_put(fs, idx);
+            return rc;
+        }
+    }
+    uint64_t *slot = &((uint64_t *)(idx->data + CFS_MHDR_SIZE))[cfs_csum_index(lblk)];
+    if (*slot == 0) {
+        if (!writable) {
+            rc = -ENOENT;
+            goto out;
+        }
+        rc = cfs_buf_new(fs, CFS_KIND_CSUM, &cb);
+        if (rc)
+            goto out;
+        *slot = cb->blkno;
+    } else {
+        rc = cfs_buf_get(fs, *slot, CFS_KIND_CSUM, &cb);
+        if (rc)
+            goto out;
+        if (writable && (rc = cfs_buf_cow(fs, &cb, slot)) != 0) {
+            cfs_buf_put(fs, cb);
+            goto out;
+        }
+    }
+    *out = cb;
+out:
+    cfs_buf_put(fs, idx);
+    return rc;
+}
+
+int cfs_csum_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t crc)
+{
+    struct cfs_buf *cb;
+    int rc = csum_block(fs, in, lblk, true, &cb);
+    if (rc)
+        return rc;
+    ((uint32_t *)(cb->data + CFS_MHDR_SIZE))[cfs_csum_slot(lblk)] = crc;
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+int cfs_csum_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t *crc)
+{
+    struct cfs_buf *cb;
+    int rc = csum_block(fs, in, lblk, false, &cb);
+    if (rc)
+        return rc;
+    *crc = ((const uint32_t *)(cb->data + CFS_MHDR_SIZE))[cfs_csum_slot(lblk)];
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+/* Verify a data or directory block just read for logical block `lblk`. */
+int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *block)
+{
+    if (in->csum_algo == CFS_CSUM_NONE)
+        return 0;
+    uint32_t want;
+    int rc = cfs_csum_get(fs, in, lblk, &want);
+    if (rc == -ENOENT)
+        rc = -EIO;   /* a mapped block without a checksum: the tree is damaged */
+    if (rc)
+        return rc;
+    if (crc32c(block, CFS_BLOCK) != want) {
+        kerror("cosmofs: inode %llu block %llu: data checksum mismatch", (unsigned long long)in->ino,
+               (unsigned long long)lblk);
+        fs->csum_failures++;
+        return -EIO;
+    }
+    return 0;
+}
+
+/* Release the whole checksum tree (the inode is being emptied). */
+void cfs_csum_free(struct cfs *fs, struct cfs_inode *in)
+{
+    if (in->csum_root == 0)
+        return;
+    struct cfs_buf *idx;
+    if (cfs_buf_get(fs, in->csum_root, CFS_KIND_CSUMIDX, &idx) == 0) {
+        const uint64_t *slots = (const uint64_t *)(idx->data + CFS_MHDR_SIZE);
+        for (unsigned i = 0; i < CFS_PTRS_PER_BLOCK; i++)
+            if (slots[i])
+                cfs_free_block_deferred(fs, slots[i]);
+        cfs_buf_put(fs, idx);
+    }
+    cfs_free_block_deferred(fs, in->csum_root);
+    in->csum_root = 0;
 }
 
 /* --- vnodes ---------------------------------------------------------------- */
@@ -258,25 +455,53 @@ static int dir_read_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, uint
         memset(buf, 0, CFS_BLOCK);
         return 0;
     }
-    return cfs_data_read(fs, pblk, buf);
+    rc = cfs_data_read(fs, pblk, buf);
+    if (rc == 0)
+        rc = cfs_csum_verify(fs, cfs_inode_of(dir), lblk, buf);
+    return rc;
 }
 
-/* Write directory block `lblk` copy-on-write and update the inode. */
-static int dir_write_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, const uint8_t *buf)
+/* The block after the file's previous logical block, when it is mapped:
+ * the allocation hint that keeps a sequentially written file in one run. */
+static uint64_t next_block_hint(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk)
 {
-    uint64_t nblk, old;
-    int rc = cfs_alloc_block(fs, &nblk);
+    uint64_t prev;
+    if (lblk > 0 && cfs_map(fs, in, lblk - 1, &prev) == 1)
+        return prev + 1;
+    return 0;
+}
+
+/* Write a data block copy-on-write: a new pool block near the previous
+ * one (file data from the data class, directory blocks from the metadata
+ * class so a deletion on a full disk still has a block to write), its
+ * checksum recorded, the mapping replaced. */
+static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
+                            enum cfs_alloc_class cls)
+{
+    uint64_t nblk, got, old;
+    int rc = cfs_alloc_run(fs, cls, next_block_hint(fs, in, lblk), 1, &nblk, &got);
     if (rc)
         return rc;
     rc = cfs_data_write(fs, nblk, buf);
     if (rc == 0)
-        rc = cfs_set_block(fs, cfs_inode_of(dir), lblk, nblk, &old);
+        rc = cfs_csum_put(fs, in, lblk, crc32c(buf, CFS_BLOCK));
+    if (rc == 0)
+        rc = cfs_set_block(fs, in, lblk, nblk, &old);
     if (rc) {
         cfs_free_block_deferred(fs, nblk);
         return rc;
     }
     if (old)
         cfs_free_block_deferred(fs, old);
+    return 0;
+}
+
+/* Write directory block `lblk` copy-on-write and update the inode. */
+static int dir_write_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, const uint8_t *buf)
+{
+    int rc = data_write_block(fs, cfs_inode_of(dir), lblk, buf, CFS_ALLOC_META);
+    if (rc)
+        return rc;
     if ((lblk + 1) * CFS_BLOCK > dir->size)
         dir->size = (lblk + 1) * CFS_BLOCK;
     dir->mtime_ns = vfs_now_ns();
@@ -417,6 +642,7 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     in.nlink = type == CFS_TYPE_DIR ? 2 : 1;
     in.ino = ino;
     in.parent = dir->ino;
+    in.csum_algo = CFS_CSUM_CRC32C;
     in.mtime_ns = in.ctime_ns = vfs_now_ns();
     rc = cfs_inode_write(fs, ino, &in);
     if (rc)
@@ -674,9 +900,12 @@ static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
     uint64_t pblk = 0;
     int rc = cfs_map(fs, cfs_inode_of(vn), index, &pblk);
     if (rc == 0)
-        memset(buf, 0, CFS_BLOCK);
-    else if (rc == 1)
+        memset(buf, 0, CFS_BLOCK);   /* a hole */
+    else if (rc == 1) {
         rc = cfs_data_read(fs, pblk, buf);
+        if (rc == 0)
+            rc = cfs_csum_verify(fs, cfs_inode_of(vn), index, buf);
+    }
     mutex_unlock(&fs->lock);
     return rc > 0 ? 0 : rc;
 }
@@ -687,50 +916,8 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
-    struct cfs_inode *in = cfs_inode_of(vn);
-    /* Runs cannot express holes: pages before `index` that were never
-     * written get zero blocks first. */
-    uint64_t covered = cfs_extent_blocks(in->direct, CFS_DIRECT);
-    if (in->indirect) {
-        struct cfs_extent ext[CFS_MAX_EXTENTS];
-        unsigned n;
-        int r = extents_load(fs, in, ext, &n);
-        if (r) {
-            mutex_unlock(&fs->lock);
-            return r;
-        }
-        covered = cfs_extent_blocks(ext, n);
-    }
-    int rc = 0;
-    uint8_t *zero = NULL;
-    for (uint64_t l = covered; l < index && rc == 0; l++) {
-        if (zero == NULL) {
-            zero = kmalloc(CFS_BLOCK, KMEM_ZERO);
-            if (zero == NULL) {
-                rc = -ENOMEM;
-                break;
-            }
-        }
-        uint64_t nblk, old;
-        rc = cfs_alloc_block(fs, &nblk);
-        if (rc == 0)
-            rc = cfs_data_write(fs, nblk, zero);
-        if (rc == 0)
-            rc = cfs_set_block(fs, in, l, nblk, &old);
-    }
-    kfree(zero);
-    if (rc == 0) {
-        uint64_t nblk, old;
-        rc = cfs_alloc_block(fs, &nblk);
-        if (rc == 0)
-            rc = cfs_data_write(fs, nblk, buf);
-        if (rc == 0)
-            rc = cfs_set_block(fs, in, index, nblk, &old);
-        if (rc == 0 && old)
-            cfs_free_block_deferred(fs, old);
-        else if (rc)
-            cfs_free_block_deferred(fs, nblk);
-    }
+    /* Holes are representable: only this block is written. */
+    int rc = data_write_block(fs, cfs_inode_of(vn), index, buf, CFS_ALLOC_DATA);
     if (rc == 0)
         rc = inode_sync(fs, vn);
     mutex_unlock(&fs->lock);
@@ -755,6 +942,10 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     return rc;
 }
 
+/* The VFS `sync` operation (file_sync after the page cache wrote the
+ * file's pages): the inode goes through, then the open transaction is
+ * committed, which is what durability means here (design.md, "fsync
+ * commits"). */
 static int cfs_vnode_sync(struct vnode *vn)
 {
     struct cfs *fs = cfs_of(vn->mnt);
@@ -762,6 +953,8 @@ static int cfs_vnode_sync(struct vnode *vn)
         return 0;
     mutex_lock(&fs->lock);
     int rc = inode_sync(fs, vn);
+    if (rc == 0)
+        rc = cfs_commit(fs);
     mutex_unlock(&fs->lock);
     return rc;
 }
