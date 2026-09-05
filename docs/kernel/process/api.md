@@ -75,7 +75,13 @@ documented in `docs/kernel/syscall/api.md`.
 - Concurrency: `wait_for_completion(&p->exited)`; may block. `p` must be
   referenced by the caller. Returns immediately if already exited.
 
-### `int process_spawn(const char *path, const char *const argv[], const char *const envp[], const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, pid_t *pid_out)` (`spawn.c`)
+### `int process_spawn(const char *path, const char *const argv[], const char *const envp[], const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const struct process_spawn_cred *cred, pid_t *pid_out)` (`spawn.c`)
+
+`cred` is NULL to inherit, or the child's uid and gid
+(`COSMO_SPAWN_SETCRED`): `-EPERM` unless the caller is privileged or
+holds both ids (`docs/kernel/security/design.md` §1). The child is also
+refused with `-EAGAIN` when its real uid already has
+`COSMO_RLIMIT_NPROC` processes.
 - Purpose: create a child of the calling process from an executable
   file (the `spawn` system call's engine).
 - Inputs: kernel copies of the path, `argv` (`argv[0]` required),
@@ -135,7 +141,13 @@ documented in `docs/kernel/syscall/api.md`.
   `..` (never above the root), produces `/x/y` or `/`. `-ENAMETOOLONG`
   when `n` is too small. Tested by `process-spawn`.
 
-### `unsigned process_info(struct cosmo_procinfo *buf, unsigned count)`
+### `unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer)`
+
+Records for every process when `viewer` is privileged, else only for
+processes whose real uid is the viewer's; the return value counts the
+qualifying ones. See also `process_getrlimit`, `process_setrlimit`,
+`process_count_uid` and `process_log_permitted` in
+`docs/kernel/security/api.md`.
 - Fills up to `count` records (pid, ppid, uid, gid, state, threads,
   syscalls, summed thread run time, name) in table order under the table
   lock (each process's lock for its thread list) and returns the total

@@ -347,6 +347,9 @@ archive as `init`, `bin/<name>`, `sbin/<name>` and `etc/<name>`
 | `kill` of an unknown pid, a foreign uid, or signal 0 | `-ESRCH`, `-EPERM`, `-EINVAL` |
 | ELF rejected | `process_create_from_elf` returns `-ENOEXEC` with a log line naming the rule |
 | out of memory during load | `-ENOMEM`, partial space destroyed |
+| `spawn` beyond `COSMO_RLIMIT_NPROC`, or a `SETCRED` the caller may not grant | `-EAGAIN`, `-EPERM` |
+| a mapping beyond `COSMO_RLIMIT_AS`, a populated load beyond `MEM`, a handle beyond `NOFILE` | `-ENOMEM`, `-ENOMEM`, `-EMFILE` |
+| a demand-zero touch beyond `COSMO_RLIMIT_MEM` | status 139 (a system call's copy: `-EFAULT`) |
 | user fault without region | process terminated with status 139, logged |
 | user W+X mmap | `-EINVAL` |
 | syscall with kernel pointer | `-EFAULT` |
@@ -575,6 +578,30 @@ the Linux personality maps `setuid`, `setgid`, `setreuid`, `setregid`,
 The rules are pure functions in `kernel/process/cred.c`, tested on the
 host (`tests/host/test_cred.c`); the boundary is tested by
 `init --unpriv-test` (`docs/kernel-services/vfs/invariants.md` V14).
+
+### Resource limits and the credential transition (audit milestone 6)
+
+`docs/kernel/security/design.md` records the decisions. In this
+subsystem: `struct process.rlim` (`kernel/rlimit.h`) is copied from the
+parent at creation (`rlimits_default` for a kernel-created process) and
+pushed into the enforcing structures, `vm_space_set_limits` for `AS`
+and `MEM` before the ELF is loaded, `handles.limit` for `NOFILE`; the
+`NPROC` count (`process_count_uid(child ruid) + 1`) is checked before
+the process is registered and fails creation with `-EAGAIN`; `VMEM` is
+read by `sys_vm_create`. `process_setrlimit` lowers freely and raises
+only for a privileged caller, under `process.lock`.
+
+`COSMO_SPAWN_SETCRED`: `sys_spawn` passes the request's `uid`/`gid` to
+`process_spawn`, which refuses (`-EPERM`) unless the caller is
+privileged or both ids are among its real, effective and saved ones,
+then `process_create_from_elf` sets the child's three uids and three
+gids and clears its groups. Without the flag the child inherits by copy
+as before. The executable's setuid/setgid bits are ignored.
+
+`process_info` takes the viewer's credentials and skips processes whose
+real uid differs unless the viewer is privileged. `sys_log` asks
+`process_log_permitted` (a per-process token bucket for unprivileged
+callers) before copying.
 
 ### The return-to-user hook
 

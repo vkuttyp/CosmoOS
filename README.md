@@ -311,6 +311,22 @@ See [docs/development.md](docs/development.md).
   top-level tables and debug builds assert that no kernel-half entry is
   created after the first user space. Five new self-tests, 100 in total;
   the Linux and native user tests cover the new semantics.
+- **Access control and resource limits (done):** milestone 6 of the
+  audit's plan (`docs/kernel/security/design.md`). The decision the audit
+  asked for is recorded: privilege flows down. There are no setuid
+  executables; a process is privileged only by inheritance, and `spawn`
+  with `COSMO_SPAWN_SETCRED` is the transition primitive (any identity
+  from root, only held identities from anyone else, no supplementary
+  groups). Per-process resource limits (`getrlimit`/`setrlimit`, Linux
+  `prlimit64`): address space, resident memory, handles, processes per
+  user, guest memory per VM, inherited at spawn, lowered freely, raised
+  only with privilege, enforced in the VMM, the handle table, process
+  creation and the hypervisor. The ramfs page budget is real (the page
+  cache counts pages per mount and refuses with `ENOSPC`) and the page
+  cache as a whole has a limit with LRU reclaim of clean pages, so a
+  large read no longer pins RAM; writeback runs in page order.
+  `procinfo` shows an unprivileged user its own processes and `log` is
+  rate limited. Three new self-tests, 103 in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

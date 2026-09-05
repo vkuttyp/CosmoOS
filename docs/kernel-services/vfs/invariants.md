@@ -137,6 +137,12 @@ and running `/bin/true` succeed, and root's entry in the sticky `/tmp`
 cannot be unlinked or renamed by it. Gap: `chmod`/`chown`; no
 group-permission test (no process holds a supplementary group yet).
 
+**V14a. ramfs is bounded and the page cache is bounded.** The rules S6
+and S7 of `docs/kernel/security/invariants.md`: a mount's cached pages
+never exceed its budget (ramfs: 16 384), and the global limit reclaims
+only clean pages of mounts with a backing store, never waiting on a
+cache lock while holding another. Check: `cache-limits`.
+
 **V15. Data written to a file reaches the filesystem only through
 `writepage`, and cosmofs never leaves a hole inside a file's mapped
 span.** Runs cannot express holes, so `cfs_writepage` first allocates

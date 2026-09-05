@@ -161,9 +161,17 @@ which the Linux `wait4` encodes as "terminated by signal `sig`".
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`
 (native `128 + sig`) → `sig`; a fault (native 139) → `SIGSEGV` (11);
 `rusage` is zeroed when given. `execve`, `fork`, `vfork`, `clone`,
-`clone3` → `-ENOSYS`. `rseq`, `prlimit64`, `getrlimit`, `setrlimit`,
-`sched_getaffinity`, `readlink`, `readlinkat` → `-ENOSYS` (a libc
-tolerates these).
+`clone3` → `-ENOSYS`. `rseq`, `sched_getaffinity`, `readlink`,
+`readlinkat` → `-ENOSYS` (a libc tolerates these).
+
+`getrlimit`, `setrlimit` and `prlimit64` (self only; another pid is
+`-EPERM`) map `RLIMIT_AS`, `RLIMIT_RSS` (→ `COSMO_RLIMIT_MEM`),
+`RLIMIT_NOFILE` and `RLIMIT_NPROC` onto the native limits
+(`docs/kernel/security/design.md` §2). The kernel keeps one value per
+resource: a read reports `rlim_cur == rlim_max`; a write stores
+`rlim_max` (`cur > max` is `-EINVAL`; raising needs privilege, `-EPERM`).
+Every other Linux resource reads as infinity and accepts any value
+without effect.
 
 ### Time and misc
 

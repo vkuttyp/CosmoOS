@@ -337,9 +337,11 @@ first device node in the namespace; `read` returns
 `kernel/syscall/native.c`. When no backend is present the node still
 exists and reads `none ...`; `vm_create` fails with `-ENOTSUP`.
 
-Limits: `HV_VMS_MAX` 8, `HV_VCPUS_MAX` 4 per VM, `HV_VM_MEM_MAX` 64 MiB
-per VM, `HV_REGIONS_MAX` 16 per VM. Exceeding one returns `-ENOSPC`
-(VMs, vCPUs, regions) or `-ENOMEM` (memory).
+Limits: `HV_VMS_MAX` 8, `HV_VCPUS_MAX` 4 per VM, `vm->mem_limit` per
+VM (the creator's `COSMO_RLIMIT_VMEM`, `HV_VM_MEM_MAX` 64 MiB by
+default; `vm_create(owner_uid, mem_limit, &vm)`), `HV_REGIONS_MAX` 16
+per VM. Exceeding one returns `-ENOSPC` (VMs, vCPUs, regions) or
+`-ENOMEM` (memory).
 
 ### The run loop (`vcpu.c`)
 

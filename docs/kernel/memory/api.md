@@ -326,6 +326,14 @@ description or `no region` (a kernel bug). A fault while the calling
 CPU holds `vm_space.lock` panics with a distinct message rather than
 deadlocking. Design.md §6.1.
 
+### `void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages)`
+
+The process layer's `COSMO_RLIMIT_AS` and `MEM` in pages
+(`docs/kernel/security/design.md` §2): `vm_user_map_anon` refuses growth
+of `mapped_pages` past the first (`-ENOMEM`), the demand-zero fault and
+populated maps refuse frames at or past the second. Lowering below the
+current use changes nothing already mapped.
+
 ### `void vm_space_switch(struct vm_space *prev, struct vm_space *next)`
 
 The calling CPU's root moves from `prev` to `next` (interrupts off, from
