@@ -489,12 +489,17 @@ Needed* (type 3, code 4) is now honoured: the next-hop MTU from the
 message (or, when zero, the next plateau below the quoted total length
 from RFC 1191's table) is recorded in a 16-entry per-destination cache
 (`ipv4_pmtu_update`, 10-minute expiry, floor 576) that `ipv4_path_mtu`
-consults and `tcp_path_mss` derives the MSS from; then, when the quoted
+consults and `tcp_path_mss` derives the MSS from; but only when the quoted
 transport header is TCP, `tcp_pmtu_notify(local, remote, mtu)` finds
 the connection, checks that the quoted sequence number lies in
-`[snd_una, snd_nxt]` (RFC 5927: a blind message cannot shrink a
+`[snd_una, snd_max)` (RFC 5927: a blind message cannot shrink a
 connection it cannot see), lowers `path_mss` and `mss` to `mtu − 40`
-(never below 256) and retransmits from `snd_una` at the new size.
+(never below 256) and retransmits from `snd_una` at the new size. The
+cache is written only after that confirmation: a message the quoted
+connection does not vouch for changes nothing, so a blind sender
+cannot lower the MSS of future connections to a destination of its
+choosing for ten minutes. Quotes of other protocols are ignored (no
+consumer of the cache exists for them yet).
 `pmtu_updates` counts accepted messages. IPv6 keeps its minimum-MTU
 behaviour (1280) for now.
 

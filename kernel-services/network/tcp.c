@@ -1872,11 +1872,11 @@ out:
     pcb_put(pcb);       /* the lookup's (or the creator's, for a new child) */
 }
 
-void tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, uint32_t seq, uint16_t mtu)
+bool tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, uint32_t seq, uint16_t mtu)
 {
     struct tcp_pcb *pcb = lookup(local, remote);
     if (pcb == NULL)
-        return;
+        return false;
     struct tcp_batch b = { .n = 0 };
     arch_irq_state_t s = spin_lock_irqsave(&pcb->lock);
     unsigned overhead = local->family == COSMO_AF_INET ? 40 : 60;
@@ -1885,13 +1885,13 @@ void tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, 
         pcb->state == TCP_SYN_SENT) {
         spin_unlock_irqrestore(&pcb->lock, s);
         pcb_put(pcb);
-        return;
+        return false;
     }
     /* RFC 5927: the quoted segment must be one of ours still in flight. */
     if (!(SEQ_GEQ(seq, pcb->snd_una) && SEQ_LT(seq, pcb->snd_max)) || mss >= pcb->path_mss) {
         spin_unlock_irqrestore(&pcb->lock, s);
         pcb_put(pcb);
-        return;
+        return false;
     }
     STAT(pmtu_updates);
     pcb->path_mss = (uint16_t)mss;
@@ -1906,6 +1906,7 @@ void tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, 
     spin_unlock_irqrestore(&pcb->lock, s);
     batch_send(&b);
     pcb_put(pcb);
+    return true;
 }
 
 enum tcp_state tcp_state_of(struct tcp_pcb *pcb)

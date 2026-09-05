@@ -219,14 +219,16 @@ kernel's own copy of the header (options included). Check:
 suppressed). Gap: the quoting path with IP options is reviewed, not
 tested.
 
-**N18. A "fragmentation needed" message changes a connection only when
-it quotes a segment in flight.** The quoted source must be ours and the
-quoted sequence number in `[snd_una, snd_max)`; the destination's MTU is
-recorded either way (floor 576, 10 min), the connection's MSS only then.
+**N18. A "fragmentation needed" message changes nothing unless it
+quotes a segment in flight.** The quoted source must be ours, the quoted
+transport TCP, and the quoted sequence number in `[snd_una, snd_max)`;
+only then are the connection's MSS lowered and the destination's MTU
+recorded (floor 576, 10 min). A forged quote therefore cannot lower the
+MSS of future connections to a destination of the sender's choosing.
 Check: `net-icmp-limit` (a message quoting a sequence never sent leaves
-the MSS; one quoting `snd_una` lowers it to 1460 and new connections
-start there; `ipv4_pmtu_flush` restores). Gap: no test through a real
-router.
+the MSS and the cache; one quoting `snd_una` lowers the MSS to 1460,
+records 1500 and new connections start at 1460; `ipv4_pmtu_flush`
+restores). Gap: no test through a real router.
 
 **N19. An operation on a non-blocking object returns instead of
 waiting, and `ready` reports exactly what would not block.** Sockets and

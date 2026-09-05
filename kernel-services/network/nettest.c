@@ -1275,8 +1275,10 @@ bool selftest_net_icmp_limit(const char **reason)
     ipv4_output(m, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);   /* quotes a sequence never sent */
     settle(30);
     tcp_get_stats(&t1);
+    ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates && c->tcp->mss == TCP_MSS_LO);
-    CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 1500);   /* the destination's MTU is recorded regardless */
+    /* A forged quote poisons nothing: the cache is untouched too. */
+    CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 65535 && i1.pmtu_updates == i0.pmtu_updates);
     uint8_t *gq = good->data + sizeof(*ic) + sizeof(*q);
     gq[4] = (uint8_t)(seq >> 24);
     gq[5] = (uint8_t)(seq >> 16);
@@ -1287,7 +1289,9 @@ bool selftest_net_icmp_limit(const char **reason)
     ipv4_output(good, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);
     settle(30);
     tcp_get_stats(&t1);
-    CHECK(t1.pmtu_updates == t0.pmtu_updates + 1);
+    ipv4_get_stats(&i1);
+    CHECK(t1.pmtu_updates == t0.pmtu_updates + 1 && i1.pmtu_updates == i0.pmtu_updates + 1);
+    CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 1500);   /* recorded once the connection confirmed it */
     CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
     loopback_set_filter(NULL, NULL);

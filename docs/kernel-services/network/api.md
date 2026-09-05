@@ -326,8 +326,10 @@ reply) when the rate limit allows; a destination unreachable with code
 `ICMP_UNREACH_NEEDFRAG` (4) quoting one of our own datagrams records
 the next-hop MTU (or the RFC 1191 plateau below the quoted length when
 the router reports none, floor `IPV4_PMTU_MIN` 576) in the path MTU
-cache and, for a quoted TCP segment, calls `tcp_pmtu_notify`
-(`icmp_needfrag_rcvd`); other types are counted and dropped.
+cache once `tcp_pmtu_notify` confirms the quoted segment is one of ours
+in flight; a quote of another protocol or an unconfirmed one changes
+nothing (`icmp_needfrag_rcvd` counts them all); other types are counted
+and dropped.
 **`void icmp_send_unreach(orig, iph, code)`** Sends destination
 unreachable with `code` quoting the original IP header (options
 included; `iph` must point at the whole received header, which
@@ -564,12 +566,13 @@ CLOSED, out of the pcb table (its port is free again), waiting for
 `tcp_close`. Reset, the retransmit limit, keepalive exhaustion and the
 FIN_WAIT_2 timeout end a connection the same way.
 
-**`void tcp_pmtu_notify(local, remote, seq, mtu)`** Worker only, from
+**`bool tcp_pmtu_notify(local, remote, seq, mtu)`** Worker only, from
 `icmp_input`: for the connection `(local, remote)` in a synchronized
 state whose quoted `seq` lies in `[snd_una, snd_max)` (RFC 5927) and
 whose path MSS is above `mtu - 40` (`- 60` for IPv6), lowers
-`path_mss` and `mss` (floor 256), counts `pmtu_updates` and retransmits
-from `snd_una` at the new size. Anything else is ignored.
+`path_mss` and `mss` (floor 256), counts `pmtu_updates`, retransmits
+from `snd_una` at the new size and returns true (the caller then records
+the path MTU). Anything else is ignored and false.
 
 **`void tcp_set_keepalive(idle_ns, intvl_ns, cnt)`, `void
 tcp_set_fin_wait2(ns)`** Test hooks for the global keepalive parameters

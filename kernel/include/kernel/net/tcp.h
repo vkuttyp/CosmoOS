@@ -180,9 +180,11 @@ unsigned tcp_ready(struct tcp_pcb *pcb);
 
 void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6);
 /* An ICMP "fragmentation needed" quoting a segment of ours: lower the
- * connection's MSS to fit `mtu` and retransmit. Ignored unless the quoted
- * sequence number is in flight (RFC 5927). Called on the network worker. */
-void tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, uint32_t seq, uint16_t mtu);
+ * connection's MSS to fit `mtu` and retransmit. False (and nothing done)
+ * unless the connection exists and the quoted sequence number is in
+ * flight (RFC 5927); the caller records the path MTU only then. Called on
+ * the network worker. */
+bool tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, uint32_t seq, uint16_t mtu);
 /* Test hooks: keepalive parameters and the orphaned FIN_WAIT_2 timeout (0 = default). */
 void tcp_set_keepalive(uint64_t idle_ns, uint64_t intvl_ns, unsigned cnt);
 void tcp_set_fin_wait2(uint64_t ns);

@@ -260,9 +260,11 @@ void icmp_send_unreach(struct mbuf *orig, const struct ipv4_hdr *iph, uint8_t co
 
 /*
  * Fragmentation needed (RFC 1191): the quoted datagram names the
- * destination and, for TCP, the connection. Record the MTU and let TCP
- * shrink and retransmit. Only a message quoting our own address as the
- * source is considered; the TCP layer checks the quoted sequence number.
+ * destination and the connection. Nothing is recorded on the message's
+ * word alone: a blind sender can forge any quote, so the destination's
+ * MTU enters the cache only after TCP confirms that the quoted segment
+ * is one of ours still in flight (RFC 5927). Quotes of other protocols
+ * are counted and ignored (no consumer of the cache exists for them).
  */
 static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
 {
@@ -279,7 +281,6 @@ static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
         mtu = pmtu_plateau_below(ntohs(q->len));
     if (mtu < IPV4_PMTU_MIN)
         mtu = IPV4_PMTU_MIN;
-    ipv4_pmtu_update(q->dst, mtu);
     if (q->proto != IPPROTO_TCP)
         return;
     uint8_t th[8];
@@ -294,7 +295,8 @@ static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
     local.port = (uint16_t)(th[0] << 8 | th[1]);
     remote.port = (uint16_t)(th[2] << 8 | th[3]);
     uint32_t seq = (uint32_t)th[4] << 24 | (uint32_t)th[5] << 16 | (uint32_t)th[6] << 8 | th[7];
-    tcp_pmtu_notify(&local, &remote, seq, (uint16_t)(mtu > 65535 ? 65535 : mtu));
+    if (tcp_pmtu_notify(&local, &remote, seq, (uint16_t)(mtu > 65535 ? 65535 : mtu)))
+        ipv4_pmtu_update(q->dst, mtu);   /* confirmed by a live connection: remember it for the next ones */
 }
 
 void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
