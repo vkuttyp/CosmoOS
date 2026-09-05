@@ -61,7 +61,11 @@ Never fails in interrupt context (`irq_depth != 0`). Counts `seen` and
 
 ### `int faultinject_configure(const char *spec)`, `void faultinject_init(void)`
 `spec` is `kind:every[:budget]` entries separated by commas, kinds
-`kmalloc`, `blk-submit`, `blk-complete`; `-EINVAL` on a malformed entry.
+`kmalloc`, `blk-submit`, `blk-complete`; `-EINVAL` on a malformed entry
+(unknown kind, missing or zero `every`, a field that does not fit an
+unsigned 32-bit integer, trailing characters), in which case nothing is
+armed: the specification is parsed completely before the first rule is
+set.
 `faultinject_init` applies the fw_cfg boot parameter `opt/cosmo/faultinject`
 (rules for every thread), called by `kernel_main` before the self-tests.
 Example: `-fw_cfg opt/cosmo/faultinject,string=kmalloc:1000`.

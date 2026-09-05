@@ -103,15 +103,38 @@ bool faultinject_should_fail(enum fi_kind kind)
     return true;
 }
 
-/* "kmalloc:7", "blk-complete:2:10", comma separated. */
+/* A decimal field that must fit an unsigned; returns false on overflow or
+ * no digits. Advances *pp past the digits. */
+static bool parse_unsigned(const char **pp, unsigned *out)
+{
+    const char *q = *pp;
+    unsigned v = 0;
+    if (!(*q >= '0' && *q <= '9'))
+        return false;
+    while (*q >= '0' && *q <= '9') {
+        unsigned d = (unsigned)(*q++ - '0');
+        if (v > (UINT32_MAX - d) / 10)
+            return false;   /* would wrap: a different, valid-looking schedule */
+        v = v * 10 + d;
+    }
+    *pp = q;
+    *out = v;
+    return true;
+}
+
+/* "kmalloc:7", "blk-complete:2:10", comma separated. Parsed completely
+ * before anything is armed: a malformed entry leaves every rule as it
+ * was, rather than half the specification in force. */
 int faultinject_configure(const char *spec)
 {
+    struct { int kind; unsigned every, budget; } items[FI_KIND_COUNT * 2];
+    unsigned n = 0;
     const char *p = spec;
     while (*p) {
         const char *end = strchr(p, ',');
         size_t len = end ? (size_t)(end - p) : strlen(p);
         char item[64];
-        if (len >= sizeof(item))
+        if (len >= sizeof(item) || n == sizeof(items) / sizeof(items[0]))
             return -EINVAL;
         memcpy(item, p, len);
         item[len] = '\0';
@@ -125,20 +148,27 @@ int faultinject_configure(const char *spec)
                 kind = (int)k;
         if (kind < 0)
             return -EINVAL;
-        unsigned every = 0, budget = 0;
-        char *q = colon + 1;
-        while (*q >= '0' && *q <= '9')
-            every = every * 10 + (unsigned)(*q++ - '0');
+        unsigned every, budget = 0;
+        const char *q = colon + 1;
+        if (!parse_unsigned(&q, &every) || every == 0)
+            return -EINVAL;
         if (*q == ':') {
             q++;
-            while (*q >= '0' && *q <= '9')
-                budget = budget * 10 + (unsigned)(*q++ - '0');
+            if (!parse_unsigned(&q, &budget))
+                return -EINVAL;
         }
-        if (*q != '\0' || every == 0)
+        if (*q != '\0')
             return -EINVAL;
-        faultinject_set((enum fi_kind)kind, every, budget, NULL);
-        kinfo("faultinject: %s fails every %u%s", g_names[kind], every, budget ? " (bounded)" : "");
+        items[n].kind = kind;
+        items[n].every = every;
+        items[n].budget = budget;
+        n++;
         p = end ? end + 1 : p + len;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        faultinject_set((enum fi_kind)items[i].kind, items[i].every, items[i].budget, NULL);
+        kinfo("faultinject: %s fails every %u%s", g_names[items[i].kind], items[i].every,
+              items[i].budget ? " (bounded)" : "");
     }
     return 0;
 }

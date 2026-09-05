@@ -58,8 +58,38 @@ static uint64_t live_objects(void)
 
 /* --- fault-kmalloc: allocation failures during file, socket and module work --- */
 
+/* The boot-parameter parser: overflowing and malformed specifications arm
+ * nothing (a wrapped "kmalloc:4294967297" would otherwise read as every
+ * allocation failing); a malformed item leaves the earlier items unarmed
+ * too; a valid specification arms exactly what it says. */
+static bool configure_is_strict(const char **reason)
+{
+    struct fi_stats st;
+    CHECK(faultinject_configure("kmalloc:4294967297") == -EINVAL);   /* UINT32_MAX + 2 */
+    CHECK(faultinject_configure("kmalloc:99999999999999999999") == -EINVAL);
+    CHECK(faultinject_configure("kmalloc:3:4294967296") == -EINVAL);
+    CHECK(faultinject_configure("kmalloc:2,bogus:1") == -EINVAL);
+    CHECK(faultinject_configure("kmalloc:") == -EINVAL);
+    CHECK(faultinject_configure("kmalloc:0") == -EINVAL);
+    CHECK(faultinject_configure("kmalloc:2x") == -EINVAL);
+    for (unsigned k = 0; k < FI_KIND_COUNT; k++) {
+        faultinject_stats((enum fi_kind)k, &st);
+        CHECK(st.every == 0);
+    }
+    CHECK(faultinject_configure("blk-submit:3:2,kmalloc:4294967295") == 0);
+    faultinject_stats(FI_BLK_SUBMIT, &st);
+    CHECK(st.every == 3 && st.budget == 2);
+    faultinject_stats(FI_KMALLOC, &st);
+    CHECK(st.every == 4294967295u && st.budget == 0);
+    faultinject_clear_all();
+    return true;
+}
+
 bool selftest_fault_kmalloc(const char **reason)
 {
+    if (!configure_is_strict(reason))
+        return false;
+
     /* Settle the heap: the reaper and deferred frees from earlier tests. */
     thread_sleep_ms(20);
     uint64_t base = live_objects();
