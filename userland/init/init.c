@@ -755,7 +755,7 @@ static int fpu_hold(uint8_t seed)
 }
 
 /* --trap KIND: raise a CPU exception from user mode; the kernel must end
- * this process with COSMO_EXIT_FAULT, never itself. */
+ * this process with 128 + the exception's signal, never itself. */
 static int trap_self(const char *kind)
 {
     if (strcmp(kind, "ud") == 0)
@@ -771,12 +771,16 @@ static int trap_self(const char *kind)
 
 static void trap_selftest(void)
 {
-    static const char *const kinds[] = { "ud", "gp", "de", "db" };
+    /* Each exception is its own signal (SIGILL 4, SIGSEGV 11, SIGFPE 8,
+     * SIGTRAP 5); an unhandled one ends the process with 128 + sig. */
+    static const struct { const char *kind; int status; } kinds[] = {
+        { "ud", 128 + 4 }, { "gp", 128 + 11 }, { "de", 128 + 8 }, { "db", 128 + 5 },
+    };
     for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
-        const char *argv[] = { "init", "--trap", kinds[i], NULL };
+        const char *argv[] = { "init", "--trap", kinds[i].kind, NULL };
         pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
         int status = -1;
-        CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && status == 139);
+        CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && status == kinds[i].status);
     }
     puts("usertest: user exceptions ok");
 }

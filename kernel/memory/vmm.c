@@ -521,8 +521,10 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
     /* User code touching the kernel half is fatal at once: kernel_space is
      * never selected on a user frame's behalf (a lazily mapped kernel
      * region must not be populated by an unprivileged process). */
-    if (from_user && kernel_addr && g_user_hooks != NULL)
+    if (from_user && kernel_addr && g_user_hooks != NULL) {
         g_user_hooks->fatal(addr, fl, frame);
+        return;   /* a handler frame was set up */
+    }
 
     if (kernel_addr)
         space = &kernel_space;
@@ -581,8 +583,10 @@ unserviced:
      * process; the kernel never panics on user behaviour. This includes
      * running out of memory on a demand-zero page: the process, not the
      * kernel, is what runs out. */
-    if (from_user && g_user_hooks != NULL)
+    if (from_user && g_user_hooks != NULL) {
         g_user_hooks->fatal(addr, fl, frame);
+        return;   /* a handler frame was set up */
+    }
 
     /* A kernel-mode fault on a user address inside a user copy resumes at
      * the copy's fixup, which reports -EFAULT (design.md §6.1). Kernel

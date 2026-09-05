@@ -74,7 +74,9 @@ extern struct vm_space kernel_space;
 struct arch_trap_frame;
 struct vm_user_hooks {
     struct vm_space *(*current_space)(void);              /* NULL for kernel threads */
-    void (*fatal)(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame) __noreturn;
+    /* A user fault no region services. Returns only when a signal handler
+     * frame was set up on `frame` (the trap then returns into the handler). */
+    void (*fatal)(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame);
 };
 void vm_set_user_hooks(const struct vm_user_hooks *hooks);
 

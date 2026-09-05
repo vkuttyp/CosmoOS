@@ -18,10 +18,12 @@
 #include <kernel/object.h>
 #include <kernel/percpu.h>
 #include <kernel/pipe.h>
+#include <kernel/poll.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
+#include <kernel/signal.h>
 #include <kernel/socket.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
@@ -36,6 +38,7 @@
 
 #include "convert.h"
 #include "linux_abi.h"
+#include "linux_internal.h"
 
 #define LX_BRK_MAX (1ull << 30)
 #define IOV_MAX 1024
@@ -43,10 +46,6 @@
 
 struct linux_state {
     uint64_t brk_start, brk;
-    uint64_t clear_child_tid;
-    uint64_t sigmask;
-    struct lx_sigaction act[LX_NSIG];
-    struct lx_stack_t altstack;
     unsigned unknown_syscalls;
 };
 
@@ -63,7 +62,7 @@ int linux_process_init(struct process *p, const struct elf_info *info)
     ls->brk_start = page_align_up(info->hi);
     ls->brk = ls->brk_start;
     p->linux = ls;
-    return 0;
+    return linux_sigtramp_map(p);
 }
 
 void linux_process_release(struct process *p)
@@ -72,7 +71,8 @@ void linux_process_release(struct process *p)
     p->linux = NULL;
 }
 
-unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t random_addr, uint64_t *w, unsigned max)
+unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct linux_auxv_args *x, uint64_t *w,
+                    unsigned max)
 {
     unsigned k = 0;
 #define AUX(t, v)                                                                        \
@@ -86,21 +86,30 @@ unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t ran
     AUX(LX_AT_PHENT, info->phent);
     AUX(LX_AT_PHNUM, info->phnum);
     AUX(LX_AT_PAGESZ, PAGE_SIZE);
+    AUX(LX_AT_BASE, x->interp_base);
     AUX(LX_AT_ENTRY, info->entry);
-    AUX(LX_AT_RANDOM, random_addr);
+    AUX(LX_AT_RANDOM, x->random_addr);
+    AUX(LX_AT_EXECFN, x->execfn_addr);
+    AUX(LX_AT_PLATFORM, x->platform_addr);
     AUX(LX_AT_UID, p->cred.ruid);
     AUX(LX_AT_EUID, p->cred.euid);
     AUX(LX_AT_GID, p->cred.rgid);
     AUX(LX_AT_EGID, p->cred.egid);
     AUX(LX_AT_SECURE, 0);
     AUX(LX_AT_HWCAP, 0);
+    AUX(LX_AT_HWCAP2, 0);
     AUX(LX_AT_CLKTCK, 100);
     AUX(LX_AT_NULL, 0);
 #undef AUX
     return k;
 }
 
-#if defined(ARCH_X86_64)
+/* Handlers only the x86-64 table names (AArch64 has the *at forms and
+ * ppoll instead) are compiled everywhere and unused there. */
+#ifndef __maybe_unused
+#define __maybe_unused __attribute__((unused))
+#endif
+
 /* --- helpers ------------------------------------------------------------------ */
 
 static struct linux_state *lx(void)
@@ -159,9 +168,13 @@ static int ns_from_timespec(uint64_t uptr, uint64_t *ns)
         return -EFAULT;
     if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000)
         return -EINVAL;
-    if ((uint64_t)ts.tv_sec > 3600ull * 24 * 365)
-        return -EINVAL;
-    *ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    /* Absolute wall-clock times are ~1.8e9 s; anything beyond 2^62 ns
+     * (146 years) is "never" and is clamped there so the arithmetic below
+     * and the timer's deadline cannot overflow. */
+    if ((uint64_t)ts.tv_sec >= (1ull << 62) / 1000000000ull)
+        *ns = 1ull << 62;
+    else
+        *ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
     return 0;
 }
 
@@ -272,8 +285,8 @@ static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
     return h;
 }
 
-static int64_t lx_open(struct syscall_args *a) { return do_open(a->a[0], (unsigned)a->a[1], (uint32_t)a->a[2]); }
-static int64_t lx_creat(struct syscall_args *a)
+static __maybe_unused int64_t lx_open(struct syscall_args *a) { return do_open(a->a[0], (unsigned)a->a[1], (uint32_t)a->a[2]); }
+static __maybe_unused int64_t lx_creat(struct syscall_args *a)
 {
     return do_open(a->a[0], LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, (uint32_t)a->a[1]);
 }
@@ -314,7 +327,7 @@ static int64_t stat_out(const struct cosmo_stat *st, uint64_t uptr)
     return copy_to_user(uptr, &ls, sizeof(ls)) ? -EFAULT : 0;
 }
 
-static int64_t lx_stat(struct syscall_args *a)
+static __maybe_unused int64_t lx_stat(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
@@ -410,10 +423,10 @@ static int64_t path_call(struct syscall_args *a, unsigned which, uint64_t upath)
     }
 }
 
-static int64_t lx_mkdir(struct syscall_args *a) { return path_call(a, 0, a->a[0]); }
-static int64_t lx_rmdir(struct syscall_args *a) { return path_call(a, 1, a->a[0]); }
-static int64_t lx_unlink(struct syscall_args *a) { return path_call(a, 2, a->a[0]); }
-static int64_t lx_access(struct syscall_args *a) { return path_call(a, 3, a->a[0]); }
+static __maybe_unused int64_t lx_mkdir(struct syscall_args *a) { return path_call(a, 0, a->a[0]); }
+static __maybe_unused int64_t lx_rmdir(struct syscall_args *a) { return path_call(a, 1, a->a[0]); }
+static __maybe_unused int64_t lx_unlink(struct syscall_args *a) { return path_call(a, 2, a->a[0]); }
+static __maybe_unused int64_t lx_access(struct syscall_args *a) { return path_call(a, 3, a->a[0]); }
 
 static int64_t lx_mkdirat(struct syscall_args *a)
 {
@@ -451,7 +464,7 @@ static int64_t lx_faccessat(struct syscall_args *a)
     return vfs_stat(process_current()->cwd, path, &st);
 }
 
-static int64_t lx_rename(struct syscall_args *a)
+static __maybe_unused int64_t lx_rename(struct syscall_args *a)
 {
     char oldp[VFS_PATH_MAX], newp[VFS_PATH_MAX];
     int rc = get_path(a->a[0], oldp);
@@ -528,7 +541,7 @@ static int64_t dup_to(int h, int target)
     return rc;
 }
 
-static int64_t lx_dup2(struct syscall_args *a) { return dup_to((int)a->a[0], (int)a->a[1]); }
+static __maybe_unused int64_t lx_dup2(struct syscall_args *a) { return dup_to((int)a->a[0], (int)a->a[1]); }
 static int64_t lx_dup3(struct syscall_args *a)
 {
     if ((int)a->a[0] == (int)a->a[1])
@@ -567,7 +580,7 @@ static int64_t do_pipe(uint64_t uarr, unsigned flags)
     return 0;
 }
 
-static int64_t lx_pipe(struct syscall_args *a) { return do_pipe(a->a[0], 0); }
+static __maybe_unused int64_t lx_pipe(struct syscall_args *a) { return do_pipe(a->a[0], 0); }
 static int64_t lx_pipe2(struct syscall_args *a) { return do_pipe(a->a[0], (unsigned)a->a[1]); }   /* O_CLOEXEC dropped */
 
 static int64_t lx_fcntl(struct syscall_args *a)
@@ -667,17 +680,46 @@ static int64_t lx_brk(struct syscall_args *a)
     return (int64_t)want;
 }
 
+/* Fill [base, base+len) of the caller's own new mapping from `f` at
+ * `off`: file_pread into a bounce page, copy_to_user into the region
+ * (demand-zero pages appear as the copy touches them). Bytes past the end
+ * of the file stay zero. */
+static int fill_from_file(struct file *f, uint64_t base, size_t len, uint64_t off)
+{
+    void *buf = kmalloc(PAGE_SIZE, 0);
+    if (buf == NULL)
+        return -ENOMEM;
+    int rc = 0;
+    size_t done = 0;
+    while (done < len) {
+        size_t chunk = len - done < PAGE_SIZE ? len - done : PAGE_SIZE;
+        int64_t n = file_pread(f, buf, chunk, off + done);
+        if (n < 0) {
+            rc = (int)n;
+            break;
+        }
+        if (n == 0)
+            break;   /* end of file: the rest is zero */
+        if (copy_to_user(base + done, buf, (size_t)n)) {
+            rc = -ENOMEM;   /* the region is ours and mapped: only memory can fail the copy */
+            break;
+        }
+        done += (size_t)n;
+    }
+    kfree(buf);
+    return rc;
+}
+
 static int64_t lx_mmap(struct syscall_args *a)
 {
     uint64_t hint = a->a[0];
     size_t len = (size_t)a->a[1];
     unsigned prot = (unsigned)a->a[2], flags = (unsigned)a->a[3];
+    uint64_t off = a->a[5];
     struct process *p = process_current();
     if (len == 0 || len > (size_t)(USER_HI - USER_LO))
         return -EINVAL;
     len = page_align_up(len);
-    if (!(flags & LX_MAP_ANONYMOUS))
-        return -ENODEV;   /* file mappings: the dynamic linker's stage */
     int nprot;
     if (lx_prot(prot, &nprot) < 0)
         return -EINVAL;
@@ -690,23 +732,57 @@ static int64_t lx_mmap(struct syscall_args *a)
         vprot |= VM_PROT_WRITE;
     if (nprot & COSMO_PROT_EXEC)
         vprot |= VM_PROT_EXEC;
-    uint64_t base;
-    if (flags & LX_MAP_FIXED) {
-        if (!is_page_aligned(hint) || !user_range_ok(hint, len))
+    /* A file: MAP_PRIVATE, or MAP_SHARED without PROT_WRITE, is a snapshot
+     * of the file's bytes (docs/compat/linux/design.md, "Dynamic
+     * executables"); a writable shared mapping would need page-cache-backed
+     * regions this kernel does not have. */
+    struct file *f = NULL;
+    if (!(flags & LX_MAP_ANONYMOUS)) {
+        if ((flags & LX_MAP_SHARED) && (nprot & COSMO_PROT_WRITE))
+            return -EOPNOTSUPP;
+        if (!is_page_aligned(off))
             return -EINVAL;
-        int urc = vm_user_unmap(p->space, hint, len, 0);   /* Linux replaces what was there */
-        if (urc)
-            return urc;
+        f = file_of((int)a->a[4], HANDLE_RIGHT_READ);
+        if (f == NULL)
+            return -EBADF;
+    }
+    uint64_t base;
+    int rc;
+    if (flags & LX_MAP_FIXED) {
+        if (!is_page_aligned(hint) || !user_range_ok(hint, len)) {
+            rc = -EINVAL;
+            goto out;
+        }
+        rc = vm_user_unmap(p->space, hint, len, 0);   /* Linux replaces what was there */
+        if (rc)
+            goto out;
         base = hint;
     } else {
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
         base = vm_user_find_free(p->space, from, len);
         if (base == 0 && from != USER_MMAP_BASE)
             base = vm_user_find_free(p->space, USER_MMAP_BASE, len);
-        if (base == 0)
-            return -ENOMEM;
+        if (base == 0) {
+            rc = -ENOMEM;
+            goto out;
+        }
     }
-    int rc = vm_user_map_anon(p->space, base, len, vprot, 0, "mmap");
+    rc = vm_user_map_anon(p->space, base, len, f ? VM_PROT_RW : vprot, 0, f ? "mmap-file" : "mmap");
+    if (rc)
+        goto out;
+    if (f) {
+        rc = fill_from_file(f, base, len, off);
+        if (rc == 0 && vprot != VM_PROT_RW)
+            rc = vm_user_protect(p->space, base, len, vprot);
+        if (rc) {
+            vm_user_unmap(p->space, base, len, 0);
+            goto out;
+        }
+    }
+    rc = 0;
+out:
+    if (f)
+        file_put(f);
     return rc ? rc : (int64_t)base;
 }
 
@@ -744,7 +820,6 @@ static int64_t lx_madvise(struct syscall_args *a) { (void)a; return 0; }
 
 /* --- process, identity, signals -------------------------------------------------- */
 
-static int64_t lx_exit(struct syscall_args *a) { process_exit((int)a->a[0] & 0xff); }
 static int64_t lx_getpid(struct syscall_args *a) { (void)a; return process_current()->pid; }
 static int64_t lx_getppid(struct syscall_args *a) { (void)a; return process_current()->parent_pid; }
 static int64_t lx_getuid(struct syscall_args *a) { (void)a; return process_current()->cred.ruid; }
@@ -915,15 +990,9 @@ static int64_t lx_setgroups(struct syscall_args *a)
 }
 static int64_t lx_zero(struct syscall_args *a) { (void)a; return 0; }
 static int64_t lx_nosys(struct syscall_args *a) { (void)a; return -ENOSYS; }
-static int64_t lx_getpgrp(struct syscall_args *a) { (void)a; return process_current()->pid; }
+static __maybe_unused int64_t lx_getpgrp(struct syscall_args *a) { (void)a; return process_current()->pid; }
 
-static int64_t lx_set_tid_address(struct syscall_args *a)
-{
-    lx()->clear_child_tid = a->a[0];
-    return process_current()->pid;
-}
-
-static int64_t lx_arch_prctl(struct syscall_args *a)
+static __maybe_unused int64_t lx_arch_prctl(struct syscall_args *a)
 {
     unsigned code = (unsigned)a->a[0];
     uint64_t addr = a->a[1];
@@ -966,104 +1035,33 @@ static int64_t lx_wait4(struct syscall_args *a)
     return got;
 }
 
-static int64_t lx_kill(struct syscall_args *a)
-{
-    int pid = (int)a->a[0], sig = (int)a->a[1];
-    if (pid <= 0)
-        return -ESRCH;
-    if (sig == 0) {
-        struct process *t = process_lookup((pid_t)pid);
-        if (t == NULL)
-            return -ESRCH;
-        process_put(t);
-        return 0;
-    }
-    if (sig < 1 || sig >= LX_NSIG)
-        return -EINVAL;
-    struct process *target = process_lookup((pid_t)pid);
-    if (target == NULL)
-        return -ESRCH;
-    struct process *cur = process_current();
-    int rc = 0;
-    if (!cred_may_signal(&cur->cred, &target->cred))
-        rc = -EPERM;
-    else
-        process_kill(target, sig < 32 ? sig : 9);
-    process_put(target);
-    return rc;
-}
-
-static int64_t lx_tgkill(struct syscall_args *a)
-{
-    struct syscall_args k = { .a = { a->a[1], a->a[2] } };
-    return lx_kill(&k);
-}
-
-static int64_t lx_rt_sigaction(struct syscall_args *a)
-{
-    int sig = (int)a->a[0];
-    if (sig < 1 || sig >= LX_NSIG || a->a[3] != 8)
-        return -EINVAL;
-    struct linux_state *ls = lx();
-    if (a->a[2] && copy_to_user(a->a[2], &ls->act[sig], sizeof(struct lx_sigaction)))
-        return -EFAULT;
-    if (a->a[1]) {
-        if (sig == LX_SIGKILL || sig == LX_SIGSTOP)
-            return -EINVAL;
-        struct lx_sigaction act;
-        if (copy_from_user(&act, a->a[1], sizeof(act)))
-            return -EFAULT;
-        ls->act[sig] = act;   /* stored; nothing is delivered in this phase */
-    }
-    return 0;
-}
-
-static int64_t lx_rt_sigprocmask(struct syscall_args *a)
-{
-    if (a->a[3] != 8)
-        return -EINVAL;
-    struct linux_state *ls = lx();
-    uint64_t old = ls->sigmask;
-    if (a->a[1]) {
-        uint64_t set;
-        if (copy_from_user(&set, a->a[1], 8))
-            return -EFAULT;
-        switch ((int)a->a[0]) {
-        case 0: ls->sigmask |= set; break;       /* SIG_BLOCK */
-        case 1: ls->sigmask &= ~set; break;      /* SIG_UNBLOCK */
-        case 2: ls->sigmask = set; break;        /* SIG_SETMASK */
-        default: return -EINVAL;
-        }
-    }
-    if (a->a[2] && copy_to_user(a->a[2], &old, 8))
-        return -EFAULT;
-    return 0;
-}
-
-static int64_t lx_sigaltstack(struct syscall_args *a)
-{
-    struct linux_state *ls = lx();
-    if (a->a[1] && copy_to_user(a->a[1], &ls->altstack, sizeof(ls->altstack)))
-        return -EFAULT;
-    if (a->a[0] && copy_from_user(&ls->altstack, a->a[0], sizeof(ls->altstack)))
-        return -EFAULT;
-    return 0;
-}
-
 /* --- time and misc ---------------------------------------------------------------- */
+
+/* CLOCK_REALTIME and its coarse variant read the wall clock (the RTC at
+ * boot plus the monotonic clock, kernel/timer); every other clock is the
+ * monotonic one (docs/compat/linux/design.md, "Wall clock"). */
+static bool clock_is_realtime(unsigned clk)
+{
+    return clk == LX_CLOCK_REALTIME || clk == LX_CLOCK_REALTIME_COARSE;
+}
+
+static uint64_t clock_read(unsigned clk)
+{
+    return clock_is_realtime(clk) ? clock_realtime_ns() : clock_now_ns();
+}
 
 static int64_t lx_clock_gettime(struct syscall_args *a)
 {
     unsigned clk = (unsigned)a->a[0];
     if (clk > LX_CLOCK_BOOTTIME)
         return -EINVAL;
-    return put_timespec(a->a[1], clock_now_ns());   /* no wall clock yet: every clock is monotonic */
+    return put_timespec(a->a[1], clock_read(clk));
 }
 
 static int64_t lx_gettimeofday(struct syscall_args *a)
 {
     if (a->a[0]) {
-        uint64_t ns = clock_now_ns();
+        uint64_t ns = clock_realtime_ns();
         struct lx_timeval tv = { .tv_sec = (int64_t)(ns / 1000000000ull), .tv_usec = (int64_t)(ns % 1000000000ull / 1000) };
         if (copy_to_user(a->a[0], &tv, sizeof(tv)))
             return -EFAULT;
@@ -1071,9 +1069,9 @@ static int64_t lx_gettimeofday(struct syscall_args *a)
     return 0;
 }
 
-static int64_t lx_time(struct syscall_args *a)
+static __maybe_unused int64_t lx_time(struct syscall_args *a)
 {
-    int64_t t = (int64_t)(clock_now_ns() / 1000000000ull);
+    int64_t t = (int64_t)(clock_realtime_ns() / 1000000000ull);
     if (a->a[0] && copy_to_user(a->a[0], &t, sizeof(t)))
         return -EFAULT;
     return t;
@@ -1101,7 +1099,7 @@ static int64_t lx_clock_nanosleep(struct syscall_args *a)
     if (rc)
         return rc;
     if (flags & LX_TIMER_ABSTIME) {
-        uint64_t now = clock_now_ns();
+        uint64_t now = clock_read(clk);
         ns = ns > now ? ns - now : 0;
     }
     rc = thread_sleep_ns_killable(ns);
@@ -1139,7 +1137,7 @@ static int64_t lx_uname(struct syscall_args *a)
     strlcpy(u.nodename, "cosmo", sizeof(u.nodename));
     strlcpy(u.release, "6.0.0-cosmo", sizeof(u.release));
     ksnprintf(u.version, sizeof(u.version), "%s %s %s", KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
-    strlcpy(u.machine, "x86_64", sizeof(u.machine));
+    strlcpy(u.machine, LX_MACHINE, sizeof(u.machine));
     strlcpy(u.domainname, "(none)", sizeof(u.domainname));
     return copy_to_user(a->a[0], &u, sizeof(u)) ? -EFAULT : 0;
 }
@@ -1148,27 +1146,259 @@ static int64_t lx_futex(struct syscall_args *a)
 {
     uint64_t uaddr = a->a[0];
     unsigned op = (unsigned)a->a[1] & (unsigned)LX_FUTEX_CMD_MASK;
+    bool realtime = ((unsigned)a->a[1] & LX_FUTEX_CLOCK_REALTIME) != 0;
     uint32_t val = (uint32_t)a->a[2];
     struct vm_space *space = process_current()->space;
     if (!user_range_ok(uaddr, 4))
         return -EFAULT;
     switch (op) {
-    case LX_FUTEX_WAIT: {
+    case LX_FUTEX_WAIT:
+    case LX_FUTEX_WAIT_BITSET: {
+        /* WAIT's timeout is relative (monotonic); WAIT_BITSET's is absolute
+         * on CLOCK_MONOTONIC, or CLOCK_REALTIME with the flag. The bitset is
+         * a wake filter (glibc uses MATCH_ANY); only that value is supported. */
+        if (op == LX_FUTEX_WAIT_BITSET && (uint32_t)a->a[5] != LX_FUTEX_BITSET_MATCH_ANY)
+            return -ENOSYS;
+        if (op == LX_FUTEX_WAIT && realtime)
+            return -ENOSYS;
         uint64_t timeout = 0;
         if (a->a[3]) {
             int rc = ns_from_timespec(a->a[3], &timeout);
             if (rc)
                 return rc;
+            if (op == LX_FUTEX_WAIT_BITSET) {
+                uint64_t now = realtime ? clock_realtime_ns() : clock_now_ns();
+                if (timeout <= now) {
+                    /* Already past: the value check still decides EAGAIN vs ETIMEDOUT. */
+                    uint32_t cur;
+                    if (copy_from_user(&cur, uaddr, sizeof(cur)))
+                        return -EFAULT;
+                    return cur != val ? -EAGAIN : -ETIMEDOUT;
+                }
+                timeout -= now;
+            }
             if (timeout == 0)
                 timeout = 1;
         }
         return futex_wait(space, uaddr, val, timeout);
     }
     case LX_FUTEX_WAKE:
+    case LX_FUTEX_WAKE_BITSET:
+        if (op == LX_FUTEX_WAKE_BITSET && (uint32_t)a->a[5] != LX_FUTEX_BITSET_MATCH_ANY)
+            return -ENOSYS;
         return futex_wake(space, uaddr, val);
+    case LX_FUTEX_REQUEUE:
+    case LX_FUTEX_CMP_REQUEUE: {
+        uint64_t uaddr2 = a->a[4];
+        if (!user_range_ok(uaddr2, 4))
+            return -EFAULT;
+        unsigned nr_requeue = (unsigned)a->a[3];
+        int rc = futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5]);
+        if (rc < 0)
+            return rc;
+        /* REQUEUE reports the woken only; CMP_REQUEUE woken + requeued. */
+        return op == LX_FUTEX_REQUEUE ? (rc < (int)val ? rc : (int)val) : rc;
+    }
     default:
         return -ENOSYS;
     }
+}
+
+/* --- poll, ppoll (kernel/io/poll.c) ------------------------------------------- */
+
+static unsigned poll_events_to_io(int16_t ev)
+{
+    unsigned io = 0;
+    if (ev & (LX_POLLIN | LX_POLLRDNORM | LX_POLLPRI))
+        io |= COSMO_IO_READABLE;
+    if (ev & (LX_POLLOUT | LX_POLLWRNORM))
+        io |= COSMO_IO_WRITABLE;
+    return io;
+}
+
+static int16_t poll_events_from_io(unsigned io, int16_t asked)
+{
+    int16_t ev = 0;
+    if (io & COSMO_IO_READABLE)
+        ev |= (int16_t)(asked & (LX_POLLIN | LX_POLLRDNORM | LX_POLLPRI));
+    if (io & COSMO_IO_WRITABLE)
+        ev |= (int16_t)(asked & (LX_POLLOUT | LX_POLLWRNORM));
+    if (io & COSMO_IO_HANGUP)
+        ev |= LX_POLLHUP | (int16_t)(asked & LX_POLLRDHUP);
+    if (io & COSMO_IO_ERROR)
+        ev |= LX_POLLERR;
+    return ev;
+}
+
+/* The shared body: `timeout_ns` already decided (IO_POLL_FOREVER: none). */
+static int64_t do_poll(uint64_t ufds, unsigned n, uint64_t timeout_ns)
+{
+    if (n > LX_POLL_MAX)
+        return -EINVAL;
+    struct lx_pollfd *pfds = NULL;
+    struct io_pollfd *fds = NULL;
+    if (n) {
+        pfds = kmalloc(n * sizeof(*pfds), 0);
+        fds = kmalloc(n * sizeof(*fds), KMEM_ZERO);
+        if (pfds == NULL || fds == NULL) {
+            kfree(pfds);
+            kfree(fds);
+            return -ENOMEM;
+        }
+        if (copy_from_user(pfds, ufds, n * sizeof(*pfds))) {
+            kfree(pfds);
+            kfree(fds);
+            return -EFAULT;
+        }
+    }
+    /* Resolve the handles once; a closed one is POLLNVAL at once. */
+    int nval = 0;
+    struct process *p = process_current();
+    for (unsigned i = 0; i < n; i++) {
+        pfds[i].revents = 0;
+        if (pfds[i].fd < 0)
+            continue;
+        unsigned rights;
+        struct kobject *obj = handle_get(&p->handles, pfds[i].fd, &rights);
+        if (obj == NULL || kobject_io_of(obj) == NULL) {
+            if (obj)
+                kobject_put(obj);
+            pfds[i].revents = LX_POLLNVAL;
+            nval++;
+            continue;
+        }
+        fds[i].obj = obj;
+        fds[i].events = poll_events_to_io(pfds[i].events);
+    }
+    int64_t rc;
+    if (nval) {
+        rc = io_poll(fds, n, 0) + nval;
+    } else {
+        rc = io_poll(fds, n, timeout_ns);
+    }
+    for (unsigned i = 0; i < n; i++) {
+        if (fds[i].obj) {
+            if (rc >= 0)
+                pfds[i].revents = poll_events_from_io(fds[i].revents, pfds[i].events);
+            kobject_put(fds[i].obj);
+        }
+    }
+    if (rc >= 0 && n && copy_to_user(ufds, pfds, n * sizeof(*pfds)))
+        rc = -EFAULT;
+    kfree(pfds);
+    kfree(fds);
+    return rc;
+}
+
+static __maybe_unused int64_t lx_poll(struct syscall_args *a)
+{
+    int timeout_ms = (int)a->a[2];
+    uint64_t timeout_ns = timeout_ms < 0 ? IO_POLL_FOREVER : (uint64_t)timeout_ms * 1000000ull;
+    return do_poll(a->a[0], (unsigned)a->a[1], timeout_ns);
+}
+
+/* ppoll: a timespec (NULL: forever) and a signal mask swapped in for the
+ * wait (the core's saved-mask rule restores it, or a handler's frame
+ * records it, exactly as rt_sigsuspend). */
+static int64_t lx_ppoll(struct syscall_args *a)
+{
+    uint64_t timeout_ns = IO_POLL_FOREVER;
+    if (a->a[2]) {
+        int rc = ns_from_timespec(a->a[2], &timeout_ns);
+        if (rc)
+            return rc;
+    }
+    bool swap = a->a[3] != 0;
+    uint64_t mask = 0, old = 0;
+    if (swap) {
+        if (a->a[4] != 8)
+            return -EINVAL;
+        if (copy_from_user(&mask, a->a[3], 8))
+            return -EFAULT;
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    int64_t rc = do_poll(a->a[0], (unsigned)a->a[1], timeout_ns);
+    if (swap)
+        signal_set_blocked_saved(old);
+    return rc;
+}
+
+/* --- threads: clone (the thread set only), sched_getaffinity ------------------- */
+
+static int64_t lx_clone(struct syscall_args *a)
+{
+    uint64_t flags = a->a[0] & ~0xffull;   /* the low byte is the exit signal; CLONE_THREAD ignores it */
+    uint64_t newsp = a->a[1], ptid = a->a[2];
+#if defined(ARCH_X86_64)
+    uint64_t ctid = a->a[3], tls = a->a[4];
+#else
+    uint64_t tls = a->a[3], ctid = a->a[4];   /* AArch64 swaps the last two */
+#endif
+    if (!(flags & LX_CLONE_THREAD))
+        return -ENOSYS;   /* a fork-like clone: no address-space copy exists (docs/compat/linux/design.md) */
+    if ((flags & LX_CLONE_THREAD_REQUIRED) != LX_CLONE_THREAD_REQUIRED || (flags & ~LX_CLONE_THREAD_ALLOWED))
+        return -EINVAL;   /* Linux: CLONE_THREAD needs CLONE_SIGHAND, which needs CLONE_VM */
+    if ((flags & LX_CLONE_PARENT_SETTID) && !user_range_ok(ptid, 4))
+        return -EFAULT;
+    if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) && !user_range_ok(ctid, 4))
+        return -EFAULT;
+    struct process *p = process_current();
+    struct thread *cur = thread_current();
+
+    /* The child is the caller at this instant: the same registers, the
+     * result 0, its own stack and thread pointer. */
+    struct arch_user_regs regs;
+    arch_user_regs_from_syscall(a->frame, &regs);
+    arch_user_regs_set_result(&regs, 0);
+    if (newsp)
+        arch_user_regs_set_sp(&regs, (uintptr_t)newsp);
+    uintptr_t tls_base = (flags & LX_CLONE_SETTLS) ? (uintptr_t)tls : cur->tls_base;
+
+    struct thread *t;
+    int rc = process_add_thread(p, &regs, tls_base, &t);
+    if (rc)
+        return rc;
+    uint32_t tid = t->lx_tid;
+    if (flags & LX_CLONE_CHILD_CLEARTID)
+        t->clear_child_tid = ctid;
+    /* The tid words are written before the child can run: a joiner that
+     * reads the word right after clone returns sees the tid or 0, never
+     * the stale value racing the child's exit. */
+    if (((flags & LX_CLONE_PARENT_SETTID) && copy_to_user(ptid, &tid, sizeof(tid))) ||
+        ((flags & LX_CLONE_CHILD_SETTID) && copy_to_user(ctid, &tid, sizeof(tid)))) {
+        process_thread_abandon(t);
+        return -EFAULT;
+    }
+    process_thread_start(t);
+    return tid;
+}
+
+/* Accepted and ignored: threads run on any CPU (docs/compat/linux/design.md). */
+static int64_t lx_sched_setaffinity(struct syscall_args *a)
+{
+    if (a->a[1] < sizeof(uint64_t) || !user_range_ok(a->a[2], sizeof(uint64_t)))
+        return -EINVAL;
+    return 0;
+}
+
+static int64_t lx_sched_getaffinity(struct syscall_args *a)
+{
+    int pid = (int)a->a[0];
+    size_t len = (size_t)a->a[1];
+    struct process *cur = process_current();
+    if (pid != 0 && (uint32_t)pid != cur->pid && process_find_thread(cur, (uint32_t)pid) == NULL) {
+        struct process *other = process_lookup((pid_t)pid);
+        if (other == NULL)
+            return -ESRCH;
+        process_put(other);   /* every process may run on every CPU: one answer */
+    }
+    if (len < sizeof(uint64_t))
+        return -EINVAL;
+    uint64_t mask = cpu_online_mask();
+    if (copy_to_user(a->a[2], &mask, sizeof(mask)))
+        return -EFAULT;
+    return (int64_t)sizeof(mask);
 }
 
 /* --- sockets ----------------------------------------------------------------------- */
@@ -1423,11 +1653,17 @@ static int64_t lx_unknown(struct syscall_args *a)
 static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_read] = lx_read,
     [LX_write] = lx_write,
+#ifdef LX_open
     [LX_open] = lx_open,
+#endif
     [LX_close] = lx_close,
+#ifdef LX_stat
     [LX_stat] = lx_stat,
+#endif
     [LX_fstat] = lx_fstat,
+#ifdef LX_lstat
     [LX_lstat] = lx_stat,
+#endif
     [LX_lseek] = lx_lseek,
     [LX_mmap] = lx_mmap,
     [LX_mprotect] = lx_mprotect,
@@ -1435,17 +1671,34 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_brk] = lx_brk,
     [LX_rt_sigaction] = lx_rt_sigaction,
     [LX_rt_sigprocmask] = lx_rt_sigprocmask,
+    [LX_rt_sigreturn] = lx_rt_sigreturn,
+    [LX_rt_sigpending] = lx_rt_sigpending,
+    [LX_rt_sigsuspend] = lx_rt_sigsuspend,
+#ifdef LX_pause
+    [LX_pause] = lx_pause,
+#endif
+#ifdef LX_poll
+    [LX_poll] = lx_poll,
+#endif
+    [LX_ppoll] = lx_ppoll,
+    [LX_tkill] = lx_tkill,
     [LX_ioctl] = lx_ioctl,
     [LX_pread64] = lx_pread64,
     [LX_pwrite64] = lx_pwrite64,
     [LX_readv] = lx_readv,
     [LX_writev] = lx_writev,
+#ifdef LX_access
     [LX_access] = lx_access,
+#endif
+#ifdef LX_pipe
     [LX_pipe] = lx_pipe,
+#endif
     [LX_sched_yield] = lx_sched_yield,
     [LX_madvise] = lx_madvise,
     [LX_dup] = lx_dup,
+#ifdef LX_dup2
     [LX_dup2] = lx_dup2,
+#endif
     [LX_nanosleep] = lx_nanosleep,
     [LX_getpid] = lx_getpid,
     [LX_socket] = lx_socket,
@@ -1460,9 +1713,13 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getpeername] = lx_getpeername,
     [LX_setsockopt] = lx_setsockopt,
     [LX_getsockopt] = lx_getsockopt,
-    [LX_clone] = lx_nosys,
+    [LX_clone] = lx_clone,
+#ifdef LX_fork
     [LX_fork] = lx_nosys,
+#endif
+#ifdef LX_vfork
     [LX_vfork] = lx_nosys,
+#endif
     [LX_execve] = lx_nosys,
     [LX_exit] = lx_exit,
     [LX_wait4] = lx_wait4,
@@ -1473,12 +1730,24 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_fdatasync] = lx_fsync,
     [LX_getcwd] = lx_getcwd,
     [LX_chdir] = lx_chdir,
+#ifdef LX_rename
     [LX_rename] = lx_rename,
+#endif
+#ifdef LX_mkdir
     [LX_mkdir] = lx_mkdir,
+#endif
+#ifdef LX_rmdir
     [LX_rmdir] = lx_rmdir,
+#endif
+#ifdef LX_creat
     [LX_creat] = lx_creat,
+#endif
+#ifdef LX_unlink
     [LX_unlink] = lx_unlink,
+#endif
+#ifdef LX_readlink
     [LX_readlink] = lx_nosys,
+#endif
     [LX_umask] = lx_umask,
     [LX_gettimeofday] = lx_gettimeofday,
     [LX_getrlimit] = lx_getrlimit,
@@ -1499,21 +1768,28 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getresgid] = lx_getresgid,
     [LX_setpgid] = lx_zero,
     [LX_getppid] = lx_getppid,
+#ifdef LX_getpgrp
     [LX_getpgrp] = lx_getpgrp,
+#endif
     [LX_setsid] = lx_getpgrp,
     [LX_sigaltstack] = lx_sigaltstack,
+#ifdef LX_arch_prctl
     [LX_arch_prctl] = lx_arch_prctl,
+#endif
     [LX_setrlimit] = lx_setrlimit,
     [LX_sync] = lx_sync,
-    [LX_gettid] = lx_getpid,
+    [LX_gettid] = lx_gettid,
+#ifdef LX_time
     [LX_time] = lx_time,
+#endif
     [LX_futex] = lx_futex,
-    [LX_sched_getaffinity] = lx_nosys,
+    [LX_sched_setaffinity] = lx_sched_setaffinity,
+    [LX_sched_getaffinity] = lx_sched_getaffinity,
     [LX_getdents64] = lx_getdents64,
     [LX_set_tid_address] = lx_set_tid_address,
     [LX_clock_gettime] = lx_clock_gettime,
     [LX_clock_nanosleep] = lx_clock_nanosleep,
-    [LX_exit_group] = lx_exit,
+    [LX_exit_group] = lx_exit_group,
     [LX_tgkill] = lx_tgkill,
     [LX_openat] = lx_openat,
     [LX_mkdirat] = lx_mkdirat,
@@ -1556,20 +1832,6 @@ const struct personality personality_linux = {
     .name = "linux",
     .table = g_table,
     .count = LX_NR_MAX,
+    .signal_frame = linux_signal_frame,
+    .thread_exit = linux_thread_exit,
 };
-#else
-/* Other architectures have no Linux system-call table yet (the AArch64
- * numbers differ from x86-64's: docs/compat/linux/design.md). A Linux
- * program runs until its first system call, which the dispatcher reports
- * as unknown and answers -ENOSYS. */
-static const syscall_fn g_none_table[1];
-static const syscall_fn *linux_table_get(void)
-{
-    return g_none_table;
-}
-const struct personality personality_linux = {
-    .name = "linux",
-    .table = g_none_table,
-    .count = 0,
-};
-#endif

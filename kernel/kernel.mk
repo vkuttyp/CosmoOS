@@ -60,8 +60,11 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/pipetest.c \
 	kernel/ipc/futex.c \
 	kernel/io/aio.c \
+	kernel/io/poll.c \
+	kernel/io/polltest.c \
 	compat/linux/convert.c \
 	compat/linux/syscalls.c \
+	compat/linux/signal.c \
 	kernel-services/virtualization/vmm.c \
 	kernel-services/virtualization/vm.c \
 	kernel-services/virtualization/guestmem.c \
@@ -74,6 +77,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/process/cred.c \
 	kernel/process/process.c \
 	kernel/process/spawn.c \
+	kernel/process/signal.c \
 	kernel/process/proctest.c \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \

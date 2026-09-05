@@ -7,7 +7,10 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/process.h>
+#include <kernel/signal.h>
 #include <kernel/syscall.h>
+#include <kernel/thread.h>
+#include <arch/user.h>
 
 #include <arch/irq.h>
 
@@ -39,9 +42,20 @@ int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
         .a = { args[0], args[1], args[2], args[3], args[4], args[5] },
         .frame = frame,
     };
+    struct thread *t = thread_current();
+    t->syscall_nr = nr;
+    t->syscall_arg0 = args[0];
     process_check_kill();
     int64_t rc = pers->table[nr](&a);
-    process_check_kill();
+    /* A signal that arrived (or a kill, or an exiting process) is acted
+     * on here, on the system-call frame: a handler frame, a restart of an
+     * interrupted call, or the end of the process. The result register is
+     * set first so the frame the handler returns into carries it. */
+    if (signal_pending()) {
+        arch_user_regs_set_result_in_frame(frame, rc);
+        signal_deliver(frame, true);
+        rc = arch_user_regs_result_in_frame(frame);
+    }
     return rc;
 }
 

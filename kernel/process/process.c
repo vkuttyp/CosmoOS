@@ -14,6 +14,7 @@
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
+#include <kernel/signal.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
@@ -70,6 +71,8 @@ static void process_release(struct kobject *obj)
         process_put(p->parent);
     if (p->linux)
         linux_process_release(p);
+    signal_process_release(p);
+    kfree(p->sig_shared_info);
 
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     list_remove(&p->all_link);
@@ -93,22 +96,20 @@ static struct vm_space *hook_current_space(void)
     return p ? p->space : NULL;
 }
 
-static void hook_fatal(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame) __noreturn;
+/* A user fault no region services: SIGSEGV on the faulting thread, with
+ * the frame at hand (a handler runs on it, or the process ends). */
 static void hook_fatal(uint64_t addr, unsigned fault_flags, struct arch_trap_frame *frame)
 {
     struct process *p = process_current();
     KASSERT(p != NULL);
-    kwarn("process: pid %u '%s' fault: %s %s at %p (%s); terminating", p->pid, p->name,
-          (fault_flags & VM_FAULT_USER) ? "user" : "kernel",
-          (fault_flags & VM_FAULT_EXEC) ? "execute" : (fault_flags & VM_FAULT_WRITE) ? "write" : "read",
-          (void *)(uintptr_t)addr, (fault_flags & VM_FAULT_PRESENT) ? "protection" : "not present");
-    (void)frame;
-    /* The fault arrived with interrupts disabled on this thread's kernel
-     * stack; thread_exit needs a preemptible context. A user-mode frame
-     * always has IF set, so enabling here restores the state that was
-     * in effect before the trap. */
-    arch_irq_enable();
-    process_exit(COSMO_EXIT_FAULT);
+    kdebug("process: pid %u '%s' fault: %s %s at %p (%s)", p->pid, p->name,
+           (fault_flags & VM_FAULT_USER) ? "user" : "kernel",
+           (fault_flags & VM_FAULT_EXEC) ? "execute" : (fault_flags & VM_FAULT_WRITE) ? "write" : "read",
+           (void *)(uintptr_t)addr, (fault_flags & VM_FAULT_PRESENT) ? "protection" : "not present");
+    /* Linux's SEGV_MAPERR / SEGV_ACCERR distinction rides in `code`. */
+    struct signal_info info = { .sig = SIGSEGV, .source = SIGSRC_FAULT, .fault_addr = addr,
+                                .code = (fault_flags & VM_FAULT_PRESENT) ? 2u : 1u };
+    signal_fault_info(&info, frame);
 }
 
 static const struct vm_user_hooks g_hooks = {
@@ -139,10 +140,22 @@ static void user_exception_handler(unsigned vector, struct arch_trap_frame *fram
         arch_trap_unhandled(vector, frame);
         return;
     }
+    int sig = SIGSEGV;
+    if (vector == (unsigned)arch_trap_vector(ARCH_TRAP_DIVIDE_ERROR))
+        sig = SIGFPE;
+    else if (vector == (unsigned)arch_trap_vector(ARCH_TRAP_INVALID_OPCODE))
+        sig = SIGILL;
+    else if (vector == (unsigned)arch_trap_vector(ARCH_TRAP_DEBUG))
+        sig = SIGTRAP;
     if (p->kill_sig == 0)
-        kwarn("process: pid %u '%s' %s at %p; terminating", p->pid, p->name, arch_trap_name(vector),
-              (void *)arch_trap_frame_pc(frame));
-    process_kill(p, PROCESS_FAULT_SIGNAL);
+        kdebug("process: pid %u '%s' %s at %p: signal %d", p->pid, p->name, arch_trap_name(vector),
+               (void *)arch_trap_frame_pc(frame), sig);
+    /* Queued, not delivered here: the exception may have arrived on the
+     * paranoid path (#DB), interrupt context on an IST stack; the
+     * return-to-user hook or the next tick delivers it (a handler, or the
+     * default termination with 128 + sig; SIGSEGV's is COSMO_EXIT_FAULT). */
+    struct signal_info info = { .sig = sig, .source = SIGSRC_FAULT, .fault_addr = arch_trap_frame_pc(frame) };
+    signal_send_thread(thread_current(), sig, &info);
 }
 
 void process_init(void)
@@ -169,6 +182,12 @@ void process_init(void)
 #define INITIAL_STACK_PAGES 2u
 #define INITIAL_STRINGS_MAX 300u
 
+#if defined(ARCH_X86_64)
+#define LINUX_PLATFORM "x86_64"
+#else
+#define LINUX_PLATFORM "aarch64"
+#endif
+
 /*
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
  * stack, writing through the direct map into the populated top pages.
@@ -177,7 +196,8 @@ void process_init(void)
  * frame does not fit.
  */
 static uint64_t build_initial_stack(struct process *p, const struct elf_info *info, uint64_t stack_top,
-                                    const char *const argv[], const char *const envp[])
+                                    const char *const argv[], const char *const envp[], const char *execfn,
+                                    uint64_t interp_base)
 {
     unsigned argc = 0, envc = 0;
     size_t strings = 0;
@@ -187,6 +207,8 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
         strings += strlen(envp[envc]) + 1;
     if (argc + envc > INITIAL_STRINGS_MAX)
         return 0;
+    const char *platform = LINUX_PLATFORM;   /* AT_PLATFORM: the string Linux gives on this machine */
+    strings += strlen(execfn) + 1 + strlen(platform) + 1;
     const size_t span = INITIAL_STACK_PAGES * PAGE_SIZE;
     /* words: argc, argv[argc+1], envp[envc+1], auxv (up to 20 pairs) */
     size_t words = 1 + (argc + 1) + (envc + 1) + 40;
@@ -215,6 +237,20 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
             *AT(sp + k) = (uint8_t)str[k];
         str_addrs[i] = sp;
     }
+    /* AT_EXECFN and AT_PLATFORM strings (Linux); harmless for native. */
+    uint64_t execfn_addr, platform_addr;
+    {
+        size_t n = strlen(execfn) + 1;
+        sp -= n;
+        for (size_t k = 0; k < n; k++)
+            *AT(sp + k) = (uint8_t)execfn[k];
+        execfn_addr = sp;
+        n = strlen(platform) + 1;
+        sp -= n;
+        for (size_t k = 0; k < n; k++)
+            *AT(sp + k) = (uint8_t)platform[k];
+        platform_addr = sp;
+    }
     /* 16 random bytes for AT_RANDOM (Linux); harmless for native. */
     sp -= 16;
     sp &= ~0xFULL;
@@ -237,7 +273,9 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
         w[k++] = str_addrs[argc + i];
     w[k++] = 0;
     if (p->pers == &personality_linux) {
-        k += linux_auxv(p, info, random_addr, w + k, 40);
+        struct linux_auxv_args x = { .random_addr = random_addr, .execfn_addr = execfn_addr,
+                                     .platform_addr = platform_addr, .interp_base = interp_base };
+        k += linux_auxv(p, info, &x, w + k, 40);
     } else {
         w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
         w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
@@ -264,6 +302,15 @@ static void user_thread_main(void *arg)
 {
     struct thread *self = thread_current();
     (void)arg;
+    if (self->init_regs) {
+        /* A clone: every register comes from the creator's frame. */
+        struct arch_user_regs regs = *self->init_regs;
+        kfree(self->init_regs);
+        self->init_regs = NULL;
+        arch_user_enter_regs(&regs);
+    }
+    if (self->user_entry == 0)
+        process_thread_exit(0);   /* abandoned by its creator before it ran */
     arch_user_enter(self->user_entry, self->user_sp);
 }
 
@@ -302,12 +349,42 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
                             const char *const envp[], const struct process_spawn_attr *attr, struct process **out)
 {
-    struct elf_info info;
+    struct process_image exe = { .data = image, .size = size, .path = name ? name : "?" };
+    return process_create_from_images(&exe, NULL, name, argv, envp, attr, out);
+}
+
+int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name,
+                               const char *const argv[], const char *const envp[],
+                               const struct process_spawn_attr *attr, struct process **out)
+{
+    struct elf_info info, iinfo;
     const char *why = NULL;
-    int rc = elf_validate(image, size, USER_LO, USER_HI, &info, &why);
+    int rc = elf_validate(exe->data, exe->size, USER_LO, USER_HI, &info, &why);
     if (rc) {
         kwarn("process: '%s' rejected: %s", name ? name : "?", why ? why : "?");
         return rc;
+    }
+    if (info.is_dyn) {
+        elf_rebase(&info, USER_PIE_BASE);
+        if (info.hi > USER_HI || info.hi < info.lo) {
+            kwarn("process: '%s' rejected: PIE does not fit at its base", name ? name : "?");
+            return -ENOEXEC;
+        }
+    }
+    if (info.has_interp && interp == NULL) {
+        kwarn("process: '%s' rejected: needs the interpreter %s", name ? name : "?", info.interp);
+        return -ENOEXEC;
+    }
+    if (interp) {
+        rc = elf_validate(interp->data, interp->size, USER_LO, USER_HI, &iinfo, &why);
+        if (rc) {
+            kwarn("process: '%s' rejected: interpreter %s: %s", name ? name : "?", interp->path, why ? why : "?");
+            return rc;
+        }
+        if (iinfo.has_interp) {
+            kwarn("process: '%s' rejected: interpreter %s names an interpreter itself", name ? name : "?", interp->path);
+            return -ENOEXEC;
+        }
     }
 
     struct process *p = kmem_cache_alloc(g_process_cache, KMEM_ZERO);
@@ -367,17 +444,50 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         strlcpy(p->cwd_path, "/", sizeof(p->cwd_path));
     }
 
+    rc = signal_process_init(p);
+    if (rc)
+        goto fail;
+    p->sig_shared_info = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
+    if (p->sig_shared_info == NULL) {
+        rc = -ENOMEM;
+        goto fail;
+    }
+
     rc = vm_space_create_user(&p->space);
     if (rc)
         goto fail;
     apply_space_limits(p);
 
-    rc = elf_load_into(p->space, image, &info);
+    rc = elf_load_into(p->space, exe->data, &info);
     if (rc) {
         kwarn("process: '%s' load failed (%d)", p->name, rc);
         goto fail;
     }
     p->image_end = info.hi;
+    uint64_t entry = info.entry;
+    p->exec_entry = info.entry;
+    if (interp) {
+        /* The interpreter: an ET_DYN one at the first free range at or
+         * above USER_INTERP_BASE, an ET_EXEC one where it was linked. */
+        if (iinfo.is_dyn) {
+            uint64_t base = vm_user_find_free(p->space, USER_INTERP_BASE, (size_t)(iinfo.hi - iinfo.lo));
+            if (base == 0) {
+                rc = -ENOMEM;
+                goto fail;
+            }
+            elf_rebase(&iinfo, base);
+            p->interp_base = base;
+        }
+        rc = elf_load_into(p->space, interp->data, &iinfo);
+        if (rc) {
+            kwarn("process: '%s' interpreter load failed (%d)", p->name, rc);
+            goto fail;
+        }
+        entry = iinfo.entry;
+        if (iinfo.hi > p->image_end)
+            p->image_end = iinfo.hi;
+    }
+    strlcpy(p->exec_path, exe->path, sizeof(p->exec_path));
     if (p->pers == &personality_linux) {
         rc = linux_process_init(p, &info);
         if (rc)
@@ -405,7 +515,7 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         p->space->anon_pages++;
     }
 
-    uint64_t sp = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp);
+    uint64_t sp = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp, p->exec_path, p->interp_base);
     if (sp == 0) {
         rc = -EINVAL; /* argument/environment strings do not fit the initial pages */
         goto fail;
@@ -463,13 +573,24 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         thread_put(t);
         goto fail_registered;
     }
+    t->sig_info = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
+    if (t->sig_info == NULL) {
+        t->state = THREAD_EXITED;
+        thread_put(t);
+        thread_put(t);
+        rc = -ENOMEM;
+        goto fail_registered;
+    }
     t->proc = p;
     process_get(p);
-    t->user_entry = (uintptr_t)info.entry;
+    t->user_entry = (uintptr_t)entry;   /* the interpreter's when there is one */
     t->user_sp = (uintptr_t)sp;
+    t->lx_tid = p->pid;   /* the main thread's Linux tid is the pid */
     s = spin_lock_irqsave(&p->lock);
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads = 1;
+    p->nr_live = 1;
+    p->main_thread = t;
     spin_unlock_irqrestore(&p->lock, s);
     thread_put(t); /* the creator's thread reference; the process owns it now */
 
@@ -501,11 +622,21 @@ fail:
         vnode_put(p->cwd);
     if (p->linux)
         linux_process_release(p);
+    signal_process_release(p);
+    kfree(p->sig_shared_info);
     kmem_cache_free(g_process_cache, p);
     return rc;
 }
 
 /* --- exit --- */
+
+/* p->lock held. The calling thread is leaving: run the personality's hook
+ * (outside the lock, so the caller does it first), count it out. */
+static void leaving_locked(struct process *p)
+{
+    if (p->nr_live > 0)
+        p->nr_live--;
+}
 
 void process_exit(int status)
 {
@@ -513,16 +644,111 @@ void process_exit(int status)
     struct process *p = self->proc;
     KASSERT(p != NULL);
 
+    if (p->pers->thread_exit)
+        p->pers->thread_exit(self);
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     if (p->state == PROCESS_RUNNING) {
         p->state = PROCESS_EXITING;
         p->exit_status = status;
     }
+    leaving_locked(p);
+    /* Every other thread leaves at its next return to user mode or
+     * killable wait: process_kill_pending is true from here. */
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link)
+        if (t != self)
+            sched_wake(t);
     spin_unlock_irqrestore(&p->lock, s);
-
-    /* Only one thread per process in this phase; when there are more,
-     * the others are signalled here. */
     thread_exit(status);
+}
+
+void process_thread_exit(int status)
+{
+    struct thread *self = thread_current();
+    struct process *p = self->proc;
+    KASSERT(p != NULL);
+    if (p->pers->thread_exit)
+        p->pers->thread_exit(self);
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    leaving_locked(p);
+    bool last = p->nr_live == 0;
+    if (last && p->state == PROCESS_RUNNING) {
+        p->state = PROCESS_EXITING;
+        p->exit_status = status;
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    thread_exit(status);
+}
+
+int process_add_thread(struct process *p, const struct arch_user_regs *regs, uintptr_t tls, struct thread **out)
+{
+    struct thread *cur = thread_current();
+    struct thread *t = thread_prepare(user_thread_main, NULL, p->name, SCHED_PRIO_DEFAULT, 0);
+    if (t == NULL)
+        return -ENOMEM;
+    int rc = arch_fpu_alloc(t);
+    struct arch_user_regs *copy = kmalloc(sizeof(*copy), 0);
+    struct signal_info *si = kzalloc((size_t)SIG_MAX * sizeof(struct signal_info));
+    if (rc || copy == NULL || si == NULL) {
+        kfree(copy);
+        kfree(si);
+        t->state = THREAD_EXITED;
+        thread_put(t);
+        thread_put(t);
+        return rc ? rc : -ENOMEM;
+    }
+    *copy = *regs;
+    t->init_regs = copy;
+    t->sig_info = si;
+    t->tls_base = tls;
+    t->sig_blocked = cur->sig_blocked;   /* inherited, as on Linux */
+    t->proc = p;
+    process_get(p);
+    t->lx_tid = 0x10000u + t->tid;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->state != PROCESS_RUNNING || p->nr_live >= PROCESS_MAX_THREADS) {
+        spin_unlock_irqrestore(&p->lock, s);
+        process_put(p);
+        t->proc = NULL;
+        t->state = THREAD_EXITED;
+        thread_put(t);
+        thread_put(t);
+        return -EAGAIN;
+    }
+    list_push_back(&p->threads, &t->proc_link);
+    p->nr_threads++;
+    p->nr_live++;
+    spin_unlock_irqrestore(&p->lock, s);
+    *out = t;   /* the creator's reference travels to process_thread_start */
+    return 0;
+}
+
+void process_thread_start(struct thread *t)
+{
+    thread_put(t);   /* the creator's reference; the process owns it from here */
+    sched_enqueue_new(t);
+}
+
+void process_thread_abandon(struct thread *t)
+{
+    kfree(t->init_regs);
+    t->init_regs = NULL;
+    t->user_entry = 0;   /* user_thread_main exits it at once */
+    process_thread_start(t);
+}
+
+struct thread *process_find_thread(struct process *p, uint32_t lx_tid)
+{
+    struct thread *t, *found = NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    list_for_each_entry(t, &p->threads, proc_link) {
+        if (t->lx_tid == lx_tid && t->state != THREAD_EXITED) {
+            found = t;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    return found;
 }
 
 static struct process *g_init;   /* referenced; set by process_set_init */
@@ -709,25 +935,30 @@ void process_kill(struct process *p, int sig)
 
 bool process_kill_pending(void)
 {
-    struct process *p = process_current();
-    return p != NULL && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0;
+    /* A kill, an exiting process, or a deliverable signal: every killable
+     * wait returns -EINTR and the return to user mode acts on it. */
+    return signal_pending();
 }
 
 void process_check_kill(void)
 {
     struct process *p = process_current();
-    if (p && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0)
+    if (p && (__atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 ||
+              __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING))
         process_exit(p->exit_status);
 }
 
-void process_return_to_user(void)
+void process_return_to_user(struct arch_trap_frame *frame)
 {
     struct process *p = process_current();
-    if (p && __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0) {
-        /* The trap tail runs with interrupts off; a user frame had them on. */
-        arch_irq_enable();
-        process_exit(p->exit_status);
-    }
+    if (p == NULL || !signal_pending())
+        return;
+    /* The trap tail runs with interrupts off; a user frame had them on.
+     * Delivery may fault on user memory or end the process; it gets them
+     * back off before the tail swaps GS and returns. */
+    arch_irq_enable();
+    signal_deliver(frame, false);
+    arch_irq_disable();
 }
 
 /*
