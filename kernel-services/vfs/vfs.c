@@ -40,12 +40,15 @@ static void vnode_release(struct kobject *obj)
      * lookup can find it now; the release takes no mount lock. */
     KASSERT(list_empty(&vn->hash_link));
 
+    /* A vnode whose filesystem gave up between vnode_alloc and setting
+     * `ops` (an allocation failed) is released with ops NULL: found by
+     * fault-kmalloc as a NULL dereference in ramfs_new's failure path. */
     if (vn->type == VNODE_REG) {
-        if (vn->pc.nr_dirty && vn->ops->writepage)
+        if (vn->pc.nr_dirty && vn->ops && vn->ops->writepage)
             pagecache_sync(vn);
         pagecache_drop(vn);
     }
-    if (vn->ops->evict)
+    if (vn->ops && vn->ops->evict)
         vn->ops->evict(vn);
     kfree(vn);
 }
