@@ -36,6 +36,11 @@ jobs:
         os: [ubuntu-24.04]
         arch: [x86_64, aarch64]
     timeout-minutes: 30
+    env:
+      # SIGNING=dev generates an ephemeral signing key here on first use; it
+      # lives only in this job's filesystem and is never uploaded (the
+      # artifact paths below are all under out/).
+      COSMO_KEYDIR: /tmp/cosmo-ci-keys
 
     steps:
       - name: Install cross toolchain and test tools
@@ -55,7 +60,7 @@ jobs:
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Verify toolchain
+      - name: Verify toolchain and that no signing secret is tracked
         run: make ARCH=${{ matrix.arch }} check-tools
 
       - name: Build (debug)

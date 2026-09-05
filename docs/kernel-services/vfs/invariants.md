@@ -112,11 +112,20 @@ fills a kernel buffer of at most 64 KiB and copies out; `stat` structures
 are copied out. Check: init's `fs_selftest` (`-EFAULT` for a bad path
 pointer). Gap: none.
 
-**V14. Permission bits are stored, not enforced; `mount`/`umount` are
-uid 0 only.** `mode`, `uid`, `gid` travel through `stat` and cosmofs
-inodes; no access check exists yet (security phase). Check: init runs
-as uid 0 and mounts; review. Gap: the `-EPERM` path has no test until a
-non-root process exists.
+**V14. Every namespace operation is checked against the caller's
+credentials by `vfs_permission`; `mount`/`umount` need
+`cred_privileged`.** Search on each directory entered, write and search
+on the parent of a mutation, read/write on an opened file per its mode
+(a just-created file excepted), execute for spawn; root passes all but
+execute without any x bit; new vnodes take their creator's effective
+ids. Check: `init --selftest` spawns `init --unpriv-test`, which drops
+to uid 1000 and is refused `/dev/vmm`, a 0700 root directory, writing or
+unlinking a 0644 root file, creating in a 0755 root directory,
+executing a 0600 file, `mount`, `umount`, signalling root's process, and
+the kernel log, while creating its own files in `/tmp` (owned 1000:1000)
+and running `/bin/true` succeed, and root's entry in the sticky `/tmp`
+cannot be unlinked or renamed by it. Gap: `chmod`/`chown`; no
+group-permission test (no process holds a supplementary group yet).
 
 **V15. Data written to a file reaches the filesystem only through
 `writepage`, and cosmofs never leaves a hole inside a file's mapped

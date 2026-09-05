@@ -6,19 +6,26 @@ feature rejection end in status FAILED and `-ENOTSUP`; no queue is set
 up. Check: every boot logs the negotiated features for three devices.
 Gap: no test presents a legacy-only or feature-rejecting device.
 
-**V2. Nothing the device writes is used unchecked.** Used ids below the
-queue size and backed by a cookie, chain walks length-guarded, config
-reads bounded by the DEVICE window and generation-stable, NOTIFY writes
-inside the NOTIFY window, queue vectors confirmed by read-back. Check:
-review of `virtq_pop`, `vpci_read_config`, `vpci_notify`,
-`vpci_setup_queue`. Bad and duplicate ids for heads that are not in
-flight are skipped and counted (`vq->bad_used`) without stopping the
-drain. Gap: no fault injection of a hostile used ring; and a duplicate
-completion naming a head that has since been legitimately reused is
-indistinguishable from a valid one at this layer (the split ring carries
-no generation), so such a device can corrupt its own driver's requests.
-Containing that needs per-request generation tags in the driver
-(virtio_blk could compare the slot's expected head) and is future work.
+**V2. Nothing the device writes is used unchecked, and nothing in the
+shared allocation is read to make a decision except the used ring.**
+The descriptor table is write-only for the driver: the free list, every
+chain link and every chain length live in driver-private arrays
+(`shadow_next`, `chain_len`, `in_bytes`), so a `next` field the device
+rewrites (self-loop, cycle, out of range, into a free descriptor) has no
+effect on what the driver builds or reclaims. Used ids are checked
+against those records (below the queue size, in flight, not a
+duplicate), a reported `len` is clamped to the chain's writable bytes,
+config reads are bounded by the DEVICE window and generation-stable,
+NOTIFY writes stay inside the NOTIFY window, queue vectors are confirmed
+by read-back. Check: `tests/host/test_virtq.c` drives the real
+`virtqueue.c` with a hostile peer under ASan/UBSan; review of
+`vpci_read_config`, `vpci_notify`, `vpci_setup_queue`. Bad elements are
+skipped and counted (`vq->bad_used`) without stopping the drain. Gap: a
+duplicate completion naming a head that has since been legitimately
+reused is indistinguishable from a valid one at this layer (the split
+ring carries no generation), so such a device can corrupt its own
+driver's requests; containing that needs per-request generation tags in
+the driver and is future work.
 
 **V3. Every bus address in a descriptor came from `dma_alloc` or
 `dma_map`.** Rings and per-request headers are `dma_alloc`ed; bio data
@@ -29,8 +36,9 @@ Gap: `virtq_add` cannot verify the addresses it is given.
 **V4. `virtq_add` never publishes a partial chain, and `avail->idx` is
 bumped after a release fence.** Free-list bookkeeping and the ring write
 happen under the queue spinlock. Check: every boot (block I/O
-completes correctly under `blk`). Gap: no host test drives the ring
-logic without a device (planned `test_virtq`).
+completes correctly under `blk`); `test_virtq` (normal, boundary, full
+and empty chains, 500 rounds of out-of-order completions leave the free
+list exact).
 
 **V5. One MSI-X vector per interrupt-driven queue, entry 0 for
 configuration changes; a polled queue has `VIRTIO_MSI_NO_VECTOR`.**

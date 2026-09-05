@@ -2,8 +2,9 @@
 #
 # A module is an ET_REL object: its sources are compiled with the kernel
 # flags (same code model, same freestanding rules, plus -DCOSMO_MODULE_BUILD),
-# merged with `ld.lld -r`, and signed by scripts/modsign.py with the
-# development key. The archive entries below name where each module goes
+# merged with `ld.lld -r`, and signed by scripts/modsign.py with
+# $(MODSIGN_KEY) (build/config.mk: the per-machine developer key, or the
+# release key). The archive entries below name where each module goes
 # in the boot archive: modules/ entries load at boot in this order,
 # tests/ entries are loaded by the self-tests only.
 #
@@ -14,8 +15,14 @@ MODULE_CFLAGS := $(KERNEL_CFLAGS) -DCOSMO_MODULE_BUILD=1
 MODULE_LDFLAGS := -r --no-dynamic-linker -z noexecstack --build-id=none
 MODULE_OUT := $(OUT)/modules
 
-MODSIGN_KEY ?= $(ROOT)/tools/keys/cosmo-dev.key
 MODSIGN := $(PYTHON) $(ROOT)/scripts/modsign.py
+
+# SIGNING=dev: the key pair appears on first use, outside the tree. Both
+# files come from one keygen run, so one rule makes both.
+ifeq ($(SIGNING),dev)
+$(MODSIGN_KEY) $(SIGNING_PUB) &: $(ROOT)/scripts/devkey.sh $(ROOT)/scripts/modsign.py
+	$(Q)PYTHON=$(PYTHON) $(ROOT)/scripts/devkey.sh ensure $(COSMO_KEYDIR)
+endif
 
 MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net cosmotest cosmotest_dep cosmotest_fail
 

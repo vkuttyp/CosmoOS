@@ -57,12 +57,12 @@ USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
 	etc/rc=$(ROOT)/userland/etc/rc \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
-	etc/pkg/keys/cosmo-dev.pub=$(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
+	etc/pkg/keys/$(notdir $(PKG_TRUST_PUB))=$(PKG_TRUST_PUB)
 ifeq ($(SELFTEST),1)
 USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
-	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
+	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB)
 
 .PHONY: userland
 userland: $(USER_ELFS)

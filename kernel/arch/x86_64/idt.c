@@ -57,8 +57,16 @@ void idt_init(void)
 
         if (v == X86_TRAP_BP)
             attr = GATE_INTERRUPT_DPL3;
+        /* The paranoid vectors (isr.S): their own stacks, GS decided from
+         * the MSR. isr.S routes exactly these four to isr_paranoid. */
         if (v == X86_TRAP_DF)
             ist = IST_DOUBLE_FAULT;
+        else if (v == X86_TRAP_NMI)
+            ist = IST_NMI;
+        else if (v == X86_TRAP_MC)
+            ist = IST_MACHINE_CHECK;
+        else if (v == X86_TRAP_DB)
+            ist = IST_DEBUG;
 
         set_gate(v, stub, attr, ist);
     }

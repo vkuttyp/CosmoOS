@@ -15,6 +15,9 @@
 #include <kernel/page.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <arch/fpu.h>
+#include <arch/testhooks.h>
 
 #define CHECK(c)                                                    \
     do {                                                            \
@@ -77,6 +80,49 @@ static void drop_guest(struct vm *vm, struct vcpu *v)
 {
     kobject_put(&v->obj);
     kobject_put(&vm->obj);
+}
+
+/* --- the guest rule: no vector register crosses the guest boundary ------ */
+
+bool selftest_hv_guest_fpu(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    /* This (kernel) thread takes ownership of register state for the
+     * duration, as a user thread would have it. */
+    struct thread *me = thread_current();
+    bool owned = me->fpu != NULL;
+    CHECK(arch_fpu_alloc(me) == 0);
+
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_fpu.bin", &vm, &v) == 0);
+    uint8_t guest_pattern[16], host_pattern[16], seen[16];
+    for (unsigned i = 0; i < 16; i++) {
+        guest_pattern[i] = (uint8_t)(0xB0 + i);
+        host_pattern[i] = (uint8_t)(0x40 + 3 * i);
+    }
+    CHECK(vm_mem_write(vm, 0x3010, guest_pattern, sizeof(guest_pattern)) == 0);
+    CHECK(arch_test_fpu_set(host_pattern));
+
+    struct cosmo_vm_exit x;
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HLT);
+
+    /* What the guest saw in xmm0 on its first instruction: the reset
+     * state, not the owner's pattern. */
+    static const uint8_t zero[16];
+    CHECK(vm_mem_read(vm, 0x3000, seen, sizeof(seen)) == 0);
+    CHECK(memcmp(seen, zero, sizeof(seen)) == 0);
+    /* What the owner has after the run: its own pattern, not the guest's. */
+    CHECK(arch_test_fpu_get(seen));
+    CHECK(memcmp(seen, host_pattern, sizeof(seen)) == 0);
+    /* The guest keeps running (its trailing hlt loop): its state survives an exit and re-entry. */
+    CHECK(vcpu_run(v, &x) == 0 && x.kind == COSMO_VM_EXIT_HLT);
+    drop_guest(vm, v);
+    if (!owned)
+        arch_fpu_free(me);
+    return true;
 }
 
 static bool console_is(struct vm *vm, const char *expect)

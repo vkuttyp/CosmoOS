@@ -56,6 +56,55 @@ adds CR4.PGE/SMEP/SMAP/UMIP as supported. Doing this in the kernel rather
 than trusting the loader keeps the protection state independent of which
 loader was used.
 
+## fpu.c: FPU and SIMD state
+
+The kernel is compiled `-mgeneral-regs-only` on every architecture and
+never touches x87, SSE or AVX registers itself; user threads and guests
+do, so their state must be owned explicitly (`arch/fpu.h`):
+
+- **CPU policy**, asserted on every CPU by `x86_fpu_init_cpu` from
+  `x86_cpu_enable_features` (the boot CPU inherits whatever the firmware
+  left, an AP starts with CR4 = PAE only): CR0.EM = 0, MP = 1, NE = 1,
+  TS = 0; CR4.OSFXSR = 1 and OSXMMEXCPT = 1; with XSAVE, CR4.OSXSAVE = 1
+  and XCR0 = x87 | SSE | AVX (| AVX-512 as a unit) as supported, identical
+  on every CPU so a thread's area has one layout wherever it runs. The
+  area size comes from `CPUID.(0DH,0):EBX` for that XCR0 (832 bytes with
+  AVX, 512 for FXSAVE) and heterogeneous CPUs are refused.
+- **Ownership**: a thread owns state iff `thread->fpu != NULL`;
+  `arch_fpu_alloc` gives a user thread a 64-byte-aligned area holding
+  the reset image (FCW 0x37F, MXCSR 0x1F80, XSTATE_BV 0) before it can
+  run; `arch_fpu_free` runs from `thread_put`. Kernel threads own nothing.
+- **Eager switching**: `arch_thread_switch_prepare(prev, next)` calls
+  `x86_fpu_switch`: XSAVE (not XSAVEOPT: the area may be restored on
+  another CPU) of the outgoing owner's registers into its area, XRSTOR of
+  the incoming owner's. No lazy ownership, no `#NM` juggling, no
+  cross-CPU state: the registers a kernel thread runs with are stale and
+  unreadable by construction (the compiler flag).
+- **Guests** (`svm.c`): around every VMRUN the owner thread's state is
+  saved, the vCPU's own area loaded, the guest's XCR0 installed, and
+  afterwards the guest's registers captured and the owner's restored (a
+  kernel-thread owner gets the reset image so nothing of the guest stays
+  live). XSETBV is intercepted and emulated with the hardware's rules
+  against the host's XCR0, since XCR0 is not in the VMCB.
+
+Tests: `fpu-switch` (two state-owning kernel threads pinned to one CPU
+trade patterns across 400 yields), `hv-guest-fpu` (a fresh guest sees the
+reset state, the owner keeps its own), and `init --selftest` spawning two
+`--fpu-partner` processes. Both the FXSAVE path (`qemu64`) and the XSAVE
+path (`-cpu qemu64,+xsave,+avx`) are exercised.
+
+## lapic.c: the ICR write pair
+
+The xAPIC ICR is two 32-bit registers and the write to ICR_LO sends
+with whatever ICR_HI holds. `icr_write_pair` disables local interrupts
+around `wait-idle, write HI, write LO`: a tick handler on this CPU that
+wakes a thread pinned elsewhere sends its own IPI from interrupt context,
+and between the two writes of a cross call in progress it would redirect
+that call. The trailing wait for idle happens with interrupts on. Nothing
+else writes the ICR, and an NMI handler (which cannot be masked) must not
+send IPIs. Verified by `smp-ipi-storm`: 300 ms of cross calls to every
+other CPU against a timer that wakes threads on those CPUs every tick.
+
 `cpu.c` also implements `arch/cpu.h` and `arch/irq.h`:
 `arch_irq_save` reads RFLAGS then `cli`; `arch_irq_restore` executes `sti`
 only if IF was set in the saved value, so nested save/restore pairs
@@ -95,7 +144,12 @@ Attributes:
   `GATE_INTERRUPT_DPL0 = 0x8E`;
 - vector 3 (`#BP`) uses `GATE_INTERRUPT_DPL3 = 0xEE` so `int3` from
   ring 3 is permitted;
-- vector 8 (`#DF`) uses `IST_DOUBLE_FAULT = 1`.
+- the paranoid vectors get their own IST stacks: vector 8 (`#DF`)
+  `IST_DOUBLE_FAULT = 1`, vector 2 (NMI) `IST_NMI = 2`, vector 18 (`#MC`)
+  `IST_MACHINE_CHECK = 3`, vector 1 (`#DB`) `IST_DEBUG = 4`; `gdt.c`
+  allocates the four 8 KiB stacks per CPU (static for the boot CPU,
+  guarded kernel allocations for the APs) and `gdt_ist_top(ist)` exposes
+  them to diagnostics and the `trap-paranoid` self-test.
 
 `idt_load` is separate from `idt_init` so additional CPUs can `lidt` the
 shared table.
@@ -120,6 +174,30 @@ order, so from the lowest address upward the stack reads
 rflags, rsp, ss`, which is exactly `struct arch_trap_frame`. It then
 `cld`, `mov %rsp, %rdi`, `call x86_trap_dispatch`, pops in reverse,
 `add $16, %rsp`, `iretq`.
+
+### The paranoid path (`isr_paranoid`)
+
+`isr_common` decides SWAPGS from the saved CS: ring 3 arrived with the
+user's GS base. Four vectors cannot use that rule because they can
+arrive at any instruction, including two windows where CS is already
+the kernel's but GS or RSP is not: the SYSCALL entry between `swapgs`
+and the kernel-stack load (`syscall_entry.S`), and the SYSRET exit
+after `popq %rsp`. `#DB` (1), NMI (2), `#DF` (8) and `#MC` (18) are
+routed by their stubs to `isr_paranoid`: the IDT put them on an IST
+stack, so RSP is trusted; the entry reads `MSR_GS_BASE` and swaps only
+if it is not a kernel address (every per-CPU block is in the higher
+half, a user GS base never is), remembering the decision in `rbx`
+(callee-saved across the C call, restored from the frame afterwards).
+`x86_trap_paranoid` counts as interrupt context and dispatches the
+handler; it never preempts and never delivers a kill, because the
+interrupted context may be the scheduler holding a run-queue lock or a
+system call with the user's stack live. An unregistered paranoid vector
+panics through `arch_trap_unhandled` like any exception. NMI handlers
+must not send IPIs (see `lapic.c` below). Verified by the `trap-paranoid`
+self-test: a software NMI from kernel context lands on the NMI IST stack
+with `irq_depth 1`, and one raised after a `swapgs` (the user GS base
+live, as inside the SYSCALL window) still recovers the per-CPU block and
+hands the original GS state back.
 
 ### Stack alignment at interrupt entry
 
@@ -268,14 +346,16 @@ nesting, so a page fault in a thread does not block a later preemption.
 
 ## Deliberately absent
 
-- **SWAPGS**: no user mode exists, so every trap comes from ring 0 and
-  the kernel per-CPU pointer lives in `GS_BASE` directly.
 - **MSI/MSI-X**: Phase 6 with PCI.
 - **x2APIC mode**: detected by `cpu.c`, not enabled; xAPIC MMIO is used.
-- **FPU/SSE state**: the kernel is compiled with `-mgeneral-regs-only`, so
-  there is no vector state to save or restore in the trap path.
+- **Vector state in the trap path**: the kernel is compiled with
+  `-mgeneral-regs-only`, so an interrupt saves no x87/SSE/AVX state; the
+  owning thread's registers stay live across it and are saved only at a
+  thread switch (`fpu.c`).
 - **Symbolised backtraces**: addresses are resolved offline against
   `out/<arch>-<build>/kernel/kernel.map`.
+- **Speculative-execution mitigations** (IBRS, retpolines, PTI): none;
+  the target is QEMU/TCG. To be revisited with real hardware.
 
 ## AArch64 mapping
 
@@ -289,4 +369,7 @@ nesting, so a page fault in a thread does not block a later preemption.
 | `-mcmodel=kernel` | `-mcmodel=small` with a higher-half `TTBR1` mapping |
 | `hlt` / `pause` | `wfi` / `yield` |
 
-The six interface headers do not change.
+The interface headers do not change; `arch/fpu.h` is implemented as
+no-ops while FP/SIMD stays disabled at EL0 (`fpu.c`), and
+`arch_test_paranoid_entry` reports nothing to test because TPIDR_EL1 is
+never swapped and every exception from EL0 lands on SP_EL1.

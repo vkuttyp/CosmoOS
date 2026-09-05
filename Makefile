@@ -20,7 +20,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-crash analyze reproducible compile-commands check-tools clean help
+.PHONY: all kernel boot modules image run test test-crash analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -101,6 +101,11 @@ compile-commands:
 
 check-tools:
 	$(Q)$(ROOT)/scripts/check-tools.sh "$(CC)" "$(LD)" "$(LDLINK)" "$(OBJCOPY)" "$(PYTHON)"
+	$(Q)$(ROOT)/scripts/check-secrets.sh
+
+# No private key and no revoked public key may be tracked (docs/kernel/module/design.md).
+check-secrets:
+	$(Q)$(ROOT)/scripts/check-secrets.sh
 
 clean:
 	$(Q)rm -rf $(OUT)

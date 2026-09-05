@@ -215,6 +215,7 @@ void thread_put(struct thread *t)
     KASSERT(t->state == THREAD_EXITED);
     KASSERT(t != thread_current());
     thread_unregister(t);
+    arch_fpu_free(t);
     if (t->stack_base != 0 && (t->flags & THREAD_FLAG_BOOT) == 0)
         vm_kernel_free(t->stack_base);
 

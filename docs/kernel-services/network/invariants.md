@@ -60,9 +60,13 @@ before sending a request or the pending packet; the system calls copy
 user memory into a kernel bounce buffer before calling `ksock_*`.
 Lock order: `sock->lock` (mutex) → TCP/UDP lock → ARP/ND lock →
 `netif->lock` → driver locks → mbuf caches and `mbufq` locks
-(leaves). Check: review; `lo_transmit` calls `netif_rx` synchronously,
-so a lock held across transmit over `lo` would recurse into the
-receive queue lock and hang the loopback tests. Gap: no lock-order
+(leaves). The netif registry lock is a spinlock never taken under a
+protocol lock; TCP's path MSS is computed before `g_lock`
+(`tcp_path_mss`) and read from `pcb->path_mss` under it. Check: review;
+`lo_transmit` calls `netif_rx` synchronously, so a lock held across
+transmit over `lo` would recurse into the receive queue lock and hang
+the loopback tests; `mutex_lock` panics when entered with a spinlock
+held, and `net-tcp-mss` checks the cached values. Gap: no lock-order
 checker.
 
 **N6. Data the peer has acknowledged is gone from the send ring; data

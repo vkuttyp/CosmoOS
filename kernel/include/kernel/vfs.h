@@ -145,10 +145,26 @@ uint64_t vfs_now_ns(void);
 
 /* --- namespace operations ----------------------------------------------- */
 
+/* Discretionary access control (docs/kernel-services/vfs/design.md,
+ * "Permissions"): the caller's credentials (cred_current) against the
+ * vnode's mode bits by owner, group (effective or supplementary) or
+ * other. A privileged caller passes every check except execute, which
+ * needs at least one x bit on a regular file. Search (traversal) of a
+ * directory is VFS_MAY_EXEC; the path walk applies it to every component
+ * it enters, the mutation paths require write and search on the parent,
+ * open requires read and/or write per the access mode on the file itself. */
+#define VFS_MAY_EXEC  1u
+#define VFS_MAY_WRITE 2u
+#define VFS_MAY_READ  4u
+int vfs_permission(const struct vnode *vn, unsigned mask);
+
 /* Resolve `path` (absolute, or relative to `start` when not NULL) to a
  * referenced vnode. Follows mounts; no symlinks. */
 int vfs_lookup(struct vnode *start, const char *path, struct vnode **out);
 int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out);
+/* An open file over an already resolved vnode (the reference is consumed,
+ * also on failure). No permission check: the caller made its own (exec). */
+int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out);
 int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode);
 int vfs_unlink(struct vnode *start, const char *path);
 int vfs_rmdir(struct vnode *start, const char *path);

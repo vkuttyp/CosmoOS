@@ -13,6 +13,7 @@
 | Console sink registration | `virtio-console` self-test and the boot marker `virtio-console: virtioN: registered as a console sink` |
 | Network device: receive posting, transmit chains, header handling | Phase 8 `net-arp` (ARP through `eth0`) and `net-harness` (TCP and UDP echo with the host over QEMU user-mode networking); boot marker `virtio-net: virtioN is eth0` |
 | Module dependency handling | boot: the four drivers declare `deps = "virtio"` and load after it |
+| Split-ring logic against a hostile device | `tests/host/test_virtq.c` (`make host-test`, ASan/UBSan): the real `virtqueue.c` over a fake transport; the test acts as the peer and writes descriptor links that self-loop, form a two-element loop, point out of range or at a free descriptor; used elements with an id out of range, never posted, not a head, completed twice; lengths beyond the buffers; empty, oversized, full-table (boundary descriptor) and normal multi-descriptor chains; 500 rounds of out-of-order completions |
 
 Details of the self-tests are in `docs/kernel/device/testing.md`.
 
@@ -43,11 +44,10 @@ To try a different device set, append to `QEMU_EXTRA`, for example
 
 ## Gaps
 
-- No host unit test of `virtqueue.c` with a fake transport (the ring
-  code is host-compilable; this is the next test to add).
-- No negative tests: legacy-only device, feature rejection, hostile used
-  ring, notify offsets outside the window, probe failure inside a
-  driver, unload with requests in flight, console dead state.
+- No negative tests on the target: legacy-only device, feature
+  rejection, notify offsets outside the window, probe failure inside a
+  driver, unload with requests in flight, console dead state (the ring
+  logic itself is covered on the host by `test_virtq`).
 - `virtio_net` has no driver; indirect descriptors and event index are
   never negotiated and so never tested.
 - MSI affinity: every vector targets CPU 0.

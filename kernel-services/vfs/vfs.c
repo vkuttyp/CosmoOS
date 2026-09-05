@@ -7,6 +7,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -392,11 +393,45 @@ static int follow_mount(struct vnode **vnp)
     return 0;
 }
 
+/* --- permissions ------------------------------------------------------------ */
+
+int vfs_permission(const struct vnode *vn, unsigned mask)
+{
+    const struct credentials *c = cred_current();
+    if (cred_privileged(c)) {
+        /* Root reads, writes and searches everything; executing a regular
+         * file still needs it to be marked executable by someone. */
+        if ((mask & VFS_MAY_EXEC) && vn->type == VNODE_REG && (vn->mode & 0111) == 0)
+            return -EACCES;
+        return 0;
+    }
+    unsigned bits;
+    if (c->euid == vn->uid)
+        bits = (vn->mode >> 6) & 7;
+    else if (cred_in_group(c, vn->gid))
+        bits = (vn->mode >> 3) & 7;
+    else
+        bits = vn->mode & 7;
+    return (bits & mask) == mask ? 0 : -EACCES;
+}
+
+/* Search permission on a directory being entered; consumes `dir` on failure. */
+static int may_search(struct vnode *dir)
+{
+    int rc = vfs_permission(dir, VFS_MAY_EXEC);
+    if (rc)
+        vnode_put(dir);
+    return rc;
+}
+
 /* One component from `dir` (referenced, consumed). Returns a referenced
- * child. */
+ * child. Entering a directory needs search permission on it. */
 static int step(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     if (len == 1 && name[0] == '.') {
+        int rc = may_search(dir);
+        if (rc)
+            return rc;
         *out = dir;
         return 0;
     }
@@ -408,16 +443,22 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
             vnode_get(base);
             vnode_put(dir);
         }
+        int rc = may_search(base);
+        if (rc)
+            return rc;
         if (base->mnt->root == base) {   /* the global root: stays put */
             *out = base;
             return 0;
         }
         mutex_lock(&base->lock);
-        int rc = base->ops->lookup(base, "..", 2, out);
+        rc = base->ops->lookup(base, "..", 2, out);
         mutex_unlock(&base->lock);
         vnode_put(base);
         return rc;
     }
+    int prc = may_search(dir);
+    if (prc)
+        return prc;
     mutex_lock(&dir->lock);
     int rc = (dir->flags & VNODE_DEAD) ? -ENOENT : dir->ops->lookup(dir, name, len, out);
     mutex_unlock(&dir->lock);
@@ -582,6 +623,7 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         flags |= COSMO_O_DIRECTORY;
 
     struct vnode *vn = NULL;
+    bool created = false;
     if (len == 0) {
         vn = parent;   /* the root itself */
     } else {
@@ -594,6 +636,11 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
             if (rc)
                 return rc;
         } else {
+            rc = vfs_permission(parent, VFS_MAY_EXEC);   /* search the last directory */
+            if (rc) {
+                vnode_put(parent);
+                return rc;
+            }
             mutex_lock(&parent->lock);
             rc = (parent->flags & VNODE_DEAD) ? -ENOENT : parent->ops->lookup(parent, last, len, &vn);
             if (rc == -ENOENT && (flags & COSMO_O_CREAT)) {
@@ -601,8 +648,12 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
                     rc = -EROFS;
                 else if (parent->ops->create == NULL)
                     rc = -ENOTSUP;
-                else
+                else if (vfs_permission(parent, VFS_MAY_WRITE) != 0)
+                    rc = -EACCES;   /* creating an entry writes the directory */
+                else {
                     rc = parent->ops->create(parent, last, len, mode & 07777, &vn);
+                    created = rc == 0;
+                }
             } else if (rc == 0 && (flags & COSMO_O_CREAT) && (flags & COSMO_O_EXCL)) {
                 vnode_put(vn);
                 rc = -EEXIST;
@@ -631,6 +682,21 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         vnode_put(vn);
         return -EROFS;
     }
+    /* The file itself: read and/or write per the access mode. A file this
+     * call just created is the caller's regardless of the mode it asked
+     * for (POSIX), so the check is skipped for it. */
+    if (!created) {
+        unsigned need = 0;
+        if (acc != COSMO_O_WRONLY)
+            need |= VFS_MAY_READ;
+        if (acc != COSMO_O_RDONLY)
+            need |= VFS_MAY_WRITE;
+        rc = vfs_permission(vn, need);
+        if (rc) {
+            vnode_put(vn);
+            return rc;
+        }
+    }
     if ((flags & COSMO_O_TRUNC) && vn->type == VNODE_REG && acc != COSMO_O_RDONLY) {
         mutex_lock(&vn->lock);
         rc = vn->ops->truncate ? vn->ops->truncate(vn, 0) : -ENOTSUP;
@@ -641,6 +707,17 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         }
     }
 
+    struct file *f = file_alloc(vn, flags);
+    if (f == NULL) {
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    *out = f;
+    return 0;
+}
+
+int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)
+{
     struct file *f = file_alloc(vn, flags);
     if (f == NULL) {
         vnode_put(vn);
@@ -822,6 +899,17 @@ static bool dot_name(const char *name, size_t len)
     return (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.');
 }
 
+/* The sticky bit (01000) on a directory: an entry may be removed or
+ * renamed only by the owner of the entry, the owner of the directory, or a
+ * privileged caller (/tmp is 01777). */
+static bool sticky_denies(const struct vnode *dir, const struct vnode *entry)
+{
+    if (!(dir->mode & 01000))
+        return false;
+    const struct credentials *c = cred_current();
+    return !cred_privileged(c) && c->euid != entry->uid && c->euid != dir->uid;
+}
+
 /* Resolve the parent directory for a mutation; locks it. */
 static int parent_for_mutation(struct vnode *start, const char *path, struct vnode **parent, const char **last,
                                size_t *len)
@@ -840,6 +928,13 @@ static int parent_for_mutation(struct vnode *start, const char *path, struct vno
     if ((*parent)->mnt->flags & MOUNT_RDONLY) {
         vnode_put(*parent);
         return -EROFS;
+    }
+    /* Adding, removing or renaming an entry writes the directory and
+     * searches it for the name. */
+    rc = vfs_permission(*parent, VFS_MAY_WRITE | VFS_MAY_EXEC);
+    if (rc) {
+        vnode_put(*parent);
+        return rc;
     }
     return 0;
 }
@@ -894,6 +989,8 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
             rc = -EISDIR;
         else if (victim->covered_by != NULL || victim->mnt != parent->mnt)
             rc = -EBUSY;   /* a mountpoint or a mount root */
+        else if (sticky_denies(parent, victim))
+            rc = -EACCES;  /* a sticky directory: only the owner of the entry, the directory or root */
         else if (dir)
             rc = parent->ops->rmdir ? parent->ops->rmdir(parent, last, len, victim) : -ENOTSUP;
         else
@@ -953,6 +1050,10 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
     if (rc == 0) {
         if (victim->covered_by || victim->mnt != odir->mnt) {
             rc = -EBUSY;
+        } else if (sticky_denies(odir, victim)) {
+            rc = -EACCES;
+        } else if (victim->type == VNODE_DIR && odir != ndir && vfs_permission(victim, VFS_MAY_WRITE) != 0) {
+            rc = -EACCES;   /* moving a directory rewrites its ".." */
         } else if (ndir->ops->lookup(ndir, nname, nlen, &replaced) == 0) {
             if (replaced == victim)
                 rc = 0;   /* same entry: nothing to do */
@@ -962,6 +1063,8 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
                 rc = -ENOTDIR;
             else if (replaced->covered_by || replaced->mnt != odir->mnt)
                 rc = -EBUSY;
+            else if (sticky_denies(ndir, replaced))
+                rc = -EACCES;
         }
         if (rc == 0 && replaced != victim) {
             /* A directory may not be moved under itself. */

@@ -100,6 +100,13 @@ uint64_t arch_hv_vcpu_rip(struct arch_hv_vcpu *v);
 /* Host values the CPUID/MSR emulation filters (generic code never executes CPUID itself). */
 void arch_hv_host_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx);
 uint64_t arch_hv_host_tsc(void);
+/* The extended-state components the host enables for guests (x86-64: the
+ * kernel's XCR0; 0 when the CPU has no XSAVE). A guest may enable a
+ * subset; the CPUID emulation advertises no more than this. */
+uint64_t arch_hv_host_xstate(void);
+/* Whether the guest has enabled the extended-state instructions for
+ * itself (x86-64: its CR4.OSXSAVE), mirrored into CPUID.1:ECX.OSXSAVE. */
+bool arch_hv_vcpu_xstate_enabled(struct arch_hv_vcpu *v);
 /* Deposit a value into the low `size` bytes of rax (IN completion). */
 void arch_hv_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size);
 /* GPR indices in the x86 encoding order. */

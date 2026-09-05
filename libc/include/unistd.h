@@ -28,5 +28,17 @@ int unlink(const char *path);
 int rmdir(const char *path);
 int access(const char *path, int mode);
 void sync(void);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+int setuid(uid_t uid);
+int setgid(gid_t gid);
+int setresuid(uid_t ruid, uid_t euid, uid_t suid);   /* (uid_t)-1 keeps an id */
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid);
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid);
+int getgroups(int size, gid_t list[]);
+int setgroups(size_t size, const gid_t *list);
 void _exit(int status) __attribute__((noreturn));
 #endif

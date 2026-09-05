@@ -11,6 +11,7 @@
 #include <kernel/vmm.h>
 
 #include <arch/cpu.h>
+#include <arch/irq.h>
 
 #include <x86/cpu.h>
 #include <x86/lapic.h>
@@ -145,12 +146,31 @@ static void icr_wait(void)
         arch_cpu_relax();
 }
 
+/*
+ * The xAPIC ICR is two registers and the write to ICR_LO is what sends,
+ * with whatever ICR_HI holds at that moment. An interrupt handler on this
+ * CPU that sends its own IPI (a tick waking a thread on another CPU does
+ * exactly that) between the two writes would redirect ours to its
+ * destination. The pair is therefore one critical section with local
+ * interrupts off; nothing else in the kernel writes the ICR. An NMI
+ * handler must never send an IPI for the same reason (it cannot be
+ * masked); see docs/kernel/arch/invariants.md I-ARCH-15. The trailing
+ * wait for delivery-idle needs no protection: any later sender waits for
+ * idle itself before writing. x2APIC would make this a single MSR write.
+ */
+static void icr_write_pair(uint32_t hi, uint32_t lo)
+{
+    arch_irq_state_t s = arch_irq_save();
+    icr_wait();
+    lapic_write(REG_ICR_HI, hi);
+    lapic_write(REG_ICR_LO, lo);
+    arch_irq_restore(s);
+    icr_wait();
+}
+
 static void icr_send(uint32_t apic_id, uint32_t lo)
 {
-    icr_wait();
-    lapic_write(REG_ICR_HI, apic_id << 24);
-    lapic_write(REG_ICR_LO, lo);
-    icr_wait();
+    icr_write_pair(apic_id << 24, lo);
 }
 
 void lapic_send_ipi(uint32_t apic_id, unsigned vector)
@@ -160,10 +180,9 @@ void lapic_send_ipi(uint32_t apic_id, unsigned vector)
 
 void lapic_send_ipi_all_others(unsigned vector)
 {
-    icr_wait();
-    lapic_write(REG_ICR_HI, 0);
-    lapic_write(REG_ICR_LO, ICR_DEST_ALL_OTHERS | ICR_DELIVERY_FIXED | (vector & 0xFF));
-    icr_wait();
+    /* Shorthand ignores ICR_HI, but the register pair is still written as
+     * one unit so a nested sender cannot interleave with this one. */
+    icr_write_pair(0, ICR_DEST_ALL_OTHERS | ICR_DELIVERY_FIXED | (vector & 0xFF));
 }
 
 void lapic_send_init(uint32_t apic_id)

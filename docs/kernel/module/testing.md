@@ -97,7 +97,7 @@ also requires, in every build type, the boot-loaded module's lines:
   (`build/module.mk`): `ET_REL`, x86-64, no W+X section, `.cosmo.module`
   of 240 bytes and read-only, trailer present. It is independent of the
   kernel's validator so a regression in either is caught by the other.
-- `scripts/modsign.py verify --pub tools/keys/cosmo-dev.pub --in out/x86_64-debug/modules/hello.ko`
+- `scripts/modsign.py verify --pub $HOME/.config/cosmoos/keys/dev.pub --in out/x86_64-debug/modules/hello.ko`
   checks a module with the Python implementation; the kernel's
   `ed25519.c` and the script were cross-checked against each other and
   the RFC vectors during development.

@@ -4,7 +4,7 @@
 # load them from the boot archive under /boot/tests/hv/.
 
 HV_TEST_OUT := $(OUT)/tests/hv
-HV_GUESTS := guest_pio guest_irq guest_cpuid guest_pm guest_shutdown guest_spin
+HV_GUESTS := guest_pio guest_irq guest_cpuid guest_pm guest_shutdown guest_spin guest_fpu
 
 define hv_guest_rule
 $(HV_TEST_OUT)/$(1).bin: $(ROOT)/tests/hv/$(1).S

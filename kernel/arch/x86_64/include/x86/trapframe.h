@@ -31,6 +31,9 @@ _Static_assert(sizeof(struct arch_trap_frame) == 22 * 8, "trap frame layout");
 
 /* Called from isr.S with the frame at the top of the stack. */
 void x86_trap_dispatch(struct arch_trap_frame *frame);
+/* Same, for the paranoid vectors (#DB, NMI, #DF, #MC) on their IST
+ * stacks: dispatches the handler, never schedules or delivers a kill. */
+void x86_trap_paranoid(struct arch_trap_frame *frame);
 
 /* Register state saved by syscall_entry.S. Order matches the pushes. */
 struct x86_syscall_frame {

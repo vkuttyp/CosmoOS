@@ -122,6 +122,13 @@ struct virtqueue {
     void *ring_mem;                             /* one dma_alloc */
     dma_addr_t ring_dma;
     size_t ring_bytes;
+    /* Driver-private view of the descriptor table. The table itself is in
+     * memory the device may write, so the free list and every chain link
+     * live here and are never read back from desc[]; the device-visible
+     * `next` fields are written from this copy and treated as write-only. */
+    uint16_t *shadow_next;                      /* free-list and chain links, per descriptor */
+    uint16_t *chain_len;                        /* per head: descriptors in flight in its chain, 0 = free */
+    uint32_t *in_bytes;                         /* per head: device-writable bytes; bounds used->len */
     uint16_t free_head;
     uint16_t num_free;
     uint16_t last_used;                         /* next used->ring slot to consume */

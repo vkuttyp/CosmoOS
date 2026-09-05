@@ -12,7 +12,7 @@ struct vnode {
     struct mount *mnt;
     uint64_t ino;
     enum vnode_type type;
-    uint32_t mode;                  /* permission bits, informational in this phase */
+    uint32_t mode;                  /* permission bits, enforced by vfs_permission */
     uint32_t uid, gid;
     uint32_t nlink;
     uint64_t size;
@@ -358,10 +358,33 @@ follows user pointers during a walk. Every field read from disk is
 bounds-checked (block numbers below `nblocks`, extent counts, inode
 numbers below `next_ino`, directory entry lengths) before use, and
 metadata is checksummed; corrupt or hostile images yield `-EIO`, not a
-wild pointer. `mount`/`umount` are uid-0 only. ramfs limits a file to
-`RAMFS_MAX_FILE` (64 MiB) and a mount to `RAMFS_MAX_PAGES` (16 K pages)
-so a user program cannot exhaust RAM through `/tmp`. Permission bits
-are stored, not enforced (security phase).
+wild pointer. `mount`/`umount` need `cred_privileged`. ramfs limits a
+file to `RAMFS_MAX_FILE` (64 MiB) and a mount to `RAMFS_MAX_PAGES` (16 K
+pages) so a user program cannot exhaust RAM through `/tmp`.
+
+### Permissions
+
+Discretionary access control is one function, `vfs_permission(vn, mask)`
+with `VFS_MAY_READ/WRITE/EXEC`, judged with the caller's credentials
+(`cred_current()`, `kernel/cred.h`: the process's, or the kernel's for
+boot-time work): the owner bits when the effective uid matches `vn->uid`,
+the group bits when the effective or a supplementary gid matches
+`vn->gid`, else the other bits. A privileged caller (euid 0) passes every
+check except executing a regular file that has no x bit at all. The
+checks sit where POSIX puts them: `step` needs search (`VFS_MAY_EXEC`) on
+every directory it enters, including `.` and `..`; `vfs_open` needs
+search on the last directory, write on it to create, and then read
+and/or write on the file per the access mode, except for the file it
+just created; `parent_for_mutation` (mkdir, unlink, rmdir, both parents
+of rename) needs write and search; `process_chdir` needs search on the
+target; `spawn` needs execute on the program (and no read: the kernel
+reads it on its own authority through `vfs_open_vnode`). New vnodes are
+owned by their creator's effective ids (`ramfs_new`, `cfs_create_common`;
+cosmofs persists them in the inode). `/tmp` is 01777: in a directory with
+the sticky bit (01000) an entry is removed, renamed or replaced only by
+the owner of the entry, the owner of the directory, or a privileged
+caller (`sticky_denies`). Moving a directory to another parent also
+needs write permission on the directory itself (its `..` changes).
 
 ## Testing strategy
 
@@ -386,6 +409,6 @@ arithmetic. Init: every new system call on ramfs, then `mount("vda",
   next commit and excluding its blocks from `pending_free`.
 - Data checksums: `csum_root` → a tree keyed by block number.
 - Multiple pool members and allocation groups behind `pool_*`.
-- Symbolic links (a new vnode type), hard links, permissions and
-  credentials, memory-pressure eviction, a dentry cache, `mmap` of
+- Symbolic links (a new vnode type), hard links, `chmod`/`chown`, the
+  sticky bit, memory-pressure eviction, a dentry cache, `mmap` of
   files (the page cache already owns frames), a host `mkfs`.

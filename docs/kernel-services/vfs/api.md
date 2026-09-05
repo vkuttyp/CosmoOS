@@ -194,7 +194,7 @@ every boot archive entry into the namespace: entries named `bin/...` and
 becomes `/etc/...` with mode 0644, everything else goes to
 `/boot/<name>` with mode 0644 (the bootstrap namespace policy of the
 archive, `docs/userland/`). Entry names may be nested
-(`etc/pkg/keys/cosmo-dev.pub`, `repo/hello-1.1.cpk`): the intermediate
+(`etc/pkg/keys/dev.pub`, `repo/hello-1.1.cpk`): the intermediate
 directories are created with mode 0755 (`ensure_parents`), an existing
 one is fine, any other failure is logged and the entry skipped. Once,
 after `vfs_init` and `bootarchive_init`.

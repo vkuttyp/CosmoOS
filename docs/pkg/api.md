@@ -130,7 +130,7 @@ operation stops. A file owned by another installed package is a conflict
 | Path | Content |
 |---|---|
 | `/etc/pkg/repos.conf` | one repository directory per line; `#` comments; Phase 10 ships `/boot/repo` |
-| `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); Phase 10 ships `cosmo-dev.pub` |
+| `/etc/pkg/keys/*.pub` | accepted Ed25519 public keys, 64 hex characters each (the `tools/keys/*.pub` format, at most 16 keys); the image ships the first trusted key, `dev.pub` for a development build (`PKG_TRUST_PUB`) |
 | `/var/db/pkg/index` | the last verified `INDEX` text (trailer stripped) |
 | `/var/db/pkg/installed/<name>/MANIFEST` | the installed package's manifest, as extracted |
 | `/var/db/pkg/installed/<name>/MANIFEST.new` | the staged record while an operation runs; committed by rename |
@@ -171,9 +171,9 @@ deterministic signature.
 | `pkg` | `$(OUT)/userland/pkg.elf` from `pkg/*.c` plus `kernel/security/sha512.c` and `ed25519.c` compiled with `USER_CFLAGS -I pkg` into `$(OUT)/pkgprog/` |
 | `ports` | `$(PKG_REPO)/INDEX`: rebuilds the repository (`rm -rf` first) from every `ports/*/port` with `pkgbuild.py build`, then `index`; depends on the ports' sources, `libc.a`, `crt0.o`, `user.ld`, the builder, the signer and the key |
 | `PKG_REPO` | `$(OUT)/pkg/repo` |
-| `PKGSIGN_KEY` | the signing key, default `tools/keys/cosmo-dev.key` |
+| `PKGSIGN_KEY` | the signing key, default `MODSIGN_KEY` (the per-machine developer key, or the release key) |
 | `all` | includes `pkg` and `ports` |
-| `image` | the boot archive carries `sbin/pkg`, `etc/pkg/repos.conf`, `etc/pkg/keys/cosmo-dev.pub` and every repository file as `repo/<file>` (`PKG_ARCHIVE_ENTRIES`); `SELFTEST=1` builds add the two fixtures |
+| `image` | the boot archive carries `sbin/pkg`, `etc/pkg/repos.conf`, `etc/pkg/keys/<key>.pub` (`PKG_TRUST_PUB`) and every repository file as `repo/<file>` (`PKG_ARCHIVE_ENTRIES`); `SELFTEST=1` builds add the two fixtures |
 | `analyze` | includes `pkg/*.c` (`PKG_ANALYZE`) |
 | `host-test` | includes `test_pkg` |
 | `reproducible` | compares `userland/pkg.elf`, `pkg/repo/INDEX`, `pkg/repo/hello-1.1.cpk`, `pkg/repo/fortune-1.0.cpk` |

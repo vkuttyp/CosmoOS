@@ -24,9 +24,21 @@
 #define GDT_USER_CODE   0x20u
 #define GDT_TSS         0x28u
 
-/* IST slots used by the IDT. */
-#define IST_NONE         0u
-#define IST_DOUBLE_FAULT 1u
+/* IST slots used by the IDT. Each is a dedicated per-CPU stack for a
+ * vector that can arrive while RSP or GS is not the kernel's: #DF (after
+ * a kernel stack overflow), NMI and #MC (at any instruction, including
+ * the SYSCALL entry/exit windows), #DB (single-stepping through those
+ * windows). See isr.S `isr_paranoid` and docs/kernel/arch/design.md. */
+#define IST_NONE          0u
+#define IST_DOUBLE_FAULT  1u
+#define IST_NMI           2u
+#define IST_MACHINE_CHECK 3u
+#define IST_DEBUG         4u
+#define IST_COUNT         4u
+#define IST_STACK_SIZE    8192u
+
+/* Top of the calling CPU's IST stack `ist` (1-based). Diagnostics and self-tests. */
+uintptr_t gdt_ist_top(unsigned ist);
 
 /* Boot CPU: load the static GDT, reload segment registers, load the TSS
  * with the double-fault IST stack. */

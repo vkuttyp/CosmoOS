@@ -63,6 +63,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/virtualization/hvsys.c \
 	kernel-services/virtualization/hvtest.c \
 	kernel/process/elf.c \
+	kernel/process/cred.c \
 	kernel/process/process.c \
 	kernel/process/spawn.c \
 	kernel/process/proctest.c \
@@ -108,9 +109,9 @@ KERNEL_GENERIC_SRCS := \
 	drivers/acpi/acpi.c \
 	drivers/pci/pci.c
 
-# The trusted key ring is generated from the .pub files in tools/keys (see
-# scripts/gen-keyring.py and docs/kernel/module/design.md).
-KEYRING_PUBS := $(sort $(wildcard $(ROOT)/tools/keys/*.pub))
+# The trusted key ring is generated from $(KEYRING_PUBS) (build/config.mk:
+# the developer key's public half plus tools/keys/*.pub, or the release
+# keys; see scripts/gen-keyring.py and docs/kernel/module/design.md).
 KEYRING_SRC  := $(OUT)/gen/keyring_builtin.c
 KEYRING_OBJ  := $(OUT)/gen/keyring_builtin.o
 

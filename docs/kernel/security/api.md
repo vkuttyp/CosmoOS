@@ -45,7 +45,7 @@ Verified against RFC 8032 section 7.1 vectors on the host
 ### `struct trusted_key { uint8_t id[8]; uint8_t pub[32]; const char *name; }`
 
 One trusted Ed25519 public key. `id` is the first 8 bytes of SHA-512
-over `pub`; `name` is the `.pub` file's basename (`cosmo-dev`).
+over `pub`; `name` is the `.pub` file's basename (`dev` for the developer key).
 
 ### `const struct trusted_key *keyring_find(const uint8_t id[8])`
 
@@ -74,17 +74,19 @@ without a valid trailer through. Atomic OR / atomic load; any context;
 never cleared. The panic report prints `taint: 0x<flags> (unsigned
 module loaded)` after the stack trace when nonzero.
 
-## Key material (`tools/keys/`)
+## Key material
 
 | File | Content | Trust |
 |---|---|---|
-| `cosmo-dev.pub` | 32-byte Ed25519 public key as 64 hex characters | compiled into every kernel |
-| `cosmo-dev.key` | 32-byte seed as hex | **public**: it is in the repository and authenticates nothing outside a developer's own tree |
+| `$COSMO_KEYDIR/dev.pub` | 32-byte Ed25519 public key as 64 hex characters | compiled into kernels built on this machine (`SIGNING=dev`) |
+| `$COSMO_KEYDIR/dev.key` | 32-byte seed as hex, mode 0600 | private to this machine; created by `scripts/devkey.sh`, never a repository file |
+| `tools/keys/*.pub` | release public keys | compiled into every kernel (none yet) |
 
-A production build replaces the ring with private `.pub` files and
-signs with a key that never touches the build host (`MODSIGN_KEY=`).
-Generate a pair with `scripts/modsign.py keygen`. See
-`tools/keys/README.md`.
+The repository contains no private key; `scripts/check-secrets.sh` fails
+the build if one is tracked, or if a revoked public key (the leaked
+`cosmo-dev` key of Phases 5-13) reappears. A release build names its
+key and its ring explicitly (`SIGNING=release MODSIGN_KEY= KEYRING_PUBS=`).
+Generate a pair with `scripts/modsign.py keygen`. See `tools/keys/README.md`.
 
 ## Not yet here
 

@@ -82,16 +82,30 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         attr.cwd_path = cwd_path;
     }
 
+    /* The executable: found through the caller's directories, checked for
+     * execute permission with the caller's credentials (vfs_permission:
+     * root too needs an x bit), then read by the kernel on its own
+     * authority: like Linux, exec needs x, not r. */
+    struct vnode *exe;
+    rc = vfs_lookup(cur->cwd, path, &exe);
+    if (rc)
+        goto out_cwd;
+    if (exe->type != VNODE_REG) {
+        vnode_put(exe);
+        rc = -EACCES;
+        goto out_cwd;
+    }
+    rc = vfs_permission(exe, VFS_MAY_EXEC);
+    if (rc) {
+        vnode_put(exe);
+        goto out_cwd;
+    }
     struct file *f;
-    rc = vfs_open(cur->cwd, path, COSMO_O_RDONLY, 0, &f);
+    rc = vfs_open_vnode(exe, COSMO_O_RDONLY, &f);   /* consumes the reference */
     if (rc)
         goto out_cwd;
     struct cosmo_stat st;
     file_stat(f, &st);
-    if (st.type != COSMO_DT_REG || (st.mode & 0111) == 0) {
-        rc = -EACCES;
-        goto out_file;
-    }
     if (st.size == 0 || st.size > SPAWN_IMAGE_MAX) {
         rc = -ENOEXEC;
         goto out_file;

@@ -358,7 +358,10 @@ after signing.
 | Knob | Default | Meaning |
 |---|---|---|
 | `MODULE_SIG_ENFORCE` | `1` | `CONFIG_MODULE_SIG_ENFORCE`; `0` loads unsigned modules with a warning and taints the kernel |
-| `MODSIGN_KEY` | `tools/keys/cosmo-dev.key` | seed used to sign every module |
+| `SIGNING` | `dev` | `dev`: per-machine developer key generated on first use in `COSMO_KEYDIR` (outside the tree); `release`: `MODSIGN_KEY` and `KEYRING_PUBS` explicit, nothing generated |
+| `COSMO_KEYDIR` | `$HOME/.config/cosmoos/keys` | home of `dev.key` / `dev.pub` |
+| `MODSIGN_KEY` | `$(COSMO_KEYDIR)/dev.key` | seed used to sign every module; never a repository file |
+| `KEYRING_PUBS` | `dev.pub` + `tools/keys/*.pub` | the public keys compiled into the ring |
 | `MODULES` | `hello cosmotest cosmotest_dep cosmotest_fail` | module names; each needs `MODULE_<name>_SRCS` |
 | `MODULE_ARCHIVE_ENTRIES` | see file | `archive-name=path` pairs; `modules/` entries load at boot in this order, `tests/` entries are fixtures. The top-level `Makefile` adds `init=`, `USER_ARCHIVE_ENTRIES` (`bin/`, `sbin/`, `etc/` from `userland/userland.mk`), `sbin/pkg=` and `PKG_ARCHIVE_ENTRIES` (`repo/<file>` for every file of the ports repository, `pkg/pkg.mk`) in front of them |
 | `MODULE_CFLAGS` | `KERNEL_CFLAGS -DCOSMO_MODULE_BUILD=1` | the kernel flags (`-mcmodel=kernel`, no red zone, general registers only, freestanding) |

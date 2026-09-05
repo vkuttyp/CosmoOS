@@ -1,0 +1,7 @@
+# Public keys no kernel may trust again, one 64-hex-character Ed25519 public
+# key per line. scripts/check-secrets.sh fails the build if a tracked .pub
+# holds one; scripts/gen-keyring.py refuses to compile one into the ring.
+#
+# cosmo-dev (key id f320ceec5342b9fd): its private seed was tracked as
+# tools/keys/cosmo-dev.key from Phase 5 to the Prompt #3 fix pass.
+49af948ba2deb98f9f7a0500d3b1f0513302e955f3dd0fe96e00795016c73561

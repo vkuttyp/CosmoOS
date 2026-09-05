@@ -131,7 +131,7 @@ void sched_start_cpu(void)
     rq->idle->state = THREAD_RUNNING;
     rq->idle->last_start_ns = clock_now_ns();
     __atomic_store_n(&pc->online, true, __ATOMIC_RELEASE);
-    arch_thread_switch_prepare(rq->idle);
+    arch_thread_switch_prepare(NULL, rq->idle);
     arch_context_switch(&dead, &rq->idle->ctx);
     panic("sched: AP bootstrap context resumed");
 }
@@ -259,7 +259,7 @@ static void schedule_internal(bool preempt)
     pc->current = next;
     rq->switches++;
 
-    arch_thread_switch_prepare(next);
+    arch_thread_switch_prepare(prev, next);
     arch_context_switch(&prev->ctx, &next->ctx);
 
     /* Resumed as `prev`, holding the run-queue lock taken by whoever

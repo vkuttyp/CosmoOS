@@ -21,10 +21,51 @@ SELFTEST ?= 0
 endif
 
 # Module signatures. 1 (default in every build type) refuses a module
-# without a valid signature from a key in tools/keys/. 0 is a development
-# convenience: unsigned modules load with a warning and the kernel reports
-# itself as tainted. A bad signature is refused either way.
+# without a valid signature from a key in the kernel's ring. 0 is a
+# development convenience: unsigned modules load with a warning and the
+# kernel reports itself as tainted. A bad signature is refused either way.
 MODULE_SIG_ENFORCE ?= 1
+
+# Signing keys (docs/kernel/module/design.md, "Security"). No private key
+# is ever part of the repository.
+#   SIGNING=dev      (default) a per-machine developer key pair, generated on
+#                    first use by scripts/devkey.sh in $(COSMO_KEYDIR), outside
+#                    the tree. Modules and packages are signed with it and the
+#                    kernel built here trusts its public half (plus any release
+#                    public keys checked in under tools/keys/*.pub).
+#   SIGNING=release  MODSIGN_KEY (a key that never touches a shared build host)
+#                    and KEYRING_PUBS (the public keys the kernel trusts) must
+#                    both be given explicitly; nothing is generated.
+SIGNING ?= dev
+COSMO_KEYDIR ?= $(HOME)/.config/cosmoos/keys
+# Grouped targets (`&:`, build/module.mk) need GNU make 4.3; a space in the
+# key directory would split the prerequisite list.
+ifneq ($(filter 3.% 4.0 4.1 4.2,$(MAKE_VERSION)),)
+$(error GNU make 4.3 or newer is required (found $(MAKE_VERSION)))
+endif
+ifneq ($(words $(COSMO_KEYDIR)),1)
+$(error COSMO_KEYDIR must not contain spaces: '$(COSMO_KEYDIR)')
+endif
+TRUSTED_RELEASE_PUBS := $(sort $(wildcard $(ROOT)/tools/keys/*.pub))
+ifeq ($(SIGNING),dev)
+MODSIGN_KEY ?= $(COSMO_KEYDIR)/dev.key
+SIGNING_PUB := $(COSMO_KEYDIR)/dev.pub
+KEYRING_PUBS ?= $(SIGNING_PUB) $(TRUSTED_RELEASE_PUBS)
+else ifeq ($(SIGNING),release)
+ifeq ($(MODSIGN_KEY),)
+$(error SIGNING=release needs MODSIGN_KEY=<path to the release signing key>)
+endif
+ifeq ($(KEYRING_PUBS),)
+$(error SIGNING=release needs KEYRING_PUBS=<public keys the kernel trusts>)
+endif
+SIGNING_PUB :=
+else
+$(error SIGNING must be dev or release, got '$(SIGNING)')
+endif
+# Packages and the INDEX are signed with the same key unless overridden; the
+# image ships the first trusted public key as /etc/pkg/keys/<name>.pub.
+PKGSIGN_KEY ?= $(MODSIGN_KEY)
+PKG_TRUST_PUB ?= $(firstword $(KEYRING_PUBS))
 
 # CRASH_TEST=1 makes kernel_main fault on purpose after the self-tests so
 # the panic path and the harness's failure detection can be verified.

@@ -62,3 +62,5 @@ uint64_t arch_hv_host_tsc(void)
     __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
     return v;
 }
+uint64_t arch_hv_host_xstate(void) { return 0; }
+bool arch_hv_vcpu_xstate_enabled(struct arch_hv_vcpu *v) { (void)v; return false; }

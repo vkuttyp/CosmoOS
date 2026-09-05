@@ -44,6 +44,7 @@ bool selftest_smp_shootdown(const char **reason);
 bool selftest_smp_wake(const char **reason);
 bool selftest_smp_ticks(const char **reason);
 bool selftest_smp_mutex(const char **reason);
+bool selftest_smp_ipi_storm(const char **reason);
 
 /* Phase 4: kernel/process/proctest.c */
 bool selftest_objects(const char **reason);
@@ -90,6 +91,7 @@ bool selftest_net_arp(const char **reason);
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
+bool selftest_net_tcp_mss(const char **reason);
 bool selftest_net_harness(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_npt(const char **reason);
@@ -99,5 +101,6 @@ bool selftest_hv_guest_cpuid(const char **reason);
 bool selftest_hv_guest_pm(const char **reason);
 bool selftest_hv_guest_shutdown(const char **reason);
 bool selftest_hv_guest_spin(const char **reason);
+bool selftest_hv_guest_fpu(const char **reason);
 
 #endif /* KERNEL_SELFTEST_H */

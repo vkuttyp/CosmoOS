@@ -161,7 +161,8 @@ struct tcp_pcb *tcp_pcb_new(uint16_t family)
     }
     pcb->state = TCP_CLOSED;
     pcb->local.family = pcb->remote.family = family;
-    pcb->mss = family == COSMO_AF_INET ? TCP_MSS_V4 : TCP_MSS_V6;
+    pcb->path_mss = family == COSMO_AF_INET ? TCP_MSS_V4 : TCP_MSS_V6;
+    pcb->mss = pcb->path_mss;
     pcb->rcv_wnd = TCP_RCVBUF;
     pcb->rto_ns = TCP_RTO_INIT_NS;
     pcb->cwnd = 2 * pcb->mss;
@@ -256,11 +257,23 @@ static uint16_t pick_ephemeral(uint16_t family, const struct netaddr *addr)
 
 /* --- segment construction ---------------------------------------------------- */
 
+/*
+ * The path MSS is decided once, outside the TCP lock, and cached in the
+ * pcb: tcp_path_mss consults the netif registry (a lock of its own), and
+ * the registry must never be entered from under g_lock. Everything under
+ * the lock reads the cached value (N5, docs/kernel-services/network/invariants.md).
+ */
+uint16_t tcp_path_mss(uint16_t family, const struct netaddr *remote)
+{
+    bool lo = (family == COSMO_AF_INET) ? ((ntohl(remote->v4) >> 24) == 127 || netif_owns_ipv4(remote->v4))
+                                        : (in6_is_loopback(&remote->v6) || netif_owns_ipv6(&remote->v6));
+    return lo ? TCP_MSS_LO : (family == COSMO_AF_INET ? TCP_MSS_V4 : TCP_MSS_V6);
+}
+
+/* Lock held. */
 static uint16_t seg_mss(const struct tcp_pcb *pcb)
 {
-    bool lo = (pcb->local.family == COSMO_AF_INET) ? ((ntohl(pcb->remote.v4) >> 24) == 127 || netif_owns_ipv4(pcb->remote.v4))
-                                                    : (in6_is_loopback(&pcb->remote.v6) || netif_owns_ipv6(&pcb->remote.v6));
-    return lo ? TCP_MSS_LO : (pcb->local.family == COSMO_AF_INET ? TCP_MSS_V4 : TCP_MSS_V6);
+    return pcb->path_mss;
 }
 
 /* Lock held. Build one segment into the batch; data comes from sndbuf at
@@ -612,6 +625,8 @@ int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote)
                 return -ENETUNREACH;
         }
     }
+    /* Decided here, before the lock: it reads the netif registry. */
+    uint16_t path_mss = tcp_path_mss(local.family, remote);
     struct tcp_batch b = { .n = 0 };
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     if (pcb->state != TCP_CLOSED) {
@@ -633,8 +648,9 @@ int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote)
     pcb->iss = (uint32_t)random_u64();
     pcb->snd_una = pcb->iss;
     pcb->snd_nxt = pcb->snd_max = pcb->iss + 1;
+    pcb->path_mss = path_mss;
+    pcb->mss = path_mss;
     pcb->snd_wnd = pcb->mss;
-    pcb->mss = seg_mss(pcb);
     pcb->cwnd = 2 * pcb->mss;
     pcb->state = TCP_SYN_SENT;
     STAT(conns_active);
@@ -862,7 +878,11 @@ static void enter_time_wait(struct tcp_pcb *pcb)
 
 void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6)
 {
-    (void)nif;
+    /* A segment that arrived through `lo` came from this host (ipv4/6_route
+     * deliver every packet to one of our own addresses that way), so a
+     * connection it opens is a local one: the MSS cap is decided from the
+     * interface here, before the lock, never by a registry lookup under it. */
+    bool via_lo = (nif->flags & NETIF_LOOPBACK) != 0;
     STAT(segs_in);
     uint32_t len = m->pkt.len;
     if (len < sizeof(struct tcp_hdr)) {
@@ -956,7 +976,9 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         c->snd_wnd = win;
         c->snd_wl1 = seq;
         c->snd_wl2 = ack;
-        c->mss = parse_mss(&hdr, opts, optlen, c->mss);
+        if (via_lo)
+            c->path_mss = TCP_MSS_LO;
+        c->mss = parse_mss(&hdr, opts, optlen, c->path_mss);
         if (c->mss > seg_mss(c))
             c->mss = seg_mss(c);
         c->cwnd = 2 * c->mss;

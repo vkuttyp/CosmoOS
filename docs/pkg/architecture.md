@@ -32,7 +32,7 @@ is untrusted input).
 
 The kernel changed in one generic place for this phase: ramfs creates
 the parent directories of nested boot archive entries (`repo/x.cpk`,
-`etc/pkg/keys/cosmo-dev.pub`). `pkg` itself is an ordinary program using
+`etc/pkg/keys/dev.pub`). `pkg` itself is an ordinary program using
 the libc of Phase 9 (files, directories, rename; `spawn` is not even
 needed) plus the SHA-512 and Ed25519 sources the kernel already has,
 compiled a second time for user mode (they depend on nothing but

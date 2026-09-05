@@ -3,14 +3,27 @@
  *
  * One contiguous DMA allocation per queue holds the descriptor table,
  * the available ring and the used ring at their required alignments.
- * Free descriptors form a singly linked list through `next`. Everything
- * the device writes (used ring) is validated before use.
+ *
+ * Trust model (docs/drivers/virtio/design.md, "Virtqueues"): every byte
+ * of that allocation is reachable by the device, the descriptor table
+ * included, so nothing in it is ever read back to make a decision. The
+ * driver keeps its own copy of the chain structure (shadow_next,
+ * chain_len, in_bytes) and uses only that to build chains, to reclaim
+ * them, and to bound what the device reports. The used ring is the one
+ * thing the driver reads from shared memory, and each element is
+ * validated against the driver's records before use: an index outside the
+ * table, a head that is not in flight (never posted, already completed, or
+ * a duplicate) is skipped and counted; a length larger than the chain's
+ * writable bytes is clamped and counted. Traversal is bounded by the
+ * recorded chain length, so no descriptor content can make the driver
+ * loop or index outside its arrays.
  */
 
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/panic.h>
 #include <kernel/string.h>
 
 #include <drivers/virtio.h>
@@ -28,6 +41,15 @@ static inline void rmb(void)
 static inline uint16_t read_le16(const volatile uint16_t *p)
 {
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static void vq_release(struct virtqueue *vq)
+{
+    kfree(vq->in_bytes);
+    kfree(vq->chain_len);
+    kfree(vq->shadow_next);
+    kfree(vq->cookies);
+    kfree(vq);
 }
 
 int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
@@ -50,8 +72,11 @@ int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (
     if (vq == NULL)
         return -ENOMEM;
     vq->cookies = kzalloc(size * sizeof(void *));
-    if (vq->cookies == NULL) {
-        kfree(vq);
+    vq->shadow_next = kzalloc(size * sizeof(uint16_t));
+    vq->chain_len = kzalloc(size * sizeof(uint16_t));
+    vq->in_bytes = kzalloc(size * sizeof(uint32_t));
+    if (vq->cookies == NULL || vq->shadow_next == NULL || vq->chain_len == NULL || vq->in_bytes == NULL) {
+        vq_release(vq);
         return -ENOMEM;
     }
 
@@ -63,8 +88,7 @@ int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (
     vq->ring_bytes = ALIGN_UP(used_off + used_bytes, 4096);
     vq->ring_mem = dma_alloc(&vdev->dev, vq->ring_bytes, &vq->ring_dma, DMA_ZERO);
     if (vq->ring_mem == NULL) {
-        kfree(vq->cookies);
-        kfree(vq);
+        vq_release(vq);
         return -ENOMEM;
     }
     vq->vdev = vdev;
@@ -80,8 +104,10 @@ int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (
     vq->vector = -1;
     spinlock_init(&vq->lock, "virtq");
 
+    /* The free list: descriptor i links to i + 1, in the driver's copy.
+     * The table's own `next` fields are written as chains are built. */
     for (unsigned i = 0; i < size; i++)
-        vq->desc[i].next = (uint16_t)(i + 1);
+        vq->shadow_next[i] = (uint16_t)(i + 1);
     vq->free_head = 0;
     vq->num_free = (uint16_t)size;
     vq->last_used = 0;
@@ -89,8 +115,7 @@ int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (
     int rc = vdev->tr->setup_queue(vdev, vq);
     if (rc) {
         dma_free(&vdev->dev, vq->ring_bytes, vq->ring_mem, vq->ring_dma);
-        kfree(vq->cookies);
-        kfree(vq);
+        vq_release(vq);
         return rc;
     }
     vdev->vq[index] = vq;
@@ -108,8 +133,7 @@ void virtq_free(struct virtqueue *vq)
     vdev->tr->teardown_queue(vdev, vq);
     vdev->vq[vq->index] = NULL;
     dma_free(&vdev->dev, vq->ring_bytes, vq->ring_mem, vq->ring_dma);
-    kfree(vq->cookies);
-    kfree(vq);
+    vq_release(vq);
 }
 
 int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, unsigned in, void *cookie)
@@ -125,18 +149,27 @@ int virtq_add(struct virtqueue *vq, const struct virtq_sg *sg, unsigned out, uns
     }
     uint16_t head = vq->free_head;
     uint16_t i = head;
+    uint32_t in_bytes = 0;
     for (unsigned n = 0; n < total; n++) {
+        KASSERT(i < vq->size);   /* the driver's own free list is consistent */
+        /* The link comes from the driver's copy; the table gets a copy of
+         * it for the device and is never consulted again. */
+        uint16_t next = vq->shadow_next[i];
         struct virtq_desc *d = &vq->desc[i];
         d->addr = sg[n].addr;
         d->len = sg[n].len;
         d->flags = (uint16_t)((n >= out ? VIRTQ_DESC_F_WRITE : 0) | (n + 1 < total ? VIRTQ_DESC_F_NEXT : 0));
-        uint16_t next = d->next;
+        d->next = n + 1 < total ? next : 0;
+        if (n >= out)
+            in_bytes += sg[n].len;
         if (n + 1 == total)
             vq->free_head = next;
         i = next;
     }
     vq->num_free = (uint16_t)(vq->num_free - total);
     vq->cookies[head] = cookie;
+    vq->chain_len[head] = (uint16_t)total;
+    vq->in_bytes[head] = in_bytes;
 
     uint16_t idx = vq->avail->idx;
     vq->avail->ring[idx % vq->size] = head;
@@ -155,6 +188,23 @@ void virtq_kick(struct virtqueue *vq)
     }
 }
 
+/* Lock held. Return a completed chain to the free list using only the
+ * driver's records: chain_len bounds the walk, shadow_next supplies the
+ * links, so nothing the device wrote can steer it. */
+static void reclaim_chain(struct virtqueue *vq, uint16_t head)
+{
+    uint16_t len = vq->chain_len[head];
+    uint16_t last = head;
+    for (uint16_t k = 1; k < len; k++)
+        last = vq->shadow_next[last];
+    vq->shadow_next[last] = vq->free_head;
+    vq->free_head = head;
+    vq->num_free = (uint16_t)(vq->num_free + len);
+    vq->chain_len[head] = 0;
+    vq->in_bytes[head] = 0;
+    vq->cookies[head] = NULL;
+}
+
 void *virtq_pop(struct virtqueue *vq, uint32_t *len)
 {
     arch_irq_state_t s = spin_lock_irqsave(&vq->lock);
@@ -164,45 +214,40 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
             return NULL;
         }
         rmb();
-        struct virtq_used_elem e = vq->used->ring[vq->last_used % vq->size];
+        /* One load each: the checks below must judge the values that were
+         * read, not a second read of memory the device may be rewriting. */
+        struct virtq_used_elem e;
+        const volatile struct virtq_used_elem *slot = &vq->used->ring[vq->last_used % vq->size];
+        e.id = slot->id;
+        e.len = slot->len;
         vq->last_used++;
 
-        /* A bad entry from the device is skipped, never a reason to stop
-         * draining: later valid completions must still reach the driver. */
-        if (e.id >= vq->size || vq->cookies[e.id] == NULL) {
+        /* A bad element is skipped, never a reason to stop draining: later
+         * valid completions must still reach the driver. "Bad" is anything
+         * the driver's records do not confirm: an index outside the table,
+         * a head that is not in flight (never posted, completed already, or
+         * completed twice). */
+        if (e.id >= vq->size || vq->chain_len[e.id] == 0 || vq->cookies[e.id] == NULL) {
             vq->bad_used++;
             kerror("virtio: %s: queue %u: device returned bad descriptor id %u", vq->vdev->dev.name, vq->index,
                    e.id);
             continue;
         }
-        void *cookie = vq->cookies[e.id];
-
-        /* Walk the chain; a corrupt link means the descriptors cannot be
-         * trusted back onto the free list, so they are abandoned (the
-         * queue shrinks) but the completion is still delivered. */
-        uint16_t i = (uint16_t)e.id;
-        unsigned count = 1;
-        bool chain_ok = true;
-        while (vq->desc[i].flags & VIRTQ_DESC_F_NEXT) {
-            i = vq->desc[i].next;
-            if (i >= vq->size || count >= vq->size) {
-                chain_ok = false;
-                break;
-            }
-            count++;
-        }
-        vq->cookies[e.id] = NULL;
-        if (chain_ok) {
-            vq->desc[i].next = vq->free_head;
-            vq->free_head = (uint16_t)e.id;
-            vq->num_free = (uint16_t)(vq->num_free + count);
-        } else {
+        uint16_t head = (uint16_t)e.id;
+        void *cookie = vq->cookies[head];
+        uint32_t written = e.len;
+        if (written > vq->in_bytes[head]) {
+            /* The device claims more than the chain could hold: count it
+             * and report what the buffers can actually contain. */
             vq->bad_used++;
-            kerror("virtio: %s: queue %u: corrupt descriptor chain at %u", vq->vdev->dev.name, vq->index, e.id);
+            kerror("virtio: %s: queue %u: device wrote %u bytes into a %u-byte chain at %u", vq->vdev->dev.name,
+                   vq->index, written, vq->in_bytes[head], head);
+            written = vq->in_bytes[head];
         }
+        reclaim_chain(vq, head);
         spin_unlock_irqrestore(&vq->lock, s);
         if (len)
-            *len = e.len;
+            *len = written;
         return cookie;
     }
 }

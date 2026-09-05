@@ -16,7 +16,7 @@ memory, which the PMM keeps reserved for the life of the kernel. Lookup
 is by exact name (`init`, `modules/hello.ko`, `tests/cosmotest.ko`;
 since Phase 9 also `bin/sh`, `sbin/ps`, `etc/rc`, which the ramfs
 places at `/bin`, `/sbin`, `/etc`, and since Phase 10 `sbin/pkg`,
-`etc/pkg/repos.conf`, `etc/pkg/keys/cosmo-dev.pub` and the package
+`etc/pkg/repos.conf`, `etc/pkg/keys/<key>.pub` and the package
 repository as `repo/INDEX`, `repo/hello-1.1.cpk`, ...; nested names are
 allowed, the ramfs creates the intermediate directories,
 `docs/kernel-services/vfs/api.md`).
@@ -84,13 +84,23 @@ module is impossible by construction (no trailer means `-ENOKEY`).
 
 ### The key ring (`kernel/security/keyring.c`)
 
-`scripts/gen-keyring.py` turns the `.pub` files in `tools/keys/` (32-byte hex) into a
-generated C array of `{key_id[8], pub[32], name}` at build time. The
-repository ships one development key pair, `cosmo-dev`, whose secret
-half is public by definition: it authenticates nothing outside a
-developer's own tree. Production images must be built with a different
-ring and the secret key kept off the build host. `keyring_find(id)` is a
-linear scan; the ring is immutable after build.
+`scripts/gen-keyring.py` turns `KEYRING_PUBS` (32-byte hex `.pub` files)
+into a generated C array of `{key_id[8], pub[32], name}` at build time.
+The repository holds no private key. With `SIGNING=dev` (the default)
+the ring is the developer's own public key, `dev.pub`, whose pair
+`scripts/devkey.sh` creates on first use in `$COSMO_KEYDIR` outside the
+tree, plus any release public keys under `tools/keys/*.pub`; a module
+signed on one machine is trusted only by kernels built there. With
+`SIGNING=release` the ring is exactly `KEYRING_PUBS` and the signing key
+never touches a shared build host. `keyring_find(id)` is a linear scan;
+the ring is immutable after build.
+
+Until the Prompt #3 fix pass the tree shipped `tools/keys/cosmo-dev.key`
+next to its public key. That seed is in history for good; the key is
+therefore revoked (`scripts/check-secrets.sh` refuses to build a tree
+that tracks its public half, so no kernel trusts it again), and the
+per-machine model above is what prevents a recurrence
+(`tools/keys/README.md`).
 
 ### Loaded module record (`kernel/module/module.c`)
 
@@ -284,7 +294,11 @@ TCG; it is a boot-time cost paid once per module.
   dependencies' exports. Reaching a kernel internal by address is
   possible in ring 0 by definition; the export table is a discipline
   boundary (section 24), not an isolation boundary.
-- The signing key in the tree is a development key. Enforcement is on
+- No signing key is in the tree. Development builds sign with a
+  per-machine key kept outside the repository and trusted only by
+  kernels built on that machine; release builds name their key and
+  trusted ring explicitly. `make check-tools` (and therefore CI) fails
+  if a private key or a revoked public key is tracked. Enforcement is on
   by default in both build types; turning it off is a build-time
   decision (`MODULE_SIG_ENFORCE=0`) that taints the kernel visibly.
 - The Ed25519 implementation is verification-only and variable-time:

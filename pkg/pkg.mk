@@ -2,11 +2,11 @@
 # pkg is an ordinary user program: its sources plus the kernel's SHA-512
 # and Ed25519 code compiled for user mode. `make ports` cross-compiles
 # every recipe under ports/ into $(PKG_REPO) with tools/pkgbuild.py and
-# signs packages and INDEX with the module development key.
+# signs packages and INDEX with $(PKGSIGN_KEY) (build/config.mk: the module
+# signing key unless overridden).
 
 PKG_ELF  := $(OUT)/userland/pkg.elf
 PKG_REPO := $(OUT)/pkg/repo
-PKGSIGN_KEY ?= $(ROOT)/tools/keys/cosmo-dev.key
 PKGBUILD := $(PYTHON) $(ROOT)/tools/pkgbuild.py
 
 PKG_SRCS := pkg/pkg.c pkg/manifest.c pkg/version.c pkg/tar.c pkg/verify.c \

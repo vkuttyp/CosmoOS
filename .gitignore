@@ -34,3 +34,7 @@ vgcore.*
 
 # Python
 __pycache__/
+
+# Private signing material never belongs in the tree (scripts/check-secrets.sh
+# fails the build if it does); developer keys live in $COSMO_KEYDIR.
+*.key

@@ -183,6 +183,37 @@ even CPUID and RDTSC out of generic code. Every function's contract is in
 `docs/kernel-services/virtualization/api.md`; the x86-64 implementation
 is `svm.c`, `svm_npt.c`, `svm_run.S` with the private `x86/svm.h`.
 
+## `arch/fpu.h` (Prompt #3 fix pass)
+
+### `int arch_fpu_alloc(struct thread *t)`
+
+Give `t` its own floating-point/SIMD register state at the architectural
+reset values; 0 or `-ENOMEM`; idempotent. Called by `process_create_from_elf`
+before the thread can run, and by tests that make a kernel thread a
+state owner. On AArch64 (FP/SIMD disabled at EL0) it is a no-op that
+leaves `t->fpu` NULL.
+
+### `void arch_fpu_free(struct thread *t)`
+
+Release the state (no-op when none). `thread_put` calls it; a thread may
+also free its own.
+
+### `size_t arch_fpu_state_size(void)`
+
+Bytes per thread (512 with FXSAVE, `CPUID.0DH` size with XSAVE, 0 on AArch64).
+
+The switch itself is not part of the interface: `arch_thread_switch_prepare(prev, next)`
+(`arch/context.h`) does it. Rules and ownership: `docs/kernel/arch/design.md`,
+"FPU and SIMD state", and I-ARCH-13.
+
+## `arch/testhooks.h` additions
+
+`bool arch_test_paranoid_entry(const char **why)`, `bool arch_test_fpu_switch(const char **why)`,
+`bool arch_test_fpu_set(const uint8_t pattern[16])`, `bool arch_test_fpu_get(uint8_t out[16])`:
+self-test aids for the `trap-paranoid`, `fpu-switch` and `hv-guest-fpu`
+tests. An architecture without the corresponding hazard returns true with
+`*why = NULL` (or false from the set/get pair, meaning "no such register").
+
 ## Private x86-64 headers (not part of the interface)
 
 `kernel/arch/x86_64/include/x86/`: `cpu.h` (`x86_start`, `x86_cpu_init`,

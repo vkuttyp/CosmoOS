@@ -251,4 +251,30 @@ static inline long cosmo_sysctl(const char *name, char *buf, size_t len)
     return cosmo_syscall3(SYS_sysctl, name, buf, len);
 }
 
+/* Credentials: -1 keeps an id. */
+static inline long cosmo_setresuid(long ruid, long euid, long suid)
+{
+    return cosmo_syscall3(SYS_setresuid, ruid, euid, suid);
+}
+static inline long cosmo_setresgid(long rgid, long egid, long sgid)
+{
+    return cosmo_syscall3(SYS_setresgid, rgid, egid, sgid);
+}
+static inline long cosmo_getresuid(uint32_t *ruid, uint32_t *euid, uint32_t *suid)
+{
+    return cosmo_syscall3(SYS_getresuid, ruid, euid, suid);
+}
+static inline long cosmo_getresgid(uint32_t *rgid, uint32_t *egid, uint32_t *sgid)
+{
+    return cosmo_syscall3(SYS_getresgid, rgid, egid, sgid);
+}
+static inline long cosmo_setgroups(const uint32_t *groups, size_t n)
+{
+    return cosmo_syscall2(SYS_setgroups, groups, n);
+}
+static inline long cosmo_getgroups(uint32_t *groups, size_t n)
+{
+    return cosmo_syscall2(SYS_getgroups, groups, n);
+}
+
 #endif /* COSMO_SYSCALL_H */

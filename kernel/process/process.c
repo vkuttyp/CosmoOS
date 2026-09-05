@@ -20,7 +20,9 @@
 #include <kernel/vmm.h>
 
 #include <arch/irq.h>
+#include <arch/trap.h>
 #include <arch/user.h>
+#include <kernel/interrupt.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -95,12 +97,49 @@ static const struct vm_user_hooks g_hooks = {
     .fatal = hook_fatal,
 };
 
+/*
+ * CPU exceptions other than page faults: a user program that divides by
+ * zero, executes an invalid opcode, violates protection or is single
+ * stepping dies with COSMO_EXIT_FAULT; the same exception from kernel
+ * mode is a kernel bug and panics through arch_trap_unhandled. The kill
+ * is deferred (process_kill), not taken here: the exception may have
+ * arrived on the paranoid path (#DB), which runs as interrupt context on
+ * an IST stack, and the return-to-user hook or the next tick delivers it.
+ * Status 128 + 11 is COSMO_EXIT_FAULT, the same as a fatal page fault.
+ */
+#define PROCESS_FAULT_SIGNAL 11
+
+static void user_exception_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)arg;
+    struct process *p = process_current();
+    if (p == NULL || !arch_trap_frame_is_user(frame)) {
+        arch_trap_unhandled(vector, frame);
+        return;
+    }
+    if (p->kill_sig == 0)
+        kwarn("process: pid %u '%s' %s at %p; terminating", p->pid, p->name, arch_trap_name(vector),
+              (void *)arch_trap_frame_pc(frame));
+    process_kill(p, PROCESS_FAULT_SIGNAL);
+}
+
 void process_init(void)
 {
     g_process_cache = kmem_cache_create("process", sizeof(struct process), 64);
     if (g_process_cache == NULL)
         panic("process: cannot create process cache");
     vm_set_user_hooks(&g_hooks);
+
+    static const enum arch_trap_kind kinds[] = { ARCH_TRAP_DEBUG, ARCH_TRAP_DIVIDE_ERROR, ARCH_TRAP_INVALID_OPCODE,
+                                                 ARCH_TRAP_GENERAL_PROTECTION };
+    for (size_t i = 0; i < ARRAY_SIZE(kinds); i++) {
+        int vec = arch_trap_vector(kinds[i]);
+        if (vec < 0)
+            continue;   /* the architecture reports these differently (AArch64 decodes ESR itself) */
+        int rc = interrupt_register((unsigned)vec, user_exception_handler, NULL, "user-exception");
+        if (rc && rc != -EBUSY)
+            panic("process: cannot register the handler for trap %d (%d)", vec, rc);
+    }
 }
 
 /* --- initial user stack --- */
@@ -358,6 +397,15 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     struct thread *t = thread_prepare(user_thread_main, NULL, p->name, SCHED_PRIO_DEFAULT, 0);
     if (t == NULL) {
         rc = -ENOMEM;
+        goto fail_registered;
+    }
+    /* A user thread owns vector/x87 register state from its first
+     * instruction (arch/fpu.h): allocated before it can run. */
+    rc = arch_fpu_alloc(t);
+    if (rc) {
+        t->state = THREAD_EXITED;   /* never ran: release both creation references */
+        thread_put(t);
+        thread_put(t);
         goto fail_registered;
     }
     t->proc = p;
@@ -690,6 +738,11 @@ int process_chdir(const char *path)
         vnode_put(vn);
         return -ENOTDIR;
     }
+    rc = vfs_permission(vn, VFS_MAY_EXEC);   /* search permission on the new directory */
+    if (rc) {
+        vnode_put(vn);
+        return rc;
+    }
     arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
     struct vnode *old = cur->cwd;
     cur->cwd = vn;
@@ -711,8 +764,8 @@ unsigned process_info(struct cosmo_procinfo *buf, unsigned count)
             memset(pi, 0, sizeof(*pi));
             pi->pid = p->pid;
             pi->ppid = p->parent_pid;
-            pi->uid = p->cred.uid;
-            pi->gid = p->cred.gid;
+            pi->uid = p->cred.euid;
+            pi->gid = p->cred.egid;
             pi->state = (uint32_t)p->state;
             pi->syscalls = p->syscalls;
             strlcpy(pi->name, p->name, sizeof(pi->name));
@@ -733,6 +786,42 @@ struct process *process_current(void)
 {
     struct thread *t = this_cpu()->current;
     return t ? t->proc : NULL;
+}
+
+const struct credentials *cred_current(void)
+{
+    struct process *p = process_current();
+    return p ? &p->cred : &cred_kernel;
+}
+
+/* setres{u,g}id for the calling process (system calls). The process is
+ * single-threaded, so it is the only writer; the lock keeps the update
+ * atomic against readers on other CPUs once threads exist. */
+int process_setresuid(int64_t ruid, int64_t euid, int64_t suid)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setresuid(&p->cred, ruid, euid, suid);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
+}
+
+int process_setresgid(int64_t rgid, int64_t egid, int64_t sgid)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setresgid(&p->cred, rgid, egid, sgid);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
+}
+
+int process_setgroups(const uint32_t *groups, unsigned n)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setgroups(&p->cred, groups, n);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
 }
 
 struct process *process_lookup(pid_t pid)
