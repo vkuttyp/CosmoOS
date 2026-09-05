@@ -24,6 +24,7 @@
 #include <kernel/module.h>
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
+#include <kernel/futex.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -132,6 +133,7 @@ void kernel_main(const struct cosmoboot_info *info)
     sched_init();
     tty_init();
     process_init();
+    futex_init();
     module_init();
 
     /* Devices: the model, then the PCI bus (ECAM from ACPI, BARs, MSI

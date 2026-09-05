@@ -78,10 +78,12 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
                 memcpy(&namesz, file + off, 4);
                 memcpy(&descsz, file + off + 4, 4);
                 memcpy(&type, file + off + 8, 4);
+                if (namesz > 256 || descsz > 4096)
+                    break;   /* not a note this loader recognises; sizes bounded before any arithmetic */
                 uint64_t name_at = off + 12;
-                uint64_t desc_at = name_at + ((namesz + 3u) & ~3u);
-                uint64_t next = desc_at + ((descsz + 3u) & ~3u);
-                if (namesz > 256 || descsz > 4096 || next > end)
+                uint64_t desc_at = name_at + (((uint64_t)namesz + 3u) & ~3ull);
+                uint64_t next = desc_at + (((uint64_t)descsz + 3u) & ~3ull);
+                if (next > end || next <= off)
                     break;
                 if (namesz == 8 && type == 1 && memcmp(file + name_at, "CosmoOS", 8) == 0)
                     info->cosmo_note = true;

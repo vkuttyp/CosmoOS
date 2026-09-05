@@ -27,17 +27,15 @@ struct bucket {
 };
 
 static struct bucket g_buckets[FUTEX_BUCKETS];
-static bool g_init;
 
-static void init_once(void)
+/* Called once from kernel_main before any user process exists (and so
+ * before any futex call); the buckets are never re-initialised. */
+void futex_init(void)
 {
-    if (g_init)
-        return;
     for (unsigned i = 0; i < FUTEX_BUCKETS; i++) {
         spinlock_init(&g_buckets[i].lock, "futex");
         list_init(&g_buckets[i].waiters);
     }
-    g_init = true;
 }
 
 static struct bucket *bucket_of(struct vm_space *space, uint64_t uaddr)
@@ -56,7 +54,6 @@ static void timeout_fired(struct timer *t, void *arg)
 
 int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns)
 {
-    init_once();
     if (uaddr & 3)
         return -EINVAL;
     struct bucket *b = bucket_of(space, uaddr);
@@ -107,7 +104,6 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
 
 int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
 {
-    init_once();
     if (uaddr & 3)
         return -EINVAL;
     struct bucket *b = bucket_of(space, uaddr);
