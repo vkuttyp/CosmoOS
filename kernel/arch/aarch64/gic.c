@@ -361,7 +361,7 @@ static int sgi_for_vector_locked(unsigned vector)
     return -1;
 }
 
-static int sgi_for_vector(unsigned vector)
+void arch_ipi_bind(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -369,6 +369,17 @@ static int sgi_for_vector(unsigned vector)
     spin_unlock_irqrestore(&g_lock, s);
     if (sgi < 0)
         panic("gic: more than %u IPI vectors", GIC_SGI_COUNT);
+}
+
+/* Lock-free: the binding was made by arch_ipi_bind before the first send
+ * and never changes while the vector is allocated. arch_ipi_send runs
+ * under the run-queue lock, which must stay a leaf (S2). */
+static int sgi_for_vector(unsigned vector)
+{
+    KASSERT(vector_is_dynamic(vector));
+    int sgi = __atomic_load_n(&g_sgi_of_vector[vector - VEC_DYNAMIC_BASE], __ATOMIC_ACQUIRE);
+    if (sgi < 0)
+        panic("gic: IPI vector %u sent before arch_ipi_bind", vector);
     return sgi;
 }
 

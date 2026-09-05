@@ -45,6 +45,10 @@ unsigned arch_irqc_gsi_count(void);
 unsigned arch_irqc_spurious_vector(void);
 
 /* Inter-processor interrupts (used by the SMP work). */
+/* Bind an IPI vector to its controller resource (AArch64: an SGI) once,
+ * at registration, so arch_ipi_send needs no lock: it runs under the
+ * run-queue lock, which is a leaf (scheduler invariant S2). */
+void arch_ipi_bind(unsigned vector);
 void arch_ipi_send(unsigned cpu, unsigned vector);
 void arch_ipi_broadcast_others(unsigned vector);
 

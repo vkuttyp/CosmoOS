@@ -67,16 +67,19 @@ macOS host tests) the macro degrades to a `STATIC_ASSERT`.
 Rules: a module's export may not repeat and may not shadow a kernel
 export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
-### Module ABI v2: the exported symbols
+### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 2 since the lifetime pass: `struct kobject`
-gained `owner`, which moves every field after the embedded kobject in
-`struct device`, `struct blkdev` and `struct netif`, and the release
-callbacks (`struct device.release`, `struct blkdev_ops.release`,
+`COSMO_MODULE_ABI_VERSION` is 3. Version 2 (the lifetime pass): `struct
+kobject` gained `owner`, which moves every field after the embedded
+kobject in `struct device`, `struct blkdev` and `struct netif`, and the
+release callbacks (`struct device.release`, `struct blkdev_ops.release`,
 `struct netif_ops.release`, `struct virtio_transport.release`) became
-mandatory. A v1 module is refused by `modelf_check_info`.
+mandatory. Version 3 (lock discipline): `spinlock_t` and `struct mutex`
+gained a `class` field for the lock-order checker, which changes the size
+of every exported structure embedding one. An older module is refused by
+`modelf_check_info`.
 
-The kernel image exports 132 symbols (Phase 5's 43, the Phase 6 device,
+The kernel image exports 135 symbols (Phase 5's 43, the Phase 6 device,
 PCI, DMA, block, entropy and console-sink interfaces, the Phase 8 mbuf
 and network-interface surface a NIC driver needs, and the lifetime pass's
 quiescence, timer and object interfaces). Adding one is compatible;
@@ -87,7 +90,7 @@ removing or changing one bumps the version.
 | Logging | `klog`, `kvlog`, `kprintf`, `kvprintf`, `ksnprintf`, `kvsnprintf`, `panic` |
 | Heap | `kmalloc`, `kzalloc`, `krealloc`, `kfree`, `kmem_cache_create`, `kmem_cache_destroy`, `kmem_cache_alloc`, `kmem_cache_free` |
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
-| Locks | `spinlock_init`, `spin_lock`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_trylock`, `mutex_unlock` |
+| Locks | `spinlock_init`, `spin_lock`, `spin_lock_nested`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_lock_irqsave_nested`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_lock_nested`, `mutex_trylock`, `mutex_unlock` |
 | Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay`, `timer_setup`, `timer_start`, `timer_cancel`, `timer_cancel_sync` |
 | Lifetime (`kernel/quiesce.h`, `kernel/interrupt.h`, `kernel/object.h`) | `synchronize_quiesce`, `call_quiesce`, `quiesce_read_lock_debug`, `quiesce_read_unlock_debug`, `synchronize_irq`, `interrupt_unregister_sync`, `kobject_init`, `kobject_get`, `kobject_tryget`, `kobject_put`, `kobject_refcount` |
 | Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_release_static`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
@@ -108,7 +111,7 @@ Modules export too: the `virtio` module provides 15 symbols
 and `virtio_net` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant
 M3), and a module cannot be unloaded while a dependant holds it. In
-total the tree carries 147 `EXPORT_SYMBOL` records.
+total the tree carries 150 `EXPORT_SYMBOL` records.
 
 Semantics are those of the headers the symbols come from
 (`docs/kernel/diagnostics/api.md`, `memory/api.md`, `scheduler/api.md`,

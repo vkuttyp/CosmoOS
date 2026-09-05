@@ -114,24 +114,41 @@ commit on purpose so an abandoned transaction can be dropped and the
 device released.
 
 Vnode cache: `vnode_lookup_cached(mnt, ino)` returns a referenced vnode
-if one is live; a filesystem's `lookup` calls it before instantiating.
-The cache holds **no** reference. When the last reference drops the
-`release` path takes `mnt->lock`, unhashes, syncs dirty pages
-(`pagecache_sync`), drops the cache, calls `evict`, and frees. ramfs
+if one is hashed; a filesystem's `lookup` calls it before instantiating.
+The cache holds **no** reference, but a hashed vnode always has one:
+`vnode_put` reads the count and, when it is 1, takes the mount's hash
+spinlock, re-reads it (a lookup that raised it since must have held the
+same lock, so the re-read is final) and unhashes before dropping; the
+`release` path therefore takes no mount lock and only syncs dirty pages
+(`pagecache_sync`), drops the cache, calls `evict`, and frees. This closes
+the check-then-get of the audit (a second vnode for an inode whose first
+was mid-release). ramfs
 pins its vnodes (`VNODE_PINNED`: the fs holds a reference while
 `nlink > 0`) because the page cache is its only copy of the data;
 cosmofs vnodes are re-read from disk after eviction. Directory vnodes
 that are mountpoints are pinned by the mount's reference.
 
 Locking: `g_mounts_lock` (mutex) for the mount table and `fs_type`
-registry; `mount->lock` for the vnode hash; `vnode->lock` for contents
-and size; `file->lock` for the position; `pagecache.lock` inside
-`vnode->lock`. Directory operations lock the parent (and for `rename`
-both parents in address order, then the victim); a child is never
-locked while holding only the child. Order: `g_mounts_lock` →
-`mount->lock` → `vnode->lock` (parent before child, address order for
-peers) → `pagecache.lock` → filesystem private locks → block layer.
-`file->lock` is taken alone before `vnode->lock`.
+registry; `mount->lock` (a spinlock, a leaf) for the vnode hash;
+`mount->rename_lock` (mutex) serialises renames on a mount;
+`mount->sync_lock` (mutex) orders `fs->sync` against `fs->unmount`;
+`vnode->lock` for contents and size; `file->lock` for the position;
+`pagecache.lock` inside `vnode->lock`. Directory operations lock the
+parent, then a child (`mutex_lock_nested(..., VNODE_NESTED_CHILD)`); a
+child is never locked while holding only the child. `rename` takes the
+mount's `rename_lock`, then decides the parent order from the ancestry
+(stable under that lock: only rename changes a parent): the ancestor
+first, or address order for two unrelated directories, the second parent
+annotated `VNODE_NESTED_PARENT2`; the "directory under itself" walk runs
+under `rename_lock` with no parent locked. Order: `g_mounts_lock` →
+`rename_lock` → `vnode->lock` (parent, second parent, child) →
+`pagecache.lock` → filesystem private locks → block layer; `mount->lock`
+is a spinlock leaf under any of them; `file->lock` is taken alone before
+`vnode->lock`; `sync_lock` is taken alone before filesystem locks. The
+debug-build lock-order checker (`docs/kernel/lockdep/`) verifies this on
+every boot. `vfs_sync` no longer holds `g_mounts_lock` across a commit: it
+takes each mount by position with a reference and syncs it under its
+`sync_lock`.
 
 ### Page cache (`kernel/include/kernel/pagecache.h`)
 

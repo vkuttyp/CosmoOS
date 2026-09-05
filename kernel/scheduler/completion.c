@@ -3,6 +3,7 @@
  */
 
 #include <kernel/completion.h>
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
@@ -31,8 +32,6 @@ void wait_for_completion(struct completion *c)
 {
     if (this_cpu()->irq_depth != 0)
         panic("wait_for_completion in interrupt context");
-    if (this_cpu()->preempt_count != 0)
-        panic("wait_for_completion with preemption disabled (count %d): a spinlock is held",
-              this_cpu()->preempt_count);
+    might_sleep();
     wait_event(&c->wq, completion_done(c));
 }

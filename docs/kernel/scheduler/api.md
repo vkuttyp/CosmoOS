@@ -226,12 +226,16 @@ kernel ABI; nothing here is visible to user space.
 
 ## mutex.h
 
-`struct mutex { spinlock_t lock; struct thread *owner; struct waitqueue wq; const char *name; }`
+`struct mutex { spinlock_t lock; struct thread *owner; struct waitqueue wq; const char *name; uint16_t class; }`
 
-- `mutex_init(m, name)`.
-- `mutex_lock(m)`: loop of `mutex_trylock` and
-  `wait_event(&m->wq, owner == NULL)`. Panics in interrupt context and on
-  recursive acquisition by the owner. No priority inheritance.
+- `mutex_init(m, name)`; the name is the lock class for the debug-build
+  checker (`docs/kernel/lockdep/`).
+- `mutex_lock(m)`: `might_sleep()`, then a loop of the internal try and
+  `wait_event(&m->wq, owner == NULL)`. Panics in interrupt context, under a
+  spinlock (`might_sleep`) and on recursive acquisition by the owner. No
+  priority inheritance. The order check runs before the wait.
+- `mutex_lock_nested(m, subclass)`: the same, annotated for nesting inside
+  another mutex of the same class (`VNODE_NESTED_*`).
 - `mutex_trylock(m)`: interrupt-safe; true if acquired.
 - `mutex_unlock(m)`: panics unless the caller owns it; clears the owner
   under `m->lock`, then `waitqueue_wake_one`.

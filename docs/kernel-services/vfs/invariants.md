@@ -52,13 +52,23 @@ ignored). Gap: no fuzzing of on-disk images.
 inode's slot is zeroed. Check: review. Gap: none needed while the
 64-bit space is not exhaustible in practice.
 
-**V7. Lock order.** `g_mounts_lock` → `mount->lock` → `vnode->lock`
-(parent before child; for `rename`, both parents in address order) →
-`pagecache.lock` → `cfs->lock` → block layer. `file->lock` is taken
-alone before any vnode lock. A vnode's last reference is never dropped
-while `mount->lock` is held (release takes it). Check: review; the
-self-tests run every operation under the scheduler's hang watchdog.
-Gap: no lock-order checker.
+**V7. Lock order.** `g_mounts_lock` → `mount->rename_lock` →
+`vnode->lock` (parent before child, annotated `VNODE_NESTED_CHILD`; for
+`rename`, the ancestor parent first and the second parent annotated
+`VNODE_NESTED_PARENT2`, address order only for two unrelated directories)
+→ `pagecache.lock` → `cfs->lock` → block layer. `mount->lock` is a spinlock
+protecting only the vnode hash and is a leaf under any of them.
+`file->lock` is taken alone before any vnode lock; `mount->sync_lock` is
+taken alone before filesystem locks. `vnode_put` unhashes under
+`mount->lock` before the last reference drops, so `vnode_release` takes no
+mount lock and a hashed vnode always has a reference. (The earlier text
+put `mount->lock`, then a mutex, above `vnode->lock`, while the code took
+it below: the audit's finding; and the address order for rename's
+parents was an ABBA against rmdir.) Check: the debug-build lock-order
+checker on every boot (`docs/kernel/lockdep/`), test `vfs-concurrency`
+(rename against rmdir/mkdir on two CPUs; open/close of one file on two
+CPUs with the vnode count exact afterwards), and the self-tests under the
+hang watchdog.
 
 **V8. A vnode's page cache is written back and dropped only at release
 or truncation.** Nothing evicts pages under memory pressure; a ramfs

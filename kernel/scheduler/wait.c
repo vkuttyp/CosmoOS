@@ -2,6 +2,7 @@
  * wait.c - Wait queues and timed sleep.
  */
 
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
@@ -22,8 +23,7 @@ void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e)
     struct percpu *pc = this_cpu();
     if (pc->irq_depth != 0)
         panic("wait_event in interrupt context");
-    if (pc->preempt_count != 0)
-        panic("wait_event with preemption disabled (count %d)", pc->preempt_count);
+    might_sleep();
 
     struct thread *cur = pc->current;
     e->thread = cur;

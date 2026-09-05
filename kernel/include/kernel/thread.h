@@ -15,6 +15,7 @@
 #define KERNEL_THREAD_H
 
 #include <kernel/completion.h>
+#include <kernel/lockdep_core.h>
 #include <kernel/list.h>
 #include <kernel/percpu.h>
 #include <kernel/types.h>
@@ -75,6 +76,8 @@ struct thread {
     int exit_code;
     uint32_t refcount;
     unsigned flags;
+    struct lockdep_held held_mutex[LOCKDEP_MAX_HELD_MUTEX];   /* lockdep: mutexes this thread holds */
+    unsigned nr_held_mutex;
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation

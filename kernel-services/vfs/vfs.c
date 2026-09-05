@@ -10,6 +10,7 @@
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
@@ -34,16 +35,10 @@ uint64_t vfs_now_ns(void)
 static void vnode_release(struct kobject *obj)
 {
     struct vnode *vn = container_of(obj, struct vnode, obj);
-    struct mount *mnt = vn->mnt;
 
-    /* Unhash first so a concurrent lookup instantiates a fresh vnode
-     * rather than reviving this one. */
-    mutex_lock(&mnt->lock);
-    if (!list_empty(&vn->hash_link)) {
-        list_remove(&vn->hash_link);
-        mnt->nr_vnodes--;
-    }
-    mutex_unlock(&mnt->lock);
+    /* vnode_put unhashed it before dropping the last reference, so no
+     * lookup can find it now; the release takes no mount lock. */
+    KASSERT(list_empty(&vn->hash_link));
 
     if (vn->type == VNODE_REG) {
         if (vn->pc.nr_dirty && vn->ops->writepage)
@@ -79,25 +74,50 @@ struct vnode *vnode_alloc(struct mount *mnt, uint64_t ino)
 void vnode_hash_insert(struct vnode *vn)
 {
     struct mount *mnt = vn->mnt;
-    mutex_lock(&mnt->lock);
+    arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
     list_push_back(&mnt->vnodes[vn->ino % VNODE_HASH], &vn->hash_link);
     mnt->nr_vnodes++;
-    mutex_unlock(&mnt->lock);
+    spin_unlock_irqrestore(&mnt->lock, s);
 }
 
+/*
+ * A hashed vnode always holds at least one reference: vnode_put unhashes
+ * under the hash lock before the count can reach zero (below). So a plain
+ * get here is safe, and there is no window in which a vnode at count zero
+ * is skipped and a second vnode instantiated for the inode (the audit's
+ * check-then-get finding).
+ */
 struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)
 {
-    mutex_lock(&mnt->lock);
+    arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
     struct vnode *vn;
     list_for_each_entry(vn, &mnt->vnodes[ino % VNODE_HASH], hash_link) {
-        if (vn->ino == ino && kobject_refcount(&vn->obj) > 0) {
+        if (vn->ino == ino) {
             vnode_get(vn);
-            mutex_unlock(&mnt->lock);
+            spin_unlock_irqrestore(&mnt->lock, s);
             return vn;
         }
     }
-    mutex_unlock(&mnt->lock);
+    spin_unlock_irqrestore(&mnt->lock, s);
     return NULL;
+}
+
+void vnode_put(struct vnode *vn)
+{
+    if (kobject_refcount(&vn->obj) == 1) {
+        /* Ours is the only reference, so the count can only rise, and only
+         * through a hash lookup, which needs this lock: once we hold it a
+         * re-read of 1 is final and the unhash is safe. */
+        struct mount *mnt = vn->mnt;
+        arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
+        if (kobject_refcount(&vn->obj) == 1 && !list_empty(&vn->hash_link)) {
+            list_remove(&vn->hash_link);
+            list_init(&vn->hash_link);
+            mnt->nr_vnodes--;
+        }
+        spin_unlock_irqrestore(&mnt->lock, s);
+    }
+    kobject_put(&vn->obj);
 }
 
 void vnode_stat(struct vnode *vn, struct cosmo_stat *st)
@@ -172,7 +192,9 @@ static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsign
     mnt->next_ino = 1;
     for (unsigned i = 0; i < VNODE_HASH; i++)
         list_init(&mnt->vnodes[i]);
-    mutex_init(&mnt->lock, "mount");
+    spinlock_init(&mnt->lock, "mount-hash");
+    mutex_init(&mnt->rename_lock, "rename");
+    mutex_init(&mnt->sync_lock, "mount-sync");
     list_init(&mnt->link);
     return mnt;
 }
@@ -280,7 +302,7 @@ int vfs_umount2(const char *path, unsigned flags)
 
     /* Busy if any vnode is referenced beyond what the filesystem itself
      * holds: a pinned vnode's own pin, the mount's reference on the root. */
-    mutex_lock(&mnt->lock);
+    arch_irq_state_t hs = spin_lock_irqsave(&mnt->lock);
     bool busy = false;
     for (unsigned b = 0; b < VNODE_HASH && !busy; b++) {
         struct vnode *vn;
@@ -292,7 +314,7 @@ int vfs_umount2(const char *path, unsigned flags)
             }
         }
     }
-    mutex_unlock(&mnt->lock);
+    spin_unlock_irqrestore(&mnt->lock, hs);
     if (busy) {
         rc = -EBUSY;
         goto restore;
@@ -318,8 +340,12 @@ int vfs_umount2(const char *path, unsigned flags)
 
     /* The filesystem releases its pins and private state while the root
      * is still alive; the root's eviction follows and must tolerate
-     * mnt->fs_priv being gone. */
+     * mnt->fs_priv being gone. Under sync_lock: a vfs_sync that snapshotted
+     * this mount either finishes its fs->sync first or sees `unmounted`. */
+    mutex_lock(&mnt->sync_lock);
     int urc = mnt->fs->unmount(mnt);
+    mnt->unmounted = true;
+    mutex_unlock(&mnt->sync_lock);
     struct vnode *root_vn = mnt->root;
     mnt->root = NULL;
     vnode_put(root_vn);
@@ -343,19 +369,42 @@ restore:
     return rc;
 }
 
+/*
+ * Sync every mount without holding the mount list across a commit (a
+ * cosmofs commit is block I/O; mount and unmount must not wait behind it).
+ * The k-th mount is taken by position under the list lock with a
+ * reference, synced under its own sync_lock (which unmount also takes
+ * around fs->unmount, so a mount that went away is seen as `unmounted`
+ * and skipped), and put. A mount unmounted meanwhile shifts the
+ * positions: the one that moved into its place is synced again, which is
+ * harmless, and the unmounted one was committed by vfs_umount itself.
+ */
 int vfs_sync(void)
 {
     int rc = 0;
-    mutex_lock(&g_mounts_lock);
-    struct mount *mnt;
-    list_for_each_entry(mnt, &g_mounts, link) {
-        if (mnt->fs->sync) {
+    for (unsigned k = 0;; k++) {
+        mutex_lock(&g_mounts_lock);
+        struct mount *mnt = NULL, *it;
+        unsigned i = 0;
+        list_for_each_entry(it, &g_mounts, link) {
+            if (i++ == k) {
+                mnt = it;
+                kobject_get(&mnt->obj);
+                break;
+            }
+        }
+        mutex_unlock(&g_mounts_lock);
+        if (mnt == NULL)
+            break;
+        mutex_lock(&mnt->sync_lock);
+        if (mnt->fs->sync && !mnt->unmounted) {
             int r = mnt->fs->sync(mnt);
             if (r && rc == 0)
                 rc = r;
         }
+        mutex_unlock(&mnt->sync_lock);
+        kobject_put(&mnt->obj);
     }
-    mutex_unlock(&g_mounts_lock);
     return rc;
 }
 
@@ -982,7 +1031,7 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
     else
         rc = parent->ops->lookup(parent, last, len, &victim);
     if (rc == 0) {
-        mutex_lock(&victim->lock);
+        mutex_lock_nested(&victim->lock, VNODE_NESTED_CHILD);   /* child under its parent (V7) */
         if (dir && victim->type != VNODE_DIR)
             rc = -ENOTDIR;
         else if (!dir && victim->type == VNODE_DIR)
@@ -1015,6 +1064,47 @@ int vfs_rmdir(struct vnode *start, const char *path)
     return remove_entry(start, path, true);
 }
 
+/*
+ * True if `anc` is `vn` or one of its ancestors. The caller holds the
+ * mount's rename_lock and no vnode lock: only rename changes a directory's
+ * parent, so the ancestry is stable, and each ".." lookup takes that
+ * directory's lock alone (a concurrent mkdir or unlink in it rewrites the
+ * same directory data).
+ */
+static bool is_ancestor(struct vnode *anc, struct vnode *vn)
+{
+    struct vnode *p = vn;
+    vnode_get(p);
+    bool yes = false;
+    for (unsigned d = 0; d < VFS_MAX_COMPONENTS; d++) {
+        if (p == anc) {
+            yes = true;
+            break;
+        }
+        if (p->mnt->root == p)
+            break;
+        struct vnode *up;
+        mutex_lock(&p->lock);
+        int r = p->ops->lookup(p, "..", 2, &up);
+        mutex_unlock(&p->lock);
+        vnode_put(p);
+        if (r)
+            return false;
+        p = up;
+    }
+    vnode_put(p);
+    return yes;
+}
+
+/*
+ * Rename, with the lock order the rest of the VFS uses: parent before
+ * child, and for two parents the ancestor first (docs/kernel/lockdep/
+ * design.md, "VFS: rename"). Under the mount's rename_lock the ancestry
+ * cannot change, so it is decided, and the "directory under itself" rule
+ * checked, before any parent is locked. Two unrelated directories are
+ * locked in address order: no other path locks two directories without
+ * an ancestry between them, and other renames are excluded by the mutex.
+ */
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
 {
     struct vnode *odir, *ndir;
@@ -1036,72 +1126,91 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
         rc = -ENOTSUP;
         goto out_dirs;
     }
-    /* Lock the parents in address order (or once if the same). */
-    struct vnode *first = odir < ndir ? odir : ndir, *second = odir < ndir ? ndir : odir;
-    mutex_lock(&first->lock);
-    if (second != first)
-        mutex_lock(&second->lock);
+    struct mount *mnt = odir->mnt;
+    mutex_lock(&mnt->rename_lock);
 
-    struct vnode *victim = NULL, *replaced = NULL;
-    if ((odir->flags | ndir->flags) & VNODE_DEAD)
-        rc = -ENOENT;
-    else
-        rc = odir->ops->lookup(odir, oname, olen, &victim);
-    if (rc == 0) {
-        if (victim->covered_by || victim->mnt != odir->mnt) {
-            rc = -EBUSY;
-        } else if (sticky_denies(odir, victim)) {
-            rc = -EACCES;
-        } else if (victim->type == VNODE_DIR && odir != ndir && vfs_permission(victim, VFS_MAY_WRITE) != 0) {
-            rc = -EACCES;   /* moving a directory rewrites its ".." */
-        } else if (ndir->ops->lookup(ndir, nname, nlen, &replaced) == 0) {
-            if (replaced == victim)
-                rc = 0;   /* same entry: nothing to do */
-            else if (replaced->type == VNODE_DIR && victim->type != VNODE_DIR)
-                rc = -EISDIR;
-            else if (replaced->type != VNODE_DIR && victim->type == VNODE_DIR)
-                rc = -ENOTDIR;
-            else if (replaced->covered_by || replaced->mnt != odir->mnt)
-                rc = -EBUSY;
-            else if (sticky_denies(ndir, replaced))
-                rc = -EACCES;
+    for (unsigned attempt = 0;; attempt++) {
+        /* Phase 1, no parent locked: find the victim, check it is not an
+         * ancestor of the destination, decide the lock order. */
+        struct vnode *victim0 = NULL;
+        mutex_lock(&odir->lock);
+        rc = (odir->flags & VNODE_DEAD) ? -ENOENT : odir->ops->lookup(odir, oname, olen, &victim0);
+        mutex_unlock(&odir->lock);
+        if (rc)
+            break;
+        if (victim0->type == VNODE_DIR && odir != ndir && is_ancestor(victim0, ndir)) {
+            vnode_put(victim0);
+            rc = -EINVAL;   /* a directory may not be moved under itself */
+            break;
         }
-        if (rc == 0 && replaced != victim) {
-            /* A directory may not be moved under itself. */
-            if (victim->type == VNODE_DIR) {
-                struct vnode *p = ndir;
-                vnode_get(p);
-                for (unsigned d = 0; d < VFS_MAX_COMPONENTS && rc == 0; d++) {
-                    if (p == victim)
-                        rc = -EINVAL;
-                    else if (p->mnt->root == p)
-                        break;
-                    else {
-                        struct vnode *up;
-                        int r2 = p->ops->lookup(p, "..", 2, &up);
-                        vnode_put(p);
-                        if (r2) {
-                            p = NULL;
-                            break;
-                        }
-                        p = up;
-                    }
-                }
-                if (p)
-                    vnode_put(p);
+        struct vnode *first = odir, *second = NULL;
+        if (odir != ndir) {
+            if (is_ancestor(odir, ndir)) {
+                first = odir;
+                second = ndir;
+            } else if (is_ancestor(ndir, odir)) {
+                first = ndir;
+                second = odir;
+            } else {
+                first = odir < ndir ? odir : ndir;
+                second = odir < ndir ? ndir : odir;
             }
-            if (rc == 0)
-                rc = odir->ops->rename(odir, oname, olen, victim, ndir, nname, nlen, replaced);
-            if (rc == 0 && replaced)
-                replaced->flags |= VNODE_DEAD;
         }
-        if (replaced)
-            vnode_put(replaced);
-        vnode_put(victim);
+
+        /* Phase 2: the parents, then the entries under them. */
+        mutex_lock(&first->lock);
+        if (second)
+            mutex_lock_nested(&second->lock, VNODE_NESTED_PARENT2);
+
+        struct vnode *victim = NULL, *replaced = NULL;
+        if ((odir->flags | ndir->flags) & VNODE_DEAD)
+            rc = -ENOENT;
+        else
+            rc = odir->ops->lookup(odir, oname, olen, &victim);
+        bool changed = rc == 0 && victim != victim0;   /* unlinked and re-created meanwhile */
+        vnode_put(victim0);
+        if (rc == 0 && !changed) {
+            if (victim->covered_by || victim->mnt != odir->mnt) {
+                rc = -EBUSY;
+            } else if (sticky_denies(odir, victim)) {
+                rc = -EACCES;
+            } else if (victim->type == VNODE_DIR && odir != ndir && vfs_permission(victim, VFS_MAY_WRITE) != 0) {
+                rc = -EACCES;   /* moving a directory rewrites its ".." */
+            } else if (ndir->ops->lookup(ndir, nname, nlen, &replaced) == 0) {
+                if (replaced == victim)
+                    rc = 0;   /* same entry: nothing to do */
+                else if (replaced->type == VNODE_DIR && victim->type != VNODE_DIR)
+                    rc = -EISDIR;
+                else if (replaced->type != VNODE_DIR && victim->type == VNODE_DIR)
+                    rc = -ENOTDIR;
+                else if (replaced->covered_by || replaced->mnt != odir->mnt)
+                    rc = -EBUSY;
+                else if (sticky_denies(ndir, replaced))
+                    rc = -EACCES;
+            }
+            if (rc == 0 && replaced != victim) {
+                rc = odir->ops->rename(odir, oname, olen, victim, ndir, nname, nlen, replaced);
+                if (rc == 0 && replaced)
+                    replaced->flags |= VNODE_DEAD;
+            }
+            if (replaced)
+                vnode_put(replaced);
+        }
+        if (victim)
+            vnode_put(victim);
+        if (second)
+            mutex_unlock(&second->lock);
+        mutex_unlock(&first->lock);
+        if (!changed)
+            break;
+        if (attempt == 8) {
+            rc = -EBUSY;
+            break;
+        }
+        /* The entry was replaced between the phases: the ancestry check
+         * was for the old one, so start over. */
     }
-    if (second != first)
-        mutex_unlock(&second->lock);
-    mutex_unlock(&first->lock);
+    mutex_unlock(&mnt->rename_lock);
 out_dirs:
     vnode_put(ndir);
     vnode_put(odir);

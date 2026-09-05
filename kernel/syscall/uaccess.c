@@ -6,6 +6,7 @@
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/lockdep.h>
 #include <kernel/uaccess.h>
 #include <kernel/vmm.h>
 
@@ -32,6 +33,7 @@ bool user_range_mapped(uint64_t addr, size_t len, vm_prot_t prot)
 
 int copy_from_user(void *dst, uint64_t user_src, size_t len)
 {
+    might_sleep();   /* a demand fault allocates: never under a spinlock */
     if (len == 0)
         return 0;
     if (!user_range_ok(user_src, len) || !user_range_mapped(user_src, len, VM_PROT_READ))
@@ -45,6 +47,7 @@ int copy_from_user(void *dst, uint64_t user_src, size_t len)
 
 int copy_to_user(uint64_t user_dst, const void *src, size_t len)
 {
+    might_sleep();   /* a demand fault allocates: never under a spinlock */
     if (len == 0)
         return 0;
     if (!user_range_ok(user_dst, len) || !user_range_mapped(user_dst, len, VM_PROT_WRITE))
@@ -58,6 +61,7 @@ int copy_to_user(uint64_t user_dst, const void *src, size_t len)
 
 int strncpy_from_user(char *dst, uint64_t user_src, size_t max)
 {
+    might_sleep();   /* a demand fault allocates: never under a spinlock */
     if (max == 0)
         return -EINVAL;
 

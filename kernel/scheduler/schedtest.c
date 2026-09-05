@@ -396,7 +396,9 @@ static void consumer_entry(void *arg)
     struct sem_test *st = arg;
     for (int i = 0; i < 5; i++) {
         semaphore_down(&st->items);
-        st->consumed++;
+        /* Two consumers on two CPUs share this counter: a plain increment
+         * lost updates once in several hundred runs (seen as 9 of 10). */
+        __atomic_fetch_add(&st->consumed, 1, __ATOMIC_RELAXED);
     }
 }
 

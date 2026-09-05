@@ -50,6 +50,13 @@ bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);
 bool selftest_timer_cancel_sync(const char **reason);
 bool selftest_quiesce_stress(const char **reason);
+bool selftest_lockdep_order(const char **reason);
+bool selftest_lockdep_recursion(const char **reason);
+bool selftest_lockdep_irq(const char **reason);
+bool selftest_lockdep_sleep(const char **reason);
+bool selftest_lockdep_mutex(const char **reason);
+bool selftest_lockdep_contention(const char **reason);
+bool selftest_vfs_concurrency(const char **reason);
 
 /* Phase 4: kernel/process/proctest.c */
 bool selftest_objects(const char **reason);

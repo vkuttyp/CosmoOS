@@ -7,6 +7,7 @@
  * contender for diagnostics.
  */
 
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/spinlock.h>
@@ -18,6 +19,7 @@ void spinlock_init(spinlock_t *lock, const char *name)
     lock->locked = 0;
     lock->owner_cpu = SPINLOCK_NO_OWNER;
     lock->name = name;
+    lock->class = 0;
 }
 
 static inline bool try_acquire(spinlock_t *lock)
@@ -30,42 +32,102 @@ static inline bool try_acquire(spinlock_t *lock)
  * would leave every other contender spinning until it happened to run
  * again, and on one CPU that is forever.
  */
-void spin_lock(spinlock_t *lock)
+/*
+ * With the checker on, ownership and the held-stack push (and, in unlock,
+ * the pop and the release) happen with interrupts masked: a handler that
+ * ran between the two would see an owned lock as not held and record no
+ * dependency from it. Without the checker there is nothing to keep in step
+ * and the masking is compiled out.
+ */
+static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
 {
     preempt_disable();
     unsigned cpu = arch_cpu_id();
+    bool irqs_on = arch_irq_enabled();
+    /* The order check runs before the wait: a deadlocking acquisition is
+     * reported instead of hanging. The push waits for ownership: while we
+     * spin with interrupts enabled a handler may run here and must not see
+     * this lock as held. */
+    lockdep_acquire_check(&lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, irqs_on, ip);
 
-    while (!try_acquire(lock)) {
+    for (;;) {
+#if CONFIG_LOCKDEP
+        arch_irq_state_t s = arch_irq_save();
+#endif
+        if (try_acquire(lock)) {
+            __atomic_store_n(&lock->owner_cpu, cpu, __ATOMIC_RELAXED);
+            lockdep_acquired(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, false, irqs_on, ip);
+#if CONFIG_LOCKDEP
+            arch_irq_restore(s);
+#endif
+            return;
+        }
+#if CONFIG_LOCKDEP
+        arch_irq_restore(s);
+#endif
         if (__atomic_load_n(&lock->owner_cpu, __ATOMIC_RELAXED) == cpu)
             panic("spinlock '%s' re-acquired on CPU %u (deadlock)", lock->name ? lock->name : "?", cpu);
         arch_cpu_relax();
     }
-    __atomic_store_n(&lock->owner_cpu, cpu, __ATOMIC_RELAXED);
+}
+
+void spin_lock(spinlock_t *lock)
+{
+    lock_common(lock, 0, (uintptr_t)__builtin_return_address(0));
+}
+
+void spin_lock_nested(spinlock_t *lock, unsigned subclass)
+{
+    lock_common(lock, subclass, (uintptr_t)__builtin_return_address(0));
 }
 
 bool spin_trylock(spinlock_t *lock)
 {
     preempt_disable();
-    if (!try_acquire(lock)) {
-        preempt_enable();
-        return false;
+    bool irqs_on = arch_irq_enabled();
+#if CONFIG_LOCKDEP
+    arch_irq_state_t s = arch_irq_save();
+#endif
+    bool got = try_acquire(lock);
+    if (got) {
+        __atomic_store_n(&lock->owner_cpu, arch_cpu_id(), __ATOMIC_RELAXED);
+        lockdep_acquired(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, true, irqs_on,
+                         (uintptr_t)__builtin_return_address(0));
     }
-    __atomic_store_n(&lock->owner_cpu, arch_cpu_id(), __ATOMIC_RELAXED);
-    return true;
+#if CONFIG_LOCKDEP
+    arch_irq_restore(s);
+#endif
+    if (!got)
+        preempt_enable();
+    return got;
 }
 
 void spin_unlock(spinlock_t *lock)
 {
     KASSERT(__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) != 0);
+#if CONFIG_LOCKDEP
+    arch_irq_state_t s = arch_irq_save();
+#endif
+    lockdep_release(lock, LOCKDEP_KIND_SPIN, (uintptr_t)__builtin_return_address(0));
     __atomic_store_n(&lock->owner_cpu, SPINLOCK_NO_OWNER, __ATOMIC_RELAXED);
     __atomic_store_n(&lock->locked, 0u, __ATOMIC_RELEASE);
+#if CONFIG_LOCKDEP
+    arch_irq_restore(s);
+#endif
     preempt_enable();
 }
 
 arch_irq_state_t spin_lock_irqsave(spinlock_t *lock)
 {
     arch_irq_state_t state = arch_irq_save();
-    spin_lock(lock);
+    lock_common(lock, 0, (uintptr_t)__builtin_return_address(0));
+    return state;
+}
+
+arch_irq_state_t spin_lock_irqsave_nested(spinlock_t *lock, unsigned subclass)
+{
+    arch_irq_state_t state = arch_irq_save();
+    lock_common(lock, subclass, (uintptr_t)__builtin_return_address(0));
     return state;
 }
 
@@ -85,6 +147,8 @@ bool spin_is_held(const spinlock_t *lock)
 #include <kernel/module.h>
 EXPORT_SYMBOL(spinlock_init);
 EXPORT_SYMBOL(spin_lock);
+EXPORT_SYMBOL(spin_lock_nested);
+EXPORT_SYMBOL(spin_lock_irqsave_nested);
 EXPORT_SYMBOL(spin_unlock);
 EXPORT_SYMBOL(spin_trylock);
 EXPORT_SYMBOL(spin_lock_irqsave);

@@ -2,6 +2,7 @@
  * semaphore.c - Counting semaphore on a wait queue.
  */
 
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/sched.h>
@@ -28,8 +29,7 @@ void semaphore_down(struct semaphore *s)
 {
     if (this_cpu()->irq_depth != 0)
         panic("semaphore_down in interrupt context");
-    if (this_cpu()->preempt_count != 0)
-        panic("semaphore_down with preemption disabled (count %d): a spinlock is held", this_cpu()->preempt_count);
+    might_sleep();
     for (;;) {
         if (semaphore_trydown(s))
             return;

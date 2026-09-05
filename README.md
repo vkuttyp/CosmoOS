@@ -258,6 +258,23 @@ See [docs/development.md](docs/development.md).
   protocol (GOING, shutdown, grace period, live objects, zombie). Module
   ABI v2. Nine new self-tests and a host model under ASan
   (`docs/kernel/quiesce/testing.md`).
+- **Lock discipline and lockdep (done):** milestone 3 of the audit's
+  plan. Debug builds run a lock-order checker on every spinlock and mutex
+  acquisition (`kernel/core/lockdep.c`, `docs/kernel/lockdep/`): locks are
+  classified by their initialisation name, held-lock stacks are kept per
+  CPU (spinlocks) and per thread (mutexes), a dependency graph catches
+  order inversions and un-annotated same-class nesting, interrupt-context
+  locks may not be held with interrupts enabled, and `might_sleep()` in
+  every sleeping primitive and user copy catches blocking under a
+  spinlock. The panic report prints the held locks. The fixes it and the
+  audit drove: the VFS rename lock order (a per-mount rename lock and
+  ancestor-first parents), the vnode cache's check-then-get (unhash before
+  the last drop, the mount hash lock a spinlock leaf), `vfs_sync` without
+  the mount list held across a commit, the futex user copy outside the
+  bucket lock (a wake sequence keeps the compare-and-enqueue atomic), and
+  the AArch64 IPI send lock-free under the run-queue lock. Module ABI v3.
+  Six new self-tests (five checker tests and a two-CPU VFS concurrency
+  test) and a host test of the graph core.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

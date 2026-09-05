@@ -13,6 +13,7 @@
 
 #include <kernel/list.h>
 #include <kernel/mutex.h>
+#include <kernel/spinlock.h>
 #include <kernel/object.h>
 #include <kernel/pagecache.h>
 #include <kernel/types.h>
@@ -97,11 +98,14 @@ struct mount {
     void *fs_priv;
     unsigned flags;
     struct list_node vnodes[VNODE_HASH];
-    struct mutex lock;
+    spinlock_t lock;          /* the vnode hash and nr_vnodes only: a leaf below every mutex */
+    struct mutex rename_lock; /* serialises renames on this mount; keeps the ancestry stable */
+    struct mutex sync_lock;   /* fs->sync against fs->unmount */
     struct list_node link;
     unsigned nr_vnodes;
     uint64_t next_ino;        /* for filesystems that number in memory */
     bool unmounting;          /* set under mountpoint->lock while vfs_umount decides */
+    bool unmounted;           /* set under sync_lock once fs->unmount ran */
 };
 
 struct file {
@@ -140,7 +144,10 @@ struct vnode *vnode_alloc(struct mount *mnt, uint64_t ino);
 void vnode_hash_insert(struct vnode *vn);
 struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino);   /* referenced or NULL */
 static inline void vnode_get(struct vnode *vn) { kobject_get(&vn->obj); }
-static inline void vnode_put(struct vnode *vn) { kobject_put(&vn->obj); }
+/* Drop a reference. The last one unhashes the vnode under the mount's hash
+ * lock before it falls to zero, so a hashed vnode always has a reference
+ * (docs/kernel/lockdep/design.md, "the vnode cache"). */
+void vnode_put(struct vnode *vn);
 uint64_t vfs_now_ns(void);
 
 /* --- namespace operations ----------------------------------------------- */
