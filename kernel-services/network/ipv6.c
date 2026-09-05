@@ -381,6 +381,10 @@ void icmpv6_input(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
     switch (ic->type) {
     case ICMPV6_ECHO:
         STAT(icmp_echo_rcvd);
+        if (!icmp_ratelimit_allow()) {
+            m_freem(m);
+            return;
+        }
         ic->type = ICMPV6_ECHO_REPLY;
         m->flags &= ~(M_BCAST | M_MCAST);
         STAT(icmp_echo_replied);

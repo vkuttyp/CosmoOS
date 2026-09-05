@@ -1,6 +1,7 @@
 /*
- * ipv4.c - IPv4 (RFC 791) input, output and route selection, and ICMP
- * echo / destination unreachable (RFC 792).
+ * ipv4.c - IPv4 (RFC 791) input, output and route selection, ICMP echo /
+ * destination unreachable (RFC 792) behind a rate limit, and path MTU
+ * discovery (RFC 1191) from "fragmentation needed" messages.
  */
 
 #include <kernel/errno.h>
@@ -11,12 +12,124 @@
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
+#include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 
 static struct ip_stats g_stats;
 static uint16_t g_ip_id;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
+
+/* --- ICMP rate limit and the path MTU cache -------------------------------------- */
+
+static spinlock_t g_icmp_lock = SPINLOCK_INIT("icmp-rate");
+static uint64_t g_icmp_window_ns;
+static unsigned g_icmp_count;
+
+bool icmp_ratelimit_allow(void)
+{
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_icmp_lock);
+    if (now - g_icmp_window_ns >= 1000000000ull) {
+        g_icmp_window_ns = now;
+        g_icmp_count = 0;
+    }
+    bool ok = g_icmp_count < ICMP_RATE_PER_SEC;
+    if (ok)
+        g_icmp_count++;
+    spin_unlock_irqrestore(&g_icmp_lock, s);
+    if (!ok)
+        STAT(icmp_ratelimited);
+    return ok;
+}
+
+struct pmtu_entry {
+    uint32_t dst;
+    uint32_t mtu;
+    uint64_t expires_ns;   /* 0 = free */
+};
+
+static spinlock_t g_pmtu_lock = SPINLOCK_INIT("ipv4-pmtu");
+static struct pmtu_entry g_pmtu[IPV4_PMTU_ENTRIES];
+
+static uint32_t pmtu_lookup(uint32_t dst)
+{
+    uint64_t now = clock_now_ns();
+    uint32_t mtu = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_pmtu_lock);
+    for (unsigned i = 0; i < IPV4_PMTU_ENTRIES; i++) {
+        if (g_pmtu[i].expires_ns && g_pmtu[i].dst == dst) {
+            if (now < g_pmtu[i].expires_ns)
+                mtu = g_pmtu[i].mtu;
+            else
+                g_pmtu[i].expires_ns = 0;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_pmtu_lock, s);
+    return mtu;
+}
+
+void ipv4_pmtu_update(uint32_t dst, uint32_t mtu)
+{
+    if (mtu < IPV4_PMTU_MIN)
+        mtu = IPV4_PMTU_MIN;
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_pmtu_lock);
+    struct pmtu_entry *slot = NULL, *oldest = &g_pmtu[0];
+    for (unsigned i = 0; i < IPV4_PMTU_ENTRIES; i++) {
+        struct pmtu_entry *e = &g_pmtu[i];
+        if (e->expires_ns && e->dst == dst) {
+            slot = e;
+            break;
+        }
+        if (e->expires_ns == 0 || now >= e->expires_ns) {
+            if (slot == NULL)
+                slot = e;
+        } else if (e->expires_ns < oldest->expires_ns) {
+            oldest = e;
+        }
+    }
+    if (slot == NULL)
+        slot = oldest;
+    if (slot->expires_ns == 0 || slot->dst != dst || now >= slot->expires_ns || mtu < slot->mtu)
+        slot->mtu = mtu;
+    slot->dst = dst;
+    slot->expires_ns = now + IPV4_PMTU_TTL_NS;
+    spin_unlock_irqrestore(&g_pmtu_lock, s);
+    STAT(pmtu_updates);
+}
+
+void ipv4_pmtu_flush(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_pmtu_lock);
+    memset(g_pmtu, 0, sizeof(g_pmtu));
+    spin_unlock_irqrestore(&g_pmtu_lock, s);
+}
+
+uint32_t ipv4_path_mtu(uint32_t dst)
+{
+    uint32_t mtu = pmtu_lookup(dst);
+    if (mtu)
+        return mtu;
+    struct netif *nif = ipv4_route(dst);
+    if (nif == NULL)
+        return IPV4_PMTU_MIN;
+    mtu = nif->mtu;
+    netif_put(nif);
+    return mtu;
+}
+
+/* RFC 1191 plateau table for routers that report no MTU. */
+static uint32_t pmtu_plateau_below(uint32_t len)
+{
+    static const uint32_t plateaus[] = { 65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68 };
+    for (unsigned i = 0; i < ARRAY_SIZE(plateaus); i++)
+        if (plateaus[i] < len)
+            return plateaus[i];
+    return 68;
+}
 
 /* --- routing ------------------------------------------------------------ */
 
@@ -121,6 +234,8 @@ void icmp_send_unreach(struct mbuf *orig, const struct ipv4_hdr *iph, uint8_t co
 {
     if (iph->dst == INADDR_BROADCAST_N || (ntohl(iph->dst) >> 24) == 127)
         return;
+    if (!icmp_ratelimit_allow())
+        return;
     /* ICMP header + original IP header + 8 bytes. */
     uint32_t ihl = IPV4_HDR_LEN(iph);
     uint32_t quote = ihl + 8;
@@ -143,6 +258,45 @@ void icmp_send_unreach(struct mbuf *orig, const struct ipv4_hdr *iph, uint8_t co
     ipv4_output(m, iph->dst, iph->src, IPPROTO_ICMP, IP_DEFAULT_TTL);
 }
 
+/*
+ * Fragmentation needed (RFC 1191): the quoted datagram names the
+ * destination and, for TCP, the connection. Record the MTU and let TCP
+ * shrink and retransmit. Only a message quoting our own address as the
+ * source is considered; the TCP layer checks the quoted sequence number.
+ */
+static void icmp_needfrag(struct mbuf *m, const struct icmp_hdr *ic)
+{
+    STAT(icmp_needfrag_rcvd);
+    uint8_t quote[sizeof(struct ipv4_hdr) + 8];
+    if (!m_copydata(m, sizeof(*ic), sizeof(quote), quote))
+        return;
+    const struct ipv4_hdr *q = (const struct ipv4_hdr *)quote;
+    unsigned ihl = IPV4_HDR_LEN(q);
+    if ((q->vhl >> 4) != 4 || ihl < 20 || !netif_owns_ipv4(q->src))
+        return;
+    uint32_t mtu = ntohs(ic->seq);   /* the header's last 16 bits */
+    if (mtu == 0)
+        mtu = pmtu_plateau_below(ntohs(q->len));
+    if (mtu < IPV4_PMTU_MIN)
+        mtu = IPV4_PMTU_MIN;
+    ipv4_pmtu_update(q->dst, mtu);
+    if (q->proto != IPPROTO_TCP)
+        return;
+    uint8_t th[8];
+    if (!m_copydata(m, sizeof(*ic) + ihl, sizeof(th), th))
+        return;
+    struct netaddr local, remote;
+    memset(&local, 0, sizeof(local));
+    memset(&remote, 0, sizeof(remote));
+    local.family = remote.family = COSMO_AF_INET;
+    local.v4 = q->src;
+    remote.v4 = q->dst;
+    local.port = (uint16_t)(th[0] << 8 | th[1]);
+    remote.port = (uint16_t)(th[2] << 8 | th[3]);
+    uint32_t seq = (uint32_t)th[4] << 24 | (uint32_t)th[5] << 16 | (uint32_t)th[6] << 8 | th[7];
+    tcp_pmtu_notify(&local, &remote, seq, (uint16_t)(mtu > 65535 ? 65535 : mtu));
+}
+
 void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
 {
     (void)nif;
@@ -160,8 +314,17 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
     if (m == NULL)
         return;
     struct icmp_hdr *ic = (struct icmp_hdr *)m->data;
+    if (ic->type == ICMP_DEST_UNREACH && ic->code == ICMP_UNREACH_NEEDFRAG) {
+        icmp_needfrag(m, ic);
+        m_freem(m);
+        return;
+    }
     if (ic->type == ICMP_ECHO && ic->code == 0 && !(m->flags & M_BCAST)) {
         STAT(icmp_echo_rcvd);
+        if (!icmp_ratelimit_allow()) {
+            m_freem(m);
+            return;
+        }
         /* Turn the request into the reply in place. */
         ic->type = ICMP_ECHO_REPLY;
         ic->cksum = 0;
@@ -261,26 +424,28 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
     if (bcast)
         m->flags |= M_BCAST;
 
-    /* Trim link padding, drop the header, deliver. The header stays
-     * readable behind m->data for the transport layer. */
+    /* Trim link padding, drop the header, deliver. The whole header,
+     * options included, is copied out (60 bytes at most) so that an ICMP
+     * error can quote exactly what arrived and never a byte beyond it. */
     if (total < m->pkt.len)
         m_adj(m, -(int)(m->pkt.len - total));
-    struct ipv4_hdr hdr;
-    memcpy(&hdr, iph, sizeof(hdr));
+    uint8_t hdrbuf[60];
+    memcpy(hdrbuf, iph, ihl);
+    const struct ipv4_hdr *hdr = (const struct ipv4_hdr *)hdrbuf;
     m_adj(m, (int)ihl);
 
-    switch (hdr.proto) {
-    case IPPROTO_ICMP: icmp_input(nif, m, &hdr); break;
-    case IPPROTO_UDP:  udp_input(nif, m, &hdr, NULL); break;
-    case IPPROTO_TCP:  tcp_input(nif, m, &hdr, NULL); break;
+    switch (hdr->proto) {
+    case IPPROTO_ICMP: icmp_input(nif, m, hdr); break;
+    case IPPROTO_UDP:  udp_input(nif, m, hdr, NULL); break;
+    case IPPROTO_TCP:  tcp_input(nif, m, hdr, NULL); break;
     default:
         STAT(rx_unknown_proto);
         if (!bcast) {
             /* Re-quote the header for the ICMP error. */
             struct mbuf *q = m_prepend(m, (uint32_t)ihl);
             if (q) {
-                memcpy(q->data, &hdr, sizeof(hdr));
-                icmp_send_unreach(q, &hdr, ICMP_UNREACH_PROTO);
+                memcpy(q->data, hdrbuf, ihl);
+                icmp_send_unreach(q, hdr, ICMP_UNREACH_PROTO);
                 m_freem(q);
             }
         } else {
