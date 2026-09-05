@@ -190,7 +190,9 @@ resolve(d):
     plan.append(chosen)                             (dependencies first)
 ```
 
-A later constraint that invalidates an earlier choice triggers a rebuild
+At most 16 distinct constraints are kept per name; a 17th fails the
+resolution outright rather than being ignored. A later constraint that
+invalidates an earlier choice triggers a rebuild
 with the enlarged constraint set (`demo-a` wants `demolib >= 2`, `demo-b`
 wants `demolib < 3`: 2.5 is chosen in either order). Constraints
 gathered from a candidate that a later round discards stay in the set

@@ -691,16 +691,22 @@ static struct constraint_set *cons_for(const char *name)
     return cs;
 }
 
-static void cons_add(const char *name, const struct depend *d)
+/* false when the constraint cannot be recorded: resolution must then fail
+ * rather than choose a version that ignores it. */
+static bool cons_add(const char *name, const struct depend *d)
 {
     struct constraint_set *cs = cons_for(name);
-    if (cs == NULL || d->op == OP_NONE)
-        return;
+    if (cs == NULL)
+        return false;
+    if (d->op == OP_NONE)
+        return true;
     for (int i = 0; i < cs->n; i++)
         if (cs->list[i].op == d->op && strcmp(cs->list[i].version, d->version) == 0)
-            return;
-    if (cs->n < 16)
-        cs->list[cs->n++] = *d;
+            return true;
+    if (cs->n == 16)
+        return false;
+    cs->list[cs->n++] = *d;
+    return true;
 }
 
 static bool satisfies_all(const char *name, const char *version)
@@ -761,7 +767,10 @@ static bool plan_has(const struct plan *p, const char *name, struct index_entry 
 
 static int resolve(struct plan *p, const struct depend *d, const char *why)
 {
-    cons_add(d->name, d);
+    if (!cons_add(d->name, d)) {
+        fprintf(stderr, "pkg: too many distinct constraints on %s (needed by %s)\n", d->name, why);
+        return EXIT_FAILED;
+    }
     struct index_entry *chosen;
     if (plan_has(p, d->name, &chosen)) {
         if (!satisfies_all(d->name, chosen->version))
@@ -817,33 +826,41 @@ static int resolve(struct plan *p, const struct depend *d, const char *why)
 
 /* Every installed package's constraints count too, so an upgrade never
  * breaks an installed dependant. */
-static void cons_add_installed(void)
+static int cons_add_installed(void)
 {
     char names[128][PKG_NAME_MAX];
     int n = installed_names(names, 128);
+    int rc = 0;
     for (int i = 0; i < n; i++) {
         struct manifest m;
         if (!installed_load(names[i], &m))
             continue;
-        for (int k = 0; k < m.ndepends; k++)
-            cons_add(m.depends[k].name, &m.depends[k]);
+        for (int k = 0; k < m.ndepends && rc == 0; k++) {
+            if (!cons_add(m.depends[k].name, &m.depends[k])) {
+                fprintf(stderr, "pkg: too many distinct constraints on %s (installed %s)\n", m.depends[k].name, m.name);
+                rc = EXIT_FAILED;
+            }
+        }
         manifest_free(&m);
     }
+    return rc;
 }
 
 /* Build the plan for `reqs`, rebuilding until every planned version
  * satisfies every constraint seen (bounded). */
 static int plan_build(struct plan *p, const struct depend *reqs, int nreq)
 {
-    cons_add_installed();
+    int rc = cons_add_installed();
+    if (rc)
+        return rc;
     for (int iter = 0; iter < 16; iter++) {
         p->n = 0;
         p->nvisiting = 0;
         p->retry = false;
         for (int i = 0; i < nreq; i++) {
-            int rc = resolve(p, &reqs[i], "the request");
-            if (rc)
-                return rc;
+            int r = resolve(p, &reqs[i], "the request");
+            if (r)
+                return r;
         }
         if (!p->retry)
             return 0;
