@@ -93,6 +93,17 @@ check, included in the stacks):
 3. Otherwise set `before[Aᵢ] |= B` for every Aᵢ (edges from every held lock,
    not only the innermost, so a chain seen once in pieces is still caught).
 
+The check runs before the acquisition waits, so a deadlocking order is
+reported rather than hung on, and it pushes nothing: the push onto the held
+stack happens only once the lock is owned (`lockdep_acquired`). A lock
+still being contended is not held, and with a plain `spin_lock` and
+interrupts enabled a handler can run on this CPU during the wait; if the
+lock were already on the stack the handler's acquisitions would record
+phantom edges from it (found in review of PR #18; test
+`lockdep-contention`). Edges therefore mean "attempted while held", which
+is the relation the order check wants whether or not the attempt has yet
+completed.
+
 Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself
 tracked. The search is bounded by the node count (640) and runs only when

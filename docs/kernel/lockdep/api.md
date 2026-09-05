@@ -36,14 +36,18 @@ in release builds.
 
 ## Checker interface (`kernel/include/kernel/lockdep.h`, `kernel/core/lockdep.c`)
 
-### `void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)`
-- Called by the lock primitives only, before the acquisition waits (a
+### `void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on, uintptr_t ip)`
+- Called by the lock primitives before the acquisition waits (a
   deadlocking order is reported rather than hung on). Classifies the lock
   on first use (cached in `*class_slot`), records interrupt-safety usage,
-  checks recursion and order against the held set, records edges, pushes
-  the held entry.
+  checks recursion and order against the held set, records edges. Pushes
+  nothing: a contended lock is not held.
 - Concurrency: any context. Takes the checker's raw (untracked) lock only
   to classify or to record new edges.
+
+### `void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)`
+- Called once the lock is owned: pushes the held entry (trylock callers
+  use only this half; a trylock cannot deadlock and records no order).
 
 ### `void lockdep_release(const void *lock, unsigned kind, uintptr_t ip)`
 Removes the entry (not necessarily the top one); a lock that is not held
@@ -62,7 +66,7 @@ crash report shows what the CPU and thread held.
 
 ### `void lockdep_dump_graph(void)`
 Prints every recorded edge (`kdebug`), `'a'#n -> 'b'#m` meaning b was taken
-while a was held. The `lockdep-order` self-test calls it once per boot so
+while a was held. `selftest_run_all` calls it once at the end of the run so
 the debug boot log carries the tree's real lock order; `testing.md`
 reproduces the interesting part.
 

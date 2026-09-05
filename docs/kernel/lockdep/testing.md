@@ -6,7 +6,7 @@
 |---|---|---|
 | Every debug boot | the checker runs on every acquisition through boot, all self-tests, the userland test script and the network harness; any report is a panic, so `make test` fails | `make test`, `QEMU_SMP=1 make test`, `make ARCH=aarch64 test` |
 | Host (ASan/UBSan) | `test_lockdep`: the class table, edges and reachability, the decision procedure on an ABBA, a three-lock cycle and subclass nodes | `make host-test` |
-| Target self-tests (debug builds) | `lockdep-order`, `lockdep-recursion`, `lockdep-irq`, `lockdep-sleep`, `lockdep-mutex` (the detector fires on constructed violations); `vfs-concurrency` (the fixed races, on two CPUs) | `make test` |
+| Target self-tests (debug builds) | `lockdep-order`, `lockdep-recursion`, `lockdep-irq`, `lockdep-sleep`, `lockdep-mutex`, `lockdep-contention` (the detector fires on constructed violations and stays silent on a contended wait); `vfs-concurrency` (the fixed races, on two CPUs) | `make test` |
 | Release | the checker is compiled out; `might_sleep`'s panic half stays | `make BUILD=release test` |
 
 Every test above ran and passed on x86-64 (4 CPUs and 1 CPU) and AArch64 (4
@@ -36,6 +36,7 @@ released normally.
 | `lockdep-irq` | a lock first taken with `spin_lock` and interrupts enabled, then taken inside a real self-IPI handler (`arch_vector_alloc`, `interrupt_register`, `arch_ipi_bind`, `arch_ipi_send`): the interrupt-context acquisition is the IRQ report | L3 |
 | `lockdep-sleep` | `might_sleep()` under a spinlock is a report; with nothing held it is silent | L4 |
 | `lockdep-mutex` | mutexes M1 → M2 with a spinlock under them is legal; M2 → M1 is an inversion on the per-thread stack; a mutex taken under a spinlock is a sleep report | L1 (mutexes), L4, L11 |
+| `lockdep-contention` | CPU 1 holds L for 20 ms; this CPU spins on a plain `spin_lock(L)` with interrupts enabled while a timer callback takes M inside the wait (asserted to have fired); afterwards M → L is taken and must not be an inversion, so no phantom L → M was recorded while L was merely awaited | L11 (a waited-for lock is not held); the PR #18 review finding |
 
 ## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
 
@@ -108,7 +109,7 @@ To regenerate the lists: `grep 'lockdep: edge' out/x86_64-debug/boot-test.log | 
 ## Running
 
 ```sh
-make test                          # debug: checker live, 90 self-tests
+make test                          # debug: checker live, 91 self-tests
 QEMU_SMP=1 make test
 make ARCH=aarch64 test
 make host-test                     # test_lockdep among the host tests

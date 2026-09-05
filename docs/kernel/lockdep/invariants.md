@@ -86,11 +86,16 @@ kind.** One site, one class; a mutex and its internal spinlock are two
 classes. Check: host `test_lockdep` (`classes`); the tree's names are
 literals (review: `grep spinlock_init\|mutex_init\|SPINLOCK_INIT`).
 
-**L11. Held stacks are per CPU for spinlocks and per thread for mutexes.**
-The run-queue lock handed across a context switch and interrupt-context
-acquisitions are therefore tracked correctly without special cases. Check:
-every boot (a mismatch would report an unheld release at the first
-schedule); `lockdep-order` (release out of order is legal).
+**L11. Held stacks are per CPU for spinlocks and per thread for mutexes,
+and a lock is on a stack only while it is owned.** The run-queue lock
+handed across a context switch and interrupt-context acquisitions are
+therefore tracked correctly without special cases, and a lock still being
+waited for (a contended plain `spin_lock` with interrupts enabled, during
+which a handler may run) is not seen as held by that handler. Check: every
+boot (a mismatch would report an unheld release at the first schedule);
+`lockdep-order` (release out of order is legal); `lockdep-contention` (a
+timer handler inside a contended wait records no edge from the awaited
+lock).
 
 **L12. Release builds carry no checker code beyond the `class` field and
 `might_sleep`'s always-on half.** Check: `BUILD=release` in the

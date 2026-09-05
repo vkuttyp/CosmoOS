@@ -296,6 +296,7 @@ static const struct selftest tests[] = {
     { "lockdep-irq",     selftest_lockdep_irq },
     { "lockdep-sleep",   selftest_lockdep_sleep },
     { "lockdep-mutex",   selftest_lockdep_mutex },
+    { "lockdep-contention", selftest_lockdep_contention },
     { "fpu-switch",      test_fpu_switch },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },

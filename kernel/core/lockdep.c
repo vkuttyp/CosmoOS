@@ -140,8 +140,33 @@ static void report(enum lockdep_report_kind kind, const char *name, unsigned sub
 
 /* --- acquire / release ------------------------------------------------------ */
 
-void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
-                     bool trylock, bool irqs_on, uintptr_t ip)
+/* Classify (cached) and return the node; -1 when the class table is full. */
+static int node_of(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, uintptr_t ip)
+{
+    if (*class_slot == 0) {
+        arch_irq_state_t s = raw_lock();
+        int c = lockdep_core_class(&g_graph, name, kind);
+        raw_unlock(s);
+        if (c < 0) {
+            report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "lock class table full (LOCKDEP_MAX_CLASSES)", NULL, 0);
+            return -1;
+        }
+        *class_slot = (uint16_t)(c + 1);
+    }
+    if (subclass >= LOCKDEP_SUBCLASSES)
+        panic("lockdep: subclass %u out of range for '%s'", subclass, name);
+    return (int)lockdep_node(*class_slot - 1u, subclass);
+}
+
+/*
+ * The check, before the acquisition waits. Nothing is pushed here: a lock
+ * that is still contended is not held, and an interrupt arriving during
+ * the wait (plain spin_lock with interrupts enabled) must not see it on
+ * the stack. Edges record "attempted while held", which is the order
+ * relation the checker wants whether or not the attempt has completed.
+ */
+void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
+                           uintptr_t ip)
 {
     if (g_off)
         return;
@@ -150,25 +175,14 @@ void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, u
     struct lockdep_cpu *lc = my_cpu();
     struct thread *t = in_irq ? NULL : me();
 
-    /* 1. The class, cached in the lock after the first lookup. */
-    unsigned cls;
-    if (*class_slot == 0) {
-        arch_irq_state_t s = raw_lock();
-        int c = lockdep_core_class(&g_graph, name, kind);
-        raw_unlock(s);
-        if (c < 0) {
-            report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "lock class table full (LOCKDEP_MAX_CLASSES)", NULL, 0);
-            return;
-        }
-        *class_slot = (uint16_t)(c + 1);
-    }
-    cls = *class_slot - 1u;
-    if (subclass >= LOCKDEP_SUBCLASSES)
-        panic("lockdep: subclass %u out of range for '%s'", subclass, name);
-    uint16_t node = lockdep_node(cls, subclass);
+    int n = node_of(class_slot, name, kind, subclass, ip);
+    if (n < 0)
+        return;
+    uint16_t node = (uint16_t)n;
+    unsigned cls = lockdep_node_class(node);
     __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
 
-    /* 2. Interrupt safety. */
+    /* 1. Interrupt safety. */
     struct lock_class *c = &g_graph.classes[cls];
     if (kind == LOCKDEP_KIND_SPIN) {
         const unsigned both = LOCKDEP_USED_IN_IRQ | LOCKDEP_HELD_IRQS_ON;
@@ -194,69 +208,80 @@ void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, u
         }
     }
 
-    /* 3. The held set: this CPU's spinlocks, plus the thread's mutexes in thread context. */
+    /* 2. The held set: this CPU's spinlocks, plus the thread's mutexes in thread context. */
     const struct lockdep_held *held[2] = { lc->held, t ? t->held_mutex : NULL };
     unsigned nheld[2] = { lc->nr_held, t ? t->nr_held_mutex : 0 };
 
-    if (!trylock) {
-        /* 3a. Same node already held: recursion. */
-        for (unsigned k = 0; k < 2; k++) {
-            for (unsigned i = 0; i < nheld[k]; i++) {
-                if (held[k][i].node == node) {
-                    report(LOCKDEP_R_RECURSION, name, subclass, ip,
-                           "the same lock class is already held; nest with a *_lock_nested subclass if this is intended",
-                           NULL, 0);
-                    goto push;   /* expected by a test: record it, add no edges */
-                }
-            }
-        }
-        /* 3b. Order: would `node` reach any held node? Then record the edges. */
-        bool need_edges = false;
-        for (unsigned k = 0; k < 2 && !need_edges; k++)
-            for (unsigned i = 0; i < nheld[k]; i++)
-                if (!lockdep_core_has_edge(&g_graph, held[k][i].node, node)) {
-                    need_edges = true;
-                    break;
-                }
-        if (need_edges) {
-            uint16_t path[8];
-            unsigned path_len = 0;
-            bool cycle = false;
-            uint16_t against = 0;
-            arch_irq_state_t s = raw_lock();
-            for (unsigned k = 0; k < 2 && !cycle; k++) {
-                for (unsigned i = 0; i < nheld[k]; i++) {
-                    if (lockdep_core_has_edge(&g_graph, held[k][i].node, node))
-                        continue;
-                    g_stats.searches++;
-                    if (lockdep_core_reaches(&g_graph, &g_scratch, node, held[k][i].node, path, 8, &path_len)) {
-                        cycle = true;
-                        against = held[k][i].node;
-                        break;
-                    }
-                    lockdep_core_add_edge(&g_graph, held[k][i].node, node);
-                }
-            }
-            raw_unlock(s);
-            if (cycle) {
-                char detail[128];
-                const struct lock_class *ac = &g_graph.classes[lockdep_node_class(against)];
-                ksnprintf(detail, sizeof(detail), "'%s'#%u is held, and '%s'#%u was recorded before it elsewhere",
-                          ac->name, lockdep_node_subclass(against), name, subclass);
-                report(LOCKDEP_R_INVERSION, name, subclass, ip, detail, path, path_len);
+    /* 2a. Same node already held: recursion. */
+    for (unsigned k = 0; k < 2; k++) {
+        for (unsigned i = 0; i < nheld[k]; i++) {
+            if (held[k][i].node == node) {
+                report(LOCKDEP_R_RECURSION, name, subclass, ip,
+                       "the same lock class is already held; nest with a *_lock_nested subclass if this is intended",
+                       NULL, 0);
+                return;   /* expected by a test: add no edges */
             }
         }
     }
+    /* 2b. Order: would `node` reach any held node? Then record the edges. */
+    bool need_edges = false;
+    for (unsigned k = 0; k < 2 && !need_edges; k++)
+        for (unsigned i = 0; i < nheld[k]; i++)
+            if (!lockdep_core_has_edge(&g_graph, held[k][i].node, node)) {
+                need_edges = true;
+                break;
+            }
+    if (!need_edges)
+        return;
+    uint16_t path[8];
+    unsigned path_len = 0;
+    bool cycle = false;
+    uint16_t against = 0;
+    arch_irq_state_t s = raw_lock();
+    for (unsigned k = 0; k < 2 && !cycle; k++) {
+        for (unsigned i = 0; i < nheld[k]; i++) {
+            if (lockdep_core_has_edge(&g_graph, held[k][i].node, node))
+                continue;
+            g_stats.searches++;
+            if (lockdep_core_reaches(&g_graph, &g_scratch, node, held[k][i].node, path, 8, &path_len)) {
+                cycle = true;
+                against = held[k][i].node;
+                break;
+            }
+            lockdep_core_add_edge(&g_graph, held[k][i].node, node);
+        }
+    }
+    raw_unlock(s);
+    if (cycle) {
+        char detail[128];
+        const struct lock_class *ac = &g_graph.classes[lockdep_node_class(against)];
+        ksnprintf(detail, sizeof(detail), "'%s'#%u is held, and '%s'#%u was recorded before it elsewhere", ac->name,
+                  lockdep_node_subclass(against), name, subclass);
+        report(LOCKDEP_R_INVERSION, name, subclass, ip, detail, path, path_len);
+    }
+}
 
-push:;
-    /* 4. Push. */
-    struct lockdep_held e = { .node = node,
+/* The lock is owned now: push it. */
+void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
+                      bool trylock, bool irqs_on, uintptr_t ip)
+{
+    if (g_off)
+        return;
+    struct percpu *pc = this_cpu();
+    bool in_irq = pc->irq_depth != 0;
+    int n = node_of(class_slot, name, kind, subclass, ip);
+    if (n < 0)
+        return;
+    if (trylock)
+        __atomic_fetch_add(&g_stats.acquisitions, 1u, __ATOMIC_RELAXED);
+    struct lockdep_held e = { .node = (uint16_t)n,
                               .flags = (uint8_t)((trylock ? LOCKDEP_HF_TRYLOCK : 0u) |
                                                  (in_irq ? LOCKDEP_HF_IN_IRQ : 0u) |
                                                  (irqs_on ? LOCKDEP_HF_IRQS_ON : 0u)),
                               .ip = ip,
                               .lock = lock };
     if (kind == LOCKDEP_KIND_MUTEX) {
+        struct thread *t = in_irq ? NULL : me();
         if (t == NULL)
             return;   /* mutexes before threads exist are not tracked */
         if (t->nr_held_mutex == LOCKDEP_MAX_HELD_MUTEX) {
@@ -265,6 +290,7 @@ push:;
         }
         t->held_mutex[t->nr_held_mutex++] = e;
     } else {
+        struct lockdep_cpu *lc = my_cpu();
         if (lc->nr_held == LOCKDEP_MAX_HELD) {
             report(LOCKDEP_R_OVERFLOW, name, subclass, ip, "per-CPU spinlock stack full", NULL, 0);
             return;

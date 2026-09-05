@@ -33,7 +33,7 @@ bool mutex_trylock(struct mutex *m)
     struct thread *cur = thread_current();
     if (!try_take(m, cur))
         return false;
-    lockdep_acquire(m, &m->class, m->name, LOCKDEP_KIND_MUTEX, 0, true, false, (uintptr_t)__builtin_return_address(0));
+    lockdep_acquired(m, &m->class, m->name, LOCKDEP_KIND_MUTEX, 0, true, false, (uintptr_t)__builtin_return_address(0));
     return true;
 }
 
@@ -50,14 +50,15 @@ static void lock_common(struct mutex *m, unsigned subclass, uintptr_t ip)
     if (m->owner == cur)
         panic("mutex_lock('%s'): recursive lock by '%s'", m->name, cur->name);
     /* The order check runs before the wait so a deadlocking acquisition
-     * is reported, not hung on. */
-    lockdep_acquire(m, &m->class, m->name, LOCKDEP_KIND_MUTEX, subclass, false, false, ip);
+     * is reported, not hung on; the push waits for ownership. */
+    lockdep_acquire_check(&m->class, m->name, LOCKDEP_KIND_MUTEX, subclass, false, ip);
 
     for (;;) {
         if (try_take(m, cur))
-            return;
+            break;
         wait_event(&m->wq, __atomic_load_n(&m->owner, __ATOMIC_ACQUIRE) == NULL);
     }
+    lockdep_acquired(m, &m->class, m->name, LOCKDEP_KIND_MUTEX, subclass, false, false, ip);
 }
 
 void mutex_lock(struct mutex *m)

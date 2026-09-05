@@ -55,6 +55,7 @@ bool selftest_lockdep_recursion(const char **reason);
 bool selftest_lockdep_irq(const char **reason);
 bool selftest_lockdep_sleep(const char **reason);
 bool selftest_lockdep_mutex(const char **reason);
+bool selftest_lockdep_contention(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
 
 /* Phase 4: kernel/process/proctest.c */

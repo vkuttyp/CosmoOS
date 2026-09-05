@@ -16,6 +16,7 @@
 #include <kernel/percpu.h>
 #include <kernel/selftest.h>
 #include <kernel/spinlock.h>
+#include <kernel/thread.h>
 #include <kernel/timer.h>
 
 #include <arch/cpu.h>
@@ -213,6 +214,74 @@ bool selftest_lockdep_mutex(const char **reason)
     return true;
 }
 
+/* --- lockdep-contention: a lock waited for is not held ---
+ *
+ * CPU 1 holds L for 20 ms; this CPU spins on a plain spin_lock(L) with
+ * interrupts enabled while a timer callback here takes M. If the checker
+ * pushed L before owning it, the callback would record L -> M; the
+ * legitimate M -> L order taken afterwards would then be an inversion.
+ */
+static spinlock_t g_cont_l = SPINLOCK_INIT("lockdep-test-cont-l");
+static spinlock_t g_cont_m = SPINLOCK_INIT("lockdep-test-cont-m");
+static volatile unsigned g_cont_holding, g_cont_timer_ran;
+
+static void cont_holder(void *arg)
+{
+    (void)arg;
+    arch_irq_state_t s = spin_lock_irqsave(&g_cont_l);
+    __atomic_store_n(&g_cont_holding, 1u, __ATOMIC_RELEASE);
+    uint64_t end = clock_now_ns() + 20000000ULL;
+    while (clock_now_ns() < end)
+        arch_cpu_relax();
+    spin_unlock_irqrestore(&g_cont_l, s);
+}
+
+static void cont_timer(struct timer *t, void *arg)
+{
+    (void)t;
+    (void)arg;
+    spin_lock(&g_cont_m);   /* interrupt context, during the contention on L */
+    spin_unlock(&g_cont_m);
+    __atomic_store_n(&g_cont_timer_ran, 1u, __ATOMIC_RELEASE);
+}
+
+bool selftest_lockdep_contention(const char **reason)
+{
+    unsigned other = 0;
+    for (unsigned c = 1; c < cpu_count(); c++)
+        if (cpu_online(c)) {
+            other = c;
+            break;
+        }
+    if (other == 0) {
+        kinfo("selftest: lockdep-contention: one CPU, nothing to contend with");
+        return true;
+    }
+    struct thread *h = thread_create_on(cont_holder, NULL, "cont-holder", SCHED_PRIO_DEFAULT, CPUMASK_OF(other));
+    CHECK(h != NULL);
+    uint64_t end = clock_now_ns() + 1000000000ULL;
+    while (__atomic_load_n(&g_cont_holding, __ATOMIC_ACQUIRE) == 0 && clock_now_ns() < end)
+        arch_cpu_relax();
+    CHECK(g_cont_holding == 1);
+
+    struct timer t;
+    timer_setup(&t, cont_timer, NULL);
+    timer_start(&t, 5000000ULL);   /* fires on this CPU while we spin below */
+    CHECK(arch_irq_enabled());
+    spin_lock(&g_cont_l);          /* contended for ~15 ms with interrupts enabled */
+    CHECK(g_cont_timer_ran == 1);  /* the interrupt landed inside the wait */
+    spin_unlock(&g_cont_l);
+    thread_join(h);
+
+    /* M -> L must be a fresh, legal order: no phantom L -> M was recorded. */
+    arch_irq_state_t s = spin_lock_irqsave(&g_cont_m);
+    spin_lock(&g_cont_l);
+    spin_unlock(&g_cont_l);
+    spin_unlock_irqrestore(&g_cont_m, s);
+    CHECK(lockdep_expected_hits() == 0);
+    return true;
+}
+
 #else
 
 static bool skip(const char **reason, const char *name)
@@ -226,5 +295,6 @@ bool selftest_lockdep_recursion(const char **reason) { return skip(reason, "lock
 bool selftest_lockdep_irq(const char **reason) { return skip(reason, "lockdep-irq"); }
 bool selftest_lockdep_sleep(const char **reason) { return skip(reason, "lockdep-sleep"); }
 bool selftest_lockdep_mutex(const char **reason) { return skip(reason, "lockdep-mutex"); }
+bool selftest_lockdep_contention(const char **reason) { return skip(reason, "lockdep-contention"); }
 
 #endif

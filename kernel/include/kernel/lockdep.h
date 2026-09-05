@@ -59,11 +59,17 @@ struct thread;
 
 #if CONFIG_LOCKDEP
 
-/* Called by the lock primitives. `class_slot` is the lock's cached class
- * (0 = unknown); `irqs_on` says interrupts were enabled at the
- * acquisition; `ip` is the caller's return address. */
-void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
-                     bool trylock, bool irqs_on, uintptr_t ip);
+/* Called by the lock primitives in two halves. The check runs before the
+ * acquisition waits (a deadlocking order is reported, not hung on) and
+ * pushes nothing: a contended lock is not held, and an interrupt arriving
+ * during the wait must not see it on the stack. The push runs once the
+ * lock is owned. Trylock callers use only the push. `class_slot` is the
+ * lock's cached class (0 = unknown); `irqs_on` says interrupts were
+ * enabled at the acquisition; `ip` is the caller's return address. */
+void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass, bool irqs_on,
+                           uintptr_t ip);
+void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
+                      bool trylock, bool irqs_on, uintptr_t ip);
 void lockdep_release(const void *lock, unsigned kind, uintptr_t ip);
 
 /* The debug half of might_sleep(): a report with the held stacks. */
@@ -95,8 +101,13 @@ const char *lockdep_report_name(enum lockdep_report_kind kind);
 
 #else
 
-static inline void lockdep_acquire(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
-                                   unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)
+static inline void lockdep_acquire_check(uint16_t *class_slot, const char *name, unsigned kind, unsigned subclass,
+                                         bool irqs_on, uintptr_t ip)
+{
+    (void)class_slot; (void)name; (void)kind; (void)subclass; (void)irqs_on; (void)ip;
+}
+static inline void lockdep_acquired(const void *lock, uint16_t *class_slot, const char *name, unsigned kind,
+                                    unsigned subclass, bool trylock, bool irqs_on, uintptr_t ip)
 {
     (void)lock; (void)class_slot; (void)name; (void)kind; (void)subclass; (void)trylock; (void)irqs_on; (void)ip;
 }

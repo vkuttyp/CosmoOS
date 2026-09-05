@@ -36,9 +36,12 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
 {
     preempt_disable();
     unsigned cpu = arch_cpu_id();
+    bool irqs_on = arch_irq_enabled();
     /* The order check runs before the wait: a deadlocking acquisition is
-     * reported instead of hanging. */
-    lockdep_acquire(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, false, arch_irq_enabled(), ip);
+     * reported instead of hanging. The push waits for ownership: while we
+     * spin with interrupts enabled a handler may run here and must not see
+     * this lock as held. */
+    lockdep_acquire_check(&lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, irqs_on, ip);
 
     while (!try_acquire(lock)) {
         if (__atomic_load_n(&lock->owner_cpu, __ATOMIC_RELAXED) == cpu)
@@ -46,6 +49,7 @@ static void lock_common(spinlock_t *lock, unsigned subclass, uintptr_t ip)
         arch_cpu_relax();
     }
     __atomic_store_n(&lock->owner_cpu, cpu, __ATOMIC_RELAXED);
+    lockdep_acquired(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, subclass, false, irqs_on, ip);
 }
 
 void spin_lock(spinlock_t *lock)
@@ -66,8 +70,8 @@ bool spin_trylock(spinlock_t *lock)
         return false;
     }
     __atomic_store_n(&lock->owner_cpu, arch_cpu_id(), __ATOMIC_RELAXED);
-    lockdep_acquire(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, true, arch_irq_enabled(),
-                    (uintptr_t)__builtin_return_address(0));
+    lockdep_acquired(lock, &lock->class, lock->name, LOCKDEP_KIND_SPIN, 0, true, arch_irq_enabled(),
+                     (uintptr_t)__builtin_return_address(0));
     return true;
 }
 
