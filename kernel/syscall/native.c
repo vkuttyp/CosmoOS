@@ -8,6 +8,7 @@
 
 #include <kernel/blk.h>
 #include <kernel/errno.h>
+#include <kernel/hv.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -876,7 +877,8 @@ static int64_t sys_klog(struct syscall_args *a)
 
 static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
-    "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "sysctl.names",
+    "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
+    "sysctl.names",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -903,6 +905,8 @@ static int sysctl_value(const char *name, char *out, size_t n)
         return ksnprintf(out, n, "%llu",
                          (unsigned long long)(name[9] == 't' ? st.total_pages : st.free_pages));
     }
+    if (strncmp(name, "hv.", 3) == 0)
+        return hv_sysctl(name + 3, out, n);
     if (strcmp(name, "sysctl.names") == 0) {
         int len = 0;
         for (size_t i = 0; i < ARRAY_SIZE(sysctl_names); i++) {
@@ -982,6 +986,13 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_procinfo] = sys_procinfo,
     [SYS_klog] = sys_klog,
     [SYS_sysctl] = sys_sysctl,
+    [SYS_vm_create] = sys_vm_create,
+    [SYS_vm_mem] = sys_vm_mem,
+    [SYS_vm_mem_rw] = sys_vm_mem_rw,
+    [SYS_vcpu_create] = sys_vcpu_create,
+    [SYS_vcpu_regs] = sys_vcpu_regs,
+    [SYS_vcpu_run] = sys_vcpu_run,
+    [SYS_vcpu_irq] = sys_vcpu_irq,
 };
 
 const struct personality personality_native = {

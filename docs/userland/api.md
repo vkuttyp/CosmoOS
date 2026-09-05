@@ -18,7 +18,7 @@ below are meant to stay; the exit statuses follow Unix convention.
 
 `USER_BIN_PROGRAMS` (sh echo cat ls cp mv rm mkdir rmdir pwd true
 false sleep) and `USER_SBIN_PROGRAMS` (mount umount ps kill dmesg
-sysctl) in `userland/userland.mk` generate the entries; the kernel's
+sysctl vmctl) in `userland/userland.mk` generate the entries; the kernel's
 `ramfs_populate_boot` places `bin/`, `sbin/` and `etc/` entries at the
 root and everything else under `/boot`.
 
@@ -109,6 +109,7 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 | `kill` | `kill [-sig | -s sig] pid...` | `sig` numeric or `KILL`, `TERM` (default), `INT`, `HUP`, with or without `SIG` |
 | `dmesg` | `dmesg` | the newest 32 KiB of kernel log lines |
 | `sysctl` | `sysctl -a` or `sysctl name...` | prints `name = value`; names from `sysctl.names` |
+| `vmctl` | `vmctl probe`, `vmctl info`, `vmctl run [-m KIB] [-a GPA] [-e ENTRY] IMAGE` | `probe` prints the `/dev/vmm` line (exit 2 when the backend is `none`); `info` prints `hv.*`; `run` loads a flat image (default 1 MiB of guest memory, image at 0x1000, real-mode entry there) and runs one vCPU until `HLT`, echoing the guest's debug console and reporting other exits; exit 0 on `HLT`, 1 on `MMIO`/`SHUTDOWN`/`FAIL` (`docs/kernel-services/virtualization/api.md`) |
 
 ## Scripts (`/etc`)
 

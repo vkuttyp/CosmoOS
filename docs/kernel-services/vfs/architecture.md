@@ -62,7 +62,9 @@ committed root describes a completely valid state.
   the archive's `bin/`, `sbin/`, `etc/` entries placed at `/bin`,
   `/sbin`, `/etc` (programs executable, Phase 9; nested entries such
   as `etc/pkg/keys/...` and `repo/...` get their directories, Phase
-  10), and `/tmp`, `/mnt`, `/dev` created.
+  10), and `/tmp`, `/mnt`, `/dev` created. Since Phase 12 a character
+  node can be created by a kernel subsystem (`ramfs_mkchr`); `/dev/vmm`
+  is the first, and the only entry in `/dev` so far.
 - **Storage pool** (`kernel-services/storage/`): `pool_open(blkdev)`,
   `pool_read/write/flush` in 4 KiB pool blocks. One device now; the
   interface is where allocation groups and redundancy attach later.

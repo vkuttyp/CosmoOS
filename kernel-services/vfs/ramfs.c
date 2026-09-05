@@ -29,6 +29,8 @@ struct ramfs_node {
     struct list_node entries;   /* directories */
     struct vnode *parent;       /* unreferenced back pointer, NULL for root */
     unsigned nr_entries;
+    const struct chrdev_ops *chr;   /* character nodes */
+    void *chr_priv;
 };
 
 struct ramfs {
@@ -284,6 +286,79 @@ static const struct vnode_ops ramfs_file_ops = {
     .truncate = ramfs_truncate,
     .evict = ramfs_evict,
 };
+
+static int64_t ramfs_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->read ? n->chr->read(vn, off, buf, len) : -ENOTSUP;
+}
+
+static int64_t ramfs_chr_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->write ? n->chr->write(vn, off, buf, len) : -ENOTSUP;
+}
+
+static const struct vnode_ops ramfs_chr_ops = {
+    .read = ramfs_chr_read,
+    .write = ramfs_chr_write,
+    .evict = ramfs_evict,
+};
+
+void *ramfs_chr_priv(const struct vnode *vn)
+{
+    const struct ramfs_node *n = vn->fs_priv;
+    return n->chr_priv;
+}
+
+int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out)
+{
+    const char *slash = NULL;
+    for (const char *c = path; *c; c++)
+        if (*c == '/')
+            slash = c;
+    if (slash == NULL || slash[1] == '\0' || strlen(slash + 1) > VFS_NAME_MAX)
+        return -EINVAL;
+    char dirpath[VFS_PATH_MAX];
+    size_t dl = (size_t)(slash - path);
+    if (dl == 0) {
+        dirpath[0] = '/';
+        dl = 1;
+    } else {
+        if (dl >= sizeof(dirpath))
+            return -ENAMETOOLONG;
+        memcpy(dirpath, path, dl);
+    }
+    dirpath[dl] = '\0';
+    struct vnode *dir;
+    int rc = vfs_lookup(NULL, dirpath, &dir);
+    if (rc)
+        return rc;
+    if (dir->type != VNODE_DIR || dir->ops != &ramfs_dir_ops) {
+        vnode_put(dir);
+        return -ENOTDIR;
+    }
+    const char *name = slash + 1;
+    size_t nl = strlen(name);
+    mutex_lock(&dir->lock);
+    struct vnode *vn = NULL;
+    rc = ramfs_create_common(dir, name, nl, mode, VNODE_CHR, &vn);
+    if (rc == 0) {
+        struct ramfs_node *n = vn->fs_priv;
+        n->chr = ops;
+        n->chr_priv = priv;
+        vn->ops = &ramfs_chr_ops;
+    }
+    mutex_unlock(&dir->lock);
+    vnode_put(dir);
+    if (rc)
+        return rc;
+    if (out)
+        *out = vn;      /* the caller's reference from ramfs_create_common */
+    else
+        vnode_put(vn);
+    return 0;
+}
 
 static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt)
 {

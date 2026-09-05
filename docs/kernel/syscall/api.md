@@ -70,6 +70,13 @@ kernel stack.
 | 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the total number of processes (up to `count` records filled) | `EFAULT`, `ENOMEM` |
 | 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EFAULT`, `ENOMEM` |
 | 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
+| 43 | `vm_create` | `int vmm_h` (a handle to `/dev/vmm` open for writing) | a VM handle | `EBADF`, `EPERM`, `ENOTSUP`, `ENOSPC`, `ENOMEM`, `EMFILE` |
+| 44 | `vm_mem` | `int vm, uint64_t gpa, uint64_t len` | 0 (a zeroed guest memory region) | `EBADF`, `EINVAL`, `ENOSPC`, `ENOMEM` |
+| 45 | `vm_mem_rw` | `int vm, uint64_t gpa, void *buf, size_t len, int write` | bytes copied | `EBADF`, `EINVAL`, `EFAULT`, `ENOMEM` |
+| 46 | `vcpu_create` | `int vm, unsigned index` | a vCPU handle | `EBADF`, `ENOTSUP`, `EINVAL`, `EEXIST`, `ENOMEM`, `EMFILE` |
+| 47 | `vcpu_regs` | `int vcpu, struct cosmo_vcpu_regs *regs, int set` | 0 | `EBADF`, `EFAULT`, `EINVAL` |
+| 48 | `vcpu_run` | `int vcpu, struct cosmo_vm_exit *exit` | 0, `*exit` filled | `EBADF`, `EFAULT`, `ENOTSUP`, `EIO`, `EINTR`, `ENOMEM` |
+| 49 | `vcpu_irq` | `int vcpu, unsigned vector` | 0 | `EBADF`, `EINVAL` |
 
 Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
 `struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
@@ -78,7 +85,12 @@ in `docs/kernel-services/vfs/api.md`. Calls 23–31 (Phase 8), with
 and their errno values, are in `docs/kernel-services/network/api.md`.
 Calls 32–42 (Phase 9) are specified below and in
 `docs/kernel/process/api.md`, `docs/kernel/ipc/api.md`,
-`docs/kernel/tty/api.md`. `SYS_COUNT` is 43. A file opened with `open`
+`docs/kernel/tty/api.md`. Calls 43–49 (Phase 12), with
+`struct cosmo_vcpu_regs`, `struct cosmo_vm_exit`, the `COSMO_VM_EXIT_*`
+kinds and their errno values, are in
+`docs/kernel-services/virtualization/api.md`; a VM handle is an I/O
+object (`read` drains the guest's debug console, `fstat` is
+`COSMO_DT_CHR`), a vCPU handle only closes. `SYS_COUNT` is 50. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` or `accept` is
@@ -164,7 +176,9 @@ Details per call:
   emitted line, oldest overwritten first; reading does not consume.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
   `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
-  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, and `sysctl.names`
+  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, since Phase 12
+  `hv.backend`, `hv.vms`, `hv.vcpus`, `hv.exits`
+  (`docs/kernel-services/virtualization/api.md`), and `sysctl.names`
   (the list, newline separated); values are strings; read-only.
 
 ### Constants
@@ -207,8 +221,10 @@ page is populated.
 `cosmo_sendto`, `cosmo_recvfrom`, `cosmo_shutdown`, `cosmo_getsockname`
 (over `cosmo_syscall5`), and since Phase 9 `cosmo_spawn`, `cosmo_wait`,
 `cosmo_kill`, `cosmo_pipe`, `cosmo_dup`, `cosmo_getppid`, `cosmo_chdir`,
-`cosmo_getcwd`, `cosmo_procinfo`, `cosmo_klog`, `cosmo_sysctl`, return
-the raw kernel result as `long`. The C library (`docs/libc/`) translates
+`cosmo_getcwd`, `cosmo_procinfo`, `cosmo_klog`, `cosmo_sysctl`, and since
+Phase 12 `cosmo_vm_create`, `cosmo_vm_mem`, `cosmo_vm_mem_read/write`,
+`cosmo_vcpu_create`, `cosmo_vcpu_get/set_regs`, `cosmo_vcpu_run`,
+`cosmo_vcpu_irq` (`cosmo/hv.h`), return the raw kernel result as `long`. The C library (`docs/libc/`) translates
 them into `errno` and the standard names; programs use the library, the
 raw wrappers are internal to it (and to `init --selftest`).
 

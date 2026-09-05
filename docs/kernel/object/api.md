@@ -25,7 +25,10 @@ every object that is not a `struct file`, and returns `-EBADF` when it
 is NULL. I/O kobjects today: the console (`read`/`write`/`stat`),
 `struct file` (`kernel-services/vfs/`), `struct socket`
 (`read`/`write`, no `stat` yet), the pipe ends `pipe-read`
-(`read`/`stat`) and `pipe-write` (`write`/`stat`) (`kernel/ipc/`). The system call
+(`read`/`stat`) and `pipe-write` (`write`/`stat`) (`kernel/ipc/`), and
+since Phase 12 `struct vm` (`read` drains the guest's debug console,
+`write` `-ENOTSUP`, `stat` `COSMO_DT_CHR`; `kernel-services/virtualization/`),
+whose companion `struct vcpu` is a plain kobject. The system call
 layer bounds every copy by `len`, not by the returned count: a count
 above `len` trips a `KASSERT` and fails the call with `-EIO`, so a
 buggy object can never make the kernel read past its stack buffer.

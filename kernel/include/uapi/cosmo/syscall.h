@@ -61,7 +61,14 @@
 #define SYS_procinfo  40  /* (struct cosmo_procinfo *buf, size_t count) -> total processes */
 #define SYS_klog      41  /* (char *buf, size_t len) -> bytes of the newest whole log lines */
 #define SYS_sysctl    42  /* (const char *name, char *buf, size_t len) -> value length */
-#define SYS_COUNT     43
+#define SYS_vm_create   43  /* (int vmm_handle) -> VM handle; needs /dev/vmm open for writing */
+#define SYS_vm_mem      44  /* (int vm, uint64_t gpa, uint64_t len) -> 0: zeroed guest memory region */
+#define SYS_vm_mem_rw   45  /* (int vm, uint64_t gpa, void *buf, size_t len, int write) -> bytes */
+#define SYS_vcpu_create 46  /* (int vm, unsigned index) -> vCPU handle at the reset state */
+#define SYS_vcpu_regs   47  /* (int vcpu, struct cosmo_vcpu_regs *regs, int set) -> 0 */
+#define SYS_vcpu_run    48  /* (int vcpu, struct cosmo_vm_exit *exit) -> 0; runs until an exit */
+#define SYS_vcpu_irq    49  /* (int vcpu, unsigned vector) -> 0: make a vector pending (>= 32) */
+#define SYS_COUNT       50
 
 /* spawn: the child receives exactly the mapped handles (same rights).
  * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */
@@ -237,5 +244,56 @@ struct cosmo_dirent {
 #define COSMO_AT_NULL   0
 #define COSMO_AT_PAGESZ 6
 #define COSMO_AT_ENTRY  9
+
+
+/* --- virtualization (docs/kernel-services/virtualization/) --- */
+
+struct cosmo_vcpu_seg {          /* 16 bytes */
+    uint16_t selector;
+    uint16_t attrib;             /* type(4) S DPL(2) P | AVL L DB G in bits 12-15 */
+    uint32_t limit;
+    uint64_t base;
+};
+
+/* VMState: the whole architectural register file of a virtual CPU. */
+struct cosmo_vcpu_regs {         /* 448 bytes */
+    uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t rip, rflags;
+    struct cosmo_vcpu_seg cs, ds, es, fs, gs, ss, ldtr, tr;
+    struct cosmo_vcpu_seg gdtr, idtr;   /* selector and attrib unused */
+    uint64_t cr0, cr2, cr3, cr4, cr8;
+    uint64_t efer;
+    uint64_t dr6, dr7;
+    uint64_t pending_irq;        /* get: lowest pending vector, or ~0 when none; set: ignored */
+    uint64_t reserved[9];
+};
+
+/* VMExit: why vcpu_run returned. */
+struct cosmo_vm_exit {           /* 64 bytes */
+    uint32_t kind;               /* COSMO_VM_EXIT_* */
+    uint32_t flags;              /* COSMO_VM_EXIT_F_* */
+    uint64_t rip;                /* guest rip at the exit (after IN/OUT: the next instruction) */
+    union {
+        struct { uint16_t port; uint8_t size; uint8_t write; uint8_t string; uint8_t rep; uint16_t pad;
+                 uint32_t value; uint32_t pad2; } io;
+        struct { uint64_t gpa; uint32_t write; uint32_t pad; } mmio;
+        struct { uint64_t nr, a0, a1, a2, a3; } hypercall;
+        struct { uint32_t code; uint32_t pad; uint64_t info1, info2; } fail;
+        uint64_t raw[6];
+    };
+};
+
+#define COSMO_VM_EXIT_HLT       1u  /* halted; inject a vector and run again */
+#define COSMO_VM_EXIT_IO        2u  /* port I/O no device claimed; a read completes on the next run */
+#define COSMO_VM_EXIT_MMIO      3u  /* access to guest-physical memory with no region */
+#define COSMO_VM_EXIT_HYPERCALL 4u  /* VMMCALL: nr = rax, args rbx rcx rdx rsi */
+#define COSMO_VM_EXIT_SHUTDOWN  5u  /* triple fault: the vCPU is dead */
+#define COSMO_VM_EXIT_FAIL      6u  /* the hardware refused the state, or an unknown exit */
+
+#define COSMO_VM_EXIT_F_IRQ_PENDING 1u  /* a pending vector was not delivered yet */
+
+#define COSMO_HV_VMS_MAX     8u
+#define COSMO_HV_VCPUS_MAX   4u
+#define COSMO_HV_VM_MEM_MAX  (64u << 20)
 
 #endif /* UAPI_COSMO_SYSCALL_H */

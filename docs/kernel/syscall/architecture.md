@@ -103,7 +103,8 @@ result; the kernel self-test runs it and requires status 0. See
 Per-thread syscall accounting, tracing hooks, `copy_from_user` with
 fault recovery (exception tables) so validation can be relaxed for
 performance. The Linux personality table arrived in Phase 11
-(`docs/compat/linux/`).
+(`docs/compat/linux/`); the virtualization calls in Phase 12
+(`docs/kernel-services/virtualization/`).
 
 ## Files (Phase 7)
 
@@ -135,4 +136,6 @@ before anything else runs; `sys_fstat` accepts every I/O object with a
 pipe, `write` on a full pipe, `wait`, `sleep_ns`, the socket waits) use
 `wait_event_killable` and return `-EINTR` when the process is killed,
 after which the dispatcher's `process_check_kill` ends the process.
-`SYS_COUNT` is 43.
+`SYS_COUNT` is 50: Phase 12 added the seven virtualization calls 43–49
+(`kernel-services/virtualization/hvsys.c`, listed in the native table
+like every other handler; `docs/kernel-services/virtualization/`).

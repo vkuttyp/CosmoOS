@@ -91,5 +91,13 @@ bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
 bool selftest_net_harness(const char **reason);
+bool selftest_hv_probe(const char **reason);
+bool selftest_hv_npt(const char **reason);
+bool selftest_hv_guest_pio(const char **reason);
+bool selftest_hv_guest_irq(const char **reason);
+bool selftest_hv_guest_cpuid(const char **reason);
+bool selftest_hv_guest_pm(const char **reason);
+bool selftest_hv_guest_shutdown(const char **reason);
+bool selftest_hv_guest_spin(const char **reason);
 
 #endif /* KERNEL_SELFTEST_H */

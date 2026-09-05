@@ -71,5 +71,9 @@ pkg list
 /boot/tests/linux/lxtest || FAILS=1
 ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
 rm /tmp/.musl.probe
+# Virtualization (docs/kernel-services/virtualization/testing.md): run a guest under vmctl.
+vmctl probe || echo "HVTEST: skipped"
+vmctl probe && vmctl run /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
+vmctl info
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

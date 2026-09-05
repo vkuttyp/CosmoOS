@@ -164,6 +164,17 @@ pointer.
   `opt/cosmo/` and NUL-terminates. See
   `docs/kernel-services/network/api.md`.
 
+## `arch/hv.h` (Phase 12)
+
+The hardware virtualization backend: `arch_hv_probe`, `arch_hv_vm_*`
+(nested page table + address-space tag), `arch_hv_vcpu_*` (control block,
+state in `struct cosmo_vcpu_regs`, run to a `struct hv_exit`, virtual
+interrupt offer, exception injection, RIP and GPR access) and the two
+host-value helpers (`arch_hv_host_cpuid`, `arch_hv_host_tsc`) that keep
+even CPUID and RDTSC out of generic code. Every function's contract is in
+`docs/kernel-services/virtualization/api.md`; the x86-64 implementation
+is `svm.c`, `svm_npt.c`, `svm_run.S` with the private `x86/svm.h`.
+
 ## Private x86-64 headers (not part of the interface)
 
 `kernel/arch/x86_64/include/x86/`: `cpu.h` (`x86_start`, `x86_cpu_init`,

@@ -199,6 +199,19 @@ directories are created with mode 0755 (`ensure_parents`), an existing
 one is fine, any other failure is logged and the entry skipped. Once,
 after `vfs_init` and `bootarchive_init`.
 
+**`int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out)`**
+(Phase 12) Creates a character device node in the ramfs at `path` (the
+parent must exist and be a ramfs directory): `struct chrdev_ops { int64_t
+(*read)(struct vnode *, uint64_t off, void *, size_t); int64_t
+(*write)(struct vnode *, uint64_t off, const void *, size_t); }` receives
+the node's reads and writes with the vnode lock held (a NULL operation is
+`-ENOTSUP`); `priv` is returned by **`void *ramfs_chr_priv(const struct
+vnode *)`**. `out` may be NULL, else it receives a reference. Errors:
+`-EINVAL` (no name, name too long), `-ENAMETOOLONG`, path errors,
+`-ENOTDIR` (parent not a ramfs directory), `-EEXIST`, `-ENOMEM`. The
+first user is `/dev/vmm` (`docs/kernel-services/virtualization/`); the
+console is still a kobject handed to processes at spawn, not a node.
+
 **`vfs_mount_count`, `vfs_vnode_count`, `vfs_dump`** Diagnostics.
 
 ## Page cache (`kernel/include/kernel/pagecache.h`)

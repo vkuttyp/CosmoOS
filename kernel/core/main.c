@@ -25,6 +25,7 @@
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
 #include <kernel/futex.h>
+#include <kernel/hv.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -155,6 +156,9 @@ void kernel_main(const struct cosmoboot_info *info)
 
     arch_irq_enable();
     kinfo("interrupts enabled");
+
+    /* Virtualization: probe the backend and run its self-check guest (needs interrupts). */
+    hv_init();
     arch_console_input_init();
 
     /* Bring up the other CPUs now that this one can take interrupts:

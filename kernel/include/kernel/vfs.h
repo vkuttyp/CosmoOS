@@ -175,6 +175,16 @@ struct file *file_from_kobject(struct kobject *obj);
 /* ramfs: create /boot, /tmp, /mnt, /dev and copy the boot archive into /boot. */
 void ramfs_populate_boot(void);
 
+/* A character device node in the ramfs: reads and writes go to ops (the
+ * vnode lock is held); `priv` is available as vn->fs_priv->chr_priv via
+ * ramfs_chr_priv(). Used for /dev/vmm. */
+struct chrdev_ops {
+    int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);
+    int64_t (*write)(struct vnode *vn, uint64_t off, const void *buf, size_t len);
+};
+int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
+void *ramfs_chr_priv(const struct vnode *vn);
+
 /* Diagnostics. */
 unsigned vfs_mount_count(void);
 unsigned vfs_vnode_count(void);

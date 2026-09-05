@@ -20,7 +20,7 @@ kernel directly).
                              │  pipes and redirections, waits, reports status
                              ▼
               echo cat ls cp mv rm mkdir rmdir                     userland/coreutils/
-              mount umount ps kill dmesg sysctl                    userland/system/
+              mount umount ps kill dmesg sysctl vmctl              userland/system/
                              │
                              ▼
                            libc (docs/libc/)  ──▶  system calls
@@ -81,7 +81,10 @@ tests need; all under thirty lines).
 **system** (`/sbin`): `mount source target fstype [-r]`, `umount [-f]
 target`, `ps` (pid, ppid, uid, state, threads, syscalls, cpu time,
 name), `kill [-sig] pid...` (numeric or `KILL`/`TERM`/`INT`), `dmesg`
-(the kernel log ring), `sysctl [-a] [name...]` (read-only values).
+(the kernel log ring), `sysctl [-a] [name...]` (read-only values),
+since Phase 12 `vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY]
+IMAGE` (virtual machines through `/dev/vmm`;
+`docs/kernel-services/virtualization/api.md`).
 
 **Scripts** (`/etc`): `rc` (prints the userland banner and, in
 self-test builds, runs `/etc/rc.test`), `rc.test` (the shell's own test

@@ -5,6 +5,8 @@
 # terminal, no graphics. Environment:
 #   QEMU_MEM    guest RAM (default 256M)
 #   QEMU_ACCEL  accelerator (default tcg; kvm/hvf where available)
+#   QEMU_CPU    CPU model (default qemu64,+nx,+svm,+npt: TCG emulates AMD-V with nested
+#               paging, which the virtualization tests need; use `host` with kvm/hvf)
 #   QEMU_EXTRA  extra QEMU arguments
 #   OVMF_CODE   firmware image override
 #
@@ -51,7 +53,7 @@ fi
 
 exec qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
-    -cpu qemu64,+nx \
+    -cpu "${QEMU_CPU:-qemu64,+nx,+svm,+npt}" \
     -smp "${QEMU_SMP:-4}" \
     -m "${QEMU_MEM:-256M}" \
     -drive if=pflash,format=raw,readonly=on,file="$firmware" \
