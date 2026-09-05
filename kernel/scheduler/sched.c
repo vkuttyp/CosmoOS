@@ -364,11 +364,15 @@ void sched_watchdog_disarm(void)
 static void watchdog_check(uint64_t now)
 {
     uint64_t timeout = __atomic_load_n(&g_watchdog_timeout, __ATOMIC_ACQUIRE);
-    if (timeout == 0 || g_watchdog_fired || now - g_watchdog_last_kick < timeout)
+    uint64_t last = __atomic_load_n(&g_watchdog_last_kick, __ATOMIC_RELAXED);
+    /* A kick from another CPU between this tick's timestamp and the check
+     * puts `last` ahead of `now`: progress, not a hang (the difference would
+     * otherwise wrap to a huge count and fire the report). */
+    if (timeout == 0 || g_watchdog_fired || now <= last || now - last < timeout)
         return;
     g_watchdog_fired = true;
     kprintf("\n[WATCHDOG] no progress for %llu ms; scheduler state:\n",
-            (unsigned long long)((now - g_watchdog_last_kick) / 1000000));
+            (unsigned long long)((now - last) / 1000000));
     sched_dump();
 }
 
