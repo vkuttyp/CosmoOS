@@ -275,6 +275,25 @@ See [docs/development.md](docs/development.md).
   the AArch64 IPI send lock-free under the run-queue lock. Module ABI v3.
   Six new self-tests (five checker tests and a two-CPU VFS concurrency
   test) and a host test of the graph core.
+- **Verification infrastructure (done):** milestone 4 of the audit's
+  plan, closing its finding that the tree had no fuzzing, fault injection
+  or crash-consistency tests (`docs/verification/`). On the host, `make
+  fuzz` runs six libFuzzer-compatible targets over the real parsers under
+  ASan and UBSan (module ELF, user ELF, package manifest/index/tar, Linux
+  ABI conversions, the split virtqueue against a hostile device, cosmofs
+  images through mount and walk) with a portable seeded driver, or
+  libFuzzer with `FUZZ_ENGINE=libfuzzer`. In debug kernels, fault
+  injection fails `kmalloc` and block submissions or completions per
+  thread on a schedule and budget (`kernel/core/faultinject.c`, a boot
+  parameter, read through `debug.faultinject`); a RAM block device
+  records its write stream (`kernel/block/ramblk.c`) and the
+  `cosmofs-replay` self-test mounts and checks every prefix of it, intact
+  and torn; `init --syscall-fuzz` makes 20 000 random system calls from an
+  unprivileged process; every self-test reports its duration and the boot
+  harness fails one over budget. Four new self-tests. The first fuzz run
+  found an unaligned section-table read in the module loader; fault
+  injection found a NULL dereference on a failed vnode allocation; both
+  fixed with regression tests.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

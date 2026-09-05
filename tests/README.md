@@ -1,6 +1,6 @@
 # tests
 
-Host unit tests, kernel integration tests, QEMU boot tests, property and fuzz tests. Every subsystem must have tests.
+Host unit tests, host fuzz targets, kernel integration tests, QEMU boot tests. Every subsystem must have tests.
 
 - `host/`: native ASan/UBSan tests of kernel algorithms (`make host-test`):
   `test_buddy`, `test_slab`, `test_crypto` (SHA-512, Ed25519 and CRC32C
@@ -11,6 +11,16 @@ Host unit tests, kernel integration tests, QEMU boot tests, property and fuzz te
   layouts) and `test_reloc_aarch64` (the `R_AARCH64` relocation
   encodings and range limits of the AArch64 module loader). All of them
   build on every host regardless of `ARCH`.
+- `fuzz/`: the fuzz targets (`make fuzz`, `docs/verification/`): a
+  portable seeded mutation driver (`driver.c`, libFuzzer's
+  `LLVMFuzzerTestOneInput` contract, so `FUZZ_ENGINE=libfuzzer` links the
+  same targets against libFuzzer) and one target per parser of external
+  bytes: `fuzz_modelf` (module ELF), `fuzz_elf` (user ELF), `fuzz_pkg`
+  (manifest, index, version, tar), `fuzz_linux` (Linux ABI conversions),
+  `fuzz_virtq` (the split virtqueue against a program-driven hostile
+  device), `fuzz_cosmofs` (mount and walk an image; `shim_fs.c` stands
+  in for the pool, the VFS bookkeeping and mutexes). Every target runs
+  the real source under ASan and UBSan.
 - `boot/`: the QEMU boot-test harness (`make test`, `make test-crash`)
   for both architectures (`COSMO_ARCH`, set by the Makefile, selects the
   banner and panic markers; `docs/kernel/arch/aarch64/testing.md`).
@@ -19,6 +29,9 @@ Host unit tests, kernel integration tests, QEMU boot tests, property and fuzz te
   self-tests (the disk is formatted during the run), routes
   the virtio console to `boot-test.log.vcon`, and requires the
   `boot complete` line there as well as the driver-module load lines.
+  Since the verification milestone it reads each self-test's duration,
+  prints the total and the five slowest, and fails a test over
+  `SELFTEST_BUDGET_MS` (default 8000).
 - `modules/`: kernel module fixtures packed into the boot archive under
   `tests/` and loaded only by the module self-tests: `cosmotest`
   (exports, all section groups), `cosmotest_dep` (depends on cosmotest),
