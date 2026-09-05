@@ -327,6 +327,30 @@ bool selftest_process_oom(const char **reason)
 #endif
 }
 
+/* Resource limits and the credential transition (docs/kernel/security/design.md):
+ * a root probe (defaults, AS, NOFILE, NPROC, VMEM, SETCRED to another user),
+ * an unprivileged probe (lowering only, no way back to root, procinfo shows
+ * its own user, the log rate limit), and a resident-memory limit that ends
+ * a process touching past it. */
+bool selftest_process_rlimit(const char **reason)
+{
+    static const char *const root_argv[] = { "init", "--probe", "rlimit-root", NULL };
+    static const char *const unpriv_argv[] = { "init", "--probe", "rlimit-unpriv", NULL };
+    static const char *const mem_argv[] = { "init", "--probe", "mem-limit", NULL };
+    int status;
+    if (!run_module(root_argv, &status, reason))
+        return false;
+    if (status == -1)
+        return true;
+    CHECK(status == 0);
+    CHECK(run_module(unpriv_argv, &status, reason));
+    CHECK(status == 0);
+    CHECK(run_module(mem_argv, &status, reason));
+    CHECK(status == COSMO_EXIT_FAULT);
+    kinfo("selftest: process-rlimit: limits inherited, lowered, raised only by root; SETCRED flows down; a memory limit ends the toucher");
+    return true;
+}
+
 bool selftest_process_reject(const char **reason)
 {
     /* A kernel image is a valid ELF but not a user executable. */

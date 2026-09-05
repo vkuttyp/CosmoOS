@@ -11,4 +11,8 @@ struct spawn_handle {
 pid_t spawnve(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
               size_t nh);
 pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh);
+/* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
+ * supplementary groups; unprivileged callers may name only ids they hold. */
+pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
+                 size_t nh, uid_t uid, gid_t gid);
 #endif

@@ -267,6 +267,7 @@ static const struct selftest tests[] = {
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "user-vmm",        selftest_user_vmm },
+    { "rlimit",          selftest_rlimit },
     { "uaccess",         selftest_uaccess },
     { "kmalloc",         selftest_kmalloc },
     { "acpi",            selftest_acpi },
@@ -328,6 +329,7 @@ static const struct selftest tests[] = {
     { "cosmofs-ops",     selftest_cosmofs_ops },
     { "cosmofs-crash",   selftest_cosmofs_crash },
     { "cosmofs-replay",  selftest_cosmofs_replay },
+    { "cache-limits",    selftest_cache_limits },
     { "net-mbuf",        selftest_net_mbuf },
     { "net-cksum",       selftest_net_cksum },
     { "net-arp",         selftest_net_arp },
@@ -359,6 +361,7 @@ static const struct selftest tests[] = {
     { "process-efault",  selftest_process_efault },
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },
+    { "process-rlimit",  selftest_process_rlimit },
     { "syscall-fuzz",    selftest_syscall_fuzz },
 };
 

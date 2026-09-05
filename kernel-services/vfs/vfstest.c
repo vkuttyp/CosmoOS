@@ -344,3 +344,110 @@ bool selftest_vfs_concurrency(const char **reason)
           rn.ops, rm.ops, o1.ops, o2.ops, other);
     return true;
 }
+
+/* --- the ramfs page budget and the global page-cache limit with reclaim --- */
+
+#include <kernel/blk.h>
+#include <kernel/cosmofs.h>
+#include <kernel/pagecache.h>
+#include <kernel/ramblk.h>
+
+static struct mount *mount_at(const char *path)
+{
+    struct vnode *vn;
+    if (vfs_lookup(NULL, path, &vn))
+        return NULL;
+    struct mount *m = vn->mnt;
+    vnode_put(vn);
+    return m;
+}
+
+bool selftest_cache_limits(const char **reason)
+{
+    static uint8_t buf[PAGE_SIZE];
+    struct pagecache_stats s0, s1;
+
+    /* 1. A ramfs mount with a budget of four pages: the fifth page is
+     * -ENOSPC, the write before it is short, freeing a file makes room. */
+    int mk = vfs_mkdir(NULL, "/mnt/rcap", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/mnt/rcap", "ramfs", NULL, 0) == 0);
+    struct mount *rm = mount_at("/mnt/rcap");
+    CHECK(rm != NULL && (rm->flags & MOUNT_CACHE_IS_STORE) && rm->cache_limit_pages == 16384);
+    rm->cache_limit_pages = 4;
+    struct file *f;
+    CHECK(vfs_open(NULL, "/mnt/rcap/a", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    memset(buf, 0x5a, sizeof(buf));
+    for (int i = 0; i < 4; i++)
+        CHECK(file_write(f, buf, PAGE_SIZE) == PAGE_SIZE);
+    CHECK(rm->cache_pages == 4);
+    pagecache_get_stats(&s0);
+    CHECK(file_write(f, buf, PAGE_SIZE) == -ENOSPC);
+    CHECK(file_write(f, buf, 16) == -ENOSPC);
+    pagecache_get_stats(&s1);
+    CHECK(s1.budget_refusals == s0.budget_refusals + 2);
+    file_put(f);
+    struct file *g;
+    CHECK(vfs_open(NULL, "/mnt/rcap/b", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &g) == 0);
+    CHECK(file_write(g, buf, PAGE_SIZE) == -ENOSPC);   /* the budget is the mount's, not the file's */
+    CHECK(vfs_unlink(NULL, "/mnt/rcap/a") == 0);
+    CHECK(rm->cache_pages == 0);
+    CHECK(file_write(g, buf, 2 * PAGE_SIZE) == 2 * PAGE_SIZE);
+    file_put(g);
+    CHECK(vfs_unlink(NULL, "/mnt/rcap/b") == 0);
+    CHECK(vfs_umount("/mnt/rcap") == 0);
+    CHECK(vfs_rmdir(NULL, "/mnt/rcap") == 0);
+
+    /* 2. cosmofs on a RAM device: a 2 MiB file read back under a global
+     * limit that forces reclaim of its clean pages. ramfs pages (the
+     * root's) are never touched. */
+    struct blkdev *bd = ramblk_create(1024);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    mk = vfs_mkdir(NULL, "/mnt/rcl", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/mnt/rcl", "cosmofs", bd, 0) == 0);
+    struct mount *root_mnt = mount_at("/");
+    uint64_t root_pages0 = root_mnt->cache_pages;
+    CHECK(vfs_open(NULL, "/mnt/rcl/big", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    const unsigned NPAGES = 512;
+    for (unsigned i = 0; i < NPAGES; i++) {
+        memset(buf, (int)(i & 0xff), sizeof(buf));
+        CHECK(file_write(f, buf, PAGE_SIZE) == PAGE_SIZE);
+        if ((i + 1) % 64 == 0) {
+            int src = file_sync(f);   /* every page clean: all reclaimable */
+            if (src)
+                kerror("cache-limits: sync after %u pages: %d", i + 1, src);
+            CHECK(src == 0);
+        }
+    }
+    pagecache_get_stats(&s0);
+    CHECK(s0.pages >= NPAGES);
+    uint64_t saved = pagecache_limit();
+    pagecache_set_limit(s0.pages - NPAGES / 2);   /* below what is cached: reads must evict */
+    for (unsigned i = 0; i < NPAGES; i++) {
+        CHECK(file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE);
+        CHECK(buf[0] == (uint8_t)(i & 0xff) && buf[PAGE_SIZE - 1] == (uint8_t)(i & 0xff));
+    }
+    pagecache_get_stats(&s1);
+    pagecache_set_limit(saved);
+    CHECK(s1.reclaimed > s0.reclaimed);
+    CHECK(s1.pages <= s0.pages - NPAGES / 2 + 64);   /* at most one reclaim batch over the limit */
+    CHECK(root_mnt->cache_pages == root_pages0);       /* nothing of ramfs was evicted */
+    uint64_t reclaimed = s1.reclaimed - s0.reclaimed;
+    /* A dirty page is not reclaimable: writes beyond the limit stay cached. */
+    pagecache_get_stats(&s0);
+    pagecache_set_limit(1);
+    memset(buf, 0x77, sizeof(buf));
+    CHECK(file_pwrite(f, buf, PAGE_SIZE, 0) == PAGE_SIZE);
+    CHECK(file_pread(f, buf, PAGE_SIZE, 0) == PAGE_SIZE && buf[10] == 0x77);
+    pagecache_set_limit(saved);
+    file_put(f);
+    CHECK(vfs_unlink(NULL, "/mnt/rcl/big") == 0);
+    CHECK(vfs_umount("/mnt/rcl") == 0);
+    CHECK(vfs_rmdir(NULL, "/mnt/rcl") == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cache-limits: ramfs budget refused %llu misses; %llu clean pages reclaimed under the global limit",
+          (unsigned long long)s1.budget_refusals, (unsigned long long)reclaimed);
+    return true;
+}

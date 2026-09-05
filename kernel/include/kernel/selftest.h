@@ -21,6 +21,7 @@ int selftest_run_all(void);
 bool selftest_pmm(const char **reason);
 bool selftest_vmm(const char **reason);
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
+bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: address-space, memory and handle limits */
 bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */
 bool selftest_kmalloc(const char **reason);
 
@@ -73,6 +74,7 @@ bool selftest_process_fault(const char **reason);
 bool selftest_process_efault(const char **reason);    /* -EFAULT through the fixup path, never a kill */
 bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
 bool selftest_process_oom(const char **reason);       /* injected demand-page failures */
+bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED from user mode */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
 bool selftest_tty_ldisc(const char **reason);       /* kernel/tty/ttytest.c */
@@ -97,6 +99,7 @@ bool selftest_virtio_console(const char **reason);
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
 bool selftest_pagecache(const char **reason);
+bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_crc32c(const char **reason);
 
 /* Phase 7: kernel-services/filesystem/cosmofs/cosmofstest.c */

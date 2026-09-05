@@ -277,4 +277,14 @@ static inline long cosmo_getgroups(uint32_t *groups, size_t n)
     return cosmo_syscall2(SYS_getgroups, groups, n);
 }
 
+/* Resource limits (docs/kernel/security/design.md §2). */
+static inline long cosmo_getrlimit(unsigned resource, uint64_t *value)
+{
+    return cosmo_syscall2(SYS_getrlimit, resource, value);
+}
+static inline long cosmo_setrlimit(unsigned resource, uint64_t value)
+{
+    return cosmo_syscall2(SYS_setrlimit, resource, value);
+}
+
 #endif /* COSMO_SYSCALL_H */
