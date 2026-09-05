@@ -50,8 +50,11 @@ void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
      * when unchanged so kernel-thread to kernel-thread switches do not
      * flush non-global entries needlessly. */
     struct vm_space *space = next->proc ? next->proc->space : &kernel_space;
-    if (read_cr3() != space->mmu.root)
-        arch_mmu_activate(&space->mmu);
+    if (read_cr3() != space->mmu.root) {
+        struct percpu *pc = this_cpu();
+        vm_space_switch(pc->cur_space, space);   /* maintains active_cpus around the CR3 write */
+        pc->cur_space = space;
+    }
 
     /* The user thread pointer (%fs base): kernel code never uses %fs, so
      * kernel threads keep whatever is there. */

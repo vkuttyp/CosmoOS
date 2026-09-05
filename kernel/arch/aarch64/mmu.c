@@ -72,6 +72,16 @@ static paddr_t alloc_table(void)
     return page_to_phys(page);
 }
 
+/* A PROT_NONE page: the frame stays, the descriptor is invalid to the
+ * hardware, this software bit (ignored when VALID is clear) tells the
+ * walker it is a level-3 leaf (docs/kernel/memory/design.md §6.2). */
+#define DESC_SW_NONE (1ull << 55)
+
+static inline bool desc_sw_present(pte_t e, unsigned level)
+{
+    return (e & DESC_VALID) || (level == LEVEL_L3 && (e & DESC_SW_NONE));
+}
+
 static inline bool is_table(pte_t e, unsigned level)
 {
     return level > LEVEL_L3 && (e & (DESC_VALID | DESC_TABLE)) == (DESC_VALID | DESC_TABLE);
@@ -79,7 +89,7 @@ static inline bool is_table(pte_t e, unsigned level)
 
 static inline bool is_leaf(pte_t e, unsigned level)
 {
-    if (!(e & DESC_VALID))
+    if (!desc_sw_present(e, level))
         return false;
     return level == LEVEL_L3 ? true : (e & DESC_TABLE) == 0;
 }
@@ -87,7 +97,8 @@ static inline bool is_leaf(pte_t e, unsigned level)
 static pte_t leaf_attrs(vm_prot_t prot, vm_cache_t cache, unsigned flags, unsigned level)
 {
     bool user = (flags & ARCH_MMU_MAP_USER) != 0;
-    pte_t a = DESC_VALID | DESC_AF | DESC_SH_INNER;
+    pte_t a = DESC_AF | DESC_SH_INNER;
+    a |= (prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC)) ? DESC_VALID : DESC_SW_NONE;
     if (level == LEVEL_L3)
         a |= DESC_PAGE;
     switch (cache) {
@@ -124,7 +135,7 @@ static void walk(const struct arch_mmu_context *ctx, vaddr_t va, struct walk *w)
         pte_t *e = &t[index_at(va, level)];
         w->entry = e;
         w->level = level;
-        w->present = (*e & DESC_VALID) != 0;
+        w->present = desc_sw_present(*e, level);
         w->leaf = is_leaf(*e, level);
         if (!w->present || w->leaf || level == LEVEL_L3)
             return;
@@ -227,8 +238,8 @@ int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t le
         pte_t *e = descend(ctx, va, level, &rc);
         if (e == NULL)
             return rc;
-        if (*e & DESC_VALID)
-            return -EEXIST;
+        if (desc_sw_present(*e, level))
+            return -EEXIST;   /* a PROT_NONE page is occupied too */
         *e = (pa & DESC_ADDR_MASK) | leaf_attrs(prot, cache, flags, level);
         va += level_size[level];
         pa += level_size[level];
@@ -276,7 +287,7 @@ int arch_mmu_unmap(struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 
 int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_prot_t prot)
 {
-    if (!is_page_aligned(va) || !is_page_aligned(len) || prot == VM_PROT_NONE || !va_fits(ctx, va, len))
+    if (!is_page_aligned(va) || !is_page_aligned(len) || !va_fits(ctx, va, len))
         return -EINVAL;
     vaddr_t end = va + len;
     for (vaddr_t v = va; v < end;) {
@@ -300,9 +311,10 @@ int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_pr
         }
         pte_t e = *w.entry;
         bool user = (e & DESC_AP_USER) != 0;
-        pte_t keep = e & (DESC_ADDR_MASK | DESC_VALID | DESC_TABLE | DESC_ATTRIDX_MASK | DESC_SH_INNER | DESC_AF |
+        pte_t keep = e & (DESC_ADDR_MASK | DESC_TABLE | DESC_ATTRIDX_MASK | DESC_SH_INNER | DESC_AF |
                           DESC_NG | DESC_AP_USER);
         pte_t f = keep;
+        f |= (prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC)) ? DESC_VALID : DESC_SW_NONE;
         if (!(prot & VM_PROT_WRITE))
             f |= DESC_AP_RO;
         if (prot & VM_PROT_EXEC)
@@ -331,11 +343,14 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
         *pa = (e & DESC_ADDR_MASK & ~(sz - 1)) | (va & (sz - 1));
     if (prot) {
         bool user = (e & DESC_AP_USER) != 0;
-        vm_prot_t p = VM_PROT_READ;
-        if (!(e & DESC_AP_RO))
-            p |= VM_PROT_WRITE;
-        if (user ? !(e & DESC_UXN) : !(e & DESC_PXN))
-            p |= VM_PROT_EXEC;
+        vm_prot_t p = VM_PROT_NONE;
+        if (e & DESC_VALID) {
+            p = VM_PROT_READ;
+            if (!(e & DESC_AP_RO))
+                p |= VM_PROT_WRITE;
+            if (user ? !(e & DESC_UXN) : !(e & DESC_PXN))
+                p |= VM_PROT_EXEC;
+        }
         if (user)
             p |= VM_PROT_USER;
         *prot = p;
@@ -397,15 +412,26 @@ void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t 
 /* TLB maintenance is broadcast to the inner-shareable domain by hardware: no IPI. */
 void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 {
+    arch_mmu_shootdown_cpus(ctx, va, len, CPUMASK_ALL);
+}
+
+void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, size_t len, cpumask_t cpus)
+{
     /* The DSB that completes the broadcast is the acknowledgement of every
-     * other CPU: the stats report it as one shootdown with n-1 acks so the
-     * contract's accounting holds without an IPI. */
-    unsigned others = (unsigned)__builtin_popcountll(cpu_online_mask()) - 1;
+     * target: the stats report one shootdown with as many acks as the
+     * mask names, the same accounting as the IPI implementation. */
+    unsigned others = (unsigned)__builtin_popcountll(cpus & cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id()));
     if (others > 0) {
         g_stats[arch_cpu_id()].initiated++;
         g_stats[arch_cpu_id()].acks_received += others;
     }
     arch_mmu_invalidate(ctx, va, len);
+}
+
+int arch_mmu_prepopulate(struct arch_mmu_context *ctx, vaddr_t va, size_t len)
+{
+    (void)ctx; (void)va; (void)len;
+    return 0;   /* the kernel half is TTBR1, shared by every space by construction */
 }
 
 void arch_mmu_shootdown_ipi_handler(void)

@@ -15,6 +15,7 @@
 #define ARCH_MMU_H
 
 #include <kernel/types.h>
+#include <kernel/percpu.h>
 
 typedef unsigned vm_prot_t;
 #define VM_PROT_NONE  0u
@@ -65,11 +66,15 @@ int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t le
 int arch_mmu_unmap(struct arch_mmu_context *ctx, vaddr_t va, size_t len);
 
 /* Change protection of mapped pages in [va, va+len); unmapped pages are
- * skipped. -EINVAL if the range splits a large page. */
+ * skipped. -EINVAL if the range splits a large page. VM_PROT_NONE keeps
+ * the frame but makes the entry invalid to the hardware (a software
+ * "none" bit marks it, docs/kernel/memory/design.md §6.2); a later
+ * protect to any permission makes it valid again. */
 int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_prot_t prot);
 
-/* Look up one virtual address. Returns false if not mapped. Output
- * pointers may be NULL. page_size is 4K/2M/1G of the leaf. */
+/* Look up one virtual address. Returns false if not mapped. A PROT_NONE
+ * page is mapped: true with *prot == VM_PROT_NONE (plus VM_PROT_USER).
+ * Output pointers may be NULL. page_size is 4K/2M/1G of the leaf. */
 bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
                     vm_prot_t *prot, vm_cache_t *cache, size_t *page_size);
 
@@ -86,6 +91,19 @@ void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t 
  * waiting for (the VMM releases its lock first). Panics if a CPU does
  * not answer within a generous bound. */
 void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len);
+
+/* The same for the CPUs in `cpus` only (the calling CPU is always
+ * included; CPUs not online are ignored). The VMM passes the set of CPUs
+ * whose active root is `ctx` (docs/kernel/memory/design.md §6.4). */
+void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, size_t len, cpumask_t cpus);
+
+/* Create the intermediate tables below the top level for every top-level
+ * slot [va, va+len) touches, without mapping anything, so that later maps
+ * in the range never add a top-level entry. Used by vmm_init on the
+ * kernel arena before the first user space copies the kernel half
+ * (x86-64); a no-op where the kernel half is shared by construction
+ * (AArch64 TTBR1). Returns 0 or -ENOMEM. */
+int arch_mmu_prepopulate(struct arch_mmu_context *ctx, vaddr_t va, size_t len);
 
 struct arch_mmu_shootdown_stats {
     uint64_t initiated;       /* shootdowns started on this CPU */

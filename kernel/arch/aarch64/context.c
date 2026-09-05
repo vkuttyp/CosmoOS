@@ -21,8 +21,11 @@ void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
     this_cpu()->kernel_stack_top = kstack;
     struct vm_space *space = next->proc ? next->proc->space : &kernel_space;
     if ((READ_SYSREG(ttbr0_el1) & DESC_ADDR_MASK) != (space->mmu.root & DESC_ADDR_MASK) ||
-        (READ_SYSREG(ttbr1_el1) & DESC_ADDR_MASK) != (kernel_space.mmu.root & DESC_ADDR_MASK))
-        arch_mmu_activate(&space->mmu);
+        (READ_SYSREG(ttbr1_el1) & DESC_ADDR_MASK) != (kernel_space.mmu.root & DESC_ADDR_MASK)) {
+        struct percpu *pc = this_cpu();
+        vm_space_switch(pc->cur_space, space);   /* maintains active_cpus around the TTBR0 write */
+        pc->cur_space = space;
+    }
     if (next->proc)
         WRITE_SYSREG(tpidr_el0, next->tls_base);
 }
