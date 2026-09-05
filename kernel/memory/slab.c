@@ -9,6 +9,7 @@
  * untouched (no freelist pointers inside freed memory).
  */
 
+#include <kernel/faultinject.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
@@ -198,6 +199,8 @@ void kmem_cache_destroy(struct kmem_cache *cache)
 
 void *kmem_cache_alloc(struct kmem_cache *cache, unsigned flags)
 {
+    if (faultinject_should_fail(FI_KMALLOC))
+        return NULL;   /* debug builds: an injected allocation failure (docs/verification/) */
     arch_irq_state_t s = spin_lock_irqsave(&cache->lock);
 
     struct slab *slab;

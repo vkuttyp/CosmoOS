@@ -15,6 +15,7 @@
 #include <kernel/bootinfo.h>
 #include <kernel/cosmofs.h>
 #include <kernel/device.h>
+#include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
 #include <kernel/irq.h>
@@ -170,6 +171,7 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */
     int failed = (int)module_load_boot();
+    faultinject_init();   /* opt/cosmo/faultinject, if the boot asked for injected faults */
 #if CONFIG_SELFTEST
     failed += selftest_run_all();
 #else

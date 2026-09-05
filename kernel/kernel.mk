@@ -28,6 +28,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/quiescetest.c \
 	kernel/core/lockdep.c \
 	kernel/core/lockdeptest.c \
+	kernel/core/faultinject.c \
+	kernel/core/faulttest.c \
 	kernel/interrupt/interrupt.c \
 	kernel/interrupt/irq.c \
 	kernel/interrupt/ipi.c \
@@ -86,6 +88,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/dma.c \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
+	kernel/block/ramblk.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/fwcfg.c \
@@ -97,6 +100,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
+	kernel-services/filesystem/cosmofs/cosmofscrash.c \
 	kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c \
 	kernel-services/network/inet.c \

@@ -8,6 +8,7 @@
 
 #include <kernel/blk.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/hv.h>
 #include <arch/cpu.h>
 #include <kernel/handle.h>
@@ -940,6 +941,7 @@ static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "sysctl.names",
+    "debug.faultinject",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -968,6 +970,10 @@ static int sysctl_value(const char *name, char *out, size_t n)
     }
     if (strncmp(name, "hv.", 3) == 0)
         return hv_sysctl(name + 3, out, n);
+    if (strcmp(name, "debug.faultinject") == 0) {
+        int len = faultinject_sysctl(out, n);
+        return len < 0 ? -ENOENT : len;   /* -ENOENT in release builds: the knob does not exist */
+    }
     if (strcmp(name, "sysctl.names") == 0) {
         int len = 0;
         for (size_t i = 0; i < ARRAY_SIZE(sysctl_names); i++) {

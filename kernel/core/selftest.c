@@ -14,6 +14,7 @@
 #include <kernel/kernel.h>
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
+#include <kernel/timer.h>
 #include <kernel/printf.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -311,6 +312,8 @@ static const struct selftest tests[] = {
     { "pci",             selftest_pci },
     { "dma",             selftest_dma },
     { "blk-lifetime",    selftest_blk_lifetime },
+    { "fault-kmalloc",   selftest_fault_kmalloc },
+    { "fault-blk",       selftest_fault_blk },
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },
@@ -322,6 +325,7 @@ static const struct selftest tests[] = {
     { "cosmofs-format",  selftest_cosmofs_format },
     { "cosmofs-ops",     selftest_cosmofs_ops },
     { "cosmofs-crash",   selftest_cosmofs_crash },
+    { "cosmofs-replay",  selftest_cosmofs_replay },
     { "net-mbuf",        selftest_net_mbuf },
     { "net-cksum",       selftest_net_cksum },
     { "net-arp",         selftest_net_arp },
@@ -350,6 +354,7 @@ static const struct selftest tests[] = {
     { "hv-guest-fpu",    selftest_hv_guest_fpu },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
+    { "syscall-fuzz",    selftest_syscall_fuzz },
 };
 
 int selftest_run_all(void)
@@ -360,14 +365,26 @@ int selftest_run_all(void)
      * bare harness timeout. */
     sched_watchdog_arm(8ull * 1000 * 1000 * 1000);
 
+    uint64_t total_ns = 0, slowest_ns = 0;
+    const char *slowest = "-";
     for (size_t i = 0; i < ARRAY_SIZE(tests); i++) {
         const char *reason = "";
         sched_watchdog_kick();
+        uint64_t t0 = clock_now_ns();
         bool ok = tests[i].fn(&reason);
+        uint64_t dt = clock_now_ns() - t0;
+        total_ns += dt;
+        if (dt > slowest_ns) {
+            slowest_ns = dt;
+            slowest = tests[i].name;
+        }
+        /* The duration is on every line so the boot harness can rank the
+         * tests and fail one that nears the watchdog (docs/verification/). */
         if (ok) {
-            kprintf("SELFTEST: %-16s ... ok\n", tests[i].name);
+            kprintf("SELFTEST: %-16s ... ok (%llu ms)\n", tests[i].name, (unsigned long long)(dt / 1000000));
         } else {
-            kprintf("SELFTEST: %-16s ... FAIL: %s\n", tests[i].name, reason);
+            kprintf("SELFTEST: %-16s ... FAIL: %s (%llu ms)\n", tests[i].name, reason,
+                    (unsigned long long)(dt / 1000000));
             failed++;
         }
     }
@@ -376,6 +393,9 @@ int selftest_run_all(void)
 
     /* The lock order the whole run recorded, for docs/kernel/lockdep/testing.md. */
     lockdep_dump_graph();
+
+    kprintf("SELFTEST: timing total=%llu ms slowest=%s (%llu ms)\n", (unsigned long long)(total_ns / 1000000), slowest,
+            (unsigned long long)(slowest_ns / 1000000));
 
     if (failed == 0)
         kprintf("SELFTEST: PASS (%zu tests)\n", ARRAY_SIZE(tests));

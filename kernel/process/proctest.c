@@ -225,6 +225,21 @@ bool selftest_process_selftest(const char **reason)
     return true;
 }
 
+/* The guest syscall fuzzer (docs/verification/design.md): 20 000 random
+ * system calls from an unprivileged init with a fixed seed; the process
+ * must survive and report, and so must the kernel. */
+bool selftest_syscall_fuzz(const char **reason)
+{
+    static const char *const argv[] = { "init", "--syscall-fuzz", "20000", "20260905", NULL };
+    int status;
+    if (!run_module(argv, &status, reason))
+        return false;
+    if (status == -1)
+        return true;
+    CHECK(status == 0);
+    return true;
+}
+
 bool selftest_process_fault(const char **reason)
 {
     static const char *const argv[] = { "init", "--crash", NULL };

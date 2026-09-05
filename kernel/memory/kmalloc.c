@@ -7,6 +7,7 @@
  * two paths apart from the page descriptor alone.
  */
 
+#include <kernel/faultinject.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
@@ -72,8 +73,10 @@ void *kmalloc(size_t size, unsigned flags)
         return NULL;
 
     if (size <= KMALLOC_MAX_SLAB)
-        return kmem_cache_alloc(class_for(size), flags);
+        return kmem_cache_alloc(class_for(size), flags);   /* the injection point is in the cache */
 
+    if (faultinject_should_fail(FI_KMALLOC))
+        return NULL;   /* debug builds: an injected allocation failure (docs/verification/) */
     unsigned order = order_for(size);
     struct page *page = pmm_alloc_pages(order, (flags & KMEM_ZERO) ? PMM_FLAGS_ZERO : 0);
     if (page == NULL)
