@@ -12,7 +12,7 @@ wins and the document is wrong.
 | Path | Content |
 |---|---|
 | `development.md` | Setting up a development host, building, running, testing, CI |
-| `audit/` | Whole-tree architecture audits; `2026-09-post-roadmap-audit.md` is the post-Phase-13 correctness, security, scalability and roadmap audit (Prompt #2) |
+| `audit/` | Whole-tree architecture audits; `2026-09-post-roadmap-audit.md` is the post-Phase-13 correctness, security, scalability and roadmap audit (Prompt #2); `2026-09-lifetime-quiesce-report.md` is the Prompt #3 final report (critical fix pass, the lifetime and quiescence subsystem, ordering, tests, performance, risks, debt, next subsystem) |
 | `first-task.md` | Constitution section 72 deliverables for the section 70 first engineering task |
 | `build/` | Build system subsystem documentation |
 | `boot/` | Boot protocol and UEFI loader subsystem documentation |
