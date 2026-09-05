@@ -102,7 +102,13 @@ lock were already on the stack the handler's acquisitions would record
 phantom edges from it (found in review of PR #18; test
 `lockdep-contention`). Edges therefore mean "attempted while held", which
 is the relation the order check wants whether or not the attempt has yet
-completed.
+completed. The transitions themselves are atomic with respect to
+interrupts: with the checker on, `spin_lock` wins the lock and pushes it,
+and `spin_unlock` pops it and releases it, with interrupts masked, so a
+handler never runs between an ownership change and the stack that records
+it (it would otherwise see an owned lock as not held and miss a real
+dependency; the second review finding on PR #18). Release builds compile
+the masking out with the checker.
 
 Edges are recorded and checked under the checker's raw spinlock, taken with
 interrupts disabled, so the graph is consistent; the lock is not itself

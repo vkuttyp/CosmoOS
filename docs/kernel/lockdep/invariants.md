@@ -87,7 +87,9 @@ classes. Check: host `test_lockdep` (`classes`); the tree's names are
 literals (review: `grep spinlock_init\|mutex_init\|SPINLOCK_INIT`).
 
 **L11. Held stacks are per CPU for spinlocks and per thread for mutexes,
-and a lock is on a stack only while it is owned.** The run-queue lock
+and a lock is on a stack exactly while it is owned.** Ownership and the
+push, the pop and the release, happen with interrupts masked (debug
+builds), so no handler observes one without the other. The run-queue lock
 handed across a context switch and interrupt-context acquisitions are
 therefore tracked correctly without special cases, and a lock still being
 waited for (a contended plain `spin_lock` with interrupts enabled, during
