@@ -11,6 +11,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
+#include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/storage.h>
 #include <kernel/string.h>
@@ -134,6 +135,7 @@ bool selftest_cosmofs_ops(const char **reason)
         return true;
     }
     CHECK(vfs_mount("/mnt", "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of("/mnt"), false);   /* the generation arithmetic below is exact */
     struct cosmofs_stats st0, st;
     CHECK(cosmofs_stats(mount_of("/mnt"), &st0) == 0);
 
@@ -159,9 +161,11 @@ bool selftest_cosmofs_ops(const char **reason)
     CHECK(vfs_open(NULL, "/mnt/big.bin", COSMO_O_RDWR, 0, &f) == 0);
     memset(buf + 20 * 4096 + 10, 0xee, 5000);
     CHECK(file_pwrite(f, buf + 20 * 4096 + 10, 5000, 20 * 4096 + 10) == 5000);
-    CHECK(file_sync(f) == 0);
+    CHECK(file_sync(f) == 0);   /* since milestone 7 this commits: one generation */
     file_put(f);
     CHECK(read_matches("/mnt/big.bin", buf, big));
+    CHECK(cosmofs_stats(mount_of("/mnt"), &st) == 0 && st.generation == st0.generation + 1);
+    st0 = st;
 
     /* Rename, replace, unlink, rmdir. */
     CHECK(write_file("/mnt/dir/other.txt", "other", 5));
@@ -221,6 +225,7 @@ bool selftest_cosmofs_crash(const char **reason)
     /* Mutate, then "crash" before the root is written: the previous
      * committed state must be intact and the free space unchanged. */
     CHECK(vfs_mount("/mnt", "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of("/mnt"), false);   /* nothing may commit before the discard */
     struct cosmofs_stats before, after;
     CHECK(cosmofs_stats(mount_of("/mnt"), &before) == 0);
     CHECK(write_file("/mnt/lost.txt", "this never lands", 16));
@@ -274,3 +279,359 @@ bool selftest_cosmofs_crash(const char **reason)
     blkdev_put(bd);
     return true;
 }
+
+/* --- the transaction engine (audit milestone 7), on RAM devices --------------- */
+
+#include <kernel/ramblk.h>
+#include <kernel/timer.h>
+#include <kernel/wait.h>
+
+#include "cosmofs_format.h"
+
+#if CONFIG_DEBUG
+
+#define ENG "/mnt/eng"
+
+static bool engine_mount(struct blkdev **bdp, uint64_t nblocks, const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);   /* a failed earlier test may have left one behind */
+    struct blkdev *bd = ramblk_create(nblocks);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    *bdp = bd;
+    return true;
+}
+
+static bool engine_unmount(struct blkdev *bd, const char **reason)
+{
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    return true;
+}
+
+/* Holes: a write far into a file allocates only its own block. */
+bool selftest_cosmofs_holes(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    struct cosmofs_stats st0, st1;
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/sparse", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    static const char tail[] = "tail";
+    CHECK(file_pwrite(f, tail, 4, 200ull << 20) == 4);   /* 200 MiB in, on a 4 MiB device */
+    CHECK(file_sync(f) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(st0.free_blocks - st1.free_blocks <= 12);   /* one data block and a few metadata blocks, no zero fill */
+    uint8_t buf[16];
+    CHECK(file_pread(f, buf, 8, 100ull << 20) == 8);
+    for (int i = 0; i < 8; i++)
+        CHECK(buf[i] == 0);   /* a hole reads as zeros */
+    CHECK(file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0);
+    /* A block in the middle of the hole, then the first block: the runs
+     * stay sorted and every read agrees. */
+    CHECK(file_pwrite(f, "mid", 3, 50ull << 20) == 3);
+    CHECK(file_pwrite(f, "head", 4, 0) == 4);
+    CHECK(file_sync(f) == 0);
+    CHECK(file_pread(f, buf, 4, 0) == 4 && memcmp(buf, "head", 4) == 0);
+    CHECK(file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, "mid", 3) == 0);
+    CHECK(file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0);
+    CHECK(file_pread(f, buf, 4, 1ull << 20) == 4 && buf[0] == 0 && buf[3] == 0);
+    file_put(f);
+    /* Remount: the holes and the data survive the commit. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/sparse", "head", 4) == false);   /* the file is 200 MiB + 4, not 4 bytes */
+    CHECK(vfs_open(NULL, ENG "/sparse", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, "mid", 3) == 0);
+    struct cosmo_stat s;
+    file_stat(f, &s);
+    CHECK(s.size == (200ull << 20) + 4);
+    file_put(f);
+    /* Truncate into the hole keeps the head, frees the tail. */
+    CHECK(vfs_open(NULL, ENG "/sparse", COSMO_O_WRONLY | COSMO_O_TRUNC, 0, &f) == 0);
+    file_put(f);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(st1.free_blocks + 6 >= st0.free_blocks);   /* the checksum tree of an empty file is gone too */
+    kinfo("selftest: cosmofs-holes: a 200 MiB sparse file cost %llu blocks", (unsigned long long)(st0.free_blocks - st1.free_blocks));
+    return engine_unmount(bd, reason);
+}
+
+/* Find the pool block holding a 4 KiB pattern (the test's way to corrupt data). */
+static int64_t find_block(struct blkdev *bd, const uint8_t *pattern)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return -1;
+    uint8_t *blk = kmalloc(4096, 0);
+    int64_t found = -1;
+    for (uint64_t i = 2; blk && i < p->nblocks && found < 0; i++)
+        if (pool_read(p, i, blk) == 0 && memcmp(blk, pattern, 4096) == 0)
+            found = (int64_t)i;
+    kfree(blk);
+    pool_close(p);
+    return found;
+}
+
+static bool corrupt_block(struct blkdev *bd, uint64_t blkno, unsigned off)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *blk = kmalloc(4096, 0);
+    bool ok = blk && pool_read(p, blkno, blk) == 0;
+    if (ok) {
+        blk[off] ^= 0x5a;
+        ok = pool_write(p, blkno, blk) == 0 && pool_flush(p) == 0;
+    }
+    kfree(blk);
+    pool_close(p);
+    return ok;
+}
+
+/* Checksums: a flipped byte in a data block or a directory block is -EIO. */
+bool selftest_cosmofs_csum(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    uint8_t *pat = kmalloc(4096, 0);
+    CHECK(pat != NULL);
+    for (unsigned i = 0; i < 4096; i++)
+        pat[i] = (uint8_t)(i * 13 + 5);
+    CHECK(write_file(ENG "/data", pat, 4096));
+    CHECK(write_file(ENG "/other", "fine", 4));
+    CHECK(vfs_mkdir(NULL, ENG "/d", 0755) == 0);
+    CHECK(write_file(ENG "/d/x", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);   /* drop the page cache so reads go to the device */
+    int64_t data_blk = find_block(bd, pat);
+    CHECK(data_blk > 0);
+    CHECK(corrupt_block(bd, (uint64_t)data_blk, 1000));
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/data", COSMO_O_RDONLY, 0, &f) == 0);
+    uint8_t buf[64];
+    CHECK(file_pread(f, buf, 64, 0) == -EIO);   /* refused, not returned wrong */
+    file_put(f);
+    CHECK(read_matches(ENG "/other", "fine", 4));   /* the rest is untouched */
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1);
+    /* Repair by rewriting: a new block, a new checksum. */
+    CHECK(write_file(ENG "/data", pat, 4096));
+    CHECK(read_matches(ENG "/data", pat, 4096));
+    /* A directory block: /d holds one entry, "x"; flip a byte in it and
+     * the lookup that reads the block is refused. */
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *blk = kmalloc(4096, 0);
+    CHECK(blk != NULL);
+    int64_t dir_blk = -1;
+    for (uint64_t i = 2; i < p->nblocks && dir_blk < 0; i++) {
+        if (pool_read(p, i, blk) != 0)
+            continue;
+        const struct cfs_dirent *d = (const struct cfs_dirent *)blk;
+        if (d[0].ino != 0 && d[0].ino < 1000 && d[0].namelen == 1 && d[0].name[0] == 'x' && d[1].ino == 0)
+            dir_blk = (int64_t)i;
+    }
+    kfree(blk);
+    pool_close(p);
+    CHECK(dir_blk > 0);
+    CHECK(corrupt_block(bd, (uint64_t)dir_blk, 40));   /* inside the entry's name bytes */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmo_stat cs;
+    CHECK(vfs_stat(NULL, ENG "/d/x", &cs) == -EIO);
+    CHECK(vfs_stat(NULL, ENG "/other", &cs) == 0);   /* the root's block is intact */
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1);   /* this mount's count */
+    kfree(pat);
+    kinfo("selftest: cosmofs-csum: a corrupted data block reads -EIO and a rewrite repairs it (%llu failures counted)",
+          (unsigned long long)st.csum_failures);
+    return engine_unmount(bd, reason);
+}
+
+/* fsync is durable: a file synced before a "crash" survives, one not synced does not. */
+bool selftest_cosmofs_fsync(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct cosmofs_stats st0, st1;
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/durable", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    CHECK(file_write(f, "kept", 4) == 4);
+    CHECK(file_sync(f) == 0);   /* commits the transaction */
+    file_put(f);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(st1.generation == st0.generation + 1 && st1.commits == st0.commits + 1);
+    CHECK(write_file(ENG "/lost", "gone", 4));   /* not synced */
+    cosmofs_test_discard_on_unmount(mount_of(ENG), true);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/durable", "kept", 4));
+    struct cosmo_stat s;
+    CHECK(vfs_stat(NULL, ENG "/lost", &s) == -ENOENT);
+    kinfo("selftest: cosmofs-fsync: the synced file survived the discarded transaction, the unsynced one did not");
+    return engine_unmount(bd, reason);
+}
+
+/* The metadata reserve: a full disk can still delete and commit. */
+bool selftest_cosmofs_reserve(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 256, reason))
+        return false;
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.reserve_blocks == 32);
+    uint8_t *page = kmalloc(4096, 0);
+    CHECK(page != NULL);
+    memset(page, 0x42, 4096);
+    /* Fill until data allocation is refused (pages are cached at write
+     * and allocated at the sync that writes them back); the reserve
+     * stays free. */
+    unsigned files = 0, pages = 0;
+    bool enospc = false;
+    while (files < 64 && !enospc) {
+        char path[32];
+        ksnprintf(path, sizeof(path), ENG "/f%u", files);
+        struct file *f;
+        int orc = vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f);
+        if (orc == -ENOSPC) {
+            enospc = true;
+            break;
+        }
+        CHECK(orc == 0);
+        files++;
+        for (unsigned i = 0; i < 16; i++) {
+            int64_t rc = file_write(f, page, 4096);
+            if (rc == 4096) {
+                pages++;
+                continue;
+            }
+            CHECK(rc == -ENOSPC);
+            enospc = true;
+            break;
+        }
+        int src = file_sync(f);
+        file_put(f);
+        if (src == -ENOSPC)
+            enospc = true;
+        else
+            CHECK(src == 0);
+    }
+    CHECK(enospc);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.free_blocks <= st.reserve_blocks + 2 && st.free_blocks > 0);   /* stopped at the reserve */
+    uint64_t full_free = st.free_blocks;
+    /* Deletion needs metadata blocks: the reserve provides them. */
+    CHECK(vfs_unlink(NULL, ENG "/f0") == 0);
+    CHECK(vfs_unlink(NULL, ENG "/f1") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.free_blocks > full_free + 20);
+    CHECK(write_file(ENG "/again", page, 4096));   /* space is back */
+    kfree(page);
+    kinfo("selftest: cosmofs-reserve: %u files, %u pages until -ENOSPC with %llu blocks kept for metadata; unlink and commit freed %llu",
+          files, pages, (unsigned long long)st.reserve_blocks, (unsigned long long)(st.free_blocks - full_free));
+    return engine_unmount(bd, reason);
+}
+
+/* The newer root's tree is unreadable: mount falls back to the older slot. */
+bool selftest_cosmofs_fallback(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    CHECK(write_file(ENG "/old", "old", 3));
+    CHECK(vfs_sync() == 0);   /* generation 2 */
+    CHECK(write_file(ENG "/new", "new", 3));
+    CHECK(vfs_sync() == 0);   /* generation 3 */
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 3);
+    /* Unmount without the bitmap-only commit that reclaims the pending
+     * frees, so the slots hold exactly generations 2 and 3. */
+    cosmofs_test_discard_on_unmount(mount_of(ENG), true);
+    CHECK(vfs_umount(ENG) == 0);
+    /* Corrupt the newer root's inode map root block: the tree does not load. */
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *blk = kmalloc(4096, 0);
+    CHECK(blk != NULL);
+    uint64_t imap_root = 0, newer_gen = 0;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        CHECK(pool_read(p, slot, blk) == 0);
+        const struct cfs_super *sb = (const struct cfs_super *)blk;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > newer_gen) {
+            newer_gen = sb->generation;
+            imap_root = sb->imap_root;
+        }
+    }
+    kfree(blk);
+    pool_close(p);
+    CHECK(newer_gen == 3 && imap_root >= 2);
+    CHECK(corrupt_block(bd, imap_root, 100));
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);   /* falls back with a warning */
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 2);
+    CHECK(read_matches(ENG "/old", "old", 3));
+    struct cosmo_stat s;
+    CHECK(vfs_stat(NULL, ENG "/new", &s) == -ENOENT);   /* generation 3's work is gone with its root */
+    /* The next commit writes over the broken slot and the pair is healthy. */
+    CHECK(write_file(ENG "/after", "after", 5));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation >= 3);   /* 3, plus the unmount's bitmap commit */
+    CHECK(read_matches(ENG "/after", "after", 5) && read_matches(ENG "/old", "old", 3));
+    kinfo("selftest: cosmofs-fallback: an unreadable generation-3 tree fell back to generation 2 and was replaced");
+    return engine_unmount(bd, reason);
+}
+
+/* The writeback thread commits on its own once the interval has passed. */
+bool selftest_cosmofs_writeback(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct mount *mnt = mount_of(ENG);
+    cosmofs_test_set_writeback(mnt, true);
+    cosmofs_test_set_writeback_interval(mnt, 50);
+    struct cosmofs_stats st0, st1;
+    CHECK(cosmofs_stats(mnt, &st0) == 0);
+    CHECK(write_file(ENG "/auto", "auto", 4));
+    uint64_t deadline = clock_now_ns() + 2000000000ULL;
+    do {
+        thread_sleep_ms(20);
+        CHECK(cosmofs_stats(mnt, &st1) == 0);
+    } while (st1.generation == st0.generation && clock_now_ns() < deadline);
+    CHECK(st1.generation == st0.generation + 1 && st1.wb_commits == st0.wb_commits + 1);
+    /* Nothing more dirty: no further commits happen on their own. */
+    thread_sleep_ms(200);
+    struct cosmofs_stats st2;
+    CHECK(cosmofs_stats(mnt, &st2) == 0 && st2.generation == st1.generation);
+    /* The data is on disk without anyone calling sync. */
+    cosmofs_test_discard_on_unmount(mnt, true);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/auto", "auto", 4));
+    kinfo("selftest: cosmofs-writeback: the thread committed generation %llu on its own", (unsigned long long)st1.generation);
+    return engine_unmount(bd, reason);
+}
+
+#else
+bool selftest_cosmofs_holes(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_csum(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_fsync(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_reserve(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_fallback(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_writeback(const char **reason) { (void)reason; return true; }
+#endif
