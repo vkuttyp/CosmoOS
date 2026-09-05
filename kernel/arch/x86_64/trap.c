@@ -9,6 +9,7 @@
  * has to know about the controller.
  */
 
+#include <kernel/extable.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
@@ -283,6 +284,15 @@ void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame)
 void arch_debug_break(void)
 {
     __asm__ volatile("int3" ::: "memory");
+}
+
+bool arch_trap_fixup(struct arch_trap_frame *frame)
+{
+    uintptr_t fixup = extable_fixup((uintptr_t)frame->rip);
+    if (fixup == 0)
+        return false;
+    frame->rip = fixup;
+    return true;
 }
 
 uintptr_t arch_trap_fault_address(const struct arch_trap_frame *frame)

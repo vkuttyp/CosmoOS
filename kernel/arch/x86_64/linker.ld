@@ -40,6 +40,14 @@ SECTIONS
     } :rodata
     /* Exported symbol table for modules (EXPORT_SYMBOL). KEEP: nothing
      * references the records, --gc-sections would drop them. */
+    /* Exception fixup table (kernel/extable.h). KEEP: only the fault
+     * handler's runtime scan references the entries. */
+    . = ALIGN(4);
+    __ex_table_start = .;
+    .ex_table : {
+        KEEP(*(.ex_table))
+    } :rodata
+    __ex_table_end = .;
     . = ALIGN(16);
     __ksymtab_start = .;
     .ksymtab : {

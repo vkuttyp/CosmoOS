@@ -8,6 +8,7 @@
  *   1056..1311   dynamic software vectors routed to INTIDs by gic.c
  */
 
+#include <kernel/extable.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
@@ -214,6 +215,15 @@ void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame)
 void arch_debug_break(void)
 {
     __asm__ volatile("brk #0" ::: "memory");
+}
+
+bool arch_trap_fixup(struct arch_trap_frame *frame)
+{
+    uintptr_t fixup = extable_fixup((uintptr_t)frame->elr);
+    if (fixup == 0)
+        return false;
+    frame->elr = fixup;
+    return true;
 }
 
 uintptr_t arch_trap_fault_address(const struct arch_trap_frame *frame)

@@ -1,5 +1,13 @@
 /*
- * uaccess.c - Validated kernel access to user memory.
+ * uaccess.c - Kernel access to user memory (docs/kernel/memory/design.md §6.1).
+ *
+ * The range is checked against the user window; the copy itself is the
+ * architecture primitive whose faulting instructions carry exception
+ * fixups. A page that is unmapped, PROT_NONE, or lacks the permission,
+ * or a demand-zero fault that finds no memory, ends the copy with
+ * -EFAULT instead of a kernel fault. There is no walk of the region list
+ * and therefore no check-then-copy window: a concurrent munmap makes
+ * the copy fail, never the kernel.
  */
 
 #include <kernel/errno.h>
@@ -23,12 +31,13 @@ bool user_range_ok(uint64_t addr, size_t len)
     return addr + len <= USER_HI;
 }
 
-bool user_range_mapped(uint64_t addr, size_t len, vm_prot_t prot)
+/* One access window around the raw copy; the result is bytes not copied. */
+static size_t raw_copy(void *dst, const void *src, size_t len)
 {
-    struct process *p = process_current();
-    if (p == NULL)
-        return false;
-    return vm_user_range_mapped(p->space, addr, len, prot);
+    arch_user_access_begin();
+    size_t left = arch_copy_user_raw(dst, src, len);
+    arch_user_access_end();
+    return left;
 }
 
 int copy_from_user(void *dst, uint64_t user_src, size_t len)
@@ -36,13 +45,9 @@ int copy_from_user(void *dst, uint64_t user_src, size_t len)
     might_sleep();   /* a demand fault allocates: never under a spinlock */
     if (len == 0)
         return 0;
-    if (!user_range_ok(user_src, len) || !user_range_mapped(user_src, len, VM_PROT_READ))
+    if (!user_range_ok(user_src, len))
         return -EFAULT;
-
-    arch_user_access_begin();
-    memcpy(dst, (const void *)(uintptr_t)user_src, len);
-    arch_user_access_end();
-    return 0;
+    return raw_copy(dst, (const void *)(uintptr_t)user_src, len) ? -EFAULT : 0;
 }
 
 int copy_to_user(uint64_t user_dst, const void *src, size_t len)
@@ -50,13 +55,9 @@ int copy_to_user(uint64_t user_dst, const void *src, size_t len)
     might_sleep();   /* a demand fault allocates: never under a spinlock */
     if (len == 0)
         return 0;
-    if (!user_range_ok(user_dst, len) || !user_range_mapped(user_dst, len, VM_PROT_WRITE))
+    if (!user_range_ok(user_dst, len))
         return -EFAULT;
-
-    arch_user_access_begin();
-    memcpy((void *)(uintptr_t)user_dst, src, len);
-    arch_user_access_end();
-    return 0;
+    return raw_copy((void *)(uintptr_t)user_dst, src, len) ? -EFAULT : 0;
 }
 
 int strncpy_from_user(char *dst, uint64_t user_src, size_t max)
@@ -74,20 +75,20 @@ int strncpy_from_user(char *dst, uint64_t user_src, size_t max)
         size_t want = max - 1 - done;
         if (want > in_page)
             want = in_page;
-        if (!user_range_ok(addr, want) || !user_range_mapped(addr, want, VM_PROT_READ)) {
+        if (!user_range_ok(addr, want)) {
             dst[done] = '\0';
             return -EFAULT;
         }
-        arch_user_access_begin();
-        for (size_t i = 0; i < want; i++) {
-            char c = ((const char *)(uintptr_t)addr)[i];
-            dst[done + i] = c;
-            if (c == '\0') {
-                arch_user_access_end();
+        size_t left = raw_copy(dst + done, (const void *)(uintptr_t)addr, want);
+        size_t got = want - left;
+        for (size_t i = 0; i < got; i++) {
+            if (dst[done + i] == '\0')
                 return (int)(done + i);
-            }
         }
-        arch_user_access_end();
+        if (left) {
+            dst[done] = '\0';   /* the string ran into an inaccessible page */
+            return -EFAULT;
+        }
         done += want;
     }
     dst[done] = '\0';

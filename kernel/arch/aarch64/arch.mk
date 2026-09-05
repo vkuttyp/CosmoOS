@@ -5,6 +5,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/aarch64/entry.S \
 	kernel/arch/aarch64/vectors.S \
 	kernel/arch/aarch64/switch.S \
+	kernel/arch/aarch64/uaccess.S \
 	kernel/arch/aarch64/trampoline.S \
 	kernel/arch/aarch64/start.c \
 	kernel/arch/aarch64/cpu.c \
