@@ -236,6 +236,28 @@ int main(int argc, char **argv)
     sc1(LX_close, 40);
     sc1(LX_close, p[0]);
 
+    /* --- non-blocking pipes: pipe2(O_NONBLOCK), fcntl(F_SETFL) --- */
+    CHECKV(sc2(LX_pipe2, p, LX_O_NONBLOCK) == 0, 0);
+    CHECKV(sc3(LX_read, p[0], buf, 8) == -11, 0);                              /* EAGAIN: empty, writer alive */
+    CHECKV(sc3(LX_fcntl, p[0], LX_F_GETFL, 0) == (LX_O_RDONLY | LX_O_NONBLOCK), 0);
+    CHECKV(sc3(LX_fcntl, p[0], LX_F_SETFL, 0) == 0, 0);                        /* clear it */
+    CHECKV(sc3(LX_fcntl, p[0], LX_F_GETFL, 0) == LX_O_RDONLY, 0);
+    CHECKV(sc3(LX_fcntl, p[1], LX_F_SETFL, LX_O_NONBLOCK) == 0, 0);
+    static char page[4096];
+    long filled = 0;
+    for (int i = 0; i < 64; i++) {
+        long wn = sc3(LX_write, p[1], page, sizeof(page));
+        if (wn < 0) {
+            CHECKV(wn == -11, wn);   /* EAGAIN once the ring is full */
+            break;
+        }
+        filled += wn;
+    }
+    CHECKV(filled == 16384, filled);                                           /* the ring, then EAGAIN */
+    CHECKV(sc3(LX_read, p[0], buf, 8) == 8, 0);
+    sc1(LX_close, p[0]);
+    sc1(LX_close, p[1]);
+
     /* --- signals (stored only), wait, kill --- */
     struct lx_sigaction act = { .handler = 0x400000, .flags = 0x04000000 }, old;
     CHECKV(sc4(LX_rt_sigaction, 2, &act, 0, 8) == 0, 0);
@@ -314,6 +336,43 @@ int main(int argc, char **argv)
     CHECKV(sc6(LX_setsockopt, s, LX_SOL_SOCKET, 2, &one, 4, 0) == 0, 0);   /* SO_REUSEADDR: accepted */
     CHECKV(sc1(LX_close, s) == 0, 0);
     CHECKV(sc3(LX_socket, 1, LX_SOCK_STREAM, 0) == -97, 0);   /* AF_UNIX: EAFNOSUPPORT */
+
+    /* --- non-blocking sockets: SOCK_NONBLOCK, accept4, EINPROGRESS --- */
+    long nb = sc3(LX_socket, LX_AF_INET, LX_SOCK_DGRAM | LX_SOCK_NONBLOCK, 0);
+    CHECKV(nb >= 3, nb);
+    me.sin_port = (uint16_t)((40101 >> 8) | (40101 << 8));
+    CHECKV(sc3(LX_bind, nb, &me, sizeof(me)) == 0, 0);
+    CHECKV(sc6(LX_recvfrom, nb, buf, 16, 0, 0, 0) == -11, 0);                 /* EAGAIN */
+    CHECKV((sc3(LX_fcntl, nb, LX_F_GETFL, 0) & LX_O_NONBLOCK) != 0, 0);
+    CHECKV(sc1(LX_close, nb) == 0, 0);
+    long ls = sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM, 0);
+    me.sin_port = (uint16_t)((40102 >> 8) | (40102 << 8));
+    CHECKV(ls >= 3 && sc3(LX_bind, ls, &me, sizeof(me)) == 0 && sc2(LX_listen, ls, 2) == 0, 0);
+    CHECKV(sc3(LX_fcntl, ls, LX_F_SETFL, LX_O_NONBLOCK) == 0, 0);
+    CHECKV(sc4(LX_accept4, ls, 0, 0, LX_SOCK_NONBLOCK) == -11, 0);            /* EAGAIN: nobody yet */
+    long cs = sc3(LX_socket, LX_AF_INET, LX_SOCK_STREAM | LX_SOCK_NONBLOCK, 0);
+    long crc = sc3(LX_connect, cs, &me, sizeof(me));
+    CHECKV(crc == 0 || crc == -115, crc);                                      /* EINPROGRESS */
+    long as = -11;
+    for (int i = 0; i < 200 && as == -11; i++) {
+        as = sc4(LX_accept4, ls, 0, 0, LX_SOCK_NONBLOCK);
+        if (as == -11)
+            sc2(LX_nanosleep, &nap, 0);
+    }
+    CHECKV(as >= 3, as);
+    CHECKV(sc3(LX_connect, cs, &me, sizeof(me)) == -106, 0);                   /* EISCONN */
+    CHECKV(sc6(LX_recvfrom, as, buf, 16, 0, 0, 0) == -11, 0);                  /* the accepted end inherited NONBLOCK */
+    CHECKV(sc6(LX_sendto, cs, "hey", 3, 0, 0, 0) == 3, 0);
+    long got = -11;
+    for (int i = 0; i < 200 && got == -11; i++) {
+        got = sc6(LX_recvfrom, as, buf, 16, 0, 0, 0);
+        if (got == -11)
+            sc2(LX_nanosleep, &nap, 0);
+    }
+    CHECKV(got == 3 && memeq(buf, "hey", 3), got);
+    sc1(LX_close, as);
+    sc1(LX_close, cs);
+    sc1(LX_close, ls);
 
     /* --- unknown numbers --- */
     CHECKV(sc0(510) == -38, 0);

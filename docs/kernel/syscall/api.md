@@ -50,7 +50,7 @@ kernel stack.
 | 20 | `sync` | none | 0 | filesystem error |
 | 21 | `mount` | `source, target, fstype, flags` | 0 | `EPERM`, `ENODEV`, `EBUSY`, `EIO` |
 | 22 | `umount` | `const char *target, unsigned flags` (`COSMO_UMOUNT_FORCE`) | 0 | `EPERM`, `EINVAL`, `EBUSY`, the commit's error |
-| 23 | `socket` | `int family, int type, int proto` | handle (READ and WRITE) | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
+| 23 | `socket` | `int family, int type, int proto` (`type` may carry `COSMO_SOCK_NONBLOCK` 0x800) | handle (READ and WRITE) | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
 | 24 | `bind` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EPERM`, `EADDRINUSE`, `EADDRNOTAVAIL` |
 | 25 | `listen` | `int h, int backlog` | 0 | `EBADF`, `EOPNOTSUPP`, `EINVAL` |
 | 26 | `accept` | `int h, struct cosmo_sockaddr *peer, size_t *len` | handle (READ and WRITE) | `EBADF`, `EOPNOTSUPP`, `EINVAL`, `EFAULT`, `EMFILE` |
@@ -72,6 +72,8 @@ kernel stack.
 | 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
 | 56 | `getrlimit` | `unsigned resource, uint64_t *value` | 0 | `EINVAL`, `EFAULT` |
 | 57 | `setrlimit` | `unsigned resource, uint64_t value` | 0 | `EINVAL` (resource, `NOFILE` > 64), `EPERM` (raising without privilege) |
+| 58 | `ioready` | `int h` | `COSMO_IO_*` mask of what would not block now (`READABLE` 1, `WRITABLE` 2, `HANGUP` 4, `ERROR` 8); a file is always ready, a vCPU never | `EBADF` |
+| 59 | `setnonblock` | `int h, int on` | 0; the object (every handle to it) blocks no more: sockets return `EAGAIN`/`EINPROGRESS`/`EALREADY`, pipe ends `EAGAIN` | `EBADF`, `EOPNOTSUPP` (the object never blocks: console, file, VM) |
 | 43 | `vm_create` | `int vmm_h` (a handle to `/dev/vmm` open for writing) | a VM handle | `EBADF`, `EPERM`, `ENOTSUP`, `ENOSPC`, `ENOMEM`, `EMFILE` |
 | 44 | `vm_mem` | `int vm, uint64_t gpa, uint64_t len` | 0 (a zeroed guest memory region) | `EBADF`, `EINVAL`, `ENOSPC`, `ENOMEM` |
 | 45 | `vm_mem_rw` | `int vm, uint64_t gpa, void *buf, size_t len, int write` | bytes copied | `EBADF`, `EINVAL`, `EFAULT`, `ENOMEM` |
@@ -94,7 +96,8 @@ kinds and their errno values, are in
 object (`read` drains the guest's debug console, `fstat` is
 `COSMO_DT_CHR`), a vCPU handle only closes. Calls 50–55 are the
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
-`SYS_COUNT` is 58. A file opened with `open`
+58–59 the readiness and non-blocking calls (milestone 8;
+`docs/kernel/object/api.md`); `SYS_COUNT` is 60. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` or `accept` is
@@ -209,6 +212,8 @@ kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
 `EINVAL` 22, `EMFILE` 24, `ENOSYS` 38, and others; Phase 9 adds `ESRCH`
 3, `EINTR` 4, `E2BIG` 7, `ENOEXEC` 8, `ECHILD` 10, `EACCES` 13,
 `ENOTTY` 25, `ESPIPE` 29, `ERANGE` 34); `COSMO_EXIT_FAULT` 139;
+`COSMO_SOCK_NONBLOCK` 0x800, `COSMO_IO_READABLE/WRITABLE/HANGUP/ERROR`
+1/2/4/8, `COSMO_EALREADY` 114, `COSMO_EINPROGRESS` 115 (milestone 8);
 `COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags `COSMO_AT_NULL`
 0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9; `COSMO_DT_FIFO` 4,
 `COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*`,
@@ -244,7 +249,9 @@ page is populated.
 `cosmo_getcwd`, `cosmo_procinfo`, `cosmo_klog`, `cosmo_sysctl`, and since
 Phase 12 `cosmo_vm_create`, `cosmo_vm_mem`, `cosmo_vm_mem_read/write`,
 `cosmo_vcpu_create`, `cosmo_vcpu_get/set_regs`, `cosmo_vcpu_run`,
-`cosmo_vcpu_irq` (`cosmo/hv.h`), return the raw kernel result as `long`. The C library (`docs/libc/`) translates
+`cosmo_vcpu_irq` (`cosmo/hv.h`), since milestone 6 `cosmo_getrlimit`,
+`cosmo_setrlimit`, and since milestone 8 `cosmo_ioready`,
+`cosmo_setnonblock`, return the raw kernel result as `long`. The C library (`docs/libc/`) translates
 them into `errno` and the standard names; programs use the library, the
 raw wrappers are internal to it (and to `init --selftest`).
 

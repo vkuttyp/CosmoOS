@@ -348,6 +348,12 @@ static const struct selftest tests[] = {
     { "net-tcp-mss",     selftest_net_tcp_mss },
     { "net-netif-lifetime", selftest_net_netif_lifetime },
     { "net-accept-race", selftest_net_accept_race },
+    { "net-tcp-syncache", selftest_net_tcp_syncache },
+    { "net-tcp-rfc5961", selftest_net_tcp_rfc5961 },
+    { "net-tcp-reorder", selftest_net_tcp_reorder },
+    { "net-tcp-keepalive", selftest_net_tcp_keepalive },
+    { "net-icmp-limit",  selftest_net_icmp_limit },
+    { "net-nonblock",    selftest_net_nonblock },
     { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */

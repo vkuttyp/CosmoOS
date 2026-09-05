@@ -97,7 +97,7 @@ struct net_work {
     bool queued;
 };
 void net_work_init(struct net_work *w, net_work_fn fn, void *arg);
-void net_work_queue(struct net_work *w);      /* any context; idempotent while queued */
+bool net_work_queue(struct net_work *w);      /* any context; true if newly queued, false while already queued */
 
 /* Test hook for the loopback path: called for every packet before it
  * is queued; return false to drop it. */

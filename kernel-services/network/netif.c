@@ -393,15 +393,17 @@ void net_work_init(struct net_work *w, net_work_fn fn, void *arg)
     w->queued = false;
 }
 
-void net_work_queue(struct net_work *w)
+bool net_work_queue(struct net_work *w)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_work_lock);
-    if (!w->queued) {
+    bool fresh = !w->queued;
+    if (fresh) {
         w->queued = true;
         list_push_back(&g_work, &w->link);
     }
     spin_unlock_irqrestore(&g_work_lock, s);
     waitqueue_wake_one(&g_worker_wq);
+    return fresh;
 }
 
 static bool work_pending(void)

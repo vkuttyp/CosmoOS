@@ -22,6 +22,7 @@ struct pipe;
 struct pipe_end {
     struct kobject obj;
     struct pipe *pipe;
+    bool nonblock;                 /* this end's mode, shared by every handle to it */
 };
 
 struct pipe {
@@ -80,13 +81,20 @@ static void write_end_release(struct kobject *obj)
 
 static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
 {
-    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    struct pipe *p = e->pipe;
     if (len == 0)
         return 0;
-    int rc = wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0);
-    if (rc)
-        return rc;
+    if (!__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED)) {
+        int rc = wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0);
+        if (rc)
+            return rc;
+    }
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->used == 0 && p->writers > 0) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return -EAGAIN;   /* non-blocking and empty */
+    }
     unsigned n = p->used < len ? p->used : (unsigned)len;
     unsigned first = PIPE_SIZE - p->head;
     if (first > n)
@@ -105,18 +113,22 @@ static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
 
 static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
 {
-    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    struct pipe *p = e->pipe;
     if (p->readers == 0)
         return -EPIPE;
     if (len == 0)
         return 0;
+    bool nonblock = __atomic_load_n(&e->nonblock, __ATOMIC_RELAXED);
     size_t done = 0;
     while (done < len) {
         size_t left = len - done;
         unsigned need = left <= PIPE_BUF ? (unsigned)left : 1u;   /* small writes land whole */
-        int rc = wait_event_killable(&p->wr_wq, PIPE_SIZE - p->used >= need || p->readers == 0);
-        if (rc)
-            return done ? (int64_t)done : rc;
+        if (!nonblock) {
+            int rc = wait_event_killable(&p->wr_wq, PIPE_SIZE - p->used >= need || p->readers == 0);
+            if (rc)
+                return done ? (int64_t)done : rc;
+        }
         arch_irq_state_t s = spin_lock_irqsave(&p->lock);
         if (p->readers == 0) {
             spin_unlock_irqrestore(&p->lock, s);
@@ -125,6 +137,8 @@ static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
         unsigned space = PIPE_SIZE - p->used;
         if (space < need) {
             spin_unlock_irqrestore(&p->lock, s);
+            if (nonblock)
+                return done ? (int64_t)done : -EAGAIN;
             continue;   /* another writer got there first */
         }
         unsigned n = left < space ? (unsigned)left : space;
@@ -155,18 +169,57 @@ static int pipe_stat(struct kobject *obj, struct cosmo_stat *st)
     return 0;
 }
 
+static unsigned pipe_read_ready(struct kobject *obj)
+{
+    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
+    unsigned r = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->used > 0)
+        r |= COSMO_IO_READABLE;
+    if (p->writers == 0)
+        r |= COSMO_IO_READABLE | COSMO_IO_HANGUP;   /* EOF reads at once */
+    spin_unlock_irqrestore(&p->lock, s);
+    return r;
+}
+
+static unsigned pipe_write_ready(struct kobject *obj)
+{
+    struct pipe *p = container_of(obj, struct pipe_end, obj)->pipe;
+    unsigned r = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (PIPE_SIZE - p->used >= PIPE_BUF)
+        r |= COSMO_IO_WRITABLE;
+    if (p->readers == 0)
+        r |= COSMO_IO_WRITABLE | COSMO_IO_ERROR;   /* -EPIPE at once */
+    spin_unlock_irqrestore(&p->lock, s);
+    return r;
+}
+
+static int pipe_set_nonblock(struct kobject *obj, int on)
+{
+    struct pipe_end *e = container_of(obj, struct pipe_end, obj);
+    int was = __atomic_load_n(&e->nonblock, __ATOMIC_RELAXED) ? 1 : 0;
+    if (on >= 0)
+        __atomic_store_n(&e->nonblock, on != 0, __ATOMIC_RELAXED);
+    return was;
+}
+
 static const struct kobject_io_type pipe_read_type = {
-    .base = { .name = "pipe-read", .release = read_end_release },
+    .base = { .name = "pipe-read", .release = read_end_release, .flags = KOBJECT_TYPE_IO },
     .read = pipe_read,
     .write = NULL,
     .stat = pipe_stat,
+    .ready = pipe_read_ready,
+    .set_nonblock = pipe_set_nonblock,
 };
 
 static const struct kobject_io_type pipe_write_type = {
-    .base = { .name = "pipe-write", .release = write_end_release },
+    .base = { .name = "pipe-write", .release = write_end_release, .flags = KOBJECT_TYPE_IO },
     .read = NULL,
     .write = pipe_write,
     .stat = pipe_stat,
+    .ready = pipe_write_ready,
+    .set_nonblock = pipe_set_nonblock,
 };
 
 int pipe_create(struct kobject **read_end, struct kobject **write_end)

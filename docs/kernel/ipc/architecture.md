@@ -53,7 +53,7 @@ gone.
 
 ## Non-responsibilities
 
-- Named pipes (FIFOs in the filesystem), non-blocking mode, `poll`/
+- Named pipes (FIFOs in the filesystem), `poll`/
   `select`, `splice`, message boundaries, priorities.
 - Channels with typed messages and handle passing, events, shared
   memory, futexes: later entries in this directory.

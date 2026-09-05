@@ -144,11 +144,11 @@ which the Linux `wait4` encodes as "terminated by signal `sig`".
 | `read`, `write`, `pread64`, `pwrite64` | the native handle path (`file_read`/`file_pread` or the object's `read`/`write` for pipes, console, sockets); Linux and native share the handle table |
 | `readv`, `writev` | loop over up to 1024 iovecs (each validated), stop at the first short transfer |
 | `open`, `openat(AT_FDCWD, ...)`, `creat` | Linux `O_*` (octal Linux values) mapped to `COSMO_O_*`; `O_CLOEXEC`, `O_NONBLOCK`, `O_NOCTTY`, `O_LARGEFILE` accepted and dropped; a `dirfd` other than `AT_FDCWD` is `-ENOSYS` |
-| `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct (`pipe2` flags dropped) |
+| `close`, `lseek`, `dup`, `dup2`, `dup3`, `pipe`, `pipe2` | direct; `pipe2(O_NONBLOCK)` sets both ends non-blocking, `O_CLOEXEC` is dropped |
 | `fstat`, `stat`, `lstat`, `newfstatat` | `struct cosmo_stat` → Linux `struct stat` (144 bytes: `st_dev` 0, `st_ino`, `st_nlink`, `st_mode` = type bits (`S_IFREG` 0100000, `S_IFDIR` 040000, `S_IFCHR` 020000, `S_IFIFO` 010000, `S_IFSOCK` 0140000) or permission bits, uid, gid, `st_size`, `st_blksize` 4096, `st_blocks`, times as `timespec` from `mtime_ns`/`ctime_ns`); `AT_EMPTY_PATH` with an fd is `fstat` |
 | `getdents64` | native `getdents` records → `linux_dirent64` (`d_ino`, `d_off`, `d_reclen`, `d_type`, `d_name`), through two kernel buffers; the native name starts at byte 12 of its record (`offsetof(struct cosmo_dirent, name)`, not `sizeof`, which is 16), `d_type` is mapped to Linux's `DT_*` values (`DT_REG` 8, `DT_DIR` 4, `DT_CHR` 2, `DT_FIFO` 1, `DT_SOCK` 12), each output record is the 19-byte header plus the NUL-terminated name padded to 8 bytes, and `d_off` is the offset of the next record in the buffer |
 | `mkdir`, `mkdirat`, `rmdir`, `unlink`, `unlinkat` (`AT_REMOVEDIR`), `rename`, `renameat`, `chdir`, `getcwd`, `access`, `faccessat`, `fsync`, `fdatasync`, `sync`, `umask` | direct or trivial (`umask` returns 022; `access` is a `stat`) |
-| `fcntl` | `F_GETFD`/`F_SETFD` 0, `F_GETFL` reconstructs the access mode, `F_SETFL` accepted, `F_DUPFD`/`F_DUPFD_CLOEXEC` via `dup`; others `-EINVAL` |
+| `fcntl` | `F_GETFD`/`F_SETFD` 0, `F_GETFL` reconstructs the access mode and adds `O_NONBLOCK` when the object is non-blocking, `F_SETFL` sets or clears `O_NONBLOCK` on the object (other status flags dropped; objects that never block accept silently), `F_DUPFD`/`F_DUPFD_CLOEXEC` via `dup`; others `-EINVAL` |
 | `ioctl` | `-ENOTTY` for every request (so libcs treat the console as a non-terminal and fully buffer; recorded) |
 
 ### Processes and identity
@@ -185,9 +185,12 @@ the build id, `x86_64`, `(none)`); `sysinfo` `-ENOSYS`.
 
 ### Sockets
 
-`socket` (`AF_INET` 2, `AF_INET6` 10, `SOCK_STREAM` 1 | `SOCK_DGRAM` 2
-with `SOCK_CLOEXEC`/`SOCK_NONBLOCK` dropped), `bind`, `connect`,
-`listen`, `accept`, `accept4`, `sendto`, `recvfrom`, `shutdown`,
+`socket` (`AF_INET` 2, `AF_INET6` 10, `SOCK_STREAM` 1 | `SOCK_DGRAM` 2;
+`SOCK_NONBLOCK` makes the socket non-blocking, `SOCK_CLOEXEC` is
+dropped), `bind`, `connect` (`-EINPROGRESS`/`-EALREADY` on a
+non-blocking socket), `listen`, `accept`, `accept4` (`SOCK_NONBLOCK` on
+the accepted socket; `-EAGAIN` from a non-blocking listener), `sendto`,
+`recvfrom` (`-EAGAIN` when a non-blocking socket would wait), `shutdown`,
 `getsockname`, `getpeername` translate Linux `sockaddr_in` (family,
 port in network order, 4-byte address) and `sockaddr_in6` (family, port,
 flowinfo, 16-byte address, scope) to `struct netaddr` and back (output
@@ -261,7 +264,8 @@ in `lxhello` (whose table is at `0x400040`). Details in `testing.md`.
 - Stage 2: `PT_INTERP` and file-backed `mmap` for the dynamic linker;
   `clone` with `CLONE_THREAD` once the kernel has user threads; signal
   frames and `rt_sigreturn`; `execve` once the native side has it.
-- Stage 3: `epoll`/`poll`, `sendmsg`, `/proc`.
+- Stage 3: `epoll`/`poll` (over the object readiness operation that
+  milestone 8 added), `sendmsg`, `/proc`.
 - Another architecture's Linux ABI (AArch64) reuses everything but the
   numbers table and `arch_prctl`. Phase 13 put the x86-64 table under
   `#if defined(ARCH_X86_64)` and left an empty table elsewhere;

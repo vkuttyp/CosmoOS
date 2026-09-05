@@ -536,7 +536,7 @@ static int64_t lx_dup3(struct syscall_args *a)
     return dup_to((int)a->a[0], (int)a->a[1]);
 }
 
-static int64_t do_pipe(uint64_t uarr)
+static int64_t do_pipe(uint64_t uarr, unsigned flags)
 {
     if (!user_range_ok(uarr, 8))
         return -EFAULT;
@@ -544,6 +544,10 @@ static int64_t do_pipe(uint64_t uarr)
     int rc = pipe_create(&rd, &wr);
     if (rc)
         return rc;
+    if (flags & LX_O_NONBLOCK) {
+        kobject_set_nonblock(rd, 1);
+        kobject_set_nonblock(wr, 1);
+    }
     struct handle_table *t = &process_current()->handles;
     int32_t h[2];
     h[0] = handle_install(t, rd, HANDLE_RIGHT_READ);
@@ -563,8 +567,8 @@ static int64_t do_pipe(uint64_t uarr)
     return 0;
 }
 
-static int64_t lx_pipe(struct syscall_args *a) { return do_pipe(a->a[0]); }
-static int64_t lx_pipe2(struct syscall_args *a) { return do_pipe(a->a[0]); }   /* O_CLOEXEC/O_NONBLOCK dropped */
+static int64_t lx_pipe(struct syscall_args *a) { return do_pipe(a->a[0], 0); }
+static int64_t lx_pipe2(struct syscall_args *a) { return do_pipe(a->a[0], (unsigned)a->a[1]); }   /* O_CLOEXEC dropped */
 
 static int64_t lx_fcntl(struct syscall_args *a)
 {
@@ -579,13 +583,20 @@ static int64_t lx_fcntl(struct syscall_args *a)
     switch (cmd) {
     case LX_F_GETFD:
     case LX_F_SETFD:
-    case LX_F_SETFL:
         rc = 0;
         break;
+    case LX_F_SETFL: {
+        /* O_NONBLOCK is the one status flag with an effect; the rest are accepted and dropped. */
+        int r = kobject_set_nonblock(obj, (a->a[2] & LX_O_NONBLOCK) ? 1 : 0);
+        rc = (r < 0 && r != -EOPNOTSUPP) ? r : 0;
+        break;
+    }
     case LX_F_GETFL:
         rc = (rights & HANDLE_RIGHT_READ) && (rights & HANDLE_RIGHT_WRITE) ? LX_O_RDWR
              : (rights & HANDLE_RIGHT_WRITE)                                ? LX_O_WRONLY
                                                                             : LX_O_RDONLY;
+        if (kobject_set_nonblock(obj, -1) == 1)
+            rc |= LX_O_NONBLOCK;
         break;
     case LX_F_DUPFD:
     case LX_F_DUPFD_CLOEXEC: {
@@ -1193,6 +1204,7 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *na)
 static int64_t lx_socket(struct syscall_args *a)
 {
     int family = (int)a->a[0];
+    bool nonblock = ((unsigned)a->a[1] & LX_SOCK_NONBLOCK) != 0;
     unsigned type = (unsigned)a->a[1] & ~(unsigned)(LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC);
     if (family != LX_AF_INET && family != LX_AF_INET6)
         return -EAFNOSUPPORT;
@@ -1204,6 +1216,8 @@ static int64_t lx_socket(struct syscall_args *a)
                           &s);
     if (rc)
         return rc;
+    if (nonblock)
+        ksock_set_nonblock(s, true);
     int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
     ksock_put(s);
     return h;
@@ -1258,6 +1272,8 @@ static int64_t lx_accept(struct syscall_args *a)
     ksock_put(s);
     if (rc)
         return rc;
+    if (a->a[3] & LX_SOCK_NONBLOCK)   /* accept4 flags; accept passes 0 */
+        ksock_set_nonblock(c, true);
     rc = addr_to_user(a->a[1], a->a[2], &peer);
     if (rc) {
         ksock_put(c);

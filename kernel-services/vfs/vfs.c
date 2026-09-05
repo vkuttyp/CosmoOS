@@ -637,7 +637,7 @@ static int64_t file_obj_write(struct kobject *obj, const void *buf, size_t len)
 }
 
 static const struct kobject_io_type file_type = {
-    .base = { .name = "file", .release = file_release },
+    .base = { .name = "file", .release = file_release, .flags = KOBJECT_TYPE_IO },
     .read = file_obj_read,
     .write = file_obj_write,
 };

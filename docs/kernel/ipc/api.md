@@ -62,6 +62,15 @@ kernel callers (recorded gap, `invariants.md` I3).
 **`stat(end, st)`**: `type = COSMO_DT_FIFO`, `mode = 0600`, `nlink = 1`,
 `size = used` (bytes in the ring), everything else 0.
 
+**`ready(end)`**: read end `COSMO_IO_READABLE` with `used > 0`,
+`READABLE|HANGUP` with `writers == 0`; write end `COSMO_IO_WRITABLE`
+with `PIPE_SIZE - used >= PIPE_BUF`, `WRITABLE|ERROR` with `readers ==
+0`. **`set_nonblock(end, on)`**: sets the end's mode (0/1; -1 asks) and
+returns the previous one. In non-blocking mode `read` is `-EAGAIN`
+instead of waiting (still 0 at end of file) and `write` is `-EAGAIN`
+when the ring cannot take the current piece and nothing was written
+yet (else the partial count).
+
 **Release of the read end**: `readers--`, wake the writers (they see
 `-EPIPE`), free the pipe when both counts are 0. **Release of the write
 end**: `writers--`, wake the readers (they see end of file), free

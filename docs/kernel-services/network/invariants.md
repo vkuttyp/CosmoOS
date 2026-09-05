@@ -44,9 +44,10 @@ well-formed traffic and QEMU's user-mode stack.
 
 **N4. All protocol input runs on the `netrx` thread; timers never send.**
 `netif_rx` only enqueues; `ether_input` and everything it calls run on
-the worker; the ARP/ND ageing timer and the TCP retransmit, delayed-ACK
-and TIME_WAIT timers set a flag and call `net_work_queue`, and the
-worker runs the handler. Output runs on the caller's thread. Check:
+the worker; the ARP/ND ageing timer and the TCP retransmit, delayed-ACK,
+TIME_WAIT and keepalive timers set a flag, take a pcb reference and
+call `net_work_queue`, and the worker runs the handler (`pcb_work`),
+which drops the reference. Output runs on the caller's thread. Check:
 `KASSERT`-free today, by review: the only callers of `ether_input`,
 `*_input` and `pcb_work` are `worker_main`'s `input_one` and
 `run_work`. Gap: no runtime assertion that the current thread is the
@@ -58,28 +59,34 @@ copy, or a blocking wait.** TCP builds segments under its lock into a
 the pcb lock before `ipv4/6_output`; ARP/ND release their table lock
 before sending a request or the pending packet; the system calls copy
 user memory into a kernel bounce buffer before calling `ksock_*`.
-Lock order: `sock->lock` (mutex) → TCP/UDP lock → ARP/ND lock →
+Lock order: `sock->lock` (mutex) → listener `pcb->lock` → child
+`pcb->lock` (subclass 1) → `tcp-table` / UDP lock → ARP/ND lock →
 `netif->lock` → driver locks → mbuf caches and `mbufq` locks
-(leaves). The netif registry lock is a spinlock never taken under a
-protocol lock; TCP's path MSS is computed before `g_lock`
-(`tcp_path_mss`) and read from `pcb->path_mss` under it. Check: review;
-`lo_transmit` calls `netif_rx` synchronously, so a lock held across
-transmit over `lo` would recurse into the receive queue lock and hang
-the loopback tests; `mutex_lock` panics when entered with a spinlock
-held, and `net-tcp-mss` checks the cached values. Gap: no lock-order
-checker.
+(leaves). A lookup never takes a pcb lock under the table lock: it
+takes a reference, drops the table lock, then locks the pcb. The netif
+registry lock is a spinlock never taken under a protocol lock; TCP's
+path MSS is computed before the pcb lock (`tcp_path_mss`) and read
+from `pcb->path_mss` under it. Check: the debug-build lock-order
+checker on every boot (`docs/kernel/lockdep/`); `lo_transmit` calls
+`netif_rx` synchronously, so a lock held across transmit over `lo`
+would recurse into the receive queue lock and hang the loopback tests;
+`mutex_lock` panics when entered with a spinlock held, and
+`net-tcp-mss` checks the cached values.
 
 **N6. Data the peer has acknowledged is gone from the send ring; data
 we have acknowledged is in the receive ring.** `snd_una` advances only
 when an ACK covers the bytes, and `netbuf_drop` frees exactly that
 many; out-of-order segments are acknowledged with `rcv_nxt` (nothing
-new) and dropped rather than partly stored; a segment is stored before
-the ACK for it is built. Retransmission always restarts from `snd_una`.
+new) and held in the reassembly queue, never stored in the ring until
+the bytes before them have arrived; `rcv_nxt` advances only over bytes
+in the ring; a segment is stored before the ACK for it is built.
+Retransmission always restarts from `snd_una`.
 Check: `net-lo-tcp` (1 MiB v4 and 256 KiB v6 verified byte for byte),
 `net-lo-tcp-loss` (every seventh data segment dropped; the transfer
 still completes and `retransmits` grew), the harness's 256 KiB echo
-through QEMU's user-mode stack. Gap: no reordering or duplication
-injection, no test with a peer that shrinks its window.
+through QEMU's user-mode stack, `net-tcp-reorder` (every fifth data
+segment overtaken by the next; byte-exact, `ooo_queued` grew). Gap: no
+duplication injection, no test with a peer that shrinks its window.
 
 **N7. Ports below 1024 need uid 0; a bound (address, port) is unique.**
 `ksock_bind` refuses `1..1023` for `uid != 0`; `udp_bind` and
@@ -147,13 +154,20 @@ still poisons its own IP's mapping; ARP offers no defence and none is
 attempted.
 
 **N14. A TCP pcb is never freed while a socket points at it, and an
-ended connection holds nothing.** Every path that ends a connection
-(TIME_WAIT expiry, the last ACK, a reset, the retransmit limit) goes
-through `pcb_end_locked`: it frees the pcb when `sock` is NULL and
-otherwise retires it (CLOSED, timers off, out of the pcb table so the
-port is free and no segment matches it) until `tcp_close`. Check:
-`net-lo-tcp` keeps a shut-down socket 2.5 s past TIME_WAIT, uses it,
-and binds a new socket to its former port.
+ended connection holds nothing.** The socket holds a reference that
+`tcp_close` drops last. Every path that ends a connection (TIME_WAIT
+expiry, the last ACK, a reset, the retransmit limit, keepalive
+exhaustion, the FIN_WAIT_2 timeout) goes through `pcb_end_locked`: it
+kills the pcb when `sock` is NULL (timers cancelled synchronously, out
+of the table, reassembly queue freed, the state machine's reference
+dropped by the caller after unlocking) and otherwise retires it
+(CLOSED, timers off, out of the pcb table so the port is free and no
+segment matches it) until `tcp_close`. The memory goes when the count
+reaches zero, never under the pcb's own lock. Check: `net-lo-tcp` keeps
+a shut-down socket 2.5 s past TIME_WAIT, uses it, and binds a new
+socket to its former port; `net-tcp-rfc5961` resets a connection under
+a live socket and reads the error; `net-tcp-keepalive` ends two
+connections on the worker.
 
 **N-L1. An interface is freed only by its release, after `netif_unregister`
 and the last reference.** `netif_register` refuses an interface without
@@ -165,14 +179,65 @@ transmit, receive, queued packet, ARP or ND entry naming the interface
 Gap: the virtio-net remove path is exercised only by unloading the module.
 
 **N-L2. A TCP child never exists without an owner between accept and
-attach.** `tcp_accept(pcb, owner)` attaches under `g_lock` with the
-dequeue. Check: `net-accept-race`.
+attach.** `tcp_accept(pcb, owner)` attaches under the listener's and the
+child's lock with the dequeue, and the queue's reference becomes the
+socket's. Check: `net-accept-race`.
 
 **N-L3. TCP pcb memory is freed only after its timers' callbacks have
-returned.** `pcb_free_locked` uses `timer_cancel_sync`; the callbacks take
-only the network work lock. Check: `timer-cancel-sync` for the mechanism;
+returned.** `pcb_kill_locked` uses `timer_cancel_sync` on all four timers
+before the state machine's reference is dropped; the callbacks take only
+the network work lock and atomics on the pcb, and hold a reference of
+their own across the work hand-off, so a callback in flight can never be
+the last reference. Check: `timer-cancel-sync` for the mechanism;
 `net-lo-tcp*` for the path. Gap: the callback/free race itself is not
 driven by a test.
+
+**N15. A SYN allocates nothing.** A listener answers a SYN from a
+64-entry SYN cache or with a SYN cookie; a pcb (128 KiB of rings) is
+allocated only for an ACK that matches a cache entry or a valid cookie,
+and only while the accept queue is below the backlog. Check:
+`net-tcp-syncache` (300 spoofed SYNs: `conns_passive` unchanged, cached
++ cookies = 300; a client then connects; an ACK matching nothing is
+`syn_bad_ack`). Gap: no test of cookie expiry across the 8 s slot
+boundary.
+
+**N16. A segment resets a connection only at `rcv_nxt`, and never
+because it carries SYN.** Elsewhere in the window a RST, any SYN, and an
+ACK outside `[snd_una - 65535, snd_max]` earn a rate-limited challenge
+ACK and change nothing (RFC 5961). TIME_WAIT ignores RST (RFC 1337) and
+restarts only for a retransmitted FIN. Check: `net-tcp-rfc5961` (three
+blind segments: `challenge_acks` +3, state ESTABLISHED, `rsts_in`
+unchanged; the exact reset is accepted). Gap: the challenge-ACK rate
+limit is not driven to its cap.
+
+**N17. This host sends at most `ICMP_RATE_PER_SEC` ICMP replies a
+second.** Unreachables and v4/v6 echo replies pass one token bucket;
+the excess is counted (`icmp_ratelimited`), not sent. An unreachable
+quotes exactly the received IP header and 8 bytes, copied from the
+kernel's own copy of the header (options included). Check:
+`net-icmp-limit` (300 echo requests in a burst: 100 replies, 200
+suppressed). Gap: the quoting path with IP options is reviewed, not
+tested.
+
+**N18. A "fragmentation needed" message changes nothing unless it
+quotes a segment in flight.** The quoted source must be ours, the quoted
+transport TCP, and the quoted sequence number in `[snd_una, snd_max)`;
+only then are the connection's MSS lowered and the destination's MTU
+recorded (floor 576, 10 min). A forged quote therefore cannot lower the
+MSS of future connections to a destination of the sender's choosing.
+Check: `net-icmp-limit` (a message quoting a sequence never sent leaves
+the MSS and the cache; one quoting `snd_una` lowers the MSS to 1460,
+records 1500 and new connections start at 1460; `ipv4_pmtu_flush`
+restores). Gap: no test through a real router.
+
+**N19. An operation on a non-blocking object returns instead of
+waiting, and `ready` reports exactly what would not block.** Sockets and
+pipe ends check the mode before every wait (`-EAGAIN`, or
+`-EINPROGRESS`/`-EALREADY` for a stream connect); `kobject_ready` is
+computed from the same state the operation tests. Check: `net-nonblock`
+(kernel API and object operations), `init --selftest` (system calls),
+`lxtest` (Linux `SOCK_NONBLOCK`, `accept4`, `pipe2`, `fcntl`). Gap: no
+wait primitive consumes readiness yet (`poll` is Linux stage 3).
 
 **N-L4. A socket woken outside a protocol lock is referenced with
 `kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:

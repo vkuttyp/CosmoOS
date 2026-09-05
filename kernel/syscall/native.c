@@ -49,8 +49,8 @@ int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)
     struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_WRITE);
     if (obj == NULL)
         return -EBADF;
-    const struct kobject_io_type *io = (const struct kobject_io_type *)obj->type;
-    if (io->write == NULL) {
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL || io->write == NULL) {
         kobject_put(obj);
         return -EBADF;
     }
@@ -92,8 +92,8 @@ int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)
     struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_READ);
     if (obj == NULL)
         return -EBADF;
-    const struct kobject_io_type *io = (const struct kobject_io_type *)obj->type;
-    if (io->read == NULL) {
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL || io->read == NULL) {
         kobject_put(obj);
         return -EBADF;
     }
@@ -289,8 +289,8 @@ int syscall_handle_stat(int h, struct cosmo_stat *st)
     if (f) {
         file_stat(f, st);
     } else {
-        const struct kobject_io_type *io = (const struct kobject_io_type *)obj->type;
-        if (io->stat == NULL)
+        const struct kobject_io_type *io = kobject_io_of(obj);
+        if (io == NULL || io->stat == NULL)
             rc = -EBADF;
         else
             rc = io->stat(obj, st);
@@ -463,9 +463,13 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *a)
 static int64_t sys_socket(struct syscall_args *a)
 {
     struct socket *s;
-    int rc = ksock_create((int)a->a[0], (int)a->a[1], process_current()->cred.euid, &s);
+    int type = (int)a->a[1];
+    bool nonblock = (type & COSMO_SOCK_NONBLOCK) != 0;
+    int rc = ksock_create((int)a->a[0], type & ~COSMO_SOCK_NONBLOCK, process_current()->cred.euid, &s);
     if (rc)
         return rc;
+    if (nonblock)
+        ksock_set_nonblock(s, true);
     int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
     ksock_put(s);
     return h;
@@ -834,6 +838,26 @@ static int64_t sys_setrlimit(struct syscall_args *a)
     return process_setrlimit((unsigned)a->a[0], a->a[1]);
 }
 
+static int64_t sys_ioready(struct syscall_args *a)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
+        return -EBADF;
+    unsigned r = kobject_ready(obj);
+    kobject_put(obj);
+    return (int64_t)r;
+}
+
+static int64_t sys_setnonblock(struct syscall_args *a)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
+        return -EBADF;
+    int rc = kobject_set_nonblock(obj, a->a[1] ? 1 : 0);
+    kobject_put(obj);
+    return rc < 0 ? rc : 0;
+}
+
 static int64_t sys_pipe(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[0], 2 * sizeof(int)))
@@ -1092,6 +1116,8 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_getresgid] = sys_getresgid,
     [SYS_getrlimit] = sys_getrlimit,
     [SYS_setrlimit] = sys_setrlimit,
+    [SYS_ioready] = sys_ioready,
+    [SYS_setnonblock] = sys_setnonblock,
     [SYS_setgroups] = sys_setgroups,
     [SYS_getgroups] = sys_getgroups,
 };

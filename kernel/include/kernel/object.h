@@ -27,7 +27,10 @@ struct kobject;
 struct kobject_type {
     const char *name;
     void (*release)(struct kobject *obj);
+    unsigned flags;                       /* KOBJECT_TYPE_IO: the type is a struct kobject_io_type */
 };
+
+#define KOBJECT_TYPE_IO 1u
 
 struct module;
 
@@ -66,7 +69,23 @@ struct kobject_io_type {
     int64_t (*read)(struct kobject *obj, void *buf, size_t len);
     int64_t (*write)(struct kobject *obj, const void *buf, size_t len);
     int (*stat)(struct kobject *obj, struct cosmo_stat *st);   /* optional: fstat on the object */
+    /* Optional. COSMO_IO_READABLE/WRITABLE/HANGUP/ERROR bits describing what
+     * would not block now; NULL means always readable and writable. Any
+     * thread context; never blocks. */
+    unsigned (*ready)(struct kobject *obj);
+    /* Optional. Switch the object's non-blocking mode (a property of the
+     * object, shared by every handle to it): `on` 0 or 1 sets it, -1 only
+     * asks. Returns the previous mode (0 or 1). NULL means -EOPNOTSUPP. */
+    int (*set_nonblock)(struct kobject *obj, int on);
 };
+
+/* The object's io type, or NULL when it has none (a plain kobject such as
+ * a vcpu): the system-call layer refuses I/O on those with -EBADF. */
+const struct kobject_io_type *kobject_io_of(const struct kobject *obj);
+/* Readiness through the type: the io type's ready, or always ready; a
+ * plain kobject is never ready. */
+unsigned kobject_ready(struct kobject *obj);
+int kobject_set_nonblock(struct kobject *obj, int on);   /* -1 asks; returns the previous mode */
 
 /* The single console object; kobject_get before installing in a table. */
 struct kobject *console_object(void);

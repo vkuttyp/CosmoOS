@@ -4,7 +4,10 @@
 
 #include <kernel/module.h>
 #include <kernel/object.h>
+#include <kernel/errno.h>
 #include <kernel/panic.h>
+
+#include <uapi/cosmo/syscall.h>
 
 void kobject_init(struct kobject *obj, const struct kobject_type *type)
 {
@@ -70,3 +73,28 @@ EXPORT_SYMBOL(kobject_get);
 EXPORT_SYMBOL(kobject_tryget);
 EXPORT_SYMBOL(kobject_put);
 EXPORT_SYMBOL(kobject_refcount);
+
+const struct kobject_io_type *kobject_io_of(const struct kobject *obj)
+{
+    if (obj == NULL || !(obj->type->flags & KOBJECT_TYPE_IO))
+        return NULL;
+    return (const struct kobject_io_type *)obj->type;
+}
+
+unsigned kobject_ready(struct kobject *obj)
+{
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL)
+        return 0;
+    if (io->ready == NULL)
+        return COSMO_IO_READABLE | COSMO_IO_WRITABLE;
+    return io->ready(obj);
+}
+
+int kobject_set_nonblock(struct kobject *obj, int on)
+{
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL || io->set_nonblock == NULL)
+        return -EOPNOTSUPP;
+    return io->set_nonblock(obj, on);
+}

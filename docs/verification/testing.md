@@ -113,7 +113,7 @@ the last data-bearing write, and a torn commit write accepts either root
 ## Syscall fuzzer
 
 ```
-USERTEST: syscall-fuzz ok: 20000 calls, 16779 errors, 3221 successes, 47/56 system calls exercised, seed 20260905
+USERTEST: syscall-fuzz ok: 20000 calls, 16932 errors, 3068 successes, 50/60 system calls exercised, seed 20260905
 ```
 
 1.8 to 1.9 s per boot on either architecture. The kernel survived on the

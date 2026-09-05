@@ -129,6 +129,12 @@ bool selftest_net_tcp_mss(const char **reason);
 bool selftest_net_harness(const char **reason);
 bool selftest_net_netif_lifetime(const char **reason);
 bool selftest_net_accept_race(const char **reason);
+bool selftest_net_tcp_syncache(const char **reason);   /* milestone 8: SYN cache and cookies */
+bool selftest_net_tcp_rfc5961(const char **reason);    /* blind RST/SYN/ACK earn challenge ACKs */
+bool selftest_net_tcp_reorder(const char **reason);    /* out-of-order segments are reassembled */
+bool selftest_net_tcp_keepalive(const char **reason);  /* keepalive timeout, orphaned FIN_WAIT_2 */
+bool selftest_net_icmp_limit(const char **reason);     /* ICMP rate limit, path MTU discovery */
+bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and readiness */
 bool selftest_blk_lifetime(const char **reason);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);

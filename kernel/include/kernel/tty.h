@@ -52,6 +52,8 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n);
  * one line (or a prefix of it when `len` is smaller), 0 at an EOF mark,
  * -EINTR when the calling process is being killed. */
 int64_t tty_read(struct tty *t, void *buf, size_t len);
+/* A complete line (or an EOF mark) waits: tty_read would not block. Any context. */
+bool tty_has_line(struct tty *t);
 
 void tty_get_stats(struct tty *t, struct tty_stats *out);
 
