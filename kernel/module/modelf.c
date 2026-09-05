@@ -89,6 +89,10 @@ int modelf_validate(const void *file, size_t size, struct modelf_layout *out, co
     REJECT(eh->e_shnum >= SHN_LORESERVE, "too many sections");
     REJECT(!in_file(eh->e_shoff, (uint64_t)eh->e_shnum * sizeof(struct elf64_shdr), size),
            "section header table outside the file");
+    /* The tables are read in place as structures: their file offsets must
+     * carry the structures' alignment (found by fuzz_modelf: an unaligned
+     * e_shoff is undefined behaviour and a trap on strict architectures). */
+    REJECT(eh->e_shoff % 8 != 0, "section header table not 8-byte aligned");
     REJECT(eh->e_shstrndx == 0 || eh->e_shstrndx >= eh->e_shnum, "bad e_shstrndx");
 
     const struct elf64_shdr *shstr = modelf_shdr(file, eh->e_shstrndx);
@@ -104,6 +108,9 @@ int modelf_validate(const void *file, size_t size, struct modelf_layout *out, co
         REJECT(sh->sh_type == SHT_DYNSYM, "dynamic symbol table in a module");
         if (sh->sh_type != SHT_NOBITS && sh->sh_type != SHT_NULL)
             REJECT(!in_file(sh->sh_offset, sh->sh_size, size), "section outside the file");
+        if (sh->sh_type == SHT_SYMTAB || sh->sh_type == SHT_RELA || strcmp(name, ".cosmo.module") == 0 ||
+            strcmp(name, ".ksymtab") == 0)
+            REJECT(sh->sh_offset % 8 != 0, "structured section not 8-byte aligned in the file");
         if (sh->sh_type == SHT_SYMTAB) {
             REJECT(out->symtab != 0, "more than one symbol table");
             REJECT(sh->sh_entsize != sizeof(struct elf64_sym), "bad symbol entry size");
