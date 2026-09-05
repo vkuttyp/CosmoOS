@@ -105,7 +105,7 @@ builds (`SELFTEST=1`) carry `rc.test`.
 
 | Interface | Where | Used by |
 |---|---|---|
-| The boot archive's `bin/`, `sbin/`, `etc/` → `/bin`, `/sbin`, `/etc` | `Makefile`, `kernel-services/vfs/ramfs.c` | init, sh (`PATH=/bin:/sbin`) |
+| The boot archive's `bin/`, `sbin/`, `etc/` → `/bin`, `/sbin`, `/etc` | `Makefile`, `kernel-services/vfs/ramfs.c` | init, sh (`PATH=/bin:/sbin:/usr/bin:/usr/sbin`; `/usr` is where packages install, `docs/pkg/`) |
 | `sh` command language (above) | `userland/shell/` | people, `rc`, tests |
 | `USERTEST: PASS/FAIL`, `SHTEST: PASS/FAIL`, `init: ...` lines | serial log | `tests/boot/run_boot_test.py` |
 | The interactive harness: after `cosmo$ ` types commands, expects their output | `tests/boot/shelltest.py` | `make test` |

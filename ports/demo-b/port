@@ -1,0 +1,4 @@
+name: demo-b
+version: 1.0
+summary: resolver test: needs demolib < 3
+depends: demolib < 3

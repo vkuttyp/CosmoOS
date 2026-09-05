@@ -475,7 +475,7 @@ int main(int argc, char **argv)
 
     printf("init: CosmoOS userland, pid %d\n", getpid());   /* pid 1 outside self-test builds */
     fflush(stdout);
-    setenv("PATH", "/bin:/sbin", 1);
+    setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin", 1);
     setenv("HOME", "/", 1);
     struct stat st;
     if (stat("/etc/rc", &st) == 0) {

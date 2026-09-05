@@ -45,7 +45,10 @@ and `true || ...`; `false; echo "status $?"` (prints `status 1`);
 (`X=42; echo "var $X ${X}1 $$"`); `export` visible in a child `sh -c`;
 `cd` with `pwd` into `/tmp/shtest`, `dir`, `..`; `ls -l | cat > file`
 then `cat` of it; `echo -n`; `ps`; `sysctl kernel.name`; `kill 99999`
-fails; `rm -r` of the work directory; `SHTEST: PASS`.
+fails; the package section (`pkg update`, `install fortune`, `badsig`
+and `badsum` refused, `hello=1.0` then `upgrade`, removal in dependency
+order; `docs/pkg/testing.md`); `rm -r` of the work directory; `SHTEST:
+PASS`.
 
 ## Interactive harness (`tests/boot/shelltest.py`)
 
@@ -65,6 +68,7 @@ the end:
 | `sysctl kernel.name` | `^kernel.name = CosmoOS$` |
 | `dmesg` | the `serial: console input on IRQ 4` line |
 | `nosuchprogram` | `^sh: nosuchprogram: not found$` |
+| `pkg install hello && hello && pkg list` | `^hello, world \(hello 1\.1\)$`, `^hello\s+1\.1\s+prints a greeting$` (`docs/pkg/testing.md`) |
 | `exit 0` | the run ends: `init: shell exited with status 0` |
 
 Failures appear as `shell harness: ...` lines (`no prompt before

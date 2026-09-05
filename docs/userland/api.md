@@ -26,7 +26,7 @@ root and everything else under `/boot`.
 
 | Invocation | Behaviour | Exit status |
 |---|---|---|
-| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin`, `HOME=/`; if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `sh` on the console (handles 0, 1, 2 inherited), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
+| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/`; if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `sh` on the console (handles 0, 1, 2 inherited), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
 | `init --selftest` | `fs_selftest`, `net_selftest`, `proc_selftest`, then the Phase 4 checks; prints `USERTEST: PASS` or `USERTEST: FAIL (n checks)` | 0 or 1 |
 | `init --crash` | prints `init: crashing on purpose` and writes to address 0 | 139 (fault) |
 | `init --block` | reads one byte from handle 0 and exits 5 | 5, or 128 + sig when killed |
@@ -69,7 +69,8 @@ shell's handles temporarily replaced): `cd [dir]` (`$HOME` or `/`),
 NAME ...`, `set` (prints variables and environment) and `set -e`, `:`,
 `true`, `false`, `wait`, `.` and `source file`.
 
-**Programs**: found through `spawnvp` (`PATH`, default `/bin:/sbin`,
+**Programs**: found through `spawnvp` (`PATH`, default
+`/bin:/sbin:/usr/bin:/usr/sbin`,
 or a name containing `/`). Each pipeline stage receives exactly handles
 0, 1, 2: the previous stage's pipe, the next stage's pipe, or the
 shell's, overridden by redirections. The shell waits for every stage;
@@ -111,8 +112,9 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 
 ## Scripts (`/etc`)
 
-`/etc/rc`: prints `CosmoOS userland ready` and runs `sh /etc/rc.test`
-(which fails harmlessly with `not found` in release builds). `/etc/rc.test`:
+`/etc/rc`: prints `CosmoOS userland ready` and, when `/etc/rc.test`
+exists (`ls /etc/rc.test 2> /tmp/.rc.probe && sh /etc/rc.test`; the
+probe file is removed afterwards), runs it. `/etc/rc.test`:
 the shell's own test (`docs/userland/testing.md`), ending with
 `SHTEST: PASS` or `SHTEST: FAIL n`.
 

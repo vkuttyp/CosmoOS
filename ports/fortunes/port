@@ -1,0 +1,5 @@
+# fortunes: a data-only package, the dependency of fortune.
+name: fortunes
+version: 1.0
+summary: the fortune database
+file: share/fortunes/fortunes.txt data/fortunes.txt 0644

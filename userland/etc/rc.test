@@ -37,5 +37,34 @@ echo -n "no newline"; echo
 ps
 sysctl kernel.name
 kill 99999 2> /tmp/shtest/k && FAILS=1
+# The package system (docs/pkg/testing.md): update, dependency closure, refusals, upgrade, removal order.
+pkg update || FAILS=1
+pkg install fortune || FAILS=1
+fortune || FAILS=1
+pkg list
+pkg info fortune || FAILS=1
+pkg verify || FAILS=1
+pkg install badsig 2> /tmp/shtest/badsig && FAILS=1
+cat /tmp/shtest/badsig
+pkg install badsum 2> /tmp/shtest/badsum && FAILS=1
+cat /tmp/shtest/badsum
+pkg install hello=1.0 || FAILS=1
+hello
+pkg upgrade || FAILS=1
+hello
+pkg remove fortunes 2> /tmp/shtest/rmdep && FAILS=1
+cat /tmp/shtest/rmdep
+pkg remove fortune || FAILS=1
+pkg remove fortunes || FAILS=1
+fortune 2> /tmp/shtest/gone && FAILS=1
+pkg remove hello || FAILS=1
+# Resolution is order independent: demo-a wants demolib >= 2, demo-b wants < 3; 2.5 satisfies both.
+pkg install demo-a demo-b || FAILS=1
+pkg info demolib
+pkg remove demo-a demo-b demolib || FAILS=1
+pkg install demo-b demo-a || FAILS=1
+cat /usr/share/demolib/VERSION
+pkg remove demo-b demo-a demolib || FAILS=1
+pkg list
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

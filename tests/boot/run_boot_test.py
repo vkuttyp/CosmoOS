@@ -61,6 +61,20 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
 ]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
+# The package system's script checks: output lines the harness also requires in self-test builds.
+PKGTEST_MARKERS = [
+    r"^pkg: index updated: \d+ packages",
+    r"^pkg: installing fortunes-1\.0",
+    r"^pkg: installing fortune-1\.0",
+    r"bad signature|unknown signing key",
+    r"checksum does not match the index",
+    r"^hello, world \(hello 1\.0\)$",
+    r"^hello, world \(hello 1\.1\)$",
+    r"^pkg: fortunes: fortune depends on it",
+    r"^pkg: verify: 0 problems",
+    r"^installed: 2\.5$",
+    r"^2\.5$",
+]
 
 # Only produced by the self-test run of init (debug builds); required
 # whenever self-tests ran at all.
@@ -232,6 +246,10 @@ def main():
         failures.extend(shelltest.failures(lines))
     if want_selftest and not any(re.search(SHTEST_MARKER, ln) for ln in lines):
         failures.append(f"missing marker /{SHTEST_MARKER}/ (shell test script)")
+    if want_selftest:
+        for pat in PKGTEST_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (package test)")
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:
         try:

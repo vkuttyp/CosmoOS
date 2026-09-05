@@ -1,0 +1,6 @@
+# hello: the smallest program a package can carry (version 1.1; 1.0 is in ports/hello-1.0).
+name: hello
+version: 1.1
+summary: prints a greeting
+program: bin/hello src/hello.c
+file: share/doc/hello/README doc/README 0644

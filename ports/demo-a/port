@@ -1,0 +1,4 @@
+name: demo-a
+version: 1.0
+summary: resolver test: needs demolib >= 2
+depends: demolib >= 2

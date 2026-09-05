@@ -15,7 +15,11 @@ recorded in a fixed table (`BOOTARCHIVE_MAX_ENTRIES` = 64) as
 memory, which the PMM keeps reserved for the life of the kernel. Lookup
 is by exact name (`init`, `modules/hello.ko`, `tests/cosmotest.ko`;
 since Phase 9 also `bin/sh`, `sbin/ps`, `etc/rc`, which the ramfs
-places at `/bin`, `/sbin`, `/etc`, `docs/kernel-services/vfs/api.md`).
+places at `/bin`, `/sbin`, `/etc`, and since Phase 10 `sbin/pkg`,
+`etc/pkg/repos.conf`, `etc/pkg/keys/cosmo-dev.pub` and the package
+repository as `repo/INDEX`, `repo/hello-1.1.cpk`, ...; nested names are
+allowed, the ramfs creates the intermediate directories,
+`docs/kernel-services/vfs/api.md`).
 
 ### The module ABI (`kernel/include/kernel/module.h`)
 

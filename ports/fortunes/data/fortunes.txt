@@ -1,0 +1,6 @@
+Simplicity is prerequisite for reliability.
+Make each program do one thing well.
+Expect the output of every program to become the input to another.
+Mechanism, not policy.
+The kernel must know nothing about package management.
+Write programs that work together.

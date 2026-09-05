@@ -121,7 +121,7 @@ pid_t wait(int *status);
 int kill(pid_t pid, int sig);
 ```
 
-`spawnvp` searches `PATH` (default `/bin:/sbin` when unset) when `file`
+`spawnvp` searches `PATH` (default `/bin:/sbin:/usr/bin:/usr/sbin` when unset) when `file`
 has no `/`, trying `stat` on each candidate and spawning the first
 regular file; it sets `errno` to the last error (`ENOENT` when none).
 With `h == NULL, nh == 0` the child inherits handles 0, 1, 2 as they

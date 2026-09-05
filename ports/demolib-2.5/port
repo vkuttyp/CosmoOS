@@ -1,0 +1,4 @@
+name: demolib
+version: 2.5
+summary: resolver test library, version 2.5
+file: share/demolib/VERSION data/VERSION 0644

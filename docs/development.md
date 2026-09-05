@@ -57,17 +57,19 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, and the kernel modules (default) |
+| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
 | `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
 | `userland` | `out/<arch>-<build>/userland/*.elf`: init, the shell, the coreutils and system tools (`userland/userland.mk`, `docs/userland/`) |
+| `pkg` | `out/<arch>-<build>/userland/pkg.elf`: the package manager, from `pkg/*.c` plus the kernel's SHA-512 and Ed25519 sources compiled for user mode (`pkg/pkg.mk`, `docs/pkg/`) |
+| `ports` | `out/<arch>-<build>/pkg/repo/`: every recipe under `ports/*/port` cross-compiled by `tools/pkgbuild.py` into a signed `.cpk`, plus the signed `INDEX`; signed with `PKGSIGN_KEY` (default `tools/keys/cosmo-dev.key`); `SELFTEST=1` adds the `badsig` and `badsum` fixtures |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
-| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*`, `etc/*` and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
+| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*` including `sbin/pkg`, `etc/*` including `etc/pkg/repos.conf` and `etc/pkg/keys/cosmo-dev.pub`, `repo/*` (the ports repository, visible at `/boot/repo`) and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout and libc algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc and package-parser algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -88,8 +90,10 @@ against synthetic module images, built with `-DMODELF_HOST_TEST=1`), and
 `test_cosmofs` (the cosmofs on-disk layout header: structure sizes,
 inode-map arithmetic, extent mapping), and `test_libc` (the C library's
 `printf.c`, `malloc.c` over a fake `mmap`, and `conv.c`, included with
-renamed symbols so they coexist with the host libc; `docs/libc/testing.md`);
-`test_crypto` also checks CRC32C. The
+renamed symbols so they coexist with the host libc; `docs/libc/testing.md`),
+and `test_pkg` (the package manager's `manifest.c`, `version.c` and
+`tar.c`: formats, constraints, path confinement, the ustar reader;
+`docs/pkg/testing.md`); `test_crypto` also checks CRC32C. The
 architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
@@ -166,6 +170,23 @@ add `<name>` to `USER_BIN_PROGRAMS` or `USER_SBIN_PROGRAMS` and a
 `PROG_DIR_<name> := <family>` line in `userland/userland.mk`; the link
 rule and the archive entry follow. The library's interface is in
 `docs/libc/api.md`, the system calls in `docs/kernel/syscall/api.md`.
+
+### Packages
+
+`ports/<dir>/port` is a recipe (`docs/pkg/api.md`); `make ports` builds
+every recipe into `out/<arch>-<build>/pkg/repo/` with
+`tools/pkgbuild.py` and signs packages and `INDEX` with `PKGSIGN_KEY`.
+The repository rides in the boot archive as `repo/` and appears at
+`/boot/repo`, which `/etc/pkg/repos.conf` names; `/etc/pkg/keys/`
+holds the accepted public keys. On the target: `pkg update`, `pkg
+install fortune`, `pkg list`, `pkg remove fortune`. In self-test builds
+`/etc/rc.test` runs the whole flow, including the refused `badsig` and
+`badsum` fixtures and an upgrade of `hello` from 1.0 to 1.1; the boot
+harness requires the resulting lines (`PKGTEST_MARKERS` in
+`tests/boot/run_boot_test.py`) and types `pkg install hello && hello &&
+pkg list` at the prompt in every build. To add a package: a directory
+under `ports/` with a `port` file and its sources; `make ports` picks it
+up and `make reproducible` should still say yes.
 
 ## Variables
 
@@ -312,7 +333,9 @@ markers (loader banner, kernel banner, `init: CosmoOS userland, pid N`,
 `interactive-ok`, `init: shell exited with status 0`, `init exited with
 status 0`, `boot complete`, the shell harness's per-command patterns
 (`tests/boot/shelltest.py`), and, when a `SELFTEST:` line appears,
-`SELFTEST: PASS`, `USERTEST: PASS` and `SHTEST: PASS`),
+`SELFTEST: PASS`, `USERTEST: PASS`, `SHTEST: PASS` and the package
+markers `pkg: index updated`, `pkg: installing fortunes-1.0`, `hello,
+world (hello 1.0)` then `(hello 1.1)`, `pkg: verify: 0 problems`),
 and rejects any log containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`,
 or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
 kernel report failure through the same port. On hardware or an emulator without the device the port

@@ -60,8 +60,9 @@ committed root describes a completely valid state.
 - **ramfs**: directories and regular files entirely in memory; the
   root filesystem at boot with `/boot` populated from the boot archive,
   the archive's `bin/`, `sbin/`, `etc/` entries placed at `/bin`,
-  `/sbin`, `/etc` (programs executable, Phase 9), and `/tmp`, `/mnt`,
-  `/dev` created.
+  `/sbin`, `/etc` (programs executable, Phase 9; nested entries such
+  as `etc/pkg/keys/...` and `repo/...` get their directories, Phase
+  10), and `/tmp`, `/mnt`, `/dev` created.
 - **Storage pool** (`kernel-services/storage/`): `pool_open(blkdev)`,
   `pool_read/write/flush` in 4 KiB pool blocks. One device now; the
   interface is where allocation groups and redundancy attach later.

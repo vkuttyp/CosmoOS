@@ -1,0 +1,6 @@
+# fortune: prints one line of the fortune database; depends on the fortunes package.
+name: fortune
+version: 1.0
+summary: prints a line from the fortunes database
+depends: fortunes >= 1.0
+program: bin/fortune src/fortune.c

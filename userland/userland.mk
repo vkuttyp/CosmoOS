@@ -54,11 +54,14 @@ USER_ELFS := $(foreach p,$(USER_PROGRAMS),$(call prog_elf,$(p)))
 USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(p)=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
-	etc/rc=$(ROOT)/userland/etc/rc
+	etc/rc=$(ROOT)/userland/etc/rc \
+	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
+	etc/pkg/keys/cosmo-dev.pub=$(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
 ifeq ($(SELFTEST),1)
 USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test
 endif
-USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test
+USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test \
+	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
 
 .PHONY: userland
 userland: $(USER_ELFS)
