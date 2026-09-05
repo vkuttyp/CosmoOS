@@ -91,6 +91,14 @@ unsigned kobject_ready(struct kobject *obj)
     return io->ready(obj);
 }
 
+struct waitqueue *kobject_poll_wq(struct kobject *obj, unsigned events)
+{
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io == NULL || io->poll_wq == NULL)
+        return NULL;
+    return io->poll_wq(obj, events);
+}
+
 int kobject_set_nonblock(struct kobject *obj, int on)
 {
     const struct kobject_io_type *io = kobject_io_of(obj);

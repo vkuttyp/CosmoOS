@@ -297,4 +297,18 @@ static inline long cosmo_setnonblock(int h, int on)
     return cosmo_syscall2(SYS_setnonblock, h, on);
 }
 
+/* The asynchronous I/O ring (docs/kernel/io/api.md). */
+static inline long cosmo_aio_create(unsigned entries, unsigned flags)
+{
+    return cosmo_syscall2(SYS_aio_create, entries, flags);
+}
+static inline long cosmo_aio_submit(int ring, const struct cosmo_sqe *sqes, unsigned n)
+{
+    return cosmo_syscall3(SYS_aio_submit, ring, sqes, n);
+}
+static inline long cosmo_aio_wait(int ring, struct cosmo_cqe *cqes, unsigned n, unsigned min, uint64_t timeout_ns)
+{
+    return cosmo_syscall5(SYS_aio_wait, ring, cqes, n, min, timeout_ns);
+}
+
 #endif /* COSMO_SYSCALL_H */

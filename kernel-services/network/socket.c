@@ -11,6 +11,7 @@
 #include <kernel/sched.h>
 #include <kernel/socket.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -64,6 +65,12 @@ static int socket_obj_set_nonblock(struct kobject *obj, int on)
     return was;
 }
 
+static struct waitqueue *socket_obj_poll_wq(struct kobject *obj, unsigned events)
+{
+    (void)events;
+    return &container_of(obj, struct socket, obj)->wait;   /* one queue for every condition */
+}
+
 static const struct kobject_io_type socket_type = {
     .base = { .name = "socket", .release = socket_release, .flags = KOBJECT_TYPE_IO },
     .read = socket_obj_read,
@@ -71,6 +78,7 @@ static const struct kobject_io_type socket_type = {
     .stat = socket_obj_stat,
     .ready = socket_obj_ready,
     .set_nonblock = socket_obj_set_nonblock,
+    .poll_wq = socket_obj_poll_wq,
 };
 
 struct socket *socket_from_kobject(struct kobject *obj)
@@ -215,7 +223,7 @@ int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
             ksock_put(c);
             return take_error(s) ? take_error(s) : -EINVAL;
         }
-        if (s->nonblock) {
+        if (io_nonblocking(s->nonblock)) {
             ksock_put(c);
             return -EAGAIN;
         }
@@ -263,7 +271,7 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
         }
     } else {
         rc = tcp_connect(s->tcp, addr);
-        if (rc == 0 && s->nonblock) {
+        if (rc == 0 && io_nonblocking(s->nonblock)) {
             enum tcp_state st = tcp_state_of(s->tcp);
             if (st == TCP_SYN_SENT || st == TCP_SYN_RCVD) {
                 s->state = SS_CONNECTING;
@@ -335,7 +343,7 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
         }
         done += (size_t)n;
         if (done < len) {
-            if (s->nonblock)
+            if (io_nonblocking(s->nonblock))
                 return done ? (int64_t)done : -EAGAIN;
             int w = wait_event_killable(&s->wait, tcp_send_space(s->tcp) > 0 || s->tcp->error ||
                                                       tcp_state_of(s->tcp) == TCP_CLOSED);
@@ -362,7 +370,7 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
                 return 0;
             if (s->error)
                 return take_error(s);
-            if (s->nonblock)
+            if (io_nonblocking(s->nonblock))
                 return -EAGAIN;
             int w = wait_event_killable(&s->wait, mbufq_len(&s->udp.rxq) > 0 || s->error || (s->shut & 1));
             if (w)
@@ -393,7 +401,7 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
             return 0;
         if (s->tcp->state == TCP_CLOSED)
             return s->tcp->error ? s->tcp->error : 0;
-        if (s->nonblock)
+        if (io_nonblocking(s->nonblock))
             return -EAGAIN;
         int w = wait_event_killable(&s->wait, tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error ||
                                                   s->tcp->state == TCP_CLOSED || (s->shut & 1));

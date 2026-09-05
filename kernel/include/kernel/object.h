@@ -77,7 +77,13 @@ struct kobject_io_type {
      * object, shared by every handle to it): `on` 0 or 1 sets it, -1 only
      * asks. Returns the previous mode (0 or 1). NULL means -EOPNOTSUPP. */
     int (*set_nonblock)(struct kobject *obj, int on);
+    /* Optional. The wait queue a waiter for `events` (COSMO_IO_* bits)
+     * should sleep on; it is woken whenever `ready` may have changed for
+     * those bits. NULL means readiness never changes (a file). */
+    struct waitqueue *(*poll_wq)(struct kobject *obj, unsigned events);
 };
+
+struct waitqueue;
 
 /* The object's io type, or NULL when it has none (a plain kobject such as
  * a vcpu): the system-call layer refuses I/O on those with -EBADF. */
@@ -86,6 +92,7 @@ const struct kobject_io_type *kobject_io_of(const struct kobject *obj);
  * plain kobject is never ready. */
 unsigned kobject_ready(struct kobject *obj);
 int kobject_set_nonblock(struct kobject *obj, int on);   /* -1 asks; returns the previous mode */
+struct waitqueue *kobject_poll_wq(struct kobject *obj, unsigned events);   /* NULL: never changes */
 
 /* The single console object; kobject_get before installing in a table. */
 struct kobject *console_object(void);

@@ -83,7 +83,11 @@
 #define SYS_setrlimit   57  /* (unsigned resource, uint64_t value) -> 0; raising a limit needs privilege */
 #define SYS_ioready     58  /* (int h) -> COSMO_IO_* mask of what would not block now */
 #define SYS_setnonblock 59  /* (int h, int on) -> 0; -EOPNOTSUPP for objects that never block */
-#define SYS_COUNT       60
+/* Milestone 9: the asynchronous I/O ring (docs/kernel/io/). */
+#define SYS_aio_create  60  /* (unsigned entries 1..1024, unsigned flags 0) -> ring handle */
+#define SYS_aio_submit  61  /* (int ring, const struct cosmo_sqe *sqes, unsigned n) -> entries accepted */
+#define SYS_aio_wait    62  /* (int ring, struct cosmo_cqe *cqes, unsigned n, unsigned min, uint64_t timeout_ns) -> completions */
+#define SYS_COUNT       63
 
 #define COSMO_RLIMIT_AS     0   /* bytes of user address space mapped by regions */
 #define COSMO_RLIMIT_MEM    1   /* bytes of anonymous memory populated (resident) */
@@ -149,6 +153,34 @@ struct cosmo_procinfo {
 #define COSMO_IO_WRITABLE 2
 #define COSMO_IO_HANGUP   4
 #define COSMO_IO_ERROR    8
+
+/* The asynchronous I/O ring (docs/kernel/io/design.md). */
+#define COSMO_AIO_MAX_ENTRIES 1024
+#define COSMO_AIO_NOP    0
+#define COSMO_AIO_READ   1   /* the object's read at its position: result = bytes, 0 at end of file */
+#define COSMO_AIO_WRITE  2   /* the object's write: result = bytes */
+#define COSMO_AIO_PREAD  3   /* a file, at `offset` */
+#define COSMO_AIO_PWRITE 4
+#define COSMO_AIO_FSYNC  5   /* a file: result 0 */
+#define COSMO_AIO_POLL   6   /* result = the COSMO_IO_* bits set among `events` */
+#define COSMO_AIO_F_NOWAIT 1 /* complete with -EAGAIN instead of waiting for readiness */
+#define COSMO_AIO_WAIT_FOREVER (~0ull)
+
+struct cosmo_sqe {
+    uint8_t op;          /* COSMO_AIO_* */
+    uint8_t flags;       /* COSMO_AIO_F_* */
+    uint16_t events;     /* POLL: bits of interest */
+    int32_t handle;
+    uint64_t addr;       /* user buffer */
+    uint64_t len;
+    uint64_t offset;     /* PREAD/PWRITE */
+    uint64_t user_data;  /* returned in the completion */
+};                       /* 40 bytes */
+
+struct cosmo_cqe {
+    uint64_t user_data;
+    int64_t result;      /* bytes, a mask, 0, or -COSMO_E* */
+};                       /* 16 bytes */
 #define COSMO_SHUT_RD   0
 #define COSMO_SHUT_WR   1
 #define COSMO_SHUT_RDWR 2

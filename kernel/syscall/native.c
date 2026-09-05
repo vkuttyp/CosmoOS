@@ -6,6 +6,7 @@
  * errno on failure. User memory is touched only through uaccess.h.
  */
 
+#include <kernel/aio.h>
 #include <kernel/blk.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
@@ -41,20 +42,11 @@ static int64_t sys_exit(struct syscall_args *a)
     process_exit((int)a->a[0]);
 }
 
-int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)
+int64_t syscall_obj_write(struct kobject *obj, const uint64_t ubuf, size_t len)
 {
-    if (!user_range_ok(ubuf, len))
-        return -EFAULT;
-
-    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_WRITE);
-    if (obj == NULL)
-        return -EBADF;
     const struct kobject_io_type *io = kobject_io_of(obj);
-    if (io == NULL || io->write == NULL) {
-        kobject_put(obj);
+    if (io == NULL || io->write == NULL)
         return -EBADF;
-    }
-
     char tmp[IO_CHUNK];
     size_t done = 0;
     int64_t rc = 0;
@@ -75,8 +67,19 @@ int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)
         if ((size_t)rc < n)
             break;
     }
-    kobject_put(obj);
     return done > 0 ? (int64_t)done : rc;
+}
+
+int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)
+{
+    if (!user_range_ok(ubuf, len))
+        return -EFAULT;
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_WRITE);
+    if (obj == NULL)
+        return -EBADF;
+    int64_t rc = syscall_obj_write(obj, ubuf, len);
+    kobject_put(obj);
+    return rc;
 }
 
 static int64_t sys_write(struct syscall_args *a)
@@ -84,20 +87,11 @@ static int64_t sys_write(struct syscall_args *a)
     return syscall_handle_write((int)a->a[0], a->a[1], (size_t)a->a[2]);
 }
 
-int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)
+int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
 {
-    if (!user_range_ok(ubuf, len))
-        return -EFAULT;
-
-    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_READ);
-    if (obj == NULL)
-        return -EBADF;
     const struct kobject_io_type *io = kobject_io_of(obj);
-    if (io == NULL || io->read == NULL) {
-        kobject_put(obj);
+    if (io == NULL || io->read == NULL)
         return -EBADF;
-    }
-
     char tmp[IO_CHUNK];
     size_t n = len < IO_CHUNK ? len : IO_CHUNK;
     int64_t rc = io->read(obj, tmp, n);
@@ -108,6 +102,17 @@ int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)
         rc = -EIO;
     if (rc > 0 && copy_to_user(ubuf, tmp, (size_t)rc))
         rc = -EFAULT;
+    return rc;
+}
+
+int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)
+{
+    if (!user_range_ok(ubuf, len))
+        return -EFAULT;
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_READ);
+    if (obj == NULL)
+        return -EBADF;
+    int64_t rc = syscall_obj_read(obj, ubuf, len);
     kobject_put(obj);
     return rc;
 }
@@ -858,6 +863,50 @@ static int64_t sys_setnonblock(struct syscall_args *a)
     return rc < 0 ? rc : 0;
 }
 
+/* --- milestone 9: the asynchronous I/O ring (kernel/io/aio.c) --------------- */
+
+static int64_t sys_aio_create(struct syscall_args *a)
+{
+    struct aio_ring *r;
+    int rc = aio_ring_create((unsigned)a->a[0], (unsigned)a->a[1], &r);
+    if (rc)
+        return rc;
+    int h = handle_install(&process_current()->handles, &r->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    kobject_put(&r->obj);
+    return h;
+}
+
+static struct aio_ring *ring_of(int h)
+{
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    if (obj == NULL)
+        return NULL;
+    struct aio_ring *r = aio_ring_from_kobject(obj);
+    if (r == NULL)
+        kobject_put(obj);
+    return r;
+}
+
+static int64_t sys_aio_submit(struct syscall_args *a)
+{
+    struct aio_ring *r = ring_of((int)a->a[0]);
+    if (r == NULL)
+        return -EBADF;
+    int64_t rc = aio_submit(r, a->a[1], (unsigned)a->a[2]);
+    kobject_put(&r->obj);
+    return rc;
+}
+
+static int64_t sys_aio_wait(struct syscall_args *a)
+{
+    struct aio_ring *r = ring_of((int)a->a[0]);
+    if (r == NULL)
+        return -EBADF;
+    int64_t rc = aio_wait(r, a->a[1], (unsigned)a->a[2], (unsigned)a->a[3], a->a[4]);
+    kobject_put(&r->obj);
+    return rc;
+}
+
 static int64_t sys_pipe(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[0], 2 * sizeof(int)))
@@ -1118,6 +1167,9 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_setrlimit] = sys_setrlimit,
     [SYS_ioready] = sys_ioready,
     [SYS_setnonblock] = sys_setnonblock,
+    [SYS_aio_create] = sys_aio_create,
+    [SYS_aio_submit] = sys_aio_submit,
+    [SYS_aio_wait] = sys_aio_wait,
     [SYS_setgroups] = sys_setgroups,
     [SYS_getgroups] = sys_getgroups,
 };

@@ -47,12 +47,19 @@ static unsigned console_obj_ready(struct kobject *obj)
     return COSMO_IO_WRITABLE | (tty_has_line(tty_console()) ? COSMO_IO_READABLE : 0);
 }
 
+static struct waitqueue *console_obj_poll_wq(struct kobject *obj, unsigned events)
+{
+    (void)obj;
+    return (events & COSMO_IO_READABLE) ? &tty_console()->readers : NULL;   /* always writable */
+}
+
 static const struct kobject_io_type console_type = {
     .base = { .name = "console", .release = console_obj_release, .flags = KOBJECT_TYPE_IO },
     .read = console_obj_read,
     .write = console_obj_write,
     .stat = console_obj_stat,
     .ready = console_obj_ready,
+    .poll_wq = console_obj_poll_wq,
 };
 
 static struct kobject g_console = { .type = &console_type.base, .refcount = 1 };

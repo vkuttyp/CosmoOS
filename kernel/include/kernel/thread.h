@@ -78,6 +78,7 @@ struct thread {
     unsigned flags;
     struct lockdep_held held_mutex[LOCKDEP_MAX_HELD_MUTEX];   /* lockdep: mutexes this thread holds */
     unsigned nr_held_mutex;
+    bool io_nonblock;                   /* the I/O ring executes an entry: object waits return -EAGAIN instead */
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation
@@ -101,6 +102,14 @@ void thread_put(struct thread *t);
 static inline struct thread *thread_current(void)
 {
     return this_cpu()->current;
+}
+
+/* Would an object operation on this thread have to return -EAGAIN rather
+ * than wait? True when the object is non-blocking or the thread executes
+ * an I/O ring entry (docs/kernel/io/design.md). */
+static inline bool io_nonblocking(bool object_nonblock)
+{
+    return object_nonblock || thread_current()->io_nonblock;
 }
 
 /* True if the address lies inside `t`'s stack (backtrace validation). */
