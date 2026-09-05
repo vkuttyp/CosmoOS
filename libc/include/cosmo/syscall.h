@@ -287,4 +287,14 @@ static inline long cosmo_setrlimit(unsigned resource, uint64_t value)
     return cosmo_syscall2(SYS_setrlimit, resource, value);
 }
 
+/* Readiness and non-blocking mode (docs/kernel/object/api.md). */
+static inline long cosmo_ioready(int h)
+{
+    return cosmo_syscall1(SYS_ioready, h);
+}
+static inline long cosmo_setnonblock(int h, int on)
+{
+    return cosmo_syscall2(SYS_setnonblock, h, on);
+}
+
 #endif /* COSMO_SYSCALL_H */

@@ -50,11 +50,27 @@ static int socket_obj_stat(struct kobject *obj, struct cosmo_stat *st)
     return 0;
 }
 
+static unsigned socket_obj_ready(struct kobject *obj)
+{
+    return ksock_ready(container_of(obj, struct socket, obj));
+}
+
+static int socket_obj_set_nonblock(struct kobject *obj, int on)
+{
+    struct socket *s = container_of(obj, struct socket, obj);
+    int was = __atomic_load_n(&s->nonblock, __ATOMIC_RELAXED) ? 1 : 0;
+    if (on >= 0)
+        ksock_set_nonblock(s, on != 0);
+    return was;
+}
+
 static const struct kobject_io_type socket_type = {
-    .base = { .name = "socket", .release = socket_release },
+    .base = { .name = "socket", .release = socket_release, .flags = KOBJECT_TYPE_IO },
     .read = socket_obj_read,
     .write = socket_obj_write,
     .stat = socket_obj_stat,
+    .ready = socket_obj_ready,
+    .set_nonblock = socket_obj_set_nonblock,
 };
 
 struct socket *socket_from_kobject(struct kobject *obj)
@@ -127,6 +143,19 @@ static int take_error(struct socket *s)
     return e;
 }
 
+/* A non-blocking connect that finished since connect() returned becomes
+ * SS_CONNECTED here (under the socket mutex, like every state change). */
+static void settle_connecting(struct socket *s)
+{
+    mutex_lock(&s->lock);
+    if (s->state == SS_CONNECTING) {
+        enum tcp_state st = tcp_state_of(s->tcp);
+        if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT)
+            s->state = SS_CONNECTED;
+    }
+    mutex_unlock(&s->lock);
+}
+
 int ksock_bind(struct socket *s, const struct netaddr *addr)
 {
     if (addr->family != s->family)
@@ -186,6 +215,10 @@ int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
             ksock_put(c);
             return take_error(s) ? take_error(s) : -EINVAL;
         }
+        if (s->nonblock) {
+            ksock_put(c);
+            return -EAGAIN;
+        }
         int w = wait_event_killable(&s->wait, tcp_accept_ready(s->tcp) || s->error || (s->shut & 1));
         if (w) {
             ksock_put(c);
@@ -214,9 +247,35 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
         rc = -EISCONN;
     } else if (s->state == SS_LISTENING) {
         rc = -EINVAL;
+    } else if (s->state == SS_CONNECTING) {
+        /* A non-blocking connect in progress, or finished since. */
+        enum tcp_state st = tcp_state_of(s->tcp);
+        if (st == TCP_SYN_SENT || st == TCP_SYN_RCVD) {
+            rc = -EALREADY;
+        } else if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+            s->state = SS_CONNECTED;
+            rc = -EISCONN;
+        } else {
+            rc = take_error(s);
+            if (rc == 0)
+                rc = -ECONNREFUSED;
+            s->state = SS_UNCONNECTED;
+        }
     } else {
         rc = tcp_connect(s->tcp, addr);
-        if (rc == 0) {
+        if (rc == 0 && s->nonblock) {
+            enum tcp_state st = tcp_state_of(s->tcp);
+            if (st == TCP_SYN_SENT || st == TCP_SYN_RCVD) {
+                s->state = SS_CONNECTING;
+                rc = -EINPROGRESS;
+            } else if (st == TCP_ESTABLISHED || st == TCP_CLOSE_WAIT) {
+                s->state = SS_CONNECTED;
+            } else {
+                rc = take_error(s);
+                if (rc == 0)
+                    rc = -ECONNREFUSED;
+            }
+        } else if (rc == 0) {
             s->state = SS_CONNECTING;
             mutex_unlock(&s->lock);
             int w = wait_event_killable(&s->wait,
@@ -260,6 +319,8 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
     }
     if (to != NULL)
         return -EISCONN;
+    if (s->state == SS_CONNECTING)
+        settle_connecting(s);
     if (s->state != SS_CONNECTED)
         return -ENOTCONN;
     const uint8_t *p = buf;
@@ -274,6 +335,8 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
         }
         done += (size_t)n;
         if (done < len) {
+            if (s->nonblock)
+                return done ? (int64_t)done : -EAGAIN;
             int w = wait_event_killable(&s->wait, tcp_send_space(s->tcp) > 0 || s->tcp->error ||
                                                       tcp_state_of(s->tcp) == TCP_CLOSED);
             if (w)
@@ -299,6 +362,8 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
                 return 0;
             if (s->error)
                 return take_error(s);
+            if (s->nonblock)
+                return -EAGAIN;
             int w = wait_event_killable(&s->wait, mbufq_len(&s->udp.rxq) > 0 || s->error || (s->shut & 1));
             if (w)
                 return w;
@@ -310,6 +375,8 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
         m_freem(m);
         return (int64_t)n;
     }
+    if (s->state == SS_CONNECTING)
+        settle_connecting(s);
     if (s->state != SS_CONNECTED)
         return -ENOTCONN;
     for (;;) {
@@ -326,6 +393,8 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
             return 0;
         if (s->tcp->state == TCP_CLOSED)
             return s->tcp->error ? s->tcp->error : 0;
+        if (s->nonblock)
+            return -EAGAIN;
         int w = wait_event_killable(&s->wait, tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error ||
                                                   s->tcp->state == TCP_CLOSED || (s->shut & 1));
         if (w)
@@ -363,6 +432,33 @@ int ksock_getpeername(struct socket *s, struct netaddr *out)
         return -ENOTCONN;
     *out = s->type == COSMO_SOCK_DGRAM ? s->udp.remote : s->tcp->remote;
     return 0;
+}
+
+void ksock_set_nonblock(struct socket *s, bool on)
+{
+    __atomic_store_n(&s->nonblock, on, __ATOMIC_RELAXED);
+}
+
+unsigned ksock_ready(struct socket *s)
+{
+    unsigned r = 0;
+    if (s->type == COSMO_SOCK_DGRAM) {
+        if (mbufq_len(&s->udp.rxq) > 0)
+            r |= COSMO_IO_READABLE;
+        r |= COSMO_IO_WRITABLE;
+    } else {
+        r = tcp_ready(s->tcp);
+        enum socket_state st = s->state;
+        if (st != SS_CONNECTED && st != SS_LISTENING && st != SS_CONNECTING)
+            r |= COSMO_IO_WRITABLE;   /* a write fails at once with -ENOTCONN */
+    }
+    if (s->error)
+        r |= COSMO_IO_READABLE | COSMO_IO_WRITABLE | COSMO_IO_ERROR;
+    if (s->shut & 1)
+        r |= COSMO_IO_READABLE | COSMO_IO_HANGUP;
+    if (s->shut & 2)
+        r |= COSMO_IO_WRITABLE;
+    return r;
 }
 
 unsigned socket_count(void)

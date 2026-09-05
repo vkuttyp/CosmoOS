@@ -109,6 +109,11 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
     spin_unlock_irqrestore(&t->lock, s);
 }
 
+bool tty_has_line(struct tty *t)
+{
+    return __atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0;
+}
+
 int64_t tty_read(struct tty *t, void *buf, size_t len)
 {
     if (len == 0)

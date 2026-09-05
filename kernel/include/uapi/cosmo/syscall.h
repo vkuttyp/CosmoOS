@@ -81,7 +81,9 @@
 /* Resource limits (docs/kernel/security/design.md §2). */
 #define SYS_getrlimit   56  /* (unsigned resource, uint64_t *value) -> 0 */
 #define SYS_setrlimit   57  /* (unsigned resource, uint64_t value) -> 0; raising a limit needs privilege */
-#define SYS_COUNT       58
+#define SYS_ioready     58  /* (int h) -> COSMO_IO_* mask of what would not block now */
+#define SYS_setnonblock 59  /* (int h, int on) -> 0; -EOPNOTSUPP for objects that never block */
+#define SYS_COUNT       60
 
 #define COSMO_RLIMIT_AS     0   /* bytes of user address space mapped by regions */
 #define COSMO_RLIMIT_MEM    1   /* bytes of anonymous memory populated (resident) */
@@ -140,6 +142,13 @@ struct cosmo_procinfo {
 #define COSMO_AF_INET6 10
 #define COSMO_SOCK_STREAM 1
 #define COSMO_SOCK_DGRAM  2
+#define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: the socket starts non-blocking */
+
+/* Readiness bits (SYS_ioready). */
+#define COSMO_IO_READABLE 1
+#define COSMO_IO_WRITABLE 2
+#define COSMO_IO_HANGUP   4
+#define COSMO_IO_ERROR    8
 #define COSMO_SHUT_RD   0
 #define COSMO_SHUT_WR   1
 #define COSMO_SHUT_RDWR 2
@@ -257,6 +266,8 @@ struct cosmo_dirent {
 #define COSMO_EISCONN 106
 #define COSMO_ENOTCONN 107
 #define COSMO_ETIMEDOUT 110
+#define COSMO_EALREADY 114
+#define COSMO_EINPROGRESS 115
 #define COSMO_ECONNREFUSED 111
 #define COSMO_EHOSTUNREACH 113
 

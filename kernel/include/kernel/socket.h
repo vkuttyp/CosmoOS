@@ -37,6 +37,7 @@ struct socket {
     struct waitqueue wait;
     int error;                  /* pending asynchronous error, consumed by the next call */
     unsigned shut;              /* 1 = RD, 2 = WR */
+    bool nonblock;              /* a property of the object, shared by every handle to it */
     struct mutex lock;
     uint32_t uid;               /* creator's effective uid, informational (reserved ports are judged on the
                                    caller's credentials at bind time) */
@@ -55,6 +56,11 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
 int ksock_shutdown(struct socket *s, int how);
 int ksock_getsockname(struct socket *s, struct netaddr *out);
 int ksock_getpeername(struct socket *s, struct netaddr *out);
+/* Non-blocking mode: accept -EAGAIN, connect -EINPROGRESS, recv -EAGAIN,
+ * send what fits or -EAGAIN. */
+void ksock_set_nonblock(struct socket *s, bool on);
+/* COSMO_IO_* bits that would not block now. */
+unsigned ksock_ready(struct socket *s);
 static inline void ksock_get(struct socket *s) { kobject_get(&s->obj); }
 static inline void ksock_put(struct socket *s) { kobject_put(&s->obj); }
 struct socket *socket_from_kobject(struct kobject *obj);

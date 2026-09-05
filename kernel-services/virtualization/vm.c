@@ -40,7 +40,7 @@ static int vm_obj_stat(struct kobject *obj, struct cosmo_stat *st)
 }
 
 static const struct kobject_io_type vm_type = {
-    .base = { .name = "vm", .release = vm_release },
+    .base = { .name = "vm", .release = vm_release, .flags = KOBJECT_TYPE_IO },
     .read = vm_obj_read,
     .write = vm_obj_write,
     .stat = vm_obj_stat,

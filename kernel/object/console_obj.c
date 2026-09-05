@@ -41,11 +41,18 @@ static void console_obj_release(struct kobject *obj)
     panic("console object %p released; it must outlive the kernel", (void *)obj);
 }
 
+static unsigned console_obj_ready(struct kobject *obj)
+{
+    (void)obj;
+    return COSMO_IO_WRITABLE | (tty_has_line(tty_console()) ? COSMO_IO_READABLE : 0);
+}
+
 static const struct kobject_io_type console_type = {
-    .base = { .name = "console", .release = console_obj_release },
+    .base = { .name = "console", .release = console_obj_release, .flags = KOBJECT_TYPE_IO },
     .read = console_obj_read,
     .write = console_obj_write,
     .stat = console_obj_stat,
+    .ready = console_obj_ready,
 };
 
 static struct kobject g_console = { .type = &console_type.base, .refcount = 1 };
