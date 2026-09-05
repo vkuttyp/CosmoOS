@@ -74,6 +74,9 @@ kernel stack.
 | 57 | `setrlimit` | `unsigned resource, uint64_t value` | 0 | `EINVAL` (resource, `NOFILE` > 64), `EPERM` (raising without privilege) |
 | 58 | `ioready` | `int h` | `COSMO_IO_*` mask of what would not block now (`READABLE` 1, `WRITABLE` 2, `HANGUP` 4, `ERROR` 8); a file is always ready, a vCPU never | `EBADF` |
 | 59 | `setnonblock` | `int h, int on` | 0; the object (every handle to it) blocks no more: sockets return `EAGAIN`/`EINPROGRESS`/`EALREADY`, pipe ends `EAGAIN` | `EBADF`, `EOPNOTSUPP` (the object never blocks: console, file, VM) |
+| 60 | `aio_create` | `unsigned entries (1..1024), unsigned flags (0)` | an I/O ring handle (READ and WRITE) | `EINVAL`, `ENOMEM`, `EMFILE` |
+| 61 | `aio_submit` | `int ring, const struct cosmo_sqe *sqes, unsigned n` | entries accepted (each completes later with its own result or error) | `EBADF`, `EPERM` (another process's ring), `EFAULT`, `EBUSY` (full) |
+| 62 | `aio_wait` | `int ring, struct cosmo_cqe *cqes, unsigned n, unsigned min, uint64_t timeout_ns` | completions copied, 0 after a timeout or a poll | `EBADF`, `EPERM`, `EINVAL` (`min > n`), `EFAULT`, `EINTR` |
 | 43 | `vm_create` | `int vmm_h` (a handle to `/dev/vmm` open for writing) | a VM handle | `EBADF`, `EPERM`, `ENOTSUP`, `ENOSPC`, `ENOMEM`, `EMFILE` |
 | 44 | `vm_mem` | `int vm, uint64_t gpa, uint64_t len` | 0 (a zeroed guest memory region) | `EBADF`, `EINVAL`, `ENOSPC`, `ENOMEM` |
 | 45 | `vm_mem_rw` | `int vm, uint64_t gpa, void *buf, size_t len, int write` | bytes copied | `EBADF`, `EINVAL`, `EFAULT`, `ENOMEM` |
@@ -97,7 +100,8 @@ object (`read` drains the guest's debug console, `fstat` is
 `COSMO_DT_CHR`), a vCPU handle only closes. Calls 50–55 are the
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
-`docs/kernel/object/api.md`); `SYS_COUNT` is 60. A file opened with `open`
+`docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 63. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` or `accept` is
@@ -214,6 +218,10 @@ kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
 `ENOTTY` 25, `ESPIPE` 29, `ERANGE` 34); `COSMO_EXIT_FAULT` 139;
 `COSMO_SOCK_NONBLOCK` 0x800, `COSMO_IO_READABLE/WRITABLE/HANGUP/ERROR`
 1/2/4/8, `COSMO_EALREADY` 114, `COSMO_EINPROGRESS` 115 (milestone 8);
+`COSMO_AIO_NOP/READ/WRITE/PREAD/PWRITE/FSYNC/POLL` 0–6,
+`COSMO_AIO_F_NOWAIT` 1, `COSMO_AIO_MAX_ENTRIES` 1024,
+`COSMO_AIO_WAIT_FOREVER`, `struct cosmo_sqe` (40 bytes) and
+`struct cosmo_cqe` (16 bytes) (milestone 9);
 `COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags `COSMO_AT_NULL`
 0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9; `COSMO_DT_FIFO` 4,
 `COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*`,
@@ -250,8 +258,9 @@ page is populated.
 Phase 12 `cosmo_vm_create`, `cosmo_vm_mem`, `cosmo_vm_mem_read/write`,
 `cosmo_vcpu_create`, `cosmo_vcpu_get/set_regs`, `cosmo_vcpu_run`,
 `cosmo_vcpu_irq` (`cosmo/hv.h`), since milestone 6 `cosmo_getrlimit`,
-`cosmo_setrlimit`, and since milestone 8 `cosmo_ioready`,
-`cosmo_setnonblock`, return the raw kernel result as `long`. The C library (`docs/libc/`) translates
+`cosmo_setrlimit`, since milestone 8 `cosmo_ioready`,
+`cosmo_setnonblock`, and since milestone 9 `cosmo_aio_create`,
+`cosmo_aio_submit`, `cosmo_aio_wait`, return the raw kernel result as `long`. The C library (`docs/libc/`) translates
 them into `errno` and the standard names; programs use the library, the
 raw wrappers are internal to it (and to `init --selftest`).
 

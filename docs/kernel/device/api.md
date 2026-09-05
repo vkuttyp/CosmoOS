@@ -122,7 +122,8 @@ device can reach. Inputs: `dev` (NULL means a 32-bit mask), `size > 0`,
 under 32 bits, `DMA32` for exactly 32 bits, any RAM otherwise; a block
 that lands above the mask is freed and NULL returned. Outputs: the
 direct-map virtual address and `*dma_out`. Ownership: caller, until
-`dma_free`. Sleeps (PMM); never from interrupt context. NULL on failure.
+`dma_free`. Thread context (the PMM does not sleep, but this is not for
+interrupt handlers). NULL on failure.
 
 ### `void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma)` *(exported)*
 Purpose: release a `dma_alloc` block; `size` must be the size passed to
@@ -138,7 +139,15 @@ from a statistics spinlock. `dir` is `DMA_TO_DEVICE`, `DMA_FROM_DEVICE`,
 or `DMA_BIDIRECTIONAL` and is currently only recorded.
 
 ### `void dma_unmap(struct device *, dma_addr_t, size_t, enum dma_dir)` *(exported)*
-No-op today; the place an IOMMU tears a mapping down. Any context.
+Undo a `dma_map`: nothing to tear down without an IOMMU, but every map
+must have its unmap (`invariants.md` D5) and the call counts `unmaps`.
+`dma` must be a value `dma_map` returned (non-zero, asserted). Any
+context.
+
+### `bool dma_mappable(struct device *dev, const void *va, size_t len)` *(exported)*
+Would `dma_map` accept the range? The same rule with no side effect and
+no statistics; the block layer validates bio buffers with it and leaves
+the real mapping to the driver. Any context.
 
 ### `void dma_sync_for_device(...)`, `void dma_sync_for_cpu(...)` *(exported)*
 Purpose: ordering points around device access: a compiler barrier plus
@@ -153,8 +162,9 @@ Purpose: declare how many address bits the device drives (24 to 64).
 allocation.
 
 ### `void dma_get_stats(struct dma_stats *out)`
-`allocs`, `frees`, `maps`, `map_failures`, `bytes_allocated`
-(outstanding). Any context.
+`allocs`, `frees`, `maps`, `unmaps`, `map_failures`, `bytes_allocated`
+(outstanding). `maps - unmaps` is the number of mappings in flight. Any
+context.
 
 ## Block layer (`kernel/include/kernel/blk.h`, `kernel/block/blk.c`)
 
@@ -162,13 +172,20 @@ allocation.
 Registry mutex. Once, from `kernel_main` after `pci_init`.
 
 ### `int blk_register(struct blkdev *bd, const char *prefix)` *(exported)*
-Purpose: publish a caller-owned `struct blkdev`. Inputs: `ops->submit`,
-`sector_size` (power of two, at least 512), `capacity` (sectors, > 0),
-`max_sectors` (per bio, > 0), optional `dev`, `read_only`, `priv`;
-`prefix` such as `"vd"` gets the first free letter appended (`vda`).
-Outputs: 0, `-EINVAL` for bad geometry or a long prefix, `-ENOSPC` past
-`z`. Ownership: the caller keeps the object until `blk_unregister`.
-Sleeps. Logs one line the boot test keys on.
+Purpose: publish a caller-owned `struct blkdev`. Inputs: `ops->submit`
+and `ops->release`, `sector_size` (power of two, at least 512),
+`capacity` (sectors, > 0), `max_sectors` (per bio, > 0), optional
+`max_segments` (0 means 1), `timeout_ns` (0 takes `BLK_TIMEOUT_NS` 30 s,
+`UINT64_MAX` disables), `nr_queues` (0 means 1, informational),
+`ops->timeout`, `dev`, `read_only`, `priv`; `prefix` such as `"vd"` gets
+the first free letter appended (`vda`). Outputs: 0, `-EINVAL` for bad
+geometry or a long prefix, `-ENOSPC` past `z`. Ownership: the caller
+keeps the object until `blk_unregister`. Sleeps. Logs one line the boot
+test keys on. The first registration starts the `blk-timeout` thread.
+
+### `int blk_register_named(struct blkdev *bd, const char *name)` *(exported)*
+The same under exactly `name` (`nvme0n1`); `-EEXIST` when taken,
+`-EINVAL` for an empty or long name.
 
 ### `void blk_unregister(struct blkdev *bd)` *(exported)*
 Purpose: remove from the registry. The driver must have drained or
@@ -178,8 +195,13 @@ completes them with `-EIO`). Sleeps.
 ### `int blk_submit(struct bio *bio)` *(exported)*
 Purpose: validate and hand a request to the driver. Inputs: `dev`,
 `done` non-NULL; for `BIO_READ`/`BIO_WRITE`: `nsectors` in
-`[1, max_sectors]`, `sector + nsectors <= capacity`, `buf` DMA-able
-(`dma_map` must succeed); `BIO_FLUSH` needs `sector == nsectors == 0`.
+`[1, max_sectors]`, `sector + nsectors <= capacity`, and the data
+either one buffer (`buf`, `nr_vecs == 0`) or `nr_vecs <= max_segments`
+segments in `vecs` whose lengths sum to `nsectors × sector_size`, every
+segment but the first starting on a page boundary and every segment but
+the last ending on one; each buffer DMA-able (`dma_mappable`);
+`BIO_FLUSH` needs `sector == nsectors == 0`. The accepted bio joins the
+device's in-flight list (`issued_ns`, `issue_cpu`) until it completes.
 Outputs: 0 (the driver owns the bio until it calls `bio_complete`, and
 `done` runs exactly once), `-EINVAL` (also for `flags` on a read),
 `-EROFS` for a write to a read-only device, or the driver's own error
@@ -191,8 +213,25 @@ the last piece. Thread context. `status` reads `-EAGAIN` while in
 flight.
 
 ### `void bio_complete(struct bio *bio, int status)` *(exported)*
-Driver side: record `status`, bump the device's `reads`/`writes`/
-`flushes`/`errors`, run `done`. Any context, typically an MSI handler.
+Driver side: take the bio off the in-flight list, record `status`, bump
+the device's `reads`/`writes`/`flushes`/`errors` and
+`completed_local`/`completed_remote` (whether the completing CPU is the
+issuing one), run `done`, then resubmit from the pending list. Any
+context, typically an MSI handler.
+
+### `void bio_segment(const struct bio *bio, unsigned i, struct bio_vec *out)`, `unsigned bio_segments(const struct bio *bio)` *(exported)*
+Segment `i` of a bio in either shape: a plain bio is one segment of
+`buf` and `nsectors × sector_size` bytes. Drivers written for segments
+handle both.
+
+### `ops->timeout(struct blkdev *dev, struct bio *bio)` (optional)
+Called by the `blk-timeout` thread (thread context, the registry mutex
+held) for a bio in flight longer than `timeout_ns`, once per bio
+(`timeouts` counts it, one warning is logged). The driver must find the
+bio in its own in-flight records under its own lock before touching it,
+because the request may complete on another CPU at any moment; if found,
+make the device forget it and complete it (`-ETIMEDOUT`) through
+`bio_complete`. Without the operation the layer only warns.
 
 ### `int blk_read(struct blkdev *, uint64_t sector, uint32_t nsectors, void *buf)`, `blk_write(...)`, `blk_write_flags(..., unsigned flags)`, `blk_flush(...)` *(exported)*
 Purpose: synchronous helpers on a stack `completion`, splitting into
@@ -205,9 +244,16 @@ Referenced pointer or NULL; drop with `blkdev_put`. Sleeps.
 `blk_count()` and `blk_dump()` report the registry.
 
 ### `struct bio`
-`dev`, `sector`, `nsectors`, `dir`, `buf`, `done`, `arg`, `status`,
-`link` and `drvpriv` for the driver. The submitter owns it; nothing in
-the layer allocates bios.
+`dev`, `sector`, `nsectors`, `dir`, `flags`, `buf` or `vecs`/`nr_vecs`
+(`struct bio_vec { void *buf; uint32_t len; }`), `done`, `arg`,
+`status`, `link` and `drvpriv` for the driver, `inflight_link`,
+`issued_ns` and `issue_cpu` for the layer. The submitter owns it; nothing
+in the layer allocates bios.
+
+### `struct blkdev` counters
+`reads`, `writes`, `flushes`, `errors`, `requeued`, `timeouts`,
+`completed_local`, `completed_remote`; `nr_queues` as the driver set
+it.
 
 ## Entropy (`kernel/include/kernel/random.h`, `kernel/core/random.c`)
 

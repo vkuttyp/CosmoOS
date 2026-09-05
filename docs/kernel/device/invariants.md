@@ -41,16 +41,21 @@ path resets the device and frees queues and DMA memory). Check: `device`
 self-test (`-EIO` probe), `module-fail` style review of each driver's
 failure path. Gap: no fault-injection test drives a virtio probe failure.
 
-**D5. Every bus address comes from `dma_alloc` or `dma_map`, and
-`dma_map` accepts only direct-map memory below the device's mask.**
-Kernel-arena, stack, and user addresses yield 0. `blk_submit` runs
-`dma_map` on the bio buffer before any driver sees it. Check: `dma`
-self-test (kmalloc maps, arena and stack do not, 24-bit mask allocation
-lands below 16 MiB where a DMA zone exists; the AArch64 `virt` machine
-has no RAM below 1 GiB and the check is skipped there), `blk` self-test
-(stack buffer refused). Gap: a
-driver can still pass an arbitrary integer as a bus address; the API is
-a discipline boundary, not enforcement (no IOMMU).
+**D5. Every bus address comes from `dma_alloc` or `dma_map`, `dma_map`
+accepts only direct-map memory below the device's mask, and every
+`dma_map` has its `dma_unmap`.** Kernel-arena, stack, and user addresses
+yield 0. `blk_submit` checks bio buffers with `dma_mappable` (no side
+effect) and the driver maps and unmaps for real; virtio-blk unmaps at
+completion, virtio-net when the device returns a buffer, NVMe at
+completion, abort or reset. Devices that address 64 bits say so
+(`dma_set_mask(64)`: the virtio-pci transport, NVMe), so buffers above
+4 GiB are not refused (audit finding #27). Check: `dma` self-test
+(kmalloc maps, arena and stack do not, the predicate agrees with the
+map, `unmaps` counts, and a burst of I/O on `vda` leaves `maps − unmaps`
+unchanged), `nvme` self-test (the same on the NVMe namespace), `blk`
+self-test (stack buffer refused). Gap: a driver can still pass an
+arbitrary integer as a bus address; the API is a discipline boundary,
+not enforcement (no IOMMU).
 
 **D6. `dma_alloc` memory is physically contiguous, page granular, and
 inside the mask; `dma_free` gets the same `size`.** Zone selection by
@@ -60,12 +65,33 @@ starting value). Gap: `dma_free` cannot detect a wrong `size`.
 
 **D7. A bio that `blk_submit` accepted completes exactly once through
 `bio_complete`, and a bio it rejected never runs `done`.** Validation
-(range, count against `max_sectors`, DMA-ability, read-only) happens
-before `ops->submit`; a driver that returns an error from `submit` has
-not queued it. virtio_blk completes every in-flight bio with `-EIO` on
-remove. Check: `blk` self-test (rejections return `-EINVAL`/`-EROFS`
-without completion; statistics count exactly the accepted bios). Gap: no
-test unloads `virtio_blk` with requests in flight.
+(range, count against `max_sectors`, segment rules and count against
+`max_segments`, DMA-ability, read-only) happens before `ops->submit`; a
+driver that returns an error from `submit` has not queued it. virtio_blk
+completes every in-flight bio with `-EIO` on remove. Check: `blk`
+self-test (rejections return `-EINVAL`/`-EROFS` without completion;
+statistics count exactly the accepted bios), `blk-segments` (five
+malformed segment lists refused). Gap: no test unloads `virtio_blk` with
+requests in flight.
+
+**D7c. A segment list is a run of whole pages between its ends.** Every
+segment but the first starts on a page boundary, every segment but the
+last ends on one, the lengths sum to the transfer, the count is within
+`max_segments`; so a driver turns segments into descriptors or PRP
+entries without bouncing. Check: `blk-segments` (three-segment write
+read back flat and in two pages on the RAM device), `nvme` (a
+two-segment, four-page transfer through a PRP list).
+
+**D7d. No accepted bio waits for ever.** Every accepted bio is on its
+device's in-flight list; the `blk-timeout` thread reports one older than
+`timeout_ns` once and hands it to the driver's `timeout`, which completes
+it (`-ETIMEDOUT`) after making the device forget it; a driver without the
+operation gets the warning and the counter. The driver never
+dereferences the bio before finding it in its own records. Check:
+`blk-timeout` (a stalled RAM device: `blk_read` returns `-ETIMEDOUT`
+after the 300 ms the test set, `timeouts` +1, the device recovers).
+Gap: virtio-blk's and NVMe's timeout paths run only by review (QEMU
+answers).
 
 **D7a. A queue-full driver never fails a caller.** `-EAGAIN` from
 `ops->submit` parks the bio in `blkdev.pending`; `bio_complete` drains the

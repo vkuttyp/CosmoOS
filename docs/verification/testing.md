@@ -113,11 +113,11 @@ the last data-bearing write, and a torn commit write accepts either root
 ## Syscall fuzzer
 
 ```
-USERTEST: syscall-fuzz ok: 20000 calls, 16932 errors, 3068 successes, 50/60 system calls exercised, seed 20260905
+USERTEST: syscall-fuzz ok: 20000 calls, 16858 errors, 3142 successes, 52/63 system calls exercised, seed 20260905
 ```
 
 1.8 to 1.9 s per boot on either architecture. The kernel survived on the
-first run; the nine excluded calls are the blocking and process-ending
+first run; the eleven excluded calls are the blocking and process-ending
 ones (`api.md`). The error count is the point: sixteen thousand rejected
 argument combinations, each a clean errno.
 

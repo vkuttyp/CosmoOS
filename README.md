@@ -360,6 +360,23 @@ See [docs/development.md](docs/development.md).
   `accept4`, `pipe2(O_NONBLOCK)`, `fcntl(O_NONBLOCK)`), the piece
   `poll` and asynchronous I/O will build on. Six new self-tests, 119
   in total.
+- **Async I/O and the block layer for NVMe (done):** milestone 9 of the
+  audit's plan (`docs/kernel/io/design.md`, `docs/drivers/nvme/design.md`,
+  `docs/kernel/device/design.md` "The block layer for NVMe"). An
+  asynchronous I/O ring (`aio_create`/`aio_submit`/`aio_wait`, calls
+  60–62): entries execute in the submitting process when their object is
+  ready and park otherwise, driven by the readiness operation and a new
+  `poll_wq` operation on every I/O object; completions are collected in
+  batches with `min` and a timeout. The block layer gained multi-segment
+  bios, an in-flight list with request timeouts and a driver `timeout`
+  operation, exact-name registration and completion-locality counters;
+  every DMA mapping now has its unmap and 64-bit devices declare their
+  mask (finding #27). A new `nvme` driver module brings up the
+  controller, creates one I/O queue per CPU with its MSI-X vector routed
+  to that CPU, builds PRP lists from segments, aborts and resets on
+  timeout, and registers each namespace as `nvme0n1`; QEMU attaches one
+  on both machines and cosmofs mounts on it. Three new self-tests, 122
+  in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

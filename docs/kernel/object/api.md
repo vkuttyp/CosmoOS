@@ -30,8 +30,9 @@ descriptor is really a `struct kobject_io_type`; a type without it (a
 vcpu) is a plain object and every I/O path answers `-EBADF` for it
 instead of reading operations past the end of the descriptor. Subtypes
 embed it as `base` and add operations (`struct kobject_io_type` adds
-`read`, `write`, since Phase 9 an optional `stat`, and since milestone
-8 the optional `ready` and `set_nonblock`). Contract for `read(obj,
+`read`, `write`, since Phase 9 an optional `stat`, since milestone 8 the
+optional `ready` and `set_nonblock`, and since milestone 9 the optional
+`poll_wq`). Contract for `read(obj,
 buf, len)` / `write(obj, buf, len)`: return the bytes transferred,
 `0 <= count <= len`, or a negative errno; a NULL operation means the
 object does not support that direction (`-EBADF` from the system
@@ -46,12 +47,19 @@ non-blocking mode (0 or 1; -1 only asks) and returns the previous mode;
 NULL means the object never blocks and the switch is `-EOPNOTSUPP`. The
 mode is a property of the object, shared by every handle to it (there
 is no open-file-description layer between a handle and its object).
+`struct waitqueue *poll_wq(obj, unsigned events)` returns the queue a
+waiter for `events` sleeps on, woken whenever `ready` may have changed
+for those bits; NULL means readiness never changes (a file). The
+asynchronous I/O ring (`docs/kernel/io/`) is built on `ready` and
+`poll_wq` alone.
 I/O kobjects today: the console (`read`/`write`/`stat`/`ready`: readable
 with a complete tty line, always writable), `struct file`
 (`kernel-services/vfs/`; no `ready`: always ready), `struct socket`
 (`read`/`write`/`stat`/`ready`/`set_nonblock`), the pipe ends
 `pipe-read` (`read`/`stat`/`ready`/`set_nonblock`) and `pipe-write`
-(`write`/`stat`/`ready`/`set_nonblock`) (`kernel/ipc/`), and
+(`write`/`stat`/`ready`/`set_nonblock`) (`kernel/ipc/`), all four with
+`poll_wq` since milestone 9, the I/O ring `aio` (`ready`/`poll_wq` only;
+`kernel/io/`), and
 since Phase 12 `struct vm` (`read` drains the guest's debug console,
 `write` `-ENOTSUP`, `stat` `COSMO_DT_CHR`; `kernel-services/virtualization/`),
 whose companion `struct vcpu` is a plain kobject. The system call
@@ -63,6 +71,10 @@ buggy object can never make the kernel read past its stack buffer.
 The object's io type, or NULL for a plain object (or NULL `obj`).
 `syscall_handle_read/write/stat`, `sys_ioready` and `sys_setnonblock`
 go through it.
+
+### `struct waitqueue *kobject_poll_wq(struct kobject *obj, unsigned events)`
+The `poll_wq` operation with its default: NULL for a plain object or a
+type without it.
 
 ### `unsigned kobject_ready(struct kobject *obj)`, `int kobject_set_nonblock(struct kobject *obj, int on)`
 The `ready` and `set_nonblock` operations with their defaults: a plain

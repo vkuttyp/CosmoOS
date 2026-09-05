@@ -88,7 +88,9 @@ line count); the console object's `ready` operation reports
   `-EINTR` when the calling process is being killed.
 - Blocking: `wait_event_killable(&t->readers, t->lines > 0)`; several
   readers may race for one record, the first to take the lock wins and
-  the others wait again. Thread context only.
+  the others wait again. Thread context only. A thread executing an I/O
+  ring entry (`io_nonblocking(false)`, `docs/kernel/io/api.md`) gets
+  `-EAGAIN` instead of waiting when no line is complete.
 - Ownership: nothing; bytes are copied.
 
 ### `void tty_get_stats(struct tty *t, struct tty_stats *out)`
@@ -97,6 +99,8 @@ Snapshot under the lock. For tests and diagnostics.
 ## The console kobject (`kernel/object/console_obj.c`)
 
 `read(obj, buf, len)` is `tty_read(tty_console(), buf, len)`;
+`poll_wq(obj, events)` is the tty's `readers` queue for
+`COSMO_IO_READABLE` and NULL otherwise (the console is always writable);
 `write(obj, buf, len)` is `console_write` and returns `len`;
 `stat(obj, st)` fills `type = COSMO_DT_CHR`, `mode = 0620`, `nlink = 1`,
 everything else 0. The object is static with refcount 1; its release
