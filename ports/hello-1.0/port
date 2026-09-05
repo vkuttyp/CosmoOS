@@ -1,0 +1,5 @@
+# hello 1.0: the older version, kept so `pkg upgrade` has something to do.
+name: hello
+version: 1.0
+summary: prints a greeting
+program: bin/hello src/hello.c

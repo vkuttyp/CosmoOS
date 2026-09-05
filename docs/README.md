@@ -38,6 +38,7 @@ wins and the document is wrong.
 | `kernel/ipc/` | IPC primitives: anonymous pipes as two kobject ends (`pipe`, system call 35) |
 | `libc/` | The native C library: headers, `errno`, string, allocator, stdio, `spawn`/`wait`/`kill`, files, directories, sockets, the native introspection wrappers; host test |
 | `userland/` | init, the shell (`cosmo$ `), the coreutils and system tools, `/etc/rc`, the shell test script and the interactive serial harness |
+| `pkg/` | The package system: recipes (`ports/`), the host builder `tools/pkgbuild.py`, the `.cpk` and `INDEX` formats, the `pkg` manager (`pkg/`), signing and checksums, the `/var/db/pkg` database, the package tests |
 
 Further subsystem directories are added as subsystems come into existence
 (`drivers/nvme/`, `drivers/network/`, `kernel-services/virtualization/`, and so on).

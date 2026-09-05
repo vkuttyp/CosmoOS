@@ -32,7 +32,7 @@ pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_han
         return spawnve(file, argv, (const char *const *)environ, h, nh);
     const char *path = getenv("PATH");
     if (path == NULL)
-        path = "/bin:/sbin";
+        path = "/bin:/sbin:/usr/bin:/usr/sbin";
     char cand[1024];
     int last = ENOENT;
     while (*path) {

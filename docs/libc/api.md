@@ -134,7 +134,7 @@ int kill(pid_t pid, int sig);
 `SYS_spawn`; the child receives exactly the handles in `h` (`h == NULL,
 nh == 0`: handles 0, 1, 2 as they are). `spawnvp` uses `environ`; a
 `file` containing `/` is used as is, otherwise each `PATH` directory
-(default `/bin:/sbin`) is tried with `stat` and the first regular file
+(default `/bin:/sbin:/usr/bin:/usr/sbin`) is tried with `stat` and the first regular file
 is spawned; `errno` is the last error, `ENOENT` when nothing matched.
 The `argv` arrays are `const char *const *` so string literals can be
 passed under `-Wwrite-strings`.

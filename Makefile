@@ -27,10 +27,11 @@ include $(ROOT)/kernel/kernel.mk
 include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/libc/libc.mk
 include $(ROOT)/userland/userland.mk
+include $(ROOT)/pkg/pkg.mk
 include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
 
-all: kernel boot libc userland modules
+all: kernel boot libc userland pkg ports modules
 
 IMAGE := $(OUT)/cosmoos.img
 
@@ -40,9 +41,9 @@ image: $(IMAGE)
 # order the kernel loads them (dependencies first). See
 # scripts/mkbootarchive.py and docs/kernel/module/.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES := init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 
@@ -67,7 +68,7 @@ test-crash:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
 
-analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE)
+analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE)
 	@echo "static analysis: clean"
 
 reproducible:

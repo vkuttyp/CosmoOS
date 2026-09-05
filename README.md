@@ -161,5 +161,20 @@ See [docs/development.md](docs/development.md).
   total), a libc host test, the shell's own test script and an
   interactive harness that types at the `cosmo$ ` prompt through QEMU's
   serial port.
-- **Next, Phase 10:** the package system: ports, builder, repositories,
-  `pkg`, signing (constitution sections 47 and 48).
+- **Phase 10 (done):** the package system, entirely in userland.
+  Declarative recipes under `ports/` (`name`, `version`, `depends`,
+  `program`, `file`), a host builder (`tools/pkgbuild.py`, `make ports`)
+  that cross-compiles them into signed, checksummed, reproducible
+  `.cpk` packages (a ustar archive with a `+MANIFEST`, then the module
+  signature trailer) and a signed repository `INDEX`, and `/sbin/pkg`
+  (`update install remove upgrade list info search verify`) with
+  dependency resolution and version constraints, Ed25519 signature and
+  SHA-512 checksum verification against `/etc/pkg/keys`, atomic
+  per-file installation with rollback, and a text database under
+  `/var/db/pkg`. The repository ships in the boot archive as
+  `/boot/repo`; the shell test script installs, upgrades, refuses
+  tampered fixtures and removes packages, and a host test covers the
+  parsers.
+- **Next, Phase 11:** Linux compatibility: a Linux personality with its
+  own system-call table, ELF loading, signals, futex, mmap, sockets and
+  a dynamic linker (constitution sections 38 to 40).

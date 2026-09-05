@@ -347,6 +347,22 @@ static int write_file(const char *path, const void *data, size_t len, uint32_t m
     return n == (int64_t)len ? 0 : (n < 0 ? (int)n : -EIO);
 }
 
+/* mkdir -p for the parents of `path` (archive entries may be nested). */
+static void ensure_parents(const char *path)
+{
+    char dir[VFS_PATH_MAX];
+    strlcpy(dir, path, sizeof(dir));
+    for (char *p = dir + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        int rc = vfs_mkdir(NULL, dir, 0755);
+        if (rc && rc != -EEXIST)
+            kwarn("ramfs: cannot create %s (%d)", dir, rc);
+        *p = '/';
+    }
+}
+
 void ramfs_populate_boot(void)
 {
     static const char *const dirs[] = { "/boot", "/boot/modules", "/boot/tests", "/tmp", "/mnt", "/dev",
@@ -371,6 +387,7 @@ void ramfs_populate_boot(void)
         } else {
             ksnprintf(path, sizeof(path), "/boot/%s", e->name);
         }
+        ensure_parents(path);
         int rc = write_file(path, e->data, e->size, mode);
         if (rc)
             kwarn("ramfs: cannot populate %s (%d)", path, rc);
