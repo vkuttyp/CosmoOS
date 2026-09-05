@@ -42,6 +42,57 @@ static const struct chrdev_ops vmm_chr_ops = {
     .write = NULL,
 };
 
+/*
+ * Nested paging must translate every guest access, including those of a
+ * guest that has its own paging disabled (real mode, flat protected
+ * mode). An emulator that skips the nested walk in that case lets such
+ * a guest read and write *host* physical memory: QEMU/TCG before 9.2 did
+ * exactly that. The check runs a one-instruction paging-off guest whose
+ * code lives at guest-physical 0x80000000, an address that is outside
+ * host RAM in the harness (256 MiB) and inside the PCI hole, so a
+ * bypassed nested walk fetches 0xFF bytes there, faults with an empty IDT
+ * and shuts down instead of executing the hlt. On a failure the backend
+ * is disabled: no VM can be created on a platform whose hardware or
+ * emulator would let a guest out of its memory.
+ */
+#define SELFCHECK_GPA 0x80000000ull
+
+static bool paging_off_is_translated(void)
+{
+    struct vm *vm;
+    struct vcpu *v = NULL;
+    bool ok = false;
+    if (vm_create(0, &vm))
+        return false;
+    static const uint8_t hlt = 0xF4;
+    if (vm_mem_add(vm, SELFCHECK_GPA, 0x1000) || vm_mem_write(vm, SELFCHECK_GPA, &hlt, 1) ||
+        vcpu_create(vm, 0, &v))
+        goto out;
+    struct cosmo_vcpu_regs regs;
+    vcpu_get_regs(v, &regs);
+    regs.cr0 = 0x11;                                        /* PE | ET, paging off */
+    regs.cs.selector = 0x8;  regs.cs.attrib = 0xC9B; regs.cs.limit = 0xFFFFFFFFu; regs.cs.base = 0;
+    regs.ds.selector = 0x10; regs.ds.attrib = 0xC93; regs.ds.limit = 0xFFFFFFFFu; regs.ds.base = 0;
+    regs.es = regs.ss = regs.fs = regs.gs = regs.ds;
+    regs.rip = SELFCHECK_GPA;
+    regs.rsp = SELFCHECK_GPA + 0x1000;
+    regs.idtr.limit = 0;
+    if (vcpu_set_regs(v, &regs))
+        goto out;
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    int rc = vcpu_run_limited(v, &x, 50);
+    ok = rc == 0 && x.kind == COSMO_VM_EXIT_HLT && x.rip == SELFCHECK_GPA + 1;
+    if (!ok)
+        kwarn("hv: self-check: paging-off guest exited with rc %d kind %u rip 0x%llx (expected hlt)", rc, x.kind,
+              (unsigned long long)x.rip);
+out:
+    if (v)
+        kobject_put(&v->obj);
+    kobject_put(&vm->obj);
+    return ok;
+}
+
 void hv_init(void)
 {
     mutex_init(&g_lock, "hv");
@@ -51,7 +102,14 @@ void hv_init(void)
         kinfo("hv: no hardware virtualization backend on this CPU");
     else if (rc)
         kwarn("hv: backend probe failed (%d)", rc);
-    else
+    else if (!paging_off_is_translated()) {
+        kwarn("hv: backend %s disabled: nested paging does not confine a guest with paging off "
+              "(QEMU/TCG before 9.2 has this bug)", g_caps.name);
+        g_caps.present = false;
+        g_caps.name = "none";
+        g_caps.nested_paging = false;
+        g_caps.max_asids = 0;
+    } else
         kinfo("hv: backend %s, nested paging %s, %u ASIDs", g_caps.name, g_caps.nested_paging ? "yes" : "no",
               g_caps.max_asids);
     rc = ramfs_mkchr("/dev/vmm", 0600, &vmm_chr_ops, NULL, &g_vmm_vnode);

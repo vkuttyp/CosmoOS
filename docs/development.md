@@ -415,3 +415,8 @@ Constitution section 66 applies to every subsystem change. In practice:
 3. Before pushing: `make test`, `make BUILD=release test`, `make host-test`,
    `make analyze`, `make reproducible`, `make test-crash`.
 4. Update the subsystem documentation in the same PR.
+
+The virtualization tests need QEMU 9.2 or newer (TCG nested paging for
+paging-off guests); with an older QEMU the kernel disables the backend at
+boot and the boot test fails on the skipped guest tests. CI runs in a
+Debian trixie container for this reason.

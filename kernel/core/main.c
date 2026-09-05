@@ -149,7 +149,6 @@ void kernel_main(const struct cosmoboot_info *info)
     vfs_init();
     cosmofs_init();
     ramfs_populate_boot();
-    hv_init();
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */
@@ -157,6 +156,9 @@ void kernel_main(const struct cosmoboot_info *info)
 
     arch_irq_enable();
     kinfo("interrupts enabled");
+
+    /* Virtualization: probe the backend and run its self-check guest (needs interrupts). */
+    hv_init();
     arch_console_input_init();
 
     /* Bring up the other CPUs now that this one can take interrupts:

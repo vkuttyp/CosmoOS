@@ -5,8 +5,13 @@
 #   -> host unit tests (ASan/UBSan) -> static analysis
 #   -> reproducibility check -> panic-path test.
 #
-# The runner is x86-64 Linux. The primary development environment is an
-# ARM64 Linux VM; the toolchain is host-agnostic so the outputs match.
+# The runner is x86-64 Linux. The job runs in a Debian trixie container:
+# the virtualization tests need QEMU >= 9.2, whose TCG applies nested
+# paging to guests that have their own paging disabled (Ubuntu 24.04
+# ships 8.2, which lets such a guest read host memory; the kernel's
+# hv self-check then disables the backend and the guest tests are
+# skipped, which the harness treats as a failure). The toolchain is
+# host-agnostic so the outputs match the ARM64 development environment.
 # GitHub-hosted ARM64 runners (ubuntu-24.04-arm) are not enabled for this
 # private repository yet; when they are, add them to the matrix below.
 
@@ -24,6 +29,7 @@ jobs:
   build-and-boot:
     name: build, boot, analyze (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
@@ -31,16 +37,20 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Install cross toolchain and test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates clang lld llvm make mtools qemu-system-x86 ovmf python3 musl-tools
+          qemu-system-x86_64 --version
+
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0 # git describe needs history for BUILD_ID
 
-      - name: Install cross toolchain and test tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang lld llvm make mtools qemu-system-x86 ovmf python3 musl-tools
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Verify toolchain
         run: make check-tools

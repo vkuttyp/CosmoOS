@@ -1,5 +1,15 @@
 # Virtualization: testing
 
+**Emulator requirement.** QEMU/TCG before 9.2 does not apply nested
+paging to a guest whose own paging is disabled (real mode, flat
+protected mode): such a guest reads and writes host physical memory.
+`hv_init` runs a one-instruction paging-off guest at guest-physical
+0x80000000 (outside the 256 MiB of harness RAM, inside the PCI hole) and
+expects an `HLT` exit; anything else disables the backend with a
+warning, `/dev/vmm` reports `none`, the guest self-tests log `skipped`
+and the harness fails the run (forbidden marker). CI therefore runs in a
+Debian trixie container (QEMU 10.0); Ubuntu 24.04's 8.2 is not enough.
+
 Three layers, as everywhere in the project: host unit tests of the pure
 code, kernel self-tests that run real guests under the QEMU harness, and
 a userland run through `vmctl` from `/etc/rc.test`. All of it executes

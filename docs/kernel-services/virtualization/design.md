@@ -307,6 +307,18 @@ delivery at the next entry.
 
 ### The VM manager (`vmm.c`)
 
+After a successful probe `hv_init` runs a **self-check**: a VM with one
+page at guest-physical 0x80000000 holding `hlt`, a flat 32-bit
+paging-off vCPU with `idtr.limit` 0 and `rsp` in the same page, run for
+at most 50 host-interrupt exits. Nested paging that confines the guest
+yields an `HLT` exit at 0x80000001; a nested walk that is bypassed while
+guest paging is off (QEMU/TCG before 9.2) fetches from the host's PCI
+hole, faults with an empty IDT and shuts down, and the backend is
+disabled (`present = false`, name `none`). The address was chosen to be
+outside host RAM in the harness so the check itself never touches host
+memory when the bug is present. `hv_init` runs after interrupts are
+enabled, since the self-check enters a guest.
+
 `hv_init()` runs from `kernel_main` after `vfs_init` and the ramfs boot
 population: it calls `arch_hv_probe` (CPUID for SVM and nested paging,
 `VM_CR.SVMDIS`, the permission maps; SVM itself is enabled per CPU on
