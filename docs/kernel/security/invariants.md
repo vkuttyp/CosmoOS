@@ -34,13 +34,16 @@ a populated map `-ENOMEM` after unwinding, a demand-zero fault treated as
 an allocation failure (fatal to a user touch, `-EFAULT` in a copy,
 docs/kernel/memory/design.md §6.1); `NOFILE`: `handle_install` `-EMFILE`
 (`handle_install_at`, used for a new process's 0–2, is not bounded);
-`NPROC`: `process_create_from_elf` `-EAGAIN` before the process is
-registered; `VMEM`: `vm_mem_add` `-ENOMEM` against `vm->mem_limit`,
+`NPROC`: `process_create_from_elf` `-EAGAIN`, decided under the
+process-table lock in the same critical section that publishes the
+process, so two spawns near the limit cannot both pass on a stale count; `VMEM`: `vm_mem_add` `-ENOMEM` against `vm->mem_limit`,
 recorded from the creator at `vm_create`. Check: `rlimit` (VMM and
 handle table on private objects), `process-rlimit` (every resource from
 user mode, the memory limit ending the toucher with status 139),
 `hv-npt` (a VM created with a 8 KiB cap refuses 12 KiB), `lxtest`
-(`EMFILE` at the eighth handle).
+(`EMFILE` at the eighth handle), `process-nproc` (two kernel threads
+spawn sixteen children of one uid under a limit of four while a third
+samples the count: the peak is exactly four).
 
 **S5. Lowering a limit below the current use changes nothing already
 granted.** `vm_space_set_limits` and `handles.limit` only gate growth;
@@ -48,12 +51,18 @@ regions, frames and handles stay. Check: `rlimit` (three regions survive
 a limit of one page), review.
 
 **S6. A ramfs mount never holds more than its page budget.** `struct
-mount.cache_pages` counts every cached page of the mount (inserted in
-`get`, removed in `remove_entry` and `pagecache_drop`); a miss at or
-above `cache_limit_pages` is `-ENOSPC` and allocates nothing; ramfs
+mount.cache_pages` counts every cached page of the mount; a miss
+*reserves* its page with one atomic increment and refuses with `-ENOSPC`
+when the result exceeds `cache_limit_pages` (the increment is the
+admission, so concurrent misses on different vnodes cannot both pass a
+stale read); every later failure of the miss returns the reservation,
+and `remove_entry`/`pagecache_drop` return it when the page goes. ramfs
 mounts get `RAMFS_MAX_PAGES` (16 384). Check: `cache-limits` (a budget
 of four pages: the fifth page `-ENOSPC`, a second file refused too,
-unlink frees the budget), review of the two counters' paths.
+unlink frees the budget), `cache-budget-race` (two writers fill and free
+files on a four-page mount for forty rounds while a sampler watches the
+count: the peak is exactly four and the count returns to zero), review
+of the counter's paths.
 
 **S7. The global page-cache limit reclaims only what can be rebuilt.**
 Only clean pages of mounts without `MOUNT_CACHE_IS_STORE` are ever on

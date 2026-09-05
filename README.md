@@ -326,7 +326,7 @@ See [docs/development.md](docs/development.md).
   cache as a whole has a limit with LRU reclaim of clean pages, so a
   large read no longer pins RAM; writeback runs in page order.
   `procinfo` shows an unprivileged user its own processes and `log` is
-  rate limited. Three new self-tests, 103 in total.
+  rate limited. Five new self-tests, 105 in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

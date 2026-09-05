@@ -77,7 +77,8 @@ documented in `docs/kernel/syscall/api.md`.
 
 ### `int process_spawn(const char *path, const char *const argv[], const char *const envp[], const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const struct process_spawn_cred *cred, pid_t *pid_out)` (`spawn.c`)
 
-`cred` is NULL to inherit, or the child's uid and gid
+`process_spawn_attr.rlim` (NULL: the parent's limits or the defaults)
+lets a kernel creator name a child's limits. `cred` is NULL to inherit, or the child's uid and gid
 (`COSMO_SPAWN_SETCRED`): `-EPERM` unless the caller is privileged or
 holds both ids (`docs/kernel/security/design.md` §1). The child is also
 refused with `-EAGAIN` when its real uid already has

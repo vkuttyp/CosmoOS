@@ -3,7 +3,7 @@
 | Level | What | Command |
 |---|---|---|
 | Host | `test_cred` (the `setres*` rules) | `make host-test` |
-| Kernel, debug | `rlimit` (address-space, memory and handle limits on a private space and table), `cache-limits` (ramfs budget, global limit with reclaim), `process-rlimit` (three `init --probe` runs), `hv-npt` (a VM's cap from its creator) | `make test` |
+| Kernel, debug | `rlimit` (address-space, memory and handle limits on a private space and table), `cache-limits` (ramfs budget, global limit with reclaim), `cache-budget-race` (two writers against one budget, a sampler watching the peak), `process-rlimit` (three `init --probe` runs), `process-nproc` (two spawners against one `NPROC` limit, a sampler watching the peak), `hv-npt` (a VM's cap from its creator) | `make test` |
 | User mode | `init --unpriv-test` (the permission boundary, `docs/kernel-services/vfs/invariants.md` V14); `init --probe rlimit-root`, `rlimit-unpriv`, `mem-limit`, `uid-is:N` | run by the kernel tests |
 | Linux | `lxtest`: `getrlimit`, `prlimit64`, `setrlimit` lowering and raising, `EMFILE` at the eighth handle, `cur > max` `-EINVAL`, another pid `-EPERM`, an unbounded resource read as infinity and its set ignored | `make test` (x86-64) |
 
@@ -26,7 +26,18 @@ record carries uid 1000; 80 `log` calls: at least 16 succeed and at
 least one is `-EAGAIN`.
 
 `mem-limit` (exit 139): `MEM` 1 MiB, then a page-by-page touch of a
-4 MiB mapping.
+4 MiB mapping. `hold` (exit 0): sleeps 30 ms, so `process-nproc`'s
+children stay alive long enough to be counted.
+
+## The admission races
+
+Greptile's review of the milestone found two check-then-act windows: the
+`NPROC` count was taken and released before the process was registered,
+and the ramfs budget was read before the page was charged. Both are now
+one atomic step (`docs/kernel/security/invariants.md` S4, S6), and
+`process-nproc` and `cache-budget-race` sample the invariants under two
+concurrent actors on four CPUs; a regression would show as a peak above
+the limit.
 
 ## Results (2026-09-05, QEMU TCG, x86-64 and AArch64)
 
@@ -34,11 +45,14 @@ least one is `-EAGAIN`.
 selftest: rlimit: address-space, resident-memory and handle limits bind where they are enforced
 selftest: cache-limits: ramfs budget refused 3 misses; N clean pages reclaimed under the global limit
 selftest: process-rlimit: limits inherited, lowered, raised only by root; SETCRED flows down; a memory limit ends the toucher
-SELFTEST: PASS (103 tests)
+selftest: process-nproc: 4 admitted, 12 refused across two spawners; peak 4 of a limit of 4
+selftest: cache-budget-race: 167 pages admitted, 313 refused across two writers; peak 4 of a budget of 4
+SELFTEST: PASS (105 tests)
 ```
 
 `rlimit` under 1 ms, `cache-limits` about 60 ms, `process-rlimit` about
-20 ms on x86-64. The syscall fuzzer exercises `getrlimit` and leaves
+20 ms, `process-nproc` about 100 ms, `cache-budget-race` about 15 ms on
+x86-64. The syscall fuzzer exercises `getrlimit` and leaves
 `setrlimit` out (a random low memory limit would end the fuzzer itself).
 
 ## Gaps
@@ -46,7 +60,8 @@ SELFTEST: PASS (103 tests)
 - No test of `NPROC` across two unprivileged users, or of a user
   reaching `NPROC × MEM` in aggregate (limits are per process).
 - The global cache limit is not tested under concurrent readers, and
-  reclaim's `mutex_trylock` skip path (a busy victim) is not driven.
+  reclaim's `mutex_trylock` skip path (a busy victim) is not driven
+  (the budget race test exercises concurrent misses, not reclaim).
 - `procinfo` visibility is tested for the unprivileged view only; that
   root sees every process is exercised by `ps` in the shell test.
 - No `chmod`/`chown`, no group-permission test (unchanged from V14).

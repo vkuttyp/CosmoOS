@@ -330,6 +330,7 @@ static const struct selftest tests[] = {
     { "cosmofs-crash",   selftest_cosmofs_crash },
     { "cosmofs-replay",  selftest_cosmofs_replay },
     { "cache-limits",    selftest_cache_limits },
+    { "cache-budget-race", selftest_cache_budget_race },
     { "net-mbuf",        selftest_net_mbuf },
     { "net-cksum",       selftest_net_cksum },
     { "net-arp",         selftest_net_arp },
@@ -362,6 +363,7 @@ static const struct selftest tests[] = {
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },
     { "process-rlimit",  selftest_process_rlimit },
+    { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
 };
 

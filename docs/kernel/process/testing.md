@@ -166,7 +166,9 @@ write to a fresh page is fatal (139). Both were kernel panics before.
 
 Runs `init --probe rlimit-root` (exit 0), `rlimit-unpriv` (exit 0) and
 `mem-limit` (status 139); the probes are specified in
-`docs/kernel/security/testing.md`.
+`docs/kernel/security/testing.md`. `process-nproc` (there too) has two
+kernel threads create sixteen `init --probe hold` children of one uid
+under a limit of four while a sampler watches the count.
 
 ## Harness markers (`tests/boot/run_boot_test.py`)
 
@@ -195,8 +197,9 @@ Every user ELF (`out/x86_64-debug/userland/*.elf`, packed into the boot
 archive as `init`, `bin/*`, `sbin/*`) has three `PT_LOAD` segments
 (r-x, r--, rw-) and a non-executable `PT_GNU_STACK`.
 
-Milestone 6 (2026-09-05): `SELFTEST: PASS (103 tests)` on both
-architectures with `process-rlimit` at about 20 ms. Milestone 5: 100
+Milestone 6 (2026-09-05): `SELFTEST: PASS (105 tests)` on both
+architectures with `process-rlimit` at about 20 ms and `process-nproc`
+(two concurrent spawners against one limit) at about 100 ms. Milestone 5: 100
 tests on x86-64 with 4 and 1 CPUs and on AArch64; `process-efault` 8 ms / 18 ms,
 `process-protnone` 9 / 27 ms, `process-oom` 16 / 27 ms (x86-64 /
 AArch64).
