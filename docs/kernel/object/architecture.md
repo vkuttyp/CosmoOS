@@ -20,8 +20,9 @@ pointer (constitution section 11).
 - `struct kobject`: type pointer and atomic reference count.
 - `struct kobject_type`: name and `release`; subtypes extend it (the
   console type, since Phase 7 `struct file`, since Phase 8
-  `struct socket`, and since Phase 9 the two pipe ends add `read`/`write`
-  and an optional `stat` through `kobject_io_type`). Other kobjects
+  `struct socket`, since Phase 9 the two pipe ends, and since Phase 12
+  `struct vm` add `read`/`write` and an optional `stat` through
+  `kobject_io_type`; `struct vcpu` is a plain kobject). Other kobjects
   today: `struct vnode` and `struct mount` (`kernel-services/vfs/`),
   `struct device` (`kernel/device/`), `struct blkdev` (`kernel/block/`),
   `struct process`.

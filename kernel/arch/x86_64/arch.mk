@@ -27,6 +27,9 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/syscall_entry.S \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \
-	kernel/arch/x86_64/shutdown.c
+	kernel/arch/x86_64/shutdown.c \
+	kernel/arch/x86_64/svm.c \
+	kernel/arch/x86_64/svm_npt.c \
+	kernel/arch/x86_64/svm_run.S
 
 KERNEL_LINKER_SCRIPT := $(ROOT)/kernel/arch/x86_64/linker.ld

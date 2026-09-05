@@ -170,6 +170,16 @@ kernel log lines that fit. `int sysctl_get(const char *name, char *buf,
 size_t len)` returns the value's length, writes it NUL-terminated when
 it fits (truncated without NUL otherwise), `ENOENT` for an unknown name.
 
+## cosmo/hv.h (**native**, Phase 12)
+
+Raw wrappers for virtual machines (`docs/kernel-services/virtualization/api.md`):
+`cosmo_vm_create(vmm_handle)`, `cosmo_vm_mem(vm, gpa, len)`,
+`cosmo_vm_mem_read/write(vm, gpa, buf, len)`, `cosmo_vcpu_create(vm,
+index)`, `cosmo_vcpu_get_regs/set_regs(vcpu, regs)`, `cosmo_vcpu_run(vcpu,
+exit)`, `cosmo_vcpu_irq(vcpu, vector)`. They return the kernel's result
+(negative errno) unchanged; `struct cosmo_vcpu_regs` and `struct
+cosmo_vm_exit` come from the UAPI header. Used by `vmctl`.
+
 ## cosmo/syscall.h (raw wrappers, internal)
 
 `cosmo_syscall0..6`, and one typed inline wrapper per system call

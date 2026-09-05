@@ -8,7 +8,7 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir rmdir pwd true false sleep
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -29,6 +29,7 @@ PROG_DIR_ps     := system
 PROG_DIR_kill   := system
 PROG_DIR_dmesg  := system
 PROG_DIR_sysctl := system
+PROG_DIR_vmctl  := system
 
 USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
 PROG_DIR_init := init

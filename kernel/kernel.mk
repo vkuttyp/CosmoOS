@@ -54,6 +54,14 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/futex.c \
 	compat/linux/convert.c \
 	compat/linux/syscalls.c \
+	kernel-services/virtualization/vmm.c \
+	kernel-services/virtualization/vm.c \
+	kernel-services/virtualization/guestmem.c \
+	kernel-services/virtualization/vmdev.c \
+	kernel-services/virtualization/vintr.c \
+	kernel-services/virtualization/vcpu.c \
+	kernel-services/virtualization/hvsys.c \
+	kernel-services/virtualization/hvtest.c \
 	kernel/process/elf.c \
 	kernel/process/process.c \
 	kernel/process/spawn.c \

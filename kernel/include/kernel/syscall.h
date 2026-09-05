@@ -35,4 +35,13 @@ int syscall_handle_stat(int h, struct cosmo_stat *st);
 uint64_t syscall_count(void);
 uint64_t syscall_unknown_count(void);
 
+/* Virtualization system calls (kernel-services/virtualization/hvsys.c). */
+int64_t sys_vm_create(struct syscall_args *a);
+int64_t sys_vm_mem(struct syscall_args *a);
+int64_t sys_vm_mem_rw(struct syscall_args *a);
+int64_t sys_vcpu_create(struct syscall_args *a);
+int64_t sys_vcpu_regs(struct syscall_args *a);
+int64_t sys_vcpu_run(struct syscall_args *a);
+int64_t sys_vcpu_irq(struct syscall_args *a);
+
 #endif /* KERNEL_SYSCALL_H */

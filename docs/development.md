@@ -57,7 +57,7 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, the Linux test programs, and the kernel modules (default) |
+| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, the Linux test programs, the virtualization guest images, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
 | `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
@@ -65,12 +65,13 @@ Notes:
 | `pkg` | `out/<arch>-<build>/userland/pkg.elf`: the package manager, from `pkg/*.c` plus the kernel's SHA-512 and Ed25519 sources compiled for user mode (`pkg/pkg.mk`, `docs/pkg/`) |
 | `ports` | `out/<arch>-<build>/pkg/repo/`: every recipe under `ports/*/port` cross-compiled by `tools/pkgbuild.py` into a signed `.cpk`, plus the signed `INDEX`; signed with `PKGSIGN_KEY` (default `tools/keys/cosmo-dev.key`); `SELFTEST=1` adds the `badsig` and `badsum` fixtures |
 | `linux-tests` | `out/<arch>-<build>/tests/linux/`: `lxhello.elf` and `lxtest.elf` (freestanding raw-Linux-ABI programs, no crt0/libc, so no CosmoOS note) and, when `musl-gcc` is found or `MUSL_GCC=` names a compiler, `hello_musl` (`tests/linux/linux.mk`, `docs/compat/linux/testing.md`); they ride in the boot archive as `tests/linux/*` |
+| `hv-guests` | `out/<arch>-<build>/tests/hv/*.bin`: the six flat guest images for the virtualization tests (`tests/hv/*.S` assembled and linked with `--image-base=0 -Ttext=0x1000 --oformat=binary`, `tests/hv/hv.mk`, `docs/kernel-services/virtualization/testing.md`); in the boot archive as `tests/hv/*.bin` |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
 | `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*` including `sbin/pkg`, `etc/*` including `etc/pkg/repos.conf` and `etc/pkg/keys/cosmo-dev.pub`, `repo/*` (the ports repository, visible at `/boot/repo`) and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser and Linux-conversion algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion and nested-page-table algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -97,8 +98,11 @@ and `test_pkg` (the package manager's `manifest.c`, `version.c` and
 `docs/pkg/testing.md`), and `test_linux` (the Linux personality's pure
 conversions in `compat/linux/convert.c`: open flags, `struct stat`,
 wait status, sockaddr, `getdents64` records, `PROT_*`;
-`docs/compat/linux/testing.md`); `test_crypto` also checks CRC32C. The
-architecture headers are replaced by `tests/host/shim/arch/*.h`; every
+`docs/compat/linux/testing.md`), and `test_hv` (the SVM backend's pure
+parts: the nested page table builder `kernel/arch/x86_64/svm_npt.c` over
+the harness arena, the I/O exit decoder, the VMCB and UAPI layouts;
+`docs/kernel-services/virtualization/testing.md`); `test_crypto` also
+checks CRC32C. The architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
 package on Ubuntu both qualify. Set `HOST_CC` to override the compiler.
@@ -192,6 +196,22 @@ pkg list` at the prompt in every build. To add a package: a directory
 under `ports/` with a `port` file and its sources; `make ports` picks it
 up and `make reproducible` should still say yes.
 
+### Virtual machines
+
+The kernel is a hypervisor since Phase 12 (`kernel-services/virtualization/`,
+`docs/kernel-services/virtualization/`), on AMD-V with nested paging.
+QEMU's default CPU model in `scripts/qemu-run.sh` is
+`qemu64,+nx,+svm,+npt` so TCG emulates the extension (`QEMU_CPU`
+overrides it; `host` with `kvm`/`hvf` needs nested virtualization on the
+host). The boot archive carries `tests/hv/*.bin`; eight self-tests run
+guests from them, and `/etc/rc.test` runs `vmctl probe`, `vmctl run
+/boot/tests/hv/guest_pio.bin` and `vmctl info`, printing `HVTEST: PASS`,
+which the harness requires; `selftest: hv: skipped` and `HVTEST: skipped`
+(what a CPU model without SVM produces) are forbidden markers. To try a
+guest by hand: write a flat real-mode program that talks to port 0xE9
+and halts, add it to `HV_GUESTS` in `tests/hv/hv.mk` (or copy the binary
+onto the cosmofs disk), boot, and `vmctl run /path/to/image`.
+
 ### Linux programs
 
 A static x86-64 ELF without the CosmoOS ABI note (which `crt0.S` emits
@@ -230,6 +250,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `MUSL_GCC` | `musl-gcc` if found | A musl C compiler used to build `tests/linux/hello_musl`; empty skips it and sets `HAVE_MUSL=0` for the harness |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
+| `QEMU_CPU` | `qemu64,+nx,+svm,+npt` | QEMU CPU model; the default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host) |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
 | `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
@@ -292,8 +313,11 @@ USERTEST: PASS
 SELFTEST: process-user     ... ok
 init: crashing on purpose
 SELFTEST: linux-elf        ... ok
+SELFTEST: hv-probe         ... ok
+...
+SELFTEST: hv-guest-spin    ... ok
 SELFTEST: process-fault    ... ok
-SELFTEST: PASS (62 tests)
+SELFTEST: PASS (70 tests)
 [ INFO] process: pid 8 'init' created, entry 0x400000, 3 segments
 init: CosmoOS userland, pid 8
 CosmoOS userland ready

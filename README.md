@@ -191,6 +191,21 @@ See [docs/development.md](docs/development.md).
   freestanding raw-ABI program (`LINUXTEST: PASS`), a real statically
   linked musl program, a host test of the conversions and a kernel
   self-test (62 in total).
-- **Next, Phase 12:** virtualization: hardware-assisted virtual
-  machines as a kernel service, per the constitution's roadmap; design
-  documents first.
+- **Phase 12 (done):** virtualization, stage 1 (constitution sections
+  41 to 43, invariants 9 and 10). A VM manager in
+  `kernel-services/virtualization/` behind the backend interface
+  `arch/hv.h`, implemented on AMD-V with nested paging (`svm.c`,
+  `svm_npt.c`, `svm_run.S`; VT-x is the next backend, chosen because
+  the QEMU/TCG harness emulates SVM and not VMX). VMs and vCPUs are
+  kobjects handed out by seven system calls (43 to 49) gated by
+  `/dev/vmm`, the first device node; guest memory is zeroed host pages
+  behind the nested table; the run loop emulates CPUID and MSRs,
+  delivers injected vectors through the hardware, routes port I/O to
+  device backends (a debug console on port 0xE9) or the owner, and
+  reports halts, MMIO, hypercalls and shutdowns as `struct
+  cosmo_vm_exit`. Real-mode and protected-mode guests run under TCG;
+  `vmctl` drives one from the shell (`HVTEST: PASS`), eight kernel
+  self-tests run six guest images (70 self-tests in total), and a host
+  test covers the nested page tables.
+- **Next, Phase 13:** AArch64, per the constitution's roadmap (the same
+  generic layers over an ARM64 arch directory); design documents first.

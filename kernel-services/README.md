@@ -12,8 +12,12 @@ for performance but talk to the core only through documented interfaces.
 - `network/`: the network stack: mbufs, interfaces and the `netrx`
   worker, Ethernet/ARP, IPv4/IPv6 with ICMP and ND, UDP, TCP, sockets.
   Phase 8.
-- `virtualization/`: later.
+- `virtualization/`: the VM manager: `/dev/vmm`, VMs and vCPUs, guest
+  memory behind nested paging, the run loop, virtual interrupts, device
+  backends, the virtualization system calls; hardware specifics live in
+  `kernel/arch/*/` behind `arch/hv.h`. Phase 12.
 
 Documentation: `docs/kernel-services/vfs/`,
-`docs/kernel-services/filesystem/cosmofs/` and
-`docs/kernel-services/network/`.
+`docs/kernel-services/filesystem/cosmofs/`,
+`docs/kernel-services/network/` and
+`docs/kernel-services/virtualization/`.

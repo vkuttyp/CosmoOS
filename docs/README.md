@@ -38,12 +38,12 @@ wins and the document is wrong.
 | `kernel/ipc/` | IPC primitives: anonymous pipes as two kobject ends (`pipe`, system call 35); since Phase 11 the futex (`futex_wait`/`futex_wake`) |
 | `libc/` | The native C library: headers, `errno`, string, allocator, stdio, `spawn`/`wait`/`kill`, files, directories, sockets, the native introspection wrappers; host test |
 | `userland/` | init, the shell (`cosmo$ `), the coreutils and system tools, `/etc/rc`, the shell test script and the interactive serial harness |
+| `kernel-services/virtualization/` | The VM manager (Phase 12): `/dev/vmm`, VMs and vCPUs as kobjects, guest memory behind nested paging, the run loop with CPUID/MSR emulation and virtual interrupts, device backends (the debug console), the `arch/hv.h` backend interface and its AMD-V (SVM + NPT) implementation, system calls 43–49, `vmctl`, the guest-image tests |
 | `compat/linux/` | The Linux personality (Phase 11): selection by the CosmoOS ELF note, the Linux x86-64 system-call table translating onto the native services (files, memory, `brk`, futex, signal tables, time, sockets), the Linux initial stack and thread pointer, the raw-ABI and musl test programs |
 | `pkg/` | The package system: recipes (`ports/`), the host builder `tools/pkgbuild.py`, the `.cpk` and `INDEX` formats, the `pkg` manager (`pkg/`), signing and checksums, the `/var/db/pkg` database, the package tests |
 
 Further subsystem directories are added as subsystems come into existence
-(`drivers/nvme/`, `drivers/network/`, `kernel-services/virtualization/`,
-`compat/<other>/`, and so on).
+(`drivers/nvme/`, `drivers/network/`, `compat/<other>/`, and so on).
 
 ## Per-subsystem convention
 

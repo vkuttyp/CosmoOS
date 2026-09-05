@@ -25,6 +25,7 @@
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
 #include <kernel/futex.h>
+#include <kernel/hv.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -148,6 +149,7 @@ void kernel_main(const struct cosmoboot_info *info)
     vfs_init();
     cosmofs_init();
     ramfs_populate_boot();
+    hv_init();
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */

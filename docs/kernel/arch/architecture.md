@@ -25,6 +25,12 @@ remain isolated") is realised by keeping every assembly file under
 - Provide local interrupt enable/disable, halt, spin hints, backtraces, and
   emulator exit (`cpu.c`, `backtrace.c`, `shutdown.c`).
 - Define the kernel image layout (`linker.ld`).
+- Since Phase 12, the hardware virtualization backend behind
+  `arch/hv.h` (`svm.c`: AMD-V enable, VMCB, intercepts, exit decoding,
+  state; `svm_npt.c`: nested page tables; `svm_run.S`: the VMRUN
+  sequence). The generic VM manager is `kernel-services/virtualization/`
+  (`docs/kernel-services/virtualization/`); a VT-x backend would sit
+  beside `svm.c` behind the same header.
 
 ## Non-responsibilities
 

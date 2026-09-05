@@ -82,6 +82,17 @@ LINUXTEST_MARKERS = [
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 
+# Virtualization (docs/kernel-services/virtualization/testing.md): the QEMU
+# CPU model carries SVM + NPT, so the guest self-tests must run (not skip)
+# and vmctl must run the sample guest from the shell.
+HVTEST_MARKERS = [
+    r"^HVTEST: PASS$",
+]
+HV_FORBIDDEN_MARKERS = [
+    r"selftest: hv: skipped",
+    r"^HVTEST: skipped",
+]
+
 # Only produced by the self-test run of init (debug builds); required
 # whenever self-tests ran at all.
 USERTEST_MARKER = r"^USERTEST: PASS"
@@ -256,6 +267,13 @@ def main():
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (package test)")
+        for pat in HVTEST_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (virtualization test)")
+        for pat in HV_FORBIDDEN_MARKERS:
+            hits = [ln for ln in lines if re.search(pat, ln)]
+            if hits:
+                failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
         for pat in LINUXTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (Linux ABI test)")
