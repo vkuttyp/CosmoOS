@@ -10,7 +10,6 @@
 #include <kernel/errno.h>
 #include <kernel/fwcfg.h>
 #include <kernel/log.h>
-#include <kernel/mutex.h>
 #include <kernel/netif.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
@@ -24,8 +23,16 @@
 
 #define NET_RXQ_MAX 512u
 
+/*
+ * The interface registry lock is a spinlock, not a mutex: netif_owns_*,
+ * netif_default and netif_find are predicates that routing and address
+ * checks call from thread context, and they must stay callable from any
+ * context that does not sleep. Nothing under this lock sleeps, prints
+ * are the diagnostics' business (netif_dump), and a mutex here was the
+ * sleeping-lock-under-spinlock hazard the Prompt #3 fix pass removed.
+ */
 static LIST_HEAD(g_netifs);
-static struct mutex g_netif_lock;
+static spinlock_t g_netif_lock = SPINLOCK_INIT("netifs");
 static unsigned g_next_index = 1;
 static struct mbufq g_rxq;
 static LIST_HEAD(g_work);
@@ -92,11 +99,11 @@ int netif_register(struct netif *nif)
 {
     if (nif->name[0] == '\0' || nif->ops == NULL || nif->ops->transmit == NULL || nif->mtu < 68)
         return -EINVAL;
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, nif->name) == 0) {
-            mutex_unlock(&g_netif_lock);
+            spin_unlock_irqrestore(&g_netif_lock, s);
             return -EEXIST;
         }
     }
@@ -119,7 +126,7 @@ int netif_register(struct netif *nif)
         nif->ip6_ll.s6_addr[15] = nif->mac[5];
     }
     list_push_back(&g_netifs, &nif->link);
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     kinfo("net: %s registered (%02x:%02x:%02x:%02x:%02x:%02x, mtu %u)", nif->name, nif->mac[0], nif->mac[1],
           nif->mac[2], nif->mac[3], nif->mac[4], nif->mac[5], nif->mtu);
     if (!(nif->flags & NETIF_LOOPBACK) && nif->ip4.addr == 0)
@@ -129,17 +136,17 @@ int netif_register(struct netif *nif)
 
 void netif_unregister(struct netif *nif)
 {
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     list_remove(&nif->link);
     list_init(&nif->link);
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     arp_flush(nif);
     kinfo("net: %s unregistered", nif->name);
 }
 
 struct netif *netif_find(const char *name)
 {
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n, *found = NULL;
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, name) == 0) {
@@ -147,13 +154,13 @@ struct netif *netif_find(const char *name)
             break;
         }
     }
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     return found;
 }
 
 struct netif *netif_default(void)
 {
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n, *found = NULL;
     list_for_each_entry(n, &g_netifs, link) {
         if (!(n->flags & NETIF_LOOPBACK) && (n->flags & NETIF_UP)) {
@@ -161,7 +168,7 @@ struct netif *netif_default(void)
             break;
         }
     }
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     return found;
 }
 
@@ -196,7 +203,7 @@ bool netif_owns_ipv4(uint32_t addr)
     if (addr == INADDR_LOOPBACK_N || (ntohl(addr) >> 24) == 127)
         return true;
     bool owns = false;
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         if (n->ip4.addr && n->ip4.addr == addr) {
@@ -204,7 +211,7 @@ bool netif_owns_ipv4(uint32_t addr)
             break;
         }
     }
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     return owns;
 }
 
@@ -213,7 +220,7 @@ bool netif_owns_ipv6(const struct in6_addr *a)
     if (in6_is_loopback(a))
         return true;
     bool owns = false;
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         if (!(n->flags & NETIF_LOOPBACK) && in6_equal(&n->ip6_ll, a)) {
@@ -221,7 +228,7 @@ bool netif_owns_ipv6(const struct in6_addr *a)
             break;
         }
     }
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
     return owns;
 }
 
@@ -338,7 +345,6 @@ extern void socket_init(void);
 
 void net_init(void)
 {
-    mutex_init(&g_netif_lock, "netifs");
     mbufq_init(&g_rxq, NET_RXQ_MAX, "net-rxq");
     mbuf_init();
     arp_init();
@@ -355,7 +361,7 @@ void net_init(void)
 
 void netif_dump(void)
 {
-    mutex_lock(&g_netif_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         const uint8_t *a = (const uint8_t *)&n->ip4.addr;
@@ -365,7 +371,7 @@ void netif_dump(void)
                 (unsigned long long)n->stats.rx_dropped, (unsigned long long)n->stats.tx_packets,
                 (unsigned long long)n->stats.tx_bytes, (unsigned long long)n->stats.tx_errors);
     }
-    mutex_unlock(&g_netif_lock);
+    spin_unlock_irqrestore(&g_netif_lock, s);
 }
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). */

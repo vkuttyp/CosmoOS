@@ -28,6 +28,8 @@ void semaphore_down(struct semaphore *s)
 {
     if (this_cpu()->irq_depth != 0)
         panic("semaphore_down in interrupt context");
+    if (this_cpu()->preempt_count != 0)
+        panic("semaphore_down with preemption disabled (count %d): a spinlock is held", this_cpu()->preempt_count);
     for (;;) {
         if (semaphore_trydown(s))
             return;

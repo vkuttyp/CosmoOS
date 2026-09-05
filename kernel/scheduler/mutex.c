@@ -32,6 +32,13 @@ void mutex_lock(struct mutex *m)
     struct thread *cur = thread_current();
     if (this_cpu()->irq_depth != 0)
         panic("mutex_lock('%s') in interrupt context", m->name);
+    /* Checked on every acquisition, not only when the mutex is contended
+     * and wait_event would notice: a sleeping lock taken under a spinlock
+     * (preempt_count > 0) must fail deterministically, in the first test
+     * that runs the path, not only under load (invariant S6). */
+    if (this_cpu()->preempt_count != 0)
+        panic("mutex_lock('%s') with preemption disabled (count %d): a spinlock is held", m->name,
+              this_cpu()->preempt_count);
     if (m->owner == cur)
         panic("mutex_lock('%s'): recursive lock by '%s'", m->name, cur->name);
 

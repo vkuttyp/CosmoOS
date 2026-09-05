@@ -20,6 +20,7 @@
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
+#include <kernel/wait.h>
 #include <kernel/acpi.h>
 
 #include <arch/cpu.h>
@@ -52,6 +53,90 @@ static bool threads_settle(unsigned expected)
             return false;
         sched_yield();
     }
+    return true;
+}
+
+/* --- an IPI storm: cross calls while this CPU's tick sends wake IPIs ---
+ *
+ * Prompt #3, 3.4: the xAPIC ICR is written as two registers. A timer
+ * callback on the calling CPU that wakes threads pinned elsewhere sends
+ * IPI_RESCHEDULE from interrupt context, exactly what could land between
+ * the two writes of a cross call in progress and redirect it. With the
+ * ICR pair written under local interrupt masking every cross call below
+ * reaches its CPU; without it the caller panics after one second. */
+
+static struct waitqueue g_storm_wq = WAITQUEUE_INIT(g_storm_wq);
+static volatile unsigned g_storm_gen;
+static volatile bool g_storm_stop;
+static struct timer g_storm_timer;
+
+static void storm_timer(struct timer *t, void *arg)
+{
+    (void)arg;
+    g_storm_gen++;
+    waitqueue_wake_all(&g_storm_wq);   /* interrupt context: wake IPIs to the waiters' CPUs */
+    if (!g_storm_stop)
+        timer_start(t, 100000);        /* every tick, effectively */
+}
+
+static void storm_waiter(void *arg)
+{
+    (void)arg;
+    unsigned seen = g_storm_gen;
+    while (!g_storm_stop) {
+        wait_event(&g_storm_wq, g_storm_gen != seen || g_storm_stop);
+        seen = g_storm_gen;
+    }
+}
+
+static void storm_call(void *arg)
+{
+    __atomic_fetch_add((unsigned *)arg, 1u, __ATOMIC_RELAXED);
+}
+
+bool selftest_smp_ipi_storm(const char **reason)
+{
+    unsigned online = online_count();
+    if (online < 2) {
+        kinfo("selftest: smp-ipi-storm: one CPU, no cross-CPU traffic to race");
+        return true;
+    }
+    unsigned threads0 = thread_count();
+    struct thread *w[CONFIG_MAX_CPUS];
+    unsigned nw = 0;
+    g_storm_stop = false;
+    g_storm_gen = 0;
+    for (unsigned c = 1; c < cpu_count(); c++) {
+        if (!cpu_online(c))
+            continue;
+        w[nw] = thread_create_on(storm_waiter, NULL, "storm", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        CHECK(w[nw] != NULL);
+        nw++;
+    }
+    timer_setup(&g_storm_timer, storm_timer, NULL);
+    timer_start(&g_storm_timer, 100000);
+
+    unsigned calls = 0, rounds = 0;
+    uint64_t end = clock_now_ns() + MS(300);
+    while (clock_now_ns() < end) {
+        for (unsigned c = 1; c < cpu_count(); c++) {
+            if (cpu_online(c))
+                smp_call_function_single(c, storm_call, &calls);
+        }
+        rounds++;
+    }
+
+    g_storm_stop = true;
+    timer_cancel(&g_storm_timer);   /* the callback runs on this CPU: it either re-armed before the stop
+                                       flag (cancelled here) or saw the flag and did not */
+    waitqueue_wake_all(&g_storm_wq);
+    for (unsigned i = 0; i < nw; i++)
+        thread_join(w[i]);
+    CHECK(calls == rounds * (online - 1));
+    CHECK(g_storm_gen > 0);
+    CHECK(threads_settle(threads0));
+    kinfo("selftest: smp-ipi-storm: %u cross calls in %u rounds against %u wake ticks", calls, rounds,
+          g_storm_gen);
     return true;
 }
 

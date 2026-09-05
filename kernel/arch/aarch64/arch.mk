@@ -23,6 +23,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/aarch64/modreloc.c \
 	kernel/arch/aarch64/backtrace.c \
 	kernel/arch/aarch64/shutdown.c \
+	kernel/arch/aarch64/testhooks.c \
 	kernel/arch/aarch64/hv.c
 
 KERNEL_LINKER_SCRIPT := $(ROOT)/kernel/arch/aarch64/linker.ld

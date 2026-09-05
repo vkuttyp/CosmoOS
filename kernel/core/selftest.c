@@ -19,6 +19,7 @@
 #include <kernel/string.h>
 
 #include <arch/irq.h>
+#include <arch/testhooks.h>
 #include <arch/trap.h>
 
 #define CHECK(cond)                                                            \
@@ -231,12 +232,25 @@ static bool test_breakpoint_trap(const char **reason)
     return true;
 }
 
+/* The exception paths that must be safe at any instruction (x86-64: NMI-class
+ * vectors on their own stacks, recovering the per-CPU pointer from the MSR). */
+static bool test_trap_paranoid(const char **reason)
+{
+    const char *why = NULL;
+    if (!arch_test_paranoid_entry(&why)) {
+        *reason = why ? why : "paranoid entry check failed";
+        return false;
+    }
+    return true;
+}
+
 static const struct selftest tests[] = {
     { "printf",          test_printf },
     { "string",          test_string },
     { "bootinfo",        test_bootinfo },
     { "irq-state",       test_irq_state },
     { "breakpoint-trap", test_breakpoint_trap },
+    { "trap-paranoid",   test_trap_paranoid },
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
     { "kmalloc",         selftest_kmalloc },
@@ -259,6 +273,7 @@ static const struct selftest tests[] = {
     { "smp-wake",        selftest_smp_wake },
     { "smp-ticks",       selftest_smp_ticks },
     { "smp-mutex",       selftest_smp_mutex },
+    { "smp-ipi-storm",   selftest_smp_ipi_storm },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },
     { "bootarchive",     selftest_bootarchive },
@@ -286,6 +301,7 @@ static const struct selftest tests[] = {
     { "net-lo-udp",      selftest_net_lo_udp },
     { "net-lo-tcp",      selftest_net_lo_tcp },
     { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },
+    { "net-tcp-mss",     selftest_net_tcp_mss },
     { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */

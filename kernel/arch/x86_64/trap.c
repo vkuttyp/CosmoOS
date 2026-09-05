@@ -17,10 +17,13 @@
 #include <arch/user.h>
 #include <kernel/sched.h>
 
+#include <arch/irq.h>
 #include <arch/irqc.h>
+#include <arch/testhooks.h>
 #include <arch/trap.h>
 
 #include <x86/cpu.h>
+#include <x86/gdt.h>
 #include <x86/idt.h>
 #include <x86/pic.h>
 #include <x86/trapframe.h>
@@ -87,6 +90,86 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
      * CPU-bound loop dies at its next timer tick. */
     if (arch_trap_frame_is_user(frame) && pc->irq_depth == 0 && pc->preempt_count == 0)
         process_return_to_user();
+}
+
+/*
+ * The paranoid vectors (#DB, NMI, #DF, #MC) arrive here from isr_paranoid
+ * on their IST stacks, with the per-CPU pointer already recovered. They
+ * count as interrupt context: a handler must not block, and this tail
+ * neither preempts nor delivers a kill, because the interrupted context
+ * may be the scheduler holding a run-queue lock, or a SYSCALL/SYSRET
+ * window with the user's stack live. An unregistered vector ends in
+ * panic_frame through arch_trap_unhandled, as for any exception.
+ */
+void x86_trap_paranoid(struct arch_trap_frame *frame)
+{
+    struct percpu *pc = this_cpu();
+    pc->irq_depth++;
+    interrupt_dispatch((unsigned)frame->vector, frame);
+    pc->irq_depth--;
+}
+
+/* --- arch/testhooks.h: the paranoid path under test --- */
+
+struct paranoid_probe {
+    unsigned hits;
+    uintptr_t frame;
+    struct percpu *pc;
+    unsigned irq_depth;
+};
+
+static void paranoid_probe_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    struct paranoid_probe *p = arg;
+    (void)vector;
+    p->hits++;
+    p->frame = (uintptr_t)frame;   /* lives on whatever stack the CPU switched to */
+    p->pc = this_cpu();
+    p->irq_depth = this_cpu()->irq_depth;
+}
+
+static bool on_ist(uintptr_t frame, uintptr_t top)
+{
+    return frame < top && frame >= top - IST_STACK_SIZE;
+}
+
+bool arch_test_paranoid_entry(const char **why)
+{
+    struct paranoid_probe p = { 0 };
+    struct percpu *me = this_cpu();
+    uintptr_t top = gdt_ist_top(IST_NMI);
+
+    if (interrupt_register(X86_TRAP_NMI, paranoid_probe_handler, &p, "selftest-nmi") != 0) {
+        *why = "cannot register the NMI probe";
+        return false;
+    }
+
+    /* 1. A software NMI from ordinary kernel context: IST stack, interrupt depth. */
+    __asm__ volatile("int $2" ::: "memory");
+    bool ok = p.hits == 1 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top);
+    if (!ok)
+        *why = "NMI from kernel context: wrong stack, per-CPU block or depth";
+
+    /* 2. The same with the user's GS base live, the state inside the
+     * SYSCALL entry window before its swapgs (KERNEL_GS_BASE holds 0 for
+     * user mode). A CS-based swap decision would run the handler with GS
+     * base 0 and fault on this_cpu(); the MSR-based one must recover the
+     * block and hand back exactly the state it found. */
+    if (ok) {
+        arch_irq_state_t s = arch_irq_save();
+        __asm__ volatile("swapgs\n\tint $2\n\tswapgs" ::: "memory");
+        uint64_t gs_after = rdmsr(0xC0000101u);   /* MSR_GS_BASE */
+        arch_irq_restore(s);
+        ok = p.hits == 2 && p.pc == me && p.irq_depth == 1 && on_ist(p.frame, top) &&
+             gs_after == (uint64_t)(uintptr_t)me && this_cpu() == me;
+        if (!ok)
+            *why = "NMI with the user's GS base: per-CPU block not recovered or not restored";
+    }
+
+    interrupt_unregister(X86_TRAP_NMI, paranoid_probe_handler);
+    if (ok)
+        *why = NULL;
+    return ok;
 }
 
 /* --- arch/trap.h --- */

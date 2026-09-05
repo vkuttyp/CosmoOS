@@ -71,7 +71,11 @@ struct tcp_pcb {
     struct netaddr local, remote;
     /* send side */
     uint32_t iss, snd_una, snd_nxt, snd_wnd, snd_wl1, snd_wl2, snd_max;
-    uint16_t mss;
+    uint16_t mss;                  /* negotiated: min(peer's option, path_mss) */
+    uint16_t path_mss;             /* what this end can send on the path: TCP_MSS_LO when the peer is this
+                                      host, else the family default. Fixed when the connection is set up
+                                      (tcp_path_mss), so nothing under the TCP lock consults the netif
+                                      registry (invariant N5). */
     struct netbuf sndbuf;          /* bytes from snd_una onward */
     /* receive side */
     uint32_t irs, rcv_nxt, rcv_wnd;
@@ -103,6 +107,10 @@ struct tcp_pcb {
 
 void tcp_init(void);
 struct tcp_pcb *tcp_pcb_new(uint16_t family);
+/* The largest segment this host can send to `remote`: TCP_MSS_LO when the
+ * peer is this host (delivery through `lo`), else the family default. Reads
+ * the netif registry; call it before taking the TCP lock, never under it. */
+uint16_t tcp_path_mss(uint16_t family, const struct netaddr *remote);
 /* Release the pcb from the socket side: FIN when connected, RST when
  * data is unread, immediate free when closed. The pcb may linger in
  * TIME_WAIT and free itself. */

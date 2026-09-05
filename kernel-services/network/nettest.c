@@ -505,6 +505,51 @@ bool selftest_net_lo_tcp(const char **reason)
     return true;
 }
 
+/* --- the path MSS is decided outside the TCP lock (Prompt #3, 3.1) ----------- */
+
+bool selftest_net_tcp_mss(const char **reason)
+{
+    /* tcp_path_mss reads the netif registry, so it is called with no
+     * spinlock held; under the TCP lock only the cached pcb->path_mss is
+     * consulted. Every mutex_lock now asserts preempt_count == 0, so the
+     * loopback handshake below would panic if that rule were broken. */
+    struct netaddr a = v4addr(INADDR_LOOPBACK_N, 1);
+    CHECK(tcp_path_mss(COSMO_AF_INET, &a) == TCP_MSS_LO);
+    struct netif *eth = netif_default();
+    if (eth != NULL && eth->ip4.addr != 0) {
+        a.v4 = eth->ip4.addr;
+        CHECK(tcp_path_mss(COSMO_AF_INET, &a) == TCP_MSS_LO);   /* one of our own addresses: local delivery */
+        a.v4 = eth->ip4.gateway;
+        CHECK(tcp_path_mss(COSMO_AF_INET, &a) == TCP_MSS_V4);
+    }
+    struct netaddr b = v6loop(1);
+    CHECK(tcp_path_mss(COSMO_AF_INET6, &b) == TCP_MSS_LO);
+    memset(&b.v6, 0, sizeof(b.v6));
+    b.v6.s6_addr[0] = 0xfe;
+    b.v6.s6_addr[1] = 0x80;
+    b.v6.s6_addr[15] = 0x77;
+    if (eth == NULL || !in6_equal(&eth->ip6_ll, &b.v6))
+        CHECK(tcp_path_mss(COSMO_AF_INET6, &b) == TCP_MSS_V6);
+
+    /* Both ends of a loopback connection settle on TCP_MSS_LO: the active
+     * end from the route (before its lock), the passive one from the
+     * interface the SYN arrived on (before its lock). */
+    struct socket *ls, *c, *acc;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    struct netaddr la = v4addr(INADDR_LOOPBACK_N, 6010);
+    CHECK(ksock_bind(ls, &la) == 0 && ksock_listen(ls, 1) == 0);
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0 && ksock_connect(c, &la) == 0);
+    struct netaddr peer;
+    CHECK(ksock_accept(ls, &acc, &peer) == 0);
+    CHECK(c->tcp->path_mss == TCP_MSS_LO && c->tcp->mss == TCP_MSS_LO);
+    CHECK(acc->tcp->path_mss == TCP_MSS_LO && acc->tcp->mss == TCP_MSS_LO);
+    ksock_put(acc);
+    ksock_put(c);
+    ksock_put(ls);
+    thread_sleep_ms(20);
+    return true;
+}
+
 /* Loss injection: drop every `drop_every`th TCP data segment. */
 static unsigned g_seen, g_drop_every, g_dropped;
 

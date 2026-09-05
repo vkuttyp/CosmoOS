@@ -52,18 +52,22 @@ struct gdtr {
     uint64_t base;
 } __attribute__((packed));
 
-/* Separate stack for double faults so a kernel stack overflow still gets
- * a readable report instead of a triple fault. */
-#define DF_STACK_SIZE 8192
-
+/*
+ * Separate stacks for the vectors that cannot trust the interrupted
+ * context's stack: #DF (a kernel stack overflow), NMI and #MC (may arrive
+ * while RSP is still the user's, in the SYSCALL entry/exit windows), #DB
+ * (single-stepping through those windows). One set per CPU; the boot
+ * CPU's are static so they exist before the heap, the APs' are guarded
+ * kernel allocations. The IDT selects them by IST slot (idt.c).
+ */
 struct x86_cpu_tables {
     struct gdt gdt;
     struct tss tss __attribute__((aligned(16)));
-    uintptr_t df_stack_top;
+    uintptr_t ist_top[IST_COUNT];   /* index = IST slot - 1 */
 };
 
 static struct x86_cpu_tables g_boot_tables __attribute__((aligned(16)));
-static uint8_t g_boot_df_stack[DF_STACK_SIZE] __attribute__((aligned(16)));
+static uint8_t g_boot_ist_stacks[IST_COUNT][IST_STACK_SIZE] __attribute__((aligned(16)));
 static struct x86_cpu_tables *g_tables[CONFIG_MAX_CPUS];
 
 static void set_tss_descriptor(struct gdt *g, const struct tss *t)
@@ -80,7 +84,7 @@ static void set_tss_descriptor(struct gdt *g, const struct tss *t)
     g->tss_high = (base >> 32) & 0xFFFFFFFF;
 }
 
-static void tables_init(struct x86_cpu_tables *t, uintptr_t df_stack_top)
+static void tables_init(struct x86_cpu_tables *t, const uintptr_t ist_top[IST_COUNT])
 {
     memset(&t->gdt, 0, sizeof(t->gdt));
     t->gdt.kernel_code = DESC_KERNEL_CODE;
@@ -89,8 +93,11 @@ static void tables_init(struct x86_cpu_tables *t, uintptr_t df_stack_top)
     t->gdt.user_code = DESC_USER_CODE;
 
     memset(&t->tss, 0, sizeof(t->tss));
-    t->df_stack_top = df_stack_top;
-    t->tss.ist[IST_DOUBLE_FAULT - 1] = df_stack_top;
+    for (unsigned i = 0; i < IST_COUNT; i++) {
+        KASSERT((ist_top[i] & 0xF) == 0);
+        t->ist_top[i] = ist_top[i];
+        t->tss.ist[i] = ist_top[i];
+    }
     t->tss.iomap_base = sizeof(t->tss); /* no I/O bitmap */
     set_tss_descriptor(&t->gdt, &t->tss);
 }
@@ -127,7 +134,10 @@ static void tables_load(struct x86_cpu_tables *t)
 
 void gdt_init(void)
 {
-    tables_init(&g_boot_tables, (uintptr_t)(g_boot_df_stack + DF_STACK_SIZE));
+    uintptr_t tops[IST_COUNT];
+    for (unsigned i = 0; i < IST_COUNT; i++)
+        tops[i] = (uintptr_t)(g_boot_ist_stacks[i] + IST_STACK_SIZE);
+    tables_init(&g_boot_tables, tops);
     g_tables[0] = &g_boot_tables;
     tables_load(&g_boot_tables);
 }
@@ -143,15 +153,27 @@ int gdt_alloc_cpu(unsigned cpu)
         return -ENOMEM;
     KASSERT(((uintptr_t)t & 0xF) == 0);
 
-    vaddr_t df = vm_kernel_alloc(DF_STACK_SIZE, VM_KALLOC_GUARD | VM_KALLOC_POPULATE, VM_PROT_RW);
-    if (df == 0) {
-        kfree(t);
-        return -ENOMEM;
+    uintptr_t tops[IST_COUNT] = { 0 };
+    for (unsigned i = 0; i < IST_COUNT; i++) {
+        vaddr_t stack = vm_kernel_alloc(IST_STACK_SIZE, VM_KALLOC_GUARD | VM_KALLOC_POPULATE, VM_PROT_RW);
+        if (stack == 0) {
+            for (unsigned j = 0; j < i; j++)
+                vm_kernel_free(tops[j] - IST_STACK_SIZE);
+            kfree(t);
+            return -ENOMEM;
+        }
+        tops[i] = stack + IST_STACK_SIZE;
     }
 
-    tables_init(t, df + DF_STACK_SIZE);
+    tables_init(t, tops);
     g_tables[cpu] = t;
     return 0;
+}
+
+uintptr_t gdt_ist_top(unsigned ist)
+{
+    KASSERT(ist >= 1 && ist <= IST_COUNT);
+    return g_tables[arch_cpu_id()]->ist_top[ist - 1];
 }
 
 void gdt_init_cpu(unsigned cpu)

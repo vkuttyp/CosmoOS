@@ -31,5 +31,8 @@ void wait_for_completion(struct completion *c)
 {
     if (this_cpu()->irq_depth != 0)
         panic("wait_for_completion in interrupt context");
+    if (this_cpu()->preempt_count != 0)
+        panic("wait_for_completion with preemption disabled (count %d): a spinlock is held",
+              this_cpu()->preempt_count);
     wait_event(&c->wq, completion_done(c));
 }
