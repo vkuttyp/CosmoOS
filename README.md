@@ -342,6 +342,24 @@ See [docs/development.md](docs/development.md).
   pending queue, so a driver's queue-full answer never reaches a
   filesystem; virtio-blk no longer sends unsupported flushes. Eight new
   self-tests, 113 in total.
+- **Network stack hardening and per-connection locking (done):**
+  milestone 8 of the audit's plan
+  (`docs/kernel-services/network/design.md`, "Hardening and
+  per-connection locking"). TCP pcbs are reference counted with one
+  spinlock each and a hashed table, replacing the single TCP lock; a
+  listener answers SYNs from a SYN cache or with SYN cookies and
+  allocates a connection only for the completing ACK, so a SYN flood
+  costs it nothing and locks nobody out; blind resets, SYNs and
+  out-of-range ACKs earn RFC 5961 challenge ACKs; keepalive probes end
+  dead connections and an orphaned FIN_WAIT_2 times out; out-of-order
+  segments are reassembled instead of dropped; ICMP replies are rate
+  limited and quote exactly the received header; "fragmentation
+  needed" messages drive path MTU discovery. Every I/O object gained a
+  readiness operation and a non-blocking mode (`ioready` 58,
+  `setnonblock` 59, `COSMO_SOCK_NONBLOCK`; Linux `SOCK_NONBLOCK`,
+  `accept4`, `pipe2(O_NONBLOCK)`, `fcntl(O_NONBLOCK)`), the piece
+  `poll` and asynchronous I/O will build on. Six new self-tests, 119
+  in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

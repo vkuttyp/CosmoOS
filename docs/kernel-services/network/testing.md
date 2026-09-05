@@ -93,6 +93,70 @@ first bytes are `QUIT` arrives, prints `NETTEST: done tcp_conns=N
 udp_pkts=N quit=1`, closes everything and checks `client_ok` and the
 quit flag. The watchdog is kicked during the waits.
 
+**`net-tcp-syncache`**: a listener on port 6020 (backlog 4) behind a
+loopback filter that drops resets addressed to it (this host would
+otherwise answer every SYN-ACK to a spoofed port with a RST and clear
+the cache); 300 raw SYNs from 300 source ports are injected through
+`ipv4_output`; afterwards `syn_cached` is between 1 and 64,
+`syn_cookies_sent` makes up the rest of 300, `conns_passive` has not
+moved and the listener has nothing to accept; a real client connects,
+is accepted and exchanges `hello`; a raw ACK matching nothing is
+counted as `syn_bad_ack` and creates nothing.
+
+**`net-tcp-rfc5961`**: a connection to a holding server; three raw
+segments from the server's port to the client's are injected: a RST
+1000 bytes into the window, a SYN 10 bytes in, an ACK 100 000 bytes
+beyond `snd_max`. After each the client is still ESTABLISHED and
+`snd_una` unchanged; `challenge_acks` grew by three, `rsts_in` by
+none. A RST at `rcv_nxt` then ends the connection: `recvfrom` is
+`-ECONNRESET`, `rsts_in` +1.
+
+**`net-tcp-reorder`**: the loopback filter holds a copy of every fifth
+data segment to port 6022, drops the original, lets the next data
+segment through and re-injects the held copy before the one after that;
+a 512 KiB transfer completes byte-exact, `g_reordered > 0` and
+`ooo_queued` grew (log: `7 segments delayed, 7 queued out of order, 0
+retransmissions`).
+
+**`net-tcp-keepalive`**: with `tcp_set_keepalive(150 ms, 50 ms, 3)`
+set before the connection exists, a client connects to a holding
+server and a filter black-holes every segment of that port in both
+directions; within 3 s the client's pcb is CLOSED, `recvfrom` is
+`-ETIMEDOUT`, `timeouts` grew and at least three probes were sent. Then
+with `tcp_set_fin_wait2(100 ms)` a client connects and closes while the
+server holds its end: the orphaned FIN_WAIT_2 is reaped
+(`fin_wait2_timeouts` +1) within 2 s. Both hooks are restored.
+
+**`net-icmp-limit`**: 300 echo requests to `127.0.0.1` in a burst: all
+counted as received, at most 100 replied, at least 200
+`icmp_ratelimited` (unreachables are never sent for 127/8, so the echo
+path carries the test). Then a connection to a holding server over `lo`
+(`mss` 16384, `ipv4_path_mtu(127.0.0.1)` 65535) with the black-hole
+filter keeping 2000 sent bytes in flight; a crafted ICMP type 3 code 4
+with MTU 1500 quoting the client's header with a sequence number 5000
+below `snd_una` is ignored by TCP (`pmtu_updates` unchanged, `mss`
+16384) but records the destination's MTU (`ipv4_path_mtu` 1500); the
+same message quoting `snd_una` lowers `mss` and `path_mss` to 1460
+and `tcp_path_mss` for new connections to 1460; the filter is removed,
+the retransmission completes, `ipv4_pmtu_flush` restores 16384.
+
+**`net-nonblock`**: a non-blocking listener answers `accept` with
+`-EAGAIN` and no readiness; a non-blocking client's `connect` returns 0
+or `-EINPROGRESS` (`-EALREADY` or `-EISCONN` on a repeat), becomes
+`WRITABLE`, then `-EISCONN`; the listener turns `READABLE` and accepts;
+`recvfrom` on the empty client is `-EAGAIN` and not `READABLE` until
+the server sends; non-blocking sends fill the rings and end in
+`-EAGAIN` with `WRITABLE` clear, the server drains exactly that many
+bytes and `WRITABLE` returns; closing the server end makes the client
+`HANGUP` and reads 0. A non-blocking datagram socket is `-EAGAIN` and
+`WRITABLE` only, then `READABLE` after a datagram to itself. Pipe ends
+through `kobject_io_of`, `kobject_set_nonblock` (-1 asks, returns the
+previous mode) and `kobject_ready`: an empty read is `-EAGAIN`, writes
+fill exactly `PIPE_SIZE` then `-EAGAIN` with `WRITABLE` clear, the
+read end is `READABLE`, and after the write end is released `HANGUP`
+with the rest of the bytes then 0; the console is `WRITABLE` and
+refuses `set_nonblock` with `-EOPNOTSUPP`.
+
 `tcp_transfer` ends by waiting, bounded, until the port it used binds
 again: the server's child leaves `LAST_ACK` only when the `netrx` worker
 processes the client's final ACK, and the test thread (higher priority)
@@ -173,14 +237,19 @@ with `QEMU_PCAP` opens in Wireshark or `tcpdump -r`.
   `tests/host/test_net.c` with a bit-flip fuzz loop (constitution
   section 60); today only well-formed packets and QEMU's stack
   exercise them.
-- No reordering, duplication or window-shrink injection; the loss
-  test drops only.
+- No duplication or window-shrink injection (reordering is injected by
+  `net-tcp-reorder`).
 - No IPv6 traffic through `eth0` (QEMU's user-mode IPv6 is enabled but
   the harness uses IPv4); IPv6 is tested over `lo` only, and ND
   against a real peer is untested.
-- No test of `ETIMEDOUT` (8 retransmissions take about 2 minutes with
-  the RTO doubling).
+- `ETIMEDOUT` is reached through keepalive (`net-tcp-keepalive`); the
+  retransmit limit itself (8 retransmissions, about 2 minutes with the
+  RTO doubling) is not driven.
 - No concurrency stress beyond one server and one client thread; lock
   order is reviewed, not checked.
-- No non-blocking or timed socket operations exist yet, so none are
-  tested.
+- No timed socket operations exist; non-blocking mode and readiness
+  are tested, a wait primitive over readiness (`poll`) does not exist
+  yet.
+- No test of the SYN cookie slot boundary (a cookie from the previous
+  8 s slot), of the challenge-ACK cap, or of a path MTU message from a
+  real router.

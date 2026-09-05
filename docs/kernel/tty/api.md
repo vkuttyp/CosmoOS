@@ -68,6 +68,12 @@ the line limit), `eofs` (empty `^D` records committed).
   the panic path; `waitqueue_wake_all` on a commit is interrupt-safe.
 - Failure modes: none reported; overflow is counted.
 
+### `bool tty_has_line(struct tty *t)`
+True when a complete line or an end-of-file mark waits in the ring, so
+`tty_read` would not block. Any context, no lock (a relaxed load of the
+line count); the console object's `ready` operation reports
+`COSMO_IO_READABLE` from it.
+
 ### `int64_t tty_read(struct tty *t, void *buf, size_t len)`
 - Purpose: deliver one record, or a prefix of it, to a reader.
 - Inputs: a kernel buffer (`sys_read` bounces through its 1024-byte

@@ -56,8 +56,9 @@ test kills a blocked *writer*.
 
 ## Gaps (documented, not invariants)
 
-- No named pipes, non-blocking mode, `poll`, `splice`, message
-  boundaries or priorities.
+- No named pipes, `poll`, `splice`, message boundaries or priorities
+  (non-blocking mode and readiness exist since milestone 8:
+  `docs/kernel-services/network/invariants.md` N19).
 - No global limit on pipes; a process is bounded by its 64-slot handle
   table (32 pipes, about 520 KiB of rings).
 - Channels, events and shared memory are not written; the futex

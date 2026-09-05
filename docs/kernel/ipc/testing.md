@@ -49,6 +49,18 @@ by `tests/linux/lxtest` (`-EAGAIN` on a mismatch, `-ETIMEDOUT` after 20
 ms, a wake with no waiter returns 0, an unknown operation `-ENOSYS`);
 `docs/compat/linux/testing.md`. No two-thread test exists yet.
 
+## Non-blocking mode and readiness (milestone 8)
+
+`net-nonblock` (`kernel-services/network/nettest.c`) drives the pipe ends
+through the object operations: `-EAGAIN` on an empty read, exactly
+`PIPE_SIZE` bytes written before `-EAGAIN`, `WRITABLE` clear when full
+and back after a read, `HANGUP` on the read end after the write end is
+released. `init --selftest` repeats it through `setnonblock`/`ioready`
+(`read` `-EAGAIN`, the read end not ready and the write end `WRITABLE`,
+`READABLE` after one byte, `HANGUP` then 0 after the writer closes);
+`lxtest` covers `pipe2(O_NONBLOCK)`, `fcntl(F_GETFL/F_SETFL)` and the
+same fill-to-`EAGAIN`.
+
 ## Gaps and planned tests
 
 - No test kills a writer blocked on a full pipe.

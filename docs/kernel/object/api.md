@@ -22,27 +22,54 @@ holds reference 1; a registry that hands the object out by lookup holds
 its own reference and drops it on unregister; lookups return referenced
 pointers.
 
-### `struct kobject_type { const char *name; void (*release)(struct kobject *); }`
+### `struct kobject_type { const char *name; void (*release)(struct kobject *); unsigned flags; }`
 Static, immortal type descriptor. `release` runs from the last put,
 in the putter's context, and may block; it must free or otherwise
-retire the object. Subtypes embed it as `base` and add operations
-(`struct kobject_io_type` adds `read`, `write` and, since Phase 9, an
-optional `stat`). Contract for `read(obj, buf, len)` / `write(obj, buf,
-len)`: return the bytes transferred, `0 <= count <= len`, or a negative
-errno; a NULL operation means the object does not support that
-direction (`-EBADF` from the system call). `stat(obj, struct cosmo_stat
-*st)` fills the record (0 or a negative errno); `sys_fstat` uses it for
-every object that is not a `struct file`, and returns `-EBADF` when it
-is NULL. I/O kobjects today: the console (`read`/`write`/`stat`),
-`struct file` (`kernel-services/vfs/`), `struct socket`
-(`read`/`write`, no `stat` yet), the pipe ends `pipe-read`
-(`read`/`stat`) and `pipe-write` (`write`/`stat`) (`kernel/ipc/`), and
+retire the object. `flags` carries `KOBJECT_TYPE_IO` when the
+descriptor is really a `struct kobject_io_type`; a type without it (a
+vcpu) is a plain object and every I/O path answers `-EBADF` for it
+instead of reading operations past the end of the descriptor. Subtypes
+embed it as `base` and add operations (`struct kobject_io_type` adds
+`read`, `write`, since Phase 9 an optional `stat`, and since milestone
+8 the optional `ready` and `set_nonblock`). Contract for `read(obj,
+buf, len)` / `write(obj, buf, len)`: return the bytes transferred,
+`0 <= count <= len`, or a negative errno; a NULL operation means the
+object does not support that direction (`-EBADF` from the system
+call). `stat(obj, struct cosmo_stat *st)` fills the record (0 or a
+negative errno); `sys_fstat` uses it for every object that is not a
+`struct file`, and returns `-EBADF` when it is NULL. `unsigned
+ready(obj)` returns the `COSMO_IO_READABLE` (1) / `WRITABLE` (2) /
+`HANGUP` (4) / `ERROR` (8) bits describing what would not block now,
+from any thread context without blocking; NULL means always readable
+and writable. `int set_nonblock(obj, int on)` switches the object's
+non-blocking mode (0 or 1; -1 only asks) and returns the previous mode;
+NULL means the object never blocks and the switch is `-EOPNOTSUPP`. The
+mode is a property of the object, shared by every handle to it (there
+is no open-file-description layer between a handle and its object).
+I/O kobjects today: the console (`read`/`write`/`stat`/`ready`: readable
+with a complete tty line, always writable), `struct file`
+(`kernel-services/vfs/`; no `ready`: always ready), `struct socket`
+(`read`/`write`/`stat`/`ready`/`set_nonblock`), the pipe ends
+`pipe-read` (`read`/`stat`/`ready`/`set_nonblock`) and `pipe-write`
+(`write`/`stat`/`ready`/`set_nonblock`) (`kernel/ipc/`), and
 since Phase 12 `struct vm` (`read` drains the guest's debug console,
 `write` `-ENOTSUP`, `stat` `COSMO_DT_CHR`; `kernel-services/virtualization/`),
 whose companion `struct vcpu` is a plain kobject. The system call
 layer bounds every copy by `len`, not by the returned count: a count
 above `len` trips a `KASSERT` and fails the call with `-EIO`, so a
 buggy object can never make the kernel read past its stack buffer.
+
+### `const struct kobject_io_type *kobject_io_of(const struct kobject *obj)`
+The object's io type, or NULL for a plain object (or NULL `obj`).
+`syscall_handle_read/write/stat`, `sys_ioready` and `sys_setnonblock`
+go through it.
+
+### `unsigned kobject_ready(struct kobject *obj)`, `int kobject_set_nonblock(struct kobject *obj, int on)`
+The `ready` and `set_nonblock` operations with their defaults: a plain
+object is never ready and cannot be switched (`-EOPNOTSUPP`); an io type
+without `ready` is `READABLE|WRITABLE`; one without `set_nonblock` is
+`-EOPNOTSUPP`. System calls `ioready` (58) and `setnonblock` (59)
+expose them (`docs/kernel/syscall/api.md`).
 
 ### `void kobject_init(struct kobject *obj, const struct kobject_type *type)`
 - Purpose: set the type and a reference count of 1 owned by the caller;

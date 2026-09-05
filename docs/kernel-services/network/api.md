@@ -322,10 +322,27 @@ NULL. Any context.
 
 **`void icmp_input(nif, m, iph)`** Worker only: verifies the checksum;
 echo requests are answered in place (the mbuf is turned into the
-reply); other types are counted and dropped. **`void icmp_send_unreach(orig, iph, code)`**
-Sends destination unreachable with `code` quoting the first 8 bytes of
-the original datagram; `orig` is **borrowed**. Not sent for
-broadcast/multicast. **`icmp_set_echo_reply_hook(fn)`** registers an
+reply) when the rate limit allows; a destination unreachable with code
+`ICMP_UNREACH_NEEDFRAG` (4) quoting one of our own datagrams records
+the next-hop MTU (or the RFC 1191 plateau below the quoted length when
+the router reports none, floor `IPV4_PMTU_MIN` 576) in the path MTU
+cache and, for a quoted TCP segment, calls `tcp_pmtu_notify`
+(`icmp_needfrag_rcvd`); other types are counted and dropped.
+**`void icmp_send_unreach(orig, iph, code)`** Sends destination
+unreachable with `code` quoting the original IP header (options
+included; `iph` must point at the whole received header, which
+`ipv4_input` copies out before dispatching) and 8 bytes of payload;
+`orig` is **borrowed**. Not sent for broadcast/multicast, for 127/8
+destinations, or beyond the rate limit. **`bool icmp_ratelimit_allow(void)`**
+One token from the host-wide ICMP bucket (`ICMP_RATE_PER_SEC` 100 per
+second, shared by unreachables and v4/v6 echo replies); a refusal
+counts `icmp_ratelimited`. **`uint32_t ipv4_path_mtu(dst)`** The
+cached path MTU for `dst` (`IPV4_PMTU_ENTRIES` 16, `IPV4_PMTU_TTL_NS`
+10 min), else the route's interface MTU, else 576; reads the registry:
+not under a protocol lock. **`void ipv4_pmtu_update(dst, mtu)`,
+**`void ipv4_pmtu_flush(void)`** record a destination's MTU (evicting
+the oldest entry; `pmtu_updates`) and empty the cache (tests).
+**`icmp_set_echo_reply_hook(fn)`** registers an
 observer `fn(src, id, seq)` for incoming echo replies (tests);
 **`int icmp_send_echo(dst, id, seq, payload, len)`** sends a request
 (`-EMSGSIZE` above 1400 payload bytes). Thread context.
@@ -343,7 +360,8 @@ tries, 20 min ageing), `nd_input_ns`, `nd_input_na`, `nd_age(now_ns)`.
 **`ipv4_get_stats`, `ipv6_get_stats`** (`struct ip_stats`: `rx`,
 `rx_bad_header`, `rx_bad_cksum`, `rx_not_for_us`, `rx_fragments`,
 `rx_unknown_proto`, `tx`, `tx_no_route`, `icmp_echo_rcvd`,
-`icmp_echo_replied`, `icmp_unreach_sent`). Any context.
+`icmp_echo_replied`, `icmp_unreach_sent`, `icmp_ratelimited`,
+`icmp_needfrag_rcvd`, `pmtu_updates`). Any context.
 
 ## UDP (`kernel/include/kernel/net/udp.h`, `udp.c`)
 
@@ -390,28 +408,42 @@ Constants: `struct tcp_hdr`, `TH_FIN/SYN/RST/PSH/ACK`, `TCP_HDR_LEN`,
 `enum tcp_state` (the eleven RFC 793 states), `TCP_SNDBUF` and
 `TCP_RCVBUF` 65536, `TCP_MSS_V4` 1460, `TCP_MSS_V6` 1440, `TCP_MSS_LO`
 16384, `TCP_MAX_REXMIT` 8, RTO bounds 200 ms .. 60 s (initial 1 s),
-`TCP_DELACK_NS` 40 ms, `TCP_TIMEWAIT_NS` 2 s, `TCP_MAX_BACKLOG` 16.
+`TCP_DELACK_NS` 40 ms, `TCP_TIMEWAIT_NS` 2 s, `TCP_MAX_BACKLOG` 16,
+`TCP_MAX_WINDOW` 65535, `TCP_HASH_SIZE` 256, `TCP_SYNCACHE_SIZE` 64,
+`TCP_SYNCACHE_TTL_NS` 8 s, `TCP_FIN_WAIT2_NS` 60 s, `TCP_KEEPIDLE_NS`
+7200 s, `TCP_KEEPINTVL_NS` 75 s, `TCP_KEEPCNT` 9, `TCP_OOO_MAX` 32,
+`TCP_CHALLENGE_PER_SEC` 100. `struct tcp_syn_entry` / `struct
+tcp_syncache` (a listener's half-open connections), `struct
+tcp_ooo_seg` (`seq`, `len`, `m`, `fin`: one held segment).
 
-**`struct tcp_pcb`**: state; `local`/`remote`; send variables `iss`,
+**`struct tcp_pcb`**: `lock` (this pcb's spinlock), `refs` (atomic
+reference count: the state machine, the table, the socket, the accept
+queue, lookups in flight and queued work items); state; `local`/`remote`; send variables `iss`,
 `snd_una`, `snd_nxt`, `snd_wnd`, `snd_wl1`, `snd_wl2`, `snd_max`,
 `mss`, `sndbuf` (a `struct netbuf` byte ring holding bytes from
 `snd_una`); receive variables `irs`, `rcv_nxt`, `rcv_wnd`, `rcvbuf`;
 congestion and RTT state (`cwnd`, `ssthresh`, `dupacks`, `srtt_ns`,
-`rttvar_ns`, `rto_ns`, one timed sequence number); timers `rexmit`,
-`delack`, `timewait` with `rexmit_count`; flags `delack_pending`,
-`fin_queued`, `fin_sent`, `fin_rcvd`; passive-open fields `listener`,
-`accept_link`, `accept_queue`, `backlog`, `nr_queued`; `sock`, `link`,
-`error` (the asynchronous error the socket layer reports),
-`retransmits`, `segs_in`, `segs_out`, `work`/`work_flags` (the timers'
-hand-off to the worker). Allocated by `tcp_pcb_new`; freed by
-`tcp_close` or, when the connection lingers (TIME_WAIT, a FIN in
-flight), by the pcb itself on the worker once the state machine ends.
-After `tcp_close` the caller must not touch it.
+`rttvar_ns`, `rto_ns`, one timed sequence number); the reassembly
+queue `ooo[]`, `ooo_n`, `ooo_bytes`; timers `rexmit`, `delack`,
+`timewait`, `keep` with `rexmit_count`, `last_rx_ns`, `keep_probes`;
+flags `delack_pending`, `fin_queued`, `fin_sent`, `fin_rcvd`;
+passive-open fields `listener`, `accept_link`, `accept_queue`,
+`syncache`, `backlog`, `nr_queued`; `sock`, `hash_link`, `error` (the
+asynchronous error the socket layer reports), `retransmits`,
+`segs_in`, `segs_out`, `work`/`work_flags` (the timers' hand-off to
+the worker). Allocated by `tcp_pcb_new` with two references (the state
+machine's and the caller's); freed by the last reference drop, which
+happens after `tcp_close` when the state machine has ended, or on the
+worker when a lingering connection (TIME_WAIT, a FIN in flight, an
+orphaned FIN_WAIT_2) ends. After `tcp_close` the caller must not touch
+it.
 
-All TCP functions take the single TCP spinlock internally; none may be
-called with it held. Segments are built under the lock into a
-`struct tcp_batch` (16 at most) and transmitted after it is released,
-so no function holds a spinlock across a driver.
+Every TCP function takes the pcb's own spinlock internally and the
+table lock inside it; none may be called with either held. Segments
+are built under the lock into a `struct tcp_batch` (16 at most) and
+transmitted after it is released, so no function holds a spinlock
+across a driver. `design.md`, "Hardening and per-connection locking",
+gives the lock order and the reference rules.
 
 **`void tcp_init(void)`** Seeds the ephemeral port counter from
 `random_u64`.
@@ -421,13 +453,14 @@ allocated 64 KiB send and receive rings, `mss` by family, timers
 initialised. NULL without memory. Thread context (allocates).
 
 **`void tcp_close(struct tcp_pcb *pcb)`** Detaches the socket
-(`pcb->sock = NULL`) and: frees a CLOSED or SYN_SENT pcb; for a
-listener, resets and frees every unaccepted child and frees itself;
-for SYN_RCVD/ESTABLISHED/CLOSE_WAIT sends RST and frees when unread
-data remains (RFC 2525 2.17), otherwise queues a FIN after the
-buffered data (FIN_WAIT_1 or LAST_ACK) and lets the pcb finish and
-free itself; in the other closing states it does nothing more. Thread
-context.
+(`pcb->sock = NULL`) and: ends a CLOSED or SYN_SENT pcb; for a
+listener, resets and ends every unaccepted child and ends itself; for
+SYN_RCVD/ESTABLISHED/CLOSE_WAIT sends RST and ends when unread data
+(buffered or held for reassembly) remains (RFC 2525 2.17), otherwise
+queues a FIN after the buffered data (FIN_WAIT_1 or LAST_ACK) and lets
+the pcb finish on its own; in FIN_WAIT_2 it arms the orphan timeout; in
+the other closing states it does nothing more. Drops the caller's
+reference last. Thread context.
 
 **`int tcp_bind(pcb, local)`** Records the local address and port
 (ephemeral when 0). `-EAFNOSUPPORT` (family), `-EINVAL` (not CLOSED),
@@ -435,19 +468,27 @@ context.
 overlapping address), `-EADDRNOTAVAIL`.
 
 **`int tcp_listen(pcb, backlog)`** LISTEN with `backlog` clamped to
-`1..TCP_MAX_BACKLOG`. `-EINVAL` unless bound and CLOSED.
+`1..TCP_MAX_BACKLOG` and a SYN cache allocated. `-EINVAL` unless bound
+and CLOSED, `-ENOMEM`.
 
 **`struct tcp_pcb *tcp_accept(pcb, owner)`** Removes and returns one
 established child of a listening pcb, attaching `owner` (the new socket)
-to it in the same critical section, or NULL. The former two-step
-(dequeue, then `tcp_attach_socket` from the caller) left a window where a
-reset found `sock == NULL` and freed the pcb under the accepting thread
-(`docs/kernel/quiesce/invariants.md` Q13); `ksock_accept` therefore
-allocates the child socket before dequeuing.
+to it under the listener's and the child's lock in the same critical
+section, or NULL; the queue's reference becomes the socket's. Children
+that ended while queued (a reset before accept) are discarded on the
+way. The former two-step (dequeue, then `tcp_attach_socket` from the
+caller) left a window where a reset found `sock == NULL` and freed the
+pcb under the accepting thread (`docs/kernel/quiesce/invariants.md`
+Q13); `ksock_accept` therefore allocates the child socket before
+dequeuing.
 
 **`int tcp_connect(pcb, remote)`** Picks the source address and an
-ephemeral port when unbound, chooses `mss` by route (`TCP_MSS_LO` over
-`lo`), sends a SYN with the MSS option and enters SYN_SENT. Completion
+ephemeral port when unbound (a random start, probing upwards), chooses
+`mss` by route and path MTU cache (`tcp_path_mss`: `TCP_MSS_LO` over
+`lo`, `ipv4_path_mtu(dst) - 40` capped by the family default
+otherwise), sends a SYN with the MSS option and enters SYN_SENT. A
+retired pcb (its connection ended under a live socket) starts afresh
+here. Completion
 is asynchronous: the worker moves the pcb to ESTABLISHED (or sets
 `error` to `-ECONNREFUSED`/`-ETIMEDOUT` and CLOSED) and calls
 `sock_wake`. `-EAFNOSUPPORT` (family), `-EINVAL` (unspecified peer),
@@ -475,34 +516,73 @@ otherwise.
 
 **`uint32_t tcp_send_space(pcb)`, `uint32_t tcp_recv_avail(pcb)`,
 `bool tcp_accept_ready(pcb)`, `enum tcp_state tcp_state_of(pcb)`**
-Lock-free reads for wait conditions; the value may be stale by the
-time it is used, which the callers tolerate by re-checking under the
-protocol call. Any context.
+Reads for wait conditions (under the pcb lock, except `tcp_state_of`,
+an atomic load); the value may be stale by the time it is used, which
+the callers tolerate by re-checking under the protocol call. Any
+context.
 
-**`void tcp_attach_socket(pcb, sock)`** Sets `pcb->sock` under the
-lock (accepted children).
+**`unsigned tcp_ready(pcb)`** `COSMO_IO_*` bits for the pcb alone: a
+listener is `READABLE` with a child waiting; a connection is
+`READABLE` with data in `rcvbuf`, `READABLE|HANGUP` after the peer's
+FIN, `READABLE|WRITABLE|ERROR` with a pending error, `WRITABLE` with
+room in `sndbuf` in ESTABLISHED/CLOSE_WAIT or once a FIN is queued (a
+write fails at once); CLOSED is `READABLE|WRITABLE|HANGUP`; SYN_SENT
+and SYN_RCVD report nothing. Any thread context.
 
 **`void tcp_input(nif, m, ip4, ip6)`** Worker only, `m->data` at the
 TCP header. Verifies the checksum (`bad_cksum`), looks up the exact
-four-tuple then a listener on the local port (a segment for no pcb
-earns a RST unless it carries one, `dropped_no_pcb`), and runs the
-state machine: SYN to a listener creates a child when `nr_queued <
-backlog` (otherwise the SYN is dropped and the client retransmits);
-ACK processing frees `sndbuf`, updates the window, samples the RTT
-(RFC 6298), grows `cwnd` (slow start, then one MSS per RTT), counts
-duplicate ACKs (three: halve `ssthresh`, retransmit one segment); RST
-sets `error` (`-ECONNREFUSED` in SYN_RCVD, `-ECONNRESET` otherwise)
-and closes; in-order data is appended to `rcvbuf` and acknowledged
-immediately every second segment or after 40 ms, out-of-order data is
-acknowledged with `rcv_nxt` and dropped (`out_of_order`); FIN moves
-through CLOSE_WAIT / TIME_WAIT (2 s) and wakes the socket. When
-TIME_WAIT ends the pcb is freed if its socket is gone; otherwise it is
-retired: CLOSED, out of the pcb table (its port is free again), waiting
-for `tcp_close`. Reset and timeout end a connection the same way.
+four-tuple then a listener on the local port (a segment for no pcb, or
+for one that ended between the lookup and its lock, earns a RST unless
+it carries one, `dropped_no_pcb`), and runs the state machine. A
+listener answers a SYN from its SYN cache (a slot for up to 8 s,
+`syn_cached`) or, when the cache has no slot, with a SYN cookie
+(`syn_cookies_sent`); the ACK that completes the handshake is checked
+against the cache, then the cookies of the current and previous 8 s
+slot (`syn_cookies_ok`; a mismatch is `syn_bad_ack` and a RST), and
+creates the child ESTABLISHED, queued for accept and in the table when
+`nr_queued < backlog` (otherwise dropped: the client retransmits); the
+segment is then processed on the child. In synchronized states: a RST
+is accepted only at `rcv_nxt`, a RST elsewhere in the window, any SYN,
+and an ACK outside `[snd_una - TCP_MAX_WINDOW, snd_max]` earn a
+rate-limited challenge ACK and are dropped (`challenge_acks`, RFC
+5961); ACK processing frees `sndbuf`, updates the window, samples the
+RTT (RFC 6298), grows `cwnd` (slow start, then one MSS per RTT), counts
+duplicate ACKs (three: halve `ssthresh`, retransmit one segment); an
+accepted RST sets `error` (`-ECONNREFUSED` in SYN_RCVD, `-ECONNRESET`
+otherwise) and ends the connection; in-order data is appended to
+`rcvbuf`, followed by whatever the reassembly queue now makes
+contiguous, and acknowledged immediately every second segment, when a
+gap remains behind it, or after 40 ms; out-of-order data inside the
+window is queued (`out_of_order`, `ooo_queued`; `ooo_dropped` when the
+bound or an overlap refuses it) and answered with an immediate ACK; FIN
+(in the segment or at the end of the drained queue) moves through
+CLOSE_WAIT / TIME_WAIT (2 s) and wakes the socket. TIME_WAIT
+acknowledges and restarts only for a retransmitted FIN. Every
+acceptable segment records `last_rx_ns` for keepalive. When TIME_WAIT
+ends the pcb is ended if its socket is gone; otherwise it is retired:
+CLOSED, out of the pcb table (its port is free again), waiting for
+`tcp_close`. Reset, the retransmit limit, keepalive exhaustion and the
+FIN_WAIT_2 timeout end a connection the same way.
+
+**`void tcp_pmtu_notify(local, remote, seq, mtu)`** Worker only, from
+`icmp_input`: for the connection `(local, remote)` in a synchronized
+state whose quoted `seq` lies in `[snd_una, snd_max)` (RFC 5927) and
+whose path MSS is above `mtu - 40` (`- 60` for IPv6), lowers
+`path_mss` and `mss` (floor 256), counts `pmtu_updates` and retransmits
+from `snd_una` at the new size. Anything else is ignored.
+
+**`void tcp_set_keepalive(idle_ns, intvl_ns, cnt)`, `void
+tcp_set_fin_wait2(ns)`** Test hooks for the global keepalive parameters
+and the orphaned FIN_WAIT_2 timeout; 0 restores a default. The idle
+timer is armed when a connection is established, so a change applies to
+connections made after it.
 
 **`tcp_get_stats`** (`segs_in`, `segs_out`, `retransmits`,
 `bad_cksum`, `rsts_in`, `rsts_out`, `conns_active`, `conns_passive`,
-`conns_established`, `dropped_no_pcb`, `out_of_order`, `timeouts`);
+`conns_established`, `dropped_no_pcb`, `out_of_order`, `timeouts`,
+`syn_cached`, `syn_cookies_sent`, `syn_cookies_ok`, `syn_bad_ack`,
+`challenge_acks` (sent and suppressed), `ooo_queued`, `ooo_dropped`,
+`keepalive_probes`, `fin_wait2_timeouts`, `pmtu_updates`);
 **`const char *tcp_state_name(s)`**.
 
 ## Sockets (`kernel/include/kernel/socket.h`, `socket.c`)
@@ -513,7 +593,8 @@ for `tcp_close`. Reset and timeout end a connection the same way.
 (`SS_UNCONNECTED`, `SS_BOUND`, `SS_LISTENING`, `SS_CONNECTING`,
 `SS_CONNECTED`, `SS_CLOSED`), `udp` (embedded pcb, datagram sockets),
 `tcp` (allocated pcb, stream sockets), `wait`, `error` (consumed by
-the next call that reports it), `shut` (1 = read, 2 = write), `lock`
+the next call that reports it), `shut` (1 = read, 2 = write),
+`nonblock` (the object's mode, shared by every handle), `lock`
 (a mutex serialising callers; protocol spinlocks nest inside), `uid`
 (the creator, for privileged ports). `SOCK_IO_CHUNK` 4096 is the
 system-call bounce-buffer size. Lifetime: a reference-counted kobject
@@ -545,7 +626,10 @@ the pending error, `-ENOMEM` (the child is closed).
 traffic. Stream: sends the SYN and blocks until ESTABLISHED
 (`SS_CONNECTED`) or failure (`-ECONNREFUSED`, `-ETIMEDOUT` after 8
 SYN retransmissions, `-ECONNRESET`); `-EISCONN`, `-EINVAL` (listening),
-`-EAFNOSUPPORT`, `tcp_connect` errors.
+`-EAFNOSUPPORT`, `tcp_connect` errors. Non-blocking: returns
+`-EINPROGRESS` with the SYN out (`SS_CONNECTING`); a later call answers
+`-EALREADY` while the handshake runs, `-EISCONN` once it succeeded, or
+the failure; readiness (`WRITABLE`, or `ERROR`) tells when to ask.
 
 **`int64_t ksock_sendto(s, buf, len, to)`** `-EPIPE` after a write
 shutdown. Datagram: `to` NULL requires a connected socket
@@ -554,14 +638,16 @@ becomes `SS_BOUND` on first use. Stream: `to` must be NULL
 (`-EISCONN`), the socket connected (`-ENOTCONN`); copies everything,
 blocking while the send ring is full; on an error midway returns the
 bytes already taken, else the error (`-EPIPE`, `-ECONNRESET`,
-`-ETIMEDOUT`).
+`-ETIMEDOUT`). Non-blocking: returns what fitted, `-EAGAIN` when
+nothing did.
 
 **`int64_t ksock_recvfrom(s, buf, len, from)`** Datagram: `-EINVAL`
 when unbound (nothing can arrive); blocks for one datagram and copies
 at most `len` bytes of it (the rest is discarded); `from` gets the
 sender. Stream: `-ENOTCONN` unless connected; blocks for data; returns
 bytes, 0 at EOF (peer FIN, or read shutdown), `pcb->error` on a
-reset. 0 immediately after `shutdown(SHUT_RD)`.
+reset. 0 immediately after `shutdown(SHUT_RD)`. Non-blocking (both
+kinds): `-EAGAIN` when nothing is queued.
 
 **`int ksock_shutdown(s, how)`** `COSMO_SHUT_RD/WR/RDWR` (`-EINVAL`
 otherwise); write shutdown on a connected stream queues a FIN; wakes
@@ -570,6 +656,18 @@ every waiter.
 **`int ksock_getsockname(s, out)`** Always succeeds (port 0 when
 unbound). **`int ksock_getpeername(s, out)`** `-ENOTCONN` unless
 connected.
+
+**`void ksock_set_nonblock(s, on)`, `unsigned ksock_ready(s)`** Switch
+the object's non-blocking mode; report `COSMO_IO_*` readiness: a
+datagram socket is `READABLE` with a queued datagram and always
+`WRITABLE`; a stream socket reports `tcp_ready` plus `WRITABLE` when a
+write would fail at once (not connected), `READABLE|HANGUP` after a read
+shutdown, `WRITABLE` after a write shutdown, and
+`READABLE|WRITABLE|ERROR` with a pending error. A finished
+non-blocking connect becomes `SS_CONNECTED` on the next `connect`,
+`sendto` or `recvfrom` (under the socket mutex); `ksock_ready` changes
+nothing. Through the object type these are `ready` and `set_nonblock`
+(`docs/kernel/object/api.md`).
 
 **`struct socket *socket_from_kobject(struct kobject *obj)`** The
 socket, or NULL when `obj` has another type (`sock_of` in `native.c`
@@ -582,13 +680,16 @@ socket_count(void)`** live sockets (tests check for leaks).
 ## System calls (`kernel/include/uapi/cosmo/syscall.h`, `kernel/syscall/native.c`)
 
 **ABI stability: stable.** Numbers 23–31; `SYS_COUNT` was 32 after this
-phase (43 since Phase 9 appended calls 32–42).
+phase (43 since Phase 9 appended calls 32–42; 60 since milestone 8
+appended `ioready` 58 and `setnonblock` 59, `docs/kernel/syscall/api.md`).
 
 ```c
 #define COSMO_AF_INET  2
 #define COSMO_AF_INET6 10
 #define COSMO_SOCK_STREAM 1
 #define COSMO_SOCK_DGRAM  2
+#define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: starts non-blocking (milestone 8) */
+#define COSMO_IO_READABLE 1, COSMO_IO_WRITABLE 2, COSMO_IO_HANGUP 4, COSMO_IO_ERROR 8   /* ioready */
 #define COSMO_SHUT_RD 0, COSMO_SHUT_WR 1, COSMO_SHUT_RDWR 2
 struct cosmo_sockaddr {
     uint16_t family;    /* COSMO_AF_* */
@@ -601,11 +702,11 @@ struct cosmo_sockaddr {
 
 | Nr | Name | Arguments | Result | Errors |
 |---|---|---|---|---|
-| 23 | `socket` | `int family, int type, int proto` (0) | handle with READ and WRITE rights | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
+| 23 | `socket` | `int family, int type, int proto` (0); `type` may carry `COSMO_SOCK_NONBLOCK` | handle with READ and WRITE rights | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
 | 24 | `bind` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF` (not a socket), `EFAULT`, `EINVAL` (`len` below 28), `EAFNOSUPPORT`, `EPERM`, `EADDRINUSE`, `EADDRNOTAVAIL` |
 | 25 | `listen` | `int h, int backlog` | 0 | `EBADF`, `EOPNOTSUPP`, `EINVAL` |
-| 26 | `accept` | `int h, struct cosmo_sockaddr *peer, size_t *len` (both may be NULL) | new handle | `EBADF` (needs READ), `EOPNOTSUPP`, `EINVAL`, `EFAULT`, `EMFILE`, the connection's error |
-| 27 | `connect` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EISCONN`, `ECONNREFUSED`, `ETIMEDOUT`, `ENETUNREACH`, `EADDRNOTAVAIL` |
+| 26 | `accept` | `int h, struct cosmo_sockaddr *peer, size_t *len` (both may be NULL) | new handle (blocking mode, whatever the listener's) | `EBADF` (needs READ), `EOPNOTSUPP`, `EINVAL`, `EFAULT`, `EMFILE`, `EAGAIN` (non-blocking, nobody waiting), the connection's error |
+| 27 | `connect` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EISCONN`, `ECONNREFUSED`, `ETIMEDOUT`, `ENETUNREACH`, `EADDRNOTAVAIL`, `EINPROGRESS`/`EALREADY` (non-blocking) |
 | 28 | `sendto` | `int h, const void *buf, size_t len, const struct cosmo_sockaddr *to, size_t tolen` (`to` NULL for connected sockets) | bytes sent | `EBADF` (needs WRITE), `EFAULT`, `EINVAL`, `EMSGSIZE`, `ENOTCONN`, `EISCONN`, `EPIPE`, `ECONNRESET`, `ETIMEDOUT`, `ENOMEM` |
 | 29 | `recvfrom` | `int h, void *buf, size_t len, struct cosmo_sockaddr *from, size_t *fromlen` (both may be NULL) | bytes received, 0 at end of stream | `EBADF` (needs READ), `EFAULT`, `EINVAL`, `ENOTCONN`, `ECONNRESET`, `ETIMEDOUT`, `ENOMEM` |
 | 30 | `shutdown` | `int h, int how` | 0 | `EBADF`, `EINVAL` |
@@ -629,16 +730,21 @@ cosmo_sockaddr)`; on input it is ignored. A socket handle also answers
 101, `COSMO_ECONNRESET` 104, `COSMO_ENOBUFS` 105, `COSMO_EISCONN` 106,
 `COSMO_ENOTCONN` 107, `COSMO_ETIMEDOUT` 110, `COSMO_ECONNREFUSED` 111,
 `COSMO_EHOSTUNREACH` 113, `COSMO_EALREADY` 114, `COSMO_EINPROGRESS`
-115 (the last two are defined for completeness; no call returns them
-yet since sockets are blocking).
+115 (the last two from a non-blocking `connect`; `sendto` and
+`recvfrom` on a non-blocking socket return `COSMO_EAGAIN` 11 when they
+would wait). Readiness without waiting is `ioready` (58) and the mode
+switch `setnonblock` (59), both generic over handles
+(`docs/kernel/syscall/api.md`).
 
 User-side wrappers (`libc/include/cosmo/syscall.h`, stable names):
 `cosmo_syscall5`, `cosmo_socket(family, type, proto)`, `cosmo_bind(h,
 sa)`, `cosmo_listen(h, backlog)`, `cosmo_accept(h, peer, len)`,
 `cosmo_connect(h, sa)`, `cosmo_sendto(h, buf, len, to)`,
 `cosmo_recvfrom(h, buf, len, from, fromlen)`, `cosmo_shutdown(h, how)`,
-`cosmo_getsockname(h, sa, len)`; the address wrappers pass
-`sizeof(struct cosmo_sockaddr)` (0 for a NULL `to`).
+`cosmo_getsockname(h, sa, len)`, `cosmo_ioready(h)`,
+`cosmo_setnonblock(h, on)`; the address wrappers pass
+`sizeof(struct cosmo_sockaddr)` (0 for a NULL `to`). `<sys/socket.h>`
+maps `SOCK_NONBLOCK`; `<errno.h>` `EAGAIN`, `EINPROGRESS`, `EALREADY`.
 
 ## Boot parameters (`kernel/include/kernel/fwcfg.h`, `kernel/include/arch/fwcfg.h`)
 

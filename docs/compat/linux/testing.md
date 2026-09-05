@@ -73,11 +73,12 @@ order:
 | thread pointer | `arch_prctl(ARCH_SET_FS, tcb)`, `%fs:0` reads the word, `ARCH_GET_FS` returns the base, `ARCH_SET_GS` `-EINVAL`; a sleep, then `%fs:0` again |
 | brk, mmap | `brk(0)`, grow 8 KiB and write both pages, shrink back, a request below the start returns the old break; anonymous `mmap` of 8 KiB written, `mprotect` to read-only, `munmap`; a file mapping `-ENODEV`; RWX `-EINVAL`; `MAP_FIXED` at a free page, `MAP_FIXED` again on it replaces (reads 0), then `munmap`. Milestone 5: eight pages, `mprotect` of the middle two to read-only (page 0 still writable, the two readable with contents), to `PROT_NONE` (`write` from it `-EFAULT`), back to RW (the byte survived); `munmap` of one page, `mprotect` across the hole `-ENOMEM`, `munmap` of the whole range 0; `brk` grow, shrink to one page, regrow larger: kept page, zero page, new byte |
 | files | `openat(AT_FDCWD, "/tmp/lxtest.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644)`, `write`, `writev` of two iovecs, `fstat` (`S_IFREG`, size 22), reopen `O_RDONLY`, `pread64` at 6, `lseek` 0, `readv` into two buffers, `read` at EOF returns 0, `close`, second `close` `-EBADF`; `newfstatat` size, `stat` of a missing path `-ENOENT`, `/tmp` is `S_IFDIR`, fd 0 is `S_IFCHR`, `ioctl(1, TCGETS)` `-ENOTTY`, `access`; `mkdirat`, `rename` into the directory, `getdents64` sees `.`, `..` and `moved` (`d_type` 8) with 8-aligned records of at least 24 bytes, a second `getdents64` returns 0; `unlinkat`, `unlinkat(AT_REMOVEDIR)`; `chdir("/tmp")`, `getcwd` returns 5 (NUL included) and `/tmp`; `chdir("/")`; `umask` 022 |
-| pipes, dup, fcntl | `pipe2(O_CLOEXEC)`, write 3 bytes, read them back; `dup`, `dup3` to 40, `dup3(fd, fd)` `-EINVAL`; `F_GETFL` on the write end is `O_WRONLY`; `F_DUPFD` from 50 lands at or above 50; close every write end, `read(40)` returns 0 (EOF); `fstat(40)` is `S_IFIFO` |
+| pipes, dup, fcntl | `pipe2(O_CLOEXEC)`, write 3 bytes, read them back; `dup`, `dup3` to 40, `dup3(fd, fd)` `-EINVAL`; `F_GETFL` on the write end is `O_WRONLY`; `F_DUPFD` from 50 lands at or above 50; `pipe2(O_NONBLOCK)`: an empty read is `-EAGAIN`, `F_GETFL` shows `O_NONBLOCK`, `F_SETFL(0)` clears it, `F_SETFL(O_NONBLOCK)` on the write end and 4096-byte writes fill exactly 16384 bytes before `-EAGAIN`; close every write end, `read(40)` returns 0 (EOF); `fstat(40)` is `S_IFIFO` |
 | rlimits | `getrlimit(NOFILE)` 64/64, `prlimit64(0, AS)` 2 GiB, `RLIMIT_STACK` infinity; `setrlimit(NOFILE, 8)` then opens until `-EMFILE`; back to 64 (root); `cur > max` `-EINVAL`; another pid `-EPERM`; `setrlimit(STACK)` accepted and ignored |
 | signals, wait, kill | `rt_sigaction(2)` stores a handler at `0x400000` and reads it back; `rt_sigaction(9)` `-EINVAL`; `rt_sigprocmask` block and read back; `wait4(-1)` `-ECHILD`; `kill(999999, 15)` `-ESRCH`; `kill(self, 0)` 0; `execve` and `fork` `-ENOSYS`; `sched_yield` 0 |
 | futex | `FUTEX_WAIT|PRIVATE` with the wrong value `-EAGAIN`; `FUTEX_WAIT` with a 20 ms timeout `-ETIMEDOUT`; `FUTEX_WAKE` returns 0; operation 99 `-ENOSYS` |
 | random, sockets | `getrandom(32)` returns 32; a UDP socket bound to 127.0.0.1 sends `ping` to itself and `recvfrom` receives it with the sender's address; `getsockname` into a 4-byte buffer reports 16 and leaves a canary intact; `fstat` on the socket is `S_IFSOCK`; `setsockopt(SOL_SOCKET, SO_REUSEADDR)` 0; `close`; `socket(AF_UNIX)` `-EAFNOSUPPORT` |
+| non-blocking sockets | `socket(SOCK_DGRAM\|SOCK_NONBLOCK)` bound to 127.0.0.1: `recvfrom` `-EAGAIN`, `F_GETFL` has `O_NONBLOCK`; a listener made non-blocking with `F_SETFL`: `accept4` `-EAGAIN`; a `SOCK_STREAM\|SOCK_NONBLOCK` client's `connect` is 0 or `-EINPROGRESS`, `accept4(SOCK_NONBLOCK)` polled until it returns a socket, a second `connect` `-EISCONN`, the accepted end's `recvfrom` `-EAGAIN` until `hey` arrives |
 | unknown numbers | 510 (in the table, unimplemented) and 9999 (beyond it) both `-ENOSYS` |
 
 `hello_musl` (`tests/linux/hello_musl.c`): `uname`, `malloc`,
@@ -151,8 +152,9 @@ binary is about 200 KiB, static, with a `PT_GNU_STACK` and four
 No two-thread futex test and no contention test (a single-threaded
 process cannot exercise a real wake). No hostile-pointer sweep over the
 Linux table comparable to `init --selftest`. No test of `brk`'s 1 GiB
-cap, of `MAP_FIXED` over the heap, of TCP through the Linux socket
-calls (only UDP loopback), of `wait4` on a real child (Linux processes
+cap, of `MAP_FIXED` over the heap, of a blocking TCP transfer through
+the Linux socket calls (the non-blocking handshake and one datagram are
+covered), of `wait4` on a real child (Linux processes
 cannot spawn yet), or of two Linux processes alternating their `%fs`
 bases. `hello_musl` is the only foreign-toolchain binary; a larger
 program (a shell, `busybox`) is the natural next fixture once file

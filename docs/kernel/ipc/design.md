@@ -138,10 +138,23 @@ Pipes are anonymous: only handle inheritance or `dup` can share one. The
 buffer is bounded; a writer cannot exhaust memory beyond `PIPE_SIZE` per
 pipe. Lengths come from the system-call layer already validated.
 
+## Non-blocking ends and readiness (milestone 8)
+
+Each end carries a `nonblock` bit (`set_nonblock` through the object
+type, `setnonblock`/`fcntl(F_SETFL)` from user mode; shared by every
+handle to that end). A non-blocking read of an empty pipe with a writer
+alive is `-EAGAIN` (still 0 at end of file); a non-blocking write is
+`-EAGAIN` when the ring cannot take the piece (whole for `PIPE_BUF` or
+less, one byte otherwise) and nothing was written yet, else the partial
+count. `ready` on the read end reports `READABLE` with bytes in the
+ring and `READABLE|HANGUP` once no writer remains; on the write end
+`WRITABLE` with at least `PIPE_BUF` free and `WRITABLE|ERROR` once no
+reader remains (a write fails at once). Both read the pipe under its
+lock and never block.
+
 ## Future extensibility
 
-- Non-blocking ends and `poll` readiness: a `flags` word per end and
-  readiness callbacks on the two wait queues.
+- `poll` over the readiness operation once a wait primitive exists.
 - Named pipes: a `VNODE_FIFO` whose open returns the ends.
 - Channels (messages with handles), events, shared memory and futexes
   join `kernel/ipc/` as separate files with their own kobject types; the

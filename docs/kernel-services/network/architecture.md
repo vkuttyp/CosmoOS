@@ -78,13 +78,18 @@ through handles.
   acknowledgement handling, receive window and flow control, a byte
   send buffer with retransmission on an RTO timer (RFC 6298 estimate),
   fast retransmit on three duplicate ACKs, slow start and congestion
-  avoidance, delayed ACK, TIME_WAIT, RST handling, listen backlog. No
-  SACK, window scaling, timestamps, or urgent data.
+  avoidance, delayed ACK, TIME_WAIT, RST handling; since milestone 8 a
+  SYN cache with SYN cookies behind the listen backlog, RFC 5961
+  challenge ACKs, keepalive and an orphaned-FIN_WAIT_2 timeout, bounded
+  out-of-order reassembly, path MTU notifications, one lock per
+  connection and a hashed pcb table. No SACK, window scaling,
+  timestamps, or urgent data.
 - **Sockets** (`kernel/socket.h`): `struct socket` as a kobject with the
-  io type (read/write on connected sockets), the kernel API `ksock_*`
-  used by both the system calls and the tests, blocking semantics
-  through wait queues, `shutdown`. System calls 23 to 31 with
-  `struct cosmo_sockaddr` in the UAPI.
+  io type (read/write on connected sockets, readiness, non-blocking
+  mode), the kernel API `ksock_*` used by both the system calls and the
+  tests, blocking semantics through wait queues, `shutdown`. System
+  calls 23 to 31 with `struct cosmo_sockaddr` in the UAPI, plus
+  `ioready` (58) and `setnonblock` (59).
 - **Drivers**: `virtio_net.ko` (feature negotiation, 32 receive
   clusters posted to the device, transmit completions, MAC from the
   device configuration, interrupt-driven queues through the `virtio`
@@ -99,12 +104,12 @@ through handles.
 - Zero-copy paths and user mappings of packet buffers (section 35: the
   ownership model comes first; copies happen at the socket boundary).
 - DHCP, DNS, routing beyond one default route, multicast, IGMP/MLD,
-  IPv4 fragmentation and reassembly, path MTU discovery, TCP options
-  beyond MSS, SACK, ECN, keepalive, `SO_*` socket options beyond what
-  the tests need, Unix domain sockets, raw sockets, netfilter-style
-  hooks, per-CPU queues and RCU routing (section 36: one worker thread
-  and fine-grained locks for now; the queue and table shapes admit the
-  upgrade).
+  IPv4 fragmentation and reassembly, IPv6 path MTU discovery, TCP
+  options beyond MSS, SACK, ECN, `SO_*` socket options beyond what the
+  tests need (keepalive is always on, with global parameters), Unix
+  domain sockets, raw sockets, netfilter-style hooks, per-CPU queues
+  and RCU routing (section 36: one worker thread for now; the queue and
+  table shapes admit the upgrade).
 - Any other NIC. Section 60's fuzzing of parsers is started with host
   tests over the pure parsers and is a standing item, not finished here.
 
