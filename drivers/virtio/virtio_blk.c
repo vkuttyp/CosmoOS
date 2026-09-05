@@ -181,21 +181,33 @@ static void vblk_done(struct virtqueue *vq)
     uint32_t len;
     struct bio *bio;
     while ((bio = virtq_pop(vq, &len)) != NULL) {
-        unsigned slot = (unsigned)(uintptr_t)bio->drvpriv - 1;
-        int status;
-        if (slot >= vb->nr_slots || vb->inflight[slot] != bio) {
-            kerror("virtio-blk: completion for an unknown request");
+        /* Ownership is decided under the lock, by pointer, before the bio
+         * is touched: the timeout path may have completed it already (and
+         * a synchronous caller freed its stack frame), so neither its
+         * fields nor a second completion are ours to use. */
+        unsigned slot = vb->nr_slots;
+        int status = -EIO;
+        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
+        for (unsigned i = 0; i < vb->nr_slots; i++) {
+            if (vb->inflight[i] == bio) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < vb->nr_slots) {
+            switch (vb->slots[slot].status) {
+            case VIRTIO_BLK_S_OK:     status = 0; break;
+            case VIRTIO_BLK_S_UNSUPP: status = -ENOTSUP; break;
+            default:                  status = -EIO; break;
+            }
+            unmap_slot(vb, slot);
+            vb->inflight[slot] = NULL;
+        }
+        spin_unlock_irqrestore(&vb->lock, s);
+        if (slot == vb->nr_slots) {
+            kerror("virtio-blk: completion for a request no longer in flight");
             continue;
         }
-        switch (vb->slots[slot].status) {
-        case VIRTIO_BLK_S_OK:     status = 0; break;
-        case VIRTIO_BLK_S_UNSUPP: status = -ENOTSUP; break;
-        default:                  status = -EIO; break;
-        }
-        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
-        unmap_slot(vb, slot);
-        vb->inflight[slot] = NULL;
-        spin_unlock_irqrestore(&vb->lock, s);
         bio_complete(bio, status);
     }
 }

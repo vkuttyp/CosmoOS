@@ -90,7 +90,11 @@ operation gets the warning and the counter. The driver never
 dereferences the bio before finding it in its own records. Check:
 `blk-timeout` (a stalled RAM device: `blk_read` returns `-ETIMEDOUT`
 after the 300 ms the test set, `timeouts` +1, the device recovers).
-Gap: virtio-blk's and NVMe's timeout paths run only by review (QEMU
+A driver's completion path decides ownership under its lock by pointer
+before touching the bio (virtio-blk scans its slot table; NVMe its
+command slots), so a request the timeout path already completed is
+neither dereferenced nor completed twice (Greptile on PR #24). Gap:
+virtio-blk's and NVMe's timeout paths run only by review (QEMU
 answers).
 
 **D7a. A queue-full driver never fails a caller.** `-EAGAIN` from
