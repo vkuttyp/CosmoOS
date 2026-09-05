@@ -12,11 +12,13 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root" || exit 2
 status=0
 
-# Public keys revoked because their private half leaked. The Ed25519
-# public key that shipped as tools/keys/cosmo-dev.pub (with its seed in
-# tools/keys/cosmo-dev.key) in every commit from Phase 5 to the Prompt #3
-# fix pass; key id f320ceec5342b9fd.
-REVOKED_PUBS="49af948ba2deb98f9f7a0500d3b1f0513302e955f3dd0fe96e00795016c73561"
+# Public keys revoked because their private half leaked: tools/keys/REVOKED
+# (shared with scripts/gen-keyring.py, which refuses to compile them in).
+REVOKED_PUBS=$(grep -Eo '^[0-9a-fA-F]{64}' tools/keys/REVOKED | tr 'A-F' 'a-f')
+if [ -z "$REVOKED_PUBS" ]; then
+    echo "check-secrets: tools/keys/REVOKED lists no key; refusing to run blind" >&2
+    exit 1
+fi
 
 if ! command -v git >/dev/null 2>&1 || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "check-secrets: not a git checkout; skipping" >&2
@@ -32,7 +34,7 @@ if [ -n "$keys" ]; then
 fi
 
 # Anything under a keys directory that is not a README or a .pub is suspect.
-odd=$(printf '%s\n' "$tracked" | grep -E '(^|/)keys/' | grep -vE '(\.pub|README\.md)$')
+odd=$(printf '%s\n' "$tracked" | grep -E '(^|/)keys/' | grep -vE '(\.pub|README\.md|/REVOKED)$')
 if [ -n "$odd" ]; then
     printf 'check-secrets: unexpected file(s) under a keys directory:\n%s\n' "$odd" >&2
     status=1

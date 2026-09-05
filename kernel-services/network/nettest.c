@@ -298,11 +298,14 @@ bool selftest_net_lo_udp(const char **reason)
         return false;
     if (!udp_roundtrip(reason, v6loop(5001), v6loop(0)))
         return false;
-    /* A privileged port needs uid 0. */
+    /* A reserved port is judged on the caller's credentials at bind time,
+     * not on the socket's creator: this kernel thread is privileged, so
+     * the bind succeeds whatever uid the socket records. The refusal for
+     * an unprivileged caller is exercised by init --unpriv-test. */
     struct socket *s;
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 1000, &s) == 0);
     struct netaddr low = v4addr(0, 80);
-    CHECK(ksock_bind(s, &low) == -EPERM);
+    CHECK(ksock_bind(s, &low) == 0);
     ksock_put(s);
     udp_get_stats(&u1);
     CHECK(u1.rx_no_port >= u0.rx_no_port + 2 && u1.rx_bad_cksum == u0.rx_bad_cksum);

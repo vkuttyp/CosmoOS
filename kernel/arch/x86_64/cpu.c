@@ -3,6 +3,7 @@
  * arch/cpu.h + arch/irq.h interfaces for x86-64.
  */
 
+#include <kernel/panic.h>
 #include <kernel/string.h>
 
 #include <arch/cpu.h>
@@ -106,7 +107,12 @@ void x86_cpu_enable_features(void)
         cr4 |= CR4_SMAP;
     if (g_cpu.has_umip)
         cr4 |= CR4_UMIP;
+    /* The paranoid entry (isr.S) recognises the kernel's GS base by its
+     * sign bit; that is sound only while user mode cannot choose a GS base
+     * (no FSGSBASE, no ARCH_SET_GS). Assert the first half here. */
+    cr4 &= ~CR4_FSGSBASE;
     write_cr4(cr4);
+    KASSERT((read_cr4() & CR4_FSGSBASE) == 0);
 
     /* Floating-point/SIMD configuration: identical on every CPU, never
      * inherited from the firmware or the AP trampoline (fpu.c). */

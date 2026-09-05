@@ -50,7 +50,12 @@ The gates for vectors 8, 2, 18 and 1 reference `IST_DOUBLE_FAULT`,
 four 8 KiB dedicated stacks. Their stubs jump to `isr_paranoid`, which
 decides SWAPGS from `MSR_GS_BASE` (a kernel address means GS is already
 the kernel's), never from the saved CS, and restores exactly the GS state
-it found. `x86_trap_paranoid` neither preempts nor delivers a kill.
+it found. That test is sound only while user mode cannot choose a GS
+base: `x86_cpu_enable_features` clears and asserts `CR4.FSGSBASE` off
+and the Linux personality refuses `ARCH_SET_GS`; enabling either requires
+a different paranoid rule first. `x86_trap_paranoid` neither preempts
+nor delivers a kill, and a paranoid handler must not fault or single-step
+(the IST stacks are not re-entrant).
 **Checked by** `idt_init`, `gdt_init`, and the `trap-paranoid` self-test
 (a software NMI from kernel context and one with the user's GS base
 live); a stack-overflow crash test is future work.

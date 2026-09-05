@@ -38,6 +38,14 @@ MODULE_SIG_ENFORCE ?= 1
 #                    both be given explicitly; nothing is generated.
 SIGNING ?= dev
 COSMO_KEYDIR ?= $(HOME)/.config/cosmoos/keys
+# Grouped targets (`&:`, build/module.mk) need GNU make 4.3; a space in the
+# key directory would split the prerequisite list.
+ifneq ($(filter 3.% 4.0 4.1 4.2,$(MAKE_VERSION)),)
+$(error GNU make 4.3 or newer is required (found $(MAKE_VERSION)))
+endif
+ifneq ($(words $(COSMO_KEYDIR)),1)
+$(error COSMO_KEYDIR must not contain spaces: '$(COSMO_KEYDIR)')
+endif
 TRUSTED_RELEASE_PUBS := $(sort $(wildcard $(ROOT)/tools/keys/*.pub))
 ifeq ($(SIGNING),dev)
 MODSIGN_KEY ?= $(COSMO_KEYDIR)/dev.key

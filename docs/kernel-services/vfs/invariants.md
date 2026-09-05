@@ -123,9 +123,9 @@ to uid 1000 and is refused `/dev/vmm`, a 0700 root directory, writing or
 unlinking a 0644 root file, creating in a 0755 root directory,
 executing a 0600 file, `mount`, `umount`, signalling root's process, and
 the kernel log, while creating its own files in `/tmp` (owned 1000:1000)
-and running `/bin/true` succeed. Gap: `chmod`/`chown` and the sticky
-bit; no group-permission test (no process holds a supplementary group
-yet).
+and running `/bin/true` succeed, and root's entry in the sticky `/tmp`
+cannot be unlinked or renamed by it. Gap: `chmod`/`chown`; no
+group-permission test (no process holds a supplementary group yet).
 
 **V15. Data written to a file reaches the filesystem only through
 `writepage`, and cosmofs never leaves a hole inside a file's mapped

@@ -214,7 +214,12 @@ void *virtq_pop(struct virtqueue *vq, uint32_t *len)
             return NULL;
         }
         rmb();
-        struct virtq_used_elem e = vq->used->ring[vq->last_used % vq->size];
+        /* One load each: the checks below must judge the values that were
+         * read, not a second read of memory the device may be rewriting. */
+        struct virtq_used_elem e;
+        const volatile struct virtq_used_elem *slot = &vq->used->ring[vq->last_used % vq->size];
+        e.id = slot->id;
+        e.len = slot->len;
         vq->last_used++;
 
         /* A bad element is skipped, never a reason to stop draining: later

@@ -899,6 +899,17 @@ static bool dot_name(const char *name, size_t len)
     return (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.');
 }
 
+/* The sticky bit (01000) on a directory: an entry may be removed or
+ * renamed only by the owner of the entry, the owner of the directory, or a
+ * privileged caller (/tmp is 01777). */
+static bool sticky_denies(const struct vnode *dir, const struct vnode *entry)
+{
+    if (!(dir->mode & 01000))
+        return false;
+    const struct credentials *c = cred_current();
+    return !cred_privileged(c) && c->euid != entry->uid && c->euid != dir->uid;
+}
+
 /* Resolve the parent directory for a mutation; locks it. */
 static int parent_for_mutation(struct vnode *start, const char *path, struct vnode **parent, const char **last,
                                size_t *len)
@@ -978,6 +989,8 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
             rc = -EISDIR;
         else if (victim->covered_by != NULL || victim->mnt != parent->mnt)
             rc = -EBUSY;   /* a mountpoint or a mount root */
+        else if (sticky_denies(parent, victim))
+            rc = -EACCES;  /* a sticky directory: only the owner of the entry, the directory or root */
         else if (dir)
             rc = parent->ops->rmdir ? parent->ops->rmdir(parent, last, len, victim) : -ENOTSUP;
         else
@@ -1037,6 +1050,10 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
     if (rc == 0) {
         if (victim->covered_by || victim->mnt != odir->mnt) {
             rc = -EBUSY;
+        } else if (sticky_denies(odir, victim)) {
+            rc = -EACCES;
+        } else if (victim->type == VNODE_DIR && odir != ndir && vfs_permission(victim, VFS_MAY_WRITE) != 0) {
+            rc = -EACCES;   /* moving a directory rewrites its ".." */
         } else if (ndir->ops->lookup(ndir, nname, nlen, &replaced) == 0) {
             if (replaced == victim)
                 rc = 0;   /* same entry: nothing to do */
@@ -1046,6 +1063,8 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
                 rc = -ENOTDIR;
             else if (replaced->covered_by || replaced->mnt != odir->mnt)
                 rc = -EBUSY;
+            else if (sticky_denies(ndir, replaced))
+                rc = -EACCES;
         }
         if (rc == 0 && replaced != victim) {
             /* A directory may not be moved under itself. */

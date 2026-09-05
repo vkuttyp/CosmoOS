@@ -138,6 +138,21 @@ void vcpu_emulate_cpuid(struct vcpu *v)
                 r.ecx &= ~(1u << 26);
             else if (arch_hv_vcpu_xstate_enabled(v->arch))
                 r.ecx |= 1u << 27;
+            if (!(arch_hv_host_xstate() & (1ull << 2)))
+                r.ecx &= ~(1u << 28);                             /* AVX needs the AVX state component */
+        } else if (leaf == 7 && sub == 0) {
+            /* Instruction-set bits whose state the host does not hold for
+             * the guest would only lead it to an XSETBV #GP: AVX2 needs
+             * AVX state, AVX-512 needs the opmask/ZMM components. */
+            uint64_t xs = arch_hv_host_xstate();
+            if (!(xs & (1ull << 2)))
+                r.ebx &= ~(1u << 5);                              /* AVX2 */
+            if (!(xs & (1ull << 5))) {
+                r.ebx &= ~((1u << 16) | (1u << 17) | (1u << 21) | (1u << 26) | (1u << 27) | (1u << 28) |
+                           (1u << 30) | (1u << 31));              /* AVX512 F/DQ/IFMA/PF/ER/CD/BW/VL */
+                r.ecx &= ~((1u << 1) | (1u << 6) | (1u << 11) | (1u << 12) | (1u << 14));   /* VBMI, VBMI2, VNNI, BITALG, VPOPCNTDQ */
+                r.edx &= ~((1u << 2) | (1u << 3) | (1u << 8) | (1u << 23));                 /* 4VNNIW, 4FMAPS, VP2INTERSECT, FP16 */
+            }
         } else if (leaf == 0x80000001u) {
             r.ecx &= ~(1u << 2);                              /* SVM */
         } else if (leaf == 0) {

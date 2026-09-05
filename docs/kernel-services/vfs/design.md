@@ -380,8 +380,11 @@ of rename) needs write and search; `process_chdir` needs search on the
 target; `spawn` needs execute on the program (and no read: the kernel
 reads it on its own authority through `vfs_open_vnode`). New vnodes are
 owned by their creator's effective ids (`ramfs_new`, `cfs_create_common`;
-cosmofs persists them in the inode). `/tmp` is 01777; the sticky bit is
-recorded, not yet enforced.
+cosmofs persists them in the inode). `/tmp` is 01777: in a directory with
+the sticky bit (01000) an entry is removed, renamed or replaced only by
+the owner of the entry, the owner of the directory, or a privileged
+caller (`sticky_denies`). Moving a directory to another parent also
+needs write permission on the directory itself (its `..` changes).
 
 ## Testing strategy
 

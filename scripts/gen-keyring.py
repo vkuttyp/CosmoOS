@@ -17,12 +17,23 @@ def main(argv):
         sys.stderr.write(__doc__)
         return 2
     out = argv[1]
+    # Keys whose private half leaked may never be trusted again, whatever
+    # file they turn up in (a stale untracked tools/keys/*.pub included).
+    revoked = set()
+    revoked_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "keys", "REVOKED")
+    with open(revoked_file) as f:
+        for line in f:
+            line = line.strip()
+            if len(line) == 64 and all(c in "0123456789abcdefABCDEF" for c in line):
+                revoked.add(bytes.fromhex(line))
     keys = []
     for path in argv[2:]:
         with open(path) as f:
             pub = bytes.fromhex(f.read().strip())
         if len(pub) != 32:
             raise SystemExit(f"gen-keyring: {path} is not a 32-byte key")
+        if pub in revoked:
+            raise SystemExit(f"gen-keyring: {path} holds a revoked key (tools/keys/REVOKED); remove it")
         name = os.path.basename(path)
         if name.endswith(".pub"):
             name = name[:-4]

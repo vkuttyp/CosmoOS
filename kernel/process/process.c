@@ -20,7 +20,9 @@
 #include <kernel/vmm.h>
 
 #include <arch/irq.h>
+#include <arch/trap.h>
 #include <arch/user.h>
+#include <kernel/interrupt.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -95,12 +97,49 @@ static const struct vm_user_hooks g_hooks = {
     .fatal = hook_fatal,
 };
 
+/*
+ * CPU exceptions other than page faults: a user program that divides by
+ * zero, executes an invalid opcode, violates protection or is single
+ * stepping dies with COSMO_EXIT_FAULT; the same exception from kernel
+ * mode is a kernel bug and panics through arch_trap_unhandled. The kill
+ * is deferred (process_kill), not taken here: the exception may have
+ * arrived on the paranoid path (#DB), which runs as interrupt context on
+ * an IST stack, and the return-to-user hook or the next tick delivers it.
+ * Status 128 + 11 is COSMO_EXIT_FAULT, the same as a fatal page fault.
+ */
+#define PROCESS_FAULT_SIGNAL 11
+
+static void user_exception_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)arg;
+    struct process *p = process_current();
+    if (p == NULL || !arch_trap_frame_is_user(frame)) {
+        arch_trap_unhandled(vector, frame);
+        return;
+    }
+    if (p->kill_sig == 0)
+        kwarn("process: pid %u '%s' %s at %p; terminating", p->pid, p->name, arch_trap_name(vector),
+              (void *)arch_trap_frame_pc(frame));
+    process_kill(p, PROCESS_FAULT_SIGNAL);
+}
+
 void process_init(void)
 {
     g_process_cache = kmem_cache_create("process", sizeof(struct process), 64);
     if (g_process_cache == NULL)
         panic("process: cannot create process cache");
     vm_set_user_hooks(&g_hooks);
+
+    static const enum arch_trap_kind kinds[] = { ARCH_TRAP_DEBUG, ARCH_TRAP_DIVIDE_ERROR, ARCH_TRAP_INVALID_OPCODE,
+                                                 ARCH_TRAP_GENERAL_PROTECTION };
+    for (size_t i = 0; i < ARRAY_SIZE(kinds); i++) {
+        int vec = arch_trap_vector(kinds[i]);
+        if (vec < 0)
+            continue;   /* the architecture reports these differently (AArch64 decodes ESR itself) */
+        int rc = interrupt_register((unsigned)vec, user_exception_handler, NULL, "user-exception");
+        if (rc && rc != -EBUSY)
+            panic("process: cannot register the handler for trap %d (%d)", vec, rc);
+    }
 }
 
 /* --- initial user stack --- */

@@ -404,6 +404,33 @@ static int fpu_hold(uint8_t seed)
     return 0;
 }
 
+/* --trap KIND: raise a CPU exception from user mode; the kernel must end
+ * this process with COSMO_EXIT_FAULT, never itself. */
+static int trap_self(const char *kind)
+{
+    if (strcmp(kind, "ud") == 0)
+        __asm__ volatile("ud2");
+    else if (strcmp(kind, "gp") == 0)
+        __asm__ volatile("hlt");                                   /* privileged instruction */
+    else if (strcmp(kind, "de") == 0)
+        __asm__ volatile("xorl %%eax, %%eax\n\tdivl %%eax" ::: "eax", "edx", "cc");
+    else if (strcmp(kind, "db") == 0)
+        __asm__ volatile("pushfq\n\torq $0x100, (%%rsp)\n\tpopfq\n\tnop\n\tnop" ::: "memory", "cc");   /* TF */
+    return 9;   /* reached only if the kernel let the fault pass */
+}
+
+static void trap_selftest(void)
+{
+    static const char *const kinds[] = { "ud", "gp", "de", "db" };
+    for (size_t i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        const char *argv[] = { "init", "--trap", kinds[i], NULL };
+        pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+        int status = -1;
+        CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && status == 139);
+    }
+    puts("usertest: user exceptions ok");
+}
+
 static void fpu_selftest(void)
 {
     const char *a_argv[] = { "init", "--fpu-partner", "17", NULL };
@@ -425,6 +452,16 @@ static int fpu_hold(uint8_t seed)
 }
 
 static void fpu_selftest(void)
+{
+}
+
+static int trap_self(const char *kind)
+{
+    (void)kind;
+    return 9;
+}
+
+static void trap_selftest(void)
 {
 }
 #endif
@@ -489,6 +526,24 @@ static int unpriv_test(void)
     UCHECK(spawnve("/tmp/privtest/secret", argv, NULL, NULL, 0) < 0 && errno == EACCES);
     UCHECK(spawnve("/tmp/privtest/../privtest/secret", argv, NULL, NULL, 0) < 0 && errno == EACCES);
 
+    /* The sticky bit on /tmp: root's entry there is not the child's to remove or rename. */
+    UCHECK(unlink("/tmp/rootowned") < 0 && errno == EACCES);
+    UCHECK(rename("/tmp/rootowned", "/tmp/rootowned2") < 0 && errno == EACCES);
+
+    /* Reserved ports are judged at bind time: a socket the child creates
+     * now, and one it inherited from its privileged parent (handle 3). */
+    struct sockaddr low;
+    memset(&low, 0, sizeof(low));
+    low.sa_family = AF_INET;
+    low.sa_port = 80;
+    inet_pton(AF_INET, "127.0.0.1", low.sa_addr);
+    int sk = socket(AF_INET, SOCK_STREAM, 0);
+    UCHECK(sk >= 0 && bind(sk, &low, sizeof(low)) < 0 && errno == EPERM);
+    if (sk >= 0)
+        close(sk);
+    UCHECK(bind(3, &low, sizeof(low)) < 0 && errno == EPERM);
+    close(3);
+
     /* What it may do: its own files in /tmp, and running installed programs. */
     fd = open("/tmp/unpriv.txt", O_WRONLY | O_CREAT | O_TRUNC, 0600);
     UCHECK(fd >= 0 && write(fd, "mine", 4) == 4);
@@ -517,17 +572,27 @@ static void priv_selftest(void)
     struct stat st;
     CHECK(stat("/tmp/privtest/secret", &st) == 0 && st.st_uid == 0 && st.st_mode == 0600);
     CHECK(stat("/tmp", &st) == 0 && st.st_mode == 01777);
+    fd = open("/tmp/rootowned", O_WRONLY | O_CREAT, 0666);   /* world-writable, but root's: sticky /tmp protects it */
+    CHECK(fd >= 0);
+    if (fd >= 0)
+        close(fd);
     uid_t r, e, s;
     CHECK(getresuid(&r, &e, &s) == 0 && r == 0 && e == 0 && s == 0);
     CHECK(getgroups(0, NULL) == 0);
 
+    /* A socket created by root, handed to the child as handle 3. */
+    int rootsock = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(rootsock >= 0);
+    struct spawn_handle map[] = { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, rootsock } };
     const char *argv[] = { "init", "--unpriv-test", NULL };
-    pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+    pid_t pid = spawnve("/boot/init", argv, NULL, map, 4);
     CHECK(pid > 0);
+    close(rootsock);
     int status = -1;
     CHECK(waitpid(pid, &status, 0) == pid);
     CHECK(status == 0);   /* the number of refused-but-allowed operations */
 
+    CHECK(unlink("/tmp/rootowned") == 0);
     CHECK(unlink("/tmp/privtest/secret") == 0 && rmdir("/tmp/privtest") == 0);
     puts("usertest: privilege boundary ok");
 }
@@ -538,6 +603,7 @@ static void selftest(void)
     net_selftest();
     proc_selftest();
     fpu_selftest();
+    trap_selftest();
     priv_selftest();
 
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
@@ -652,6 +718,8 @@ int main(int argc, char **argv)
         return fpu_hold((uint8_t)atoi(argv[2]));
     if (argc >= 2 && strcmp(argv[1], "--unpriv-test") == 0)
         return unpriv_test();
+    if (argc >= 3 && strcmp(argv[1], "--trap") == 0)
+        return trap_self(argv[2]);
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
         selftest();
         if (g_failures == 0) {

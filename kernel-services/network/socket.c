@@ -3,6 +3,7 @@
  * exposed as kobjects for handle tables.
  */
 
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -130,7 +131,10 @@ int ksock_bind(struct socket *s, const struct netaddr *addr)
 {
     if (addr->family != s->family)
         return -EAFNOSUPPORT;
-    if (addr->port != 0 && addr->port < 1024 && s->uid != 0)
+    /* Reserved ports are judged on the caller's credentials at bind time,
+     * not on who created the socket: a handle inherited from a privileged
+     * process, or kept across setresuid, confers nothing. */
+    if (addr->port != 0 && addr->port < 1024 && !cred_privileged(cred_current()))
         return -EPERM;
     mutex_lock(&s->lock);
     int rc;

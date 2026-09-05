@@ -523,6 +523,23 @@ unchanged). Rights are copied. `-EMFILE` when the table is full.
   counting the NUL that is written when it fits); `-ENOENT` for an
   unknown name. Writable values arrive when there is policy to set.
 
+### User-mode CPU exceptions (Prompt #3 fix pass)
+
+Besides page faults, a user program can raise `#DE`, `#UD`, `#GP` and
+`#DB` (division by zero, an invalid or privileged instruction, single
+stepping). `process_init` registers `user_exception_handler` on those
+vectors (`arch_trap_vector` kinds; an architecture that decodes them
+itself returns -1 and is skipped). From user mode the handler
+`process_kill`s the process with signal 11, so it exits with
+`COSMO_EXIT_FAULT` (139) like a fatal page fault; the kill is deferred
+rather than taken in the handler because `#DB` arrives on the paranoid
+path (interrupt context, IST stack) and is delivered by the
+return-to-user hook or the next tick. From kernel mode the same
+exception is a kernel bug and panics through `arch_trap_unhandled`.
+`init --selftest` spawns `init --trap ud|gp|de|db` and requires status
+139 from each. Gap: `int3` from user mode still reaches an unregistered
+vector 3 (the `breakpoint-trap` self-test owns that vector temporarily).
+
 ### Credentials (Prompt #3 fix pass)
 
 `struct credentials` (`kernel/cred.h`) is POSIX-shaped: `ruid, euid,

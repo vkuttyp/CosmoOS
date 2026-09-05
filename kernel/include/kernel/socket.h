@@ -38,7 +38,8 @@ struct socket {
     int error;                  /* pending asynchronous error, consumed by the next call */
     unsigned shut;              /* 1 = RD, 2 = WR */
     struct mutex lock;
-    uint32_t uid;               /* creator, for privileged ports */
+    uint32_t uid;               /* creator's effective uid, informational (reserved ports are judged on the
+                                   caller's credentials at bind time) */
 };
 
 #define SOCK_IO_CHUNK 4096u

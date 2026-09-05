@@ -44,9 +44,11 @@ repository does not un-publish it, and anyone with a clone from that
 period has it. The remediation is therefore revocation, not removal:
 
 - the public key `49af948ba2deb98f9f7a0500d3b1f0513302e955f3dd0fe96e00795016c73561`
-  (key id `f320ceec5342b9fd`) is on the revoked list in
-  `scripts/check-secrets.sh`, and a tracked `.pub` holding it fails the
-  build, so no kernel built from this tree will trust it again;
+  (key id `f320ceec5342b9fd`) is listed in `tools/keys/REVOKED`: a
+  tracked `.pub` holding it fails `scripts/check-secrets.sh`, and
+  `scripts/gen-keyring.py` refuses to compile it into any ring, even from
+  an untracked stale file, so no kernel built from this tree will trust
+  it again;
 - every module or package signed with it is unsigned as far as any
   current kernel is concerned (`-ENOKEY` under `MODULE_SIG_ENFORCE=1`);
 - the developer key model above means a leak of this kind cannot recur:
