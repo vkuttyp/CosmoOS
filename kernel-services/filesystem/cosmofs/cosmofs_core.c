@@ -533,16 +533,18 @@ int cfs_sync_vnodes(struct cfs *fs)
     for (unsigned b = 0; b < VNODE_HASH; b++) {
         for (;;) {
             struct vnode *vn = NULL;
-            mutex_lock(&mnt->lock);
+            /* The hash lock is a spinlock; a hashed vnode always holds a
+             * reference (vnode_put unhashes before the last drop). */
+            arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
             struct vnode *it;
             list_for_each_entry(it, &mnt->vnodes[b], hash_link) {
-                if (it->type == VNODE_REG && it->pc.nr_dirty && kobject_refcount(&it->obj) > 0) {
+                if (it->type == VNODE_REG && it->pc.nr_dirty) {
                     vn = it;
                     vnode_get(vn);
                     break;
                 }
             }
-            mutex_unlock(&mnt->lock);
+            spin_unlock_irqrestore(&mnt->lock, s);
             if (vn == NULL)
                 break;
             mutex_lock(&vn->lock);

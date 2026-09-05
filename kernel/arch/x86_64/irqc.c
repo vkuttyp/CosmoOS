@@ -139,6 +139,11 @@ unsigned arch_irqc_spurious_vector(void)
     return LAPIC_SPURIOUS_VECTOR;
 }
 
+void arch_ipi_bind(unsigned vector)
+{
+    (void)vector;   /* the LAPIC delivers any vector directly */
+}
+
 void arch_ipi_send(unsigned cpu, unsigned vector)
 {
     KASSERT(cpu < CONFIG_MAX_CPUS);

@@ -311,9 +311,10 @@ reset).
 
 ## Concurrency
 
-Lock order: `sock->lock` (mutex) → `tcp_lock`/`udp_lock` (spinlock,
-IRQ-safe) → `arp_lock`/`nd_lock` → `netif->lock` → driver locks →
-`mbuf` caches. `rxq.lock` is a leaf taken by drivers in interrupt
+Lock order (verified by the debug-build lock-order checker on every
+boot, `docs/kernel/lockdep/testing.md`): `sock->lock` (mutex) →
+`tcp_lock`/`udp_lock` (spinlock, IRQ-safe) → `arp_lock`/`nd_lock` →
+`netif->lock` → driver locks → `mbuf` caches. `rxq.lock` is a leaf taken by drivers in interrupt
 context. Timers take `tcp_lock`. The worker thread takes protocol locks
 but never `sock->lock`; it wakes waiters through `waitqueue_wake_all`,
 which needs no socket lock. Nothing holds a spinlock across

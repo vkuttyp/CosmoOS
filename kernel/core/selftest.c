@@ -12,6 +12,7 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/kernel.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/printf.h>
 #include <kernel/sched.h>
@@ -290,6 +291,11 @@ static const struct selftest tests[] = {
     { "irq-sync",        selftest_irq_sync },
     { "timer-cancel-sync", selftest_timer_cancel_sync },
     { "quiesce-stress",  selftest_quiesce_stress },
+    { "lockdep-order",   selftest_lockdep_order },
+    { "lockdep-recursion", selftest_lockdep_recursion },
+    { "lockdep-irq",     selftest_lockdep_irq },
+    { "lockdep-sleep",   selftest_lockdep_sleep },
+    { "lockdep-mutex",   selftest_lockdep_mutex },
     { "fpu-switch",      test_fpu_switch },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },
@@ -310,6 +316,7 @@ static const struct selftest tests[] = {
     { "crc32c",          selftest_crc32c },
     { "pagecache",       selftest_pagecache },
     { "vfs-ramfs",       selftest_vfs_ramfs },
+    { "vfs-concurrency", selftest_vfs_concurrency },
     { "pool",            selftest_pool },
     { "cosmofs-format",  selftest_cosmofs_format },
     { "cosmofs-ops",     selftest_cosmofs_ops },
@@ -365,6 +372,9 @@ int selftest_run_all(void)
     }
 
     sched_watchdog_disarm();
+
+    /* The lock order the whole run recorded, for docs/kernel/lockdep/testing.md. */
+    lockdep_dump_graph();
 
     if (failed == 0)
         kprintf("SELFTEST: PASS (%zu tests)\n", ARRAY_SIZE(tests));

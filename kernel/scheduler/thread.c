@@ -9,6 +9,7 @@
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
+#include <kernel/lockdep.h>
 #include <kernel/thread.h>
 #include <kernel/vmm.h>
 
@@ -180,6 +181,7 @@ void thread_exit(int code)
     struct thread *self = thread_current();
     KASSERT((self->flags & (THREAD_FLAG_IDLE | THREAD_FLAG_BOOT)) == 0);
     KASSERT(preemptible());
+    lockdep_thread_exit(self);
 
     self->exit_code = code;
     complete(&self->exited);

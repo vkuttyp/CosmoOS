@@ -21,8 +21,12 @@ silently.
 **S2. `runqueue.lock` is a leaf.** Nothing is acquired while it is held.
 `schedule()` calls `arch_context_switch` with it held and the resumed
 thread releases it; `sched_finish_switch` unlocks *before* calling
-`thread_put`, which takes `kernel_space.lock` and slab locks. Check:
-review; the spinlock owner check would panic on a self-deadlock.
+`thread_put`, which takes `kernel_space.lock` and slab locks. The AArch64
+IPI path used to take the GIC lock under it (`request_resched` →
+`arch_ipi_send` → the SGI table); `arch_ipi_bind` at `ipi_init` now makes
+that lookup lock-free. Check: the lock-order checker records no edge out
+of the `runqueue` class on either architecture (`docs/kernel/lockdep/
+testing.md`); the spinlock owner check would panic on a self-deadlock.
 
 **S3. The run-queue lock is held across the context switch and
 released by whoever runs next.** A resumed thread releases it in
@@ -32,8 +36,14 @@ calling its entry. `rq->prev_exited` is the only state handed across the
 switch. Check: assert (`spin_unlock` asserts the lock is held); test
 `thread` (a first-run thread reaches its entry with interrupts enabled).
 
-**S4. Lock order is `waitqueue.lock` → `runqueue.lock`**, and a
-primitive's own lock precedes its wait queue's lock. Check: review.
+**S4. `runqueue.lock` may be preceded by any lock, and a primitive's own
+lock precedes its wait queue's lock.** Wakers hold their own state lock
+when they call `sched_wake`: every wait queue's lock, `process.lock`
+(`process_kill`), the futex bucket, `tty.lock`, the SMP call and sleep
+locks all precede `runqueue.lock` in the recorded graph; since S2 makes
+the run-queue lock a leaf no order among them is implied by it. (The
+previous text, "`waitqueue.lock` → `runqueue.lock`" alone, was
+incomplete.) Check: the recorded graph, `docs/kernel/lockdep/testing.md`.
 
 **S5. Interrupts are re-enabled by the resumed thread, not by the
 switch.** `arch_context_switch` does not save RFLAGS; `schedule()`

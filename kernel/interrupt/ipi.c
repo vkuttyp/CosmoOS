@@ -85,6 +85,7 @@ void ipi_init(void)
         int rc = interrupt_register((unsigned)v, handlers[k].fn, NULL, handlers[k].name);
         if (rc)
             panic("ipi: cannot register %s (%d)", handlers[k].name, rc);
+        arch_ipi_bind((unsigned)v);   /* so ipi_send takes no lock under the run-queue lock */
         g_vectors[k] = v;
     }
     g_initialized = true;

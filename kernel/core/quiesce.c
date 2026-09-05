@@ -8,6 +8,7 @@
  */
 
 #include <kernel/ipi.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -64,8 +65,7 @@ void synchronize_quiesce(void)
     struct percpu *pc = this_cpu();
     if (pc->irq_depth != 0)
         panic("synchronize_quiesce in interrupt context");
-    if (pc->preempt_count != 0)
-        panic("synchronize_quiesce with preemption disabled (count %d): a spinlock is held", pc->preempt_count);
+    might_sleep();   /* a spinlock or a read-side section is held: a report with the stacks */
 
     cpumask_t online = cpu_online_mask();
     uint64_t target = quiesce_core_begin(&g_state);

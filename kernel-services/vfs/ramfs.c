@@ -10,6 +10,7 @@
 #include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/lockdep.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/printf.h>
@@ -191,7 +192,7 @@ static int ramfs_rename(struct vnode *odir, const char *oname, size_t olen, stru
             return -ENOENT;
         if (replaced->type == VNODE_DIR && ((struct ramfs_node *)replaced->fs_priv)->nr_entries != 0)
             return -ENOTEMPTY;
-        mutex_lock(&replaced->lock);
+        mutex_lock_nested(&replaced->lock, VNODE_NESTED_CHILD);   /* under both parents (V7) */
         drop_entry(ndir, r);
         mutex_unlock(&replaced->lock);
     }
@@ -379,7 +380,14 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
     return 0;
 }
 
-/* Release every entry under `dir` (recursively) so the vnodes can go. */
+/*
+ * Release every entry under `dir` (recursively) so the vnodes can go. Runs
+ * from unmount after vfs_umount's reference scan proved that nothing
+ * outside the filesystem holds any vnode of this mount, and with the root
+ * locked: the tree is exclusively ours, so the children are not locked
+ * here (a lock per level would nest the vnode class to arbitrary depth,
+ * which no annotation can express, and would exclude nothing).
+ */
 static void ramfs_release_tree(struct vnode *dir)
 {
     struct ramfs_node *n = dir->fs_priv;
@@ -389,12 +397,10 @@ static void ramfs_release_tree(struct vnode *dir)
         list_remove(&e->link);
         n->nr_entries--;
         kfree(e);
-        mutex_lock(&child->lock);
         if (child->type == VNODE_DIR)
             ramfs_release_tree(child);
         child->nlink = 0;
         child->flags &= ~VNODE_PINNED;
-        mutex_unlock(&child->lock);
         vnode_put(child);   /* the pin; nothing else references it (unmount checked) */
     }
 }

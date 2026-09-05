@@ -20,7 +20,7 @@
 
 /* --- ABI ------------------------------------------------------------- */
 
-#define COSMO_MODULE_ABI_VERSION 2u   /* 2: struct kobject gained `owner`; mandatory release callbacks */
+#define COSMO_MODULE_ABI_VERSION 3u   /* 2: struct kobject gained `owner`, mandatory release callbacks; 3: spinlock_t and struct mutex gained `class` */
 #define COSMO_MODULE_MAGIC       "COSMOMOD"   /* 8 bytes, compared without a NUL */
 #define COSMO_MODULE_MAGIC_INIT  { 'C', 'O', 'S', 'M', 'O', 'M', 'O', 'D' }
 

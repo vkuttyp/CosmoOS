@@ -10,6 +10,7 @@
 #include <kernel/console.h>
 #include <kernel/kernel.h>
 #include <kernel/log.h>
+#include <kernel/lockdep.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/smp.h>
@@ -87,6 +88,7 @@ panic_common(const struct arch_trap_frame *frame, const char *fmt, va_list ap)
         arch_trap_frame_dump(frame);
 
     backtrace_print(frame);
+    lockdep_dump_held();
 
     if (g_taint)
         kprintf("taint: 0x%x%s\n", g_taint, (g_taint & TAINT_UNSIGNED_MODULE) ? " (unsigned module loaded)" : "");

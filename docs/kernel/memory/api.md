@@ -73,9 +73,12 @@ the object. `LIST_HEAD(name)`, `list_init`, `list_empty`,
 | `spin_lock_irqsave(lock)` | Disable interrupts, acquire; returns the state for restore. The form every memory lock uses. |
 | `spin_unlock_irqrestore(lock, state)` | Release, then restore interrupts. |
 | `spin_is_held(lock)` | `true` if the calling CPU holds it. Used by `KASSERT` in the buddy core. |
+| `spin_lock_nested(lock, subclass)`, `spin_lock_irqsave_nested(lock, subclass)` | As the plain forms, annotated for nesting inside another lock of the same class (`docs/kernel/lockdep/api.md`). |
 
 Implemented in `kernel/core/spinlock.c` with `__atomic_exchange_n`
-(acquire) and a release store. Not recursive. No lock-order checker yet;
+(acquire) and a release store. Not recursive. Debug builds run the
+lock-order checker on every acquisition (`docs/kernel/lockdep/`): the name
+is the class, and
 the documented order is enforced by review.
 
 ## `kernel/page.h`

@@ -10,6 +10,10 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
+#include <kernel/sched.h>
+#include <kernel/wait.h>
+#include <kernel/thread.h>
+#include <kernel/percpu.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -199,5 +203,144 @@ bool selftest_vfs_ramfs(const char **reason)
     CHECK(vfs_stat(NULL, "/mnt/inner", &st) == -ENOENT);                /* the ramfs is gone */
     CHECK(vfs_mount_count() == 1);
     CHECK(vfs_vnode_count() == vnodes0);
+    return true;
+}
+
+/* --- vfs-concurrency: rename against rmdir, lookup against release --------------
+ *
+ * Two CPUs when available (docs/kernel/lockdep/testing.md). The audit's two
+ * findings: rename locked its parents in address order while rmdir locked
+ * parent then child (an ABBA, now excluded by the rename lock and the
+ * ancestor-first order), and the vnode cache could instantiate a second
+ * vnode for an inode whose first was mid-release (now excluded by the
+ * unhash-before-drop in vnode_put). Under the debug-build checker any lock
+ * order this test provokes is also verified structurally.
+ */
+struct vfs_hammer {
+    volatile unsigned stop;
+    unsigned ops;
+    unsigned failures;
+    int last_rc;
+};
+
+/* Moves /tmp/vc/a/x into /tmp/vc/a/b and back; b may vanish under it. */
+static void rename_hammer(void *arg)
+{
+    struct vfs_hammer *h = arg;
+    while (!__atomic_load_n(&h->stop, __ATOMIC_ACQUIRE)) {
+        int rc = vfs_rename(NULL, "/tmp/vc/a/x", "/tmp/vc/a/b/y");
+        if (rc == 0)
+            rc = vfs_rename(NULL, "/tmp/vc/a/b/y", "/tmp/vc/a/x");
+        if (rc != 0 && rc != -ENOENT) {   /* -ENOENT: b was removed, or y is gone */
+            h->failures++;
+            h->last_rc = rc;
+        }
+        h->ops++;
+    }
+}
+
+/* Removes and recreates /tmp/vc/a/b; it may be non-empty (y inside). */
+static void rmdir_hammer(void *arg)
+{
+    struct vfs_hammer *h = arg;
+    while (!__atomic_load_n(&h->stop, __ATOMIC_ACQUIRE)) {
+        int rc = vfs_rmdir(NULL, "/tmp/vc/a/b");
+        if (rc == 0 || rc == -ENOENT)
+            rc = vfs_mkdir(NULL, "/tmp/vc/a/b", 0755);
+        if (rc != 0 && rc != -ENOTEMPTY && rc != -EEXIST) {
+            h->failures++;
+            h->last_rc = rc;
+        }
+        h->ops++;
+    }
+}
+
+/* Opens and closes one file: the vnode is instantiated and released over
+ * and over on two CPUs at once. */
+static void open_hammer(void *arg)
+{
+    struct vfs_hammer *h = arg;
+    while (!__atomic_load_n(&h->stop, __ATOMIC_ACQUIRE)) {
+        struct file *f;
+        int rc = vfs_open(NULL, "/tmp/vc/shared", COSMO_O_RDONLY, 0, &f);
+        if (rc == 0)
+            file_put(f);
+        else {
+            h->failures++;
+            h->last_rc = rc;
+        }
+        h->ops++;
+    }
+}
+
+static struct thread *hammer_on(void (*fn)(void *), struct vfs_hammer *h, unsigned cpu)
+{
+    return thread_create_on(fn, h, "vfs-hammer", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+}
+
+bool selftest_vfs_concurrency(const char **reason)
+{
+    unsigned other = 0;
+    for (unsigned c = 1; c < cpu_count(); c++)
+        if (cpu_online(c)) {
+            other = c;
+            break;
+        }
+    unsigned vnodes0 = vfs_vnode_count();
+    struct file *f;
+    CHECK(vfs_mkdir(NULL, "/tmp/vc", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/vc/a", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/vc/a/b", 0755) == 0);
+    CHECK(vfs_open(NULL, "/tmp/vc/a/x", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    file_put(f);
+    CHECK(vfs_open(NULL, "/tmp/vc/shared", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    file_put(f);
+
+    /* 1. rename vs rmdir/mkdir of the destination directory, 200 ms. */
+    struct vfs_hammer rn = { 0 }, rm = { 0 };
+    struct thread *t1 = hammer_on(rename_hammer, &rn, 0);
+    struct thread *t2 = hammer_on(rmdir_hammer, &rm, other);
+    CHECK(t1 != NULL && t2 != NULL);
+    thread_sleep_ms(200);
+    __atomic_store_n(&rn.stop, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&rm.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t1);
+    thread_join(t2);
+    CHECK(rn.failures == 0);
+    CHECK(rm.failures == 0);
+    CHECK(rn.ops > 0 && rm.ops > 0);
+
+    /* The tree is consistent: x is in exactly one of its two places, b may or may not exist. */
+    struct cosmo_stat st;
+    int at_a = vfs_stat(NULL, "/tmp/vc/a/x", &st);
+    int at_b = vfs_stat(NULL, "/tmp/vc/a/b/y", &st);
+    CHECK((at_a == 0) != (at_b == 0));
+    if (at_b == 0)
+        CHECK(vfs_rename(NULL, "/tmp/vc/a/b/y", "/tmp/vc/a/x") == 0);
+
+    /* 2. Two CPUs open and close one file: one vnode per inode, always. */
+    struct vfs_hammer o1 = { 0 }, o2 = { 0 };
+    t1 = hammer_on(open_hammer, &o1, 0);
+    t2 = hammer_on(open_hammer, &o2, other);
+    CHECK(t1 != NULL && t2 != NULL);
+    thread_sleep_ms(200);
+    __atomic_store_n(&o1.stop, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&o2.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t1);
+    thread_join(t2);
+    CHECK(o1.failures == 0 && o2.failures == 0);
+    CHECK(o1.ops > 0 && o2.ops > 0);
+    /* ramfs pins its vnodes, so the count is exact: the five we created and nothing duplicated. */
+    CHECK(vfs_vnode_count() == vnodes0 + 5 || vfs_vnode_count() == vnodes0 + 4);   /* b may be absent */
+
+    CHECK(vfs_unlink(NULL, "/tmp/vc/shared") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/vc/a/x") == 0);
+    if (vfs_stat(NULL, "/tmp/vc/a/b", &st) == 0)
+        CHECK(vfs_rmdir(NULL, "/tmp/vc/a/b") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/vc/a") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/vc") == 0);
+    CHECK(vfs_vnode_count() == vnodes0);
+    kinfo("selftest: vfs-concurrency: %u rename rounds against %u rmdir/mkdir rounds, %u+%u open/close on CPUs 0 and %u",
+          rn.ops, rm.ops, o1.ops, o2.ops, other);
     return true;
 }

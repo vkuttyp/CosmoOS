@@ -259,6 +259,7 @@ bool selftest_irq_sync(const char **reason)
     int vec = arch_vector_alloc();
     CHECK(vec >= 0);
     CHECK(interrupt_register((unsigned)vec, irq_probe_handler, p, "selftest-irqsync") == 0);
+    arch_ipi_bind((unsigned)vec);
 
     unsigned cpu = other_cpu();
     struct quiesce_stats before, after;

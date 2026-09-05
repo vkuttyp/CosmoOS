@@ -103,13 +103,19 @@ returns `-EINVAL` (a recorded limit of the VMM's region granularity).
 A native primitive: `futex_wait(space, uaddr, val, timeout_ns)` and
 `futex_wake(space, uaddr, n)`. One table of 64 buckets hashed by
 `(space, uaddr)`; each waiter is a `struct futex_waiter { space, uaddr,
-struct waitqueue wq (one waiter), woken }` on the bucket list. `wait`:
-lock the bucket, `copy_from_user` the word (with the lock held so a wake
-between the compare and the sleep cannot be missed: `wake` takes the
-same lock), compare with `val` (`-EAGAIN` on mismatch), enqueue, unlock,
+struct waitqueue wq (one waiter), woken }` on the bucket list; each
+bucket carries a `wake_seq`. `wait`: lock the bucket, read `wake_seq`,
+unlock; `copy_from_user` the word with no lock held (a demand fault may
+allocate, a fatal fault kills the process: neither may happen under a
+spinlock, which `might_sleep` in `copy_from_user` enforces); compare with
+`val` (`-EAGAIN` on mismatch); lock, and if `wake_seq` changed return 0
+(a wake ran between the compare and the enqueue; a spurious return the
+futex contract permits and musl retries), else enqueue; unlock;
 `wait_event_killable` with an optional timer (`-ETIMEDOUT`; a kill gives
-`-EINTR`), dequeue. `wake`: lock, mark and wake up to `n` waiters of that
-`(space, uaddr)`, return the count. The Linux call accepts `FUTEX_WAIT`
+`-EINTR`); dequeue. `wake`: lock, bump `wake_seq`, mark and wake up to `n`
+waiters of that `(space, uaddr)`, return the count. No wake is lost: a
+wake that ran after the waiter's read of the word bumped the sequence the
+waiter checks before sleeping (`docs/kernel/lockdep/design.md`, "futex"). The Linux call accepts `FUTEX_WAIT`
 (0), `FUTEX_WAKE` (1), with or without `FUTEX_PRIVATE_FLAG` (128) and
 `FUTEX_CLOCK_REALTIME`; other operations return `-ENOSYS`.
 

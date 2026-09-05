@@ -71,7 +71,7 @@ also requires, in every build type, the boot-loaded module's lines:
 
 ```text
 [ INFO] module: loaded hello 1.0 (text 4 KiB, rodata 4 KiB, data 4 KiB, 0 exports)
-[ INFO] hello: module init (ABI v2, load 1)
+[ INFO] hello: module init (ABI v3, load 1)
 ```
 
 (`REQUIRED_MARKERS` in `tests/boot/run_boot_test.py`), and

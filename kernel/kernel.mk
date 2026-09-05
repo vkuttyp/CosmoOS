@@ -26,6 +26,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/smp.c \
 	kernel/core/quiesce.c \
 	kernel/core/quiescetest.c \
+	kernel/core/lockdep.c \
+	kernel/core/lockdeptest.c \
 	kernel/interrupt/interrupt.c \
 	kernel/interrupt/irq.c \
 	kernel/interrupt/ipi.c \
