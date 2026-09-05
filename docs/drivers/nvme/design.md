@@ -106,12 +106,16 @@ block layer's pending list absorbs (D7a).
 ## Timeouts, abort and reset
 
 The block layer's request timer (`blkdev.timeout_ns`, 30 s) calls the
-driver's `timeout` operation in thread context. The driver issues an
-Abort admin command for the (queue, command id); if the controller
-completes the aborted command (status Command Abort Requested) the bio
-finishes with `-ETIMEDOUT` through the normal path. If the abort itself
-does not complete within 5 s, or the controller reports `CSTS.CFS`, the
-driver *resets*: it clears `CC.EN`, waits for `RDY` to fall, completes
+driver's `timeout` operation in thread context. The driver marks the
+slot `aborting` (its command id is not reused while an Abort names it;
+a completion in the meantime leaves the slot reserved for the timeout
+path to free) and issues an Abort admin command for the (queue, command
+id); if the controller completes the aborted command (status Command
+Abort Requested) the bio finishes with `-ETIMEDOUT` through the normal
+path. An admin command that times out in software leaves its slot
+orphaned until the controller's late answer frees it, for the same
+reason. If the abort itself does not complete within 5 s, or the
+controller reports `CSTS.CFS`, the driver *resets*: it clears `CC.EN`, waits for `RDY` to fall, completes
 every in-flight command on every queue with `-ETIMEDOUT`
 (the controller has forgotten them), marks the controller dead, and
 every later submission answers `-EIO`. A dead controller's namespaces

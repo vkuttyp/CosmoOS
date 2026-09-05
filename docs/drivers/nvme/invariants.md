@@ -1,12 +1,21 @@
 # NVMe driver: invariants
 
 **M1. A command slot is owned by exactly one command from `slot_get` to
-`slot_put`, and a completion for a free slot changes nothing.** The free
-list is a linked list through `cmds[]` under the queue lock; a completion
-whose id names a slot without a bio or waiter is logged and ignored.
-Check: `nvme` self-test (32 reads from four CPUs, every completion
-delivered once; a burst of segment I/O). Gap: no hostile-controller
-test with forged completions.
+`slot_put`, a completion for a free slot changes nothing, and a slot the
+controller may still answer is never reused.** The free list is a linked
+list through `cmds[]` under the queue lock; a completion whose id names
+a slot without a bio or waiter is logged and ignored. An admin command
+that times out in software leaves its slot *orphaned* (out of the free
+list) until the controller's late answer frees it, so that answer can
+never be delivered to a newer command with the same id; a slot whose
+command is being aborted is marked `aborting` and, if the command
+completes meanwhile, stays reserved until the timeout path releases it,
+so the Abort can never name a replacement request (Greptile on PR #24).
+A reset frees every reserved slot, since a disabled controller answers
+nothing. Check: `nvme` self-test (32 reads from four CPUs, every
+completion delivered once; a burst of segment I/O); review of the
+orphan/aborting paths (QEMU's controller never times out). Gap: no
+hostile-controller test with late or forged completions.
 
 **M2. Every segment mapped for a command is unmapped when the command
 completes, is aborted, or the controller dies.** `unmap_cmd` runs under

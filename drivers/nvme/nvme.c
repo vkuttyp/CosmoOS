@@ -59,6 +59,12 @@ struct nvme_cmd {
     unsigned nr_segs;
     enum dma_dir dir;
     uint16_t next_free;                    /* free list through the slots */
+    /* A command id names a slot to the controller too, so a slot the
+     * controller may still answer is never handed out again:
+     * `orphan` after a software timeout of an admin command (freed when
+     * the late completion arrives), `aborting` while an Abort naming it
+     * is in flight (freed by the timeout path once the abort is over). */
+    bool orphan, aborting;
 };
 
 struct nvme_queue {
@@ -199,6 +205,8 @@ static void slot_put(struct nvme_queue *q, uint16_t id)
     cmd->bio = NULL;
     cmd->wait = NULL;
     cmd->nr_segs = 0;
+    cmd->orphan = false;
+    cmd->aborting = false;
     cmd->next_free = q->free_head;
     q->free_head = id;
     q->inflight--;
@@ -253,18 +261,27 @@ static void queue_process(struct nvme_queue *q)
         struct bio *bio = NULL;
         struct nvme_cmd_wait *wait = NULL;
         int status = -EIO;
+        bool orphan = false;
         if (cid < q->depth) {
             struct nvme_cmd *cmd = &q->cmds[cid];
             bio = cmd->bio;
             wait = cmd->wait;
+            orphan = cmd->orphan;
             status = status_to_errno(NVME_CQE_STATUS(cqe.dw3));
             if (wait) {
                 wait->result = cqe.dw0;
                 wait->status = NVME_CQE_STATUS(cqe.dw3);
             }
-            if (bio || wait) {
+            if (orphan) {
+                slot_put(q, cid);   /* the late answer to a timed-out admin command: nobody waits */
+            } else if (bio || wait) {
                 unmap_cmd(c, cmd);
-                slot_put(q, cid);
+                if (cmd->aborting) {
+                    cmd->bio = NULL;   /* the Abort naming this id is in flight: the slot stays reserved */
+                    cmd->wait = NULL;
+                } else {
+                    slot_put(q, cid);
+                }
             }
         }
         spin_unlock_irqrestore(&q->lock, s);
@@ -272,7 +289,7 @@ static void queue_process(struct nvme_queue *q)
             bio_complete(bio, status);
         else if (wait)
             complete(&wait->done);
-        else
+        else if (!orphan)
             kwarn("nvme%u: completion for an unknown command %u on queue %u", c->index, cid, q->qid);
     }
 }
@@ -316,10 +333,14 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
     }
     int rc;
     if (!completion_done(&w.done)) {
-        /* Take the slot back: a late completion finds no waiter and is ignored. */
+        /* The controller may still answer this id: keep the slot out of
+         * the free list until it does (queue_process frees an orphan), so
+         * the late completion can never be delivered to a new command. */
         s = spin_lock_irqsave(&q->lock);
-        if (q->cmds[cid].wait == &w)
-            slot_put(q, cid);
+        if (q->cmds[cid].wait == &w) {
+            q->cmds[cid].wait = NULL;
+            q->cmds[cid].orphan = true;
+        }
         spin_unlock_irqrestore(&q->lock, s);
         rc = -ETIMEDOUT;
     } else {
@@ -474,15 +495,16 @@ static void controller_die(struct nvme_ctrl *c, const char *why)
         struct nvme_queue *q = qi == 0 ? &c->admin : c->ioq[qi - 1];
         for (uint16_t cid = 0; cid < q->depth; cid++) {
             arch_irq_state_t s = spin_lock_irqsave(&q->lock);
-            struct bio *bio = q->cmds[cid].bio;
-            struct nvme_cmd_wait *w = q->cmds[cid].wait;
-            if (bio || w) {
+            struct nvme_cmd *cmd = &q->cmds[cid];
+            struct bio *bio = cmd->bio;
+            struct nvme_cmd_wait *w = cmd->wait;
+            if (bio || w || cmd->orphan || cmd->aborting) {
                 if (w) {
                     w->status = 0x4000;   /* an invented "controller dead" status: -EIO */
                     w->result = 0;
                 }
-                unmap_cmd(c, &q->cmds[cid]);
-                slot_put(q, cid);
+                unmap_cmd(c, cmd);
+                slot_put(q, cid);   /* disabled: no late answer can come for a reserved slot */
             }
             spin_unlock_irqrestore(&q->lock, s);
             if (bio)
@@ -495,7 +517,9 @@ static void controller_die(struct nvme_ctrl *c, const char *why)
 
 /* The block layer's timeout thread: abort the command, and reset when the
  * abort gets nowhere. `victim` is only compared, never dereferenced, until
- * it is found in a slot under the queue lock. */
+ * it is found in a slot under the queue lock; the slot is then marked
+ * `aborting` so its id cannot be reused while an Abort names it (a
+ * completion in the meantime leaves the slot reserved for us to free). */
 static void nvme_timeout(struct blkdev *bd, struct bio *victim)
 {
     struct nvme_ns *ns = bd->priv;
@@ -506,7 +530,8 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
         struct nvme_queue *cand = c->ioq[i];
         arch_irq_state_t s = spin_lock_irqsave(&cand->lock);
         for (uint16_t k = 0; k < cand->depth; k++) {
-            if (cand->cmds[k].bio == victim) {
+            if (cand->cmds[k].bio == victim && !cand->cmds[k].aborting) {
+                cand->cmds[k].aborting = true;
                 q = cand;
                 cid = k;
                 break;
@@ -515,24 +540,36 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
         spin_unlock_irqrestore(&cand->lock, s);
     }
     if (q == NULL)
-        return;   /* completed meanwhile */
+        return;   /* completed meanwhile, or already being aborted */
     struct nvme_sqe sqe;
     memset(&sqe, 0, sizeof(sqe));
     sqe.cdw0 = NVME_ADMIN_ABORT;
     sqe.cdw10 = ((uint32_t)cid << 16) | q->qid;
     uint32_t result = 1;
     int rc = admin_cmd(c, &sqe, &result);
+    bool done = false;
     if (rc == 0 && (result & 1) == 0) {
         /* The controller says it aborted: its completion for the command
          * arrives with Command Abort Requested. Give it a moment. */
-        for (unsigned waited = 0; waited < 1000; waited++) {
+        for (unsigned waited = 0; waited < 1000 && !done; waited++) {
             arch_irq_state_t s = spin_lock_irqsave(&q->lock);
-            bool gone = q->cmds[cid].bio != victim;
+            done = q->cmds[cid].bio == NULL;
             spin_unlock_irqrestore(&q->lock, s);
-            if (gone)
-                return;
-            thread_sleep_ms(1);
+            if (!done)
+                thread_sleep_ms(1);
         }
+    } else {
+        arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+        done = q->cmds[cid].bio == NULL;   /* it may have completed on its own while we asked */
+        spin_unlock_irqrestore(&q->lock, s);
+    }
+    if (done) {
+        /* The slot was held for the Abort's sake; release it now. */
+        arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+        if (q->cmds[cid].aborting && q->cmds[cid].bio == NULL)
+            slot_put(q, cid);
+        spin_unlock_irqrestore(&q->lock, s);
+        return;
     }
     controller_die(c, "a request did not complete and could not be aborted");
 }
