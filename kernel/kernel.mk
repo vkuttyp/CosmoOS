@@ -29,6 +29,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/lockdep.c \
 	kernel/core/lockdeptest.c \
 	kernel/core/faultinject.c \
+	kernel/core/extable.c \
 	kernel/core/faulttest.c \
 	kernel/interrupt/interrupt.c \
 	kernel/interrupt/irq.c \
@@ -76,6 +77,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \
 	kernel/syscall/uaccess.c \
+	kernel/syscall/uaccesstest.c \
 	kernel/security/sha512.c \
 	kernel/security/ed25519.c \
 	kernel/security/keyring.c \

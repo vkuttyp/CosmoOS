@@ -123,6 +123,11 @@ The Phase 4 checks (raw wrappers), unchanged except where noted:
   `-EINVAL`; `MAP_FIXED` at `0x10` → `-EINVAL`; `MAP_FIXED` at
   `0x0000200000000000` → that address, written; `MAP_FIXED` on the
   same page → `-EEXIST`; `munmap` of it → 0; `munmap(0x10)` → `-EINVAL`.
+  Milestone 5: four RW pages, `munmap` of the middle two → 0 and both
+  ends still hold their bytes; `munmap` of the gone page → `-EINVAL`;
+  `munmap` of the whole range across the hole → `-EINVAL` and the ends
+  unchanged (strict); the two ends unmapped one by one → 0; a
+  `PROT_NONE` mapping succeeds and `log` from it is `-EFAULT`.
 - **log/close/unknown**: `log` of 20 bytes → 0; kernel pointer →
   `-EFAULT`; length 4096 → `-EINVAL`; `close(7)` → `-EBADF`; numbers
   `SYS_COUNT`, 999999, and -1 → `-ENOSYS`.
@@ -136,6 +141,26 @@ The Phase 4 checks (raw wrappers), unchanged except where noted:
 Runs `init --crash`, which prints a line and writes to address 0;
 requires exit status `COSMO_EXIT_FAULT` (139). The log shows
 `fault: user write at 0x0000000000000000 (not present); terminating`.
+
+### `process-efault`, `process-protnone`, `process-oom` (milestone 5)
+
+`init --probe efault` maps a `PROT_NONE` page, a read-only page and
+three RW pages with the middle one unmapped, then: `write` from the
+`PROT_NONE` page and `log` of it are `-EFAULT`; `read` from a pipe into
+the read-only page is `-EFAULT` (a protection fault on a present page
+inside the kernel's copy); `read` into 16 bytes that straddle the hole
+is `-EFAULT`; the same `read` into the surviving page returns the data;
+`stat` into the `PROT_NONE` page and `stat` of a path whose bytes run
+off the end of a mapped page without a NUL are `-EFAULT`; `write` from
+the read-only page works. Exit 0 (a nonzero exit names the failing
+step) and `vm_stats.fixups` rose (six on both architectures).
+`init --probe none-touch` writes to a `PROT_NONE` page: status 139.
+`process-oom` (fault-injection builds) arms `demand-copy` for one hit
+and runs `init --probe oom-copy`, which reads from a pipe into a fresh
+page: the kernel's copy takes the demand fault, the frame allocation is
+made to fail, the read is `-EFAULT`, exit 0, one hit counted; then
+`demand-page` for one hit and `init --probe oom-touch`, whose first
+write to a fresh page is fatal (139). Both were kernel panics before.
 
 ## Harness markers (`tests/boot/run_boot_test.py`)
 
@@ -163,6 +188,11 @@ interactive harness runs in every normal build.
 Every user ELF (`out/x86_64-debug/userland/*.elf`, packed into the boot
 archive as `init`, `bin/*`, `sbin/*`) has three `PT_LOAD` segments
 (r-x, r--, rw-) and a non-executable `PT_GNU_STACK`.
+
+Milestone 5 (2026-09-05): `SELFTEST: PASS (100 tests)` on x86-64 with
+4 and 1 CPUs and on AArch64; `process-efault` 8 ms / 18 ms,
+`process-protnone` 9 / 27 ms, `process-oom` 16 / 27 ms (x86-64 /
+AArch64).
 
 ## Gaps and planned tests
 

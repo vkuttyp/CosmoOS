@@ -291,6 +291,16 @@ EC from EL0 → `ARCH_FAULT_USER`; DFSC/IFSC translation fault (0b0001xx)
 `ARCH_FAULT_PRESENT`; anything else (address size, synchronous external,
 alignment) → `ARCH_FAULT_RESERVED`, which the VMM treats as fatal.
 
+Milestone 5 additions: `arch_trap_fixup` moves `ELR_EL1` to the
+exception-table fixup of a faulting kernel PC (`kernel/extable.h`);
+`arch_copy_user_raw` (`uaccess.S`) is an aligned 8-byte loop and a byte
+loop whose four loads and stores are the table's entries, run with PAN
+cleared by the caller; a `PROT_NONE` page is a level-3 descriptor with
+VALID clear and the software bit 55 (`DESC_SW_NONE`) set, which the
+walker treats as a leaf (`docs/kernel/memory/design.md` §6.2).
+`arch_mmu_shootdown_cpus` counts the CPUs in the mask as acknowledged
+by the broadcast TLBI's DSB; `arch_mmu_prepopulate` is a no-op (TTBR1).
+
 ## Threads, per-CPU, user mode
 
 `struct percpu *` lives in `TPIDR_EL1` (`arch_percpu_get` is one `mrs`).

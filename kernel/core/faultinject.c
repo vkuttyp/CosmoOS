@@ -28,6 +28,8 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_KMALLOC] = "kmalloc",
     [FI_BLK_SUBMIT] = "blk-submit",
     [FI_BLK_COMPLETE] = "blk-complete",
+    [FI_DEMAND_PAGE] = "demand-page",
+    [FI_DEMAND_COPY] = "demand-copy",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

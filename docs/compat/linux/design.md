@@ -84,7 +84,10 @@ equal to it. `brk(0)` returns the current value; `brk(addr)` maps
 with the old value returned, as Linux does, when the range is taken or
 memory runs out; the region is capped at 1 GiB above `brk_start`) and
 unmaps `[page_up(addr), page_up(brk))` when shrinking, then returns the
-new `brk`.
+new `brk`. Growth merges into the existing heap region and a shrink
+splits it (`docs/kernel/memory/design.md` §6.3), so shrink and regrow
+in any order keep working; a shrink that fails (it cannot on a
+well-formed heap) leaves the break unchanged.
 
 ### mmap family
 
@@ -93,10 +96,11 @@ file mappings are stage 2), `MAP_PRIVATE`/`MAP_SHARED` accepted (all
 mappings are private), `MAP_FIXED` (0x10) forces the address (and
 unmaps what was there, as Linux does: `vm_user_unmap` then map),
 `MAP_NORESERVE`/`MAP_STACK`/`MAP_POPULATE` ignored. `PROT_*` bits equal
-the native ones. A hint that is not page aligned is ignored, not an
-error. `munmap` and `mprotect` map to `vm_user_unmap` and
-`vm_user_protect`; a `mprotect` that does not cover exactly one region
-returns `-EINVAL` (a recorded limit of the VMM's region granularity).
+the native ones; `PROT_NONE` reserves and traps. A hint that is not page
+aligned is ignored, not an error. `munmap` takes any range and skips
+unmapped pages (0); `mprotect` takes any range whose pages are all
+mapped, splitting and merging regions, and is `-ENOMEM` across a hole,
+as on Linux; a `MAP_FIXED` mapping replaces whatever was there.
 
 ### futex (`kernel/ipc/futex.c`)
 

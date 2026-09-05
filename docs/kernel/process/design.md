@@ -235,8 +235,10 @@ entry afterwards (invariant P9).
 
 `vm_user_map_anon(space, base, size, prot, name, flags)`: ANON region
 with `VM_REGION_USER`; page-table leaves get the U/S bit; populated or
-lazy. `vm_user_unmap(space, base, size)`: exact-region unmap for `munmap`
-(partial unmaps are `-EINVAL` in this phase). `vm_space_destroy(space)`:
+lazy; `PROT_NONE` reserves. `vm_user_unmap(space, base, size, flags)`
+and `vm_user_protect(space, base, size, prot)` take any page range and
+split or merge regions as needed (`docs/kernel/memory/design.md` §6.3;
+the native `munmap` uses `VM_UNMAP_STRICT`). `vm_space_destroy(space)`:
 teardown every region (frames + shootdown), destroy the MMU context
 (free lower-half tables), free the struct.
 
@@ -244,8 +246,10 @@ Fault handling for user addresses: `space = process_current()->space`
 when the current thread has a process (the fault came either from user
 mode or from a `copy_*_user` in kernel mode); demand-zero for ANON
 regions with matching access; otherwise a user-mode frame terminates
-the process and a kernel-mode frame panics (validation should have
-refused the pointer).
+the process and a kernel-mode frame resumes at the copy's exception
+fixup, which makes the system call return `-EFAULT`
+(`docs/kernel/memory/design.md` §6.1). A kernel-mode fault at a user
+address outside any copy has no fixup and panics: a kernel bug.
 
 `arch_mmu_query` for user spaces reports `VM_PROT_USER` in the prot
 bits so tests can verify U/S.
@@ -288,11 +292,15 @@ Native table (`uapi/cosmo/syscall.h`, numbers stable from now on):
 | 10 | `close` | `(int h)` → 0 or -EBADF |
 
 User copy helpers (`kernel/syscall/uaccess.c`): `user_range_ok(addr,
-len)` (inside `[USER_LO, USER_HI)`, no overflow); `user_range_mapped
-(space, addr, len, prot)` (every page inside a region with the required
-prot); `copy_from_user`/`copy_to_user` do both checks, then copy inside
-an access window. Demand-zero faults taken during the copy are handled
-by the fault handler as kernel-mode faults on a user ANON region.
+len)` (inside `[USER_LO, USER_HI)`, no overflow), then the copy through
+`arch_copy_user_raw` inside an access window. The primitive's accesses
+carry exception-table entries: a page that is unmapped, `PROT_NONE`,
+lacks the permission, or cannot be populated for lack of memory makes
+the helper return `-EFAULT` (since milestone 5; before it the helpers
+walked the region list first and a concurrent change between the walk
+and the copy would have been a kernel fault). Demand-zero faults taken
+during the copy are serviced as kernel-mode faults on a user ANON
+region.
 
 ## 7. Boot archive and protocol v3
 

@@ -151,13 +151,16 @@ Checked by: explicit test in `vm_fault_handler`; `spin_lock` panics on
 re-acquisition.
 
 **M21. Only not-present faults on `VM_REGION_ANON` regions within their
-protection are handled.** Protection faults, reserved-bit faults, faults
-in `VM_REGION_PHYS` regions, faults outside any region, and user-mode
-faults all panic with the VMM report. There is no retry and no signal
-delivery yet.
+protection are serviced.** Protection faults, reserved-bit faults, faults
+in `VM_REGION_PHYS` regions and faults outside any region are never
+serviced. What happens to them depends on the frame: a user-mode fault
+ends the process (P15); a kernel-mode fault at a user address resumes at
+the exception fixup of the faulting instruction when one exists (M32);
+everything else panics with the VMM report.
 Checked by: `make test-crash` (fault outside any region must produce
 `page fault: kernel write at 0xffff900000000000 (not present): no
-region`); `selftest_vmm` demand-zero path for the handled case.
+region`); `selftest_vmm` demand-zero path for the handled case;
+`uaccess`, `process-efault`, `process-protnone`.
 
 **M22. Lock order is `vm_space.lock → kmem_cache.lock → pmm_zone.lock`.**
 The fault handler takes `vm_space.lock` then `pmm_zone.lock` and never a
@@ -172,10 +175,14 @@ locks are spinlocks taken with interrupts disabled; nothing sleeps,
 waits, or performs I/O.
 Checked by: there is no sleeping primitive to call (review).
 
-**M24. No user address spaces exist.** `vm_fault_handler` treats
-addresses below `arch_mmu_kernel_base()` as errors; `arch_mmu_map` never
-sets the user bit. Phase 4 changes both and this document.
-Checked by: review.
+**M24. User code never reaches kernel_space through the fault handler.**
+A fault whose frame is user mode and whose address is in the kernel half
+is fatal to the process before any space is selected; kernel_space is
+consulted only for kernel-mode faults. (Phase 0's version of this rule,
+"no user spaces exist", was retired by Phase 4; until milestone 5 the
+handler selected kernel_space by address alone and a user fault on a
+lazily mapped kernel region populated it.)
+Checked by: review of `vm_fault_handler`; `process-fault`.
 
 ## Heap
 
@@ -229,3 +236,63 @@ VM_PROT_EXEC`; a protection change to RX is followed by a shootdown
 before the caller sees `0`.
 Checked by: test `module-load` (`vm_query` reports RX for module text, R
 for rodata, RW for data), review.
+
+## User memory (audit milestone 5, design.md §6)
+
+**M32. A kernel-mode fault on a user address inside a user copy is
+`-EFAULT`, never a panic.** Every instruction of `arch_copy_user_raw`
+that touches user memory has an exception-table entry; `copy_from_user`,
+`copy_to_user` and `strncpy_from_user` touch user memory through it and
+nothing else in the kernel dereferences a user pointer (P14). The fault
+handler consults the table for kernel-mode faults at user addresses,
+including a demand-zero fault that finds no memory. There is no
+check-then-copy window: a concurrent unmap makes the copy fail.
+Checked by: `uaccess` (four real faults from a kernel thread, each
+resumed, `fixups` up by four), `process-efault` (PROT_NONE, read-only,
+unmapped and torn-string pointers from a process, exit 0),
+`process-oom` (an injected allocation failure inside `read`'s copy is
+`-EFAULT`; on a user touch it is fatal). Gap: a kernel-address fault with
+a fixup-table PC still panics by design; nothing tests that a rogue
+entry cannot be added (review).
+
+**M33. A `PROT_NONE` page keeps its frame and traps every access.** The
+leaf stays in the table with the hardware valid bit clear and the
+software none bit set; `arch_mmu_query` reports the frame with
+`VM_PROT_NONE`; `arch_mmu_map` over it is `-EEXIST`; a later
+`vm_user_protect` restores the frame's contents to view. The hardware
+reports not-present; the region's `prot` forbids the access; the
+outcome is P15 or M32.
+Checked by: `user-vmm` (frames counted, query reports NONE, contents
+survive), `process-protnone`, `lxtest` (`mprotect(PROT_NONE)` then
+`write` is `-EFAULT`, then back to RW reads the old byte).
+
+**M34. Regions are exact at page granularity.** After any
+`vm_user_unmap` or `vm_user_protect` the region list describes exactly
+the mapped pages and their protections: regions are split at range ends
+and equal neighbours (kind, prot, cache, flags, name, no guard between)
+are merged, so the same mapping has one representation whatever sequence
+of calls produced it. The strict unmap changes nothing unless every page
+is mapped; `protect` changes nothing unless every page is mapped; both
+allocate their split records before taking the lock and fail with
+`-ENOMEM` rather than leave a half-cut list.
+Checked by: `user-vmm` (region counts and frame counts after every step),
+`process-user` (partial native `munmap`), `lxtest` (partial `mprotect`,
+`brk` shrink and regrow, `MAP_FIXED` replacement, lenient `munmap`).
+
+**M35. Frames of an unmapped range are freed only after the regions are
+gone and the TLBs of every CPU running the space are clean.** The range's
+regions are unlinked or shrunk under the lock first, so a fault in the
+window finds no region; then per chunk: collect frames, unmap, unlock,
+shoot down on `active_cpus`, free. The mask is read after a full fence
+that follows the PTE change; a CPU sets its bit before loading the root.
+Checked by: review; `user-vmm` (a space no other CPU runs collects zero
+acknowledgements); `smp-shootdown` for the IPI mechanism on the kernel
+space. Gap: no test drives a shootdown against a CPU that is running the
+space concurrently (needs two-CPU process scheduling in a test).
+
+**M36. The kernel half of every user root is complete.** `vmm_init`
+pre-populates the arena's top-level slots before the first user root is
+made; in debug builds `descend` panics if it would create a kernel-half
+PML4 entry after that (`arch_mmu_context_init_user` sets the flag). On
+AArch64 TTBR1 makes the rule structural.
+Checked by: the debug panic (never seen in the boot test), review.

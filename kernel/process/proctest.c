@@ -8,6 +8,7 @@
 #include <kernel/elf.h>
 #include <kernel/elf64.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -18,6 +19,7 @@
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
+#include <kernel/vmm.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -250,6 +252,79 @@ bool selftest_process_fault(const char **reason)
         return true;
     CHECK(status == COSMO_EXIT_FAULT);
     return true;
+}
+
+/* --probe efault: system calls whose user pointers name PROT_NONE,
+ * read-only and unmapped pages get -EFAULT through the exception fixup
+ * path; the process survives and exits 0 (design.md §6.1). */
+bool selftest_process_efault(const char **reason)
+{
+    static const char *const argv[] = { "init", "--probe", "efault", NULL };
+    int status;
+    struct vm_stats s0, s1;
+    vm_get_stats(&s0);
+    if (!run_module(argv, &status, reason))
+        return false;
+    if (status == -1)
+        return true;
+    CHECK(status == 0);
+    vm_get_stats(&s1);
+    CHECK(s1.fixups > s0.fixups);
+    kinfo("selftest: process-efault: %llu kernel-mode faults resumed as -EFAULT", (unsigned long long)(s1.fixups - s0.fixups));
+    return true;
+}
+
+/* --probe none-touch: user code touching a PROT_NONE page dies with the
+ * fault status; the kernel keeps running. */
+bool selftest_process_protnone(const char **reason)
+{
+    static const char *const argv[] = { "init", "--probe", "none-touch", NULL };
+    int status;
+    if (!run_module(argv, &status, reason))
+        return false;
+    if (status == -1)
+        return true;
+    CHECK(status == COSMO_EXIT_FAULT);
+    return true;
+}
+
+/* Demand-zero allocation failures: inside a user copy the system call
+ * returns -EFAULT (the process exits 0); on a user-mode touch the process
+ * dies. Both were kernel panics before milestone 5 (finding #11). */
+bool selftest_process_oom(const char **reason)
+{
+#if CONFIG_FAULTINJECT
+    static const char *const copy_argv[] = { "init", "--probe", "oom-copy", NULL };
+    static const char *const touch_argv[] = { "init", "--probe", "oom-touch", NULL };
+    int status;
+    struct fi_stats st;
+
+    faultinject_set(FI_DEMAND_COPY, 1, 1, NULL);   /* the first kernel-mode demand fault in any user space */
+    bool ok = run_module(copy_argv, &status, reason);
+    faultinject_clear(FI_DEMAND_COPY);
+    if (!ok)
+        return false;
+    if (status == -1)
+        return true;
+    faultinject_stats(FI_DEMAND_COPY, &st);
+    CHECK(st.hits == 1);
+    CHECK(status == 0);
+
+    faultinject_set(FI_DEMAND_PAGE, 1, 1, NULL);   /* the first user-mode demand fault */
+    ok = run_module(touch_argv, &status, reason);
+    faultinject_clear(FI_DEMAND_PAGE);
+    if (!ok)
+        return false;
+    faultinject_stats(FI_DEMAND_PAGE, &st);
+    CHECK(st.hits == 1);
+    CHECK(status == COSMO_EXIT_FAULT);
+    kinfo("selftest: process-oom: an injected demand-page failure is -EFAULT in a copy and fatal on a user touch");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: process-oom: fault injection is compiled out of this build");
+    return true;
+#endif
 }
 
 bool selftest_process_reject(const char **reason)

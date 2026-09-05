@@ -54,6 +54,7 @@ struct vm_space {
     vaddr_t near_hi;
     bool user;               /* a process address space (lower half) */
     uint64_t anon_pages;     /* frames populated for this space's ANON regions */
+    cpumask_t active_cpus;   /* user: CPUs whose translation root is this space now (atomic) */
 };
 
 extern struct vm_space kernel_space;
@@ -83,18 +84,37 @@ int vm_space_create_user(struct vm_space **out);
 void vm_space_destroy(struct vm_space *space);
 
 /* Map an anonymous user region at exactly [base, base+size). `prot`
- * must not be W+X. flags: VM_REGION_POPULATED for eager zeroed frames,
- * VM_REGION_GUARD_BELOW for a guard page below. Returns 0, -EEXIST if it
- * overlaps, -EINVAL, -ENOMEM. */
+ * must not be W+X; VM_PROT_NONE reserves the range (every access faults).
+ * flags: VM_REGION_POPULATED for eager zeroed frames, VM_REGION_GUARD_BELOW
+ * for a guard page below. The new region merges with an adjacent one of
+ * the same kind, prot, flags and name. Returns 0, -EEXIST if it overlaps,
+ * -EINVAL, -ENOMEM. */
 int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot, unsigned flags,
                      const char *name);
 
-/* Unmap a region that starts at `base` with exactly `size` bytes. */
-int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size);
+/* Unmap every page of [base, base+size), splitting regions at the ends.
+ * VM_UNMAP_STRICT: every page must be mapped, else -EINVAL and nothing
+ * changes (the native munmap). Without it unmapped pages are skipped
+ * (Linux munmap, brk, MAP_FIXED replacement). -EINVAL for a range outside
+ * the user window; -ENOMEM if a split needs a region struct there is no
+ * memory for (nothing changes). */
+#define VM_UNMAP_STRICT (1u << 0)
+int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned flags);
 
-/* Change the protection of a whole region (exact base and size).
- * -EINVAL for W+X or a partial range. */
+/* Change the protection of every page of [base, base+size), splitting
+ * regions at the ends and merging equal neighbours afterwards. -EINVAL
+ * for W+X or a bad range; -ENOMEM if a page of the range is unmapped
+ * (nothing changes) or a split cannot be allocated. */
 int vm_user_protect(struct vm_space *space, uint64_t base, size_t size, vm_prot_t prot);
+
+/* Number of regions in a user space (tests). */
+unsigned vm_user_region_count(struct vm_space *space);
+
+/* The calling CPU switches its translation root from `prev` to `next`
+ * (either may be the kernel space): maintains active_cpus around the
+ * arch activation. Called by arch_thread_switch_prepare with interrupts
+ * off. */
+void vm_space_switch(struct vm_space *prev, struct vm_space *next);
 
 /* Lowest free range of `size` bytes at or above `from` inside
  * [USER_LO, USER_HI) with a guard gap; 0 if none. */
@@ -158,6 +178,7 @@ struct vm_stats {
     uint64_t regions;
     uint64_t anon_pages;       /* frames populated for ANON regions */
     uint64_t faults_handled;   /* demand-zero populations */
+    uint64_t fixups;           /* kernel-mode faults resumed at an exception fixup */
 };
 
 void vm_get_stats(struct vm_stats *out);

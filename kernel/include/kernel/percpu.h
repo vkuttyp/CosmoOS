@@ -31,6 +31,8 @@ struct thread;
 struct runqueue;
 struct timer_queue;
 
+struct vm_space;
+
 struct percpu {
     struct percpu *self;        /* offset 0: arch fast path (x86-64: mov %gs:0; AArch64 reads TPIDR_EL1) */
     uintptr_t kernel_stack_top; /* offset 8: syscall entry loads rsp from here */
@@ -47,6 +49,7 @@ struct percpu {
     uint64_t ticks;             /* local timer ticks since this CPU started */
     uint64_t irq_count;         /* interrupts handled on this CPU */
     uintptr_t boot_stack;       /* AP bootstrap stack; freed by its idle thread */
+    struct vm_space *cur_space; /* the space whose root this CPU runs (vm_space_switch) */
     uint32_t hw_id;             /* local interrupt controller id (APIC id) */
 };
 

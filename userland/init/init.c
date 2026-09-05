@@ -351,6 +351,92 @@ static void proc_selftest(void)
     puts("usertest: processes ok");
 }
 
+/* --probe KIND: the user-memory edge cases of audit milestone 5
+ * (docs/kernel/memory/design.md §6). "efault": system calls given
+ * PROT_NONE, read-only and unmapped pointers return -EFAULT and the
+ * process lives (exit 0; a nonzero exit names the failing step).
+ * "none-touch" and "oom-touch" end in a fatal fault. "oom-copy" reads
+ * from a pipe into a never-touched page while the kernel injects a
+ * failure into that demand fault: -EFAULT, exit 0. */
+static int probe(const char *kind)
+{
+    const size_t P = 4096;
+    if (strcmp(kind, "efault") == 0) {
+        long none = cosmo_mmap(NULL, P, COSMO_PROT_NONE, COSMO_MAP_ANONYMOUS);
+        long ro = cosmo_mmap(NULL, P, COSMO_PROT_READ, COSMO_MAP_ANONYMOUS);
+        long rw = cosmo_mmap(NULL, 3 * P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        if (none <= 0 || ro <= 0 || rw <= 0)
+            return 10;
+        int h[2];
+        if (cosmo_pipe(h) != 0)
+            return 11;
+        /* Writes from a PROT_NONE page and a hole: -EFAULT, nothing written. */
+        if (cosmo_write(h[1], (void *)none, 16) != -COSMO_EFAULT)
+            return 12;
+        if (cosmo_log((const char *)none, 8) != -COSMO_EFAULT)
+            return 13;
+        /* A read into a read-only page: the copy_to_user faults on a
+         * present page (a protection fault, not a demand fault). Each
+         * attempt gets its own 16 bytes: whether a failed copy consumed
+         * them from the pipe is the pipe's business, not this probe's. */
+        if (cosmo_write(h[1], "0123456789abcdef", 16) != 16)
+            return 14;
+        if (cosmo_read(h[0], (void *)ro, 16) != -COSMO_EFAULT)
+            return 15;
+        /* A hole in the middle of a mapping: the copy stops there. */
+        if (cosmo_munmap((void *)(rw + P), P) != 0 || cosmo_write(h[1], "0123456789abcdef", 16) != 16)
+            return 16;
+        if (cosmo_read(h[0], (void *)(rw + P - 8), 16) != -COSMO_EFAULT)
+            return 17;
+        /* The same read into the surviving first page works. */
+        if (cosmo_write(h[1], "0123456789abcdef", 16) != 16)
+            return 18;
+        if (cosmo_read(h[0], (void *)rw, 16) != 16 || memcmp((void *)rw, "0123456789abcdef", 16) != 0)
+            return 18;
+        /* stat into PROT_NONE, and a path string that runs into a hole. */
+        if (cosmo_stat("/boot", (struct cosmo_stat *)none) != -COSMO_EFAULT)
+            return 19;
+        char *edge = (char *)(rw + P - 4);
+        memcpy(edge, "/boo", 4);   /* no NUL before the unmapped page */
+        struct cosmo_stat st;
+        if (cosmo_stat(edge, &st) != -COSMO_EFAULT)
+            return 20;
+        /* A read-only page can be a source. */
+        if (cosmo_write(h[1], (const void *)ro, 4) != 4)
+            return 21;
+        cosmo_close(h[0]);
+        cosmo_close(h[1]);
+        return 0;
+    }
+    if (strcmp(kind, "none-touch") == 0) {
+        long none = cosmo_mmap(NULL, P, COSMO_PROT_NONE, COSMO_MAP_ANONYMOUS);
+        if (none <= 0)
+            return 10;
+        *(volatile char *)none = 1;   /* must be fatal */
+        return 9;
+    }
+    if (strcmp(kind, "oom-copy") == 0) {
+        long fresh = cosmo_mmap(NULL, P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        int h[2];
+        if (fresh <= 0 || cosmo_pipe(h) != 0)
+            return 10;
+        if (cosmo_write(h[1], "oom", 3) != 3)
+            return 11;
+        long r = cosmo_read(h[0], (void *)fresh, 3);   /* the kernel's copy takes the demand fault */
+        if (r == -COSMO_EFAULT)
+            return 0;
+        return r == 3 ? 3 : 4;   /* 3: the injected failure went elsewhere */
+    }
+    if (strcmp(kind, "oom-touch") == 0) {
+        long fresh = cosmo_mmap(NULL, P, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        if (fresh <= 0)
+            return 10;
+        *(volatile char *)fresh = 1;   /* the demand fault fails: fatal */
+        return 9;
+    }
+    return 2;
+}
+
 #if defined(__x86_64__)
 /* The process rule of arch/fpu.h: a process never observes another's
  * vector registers. Two partner processes and this one each hold a
@@ -660,6 +746,29 @@ static void selftest(void)
     }
     CHECK(cosmo_munmap((void *)0x10, 4096) == -COSMO_EINVAL);
 
+    /* Milestone 5: partial unmaps split regions; a hole makes the strict
+     * native munmap refuse the whole range; PROT_NONE reserves. */
+    long sp = cosmo_mmap(NULL, 4 * 4096, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+    CHECK(sp > 0);
+    if (sp > 0) {
+        volatile char *q = (volatile char *)sp;
+        q[0] = 1;
+        q[3 * 4096] = 4;
+        CHECK(cosmo_munmap((void *)(sp + 4096), 2 * 4096) == 0);          /* the middle two */
+        CHECK(q[0] == 1 && q[3 * 4096] == 4);                               /* the ends survive */
+        CHECK(cosmo_munmap((void *)(sp + 4096), 4096) == -COSMO_EINVAL);   /* already gone */
+        CHECK(cosmo_munmap((void *)sp, 4 * 4096) == -COSMO_EINVAL);        /* a hole: refused whole */
+        CHECK(q[3 * 4096] == 4);                                            /* and nothing changed */
+        CHECK(cosmo_munmap((void *)sp, 4096) == 0);
+        CHECK(cosmo_munmap((void *)(sp + 3 * 4096), 4096) == 0);
+    }
+    long none = cosmo_mmap(NULL, 4096, COSMO_PROT_NONE, COSMO_MAP_ANONYMOUS);
+    CHECK(none > 0);
+    if (none > 0) {
+        CHECK(cosmo_log((const char *)none, 4) == -COSMO_EFAULT);   /* the kernel cannot read it either */
+        CHECK(cosmo_munmap((void *)none, 4096) == 0);
+    }
+
     CHECK(cosmo_log("hello from user mode", 20) == 0);
     CHECK(cosmo_log((const char *)0xffffffff80000000ULL, 5) == -COSMO_EFAULT);
     CHECK(cosmo_log("x", 4096) == -COSMO_EINVAL);
@@ -920,6 +1029,8 @@ int main(int argc, char **argv)
         return unpriv_test();
     if (argc >= 3 && strcmp(argv[1], "--trap") == 0)
         return trap_self(argv[2]);
+    if (argc >= 3 && strcmp(argv[1], "--probe") == 0)
+        return probe(argv[2]);
     if (argc >= 4 && strcmp(argv[1], "--syscall-fuzz") == 0)
         return syscall_fuzz(strtoul(argv[2], NULL, 0), strtoull(argv[3], NULL, 0));
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {

@@ -1,15 +1,16 @@
 /*
  * uaccess.h - The only way kernel code touches user memory.
  *
- * Every helper checks the range against the user address window and
- * against the current process's regions with the required protection
- * before copying inside an architecture user-access window (STAC/CLAC
- * when SMAP exists). Demand-zero faults on the process's own anonymous
- * regions may occur during the copy and are serviced by the fault
- * handler; anything else is a kernel bug.
+ * Every helper checks the range against the user address window, then
+ * copies inside an architecture user-access window (STAC/CLAC with SMAP,
+ * PAN on AArch64) with a primitive whose faulting instructions carry
+ * exception fixups (kernel/extable.h). Demand-zero faults on the
+ * process's anonymous regions are serviced during the copy; any other
+ * fault, including an allocation failure, makes the helper return
+ * -EFAULT (docs/kernel/memory/design.md §6.1).
  *
- * All helpers may block (a demand-zero fault allocates). They must be
- * called from a thread that belongs to a process.
+ * All helpers may block (a demand-zero fault allocates). From a thread
+ * without a process every user address is -EFAULT.
  */
 
 #ifndef KERNEL_UACCESS_H
@@ -21,10 +22,6 @@
 
 /* True if [addr, addr+len) lies inside the user window without overflow. */
 bool user_range_ok(uint64_t addr, size_t len);
-
-/* True if every page of the range is inside a region of the current
- * process with all of `prot` (VM_PROT_READ / VM_PROT_WRITE). */
-bool user_range_mapped(uint64_t addr, size_t len, vm_prot_t prot);
 
 /* Return 0 or -EFAULT. len 0 is always fine. */
 int copy_from_user(void *dst, uint64_t user_src, size_t len);

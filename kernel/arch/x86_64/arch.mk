@@ -3,6 +3,7 @@
 KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/entry.S \
 	kernel/arch/x86_64/isr.S \
+	kernel/arch/x86_64/uaccess.S \
 	kernel/arch/x86_64/start.c \
 	kernel/arch/x86_64/cpu.c \
 	kernel/arch/x86_64/fpu.c \

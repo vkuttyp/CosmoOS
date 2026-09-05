@@ -20,6 +20,8 @@ int selftest_run_all(void);
  * or sets *reason to an immortal string and returns false. */
 bool selftest_pmm(const char **reason);
 bool selftest_vmm(const char **reason);
+bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
+bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */
 bool selftest_kmalloc(const char **reason);
 
 /* Phase 3: kernel/scheduler/schedtest.c */
@@ -68,6 +70,9 @@ bool selftest_elf(const char **reason);
 bool selftest_process_reject(const char **reason);
 bool selftest_process_selftest(const char **reason);
 bool selftest_process_fault(const char **reason);
+bool selftest_process_efault(const char **reason);    /* -EFAULT through the fixup path, never a kill */
+bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
+bool selftest_process_oom(const char **reason);       /* injected demand-page failures */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
 bool selftest_tty_ldisc(const char **reason);       /* kernel/tty/ttytest.c */

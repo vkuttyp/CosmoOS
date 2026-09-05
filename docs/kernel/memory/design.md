@@ -345,3 +345,162 @@ from the cache's `object_size` or the page order. All kmalloc results are
 | slab double free | panic with object address |
 | kfree of non-heap pointer | panic |
 | kmalloc size > 4 MiB | NULL |
+
+## 6. User memory: fixups, regions, shootdown (audit milestone 5)
+
+Milestone 5 of the post-roadmap plan (`docs/audit/2026-09-post-roadmap-audit.md`
+§19; findings #11, #18, #19 and the region part of #30). Before it, four
+assumptions were load-bearing and unwritten: a process has one thread
+(so check-then-copy user access cannot race an unmap), a user region is
+only ever unmapped or re-protected whole, `PROT_NONE` means readable, and
+the kernel-half PML4 never grows. This section makes each one either
+true by construction or unnecessary.
+
+### 6.1 Exception fixups
+
+`copy_from_user`, `copy_to_user` and `strncpy_from_user` no longer walk
+the region list before touching user memory. They check the address
+range (`user_range_ok`: inside `[USER_LO, USER_HI)`, no overflow) and
+then copy through an architecture primitive whose faulting instructions
+are listed in an **exception table**:
+
+```c
+struct ex_entry { int32_t insn; int32_t fixup; };   /* offsets from the entry itself */
+```
+
+The entries live in `.ex_table` (`KEEP`, between `.rodata` and
+`.ksymtab`, bounded by `__ex_table_start/end`). The copy primitive is
+`arch_copy_user_raw(dst, src, n)`: it returns the number of bytes **not**
+copied, 0 on success. On x86-64 it is `rep movsb` with one table entry:
+the fixup returns the remaining count from `rcx`. On AArch64 it is an
+8-byte loop and a byte tail with one entry per load and store; the fixup
+computes the remainder from the destination cursor. Both run inside the
+`arch_user_access_begin/end` window (STAC/CLAC, PAN).
+
+`vm_fault_handler` gains one rule. A **kernel-mode** fault at a user
+address is first offered the demand-zero path as before (a lazily
+mapped ANON region the copy is the first to touch). If that path does
+not apply (no process, no region, a protection violation, `PROT_NONE`)
+**or it fails for lack of memory**, the handler looks the faulting PC up
+in the exception table; a hit rewrites the frame's PC to the fixup and
+returns, and the copy reports `-EFAULT`. A miss is a kernel bug and
+panics as before. So a sibling thread's `munmap` between the check and
+the copy, a `PROT_NONE` page, a read-only destination, or an exhausted
+allocator all become `-EFAULT` from the system call, never a panic and
+never a process kill (finding #11, #19).
+
+Two hardening rules ride along. A **user-mode** fault at a kernel
+address goes straight to the fatal hook: it used to select
+`kernel_space` and could populate a lazily mapped kernel region on an
+unprivileged process's behalf (audit 5.2). And `strncpy_from_user`
+copies page-bounded pieces with the raw primitive and scans for the NUL,
+so a string that ends before an unmapped page is accepted and one that
+runs into it is `-EFAULT`, as before, without the region walk.
+
+What the fixup does not cover: direct dereferences of user pointers
+outside `uaccess.c` (there are none, invariant P14), and faults at kernel
+addresses (no entry ever names one; a kernel-address fault with a
+fixup-table PC still panics).
+
+### 6.2 `PROT_NONE`
+
+A region may now have `prot == VM_PROT_NONE`, at creation (`mmap` with
+`PROT_NONE`: a reservation) or by `mprotect`. A `PROT_NONE` page keeps
+its frame: the leaf entry is rewritten with the hardware valid bit clear
+and a software bit set (x86-64 `PTE_SW_NONE`, bit 9; AArch64
+`DESC_SW_NONE`, bit 55) while the frame address stays. The table walker
+treats such an entry as a present leaf, so `arch_mmu_query` reports the
+frame with `VM_PROT_NONE` (plus `VM_PROT_USER`), `arch_mmu_unmap` frees
+it like any leaf, `arch_mmu_map` over it is `-EEXIST`, and
+`arch_mmu_protect` from `NONE` to anything restores the valid bit with
+the new permissions. The hardware sees an invalid entry: every access
+faults as not-present; the fault handler finds the region, sees that no
+access is allowed by `prot == NONE`, and the process dies (user mode) or
+the copy gets `-EFAULT` (kernel mode). Guard pages and `mprotect(NONE)`
+trap, as they must.
+
+### 6.3 Regions split and merge
+
+`vm_user_unmap` and `vm_user_protect` take any page-aligned range inside
+the user window. Under `space->lock`:
+
+- a region that lies wholly inside the range is unlinked (unmap) or
+  re-protected (protect);
+- a region that straddles a range end is **split** at that end: the head
+  keeps `GUARD_BELOW`, the tail keeps `GUARD_ABOVE`, both keep kind,
+  cache, name and `POPULATED`. At most two splits happen per call (the
+  first region's head and the last region's tail), so the two spare
+  region structs are allocated before the lock is taken and freed if
+  unused;
+- after protect (and after every `vm_user_map_anon`), a region is
+  **merged** with a neighbour that is adjacent, has the same kind, prot,
+  cache, flags and name pointer, and has no guard page between them. The
+  brk heap therefore stays one region as it grows.
+
+The frames of an unmapped range are released after the lock is dropped,
+by address range (`user_range_teardown(space, va, len)`: query the frame
+of each page, unmap the chunk, shoot down, free), with the regions
+already unlinked or shrunk. A fault in the range during that window
+finds no region and is fatal or `-EFAULT`; it cannot repopulate a page
+that is about to be freed (audit 5.2 MEDIUM, closed).
+
+Semantics by caller:
+
+| Caller | Range rule |
+|---|---|
+| native `munmap` | strict: every page of the range must be mapped, else `-EINVAL` and nothing changes |
+| Linux `munmap`, `brk` shrink, Linux `MAP_FIXED` | lenient: unmapped pages in the range are skipped; 0 |
+| `mprotect` | every page must be mapped, else `-ENOMEM` (Linux) and nothing changes |
+| native `MAP_FIXED` | still `-EEXIST` over an existing mapping (the native ABI does not replace) |
+| Linux `MAP_FIXED` | replaces: lenient unmap of the range, then map |
+
+`brk` shrink checks the unmap result (it cannot fail on a well-formed
+heap; a failure leaves the break unchanged) and growth merges into the
+existing heap region, so a shrink followed by a growth no longer fails
+with `-EEXIST` for the life of the process (finding #30, region part).
+
+### 6.4 Shootdown by the CPUs that run the space
+
+`struct vm_space` gains `active_cpus`, the set of CPUs whose translation
+root is this space right now. `arch_thread_switch_prepare` maintains it
+through `vm_space_switch(prev, next)`: set the CPU's bit in `next`
+(an atomic OR, a full barrier), write CR3 / TTBR0, then clear the bit
+in `prev`. Without PCID or ASIDs a CPU that leaves a space holds none of
+its translations, so the bit can be cleared at once.
+
+`arch_mmu_shootdown_cpus(ctx, va, len, cpus)` invalidates on exactly the
+CPUs in `cpus`; `arch_mmu_shootdown` remains the all-online form for
+the kernel space. The VMM calls the mask form for user spaces after every
+PTE change that can leave a stale translation (unmap, protect), reading
+`active_cpus` after a full fence that orders the PTE write before the
+mask read. A CPU switching into the space either has its bit visible to
+the initiator (and is sent the IPI) or writes CR3 after the PTE change
+(and loads the fresh table). On x86-64 the IPIs are `ipi_send` per target
+and the acknowledgement count is the target count; on AArch64 the
+hardware broadcast covers every CPU regardless, and the statistics count
+the same targets so the two architectures report alike.
+
+The consequence for process exit: `vm_space_destroy` runs on the reaper
+with no CPU running the space, so its shootdowns are local invalidates
+and the exit of a process no longer interrupts every other CPU once per
+32-page chunk (audit 6.2).
+
+### 6.5 Kernel-half tables are fixed before the first user space
+
+`vmm_init` calls `arch_mmu_prepopulate(&kernel_space.mmu, KERNEL_ARENA_LO,
+KERNEL_ARENA_HI - KERNEL_ARENA_LO)`, which creates the 64 PDPTs of the
+arena's PML4 slots (256 KiB). The direct map and the image slots exist
+from the mapping itself. From then on every user root copies a complete
+kernel half. In debug builds `descend` panics if it would create a
+kernel-half PML4 entry after the first user context exists
+(`arch_mmu_context_init_user` sets the flag): invariant P9 is checked,
+not asserted by comment (finding #18). AArch64 is unaffected: the kernel
+half lives in TTBR1 and is shared by construction.
+
+### 6.6 What stays as it was
+
+Populated mappings (ELF segments) still allocate under `space->lock`
+with interrupts off; a region tree, per-CPU frame caches and ASIDs are
+scalability work (audit 5.4) outside this milestone. The native ABI does
+not gain `mprotect` or `brk`; both are Linux-personality calls, and the
+native `munmap` keeps its strict contract.

@@ -84,9 +84,19 @@ static paddr_t alloc_table(void)
     return page_to_phys(page);
 }
 
+/* A PROT_NONE page: the frame stays, the hardware sees a not-present
+ * entry, this software bit (ignored by the CPU when P is clear) tells the
+ * walker it is a leaf (docs/kernel/memory/design.md §6.2). */
+#define PTE_SW_NONE (1ULL << 9)
+
+static inline bool pte_sw_present(pte_t e)
+{
+    return (e & (PTE_P | PTE_SW_NONE)) != 0;
+}
+
 static pte_t leaf_flags(vm_prot_t prot, vm_cache_t cache, unsigned flags, bool large)
 {
-    pte_t f = PTE_P;
+    pte_t f = (prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC)) ? PTE_P : PTE_SW_NONE;
     if (prot & VM_PROT_WRITE)
         f |= PTE_RW;
     if (!(prot & VM_PROT_EXEC))
@@ -130,7 +140,7 @@ static void walk(const struct arch_mmu_context *ctx, vaddr_t va, struct walk *w)
         e = &t[idx];
         w->entry = e;
         w->level = level;
-        w->present = (*e & PTE_P) != 0;
+        w->present = level == LEVEL_PT ? pte_sw_present(*e) : (*e & PTE_P) != 0;
         if (!w->present)
             return;
         if (level == LEVEL_PT || (*e & PTE_PS)) {
@@ -144,6 +154,8 @@ static void walk(const struct arch_mmu_context *ctx, vaddr_t va, struct walk *w)
  * at that level, or NULL with *rc set on conflict/OOM. Intermediate
  * entries for user mappings carry U/S (the leaf decides the rest);
  * kernel intermediates never do. */
+static bool g_user_contexts_exist;   /* set by the first arch_mmu_context_init_user */
+
 static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_level, bool user, int *rc)
 {
     pte_t *t = table_at(ctx->root);
@@ -151,6 +163,11 @@ static pte_t *descend(struct arch_mmu_context *ctx, vaddr_t va, unsigned target_
 
     for (unsigned level = LEVEL_PML4; level > target_level; level--) {
         if ((*e & PTE_P) == 0) {
+            /* Invariant P9: a kernel-half PML4 entry created after a user
+             * root copied the kernel half would be missing from that
+             * root. vmm_init pre-populates the arena's slots. */
+            if (level == LEVEL_PML4 && !user && g_user_contexts_exist && va >= arch_mmu_kernel_base())
+                panic("mmu: kernel-half PML4 entry for %p created after the first user space (P9)", (void *)va);
             paddr_t child = alloc_table();
             if (child == 0) {
                 *rc = -ENOMEM;
@@ -193,6 +210,18 @@ int arch_mmu_context_init_user(struct arch_mmu_context *ctx, const struct arch_m
     const pte_t *src = table_at(kernel->root);
     for (unsigned i = PT_ENTRIES / 2; i < PT_ENTRIES; i++)
         dst[i] = src[i];
+    g_user_contexts_exist = true;
+    return 0;
+}
+
+int arch_mmu_prepopulate(struct arch_mmu_context *ctx, vaddr_t va, size_t len)
+{
+    vaddr_t end = va + len;
+    for (vaddr_t v = va & ~(level_size[LEVEL_PML4] - 1); v < end; v += level_size[LEVEL_PML4]) {
+        int rc = 0;
+        if (descend(ctx, v, LEVEL_PDPT, false, &rc) == NULL)
+            return rc;
+    }
     return 0;
 }
 
@@ -254,8 +283,13 @@ void arch_mmu_shootdown_ipi_handler(void)
 
 void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 {
-    cpumask_t online = cpu_online_mask();
-    unsigned targets = (unsigned)__builtin_popcountll(online) - 1;
+    arch_mmu_shootdown_cpus(ctx, va, len, CPUMASK_ALL);
+}
+
+void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, size_t len, cpumask_t cpus)
+{
+    cpumask_t others = cpus & cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id());
+    unsigned targets = (unsigned)__builtin_popcountll(others);
 
     if (targets == 0) {
         arch_mmu_invalidate(ctx, va, len);
@@ -273,7 +307,9 @@ void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t l
     __atomic_store_n(&g_shootdown_acks, 0u, __ATOMIC_RELEASE);
     g_shootdown_stats[arch_cpu_id()].initiated++;
 
-    ipi_broadcast_others(IPI_TLB_FLUSH);
+    for (unsigned c = 0; c < CONFIG_MAX_CPUS; c++)
+        if (others & CPUMASK_OF(c))
+            ipi_send(c, IPI_TLB_FLUSH);
     arch_mmu_invalidate(ctx, va, len);
 
     uint64_t deadline = clock_now_ns() + 1000000000ULL;
@@ -322,8 +358,8 @@ int arch_mmu_map(struct arch_mmu_context *ctx, vaddr_t va, paddr_t pa, size_t le
         pte_t *e = descend(ctx, va, level, (flags & ARCH_MMU_MAP_USER) != 0, &rc);
         if (e == NULL)
             return rc;
-        if (*e & PTE_P)
-            return -EEXIST;
+        if (pte_sw_present(*e))
+            return -EEXIST;   /* a PROT_NONE page is occupied too */
 
         *e = (pa & PTE_ADDR_MASK) | leaf_flags(prot, cache, flags, level != LEVEL_PT);
 
@@ -379,7 +415,7 @@ int arch_mmu_unmap(struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 
 int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_prot_t prot)
 {
-    if (!is_page_aligned(va) || !is_page_aligned(len) || prot == VM_PROT_NONE)
+    if (!is_page_aligned(va) || !is_page_aligned(len))
         return -EINVAL;
 
     vaddr_t end = va + len;
@@ -404,7 +440,7 @@ int arch_mmu_protect(struct arch_mmu_context *ctx, vaddr_t va, size_t len, vm_pr
             continue;
         }
         pte_t keep = *w.entry & (PTE_ADDR_MASK | PTE_PS | PTE_G | PTE_PCD | PTE_PWT | PTE_US | PTE_A | PTE_D);
-        pte_t f = PTE_P;
+        pte_t f = (prot & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC)) ? PTE_P : PTE_SW_NONE;
         if (prot & VM_PROT_WRITE)
             f |= PTE_RW;
         if (!(prot & VM_PROT_EXEC))
@@ -431,11 +467,14 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
     if (pa)
         *pa = (e & PTE_ADDR_MASK & ~(sz - 1)) | (va & (sz - 1));
     if (prot) {
-        vm_prot_t p = VM_PROT_READ;
-        if (e & PTE_RW)
-            p |= VM_PROT_WRITE;
-        if ((e & PTE_NX) == 0)
-            p |= VM_PROT_EXEC;
+        vm_prot_t p = VM_PROT_NONE;
+        if (e & PTE_P) {
+            p = VM_PROT_READ;
+            if (e & PTE_RW)
+                p |= VM_PROT_WRITE;
+            if ((e & PTE_NX) == 0)
+                p |= VM_PROT_EXEC;
+        }
         if (e & PTE_US)
             p |= VM_PROT_USER;
         *prot = p;

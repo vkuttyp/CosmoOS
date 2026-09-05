@@ -26,4 +26,15 @@ void arch_user_access_end(void);
 struct arch_trap_frame;
 bool arch_trap_frame_is_user(const struct arch_trap_frame *frame);
 
+/* Copy n bytes between kernel memory and user memory (either direction:
+ * the caller knows which side is which) with every access listed in the
+ * exception table. Returns the number of bytes NOT copied: 0 on success,
+ * else the copy stopped at the first faulting page and the fault handler
+ * resumed here. Call inside arch_user_access_begin/end. */
+size_t arch_copy_user_raw(void *dst, const void *src, size_t n);
+
+/* Kernel-mode fault at a fixable PC: move the frame's PC to the fixup
+ * and return true; false when the PC has no table entry. */
+bool arch_trap_fixup(struct arch_trap_frame *frame);
+
 #endif /* ARCH_USER_H */
