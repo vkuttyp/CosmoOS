@@ -95,6 +95,13 @@ harness stores at each sync point.
 ### `uint8_t *ramblk_snapshot(struct blkdev *bd)`, `void ramblk_restore(struct blkdev *bd, const uint8_t *image)`
 The whole device as one kmalloc'd image, and back.
 
+### `void ramblk_set_deferred(struct blkdev *bd, unsigned limit)`
+Deferred mode: completions run on a worker thread and `submit` answers
+`-EAGAIN` above `limit` requests in flight (a virtqueue with every slot
+taken); 0 returns to synchronous completion after completing what is
+deferred. The block layer's pending queue is tested against it
+(`blk-queue`).
+
 ### `void ramblk_replay(struct blkdev *bd, const struct ramblk_log *log, unsigned count, bool torn)`
 Apply the first `count` entries; with `torn` the last write's second half
 of sectors is left out (a write of one sector is applied whole).

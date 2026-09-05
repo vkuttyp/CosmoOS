@@ -327,6 +327,21 @@ See [docs/development.md](docs/development.md).
   large read no longer pins RAM; writeback runs in page order.
   `procinfo` shows an unprivileged user its own processes and `log` is
   rate limited. Five new self-tests, 105 in total.
+- **Filesystem transaction engine (done):** milestone 7 of the audit's
+  plan (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format
+  version 2 and the transaction engine"). cosmofs format version 2:
+  extents carry their logical position, so holes cost nothing and a
+  sparse write no longer fills the disk; extent blocks chain, so the
+  264-run cap is gone; every data and directory block has a CRC32C in a
+  per-inode checksum tree, verified on read. The allocator is
+  contiguity-aware and keeps a metadata reserve, so a full disk can still
+  delete and commit. `fsync` commits the transaction; a writeback thread
+  commits on dirty and age thresholds, bounding the loss window; mount
+  falls back to the older superblock slot when the newer root's tree
+  does not load. The block layer gained `BIO_PREFLUSH`/`BIO_FUA` and a
+  pending queue, so a driver's queue-full answer never reaches a
+  filesystem; virtio-blk no longer sends unsupported flushes. Seven new
+  self-tests, 112 in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

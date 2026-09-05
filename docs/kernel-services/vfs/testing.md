@@ -5,7 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Host | `test_cosmofs` (on-disk layout sizes, inode/imap index arithmetic, extent mapping) and the CRC32C vectors in `test_crypto` | `make host-test` |
-| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
+| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since audit milestone 7 `cosmofs-holes`, `cosmofs-csum`, `cosmofs-fsync`, `cosmofs-reserve`, `cosmofs-fallback`, `cosmofs-writeback` on RAM devices and `blk-queue` for the block layer's pending queue and bio flags; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
 | Host fuzz | `fuzz_cosmofs`: mount, walk and read mutated images under ASan/UBSan (`docs/verification/`) | `make fuzz` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 
@@ -61,9 +61,12 @@ unmount while a file is open (`-EBUSY`), `rmdir` of a mountpoint
 (`-EBUSY`), unmount, unmount again (`-EINVAL`), unmount `/` (`-EBUSY`);
 the mount count and vnode count return to their starting values.
 
-The cosmofs tests skip with a log line when no `vda` exists. They
-format the scratch disk (`make test` creates a fresh 8 MiB one per run:
-2048 blocks, 2041 free after format).
+The cosmofs tests on `vda` skip with a log line when no `vda` exists.
+They format the scratch disk (`make test` creates a fresh 8 MiB one per
+run: 2048 blocks, 2041 free after format; format version 2 since
+milestone 7, so a disk formatted by an older kernel is refused with a
+message naming the version). The milestone 7 tests use RAM devices and
+run everywhere.
 
 **`pool`**: `pool_open` on `vda` (4096-byte blocks, 8 sectors each,
 `nblocks = capacity / 8`); write, flush and read back the last block;
@@ -110,6 +113,39 @@ and every directory and file to walk and read cleanly. 75 writes, 139
 prefix images per boot; the property is the commit rule in `design.md`
 made a machine check.
 
+**The transaction-engine tests** (milestone 7, `cosmofstest.c`, each on
+its own RAM device mounted at `/mnt/eng` with the writeback thread off
+unless the test is about it): **`cosmofs-holes`** writes four bytes
+200 MiB into a file on a 4 MiB device (five blocks consumed, no zero
+fill), reads zeros in the holes and the data at its offsets, fills a
+block in the middle of the hole and the first block, remounts, and
+truncates (the checksum tree of the emptied file is freed too).
+**`cosmofs-csum`** finds a file's data block by its pattern through the
+pool, flips a byte, and the read is `-EIO` while another file reads
+fine and the counter rises; a rewrite repairs it; then the block of a
+one-entry directory is flipped and the lookup is `-EIO`.
+**`cosmofs-fsync`** writes and `file_sync`s one file (the generation and
+the commit count advance by one), writes another without, discards the
+transaction at unmount: the first survives, the second does not.
+**`cosmofs-reserve`** fills a 256-block device with 4 KiB writes until
+`-ENOSPC` (at the sync that allocates), checks the free count stopped at
+the 32-block reserve, unlinks two files, commits, and writes a new file.
+**`cosmofs-fallback`** commits generations 2 and 3, corrupts generation
+3's inode-map root, and mounts: generation 2 with a warning, the file of
+generation 3 absent; a commit and remount show the pair healthy again.
+**`cosmofs-writeback`** turns the thread on with a 50 ms interval,
+writes one file, and sees the generation and the thread's commit count
+advance without any sync call; nothing further commits while nothing is
+dirty; a discarded unmount and remount still show the file.
+
+**`blk-queue`** (`kernel/block/blktest.c`): a RAM device in deferred
+mode with two slots takes eight concurrent writes through `blk_submit`
+without one `-EAGAIN`; all complete in order and six waited in the
+pending queue; a `BIO_PREFLUSH | BIO_FUA` write is recorded as flush,
+write, flush (and as write, flush with `BIO_FUA` alone); a flagged read
+and a flagged write past the end are `-EINVAL` before anything is
+submitted.
+
 **`fault-blk`** (`kernel/core/faulttest.c`): completion and submission
 errors injected under a cosmofs workload; every write and sync returns
 `-EIO` or succeeds, a forced unmount and a clean remount read every
@@ -151,7 +187,7 @@ QEMU_TESTDISK=/tmp/d.img make run    # keep a formatted disk between runs
   reviewed, not checked.
 - No host `mkfs`; `cosmofs_format` runs only in the kernel.
 - `-EPERM` on `mount` has no test until a non-root process exists.
-- Large files (more than 264 runs) and full disks (`-ENOSPC`) are not
-  exercised; `cache-limits` syncs its 2 MiB file every 64 pages to stay
-  under the extent cap (writeback is now in page order, so a
-  sequentially written file lays out contiguously).
+- Files with more than 4096 runs (`CFS_MAX_EXTENTS`, the implementation's
+  fragmentation bound) are not exercised; full disks are
+  (`cosmofs-reserve`). `cache-limits` still syncs its 2 MiB file every
+  64 pages, a habit from the 264-run cap that no longer exists.

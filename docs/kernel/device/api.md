@@ -181,16 +181,20 @@ Purpose: validate and hand a request to the driver. Inputs: `dev`,
 `[1, max_sectors]`, `sector + nsectors <= capacity`, `buf` DMA-able
 (`dma_map` must succeed); `BIO_FLUSH` needs `sector == nsectors == 0`.
 Outputs: 0 (the driver owns the bio until it calls `bio_complete`, and
-`done` runs exactly once), `-EINVAL`, `-EROFS` for a write to a
-read-only device, or the driver's own error (`-EAGAIN` when its queue is
-full), in which case `done` never runs. Thread context. `status` reads
-`-EAGAIN` while in flight.
+`done` runs exactly once), `-EINVAL` (also for `flags` on a read),
+`-EROFS` for a write to a read-only device, or the driver's own error
+other than `-EAGAIN`, in which case `done` never runs. A driver's
+`-EAGAIN` is absorbed: the bio waits in the device's pending list and is
+resubmitted in order as completions free slots. `flags`: `BIO_PREFLUSH`
+(flush before), `BIO_FUA` (flush after); the caller's `done` runs after
+the last piece. Thread context. `status` reads `-EAGAIN` while in
+flight.
 
 ### `void bio_complete(struct bio *bio, int status)` *(exported)*
 Driver side: record `status`, bump the device's `reads`/`writes`/
 `flushes`/`errors`, run `done`. Any context, typically an MSI handler.
 
-### `int blk_read(struct blkdev *, uint64_t sector, uint32_t nsectors, void *buf)`, `blk_write(...)`, `blk_flush(...)` *(exported)*
+### `int blk_read(struct blkdev *, uint64_t sector, uint32_t nsectors, void *buf)`, `blk_write(...)`, `blk_write_flags(..., unsigned flags)`, `blk_flush(...)` *(exported)*
 Purpose: synchronous helpers on a stack `completion`, splitting into
 `max_sectors` pieces. `-EINVAL` for zero sectors or a NULL buffer before
 anything is submitted; otherwise the first failing piece's error.
