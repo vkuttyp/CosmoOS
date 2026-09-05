@@ -38,9 +38,27 @@ and from the caller's user memory, so the user-mode check is the test.
 The block-layer half of the milestone has its own tests
 (`docs/kernel/device/testing.md`: `blk-segments`, `blk-timeout`, `nvme`).
 
+### `io-poll` (`kernel/io/polltest.c`, milestone 10)
+
+On a pipe: the read end is not ready and the write end is `WRITABLE`
+without waiting, an ignored (NULL) entry stays 0; a 20 ms timeout with
+nothing ready returns 0 after at least 15 ms; a thread that writes after
+20 ms wakes a wait without timeout (`READABLE`, at least 10 ms later);
+the bytes read, nothing ready again; the writer dropped: `READABLE |
+HANGUP` even though only `READABLE` was asked for. About 50 ms. The Linux
+`poll`/`ppoll` checks in `lxtest` cover the translation
+(`docs/compat/linux/testing.md`).
+
+### `realtime` (`kernel/io/polltest.c`)
+
+`clock_realtime_ns` is between 2020 and 2100 and advances across a 5 ms
+sleep by the same amount as `clock_now_ns` (within 1 ms).
+
 ## Gaps
 
-- No multi-threaded test (two threads of one process on one ring).
+- No multi-threaded test (two threads of one process on one ring); the
+  `io_poll` wake test uses a kernel thread, the Linux `poll` test a
+  clone.
 - No test of a kill landing inside `aio_wait`.
 - No throughput measurement; the ring is a correctness deliverable in
   this milestone.

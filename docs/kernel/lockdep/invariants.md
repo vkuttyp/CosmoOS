@@ -46,6 +46,7 @@ if it ever can, it gets one.
 | `VNODE_NESTED_CHILD` on `victim->lock` | `vfs.c` `remove_entry` | the parent is locked first; the child cannot be a parent of anything locked here |
 | `VNODE_NESTED_CHILD` on `replaced->lock` | `ramfs.c` `ramfs_rename` | both parents are locked (subclass 0 and 1); the replaced entry is a child of the second |
 | `VNODE_NESTED_PARENT2` on the second parent | `vfs.c` `vfs_rename` | under `rename_lock` the ancestor is locked first; two unrelated directories are locked in address order, which no other path contradicts (parent-then-child needs an ancestry; other renames are excluded) |
+| subclass 1 on the second futex bucket | `futex.c` `futex_requeue` (milestone 10) | the two buckets are locked in address order, and no other path takes two futex bucket locks |
 
 `ramfs_release_tree` locks no child: it runs from unmount after the
 reference scan proved exclusive access, with the root locked, and a lock

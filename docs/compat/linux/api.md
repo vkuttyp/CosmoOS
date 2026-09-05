@@ -64,11 +64,14 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
 
 ### `int linux_process_init(struct process *p, const struct elf_info *info)`
 - Purpose: allocate the personality's per-process state
-  (`struct linux_state`: `brk_start`, `brk`, `clear_child_tid`,
-  `sigmask`, `act[64]`, `altstack`, `unknown_syscalls`) and set
-  `brk_start = brk = page_align_up(info->hi)`. Also completes the
-  personality table the first time (every empty slot becomes
-  `lx_unknown`), before any Linux process can make a call.
+  (`struct linux_state`: `brk_start`, `brk`, `unknown_syscalls`; since
+  milestone 10 the signal state lives in the kernel core, `kernel/signal.h`,
+  and `clear_child_tid` on the thread), set `brk_start = brk =
+  page_align_up(info->hi)`, and map the signal trampoline page
+  (`linux_sigtramp_map`: one RX page at `LX_SIGTRAMP` = `0x7FFFFFFF1000`
+  holding `mov $15,%eax; syscall` / `mov x8,#139; svc #0`). Also
+  completes the personality table the first time (every empty slot
+  becomes `lx_unknown`), before any Linux process can make a call.
 - Called from `process_create_from_elf` after the image is loaded and
   before the stack is built. May allocate (`kzalloc`); returns `-ENOMEM`
   (creation then fails and `linux_process_release` runs on the fail
@@ -80,10 +83,13 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
   path; both guard on `p->linux != NULL`, so it never runs for a native
   process. Does not block.
 
-### `unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t random_addr, uint64_t *w, unsigned max)`
+### `unsigned linux_auxv(struct process *p, const struct elf_info *exe, const struct linux_auxv_args *x, uint64_t *w, unsigned max)`
 - Purpose: write the Linux auxiliary vector into the word array
   `build_initial_stack` is assembling; returns the number of words
-  written (at most `max`, 28 today). Order and values:
+  written (at most `max`, 36 today). `x` carries the stack addresses of
+  the random bytes, the `AT_EXECFN` string (the spawn path) and the
+  `AT_PLATFORM` string (`x86_64`/`aarch64`), and the interpreter's bias.
+  Order and values:
 
 | Tag | Value |
 |---|---|
@@ -91,12 +97,16 @@ for a Linux process, `linux_process_init` allocates `p->linux`.
 | `AT_PHENT` (4) | `info->phent` (56) |
 | `AT_PHNUM` (5) | `info->phnum` |
 | `AT_PAGESZ` (6) | 4096 |
-| `AT_ENTRY` (9) | `info->entry` |
+| `AT_BASE` (7) | the interpreter's load bias, 0 without one (milestone 10) |
+| `AT_ENTRY` (9) | `exe->entry` (the executable's, biased for a PIE; the process starts at the interpreter's) |
 | `AT_RANDOM` (25) | `random_addr`: 16 bytes from `random_get_bytes`, 16-byte aligned, placed below the strings |
+| `AT_EXECFN` (31) | the path the executable was spawned by (milestone 10) |
+| `AT_PLATFORM` (15) | `"x86_64"` or `"aarch64"` (milestone 10) |
 | `AT_UID` (11), `AT_EUID` (12) | `p->cred.uid` |
 | `AT_GID` (13), `AT_EGID` (14) | `p->cred.gid` |
 | `AT_SECURE` (23) | 0 |
 | `AT_HWCAP` (16) | 0 |
+| `AT_HWCAP2` (26) | 0 |
 | `AT_CLKTCK` (17) | 100 |
 | `AT_NULL` (0) | 0 |
 
@@ -106,8 +116,16 @@ vector points at them. The initial frame spans two eagerly populated
 stack pages (`INITIAL_STACK_PAGES` 2) and up to 300 argument and
 environment strings (`INITIAL_STRINGS_MAX`).
 
+### `int linux_signal_frame(struct arch_user_regs *, const struct sigaction_k *, const struct signal_info *, uint64_t blocked_before)`, `void linux_thread_exit(struct thread *)` (`compat/linux/signal.c`, milestone 10)
+The personality's two hooks: the `rt_sigframe` builder the signal core
+calls (`design.md`, "Signals": the x86-64 and AArch64 layouts, the
+alternate stack, `-EFAULT` for an unwritable stack or an x86-64 handler
+without `SA_RESTORER`), and the exit hook that zeroes `clear_child_tid`
+and wakes one futex waiter on it.
+
 ### `extern const struct personality personality_linux`
-`{ .name = "linux", .table = g_table, .count = LX_NR_MAX (512) }`.
+`{ .name = "linux", .table = g_table, .count = LX_NR_MAX (512),
+.signal_frame = linux_signal_frame, .thread_exit = linux_thread_exit }`.
 `g_table` is `linux_table` with `lx_unknown` in every empty slot; a
 number at or above 512 never reaches the table (the dispatcher's own
 bounds check returns `-ENOSYS` and logs `unknown number ... (linux)`).
@@ -115,8 +133,15 @@ bounds check returns `-ENOSYS` and logs `unknown number ... (linux)`).
 ## Linux system calls (`compat/linux/syscalls.c`)
 
 **ABI stability: Linux's.** Numbers are the x86-64 table
-(`compat/linux/linux_abi.h`, `LX_*`). Arguments arrive in `rdi rsi rdx
-r10 r8 r9`, the result in `rax`, `-errno` negative; errno values are the
+(`compat/linux/nr_x86_64.h`) or the AArch64 generic table
+(`compat/linux/nr_aarch64.h`), selected by `linux_abi.h` per
+architecture (`LX_*`; the calls that exist only on x86-64 — `open`,
+`stat`, `lstat`, `poll`, `access`, `pipe`, `select`, `dup2`, `pause`,
+`fork`, `vfork`, `rename`, `mkdir`, `rmdir`, `creat`, `unlink`,
+`readlink`, `getpgrp`, `arch_prctl`, `time` — have no AArch64 number and
+their table rows are `#ifdef`-guarded). Arguments arrive in `rdi rsi rdx
+r10 r8 r9` (x86-64) or `x0..x5` with the number in `x8` (AArch64), the
+result in `rax`/`x0`, `-errno` negative; errno values are the
 native ones, which coincide with Linux's for every value the kernel
 produces. Every call runs on the calling thread's kernel stack with
 interrupts enabled and may block; every user pointer passes through
@@ -166,7 +191,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | Nr | Call | Translation | Deviations |
 |---|---|---|---|
 | 12 | `brk` | `brk(0)` returns the break; growing maps `[page_up(brk), page_up(addr))` anonymous RW (`vm_user_map_anon`, region name `brk`); shrinking unmaps `[page_up(addr), page_up(brk))`; the break is stored exactly as requested | on any failure (below `brk_start`, more than 1 GiB above it, range taken, out of memory) the **unchanged** break is returned, as Linux does |
-| 9 | `mmap` | `MAP_ANONYMOUS` required; `lx_prot`; `MAP_FIXED` → `vm_user_unmap` then map at `addr` (must be page aligned and in range, else `-EINVAL`); otherwise `vm_user_find_free` from a page-aligned hint, falling back to `USER_MMAP_BASE` | file mappings `-ENODEV`; `PROT_WRITE|PROT_EXEC` `-EINVAL` (W^X); `PROT_NONE` maps read-only; `MAP_SHARED` accepted (mappings are private); `MAP_NORESERVE`, `MAP_STACK`, `MAP_POPULATE` ignored; `len` 0 or larger than the user window `-EINVAL`; no free range `-ENOMEM` |
+| 9 | `mmap` | `lx_prot`; `MAP_FIXED` → `vm_user_unmap` then map at `addr` (must be page aligned and in range, else `-EINVAL`); otherwise `vm_user_find_free` from a page-aligned hint, falling back to `USER_MMAP_BASE`. Milestone 10, a file (`MAP_PRIVATE`, or `MAP_SHARED` without `PROT_WRITE`): the fd needs READ (`-EBADF`), the offset must be page aligned (`-EINVAL`); an anonymous RW region is filled from the file through a bounce page (`file_pread` + `copy_to_user`, bytes past the end zero) and then set to the requested protection | `MAP_SHARED|PROT_WRITE` on a file `-EOPNOTSUPP` (a snapshot, not a shared page cache); `PROT_WRITE|PROT_EXEC` `-EINVAL` (W^X); `MAP_NORESERVE`, `MAP_STACK`, `MAP_POPULATE` ignored; `len` 0 or larger than the user window `-EINVAL`; no free range `-ENOMEM` |
 | 11 | `munmap` | `vm_user_unmap` of the page-rounded range | `-EINVAL` unless `addr` is page aligned, `len` non-zero and the range is a user range |
 | 10 | `mprotect` | `vm_user_protect` | same W^X and alignment rules; `vm_user_protect` requires the range to be exactly one region (`-EINVAL` otherwise: a recorded VMM limit) |
 | 28 | `madvise` | 0 | advice ignored |
@@ -175,36 +200,46 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 
 | Nr | Call | Translation | Deviations |
 |---|---|---|---|
-| 60, 231 | `exit`, `exit_group` | `process_exit(status & 0xff)` | identical (one thread per process) |
-| 39, 186 | `getpid`, `gettid` | `pid` | `gettid == getpid` |
+| 60 | `exit` | `process_thread_exit(status & 0xff)`: the calling thread; the process ends with that status when it was the last live thread | |
+| 231 | `exit_group` | `process_exit(status & 0xff)`: every thread | |
+| 39 | `getpid` | `pid` | |
+| 186 | `gettid` | `thread->lx_tid`: the pid for the main thread, `0x10000 + kernel tid` for a clone | |
+| 56 | `clone` (milestone 10) | the thread set only: `CLONE_VM\|THREAD\|SIGHAND` required, plus any of `FS`, `FILES`, `SYSVSEM`, `SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`, `CHILD_SETTID`, `DETACHED`, `UNTRACED`; `process_add_thread` with the caller's frame (result 0, `rsp`/`sp` = `stack` when non-zero, thread pointer = `tls` under `SETTLS` else the caller's), the tid words written before the child runs, `clear_child_tid` recorded; returns the child's tid. Argument order: x86-64 `flags, stack, ptid, ctid, tls`; AArch64 `flags, stack, ptid, tls, ctid` | without `CLONE_THREAD` (a fork) `-ENOSYS`; `THREAD` without `SIGHAND`/`VM`, or a flag outside the set, `-EINVAL`; an unwritable tid word `-EFAULT` (the child is abandoned); more than 256 live threads `-EAGAIN`; the child's FPU state is the reset state |
+| 203, 204 | `sched_setaffinity`, `sched_getaffinity` | set: accepted and ignored (`-EINVAL` below 8 bytes or an unreadable mask); get: the online CPU mask in 8 bytes, returns 8 | `pid` 0, the caller, one of its threads, or any live process; unknown `-ESRCH` |
 | 110 | `getppid` | `parent_pid` | |
 | 102, 107 | `getuid`, `geteuid` | `cred.uid` | |
 | 104, 108 | `getgid`, `getegid` | `cred.gid` | |
 | 111, 112 | `getpgrp`, `setsid` | return `pid` | no process groups or sessions |
 | 109 | `setpgid` | 0 | |
-| 218 | `set_tid_address` | stores `clear_child_tid`, returns `pid` | never written (no thread exit yet) |
+| 218 | `set_tid_address` | stores `thread->clear_child_tid`, returns the thread's tid | zeroed and `futex_wake`d (one waiter) when the thread exits (`linux_thread_exit`) |
 | 273 | `set_robust_list` | 0 | |
 | 158 | `arch_prctl` | `ARCH_SET_FS` (0x1002): `arch_set_tls_base(addr)`; `ARCH_GET_FS` (0x1003): copies `thread->tls_base` out | `SET_FS` with a non-zero address that is not 8 readable user bytes `-EPERM`; `ARCH_SET_GS`/`ARCH_GET_GS` and anything else `-EINVAL` |
 | 61 | `wait4` | `process_wait_child(pid, WNOHANG ? PROCESS_WAIT_NOHANG : 0)`; status through `lx_wait_status`; `rusage` zeroed (144 bytes) when given | `pid == 0` or `pid < -1` `-ECHILD` (no groups); `-ECHILD` with no children |
-| 62 | `kill` | `sig == 0`: existence probe (`process_lookup`); else `process_kill(target, sig < 32 ? sig : SIGKILL)` | `pid <= 0` `-ESRCH`; `sig` outside `1..63` `-EINVAL`; another uid's process `-EPERM` unless uid 0; the target terminates with native status `128 + sig` |
-| 234 | `tgkill` | `kill(tid, sig)` (`tgid` ignored) | |
-| 13 | `rt_sigaction` | stores and returns 32-byte `struct k_sigaction` records (`handler flags restorer mask`) in `linux_state.act[sig]` | `sigsetsize` must be 8; `sig` in `1..63`; a non-NULL `act` for `SIGKILL`/`SIGSTOP` `-EINVAL`; **nothing is ever delivered** |
-| 14 | `rt_sigprocmask` | `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` on `linux_state.sigmask`; old mask out | `sigsetsize` must be 8; the mask influences nothing |
-| 131 | `sigaltstack` | stores and returns `linux_state.altstack` | never used |
+| 62 | `kill` | `sig == 0`: existence and permission probe; else `signal_send(target, sig, SI_USER)` after `cred_may_signal` | `pid <= 0` `-ESRCH` (no groups); `sig` outside `1..63` `-EINVAL`; another uid's process `-EPERM` unless uid 0; a default-terminate signal ends the target with native status `128 + sig`, a handled one runs the handler, an ignored one is dropped |
+| 234 | `tgkill` | the thread of process `tgid` with that tid (`process_find_thread`): `signal_send_thread(SI_TKILL)` | `tgid`/`tid` ≤ 0 `-EINVAL`; unknown `-ESRCH`; `-EPERM` as `kill` |
+| 200 | `tkill` | the caller's own thread by tid, or another process's main thread by pid | as `tgkill` |
+| 13 | `rt_sigaction` | `signal_set_action`/`signal_get_action` on the shared 64-entry `struct sigaction_k` table (`handler flags restorer mask`) | `sigsetsize` must be 8; `sig` in `1..63`; a non-NULL `act` for `SIGKILL`/`SIGSTOP` `-EINVAL`; delivery: `design.md` "Signals" |
+| 14 | `rt_sigprocmask` | `SIG_BLOCK`/`SIG_UNBLOCK`/`SIG_SETMASK` on the calling thread's mask (`signal_set_blocked`); old mask out | `sigsetsize` must be 8; `SIGKILL`/`SIGSTOP` never block |
+| 127 | `rt_sigpending` | the thread's and the process's pending sets | `sigsetsize` must be 8 |
+| 130 | `rt_sigsuspend` | mask swapped in, `signal_wait`, the old mask recorded for the return (`signal_set_blocked_saved`) | always `-EINTR` (after the handler ran) |
+| 34 | `pause` | `signal_wait` | `-EINTR` |
+| 15 | `rt_sigreturn` | the frame read back from the stack, the FXSAVE image restored, `signal_return` | a frame that cannot be read: `SIGSEGV` on the thread |
+| 131 | `sigaltstack` | the thread's `altstack`; `ss_flags` out reports `SS_ONSTACK`/`SS_DISABLE`/0 for the current `sp` | changing it while on it `-EPERM`; flags other than 0/`SS_DISABLE`/`SS_ONSTACK` (`SS_AUTODISARM` masked) `-EINVAL`; `ss_size` below 2048 `-ENOMEM`; an unreadable range `-EFAULT` |
+| 7, 271 | `poll`, `ppoll` (milestone 10) | `struct pollfd` ↔ `io_poll` (`kernel/io/poll.c`): `POLLIN`/`POLLRDNORM`/`POLLPRI` ↔ `READABLE`, `POLLOUT`/`POLLWRNORM` ↔ `WRITABLE`, `HANGUP` → `POLLHUP` (and `POLLRDHUP` when asked), `ERROR` → `POLLERR`; a negative fd is ignored; a closed or non-I/O fd is `POLLNVAL` and the call returns at once; `poll`'s timeout in ms (negative: forever), `ppoll`'s `timespec` (NULL: forever) and its mask swapped in for the wait as `rt_sigsuspend` | more than 1024 entries `-EINVAL`; a kill or a deliverable signal `-EINTR` |
 | 24 | `sched_yield` | `sched_yield` | |
 
 ### Time, random, system
 
 | Nr | Call | Translation | Deviations |
 |---|---|---|---|
-| 228 | `clock_gettime` | `clock_now_ns` as `timespec` for clock ids `0..7` | **every clock is the monotonic clock** (no wall clock yet); id above 7 `-EINVAL` |
-| 96 | `gettimeofday` | monotonic time as `timeval` | timezone argument ignored |
-| 201 | `time` | monotonic seconds | |
-| 35 | `nanosleep` | `thread_sleep_ns_killable` | `tv_sec` above one year or a bad `tv_nsec` `-EINVAL`; on `-EINTR` the remainder is written as 0 |
-| 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the monotonic clock | clock ids `0..7` |
+| 228 | `clock_gettime` | `CLOCK_REALTIME` (0) and `REALTIME_COARSE` (5): `clock_realtime_ns` (the RTC at boot plus the monotonic clock, milestone 10); every other id `0..7`: `clock_now_ns` | id above 7 `-EINVAL` |
+| 96 | `gettimeofday` | wall-clock time as `timeval` | timezone argument ignored |
+| 201 | `time` | wall-clock seconds | |
+| 35 | `nanosleep` | `thread_sleep_ns_killable` | a bad `tv_nsec` or negative fields `-EINVAL`; values beyond 2^62 ns clamp there ("never"); on `-EINTR` the remainder is written as 0 |
+| 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the named clock | clock ids `0..7` |
 | 318 | `getrandom` | `random_get_bytes` in 256-byte pieces | flags ignored; at most 256 KiB per call |
 | 63 | `uname` | `sysname "Linux"`, `nodename "cosmo"`, `release "6.0.0-cosmo"`, `version "<KERNEL_NAME> <KERNEL_VERSION> <COSMO_BUILD_ID>"`, `machine "x86_64"`, `domainname "(none)"` (six 65-byte fields, 390 bytes) | a presentation decision so libcs' version checks pass |
-| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout)` (a `timespec` timeout of zero becomes 1 ns so it still times out); `FUTEX_WAKE` (1) → `futex_wake(space, uaddr, val)`; `FUTEX_PRIVATE_FLAG` (128) and `FUTEX_CLOCK_REALTIME` (256) masked off | other operations `-ENOSYS`; `uaddr` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`) |
+| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(uaddr, uaddr2, val, nr_requeue, cmp, val3)` (`REQUEUE` returns the woken, `CMP_REQUEUE` woken + requeued); `FUTEX_PRIVATE_FLAG` (128) masked off | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
 
 ### Sockets
 
@@ -227,15 +262,14 @@ as Linux does.
 | 54 | `setsockopt` | 0 for `SOL_SOCKET` (1), `-ENOPROTOOPT` otherwise | nothing stored |
 | 55 | `getsockopt` | `-ENOPROTOOPT` | |
 
-### Explicit `-ENOSYS` (13 entries)
+### Explicit `-ENOSYS`
 
-`clone` 56, `fork` 57, `vfork` 58, `execve` 59, `readlink` 89,
-`getrlimit` 97, `sysinfo` 99, `setrlimit` 160, `sched_getaffinity` 204,
-`readlinkat` 267, `prlimit64` 302, `rseq` 334, `clone3` 435. These are
-`lx_nosys`, not `lx_unknown`: they are known and refused, so they are
-not counted as unknown. `poll` 7, `select` 23, `rt_sigreturn` 15,
-`mremap` 25, `msync` 26, `pause` 34, `sendmsg` 46, `recvmsg` 47 have
-numbers in `linux_abi.h` but no entry: they go through `lx_unknown`.
+`fork` 57, `vfork` 58, `execve` 59, `readlink` 89, `sysinfo` 99,
+`readlinkat` 267, `rseq` 334, `clone3` 435 (x86-64 numbers; the AArch64
+rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
+known and refused, so they are not counted as unknown. `select` 23,
+`mremap` 25, `msync` 26, `sendmsg` 46, `recvmsg` 47 have numbers in the
+tables but no entry: they go through `lx_unknown`.
 
 ## Conversions (`compat/linux/convert.h`, `convert.c`)
 
@@ -284,6 +318,17 @@ list. Waiters live on the waiting thread's stack.
   `-EINVAL` for a misaligned address. Any thread context; does not
   block; takes the bucket lock with interrupts off.
 
+### `int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue, bool cmp, uint32_t cmpval)` (milestone 10)
+- Wakes up to `nr_wake` waiters on `uaddr1` and moves up to
+  `nr_requeue` more onto `uaddr2`'s list (their `uaddr` and bucket
+  pointer rewritten under both buckets' locks, lower address first, the
+  second `spin_lock_nested(1)`), where a later `futex_wake(uaddr2)`
+  finds them. With `cmp` the word at `uaddr1` must read `cmpval` first
+  (`-EAGAIN`; the read is outside the lock, like `futex_wait`'s).
+  Returns woken + requeued; `-EINVAL`, `-EFAULT`. A woken waiter
+  dequeues itself from whichever bucket it is on (it re-reads its bucket
+  pointer under that bucket's lock until they agree). Thread context.
+
 ## Thread pointer (`kernel/include/arch/user.h`, `kernel/arch/x86_64/user.c`, `context.c`)
 
 **ABI stability: internal (arch interface).**
@@ -294,14 +339,21 @@ Stores `base` in the current thread's `tls_base` and writes
 the call returns. `arch_thread_switch_prepare(next)` writes
 `MSR_FS_BASE` from `next->tls_base` whenever `next->proc != NULL`, so
 the value follows the thread across every switch; kernel threads never
-use `%fs` and skip the write. `%gs` stays the kernel's (`swapgs`).
+use `%fs` and skip the write. `%gs` stays the kernel's (`swapgs`). On
+AArch64 the register is `tpidr_el0`, which user code writes itself (no
+`arch_prctl`); the switch hook saves the outgoing thread's value and
+loads the incoming one's (milestone 10). A clone's thread pointer is
+`CLONE_SETTLS`'s value, loaded by `arch_user_enter_regs`.
 
 ## Files and make targets
 
 | Path | Content |
 |---|---|
-| `compat/linux/linux_abi.h` | the Linux ABI written out: numbers, flags, `AT_*`, structures; shared with `tests/linux/lxabi.h` |
+| `compat/linux/linux_abi.h` | the Linux ABI written out: flags, `AT_*`, structures (per-architecture `struct lx_stat`, `LX_STAT_SIZE`, `LX_MACHINE`), the signal frame layouts; includes the number table for the architecture; shared with `tests/linux/lxabi.h` and the host test |
+| `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | the system-call numbers (milestone 10) |
 | `compat/linux/convert.h`, `convert.c` | the pure conversions above |
-| `compat/linux/syscalls.c` | `struct linux_state`, the hooks, every `lx_*` handler, the table, `personality_linux` |
+| `compat/linux/syscalls.c` | `struct linux_state`, the hooks, the `lx_*` handlers, the table, `personality_linux` |
+| `compat/linux/signal.c`, `linux_internal.h` | signals: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |
-| `tests/linux/linux.mk` | `make linux-tests`: `lxhello.elf`, `lxtest.elf`, and `hello_musl` when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |
+| `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` |
+| `tests/linux/linux.mk` | `make linux-tests` (both architectures): `lxhello`, `lxtest`, `lxsig`, the PIE pair `lxinterp`/`lxdyn`, and `hello_musl` on x86-64 when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |

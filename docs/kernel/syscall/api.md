@@ -33,7 +33,7 @@ kernel stack.
 | 3 | `getpid` | none | pid (> 0) | none |
 | 4 | `yield` | none | 0 | none |
 | 5 | `sleep_ns` | `uint64_t ns` | 0 after at least `ns` | `EINVAL` (> 1 hour) |
-| 6 | `clock_ns` | none | monotonic nanoseconds since boot | none |
+| 6 | `clock_ns` | `unsigned clock` (`COSMO_CLOCK_MONOTONIC` 0, `COSMO_CLOCK_REALTIME` 1; milestone 10) | monotonic nanoseconds since boot, or nanoseconds since 1970 from the RTC-seeded wall clock | `EINVAL` |
 | 7 | `mmap` | `void *hint, size_t len, int prot, int flags` | address | `EINVAL`, `ENOMEM`, `EEXIST` |
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
@@ -176,11 +176,18 @@ Details per call:
   Blocks until a matching child exits unless `COSMO_WNOHANG`; `EINTR`
   when the caller is killed while waiting.
 - **kill**: `sig` is `1..31` (`COSMO_SIGHUP` 1, `COSMO_SIGINT` 2,
-  `COSMO_SIGKILL` 9, `COSMO_SIGSEGV` 11, `COSMO_SIGTERM` 15); every
-  signal terminates the target with status `128 + sig` at its next
-  system call, return from an interrupt, or killable wait. The caller
-  must have the target's uid or uid 0. A zombie is a valid target
-  (nothing happens).
+  `COSMO_SIGKILL` 9, `COSMO_SIGSEGV` 11, `COSMO_SIGTERM` 15). Since
+  milestone 10 the call goes through the kernel's signal core
+  (`docs/kernel/process/design.md` §11) with every action at its
+  default: a signal whose default is *terminate* ends the target with
+  status `128 + sig` at its next system call, return from an interrupt,
+  or killable wait; one whose default is *ignore* (`SIGCHLD` 17,
+  `SIGURG` 23, `SIGWINCH` 28, `SIGCONT` 18, the stop signals) is
+  discarded. Native processes install no handlers, so nothing else can
+  happen. The caller must have the target's uid or uid 0. A zombie is a
+  valid target (nothing happens). A user-mode CPU exception now ends the
+  process with `128 + its own signal` (`SIGILL` 132, `SIGFPE` 136,
+  `SIGTRAP` 133, `SIGSEGV` 139), not 139 for all.
 - **pipe**: two new handles in the lowest free slots, READ on `h[0]`,
   WRITE on `h[1]`; `docs/kernel/ipc/api.md` for the stream's rules.
 - **dup**: `target == -1` takes the lowest free slot; otherwise `target`

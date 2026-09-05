@@ -199,6 +199,167 @@ length honoured, full size reported). `setsockopt` returns 0 for
 ...) and `-ENOPROTOOPT` otherwise; `getsockopt` `-ENOPROTOOPT`;
 `sendmsg`/`recvmsg`/`poll`/`select`/`epoll_*` `-ENOSYS`.
 
+## Stage 2 (audit milestone 10)
+
+Finding #30 and §12.3–12.6 of the audit. The kernel side (threads, the
+signal core, `arch_user_regs`, the full-restore exit, the wall clock) is
+`docs/kernel/process/design.md` §11; this section is the personality's
+part, and the AArch64 table.
+
+### Signals
+
+`rt_sigaction` stores into the shared `struct sigaction_k` table (Linux's
+`struct k_sigaction` has the same four words); `rt_sigprocmask`,
+`sigaltstack`, `sigpending`, `rt_sigsuspend` and `pause` work on the
+calling thread's sets; `kill(pid, sig)` is `signal_send(process)` after
+the credential check, `tgkill(tgid, tid, sig)` is `signal_send_thread`
+on the thread whose Linux tid matches (`-ESRCH` otherwise, `-EINVAL` when
+`tgid` is not the process). Signal 0 probes. `SIGKILL` and `SIGSTOP`
+refuse `rt_sigaction` as before.
+
+`signal_setup_frame` builds Linux's `rt_sigframe` on the interrupted
+stack (or the alternate stack with `SA_ONSTACK`), 16-byte aligned:
+
+- **x86-64**: `pretcode` (the `SA_RESTORER` address; a handler without
+  `SA_RESTORER` gets `SIGSEGV`, as on Linux), `struct ucontext` (`uc_flags`,
+  `uc_link` 0, `uc_stack`, `mcontext` with the 23 `gregs` in Linux's
+  order, `fpstate` pointing at the frame's 512-byte FXSAVE image,
+  `uc_sigmask` = the mask before the handler), `siginfo` (128 bytes:
+  `si_signo`, `si_errno` 0, `si_code` `SI_USER`/`SI_TKILL`/`SEGV_MAPERR`,
+  `si_pid`/`si_uid` of the sender or `si_addr` of a fault), the FXSAVE
+  image. Entry: `rdi` = sig, `rsi` = &siginfo, `rdx` = &ucontext, `rip` =
+  handler, `rsp` = &pretcode, `rax` = 0 (an interrupted call's restart is
+  arranged before the frame is pushed: `rax` = nr, `rdi` = the first
+  argument, `rip` -= 2). The FXSAVE image is the thread's live vector
+  state saved into the frame; `rt_sigreturn` loads it back through a
+  kernel-built XSAVE header that names only the x87 and SSE components
+  (a value the CPU cannot refuse), so AVX registers above the SSE
+  halves do not survive a handler (a recorded gap: Linux saves the
+  extended area too).
+- **AArch64**: `siginfo`, then `struct ucontext` (`uc_flags`, `uc_link`,
+  `uc_stack`, `uc_sigmask`, `mcontext`: `fault_address`, `regs[31]`, `sp`,
+  `pc`, `pstate`, a reserved area holding an `esr_context` (syndrome 0:
+  the fault's ESR is not carried yet) and the terminator; no
+  `fpsimd_context`, FP/SIMD is off at EL0). Entry: `x0`,
+  `x1`, `x2` as above, `pc` = handler, `sp` = the frame, `lr` = the
+  restorer: `SA_RESTORER` when set, else the kernel's trampoline (below).
+  Restart: `x8` = nr, `x0` = the first argument, `pc` -= 4.
+
+`rt_sigreturn` reads the `ucontext` back (x86-64: `rsp` points at it
+after the restorer's `ret` popped `pretcode`; AArch64: `sp` points at the
+frame record below the `rt_sigframe`), loads the FXSAVE image when the
+frame names one, and hands the register set to the core's
+`signal_return`: `cs` and `ss` are the user selectors whatever the frame
+says, `rflags` keeps only the user-changeable bits, a non-canonical `rip`
+becomes 0 (the SYSRET guard, `docs/kernel/process/design.md` §11), the
+mask is set and the full-restore exit requested. A frame that cannot be
+read is a `SIGSEGV` on the thread, delivered at this call's exit. The
+handler entry clears `DF`, `TF` and `RF`; `uc_stack` describes the
+*interrupted* context's relation to the alternate stack (Linux's
+`sas_ss_flags(sp)`: `SS_DISABLE` with none configured, 0 when the
+handler was moved onto it, `SS_ONSTACK` when already on it).
+
+**The signal trampoline.** Every Linux process gets one read-only,
+executable page at `LX_SIGTRAMP` (`0x7FFFFFFF1000`, the page above the
+stack's top with one unmapped page between) holding `mov $15, %eax; syscall` / `mov x8, #139; svc #0` and
+`ud2`/`brk`. AArch64 handlers return through it (the arm64 kernel has no
+`SA_RESTORER` in common use); on x86-64 it is present for symmetry and
+used when a handler has no restorer *and* the process asked for it
+through `SA_RESTORER` = 0 — which Linux refuses; so does this kernel
+(`SIGSEGV`). The page is a `VM_REGION_ANON` region named `sigtramp`,
+populated at process creation.
+
+Default dispositions follow Linux except the stop signals (ignored: no
+job control), and `SIGKILL`/`SIGTERM`/`SIGINT` and the rest terminate
+with `128 + sig`, the status `wait4` encodes as a termination by signal.
+
+### Threads: `clone`
+
+`clone(flags, stack, ptid, ctid, tls)` (x86-64 argument order; AArch64
+swaps `tls` and `ctid`) is accepted only with `CLONE_VM | CLONE_THREAD |
+CLONE_SIGHAND` (musl's `pthread_create` set: plus `CLONE_FS`,
+`CLONE_FILES`, `CLONE_SYSVSEM`, `CLONE_SETTLS`, `CLONE_PARENT_SETTID`,
+`CLONE_CHILD_CLEARTID`, `CLONE_DETACHED`); anything else, `fork`,
+`vfork` and `clone3` are `-ENOSYS`. The child is `process_add_thread`
+with the caller's frame (result 0, `rsp`/`sp` = `stack`, `fs`/`tpidr_el0`
+= `tls`), `*ptid` and `*ctid` written as the flags ask, `clear_child_tid`
+recorded on the thread. `set_tid_address` stores it too and returns the
+Linux tid; `gettid` returns it; `exit` ends the calling thread only
+unless it is the last (`exit_group` ends the process). `futex` gains
+`FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` (waiters move from one word to
+another under both buckets' locks, lower address first with the second
+annotated nested for lockdep; a waiter leaves whichever list it is on
+when it wakes; `CMP` checks the first word first, `-EAGAIN`, the read
+outside the lock like `futex_wait`'s), `FUTEX_WAIT_BITSET` and
+`FUTEX_WAKE_BITSET` with the all-ones set only (`-ENOSYS` for a real
+bitset; an absolute timeout on the named clock, already-past deadlines
+answer `-ETIMEDOUT` after the value check), and honours
+`FUTEX_CLOCK_REALTIME` (`-ENOSYS` with plain `WAIT`, as Linux).
+`sched_getaffinity` reports the online CPUs in 8 bytes (`-EINVAL` for a
+shorter set, `-ESRCH` for an unknown pid); `sched_setaffinity` accepts
+and ignores. `tkill(tid, sig)` finds the thread in the caller's process
+(or another process's main thread by pid). A clone with `CLONE_THREAD`
+but without `CLONE_SIGHAND` or `CLONE_VM`, or with a flag outside the
+set, is `-EINVAL`; without `CLONE_THREAD` (a fork) `-ENOSYS`. The
+child's FPU state is the reset state (a recorded deviation).
+
+### Dynamic executables
+
+`elf_validate` accepts `ET_DYN` (`info->is_dyn`; segment addresses are
+relative and the caller chooses the load bias) and records `PT_INTERP`
+(`info->interp`, a path of at most 255 bytes inside the file). `spawn`
+loads a PIE at `USER_PIE_BASE` (`0x555500000000`) and, when the image
+names an interpreter, reads that file too (through the caller's path
+lookup and `VFS_MAY_EXEC` check, `ET_DYN` or `ET_EXEC`), loads it at the
+first free range at or above `USER_INTERP_BASE` (`0x7F0000000000`) and
+starts the process at the interpreter's entry with `AT_BASE` = its bias,
+`AT_ENTRY` = the program's entry, `AT_PHDR`/`AT_PHNUM` = the program's
+table, `AT_EXECFN` = the path and `AT_PLATFORM` = the machine string.
+`mmap` with a file (`MAP_PRIVATE`, or `MAP_SHARED` without `PROT_WRITE`,
+which is the same thing for a file nobody else writes) maps an anonymous
+region and fills it from the file (`file_pread` through a bounce buffer
+into the caller's own new mapping, bytes past the end zero), then
+applies the requested protection: a private file mapping is a snapshot,
+which is what a dynamic linker needs for text and data and what a
+`MAP_PRIVATE` mapping is allowed to be. `MAP_SHARED | PROT_WRITE` on a
+file is `-EOPNOTSUPP` (no page-cache-backed regions yet). Offsets must
+be page aligned (`-EINVAL`).
+
+### `poll` and `ppoll`
+
+Both translate `struct pollfd` to the kernel's `io_poll`
+(`docs/kernel/io/design.md`, "Polling"): `POLLIN` ↔ `COSMO_IO_READABLE`,
+`POLLOUT` ↔ `WRITABLE`, `POLLHUP` ↔ `HANGUP`, `POLLERR` ↔ `ERROR`;
+`POLLNVAL` for a handle that is not an I/O object, a negative `fd` is
+skipped, the timeout is milliseconds (`-1` for ever) or a timespec.
+`ppoll`'s temporary mask is applied around the wait. `select` and
+`epoll` stay stage 3.
+
+### Wall clock
+
+`CLOCK_REALTIME` and `CLOCK_REALTIME_COARSE` read `clock_realtime_ns()`;
+`gettimeofday` and `time` too; `MONOTONIC`, `MONOTONIC_RAW`,
+`MONOTONIC_COARSE` and `BOOTTIME` stay the monotonic clock.
+`clock_nanosleep(TIMER_ABSTIME)` subtracts the named clock's now.
+
+### The AArch64 table
+
+The system-call numbers move out of `linux_abi.h` into
+`nr_x86_64.h` and `nr_aarch64.h` (the generic table: `openat` 56,
+`read` 63, `write` 64, `exit` 93, `exit_group` 94, `futex` 98, `clone`
+220, ...), selected by the architecture; calls that exist only on x86-64
+(`open`, `stat`, `pipe`, `dup2`, `fork`, `poll`, `select`, `time`,
+`access`, `readlink`, `rename`, `mkdir`, `rmdir`, `unlink`, `creat`,
+`getpgrp`, `arch_prctl`) are defined only there and their table entries
+are guarded. `struct lx_stat` has the AArch64 layout (128 bytes) under
+that architecture, `uname` reports `aarch64`, the thread pointer is
+`tpidr_el0` which user code sets itself, `clone` takes `tls` before
+`ctid`, and signal frames follow the arm64 layout above. The one
+personality source compiles for both; the empty table is gone.
+`tests/linux` builds for AArch64 as well (`lxabi.h` carries an `svc`
+wrapper and an arm64 `_start`), and the boot test requires `LINUXTEST:
+PASS` on both machines.
+
 ## Errors
 
 Linux and native errno numbers coincide for every value the kernel

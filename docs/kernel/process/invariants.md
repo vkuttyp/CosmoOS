@@ -115,8 +115,13 @@ none (review).
 fault at a user address never panics inside a user copy.** The fault
 handler routes a fault whose frame has `VM_FAULT_USER` and no
 serviceable region (or no memory to service it) to
-`vm_user_hooks.fatal`, which logs and calls `process_exit(139)` after
-re-enabling interrupts; a kernel-mode fault at a user address resumes at
+`vm_user_hooks.fatal`, which raises `SIGSEGV` on the thread (milestone
+10: a handler frame is built on the trap frame and the hook returns, or
+the process ends with 139 after interrupts are re-enabled); every other
+CPU exception from user mode, registered or not, is a signal on the
+thread (`arch_trap_unhandled` on x86-64; the AArch64 classifier maps
+every EL0 syndrome to a registered kind) — `lxsig badstack` (a `push`
+on a non-canonical `rsp`, `#SS`) and `lxsig ill` are the checks; a kernel-mode fault at a user address resumes at
 the exception fixup of the copy and the system call returns `-EFAULT`
 (`docs/kernel/memory/invariants.md` M32). A kernel-mode fault at a user
 address with no fixup is a kernel bug and panics. Check: tests
@@ -263,14 +268,62 @@ the request, path, argv, envp (`COSMO_ARG_MAX`, `COSMO_ARG_ENTRIES`,
 `-ENOENT`, an empty `argv` `-EINVAL`); `process-reject`. Gap: no test
 exceeds `COSMO_ARG_MAX`.
 
+## Milestone 10: threads, signals, the return paths
+
+**P-S1. The kernel never executes `SYSRET` or `IRETQ` with a value the
+instruction could fault on.** `x86_syscall_return_check` forces the
+`iretq` exit when `rip` is not canonical or `rflags` has a bit outside
+the user mask; `arch_user_regs_sanitize` — applied to every register set
+built from user memory (`rt_sigreturn`, a handler frame, a clone's first
+entry) — keeps only the user-changeable `rflags` bits, sets the fixed
+ones (`IF`, bit 1) and replaces a `rip` at or above
+`0x0000800000000000` with 0, so `iretq` itself never faults and the
+process takes a user-mode `SIGSEGV` at 0 instead. `rsp` is loaded
+unchecked by design (`iretq` does not fault on it); its first use faults
+in user mode as `#SS`, a signal. Check: `lxsig badret` (status 139 from
+`rt_sigreturn` to `0x8000000000000000`), `lxsig badstack` (139), review
+of `x86_syscall_return_check` and `sanitize`. Gap: no test forces the
+`TF`-in-`rflags` path through the full restore.
+
+**P-S2. A signal is delivered only at a return to user mode, on the
+frame that return uses, and each return runs at most one handler.**
+`signal_deliver` is called from `syscall_dispatch` after the handler
+(system-call frame) and from `process_return_to_user` (trap frame, only
+for user frames with `irq_depth == 0`); exceptions that arrive on other
+stacks (`#DB` on its IST) only *queue* (`signal_send_thread`) and the
+next return delivers. The handler's mask and the signal itself are
+blocked before the frame is written back, so a second instance waits
+for `rt_sigreturn`. Check: `lxtest` (a handler sees its own signal
+blocked and the mask restored afterwards; the SIGSEGV handler steps over
+the store and the program continues), `init --selftest` trap tests (each
+exception's own signal number), review.
+
+**P-S3. A thread's signal state is freed with the thread and a process's
+with the process, and a signal to an exited thread is refused.**
+`thread_put` frees `sig_info` and `init_regs`; `process_release` frees
+`sigactions` and `sig_shared_info`; `process_find_thread` skips
+`THREAD_EXITED` threads (`tgkill` to a gone tid is `-ESRCH`). Check:
+`lxtest` (`tgkill(pid, tid, 0)` after the join is `-ESRCH`); the
+`released` log lines; review. Gap: no leak counter.
+
+**P-S4. The process ends when its last live thread does, and an exiting
+process takes every thread with it.** `nr_live` counts threads that have
+not exited; `process_thread_exit` of the last one, or `process_exit` from
+any, sets EXITING (an earlier status wins) and wakes every thread; each
+sees `signal_pending()` true and exits at its next return to user mode
+or killable wait; `process_last_thread_gone` then reaps. Check: `lxsig
+group` (a second thread's `exit_group(7)` ends a spinning main thread:
+status 7), `lxsig lastthread` (the main thread exits, the other's
+`exit_group(5)` gives 5), `lxtest` joins through `CHILD_CLEARTID`.
+Gap: no test kills a process with a thread blocked in `futex_wait`.
+
 ## Gaps (documented, not invariants)
 
 - No `fork` or `exec` replacing the current image; `spawn` is the only
-  creation primitive.
-- No signal handlers or masks; `kill` only terminates, and a fatal fault
-  or a kill are the only asynchronous events a process sees.
-- One thread per process; `process_exit` does not yet signal other
-  threads.
+  creation primitive; `clone` creates threads only.
+- Stop signals are ignored (no job control); a clone's FPU state is the
+  reset state, not the caller's; AVX state above the SSE halves does not
+  survive a handler on x86-64 (the frame carries the FXSAVE image only).
 - One console object shared by every process that inherited it; no
   device nodes, so a process that closed handle 0 cannot reopen the
   console.

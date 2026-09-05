@@ -25,7 +25,7 @@ plus a walk).
 | Target | Seeds | Code under test | Property beyond "no sanitizer report" |
 |---|---|---|---|
 | `fuzz_modelf` | a full synthetic module image, a bare `cosmo_module_info` | `kernel/module/modelf.c` | every accepted section and table lies inside the image |
-| `fuzz_elf` | a minimal `ET_EXEC` | `kernel/process/elf.c` (`ELF_HOST_TEST`) | every accepted segment lies inside the image and the user window |
+| `fuzz_elf` | a minimal `ET_EXEC` | `kernel/process/elf.c` (`ELF_HOST_TEST`) | every accepted segment lies inside the image and the user window (an `ET_DYN` image's segments, relative to 0, inside the window's span) |
 | `fuzz_pkg` | a manifest, an index, a tar, a version | `pkg/manifest.c`, `version.c`, `tar.c` | every tar member lies inside the buffer |
 | `fuzz_linux` | sockaddrs, a dirent batch, flag words | `compat/linux/convert.c` | converted records never exceed the caller's capacity |
 | `fuzz_virtq` | a well-behaved add/complete/pop program | `drivers/virtio/virtqueue.c` | only in-flight cookies are ever popped; `num_free ≤ size` |

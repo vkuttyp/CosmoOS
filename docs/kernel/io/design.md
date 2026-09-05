@@ -200,6 +200,20 @@ spinlocks (leaves).
 shared rings are a different contract); `poll` and `epoll` remain stage 3
 and can be built on `poll_wq` and `ready` alone.
 
+## Polling (milestone 10)
+
+`io_poll(struct io_pollfd *fds, unsigned n, uint64_t timeout_ns)`
+(`kernel/io/poll.c`) is the ring's multi-queue wait as a plain call:
+each entry names an object and the `COSMO_IO_*` bits of interest; the
+call reports `ready & interest` (plus `HANGUP`/`ERROR` whenever set) per
+entry, returns the number of entries with something set, and otherwise
+sleeps on every object's `poll_wq` at once until one changes, the
+timeout passes (0 polls, `COSMO_AIO_WAIT_FOREVER` waits) or the process
+is killed or signalled (`-EINTR`). Objects without `ready` are always
+readable and writable; objects without `poll_wq` can only be re-checked
+by another entry's wake or the timeout. Linux `poll`/`ppoll` translate
+onto it; a native `poll` can be added the same way.
+
 ## What this gives the rest of the system
 
 - **Files, sockets, pipes, the console** work today through the two

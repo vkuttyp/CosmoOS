@@ -76,9 +76,19 @@ what Linux is.
 - **Futex** (`kernel/ipc/futex.c`, a native primitive the personality
   uses): `FUTEX_WAIT`/`FUTEX_WAKE` on user words with relative
   timeouts; enough for a libc's locks and `sleep` implementations.
-- **Signals, stage 1**: `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`
-  store their state per process so libcs initialise; `kill` translates
-  to the native kill (termination); no handler is ever invoked.
+- **Signals** (stage 2, audit milestone 10): the kernel's signal core
+  (`docs/kernel/process/design.md` §11) with Linux's `rt_sigframe` on
+  both architectures, `rt_sigreturn`, `SA_RESTART`, the alternate
+  stack, `kill`/`tgkill`/`tkill`, `rt_sigsuspend`, `pause`; faults
+  become `SIGSEGV`/`SIGILL`/`SIGFPE`/`SIGTRAP`/`SIGBUS` with `siginfo`.
+- **Threads**: `clone` with the pthread flag set, `set_tid_address`,
+  `CHILD_CLEARTID`, `futex` requeue and bitset waits, `sched_*affinity`;
+  `exit` ends a thread, `exit_group` the process.
+- **Dynamic executables**: `ET_DYN` at `USER_PIE_BASE`, `PT_INTERP`
+  loaded and started first with `AT_BASE`/`AT_ENTRY`/`AT_EXECFN`/
+  `AT_PLATFORM`; file-backed private `mmap`.
+- **`poll`/`ppoll`** over the kernel's `io_poll`; **wall clock** behind
+  `CLOCK_REALTIME`, `gettimeofday`, `time`.
 - **Files, directories, processes, time, identity, sockets**: the
   translated set is listed in `api.md` (87 calls; 13 more are known and
   refused with `-ENOSYS`). Any other number below 512 lands on
@@ -87,23 +97,20 @@ what Linux is.
   by the dispatcher's own bounds check.
 - **`uname`** reports `Linux 6.0.0-cosmo x86_64` (a personality
   decision: libcs check the kernel name and version).
-- **Architecture**: the numbers table is the x86-64 Linux ABI and is
-  compiled only for `ARCH=x86_64`. On AArch64 (Phase 13) the personality
-  is still selected for a binary without the CosmoOS note, but its table
-  is empty (`count = 0`), so the first system call is `-ENOSYS`; the
-  AArch64 Linux table (the generic `unistd` numbering) is a later phase.
+- **Architecture**: since milestone 10 one personality source compiles
+  for both machines with its own number table (`nr_x86_64.h`,
+  `nr_aarch64.h`), `struct stat`, `uname` machine string, signal frame
+  and `clone` argument order; the Linux test programs run on both.
 
 ## Non-responsibilities
 
-- The dynamic linker (`PT_INTERP`), shared objects, `execve`, `fork`,
-  `vfork`, `clone` and threads: stage 2 and beyond; each returns
-  `-ENOSYS`.
-- Signal delivery to user handlers, `sigreturn`, real-time signals,
-  job control: recorded; `kill` terminates as it does natively.
+- `execve`, `fork`, `vfork`, `clone3`: `-ENOSYS` (`clone` creates
+  threads only); a real `ld.so` has not been run (the tree has no
+  shared objects), though `PT_INTERP` loading and file `mmap` exist.
+- Real-time signal queues, job control (stop signals are ignored).
 - `/proc`, `/sys`, `/dev` nodes, `ioctl` beyond "not a terminal",
-  `epoll`/`poll`/`select`, `sendmsg`/`recvmsg`, file-backed `mmap`,
-  `mremap`, shared memory, `clone`-based anything, resource limits,
-  namespaces, seccomp: later stages or never.
+  `epoll`/`select`, `sendmsg`/`recvmsg`, writable shared file mappings,
+  `mremap`, shared memory, namespaces, seccomp: later stages or never.
 - Running a Linux distribution's userspace (stage 4).
 - Anything in the native personality or subsystems on behalf of Linux:
   the translation layer adapts to them, never the reverse.

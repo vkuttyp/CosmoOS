@@ -54,18 +54,30 @@ timeout `-ETIMEDOUT`, `FUTEX_WAKE` with no waiter returns 0); review of
 wake itself); the primitive's contention behaviour is untested until
 user threads exist.
 
-**L5. Signals are recorded, never delivered.** `rt_sigaction`,
-`rt_sigprocmask` and `sigaltstack` store into `struct linux_state` and
-read back exactly what was stored; no code path invokes a user handler,
-builds a signal frame or consults `sigmask`; `kill` and `tgkill`
-translate to `process_kill`, which terminates the target exactly as the
-native `kill` does (status `128 + sig`, which `lx_wait_status` reports
-as "killed by `sig`"). Check: `lxtest` stores a handler for signal 2
-and reads it back, is refused for `SIGKILL`, sees its mask round-trip;
-`hello_musl` runs musl's start-up (which installs nothing but reads
-the mask). Gap: a Linux program that relies on a handler running
-(`SIGCHLD`, `SIGALRM`, `SIGPIPE` ignored) misbehaves; recorded as stage
-2 work in `design.md`.
+**L5. Signals are delivered only through the kernel core, and only in
+ways Linux programs expect.** (Milestone 10; the stage-1 rule "recorded,
+never delivered" is retired.) `rt_sigaction`, `rt_sigprocmask`,
+`sigaltstack`, `rt_sigpending`, `rt_sigsuspend`, `pause`, `kill`,
+`tgkill` and `tkill` are thin translations onto `kernel/signal.h`; the
+personality's only other signal code is the frame builder and
+`rt_sigreturn` (`compat/linux/signal.c`). A handler runs on Linux's
+`rt_sigframe` (x86-64 440 bytes plus the FXSAVE image; AArch64 4688 bytes
+plus a frame record) with `siginfo` naming the sender or the fault
+address, the signal and the action's mask blocked while it runs, the
+interrupted registers and mask restored by `rt_sigreturn`; a `-EINTR`
+result is restarted under `SA_RESTART`; an x86-64 handler without
+`SA_RESTORER` is refused with `SIGSEGV`, as Linux does. Check: `lxtest`
+(handler through `kill` with `SI_USER` and the sender's pid, through
+`tgkill` with `SI_TKILL`, a blocked signal stays pending and is delivered
+by the unblock, `rt_sigsuspend` runs the handler and restores the mask,
+`SA_RESETHAND`, the alternate stack with `SA_ONSTACK` (`sigaltstack`
+reports `SS_ONSTACK` from inside), `SIGSEGV` with `SEGV_MAPERR` and
+`SEGV_ACCERR` and the handler stepping over the store, `xmm0` surviving
+a handler that clobbers it, `SA_RESTART` making an interrupted `read`
+complete), `lxsig` (the default action: `term` 143, `segv` 139, `ill`
+132); `hello_musl` still starts. Gap: real-time signal queueing (one
+pending instance per number, as for standard signals); `SIGSTOP` and
+friends are ignored; the `esr_context` on AArch64 carries syndrome 0.
 
 **L6. No Linux system call number crashes or panics the kernel.** Every
 slot of the 512-entry table is a function (`lx_unknown` where nothing is
@@ -79,7 +91,8 @@ diagnostics. Gap: no fuzzing of argument values across the table
 handlers, so it would be a target-side program).
 
 **L7. Linux structure layouts are fixed, byte for byte.** `struct
-lx_stat` 144 bytes, `struct lx_utsname` 390, `struct lx_sockaddr_in` 16,
+lx_stat` 144 bytes on x86-64 and 128 on AArch64 (`LX_STAT_SIZE`),
+`struct lx_utsname` 390, `struct lx_sockaddr_in` 16,
 `struct lx_sockaddr_in6` 28, `struct lx_sigaction` 32, `struct
 lx_dirent64` a 19-byte header; `linux_dirent64` records are 8-byte
 aligned with a NUL after the name; `getcwd` returns the length including
@@ -116,7 +129,11 @@ pages mapped and the regrow failed with `-EEXIST`). Gap: no test of the
 1 GiB cap or of a `MAP_FIXED` mapping placed over the heap (allowed, as
 on Linux).
 
-**L10. The thread pointer follows the thread.** `arch_prctl(ARCH_SET_FS)`
+**L10. The thread pointer follows the thread.** On AArch64 user code
+writes `tpidr_el0` itself and the switch hook saves the outgoing thread's
+value before loading the incoming one's; a clone starts with
+`CLONE_SETTLS`'s value (`lxtest` checks both on both machines, milestone
+10). On x86-64 `arch_prctl(ARCH_SET_FS)`
 stores into `thread->tls_base` and writes `MSR_FS_BASE` at once;
 `arch_thread_switch_prepare` writes `MSR_FS_BASE` from
 `next->tls_base` on every switch to a thread with a process, so a
@@ -152,17 +169,57 @@ RWX anonymous mapping and gets `-EINVAL`; the loader tests in
 code and `mprotect`s to RX (a JIT) works, as on Linux; nothing prevents
 it, by design.
 
+## Milestone 10
+
+**L13. A thread is only ever created by `clone` with the thread set, and
+the process is exactly its threads.** `CLONE_VM|CLONE_THREAD|CLONE_SIGHAND`
+are required and only the pthread flags accepted (`-EINVAL` otherwise,
+`-ENOSYS` for a fork); the child shares the address space, handles,
+actions and working directory by construction (there is one `struct
+process`); its tid is unique within the process and never the pid;
+`CHILD_SETTID`/`PARENT_SETTID` are written before the child runs and
+`CHILD_CLEARTID` is zeroed and woken at its exit, so a libc's join is
+race-free; `exit` ends one thread, `exit_group` all. Check: `lxtest`
+(clone with the full set, the parent's tid word, the child's `gettid` and
+TLS, join through the cleared word, `-EINVAL`/`-ENOSYS`/`-EFAULT`
+refusals), `lxsig group`/`lastthread`, `docs/kernel/process/invariants.md`
+P-S4. Gap: no test creates threads up to `PROCESS_MAX_THREADS`.
+
+**L14. A private file mapping is a snapshot the file never sees.**
+`mmap` with a file copies the bytes at call time into an anonymous
+region and applies the protection afterwards; a write through a
+`MAP_PRIVATE` mapping changes the mapping only; `MAP_SHARED|PROT_WRITE`
+is refused (`-EOPNOTSUPP`) rather than pretending to share. Check:
+`lxtest` (a 6000-byte file mapped over two pages: bytes match, the tail
+is zero, a mapping at offset one page matches, a write does not reach
+the file, `-EOPNOTSUPP`, an unaligned offset `-EINVAL`, a bad fd
+`-EBADF`); `lxdyn` loads through the loader, not `mmap`. Gap: a real
+dynamic linker's `mmap` of a shared object is not exercised (no `ld.so`
+in the tree).
+
+**L15. The two number tables never disagree on a shared call's
+meaning.** Every `LX_*` name in `nr_aarch64.h` has the same name in
+`nr_x86_64.h` (the header generator refuses otherwise); a handler is
+written once and bound by name; x86-64-only calls appear only in the
+x86-64 header and their rows are guarded. `struct lx_stat` and
+`LX_MACHINE` are the only per-architecture ABI differences besides the
+frames and `clone`'s argument order. Check: `lxtest` runs unchanged (up
+to `#ifdef`s on the missing calls) on both machines and the harness
+requires the same markers on both. Gap: no automated diff against the
+kernel's `unistd.h` tables.
+
 ## Gaps (documented, not invariants)
 
-- Stage 2 of constitution section 40 is not attempted: no `PT_INTERP`,
-  no file-backed `mmap`, no `clone`/`fork`/`execve`, no signal frames,
-  no `rt_sigreturn`, no `poll`/`select`/`epoll`, no `sendmsg`/`recvmsg`.
+- No `fork`, `execve`, `select`/`epoll`, `sendmsg`/`recvmsg`, shared
+  file mappings, real-time signal queues, job control.
 - `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
   unless the path is absolute; the VFS has no `openat` semantics yet.
-- Every clock is monotonic; `uname` reports a kernel release that is not
-  the kernel's; `ioctl` is `-ENOTTY` for every request, so Linux libcs
-  never see the console as a terminal.
+- `uname` reports a kernel release that is not the kernel's; `ioctl` is
+  `-ENOTTY` for every request, so Linux libcs never see the console as a
+  terminal.
 - `getdents64`'s `d_off` is not a seekable directory cookie.
 - Linux errno values pass through unchanged because the native numbers
   were chosen to match; a future native errno that Linux lacks would need
   a mapping here.
+- AArch64: no FP/SIMD at EL0, so a libc built with NEON `memcpy` traps
+  (`SIGILL`); the test programs are built `-mgeneral-regs-only`.

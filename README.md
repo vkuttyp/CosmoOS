@@ -377,11 +377,34 @@ See [docs/development.md](docs/development.md).
   timeout, and registers each namespace as `nvme0n1`; QEMU attaches one
   on both machines and cosmofs mounts on it. Three new self-tests, 122
   in total.
+- **Linux personality stage 2: signals, threads, PIE, poll, the wall
+  clock (done):** milestone 10 of the audit's plan
+  (`docs/kernel/process/design.md` §11, `docs/compat/linux/design.md`
+  "Stage 2", `docs/kernel/io/design.md` "Polling"). A signal core the
+  two personalities share (`kernel/process/signal.c`): per-thread
+  pending and blocked sets, per-process actions, delivery at the two
+  returns to user mode, `SA_RESTART`, faults as signals with `siginfo`;
+  the Linux `rt_sigframe` on both architectures, `rt_sigreturn`, the
+  alternate stack, `kill`/`tgkill`/`tkill`/`rt_sigsuspend`/`pause`. The
+  SYSRET canonical guard (audit §14.2): a full-restore `iretq` exit for
+  any frame `SYSRET` could fault on, sanitised register sets, and every
+  user-mode CPU exception a signal rather than a panic. Several threads
+  per process: `clone` with the pthread flag set, `CHILD_CLEARTID`
+  joins, `exit` versus `exit_group`, futex requeue and bitset waits with
+  `CLOCK_REALTIME`. `ET_DYN` executables at `USER_PIE_BASE` and
+  `PT_INTERP` interpreters started first with the full auxiliary vector;
+  private file-backed `mmap`. `io_poll` behind `poll`/`ppoll`. A wall
+  clock seeded from the RTC on both machines (`clock_ns(REALTIME)`,
+  Linux `CLOCK_REALTIME`, `gettimeofday`, `time`). The Linux system-call
+  numbers split into `nr_x86_64.h`/`nr_aarch64.h` and the personality,
+  its test programs and the boot harness now run on AArch64 too. New
+  Linux fixtures `lxsig` (seven expected deaths, including the guard)
+  and the PIE pair `lxinterp`/`lxdyn`; two new self-tests, 124 in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
   graphics and a desktop, fuller Linux compatibility, NUMA, live
   migration, nested virtualization), plus the AArch64 follow-ups noted
-  in `docs/kernel/arch/aarch64/design.md` (the Linux AArch64 table, an
-  EL2 virtualization backend, GICv3, ASIDs, FP/SIMD in userland); design
-  documents first, one subsystem at a time.
+  in `docs/kernel/arch/aarch64/design.md` (an EL2 virtualization
+  backend, GICv3, ASIDs, FP/SIMD in userland); design documents first,
+  one subsystem at a time.

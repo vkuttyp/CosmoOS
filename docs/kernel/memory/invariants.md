@@ -154,7 +154,8 @@ re-acquisition.
 protection are serviced.** Protection faults, reserved-bit faults, faults
 in `VM_REGION_PHYS` regions and faults outside any region are never
 serviced. What happens to them depends on the frame: a user-mode fault
-ends the process (P15); a kernel-mode fault at a user address resumes at
+is a `SIGSEGV` to the faulting thread (P15: a handler runs on the trap
+frame, or the process ends); a kernel-mode fault at a user address resumes at
 the exception fixup of the faulting instruction when one exists (M32);
 everything else panics with the VMM report.
 Checked by: `make test-crash` (fault outside any region must produce

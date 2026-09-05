@@ -619,3 +619,165 @@ decides "this frame returns to user mode".
 `EINTR 4`, `ESRCH 3`, `ECHILD 10`, `EACCES 13`, `E2BIG 7`, `ENOEXEC 8`
 (existed in the kernel, now in the UAPI), `ENOTTY 25`, `ESPIPE 29`
 (UAPI), `ERANGE 34` (UAPI).
+
+## 11. Threads, signals, the SYSRET guard and the wall clock (audit milestone 10)
+
+Milestone 10 of `docs/audit/2026-09-post-roadmap-audit.md` §19 (finding
+#30; audit §12.3–12.6, §14.2 SYSRET guard). The Linux personality's stage
+2 (`docs/compat/linux/design.md`, "Stage 2") needs four things the kernel
+did not have; they are generic and live here, and the personality maps
+onto them.
+
+### Several user threads per process
+
+`process_add_thread(p, regs, tls, out_thread)` creates a further user
+thread in an existing process: a kernel thread like the main one
+(`thread_prepare`, `arch_fpu_alloc`, a process reference, on
+`p->threads`, `nr_threads++`), whose first entry to user mode loads a
+complete register set rather than an entry point and a stack pointer.
+`struct arch_user_regs` is the architecture's view of every user
+register (x86-64: the fifteen general registers, rip, rsp, rflags;
+AArch64: x0–x30, sp, pc, pstate); `arch_user_regs_from_frame` fills it
+from a system-call or trap frame, and `arch_user_enter_regs` performs
+the first entry (an IRETQ / ERET with every register loaded). A thread
+carries its initial set in `thread.init_regs` until it has run once.
+Linux `clone(CLONE_VM | CLONE_THREAD)` is the copy of the caller's
+frame with the result register 0, the stack the caller named and, with
+`CLONE_SETTLS`, the thread pointer it named.
+
+Exiting: `process_exit(status)` keeps its meaning, *the process ends*
+(`exit_group`): the state becomes `PROCESS_EXITING`, every other thread
+is woken and leaves at its next return to user mode or killable wait
+(`process_kill_pending` is true whenever the process is no longer
+running), and the last thread out completes the exit as before.
+The child's floating-point state is the architectural reset state, not
+a copy of the caller's (a recorded deviation from Linux; a thread that
+needs the caller's rounding mode sets it). A process holds at most
+`PROCESS_MAX_THREADS` (256) live threads (`-EAGAIN` beyond). Creation is
+two steps — `process_add_thread` (linked, not runnable) then
+`process_thread_start` — so the caller can record `clear_child_tid` and
+write the tid words before the child can run; `process_thread_abandon`
+lets it exit unrun when a write fails.
+
+`process_thread_exit(status)` ends only the calling thread; the last
+live thread's exit ends the process with that status (`nr_live` is
+counted down at exit, not at reaping, so two threads exiting together
+agree on who is last). A thread exit runs the personality's
+`thread_exit` hook first (Linux: `clear_child_tid` is zeroed and its
+futex woken, while the address space is still the thread's).
+
+Thread ids: the kernel `tid` is global. The Linux view is
+`lx_tid = tid == main ? pid : LX_TID_BASE + tid` (`LX_TID_BASE`
+0x10000, above every pid this kernel will hand out), so `getpid() ==
+gettid()` holds in the main thread as programs assume.
+
+### The signal core (`kernel/process/signal.c`)
+
+POSIX signals as a kernel service that both personalities share; the
+native ABI keeps its behaviour (no handlers, `kill` terminates) as the
+special case in which every action is the default.
+
+```c
+struct sigaction_k { uint64_t handler, flags, restorer, mask; };   /* per process, 64 entries, under p->lock */
+struct thread { ... uint64_t sig_pending, sig_blocked; struct sigaltstack_k altstack; ... };
+struct process { ... struct sigaction_k *sigactions; uint64_t shared_pending; ... };
+```
+
+- **Sending.** `signal_send(p, sig)` queues on the process (any thread
+  not blocking it may take it; the main thread is preferred);
+  `signal_send_thread(t, sig)` queues on one thread (`tgkill`, a fault).
+  Both wake a blocked target (`sched_wake`) so killable waits return
+  `-EINTR`. `SIGKILL` is never blocked or caught and ends the process at
+  once (`process_kill` as today, status 128 + 9). A signal whose action
+  is `SIG_IGN`, or whose default is *ignore* (`SIGCHLD`, `SIGURG`,
+  `SIGWINCH`, `SIGCONT`), is discarded when sent unless blocked. The stop
+  signals (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) have no job control
+  behind them: they are treated as ignored (a recorded deviation), not as
+  fatal, which was the audit's HIGH.
+- **Delivery.** `signal_pending()` is true when the calling thread has a
+  deliverable signal (pending and not blocked, or the process is
+  exiting); the killable waits check it where they checked the kill flag.
+  Delivery happens at the two returns to user mode: the system-call exit
+  (`syscall_dispatch` calls `signal_deliver(frame, true)` after the
+  handler) and the trap or interrupt return (`process_return_to_user(frame)`).
+  It dequeues the lowest-numbered deliverable signal (`SIGKILL`/`SIGSEGV`
+  first), and: default *terminate* ends the process with `128 + sig`;
+  a handler is run by the personality's `signal_setup_frame(frame,
+  is_syscall, sig, action)` which rewrites the frame (`docs/compat/linux/design.md`
+  for the Linux layout) and blocks the handler's mask plus the signal
+  itself (unless `SA_NODEFER`); `SA_RESETHAND` restores the default.
+- **Restart.** A system call that returned `-EINTR` because a signal
+  arrived is restarted when the action has `SA_RESTART`: the dispatcher
+  records the number and first argument before the call
+  (`thread.syscall_nr`, `syscall_arg0`), and `signal_setup_frame` puts
+  them back and moves the program counter to the `syscall`/`svc`
+  instruction before the handler frame is pushed, so the handler returns
+  into a re-issued call. Without `SA_RESTART`, `-EINTR` stands. A call
+  interrupted with no handler to run is not restarted (the process ends,
+  or the signal was ignored and the call already returned `-EINTR`).
+- **Faults become signals.** A fatal user fault (`hook_fatal`) or CPU
+  exception raises `SIGSEGV`/`SIGBUS`/`SIGFPE`/`SIGILL`/`SIGTRAP` on the
+  faulting thread with the trap frame at hand; with a handler installed
+  the frame is set up right there and the trap returns into the handler
+  (`si_addr` is the fault address); without one the process ends with
+  `128 + sig` as before (`COSMO_EXIT_FAULT` is `128 + 11`). A fault taken
+  *while setting up a handler frame* (an unmapped signal stack) is fatal.
+- **Return.** `signal_return(frame, regs, mask)` (the personality's
+  `rt_sigreturn`) sanitises the register set (user-changeable flag bits
+  only, a loadable program counter), sets the mask and writes the
+  registers into the system-call frame marked for a *full restore*,
+  below. The personality sets `thread.syscall_nr` to `SIGNAL_NO_RESTART`
+  so the restored result register is never mistaken for `-EINTR`.
+- **Temporary masks.** `rt_sigsuspend` and `ppoll` swap the mask for the
+  wait and record the old one (`signal_set_blocked_saved`); the handler
+  frame's saved mask is that old one, and when no handler runs (the
+  signal was taken by another thread, or ignored) the return to user
+  mode restores it. Linux's `TIF_RESTORE_SIGMASK`.
+- **Where the code lives.** `kernel/process/signal.c` is the core;
+  `compat/linux/signal.c` the Linux view (frames, `rt_sigreturn`, the
+  trampoline page, every signal system call). The native personality has
+  no frame builder: a handler can never run there, so every non-ignored
+  signal terminates, as before.
+
+### The SYSRET canonical guard and the full-restore exit (x86-64)
+
+`SYSRET` with a non-canonical `rcx` raises `#GP` in the kernel with the
+user's stack already loaded (audit §14.2); `rt_sigreturn` and a signal
+frame are the two places user memory chooses the return `rip`. The
+system-call frame gains three words pushed at entry: `rcx` and `r11`
+(the two registers `SYSRET` cannot restore) and `flags`. Before the exit
+sequence, `x86_syscall_c` sets `X86_SYSCALL_FULL_RESTORE` in `flags`
+when `rip` is not canonical, when a frame or return rewrote the register
+set, or when `rflags` carries a bit `SYSRET` must not load (`TF`); the
+exit code tests the flag and takes an `iretq` through a frame it builds
+from `rip`, `rflags`, `rsp`, loading every register including `rcx` and
+`r11`. The plain path is unchanged and still the common one. An `iretq`
+to a non-canonical `rip` would fault *in the kernel* (the instruction
+itself raises `#GP`), so `arch_user_regs_sanitize` — applied to every
+register set a signal frame or `rt_sigreturn` produces — replaces a
+`rip` at or above `0x0000800000000000` with 0: the return then faults in
+user mode at address 0 and is delivered as `SIGSEGV` like any other
+fault (`lxsig badret`). A user-chosen `rsp` needs no check: `iretq`
+loads it without looking, and the first user access through a bad one is
+`#SS`, which the trap default turns into `SIGSEGV` (`lxsig badstack`) —
+every CPU exception from user mode that no handler claims is now a
+signal on the thread (`SIGFPE` for `#DE`/`#MF`/`#XM`, `SIGTRAP` for
+`#DB`/`#BP`, `SIGILL` for `#UD`, `SIGBUS` for `#AC`, `SIGSEGV`
+otherwise), never a panic. On AArch64 the system-call frame is the trap
+frame and `eret` restores everything; a bad `elr` or `sp` faults at EL0
+and the classifier already maps every EL0 syndrome to a registered kind.
+Invariant P-S1 records the guard.
+
+### The wall clock
+
+`clock_realtime_ns()` = `clock_now_ns()` + a boot-time offset the
+architecture reads once from its real-time clock: x86-64 the CMOS RTC
+(ports 0x70/0x71, BCD or binary per status register B, the century from
+the FADT when present), AArch64 the PL031 of the `virt` machine at its
+fixed address, validated by a non-zero read. Both give seconds; the
+sub-second part starts at 0. The native `clock_ns` system call takes a
+clock id (`COSMO_CLOCK_MONOTONIC` 0, the former behaviour, or
+`COSMO_CLOCK_REALTIME` 1); the Linux `REALTIME`/`REALTIME_COARSE`
+clocks, `gettimeofday` and `time` return it, `TIMER_ABSTIME` against it
+converts through the offset, and the one-year cap on timespec values is
+gone (they are bounded by 2^63 ns).
