@@ -5,7 +5,8 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Host | `test_cosmofs` (on-disk layout sizes, inode/imap index arithmetic, extent mapping) and the CRC32C vectors in `test_crypto` | `make host-test` |
-| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash` | `make test` |
+| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device | `make test` |
+| Host fuzz | `fuzz_cosmofs`: mount, walk and read mutated images under ASan/UBSan (`docs/verification/`) | `make fuzz` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 
 The boot test's total was `SELFTEST: PASS (51 tests)` at the end of
@@ -97,6 +98,22 @@ older slot (generation minus one) and every file still reads; a commit
 rewrites the torn slot and a final remount verifies the two fixture
 files. The disk is left holding `hello.txt` and `dir/nested.txt` for
 init.
+
+**`cosmofs-replay`** (`kernel-services/filesystem/cosmofs/cosmofscrash.c`,
+`docs/verification/design.md`): formats a 512-block RAM device, records
+every write and flush of a workload with five sync points (creates,
+rewrites, renames, unlinks), then for every sampled prefix of the log,
+intact and with the last write torn, restores the formatted image,
+replays the prefix, mounts, and requires every file committed by the
+last sync whose superblock write is in the prefix to read back exactly,
+and every directory and file to walk and read cleanly. 75 writes, 139
+prefix images per boot; the property is the commit rule in `design.md`
+made a machine check.
+
+**`fault-blk`** (`kernel/core/faulttest.c`): completion and submission
+errors injected under a cosmofs workload; every write and sync returns
+`-EIO` or succeeds, a forced unmount and a clean remount read every
+visible file back.
 
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 

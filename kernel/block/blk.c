@@ -6,6 +6,7 @@
 #include <kernel/completion.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
 #include <kernel/sched.h>
@@ -134,6 +135,8 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
         if (dma_map(bd->dev, bio->buf, (size_t)bio->nsectors * bd->sector_size, DMA_BIDIRECTIONAL) == 0)
             return -EINVAL;   /* not DMA-able memory */
     }
+    if (faultinject_should_fail(FI_BLK_SUBMIT))
+        return -EIO;   /* debug builds: an injected submission failure (docs/verification/) */
     bio->status = -EAGAIN;   /* in flight */
     return bd->ops->submit(bd, bio);
 }
@@ -141,6 +144,8 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
 void bio_complete(struct bio *bio, int status)
 {
     struct blkdev *bd = bio->dev;
+    if (status == 0 && faultinject_should_fail(FI_BLK_COMPLETE))
+        status = -EIO;   /* debug builds: an injected device error (docs/verification/) */
     bio->status = status;
     if (status)
         __atomic_fetch_add(&bd->errors, 1, __ATOMIC_RELAXED);

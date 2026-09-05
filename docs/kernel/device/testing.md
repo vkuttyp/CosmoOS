@@ -4,13 +4,24 @@
 
 | Level | What | Command |
 |---|---|---|
-| Target self-tests (debug builds, 4 CPUs) | `device`, `pci`, `dma`, `blk-lifetime`, `random`, `blk`, `virtio-console` | `make test` |
+| Target self-tests (debug builds, 4 CPUs) | `device`, `pci`, `dma`, `blk-lifetime`, `fault-blk`, `random`, `blk`, `virtio-console` | `make test` |
+| Host fuzz | `fuzz_virtq`: the split virtqueue driven by a program-generated hostile device (`make fuzz`, `docs/verification/`) | `make fuzz` |
 | Boot markers | module load lines for the four driver modules, the `blk: vda:` line, the virtio-console registration line, and the `boot complete` line **inside the virtio console file** | `make test` |
 | Release | same drivers, no self-tests | `make BUILD=release test` |
 | Single CPU | MSI vectors and completions on one CPU | `QEMU_SMP=1 make test` |
 | Build-time | every driver module is signed and checked (`check-module-elf.py`) | `make modules` |
 
-There is no host test for this subsystem yet (see gaps).
+The host fuzz target `fuzz_virtq` (`tests/fuzz/fuzz_virtq.c`) is the
+subsystem's host test: the input is a program of operations (add a chain,
+the device completes a used element with any id and length, pop, rewrite
+a descriptor, jump the used index, scribble the available ring) and the
+target asserts the driver only ever pops cookies it added and has not
+reclaimed and never counts more free descriptors than the queue holds.
+`fault-blk` (`kernel/core/faulttest.c`) injects `-EIO` at `blk_submit`
+and at completion under a cosmofs workload on a RAM block device
+(`kernel/block/ramblk.c`, debug builds: a registered block device backed
+by kernel memory with a write recorder and snapshots for the
+crash-consistency harness).
 
 ## The QEMU configuration the tests assume
 

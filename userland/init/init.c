@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -697,6 +698,205 @@ static int run_and_wait(const char *what, const char *const argv[])
     }
 }
 
+
+/* --- the guest syscall fuzzer (docs/verification/design.md) ----------------
+ *
+ * N random system calls with random arguments from an unprivileged
+ * process. Every call must return a value or an errno and the process must
+ * survive; a kernel panic fails the boot test. Calls that would block this
+ * process forever or damage it rather than the kernel are excluded here and
+ * named: exit, read, recvfrom, accept, connect, wait, kill, spawn, vcpu_run.
+ */
+
+static uint64_t g_fz_rng;
+
+static uint64_t fz_rnd(void)
+{
+    g_fz_rng ^= g_fz_rng >> 12;
+    g_fz_rng ^= g_fz_rng << 25;
+    g_fz_rng ^= g_fz_rng >> 27;
+    return g_fz_rng * 0x2545F4914F6CDD1Dull;
+}
+
+static unsigned fz_below(unsigned n)
+{
+    return n ? (unsigned)(fz_rnd() % n) : 0;
+}
+
+static uint8_t *g_fz_page;   /* one mapped scratch page */
+
+static long fz_pointer(void)
+{
+    switch (fz_below(10)) {
+    case 0: return 0;                                        /* NULL */
+    case 1: return (long)g_fz_page;                          /* valid */
+    case 2: return (long)g_fz_page + 4096 - 3;               /* straddles the end */
+    case 3: return (long)g_fz_page + 1;                      /* unaligned */
+    case 4: return 0x1000;                                   /* unmapped low */
+    case 5: return (long)0xffff800000001000ull;              /* kernel half */
+    case 6: return (long)0x00007ffffffff000ull;              /* top of the user window */
+    case 7: return (long)0xdeadbeefcafeull;                  /* far away */
+    case 8: return (long)g_fz_page + fz_below(4096);         /* inside */
+    default: return (long)(fz_rnd() & 0x7fffffffffffull);    /* anything */
+    }
+}
+
+static long fz_len(void)
+{
+    static const long lens[] = { 0, 1, 7, 64, 4095, 4096, 4097, 65536, 0x7fffffff, -1, (long)0x8000000000000000ull };
+    return lens[fz_below(sizeof(lens) / sizeof(lens[0]))];
+}
+
+static long fz_handle(void)
+{
+    switch (fz_below(6)) {
+    case 0: return -1;
+    case 1: return 3 + (long)fz_below(29);   /* never 0..2: the process's console */
+    case 2: return 64;
+    case 3: return 100000;
+    case 4: return 0x7fffffff;
+    default: return (long)(fz_rnd() & 0xffffffff) | 3;
+    }
+}
+
+static const char *const g_fz_paths[] = { "/", "/tmp", "/tmp/fuzz-a", "/tmp/fuzz-b", "/tmp/fuzz-dir", "/tmp/fuzz-dir/x",
+                                          "/nope", "/boot/init", "/dev/console", "/../..", "/tmp/../tmp/fuzz-c", "",
+                                          "relative",
+                                          ("/tmp/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                           "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") };
+
+static long fz_string(void)
+{
+    unsigned k = fz_below(sizeof(g_fz_paths) / sizeof(g_fz_paths[0]) + 3);
+    if (k < sizeof(g_fz_paths) / sizeof(g_fz_paths[0]))
+        return (long)g_fz_paths[k];
+    if (k == sizeof(g_fz_paths) / sizeof(g_fz_paths[0])) {
+        memset(g_fz_page + 4000, 'z', 96);   /* unterminated to the end of the page */
+        return (long)g_fz_page + 4000;
+    }
+    return fz_pointer();
+}
+
+static long fz_flags(void)
+{
+    switch (fz_below(4)) {
+    case 0: return 0;
+    case 1: return (long)fz_below(16);
+    case 2: return (long)(fz_rnd() & 0xffffffff);
+    default: return -1;
+    }
+}
+
+static int syscall_fuzz(unsigned long n, uint64_t seed)
+{
+    /* Unprivileged, console read closed, one scratch page. */
+    if (setresgid(1000, 1000, 1000) != 0 || setresuid(1000, 1000, 1000) != 0) {
+        printf("USERTEST: syscall-fuzz: cannot drop privileges (errno %d)\n", errno);
+        return 1;
+    }
+    close(0);
+    g_fz_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_ANONYMOUS, -1, 0);
+    if (g_fz_page == MAP_FAILED) {
+        printf("USERTEST: syscall-fuzz: cannot map the scratch page\n");
+        return 1;
+    }
+    g_fz_rng = seed ? seed : 1;
+
+    static const int allowed[] = {
+        SYS_write, SYS_getpid, SYS_yield, SYS_sleep_ns, SYS_clock_ns, SYS_mmap, SYS_munmap, SYS_log, SYS_close,
+        SYS_open, SYS_stat, SYS_fstat, SYS_lseek, SYS_mkdir, SYS_unlink, SYS_rmdir, SYS_rename, SYS_getdents,
+        SYS_sync, SYS_mount, SYS_umount, SYS_socket, SYS_bind, SYS_listen, SYS_sendto, SYS_shutdown, SYS_getsockname,
+        SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
+        SYS_vm_mem, SYS_vm_mem_rw, SYS_vcpu_create, SYS_vcpu_regs, SYS_vcpu_irq, SYS_setresuid, SYS_setresgid,
+        SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups,
+        /* and a few numbers past the table, for the dispatcher's own check */
+        SYS_COUNT, SYS_COUNT + 1, 1000, -1,
+    };
+    unsigned long errors = 0, successes = 0;
+    long hist[SYS_COUNT] = { 0 };
+    for (unsigned long i = 0; i < n; i++) {
+        int nr = allowed[fz_below(sizeof(allowed) / sizeof(allowed[0]))];
+        long a[6];
+        for (int k = 0; k < 6; k++) {
+            switch (fz_below(5)) {
+            case 0: a[k] = fz_pointer(); break;
+            case 1: a[k] = fz_len(); break;
+            case 2: a[k] = fz_handle(); break;
+            case 3: a[k] = fz_string(); break;
+            default: a[k] = fz_flags(); break;
+            }
+        }
+        /* Per-call constraints: what would hurt this process, not the kernel. */
+        switch (nr) {
+        case SYS_write: case SYS_close: case SYS_fstat: case SYS_lseek: case SYS_getdents: case SYS_bind:
+        case SYS_listen: case SYS_sendto: case SYS_shutdown: case SYS_getsockname:
+            a[0] = fz_handle();
+            break;
+        case SYS_dup:
+            a[0] = fz_handle();
+            a[1] = fz_below(2) ? -1 : 3 + (long)fz_below(60);
+            break;
+        case SYS_sleep_ns:
+            a[0] = (long)fz_below(1000000);   /* at most 1 ms */
+            break;
+        case SYS_mmap:
+            a[3] &= ~(long)COSMO_MAP_FIXED;
+            if (a[1] < 0 || a[1] > (1 << 24))
+                a[1] = (long)fz_below(1 << 20);
+            break;
+        case SYS_munmap:
+            /* Only the scratch page or an invalid range: never our own text, stack or heap. */
+            if (fz_below(2)) {
+                a[0] = (long)g_fz_page + (fz_below(2) ? 0 : 1);
+                a[1] = fz_below(3) == 0 ? 4096 : fz_len();
+                if (a[0] == (long)g_fz_page && a[1] == 4096)
+                    a[1] = 0;   /* keep the page mapped */
+            } else {
+                a[0] = (long)0xffff800000000000ull + (long)fz_below(4096) * 4096;
+            }
+            break;
+        case SYS_open: case SYS_stat: case SYS_mkdir: case SYS_unlink: case SYS_rmdir: case SYS_chdir:
+        case SYS_umount:
+            a[0] = fz_string();
+            break;
+        case SYS_rename: case SYS_mount:
+            a[0] = fz_string();
+            a[1] = fz_string();
+            break;
+        default:
+            break;
+        }
+        long rc = cosmo_syscall6(nr, a[0], a[1], a[2], a[3], a[4], a[5]);
+        if (rc < 0 && rc > -4096)
+            errors++;
+        else
+            successes++;
+        if (nr >= 0 && nr < SYS_COUNT)
+            hist[nr]++;
+        /* A successful open or socket leaves a handle; close the ones above
+         * the console now and then so the table does not fill up. */
+        if ((i & 63) == 63) {
+            for (int h = 3; h < 64; h++)
+                cosmo_syscall1(SYS_close, h);
+        }
+    }
+    /* What we may have created under /tmp. */
+    rmdir("/tmp/fuzz-dir/x");
+    unlink("/tmp/fuzz-dir/x");
+    rmdir("/tmp/fuzz-dir");
+    unlink("/tmp/fuzz-a");
+    unlink("/tmp/fuzz-b");
+    unlink("/tmp/fuzz-c");
+    chdir("/");
+    unsigned covered = 0;
+    for (int k = 0; k < SYS_COUNT; k++)
+        if (hist[k])
+            covered++;
+    printf("USERTEST: syscall-fuzz ok: %lu calls, %lu errors, %lu successes, %u/%d system calls exercised, seed %llu\n",
+           n, errors, successes, covered, SYS_COUNT, (unsigned long long)seed);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--crash") == 0) {
@@ -720,6 +920,8 @@ int main(int argc, char **argv)
         return unpriv_test();
     if (argc >= 3 && strcmp(argv[1], "--trap") == 0)
         return trap_self(argv[2]);
+    if (argc >= 4 && strcmp(argv[1], "--syscall-fuzz") == 0)
+        return syscall_fuzz(strtoul(argv[2], NULL, 0), strtoull(argv[3], NULL, 0));
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
         selftest();
         if (g_failures == 0) {

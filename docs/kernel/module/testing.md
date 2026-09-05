@@ -119,6 +119,20 @@ make MODULE_SIG_ENFORCE=0 OUT=$PWD/out/x86_64-noenforce test
 grep -n "module:\|SELFTEST: mod\|hello:" out/x86_64-debug/boot-test.log
 ```
 
+## Fuzzing and fault injection (`docs/verification/`)
+
+`make fuzz` runs `fuzz_modelf` (`tests/fuzz/fuzz_modelf.c`): the
+validator over mutations of the synthetic images (`tests/host/modelf_image.h`,
+shared with `test_modelf`), asserting that every section and metadata
+table an accepted image describes lies inside the image. Its first run
+found that `e_shoff` was not checked for alignment and the section
+header table was read in place unaligned (UBSan); `modelf.c` now rejects
+an `e_shoff` or a structured section's `sh_offset` that is not 8-byte
+aligned (`test_modelf` `unaligned-tables`). `fault-kmalloc`
+(`kernel/core/faulttest.c`) loads `cosmotest.ko` with one injected
+allocation failure at a different allocation each time and requires a
+clean load or `-ENOMEM`.
+
 ## Gaps
 
 - No fixture with an unresolvable symbol, a weak undefined symbol, or a

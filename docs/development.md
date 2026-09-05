@@ -74,6 +74,7 @@ Notes:
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
 | `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion, nested-page-table and AArch64-relocation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `fuzz` | Build the host fuzz targets in `tests/fuzz/` (module ELF, user ELF, package formats, Linux ABI conversions, virtqueue, cosmofs images) under ASan/UBSan and run each over its seeds and `FUZZ_RUNS` (default 20000) seeded mutations; `FUZZ_ENGINE=libfuzzer` links libFuzzer instead; `fuzz-build` builds only (`docs/verification/`) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -419,8 +420,9 @@ container (QEMU 10, `libclang-rt-dev` for the sanitizers,
 `qemu-system-arm` and `qemu-efi-aarch64` for the AArch64 target), as a
 matrix over `arch: [x86_64, aarch64]`. Each job runs `check-tools`, a
 debug build with `test`, a release build with `test`, `host-test`,
-`analyze`, `reproducible`, and `test-crash` with `ARCH=<arch>`, and
-uploads serial logs and images per architecture. Both targets are
+`analyze`, `reproducible`, and `test-crash` with `ARCH=<arch>`; the
+x86-64 job also runs `fuzz` (the targets are host binaries, the same on
+either job), and each uploads serial logs and images per architecture. Both targets are
 cross-compiled and emulated under TCG on the x86-64 runner: the toolchain
 is host-agnostic, which is the point of using clang, but CI does not
 exercise an ARM64 host. GitHub's hosted ARM64 runners are not enabled
@@ -436,7 +438,7 @@ Constitution section 66 applies to every subsystem change. In practice:
 2. Work on a feature branch and open a pull request; Greptile reviews every
    PR on the repository.
 3. Before pushing: `make test`, `make BUILD=release test`, `make host-test`,
-   `make analyze`, `make reproducible`, `make test-crash`.
+   `make fuzz`, `make analyze`, `make reproducible`, `make test-crash`.
 4. Update the subsystem documentation in the same PR.
 
 The virtualization tests need QEMU 9.2 or newer (TCG nested paging for

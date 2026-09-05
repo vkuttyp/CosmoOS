@@ -165,10 +165,14 @@ Boot log lines from the memory subsystem in that configuration:
 
 Not tested yet:
 
-- **Out-of-memory injection.** No test drives the buddy to exhaustion in
-  the kernel or makes a slab grow fail; the NULL paths in `kmalloc`,
-  `vm_kernel_alloc` rollback, and the fault handler's OOM panic are
-  exercised only by the host `exhaustion` test at the buddy level.
+- **Out-of-memory injection** is now partly covered: the `fault-kmalloc`
+  self-test (`kernel/core/faulttest.c`, `docs/verification/`) makes
+  `kmem_cache_alloc` and the large-page path of `kmalloc` return NULL on
+  a per-thread schedule, and checks the file, socket and module paths
+  return `-ENOMEM` cleanly with the heap's live-object count back at its
+  baseline. Real exhaustion of the buddy in the kernel, `vm_kernel_alloc`
+  rollback, and the fault handler's OOM panic are still exercised only
+  by the host `exhaustion` test at the buddy level.
 - **Concurrency.** Everything runs on one CPU. Zone, cache, and space
   locks are taken but never contended. Phase 3 SMP must add multi-CPU
   stress and a lock-order checker.

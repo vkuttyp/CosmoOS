@@ -178,7 +178,9 @@ Details per call:
   `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, since Phase 12
   `hv.backend`, `hv.vms`, `hv.vcpus`, `hv.exits`
-  (`docs/kernel-services/virtualization/api.md`), and `sysctl.names`
+  (`docs/kernel-services/virtualization/api.md`), in debug builds
+  `debug.faultinject` (the fault-injection rules and counters, one line
+  per kind; `docs/verification/api.md`), and `sysctl.names`
   (the list, newline separated); values are strings; read-only.
 
 ### Constants

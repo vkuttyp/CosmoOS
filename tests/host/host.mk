@@ -9,7 +9,7 @@ HOST_CFLAGS := \
 	-std=c11 -g -O1 -fno-omit-frame-pointer \
 	-fsanitize=address,undefined -fno-sanitize-recover=undefined \
 	-Wall -Wextra -Werror -Wshadow -Wno-unused-function \
-	-DCONFIG_DEBUG=1 -DCONFIG_SELFTEST=0 -DCONFIG_CRASH_TEST=0 \
+	-DCONFIG_DEBUG=1 -DCONFIG_SELFTEST=0 -DCONFIG_CRASH_TEST=0 -DCONFIG_FAULTINJECT=0 \
 	-I$(ROOT)/tests/host/shim \
 	-I$(ROOT)/tests/host \
 	-I$(ROOT)/kernel/include \

@@ -2,8 +2,8 @@
 #
 # Runs the full Phase 0 pipeline on every push and pull request:
 #   tool check -> debug build -> QEMU boot test -> release build + test
-#   -> host unit tests (ASan/UBSan) -> static analysis
-#   -> reproducibility check -> panic-path test.
+#   -> host unit tests (ASan/UBSan) -> fuzz targets (x86_64 job)
+#   -> static analysis -> reproducibility check -> panic-path test.
 #
 # The runner is x86-64 Linux. The job runs in a Debian trixie container:
 # the virtualization tests need QEMU >= 9.2, whose TCG applies nested
@@ -74,6 +74,11 @@ jobs:
 
       - name: Host unit tests (ASan + UBSan)
         run: make ARCH=${{ matrix.arch }} host-test
+
+      - name: Fuzz targets (ASan + UBSan, bounded run)
+        # Host binaries, identical on either job: run them once.
+        if: matrix.arch == 'x86_64'
+        run: make ARCH=${{ matrix.arch }} fuzz FUZZ_RUNS=50000
 
       - name: Static analysis
         run: make ARCH=${{ matrix.arch }} analyze

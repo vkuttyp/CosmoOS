@@ -62,9 +62,13 @@ void backtrace_print(const struct arch_trap_frame *from)
     (void)from;
 }
 
+/* The fuzz driver raises this to KLOG_ERROR + 1: a rejected input's
+ * warnings are the expected outcome twenty thousand times over. */
+int harness_klog_min = KLOG_WARN;
+
 void klog(enum klog_level level, const char *fmt, ...)
 {
-    if (level < KLOG_WARN)
+    if ((int)level < harness_klog_min)
         return;
     va_list ap;
     va_start(ap, fmt);

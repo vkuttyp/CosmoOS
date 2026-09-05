@@ -255,6 +255,22 @@ def main():
             failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
 
     selftest_lines = [ln for ln in lines if ln.startswith("SELFTEST: ")]
+    # Per-test durations (docs/verification/design.md, "Per-test timing"):
+    # report the slowest and fail one that nears the hang watchdog.
+    budget_ms = int(os.environ.get("SELFTEST_BUDGET_MS", "8000"))
+    timings = []
+    for ln in selftest_lines:
+        m = re.match(r"SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)", ln)
+        if m:
+            timings.append((int(m.group(2)), m.group(1)))
+    if timings:
+        timings.sort(reverse=True)
+        total = sum(t for t, _ in timings)
+        print(f"boot-test: {len(timings)} self-tests, {total} ms total; slowest: "
+              + ", ".join(f"{name} {ms} ms" for ms, name in timings[:5]))
+        for ms, name in timings:
+            if ms > budget_ms:
+                failures.append(f"self-test {name} took {ms} ms (budget {budget_ms} ms)")
     want_selftest = args.expect_selftest == "yes" or (args.expect_selftest == "auto" and selftest_lines)
     if want_selftest and not any(ln.startswith("SELFTEST: PASS") for ln in selftest_lines):
         failures.append("no 'SELFTEST: PASS' line")
