@@ -125,13 +125,18 @@ struct spawn_handle { int child; int parent; };
 pid_t spawnve(const char *path, const char *const argv[], const char *const envp[],
               const struct spawn_handle *h, size_t nh);
 pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh);
+pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[],
+                 const struct spawn_handle *h, size_t nh, uid_t uid, gid_t gid);   /* COSMO_SPAWN_SETCRED */
 pid_t waitpid(pid_t pid, int *status, int options);   /* WNOHANG */
 pid_t wait(int *status);
 int kill(pid_t pid, int sig);
 ```
 
 `spawnve` fills `struct cosmo_spawn` (`cwd` NULL, `flags` 0) and calls
-`SYS_spawn`; the child receives exactly the handles in `h` (`h == NULL,
+`SYS_spawn`; `spawnve_as` sets `COSMO_SPAWN_SETCRED` with the uid and
+gid the child starts as (`docs/kernel/security/design.md` §1; `EPERM`
+for ids the caller may not grant). `cosmo_getrlimit`/`cosmo_setrlimit`
+in `cosmo/syscall.h` are the raw resource-limit calls; the child receives exactly the handles in `h` (`h == NULL,
 nh == 0`: handles 0, 1, 2 as they are). `spawnvp` uses `environ`; a
 `file` containing `/` is used as is, otherwise each `PATH` directory
 (default `/bin:/sbin:/usr/bin:/usr/sbin`) is tried with `stat` and the first regular file

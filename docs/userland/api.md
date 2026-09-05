@@ -105,7 +105,7 @@ when everything succeeded, 1 otherwise, 2 for usage errors.
 |---|---|---|
 | `mount` | `mount [-r] source target fstype` | `-r` is `MS_RDONLY`; `source` is a block device name (`vda`) or `none` |
 | `umount` | `umount [-f] target` | `-f` is `MNT_FORCE` |
-| `ps` | `ps` | `procinfo`; columns `PID PPID UID S THR SYSCALLS TIME(ms) NAME`; `S` is `R` running, `X` exiting, `Z` zombie |
+| `ps` | `ps` | `procinfo`; columns `PID PPID UID S THR SYSCALLS TIME(ms) NAME`; `S` is `R` running, `X` exiting, `Z` zombie; an unprivileged user sees only its own processes |
 | `kill` | `kill [-sig | -s sig] pid...` | `sig` numeric or `KILL`, `TERM` (default), `INT`, `HUP`, with or without `SIG` |
 | `dmesg` | `dmesg` | the newest 32 KiB of kernel log lines |
 | `sysctl` | `sysctl -a` or `sysctl name...` | prints `name = value`; names from `sysctl.names` |

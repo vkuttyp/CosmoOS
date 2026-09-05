@@ -136,6 +136,8 @@ before anything else runs; `sys_fstat` accepts every I/O object with a
 pipe, `write` on a full pipe, `wait`, `sleep_ns`, the socket waits) use
 `wait_event_killable` and return `-EINTR` when the process is killed,
 after which the dispatcher's `process_check_kill` ends the process.
-`SYS_COUNT` is 50: Phase 12 added the seven virtualization calls 43–49
+`SYS_COUNT` is 58: Phase 12 added the seven virtualization calls 43–49,
+the Prompt #3 fix pass the six credential calls 50–55, audit milestone 6
+`getrlimit`/`setrlimit` 56–57 (`docs/kernel/security/api.md`)
 (`kernel-services/virtualization/hvsys.c`, listed in the native table
 like every other handler; `docs/kernel-services/virtualization/`).

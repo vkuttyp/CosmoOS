@@ -12,6 +12,7 @@ void handle_table_init(struct handle_table *t)
     spinlock_init(&t->lock, "handles");
     memset(t->entries, 0, sizeof(t->entries));
     t->count = 0;
+    t->limit = HANDLE_TABLE_SIZE;
 }
 
 void handle_table_destroy(struct handle_table *t)
@@ -35,6 +36,11 @@ int handle_install(struct handle_table *t, struct kobject *obj, unsigned rights)
     kobject_get(obj);
 
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    if (t->count >= t->limit) {   /* the process's NOFILE limit */
+        spin_unlock_irqrestore(&t->lock, s);
+        kobject_put(obj);
+        return -EMFILE;
+    }
     for (int h = 0; h < HANDLE_TABLE_SIZE; h++) {
         if (t->entries[h].obj == NULL) {
             int r = install_slot(t, h, obj, rights);

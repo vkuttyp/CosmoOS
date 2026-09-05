@@ -161,6 +161,20 @@
 #define LX_S_IFCHR 0020000
 #define LX_S_IFIFO 0010000
 
+/* --- rlimits (getrlimit/setrlimit/prlimit64) --- */
+#define LX_RLIMIT_DATA 2
+#define LX_RLIMIT_STACK 3
+#define LX_RLIMIT_RSS 5
+#define LX_RLIMIT_NPROC 6
+#define LX_RLIMIT_NOFILE 7
+#define LX_RLIMIT_AS 9
+#define LX_RLIM_NLIMITS 16
+#define LX_RLIM_INFINITY (~0ull)
+struct lx_rlimit {
+    uint64_t rlim_cur;
+    uint64_t rlim_max;
+};
+
 /* --- mmap --- */
 #define LX_PROT_READ 1
 #define LX_PROT_WRITE 2

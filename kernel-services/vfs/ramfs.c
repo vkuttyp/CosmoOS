@@ -35,10 +35,6 @@ struct ramfs_node {
     void *chr_priv;
 };
 
-struct ramfs {
-    unsigned nr_pages_limit;
-};
-
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
 
@@ -372,6 +368,11 @@ static int ramfs_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, 
     (void)flags;
     if (bdev != NULL)
         return -EINVAL;
+    /* The page cache is this filesystem's store: its pages are never
+     * reclaimed, and the mount has a page budget so no process fills RAM
+     * through /tmp (docs/kernel/security/design.md §3). */
+    mnt->flags |= MOUNT_CACHE_IS_STORE;
+    mnt->cache_limit_pages = RAMFS_MAX_PAGES;
     struct vnode *root = ramfs_new(mnt, VNODE_DIR, 0755, NULL);
     if (root == NULL)
         return -ENOMEM;

@@ -54,10 +54,12 @@ convention.
 
 ## Non-responsibilities
 
-- Credentials, capabilities, permission checks, audit logging,
-  sandboxing, resource limits: section 41's model arrives with the
-  security phase; the module loader's future `sys_module_load` waits for
-  it.
+- Capabilities, audit logging, sandboxing, namespaces: section 41's
+  remaining items arrive with the container work; the module loader's
+  future `sys_module_load` waits for them. Credentials, permission
+  checks and resource limits exist (`design.md`, Prompt #3 and audit
+  milestone 6) and live in `kernel/process/` and the VFS; this directory
+  holds their design record.
 - Signing. The kernel never signs anything; the secret key lives in the
   build (`scripts/modsign.py`).
 - Constant-time arithmetic. Verification sees only public inputs, so

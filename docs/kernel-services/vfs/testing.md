@@ -5,7 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Host | `test_cosmofs` (on-disk layout sizes, inode/imap index arithmetic, extent mapping) and the CRC32C vectors in `test_crypto` | `make host-test` |
-| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device | `make test` |
+| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
 | Host fuzz | `fuzz_cosmofs`: mount, walk and read mutated images under ASan/UBSan (`docs/verification/`) | `make fuzz` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 
@@ -152,4 +152,6 @@ QEMU_TESTDISK=/tmp/d.img make run    # keep a formatted disk between runs
 - No host `mkfs`; `cosmofs_format` runs only in the kernel.
 - `-EPERM` on `mount` has no test until a non-root process exists.
 - Large files (more than 264 runs) and full disks (`-ENOSPC`) are not
-  exercised.
+  exercised; `cache-limits` syncs its 2 MiB file every 64 pages to stay
+  under the extent cap (writeback is now in page order, so a
+  sequentially written file lays out contiguously).

@@ -36,7 +36,7 @@ kernel stack.
 | 6 | `clock_ns` | none | monotonic nanoseconds since boot | none |
 | 7 | `mmap` | `void *hint, size_t len, int prot, int flags` | address | `EINVAL`, `ENOMEM`, `EEXIST` |
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
-| 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200) |
+| 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
 | 10 | `close` | `int h` | 0 | `EBADF` |
 | 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
 | 12 | `stat` | `const char *path, struct cosmo_stat *st` | 0 | path errors, `EFAULT` |
@@ -59,7 +59,7 @@ kernel stack.
 | 29 | `recvfrom` | `int h, void *buf, size_t len, struct cosmo_sockaddr *from, size_t *fromlen` | bytes, 0 at end of stream | `EBADF`, `EFAULT`, `EINVAL`, `ENOTCONN`, `ECONNRESET` |
 | 30 | `shutdown` | `int h, int how` | 0 | `EBADF`, `EINVAL` |
 | 31 | `getsockname` | `int h, struct cosmo_sockaddr *sa, size_t *len` | 0 | `EBADF`, `EFAULT` |
-| 32 | `spawn` | `const struct cosmo_spawn *req` | the child's pid | `EFAULT`, `EINVAL` (flags, NULL path/argv, empty argv, bad map), `E2BIG`, `ENAMETOOLONG`, `EBADF` (map names a free handle), path errors, `ENOTDIR` (cwd), `EACCES` (not a regular executable file), `ENOEXEC`, `ENOMEM` |
+| 32 | `spawn` | `const struct cosmo_spawn *req` | the child's pid | `EPERM` (`COSMO_SPAWN_SETCRED` naming ids the caller may not grant), `EAGAIN` (`COSMO_RLIMIT_NPROC`), `EFAULT`, `EINVAL` (unknown flags, NULL path/argv, empty argv, bad map), `E2BIG`, `ENAMETOOLONG`, `EBADF` (map names a free handle), path errors, `ENOTDIR` (cwd), `EACCES` (not a regular executable file), `ENOEXEC`, `ENOMEM` |
 | 33 | `wait` | `int pid, int *status, unsigned flags` | the reaped pid; 0 with `COSMO_WNOHANG` when none exited | `EINVAL` (pid 0 or < -1, unknown flag), `ECHILD`, `EINTR`, `EFAULT` |
 | 34 | `kill` | `int pid, int sig` | 0 | `EINVAL` (sig outside 1..31, pid <= 0), `ESRCH`, `EPERM` |
 | 35 | `pipe` | `int h[2]` | 0; `h[0]` reads, `h[1]` writes | `EFAULT`, `ENOMEM`, `EMFILE` |
@@ -67,9 +67,11 @@ kernel stack.
 | 37 | `getppid` | none | the parent's pid, 0 for a kernel-created process | none |
 | 38 | `chdir` | `const char *path` | 0 | `EFAULT`, `ENAMETOOLONG`, path errors, `ENOTDIR` |
 | 39 | `getcwd` | `char *buf, size_t len` | the path length (the NUL is written too) | `ERANGE`, `EFAULT` |
-| 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the total number of processes (up to `count` records filled) | `EFAULT`, `ENOMEM` |
+| 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the number of processes the caller may see (up to `count` records filled): every process for a privileged caller, else those with its real uid | `EFAULT`, `ENOMEM` |
 | 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EFAULT`, `ENOMEM` |
 | 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
+| 56 | `getrlimit` | `unsigned resource, uint64_t *value` | 0 | `EINVAL`, `EFAULT` |
+| 57 | `setrlimit` | `unsigned resource, uint64_t value` | 0 | `EINVAL` (resource, `NOFILE` > 64), `EPERM` (raising without privilege) |
 | 43 | `vm_create` | `int vmm_h` (a handle to `/dev/vmm` open for writing) | a VM handle | `EBADF`, `EPERM`, `ENOTSUP`, `ENOSPC`, `ENOMEM`, `EMFILE` |
 | 44 | `vm_mem` | `int vm, uint64_t gpa, uint64_t len` | 0 (a zeroed guest memory region) | `EBADF`, `EINVAL`, `ENOSPC`, `ENOMEM` |
 | 45 | `vm_mem_rw` | `int vm, uint64_t gpa, void *buf, size_t len, int write` | bytes copied | `EBADF`, `EINVAL`, `EFAULT`, `ENOMEM` |
@@ -90,7 +92,9 @@ Calls 32–42 (Phase 9) are specified below and in
 kinds and their errno values, are in
 `docs/kernel-services/virtualization/api.md`; a VM handle is an I/O
 object (`read` drains the guest's debug console, `fstat` is
-`COSMO_DT_CHR`), a vCPU handle only closes. `SYS_COUNT` is 50. A file opened with `open`
+`COSMO_DT_CHR`), a vCPU handle only closes. Calls 50–55 are the
+credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
+`SYS_COUNT` is 58. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` or `accept` is
@@ -186,7 +190,9 @@ Details per call:
   emitted line, oldest overwritten first; reading does not consume.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
   `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
-  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, since Phase 12
+  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
+  and `vm.cache_limit` (the page cache's size and its reclaim limit,
+  `docs/kernel/security/design.md` §3), since Phase 12
   `hv.backend`, `hv.vms`, `hv.vcpus`, `hv.exits`
   (`docs/kernel-services/virtualization/api.md`), in debug builds
   `debug.faultinject` (the fault-injection rules and counters, one line
@@ -196,7 +202,9 @@ Details per call:
 ### Constants
 
 `COSMO_PROT_NONE/READ/WRITE/EXEC` (0, 1, 2, 4); `COSMO_MAP_ANONYMOUS`
-(1), `COSMO_MAP_FIXED` (2); `COSMO_E*` error numbers equal to the
+(1), `COSMO_MAP_FIXED` (2); `COSMO_RLIMIT_AS/MEM/NOFILE/NPROC/VMEM`
+(0–4), `COSMO_RLIM_INFINITY`; `COSMO_SPAWN_SETCRED` (1) with the
+`uid`/`gid` fields of `struct cosmo_spawn`; `COSMO_E*` error numbers equal to the
 kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
 `EINVAL` 22, `EMFILE` 24, `ENOSYS` 38, and others; Phase 9 adds `ESRCH`
 3, `EINTR` 4, `E2BIG` 7, `ENOEXEC` 8, `ECHILD` 10, `EACCES` 13,

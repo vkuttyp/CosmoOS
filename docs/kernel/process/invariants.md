@@ -234,6 +234,12 @@ setres* beyond the caller's own ids) asks the one predicate in
 privileged call and every root-owned object refused). Gap: no
 capability set yet; privilege is all-or-nothing.
 
+**P26b. Privilege flows down and limits bind.** The rules S1–S5 and S8
+of `docs/kernel/security/invariants.md`: a new process's ids come only
+from its parent (copy or a permitted `SETCRED`), its limits are its
+parent's, lowered freely and raised only with privilege, and every
+limit is enforced where the resource is granted. Check: there.
+
 **P27. Relative paths resolve from the process's working directory,
 whose string and vnode agree.** Every path system call passes
 `process_current()->cwd`; `chdir` verifies the target is a directory

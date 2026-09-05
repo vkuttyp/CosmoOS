@@ -88,10 +88,41 @@ the build if one is tracked, or if a revoked public key (the leaked
 key and its ring explicitly (`SIGNING=release MODSIGN_KEY= KEYRING_PUBS=`).
 Generate a pair with `scripts/modsign.py keygen`. See `tools/keys/README.md`.
 
+## Access control and resource limits (`design.md`)
+
+Credentials and the privilege predicate live in `kernel/cred.h`
+(`docs/kernel/process/api.md`); permission checks in
+`vfs_permission` (`docs/kernel-services/vfs/api.md`). Milestone 6 adds:
+
+### `struct rlimits { uint64_t v[COSMO_RLIMIT_COUNT]; }` (`kernel/rlimit.h`)
+One value per `COSMO_RLIMIT_AS`, `MEM`, `NOFILE`, `NPROC`, `VMEM`;
+`COSMO_RLIM_INFINITY` disables one. `rlimits_default` is what a
+kernel-created process (init) starts with: 2 GiB, 128 MiB, 64, 128,
+64 MiB.
+
+### `int process_getrlimit(unsigned resource, uint64_t *value)`, `int process_setrlimit(unsigned resource, uint64_t value)`
+The calling process's limits. `-EINVAL` for an unknown resource or a
+`NOFILE` value above `HANDLE_TABLE_SIZE`; `-EPERM` for raising without
+privilege. Setting `AS`/`MEM` calls `vm_space_set_limits`, `NOFILE`
+writes `handles.limit`; `NPROC` and `VMEM` are read at spawn and at
+`vm_create`.
+
+### `unsigned process_count_uid(uint32_t ruid)`
+Processes whose real uid is `ruid`, under the table lock (the `NPROC`
+count).
+
+### `bool process_log_permitted(void)`
+True for a privileged caller; otherwise one token from the process's
+`sys_log` bucket (64, refilled at 16 per second), false when empty.
+
+### `struct process_spawn_cred { uint32_t uid, gid; }`
+Passed to `process_spawn` for `COSMO_SPAWN_SETCRED`; validated there
+(`may_set_cred`) and applied by `process_create_from_elf` through
+`process_spawn_attr.set_cred/uid/gid`.
+
 ## Not yet here
 
-Credentials (`struct cred`), capabilities, permission checks, audit,
-sandboxing, resource limits: section 41 of the constitution, scheduled
-after the device and filesystem phases. The module loader's
+Capabilities, audit, sandboxing, namespaces: section 41 of the
+constitution, scheduled with the container work. The module loader's
 user-facing entry point (`sys_module_load`) waits for them, which is
 why there is none in Phase 5.

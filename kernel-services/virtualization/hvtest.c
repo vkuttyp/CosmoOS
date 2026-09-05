@@ -50,7 +50,7 @@ static int make_guest(const char *image, struct vm **vm_out, struct vcpu **vcpu_
     if (!bootarchive_find(image, &data, &size))
         return -ENOENT;
     struct vm *vm;
-    int rc = vm_create(0, &vm);
+    int rc = vm_create(0, HV_VM_MEM_MAX, &vm);
     if (rc)
         return rc;
     rc = vm_mem_add(vm, 0, MEM_LEN);
@@ -143,7 +143,7 @@ bool selftest_hv_probe(const char **reason)
     if (!c->present) {
         kinfo("selftest: hv-probe: no backend (%s)", c->name);
         struct vm *vm;
-        CHECK(vm_create(0, &vm) == -ENOTSUP);
+        CHECK(vm_create(0, HV_VM_MEM_MAX, &vm) == -ENOTSUP);
         return true;
     }
     CHECK(strcmp(c->name, "svm") == 0 || strcmp(c->name, "vmx") == 0);
@@ -158,13 +158,18 @@ bool selftest_hv_npt(const char **reason)
         return true;
     unsigned before = hv_vm_count();
     struct vm *vm;
-    CHECK(vm_create(0, &vm) == 0);
+    CHECK(vm_create(0, HV_VM_MEM_MAX, &vm) == 0);
     CHECK(hv_vm_count() == before + 1);
     CHECK(vm_mem_add(vm, 0, 0x10000) == 0);
     CHECK(vm_mem_add(vm, 0x200000, 0x3000) == 0);
     CHECK(vm_mem_add(vm, 0x8000, 0x1000) == -EINVAL);          /* overlap */
     CHECK(vm_mem_add(vm, 0x1001, 0x1000) == -EINVAL);          /* alignment */
     CHECK(vm_mem_add(vm, 0x300000, HV_VM_MEM_MAX) == -ENOMEM); /* the per-VM limit */
+    struct vm *small;
+    CHECK(vm_create(0, 0x2000, &small) == 0);                    /* the creator's COSMO_RLIMIT_VMEM */
+    CHECK(vm_mem_add(small, 0, 0x3000) == -ENOMEM);
+    CHECK(vm_mem_add(small, 0, 0x2000) == 0);
+    kobject_put(&small->obj);
     CHECK(vm_mem_add(vm, HV_GPA_LIMIT - 0x1000, 0x2000) == -EINVAL);
     for (uint64_t gpa = 0; gpa < 0x10000; gpa += 0x1000) {
         paddr_t hpa;

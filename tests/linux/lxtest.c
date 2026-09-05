@@ -252,6 +252,32 @@ int main(int argc, char **argv)
     CHECKV(sc0(LX_fork) == -38, 0);
     CHECKV(sc0(LX_sched_yield) == 0, 0);
 
+    /* --- rlimits (milestone 6): one value, reported as cur == max --- */
+    struct lx_rlimit rl;
+    CHECKV(sc2(LX_getrlimit, LX_RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur == 64 && rl.rlim_max == 64, rl.rlim_cur);
+    CHECKV(sc4(LX_prlimit64, 0, LX_RLIMIT_AS, 0, &rl) == 0 && rl.rlim_cur == (2ull << 30), rl.rlim_cur);
+    CHECKV(sc2(LX_getrlimit, LX_RLIMIT_STACK, &rl) == 0 && rl.rlim_cur == LX_RLIM_INFINITY, 0);   /* not bounded here */
+    struct lx_rlimit few = { 8, 8 };
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_NOFILE, &few) == 0, 0);
+    long opened[8];
+    int nopen = 0, emfile = 0;
+    for (int i = 0; i < 8; i++) {
+        long ofd = sc4(LX_openat, LX_AT_FDCWD, "/etc/rc", LX_O_RDONLY, 0);
+        if (ofd >= 0)
+            opened[nopen++] = ofd;
+        else if (ofd == -24)
+            emfile++;
+    }
+    CHECKV(nopen >= 1 && emfile >= 1, nopen);   /* EMFILE at the eighth handle */
+    for (int i = 0; i < nopen; i++)
+        sc1(LX_close, opened[i]);
+    struct lx_rlimit many = { 64, 64 };
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_NOFILE, &many) == 0, 0);   /* root raises it back */
+    struct lx_rlimit bad = { 10, 5 };
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_NOFILE, &bad) == -22, 0);
+    CHECKV(sc4(LX_prlimit64, 99999, LX_RLIMIT_NOFILE, 0, &rl) == -1, 0);   /* EPERM: not ours */
+    CHECKV(sc2(LX_setrlimit, LX_RLIMIT_STACK, &few) == 0, 0);   /* accepted and ignored */
+
     /* --- futex --- */
     static uint32_t word = 5;
     CHECKV(sc6(LX_futex, &word, LX_FUTEX_WAIT | LX_FUTEX_PRIVATE_FLAG, 6, 0, 0, 0) == -11, 0);   /* EAGAIN */

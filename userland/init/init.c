@@ -408,6 +408,131 @@ static int probe(const char *kind)
         cosmo_close(h[1]);
         return 0;
     }
+    if (strcmp(kind, "hold") == 0) {
+        cosmo_sleep_ns(30000000);   /* stay alive long enough to be counted */
+        return 0;
+    }
+    if (strncmp(kind, "uid-is:", 7) == 0) {
+        unsigned want = (unsigned)strtoul(kind + 7, NULL, 10);
+        return (getuid() == want && geteuid() == want && getgid() == want && getgroups(0, NULL) == 0) ? 0 : 1;
+    }
+    if (strcmp(kind, "rlimit-root") == 0) {
+        uint64_t v;
+        if (cosmo_getrlimit(COSMO_RLIMIT_AS, &v) != 0 || v != (2ull << 30))
+            return 10;
+        if (cosmo_getrlimit(COSMO_RLIMIT_NOFILE, &v) != 0 || v != 64)
+            return 11;
+        if (cosmo_getrlimit(COSMO_RLIMIT_NPROC, &v) != 0 || v != 128)
+            return 12;
+        if (cosmo_getrlimit(99, &v) != -COSMO_EINVAL || cosmo_setrlimit(99, 1) != -COSMO_EINVAL)
+            return 13;
+        if (cosmo_setrlimit(COSMO_RLIMIT_NOFILE, 65) != -COSMO_EINVAL)
+            return 14;
+        /* Address space: 16 MiB caps the mappings (the stack alone is 8). */
+        if (cosmo_setrlimit(COSMO_RLIMIT_AS, 16ull << 20) != 0)
+            return 15;
+        if (cosmo_mmap(NULL, 32ull << 20, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS) != -COSMO_ENOMEM)
+            return 16;
+        long m = cosmo_mmap(NULL, 1ull << 20, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        if (m <= 0)
+            return 17;
+        if (cosmo_setrlimit(COSMO_RLIMIT_AS, 2ull << 30) != 0)   /* root raises it back */
+            return 18;
+        /* Handles: 0, 1, 2 are open; a limit of 4 leaves room for one. */
+        if (cosmo_setrlimit(COSMO_RLIMIT_NOFILE, 4) != 0)
+            return 19;
+        int h[2];
+        if (cosmo_pipe(h) != -COSMO_EMFILE)
+            return 20;
+        if (cosmo_setrlimit(COSMO_RLIMIT_NOFILE, 64) != 0 || cosmo_pipe(h) != 0)
+            return 21;
+        cosmo_close(h[0]);
+        cosmo_close(h[1]);
+        /* Processes: this one counts; a limit of 1 leaves no room for a child. */
+        const char *child[] = { "init", "--probe", "uid-is:0", NULL };
+        if (cosmo_setrlimit(COSMO_RLIMIT_NPROC, 1) != 0)
+            return 22;
+        if (spawnve("/boot/init", child, NULL, NULL, 0) >= 0 || errno != EAGAIN)
+            return 23;
+        if (cosmo_setrlimit(COSMO_RLIMIT_NPROC, 128) != 0)
+            return 24;
+        /* A privileged caller hands a child any identity; it has no groups. */
+        const char *child1000[] = { "init", "--probe", "uid-is:1000", NULL };
+        pid_t pid = spawnve_as("/boot/init", child1000, NULL, NULL, 0, 1000, 1000);
+        int status = -1;
+        if (pid <= 0 || waitpid(pid, &status, 0) != pid || status != 0)
+            return 25;
+        /* Guest memory: the cap the VM records is the creator's limit. */
+        if (cosmo_setrlimit(COSMO_RLIMIT_VMEM, 1ull << 20) != 0)
+            return 26;
+        long dev = cosmo_open("/dev/vmm", COSMO_O_RDWR, 0);
+        if (dev >= 0) {
+            long vm = cosmo_syscall1(SYS_vm_create, dev);
+            if (vm >= 0) {
+                if (cosmo_syscall3(SYS_vm_mem, vm, 0, 2ull << 20) != -COSMO_ENOMEM)
+                    return 27;
+                if (cosmo_syscall3(SYS_vm_mem, vm, 0, 1ull << 20) != 0)
+                    return 28;
+                cosmo_close((int)vm);
+            } else if (vm != -COSMO_EOPNOTSUPP) {   /* no backend on this platform */
+                return 29;
+            }
+            cosmo_close((int)dev);
+        }
+        return 0;
+    }
+    if (strcmp(kind, "rlimit-unpriv") == 0) {
+        if (setresgid(1000, 1000, 1000) != 0 || setresuid(1000, 1000, 1000) != 0)
+            return 10;
+        if (cosmo_setrlimit(COSMO_RLIMIT_NOFILE, 60) != 0)          /* lowering is free */
+            return 11;
+        if (cosmo_setrlimit(COSMO_RLIMIT_NOFILE, 64) != -COSMO_EPERM) /* raising is privileged */
+            return 12;
+        if (cosmo_setrlimit(COSMO_RLIMIT_MEM, 64ull << 20) != 0 || cosmo_setrlimit(COSMO_RLIMIT_MEM, 65ull << 20) != -COSMO_EPERM)
+            return 13;
+        /* No path back to root through spawn. */
+        const char *child0[] = { "init", "--probe", "uid-is:0", NULL };
+        if (spawnve_as("/boot/init", child0, NULL, NULL, 0, 0, 0) >= 0 || errno != EPERM)
+            return 14;
+        if (spawnve_as("/boot/init", child0, NULL, NULL, 0, 1000, 0) >= 0 || errno != EPERM)
+            return 15;
+        const char *child1000[] = { "init", "--probe", "uid-is:1000", NULL };
+        pid_t pid = spawnve_as("/boot/init", child1000, NULL, NULL, 0, 1000, 1000);   /* an id it holds */
+        int status = -1;
+        if (pid <= 0 || waitpid(pid, &status, 0) != pid || status != 0)
+            return 16;
+        /* procinfo shows only this user's processes. */
+        struct cosmo_procinfo pi[64];
+        int n = procinfo(pi, 64);
+        if (n < 1)
+            return 17;
+        for (int i = 0; i < n && i < 64; i++)
+            if (pi[i].uid != 1000)
+                return 18;
+        /* The kernel-log write is rate limited for unprivileged callers. */
+        int eagain = 0, ok = 0;
+        for (int i = 0; i < 80; i++) {
+            long r = cosmo_log("rl", 2);
+            if (r == -COSMO_EAGAIN)
+                eagain++;
+            else if (r == 0)
+                ok++;
+        }
+        if (ok < 16 || eagain == 0)
+            return 19;
+        return 0;
+    }
+    if (strcmp(kind, "mem-limit") == 0) {
+        /* Resident memory capped at 1 MiB; touching 4 MiB must be fatal. */
+        if (cosmo_setrlimit(COSMO_RLIMIT_MEM, 1ull << 20) != 0)
+            return 10;
+        long m = cosmo_mmap(NULL, 4ull << 20, COSMO_PROT_READ | COSMO_PROT_WRITE, COSMO_MAP_ANONYMOUS);
+        if (m <= 0)
+            return 11;
+        for (uint64_t off = 0; off < (4ull << 20); off += P)
+            *(volatile char *)(m + off) = 1;
+        return 9;   /* reached only if the limit did not bite */
+    }
     if (strcmp(kind, "none-touch") == 0) {
         long none = cosmo_mmap(NULL, P, COSMO_PROT_NONE, COSMO_MAP_ANONYMOUS);
         if (none <= 0)
@@ -917,7 +1042,8 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
         SYS_sync, SYS_mount, SYS_umount, SYS_socket, SYS_bind, SYS_listen, SYS_sendto, SYS_shutdown, SYS_getsockname,
         SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
         SYS_vm_mem, SYS_vm_mem_rw, SYS_vcpu_create, SYS_vcpu_regs, SYS_vcpu_irq, SYS_setresuid, SYS_setresgid,
-        SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups,
+        SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups, SYS_getrlimit,
+        /* setrlimit is left out: a random low memory limit would end the fuzzer itself */
         /* and a few numbers past the table, for the dispatcher's own check */
         SYS_COUNT, SYS_COUNT + 1, 1000, -1,
     };

@@ -73,7 +73,10 @@ kernel resolves them and the guest continues.
 ### Limits
 
 `COSMO_HV_VMS_MAX` 8 VMs, `COSMO_HV_VCPUS_MAX` 4 vCPUs per VM,
-`COSMO_HV_VM_MEM_MAX` 64 MiB of guest memory per VM. Not exported but
+`COSMO_HV_VM_MEM_MAX` 64 MiB of guest memory per VM by default: the cap
+a VM records at creation is its creator's `COSMO_RLIMIT_VMEM`
+(`docs/kernel/security/design.md` §2), so a process may be bounded
+lower. Not exported but
 enforced: 16 memory regions per VM, a 4 GiB guest-physical window, a 4 KiB
 console ring.
 

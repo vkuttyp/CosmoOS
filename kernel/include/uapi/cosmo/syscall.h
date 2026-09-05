@@ -78,7 +78,18 @@
 #define SYS_getresgid   53  /* (uint32_t *rgid, uint32_t *egid, uint32_t *sgid) -> 0 */
 #define SYS_setgroups   54  /* (const uint32_t *groups, size_t n) -> 0; privileged; n <= 16 */
 #define SYS_getgroups   55  /* (uint32_t *groups, size_t n) -> count; n == 0 queries the count */
-#define SYS_COUNT       56
+/* Resource limits (docs/kernel/security/design.md §2). */
+#define SYS_getrlimit   56  /* (unsigned resource, uint64_t *value) -> 0 */
+#define SYS_setrlimit   57  /* (unsigned resource, uint64_t value) -> 0; raising a limit needs privilege */
+#define SYS_COUNT       58
+
+#define COSMO_RLIMIT_AS     0   /* bytes of user address space mapped by regions */
+#define COSMO_RLIMIT_MEM    1   /* bytes of anonymous memory populated (resident) */
+#define COSMO_RLIMIT_NOFILE 2   /* open handles (at most the table size, 64) */
+#define COSMO_RLIMIT_NPROC  3   /* processes with the caller's real uid, counting a new child */
+#define COSMO_RLIMIT_VMEM   4   /* guest memory per VM the process creates */
+#define COSMO_RLIMIT_COUNT  5
+#define COSMO_RLIM_INFINITY (~0ull)
 
 #define COSMO_NGROUPS_MAX 16
 
@@ -95,8 +106,13 @@ struct cosmo_spawn {
     const struct cosmo_spawn_handle *handles;
     size_t nr_handles;
     const char *cwd;                           /* NULL: inherit */
-    unsigned flags;                            /* must be 0 */
+    unsigned flags;                            /* COSMO_SPAWN_* or 0 */
+    uint32_t uid, gid;                         /* with COSMO_SPAWN_SETCRED: the child's ids */
 };
+/* The child starts with real, effective and saved ids `uid`/`gid` and no
+ * supplementary groups. A privileged caller names any ids; an unprivileged
+ * one only ids it holds (docs/kernel/security/design.md §1). */
+#define COSMO_SPAWN_SETCRED (1u << 0)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

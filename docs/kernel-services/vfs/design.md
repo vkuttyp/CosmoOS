@@ -153,7 +153,8 @@ takes each mount by position with a reference and syncs it under its
 ### Page cache (`kernel/include/kernel/pagecache.h`)
 
 ```c
-struct pc_entry { uint64_t index; struct page *page; bool dirty; struct pc_entry *next; };
+struct pc_entry { uint64_t index; struct page *page; bool dirty, on_lru; struct pc_entry *next;
+                  struct vnode *vn; struct list_node lru; };
 struct pagecache { struct pc_entry *buckets[PC_HASH]; /* 32 */ unsigned nr_pages, nr_dirty; struct mutex lock; };
 
 int  pagecache_read(struct vnode *vn, uint64_t off, void *buf, size_t len);      /* bounded by vn->size */
@@ -163,12 +164,20 @@ void pagecache_truncate(struct vnode *vn, uint64_t size);                       
 void pagecache_drop(struct vnode *vn);                                             /* free every page (clean) */
 ```
 
-A miss allocates a frame (`pmm_alloc_page`, NORMAL zone), calls
-`readpage` for pages inside the file's block-aligned size (holes zero),
-and inserts. Writes mark pages dirty; nothing reaches the filesystem
-until `pagecache_sync` (called by `vfs_sync`, `fs->sync`, and eviction).
-The frame is addressed through the direct map. Memory: 16 bytes of
-entry per cached page plus the page.
+A miss checks the mount's page budget (`mount.cache_limit_pages`;
+`-ENOSPC` at or above it, nothing allocated), allocates a frame
+(`pmm_alloc_page`, NORMAL zone), calls `readpage` for pages inside the
+file's block-aligned size (holes zero), inserts, counts the page on the
+mount, and links it on the global LRU when the mount's pages can be
+rebuilt (no `MOUNT_CACHE_IS_STORE`). Writes mark pages dirty and take
+them off the LRU; nothing reaches the filesystem until `pagecache_sync`
+(called by `vfs_sync`, `fs->sync`, and eviction), which writes the
+dirty pages in ascending index order and puts them back on the LRU.
+Before a read, write or page get/put locks a cache,
+`reclaim_if_needed` evicts clean LRU-tail pages while the global count
+is at or above `pagecache_limit()` (a quarter of RAM at boot;
+`docs/kernel/security/design.md` §3). The frame is addressed through the
+direct map. Memory: 48 bytes of entry per cached page plus the page.
 
 ### ramfs (`kernel-services/vfs/ramfs.c`)
 
@@ -377,7 +386,11 @@ numbers below `next_ino`, directory entry lengths) before use, and
 metadata is checksummed; corrupt or hostile images yield `-EIO`, not a
 wild pointer. `mount`/`umount` need `cred_privileged`. ramfs limits a
 file to `RAMFS_MAX_FILE` (64 MiB) and a mount to `RAMFS_MAX_PAGES` (16 K
-pages) so a user program cannot exhaust RAM through `/tmp`.
+pages, enforced by the page cache's per-mount budget since audit
+milestone 6; before it the constant was declared and unused) so a user
+program cannot exhaust RAM through `/tmp`; the cache as a whole is
+bounded by `pagecache_limit()` with reclaim of clean pages
+(`docs/kernel/security/design.md` §3).
 
 ### Permissions
 

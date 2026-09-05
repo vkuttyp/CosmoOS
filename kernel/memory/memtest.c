@@ -443,3 +443,65 @@ bool selftest_user_vmm(const char **reason)
     kinfo("selftest: user-vmm: split, merge, PROT_NONE and masked shootdown on a private space");
     return true;
 }
+
+/* --- resource limits at the VMM and handle-table level (docs/kernel/security/design.md §2) --- */
+
+#include <kernel/handle.h>
+#include <kernel/process.h>
+
+bool selftest_rlimit(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    const uint64_t A = 0x0000310000000000ULL;
+
+    /* Address space: four pages allowed; a fifth is -ENOMEM, unmapping makes room. */
+    vm_space_set_limits(sp, 4, UINT64_MAX);
+    CHECK(vm_user_map_anon(sp, A, 5 * PAGE_SIZE, VM_PROT_RW, 0, "t") == -ENOMEM);
+    CHECK(vm_user_map_anon(sp, A, 3 * PAGE_SIZE, VM_PROT_RW, 0, "t") == 0);
+    CHECK(sp->mapped_pages == 3);
+    CHECK(vm_user_map_anon(sp, A + 4 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "t") == -ENOMEM);
+    CHECK(vm_user_map_anon(sp, A + 4 * PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, 0, "t") == 0);
+    CHECK(sp->mapped_pages == 4);
+    CHECK(vm_user_unmap(sp, A, 2 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(sp->mapped_pages == 2);
+    CHECK(vm_user_map_anon(sp, A + 8 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, 0, "t") == 0);
+    CHECK(sp->mapped_pages == 4);
+    /* Lowering below the current use changes nothing mapped; growth is refused. */
+    vm_space_set_limits(sp, 1, UINT64_MAX);
+    CHECK(vm_user_region_count(sp) == 3);
+    CHECK(vm_user_map_anon(sp, A + 16 * PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, 0, "t") == -ENOMEM);
+
+    /* Resident memory: a populated map beyond the limit unwinds completely. */
+    vm_space_set_limits(sp, UINT64_MAX, 2);
+    CHECK(vm_user_map_anon(sp, A + 32 * PAGE_SIZE, 3 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "p") == -ENOMEM);
+    CHECK(sp->anon_pages == 0);   /* the two frames it did populate are back (table pages stay: M19) */
+    CHECK(sp->mapped_pages == 4);
+    CHECK(vm_user_region_count(sp) == 3);
+    CHECK(vm_user_map_anon(sp, A + 32 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "p") == 0);
+    CHECK(sp->anon_pages == 2);
+    vm_space_destroy(sp);
+
+    /* Handles: the table refuses at its limit and again at the table size. */
+    struct handle_table t;
+    handle_table_init(&t);
+    CHECK(t.limit == HANDLE_TABLE_SIZE);
+    struct kobject *con = console_object();
+    t.limit = 2;
+    int h0 = handle_install(&t, con, HANDLE_RIGHT_READ);
+    int h1 = handle_install(&t, con, HANDLE_RIGHT_READ);
+    CHECK(h0 == 0 && h1 == 1);
+    CHECK(handle_install(&t, con, HANDLE_RIGHT_READ) == -EMFILE);
+    CHECK(handle_close(&t, h0) == 0);
+    CHECK(handle_install(&t, con, HANDLE_RIGHT_READ) == 0);
+    t.limit = HANDLE_TABLE_SIZE;
+    for (int i = 2; i < HANDLE_TABLE_SIZE; i++)
+        CHECK(handle_install(&t, con, HANDLE_RIGHT_READ) == i);
+    CHECK(handle_install(&t, con, HANDLE_RIGHT_READ) == -EMFILE);
+    handle_table_destroy(&t);
+
+    /* The per-uid count sees no process for an unused uid. */
+    CHECK(process_count_uid(0xFFFF1234u) == 0);
+    kinfo("selftest: rlimit: address-space, resident-memory and handle limits bind where they are enforced");
+    return true;
+}

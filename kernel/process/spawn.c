@@ -49,8 +49,21 @@ static int validate_handles(struct process *cur, const struct process_handle_map
     return 0;
 }
 
+/* COSMO_SPAWN_SETCRED: a privileged caller names any ids; an unprivileged
+ * one only ids among its own real, effective and saved set, the setresuid
+ * rule (docs/kernel/security/design.md §1). */
+static bool may_set_cred(const struct credentials *c, uint32_t uid, uint32_t gid)
+{
+    if (cred_privileged(c))
+        return true;
+    bool u = uid == c->ruid || uid == c->euid || uid == c->suid;
+    bool g = gid == c->rgid || gid == c->egid || gid == c->sgid;
+    return u && g;
+}
+
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
-                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, pid_t *pid_out)
+                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd,
+                  const struct process_spawn_cred *cred, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -59,11 +72,16 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
     int rc = validate_handles(cur, handles, nr_handles);
     if (rc)
         return rc;
+    if (cred && !may_set_cred(&cur->cred, cred->uid, cred->gid))
+        return -EPERM;
 
     struct process_spawn_attr attr = {
         .parent = cur,
         .handles = handles,
         .nr_handles = nr_handles,
+        .set_cred = cred != NULL,
+        .uid = cred ? cred->uid : 0,
+        .gid = cred ? cred->gid : 0,
     };
     char cwd_path[sizeof(cur->cwd_path)];
     if (cwd) {

@@ -56,6 +56,7 @@ struct vm {
     struct arch_hv_vm *arch;
     struct list_node regions;            /* struct guest_region by gpa */
     unsigned nr_regions;
+    uint64_t mem_limit;                  /* bytes of guest memory this VM may hold (the creator's rlimit) */
     uint64_t mem_bytes;
     struct vcpu *vcpus[HV_VCPUS_MAX];    /* weak: a vcpu references its vm */
     unsigned nr_vcpus;
@@ -97,7 +98,7 @@ void hv_stats(uint64_t *exits, uint64_t *entries, unsigned *vcpus);
 int hv_sysctl(const char *name, char *out, size_t n);
 
 /* VM lifetime: the returned reference belongs to the caller. */
-int vm_create(uint32_t owner_uid, struct vm **out);
+int vm_create(uint32_t owner_uid, uint64_t mem_limit, struct vm **out);   /* mem_limit: COSMO_RLIMIT_VMEM of the creator */
 struct vm *vm_from_kobject(struct kobject *obj);
 
 /* GuestMemory. */
