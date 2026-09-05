@@ -643,10 +643,14 @@ static int64_t lx_brk(struct syscall_args *a)
         return (int64_t)ls->brk;   /* Linux returns the unchanged break on failure */
     uint64_t cur_end = page_align_up(ls->brk), new_end = page_align_up(want);
     if (new_end > cur_end) {
+        /* Growth merges into the existing heap region (same prot and name). */
         if (vm_user_map_anon(p->space, cur_end, new_end - cur_end, VM_PROT_RW, 0, "brk") != 0)
             return (int64_t)ls->brk;
     } else if (new_end < cur_end) {
-        vm_user_unmap(p->space, new_end, cur_end - new_end);
+        /* A shrink cannot fail on a well-formed heap; if it does the break
+         * stays where it was and no mapping changes. */
+        if (vm_user_unmap(p->space, new_end, cur_end - new_end, 0) != 0)
+            return (int64_t)ls->brk;
     }
     ls->brk = want;
     return (int64_t)want;
@@ -675,13 +679,13 @@ static int64_t lx_mmap(struct syscall_args *a)
         vprot |= VM_PROT_WRITE;
     if (nprot & COSMO_PROT_EXEC)
         vprot |= VM_PROT_EXEC;
-    if (vprot == 0)
-        vprot = VM_PROT_READ;
     uint64_t base;
     if (flags & LX_MAP_FIXED) {
         if (!is_page_aligned(hint) || !user_range_ok(hint, len))
             return -EINVAL;
-        vm_user_unmap(p->space, hint, len);   /* Linux replaces what was there */
+        int urc = vm_user_unmap(p->space, hint, len, 0);   /* Linux replaces what was there */
+        if (urc)
+            return urc;
         base = hint;
     } else {
         uint64_t from = (hint >= USER_LO && is_page_aligned(hint)) ? hint : USER_MMAP_BASE;
@@ -701,7 +705,7 @@ static int64_t lx_munmap(struct syscall_args *a)
     size_t len = (size_t)a->a[1];
     if (!is_page_aligned(addr) || len == 0 || !user_range_ok(addr, page_align_up(len)))
         return -EINVAL;
-    return vm_user_unmap(process_current()->space, addr, page_align_up(len));
+    return vm_user_unmap(process_current()->space, addr, page_align_up(len), 0);
 }
 
 static int64_t lx_mprotect(struct syscall_args *a)
@@ -720,8 +724,8 @@ static int64_t lx_mprotect(struct syscall_args *a)
         vprot |= VM_PROT_WRITE;
     if (nprot & COSMO_PROT_EXEC)
         vprot |= VM_PROT_EXEC;
-    if (vprot == 0)
-        vprot = VM_PROT_READ;
+    if (!user_range_ok(addr, len))
+        return -ENOMEM;
     return vm_user_protect(process_current()->space, addr, len, vprot);
 }
 

@@ -168,8 +168,7 @@ static int64_t sys_mmap(struct syscall_args *a)
         vprot |= VM_PROT_WRITE;
     if (prot & COSMO_PROT_EXEC)
         vprot |= VM_PROT_EXEC;
-    if (vprot == 0)
-        vprot = VM_PROT_READ; /* PROT_NONE reserves the range readable-only for now */
+    /* PROT_NONE reserves the range: every access faults (design.md §6.2). */
 
     uint64_t base;
     if (flags & COSMO_MAP_FIXED) {
@@ -197,7 +196,7 @@ static int64_t sys_munmap(struct syscall_args *a)
     size_t len = (size_t)a->a[1];
     if (!is_page_aligned(addr) || len == 0 || !is_page_aligned(len) || !user_range_ok(addr, len))
         return -EINVAL;
-    return vm_user_unmap(process_current()->space, addr, len);
+    return vm_user_unmap(process_current()->space, addr, len, VM_UNMAP_STRICT);
 }
 
 static int64_t sys_log(struct syscall_args *a)
