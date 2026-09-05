@@ -26,8 +26,10 @@ transaction may be modified in place, any other is copied first.
 | `INODES` (3) | 15 × 256-byte `struct cfs_inode` |
 | `ALLOCIDX` (4) | 508 block numbers of `BITMAP` blocks |
 | `BITMAP` (5) | 32512 bits, one per pool block, 1 = allocated |
-| `EXTENTS` (6) | 254 × 16-byte `struct cfs_extent` |
-| data | file contents or directory entries, no header |
+| `EXTENTS` (6) | `uint64_t next` (the chain) then 253 × 16-byte `struct cfs_extent` |
+| `CSUMIDX` (7) | 508 block numbers of `CSUM` blocks (an inode's checksum index) |
+| `CSUM` (8) | 1016 CRC32C values, one per logical block |
+| data | file contents or directory entries, no header; checksummed in the owner's `CSUM` tree |
 
 Inode `i` lives in inode block `i / 15`, slot `i % 15`; that inode
 block is entry `(i/15) % 508` of the `IMAP0` block found at entry
@@ -35,28 +37,33 @@ block is entry `(i/15) % 508` of the `IMAP0` block found at entry
 blocks (63 GiB). Inode 1 is the root directory; inode 0 is never used.
 
 ```c
-struct cfs_extent { uint64_t start; uint32_t count; uint32_t pad; };          /* a run of `count` pool blocks */
-struct cfs_inode {                                                              /* 256 bytes */
+struct cfs_extent { uint64_t start; uint32_t count; uint32_t lblk; };   /* logical [lblk, lblk+count) -> pool [start, start+count) */
+struct cfs_extent_block { uint64_t next; struct cfs_extent ext[253]; }; /* the payload of an EXTENTS block */
+struct cfs_inode {                                                        /* 256 bytes */
     uint32_t mode;               /* CFS_TYPE_REG=1 or CFS_TYPE_DIR=2 in bits 12+, permissions below */
     uint32_t nlink, uid, gid;
     uint64_t size, mtime_ns, ctime_ns;
     uint64_t generation;         /* transaction that last wrote it */
     uint64_t ino;                /* self check; 0 in a free slot */
     struct cfs_extent direct[10];
-    uint64_t indirect;           /* EXTENTS block or 0 */
+    uint64_t indirect;           /* head of the EXTENTS chain or 0 */
     uint64_t parent;             /* directories: parent inode (root points at itself) */
-    uint64_t reserved[3];
+    uint32_t csum_algo;          /* CFS_CSUM_CRC32C (1) for every inode version 2 writes; 0 = none */
+    uint32_t csum_pad;
+    uint64_t csum_root;          /* CSUMIDX block or 0 */
+    uint64_t reserved;
 };
 struct cfs_dirent { uint64_t ino /* 0 = free slot */; uint8_t type, namelen; uint8_t pad[6]; char name[48]; };  /* 64 bytes, names up to 47 */
 ```
 
-A file's logical block `n` is found by walking its runs in order,
-direct then indirect (`cfs_map_block`); a logical block beyond the runs
-is a hole that reads as zeros. Runs cannot express a hole *inside* the
-span, so `cfs_writepage` allocates zero blocks for any unwritten
-logical block below the one being written. At most 264 runs per file;
-sequential allocation merges adjacent runs (`extents_merge`), and a
-rewrite in the middle of a run splits it into up to three.
+A file's logical block `n` is found by walking its runs, sorted by
+`lblk`, direct then the chain (`cfs_map_block`); a logical block no run
+covers is a hole that reads as zeros, wherever it lies. Sequential
+allocation merges runs that are adjacent both logically and physically
+(`extents_merge`); a rewrite in the middle of a run splits it into up to
+three. The implementation loads at most `CFS_MAX_EXTENTS` (4096) runs
+per inode, a fragmentation bound rather than a format limit (version 2,
+below).
 
 Directories are ordinary file data: 64 entries per block, linear scan,
 a removed entry is zeroed, a new entry takes the first free slot or
@@ -216,7 +223,160 @@ consistent state the in-memory structures hold.
 ## Future extensibility
 
 Snapshots (`snap_root` → a list of immutable roots whose blocks are
-excluded from `pending_free`), data checksums (`csum_root`), hole-aware
-extents, inode slot reuse, an auto-commit threshold, B-tree
-directories, multiple pool members behind `pool_*`, a host `mkfs` and
-`fsck` over `cosmofs_format.h`.
+excluded from `pending_free`), a pool-wide checksum tree (the
+superblock's `csum_root`), inode slot reuse, B-tree directories,
+multiple pool members behind `pool_*`, a host `mkfs` and `fsck` over
+`cosmofs_format.h`, transaction groups in flight while the next one is
+open. Hole-aware extents, per-inode data checksums, the writeback
+thread and `fsync` durability arrived with audit milestone 7 (below).
+
+## Format version 2 and the transaction engine (audit milestone 7)
+
+Audit milestone 7 (`docs/audit/2026-09-post-roadmap-audit.md` §19;
+findings #22, #23, #25, #26). Everything above describes version 1
+except where this section says otherwise; the code implements version 2
+only, and a version-1 image is refused at mount with a clear message
+(the scratch disk is reformatted on every boot test, and no version-1
+image is expected to exist anywhere else).
+
+### What changes on disk
+
+`CFS_VERSION` is 2. The superblock, the metadata header, the inode map
+and the allocator are unchanged. Three things change:
+
+**Extents carry their logical position.** `struct cfs_extent { uint64_t
+start; uint32_t count; uint32_t lblk; }` (the former `pad` is `lblk`):
+a run maps logical blocks `[lblk, lblk + count)` to pool blocks
+`[start, start + count)`. Runs are sorted by `lblk` and never overlap;
+a logical block that no run covers is a **hole** and reads as zeros.
+`writepage` no longer fills the span below a written block with zero
+blocks (V15's gap and the sparse-write exhaustion of #23 are gone).
+Files are bounded at 2^32 blocks (16 TiB) by the 32-bit `lblk`.
+
+**The extent block is a chain.** The payload of a `CFS_KIND_EXTENTS`
+block is `uint64_t next` (0 or the next extent block) followed by 253
+extents. The inode's `indirect` heads the chain; an inode therefore
+holds 10 direct runs plus any number of chained blocks, and the 264-run
+`-EFBIG` cap of #23 is gone (a badly fragmented file costs one chained
+block per 253 runs and a longer linear walk).
+
+**Every data and directory block has a checksum stored in the inode's
+metadata.** The inode's `reserved[3]` becomes `uint32_t csum_algo;
+uint32_t pad; uint64_t csum_root; uint64_t reserved;`. `csum_algo` is
+`CFS_CSUM_CRC32C` (1) for every inode version 2 writes (0 would mean
+"no checksums", kept for a future option). `csum_root` points at a
+`CFS_KIND_CSUMIDX` block (kind 7): 508 pointers to `CFS_KIND_CSUM`
+blocks (kind 8), each holding 1016 CRC32C values; logical block `l`'s
+checksum is in index slot `l / 1016`, entry `l % 1016`. The checksum
+tree is metadata: copy-on-write, sealed, freed with the inode. The
+audit suggested the extent entry as the home of the checksum; a run of
+`count` blocks has no room for `count` checksums without giving up
+contiguity, so the per-inode tree is the "parent pointer" here, with
+the algorithm id in the inode and the superblock's `csum_root` still
+reserved for a pool-wide tree.
+
+A `writepage` or directory-block write computes the block's CRC32C and
+stores it before the inode is written through; `readpage` and the
+directory reader verify the block against its entry and return `-EIO`
+(and log the block number) on mismatch (finding #26). A hole has no
+entry and is not checked. Truncation leaves entries past the new end
+stale but unreachable; a later write at that position overwrites them.
+
+### Allocation: contiguity and the metadata reserve
+
+`cfs_alloc_run(fs, class, hint, want, &start, &got)` finds the first
+free run at or after `hint` and returns up to `want` consecutive blocks
+(at least one). `writepage` asks for the block after the file's
+previous logical block when that one is mapped (`hint = pblk(l-1) + 1`),
+so a sequentially written file lays out in one run; milestone 6's
+in-order writeback made sequential the common case.
+
+Two allocation classes exist. `CFS_ALLOC_DATA` (file data blocks) is
+refused with `-ENOSPC` once free blocks are at or below the **reserve**
+(`max(32, nblocks / 32)`); `CFS_ALLOC_META` (inode map, inode blocks,
+extent and checksum blocks, directory blocks, bitmap chunks at commit)
+may use the reserve. Directory blocks count as metadata because a
+deletion rewrites one. Deleting a file needs a copy-on-write directory block,
+inode block and bitmap chunks, which come from the reserve, and its
+blocks become allocatable after the commit that publishes the deletion:
+the full-disk deadlock of #23 is closed. The reserve is a policy of the
+mounted filesystem, not an on-disk field; mount recomputes it.
+
+### `fsync` commits
+
+`cfs_vnode_sync` (the VFS `sync` operation, reached from `file_sync`
+after the page cache wrote the file's dirty pages) writes the inode
+through and then **commits the open transaction**. A transaction is
+whole-filesystem, so `fsync` of one file publishes every mutation made
+so far; the durability the caller asked for is exactly the commit
+protocol above (finding #22). `vfs_sync` is unchanged.
+
+### The writeback thread and dirty thresholds
+
+Every mount starts one kernel thread (`cfs-wb/<dev>`) that wakes every
+`CFS_WB_POLL_MS` (100 ms) and commits when any of these holds and the
+open transaction is non-empty:
+
+| Trigger | Threshold |
+|---|---|
+| dirty metadata buffers | `CFS_WB_DIRTY_BUFS` (64) |
+| pending frees | `CFS_WB_PENDING` (512) |
+| dirty pages of the mount (`mount.cache_dirty`, kept by the page cache) | `CFS_WB_DIRTY_PAGES` (256, 1 MiB) |
+| age of the oldest uncommitted change | `CFS_WB_INTERVAL_MS` (5000) |
+
+It commits through `cosmofs_sync` under `mount.sync_lock`, taken with
+`mutex_trylock` so it never waits on an unmount or a `vfs_sync` in
+progress (it retries on the next poll). Unmount sets `fs->wb_stop` and
+joins the thread before destroying the filesystem. The loss window after
+a crash is bounded by the interval; the transaction's memory by the
+buffer and page thresholds. Two test hooks exist:
+`cosmofs_test_set_writeback(mnt, on)` turns the thread's commits off
+(the replay harness needs every superblock write to be one it asked
+for) and `cosmofs_test_set_writeback_interval(mnt, ms)` shortens the
+age trigger.
+
+### Older-slot fallback at mount
+
+Mount reads both superblock slots as before and prefers the newer valid
+one. It then loads the allocator and the root inode; if either fails
+(a bad header, a wrong checksum, a read error), it logs a warning and
+retries with the other slot when that one is valid. The next commit
+writes into the slot the chosen root did not come from, which is the
+unusable newer one, so a broken root is replaced by the first commit
+after recovery. Both roots unusable is `-EIO`, as before.
+
+### The block layer: flags and queueing
+
+`struct bio` gains `flags`: `BIO_PREFLUSH` (the device's volatile cache
+is flushed before this write) and `BIO_FUA` (this write is on stable
+media when it completes). The block layer implements both without
+driver support as a sequence of bios (flush, write, flush) chained by
+their completions, so a driver sees only plain reads, writes and
+flushes. `pool_write_flags(p, blk, buf, flags)` exposes them; the commit
+uses `BIO_PREFLUSH | BIO_FUA` for the superblock, which is the two-flush
+protocol written as one call.
+
+A driver that returns `-EAGAIN` from `submit` (virtio-blk with every
+slot in flight) no longer fails the caller: the block layer queues the
+bio on the device and resubmits it from `bio_complete` as slots free
+up, in order. `blk_submit` returns 0 for a queued bio and `done` runs
+when it eventually completes; `blkdev.requeued` counts them. A burst
+larger than the queue can therefore never poison a mount through
+`cfs_fail` (finding #25). virtio-blk completes a `BIO_FLUSH` at once
+when the device did not negotiate `VIRTIO_BLK_F_FLUSH` (no volatile
+cache: nothing to flush), instead of sending an unsupported request.
+
+The RAM block device gains a deferred mode for tests
+(`ramblk_set_deferred(bd, limit)`): completions run on a worker thread
+and the driver returns `-EAGAIN` above `limit` in-flight requests, which
+is how the queueing is exercised (`blk-queue`).
+
+### What this is not
+
+Multiple transaction groups in flight (open, quiescing, syncing): one
+open transaction per mount is still committed under `cfs->lock`, so
+mutations wait during a commit. Snapshots, a pool-wide checksum tree,
+multi-device pools, a scrub, `fsck` and a host `mkfs` remain future
+work; the format keeps `snap_root`, `csum_root` and `members` reserved
+for them.
+
