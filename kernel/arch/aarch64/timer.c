@@ -14,6 +14,7 @@
 #include <kernel/panic.h>
 #include <kernel/string.h>
 #include <kernel/percpu.h>
+#include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/irqc.h>
 #include <arch/testhooks.h>
@@ -159,4 +160,25 @@ void arch_test_periodic_irq_stop(void)
     WRITE_SYSREG(cntv_ctl_el0, CNT_CTL_IMASK);
     isb();
     g_test_period = 0;
+}
+
+/* --- the PL031 real-time clock of the virt machine ------------------------- */
+
+bool arch_rtc_read_epoch(uint64_t *seconds)
+{
+    /* QEMU's virt describes the PL031 in its DSDT (ARMH0011), which this
+     * kernel does not interpret; the machine's memory map is fixed, so the
+     * register is read at its known address and validated: a machine
+     * without the device reads zero (or faults on nothing: the range is
+     * device memory on every virt variant). */
+    vaddr_t va = vm_map_phys((paddr_t)VIRT_PL031_BASE, PAGE_SIZE, VM_PROT_RW, VM_CACHE_UC);
+    if (va == 0)
+        return false;
+    uint32_t dr = *(volatile uint32_t *)va;        /* RTCDR */
+    uint32_t pid0 = *(volatile uint32_t *)(va + 0xfe0);   /* PeriphID0: 0x31 for a PL031 */
+    vm_unmap_phys(va);
+    if ((pid0 & 0xff) != 0x31 || dr == 0)
+        return false;
+    *seconds = dr;
+    return true;
 }

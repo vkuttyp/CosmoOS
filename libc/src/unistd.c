@@ -154,11 +154,15 @@ int usleep(unsigned long usec)
 
 int clock_gettime(clockid_t clk, struct timespec *ts)
 {
-    if (clk != CLOCK_MONOTONIC) {
+    uint64_t ns;
+    if (clk == CLOCK_MONOTONIC) {
+        ns = cosmo_clock_ns();
+    } else if (clk == CLOCK_REALTIME) {
+        ns = cosmo_clock_realtime_ns();
+    } else {
         errno = EINVAL;
         return -1;
     }
-    uint64_t ns = cosmo_clock_ns();
     ts->tv_sec = (time_t)(ns / 1000000000ULL);
     ts->tv_nsec = (long)(ns % 1000000000ULL);
     return 0;

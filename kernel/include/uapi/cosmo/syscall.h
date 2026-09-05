@@ -23,7 +23,7 @@
 #define SYS_getpid    3   /* () -> pid */
 #define SYS_yield     4   /* () -> 0 */
 #define SYS_sleep_ns  5   /* (uint64_t ns) -> 0 */
-#define SYS_clock_ns  6   /* () -> monotonic nanoseconds */
+#define SYS_clock_ns  6   /* (unsigned clock) -> nanoseconds: COSMO_CLOCK_MONOTONIC (0, since boot) or COSMO_CLOCK_REALTIME (1, since 1970) */
 #define SYS_mmap      7   /* (void *hint, size_t len, int prot, int flags) -> addr */
 #define SYS_munmap    8   /* (void *addr, size_t len) -> 0 */
 #define SYS_log       9   /* (const char *s, size_t len) -> 0 */
@@ -147,6 +147,10 @@ struct cosmo_procinfo {
 #define COSMO_SOCK_STREAM 1
 #define COSMO_SOCK_DGRAM  2
 #define COSMO_SOCK_NONBLOCK 0x800   /* ORed into the type: the socket starts non-blocking */
+
+/* Clocks (SYS_clock_ns). */
+#define COSMO_CLOCK_MONOTONIC 0
+#define COSMO_CLOCK_REALTIME  1
 
 /* Readiness bits (SYS_ioready). */
 #define COSMO_IO_READABLE 1

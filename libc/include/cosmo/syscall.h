@@ -86,7 +86,11 @@ static inline long cosmo_sleep_ns(uint64_t ns)
 
 static inline uint64_t cosmo_clock_ns(void)
 {
-    return (uint64_t)cosmo_syscall0(SYS_clock_ns);
+    return (uint64_t)cosmo_syscall1(SYS_clock_ns, COSMO_CLOCK_MONOTONIC);
+}
+static inline uint64_t cosmo_clock_realtime_ns(void)
+{
+    return (uint64_t)cosmo_syscall1(SYS_clock_ns, COSMO_CLOCK_REALTIME);
 }
 
 static inline long cosmo_mmap(void *hint, size_t len, int prot, int flags)
