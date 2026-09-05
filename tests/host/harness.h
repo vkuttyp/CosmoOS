@@ -23,6 +23,7 @@ extern int harness_failures;
 extern jmp_buf harness_panic_jmp;
 extern bool harness_expect_panic;
 extern char harness_last_panic[256];
+extern int harness_klog_min;   /* klog lines below this level (enum klog_level) are dropped */
 
 void harness_fail(const char *file, int line, const char *expr);
 int harness_run(const struct host_test *tests, size_t count);

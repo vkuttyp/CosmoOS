@@ -6,6 +6,7 @@
 #   make test         automated QEMU boot test with PASS/FAIL exit code
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
+#   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
 #   make reproducible build twice into separate trees and compare outputs
 #   make compile-commands  compile_commands.json for clangd with cross flags
@@ -43,6 +44,7 @@ ARCH_TEST_TARGETS :=
 endif
 include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
+include $(ROOT)/tests/fuzz/fuzz.mk
 
 all: $(ARCH_TEST_TARGETS) kernel boot libc userland pkg ports modules
 
