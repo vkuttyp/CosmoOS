@@ -116,6 +116,7 @@ bool selftest_cosmofs_fsync(const char **reason);      /* fsync commits */
 bool selftest_cosmofs_reserve(const char **reason);    /* the metadata reserve on a full disk */
 bool selftest_cosmofs_fallback(const char **reason);   /* older-slot fallback at mount */
 bool selftest_cosmofs_writeback(const char **reason);  /* the writeback thread */
+bool selftest_cosmofs_badmap(const char **reason);     /* a crafted inode's direct runs are validated */
 
 /* Phase 8: kernel-services/network/nettest.c */
 bool selftest_net_mbuf(const char **reason);

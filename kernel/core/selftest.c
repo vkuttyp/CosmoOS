@@ -336,6 +336,7 @@ static const struct selftest tests[] = {
     { "cosmofs-reserve", selftest_cosmofs_reserve },
     { "cosmofs-fallback", selftest_cosmofs_fallback },
     { "cosmofs-writeback", selftest_cosmofs_writeback },
+    { "cosmofs-badmap",  selftest_cosmofs_badmap },
     { "cache-limits",    selftest_cache_limits },
     { "cache-budget-race", selftest_cache_budget_race },
     { "net-mbuf",        selftest_net_mbuf },

@@ -7,6 +7,7 @@
 
 #include <kernel/blk.h>
 #include <kernel/cosmofs.h>
+#include <kernel/crc32c.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -634,4 +635,84 @@ bool selftest_cosmofs_fsync(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_reserve(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_fallback(const char **reason) { (void)reason; return true; }
 bool selftest_cosmofs_writeback(const char **reason) { (void)reason; return true; }
+#endif
+
+#if CONFIG_DEBUG
+/* A crafted inode: two direct runs written out of order (a corruption
+ * the header checksum does not see because the block is re-sealed).
+ * Before the direct runs were validated on the map fast path, the first
+ * block of the file read as a hole; now the inode is -EIO (Greptile on
+ * PR #22). */
+static uint32_t block_crc_test(const uint8_t *block)
+{
+    static const uint8_t zero4[4] = { 0 };
+    size_t off = offsetof(struct cfs_mhdr, crc);
+    uint32_t c = crc32c(block, off);
+    c = crc32c_update(c, zero4, 4);
+    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
+}
+
+bool selftest_cosmofs_badmap(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    uint8_t *page = kmalloc(4096, 0);
+    CHECK(page != NULL);
+    memset(page, 0x11, 4096);
+    CHECK(file_pwrite(f, page, 4096, 0) == 4096);            /* run at lblk 0 */
+    memset(page, 0x22, 4096);
+    CHECK(file_pwrite(f, page, 4096, 5 * 4096) == 4096);     /* run at lblk 5, a hole between */
+    CHECK(file_sync(f) == 0);
+    uint64_t ino = f->vn->ino;
+    file_put(f);
+    cosmofs_test_discard_on_unmount(mount_of(ENG), true);   /* keep the slots as they are */
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Walk superblock -> IMAP1 -> IMAP0 -> INODES through the pool, swap
+     * the two direct runs of the inode, re-seal the block. */
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *blk = kmalloc(4096, 0);
+    CHECK(blk != NULL);
+    uint64_t imap = 0, gen = 0;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        CHECK(pool_read(p, slot, blk) == 0);
+        const struct cfs_super *sb = (const struct cfs_super *)blk;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > gen) {
+            gen = sb->generation;
+            imap = sb->imap_root;
+        }
+    }
+    CHECK(imap >= 2);
+    CHECK(pool_read(p, imap, blk) == 0);
+    uint64_t l0 = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l1_index(ino)];
+    CHECK(pool_read(p, l0, blk) == 0);
+    uint64_t ib = ((const uint64_t *)(blk + CFS_MHDR_SIZE))[cfs_imap_l0_index(ino)];
+    CHECK(pool_read(p, ib, blk) == 0);
+    struct cfs_inode *in = (struct cfs_inode *)(blk + CFS_MHDR_SIZE + cfs_inode_slot(ino) * CFS_INODE_SIZE);
+    CHECK(in->ino == ino && in->direct[0].count == 1 && in->direct[1].count == 1 && in->direct[1].lblk == 5);
+    struct cfs_extent tmp = in->direct[0];
+    in->direct[0] = in->direct[1];
+    in->direct[1] = tmp;   /* unsorted: lblk 5 before lblk 0 */
+    struct cfs_mhdr *h = (struct cfs_mhdr *)blk;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, ib, blk) == 0 && pool_flush(p) == 0);
+    kfree(blk);
+    pool_close(p);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(vfs_open(NULL, ENG "/two", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(file_pread(f, page, 4096, 0) == -EIO);   /* not a hole of zeros */
+    CHECK(file_pread(f, page, 4096, 5 * 4096) == -EIO);
+    file_put(f);
+    kfree(page);
+    kinfo("selftest: cosmofs-badmap: an inode with unsorted direct runs is refused, not read as holes");
+    return engine_unmount(bd, reason);
+}
+#else
+bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 #endif

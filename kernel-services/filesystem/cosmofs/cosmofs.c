@@ -162,9 +162,32 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
     return 0;
 }
 
+/* The direct runs of an inode as read from disk: in range, sorted, no
+ * overlap, no run after the first empty slot. */
+static bool direct_valid(const struct cfs *fs, const struct cfs_inode *in)
+{
+    unsigned n = 0;
+    while (n < CFS_DIRECT && in->direct[n].count)
+        n++;
+    for (unsigned i = n; i < CFS_DIRECT; i++)
+        if (in->direct[i].count || in->direct[i].start || in->direct[i].lblk)
+            return false;   /* a run hiding behind an empty slot */
+    for (unsigned i = 0; i < n; i++) {
+        if (!extent_valid(fs, &in->direct[i]))
+            return false;
+        if (i > 0 && in->direct[i].lblk < (uint64_t)in->direct[i - 1].lblk + in->direct[i - 1].count)
+            return false;
+    }
+    return true;
+}
+
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk)
 {
-    /* The direct runs answer most lookups without loading the chain. */
+    /* The direct runs answer most lookups without loading the chain; they
+     * get the same checks the chain gets, so a crafted inode cannot map a
+     * block of another file or turn data into a hole (Greptile, PR #22). */
+    if (!direct_valid(fs, in))
+        return -EIO;
     if (cfs_map_block(in->direct, CFS_DIRECT, lblk, pblk) == 1)
         return 1;
     if (in->indirect == 0)
