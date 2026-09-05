@@ -57,6 +57,9 @@ struct virtio_transport {
     int      (*setup_queue)(struct virtio_device *vdev, struct virtqueue *vq);
     void     (*teardown_queue)(struct virtio_device *vdev, struct virtqueue *vq);
     void     (*notify)(struct virtio_device *vdev, struct virtqueue *vq);
+    /* Mandatory: the last reference to the virtio device dropped, after
+     * virtio_device_unregister; free the transport's memory. */
+    void     (*release)(struct virtio_device *vdev);
 };
 
 struct virtio_device {

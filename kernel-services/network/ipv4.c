@@ -20,13 +20,18 @@ static uint16_t g_ip_id;
 
 /* --- routing ------------------------------------------------------------ */
 
+/* Referenced interface (netif_put when done) or NULL. */
 struct netif *ipv4_route(uint32_t dst)
 {
     if ((ntohl(dst) >> 24) == 127 || netif_owns_ipv4(dst))
         return netif_loopback();
     struct netif *nif = netif_default();
-    if (nif == NULL || nif->ip4.addr == 0)
+    if (nif == NULL)
         return NULL;
+    if (nif->ip4.addr == 0) {
+        netif_put(nif);
+        return NULL;
+    }
     return nif;
 }
 
@@ -35,12 +40,18 @@ uint32_t ipv4_source_for(uint32_t dst)
     struct netif *nif = ipv4_route(dst);
     if (nif == NULL)
         return 0;
+    uint32_t src;
     if (nif->flags & NETIF_LOOPBACK)
-        return netif_owns_ipv4(dst) ? dst : INADDR_LOOPBACK_N;
-    return nif->ip4.addr;
+        src = netif_owns_ipv4(dst) ? dst : INADDR_LOOPBACK_N;
+    else
+        src = nif->ip4.addr;
+    netif_put(nif);
+    return src;
 }
 
 /* --- output --------------------------------------------------------------- */
+
+static int output_on(struct netif *nif, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8_t ttl);
 
 int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8_t ttl)
 {
@@ -50,6 +61,13 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
         m_freem(m);
         return -ENETUNREACH;
     }
+    int rc = output_on(nif, m, src, dst, proto, ttl);
+    netif_put(nif);
+    return rc;
+}
+
+static int output_on(struct netif *nif, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8_t ttl)
+{
     if (src == 0)
         src = ipv4_source_for(dst);
     uint32_t total = m->pkt.len + sizeof(struct ipv4_hdr);

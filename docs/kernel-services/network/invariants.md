@@ -154,3 +154,26 @@ otherwise retires it (CLOSED, timers off, out of the pcb table so the
 port is free and no segment matches it) until `tcp_close`. Check:
 `net-lo-tcp` keeps a shut-down socket 2.5 s past TIME_WAIT, uses it,
 and binds a new socket to its former port.
+
+**N-L1. An interface is freed only by its release, after `netif_unregister`
+and the last reference.** `netif_register` refuses an interface without
+`ops->release`; the registry takes a reference; `netif_find`,
+`netif_default`, `netif_loopback`, `ipv4_route` and `ipv6_route` return
+referenced pointers that their callers put; `netif_unregister` leaves no
+transmit, receive, queued packet, ARP or ND entry naming the interface
+(`docs/kernel/quiesce/invariants.md` Q9–Q12). Check: `net-netif-lifetime`.
+Gap: the virtio-net remove path is exercised only by unloading the module.
+
+**N-L2. A TCP child never exists without an owner between accept and
+attach.** `tcp_accept(pcb, owner)` attaches under `g_lock` with the
+dequeue. Check: `net-accept-race`.
+
+**N-L3. TCP pcb memory is freed only after its timers' callbacks have
+returned.** `pcb_free_locked` uses `timer_cancel_sync`; the callbacks take
+only the network work lock. Check: `timer-cancel-sync` for the mechanism;
+`net-lo-tcp*` for the path. Gap: the callback/free race itself is not
+driven by a test.
+
+**N-L4. A socket woken outside a protocol lock is referenced with
+`kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:
+review; `net-lo-udp`, `net-lo-tcp` exercise both.

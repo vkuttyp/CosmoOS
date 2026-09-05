@@ -6,10 +6,21 @@ entry follows constitution section 52.
 
 ## Objects (`kernel/include/kernel/object.h`, `kernel/object/object.c`)
 
-### `struct kobject { const struct kobject_type *type; uint32_t refcount; }`
+### `struct kobject { const struct kobject_type *type; uint32_t refcount; struct module *owner; }`
 Embedded as the first or any member of a concrete object; recover the
 container with `container_of`. The count is manipulated only through
-the functions below.
+the functions below. `owner` is the module whose code the release lives
+in (NULL for the kernel), recorded so the module cannot be unloaded
+while the object exists (`docs/kernel/quiesce/design.md`, "Module
+unload"). Adding the field changed the layout of every exported
+structure that embeds a kobject (`struct device`, `struct blkdev`,
+`struct netif`): module ABI v2.
+
+Lifetime rules every type follows (`docs/kernel/quiesce/invariants.md`
+Q9–Q10): the release frees the memory and nothing else does; the creator
+holds reference 1; a registry that hands the object out by lookup holds
+its own reference and drops it on unregister; lookups return referenced
+pointers.
 
 ### `struct kobject_type { const char *name; void (*release)(struct kobject *); }`
 Static, immortal type descriptor. `release` runs from the last put,
@@ -34,9 +45,25 @@ above `len` trips a `KASSERT` and fails the call with `-EIO`, so a
 buggy object can never make the kernel read past its stack buffer.
 
 ### `void kobject_init(struct kobject *obj, const struct kobject_type *type)`
-- Purpose: set the type and a reference count of 1 owned by the caller.
+- Purpose: set the type and a reference count of 1 owned by the caller;
+  record the owner module of `type->release` (`module_owner_of`, which
+  raises that module's live-object count inside a read-side section).
 - Failure: `KASSERT` on a NULL type or NULL `release`.
-- Concurrency: none needed; the object is not yet shared.
+- Concurrency: none needed for the object; the owner lookup is a
+  `quiesce_read_lock` section, any context.
+
+### `void kobject_track_code(struct kobject *obj, uintptr_t code)`
+- Purpose: for types whose release trampolines to a per-object callback
+  (`struct device.release`, `struct blkdev_ops.release`,
+  `struct netif_ops.release`), record the callback's owner module once
+  it is known (`device_register`, `blk_register`, `netif_register`).
+  Releases the owner recorded by `kobject_init` if it differs.
+
+### `bool kobject_tryget(struct kobject *obj)`
+- Purpose: take a reference unless the count is already zero; the form
+  for a table that a release path clears under a lock the looker holds
+  (TCP `sock_ref`, `udp_input`), where the object may be mid-release.
+- Concurrency: CAS loop, acq_rel; any context.
 
 ### `void kobject_get(struct kobject *obj)`
 - Purpose: take a reference; the caller must already hold one (or a
@@ -45,7 +72,9 @@ buggy object can never make the kernel read past its stack buffer.
   spinlocks. Panics if the count was 0 (use after release).
 
 ### `void kobject_put(struct kobject *obj)`
-- Purpose: drop a reference; runs `type->release` when it was the last.
+- Purpose: drop a reference; runs `type->release` when it was the last,
+  then drops the owner module's live-object count (so the release runs
+  with its module still mapped).
 - Concurrency: atomic; the drop itself is interrupt-safe, but because
   `release` may block, a put that might be the last one must not be
   made under a spinlock or in interrupt context. `handle_close` and

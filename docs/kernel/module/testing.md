@@ -62,15 +62,16 @@ fixture is absent from the archive.
 | `ksym` | ≥ 30 exports; `kprintf`, `kmalloc`, `memcpy` resolve to their addresses; unknown and empty names give 0; internals (`pmm_alloc_page`, `schedule`) are not exported; the index is strictly sorted; `module_symbol_lookup` reports the kernel as owner |
 | `modsig` | the real `cosmotest.ko` verifies with the right payload length; a flipped payload byte, a flipped signature byte, a wrong version, a wrong algorithm, and a payload shifted by one byte are `-EKEYREJECTED`; an unknown key id, a truncated trailer, and a 10-byte file are `-ENOKEY` |
 | `module-reject` | the genuine payload validates with all three groups and a `.ksymtab`; six in-memory mutations of it (`ET_EXEC`, AArch64, bad magic, W+X text, section past the end, wrong metadata size) fail on their exact rule; metadata rules (ABI version, magic, name syntax, empty dependency, reserved word); 64 bytes of garbage through `module_load` is `-ENOKEY` (enforcing) or `-ENOEXEC`; loading `cosmotest_dep` before `cosmotest` is `-ENOENT` and leaves nothing |
-| `module-load` | `hello` is live from boot; `cosmotest` loads: state, refs, flags, capabilities; text RX, rodata R, data RW, metadata R (`vm_query`); `init` points into text; 3 exports; `cosmotest_answer()` called through the export returns 42; the counter is 101 (data relocated and mutated by `init`); the table is 36 and read-only; a second load is `-EEXIST`; `cosmotest_dep` loads with `deps[0] == cosmotest`, `refs == 1`, counter 111, `cosmotest_dep_sum()` == 189; unloading the dependency is `-EBUSY`; unloading the dependant restores the counter and removes its export; unloading `cosmotest` then works, lookups return 0, a second unload is `-ENOENT`; reload and unload; `vm_stats.regions`, `anon_pages`, and `module_count` equal the values before the test |
+| `module-load` | `hello` is live from boot; `cosmotest` loads: state, refs, flags, capabilities; text RX, rodata R, data RW, metadata R (`vm_query`); `init` points into text; 5 exports; `cosmotest_answer()` called through the export returns 42; the counter is 101 (data relocated and mutated by `init`); the table is 36 and read-only; a second load is `-EEXIST`; `cosmotest_dep` loads with `deps[0] == cosmotest`, `refs == 1`, counter 111, `cosmotest_dep_sum()` == 189; unloading the dependency is `-EBUSY`; unloading the dependant restores the counter and removes its export; unloading `cosmotest` then works, lookups return 0, a second unload is `-ENOENT`; reload and unload; `vm_stats.regions`, `anon_pages`, and `module_count` equal the values before the test |
 | `module-fail` | `cosmotest_fail` returns `-EIO`, the out pointer is untouched, nothing is live, region and page counts are unchanged |
+| `module-unload-busy` | `module_owner_of` of a kernel address is NULL and of `cosmotest_object_take` is the module (count balanced); the fixture hands out a kobject whose release lives in module text; `module_unload` with a 50 ms timeout waits and returns `-EBUSY`, the module is not live and its exports resolve to 0; `kobject_put` runs the release from the zombie (`cosmotest_released == 1`); the second unload frees it (0), the third is `-ENOENT`; the name loads and unloads again |
 
 The self-test run is 38 tests; the six above run last. The boot test
 also requires, in every build type, the boot-loaded module's lines:
 
 ```text
 [ INFO] module: loaded hello 1.0 (text 4 KiB, rodata 4 KiB, data 4 KiB, 0 exports)
-[ INFO] hello: module init (ABI v1, load 1)
+[ INFO] hello: module init (ABI v2, load 1)
 ```
 
 (`REQUIRED_MARKERS` in `tests/boot/run_boot_test.py`), and

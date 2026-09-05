@@ -42,6 +42,9 @@ struct blkdev_ops {
     /* Take ownership of the bio until bio_complete(). Returns 0 or a
      * negative errno without completing it. Thread context. */
     int (*submit)(struct blkdev *dev, struct bio *bio);
+    /* Mandatory: the last reference dropped (after blk_unregister);
+     * free the memory the blkdev is embedded in. */
+    void (*release)(struct blkdev *dev);
 };
 
 #define BLKDEV_NAME_MAX 16
@@ -58,20 +61,29 @@ struct blkdev {
     void *priv;
     struct list_node link;
     uint64_t reads, writes, flushes, errors;   /* completed bios */
+    bool gone;                       /* unregistered: blk_submit refuses (-ENODEV) */
+    uint32_t submitting;             /* blk_submit calls inside ops->submit right now */
 };
 
 void blk_init(void);
 
-/* Fill obj/name and add to the registry. `prefix` such as "vd" gets the
- * next free letter appended ("vda"). The caller owns the object and
- * keeps it until blk_unregister returns. Sleeps. -EINVAL for bad
- * geometry, -ENOSPC when out of letters. */
+/* Fill obj/name and add to the registry, which takes its own reference.
+ * `prefix` such as "vd" gets the next free letter appended ("vda"). The
+ * caller keeps the creator's reference and drops it with blkdev_put when
+ * its own teardown is done; ops->release frees the memory when the last
+ * holder (a blk_find caller, a mounted filesystem) is gone. Sleeps.
+ * -EINVAL for bad geometry or a missing release, -ENOSPC when out of
+ * letters. */
 int blk_register(struct blkdev *bd, const char *prefix);
+/* Remove from the registry, refuse new bios, wait for blk_submit calls in
+ * progress to leave the driver, drop the registry's reference. On return
+ * the driver may tear down its queues; bios already accepted must still
+ * be completed (bio_complete with -EIO after a reset). Sleeps. */
 void blk_unregister(struct blkdev *bd);
 
 /* Validate and hand to the driver. -EINVAL (range, alignment, size,
- * buffer), -EROFS, or the driver's error; on success `done` will run
- * exactly once. Thread context. */
+ * buffer), -ENODEV after blk_unregister, -EROFS, or the driver's error;
+ * on success `done` will run exactly once. Thread context. */
 int blk_submit(struct bio *bio);
 
 /* Driver side: finish a bio. Any context. */

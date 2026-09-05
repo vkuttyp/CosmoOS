@@ -8,6 +8,7 @@
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
+#include <kernel/sched.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
@@ -18,7 +19,9 @@ static unsigned g_count;
 
 static void blkdev_release(struct kobject *obj)
 {
-    (void)obj;   /* driver-owned storage */
+    struct blkdev *bd = container_of(obj, struct blkdev, obj);
+    KASSERT(list_empty(&bd->link));   /* unregistered before the last put */
+    bd->ops->release(bd);
 }
 
 static const struct kobject_type blkdev_type = {
@@ -43,14 +46,17 @@ static bool name_taken(const char *name)
 
 int blk_register(struct blkdev *bd, const char *prefix)
 {
-    if (bd->ops == NULL || bd->ops->submit == NULL || bd->sector_size < 512 ||
+    if (bd->ops == NULL || bd->ops->submit == NULL || bd->ops->release == NULL || bd->sector_size < 512 ||
         (bd->sector_size & (bd->sector_size - 1)) != 0 || bd->capacity == 0 || bd->max_sectors == 0 ||
         strlen(prefix) + 2 > BLKDEV_NAME_MAX)
         return -EINVAL;
 
     kobject_init(&bd->obj, &blkdev_type);
+    kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
     list_init(&bd->link);
     bd->reads = bd->writes = bd->flushes = bd->errors = 0;
+    bd->gone = false;
+    bd->submitting = 0;
 
     mutex_lock(&g_blk_lock);
     char letter = 'a';
@@ -65,6 +71,7 @@ int blk_register(struct blkdev *bd, const char *prefix)
     }
     list_push_back(&g_blkdevs, &bd->link);
     g_count++;
+    kobject_get(&bd->obj);   /* the registry's reference */
     mutex_unlock(&g_blk_lock);
     kinfo("blk: %s: %llu sectors of %u bytes (%llu MiB)%s", bd->name, (unsigned long long)bd->capacity,
           bd->sector_size, (unsigned long long)((bd->capacity * bd->sector_size) >> 20),
@@ -79,14 +86,37 @@ void blk_unregister(struct blkdev *bd)
     list_init(&bd->link);
     g_count--;
     mutex_unlock(&g_blk_lock);
+
+    /* Refuse new submissions, then wait for the ones inside the driver.
+     * Both sides are sequentially consistent: a submitter that did not
+     * see `gone` has raised `submitting` before we read it, or we saw
+     * its increment (docs/kernel/quiesce/design.md, "Block devices"). */
+    __atomic_store_n(&bd->gone, true, __ATOMIC_SEQ_CST);
+    while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0)
+        sched_yield();
     kinfo("blk: %s removed", bd->name);
+    kobject_put(&bd->obj);   /* the registry's reference */
 }
+
+static int submit_checked(struct blkdev *bd, struct bio *bio);
 
 int blk_submit(struct bio *bio)
 {
     struct blkdev *bd = bio->dev;
     if (bd == NULL || bio->done == NULL)
         return -EINVAL;
+    __atomic_fetch_add(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&bd->gone, __ATOMIC_SEQ_CST)) {
+        __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
+        return -ENODEV;
+    }
+    int rc = submit_checked(bd, bio);
+    __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
+    return rc;
+}
+
+static int submit_checked(struct blkdev *bd, struct bio *bio)
+{
     if (bio->dir == BIO_FLUSH) {
         if (bio->nsectors != 0 || bio->sector != 0)
             return -EINVAL;

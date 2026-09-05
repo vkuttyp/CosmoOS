@@ -9,6 +9,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/object.h>
 #include <kernel/string.h>
 
 /* rodata: a table the dependant reads through a relocated pointer. */
@@ -35,6 +36,29 @@ int cosmotest_answer(void)
     return sum;   /* 42 */
 }
 EXPORT_SYMBOL(cosmotest_answer);
+
+/* A kernel object whose release code lives in this module: the unload
+ * protocol must keep the module's text until the last reference drops
+ * (self-test module-unload-busy). */
+int cosmotest_released;
+EXPORT_SYMBOL(cosmotest_released);
+
+static void cosmotest_obj_release(struct kobject *obj)
+{
+    (void)obj;
+    cosmotest_released++;
+}
+
+static const struct kobject_type cosmotest_obj_type = { .name = "cosmotest", .release = cosmotest_obj_release };
+static struct kobject cosmotest_obj;
+
+struct kobject *cosmotest_object_take(void);
+struct kobject *cosmotest_object_take(void)
+{
+    kobject_init(&cosmotest_obj, &cosmotest_obj_type);   /* reference 1 goes to the caller */
+    return &cosmotest_obj;
+}
+EXPORT_SYMBOL(cosmotest_object_take);
 
 /* Uses kernel exports across the module ABI: kmalloc, memset, strlen. */
 static int cosmotest_init(void)

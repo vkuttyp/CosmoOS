@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | Seven self-tests: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`) | `make test` |
+| Target, loopback | Nine self-tests: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -92,6 +92,12 @@ behind QEMU's `10.0.2.2`), sends `cosmo hello\n`, expects
 first bytes are `QUIT` arrives, prints `NETTEST: done tcp_conns=N
 udp_pkts=N quit=1`, closes everything and checks `client_ok` and the
 quit flag. The watchdog is kicked during the waits.
+
+`tcp_transfer` ends by waiting, bounded, until the port it used binds
+again: the server's child leaves `LAST_ACK` only when the `netrx` worker
+processes the client's final ACK, and the test thread (higher priority)
+can run ahead of the worker now that `quiesce_read_unlock` at the end of
+a transmit is a prompt preemption point.
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

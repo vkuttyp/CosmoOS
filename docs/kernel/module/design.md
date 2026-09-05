@@ -243,6 +243,22 @@ because `refs` forbids unloading the dependency first. Exported symbol
 addresses handed to callers of `module_symbol_lookup` are valid only
 while the owning module is `LIVE`; diagnostics callers accept that.
 
+Kernel objects are the other holders of module code: a `struct device`,
+`struct blkdev` or `struct netif` created by a driver module points at a
+release in module text. `kobject_init`/`kobject_track_code` record the
+owner (`module_owner_of`) and raise `live_objects`; the release drops it.
+`module_unload` frees nothing while the count is non-zero: after
+`shutdown()` and one grace period it waits up to the unload timeout, then
+keeps the module as a zombie (memory mapped, name free) that a later
+unload reaps. The zombie is the honest outcome when a `blk_find` holder
+or a mounted filesystem still names a device the driver has removed.
+
+Live modules are also published in a fixed array `g_live[]` for the
+lock-free `module_owner_of` (a release store per slot; readers walk it
+inside `quiesce_read_lock`). Unload clears the slot before `shutdown()`
+and the grace period that follows orders every reader's increment before
+the unloader's check (`docs/kernel/quiesce/design.md`).
+
 ## Concurrency
 
 - `g_modules_lock` (mutex, may sleep) serialises every list mutation
@@ -257,6 +273,11 @@ while the owning module is `LIVE`; diagnostics callers accept that.
 - Module code runs on whichever thread calls it; the loader imposes no
   threading model beyond that `init` and `shutdown` run in thread
   context with interrupts enabled.
+- `module_owner_of` takes no lock: it walks `g_live[]` under
+  `quiesce_read_lock` (acquire loads) and raises the module's
+  `live_objects` inside the section. `module_unload` holds `g_lock`
+  across `shutdown()`, the grace period and the live-object wait, all of
+  which sleep; that is why `g_lock` is a mutex.
 
 ## Memory
 

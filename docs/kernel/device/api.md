@@ -49,15 +49,24 @@ Purpose: the `index`-th resource of `type`, or NULL. Any context.
 ### `int device_register(struct device *dev)` *(exported)*
 Purpose: put the device on its bus and probe the bus's registered
 drivers in registration order; the first driver whose `match` succeeds
-gets `probe`. Ownership: the bus takes one `kobject` reference. Outputs:
-0, or `-EEXIST` if a device of that name is already on the bus. A probe
+gets `probe`. Ownership: the bus takes one `kobject` reference; the
+creator keeps reference 1 and drops it with `device_put` when its own
+teardown is done. `dev->release` is mandatory (set after `device_setup`;
+`device_release_static` for static objects) and its owner module is
+recorded (`kobject_track_code`). Outputs: 0, `-EINVAL` without a
+release, or `-EEXIST` if a device of that name is already on the bus. A probe
 failure is not a registration failure: the device stays registered with
 `state == DEV_FAILED` and `probe_error` set, and is logged. Sleeps; may
 be called from a `probe` (recursive lock).
 
 ### `void device_unregister(struct device *dev)` *(exported)*
 Purpose: `remove` it from its driver if bound, drop it from the bus,
-release the bus's reference. Sleeps; callable from `remove`.
+release the bus's reference. The object lives on while `device_find`
+holders and the creator hold it; `dev->release` runs from the last put.
+Sleeps; callable from `remove`.
+
+### `void device_release_static(struct device *dev)` *(exported)*
+An empty release for devices in static storage (tests, immortal roots).
 
 ### `int driver_register(struct device_driver *drv)` *(exported)*
 Purpose: add a driver to `drv->bus` and probe every `DEV_UNBOUND` device
@@ -94,10 +103,12 @@ Count on one bus (all when NULL); dump every bus, device, state, driver
 and resource to the console.
 
 ### `struct device`, `struct device_driver`, `struct bus_type`
-Layouts are in `design.md`. `struct device` embeds a `kobject`; its
-`release` is a no-op because devices are bus-owned storage that lives
-until shutdown in this phase. `drvdata` belongs to the bound driver and
-is cleared at unbind.
+Layouts are in `design.md`. `struct device` embeds a `kobject` and a
+mandatory `release(struct device *)` that frees the memory the device is
+embedded in (`pci_device_release` frees the `struct pci_device`;
+`virtio_device_release` forwards to the transport's `release`, which
+frees the virtio-pci private block). `drvdata` belongs to the bound
+driver and is cleared at unbind.
 
 ## DMA (`kernel/include/kernel/dma.h`, `kernel/device/dma.c`)
 

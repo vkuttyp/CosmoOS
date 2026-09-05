@@ -281,9 +281,22 @@ harness but only require the `virtio_net` and `eth0` boot markers.
 
 ## Ownership and lifetime
 
-mbufs: as above. netifs: static or driver-owned; `netif_unregister`
-drains pending transmissions and removes ARP entries. pcbs: owned by
-the socket until close; a TCP pcb outlives its socket in TIME_WAIT and
+mbufs: as above. netifs: kobjects whose storage is freed by
+`ops->release` after the last reference; the creator and the registry
+each hold one, lookups and routes hand out more, and `netif_unregister`
+runs the six-step protocol in `api.md` (flags, registry, grace period,
+queue purge and worker barrier, table flush, registry reference) so that
+no transmit, receive, queued packet or table entry names the interface
+when it returns (`docs/kernel/quiesce/design.md`, "Network interfaces").
+pcbs: owned by the socket until close; a pcb's three timers are cancelled
+with `timer_cancel_sync` in `pcb_free_locked`, because a callback that
+fired on another CPU writes `work_flags` and queues `pcb->work` (the
+callbacks take only the work lock, so spinning on them under `g_lock`
+cannot deadlock); a TCP child dequeued by `tcp_accept` is attached to its
+socket under `g_lock` in the same step, so no reset can free it under
+the accepting thread; sockets woken after a protocol lock is dropped are
+held with `kobject_tryget` (the release clears `pcb->sock` under that
+lock but starts at count zero). a TCP pcb outlives its socket in TIME_WAIT and
 is freed by the timer once `sock` is NULL. If the application still
 holds the socket when TIME_WAIT ends (shutdown without close), or the
 connection ends by reset or timeout, the pcb is *retired*: it becomes

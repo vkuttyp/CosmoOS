@@ -131,6 +131,21 @@ reference counting for lookups; callers of `module_find` and
 `module_symbol_lookup` may not hold results across a possible unload.
 Check: review.
 
+**M22. A module's memory is freed only after `shutdown()`, one grace
+period, and `live_objects == 0`.** A kobject whose release code lives in
+the module keeps it mapped; the unloader waits up to the unload timeout
+and otherwise leaves a zombie that a later unload reaps
+(`docs/kernel/quiesce/invariants.md` Q15–Q16). Check: test
+`module-unload-busy` (`-EBUSY` after the timeout, the release runs from
+the zombie's text, the second unload frees it).
+
+**M23. `module_owner_of` never returns a module that can be freed before
+the caller's increment is seen.** The lookup and the increment happen in
+one `quiesce_read_lock` section; unload unpublishes the slot, then waits
+a grace period, then reads the count. Check: `module-unload-busy`
+(owner lookup of the fixture's export raises the count; a kernel address
+gives NULL); review of the ordering.
+
 **M21. `module_load_boot` loads `modules/` entries in archive order and
 only those.** Order is the build's dependency order
 (`MODULE_ARCHIVE_ENTRIES`); `tests/` entries are never loaded at boot.

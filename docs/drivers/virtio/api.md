@@ -84,7 +84,7 @@ Free descriptors right now (advisory).
 `get_features`, `set_features`, `get_status`, `set_status`,
 `read_config`, `queue_max_size`, `setup_queue` (program addresses and
 the interrupt for an allocated queue, enable it; no vector when
-`vq->callback` is NULL), `teardown_queue`, `notify`. Every function is
+`vq->callback` is NULL), `teardown_queue`, `notify`, and `release` (mandatory: the last reference to the virtio device dropped after `virtio_device_unregister`; frees the transport's memory. virtio-pci frees its private block here, not in `vpci_remove`, because a `device_find` holder may outlive the remove). Every function is
 called with the device's lifetime guaranteed by the transport.
 
 ### `int virtio_device_register(struct virtio_device *vdev)`, `void virtio_device_unregister(...)`

@@ -227,6 +227,8 @@ static void vpci_notify(struct virtio_device *vdev, struct virtqueue *vq)
         wr16(v->notify, off, (uint16_t)vq->index);
 }
 
+static void vpci_release(struct virtio_device *vdev);
+
 static const struct virtio_transport vpci_transport = {
     .name = "virtio-pci",
     .get_features = vpci_get_features,
@@ -238,6 +240,7 @@ static const struct virtio_transport vpci_transport = {
     .setup_queue = vpci_setup_queue,
     .teardown_queue = vpci_teardown_queue,
     .notify = vpci_notify,
+    .release = vpci_release,
 };
 
 /* --- PCI driver ------------------------------------------------------------ */
@@ -364,14 +367,21 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
     return 0;
 }
 
+/* Last reference to the virtio device: a holder from device_find may
+ * outlive vpci_remove, so the memory goes here and nowhere else. */
+static void vpci_release(struct virtio_device *vdev)
+{
+    kfree(vdev->tr_priv);
+}
+
 static void vpci_remove(struct pci_device *pdev)
 {
     struct vpci *v = pdev->dev.drvdata;
-    virtio_device_unregister(&v->vdev);   /* runs the virtio driver's remove */
+    virtio_device_unregister(&v->vdev);   /* runs the virtio driver's remove; drops the bus's reference */
     vpci_set_status(&v->vdev, 0);
     pci_msix_disable(pdev);
     vpci_unmap_all(v);
-    kfree(v);
+    device_put(&v->vdev.dev);             /* the creator's reference; release frees v when the last holder is gone */
 }
 
 static const struct pci_id vpci_ids[] = {

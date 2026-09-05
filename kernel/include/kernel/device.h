@@ -65,7 +65,14 @@ struct device {
     enum device_state state;
     int probe_error;
     struct list_node bus_link;
+    /* Mandatory: runs when the last reference drops, after unregister;
+     * frees the memory the device is embedded in. device_release_static
+     * for objects that are never freed. Set before device_register. */
+    void (*release)(struct device *dev);
 };
+
+/* For devices in static storage (tests, immortal bus roots). */
+void device_release_static(struct device *dev);
 
 struct device_driver {
     const char *name;
@@ -90,12 +97,15 @@ int device_add_resource(struct device *dev, enum resource_type type, uint64_t st
                         unsigned flags);
 const struct resource *device_resource(const struct device *dev, enum resource_type type, unsigned index);
 
-/* Register: appends to the bus and probes registered drivers. Sleeps.
- * -EEXIST if a device of that name is already on the bus. A probe
- * failure is not a registration failure (state DEV_FAILED). */
+/* Register: appends to the bus (taking the bus's reference) and probes
+ * registered drivers. Sleeps. -EINVAL without a release, -EEXIST if a
+ * device of that name is already on the bus. A probe failure is not a
+ * registration failure (state DEV_FAILED). */
 int device_register(struct device *dev);
 
-/* Unbind (remove() if bound) and drop from the bus. Sleeps. */
+/* Unbind (remove() if bound), drop from the bus and drop the bus's
+ * reference. The creator's reference remains: device_put it when done
+ * with the object; the release runs when the last holder is gone. Sleeps. */
 void device_unregister(struct device *dev);
 
 /* Register a driver and probe the bus's unbound devices. Sleeps.

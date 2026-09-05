@@ -125,7 +125,9 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
     return 0;
 }
 
-static const struct netif_ops vnet_ops = { .transmit = vnet_transmit };
+static void vnet_release(struct netif *nif);
+
+static const struct netif_ops vnet_ops = { .transmit = vnet_transmit, .release = vnet_release };
 
 static int vnet_probe(struct virtio_device *vdev)
 {
@@ -177,11 +179,17 @@ fail:
     return rc;
 }
 
+/* Last reference: a route lookup or a queued packet may hold the
+ * interface past remove; the memory goes here (docs/kernel/quiesce/). */
+static void vnet_release(struct netif *nif)
+{
+    kfree(nif->priv);
+}
+
 static void vnet_remove(struct virtio_device *vdev)
 {
     struct vnet *v = vdev->priv;
-    netif_set_up(&v->nif, false);
-    netif_unregister(&v->nif);
+    netif_unregister(&v->nif);   /* no transmit or receive touches the queues after this */
     virtio_device_reset(vdev);
     /* Everything the device held is dropped; free the posted buffers. */
     struct mbuf *m;
@@ -192,8 +200,9 @@ static void vnet_remove(struct virtio_device *vdev)
         m_freem(m);
     virtq_free(v->rx);
     virtq_free(v->tx);
-    kfree(v);
+    v->rx = v->tx = NULL;
     vdev->priv = NULL;
+    netif_put(&v->nif);          /* the creator's reference; vnet_release frees v when holders are gone */
 }
 
 static const uint32_t vnet_ids[] = { VIRTIO_ID_NET, 0 };

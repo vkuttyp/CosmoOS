@@ -61,11 +61,20 @@ void virtio_unregister_driver(struct virtio_driver *vdrv)
 
 static unsigned g_next_index;
 
+static void virtio_device_release(struct device *dev)
+{
+    struct virtio_device *vdev = to_virtio_device(dev);
+    vdev->tr->release(vdev);
+}
+
 int virtio_device_register(struct virtio_device *vdev)
 {
+    if (vdev->tr == NULL || vdev->tr->release == NULL)
+        return -EINVAL;
     char name[DEVICE_NAME_MAX];
     ksnprintf(name, sizeof(name), "virtio%u", g_next_index++);
     device_setup(&vdev->dev, &virtio_bus, vdev->hw, name);
+    vdev->dev.release = virtio_device_release;
     vdev->dev.dma_mask = vdev->hw ? vdev->hw->dma_mask : 0xFFFFFFFFULL;
     return device_register(&vdev->dev);
 }

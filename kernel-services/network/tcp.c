@@ -177,12 +177,22 @@ struct tcp_pcb *tcp_pcb_new(uint16_t family)
     return pcb;
 }
 
-/* Lock held. Frees now, or after a queued work item has run. */
+/*
+ * Lock held. Frees now, or after a queued work item has run.
+ *
+ * The timers are cancelled synchronously: a callback that already fired
+ * on another CPU writes pcb->work_flags and queues pcb->work, so the pcb
+ * must outlive it. timer_cancel_sync spins on that callback; it is safe
+ * under g_lock because the callbacks take only g_work_lock (never g_lock)
+ * (docs/kernel/quiesce/design.md, "TCP"). After the wait, a callback that
+ * queued the work has made `queued` visible (its spin_lock chain), so the
+ * WORK_FREE deferral below sees it.
+ */
 static void pcb_free_locked(struct tcp_pcb *pcb)
 {
-    timer_cancel(&pcb->rexmit);
-    timer_cancel(&pcb->delack);
-    timer_cancel(&pcb->timewait);
+    timer_cancel_sync(&pcb->rexmit);
+    timer_cancel_sync(&pcb->delack);
+    timer_cancel_sync(&pcb->timewait);
     if (!list_empty(&pcb->link)) {
         list_remove(&pcb->link);
         list_init(&pcb->link);
@@ -464,12 +474,14 @@ static void sock_wake_after(struct socket *s)
     }
 }
 
-/* Lock held: take a reference to wake after unlocking. */
+/* Lock held: take a reference to wake after unlocking. The socket's
+ * release detaches pcb->sock under g_lock, but its count is already zero
+ * when it starts, so a plain get could race it: tryget. */
 static struct socket *sock_ref(struct tcp_pcb *pcb)
 {
-    if (pcb->sock)
-        ksock_get(pcb->sock);
-    return pcb->sock;
+    if (pcb->sock && kobject_tryget(&pcb->sock->obj))
+        return pcb->sock;
+    return NULL;
 }
 
 /* --- worker-side timer handling ----------------------------------------------------- */
@@ -587,7 +599,14 @@ int tcp_listen(struct tcp_pcb *pcb, unsigned backlog)
     return 0;
 }
 
-struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb)
+/*
+ * Dequeue an established child and attach `owner` to it under the lock.
+ * Between the dequeue and the attach the child has no listener and no
+ * socket; if those two steps were separate, a reset arriving in between
+ * would find sock == NULL and free the pcb (pcb_end_locked) while the
+ * accepting thread still held the pointer (audit finding: accept race).
+ */
+struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb, struct socket *owner)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     struct tcp_pcb *child = NULL, *c;
@@ -602,6 +621,7 @@ struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb)
         list_init(&child->accept_link);
         pcb->nr_queued--;
         child->listener = NULL;
+        child->sock = owner;
     }
     spin_unlock_irqrestore(&g_lock, s);
     return child;
@@ -1248,13 +1268,6 @@ bool tcp_accept_ready(struct tcp_pcb *pcb)
 enum tcp_state tcp_state_of(struct tcp_pcb *pcb)
 {
     return __atomic_load_n(&pcb->state, __ATOMIC_ACQUIRE);
-}
-
-void tcp_attach_socket(struct tcp_pcb *pcb, struct socket *sock)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    pcb->sock = sock;
-    spin_unlock_irqrestore(&g_lock, s);
 }
 
 void tcp_init(void)

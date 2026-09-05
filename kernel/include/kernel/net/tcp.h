@@ -118,7 +118,8 @@ void tcp_close(struct tcp_pcb *pcb);
 int tcp_bind(struct tcp_pcb *pcb, const struct netaddr *local);
 int tcp_listen(struct tcp_pcb *pcb, unsigned backlog);
 /* Take an established child off the accept queue, or NULL. */
-struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb);
+/* Dequeue an established child, attached to `owner` under the lock, or NULL. */
+struct tcp_pcb *tcp_accept(struct tcp_pcb *pcb, struct socket *owner);
 int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote);   /* sends SYN; completion via sock_wake */
 /* Copy into the send buffer and transmit; returns bytes taken (may be
  * fewer than len when the buffer is full, 0 when it is full). */
@@ -130,7 +131,6 @@ uint32_t tcp_send_space(struct tcp_pcb *pcb);
 /* Accessors for the socket layer's wait conditions (lock-free reads). */
 bool tcp_accept_ready(struct tcp_pcb *pcb);
 enum tcp_state tcp_state_of(struct tcp_pcb *pcb);
-void tcp_attach_socket(struct tcp_pcb *pcb, struct socket *sock);
 uint32_t tcp_recv_avail(struct tcp_pcb *pcb);
 
 void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6);

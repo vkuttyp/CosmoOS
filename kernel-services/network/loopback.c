@@ -21,7 +21,7 @@ static int lo_transmit(struct netif *nif, struct mbuf *m)
     return 0;
 }
 
-static const struct netif_ops lo_ops = { .transmit = lo_transmit };
+static const struct netif_ops lo_ops = { .transmit = lo_transmit, .release = netif_release_static };
 
 static struct netif g_lo = {
     .name = "lo",
