@@ -1,9 +1,11 @@
 /*
  * keyring.h - Trusted public keys compiled into the kernel.
  *
- * scripts/gen-keyring.py turns the .pub files in tools/keys into the table behind
- * keyring_find(). The ring is immutable after build; a firmware-provided
- * ring is future work and would add keys, not change this interface.
+ * scripts/gen-keyring.py turns KEYRING_PUBS (the developer public key
+ * from $COSMO_KEYDIR plus the release .pub files in tools/keys) into the
+ * table behind keyring_find(). The ring is immutable after build; a
+ * firmware-provided ring is future work and would add keys, not change
+ * this interface. No private key is ever part of the repository.
  */
 
 #ifndef KERNEL_KEYRING_H
@@ -28,8 +30,8 @@ const struct trusted_key *keyring_entry(unsigned index);
 /* The id derivation, shared with the signing tool. */
 void keyring_key_id(const uint8_t pub[ED25519_PUBLIC_KEY_SIZE], uint8_t id[KEYRING_ID_SIZE]);
 
-/* Generated table (kernel/security/keyring_builtin.c, built from
- * the .pub files in tools/keys). */
+/* Generated table (out/<arch>-<build>/gen/keyring_builtin.c, built from
+ * KEYRING_PUBS). */
 extern const struct trusted_key keyring_builtin[];
 extern const unsigned keyring_builtin_count;
 

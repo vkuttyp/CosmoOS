@@ -66,19 +66,30 @@ list through `next`; `free_head = 0`, `num_free = size`. The transport's
 `setup_queue` programs addresses and the interrupt and enables the
 queue; on failure everything is freed.
 
+The whole allocation is device-writable, the descriptor table included,
+so the driver never reads a decision out of it. The chain structure
+lives in driver-private arrays: `shadow_next` (the free list and every
+chain link), `chain_len` (per head, descriptors in flight; 0 = free) and
+`in_bytes` (per head, device-writable bytes). `desc[].next` is written
+from the shadow for the device's benefit and never read back.
+
 `virtq_add(vq, sg, out, in, cookie)`: under the queue's IRQ-safe
 spinlock, refuse when `num_free < out + in` (`-ENOSPC`), take
-descriptors from the free list, fill `addr`/`len`, set `WRITE` on the
-`in` segments and `NEXT` on all but the last, remember `cookie` at the
-head, write the head into `avail->ring[idx % size]`, release-fence, bump
-`avail->idx`. `virtq_kick`: `dma_sync_for_device` (a full fence), then
-`notify` unless the device set `VIRTQ_USED_F_NO_NOTIFY`. `virtq_pop`:
-under the lock, compare `last_used` with an acquire load of
-`used->idx`; read the element; reject `id >= size` or an id with no
-cookie (logged, NULL); walk the chain back onto the free list with a
-length guard; return the cookie and `len`. `virtq_interrupt` (called by
-the transport's MSI-X handler) counts and runs `callback`. Nothing the
-device wrote is used without a bounds check.
+descriptors from the shadow free list, fill `addr`/`len`/`flags`/`next`,
+set `WRITE` on the `in` segments and `NEXT` on all but the last, record
+`cookie`, `chain_len` and `in_bytes` at the head, write the head into
+`avail->ring[idx % size]`, release-fence, bump `avail->idx`.
+`virtq_kick`: `dma_sync_for_device` (a full fence), then `notify` unless
+the device set `VIRTQ_USED_F_NO_NOTIFY`. `virtq_pop`: under the lock,
+compare `last_used` with an acquire load of `used->idx`; read the
+element; skip and count (`bad_used`) an `id >= size`, a head that is not
+in flight (never posted, already completed, a duplicate); clamp and
+count a `len` larger than the chain's `in_bytes`; return the chain to
+the free list by walking the shadow for exactly `chain_len` steps; return
+the cookie and `len`. Traversal is bounded by the driver's own record,
+so no descriptor content can make it loop or index outside its arrays.
+`virtq_interrupt` (called by the transport's MSI-X handler) counts and
+runs `callback`.
 
 ## The virtio-pci transport (`virtio_pci.c`)
 

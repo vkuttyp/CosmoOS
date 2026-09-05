@@ -224,6 +224,23 @@ See [docs/development.md](docs/development.md).
   generic; the Linux table and the virtualization backend are documented
   stubs (`LINUXTEST: skipped`, `HVTEST: skipped`). CI runs both
   architectures. Documented in `docs/kernel/arch/aarch64/`.
+- **Post-roadmap audit and critical-fix pass (done):**
+  `docs/audit/2026-09-post-roadmap-audit.md` audited the whole tree and
+  the fix pass closed its seven CRITICAL findings: TCP no longer takes
+  the interface registry mutex under its spinlock (and every sleeping
+  primitive now panics when entered under a spinlock); virtqueue chains
+  are built and reclaimed from driver-private records, never from the
+  device-writable descriptor table (host test `test_virtq` with a
+  hostile peer); floating-point/SIMD state has an explicit owner per
+  thread with eager switching and per-guest areas (`arch/fpu.h`,
+  XSETBV intercepted); the LAPIC ICR pair is written with interrupts
+  masked; NMI, `#MC`, `#DB` and `#DF` run on their own IST stacks with a
+  paranoid entry that recovers the per-CPU block from the GS base MSR; a
+  POSIX credential model with one privilege predicate gates every
+  privileged call and the VFS enforces permissions (system calls 50-55,
+  `init --unpriv-test`); and no private signing key is in the repository
+  (per-machine developer keys, `scripts/check-secrets.sh`, the leaked key
+  revoked). 75 self-tests, 12 host tests.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

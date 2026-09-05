@@ -57,7 +57,7 @@ struct process {
     struct handle_table handles;
     struct list_node threads;          /* struct thread.proc_link */
     unsigned nr_threads;
-    struct credentials cred;           /* uid/gid placeholders */
+    struct credentials cred;           /* kernel/cred.h: real/effective/saved uid and gid, groups */
     const struct personality *pers;    /* &personality_native, or &personality_linux (Phase 11) */
     enum process_state state;
     int exit_status;
@@ -434,7 +434,8 @@ a fatal fault gives 139 (`COSMO_EXIT_FAULT`, as before), a kill gives
 ```text
 sys_kill(pid, sig):
   1 ≤ sig ≤ 31 else -EINVAL; pid ≤ 0 → -EINVAL (no groups); target = process_lookup(pid) else -ESRCH
-  permission: cur->cred.uid == 0 || cur->cred.uid == target->cred.uid else -EPERM
+  permission: cred_may_signal(&cur->cred, &target->cred) else -EPERM
+              (privileged, or the sender's real/effective uid equals the target's real/saved uid)
   process_kill(target, sig)
 process_kill(p, sig):
   lock p; if state != RUNNING or kill_sig already set: unlock, return
@@ -521,6 +522,34 @@ unchanged). Rights are copied. `-EMFILE` when the table is full.
   (the list, newline-separated). Returns the length of the value (not
   counting the NUL that is written when it fits); `-ENOENT` for an
   unknown name. Writable values arrive when there is policy to set.
+
+### Credentials (Prompt #3 fix pass)
+
+`struct credentials` (`kernel/cred.h`) is POSIX-shaped: `ruid, euid,
+suid`, `rgid, egid, sgid`, `ngroups` and `groups[16]`. The security
+boundary is one predicate, `cred_privileged(c)` (`euid == 0`), consulted
+by every privileged operation: `mount`, `umount`, `klog`, binding a port
+below 1024, `setgroups`, and any `setres*` change beyond shuffling ids
+the caller already holds. Discretionary file access uses the effective
+ids and the supplementary groups (`vfs_permission`). `kill` uses
+`cred_may_signal`. Kernel threads and boot-time work run as
+`cred_kernel` (root); `cred_current()` returns the current process's
+credentials or that.
+
+A child inherits its parent's credentials by copy at spawn; the kernel
+creates init with all ids 0. A process changes only its own credentials,
+under `process->lock` (it is single-threaded today; the lock is for the
+readers on other CPUs once threads exist): `setresuid`/`setresgid`
+follow POSIX (`-1` keeps an id; an unprivileged caller may set each id
+only to one of its current real, effective or saved ids; all or
+nothing, `-EPERM`), `setgroups` is privileged, `getres*`/`getgroups`
+read. Native system calls 50-55 (`SYS_setresuid` ... `SYS_getgroups`);
+the Linux personality maps `setuid`, `setgid`, `setreuid`, `setregid`,
+`setresuid`, `setresgid`, `getresuid`, `getresgid`, `getgroups`,
+`setgroups` onto them and its `get*id` calls return the matching id.
+The rules are pure functions in `kernel/process/cred.c`, tested on the
+host (`tests/host/test_cred.c`); the boundary is tested by
+`init --unpriv-test` (`docs/kernel-services/vfs/invariants.md` V14).
 
 ### The return-to-user hook
 

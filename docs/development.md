@@ -65,11 +65,11 @@ Notes:
 | `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
 | `userland` | `out/<arch>-<build>/userland/*.elf`: init, the shell, the coreutils and system tools (`userland/userland.mk`, `docs/userland/`) |
 | `pkg` | `out/<arch>-<build>/userland/pkg.elf`: the package manager, from `pkg/*.c` plus the kernel's SHA-512 and Ed25519 sources compiled for user mode (`pkg/pkg.mk`, `docs/pkg/`) |
-| `ports` | `out/<arch>-<build>/pkg/repo/`: every recipe under `ports/*/port` cross-compiled by `tools/pkgbuild.py` into a signed `.cpk`, plus the signed `INDEX`; signed with `PKGSIGN_KEY` (default `tools/keys/cosmo-dev.key`); `SELFTEST=1` adds the `badsig` and `badsum` fixtures |
+| `ports` | `out/<arch>-<build>/pkg/repo/`: every recipe under `ports/*/port` cross-compiled by `tools/pkgbuild.py` into a signed `.cpk`, plus the signed `INDEX`; signed with `PKGSIGN_KEY` (default: the module signing key, see `SIGNING`); `SELFTEST=1` adds the `badsig` and `badsum` fixtures |
 | `linux-tests` | `out/<arch>-<build>/tests/linux/`: `lxhello.elf` and `lxtest.elf` (freestanding raw-Linux-ABI programs, no crt0/libc, so no CosmoOS note) and, when `musl-gcc` is found or `MUSL_GCC=` names a compiler, `hello_musl` (`tests/linux/linux.mk`, `docs/compat/linux/testing.md`); they ride in the boot archive as `tests/linux/*` |
-| `hv-guests` | `out/<arch>-<build>/tests/hv/*.bin`: the six flat guest images for the virtualization tests (`tests/hv/*.S` assembled and linked with `--image-base=0 -Ttext=0x1000 --oformat=binary`, `tests/hv/hv.mk`, `docs/kernel-services/virtualization/testing.md`); in the boot archive as `tests/hv/*.bin` |
+| `hv-guests` | `out/<arch>-<build>/tests/hv/*.bin`: the seven flat guest images for the virtualization tests (`tests/hv/*.S` assembled and linked with `--image-base=0 -Ttext=0x1000 --oformat=binary`, `tests/hv/hv.mk`, `docs/kernel-services/virtualization/testing.md`); in the boot archive as `tests/hv/*.bin` |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
-| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*` including `sbin/pkg`, `etc/*` including `etc/pkg/repos.conf` and `etc/pkg/keys/cosmo-dev.pub`, `repo/*` (the ports repository, visible at `/boot/repo`) and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
+| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*` including `sbin/pkg`, `etc/*` including `etc/pkg/repos.conf` and `etc/pkg/keys/<key>.pub` (the first trusted public key, `PKG_TRUST_PUB`), `repo/*` (the ports repository, visible at `/boot/repo`) and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
@@ -117,14 +117,20 @@ single binary. See `docs/kernel/memory/testing.md` and
 `build/module.mk` builds every module named in `MODULES`: its sources
 are compiled with the kernel flags plus `-DCOSMO_MODULE_BUILD=1`, merged
 with `ld.lld -r` into an `ET_REL` object, signed by `scripts/modsign.py`
-with `MODSIGN_KEY` (default `tools/keys/cosmo-dev.key`, a development
-key whose secret half is public), and checked by
-`scripts/check-module-elf.py`. The results go into the boot archive at
-the names listed in `MODULE_ARCHIVE_ENTRIES`: `modules/<name>.ko`
-entries are loaded by the kernel at boot in archive order (list
-dependencies first), `tests/<name>.ko` entries are fixtures loaded only
-by the self-tests. The kernel's trusted key ring is generated from the
-`.pub` files in `tools/keys/` into `out/<arch>-<build>/gen/keyring_builtin.c`
+with `MODSIGN_KEY`, and checked by `scripts/check-module-elf.py`. No
+private key is in the repository: with `SIGNING=dev` (the default) the
+key is a per-machine pair that `scripts/devkey.sh` creates on first use
+in `COSMO_KEYDIR` (`$HOME/.config/cosmoos/keys`), and only kernels built
+on that machine trust it; `SIGNING=release` takes `MODSIGN_KEY` and
+`KEYRING_PUBS` explicitly and generates nothing (`tools/keys/README.md`).
+`scripts/check-secrets.sh` (run by `make check-tools`) fails if a key
+file or a revoked public key is ever tracked. The results go into the
+boot archive at the names listed in `MODULE_ARCHIVE_ENTRIES`:
+`modules/<name>.ko` entries are loaded by the kernel at boot in archive
+order (list dependencies first), `tests/<name>.ko` entries are fixtures
+loaded only by the self-tests. The kernel's trusted key ring is
+generated from `KEYRING_PUBS` (the developer public key plus any
+`tools/keys/*.pub`) into `out/<arch>-<build>/gen/keyring_builtin.c`
 (`scripts/gen-keyring.py`). To add a module, add its sources under
 `modules/<name>/` (or with their subsystem under `drivers/`), define
 `MODULE_<name>_SRCS`, append `<name>` to `MODULES` and an entry to
@@ -251,8 +257,13 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `V` | `0` | `V=1` prints full command lines |
 | `SELFTEST` | `1` for debug, `0` for release | Compile boot-time self-tests (`CONFIG_SELFTEST`) |
 | `CRASH_TEST` | `0` | Compile a deliberate fault after the banner (`CONFIG_CRASH_TEST`) to exercise the panic path |
-| `MODULE_SIG_ENFORCE` | `1` | `CONFIG_MODULE_SIG_ENFORCE`: refuse a kernel module without a valid signature from a key in `tools/keys/`. `0` loads unsigned modules with a warning and taints the kernel; a bad signature is refused either way |
-| `MODSIGN_KEY` | `tools/keys/cosmo-dev.key` | Ed25519 seed used by `build/module.mk` to sign modules |
+| `MODULE_SIG_ENFORCE` | `1` | `CONFIG_MODULE_SIG_ENFORCE`: refuse a kernel module without a valid signature from a key in the kernel's ring. `0` loads unsigned modules with a warning and taints the kernel; a bad signature is refused either way |
+| `SIGNING` | `dev` | `dev`: sign with a per-machine developer key created on first use outside the tree; `release`: `MODSIGN_KEY` and `KEYRING_PUBS` must be given, nothing is generated (`tools/keys/README.md`) |
+| `COSMO_KEYDIR` | `$HOME/.config/cosmoos/keys` | Where `SIGNING=dev` keeps `dev.key` (0600) and `dev.pub`; never inside the repository |
+| `MODSIGN_KEY` | `$(COSMO_KEYDIR)/dev.key` | Ed25519 seed used by `build/module.mk` to sign modules |
+| `KEYRING_PUBS` | `$(COSMO_KEYDIR)/dev.pub` + `tools/keys/*.pub` | Public keys compiled into the kernel's trusted ring |
+| `PKGSIGN_KEY` | `$(MODSIGN_KEY)` | Key that signs packages and the `INDEX` |
+| `PKG_TRUST_PUB` | first of `KEYRING_PUBS` | Public key shipped as `/etc/pkg/keys/<name>.pub` for `pkg` |
 | `LLVM_PREFIX` | empty | Directory prefix (with trailing `/`) for `clang`, `ld.lld`, `lld-link`, `llvm-objcopy`, `llvm-nm`, `llvm-objdump` |
 | `QEMU_MEM` | `256M` | Guest RAM |
 | `MUSL_GCC` | `musl-gcc` if found | A musl C compiler used to build `tests/linux/hello_musl`; empty skips it and sets `HAVE_MUSL=0` for the harness |

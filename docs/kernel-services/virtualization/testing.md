@@ -75,6 +75,7 @@ Console output means bytes the guest wrote to port 0xE9, read back with
 | `hv-guest-pm` | `guest_pm.S` | a 32-bit protected-mode guest entered through `set_regs` (`cr0` PE, flat `cs` 0x0C9B / data 0x0C93); `P` on the console; a store to 0x10000000 is an `MMIO` exit (write, that address) with `rax` 0x5A5A5A5A; the owner skips the 5-byte instruction with `set_regs`; `Q` and `HLT` follow; `set_regs` with PG-without-PE and with EFER.SVME are `-EINVAL` |
 | `hv-guest-shutdown` | `guest_shutdown.S` | with `idtr.limit` set to 0, `int $3` triple-faults: `SHUTDOWN` exit after `S` on the console; the next run is `-EIO`; `get_regs` still works |
 | `hv-guest-spin` | `guest_spin.S` | a guest that never exits: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick reaches the guest even with its IF clear); `.` on the console; a second vCPU, index reuse `-EEXIST`, index 4 `-EINVAL`, `nr_vcpus` bookkeeping; the VM count drops when the last references go |
+| `hv-guest-fpu` | `guest_fpu.S` | the guest rule of `arch/fpu.h`: the test thread takes ownership of register state (`arch_fpu_alloc`) and puts a pattern in xmm0; the guest enables SSE for itself, stores its initial xmm0 at 0x3000 (must be the reset state, zeros: nothing of the owner leaked in) and loads a pattern the test placed at 0x3010; afterwards the owner's xmm0 must still hold its own pattern (nothing of the guest leaked out), and a second run shows the guest kept running |
 
 Without a backend every guest test and `hv-npt` return true after the
 skip line; `hv-probe` then checks the `-ENOTSUP` path instead.
@@ -82,7 +83,8 @@ skip line; `hv-probe` then checks the `-ENOTSUP` path instead.
 ## The guest images (`tests/hv/`)
 
 All are position-dependent flat binaries for 0x1000. `guest_pio.S`,
-`guest_irq.S`, `guest_cpuid.S`, `guest_shutdown.S` and `guest_spin.S`
+`guest_irq.S`, `guest_cpuid.S`, `guest_shutdown.S`, `guest_spin.S` and
+`guest_fpu.S` (which enables SSE for itself with CR0/CR4 writes)
 are `.code16` real-mode programs; `guest_pm.S` is `.code32` and expects
 the owner to have entered protected mode for it. They use only port
 0xE9 (the console), `hlt`, `in`/`out`, `cpuid`, `rdmsr`/`wrmsr`,

@@ -19,8 +19,22 @@ Reaching `boot complete` proves `entry.S`, `start.c`, `gdt_init`,
 
 ### Self-tests (`CONFIG_SELFTEST=1`, default in debug builds)
 
-Two of the five self-tests in `kernel/core/selftest.c` target this layer:
+These self-tests in `kernel/core/selftest.c` target this layer:
 
+- **trap-paranoid**: `arch_test_paranoid_entry` (x86-64 `trap.c`)
+  registers a probe on vector 2, raises a software NMI from kernel
+  context and one with the user's GS base live (`swapgs; int $2; swapgs`
+  with interrupts off), and checks each ran on the NMI IST stack of this
+  CPU, saw the right per-CPU block and `irq_depth 1`, and that the GS
+  base afterwards is the kernel's again. AArch64 reports nothing to test.
+- **fpu-switch**: `arch_test_fpu_switch` (x86-64 `fpu.c`) runs two
+  state-owning threads pinned to the calling CPU that load distinct
+  xmm0-15 patterns and, across 400 yields each, verify their registers
+  came back untouched.
+- **smp-ipi-storm** (`smptest.c`): cross calls to every other CPU for
+  300 ms while a timer on this CPU wakes threads pinned to those CPUs
+  every tick, so wake IPIs are sent from interrupt context during the
+  ICR write sequence of the cross calls; every call must complete.
 - **irq-state**: nested `arch_irq_save`/`arch_irq_restore` pairs leave IF
   exactly as found; `arch_irq_enabled` reports false inside the pair.
 - **breakpoint-trap**: registers a handler on

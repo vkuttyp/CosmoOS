@@ -43,11 +43,17 @@ one is decided by `arch_trap_unhandled`. **Checked by** `idt_init`
 looping over `IDT_VECTORS` and by `start.c` ordering `idt_init` before
 `kernel_main` (which is where `arch_irq_enable` is first called).
 
-## I-ARCH-7: `#DF` runs on IST1
+## I-ARCH-7: `#DF`, NMI, `#MC` and `#DB` run on their own IST stacks and take the paranoid entry
 
-The double-fault gate references `IST_DOUBLE_FAULT` and the TSS
-`ist[0]` points at the top of an 8 KiB dedicated stack. **Checked by**
-`idt_init` and `gdt_init`; a stack-overflow crash test is future work.
+The gates for vectors 8, 2, 18 and 1 reference `IST_DOUBLE_FAULT`,
+`IST_NMI`, `IST_MACHINE_CHECK` and `IST_DEBUG`; each CPU's TSS holds
+four 8 KiB dedicated stacks. Their stubs jump to `isr_paranoid`, which
+decides SWAPGS from `MSR_GS_BASE` (a kernel address means GS is already
+the kernel's), never from the saved CS, and restores exactly the GS state
+it found. `x86_trap_paranoid` neither preempts nor delivers a kill.
+**Checked by** `idt_init`, `gdt_init`, and the `trap-paranoid` self-test
+(a software NMI from kernel context and one with the user's GS base
+live); a stack-overflow crash test is future work.
 
 ## I-ARCH-8: `arch_irq_save`/`arch_irq_restore` compose
 
@@ -78,12 +84,25 @@ Changing it breaks the future `SYSRET` STAR assumption and every
 `GDT_*` user. **Checked by** the constants in `x86/gdt.h`; any change must
 update `design.md`.
 
-## I-ARCH-13: No FPU/SSE instructions in kernel code
+## I-ARCH-13: Kernel code uses no FPU/SIMD registers; every thread that does owns its state
 
-`-mgeneral-regs-only` is on for the kernel target; the trap path saves no
-vector state. A future subsystem that needs SIMD must add explicit
-save/restore and remove the flag for that unit only. **Checked by the
-compiler**.
+`-mgeneral-regs-only` is on for the kernel target (and the loader,
+modules and native libc); the trap path saves no vector state. A thread
+executes x87/SSE/AVX instructions only if `thread->fpu` is set
+(`arch_fpu_alloc`: every user thread before its first instruction; test
+threads explicitly), and `arch_thread_switch_prepare` saves the outgoing
+owner's registers and loads the incoming owner's on every switch between
+owners (eager). A guest runs from its own area with the owner saved
+around it and its own XCR0 installed. CR0/CR4/XCR0 are asserted
+identically on every CPU by `x86_fpu_init_cpu`. **Checked by** the
+compiler, `fpu-switch`, `hv-guest-fpu`, `init --selftest` (`--fpu-partner`).
+
+## I-ARCH-15: The ICR write pair is atomic against local interrupts, and NMI handlers send no IPIs
+
+`icr_write_pair` writes ICR_HI and ICR_LO with interrupts disabled;
+nothing else writes the ICR. An NMI handler cannot be masked and must
+therefore never call `ipi_send` or anything that does. **Checked by**
+`smp-ipi-storm` and review of the (registered) NMI handlers.
 
 ## I-ARCH-14: `arch_emulator_exit` may return
 

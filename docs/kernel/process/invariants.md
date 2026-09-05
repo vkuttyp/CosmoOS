@@ -208,9 +208,20 @@ a timer tick); `init --selftest` (a `cat` blocked on a pipe dies with
 
 **P26. `kill` honours credentials and validates its arguments.** Signal
 numbers outside `1..31` and pids `<= 0` are `-EINVAL`, an unknown pid
-`-ESRCH`, another uid `-EPERM` unless the caller is uid 0. Check:
-`init --selftest` (`-ESRCH`, `-EINVAL`). Gap: every process is uid 0,
-so `-EPERM` is untested.
+`-ESRCH`, and `-EPERM` unless `cred_may_signal` (privileged, or the
+sender's real/effective uid equals the target's real/saved uid). Check:
+`init --selftest` (`-ESRCH`, `-EINVAL`) and `init --unpriv-test` (a
+uid-1000 child's `kill(getppid(), SIGTERM)` is `-EPERM` and the root
+parent survives).
+
+**P26a. Privilege is `cred_privileged` and nothing else.** Every
+privileged operation (mount, umount, klog, reserved ports, setgroups,
+setres* beyond the caller's own ids) asks the one predicate in
+`kernel/cred.h`; an unprivileged process cannot regain privilege
+(`setresuid` refuses ids it does not hold, all or nothing). Check:
+`tests/host/test_cred.c` (the rules), `init --unpriv-test` (every
+privileged call and every root-owned object refused). Gap: no
+capability set yet; privilege is all-or-nothing.
 
 **P27. Relative paths resolve from the process's working directory,
 whose string and vnode agree.** Every path system call passes

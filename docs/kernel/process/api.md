@@ -338,7 +338,22 @@ asserted with `STATIC_ASSERT` and relied on by `syscall_entry.S`.
 
 ## arch/context.h
 
-`void arch_thread_switch_prepare(struct thread *next)`: called by the
-scheduler with the run-queue lock held before `arch_context_switch`;
-publishes `next`'s kernel stack top (per-CPU block and TSS `rsp0`) and
-activates `next->proc->space` or `kernel_space` if CR3 differs.
+`void arch_thread_switch_prepare(struct thread *prev, struct thread *next)`:
+called by the scheduler with the run-queue lock held and interrupts
+disabled before `arch_context_switch`; saves `prev`'s vector/x87 state
+and loads `next`'s when they own state (`arch/fpu.h`; `prev` is NULL
+when a CPU abandons its bootstrap context), publishes `next`'s kernel
+stack top (per-CPU block and TSS `rsp0`) and activates
+`next->proc->space` or `kernel_space` if CR3 differs.
+
+## kernel/cred.h (Prompt #3 fix pass)
+
+`struct credentials { ruid, euid, suid, rgid, egid, sgid, ngroups, groups[16] }`,
+`cred_privileged(c)` (`euid == 0`; the single privilege predicate),
+`cred_current()` (the process's, or `cred_kernel` on a kernel thread),
+`cred_in_group`, `cred_setresuid`/`cred_setresgid` (POSIX rules, `-1`
+keeps, all or nothing, `-EPERM`/`-EINVAL`), `cred_setgroups`
+(privileged), `cred_may_signal`. Process wrappers taking `process->lock`:
+`process_setresuid`, `process_setresgid`, `process_setgroups`. Native
+system calls 50-55: `setresuid`, `setresgid`, `getresuid`, `getresgid`,
+`setgroups`, `getgroups`. Details: `design.md`, "Credentials".

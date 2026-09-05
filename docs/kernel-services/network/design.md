@@ -304,7 +304,15 @@ IRQ-safe) → `arp_lock`/`nd_lock` → `netif->lock` → driver locks →
 context. Timers take `tcp_lock`. The worker thread takes protocol locks
 but never `sock->lock`; it wakes waiters through `waitqueue_wake_all`,
 which needs no socket lock. Nothing holds a spinlock across
-`transmit`, `copy_to/from_user`, or a blocking wait.
+`transmit`, `copy_to/from_user`, or a blocking wait, and nothing under
+a protocol spinlock enters a sleeping primitive: the interface registry
+(`netif_find`, `netif_default`, `netif_owns_*`) is guarded by a spinlock
+of its own and is read only outside the protocol locks, and TCP decides
+its path MSS (`tcp_path_mss`, a registry lookup) before taking `g_lock`
+and caches it in `pcb->path_mss`, on the active side from the route and
+on the passive side from the interface the SYN arrived on. `mutex_lock`
+asserts `preempt_count == 0` on entry, so a regression here panics in
+the first handshake of `net-lo-tcp`.
 
 ## Memory
 

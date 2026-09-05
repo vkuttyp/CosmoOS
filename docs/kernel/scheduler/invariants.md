@@ -45,11 +45,16 @@ returned with interrupts off would never take the next tick).
 ## Entry conditions
 
 **S6. `schedule()` is never called from interrupt context or with
-preemption disabled by the caller.** `schedule()` panics if
-`irq_depth != 0` or `preempt_count != 0`; `sched_block_current`,
-`waitqueue_prepare`, `mutex_lock`, `semaphore_down`,
-`wait_for_completion` repeat the check with a clearer message. Check:
-assert.
+preemption disabled by the caller, and no sleeping primitive is entered
+under a spinlock.** `schedule()` panics if `irq_depth != 0` or
+`preempt_count != 0`; `sched_block_current` and `waitqueue_prepare`
+repeat the check; `mutex_lock`, `semaphore_down` and
+`wait_for_completion` check `preempt_count` on entry, on every call and
+not only when they would block, so a sleeping lock taken under a
+spinlock fails in the first test that runs the path rather than under
+load (the Prompt #3 fix pass found `tcp.c` taking the netif registry
+mutex under the TCP spinlock: uncontended it passed, contended it would
+have panicked in `waitqueue_prepare`). Check: assert.
 
 **S7. Holding a spinlock disables preemption.** `spin_lock` and
 `spin_trylock` (on success) call `preempt_disable`; `spin_unlock` calls

@@ -9,7 +9,9 @@ Automation: toolchain setup, QEMU runners, CI helpers.
 | `mkimage.sh` | FAT32 boot image: loader, kernel, boot archive |
 | `mkbootarchive.py` | Reproducible ustar boot archive (`init`, modules, fixtures) |
 | `modsign.py` | Ed25519 key generation, module signing, verification (pure Python) |
-| `gen-keyring.py` | Generate the kernel's built-in key ring from `tools/keys/*.pub` |
+| `devkey.sh` | Create the per-machine developer signing key in `$COSMO_KEYDIR` on first use (`SIGNING=dev`) |
+| `check-secrets.sh` | Fail if a private key or a revoked public key is tracked (run by `make check-tools`) |
+| `gen-keyring.py` | Generate the kernel's built-in key ring from `KEYRING_PUBS` (the developer public key plus `tools/keys/*.pub`) |
 | `check-module-elf.py` | Post-build checks on a signed module (ET_REL, W^X, metadata, trailer) |
 | `check-kernel-elf.sh` | Post-link checks on the kernel (W^X segments, PT_NOTE) |
 | `check-reproducible.sh` | Build twice, compare |

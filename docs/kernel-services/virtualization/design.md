@@ -222,8 +222,14 @@ set: every MSR read and write intercepts).
 **Intercepts** in every VMCB: INTR, NMI, SMI, INIT, HLT, CPUID, INVD,
 IOIO, MSR, SHUTDOWN, VMRUN (architecturally required), VMMCALL, VMLOAD,
 VMSAVE, STGI, CLGI, SKINIT, INVLPGA, MONITOR, MWAIT (armed or not).
-RDTSC, RDTSCP and XSETBV are not intercepted (the guest reads the host
-TSC with a zero offset and enables XSAVE state as the hardware allows);
+XSETBV is intercepted: XCR0 is not part of the VMCB, so the guest's
+value is kept in the vCPU, validated with the hardware's rules against
+the host's XCR0 (`#UD` without CR4.OSXSAVE, `#GP(0)` for CPL > 0, ECX != 0
+or an unacceptable value) and installed around VMRUN; the guest's
+x87/SSE/AVX registers live in a per-vCPU area swapped with the owner
+thread's around every entry (`docs/kernel/arch/design.md`, "FPU and SIMD
+state"). RDTSC and RDTSCP are not intercepted (the guest reads the host
+TSC with a zero offset);
 exceptions are not intercepted (the guest handles its own faults); nested
 paging turns a guest access to unmapped guest-physical memory into an NPF
 exit. NP_ENABLE = 1, N_CR3 = the VM's table, ASID = the VM's,
