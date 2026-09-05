@@ -250,6 +250,10 @@ nblocks, reads, writes, flushes }`.
   block through `blk_read`/`blk_write` (synchronous, sleeps). `buf` must
   be DMA-able (kmalloc or dma_alloc memory). `-EINVAL` past the end, or
   the block layer's error.
+- **`int pool_write_flags(p, blk, buf, flags)`** The same write with
+  `BIO_PREFLUSH` and/or `BIO_FUA`: the block layer flushes before and/or
+  after it. cosmofs writes its root this way (one call for the two-flush
+  commit).
 - **`int pool_flush(p)`** `blk_flush`.
 
 ## cosmofs (`kernel/include/kernel/cosmofs.h`)
@@ -265,11 +269,17 @@ nblocks, reads, writes, flushes }`.
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which
   includes blocks freed since the last commit once that commit is
-  done), `total_blocks`, `inode_count`, `dirty_buffers`, `pending_frees`.
-  `-EINVAL` for a mount that is not a cosmofs.
+  done), `total_blocks`, `inode_count`, `dirty_buffers`, `pending_frees`,
+  `reserve_blocks`, `commits`, `wb_commits` (by the writeback thread),
+  `csum_failures`. `-EINVAL` for a mount that is not a cosmofs.
 - **`void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)`**
   Test hook: the next unmount drops the open transaction instead of
   committing it, as a crash before the root write would.
+- **`void cosmofs_test_set_writeback(struct mount *mnt, bool on)`**,
+  **`void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms)`**
+  Test hooks for the writeback thread (`docs/kernel-services/filesystem/cosmofs/design.md`).
+- **`file_sync`** on a cosmofs file writes its pages back and then commits
+  the open transaction: the file is durable when the call returns.
 
 The on-disk format is `kernel-services/filesystem/cosmofs/cosmofs_format.h`;
 see `docs/kernel-services/filesystem/cosmofs/`.

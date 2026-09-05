@@ -325,6 +325,12 @@ bool selftest_cosmofs_replay(const char **reason)
     int mk = vfs_mkdir(NULL, MNT, 0755);
     CHECK(mk == 0 || mk == -EEXIST);
     CHECK(vfs_mount(MNT, "cosmofs", bd, 0) == 0);
+    {
+        struct vnode *mv;
+        CHECK(vfs_lookup(NULL, MNT, &mv) == 0);
+        cosmofs_test_set_writeback(mv->mnt, false);   /* every root write in the log is one this workload asked for */
+        vnode_put(mv);
+    }
     ramblk_record_start(bd, MAX_LOG);
 
     /* The workload: creates, rewrites, a directory, renames, unlinks, with

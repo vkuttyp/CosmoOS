@@ -21,7 +21,10 @@
 #include <kernel/panic.h>
 #include <kernel/storage.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vfs.h>
+#include <kernel/wait.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -84,6 +87,37 @@ int pool_write(struct spool *p, uint64_t blk, const void *buf)
     p->writes++;
     memcpy(g_image + blk * POOL_BLOCK, buf, POOL_BLOCK);
     return 0;
+}
+
+int pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags)
+{
+    (void)flags;   /* the image is memory: flushes mean nothing here */
+    return pool_write(p, blk, buf);
+}
+
+/* No threads on the host: the filesystem runs without its writeback
+ * thread (mount logs a warning and commits only on sync and unmount). */
+struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority)
+{
+    (void)entry; (void)arg; (void)name; (void)priority;
+    return NULL;
+}
+
+int thread_join(struct thread *t)
+{
+    (void)t;
+    return 0;
+}
+
+void thread_sleep_ns(uint64_t ns)
+{
+    (void)ns;
+}
+
+uint64_t clock_now_ns(void)
+{
+    static uint64_t t;
+    return t += 1000;
 }
 
 int pool_flush(struct spool *p)

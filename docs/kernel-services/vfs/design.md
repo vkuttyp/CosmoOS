@@ -198,6 +198,7 @@ int  pool_open(struct blkdev *bd, struct spool **out);      /* references bd */
 void pool_close(struct spool *p);
 int  pool_read(struct spool *p, uint64_t blk, void *buf);   /* one pool block */
 int  pool_write(struct spool *p, uint64_t blk, const void *buf);
+int  pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags);   /* BIO_PREFLUSH, BIO_FUA: the root write */
 int  pool_flush(struct spool *p);
 ```
 

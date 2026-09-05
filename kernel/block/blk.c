@@ -7,6 +7,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
 #include <kernel/sched.h>
@@ -72,6 +73,9 @@ int blk_register(struct blkdev *bd, const char *prefix)
     bd->reads = bd->writes = bd->flushes = bd->errors = 0;
     bd->gone = false;
     bd->submitting = 0;
+    list_init(&bd->pending);
+    spinlock_init(&bd->qlock, "blk-pending");
+    bd->requeued = 0;
     list_push_back(&g_blkdevs, &bd->link);
     g_count++;
     kobject_get(&bd->obj);   /* the registry's reference */
@@ -97,11 +101,21 @@ void blk_unregister(struct blkdev *bd)
     __atomic_store_n(&bd->gone, true, __ATOMIC_SEQ_CST);
     while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0)
         sched_yield();
+    /* Nothing waiting in the pending list will ever reach the driver. */
+    for (;;) {
+        arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+        struct list_node *n = list_empty(&bd->pending) ? NULL : list_pop_front(&bd->pending);
+        spin_unlock_irqrestore(&bd->qlock, s);
+        if (n == NULL)
+            break;
+        bio_complete(container_of(n, struct bio, link), -ENODEV);
+    }
     kinfo("blk: %s removed", bd->name);
     kobject_put(&bd->obj);   /* the registry's reference */
 }
 
 static int submit_checked(struct blkdev *bd, struct bio *bio);
+static int submit_flagged(struct blkdev *bd, struct bio *bio);
 
 int blk_submit(struct bio *bio)
 {
@@ -113,8 +127,178 @@ int blk_submit(struct bio *bio)
         __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
         return -ENODEV;
     }
-    int rc = submit_checked(bd, bio);
+    int rc = (bio->flags & (BIO_PREFLUSH | BIO_FUA)) ? submit_flagged(bd, bio) : submit_checked(bd, bio);
     __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
+    return rc;
+}
+
+/*
+ * The pending queue (docs/kernel-services/filesystem/cosmofs/design.md,
+ * "The block layer"): a driver that refuses a bio with -EAGAIN has no
+ * slot for it; the bio waits here and every completion resubmits from
+ * the head. No lock is held across ops->submit (a driver may complete
+ * synchronously and re-enter through bio_complete), so a resubmission
+ * that is refused again goes back to the head and the next completion
+ * tries once more. The caller's `done` runs exactly once, when the bio
+ * finally completes.
+ */
+static void drain_pending(struct blkdev *bd)
+{
+    for (;;) {
+        arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+        if (list_empty(&bd->pending)) {
+            spin_unlock_irqrestore(&bd->qlock, s);
+            return;
+        }
+        struct bio *bio = container_of(list_pop_front(&bd->pending), struct bio, link);
+        spin_unlock_irqrestore(&bd->qlock, s);
+        int rc = bd->ops->submit(bd, bio);
+        if (rc == -EAGAIN) {
+            s = spin_lock_irqsave(&bd->qlock);
+            list_push_front(&bd->pending, &bio->link);
+            spin_unlock_irqrestore(&bd->qlock, s);
+            return;
+        }
+        if (rc)
+            bio_complete(bio, rc);   /* the driver never owned it */
+    }
+}
+
+/* Hand a validated bio to the driver; -EAGAIN parks it in the queue. */
+static int driver_submit(struct blkdev *bd, struct bio *bio)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+    bool waiting = !list_empty(&bd->pending);
+    if (waiting) {
+        list_push_back(&bd->pending, &bio->link);   /* keep the order behind those already waiting */
+        bd->requeued++;
+    }
+    spin_unlock_irqrestore(&bd->qlock, s);
+    if (waiting) {
+        drain_pending(bd);   /* a slot may have freed since the queue formed */
+        return 0;
+    }
+    int rc = bd->ops->submit(bd, bio);
+    if (rc != -EAGAIN)
+        return rc;
+    s = spin_lock_irqsave(&bd->qlock);
+    list_push_back(&bd->pending, &bio->link);
+    bd->requeued++;
+    spin_unlock_irqrestore(&bd->qlock, s);
+    drain_pending(bd);   /* closes the window between the refusal and the enqueue */
+    return 0;
+}
+
+/*
+ * BIO_PREFLUSH / BIO_FUA as a sequence: flush, the write, flush. The
+ * user's bio keeps its own fields; its `done` is parked in the sequence
+ * and restored before it runs. A failure anywhere completes the user's
+ * bio with that status.
+ */
+struct bio_seq {
+    struct bio flush;
+    struct bio *user;
+    void (*user_done)(struct bio *bio);
+    void *user_arg;               /* the caller's context, parked while the sequence borrows the field */
+    unsigned pending_flags;
+};
+
+/* Give the user's bio its own done and arg back. */
+static void seq_restore(struct bio_seq *seq)
+{
+    seq->user->done = seq->user_done;
+    seq->user->arg = seq->user_arg;
+}
+
+static void seq_finish(struct bio_seq *seq, int status)
+{
+    struct bio *u = seq->user;
+    seq_restore(seq);
+    kfree(seq);
+    bio_complete(u, status);
+}
+
+static void seq_post_flush_done(struct bio *bio)
+{
+    struct bio_seq *seq = bio->arg;
+    seq_finish(seq, bio->status);
+}
+
+static void seq_write_done(struct bio *bio)
+{
+    struct bio_seq *seq = bio->arg;
+    if (bio->status || !(seq->pending_flags & BIO_FUA)) {
+        seq_finish(seq, bio->status);
+        return;
+    }
+    memset(&seq->flush, 0, sizeof(seq->flush));
+    seq->flush.dev = bio->dev;
+    seq->flush.dir = BIO_FLUSH;
+    seq->flush.done = seq_post_flush_done;
+    seq->flush.arg = seq;
+    list_init(&seq->flush.link);
+    seq->flush.status = -EAGAIN;
+    int rc = driver_submit(bio->dev, &seq->flush);
+    if (rc)
+        seq_finish(seq, rc);
+}
+
+static void seq_pre_flush_done(struct bio *bio)
+{
+    struct bio_seq *seq = bio->arg;
+    if (bio->status) {
+        seq_finish(seq, bio->status);
+        return;
+    }
+    struct bio *u = seq->user;
+    u->status = -EAGAIN;
+    int rc = driver_submit(u->dev, u);
+    if (rc)
+        seq_finish(seq, rc);
+}
+
+static int submit_flagged(struct blkdev *bd, struct bio *bio)
+{
+    if (bio->dir != BIO_WRITE)
+        return -EINVAL;   /* flags belong to writes */
+    /* Validate the write itself first, without submitting it. */
+    if (bio->nsectors == 0 || bio->nsectors > bd->max_sectors || bio->buf == NULL)
+        return -EINVAL;
+    if (bio->sector >= bd->capacity || bd->capacity - bio->sector < bio->nsectors)
+        return -EINVAL;
+    if (bd->read_only)
+        return -EROFS;
+    if (dma_map(bd->dev, bio->buf, (size_t)bio->nsectors * bd->sector_size, DMA_BIDIRECTIONAL) == 0)
+        return -EINVAL;
+    struct bio_seq *seq = kzalloc(sizeof(*seq));
+    if (seq == NULL)
+        return -ENOMEM;
+    seq->user = bio;
+    seq->user_done = bio->done;
+    seq->user_arg = bio->arg;
+    seq->pending_flags = bio->flags;
+    bio->done = seq_write_done;
+    bio->arg = seq;   /* borrowed until seq_restore; the caller's arg is parked in the sequence */
+    bio->status = -EAGAIN;
+    if (bio->flags & BIO_PREFLUSH) {
+        seq->flush.dev = bd;
+        seq->flush.dir = BIO_FLUSH;
+        seq->flush.done = seq_pre_flush_done;
+        seq->flush.arg = seq;
+        list_init(&seq->flush.link);
+        seq->flush.status = -EAGAIN;
+        int rc = driver_submit(bd, &seq->flush);
+        if (rc) {
+            seq_restore(seq);
+            kfree(seq);
+        }
+        return rc;
+    }
+    int rc = driver_submit(bd, bio);
+    if (rc) {
+        seq_restore(seq);
+        kfree(seq);
+    }
     return rc;
 }
 
@@ -138,7 +322,7 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
     if (faultinject_should_fail(FI_BLK_SUBMIT))
         return -EIO;   /* debug builds: an injected submission failure (docs/verification/) */
     bio->status = -EAGAIN;   /* in flight */
-    return bd->ops->submit(bd, bio);
+    return driver_submit(bd, bio);
 }
 
 void bio_complete(struct bio *bio, int status)
@@ -156,6 +340,7 @@ void bio_complete(struct bio *bio, int status)
     else
         __atomic_fetch_add(&bd->flushes, 1, __ATOMIC_RELAXED);
     bio->done(bio);
+    drain_pending(bd);   /* a slot is free: the next waiting bio goes in */
 }
 
 struct sync_bio {
@@ -169,7 +354,8 @@ static void sync_done(struct bio *bio)
     complete(&s->done);
 }
 
-static int sync_io(struct blkdev *bd, enum bio_dir dir, uint64_t sector, uint32_t nsectors, void *buf)
+static int sync_io(struct blkdev *bd, enum bio_dir dir, uint64_t sector, uint32_t nsectors, void *buf,
+                   unsigned flags)
 {
     if (dir != BIO_FLUSH && (nsectors == 0 || buf == NULL))
         return -EINVAL;
@@ -179,6 +365,7 @@ static int sync_io(struct blkdev *bd, enum bio_dir dir, uint64_t sector, uint32_
         memset(&s.bio, 0, sizeof(s.bio));
         s.bio.dev = bd;
         s.bio.dir = dir;
+        s.bio.flags = dir == BIO_WRITE ? flags : 0;
         s.bio.sector = dir == BIO_FLUSH ? 0 : sector;
         s.bio.nsectors = dir == BIO_FLUSH ? 0 : n;
         s.bio.buf = buf;
@@ -202,17 +389,22 @@ static int sync_io(struct blkdev *bd, enum bio_dir dir, uint64_t sector, uint32_
 
 int blk_read(struct blkdev *bd, uint64_t sector, uint32_t nsectors, void *buf)
 {
-    return sync_io(bd, BIO_READ, sector, nsectors, buf);
+    return sync_io(bd, BIO_READ, sector, nsectors, buf, 0);
 }
 
 int blk_write(struct blkdev *bd, uint64_t sector, uint32_t nsectors, const void *buf)
 {
-    return sync_io(bd, BIO_WRITE, sector, nsectors, (void *)(uintptr_t)buf);
+    return sync_io(bd, BIO_WRITE, sector, nsectors, (void *)(uintptr_t)buf, 0);
+}
+
+int blk_write_flags(struct blkdev *bd, uint64_t sector, uint32_t nsectors, const void *buf, unsigned flags)
+{
+    return sync_io(bd, BIO_WRITE, sector, nsectors, (void *)(uintptr_t)buf, flags);
 }
 
 int blk_flush(struct blkdev *bd)
 {
-    return sync_io(bd, BIO_FLUSH, 0, 0, NULL);
+    return sync_io(bd, BIO_FLUSH, 0, 0, NULL, 0);
 }
 
 struct blkdev *blk_find(const char *name)
@@ -260,5 +452,6 @@ EXPORT_SYMBOL(blk_submit);
 EXPORT_SYMBOL(bio_complete);
 EXPORT_SYMBOL(blk_read);
 EXPORT_SYMBOL(blk_write);
+EXPORT_SYMBOL(blk_write_flags);
 EXPORT_SYMBOL(blk_flush);
 EXPORT_SYMBOL(blk_find);

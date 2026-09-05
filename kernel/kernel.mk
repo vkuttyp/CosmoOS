@@ -91,6 +91,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/device/devtest.c \
 	kernel/block/blk.c \
 	kernel/block/ramblk.c \
+	kernel/block/blktest.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/fwcfg.c \

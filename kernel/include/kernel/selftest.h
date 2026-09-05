@@ -62,6 +62,7 @@ bool selftest_lockdep_contention(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
 bool selftest_fault_blk(const char **reason);
+bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 
@@ -109,6 +110,13 @@ bool selftest_pool(const char **reason);
 bool selftest_cosmofs_format(const char **reason);
 bool selftest_cosmofs_ops(const char **reason);
 bool selftest_cosmofs_crash(const char **reason);
+bool selftest_cosmofs_holes(const char **reason);      /* milestone 7 (RAM devices): sparse files */
+bool selftest_cosmofs_csum(const char **reason);       /* data and directory checksums */
+bool selftest_cosmofs_fsync(const char **reason);      /* fsync commits */
+bool selftest_cosmofs_reserve(const char **reason);    /* the metadata reserve on a full disk */
+bool selftest_cosmofs_fallback(const char **reason);   /* older-slot fallback at mount */
+bool selftest_cosmofs_writeback(const char **reason);  /* the writeback thread */
+bool selftest_cosmofs_badmap(const char **reason);     /* a crafted inode's direct runs are validated */
 
 /* Phase 8: kernel-services/network/nettest.c */
 bool selftest_net_mbuf(const char **reason);

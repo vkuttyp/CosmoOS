@@ -109,6 +109,12 @@ reaching the driver; the creator's `blkdev_put` does not run the release
 while the finder holds it; the finder's put runs it exactly once
 (`docs/kernel/quiesce/invariants.md` Q9–Q11).
 
+### `blk-queue`
+
+`kernel/block/blktest.c`, on the RAM block device in deferred mode
+(`ramblk_set_deferred`): the pending queue and the bio flags
+(`docs/kernel-services/vfs/testing.md`).
+
 ## Boot markers (`tests/boot/run_boot_test.py`)
 
 Required in the serial log on every normal run:

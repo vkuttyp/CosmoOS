@@ -14,15 +14,18 @@ future work).
 
 **V2. Every committed cosmofs root describes a completely valid
 filesystem.** A commit writes every new metadata block and data block,
-flushes, then writes the superblock into the slot the current root did
-not come from, then flushes. Before the superblock write the previous
+then writes the superblock into the slot the current root did not come
+from with `BIO_PREFLUSH | BIO_FUA` (the block layer runs flush, write,
+flush). Before the superblock write the previous
 root is intact because every block the transaction touched was free in
 it; after it the new root is complete. Check: `cosmofs-crash` (mutate,
 discard the transaction, remount: the previous state and free count
 are unchanged; corrupt the newer slot: mount falls back to the older
-generation and still reads every file). Gap: no power-cut injection at
-arbitrary points of the commit sequence; the two-flush ordering relies
-on the device honouring `flush`.
+generation and still reads every file); `cosmofs-replay` (every prefix
+of the write stream); `cosmofs-fallback` (a newer root whose tree does
+not load is passed over for the older one, and the next commit replaces
+it). Gap: the flush ordering relies on the device honouring `flush`; a
+device that did not negotiate one is taken to have no volatile cache.
 
 **V3. A block referenced by a committed root is never overwritten.**
 Metadata is modified only after `cfs_buf_cow` moved it to a block that
@@ -40,13 +43,19 @@ commit through the reserve-then-write fixpoint. Check: `cosmofs-ops`
 (free count returns after a delete plus commit); review. Gap: the
 fixpoint is exercised only with one bitmap chunk (8 MiB disk).
 
-**V5. Every metadata block read from the pool is verified before use.**
-Magic, kind, own block number and CRC32C (`mhdr_check`); superblocks
-also magic, version, block size, total blocks and CRC. Extents,
-inode numbers, directory entry lengths and block numbers are
-range-checked before they index anything. Check: `cosmofs-format` (an
-unformatted disk is `-EIO`), `cosmofs-crash` (a corrupted superblock is
-ignored). Gap: no fuzzing of on-disk images.
+**V5. Every block read from the pool is verified before use.** Metadata:
+magic, kind, own block number and CRC32C (`mhdr_check`); superblocks
+also magic, version, block size, total blocks and CRC. Data and
+directory blocks (since format version 2): CRC32C against the entry in
+the owner inode's checksum tree, `-EIO` and a log line on mismatch.
+Extents (range, order, no overlap), inode numbers, directory entry
+lengths and block numbers are range-checked before they index anything.
+Check: `cosmofs-format` (an unformatted disk is `-EIO`), `cosmofs-crash`
+(a corrupted superblock is ignored), `cosmofs-csum` (a flipped byte in a
+data block reads `-EIO` and a rewrite repairs it; in a directory block the
+lookup is `-EIO`), `cosmofs-badmap` (an inode whose two direct runs were
+swapped and re-sealed is `-EIO` on the map fast path, not read as a
+hole), `fuzz_cosmofs` (`make fuzz`).
 
 **V6. Inode numbers are never reused.** `next_ino` only grows; a freed
 inode's slot is zeroed. Check: review. Gap: none needed while the
@@ -144,13 +153,13 @@ only clean pages of mounts with a backing store, never waiting on a
 cache lock while holding another. Check: `cache-limits`.
 
 **V15. Data written to a file reaches the filesystem only through
-`writepage`, and cosmofs never leaves a hole inside a file's mapped
-span.** Runs cannot express holes, so `cfs_writepage` first allocates
-zero blocks for unwritten logical blocks below the one being written;
-`readpage` returns zeros beyond the mapped span. Check: `cosmofs-ops`
-(a 45-block file with a rewrite in the middle reads back exactly);
-`pagecache` (hole reads). Gap: sparse files consume disk for their
-holes; a hole-capable extent format is future work.
+`writepage`, and a hole costs nothing.** Runs carry their logical
+position (format version 2), so `cfs_writepage` writes exactly the block
+asked for and `readpage` returns zeros for any logical block no run
+covers. Check: `cosmofs-ops` (a 45-block file with a rewrite in the
+middle reads back exactly); `cosmofs-holes` (a 200 MiB sparse file on a
+4 MiB device costs five blocks, reads zeros in the holes, keeps its data
+across a remount); `pagecache` (hole reads).
 
 **V16. cosmofs writes an inode through to its (copy-on-write) inode
 block on every mutation.** `struct cfs_vnode` caches the inode; the
@@ -158,12 +167,35 @@ buffer cache therefore always holds the complete pre-commit state and
 eviction has nothing to flush but pages. Check: `cosmofs-ops` (remount
 after `vfs_sync` shows every change). Gap: none.
 
-**V17. Commit happens only on `vfs_sync` and unmount.** There is no
-auto-commit threshold; dirty metadata buffers and pending frees grow
-until then. Check: `cosmofs-format` (unmount of an untouched mount does
-not advance the generation), `cosmofs-ops` (generation advances by one
-per `vfs_sync`). Gap: an unbounded transaction can exhaust memory or
-free space; a threshold is future work.
+**V17. Commit happens on `vfs_sync`, `fsync`, unmount, and on the
+writeback thread's thresholds.** `file_sync` commits the open
+transaction (a synced file is durable); the thread commits when dirty
+buffers, pending frees or the mount's dirty pages pass their thresholds
+or the oldest change is older than the interval, so neither the loss
+window nor the transaction's memory is unbounded. Check: `cosmofs-fsync`
+(a synced file survives a discarded transaction, an unsynced one does
+not), `cosmofs-writeback` (a change commits on its own within the
+interval and nothing commits when nothing is dirty), `cosmofs-format`
+(unmount of an untouched mount does not advance the generation),
+`cosmofs-ops` (each `vfs_sync` and `fsync` advances the generation by
+one). The tests that count generations turn the thread off
+(`cosmofs_test_set_writeback`).
+
+**V19. A full disk can still delete and commit.** File data is allocated
+from the data class, refused at or below the reserve (`max(32,
+nblocks / 32)` blocks); metadata, directory blocks and the commit's
+bitmap chunks come from the metadata class and may use it. Check:
+`cosmofs-reserve` (a 256-block device filled to `-ENOSPC` keeps its 32
+reserve blocks; two unlinks and a commit return the space and a new file
+is written). Gap: the reserve is sized by a constant, not by the
+metadata the filesystem actually holds.
+
+**V20. A block-layer queue-full answer never reaches a filesystem.** A
+driver's `-EAGAIN` parks the bio in the device's pending list, resubmitted
+in order from completions; `blk_submit` returns 0 and `done` runs once.
+Check: `blk-queue` (eight writes against two slots all complete, in
+order; `requeued` counts six), review of `cfs_fail` callers (none can be
+reached by `-EAGAIN`).
 
 **V18. The pool is the only thing cosmofs addresses, and the pool
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;

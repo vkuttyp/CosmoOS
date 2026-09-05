@@ -67,6 +67,20 @@ remove. Check: `blk` self-test (rejections return `-EINVAL`/`-EROFS`
 without completion; statistics count exactly the accepted bios). Gap: no
 test unloads `virtio_blk` with requests in flight.
 
+**D7a. A queue-full driver never fails a caller.** `-EAGAIN` from
+`ops->submit` parks the bio in `blkdev.pending`; `bio_complete` drains the
+list in order with no lock held across `ops->submit` (a driver may
+complete synchronously and re-enter); a refused resubmission goes back
+to the head. `blk_unregister` completes what is still pending with
+`-ENODEV`. Check: `blk-queue` (eight writes against two slots on the RAM
+device in deferred mode: all complete, in order, six requeued).
+
+**D7b. Bio flags are the block layer's, not the driver's.** `BIO_PREFLUSH`
+and `BIO_FUA` are implemented as flush, write, flush chained by
+completions; a driver only ever sees `BIO_READ`, `BIO_WRITE`, `BIO_FLUSH`.
+Check: `blk-queue` (the RAM device's recorded stream shows flush, write,
+flush); review of the drivers (none reads `bio->flags`).
+
 **D8. The block layer knows no driver and no filesystem.** `blk.c`
 includes no driver header; drivers see only `struct blkdev`/`struct
 bio`. Check: review (the include list). Gap: none.

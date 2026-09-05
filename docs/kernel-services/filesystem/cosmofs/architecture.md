@@ -41,15 +41,19 @@ corruption".
 
 ## Responsibilities
 
-- The on-disk format: two superblock slots, a two-level inode map,
-  256-byte inodes with 10 direct extents and one indirect extent block,
-  a bitmap allocator behind an allocation index, directories as 64-byte
-  entries in file data, CRC32C and self-numbering on every metadata
-  block.
+- The on-disk format (version 2): two superblock slots, a two-level
+  inode map, 256-byte inodes with 10 direct extents and a chain of
+  extent blocks, hole-capable extents that carry their logical position,
+  a per-inode checksum tree over data and directory blocks, a bitmap
+  allocator behind an allocation index, directories as 64-byte entries
+  in file data, CRC32C and self-numbering on every metadata block.
 - Transactions: one open generation per mount; copy-on-write of
   metadata (`cfs_buf_cow`), always-new blocks for data and directory
   writes, deferred frees, the reserve-then-write bitmap fixpoint, the
-  two-flush commit into the alternate superblock slot.
+  commit into the alternate superblock slot with a flush before and
+  after (`BIO_PREFLUSH | BIO_FUA`), a metadata reserve, `fsync` as a
+  commit, a writeback thread with dirty and age thresholds, and the
+  older-slot fallback when the newer root's tree does not load.
 - Formatting a device (`cosmofs_format`), mounting (slot selection,
   bitmap load, free-count reconciliation), unmounting (commit, or
   discard under the test hook), statistics.
@@ -59,20 +63,21 @@ corruption".
 
 ## Non-responsibilities
 
-- Data checksums (`csum_root` reserved), snapshots (`snap_root`
-  reserved; every committed root is already immutable), multi-device
-  pools and redundancy (`members` reserved, the pool is the seam),
-  compression, quotas, permissions, symbolic or hard links, sparse
-  holes inside the mapped span, inode number reuse, automatic commit
-  thresholds, a host `mkfs`, and any performance work (linear
-  directories, one lock per filesystem, first-fit allocation).
+- A pool-wide checksum tree (the superblock's `csum_root` stays
+  reserved; checksums are per inode), snapshots (`snap_root` reserved;
+  every committed root is already immutable), multi-device pools and
+  redundancy (`members` reserved, the pool is the seam), compression,
+  quotas, symbolic or hard links, inode number reuse, transaction groups
+  pipelined behind an open one, a host `mkfs` or `fsck`, and any
+  performance work beyond contiguity-aware allocation (linear
+  directories, one lock per filesystem).
 
 ## Interfaces at a glance
 
 | Interface | Where | Used by |
 |---|---|---|
 | `cosmofs_fs_type`, `cosmofs_init` | `kernel/cosmofs.h` | `kernel_main`, the VFS registry |
-| `cosmofs_format`, `cosmofs_stats`, `cosmofs_test_discard_on_unmount` | `kernel/cosmofs.h` | self-tests |
+| `cosmofs_format`, `cosmofs_stats`, `cosmofs_test_discard_on_unmount`, `cosmofs_test_set_writeback`, `cosmofs_test_set_writeback_interval` | `kernel/cosmofs.h` | self-tests |
 | `struct cfs_super`, `cfs_mhdr`, `cfs_inode`, `cfs_extent`, `cfs_dirent`, index helpers | `cosmofs_format.h` | the implementation, `tests/host/test_cosmofs.c` |
 | `pool_*` | `kernel/storage.h` | cosmofs (its only I/O path) |
 

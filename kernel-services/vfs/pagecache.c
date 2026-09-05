@@ -182,12 +182,18 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
      * concurrent misses on different vnodes of one mount cannot both pass
      * a stale read of the count. Every failure below gives it back. */
     struct mount *mnt = vn->mnt;
-    uint64_t now = __atomic_add_fetch(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
-    if (mnt->cache_limit_pages && now > mnt->cache_limit_pages) {
-        __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
-        stat_add(&g_stats.budget_refusals, 1);
-        *err = -ENOSPC;   /* the mount's page budget (ramfs) */
-        return NULL;
+    for (;;) {
+        uint64_t cur = __atomic_load_n(&mnt->cache_pages, __ATOMIC_RELAXED);
+        if (mnt->cache_limit_pages && cur >= mnt->cache_limit_pages) {
+            stat_add(&g_stats.budget_refusals, 1);
+            *err = -ENOSPC;   /* the mount's page budget (ramfs) */
+            return NULL;
+        }
+        /* The compare-and-swap is the admission: the count never exceeds
+         * the budget, not even transiently. */
+        if (__atomic_compare_exchange_n(&mnt->cache_pages, &cur, cur + 1, false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            break;
     }
     e = kzalloc(sizeof(*e));
     if (e == NULL) {
@@ -231,8 +237,10 @@ static void remove_entry(struct pagecache *pc, struct pc_entry *e)
     if (*pp)
         *pp = e->next;
     lru_remove(e);
-    if (e->dirty)
+    if (e->dirty) {
         pc->nr_dirty--;
+        __atomic_fetch_sub(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+    }
     pc->nr_pages--;
     __atomic_fetch_sub(&e->vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
     stat_add(&g_stats.pages, -1);
@@ -246,6 +254,7 @@ static void mark_dirty(struct pagecache *pc, struct pc_entry *e)
     if (!e->dirty) {
         e->dirty = true;
         pc->nr_dirty++;
+        __atomic_fetch_add(&e->vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
         lru_remove(e);
     }
 }
@@ -332,6 +341,7 @@ int pagecache_sync(struct vnode *vn)
             if (rc == 0) {
                 e->dirty = false;
                 pc->nr_dirty--;
+                __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
                 stat_add(&g_stats.writebacks, 1);
                 lru_add(e);   /* clean again: reclaimable */
             }
@@ -373,8 +383,10 @@ void pagecache_drop(struct vnode *vn)
         while (e) {
             struct pc_entry *next = e->next;
             lru_remove(e);
-            if (e->dirty)
+            if (e->dirty) {
                 pc->nr_dirty--;
+                __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+            }
             pc->nr_pages--;
             __atomic_fetch_sub(&vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
             stat_add(&g_stats.pages, -1);

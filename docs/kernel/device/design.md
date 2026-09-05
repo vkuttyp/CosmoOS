@@ -161,6 +161,7 @@ struct bio {
     uint64_t sector;                 /* in dev->sector_size units */
     uint32_t nsectors;
     enum bio_dir dir;                /* BIO_READ, BIO_WRITE, BIO_FLUSH */
+    unsigned flags;                  /* BIO_PREFLUSH, BIO_FUA (writes only) */
     void *buf;                       /* DMA-able (dma_map succeeds) */
     void (*done)(struct bio *bio);   /* interrupt or thread context */
     void *arg;
@@ -186,7 +187,15 @@ struct blkdev {
 the direction, read-only devices (`-EROFS`), and that `dma_map` accepts
 the buffer, sets `status = -EAGAIN` (in flight) and calls
 `ops->submit`; the driver completes with `bio_complete(bio, status)`
-which updates the statistics and runs `done`. `blk_read`/`blk_write`/
+which updates the statistics and runs `done`. Since audit milestone 7 a
+driver's `-EAGAIN` (queue full) parks the bio in `blkdev.pending` and
+every `bio_complete` resubmits from the head, in order, so the caller
+never sees it (`requeued` counts them); and a write with `BIO_PREFLUSH`
+or `BIO_FUA` becomes a sequence flush, write, flush chained by
+completions (`struct bio_seq`), so drivers see only plain requests
+(`docs/kernel-services/filesystem/cosmofs/design.md`, "The block layer").
+virtio-blk completes a `BIO_FLUSH` at once when `VIRTIO_BLK_F_FLUSH` was
+not negotiated. `blk_read`/`blk_write`/
 `blk_flush` are synchronous wrappers built on a stack `completion`;
 they reject zero-length or NULL-buffer requests up front and split
 large transfers into `max_sectors` pieces. Names are assigned by the

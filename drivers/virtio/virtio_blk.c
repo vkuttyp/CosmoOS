@@ -72,6 +72,12 @@ static int vblk_submit(struct blkdev *bd, struct bio *bio)
 {
     struct vblk *vb = bd->priv;
 
+    if (bio->dir == BIO_FLUSH && !vb->flush) {
+        /* No VIRTIO_BLK_F_FLUSH: the device has no volatile cache to
+         * flush and would answer UNSUPP; completed writes are stable. */
+        bio_complete(bio, 0);
+        return 0;
+    }
     arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
     unsigned slot = vb->nr_slots;
     for (unsigned n = 0; n < vb->nr_slots; n++) {
