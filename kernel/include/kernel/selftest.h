@@ -63,6 +63,8 @@ bool selftest_vfs_concurrency(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
 bool selftest_fault_blk(const char **reason);
 bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */
+bool selftest_blk_segments(const char **reason); /* multi-segment bios (milestone 9) */
+bool selftest_blk_timeout(const char **reason);  /* a stalled request times out */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 
@@ -136,6 +138,9 @@ bool selftest_net_tcp_keepalive(const char **reason);  /* keepalive timeout, orp
 bool selftest_net_icmp_limit(const char **reason);     /* ICMP rate limit, path MTU discovery */
 bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and readiness */
 bool selftest_blk_lifetime(const char **reason);
+struct bio;
+bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
+void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_npt(const char **reason);

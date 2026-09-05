@@ -300,6 +300,82 @@ static void proc_selftest(void)
     CHECK(close(p[1]) == 0 && (cosmo_ioready(p[0]) & COSMO_IO_HANGUP) && read(p[0], buf, 1) == 0);
     CHECK(close(p[0]) == 0);
 
+    /* The asynchronous I/O ring (milestone 9). */
+    {
+        CHECK(cosmo_aio_create(0, 0) == -COSMO_EINVAL && cosmo_aio_create(8, 1) == -COSMO_EINVAL);
+        int ring = (int)cosmo_aio_create(8, 0);
+        CHECK(ring >= 3);
+        CHECK(pipe(p) == 0);
+        char rbuf[16] = { 0 };
+        struct cosmo_sqe sq[4];
+        struct cosmo_cqe cq[8];
+        memset(sq, 0, sizeof(sq));
+        /* A read of an empty pipe parks; a NOP completes at once; a bad handle completes with -EBADF. */
+        sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .handle = p[0], .addr = (uint64_t)rbuf, .len = 8, .user_data = 1 };
+        sq[1] = (struct cosmo_sqe){ .op = COSMO_AIO_NOP, .user_data = 2 };
+        sq[2] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .handle = 999, .addr = (uint64_t)rbuf, .len = 8, .user_data = 3 };
+        sq[3] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .flags = COSMO_AIO_F_NOWAIT, .handle = p[0],
+                                    .addr = (uint64_t)rbuf, .len = 8, .user_data = 4 };
+        CHECK(cosmo_aio_submit(ring, sq, 4) == 4);
+        CHECK(cosmo_ioready(ring) & COSMO_IO_READABLE);
+        long got = cosmo_aio_wait(ring, cq, 8, 0, 0);   /* poll: three completions, the read still parked */
+        CHECK(got == 3);
+        int seen_nop = 0, seen_bad = 0, seen_nowait = 0;
+        for (long i = 0; i < got; i++) {
+            if (cq[i].user_data == 2 && cq[i].result == 0) seen_nop++;
+            if (cq[i].user_data == 3 && cq[i].result == -COSMO_EBADF) seen_bad++;
+            if (cq[i].user_data == 4 && cq[i].result == -COSMO_EAGAIN) seen_nowait++;
+        }
+        CHECK(seen_nop == 1 && seen_bad == 1 && seen_nowait == 1);
+        CHECK(cosmo_ioready(ring) == 0);
+        CHECK(cosmo_aio_wait(ring, cq, 8, 1, 20000000) == 0);   /* 20 ms: nothing completes */
+        CHECK(write(p[1], "ringdata", 8) == 8);                  /* now the parked read can run */
+        got = cosmo_aio_wait(ring, cq, 8, 1, COSMO_AIO_WAIT_FOREVER);
+        CHECK(got == 1 && cq[0].user_data == 1 && cq[0].result == 8 && memcmp(rbuf, "ringdata", 8) == 0);
+        /* POLL: not ready parks, then completes with the bit when data arrives; a write completes at once. */
+        sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_POLL, .handle = p[0], .events = COSMO_IO_READABLE, .user_data = 5 };
+        sq[1] = (struct cosmo_sqe){ .op = COSMO_AIO_WRITE, .handle = p[1], .addr = (uint64_t)"xy", .len = 2, .user_data = 6 };
+        CHECK(cosmo_aio_submit(ring, sq, 2) == 2);
+        got = cosmo_aio_wait(ring, cq, 8, 2, 1000000000ull);
+        CHECK(got == 2);
+        for (long i = 0; i < got; i++) {
+            if (cq[i].user_data == 5) CHECK(cq[i].result == COSMO_IO_READABLE);
+            if (cq[i].user_data == 6) CHECK(cq[i].result == 2);
+        }
+        CHECK(read(p[0], rbuf, 2) == 2);
+        /* Files: PREAD at an offset and FSYNC complete at submission. */
+        int fh = open("/tmp/aio.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        CHECK(fh >= 3 && write(fh, "0123456789", 10) == 10);
+        memset(rbuf, 0, sizeof(rbuf));
+        sq[0] = (struct cosmo_sqe){ .op = COSMO_AIO_PREAD, .handle = fh, .addr = (uint64_t)rbuf, .len = 4, .offset = 6,
+                                    .user_data = 7 };
+        sq[1] = (struct cosmo_sqe){ .op = COSMO_AIO_FSYNC, .handle = fh, .user_data = 8 };
+        sq[2] = (struct cosmo_sqe){ .op = COSMO_AIO_PWRITE, .handle = fh, .addr = (uint64_t)"ZZ", .len = 2, .offset = 0,
+                                    .user_data = 9 };
+        CHECK(cosmo_aio_submit(ring, sq, 3) == 3);
+        got = cosmo_aio_wait(ring, cq, 8, 3, 0);
+        CHECK(got == 3);
+        for (long i = 0; i < got; i++) {
+            if (cq[i].user_data == 7) CHECK(cq[i].result == 4 && memcmp(rbuf, "6789", 4) == 0);
+            if (cq[i].user_data == 8) CHECK(cq[i].result == 0);
+            if (cq[i].user_data == 9) CHECK(cq[i].result == 2);
+        }
+        CHECK(lseek(fh, 0, SEEK_SET) == 0 && read(fh, rbuf, 2) == 2 && memcmp(rbuf, "ZZ", 2) == 0);
+        CHECK(close(fh) == 0 && unlink("/tmp/aio.txt") == 0);
+        /* Capacity: nine parked reads on an 8-entry ring: the ninth is refused. */
+        struct cosmo_sqe many[9];
+        for (int i = 0; i < 9; i++)
+            many[i] = (struct cosmo_sqe){ .op = COSMO_AIO_READ, .handle = p[0], .addr = (uint64_t)rbuf, .len = 1,
+                                          .user_data = 100 + (uint64_t)i };
+        CHECK(cosmo_aio_submit(ring, many, 9) == 8);
+        CHECK(cosmo_aio_submit(ring, many, 1) == -COSMO_EBUSY);
+        CHECK(cosmo_aio_wait(ring, cq, 9, 0, 0) == 0);
+        CHECK(cosmo_aio_wait(ring, cq, 2, 3, 0) == -COSMO_EINVAL);
+        CHECK(close(ring) == 0);   /* drops the parked reads */
+        CHECK(close(p[0]) == 0 && close(p[1]) == 0);
+        CHECK(cosmo_aio_submit(999, sq, 1) == -COSMO_EBADF && cosmo_aio_submit(p[0], sq, 1) == -COSMO_EBADF);
+    }
+
     /* The console: a character device, a terminal. */
     CHECK(fstat(0, &st) == 0 && S_ISCHR(st.st_type));
     CHECK(isatty(0) == 1);
@@ -1105,6 +1181,7 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
         SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
         SYS_vm_mem, SYS_vm_mem_rw, SYS_vcpu_create, SYS_vcpu_regs, SYS_vcpu_irq, SYS_setresuid, SYS_setresgid,
         SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups, SYS_getrlimit, SYS_ioready, SYS_setnonblock,
+        SYS_aio_create, SYS_aio_submit,
         /* setrlimit is left out: a random low memory limit would end the fuzzer itself */
         /* and a few numbers past the table, for the dispatcher's own check */
         SYS_COUNT, SYS_COUNT + 1, 1000, -1,
