@@ -21,3 +21,7 @@ unsigned arch_cpu_id(void)
 {
     return arch_percpu_get()->cpu_id;
 }
+
+/* Module ABI export: a multi-queue driver picks the queue of the CPU it runs on. */
+#include <kernel/module.h>
+EXPORT_SYMBOL(arch_cpu_id);

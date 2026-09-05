@@ -42,3 +42,7 @@ unsigned arch_cpu_id(void)
     __asm__ volatile("mov %%gs:%c1, %0" : "=r"(id) : "i"(__builtin_offsetof(struct percpu, cpu_id)));
     return id;
 }
+
+/* Module ABI export: a multi-queue driver picks the queue of the CPU it runs on. */
+#include <kernel/module.h>
+EXPORT_SYMBOL(arch_cpu_id);

@@ -24,7 +24,7 @@ $(MODSIGN_KEY) $(SIGNING_PUB) &: $(ROOT)/scripts/devkey.sh $(ROOT)/scripts/modsi
 	$(Q)PYTHON=$(PYTHON) $(ROOT)/scripts/devkey.sh ensure $(COSMO_KEYDIR)
 endif
 
-MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net cosmotest cosmotest_dep cosmotest_fail
+MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net nvme cosmotest cosmotest_dep cosmotest_fail
 
 MODULE_hello_SRCS          := modules/hello/hello.c
 MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
@@ -32,6 +32,7 @@ MODULE_virtio_blk_SRCS     := drivers/virtio/virtio_blk.c
 MODULE_virtio_rng_SRCS     := drivers/virtio/virtio_rng.c
 MODULE_virtio_console_SRCS := drivers/virtio/virtio_console.c
 MODULE_virtio_net_SRCS     := drivers/virtio/virtio_net.c
+MODULE_nvme_SRCS           := drivers/nvme/nvme.c
 MODULE_cosmotest_SRCS      := tests/modules/cosmotest.c
 MODULE_cosmotest_dep_SRCS  := tests/modules/cosmotest_dep.c
 MODULE_cosmotest_fail_SRCS := tests/modules/cosmotest_fail.c
@@ -44,6 +45,7 @@ MODULE_ARCHIVE_ENTRIES := \
 	modules/virtio_rng.ko=$(MODULE_OUT)/virtio_rng.ko \
 	modules/virtio_console.ko=$(MODULE_OUT)/virtio_console.ko \
 	modules/virtio_net.ko=$(MODULE_OUT)/virtio_net.ko \
+	modules/nvme.ko=$(MODULE_OUT)/nvme.ko \
 	tests/cosmotest.ko=$(MODULE_OUT)/cosmotest.ko \
 	tests/cosmotest_dep.ko=$(MODULE_OUT)/cosmotest_dep.ko \
 	tests/cosmotest_fail.ko=$(MODULE_OUT)/cosmotest_fail.ko

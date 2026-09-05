@@ -32,6 +32,13 @@ if [ ! -f "$testdisk" ]; then
 fi
 vcon=${QEMU_VCON:-$outdir/vcon.log}
 : > "$vcon"
+# Milestone 9: an NVMe controller with one 8 MiB namespace (the nvme
+# self-test writes to it; the harness gives it a fresh file per run).
+nvmedisk=${QEMU_NVMEDISK:-$outdir/nvme.img}
+if [ ! -f "$nvmedisk" ]; then
+    dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 status=none 2>/dev/null \
+        || dd if=/dev/zero of="$nvmedisk" bs=1048576 count=8 2>/dev/null
+fi
 
 # Phase 8: QEMU user-mode networking on a virtio-net NIC. The harness
 # adds host port forwards (QEMU_NET_HOSTFWD, a comma-separated list of
@@ -74,6 +81,8 @@ if [ "$arch" = aarch64 ]; then
         -device virtio-blk-pci,drive=testdisk \
         -drive if=none,id=boot,format=raw,readonly=on,file="$image" \
         -device virtio-blk-pci,drive=boot \
+        -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
+        -device nvme,drive=nvme0,serial=cosmo-nvme0 \
         -device virtio-rng-pci \
         -device virtio-serial-pci \
         -chardev file,id=vcon,path="$vcon" \
@@ -99,6 +108,8 @@ exec qemu-system-x86_64 \
     -drive format=raw,file="$image" \
     -drive if=none,id=testdisk,format=raw,file="$testdisk" \
     -device virtio-blk-pci,drive=testdisk \
+    -drive if=none,id=nvme0,format=raw,file="$nvmedisk" \
+    -device nvme,drive=nvme0,serial=cosmo-nvme0 \
     -device virtio-rng-pci \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \
