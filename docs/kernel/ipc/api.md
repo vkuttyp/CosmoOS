@@ -69,6 +69,17 @@ likewise. Releases run from the last `kobject_put` of the end, which
 `handle_close` and `handle_table_destroy` perform outside their locks
 (they may not block here, but the contract allows it).
 
+## Futex (`kernel/include/kernel/futex.h`, Phase 11)
+
+`int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val,
+uint64_t timeout_ns)` blocks while the user word equals `val` (0 woken,
+`-EAGAIN` differs, `-ETIMEDOUT`, `-EINTR` killed, `-EFAULT`, `-EINVAL`
+misaligned); `int futex_wake(struct vm_space *space, uint64_t uaddr,
+unsigned n)` wakes up to `n` waiters and returns the count. The compare
+and the enqueue happen under one bucket lock (64 buckets). No native
+system call exposes it yet; the Linux `futex` call does. Full contract:
+`docs/compat/linux/api.md`.
+
 ## System calls (`kernel/syscall/native.c`)
 
 **`pipe(int h[2])`** (35): `-EFAULT` unless `h` names 8 writable user

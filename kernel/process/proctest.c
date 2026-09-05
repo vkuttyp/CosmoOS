@@ -273,6 +273,26 @@ static bool kill_module(const char *const argv[], int sig, const char **reason)
     return true;
 }
 
+/* Phase 11: the CosmoOS note marks native programs; a Linux test program lacks it. */
+bool selftest_linux_elf(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    struct elf_info info;
+    const char *why;
+    if (bootarchive_find("init", &image, &image_size)) {
+        CHECK(elf_validate(image, image_size, USER_LO, USER_HI, &info, &why) == 0);
+        CHECK(info.cosmo_note);
+        CHECK(info.phdr_vaddr != 0 && info.phnum > 0 && info.phent == 56);
+    }
+    if (bootarchive_find("tests/linux/lxhello", &image, &image_size)) {
+        CHECK(elf_validate(image, image_size, USER_LO, USER_HI, &info, &why) == 0);
+        CHECK(!info.cosmo_note);
+        CHECK(info.phdr_vaddr == 0x400040);
+    }
+    return true;
+}
+
 bool selftest_process_spawn(const char **reason)
 {
     char out[64];

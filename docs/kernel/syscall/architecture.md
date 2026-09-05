@@ -22,9 +22,12 @@ maps a number to a function through the calling process's personality.
 
 Invariant 7 (Linux compatibility must not contaminate the native ABI)
 is met structurally: a personality is a table plus conventions; the
-native functions never see Linux numbers, and a Linux table (Phase 11)
-will call the same kernel subsystems through its own translation
-functions.
+native functions never see Linux numbers, and the Linux table (Phase
+11, `compat/linux/syscalls.c`, `docs/compat/linux/`) calls the same
+kernel subsystems through its own translation functions. The only
+thing it shares with `native.c` is the exported bodies of `read`,
+`write` and `fstat` (`syscall_handle_read/write/stat`), which take
+native arguments.
 
 ## Responsibilities
 
@@ -97,9 +100,10 @@ result; the kernel self-test runs it and requires status 0. See
 
 ## Future
 
-Per-thread syscall accounting, tracing hooks, Linux personality table,
-`copy_from_user` with fault recovery (exception tables) so validation
-can be relaxed for performance.
+Per-thread syscall accounting, tracing hooks, `copy_from_user` with
+fault recovery (exception tables) so validation can be relaxed for
+performance. The Linux personality table arrived in Phase 11
+(`docs/compat/linux/`).
 
 ## Files (Phase 7)
 

@@ -22,6 +22,15 @@ struct syscall_args {
  * result register. */
 int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame);
 
+/* Handle I/O shared by the personalities (kernel/syscall/native.c):
+ * validate the user range, look the handle up with the right, copy
+ * through a bounded kernel buffer. Bytes or -errno. */
+int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len);
+int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len);
+/* fstat on any I/O object; 0 or -errno with *st filled. */
+struct cosmo_stat;
+int syscall_handle_stat(int h, struct cosmo_stat *st);
+
 /* Diagnostics: calls and unknown numbers seen. */
 uint64_t syscall_count(void);
 uint64_t syscall_unknown_count(void);

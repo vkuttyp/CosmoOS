@@ -59,6 +59,8 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
         return fail(why, "program header table outside the file");
 
     uint64_t lo = UINT64_MAX, hi = 0;
+    info->phnum = eh.e_phnum;
+    info->phent = eh.e_phentsize;
 
     for (uint16_t i = 0; i < eh.e_phnum; i++) {
         struct elf64_phdr ph;
@@ -66,6 +68,27 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
 
         if (ph.p_type == PT_INTERP)
             return fail(why, "PT_INTERP: dynamic executables are not supported");
+        if (ph.p_type == PT_NOTE) {
+            /* Notes: namesz, descsz, type, name (padded to 4), desc (padded to 4). */
+            if (!in_file(ph.p_offset, ph.p_filesz, size))
+                return fail(why, "PT_NOTE outside the file");
+            uint64_t off = ph.p_offset, end = ph.p_offset + ph.p_filesz;
+            while (off + 12 <= end) {
+                uint32_t namesz, descsz, type;
+                memcpy(&namesz, file + off, 4);
+                memcpy(&descsz, file + off + 4, 4);
+                memcpy(&type, file + off + 8, 4);
+                uint64_t name_at = off + 12;
+                uint64_t desc_at = name_at + ((namesz + 3u) & ~3u);
+                uint64_t next = desc_at + ((descsz + 3u) & ~3u);
+                if (namesz > 256 || descsz > 4096 || next > end)
+                    break;
+                if (namesz == 8 && type == 1 && memcmp(file + name_at, "CosmoOS", 8) == 0)
+                    info->cosmo_note = true;
+                off = next;
+            }
+            continue;
+        }
         if (ph.p_type == PT_GNU_STACK) {
             if (ph.p_flags & ELF_PF_X)
                 return fail(why, "PT_GNU_STACK requests an executable stack");
@@ -125,6 +148,14 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
     }
     if (!entry_ok)
         return fail(why, "entry point is not inside an executable segment");
+
+    /* Where the program header table lands in memory, for AT_PHDR. */
+    for (unsigned j = 0; j < info->nr_segments; j++) {
+        const struct elf_segment *s = &info->segments[j];
+        uint64_t table = (uint64_t)eh.e_phnum * sizeof(struct elf64_phdr);
+        if (eh.e_phoff >= s->offset && eh.e_phoff + table <= s->offset + s->filesz)
+            info->phdr_vaddr = s->file_vaddr + (eh.e_phoff - s->offset);
+    }
 
     info->entry = eh.e_entry;
     info->lo = lo;

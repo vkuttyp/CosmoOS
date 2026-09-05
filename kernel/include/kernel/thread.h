@@ -51,7 +51,7 @@ struct thread {
     struct list_node proc_link;         /* in process.threads, under process.lock */
     uintptr_t user_entry;               /* first user-mode instruction (user threads) */
     uintptr_t user_sp;                  /* initial user stack pointer */
-    uintptr_t tls_base;                 /* user TLS base; unused yet */
+    uintptr_t tls_base;                 /* user FS base (arch_prctl ARCH_SET_FS), restored on every switch to user */
     enum thread_state state;            /* (rq) */
     struct arch_context ctx;
     vaddr_t stack_base;

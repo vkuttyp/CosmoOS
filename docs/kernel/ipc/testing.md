@@ -42,6 +42,13 @@ reaped); `spawnvp("cat", ...)` with the read end as the child's handle 0
 blocks, `waitpid(WNOHANG)` returns 0, `kill(pid, SIGKILL)` ends it with
 status 137.
 
+## Futex (Phase 11)
+
+`futex_wait`/`futex_wake` are exercised through the Linux `futex` call
+by `tests/linux/lxtest` (`-EAGAIN` on a mismatch, `-ETIMEDOUT` after 20
+ms, a wake with no waiter returns 0, an unknown operation `-ENOSYS`);
+`docs/compat/linux/testing.md`. No two-thread test exists yet.
+
 ## Gaps and planned tests
 
 - No test kills a writer blocked on a full pipe.

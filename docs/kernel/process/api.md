@@ -186,7 +186,10 @@ reparenting, 0 for kernel-created processes), `name`, `space` (user
 `exit_status`, `exited` (completion), `lock`, `all_link`, `syscalls`;
 Phase 9: `parent` (referenced or NULL), `children`/`sibling`,
 `child_wq`, `reaped`, `kill_sig`, `cwd` (referenced vnode),
-`cwd_path[1024]`. `struct process_handle_map { int child, parent; }`
+`cwd_path[1024]`; Phase 11: `linux` (`struct linux_state *`, the Linux
+personality's state, NULL for native processes; `docs/compat/linux/`),
+`image_end` (the page after the highest loaded segment). `struct
+process_handle_map { int child, parent; }`
 (the shape of `struct cosmo_spawn_handle`, asserted) and
 `struct process_spawn_attr` are the spawn inputs; `PROCESS_WAIT_NOHANG`
 is the wait flag.
@@ -203,7 +206,11 @@ Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
 - Pure function (string.h only; compiled on the host with
   `ELF_HOST_TEST`). Never blocks, never allocates, interrupt-safe.
 - Outputs: 0 and `*info` (entry, lo, hi, page-rounded segments with
-  file offset/size and the unaligned file vaddr); `-ENOEXEC` with
+  file offset/size and the unaligned file vaddr; Phase 11: `cosmo_note`
+  when a `PT_NOTE` holds a note named `CosmoOS` of type 1, `phdr_vaddr`
+  when the program header table lies inside a `PT_LOAD`'s file bytes
+  (else 0), `phnum`, `phent`); a `PT_NOTE` outside the file is
+  "PT_NOTE outside the file"; `-ENOEXEC` with
   `*why` set to one of these immortal strings, in check order:
   - "file shorter than the ELF header"
   - "bad ELF magic"
@@ -212,6 +219,7 @@ Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
   - "not x86-64"
   - "bad program header table"
   - "program header table outside the file"
+  - "PT_NOTE outside the file"
   - "PT_INTERP: dynamic executables are not supported"
   - "PT_GNU_STACK requests an executable stack"
   - "PT_LOAD memsz smaller than filesz"
@@ -262,6 +270,12 @@ both checks pass.
 - `arch_user_access_begin/end`: STAC/CLAC when the CPU has SMAP.
 - `bool arch_trap_frame_is_user(const struct arch_trap_frame *)`:
   `(cs & 3) != 0`.
+- `void arch_set_tls_base(uintptr_t base)` (Phase 11): stores `base` in
+  the current thread's `tls_base` and writes `MSR_FS_BASE` at once;
+  `arch_thread_switch_prepare` reloads `MSR_FS_BASE` from
+  `next->tls_base` for every thread with a process, so the user `%fs`
+  base follows the thread. Used by the Linux `arch_prctl(ARCH_SET_FS)`;
+  no native call sets it yet.
 
 ## kernel/vmm.h additions
 
@@ -303,7 +317,8 @@ both checks pass.
 
 `proc` (holds a process reference; NULL for kernel threads),
 `proc_link` (under `process.lock`), `user_entry`, `user_sp`,
-`tls_base` (unused). `thread_put` of a process thread leaves the
+`tls_base` (the user `%fs` base, `arch_set_tls_base`; loaded on every
+switch to a thread with a process). `thread_put` of a process thread leaves the
 process's list and calls `process_last_thread_gone` when it was the
 last, then drops the reference.
 

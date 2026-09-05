@@ -175,6 +175,22 @@ See [docs/development.md](docs/development.md).
   `/boot/repo`; the shell test script installs, upgrades, refuses
   tampered fixtures and removes packages, and a host test covers the
   parsers.
-- **Next, Phase 11:** Linux compatibility: a Linux personality with its
-  own system-call table, ELF loading, signals, futex, mmap, sockets and
-  a dynamic linker (constitution sections 38 to 40).
+- **Phase 11 (done):** Linux compatibility, stage 1 (constitution
+  sections 38 to 40, invariant 7). A static x86-64 ELF without the
+  CosmoOS ABI note (a `PT_NOTE` every native program now carries from
+  `crt0.S`) runs under a Linux personality: its own 512-entry
+  system-call table in `compat/linux/` translating 87 Linux calls onto
+  the native services (files and directories with Linux `struct stat`
+  and `linux_dirent64`, `brk` and anonymous `mmap`/`mprotect`, the
+  thread pointer through `arch_prctl` and `MSR_FS_BASE`, a futex
+  primitive in `kernel/ipc/`, signal tables that are stored but not
+  delivered, `wait4`/`kill`, monotonic clocks, `uname` reporting
+  `Linux`, IPv4/IPv6 sockets), a Linux initial stack with the auxiliary
+  vector (`AT_PHDR`, `AT_RANDOM`, ...), and `-ENOSYS` with a per-process
+  count for everything else; the native ABI is untouched. Tested by a
+  freestanding raw-ABI program (`LINUXTEST: PASS`), a real statically
+  linked musl program, a host test of the conversions and a kernel
+  self-test (62 in total).
+- **Next, Phase 12:** virtualization: hardware-assisted virtual
+  machines as a kernel service, per the constitution's roadmap; design
+  documents first.

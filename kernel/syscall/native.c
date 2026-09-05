@@ -38,12 +38,8 @@ static int64_t sys_exit(struct syscall_args *a)
     process_exit((int)a->a[0]);
 }
 
-static int64_t sys_write(struct syscall_args *a)
+int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)
 {
-    int h = (int)a->a[0];
-    uint64_t ubuf = a->a[1];
-    size_t len = (size_t)a->a[2];
-
     if (!user_range_ok(ubuf, len))
         return -EFAULT;
 
@@ -80,12 +76,13 @@ static int64_t sys_write(struct syscall_args *a)
     return done > 0 ? (int64_t)done : rc;
 }
 
-static int64_t sys_read(struct syscall_args *a)
+static int64_t sys_write(struct syscall_args *a)
 {
-    int h = (int)a->a[0];
-    uint64_t ubuf = a->a[1];
-    size_t len = (size_t)a->a[2];
+    return syscall_handle_write((int)a->a[0], a->a[1], (size_t)a->a[2]);
+}
 
+int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)
+{
     if (!user_range_ok(ubuf, len))
         return -EFAULT;
 
@@ -110,6 +107,11 @@ static int64_t sys_read(struct syscall_args *a)
         rc = -EFAULT;
     kobject_put(obj);
     return rc;
+}
+
+static int64_t sys_read(struct syscall_args *a)
+{
+    return syscall_handle_read((int)a->a[0], a->a[1], (size_t)a->a[2]);
 }
 
 static int64_t sys_getpid(struct syscall_args *a)
@@ -273,24 +275,30 @@ static int64_t sys_stat(struct syscall_args *a)
     return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
 }
 
-static int64_t sys_fstat(struct syscall_args *a)
+int syscall_handle_stat(int h, struct cosmo_stat *st)
 {
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    struct kobject *obj = handle_lookup(&process_current()->handles, h, 0);
     if (obj == NULL)
         return -EBADF;
-    struct cosmo_stat st;
     struct file *f = file_from_kobject(obj);
     int rc = 0;
     if (f) {
-        file_stat(f, &st);
+        file_stat(f, st);
     } else {
         const struct kobject_io_type *io = (const struct kobject_io_type *)obj->type;
         if (io->stat == NULL)
             rc = -EBADF;
         else
-            rc = io->stat(obj, &st);
+            rc = io->stat(obj, st);
     }
     kobject_put(obj);
+    return rc;
+}
+
+static int64_t sys_fstat(struct syscall_args *a)
+{
+    struct cosmo_stat st;
+    int rc = syscall_handle_stat((int)a->a[0], &st);
     if (rc)
         return rc;
     return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;

@@ -75,6 +75,12 @@ PKGTEST_MARKERS = [
     r"^installed: 2\.5$",
     r"^2\.5$",
 ]
+# Phase 11: Linux programs run from /etc/rc.test; hello_musl only when the build had musl-gcc.
+LINUXTEST_MARKERS = [
+    r"^hello from linux abi$",
+    r"^LINUXTEST: PASS$",
+]
+MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 
 # Only produced by the self-test run of init (debug builds); required
 # whenever self-tests ran at all.
@@ -250,6 +256,11 @@ def main():
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (package test)")
+        for pat in LINUXTEST_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (Linux ABI test)")
+        if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
+            failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:
         try:

@@ -50,6 +50,7 @@ struct personality {
 
 struct vm_space;
 struct thread;
+struct linux_state;   /* compat/linux: per-process state of the Linux personality */
 
 struct process {
     struct kobject obj;
@@ -78,6 +79,10 @@ struct process {
     int kill_sig;                      /* 0, or the signal terminating the process */
     struct vnode *cwd;                 /* referenced */
     char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
+
+    /* Phase 11: the Linux personality's state (NULL for native processes). */
+    struct linux_state *linux;
+    uint64_t image_end;                /* page after the highest loaded segment (brk starts here) */
 };
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
@@ -154,5 +159,13 @@ unsigned process_count(void);
 void process_dump_all(void);
 
 extern const struct personality personality_native;
+extern const struct personality personality_linux;   /* compat/linux/syscalls.c */
+
+/* compat/linux hooks called by the process code. */
+struct elf_info;
+int linux_process_init(struct process *p, const struct elf_info *info);   /* allocate p->linux */
+void linux_process_release(struct process *p);
+/* Lay out the Linux auxiliary vector: returns words written into `w` (pairs). */
+unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t random_addr, uint64_t *w, unsigned max);
 
 #endif /* KERNEL_PROCESS_H */

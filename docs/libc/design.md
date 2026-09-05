@@ -166,6 +166,7 @@ Irrelevant at this scale; the allocator is O(n) in free blocks per call,
 - Threads: `errno` becomes TLS, the allocator and stdio take locks.
 - Floating point once user FPU state is saved: `%f/%g/%e`, `strtod`,
   `<math.h>`.
-- `fork`/`exec` compatibility for the Linux personality lives in
-  `compat/linux/`, not here (invariant 7).
+- Linux compatibility lives in `compat/linux/` (Phase 11), not here
+  (invariant 7): this library is the native one, and its `crt0.S`
+  carries the note that marks a program as native.
 - A wall clock (`time`, `gettimeofday`) when the kernel has one.

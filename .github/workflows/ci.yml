@@ -40,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang lld llvm make mtools qemu-system-x86 ovmf python3
+            clang lld llvm make mtools qemu-system-x86 ovmf python3 musl-tools
 
       - name: Verify toolchain
         run: make check-tools

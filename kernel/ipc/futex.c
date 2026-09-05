@@ -1,0 +1,130 @@
+/* futex.c - Wait on and wake by a user word (docs/compat/linux/design.md "futex"). */
+
+#include <kernel/errno.h>
+#include <kernel/futex.h>
+#include <kernel/list.h>
+#include <kernel/sched.h>
+#include <kernel/spinlock.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
+#include <kernel/uaccess.h>
+#include <kernel/wait.h>
+
+#define FUTEX_BUCKETS 64
+
+struct futex_waiter {
+    struct list_node link;
+    struct vm_space *space;
+    uint64_t uaddr;
+    struct thread *thread;
+    bool woken;
+    bool timed_out;
+};
+
+struct bucket {
+    spinlock_t lock;
+    struct list_node waiters;
+};
+
+static struct bucket g_buckets[FUTEX_BUCKETS];
+static bool g_init;
+
+static void init_once(void)
+{
+    if (g_init)
+        return;
+    for (unsigned i = 0; i < FUTEX_BUCKETS; i++) {
+        spinlock_init(&g_buckets[i].lock, "futex");
+        list_init(&g_buckets[i].waiters);
+    }
+    g_init = true;
+}
+
+static struct bucket *bucket_of(struct vm_space *space, uint64_t uaddr)
+{
+    uint64_t h = (uintptr_t)space ^ (uaddr >> 2) ^ (uaddr >> 17);
+    return &g_buckets[h % FUTEX_BUCKETS];
+}
+
+static void timeout_fired(struct timer *t, void *arg)
+{
+    (void)t;
+    struct futex_waiter *w = arg;
+    __atomic_store_n(&w->timed_out, true, __ATOMIC_RELEASE);
+    sched_wake(w->thread);
+}
+
+int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t timeout_ns)
+{
+    init_once();
+    if (uaddr & 3)
+        return -EINVAL;
+    struct bucket *b = bucket_of(space, uaddr);
+    struct futex_waiter w = { .space = space, .uaddr = uaddr, .thread = thread_current() };
+    list_init(&w.link);
+
+    /* Compare and enqueue under the bucket lock: a wake that comes after
+     * the store the waiter is checking against must find it queued. */
+    arch_irq_state_t s = spin_lock_irqsave(&b->lock);
+    uint32_t cur;
+    if (copy_from_user(&cur, uaddr, sizeof(cur))) {
+        spin_unlock_irqrestore(&b->lock, s);
+        return -EFAULT;
+    }
+    if (cur != val) {
+        spin_unlock_irqrestore(&b->lock, s);
+        return -EAGAIN;
+    }
+    list_push_back(&b->waiters, &w.link);
+    spin_unlock_irqrestore(&b->lock, s);
+
+    struct timer t;
+    if (timeout_ns) {
+        timer_setup(&t, timeout_fired, &w);
+        timer_start(&t, timeout_ns);
+    }
+    /* A private wait queue with this thread as the only waiter: the wake
+     * side and the timer wake the thread directly. */
+    struct waitqueue wq;
+    waitqueue_init(&wq, "futex");
+    int rc = wait_event_killable(&wq, __atomic_load_n(&w.woken, __ATOMIC_ACQUIRE) ||
+                                          __atomic_load_n(&w.timed_out, __ATOMIC_ACQUIRE));
+    if (timeout_ns)
+        timer_cancel(&t);
+
+    s = spin_lock_irqsave(&b->lock);
+    bool was_woken = w.woken;
+    if (!list_empty(&w.link))
+        list_remove(&w.link);
+    spin_unlock_irqrestore(&b->lock, s);
+
+    if (was_woken)
+        return 0;
+    if (rc)
+        return rc;   /* -EINTR */
+    return -ETIMEDOUT;
+}
+
+int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
+{
+    init_once();
+    if (uaddr & 3)
+        return -EINVAL;
+    struct bucket *b = bucket_of(space, uaddr);
+    int woken = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&b->lock);
+    struct futex_waiter *w, *tmp;
+    list_for_each_entry_safe(w, tmp, &b->waiters, link) {
+        if ((unsigned)woken >= n)
+            break;
+        if (w->space != space || w->uaddr != uaddr)
+            continue;
+        list_remove(&w->link);
+        list_init(&w->link);
+        __atomic_store_n(&w->woken, true, __ATOMIC_RELEASE);
+        sched_wake(w->thread);
+        woken++;
+    }
+    spin_unlock_irqrestore(&b->lock, s);
+    return woken;
+}

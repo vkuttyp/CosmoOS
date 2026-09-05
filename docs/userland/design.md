@@ -5,7 +5,8 @@
 `userland/userland.mk` builds every program the same way:
 
 ```text
-$(OUT)/userland/<name>.elf : crt0.o <objects> libc.a   linked with -T userland/user.ld (shared script)
+$(OUT)/userland/<name>.elf : crt0.o <objects> libc.a   linked with -T userland/user.ld (shared script; since Phase 11 the ELF and
+                                                       program headers are inside the text segment and .note.cosmo sits in a PT_NOTE)
 USER_CFLAGS = --target=x86_64 $(COMMON_CFLAGS) -fno-pic -fno-pie -mgeneral-regs-only -ffreestanding? no:
               -nostdinc is NOT used (compiler builtin headers are wanted) but -nostdlib and
               -I libc/include -I kernel/include (for uapi/) -isystem <clang resource dir> are.

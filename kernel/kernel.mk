@@ -51,6 +51,9 @@ KERNEL_GENERIC_SRCS := \
 	kernel/tty/ttytest.c \
 	kernel/ipc/pipe.c \
 	kernel/ipc/pipetest.c \
+	kernel/ipc/futex.c \
+	compat/linux/convert.c \
+	compat/linux/syscalls.c \
 	kernel/process/elf.c \
 	kernel/process/process.c \
 	kernel/process/spawn.c \

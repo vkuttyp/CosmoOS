@@ -66,5 +66,10 @@ pkg install demo-b demo-a || FAILS=1
 cat /usr/share/demolib/VERSION
 pkg remove demo-b demo-a demolib || FAILS=1
 pkg list
+# Linux programs (docs/compat/linux/testing.md): no CosmoOS note, so the kernel runs them as Linux.
+/boot/tests/linux/lxhello || FAILS=1
+/boot/tests/linux/lxtest || FAILS=1
+ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
+rm /tmp/.musl.probe
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

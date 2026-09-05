@@ -60,4 +60,7 @@ test kills a blocked *writer*.
   boundaries or priorities.
 - No global limit on pipes; a process is bounded by its 64-slot handle
   table (32 pipes, about 520 KiB of rings).
-- Channels, events, shared memory and futexes are not written.
+- Channels, events and shared memory are not written; the futex
+  (`futex.c`) exists since Phase 11 with its invariant L4 in
+  `docs/compat/linux/invariants.md` (no lost wake between compare and
+  sleep) and no native system call yet.

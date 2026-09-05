@@ -12,6 +12,7 @@
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
+#include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -46,6 +47,8 @@ static void process_release(struct kobject *obj)
         vnode_put(p->cwd);
     if (p->parent)
         process_put(p->parent);
+    if (p->linux)
+        linux_process_release(p);
 
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     list_remove(&p->all_link);
@@ -102,13 +105,18 @@ void process_init(void)
 
 /* --- initial user stack --- */
 
+#define INITIAL_STACK_PAGES 2u
+#define INITIAL_STRINGS_MAX 300u
+
 /*
  * Lay out argc/argv/envp/auxv and the strings at the top of the user
- * stack, writing through the direct map into the (populated) top page.
- * Returns the initial user rsp, or 0 if it does not fit in one page.
+ * stack, writing through the direct map into the populated top pages.
+ * Native processes get the CosmoOS auxiliary vector, Linux processes the
+ * Linux one (compat/linux). Returns the initial user rsp, or 0 if the
+ * frame does not fit.
  */
-static uint64_t build_initial_stack(struct vm_space *space, uint64_t stack_top, const char *const argv[],
-                                    const char *const envp[])
+static uint64_t build_initial_stack(struct process *p, const struct elf_info *info, uint64_t stack_top,
+                                    const char *const argv[], const char *const envp[])
 {
     unsigned argc = 0, envc = 0;
     size_t strings = 0;
@@ -116,41 +124,49 @@ static uint64_t build_initial_stack(struct vm_space *space, uint64_t stack_top, 
         strings += strlen(argv[argc]) + 1;
     for (; envp && envp[envc]; envc++)
         strings += strlen(envp[envc]) + 1;
-
-    /* words: argc, argv[argc+1], envp[envc+1], auxv (3 pairs) */
-    size_t words = 1 + (argc + 1) + (envc + 1) + 6;
-    size_t need = strings + words * 8 + 16;
-    if (need > PAGE_SIZE - 64)
+    if (argc + envc > INITIAL_STRINGS_MAX)
         return 0;
-
-    uint64_t page_va = stack_top - PAGE_SIZE;
-    paddr_t pa;
-    if (!arch_mmu_query(&space->mmu, (vaddr_t)page_va, &pa, NULL, NULL, NULL))
+    const size_t span = INITIAL_STACK_PAGES * PAGE_SIZE;
+    /* words: argc, argv[argc+1], envp[envc+1], auxv (up to 20 pairs) */
+    size_t words = 1 + (argc + 1) + (envc + 1) + 40;
+    size_t need = strings + 16 + words * 8 + 32;
+    if (need > span - 64)
         return 0;
-    uint8_t *page = phys_to_virt(pa);
-
-    /* Strings grow down from the top of the page. */
-    uint64_t sp = stack_top;
-    uint64_t str_addrs[64];
-    unsigned nstr = 0;
-    for (unsigned i = 0; i < argc + envc; i++) {
-        const char *s = i < argc ? argv[i] : envp[i - argc];
-        size_t n = strlen(s) + 1;
-        sp -= n;
-        memcpy(page + (sp - page_va), s, n);
-        str_addrs[nstr++] = sp;
-        if (nstr >= 64)
+    uint64_t base_va = stack_top - span;
+    /* The populated pages need not be contiguous in the direct map: every
+     * byte is written through the page it lands in. */
+    uint8_t *pages[INITIAL_STACK_PAGES];
+    for (unsigned i = 0; i < INITIAL_STACK_PAGES; i++) {
+        paddr_t pa;
+        if (!arch_mmu_query(&p->space->mmu, (vaddr_t)(base_va + i * PAGE_SIZE), &pa, NULL, NULL, NULL))
             return 0;
+        pages[i] = phys_to_virt(pa);
     }
-
-    /* Word area, 16-byte aligned at the final rsp. */
+#define AT(va) (pages[((va) - base_va) / PAGE_SIZE] + (((va) - base_va) % PAGE_SIZE))
+    /* Strings grow down from the top; a copy may straddle the page boundary. */
+    uint64_t sp = stack_top;
+    uint64_t str_addrs[INITIAL_STRINGS_MAX];
+    for (unsigned i = 0; i < argc + envc; i++) {
+        const char *str = i < argc ? argv[i] : envp[i - argc];
+        size_t n = strlen(str) + 1;
+        sp -= n;
+        for (size_t k = 0; k < n; k++)
+            *AT(sp + k) = (uint8_t)str[k];
+        str_addrs[i] = sp;
+    }
+    /* 16 random bytes for AT_RANDOM (Linux); harmless for native. */
+    sp -= 16;
     sp &= ~0xFULL;
-    if (((words * 8) & 0xF) != 0)
-        sp -= 8;
-    sp -= words * 8;
-    sp &= ~0xFULL;
-
-    uint64_t *w = (uint64_t *)(page + (sp - page_va));
+    uint64_t random_addr = sp;
+    {
+        uint8_t rnd[16];
+        random_get_bytes(rnd, sizeof(rnd));
+        for (size_t k = 0; k < 16; k++)
+            *AT(sp + k) = rnd[k];
+    }
+    /* Word area, 16-byte aligned at the final rsp; built in a kernel
+     * array then copied, since it may straddle the boundary too. */
+    uint64_t w[1 + INITIAL_STRINGS_MAX + 2 + 40];
     unsigned k = 0;
     w[k++] = argc;
     for (unsigned i = 0; i < argc; i++)
@@ -159,9 +175,25 @@ static uint64_t build_initial_stack(struct vm_space *space, uint64_t stack_top, 
     for (unsigned i = 0; i < envc; i++)
         w[k++] = str_addrs[argc + i];
     w[k++] = 0;
-    w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
-    w[k++] = COSMO_AT_ENTRY;  w[k++] = 0; /* patched by the caller */
-    w[k++] = COSMO_AT_NULL;   w[k++] = 0;
+    if (p->pers == &personality_linux) {
+        k += linux_auxv(p, info, random_addr, w + k, 40);
+    } else {
+        w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
+        w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
+        w[k++] = COSMO_AT_NULL;   w[k++] = 0;
+    }
+    words = k;
+    sp &= ~0xFULL;
+    if (((words * 8) & 0xF) != 0)
+        sp -= 8;
+    sp -= words * 8;
+    sp &= ~0xFULL;
+    for (unsigned i = 0; i < words; i++) {
+        uint64_t va = sp + (uint64_t)i * 8;
+        for (unsigned b = 0; b < 8; b++)
+            *AT(va + b) = (uint8_t)(w[i] >> (8 * b));
+    }
+#undef AT
     return sp;
 }
 
@@ -230,11 +262,12 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");
-    p->pers = &personality_native;
     p->state = PROCESS_RUNNING;
     p->parent_pid = 0;
 
     struct process *parent = attr ? attr->parent : NULL;
+    /* Personality: the CosmoOS note selects native; kernel-created processes are always native. */
+    p->pers = (info.cosmo_note || parent == NULL) ? &personality_native : &personality_linux;
     if (parent) {
         p->parent_pid = parent->pid;
         p->cred = parent->cred;
@@ -265,20 +298,26 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         kwarn("process: '%s' load failed (%d)", p->name, rc);
         goto fail;
     }
+    p->image_end = info.hi;
+    if (p->pers == &personality_linux) {
+        rc = linux_process_init(p, &info);
+        if (rc)
+            goto fail;
+    }
 
-    /* Stack: lazily populated except the top page, with a guard below. */
+    /* Stack: lazily populated except the top pages, with a guard below. */
     rc = vm_user_map_anon(p->space, USER_STACK_TOP - USER_STACK_SIZE, USER_STACK_SIZE, VM_PROT_RW,
                           VM_REGION_GUARD_BELOW, "stack");
     if (rc)
         goto fail;
-    {
-        /* Populate the top page so the initial frame can be written. */
+    for (unsigned i = 1; i <= INITIAL_STACK_PAGES; i++) {
+        /* Populate the top pages so the initial frame can be written. */
         struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
         if (pg == NULL) {
             rc = -ENOMEM;
             goto fail;
         }
-        rc = arch_mmu_map(&p->space->mmu, (vaddr_t)(USER_STACK_TOP - PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
+        rc = arch_mmu_map(&p->space->mmu, (vaddr_t)(USER_STACK_TOP - i * PAGE_SIZE), page_to_phys(pg), PAGE_SIZE,
                           VM_PROT_RW, VM_CACHE_WB, ARCH_MMU_MAP_USER);
         if (rc) {
             pmm_free_page(pg);
@@ -287,22 +326,10 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         p->space->anon_pages++;
     }
 
-    uint64_t sp = build_initial_stack(p->space, USER_STACK_TOP, argv, envp);
+    uint64_t sp = build_initial_stack(p, &info, USER_STACK_TOP, argv, envp);
     if (sp == 0) {
-        rc = -EINVAL; /* argument/environment strings do not fit the first page */
+        rc = -EINVAL; /* argument/environment strings do not fit the initial pages */
         goto fail;
-    }
-    {
-        /* Patch AT_ENTRY (second-to-last pair). */
-        paddr_t pa;
-        arch_mmu_query(&p->space->mmu, (vaddr_t)(USER_STACK_TOP - PAGE_SIZE), &pa, NULL, NULL, NULL);
-        uint64_t *w = (uint64_t *)((uint8_t *)phys_to_virt(pa) + (sp - (USER_STACK_TOP - PAGE_SIZE)));
-        unsigned argc = (unsigned)w[0];
-        unsigned envc = 0;
-        for (unsigned i = argc + 2; w[i] != 0; i++)
-            envc++;
-        unsigned aux = 1 + argc + 1 + envc + 1;
-        w[aux + 3] = info.entry; /* AT_ENTRY value */
     }
 
     /* Handles: exactly what the parent maps; kernel-created processes
@@ -369,6 +396,8 @@ fail:
         vm_space_destroy(p->space);
     if (p->cwd)
         vnode_put(p->cwd);
+    if (p->linux)
+        linux_process_release(p);
     kmem_cache_free(g_process_cache, p);
     return rc;
 }

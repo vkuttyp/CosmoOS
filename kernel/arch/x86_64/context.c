@@ -27,7 +27,10 @@
 #include <arch/mmu.h>
 
 #include <x86/cpu.h>
+#include <x86/cpu.h>
 #include <x86/gdt.h>
+
+#define MSR_FS_BASE 0xC0000100u
 
 void x86_context_start(void);
 
@@ -44,6 +47,11 @@ void arch_thread_switch_prepare(struct thread *next)
     struct vm_space *space = next->proc ? next->proc->space : &kernel_space;
     if (read_cr3() != space->mmu.root)
         arch_mmu_activate(&space->mmu);
+
+    /* The user thread pointer (%fs base): kernel code never uses %fs, so
+     * kernel threads keep whatever is there. */
+    if (next->proc)
+        wrmsr(MSR_FS_BASE, next->tls_base);
 }
 extern char x86_boot_stack_bottom[], x86_boot_stack_top[];
 

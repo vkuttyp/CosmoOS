@@ -17,8 +17,11 @@ lifetime) and invariant 14 (validate untrusted input).
    kernel/scheduler/   wait queues (killable waits)
 ```
 
-A pipe is the first IPC primitive; the directory is where channels,
-events, shared memory and futex-like waits go later. It is deliberately
+A pipe is the first IPC primitive; Phase 11 added the second, the futex
+(`kernel/ipc/futex.c`: wait on and wake by a 32-bit user word, keyed by
+address space and address; used by the Linux personality, documented
+in `docs/compat/linux/api.md` and `design.md`). The directory is where
+channels, events and shared memory go later. It is deliberately
 the classic Unix pipe: a byte stream, blocking, anonymous, passed to
 other processes only by handle inheritance at `spawn`.
 
