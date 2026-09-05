@@ -204,8 +204,10 @@ flagged `PG_PAGETABLE`.
 | `arch_mmu_context_init(ctx)` | allocate an empty root; `0` or `-ENOMEM` |
 | `arch_mmu_map(ctx, va, pa, len, prot, cache, flags)` | map page-aligned `[va, va+len)`; uses 1 GiB/2 MiB leaves when `ARCH_MMU_MAP_LARGE` and alignment allow; `-EINVAL` on misalignment or `VM_PROT_NONE`, `-ENOMEM` when a table page cannot be allocated, `-EEXIST` if a page is already mapped (the range may be partially mapped; callers unmap it) |
 | `arch_mmu_unmap(ctx, va, len)` | clear leaves in the range, skipping unmapped pages; `-EINVAL` if the range would split a large page, decided before any change; invalidates |
-| `arch_mmu_protect(ctx, va, len, prot)` | rewrite leaf permissions, same large-page rule; invalidates |
-| `arch_mmu_query(ctx, va, pa, prot, cache, page_size)` | translate one address; `false` if unmapped; outputs may be NULL |
+| `arch_mmu_protect(ctx, va, len, prot)` | rewrite leaf permissions, same large-page rule; invalidates. `VM_PROT_NONE` keeps the frame and clears the hardware valid bit, marking the entry with a software bit (`PTE_SW_NONE` bit 9 on x86-64, `DESC_SW_NONE` bit 55 on AArch64); a later protect to any permission makes it valid again (design.md §6.2) |
+| `arch_mmu_query(ctx, va, pa, prot, cache, page_size)` | translate one address; `false` if unmapped; a `PROT_NONE` page is mapped: `true` with `*prot == VM_PROT_NONE` (plus `VM_PROT_USER`); outputs may be NULL |
+| `arch_mmu_shootdown_cpus(ctx, va, len, cpus)` | invalidate on the CPUs in `cpus` (the caller always included, offline CPUs ignored) and wait for their acknowledgements; `arch_mmu_shootdown` is the all-online form (design.md §6.4) |
+| `arch_mmu_prepopulate(ctx, va, len)` | create the tables below the top level for every top-level slot the range touches, mapping nothing; `vmm_init` calls it on the arena so no kernel-half PML4 entry is created after the first user root copies the kernel half; a no-op on AArch64 (TTBR1 is shared) |
 | `arch_mmu_activate(ctx)` | load CR3 |
 | `arch_mmu_invalidate(ctx, va, len)` | `invlpg` per page up to 64 pages, else a full flush that also drops global entries (CR4.PGE toggle); current CPU only until Phase 3 |
 | `arch_mmu_large_page_sizes()` | bitmask `PAGE_2M_SIZE | PAGE_1G_SIZE` (1 GiB only with `pdpe1gb`) |
@@ -308,13 +310,37 @@ Take `vm_space.lock`. `vm_dump` prints one line per region.
 
 ### Page-fault behaviour (not a function callers invoke)
 
-`vm_fault_handler` runs on the page-fault vector. If the address is in the
-kernel half and lies in a `VM_REGION_ANON` region, the fault is
-not-present, no reserved bit is set, and the access kind is within the
-region's `prot`, it allocates a zeroed frame, maps it, and returns. Every
-other case is `panic_frame` with the access kind, fault kind, and the
-region description or `no region`. A fault while the calling CPU holds
-`vm_space.lock` panics with a distinct message rather than deadlocking.
+`vm_fault_handler` runs on the page-fault vector. A user-mode fault at a
+kernel address is fatal to the process at once. Otherwise the space is
+`kernel_space` for a kernel address and the current process's space for
+a user one (NULL on a kernel thread). If the address lies in a
+`VM_REGION_ANON` region, the fault is not-present, no reserved bit is
+set, and the access kind is within the region's `prot`, it allocates a
+zeroed frame, maps it, and returns. Every other case, including an
+allocation failure on that path, is: fatal to the process for a
+user-mode frame; for a kernel-mode frame at a user address, resumed at
+the faulting PC's exception fixup when the exception table has one
+(`fixups` counts these), which is how `copy_*_user` reports `-EFAULT`;
+else `panic_frame` with the access kind, fault kind, and the region
+description or `no region` (a kernel bug). A fault while the calling
+CPU holds `vm_space.lock` panics with a distinct message rather than
+deadlocking. Design.md §6.1.
+
+### `void vm_space_switch(struct vm_space *prev, struct vm_space *next)`
+
+The calling CPU's root moves from `prev` to `next` (interrupts off, from
+`arch_thread_switch_prepare`): sets the CPU's bit in `next->active_cpus`,
+activates, clears it in `prev->active_cpus`. User-space shootdowns
+target `active_cpus` plus the caller (design.md §6.4).
+
+## `kernel/extable.h`
+
+`struct ex_entry { int32_t insn, fixup; }` (offsets from their own
+position) in `.ex_table` between `__ex_table_start` and `__ex_table_end`.
+`uintptr_t extable_fixup(uintptr_t pc)`: the fixup for a faulting PC or
+0. `extable_count()`, `extable_entry(i, &insn, &fixup)`: enumeration
+for tests. Entries are written by the assembly of `arch_copy_user_raw`
+(`kernel/arch/*/uaccess.S`); nothing else adds any.
 
 ## `kernel/kmalloc.h`
 

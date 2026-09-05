@@ -35,11 +35,14 @@ on where the sanitizer supports it.
 
 ## Fault injection (`kernel/include/kernel/faultinject.h`, `kernel/core/faultinject.c`)
 
-### `enum fi_kind { FI_KMALLOC, FI_BLK_SUBMIT, FI_BLK_COMPLETE }`
+### `enum fi_kind { FI_KMALLOC, FI_BLK_SUBMIT, FI_BLK_COMPLETE, FI_DEMAND_PAGE, FI_DEMAND_COPY }`
 Where a fault can be injected: `kmalloc`/`kmem_cache_alloc` return NULL
 (the small-object path is hooked in the cache, the large-page path in
 `kmalloc`); `blk_submit` returns `-EIO` before the driver; `bio_complete`
-turns a success into `-EIO`.
+turns a success into `-EIO`; the frame allocation of a demand-zero fault
+in a user space fails, for a user-mode fault (`demand-page`: the process
+dies) or a kernel-mode fault inside a user copy (`demand-copy`: the
+system call returns `-EFAULT`), `docs/kernel/memory/design.md` §6.1.
 
 ### `void faultinject_set(enum fi_kind kind, unsigned every, unsigned budget, struct thread *only)`
 - Purpose: arm a rule: fail every `every`-th eligible event (1 = all), at
@@ -61,7 +64,7 @@ Never fails in interrupt context (`irq_depth != 0`). Counts `seen` and
 
 ### `int faultinject_configure(const char *spec)`, `void faultinject_init(void)`
 `spec` is `kind:every[:budget]` entries separated by commas, kinds
-`kmalloc`, `blk-submit`, `blk-complete`; `-EINVAL` on a malformed entry
+`kmalloc`, `blk-submit`, `blk-complete`, `demand-page`, `demand-copy`; `-EINVAL` on a malformed entry
 (unknown kind, missing or zero `every`, a field that does not fit an
 unsigned 32-bit integer, trailing characters), in which case nothing is
 armed: the specification is parsed completely before the first rule is

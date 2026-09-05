@@ -47,6 +47,33 @@ subsequent "back to baseline" check would be off by the table pages.
 | two guarded allocations are page aligned, distinct, and at least two pages apart | arena placement |
 | size 0, unaligned size, and `VM_PROT_NONE` return 0 | argument validation |
 
+### `SELFTEST: user-vmm` (`selftest_user_vmm`, milestone 5)
+
+On a user space created for the test and never activated: four
+populated RW pages are one region with four frames; unmapping the middle
+two leaves two regions and two frames, the strict unmap refuses the gap
+and the whole range (nothing changes), the lenient one skips it;
+refilling the gap with equal attributes merges back to one region; a
+different name does not merge; `mprotect` of the middle two to
+`PROT_NONE` splits into three regions with all four frames still
+attached and `arch_mmu_query` reporting no permissions, the shootdown
+collects no acknowledgements (no other CPU runs the space), mapping
+over the `PROT_NONE` pages is `-EEXIST`; back to RW merges to one;
+`protect` across a gap is `-ENOMEM`, W+X `-EINVAL`; a `PROT_NONE`
+reservation has no frames and can be split by `protect`; a lenient unmap
+across two regions and a gap leaves exactly the expected pieces;
+`vm_space_destroy` returns the frames.
+
+### `SELFTEST: uaccess` (`selftest_uaccess`, `kernel/syscall/uaccesstest.c`)
+
+From a kernel thread (no process, so every user address is unmapped):
+the exception table has at least one entry (one on x86-64, four on
+AArch64), each naming kernel text; `user_range_ok` edges; four real
+kernel-mode faults at user addresses through `copy_from_user`,
+`copy_to_user` and `strncpy_from_user` each return `-EFAULT` with the
+kernel buffer untouched, and `vm_stats.fixups` rises by exactly four; a
+kernel pointer is refused by the range check without a fault.
+
 ### `SELFTEST: kmalloc` (`selftest_kmalloc`)
 
 | Step | Proves |

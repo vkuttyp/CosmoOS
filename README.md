@@ -294,6 +294,23 @@ See [docs/development.md](docs/development.md).
   found an unaligned section-table read in the module loader; fault
   injection found a NULL dereference on a failed vnode allocation; both
   fixed with regression tests.
+- **User-access fixups and user VMM regions (done):** milestone 5 of
+  the audit's plan (`docs/kernel/memory/design.md` §6). Kernel access to
+  user memory goes through one copy primitive per architecture whose
+  faulting instructions are listed in an exception table
+  (`kernel/arch/*/uaccess.S`, `kernel/core/extable.c`): a kernel-mode
+  fault at a user address, including a demand-zero fault that finds no
+  memory, resumes at the fixup and the system call returns `-EFAULT`; the
+  region walk before every copy, and with it the check-then-copy window,
+  is gone. `PROT_NONE` pages keep their frame and trap every access.
+  `munmap` and `mprotect` take any page range: regions split at the ends
+  and merge with equal neighbours, so the Linux heap shrinks and regrows,
+  `MAP_FIXED` replaces, and a partial `mprotect` works. Every user space
+  tracks the CPUs running it and shoots down only those; process exit
+  no longer interrupts every CPU. `vmm_init` pre-populates the arena's
+  top-level tables and debug builds assert that no kernel-half entry is
+  created after the first user space. Five new self-tests, 100 in total;
+  the Linux and native user tests cover the new semantics.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

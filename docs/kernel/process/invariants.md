@@ -50,9 +50,12 @@ segments, and an entry inside an executable segment loads. Check: test
 file; test `process-reject`.
 
 **P7. Every unmap path shoots down before freeing frames.**
-`user_region_teardown` and `vm_user_protect` follow the kernel arena's
-protocol: table edit under `vm_space.lock`, unlock, `arch_mmu_shootdown`,
-then `pmm_free_page`. Check: review; `smp-shootdown` for the mechanism.
+`user_range_teardown` and `vm_user_protect` follow the kernel arena's
+protocol: table edit under `vm_space.lock`, unlock,
+`arch_mmu_shootdown_cpus` on the CPUs running the space, then
+`pmm_free_page`; the regions are unlinked before the teardown so no
+fault can repopulate the range (`docs/kernel/memory/invariants.md` M35).
+Check: review; `smp-shootdown` for the mechanism; `user-vmm`.
 
 **P8. A user space is destroyed only by the reaper.** Address-space
 teardown runs from `process_release`, reached from `thread_put` in the
@@ -62,12 +65,12 @@ assert `t != thread_current()` in `thread_put`.
 
 **P9. Kernel-half PML4 entries are fixed after `vmm_init`.**
 `arch_mmu_context_init_user` copies entries 256–511 from the kernel root
-once; nothing creates a new kernel-half PML4 entry afterwards because
-the direct map, the arena, and the image all have their PDPTs by the
-end of `vmm_init` and `arch_mmu_map` on the kernel space only descends
-into existing PML4 entries for those ranges. Check: review. Gap: not
-yet asserted at runtime; a `KASSERT` in `descend()` when creating a
-PML4 entry above index 255 after init is planned.
+once; `vmm_init` pre-populates the arena's 64 PML4 slots with
+`arch_mmu_prepopulate` (the direct map and the image have theirs from
+the mapping itself), so nothing creates a kernel-half PML4 entry
+afterwards. Check: in debug builds `descend()` panics if it would create
+one after the first user root exists (`docs/kernel/memory/invariants.md`
+M36); review.
 
 **P10. CR3 is switched on every switch to a different space.**
 `arch_thread_switch_prepare` activates `next->proc->space` or
@@ -99,18 +102,26 @@ rsp at offset 16. Check: build (`STATIC_ASSERT` on the offsets), test
 `process-user`.
 
 **P14. User pointers reach kernel code only through `uaccess`.** Every
-native syscall calls `user_range_ok` then `copy_*_user` or
-`user_range_mapped` before touching a user address; `sys_read`/`sys_write`
-bounce through a 1024-byte kernel buffer. Check: test `process-user`
-(kernel pointer, below-window, top-of-window, unmapped, and overflowing
-lengths all `-EFAULT`), review.
+native syscall calls `copy_*_user` or `strncpy_from_user` for a user
+address, and those touch user memory only through `arch_copy_user_raw`,
+whose accesses carry exception fixups; `sys_read`/`sys_write` bounce
+through a 1024-byte kernel buffer. Check: test `process-user` (kernel
+pointer, below-window, top-of-window, unmapped, and overflowing lengths
+all `-EFAULT`), `process-efault` (PROT_NONE, read-only, torn ranges),
+`uaccess`; grep for casts of user addresses outside `uaccess.c` finds
+none (review).
 
-**P15. A user-mode fault never panics the kernel.** The fault handler
-routes a fault whose frame has `VM_FAULT_USER` and no serviceable region
-to `vm_user_hooks.fatal`, which logs and calls `process_exit(139)`
-after re-enabling interrupts. Kernel-mode faults on user addresses that
-validation did not catch still panic (kernel bug). Check: test
-`process-fault` (status `COSMO_EXIT_FAULT` = 139).
+**P15. A user-mode fault never panics the kernel, and a kernel-mode
+fault at a user address never panics inside a user copy.** The fault
+handler routes a fault whose frame has `VM_FAULT_USER` and no
+serviceable region (or no memory to service it) to
+`vm_user_hooks.fatal`, which logs and calls `process_exit(139)` after
+re-enabling interrupts; a kernel-mode fault at a user address resumes at
+the exception fixup of the copy and the system call returns `-EFAULT`
+(`docs/kernel/memory/invariants.md` M32). A kernel-mode fault at a user
+address with no fixup is a kernel bug and panics. Check: tests
+`process-fault` (status `COSMO_EXIT_FAULT` = 139), `process-protnone`,
+`process-efault`, `process-oom`.
 
 **P16. No kernel pointer reaches user space.** Handles are table
 indices; syscall results are integers or user addresses; `sys_mmap`

@@ -109,8 +109,12 @@ break) or from the caller's aligned hint, so the two never collide by
 default. Check: `lxtest` grows the break by 8 KiB, writes the pages,
 shrinks back, and sees a request below `brk_start` refused with the old
 value; `hello_musl`'s `malloc` (musl uses `brk` first, then `mmap`).
-Gap: no test of the 1 GiB cap or of a `MAP_FIXED` mapping placed over
-the heap (allowed, as on Linux).
+`lxtest` also grows to 100 000, shrinks to one page, regrows to
+200 000 and sees the kept page, a fresh zero page where the freed one
+was, and the new top byte (milestone 5: before it a shrink left the
+pages mapped and the regrow failed with `-EEXIST`). Gap: no test of the
+1 GiB cap or of a `MAP_FIXED` mapping placed over the heap (allowed, as
+on Linux).
 
 **L10. The thread pointer follows the thread.** `arch_prctl(ARCH_SET_FS)`
 stores into `thread->tls_base` and writes `MSR_FS_BASE` at once;

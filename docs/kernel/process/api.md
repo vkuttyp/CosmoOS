@@ -243,21 +243,22 @@ Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
 
 ## kernel/uaccess.h
 
-All helpers require a process-owning thread and may block (a demand-zero
-fault during the copy allocates). They never touch user memory before
-both checks pass.
+All helpers may block (a demand-zero fault during the copy allocates).
+They check the range, then copy through `arch_copy_user_raw`, whose
+faulting instructions carry exception fixups: any fault inside the copy
+is `-EFAULT` (`docs/kernel/memory/design.md` §6.1). From a thread with
+no process every user address faults and is `-EFAULT`.
 
 - `bool user_range_ok(uint64_t addr, size_t len)`: inside
   `[USER_LO, USER_HI)` without overflow; `len` 0 accepts `addr == USER_HI`.
-- `bool user_range_mapped(uint64_t addr, size_t len, vm_prot_t prot)`:
-  every page in a region of the current process carrying `prot`.
 - `int copy_from_user(void *dst, uint64_t src, size_t len)` /
   `int copy_to_user(uint64_t dst, const void *src, size_t len)`: 0 or
-  `-EFAULT`; copy inside `arch_user_access_begin/end`.
+  `-EFAULT`; copy inside `arch_user_access_begin/end`. On `-EFAULT` the
+  destination may be partly written up to the faulting page.
 - `int strncpy_from_user(char *dst, uint64_t src, size_t max)`: length,
   `-EFAULT`, `-ENAMETOOLONG`, `-EINVAL` (max 0); always terminates `dst`;
-  checks page by page so a string ending before an unmapped page is
-  accepted.
+  copies page by page so a string ending before an inaccessible page is
+  accepted and one running into it is `-EFAULT`.
 
 ## arch/user.h
 
@@ -287,13 +288,22 @@ both checks pass.
   (frames freed after shootdown), frees lower-half tables, frees the
   struct. Must not be the active space on the calling CPU. May block.
 - `int vm_user_map_anon(space, base, size, prot, flags, name)`: exact
-  range inside the window, page aligned, no W+X, `-EEXIST` on overlap;
-  `VM_REGION_POPULATED` for eager zeroed frames, `VM_REGION_GUARD_BELOW`
-  for a guard page; unwinds fully on `-ENOMEM`.
-- `int vm_user_unmap(space, base, size)`: exact region only, `-EINVAL`
-  otherwise; shoots down before freeing frames.
-- `int vm_user_protect(space, base, size, prot)`: whole region only;
-  `-EINVAL` for W+X, NONE, or partial ranges; shoots down.
+  range inside the window, page aligned, no W+X (`VM_PROT_NONE` reserves),
+  `-EEXIST` on overlap; `VM_REGION_POPULATED` for eager zeroed frames,
+  `VM_REGION_GUARD_BELOW` for a guard page; unwinds fully on `-ENOMEM`;
+  merges with an equal adjacent region.
+- `int vm_user_unmap(space, base, size, flags)`: any page range in the
+  window; regions are split at the ends. `VM_UNMAP_STRICT`: every page
+  must be mapped or `-EINVAL` with nothing changed; without it unmapped
+  pages are skipped. `-ENOMEM` if a split record cannot be allocated
+  (nothing changed). Shoots down on the CPUs running the space before
+  freeing frames.
+- `int vm_user_protect(space, base, size, prot)`: any page range;
+  `-EINVAL` for W+X or a bad range; `-ENOMEM` if a page is unmapped or
+  a split cannot be allocated (nothing changed); splits at the ends,
+  merges equal neighbours afterwards; `VM_PROT_NONE` keeps the frames;
+  shoots down.
+- `unsigned vm_user_region_count(space)`: for tests.
 - `uint64_t vm_user_find_free(space, from, size)`: first fit at or
   above `from` keeping one unmapped page between regions; 0 if none.
 - `bool vm_user_range_mapped(space, addr, len, prot)`: contiguous
@@ -301,6 +311,17 @@ both checks pass.
 - `void vm_set_user_hooks(const struct vm_user_hooks *)`: the process
   layer supplies `current_space()` and `fatal()` (noreturn) for the
   fault handler.
+
+## arch/user.h additions (milestone 5)
+
+- `size_t arch_copy_user_raw(void *dst, const void *src, size_t n)`:
+  copy with every access in the exception table; returns the bytes not
+  copied (0 on success). x86-64: `rep movsb`, one entry; AArch64: an
+  aligned 8-byte loop and a byte loop, four entries. Call inside the
+  access window.
+- `bool arch_trap_fixup(struct arch_trap_frame *)`: if the frame's PC
+  has an exception-table entry, move the PC to the fixup and return
+  true.
 
 ## arch/mmu.h additions
 

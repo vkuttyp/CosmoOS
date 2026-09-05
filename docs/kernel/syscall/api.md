@@ -35,7 +35,7 @@ kernel stack.
 | 5 | `sleep_ns` | `uint64_t ns` | 0 after at least `ns` | `EINVAL` (> 1 hour) |
 | 6 | `clock_ns` | none | monotonic nanoseconds since boot | none |
 | 7 | `mmap` | `void *hint, size_t len, int prot, int flags` | address | `EINVAL`, `ENOMEM`, `EEXIST` |
-| 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` |
+| 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200) |
 | 10 | `close` | `int h` | 0 | `EBADF` |
 | 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
@@ -123,15 +123,25 @@ Details per call:
 - **mmap**: `len` must be a non-zero page multiple; `flags` must
   include `COSMO_MAP_ANONYMOUS` (file mappings arrive with the VFS);
   `prot` is any subset of READ/WRITE/EXEC except WRITE+EXEC (W^X);
-  `PROT_NONE` currently maps readable. Without `COSMO_MAP_FIXED`, the
+  `PROT_NONE` reserves the range: every access, from user code or from
+  a system call given a pointer into it, faults (`-EFAULT` for the
+  call, `COSMO_EXIT_FAULT` for the process). Without `COSMO_MAP_FIXED`, the
   page-aligned `hint` at or above 4 MiB is the first-fit search start,
   falling back to `0x0000100000000000`; the result keeps one unmapped
   page between regions. With `COSMO_MAP_FIXED`, `hint` must be page
   aligned and inside the window, and an overlap is `EEXIST` (no silent
   replacement). Pages are demand-zero.
-- **munmap**: `addr`/`len` must name exactly one region created by
-  `mmap` (the stack and ELF segments are regions too, and can be
-  unmapped whole); partial or non-matching ranges are `EINVAL`.
+- **munmap**: any page-aligned range inside the window whose every page
+  is mapped (by `mmap`, the stack or an ELF segment: regions split as
+  needed); a range with an unmapped page is `EINVAL` and nothing
+  changes. This strict rule is the native contract; the Linux
+  personality's `munmap` skips unmapped pages.
+- **EFAULT** everywhere: a user pointer that names an unmapped,
+  `PROT_NONE` or wrong-permission page, or one the kernel cannot
+  populate for lack of memory, makes the call return `EFAULT`; the
+  process is never terminated by a system call's access to its memory
+  (`docs/kernel/memory/design.md` §6.1). A call that fails this way may
+  have partly written its destination up to the faulting page.
 - **log**: copies at most 199 bytes and prints them through `klog` at
   INFO as `pid N: <text>`. Intended for early user diagnostics.
 - **close**: releases the handle; the slot can be reused by a later
