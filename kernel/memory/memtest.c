@@ -6,6 +6,7 @@
  * the code under test fails the test rather than a later one.
  */
 
+#include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
@@ -340,5 +341,105 @@ bool selftest_kmalloc(const char **reason)
     kmalloc_get_stats(&ks1);
     CHECK(ks1.live_objects == ks0.live_objects);
     CHECK(free_pages() + 64 >= baseline);
+    return true;
+}
+
+/* --- user regions: PROT_NONE, split, merge, strict and lenient unmap, the shootdown mask --- */
+
+#include <kernel/percpu.h>
+#include <arch/cpu.h>
+
+static unsigned online_cpus(void)
+{
+    return (unsigned)__builtin_popcountll(cpu_online_mask());
+}
+
+bool selftest_user_vmm(const char **reason)
+{
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    CHECK(sp != NULL && sp->active_cpus == 0);
+
+    const uint64_t A = 0x0000300000000000ULL;   /* far from anything a process maps */
+    paddr_t pa;
+    vm_prot_t prot;
+
+    /* Four populated RW pages: one region, four frames. */
+    CHECK(vm_user_map_anon(sp, A, 4 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "t") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->anon_pages == 4);
+    CHECK(vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_RW));
+
+    /* Unmap the middle two: two regions, two frames, a gap the strict
+     * form refuses to unmap again and the lenient form skips. */
+    CHECK(vm_user_unmap(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(sp->anon_pages == 2);
+    CHECK(!vm_user_range_mapped(sp, A, 4 * PAGE_SIZE, VM_PROT_READ));
+    CHECK(vm_user_range_mapped(sp, A, PAGE_SIZE, VM_PROT_RW));
+    CHECK(vm_user_range_mapped(sp, A + 3 * PAGE_SIZE, PAGE_SIZE, VM_PROT_RW));
+    CHECK(!arch_mmu_query(&sp->mmu, A + PAGE_SIZE, &pa, NULL, NULL, NULL));
+    CHECK(vm_user_unmap(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, VM_UNMAP_STRICT) == -EINVAL);
+    CHECK(vm_user_unmap(sp, A, 4 * PAGE_SIZE, VM_UNMAP_STRICT) == -EINVAL);   /* nothing changed */
+    CHECK(vm_user_region_count(sp) == 2 && sp->anon_pages == 2);
+    CHECK(vm_user_unmap(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, 0) == 0);           /* lenient: no-op */
+    CHECK(vm_user_region_count(sp) == 2 && sp->anon_pages == 2);
+
+    /* Fill the gap with the same attributes and name: the three merge. */
+    CHECK(vm_user_map_anon(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "t") == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(sp->anon_pages == 4);
+    /* A different name does not merge; the same name adjacent does. */
+    CHECK(vm_user_map_anon(sp, A + 4 * PAGE_SIZE, PAGE_SIZE, VM_PROT_RW, 0, "u") == 0);
+    CHECK(vm_user_region_count(sp) == 2);
+    CHECK(vm_user_unmap(sp, A + 4 * PAGE_SIZE, PAGE_SIZE, VM_UNMAP_STRICT) == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+
+    /* mprotect of the middle two pages to PROT_NONE: three regions, the
+     * frames stay attached and are reported with no permissions; back to
+     * RW merges again. */
+    struct arch_mmu_shootdown_stats sd0, sd1;
+    arch_mmu_shootdown_stats(&sd0);
+    CHECK(vm_user_protect(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_NONE) == 0);
+    arch_mmu_shootdown_stats(&sd1);
+    CHECK(vm_user_region_count(sp) == 3);
+    CHECK(sp->anon_pages == 4);
+    CHECK(arch_mmu_query(&sp->mmu, A + PAGE_SIZE, &pa, &prot, NULL, NULL));
+    CHECK(pa != 0 && (prot & ~VM_PROT_USER) == VM_PROT_NONE);
+    CHECK(arch_mmu_query(&sp->mmu, A, NULL, &prot, NULL, NULL));
+    CHECK((prot & ~VM_PROT_USER) == VM_PROT_RW);
+    CHECK(vm_user_range_mapped(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_NONE));
+    CHECK(!vm_user_range_mapped(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_READ));
+    /* No other CPU runs this space: the shootdown was local, no acks. */
+    CHECK(sd1.acks_received == sd0.acks_received);
+    CHECK(online_cpus() == 1 || sd1.initiated == sd0.initiated);
+    CHECK(vm_user_map_anon(sp, A + PAGE_SIZE, PAGE_SIZE, VM_PROT_READ, 0, "t") == -EEXIST);   /* occupied */
+
+    CHECK(vm_user_protect(sp, A + PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_RW) == 0);
+    CHECK(vm_user_region_count(sp) == 1);
+    CHECK(arch_mmu_query(&sp->mmu, A + 2 * PAGE_SIZE, NULL, &prot, NULL, NULL));
+    CHECK((prot & ~VM_PROT_USER) == VM_PROT_RW);
+
+    /* Protect across a gap is refused whole; W+X refused; a reservation
+     * (PROT_NONE at creation) has no frames and merges with nothing. */
+    CHECK(vm_user_protect(sp, A, 6 * PAGE_SIZE, VM_PROT_READ) == -ENOMEM);
+    CHECK(vm_user_protect(sp, A, PAGE_SIZE, VM_PROT_RW | VM_PROT_EXEC) == -EINVAL);
+    CHECK(vm_user_map_anon(sp, A + 8 * PAGE_SIZE, 2 * PAGE_SIZE, VM_PROT_NONE, 0, "t") == 0);
+    CHECK(vm_user_region_count(sp) == 2 && sp->anon_pages == 4);
+    CHECK(vm_user_protect(sp, A + 8 * PAGE_SIZE, PAGE_SIZE, VM_PROT_READ) == 0);   /* splits, no frames to flip */
+    CHECK(vm_user_region_count(sp) == 3);
+
+    /* Unmap a range that straddles two regions and a gap (lenient). */
+    CHECK(vm_user_unmap(sp, A + 3 * PAGE_SIZE, 6 * PAGE_SIZE, 0) == 0);
+    CHECK(vm_user_region_count(sp) == 2);   /* [A, A+3P) and [A+9P, A+10P) */
+    CHECK(sp->anon_pages == 3);
+    CHECK(vm_user_range_mapped(sp, A, 3 * PAGE_SIZE, VM_PROT_RW));
+    CHECK(!vm_user_range_mapped(sp, A + 3 * PAGE_SIZE, PAGE_SIZE, VM_PROT_NONE));
+    CHECK(vm_user_range_mapped(sp, A + 9 * PAGE_SIZE, PAGE_SIZE, VM_PROT_NONE));
+
+    uint64_t before = free_pages();
+    vm_space_destroy(sp);
+    CHECK(free_pages() >= before + 3);
+    kinfo("selftest: user-vmm: split, merge, PROT_NONE and masked shootdown on a private space");
     return true;
 }

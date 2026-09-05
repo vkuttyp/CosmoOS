@@ -266,6 +266,8 @@ static const struct selftest tests[] = {
     { "trap-paranoid",   test_trap_paranoid },
     { "pmm",             selftest_pmm },
     { "vmm",             selftest_vmm },
+    { "user-vmm",        selftest_user_vmm },
+    { "uaccess",         selftest_uaccess },
     { "kmalloc",         selftest_kmalloc },
     { "acpi",            selftest_acpi },
     { "timer",           selftest_timer },
@@ -354,6 +356,9 @@ static const struct selftest tests[] = {
     { "hv-guest-fpu",    selftest_hv_guest_fpu },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
+    { "process-efault",  selftest_process_efault },
+    { "process-protnone", selftest_process_protnone },
+    { "process-oom",     selftest_process_oom },
     { "syscall-fuzz",    selftest_syscall_fuzz },
 };
 

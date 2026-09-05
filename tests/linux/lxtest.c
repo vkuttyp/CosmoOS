@@ -128,8 +128,41 @@ int main(int argc, char **argv)
     CHECKV(fixed == 0x30000000000L, fixed);
     if (fixed > 0) {
         *(volatile char *)fixed = 'x';
+        /* MAP_FIXED over a live mapping replaces it: fresh zero contents. */
+        long again = sc6(LX_mmap, fixed, 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_PRIVATE | LX_MAP_ANONYMOUS | LX_MAP_FIXED, -1, 0);
+        CHECKV(again == fixed, again);
+        CHECK(*(volatile char *)fixed == 0);
         CHECKV(sc2(LX_munmap, fixed, 4096) == 0, 0);
     }
+
+    /* --- milestone 5: partial mprotect, PROT_NONE, brk shrink and regrow --- */
+    long r8 = sc6(LX_mmap, 0, 8 * 4096, LX_PROT_READ | LX_PROT_WRITE, LX_MAP_PRIVATE | LX_MAP_ANONYMOUS, -1, 0);
+    CHECKV(r8 > 0 && (r8 & 0xfff) == 0, r8);
+    if (r8 > 0) {
+        volatile unsigned char *b = (unsigned char *)r8;
+        for (int i = 0; i < 8; i++)
+            b[i * 4096] = (unsigned char)(i + 1);
+        CHECKV(sc3(LX_mprotect, r8 + 2 * 4096, 2 * 4096, LX_PROT_READ) == 0, 0);   /* the middle: a split */
+        b[0] = 9;                                                                  /* still writable */
+        CHECK(b[2 * 4096] == 3 && b[3 * 4096] == 4);                              /* readable, contents kept */
+        CHECKV(sc3(LX_mprotect, r8 + 2 * 4096, 2 * 4096, 0) == 0, 0);             /* PROT_NONE */
+        CHECKV(sc3(LX_write, 1, r8 + 2 * 4096, 1) == -14, 0);                     /* the kernel gets EFAULT too */
+        CHECKV(sc3(LX_mprotect, r8 + 2 * 4096, 2 * 4096, LX_PROT_READ | LX_PROT_WRITE) == 0, 0);
+        CHECK(b[2 * 4096] == 3);                                                   /* the frame survived PROT_NONE */
+        b[2 * 4096] = 7;
+        CHECKV(sc2(LX_munmap, r8 + 4096, 4096) == 0, 0);                          /* a hole */
+        CHECKV(sc3(LX_mprotect, r8, 8 * 4096, LX_PROT_READ) == -12, 0);           /* across the hole: ENOMEM */
+        CHECKV(sc2(LX_munmap, r8, 8 * 4096) == 0, 0);                             /* lenient: the hole is skipped */
+    }
+    long brk2 = sc1(LX_brk, brk0 + 100000);
+    CHECKV(brk2 == brk0 + 100000, brk2);
+    heap[0] = 1;                                                            /* page 0: kept by the shrink below */
+    heap[99999] = 5;                                                        /* page 24: freed by it */
+    CHECKV(sc1(LX_brk, brk0 + 4096) == brk0 + 4096, 0);                    /* shrink to one page */
+    CHECKV(sc1(LX_brk, brk0 + 200000) == brk0 + 200000, 0);                /* regrow past the old size */
+    heap[199999] = 6;
+    CHECK(heap[0] == 1 && heap[99999] == 0 && heap[199999] == 6);          /* kept, fresh zero, new */
+    CHECKV(sc1(LX_brk, brk0) == brk0, 0);
 
     /* --- files --- */
     long fd = sc4(LX_openat, LX_AT_FDCWD, "/tmp/lxtest.txt", LX_O_RDWR | LX_O_CREAT | LX_O_TRUNC | LX_O_CLOEXEC, 0644);
