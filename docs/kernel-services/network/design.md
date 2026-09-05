@@ -142,6 +142,7 @@ mandatory on v6, generated on v4.
 
 ```c
 struct tcp_pcb {
+    spinlock_t lock; uint32_t refs;                 /* per-pcb lock; references (design: "Hardening") */
     enum tcp_state state;
     struct netaddr local, remote;                   /* family-tagged addresses */
     /* send */  uint32_t iss, snd_una, snd_nxt, snd_wnd, snd_wl1, snd_wl2, snd_max; uint16_t mss;
@@ -149,9 +150,12 @@ struct tcp_pcb {
     /* receive */ uint32_t rcv_nxt, rcv_wnd, irs; struct netbuf rcvbuf;   /* TCP_RCVBUF 65536 */
     /* congestion */ uint32_t cwnd, ssthresh; unsigned dupacks;
     /* RTO */ uint64_t srtt_ns, rttvar_ns, rto_ns; uint32_t rtt_seq; uint64_t rtt_start_ns;
+    struct tcp_ooo_seg ooo[TCP_OOO_MAX]; unsigned ooo_n; uint32_t ooo_bytes;   /* reassembly queue */
     struct timer rexmit;  unsigned rexmit_count;  struct timer delack; struct timer timewait;
-    struct net_work work; unsigned work_flags;      /* WORK_REXMIT/DELACK/TIMEWAIT/FREE: timers -> worker */
-    struct list_node link;                          /* the pcb table */
+    struct timer keep; uint64_t last_rx_ns; unsigned keep_probes;   /* keepalive and orphaned FIN_WAIT_2 */
+    struct net_work work; unsigned work_flags;      /* WORK_REXMIT/DELACK/TIMEWAIT/KEEP: timers -> worker */
+    struct list_node hash_link;                     /* the pcb table bucket for local.port */
+    struct tcp_syncache *syncache;                  /* listeners: half-open connections */
     struct socket *sock;                            /* owner; NULL once closed */
     int error;                                      /* -ECONNREFUSED, -ECONNRESET, -ETIMEDOUT */
     struct list_node accept_link, accept_queue;  struct tcp_pcb *listener; unsigned backlog, nr_queued;
@@ -162,10 +166,11 @@ struct tcp_pcb {
 Segments in: `tcp_input(nif, m, ip4, ip6)` looks up the pcb (exact 4-tuple, else
 a LISTEN pcb on the local port), validates the checksum and sequence
 window, and runs the state machine of RFC 793 section 3.9 with these
-simplifications: one SYN option (MSS), no reassembly queue beyond
-accepting only in-order data (out-of-order segments are ACKed with
-`rcv_nxt` and dropped, which the loss test shows still converges
-through retransmission), RST on segments to closed ports, ACK
+simplifications: one SYN option (MSS), a bounded reassembly queue
+(out-of-order segments inside the window are kept, up to `TCP_OOO_MAX`,
+and delivered when the gap closes; each earns an immediate duplicate
+ACK), RST on segments to closed ports, RFC 5961 challenge ACKs for
+blind resets, SYNs and out-of-range ACKs, ACK
 processing frees acknowledged bytes from `sndbuf`, updates the window,
 runs the RTT estimator (RFC 6298, one sample in flight at a time), and
 drives congestion control (slow start until `ssthresh`, then one MSS
@@ -179,22 +184,24 @@ attempts (the connection is closed with `-ETIMEDOUT`). When the peer
 advertises a zero window the retransmit timer doubles as the persist
 probe. Delayed ACK: a
 pure ACK is sent at once when two segments are pending or after 40 ms.
-TIME_WAIT lasts 2 s in this phase (a constant, `TCP_TIMEWAIT_NS`).
+TIME_WAIT lasts 2 s in this phase (a constant, `TCP_TIMEWAIT_NS`) and
+restarts only for a retransmitted FIN. An orphaned FIN_WAIT_2 ends
+after `TCP_FIN_WAIT2_NS`; an idle established connection is probed
+(keepalive) and ends after unanswered probes.
 Closing: `shutdown(SHUT_WR)`/`close` queue a FIN after the data; close
 on a socket with unread data sends RST (RFC 2525 2.17); closing a
-listener resets its unaccepted children. Listening pcbs hold an accept
-queue of established children up to `backlog` (1..16); a SYN beyond it
-is dropped and the client retransmits.
+listener resets its unaccepted children. Listening pcbs answer SYNs
+from a SYN cache or with SYN cookies and allocate a child only for the
+ACK that completes the handshake; the accept queue holds established
+children up to `backlog` (1..16), and a completing ACK beyond it is
+dropped so the client retransmits.
 
-Locking: one TCP spinlock (`g_lock` in `tcp.c`) protects the pcb table
-and every pcb in this phase; it is taken by input (worker), output
-(callers) and the worker's timer handlers, never held across
-`transmit` (segments are built under the lock into a `struct tcp_batch`
-of at most 16 and sent by `batch_send` after unlock) and never across a
+Locking: one spinlock per pcb and one for the hashed table; segments
+are built under the pcb lock into a `struct tcp_batch` of at most 16
+and sent by `batch_send` after unlock, and nothing is held across a
 copy to or from user memory (the socket layer copies into a kernel
-buffer first). Section 36 asks for finer grain; the single lock is
-recorded as the thing to split (per-pcb locks plus a table lock) once
-there is a workload.
+buffer first). The rules are in "Hardening and per-connection
+locking" below.
 
 ### Sockets (`kernel/include/kernel/socket.h`)
 
@@ -288,16 +295,20 @@ runs the six-step protocol in `api.md` (flags, registry, grace period,
 queue purge and worker barrier, table flush, registry reference) so that
 no transmit, receive, queued packet or table entry names the interface
 when it returns (`docs/kernel/quiesce/design.md`, "Network interfaces").
-pcbs: owned by the socket until close; a pcb's three timers are cancelled
-with `timer_cancel_sync` in `pcb_free_locked`, because a callback that
-fired on another CPU writes `work_flags` and queues `pcb->work` (the
-callbacks take only the work lock, so spinning on them under `g_lock`
-cannot deadlock); a TCP child dequeued by `tcp_accept` is attached to its
-socket under `g_lock` in the same step, so no reset can free it under
-the accepting thread; sockets woken after a protocol lock is dropped are
-held with `kobject_tryget` (the release clears `pcb->sock` under that
-lock but starts at count zero). a TCP pcb outlives its socket in TIME_WAIT and
-is freed by the timer once `sock` is NULL. If the application still
+pcbs: reference counted (the state machine, the table, the socket, the
+accept queue, each lookup and each queued work item hold one; the table
+in "Hardening and per-connection locking"); a pcb's four timers are
+cancelled with `timer_cancel_sync` in `pcb_kill_locked` before the
+state machine's reference is dropped, because a callback that fired on
+another CPU writes `work_flags` and queues `pcb->work` (the callbacks
+take only the work lock and atomics, so spinning on them under the pcb
+lock cannot deadlock); a TCP child dequeued by `tcp_accept` is attached
+to its socket under the listener's and its own lock in the same step, so
+no reset can end it under the accepting thread; sockets woken after a
+protocol lock is dropped are held with `kobject_tryget` (the release
+clears `pcb->sock` under that lock but starts at count zero). A TCP pcb
+outlives its socket in TIME_WAIT and ends when the timer fires with
+`sock` NULL. If the application still
 holds the socket when TIME_WAIT ends (shutdown without close), or the
 connection ends by reset or timeout, the pcb is *retired*: it becomes
 CLOSED (reads return 0 or the error, writes `-EPIPE`), leaves the pcb
@@ -313,20 +324,228 @@ reset).
 
 Lock order (verified by the debug-build lock-order checker on every
 boot, `docs/kernel/lockdep/testing.md`): `sock->lock` (mutex) →
-`tcp_lock`/`udp_lock` (spinlock, IRQ-safe) → `arp_lock`/`nd_lock` →
+listener `pcb->lock` → child `pcb->lock` (subclass 1) → `tcp-table` /
+`udp_lock` (spinlock, IRQ-safe) → `arp_lock`/`nd_lock` →
 `netif->lock` → driver locks → `mbuf` caches. `rxq.lock` is a leaf taken by drivers in interrupt
-context. Timers take `tcp_lock`. The worker thread takes protocol locks
+context. Timers take no pcb lock (they queue work). The worker thread takes protocol locks
 but never `sock->lock`; it wakes waiters through `waitqueue_wake_all`,
 which needs no socket lock. Nothing holds a spinlock across
 `transmit`, `copy_to/from_user`, or a blocking wait, and nothing under
 a protocol spinlock enters a sleeping primitive: the interface registry
 (`netif_find`, `netif_default`, `netif_owns_*`) is guarded by a spinlock
 of its own and is read only outside the protocol locks, and TCP decides
-its path MSS (`tcp_path_mss`, a registry lookup) before taking `g_lock`
-and caches it in `pcb->path_mss`, on the active side from the route and
-on the passive side from the interface the SYN arrived on. `mutex_lock`
+its path MSS (`tcp_path_mss`, a registry and path-MTU cache lookup)
+before taking the pcb lock and caches it in `pcb->path_mss`, on the
+active side from the route and on the passive side from the interface
+the SYN arrived on. `mutex_lock`
 asserts `preempt_count == 0` on entry, so a regression here panics in
 the first handshake of `net-lo-tcp`.
+
+## Hardening and per-connection locking (audit milestone 8)
+
+Milestone 8 of `docs/audit/2026-09-post-roadmap-audit.md` §19 (findings
+#9 and #10, and the network items of §9.2 and §9.3). The lifetime pass
+already gave `netif` a reference count and closed the accept, timer and
+UDP close races; this milestone gives TCP the same shape and closes the
+remaining remote-triggerable weaknesses. Everything here is decided in
+this section first and implemented in `tcp.c`, `ipv4.c`, `socket.c`,
+`pipe.c` and the system-call layers.
+
+### Reference-counted pcbs and per-pcb locks
+
+`struct tcp_pcb` gains `spinlock_t lock`, `uint32_t refs` and
+`hash_link`; the single `g_lock` is gone. The lock covers the pcb's own
+state; the table (`g_hash[TCP_HASH_SIZE]`, 256 buckets keyed by the
+local port, holding listeners and connections alike) has its own
+spinlock `g_table_lock` that covers only bucket membership and port
+reservation (`port_in_use`, `pick_ephemeral`). Reference holders:
+
+| Holder | Taken | Dropped |
+|---|---|---|
+| the state machine itself | `tcp_pcb_new` | when the connection ends (`pcb_kill_locked`): timers cancelled synchronously, the pcb unlinked |
+| the table | insertion (`bind`, `connect`, passive open) | unlink (`pcb_kill_locked`, retire) |
+| the socket | `ksock_create`, `tcp_accept` (transferred from the queue) | `tcp_close` |
+| the listener's accept queue | passive open | `tcp_accept` (to the socket), listener close |
+| a lookup | `lookup()` under the table lock | end of `tcp_input` |
+| a queued work item | the timer callback, `pcb_get` before `net_work_queue` | end of `pcb_work` |
+
+`pcb_put` frees at zero (rings, out-of-order queue, the pcb); it must
+never be the last put from a timer callback, and it cannot be: a
+callback runs only while the state machine holds its reference, since
+the ending path cancels every timer synchronously before dropping it.
+
+Lock order: `sock->lock` (mutex) → listener `pcb->lock` → child
+`pcb->lock` (subclass 1, `spin_lock_irqsave_nested`) → `g_table_lock` →
+`arp_lock`/`nd_lock` → `netif->lock` → drivers. The table lock is
+innermost among TCP's locks so that a pcb holding its own lock may
+insert or remove itself; a lookup therefore never takes a pcb lock
+under the table lock: it takes the table lock, finds the pcb, takes a
+reference, drops the table lock, then locks the pcb. If the pcb ended
+in between (state `CLOSED`) the segment is treated as if no pcb matched.
+A child never takes its listener's lock; the listener's fields a child
+needs (`sock` for the accept wake-up) are read through `sock_ref`'s
+`kobject_tryget`, and the listener clears `c->listener` under the
+child's lock when it closes. Segments are still built under the pcb
+lock into a `struct tcp_batch` and sent after unlock (N5); the batch's
+data copy uses the mbuf cluster directly instead of a 1500-byte stack
+buffer (§9.2 LOW). Nothing in the worker or in `tcp_input` holds two
+connection locks except listener → child on the passive-open and
+accept paths.
+
+### Passive open: SYN cache and SYN cookies (#10)
+
+A SYN to a listener no longer allocates a pcb. The listener owns a
+`struct tcp_syncache` of `TCP_SYNCACHE_SIZE` (64) entries, each the
+peer's address, the local address, `iss`, `irs`, the peer's MSS, the
+path MSS and the arrival time, indexed by a hash of the 4-tuple with
+linear probing over eight slots. A SYN fills a free or expired
+(`TCP_SYNCACHE_TTL_NS`, 8 s) slot and answers SYN-ACK; a repeated SYN
+for an entry answers SYN-ACK again (there is no SYN-ACK retransmit
+timer: the client's SYN retransmit drives it). When no slot is free the
+listener answers with a *SYN cookie* and keeps nothing: `iss = H(secret,
+4-tuple, t) & ~7 | mss_index`, `t` the 8-second slot of the clock, `H`
+a 32-bit hash keyed by a boot-time secret, `mss_index` into the table
+{536, 1220, 1440, 1460, 4096, 8960, 16384}. The completing ACK
+(`ack - 1 == iss`) is checked against the cache first, then against the
+cookies of the current and previous slot; only then is a pcb allocated,
+already `ESTABLISHED`, inserted in the table and queued for `accept`.
+`backlog` (1..`TCP_MAX_BACKLOG` 16) now bounds established children
+waiting to be accepted; a completing ACK beyond it is dropped (the
+client retransmits the ACK, or its data, and the pcb is created when
+the queue drains). A flood of SYNs therefore costs the listener at most
+64 × 64 bytes and no memory per spoofed source, and a legitimate client
+still connects through a cookie. `SYN_RCVD` remains only for the
+simultaneous-open path of `SYN_SENT`. New counters: `syn_cached`,
+`syn_cookies_sent`, `syn_cookies_ok`, `syn_bad_ack`.
+
+### RFC 5961: blind in-window attacks
+
+- **RST**: accepted only when `seq == rcv_nxt`; a RST elsewhere inside
+  the window is answered with a *challenge ACK* (a pure ACK with the
+  current numbers) and dropped. Outside the window, dropped.
+- **SYN in a synchronized state**: never a reset any more; a challenge
+  ACK, and the segment is dropped.
+- **ACK**: `ack` outside `[snd_una − TCP_MAX_WINDOW, snd_max]` is a
+  challenge ACK and a drop, not processed.
+
+Challenge ACKs are limited to `TCP_CHALLENGE_PER_SEC` (100) across the
+host with a token bucket; the counter `challenge_acks` records both
+sent and suppressed. TIME_WAIT applies the same rules and restarts its
+2 MSL timer only for a retransmitted FIN (RFC 1122 4.2.2.13), not for
+any segment, so a peer can no longer pin a pcb (§9.2).
+
+### Timers: FIN_WAIT_2 and keepalive
+
+A fourth timer, `keep`, serves two purposes:
+
+- **Orphaned FIN_WAIT_2.** When the socket is gone (`sock == NULL`) and
+  the connection is in `FIN_WAIT_2`, the pcb is ended silently after
+  `TCP_FIN_WAIT2_NS` (60 s). A peer that never sends its FIN cannot
+  hold the pcb and its 128 KiB of rings for ever. (With a socket still
+  open the state may last as long as the application wants, as on every
+  other system.)
+- **Keepalive.** In `ESTABLISHED` and `CLOSE_WAIT` the timer fires after
+  `TCP_KEEPIDLE_NS` (7200 s) without a received segment; the worker then
+  sends a probe (an ACK with `seq = snd_nxt − 1`, no data, RFC 1122
+  4.2.3.6) every `TCP_KEEPINTVL_NS` (75 s) up to `TCP_KEEPCNT` (9)
+  times, after which the connection ends with `-ETIMEDOUT`. Any
+  received acceptable segment records `last_rx_ns` and resets the
+  count. Keepalive is always on (there is no `SO_KEEPALIVE` yet); the
+  parameters are global and `tcp_set_keepalive(idle_ns, intvl_ns, cnt)`
+  lets the self-test shorten them.
+
+Both run on the worker through `WORK_KEEP` (timers never send, N4).
+
+### Out-of-order reassembly
+
+A segment inside the window but beyond `rcv_nxt` is queued on the pcb's
+`ooo` list (`struct tcp_ooo_seg { seq, len, mbuf }`, sorted, at most
+`TCP_OOO_MAX` 32 entries and never more bytes than the receive window)
+instead of being dropped. A new segment that overlaps a queued one is
+dropped unless it covers it entirely, in which case it replaces it;
+overlap with `rcv_nxt` is trimmed on delivery. After in-order data is
+stored, the queue is drained while its head is contiguous with
+`rcv_nxt`, and the ACK that follows covers everything delivered. A
+duplicate ACK still goes out for every out-of-order arrival so the
+sender's fast retransmit works. `out_of_order` keeps counting arrivals;
+`ooo_queued` counts what was kept and `ooo_dropped` what the bound
+refused. The queue is freed with the pcb and flushed on reset.
+
+### ICMP rate limit
+
+`icmp_send_unreach`, the echo reply and the IPv6 echo reply pass a
+global token bucket of `ICMP_RATE_PER_SEC` (100, burst 100).
+Suppressed messages count in `icmp_ratelimited`. A UDP port scan or an
+echo flood thus produces at most 100 replies a second from this host.
+While there, the quoted header in an unreachable copies the *whole*
+received IP header (options included) from the saved copy, closing the
+uninitialised-bytes leak of §9.2 (`ipv4.c` unknown protocol, `udp.c`
+port unreachable).
+
+### Path MTU discovery
+
+Every IPv4 datagram carries DF already. An incoming *Fragmentation
+Needed* (type 3, code 4) is now honoured: the next-hop MTU from the
+message (or, when zero, the next plateau below the quoted total length
+from RFC 1191's table) is recorded in a 16-entry per-destination cache
+(`ipv4_pmtu_update`, 10-minute expiry, floor 576) that `ipv4_path_mtu`
+consults and `tcp_path_mss` derives the MSS from; then, when the quoted
+transport header is TCP, `tcp_pmtu_notify(local, remote, mtu)` finds
+the connection, checks that the quoted sequence number lies in
+`[snd_una, snd_nxt]` (RFC 5927: a blind message cannot shrink a
+connection it cannot see), lowers `path_mss` and `mss` to `mtu − 40`
+(never below 256) and retransmits from `snd_una` at the new size.
+`pmtu_updates` counts accepted messages. IPv6 keeps its minimum-MTU
+behaviour (1280) for now.
+
+### Ephemeral ports
+
+`pick_ephemeral` starts from a random port on every call and probes
+upwards, instead of counting from a random base once at boot (§9.2
+LOW).
+
+### Non-blocking I/O and readiness
+
+`struct kobject_io_type` gains two optional operations
+(`docs/kernel/object/api.md`):
+
+```c
+unsigned (*ready)(struct kobject *obj);              /* COSMO_IO_* bits that would not block now */
+int (*set_nonblock)(struct kobject *obj, bool on);   /* -EOPNOTSUPP when the object always completes */
+```
+
+`COSMO_IO_READABLE` (1), `COSMO_IO_WRITABLE` (2), `COSMO_IO_HANGUP` (4)
+and `COSMO_IO_ERROR` (8) are UAPI. A NULL `ready` means always readable
+and writable (files); the console reports readable when the tty holds
+a complete line. Sockets: a datagram socket is readable with a queued
+datagram, a listener when a child waits, a stream when the receive ring
+has data, the peer's FIN arrived (`HANGUP` too), the connection ended
+or an error is pending (`ERROR`); writable when the send ring has room
+in `ESTABLISHED`/`CLOSE_WAIT`, or when a write would fail at once. Pipe
+ends: the reader is readable with bytes or no writer left (`HANGUP`),
+the writer writable with `PIPE_BUF` free or no reader left (`ERROR`).
+
+Non-blocking mode is a property of the object (one bit in `struct
+socket` and one per pipe end), which every handle to it shares; Linux
+attaches it to the open file description and CosmoOS has no such layer
+between the handle and the object, so the two are the same here. In
+non-blocking mode `accept` returns `-EAGAIN` with no child; `connect`
+returns `-EINPROGRESS` once the SYN is out (a second call
+`-EALREADY`, and once the handshake is over `-EISCONN` or the recorded
+error); `recvfrom`/`read` return `-EAGAIN` with nothing to read; `send`
+returns what fits and `-EAGAIN` when nothing does; a pipe read is
+`-EAGAIN` while empty with a writer, a pipe write `-EAGAIN` when the
+buffer cannot take the write (or its first byte for a write larger
+than `PIPE_BUF`).
+
+UAPI: `COSMO_SOCK_NONBLOCK` (0x800) may be ORed into `socket`'s type;
+`SYS_ioready` (58: `(int h) -> COSMO_IO_* mask`) reports readiness
+without waiting; `SYS_setnonblock` (59: `(int h, int on) -> 0`) sets
+the mode. Linux: `SOCK_NONBLOCK` on `socket` and `accept4`,
+`pipe2(O_NONBLOCK)`, `fcntl(F_SETFL, O_NONBLOCK)` and `F_GETFL`
+reporting it, `EINPROGRESS`/`EALREADY`/`EAGAIN` as above. `poll` itself
+remains Linux stage 3 (`docs/compat/linux/design.md`); the readiness
+operation is the piece it and async I/O need from every object.
 
 ## Memory
 
@@ -375,13 +594,23 @@ refused, unbound recv fails), `net-lo-tcp` (server and client threads
 over `lo`, 1 MiB IPv4 and 256 KiB IPv6 transfers with verification,
 orderly close, RST to a closed port, listen backlog), `net-lo-tcp-loss`
 (the loopback drop hook drops every 7th data segment; the transfer
-still completes; retransmission counters moved), `net-harness` (as
-above, skipped without fw_cfg). Init: a user-mode UDP echo to itself
-over loopback, a refused TCP connect, a privileged bind, and the error
+still completes; retransmission counters moved), `net-tcp-syncache` (a
+300-SYN flood allocates nothing and a client still connects),
+`net-tcp-rfc5961` (blind RST, SYN and ACK are challenged, the exact
+reset accepted), `net-tcp-reorder` (delayed segments are queued and
+delivered), `net-tcp-keepalive` (probes and timeout, an orphaned
+FIN_WAIT_2 reaped), `net-icmp-limit` (echo replies rate limited, a
+fragmentation-needed message lowers a connection's MSS),
+`net-nonblock` (sockets and pipe ends never block and report
+readiness), `net-harness` (as above, skipped without fw_cfg). Init: a
+user-mode UDP echo to itself over loopback, a refused TCP connect, a
+privileged bind, non-blocking sockets with `ioready`, and the error
 paths of the calls. Details in `testing.md`.
 
 ## Future extensibility
 
-Per-CPU receive queues and RSS; RCU routing table; per-pcb locks;
-SACK/window scaling/timestamps; reassembly; DHCP; DNS resolver in
-userland; zero-copy receive via page cache-style mappings; more NICs.
+Per-CPU receive queues and RSS; RCU routing table; SACK/window
+scaling/timestamps; `SO_KEEPALIVE` and per-socket keepalive
+parameters; IPv6 path MTU discovery; a `poll`/`select` built on the
+readiness operation; DHCP; DNS resolver in userland; zero-copy receive
+via page cache-style mappings; more NICs.
