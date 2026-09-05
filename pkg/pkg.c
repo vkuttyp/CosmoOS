@@ -590,7 +590,33 @@ static int install_loaded(struct loaded *l)
             manifest_free(&old);
         return rc;
     }
+    /* The record describes the new files, which are on disk now, and
+     * carries the old version's directories too (an empty one goes below;
+     * a directory that stays is harmlessly listed). It is committed before
+     * any file of the old version is touched, so a failure from here on
+     * never leaves the database describing files that are gone. */
+    for (int i = 0; i < old_dirs.n && created.n < PKG_MAX_DIRS; i++) {
+        bool dup = false;
+        for (int k = 0; k < created.n && !dup; k++)
+            dup = strcmp(created.paths[k], old_dirs.paths[i]) == 0;
+        if (!dup)
+            strlcpy(created.paths[created.n++], old_dirs.paths[i], PKG_PATH_MAX);
+    }
+    if (record_stage(l->m.name, &l->m, &created) < 0 || record_commit(l->m.name) < 0) {
+        fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
+        for (int i = 0; i < l->m.nfiles; i++) {
+            char path[PKG_PATH_MAX];
+            snprintf(path, sizeof(path), "/%s", l->m.files[i].path);
+            unlink(path);
+        }
+        remove_dirs(&created);
+        record_unstage(l->m.name);
+        if (had_old)
+            manifest_free(&old);
+        return EXIT_FAILED;   /* the old record stands; its overlapping files are gone (PK4's recorded gap) */
+    }
     if (had_old) {
+        /* Obsolete files of the previous version: best effort, after the commit. */
         for (int i = 0; i < old.nfiles; i++) {
             bool still = false;
             for (int k = 0; k < l->m.nfiles && !still; k++)
@@ -598,27 +624,12 @@ static int install_loaded(struct loaded *l)
             if (!still) {
                 char path[PKG_PATH_MAX];
                 snprintf(path, sizeof(path), "/%s", old.files[i].path);
-                unlink(path);
+                if (unlink(path) < 0 && errno != ENOENT)
+                    fprintf(stderr, "pkg: %s: obsolete file %s left behind: %s\n", l->m.name, path, strerror(errno));
             }
         }
         remove_dirs(&old_dirs);
-        /* Directories still in use stay; carry them into the new record. */
-        for (int i = 0; i < old_dirs.n && created.n < PKG_MAX_DIRS; i++) {
-            struct stat st;
-            if (stat(old_dirs.paths[i], &st) == 0)
-                strlcpy(created.paths[created.n++], old_dirs.paths[i], PKG_PATH_MAX);
-        }
         manifest_free(&old);
-        /* The directory list grew: restage it before the commit. */
-        if (record_stage(l->m.name, &l->m, &created) < 0) {
-            fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
-            return EXIT_FAILED;   /* files of the new version are on disk; the old record stands (verify reports it) */
-        }
-    }
-    if (record_commit(l->m.name) < 0) {
-        fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
-        record_unstage(l->m.name);
-        return EXIT_FAILED;
     }
     return 0;
 }
@@ -962,12 +973,20 @@ static int cmd_remove(int argc, char **argv)
             }
             if (stuck) {
                 /* The record shrinks to what is still on disk, so the database
-                 * keeps describing the filesystem and a later remove finishes. */
+                 * keeps describing the filesystem and a later remove finishes.
+                 * If even that cannot be written, the record is dropped rather
+                 * than left listing files that are gone; the stuck files are
+                 * then untracked and named here. */
                 m.nfiles = kept;
-                if (record_stage(m.name, &m, m.dirs) < 0 || record_commit(m.name) < 0)
-                    fprintf(stderr, "pkg: %s: cannot update the record: %s\n", m.name, strerror(errno));
-                fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded with them\n",
-                        m.name, stuck, stuck == 1 ? "" : "s");
+                if (record_stage(m.name, &m, m.dirs) < 0 || record_commit(m.name) < 0) {
+                    fprintf(stderr, "pkg: %s: cannot update the record (%s); dropping it\n", m.name, strerror(errno));
+                    installed_drop(m.name);
+                    for (int k = 0; k < kept; k++)
+                        fprintf(stderr, "pkg: %s: /%s is left untracked\n", m.name, m.files[k].path);
+                } else {
+                    fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded with them\n",
+                            m.name, stuck, stuck == 1 ? "" : "s");
+                }
                 rc = EXIT_FAILED;
             } else {
                 if (m.dirs)

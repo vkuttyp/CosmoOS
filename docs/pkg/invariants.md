@@ -43,9 +43,11 @@ failure unlinks the files this package has already placed, removes the
 directories it created and the staged record, and the operation stops.
 The database record is one file, staged as `MANIFEST.new` before the
 first file is written and committed by a single rename after the last,
-so the database never describes a mixture of old and new. A `remove`
+so the database never describes a mixture of old and new, and it is
+committed before any file of a previous version is removed. A `remove`
 that could not delete every file rewrites the record to the files still
-present and fails. Check: review; `rc.test` sees
+present and fails; if even that write fails the record is dropped and
+the files are named as untracked. Check: review; `rc.test` sees
 complete installs and removals. Gap: no test injects a write failure
 mid-install or mid-remove; a failure while replacing a previous version
 leaves that version's overlapping files gone (a recorded limit of the

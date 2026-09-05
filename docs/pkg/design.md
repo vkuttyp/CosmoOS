@@ -212,17 +212,21 @@ install(pkg):
   stage the record: write installed/<name>/MANIFEST.new (a database that cannot be written stops here)
   for each file: mkdir -p its directory (recording every directory that did not exist)
                  write to "<path>.pkgtmp" with the manifest mode, rename over the destination
-  restage MANIFEST.new with the "dir:" lines for the directories created
+  restage MANIFEST.new with "dir:" lines for the directories created plus the previous version's
+  commit: rename MANIFEST.new -> MANIFEST (one rename, one file)
   on any failure so far: unlink the files this package placed, remove the directories it created,
                          delete the staged record, report, stop the operation
-  if a previous version was installed: unlink files of the old manifest that the new one lacks,
-                                       remove its recorded directories that are now empty, restage
-  commit: rename MANIFEST.new -> MANIFEST (one rename, one file)
+  if a previous version was installed: unlink files of the old manifest that the new one lacks
+                                       (best effort, reported), remove its recorded directories that are empty
 ```
 
-The record is committed last and by one rename, so the database holds
-either the old record or the new one; a failure before the commit leaves
-the old record and (for a fresh install) no files.
+The record is committed by one rename before any file of the previous
+version is touched, so the database describes files that exist at every
+step: a failure before the commit leaves the old record and (for a fresh
+install) no files; a failure after it can only leave an obsolete file of
+the old version behind, which is reported. The recorded gap remains that
+the new files overwrite the old version's files with the same paths
+before the commit.
 
 A file that already exists and belongs to another installed package is
 a conflict, reported before writing (`pkg` scans the installed manifests
@@ -235,9 +239,11 @@ it (list them; `-f` overrides); unlink every manifest file (a file
 already missing is fine); if any file could not be removed, the record
 is rewritten to list only the files still on disk (so the database keeps
 describing the filesystem, the files stay owned, and a later `remove`
-finishes the job) and the command fails; otherwise `rmdir` the recorded
-directories deepest first (non-empty ones are left) and remove the
-record.
+finishes the job) and the command fails; if that record cannot be
+written either, the record is dropped and the stuck files are named as
+untracked, so the database never lists files that are gone; otherwise
+`rmdir` the recorded directories deepest first (non-empty ones are left)
+and remove the record.
 
 ### Upgrade
 
