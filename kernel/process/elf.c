@@ -51,8 +51,8 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
         return fail(why, "not ELF64 little-endian v1");
     if (eh.e_type != ET_EXEC)
         return fail(why, "not ET_EXEC (static executables only)");
-    if (eh.e_machine != EM_X86_64)
-        return fail(why, "not x86-64");
+    if (eh.e_machine != ELF_MACHINE_NATIVE)
+        return fail(why, "not " ELF_MACHINE_NATIVE_NAME);
     if (eh.e_phentsize != sizeof(struct elf64_phdr) || eh.e_phnum == 0)
         return fail(why, "bad program header table");
     if (!in_file(eh.e_phoff, (uint64_t)eh.e_phnum * sizeof(struct elf64_phdr), size))

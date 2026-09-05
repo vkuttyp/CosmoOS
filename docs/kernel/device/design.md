@@ -147,8 +147,9 @@ direct-map and `kmalloc` addresses (which are in the direct map),
 checks the range against the mask, and returns `virt_to_phys`; any
 other address (kernel arena, user) yields 0 so a driver cannot hand
 the device a stack or a vmalloc buffer by accident. Sync operations
-are `barrier()` plus a store fence on x86 (coherent), kept as calls so
-a non-coherent port has one place to change. Every function is
+are `barrier()` plus `arch_dma_barrier()` (`sfence` on x86-64, `dsb sy`
+on AArch64; both platforms are DMA-coherent), kept as calls so a
+non-coherent port has one place to change. Every function is
 non-blocking and lock-free apart from the PMM's own locks; `dma_alloc`
 may not be called from interrupt context because the PMM may not.
 

@@ -4,6 +4,7 @@
 # Boot the CosmoOS disk image under QEMU with UEFI firmware, serial on the
 # terminal, no graphics. Environment:
 #   QEMU_MEM    guest RAM (default 256M)
+#   QEMU_ARCH   x86_64 (default) or aarch64: selects the machine (q35 or virt)
 #   QEMU_ACCEL  accelerator (default tcg; kvm/hvf where available)
 #   QEMU_CPU    CPU model (default qemu64,+nx,+svm,+npt: TCG emulates AMD-V with nested
 #               paging, which the virtualization tests need; use `host` with kvm/hvf)
@@ -16,7 +17,8 @@ set -eu
 
 image=$1
 here=$(cd "$(dirname "$0")" && pwd)
-firmware=$("$here/find-firmware.sh" x86_64)
+arch=${QEMU_ARCH:-x86_64}
+firmware=$("$here/find-firmware.sh" "$arch")
 
 # Phase 6 devices: a scratch virtio-blk disk (8 MiB, created next to the
 # image unless QEMU_TESTDISK names one), a virtio-rng, and a virtio
@@ -49,6 +51,43 @@ fi
 pcap=""
 if [ -n "${QEMU_PCAP:-}" ]; then
     pcap="-object filter-dump,id=f0,netdev=n0,file=$QEMU_PCAP"
+fi
+
+if [ "$arch" = aarch64 ]; then
+    # The virt machine wants a 64 MiB flash image; pad smaller firmware files.
+    padded="$outdir/firmware-aarch64.fd"
+    if [ ! -f "$padded" ] || [ "$firmware" -nt "$padded" ]; then
+        cp "$firmware" "$padded.tmp"
+        python3 -c "import sys; f=open(sys.argv[1],'r+b'); f.truncate(64*1024*1024)" "$padded.tmp"
+        mv "$padded.tmp" "$padded"
+    fi
+    # GICv2 with a GICv2m MSI frame; semihosting carries the exit status
+    # (docs/kernel/arch/aarch64/design.md). The scratch disk comes first so it
+    # is vda for the storage self-tests, as on x86; the boot image is read-only.
+    exec qemu-system-aarch64 \
+        -machine virt,gic-version=2,accel="${QEMU_ACCEL:-tcg}" \
+        -cpu "${QEMU_CPU:-cortex-a72}" \
+        -smp "${QEMU_SMP:-4}" \
+        -m "${QEMU_MEM:-256M}" \
+        -drive if=pflash,format=raw,readonly=on,file="$padded" \
+        -drive if=none,id=testdisk,format=raw,file="$testdisk" \
+        -device virtio-blk-pci,drive=testdisk \
+        -drive if=none,id=boot,format=raw,readonly=on,file="$image" \
+        -device virtio-blk-pci,drive=boot \
+        -device virtio-rng-pci \
+        -device virtio-serial-pci \
+        -chardev file,id=vcon,path="$vcon" \
+        -device virtconsole,chardev=vcon \
+        -netdev "$netdev" \
+        -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 \
+        $fwcfg \
+        $pcap \
+        -semihosting-config enable=on,target=native \
+        -serial stdio \
+        -display none \
+        -monitor none \
+        -no-reboot \
+        ${QEMU_EXTRA:-}
 fi
 
 exec qemu-system-x86_64 \

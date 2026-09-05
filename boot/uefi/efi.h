@@ -15,7 +15,11 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#if defined(__x86_64__)
 #define EFIAPI __attribute__((ms_abi))
+#else
+#define EFIAPI
+#endif
 
 typedef uint64_t UINTN;
 typedef int64_t  INTN;

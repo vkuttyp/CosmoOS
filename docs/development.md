@@ -51,7 +51,9 @@ Notes:
   use Homebrew's complete toolchain set
   `LLVM_PREFIX="$(brew --prefix llvm)/bin/"`.
 - UEFI firmware comes from Homebrew's QEMU:
-  `/opt/homebrew/share/qemu/edk2-x86_64-code.fd`.
+  `/opt/homebrew/share/qemu/edk2-x86_64-code.fd` and, for `ARCH=aarch64`,
+  `edk2-aarch64-code.fd` (`scripts/find-firmware.sh <arch>` searches the
+  usual locations; `OVMF_CODE` overrides).
 
 ## Make targets
 
@@ -59,7 +61,7 @@ Notes:
 |---|---|
 | `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, the Linux test programs, the virtualization guest images, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
-| `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
+| `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` (`BOOTAA64.EFI` for `ARCH=aarch64`) |
 | `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
 | `userland` | `out/<arch>-<build>/userland/*.elf`: init, the shell, the coreutils and system tools (`userland/userland.mk`, `docs/userland/`) |
 | `pkg` | `out/<arch>-<build>/userland/pkg.elf`: the package manager, from `pkg/*.c` plus the kernel's SHA-512 and Ed25519 sources compiled for user mode (`pkg/pkg.mk`, `docs/pkg/`) |
@@ -71,7 +73,7 @@ Notes:
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion and nested-page-table algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser, Linux-conversion, nested-page-table and AArch64-relocation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -206,8 +208,11 @@ overrides it; `host` with `kvm`/`hvf` needs nested virtualization on the
 host). The boot archive carries `tests/hv/*.bin`; eight self-tests run
 guests from them, and `/etc/rc.test` runs `vmctl probe`, `vmctl run
 /boot/tests/hv/guest_pio.bin` and `vmctl info`, printing `HVTEST: PASS`,
-which the harness requires; `selftest: hv: skipped` and `HVTEST: skipped`
-(what a CPU model without SVM produces) are forbidden markers. To try a
+which the harness requires on x86-64; `selftest: hv: skipped` and
+`HVTEST: skipped` (what a CPU model without SVM produces) are forbidden
+markers there. On `ARCH=aarch64` there is no backend yet: the guest
+images are not built, `vmctl probe` fails and the harness requires
+`HVTEST: skipped` instead. To try a
 guest by hand: write a flat real-mode program that talks to port 0xE9
 and halts, add it to `HV_GUESTS` in `tests/hv/hv.mk` (or copy the binary
 onto the cosmofs disk), boot, and `vmctl run /path/to/image`.
@@ -225,7 +230,10 @@ the build had musl (`HAVE_MUSL=1`, passed by `make test`), `hello from
 musl on Linux x86_64 (pid N)`. CI installs `musl-tools`; on macOS use a
 wrapper that compiles in an Alpine container: `make
 MUSL_GCC=/path/to/musl-gcc-docker.sh test` (recipe in
-`docs/compat/linux/testing.md`). To try a Linux program by hand: build
+`docs/compat/linux/testing.md`). The Linux test programs are x86-64
+only; on `ARCH=aarch64` the personality has no system-call table yet,
+`rc.test` prints `LINUXTEST: skipped` and the harness requires that
+line. To try a Linux program by hand: build
 it `-static` with musl, add a `tests/linux/<name>=<path>` archive entry
 (or copy it onto the cosmofs disk), boot, and run it from the shell;
 unimplemented calls show up as `linux: pid N: unimplemented system call
@@ -237,7 +245,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARCH` | `x86_64` | Target architecture; must match a directory under `kernel/arch/` and a file `build/arch/<ARCH>.mk` |
+| `ARCH` | `x86_64` | Target architecture, `x86_64` or `aarch64`; must match a directory under `kernel/arch/` and a file `build/arch/<ARCH>.mk`. `ARCH=aarch64` builds `BOOTAA64.EFI`, boots QEMU's `virt` machine (`docs/kernel/arch/aarch64/testing.md`) and leaves out the x86-only `tests/linux` and `tests/hv` fixtures |
 | `BUILD` | `debug` | `debug` (-O1 -g, `CONFIG_DEBUG=1`) or `release` (-O2 -g, `CONFIG_DEBUG=0`) |
 | `OUT` | `out/$(ARCH)-$(BUILD)` | Output tree; never inside the source directories |
 | `V` | `0` | `V=1` prints full command lines |
@@ -250,14 +258,14 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `MUSL_GCC` | `musl-gcc` if found | A musl C compiler used to build `tests/linux/hello_musl`; empty skips it and sets `HAVE_MUSL=0` for the harness |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
-| `QEMU_CPU` | `qemu64,+nx,+svm,+npt` | QEMU CPU model; the default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host) |
+| `QEMU_CPU` | `qemu64,+nx,+svm,+npt` (x86-64), `cortex-a72` (aarch64) | QEMU CPU model; the x86-64 default gives TCG guests AMD-V with nested paging for the virtualization tests. Use `host` with `kvm`/`hvf` (nested virtualization then depends on the host). On aarch64 `max` adds PAN and is also supported |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img` | Raw backing file of the virtio-blk scratch disk (`vda`); created as 8 MiB of zeros when missing. The boot test always uses a fresh `boot-test.log.testdisk.img` |
 | `QEMU_VCON` | `<image dir>/vcon.log` | File the virtio console writes to (truncated at start). The boot test uses `boot-test.log.vcon` and checks it |
 | `QEMU_NET_HOSTFWD` | empty | Comma-separated QEMU `hostfwd` rules for the user-mode netdev, e.g. `tcp:127.0.0.1:2007-:7,udp:127.0.0.1:2008-:7`. The boot test sets it to reach the guest's echo services |
 | `QEMU_FWCFG_NETTEST` | empty | Value of the fw_cfg item `opt/cosmo/nettest` (`tcp=<hostport>`); its presence makes the `net-harness` self-test run and connect back to the host. The boot test sets it |
 | `QEMU_PCAP` | empty | When set, QEMU records every frame on the guest NIC into this pcap file (`filter-dump`), for Wireshark or `tcpdump -r` |
-| `OVMF_CODE` | auto | Path to the UEFI firmware image; overrides `scripts/find-firmware.sh` |
+| `OVMF_CODE` | auto | Path to the UEFI firmware image; overrides `scripts/find-firmware.sh <arch>`. On aarch64 the image is padded to the 64 MiB `virt` flash size into `out/<arch>-<build>/firmware-aarch64.fd` |
 | `SOURCE_DATE_EPOCH` | `0` | Exported to the compiler for reproducible builds |
 
 ## Running and reading the serial log
@@ -395,14 +403,18 @@ write is ignored and the kernel simply halts.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request on the
-GitHub-hosted `ubuntu-24.04` (x86-64) runner. It installs the same apt
-packages as `scripts/setup-dev-linux.sh`, then runs `check-tools`, a
+GitHub-hosted `ubuntu-24.04` (x86-64) runner, inside a `debian:trixie`
+container (QEMU 10, `libclang-rt-dev` for the sanitizers,
+`qemu-system-arm` and `qemu-efi-aarch64` for the AArch64 target), as a
+matrix over `arch: [x86_64, aarch64]`. Each job runs `check-tools`, a
 debug build with `test`, a release build with `test`, `host-test`,
-`analyze`, `reproducible`, and `test-crash`. The x86-64 runner is a deliberate simplification: the
-toolchain is host-agnostic, which is the point of using clang, but it
-means CI does not currently exercise an ARM64 host. GitHub's hosted ARM64
-runners are not enabled for this private repository; when they are, the
-same job can run in a matrix over both.
+`analyze`, `reproducible`, and `test-crash` with `ARCH=<arch>`, and
+uploads serial logs and images per architecture. Both targets are
+cross-compiled and emulated under TCG on the x86-64 runner: the toolchain
+is host-agnostic, which is the point of using clang, but CI does not
+exercise an ARM64 host. GitHub's hosted ARM64 runners are not enabled
+for this private repository; when they are, the same matrix can add the
+host dimension.
 
 ## Workflow for a change
 

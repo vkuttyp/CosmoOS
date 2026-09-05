@@ -14,7 +14,7 @@ below are meant to stay; the exit statuses follow Unix convention.
 | `bin/<name>` | `/bin/<name>` | 0755 | `userland/shell/sh.c`, `userland/coreutils/<name>.c` |
 | `sbin/<name>` | `/sbin/<name>` | 0755 | `userland/system/<name>.c` |
 | `etc/rc` | `/etc/rc` | 0644 | `userland/etc/rc` |
-| `etc/rc.test` | `/etc/rc.test` (self-test builds only, `SELFTEST=1`) | 0644 | `userland/etc/rc.test` |
+| `etc/rc.test` | `/etc/rc.test` (self-test builds only, `SELFTEST=1`; its Linux and virtualization sections report `skipped` when the x86-only fixtures are absent) | 0644 | `userland/etc/rc.test` |
 
 `USER_BIN_PROGRAMS` (sh echo cat ls cp mv rm mkdir rmdir pwd true
 false sleep) and `USER_SBIN_PROGRAMS` (mount umount ps kill dmesg

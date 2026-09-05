@@ -15,14 +15,14 @@ wins and the document is wrong.
 | `first-task.md` | Constitution section 72 deliverables for the section 70 first engineering task |
 | `build/` | Build system subsystem documentation |
 | `boot/` | Boot protocol and UEFI loader subsystem documentation |
-| `kernel/arch/` | Architecture abstraction and its x86-64 implementation |
+| `kernel/arch/` | Architecture abstraction and its x86-64 implementation; `kernel/arch/aarch64/` covers the AArch64 port (Phase 13: QEMU `virt`, GICv2, stage-1 MMU, PSCI, the loader split) |
 | `kernel/interrupt/` | Vector-to-handler dispatch; `controllers.md` covers the Phase 3 IRQ layer (GSI routing, LAPIC/IOAPIC, vector map, IPIs) |
 | `kernel/diagnostics/` | Console, logging, printf, panic, self-tests, crash test |
 | `kernel/memory/` | Physical memory (bootmem, zones, buddy), virtual memory (page-table takeover, arena, faults), slab heap and kmalloc; host unit tests in `tests/host/` |
 | `kernel/scheduler/` | Threads, per-CPU run queues, round-robin policy, preemption, wait queues, mutex, semaphore, completion, per-CPU data |
 | `kernel/timer/` | Monotonic TSC clock, LAPIC tick, one-shot timers, sleep, PIT calibration |
 | `kernel/smp/` | AP bring-up (trampoline, per-CPU tables), IPIs, cross-CPU calls, TLB shootdown, stopping CPUs, the hang watchdog |
-| `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides) |
+| `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides; GIC CPU interfaces, distributor and MSI frame on AArch64) |
 | `kernel/object/` | Reference-counted kernel objects, the per-process handle table with rights, the console object |
 | `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module; since Phase 9 `spawn` from a file with a handle map, zombies and `wait`, `kill` delivery, the working directory, `procinfo`; since Phase 11 personality selection by ELF note and the two-page initial stack with the Linux auxiliary vector |
 | `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities (native and, since Phase 11, Linux), the native system-call ABI (`uapi/cosmo/syscall.h`, 43 calls) and user-side wrappers |

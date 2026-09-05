@@ -24,11 +24,10 @@
 #define KERNEL_ARENA_LO 0xFFFFC00000000000ULL
 #define KERNEL_ARENA_HI 0xFFFFE00000000000ULL
 
-/* The near arena sits in the top 2 GiB above the kernel image so code
- * built with -mcmodel=kernel (modules) can reach both itself and the
- * image with 32-bit relocations. The image may grow to 128 MiB. */
-#define KERNEL_NEAR_LO 0xFFFFFFFF88000000ULL
-#define KERNEL_NEAR_HI 0xFFFFFFFFFF000000ULL
+/* The near arena holds modules where the architecture's code model and
+ * direct branches reach the kernel image: its bounds come from
+ * arch_mmu_near_arena (x86-64: the top 2 GiB above the image for
+ * -mcmodel=kernel; AArch64: within +-128 MiB of the image for CALL26). */
 
 struct vm_space kernel_space;
 
@@ -196,8 +195,7 @@ void vmm_init(void)
     list_init(&kernel_space.regions);
     kernel_space.arena_lo = (vaddr_t)KERNEL_ARENA_LO;
     kernel_space.arena_hi = (vaddr_t)KERNEL_ARENA_HI;
-    kernel_space.near_lo = (vaddr_t)KERNEL_NEAR_LO;
-    kernel_space.near_hi = (vaddr_t)KERNEL_NEAR_HI;
+    arch_mmu_near_arena(&kernel_space.near_lo, &kernel_space.near_hi);
     if ((vaddr_t)__kernel_end > kernel_space.near_lo)
         panic("vmm: kernel image ends at %p, past the near arena start %p", (void *)__kernel_end,
               (void *)kernel_space.near_lo);

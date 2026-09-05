@@ -12,7 +12,8 @@ Files: `kernel/interrupt/interrupt.c`, `kernel/include/kernel/interrupt.h`.
 
 ## Responsibilities
 
-- Own the vector → handler table (`INTERRUPT_MAX_VECTORS` = 256 slots).
+- Own the vector → handler table (`INTERRUPT_MAX_VECTORS` = 1344 slots;
+  x86-64 dispatches 256 vectors, AArch64 1312).
 - Register and unregister handlers with defined error codes.
 - Dispatch a vector to its handler, or to `arch_trap_unhandled()` when
   there is none.

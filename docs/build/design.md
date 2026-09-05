@@ -145,11 +145,16 @@ side effect of `all`.
 
 ## Future extensibility
 
-- **AArch64**: add `build/arch/aarch64.mk` (`KERNEL_TARGET :=
-  aarch64-unknown-none-elf`, `LOADER_TARGET := aarch64-unknown-windows`,
-  no code-model flag) and `kernel/arch/aarch64/arch.mk`; `make
-  ARCH=aarch64` then works without touching shared files. `qemu-run.sh`
-  needs a per-arch machine description.
+- **AArch64** (done, Phase 13): `build/arch/aarch64.mk` (`KERNEL_TARGET
+  := aarch64-unknown-none-elf`, `LOADER_TARGET := aarch64-unknown-windows`,
+  `-march=armv8-a -mcmodel=small -mgeneral-regs-only -mno-outline-atomics
+  -ffixed-x18`, `LOADER_ARCH_LDFLAGS := /machine:arm64`, `LOADER_EFI_NAME
+  := BOOTAA64.EFI`, `QEMU_SYSTEM := qemu-system-aarch64`) and
+  `kernel/arch/aarch64/arch.mk`. The shared files changed in three places:
+  the Makefile includes `tests/linux` and `tests/hv` only for x86-64 and
+  passes `COSMO_ARCH`/`QEMU_ARCH` to the harness, `qemu-run.sh` dispatches
+  on `QEMU_ARCH`, and `check-reproducible.sh`/`check-module-elf.py` take
+  the architecture as an argument.
 - **Host tools, libc, userland**: separate component makefiles with their
   own toolchain variables (`HOST_CC` for tools, the target triple plus a
   sysroot for userland). `COMMON_CFLAGS` is kernel/loader-specific and

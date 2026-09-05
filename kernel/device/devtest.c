@@ -10,6 +10,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/pmm.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/random.h>
@@ -206,8 +207,14 @@ bool selftest_dma(const char **reason)
     CHECK(dma_set_mask(&tiny, 24) == 0 && tiny.dma_mask == 0xFFFFFFULL);
     dma_addr_t low = 0;
     void *lva = dma_alloc(&tiny, 4096, &low, 0);
-    CHECK(lva != NULL && low + 4096 <= 0x1000000ULL);
-    dma_free(&tiny, 4096, lva, low);
+    struct pmm_stats zs;
+    pmm_get_stats(&zs);
+    if (zs.zone_free[PMM_ZONE_DMA] > 0) {
+        CHECK(lva != NULL && low + 4096 <= 0x1000000ULL);
+        dma_free(&tiny, 4096, lva, low);
+    } else {
+        CHECK(lva == NULL);   /* no RAM below 16 MiB on this platform (QEMU virt) */
+    }
     CHECK(dma_set_mask(&tiny, 64) == 0 && tiny.dma_mask == UINT64_MAX);
 
     /* kmalloc memory maps; arena memory and a stack address do not. */
@@ -222,7 +229,8 @@ bool selftest_dma(const char **reason)
     CHECK(dma_map(NULL, NULL, 0, DMA_TO_DEVICE) == 0);
 
     dma_get_stats(&after);
-    CHECK(after.allocs == before.allocs + 2 && after.frees == before.frees + 2);
+    unsigned tiny_ok = lva != NULL ? 1u : 0u;   /* the 24-bit allocation exists only with a DMA zone */
+    CHECK(after.allocs == before.allocs + 1 + tiny_ok && after.frees == before.frees + 1 + tiny_ok);
     CHECK(after.bytes_allocated == before.bytes_allocated);
     CHECK(after.maps == before.maps + 3 && after.map_failures == before.map_failures + 3);
     return true;

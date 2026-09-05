@@ -11,6 +11,12 @@ realised here, and Invariant 10 ("architecture-specific assembly must
 remain isolated") is realised by keeping every assembly file under
 `kernel/arch/`.
 
+Two implementations exist: x86-64 (`kernel/arch/x86_64/`, described in
+this directory) and, since Phase 13, AArch64 (`kernel/arch/aarch64/`,
+described in `aarch64/`: architecture, design, api, invariants,
+testing). The headers below are the whole contract between them and the
+generic kernel.
+
 ## Responsibilities
 
 - Receive control from the bootloader and reach C on a kernel-owned stack
@@ -46,7 +52,7 @@ Generic code may include only these headers:
 
 | Header | Provides |
 |---|---|
-| `arch/cpu.h` | `arch_name`, `arch_cpu_brand_string`, `arch_cpu_id`, `arch_cpu_relax`, `arch_cpu_wait_for_interrupt`, `arch_cpu_halt_forever` |
+| `arch/cpu.h` | `arch_name`, `arch_cpu_brand_string`, `arch_cpu_id`, `arch_cpu_relax`, `arch_cpu_wait_for_interrupt`, `arch_cpu_halt_forever`, `arch_dma_barrier` (Phase 13) |
 | `arch/irq.h` | `arch_irq_save/restore/enable/disable/enabled`, `arch_irq_state_t` |
 | `arch/trap.h` | opaque `struct arch_trap_frame`, `enum arch_trap_kind`, `arch_trap_vector`, `arch_trap_vector_count`, `arch_trap_is_exception`, `arch_trap_name`, frame accessors, `arch_trap_frame_dump`, `arch_trap_unhandled`, `arch_debug_break` |
 | `arch/console.h` | `arch_console_early_init` |
@@ -159,11 +165,14 @@ page fault through the panic path.
 
 ## Future extensibility
 
-- **AArch64**: implements the same six headers under
-  `kernel/arch/aarch64/`. Exception vector table instead of IDT, GIC
-  instead of PIC/APIC, DAIF bits for `arch_irq_*`, EL1 as the kernel
-  level, semihosting for `arch_emulator_exit`. The boot protocol and
-  generic kernel do not change.
+- **AArch64** (done, Phase 13): implements every `arch/*.h` header under
+  `kernel/arch/aarch64/`: exception vector table instead of IDT, GICv2
+  plus GICv2m instead of PIC/APIC/IOAPIC/MSI, DAIF bits for `arch_irq_*`,
+  EL1 as the kernel level, TTBR0/TTBR1 stage-1 tables, PSCI for
+  secondary CPUs, semihosting for `arch_emulator_exit`. The generic
+  kernel gained two interface functions (`arch_dma_barrier`,
+  `arch_mmu_near_arena`) and the boot protocol a second table root
+  (v4); see `aarch64/architecture.md`.
 - **User mode (Phase 4)**: `isr_common` gains `SWAPGS` conditioned on the
   saved CS, the TSS gets `rsp0` set via `gdt_set_kernel_stack`, and the
   selector layout already suits `SYSRET`.

@@ -82,7 +82,7 @@ int modelf_validate(const void *file, size_t size, struct modelf_layout *out, co
     REJECT(eh->e_ident[EI_DATA] != ELFDATA2LSB, "not little endian");
     REJECT(eh->e_ident[EI_VERSION] != EV_CURRENT || eh->e_version != EV_CURRENT, "bad ELF version");
     REJECT(eh->e_type != ET_REL, "not a relocatable object (ET_REL)");
-    REJECT(eh->e_machine != EM_X86_64, "not an x86-64 object");
+    REJECT(eh->e_machine != ELF_MACHINE_NATIVE, "not a native (" ELF_MACHINE_NATIVE_NAME ") object");
     REJECT(eh->e_ehsize != sizeof(struct elf64_ehdr), "bad e_ehsize");
     REJECT(eh->e_shentsize != sizeof(struct elf64_shdr), "bad e_shentsize");
     REJECT(eh->e_shnum < 2, "no sections");

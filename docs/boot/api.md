@@ -163,24 +163,49 @@ status on out-of-memory.
 Purpose: number of 4 KiB pages `paging_build()` needs, with 4 pages of
 slack. Pure function.
 
-### `EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base, uint64_t loader_size)`
+### `EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base, uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size)`
 
-Purpose: build the bootstrap tables described in `design.md`.
+Purpose: build the bootstrap tables described in `design.md`
+(`boot/uefi/arch/<arch>/paging.c`).
 Inputs: `ctx->pool_phys`, `ctx->pool_pages`, `ctx->nx` set by the caller;
-the loaded image; the running loader's image range.
-Outputs: `ctx->pml4_phys`, `ctx->pool_used`.
+the loaded image; the running loader's image range; a snapshot of the
+EFI memory map (descriptors of `desc_size` bytes) taken by `main.c`
+before the call, which AArch64 uses to give RAM and MMIO different
+attributes and x86-64 ignores.
+Outputs: `ctx->root` (x86-64: the PML4 for CR3; AArch64: the TTBR1
+table), `ctx->root_user` (AArch64: the TTBR0 identity table; x86-64: 0),
+`ctx->pool_used`.
 Failure: always returns `EFI_SUCCESS`; pool exhaustion is a loader bug and
 calls `die()`.
 
-### `bool cpu_has_nx(void)`, `void cpu_enable_nx(void)`, `void cpu_enable_wp(void)`
+### `bool cpu_prepare(void)`, `void cpu_finish(void)`, `void cpu_halt(void)` (noreturn)
 
-CPUID `0x80000001` EDX bit 20; `EFER.NXE` via `wrmsr`; `CR0.WP`. Order
-matters: enable NX before loading a CR3 that uses bit 63.
+`cpu_prepare` runs first and refuses a CPU the kernel cannot run on:
+x86-64 without NX (CPUID `0x80000001` EDX bit 20); AArch64 not at EL1
+(the `virt` machine must run with `virtualization=off`). `cpu_finish`
+runs after ExitBootServices: x86-64 sets `EFER.NXE` via `wrmsr` and
+`CR0.WP` (order matters: enable NX before loading a CR3 that uses
+bit 63); AArch64 does nothing. `cpu_halt` masks interrupts and halts.
 
-### `void cpu_jump_to_kernel(uint64_t cr3, uint64_t stack_top, uint64_t info, uint64_t entry)` (noreturn)
+### `void cpu_jump_to_kernel(const struct paging_ctx *pg, uint64_t stack_top, uint64_t info, uint64_t entry)` (noreturn)
 
-`cli`, load CR3, load RSP, zero RBP, `jmp entry` with `RDI = info`. Must
-be called only after ExitBootServices and after NX/WP are set.
+x86-64: `cli`, load CR3 from `pg->root`, load RSP, zero RBP, `jmp entry`
+with `RDI = info`. AArch64: mask DAIF, program `MAIR_EL1`, `TCR_EL1`,
+`TTBR0_EL1` = `pg->root_user`, `TTBR1_EL1` = `pg->root`, `tlbi vmalle1`,
+`SCTLR_EL1` (M, C, I; WXN and A clear) with the MMU kept on throughout,
+set `sp`, zero `x29`/`x30`, `br entry` with `x0 = info`. Must be called
+only after ExitBootServices and `cpu_finish`.
+
+### `void arch_serial_init(void)`, `bool arch_serial_present(void)`, `void arch_serial_putc(char)`
+
+The loader's own serial output after the firmware console is gone: COM1
+(probed) on x86-64, the PL011 at 0x09000000 (assumed present) on AArch64.
+
+### `LOADER_ELF_MACHINE`, `LOADER_ELF_MACHINE_NAME`, `COSMOBOOT_ARCH_NATIVE`
+
+62 / `"x86-64"` / `COSMOBOOT_ARCH_X86_64`, or 183 / `"AArch64"` /
+`COSMOBOOT_ARCH_AARCH64`; `elf.c` checks `e_machine` against the first
+and `main.c` writes the last into `arch`.
 
 ### `memcpy`, `memset`, `memcmp`, `strlen`
 
@@ -194,3 +219,14 @@ to `x86_boot_stack_top`, pushes a zero frame, calls
 `x86_start(const struct cosmoboot_info *)` (declared in
 `kernel/arch/x86_64/include/x86/cpu.h`, noreturn). Exports
 `x86_boot_stack_bottom`/`x86_boot_stack_top` (64 KiB, 16-byte aligned).
+
+## AArch64 entry (`kernel/arch/aarch64/entry.S`)
+
+`_start`: expects EL1, the MMU on with the loader's TTBR0/TTBR1 tables,
+DAIF masked and `x0` = the bootinfo pointer (a direct-map address). Masks
+DAIF again, switches to `aarch64_boot_stack_top`, installs `VBAR_EL1` =
+`aarch64_vectors`, zeroes `x29`/`x30` and calls `aarch64_start(const
+struct cosmoboot_info *)` (declared in
+`kernel/arch/aarch64/include/aarch64/platform.h`, noreturn). Exports
+`aarch64_boot_stack_bottom`/`aarch64_boot_stack_top` (64 KiB, 16-byte
+aligned). The `.note.cosmoboot` note is emitted here as on x86-64.

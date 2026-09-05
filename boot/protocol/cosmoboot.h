@@ -35,6 +35,13 @@
  * belong to the firmware GDT (the kernel installs its own immediately).
  * The identity map of [0, hhdm_size) is also present so the loader can
  * execute its final jump; the kernel must not rely on it.
+ *
+ * AArch64 specifics: EL1, MMU on, TTBR1 = boot_pagetable_root (the
+ * higher half: image and direct map), TTBR0 = boot_pagetable_root_user
+ * (the loader's identity map), MAIR/TCR programmed as the kernel expects
+ * (4 KiB granule, 48-bit), interrupts masked, x0 = info, sp = the loader
+ * stack (identity mapped). The direct map gives RAM normal write-back
+ * attributes and every other range device attributes.
  */
 
 #ifndef COSMOBOOT_H
@@ -48,7 +55,7 @@
  *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE
  *   3  the module becomes a ustar boot archive (archive_phys/archive_size,
  *      COSMOBOOT_MEM_ARCHIVE) holding init and the boot-time kernel modules */
-#define COSMOBOOT_VERSION 3
+#define COSMOBOOT_VERSION 4
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -135,7 +142,11 @@ struct cosmoboot_info {
 
     /* Reserved for framebuffer and command line in later versions.
      * Must be zero in version 3. */
-    uint64_t reserved1[6];
+    /* v4: a second bootstrap root for architectures with split roots
+     * (AArch64: the TTBR0 identity table the loader still runs on; the
+     * kernel adopts boot_pagetable_root as TTBR1). x86-64 writes 0. */
+    uint64_t boot_pagetable_root_user;
+    uint64_t reserved1[5];
 };
 
 #endif /* __ASSEMBLER__ */

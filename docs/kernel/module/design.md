@@ -307,8 +307,10 @@ read-only. The boot test requires the log line for the boot-loaded
 
 ## Future extensibility
 
-- AArch64: `arch_module_reloc` for `R_AARCH64_*`, a near arena inside
-  the image's ±128 MiB adrp reach, no generic change.
+- AArch64 (done, Phase 13): `kernel/arch/aarch64/modreloc.c` applies
+  `R_AARCH64_*`; the near arena comes from `arch_mmu_near_arena` (within
+  the image's ±128 MiB `CALL26` reach); the only generic change was
+  `ELF_MACHINE_NATIVE` in the validator.
 - A firmware-provisioned key ring: `keyring_add()` at boot from a
   UEFI variable; the trailer's `key_id` already selects the key.
 - Per-symbol versions: an optional `.ksymvers` section checked when

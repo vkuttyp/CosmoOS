@@ -1,6 +1,6 @@
 # CosmoOS top-level build.
 #
-#   make [ARCH=x86_64] [BUILD=debug|release] [V=1]   build loader + kernel
+#   make [ARCH=x86_64|aarch64] [BUILD=debug|release] [V=1]   build loader + kernel
 #   make image        FAT boot image with loader and kernel
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
@@ -28,12 +28,23 @@ include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/libc/libc.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
+# The Linux ABI and virtualization test programs are x86-64 machine code.
+ifeq ($(ARCH),x86_64)
 include $(ROOT)/tests/linux/linux.mk
 include $(ROOT)/tests/hv/hv.mk
+ARCH_TEST_TARGETS := hv-guests linux-tests
+else
+LINUX_TEST_ELFS :=
+LINUX_TEST_ARCHIVE_ENTRIES :=
+HV_GUEST_BINS :=
+HV_ARCHIVE_ENTRIES :=
+HAVE_MUSL := 0
+ARCH_TEST_TARGETS :=
+endif
 include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
 
-all: hv-guests kernel boot libc userland pkg ports linux-tests modules
+all: $(ARCH_TEST_TARGETS) kernel boot libc userland pkg ports modules
 
 IMAGE := $(OUT)/cosmoos.img
 
@@ -54,11 +65,11 @@ $(IMAGE): $(KERNEL_ELF) $(LOADER_EFI) $(BOOT_ARCHIVE) $(ROOT)/scripts/mkimage.sh
 	$(Q)$(ROOT)/scripts/mkimage.sh $@ $(LOADER_EFI) $(KERNEL_ELF) $(BOOT_ARCHIVE)
 
 run: $(IMAGE)
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(ROOT)/scripts/qemu-run.sh $(IMAGE)
 
 test: $(IMAGE)
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
 
 # Build a deliberately crashing kernel into a sibling output tree and
@@ -66,7 +77,7 @@ test: $(IMAGE)
 test-crash:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
 		CRASH_TEST=1 OUT=$(OUT)-crash image
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
 

@@ -25,6 +25,14 @@
 
 #define EM_X86_64  62
 #define EM_AARCH64 183
+/* The machine this kernel runs and loads programs and modules for. */
+#if defined(ARCH_AARCH64)
+#define ELF_MACHINE_NATIVE EM_AARCH64
+#define ELF_MACHINE_NATIVE_NAME "AArch64"
+#else
+#define ELF_MACHINE_NATIVE EM_X86_64
+#define ELF_MACHINE_NATIVE_NAME "x86-64"
+#endif
 
 #define PT_LOAD      1
 #define PT_NOTE      4

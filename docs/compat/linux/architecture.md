@@ -87,6 +87,11 @@ what Linux is.
   by the dispatcher's own bounds check.
 - **`uname`** reports `Linux 6.0.0-cosmo x86_64` (a personality
   decision: libcs check the kernel name and version).
+- **Architecture**: the numbers table is the x86-64 Linux ABI and is
+  compiled only for `ARCH=x86_64`. On AArch64 (Phase 13) the personality
+  is still selected for a binary without the CosmoOS note, but its table
+  is empty (`count = 0`), so the first system call is `-ENOSYS`; the
+  AArch64 Linux table (the generic `unistd` numbering) is a later phase.
 
 ## Non-responsibilities
 

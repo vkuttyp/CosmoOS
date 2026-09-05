@@ -9,6 +9,7 @@
 #include <kernel/blk.h>
 #include <kernel/errno.h>
 #include <kernel/hv.h>
+#include <arch/cpu.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -890,7 +891,7 @@ static int sysctl_value(const char *name, char *out, size_t n)
     if (strcmp(name, "kernel.build") == 0)
         return ksnprintf(out, n, "%s %s", COSMO_BUILD_ID, COSMO_BUILD_TYPE);
     if (strcmp(name, "kernel.arch") == 0)
-        return ksnprintf(out, n, "x86_64");
+        return ksnprintf(out, n, "%s", arch_name());
     if (strcmp(name, "kernel.uptime_ns") == 0)
         return ksnprintf(out, n, "%llu", (unsigned long long)clock_now_ns());
     if (strcmp(name, "kernel.nprocs") == 0)

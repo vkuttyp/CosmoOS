@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""check-module-elf.py module.ko
+"""check-module-elf.py module.ko [x86_64|aarch64]
 
 Post-build checks on a signed kernel module, independent of the kernel's
 own validator so a regression in one is caught by the other:
-  - ET_REL, x86-64, little endian ELF64
+  - ET_REL, little endian ELF64 for the given architecture (x86-64 by default)
   - no section is both writable and executable (W^X, constitution s.15)
   - a .cosmo.module section of exactly 240 bytes exists
   - the file ends with a signature trailer (magic COSMOSIG)
@@ -16,10 +16,15 @@ SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR = 1, 2, 4
 
 
 def main(argv):
-    if len(argv) != 2:
+    if len(argv) not in (2, 3):
         sys.stderr.write(__doc__)
         return 2
     path = argv[1]
+    arch = argv[2] if len(argv) == 3 else "x86_64"
+    machines = {"x86_64": (62, "x86-64"), "aarch64": (183, "AArch64")}
+    if arch not in machines:
+        return fail(path, f"unknown architecture {arch}")
+    want_machine, want_name = machines[arch]
     with open(path, "rb") as f:
         blob = f.read()
     if len(blob) < 88 or blob[-8:] != b"COSMOSIG":
@@ -30,8 +35,8 @@ def main(argv):
     e_type, e_machine = struct.unpack_from("<HH", elf, 16)
     if e_type != 1:
         return fail(path, f"e_type {e_type} is not ET_REL")
-    if e_machine != 62:
-        return fail(path, f"e_machine {e_machine} is not x86-64")
+    if e_machine != want_machine:
+        return fail(path, f"e_machine {e_machine} is not {want_name}")
     e_shoff, = struct.unpack_from("<Q", elf, 40)
     e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", elf, 58)
     if e_shentsize != 64 or e_shoff + e_shnum * 64 > len(elf):

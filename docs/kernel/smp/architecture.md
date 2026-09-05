@@ -140,5 +140,7 @@ contention across CPUs stays correct. See `testing.md`.
 
 Per-CPU data structures and IPI kinds are the base for load balancing,
 RCU grace periods, and user address spaces (per-space shootdown
-filtering with a CPU mask of users). AArch64 implements `arch/smp.h`
-with PSCI `CPU_ON` and `arch_ipi_*` with GIC SGIs.
+filtering with a CPU mask of users). AArch64 (Phase 13) implements
+`arch/smp.h` with PSCI `CPU_ON` and an identity-mapped trampoline, and
+`arch_ipi_*` with GIC SGIs; TLB shootdown there is a hardware broadcast
+with no IPI (`docs/kernel/arch/aarch64/design.md`).

@@ -15,7 +15,8 @@ safe in interrupt and panic context.
 ## `arch/cpu.h`
 
 ### `const char *arch_name(void)`
-- **Purpose**: architecture string for banners (`"x86_64"`).
+- **Purpose**: architecture string for banners and the `kernel.arch`
+  sysctl (`"x86_64"` or `"aarch64"`).
 - **Outputs**: immortal string; caller does not own it.
 
 ### `void arch_cpu_brand_string(char *buf, size_t len)`
@@ -38,7 +39,14 @@ safe in interrupt and panic context.
 - **Interrupt context**: must not be called from a handler.
 
 ### `void arch_cpu_halt_forever(void) __noreturn`
-- **Purpose**: `cli; hlt` loop. Used by panic and shutdown.
+- **Purpose**: `cli; hlt` loop (`msr daifset, #0xF; wfi` on AArch64).
+  Used by panic and shutdown.
+
+### `void arch_dma_barrier(void)` (Phase 13)
+- **Purpose**: order this CPU's memory writes before a device observes
+  them; `dma_sync_for_device` calls it before a driver rings a doorbell.
+- **Implementation**: `sfence` on x86-64, `dsb sy` on AArch64.
+- **Concurrency**: pure; any context.
 
 ---
 
@@ -189,4 +197,7 @@ Phase 9 `serial.c` also implements `arch_console_input_init` from
 with `irq_enable`, and its handler feeds every received byte to the
 console tty with `tty_input`, `docs/kernel/tty/`),
 `trapframe.h` (`struct arch_trap_frame` layout, `x86_trap_dispatch`).
-These may change freely; only x86-64 code includes them.
+These may change freely; only x86-64 code includes them. The AArch64
+counterparts (`kernel/arch/aarch64/include/aarch64/`: `sysreg.h`,
+`trapframe.h`, `platform.h`, `modreloc.h`) are listed in
+`aarch64/api.md`.

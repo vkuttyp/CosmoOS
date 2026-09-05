@@ -203,8 +203,8 @@ static void test_header_rules(void)
     free(img.bytes);
 
     img = build_image();
-    img.eh->e_machine = EM_AARCH64;
-    EXPECT_REJECT(img, "not an x86-64 object");
+    img.eh->e_machine = 0x1234;
+    EXPECT_REJECT(img, "not a native (x86-64) object");
     free(img.bytes);
 
     img = build_image();

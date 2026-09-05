@@ -28,11 +28,13 @@ import time
 EXIT_SUCCESS_VALUE = 0x10
 EXIT_FAILURE_VALUE = 0x11
 
+ARCH = os.environ.get("COSMO_ARCH", "x86_64")
+
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
     r"^jumping to kernel entry",
     r"^CosmoOS kernel ",
-    r"^Architecture: x86_64",
+    r"^Architecture: " + re.escape(ARCH) + r"$",
     r"^Boot: UEFI",
 ]
 
@@ -105,12 +107,24 @@ FORBIDDEN_MARKERS = [
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
 # complete and the failure exit code must be delivered.
+# The page-fault vector and the register dump are architecture specific
+# (docs/kernel/arch/aarch64/testing.md).
+if ARCH == "aarch64":
+    PANIC_ARCH_MARKERS = [
+        r"^trap 1029 ",
+        r"^ELR=[0-9a-f]{16} SPSR=",
+        r"^FAR=ffff900000000000 \(not-present write kernel\)",
+    ]
+else:
+    PANIC_ARCH_MARKERS = [
+        r"^trap 14 ",
+        r"^RIP=[0-9a-f]{16} CS=",
+        r"^CR2=ffff900000000000 \(not-present write kernel\)",
+    ]
 PANIC_REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] crash test: writing to an unmapped address",
     r"^KERNEL PANIC: page fault: kernel write at 0xffff900000000000 \(not present\): no region",
-    r"^trap 14 ",
-    r"^RIP=[0-9a-f]{16} CS=",
-    r"^CR2=ffff900000000000 \(not-present write kernel\)",
+] + PANIC_ARCH_MARKERS + [
     r"^stack trace:",
     r"^  #0 +0xffffffff8[0-9a-f]{7}",
     r"^halting\.",
@@ -267,18 +281,25 @@ def main():
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (package test)")
-        for pat in HVTEST_MARKERS:
-            if not any(re.search(pat, ln) for ln in lines):
-                failures.append(f"missing marker /{pat}/ (virtualization test)")
-        for pat in HV_FORBIDDEN_MARKERS:
-            hits = [ln for ln in lines if re.search(pat, ln)]
-            if hits:
-                failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
-        for pat in LINUXTEST_MARKERS:
-            if not any(re.search(pat, ln) for ln in lines):
-                failures.append(f"missing marker /{pat}/ (Linux ABI test)")
-        if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
-            failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
+        if ARCH == "x86_64":
+            # The virtualization backend and the Linux table exist on x86-64 only
+            # (docs/kernel/arch/aarch64/design.md, "Stubs and exclusions").
+            for pat in HVTEST_MARKERS:
+                if not any(re.search(pat, ln) for ln in lines):
+                    failures.append(f"missing marker /{pat}/ (virtualization test)")
+            for pat in HV_FORBIDDEN_MARKERS:
+                hits = [ln for ln in lines if re.search(pat, ln)]
+                if hits:
+                    failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
+            for pat in LINUXTEST_MARKERS:
+                if not any(re.search(pat, ln) for ln in lines):
+                    failures.append(f"missing marker /{pat}/ (Linux ABI test)")
+            if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
+                failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
+        else:
+            for pat in (r"^HVTEST: skipped$", r"^LINUXTEST: skipped$"):
+                if not any(re.search(pat, ln) for ln in lines):
+                    failures.append(f"missing marker /{pat}/ (x86-only sections must report skipped)")
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:
         try:

@@ -12,8 +12,8 @@
 # hv self-check then disables the backend and the guest tests are
 # skipped, which the harness treats as a failure). The toolchain is
 # host-agnostic so the outputs match the ARM64 development environment.
-# GitHub-hosted ARM64 runners (ubuntu-24.04-arm) are not enabled for this
-# private repository yet; when they are, add them to the matrix below.
+# Both targets build and boot on the same x86-64 runner: QEMU/TCG runs
+# the AArch64 `virt` machine with the qemu-efi-aarch64 firmware.
 
 name: CI
 
@@ -27,13 +27,14 @@ permissions:
 
 jobs:
   build-and-boot:
-    name: build, boot, analyze (${{ matrix.os }})
+    name: build, boot, analyze (${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04]
+        arch: [x86_64, aarch64]
     timeout-minutes: 30
 
     steps:
@@ -41,8 +42,10 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            git ca-certificates clang lld llvm libclang-rt-dev make mtools qemu-system-x86 ovmf python3 musl-tools
+            git ca-certificates clang lld llvm libclang-rt-dev make mtools python3 musl-tools \
+            qemu-system-x86 ovmf qemu-system-arm qemu-efi-aarch64
           qemu-system-x86_64 --version
+          qemu-system-aarch64 --version
 
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -53,34 +56,34 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Verify toolchain
-        run: make check-tools
+        run: make ARCH=${{ matrix.arch }} check-tools
 
       - name: Build (debug)
-        run: make BUILD=debug all
+        run: make ARCH=${{ matrix.arch }} BUILD=debug all
 
       - name: Boot test (debug)
-        run: make BUILD=debug test
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test
 
       - name: Build and boot test (release)
-        run: make BUILD=release all test
+        run: make ARCH=${{ matrix.arch }} BUILD=release all test
 
       - name: Host unit tests (ASan + UBSan)
-        run: make host-test
+        run: make ARCH=${{ matrix.arch }} host-test
 
       - name: Static analysis
-        run: make analyze
+        run: make ARCH=${{ matrix.arch }} analyze
 
       - name: Reproducible build check
-        run: make reproducible
+        run: make ARCH=${{ matrix.arch }} reproducible
 
       - name: Panic path test
-        run: make BUILD=debug test-crash
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
 
       - name: Upload serial logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: serial-logs-${{ matrix.os }}
+          name: serial-logs-${{ matrix.arch }}
           path: out/**/boot-test*.log
           if-no-files-found: ignore
 
@@ -88,10 +91,10 @@ jobs:
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: images-${{ matrix.os }}
+          name: images-${{ matrix.arch }}
           path: |
-            out/x86_64-debug/kernel/kernel.elf
-            out/x86_64-debug/boot/BOOTX64.EFI
-            out/x86_64-debug/cosmoos.img
-            out/x86_64-release/kernel/kernel.elf
-            out/x86_64-release/boot/BOOTX64.EFI
+            out/${{ matrix.arch }}-debug/kernel/kernel.elf
+            out/${{ matrix.arch }}-debug/boot/*.EFI
+            out/${{ matrix.arch }}-debug/cosmoos.img
+            out/${{ matrix.arch }}-release/kernel/kernel.elf
+            out/${{ matrix.arch }}-release/boot/*.EFI

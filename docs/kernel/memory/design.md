@@ -202,8 +202,8 @@ Kernel layout (x86-64, 48-bit):
 |---|---|
 | `0xFFFF800000000000` + 64 TiB | HHDM: direct map of RAM, RW NX WB, large pages |
 | `0xFFFFC00000000000` + 32 TiB | kernel VA arena (vm_kernel_alloc, MMIO windows) |
-| `0xFFFFFFFF80000000` + 128 MiB | kernel image (link address); `vmm_init` panics if `__kernel_end` passes `KERNEL_NEAR_LO` |
-| `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000` | near arena (`VM_KALLOC_NEAR_KERNEL`): kernel modules, which are built with `-mcmodel=kernel` and must sit in the top 2 GiB so `R_X86_64_32S`/`PC32` relocations reach both themselves and the image (Phase 5) |
+| `0xFFFFFFFF80000000` + 128 MiB | kernel image (link address); `vmm_init` panics if `__kernel_end` passes the near arena's low bound |
+| `arch_mmu_near_arena()` | near arena (`VM_KALLOC_NEAR_KERNEL`): kernel modules. x86-64: `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000`, because modules are built with `-mcmodel=kernel` and must sit in the top 2 GiB so `R_X86_64_32S`/`PC32` relocations reach both themselves and the image (Phase 5). AArch64: from the 2 MiB-aligned end of the image to image base + 120 MiB so `R_AARCH64_CALL26` (±128 MiB) reaches every export (Phase 13). `vmm_init` copies the bounds into `kernel_space.near_lo/near_hi` |
 
 `vmm_init()` sequence:
 1. `arch_mmu_context_init(&kernel_space.mmu)`.

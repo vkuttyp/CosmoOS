@@ -59,5 +59,6 @@ release/acquire plus a grace period on removal (constitution Invariant
 
 ## I-INT-10: `arch_trap_vector_count() <= INTERRUPT_MAX_VECTORS`
 
-An architecture with more vectors must raise the constant, not truncate.
+An architecture with more vectors must raise the constant, not truncate
+(the constant became 1344 when AArch64 arrived with 1312 vectors).
 **Checked by** the panic in `interrupt_init`.

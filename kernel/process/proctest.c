@@ -128,7 +128,7 @@ static void make_elf(struct tiny_elf *e, uint64_t entry, uint64_t vaddr, uint32_
     e->ehdr[5] = 1;   /* little-endian */
     e->ehdr[6] = 1;   /* EV_CURRENT */
     put16(e->ehdr + 16, 2);   /* ET_EXEC */
-    put16(e->ehdr + 18, 62);  /* EM_X86_64 */
+    put16(e->ehdr + 18, ELF_MACHINE_NATIVE);
     put32(e->ehdr + 20, 1);
     put64(e->ehdr + 24, entry);
     put64(e->ehdr + 32, 64);  /* e_phoff */

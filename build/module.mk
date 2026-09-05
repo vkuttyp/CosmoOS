@@ -50,7 +50,7 @@ $$(MODULE_OUT)/$(1).ko: $$(MODULE_$(1)_OBJS) $$(ROOT)/scripts/modsign.py $$(MODS
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)$$(LD) $$(MODULE_LDFLAGS) -o $$@.unsigned $$(MODULE_$(1)_OBJS)
 	$$(Q)$$(MODSIGN) sign --key $$(MODSIGN_KEY) --in $$@.unsigned --out $$@
-	$$(Q)$$(PYTHON) $$(ROOT)/scripts/check-module-elf.py $$@
+	$$(Q)$$(PYTHON) $$(ROOT)/scripts/check-module-elf.py $$@ $$(ARCH)
 MODULE_KOS += $$(MODULE_OUT)/$(1).ko
 MODULE_ANALYZE += $$(patsubst %.o,%.analyzed,$$(MODULE_$(1)_OBJS))
 MODULE_ALL_OBJS += $$(MODULE_$(1)_OBJS)

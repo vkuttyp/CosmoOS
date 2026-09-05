@@ -42,7 +42,9 @@ failure path. Gap: no fault-injection test drives a virtio probe failure.
 Kernel-arena, stack, and user addresses yield 0. `blk_submit` runs
 `dma_map` on the bio buffer before any driver sees it. Check: `dma`
 self-test (kmalloc maps, arena and stack do not, 24-bit mask allocation
-lands below 16 MiB), `blk` self-test (stack buffer refused). Gap: a
+lands below 16 MiB where a DMA zone exists; the AArch64 `virt` machine
+has no RAM below 1 GiB and the check is skipped there), `blk` self-test
+(stack buffer refused). Gap: a
 driver can still pass an arbitrary integer as a bus address; the API is
 a discipline boundary, not enforcement (no IOMMU).
 

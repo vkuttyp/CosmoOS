@@ -20,7 +20,7 @@
 
 typedef unsigned irq_t;
 
-#define IRQ_MAX 256u
+#define IRQ_MAX 1024u   /* GSIs: IOAPIC pins on x86-64, GIC INTIDs on AArch64 */
 
 #define IRQ_TRIGGER_EDGE  0u
 #define IRQ_TRIGGER_LEVEL (1u << 0)

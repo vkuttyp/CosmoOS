@@ -68,7 +68,7 @@ static uint64_t *next_level(struct paging_ctx *ctx, uint64_t *table, unsigned in
 
 static void map_2m(struct paging_ctx *ctx, uint64_t virt, uint64_t phys, uint64_t flags)
 {
-    uint64_t *pml4 = table_at(ctx->pml4_phys);
+    uint64_t *pml4 = table_at(ctx->root);
     uint64_t *pdpt = next_level(ctx, pml4, (unsigned)PML4_INDEX(virt));
     uint64_t *pd = next_level(ctx, pdpt, (unsigned)PDPT_INDEX(virt));
     pd[PD_INDEX(virt)] = (phys & PTE_ADDR_MASK) | PTE_P | PTE_PS | flags;
@@ -76,7 +76,7 @@ static void map_2m(struct paging_ctx *ctx, uint64_t virt, uint64_t phys, uint64_
 
 static void map_4k(struct paging_ctx *ctx, uint64_t virt, uint64_t phys, uint64_t flags)
 {
-    uint64_t *pml4 = table_at(ctx->pml4_phys);
+    uint64_t *pml4 = table_at(ctx->root);
     uint64_t *pdpt = next_level(ctx, pml4, (unsigned)PML4_INDEX(virt));
     uint64_t *pd = next_level(ctx, pdpt, (unsigned)PDPT_INDEX(virt));
     uint64_t *pt = next_level(ctx, pd, (unsigned)PD_INDEX(virt));
@@ -92,11 +92,14 @@ UINTN paging_pool_size(const struct elf_image *img)
     return 1 + (1 + identity_gib) + (1 + 1 + kernel_span_2m + 1) + 4;
 }
 
-EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img,
-                        uint64_t loader_base, uint64_t loader_size)
+EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,
+                        uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size)
 {
-    ctx->pml4_phys = pool_take(ctx);
-    uint64_t *pml4 = table_at(ctx->pml4_phys);
+    (void)mmap;
+    (void)mmap_size;
+    (void)desc_size;
+    ctx->root = pool_take(ctx);
+    uint64_t *pml4 = table_at(ctx->root);
     uint64_t nx = ctx->nx ? PTE_NX : 0;
 
     /* Identity map with 2 MiB pages. */

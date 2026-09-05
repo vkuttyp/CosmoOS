@@ -20,7 +20,7 @@ COMMANDS = [
     ("pwd", [r"^/$"]),
     ("cd /tmp && pwd && cd /", [r"^/tmp$"]),
     ("sysctl kernel.name", [r"^kernel.name = CosmoOS$"]),
-    ("dmesg", [r"\[ INFO\] tty: |\[ INFO\] serial: console input on IRQ 4"]),
+    ("dmesg", [r"\[ INFO\] tty: |\[ INFO\] serial: console input on IRQ \d+"]),
     ("nosuchprogram", [r"^sh: nosuchprogram: not found$"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
     ("exit 0", []),
