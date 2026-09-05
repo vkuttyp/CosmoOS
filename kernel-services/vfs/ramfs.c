@@ -386,6 +386,8 @@ void ramfs_populate_boot(void)
             ksnprintf(path, sizeof(path), "/%s", e->name);
         } else {
             ksnprintf(path, sizeof(path), "/boot/%s", e->name);
+            if (strncmp(e->name, "tests/", 6) == 0)
+                mode = 0755;   /* test programs and fixtures run from the shell */
         }
         ensure_parents(path);
         int rc = write_file(path, e->data, e->size, mode);

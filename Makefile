@@ -28,10 +28,11 @@ include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/libc/libc.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
+include $(ROOT)/tests/linux/linux.mk
 include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
 
-all: kernel boot libc userland pkg ports modules
+all: kernel boot libc userland pkg ports linux-tests modules
 
 IMAGE := $(OUT)/cosmoos.img
 
@@ -41,9 +42,9 @@ image: $(IMAGE)
 # order the kernel loads them (dependencies first). See
 # scripts/mkbootarchive.py and docs/kernel/module/.
 BOOT_ARCHIVE := $(OUT)/boot.tar
-BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
+BOOT_ARCHIVE_ENTRIES = init=$(INIT_ELF) $(USER_ARCHIVE_ENTRIES) sbin/pkg=$(PKG_ELF) $(PKG_ARCHIVE_ENTRIES) $(LINUX_TEST_ARCHIVE_ENTRIES) $(MODULE_ARCHIVE_ENTRIES)
 
-$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
+$(BOOT_ARCHIVE): $(USER_ARCHIVE_DEPS) $(PKG_ELF) $(PKG_INDEX) $(LINUX_TEST_ELFS) $(MODULE_KOS) $(ROOT)/scripts/mkbootarchive.py
 	$(call log,ARCHIVE,$@)
 	$(Q)$(PYTHON) $(ROOT)/scripts/mkbootarchive.py $@ $(BOOT_ARCHIVE_ENTRIES)
 
@@ -56,7 +57,7 @@ run: $(IMAGE)
 		$(ROOT)/scripts/qemu-run.sh $(IMAGE)
 
 test: $(IMAGE)
-	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+	$(Q)QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
 
 # Build a deliberately crashing kernel into a sibling output tree and

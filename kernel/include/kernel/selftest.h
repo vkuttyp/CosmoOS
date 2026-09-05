@@ -52,6 +52,7 @@ bool selftest_process_reject(const char **reason);
 bool selftest_process_selftest(const char **reason);
 bool selftest_process_fault(const char **reason);
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
+bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
 bool selftest_tty_ldisc(const char **reason);       /* kernel/tty/ttytest.c */
 bool selftest_ipc_pipe(const char **reason);        /* kernel/ipc/pipetest.c */
 

@@ -235,8 +235,19 @@ Built on the dispatcher's stack; lives for one call.
 ### `struct personality { const char *name; const syscall_fn *table; size_t count; }`
 A handler is `int64_t (*)(struct syscall_args *)`. `personality_native`
 (`kernel/syscall/native.c`) has `count == SYS_COUNT`; NULL entries are
-`-ENOSYS`. A process's `pers` is set at creation and never changes in
-this phase.
+`-ENOSYS`. `personality_linux` (`compat/linux/syscalls.c`, Phase 11)
+has `count == 512` and no NULL entry (unimplemented numbers are a
+counting `-ENOSYS` handler); `docs/compat/linux/api.md`. A process's
+`pers` is set at creation (by the CosmoOS ELF note) and never changes.
+
+### `int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)`, `int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)`, `int syscall_handle_stat(int h, struct cosmo_stat *st)`
+The bodies of the native `read`, `write` and `fstat` (handle lookup
+with the right, `IO_CHUNK` copies, the object's `read`/`write`/`stat`
+operation), exported so the Linux personality's `read`, `write`,
+`readv`, `writev`, `fstat` and `newfstatat(AT_EMPTY_PATH)` are the same
+code. The native `sys_read`/`sys_write`/`sys_fstat` wrap them; they
+take no Linux argument and know nothing of the caller's personality.
+May block like the calls they implement.
 
 ### `uint64_t syscall_count(void)`, `uint64_t syscall_unknown_count(void)`
 Relaxed atomic reads; interrupt-safe; for diagnostics and tests.

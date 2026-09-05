@@ -293,6 +293,7 @@ static const struct selftest tests[] = {
     { "ipc-pipe",        selftest_ipc_pipe },
     { "process-reject",  selftest_process_reject },
     { "process-spawn",   selftest_process_spawn },
+    { "linux-elf",       selftest_linux_elf },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
 };

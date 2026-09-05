@@ -6,6 +6,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/bootinfo.h>
 #include <kernel/elf.h>
+#include <kernel/elf64.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
@@ -270,6 +271,75 @@ static bool kill_module(const char *const argv[], int sig, const char **reason)
     CHECK(clock_now_ns() - t0 < 2000000000ULL);
     CHECK(status == 128 + sig);
     process_put(p);
+    return true;
+}
+
+/* A loadable image with one PT_NOTE segment of 32 bytes at offset 176. */
+struct note_elf {
+    uint8_t ehdr[64];
+    uint8_t phdr[2][56];
+    uint8_t note[32];
+};
+
+static void make_note_elf(struct note_elf *e, uint32_t namesz, uint32_t descsz, uint32_t type, const char *name)
+{
+    struct tiny_elf t;
+    make_elf(&t, 0x400010, 0x400000, ELF_PF_R | ELF_PF_X);
+    memset(e, 0, sizeof(*e));
+    memcpy(e->ehdr, t.ehdr, 64);
+    put16(e->ehdr + 56, 2);                    /* e_phnum */
+    memcpy(e->phdr[0], t.phdr, 56);
+    put64(e->phdr[0] + 32, sizeof(*e));        /* p_filesz: the whole file */
+    put32(e->phdr[1] + 0, PT_NOTE);
+    put32(e->phdr[1] + 4, ELF_PF_R);
+    put64(e->phdr[1] + 8, 176);                /* p_offset */
+    put64(e->phdr[1] + 16, 0x400000 + 176);
+    put64(e->phdr[1] + 32, sizeof(e->note));   /* p_filesz */
+    put64(e->phdr[1] + 40, sizeof(e->note));
+    put64(e->phdr[1] + 48, 4);
+    put32(e->note + 0, namesz);
+    put32(e->note + 4, descsz);
+    put32(e->note + 8, type);
+    if (name)
+        memcpy(e->note + 12, name, strlen(name) + 1);
+}
+
+/* Phase 11: the CosmoOS note marks native programs; a Linux test program lacks it. */
+bool selftest_linux_elf(const char **reason)
+{
+    struct note_elf ne;
+    struct elf_info ninfo;
+    const char *nwhy;
+    make_note_elf(&ne, 8, 4, 1, "CosmoOS");
+    put32(ne.note + 20, 1);                    /* desc: ABI version */
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0);
+    CHECK(ninfo.cosmo_note);
+    make_note_elf(&ne, 8, 4, 2, "CosmoOS");    /* wrong type */
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0 && !ninfo.cosmo_note);
+    make_note_elf(&ne, 6, 0, 1, "Other");      /* a foreign note first, then nothing */
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0 && !ninfo.cosmo_note);
+    /* Sizes near UINT32_MAX must neither wrap into a zero-length record nor hang the walker. */
+    make_note_elf(&ne, 0xFFFFFFFDu, 0, 1, NULL);
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0 && !ninfo.cosmo_note);
+    make_note_elf(&ne, 0, 0xFFFFFFFFu, 1, NULL);
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0 && !ninfo.cosmo_note);
+    make_note_elf(&ne, 8, 4096, 1, "CosmoOS"); /* desc runs past the segment: ignored */
+    CHECK(elf_validate(&ne, sizeof(ne), USER_LO, USER_HI, &ninfo, &nwhy) == 0 && !ninfo.cosmo_note);
+
+    const void *image;
+    size_t image_size;
+    struct elf_info info;
+    const char *why;
+    if (bootarchive_find("init", &image, &image_size)) {
+        CHECK(elf_validate(image, image_size, USER_LO, USER_HI, &info, &why) == 0);
+        CHECK(info.cosmo_note);
+        CHECK(info.phdr_vaddr != 0 && info.phnum > 0 && info.phent == 56);
+    }
+    if (bootarchive_find("tests/linux/lxhello", &image, &image_size)) {
+        CHECK(elf_validate(image, image_size, USER_LO, USER_HI, &info, &why) == 0);
+        CHECK(!info.cosmo_note);
+        CHECK(info.phdr_vaddr == 0x400040);
+    }
     return true;
 }
 

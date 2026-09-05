@@ -37,6 +37,7 @@
 #define ENOTEMPTY 39  /* directory not empty */
 #define ELOOP     40  /* too many levels */
 #define EMSGSIZE  90  /* message too long */
+#define ENOPROTOOPT 92 /* protocol option not available */
 #define ENOTSUP   95  /* operation not supported */
 #define EOPNOTSUPP 95 /* alias */
 #define EAFNOSUPPORT 97 /* address family not supported */

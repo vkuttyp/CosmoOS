@@ -30,8 +30,9 @@ HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_m
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
 HOST_LIBC_SRCS := tests/host/test_libc.c
 HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
+HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
 
-HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg
+HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux
 
 $(HOST_OUT)/test_buddy: $(addprefix $(ROOT)/,$(HOST_BUDDY_SRCS))
 	$(call log,HOSTCC,$@)
@@ -65,6 +66,11 @@ $(HOST_OUT)/test_pkg: $(addprefix $(ROOT)/,$(HOST_PKG_SRCS))
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 		-Wall -Wextra -Werror -Wno-missing-prototypes -I$(ROOT)/pkg $^ $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_linux: $(addprefix $(ROOT)/,$(HOST_LINUX_SRCS))
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/compat/linux $(addprefix $(ROOT)/,$(HOST_LINUX_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_cosmofs: $(addprefix $(ROOT)/,$(HOST_COSMOFS_SRCS))
 	$(call log,HOSTCC,$@)

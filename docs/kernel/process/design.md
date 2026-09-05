@@ -58,7 +58,7 @@ struct process {
     struct list_node threads;          /* struct thread.proc_link */
     unsigned nr_threads;
     struct credentials cred;           /* uid/gid placeholders */
-    const struct personality *pers;    /* &personality_native */
+    const struct personality *pers;    /* &personality_native, or &personality_linux (Phase 11) */
     enum process_state state;
     int exit_status;
     struct completion exited;
@@ -103,16 +103,26 @@ attributes):
    user CR3 nor STAC.
 4. Stack: `vm_user_map_anon(space, USER_STACK_TOP - USER_STACK_SIZE,
    USER_STACK_SIZE, RW, "stack")` with a guard page below, lazily
-   populated except the top page, which receives the initial frame:
+   populated except the top two pages (`INITIAL_STACK_PAGES`), which
+   receive the initial frame (written byte by byte through the direct
+   map, since the two frames need not be adjacent):
 
    ```text
    USER_STACK_TOP-ish (16-byte aligned at the final rsp):
      argc
      argv[0..argc-1], NULL
      envp[0..], NULL
-     auxv: AT_PAGESZ, AT_ENTRY, AT_NULL
-     strings (argv, envp bytes)
+     auxv: AT_PAGESZ, AT_ENTRY, AT_NULL          (native)
+           or the Linux vector: AT_PHDR AT_PHENT AT_PHNUM AT_PAGESZ AT_ENTRY
+           AT_RANDOM AT_UID AT_EUID AT_GID AT_EGID AT_SECURE AT_HWCAP AT_CLKTCK AT_NULL
+     16 random bytes (AT_RANDOM), 16-byte aligned
+     strings (argv, envp bytes; at most INITIAL_STRINGS_MAX 300 of them)
    ```
+
+   Phase 11: before the stack, `elf_load_into` is followed by
+   `p->image_end = info.hi` and, for a Linux process (`p->pers ==
+   &personality_linux`: the image lacks the CosmoOS note and the
+   process has a parent), `linux_process_init` (`docs/compat/linux/`).
 5. Handles: 0/1/2 → console for a kernel creator, else the parent's map.
    Create the main thread with `thread_prepare`
    plus `t->proc = process`, `t->user_entry = elf.entry`, `t->user_sp =
@@ -157,8 +167,10 @@ set — and never returns to user mode).
 
 `struct thread` gains: `struct process *proc` (NULL for kernel
 threads), `struct list_node proc_link`, `uintptr_t user_entry,
-user_sp`, `uintptr_t kernel_stack_top`, `uintptr_t tls_base` (unused
-yet).
+user_sp`, `uintptr_t kernel_stack_top`, `uintptr_t tls_base` (the
+user `%fs` base; set by `arch_set_tls_base` from the Linux
+`arch_prctl(ARCH_SET_FS)` and loaded into `MSR_FS_BASE` by
+`arch_thread_switch_prepare` for every thread with a process).
 
 `arch_context_switch` callers (`schedule_internal`) call
 `arch_thread_switch_prepare(next)` before switching: it writes
@@ -254,7 +266,10 @@ struct personality {
 `syscall_dispatch(frame)` (called with interrupts enabled on the kernel
 stack): builds `struct syscall_args`, picks `process_current()->pers`,
 range-checks `nr`, calls the function, stores the result into the
-frame's `rax`. Unknown numbers return `-ENOSYS` and are counted.
+frame's `rax`. Unknown numbers return `-ENOSYS` and are counted. Two
+personalities exist: `personality_native` (below) and
+`personality_linux` (`compat/linux/syscalls.c`, 512 entries,
+`docs/compat/linux/`), chosen at creation by the CosmoOS ELF note.
 
 Native table (`uapi/cosmo/syscall.h`, numbers stable from now on):
 
@@ -307,7 +322,9 @@ dereferences address 0, `--block` reads the console, `--spin` loops).
 the `SYSCALL` instruction using the `uapi` numbers. Programs are built
 with the kernel's freestanding flags for `x86_64-unknown-none-elf`
 without `-mcmodel=kernel`, linked at `0x400000` with `userland/user.ld`
-(three W^X segments, non-executable stack), and packed into the boot
+(three W^X segments, the ELF and program headers inside the text
+segment so `AT_PHDR` can be published, a `PT_NOTE` carrying the CosmoOS
+ABI note from `crt0.S`, non-executable stack), and packed into the boot
 archive as `init`, `bin/<name>`, `sbin/<name>` and `etc/<name>`
 (`scripts/mkbootarchive.py`, see `docs/kernel/module/design.md`).
 

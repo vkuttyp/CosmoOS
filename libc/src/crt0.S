@@ -20,4 +20,13 @@ _start:
 1:  jmp 1b
     .size _start, . - _start
 
+    /* The CosmoOS ABI note: its presence selects the native personality
+     * (docs/compat/linux/design.md); a static ELF without it runs as a
+     * Linux program. namesz 8, descsz 4, type 1, name "CosmoOS", desc = ABI version. */
+    .section .note.cosmo, "a", @note
+    .balign 4
+    .long 8, 4, 1
+    .asciz "CosmoOS"
+    .long 1
+
     .section .note.GNU-stack, "", @progbits

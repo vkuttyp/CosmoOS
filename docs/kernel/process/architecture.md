@@ -88,10 +88,13 @@ carried `init.elf` as a single raw module.
   TLS setup (the fields exist).
 - Dynamic linking, `PT_INTERP`, `PT_GNU_STACK` policy beyond refusing
   executable stacks.
-- Linux personality (Phase 11); only the native table exists.
+- The Linux personality's own behaviour: it lives in `compat/linux/`
+  (`docs/compat/linux/`, Phase 11); the process code only selects it
+  (by the CosmoOS ELF note), allocates and frees its state through two
+  hooks, and builds its auxiliary vector.
 - Resource limits enforcement, audit, capabilities beyond a credential
   placeholder (Phase 5+ security work).
-- Set-uid, resource limits, argument sizes beyond one stack page
+- Set-uid, resource limits, argument sizes beyond two stack pages
   (`COSMO_ARG_MAX` 2048 bytes, 128 entries), file-backed `mmap`.
 
 ## 5. Interfaces (contracts in api.md)
@@ -204,8 +207,9 @@ and hostile-pointer inputs and prints `USERTEST: PASS`. See
 
 ## 13. Future extensibility
 
-The personality pointer is where the Linux table plugs in. `struct
-kobject` is the base for files, sockets, and devices. `vm_space` per
+The personality pointer is where the Linux table plugged in (Phase 11:
+`personality_linux`, selected when the image lacks the `CosmoOS`
+`PT_NOTE`). `struct kobject` is the base for files, sockets, and devices. `vm_space` per
 process with region kinds is where CoW (`fork`) and file-backed regions
 (`exec`, `mmap` of files) attach. Threads already carry a process
 pointer and per-thread kernel stack, so user threads are a syscall away.

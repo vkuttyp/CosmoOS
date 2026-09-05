@@ -32,12 +32,15 @@ resolves each destination page with `arch_mmu_query` and writes via
 the user CR3 nor STAC. Check: review (the function has no
 `arch_user_access_begin`).
 
-**P5. The initial stack.** The top page is populated eagerly (the
-initial frame is written into it through the direct map); the rest of
-the 8 MiB region is lazy with `VM_REGION_GUARD_BELOW`; argv/envp/auxv
-strings must fit that page or creation fails with `-EINVAL`. Check:
-test `process-user` (64 KiB of stack touched through lazy pages),
-review of `build_initial_stack`.
+**P5. The initial stack.** The top two pages (`INITIAL_STACK_PAGES`)
+are populated eagerly (the initial frame is written into them byte by
+byte through the direct map); the rest of the 8 MiB region is lazy with
+`VM_REGION_GUARD_BELOW`; argv/envp/auxv strings (at most
+`INITIAL_STRINGS_MAX` 300) and the 16 `AT_RANDOM` bytes must fit those
+pages or creation fails with `-EINVAL`. Check: test `process-user` (64
+KiB of stack touched through lazy pages), `linux-elf` and the Linux
+programs (which read the larger vector), review of
+`build_initial_stack`.
 
 **P6. Refused executables.** `PT_INTERP` and executable
 `PT_GNU_STACK` are `-ENOEXEC`; only `ET_EXEC` x86-64 with in-bounds
@@ -158,8 +161,17 @@ without side effects. Check: test `process-user` (`SYS_COUNT`, 999999,
 -1), review.
 
 **P22. Personality lookup is bounds-checked.** `syscall_dispatch`
-checks `nr < pers->count` and a non-NULL entry before calling. Check:
-P21's test.
+checks `nr < pers->count` and a non-NULL entry before calling, for both
+personalities. Check: P21's test; `lxtest` calls Linux numbers 510 and
+9999.
+
+**P22a. Personality selection (Phase 11).** `pers` is
+`&personality_native` when the image carries the `CosmoOS` `PT_NOTE`
+(type 1) or the process has no parent (kernel-created), else
+`&personality_linux`; it is set once in `process_create_from_elf` and
+never changes. `p->linux` is non-NULL exactly for Linux processes and is
+freed with the process. Check: self-test `linux-elf`, the Linux
+programs in `/etc/rc.test`; `docs/compat/linux/invariants.md` L1, L3.
 
 ## Phase 9: processes, kill, working directory
 

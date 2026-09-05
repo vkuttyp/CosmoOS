@@ -179,6 +179,13 @@ codes exactly.
 
 ## Program start (`libc/src/crt0.S`)
 
+Since Phase 11 `crt0.S` also emits the CosmoOS ABI note (section
+`.note.cosmo`: `namesz` 8, `descsz` 4, type 1, name `CosmoOS`, desc =
+ABI version 1), which `user.ld` places in a `PT_NOTE`; the kernel runs
+an executable without it under the Linux personality
+(`docs/compat/linux/api.md`). Every program linked with `crt0.o` is
+therefore native.
+
 `_start`: `rbp = 0`, `rdi = argc`, `rsi = argv`, `rdx = envp`, stack
 aligned to 16, `call __libc_start`. Every program is linked as
 `crt0.o objects libc.a` with `userland/user.ld` (`libc/libc.mk`,

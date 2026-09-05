@@ -34,6 +34,9 @@ struct elf_info {
     uint64_t hi;       /* highest segment end */
     unsigned nr_segments;
     struct elf_segment segments[ELF_MAX_SEGMENTS];
+    bool cosmo_note;   /* PT_NOTE "CosmoOS" type 1: a native program (docs/compat/linux/) */
+    uint64_t phdr_vaddr; /* the program header table's address in the image, 0 when not loaded */
+    uint16_t phnum, phent;
 };
 
 /* Validate an x86-64 static executable for the user range

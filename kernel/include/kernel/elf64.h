@@ -27,7 +27,9 @@
 #define EM_AARCH64 183
 
 #define PT_LOAD      1
+#define PT_NOTE      4
 #define PT_INTERP    3
+#define PT_TLS       7
 #define PT_GNU_STACK 0x6474e551u
 
 #define SHT_NULL     0

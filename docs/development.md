@@ -57,19 +57,20 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, and the kernel modules (default) |
+| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, `pkg` and the ports repository, the Linux test programs, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
 | `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
 | `userland` | `out/<arch>-<build>/userland/*.elf`: init, the shell, the coreutils and system tools (`userland/userland.mk`, `docs/userland/`) |
 | `pkg` | `out/<arch>-<build>/userland/pkg.elf`: the package manager, from `pkg/*.c` plus the kernel's SHA-512 and Ed25519 sources compiled for user mode (`pkg/pkg.mk`, `docs/pkg/`) |
 | `ports` | `out/<arch>-<build>/pkg/repo/`: every recipe under `ports/*/port` cross-compiled by `tools/pkgbuild.py` into a signed `.cpk`, plus the signed `INDEX`; signed with `PKGSIGN_KEY` (default `tools/keys/cosmo-dev.key`); `SELFTEST=1` adds the `badsig` and `badsum` fixtures |
+| `linux-tests` | `out/<arch>-<build>/tests/linux/`: `lxhello.elf` and `lxtest.elf` (freestanding raw-Linux-ABI programs, no crt0/libc, so no CosmoOS note) and, when `musl-gcc` is found or `MUSL_GCC=` names a compiler, `hello_musl` (`tests/linux/linux.mk`, `docs/compat/linux/testing.md`); they ride in the boot archive as `tests/linux/*` |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
 | `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*` including `sbin/pkg`, `etc/*` including `etc/pkg/repos.conf` and `etc/pkg/keys/cosmo-dev.pub`, `repo/*` (the ports repository, visible at `/boot/repo`) and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
 | `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc and package-parser algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout, libc, package-parser and Linux-conversion algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -93,7 +94,10 @@ inode-map arithmetic, extent mapping), and `test_libc` (the C library's
 renamed symbols so they coexist with the host libc; `docs/libc/testing.md`),
 and `test_pkg` (the package manager's `manifest.c`, `version.c` and
 `tar.c`: formats, constraints, path confinement, the ustar reader;
-`docs/pkg/testing.md`); `test_crypto` also checks CRC32C. The
+`docs/pkg/testing.md`), and `test_linux` (the Linux personality's pure
+conversions in `compat/linux/convert.c`: open flags, `struct stat`,
+wait status, sockaddr, `getdents64` records, `PROT_*`;
+`docs/compat/linux/testing.md`); `test_crypto` also checks CRC32C. The
 architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
@@ -188,6 +192,25 @@ pkg list` at the prompt in every build. To add a package: a directory
 under `ports/` with a `port` file and its sources; `make ports` picks it
 up and `make reproducible` should still say yes.
 
+### Linux programs
+
+A static x86-64 ELF without the CosmoOS ABI note (which `crt0.S` emits
+for every native program) runs under the Linux personality
+(`compat/linux/`, `docs/compat/linux/`). The boot archive carries
+`tests/linux/lxhello` and `lxtest` (built by the project toolchain
+against the raw Linux ABI) and, when a musl compiler is available,
+`hello_musl` (`musl-gcc -static`); `/etc/rc.test` runs them and the
+harness requires `hello from linux abi`, `LINUXTEST: PASS` and, when
+the build had musl (`HAVE_MUSL=1`, passed by `make test`), `hello from
+musl on Linux x86_64 (pid N)`. CI installs `musl-tools`; on macOS use a
+wrapper that compiles in an Alpine container: `make
+MUSL_GCC=/path/to/musl-gcc-docker.sh test` (recipe in
+`docs/compat/linux/testing.md`). To try a Linux program by hand: build
+it `-static` with musl, add a `tests/linux/<name>=<path>` archive entry
+(or copy it onto the cosmofs disk), boot, and run it from the shell;
+unimplemented calls show up as `linux: pid N: unimplemented system call
+NR` in the debug log.
+
 ## Variables
 
 Set on the command line (`make BUILD=release test`) or in the environment.
@@ -204,6 +227,7 @@ Set on the command line (`make BUILD=release test`) or in the environment.
 | `MODSIGN_KEY` | `tools/keys/cosmo-dev.key` | Ed25519 seed used by `build/module.mk` to sign modules |
 | `LLVM_PREFIX` | empty | Directory prefix (with trailing `/`) for `clang`, `ld.lld`, `lld-link`, `llvm-objcopy`, `llvm-nm`, `llvm-objdump` |
 | `QEMU_MEM` | `256M` | Guest RAM |
+| `MUSL_GCC` | `musl-gcc` if found | A musl C compiler used to build `tests/linux/hello_musl`; empty skips it and sets `HAVE_MUSL=0` for the harness |
 | `QEMU_SMP` | `4` | Guest CPU count; `QEMU_SMP=1 make test` runs the suite on one CPU (the SMP tests then check their single-CPU behaviour) |
 | `QEMU_ACCEL` | `tcg` | QEMU accelerator; `tcg` is the deterministic default, `kvm`/`hvf` are faster where available |
 | `QEMU_EXTRA` | empty | Extra QEMU arguments appended verbatim (for example `-fw_cfg name=opt/cosmo/ipv4,string=10.0.2.20/24,10.0.2.2` to give `eth0` a static address) |
@@ -267,8 +291,9 @@ SELFTEST: smp-mutex        ... ok
 USERTEST: PASS
 SELFTEST: process-user     ... ok
 init: crashing on purpose
+SELFTEST: linux-elf        ... ok
 SELFTEST: process-fault    ... ok
-SELFTEST: PASS (61 tests)
+SELFTEST: PASS (62 tests)
 [ INFO] process: pid 8 'init' created, entry 0x400000, 3 segments
 init: CosmoOS userland, pid 8
 CosmoOS userland ready
@@ -335,7 +360,9 @@ status 0`, `boot complete`, the shell harness's per-command patterns
 (`tests/boot/shelltest.py`), and, when a `SELFTEST:` line appears,
 `SELFTEST: PASS`, `USERTEST: PASS`, `SHTEST: PASS` and the package
 markers `pkg: index updated`, `pkg: installing fortunes-1.0`, `hello,
-world (hello 1.0)` then `(hello 1.1)`, `pkg: verify: 0 problems`),
+world (hello 1.0)` then `(hello 1.1)`, `pkg: verify: 0 problems`, and
+the Linux markers `hello from linux abi`, `LINUXTEST: PASS` and, with
+`HAVE_MUSL=1`, the musl line),
 and rejects any log containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`,
 or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
 kernel report failure through the same port. On hardware or an emulator without the device the port
