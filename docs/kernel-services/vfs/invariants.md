@@ -53,7 +53,9 @@ lengths and block numbers are range-checked before they index anything.
 Check: `cosmofs-format` (an unformatted disk is `-EIO`), `cosmofs-crash`
 (a corrupted superblock is ignored), `cosmofs-csum` (a flipped byte in a
 data block reads `-EIO` and a rewrite repairs it; in a directory block the
-lookup is `-EIO`), `fuzz_cosmofs` (`make fuzz`).
+lookup is `-EIO`), `cosmofs-badmap` (an inode whose two direct runs were
+swapped and re-sealed is `-EIO` on the map fast path, not read as a
+hole), `fuzz_cosmofs` (`make fuzz`).
 
 **V6. Inode numbers are never reused.** `next_ino` only grows; a freed
 inode's slot is zeroed. Check: review. Gap: none needed while the

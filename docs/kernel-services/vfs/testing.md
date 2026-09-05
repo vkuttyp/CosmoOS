@@ -5,7 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Host | `test_cosmofs` (on-disk layout sizes, inode/imap index arithmetic, extent mapping) and the CRC32C vectors in `test_crypto` | `make host-test` |
-| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since audit milestone 7 `cosmofs-holes`, `cosmofs-csum`, `cosmofs-fsync`, `cosmofs-reserve`, `cosmofs-fallback`, `cosmofs-writeback` on RAM devices and `blk-queue` for the block layer's pending queue and bio flags; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
+| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since audit milestone 7 `cosmofs-holes`, `cosmofs-csum`, `cosmofs-fsync`, `cosmofs-reserve`, `cosmofs-fallback`, `cosmofs-writeback`, `cosmofs-badmap` on RAM devices and `blk-queue` for the block layer's pending queue and bio flags; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
 | Host fuzz | `fuzz_cosmofs`: mount, walk and read mutated images under ASan/UBSan (`docs/verification/`) | `make fuzz` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 
@@ -138,13 +138,20 @@ writes one file, and sees the generation and the thread's commit count
 advance without any sync call; nothing further commits while nothing is
 dirty; a discarded unmount and remount still show the file.
 
+**`cosmofs-badmap`** writes a two-run file (blocks 0 and 5), walks
+superblock → IMAP1 → IMAP0 → INODES through the pool, swaps the inode's
+two direct runs and re-seals the block, and mounts: both reads are
+`-EIO`; before the direct runs were validated on the map fast path the
+first block read as a hole of zeros (Greptile on PR #22).
+
 **`blk-queue`** (`kernel/block/blktest.c`): a RAM device in deferred
 mode with two slots takes eight concurrent writes through `blk_submit`
 without one `-EAGAIN`; all complete in order and six waited in the
 pending queue; a `BIO_PREFLUSH | BIO_FUA` write is recorded as flush,
 write, flush (and as write, flush with `BIO_FUA` alone); a flagged read
 and a flagged write past the end are `-EINVAL` before anything is
-submitted.
+submitted; an asynchronous flagged write returns with the caller's `done`
+and `arg` intact (the sequence borrows the field and gives it back).
 
 **`fault-blk`** (`kernel/core/faulttest.c`): completion and submission
 errors injected under a cosmofs workload; every write and sync returns

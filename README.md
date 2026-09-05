@@ -340,8 +340,8 @@ See [docs/development.md](docs/development.md).
   falls back to the older superblock slot when the newer root's tree
   does not load. The block layer gained `BIO_PREFLUSH`/`BIO_FUA` and a
   pending queue, so a driver's queue-full answer never reaches a
-  filesystem; virtio-blk no longer sends unsupported flushes. Seven new
-  self-tests, 112 in total.
+  filesystem; virtio-blk no longer sends unsupported flushes. Eight new
+  self-tests, 113 in total.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
