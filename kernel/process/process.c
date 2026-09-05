@@ -699,6 +699,11 @@ int process_chdir(const char *path)
         vnode_put(vn);
         return -ENOTDIR;
     }
+    rc = vfs_permission(vn, VFS_MAY_EXEC);   /* search permission on the new directory */
+    if (rc) {
+        vnode_put(vn);
+        return rc;
+    }
     arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
     struct vnode *old = cur->cwd;
     cur->cwd = vn;
@@ -720,8 +725,8 @@ unsigned process_info(struct cosmo_procinfo *buf, unsigned count)
             memset(pi, 0, sizeof(*pi));
             pi->pid = p->pid;
             pi->ppid = p->parent_pid;
-            pi->uid = p->cred.uid;
-            pi->gid = p->cred.gid;
+            pi->uid = p->cred.euid;
+            pi->gid = p->cred.egid;
             pi->state = (uint32_t)p->state;
             pi->syscalls = p->syscalls;
             strlcpy(pi->name, p->name, sizeof(pi->name));
@@ -742,6 +747,42 @@ struct process *process_current(void)
 {
     struct thread *t = this_cpu()->current;
     return t ? t->proc : NULL;
+}
+
+const struct credentials *cred_current(void)
+{
+    struct process *p = process_current();
+    return p ? &p->cred : &cred_kernel;
+}
+
+/* setres{u,g}id for the calling process (system calls). The process is
+ * single-threaded, so it is the only writer; the lock keeps the update
+ * atomic against readers on other CPUs once threads exist. */
+int process_setresuid(int64_t ruid, int64_t euid, int64_t suid)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setresuid(&p->cred, ruid, euid, suid);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
+}
+
+int process_setresgid(int64_t rgid, int64_t egid, int64_t sgid)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setresgid(&p->cred, rgid, egid, sgid);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
+}
+
+int process_setgroups(const uint32_t *groups, unsigned n)
+{
+    struct process *p = process_current();
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    int rc = cred_setgroups(&p->cred, groups, n);
+    spin_unlock_irqrestore(&p->lock, s);
+    return rc;
 }
 
 struct process *process_lookup(pid_t pid)

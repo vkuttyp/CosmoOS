@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -428,12 +429,116 @@ static void fpu_selftest(void)
 }
 #endif
 
+/* --- the privilege boundary (Prompt #3, 3.6) --------------------------------
+ *
+ * The parent (root) prepares a root-only directory and file, then spawns
+ * itself with --unpriv-test. The child drops to uid/gid 1000 and tries
+ * every privileged operation and every root-owned object it can reach;
+ * each must be refused. Its exit status is the number of failures. */
+
+#define UNPRIV_UID 1000u
+
+static int g_unpriv_failures;
+#define UCHECK(cond)                                                          \
+    do {                                                                      \
+        if (!(cond)) {                                                        \
+            printf("unpriv: check failed: %s (errno %d)\n", #cond, errno);    \
+            g_unpriv_failures++;                                              \
+        }                                                                     \
+    } while (0)
+
+static int unpriv_test(void)
+{
+    pid_t parent = getppid();
+    uid_t r, e, s;
+    UCHECK(geteuid() == 0);
+    UCHECK(setresgid(UNPRIV_UID, UNPRIV_UID, UNPRIV_UID) == 0);
+    UCHECK(setresuid(UNPRIV_UID, UNPRIV_UID, UNPRIV_UID) == 0);
+    UCHECK(getresuid(&r, &e, &s) == 0 && r == UNPRIV_UID && e == UNPRIV_UID && s == UNPRIV_UID);
+    UCHECK(getgid() == UNPRIV_UID && getegid() == UNPRIV_UID);
+
+    /* No way back up. */
+    UCHECK(setresuid(0, 0, 0) < 0 && errno == EPERM);
+    UCHECK(setresuid((uid_t)-1, 0, (uid_t)-1) < 0 && errno == EPERM);
+    UCHECK(setuid(0) < 0 && errno == EPERM);
+    UCHECK(setresgid(0, (gid_t)-1, (gid_t)-1) < 0 && errno == EPERM);
+    gid_t g = 5;
+    UCHECK(setgroups(1, &g) < 0 && errno == EPERM);
+    UCHECK(setresuid((uid_t)-1, UNPRIV_UID, (uid_t)-1) == 0);   /* an id it holds: allowed */
+
+    /* Privileged system calls. */
+    UCHECK(mount("none", "/mnt", "ramfs", 0) < 0 && errno == EPERM);
+    UCHECK(umount("/") < 0 && errno == EPERM);
+    UCHECK(kill(parent, SIGTERM) < 0 && errno == EPERM);      /* root's process; must survive */
+    char log[256];
+    UCHECK(klog_read(log, sizeof(log)) < 0 && errno == EPERM);
+
+    /* Root-owned objects. */
+    UCHECK(open("/dev/vmm", O_RDWR) < 0 && errno == EACCES);              /* 0600 root */
+    UCHECK(open("/tmp/privtest/secret", O_RDONLY) < 0 && errno == EACCES); /* 0700 directory */
+    UCHECK(chdir("/tmp/privtest") < 0 && errno == EACCES);
+    UCHECK(open("/etc/rc", O_WRONLY) < 0 && errno == EACCES);               /* 0644 root */
+    int fd = open("/etc/rc", O_RDONLY);
+    UCHECK(fd >= 0);                                                       /* world-readable */
+    if (fd >= 0)
+        close(fd);
+    UCHECK(mkdir("/etc/unpriv", 0755) < 0 && errno == EACCES);              /* 0755 root directory */
+    UCHECK(unlink("/etc/rc") < 0 && errno == EACCES);
+    UCHECK(rename("/etc/rc", "/tmp/rc") < 0 && errno == EACCES);
+    const char *argv[] = { "secret", NULL };
+    UCHECK(spawnve("/tmp/privtest/secret", argv, NULL, NULL, 0) < 0 && errno == EACCES);
+    UCHECK(spawnve("/tmp/privtest/../privtest/secret", argv, NULL, NULL, 0) < 0 && errno == EACCES);
+
+    /* What it may do: its own files in /tmp, and running installed programs. */
+    fd = open("/tmp/unpriv.txt", O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    UCHECK(fd >= 0 && write(fd, "mine", 4) == 4);
+    if (fd >= 0)
+        close(fd);
+    struct stat st;
+    UCHECK(stat("/tmp/unpriv.txt", &st) == 0 && st.st_uid == UNPRIV_UID && st.st_gid == UNPRIV_UID &&
+           st.st_mode == 0600);
+    UCHECK(mkdir("/tmp/unprivdir", 0700) == 0 && rmdir("/tmp/unprivdir") == 0);
+    UCHECK(unlink("/tmp/unpriv.txt") == 0);
+    const char *true_argv[] = { "true", NULL };
+    pid_t t = spawnvp("true", true_argv, NULL, 0);
+    int status = -1;
+    UCHECK(t > 0 && waitpid(t, &status, 0) == t && status == 0);
+    return g_unpriv_failures;
+}
+
+static void priv_selftest(void)
+{
+    /* Root's fixtures: a directory nobody else may enter, a file inside it. */
+    CHECK(mkdir("/tmp/privtest", 0700) == 0);
+    int fd = open("/tmp/privtest/secret", O_WRONLY | O_CREAT, 0600);
+    CHECK(fd >= 0 && write(fd, "top\n", 4) == 4);
+    if (fd >= 0)
+        close(fd);
+    struct stat st;
+    CHECK(stat("/tmp/privtest/secret", &st) == 0 && st.st_uid == 0 && st.st_mode == 0600);
+    CHECK(stat("/tmp", &st) == 0 && st.st_mode == 01777);
+    uid_t r, e, s;
+    CHECK(getresuid(&r, &e, &s) == 0 && r == 0 && e == 0 && s == 0);
+    CHECK(getgroups(0, NULL) == 0);
+
+    const char *argv[] = { "init", "--unpriv-test", NULL };
+    pid_t pid = spawnve("/boot/init", argv, NULL, NULL, 0);
+    CHECK(pid > 0);
+    int status = -1;
+    CHECK(waitpid(pid, &status, 0) == pid);
+    CHECK(status == 0);   /* the number of refused-but-allowed operations */
+
+    CHECK(unlink("/tmp/privtest/secret") == 0 && rmdir("/tmp/privtest") == 0);
+    puts("usertest: privilege boundary ok");
+}
+
 static void selftest(void)
 {
     fs_selftest();
     net_selftest();
     proc_selftest();
     fpu_selftest();
+    priv_selftest();
 
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
     CHECK(cosmo_write(1, "", 0) == 0);
@@ -545,6 +650,8 @@ int main(int argc, char **argv)
     }
     if (argc >= 3 && strcmp(argv[1], "--fpu-partner") == 0)
         return fpu_hold((uint8_t)atoi(argv[2]));
+    if (argc >= 2 && strcmp(argv[1], "--unpriv-test") == 0)
+        return unpriv_test();
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
         selftest();
         if (g_failures == 0) {

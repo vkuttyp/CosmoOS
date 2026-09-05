@@ -7,6 +7,7 @@
  */
 
 #include <kernel/bootarchive.h>
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -54,6 +55,10 @@ static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t
     n->parent = parent;
     vn->type = type;
     vn->mode = mode;
+    /* Owned by whoever creates it: the kernel (root) for the boot
+     * namespace, the calling process afterwards. */
+    vn->uid = cred_current()->euid;
+    vn->gid = cred_current()->egid;
     vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : &ramfs_file_ops;
     vn->fs_priv = n;
     vn->flags |= VNODE_PINNED;   /* the reference from vnode_alloc is the pin */
@@ -440,12 +445,18 @@ static void ensure_parents(const char *path)
 
 void ramfs_populate_boot(void)
 {
-    static const char *const dirs[] = { "/boot", "/boot/modules", "/boot/tests", "/tmp", "/mnt", "/dev",
-                                        "/bin",  "/sbin",         "/etc" };
+    static const struct {
+        const char *path;
+        uint32_t mode;
+    } dirs[] = {
+        { "/boot", 0755 }, { "/boot/modules", 0755 }, { "/boot/tests", 0755 },
+        { "/tmp", 01777 },   /* world-writable scratch space (the sticky bit is recorded, not yet enforced) */
+        { "/mnt", 0755 },  { "/dev", 0755 }, { "/bin", 0755 }, { "/sbin", 0755 }, { "/etc", 0755 },
+    };
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
-        int rc = vfs_mkdir(NULL, dirs[i], 0755);
+        int rc = vfs_mkdir(NULL, dirs[i].path, dirs[i].mode);
         if (rc)
-            kwarn("ramfs: cannot create %s (%d)", dirs[i], rc);
+            kwarn("ramfs: cannot create %s (%d)", dirs[i].path, rc);
     }
     unsigned copied = 0;
     for (unsigned i = 0; i < bootarchive_count(); i++) {

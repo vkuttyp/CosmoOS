@@ -11,6 +11,7 @@
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/cred.h>
 #include <kernel/page.h>
 #include <kernel/string.h>
 
@@ -239,6 +240,8 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
     in->mtime_ns = vn->mtime_ns;
     in->ctime_ns = vn->ctime_ns;
     in->mode = CFS_MODE(vn->type == VNODE_DIR ? CFS_TYPE_DIR : CFS_TYPE_REG, vn->mode);
+    in->uid = vn->uid;
+    in->gid = vn->gid;
     return cfs_inode_write(fs, vn->ino, in);
 }
 
@@ -409,6 +412,8 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     struct cfs_inode in;
     memset(&in, 0, sizeof(in));
     in.mode = CFS_MODE(type, mode);
+    in.uid = cred_current()->euid;   /* owned by its creator */
+    in.gid = cred_current()->egid;
     in.nlink = type == CFS_TYPE_DIR ? 2 : 1;
     in.ino = ino;
     in.parent = dir->ino;

@@ -70,7 +70,17 @@
 #define SYS_vcpu_regs   47  /* (int vcpu, struct cosmo_vcpu_regs *regs, int set) -> 0 */
 #define SYS_vcpu_run    48  /* (int vcpu, struct cosmo_vm_exit *exit) -> 0; runs until an exit */
 #define SYS_vcpu_irq    49  /* (int vcpu, unsigned vector) -> 0: make a vector pending (>= 32) */
-#define SYS_COUNT       50
+/* Credentials (POSIX real/effective/saved ids; -1 keeps an id). Unprivileged
+ * callers may set an id only to one they already hold; euid 0 is privileged. */
+#define SYS_setresuid   50  /* (int64_t ruid, int64_t euid, int64_t suid) -> 0 */
+#define SYS_setresgid   51  /* (int64_t rgid, int64_t egid, int64_t sgid) -> 0 */
+#define SYS_getresuid   52  /* (uint32_t *ruid, uint32_t *euid, uint32_t *suid) -> 0 */
+#define SYS_getresgid   53  /* (uint32_t *rgid, uint32_t *egid, uint32_t *sgid) -> 0 */
+#define SYS_setgroups   54  /* (const uint32_t *groups, size_t n) -> 0; privileged; n <= 16 */
+#define SYS_getgroups   55  /* (uint32_t *groups, size_t n) -> count; n == 0 queries the count */
+#define SYS_COUNT       56
+
+#define COSMO_NGROUPS_MAX 16
 
 /* spawn: the child receives exactly the mapped handles (same rights).
  * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */

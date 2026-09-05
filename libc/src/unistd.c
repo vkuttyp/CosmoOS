@@ -43,6 +43,31 @@ int dup(int fd) { return (int)__syscall_ret(cosmo_dup(fd, -1)); }
 int dup2(int fd, int newfd) { return (int)__syscall_ret(cosmo_dup(fd, newfd)); }
 int pipe(int fd[2]) { return (int)__syscall_ret(cosmo_pipe(fd)); }
 
+/* Credentials (uid_t is unsigned; -1 as an argument means "keep"). */
+static long id_arg(unsigned v)
+{
+    return v == (unsigned)-1 ? -1 : (long)v;
+}
+uid_t getuid(void) { uint32_t r = 0, e, s; cosmo_getresuid(&r, &e, &s); return r; }
+uid_t geteuid(void) { uint32_t r, e = 0, s; cosmo_getresuid(&r, &e, &s); return e; }
+gid_t getgid(void) { uint32_t r = 0, e, s; cosmo_getresgid(&r, &e, &s); return r; }
+gid_t getegid(void) { uint32_t r, e = 0, s; cosmo_getresgid(&r, &e, &s); return e; }
+int setresuid(uid_t r, uid_t e, uid_t s) { return (int)__syscall_ret(cosmo_setresuid(id_arg(r), id_arg(e), id_arg(s))); }
+int setresgid(gid_t r, gid_t e, gid_t s) { return (int)__syscall_ret(cosmo_setresgid(id_arg(r), id_arg(e), id_arg(s))); }
+int getresuid(uid_t *r, uid_t *e, uid_t *s) { return (int)__syscall_ret(cosmo_getresuid(r, e, s)); }
+int getresgid(gid_t *r, gid_t *e, gid_t *s) { return (int)__syscall_ret(cosmo_getresgid(r, e, s)); }
+int setuid(uid_t uid)
+{
+    /* Root sets all three ids; anyone else only the effective one. */
+    return geteuid() == 0 ? setresuid(uid, uid, uid) : setresuid((uid_t)-1, uid, (uid_t)-1);
+}
+int setgid(gid_t gid)
+{
+    return geteuid() == 0 ? setresgid(gid, gid, gid) : setresgid((gid_t)-1, gid, (gid_t)-1);
+}
+int getgroups(int size, gid_t list[]) { return size < 0 ? (errno = EINVAL, -1) : (int)__syscall_ret(cosmo_getgroups(list, (size_t)size)); }
+int setgroups(size_t size, const gid_t *list) { return (int)__syscall_ret(cosmo_setgroups(list, size)); }
+
 int mount(const char *source, const char *target, const char *fstype, unsigned flags)
 {
     return (int)__syscall_ret(cosmo_mount(source, target, fstype, flags));

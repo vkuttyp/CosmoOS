@@ -379,7 +379,7 @@ static int64_t sys_sync(struct syscall_args *a)
 
 static int64_t sys_mount(struct syscall_args *a)
 {
-    if (process_current()->cred.uid != 0)
+    if (!cred_privileged(cred_current()))
         return -EPERM;
     char source[BLKDEV_NAME_MAX], target[VFS_PATH_MAX], fstype[16];
     int rc = strncpy_from_user(source, a->a[0], sizeof(source));
@@ -406,7 +406,7 @@ static int64_t sys_mount(struct syscall_args *a)
 
 static int64_t sys_umount(struct syscall_args *a)
 {
-    if (process_current()->cred.uid != 0)
+    if (!cred_privileged(cred_current()))
         return -EPERM;
     char target[VFS_PATH_MAX];
     int rc = get_path(a->a[0], target);
@@ -461,7 +461,7 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *a)
 static int64_t sys_socket(struct syscall_args *a)
 {
     struct socket *s;
-    int rc = ksock_create((int)a->a[0], (int)a->a[1], process_current()->cred.uid, &s);
+    int rc = ksock_create((int)a->a[0], (int)a->a[1], process_current()->cred.euid, &s);
     if (rc)
         return rc;
     int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
@@ -751,12 +751,68 @@ static int64_t sys_kill(struct syscall_args *a)
         return -ESRCH;
     struct process *cur = process_current();
     int rc = 0;
-    if (cur->cred.uid != 0 && cur->cred.uid != target->cred.uid)
+    if (!cred_may_signal(&cur->cred, &target->cred))
         rc = -EPERM;
     else
         process_kill(target, sig);
     process_put(target);
     return rc;
+}
+
+/* --- credentials (Prompt #3, 3.6) ------------------------------------------- */
+
+static int64_t sys_setresuid(struct syscall_args *a)
+{
+    return process_setresuid((int64_t)a->a[0], (int64_t)a->a[1], (int64_t)a->a[2]);
+}
+
+static int64_t sys_setresgid(struct syscall_args *a)
+{
+    return process_setresgid((int64_t)a->a[0], (int64_t)a->a[1], (int64_t)a->a[2]);
+}
+
+static int64_t put_three(struct syscall_args *a, uint32_t r, uint32_t e, uint32_t s)
+{
+    if (copy_to_user(a->a[0], &r, sizeof(r)) || copy_to_user(a->a[1], &e, sizeof(e)) ||
+        copy_to_user(a->a[2], &s, sizeof(s)))
+        return -EFAULT;
+    return 0;
+}
+
+static int64_t sys_getresuid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    return put_three(a, c->ruid, c->euid, c->suid);
+}
+
+static int64_t sys_getresgid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    return put_three(a, c->rgid, c->egid, c->sgid);
+}
+
+static int64_t sys_setgroups(struct syscall_args *a)
+{
+    size_t n = (size_t)a->a[1];
+    if (n > CRED_NGROUPS_MAX)
+        return -EINVAL;
+    uint32_t groups[CRED_NGROUPS_MAX];
+    if (n && copy_from_user(groups, a->a[0], n * sizeof(groups[0])))
+        return -EFAULT;
+    return process_setgroups(groups, (unsigned)n);
+}
+
+static int64_t sys_getgroups(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    size_t n = (size_t)a->a[1];
+    if (n == 0)
+        return c->ngroups;
+    if (n < c->ngroups)
+        return -EINVAL;
+    if (c->ngroups && copy_to_user(a->a[0], c->groups, c->ngroups * sizeof(c->groups[0])))
+        return -EFAULT;
+    return c->ngroups;
 }
 
 static int64_t sys_pipe(struct syscall_args *a)
@@ -860,6 +916,10 @@ static int64_t sys_procinfo(struct syscall_args *a)
 
 static int64_t sys_klog(struct syscall_args *a)
 {
+    /* The kernel log carries kernel addresses and every process's
+     * activity: privileged, like dmesg on a hardened system. */
+    if (!cred_privileged(cred_current()))
+        return -EPERM;
     size_t len = (size_t)a->a[1];
     if (len > KLOG_RING_SIZE)
         len = KLOG_RING_SIZE;
@@ -994,6 +1054,12 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_vcpu_regs] = sys_vcpu_regs,
     [SYS_vcpu_run] = sys_vcpu_run,
     [SYS_vcpu_irq] = sys_vcpu_irq,
+    [SYS_setresuid] = sys_setresuid,
+    [SYS_setresgid] = sys_setresgid,
+    [SYS_getresuid] = sys_getresuid,
+    [SYS_getresgid] = sys_getresgid,
+    [SYS_setgroups] = sys_setgroups,
+    [SYS_getgroups] = sys_getgroups,
 };
 
 const struct personality personality_native = {

@@ -13,6 +13,7 @@
 #define KERNEL_PROCESS_H
 
 #include <kernel/completion.h>
+#include <kernel/cred.h>
 #include <kernel/handle.h>
 #include <kernel/list.h>
 #include <kernel/object.h>
@@ -33,11 +34,6 @@ typedef uint32_t pid_t;
 #define USER_MMAP_BASE  0x0000100000000000ULL   /* hint-less mmap searches upward from here */
 
 enum process_state { PROCESS_RUNNING, PROCESS_EXITING, PROCESS_EXITED };
-
-struct credentials {
-    uint32_t uid;
-    uint32_t gid;
-};
 
 struct syscall_args;
 typedef int64_t (*syscall_fn)(struct syscall_args *a);
@@ -127,6 +123,11 @@ void process_return_to_user(void);
 
 /* Working directory. */
 int process_chdir(const char *path);
+
+/* Credentials of the calling process (kernel/cred.h rules; -1 keeps an id). */
+int process_setresuid(int64_t ruid, int64_t euid, int64_t suid);
+int process_setresgid(int64_t rgid, int64_t egid, int64_t sgid);
+int process_setgroups(const uint32_t *groups, unsigned n);
 int path_normalize(const char *base, const char *rel, char *out, size_t n);
 
 /* Introspection for procinfo: fills up to `count` records, returns the total. */

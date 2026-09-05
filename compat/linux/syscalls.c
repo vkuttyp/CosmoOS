@@ -88,10 +88,10 @@ unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t ran
     AUX(LX_AT_PAGESZ, PAGE_SIZE);
     AUX(LX_AT_ENTRY, info->entry);
     AUX(LX_AT_RANDOM, random_addr);
-    AUX(LX_AT_UID, p->cred.uid);
-    AUX(LX_AT_EUID, p->cred.uid);
-    AUX(LX_AT_GID, p->cred.gid);
-    AUX(LX_AT_EGID, p->cred.gid);
+    AUX(LX_AT_UID, p->cred.ruid);
+    AUX(LX_AT_EUID, p->cred.euid);
+    AUX(LX_AT_GID, p->cred.rgid);
+    AUX(LX_AT_EGID, p->cred.egid);
     AUX(LX_AT_SECURE, 0);
     AUX(LX_AT_HWCAP, 0);
     AUX(LX_AT_CLKTCK, 100);
@@ -732,8 +732,106 @@ static int64_t lx_madvise(struct syscall_args *a) { (void)a; return 0; }
 static int64_t lx_exit(struct syscall_args *a) { process_exit((int)a->a[0] & 0xff); }
 static int64_t lx_getpid(struct syscall_args *a) { (void)a; return process_current()->pid; }
 static int64_t lx_getppid(struct syscall_args *a) { (void)a; return process_current()->parent_pid; }
-static int64_t lx_getuid(struct syscall_args *a) { (void)a; return process_current()->cred.uid; }
-static int64_t lx_getgid(struct syscall_args *a) { (void)a; return process_current()->cred.gid; }
+static int64_t lx_getuid(struct syscall_args *a) { (void)a; return process_current()->cred.ruid; }
+static int64_t lx_getgid(struct syscall_args *a) { (void)a; return process_current()->cred.rgid; }
+static int64_t lx_geteuid(struct syscall_args *a) { (void)a; return process_current()->cred.euid; }
+static int64_t lx_getegid(struct syscall_args *a) { (void)a; return process_current()->cred.egid; }
+
+/* Linux ids are 32-bit with -1 meaning "keep"; the kernel takes int64. */
+static int64_t lx_id(uint64_t v)
+{
+    return (uint32_t)v == 0xFFFFFFFFu ? -1 : (int64_t)(uint32_t)v;
+}
+
+static int64_t lx_setresuid(struct syscall_args *a)
+{
+    return process_setresuid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
+}
+
+static int64_t lx_setresgid(struct syscall_args *a)
+{
+    return process_setresgid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
+}
+
+/* setuid(u): root sets all three; anyone else sets the effective id to a
+ * real or saved one. setgid likewise. */
+static int64_t lx_setuid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    int64_t u = lx_id(a->a[0]);
+    return cred_privileged(c) ? process_setresuid(u, u, u) : process_setresuid(-1, u, -1);
+}
+
+static int64_t lx_setgid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    int64_t g = lx_id(a->a[0]);
+    return cred_privileged(c) ? process_setresgid(g, g, g) : process_setresgid(-1, g, -1);
+}
+
+/* setreuid(r, e): the saved id follows the effective one whenever the
+ * real id is set or the effective id becomes something other than the
+ * old real id (POSIX). */
+static int64_t lx_setreuid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
+    int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->ruid)) ? (e != -1 ? e : (int64_t)c->euid) : -1;
+    return process_setresuid(r, e, s);
+}
+
+static int64_t lx_setregid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    int64_t r = lx_id(a->a[0]), e = lx_id(a->a[1]);
+    int64_t s = (r != -1 || (e != -1 && (uint32_t)e != c->rgid)) ? (e != -1 ? e : (int64_t)c->egid) : -1;
+    return process_setresgid(r, e, s);
+}
+
+static int64_t lx_getres3(struct syscall_args *a, uint32_t r, uint32_t e, uint32_t s)
+{
+    if (copy_to_user(a->a[0], &r, 4) || copy_to_user(a->a[1], &e, 4) || copy_to_user(a->a[2], &s, 4))
+        return -EFAULT;
+    return 0;
+}
+
+static int64_t lx_getresuid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    return lx_getres3(a, c->ruid, c->euid, c->suid);
+}
+
+static int64_t lx_getresgid(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    return lx_getres3(a, c->rgid, c->egid, c->sgid);
+}
+
+static int64_t lx_getgroups(struct syscall_args *a)
+{
+    const struct credentials *c = cred_current();
+    int n = (int)a->a[0];
+    if (n < 0)
+        return -EINVAL;
+    if (n == 0)
+        return c->ngroups;
+    if ((unsigned)n < c->ngroups)
+        return -EINVAL;
+    if (c->ngroups && copy_to_user(a->a[1], c->groups, c->ngroups * 4))
+        return -EFAULT;
+    return c->ngroups;
+}
+
+static int64_t lx_setgroups(struct syscall_args *a)
+{
+    size_t n = (size_t)a->a[0];
+    if (n > CRED_NGROUPS_MAX)
+        return -EINVAL;
+    uint32_t groups[CRED_NGROUPS_MAX];
+    if (n && copy_from_user(groups, a->a[1], n * 4))
+        return -EFAULT;
+    return process_setgroups(groups, (unsigned)n);
+}
 static int64_t lx_zero(struct syscall_args *a) { (void)a; return 0; }
 static int64_t lx_nosys(struct syscall_args *a) { (void)a; return -ENOSYS; }
 static int64_t lx_getpgrp(struct syscall_args *a) { (void)a; return process_current()->pid; }
@@ -806,7 +904,7 @@ static int64_t lx_kill(struct syscall_args *a)
         return -ESRCH;
     struct process *cur = process_current();
     int rc = 0;
-    if (cur->cred.uid != 0 && cur->cred.uid != target->cred.uid)
+    if (!cred_may_signal(&cur->cred, &target->cred))
         rc = -EPERM;
     else
         process_kill(target, sig < 32 ? sig : 9);
@@ -1032,7 +1130,7 @@ static int64_t lx_socket(struct syscall_args *a)
         return -EINVAL;
     struct socket *s;
     int rc = ksock_create(family == LX_AF_INET ? COSMO_AF_INET : COSMO_AF_INET6,
-                          type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, process_current()->cred.uid,
+                          type == LX_SOCK_STREAM ? COSMO_SOCK_STREAM : COSMO_SOCK_DGRAM, process_current()->cred.euid,
                           &s);
     if (rc)
         return rc;
@@ -1301,8 +1399,18 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_sysinfo] = lx_nosys,
     [LX_getuid] = lx_getuid,
     [LX_getgid] = lx_getgid,
-    [LX_geteuid] = lx_getuid,
-    [LX_getegid] = lx_getgid,
+    [LX_geteuid] = lx_geteuid,
+    [LX_getegid] = lx_getegid,
+    [LX_setuid] = lx_setuid,
+    [LX_setgid] = lx_setgid,
+    [LX_setreuid] = lx_setreuid,
+    [LX_setregid] = lx_setregid,
+    [LX_getgroups] = lx_getgroups,
+    [LX_setgroups] = lx_setgroups,
+    [LX_setresuid] = lx_setresuid,
+    [LX_getresuid] = lx_getresuid,
+    [LX_setresgid] = lx_setresgid,
+    [LX_getresgid] = lx_getresgid,
     [LX_setpgid] = lx_zero,
     [LX_getppid] = lx_getppid,
     [LX_getpgrp] = lx_getpgrp,
