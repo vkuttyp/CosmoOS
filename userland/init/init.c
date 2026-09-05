@@ -408,6 +408,10 @@ static int probe(const char *kind)
         cosmo_close(h[1]);
         return 0;
     }
+    if (strcmp(kind, "hold") == 0) {
+        cosmo_sleep_ns(30000000);   /* stay alive long enough to be counted */
+        return 0;
+    }
     if (strncmp(kind, "uid-is:", 7) == 0) {
         unsigned want = (unsigned)strtoul(kind + 7, NULL, 10);
         return (getuid() == want && geteuid() == want && getgid() == want && getgroups(0, NULL) == 0) ? 0 : 1;

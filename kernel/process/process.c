@@ -336,6 +336,8 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     } else {
         p->rlim = rlimits_default;
     }
+    if (attr && attr->rlim)
+        p->rlim = *attr->rlim;   /* a kernel creator naming the child's limits (tests, a future service manager) */
     if (attr && attr->set_cred) {
         /* COSMO_SPAWN_SETCRED, validated by the caller: the child's three
          * ids are the named ones and it starts with no supplementary
@@ -348,11 +350,6 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
                                                                         : HANDLE_TABLE_SIZE;
     p->log_tokens = LOG_BUCKET;
     p->log_refill_ns = clock_now_ns();
-    /* COSMO_RLIMIT_NPROC: the child counts against its own real uid. */
-    if (process_count_uid(p->cred.ruid) + 1 > p->rlim.v[COSMO_RLIMIT_NPROC]) {
-        rc = -EAGAIN;
-        goto fail;
-    }
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
         vnode_get(attr->cwd);
@@ -427,8 +424,23 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE);
     }
 
-    /* Register. */
+    /* Register. The COSMO_RLIMIT_NPROC admission is decided under the
+     * same lock that publishes the process, so two concurrent spawns near
+     * the limit cannot both pass on a stale count: the child counts
+     * against its own real uid. */
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    if (p->rlim.v[COSMO_RLIMIT_NPROC] != COSMO_RLIM_INFINITY) {
+        uint64_t same = 0;
+        struct process *q;
+        list_for_each_entry(q, &g_processes, all_link)
+            if (q->cred.ruid == p->cred.ruid)
+                same++;
+        if (same + 1 > p->rlim.v[COSMO_RLIMIT_NPROC]) {
+            spin_unlock_irqrestore(&g_process_table_lock, s);
+            rc = -EAGAIN;
+            goto fail;
+        }
+    }
     p->pid = g_next_pid++;
     list_push_back(&g_processes, &p->all_link);
     g_process_count++;

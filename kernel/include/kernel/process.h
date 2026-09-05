@@ -99,6 +99,7 @@ struct process_spawn_attr {
     const char *cwd_path;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
+    const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
 };
 
 /* The credentials a spawn request names for the child. */

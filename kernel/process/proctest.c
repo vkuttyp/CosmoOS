@@ -351,6 +351,92 @@ bool selftest_process_rlimit(const char **reason)
     return true;
 }
 
+/* Two kernel threads create children of uid 4242 under a limit of four
+ * while a third samples the count: the admission is decided under the
+ * table lock, so the count never exceeds the limit (Greptile on PR #21
+ * found the earlier count-then-register window). */
+struct nproc_stress {
+    const void *image;
+    size_t size;
+    unsigned ok, eagain;
+    struct process *kids[8];
+};
+
+static const struct rlimits g_nproc_rlim = {
+    .v = { [COSMO_RLIMIT_AS] = 2ull << 30, [COSMO_RLIMIT_MEM] = 128ull << 20, [COSMO_RLIMIT_NOFILE] = 64,
+           [COSMO_RLIMIT_NPROC] = 4, [COSMO_RLIMIT_VMEM] = 0 },
+};
+
+static void nproc_spawner(void *arg)
+{
+    struct nproc_stress *st = arg;
+    static const char *const argv[] = { "init", "--probe", "hold", NULL };
+    struct process_spawn_attr attr = { .set_cred = true, .uid = 4242, .gid = 4242, .rlim = &g_nproc_rlim };
+    for (unsigned i = 0; i < 8; i++) {
+        struct process *p = NULL;
+        int rc = process_create_from_elf(st->image, st->size, "hold", argv, NULL, &attr, &p);
+        if (rc == 0) {
+            st->kids[st->ok++] = p;
+        } else if (rc == -EAGAIN) {
+            st->eagain++;
+            thread_sleep_ms(5);
+        }
+    }
+}
+
+static volatile bool g_nproc_stop;
+static volatile unsigned g_nproc_peak;
+
+static void nproc_sampler(void *arg)
+{
+    (void)arg;
+    while (!g_nproc_stop) {
+        unsigned n = process_count_uid(4242);
+        if (n > g_nproc_peak)
+            g_nproc_peak = n;
+        sched_yield();
+    }
+}
+
+bool selftest_process_nproc(const char **reason)
+{
+    const void *image;
+    size_t size;
+    if (!bootarchive_find("init", &image, &size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    struct nproc_stress a = { .image = image, .size = size }, b = { .image = image, .size = size };
+    g_nproc_stop = false;
+    g_nproc_peak = 0;
+    struct thread *sampler = thread_create(nproc_sampler, NULL, "nproc-sampler", SCHED_PRIO_DEFAULT);
+    struct thread *ta = thread_create(nproc_spawner, &a, "nproc-a", SCHED_PRIO_DEFAULT);
+    struct thread *tb = thread_create(nproc_spawner, &b, "nproc-b", SCHED_PRIO_DEFAULT);
+    CHECK(sampler && ta && tb);
+    thread_join(ta);
+    thread_join(tb);
+    for (unsigned i = 0; i < a.ok; i++) {
+        process_wait_exit(a.kids[i]);
+        process_put(a.kids[i]);
+    }
+    for (unsigned i = 0; i < b.ok; i++) {
+        process_wait_exit(b.kids[i]);
+        process_put(b.kids[i]);
+    }
+    g_nproc_stop = true;
+    thread_join(sampler);
+    CHECK(a.ok + b.ok >= 4);
+    CHECK(a.eagain + b.eagain >= 1);   /* sixteen attempts, at most four alive */
+    CHECK(g_nproc_peak <= 4);
+    uint64_t deadline = clock_now_ns() + 1000000000ULL;
+    while (process_count_uid(4242) != 0 && clock_now_ns() < deadline)
+        sched_yield();
+    CHECK(process_count_uid(4242) == 0);
+    kinfo("selftest: process-nproc: %u admitted, %u refused across two spawners; peak %u of a limit of 4",
+          a.ok + b.ok, a.eagain + b.eagain, g_nproc_peak);
+    return true;
+}
+
 bool selftest_process_reject(const char **reason)
 {
     /* A kernel image is a valid ELF but not a user executable. */
