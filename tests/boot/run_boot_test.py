@@ -84,6 +84,16 @@ PKGTEST_MARKERS = [
 LINUXTEST_MARKERS = [
     r"^hello from linux abi$",
     r"^LINUXTEST: PASS$",
+    r"^lxinterp: ok$",
+    r"^lxdyn: ok$",
+    # lxsig (docs/compat/linux/testing.md): each mode dies by its signal.
+    r"^lxsig term: 143$",
+    r"^lxsig segv: 139$",
+    r"^lxsig ill: 132$",
+    r"^lxsig badret: 139$",
+    r"^lxsig badstack: 139$",
+    r"^lxsig group: 7$",
+    r"^lxsig lastthread: 5$",
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 
@@ -314,15 +324,16 @@ def main():
                 hits = [ln for ln in lines if re.search(pat, ln)]
                 if hits:
                     failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
-            for pat in LINUXTEST_MARKERS:
-                if not any(re.search(pat, ln) for ln in lines):
-                    failures.append(f"missing marker /{pat}/ (Linux ABI test)")
             if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
                 failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
         else:
-            for pat in (r"^HVTEST: skipped$", r"^LINUXTEST: skipped$"):
+            for pat in (r"^HVTEST: skipped$",):
                 if not any(re.search(pat, ln) for ln in lines):
                     failures.append(f"missing marker /{pat}/ (x86-only sections must report skipped)")
+        # The Linux ABI programs run on both architectures (milestone 10).
+        for pat in LINUXTEST_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (Linux ABI test)")
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:
         try:

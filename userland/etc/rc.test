@@ -67,7 +67,7 @@ cat /usr/share/demolib/VERSION
 pkg remove demo-b demo-a demolib || FAILS=1
 pkg list
 # Linux programs (docs/compat/linux/testing.md): no CosmoOS note, so the kernel runs them as Linux.
-# Only x86-64 builds carry them; elsewhere the section is skipped (the harness knows the architecture).
+# Both architectures carry them (milestone 10); a build without them reports the section skipped.
 sh -c 'ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || exit 0; sh /etc/rc.linux' || FAILS=1
 ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || echo "LINUXTEST: skipped"
 # Virtualization (docs/kernel-services/virtualization/testing.md): run a guest under vmctl.
