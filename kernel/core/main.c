@@ -27,6 +27,7 @@
 #include <kernel/futex.h>
 #include <kernel/hv.h>
 #include <kernel/process.h>
+#include <kernel/quiesce.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -132,6 +133,7 @@ void kernel_main(const struct cosmoboot_info *info)
     ipi_init();
     timer_init();
     sched_init();
+    quiesce_init();
     tty_init();
     process_init();
     futex_init();

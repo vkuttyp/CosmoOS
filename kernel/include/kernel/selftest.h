@@ -45,6 +45,11 @@ bool selftest_smp_wake(const char **reason);
 bool selftest_smp_ticks(const char **reason);
 bool selftest_smp_mutex(const char **reason);
 bool selftest_smp_ipi_storm(const char **reason);
+bool selftest_quiesce_grace(const char **reason);
+bool selftest_quiesce_call(const char **reason);
+bool selftest_irq_sync(const char **reason);
+bool selftest_timer_cancel_sync(const char **reason);
+bool selftest_quiesce_stress(const char **reason);
 
 /* Phase 4: kernel/process/proctest.c */
 bool selftest_objects(const char **reason);
@@ -93,6 +98,10 @@ bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
 bool selftest_net_tcp_mss(const char **reason);
 bool selftest_net_harness(const char **reason);
+bool selftest_net_netif_lifetime(const char **reason);
+bool selftest_net_accept_race(const char **reason);
+bool selftest_blk_lifetime(const char **reason);
+bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_npt(const char **reason);
 bool selftest_hv_guest_pio(const char **reason);

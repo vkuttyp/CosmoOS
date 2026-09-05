@@ -44,8 +44,14 @@ static void model_unlock(void)
 
 static void device_release(struct kobject *obj)
 {
-    /* Devices are bus-owned and live until shutdown in this phase. */
-    (void)obj;
+    struct device *dev = container_of(obj, struct device, obj);
+    KASSERT(list_empty(&dev->bus_link));   /* unregistered before the last put */
+    dev->release(dev);
+}
+
+void device_release_static(struct device *dev)
+{
+    (void)dev;
 }
 
 static const struct kobject_type device_type = {
@@ -172,14 +178,21 @@ static void unbind(struct device *dev)
 int device_register(struct device *dev)
 {
     KASSERT(g_initialized && dev->bus != NULL);
+    if (dev->release == NULL) {
+        kerror("device: %s registered without a release", dev->name);
+        return -EINVAL;
+    }
     model_lock();
     struct device *d;
     list_for_each_entry(d, &dev->bus->devices, bus_link) {
         if (strcmp(d->name, dev->name) == 0) {
             model_unlock();
-            return -EEXIST;
+            return -EEXIST;   /* no owner count taken: the caller's failure path frees the storage directly */
         }
     }
+    /* Accepted: record the release's owner module only now, so a failed
+     * registration leaves nothing to balance. */
+    kobject_track_code(&dev->obj, (uintptr_t)dev->release);
     list_push_back(&dev->bus->devices, &dev->bus_link);
     dev->bus->nr_devices++;
     kobject_get(&dev->obj);   /* the bus's reference */
@@ -356,6 +369,7 @@ void device_dump(void)
 EXPORT_SYMBOL(bus_register);
 EXPORT_SYMBOL(bus_find);
 EXPORT_SYMBOL(device_setup);
+EXPORT_SYMBOL(device_release_static);
 EXPORT_SYMBOL(device_add_resource);
 EXPORT_SYMBOL(device_resource);
 EXPORT_SYMBOL(device_register);

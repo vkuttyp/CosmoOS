@@ -242,7 +242,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
 
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     struct udp_pcb *pcb = lookup(dst.family, &dst, &src);
-    struct socket *sock = pcb ? pcb->sock : NULL;
+    struct socket *sock = NULL;
     bool queued = false;
     if (pcb) {
         queued = mbufq_enqueue(&pcb->rxq, m);
@@ -250,6 +250,11 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             pcb->rx_dropped++;
             STAT(rx_queue_full);
         }
+        /* The wake happens after the unlock; hold the socket across it.
+         * Its release clears pcb->sock under g_lock but starts at count
+         * zero, so only a tryget is safe here (design.md, "UDP"). */
+        if (queued && pcb->sock && kobject_tryget(&pcb->sock->obj))
+            sock = pcb->sock;
     }
     spin_unlock_irqrestore(&g_lock, s);
     if (pcb == NULL) {
@@ -266,8 +271,10 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         return;
     }
-    if (queued && sock)
+    if (sock) {
         sock_wake(sock);
+        ksock_put(sock);
+    }
 }
 
 void udp_get_stats(struct udp_stats *out)

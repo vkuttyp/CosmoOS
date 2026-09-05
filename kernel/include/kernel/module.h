@@ -20,7 +20,7 @@
 
 /* --- ABI ------------------------------------------------------------- */
 
-#define COSMO_MODULE_ABI_VERSION 1u
+#define COSMO_MODULE_ABI_VERSION 2u   /* 2: struct kobject gained `owner`; mandatory release callbacks */
 #define COSMO_MODULE_MAGIC       "COSMOMOD"   /* 8 bytes, compared without a NUL */
 #define COSMO_MODULE_MAGIC_INIT  { 'C', 'O', 'S', 'M', 'O', 'M', 'O', 'D' }
 
@@ -95,7 +95,7 @@ struct ksym {
 enum module_state {
     MODULE_LOADING,
     MODULE_LIVE,
-    MODULE_GOING,
+    MODULE_GOING,    /* shutdown ran; waiting for the grace period or for live objects (a zombie) */
 };
 
 #define MODULE_FLAG_UNSIGNED (1u << 0)   /* loaded without a signature (enforcement off) */
@@ -115,6 +115,7 @@ struct module {
     struct module *deps[MODULE_MAX_DEPS];
     unsigned nr_deps;
     unsigned refs;                       /* live dependants */
+    uint32_t live_objects;               /* kobjects whose release code lives in this module */
 };
 
 /* Sort the kernel export index. Call once, after kmalloc_init(). */
@@ -127,8 +128,23 @@ void module_init(void);
   * symbol), -EEXIST, -ERANGE, -ENOMEM, or init()'s own value. */
 int module_load(const void *file, size_t size, const char *origin, struct module **out);
 
-/* Unload by name: -ENOENT, -EBUSY (dependants), else 0. Sleeps. */
+/* Unload by name (docs/kernel/quiesce/design.md, "Module unload"):
+ * GOING -> shutdown() -> one grace period -> wait for live objects -> free.
+ * -ENOENT, -EBUSY (dependants, or objects still alive after the timeout:
+ * the module becomes a zombie whose memory stays mapped; calling again
+ * once the objects are gone frees it and returns 0). Sleeps. */
 int module_unload(const char *name);
+
+/* The module whose text, rodata or data contains `addr`, with its
+ * live-object count raised, or NULL for a kernel address. The caller
+ * balances with module_object_released() when the object dies. Any
+ * context (a read-side section inside). */
+struct module *module_owner_of(uintptr_t addr);
+void module_object_released(struct module *m);
+
+/* How long module_unload waits for live objects before giving up
+ * (default 5000 ms). Self-tests shorten it. */
+void module_set_unload_timeout_ms(unsigned ms);
 
 /* Borrowed pointer while the module is live, or NULL. Sleeps (mutex). */
 struct module *module_find(const char *name);

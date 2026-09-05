@@ -149,18 +149,25 @@ seed a transport checksum with. Verification is
 
 ## Interfaces and the worker (`kernel/include/kernel/netif.h`, `netif.c`, `loopback.c`)
 
-**`struct netif_ops { int (*transmit)(struct netif *nif, struct mbuf *m); }`**
-Called in thread context with no stack lock held; takes the packet
-(frees it on error too) and returns 0 or `-errno`. `m->data` is at the
-Ethernet header; the chain may have several buffers.
+**`struct netif_ops { int (*transmit)(struct netif *nif, struct mbuf *m); void (*release)(struct netif *nif); }`**
+`transmit` is called in thread context with no stack lock held, inside a
+read-side section (`quiesce_read_lock`, so it must not sleep); takes the
+packet (frees it on error too) and returns 0 or `-errno`. `m->data` is at
+the Ethernet header; the chain may have several buffers. `release` is
+mandatory: the last reference to the interface dropped, after
+`netif_unregister`; it frees the memory the netif is embedded in
+(`netif_release_static` for `lo`).
 
-**`struct netif`**: `name[8]`, `index` (assigned at registration),
-`mac[6]`, `mtu`, `flags` (`NETIF_UP`, `NETIF_LOOPBACK`, `NETIF_NOARP`),
-`ip4 { addr, mask, gateway }` (network order, 0 = unset), `ip6_ll`
-(derived from the MAC at registration), `ops`, `priv`, `stats`
-(`rx_packets/bytes/dropped/errors`, `tx_*`), `link`, `lock` (spinlock
-for addresses and flags). Storage belongs to the driver (or is static,
-as for `lo`) and must outlive the registration.
+**`struct netif`**: `obj` (kobject), `name[8]`, `index` (assigned at
+registration), `mac[6]`, `mtu`, `flags` (`NETIF_UP`, `NETIF_LOOPBACK`,
+`NETIF_NOARP`, `NETIF_GONE` once unregistered), `ip4 { addr, mask,
+gateway }` (network order, 0 = unset), `ip6_ll` (derived from the MAC at
+registration), `ops`, `priv`, `stats` (`rx_packets/bytes/dropped/errors`,
+`tx_*`), `link`, `lock` (spinlock for addresses and flags). The creator
+holds reference 1, the registry one more; `netif_find`, `netif_default`
+and `netif_loopback` hand out referenced pointers (`netif_put` when
+done); `ops->release` frees the storage after the last put
+(`docs/kernel/quiesce/invariants.md` Q9–Q12).
 
 **`void net_init(void)`** Once, from `kernel_main` after
 `ramfs_populate_boot` and before `module_load_boot` (drivers register
@@ -178,16 +185,23 @@ the IPv4 configuration from fw_cfg `opt/cosmo/ipv4`
 68), `-EEXIST` for a duplicate name. Thread context (a mutex guards the
 list).
 
-**`void netif_unregister(struct netif *nif)`** Removes the interface and
-flushes its ARP entries (pending packets freed). Packets already on the
-receive queue with `rcvif == nif` are still processed by the worker;
-drivers must call `netif_set_up(nif, false)` first and stop delivering.
-Thread context.
+**`void netif_unregister(struct netif *nif)`** Takes the interface down
+for good, in six steps: `NETIF_GONE` and not `UP` under `nif->lock`
+(transmit and `netif_rx` refuse from here); out of the registry; one
+grace period (`synchronize_quiesce`: a transmit or `netif_rx` that read
+the old flags runs in a read-side section, so none is in flight after
+it); every packet of the interface purged from the receive queue and a
+barrier work item run on the worker (any `input_one` that had dequeued
+one has finished); `arp_flush` and `nd_flush`; the registry's reference
+dropped. The driver then tears its queues down and drops its own
+reference; `ops->release` runs when the last holder is gone. Sleeps.
 
-**`struct netif *netif_find(const char *name)`**, **`netif_default(void)`**
-(the first non-loopback interface or NULL), **`netif_loopback(void)`**:
-borrowed pointers, valid while the interface stays registered. Any
-context.
+**`struct netif *netif_find(const char *name)`**, **`netif_default(void)`**,
+**`netif_loopback(void)`** Referenced pointer (drop with `netif_put`) or
+NULL: by name; the first non-loopback interface that is up; `lo`.
+`netif_get`/`netif_put` are inline kobject wrappers. `ipv4_route` and
+`ipv6_route` return the same kind of pointer and their callers put it
+after the transmit.
 
 **`void netif_set_ipv4(nif, addr, mask, gateway)`** Sets the addresses
 (network order) and logs them. **`void netif_set_up(nif, bool up)`**
@@ -208,9 +222,12 @@ interfaces `m->data` is at the IP header and `pkt.proto` carries the
 EtherType (`ETH_P_IP`/`ETH_P_IPV6`) that selects the input function.
 
 **`int netif_transmit(struct netif *nif, struct mbuf *m)`** Stack to
-driver: counts, checks `NETIF_UP` (`-ENETUNREACH` otherwise, packet
-freed) and calls `ops->transmit`. Takes the packet. Thread context, no
-spinlock held.
+driver, thread context: inside a read-side section it checks the flags
+(`-ENODEV` once `NETIF_GONE`, `-ENETUNREACH` when not `UP`; the packet is
+freed either way), calls `ops->transmit` and counts the result.
+`netif_rx` is the mirror: a read-side section that drops the packet once
+`GONE`, else queues it for the worker. `netif_rxq_count` (tests) is the
+receive-queue length.
 
 **Deferred work**: `struct net_work { link, fn, arg, queued }`;
 `net_work_init(w, fn, arg)`; `net_work_queue(w)` schedules `fn(arg)` on
@@ -420,9 +437,13 @@ overlapping address), `-EADDRNOTAVAIL`.
 **`int tcp_listen(pcb, backlog)`** LISTEN with `backlog` clamped to
 `1..TCP_MAX_BACKLOG`. `-EINVAL` unless bound and CLOSED.
 
-**`struct tcp_pcb *tcp_accept(pcb)`** Removes and returns one
-ESTABLISHED (or CLOSE_WAIT) child from the accept queue, or NULL. The
-child's `sock` is NULL until `tcp_attach_socket`.
+**`struct tcp_pcb *tcp_accept(pcb, owner)`** Removes and returns one
+established child of a listening pcb, attaching `owner` (the new socket)
+to it in the same critical section, or NULL. The former two-step
+(dequeue, then `tcp_attach_socket` from the caller) left a window where a
+reset found `sock == NULL` and freed the pcb under the accepting thread
+(`docs/kernel/quiesce/invariants.md` Q13); `ksock_accept` therefore
+allocates the child socket before dequeuing.
 
 **`int tcp_connect(pcb, remote)`** Picks the source address and an
 ephemeral port when unbound, chooses `mss` by route (`TCP_MSS_LO` over
@@ -644,7 +665,7 @@ the traditional I/O ports 0x510 (selector) and 0x511 (data) and the
 Added to module ABI v1 in this phase (`EXPORT_SYMBOL` at the end of
 `mbuf.c` and `netif.c`): `m_get`, `m_getcl`, `m_free`, `m_freem`,
 `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`,
-`m_length`, `m_copypacket`, `netif_register`, `netif_unregister`,
+`m_length`, `m_copypacket`, `netif_register`, `netif_unregister`, `netif_release_static`,
 `netif_rx`, `netif_set_ipv4`, `netif_set_up`. This is the whole
 surface a NIC driver module needs; `virtio_net.ko` uses nothing else
 from the stack.

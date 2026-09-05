@@ -4,7 +4,7 @@
 
 | Level | What | Command |
 |---|---|---|
-| Target self-tests (debug builds, 4 CPUs) | `device`, `pci`, `dma`, `random`, `blk`, `virtio-console` (six of the 44) | `make test` |
+| Target self-tests (debug builds, 4 CPUs) | `device`, `pci`, `dma`, `blk-lifetime`, `random`, `blk`, `virtio-console` | `make test` |
 | Boot markers | module load lines for the four driver modules, the `blk: vda:` line, the virtio-console registration line, and the `boot complete` line **inside the virtio console file** | `make test` |
 | Release | same drivers, no self-tests | `make BUILD=release test` |
 | Single CPU | MSI vectors and completions on one CPU | `QEMU_SMP=1 make test` |
@@ -86,6 +86,17 @@ name is false.
 Every test restores what it changed: the synthetic bus stays registered
 (static, empty), test buffers are freed, `blk_find`'s reference is
 dropped.
+
+### `blk-lifetime`
+
+A synthetic block device (`kernel/device/devtest.c`): `blk_register`
+without `ops->release` is `-EINVAL`; with it the refcount is 2 (creator +
+registry), 3 after `blk_find`; a bio completes through the fake `submit`;
+`blk_unregister` removes it from the registry, drops the registry's
+reference, sets `gone`, and `blk_submit` returns `-ENODEV` without
+reaching the driver; the creator's `blkdev_put` does not run the release
+while the finder holds it; the finder's put runs it exactly once
+(`docs/kernel/quiesce/invariants.md` Q9–Q11).
 
 ## Boot markers (`tests/boot/run_boot_test.py`)
 

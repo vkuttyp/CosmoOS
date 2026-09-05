@@ -12,7 +12,7 @@ wins and the document is wrong.
 | Path | Content |
 |---|---|
 | `development.md` | Setting up a development host, building, running, testing, CI |
-| `audit/` | Whole-tree architecture audits; `2026-09-post-roadmap-audit.md` is the post-Phase-13 correctness, security, scalability and roadmap audit (Prompt #2) |
+| `audit/` | Whole-tree architecture audits; `2026-09-post-roadmap-audit.md` is the post-Phase-13 correctness, security, scalability and roadmap audit (Prompt #2); `2026-09-lifetime-quiesce-report.md` is the Prompt #3 final report (critical fix pass, the lifetime and quiescence subsystem, ordering, tests, performance, risks, debt, next subsystem) |
 | `first-task.md` | Constitution section 72 deliverables for the section 70 first engineering task |
 | `build/` | Build system subsystem documentation |
 | `boot/` | Boot protocol and UEFI loader subsystem documentation |
@@ -24,7 +24,8 @@ wins and the document is wrong.
 | `kernel/timer/` | Monotonic TSC clock, LAPIC tick, one-shot timers, sleep, PIT calibration |
 | `kernel/smp/` | AP bring-up (trampoline, per-CPU tables), IPIs, cross-CPU calls, TLB shootdown, stopping CPUs, the hang watchdog |
 | `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides; GIC CPU interfaces, distributor and MSI frame on AArch64) |
-| `kernel/object/` | Reference-counted kernel objects, the per-process handle table with rights, the console object |
+| `kernel/object/` | Reference-counted kernel objects (with owner-module tracking since the lifetime pass), the per-process handle table with rights, the console object |
+| `kernel/quiesce/` | Kernel object lifetime and quiescence: epoch-based grace periods (`synchronize_quiesce`, `call_quiesce`), `synchronize_irq`, `timer_cancel_sync`, the mandatory-release object rule, the module unload protocol, the converted device, block, interface, TCP and UDP lifetimes, with the memory-ordering argument for every barrier |
 | `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module; since Phase 9 `spawn` from a file with a handle map, zombies and `wait`, `kill` delivery, the working directory, `procinfo`; since Phase 11 personality selection by ELF note and the two-page initial stack with the Linux auxiliary vector |
 | `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities (native and, since Phase 11, Linux), the native system-call ABI (`uapi/cosmo/syscall.h`, 56 calls) and user-side wrappers |
 | `kernel/module/` | The boot archive, the module ABI (`COSMO_MODULE`, `EXPORT_SYMBOL`, ABI version), the signed `ET_REL` module loader (validation, relocation, symbol resolution, dependencies, W^X, unload), signing tools and keys |

@@ -160,6 +160,7 @@ bool selftest_net_arp(const char **reason)
         kinfo("selftest: net-arp: no ethernet interface; table logic only");
         return true;
     }
+    netif_put(nif);   /* eth0 is never unregistered while the tests run; a borrowed pointer is enough here */
     struct arp_stats s0, s1;
     arp_get_stats(&s0);
     struct mbuf *m = m_getcl();
@@ -451,6 +452,22 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
         sched_watchdog_kick();
     }
     CHECK(srv.done && srv.result == 0 && srv.bytes_seen == bytes);
+
+    /* The server's child leaves LAST_ACK when the network worker processes
+     * our final ACK. The worker runs below this thread's priority and is
+     * preempted as soon as it wakes us, so the port can still be reserved
+     * for a moment after `done`; the next caller of this helper binds it
+     * again. Wait for that condition, bounded. */
+    int rc = -EADDRINUSE;
+    for (unsigned i = 0; i < 2000 && rc == -EADDRINUSE; i++) {
+        struct socket *probe;
+        CHECK(ksock_create(addr.family, COSMO_SOCK_STREAM, 0, &probe) == 0);
+        rc = ksock_bind(probe, &addr);
+        ksock_put(probe);
+        if (rc == -EADDRINUSE)
+            thread_sleep_ms(1);
+    }
+    CHECK(rc == 0);
     return true;
 }
 
@@ -519,6 +536,8 @@ bool selftest_net_tcp_mss(const char **reason)
     struct netaddr a = v4addr(INADDR_LOOPBACK_N, 1);
     CHECK(tcp_path_mss(COSMO_AF_INET, &a) == TCP_MSS_LO);
     struct netif *eth = netif_default();
+    if (eth)
+        netif_put(eth);   /* see net-arp: eth0 outlives the tests */
     if (eth != NULL && eth->ip4.addr != 0) {
         a.v4 = eth->ip4.addr;
         CHECK(tcp_path_mss(COSMO_AF_INET, &a) == TCP_MSS_LO);   /* one of our own addresses: local delivery */
@@ -659,6 +678,7 @@ bool selftest_net_harness(const char **reason)
     }
     struct netif *nif = netif_default();
     CHECK(nif != NULL && nif->ip4.addr != 0);
+    netif_put(nif);
     unsigned hostport = 0;
     if (strncmp(cfg, "tcp=", 4) == 0) {
         for (const char *p = cfg + 4; *p >= '0' && *p <= '9'; p++)
@@ -711,5 +731,158 @@ bool selftest_net_harness(const char **reason)
     ksock_put(us);
     CHECK(client_ok);
     CHECK(g_h_quit);
+    return true;
+}
+
+/* --- interface lifetime ------------------------------------------------------
+ *
+ * docs/kernel/quiesce/design.md, "Network interfaces": lookups are
+ * referenced, unregister stops transmit and receive and purges the
+ * queue, and the driver's release runs when the last holder is gone.
+ */
+struct fake_nif {
+    struct netif nif;
+    unsigned transmits;
+    unsigned releases;
+};
+
+static int fake_nif_transmit(struct netif *nif, struct mbuf *m)
+{
+    struct fake_nif *f = nif->priv;
+    f->transmits++;
+    m_freem(m);
+    return 0;
+}
+
+static void fake_nif_release(struct netif *nif)
+{
+    struct fake_nif *f = nif->priv;
+    f->releases++;
+}
+
+bool selftest_net_netif_lifetime(const char **reason)
+{
+    static struct fake_nif f;
+    static const struct netif_ops no_release = { .transmit = fake_nif_transmit };
+    static const struct netif_ops ops = { .transmit = fake_nif_transmit, .release = fake_nif_release };
+    memset(&f, 0, sizeof(f));
+    strlcpy(f.nif.name, "test0", sizeof(f.nif.name));
+    f.nif.mtu = 1500;
+    f.nif.ops = &no_release;
+    f.nif.priv = &f;
+    /* Loopback-style: input_one frees an unknown protocol without a link layer. */
+    f.nif.flags = NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP;
+    CHECK(netif_register(&f.nif) == -EINVAL);   /* no release: refused */
+    f.nif.ops = &ops;
+    CHECK(netif_register(&f.nif) == 0);
+    CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + registry */
+
+    /* A duplicate name is refused before the object exists: no kobject,
+     * no owner count for the driver's module to balance (its failure path
+     * frees the storage directly). */
+    static struct fake_nif dup;
+    memset(&dup, 0, sizeof(dup));
+    strlcpy(dup.nif.name, "test0", sizeof(dup.nif.name));
+    dup.nif.mtu = 1500;
+    dup.nif.ops = &ops;
+    dup.nif.priv = &dup;
+    CHECK(netif_register(&dup.nif) == -EEXIST);
+    CHECK(dup.nif.obj.type == NULL && dup.nif.obj.refcount == 0 && dup.nif.obj.owner == NULL);
+
+    struct netif *found = netif_find("test0");
+    CHECK(found == &f.nif && kobject_refcount(&f.nif.obj) == 3);
+
+    struct mbuf *m = m_getcl();
+    CHECK(m != NULL);
+    m->len = m->pkt.len = 16;
+    m->pkt.proto = 0x88B5;   /* experimental EtherType: input drops it */
+    CHECK(netif_transmit(found, m) == 0 && f.transmits == 1);
+    m = m_getcl();
+    CHECK(m != NULL);
+    m->len = m->pkt.len = 16;
+    m->pkt.proto = 0x88B5;
+    netif_rx(found, m);                          /* queued for the worker */
+
+    netif_unregister(&f.nif);
+    CHECK(netif_find("test0") == NULL);
+    CHECK((f.nif.flags & NETIF_GONE) && !(f.nif.flags & NETIF_UP));
+    CHECK(kobject_refcount(&f.nif.obj) == 2);
+    m = m_getcl();
+    CHECK(m != NULL);
+    m->len = m->pkt.len = 16;
+    CHECK(netif_transmit(found, m) == -ENODEV && f.transmits == 1);
+    m = m_getcl();
+    CHECK(m != NULL);
+    m->len = m->pkt.len = 16;
+    unsigned q0 = netif_rxq_count(found);
+    netif_rx(found, m);                          /* dropped: gone */
+    CHECK(netif_rxq_count(found) == q0);
+    CHECK(f.nif.stats.rx_packets == 1);
+
+    netif_put(&f.nif);                           /* the creator is done */
+    CHECK(f.releases == 0);
+    netif_put(found);
+    CHECK(f.releases == 1);
+    return true;
+}
+
+/* --- accept against a racing peer ------------------------------------------------
+ *
+ * The audit's accept race: a child dequeued by tcp_accept had neither
+ * listener nor socket until the caller attached one, so a reset in that
+ * window freed the pcb under the accepting thread. tcp_accept now attaches
+ * the owner under the TCP lock. The check below is the invariant (the pcb
+ * names its socket when accept returns) plus a stress: clients that
+ * connect and drop the connection at once while the server accepts.
+ */
+struct race_client {
+    unsigned rounds;
+    unsigned failures;
+    struct netaddr server;
+};
+
+static void race_client_main(void *arg)
+{
+    struct race_client *rc = arg;
+    for (unsigned i = 0; i < rc->rounds; i++) {
+        struct socket *c;
+        if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) != 0) {
+            rc->failures++;
+            continue;
+        }
+        if (ksock_connect(c, &rc->server) != 0)
+            rc->failures++;
+        else if (i & 1)
+            ksock_shutdown(c, 2);   /* FIN before the server accepts */
+        ksock_put(c);               /* close: FIN or, with unread data, RST */
+    }
+}
+
+bool selftest_net_accept_race(const char **reason)
+{
+    struct socket *ls;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    struct netaddr any = v4addr(INADDR_LOOPBACK_N, 0);
+    CHECK(ksock_bind(ls, &any) == 0 && ksock_listen(ls, 8) == 0);
+    struct race_client rc = { .rounds = 64 };
+    CHECK(ksock_getsockname(ls, &rc.server) == 0);
+
+    struct thread *t = thread_create(race_client_main, &rc, "raceclient", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    unsigned accepted = 0;
+    for (unsigned i = 0; i < rc.rounds; i++) {
+        struct socket *c;
+        struct netaddr peer;
+        int rc2 = ksock_accept(ls, &c, &peer);
+        CHECK(rc2 == 0);
+        CHECK(c->tcp != NULL && c->tcp->sock == c);   /* attached under the lock */
+        CHECK(peer.family == COSMO_AF_INET && peer.port != 0);
+        accepted++;
+        ksock_put(c);
+    }
+    thread_join(t);
+    CHECK(rc.failures == 0);
+    ksock_put(ls);
+    kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
     return true;
 }

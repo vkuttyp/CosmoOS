@@ -67,12 +67,20 @@ macOS host tests) the macro degrades to a `STATIC_ASSERT`.
 Rules: a module's export may not repeat and may not shadow a kernel
 export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
-### Module ABI v1: the exported symbols
+### Module ABI v2: the exported symbols
 
-The kernel image exports 117 symbols (Phase 5's 43, the Phase 6
-device, PCI, DMA, block, entropy and console-sink interfaces, and the
-Phase 8 mbuf and network-interface surface a NIC driver needs). Adding
-one is compatible; removing or changing one bumps the version.
+`COSMO_MODULE_ABI_VERSION` is 2 since the lifetime pass: `struct kobject`
+gained `owner`, which moves every field after the embedded kobject in
+`struct device`, `struct blkdev` and `struct netif`, and the release
+callbacks (`struct device.release`, `struct blkdev_ops.release`,
+`struct netif_ops.release`, `struct virtio_transport.release`) became
+mandatory. A v1 module is refused by `modelf_check_info`.
+
+The kernel image exports 132 symbols (Phase 5's 43, the Phase 6 device,
+PCI, DMA, block, entropy and console-sink interfaces, the Phase 8 mbuf
+and network-interface surface a NIC driver needs, and the lifetime pass's
+quiescence, timer and object interfaces). Adding one is compatible;
+removing or changing one bumps the version.
 
 | Area | Symbols |
 |---|---|
@@ -80,15 +88,16 @@ one is compatible; removing or changing one bumps the version.
 | Heap | `kmalloc`, `kzalloc`, `krealloc`, `kfree`, `kmem_cache_create`, `kmem_cache_destroy`, `kmem_cache_alloc`, `kmem_cache_free` |
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
 | Locks | `spinlock_init`, `spin_lock`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_trylock`, `mutex_unlock` |
-| Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay` |
-| Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
+| Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay`, `timer_setup`, `timer_start`, `timer_cancel`, `timer_cancel_sync` |
+| Lifetime (`kernel/quiesce.h`, `kernel/interrupt.h`, `kernel/object.h`) | `synchronize_quiesce`, `call_quiesce`, `quiesce_read_lock_debug`, `quiesce_read_unlock_debug`, `synchronize_irq`, `interrupt_unregister_sync`, `kobject_init`, `kobject_get`, `kobject_tryget`, `kobject_put`, `kobject_refcount` |
+| Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_release_static`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
 | DMA (`kernel/dma.h`) | `dma_alloc`, `dma_free`, `dma_map`, `dma_unmap`, `dma_sync_for_device`, `dma_sync_for_cpu`, `dma_set_mask` |
 | PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
 | Block (`kernel/blk.h`) | `blk_register`, `blk_unregister`, `blk_submit`, `bio_complete`, `blk_read`, `blk_write`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
 | Console (`kernel/console.h`) | `console_register`, `console_unregister` |
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
-| Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_rx`, `netif_set_ipv4`, `netif_set_up` |
+| Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_set_ipv4`, `netif_set_up` |
 
 Modules export too: the `virtio` module provides 15 symbols
 (`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
@@ -99,7 +108,7 @@ Modules export too: the `virtio` module provides 15 symbols
 and `virtio_net` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant
 M3), and a module cannot be unloaded while a dependant holds it. In
-total the tree carries 132 `EXPORT_SYMBOL` records.
+total the tree carries 147 `EXPORT_SYMBOL` records.
 
 Semantics are those of the headers the symbols come from
 (`docs/kernel/diagnostics/api.md`, `memory/api.md`, `scheduler/api.md`,
@@ -149,10 +158,35 @@ Blocking: allocations, the mutex, a TLB shootdown per protected region
 
 ### `int module_unload(const char *name)`
 
-Purpose: `shutdown()` and free a live module.
-Outputs: `0`; `-ENOENT` (not live); `-EBUSY` (another live module
-declared it as a dependency; logged). On success dependency reference
-counts drop and every region is freed.
+Purpose: take a live module down and free it, in the order the lifetime
+design requires (`docs/kernel/quiesce/design.md`, "Module unload
+protocol"): state `GOING` and the module unpublished from every lookup
+(`module_find`, symbol lookup, `module_owner_of`); `shutdown()`; one
+grace period (`synchronize_quiesce`), so a CPU that looked it up or was
+inside a handler it unlinked has left; then a wait for `live_objects` to
+reach zero (objects whose release code lives in the module), bounded by
+`module_set_unload_timeout_ms` (default 5 s); then the regions are freed.
+Outputs: `0`; `-ENOENT` (not live and not a zombie); `-EBUSY` (a live
+dependant, logged; or objects still alive after the timeout, in which
+case the module becomes a **zombie**: off the live list, its name free,
+its memory kept so the outstanding releases can still run; a later
+`module_unload` of the name frees it once the count is zero and returns
+0, or `-EBUSY` again). Dependency reference counts drop only when the
+memory is freed: a zombie's outstanding release code may call into its
+dependencies, so they stay pinned (and refuse to unload with `-EBUSY`)
+until the zombie is reaped.
+
+### `struct module *module_owner_of(uintptr_t addr)`, `void module_object_released(struct module *m)`
+
+The live module containing `addr` with its live-object count raised
+(inside a `quiesce_read_lock` section, so an unloader that has
+unpublished the module and waited a grace period sees the increment), or
+NULL for a kernel address; the release balances it. Used by
+`kobject_init` and `kobject_track_code`. Any context.
+
+### `void module_set_unload_timeout_ms(unsigned ms)`
+
+The live-object wait bound (self-tests shorten it to 50 ms).
 
 ### `struct module *module_find(const char *name)`
 
@@ -184,7 +218,8 @@ Public fields (read-only for callers): `name`, `version`,
 `capabilities`, `flags` (`MODULE_FLAG_UNSIGNED`), `state`
 (`MODULE_LOADING`/`LIVE`/`GOING`), `text`/`rodata`/`data` bases (0 when
 that group is empty) and sizes, `info` (the relocated metadata, inside
-rodata), `exports`/`nr_exports`, `deps[]`/`nr_deps`, `refs`. The
+rodata), `exports`/`nr_exports`, `deps[]`/`nr_deps`, `refs`,
+`live_objects` (kobjects whose release code lives in the module). The
 private continuation `struct module_priv` holds the sorted export
 index.
 

@@ -353,7 +353,7 @@ static void test_info_rules(void)
     EXPECT(modelf_check_info(&info, &why) == 0);
 
     struct cosmo_module_info bad = info;
-    bad.abi_version = 2;
+    bad.abi_version = COSMO_MODULE_ABI_VERSION + 1;
     EXPECT(modelf_check_info(&bad, &why) == -ENOEXEC && strcmp(why, "module ABI version mismatch") == 0);
 
     bad = info;

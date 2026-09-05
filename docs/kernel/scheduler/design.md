@@ -161,12 +161,21 @@ RUNNING thread is a no-op (this is what makes the wait protocol safe).
 ### Preemption points
 
 - Interrupt return (`x86_trap_dispatch` tail): if `irq_depth` is back
-  to 0, `need_resched` is set, `preempt_count == 0`, and the interrupted
-  frame had IF set, call `schedule()`. The switch happens inside the
-  handler on the interrupted thread's stack; when the thread is switched
-  back in it completes the `iretq`.
-- `preempt_enable()` reaching zero with `need_resched`.
+  to 0, `preempt_count == 0`, and the interrupted frame had IF set, the
+  CPU first records a quiescent state (`quiesce_note_quiescent`,
+  `docs/kernel/quiesce/`) and then, if `need_resched` is set, calls
+  `sched_preempt()`. The switch happens inside the handler on the
+  interrupted thread's stack; when the thread is switched back in it
+  completes the `iretq`.
+- `preempt_enable()` reaching zero with `need_resched`. Since the
+  lifetime pass `quiesce_read_unlock()` is such a point too, so code that
+  wakes a higher-priority thread and then leaves a read-side section is
+  preempted there rather than at the next tick.
 - Explicit `sched_yield()` / blocking calls.
+
+`schedule_internal`, the idle loop before `hlt`/`wfi`, and
+`sched_start_cpu` also record a quiescent state: at each the CPU holds no
+spinlock and is in no read-side section.
 
 ### Idle
 

@@ -241,6 +241,23 @@ See [docs/development.md](docs/development.md).
   `init --unpriv-test`); and no private signing key is in the repository
   (per-machine developer keys, `scripts/check-secrets.sh`, the leaked key
   revoked). 75 self-tests, 12 host tests.
+- **Kernel object lifetime and quiescence (done):** the second half of
+  Prompt #3. An epoch-based grace-period mechanism
+  (`kernel/core/quiesce.c`, `docs/kernel/quiesce/`): a read-side section
+  is a preemption-disabled region, a CPU is quiescent only at interrupt
+  return to a preemptible context, in `schedule()`, in the idle loop and
+  at CPU bring-up; `synchronize_quiesce` waits with documented
+  release/acquire/seq_cst ordering, `call_quiesce` defers. On it:
+  `synchronize_irq`/`interrupt_unregister_sync` (handlers are read-side
+  sections; the IRQ layer's release paths wait), `timer_cancel_sync`
+  (spins on the running callback, defeats re-arming), a mandatory
+  release for every kernel object with owner-module tracking, referenced
+  lookups for devices, block devices and interfaces, a six-step
+  `netif_unregister`, `blk_submit` refusing a removed device, the TCP
+  accept race and the socket-wake reference closed, and a module unload
+  protocol (GOING, shutdown, grace period, live objects, zombie). Module
+  ABI v2. Nine new self-tests and a host model under ASan
+  (`docs/kernel/quiesce/testing.md`).
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

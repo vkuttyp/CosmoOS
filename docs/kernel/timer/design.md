@@ -61,7 +61,7 @@ struct timer {
     enum timer_state state;
 };
 
-struct timer_queue { spinlock_t lock; struct list_node pending; unsigned count; };
+struct timer_queue { spinlock_t lock; struct list_node pending; unsigned count; struct timer *running; };
 ```
 
 `timer_start(t, delay_ns)`: panics if state is PENDING (RUNNING is
@@ -72,13 +72,15 @@ records `t->cpu`.
 
 `timer_cancel(t)`: locks the queue of `t->cpu`; if PENDING, unlinks and
 returns true; if RUNNING (its callback is executing on another CPU) it
-returns false and the caller must not free the timer until the callback
-finishes (callbacks are short; a `timer_cancel_sync` that spins on
-RUNNING arrives with the SMP PR).
+returns false and the caller must not free the timer until
+`timer_cancel_sync(t)`, which spins while `q->running == t` and
+re-cancels after every wait (a callback may have re-armed); see
+`docs/kernel/quiesce/design.md`, "timer_cancel_sync".
 
 `timer_run_expired(q, now)`: under the lock, pop entries while
-`head.expires_ns <= now`, mark RUNNING, release the lock, call `fn`,
-mark IDLE, re-take the lock. A callback may re-arm its own timer.
+`head.expires_ns <= now`, mark RUNNING and `q->running = t`, release the
+lock, call `fn`, re-take the lock, clear `q->running`, mark IDLE unless
+the callback re-armed. A callback may re-arm its own timer.
 
 ## 4. Sleeping and delays
 

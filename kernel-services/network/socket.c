@@ -172,25 +172,28 @@ int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
         return -EOPNOTSUPP;
     if (s->state != SS_LISTENING)
         return -EINVAL;
+    /* The child socket exists before the pcb is dequeued, so the pcb is
+     * never without an owner (tcp_accept attaches under the TCP lock). */
+    struct socket *c = alloc_socket(s->family, COSMO_SOCK_STREAM, s->uid);
+    if (c == NULL)
+        return -ENOMEM;
     struct tcp_pcb *child;
     for (;;) {
-        child = tcp_accept(s->tcp);
+        child = tcp_accept(s->tcp, c);
         if (child)
             break;
-        if (s->error || (s->shut & 1))
+        if (s->error || (s->shut & 1)) {
+            ksock_put(c);
             return take_error(s) ? take_error(s) : -EINVAL;
+        }
         int w = wait_event_killable(&s->wait, tcp_accept_ready(s->tcp) || s->error || (s->shut & 1));
-        if (w)
+        if (w) {
+            ksock_put(c);
             return w;
-    }
-    struct socket *c = alloc_socket(s->family, COSMO_SOCK_STREAM, s->uid);
-    if (c == NULL) {
-        tcp_close(child);
-        return -ENOMEM;
+        }
     }
     c->tcp = child;
     c->state = SS_CONNECTED;
-    tcp_attach_socket(child, c);
     if (peer)
         *peer = child->remote;
     *out = c;

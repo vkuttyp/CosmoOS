@@ -22,12 +22,16 @@ another order; a driver's interrupt handler takes only its own
 spinlock. Check: review; the mutex panics on recursion by a different
 path (`mutex_lock: recursive lock`). Gap: no lockdep.
 
-**D3. A device is bus-owned storage that lives until shutdown.**
-`device_register` takes the bus's reference; `device_release` frees
-nothing; `device_find` returns a referenced pointer. No path frees a
-`struct device` while it is on a bus. Check: `device` self-test refcount
-assertions (`init + bus + find` = 3). Gap: hot-plug would need a real
-`release`; not implemented.
+**D3. A device is freed by its release and by nothing else, after the
+last reference.** `device_register` refuses a device without a release
+and takes the bus's reference; `device_unregister` drops it; the creator
+drops its own after its teardown; `device_find` returns a referenced
+pointer. No path frees a `struct device` while it is on a bus or held.
+`vpci_remove` therefore unregisters, tears the transport down, and only
+then `device_put`s; `vpci_release` frees the block when the last holder
+is gone. Check: `device` self-test (`-EINVAL` without a release; refcount
+`init + bus + find` = 3; 1 after unregister). Gap: no hot-unplug driver
+exercises `vpci_remove` at run time (module unload of `virtio` does).
 
 **D4. A probe failure never leaves a half-bound device.** On a nonzero
 `probe` return the model records `DEV_FAILED` and `probe_error`, clears

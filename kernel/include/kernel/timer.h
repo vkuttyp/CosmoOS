@@ -36,6 +36,7 @@ struct timer_queue {
     spinlock_t lock;
     struct list_node pending;
     unsigned count;
+    struct timer *running;   /* callback executing now on this queue's CPU, else NULL */
 };
 
 /* Calibrate, register the clock source, arm the boot CPU's tick, and
@@ -51,8 +52,19 @@ const char *clock_name(void);
 
 void timer_setup(struct timer *t, timer_fn fn, void *arg);
 void timer_start(struct timer *t, uint64_t delay_ns);
-/* True if the timer was pending and is now cancelled. */
+/* True if the timer was pending and is now cancelled. Any context. On
+ * return the callback will not START; it may still be RUNNING on the
+ * timer's CPU, so the timer and its argument must stay alive. */
 bool timer_cancel(struct timer *t);
+
+/* Cancel and wait until the callback is not running anywhere: on return
+ * the timer's memory may be freed. Spins (no sleep) while the callback
+ * runs on another CPU, re-cancelling if the callback re-armed. Any
+ * context except the timer's own callback (a panic: it would wait for
+ * itself). On the timer's own CPU the callback cannot be running, since
+ * callbacks run in interrupt context and interrupts are masked here, so
+ * the wait is free. Returns what timer_cancel would have. */
+bool timer_cancel_sync(struct timer *t);
 
 /* Hook called from the tick on every CPU (the scheduler registers). */
 typedef void (*timer_tick_hook_fn)(uint64_t now_ns);

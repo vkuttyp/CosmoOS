@@ -20,14 +20,31 @@
 #include <kernel/module.h>
 #include <kernel/mutex.h>
 #include <kernel/panic.h>
+#include <kernel/quiesce.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
+#include <kernel/wait.h>
 
 #include <arch/module.h>
 
 static struct mutex g_lock;
 static LIST_HEAD(g_modules);
 static unsigned g_count;
+
+/*
+ * Live modules, published for lock-free address lookups: module_owner_of
+ * runs from kobject_init in any context and cannot take g_lock. A slot
+ * is written with a release store when the module goes live and cleared
+ * before its shutdown runs; readers walk the array inside
+ * quiesce_read_lock, and unload waits one grace period after clearing
+ * the slot before it looks at the live-object count (design.md, "Module
+ * unload").
+ */
+#define MODULE_MAX_LIVE 32
+static struct module *g_live[MODULE_MAX_LIVE];
+static LIST_HEAD(g_zombies);          /* GOING modules whose objects outlived the unload */
+static unsigned g_unload_timeout_ms = 5000;
 
 /* Per-module data the public struct does not expose. */
 struct module_priv {
@@ -377,10 +394,20 @@ static int load_locked(const void *file, size_t size, const char *origin, struct
         goto fail;
     }
 
-    /* 9. Register. */
+    /* 9. Register. The publish is a release store: every field a reader
+     * of g_live needs (the region bounds) is written before it. */
     m->state = MODULE_LIVE;
     list_push_back(&g_modules, &m->link);
     g_count++;
+    bool published = false;
+    for (unsigned i = 0; i < MODULE_MAX_LIVE && !published; i++) {
+        if (g_live[i] == NULL) {
+            __atomic_store_n(&g_live[i], m, __ATOMIC_RELEASE);
+            published = true;
+        }
+    }
+    if (!published)
+        panic("module: more than %u modules live", MODULE_MAX_LIVE);
     for (unsigned i = 0; i < m->nr_deps; i++)
         m->deps[i]->refs++;
     kinfo("module: loaded %s %s (text %zu KiB, rodata %zu KiB, data %zu KiB, %zu exports%s)", m->name,
@@ -408,31 +435,136 @@ int module_load(const void *file, size_t size, const char *origin, struct module
     return rc;
 }
 
+static void unpublish(struct module *m)
+{
+    for (unsigned i = 0; i < MODULE_MAX_LIVE; i++) {
+        if (g_live[i] == m)
+            __atomic_store_n(&g_live[i], (struct module *)NULL, __ATOMIC_RELEASE);
+    }
+}
+
+/* A module's code may reference its dependencies until it is unmapped,
+ * including from the release callbacks a zombie still owes; the pins go
+ * with the memory, never before. */
+static void drop_deps(struct module *m)
+{
+    for (unsigned i = 0; i < m->nr_deps; i++) {
+        KASSERT(m->deps[i]->refs > 0);
+        m->deps[i]->refs--;
+    }
+}
+
+static struct module *find_zombie_locked(const char *name)
+{
+    struct module *m;
+    list_for_each_entry(m, &g_zombies, link) {
+        if (strcmp(m->name, name) == 0)
+            return m;
+    }
+    return NULL;
+}
+
 int module_unload(const char *name)
 {
     mutex_lock(&g_lock);
     struct module *m = find_locked(name);
     if (m == NULL) {
+        /* A zombie whose objects have since died is freed now. */
+        struct module *z = find_zombie_locked(name);
+        if (z == NULL) {
+            mutex_unlock(&g_lock);
+            return -ENOENT;
+        }
+        if (__atomic_load_n(&z->live_objects, __ATOMIC_ACQUIRE) != 0) {
+            mutex_unlock(&g_lock);
+            return -EBUSY;
+        }
+        list_remove(&z->link);
+        kinfo("module: freed zombie %s", z->name);
+        drop_deps(z);
+        free_module((struct module_priv *)z);
         mutex_unlock(&g_lock);
-        return -ENOENT;
+        return 0;
     }
     if (m->refs != 0) {
         kwarn("module: %s has %u dependant(s), not unloading", name, m->refs);
         mutex_unlock(&g_lock);
         return -EBUSY;
     }
+
+    /* 1. GOING: no new lookups find it (module_find, symbol lookup,
+     *    module_owner_of). */
     m->state = MODULE_GOING;
-    m->info->shutdown();
+    unpublish(m);
     list_remove(&m->link);
     g_count--;
-    for (unsigned i = 0; i < m->nr_deps; i++) {
-        KASSERT(m->deps[i]->refs > 0);
-        m->deps[i]->refs--;
+
+    /* 2. The module unregisters everything it registered. Handlers,
+     *    timers and callbacks it owned are unlinked by the time this
+     *    returns, each through its own synchronous unregister. */
+    m->info->shutdown();
+
+    /* 3. One grace period: a CPU that looked the module up (or was
+     *    inside a handler the shutdown unlinked without waiting) is out
+     *    of its read-side section, and every live-object increment made
+     *    under a section that saw the module is visible. */
+    synchronize_quiesce();
+
+    /* 4. Objects whose release code lives here must all be gone. */
+    uint64_t deadline = clock_now_ns() + (uint64_t)g_unload_timeout_ms * 1000000ULL;
+    while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && clock_now_ns() < deadline)
+        thread_sleep_ns(1000000);
+    uint32_t live = __atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE);
+    if (live != 0) {
+        /* Freeing would leave a release pointer into unmapped text. The
+         * memory stays; the name is free for a new load; a later unload
+         * of the name reaps it once the count reaches zero. The
+         * dependencies stay pinned too (drop_deps runs at the free): the
+         * outstanding release code may call into them. */
+        kwarn("module: %s still has %u live object(s) after %u ms; kept as a zombie", m->name, live,
+              g_unload_timeout_ms);
+        list_push_back(&g_zombies, &m->link);
+        mutex_unlock(&g_lock);
+        return -EBUSY;
     }
+
+    /* 5. Free. */
     kinfo("module: unloaded %s", m->name);
+    drop_deps(m);
     free_module((struct module_priv *)m);
     mutex_unlock(&g_lock);
     return 0;
+}
+
+struct module *module_owner_of(uintptr_t addr)
+{
+    struct module *found = NULL;
+    quiesce_read_lock();
+    for (unsigned i = 0; i < MODULE_MAX_LIVE; i++) {
+        struct module *m = __atomic_load_n(&g_live[i], __ATOMIC_ACQUIRE);
+        if (m && in_module(m, addr, 1)) {
+            /* Inside the section: the unloader clears the slot, then
+             * waits a grace period, then reads the count, so this
+             * increment is either seen or made after a NULL slot. */
+            __atomic_fetch_add(&m->live_objects, 1u, __ATOMIC_ACQ_REL);
+            found = m;
+            break;
+        }
+    }
+    quiesce_read_unlock();
+    return found;
+}
+
+void module_object_released(struct module *m)
+{
+    uint32_t old = __atomic_fetch_sub(&m->live_objects, 1u, __ATOMIC_ACQ_REL);
+    if (old == 0)
+        panic("module: %s live-object count underflow", m->name);
+}
+
+void module_set_unload_timeout_ms(unsigned ms)
+{
+    g_unload_timeout_ms = ms;
 }
 
 struct module *module_find(const char *name)
@@ -499,10 +631,12 @@ void module_dump(void)
     kprintf("modules (%u):\n", g_count);
     struct module *m;
     list_for_each_entry(m, &g_modules, link) {
-        kprintf("  %-16s %-8s text %p rodata %p data %p refs %u caps 0x%x%s\n", m->name, m->version,
-                (void *)m->text, (void *)m->rodata, (void *)m->data, m->refs, m->capabilities,
+        kprintf("  %-16s %-8s text %p rodata %p data %p refs %u objects %u caps 0x%x%s\n", m->name, m->version,
+                (void *)m->text, (void *)m->rodata, (void *)m->data, m->refs, m->live_objects, m->capabilities,
                 (m->flags & MODULE_FLAG_UNSIGNED) ? " UNSIGNED" : "");
     }
+    list_for_each_entry(m, &g_zombies, link)
+        kprintf("  %-16s %-8s ZOMBIE, %u live object(s)\n", m->name, m->version, m->live_objects);
     mutex_unlock(&g_lock);
 }
 

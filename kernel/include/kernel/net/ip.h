@@ -88,6 +88,7 @@ int nd_resolve(struct netif *nif, const struct in6_addr *ip, uint8_t mac[6], str
 void nd_input_ns(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6);
 void nd_age(uint64_t now_ns);
+void nd_flush(struct netif *nif);   /* drop every entry that names the interface */
 
 struct ip_stats {
     uint64_t rx, rx_bad_header, rx_bad_cksum, rx_not_for_us, rx_fragments, rx_unknown_proto, tx, tx_no_route;

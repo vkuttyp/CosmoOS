@@ -78,6 +78,9 @@ bool selftest_device(const char **reason)
 
     device_setup(&d1, &fake_bus, NULL, "fake0");
     device_setup(&d2, &fake_bus, NULL, "fake1");
+    CHECK(device_register(&d1) == -EINVAL);   /* no release: refused */
+    d1.release = device_release_static;
+    d2.release = device_release_static;
     CHECK(d1.dma_mask == 0xFFFFFFFFULL && d1.state == DEV_UNBOUND);
     CHECK(device_add_resource(&d1, RES_MMIO, 0x1000, 0x100, 0) == 0);
     CHECK(device_add_resource(&d1, RES_IRQ, 5, 1, 0) == 0);
@@ -339,5 +342,103 @@ bool selftest_virtio_console(const char **reason)
     }
     CHECK(console_has_sink("virtio-console"));
     CHECK(!console_has_sink("no-such-sink"));
+    return true;
+}
+
+/* --- block device lifetime ---------------------------------------------------
+ *
+ * docs/kernel/quiesce/design.md, "Block devices": the registry and the
+ * creator each hold a reference, blk_find hands out more, unregister
+ * makes submit fail with -ENODEV, and the driver's release runs once,
+ * when the last holder is gone.
+ */
+struct fake_blk {
+    struct blkdev bd;
+    unsigned submits;
+    unsigned releases;
+};
+
+static int fake_blk_submit(struct blkdev *bd, struct bio *bio)
+{
+    struct fake_blk *f = bd->priv;
+    f->submits++;
+    bio_complete(bio, 0);
+    return 0;
+}
+
+static void fake_blk_release(struct blkdev *bd)
+{
+    struct fake_blk *f = bd->priv;
+    f->releases++;
+}
+
+static void fake_bio_done(struct bio *bio)
+{
+    (void)bio;
+}
+
+bool selftest_blk_lifetime(const char **reason)
+{
+    static struct fake_blk f;
+    static const struct blkdev_ops no_release = { .submit = fake_blk_submit };
+    static const struct blkdev_ops ops = { .submit = fake_blk_submit, .release = fake_blk_release };
+    memset(&f, 0, sizeof(f));
+    f.bd.ops = &no_release;
+    f.bd.sector_size = 512;
+    f.bd.capacity = 8;
+    f.bd.max_sectors = 8;
+    f.bd.priv = &f;
+    CHECK(blk_register(&f.bd, "zz") == -EINVAL);   /* no release: refused */
+    f.bd.ops = &ops;
+    unsigned before = blk_count();
+    CHECK(blk_register(&f.bd, "zz") == 0);
+    CHECK(strcmp(f.bd.name, "zza") == 0 && blk_count() == before + 1);
+    CHECK(kobject_refcount(&f.bd.obj) == 2);       /* creator + registry */
+
+    struct blkdev *found = blk_find("zza");
+    CHECK(found == &f.bd && kobject_refcount(&f.bd.obj) == 3);
+
+    void *buf = kmalloc(512, 0);   /* blk_submit requires DMA-able memory */
+    CHECK(buf != NULL);
+    struct bio bio = { .dev = found, .sector = 0, .nsectors = 1, .dir = BIO_READ, .buf = buf, .done = fake_bio_done };
+    CHECK(blk_submit(&bio) == 0 && f.submits == 1 && bio.status == 0);
+
+    blk_unregister(&f.bd);
+    CHECK(blk_count() == before && blk_find("zza") == NULL);
+    CHECK(kobject_refcount(&f.bd.obj) == 2);       /* registry's reference gone */
+    CHECK(f.bd.gone);
+    CHECK(blk_submit(&bio) == -ENODEV && f.submits == 1);
+    kfree(buf);
+
+    blkdev_put(&f.bd);                             /* the creator is done */
+    CHECK(f.releases == 0);                        /* the finder still holds it */
+    blkdev_put(found);
+    CHECK(f.releases == 1);
+
+    /* Name exhaustion is refused before the object exists: the 27th "zy"
+     * device gets -ENOSPC with no kobject and no owner count to balance. */
+    static struct fake_blk many[27];
+    memset(many, 0, sizeof(many));
+    unsigned n;
+    for (n = 0; n < 27; n++) {
+        many[n].bd.ops = &ops;
+        many[n].bd.sector_size = 512;
+        many[n].bd.capacity = 8;
+        many[n].bd.max_sectors = 8;
+        many[n].bd.priv = &many[n];
+        int rc = blk_register(&many[n].bd, "zy");
+        if (n < 26)
+            CHECK(rc == 0);
+        else
+            CHECK(rc == -ENOSPC);
+    }
+    CHECK(many[26].bd.obj.type == NULL && many[26].bd.obj.refcount == 0 && many[26].bd.obj.owner == NULL);
+    CHECK(strcmp(many[25].bd.name, "zyz") == 0);
+    for (n = 0; n < 26; n++) {
+        blk_unregister(&many[n].bd);
+        blkdev_put(&many[n].bd);
+        CHECK(many[n].releases == 1);
+    }
+    CHECK(blk_count() == before);
     return true;
 }

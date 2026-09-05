@@ -18,6 +18,7 @@ static struct ip_stats g_stats;
 
 /* --- routing ------------------------------------------------------------ */
 
+/* Referenced interface (netif_put when done) or NULL. */
 struct netif *ipv6_route(const struct in6_addr *dst)
 {
     if (in6_is_loopback(dst) || netif_owns_ipv6(dst))
@@ -33,11 +34,11 @@ void ipv6_source_for(const struct in6_addr *dst, struct in6_addr *src)
     memset(src, 0, sizeof(*src));
     if (nif == NULL)
         return;
-    if (nif->flags & NETIF_LOOPBACK) {
+    if (nif->flags & NETIF_LOOPBACK)
         *src = netif_owns_ipv6(dst) ? *dst : nif->ip6_ll;
-        return;
-    }
-    *src = nif->ip6_ll;
+    else
+        *src = nif->ip6_ll;
+    netif_put(nif);
 }
 
 /* --- neighbour discovery --------------------------------------------------- */
@@ -247,6 +248,18 @@ void nd_input_na(struct netif *nif, struct mbuf *m, const struct ipv6_hdr *ip6)
         ether_output(nif, pending, nd.opt_mac, ETH_P_IPV6);
 }
 
+void nd_flush(struct netif *nif)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_nd_lock);
+    for (unsigned i = 0; i < ND_TABLE_SIZE; i++) {
+        if (g_nd[i].state != ND_FREE && g_nd[i].nif == nif) {
+            m_freem(g_nd[i].pending);
+            memset(&g_nd[i], 0, sizeof(g_nd[i]));
+        }
+    }
+    spin_unlock_irqrestore(&g_nd_lock, s);
+}
+
 void nd_age(uint64_t now)
 {
     struct {
@@ -294,6 +307,9 @@ void nd_init(void)
 
 /* --- output --------------------------------------------------------------- */
 
+static int output_on(struct netif *nif, struct mbuf *m, const struct in6_addr *src, const struct in6_addr *dst,
+                     uint8_t proto, uint8_t hoplimit);
+
 int ipv6_output(struct mbuf *m, const struct in6_addr *src, const struct in6_addr *dst, uint8_t proto,
                 uint8_t hoplimit)
 {
@@ -303,6 +319,14 @@ int ipv6_output(struct mbuf *m, const struct in6_addr *src, const struct in6_add
         m_freem(m);
         return -ENETUNREACH;
     }
+    int rc = output_on(nif, m, src, dst, proto, hoplimit);
+    netif_put(nif);
+    return rc;
+}
+
+static int output_on(struct netif *nif, struct mbuf *m, const struct in6_addr *src, const struct in6_addr *dst,
+                     uint8_t proto, uint8_t hoplimit)
+{
     struct in6_addr s;
     if (src == NULL || in6_is_unspecified(src)) {
         ipv6_source_for(dst, &s);

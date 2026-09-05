@@ -32,20 +32,34 @@ interrupts disabled; must not sleep, allocate, or take sleeping locks;
 - **Outputs**: `0`, `-EINVAL` (vector out of range or `fn` NULL),
   `-EBUSY` (already registered).
 - **Ownership**: the table does not own `arg` or `name`. The registrant
-  keeps them valid until `interrupt_unregister` returns.
-- **Concurrency**: disables local interrupts for the update; publishes
-  with release semantics. Safe to call from any context including a
-  handler (it is non-blocking), though registering from inside a handler
-  is unusual.
+  keeps them valid until `interrupt_unregister_sync` returns, or until a
+  plain `interrupt_unregister` has been followed by `synchronize_irq`.
+- **Concurrency**: disables local interrupts for the update; writes an
+  immutable `{fn, arg, name}` record and publishes its pointer with a
+  release store (dispatch loads it once with acquire, so a handler never
+  runs with another registration's argument). Safe to call from any
+  context including a handler (it is non-blocking), though registering
+  from inside a handler is unusual.
 - **ABI**: internal.
 
 ### `int interrupt_unregister(unsigned vector, interrupt_handler_fn fn)`
 - **Purpose**: remove `fn` from `vector`.
 - **Outputs**: `0`, `-EINVAL` (bad vector or NULL `fn`), `-ENOENT` (`fn`
   is not the installed handler).
-- **Lifetime**: after return, on a single CPU, no further invocations of
-  `fn` occur and `arg` may be freed. Under SMP a grace period will be
-  required; see `design.md`.
+- **Lifetime**: after return the handler will not *start* again, but may
+  still be *running* on another CPU: `arg` stays alive until
+  `synchronize_irq(vector)`. Any context.
+
+### `void synchronize_irq(unsigned vector)` *(exported)*
+- **Purpose**: wait until no CPU is executing the handler that was
+  registered on `vector` before the preceding unregister. One grace
+  period (`docs/kernel/quiesce/`): a handler is a read-side section.
+- **Concurrency**: thread context, no spinlock held (sleeps).
+
+### `int interrupt_unregister_sync(unsigned vector, interrupt_handler_fn fn)` *(exported)*, `int interrupt_unregister_vector_sync(unsigned vector)`
+- **Purpose**: unregister and synchronize; on return `arg` and the
+  handler's code may be freed. Same results as the plain variants.
+- **Concurrency**: thread context, no spinlock held.
 
 ### `void interrupt_dispatch(unsigned vector, struct arch_trap_frame *frame)`
 - **Purpose**: deliver a trap to its handler. Called only by the
@@ -115,8 +129,11 @@ table); `irq_enable`/`irq_disable` are interrupt-safe.
 - **Ownership**: `arg` and `name` as for `interrupt_register`.
 
 ### `int irq_release(irq_t irq)`
-- Masks the line, removes the handler (`interrupt_unregister_vector`),
-  frees the vector. `-ENOENT` if not requested.
+- Masks the line and removes the handler (`interrupt_unregister_vector`)
+  under the IRQ lock, drops the lock, waits one grace period
+  (`synchronize_irq`) so a handler entered before the mask has returned,
+  then frees the vector (still allocated during the wait, so no new
+  registrant can take it). `-ENOENT` if not requested. Thread context.
 
 ### `int irq_enable(irq_t irq)` / `int irq_disable(irq_t irq)`
 - Unmask / mask the redirection entry. `-EINVAL` if not requested.
@@ -145,8 +162,10 @@ table); `irq_enable`/`irq_disable` are interrupt-safe.
   is indistinguishable from any other vector once it arrives.
 
 ### `int irq_release_msi(int vector)`
-- **Purpose**: unregister the handler and free the vector. The device
-  must be masked first (the PCI core does this in `pci_msix_release`).
+- **Purpose**: unregister the handler, wait one grace period with the
+  IRQ lock dropped, then free the vector: on return the handler's `arg`
+  may be freed. The device must be masked first (the PCI core does this
+  in `pci_msix_release`). Thread context.
 - **Outputs**: 0 or `-EINVAL`.
 
 ## Phase 3: controller interface (`kernel/include/arch/irqc.h`)

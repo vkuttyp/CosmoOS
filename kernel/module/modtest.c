@@ -13,9 +13,11 @@
 #include <kernel/modelf.h>
 #include <kernel/modsig.h>
 #include <kernel/module.h>
+#include <kernel/object.h>
 #include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 
 #define STR_(x) #x
@@ -319,7 +321,7 @@ bool selftest_module_load(const char **reason)
     CHECK(prot_is((vaddr_t)m->info, VM_PROT_READ));
     CHECK(m->info->init != NULL && (vaddr_t)m->info->init >= m->text &&
           (vaddr_t)m->info->init < m->text + m->text_size);
-    CHECK(m->nr_exports == 3);
+    CHECK(m->nr_exports == 5);   /* table, counter, answer, released, object_take */
 
     /* Call into the module through its export table. */
     const struct module *owner = NULL;
@@ -388,5 +390,89 @@ bool selftest_module_fail(const char **reason)
     vm_get_stats(&after);
     CHECK(after.regions == before.regions);
     CHECK(after.anon_pages == before.anon_pages);
+    return true;
+}
+
+/* --- unload with a live object: zombie, then reaped ------------------------------
+ *
+ * docs/kernel/quiesce/design.md, "Module unload": a kobject whose release
+ * code lives in the module keeps the module's memory mapped past unload;
+ * the release runs from module text after the unload returned -EBUSY,
+ * and a second unload frees the zombie.
+ */
+bool selftest_module_unload_busy(const char **reason)
+{
+    size_t size;
+    const void *file = fixture("tests/cosmotest.ko", &size);
+    if (file == NULL) {
+        kinfo("selftest: module fixture missing from the boot archive; skipping");
+        return true;
+    }
+    struct module *m = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    struct kobject *(*take)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_object_take", NULL);
+    int *released = (int *)module_symbol_lookup("cosmotest_released", NULL);
+    CHECK(take != NULL && released != NULL);
+
+    /* A kernel address has no module owner; the fixture's does. */
+    CHECK(module_owner_of((uintptr_t)&selftest_module_unload_busy) == NULL);
+    struct module *owner = module_owner_of((uintptr_t)take);
+    CHECK(owner == m);
+    module_object_released(owner);
+    CHECK(m->live_objects == 0);
+
+    struct kobject *obj = take();
+    CHECK(obj != NULL && obj->owner == m && m->live_objects == 1);
+
+    module_set_unload_timeout_ms(50);
+    uint64_t t0 = clock_now_ns();
+    int rc = module_unload("cosmotest");
+    uint64_t waited = clock_now_ns() - t0;
+    module_set_unload_timeout_ms(5000);
+    CHECK(rc == -EBUSY);
+    CHECK(waited >= 50000000ULL);                 /* it waited the timeout for the object */
+    CHECK(module_find("cosmotest") == NULL);      /* not live */
+    CHECK(module_symbol_lookup("cosmotest_object_take", NULL) == 0);
+    CHECK(*released == 0);
+
+    /* The release runs from the zombie's text. */
+    kobject_put(obj);
+    CHECK(*released == 1);
+    CHECK(m->live_objects == 0);
+
+    /* Reaping frees it; a third unload finds nothing. */
+    CHECK(module_unload("cosmotest") == 0);
+    CHECK(module_unload("cosmotest") == -ENOENT);
+
+    /* The name is usable again, and a clean unload still works. */
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    CHECK(module_unload("cosmotest") == 0);
+
+    /* A zombie keeps its dependencies pinned: cosmotest_dep's release
+     * calls cosmotest_answer(), so cosmotest must stay mapped until the
+     * zombie's object is gone. */
+    size_t dep_size;
+    const void *dep = fixture("tests/cosmotest_dep.ko", &dep_size);
+    CHECK(dep != NULL);
+    struct module *d = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    CHECK(module_load(dep, dep_size, "tests/cosmotest_dep.ko", &d) == 0);
+    CHECK(m->refs == 1);
+    struct kobject *(*dtake)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_dep_object_take", NULL);
+    int *dreleased = (int *)module_symbol_lookup("cosmotest_dep_released", NULL);
+    CHECK(dtake != NULL && dreleased != NULL);
+    struct kobject *dobj = dtake();
+    CHECK(dobj != NULL && dobj->owner == d);
+    module_set_unload_timeout_ms(50);
+    rc = module_unload("cosmotest_dep");
+    module_set_unload_timeout_ms(5000);
+    CHECK(rc == -EBUSY);
+    CHECK(m->refs == 1);                            /* still pinned by the zombie */
+    CHECK(module_unload("cosmotest") == -EBUSY);    /* so the dependency cannot go */
+    kobject_put(dobj);                              /* release runs, calling into cosmotest */
+    CHECK(*dreleased == 42);
+    CHECK(module_unload("cosmotest_dep") == 0);     /* reap: the pin drops here */
+    CHECK(m->refs == 0);
+    CHECK(module_unload("cosmotest") == 0);
     return true;
 }

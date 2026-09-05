@@ -252,6 +252,15 @@ static void find_capabilities(struct pci_device *p)
 
 static void scan_bus(uint8_t bus, struct device *parent, unsigned depth);
 
+/* PCI devices are enumerated once and never unregistered today; the
+ * release exists so the object model's rule holds when hot-unplug does. */
+static void pci_device_release(struct device *dev)
+{
+    struct pci_device *p = container_of(dev, struct pci_device, dev);
+    kfree(p->msix.vectors);
+    kfree(p);
+}
+
 static void scan_function(uint8_t bus, uint8_t slot, uint8_t func, struct device *parent, unsigned depth)
 {
     uint32_t id = cfg_read(bus, slot, func, PCI_VENDOR_ID, 4);
@@ -267,6 +276,7 @@ static void scan_function(uint8_t bus, uint8_t slot, uint8_t func, struct device
     char name[DEVICE_NAME_MAX];
     ksnprintf(name, sizeof(name), "pci:%02x:%02x.%u", bus, slot, func);
     device_setup(&p->dev, &pci_bus, parent, name);
+    p->dev.release = pci_device_release;
     list_init(&p->link);
     p->msi_vector = -1;
     p->bus = bus;

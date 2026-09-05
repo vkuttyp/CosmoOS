@@ -81,6 +81,6 @@ callback fires exactly four times and ends IDLE.
 
 - No cross-CPU TSC synchronisation check (SMP PR, or a switch to the
   HPET/ACPI PM timer as a fallback clock source).
-- `timer_cancel` cannot wait for a RUNNING callback (`timer_cancel_sync`
+- (closed by the lifetime pass) `timer_cancel_sync` waits for a RUNNING callback; the old gap read: `timer_cancel` cannot wait for a RUNNING callback (`timer_cancel_sync`
   planned).
 - The queue is a sorted list; insertion is O(n).

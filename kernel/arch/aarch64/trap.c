@@ -13,6 +13,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/process.h>
+#include <kernel/quiesce.h>
 #include <kernel/sched.h>
 #include <kernel/syscall.h>
 #include <arch/irq.h>
@@ -106,8 +107,14 @@ static void handle_irq(struct arch_trap_frame *frame)
     pc->irq_count++;
     gic_irq_dispatch(frame);
     pc->irq_depth--;
-    if (pc->irq_depth == 0 && pc->need_resched && pc->preempt_count == 0 && (frame->spsr & DAIF_I) == 0)
-        sched_preempt();
+    /* Quiescent point and preemption point (docs/kernel/quiesce/): the
+     * interrupted context holds no spinlock, is not an interrupt, and had
+     * interrupts enabled. */
+    if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->spsr & DAIF_I) == 0) {
+        quiesce_note_quiescent();
+        if (pc->need_resched)
+            sched_preempt();
+    }
     return_to_user_check(frame);
 }
 

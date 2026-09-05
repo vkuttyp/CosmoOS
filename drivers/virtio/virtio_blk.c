@@ -154,8 +154,11 @@ static void vblk_done(struct virtqueue *vq)
     }
 }
 
+static void vblk_release(struct blkdev *bd);
+
 static const struct blkdev_ops vblk_ops = {
     .submit = vblk_submit,
+    .release = vblk_release,
 };
 
 static int vblk_probe(struct virtio_device *vdev)
@@ -226,10 +229,19 @@ fail:
     return rc;
 }
 
+/* Last reference: a blk_find holder or a mounted filesystem may outlive
+ * the device; the memory goes here (docs/kernel/quiesce/design.md). */
+static void vblk_release(struct blkdev *bd)
+{
+    struct vblk *vb = bd->priv;
+    kfree(vb->inflight);
+    kfree(vb);
+}
+
 static void vblk_remove(struct virtio_device *vdev)
 {
     struct vblk *vb = vdev->priv;
-    blk_unregister(&vb->bd);
+    blk_unregister(&vb->bd);     /* no submit is inside the driver after this */
     virtio_device_reset(vdev);   /* the device drops every in-flight request */
     for (unsigned i = 0; i < vb->nr_slots; i++) {
         if (vb->inflight[i]) {
@@ -240,9 +252,10 @@ static void vblk_remove(struct virtio_device *vdev)
     }
     virtq_free(vb->vq);
     dma_free(&vdev->dev, vb->slots_bytes, vb->slots, vb->slots_dma);
-    kfree(vb->inflight);
-    kfree(vb);
+    vb->vq = NULL;
+    vb->slots = NULL;
     vdev->priv = NULL;
+    blkdev_put(&vb->bd);         /* the creator's reference; vblk_release frees when holders are gone */
 }
 
 static const uint32_t vblk_ids[] = { VIRTIO_ID_BLOCK, 0 };

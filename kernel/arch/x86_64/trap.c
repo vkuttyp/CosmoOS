@@ -14,6 +14,7 @@
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/process.h>
+#include <kernel/quiesce.h>
 #include <arch/user.h>
 #include <kernel/sched.h>
 
@@ -78,12 +79,17 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
         arch_irqc_eoi(vector);
         pc->irq_depth--;
 
-        /* Preemption point: returning to a preemptible context with a
-         * reschedule pending. The switch happens here, on the interrupted
-         * thread's stack; the iretq completes when it is switched back. */
-        if (pc->irq_depth == 0 && pc->need_resched && pc->preempt_count == 0 &&
-            (frame->rflags & RFLAGS_IF))
-            sched_preempt();
+        /* Returning to a context that holds no spinlock, is not itself an
+         * interrupt and had interrupts enabled: this CPU is outside every
+         * read-side section, so it is quiescent (docs/kernel/quiesce/),
+         * and it is the preemption point. The switch happens here, on the
+         * interrupted thread's stack; the iretq completes when it is
+         * switched back. */
+        if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->rflags & RFLAGS_IF)) {
+            quiesce_note_quiescent();
+            if (pc->need_resched)
+                sched_preempt();
+        }
     }
 
     /* Returning to ring 3: a pending kill ends the process here, so a

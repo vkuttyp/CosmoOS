@@ -7,6 +7,7 @@
  * protocol code runs in interrupt context.
  */
 
+#include <kernel/completion.h>
 #include <kernel/errno.h>
 #include <kernel/fwcfg.h>
 #include <kernel/log.h>
@@ -15,6 +16,7 @@
 #include <kernel/net/ip.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
+#include <kernel/quiesce.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -40,6 +42,20 @@ static spinlock_t g_work_lock = SPINLOCK_INIT("network");
 static struct waitqueue g_worker_wq = WAITQUEUE_INIT(g_worker_wq);
 static struct thread *g_worker;
 static volatile bool g_worker_ready;
+
+static void netif_release(struct kobject *obj)
+{
+    struct netif *nif = container_of(obj, struct netif, obj);
+    KASSERT(list_empty(&nif->link));   /* unregistered before the last put */
+    nif->ops->release(nif);
+}
+
+static const struct kobject_type netif_type = { .name = "netif", .release = netif_release };
+
+void netif_release_static(struct netif *nif)
+{
+    (void)nif;
+}
 
 /* --- interfaces -------------------------------------------------------- */
 
@@ -97,16 +113,24 @@ static void netif_autoconfig(struct netif *nif)
 
 int netif_register(struct netif *nif)
 {
-    if (nif->name[0] == '\0' || nif->ops == NULL || nif->ops->transmit == NULL || nif->mtu < 68)
+    if (nif->name[0] == '\0' || nif->ops == NULL || nif->ops->transmit == NULL || nif->ops->release == NULL ||
+        nif->mtu < 68)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, nif->name) == 0) {
             spin_unlock_irqrestore(&g_netif_lock, s);
-            return -EEXIST;
+            return -EEXIST;   /* the object is untouched: no kobject, no owner count; the caller frees its storage */
         }
     }
+    /* Accepted: only now does the object exist (reference 1 to the
+     * creator, the owner module's live-object count raised). A failed
+     * registration must leave nothing to balance, since the caller's
+     * failure path frees the storage directly, not through the release. */
+    kobject_init(&nif->obj, &netif_type);
+    kobject_track_code(&nif->obj, (uintptr_t)nif->ops->release);
+    nif->flags &= ~NETIF_GONE;
     nif->index = g_next_index++;
     spinlock_init(&nif->lock, "netif");
     list_init(&nif->link);
@@ -126,6 +150,7 @@ int netif_register(struct netif *nif)
         nif->ip6_ll.s6_addr[15] = nif->mac[5];
     }
     list_push_back(&g_netifs, &nif->link);
+    kobject_get(&nif->obj);   /* the registry's reference */
     spin_unlock_irqrestore(&g_netif_lock, s);
     kinfo("net: %s registered (%02x:%02x:%02x:%02x:%02x:%02x, mtu %u)", nif->name, nif->mac[0], nif->mac[1],
           nif->mac[2], nif->mac[3], nif->mac[4], nif->mac[5], nif->mtu);
@@ -134,14 +159,84 @@ int netif_register(struct netif *nif)
     return 0;
 }
 
+/* A worker barrier: runs on the network thread after everything queued
+ * before it, so any input_one that dequeued a packet earlier is done. */
+struct worker_barrier {
+    struct net_work work;
+    struct completion done;
+};
+
+static void barrier_fn(void *arg)
+{
+    struct worker_barrier *b = arg;
+    complete(&b->done);
+}
+
+/* Drop every queued receive packet that arrived on `nif`. The queue is
+ * drained and rebuilt in order; it is short (NET_RXQ_MAX). */
+static unsigned rxq_purge(struct netif *nif)
+{
+    struct mbufq keep;
+    mbufq_init(&keep, NET_RXQ_MAX, "net-rxq-keep");
+    struct mbuf *m;
+    unsigned dropped = 0;
+    while ((m = mbufq_dequeue(&g_rxq)) != NULL) {
+        if (m->pkt.rcvif == nif) {
+            m_freem(m);
+            dropped++;
+        } else if (!mbufq_enqueue(&keep, m)) {
+            m_freem(m);
+        }
+    }
+    while ((m = mbufq_dequeue(&keep)) != NULL) {
+        if (!mbufq_enqueue(&g_rxq, m))
+            m_freem(m);
+    }
+    return dropped;
+}
+
+unsigned netif_rxq_count(const struct netif *nif)
+{
+    (void)nif;
+    return mbufq_len(&g_rxq);
+}
+
 void netif_unregister(struct netif *nif)
 {
-    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    /* 1. Down and gone: netif_transmit and netif_rx refuse from here. */
+    arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
+    nif->flags = (nif->flags & ~NETIF_UP) | NETIF_GONE;
+    spin_unlock_irqrestore(&nif->lock, s);
+
+    /* 2. Out of the registry: no new lookups. */
+    s = spin_lock_irqsave(&g_netif_lock);
     list_remove(&nif->link);
     list_init(&nif->link);
     spin_unlock_irqrestore(&g_netif_lock, s);
+
+    /* 3. A transmit or netif_rx that read the flags before step 1 runs in
+     * a read-side section; after one grace period none is in flight, so
+     * every packet of its is either in the queue or already input. */
+    synchronize_quiesce();
+
+    /* 4. Nothing of its left in the receive queue, and the worker has
+     * finished any input_one it had started. */
+    unsigned dropped = rxq_purge(nif);
+    if (g_worker_ready) {
+        struct worker_barrier b;
+        net_work_init(&b.work, barrier_fn, &b);
+        completion_init(&b.done, "netif-barrier");
+        net_work_queue(&b.work);
+        wait_for_completion(&b.done);
+    }
+
+    /* 5. Tables that name the interface. */
     arp_flush(nif);
-    kinfo("net: %s unregistered", nif->name);
+    nd_flush(nif);
+    kinfo("net: %s unregistered (%u queued packets dropped)", nif->name, dropped);
+
+    /* 6. The registry's reference. */
+    kobject_put(&nif->obj);
 }
 
 struct netif *netif_find(const char *name)
@@ -151,6 +246,7 @@ struct netif *netif_find(const char *name)
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, name) == 0) {
             found = n;
+            kobject_get(&n->obj);
             break;
         }
     }
@@ -165,6 +261,7 @@ struct netif *netif_default(void)
     list_for_each_entry(n, &g_netifs, link) {
         if (!(n->flags & NETIF_LOOPBACK) && (n->flags & NETIF_UP)) {
             found = n;
+            kobject_get(&n->obj);
             break;
         }
     }
@@ -236,26 +333,49 @@ bool netif_owns_ipv6(const struct in6_addr *a)
 
 void netif_rx(struct netif *nif, struct mbuf *m)
 {
+    /* Read-side section: a driver calls this from its interrupt (already
+     * one) or from a thread (loopback); netif_unregister's grace period
+     * waits for it either way. */
+    quiesce_read_lock();
+    if (__atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE) & NETIF_GONE) {
+        quiesce_read_unlock();
+        m_freem(m);
+        return;
+    }
     m->pkt.rcvif = nif;
     m->pkt.rx_ns = clock_now_ns();
     __atomic_fetch_add(&nif->stats.rx_packets, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&nif->stats.rx_bytes, m->pkt.len, __ATOMIC_RELAXED);
     if (!mbufq_enqueue(&g_rxq, m)) {
         __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        quiesce_read_unlock();
         return;
     }
+    quiesce_read_unlock();
     waitqueue_wake_one(&g_worker_wq);
 }
 
 int netif_transmit(struct netif *nif, struct mbuf *m)
 {
-    if (!(nif->flags & NETIF_UP)) {
+    /* Read-side section around the driver's transmit: netif_unregister
+     * sets GONE, then waits one grace period before the driver frees its
+     * queues, so a transmit that saw UP finishes on live hardware. */
+    quiesce_read_lock();
+    unsigned flags = __atomic_load_n(&nif->flags, __ATOMIC_ACQUIRE);
+    if (flags & NETIF_GONE) {
+        quiesce_read_unlock();
+        m_freem(m);
+        return -ENODEV;
+    }
+    if (!(flags & NETIF_UP)) {
+        quiesce_read_unlock();
         m_freem(m);
         __atomic_fetch_add(&nif->stats.tx_dropped, 1, __ATOMIC_RELAXED);
         return -ENETUNREACH;
     }
     uint32_t len = m->pkt.len;
     int rc = nif->ops->transmit(nif, m);
+    quiesce_read_unlock();
     if (rc) {
         __atomic_fetch_add(&nif->stats.tx_errors, 1, __ATOMIC_RELAXED);
     } else {
@@ -378,6 +498,7 @@ void netif_dump(void)
 #include <kernel/module.h>
 EXPORT_SYMBOL(netif_register);
 EXPORT_SYMBOL(netif_unregister);
+EXPORT_SYMBOL(netif_release_static);
 EXPORT_SYMBOL(netif_rx);
 EXPORT_SYMBOL(netif_set_ipv4);
 EXPORT_SYMBOL(netif_set_up);

@@ -11,6 +11,7 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/quiesce.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -57,6 +58,9 @@ static void idle_main(void *arg)
     }
 
     for (;;) {
+        /* Quiescent: no thread work, no read section (docs/kernel/quiesce/).
+         * While halted, the next interrupt's return publishes again. */
+        quiesce_note_quiescent();
         if (this_cpu()->need_resched)
             schedule();
         else
@@ -130,6 +134,7 @@ void sched_start_cpu(void)
     pc->current = rq->idle;
     rq->idle->state = THREAD_RUNNING;
     rq->idle->last_start_ns = clock_now_ns();
+    quiesce_note_quiescent();   /* a CPU coming online holds no reference from before */
     __atomic_store_n(&pc->online, true, __ATOMIC_RELEASE);
     arch_thread_switch_prepare(NULL, rq->idle);
     arch_context_switch(&dead, &rq->idle->ctx);
@@ -213,6 +218,10 @@ static void schedule_internal(bool preempt)
     if (pc->preempt_count != 0)
         panic("schedule() called with preemption disabled (count %d), a spinlock is held",
               pc->preempt_count);
+
+    /* Quiescent: preempt_count is 0 here (asserted above), so no read-side
+     * section is open on this CPU (docs/kernel/quiesce/design.md). */
+    quiesce_note_quiescent();
 
     struct runqueue *rq = pc->rq;
     arch_irq_state_t s = spin_lock_irqsave(&rq->lock);

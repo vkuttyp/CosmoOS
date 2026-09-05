@@ -71,13 +71,15 @@ The single-CPU version is already written in the shape SMP needs:
 
 1. Publish/consume of `fn` is release/acquire, so a handler installed on
    CPU A is seen complete by CPU B.
-2. What is missing is a grace period on unregistration: CPU B may have
-   loaded `fn` just before CPU A cleared it and still be running the
-   handler. Before the registrant frees `arg` or unloads a module, it
-   must wait until every CPU has passed through a quiescent state. The
-   intended mechanism is the Epoch/RCU abstraction from constitution
-   section 22 (`Synchronize()` after clearing the slot), which keeps the
-   dispatch path lock-free.
+2. The grace period on unregistration exists since the lifetime pass:
+   CPU B may have loaded the record just before CPU A cleared it and
+   still be running the handler, so `interrupt_unregister_sync` (and the
+   IRQ layer's release paths) call `synchronize_irq`, one
+   `synchronize_quiesce`, before `arg` may be freed
+   (`docs/kernel/quiesce/design.md`). Each slot publishes a pointer to an
+   immutable `{fn, arg, name}` record (two per slot, alternating), so a
+   dispatcher that loaded a record uses a coherent pair even while the
+   slot is being re-registered.
 3. Registration from two CPUs racing for the same slot needs a
    compare-and-swap instead of load-then-store; that change is local to
    `interrupt_register`.
