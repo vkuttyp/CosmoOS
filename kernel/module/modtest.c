@@ -447,5 +447,32 @@ bool selftest_module_unload_busy(const char **reason)
     /* The name is usable again, and a clean unload still works. */
     CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
     CHECK(module_unload("cosmotest") == 0);
+
+    /* A zombie keeps its dependencies pinned: cosmotest_dep's release
+     * calls cosmotest_answer(), so cosmotest must stay mapped until the
+     * zombie's object is gone. */
+    size_t dep_size;
+    const void *dep = fixture("tests/cosmotest_dep.ko", &dep_size);
+    CHECK(dep != NULL);
+    struct module *d = NULL;
+    CHECK(module_load(file, size, "tests/cosmotest.ko", &m) == 0);
+    CHECK(module_load(dep, dep_size, "tests/cosmotest_dep.ko", &d) == 0);
+    CHECK(m->refs == 1);
+    struct kobject *(*dtake)(void) = (struct kobject * (*)(void)) module_symbol_lookup("cosmotest_dep_object_take", NULL);
+    int *dreleased = (int *)module_symbol_lookup("cosmotest_dep_released", NULL);
+    CHECK(dtake != NULL && dreleased != NULL);
+    struct kobject *dobj = dtake();
+    CHECK(dobj != NULL && dobj->owner == d);
+    module_set_unload_timeout_ms(50);
+    rc = module_unload("cosmotest_dep");
+    module_set_unload_timeout_ms(5000);
+    CHECK(rc == -EBUSY);
+    CHECK(m->refs == 1);                            /* still pinned by the zombie */
+    CHECK(module_unload("cosmotest") == -EBUSY);    /* so the dependency cannot go */
+    kobject_put(dobj);                              /* release runs, calling into cosmotest */
+    CHECK(*dreleased == 42);
+    CHECK(module_unload("cosmotest_dep") == 0);     /* reap: the pin drops here */
+    CHECK(m->refs == 0);
+    CHECK(module_unload("cosmotest") == 0);
     return true;
 }

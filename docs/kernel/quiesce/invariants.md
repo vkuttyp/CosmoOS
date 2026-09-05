@@ -39,9 +39,11 @@ with a spinlock held.** Asserted on entry (`irq_depth`, `preempt_count`).
 submits half its callbacks from a preempt-disabled, interrupts-off region.
 
 **Q5. `call_quiesce` callbacks run once, in submission order, in thread
-context, after a grace period that began after the submission.** Check:
-`quiesce-call` (eight callbacks, order and context asserted, one grace
-period for the batch).
+context, after a grace period that began after the submission; a head is
+never on the list twice.** A second submission before the callback ran
+panics (`pending`). Check: `quiesce-call` (eight callbacks, order and
+context asserted, one grace period for the batch); the double submission
+is a panic path, checked by review.
 
 **Q6. A CPU that never takes an interrupt is not counted forever: a
 straggler is kicked.** After two ticks the waiter sends `IPI_RESCHEDULE`
@@ -74,6 +76,13 @@ pointers. Check: `device` (refused without a release), `blk-lifetime`,
 `net-netif-lifetime` (release runs exactly once, after the last holder,
 never before). Gap: the vfs, process, socket, pipe, vm and vcpu types
 were already release-owning and are unchanged.
+
+**Q9a. A refused registration leaves no kobject and no owner count.**
+`device_register`, `blk_register` and `netif_register` record the owner
+(and initialise the kobject) only after the registry accepted the object,
+so a driver's failure path can free the storage directly. Check:
+`net-netif-lifetime` (a duplicate `test0`: `-EEXIST`, type NULL, count 0,
+owner NULL), `blk-lifetime` (the 27th `zy` device: `-ENOSPC`, likewise).
 
 **Q10. A registry's reference and the creator's reference are distinct;
 unregister drops the registry's, the creator drops its own.** `blkdev`
@@ -116,7 +125,11 @@ the module keep it mapped; after the timeout it becomes a zombie (name
 reusable, memory kept, `-EBUSY`) that a later `module_unload` reaps.
 `module_owner_of` raises the count inside its read-side section, so an
 increment made under a section that saw the module is visible to the
-unloader after its grace period. Check: `module-unload-busy`.
+unloader after its grace period. A zombie keeps its dependency pins until
+it is freed, since its outstanding release code may call into them.
+Check: `module-unload-busy` (including a zombie `cosmotest_dep` whose
+release calls `cosmotest_answer()`: `cosmotest` cannot be unloaded until
+the zombie is reaped).
 
 **Q16. `struct kobject.owner` is set at `kobject_init` (from
 `type->release`) or `kobject_track_code` (from the per-object callback),

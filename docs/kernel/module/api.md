@@ -171,7 +171,10 @@ dependant, logged; or objects still alive after the timeout, in which
 case the module becomes a **zombie**: off the live list, its name free,
 its memory kept so the outstanding releases can still run; a later
 `module_unload` of the name frees it once the count is zero and returns
-0, or `-EBUSY` again). Dependency reference counts drop in either case.
+0, or `-EBUSY` again). Dependency reference counts drop only when the
+memory is freed: a zombie's outstanding release code may call into its
+dependencies, so they stay pinned (and refuse to unload with `-EBUSY`)
+until the zombie is reaped.
 
 ### `struct module *module_owner_of(uintptr_t addr)`, `void module_object_released(struct module *m)`
 

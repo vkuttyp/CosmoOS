@@ -51,13 +51,6 @@ int blk_register(struct blkdev *bd, const char *prefix)
         strlen(prefix) + 2 > BLKDEV_NAME_MAX)
         return -EINVAL;
 
-    kobject_init(&bd->obj, &blkdev_type);
-    kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
-    list_init(&bd->link);
-    bd->reads = bd->writes = bd->flushes = bd->errors = 0;
-    bd->gone = false;
-    bd->submitting = 0;
-
     mutex_lock(&g_blk_lock);
     char letter = 'a';
     for (; letter <= 'z'; letter++) {
@@ -67,8 +60,17 @@ int blk_register(struct blkdev *bd, const char *prefix)
     }
     if (letter > 'z') {
         mutex_unlock(&g_blk_lock);
-        return -ENOSPC;
+        return -ENOSPC;   /* the object is untouched: no kobject, no owner count; the caller frees its storage */
     }
+    /* Accepted: only now does the object exist (reference 1 to the
+     * creator, the owner module's live-object count raised). A failed
+     * registration leaves nothing to balance. */
+    kobject_init(&bd->obj, &blkdev_type);
+    kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
+    list_init(&bd->link);
+    bd->reads = bd->writes = bd->flushes = bd->errors = 0;
+    bd->gone = false;
+    bd->submitting = 0;
     list_push_back(&g_blkdevs, &bd->link);
     g_count++;
     kobject_get(&bd->obj);   /* the registry's reference */

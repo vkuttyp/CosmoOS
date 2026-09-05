@@ -414,5 +414,31 @@ bool selftest_blk_lifetime(const char **reason)
     CHECK(f.releases == 0);                        /* the finder still holds it */
     blkdev_put(found);
     CHECK(f.releases == 1);
+
+    /* Name exhaustion is refused before the object exists: the 27th "zy"
+     * device gets -ENOSPC with no kobject and no owner count to balance. */
+    static struct fake_blk many[27];
+    memset(many, 0, sizeof(many));
+    unsigned n;
+    for (n = 0; n < 27; n++) {
+        many[n].bd.ops = &ops;
+        many[n].bd.sector_size = 512;
+        many[n].bd.capacity = 8;
+        many[n].bd.max_sectors = 8;
+        many[n].bd.priv = &many[n];
+        int rc = blk_register(&many[n].bd, "zy");
+        if (n < 26)
+            CHECK(rc == 0);
+        else
+            CHECK(rc == -ENOSPC);
+    }
+    CHECK(many[26].bd.obj.type == NULL && many[26].bd.obj.refcount == 0 && many[26].bd.obj.owner == NULL);
+    CHECK(strcmp(many[25].bd.name, "zyz") == 0);
+    for (n = 0; n < 26; n++) {
+        blk_unregister(&many[n].bd);
+        blkdev_put(&many[n].bd);
+        CHECK(many[n].releases == 1);
+    }
+    CHECK(blk_count() == before);
     return true;
 }

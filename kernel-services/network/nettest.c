@@ -777,6 +777,18 @@ bool selftest_net_netif_lifetime(const char **reason)
     CHECK(netif_register(&f.nif) == 0);
     CHECK(kobject_refcount(&f.nif.obj) == 2);   /* creator + registry */
 
+    /* A duplicate name is refused before the object exists: no kobject,
+     * no owner count for the driver's module to balance (its failure path
+     * frees the storage directly). */
+    static struct fake_nif dup;
+    memset(&dup, 0, sizeof(dup));
+    strlcpy(dup.nif.name, "test0", sizeof(dup.nif.name));
+    dup.nif.mtu = 1500;
+    dup.nif.ops = &ops;
+    dup.nif.priv = &dup;
+    CHECK(netif_register(&dup.nif) == -EEXIST);
+    CHECK(dup.nif.obj.type == NULL && dup.nif.obj.refcount == 0 && dup.nif.obj.owner == NULL);
+
     struct netif *found = netif_find("test0");
     CHECK(found == &f.nif && kobject_refcount(&f.nif.obj) == 3);
 

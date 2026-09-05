@@ -50,9 +50,11 @@ entry follows constitution section 52.
 ### `void call_quiesce(struct quiesce_head *h, void (*fn)(struct quiesce_head *h))` *(exported)*
 - Purpose: run `fn(h)` in thread context after a grace period that
   begins after the call; the deferred form of the above.
-- Inputs: `h` embedded in the object being freed; the callback recovers
-  the object with `container_of`. `h` belongs to the subsystem until `fn`
-  runs.
+- Inputs: `h` embedded in the object being freed (zero-initialised or
+  previously run); the callback recovers the object with `container_of`.
+  `h` belongs to the subsystem from the call until `fn` runs; submitting
+  it again before then panics (`pending` flag), because the object it is
+  embedded in is about to be freed by the first callback.
 - Concurrency: any context (a spinlock, irqsave). Callbacks are batched:
   the worker takes the whole list, waits one grace period, runs them in
   submission order.
@@ -110,7 +112,18 @@ Drop one live object (panics on underflow).
 
 ### `void module_set_unload_timeout_ms(unsigned ms)`
 How long `module_unload` waits for live objects before it leaves the
-module as a zombie (default 5000 ms; the self-test uses 50).
+module as a zombie (default 5000 ms; the self-test uses 50). A zombie
+keeps its dependencies pinned until it is freed: its outstanding release
+code may call into them.
+
+## Registration failures
+
+`device_register`, `blk_register` and `netif_register` record the owner
+module (and, for block devices and interfaces, initialise the kobject)
+only after the registry has accepted the object. A refused registration
+(`-EEXIST`, `-ENOSPC`) therefore leaves nothing to balance: the caller's
+failure path frees its storage directly, as every virtio driver's `fail`
+label does, and no live-object count is left raised.
 
 ## Test hooks
 

@@ -31,6 +31,7 @@
 struct quiesce_head {
     struct quiesce_head *next;
     void (*fn)(struct quiesce_head *h);
+    bool pending;   /* submitted and not yet run; a second call_quiesce panics */
 };
 
 /* After sched_init: the callback worker thread. */
@@ -62,7 +63,10 @@ void quiesce_note_quiescent(void);
 void synchronize_quiesce(void);
 
 /* Run `fn(h)` in thread context after a grace period that begins after
- * this call. Any context. `h` belongs to the caller until fn runs. */
+ * this call. Any context. `h` belongs to the subsystem from this call
+ * until `fn` runs: submitting it again before then is a bug and panics
+ * (the object it is embedded in is about to be freed by the first
+ * callback). `h` must be zero-initialised or previously run. */
 void call_quiesce(struct quiesce_head *h, void (*fn)(struct quiesce_head *h));
 
 struct quiesce_stats {

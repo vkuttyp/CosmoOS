@@ -443,6 +443,17 @@ static void unpublish(struct module *m)
     }
 }
 
+/* A module's code may reference its dependencies until it is unmapped,
+ * including from the release callbacks a zombie still owes; the pins go
+ * with the memory, never before. */
+static void drop_deps(struct module *m)
+{
+    for (unsigned i = 0; i < m->nr_deps; i++) {
+        KASSERT(m->deps[i]->refs > 0);
+        m->deps[i]->refs--;
+    }
+}
+
 static struct module *find_zombie_locked(const char *name)
 {
     struct module *m;
@@ -470,6 +481,7 @@ int module_unload(const char *name)
         }
         list_remove(&z->link);
         kinfo("module: freed zombie %s", z->name);
+        drop_deps(z);
         free_module((struct module_priv *)z);
         mutex_unlock(&g_lock);
         return 0;
@@ -502,15 +514,13 @@ int module_unload(const char *name)
     uint64_t deadline = clock_now_ns() + (uint64_t)g_unload_timeout_ms * 1000000ULL;
     while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && clock_now_ns() < deadline)
         thread_sleep_ns(1000000);
-    for (unsigned i = 0; i < m->nr_deps; i++) {
-        KASSERT(m->deps[i]->refs > 0);
-        m->deps[i]->refs--;
-    }
     uint32_t live = __atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE);
     if (live != 0) {
         /* Freeing would leave a release pointer into unmapped text. The
          * memory stays; the name is free for a new load; a later unload
-         * of the name reaps it once the count reaches zero. */
+         * of the name reaps it once the count reaches zero. The
+         * dependencies stay pinned too (drop_deps runs at the free): the
+         * outstanding release code may call into them. */
         kwarn("module: %s still has %u live object(s) after %u ms; kept as a zombie", m->name, live,
               g_unload_timeout_ms);
         list_push_back(&g_zombies, &m->link);
@@ -520,6 +530,7 @@ int module_unload(const char *name)
 
     /* 5. Free. */
     kinfo("module: unloaded %s", m->name);
+    drop_deps(m);
     free_module((struct module_priv *)m);
     mutex_unlock(&g_lock);
     return 0;

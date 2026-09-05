@@ -182,15 +182,17 @@ int device_register(struct device *dev)
         kerror("device: %s registered without a release", dev->name);
         return -EINVAL;
     }
-    kobject_track_code(&dev->obj, (uintptr_t)dev->release);
     model_lock();
     struct device *d;
     list_for_each_entry(d, &dev->bus->devices, bus_link) {
         if (strcmp(d->name, dev->name) == 0) {
             model_unlock();
-            return -EEXIST;
+            return -EEXIST;   /* no owner count taken: the caller's failure path frees the storage directly */
         }
     }
+    /* Accepted: record the release's owner module only now, so a failed
+     * registration leaves nothing to balance. */
+    kobject_track_code(&dev->obj, (uintptr_t)dev->release);
     list_push_back(&dev->bus->devices, &dev->bus_link);
     dev->bus->nr_devices++;
     kobject_get(&dev->obj);   /* the bus's reference */

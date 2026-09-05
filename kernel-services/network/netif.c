@@ -116,17 +116,21 @@ int netif_register(struct netif *nif)
     if (nif->name[0] == '\0' || nif->ops == NULL || nif->ops->transmit == NULL || nif->ops->release == NULL ||
         nif->mtu < 68)
         return -EINVAL;
-    kobject_init(&nif->obj, &netif_type);
-    kobject_track_code(&nif->obj, (uintptr_t)nif->ops->release);
-    nif->flags &= ~NETIF_GONE;
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n;
     list_for_each_entry(n, &g_netifs, link) {
         if (strcmp(n->name, nif->name) == 0) {
             spin_unlock_irqrestore(&g_netif_lock, s);
-            return -EEXIST;
+            return -EEXIST;   /* the object is untouched: no kobject, no owner count; the caller frees its storage */
         }
     }
+    /* Accepted: only now does the object exist (reference 1 to the
+     * creator, the owner module's live-object count raised). A failed
+     * registration must leave nothing to balance, since the caller's
+     * failure path frees the storage directly, not through the release. */
+    kobject_init(&nif->obj, &netif_type);
+    kobject_track_code(&nif->obj, (uintptr_t)nif->ops->release);
+    nif->flags &= ~NETIF_GONE;
     nif->index = g_next_index++;
     spinlock_init(&nif->lock, "netif");
     list_init(&nif->link);

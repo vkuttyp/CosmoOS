@@ -122,8 +122,11 @@ void synchronize_quiesce(void)
 void call_quiesce(struct quiesce_head *h, void (*fn)(struct quiesce_head *h))
 {
     KASSERT(fn != NULL);
-    h->fn = fn;
     arch_irq_state_t s = spin_lock_irqsave(&g_cb_lock);
+    if (h->pending)
+        panic("call_quiesce: head %p submitted twice before its callback ran", (void *)h);
+    h->pending = true;
+    h->fn = fn;
     h->next = g_cb_head;
     g_cb_head = h;
     g_cb_pending++;
@@ -162,6 +165,8 @@ static void worker_main(void *arg)
         }
         while (ordered) {
             struct quiesce_head *n = ordered->next;
+            ordered->next = NULL;
+            ordered->pending = false;   /* the callback may free or resubmit the head */
             ordered->fn(ordered);
             g_stats.callbacks++;
             ordered = n;

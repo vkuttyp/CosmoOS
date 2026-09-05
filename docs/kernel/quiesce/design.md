@@ -137,6 +137,12 @@ memory and take mutexes. Ordering: a callback runs after one full grace
 period that began after `call_quiesce` returned, which is what the
 caller's unlink-before-call gives.
 
+A head is owned by the subsystem from the call until its callback runs;
+`pending` records that, and a second `call_quiesce` on a pending head
+panics rather than corrupting the list or running the callback twice on
+memory the first run frees. The worker clears `pending` before calling
+`fn`, so a callback may resubmit its own head.
+
 ## `synchronize_irq()` and `interrupt_unregister_sync()`
 
 Interrupt handlers run with interrupts disabled inside an interrupt, so
@@ -221,6 +227,14 @@ module_unload(name):
 (the list is published with release stores and unlinked before a grace
 period, step 4 to 6), so `kobject_init` can attribute a type to its
 module from any non-sleeping context.
+
+Two consequences of the zombie state: the module's dependency pins
+(`deps[i]->refs`) drop only when the memory is freed, never at the
+timeout, because the outstanding release code may call into a dependency;
+and a refused registration (`device_register` `-EEXIST`, `blk_register`
+`-ENOSPC`, `netif_register` `-EEXIST`) takes no owner count, because the
+driver's failure path frees the storage without a release and a raised
+count would make every later unload of that module a zombie.
 
 ## Ownership and lifetime
 
