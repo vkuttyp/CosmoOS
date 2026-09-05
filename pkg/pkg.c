@@ -240,15 +240,18 @@ static void record_unstage(const char *name)
     rmdir(path);   /* only when no record is left */
 }
 
-static void installed_drop(const char *name)
+/* Remove the record; -1 (with errno) when the record itself cannot be removed. */
+static int installed_drop(const char *name)
 {
     char path[PKG_PATH_MAX];
-    installed_path(name, "MANIFEST", path, sizeof(path));
-    unlink(path);
     installed_path(name, "MANIFEST.new", path, sizeof(path));
     unlink(path);
+    installed_path(name, "MANIFEST", path, sizeof(path));
+    if (unlink(path) < 0 && errno != ENOENT)
+        return -1;
     snprintf(path, sizeof(path), PKG_DB_INSTALLED "/%s", name);
     rmdir(path);
+    return 0;
 }
 
 /* --- the index and the key ring --------------------------------------------- */
@@ -615,23 +618,43 @@ static int install_loaded(struct loaded *l)
             manifest_free(&old);
         return EXIT_FAILED;   /* the old record stands; its overlapping files are gone (PK4's recorded gap) */
     }
+    int rc2 = 0;
     if (had_old) {
-        /* Obsolete files of the previous version: best effort, after the commit. */
+        /* Obsolete files of the previous version, after the commit. One that
+         * cannot be removed stays owned: it is appended to the record (its
+         * checksum is unchanged) so verify and a later remove still see it. */
+        int leftover = 0;
         for (int i = 0; i < old.nfiles; i++) {
             bool still = false;
             for (int k = 0; k < l->m.nfiles && !still; k++)
                 still = strcmp(old.files[i].path, l->m.files[k].path) == 0;
-            if (!still) {
-                char path[PKG_PATH_MAX];
-                snprintf(path, sizeof(path), "/%s", old.files[i].path);
-                if (unlink(path) < 0 && errno != ENOENT)
-                    fprintf(stderr, "pkg: %s: obsolete file %s left behind: %s\n", l->m.name, path, strerror(errno));
+            if (still)
+                continue;
+            char path[PKG_PATH_MAX];
+            snprintf(path, sizeof(path), "/%s", old.files[i].path);
+            if (unlink(path) < 0 && errno != ENOENT) {
+                fprintf(stderr, "pkg: %s: obsolete file %s cannot be removed: %s\n", l->m.name, path, strerror(errno));
+                if (l->m.nfiles + leftover < PKG_MAX_FILES) {   /* files[] holds PKG_MAX_FILES entries */
+                    l->m.files[l->m.nfiles + leftover] = old.files[i];
+                    leftover++;
+                }
             }
         }
         remove_dirs(&old_dirs);
         manifest_free(&old);
+        if (leftover) {
+            l->m.nfiles += leftover;
+            if (record_stage(l->m.name, &l->m, &created) < 0 || record_commit(l->m.name) < 0) {
+                fprintf(stderr, "pkg: %s: cannot record %d leftover file%s (%s); %s untracked\n", l->m.name, leftover,
+                        leftover == 1 ? "" : "s", strerror(errno), leftover == 1 ? "it is" : "they are");
+                rc2 = EXIT_FAILED;
+            } else {
+                fprintf(stderr, "pkg: %s: %d obsolete file%s kept in the record\n", l->m.name, leftover,
+                        leftover == 1 ? "" : "s");
+            }
+        }
     }
-    return 0;
+    return rc2;
 }
 
 /* --- resolution ------------------------------------------------------------- */
@@ -979,10 +1002,17 @@ static int cmd_remove(int argc, char **argv)
                  * then untracked and named here. */
                 m.nfiles = kept;
                 if (record_stage(m.name, &m, m.dirs) < 0 || record_commit(m.name) < 0) {
-                    fprintf(stderr, "pkg: %s: cannot update the record (%s); dropping it\n", m.name, strerror(errno));
-                    installed_drop(m.name);
-                    for (int k = 0; k < kept; k++)
-                        fprintf(stderr, "pkg: %s: /%s is left untracked\n", m.name, m.files[k].path);
+                    int saved = errno;
+                    if (installed_drop(m.name) == 0) {
+                        fprintf(stderr, "pkg: %s: cannot update the record (%s); dropped it\n", m.name, strerror(saved));
+                        for (int k = 0; k < kept; k++)
+                            fprintf(stderr, "pkg: %s: /%s is left untracked\n", m.name, m.files[k].path);
+                    } else {
+                        fprintf(stderr,
+                                "pkg: %s: the database cannot be written (%s): the record still lists removed files; "
+                                "run 'pkg remove %s' again once %s is writable\n",
+                                m.name, strerror(saved), m.name, PKG_DB_DIR);
+                    }
                 } else {
                     fprintf(stderr, "pkg: %s: %d file%s could not be removed; the package stays recorded with them\n",
                             m.name, stuck, stuck == 1 ? "" : "s");
@@ -991,7 +1021,11 @@ static int cmd_remove(int argc, char **argv)
             } else {
                 if (m.dirs)
                     remove_dirs(m.dirs);
-                installed_drop(m.name);
+                if (installed_drop(m.name) < 0) {
+                    fprintf(stderr, "pkg: %s: files removed but the record cannot be dropped: %s\n", m.name,
+                            strerror(errno));
+                    rc = EXIT_FAILED;
+                }
             }
         }
         manifest_free(&m);

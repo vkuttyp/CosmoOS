@@ -223,10 +223,11 @@ install(pkg):
 The record is committed by one rename before any file of the previous
 version is touched, so the database describes files that exist at every
 step: a failure before the commit leaves the old record and (for a fresh
-install) no files; a failure after it can only leave an obsolete file of
-the old version behind, which is reported. The recorded gap remains that
-the new files overwrite the old version's files with the same paths
-before the commit.
+install) no files; after it, an obsolete file of the old version that
+cannot be removed is appended to the record (its checksum is unchanged)
+so it stays owned; only when that record cannot be written is it
+reported as untracked. The recorded gap remains that the new files
+overwrite the old version's files with the same paths before the commit.
 
 A file that already exists and belongs to another installed package is
 a conflict, reported before writing (`pkg` scans the installed manifests
@@ -241,7 +242,9 @@ is rewritten to list only the files still on disk (so the database keeps
 describing the filesystem, the files stay owned, and a later `remove`
 finishes the job) and the command fails; if that record cannot be
 written either, the record is dropped and the stuck files are named as
-untracked, so the database never lists files that are gone; otherwise
+untracked, so the database never lists files that are gone; if even the
+drop fails the command says the database is unwritable and that the
+record is stale until `pkg remove` is repeated; otherwise
 `rmdir` the recorded directories deepest first (non-empty ones are left)
 and remove the record.
 
