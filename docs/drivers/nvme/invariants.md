@@ -12,7 +12,9 @@ command is being aborted is marked `aborting` and, if the command
 completes meanwhile, stays reserved until the timeout path releases it,
 so the Abort can never name a replacement request; an Abort that itself
 gets no answer resets the controller rather than releasing the id it
-names (Greptile on PR #24). A reset frees every reserved slot, since a
+names, while an Abort the controller answered with an error status is a
+completed Abort (nothing names the id) and, if the request finished on
+its own meanwhile, no failure at all (Greptile on PR #24). A reset frees every reserved slot, since a
 disabled controller answers nothing.
 
 **M1a. A waiter on the stack is never signalled after its frame is

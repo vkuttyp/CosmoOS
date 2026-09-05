@@ -556,14 +556,19 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
     sqe.cdw10 = ((uint32_t)cid << 16) | q->qid;
     uint32_t result = 1;
     int rc = admin_cmd(c, &sqe, &result);
-    if (rc == -ETIMEDOUT || rc == -EIO) {
-        /* The Abort itself got no answer (or the controller is already
-         * dead): it may still be executed later against this id, so the
-         * slot cannot be released. A controller that does not answer an
-         * Abort within 5 s is reset. */
+    if (rc == -ETIMEDOUT) {
+        /* The Abort itself got no answer: it may still be executed later
+         * against this id, so the slot cannot be released. A controller
+         * that does not answer an Abort within 5 s is reset. */
         controller_die(c, "an Abort command did not complete");
         return;
     }
+    if (__atomic_load_n(&c->dead, __ATOMIC_ACQUIRE))
+        return;   /* reset meanwhile: controller_die released every slot */
+    /* From here the Abort has completed (accepted, refused with an error
+     * status, or never issued: -EBUSY); whatever it says, nothing names the
+     * id any more, and a refused Abort of a request that finished on its
+     * own is not a failure of the controller. */
     bool done = false;
     if (rc == 0 && (result & 1) == 0) {
         /* The controller says it aborted: its completion for the command
@@ -576,8 +581,6 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
                 thread_sleep_ms(1);
         }
     } else {
-        /* The Abort completed without effect (refused, or too late, or it
-         * was never issued: -EBUSY): nothing names the id any more. */
         arch_irq_state_t s = spin_lock_irqsave(&q->lock);
         done = q->cmds[cid].bio == NULL;   /* it may have completed on its own while we asked */
         spin_unlock_irqrestore(&q->lock, s);
