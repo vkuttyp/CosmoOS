@@ -362,6 +362,82 @@ static struct mount *mount_at(const char *path)
     return m;
 }
 
+/* Two threads fill and free distinct files on a four-page mount while a
+ * third samples the mount's page count: the reservation is the admission,
+ * so the count never exceeds the budget (Greptile on PR #21 found the
+ * earlier read-then-charge window). */
+struct budget_stress {
+    const char *path;
+    unsigned enospc, pages;
+};
+
+static volatile bool g_budget_stop;
+static volatile uint64_t g_budget_peak;
+static struct mount *g_budget_mnt;
+
+static void budget_writer(void *arg)
+{
+    struct budget_stress *st = arg;
+    static const uint8_t page[PAGE_SIZE] = { 1 };
+    for (unsigned round = 0; round < 40; round++) {
+        struct file *f;
+        if (vfs_open(NULL, st->path, COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) != 0)
+            continue;
+        for (unsigned i = 0; i < 6; i++) {
+            int64_t n = file_write(f, page, PAGE_SIZE);
+            if (n == PAGE_SIZE)
+                st->pages++;
+            else if (n == -ENOSPC)
+                st->enospc++;
+        }
+        file_put(f);
+        vfs_unlink(NULL, st->path);
+    }
+}
+
+static void budget_sampler(void *arg)
+{
+    (void)arg;
+    while (!g_budget_stop) {
+        uint64_t n = __atomic_load_n(&g_budget_mnt->cache_pages, __ATOMIC_RELAXED);
+        if (n > g_budget_peak)
+            g_budget_peak = n;
+        sched_yield();
+    }
+}
+
+bool selftest_cache_budget_race(const char **reason)
+{
+    int mk = vfs_mkdir(NULL, "/mnt/rrace", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/mnt/rrace", "ramfs", NULL, 0) == 0);
+    struct vnode *rv;
+    CHECK(vfs_lookup(NULL, "/mnt/rrace", &rv) == 0);
+    g_budget_mnt = rv->mnt;
+    vnode_put(rv);
+    g_budget_mnt->cache_limit_pages = 4;
+    g_budget_stop = false;
+    g_budget_peak = 0;
+    struct budget_stress a = { .path = "/mnt/rrace/a" }, b = { .path = "/mnt/rrace/b" };
+    struct thread *sampler = thread_create(budget_sampler, NULL, "budget-sampler", SCHED_PRIO_DEFAULT);
+    struct thread *ta = thread_create(budget_writer, &a, "budget-a", SCHED_PRIO_DEFAULT);
+    struct thread *tb = thread_create(budget_writer, &b, "budget-b", SCHED_PRIO_DEFAULT);
+    CHECK(sampler && ta && tb);
+    thread_join(ta);
+    thread_join(tb);
+    g_budget_stop = true;
+    thread_join(sampler);
+    CHECK(a.enospc + b.enospc > 0);   /* twelve pages wanted per round, four allowed */
+    CHECK(a.pages + b.pages > 0);
+    CHECK(g_budget_peak <= 4);
+    CHECK(g_budget_mnt->cache_pages == 0);   /* every reservation was charged or returned */
+    CHECK(vfs_umount("/mnt/rrace") == 0);
+    CHECK(vfs_rmdir(NULL, "/mnt/rrace") == 0);
+    kinfo("selftest: cache-budget-race: %u pages admitted, %u refused across two writers; peak %llu of a budget of 4",
+          a.pages + b.pages, a.enospc + b.enospc, (unsigned long long)g_budget_peak);
+    return true;
+}
+
 bool selftest_cache_limits(const char **reason)
 {
     static uint8_t buf[PAGE_SIZE];

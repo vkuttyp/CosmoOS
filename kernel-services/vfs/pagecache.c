@@ -178,15 +178,20 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
         return e;
     }
     stat_add(&g_stats.misses, 1);
+    /* Reserve the mount's page first: the increment is the admission, so
+     * concurrent misses on different vnodes of one mount cannot both pass
+     * a stale read of the count. Every failure below gives it back. */
     struct mount *mnt = vn->mnt;
-    if (mnt->cache_limit_pages &&
-        __atomic_load_n(&mnt->cache_pages, __ATOMIC_RELAXED) >= mnt->cache_limit_pages) {
+    uint64_t now = __atomic_add_fetch(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
+    if (mnt->cache_limit_pages && now > mnt->cache_limit_pages) {
+        __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
         stat_add(&g_stats.budget_refusals, 1);
         *err = -ENOSPC;   /* the mount's page budget (ramfs) */
         return NULL;
     }
     e = kzalloc(sizeof(*e));
     if (e == NULL) {
+        __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
         *err = -ENOMEM;
         return NULL;
     }
@@ -195,6 +200,7 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
     e->page = pmm_alloc_page(PMM_FLAGS_ZERO);
     if (e->page == NULL) {
         kfree(e);
+        __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
         *err = -ENOMEM;
         return NULL;
     }
@@ -204,6 +210,7 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
         if (rc) {
             pmm_free_page(e->page);
             kfree(e);
+            __atomic_fetch_sub(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
             *err = rc;
             return NULL;
         }
@@ -211,7 +218,6 @@ static struct pc_entry *get(struct vnode *vn, uint64_t index, int *err)
     e->next = pc->buckets[index % PC_HASH];
     pc->buckets[index % PC_HASH] = e;
     pc->nr_pages++;
-    __atomic_fetch_add(&mnt->cache_pages, 1u, __ATOMIC_RELAXED);
     stat_add(&g_stats.pages, 1);
     lru_add(e);   /* clean until written */
     return e;
