@@ -289,8 +289,13 @@ unless it is the last (`exit_group` ends the process). `futex` gains
 `FUTEX_REQUEUE` and `FUTEX_CMP_REQUEUE` (waiters move from one word to
 another under both buckets' locks, lower address first with the second
 annotated nested for lockdep; a waiter leaves whichever list it is on
-when it wakes; `CMP` checks the first word first, `-EAGAIN`, the read
-outside the lock like `futex_wait`'s), `FUTEX_WAIT_BITSET` and
+when it wakes; `CMP` checks the first word first, `-EAGAIN`, and the
+check is atomic against the bucket's other operations: the bucket's
+`queue_seq` is noted, the word compared unlocked, and the act happens
+under the locks only if the sequence is unchanged, else the compare is
+redone — the same shape as `futex_wait`'s compare-then-enqueue; both
+operations return woken + requeued as the Linux kernel does),
+`FUTEX_WAIT_BITSET` and
 `FUTEX_WAKE_BITSET` with the all-ones set only (`-ENOSYS` for a real
 bitset; an absolute timeout on the named clock, already-past deadlines
 answer `-ETIMEDOUT` after the value check), and honours

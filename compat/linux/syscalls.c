@@ -1193,11 +1193,9 @@ static int64_t lx_futex(struct syscall_args *a)
         if (!user_range_ok(uaddr2, 4))
             return -EFAULT;
         unsigned nr_requeue = (unsigned)a->a[3];
-        int rc = futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5]);
-        if (rc < 0)
-            return rc;
-        /* REQUEUE reports the woken only; CMP_REQUEUE woken + requeued. */
-        return op == LX_FUTEX_REQUEUE ? (rc < (int)val ? rc : (int)val) : rc;
+        /* Both report woken + requeued, as the Linux kernel does for both
+         * operations (its man page's "woken" for REQUEUE notwithstanding). */
+        return futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5]);
     }
     default:
         return -ENOSYS;

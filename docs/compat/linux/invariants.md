@@ -49,10 +49,15 @@ mark waiters; a waiter marked `woken` returns 0 even if its timer also
 fired; the waiter dequeues itself under the lock before returning, so a
 stack-resident waiter never outlives its frame on a list. Check:
 `lxtest` (`FUTEX_WAIT` with the wrong value `-EAGAIN`, with a 20 ms
-timeout `-ETIMEDOUT`, `FUTEX_WAKE` with no waiter returns 0); review of
-`futex.c`. Gap: no two-thread test (a single-threaded process cannot
-wake itself); the primitive's contention behaviour is untested until
-user threads exist.
+timeout `-ETIMEDOUT`, `FUTEX_WAKE` with no waiter returns 0); `lxtest`'s
+two waiters requeued and released (milestone 10); review of `futex.c`.
+Milestone 10 extends the rule to `CMP_REQUEUE`: its compare is bracketed
+by two reads of the bucket's `queue_seq` (bumped by every enqueue, wake
+and requeue) and repeated when they differ, so the value it acts on was
+the word's value while no other futex operation touched the bucket — the
+atomicity Linux gets from reading the word under the bucket lock. Gap:
+the race itself is not driven by a test; the primitive's contention
+behaviour beyond two waiters is untested.
 
 **L5. Signals are delivered only through the kernel core, and only in
 ways Linux programs expect.** (Milestone 10; the stage-1 rule "recorded,

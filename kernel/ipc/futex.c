@@ -26,6 +26,7 @@ struct bucket {
     spinlock_t lock;
     struct list_node waiters;
     uint64_t wake_seq;   /* bumped by every futex_wake under the lock */
+    uint64_t queue_seq;  /* bumped by every change to the waiter list (enqueue, wake, requeue) */
 };
 
 static struct bucket g_buckets[FUTEX_BUCKETS];
@@ -88,6 +89,7 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
         return 0;
     }
     list_push_back(&b->waiters, &w.link);
+    b->queue_seq++;
     spin_unlock_irqrestore(&b->lock, s);
 
     struct timer t;
@@ -148,6 +150,8 @@ int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
         sched_wake(w->thread);
         woken++;
     }
+    if (woken)
+        b->queue_seq++;
     spin_unlock_irqrestore(&b->lock, s);
     return woken;
 }
@@ -157,22 +161,46 @@ int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsi
 {
     if ((uaddr1 & 3) || (uaddr2 & 3))
         return -EINVAL;
-    if (cmp) {
-        uint32_t cur;
-        if (copy_from_user(&cur, uaddr1, sizeof(cur)))
-            return -EFAULT;
-        if (cur != cmpval)
-            return -EAGAIN;
-    }
     struct bucket *b1 = bucket_of(space, uaddr1), *b2 = bucket_of(space, uaddr2);
     /* Two buckets of one class: lower address first, always (no other path
      * takes two), the second annotated as nested for lockdep
      * (docs/kernel/lockdep/invariants.md, "futex"). */
     struct bucket *lo = b1 < b2 ? b1 : b2, *hi = b1 < b2 ? b2 : b1;
-    arch_irq_state_t s = spin_lock_irqsave(&lo->lock);
-    if (hi != lo)
-        spin_lock_nested(&hi->lock, 1);
+    arch_irq_state_t s;
+    for (;;) {
+        /*
+         * CMP_REQUEUE's compare must be atomic with respect to the other
+         * futex operations on uaddr1's bucket, as on Linux, where the word
+         * is read under the bucket lock. The user copy cannot run under the
+         * spinlock here (it may fault), so: note the bucket's queue
+         * sequence, compare unlocked, then take the locks and act only if
+         * no enqueue, wake or requeue touched the bucket in between;
+         * otherwise compare again. The same shape as futex_wait's
+         * compare-then-enqueue.
+         */
+        uint64_t seq = 0;
+        if (cmp) {
+            s = spin_lock_irqsave(&b1->lock);
+            seq = b1->queue_seq;
+            spin_unlock_irqrestore(&b1->lock, s);
+            uint32_t cur;
+            if (copy_from_user(&cur, uaddr1, sizeof(cur)))
+                return -EFAULT;
+            if (cur != cmpval)
+                return -EAGAIN;
+        }
+        s = spin_lock_irqsave(&lo->lock);
+        if (hi != lo)
+            spin_lock_nested(&hi->lock, 1);
+        if (!cmp || b1->queue_seq == seq)
+            break;
+        if (hi != lo)
+            spin_unlock(&hi->lock);
+        spin_unlock_irqrestore(&lo->lock, s);
+    }
     b1->wake_seq++;
+    b1->queue_seq++;
+    b2->queue_seq++;
     int woken = 0, requeued = 0;
     struct futex_waiter *w, *tmp;
     list_for_each_entry_safe(w, tmp, &b1->waiters, link) {

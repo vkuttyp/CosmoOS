@@ -27,9 +27,10 @@ int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n);
 
 /* Wake up to `nr_wake` waiters on uaddr1 and move up to `nr_requeue` more
  * to uaddr2, where a later futex_wake(uaddr2) finds them. With `cmp`, the
- * word at uaddr1 must still read `cmpval` (-EAGAIN otherwise; the read is
- * not under the bucket lock, like futex_wait's). Returns woken + requeued
- * (Linux's FUTEX_CMP_REQUEUE result); -EINVAL, -EFAULT. Thread context. */
+ * word at uaddr1 must read `cmpval` (-EAGAIN otherwise), atomically with
+ * respect to every other futex operation on uaddr1's bucket (the compare
+ * is redone whenever a wait, wake or requeue touched the bucket in
+ * between). Returns woken + requeued; -EINVAL, -EFAULT. Thread context. */
 int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue,
                   bool cmp, uint32_t cmpval);
 

@@ -239,7 +239,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 230 | `clock_nanosleep` | as `nanosleep`; `TIMER_ABSTIME` (1) is taken relative to the named clock | clock ids `0..7` |
 | 318 | `getrandom` | `random_get_bytes` in 256-byte pieces | flags ignored; at most 256 KiB per call |
 | 63 | `uname` | `sysname "Linux"`, `nodename "cosmo"`, `release "6.0.0-cosmo"`, `version "<KERNEL_NAME> <KERNEL_VERSION> <COSMO_BUILD_ID>"`, `machine "x86_64"`, `domainname "(none)"` (six 65-byte fields, 390 bytes) | a presentation decision so libcs' version checks pass |
-| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(uaddr, uaddr2, val, nr_requeue, cmp, val3)` (`REQUEUE` returns the woken, `CMP_REQUEUE` woken + requeued); `FUTEX_PRIVATE_FLAG` (128) masked off | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
+| 202 | `futex` | `FUTEX_WAIT` (0) → `futex_wait(space, uaddr, val, timeout)` (a relative `timespec`; zero becomes 1 ns so it still times out); `FUTEX_WAIT_BITSET` (9) with `FUTEX_BITSET_MATCH_ANY`: an absolute deadline on `CLOCK_MONOTONIC`, or `CLOCK_REALTIME` with `FUTEX_CLOCK_REALTIME` (256); `FUTEX_WAKE` (1) and `FUTEX_WAKE_BITSET` (10, all-ones) → `futex_wake(space, uaddr, val)`; `FUTEX_REQUEUE` (3) and `FUTEX_CMP_REQUEUE` (4) → `futex_requeue(uaddr, uaddr2, val, nr_requeue, cmp, val3)` (both return woken + requeued, as the Linux kernel does); `FUTEX_PRIVATE_FLAG` (128) masked off | other operations, a real bitset, or `CLOCK_REALTIME` with plain `WAIT` `-ENOSYS`; `uaddr`/`uaddr2` must be 4 readable user bytes (`-EFAULT`) and 4-byte aligned (`-EINVAL`); a past absolute deadline `-ETIMEDOUT` (or `-EAGAIN` when the word differs) |
 
 ### Sockets
 
@@ -323,9 +323,11 @@ list. Waiters live on the waiting thread's stack.
   `nr_requeue` more onto `uaddr2`'s list (their `uaddr` and bucket
   pointer rewritten under both buckets' locks, lower address first, the
   second `spin_lock_nested(1)`), where a later `futex_wake(uaddr2)`
-  finds them. With `cmp` the word at `uaddr1` must read `cmpval` first
-  (`-EAGAIN`; the read is outside the lock, like `futex_wait`'s).
-  Returns woken + requeued; `-EINVAL`, `-EFAULT`. A woken waiter
+  finds them. With `cmp` the word at `uaddr1` must read `cmpval`
+  (`-EAGAIN`), atomically with respect to the bucket's other operations:
+  every enqueue, wake and requeue bumps the bucket's `queue_seq`; the
+  compare runs unlocked between two reads of it and is redone when they
+  differ. Returns woken + requeued; `-EINVAL`, `-EFAULT`. A woken waiter
   dequeues itself from whichever bucket it is on (it re-reads its bucket
   pointer under that bucket's lock until they agree). Thread context.
 
