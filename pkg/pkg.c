@@ -73,21 +73,35 @@ static int write_all(int fd, const void *data, size_t len)
     return 0;
 }
 
-/* Write `path` through "<path>.pkgtmp" and rename. */
-static int write_atomic(const char *path, const void *data, size_t len, unsigned mode)
+static int write_new(const char *path, const void *data, size_t len, unsigned mode)
 {
-    char tmp[PKG_PATH_MAX + 16];
-    snprintf(tmp, sizeof(tmp), "%s.pkgtmp", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
     if (fd < 0)
         return -1;
     int rc = write_all(fd, data, len);
     close(fd);
-    if (rc == 0)
-        rc = rename(tmp, path);
     if (rc)
-        unlink(tmp);
+        unlink(path);
     return rc;
+}
+
+static void tmp_name(const char *path, char *tmp, size_t n)
+{
+    snprintf(tmp, n, "%s.pkgtmp", path);
+}
+
+/* Write `path` through "<path>.pkgtmp" and rename. */
+static int write_atomic(const char *path, const void *data, size_t len, unsigned mode)
+{
+    char tmp[PKG_PATH_MAX + 16];
+    tmp_name(path, tmp, sizeof(tmp));
+    if (write_new(tmp, data, len, mode) < 0)
+        return -1;
+    if (rename(tmp, path) < 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
 }
 
 /* mkdir -p for the directory of `path`, recording the directories created. */
@@ -563,41 +577,27 @@ static int install_loaded(struct loaded *l)
         return EXIT_FAILED;
     }
 
+    /*
+     * Phase 1: every file is written as "<path>.pkgtmp"; nothing visible
+     * changes and a previous version's files are untouched. Phase 2: the
+     * record (with the directories created and the previous version's) is
+     * committed. Phase 3: the temporaries are renamed into place. A failure
+     * in phases 1 or 2 removes the temporaries and leaves the old state
+     * exactly as it was, record included.
+     */
     int done = 0;
     int rc = 0;
     for (; done < l->m.nfiles; done++) {
         struct file_entry *f = &l->m.files[done];
-        char path[PKG_PATH_MAX];
+        char path[PKG_PATH_MAX], tmp[PKG_PATH_MAX + 16];
         snprintf(path, sizeof(path), "/%s", f->path);
-        if (ensure_parent_dirs(path, &created) < 0 || write_atomic(path, l->data[done], (size_t)f->size, f->mode) < 0) {
+        tmp_name(path, tmp, sizeof(tmp));
+        if (ensure_parent_dirs(path, &created) < 0 || write_new(tmp, l->data[done], (size_t)f->size, f->mode) < 0) {
             fprintf(stderr, "pkg: %s: cannot write %s: %s\n", l->m.name, path, strerror(errno));
             rc = EXIT_FAILED;
             break;
         }
     }
-    if (rc == 0 && record_stage(l->m.name, &l->m, &created) < 0) {
-        fprintf(stderr, "pkg: %s: cannot write the installation record: %s\n", l->m.name, strerror(errno));
-        rc = EXIT_FAILED;
-    }
-    if (rc) {
-        /* Roll back this package's files and the staged record; a previous
-         * version's files with the same paths are lost too (recorded gap). */
-        for (int i = 0; i < done; i++) {
-            char path[PKG_PATH_MAX];
-            snprintf(path, sizeof(path), "/%s", l->m.files[i].path);
-            unlink(path);
-        }
-        remove_dirs(&created);
-        record_unstage(l->m.name);
-        if (had_old)
-            manifest_free(&old);
-        return rc;
-    }
-    /* The record describes the new files, which are on disk now, and
-     * carries the old version's directories too (an empty one goes below;
-     * a directory that stays is harmlessly listed). It is committed before
-     * any file of the old version is touched, so a failure from here on
-     * never leaves the database describing files that are gone. */
     for (int i = 0; i < old_dirs.n && created.n < PKG_MAX_DIRS; i++) {
         bool dup = false;
         for (int k = 0; k < created.n && !dup; k++)
@@ -605,18 +605,40 @@ static int install_loaded(struct loaded *l)
         if (!dup)
             strlcpy(created.paths[created.n++], old_dirs.paths[i], PKG_PATH_MAX);
     }
-    if (record_stage(l->m.name, &l->m, &created) < 0 || record_commit(l->m.name) < 0) {
+    if (rc == 0 && (record_stage(l->m.name, &l->m, &created) < 0 || record_commit(l->m.name) < 0)) {
         fprintf(stderr, "pkg: %s: cannot commit the installation record: %s\n", l->m.name, strerror(errno));
-        for (int i = 0; i < l->m.nfiles; i++) {
-            char path[PKG_PATH_MAX];
+        rc = EXIT_FAILED;
+    }
+    if (rc) {
+        for (int i = 0; i < done; i++) {
+            char path[PKG_PATH_MAX], tmp[PKG_PATH_MAX + 16];
             snprintf(path, sizeof(path), "/%s", l->m.files[i].path);
-            unlink(path);
+            tmp_name(path, tmp, sizeof(tmp));
+            unlink(tmp);
         }
         remove_dirs(&created);
         record_unstage(l->m.name);
         if (had_old)
             manifest_free(&old);
-        return EXIT_FAILED;   /* the old record stands; its overlapping files are gone (PK4's recorded gap) */
+        return rc;   /* the old record and the old files stand untouched */
+    }
+    /* Phase 3: the record now describes the new files; move them into place. */
+    int stuck = 0;
+    for (int i = 0; i < l->m.nfiles; i++) {
+        char path[PKG_PATH_MAX], tmp[PKG_PATH_MAX + 16];
+        snprintf(path, sizeof(path), "/%s", l->m.files[i].path);
+        tmp_name(path, tmp, sizeof(tmp));
+        if (rename(tmp, path) < 0) {
+            fprintf(stderr, "pkg: %s: cannot place %s: %s (verify reports it; reinstall to repair)\n", l->m.name, path,
+                    strerror(errno));
+            unlink(tmp);
+            stuck++;
+        }
+    }
+    if (stuck) {
+        if (had_old)
+            manifest_free(&old);
+        return EXIT_FAILED;
     }
     int rc2 = 0;
     if (had_old) {

@@ -212,24 +212,25 @@ writes nothing.
 ```text
 install(pkg):
   stage the record: write installed/<name>/MANIFEST.new (a database that cannot be written stops here)
-  for each file: mkdir -p its directory (recording every directory that did not exist)
-                 write to "<path>.pkgtmp" with the manifest mode, rename over the destination
-  restage MANIFEST.new with "dir:" lines for the directories created plus the previous version's
-  commit: rename MANIFEST.new -> MANIFEST (one rename, one file)
-  on any failure so far: unlink the files this package placed, remove the directories it created,
-                         delete the staged record, report, stop the operation
+  phase 1: for each file: mkdir -p its directory (recording every directory that did not exist),
+                          write "<path>.pkgtmp" with the manifest mode   (nothing visible changes)
+  phase 2: restage MANIFEST.new with "dir:" lines (directories created plus the previous version's),
+           commit: rename MANIFEST.new -> MANIFEST (one rename, one file)
+  on any failure in phases 1 or 2: unlink the temporaries, remove the directories created, delete
+           the staged record: the old record and the old files stand exactly as they were
+  phase 3: rename every "<path>.pkgtmp" into place (a rename that fails is reported; verify shows it)
   if a previous version was installed: unlink files of the old manifest that the new one lacks
-                                       (best effort, reported), remove its recorded directories that are empty
+           (one that cannot be removed is appended to the record so it stays owned), remove its
+           recorded directories that are empty
 ```
 
-The record is committed by one rename before any file of the previous
-version is touched, so the database describes files that exist at every
-step: a failure before the commit leaves the old record and (for a fresh
-install) no files; after it, an obsolete file of the old version that
-cannot be removed is appended to the record (its checksum is unchanged)
-so it stays owned; only when that record cannot be written is it
-reported as untracked. The recorded gap remains that the new files
-overwrite the old version's files with the same paths before the commit.
+Nothing visible changes before the record is committed, and the record
+is committed before any file of the previous version is touched or
+replaced, so the database describes files that exist at every step. The
+only window left is phase 3 itself: a rename that fails (in practice
+only when the filesystem is out of memory) leaves that path with the old
+content under the new record, which `verify` reports and a reinstall
+repairs.
 
 A file that already exists and belongs to another installed package is
 a conflict, reported before writing (`pkg` scans the installed manifests

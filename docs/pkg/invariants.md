@@ -38,9 +38,12 @@ is decided by scanning installed manifests, so a path written outside
 program in `/bin` with one in `/usr/bin` (the shell's `PATH` decides).
 
 **PK4. Installation is atomic per file and rolled back per package.**
-Each file is written to `<path>.pkgtmp` and renamed into place; a
-failure unlinks the files this package has already placed, removes the
-directories it created and the staged record, and the operation stops.
+Every file is first written as `<path>.pkgtmp`; only after the record is
+committed are the temporaries renamed into place, so a failure before
+that leaves the previous version's files and record exactly as they
+were, and a fresh install that fails leaves nothing. A failure unlinks
+the temporaries, removes the directories it created and the staged
+record, and the operation stops.
 The database record is one file, staged as `MANIFEST.new` before the
 first file is written and committed by a single rename after the last,
 so the database never describes a mixture of old and new, and it is
@@ -51,10 +54,10 @@ fails; if even that write fails the record is dropped and the files are
 named as untracked; if the drop fails too, the command says the database
 is unwritable (the only case where a record can be stale, and it says so). Check: review; `rc.test` sees
 complete installs and removals. Gap: no test injects a write failure
-mid-install or mid-remove; a failure while replacing a previous version
-leaves that version's overlapping files gone (a recorded limit of the
-single-package rollback); multi-package operations stop at the first
-failure with earlier packages installed.
+mid-install or mid-remove; a rename that fails while moving the
+temporaries into place (after the commit) leaves that path with the old
+content, which `verify` reports and a reinstall repairs; multi-package
+operations stop at the first failure with earlier packages installed.
 
 **PK5. The database describes what is on disk.** `installed/<name>/
 MANIFEST` is the manifest of the package as extracted plus `dir:` lines
