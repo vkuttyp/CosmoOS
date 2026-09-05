@@ -15,6 +15,7 @@ than sleep so the scheduler is not involved.
 | timers armed for 30, 10, 20 ms fire in order 10, 20, 30 (`fired_at == {2,3,1}`) within 60 ms | T7 sorted queue; callbacks run; `timer_pending_count() >= 3` while armed |
 | all three timers back to `TIMER_IDLE` | T6 state handling after the callback |
 | arm 20 ms, `timer_cancel` → true, second `timer_cancel` → false, nothing fires in 30 ms | cancellation and state |
+| `timer-cancel-sync` (`kernel/core/quiescetest.c`): a callback spinning 20 ms on CPU 1 is outlasted by `timer_cancel_sync` (≥ 10 ms, `timer_sync_waits` +1); a callback that re-arms every 1 ms is stopped for good (IDLE, no fire in 30 ms) | the sync form and the re-arm race (`docs/kernel/quiesce/testing.md`) |
 
 ### `sleep` (`selftest_sleep`)
 

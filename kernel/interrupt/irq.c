@@ -116,12 +116,25 @@ int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsign
     return vector;
 }
 
+/*
+ * Release order (docs/kernel/quiesce/design.md, "Interrupt handlers"):
+ * unpublish the handler under the lock, drop the lock, wait one grace
+ * period so a CPU still inside the handler has returned, then give the
+ * vector back. The vector stays allocated across the wait, so no new
+ * registrant can take it while the old handler may still be running.
+ * Thread context only (the wait sleeps).
+ */
 int irq_release_msi(int vector)
 {
     if (vector < 0 || (unsigned)vector >= arch_trap_vector_count())
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
     interrupt_unregister_vector((unsigned)vector);
+    spin_unlock_irqrestore(&g_irq_lock, s);
+
+    synchronize_irq((unsigned)vector);
+
+    s = spin_lock_irqsave(&g_irq_lock);
     arch_vector_free((unsigned)vector);
     spin_unlock_irqrestore(&g_irq_lock, s);
     return 0;
@@ -142,9 +155,16 @@ int irq_release(irq_t irq)
     arch_irqc_mask(irq);
     unsigned vector = (unsigned)slot->vector;
     interrupt_unregister_vector(vector);
-    arch_vector_free(vector);
     slot->vector = -1;
     slot->enabled = false;
+    spin_unlock_irqrestore(&g_irq_lock, s);
+
+    /* Masked and unpublished; a handler entered before the mask may
+     * still be running on its CPU. */
+    synchronize_irq(vector);
+
+    s = spin_lock_irqsave(&g_irq_lock);
+    arch_vector_free(vector);
     spin_unlock_irqrestore(&g_irq_lock, s);
     return 0;
 }

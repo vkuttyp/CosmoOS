@@ -55,9 +55,25 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 - **Purpose**: remove a PENDING timer from the queue of `t->cpu`.
 - **Outputs**: true if it was pending (now IDLE); false if it was IDLE or
   RUNNING. A RUNNING timer's callback may still be executing on its CPU;
-  the caller must not free it until the callback has returned
-  (`timer_cancel_sync` is planned with the SMP PR).
+  the caller must not free it until `timer_cancel_sync`.
 - **Interrupt context**: yes.
+
+### `bool timer_cancel_sync(struct timer *t)` *(exported)*
+- **Purpose**: cancel and wait until the callback is not running
+  anywhere; on return the timer's memory may be freed.
+- **Mechanism**: `struct timer_queue.running` names the callback the
+  queue's CPU is executing (set before the callback with the lock held,
+  cleared after it with the lock re-taken). Holding the queue lock while
+  `running != t` proves the callback is not executing; seeing `running
+  == t` means it runs on another CPU, and the caller spins
+  (`arch_cpu_relax`, no sleep) and cancels again, so a callback that
+  re-armed is caught. On the timer's own CPU `running == t` is impossible
+  from thread context (callbacks run in the tick interrupt, masked while
+  the lock is held) and from the callback itself it panics.
+- **Outputs**: what `timer_cancel` would have returned.
+- **Context**: any except the timer's own callback. Safe under a spinlock
+  as long as the callback never takes that lock (TCP's callbacks take only
+  the network work lock; `pcb_free_locked` relies on that).
 
 ### `typedef void (*timer_fn)(struct timer *t, void *arg)`
 - Callback contract: runs in interrupt context on the arming CPU with

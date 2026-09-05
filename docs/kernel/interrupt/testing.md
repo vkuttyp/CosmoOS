@@ -19,6 +19,7 @@ and what each proves:
 | `interrupt_count(v) == before + 1` | I-INT-6 |
 | `arch_irq_enabled()` afterwards | IRETQ restored RFLAGS; the dispatcher did not leak IF state |
 | `interrupt_unregister(v, bp_handler) == 0`, name now NULL | removal path |
+| `irq-sync` (`kernel/core/quiescetest.c`): a handler spinning 20 ms on CPU 1, raised with `arch_ipi_send`; `interrupt_unregister_sync` returns only after the handler set its `done` flag (≥ 10 ms) | a handler is a read-side section; `synchronize_irq` outlasts it (`docs/kernel/quiesce/testing.md`) |
 | register on `arch_trap_vector_count()` → `-EINVAL`; NULL fn → `-EINVAL` | argument validation |
 
 ### Unhandled-exception path (`make test-crash`)

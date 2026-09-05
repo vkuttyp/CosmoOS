@@ -337,9 +337,11 @@ leaves it in one-shot mode with count 0.
 **trap.c dispatch tail.** For vectors ≥ 32, `x86_trap_dispatch`
 increments `percpu->irq_depth` and `irq_count`, calls
 `interrupt_dispatch`, then `arch_irqc_eoi(vector)`, decrements
-`irq_depth`, and, if `irq_depth == 0 && need_resched &&
-preempt_count == 0 && (frame->rflags & RFLAGS_IF)`, calls
-`sched_preempt()`. The context switch happens inside the handler on the
+`irq_depth`, and, if `irq_depth == 0 && preempt_count == 0 &&
+(frame->rflags & RFLAGS_IF)`, records a quiescent state
+(`quiesce_note_quiescent`, `docs/kernel/quiesce/design.md`: the
+interrupted context holds no spinlock and is not an interrupt) and then,
+if `need_resched`, calls `sched_preempt()`. The context switch happens inside the handler on the
 interrupted thread's stack; the `iretq` completes when the thread is
 switched back in. Exceptions (vectors < 32) do not count as interrupt
 nesting, so a page fault in a thread does not block a later preemption.

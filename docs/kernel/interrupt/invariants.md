@@ -53,9 +53,10 @@ the current context) are planned with the scheduler.
 
 ## I-INT-9: No global lock
 
-Dispatch is lock-free by design and will stay so under SMP via
-release/acquire plus a grace period on removal (constitution Invariant
-12). **Checked by review**.
+Dispatch is lock-free by design: release/acquire on the record pointer
+plus a grace period on removal (`synchronize_irq`; constitution
+Invariant 12). **Checked by review and by `irq-sync`** (a handler running
+on another CPU is outlasted by `interrupt_unregister_sync`).
 
 ## I-INT-10: `arch_trap_vector_count() <= INTERRUPT_MAX_VECTORS`
 

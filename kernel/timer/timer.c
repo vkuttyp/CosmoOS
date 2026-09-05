@@ -116,6 +116,17 @@ void timer_start(struct timer *t, uint64_t delay_ns)
     arch_irq_restore(s);
 }
 
+static bool cancel_locked(struct timer_queue *q, struct timer *t)
+{
+    bool was_pending = t->state == TIMER_PENDING;
+    if (was_pending) {
+        list_remove(&t->link);
+        q->count--;
+        t->state = TIMER_IDLE;
+    }
+    return was_pending;
+}
+
 bool timer_cancel(struct timer *t)
 {
     if (t->cpu >= CONFIG_MAX_CPUS)
@@ -123,13 +134,43 @@ bool timer_cancel(struct timer *t)
     struct timer_queue *q = &g_queues[t->cpu];
 
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
-    bool was_pending = t->state == TIMER_PENDING;
-    if (was_pending) {
-        list_remove(&t->link);
-        q->count--;
-        t->state = TIMER_IDLE;
-    }
+    bool was_pending = cancel_locked(q, t);
     spin_unlock_irqrestore(&q->lock, s);
+    return was_pending;
+}
+
+void quiesce_count_timer_wait(void);   /* quiesce.c statistics */
+
+bool timer_cancel_sync(struct timer *t)
+{
+    if (t->cpu >= CONFIG_MAX_CPUS)
+        return false;
+    struct timer_queue *q = &g_queues[t->cpu];
+    bool was_pending = false;
+    bool waited = false;
+
+    /* The callback runs under q->running with the queue lock dropped and
+     * takes the lock again when it returns. Holding the lock while
+     * q->running != t therefore means the callback is not executing;
+     * seeing q->running == t means it is, on another CPU (on this CPU it
+     * would have to be interrupt context, which cannot be pre-empted by
+     * us: interrupts are masked while we hold the lock). A callback may
+     * re-arm itself, so cancel again after every wait. */
+    for (;;) {
+        arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+        was_pending |= cancel_locked(q, t);
+        if (q->running != t) {
+            spin_unlock_irqrestore(&q->lock, s);
+            break;
+        }
+        if (t->cpu == arch_cpu_id())
+            panic("timer_cancel_sync: timer %p cancelled from its own callback", (void *)t);
+        spin_unlock_irqrestore(&q->lock, s);
+        waited = true;
+        arch_cpu_relax();
+    }
+    if (waited)
+        quiesce_count_timer_wait();
     return was_pending;
 }
 
@@ -143,11 +184,13 @@ static void run_expired(struct timer_queue *q, uint64_t now)
         list_remove(&t->link);
         q->count--;
         t->state = TIMER_RUNNING;
+        q->running = t;
         spin_unlock(&q->lock);
 
         t->fn(t, t->arg);
 
         spin_lock(&q->lock);
+        q->running = NULL;
         if (t->state == TIMER_RUNNING)
             t->state = TIMER_IDLE; /* unless the callback re-armed it */
     }
@@ -183,6 +226,7 @@ void timer_init_cpu(void)
     spinlock_init(&q->lock, "timer_queue");
     list_init(&q->pending);
     q->count = 0;
+    q->running = NULL;
     pc->timers = q;
     arch_timer_start_tick(CONFIG_HZ);
 }
@@ -226,5 +270,9 @@ unsigned timer_pending_count(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(clock_now_ns);
+EXPORT_SYMBOL(timer_setup);
+EXPORT_SYMBOL(timer_start);
+EXPORT_SYMBOL(timer_cancel);
+EXPORT_SYMBOL(timer_cancel_sync);
 EXPORT_SYMBOL(ndelay);
 EXPORT_SYMBOL(udelay);
