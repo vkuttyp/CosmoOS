@@ -15,6 +15,8 @@
 #include <kernel/ramblk.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/wait.h>
 
 #if CONFIG_DEBUG
 
@@ -24,6 +26,14 @@ struct ramblk {
     uint64_t nblocks;
     spinlock_t lock;
     struct ramblk_log *log;   /* recording when non-NULL */
+    /* Deferred mode (tests of the block layer's queueing): completions
+     * run on a worker thread and submit refuses with -EAGAIN above
+     * `limit` requests in flight. */
+    unsigned limit;           /* 0: synchronous completion */
+    unsigned inflight;
+    struct list_node deferred;
+    struct thread *worker;
+    bool stop;
 };
 
 static struct ramblk *of(struct blkdev *bd)
@@ -59,6 +69,10 @@ static int ramblk_submit(struct blkdev *bd, struct bio *bio)
 {
     struct ramblk *r = of(bd);
     arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    if (r->limit && r->inflight >= r->limit) {
+        spin_unlock_irqrestore(&r->lock, s);
+        return -EAGAIN;   /* the queue is full, like a virtqueue with every slot taken */
+    }
     if (bio->dir != BIO_FLUSH) {
         uint64_t byte = bio->sector * 512;
         size_t len = (size_t)bio->nsectors * 512;
@@ -77,9 +91,56 @@ static int ramblk_submit(struct blkdev *bd, struct bio *bio)
     }
     if (bio->dir != BIO_READ)
         record(r, bio);
+    if (r->limit) {
+        r->inflight++;
+        list_push_back(&r->deferred, &bio->link);   /* the worker completes it */
+        spin_unlock_irqrestore(&r->lock, s);
+        return 0;
+    }
     spin_unlock_irqrestore(&r->lock, s);
     bio_complete(bio, 0);
     return 0;
+}
+
+/* Complete deferred bios in order, one batch per millisecond. */
+static void ramblk_worker(void *arg)
+{
+    struct ramblk *r = arg;
+    for (;;) {
+        for (;;) {
+            arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+            struct bio *bio = list_empty(&r->deferred) ? NULL
+                                                        : container_of(list_pop_front(&r->deferred), struct bio, link);
+            if (bio)
+                r->inflight--;
+            spin_unlock_irqrestore(&r->lock, s);
+            if (bio == NULL)
+                break;
+            bio_complete(bio, 0);
+        }
+        if (__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE))
+            break;
+        thread_sleep_ms(1);
+    }
+}
+
+void ramblk_set_deferred(struct blkdev *bd, unsigned limit)
+{
+    struct ramblk *r = of(bd);
+    if (limit && r->worker == NULL) {
+        r->stop = false;
+        r->limit = limit;
+        r->worker = thread_create(ramblk_worker, r, "ramblk-worker", SCHED_PRIO_DEFAULT);
+        if (r->worker == NULL)
+            r->limit = 0;
+        return;
+    }
+    if (limit == 0 && r->worker) {
+        __atomic_store_n(&r->stop, true, __ATOMIC_RELEASE);
+        thread_join(r->worker);   /* drains what is still deferred */
+        r->worker = NULL;
+        r->limit = 0;
+    }
 }
 
 static void ramblk_release(struct blkdev *bd)
@@ -115,6 +176,7 @@ struct blkdev *ramblk_create(uint64_t nblocks)
         }
     }
     spinlock_init(&r->lock, "ramblk");
+    list_init(&r->deferred);
     r->bd.ops = &ramblk_ops;
     r->bd.sector_size = 512;
     r->bd.capacity = nblocks * (RAMBLK_BLOCK / 512);
@@ -129,6 +191,7 @@ struct blkdev *ramblk_create(uint64_t nblocks)
 
 void ramblk_destroy(struct blkdev *bd)
 {
+    ramblk_set_deferred(bd, 0);   /* completes anything deferred first */
     blk_unregister(bd);
     blkdev_put(bd);   /* the creator's reference; release frees when the last holder is gone */
 }

@@ -32,6 +32,8 @@ void pool_close(struct spool *p);
  * past the end. */
 int pool_read(struct spool *p, uint64_t blk, void *buf);
 int pool_write(struct spool *p, uint64_t blk, const void *buf);
+/* The same with bio flags (BIO_PREFLUSH, BIO_FUA): the commit's root write. */
+int pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags);
 int pool_flush(struct spool *p);
 
 #endif /* KERNEL_STORAGE_H */

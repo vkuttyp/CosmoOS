@@ -41,6 +41,11 @@ unsigned ramblk_record_count(struct blkdev *bd);
 uint8_t *ramblk_snapshot(struct blkdev *bd);
 void ramblk_restore(struct blkdev *bd, const uint8_t *image);
 
+/* Deferred mode for block-layer tests: completions run on a worker thread
+ * and submit answers -EAGAIN above `limit` requests in flight; 0 returns
+ * to synchronous completion (after completing what is deferred). */
+void ramblk_set_deferred(struct blkdev *bd, unsigned limit);
+
 /* Apply the first `count` entries of `log`; with `torn`, the last write is
  * applied only up to half its sectors (rounded down, at least one). */
 void ramblk_replay(struct blkdev *bd, const struct ramblk_log *log, unsigned count, bool torn);

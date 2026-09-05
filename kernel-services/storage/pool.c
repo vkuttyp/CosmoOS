@@ -45,6 +45,18 @@ int pool_write(struct spool *p, uint64_t blk, const void *buf)
     return blk_write(p->dev, blk * p->sectors_per_block, p->sectors_per_block, buf);
 }
 
+int pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags)
+{
+    if (blk >= p->nblocks)
+        return -EINVAL;
+    p->writes++;
+    if (flags & BIO_PREFLUSH)
+        p->flushes++;
+    if (flags & BIO_FUA)
+        p->flushes++;
+    return blk_write_flags(p->dev, blk * p->sectors_per_block, p->sectors_per_block, buf, flags);
+}
+
 int pool_flush(struct spool *p)
 {
     p->flushes++;

@@ -14,6 +14,7 @@
 
 #include <kernel/list.h>
 #include <kernel/object.h>
+#include <kernel/spinlock.h>
 #include <kernel/types.h>
 
 struct device;
@@ -25,11 +26,18 @@ enum bio_dir {
     BIO_FLUSH,   /* no data; sector and nsectors are 0 */
 };
 
+/* bio flags (docs/kernel-services/filesystem/cosmofs/design.md, "The block
+ * layer"): implemented by the block layer as a flush before / after the
+ * write, so drivers never see them. */
+#define BIO_PREFLUSH (1u << 0)   /* flush the volatile cache before this write */
+#define BIO_FUA      (1u << 1)   /* the write is on stable media when it completes */
+
 struct bio {
     struct blkdev *dev;
     uint64_t sector;
     uint32_t nsectors;
     enum bio_dir dir;
+    unsigned flags;                  /* BIO_PREFLUSH, BIO_FUA (writes only) */
     void *buf;
     void (*done)(struct bio *bio);   /* may run in interrupt context */
     void *arg;
@@ -63,6 +71,9 @@ struct blkdev {
     uint64_t reads, writes, flushes, errors;   /* completed bios */
     bool gone;                       /* unregistered: blk_submit refuses (-ENODEV) */
     uint32_t submitting;             /* blk_submit calls inside ops->submit right now */
+    struct list_node pending;        /* bios the driver refused with -EAGAIN, resubmitted in order */
+    spinlock_t qlock;                /* the pending list */
+    uint64_t requeued;               /* bios that waited in `pending` */
 };
 
 void blk_init(void);
@@ -83,7 +94,11 @@ void blk_unregister(struct blkdev *bd);
 
 /* Validate and hand to the driver. -EINVAL (range, alignment, size,
  * buffer), -ENODEV after blk_unregister, -EROFS, or the driver's error;
- * on success `done` will run exactly once. Thread context. */
+ * on success `done` will run exactly once. A driver that answers -EAGAIN
+ * (its queue is full) is not an error: the bio waits in the device's
+ * pending list and is resubmitted as completions free slots. A write
+ * with BIO_PREFLUSH/BIO_FUA becomes flush, write, flush; the caller's
+ * `done` runs once, after the last piece. Thread context. */
 int blk_submit(struct bio *bio);
 
 /* Driver side: finish a bio. Any context. */
@@ -92,6 +107,7 @@ void bio_complete(struct bio *bio, int status);
 /* Synchronous helpers; split into max_sectors pieces. Sleep. */
 int blk_read(struct blkdev *bd, uint64_t sector, uint32_t nsectors, void *buf);
 int blk_write(struct blkdev *bd, uint64_t sector, uint32_t nsectors, const void *buf);
+int blk_write_flags(struct blkdev *bd, uint64_t sector, uint32_t nsectors, const void *buf, unsigned flags);
 int blk_flush(struct blkdev *bd);
 
 /* Referenced pointer or NULL. Sleeps. */
