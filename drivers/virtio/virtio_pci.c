@@ -329,6 +329,7 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
     }
 
     pci_enable_device(pdev, true);
+    dma_set_mask(&pdev->dev, 64);   /* the modern transport addresses 64 bits; the virtio device inherits it */
 
     /* Queues + the configuration vector. */
     int granted = pci_msix_enable(pdev, VIRTIO_MAX_QUEUES + 1);

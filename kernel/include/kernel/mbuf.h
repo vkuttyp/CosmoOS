@@ -45,6 +45,7 @@ struct mbuf {
         uint16_t proto;
         uint16_t csum_flags;
         struct netaddr src;    /* UDP: sender, set by udp_input */
+        uint64_t dma;          /* a driver's dma_map of this buffer while the device holds it (unmapped on return) */
     } pkt;
     struct mbuf_cluster *cl;   /* M_EXT */
     uint8_t inl[MHLEN];

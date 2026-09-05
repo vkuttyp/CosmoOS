@@ -46,8 +46,10 @@ static void vnet_post_rx(struct vnet *v)
             m_freem(m);
             break;
         }
+        m->pkt.dma = dma;
         struct virtq_sg sg = { .addr = dma, .len = MCLBYTES };
         if (virtq_add(v->rx, &sg, 0, 1, m) != 0) {
+            dma_unmap(&v->vdev->dev, dma, MCLBYTES, DMA_FROM_DEVICE);
             m_freem(m);
             break;
         }
@@ -63,6 +65,8 @@ static void vnet_rx_done(struct virtqueue *vq)
     struct mbuf *m;
     while ((m = virtq_pop(vq, &len)) != NULL) {
         v->rx_posted--;
+        dma_unmap(&v->vdev->dev, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
+        m->pkt.dma = 0;
         if (len < VNET_HDR_LEN + 14 || len > MCLBYTES) {
             v->rx_drops++;
             m_freem(m);
@@ -75,12 +79,26 @@ static void vnet_rx_done(struct virtqueue *vq)
     vnet_post_rx(v);
 }
 
+/* Every buffer of a transmitted chain carries its own mapping in pkt.dma. */
+static void tx_unmap(struct vnet *v, struct mbuf *m)
+{
+    for (struct mbuf *b = m; b; b = b->next) {
+        if (b->pkt.dma) {
+            dma_unmap(&v->vdev->dev, b->pkt.dma, b->len, DMA_TO_DEVICE);
+            b->pkt.dma = 0;
+        }
+    }
+}
+
 static void vnet_tx_done(struct virtqueue *vq)
 {
+    struct vnet *v = vq->vdev->priv;
     uint32_t len;
     struct mbuf *m;
-    while ((m = virtq_pop(vq, &len)) != NULL)
+    while ((m = virtq_pop(vq, &len)) != NULL) {
+        tx_unmap(v, m);
         m_freem(m);
+    }
 }
 
 static int vnet_transmit(struct netif *nif, struct mbuf *m)
@@ -104,13 +122,16 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
     struct virtq_sg sg[VNET_MAX_SEGS + 1];
     unsigned n = 0;
     for (struct mbuf *b = m; b; b = b->next) {
+        b->pkt.dma = 0;
         if (b->len == 0)
             continue;
-        dma_addr_t dma = dma_map(&v->vdev->dev, b->data, b->len, DMA_TO_DEVICE);
-        if (dma == 0 || n == ARRAY_SIZE(sg)) {
+        dma_addr_t dma = n < ARRAY_SIZE(sg) ? dma_map(&v->vdev->dev, b->data, b->len, DMA_TO_DEVICE) : 0;
+        if (dma == 0) {
+            tx_unmap(v, m);
             m_freem(m);
             return -EINVAL;
         }
+        b->pkt.dma = dma;
         sg[n].addr = dma;
         sg[n].len = b->len;
         n++;
@@ -118,6 +139,7 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
     int rc = virtq_add(v->tx, sg, n, 0, m);
     if (rc) {
         v->tx_drops++;
+        tx_unmap(v, m);
         m_freem(m);
         return -ENOBUFS;
     }
