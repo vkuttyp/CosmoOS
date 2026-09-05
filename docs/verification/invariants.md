@@ -52,10 +52,10 @@ checked; "uncommitted data is absent" is not asserted (a sync that
 completed on the device is legitimately visible).
 
 **F5. The syscall boundary survives any argument from an unprivileged
-process.** 20 000 seeded random calls over 50 of the 60 system calls return
+process.** 20 000 seeded random calls over 52 of the 63 system calls return
 a value or an errno and the kernel keeps running. Check: `syscall-fuzz` on
-every debug boot. Gap: the ten excluded calls (`exit`, `read`,
-`recvfrom`, `accept`, `connect`, `wait`, `kill`, `spawn`, `vcpu_run`, `setrlimit`) are
+every debug boot. Gap: the eleven excluded calls (`exit`, `read`,
+`recvfrom`, `accept`, `connect`, `wait`, `kill`, `spawn`, `vcpu_run`, `setrlimit`, `aio_wait`) are
 covered only by the ordinary user-mode self-test; a fuzzer with a watchdog
 thread could include the blocking ones.
 

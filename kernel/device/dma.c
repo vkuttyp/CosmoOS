@@ -79,18 +79,29 @@ void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma)
     spin_unlock_irqrestore(&g_stats_lock, s);
 }
 
+/* The bus address of a direct-map range within the device's mask, else 0. */
+static dma_addr_t translate(struct device *dev, const void *va, size_t len)
+{
+    uintptr_t v = (uintptr_t)va;
+    if (len == 0 || !virt_is_direct_map(v) || !virt_is_direct_map(v + len - 1))
+        return 0;
+    dma_addr_t dma = (dma_addr_t)virt_to_phys((const void *)v);
+    /* The direct map is linear, so contiguity is guaranteed. */
+    if (dma + len - 1 > mask_of(dev))
+        return 0;
+    return dma;
+}
+
+bool dma_mappable(struct device *dev, const void *va, size_t len)
+{
+    return translate(dev, va, len) != 0;
+}
+
 dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir dir)
 {
     (void)dir;
-    uintptr_t v = (uintptr_t)va;
-    bool ok = len > 0 && virt_is_direct_map(v) && virt_is_direct_map(v + len - 1);
-    dma_addr_t dma = 0;
-    if (ok) {
-        dma = (dma_addr_t)virt_to_phys((const void *)v);
-        /* The direct map is linear, so contiguity is guaranteed. */
-        if (dma + len - 1 > mask_of(dev))
-            ok = false;
-    }
+    dma_addr_t dma = translate(dev, va, len);
+    bool ok = dma != 0;
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     if (ok)
         g_stats.maps++;
@@ -103,9 +114,12 @@ dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir 
 void dma_unmap(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)
 {
     (void)dev;
-    (void)dma;
     (void)len;
     (void)dir;
+    KASSERT(dma != 0);
+    arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
+    g_stats.unmaps++;   /* identity mapping: nothing to tear down, but the pairing is the contract */
+    spin_unlock_irqrestore(&g_stats_lock, s);
 }
 
 void dma_sync_for_device(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)
@@ -150,6 +164,7 @@ EXPORT_SYMBOL(dma_alloc);
 EXPORT_SYMBOL(dma_free);
 EXPORT_SYMBOL(dma_map);
 EXPORT_SYMBOL(dma_unmap);
+EXPORT_SYMBOL(dma_mappable);
 EXPORT_SYMBOL(dma_sync_for_device);
 EXPORT_SYMBOL(dma_sync_for_cpu);
 EXPORT_SYMBOL(dma_set_mask);

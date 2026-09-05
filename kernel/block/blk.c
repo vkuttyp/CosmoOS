@@ -14,10 +14,18 @@
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
+#include <arch/cpu.h>
 
 static struct mutex g_blk_lock;
 static LIST_HEAD(g_blkdevs);
 static unsigned g_count;
+static struct thread *g_timeout_thread;   /* started at the first registration */
+static void blk_timeout_thread(void *arg);
+
+/* Internal bio flag: reported by the timeout thread once. */
+#define BIO_TIMED_OUT (1u << 30)
 
 static void blkdev_release(struct kobject *obj)
 {
@@ -46,11 +54,51 @@ static bool name_taken(const char *name)
     return false;
 }
 
+static bool geometry_ok(const struct blkdev *bd)
+{
+    return bd->ops != NULL && bd->ops->submit != NULL && bd->ops->release != NULL && bd->sector_size >= 512 &&
+           (bd->sector_size & (bd->sector_size - 1)) == 0 && bd->capacity != 0 && bd->max_sectors != 0;
+}
+
+/* Registry lock held, name chosen. Only now does the object exist
+ * (reference 1 to the creator, the owner module's live-object count
+ * raised); a failed registration leaves nothing to balance. */
+static void register_locked(struct blkdev *bd)
+{
+    kobject_init(&bd->obj, &blkdev_type);
+    kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
+    list_init(&bd->link);
+    bd->reads = bd->writes = bd->flushes = bd->errors = bd->timeouts = 0;
+    bd->completed_local = bd->completed_remote = 0;
+    if (bd->nr_queues == 0)
+        bd->nr_queues = 1;
+    bd->gone = false;
+    bd->submitting = 0;
+    list_init(&bd->pending);
+    list_init(&bd->inflight);
+    spinlock_init(&bd->qlock, "blk-pending");
+    bd->requeued = 0;
+    if (bd->max_segments == 0)
+        bd->max_segments = 1;
+    if (bd->timeout_ns == 0)
+        bd->timeout_ns = BLK_TIMEOUT_NS;
+    list_push_back(&g_blkdevs, &bd->link);
+    g_count++;
+    kobject_get(&bd->obj);   /* the registry's reference */
+    if (g_timeout_thread == NULL)
+        g_timeout_thread = thread_create(blk_timeout_thread, NULL, "blk-timeout", SCHED_PRIO_DEFAULT);
+}
+
+static void announce(const struct blkdev *bd)
+{
+    kinfo("blk: %s: %llu sectors of %u bytes (%llu MiB)%s", bd->name, (unsigned long long)bd->capacity,
+          bd->sector_size, (unsigned long long)((bd->capacity * bd->sector_size) >> 20),
+          bd->read_only ? ", read-only" : "");
+}
+
 int blk_register(struct blkdev *bd, const char *prefix)
 {
-    if (bd->ops == NULL || bd->ops->submit == NULL || bd->ops->release == NULL || bd->sector_size < 512 ||
-        (bd->sector_size & (bd->sector_size - 1)) != 0 || bd->capacity == 0 || bd->max_sectors == 0 ||
-        strlen(prefix) + 2 > BLKDEV_NAME_MAX)
+    if (!geometry_ok(bd) || strlen(prefix) + 2 > BLKDEV_NAME_MAX)
         return -EINVAL;
 
     mutex_lock(&g_blk_lock);
@@ -64,26 +112,126 @@ int blk_register(struct blkdev *bd, const char *prefix)
         mutex_unlock(&g_blk_lock);
         return -ENOSPC;   /* the object is untouched: no kobject, no owner count; the caller frees its storage */
     }
-    /* Accepted: only now does the object exist (reference 1 to the
-     * creator, the owner module's live-object count raised). A failed
-     * registration leaves nothing to balance. */
-    kobject_init(&bd->obj, &blkdev_type);
-    kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
-    list_init(&bd->link);
-    bd->reads = bd->writes = bd->flushes = bd->errors = 0;
-    bd->gone = false;
-    bd->submitting = 0;
-    list_init(&bd->pending);
-    spinlock_init(&bd->qlock, "blk-pending");
-    bd->requeued = 0;
-    list_push_back(&g_blkdevs, &bd->link);
-    g_count++;
-    kobject_get(&bd->obj);   /* the registry's reference */
+    register_locked(bd);
     mutex_unlock(&g_blk_lock);
-    kinfo("blk: %s: %llu sectors of %u bytes (%llu MiB)%s", bd->name, (unsigned long long)bd->capacity,
-          bd->sector_size, (unsigned long long)((bd->capacity * bd->sector_size) >> 20),
-          bd->read_only ? ", read-only" : "");
+    announce(bd);
     return 0;
+}
+
+int blk_register_named(struct blkdev *bd, const char *name)
+{
+    if (!geometry_ok(bd) || name == NULL || name[0] == '\0' || strlen(name) >= BLKDEV_NAME_MAX)
+        return -EINVAL;
+    mutex_lock(&g_blk_lock);
+    if (name_taken(name)) {
+        mutex_unlock(&g_blk_lock);
+        return -EEXIST;
+    }
+    strlcpy(bd->name, name, sizeof(bd->name));
+    register_locked(bd);
+    mutex_unlock(&g_blk_lock);
+    announce(bd);
+    return 0;
+}
+
+void bio_segment(const struct bio *bio, unsigned i, struct bio_vec *out)
+{
+    if (bio->nr_vecs == 0) {
+        KASSERT(i == 0);
+        out->buf = bio->buf;
+        out->len = bio->nsectors * bio->dev->sector_size;
+        return;
+    }
+    KASSERT(i < bio->nr_vecs);
+    *out = bio->vecs[i];
+}
+
+/* The data buffer(s) of a read or write: total length, the segment
+ * rules (docs/kernel/device/design.md, "Multi-segment bios"), DMA-able. */
+static bool data_ok(const struct blkdev *bd, const struct bio *bio)
+{
+    size_t total = (size_t)bio->nsectors * bd->sector_size;
+    if (bio->nr_vecs == 0)
+        return bio->buf != NULL && dma_mappable(bd->dev, bio->buf, total);
+    if (bio->vecs == NULL || bio->nr_vecs > bd->max_segments)
+        return false;
+    size_t sum = 0;
+    for (unsigned i = 0; i < bio->nr_vecs; i++) {
+        const struct bio_vec *v = &bio->vecs[i];
+        if (v->buf == NULL || v->len == 0)
+            return false;
+        if (i > 0 && ((uintptr_t)v->buf & (PAGE_SIZE - 1)) != 0)
+            return false;   /* every segment but the first starts on a page */
+        if (i + 1 < bio->nr_vecs && (((uintptr_t)v->buf + v->len) & (PAGE_SIZE - 1)) != 0)
+            return false;   /* every segment but the last ends on one */
+        if (!dma_mappable(bd->dev, v->buf, v->len))
+            return false;
+        sum += v->len;
+    }
+    return sum == total;
+}
+
+/* qlock held. */
+static void inflight_add_locked(struct blkdev *bd, struct bio *bio)
+{
+    bio->issued_ns = clock_now_ns();
+    bio->issue_cpu = arch_cpu_id();
+    bio->flags &= ~BIO_TIMED_OUT;
+    list_push_back(&bd->inflight, &bio->inflight_link);
+}
+
+static void inflight_remove(struct blkdev *bd, struct bio *bio)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+    if (!list_empty(&bio->inflight_link)) {
+        list_remove(&bio->inflight_link);
+        list_init(&bio->inflight_link);
+    }
+    spin_unlock_irqrestore(&bd->qlock, s);
+}
+
+/*
+ * Every 500 ms: bios older than their device's timeout are reported once
+ * and handed to the driver's timeout operation (thread context). The
+ * driver receives a pointer it must find in its own in-flight records
+ * under its own lock before touching it: the request may complete on
+ * another CPU at any moment, and once it has the memory is the owner's.
+ */
+static void blk_timeout_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        thread_sleep_ms(500);
+        mutex_lock(&g_blk_lock);
+        struct blkdev *bd;
+        list_for_each_entry(bd, &g_blkdevs, link) {
+            if (bd->timeout_ns == UINT64_MAX || bd->ops->timeout == NULL)
+                continue;
+            struct bio *expired[8];
+            unsigned n = 0;
+            uint64_t now = clock_now_ns();
+            arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+            struct bio *b;
+            list_for_each_entry(b, &bd->inflight, inflight_link) {
+                if (now - b->issued_ns < bd->timeout_ns)
+                    break;   /* oldest first: the rest are younger */
+                if (b->flags & BIO_TIMED_OUT)
+                    continue;
+                b->flags |= BIO_TIMED_OUT;
+                bd->timeouts++;
+                expired[n++] = b;
+                if (n == ARRAY_SIZE(expired))
+                    break;
+            }
+            spin_unlock_irqrestore(&bd->qlock, s);
+            for (unsigned i = 0; i < n; i++) {
+                kwarn("blk: %s: request timed out after %llu ms", bd->name,
+                      (unsigned long long)(bd->timeout_ns / 1000000));
+                bd->ops->timeout(bd, expired[i]);
+            }
+        }
+        mutex_unlock(&g_blk_lock);
+    }
 }
 
 void blk_unregister(struct blkdev *bd)
@@ -116,6 +264,7 @@ void blk_unregister(struct blkdev *bd)
 
 static int submit_checked(struct blkdev *bd, struct bio *bio);
 static int submit_flagged(struct blkdev *bd, struct bio *bio);
+static int to_driver(struct blkdev *bd, struct bio *bio);
 
 int blk_submit(struct bio *bio)
 {
@@ -152,7 +301,7 @@ static void drain_pending(struct blkdev *bd)
         }
         struct bio *bio = container_of(list_pop_front(&bd->pending), struct bio, link);
         spin_unlock_irqrestore(&bd->qlock, s);
-        int rc = bd->ops->submit(bd, bio);
+        int rc = to_driver(bd, bio);
         if (rc == -EAGAIN) {
             s = spin_lock_irqsave(&bd->qlock);
             list_push_front(&bd->pending, &bio->link);
@@ -164,9 +313,24 @@ static void drain_pending(struct blkdev *bd)
     }
 }
 
+/* Call the driver with the bio on the in-flight list: a driver may
+ * complete synchronously from inside submit, and the completion must
+ * find the bio there to take it off. A refusal takes it off again. */
+static int to_driver(struct blkdev *bd, struct bio *bio)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
+    inflight_add_locked(bd, bio);
+    spin_unlock_irqrestore(&bd->qlock, s);
+    int rc = bd->ops->submit(bd, bio);
+    if (rc)
+        inflight_remove(bd, bio);
+    return rc;
+}
+
 /* Hand a validated bio to the driver; -EAGAIN parks it in the queue. */
 static int driver_submit(struct blkdev *bd, struct bio *bio)
 {
+    list_init(&bio->inflight_link);
     arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
     bool waiting = !list_empty(&bd->pending);
     if (waiting) {
@@ -178,7 +342,7 @@ static int driver_submit(struct blkdev *bd, struct bio *bio)
         drain_pending(bd);   /* a slot may have freed since the queue formed */
         return 0;
     }
-    int rc = bd->ops->submit(bd, bio);
+    int rc = to_driver(bd, bio);
     if (rc != -EAGAIN)
         return rc;
     s = spin_lock_irqsave(&bd->qlock);
@@ -262,13 +426,13 @@ static int submit_flagged(struct blkdev *bd, struct bio *bio)
     if (bio->dir != BIO_WRITE)
         return -EINVAL;   /* flags belong to writes */
     /* Validate the write itself first, without submitting it. */
-    if (bio->nsectors == 0 || bio->nsectors > bd->max_sectors || bio->buf == NULL)
+    if (bio->nsectors == 0 || bio->nsectors > bd->max_sectors)
         return -EINVAL;
     if (bio->sector >= bd->capacity || bd->capacity - bio->sector < bio->nsectors)
         return -EINVAL;
     if (bd->read_only)
         return -EROFS;
-    if (dma_map(bd->dev, bio->buf, (size_t)bio->nsectors * bd->sector_size, DMA_BIDIRECTIONAL) == 0)
+    if (!data_ok(bd, bio))
         return -EINVAL;
     struct bio_seq *seq = kzalloc(sizeof(*seq));
     if (seq == NULL)
@@ -308,7 +472,7 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
         if (bio->nsectors != 0 || bio->sector != 0)
             return -EINVAL;
     } else {
-        if (bio->nsectors == 0 || bio->nsectors > bd->max_sectors || bio->buf == NULL)
+        if (bio->nsectors == 0 || bio->nsectors > bd->max_sectors)
             return -EINVAL;
         if (bio->sector >= bd->capacity || bd->capacity - bio->sector < bio->nsectors)
             return -EINVAL;
@@ -316,8 +480,8 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
             return -EROFS;
         if (bio->dir != BIO_READ && bio->dir != BIO_WRITE)
             return -EINVAL;
-        if (dma_map(bd->dev, bio->buf, (size_t)bio->nsectors * bd->sector_size, DMA_BIDIRECTIONAL) == 0)
-            return -EINVAL;   /* not DMA-able memory */
+        if (!data_ok(bd, bio))
+            return -EINVAL;   /* not DMA-able memory, or segments that break the rules */
     }
     if (faultinject_should_fail(FI_BLK_SUBMIT))
         return -EIO;   /* debug builds: an injected submission failure (docs/verification/) */
@@ -328,6 +492,11 @@ static int submit_checked(struct blkdev *bd, struct bio *bio)
 void bio_complete(struct bio *bio, int status)
 {
     struct blkdev *bd = bio->dev;
+    inflight_remove(bd, bio);
+    if (bio->issue_cpu == arch_cpu_id())
+        __atomic_fetch_add(&bd->completed_local, 1, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&bd->completed_remote, 1, __ATOMIC_RELAXED);
     if (status == 0 && faultinject_should_fail(FI_BLK_COMPLETE))
         status = -EIO;   /* debug builds: an injected device error (docs/verification/) */
     bio->status = status;
@@ -447,6 +616,8 @@ void blk_dump(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(blk_register);
+EXPORT_SYMBOL(blk_register_named);
+EXPORT_SYMBOL(bio_segment);
 EXPORT_SYMBOL(blk_unregister);
 EXPORT_SYMBOL(blk_submit);
 EXPORT_SYMBOL(bio_complete);

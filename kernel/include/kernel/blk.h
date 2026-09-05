@@ -32,19 +32,38 @@ enum bio_dir {
 #define BIO_PREFLUSH (1u << 0)   /* flush the volatile cache before this write */
 #define BIO_FUA      (1u << 1)   /* the write is on stable media when it completes */
 
+/* One segment of a multi-segment bio (docs/kernel/device/design.md, "The
+ * block layer for NVMe"): every segment but the first starts on a page
+ * boundary, every segment but the last ends on one, each is DMA-able. */
+struct bio_vec {
+    void *buf;
+    uint32_t len;
+};
+
 struct bio {
     struct blkdev *dev;
     uint64_t sector;
     uint32_t nsectors;
     enum bio_dir dir;
     unsigned flags;                  /* BIO_PREFLUSH, BIO_FUA (writes only) */
-    void *buf;
+    void *buf;                       /* the single segment when nr_vecs == 0 */
+    struct bio_vec *vecs;            /* else the segments, in transfer order */
+    unsigned nr_vecs;
     void (*done)(struct bio *bio);   /* may run in interrupt context */
     void *arg;
     int status;                      /* 0 or -errno once done ran */
     struct list_node link;           /* for the driver's queue */
     void *drvpriv;                   /* for the driver */
+    struct list_node inflight_link;  /* the block layer's in-flight list */
+    uint64_t issued_ns;              /* when the driver accepted it */
+    unsigned issue_cpu;              /* the CPU that handed it to the driver */
 };
+
+/* Segment `i` of a bio (0 .. bio_segments(bio) - 1), in either shape. */
+static inline unsigned bio_segments(const struct bio *bio) { return bio->nr_vecs ? bio->nr_vecs : 1u; }
+void bio_segment(const struct bio *bio, unsigned i, struct bio_vec *out);
+
+#define BLK_TIMEOUT_NS (30ull * 1000000000ull)   /* default request timeout */
 
 struct blkdev_ops {
     /* Take ownership of the bio until bio_complete(). Returns 0 or a
@@ -53,6 +72,11 @@ struct blkdev_ops {
     /* Mandatory: the last reference dropped (after blk_unregister);
      * free the memory the blkdev is embedded in. */
     void (*release)(struct blkdev *dev);
+    /* Optional: `bio` has been in flight longer than dev->timeout_ns.
+     * Thread context (the blk-timeout thread). Make the device forget the
+     * request, then complete it (-ETIMEDOUT) through bio_complete as
+     * usual. Without it the layer only warns and counts. */
+    void (*timeout)(struct blkdev *dev, struct bio *bio);
 };
 
 #define BLKDEV_NAME_MAX 16
@@ -68,11 +92,17 @@ struct blkdev {
     bool read_only;
     void *priv;
     struct list_node link;
+    unsigned max_segments;           /* per bio; 0 means 1 (single-buffer drivers) */
+    uint64_t timeout_ns;             /* per request; 0 at registration takes BLK_TIMEOUT_NS, UINT64_MAX disables */
     uint64_t reads, writes, flushes, errors;   /* completed bios */
+    uint64_t timeouts;               /* bios the timeout thread reported */
+    uint64_t completed_local, completed_remote;   /* completions on the issuing CPU / elsewhere (queue locality) */
+    unsigned nr_queues;              /* informational: hardware queues the driver uses (1 when it says nothing) */
     bool gone;                       /* unregistered: blk_submit refuses (-ENODEV) */
     uint32_t submitting;             /* blk_submit calls inside ops->submit right now */
     struct list_node pending;        /* bios the driver refused with -EAGAIN, resubmitted in order */
-    spinlock_t qlock;                /* the pending list */
+    struct list_node inflight;       /* bios the driver holds, oldest first */
+    spinlock_t qlock;                /* the pending and in-flight lists */
     uint64_t requeued;               /* bios that waited in `pending` */
 };
 
@@ -86,6 +116,8 @@ void blk_init(void);
  * -EINVAL for bad geometry or a missing release, -ENOSPC when out of
  * letters. */
 int blk_register(struct blkdev *bd, const char *prefix);
+/* Same, under exactly `name` ("nvme0n1"); -EEXIST when taken. */
+int blk_register_named(struct blkdev *bd, const char *name);
 /* Remove from the registry, refuse new bios, wait for blk_submit calls in
  * progress to leave the driver, drop the registry's reference. On return
  * the driver may tear down its queues; bios already accepted must still

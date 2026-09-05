@@ -91,12 +91,12 @@ removing or changing one bumps the version.
 | Heap | `kmalloc`, `kzalloc`, `krealloc`, `kfree`, `kmem_cache_create`, `kmem_cache_destroy`, `kmem_cache_alloc`, `kmem_cache_free` |
 | Strings | `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`, `strlen`, `strnlen`, `strcmp`, `strncmp`, `strchr`, `strstr`, `strlcpy` |
 | Locks | `spinlock_init`, `spin_lock`, `spin_lock_nested`, `spin_unlock`, `spin_trylock`, `spin_lock_irqsave`, `spin_lock_irqsave_nested`, `spin_unlock_irqrestore`, `mutex_init`, `mutex_lock`, `mutex_lock_nested`, `mutex_trylock`, `mutex_unlock` |
-| Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay`, `timer_setup`, `timer_start`, `timer_cancel`, `timer_cancel_sync` |
+| Scheduling and time | `thread_create`, `thread_sleep_ns`, `sched_yield`, `clock_now_ns`, `ndelay`, `udelay`, `timer_setup`, `timer_start`, `timer_cancel`, `timer_cancel_sync`, and since milestone 9 `completion_init`, `complete`, `completion_done`, `wait_for_completion`, `cpu_count`, `arch_cpu_id` |
 | Lifetime (`kernel/quiesce.h`, `kernel/interrupt.h`, `kernel/object.h`) | `synchronize_quiesce`, `call_quiesce`, `quiesce_read_lock_debug`, `quiesce_read_unlock_debug`, `synchronize_irq`, `interrupt_unregister_sync`, `kobject_init`, `kobject_get`, `kobject_tryget`, `kobject_put`, `kobject_refcount` |
 | Device model (`kernel/device.h`) | `bus_register`, `bus_find`, `device_setup`, `device_release_static`, `device_add_resource`, `device_resource`, `device_register`, `device_unregister`, `driver_register`, `driver_unregister`, `device_map_mmio`, `device_unmap_mmio`, `device_find`, `device_for_each`, `device_count` |
-| DMA (`kernel/dma.h`) | `dma_alloc`, `dma_free`, `dma_map`, `dma_unmap`, `dma_sync_for_device`, `dma_sync_for_cpu`, `dma_set_mask` |
+| DMA (`kernel/dma.h`) | `dma_alloc`, `dma_free`, `dma_map`, `dma_unmap`, `dma_mappable`, `dma_sync_for_device`, `dma_sync_for_cpu`, `dma_set_mask` |
 | PCI (`drivers/pci.h`) | `pci_bus`, `pci_register_driver`, `pci_unregister_driver`, `pci_cfg_read8/16/32`, `pci_cfg_write8/16/32`, `pci_enable_device`, `pci_map_bar`, `pci_find_capability`, `pci_msix_enable`, `pci_msix_request`, `pci_msix_release`, `pci_msix_disable`, `pci_msi_enable`, `pci_msi_disable`, `pci_device_count`, `pci_device_at`, `pci_find_device` |
-| Block (`kernel/blk.h`) | `blk_register`, `blk_unregister`, `blk_submit`, `bio_complete`, `blk_read`, `blk_write`, `blk_flush`, `blk_find` |
+| Block (`kernel/blk.h`) | `blk_register`, `blk_register_named`, `blk_unregister`, `blk_submit`, `bio_complete`, `bio_segment`, `blk_read`, `blk_write`, `blk_write_flags`, `blk_flush`, `blk_find` |
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
 | Console (`kernel/console.h`) | `console_register`, `console_unregister` |
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |

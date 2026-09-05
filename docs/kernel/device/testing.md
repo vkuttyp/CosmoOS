@@ -36,7 +36,10 @@ crash-consistency harness).
 - `virtio-serial-pci` with one `virtconsole` whose `chardev` is a file,
   `QEMU_VCON` (`boot-test.log.vcon` under the harness);
 - since Phase 8, `virtio-net-pci` on QEMU user-mode networking
-  (`docs/kernel-services/network/testing.md`).
+  (`docs/kernel-services/network/testing.md`);
+- since milestone 9, `nvme` (`serial=cosmo-nvme0`) over `QEMU_NVMEDISK`
+  (a fresh 8 MiB `boot-test.log.nvme.img` per harness run;
+  `docs/drivers/nvme/testing.md`).
 
 Under q35 that is 9 PCI functions: host bridge, VGA, the four virtio
 functions at `00:02.0`–`00:05.0` (the explicit `-netdev`/`-device`
@@ -115,6 +118,35 @@ while the finder holds it; the finder's put runs it exactly once
 (`ramblk_set_deferred`): the pending queue and the bio flags
 (`docs/kernel-services/vfs/testing.md`).
 
+### `blk-segments`
+
+`kernel/block/blktest.c`: a three-segment write (half a page from
+mid-page, a whole page, half a page) on the RAM device reads back flat
+and byte-exact, then back into two whole-page segments; a middle segment
+not ending on a page, a later one not starting on one, a wrong total,
+nine segments against `max_segments` 8, and a stack buffer are each
+`-EINVAL`.
+
+### `blk-timeout`
+
+`kernel/block/blktest.c`: the RAM device in deferred mode with
+`ramblk_set_stall` (the worker completes nothing) and a 300 ms
+`timeout_ns`: `blk_read` returns `-ETIMEDOUT` between 300 ms and 3 s,
+`timeouts` grew by one (the `blk-timeout` thread called the driver's
+`timeout`, which completed the bio), and after the stall is lifted a read
+completes.
+
+### `nvme`
+
+`kernel/device/devtest.c`, on `nvme0n1` through the block layer only:
+`docs/drivers/nvme/testing.md`.
+
+### `dma` (milestone 9 additions)
+
+`dma_unmap` counts, `dma_mappable` agrees with `dma_map`, and sixteen
+reads plus a write and a flush on `vda` leave `maps − unmaps` where it
+was.
+
 ## Boot markers (`tests/boot/run_boot_test.py`)
 
 Required in the serial log on every normal run:
@@ -126,6 +158,9 @@ Required in the serial log on every normal run:
 [ INFO] module: loaded virtio_console 1.0
 [ INFO] blk: vda: 16384 sectors of 512 bytes
 [ INFO] virtio-console: virtioN: registered as a console sink
+[ INFO] module: loaded nvme 1.0
+[ INFO] blk: nvme0n1: 16384 sectors of 512 bytes
+[ INFO] nvme0: ... 1 namespace(s) of N, Q I/O queue(s) of depth 32
 ```
 
 and, read from `QEMU_VCON` after QEMU exits, `[ INFO] boot complete`:

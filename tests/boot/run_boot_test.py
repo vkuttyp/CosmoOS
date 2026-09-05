@@ -49,8 +49,11 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] module: loaded virtio_rng 1\.0 ",
     r"^\[ INFO\] module: loaded virtio_console 1\.0 ",
     r"^\[ INFO\] module: loaded virtio_net 1\.0 ",
+    r"^\[ INFO\] module: loaded nvme 1\.0 ",
     r"^\[ INFO\] net: eth0 registered ",
     r"^\[ INFO\] blk: vda: 16384 sectors of 512 bytes",
+    r"^\[ INFO\] blk: nvme0n1: 16384 sectors of 512 bytes",
+    r"^\[ INFO\] nvme0: .* 1 namespace\(s\) of \d+, \d+ I/O queue\(s\) of depth 32",
     r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
     r"^\[ INFO\] hello: module init \(ABI v3, load 1\)",
     r"^init: CosmoOS userland, pid \d+",
@@ -179,7 +182,11 @@ def main():
     with open(testdisk, "wb") as f:
         f.truncate(8 * 1024 * 1024)
     vcon = args.log + ".vcon"
+    nvmedisk = args.log + ".nvme.img"
+    with open(nvmedisk, "wb") as f:
+        f.truncate(8 * 1024 * 1024)
     env["QEMU_TESTDISK"] = testdisk
+    env["QEMU_NVMEDISK"] = nvmedisk
     env["QEMU_VCON"] = vcon
 
     # Phase 8: the network harness (only for normal runs with self-tests).

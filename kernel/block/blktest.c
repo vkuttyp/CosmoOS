@@ -5,6 +5,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -150,8 +151,131 @@ bool selftest_blk_queue(const char **reason)
     return true;
 }
 
+/* Page-aligned, DMA-able test memory (kmalloc classes do not promise page alignment). */
+static uint8_t *pages_alloc(unsigned n, dma_addr_t *dma)
+{
+    return dma_alloc(NULL, (size_t)n * PAGE_SIZE, dma, DMA_ZERO);
+}
+
+bool selftest_blk_segments(const char **reason)
+{
+    struct blkdev *bd = ramblk_create(64);
+    CHECK(bd != NULL);
+    CHECK(bd->max_segments == 8);
+    dma_addr_t d1, d2;
+    uint8_t *a = pages_alloc(2, &d1), *b = pages_alloc(2, &d2);
+    CHECK(a != NULL && b != NULL);
+    for (unsigned i = 0; i < 2 * PAGE_SIZE; i++) {
+        a[i] = (uint8_t)(i * 3 + 1);
+        b[i] = (uint8_t)(i * 5 + 2);
+    }
+    /* Three segments: half a page (from mid-page), a whole page, half a page: 4 KiB + 4 KiB = 16 sectors. */
+    struct bio_vec vecs[3] = {
+        { a + PAGE_SIZE / 2, (uint32_t)(PAGE_SIZE / 2) },
+        { b, (uint32_t)PAGE_SIZE },
+        { a + PAGE_SIZE, (uint32_t)(PAGE_SIZE / 2) },
+    };
+    struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    bio.dev = bd;
+    bio.dir = BIO_WRITE;
+    bio.sector = 16;
+    bio.nsectors = 16;
+    bio.vecs = vecs;
+    bio.nr_vecs = 3;
+    bio.done = count_done;
+    g_done_count = 0;
+    g_done_status = 0;
+    CHECK(blk_submit(&bio) == 0);
+    CHECK(g_done_count == 1 && g_done_status == 0);
+    /* Read back flat and compare segment by segment. */
+    dma_addr_t d3;
+    uint8_t *flat = pages_alloc(2, &d3);
+    CHECK(flat != NULL);
+    CHECK(blk_read(bd, 16, 16, flat) == 0);
+    CHECK(memcmp(flat, a + PAGE_SIZE / 2, PAGE_SIZE / 2) == 0);
+    CHECK(memcmp(flat + PAGE_SIZE / 2, b, PAGE_SIZE) == 0);
+    CHECK(memcmp(flat + PAGE_SIZE / 2 + PAGE_SIZE, a + PAGE_SIZE, PAGE_SIZE / 2) == 0);
+    /* And back through segments in another shape (two whole pages). */
+    memset(a, 0, 2 * PAGE_SIZE);
+    struct bio_vec rd[2] = { { a, (uint32_t)PAGE_SIZE }, { a + PAGE_SIZE, (uint32_t)PAGE_SIZE } };
+    bio.dir = BIO_READ;
+    bio.vecs = rd;
+    bio.nr_vecs = 2;
+    g_done_count = 0;
+    CHECK(blk_submit(&bio) == 0 && g_done_count == 1 && g_done_status == 0);
+    CHECK(memcmp(a, flat, 2 * PAGE_SIZE) == 0);
+    /* Refusals: a middle segment not ending on a page, a later one not
+     * starting on one, a wrong total, too many segments, a stack buffer. */
+    struct bio_vec bad1[2] = { { a, (uint32_t)(PAGE_SIZE / 2) }, { a + PAGE_SIZE, (uint32_t)(PAGE_SIZE + PAGE_SIZE / 2) } };
+    bio.vecs = bad1;
+    bio.nr_vecs = 2;
+    CHECK(blk_submit(&bio) == -EINVAL);
+    struct bio_vec bad2[2] = { { a, (uint32_t)PAGE_SIZE }, { a + PAGE_SIZE + 8, (uint32_t)(PAGE_SIZE - 8) } };
+    bio.vecs = bad2;
+    CHECK(blk_submit(&bio) == -EINVAL);
+    struct bio_vec bad3[2] = { { a, (uint32_t)PAGE_SIZE }, { a + PAGE_SIZE, (uint32_t)(PAGE_SIZE / 2) } };
+    bio.vecs = bad3;
+    CHECK(blk_submit(&bio) == -EINVAL);   /* 12 KiB promised, 6 KiB given */
+    struct bio_vec many[9];
+    for (unsigned i = 0; i < 9; i++)
+        many[i] = (struct bio_vec){ a, 0 };
+    bio.vecs = many;
+    bio.nr_vecs = 9;
+    CHECK(blk_submit(&bio) == -EINVAL);
+    uint8_t stackbuf[512];
+    struct bio_vec bad4[1] = { { stackbuf, 512 } };
+    bio.vecs = bad4;
+    bio.nr_vecs = 1;
+    bio.nsectors = 1;
+    CHECK(blk_submit(&bio) == -EINVAL);
+    dma_free(NULL, 2 * PAGE_SIZE, a, d1);
+    dma_free(NULL, 2 * PAGE_SIZE, b, d2);
+    dma_free(NULL, 2 * PAGE_SIZE, flat, d3);
+    ramblk_destroy(bd);
+    kinfo("selftest: blk-segments: three-segment write read back flat and in two pages; five refusals");
+    return true;
+}
+
+bool selftest_blk_timeout(const char **reason)
+{
+    struct blkdev *bd = ramblk_create(16);
+    CHECK(bd != NULL);
+    CHECK(bd->timeout_ns == BLK_TIMEOUT_NS);
+    bd->timeout_ns = 300ull * 1000000ull;   /* 300 ms for the test */
+    ramblk_set_deferred(bd, 4);
+    ramblk_set_stall(bd, true);              /* a silent device */
+    uint8_t *page = kmalloc(4096, KMEM_ZERO);
+    CHECK(page != NULL);
+    uint64_t t0 = clock_now_ns();
+    uint64_t timeouts0 = bd->timeouts;
+    int rc = blk_read(bd, 0, 8, page);        /* would block for ever without the timeout */
+    uint64_t took_ms = (clock_now_ns() - t0) / 1000000;
+    CHECK(rc == -ETIMEDOUT);
+    CHECK(bd->timeouts == timeouts0 + 1);
+    CHECK(took_ms >= 300 && took_ms < 3000);
+    /* The device recovers for the test's sake: a fresh request completes. */
+    ramblk_set_stall(bd, false);
+    CHECK(blk_read(bd, 0, 8, page) == 0);
+    ramblk_set_deferred(bd, 0);
+    kfree(page);
+    ramblk_destroy(bd);
+    kinfo("selftest: blk-timeout: a stalled request returned -ETIMEDOUT after %llu ms", (unsigned long long)took_ms);
+    return true;
+}
+
 #else
 bool selftest_blk_queue(const char **reason)
+{
+    (void)reason;
+    return true;
+}
+bool selftest_blk_segments(const char **reason)
+{
+    (void)reason;
+    return true;
+}
+bool selftest_blk_timeout(const char **reason)
 {
     (void)reason;
     return true;

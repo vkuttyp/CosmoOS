@@ -11,6 +11,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -40,6 +41,7 @@
 #define VIRTIO_BLK_S_UNSUPP 2u
 
 #define VBLK_MAX_SECTORS 128u   /* 64 KiB per request */
+#define VBLK_MAX_SEGS    16u    /* per request; capped by the negotiated seg_max */
 
 struct vblk_req_hdr {
     uint32_t type;
@@ -54,6 +56,14 @@ struct vblk_slot {
     uint8_t pad[15];
 } __packed;
 
+/* The mappings of one in-flight request, undone at completion. */
+struct vblk_map {
+    dma_addr_t dma[VBLK_MAX_SEGS];
+    uint32_t len[VBLK_MAX_SEGS];
+    unsigned n;
+    enum dma_dir dir;
+};
+
 struct vblk {
     struct virtio_device *vdev;
     struct virtqueue *vq;
@@ -62,16 +72,29 @@ struct vblk {
     dma_addr_t slots_dma;
     size_t slots_bytes;
     struct bio **inflight;      /* per slot */
+    struct vblk_map *maps;      /* per slot */
     unsigned nr_slots;
     unsigned next_slot;
+    unsigned seg_max;
     spinlock_t lock;
     bool flush;
+    bool dead;                  /* a request timed out: the device was reset and every request fails */
 };
+
+static void unmap_slot(struct vblk *vb, unsigned slot)
+{
+    struct vblk_map *mp = &vb->maps[slot];
+    for (unsigned i = 0; i < mp->n; i++)
+        dma_unmap(&vb->vdev->dev, mp->dma[i], mp->len[i], mp->dir);
+    mp->n = 0;
+}
 
 static int vblk_submit(struct blkdev *bd, struct bio *bio)
 {
     struct vblk *vb = bd->priv;
 
+    if (__atomic_load_n(&vb->dead, __ATOMIC_ACQUIRE))
+        return -EIO;
     if (bio->dir == BIO_FLUSH && !vb->flush) {
         /* No VIRTIO_BLK_F_FLUSH: the device has no volatile cache to
          * flush and would answer UNSUPP; completed writes are stable. */
@@ -100,37 +123,51 @@ static int vblk_submit(struct blkdev *bd, struct bio *bio)
     sl->hdr.reserved = 0;
     sl->status = 0xff;
 
-    struct virtq_sg sg[3];
-    unsigned out = 1, in = 1;
+    struct virtq_sg sg[VBLK_MAX_SEGS + 2];
+    unsigned out = 1, in = 1, n = 1;
+    struct vblk_map *mp = &vb->maps[slot];
+    mp->n = 0;
     sg[0].addr = sl_dma;
     sg[0].len = sizeof(sl->hdr);
     if (bio->dir == BIO_FLUSH) {
         sl->hdr.type = VIRTIO_BLK_T_FLUSH;
         sl->hdr.sector = 0;
-        sg[1].addr = sl_dma + offsetof(struct vblk_slot, status);
-        sg[1].len = 1;
     } else {
-        size_t bytes = (size_t)bio->nsectors * bd->sector_size;
-        dma_addr_t data = dma_map(bd->dev, bio->buf, bytes,
-                                  bio->dir == BIO_WRITE ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-        if (data == 0) {
+        unsigned segs = bio_segments(bio);
+        if (segs > vb->seg_max) {
             vb->inflight[slot] = NULL;
             return -EINVAL;
         }
+        mp->dir = bio->dir == BIO_WRITE ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+        for (unsigned i = 0; i < segs; i++) {
+            struct bio_vec v;
+            bio_segment(bio, i, &v);
+            dma_addr_t data = dma_map(bd->dev, v.buf, v.len, mp->dir);
+            if (data == 0) {
+                unmap_slot(vb, slot);
+                vb->inflight[slot] = NULL;
+                return -EINVAL;
+            }
+            mp->dma[mp->n] = data;
+            mp->len[mp->n] = v.len;
+            mp->n++;
+            sg[n].addr = data;
+            sg[n].len = v.len;
+            n++;
+        }
         sl->hdr.type = bio->dir == BIO_WRITE ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
         sl->hdr.sector = bio->sector * (bd->sector_size / 512);
-        sg[1].addr = data;
-        sg[1].len = (uint32_t)bytes;
-        sg[2].addr = sl_dma + offsetof(struct vblk_slot, status);
-        sg[2].len = 1;
         if (bio->dir == BIO_WRITE)
-            out = 2;
+            out = 1 + segs;
         else
-            in = 2;
+            in = 1 + segs;
     }
+    sg[n].addr = sl_dma + offsetof(struct vblk_slot, status);
+    sg[n].len = 1;
     bio->drvpriv = (void *)(uintptr_t)(slot + 1);
     int rc = virtq_add(vb->vq, sg, out, in, bio);
     if (rc) {
+        unmap_slot(vb, slot);
         vb->inflight[slot] = NULL;
         return rc;
     }
@@ -144,19 +181,57 @@ static void vblk_done(struct virtqueue *vq)
     uint32_t len;
     struct bio *bio;
     while ((bio = virtq_pop(vq, &len)) != NULL) {
-        unsigned slot = (unsigned)(uintptr_t)bio->drvpriv - 1;
-        int status;
-        if (slot >= vb->nr_slots || vb->inflight[slot] != bio) {
-            kerror("virtio-blk: completion for an unknown request");
+        /* Ownership is decided under the lock, by pointer, before the bio
+         * is touched: the timeout path may have completed it already (and
+         * a synchronous caller freed its stack frame), so neither its
+         * fields nor a second completion are ours to use. */
+        unsigned slot = vb->nr_slots;
+        int status = -EIO;
+        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
+        for (unsigned i = 0; i < vb->nr_slots; i++) {
+            if (vb->inflight[i] == bio) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < vb->nr_slots) {
+            switch (vb->slots[slot].status) {
+            case VIRTIO_BLK_S_OK:     status = 0; break;
+            case VIRTIO_BLK_S_UNSUPP: status = -ENOTSUP; break;
+            default:                  status = -EIO; break;
+            }
+            unmap_slot(vb, slot);
+            vb->inflight[slot] = NULL;
+        }
+        spin_unlock_irqrestore(&vb->lock, s);
+        if (slot == vb->nr_slots) {
+            kerror("virtio-blk: completion for a request no longer in flight");
             continue;
         }
-        switch (vb->slots[slot].status) {
-        case VIRTIO_BLK_S_OK:     status = 0; break;
-        case VIRTIO_BLK_S_UNSUPP: status = -ENOTSUP; break;
-        default:                  status = -EIO; break;
-        }
-        vb->inflight[slot] = NULL;
         bio_complete(bio, status);
+    }
+}
+
+/* The device stopped answering: reset it (it drops every request) and
+ * fail everything in flight; the device stays dead until removed. */
+static void vblk_timeout(struct blkdev *bd, struct bio *victim)
+{
+    struct vblk *vb = bd->priv;
+    (void)victim;   /* found (or not) in the slot table below; never dereferenced on its own */
+    if (__atomic_exchange_n(&vb->dead, true, __ATOMIC_ACQ_REL))
+        return;
+    kerror("virtio-blk: %s: request timed out; resetting the device, every request fails from here", bd->name);
+    virtio_device_reset(vb->vdev);
+    for (unsigned i = 0; i < vb->nr_slots; i++) {
+        arch_irq_state_t s = spin_lock_irqsave(&vb->lock);
+        struct bio *bio = vb->inflight[i];
+        if (bio) {
+            unmap_slot(vb, i);
+            vb->inflight[i] = NULL;
+        }
+        spin_unlock_irqrestore(&vb->lock, s);
+        if (bio)
+            bio_complete(bio, -ETIMEDOUT);
     }
 }
 
@@ -165,6 +240,7 @@ static void vblk_release(struct blkdev *bd);
 static const struct blkdev_ops vblk_ops = {
     .submit = vblk_submit,
     .release = vblk_release,
+    .timeout = vblk_timeout,
 };
 
 static int vblk_probe(struct virtio_device *vdev)
@@ -191,6 +267,11 @@ static int vblk_probe(struct virtio_device *vdev)
         goto fail;
     }
     vb->flush = virtio_has_feature(vdev, VIRTIO_BLK_F_FLUSH);
+    vb->seg_max = virtio_has_feature(vdev, VIRTIO_BLK_F_SEG_MAX) ? virtio_read_config32(vdev, CFG_SEG_MAX) : 1;
+    if (vb->seg_max == 0)
+        vb->seg_max = 1;
+    if (vb->seg_max > VBLK_MAX_SEGS)
+        vb->seg_max = VBLK_MAX_SEGS;
 
     rc = virtq_alloc(vdev, 0, 0, vblk_done, &vb->vq);
     if (rc)
@@ -202,7 +283,8 @@ static int vblk_probe(struct virtio_device *vdev)
     vb->slots_bytes = vb->nr_slots * sizeof(struct vblk_slot);
     vb->slots = dma_alloc(&vdev->dev, vb->slots_bytes, &vb->slots_dma, DMA_ZERO);
     vb->inflight = kzalloc(vb->nr_slots * sizeof(*vb->inflight));
-    if (vb->slots == NULL || vb->inflight == NULL) {
+    vb->maps = kzalloc(vb->nr_slots * sizeof(*vb->maps));
+    if (vb->slots == NULL || vb->inflight == NULL || vb->maps == NULL) {
         rc = -ENOMEM;
         goto fail_vq;
     }
@@ -214,12 +296,14 @@ static int vblk_probe(struct virtio_device *vdev)
     vb->bd.sector_size = blk_size;
     vb->bd.capacity = capacity / (blk_size / 512);
     vb->bd.max_sectors = VBLK_MAX_SECTORS * 512 / blk_size;
+    vb->bd.max_segments = vb->seg_max;
     vb->bd.read_only = virtio_has_feature(vdev, VIRTIO_BLK_F_RO);
     vb->bd.priv = vb;
     rc = blk_register(&vb->bd, "vd");
     if (rc)
         goto fail_vq;
-    kinfo("virtio-blk: %s is %s%s", vdev->dev.name, vb->bd.name, vb->flush ? " (flush)" : "");
+    kinfo("virtio-blk: %s is %s%s, %u segments", vdev->dev.name, vb->bd.name, vb->flush ? " (flush)" : "",
+          vb->seg_max);
     return 0;
 
 fail_vq:
@@ -230,6 +314,7 @@ fail:
     if (vb->slots)
         dma_free(&vdev->dev, vb->slots_bytes, vb->slots, vb->slots_dma);
     kfree(vb->inflight);
+    kfree(vb->maps);
     kfree(vb);
     vdev->priv = NULL;
     return rc;
@@ -241,6 +326,7 @@ static void vblk_release(struct blkdev *bd)
 {
     struct vblk *vb = bd->priv;
     kfree(vb->inflight);
+    kfree(vb->maps);
     kfree(vb);
 }
 
@@ -252,6 +338,7 @@ static void vblk_remove(struct virtio_device *vdev)
     for (unsigned i = 0; i < vb->nr_slots; i++) {
         if (vb->inflight[i]) {
             struct bio *bio = vb->inflight[i];
+            unmap_slot(vb, i);
             vb->inflight[i] = NULL;
             bio_complete(bio, -EIO);
         }

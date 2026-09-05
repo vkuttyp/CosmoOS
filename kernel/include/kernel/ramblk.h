@@ -45,6 +45,10 @@ void ramblk_restore(struct blkdev *bd, const uint8_t *image);
  * and submit answers -EAGAIN above `limit` requests in flight; 0 returns
  * to synchronous completion (after completing what is deferred). */
 void ramblk_set_deferred(struct blkdev *bd, unsigned limit);
+/* Stall: in deferred mode the worker stops completing (a silent device);
+ * the block layer's timeout thread then calls the driver's timeout
+ * operation, which completes the request with -ETIMEDOUT. */
+void ramblk_set_stall(struct blkdev *bd, bool stall);
 
 /* Apply the first `count` entries of `log`; with `torn`, the last write is
  * applied only up to half its sectors (rounded down, at least one). */

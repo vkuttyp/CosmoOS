@@ -59,6 +59,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/ipc/pipe.c \
 	kernel/ipc/pipetest.c \
 	kernel/ipc/futex.c \
+	kernel/io/aio.c \
 	compat/linux/convert.c \
 	compat/linux/syscalls.c \
 	kernel-services/virtualization/vmm.c \

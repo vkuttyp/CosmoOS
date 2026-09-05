@@ -34,6 +34,7 @@ struct ramblk {
     struct list_node deferred;
     struct thread *worker;
     bool stop;
+    bool stall;               /* deferred mode: the worker completes nothing */
 };
 
 static struct ramblk *of(struct blkdev *bd)
@@ -60,7 +61,13 @@ static void record(struct ramblk *r, const struct bio *bio)
             log->dropped++;
             return;
         }
-        memcpy(w->data, bio->buf, (size_t)w->nsectors * 512);
+        size_t done = 0;
+        for (unsigned i = 0; i < bio_segments(bio); i++) {
+            struct bio_vec v;
+            bio_segment(bio, i, &v);
+            memcpy(w->data + done, v.buf, v.len);
+            done += v.len;
+        }
     }
     log->n++;
 }
@@ -75,18 +82,22 @@ static int ramblk_submit(struct blkdev *bd, struct bio *bio)
     }
     if (bio->dir != BIO_FLUSH) {
         uint64_t byte = bio->sector * 512;
-        size_t len = (size_t)bio->nsectors * 512;
-        uint8_t *buf = bio->buf;
-        while (len) {
-            uint64_t blk = byte / RAMBLK_BLOCK, off = byte % RAMBLK_BLOCK;
-            size_t chunk = RAMBLK_BLOCK - off < len ? RAMBLK_BLOCK - off : len;
-            if (bio->dir == BIO_WRITE)
-                memcpy(r->blocks[blk] + off, buf, chunk);
-            else
-                memcpy(buf, r->blocks[blk] + off, chunk);
-            byte += chunk;
-            buf += chunk;
-            len -= chunk;
+        for (unsigned i = 0; i < bio_segments(bio); i++) {
+            struct bio_vec v;
+            bio_segment(bio, i, &v);
+            size_t len = v.len;
+            uint8_t *buf = v.buf;
+            while (len) {
+                uint64_t blk = byte / RAMBLK_BLOCK, off = byte % RAMBLK_BLOCK;
+                size_t chunk = RAMBLK_BLOCK - off < len ? RAMBLK_BLOCK - off : len;
+                if (bio->dir == BIO_WRITE)
+                    memcpy(r->blocks[blk] + off, buf, chunk);
+                else
+                    memcpy(buf, r->blocks[blk] + off, chunk);
+                byte += chunk;
+                buf += chunk;
+                len -= chunk;
+            }
         }
     }
     if (bio->dir != BIO_READ)
@@ -109,8 +120,9 @@ static void ramblk_worker(void *arg)
     for (;;) {
         for (;;) {
             arch_irq_state_t s = spin_lock_irqsave(&r->lock);
-            struct bio *bio = list_empty(&r->deferred) ? NULL
-                                                        : container_of(list_pop_front(&r->deferred), struct bio, link);
+            struct bio *bio = (list_empty(&r->deferred) || r->stall)
+                                  ? NULL
+                                  : container_of(list_pop_front(&r->deferred), struct bio, link);
             if (bio)
                 r->inflight--;
             spin_unlock_irqrestore(&r->lock, s);
@@ -122,6 +134,38 @@ static void ramblk_worker(void *arg)
             break;
         thread_sleep_ms(1);
     }
+}
+
+/* The block layer's timeout thread: the request is still ours only if it
+ * is on the deferred list; find it by pointer under the lock, never
+ * dereference it first (it may have completed on another CPU). */
+static void ramblk_timeout(struct blkdev *bd, struct bio *victim)
+{
+    struct ramblk *r = of(bd);
+    struct bio *found = NULL, *b;
+    arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    list_for_each_entry(b, &r->deferred, link) {
+        if (b == victim) {
+            found = b;
+            break;
+        }
+    }
+    if (found) {
+        list_remove(&found->link);
+        list_init(&found->link);
+        r->inflight--;
+    }
+    spin_unlock_irqrestore(&r->lock, s);
+    if (found)
+        bio_complete(found, -ETIMEDOUT);
+}
+
+void ramblk_set_stall(struct blkdev *bd, bool stall)
+{
+    struct ramblk *r = of(bd);
+    arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    r->stall = stall;
+    spin_unlock_irqrestore(&r->lock, s);
 }
 
 void ramblk_set_deferred(struct blkdev *bd, unsigned limit)
@@ -155,6 +199,7 @@ static void ramblk_release(struct blkdev *bd)
 static const struct blkdev_ops ramblk_ops = {
     .submit = ramblk_submit,
     .release = ramblk_release,
+    .timeout = ramblk_timeout,
 };
 
 struct blkdev *ramblk_create(uint64_t nblocks)
@@ -181,6 +226,7 @@ struct blkdev *ramblk_create(uint64_t nblocks)
     r->bd.sector_size = 512;
     r->bd.capacity = nblocks * (RAMBLK_BLOCK / 512);
     r->bd.max_sectors = 128;
+    r->bd.max_segments = 8;
     r->bd.priv = r;
     if (blk_register(&r->bd, "ram") != 0) {
         ramblk_release(&r->bd);
@@ -191,6 +237,7 @@ struct blkdev *ramblk_create(uint64_t nblocks)
 
 void ramblk_destroy(struct blkdev *bd)
 {
+    ramblk_set_stall(bd, false);
     ramblk_set_deferred(bd, 0);   /* completes anything deferred first */
     blk_unregister(bd);
     blkdev_put(bd);   /* the creator's reference; release frees when the last holder is gone */

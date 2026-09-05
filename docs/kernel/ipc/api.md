@@ -69,7 +69,10 @@ with `PIPE_SIZE - used >= PIPE_BUF`, `WRITABLE|ERROR` with `readers ==
 returns the previous one. In non-blocking mode `read` is `-EAGAIN`
 instead of waiting (still 0 at end of file) and `write` is `-EAGAIN`
 when the ring cannot take the current piece and nothing was written
-yet (else the partial count).
+yet (else the partial count); the same holds while the calling thread
+executes an I/O ring entry (`io_nonblocking`, `docs/kernel/io/api.md`).
+**`poll_wq(end, events)`**: the read end's `rd_wq`, the write end's
+`wr_wq`, whatever `events` asks.
 
 **Release of the read end**: `readers--`, wake the writers (they see
 `-EPIPE`), free the pipe when both counts are 0. **Release of the write

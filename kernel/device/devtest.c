@@ -15,8 +15,14 @@
 #include <kernel/page.h>
 #include <kernel/random.h>
 #include <kernel/selftest.h>
+#include <kernel/cosmofs.h>
+#include <kernel/percpu.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/vfs.h>
 #include <kernel/vmm.h>
+
+#include <uapi/cosmo/syscall.h>
 
 #include <drivers/pci.h>
 
@@ -201,6 +207,10 @@ bool selftest_dma(const char **reason)
     va[8191] = 2;
     CHECK(dma_map(NULL, va, 8192, DMA_TO_DEVICE) == dma);
     CHECK(dma_map(NULL, va + 100, 50, DMA_FROM_DEVICE) == dma + 100);
+    dma_unmap(NULL, dma, 8192, DMA_TO_DEVICE);
+    dma_unmap(NULL, dma + 100, 50, DMA_FROM_DEVICE);
+    /* The predicate answers like dma_map without counting a mapping. */
+    CHECK(dma_mappable(NULL, va, 8192) && !dma_mappable(NULL, va, 0));
     dma_free(NULL, 8192, va, dma);
 
     /* A 24-bit device gets memory below 16 MiB. */
@@ -223,6 +233,7 @@ bool selftest_dma(const char **reason)
     /* kmalloc memory maps; arena memory and a stack address do not. */
     void *kb = kmalloc(256, 0);
     CHECK(kb != NULL && dma_map(NULL, kb, 256, DMA_TO_DEVICE) == virt_to_phys(kb));
+    dma_unmap(NULL, virt_to_phys(kb), 256, DMA_TO_DEVICE);
     kfree(kb);
     vaddr_t arena = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_POPULATE, VM_PROT_RW);
     CHECK(arena != 0 && dma_map(NULL, (void *)arena, 64, DMA_TO_DEVICE) == 0);
@@ -236,6 +247,24 @@ bool selftest_dma(const char **reason)
     CHECK(after.allocs == before.allocs + 1 + tiny_ok && after.frees == before.frees + 1 + tiny_ok);
     CHECK(after.bytes_allocated == before.bytes_allocated);
     CHECK(after.maps == before.maps + 3 && after.map_failures == before.map_failures + 3);
+    CHECK(after.unmaps == before.unmaps + 3);
+
+    /* Every mapping a driver takes for a request is undone at completion:
+     * a burst of I/O on the real disk leaves maps - unmaps where it was. */
+    struct blkdev *bd = blk_find("vda");
+    if (bd) {
+        uint8_t *buf = kmalloc(8192, 0);
+        CHECK(buf != NULL);
+        dma_get_stats(&before);
+        for (unsigned i = 0; i < 16; i++)
+            CHECK(blk_read(bd, 2048 + i * 16, 16, buf) == 0);
+        CHECK(blk_write(bd, 2048, 16, buf) == 0 && blk_flush(bd) == 0);
+        dma_get_stats(&after);
+        CHECK(after.maps - after.unmaps == before.maps - before.unmaps);
+        CHECK(after.maps > before.maps);
+        kfree(buf);
+        blkdev_put(bd);
+    }
     return true;
 }
 
@@ -329,6 +358,168 @@ bool selftest_blk(const char **reason)
     CHECK(ok);
 #undef STEP
     return true;
+}
+
+/* --- NVMe (milestone 9) --------------------------------------------------------
+ *
+ * The driver is a module; the kernel reaches its namespace only through the
+ * block layer, which is the point: everything below is generic block I/O.
+ */
+struct nvme_worker {
+    struct blkdev *bd;
+    uint8_t *buf;
+    unsigned cpu;
+    int rc;
+};
+
+static void nvme_cpu_worker(void *arg)
+{
+    struct nvme_worker *w = arg;
+    for (unsigned i = 0; i < 8 && w->rc == 0; i++)
+        w->rc = blk_read(w->bd, 4096 + (uint64_t)w->cpu * 64 + i * 8, 8, w->buf);
+    thread_exit(0);
+}
+
+bool selftest_nvme(const char **reason)
+{
+    struct blkdev *bd = blk_find("nvme0n1");
+    if (bd == NULL) {
+        kinfo("selftest: nvme: no nvme0n1; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: nvme: step failed at line %d", __LINE__); ok = false; } } while (0)
+    STEP(bd->sector_size == 512 && bd->capacity == 16384 && bd->nr_queues >= 1 && bd->max_segments >= 8);
+    STEP(bd->max_sectors >= 64);
+    struct dma_stats d0, d1;
+    dma_get_stats(&d0);
+
+    /* Single-buffer round trips, a flush, and a rejection. */
+    uint8_t *w = kmalloc(65536, 0), *r = kmalloc(65536, 0);
+    STEP(w != NULL && r != NULL);
+    if (w && r) {
+        for (unsigned i = 0; i < 65536; i++)
+            w[i] = (uint8_t)(i * 11 + 5);
+        uint32_t n = bd->max_sectors < 128 ? bd->max_sectors : 128;
+        STEP(blk_write(bd, 100, n, w) == 0);
+        memset(r, 0, 65536);
+        STEP(blk_read(bd, 100, n, r) == 0 && memcmp(w, r, (size_t)n * 512) == 0);
+        STEP(blk_flush(bd) == 0);
+        STEP(blk_read(bd, bd->capacity, 1, r) == -EINVAL);
+    }
+
+    /* Four pages in two segments: PRP1, then a PRP list (more than two pages). */
+    dma_addr_t da, db, dc;
+    uint8_t *a = dma_alloc(NULL, 2 * PAGE_SIZE, &da, 0), *b = dma_alloc(NULL, 2 * PAGE_SIZE, &db, 0);
+    uint8_t *flat = dma_alloc(NULL, 4 * PAGE_SIZE, &dc, DMA_ZERO);
+    STEP(a && b && flat);
+    if (a && b && flat) {
+        for (unsigned i = 0; i < 2 * PAGE_SIZE; i++) {
+            a[i] = (uint8_t)(i ^ 0x5a);
+            b[i] = (uint8_t)(i ^ 0xa5);
+        }
+        struct bio_vec vecs[2] = { { a, (uint32_t)(2 * PAGE_SIZE) }, { b, (uint32_t)(2 * PAGE_SIZE) } };
+        struct sync_marker { volatile bool done; int status; } mk = { false, 0 };
+        struct bio bio;
+        memset(&bio, 0, sizeof(bio));
+        bio.dev = bd;
+        bio.dir = BIO_WRITE;
+        bio.sector = 1024;
+        bio.nsectors = (uint32_t)(4 * PAGE_SIZE / 512);
+        bio.vecs = vecs;
+        bio.nr_vecs = 2;
+        /* A completion through a stack marker: done() runs in interrupt context. */
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        for (unsigned i = 0; i < 2000 && !mk.done; i++)
+            thread_sleep_ms(1);
+        STEP(mk.done && mk.status == 0);
+        STEP(blk_read(bd, 1024, bio.nsectors, flat) == 0);
+        STEP(memcmp(flat, a, 2 * PAGE_SIZE) == 0 && memcmp(flat + 2 * PAGE_SIZE, b, 2 * PAGE_SIZE) == 0);
+    }
+
+    /* Queue locality: reads issued from every CPU complete on that CPU
+     * when the controller granted one queue per CPU. */
+    uint64_t local0 = bd->completed_local, remote0 = bd->completed_remote;
+    unsigned ncpu = cpu_count();
+    struct nvme_worker workers[CONFIG_MAX_CPUS];
+    struct thread *threads[CONFIG_MAX_CPUS];
+    unsigned started = 0;
+    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c))
+            continue;
+        workers[c].bd = bd;
+        workers[c].cpu = c;
+        workers[c].rc = 0;
+        workers[c].buf = kmalloc(4096, 0);
+        threads[c] = workers[c].buf ? thread_create_on(nvme_cpu_worker, &workers[c], "nvme-cpu", SCHED_PRIO_DEFAULT,
+                                                       CPUMASK_OF(c))
+                                    : NULL;
+        if (threads[c])
+            started++;
+    }
+    for (unsigned c = 0; c < ncpu && c < CONFIG_MAX_CPUS; c++) {
+        if (!cpu_online(c) || threads[c] == NULL)
+            continue;
+        thread_join(threads[c]);
+        STEP(workers[c].rc == 0);
+        kfree(workers[c].buf);
+    }
+    uint64_t local = bd->completed_local - local0, remote = bd->completed_remote - remote0;
+    STEP(local + remote == 8ull * started);
+    if (bd->nr_queues >= ncpu)
+        STEP(local * 10 >= (local + remote) * 9);   /* at least 90 %: a migration between pick and doorbell is allowed */
+
+    /* Every mapping undone. */
+    dma_get_stats(&d1);
+    STEP(d1.maps - d1.unmaps == d0.maps - d0.unmaps && d1.maps > d0.maps);
+
+    /* A filesystem on it: format, mount, write, remount, read back. */
+    STEP(vfs_mkdir(NULL, "/mnt-nvme", 0755) == 0);
+    STEP(cosmofs_format(bd) == 0);
+    STEP(vfs_mount("/mnt-nvme", "cosmofs", bd, 0) == 0);
+    struct file *f = NULL;
+    STEP(vfs_open(NULL, "/mnt-nvme/hello", COSMO_O_CREAT | COSMO_O_RDWR, 0644, &f) == 0);
+    if (f) {
+        STEP(file_write(f, w, 12000) == 12000);
+        STEP(file_sync(f) == 0);
+        file_put(f);
+        f = NULL;
+    }
+    STEP(vfs_umount("/mnt-nvme") == 0);
+    STEP(vfs_mount("/mnt-nvme", "cosmofs", bd, 0) == 0);
+    STEP(vfs_open(NULL, "/mnt-nvme/hello", COSMO_O_RDONLY, 0, &f) == 0);
+    if (f) {
+        memset(r, 0, 65536);
+        int64_t got = file_read(f, r, 65536);
+        STEP(got == 12000 && memcmp(r, w, 12000) == 0);
+        file_put(f);
+    }
+    STEP(vfs_umount("/mnt-nvme") == 0);
+    STEP(vfs_rmdir(NULL, "/mnt-nvme") == 0);
+
+    if (a)
+        dma_free(NULL, 2 * PAGE_SIZE, a, da);
+    if (b)
+        dma_free(NULL, 2 * PAGE_SIZE, b, db);
+    if (flat)
+        dma_free(NULL, 4 * PAGE_SIZE, flat, dc);
+    kfree(w);
+    kfree(r);
+    kinfo("selftest: nvme: %u queue(s); %llu of %llu completions on the issuing CPU; cosmofs mounted and read back",
+          bd->nr_queues, (unsigned long long)local, (unsigned long long)(local + remote));
+    blkdev_put(bd);
+    CHECK(ok);
+#undef STEP
+    return true;
+}
+
+void selftest_nvme_mark_done(struct bio *bio)
+{
+    struct { volatile bool done; int status; } *mk = bio->arg;
+    mk->status = bio->status;
+    __atomic_store_n(&mk->done, true, __ATOMIC_RELEASE);
 }
 
 /* --- virtio console --------------------------------------------------------- */

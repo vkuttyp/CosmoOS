@@ -13,6 +13,7 @@
 #include <kernel/sched.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/wait.h>
 
 #include <uapi/cosmo/syscall.h>
@@ -85,7 +86,7 @@ static int64_t pipe_read(struct kobject *obj, void *buf, size_t len)
     struct pipe *p = e->pipe;
     if (len == 0)
         return 0;
-    if (!__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED)) {
+    if (!io_nonblocking(__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED))) {
         int rc = wait_event_killable(&p->rd_wq, p->used > 0 || p->writers == 0);
         if (rc)
             return rc;
@@ -119,7 +120,7 @@ static int64_t pipe_write(struct kobject *obj, const void *buf, size_t len)
         return -EPIPE;
     if (len == 0)
         return 0;
-    bool nonblock = __atomic_load_n(&e->nonblock, __ATOMIC_RELAXED);
+    bool nonblock = io_nonblocking(__atomic_load_n(&e->nonblock, __ATOMIC_RELAXED));
     size_t done = 0;
     while (done < len) {
         size_t left = len - done;
@@ -195,6 +196,18 @@ static unsigned pipe_write_ready(struct kobject *obj)
     return r;
 }
 
+static struct waitqueue *pipe_read_poll_wq(struct kobject *obj, unsigned events)
+{
+    (void)events;
+    return &container_of(obj, struct pipe_end, obj)->pipe->rd_wq;
+}
+
+static struct waitqueue *pipe_write_poll_wq(struct kobject *obj, unsigned events)
+{
+    (void)events;
+    return &container_of(obj, struct pipe_end, obj)->pipe->wr_wq;
+}
+
 static int pipe_set_nonblock(struct kobject *obj, int on)
 {
     struct pipe_end *e = container_of(obj, struct pipe_end, obj);
@@ -211,6 +224,7 @@ static const struct kobject_io_type pipe_read_type = {
     .stat = pipe_stat,
     .ready = pipe_read_ready,
     .set_nonblock = pipe_set_nonblock,
+    .poll_wq = pipe_read_poll_wq,
 };
 
 static const struct kobject_io_type pipe_write_type = {
@@ -220,6 +234,7 @@ static const struct kobject_io_type pipe_write_type = {
     .stat = pipe_stat,
     .ready = pipe_write_ready,
     .set_nonblock = pipe_set_nonblock,
+    .poll_wq = pipe_write_poll_wq,
 };
 
 int pipe_create(struct kobject **read_end, struct kobject **write_end)

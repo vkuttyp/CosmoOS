@@ -98,17 +98,20 @@ that know nothing about PCI or VirtIO.
 - ACPI interpretation beyond static tables: no AML, so no `_PRT`
   routing of legacy INTx. Every PCI driver uses MSI/MSI-X; a device
   without either is enumerated but gets no interrupt.
-- IOMMU, scatter/gather, bounce buffers, non-coherent architectures:
-  designed for (the API takes a device and a direction, addresses are
-  `dma_addr_t` not `paddr_t`, the sync points call `arch_dma_barrier`),
-  not implemented. Both supported platforms (QEMU `q35` and `virt`) are
-  DMA-coherent; cache maintenance for a non-coherent bus is out of
-  scope. `dma_map` refuses anything not physically contiguous.
+- IOMMU, bounce buffers, non-coherent architectures: designed for (the
+  API takes a device and a direction, addresses are `dma_addr_t` not
+  `paddr_t`, the sync points call `arch_dma_barrier`, since milestone 9
+  every map has its unmap), not implemented. Both supported platforms
+  (QEMU `q35` and `virt`) are DMA-coherent; cache maintenance for a
+  non-coherent bus is out of scope. `dma_map` refuses anything not
+  physically contiguous; scatter/gather is a bio's segment list
+  (`design.md`, "Multi-segment bios"), not a DMA-layer service.
 - Hot-plug and power management: devices are enumerated once at boot;
   `device_unregister` exists for module unload, not for surprise
   removal.
-- NVMe, AHCI, USB, network: later phases. The boot disk stays on the
-  firmware's AHCI controller and is untouched.
+- AHCI, USB: later. NVMe is the `nvme` module since milestone 9
+  (`docs/drivers/nvme/`); network is `virtio_net`. The boot disk stays
+  on the firmware's AHCI controller and is untouched.
 - A page cache, partitions, or a filesystem: Phase 7.
 - Console input from virtio-console (no reader exists yet) and
   serial input.
@@ -123,7 +126,7 @@ that know nothing about PCI or VirtIO.
 | `arch_irqc_msi_compose` | `arch/irqc.h` | irq.c |
 | `arch_pci_legacy_read/write` | `arch/pci.h` | PCI core |
 | `pci_*` (config, BARs, capabilities, MSI-X, enable) | `drivers/pci.h` | virtio-pci transport, self-tests |
-| `blk_register/unregister/find`, `blk_submit`, `blk_read/write` | `kernel/blk.h` | virtio_blk, self-tests, Phase 7 |
+| `blk_register/register_named/unregister/find`, `blk_submit` (segments, timeouts), `bio_segment`, `blk_read/write` | `kernel/blk.h` | virtio_blk, nvme, self-tests, Phase 7 |
 | `random_add_entropy`, `random_get_bytes`, `random_entropy_bits` | `kernel/random.h` | virtio_rng, everyone |
 | `virtio_*`, `virtq_*` | `drivers/virtio.h` | virtio device drivers |
 | `console_register` | `kernel/console.h` | virtio_console |

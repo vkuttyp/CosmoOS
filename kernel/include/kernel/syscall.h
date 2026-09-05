@@ -27,6 +27,11 @@ int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame);
  * through a bounded kernel buffer. Bytes or -errno. */
 int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len);
 int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len);
+/* The same on an object the caller already holds (the I/O ring): the
+ * copy goes through a kernel bounce buffer, bounded by the returned count. */
+struct kobject;
+int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len);
+int64_t syscall_obj_write(struct kobject *obj, uint64_t ubuf, size_t len);
 /* fstat on any I/O object; 0 or -errno with *st filled. */
 struct cosmo_stat;
 int syscall_handle_stat(int h, struct cosmo_stat *st);

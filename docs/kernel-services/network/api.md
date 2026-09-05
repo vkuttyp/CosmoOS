@@ -670,7 +670,9 @@ shutdown, `WRITABLE` after a write shutdown, and
 non-blocking connect becomes `SS_CONNECTED` on the next `connect`,
 `sendto` or `recvfrom` (under the socket mutex); `ksock_ready` changes
 nothing. Through the object type these are `ready` and `set_nonblock`
-(`docs/kernel/object/api.md`).
+(`docs/kernel/object/api.md`); `poll_wq` is the socket's `wait` queue
+for every event, and every wait site treats a thread executing an I/O
+ring entry as non-blocking (`io_nonblocking`, milestone 9).
 
 **`struct socket *socket_from_kobject(struct kobject *obj)`** The
 socket, or NULL when `obj` has another type (`sock_of` in `native.c`

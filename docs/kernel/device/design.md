@@ -279,6 +279,89 @@ kicks, and polls the used ring for at most 200 ms (`clock_now_ns`),
 marking itself dead on timeout so the console can never wedge. The
 per-driver details are in `docs/drivers/virtio/design.md`.
 
+## The block layer for NVMe (audit milestone 9)
+
+Milestone 9 of `docs/audit/2026-09-post-roadmap-audit.md` §19 (finding
+#27, §10.2–10.4) gives the block and DMA layers what an NVMe driver and
+asynchronous I/O need. `docs/drivers/nvme/design.md` is the driver's
+design, `docs/kernel/io/design.md` the ring's.
+
+### Multi-segment bios
+
+```c
+struct bio_vec { void *buf; uint32_t len; };
+struct bio {
+    ...
+    void *buf;                 /* the single segment when nr_vecs == 0 */
+    struct bio_vec *vecs;      /* else the segments, in transfer order */
+    unsigned nr_vecs;
+    struct list_node inflight_link;   /* the block layer's in-flight list (link stays the driver's) */
+    uint64_t issued_ns;
+};
+struct blkdev { ... unsigned max_segments; uint64_t timeout_ns; uint64_t timeouts; struct list_node inflight; };
+```
+
+The segments' lengths sum to `nsectors × sector_size`; every segment
+but the first starts on a page boundary and every segment but the last
+ends on one (Linux's rule, and exactly what turns segments into NVMe
+PRP entries or virtio descriptors without bouncing); each is DMA-able
+(`dma_mappable`, a predicate with no side effect, replaces the
+throw-away `dma_map` the audit flagged); their number is at most the
+device's `max_segments` (1 for a driver that has not opted in). `blk_submit`
+checks all of it and refuses with `-EINVAL`. Drivers walk the segments
+with `bio_segment(bio, i, &vec)`, which returns the single buffer for a
+plain bio, so a driver written for segments handles both shapes. The
+RAM device copies per segment, virtio-blk gives each segment a
+descriptor (bounded by the negotiated `seg_max`), NVMe builds PRPs.
+The synchronous helpers stay single-buffer; the page cache (whose pages
+are the natural segments of one bio) is the consumer to convert once
+its writeback batches by extent.
+
+### Request timeouts
+
+Every accepted bio is on its device's in-flight list with the time it
+went to the driver. A kernel thread, `blk-timeout`, wakes every 500 ms
+and, for each device whose `timeout_ns` is non-zero (default
+`BLK_TIMEOUT_NS`, 30 s), finds bios older than that. For each it counts
+`timeouts`, logs one warning, and calls the driver's optional
+`ops->timeout(bd, bio)` in thread context; the driver must make the
+device forget the request and then complete it (`-ETIMEDOUT`) through
+`bio_complete` like any other. A driver without the operation gets the
+warning and the counter only: the layer cannot complete a request whose
+DMA may still be pending. `sync_io` therefore returns `-ETIMEDOUT`
+instead of blocking for ever on a silent device (audit §10.2 MEDIUM). The
+RAM device implements the operation and a stall mode for the test; NVMe
+aborts and resets; virtio-blk resets the device and fails every in-flight
+request.
+
+### DMA discipline (#27)
+
+`dma_set_mask(dev, 64)` is called by the virtio-pci transport (the
+modern transport addresses 64 bits) and by NVMe, so `dma_alloc` may
+return `ZONE_NORMAL` pages and `dma_map` accepts any direct-map buffer;
+the 32-bit default remains for a device that does not say otherwise.
+Every `dma_map` now has its `dma_unmap`: virtio-blk unmaps a bio's
+segments at completion, virtio-net unmaps receive buffers when the
+device returns them and transmit buffers when their completion pops,
+NVMe unmaps at completion. `dma_stats` gains `unmaps`, and the DMA
+self-test asserts `maps − unmaps` returns to its starting value after a
+burst of I/O. The mapping calls are still identity mappings; the
+discipline is what lets an IOMMU or a bounce path slot in behind them.
+
+### Per-CPU vectors
+
+NVMe requests one MSI-X vector per I/O queue and routes each to the CPU
+whose queue it serves (`pci_msix_request(..., cpu)`, an API the PCI core
+already had). Nothing new is needed in the interrupt layer; the
+self-test checks that completions land on the submitting CPU. VirtIO
+devices keep their vectors on CPU 0 (one queue each).
+
+### Exact names
+
+`blk_register_named(bd, name)` registers under a caller-chosen name
+(`-EEXIST` if taken) for drivers whose naming scheme is not a letter
+suffix (`nvme0n1`).
+
 ## Ownership and lifetime
 
 The PCI core owns every `pci_device` (allocated at enumeration, never

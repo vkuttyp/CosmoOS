@@ -34,11 +34,13 @@ wins and the document is wrong.
 | `kernel/security/` | SHA-512, Ed25519 verification, the compiled-in key ring, kernel taint; the access-control and resource-limit design (privilege flows down, `COSMO_SPAWN_SETCRED`, rlimits, ramfs and page-cache caps with reclaim, the `procinfo`/`log` gates) |
 | `kernel/device/` | The bus/device/driver model with resources and probing, the DMA API, the block layer (`kernel/block/`), the entropy pool, console sinks, MSI in the interrupt layer, and the QEMU device configuration the tests rely on |
 | `drivers/pci/` | PCI core: ECAM or legacy configuration access, enumeration, BAR sizing, capabilities, MSI/MSI-X, the `pci` bus and `struct pci_driver` |
+| `drivers/nvme/` | The `nvme` module (milestone 9): controller bring-up, one I/O queue per CPU with its own MSI-X vector, PRP construction from bio segments, abort and reset, one block device per namespace |
 | `drivers/virtio/` | The `virtio` module (bus, device initialisation, split virtqueues, virtio-pci modern transport) and the `virtio_blk`, `virtio_rng`, `virtio_console` driver modules |
 | `kernel-services/vfs/` | The VFS (mounts, path walk, vnodes, files, the `fs_type` registry), the page cache, ramfs and the boot namespace, the storage pool (`kernel-services/storage/`), and the twelve filesystem system calls |
 | `kernel-services/filesystem/cosmofs/` | The copy-on-write filesystem: on-disk layout, transactions and commit, crash behaviour |
 | `kernel-services/network/` | The network stack: mbufs, interfaces and the `netrx` worker, Ethernet/ARP, IPv4/ICMP, IPv6/ICMPv6/ND, UDP, TCP, sockets and system calls 23–31, the `virtio_net` driver's contract, fw_cfg boot parameters, the QEMU network harness |
 | `kernel/tty/` | The line discipline: the console tty fed by the serial receive interrupt, canonical editing and echo, killable reads through the console kobject |
+| `kernel/io/` | The asynchronous I/O ring (milestone 9): submission and completion over the readiness operation, execution in the submitting process, the multi-queue wait, system calls 60–62 |
 | `kernel/ipc/` | IPC primitives: anonymous pipes as two kobject ends (`pipe`, system call 35); since Phase 11 the futex (`futex_wait`/`futex_wake`) |
 | `libc/` | The native C library: headers, `errno`, string, allocator, stdio, `spawn`/`wait`/`kill`, files, directories, sockets, the native introspection wrappers; host test |
 | `userland/` | init, the shell (`cosmo$ `), the coreutils and system tools, `/etc/rc`, the shell test script and the interactive serial harness |
@@ -47,7 +49,7 @@ wins and the document is wrong.
 | `pkg/` | The package system: recipes (`ports/`), the host builder `tools/pkgbuild.py`, the `.cpk` and `INDEX` formats, the `pkg` manager (`pkg/`), signing and checksums, the `/var/db/pkg` database, the package tests |
 
 Further subsystem directories are added as subsystems come into existence
-(`drivers/nvme/`, `drivers/network/`, `compat/<other>/`, and so on).
+(`drivers/network/`, `compat/<other>/`, and so on).
 
 ## Per-subsystem convention
 

@@ -16,6 +16,7 @@
 #include <kernel/errno.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/tty.h>
 
 #define TTY_EOF_MARK 0x04u
@@ -120,6 +121,8 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         return 0;
     uint8_t *out = buf;
     for (;;) {
+        if (io_nonblocking(false) && !tty_has_line(t))
+            return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
         int rc = wait_event_killable(&t->readers, t->lines > 0);
         if (rc)
             return rc;

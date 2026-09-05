@@ -29,7 +29,8 @@ enum dma_dir {
 
 /* Coherent allocation, page granular, contiguous, inside dev->dma_mask
  * (NULL dev: 32-bit). Returns the kernel virtual address and the bus
- * address. Sleeps (PMM); not for interrupt context. NULL on failure. */
+ * address. Thread context (the PMM does not sleep, but the allocation is
+ * not for interrupt handlers). NULL on failure. */
 void *dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_out, unsigned flags);
 void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma);
 
@@ -39,6 +40,9 @@ void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma);
  * (kernel arena, stack, user) returns 0. Any context. */
 dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir dir);
 void dma_unmap(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir);
+/* Would dma_map accept this range? A predicate with no side effect (the
+ * block layer validates buffers with it; drivers map for real). */
+bool dma_mappable(struct device *dev, const void *va, size_t len);
 
 /* Ordering points around device access. Any context. */
 void dma_sync_for_device(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir);
@@ -48,7 +52,7 @@ void dma_sync_for_cpu(struct device *dev, dma_addr_t dma, size_t len, enum dma_d
 int dma_set_mask(struct device *dev, unsigned bits);
 
 struct dma_stats {
-    uint64_t allocs, frees, maps, map_failures;
+    uint64_t allocs, frees, maps, unmaps, map_failures;
     uint64_t bytes_allocated;   /* currently outstanding */
 };
 void dma_get_stats(struct dma_stats *out);

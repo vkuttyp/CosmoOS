@@ -35,3 +35,11 @@ void wait_for_completion(struct completion *c)
     might_sleep();
     wait_event(&c->wq, completion_done(c));
 }
+
+/* Module ABI exports (docs/kernel/module/api.md): drivers wait for their
+ * own commands with a completion (NVMe admin commands). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(completion_init);
+EXPORT_SYMBOL(complete);
+EXPORT_SYMBOL(completion_done);
+EXPORT_SYMBOL(wait_for_completion);

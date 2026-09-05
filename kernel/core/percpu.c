@@ -69,3 +69,8 @@ void preempt_enable(void)
     if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled())
         sched_preempt();
 }
+
+/* Module ABI exports (docs/kernel/module/api.md): a multi-queue driver
+ * sizes its queues by the CPU count. */
+#include <kernel/module.h>
+EXPORT_SYMBOL(cpu_count);
