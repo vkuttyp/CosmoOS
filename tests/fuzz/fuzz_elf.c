@@ -28,7 +28,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         for (unsigned i = 0; i < info.nr_segments; i++) {
             const struct elf_segment *s = &info.segments[i];
             FUZZ_ASSERT(s->offset <= size && s->filesz <= size - s->offset);
-            FUZZ_ASSERT(s->vaddr >= USER_LO && s->vaddr + s->memsz <= USER_HI && s->memsz >= s->filesz);
+            if (info.is_dyn)   /* relative to 0 until the caller rebases it */
+                FUZZ_ASSERT(s->vaddr + s->memsz <= USER_HI - USER_LO && s->memsz >= s->filesz);
+            else
+                FUZZ_ASSERT(s->vaddr >= USER_LO && s->vaddr + s->memsz <= USER_HI && s->memsz >= s->filesz);
         }
         FUZZ_ASSERT(info.entry >= info.lo && info.entry < info.hi);
     } else {
