@@ -362,6 +362,8 @@ static const struct selftest tests[] = {
      * leave on the scratch disk. */
     { "tty-ldisc",       selftest_tty_ldisc },
     { "ipc-pipe",        selftest_ipc_pipe },
+    { "io-poll",         selftest_io_poll },
+    { "realtime",        selftest_realtime },
     { "process-reject",  selftest_process_reject },
     { "process-spawn",   selftest_process_spawn },
     { "linux-elf",       selftest_linux_elf },
