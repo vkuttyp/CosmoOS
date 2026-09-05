@@ -8,6 +8,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/aarch64/trampoline.S \
 	kernel/arch/aarch64/start.c \
 	kernel/arch/aarch64/cpu.c \
+	kernel/arch/aarch64/fpu.c \
 	kernel/arch/aarch64/irq.c \
 	kernel/arch/aarch64/trap.c \
 	kernel/arch/aarch64/gic.c \

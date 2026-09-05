@@ -22,6 +22,7 @@
 #include <arch/irq.h>
 
 #include <x86/cpu.h>
+#include <x86/fpu.h>
 #include <x86/svm.h>
 
 #define SVM_ASIDS_MAX 64u
@@ -52,9 +53,16 @@ struct arch_hv_vcpu {
     struct svm_gprs gprs;
     struct arch_hv_vm *vm;
     uint64_t guest_efer;      /* the guest's view: never SVME */
+    uint64_t guest_xcr0;      /* the guest's XCR0, installed around every VMRUN (XSETBV is intercepted) */
+    void *fpu_raw;            /* kmalloc block behind `fpu` */
+    uint8_t *fpu;             /* the guest's x87/SSE/AVX state, x86_fpu_info()->area_size bytes, 64-aligned */
     int offered;
     unsigned unknown_exits;
 };
+
+#define CR4_OSXSAVE_ (1ull << 18)
+
+static void skip_instruction(struct arch_hv_vcpu *v, uint64_t next_rip);
 
 struct svm_cpu {
     bool enabled;
@@ -233,7 +241,7 @@ static void vmcb_reset(struct arch_hv_vcpu *v)
                          SVM_INTERCEPT_IOIO | SVM_INTERCEPT_MSR | SVM_INTERCEPT_SHUTDOWN;
     c->intercept_misc2 = SVM_INTERCEPT_VMRUN | SVM_INTERCEPT_VMMCALL | SVM_INTERCEPT_VMLOAD | SVM_INTERCEPT_VMSAVE |
                          SVM_INTERCEPT_STGI | SVM_INTERCEPT_CLGI | SVM_INTERCEPT_SKINIT | SVM_INTERCEPT_MONITOR |
-                         SVM_INTERCEPT_MWAIT | SVM_INTERCEPT_MWAIT_ARM;
+                         SVM_INTERCEPT_MWAIT | SVM_INTERCEPT_MWAIT_ARM | SVM_INTERCEPT_XSETBV;
     c->iopm_base_pa = g_iopm_pa;
     c->msrpm_base_pa = g_msrpm_pa;
     c->asid = v->vm->asid;
@@ -264,6 +272,11 @@ static void vmcb_reset(struct arch_hv_vcpu *v)
     v->guest_efer = 0;
     memset(&v->gprs, 0, sizeof(v->gprs));
     v->offered = -1;
+    /* Reset: x87 and SSE state components enabled (the architectural
+     * XCR0 reset value is 1; the SSE bit is what a real-mode guest gets
+     * once it sets CR4.OSFXSR), registers at their reset values. */
+    v->guest_xcr0 = XCR0_X87 | XCR0_SSE;
+    memcpy(v->fpu, x86_fpu_reset_image(), x86_fpu_info()->area_size);
 }
 
 int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
@@ -273,11 +286,16 @@ int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
     struct arch_hv_vcpu *v = kzalloc(sizeof(*v));
     if (v == NULL)
         return -ENOMEM;
+    v->fpu_raw = kmalloc(x86_fpu_info()->area_size + 64, 0);
     struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
-    if (pg == NULL) {
+    if (v->fpu_raw == NULL || pg == NULL) {
+        if (pg)
+            pmm_free_page(pg);
+        kfree(v->fpu_raw);
         kfree(v);
         return -ENOMEM;
     }
+    v->fpu = (uint8_t *)(((uintptr_t)v->fpu_raw + 63) & ~(uintptr_t)63);
     v->vmcb_pa = page_to_phys(pg);
     v->vmcb = phys_to_virt(v->vmcb_pa);
     v->vm = vm;
@@ -291,7 +309,52 @@ void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v)
     if (v == NULL)
         return;
     pmm_free_page(phys_to_page(v->vmcb_pa));
+    kfree(v->fpu_raw);
     kfree(v);
+}
+
+uint64_t arch_hv_host_xstate(void)
+{
+    const struct x86_fpu_info *fi = x86_fpu_info();
+    return fi->xsave ? fi->xcr0 : 0;
+}
+
+bool arch_hv_vcpu_xstate_enabled(struct arch_hv_vcpu *v)
+{
+    return (v->vmcb->save.cr4 & CR4_OSXSAVE_) != 0;
+}
+
+/* XSETBV is intercepted because XCR0 is not part of the VMCB: the guest's
+ * value is kept here and installed around VMRUN. Accept exactly what the
+ * hardware would for the components the host enables; anything else is
+ * #GP(0), as on a CPU without them. */
+static bool xcr0_acceptable(uint64_t x, uint64_t host)
+{
+    const uint64_t avx512 = XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+    if (!(x & XCR0_X87) || (x & ~host))
+        return false;
+    if ((x & XCR0_AVX) && !(x & XCR0_SSE))
+        return false;
+    if ((x & avx512) && ((x & avx512) != avx512 || !(x & XCR0_AVX)))
+        return false;
+    return true;
+}
+
+static void emulate_xsetbv(struct arch_hv_vcpu *v)
+{
+    const struct x86_fpu_info *fi = x86_fpu_info();
+    struct vmcb *b = v->vmcb;
+    if (!fi->xsave || !(b->save.cr4 & CR4_OSXSAVE_)) {
+        arch_hv_vcpu_inject_exception(v, 6, false, 0);              /* #UD: no XSAVE for this guest */
+        return;
+    }
+    uint64_t value = (v->gprs.rdx << 32) | (b->save.rax & 0xFFFFFFFFull);
+    if (b->save.cpl != 0 || (uint32_t)v->gprs.rcx != 0 || !xcr0_acceptable(value, fi->xcr0)) {
+        arch_hv_vcpu_inject_exception(v, 13, true, 0);              /* #GP(0) */
+        return;
+    }
+    v->guest_xcr0 = value;
+    skip_instruction(v, b->save.rip + 3);                           /* 0F 01 D1 */
 }
 
 static void seg_out(struct cosmo_vcpu_seg *o, const struct svm_seg *s)
@@ -542,13 +605,29 @@ void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool 
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     struct vmcb *b = v->vmcb;
+    const struct x86_fpu_info *fi = x86_fpu_info();
     arch_irq_state_t s = arch_irq_save();
     struct svm_cpu *c = enable_this_cpu();
     if (c == NULL) {
         arch_irq_restore(s);
         return -ENOMEM;
     }
+    /* Guest rule (arch/fpu.h): the owner thread's x87/SSE/AVX registers
+     * are saved, the guest's loaded, and the guest runs under its own
+     * XCR0; afterwards the guest's registers are captured and the owner's
+     * put back. A kernel-thread owner holds no state and gets the reset
+     * image, so no guest register stays live in the kernel. Interrupts are
+     * off from here to the restore: nothing can switch threads in between. */
+    bool owner = x86_fpu_save_current();
+    x86_fpu_area_restore(v->fpu);
+    if (fi->xsave)
+        xsetbv(0, v->guest_xcr0);
     svm_run(v->vmcb_pa, c->host_vmcb_pa, &v->gprs);
+    if (fi->xsave)
+        xsetbv(0, fi->xcr0);
+    x86_fpu_area_save(v->fpu);
+    if (!owner || !x86_fpu_restore_current())
+        x86_fpu_area_restore(x86_fpu_reset_image());
     arch_irq_restore(s);
 
     /* An event that was being delivered when the exit happened is redelivered. */
@@ -602,6 +681,10 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         return 0;
     case SVM_EXIT_SHUTDOWN:
         out->kind = HV_EXIT_SHUTDOWN;
+        return 0;
+    case SVM_EXIT_XSETBV:
+        emulate_xsetbv(v);
+        out->kind = HV_EXIT_INTR;
         return 0;
     case SVM_EXIT_VMRUN:
     case SVM_EXIT_VMLOAD:

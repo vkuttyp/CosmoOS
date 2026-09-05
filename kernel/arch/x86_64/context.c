@@ -27,15 +27,20 @@
 #include <arch/mmu.h>
 
 #include <x86/cpu.h>
-#include <x86/cpu.h>
+#include <x86/fpu.h>
 #include <x86/gdt.h>
 
 #define MSR_FS_BASE 0xC0000100u
 
 void x86_context_start(void);
 
-void arch_thread_switch_prepare(struct thread *next)
+void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
 {
+    /* Vector/x87 registers: the outgoing owner's are saved, the incoming
+     * owner's loaded (fpu.c). Interrupts are off and nothing between here
+     * and the switch touches them. */
+    x86_fpu_switch(prev, next);
+
     /* Kernel stack for traps from ring 3 and for SYSCALL. */
     uintptr_t kstack = next->stack_base + next->stack_size;
     this_cpu()->kernel_stack_top = kstack;

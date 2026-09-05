@@ -349,11 +349,91 @@ static void proc_selftest(void)
     puts("usertest: processes ok");
 }
 
+#if defined(__x86_64__)
+/* The process rule of arch/fpu.h: a process never observes another's
+ * vector registers. Two partner processes and this one each hold a
+ * distinct pattern in xmm0-xmm15 across hundreds of yields and sleeps.
+ * libc is built -mgeneral-regs-only, so the only SSE here is this asm. */
+static void xmm_fill(uint8_t seed, uint8_t r[16][16])
+{
+    for (unsigned i = 0; i < 16; i++)
+        for (unsigned j = 0; j < 16; j++)
+            r[i][j] = (uint8_t)(seed ^ (i * 17u) ^ (j * 3u));
+}
+
+static void xmm_load(const uint8_t r[16][16])
+{
+    __asm__ volatile("movdqu 0(%0), %%xmm0\n\tmovdqu 16(%0), %%xmm1\n\tmovdqu 32(%0), %%xmm2\n\t"
+                     "movdqu 48(%0), %%xmm3\n\tmovdqu 64(%0), %%xmm4\n\tmovdqu 80(%0), %%xmm5\n\t"
+                     "movdqu 96(%0), %%xmm6\n\tmovdqu 112(%0), %%xmm7\n\tmovdqu 128(%0), %%xmm8\n\t"
+                     "movdqu 144(%0), %%xmm9\n\tmovdqu 160(%0), %%xmm10\n\tmovdqu 176(%0), %%xmm11\n\t"
+                     "movdqu 192(%0), %%xmm12\n\tmovdqu 208(%0), %%xmm13\n\tmovdqu 224(%0), %%xmm14\n\t"
+                     "movdqu 240(%0), %%xmm15"
+                     : : "r"(r) : "memory");
+}
+
+static void xmm_store(uint8_t r[16][16])
+{
+    __asm__ volatile("movdqu %%xmm0, 0(%0)\n\tmovdqu %%xmm1, 16(%0)\n\tmovdqu %%xmm2, 32(%0)\n\t"
+                     "movdqu %%xmm3, 48(%0)\n\tmovdqu %%xmm4, 64(%0)\n\tmovdqu %%xmm5, 80(%0)\n\t"
+                     "movdqu %%xmm6, 96(%0)\n\tmovdqu %%xmm7, 112(%0)\n\tmovdqu %%xmm8, 128(%0)\n\t"
+                     "movdqu %%xmm9, 144(%0)\n\tmovdqu %%xmm10, 160(%0)\n\tmovdqu %%xmm11, 176(%0)\n\t"
+                     "movdqu %%xmm12, 192(%0)\n\tmovdqu %%xmm13, 208(%0)\n\tmovdqu %%xmm14, 224(%0)\n\t"
+                     "movdqu %%xmm15, 240(%0)"
+                     : : "r"(r) : "memory");
+}
+
+#define FPU_ROUNDS 300
+
+/* Hold `seed`'s pattern for FPU_ROUNDS rounds; 0 if it survived, 3 if not. */
+static int fpu_hold(uint8_t seed)
+{
+    uint8_t want[16][16], got[16][16];
+    xmm_fill(seed, want);
+    xmm_load(want);
+    for (unsigned i = 0; i < FPU_ROUNDS; i++) {
+        if (i & 1)
+            cosmo_yield();
+        else
+            usleep(200);
+        xmm_store(got);
+        if (memcmp(got, want, sizeof(got)) != 0)
+            return 3;
+    }
+    return 0;
+}
+
+static void fpu_selftest(void)
+{
+    const char *a_argv[] = { "init", "--fpu-partner", "17", NULL };
+    const char *b_argv[] = { "init", "--fpu-partner", "170", NULL };
+    pid_t a = spawnve("/boot/init", a_argv, NULL, NULL, 0);
+    pid_t b = spawnve("/boot/init", b_argv, NULL, NULL, 0);
+    CHECK(a > 0 && b > 0);
+    CHECK(fpu_hold(0x5A) == 0);
+    int status = -1;
+    CHECK(waitpid(a, &status, 0) == a && status == 0);
+    CHECK(waitpid(b, &status, 0) == b && status == 0);
+    puts("usertest: fpu isolation ok");
+}
+#else
+static int fpu_hold(uint8_t seed)
+{
+    (void)seed;
+    return 0;
+}
+
+static void fpu_selftest(void)
+{
+}
+#endif
+
 static void selftest(void)
 {
     fs_selftest();
     net_selftest();
     proc_selftest();
+    fpu_selftest();
 
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
     CHECK(cosmo_write(1, "", 0) == 0);
@@ -463,6 +543,8 @@ int main(int argc, char **argv)
         for (volatile unsigned long i = 0;; i++)
             ;
     }
+    if (argc >= 3 && strcmp(argv[1], "--fpu-partner") == 0)
+        return fpu_hold((uint8_t)atoi(argv[2]));
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
         selftest();
         if (g_failures == 0) {

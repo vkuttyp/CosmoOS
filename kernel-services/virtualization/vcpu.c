@@ -105,15 +105,39 @@ void vcpu_emulate_cpuid(struct vcpu *v)
             memcpy(&r.edx, "osmo", 4);
         }
     } else if (leaf == 6 || leaf == 0xB || (leaf == 0xD && sub > 1)) {
-        /* thermal/power, extended topology, XSAVE sub-leaves: none */
+        /* thermal/power, extended topology, per-component XSAVE sub-leaves: none */
     } else if (leaf == 0x8000000Au) {
         /* SVM features: the guest is not a hypervisor */
+    } else if (leaf == 0xD) {
+        /* Extended state: exactly the components the host holds for the
+         * guest (arch_hv_host_xstate), the area size for all of them, and
+         * of the sub-leaf 1 instruction forms only XSAVEOPT (XSAVEC,
+         * XGETBV with ECX=1, XSAVES need state the backend does not keep). */
+        uint64_t xs = arch_hv_host_xstate();
+        if (xs != 0) {
+            arch_hv_host_cpuid(0xD, sub, &r.eax, &r.ebx, &r.ecx, &r.edx);
+            if (sub == 0) {
+                r.eax = (uint32_t)xs;
+                r.edx = (uint32_t)(xs >> 32);
+                r.ecx = r.ebx;            /* max size == size for everything we enable */
+            } else {
+                r.eax &= 1u;              /* XSAVEOPT only */
+                r.ebx = r.ecx = r.edx = 0;
+            }
+        }
     } else {
         arch_hv_host_cpuid(leaf, sub, &r.eax, &r.ebx, &r.ecx, &r.edx);
         if (leaf == 1) {
             r.ecx &= ~((1u << 3) | (1u << 5) | (1u << 6));    /* MONITOR, VMX, SMX */
             r.ecx |= 1u << 31;                                /* hypervisor present */
             r.ebx = (r.ebx & 0x00FFFFFFu) | ((uint32_t)v->index << 24);   /* initial APIC id */
+            /* OSXSAVE reflects the guest's own CR4, and XSAVE is offered
+             * only when the host keeps extended state for guests. */
+            r.ecx &= ~(1u << 27);
+            if (arch_hv_host_xstate() == 0)
+                r.ecx &= ~(1u << 26);
+            else if (arch_hv_vcpu_xstate_enabled(v->arch))
+                r.ecx |= 1u << 27;
         } else if (leaf == 0x80000001u) {
             r.ecx &= ~(1u << 2);                              /* SVM */
         } else if (leaf == 0) {

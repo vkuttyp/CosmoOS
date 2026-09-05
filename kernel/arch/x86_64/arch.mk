@@ -5,6 +5,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/isr.S \
 	kernel/arch/x86_64/start.c \
 	kernel/arch/x86_64/cpu.c \
+	kernel/arch/x86_64/fpu.c \
 	kernel/arch/x86_64/gdt.c \
 	kernel/arch/x86_64/idt.c \
 	kernel/arch/x86_64/pic.c \

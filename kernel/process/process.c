@@ -360,6 +360,15 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
         rc = -ENOMEM;
         goto fail_registered;
     }
+    /* A user thread owns vector/x87 register state from its first
+     * instruction (arch/fpu.h): allocated before it can run. */
+    rc = arch_fpu_alloc(t);
+    if (rc) {
+        t->state = THREAD_EXITED;   /* never ran: release both creation references */
+        thread_put(t);
+        thread_put(t);
+        goto fail_registered;
+    }
     t->proc = p;
     process_get(p);
     t->user_entry = (uintptr_t)info.entry;

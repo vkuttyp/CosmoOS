@@ -244,6 +244,17 @@ static bool test_trap_paranoid(const char **reason)
     return true;
 }
 
+/* Vector/x87 register state stays with the thread that owns it across switches. */
+static bool test_fpu_switch(const char **reason)
+{
+    const char *why = NULL;
+    if (!arch_test_fpu_switch(&why)) {
+        *reason = why ? why : "register state leaked between threads";
+        return false;
+    }
+    return true;
+}
+
 static const struct selftest tests[] = {
     { "printf",          test_printf },
     { "string",          test_string },
@@ -274,6 +285,7 @@ static const struct selftest tests[] = {
     { "smp-ticks",       selftest_smp_ticks },
     { "smp-mutex",       selftest_smp_mutex },
     { "smp-ipi-storm",   selftest_smp_ipi_storm },
+    { "fpu-switch",      test_fpu_switch },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },
     { "bootarchive",     selftest_bootarchive },
@@ -318,6 +330,7 @@ static const struct selftest tests[] = {
     { "hv-guest-pm",     selftest_hv_guest_pm },
     { "hv-guest-shutdown", selftest_hv_guest_shutdown },
     { "hv-guest-spin",   selftest_hv_guest_spin },
+    { "hv-guest-fpu",    selftest_hv_guest_fpu },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },
 };

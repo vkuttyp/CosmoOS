@@ -454,7 +454,10 @@ void ramfs_populate_boot(void)
         /* The bootstrap namespace: bin/, sbin/ and etc/ entries are the
          * installed system (docs/userland/); everything else is /boot. */
         uint32_t mode = 0644;
-        if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0) {
+        if (strcmp(e->name, "init") == 0) {
+            ksnprintf(path, sizeof(path), "/boot/%s", e->name);
+            mode = 0755;   /* the program the kernel starts; its self-test respawns it */
+        } else if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0) {
             ksnprintf(path, sizeof(path), "/%s", e->name);
             mode = 0755;
         } else if (strncmp(e->name, "etc/", 4) == 0) {

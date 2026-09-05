@@ -9,6 +9,7 @@
 #include <arch/irq.h>
 
 #include <x86/cpu.h>
+#include <x86/fpu.h>
 
 static struct x86_cpu_info g_cpu;
 
@@ -106,6 +107,10 @@ void x86_cpu_enable_features(void)
     if (g_cpu.has_umip)
         cr4 |= CR4_UMIP;
     write_cr4(cr4);
+
+    /* Floating-point/SIMD configuration: identical on every CPU, never
+     * inherited from the firmware or the AP trampoline (fpu.c). */
+    x86_fpu_init_cpu();
 }
 
 const struct x86_cpu_info *x86_cpu_info(void)

@@ -20,6 +20,7 @@
 #include <kernel/types.h>
 
 #include <arch/context.h>
+#include <arch/fpu.h>
 
 typedef uint32_t tid_t;
 
@@ -52,6 +53,8 @@ struct thread {
     uintptr_t user_entry;               /* first user-mode instruction (user threads) */
     uintptr_t user_sp;                  /* initial user stack pointer */
     uintptr_t tls_base;                 /* user FS base (arch_prctl ARCH_SET_FS), restored on every switch to user */
+    struct arch_fpu_state *fpu;         /* vector/x87 state this thread owns, or NULL (arch/fpu.h); saved and
+                                           restored by the arch switch hook, freed with the thread */
     enum thread_state state;            /* (rq) */
     struct arch_context ctx;
     vaddr_t stack_base;
