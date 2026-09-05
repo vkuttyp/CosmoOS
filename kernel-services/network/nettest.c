@@ -15,6 +15,8 @@
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
+#include <kernel/object.h>
+#include <kernel/pipe.h>
 #include <kernel/printf.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
@@ -884,5 +886,540 @@ bool selftest_net_accept_race(const char **reason)
     CHECK(rc.failures == 0);
     ksock_put(ls);
     kinfo("selftest: net-accept-race: %u connections accepted against a dropping peer", accepted);
+    return true;
+}
+
+/* --- milestone 8: hardening -------------------------------------------------------- */
+
+/* A raw IPv4 TCP segment from 127.0.0.1:sport to 127.0.0.1:dport. */
+static void inject_tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack, uint8_t flags, uint16_t mss_opt)
+{
+    struct mbuf *m = m_getcl();
+    if (m == NULL)
+        return;
+    unsigned hlen = sizeof(struct tcp_hdr) + (mss_opt ? 4 : 0);
+    struct tcp_hdr *th = (struct tcp_hdr *)m->data;
+    memset(th, 0, hlen);
+    th->sport = htons(sport);
+    th->dport = htons(dport);
+    th->seq = htonl(seq);
+    th->ack = htonl(ack);
+    th->doff = (uint8_t)((hlen / 4) << 4);
+    th->flags = flags;
+    th->win = htons(8192);
+    if (mss_opt) {
+        uint8_t *o = m->data + sizeof(*th);
+        o[0] = 2;
+        o[1] = 4;
+        o[2] = (uint8_t)(mss_opt >> 8);
+        o[3] = (uint8_t)mss_opt;
+    }
+    m->len = m->pkt.len = hlen;
+    uint32_t sum = cksum_pseudo4(INADDR_LOOPBACK_N, INADDR_LOOPBACK_N, IPPROTO_TCP, (uint16_t)m->pkt.len);
+    th->cksum = cksum_fold(m_cksum_partial(m, 0, m->pkt.len, sum));
+    ipv4_output(m, INADDR_LOOPBACK_N, INADDR_LOOPBACK_N, IPPROTO_TCP, IP_DEFAULT_TTL);
+}
+
+/* Let the network worker drain what was injected. */
+static void settle(unsigned ms)
+{
+    for (unsigned i = 0; i < ms; i += 10) {
+        thread_sleep_ms(10);
+        sched_watchdog_kick();
+    }
+}
+
+/* Drop TCP resets addressed to `g_guard_port` (the flood's SYN-ACKs would
+ * otherwise be reset by this host and clear the cache). */
+static uint16_t g_guard_port;
+
+static bool drop_rst_filter(struct mbuf *m, void *arg)
+{
+    (void)arg;
+    if (m->pkt.proto != ETH_P_IP || m->pkt.len < 40)
+        return true;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)m->data;
+    if (ip->proto != IPPROTO_TCP)
+        return true;
+    const struct tcp_hdr *th = (const struct tcp_hdr *)(m->data + IPV4_HDR_LEN(ip));
+    return !((th->flags & TH_RST) && ntohs(th->dport) == g_guard_port);
+}
+
+bool selftest_net_tcp_syncache(const char **reason)
+{
+    struct tcp_stats t0, t1;
+    struct socket *ls;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    struct netaddr addr = v4addr(INADDR_LOOPBACK_N, 6020);
+    CHECK(ksock_bind(ls, &addr) == 0 && ksock_listen(ls, 4) == 0);
+    g_guard_port = 6020;
+    loopback_set_filter(drop_rst_filter, NULL);
+    tcp_get_stats(&t0);
+    /* 300 SYNs from 300 sources that will never answer. */
+    for (unsigned i = 0; i < 300; i++)
+        inject_tcp((uint16_t)(20000 + i), 6020, 1000 + i, 0, TH_SYN, 1460);
+    settle(100);
+    tcp_get_stats(&t1);
+    uint64_t cached = t1.syn_cached - t0.syn_cached, cookies = t1.syn_cookies_sent - t0.syn_cookies_sent;
+    CHECK(cached > 0 && cached <= TCP_SYNCACHE_SIZE);
+    CHECK(cookies > 0 && cached + cookies == 300);
+    CHECK(t1.conns_passive == t0.conns_passive);           /* nothing allocated per SYN */
+    CHECK(!tcp_accept_ready(ls->tcp));
+    /* A real client still connects, through a cache slot or a cookie. */
+    struct socket *c;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &addr) == 0);
+    struct socket *a;
+    struct netaddr peer;
+    CHECK(ksock_accept(ls, &a, &peer) == 0 && peer.port != 0);
+    CHECK(ksock_sendto(c, "hello", 5, NULL) == 5);
+    uint8_t buf[8];
+    CHECK(ksock_recvfrom(a, buf, sizeof(buf), NULL) == 5 && memcmp(buf, "hello", 5) == 0);
+    tcp_get_stats(&t1);
+    CHECK(t1.conns_passive == t0.conns_passive + 1);
+    /* A completing ACK that matches nothing is refused. */
+    inject_tcp(30001, 6020, 5000, 12345, TH_ACK, 0);
+    settle(30);
+    struct tcp_stats t2;
+    tcp_get_stats(&t2);
+    CHECK(t2.syn_bad_ack == t1.syn_bad_ack + 1 && t2.conns_passive == t1.conns_passive);
+    loopback_set_filter(NULL, NULL);
+    ksock_put(a);
+    ksock_put(c);
+    ksock_put(ls);
+    kinfo("selftest: net-tcp-syncache: %llu SYNs cached, %llu answered with cookies, %llu cookies accepted",
+          (unsigned long long)cached, (unsigned long long)cookies,
+          (unsigned long long)(t2.syn_cookies_ok - t0.syn_cookies_ok));
+    return true;
+}
+
+/* A server that accepts one connection and holds it until told to stop. */
+static void holding_server(void *arg)
+{
+    struct tcp_server *srv = arg;
+    struct socket *ls = NULL, *c = NULL;
+    srv->result = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls);
+    if (srv->result == 0)
+        srv->result = ksock_bind(ls, &srv->addr);
+    if (srv->result == 0)
+        srv->result = ksock_listen(ls, 4);
+    if (srv->result == 0)
+        srv->result = ksock_accept(ls, &c, NULL);
+    while (!srv->stop) {
+        thread_sleep_ms(10);
+        sched_watchdog_kick();
+    }
+    if (c)
+        ksock_put(c);
+    if (ls)
+        ksock_put(ls);
+    srv->done = true;
+    thread_exit(0);
+}
+
+bool selftest_net_tcp_rfc5961(const char **reason)
+{
+    struct tcp_server srv;
+    memset(&srv, 0, sizeof(srv));
+    srv.addr = v4addr(INADDR_LOOPBACK_N, 6021);
+    struct thread *t = thread_create(holding_server, &srv, "rfc5961-srv", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    thread_sleep_ms(20);
+    struct socket *c;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv.addr) == 0);
+    struct netaddr me;
+    CHECK(ksock_getsockname(c, &me) == 0);
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    uint32_t rcv_nxt = c->tcp->rcv_nxt, snd_nxt = c->tcp->snd_nxt;
+    /* A reset inside the window but not at rcv_nxt: a challenge, no reset. */
+    inject_tcp(6021, me.port, rcv_nxt + 1000, snd_nxt, TH_RST, 0);
+    settle(30);
+    CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
+    /* A SYN inside the window: a challenge, no reset. */
+    inject_tcp(6021, me.port, rcv_nxt + 10, snd_nxt, TH_SYN, 0);
+    settle(30);
+    CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
+    /* An ACK for data never sent: a challenge, not processed. */
+    inject_tcp(6021, me.port, rcv_nxt, snd_nxt + 100000, TH_ACK, 0);
+    settle(30);
+    CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED && c->tcp->snd_una == snd_nxt);
+    tcp_get_stats(&t1);
+    CHECK(t1.challenge_acks == t0.challenge_acks + 3);
+    CHECK(t1.rsts_in == t0.rsts_in);
+    /* The exact reset ends the connection. */
+    inject_tcp(6021, me.port, rcv_nxt, snd_nxt, TH_RST, 0);
+    settle(30);
+    uint8_t buf[4];
+    CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -ECONNRESET);
+    tcp_get_stats(&t1);
+    CHECK(t1.rsts_in == t0.rsts_in + 1);
+    ksock_put(c);
+    srv.stop = true;   /* its close sends a FIN into the void and is reset */
+    thread_join(t);
+    CHECK(srv.done && srv.result == 0);
+    kinfo("selftest: net-tcp-rfc5961: three blind segments challenged, the exact reset accepted");
+    return true;
+}
+
+/* Reordering: hold every fifth data segment and deliver it after the next one. */
+static struct mbuf *g_held;
+static unsigned g_reorder_seen, g_reordered, g_pass_one;
+
+static bool reorder_filter(struct mbuf *m, void *arg)
+{
+    struct netif *lo = arg;
+    if (m->pkt.proto != ETH_P_IP || m->pkt.len < 40)
+        return true;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)m->data;
+    if (ip->proto != IPPROTO_TCP)
+        return true;
+    unsigned ihl = IPV4_HDR_LEN(ip);
+    if (ntohs(ip->len) <= ihl + 20)
+        return true;   /* pure ACKs and control segments pass */
+    const struct tcp_hdr *th = (const struct tcp_hdr *)(m->data + ihl);
+    if (ntohs(th->dport) != 6022)
+        return true;   /* only the client's data */
+    if (g_held) {
+        if (g_pass_one) {
+            g_pass_one = 0;   /* the segment after the held one overtakes it */
+            return true;
+        }
+        struct mbuf *h = g_held;
+        g_held = NULL;
+        netif_rx(lo, h);   /* the held one goes first, then this one */
+        return true;
+    }
+    if (++g_reorder_seen % 5 == 0) {
+        g_held = m_copypacket(m);
+        if (g_held) {
+            g_reordered++;
+            g_pass_one = 1;
+            return false;   /* the original is dropped; the copy arrives one segment late */
+        }
+    }
+    return true;
+}
+
+bool selftest_net_tcp_reorder(const char **reason)
+{
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    struct netif *lo = netif_loopback();
+    CHECK(lo != NULL);
+    g_held = NULL;
+    g_reorder_seen = g_reordered = g_pass_one = 0;
+    loopback_set_filter(reorder_filter, lo);
+    bool ok = tcp_transfer(reason, v4addr(INADDR_LOOPBACK_N, 6022), 512u * 1024u, 0);
+    loopback_set_filter(NULL, NULL);
+    if (g_held) {
+        m_freem(g_held);
+        g_held = NULL;
+    }
+    netif_put(lo);
+    if (!ok)
+        return false;
+    tcp_get_stats(&t1);
+    CHECK(g_reordered > 0);
+    CHECK(t1.ooo_queued > t0.ooo_queued);
+    kinfo("selftest: net-tcp-reorder: %u segments delayed, %llu queued out of order, %llu retransmissions",
+          g_reordered, (unsigned long long)(t1.ooo_queued - t0.ooo_queued),
+          (unsigned long long)(t1.retransmits - t0.retransmits));
+    return true;
+}
+
+/* A black hole for every segment of one connection (both directions). */
+static bool blackhole_filter(struct mbuf *m, void *arg)
+{
+    (void)arg;
+    if (m->pkt.proto != ETH_P_IP || m->pkt.len < 40)
+        return true;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)m->data;
+    if (ip->proto != IPPROTO_TCP)
+        return true;
+    const struct tcp_hdr *th = (const struct tcp_hdr *)(m->data + IPV4_HDR_LEN(ip));
+    return ntohs(th->dport) != g_guard_port && ntohs(th->sport) != g_guard_port;
+}
+
+bool selftest_net_tcp_keepalive(const char **reason)
+{
+    struct tcp_stats t0, t1;
+    /* Keepalive: an idle connection whose peer vanished times out. */
+    struct tcp_server srv;
+    memset(&srv, 0, sizeof(srv));
+    srv.addr = v4addr(INADDR_LOOPBACK_N, 6023);
+    struct thread *t = thread_create(holding_server, &srv, "keep-srv", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    thread_sleep_ms(20);
+    /* The idle timer is armed when a connection is established: shorten it first. */
+    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    struct socket *c;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv.addr) == 0);
+    tcp_get_stats(&t0);
+    g_guard_port = 6023;
+    loopback_set_filter(blackhole_filter, NULL);
+    for (unsigned i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++)
+        settle(10);
+    CHECK(tcp_state_of(c->tcp) == TCP_CLOSED);
+    uint8_t buf[4];
+    int64_t r = ksock_recvfrom(c, buf, sizeof(buf), NULL);
+    CHECK(r == -ETIMEDOUT);
+    tcp_get_stats(&t1);
+    CHECK(t1.timeouts > t0.timeouts);
+    uint64_t probes = t1.keepalive_probes - t0.keepalive_probes;
+    CHECK(probes >= 3);
+    loopback_set_filter(NULL, NULL);
+    tcp_set_keepalive(0, 0, 0);
+    ksock_put(c);
+    srv.stop = true;
+    thread_join(t);
+    CHECK(srv.done && srv.result == 0);
+
+    /* An orphaned FIN_WAIT_2 ends on its own. */
+    memset(&srv, 0, sizeof(srv));
+    srv.addr = v4addr(INADDR_LOOPBACK_N, 6024);
+    t = thread_create(holding_server, &srv, "fw2-srv", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    thread_sleep_ms(20);
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv.addr) == 0);
+    tcp_get_stats(&t0);
+    tcp_set_fin_wait2(100ull * 1000000ull);
+    ksock_put(c);   /* close: FIN; the server never answers with its own */
+    for (unsigned i = 0; i < 200; i++) {
+        tcp_get_stats(&t1);
+        if (t1.fin_wait2_timeouts > t0.fin_wait2_timeouts)
+            break;
+        settle(10);
+    }
+    tcp_set_fin_wait2(0);
+    CHECK(t1.fin_wait2_timeouts == t0.fin_wait2_timeouts + 1);
+    srv.stop = true;
+    thread_join(t);
+    CHECK(srv.done && srv.result == 0);
+    kinfo("selftest: net-tcp-keepalive: %llu probes unanswered, one orphaned FIN_WAIT_2 reaped",
+          (unsigned long long)probes);
+    return true;
+}
+
+bool selftest_net_icmp_limit(const char **reason)
+{
+    struct ip_stats i0, i1;
+    /* 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an
+     * unreachable is never sent for 127/8, so the echo path carries the test). */
+    ipv4_get_stats(&i0);
+    for (unsigned i = 0; i < 300; i++)
+        CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d38, (uint16_t)i, "p", 1) == 0);
+    settle(100);
+    ipv4_get_stats(&i1);
+    uint64_t sent = i1.icmp_echo_replied - i0.icmp_echo_replied, limited = i1.icmp_ratelimited - i0.icmp_ratelimited;
+    CHECK(i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300);
+    CHECK(sent <= ICMP_RATE_PER_SEC && limited >= 300 - ICMP_RATE_PER_SEC);
+
+    /* Path MTU discovery: a "fragmentation needed" quoting a segment in
+     * flight lowers the connection's MSS; one quoting nothing in flight is
+     * ignored. */
+    struct tcp_server srv;
+    memset(&srv, 0, sizeof(srv));
+    srv.addr = v4addr(INADDR_LOOPBACK_N, 6026);
+    struct thread *t = thread_create(holding_server, &srv, "pmtu-srv", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+    thread_sleep_ms(20);
+    struct socket *c;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    CHECK(ksock_connect(c, &srv.addr) == 0);
+    struct netaddr me;
+    CHECK(ksock_getsockname(c, &me) == 0);
+    CHECK(c->tcp->mss == TCP_MSS_LO && ipv4_path_mtu(INADDR_LOOPBACK_N) == 65535);
+    g_guard_port = 6026;
+    loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
+    uint8_t big[2000];
+    memset(big, 'm', sizeof(big));
+    CHECK(ksock_sendto(c, big, sizeof(big), NULL) == (int64_t)sizeof(big));
+    settle(20);
+    uint32_t seq = c->tcp->snd_una;
+    struct tcp_stats t0, t1;
+    tcp_get_stats(&t0);
+    /* Build the ICMP message: type 3 code 4, MTU 1500, quoting IP + 8 bytes of TCP. */
+    struct mbuf *m = m_getcl();
+    CHECK(m != NULL);
+    struct icmp_hdr *ic = (struct icmp_hdr *)m->data;
+    memset(ic, 0, sizeof(*ic));
+    ic->type = ICMP_DEST_UNREACH;
+    ic->code = ICMP_UNREACH_NEEDFRAG;
+    ic->seq = htons(1500);
+    struct ipv4_hdr *q = (struct ipv4_hdr *)(m->data + sizeof(*ic));
+    memset(q, 0, sizeof(*q));
+    q->vhl = 0x45;
+    q->len = htons(2040);
+    q->ttl = 64;
+    q->proto = IPPROTO_TCP;
+    q->src = INADDR_LOOPBACK_N;
+    q->dst = INADDR_LOOPBACK_N;
+    uint8_t *tq = m->data + sizeof(*ic) + sizeof(*q);
+    tq[0] = (uint8_t)(me.port >> 8);
+    tq[1] = (uint8_t)me.port;
+    tq[2] = (uint8_t)(6026 >> 8);
+    tq[3] = (uint8_t)6026;
+    uint32_t bad_seq = seq - 5000;
+    tq[4] = (uint8_t)(bad_seq >> 24);
+    tq[5] = (uint8_t)(bad_seq >> 16);
+    tq[6] = (uint8_t)(bad_seq >> 8);
+    tq[7] = (uint8_t)bad_seq;
+    m->len = m->pkt.len = sizeof(*ic) + sizeof(*q) + 8;
+    struct mbuf *good = m_copypacket(m);
+    CHECK(good != NULL);
+    ic->cksum = in_cksum(m->data, m->len);
+    ipv4_output(m, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);   /* quotes a sequence never sent */
+    settle(30);
+    tcp_get_stats(&t1);
+    CHECK(t1.pmtu_updates == t0.pmtu_updates && c->tcp->mss == TCP_MSS_LO);
+    CHECK(ipv4_path_mtu(INADDR_LOOPBACK_N) == 1500);   /* the destination's MTU is recorded regardless */
+    uint8_t *gq = good->data + sizeof(*ic) + sizeof(*q);
+    gq[4] = (uint8_t)(seq >> 24);
+    gq[5] = (uint8_t)(seq >> 16);
+    gq[6] = (uint8_t)(seq >> 8);
+    gq[7] = (uint8_t)seq;
+    ((struct icmp_hdr *)good->data)->cksum = 0;
+    ((struct icmp_hdr *)good->data)->cksum = in_cksum(good->data, good->len);
+    ipv4_output(good, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);
+    settle(30);
+    tcp_get_stats(&t1);
+    CHECK(t1.pmtu_updates == t0.pmtu_updates + 1);
+    CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
+    CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
+    loopback_set_filter(NULL, NULL);
+    settle(300);   /* the retransmission delivers the data in 1460-byte segments */
+    ipv4_pmtu_flush();
+    CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
+    ksock_put(c);
+    srv.stop = true;
+    thread_join(t);
+    CHECK(srv.done && srv.result == 0);
+    kinfo("selftest: net-icmp-limit: %llu echo replies sent, %llu suppressed; MSS lowered to 1460 by PMTUD",
+          (unsigned long long)sent, (unsigned long long)limited);
+    return true;
+}
+
+bool selftest_net_nonblock(const char **reason)
+{
+    struct socket *ls, *c, *a;
+    struct netaddr addr = v4addr(INADDR_LOOPBACK_N, 6027);
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &ls) == 0);
+    ksock_set_nonblock(ls, true);
+    CHECK(ksock_bind(ls, &addr) == 0 && ksock_listen(ls, 2) == 0);
+    CHECK(ksock_accept(ls, &a, NULL) == -EAGAIN);
+    CHECK(ksock_ready(ls) == 0);
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+    ksock_set_nonblock(c, true);
+    int rc = ksock_connect(c, &addr);
+    CHECK(rc == 0 || rc == -EINPROGRESS);
+    if (rc == -EINPROGRESS)
+        CHECK(ksock_connect(c, &addr) == -EALREADY || ksock_connect(c, &addr) == -EISCONN);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
+        settle(10);
+    CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
+    CHECK(ksock_connect(c, &addr) == -EISCONN);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(ls) & COSMO_IO_READABLE); i++)
+        settle(10);
+    CHECK(ksock_ready(ls) & COSMO_IO_READABLE);
+    CHECK(ksock_accept(ls, &a, NULL) == 0);
+    ksock_set_nonblock(a, true);
+    uint8_t buf[4096];
+    CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -EAGAIN);
+    CHECK(!(ksock_ready(c) & COSMO_IO_READABLE));
+    CHECK(ksock_sendto(a, "hello", 5, NULL) == 5);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_READABLE); i++)
+        settle(10);
+    CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == 5);
+    /* Fill the pipe: a non-blocking send returns what fits, then -EAGAIN. */
+    memset(buf, 'f', sizeof(buf));
+    uint64_t pushed = 0;
+    bool eagain = false;
+    for (unsigned i = 0; i < 200 && !eagain; i++) {
+        int64_t n = ksock_sendto(c, buf, sizeof(buf), NULL);
+        if (n == -EAGAIN)
+            eagain = true;
+        else if (n > 0)
+            pushed += (uint64_t)n;
+        else
+            CHECK(n > 0);
+    }
+    CHECK(eagain && pushed > 0);
+    CHECK(!(ksock_ready(c) & COSMO_IO_WRITABLE));
+    uint64_t drained = 0;
+    for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
+        int64_t n = ksock_recvfrom(a, buf, sizeof(buf), NULL);
+        if (n == -EAGAIN)
+            settle(10);
+        else if (n > 0)
+            drained += (uint64_t)n;
+        else
+            CHECK(n > 0);
+    }
+    CHECK(drained == pushed);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
+        settle(10);
+    CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
+    ksock_put(a);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_HANGUP); i++)
+        settle(10);
+    CHECK((ksock_ready(c) & COSMO_IO_HANGUP) && ksock_recvfrom(c, buf, sizeof(buf), NULL) == 0);
+    ksock_put(c);
+    ksock_put(ls);
+
+    /* Datagrams. */
+    struct socket *u;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &u) == 0);
+    ksock_set_nonblock(u, true);
+    struct netaddr ua = v4addr(INADDR_LOOPBACK_N, 6028);
+    CHECK(ksock_bind(u, &ua) == 0);
+    CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == -EAGAIN);
+    CHECK(ksock_ready(u) == COSMO_IO_WRITABLE);
+    CHECK(ksock_sendto(u, "d", 1, &ua) == 1);
+    for (unsigned i = 0; i < 100 && !(ksock_ready(u) & COSMO_IO_READABLE); i++)
+        settle(10);
+    CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == 1);
+    ksock_put(u);
+
+    /* Pipe ends through the object operations. */
+    struct kobject *rd, *wr;
+    CHECK(pipe_create(&rd, &wr) == 0);
+    CHECK(kobject_set_nonblock(rd, 1) == 0 && kobject_set_nonblock(wr, 1) == 0);
+    CHECK(kobject_set_nonblock(rd, -1) == 1);
+    const struct kobject_io_type *rio = kobject_io_of(rd), *wio = kobject_io_of(wr);
+    CHECK(rio && wio && rio->read && wio->write);
+    CHECK(rio->read(rd, buf, 8) == -EAGAIN);
+    CHECK(kobject_ready(rd) == 0 && kobject_ready(wr) == COSMO_IO_WRITABLE);
+    uint64_t wrote = 0;
+    for (unsigned i = 0; i < 64; i++) {
+        int64_t n = wio->write(wr, buf, sizeof(buf));
+        if (n == -EAGAIN)
+            break;
+        CHECK(n > 0);
+        wrote += (uint64_t)n;
+    }
+    CHECK(wrote == PIPE_SIZE);
+    CHECK(kobject_ready(wr) == 0 && (kobject_ready(rd) & COSMO_IO_READABLE));
+    CHECK(rio->read(rd, buf, sizeof(buf)) == (int64_t)sizeof(buf));
+    CHECK(kobject_ready(wr) == COSMO_IO_WRITABLE);
+    kobject_put(wr);
+    CHECK(kobject_ready(rd) & COSMO_IO_HANGUP);
+    uint64_t left = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        int64_t n = rio->read(rd, buf, sizeof(buf));
+        if (n == 0)
+            break;
+        CHECK(n > 0);
+        left += (uint64_t)n;
+    }
+    CHECK(left == PIPE_SIZE - sizeof(buf));
+    CHECK(rio->read(rd, buf, 8) == 0);   /* EOF */
+    kobject_put(rd);
+    CHECK(kobject_ready(console_object()) & COSMO_IO_WRITABLE);
+    CHECK(kobject_set_nonblock(console_object(), 1) == -EOPNOTSUPP);
+    kinfo("selftest: net-nonblock: sockets, datagrams and pipe ends report readiness and never block");
     return true;
 }

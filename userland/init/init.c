@@ -206,6 +206,60 @@ static void net_selftest(void)
     }
     CHECK(inet_ntop(AF_INET6, v6, text, sizeof(text)) != NULL && strcmp(text, "fe80::1") == 0);
     CHECK(inet_ntop(AF_INET, me.sa_addr, text, sizeof(text)) != NULL && strcmp(text, "127.0.0.1") == 0);
+
+    /* Non-blocking sockets and readiness (milestone 8). */
+    {
+        int n = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
+        CHECK(n >= 3);
+        me.sa_port = 40001;
+        CHECK(bind(n, &me, sizeof(me)) == 0);
+        CHECK(recvfrom(n, buf, sizeof(buf), 0, NULL, NULL) < 0 && errno == EAGAIN);
+        CHECK(cosmo_ioready(n) == COSMO_IO_WRITABLE);
+        CHECK(sendto(n, "x", 1, 0, &me, sizeof(me)) == 1);
+        for (int i = 0; i < 100 && !(cosmo_ioready(n) & COSMO_IO_READABLE); i++)
+            cosmo_sleep_ns(1000000);
+        CHECK((cosmo_ioready(n) & COSMO_IO_READABLE) && recv(n, buf, sizeof(buf), 0) == 1);
+        CHECK(cosmo_setnonblock(n, 0) == 0 && cosmo_setnonblock(n, 1) == 0);
+        CHECK(close(n) == 0);
+        int l = socket(AF_INET, SOCK_STREAM, 0);
+        me.sa_port = 40002;
+        CHECK(l >= 3 && bind(l, &me, sizeof(me)) == 0 && listen(l, 2) == 0);
+        CHECK(cosmo_setnonblock(l, 1) == 0);
+        CHECK(accept(l, NULL, NULL) < 0 && errno == EAGAIN);
+        CHECK(cosmo_ioready(l) == 0);
+        int c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        CHECK(c >= 3);
+        int rc = connect(c, &me, sizeof(me));
+        CHECK(rc == 0 || (rc < 0 && errno == EINPROGRESS));
+        for (int i = 0; i < 200 && !(cosmo_ioready(c) & COSMO_IO_WRITABLE); i++)
+            cosmo_sleep_ns(1000000);
+        CHECK(cosmo_ioready(c) & COSMO_IO_WRITABLE);
+        CHECK(connect(c, &me, sizeof(me)) < 0 && errno == EISCONN);
+        CHECK(recv(c, buf, sizeof(buf), 0) < 0 && errno == EAGAIN);
+        for (int i = 0; i < 200 && !(cosmo_ioready(l) & COSMO_IO_READABLE); i++)
+            cosmo_sleep_ns(1000000);
+        int a = accept(l, &peer, &plen);
+        CHECK(a >= 3 && send(a, "ok", 2, 0) == 2);
+        for (int i = 0; i < 200 && !(cosmo_ioready(c) & COSMO_IO_READABLE); i++)
+            cosmo_sleep_ns(1000000);
+        CHECK(recv(c, buf, sizeof(buf), 0) == 2 && buf[0] == 'o');
+        CHECK(close(a) == 0);
+        for (int i = 0; i < 200 && !(cosmo_ioready(c) & COSMO_IO_HANGUP); i++)
+            cosmo_sleep_ns(1000000);
+        CHECK((cosmo_ioready(c) & COSMO_IO_HANGUP) && recv(c, buf, sizeof(buf), 0) == 0);
+        CHECK(close(c) == 0 && close(l) == 0);
+        int refused = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        me.sa_port = 5998;
+        rc = connect(refused, &me, sizeof(me));
+        CHECK(rc < 0 && (errno == EINPROGRESS || errno == ECONNREFUSED));
+        for (int i = 0; i < 200 && !(cosmo_ioready(refused) & COSMO_IO_ERROR); i++)
+            cosmo_sleep_ns(1000000);
+        CHECK(connect(refused, &me, sizeof(me)) < 0 && errno == ECONNREFUSED);
+        CHECK(close(refused) == 0);
+        CHECK(cosmo_ioready(0) & COSMO_IO_WRITABLE);           /* the console */
+        CHECK(cosmo_setnonblock(0, 1) == -COSMO_EOPNOTSUPP);   /* it never blocks a writer */
+        CHECK(cosmo_ioready(999) == -COSMO_EBADF);
+    }
     puts("usertest: sockets ok");
 }
 
@@ -237,6 +291,14 @@ static void proc_selftest(void)
     CHECK(close(p[0]) == 0);
     CHECK(write(p[1], "x", 1) < 0 && errno == EPIPE);
     CHECK(close(p[1]) == 0);
+    /* Non-blocking ends and readiness. */
+    CHECK(pipe(p) == 0 && cosmo_setnonblock(p[0], 1) == 0 && cosmo_setnonblock(p[1], 1) == 0);
+    CHECK(read(p[0], buf, 1) < 0 && errno == EAGAIN);
+    CHECK(cosmo_ioready(p[0]) == 0 && cosmo_ioready(p[1]) == COSMO_IO_WRITABLE);
+    CHECK(write(p[1], "q", 1) == 1 && (cosmo_ioready(p[0]) & COSMO_IO_READABLE));
+    CHECK(read(p[0], buf, 1) == 1 && buf[0] == 'q');
+    CHECK(close(p[1]) == 0 && (cosmo_ioready(p[0]) & COSMO_IO_HANGUP) && read(p[0], buf, 1) == 0);
+    CHECK(close(p[0]) == 0);
 
     /* The console: a character device, a terminal. */
     CHECK(fstat(0, &st) == 0 && S_ISCHR(st.st_type));
@@ -1042,7 +1104,7 @@ static int syscall_fuzz(unsigned long n, uint64_t seed)
         SYS_sync, SYS_mount, SYS_umount, SYS_socket, SYS_bind, SYS_listen, SYS_sendto, SYS_shutdown, SYS_getsockname,
         SYS_pipe, SYS_dup, SYS_getppid, SYS_chdir, SYS_getcwd, SYS_procinfo, SYS_klog, SYS_sysctl, SYS_vm_create,
         SYS_vm_mem, SYS_vm_mem_rw, SYS_vcpu_create, SYS_vcpu_regs, SYS_vcpu_irq, SYS_setresuid, SYS_setresgid,
-        SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups, SYS_getrlimit,
+        SYS_getresuid, SYS_getresgid, SYS_setgroups, SYS_getgroups, SYS_getrlimit, SYS_ioready, SYS_setnonblock,
         /* setrlimit is left out: a random low memory limit would end the fuzzer itself */
         /* and a few numbers past the table, for the dispatcher's own check */
         SYS_COUNT, SYS_COUNT + 1, 1000, -1,
