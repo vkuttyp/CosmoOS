@@ -16,6 +16,7 @@
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
@@ -30,6 +31,24 @@
 
 static struct kmem_cache *g_process_cache;
 static LIST_HEAD(g_processes);
+
+/* docs/kernel/security/design.md §2. */
+const struct rlimits rlimits_default = {
+    .v = {
+        [COSMO_RLIMIT_AS] = 2ull << 30,
+        [COSMO_RLIMIT_MEM] = 128ull << 20,
+        [COSMO_RLIMIT_NOFILE] = HANDLE_TABLE_SIZE,
+        [COSMO_RLIMIT_NPROC] = 128,
+        [COSMO_RLIMIT_VMEM] = COSMO_HV_VM_MEM_MAX,
+    },
+};
+
+static void apply_space_limits(struct process *p)
+{
+    uint64_t as = p->rlim.v[COSMO_RLIMIT_AS], mem = p->rlim.v[COSMO_RLIMIT_MEM];
+    vm_space_set_limits(p->space, as == COSMO_RLIM_INFINITY ? UINT64_MAX : as / PAGE_SIZE,
+                        mem == COSMO_RLIM_INFINITY ? UINT64_MAX : mem / PAGE_SIZE);
+}
 static spinlock_t g_process_table_lock = SPINLOCK_INIT("process_table");
 static pid_t g_next_pid = 1;
 static unsigned g_process_count;
@@ -108,6 +127,9 @@ static const struct vm_user_hooks g_hooks = {
  * Status 128 + 11 is COSMO_EXIT_FAULT, the same as a fatal page fault.
  */
 #define PROCESS_FAULT_SIGNAL 11
+
+#define LOG_BUCKET     64u   /* docs/kernel/security/design.md §1: sys_log rate limit */
+#define LOG_RATE_PER_S 16u
 
 static void user_exception_handler(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
@@ -310,6 +332,26 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     if (parent) {
         p->parent_pid = parent->pid;
         p->cred = parent->cred;
+        p->rlim = parent->rlim;
+    } else {
+        p->rlim = rlimits_default;
+    }
+    if (attr && attr->set_cred) {
+        /* COSMO_SPAWN_SETCRED, validated by the caller: the child's three
+         * ids are the named ones and it starts with no supplementary
+         * groups (docs/kernel/security/design.md §1). */
+        p->cred.ruid = p->cred.euid = p->cred.suid = attr->uid;
+        p->cred.rgid = p->cred.egid = p->cred.sgid = attr->gid;
+        p->cred.ngroups = 0;
+    }
+    p->handles.limit = p->rlim.v[COSMO_RLIMIT_NOFILE] < HANDLE_TABLE_SIZE ? (unsigned)p->rlim.v[COSMO_RLIMIT_NOFILE]
+                                                                        : HANDLE_TABLE_SIZE;
+    p->log_tokens = LOG_BUCKET;
+    p->log_refill_ns = clock_now_ns();
+    /* COSMO_RLIMIT_NPROC: the child counts against its own real uid. */
+    if (process_count_uid(p->cred.ruid) + 1 > p->rlim.v[COSMO_RLIMIT_NPROC]) {
+        rc = -EAGAIN;
+        goto fail;
     }
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
@@ -331,6 +373,7 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
     rc = vm_space_create_user(&p->space);
     if (rc)
         goto fail;
+    apply_space_limits(p);
 
     rc = elf_load_into(p->space, image, &info);
     if (rc) {
@@ -753,12 +796,15 @@ int process_chdir(const char *path)
     return 0;
 }
 
-unsigned process_info(struct cosmo_procinfo *buf, unsigned count)
+unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer)
 {
     unsigned total = 0;
+    bool all = cred_privileged(viewer);
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
+        if (!all && p->cred.ruid != viewer->ruid)
+            continue;   /* another user's process: invisible to an unprivileged viewer */
         if (total < count) {
             struct cosmo_procinfo *pi = &buf[total];
             memset(pi, 0, sizeof(*pi));
@@ -792,6 +838,68 @@ const struct credentials *cred_current(void)
 {
     struct process *p = process_current();
     return p ? &p->cred : &cred_kernel;
+}
+
+unsigned process_count_uid(uint32_t ruid)
+{
+    unsigned n = 0;
+    arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link)
+        if (p->cred.ruid == ruid)
+            n++;
+    spin_unlock_irqrestore(&g_process_table_lock, ts);
+    return n;
+}
+
+int process_getrlimit(unsigned resource, uint64_t *value)
+{
+    if (resource >= COSMO_RLIMIT_COUNT)
+        return -EINVAL;
+    *value = process_current()->rlim.v[resource];
+    return 0;
+}
+
+int process_setrlimit(unsigned resource, uint64_t value)
+{
+    struct process *p = process_current();
+    if (resource >= COSMO_RLIMIT_COUNT)
+        return -EINVAL;
+    if (resource == COSMO_RLIMIT_NOFILE && value > HANDLE_TABLE_SIZE)
+        return -EINVAL;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (value > p->rlim.v[resource] && !cred_privileged(&p->cred)) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return -EPERM;   /* raising a limit is a privileged act */
+    }
+    p->rlim.v[resource] = value;
+    if (resource == COSMO_RLIMIT_NOFILE)
+        p->handles.limit = (unsigned)value;
+    spin_unlock_irqrestore(&p->lock, s);
+    if (resource == COSMO_RLIMIT_AS || resource == COSMO_RLIMIT_MEM)
+        apply_space_limits(p);
+    return 0;
+}
+
+/* sys_log for an unprivileged process: a token bucket of LOG_BUCKET lines
+ * refilling at LOG_RATE_PER_S. Returns false when the caller must wait. */
+bool process_log_permitted(void)
+{
+    struct process *p = process_current();
+    if (cred_privileged(&p->cred))
+        return true;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    uint64_t now = clock_now_ns();
+    uint64_t refill = (now - p->log_refill_ns) / (1000000000ull / LOG_RATE_PER_S);
+    if (refill) {
+        p->log_tokens = (uint32_t)MIN((uint64_t)LOG_BUCKET, p->log_tokens + refill);
+        p->log_refill_ns += refill * (1000000000ull / LOG_RATE_PER_S);
+    }
+    bool ok = p->log_tokens > 0;
+    if (ok)
+        p->log_tokens--;
+    spin_unlock_irqrestore(&p->lock, s);
+    return ok;
 }
 
 /* setres{u,g}id for the calling process (system calls). The process is

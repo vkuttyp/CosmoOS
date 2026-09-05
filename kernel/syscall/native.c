@@ -207,6 +207,8 @@ static int64_t sys_log(struct syscall_args *a)
 
     if (len >= sizeof(buf))
         return -EINVAL;
+    if (!process_log_permitted())
+        return -EAGAIN;   /* an unprivileged writer past its rate limit (docs/kernel/security/design.md §1) */
     int rc = copy_from_user(buf, ustr, len);
     if (rc)
         return rc;
@@ -684,8 +686,9 @@ static int64_t sys_spawn(struct syscall_args *a)
     struct cosmo_spawn req;
     if (copy_from_user(&req, a->a[0], sizeof(req)))
         return -EFAULT;
-    if (req.flags != 0 || req.path == NULL || req.argv == NULL)
+    if ((req.flags & ~COSMO_SPAWN_SETCRED) || req.path == NULL || req.argv == NULL)
         return -EINVAL;
+    struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
         return -EINVAL;
     struct spawn_copy *sc = kzalloc(sizeof(*sc));
@@ -718,7 +721,7 @@ static int64_t sys_spawn(struct syscall_args *a)
     }
     pid_t pid = 0;
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
-                       &pid);
+                       (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;
@@ -815,6 +818,22 @@ static int64_t sys_getgroups(struct syscall_args *a)
     return c->ngroups;
 }
 
+/* --- resource limits (audit milestone 6) --------------------------------------- */
+
+static int64_t sys_getrlimit(struct syscall_args *a)
+{
+    uint64_t v;
+    int rc = process_getrlimit((unsigned)a->a[0], &v);
+    if (rc)
+        return rc;
+    return copy_to_user(a->a[1], &v, sizeof(v));
+}
+
+static int64_t sys_setrlimit(struct syscall_args *a)
+{
+    return process_setrlimit((unsigned)a->a[0], a->a[1]);
+}
+
 static int64_t sys_pipe(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[0], 2 * sizeof(int)))
@@ -905,7 +924,7 @@ static int64_t sys_procinfo(struct syscall_args *a)
         if (tmp == NULL)
             return -ENOMEM;
     }
-    unsigned total = process_info(tmp, (unsigned)count);
+    unsigned total = process_info(tmp, (unsigned)count, cred_current());
     unsigned filled = total < count ? total : (unsigned)count;
     int rc = 0;
     if (filled && copy_to_user(a->a[0], tmp, filled * sizeof(*tmp)))
@@ -938,7 +957,8 @@ static int64_t sys_klog(struct syscall_args *a)
 
 static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
-    "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
+    "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
+    "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "sysctl.names",
     "debug.faultinject",
 };
@@ -961,6 +981,13 @@ static int sysctl_value(const char *name, char *out, size_t n)
         return ksnprintf(out, n, "%u", cpu_count());
     if (strcmp(name, "vm.page_size") == 0)
         return ksnprintf(out, n, "%u", (unsigned)PAGE_SIZE);
+    if (strcmp(name, "vm.cache_pages") == 0) {
+        struct pagecache_stats st;
+        pagecache_get_stats(&st);
+        return ksnprintf(out, n, "%llu", (unsigned long long)st.pages);
+    }
+    if (strcmp(name, "vm.cache_limit") == 0)
+        return ksnprintf(out, n, "%llu", (unsigned long long)pagecache_limit());
     if (strcmp(name, "vm.pages_total") == 0 || strcmp(name, "vm.pages_free") == 0) {
         struct pmm_stats st;
         pmm_get_stats(&st);
@@ -1063,6 +1090,8 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_setresgid] = sys_setresgid,
     [SYS_getresuid] = sys_getresuid,
     [SYS_getresgid] = sys_getresgid,
+    [SYS_getrlimit] = sys_getrlimit,
+    [SYS_setrlimit] = sys_setrlimit,
     [SYS_setgroups] = sys_setgroups,
     [SYS_getgroups] = sys_getgroups,
 };

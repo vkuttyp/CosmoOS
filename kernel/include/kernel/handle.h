@@ -28,6 +28,7 @@ struct handle_table {
     spinlock_t lock;
     struct handle_entry entries[HANDLE_TABLE_SIZE];
     unsigned count;
+    unsigned limit;   /* COSMO_RLIMIT_NOFILE: handle_install refuses at or above it */
 };
 
 void handle_table_init(struct handle_table *t);

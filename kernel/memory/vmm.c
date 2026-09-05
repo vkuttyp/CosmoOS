@@ -546,7 +546,8 @@ static void vm_fault_handler(unsigned vector, struct arch_trap_frame *frame, voi
              * (FI_DEMAND_PAGE for user-mode faults, FI_DEMAND_COPY for a
              * kernel-mode fault inside a user copy) to exercise the paths
              * below. */
-            if (!(space->user && faultinject_should_fail(from_user ? FI_DEMAND_PAGE : FI_DEMAND_COPY)))
+            bool over_limit = space->user && space->anon_pages >= space->limit_anon_pages;   /* COSMO_RLIMIT_MEM */
+            if (!over_limit && !(space->user && faultinject_should_fail(from_user ? FI_DEMAND_PAGE : FI_DEMAND_COPY)))
                 frame_page = pmm_alloc_page(PMM_FLAGS_ZERO);
             if (frame_page == NULL) {
                 spin_unlock_irqrestore(&space->lock, s);
@@ -624,6 +625,9 @@ int vm_space_create_user(struct vm_space **out)
     space->arena_hi = 0;
     space->user = true;
     space->active_cpus = 0;
+    space->mapped_pages = 0;
+    space->limit_mapped_pages = UINT64_MAX;
+    space->limit_anon_pages = UINT64_MAX;
 
     int rc = arch_mmu_context_init_user(&space->mmu, &kernel_space.mmu);
     if (rc) {
@@ -650,6 +654,15 @@ static cpumask_t user_shootdown_targets(struct vm_space *space)
 static void user_shootdown(struct vm_space *space, vaddr_t va, size_t len)
 {
     arch_mmu_shootdown_cpus(&space->mmu, va, len, user_shootdown_targets(space));
+}
+
+void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages)
+{
+    KASSERT(space->user);
+    arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    space->limit_mapped_pages = mapped_pages;
+    space->limit_anon_pages = anon_pages;
+    spin_unlock_irqrestore(&space->lock, s);
 }
 
 void vm_space_switch(struct vm_space *prev, struct vm_space *next)
@@ -713,6 +726,7 @@ void vm_space_destroy(struct vm_space *space)
         }
         struct vm_region *r = list_first_entry(&space->regions, struct vm_region, link);
         list_remove(&r->link);
+        space->mapped_pages -= r->size / PAGE_SIZE;
         vaddr_t base = r->base;
         size_t size = r->size;
         spin_unlock_irqrestore(&space->lock, s);
@@ -809,17 +823,26 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
     if (r == NULL)
         return -ENOMEM;
 
+    uint64_t npages = size / PAGE_SIZE;
     arch_irq_state_t s = spin_lock_irqsave(&space->lock);
+    if (space->mapped_pages + npages > space->limit_mapped_pages) {   /* COSMO_RLIMIT_AS */
+        spin_unlock_irqrestore(&space->lock, s);
+        kmem_cache_free(g_region_cache, r);
+        return -ENOMEM;
+    }
     int rc = space_insert(space, r);
     if (rc) {
         spin_unlock_irqrestore(&space->lock, s);
         kmem_cache_free(g_region_cache, r);
         return rc;
     }
+    space->mapped_pages += npages;
 
     if ((flags & VM_REGION_POPULATED) && prot != VM_PROT_NONE) {
         for (vaddr_t va = (vaddr_t)base; va < base + size; va += PAGE_SIZE) {
-            struct page *page = pmm_alloc_page(PMM_FLAGS_ZERO);
+            struct page *page = NULL;
+            if (space->anon_pages < space->limit_anon_pages)   /* COSMO_RLIMIT_MEM */
+                page = pmm_alloc_page(PMM_FLAGS_ZERO);
             rc = page ? arch_mmu_map(&space->mmu, va, page_to_phys(page), PAGE_SIZE, r->prot, VM_CACHE_WB,
                                      ARCH_MMU_MAP_USER)
                       : -ENOMEM;
@@ -828,6 +851,7 @@ int vm_user_map_anon(struct vm_space *space, uint64_t base, size_t size, vm_prot
                     pmm_free_page(page);
                 /* Unwind: drop the region, then tear down what was populated. */
                 list_remove(&r->link);
+                space->mapped_pages -= npages;
                 spin_unlock_irqrestore(&space->lock, s);
                 user_range_teardown(space, (vaddr_t)base, size);
                 kmem_cache_free(g_region_cache, r);
@@ -925,6 +949,7 @@ int vm_user_unmap(struct vm_space *space, uint64_t base, size_t size, unsigned f
             break;
         KASSERT(r->base >= base && r->base + r->size <= base + size);
         list_remove(&r->link);
+        space->mapped_pages -= r->size / PAGE_SIZE;
         if (nr < 64)
             removed[nr++] = r;
         else

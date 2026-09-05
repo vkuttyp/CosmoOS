@@ -69,7 +69,7 @@ int vm_mem_add(struct vm *vm, uint64_t gpa, uint64_t len)
     int rc = 0;
     if (vm->nr_regions >= HV_REGIONS_MAX)
         rc = -ENOSPC;
-    else if (vm->mem_bytes + len > HV_VM_MEM_MAX)
+    else if (vm->mem_bytes + len > vm->mem_limit)   /* the creator's COSMO_RLIMIT_VMEM */
         rc = -ENOMEM;
     else if (overlaps(vm, gpa, len))
         rc = -EINVAL;

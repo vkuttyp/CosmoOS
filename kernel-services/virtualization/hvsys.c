@@ -51,7 +51,7 @@ int64_t sys_vm_create(struct syscall_args *a)
     if (!ok)
         return -EPERM;
     struct vm *vm;
-    int rc = vm_create(p->cred.euid, &vm);
+    int rc = vm_create(p->cred.euid, p->rlim.v[COSMO_RLIMIT_VMEM], &vm);
     if (rc)
         return rc;
     int h = handle_install(&p->handles, &vm->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);

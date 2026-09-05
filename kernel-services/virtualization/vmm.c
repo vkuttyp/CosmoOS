@@ -62,7 +62,7 @@ static bool paging_off_is_translated(void)
     struct vm *vm;
     struct vcpu *v = NULL;
     bool ok = false;
-    if (vm_create(0, &vm))
+    if (vm_create(0, HV_VM_MEM_MAX, &vm))   /* the kernel's own self-check VM */
         return false;
     static const uint8_t hlt = 0xF4;
     if (vm_mem_add(vm, SELFCHECK_GPA, 0x1000) || vm_mem_write(vm, SELFCHECK_GPA, &hlt, 1) ||

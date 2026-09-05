@@ -747,6 +747,72 @@ static int64_t lx_id(uint64_t v)
     return (uint32_t)v == 0xFFFFFFFFu ? -1 : (int64_t)(uint32_t)v;
 }
 
+/* --- rlimits: one value per resource, reported as cur == max ------------------ */
+
+/* The native resource for a Linux one, or -1 for those the kernel does not
+ * bound (they read as infinity and accept any value). */
+static int lx_rlimit_map(unsigned res)
+{
+    switch (res) {
+    case LX_RLIMIT_AS: return COSMO_RLIMIT_AS;
+    case LX_RLIMIT_RSS: return COSMO_RLIMIT_MEM;
+    case LX_RLIMIT_NOFILE: return COSMO_RLIMIT_NOFILE;
+    case LX_RLIMIT_NPROC: return COSMO_RLIMIT_NPROC;
+    default: return -1;
+    }
+}
+
+static int64_t lx_rlimit_get(unsigned res, uint64_t out)
+{
+    if (res >= LX_RLIM_NLIMITS)
+        return -EINVAL;
+    struct lx_rlimit r = { LX_RLIM_INFINITY, LX_RLIM_INFINITY };
+    int native = lx_rlimit_map(res);
+    if (native >= 0) {
+        uint64_t v;
+        int rc = process_getrlimit((unsigned)native, &v);
+        if (rc)
+            return rc;
+        r.rlim_cur = r.rlim_max = v == COSMO_RLIM_INFINITY ? LX_RLIM_INFINITY : v;
+    }
+    return copy_to_user(out, &r, sizeof(r));
+}
+
+static int64_t lx_rlimit_set(unsigned res, uint64_t in)
+{
+    if (res >= LX_RLIM_NLIMITS)
+        return -EINVAL;
+    struct lx_rlimit r;
+    if (copy_from_user(&r, in, sizeof(r)))
+        return -EFAULT;
+    if (r.rlim_cur > r.rlim_max)
+        return -EINVAL;
+    int native = lx_rlimit_map(res);
+    if (native < 0)
+        return 0;   /* not enforced here: accepted and ignored */
+    /* One value: the maximum is what binds later raises, so it is the
+     * value stored; a maximum above the current limit needs privilege. */
+    return process_setrlimit((unsigned)native, r.rlim_max == LX_RLIM_INFINITY ? COSMO_RLIM_INFINITY : r.rlim_max);
+}
+
+static int64_t lx_getrlimit(struct syscall_args *a) { return lx_rlimit_get((unsigned)a->a[0], a->a[1]); }
+static int64_t lx_setrlimit(struct syscall_args *a) { return lx_rlimit_set((unsigned)a->a[0], a->a[1]); }
+
+static int64_t lx_prlimit64(struct syscall_args *a)
+{
+    pid_t pid = (pid_t)a->a[0];
+    if (pid != 0 && pid != process_current()->pid)
+        return -EPERM;   /* other processes' limits are theirs */
+    if (a->a[3] != 0) {
+        int64_t rc = lx_rlimit_get((unsigned)a->a[1], a->a[3]);
+        if (rc)
+            return rc;
+    }
+    if (a->a[2] != 0)
+        return lx_rlimit_set((unsigned)a->a[1], a->a[2]);
+    return 0;
+}
+
 static int64_t lx_setresuid(struct syscall_args *a)
 {
     return process_setresuid(lx_id(a->a[0]), lx_id(a->a[1]), lx_id(a->a[2]));
@@ -1399,7 +1465,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_readlink] = lx_nosys,
     [LX_umask] = lx_umask,
     [LX_gettimeofday] = lx_gettimeofday,
-    [LX_getrlimit] = lx_nosys,
+    [LX_getrlimit] = lx_getrlimit,
     [LX_sysinfo] = lx_nosys,
     [LX_getuid] = lx_getuid,
     [LX_getgid] = lx_getgid,
@@ -1421,7 +1487,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_setsid] = lx_getpgrp,
     [LX_sigaltstack] = lx_sigaltstack,
     [LX_arch_prctl] = lx_arch_prctl,
-    [LX_setrlimit] = lx_nosys,
+    [LX_setrlimit] = lx_setrlimit,
     [LX_sync] = lx_sync,
     [LX_gettid] = lx_getpid,
     [LX_time] = lx_time,
@@ -1444,7 +1510,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_accept4] = lx_accept,
     [LX_dup3] = lx_dup3,
     [LX_pipe2] = lx_pipe2,
-    [LX_prlimit64] = lx_nosys,
+    [LX_prlimit64] = lx_prlimit64,
     [LX_getrandom] = lx_getrandom,
     [LX_rseq] = lx_nosys,
     [LX_clone3] = lx_nosys,

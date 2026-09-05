@@ -14,6 +14,7 @@
 
 #include <kernel/completion.h>
 #include <kernel/cred.h>
+#include <kernel/rlimit.h>
 #include <kernel/handle.h>
 #include <kernel/list.h>
 #include <kernel/object.h>
@@ -58,6 +59,9 @@ struct process {
     struct list_node threads;          /* struct thread.proc_link */
     unsigned nr_threads;
     struct credentials cred;
+    struct rlimits rlim;               /* kernel/rlimit.h; written under lock by the process itself */
+    uint32_t log_tokens;               /* sys_log rate limit for unprivileged callers */
+    uint64_t log_refill_ns;
     const struct personality *pers;
     enum process_state state;
     int exit_status;
@@ -93,6 +97,13 @@ struct process_spawn_attr {
     unsigned nr_handles;                           /* 0 with handles NULL: inherit 0, 1, 2 */
     struct vnode *cwd;                             /* NULL: the parent's */
     const char *cwd_path;
+    bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
+    uint32_t uid, gid;
+};
+
+/* The credentials a spawn request names for the child. */
+struct process_spawn_cred {
+    uint32_t uid, gid;
 };
 
 /* One-time setup (process table, caches). Requires sched_init. */
@@ -108,7 +119,18 @@ int process_create_from_elf(const void *image, size_t size, const char *name, co
  * process (kernel/process/spawn.c). `handles` must be validated as the
  * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
-                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, pid_t *pid_out);
+                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd,
+                  const struct process_spawn_cred *cred, pid_t *pid_out);
+
+/* Resource limits of the calling process (docs/kernel/security/design.md §2):
+ * -EINVAL for an unknown resource or a NOFILE value above the table size,
+ * -EPERM for raising without privilege. */
+int process_getrlimit(unsigned resource, uint64_t *value);
+int process_setrlimit(unsigned resource, uint64_t value);
+/* Processes whose real uid is `ruid` (the NPROC count). */
+unsigned process_count_uid(uint32_t ruid);
+/* One sys_log line: always for a privileged caller, else within the rate limit. */
+bool process_log_permitted(void);
 
 /* Collect an exited child: pid > 0 for that child, -1 for any. Returns
  * 0 with *pid_out (0 when WNOHANG found none), -ECHILD, -EINTR. */
@@ -132,7 +154,10 @@ int path_normalize(const char *base, const char *rel, char *out, size_t n);
 
 /* Introspection for procinfo: fills up to `count` records, returns the total. */
 struct cosmo_procinfo;
-unsigned process_info(struct cosmo_procinfo *buf, unsigned count);
+struct credentials;
+/* Fill up to `count` records and return the total that qualify: every
+ * process for a privileged viewer, else those with the viewer's real uid. */
+unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer);
 
 /* Terminate the calling process (all its threads; only one exists in
  * this phase) with `status`. Never returns. */

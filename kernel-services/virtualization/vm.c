@@ -51,7 +51,7 @@ struct vm *vm_from_kobject(struct kobject *obj)
     return obj != NULL && obj->type == &vm_type.base ? container_of(obj, struct vm, obj) : NULL;
 }
 
-int vm_create(uint32_t owner_uid, struct vm **out)
+int vm_create(uint32_t owner_uid, uint64_t mem_limit, struct vm **out)
 {
     if (!hv_caps()->present)
         return -ENOTSUP;
@@ -65,6 +65,7 @@ int vm_create(uint32_t owner_uid, struct vm **out)
     list_init(&vm->link);
     spinlock_init(&vm->console.lock, "vm-console");
     vm->owner_uid = owner_uid;
+    vm->mem_limit = mem_limit;
     int rc = arch_hv_vm_create(&vm->arch);
     if (rc) {
         kfree(vm);
