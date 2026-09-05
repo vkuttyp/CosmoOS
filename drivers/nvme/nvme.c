@@ -332,16 +332,25 @@ static int admin_cmd(struct nvme_ctrl *c, struct nvme_sqe *sqe, uint32_t *result
             queue_process(q);   /* polled before the vector exists */
     }
     int rc;
+    bool timed_out = false;
     if (!completion_done(&w.done)) {
-        /* The controller may still answer this id: keep the slot out of
-         * the free list until it does (queue_process frees an orphan), so
-         * the late completion can never be delivered to a new command. */
+        /* Decide under the lock. If the slot still names our waiter, the
+         * controller has not answered: keep the slot out of the free list
+         * until it does (queue_process frees an orphan), so the late
+         * completion can never be delivered to a new command. Otherwise
+         * the interrupt path has already detached the waiter and is about
+         * to signal it: wait for that, the command did complete. */
         s = spin_lock_irqsave(&q->lock);
         if (q->cmds[cid].wait == &w) {
             q->cmds[cid].wait = NULL;
             q->cmds[cid].orphan = true;
+            timed_out = true;
         }
         spin_unlock_irqrestore(&q->lock, s);
+        if (!timed_out)
+            wait_for_completion(&w.done);   /* the stack frame stays valid until it is signalled */
+    }
+    if (timed_out) {
         rc = -ETIMEDOUT;
     } else {
         rc = status_to_errno(w.status);
@@ -547,6 +556,14 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
     sqe.cdw10 = ((uint32_t)cid << 16) | q->qid;
     uint32_t result = 1;
     int rc = admin_cmd(c, &sqe, &result);
+    if (rc == -ETIMEDOUT || rc == -EIO) {
+        /* The Abort itself got no answer (or the controller is already
+         * dead): it may still be executed later against this id, so the
+         * slot cannot be released. A controller that does not answer an
+         * Abort within 5 s is reset. */
+        controller_die(c, "an Abort command did not complete");
+        return;
+    }
     bool done = false;
     if (rc == 0 && (result & 1) == 0) {
         /* The controller says it aborted: its completion for the command
@@ -559,6 +576,8 @@ static void nvme_timeout(struct blkdev *bd, struct bio *victim)
                 thread_sleep_ms(1);
         }
     } else {
+        /* The Abort completed without effect (refused, or too late, or it
+         * was never issued: -EBUSY): nothing names the id any more. */
         arch_irq_state_t s = spin_lock_irqsave(&q->lock);
         done = q->cmds[cid].bio == NULL;   /* it may have completed on its own while we asked */
         spin_unlock_irqrestore(&q->lock, s);

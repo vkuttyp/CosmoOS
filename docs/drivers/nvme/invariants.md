@@ -10,9 +10,18 @@ list) until the controller's late answer frees it, so that answer can
 never be delivered to a newer command with the same id; a slot whose
 command is being aborted is marked `aborting` and, if the command
 completes meanwhile, stays reserved until the timeout path releases it,
-so the Abort can never name a replacement request (Greptile on PR #24).
-A reset frees every reserved slot, since a disabled controller answers
-nothing. Check: `nvme` self-test (32 reads from four CPUs, every
+so the Abort can never name a replacement request; an Abort that itself
+gets no answer resets the controller rather than releasing the id it
+names (Greptile on PR #24). A reset frees every reserved slot, since a
+disabled controller answers nothing.
+
+**M1a. A waiter on the stack is never signalled after its frame is
+gone.** The admin timeout path decides under the queue lock: if the slot
+still names the waiter the command is orphaned and `-ETIMEDOUT`;
+otherwise the interrupt path has detached the waiter and is about to
+`complete` it, and the caller waits for that signal and reports the
+real result. Check: review (Greptile on PR #24). Gap: not driven by a
+test. Check: `nvme` self-test (32 reads from four CPUs, every
 completion delivered once; a burst of segment I/O); review of the
 orphan/aborting paths (QEMU's controller never times out). Gap: no
 hostile-controller test with late or forged completions.
