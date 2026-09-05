@@ -637,6 +637,9 @@ static int install_loaded(struct loaded *l)
                 if (l->m.nfiles + leftover < PKG_MAX_FILES) {   /* files[] holds PKG_MAX_FILES entries */
                     l->m.files[l->m.nfiles + leftover] = old.files[i];
                     leftover++;
+                } else {
+                    fprintf(stderr, "pkg: %s: the record is full; %s is left untracked\n", l->m.name, path);
+                    rc2 = EXIT_FAILED;
                 }
             }
         }
