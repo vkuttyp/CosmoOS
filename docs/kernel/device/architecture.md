@@ -100,8 +100,10 @@ that know nothing about PCI or VirtIO.
   without either is enumerated but gets no interrupt.
 - IOMMU, scatter/gather, bounce buffers, non-coherent architectures:
   designed for (the API takes a device and a direction, addresses are
-  `dma_addr_t` not `paddr_t`), not implemented. `dma_map` refuses
-  anything not physically contiguous.
+  `dma_addr_t` not `paddr_t`, the sync points call `arch_dma_barrier`),
+  not implemented. Both supported platforms (QEMU `q35` and `virt`) are
+  DMA-coherent; cache maintenance for a non-coherent bus is out of
+  scope. `dma_map` refuses anything not physically contiguous.
 - Hot-plug and power management: devices are enumerated once at boot;
   `device_unregister` exists for module unload, not for surprise
   removal.

@@ -6,7 +6,7 @@
 libc/
   include/          the public headers (standard names) and cosmo/ (native)
   src/
-    crt0.S          _start
+    arch/<arch>/crt0.S   _start (x86_64/, aarch64/)
     errno.c         errno, __syscall_ret, strerror table
     string.c        mem*/str*
     ctype.c
@@ -45,9 +45,18 @@ libc/
 ## Program start
 
 ```asm
+; x86-64 (libc/src/arch/x86_64/crt0.S)
 _start: xor %ebp,%ebp; mov (%rsp),%rdi; lea 8(%rsp),%rsi; lea 16(%rsp,%rdi,8),%rdx
         mov %rdx, environ(%rip); and $-16,%rsp; call __libc_start   ; never returns
+; AArch64 (libc/src/arch/aarch64/crt0.S)
+_start: mov x29, xzr; mov x30, xzr; ldr x0, [sp]; add x1, sp, #8
+        add x2, x1, x0, lsl #3; add x2, x2, #8; and sp, sp, #-16; bl __libc_start
 ```
+
+Both emit the same `.note.cosmo` ABI note. The raw system-call wrapper in
+`cosmo/syscall.h` is `syscall` (number in `rax`) on x86-64 and `svc #0`
+(number in `x8`, arguments `x0`–`x5`, result `x0`) on AArch64; the
+numbers and structures are identical.
 
 `__libc_start(argc, argv, envp)` stores `environ`, initialises the three
 `FILE`s, calls `main`, then `exit(main's return)`. `exit` runs `atexit`

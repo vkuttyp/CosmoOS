@@ -100,6 +100,7 @@ unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t ran
     return k;
 }
 
+#if defined(ARCH_X86_64)
 /* --- helpers ------------------------------------------------------------------ */
 
 static struct linux_state *lx(void)
@@ -1362,3 +1363,19 @@ const struct personality personality_linux = {
     .table = g_table,
     .count = LX_NR_MAX,
 };
+#else
+/* Other architectures have no Linux system-call table yet (the AArch64
+ * numbers differ from x86-64's: docs/compat/linux/design.md). A Linux
+ * program runs until its first system call, which the dispatcher reports
+ * as unknown and answers -ENOSYS. */
+static const syscall_fn g_none_table[1];
+static const syscall_fn *linux_table_get(void)
+{
+    return g_none_table;
+}
+const struct personality personality_linux = {
+    .name = "linux",
+    .table = g_none_table,
+    .count = 0,
+};
+#endif

@@ -17,7 +17,6 @@
 #define ELFDATA2LSB 1
 #define EV_CURRENT 1
 #define ET_EXEC    2
-#define EM_X86_64  62
 #define PT_LOAD    1
 #define PT_NOTE    4
 
@@ -111,8 +110,8 @@ EFI_STATUS elf_load(const uint8_t *file, size_t size, struct elf_image *img, boo
         lputs("cosmoboot: kernel must be ET_EXEC\n");
         return EFI_LOAD_ERROR;
     }
-    if (eh->e_machine != EM_X86_64) {
-        lputs("cosmoboot: kernel is not x86-64\n");
+    if (eh->e_machine != LOADER_ELF_MACHINE) {
+        lputs("cosmoboot: kernel is not " LOADER_ELF_MACHINE_NAME "\n");
         return EFI_LOAD_ERROR;
     }
     if (eh->e_phentsize != sizeof(struct elf64_phdr) || eh->e_phnum == 0 ||

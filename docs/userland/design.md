@@ -146,6 +146,12 @@ false; test "$?" ...   (no `test`: use the utilities' own exit codes and `&&`/`|
 echo "SHTEST: PASS"
 ```
 
+Two sections depend on fixtures only the x86-64 build carries: the Linux
+programs run through `sh /etc/rc.linux` only if `/boot/tests/linux/lxhello`
+exists, else the script prints `LINUXTEST: skipped`; `vmctl probe` fails
+without `/dev/vmm` and the script prints `HVTEST: skipped`. The harness
+requires the `skipped` lines on AArch64 and forbids them on x86-64.
+
 Since there is no `test` utility, checks compare through behaviour:
 commands that must succeed carry `|| FAILS=1`, commands that must fail
 carry `&& FAILS=1` (`rm` of a file that must not exist, `ls` of a

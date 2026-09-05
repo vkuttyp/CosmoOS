@@ -31,6 +31,17 @@ x86_64)
         /usr/local/share/qemu/edk2-x86_64-code.fd
     "
     ;;
+aarch64)
+    candidates="
+        /usr/share/AAVMF/AAVMF_CODE.fd
+        /usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+        /usr/share/edk2/aarch64/QEMU_EFI.fd
+        /usr/share/edk2-armvirt/aarch64/QEMU_EFI.fd
+        /usr/share/qemu/edk2-aarch64-code.fd
+        /opt/homebrew/share/qemu/edk2-aarch64-code.fd
+        /usr/local/share/qemu/edk2-aarch64-code.fd
+    "
+    ;;
 *)
     echo "find-firmware: unsupported architecture $arch" >&2
     exit 1

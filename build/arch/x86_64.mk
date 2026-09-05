@@ -18,4 +18,6 @@ LOADER_ARCH_CFLAGS := \
 	-mno-red-zone -mgeneral-regs-only -mno-stack-arg-probe \
 	-DARCH_X86_64=1
 
+LOADER_ARCH_LDFLAGS := /machine:x64
+LOADER_EFI_NAME := BOOTX64.EFI
 QEMU_SYSTEM := qemu-system-x86_64

@@ -32,7 +32,7 @@ struct runqueue;
 struct timer_queue;
 
 struct percpu {
-    struct percpu *self;        /* offset 0: arch fast path (mov %gs:0) */
+    struct percpu *self;        /* offset 0: arch fast path (x86-64: mov %gs:0; AArch64 reads TPIDR_EL1) */
     uintptr_t kernel_stack_top; /* offset 8: syscall entry loads rsp from here */
     uintptr_t user_rsp_scratch; /* offset 16: syscall entry parks the user rsp here */
     unsigned cpu_id;

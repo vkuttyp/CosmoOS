@@ -489,3 +489,9 @@ vaddr_t arch_mmu_kernel_base(void)
 {
     return (vaddr_t)X86_KERNEL_BASE;
 }
+
+void arch_mmu_near_arena(vaddr_t *lo, vaddr_t *hi)
+{
+    *lo = (vaddr_t)0xFFFFFFFF88000000ULL;   /* -mcmodel=kernel: anywhere in the top 2 GiB */
+    *hi = (vaddr_t)0xFFFFFFFFFF000000ULL;
+}

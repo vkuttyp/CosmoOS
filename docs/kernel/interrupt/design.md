@@ -2,12 +2,15 @@
 
 ## The table
 
-One `struct interrupt_slot` per vector, 256 slots, statically allocated.
-`interrupt_init` asks the architecture how many vectors it actually
-dispatches (`arch_trap_vector_count()`, 256 on x86-64) and panics if that
-exceeds `INTERRUPT_MAX_VECTORS`, so an architecture with a larger vector
-space fails loudly at boot rather than indexing past the array. AArch64
-will fold GIC INTIDs into this space in its arch layer.
+One `struct interrupt_slot` per vector, `INTERRUPT_MAX_VECTORS` = 1344
+slots, statically allocated. `interrupt_init` asks the architecture how
+many vectors it actually dispatches (`arch_trap_vector_count()`: 256 on
+x86-64, 1312 on AArch64) and panics if that exceeds the constant, so an
+architecture with a larger vector space fails loudly at boot rather than
+indexing past the array. AArch64 folds the 1020 GIC INTIDs, a spurious
+vector, the synchronous exception kinds and 256 dynamic software vectors
+into this space in its arch layer (`docs/kernel/arch/aarch64/design.md`,
+"Vector numbering").
 
 ## Registration
 

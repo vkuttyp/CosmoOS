@@ -22,7 +22,7 @@ interrupts disabled; must not sleep, allocate, or take sleeping locks;
   Calling it again discards all registrations.
 - **Concurrency**: single CPU, interrupts disabled by construction.
 - **Failure modes**: panics if `arch_trap_vector_count()` exceeds
-  `INTERRUPT_MAX_VECTORS` (256).
+  `INTERRUPT_MAX_VECTORS` (1344; x86-64 uses 256, AArch64 1312).
 
 ### `int interrupt_register(unsigned vector, interrupt_handler_fn fn, void *arg, const char *name)`
 - **Purpose**: install `fn` on `vector`.
@@ -106,7 +106,8 @@ table); `irq_enable`/`irq_disable` are interrupt-safe.
 - **Purpose**: allocate a dynamic vector, install `fn` on it, and program
   the controller so `irq` delivers that vector to `cpu`, initially
   masked.
-- **Inputs**: `irq` is a GSI (`< IRQ_MAX` = 256); `flags` is
+- **Inputs**: `irq` is a GSI (`< IRQ_MAX` = 1024: an IOAPIC input on
+  x86-64, a GIC INTID on AArch64); `flags` is
   `IRQ_TRIGGER_EDGE` (0) or `IRQ_TRIGGER_LEVEL`, optionally
   `IRQ_POLARITY_LOW`; `cpu` must be a registered CPU.
 - **Outputs**: `0`, `-EINVAL`, `-EBUSY` (GSI already requested),
@@ -169,11 +170,19 @@ Implemented by `kernel/arch/x86_64/irqc.c` over `lapic.c` and
 - **Purpose**: the architecture's message format for `vector` on `cpu`.
   x86-64 (`kernel/arch/x86_64/irqc.c`): `addr = 0xFEE00000 | apic_id <<
   12` (physical destination, fixed delivery, edge), `data = vector`.
+  AArch64 (`kernel/arch/aarch64/gic.c`): allocates an SPI from the GICv2m
+  frame, routes it to `vector` on `cpu`, `addr` = frame + 0x40
+  (`MSI_SETSPI_NS`), `data` = the INTID.
 - **Outputs**: 0, or `-EINVAL` for a CPU without an APIC id below 256
-  (xAPIC physical mode only) or a vector outside 48 to 238.
-- **Concurrency**: pure; any context.
+  (xAPIC physical mode only) or a vector outside 48 to 238; on AArch64
+  `-EINVAL` without a GICv2m frame, `-ENOSPC` when its SPIs are all taken.
+- **Concurrency**: pure on x86-64; takes the GIC lock on AArch64. Any
+  context.
 
 ## x86-64 vector map
+
+(The AArch64 map — INTIDs 0..1019, spurious 1020, exceptions 1024..1029,
+dynamic 1056..1311 — is in `docs/kernel/arch/aarch64/design.md`.)
 
 | Range | Use |
 |---|---|

@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 2). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 4). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,19 +10,20 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 3 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive) |
+| `version` | `COSMOBOOT_VERSION` = 4 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
 | `loader_name[32]`, `loader_version` | for the banner: `cosmoboot-uefi`, 1 |
 | `hhdm_base`, `hhdm_size` | direct map: virtual `hhdm_base + p` == physical `p` for `p < hhdm_size` |
 | `kernel_phys_base`, `kernel_virt_base`, `kernel_size` | where the image landed; `kernel_virt_base` is the lowest PT_LOAD vaddr |
-| `boot_pagetable_root` | physical CR3 (TTBR on AArch64) the kernel is running on |
+| `boot_pagetable_root` | physical root of the bootstrap tables the kernel is running on: CR3 on x86-64, the TTBR1 (higher-half) table on AArch64 |
 | `mem_map_phys`, `mem_map_entries`, `mem_map_entry_size` | array of `struct cosmoboot_mem_entry { base, length, type, reserved }` |
 | `acpi_rsdp` | physical RSDP from the EFI configuration table (ACPI 2.0 preferred, 1.0 fallback), 0 if absent |
 | `firmware_system_table` | physical `EFI_SYSTEM_TABLE *` for future runtime-services use |
 | `archive_phys`, `archive_size` | (v3) the boot archive `\cosmo\boot.tar`, a ustar archive holding `init` and the boot-time kernel modules (`modules/<name>.ko`) and test fixtures (`tests/*.ko`), in `COSMOBOOT_MEM_ARCHIVE` memory below 4 GiB; both zero when the file is absent. Written by `scripts/mkbootarchive.py`, parsed by `kernel/core/bootarchive.c` |
-| `reserved1[6]` | zero; reserved for framebuffer and command line under a version bump |
+| `boot_pagetable_root_user` | (v4) the second bootstrap root for architectures with split roots: the TTBR0 identity table on AArch64, 0 on x86-64. The kernel does not read it today; its pages are `COSMOBOOT_MEM_BOOT_PAGETABLES` and go with the rest at takeover |
+| `reserved1[5]` | zero; reserved for framebuffer and command line under a version bump |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,

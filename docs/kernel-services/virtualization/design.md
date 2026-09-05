@@ -600,6 +600,10 @@ Specified in full in `testing.md`; in outline:
   the guest pages), file-backed regions, 2 MiB nested mappings,
   flush-by-ASID.
 - **Linux compat**: `/dev/kvm` as a translation of this API.
-- **AArch64** (Phase 13): the same generic layer over an EL2 backend
-  (stage-2 translation is the GuestMemory; the vGIC is the stage-2
-  interrupt controller).
+- **AArch64**: Phase 13 ported the kernel with a stub backend
+  (`kernel/arch/aarch64/hv.c`: `arch_hv_probe` returns `-ENOTSUP`, the
+  manager reports `none`, `/dev/vmm` is absent and `rc.test` prints
+  `HVTEST: skipped`). The real backend is a later phase: the same generic
+  layer over EL2 (stage-2 translation is the GuestMemory; the vGIC is
+  the stage-2 interrupt controller), which also needs the loader to
+  accept EL2 instead of refusing it.

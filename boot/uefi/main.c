@@ -10,7 +10,7 @@
  *   6. collect ACPI RSDP from the configuration tables
  *   7. GetMemoryMap + ExitBootServices (retry once if the map moved)
  *   8. translate the EFI memory map into cosmoboot entries
- *   9. enable NX/WP, switch CR3, jump
+ *   9. arch finish (x86-64: NX/WP; AArch64: nothing), switch translation tables, jump
  *
  * Nothing may allocate after step 7. Every buffer step 8 writes into was
  * sized and allocated in step 4.
@@ -299,11 +299,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
             (unsigned long long)img.phys_base, (unsigned long long)img.entry, img.segment_count);
 
     /* --- allocations that must precede ExitBootServices --- */
+    if (!cpu_prepare())
+        die("this processor cannot run the kernel", EFI_UNSUPPORTED);
+    /* A snapshot of the memory map for the table builder (RAM versus
+     * device attributes on AArch64); the map handed to the kernel is
+     * fetched again after the last allocation. */
+    UINTN pre_size = 0, pre_key = 0, pre_desc = 0;
+    uint32_t pre_ver = 0;
+    status = g_bs->GetMemoryMap(&pre_size, NULL, &pre_key, &pre_desc, &pre_ver);
+    if (status != EFI_BUFFER_TOO_SMALL)
+        die("GetMemoryMap size query failed", status);
+    pre_size += 8 * pre_desc;
+    EFI_PHYSICAL_ADDRESS pre_phys;
+    status = alloc_pages_low(BYTES_TO_PAGES(pre_size), EfiLoaderData, &pre_phys, NULL);
+    if (EFI_ERROR(status))
+        die("cannot allocate the memory map snapshot", status);
+    status = g_bs->GetMemoryMap(&pre_size, (EFI_MEMORY_DESCRIPTOR *)(uintptr_t)pre_phys, &pre_key, &pre_desc, &pre_ver);
+    if (EFI_ERROR(status))
+        die("GetMemoryMap failed", status);
     struct paging_ctx pg;
     memset(&pg, 0, sizeof(pg));
-    pg.nx = cpu_has_nx();
-    if (!pg.nx)
-        die("processor has no NX support; the kernel requires W^X and will not run on it", EFI_UNSUPPORTED);
+    pg.nx = true;
     pg.pool_pages = paging_pool_size(&img);
     status = alloc_pages_low(pg.pool_pages, EFI_MEMORY_TYPE_COSMO_PAGETABLES, &pg.pool_phys, &type_fallback);
     if (EFI_ERROR(status))
@@ -320,12 +336,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         die("cannot allocate handoff stack", status);
 
     /* --- bootstrap page tables --- */
-    status = paging_build(&pg, &img, (uint64_t)(uintptr_t)self->ImageBase, self->ImageSize);
+    status = paging_build(&pg, &img, (uint64_t)(uintptr_t)self->ImageBase, self->ImageSize,
+                          (const uint8_t *)(uintptr_t)pre_phys, pre_size, pre_desc);
     if (EFI_ERROR(status))
         die("cannot build page tables", status);
-    lprintf("paging: pml4 at 0x%llx, %u/%u pool pages used, NX %s\n",
-            (unsigned long long)pg.pml4_phys, (unsigned)pg.pool_used, (unsigned)pg.pool_pages,
-            pg.nx ? "on" : "unsupported");
+    lprintf("paging: root at 0x%llx (user root 0x%llx), %u/%u pool pages used\n",
+            (unsigned long long)pg.root, (unsigned long long)pg.root_user, (unsigned)pg.pool_used,
+            (unsigned)pg.pool_pages);
 
     /* --- bootinfo header --- */
     struct cosmoboot_info *info = (struct cosmoboot_info *)(uintptr_t)info_phys;
@@ -334,7 +351,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->magic = COSMOBOOT_MAGIC;
     info->version = COSMOBOOT_VERSION;
     info->size = sizeof(*info);
-    info->arch = COSMOBOOT_ARCH_X86_64;
+    info->arch = COSMOBOOT_ARCH_NATIVE;
     info->firmware = COSMOBOOT_FIRMWARE_UEFI;
     memcpy(info->loader_name, LOADER_NAME, sizeof(LOADER_NAME));
     info->loader_version = LOADER_VERSION;
@@ -343,7 +360,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->kernel_phys_base = img.phys_base;
     info->kernel_virt_base = img.virt_base;
     info->kernel_size = img.virt_end - img.virt_base;
-    info->boot_pagetable_root = pg.pml4_phys;
+    info->boot_pagetable_root = pg.root;
+    info->boot_pagetable_root_user = pg.root_user;
     info->mem_map_phys = (uint64_t)(uintptr_t)entries;
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();
@@ -420,14 +438,12 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
 
     /* --- go --- */
-    if (pg.nx)
-        cpu_enable_nx();
-    cpu_enable_wp();
+    cpu_finish();
 
     uint64_t info_virt = BOOT_HHDM_BASE + info_phys;
     uint64_t stack_top = stack_phys + HANDOFF_STACK_PAGES * PAGE_SIZE;
     lprintf("jumping to kernel entry 0x%llx, info at 0x%llx\n",
             (unsigned long long)img.entry, (unsigned long long)info_virt);
 
-    cpu_jump_to_kernel(pg.pml4_phys, stack_top, info_virt, img.entry);
+    cpu_jump_to_kernel(&pg, stack_top, info_virt, img.entry);
 }

@@ -96,4 +96,6 @@ timer expiry order and cancellation, sleep bounds, callback context. See
 ## 13. Future
 
 HPET/ACPI PM timer clock sources, tickless idle, hrtimers, TSC deadline
-mode, AArch64 generic timer behind `arch/timer.h`.
+mode. The AArch64 generic timer behind `arch/timer.h` exists since
+Phase 13 (`CNTPCT` clock, `CNTP_CVAL` tick;
+`docs/kernel/arch/aarch64/design.md`).

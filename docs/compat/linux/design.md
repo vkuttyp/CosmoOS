@@ -245,4 +245,8 @@ in `lxhello` (whose table is at `0x400040`). Details in `testing.md`.
   frames and `rt_sigreturn`; `execve` once the native side has it.
 - Stage 3: `epoll`/`poll`, `sendmsg`, `/proc`.
 - Another architecture's Linux ABI (AArch64) reuses everything but the
-  numbers table and `arch_prctl`.
+  numbers table and `arch_prctl`. Phase 13 put the x86-64 table under
+  `#if defined(ARCH_X86_64)` and left an empty table elsewhere;
+  `linux_process_init/release/auxv` and the conversions are already
+  generic, and the AArch64 test programs (`tests/linux`) are excluded
+  from that build until the table exists.

@@ -4,6 +4,7 @@
 
 #include <kernel/device.h>
 #include <kernel/dma.h>
+#include <arch/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
@@ -113,9 +114,10 @@ void dma_sync_for_device(struct device *dev, dma_addr_t dma, size_t len, enum dm
     (void)dma;
     (void)len;
     (void)dir;
-    /* x86 is cache coherent for DMA; order the CPU's stores before the
-     * doorbell write that follows. */
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    /* Both targets are cache coherent for DMA on the supported machines
+     * (docs/kernel/device/); order the CPU's stores before the doorbell
+     * write that follows. */
+    arch_dma_barrier();
 }
 
 void dma_sync_for_cpu(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)

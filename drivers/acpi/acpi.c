@@ -45,6 +45,9 @@ struct madt_entry {
 #define MADT_ISO            2
 #define MADT_LAPIC_OVERRIDE 5
 #define MADT_X2APIC         9
+#define MADT_GICC           11
+#define MADT_GICD           12
+#define MADT_GIC_MSI_FRAME  13
 
 #define MADT_CPU_ENABLED        (1u << 0)
 #define MADT_CPU_ONLINE_CAPABLE (1u << 1)
@@ -62,6 +65,8 @@ static struct acpi_madt_ioapic g_ioapics[ACPI_MAX_IOAPICS];
 static size_t g_ioapic_count;
 static struct acpi_madt_override g_overrides[ACPI_MAX_OVERRIDES];
 static size_t g_override_count;
+static struct acpi_gic g_gic;
+static bool g_gic_present;
 
 static uint8_t checksum(const void *p, size_t len)
 {
@@ -193,6 +198,60 @@ static void parse_madt(const struct acpi_madt *madt)
                 g_lapic_base = addr;
             }
             break;
+        case MADT_GICC:
+            /* GICC: CPU interface number 4, ACPI UID 8, flags 12, parking version 16,
+             * performance GSIV 20, parked address 24, physical base 32, GICV 40, GICH 48,
+             * VGIC maintenance 56, GICR base 60, MPIDR 68 (76 bytes in ACPI 5.1, 80 in 6.x). */
+            if (e->length >= 76) {
+                uint32_t flags;
+                uint64_t base, mpidr;
+                memcpy(&flags, p + 12, 4);
+                memcpy(&base, p + 32, 8);
+                memcpy(&mpidr, p + 68, 8);
+                if (g_gic.gicc_base == 0)
+                    g_gic.gicc_base = base;
+                if (flags & (MADT_CPU_ENABLED | MADT_CPU_ONLINE_CAPABLE)) {
+                    if (g_cpu_count < ACPI_MAX_CPUS) {
+                        uint32_t acpi_id;
+                        memcpy(&acpi_id, p + 8, 4);
+                        g_cpus[g_cpu_count].acpi_id = acpi_id;
+                        /* hw_id: the MPIDR affinity fields (Aff0-2 in bits 0-23, Aff3 in 24-31) */
+                        g_cpus[g_cpu_count].apic_id = (uint32_t)((mpidr & 0xFFFFFFull) | ((mpidr >> 8) & 0xFF000000ull));
+                        g_cpus[g_cpu_count].x2apic = false;
+                        g_cpu_count++;
+                    } else {
+                        kwarn("acpi: more than %u CPUs; extra ignored", ACPI_MAX_CPUS);
+                    }
+                }
+            }
+            break;
+        case MADT_GICD:
+            if (e->length >= 24) {
+                uint64_t base;
+                memcpy(&base, p + 8, 8);
+                g_gic.gicd_base = base;
+                g_gic.version = p[20];
+                g_gic_present = true;
+            }
+            break;
+        case MADT_GIC_MSI_FRAME:
+            if (e->length >= 24) {
+                uint64_t base;
+                uint32_t flags;
+                uint16_t count, sbase;
+                memcpy(&base, p + 8, 8);
+                memcpy(&flags, p + 16, 4);
+                memcpy(&count, p + 20, 2);
+                memcpy(&sbase, p + 22, 2);
+                if (g_gic.v2m_base == 0) {
+                    g_gic.v2m_base = base;
+                    if (flags & 1) {
+                        g_gic.v2m_spi_count = count;
+                        g_gic.v2m_spi_base = sbase;
+                    }
+                }
+            }
+            break;
         default:
             break;
         }
@@ -251,13 +310,18 @@ void acpi_init(void)
 
     const struct acpi_madt *madt = (const struct acpi_madt *)acpi_find_table("APIC");
     if (madt == NULL)
-        panic("acpi: no MADT; this kernel requires an APIC platform");
+        panic("acpi: no MADT; this kernel requires an interrupt-controller description");
     parse_madt(madt);
     g_available = true;
 
-    kinfo("acpi: %.4s rev %u, %zu tables, LAPIC at 0x%llx, %zu CPUs, %zu IOAPICs, %zu overrides",
-          root->signature, rsdp->revision, g_table_count, (unsigned long long)g_lapic_base,
-          g_cpu_count, g_ioapic_count, g_override_count);
+    if (g_gic_present)
+        kinfo("acpi: %.4s rev %u, %zu tables, GICv%u at 0x%llx, %zu CPUs, MSI frame 0x%llx", root->signature,
+              rsdp->revision, g_table_count, g_gic.version, (unsigned long long)g_gic.gicd_base, g_cpu_count,
+              (unsigned long long)g_gic.v2m_base);
+    else
+        kinfo("acpi: %.4s rev %u, %zu tables, LAPIC at 0x%llx, %zu CPUs, %zu IOAPICs, %zu overrides",
+              root->signature, rsdp->revision, g_table_count, (unsigned long long)g_lapic_base,
+              g_cpu_count, g_ioapic_count, g_override_count);
 }
 
 bool acpi_available(void)
@@ -295,4 +359,10 @@ size_t acpi_madt_overrides(const struct acpi_madt_override **out)
 {
     *out = g_overrides;
     return g_override_count;
+}
+
+bool acpi_madt_gic(struct acpi_gic *out)
+{
+    *out = g_gic;
+    return g_gic_present;
 }

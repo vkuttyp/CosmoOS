@@ -39,6 +39,15 @@ struct acpi_madt_ioapic {
     uint32_t gsi_base;
 };
 
+/* AArch64: the MADT's GIC description (types 11-13). */
+struct acpi_gic {
+    unsigned version;        /* GICD entry: 0 unknown, 2, 3, 4 */
+    paddr_t gicd_base;
+    paddr_t gicc_base;       /* the first CPU interface's physical base (GICv2) */
+    paddr_t v2m_base;        /* GIC MSI frame, 0 if none */
+    unsigned v2m_spi_base, v2m_spi_count;   /* valid when the frame overrides its TYPER */
+};
+
 struct acpi_madt_override {
     uint8_t  bus;       /* 0 = ISA */
     uint8_t  source;    /* ISA IRQ */
@@ -58,6 +67,8 @@ paddr_t acpi_madt_lapic_base(void);
 size_t  acpi_madt_cpus(const struct acpi_madt_cpu **out);
 size_t  acpi_madt_ioapics(const struct acpi_madt_ioapic **out);
 size_t  acpi_madt_overrides(const struct acpi_madt_override **out);
+/* false when the MADT carries no GIC distributor entry. */
+bool    acpi_madt_gic(struct acpi_gic *out);
 
 /* Map a physical table range to a kernel virtual pointer: direct map when
  * it is RAM, otherwise a fresh uncached-free WB window. */

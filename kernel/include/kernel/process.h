@@ -25,7 +25,7 @@ typedef uint32_t pid_t;
 
 #define PROCESS_NAME_MAX 32
 
-/* User address-space layout (x86-64 canonical lower half, page aligned). */
+/* User address-space layout (the canonical lower half on both targets, page aligned). */
 #define USER_LO         VM_USER_LO
 #define USER_HI         VM_USER_HI
 #define USER_STACK_TOP  0x00007FFFFFFF0000ULL

@@ -56,7 +56,8 @@ bool selftest_acpi(const char **reason)
 {
     const struct acpi_madt_cpu *cpus;
     CHECK(acpi_available());
-    CHECK(acpi_madt_lapic_base() != 0);
+    struct acpi_gic gic_desc;
+    CHECK(acpi_madt_lapic_base() != 0 || acpi_madt_gic(&gic_desc));   /* a LAPIC (x86-64) or a GIC (AArch64) */
     CHECK(acpi_madt_cpus(&cpus) >= 1);
     CHECK(acpi_find_table("APIC") != NULL);
     CHECK(acpi_find_table("ZZZZ") == NULL);

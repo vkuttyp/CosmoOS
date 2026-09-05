@@ -93,28 +93,6 @@ struct elf_image {
 EFI_STATUS elf_load(const uint8_t *file, size_t size, struct elf_image *img, bool *fallback_used);
 
 /* paging.c */
-struct paging_ctx {
-    uint64_t pool_phys;   /* first page of the page-table pool */
-    UINTN    pool_pages;
-    UINTN    pool_used;
-    uint64_t pml4_phys;
-    bool     nx;          /* CPU supports NX; set NX bits when true */
-};
-
-/* Number of pool pages needed for the bootstrap tables. */
-UINTN paging_pool_size(const struct elf_image *img);
-
-/* Build the bootstrap tables. loader_base/size is the running loader image,
- * which is the only identity-mapped range left executable. */
-EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img,
-                        uint64_t loader_base, uint64_t loader_size);
-
-/* cpu.c - x86-64 specifics used by the loader. */
-bool cpu_has_nx(void);
-void cpu_enable_nx(void);
-void cpu_enable_wp(void);
-
-/* Never returns. Disables interrupts, loads cr3, switches stack, jumps. */
-void cpu_jump_to_kernel(uint64_t cr3, uint64_t stack_top, uint64_t info, uint64_t entry) __attribute__((noreturn));
+#include "arch/arch.h"
 
 #endif /* COSMO_BOOT_LOADER_H */

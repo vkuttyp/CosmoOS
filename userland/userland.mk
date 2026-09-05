@@ -59,9 +59,9 @@ USER_ARCHIVE_ENTRIES := \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
 	etc/pkg/keys/cosmo-dev.pub=$(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
 ifeq ($(SELFTEST),1)
-USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test
+USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux
 endif
-USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test \
+USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
 	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/pkg/keys/cosmo-dev.pub
 
 .PHONY: userland

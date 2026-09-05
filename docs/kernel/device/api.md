@@ -130,8 +130,9 @@ or `DMA_BIDIRECTIONAL` and is currently only recorded.
 No-op today; the place an IOMMU tears a mapping down. Any context.
 
 ### `void dma_sync_for_device(...)`, `void dma_sync_for_cpu(...)` *(exported)*
-Purpose: ordering points around device access: a full memory fence on
-x86, whose caches are coherent for DMA. Any context. Drivers call the
+Purpose: ordering points around device access: a compiler barrier plus
+`arch_dma_barrier()` (`sfence` on x86-64, `dsb sy` on AArch64; both
+targets' caches are coherent for DMA). Any context. Drivers call the
 first before ringing a doorbell and the second before reading data the
 device wrote.
 

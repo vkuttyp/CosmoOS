@@ -7,6 +7,8 @@
  * Convention (x86-64): number in rax, arguments in rdi rsi rdx r10 r8
  * r9, result in rax; negative results are -errno. rcx and r11 are
  * clobbered by the instruction.
+ * Convention (AArch64): `svc #0` with the number in x8, arguments in
+ * x0..x5, result in x0; negative results are -errno.
  */
 
 #ifndef UAPI_COSMO_SYSCALL_H

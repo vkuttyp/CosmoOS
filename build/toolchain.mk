@@ -80,4 +80,4 @@ LOADER_CFLAGS := \
 
 LOADER_LDFLAGS := \
 	/subsystem:efi_application /entry:efi_main /nodefaultlib \
-	/Brepro /timestamp:0 /nologo
+	/Brepro /timestamp:0 /nologo $(LOADER_ARCH_LDFLAGS)

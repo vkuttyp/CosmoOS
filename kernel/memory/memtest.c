@@ -64,15 +64,24 @@ bool selftest_pmm(const char **reason)
     pmm_free_pages(b, 3);
     CHECK(free_pages() == baseline);
 
-    /* Zone constraints honoured. */
+    /* Zone constraints honoured. A platform whose RAM starts above 16 MiB
+     * (QEMU virt on AArch64) has an empty DMA zone: the request must fail
+     * cleanly there instead of falling upward. */
+    struct pmm_stats zs;
+    pmm_get_stats(&zs);
     struct page *d = pmm_alloc_page(PMM_FLAGS_ZONE_DMA);
-    CHECK(d != NULL);
-    CHECK(page_to_phys(d) < PMM_ZONE_DMA_LIMIT);
-    CHECK(d->zone == PMM_ZONE_DMA);
+    if (zs.zone_free[PMM_ZONE_DMA] > 0) {
+        CHECK(d != NULL);
+        CHECK(page_to_phys(d) < PMM_ZONE_DMA_LIMIT);
+        CHECK(d->zone == PMM_ZONE_DMA);
+    } else {
+        CHECK(d == NULL);
+    }
     struct page *d32 = pmm_alloc_page(PMM_FLAGS_ZONE_DMA32);
     CHECK(d32 != NULL);
     CHECK(page_to_phys(d32) < PMM_ZONE_DMA32_LIMIT);
-    pmm_free_page(d);
+    if (d)
+        pmm_free_page(d);
     pmm_free_page(d32);
     CHECK(free_pages() == baseline);
 

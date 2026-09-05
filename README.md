@@ -207,5 +207,28 @@ See [docs/development.md](docs/development.md).
   `vmctl` drives one from the shell (`HVTEST: PASS`), eight kernel
   self-tests run six guest images (70 self-tests in total), and a host
   test covers the nested page tables.
-- **Next, Phase 13:** AArch64, per the constitution's roadmap (the same
-  generic layers over an ARM64 arch directory); design documents first.
+- **Phase 13 (done):** AArch64, stage 1 (constitution sections 3, 4 and
+  17, invariants 1 and 10). The same kernel, boot archive and boot-test
+  harness on QEMU's `virt` machine with EDK2 firmware: `make
+  ARCH=aarch64 test`. A second loader architecture directory
+  (`boot/uefi/arch/aarch64/`: EL1, TTBR0/TTBR1 bootstrap tables with
+  RAM and device attributes from the EFI map, `BOOTAA64.EFI`), boot
+  protocol v4 (a second table root), and `kernel/arch/aarch64/`: the
+  exception vector table, GICv2 with GICv2m MSI behind `arch/irqc.h`
+  (GSI = INTID, 1312 vectors), the generic timer with absolute compares,
+  a 4-level stage-1 MMU with the same virtual layout as x86-64 and
+  hardware TLB broadcast, PSCI secondary bring-up, PL011, MMIO fw_cfg,
+  `R_AARCH64` module relocations in a near arena within `CALL26` reach,
+  semihosting exit. Two interface additions (`arch_dma_barrier`,
+  `arch_mmu_near_arena`), the ELF machine and the MADT GIC entries made
+  generic; the Linux table and the virtualization backend are documented
+  stubs (`LINUXTEST: skipped`, `HVTEST: skipped`). CI runs both
+  architectures. Documented in `docs/kernel/arch/aarch64/`.
+- **Next:** the roadmap's numbered phases are complete. What follows are
+  the milestones the constitution defers in section 68 (among them the
+  USB stack, AHCI and the full NVMe feature set, containers, eBPF,
+  graphics and a desktop, fuller Linux compatibility, NUMA, live
+  migration, nested virtualization), plus the AArch64 follow-ups noted
+  in `docs/kernel/arch/aarch64/design.md` (the Linux AArch64 table, an
+  EL2 virtualization backend, GICv3, ASIDs, FP/SIMD in userland); design
+  documents first, one subsystem at a time.

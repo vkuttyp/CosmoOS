@@ -29,4 +29,8 @@ void arch_cpu_wait_for_interrupt(void);
 /* Disable interrupts and halt forever. Used by panic and shutdown. */
 void arch_cpu_halt_forever(void) __noreturn;
 
+/* Order this CPU's memory writes before a device observes them (a DMA
+ * descriptor before its doorbell). x86-64: a store fence; AArch64: dsb sy. */
+void arch_dma_barrier(void);
+
 #endif /* ARCH_CPU_H */

@@ -19,7 +19,8 @@ make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" all "$a/boot.tar" >/dev/nul
 make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" all "$b/boot.tar" >/dev/null
 
 status=0
-for f in kernel/kernel.elf boot/BOOTX64.EFI boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk; do
+case "$arch" in aarch64) loader=boot/BOOTAA64.EFI ;; *) loader=boot/BOOTX64.EFI ;; esac
+for f in kernel/kernel.elf $loader boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf userland/pkg.elf libc/libc.a pkg/repo/INDEX pkg/repo/hello-1.1.cpk pkg/repo/fortune-1.0.cpk; do
     if cmp -s "$a/$f" "$b/$f"; then
         printf '  same     %s\n' "$f"
     else

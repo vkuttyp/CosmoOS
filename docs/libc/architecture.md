@@ -102,11 +102,12 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 | `spawn.h`, `sys/wait.h`, `signal.h` | processes | system calls 32–34, 37 |
 | `sys/socket.h`, `netinet/in.h`, `arpa/inet.h` | sockets | system calls 23–31 |
 | `cosmo/procinfo.h`, `cosmo/klog.h`, `cosmo/sysctl.h` | native introspection | system calls 40–42 |
-| `cosmo/syscall.h` | raw wrappers (internal) | `SYSCALL` |
+| `cosmo/syscall.h` | raw wrappers (internal) | `SYSCALL` (x86-64) or `SVC #0` (AArch64) |
 
-Build: `libc/libc.mk` compiles `libc/src/*.c` and `crt0.S` with the
-user flags into `$(OUT)/libc/libc.a` and `crt0.o`; `userland.mk` links
-every program as `crt0.o program.o ... libc.a` with `user.ld`.
+Build: `libc/libc.mk` compiles `libc/src/*.c` and
+`libc/src/arch/$(ARCH)/crt0.S` with the user flags into
+`$(OUT)/libc/libc.a` and `crt0.o`; `userland.mk` links every program as
+`crt0.o program.o ... libc.a` with `user.ld`.
 
 Tests (`testing.md`): `make host-test` compiles the pure parts
 (`string`, `stdlib` conversions and `qsort`, `vsnprintf`, the allocator

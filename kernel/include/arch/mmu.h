@@ -104,5 +104,10 @@ size_t arch_mmu_large_page_sizes(void);
 
 /* Lowest kernel-half virtual address; below it is user space. */
 vaddr_t arch_mmu_kernel_base(void);
+/* The near arena: kernel virtual addresses modules are loaded at, chosen
+ * so the architecture's direct branches and code model reach the kernel
+ * image from there (x86-64: the top 2 GiB above the image; AArch64: within
+ * +-128 MiB of the image for CALL26). Page aligned, lo < hi. */
+void arch_mmu_near_arena(vaddr_t *lo, vaddr_t *hi);
 
 #endif /* ARCH_MMU_H */

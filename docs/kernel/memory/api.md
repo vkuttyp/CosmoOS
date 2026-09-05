@@ -27,10 +27,10 @@ Common contracts, stated once:
 | `0xFFFF800000000000` | 64 TiB reserved | Higher-half direct map (HHDM): every RAM entry of the boot map, RW, NX, write-back, large pages where aligned |
 | `0xFFFFC00000000000` – `0xFFFFE00000000000` | 32 TiB | Kernel VA arena: `vm_kernel_alloc`, `vm_map_phys` |
 | `0xFFFFFFFF80000000` | 128 MiB | Kernel image at its link address, W^X from ELF flags (`vmm_init` panics if it reaches the near arena) |
-| `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000` | ~1.9 GiB | Near arena: `vm_kernel_alloc(VM_KALLOC_NEAR_KERNEL)`, kernel module text/rodata/data (`docs/kernel/module/`) |
+| `arch_mmu_near_arena()` | x86-64: `0xFFFFFFFF88000000` – `0xFFFFFFFFFF000000` (~1.9 GiB); AArch64: `align2M(__kernel_end)` – `0xFFFFFFFF80000000 + 120 MiB` | Near arena: `vm_kernel_alloc(VM_KALLOC_NEAR_KERNEL)`, kernel module text/rodata/data (`docs/kernel/module/`); the bounds follow the architecture's branch reach (`-mcmodel=kernel` / `CALL26`) |
 
-Below `0xFFFF800000000000` (`arch_mmu_kernel_base()`) is user space,
-which does not exist yet.
+Below `0xFFFF800000000000` (`arch_mmu_kernel_base()`, the same value on
+both architectures) is user space.
 
 ## `kernel/types.h`
 
@@ -244,8 +244,9 @@ region flags (`VM_REGION_GUARD_BELOW`, `VM_REGION_GUARD_ABOVE`,
 - **Inputs:** `size` a non-zero page multiple; `VM_KALLOC_GUARD` adds one
   unmapped page below and above; `VM_KALLOC_POPULATE` maps frames now,
   otherwise the region populates on first touch through the fault path;
-  `VM_KALLOC_NEAR_KERNEL` places the region in the near arena (top 2 GiB,
-  above the image) instead of the main arena.
+  `VM_KALLOC_NEAR_KERNEL` places the region in the near arena (the range
+  `arch_mmu_near_arena` reports, above the image) instead of the main
+  arena.
 - **Outputs:** base address inside the chosen arena, or `0` (bad
   arguments, arena full, region record allocation failure, frame or
   table allocation failure with everything rolled back).

@@ -170,8 +170,8 @@ static void mut_type(uint8_t *elf, size_t n)
 static void mut_machine(uint8_t *elf, size_t n)
 {
     (void)n;
-    elf[18] = (uint8_t)EM_AARCH64;
-    elf[19] = (uint8_t)(EM_AARCH64 >> 8);
+    elf[18] = 0x34;   /* no such machine: rejected on every target */
+    elf[19] = 0x12;
 }
 
 static void mut_magic(uint8_t *elf, size_t n)
@@ -247,7 +247,7 @@ bool selftest_module_reject(const char **reason)
 
     /* Crafted variants, each failing on exactly the intended rule. */
     CHECK(validate_variant(file, elf_size, mut_type, "not a relocatable object (ET_REL)"));
-    CHECK(validate_variant(file, elf_size, mut_machine, "not an x86-64 object"));
+    CHECK(validate_variant(file, elf_size, mut_machine, "not a native (" ELF_MACHINE_NATIVE_NAME ") object"));
     CHECK(validate_variant(file, elf_size, mut_magic, "bad ELF magic"));
     CHECK(validate_variant(file, elf_size, mut_wx, "section is writable and executable (W^X)"));
     CHECK(validate_variant(file, elf_size, mut_oob, "section outside the file"));

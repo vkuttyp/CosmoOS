@@ -10,53 +10,11 @@
 
 #include "loader.h"
 
-#define COM1 0x3F8
-
 static bool g_firmware_console = false;
-static bool g_serial_present = false;
-
-static inline void outb(uint16_t port, uint8_t v)
-{
-    __asm__ volatile("outb %0, %1" : : "a"(v), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port)
-{
-    uint8_t v;
-    __asm__ volatile("inb %1, %0" : "=a"(v) : "Nd"(port));
-    return v;
-}
-
-static void serial_init(void)
-{
-    outb(COM1 + 1, 0x00); /* no interrupts */
-    outb(COM1 + 3, 0x80); /* DLAB on */
-    outb(COM1 + 0, 0x01); /* divisor 1 = 115200 baud */
-    outb(COM1 + 1, 0x00);
-    outb(COM1 + 3, 0x03); /* 8N1, DLAB off */
-    outb(COM1 + 2, 0xC7); /* FIFO on, clear, 14-byte threshold */
-    outb(COM1 + 4, 0x13); /* DTR, RTS, loopback for the presence test */
-    outb(COM1 + 0, 0xA5);
-    if (inb(COM1 + 0) != 0xA5) {
-        g_serial_present = false;
-        return;
-    }
-    outb(COM1 + 4, 0x0B); /* DTR, RTS, OUT2, loopback off */
-    g_serial_present = true;
-}
-
-static void serial_putc(char c)
-{
-    if (!g_serial_present)
-        return;
-    while ((inb(COM1 + 5) & 0x20) == 0)
-        ;
-    outb(COM1 + 0, (uint8_t)c);
-}
 
 void console_init(void)
 {
-    serial_init();
+    arch_serial_init();
     g_firmware_console = (g_st != NULL && g_st->ConOut != NULL);
 }
 
@@ -85,8 +43,8 @@ static void console_putc(char c)
     }
 
     if (c == '\n')
-        serial_putc('\r');
-    serial_putc(c);
+        arch_serial_putc('\r');
+    arch_serial_putc(c);
 }
 
 void lputs(const char *s)
@@ -211,6 +169,5 @@ void die(const char *what, EFI_STATUS status)
         g_bs->Exit(g_image, status, 0, NULL);
     }
 
-    for (;;)
-        __asm__ volatile("cli; hlt");
+    cpu_halt();
 }

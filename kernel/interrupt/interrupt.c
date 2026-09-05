@@ -20,7 +20,7 @@
 
 /* Upper bound on vectors any architecture we target has. x86-64 has 256;
  * AArch64 GIC INTIDs are mapped into this space by its arch layer. */
-#define INTERRUPT_MAX_VECTORS 256
+#define INTERRUPT_MAX_VECTORS 1344   /* x86-64 uses 256; AArch64 1020 INTIDs + software vectors */
 
 struct interrupt_slot {
     interrupt_handler_fn fn;

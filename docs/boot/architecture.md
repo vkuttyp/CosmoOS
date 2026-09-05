@@ -5,31 +5,36 @@
 Get from firmware to `kernel_main()` with the machine in a documented,
 validated state, through a contract the kernel owns. The boot subsystem is
 two things: the **cosmoboot protocol** (`boot/protocol/cosmoboot.h`) and
-the **UEFI loader** that implements it for x86-64 (`boot/uefi/`). The
-kernel-side consumer is small (`kernel/core/bootinfo.c`,
-`kernel/arch/x86_64/entry.S`) and belongs to the kernel, but is described
-here because it is the other half of the contract.
+the **UEFI loader** that implements it for x86-64 and, since Phase 13,
+AArch64 (`boot/uefi/`, with the CPU- and table-specific parts under
+`boot/uefi/arch/<arch>/`). The kernel-side consumer is small
+(`kernel/core/bootinfo.c`, `kernel/arch/<arch>/entry.S`) and belongs to
+the kernel, but is described here because it is the other half of the
+contract.
 
 ## Where it sits
 
 ```
-UEFI firmware (OVMF under QEMU; vendor firmware on hardware)
-   loads \EFI\BOOT\BOOTX64.EFI from the FAT ESP
+UEFI firmware (OVMF / EDK2 aarch64 under QEMU; vendor firmware on hardware)
+   loads \EFI\BOOT\BOOTX64.EFI or \EFI\BOOT\BOOTAA64.EFI from the FAT ESP
         │
         ▼
-boot/uefi (BOOTX64.EFI)                        boot services available
-   main.c      sequence, memory map, ExitBootServices, handoff
-   elf.c       validate + copy PT_LOAD segments of \cosmo\kernel.elf
-   paging.c    bootstrap page tables (identity + HHDM + kernel)
+boot/uefi (BOOTX64.EFI / BOOTAA64.EFI)         boot services available
+   main.c      sequence, memory-map snapshot, ExitBootServices, handoff
+   elf.c       validate + copy PT_LOAD segments of \cosmo\kernel.elf (LOADER_ELF_MACHINE)
    memory.c    page allocation below 4 GiB with loader-typed memory
-   cpu.c       CPUID NX probe, EFER.NXE, CR0.WP, the final jump
-   console.c   firmware console, then COM1 after ExitBootServices
-   efi.h       minimal UEFI definitions (no external EFI headers)
+   console.c   firmware console, then the arch serial port after ExitBootServices
+   efi.h       minimal UEFI definitions (no external EFI headers; EFIAPI is ms_abi on x86 only)
+   arch/arch.h what the generic code asks of an architecture
+   arch/x86_64/  paging.c: PML4 (identity + HHDM + kernel); cpu.c: NX probe, EFER.NXE, CR0.WP, the jump; serial.c: COM1
+   arch/aarch64/ paging.c: TTBR1 (HHDM + kernel) and TTBR0 (identity) tables with RAM/device attributes
+                 from the EFI map; cpu.c: EL1 check, MAIR/TCR/SCTLR, the jump; serial.c: PL011
         │  struct cosmoboot_info in COSMOBOOT_MEM_BOOTINFO memory
-        │  CR3 = bootstrap tables, RDI = info (HHDM virtual), RSP = handoff stack
+        │  x86-64: CR3 = bootstrap tables, RDI = info (HHDM virtual), RSP = handoff stack
+        │  AArch64: TTBR1/TTBR0 = bootstrap tables, MMU on, x0 = info, SP = handoff stack, EL1, DAIF masked
         ▼
-kernel/arch/x86_64/entry.S   _start: own stack, call x86_start()
-kernel/arch/x86_64/start.c   console, GDT, IDT, PIC, CPU
+kernel/arch/<arch>/entry.S   _start: own stack, call x86_start() / aarch64_start()
+kernel/arch/<arch>/start.c   console, CPU state (GDT/IDT/PIC or VBAR/TPIDR), CPU identification
 kernel/core/bootinfo.c       bootinfo_init(): validate; accessors
 kernel/core/main.c           kernel_main()
 ```
@@ -40,8 +45,9 @@ Loader:
 
 - Find and read the kernel file from the volume the loader was started
   from.
-- Reject anything that is not a well-formed x86-64 ELF64 executable with
-  W^X segments and a matching protocol note.
+- Reject anything that is not a well-formed ELF64 executable for the
+  loader's own architecture (`LOADER_ELF_MACHINE`: 62 or 183) with W^X
+  segments and a matching protocol note.
 - Place the kernel in physical memory and map it at its link address with
   permissions taken from the ELF program headers.
 - Provide a higher-half direct map of low physical memory so the kernel
@@ -77,7 +83,8 @@ Kernel side:
 | Interface | Direction | Where |
 |---|---|---|
 | `struct cosmoboot_info`, memory types, magic/version, ELF note | loader to kernel | `boot/protocol/cosmoboot.h` |
-| x86-64 entry state (registers, CR3, RFLAGS.IF, segment state) | loader to kernel | header comment in `cosmoboot.h`, `cpu_jump_to_kernel()` |
+| Entry state per architecture (x86-64: registers, CR3, RFLAGS.IF, segment state; AArch64: EL1, MMU on with TTBR0/TTBR1, DAIF masked, `x0` = info) | loader to kernel | header comment in `cosmoboot.h`, `boot/uefi/arch/<arch>/cpu.c` `cpu_jump_to_kernel()` |
+| `boot/uefi/arch/arch.h` (`paging_*`, `cpu_*`, `arch_serial_*`, `LOADER_ELF_MACHINE`) | generic loader code to its architecture part | `boot/uefi/arch/<arch>/` |
 | `.note.cosmoboot` ELF note (name `COSMO`, type 1, desc = version) | kernel to loader | emitted by `entry.S`, parsed by `elf.c` `parse_notes()` |
 | `bootinfo_*()` accessors | kernel internal | `kernel/include/kernel/bootinfo.h` |
 | UEFI Boot Services subset: `AllocatePages`, `GetMemoryMap`, `HandleProtocol`, `ExitBootServices`, `SetWatchdogTimer`, `Stall`, `Exit`; protocols: LoadedImage, SimpleFileSystem, File, SimpleTextOutput | loader to firmware | `boot/uefi/efi.h` |
@@ -90,8 +97,10 @@ The protocol header is the only file shared between `boot/` and
 - **Own loader, own protocol**, rather than adopting Limine or another
   third-party boot protocol. The kernel's boot ABI is then a documented
   interface this project controls (constitution sections 6 and 24), and
-  AArch64 can implement the same struct without inheriting an x86-centric
-  loader design. The cost is about 900 lines of loader code.
+  AArch64 implements the same struct without inheriting an x86-centric
+  loader design: Phase 13 added one field (`boot_pagetable_root_user`)
+  and a per-architecture directory, nothing else. The cost is about 900
+  lines of generic loader code plus a few hundred per architecture.
 - **Higher-half kernel from day one** at `0xFFFFFFFF80000000`, which
   requires the loader to build page tables. Retrofitting higher-half later
   would touch every address assumption in the kernel.

@@ -30,7 +30,7 @@ static inline void wrmsr(uint32_t msr, uint64_t v)
     __asm__ volatile("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)) : "memory");
 }
 
-bool cpu_has_nx(void)
+static bool cpu_has_nx(void)
 {
     uint32_t a, b, c, d;
     cpuid(0x80000000u, &a, &b, &c, &d);
@@ -40,14 +40,14 @@ bool cpu_has_nx(void)
     return (d & CPUID_EXT_NX) != 0;
 }
 
-void cpu_enable_nx(void)
+static void cpu_enable_nx(void)
 {
     uint64_t efer = rdmsr(MSR_EFER);
     if ((efer & EFER_NXE) == 0)
         wrmsr(MSR_EFER, efer | EFER_NXE);
 }
 
-void cpu_enable_wp(void)
+static void cpu_enable_wp(void)
 {
     uint64_t cr0;
     __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
@@ -57,8 +57,29 @@ void cpu_enable_wp(void)
     }
 }
 
-void cpu_jump_to_kernel(uint64_t cr3, uint64_t stack_top, uint64_t info, uint64_t entry)
+bool cpu_prepare(void)
 {
+    if (cpu_has_nx())
+        return true;
+    lputs("cosmoboot: processor has no NX support; the kernel requires W^X and will not run on it\n");
+    return false;
+}
+
+void cpu_finish(void)
+{
+    cpu_enable_nx();
+    cpu_enable_wp();
+}
+
+void cpu_halt(void)
+{
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
+void cpu_jump_to_kernel(const struct paging_ctx *pg, uint64_t stack_top, uint64_t info, uint64_t entry)
+{
+    uint64_t cr3 = pg->root;
     /*
      * Register roles are fixed by constraints so the sequence cannot
      * clobber an input before it is consumed:

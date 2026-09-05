@@ -39,7 +39,7 @@ struct elf_info {
     uint16_t phnum, phent;
 };
 
-/* Validate an x86-64 static executable for the user range
+/* Validate a native static executable for the user range
  * [user_lo, user_hi). On failure returns -ENOEXEC and, when `why` is
  * non-NULL, points it at an immortal string naming the rule. */
 int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, struct elf_info *info,

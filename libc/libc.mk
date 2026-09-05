@@ -3,7 +3,7 @@
 # program as crt0.o objects libc.a.
 
 LIBC_A    := $(OUT)/libc/libc.a
-LIBC_CRT0 := $(OUT)/libc/src/crt0.o
+LIBC_CRT0 := $(OUT)/libc/src/arch/$(ARCH)/crt0.o
 
 USER_CFLAGS := \
 	--target=$(KERNEL_TARGET) \

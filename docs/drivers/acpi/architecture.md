@@ -23,16 +23,24 @@ all RAM after `vmm_init`.
 - Decode the MADT into typed arrays: local APIC base (with the 64-bit
   override entry), processor entries (LAPIC and x2APIC, only those
   flagged enabled or online-capable), I/O APICs, ISA interrupt source
-  overrides.
+  overrides; since Phase 13 also the GIC entries: CPU interfaces (type
+  11, the MPIDR affinity fields become the processor `hw_id`, the first
+  entry's base is the GICv2 CPU interface), the distributor (type 12,
+  base and version) and the MSI frame (type 13, base and optional SPI
+  range), exposed as `struct acpi_gic` through `acpi_madt_gic()`.
 
 ## Non-responsibilities
 
 AML, FADT power fields, HPET, MCFG (PCIe, Phase 6), SRAT (NUMA, later).
+The AArch64 backend reads its own tables through `acpi_find_table`
+(GTDT for the timer interrupts, SPCR for the console, the FADT's ARM
+boot flags for the PSCI conduit); this driver only locates them.
 
 ## Interfaces
 
 `kernel/acpi.h`: `acpi_init`, `acpi_find_table`, `acpi_madt_*` accessors
-and the `struct acpi_madt_*` records.
+(including `acpi_madt_gic`) and the `struct acpi_madt_*` / `struct
+acpi_gic` records.
 
 ## Concurrency and ownership
 
@@ -43,8 +51,9 @@ excess entries are logged and dropped.
 
 ## Error handling
 
-Missing RSDP or MADT is a panic: this kernel targets APIC platforms only.
-A bad checksum on an individual table skips that table with a warning.
+Missing RSDP or MADT is a panic: this kernel targets APIC (x86-64) and
+GIC (AArch64) platforms only. A bad checksum on an individual table skips
+that table with a warning.
 
 ## Security
 
@@ -54,5 +63,6 @@ entry is read.
 
 ## Testing
 
-Self-test: the MADT reports at least one CPU and the LAPIC base is
-non-zero; under QEMU with `-smp N` exactly N processor entries appear.
+Self-test: the MADT reports at least one CPU and either the LAPIC base
+(x86-64) or the GIC distributor (AArch64) is present; under QEMU with
+`-smp N` exactly N processor entries appear.

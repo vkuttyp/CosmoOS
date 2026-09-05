@@ -115,6 +115,11 @@ const struct x86_cpu_info *x86_cpu_info(void)
 
 /* --- arch/cpu.h --- */
 
+void arch_dma_barrier(void)
+{
+    __asm__ volatile("sfence" ::: "memory");
+}
+
 const char *arch_name(void)
 {
     return "x86_64";

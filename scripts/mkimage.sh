@@ -22,7 +22,7 @@ dd if=/dev/zero of="$tmp" bs=1048576 count=$size_mib status=none 2>/dev/null \
 
 mformat -i "$tmp" -F -v COSMOOS ::
 mmd -i "$tmp" ::/EFI ::/EFI/BOOT ::/cosmo
-mcopy -i "$tmp" "$loader" ::/EFI/BOOT/BOOTX64.EFI
+mcopy -i "$tmp" "$loader" "::/EFI/BOOT/$(basename "$loader")"
 mcopy -i "$tmp" "$kernel" ::/cosmo/kernel.elf
 if [ -n "$archive" ]; then
     mcopy -i "$tmp" "$archive" ::/cosmo/boot.tar

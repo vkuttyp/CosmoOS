@@ -10,6 +10,7 @@
 #include <kernel/spinlock.h>
 
 #include <arch/irqc.h>
+#include <arch/trap.h>
 
 struct irq_slot {
     int vector;         /* -1 = free */
@@ -117,7 +118,7 @@ int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsign
 
 int irq_release_msi(int vector)
 {
-    if (vector < 0 || vector >= 256)
+    if (vector < 0 || (unsigned)vector >= arch_trap_vector_count())
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
     interrupt_unregister_vector((unsigned)vector);

@@ -1,0 +1,8 @@
+# /etc/rc.linux - the Linux ABI programs (docs/compat/linux/testing.md).
+# Run by rc.test only where /boot/tests/linux exists (x86-64 builds); the
+# exit status of this script is the section's verdict.
+/boot/tests/linux/lxhello || exit 1
+/boot/tests/linux/lxtest || exit 1
+ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
+rm /tmp/.musl.probe
+exit 0
