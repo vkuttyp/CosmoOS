@@ -12,6 +12,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
+#include <kernel/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
@@ -1244,6 +1245,11 @@ void vfs_init(void)
     g_initialized = true;
     if (vfs_register_fs(&ramfs_fs_type))
         panic("vfs: cannot register ramfs");
+    /* The page cache may hold a quarter of RAM before clean pages are
+     * reclaimed (docs/kernel/security/design.md §3). */
+    struct pmm_stats pst;
+    pmm_get_stats(&pst);
+    pagecache_set_limit(pst.total_pages / 4);
     struct mount *root;
     int rc = do_mount(&ramfs_fs_type, NULL, 0, &root);
     if (rc)

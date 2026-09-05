@@ -87,6 +87,7 @@ struct fs_type {
 };
 
 #define MOUNT_RDONLY (1u << 0)
+#define MOUNT_CACHE_IS_STORE (1u << 1)   /* the page cache holds the only copy (ramfs): never reclaimed */
 
 struct mount {
     struct kobject obj;
@@ -104,6 +105,8 @@ struct mount {
     struct list_node link;
     unsigned nr_vnodes;
     uint64_t next_ino;        /* for filesystems that number in memory */
+    uint64_t cache_pages;     /* pages the page cache holds for this mount (atomic) */
+    uint64_t cache_limit_pages;   /* a miss beyond this is -ENOSPC; 0: no budget (docs/kernel/security/design.md §3) */
     bool unmounting;          /* set under mountpoint->lock while vfs_umount decides */
     bool unmounted;           /* set under sync_lock once fs->unmount ran */
 };

@@ -11,6 +11,7 @@
 #ifndef KERNEL_PAGECACHE_H
 #define KERNEL_PAGECACHE_H
 
+#include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/types.h>
 
@@ -23,7 +24,10 @@ struct pc_entry {
     uint64_t index;
     struct page *page;
     bool dirty;
+    bool on_lru;               /* clean and reclaimable: linked on the global LRU */
     struct pc_entry *next;
+    struct vnode *vn;          /* owner (unreferenced; the entry dies with its cache) */
+    struct list_node lru;      /* global LRU, under the LRU lock */
 };
 
 struct pagecache {
@@ -53,7 +57,18 @@ int pagecache_put_page(struct vnode *vn, uint64_t index, const void *buf);   /* 
 
 struct pagecache_stats {
     uint64_t hits, misses, writebacks, pages;
+    uint64_t reclaimed;        /* clean pages evicted by the global limit */
+    uint64_t budget_refusals;  /* misses refused by a mount's page budget (-ENOSPC) */
 };
 void pagecache_get_stats(struct pagecache_stats *out);
+
+/* The global cap on cached pages (docs/kernel/security/design.md §3): set
+ * at boot to a quarter of the buddy's pages; 0 disables reclaim. Clean
+ * pages of mounts without MOUNT_CACHE_IS_STORE are evicted from a global
+ * LRU when a miss would exceed it. */
+void pagecache_set_limit(uint64_t pages);
+uint64_t pagecache_limit(void);
+/* Evict up to `max` clean pages from the LRU tail; returns the number evicted. */
+unsigned pagecache_reclaim(unsigned max);
 
 #endif /* KERNEL_PAGECACHE_H */
