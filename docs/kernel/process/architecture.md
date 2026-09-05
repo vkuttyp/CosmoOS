@@ -1,8 +1,8 @@
 # Processes and User Mode: Architecture
 
-Phase 4 of the roadmap. This document is the specification; `design.md`
-holds data structures and algorithms; `api.md`, `invariants.md`,
-`testing.md` complete the set. The object model and the system-call
+Phase 4 of the roadmap, extended by Phase 9 (userland). This document
+is the specification; `design.md` holds data structures and algorithms;
+`api.md`, `invariants.md`, `testing.md` complete the set. The object model and the system-call
 layer have their own documents under `docs/kernel/object/` and
 `docs/kernel/syscall/`.
 
@@ -14,13 +14,15 @@ kernel loads a static ELF executable into a fresh address space, enters
 user mode, services system calls through a personality-specific table,
 delivers faults back to the process as termination, and reclaims
 everything when the last thread exits. The first process is `init`,
-delivered by the bootloader as a module because no filesystem exists
-yet.
+delivered in the boot archive and started by the kernel; since Phase 9
+every other process is created by a running process with `spawn` from
+an executable file, waited for with `wait`, and can be terminated with
+`kill`.
 
 ## 2. Where it sits
 
 ```text
-   user programs (userland/init, later the shell)      libc/include/cosmo/
+   user programs (userland/: init, sh, the utilities)  libc/ (docs/libc/)
         │  SYSCALL instruction, uapi/cosmo/syscall.h numbers and structs
         ▼
    kernel/arch/x86_64/syscall_entry.S   swapgs, kernel stack, frame, sysret
@@ -48,10 +50,12 @@ small integers to objects with per-handle rights; console object for
 standard I/O until the VFS exists.
 
 **Processes** (`kernel/process/`): process table and PIDs; creation from
-an ELF image; user address space lifecycle; the main user thread; exit
-with a status; termination on an unrecoverable fault; reaping of the
-address space by the reaper thread (never on the exiting thread's own
-stack or CR3).
+an ELF image (`process.c`) or from an executable file on behalf of a
+calling process (`spawn.c`); user address space lifecycle; the main user
+thread; exit with a status; termination on an unrecoverable fault or by
+`kill`; parent and children, zombies and `wait`, reparenting of orphans
+to init; the working directory; reaping of the address space by the
+reaper thread (never on the exiting thread's own stack or CR3).
 
 **ELF loader** (`kernel/process/elf.c`): validation of a static x86-64
 ELF64 executable (bounds, W^X, page-granularity overlap, entry inside an
@@ -76,9 +80,10 @@ carried `init.elf` as a single raw module.
 
 ## 4. Non-responsibilities (later)
 
-- `fork`, `exec` from a file, `wait`, process trees with reparenting
-  (needs a VFS for exec; fork needs CoW which needs the VM object layer).
-- Signals, job control, sessions, controlling terminals.
+- `fork` (needs CoW, which needs the VM object layer) and `exec`
+  replacing the current image; `spawn` is the creation primitive.
+- Signal handlers and masks, job control, sessions, controlling
+  terminals; `kill` only terminates.
 - Multi-threaded processes from user space (`thread_create` syscall) and
   TLS setup (the fields exist).
 - Dynamic linking, `PT_INTERP`, `PT_GNU_STACK` policy beyond refusing
@@ -86,8 +91,8 @@ carried `init.elf` as a single raw module.
 - Linux personality (Phase 11); only the native table exists.
 - Resource limits enforcement, audit, capabilities beyond a credential
   placeholder (Phase 5+ security work).
-- Console input (`read` on the console returns 0 until a serial receive
-  path exists).
+- Set-uid, resource limits, argument sizes beyond one stack page
+  (`COSMO_ARG_MAX` 2048 bytes, 128 entries), file-backed `mmap`.
 
 ## 5. Interfaces (contracts in api.md)
 
@@ -95,7 +100,7 @@ carried `init.elf` as a single raw module.
 |---|---|
 | `kernel/object.h` | `struct kobject`, `kobject_init/get/put`, `struct kobject_type` |
 | `kernel/handle.h` | `struct handle_table`, `handle_install/lookup/close`, rights |
-| `kernel/process.h` | `struct process`, `process_create_from_elf`, `process_exit`, `process_current`, `process_wait_exit` |
+| `kernel/process.h` | `struct process`, `process_create_from_elf` (with `struct process_spawn_attr`), `process_spawn`, `process_exit`, `process_wait_child`, `process_kill`, `process_check_kill`, `process_return_to_user`, `process_chdir`, `process_info`, `process_set_init`, `process_current`, `process_wait_exit` |
 | `kernel/elf.h` | `elf_validate`, `elf_load_into` |
 | `kernel/syscall.h` | `syscall_dispatch`, `struct syscall_args`, personality |
 | `kernel/uaccess.h` | `user_range_ok`, `copy_from_user`, `copy_to_user`, `strncpy_from_user` |
@@ -106,8 +111,9 @@ carried `init.elf` as a single raw module.
 
 `struct kobject`, `struct kobject_type`, `struct handle_table` (fixed
 64 entries, spinlock), `struct process` (pid, name, kobject, space,
-threads, handles, credentials placeholder, personality, state, exit
-status, completion, parent pid), `struct vm_space` gains `user` flag and
+threads, handles, credentials, personality, state, exit status,
+completion, parent and children, `child_wq`, `reaped`, `kill_sig`,
+`cwd` and `cwd_path`), `struct vm_space` gains `user` flag and
 `user_lo/user_hi`, `struct thread` gains `proc`, `user_entry`,
 `user_sp`, `kernel_stack_top`, `struct syscall_args` (nr, six args,
 frame pointer).
@@ -119,9 +125,11 @@ Lock order additions, outermost first:
 ```text
 process_table.lock → process.lock → handle_table.lock
 process.lock → vm_space.lock (user space) → pmm_zone.lock
+parent.lock → child.lock (never the reverse; reparenting detaches under the parent, then takes each child alone)
 ```
 
-`process.lock` protects the thread list, state, and exit status;
+`process.lock` protects the thread list, state, exit status, children,
+`kill_sig` and the working directory;
 `handle_table.lock` protects the table. Objects are refcounted; a handle
 holds a reference, a lookup returns a referenced object the caller must
 put. A process is reaped by the reaper thread after its last thread
@@ -135,7 +143,12 @@ kernel stack with interrupts enabled and may block.
   frees them and the lower-half page tables.
 - The ELF image is borrowed for the duration of loading; segment bytes
   are copied into freshly allocated user frames.
-- Handles own object references; closing a handle drops one.
+- Handles own object references; closing a handle drops one. The whole
+  table is closed when the last thread of the process is gone (before
+  the parent collects the status), so a pipe whose writer exited
+  delivers end of file at once.
+- A zombie owns nothing but its identity and status: no address space is
+  kept beyond the reaper, no handles, no working directory.
 - The boot archive's memory is `COSMOBOOT_MEM_ARCHIVE`, reserved by the
   PMM for the life of the kernel (the `init` entry is read at each
   `init` start in this phase; a later phase copies it into a ramfs and
@@ -145,9 +158,11 @@ kernel stack with interrupts enabled and may block.
 
 System calls return negative errno values in the return register;
 invalid handles `-EBADF`, bad pointers `-EFAULT`, bad arguments
-`-EINVAL`, unknown numbers `-ENOSYS`. A user-mode fault that no region
-handles terminates the process with exit status `128 + 11` and a log
-line naming the fault; the kernel never panics on user behaviour. A
+`-EINVAL`, unknown numbers `-ENOSYS`, a wait interrupted by a kill
+`-EINTR`. A user-mode fault that no region handles terminates the
+process with exit status `128 + 11` and a log line naming the fault; a
+kill terminates it with `128 + sig`; the kernel never panics on user
+behaviour. A
 kernel-mode fault on a user address that validation did not catch is a
 kernel bug and panics.
 
@@ -173,6 +188,9 @@ Nothing is measured.
 - SFMASK clears IF, TF, DF, and AC on syscall entry so user state cannot
   leak into kernel execution; SWAPGS is done exactly once per transition.
 - The kernel never exposes pointers to user space; handles are indices.
+- A child receives exactly the handles its parent maps in `spawn`, with
+  the parent's rights on them, and nothing else; the executable must be a
+  regular file with an execute bit; `kill` requires the same uid or uid 0.
 
 ## 12. Testing strategy
 
@@ -193,3 +211,52 @@ process with region kinds is where CoW (`fork`) and file-backed regions
 pointer and per-thread kernel stack, so user threads are a syscall away.
 AArch64 implements `arch/user.h` with `SVC`, `ERET`, `TTBR0`, and
 `PAN`.
+
+## 14. Phase 9: processes as userland sees them
+
+Phase 9 (userland) turns the Phase 4 mechanism into a Unix process
+model that a shell can drive. The additions live in `kernel/process/`
+(`process.c`, `spawn.c`) and `kernel/syscall/native.c`; their design is
+in `design.md` section 10, the calls in `api.md`, the rules in
+`invariants.md`.
+
+- **Creation from a file** (`spawn`, system call 32): the parent names
+  an executable path, `argv`, `envp`, and exactly which of its handles
+  the child receives and at which numbers (a capability-style handle
+  map; nothing is inherited implicitly). The kernel reads the file
+  through the VFS into a kernel buffer, validates and loads it with the
+  Phase 4 ELF loader, gives the child the parent's credentials and
+  working directory, records the parent, and starts it. There is no
+  `fork`: a handle-based kernel copies exactly what the parent chooses.
+- **Termination and reaping** (`wait`, 33): a child that exits becomes
+  a zombie until its parent collects the status; `wait` blocks for any
+  child or one child, `WNOHANG` polls; orphans are reparented to init
+  (the process `kernel_main` registered with `process_set_init`; it is
+  pid 1 only when no self-tests created processes first) or, when init
+  is gone, reaped by the kernel. Kernel-created processes (parent 0) are
+  reaped by the kernel as before. Handles close at exit, not at reaping.
+- **Kill** (`kill`, 34): the only asynchronous event a process can
+  receive. `SIGKILL`, `SIGTERM`, `SIGINT` (and any number 1..31)
+  terminate the target with status `128 + sig`; there are no handlers.
+  Permission: same uid or uid 0. Delivery points are the system-call
+  boundary, the return from any interrupt or fault to user mode, and
+  every killable wait in the kernel (`wait_event_killable`), so a
+  process blocked in a `read` on the console or a pipe, or in `wait`,
+  dies promptly.
+- **Handles**: `pipe` (35, see `docs/kernel/ipc/`), `dup` (36: copy a
+  handle to the lowest free slot or to a chosen slot, rights preserved),
+  `fstat` on any I/O object (character device for the console, FIFO for
+  a pipe end, socket for a socket).
+- **Working directory** (`chdir` 38, `getcwd` 39): a per-process
+  current directory (vnode reference plus a normalised absolute path)
+  from which relative paths in every filesystem system call resolve;
+  inherited by `spawn`.
+- **Introspection** (`getppid` 37, `procinfo` 40, `klog` 41, `sysctl`
+  42): the process table for `ps`, the kernel log ring for `dmesg`, and
+  a small read-only set of named values for `sysctl`.
+
+**Non-responsibilities (still)**: `fork`, `exec` replacing the current
+image, signal handlers and masks, process groups and sessions, threads
+in user programs, resource limits, argument sizes beyond one stack page
+(`COSMO_ARG_MAX` 2048 bytes and `COSMO_ARG_ENTRIES` 128 across `argv`
+and `envp`), file-backed `mmap`, set-uid.

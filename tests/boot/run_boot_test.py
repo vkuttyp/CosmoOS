@@ -51,10 +51,16 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] blk: vda: 16384 sectors of 512 bytes",
     r"^\[ INFO\] virtio-console: virtio\d+: registered as a console sink",
     r"^\[ INFO\] hello: module init \(ABI v1, load 1\)",
-    r"^init: hello from user mode, pid \d+",
+    r"^init: CosmoOS userland, pid \d+",
+    r"^CosmoOS userland ready",
+    r"^init: rc exited with status 0",
+    r"^interactive-ok$",
+    r"^init: shell exited with status 0",
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
 ]
+# Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
+SHTEST_MARKER = r"^SHTEST: PASS"
 
 # Only produced by the self-test run of init (debug builds); required
 # whenever self-tests ran at all.
@@ -139,12 +145,19 @@ def main():
         nettest = NetTest()
         env.update(nettest.env())
 
+    # Phase 9: the interactive shell harness types at the console prompt
+    # (normal runs only; the panic run never reaches a prompt).
+    shelltest = None
+    if not args.expect_panic:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from shelltest import ShellTest
+        shelltest = ShellTest()
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
     with open(args.log, "wb") as log:
         proc = subprocess.Popen(
             [runner, args.image],
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if shelltest is not None else subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
@@ -154,6 +167,11 @@ def main():
             net_thread = threading.Thread(target=nettest.run_when_ready, args=(args.log, proc, args.timeout - 30),
                                           daemon=True)
             net_thread.start()
+        shell_thread = None
+        if shelltest is not None:
+            shell_thread = threading.Thread(target=shelltest.run, args=(args.log, proc, args.timeout - 10),
+                                            daemon=True)
+            shell_thread.start()
         try:
             returncode = proc.wait(timeout=args.timeout)
             timed_out = False
@@ -208,6 +226,12 @@ def main():
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (network harness)")
 
+    if shelltest is not None:
+        if shell_thread is not None:
+            shell_thread.join(5)
+        failures.extend(shelltest.failures(lines))
+    if want_selftest and not any(re.search(SHTEST_MARKER, ln) for ln in lines):
+        failures.append(f"missing marker /{SHTEST_MARKER}/ (shell test script)")
     # The virtio console must have carried the kernel's output too.
     if not args.expect_panic:
         try:

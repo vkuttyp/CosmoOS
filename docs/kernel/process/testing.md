@@ -2,8 +2,9 @@
 
 ## Kernel self-tests (`kernel/process/proctest.c`)
 
-Run from thread 0 after the SMP tests; each leaves the process count
-where it found it.
+Run from thread 0 after the SMP tests (and, since Phase 7, last in the
+table so `init --selftest` finds the cosmofs the filesystem tests leave
+behind); each leaves the process count where it found it.
 
 ### `objects`
 
@@ -37,26 +38,81 @@ Crafted 120-byte images built by `make_elf` (one `PT_LOAD`, memsz 4096):
 128 zero bytes passed to `process_create_from_elf` → `-ENOEXEC` and no
 process object; the log shows `rejected: bad ELF magic`.
 
+### `process-spawn` (Phase 9)
+
+`path_normalize`: `/` + `usr/bin` → `/usr/bin`; `/usr/bin` + `..` →
+`/usr`; `/usr/bin` + `../../..` → `/`; `/a` + `./b//c/./d` → `/a/b/c/d`;
+`/a/b` + `/x/../y` → `/y`; `/` + `.` → `/`; a 4-byte output buffer →
+`-ENAMETOOLONG`. Then two kills of the archive's `init` created by the
+kernel: `init --block` (blocked in a console read) is killed with
+`SIGTERM` after 50 ms and must exit with 143 within 2 s; `init --spin`
+(a CPU-bound loop, killed with `SIGKILL`) must exit with 137, which
+proves the return-to-user delivery point. Both are checked not to have
+exited before the kill.
+
 ### `process-user`
 
 Runs the archive's `init` as `init --selftest` and requires exit status 0
 within 5 s, then waits for the process count to return to its baseline
 (the object is released by the reaper). Skipped with a log line when
 the loader found no module. The user program's checks
-(`userland/init/init.c`, `selftest()`, which first calls `fs_selftest()`
-for the Phase 7 filesystem calls, see
-`docs/kernel-services/vfs/testing.md`), all of which must pass for
-status 0. Since Phase 7 the process tests are the last entries of the
-self-test table so that `init --selftest` finds the cosmofs the
-`cosmofs-*` tests leave on the scratch disk:
+(`userland/init/init.c`, `selftest()`: `fs_selftest()` for the Phase 7
+filesystem calls (`docs/kernel-services/vfs/testing.md`), `net_selftest()`
+for the Phase 8 sockets (`docs/kernel-services/network/testing.md`),
+`proc_selftest()` for Phase 9, then the Phase 4 checks below) must all
+pass for status 0. Since Phase 9 init is built on libc, so most checks go
+through the library (`docs/libc/testing.md`); the Phase 4 checks still
+use the raw wrappers to test kernel error codes exactly.
+
+`proc_selftest` (Phase 9):
+
+- **pipes and dup**: `pipe` gives two distinct handles ≥ 3; `write` 3
+  bytes, `fstat` on the read end is a FIFO of size 3, `read` returns
+  them; `read` on the write end and `write` on the read end → `EBADF`;
+  `dup` of the write end keeps it alive after the original closes;
+  `dup2(d, 40)` → 40 and writable; `dup2(d, 64)` → `EINVAL`; after the
+  last write end closes the pending two bytes are read and then 0 (EOF);
+  a pipe whose read end is closed → `EPIPE` on write.
+- **console**: `fstat(0)` is a character device; `isatty(0)`; `fstat(7)`
+  → `EBADF`.
+- **spawn and wait**: `echo spawned child` with the pipe's write end as
+  the child's handle 1 → the read end yields `spawned child\n` then EOF
+  (after the parent closed its copy); `waitpid(pid)` → status 0; a
+  second `waitpid(pid)` → `ECHILD`. `sh -c "cd /tmp && pwd && exit 7"`
+  prints `/tmp` and exits 7; the parent's cwd is still `/`.
+- **kill**: `cat` with the pipe's read end as its handle 0 blocks;
+  `waitpid(WNOHANG)` → 0; `kill(pid, SIGKILL)` → 0; `waitpid` → 137;
+  `kill(999999)` → `ESRCH`; `kill(pid, 0)` → `EINVAL`.
+- **hostile spawn**: a map naming parent handle 63 (free) → `EBADF`;
+  two entries for child slot 0 → `EINVAL`; `/etc/rc` (mode 0644) and
+  `/bin` (a directory) → `EACCES`; `/bin/nothere` → `ENOENT`;
+  `spawnvp("nothere")` → `ENOENT`; an empty `argv` → `EINVAL`;
+  `waitpid(-1)` with no children → `ECHILD`.
+- **working directory**: `chdir("/tmp")`, `mkdir("cwdtest")` creates
+  `/tmp/cwdtest`; `chdir("cwdtest/../cwdtest/.")` → `/tmp/cwdtest`;
+  `chdir("..")` → `/tmp`; `chdir("/boot/init")` → `ENOTDIR`;
+  `chdir("/nope")` → `ENOENT`; `getcwd` into 4 bytes → `ERANGE`;
+  `rmdir("cwdtest")`, `chdir("/")`.
+- **introspection**: `getppid() == 0`; `procinfo` lists its own pid with
+  name `init` and one thread; `klog_read` returns more than 100 bytes
+  containing a log line; `sysctl_get("kernel.name")` is `CosmoOS`
+  (length 7), `hw.ncpu` ≥ 1, `sysctl.names` contains `kernel.version`,
+  `no.such` → `ENOENT`, a 3-byte buffer gets a truncated value and the
+  full length.
+- **libc**: `malloc(100000)` written, `realloc` to 200000 keeps the
+  bytes; a mixed `snprintf` format gives length 40 and the expected
+  text; `strtol`/`strtoul`; `setenv`/`getenv`.
+
+The Phase 4 checks (raw wrappers), unchanged except where noted:
 
 - **write**: 19 bytes to handle 1 → 19; zero length → 0; handle 7
   (unopened), handle 0 (stdin, no WRITE right), handle -1 → `-EBADF`;
   buffer at `0xffffffff80000000` (kernel), `0x10` (below the window),
   `0x00007FFFFFFFF000` (top of the window), `0x0000600000000000`
   (unmapped) → `-EFAULT`; length `(size_t)-1` → `-EFAULT`.
-- **read**: handle 0 → 0 (EOF); handle 1 (no READ right) → `-EBADF`;
-  kernel-pointer buffer → `-EFAULT`.
+- **read**: handle 1 (no READ right) → `-EBADF`; kernel-pointer buffer
+  → `-EFAULT`; a zero-length read of handle 0 → 0 without blocking (a
+  real read would wait for a typed line).
 - **pid/yield/clock/sleep**: `getpid` > 0; `yield` → 0; a 5 ms sleep
   advances the clock by at least 5 ms and less than 200 ms; a sleep
   over one hour → `-EINVAL`.
@@ -68,13 +124,12 @@ self-test table so that `init --selftest` finds the cosmofs the
   `0x0000200000000000` → that address, written; `MAP_FIXED` on the
   same page → `-EEXIST`; `munmap` of it → 0; `munmap(0x10)` → `-EINVAL`.
 - **log/close/unknown**: `log` of 20 bytes → 0; kernel pointer →
-  `-EFAULT`; length 4096 → `-EINVAL`; `close(7)` → `-EBADF`; `close(2)`
-  → 0 then `write(2)` → `-EBADF`; numbers `SYS_COUNT`, 999999, and -1
-  → `-ENOSYS`.
+  `-EFAULT`; length 4096 → `-EINVAL`; `close(7)` → `-EBADF`; numbers
+  `SYS_COUNT`, 999999, and -1 → `-ENOSYS`.
 - **stack**: a 64 KiB local array is written at both ends through
   lazily populated stack pages.
-
-The kernel side counts 43 system calls for this run.
+- **last**: `close(2)` → 0 then `write(2)` → `-EBADF` (after this no
+  failure could be reported on handle 2).
 
 ### `process-fault`
 
@@ -84,28 +139,30 @@ requires exit status `COSMO_EXIT_FAULT` (139). The log shows
 
 ## Harness markers (`tests/boot/run_boot_test.py`)
 
-Always required: `init: hello from user mode, pid N`, `[ INFO] init
-exited with status 0`, `[ INFO] boot complete`. Required whenever any
-`SELFTEST:` line appears (debug builds): `USERTEST: PASS`. Release
-builds disable self-tests and run only the real `init`, so the user
-self-test marker is not demanded there.
+Always required: `init: CosmoOS userland, pid N`, `CosmoOS userland
+ready`, `init: rc exited with status 0`, `interactive-ok` (typed by the
+shell harness, `docs/userland/testing.md`), `init: shell exited with
+status 0`, `[ INFO] init exited with status 0`, `[ INFO] boot complete`.
+Required whenever any `SELFTEST:` line appears (debug builds):
+`USERTEST: PASS` and `SHTEST: PASS`. Release builds disable self-tests
+and run only the real `init`, so those two are not demanded there; the
+interactive harness runs in every normal build.
 
-## Measured results (2026-09-04, QEMU TCG, Apple Silicon host)
+## Measured results (2026-09-05, QEMU TCG, Apple Silicon host)
 
 | Configuration | Result |
 |---|---|
-| debug, `-smp 4` | `SELFTEST: PASS (32 tests)`, `USERTEST: PASS`, init exits 0, ~3.0–3.6 s |
+| debug, `-smp 4` | `SELFTEST: PASS (61 tests)`, `USERTEST: PASS`, `SHTEST: PASS`, the shell harness completes, init exits 0, about 10 s |
 | debug, `-smp 1` | PASS |
-| release, `-smp 4` | PASS (init exits 0) |
-| three repeated debug boots | 3/3 |
+| release, `-smp 4` | PASS (init exits 0 after the interactive session) |
 | `make test-crash` | PASS (kernel-side fault report unchanged) |
-| `make host-test` | 14/14 |
+| `make host-test` | 6 binaries pass |
 | `make analyze` | clean |
 | `make reproducible` | byte-identical |
 
-The user ELF (`out/x86_64-debug/userland/init.elf`, 57 KiB, packed
-into the boot archive as `init`) has three `PT_LOAD` segments (r-x,
-r--, rw-) and a non-executable `PT_GNU_STACK`.
+Every user ELF (`out/x86_64-debug/userland/*.elf`, packed into the boot
+archive as `init`, `bin/*`, `sbin/*`) has three `PT_LOAD` segments
+(r-x, r--, rw-) and a non-executable `PT_GNU_STACK`.
 
 ## Gaps and planned tests
 
@@ -113,7 +170,10 @@ r--, rw-) and a non-executable `PT_GNU_STACK`.
   test drives it yet; a `tests/host/test_elf.c` with the crafted cases
   and a fuzz loop over random mutations of the init image is planned.
 - No fuzzing of the syscall surface from user space; a user-side
-  fuzzer for argument combinations is planned once `read` has input.
+  fuzzer for argument combinations is planned.
+- No test kills a process blocked in a socket wait or in `sleep`; no
+  test creates an orphan under the real init; no test exceeds
+  `COSMO_ARG_MAX`.
 - No concurrency tests for the handle table (single thread per
   process today).
 - SMAP (`stac`/`clac`) is untested on `qemu64`; a run with

@@ -188,8 +188,13 @@ file and drops the vnode reference.
 a handle's kobject, or NULL for another object kind (the console).
 
 **`void ramfs_populate_boot(void)`** Creates `/boot`, `/boot/modules`,
-`/boot/tests`, `/tmp`, `/mnt`, `/dev` and copies every boot archive
-entry into `/boot/<name>`. Once, after `vfs_init` and `bootarchive_init`.
+`/boot/tests`, `/tmp`, `/mnt`, `/dev`, `/bin`, `/sbin`, `/etc` and copies
+every boot archive entry into the namespace: entries named `bin/...` and
+`sbin/...` become `/bin/...` and `/sbin/...` with mode 0755, `etc/...`
+becomes `/etc/...` with mode 0644, everything else goes to
+`/boot/<name>` with mode 0644 (the bootstrap namespace policy of the
+archive, `docs/userland/`). Once, after `vfs_init` and
+`bootarchive_init`.
 
 **`vfs_mount_count`, `vfs_vnode_count`, `vfs_dump`** Diagnostics.
 

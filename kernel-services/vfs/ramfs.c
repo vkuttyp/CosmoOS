@@ -336,10 +336,10 @@ struct fs_type ramfs_fs_type = {
 
 /* --- boot population --------------------------------------------------- */
 
-static int write_file(const char *path, const void *data, size_t len)
+static int write_file(const char *path, const void *data, size_t len, uint32_t mode)
 {
     struct file *f;
-    int rc = vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f);
+    int rc = vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, mode, &f);
     if (rc)
         return rc;
     int64_t n = file_write(f, data, len);
@@ -349,7 +349,8 @@ static int write_file(const char *path, const void *data, size_t len)
 
 void ramfs_populate_boot(void)
 {
-    static const char *const dirs[] = { "/boot", "/boot/modules", "/boot/tests", "/tmp", "/mnt", "/dev" };
+    static const char *const dirs[] = { "/boot", "/boot/modules", "/boot/tests", "/tmp", "/mnt", "/dev",
+                                        "/bin",  "/sbin",         "/etc" };
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
         int rc = vfs_mkdir(NULL, dirs[i], 0755);
         if (rc)
@@ -359,8 +360,18 @@ void ramfs_populate_boot(void)
     for (unsigned i = 0; i < bootarchive_count(); i++) {
         const struct bootarchive_entry *e = bootarchive_entry(i);
         char path[VFS_PATH_MAX];
-        ksnprintf(path, sizeof(path), "/boot/%s", e->name);
-        int rc = write_file(path, e->data, e->size);
+        /* The bootstrap namespace: bin/, sbin/ and etc/ entries are the
+         * installed system (docs/userland/); everything else is /boot. */
+        uint32_t mode = 0644;
+        if (strncmp(e->name, "bin/", 4) == 0 || strncmp(e->name, "sbin/", 5) == 0) {
+            ksnprintf(path, sizeof(path), "/%s", e->name);
+            mode = 0755;
+        } else if (strncmp(e->name, "etc/", 4) == 0) {
+            ksnprintf(path, sizeof(path), "/%s", e->name);
+        } else {
+            ksnprintf(path, sizeof(path), "/boot/%s", e->name);
+        }
+        int rc = write_file(path, e->data, e->size, mode);
         if (rc)
             kwarn("ramfs: cannot populate %s (%d)", path, rc);
         else

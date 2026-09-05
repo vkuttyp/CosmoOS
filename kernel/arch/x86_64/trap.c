@@ -13,6 +13,8 @@
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
+#include <kernel/process.h>
+#include <arch/user.h>
 #include <kernel/sched.h>
 
 #include <arch/irqc.h>
@@ -80,6 +82,11 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
             (frame->rflags & RFLAGS_IF))
             sched_preempt();
     }
+
+    /* Returning to ring 3: a pending kill ends the process here, so a
+     * CPU-bound loop dies at its next timer tick. */
+    if (arch_trap_frame_is_user(frame) && pc->irq_depth == 0 && pc->preempt_count == 0)
+        process_return_to_user();
 }
 
 /* --- arch/trap.h --- */

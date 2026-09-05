@@ -13,7 +13,9 @@ end, name without NUL, typeflag other than `'0'` or `'\0'`). Entries are
 recorded in a fixed table (`BOOTARCHIVE_MAX_ENTRIES` = 64) as
 `{name, data, size}` pointers into the archive's `COSMOBOOT_MEM_ARCHIVE`
 memory, which the PMM keeps reserved for the life of the kernel. Lookup
-is by exact name (`init`, `modules/hello.ko`, `tests/cosmotest.ko`).
+is by exact name (`init`, `modules/hello.ko`, `tests/cosmotest.ko`;
+since Phase 9 also `bin/sh`, `sbin/ps`, `etc/rc`, which the ramfs
+places at `/bin`, `/sbin`, `/etc`, `docs/kernel-services/vfs/api.md`).
 
 ### The module ABI (`kernel/include/kernel/module.h`)
 

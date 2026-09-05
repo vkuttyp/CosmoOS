@@ -81,6 +81,20 @@ struct kobject *handle_lookup(struct handle_table *t, int h, unsigned rights_nee
     return obj;
 }
 
+struct kobject *handle_get(struct handle_table *t, int h, unsigned *rights_out)
+{
+    if (h < 0 || h >= HANDLE_TABLE_SIZE)
+        return NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    struct kobject *obj = t->entries[h].obj;
+    if (obj != NULL) {
+        kobject_get(obj);
+        *rights_out = t->entries[h].rights;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    return obj;
+}
+
 int handle_close(struct handle_table *t, int h)
 {
     if (h < 0 || h >= HANDLE_TABLE_SIZE)

@@ -19,6 +19,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
 #include <kernel/vmm.h>
+#include <kernel/wait.h>
 
 typedef uint32_t pid_t;
 
@@ -67,6 +68,30 @@ struct process {
     spinlock_t lock;
     struct list_node all_link;         /* process table */
     uint64_t syscalls;                 /* diagnostics */
+
+    /* Phase 9 (docs/kernel/process/design.md, "Phase 9 additions") */
+    struct process *parent;            /* referenced; NULL: kernel-created or orphan of a dead init */
+    struct list_node children;         /* struct process.sibling, under this->lock */
+    struct list_node sibling;
+    struct waitqueue child_wq;         /* the parent waits here */
+    bool reaped;                       /* status collected, or nobody will */
+    int kill_sig;                      /* 0, or the signal terminating the process */
+    struct vnode *cwd;                 /* referenced */
+    char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
+};
+
+/* How spawn builds a child (kernel creators pass NULL: console handles
+ * 0-2, root working directory, no parent). */
+struct process_handle_map {
+    int child;
+    int parent;
+};
+struct process_spawn_attr {
+    struct process *parent;                        /* the calling process */
+    const struct process_handle_map *handles;      /* validated by the caller */
+    unsigned nr_handles;                           /* 0 with handles NULL: inherit 0, 1, 2 */
+    struct vnode *cwd;                             /* NULL: the parent's */
+    const char *cwd_path;
 };
 
 /* One-time setup (process table, caches). Requires sched_init. */
@@ -76,7 +101,32 @@ void process_init(void);
  * thread. `argv`/`envp` are NULL-terminated arrays (may be NULL).
  * Returns 0 and a referenced process, or -ENOEXEC/-ENOMEM/-EINVAL. */
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
-                            const char *const envp[], struct process **out);
+                            const char *const envp[], const struct process_spawn_attr *attr, struct process **out);
+
+/* Phase 9: create from an executable file, on behalf of the calling
+ * process (kernel/process/spawn.c). `handles` must be validated as the
+ * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
+int process_spawn(const char *path, const char *const argv[], const char *const envp[],
+                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, pid_t *pid_out);
+
+/* Collect an exited child: pid > 0 for that child, -1 for any. Returns
+ * 0 with *pid_out (0 when WNOHANG found none), -ECHILD, -EINTR. */
+#define PROCESS_WAIT_NOHANG (1u << 0)
+int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out);
+
+/* Terminate `p` asynchronously with status 128 + sig. */
+void process_kill(struct process *p, int sig);
+/* Delivery points: system-call boundary, return to user mode, killable waits. */
+void process_check_kill(void);
+void process_return_to_user(void);
+
+/* Working directory. */
+int process_chdir(const char *path);
+int path_normalize(const char *base, const char *rel, char *out, size_t n);
+
+/* Introspection for procinfo: fills up to `count` records, returns the total. */
+struct cosmo_procinfo;
+unsigned process_info(struct cosmo_procinfo *buf, unsigned count);
 
 /* Terminate the calling process (all its threads; only one exists in
  * this phase) with `status`. Never returns. */
@@ -90,6 +140,9 @@ int process_wait_exit(struct process *p);
 struct process *process_current(void);
 
 struct process *process_lookup(pid_t pid);   /* referenced or NULL */
+
+/* The system's init: orphans are reparented to it. Set once by kernel_main. */
+void process_set_init(struct process *p);
 
 static inline void process_get(struct process *p) { kobject_get(&p->obj); }
 static inline void process_put(struct process *p) { kobject_put(&p->obj); }

@@ -9,7 +9,46 @@
 #include <kernel/console.h>
 #include <kernel/log.h>
 #include <kernel/printf.h>
+#include <kernel/spinlock.h>
 #include <kernel/string.h>
+
+/* The ring: every emitted line (all builds), oldest overwritten first.
+ * `head` is the total number of bytes ever written; the ring holds the
+ * last KLOG_RING_SIZE of them. */
+static char g_ring[KLOG_RING_SIZE];
+static uint64_t g_ring_head;
+static spinlock_t g_ring_lock = SPINLOCK_INIT("klog-ring");
+
+static void ring_put(const char *s, size_t n)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_ring_lock);
+    for (size_t i = 0; i < n; i++)
+        g_ring[(g_ring_head + i) % KLOG_RING_SIZE] = s[i];
+    g_ring_head += n;
+    spin_unlock_irqrestore(&g_ring_lock, st);
+}
+
+size_t klog_copy(char *buf, size_t len)
+{
+    arch_irq_state_t st = spin_lock_irqsave(&g_ring_lock);
+    uint64_t avail = g_ring_head < KLOG_RING_SIZE ? g_ring_head : KLOG_RING_SIZE;
+    uint64_t start = g_ring_head - avail;            /* oldest byte still in the ring */
+    if (avail > len)
+        start = g_ring_head - len;                    /* newest `len` bytes */
+    /* Begin at a line boundary: skip to just after the first newline
+     * unless we hold the whole history. */
+    if (start != g_ring_head - avail) {
+        while (start < g_ring_head && g_ring[start % KLOG_RING_SIZE] != '\n')
+            start++;
+        if (start < g_ring_head)
+            start++;
+    }
+    size_t n = 0;
+    for (uint64_t i = start; i < g_ring_head && n < len; i++)
+        buf[n++] = g_ring[i % KLOG_RING_SIZE];
+    spin_unlock_irqrestore(&g_ring_lock, st);
+    return n;
+}
 
 static enum klog_level g_level =
 #if CONFIG_DEBUG
@@ -56,7 +95,7 @@ void kvlog(enum klog_level level, const char *fmt, va_list ap)
     }
     line[n++] = '\n';
     line[n] = '\0';
-
+    ring_put(line, n);
     console_write(line, n);
 }
 
@@ -77,6 +116,7 @@ void kvprintf(const char *fmt, va_list ap)
     size_t n = (size_t)m;
     if (n >= sizeof(line))
         n = sizeof(line) - 1;
+    ring_put(line, n);
     console_write(line, n);
 }
 

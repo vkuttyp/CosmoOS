@@ -171,6 +171,11 @@ pointer.
 (selectors, `gdt_init`, `gdt_set_kernel_stack`), `idt.h` (vector
 constants, `idt_init`, `idt_load`, `x86_isr_stubs`), `io.h` (port I/O),
 `pic.h` (`pic_init_masked`, `pic_eoi`, `pic_is_spurious`), `serial.h`
-(`serial_init`, `serial_present`, `serial_putc`, `serial_write`),
+(`serial_init`, `serial_present`, `serial_putc`, `serial_write`; since
+Phase 9 `serial.c` also implements `arch_console_input_init` from
+`arch/console.h`: it requests ISA IRQ 4 through `irq_legacy_to_gsi` and
+`irq_request`, enables the UART's receive interrupt, unmasks the line
+with `irq_enable`, and its handler feeds every received byte to the
+console tty with `tty_input`, `docs/kernel/tty/`),
 `trapframe.h` (`struct arch_trap_frame` layout, `x86_trap_dispatch`).
 These may change freely; only x86-64 code includes them.

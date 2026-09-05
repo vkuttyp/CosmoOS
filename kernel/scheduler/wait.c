@@ -121,6 +121,23 @@ void thread_sleep_ns(uint64_t ns)
      * timer is idle and the stack objects may go. */
 }
 
+int thread_sleep_ns_killable(uint64_t ns)
+{
+    struct sleeper s;
+    struct timer t;
+
+    waitqueue_init(&s.wq, "sleep");
+    s.done = false;
+    timer_setup(&t, sleep_fired, &s);
+    timer_start(&t, ns);
+    int rc = wait_event_killable(&s.wq, __atomic_load_n(&s.done, __ATOMIC_ACQUIRE));
+    if (rc) {
+        /* Woken by a kill: the timer may still be armed on our stack. */
+        timer_cancel(&t);
+    }
+    return rc;
+}
+
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(thread_sleep_ns);

@@ -59,17 +59,35 @@ kernel stack.
 | 29 | `recvfrom` | `int h, void *buf, size_t len, struct cosmo_sockaddr *from, size_t *fromlen` | bytes, 0 at end of stream | `EBADF`, `EFAULT`, `EINVAL`, `ENOTCONN`, `ECONNRESET` |
 | 30 | `shutdown` | `int h, int how` | 0 | `EBADF`, `EINVAL` |
 | 31 | `getsockname` | `int h, struct cosmo_sockaddr *sa, size_t *len` | 0 | `EBADF`, `EFAULT` |
+| 32 | `spawn` | `const struct cosmo_spawn *req` | the child's pid | `EFAULT`, `EINVAL` (flags, NULL path/argv, empty argv, bad map), `E2BIG`, `ENAMETOOLONG`, `EBADF` (map names a free handle), path errors, `ENOTDIR` (cwd), `EACCES` (not a regular executable file), `ENOEXEC`, `ENOMEM` |
+| 33 | `wait` | `int pid, int *status, unsigned flags` | the reaped pid; 0 with `COSMO_WNOHANG` when none exited | `EINVAL` (pid 0 or < -1, unknown flag), `ECHILD`, `EINTR`, `EFAULT` |
+| 34 | `kill` | `int pid, int sig` | 0 | `EINVAL` (sig outside 1..31, pid <= 0), `ESRCH`, `EPERM` |
+| 35 | `pipe` | `int h[2]` | 0; `h[0]` reads, `h[1]` writes | `EFAULT`, `ENOMEM`, `EMFILE` |
+| 36 | `dup` | `int h, int target` | the new handle | `EBADF`, `EINVAL` (target < -1 or >= 64), `EMFILE` |
+| 37 | `getppid` | none | the parent's pid, 0 for a kernel-created process | none |
+| 38 | `chdir` | `const char *path` | 0 | `EFAULT`, `ENAMETOOLONG`, path errors, `ENOTDIR` |
+| 39 | `getcwd` | `char *buf, size_t len` | the path length (the NUL is written too) | `ERANGE`, `EFAULT` |
+| 40 | `procinfo` | `struct cosmo_procinfo *buf, size_t count` | the total number of processes (up to `count` records filled) | `EFAULT`, `ENOMEM` |
+| 41 | `klog` | `char *buf, size_t len` | bytes copied: the newest whole log lines that fit | `EFAULT`, `ENOMEM` |
+| 42 | `sysctl` | `const char *name, char *buf, size_t len` | the value's length (NUL written when it fits) | `ENOENT`, `EFAULT` |
 
 Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
 `struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
 in `docs/kernel-services/vfs/api.md`. Calls 23–31 (Phase 8), with
 `struct cosmo_sockaddr`, `COSMO_AF_*`, `COSMO_SOCK_*`, `COSMO_SHUT_*`
 and their errno values, are in `docs/kernel-services/network/api.md`.
-`SYS_COUNT` is 32. A file opened with `open` is a `struct file` kobject
-of a `kobject_io_type`, so `read`, `write` and `close` operate on it
-unchanged; the handle carries READ and/or WRITE rights from the access
-mode. A socket from `socket` or `accept` is likewise a `struct socket`
-kobject with `read`/`write` (`recvfrom`/`sendto` without an address).
+Calls 32–42 (Phase 9) are specified below and in
+`docs/kernel/process/api.md`, `docs/kernel/ipc/api.md`,
+`docs/kernel/tty/api.md`. `SYS_COUNT` is 43. A file opened with `open`
+is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
+and `close` operate on it unchanged; the handle carries READ and/or
+WRITE rights from the access mode. A socket from `socket` or `accept` is
+likewise a `struct socket` kobject with `read`/`write` (`recvfrom`/
+`sendto` without an address); a pipe end from `pipe` has `read` or
+`write`. `fstat` works on every I/O object with a `stat` operation:
+files (the vnode's attributes), the console (`COSMO_DT_CHR`, mode 0620)
+and pipe ends (`COSMO_DT_FIFO`, `size` = bytes in the pipe); sockets
+have none yet (`EBADF`).
 
 Unknown numbers (including `SYS_COUNT` and above, and negative values
 seen as large unsigned) return `-ENOSYS` with no side effects.
@@ -82,11 +100,12 @@ Details per call:
   it is `noreturn` even if a future multi-threaded exit returns.
 - **write**: `[buf, buf+len)` must lie inside `[0x400000,
   0x00007FFFFFFFF000)` and be mapped in the caller's space; the copy is
-  done in 512-byte chunks through a kernel bounce buffer, so a fault in
+  done in 1024-byte chunks through a kernel bounce buffer, so a fault in
   a later chunk returns the bytes written so far. `len` 0 returns 0
   after the handle check. The console object accepts every byte.
-- **read**: at most 512 bytes per call. The console returns 0 (no input
-  path yet).
+- **read**: at most 1024 bytes per call. The console blocks until a line
+  has been typed and returns at most one line (`docs/kernel/tty/api.md`);
+  a pipe returns what is buffered or 0 when every write end is gone.
 - **sleep_ns**: bounded to 3600 s to catch garbage arguments; the wait
   is a timer sleep, resolution is the 250 Hz tick.
 - **mmap**: `len` must be a non-zero page multiple; `flags` must
@@ -105,23 +124,72 @@ Details per call:
   INFO as `pid N: <text>`. Intended for early user diagnostics.
 - **close**: releases the handle; the slot can be reused by a later
   install. Closing 0–2 is allowed.
+- **spawn**: `req` is `struct cosmo_spawn { path, argv, envp, handles,
+  nr_handles, cwd, flags }`; `flags` must be 0; `argv` is required with
+  `argv[0]`; `envp` may be NULL; `argv` and `envp` together may hold at
+  most `COSMO_ARG_ENTRIES` (128) strings of at most `COSMO_ARG_MAX`
+  (2048) bytes including terminators, else `E2BIG`; `handles` is an
+  array of `nr_handles` (at most 64) `struct cosmo_spawn_handle {
+  child, parent }` pairs, each copying the caller's handle `parent` with
+  its rights into the child's slot `child` (slots distinct, in range;
+  `handles == NULL` with `nr_handles == 0` copies the caller's 0, 1, 2);
+  `cwd` (optional) names the child's working directory relative to the
+  caller's; the file must be regular with an execute bit and at most
+  16 MiB. The child gets the caller's uid/gid and is the caller's child
+  for `wait`. Every pointer is copied before use (`EFAULT`).
+- **wait**: `pid` is a child's pid or -1 for any child; `status` may be
+  NULL; the status is the child's exit status (`exit(n)` gives `n & 0xff`,
+  a kill `128 + sig`, a fault 139); the child is gone once collected.
+  Blocks until a matching child exits unless `COSMO_WNOHANG`; `EINTR`
+  when the caller is killed while waiting.
+- **kill**: `sig` is `1..31` (`COSMO_SIGHUP` 1, `COSMO_SIGINT` 2,
+  `COSMO_SIGKILL` 9, `COSMO_SIGSEGV` 11, `COSMO_SIGTERM` 15); every
+  signal terminates the target with status `128 + sig` at its next
+  system call, return from an interrupt, or killable wait. The caller
+  must have the target's uid or uid 0. A zombie is a valid target
+  (nothing happens).
+- **pipe**: two new handles in the lowest free slots, READ on `h[0]`,
+  WRITE on `h[1]`; `docs/kernel/ipc/api.md` for the stream's rules.
+- **dup**: `target == -1` takes the lowest free slot; otherwise `target`
+  (0..63) is closed first if occupied and the copy installed there;
+  `dup(h, h)` returns `h`. Rights are copied.
+- **chdir**/**getcwd**: the working directory is a vnode reference plus
+  a normalised absolute path (`.`, `..` and repeated slashes resolved);
+  `getcwd` needs `len` at least the path length plus one (`ERANGE`).
+- **procinfo**: `struct cosmo_procinfo { pid, ppid, uid, gid, state (0
+  running, 1 exiting, 2 zombie), nr_threads, syscalls, run_ns, name[32] }`
+  in table order; `count` above 4096 is clamped; call again with a larger
+  buffer when the result exceeds `count`.
+- **klog**: at most 32 KiB (`KLOG_RING_SIZE`); the ring holds every
+  emitted line, oldest overwritten first; reading does not consume.
+- **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
+  `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
+  `vm.page_size`, `vm.pages_total`, `vm.pages_free`, and `sysctl.names`
+  (the list, newline separated); values are strings; read-only.
 
 ### Constants
 
 `COSMO_PROT_NONE/READ/WRITE/EXEC` (0, 1, 2, 4); `COSMO_MAP_ANONYMOUS`
 (1), `COSMO_MAP_FIXED` (2); `COSMO_E*` error numbers equal to the
 kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
-`EINVAL` 22, `EMFILE` 24, `ENOSYS` 38, and others); `COSMO_EXIT_FAULT`
-139; `COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags
-`COSMO_AT_NULL` 0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9.
+`EINVAL` 22, `EMFILE` 24, `ENOSYS` 38, and others; Phase 9 adds `ESRCH`
+3, `EINTR` 4, `E2BIG` 7, `ENOEXEC` 8, `ECHILD` 10, `EACCES` 13,
+`ENOTTY` 25, `ESPIPE` 29, `ERANGE` 34); `COSMO_EXIT_FAULT` 139;
+`COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags `COSMO_AT_NULL`
+0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9; `COSMO_DT_FIFO` 4,
+`COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*`,
+`COSMO_NSIG` 32; `COSMO_ARG_MAX` 2048, `COSMO_ARG_ENTRIES` 128,
+`COSMO_PATH_MAX` 1024.
 
 ### Initial process state
 
 At entry `rsp` points to `argc`, followed by `argv[0..argc-1]`, NULL,
 `envp[...]`, NULL, then `(tag, value)` auxiliary pairs ending with
 `AT_NULL`; strings follow. All general registers are zero, `rflags` is
-`IF` only, the stack is 16-byte aligned at `argc`. Handles 0, 1, 2 are
-the console with READ, WRITE, WRITE rights. The stack region is 8 MiB
+`IF` only, the stack is 16-byte aligned at `argc`. Handles 0, 1, 2 of a
+kernel-created process (init) are the console with READ, WRITE, WRITE
+rights; a spawned process has exactly the handles its parent mapped.
+The working directory is the parent's (the root for init). The stack region is 8 MiB
 below `0x00007FFFFFFF0000` with a guard page beneath it; only its top
 page is populated.
 
@@ -137,9 +205,12 @@ page is populated.
 `cosmo_mount`, `cosmo_umount`, and since Phase 8 `cosmo_socket`,
 `cosmo_bind`, `cosmo_listen`, `cosmo_accept`, `cosmo_connect`,
 `cosmo_sendto`, `cosmo_recvfrom`, `cosmo_shutdown`, `cosmo_getsockname`
-(over `cosmo_syscall5`) return the raw kernel result
-as `long`; there is no `errno` variable yet. ABI stability: the wrapper
-names are the start of the native libc and are meant to stay.
+(over `cosmo_syscall5`), and since Phase 9 `cosmo_spawn`, `cosmo_wait`,
+`cosmo_kill`, `cosmo_pipe`, `cosmo_dup`, `cosmo_getppid`, `cosmo_chdir`,
+`cosmo_getcwd`, `cosmo_procinfo`, `cosmo_klog`, `cosmo_sysctl`, return
+the raw kernel result as `long`. The C library (`docs/libc/`) translates
+them into `errno` and the standard names; programs use the library, the
+raw wrappers are internal to it (and to `init --selftest`).
 
 ## Kernel dispatcher (`kernel/include/kernel/syscall.h`)
 
@@ -153,7 +224,9 @@ names are the start of the native libc and are meant to stay.
   interrupts enabled, `irq_depth == 0`, `preempt_count == 0` (asserted).
   Panics if the current thread has no process. Increments the global
   and per-process call counters; unknown numbers also bump
-  `syscall_unknown_count` and log at DEBUG.
+  `syscall_unknown_count` and log at DEBUG. Calls `process_check_kill`
+  before and after the handler: a process with a pending kill exits
+  here instead of returning to user mode.
 - Blocking: whatever the handler does.
 
 ### `struct syscall_args { uint64_t nr; uint64_t a[6]; void *frame; }`

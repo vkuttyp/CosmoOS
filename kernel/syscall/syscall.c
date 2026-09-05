@@ -39,7 +39,10 @@ int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
         .a = { args[0], args[1], args[2], args[3], args[4], args[5] },
         .frame = frame,
     };
-    return pers->table[nr](&a);
+    process_check_kill();
+    int64_t rc = pers->table[nr](&a);
+    process_check_kill();
+    return rc;
 }
 
 uint64_t syscall_count(void)

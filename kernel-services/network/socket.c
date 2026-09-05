@@ -11,6 +11,8 @@
 #include <kernel/socket.h>
 #include <kernel/string.h>
 
+#include <uapi/cosmo/syscall.h>
+
 static uint32_t g_count;
 
 static void socket_release(struct kobject *obj)
@@ -37,10 +39,21 @@ static int64_t socket_obj_write(struct kobject *obj, const void *buf, size_t len
     return ksock_sendto(container_of(obj, struct socket, obj), buf, len, NULL);
 }
 
+static int socket_obj_stat(struct kobject *obj, struct cosmo_stat *st)
+{
+    (void)obj;
+    memset(st, 0, sizeof(*st));
+    st->type = COSMO_DT_SOCK;
+    st->mode = 0600;
+    st->nlink = 1;
+    return 0;
+}
+
 static const struct kobject_io_type socket_type = {
     .base = { .name = "socket", .release = socket_release },
     .read = socket_obj_read,
     .write = socket_obj_write,
+    .stat = socket_obj_stat,
 };
 
 struct socket *socket_from_kobject(struct kobject *obj)
@@ -162,7 +175,9 @@ int ksock_accept(struct socket *s, struct socket **out, struct netaddr *peer)
             break;
         if (s->error || (s->shut & 1))
             return take_error(s) ? take_error(s) : -EINVAL;
-        wait_event(&s->wait, tcp_accept_ready(s->tcp) || s->error || (s->shut & 1));
+        int w = wait_event_killable(&s->wait, tcp_accept_ready(s->tcp) || s->error || (s->shut & 1));
+        if (w)
+            return w;
     }
     struct socket *c = alloc_socket(s->family, COSMO_SOCK_STREAM, s->uid);
     if (c == NULL) {
@@ -197,8 +212,13 @@ int ksock_connect(struct socket *s, const struct netaddr *addr)
         if (rc == 0) {
             s->state = SS_CONNECTING;
             mutex_unlock(&s->lock);
-            wait_event(&s->wait, tcp_state_of(s->tcp) != TCP_SYN_SENT && tcp_state_of(s->tcp) != TCP_SYN_RCVD);
+            int w = wait_event_killable(&s->wait,
+                                        tcp_state_of(s->tcp) != TCP_SYN_SENT && tcp_state_of(s->tcp) != TCP_SYN_RCVD);
             mutex_lock(&s->lock);
+            if (w) {
+                mutex_unlock(&s->lock);
+                return w;   /* being killed; the pcb finishes or times out on its own */
+            }
             if (tcp_state_of(s->tcp) == TCP_ESTABLISHED || tcp_state_of(s->tcp) == TCP_CLOSE_WAIT) {
                 s->state = SS_CONNECTED;
             } else {
@@ -247,7 +267,10 @@ int64_t ksock_sendto(struct socket *s, const void *buf, size_t len, const struct
         }
         done += (size_t)n;
         if (done < len) {
-            wait_event(&s->wait, tcp_send_space(s->tcp) > 0 || s->tcp->error || tcp_state_of(s->tcp) == TCP_CLOSED);
+            int w = wait_event_killable(&s->wait, tcp_send_space(s->tcp) > 0 || s->tcp->error ||
+                                                      tcp_state_of(s->tcp) == TCP_CLOSED);
+            if (w)
+                return done ? (int64_t)done : w;
             if (s->tcp->error || tcp_state_of(s->tcp) == TCP_CLOSED)
                 return done ? (int64_t)done : (s->tcp->error ? s->tcp->error : -EPIPE);
         }
@@ -269,7 +292,9 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
                 return 0;
             if (s->error)
                 return take_error(s);
-            wait_event(&s->wait, mbufq_len(&s->udp.rxq) > 0 || s->error || (s->shut & 1));
+            int w = wait_event_killable(&s->wait, mbufq_len(&s->udp.rxq) > 0 || s->error || (s->shut & 1));
+            if (w)
+                return w;
         }
         uint32_t n = m->pkt.len < len ? m->pkt.len : (uint32_t)len;
         m_copydata(m, 0, n, buf);
@@ -294,8 +319,10 @@ int64_t ksock_recvfrom(struct socket *s, void *buf, size_t len, struct netaddr *
             return 0;
         if (s->tcp->state == TCP_CLOSED)
             return s->tcp->error ? s->tcp->error : 0;
-        wait_event(&s->wait, tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error ||
-                                 s->tcp->state == TCP_CLOSED || (s->shut & 1));
+        int w = wait_event_killable(&s->wait, tcp_recv_avail(s->tcp) > 0 || s->tcp->fin_rcvd || s->tcp->error ||
+                                                  s->tcp->state == TCP_CLOSED || (s->shut & 1));
+        if (w)
+            return w;
     }
 }
 

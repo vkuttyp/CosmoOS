@@ -13,6 +13,10 @@
 #include <kernel/log.h>
 #include <kernel/object.h>
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
+#include <kernel/pipe.h>
+#include <kernel/pmm.h>
+#include <kernel/printf.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
 #include <kernel/socket.h>
@@ -20,13 +24,14 @@
 #include <kernel/syscall.h>
 #include <kernel/timer.h>
 #include <kernel/uaccess.h>
+#include <kernel/version.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
 
 #include <uapi/cosmo/syscall.h>
 
-#define IO_CHUNK 512
+#define IO_CHUNK 1024   /* one console line (TTY_LINE_MAX) fits a single read */
 
 static int64_t sys_exit(struct syscall_args *a)
 {
@@ -125,8 +130,7 @@ static int64_t sys_sleep_ns(struct syscall_args *a)
     uint64_t ns = a->a[0];
     if (ns > 3600ULL * NS_PER_SEC)
         return -EINVAL;
-    thread_sleep_ns(ns);
-    return 0;
+    return thread_sleep_ns_killable(ns);
 }
 
 static int64_t sys_clock_ns(struct syscall_args *a)
@@ -242,7 +246,7 @@ static int64_t sys_open(struct syscall_args *a)
     unsigned flags = (unsigned)a->a[1];
     uint32_t mode = (uint32_t)a->a[2];
     struct file *f;
-    rc = vfs_open(NULL, path, flags, mode, &f);
+    rc = vfs_open(process_current()->cwd, path, flags, mode, &f);
     if (rc)
         return rc;
     unsigned rights = 0;
@@ -263,7 +267,7 @@ static int64_t sys_stat(struct syscall_args *a)
     if (rc)
         return rc;
     struct cosmo_stat st;
-    rc = vfs_stat(NULL, path, &st);
+    rc = vfs_stat(process_current()->cwd, path, &st);
     if (rc)
         return rc;
     return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
@@ -271,12 +275,24 @@ static int64_t sys_stat(struct syscall_args *a)
 
 static int64_t sys_fstat(struct syscall_args *a)
 {
-    struct file *f = file_of((int)a->a[0], 0);
-    if (f == NULL)
+    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    if (obj == NULL)
         return -EBADF;
     struct cosmo_stat st;
-    file_stat(f, &st);
-    file_put(f);
+    struct file *f = file_from_kobject(obj);
+    int rc = 0;
+    if (f) {
+        file_stat(f, &st);
+    } else {
+        const struct kobject_io_type *io = (const struct kobject_io_type *)obj->type;
+        if (io->stat == NULL)
+            rc = -EBADF;
+        else
+            rc = io->stat(obj, &st);
+    }
+    kobject_put(obj);
+    if (rc)
+        return rc;
     return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
 }
 
@@ -294,21 +310,21 @@ static int64_t sys_mkdir(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_mkdir(NULL, path, (uint32_t)a->a[1]);
+    return rc ? rc : vfs_mkdir(process_current()->cwd, path, (uint32_t)a->a[1]);
 }
 
 static int64_t sys_unlink(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_unlink(NULL, path);
+    return rc ? rc : vfs_unlink(process_current()->cwd, path);
 }
 
 static int64_t sys_rmdir(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_rmdir(NULL, path);
+    return rc ? rc : vfs_rmdir(process_current()->cwd, path);
 }
 
 static int64_t sys_rename(struct syscall_args *a)
@@ -318,7 +334,7 @@ static int64_t sys_rename(struct syscall_args *a)
     if (rc)
         return rc;
     rc = get_path(a->a[1], newp);
-    return rc ? rc : vfs_rename(NULL, oldp, newp);
+    return rc ? rc : vfs_rename(process_current()->cwd, oldp, newp);
 }
 
 static int64_t sys_getdents(struct syscall_args *a)
@@ -417,9 +433,16 @@ static int addr_to_user(uint64_t uptr, uint64_t ulen, const struct netaddr *a)
         return 0;
     struct cosmo_sockaddr sa;
     netaddr_to_user_shape(&sa, a);
-    size_t len = sizeof(sa);
-    if (copy_to_user(uptr, &sa, sizeof(sa)))
+    /* The caller's length bounds the copy (a short buffer gets a prefix);
+     * the full size is reported back, as POSIX does. */
+    size_t room = sizeof(sa);
+    if (ulen && copy_from_user(&room, ulen, sizeof(room)))
         return -EFAULT;
+    if (room > sizeof(sa))
+        room = sizeof(sa);
+    if (room && copy_to_user(uptr, &sa, room))
+        return -EFAULT;
+    size_t len = sizeof(sa);
     if (ulen && copy_to_user(ulen, &len, sizeof(len)))
         return -EFAULT;
     return 0;
@@ -603,6 +626,310 @@ static int64_t sys_getsockname(struct syscall_args *a)
     return rc ? rc : addr_to_user(a->a[1], a->a[2], &addr);
 }
 
+/* --- Phase 9: processes, pipes, cwd, introspection ---------------------------- */
+
+struct spawn_copy {
+    char path[VFS_PATH_MAX];
+    char cwd[VFS_PATH_MAX];
+    const char *argv[COSMO_ARG_ENTRIES + 1];
+    const char *envp[COSMO_ARG_ENTRIES + 1];
+    char strings[COSMO_ARG_MAX];
+    size_t used;
+    struct process_handle_map map[HANDLE_TABLE_SIZE];
+};
+
+/* Copy a NULL-terminated pointer array and its strings. `*count` entries
+ * are already used across argv and envp together. */
+static int copy_strv(uint64_t uarr, const char **out, struct spawn_copy *sc, unsigned *count)
+{
+    unsigned n = 0;
+    if (uarr == 0) {
+        out[0] = NULL;
+        return 0;
+    }
+    for (;;) {
+        uint64_t uptr;
+        if (copy_from_user(&uptr, uarr + (uint64_t)n * 8, 8))
+            return -EFAULT;
+        if (uptr == 0)
+            break;
+        if (*count >= COSMO_ARG_ENTRIES)
+            return -E2BIG;
+        size_t room = sizeof(sc->strings) - sc->used;
+        if (room == 0)
+            return -E2BIG;
+        int len = strncpy_from_user(sc->strings + sc->used, uptr, room);
+        if (len < 0)
+            return len == -ENAMETOOLONG ? -E2BIG : len;
+        out[n++] = sc->strings + sc->used;
+        sc->used += (size_t)len + 1;
+        (*count)++;
+    }
+    out[n] = NULL;
+    return 0;
+}
+
+static int64_t sys_spawn(struct syscall_args *a)
+{
+    struct cosmo_spawn req;
+    if (copy_from_user(&req, a->a[0], sizeof(req)))
+        return -EFAULT;
+    if (req.flags != 0 || req.path == NULL || req.argv == NULL)
+        return -EINVAL;
+    if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
+        return -EINVAL;
+    struct spawn_copy *sc = kzalloc(sizeof(*sc));
+    if (sc == NULL)
+        return -ENOMEM;
+    int rc = get_path((uint64_t)(uintptr_t)req.path, sc->path);
+    if (rc)
+        goto out;
+    const char *cwd = NULL;
+    if (req.cwd) {
+        rc = get_path((uint64_t)(uintptr_t)req.cwd, sc->cwd);
+        if (rc)
+            goto out;
+        cwd = sc->cwd;
+    }
+    unsigned count = 0;
+    rc = copy_strv((uint64_t)(uintptr_t)req.argv, sc->argv, sc, &count);
+    if (rc)
+        goto out;
+    rc = copy_strv((uint64_t)(uintptr_t)req.envp, sc->envp, sc, &count);
+    if (rc)
+        goto out;
+    if (req.nr_handles) {
+        STATIC_ASSERT(sizeof(struct process_handle_map) == sizeof(struct cosmo_spawn_handle), "handle map shape");
+        if (copy_from_user(sc->map, (uint64_t)(uintptr_t)req.handles,
+                           req.nr_handles * sizeof(struct cosmo_spawn_handle))) {
+            rc = -EFAULT;
+            goto out;
+        }
+    }
+    pid_t pid = 0;
+    rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
+                       &pid);
+out:
+    kfree(sc);
+    return rc ? rc : (int64_t)pid;
+}
+
+static int64_t sys_wait(struct syscall_args *a)
+{
+    int pid = (int)a->a[0];
+    unsigned flags = (unsigned)a->a[2];
+    if (pid == 0 || pid < -1 || (flags & ~COSMO_WNOHANG))
+        return -EINVAL;
+    pid_t got = 0;
+    int status = 0;
+    int rc = process_wait_child(pid, (flags & COSMO_WNOHANG) ? PROCESS_WAIT_NOHANG : 0, &got, &status);
+    if (rc)
+        return rc;
+    if (got != 0 && a->a[1] != 0 && copy_to_user(a->a[1], &status, sizeof(status)))
+        return -EFAULT;
+    return got;
+}
+
+static int64_t sys_kill(struct syscall_args *a)
+{
+    int pid = (int)a->a[0];
+    int sig = (int)a->a[1];
+    if (sig < 1 || sig >= COSMO_NSIG || pid <= 0)
+        return -EINVAL;
+    struct process *target = process_lookup((pid_t)pid);
+    if (target == NULL)
+        return -ESRCH;
+    struct process *cur = process_current();
+    int rc = 0;
+    if (cur->cred.uid != 0 && cur->cred.uid != target->cred.uid)
+        rc = -EPERM;
+    else
+        process_kill(target, sig);
+    process_put(target);
+    return rc;
+}
+
+static int64_t sys_pipe(struct syscall_args *a)
+{
+    if (!user_range_ok(a->a[0], 2 * sizeof(int)))
+        return -EFAULT;
+    struct kobject *rd, *wr;
+    int rc = pipe_create(&rd, &wr);
+    if (rc)
+        return rc;
+    struct handle_table *t = &process_current()->handles;
+    int h[2];
+    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE);
+    kobject_put(rd);
+    kobject_put(wr);
+    if (h[0] < 0 || h[1] < 0) {
+        if (h[0] >= 0)
+            handle_close(t, h[0]);
+        return -EMFILE;
+    }
+    if (copy_to_user(a->a[0], h, sizeof(h))) {
+        handle_close(t, h[0]);
+        handle_close(t, h[1]);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+static int64_t sys_dup(struct syscall_args *a)
+{
+    int h = (int)a->a[0];
+    int target = (int)a->a[1];
+    if (target < -1 || target >= HANDLE_TABLE_SIZE)
+        return -EINVAL;
+    struct handle_table *t = &process_current()->handles;
+    unsigned rights;
+    struct kobject *obj = handle_get(t, h, &rights);
+    if (obj == NULL)
+        return -EBADF;
+    int rc;
+    if (target == -1) {
+        rc = handle_install(t, obj, rights);
+    } else if (target == h) {
+        rc = h;
+    } else {
+        handle_close(t, target);   /* -EBADF when free: fine */
+        rc = handle_install_at(t, target, obj, rights);
+    }
+    kobject_put(obj);
+    return rc;
+}
+
+static int64_t sys_getppid(struct syscall_args *a)
+{
+    (void)a;
+    return (int64_t)process_current()->parent_pid;
+}
+
+static int64_t sys_chdir(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    return rc ? rc : process_chdir(path);
+}
+
+static int64_t sys_getcwd(struct syscall_args *a)
+{
+    struct process *p = process_current();
+    size_t len = (size_t)a->a[1];
+    char buf[VFS_PATH_MAX];
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    size_t n = strlcpy(buf, p->cwd_path, sizeof(buf));
+    spin_unlock_irqrestore(&p->lock, s);
+    if (len < n + 1)
+        return -ERANGE;
+    return copy_to_user(a->a[0], buf, n + 1) ? -EFAULT : (int64_t)n;
+}
+
+static int64_t sys_procinfo(struct syscall_args *a)
+{
+    size_t count = (size_t)a->a[1];
+    if (count > 4096)
+        count = 4096;
+    if (!user_range_ok(a->a[0], count * sizeof(struct cosmo_procinfo)))
+        return -EFAULT;
+    struct cosmo_procinfo *tmp = NULL;
+    if (count) {
+        tmp = kmalloc(count * sizeof(*tmp), 0);
+        if (tmp == NULL)
+            return -ENOMEM;
+    }
+    unsigned total = process_info(tmp, (unsigned)count);
+    unsigned filled = total < count ? total : (unsigned)count;
+    int rc = 0;
+    if (filled && copy_to_user(a->a[0], tmp, filled * sizeof(*tmp)))
+        rc = -EFAULT;
+    kfree(tmp);
+    return rc ? rc : (int64_t)total;
+}
+
+static int64_t sys_klog(struct syscall_args *a)
+{
+    size_t len = (size_t)a->a[1];
+    if (len > KLOG_RING_SIZE)
+        len = KLOG_RING_SIZE;
+    if (!user_range_ok(a->a[0], len))
+        return -EFAULT;
+    if (len == 0)
+        return 0;
+    char *tmp = kmalloc(len, 0);
+    if (tmp == NULL)
+        return -ENOMEM;
+    size_t n = klog_copy(tmp, len);
+    int rc = n && copy_to_user(a->a[0], tmp, n) ? -EFAULT : 0;
+    kfree(tmp);
+    return rc ? rc : (int64_t)n;
+}
+
+static const char *const sysctl_names[] = {
+    "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
+    "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "sysctl.names",
+};
+
+static int sysctl_value(const char *name, char *out, size_t n)
+{
+    if (strcmp(name, "kernel.name") == 0)
+        return ksnprintf(out, n, "%s", KERNEL_NAME);
+    if (strcmp(name, "kernel.version") == 0)
+        return ksnprintf(out, n, "%s", KERNEL_VERSION);
+    if (strcmp(name, "kernel.build") == 0)
+        return ksnprintf(out, n, "%s %s", COSMO_BUILD_ID, COSMO_BUILD_TYPE);
+    if (strcmp(name, "kernel.arch") == 0)
+        return ksnprintf(out, n, "x86_64");
+    if (strcmp(name, "kernel.uptime_ns") == 0)
+        return ksnprintf(out, n, "%llu", (unsigned long long)clock_now_ns());
+    if (strcmp(name, "kernel.nprocs") == 0)
+        return ksnprintf(out, n, "%u", process_count());
+    if (strcmp(name, "hw.ncpu") == 0)
+        return ksnprintf(out, n, "%u", cpu_count());
+    if (strcmp(name, "vm.page_size") == 0)
+        return ksnprintf(out, n, "%u", (unsigned)PAGE_SIZE);
+    if (strcmp(name, "vm.pages_total") == 0 || strcmp(name, "vm.pages_free") == 0) {
+        struct pmm_stats st;
+        pmm_get_stats(&st);
+        return ksnprintf(out, n, "%llu",
+                         (unsigned long long)(name[9] == 't' ? st.total_pages : st.free_pages));
+    }
+    if (strcmp(name, "sysctl.names") == 0) {
+        int len = 0;
+        for (size_t i = 0; i < ARRAY_SIZE(sysctl_names); i++) {
+            int m = ksnprintf(out + (len < (int)n ? len : (int)n), len < (int)n ? n - (size_t)len : 0, "%s\n",
+                              sysctl_names[i]);
+            len += m;
+        }
+        return len;
+    }
+    return -ENOENT;
+}
+
+static int64_t sys_sysctl(struct syscall_args *a)
+{
+    char name[64];
+    int rc = strncpy_from_user(name, a->a[0], sizeof(name));
+    if (rc < 0)
+        return rc == -ENAMETOOLONG ? -ENOENT : rc;
+    size_t len = (size_t)a->a[2];
+    if (len > 4096)
+        len = 4096;
+    if (!user_range_ok(a->a[1], len))
+        return -EFAULT;
+    char value[512];
+    int vlen = sysctl_value(name, value, sizeof(value));
+    if (vlen < 0)
+        return vlen;
+    if (vlen >= (int)sizeof(value))
+        vlen = (int)sizeof(value) - 1;
+    size_t copy = (size_t)vlen + 1 <= len ? (size_t)vlen + 1 : len;   /* NUL when it fits */
+    if (copy && copy_to_user(a->a[1], value, copy))
+        return -EFAULT;
+    return vlen;
+}
+
 static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_exit] = sys_exit,
     [SYS_write] = sys_write,
@@ -636,6 +963,17 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_recvfrom] = sys_recvfrom,
     [SYS_shutdown] = sys_shutdown,
     [SYS_getsockname] = sys_getsockname,
+    [SYS_spawn] = sys_spawn,
+    [SYS_wait] = sys_wait,
+    [SYS_kill] = sys_kill,
+    [SYS_pipe] = sys_pipe,
+    [SYS_dup] = sys_dup,
+    [SYS_getppid] = sys_getppid,
+    [SYS_chdir] = sys_chdir,
+    [SYS_getcwd] = sys_getcwd,
+    [SYS_procinfo] = sys_procinfo,
+    [SYS_klog] = sys_klog,
+    [SYS_sysctl] = sys_sysctl,
 };
 
 const struct personality personality_native = {

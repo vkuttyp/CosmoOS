@@ -143,5 +143,23 @@ See [docs/development.md](docs/development.md).
   test drives the guest's echo services from the host through QEMU
   user-mode networking while the guest connects back; `init` exercises
   the socket calls from user mode.
-- **Next, Phase 9:** userland: libc, shell, coreutils, init and
-  services.
+- **Phase 9 (done):** userland. A native C library (`libc/`: errno,
+  strings, an allocator over `mmap`, buffered stdio and `printf`,
+  files and directories, `spawn`/`waitpid`/`kill`, sockets) and the
+  first programs on it: `init` (runs `/etc/rc`, then the console
+  shell), `sh` (quotes, `$VAR`, pipelines, redirections, `;` `&&` `||`,
+  builtins), the coreutils (`echo cat ls cp mv rm mkdir rmdir pwd true
+  false sleep`) and the system tools (`mount umount ps kill dmesg
+  sysctl`), delivered in the boot archive as `/bin`, `/sbin`, `/etc`.
+  The kernel gained what a shell needs: a console tty (line editing,
+  echo, the UART receive interrupt), anonymous pipes as kobjects,
+  `spawn` from an executable with an explicit handle map (no `fork`),
+  zombies and `wait`, `kill` delivered at the system-call and
+  return-to-user boundaries and in killable waits, a per-process working
+  directory, `dup`, `fstat` on any I/O object, a kernel log ring and
+  `sysctl` values (system calls 32–42). Three new self-tests (61 in
+  total), a libc host test, the shell's own test script and an
+  interactive harness that types at the `cosmo$ ` prompt through QEMU's
+  serial port.
+- **Next, Phase 10:** the package system: ports, builder, repositories,
+  `pkg`, signing (constitution sections 47 and 48).

@@ -1,22 +1,22 @@
 /*
- * console_obj.c - The console as a kernel object: standard I/O for
- * processes until the VFS provides real files.
- *
- * Writes go to the kernel console. Reads return 0 (end of file): there
- * is no serial receive path yet. The object is static and never
- * released; its release hook exists only to satisfy the type contract.
+ * console_obj.c - The console kobject: writes go to the console sinks,
+ * reads come from the console tty (docs/kernel/tty/). Installed as
+ * handles 0, 1, 2 of kernel-created processes; children get it only by
+ * inheritance through spawn.
  */
 
 #include <kernel/console.h>
 #include <kernel/object.h>
 #include <kernel/panic.h>
+#include <kernel/string.h>
+#include <kernel/tty.h>
+
+#include <uapi/cosmo/syscall.h>
 
 static int64_t console_obj_read(struct kobject *obj, void *buf, size_t len)
 {
     (void)obj;
-    (void)buf;
-    (void)len;
-    return 0;
+    return tty_read(tty_console(), buf, len);
 }
 
 static int64_t console_obj_write(struct kobject *obj, const void *buf, size_t len)
@@ -24,6 +24,16 @@ static int64_t console_obj_write(struct kobject *obj, const void *buf, size_t le
     (void)obj;
     console_write((const char *)buf, len);
     return (int64_t)len;
+}
+
+static int console_obj_stat(struct kobject *obj, struct cosmo_stat *st)
+{
+    (void)obj;
+    memset(st, 0, sizeof(*st));
+    st->type = COSMO_DT_CHR;
+    st->mode = 0620;
+    st->nlink = 1;
+    return 0;
 }
 
 static void console_obj_release(struct kobject *obj)
@@ -35,6 +45,7 @@ static const struct kobject_io_type console_type = {
     .base = { .name = "console", .release = console_obj_release },
     .read = console_obj_read,
     .write = console_obj_write,
+    .stat = console_obj_stat,
 };
 
 static struct kobject g_console = { .type = &console_type.base, .refcount = 1 };

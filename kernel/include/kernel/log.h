@@ -37,6 +37,11 @@ enum klog_level klog_get_level(void);
 
 /* Raw output, no prefix, no newline added. */
 void kprintf(const char *fmt, ...) __printf(1, 2);
+
+/* The log ring (dmesg): copy the newest whole lines that fit into `buf`,
+ * oldest first; returns the byte count. Reading does not consume. */
+#define KLOG_RING_SIZE 32768u
+size_t klog_copy(char *buf, size_t len);
 void kvprintf(const char *fmt, va_list ap) __printf(1, 0);
 
 #define kdebug(...) klog(KLOG_DEBUG, __VA_ARGS__)

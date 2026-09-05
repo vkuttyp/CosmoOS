@@ -24,8 +24,8 @@ wins and the document is wrong.
 | `kernel/smp/` | AP bring-up (trampoline, per-CPU tables), IPIs, cross-CPU calls, TLB shootdown, stopping CPUs, the hang watchdog |
 | `drivers/acpi/` | Static ACPI tables: RSDP/XSDT walk and the decoded MADT (CPUs, LAPIC, IOAPICs, overrides) |
 | `kernel/object/` | Reference-counted kernel objects, the per-process handle table with rights, the console object |
-| `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module |
-| `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities, the native system-call ABI (`uapi/cosmo/syscall.h`) and user-side wrappers |
+| `kernel/process/` | Processes, user address spaces, the static ELF loader, ring-3 entry and return, user-memory access, fatal user faults, the `init` boot module; since Phase 9 `spawn` from a file with a handle map, zombies and `wait`, `kill` delivery, the working directory, `procinfo` |
+| `kernel/syscall/` | SYSCALL/SYSRET entry, the generic dispatcher and personalities, the native system-call ABI (`uapi/cosmo/syscall.h`, 43 calls) and user-side wrappers |
 | `kernel/module/` | The boot archive, the module ABI (`COSMO_MODULE`, `EXPORT_SYMBOL`, ABI version), the signed `ET_REL` module loader (validation, relocation, symbol resolution, dependencies, W^X, unload), signing tools and keys |
 | `kernel/security/` | SHA-512, Ed25519 verification, the compiled-in key ring, kernel taint; credentials and capabilities arrive in a later phase |
 | `kernel/device/` | The bus/device/driver model with resources and probing, the DMA API, the block layer (`kernel/block/`), the entropy pool, console sinks, MSI in the interrupt layer, and the QEMU device configuration the tests rely on |
@@ -34,6 +34,10 @@ wins and the document is wrong.
 | `kernel-services/vfs/` | The VFS (mounts, path walk, vnodes, files, the `fs_type` registry), the page cache, ramfs and the boot namespace, the storage pool (`kernel-services/storage/`), and the twelve filesystem system calls |
 | `kernel-services/filesystem/cosmofs/` | The copy-on-write filesystem: on-disk layout, transactions and commit, crash behaviour |
 | `kernel-services/network/` | The network stack: mbufs, interfaces and the `netrx` worker, Ethernet/ARP, IPv4/ICMP, IPv6/ICMPv6/ND, UDP, TCP, sockets and system calls 23–31, the `virtio_net` driver's contract, fw_cfg boot parameters, the QEMU network harness |
+| `kernel/tty/` | The line discipline: the console tty fed by the serial receive interrupt, canonical editing and echo, killable reads through the console kobject |
+| `kernel/ipc/` | IPC primitives: anonymous pipes as two kobject ends (`pipe`, system call 35) |
+| `libc/` | The native C library: headers, `errno`, string, allocator, stdio, `spawn`/`wait`/`kill`, files, directories, sockets, the native introspection wrappers; host test |
+| `userland/` | init, the shell (`cosmo$ `), the coreutils and system tools, `/etc/rc`, the shell test script and the interactive serial harness |
 
 Further subsystem directories are added as subsystems come into existence
 (`drivers/nvme/`, `drivers/network/`, `kernel-services/virtualization/`, and so on).

@@ -560,7 +560,8 @@ socket_count(void)`** live sockets (tests check for leaks).
 
 ## System calls (`kernel/include/uapi/cosmo/syscall.h`, `kernel/syscall/native.c`)
 
-**ABI stability: stable.** Numbers 23–31; `SYS_COUNT` is 32.
+**ABI stability: stable.** Numbers 23–31; `SYS_COUNT` was 32 after this
+phase (43 since Phase 9 appended calls 32–42).
 
 ```c
 #define COSMO_AF_INET  2

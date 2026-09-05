@@ -46,6 +46,8 @@ int handle_install_at(struct handle_table *t, int h, struct kobject *obj, unsign
 /* Referenced object if `h` is valid and holds every right in
  * `rights_needed`; NULL otherwise. */
 struct kobject *handle_lookup(struct handle_table *t, int h, unsigned rights_needed);
+/* Referenced object and its rights, for dup and spawn; NULL when free. */
+struct kobject *handle_get(struct handle_table *t, int h, unsigned *rights_out);
 
 /* Drop the table's reference. -EBADF if the slot is empty or invalid. */
 int handle_close(struct handle_table *t, int h);

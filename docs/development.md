@@ -57,16 +57,17 @@ Notes:
 
 | Target | Effect |
 |---|---|
-| `all` | Build the kernel ELF, the UEFI loader, the user programs, and the kernel modules (default) |
+| `all` | Build the kernel ELF, the UEFI loader, the C library, the user programs, and the kernel modules (default) |
 | `kernel` | `out/<arch>-<build>/kernel/kernel.elf` plus `kernel.map` |
 | `boot` | `out/<arch>-<build>/boot/BOOTX64.EFI` |
-| `userland` | `out/<arch>-<build>/userland/init.elf`, the first user program (`userland/userland.mk`) |
+| `libc` | `out/<arch>-<build>/libc/libc.a` and `libc/src/crt0.o`: the native C library (`libc/libc.mk`, `docs/libc/`) |
+| `userland` | `out/<arch>-<build>/userland/*.elf`: init, the shell, the coreutils and system tools (`userland/userland.mk`, `docs/userland/`) |
 | `modules` | `out/<arch>-<build>/modules/*.ko`: signed `ET_REL` kernel modules (`build/module.mk`, see `docs/kernel/module/`) |
-| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init` plus the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
+| `image` | FAT32 disk image `out/<arch>-<build>/cosmoos.img` via `scripts/mkimage.sh`: loader, `\cosmo\kernel.elf`, `\cosmo\boot.tar` (the boot archive: `init`, `bin/*`, `sbin/*`, `etc/*` and the modules, built by `scripts/mkbootarchive.py` into `out/<arch>-<build>/boot.tar`) |
 | `run` | Boot the image in QEMU with serial on the terminal (`scripts/qemu-run.sh`). Since Phase 6 the machine also carries a virtio-blk scratch disk (`QEMU_TESTDISK`, default `out/<arch>-<build>/testdisk.img`, created as 8 MiB of zeros), a virtio-rng, and a virtio console whose output goes to `QEMU_VCON` (default `out/<arch>-<build>/vcon.log`); since Phase 8 a virtio-net NIC on QEMU user-mode networking (`eth0` is `10.0.2.15`, gateway `10.0.2.2`) |
-| `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md` |
+| `test` | Automated boot test: `tests/boot/run_boot_test.py`, PASS/FAIL exit status. Since Phase 8 it also runs the network harness (`tests/boot/nettest.py`): host port forwards to the guest's echo services and a guest-initiated connection back, see `docs/kernel-services/network/testing.md`. Since Phase 9 it types commands at the shell prompt through QEMU's serial stdin (`tests/boot/shelltest.py`) and requires their output; the boot ends when the harness types `exit 0` |
 | `test-crash` | Build with `CRASH_TEST=1` and verify the harness detects a deliberate panic |
-| `host-test` | Compile the memory, crypto, and module-validation algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
+| `host-test` | Compile the memory, crypto, module-validation, cosmofs-layout and libc algorithms natively with ASan/UBSan and run `tests/host/` (see below) |
 | `analyze` | clang static analyzer over every target source; fails on any report |
 | `reproducible` | Build twice into `out/repro-a` and `out/repro-b`, compare binaries |
 | `check-tools` | Verify toolchain, image tools, QEMU, firmware, and both compiler targets |
@@ -85,8 +86,10 @@ and `test_slab` (`kernel/memory/buddy.c`, `slab.c`, `kmalloc.c`),
 FIPS and RFC 8032 vectors), and `test_modelf` (`kernel/module/modelf.c`
 against synthetic module images, built with `-DMODELF_HOST_TEST=1`), and
 `test_cosmofs` (the cosmofs on-disk layout header: structure sizes,
-inode-map arithmetic, extent mapping); `test_crypto` also checks
-CRC32C. The
+inode-map arithmetic, extent mapping), and `test_libc` (the C library's
+`printf.c`, `malloc.c` over a fake `mmap`, and `conv.c`, included with
+renamed symbols so they coexist with the host libc; `docs/libc/testing.md`);
+`test_crypto` also checks CRC32C. The
 architecture headers are replaced by `tests/host/shim/arch/*.h`; every
 other header is the real kernel header. This requires a host compiler
 with the ASan and UBSan runtimes: Apple's clang on macOS and the `clang`
@@ -125,34 +128,44 @@ headers shared between the kernel and modules live in
 `<drivers/pci.h>`. See `docs/kernel/device/`, `docs/drivers/pci/`,
 `docs/drivers/virtio/`.
 
-### User programs
+### The C library and the user programs
 
-`userland/` holds programs that run in ring 3; `libc/include/` is the
-start of the native C library (only the raw system-call wrappers so
-far). They are compiled with the same clang and the kernel target
-triple, but with user flags (`USER_CFLAGS` in `userland/userland.mk`):
-no `-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie`, static
-link at 4 MiB through `userland/init/user.ld` with
-`-z noexecstack -z separate-code` so the ELF has separate r-x, r--,
-rw- segments (the kernel refuses W+X segments and executable stacks).
-`init` is delivered to the kernel as the `init` entry of the boot
-archive (protocol v3, `docs/boot/design.md`). Since Phase 7 the kernel
-has a namespace: a ramfs root with `/boot` (every archive entry, so
-`/boot/init` and `/boot/modules/*.ko`), `/tmp`, `/mnt` and `/dev`, and
-the `open`/`read`/`write`/`stat`/`mkdir`/`unlink`/`rename`/`getdents`/
-`lseek`/`sync`/`mount`/`umount` calls (`docs/kernel-services/vfs/api.md`).
-The scratch virtio disk can carry a cosmofs (`mount("vda", "/mnt",
-"cosmofs", 0)`); the kernel formats it during the self-tests.
+`libc/` is the native C library (`docs/libc/`): `libc/include/` holds
+the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `unistd.h`,
+`spawn.h`, `sys/wait.h`, ...) and `libc/src/` the implementation;
+`libc/libc.mk` builds `libc.a` and `crt0.o` with the user flags
+(`USER_CFLAGS`, defined there): the kernel target triple, no
+`-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie
+-mgeneral-regs-only` (no floating point: the kernel does not save FPU
+state for user threads yet), `-I libc/include -I kernel/include` (the
+UAPI header). `string.c` is compiled with `-fno-builtin`.
 
-To write a new program: add a directory under `userland/`, start from
-`userland/init/crt0.S` (reads `argc`/`argv` from the initial stack,
-calls `main`, exits with its return value) and the wrappers in
-`libc/include/cosmo/syscall.h`, add a rule modelled on `INIT_ELF` in
-`userland.mk`, and add it to `BOOT_ARCHIVE_ENTRIES` in the top-level
-`Makefile` (`name=path`). The system calls available are listed in
-`docs/kernel/syscall/api.md`; the kernel starts only the archive entry
-named `init` today, so a second program is reachable only by replacing
-`init`.
+`userland/` holds the programs (`docs/userland/`): `init/`, `shell/`
+(`sh`), `coreutils/` (echo cat ls cp mv rm mkdir rmdir pwd true false
+sleep), `system/` (mount umount ps kill dmesg sysctl), `etc/` (`rc`,
+`rc.test`). `userland/userland.mk` links every program as `crt0.o
+<name>.o libc.a` at 4 MiB through `userland/user.ld` with `-z
+noexecstack -z separate-code` (separate r-x, r--, rw- segments; the
+kernel refuses W+X segments and executable stacks) and generates the
+boot archive entries: `init=` (the kernel starts that entry),
+`bin/<name>` and `sbin/<name>` (executable, mode 0755 in the ramfs),
+`etc/rc`, and `etc/rc.test` only when `SELFTEST=1`. The kernel's ramfs
+places them at `/bin`, `/sbin`, `/etc`, keeps everything else under
+`/boot` (`/boot/init`, `/boot/modules/*.ko`), and creates `/tmp`, `/mnt`,
+`/dev` (`docs/kernel-services/vfs/api.md`). The scratch virtio disk can
+carry a cosmofs (`mount vda /mnt cosmofs`); the kernel formats it during
+the self-tests.
+
+At boot init runs `/etc/rc` and then `sh` on the console; the boot ends
+when that shell exits (`exit`). `make run` gives an interactive
+`cosmo$ ` prompt on the terminal; `make test` types a scripted session
+into it.
+
+To write a new program: add `userland/<family>/<name>.c` with a `main`,
+add `<name>` to `USER_BIN_PROGRAMS` or `USER_SBIN_PROGRAMS` and a
+`PROG_DIR_<name> := <family>` line in `userland/userland.mk`; the link
+rule and the archive entry follow. The library's interface is in
+`docs/libc/api.md`, the system calls in `docs/kernel/syscall/api.md`.
 
 ## Variables
 
@@ -234,19 +247,29 @@ USERTEST: PASS
 SELFTEST: process-user     ... ok
 init: crashing on purpose
 SELFTEST: process-fault    ... ok
-SELFTEST: PASS (32 tests)
-[ INFO] process: pid 3 'init' created, entry 0x400000, 3 segments
-init: hello from user mode, pid 3, argc 1
-init: nothing to supervise yet; exiting
-[ INFO] process: pid 3 'init' exited with status 0 (5 syscalls)
+SELFTEST: PASS (61 tests)
+[ INFO] process: pid 8 'init' created, entry 0x400000, 3 segments
+init: CosmoOS userland, pid 8
+CosmoOS userland ready
+...
+SHTEST: PASS
+init: rc exited with status 0
+cosmo$ echo interactive-ok
+interactive-ok
+...
+cosmo$ exit 0
+init: shell exited with status 0
+[ INFO] process: pid 8 'init' exited with status 0 (61 syscalls)
 [ INFO] init exited with status 0
 [ INFO] boot complete; nothing more to do in this phase
 [ INFO] shutdown: exit status 0
 [ INFO] shutdown: halting CPU
 ```
 
-Lines starting with `init:` and `USERTEST:` are written by the user
-program through the `write` system call on handle 1; the self-test run
+Lines starting with `init:`, `USERTEST:` and `SHTEST:` are written by
+user programs through the `write` system call on handle 1; the `cosmo$ `
+prompts come from the shell and the text after them is what the harness
+typed, echoed by the console tty; the self-test run
 (`init --selftest`) and the crash run (`init --crash`) happen inside
 the `process-user` and `process-fault` self-tests, and the plain run
 is the real first process. Release builds skip the self-tests and show
@@ -284,9 +307,12 @@ QEMU then exits with status `(value << 1) | 1`.
 QEMU processes the exit asynchronously, so the kernel still prints
 `shutdown: halting CPU` and halts before the emulator terminates. The
 harness requires both the correct exit status and the expected log
-markers (loader banner, kernel banner, `init: hello from user mode,
-pid N`, `init exited with status 0`, `boot complete`, and, when a
-`SELFTEST:` line appears, both `SELFTEST: PASS` and `USERTEST: PASS`),
+markers (loader banner, kernel banner, `init: CosmoOS userland, pid N`,
+`CosmoOS userland ready`, `init: rc exited with status 0`,
+`interactive-ok`, `init: shell exited with status 0`, `init exited with
+status 0`, `boot complete`, the shell harness's per-command patterns
+(`tests/boot/shelltest.py`), and, when a `SELFTEST:` line appears,
+`SELFTEST: PASS`, `USERTEST: PASS` and `SHTEST: PASS`),
 and rejects any log containing `KERNEL PANIC`, `BUG:`, `SELFTEST: FAIL`,
 or `cosmoboot: FATAL`. A non-zero exit status from `init` makes the
 kernel report failure through the same port. On hardware or an emulator without the device the port

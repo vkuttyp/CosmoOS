@@ -19,7 +19,7 @@ make -C "$root" ARCH="$arch" BUILD="$build" OUT="$a" all "$a/boot.tar" >/dev/nul
 make -C "$root" ARCH="$arch" BUILD="$build" OUT="$b" all "$b/boot.tar" >/dev/null
 
 status=0
-for f in kernel/kernel.elf boot/BOOTX64.EFI boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf; do
+for f in kernel/kernel.elf boot/BOOTX64.EFI boot.tar modules/hello.ko modules/cosmotest.ko modules/cosmotest_dep.ko modules/cosmotest_fail.ko userland/init.elf userland/sh.elf userland/ls.elf libc/libc.a; do
     if cmp -s "$a/$f" "$b/$f"; then
         printf '  same     %s\n' "$f"
     else

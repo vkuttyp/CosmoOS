@@ -58,8 +58,10 @@ committed root describes a completely valid state.
   and `writepage`, dirty tracking, writeback on `sync`, truncation.
   Filesystems that cache in memory only (ramfs) use it as their store.
 - **ramfs**: directories and regular files entirely in memory; the
-  root filesystem at boot with `/boot` populated from the boot archive
-  and `/tmp`, `/mnt`, `/dev` created.
+  root filesystem at boot with `/boot` populated from the boot archive,
+  the archive's `bin/`, `sbin/`, `etc/` entries placed at `/bin`,
+  `/sbin`, `/etc` (programs executable, Phase 9), and `/tmp`, `/mnt`,
+  `/dev` created.
 - **Storage pool** (`kernel-services/storage/`): `pool_open(blkdev)`,
   `pool_read/write/flush` in 4 KiB pool blocks. One device now; the
   interface is where allocation groups and redundancy attach later.

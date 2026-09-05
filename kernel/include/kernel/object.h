@@ -37,10 +37,12 @@ uint32_t kobject_refcount(const struct kobject *obj);
  * (sys_read/sys_write) assert on it and fail the call with -EIO, they
  * never trust it to size a copy.
  */
+struct cosmo_stat;
 struct kobject_io_type {
     struct kobject_type base;
     int64_t (*read)(struct kobject *obj, void *buf, size_t len);
     int64_t (*write)(struct kobject *obj, const void *buf, size_t len);
+    int (*stat)(struct kobject *obj, struct cosmo_stat *st);   /* optional: fstat on the object */
 };
 
 /* The single console object; kobject_get before installing in a table. */

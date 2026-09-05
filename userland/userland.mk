@@ -1,42 +1,66 @@
-# User programs. Built with the same freestanding cross toolchain as the
-# kernel but for the user ABI: static, non-PIC, SysV, linked at 4 MiB.
-# The user code model is small (default); no kernel-only flags such as
-# -mcmodel=kernel, -mno-red-zone, or -mgeneral-regs-only apply, except
-# that the freestanding init has no FP code and keeps the general-regs
-# restriction to stay independent of FPU state handling, which arrives
-# with a later phase.
+# User programs (docs/userland/). Every program is one or more C files
+# linked as crt0.o objects libc.a with the shared user.ld at 4 MiB. The
+# program list also generates the boot archive entries: bin/<name> for
+# the coreutils and the shell, sbin/<name> for the system tools, etc/ for
+# the scripts; init keeps its `init=` entry (the kernel finds it by name).
 
-INIT_ELF := $(OUT)/userland/init.elf
+USER_LD := $(ROOT)/userland/user.ld
 
-USER_CFLAGS := \
-	--target=$(KERNEL_TARGET) \
-	$(COMMON_CFLAGS) \
-	-fno-pic -fno-pie -mgeneral-regs-only \
-	-I$(ROOT)/libc/include \
-	-I$(ROOT)/kernel/include
+# name := directory
+USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir rmdir pwd true false sleep
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl
 
-USER_LDFLAGS := \
-	-nostdlib -static --no-dynamic-linker \
-	-z max-page-size=0x1000 -z noexecstack -z separate-code \
-	--build-id=none --gc-sections
+PROG_DIR_sh     := shell
+PROG_DIR_echo   := coreutils
+PROG_DIR_cat    := coreutils
+PROG_DIR_ls     := coreutils
+PROG_DIR_cp     := coreutils
+PROG_DIR_mv     := coreutils
+PROG_DIR_rm     := coreutils
+PROG_DIR_mkdir  := coreutils
+PROG_DIR_rmdir  := coreutils
+PROG_DIR_pwd    := coreutils
+PROG_DIR_true   := coreutils
+PROG_DIR_false  := coreutils
+PROG_DIR_sleep  := coreutils
+PROG_DIR_mount  := system
+PROG_DIR_umount := system
+PROG_DIR_ps     := system
+PROG_DIR_kill   := system
+PROG_DIR_dmesg  := system
+PROG_DIR_sysctl := system
 
-INIT_SRCS := \
-	userland/init/crt0.S \
-	userland/init/init.c
+USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
+PROG_DIR_init := init
 
-INIT_OBJS := $(call objs_of,$(INIT_SRCS))
-INIT_C_OBJS := $(call objs_of,$(filter %.c,$(INIT_SRCS)))
-INIT_S_OBJS := $(call objs_of,$(filter %.S,$(INIT_SRCS)))
+prog_srcs = userland/$(PROG_DIR_$(1))/$(1).c
+prog_elf  = $(OUT)/userland/$(1).elf
 
-$(eval $(call compile_rules,$(INIT_C_OBJS),USER_CFLAGS))
-$(eval $(call assemble_rules,$(INIT_S_OBJS),USER_CFLAGS))
+USER_SRCS := $(foreach p,$(USER_PROGRAMS),$(call prog_srcs,$(p)))
+USER_OBJS := $(call objs_of,$(USER_SRCS))
+$(eval $(call compile_rules,$(USER_OBJS),USER_CFLAGS))
 
-$(INIT_ELF): $(INIT_OBJS) $(ROOT)/userland/init/user.ld
-	$(call log,LD,$@)
-	$(Q)mkdir -p $(dir $@)
-	$(Q)$(LD) $(USER_LDFLAGS) -T $(ROOT)/userland/init/user.ld -o $@ $(INIT_OBJS)
+define prog_link_rule
+$(call prog_elf,$(1)): $(call objs_of,$(call prog_srcs,$(1))) $(LIBC_CRT0) $(LIBC_A) $(USER_LD)
+	$$(call log,LD,$$@)
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)$$(LD) $$(USER_LDFLAGS) -T $(USER_LD) -o $$@ $(LIBC_CRT0) $(call objs_of,$(call prog_srcs,$(1))) $(LIBC_A)
+endef
+$(foreach p,$(USER_PROGRAMS),$(eval $(call prog_link_rule,$(p))))
+
+INIT_ELF  := $(call prog_elf,init)
+USER_ELFS := $(foreach p,$(USER_PROGRAMS),$(call prog_elf,$(p)))
+
+USER_ARCHIVE_ENTRIES := \
+	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(p)=$(call prog_elf,$(p))) \
+	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
+	etc/rc=$(ROOT)/userland/etc/rc
+ifeq ($(SELFTEST),1)
+USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test
+endif
+USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test
 
 .PHONY: userland
-userland: $(INIT_ELF)
+userland: $(USER_ELFS)
 
--include $(INIT_OBJS:.o=.d)
+-include $(USER_OBJS:.o=.d)

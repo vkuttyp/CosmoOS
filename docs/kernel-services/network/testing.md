@@ -9,8 +9,9 @@
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
 
-The boot test's total is `SELFTEST: PASS (58 tests)`. The seven network
-tests sit after the filesystem tests and before the process tests
+The boot test's total is `SELFTEST: PASS (61 tests)` since Phase 9 (58
+after Phase 8). The seven network tests sit after the filesystem tests
+and before the tty, pipe and process tests
 (which run `init --selftest`), so init's socket test runs on a stack the
 kernel tests have already exercised.
 

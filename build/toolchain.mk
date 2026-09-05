@@ -14,6 +14,7 @@ CC      := $(LLVM_PREFIX)clang
 LD      := $(LLVM_PREFIX)ld.lld
 LDLINK  := $(LLVM_PREFIX)lld-link
 OBJCOPY := $(LLVM_PREFIX)llvm-objcopy
+AR      := $(LLVM_PREFIX)llvm-ar
 NM      := $(LLVM_PREFIX)llvm-nm
 OBJDUMP := $(LLVM_PREFIX)llvm-objdump
 PYTHON  ?= python3

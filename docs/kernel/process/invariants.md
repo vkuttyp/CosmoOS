@@ -98,7 +98,7 @@ rsp at offset 16. Check: build (`STATIC_ASSERT` on the offsets), test
 **P14. User pointers reach kernel code only through `uaccess`.** Every
 native syscall calls `user_range_ok` then `copy_*_user` or
 `user_range_mapped` before touching a user address; `sys_read`/`sys_write`
-bounce through a 512-byte kernel buffer. Check: test `process-user`
+bounce through a 1024-byte kernel buffer. Check: test `process-user`
 (kernel pointer, below-window, top-of-window, unmapped, and overflowing
 lengths all `-EFAULT`), review.
 
@@ -121,24 +121,38 @@ NULL unless every requested right is held; `sys_write` on the read-only
 `stdin` handle is `-EBADF`, `sys_read` on `stdout` likewise. Check: tests
 `objects`, `process-user`.
 
-**P18. Handles 0–2 of a new process are the console** with READ,
-WRITE, WRITE rights; `close` on any of them works and later use is
-`-EBADF`. Check: test `process-user` (`close(2)` then `write(2)`).
+**P18. Handles 0–2 of a kernel-created process are the console** with
+READ, WRITE, WRITE rights; a spawned child holds exactly the handles its
+parent mapped (`struct cosmo_spawn_handle` pairs, the parent's rights
+copied), or its parent's 0–2 when the map is empty; nothing else is
+inherited. `close` on any handle works and later use is `-EBADF`. Check:
+test `process-user` (`close(2)` then `write(2)`; a child spawned with
+only handles 1 and 2 mapped writes into the pipe it was given; a map
+naming a free parent handle is `-EBADF`, a duplicate child slot
+`-EINVAL`).
 
-**P19. Console `read` returns 0.** There is no input path; the object
-never blocks. Check: test `process-user`.
+**P19. Console `read` is a tty read.** It blocks until a complete line
+exists, returns at most one line, 0 for `^D` on an empty line, `-EINTR`
+when the process is killed, and 0 at once for a zero-length request
+(`docs/kernel/tty/invariants.md`). Check: test `process-user` (zero
+length), `process-spawn` (kill of a blocked reader), the interactive
+harness.
 
-**P20. Process references.** Creator, table, and each thread hold one;
-`process_release` runs with `state == EXITED` and `nr_threads == 0`
-(asserted) and only after all three are dropped. Check: asserts in
-`process_release`; test `process-user` waits for `process_count()` to
-return to its baseline.
+**P20. Process references.** Creator (or `process_spawn`, which drops it
+at once), table, each thread, each child (`parent`), and `process_set_init`
+hold one; `process_release` runs with `state == EXITED` and
+`nr_threads == 0` (asserted) and only after all are dropped. A zombie's
+table reference is dropped by the parent's `wait`, by reparenting when
+no parent remains, or at once when the process had no parent. Check:
+asserts in `process_release`; test `process-user` waits for
+`process_count()` to return to its baseline; `init --selftest` reaps
+every child it creates and sees `-ECHILD` afterwards.
 
 ## ABI
 
 **P21. Syscall numbers are stable and only appended.**
-`uapi/cosmo/syscall.h` numbers 0–10 never change meaning; `SYS_COUNT`
-grows. Unknown numbers, including values above `SYS_COUNT` and
+`uapi/cosmo/syscall.h` numbers 0–42 never change meaning; `SYS_COUNT`
+(43) grows. Unknown numbers, including values above `SYS_COUNT` and
 negative values reinterpreted as large unsigned, return `-ENOSYS`
 without side effects. Check: test `process-user` (`SYS_COUNT`, 999999,
 -1), review.
@@ -147,15 +161,79 @@ without side effects. Check: test `process-user` (`SYS_COUNT`, 999999,
 checks `nr < pers->count` and a non-NULL entry before calling. Check:
 P21's test.
 
+## Phase 9: processes, kill, working directory
+
+**P23. A process is never freed, and its status never lost, while
+someone can still ask for it.** An exited child stays in the table as a
+zombie (state EXITED, `reaped == false`) until its parent's
+`process_wait_child` collects it; a parent that exits first hands its
+children to init (which reaps them) or, when init is gone, to the
+kernel, which drops exited ones at once and lets live ones self-reap.
+Check: `init --selftest` (`waitpid` returns the status once and
+`-ECHILD` the second time); `process-spawn` and `process-user` leave
+`process_count()` at its baseline. Gap: no test creates an orphan under
+the real init.
+
+**P24. Handles and the working directory close when the last thread is
+gone, not when the zombie is reaped.** `process_last_thread_gone` calls
+`handle_table_destroy` and drops `cwd`; `process_release` finds them
+already gone. Consequence: a pipe whose writer exited delivers end of
+file even while the parent still has to `wait`. Check: `init --selftest`
+reads EOF from a pipe whose only remaining writer was a child that has
+exited but not been reaped. Gap: none.
+
+**P25. Kill is delivered only on the target's own thread, at a
+boundary, and exactly once.** `process_kill` sets `kill_sig` and the
+status under `p->lock` and wakes the thread; the process exits at the
+next `process_check_kill` (system-call entry and exit),
+`process_return_to_user` (an interrupt or fault returning to ring 3), or
+`wait_event_killable`/`thread_sleep_ns_killable` returning `-EINTR`. A
+second kill, or a kill of an exiting or exited process, changes nothing.
+The status is `128 + sig`. Check: `process-spawn` (`init --block` in a
+console read dies with 143 within 2 s; `init --spin` dies with 137 at
+a timer tick); `init --selftest` (a `cat` blocked on a pipe dies with
+137). Gap: no test kills a process blocked in a socket wait or a sleep.
+
+**P26. `kill` honours credentials and validates its arguments.** Signal
+numbers outside `1..31` and pids `<= 0` are `-EINVAL`, an unknown pid
+`-ESRCH`, another uid `-EPERM` unless the caller is uid 0. Check:
+`init --selftest` (`-ESRCH`, `-EINVAL`). Gap: every process is uid 0,
+so `-EPERM` is untested.
+
+**P27. Relative paths resolve from the process's working directory,
+whose string and vnode agree.** Every path system call passes
+`process_current()->cwd`; `chdir` verifies the target is a directory
+before swapping vnode and normalised string together under
+`process.lock`; a child inherits both (or the `cwd` named in the spawn
+request). Check: `init --selftest` (`mkdir` relative to `/tmp`,
+`chdir("cwdtest/../cwdtest/.")` gives `/tmp/cwdtest`, `..` gives `/tmp`,
+`ENOTDIR`, `ENOENT`, `ERANGE`; a child's `cd` leaves the parent's cwd);
+`process-spawn` (the `path_normalize` table). Gap: a renamed ancestor is
+not noticed by `getcwd` (the string is authoritative for display, the
+vnode for resolution).
+
+**P28. `spawn` executes only a regular file with an execute bit, reads
+it through the VFS, and copies every argument before touching it.**
+`process_spawn` checks `COSMO_DT_REG` and `mode & 0111` (`-EACCES`),
+bounds the image at 16 MiB (`-ENOEXEC`), reads it into a kernel-arena
+buffer and runs the Phase 4 validator on that copy; `sys_spawn` copies
+the request, path, argv, envp (`COSMO_ARG_MAX`, `COSMO_ARG_ENTRIES`,
+`-E2BIG`) and the handle map into kernel memory first. Check: `init
+--selftest` (`/etc/rc` and `/bin` are `-EACCES`, a missing file
+`-ENOENT`, an empty `argv` `-EINVAL`); `process-reject`. Gap: no test
+exceeds `COSMO_ARG_MAX`.
+
 ## Gaps (documented, not invariants)
 
-- No `fork`, `exec` from a file, or `wait`; processes are created only
-  from an in-memory image by kernel code.
-- No signals; a fatal fault is the only asynchronous event a process
-  sees, and it is terminal.
+- No `fork` or `exec` replacing the current image; `spawn` is the only
+  creation primitive.
+- No signal handlers or masks; `kill` only terminates, and a fatal fault
+  or a kill are the only asynchronous events a process sees.
 - One thread per process; `process_exit` does not yet signal other
   threads.
-- One console object shared by every process; no per-process I/O.
+- One console object shared by every process that inherited it; no
+  device nodes, so a process that closed handle 0 cannot reopen the
+  console.
 - `copy_*_user` relies on validation, not on fault recovery; a
   concurrent `munmap` from another thread of the same process (which
   cannot exist yet) could turn a validated copy into a kernel-mode

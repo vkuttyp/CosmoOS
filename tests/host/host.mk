@@ -28,8 +28,9 @@ HOST_SLAB_SRCS  := $(HOST_COMMON_SRCS) kernel/memory/slab.c kernel/memory/kmallo
 HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security/ed25519.c kernel/core/crc32c.c tests/host/test_crypto.c
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
+HOST_LIBC_SRCS := tests/host/test_libc.c
 
-HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs
+HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc
 
 $(HOST_OUT)/test_buddy: $(addprefix $(ROOT)/,$(HOST_BUDDY_SRCS))
 	$(call log,HOSTCC,$@)
@@ -50,6 +51,13 @@ $(HOST_OUT)/test_modelf: $(addprefix $(ROOT)/,$(HOST_MODELF_SRCS))
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DMODELF_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_libc: $(addprefix $(ROOT)/,$(HOST_LIBC_SRCS)) $(ROOT)/libc/src/printf.c $(ROOT)/libc/src/malloc.c $(ROOT)/libc/src/conv.c
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+		-Wall -Wextra -Werror -Wno-missing-prototypes -Wno-builtin-requires-header -Wno-incompatible-library-redeclaration \
+		-DLIBC_HOST_TEST=1 $< $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_cosmofs: $(addprefix $(ROOT)/,$(HOST_COSMOFS_SRCS))
 	$(call log,HOSTCC,$@)
