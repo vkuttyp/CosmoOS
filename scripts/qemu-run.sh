@@ -71,8 +71,11 @@ if [ "$arch" = aarch64 ]; then
     # GICv2 with a GICv2m MSI frame; semihosting carries the exit status
     # (docs/kernel/arch/aarch64/design.md). The scratch disk comes first so it
     # is vda for the storage self-tests, as on x86; the boot image is read-only.
+    # An SMMUv3 in front of the PCI root complex (kernel/iommu); QEMU_IOMMU=0 leaves it out.
+    iommu_machine=""
+    [ "${QEMU_IOMMU:-1}" != "0" ] && iommu_machine=",iommu=smmuv3"
     exec qemu-system-aarch64 \
-        -machine virt,gic-version=2,accel="${QEMU_ACCEL:-tcg}" \
+        -machine "virt,gic-version=2${iommu_machine},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
         -smp "${QEMU_SMP:-4}" \
         -m "${QEMU_MEM:-256M}" \
@@ -99,8 +102,13 @@ if [ "$arch" = aarch64 ]; then
         ${QEMU_EXTRA:-}
 fi
 
+# An Intel IOMMU (VT-d, DMA remapping only: intremap=off) in front of the
+# PCI devices (kernel/iommu); QEMU_IOMMU=0 leaves it out.
+iommu_dev=""
+[ "${QEMU_IOMMU:-1}" != "0" ] && iommu_dev="-device intel-iommu,intremap=off"
 exec qemu-system-x86_64 \
     -machine q35,accel="${QEMU_ACCEL:-tcg}" \
+    $iommu_dev \
     -cpu "${QEMU_CPU:-qemu64,+nx,+svm,+npt}" \
     -smp "${QEMU_SMP:-4}" \
     -m "${QEMU_MEM:-256M}" \

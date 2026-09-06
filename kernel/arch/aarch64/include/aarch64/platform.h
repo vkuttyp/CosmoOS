@@ -65,6 +65,7 @@ void pl011_early_putc(char c);
 #define VIRT_PL011_INTID   33u
 #define VIRT_PL031_BASE    0x09010000ull   /* the real-time clock: RTCDR (seconds since 1970) at offset 0 */
 #define VIRT_FWCFG_BASE    0x09020000ull
+/* The SMMUv3 (0x09050000, INTIDs 106-109) is described in drivers/iommu/arm_smmuv3.c, which has no arch include path. */
 #define VIRT_TIMER_EL1_PHYS_INTID 30u
 #define VIRT_TIMER_EL1_VIRT_INTID 27u
 
