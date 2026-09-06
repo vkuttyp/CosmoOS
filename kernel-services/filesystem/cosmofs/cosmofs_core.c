@@ -17,6 +17,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/random.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
@@ -64,14 +65,14 @@ struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b)
 
 int cfs_data_read(struct cfs *fs, uint64_t blk, void *buf)
 {
-    if (blk < 2 || blk >= fs->nblocks)
+    if (!cfs_dva_valid(fs, blk))
         return -EIO;
     return pool_read(fs->pool, blk, buf);
 }
 
 int cfs_data_write(struct cfs *fs, uint64_t blk, const void *buf)
 {
-    if (blk < 2 || blk >= fs->nblocks)
+    if (!cfs_dva_valid(fs, blk))
         return -EIO;
     return pool_write(fs->pool, blk, buf);
 }
@@ -125,7 +126,7 @@ static struct cfs_buf *buf_alloc(struct cfs *fs, uint64_t blkno)
 
 int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **out)
 {
-    if (blkno < 2 || blkno >= fs->nblocks)
+    if (!cfs_dva_valid(fs, blkno))
         return -EIO;
     struct cfs_buf *b = buf_find(fs, blkno);
     if (b) {
@@ -249,10 +250,52 @@ static void note_dirty(struct cfs *fs)
     }
 }
 
+/* The first free run in blocks [lo, hi) of member `v`, claimed. `hi` is
+ * never past the member's last block, so the padding at the end of its
+ * last bitmap chunk is unreachable. */
+static bool scan_member(struct cfs *fs, unsigned v, uint64_t lo, uint64_t hi, uint32_t want, uint64_t *start,
+                        uint64_t *got)
+{
+    struct cfs_memstate *m = &fs->mem[v];
+    for (uint64_t b = lo; b < hi; b++) {
+        if (bit_test(fs->bitmap, m->base + b))
+            continue;
+        uint64_t len = 1;
+        while (len < want && b + len < hi && !bit_test(fs->bitmap, m->base + b + len))
+            len++;
+        for (uint64_t k = 0; k < len; k++) {
+            bit_set(fs->bitmap, m->base + b + k);
+            fs->bitmap_dirty[m->chunk0 + (b + k) / CFS_BITS_PER_BITMAP] = 1;
+        }
+        fs->free_blocks -= len;
+        m->free_blocks -= len;
+        m->alloc_hint = b + len;
+        fs->alloc_hint = m->base + b + len;
+        note_dirty(fs);
+        *start = CFS_DVA(v, b);
+        *got = len;
+        return true;
+    }
+    return false;
+}
+
+/* Where a run with no hint should come from: the member with the most
+ * room, so a pool fills evenly rather than filling member 0 first. */
+static unsigned pick_member(const struct cfs *fs)
+{
+    unsigned best = 0;
+    for (unsigned v = 1; v < fs->nmembers; v++)
+        if (fs->mem[v].free_blocks > fs->mem[best].free_blocks)
+            best = v;
+    return best;
+}
+
 /* First fit from `hint` (or the running hint), taking up to `want`
  * consecutive free blocks. Data allocations stop at the reserve so
  * deletion and commit always have metadata blocks (design.md,
- * "Allocation: contiguity and the metadata reserve"). */
+ * "Allocation: contiguity and the metadata reserve"). A run never
+ * crosses a member: an extent's `count` counts blocks on one device
+ * (design.md, "One bitmap, many members"). */
 int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint32_t want, uint64_t *start,
                   uint64_t *got)
 {
@@ -264,26 +307,18 @@ int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint3
         want = 1;
     if (want > usable)
         want = (uint32_t)usable;
-    uint64_t from = hint >= 2 && hint < fs->nblocks ? hint : (fs->alloc_hint < fs->nblocks ? fs->alloc_hint : 2);
-    for (uint64_t n = 0; n < fs->nblocks; n++) {
-        uint64_t i = from + n;
-        if (i >= fs->nblocks)
-            i -= fs->nblocks;
-        if (i < 2 || bit_test(fs->bitmap, i))
-            continue;
-        uint64_t len = 1;
-        while (len < want && i + len < fs->nblocks && !bit_test(fs->bitmap, i + len))
-            len++;
-        for (uint64_t k = 0; k < len; k++) {
-            bit_set(fs->bitmap, i + k);
-            fs->bitmap_dirty[(i + k) / CFS_BITS_PER_BITMAP] = 1;
-        }
-        fs->free_blocks -= len;
-        fs->alloc_hint = i + len;
-        note_dirty(fs);
-        *start = i;
-        *got = len;
-        return 0;
+    bool hinted = cfs_dva_valid(fs, hint);
+    unsigned first = hinted ? CFS_DVA_VDEV(hint) : pick_member(fs);
+    for (unsigned n = 0; n < fs->nmembers; n++) {
+        unsigned v = (first + n) % fs->nmembers;
+        struct cfs_memstate *m = &fs->mem[v];
+        uint64_t from = (n == 0 && hinted) ? CFS_DVA_BLK(hint) : m->alloc_hint;
+        if (from < m->first_usable || from >= m->nblocks)
+            from = m->first_usable;
+        if (scan_member(fs, v, from, m->nblocks, want, start, got))
+            return 0;
+        if (scan_member(fs, v, m->first_usable, from, want, start, got))
+            return 0;
     }
     return -ENOSPC;
 }
@@ -301,7 +336,7 @@ int cfs_alloc_data(struct cfs *fs, uint64_t hint, uint32_t want, uint64_t *start
 
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
 {
-    if (blk < 2 || blk >= fs->nblocks)
+    if (!cfs_dva_valid(fs, blk))
         return;
     if (fs->nr_pending == fs->pending_cap) {
         unsigned cap = fs->pending_cap ? fs->pending_cap * 2 : 64;
@@ -460,61 +495,87 @@ int cfs_inode_alloc(struct cfs *fs, uint64_t *ino)
 
 /* Write the in-memory bitmap chunks that changed, copy-on-write, until
  * no allocation made by the writing itself leaves a chunk dirty. */
-static int commit_bitmap(struct cfs *fs)
+/* One member's dirty bitmap chunks, into fresh blocks on that member.
+ * Its index is CoW'd like any other metadata block; the parent pointer
+ * is the member's own alloc_root, which is why a member's allocation
+ * metadata never lives on another member. */
+static int commit_member_bitmap(struct cfs *fs, unsigned v, uint64_t *reserved)
 {
-    uint64_t *reserved = kzalloc(fs->nr_chunks * sizeof(*reserved));
-    if (reserved == NULL)
-        return -ENOMEM;
+    struct cfs_memstate *m = &fs->mem[v];
     struct cfs_buf *idx;
-    int rc = cfs_buf_get(fs, fs->sb.alloc_root, CFS_KIND_ALLOCIDX, &idx);
-    if (rc) {
-        kfree(reserved);
+    int rc = cfs_buf_get(fs, m->alloc_root, CFS_KIND_ALLOCIDX, &idx);
+    if (rc)
         return rc;
-    }
-    rc = cfs_buf_cow(fs, &idx, &fs->sb.alloc_root);
+    rc = cfs_buf_cow(fs, &idx, &m->alloc_root);
     if (rc)
         goto out;
-
-    /* Reserve a destination block for every dirty chunk; reserving may
-     * dirty further chunks, so iterate to a fixpoint. */
-    for (bool progress = true; progress;) {
-        progress = false;
-        for (unsigned c = 0; c < fs->nr_chunks; c++) {
-            if (fs->bitmap_dirty[c] && reserved[c] == 0) {
-                rc = cfs_alloc_block(fs, &reserved[c]);
-                if (rc)
-                    goto out;
-                progress = true;
-            }
-        }
-    }
     uint64_t *slots = ptrs(idx);
-    for (unsigned c = 0; c < fs->nr_chunks; c++) {
-        if (!fs->bitmap_dirty[c])
+    for (unsigned c = 0; c < m->nchunks; c++) {
+        unsigned gc = m->chunk0 + c;
+        if (!fs->bitmap_dirty[gc])
             continue;
-        struct cfs_buf *nb = buf_alloc(fs, reserved[c]);
+        struct cfs_buf *nb = buf_alloc(fs, reserved[gc]);
         if (nb == NULL) {
             rc = -ENOMEM;
             goto out;
         }
         size_t bytes = CFS_BITS_PER_BITMAP / 8;
-        size_t off = (size_t)c * bytes;
+        size_t off = (size_t)gc * bytes;
         size_t total = (fs->nblocks + 7) / 8;
         size_t n = off + bytes <= total ? bytes : total - off;
         memset(nb->data, 0, CFS_BLOCK);
         memcpy(nb->data + CFS_MHDR_SIZE, fs->bitmap + off, n);
-        mhdr_seal(fs, nb->data, CFS_KIND_BITMAP, reserved[c]);
+        mhdr_seal(fs, nb->data, CFS_KIND_BITMAP, reserved[gc]);
         buf_mark_dirty(fs, nb);
         cfs_buf_put(fs, nb);
         if (slots[c])
             cfs_free_block_deferred(fs, slots[c]);
-        slots[c] = reserved[c];
-        fs->bitmap_dirty[c] = 0;
+        slots[c] = reserved[gc];
+        fs->bitmap_dirty[gc] = 0;
     }
     /* Re-seal the index (it was CoW'd or dirtied above). */
     mhdr_seal(fs, idx->data, CFS_KIND_ALLOCIDX, idx->blkno);
 out:
     cfs_buf_put(fs, idx);
+    return rc;
+}
+
+static int commit_bitmap(struct cfs *fs)
+{
+    uint64_t *reserved = kzalloc(fs->nr_chunks * sizeof(*reserved));
+    if (reserved == NULL)
+        return -ENOMEM;
+
+    /* Reserve a destination block for every dirty chunk before writing
+     * any of them; reserving may dirty further chunks, so iterate to a
+     * fixpoint. Each chunk's replacement comes from its own member, so
+     * that a member's bitmap stays on the member it describes. */
+    /* The member table is copy-on-written first, so the block that
+     * takes is already counted in the bitmaps written below. Its
+     * contents are filled in again at the end, once every member's new
+     * allocation root is known; by then the block is writable in this
+     * generation and the second call allocates nothing. */
+    int rc = cfs_members_store(fs);
+    for (bool progress = true; progress && rc == 0;) {
+        progress = false;
+        for (unsigned v = 0; v < fs->nmembers && rc == 0; v++) {
+            struct cfs_memstate *m = &fs->mem[v];
+            for (unsigned c = 0; c < m->nchunks; c++) {
+                unsigned gc = m->chunk0 + c;
+                if (!fs->bitmap_dirty[gc] || reserved[gc] != 0)
+                    continue;
+                uint64_t got;
+                rc = cfs_alloc_run(fs, CFS_ALLOC_META, CFS_DVA(v, m->first_usable), 1, &reserved[gc], &got);
+                if (rc)
+                    break;
+                progress = true;
+            }
+        }
+    }
+    for (unsigned v = 0; v < fs->nmembers && rc == 0; v++)
+        rc = commit_member_bitmap(fs, v, reserved);
+    if (rc == 0)
+        rc = cfs_members_store(fs);
     kfree(reserved);
     return rc;
 }
@@ -598,14 +659,16 @@ int cfs_commit(struct cfs *fs)
      * (design.md, "Not freeing what a snapshot names"). */
     bool snapshots = fs->snap_count > 0;
     for (unsigned i = 0; i < fs->nr_pending; i++) {
-        uint64_t blk = fs->pending_free[i];
-        if (!bit_test(fs->bitmap, blk))
+        uint64_t dva = fs->pending_free[i];
+        uint64_t lin = cfs_dva_lin(fs, dva);
+        if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
             continue;
-        if (snapshots && cfs_snapshot_hold_block(fs, blk))
+        if (snapshots && cfs_snapshot_hold_block(fs, dva))
             continue;
-        bit_clear(fs->bitmap, blk);
-        fs->bitmap_dirty[blk / CFS_BITS_PER_BITMAP] = 1;
+        bit_clear(fs->bitmap, lin);
+        fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
         fs->free_blocks++;
+        fs->mem[CFS_DVA_VDEV(dva)].free_blocks++;
     }
     fs->nr_pending = 0;
     fs->gen++;
@@ -655,27 +718,62 @@ int cfs_sync_vnodes(struct cfs *fs)
 
 /* --- format ------------------------------------------------------------------ */
 
-int cosmofs_format(struct blkdev *bd)
+/*
+ * Format `n` devices as one pool. Member 0 carries the superblocks, the
+ * member table and its own allocation metadata; every other member
+ * carries a label at block 0 and its own allocation metadata, so that
+ * losing one member does not take another's bitmap with it (design.md,
+ * "The member table").
+ */
+static int format_at(struct blkdev **bd, unsigned n, unsigned version)
 {
+    if (n == 0 || n > CFS_MAX_MEMBERS)
+        return -EINVAL;
+    if (version < 4 && n != 1)
+        return -EINVAL;   /* one member is all the older formats can name */
     struct spool *pool;
-    int rc = pool_open(bd, &pool);
+    int rc = pool_open(bd[0], &pool);
     if (rc)
         return rc;
-    if (pool->nblocks < CFS_MIN_BLOCKS || pool->nblocks > CFS_MAX_BLOCKS) {
+    for (unsigned v = 1; v < n && rc == 0; v++)
+        rc = pool_add_member(pool, bd[v], NULL);
+    if (rc) {
         pool_close(pool);
-        return -EINVAL;
-    }
-    uint64_t nblocks = pool->nblocks;
-    unsigned nr_chunks = (unsigned)((nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
-    if (nr_chunks > CFS_PTRS_PER_BLOCK) {
-        pool_close(pool);
-        return -EINVAL;
+        return rc;
     }
 
-    /* Layout: 0,1 superblocks; 2 alloc index; 3.. bitmaps; then imap L1,
-     * imap L0, inode block 0. */
-    uint64_t alloc_idx = 2, bitmap0 = 3, imap1 = bitmap0 + nr_chunks, imap0 = imap1 + 1, inodes0 = imap0 + 1;
-    uint64_t used = inodes0 + 1;
+    struct cfs_member mem[CFS_MAX_MEMBERS];
+    memset(mem, 0, sizeof(mem[0]) * n);
+    uint8_t uuid[16];
+    random_get_bytes(uuid, sizeof(uuid));
+    uint64_t total = 0, free_total = 0;
+    for (unsigned v = 0; v < n; v++) {
+        uint64_t nb = pool->m[v].nblocks;
+        if (nb < CFS_MIN_BLOCKS || nb > CFS_MAX_BLOCKS) {
+            pool_close(pool);
+            return -EINVAL;
+        }
+        unsigned chunks = (unsigned)((nb + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+        if (chunks > CFS_PTRS_PER_BLOCK) {
+            pool_close(pool);
+            return -EINVAL;
+        }
+        memcpy(mem[v].uuid, uuid, 16);
+        mem[v].nblocks = nb;
+        mem[v].first_usable = v == 0 ? 2 : 1;
+        total += nb;
+    }
+
+    /* Member 0: 0,1 superblocks; 2 member table; 3 alloc index; 4..
+     * bitmaps; then imap L1, imap L0, inode block 0.
+     * Member v>0: 0 label; 1 alloc index; 2.. bitmaps. */
+    unsigned chunks0 = (unsigned)((mem[0].nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+    bool v4 = version >= 4;
+    /* Before version 4 there is no member table, and the allocation
+     * index is at block 2 where that format put it. */
+    uint64_t members_blk = 2, alloc_idx = v4 ? 3 : 2, bitmap0 = v4 ? 4 : 3;
+    uint64_t imap1 = bitmap0 + chunks0, imap0 = imap1 + 1, inodes0 = imap0 + 1;
+    uint64_t used0 = inodes0 + 1;
 
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL) {
@@ -685,26 +783,49 @@ int cosmofs_format(struct blkdev *bd)
     struct cfs tmp;
     memset(&tmp, 0, sizeof(tmp));
     tmp.gen = 1;
+    tmp.pool = pool;
 
-    /* Bitmaps: blocks [0, used) allocated. */
-    for (unsigned c = 0; c < nr_chunks && rc == 0; c++) {
-        memset(block, 0, CFS_BLOCK);
-        uint8_t *bits = block + CFS_MHDR_SIZE;
-        for (uint64_t i = (uint64_t)c * CFS_BITS_PER_BITMAP; i < ((uint64_t)c + 1) * CFS_BITS_PER_BITMAP; i++) {
-            if (i >= nblocks || i < used)
-                bit_set(bits, i - (uint64_t)c * CFS_BITS_PER_BITMAP);   /* past-the-end bits stay allocated */
+    for (unsigned v = 0; v < n && rc == 0; v++) {
+        uint64_t nb = mem[v].nblocks;
+        unsigned chunks = (unsigned)((nb + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+        uint64_t idx_blk = v == 0 ? alloc_idx : 1;
+        (void)members_blk;
+        uint64_t bm0 = v == 0 ? bitmap0 : 2;
+        uint64_t used = v == 0 ? used0 : bm0 + chunks;
+        for (unsigned c = 0; c < chunks && rc == 0; c++) {
+            memset(block, 0, CFS_BLOCK);
+            uint8_t *bits = block + CFS_MHDR_SIZE;
+            for (uint64_t i = (uint64_t)c * CFS_BITS_PER_BITMAP; i < ((uint64_t)c + 1) * CFS_BITS_PER_BITMAP; i++) {
+                if (i >= nb || i < used)
+                    bit_set(bits, i - (uint64_t)c * CFS_BITS_PER_BITMAP);   /* past-the-end bits stay allocated */
+            }
+            mhdr_seal(&tmp, block, CFS_KIND_BITMAP, CFS_DVA(v, bm0 + c));
+            rc = pool_write(pool, CFS_DVA(v, bm0 + c), block);
         }
-        mhdr_seal(&tmp, block, CFS_KIND_BITMAP, bitmap0 + c);
-        rc = pool_write(pool, bitmap0 + c, block);
+        if (rc == 0) {
+            memset(block, 0, CFS_BLOCK);
+            uint64_t *p = (uint64_t *)(block + CFS_MHDR_SIZE);
+            for (unsigned c = 0; c < chunks; c++)
+                p[c] = CFS_DVA(v, bm0 + c);
+            mhdr_seal(&tmp, block, CFS_KIND_ALLOCIDX, CFS_DVA(v, idx_blk));
+            rc = pool_write(pool, CFS_DVA(v, idx_blk), block);
+        }
+        if (rc == 0 && v > 0)
+            rc = cfs_label_write(pool, v, uuid, nb);
+        mem[v].alloc_root = CFS_DVA(v, idx_blk);
+        mem[v].free_blocks = nb - used;
+        free_total += nb - used;
     }
-    /* Alloc index. */
-    if (rc == 0) {
+
+    /* The member table. */
+    if (rc == 0 && v4) {
         memset(block, 0, CFS_BLOCK);
-        uint64_t *p = (uint64_t *)(block + CFS_MHDR_SIZE);
-        for (unsigned c = 0; c < nr_chunks; c++)
-            p[c] = bitmap0 + c;
-        mhdr_seal(&tmp, block, CFS_KIND_ALLOCIDX, alloc_idx);
-        rc = pool_write(pool, alloc_idx, block);
+        struct cfs_member_block *mb = (struct cfs_member_block *)(block + CFS_MHDR_SIZE);
+        mb->count = n;
+        for (unsigned v = 0; v < n; v++)
+            mb->m[v] = mem[v];
+        mhdr_seal(&tmp, block, CFS_KIND_MEMBERS, CFS_DVA(0, members_blk));
+        rc = pool_write(pool, CFS_DVA(0, members_blk), block);
     }
     /* Inode block 0 with the root directory (inode 1). */
     if (rc == 0) {
@@ -733,21 +854,24 @@ int cosmofs_format(struct blkdev *bd)
     }
     if (rc == 0)
         rc = pool_flush(pool);
-    /* Superblock A at generation 1; slot B zeroed. */
+    /* Superblock A at generation 1; slot B zeroed. Member 0's addresses
+     * are numerically what they always were, so a version-3 reader sees
+     * the same layout it would have written. */
     if (rc == 0) {
         memset(&tmp.sb, 0, sizeof(tmp.sb));
         memcpy(tmp.sb.magic, CFS_MAGIC, 8);
-        tmp.sb.version = CFS_VERSION;
+        tmp.sb.version = version;
         tmp.sb.block_size = CFS_BLOCK;
-        tmp.sb.total_blocks = nblocks;
+        tmp.sb.total_blocks = total;
         tmp.sb.generation = 1;
         tmp.sb.imap_root = imap1;
-        tmp.sb.alloc_root = alloc_idx;
+        tmp.sb.alloc_root = v4 ? 0 : CFS_DVA(0, alloc_idx);
         tmp.sb.next_ino = 2;
         tmp.sb.inode_count = 1;
-        tmp.sb.free_blocks = nblocks - used;
-        tmp.sb.members = 1;
-        tmp.pool = pool;
+        tmp.sb.free_blocks = free_total;
+        tmp.sb.members = v4 ? CFS_DVA(0, members_blk) : 1;
+        if (v4)
+            memcpy(tmp.sb.uuid, uuid, 16);
         memset(block, 0, CFS_BLOCK);
         rc = pool_write(pool, CFS_SUPER_B, block);
         if (rc == 0)
@@ -756,9 +880,29 @@ int cosmofs_format(struct blkdev *bd)
     kfree(block);
     pool_close(pool);
     if (rc == 0)
-        kinfo("cosmofs: formatted %s: %llu blocks, %llu free", bd->name, (unsigned long long)nblocks,
-              (unsigned long long)(nblocks - used));
+        kinfo("cosmofs: formatted %s%s: %u member(s), %llu blocks, %llu free", bd[0]->name,
+              n > 1 ? " and others" : "", n, (unsigned long long)total, (unsigned long long)free_total);
     return rc;
+}
+
+int cosmofs_format_pool(struct blkdev **bd, unsigned n)
+{
+    return format_at(bd, n, CFS_VERSION);
+}
+
+int cosmofs_format(struct blkdev *bd)
+{
+    return format_at(&bd, 1, CFS_VERSION);
+}
+
+/* Test hook: write an older format, so that "versions 2 and 3 mount
+ * unchanged" is a claim something checks (design.md, "The DVA is 64
+ * bits"). */
+int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
+{
+    if (version < CFS_VERSION_MIN || version > CFS_VERSION)
+        return -EINVAL;
+    return format_at(&bd, 1, version);
 }
 
 /* --- mount / unmount ------------------------------------------------------------ */
@@ -777,10 +921,22 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
         if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && !version_ok && sb->version != 0)
             kerror("cosmofs: slot %u is format version %u; this kernel reads versions %u to %u (reformat)", slot,
                    sb->version, CFS_VERSION_MIN, CFS_VERSION);
+        /* The member table is not read yet -- it is named by this very
+         * block -- so a pointer can only be checked for shape here.
+         * What it actually addresses is checked when it is read: every
+         * metadata block carries its own DVA (mhdr_check). Before
+         * version 4 there is one member and the old exact checks hold. */
+        uint64_t dev0 = fs->pool->m[0].nblocks;
+        bool ptrs_ok;
+        if (sb->version >= 4)
+            ptrs_ok = sb->total_blocks <= CFS_MAX_BLOCKS * (uint64_t)CFS_MAX_MEMBERS &&
+                      CFS_DVA_VDEV(sb->imap_root) < CFS_MAX_MEMBERS && CFS_DVA_BLK(sb->imap_root) < CFS_MAX_BLOCKS &&
+                      CFS_DVA_VDEV(sb->members) < CFS_MAX_MEMBERS && CFS_DVA_BLK(sb->members) < CFS_MAX_BLOCKS;
+        else
+            ptrs_ok = sb->total_blocks == dev0 && sb->imap_root < dev0 && sb->alloc_root < dev0;
         if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || !version_ok || sb->block_size != CFS_BLOCK ||
-            sb->total_blocks != fs->nblocks || sb->generation == 0 ||
-            block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc || sb->imap_root >= fs->nblocks ||
-            sb->alloc_root >= fs->nblocks)
+            sb->total_blocks == 0 || sb->generation == 0 ||
+            block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc || !ptrs_ok)
             rc = -EIO;
         else
             *out = *sb;
@@ -791,34 +947,49 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
 
 static int load_bitmap(struct cfs *fs)
 {
-    fs->nr_chunks = (unsigned)((fs->nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
+    /* fs->nblocks and fs->nr_chunks describe the linear space the
+     * members were laid out in (cfs_members_load). */
     fs->bitmap = kzalloc((size_t)((fs->nblocks + 7) / 8));
     fs->bitmap_dirty = kzalloc(fs->nr_chunks);
     if (fs->bitmap == NULL || fs->bitmap_dirty == NULL)
         return -ENOMEM;
-    struct cfs_buf *idx;
-    int rc = cfs_buf_get(fs, fs->sb.alloc_root, CFS_KIND_ALLOCIDX, &idx);
-    if (rc)
-        return rc;
-    uint64_t *slots = ptrs(idx);
+    int rc = 0;
     uint64_t free = 0;
-    for (unsigned c = 0; c < fs->nr_chunks && rc == 0; c++) {
-        struct cfs_buf *bm;
-        rc = cfs_buf_get(fs, slots[c], CFS_KIND_BITMAP, &bm);
+    for (unsigned v = 0; v < fs->nmembers && rc == 0; v++) {
+        struct cfs_memstate *m = &fs->mem[v];
+        struct cfs_buf *idx;
+        rc = cfs_buf_get(fs, m->alloc_root, CFS_KIND_ALLOCIDX, &idx);
         if (rc)
             break;
-        size_t bytes = CFS_BITS_PER_BITMAP / 8;
-        size_t off = (size_t)c * bytes;
-        size_t total = (size_t)((fs->nblocks + 7) / 8);
-        size_t n = off + bytes <= total ? bytes : total - off;
-        memcpy(fs->bitmap + off, bm->data + CFS_MHDR_SIZE, n);
-        cfs_buf_put(fs, bm);
+        uint64_t *slots = ptrs(idx);
+        for (unsigned c = 0; c < m->nchunks && rc == 0; c++) {
+            struct cfs_buf *bm;
+            rc = cfs_buf_get(fs, slots[c], CFS_KIND_BITMAP, &bm);
+            if (rc)
+                break;
+            size_t bytes = CFS_BITS_PER_BITMAP / 8;
+            size_t off = (size_t)(m->chunk0 + c) * bytes;
+            size_t total = (size_t)((fs->nblocks + 7) / 8);
+            size_t n = off + bytes <= total ? bytes : total - off;
+            memcpy(fs->bitmap + off, bm->data + CFS_MHDR_SIZE, n);
+            cfs_buf_put(fs, bm);
+        }
+        cfs_buf_put(fs, idx);
+        if (rc)
+            break;
+        /* The tail of a member's last chunk addresses nothing: mark it
+         * taken so the allocator can never reach it. */
+        for (uint64_t b = m->nblocks; b < (uint64_t)m->nchunks * CFS_BITS_PER_BITMAP; b++)
+            bit_set(fs->bitmap, m->base + b);
+        uint64_t mfree = 0;
+        for (uint64_t b = m->first_usable; b < m->nblocks; b++)
+            mfree += bit_test(fs->bitmap, m->base + b) ? 0 : 1;
+        m->free_blocks = mfree;
+        m->alloc_hint = m->first_usable;
+        free += mfree;
     }
-    cfs_buf_put(fs, idx);
     if (rc)
         return rc;
-    for (uint64_t i = 2; i < fs->nblocks; i++)
-        free += bit_test(fs->bitmap, i) ? 0 : 1;
     fs->free_blocks = free;
     if (free != fs->sb.free_blocks)
         kwarn("cosmofs: free block count %llu differs from the superblock's %llu; using the bitmap",
@@ -837,6 +1008,7 @@ static void cfs_destroy(struct cfs *fs)
     kfree(fs->bitmap);
     kfree(fs->bitmap_dirty);
     kfree(fs->pending_free);
+    cfs_members_free(fs);
     if (fs->pool)
         pool_close(fs->pool);
     kfree(fs);
@@ -856,6 +1028,9 @@ static void cfs_reset_root(struct cfs *fs)
     kfree(fs->bitmap_dirty);
     fs->bitmap = NULL;
     fs->bitmap_dirty = NULL;
+    /* The other root may describe a different set of members; the pool
+     * keeps its devices, the table is read again. */
+    cfs_members_free(fs);
 }
 
 /* Load the allocator and the root directory of the root in fs->sb. */
@@ -863,7 +1038,15 @@ static int load_root(struct cfs *fs, struct vnode **root)
 {
     fs->gen = fs->sb.generation + 1;
     fs->alloc_hint = 2;
-    int rc = load_bitmap(fs);
+    int rc = cfs_members_load(fs, fs->pool->m[0].dev);
+    if (rc)
+        return rc;
+    /* From the blocks that exist, not the linear span: that is rounded
+     * up to whole bitmap chunks per member and is mostly padding on a
+     * small device. */
+    uint64_t tot = fs->sb.total_blocks;
+    fs->reserve = tot / 32 > 32 ? tot / 32 : 32;
+    rc = load_bitmap(fs);
     if (rc)
         return rc;
     /* How many snapshots exist decides whether a commit may free the
@@ -936,8 +1119,8 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
         kfree(fs);
         return rc;
     }
-    fs->nblocks = fs->pool->nblocks;
-    fs->reserve = fs->nblocks / 32 > 32 ? fs->nblocks / 32 : 32;
+    /* fs->nblocks and the reserve follow from the member table, which
+     * the root's own generation names (load_root). */
 
     struct cfs_super a, b;
     int ra = super_read(fs, CFS_SUPER_A, &a);
@@ -973,7 +1156,8 @@ static int cosmofs_mount(struct fs_type *fst, struct blkdev *bdev, unsigned flag
     mnt->root = root;
     kinfo("cosmofs: %s: generation %llu, %llu/%llu blocks free (%llu reserved), %llu inodes", bdev->name,
           (unsigned long long)fs->sb.generation, (unsigned long long)fs->free_blocks,
-          (unsigned long long)fs->nblocks, (unsigned long long)fs->reserve, (unsigned long long)fs->sb.inode_count);
+          (unsigned long long)fs->sb.total_blocks, (unsigned long long)fs->reserve,
+          (unsigned long long)fs->sb.inode_count);
     return 0;
 }
 
@@ -1024,7 +1208,7 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     mutex_lock(&fs->lock);
     out->generation = fs->sb.generation;
     out->free_blocks = fs->free_blocks;
-    out->total_blocks = fs->nblocks;
+    out->total_blocks = fs->sb.total_blocks;
     out->inode_count = fs->sb.inode_count;
     out->dirty_buffers = fs->nr_dirty;
     out->pending_frees = fs->nr_pending;
@@ -1032,6 +1216,7 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->commits = fs->commits;
     out->wb_commits = fs->wb_commits;
     out->csum_failures = fs->csum_failures;
+    out->members = fs->nmembers;
     mutex_unlock(&fs->lock);
     return 0;
 }
@@ -1041,6 +1226,17 @@ void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
     struct cfs *fs = cfs_of(mnt);
     if (fs)
         fs->discard_on_unmount = discard;
+}
+
+uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL || vdev >= fs->nmembers)
+        return UINT64_MAX;
+    mutex_lock(&fs->lock);
+    uint64_t n = fs->mem[vdev].free_blocks;
+    mutex_unlock(&fs->lock);
+    return n;
 }
 
 void cosmofs_test_set_writeback(struct mount *mnt, bool on)

@@ -32,9 +32,12 @@ static const struct vnode_ops cfs_file_ops;
 
 static bool extent_valid(const struct cfs *fs, const struct cfs_extent *e)
 {
-    /* Overflow-safe: start below the end and count within the remainder;
-     * the logical range must not wrap the 32-bit lblk either. */
-    return e->start >= 2 && e->start < fs->nblocks && e->count > 0 && e->count <= fs->nblocks - e->start &&
+    /* A run lies on one member (cfs_alloc_run never crosses one), so
+     * both ends are checked against that member; the logical range must
+     * not wrap the 32-bit lblk either. */
+    return e->count > 0 && cfs_dva_valid(fs, e->start) &&
+           cfs_dva_valid(fs, e->start + e->count - 1) &&
+           CFS_DVA_VDEV(e->start) == CFS_DVA_VDEV(e->start + e->count - 1) &&
            (uint64_t)e->lblk + e->count <= 0x100000000ull;
 }
 
@@ -50,7 +53,7 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
     uint64_t next = in->indirect;
     unsigned chain = 0;
     while (next) {
-        if (++chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || next < 2 || next >= fs->nblocks) {
+        if (++chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || !cfs_dva_valid(fs, next)) {
             kfree(ext);
             return -EIO;   /* a cycle or a wild pointer */
         }
