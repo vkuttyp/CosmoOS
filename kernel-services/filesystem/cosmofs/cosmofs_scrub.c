@@ -131,18 +131,37 @@ static void scrub_inode(struct cfs *fs, const struct cfs_inode *inp, uint8_t *pa
     scrub_extent_chain(fs, in.indirect, page, st);
     scrub_csum_tree(fs, in.csum_root, page, st);
     uint64_t blocks = (in.size + CFS_BLOCK - 1) / CFS_BLOCK;
-    for (uint64_t lblk = 0; lblk < blocks; lblk++) {
-        uint64_t pblk = 0;
-        int rc = cfs_map(fs, &in, lblk, &pblk);
-        if (rc != 1)
-            continue;   /* a hole, or a mapping that could not be read */
+    for (uint64_t lblk = 0; lblk < blocks;) {
+        struct cfs_extent e;
+        int rc = cfs_map_ext(fs, &in, lblk, &e);
+        if (rc != 1) {
+            lblk++;      /* a hole, or a mapping that could not be read */
+            continue;
+        }
+        if (cfs_ext_compressed(&e)) {
+            /* A record's checksums cover its physical blocks, so those
+             * are what is checked -- once for the record, not once per
+             * logical block it holds. */
+            for (uint32_t i = 0; i < cfs_ext_psize(&e); i++) {
+                unsigned fixed = 0;
+                rc = cfs_data_scrub_block(fs, &in, e.lblk + i, e.start + i, page, &fixed);
+                st->blocks_read++;
+                if (rc)
+                    st->unrecoverable++;
+                else
+                    st->repaired += fixed;
+            }
+            lblk = e.lblk + cfs_ext_count(&e);
+            continue;
+        }
         unsigned fixed = 0;
-        rc = cfs_data_scrub_block(fs, &in, lblk, pblk, page, &fixed);
+        rc = cfs_data_scrub_block(fs, &in, lblk, e.start + (lblk - e.lblk), page, &fixed);
         st->blocks_read++;
         if (rc)
             st->unrecoverable++;
         else
             st->repaired += fixed;
+        lblk++;
     }
 }
 

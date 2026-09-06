@@ -193,6 +193,13 @@ int cfs_data_write(struct cfs *fs, uint64_t blk, const void *buf);
 /* vnodes and extents (cosmofs.c) */
 int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
+/* The run covering `lblk`, whether it is a plain run or a compressed
+ * record: 1 with the extent, 0 for a hole, or an error. */
+int cfs_map_ext(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, struct cfs_extent *out);
+/* Read a compressed record and decompress it into `out`, which must hold
+ * cfs_ext_count(e) blocks. Every physical block is verified and repaired
+ * on the way, as any other read is. */
+int cfs_record_read(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *e, uint8_t *out);
 int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t pblk, uint64_t *old);
 int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep_blocks);
 /* The per-inode checksum tree (cosmofs.c). */
