@@ -17,6 +17,11 @@ static int lo_transmit(struct netif *nif, struct mbuf *m)
         m_freem(m);
         return 0;   /* "sent" and lost */
     }
+    /* Nothing is checked between two ends of one machine: the transport
+     * checksum is left in its partial form (NETIF_CAP_TXCSUM) and the
+     * receiver trusts it (M_CSUM_OK), as Linux's lo does. */
+    m->flags |= M_CSUM_OK;
+    m->pkt.csum_flags &= (uint16_t)~NET_CSUM_TX;
     netif_rx(nif, m);
     return 0;
 }
@@ -27,6 +32,7 @@ static struct netif g_lo = {
     .name = "lo",
     .mtu = 65535,
     .flags = NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP,
+    .caps = NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM,
     .ops = &lo_ops,
 };
 

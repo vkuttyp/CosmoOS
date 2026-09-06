@@ -230,7 +230,7 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         sum = cksum_pseudo6(&ip6->src, &ip6->dst, IPPROTO_UDP, ulen);
     }
-    if (uh->cksum != 0 && cksum_fold(m_cksum_partial(m, 0, ulen, sum)) != 0) {
+    if (uh->cksum != 0 && !(m->flags & M_CSUM_OK) && cksum_fold(m_cksum_partial(m, 0, ulen, sum)) != 0) {
         STAT(rx_bad_cksum);
         m_freem(m);
         return;

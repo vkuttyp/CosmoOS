@@ -1,15 +1,24 @@
 /*
- * netif.c - Interfaces, the receive queue, the network worker thread.
+ * netif.c - Interfaces, the per-CPU receive queues, the network workers.
  *
- * Drivers call netif_rx from any context; the worker thread ("netrx")
- * drains the queue and runs protocol input in thread context. Timers
- * hand deferred work to the same thread through net_work_queue so no
- * protocol code runs in interrupt context.
+ * Drivers call netif_rx from any context; the packet is steered by its
+ * flow hash to one CPU's receive queue, whose pinned worker ("netrx/N")
+ * drains it and runs protocol input in thread context, so one flow is
+ * processed in order by one thread and different flows in parallel
+ * (docs/kernel-services/network/design.md, "Receive scaling"). Timers
+ * hand deferred work to the calling CPU's worker through net_work_queue
+ * so no protocol code runs in interrupt context.
  */
 
 #include <kernel/completion.h>
 #include <kernel/errno.h>
 #include <kernel/fwcfg.h>
+#include <kernel/kmalloc.h>
+#include <kernel/net/cksum.h>
+#include <kernel/net/tcp.h>
+#include <kernel/net/udp.h>
+#include <kernel/percpu.h>
+#include <arch/cpu.h>
 #include <kernel/log.h>
 #include <kernel/netif.h>
 #include <kernel/net/ether.h>
@@ -36,12 +45,26 @@
 static LIST_HEAD(g_netifs);
 static spinlock_t g_netif_lock = SPINLOCK_INIT("netifs");
 static unsigned g_next_index = 1;
-static struct mbufq g_rxq;
-static LIST_HEAD(g_work);
-static spinlock_t g_work_lock = SPINLOCK_INIT("network");
-static struct waitqueue g_worker_wq = WAITQUEUE_INIT(g_worker_wq);
-static struct thread *g_worker;
-static volatile bool g_worker_ready;
+/* One receive queue, work list and worker per CPU (unit 11). CPU 0's
+ * worker starts in net_init; the others in net_start_workers after SMP
+ * bring-up. A packet steered to a CPU whose worker is not ready yet goes
+ * to CPU 0. */
+struct net_cpu {
+    struct mbufq rxq;
+    struct list_node work;
+    spinlock_t work_lock;
+    struct waitqueue wq;
+    struct thread *worker;
+    volatile bool ready;
+    struct net_cpu_stats stats;
+    unsigned id;
+    char name[16];
+};
+static struct net_cpu g_cpu[CONFIG_MAX_CPUS];
+static unsigned g_ncpu = 1;            /* CPUs with a queue (workers may still be starting) */
+static bool g_steer = true;
+static netif_rx_hook_fn g_rx_hook;
+static void *g_rx_hook_arg;
 
 static void netif_release(struct kobject *obj)
 {
@@ -172,25 +195,29 @@ static void barrier_fn(void *arg)
     complete(&b->done);
 }
 
-/* Drop every queued receive packet that arrived on `nif`. The queue is
- * drained and rebuilt in order; it is short (NET_RXQ_MAX). */
+/* Drop every queued receive packet that arrived on `nif`, on every CPU's
+ * queue. Each queue is drained and rebuilt in order; they are short
+ * (NET_RXQ_MAX). */
 static unsigned rxq_purge(struct netif *nif)
 {
     struct mbufq keep;
     mbufq_init(&keep, NET_RXQ_MAX, "net-rxq-keep");
-    struct mbuf *m;
     unsigned dropped = 0;
-    while ((m = mbufq_dequeue(&g_rxq)) != NULL) {
-        if (m->pkt.rcvif == nif) {
-            m_freem(m);
-            dropped++;
-        } else if (!mbufq_enqueue(&keep, m)) {
-            m_freem(m);
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        struct mbufq *q = &g_cpu[i].rxq;
+        struct mbuf *m;
+        while ((m = mbufq_dequeue(q)) != NULL) {
+            if (m->pkt.rcvif == nif) {
+                m_freem(m);
+                dropped++;
+            } else if (!mbufq_enqueue(&keep, m)) {
+                m_freem(m);
+            }
         }
-    }
-    while ((m = mbufq_dequeue(&keep)) != NULL) {
-        if (!mbufq_enqueue(&g_rxq, m))
-            m_freem(m);
+        while ((m = mbufq_dequeue(&keep)) != NULL) {
+            if (!mbufq_enqueue(q, m))
+                m_freem(m);
+        }
     }
     return dropped;
 }
@@ -198,8 +225,13 @@ static unsigned rxq_purge(struct netif *nif)
 unsigned netif_rxq_count(const struct netif *nif)
 {
     (void)nif;
-    return mbufq_len(&g_rxq);
+    unsigned n = 0;
+    for (unsigned i = 0; i < g_ncpu; i++)
+        n += mbufq_len(&g_cpu[i].rxq);
+    return n;
 }
+
+static bool net_work_queue_on(struct net_work *w, struct net_cpu *c);
 
 void netif_unregister(struct netif *nif)
 {
@@ -219,15 +251,29 @@ void netif_unregister(struct netif *nif)
      * every packet of its is either in the queue or already input. */
     synchronize_quiesce();
 
-    /* 4. Nothing of its left in the receive queue, and the worker has
-     * finished any input_one it had started. */
+    /* 4. Nothing of its left in any receive queue, and every worker has
+     * finished any input_one it had started: a barrier through each. */
     unsigned dropped = rxq_purge(nif);
-    if (g_worker_ready) {
-        struct worker_barrier b;
-        net_work_init(&b.work, barrier_fn, &b);
-        completion_init(&b.done, "netif-barrier");
-        net_work_queue(&b.work);
-        wait_for_completion(&b.done);
+    struct worker_barrier *bs = kmalloc(g_ncpu * sizeof(*bs), 0);
+    if (bs) {
+        unsigned posted = 0;
+        for (unsigned i = 0; i < g_ncpu; i++) {
+            if (!g_cpu[i].ready)
+                continue;
+            net_work_init(&bs[i].work, barrier_fn, &bs[i]);
+            completion_init(&bs[i].done, "netif-barrier");
+            if (net_work_queue_on(&bs[i].work, &g_cpu[i]))
+                posted |= 1u << (i % 32);
+        }
+        for (unsigned i = 0; i < g_ncpu; i++)
+            if (g_cpu[i].ready && (posted & (1u << (i % 32))))
+                wait_for_completion(&bs[i].done);
+        kfree(bs);
+    } else {
+        /* No memory for the barriers: a grace period plus a pause covers
+         * the one input_one per worker that may still run. */
+        synchronize_quiesce();
+        thread_sleep_ms(10);
     }
 
     /* 5. Tables that name the interface. */
@@ -331,7 +377,78 @@ bool netif_owns_ipv6(const struct in6_addr *a)
 
 /* --- receive path --------------------------------------------------------- */
 
-void netif_rx(struct netif *nif, struct mbuf *m)
+static uint32_t mix32(uint32_t h, uint32_t v)
+{
+    h ^= v;
+    h *= 0x9E3779B1u;
+    h ^= h >> 15;
+    return h;
+}
+
+uint32_t net_flow_hash(const struct mbuf *m, bool ether)
+{
+    uint8_t b[96];
+    uint32_t n = m->pkt.len < sizeof(b) ? m->pkt.len : (uint32_t)sizeof(b);
+    if (n == 0 || !m_copydata(m, 0, n, b))
+        return 0;
+    uint32_t off = 0, type;
+    if (ether) {
+        if (n < ETH_HLEN)
+            return 0;
+        type = ((uint32_t)b[12] << 8) | b[13];
+        off = ETH_HLEN;
+    } else {
+        type = m->pkt.proto;
+    }
+    uint32_t h = 0x811C9DC5u, proto = 0, ports_at = 0;
+    if (type == ETH_P_IP) {
+        if (n < off + 20)
+            return 0;
+        uint32_t ihl = (uint32_t)(b[off] & 0xf) * 4;
+        uint32_t src, dst;
+        memcpy(&src, b + off + 12, 4);
+        memcpy(&dst, b + off + 16, 4);
+        proto = b[off + 9];
+        h = mix32(mix32(h, src), dst);
+        if (!(((b[off + 6] & 0x3f) != 0) || b[off + 7] != 0))   /* not a fragment: ports are here */
+            ports_at = off + ihl;
+    } else if (type == ETH_P_IPV6) {
+        if (n < off + 40)
+            return 0;
+        for (unsigned k = 0; k < 8; k++) {
+            uint32_t w;
+            memcpy(&w, b + off + 8 + 4 * k, 4);
+            h = mix32(h, w);
+        }
+        proto = b[off + 6];
+        ports_at = off + 40;   /* extension headers: ports left out */
+    } else {
+        return mix32(h, type);
+    }
+    h = mix32(h, proto);
+    if ((proto == IPPROTO_TCP || proto == IPPROTO_UDP) && ports_at && ports_at + 4 <= n) {
+        uint32_t ports;
+        memcpy(&ports, b + ports_at, 4);
+        h = mix32(h, ports);
+    }
+    return h ? h : 1;
+}
+
+/* The queue a packet goes to: the flow's CPU when steering is on and that
+ * CPU's worker is running, else CPU 0's. */
+static struct net_cpu *steer(struct netif *nif, struct mbuf *m, int cpu)
+{
+    if (cpu < 0) {
+        if (!g_steer || g_ncpu <= 1)
+            return &g_cpu[0];
+        m->pkt.flow_hash = net_flow_hash(m, !(nif->flags & NETIF_LOOPBACK));
+        cpu = (int)(m->pkt.flow_hash % g_ncpu);
+    }
+    struct net_cpu *c = &g_cpu[(unsigned)cpu < g_ncpu ? (unsigned)cpu : 0];
+    return c->ready ? c : &g_cpu[0];
+}
+
+static void rx_common(struct netif *nif, struct mbuf *m, int cpu)
 {
     /* Read-side section: a driver calls this from its interrupt (already
      * one) or from a thread (loopback); netif_unregister's grace period
@@ -346,13 +463,52 @@ void netif_rx(struct netif *nif, struct mbuf *m)
     m->pkt.rx_ns = clock_now_ns();
     __atomic_fetch_add(&nif->stats.rx_packets, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&nif->stats.rx_bytes, m->pkt.len, __ATOMIC_RELAXED);
-    if (!mbufq_enqueue(&g_rxq, m)) {
+    struct net_cpu *c = steer(nif, m, cpu);
+    if (c->id == arch_cpu_id())
+        __atomic_fetch_add(&c->stats.rx_steered_here, 1, __ATOMIC_RELAXED);
+    if (!mbufq_enqueue(&c->rxq, m)) {
         __atomic_fetch_add(&nif->stats.rx_dropped, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&c->stats.rx_dropped, 1, __ATOMIC_RELAXED);
         quiesce_read_unlock();
         return;
     }
+    __atomic_fetch_add(&c->stats.rx_queued, 1, __ATOMIC_RELAXED);
     quiesce_read_unlock();
-    waitqueue_wake_one(&g_worker_wq);
+    waitqueue_wake_one(&c->wq);
+}
+
+void netif_rx(struct netif *nif, struct mbuf *m)
+{
+    rx_common(nif, m, -1);
+}
+
+void netif_rx_on(struct netif *nif, struct mbuf *m, unsigned cpu)
+{
+    rx_common(nif, m, (int)cpu);
+}
+
+void netif_set_steering(bool on)
+{
+    g_steer = on;
+}
+
+bool netif_steering(void)
+{
+    return g_steer;
+}
+
+bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out)
+{
+    if (cpu >= g_ncpu || !g_cpu[cpu].ready)
+        return false;
+    *out = g_cpu[cpu].stats;
+    return true;
+}
+
+void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
+{
+    g_rx_hook_arg = arg;
+    __atomic_store_n(&g_rx_hook, fn, __ATOMIC_RELEASE);
 }
 
 int netif_transmit(struct netif *nif, struct mbuf *m)
@@ -372,6 +528,14 @@ int netif_transmit(struct netif *nif, struct mbuf *m)
         m_freem(m);
         __atomic_fetch_add(&nif->stats.tx_dropped, 1, __ATOMIC_RELAXED);
         return -ENETUNREACH;
+    }
+    /* A transport checksum the interface cannot finish is finished here
+     * (unit 11: the transports leave the partial form and NET_CSUM_*). */
+    if ((m->pkt.csum_flags & NET_CSUM_TX) && !(nif->caps & NETIF_CAP_TXCSUM) && !m_csum_complete(m)) {
+        quiesce_read_unlock();
+        m_freem(m);
+        __atomic_fetch_add(&nif->stats.tx_errors, 1, __ATOMIC_RELAXED);
+        return -EINVAL;
     }
     uint32_t len = m->pkt.len;
     int rc = nif->ops->transmit(nif, m);
@@ -393,40 +557,52 @@ void net_work_init(struct net_work *w, net_work_fn fn, void *arg)
     w->queued = false;
 }
 
-bool net_work_queue(struct net_work *w)
+static bool net_work_queue_on(struct net_work *w, struct net_cpu *c)
 {
-    arch_irq_state_t s = spin_lock_irqsave(&g_work_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&c->work_lock);
     bool fresh = !w->queued;
     if (fresh) {
         w->queued = true;
-        list_push_back(&g_work, &w->link);
+        list_push_back(&c->work, &w->link);
     }
-    spin_unlock_irqrestore(&g_work_lock, s);
-    waitqueue_wake_one(&g_worker_wq);
+    spin_unlock_irqrestore(&c->work_lock, s);
+    waitqueue_wake_one(&c->wq);
     return fresh;
 }
 
-static bool work_pending(void)
+bool net_work_queue(struct net_work *w)
 {
-    arch_irq_state_t s = spin_lock_irqsave(&g_work_lock);
-    bool p = !list_empty(&g_work);
-    spin_unlock_irqrestore(&g_work_lock, s);
+    /* The calling CPU's worker (a timer fires on the CPU that armed it);
+     * an item already on some list stays there. */
+    unsigned cpu = arch_cpu_id();
+    struct net_cpu *c = &g_cpu[cpu < g_ncpu ? cpu : 0];
+    if (!c->ready)
+        c = &g_cpu[0];
+    return net_work_queue_on(w, c);
+}
+
+static bool work_pending(struct net_cpu *c)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&c->work_lock);
+    bool p = !list_empty(&c->work);
+    spin_unlock_irqrestore(&c->work_lock, s);
     return p;
 }
 
-static void run_work(void)
+static void run_work(struct net_cpu *c)
 {
     for (;;) {
-        arch_irq_state_t s = spin_lock_irqsave(&g_work_lock);
-        if (list_empty(&g_work)) {
-            spin_unlock_irqrestore(&g_work_lock, s);
+        arch_irq_state_t s = spin_lock_irqsave(&c->work_lock);
+        if (list_empty(&c->work)) {
+            spin_unlock_irqrestore(&c->work_lock, s);
             return;
         }
-        struct net_work *w = list_entry(g_work.next, struct net_work, link);
+        struct net_work *w = list_entry(c->work.next, struct net_work, link);
         list_remove(&w->link);
         list_init(&w->link);
         w->queued = false;
-        spin_unlock_irqrestore(&g_work_lock, s);
+        spin_unlock_irqrestore(&c->work_lock, s);
+        c->stats.work_runs++;
         w->fn(w->arg);
     }
 }
@@ -434,6 +610,9 @@ static void run_work(void)
 static void input_one(struct mbuf *m)
 {
     struct netif *nif = m->pkt.rcvif;
+    netif_rx_hook_fn hook = __atomic_load_n(&g_rx_hook, __ATOMIC_ACQUIRE);
+    if (hook && !hook(nif, m, g_rx_hook_arg))
+        return;
     if (nif->flags & NETIF_LOOPBACK) {
         /* No link layer: pkt.proto carries the EtherType. */
         if (m->pkt.proto == ETH_P_IP)
@@ -449,16 +628,46 @@ static void input_one(struct mbuf *m)
 
 static void worker_main(void *arg)
 {
-    (void)arg;
-    g_worker_ready = true;
+    struct net_cpu *c = arg;
+    c->ready = true;
     for (;;) {
-        wait_event(&g_worker_wq, mbufq_len(&g_rxq) > 0 || work_pending());
+        wait_event(&c->wq, mbufq_len(&c->rxq) > 0 || work_pending(c));
         struct mbuf *m;
         unsigned budget = 64;
-        while (budget-- && (m = mbufq_dequeue(&g_rxq)) != NULL)
+        while (budget-- && (m = mbufq_dequeue(&c->rxq)) != NULL)
             input_one(m);
-        run_work();
+        run_work(c);
     }
+}
+
+static void cpu_init(struct net_cpu *c, unsigned id)
+{
+    c->id = id;
+    mbufq_init(&c->rxq, NET_RXQ_MAX, "net-rxq");
+    list_init(&c->work);
+    spinlock_init(&c->work_lock, "network");
+    waitqueue_init(&c->wq, "netrx");
+    ksnprintf(c->name, sizeof(c->name), "netrx/%u", id);
+}
+
+static void start_worker(struct net_cpu *c)
+{
+    c->worker = thread_create_on(worker_main, c, c->name, 40, CPUMASK_OF(c->id));
+    if (c->worker == NULL)
+        panic("net: cannot create the worker thread for CPU %u", c->id);
+}
+
+void net_start_workers(void)
+{
+    unsigned n = cpu_count();
+    if (n > CONFIG_MAX_CPUS)
+        n = CONFIG_MAX_CPUS;
+    for (unsigned i = 1; i < n; i++) {
+        cpu_init(&g_cpu[i], i);
+        start_worker(&g_cpu[i]);
+    }
+    __atomic_store_n(&g_ncpu, n, __ATOMIC_RELEASE);
+    kinfo("net: %u receive queues", n);
 }
 
 extern void udp_init(void);
@@ -467,16 +676,14 @@ extern void socket_init(void);
 
 void net_init(void)
 {
-    mbufq_init(&g_rxq, NET_RXQ_MAX, "net-rxq");
+    cpu_init(&g_cpu[0], 0);
     mbuf_init();
     arp_init();
     nd_init();
     udp_init();
     tcp_init();
     socket_init();
-    g_worker = thread_create(worker_main, NULL, "netrx", 40);
-    if (g_worker == NULL)
-        panic("net: cannot create the worker thread");
+    start_worker(&g_cpu[0]);
     loopback_init();
     kinfo("net: stack ready");
 }
@@ -494,6 +701,12 @@ void netif_dump(void)
                 (unsigned long long)n->stats.tx_bytes, (unsigned long long)n->stats.tx_errors);
     }
     spin_unlock_irqrestore(&g_netif_lock, s);
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        const struct net_cpu_stats *st = &g_cpu[i].stats;
+        kprintf("netrx/%u: %s queued %llu drop %llu local %llu work %llu\n", i, g_cpu[i].ready ? "up" : "starting",
+                (unsigned long long)st->rx_queued, (unsigned long long)st->rx_dropped,
+                (unsigned long long)st->rx_steered_here, (unsigned long long)st->work_runs);
+    }
 }
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
@@ -502,5 +715,7 @@ EXPORT_SYMBOL(netif_register);
 EXPORT_SYMBOL(netif_unregister);
 EXPORT_SYMBOL(netif_release_static);
 EXPORT_SYMBOL(netif_rx);
+EXPORT_SYMBOL(netif_rx_on);
+EXPORT_SYMBOL(net_flow_hash);
 EXPORT_SYMBOL(netif_set_ipv4);
 EXPORT_SYMBOL(netif_set_up);

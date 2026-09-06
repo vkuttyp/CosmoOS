@@ -204,6 +204,8 @@ static int output_on(struct netif *nif, struct mbuf *m, uint32_t src, uint32_t d
     iph->cksum = 0;
     iph->cksum = in_cksum(iph, sizeof(*iph));
     m->pkt.proto = ETH_P_IP;
+    if (m->pkt.csum_flags & NET_CSUM_TX)
+        m->pkt.csum_start += sizeof(*iph);
     STAT(tx);
 
     if (nif->flags & NETIF_LOOPBACK)

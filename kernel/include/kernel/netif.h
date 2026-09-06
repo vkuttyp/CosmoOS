@@ -20,6 +20,10 @@
 #define NETIF_NOARP    (1u << 2)
 #define NETIF_GONE     (1u << 3)   /* netif_unregister ran: no transmit, no receive */
 
+/* nif->caps, set by the driver before netif_register (unit 11). */
+#define NETIF_CAP_TXCSUM (1u << 0)   /* finishes NET_CSUM_* transport checksums (virtio NEEDS_CSUM) */
+#define NETIF_CAP_RXCSUM (1u << 1)   /* may mark received packets M_CSUM_OK */
+
 struct netif;
 
 struct netif_ops {
@@ -49,12 +53,14 @@ struct netif {
     struct in6_addr ip6_ll;
     const struct netif_ops *ops;
     void *priv;
+    unsigned caps;                      /* NETIF_CAP_* */
     struct netif_stats stats;
     struct list_node link;
     spinlock_t lock;
 };
 
-void net_init(void);          /* mbufs, worker thread, loopback, protocols */
+void net_init(void);          /* mbufs, CPU 0's worker, loopback, protocols */
+void net_start_workers(void); /* after SMP bring-up: one pinned worker per online CPU (unit 11) */
 
 /* Register an interface prepared by the driver (name, mac, mtu, ops with
  * transmit and release). Assigns index and the IPv6 link-local address;
@@ -80,8 +86,29 @@ void netif_set_up(struct netif *nif, bool up);
 bool netif_owns_ipv4(uint32_t addr);          /* one of our addresses (any interface) */
 bool netif_owns_ipv6(const struct in6_addr *a);
 
-/* Driver -> stack: takes the packet, any context (dropped once GONE). */
+/* Driver -> stack: takes the packet, any context (dropped once GONE).
+ * The packet is steered to a CPU's receive queue by its flow hash, so
+ * one flow's packets are processed in order by one worker (unit 11). */
 void netif_rx(struct netif *nif, struct mbuf *m);
+/* The same for a driver whose receive queue is bound to `cpu` (a
+ * multi-queue device that steered already): no hash, that CPU's queue. */
+void netif_rx_on(struct netif *nif, struct mbuf *m, unsigned cpu);
+/* The steering hash: Ethernet (when `ether`) / IPv4 / IPv6 addresses and
+ * TCP/UDP ports; 0 for a packet it cannot classify. Reads at most the
+ * first 96 bytes; any context. */
+uint32_t net_flow_hash(const struct mbuf *m, bool ether);
+/* Steering on (the default) or every packet to CPU 0's queue (the
+ * architecture before unit 11; the benchmark's baseline). */
+void netif_set_steering(bool on);
+bool netif_steering(void);
+struct net_cpu_stats {
+    uint64_t rx_queued, rx_dropped, rx_steered_here, work_runs;
+};
+bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out);   /* false: no such worker */
+/* Test hook: called on the worker for every received packet before input;
+ * return false to take the packet (the hook then owns it). */
+typedef bool (*netif_rx_hook_fn)(struct netif *nif, struct mbuf *m, void *arg);
+void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
 /* Stack -> driver: takes the packet. Thread context; -ENETUNREACH when
  * down, -ENODEV once unregistered. */
 int netif_transmit(struct netif *nif, struct mbuf *m);
