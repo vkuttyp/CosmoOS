@@ -4,9 +4,15 @@
 #include <sys/types.h>
 /* The child receives exactly the mapped handles (docs/libc/design.md);
  * h == NULL, nh == 0 inherits 0, 1, 2 as they are. */
+/* The same shape as struct cosmo_spawn_handle: spawnve passes the array
+ * straight to the kernel. */
 struct spawn_handle {
     int child;
     int parent;
+    /* What the child gets on this handle: 0 for the caller's own
+     * rights, or a subset of COSMO_RIGHT_* to hand over less. */
+    unsigned rights;
+    unsigned pad;
 };
 pid_t spawnve(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
               size_t nh);

@@ -86,3 +86,32 @@ record has uid 1000; of 80 quick `log` calls at least 16 succeed and at
 least one is `-EAGAIN`). Gap: `sysctl` values are world-readable by
 design (none carries a kernel address); the kernel's fault log line for
 a process names the user address only.
+
+**S9. A handle says what may be done with it, and only ever says less.**
+Rights live on the handle, not the object: READ, WRITE, DUP, TRANSFER
+and MANAGE in the generic vocabulary, with bits 16..31 belonging to each
+object's type (docs/kernel/object/architecture.md, "Rights"). `dup`
+needs DUP, the `spawn` map needs TRANSFER, and both may hand over a
+subset of what the caller holds — never more, and there is no operation
+anywhere that adds a right to a handle that already exists. Creating an
+object grants its creator the access rights that suit it plus
+`HANDLE_RIGHT_OWNER`, so giving something away is always a deliberate
+act. Administering an object is separate from using it: `setnonblock`
+needs MANAGE.
+
+Two answers are deliberately different. The capability operations say
+`-EPERM` when a handle exists and does not carry the right — that is
+what `handle_lookup_rights` reports — while `read` and `write` keep
+saying `EBADF`, which is what POSIX says of a descriptor that is not
+open for that direction. The rights layer adds vocabulary; it does not
+change what the calls that predate it answer.
+
+A table stops answering before it is torn down. `handle_table_destroy`
+raises an exiting flag under the table lock and only then empties the
+slots, so a thread still inside a syscall can neither be handed a
+reference the exit is releasing nor put one back for nobody to close.
+Check: `objects` (rights tell "no such handle" from "not through this
+handle"; after destroy, lookup, get and both installs all fail), and the
+user-mode self-test (a copy with only READ cannot be written, copied,
+transferred to a child or administered, while a copy that keeps DUP and
+TRANSFER can still be passed on and is no wider than its parent).

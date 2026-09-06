@@ -21,7 +21,7 @@ pid_t spawnve(const char *path, const char *const argv[], const char *const envp
         .handles = (const struct cosmo_spawn_handle *)h,
         .nr_handles = nh,
         .cwd = NULL,
-        .flags = 0,
+        .flags = COSMO_SPAWN_HANDLE_RIGHTS,   /* struct spawn_handle carries rights */
     };
     return (pid_t)__syscall_ret(cosmo_spawn(&req));
 }
@@ -36,7 +36,7 @@ pid_t spawnve_as(const char *path, const char *const argv[], const char *const e
         .handles = (const struct cosmo_spawn_handle *)h,
         .nr_handles = nh,
         .cwd = NULL,
-        .flags = COSMO_SPAWN_SETCRED,
+        .flags = COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS,
         .uid = uid,
         .gid = gid,
     };

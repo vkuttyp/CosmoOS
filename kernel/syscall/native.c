@@ -265,7 +265,10 @@ static int64_t sys_open(struct syscall_args *a)
     rc = vfs_open(process_current()->cwd, path, flags, mode, &f);
     if (rc)
         return rc;
-    unsigned rights = 0;
+    /* The access mode decides read and write; opening a file is what
+     * makes the caller its owner, so it may also copy, pass on and
+     * administer the handle. */
+    unsigned rights = HANDLE_RIGHT_OWNER;
     unsigned acc = flags & COSMO_O_ACCMODE;
     if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR)
         rights |= HANDLE_RIGHT_READ;
@@ -480,7 +483,7 @@ static int64_t sys_socket(struct syscall_args *a)
         return rc;
     if (nonblock)
         ksock_set_nonblock(s, true);
-    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_ALL);
     ksock_put(s);
     return h;
 }
@@ -525,7 +528,7 @@ static int64_t sys_accept(struct syscall_args *a)
         ksock_put(c);
         return rc;
     }
-    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_ALL);
     ksock_put(c);
     return h;
 }
@@ -700,7 +703,7 @@ static int64_t sys_spawn(struct syscall_args *a)
     struct cosmo_spawn req;
     if (copy_from_user(&req, a->a[0], sizeof(req)))
         return -EFAULT;
-    if ((req.flags & ~COSMO_SPAWN_SETCRED) || req.path == NULL || req.argv == NULL)
+    if ((req.flags & ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS)) || req.path == NULL || req.argv == NULL)
         return -EINVAL;
     struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
@@ -727,10 +730,33 @@ static int64_t sys_spawn(struct syscall_args *a)
         goto out;
     if (req.nr_handles) {
         STATIC_ASSERT(sizeof(struct process_handle_map) == sizeof(struct cosmo_spawn_handle), "handle map shape");
-        if (copy_from_user(sc->map, (uint64_t)(uintptr_t)req.handles,
-                           req.nr_handles * sizeof(struct cosmo_spawn_handle))) {
-            rc = -EFAULT;
-            goto out;
+        if (req.flags & COSMO_SPAWN_HANDLE_RIGHTS) {
+            if (copy_from_user(sc->map, (uint64_t)(uintptr_t)req.handles,
+                               req.nr_handles * sizeof(struct cosmo_spawn_handle))) {
+                rc = -EFAULT;
+                goto out;
+            }
+        } else {
+            /* The map as it was before rights existed: two ints per
+             * entry, and the child gets what the caller holds. Reading
+             * the wider element would take the next entry's child for
+             * this one's rights. */
+            struct legacy_handle {
+                int child;
+                int parent;
+            };
+            struct legacy_handle legacy[HANDLE_TABLE_SIZE];
+            if (copy_from_user(legacy, (uint64_t)(uintptr_t)req.handles,
+                               req.nr_handles * sizeof(struct legacy_handle))) {
+                rc = -EFAULT;
+                goto out;
+            }
+            for (unsigned i = 0; i < req.nr_handles; i++) {
+                sc->map[i].child = legacy[i].child;
+                sc->map[i].parent = legacy[i].parent;
+                sc->map[i].rights = COSMO_RIGHTS_SAME;
+                sc->map[i].pad = 0;
+            }
         }
     }
     pid_t pid = 0;
@@ -864,11 +890,15 @@ static int64_t sys_ioready(struct syscall_args *a)
     return (int64_t)r;
 }
 
+/* Making an object non-blocking changes how it behaves rather than what
+ * it holds, which is what MANAGE is for. */
 static int64_t sys_setnonblock(struct syscall_args *a)
 {
-    struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
+    bool no_rights;
+    struct kobject *obj =
+        handle_lookup_rights(&process_current()->handles, (int)a->a[0], HANDLE_RIGHT_MANAGE, &no_rights);
     if (obj == NULL)
-        return -EBADF;
+        return no_rights ? -EPERM : -EBADF;
     int rc = kobject_set_nonblock(obj, a->a[1] ? 1 : 0);
     kobject_put(obj);
     return rc < 0 ? rc : 0;
@@ -882,7 +912,7 @@ static int64_t sys_aio_create(struct syscall_args *a)
     int rc = aio_ring_create((unsigned)a->a[0], (unsigned)a->a[1], &r);
     if (rc)
         return rc;
-    int h = handle_install(&process_current()->handles, &r->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &r->obj, HANDLE_RIGHT_ALL);
     kobject_put(&r->obj);
     return h;
 }
@@ -928,8 +958,8 @@ static int64_t sys_pipe(struct syscall_args *a)
         return rc;
     struct handle_table *t = &process_current()->handles;
     int h[2];
-    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ);
-    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE);
+    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    h[1] = h[0] < 0 ? -EMFILE : handle_install(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
     kobject_put(rd);
     kobject_put(wr);
     if (h[0] < 0 || h[1] < 0) {
@@ -945,10 +975,18 @@ static int64_t sys_pipe(struct syscall_args *a)
     return 0;
 }
 
+/*
+ * Duplicating a handle needs the right to duplicate it, and may hand the
+ * copy *less* than the original holds -- never more. That is what makes
+ * a handle a capability rather than a name: a process can pass a
+ * read-only view of something it can write, and cannot get back what it
+ * gave away (docs/kernel/object/architecture.md, "Rights").
+ */
 static int64_t sys_dup(struct syscall_args *a)
 {
     int h = (int)a->a[0];
     int target = (int)a->a[1];
+    unsigned want = (unsigned)a->a[2];
     if (target < -1 || target >= HANDLE_TABLE_SIZE)
         return -EINVAL;
     struct handle_table *t = &process_current()->handles;
@@ -956,6 +994,17 @@ static int64_t sys_dup(struct syscall_args *a)
     struct kobject *obj = handle_get(t, h, &rights);
     if (obj == NULL)
         return -EBADF;
+    if (!(rights & HANDLE_RIGHT_DUP)) {
+        kobject_put(obj);
+        return -EPERM;
+    }
+    if (want != COSMO_RIGHTS_SAME) {
+        if ((want & ~rights) != 0) {
+            kobject_put(obj);
+            return -EPERM;   /* rights only ever shrink */
+        }
+        rights = want;
+    }
     int rc;
     if (target == -1) {
         rc = handle_install(t, obj, rights);

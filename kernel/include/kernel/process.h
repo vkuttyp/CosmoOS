@@ -105,9 +105,13 @@ struct process {
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
  * 0-2, root working directory, no parent). */
+/* The same shape as struct cosmo_spawn_handle: the syscall copies the
+ * user's array straight into this one (native.c asserts it). */
 struct process_handle_map {
     int child;
     int parent;
+    unsigned rights;   /* COSMO_RIGHTS_SAME, or a subset of the parent's */
+    unsigned pad;
 };
 struct process_spawn_attr {
     struct process *parent;                        /* the calling process */

@@ -505,7 +505,8 @@ static int apply_redirs(struct command *c, struct spawn_handle map[3], int opene
 static int run_builtin_redirected(struct command *c)
 {
     int saved[3] = { -1, -1, -1 };
-    struct spawn_handle map[3] = { { 0, 0 }, { 1, 1 }, { 2, 2 } };
+    struct spawn_handle map[3] = { { .child = 0, .parent = 0 }, { .child = 1, .parent = 1 },
+                                   { .child = 2, .parent = 2 } };
     int opened[REDIRS_MAX];
     int nopen = apply_redirs(c, map, opened);
     if (nopen < 0)
@@ -584,7 +585,8 @@ static int run_pipeline(struct pipeline *pl)
     int last_status = 0;
     for (int i = 0; i < pl->ncmds; i++) {
         struct command *c = &pl->cmds[i];
-        struct spawn_handle map[3] = { { 0, prev_read >= 0 ? prev_read : 0 }, { 1, 1 }, { 2, 2 } };
+        struct spawn_handle map[3] = { { .child = 0, .parent = prev_read >= 0 ? prev_read : 0 },
+                                       { .child = 1, .parent = 1 }, { .child = 2, .parent = 2 } };
         int pipefd[2] = { -1, -1 };
         if (i + 1 < pl->ncmds) {
             if (pipe(pipefd) < 0) {

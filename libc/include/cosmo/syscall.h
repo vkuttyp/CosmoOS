@@ -228,7 +228,14 @@ static inline long cosmo_pipe(int h[2])
 }
 static inline long cosmo_dup(int h, int target)
 {
-    return cosmo_syscall2(SYS_dup, h, target);
+    return cosmo_syscall3(SYS_dup, h, target, COSMO_RIGHTS_SAME);
+}
+/* The copy carries `rights`, which must be a subset of what `h` holds:
+ * a process can hand on a read-only view of something it can write, and
+ * cannot get back what it gave up. */
+static inline long cosmo_dup_rights(int h, int target, unsigned rights)
+{
+    return cosmo_syscall3(SYS_dup, h, target, rights);
 }
 static inline long cosmo_getppid(void)
 {

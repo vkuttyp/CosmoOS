@@ -532,8 +532,8 @@ See [docs/development.md](docs/development.md).
   self-test (141 in total) covers rot on either copy, rot on both, a
   scrub that repairs and a second that finds nothing, and a device aged
   by one generation whose checksums are all valid.
-- **Filesystem compression (done):** the last of the audit's four
-  storage features (`docs/kernel-services/filesystem/cosmofs/design.md`,
+- **Filesystem compression (done):** the third of the audit's four
+  storage features -- encryption is the one still outstanding (`docs/kernel-services/filesystem/cosmofs/design.md`,
   "Format version 6"). A block that compresses to a quarter of itself
   still occupies a block, so compression works on **records** — eight
   consecutive logical blocks written as one — and the page cache gained
@@ -549,11 +549,31 @@ See [docs/development.md](docs/development.md).
   record: overwriting a page inside one rewrites it, and truncating into
   one reads it, drops it and writes back what survives — which is why
   `vfs_truncate` exists now at all. One new self-test (143 in total).
-- **Next:** the roadmap's numbered phases are complete. What follows are
-  the milestones the constitution defers in section 68 (among them the
-  USB stack, AHCI and the full NVMe feature set, containers, eBPF,
-  graphics and a desktop, fuller Linux compatibility, NUMA, live
-  migration, nested virtualization), plus the AArch64 follow-ups noted
-  in `docs/kernel/arch/aarch64/design.md` (an EL2 virtualization
-  backend, GICv3, ASIDs, FP/SIMD in userland); design documents first,
-  one subsystem at a time.
+- **Handle rights (done):** the first of the container primitives the
+  constitution defers in section 53, and the beginning of section 54's
+  aim that privileged operations stop depending on being uid 0. A handle
+  is a capability: what a process may do with an object is what its
+  handle says. The vocabulary is READ, WRITE, DUP, TRANSFER and MANAGE,
+  with bits 16–31 reserved for each object type, and **rights only ever
+  shrink** — `dup` and `spawn`'s handle map may hand over a subset of
+  what the caller holds, and nothing anywhere adds a right to a handle
+  that exists. Holding something is not permission to pass it on, and
+  administering an object is separate from using it. A handle table also
+  stops answering before it is torn down, so a thread still inside a
+  syscall cannot be handed a reference the exit is releasing. `read` and
+  `write` still answer `EBADF` where POSIX says they should; `EPERM` is
+  for the operations POSIX has no opinion about.
+- **Next:** the roadmap's numbered phases and the post-roadmap audit's
+  section 19 table are complete; what remains of the audit's own list
+  (`docs/audit/2026-09-post-roadmap-audit.md`) is **filesystem
+  encryption**, the rest of the container primitives (per-process roots
+  and mount namespaces, pid and uts namespaces, a syscall filter,
+  per-type control rights in a handle's upper sixteen bits), a service
+  manager and `/proc`. After those, the milestones the constitution
+  defers in section 68 (among them the USB stack, AHCI and the full
+  NVMe feature set, eBPF, graphics and a desktop, fuller Linux
+  compatibility, NUMA, live migration, nested virtualization), and the
+  AArch64 follow-ups in `docs/kernel/arch/aarch64/design.md` that the
+  EL2 backend did not cover (GICv3, ASID allocation instead of a full
+  invalidate per switch, FP/SIMD at EL0). Design documents first, one
+  subsystem at a time.

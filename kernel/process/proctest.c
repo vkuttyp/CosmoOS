@@ -83,6 +83,15 @@ bool selftest_objects(const char **reason)
     CHECK(handle_lookup(t, -1, 0) == NULL);
     CHECK(handle_lookup(t, HANDLE_TABLE_SIZE, 0) == NULL);
 
+    /* Rights distinguish "no such handle" from "not through this
+     * handle": a caller that wants to answer -EPERM can tell them
+     * apart (docs/kernel/object/architecture.md, "Rights"). */
+    bool missing = false;
+    CHECK(handle_lookup_rights(t, h, HANDLE_RIGHT_WRITE, &missing) == NULL && missing);
+    CHECK(handle_lookup_rights(t, 5, HANDLE_RIGHT_READ, &missing) == NULL && !missing);
+    CHECK(handle_lookup_rights(t, h, HANDLE_RIGHT_READ, &missing) != NULL && !missing);
+    kobject_put(&d.obj);   /* the lookup above took a reference */
+
     CHECK(handle_install_at(t, 3, &d.obj, HANDLE_RIGHT_ALL) == 3);
     CHECK(handle_install_at(t, 3, &d.obj, HANDLE_RIGHT_ALL) == -EBUSY);
     CHECK(handle_install_at(t, 99, &d.obj, HANDLE_RIGHT_ALL) == -EBADF);
@@ -103,6 +112,15 @@ bool selftest_objects(const char **reason)
     CHECK(handle_table_count(t) == HANDLE_TABLE_SIZE);
 
     handle_table_destroy(t);
+    CHECK(handle_table_count(t) == 0);
+    /* The gate stays shut afterwards: a thread still inside a syscall
+     * must not be able to look one up or put one back, or it would hand
+     * out a reference the exit has already released, or add one that
+     * nothing will ever close. */
+    CHECK(handle_lookup(t, 0, 0) == NULL);
+    CHECK(handle_get(t, 0, &(unsigned){ 0 }) == NULL);
+    CHECK(handle_install(t, &d.obj, HANDLE_RIGHT_ALL) == -EBADF);
+    CHECK(handle_install_at(t, 7, &d.obj, HANDLE_RIGHT_ALL) == -EBADF);
     CHECK(handle_table_count(t) == 0);
     CHECK(kobject_refcount(&d.obj) == 1);
     kobject_put(&d.obj);
