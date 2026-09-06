@@ -309,7 +309,10 @@ per-block CRC32C in their inode's checksum tree — and the first copy
 that verifies is written back over the copies that did not. A block no
 copy can satisfy is `-EIO` for that block, not a poisoned mount. Writes
 go to every copy, attempt all of them even after a failure, and return
-the first error before any root is published.
+the first error before any root is published. The commit flushes every
+device of every member before the root write, because that write's own
+preflush reaches only the devices holding the superblock: a root naming
+blocks still in another member's cache could outlive them.
 
 Checksums cannot tell a *stale* copy from a current one: a device
 detached while the pool went on being written carries older blocks whose

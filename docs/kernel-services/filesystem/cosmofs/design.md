@@ -697,6 +697,14 @@ stable and before the root that publishes them — a label is therefore
 never newer than the root it belongs to by more than one interrupted
 attempt.
 
+The commit flushes **every device** once its blocks and labels are
+written and before the root is written. The root write's own preflush
+reaches only the devices carrying the superblock — member 0's — and a
+root that names blocks still sitting in another member's write cache is
+a root that can outlive them. That is true of every block on another
+member, not only of labels, and has been since a pool could have more
+than one member.
+
 A copy is current when its label is **not older** than the generation
 being mounted. Not "equal": a commit interrupted after the labels and
 before the root leaves labels one ahead of the durable root, and those

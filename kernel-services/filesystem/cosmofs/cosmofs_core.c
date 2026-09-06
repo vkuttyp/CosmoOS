@@ -702,6 +702,15 @@ int cfs_commit(struct cfs *fs)
     rc = cfs_labels_update(fs);
     if (rc)
         return rc;
+    /* Now make all of it stable, on every device. The root write's own
+     * preflush reaches only the devices carrying the superblock, which
+     * is member 0's; a root that names blocks still sitting in another
+     * member's write cache is a root that can outlive them. This is not
+     * about labels alone -- it has been true of every block on another
+     * member since a pool could have more than one. */
+    rc = pool_flush(fs->pool);
+    if (rc)
+        return rc;
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
     rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc)
