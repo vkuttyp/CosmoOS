@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      5u   /* version 5: a member may be a mirror group (cfs_member.copies) */
+#define CFS_VERSION      6u   /* version 6: compressed records (CFS_EXT_COMPRESSED) */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -56,6 +56,17 @@ enum cfs_kind {
 #define CFS_CSUM_NONE   0u
 #define CFS_CSUM_CRC32C 1u
 
+/* Compression algorithms (cfs_inode.compress_algo, and the algorithm of
+ * a compressed extent). */
+#define CFS_COMPRESS_NONE 0u
+#define CFS_COMPRESS_LZ4  1u
+
+/* Logical blocks compressed as one unit. A record is the smallest thing
+ * compression can shrink -- a single block that compresses to a quarter
+ * still occupies a block -- and the largest thing a read of one page has
+ * to decompress (design.md, "Format version 6"). */
+#define CFS_RECORD_BLOCKS 8u
+
 struct cfs_mhdr {
     uint32_t magic;
     uint32_t kind;
@@ -87,11 +98,64 @@ struct cfs_mhdr {
 #define CFS_MODE_TYPE(mode) ((mode) >> 12)
 #define CFS_MODE(type, perm) (((type) << 12) | ((perm) & 07777u))
 
+/*
+ * A run of logical blocks and where they are. `count` carries the
+ * compression state, because there is nowhere else to put it: every
+ * structure on disk is exactly full (design.md, "Where the size goes").
+ *
+ *   bit 31 clear: an ordinary run of `count` blocks, one physical block
+ *                 per logical one, up to two billion of them.
+ *   bit 31 set:   a compressed record. 30..24 the algorithm, 23..16 the
+ *                 physical block count less one, 15..0 the logical block
+ *                 count. Its physical blocks are consecutive from
+ *                 `start`, and mean nothing apart from each other.
+ *
+ * Every filesystem written before version 6 has counts far below 2^31,
+ * so its runs read as uncompressed without a conversion.
+ */
 struct cfs_extent {
     uint64_t start;        /* first pool block */
-    uint32_t count;        /* blocks, > 0 in a live run */
+    uint32_t count;        /* blocks, > 0 in a live run; see above */
     uint32_t lblk;         /* first logical block; runs are sorted by lblk, gaps are holes */
 };
+
+#define CFS_EXT_COMPRESSED  (1u << 31)
+#define CFS_EXT_ALGO_SHIFT  24u
+#define CFS_EXT_ALGO_MASK   0x7Fu
+#define CFS_EXT_PSIZE_SHIFT 16u
+#define CFS_EXT_PSIZE_MASK  0xFFu
+#define CFS_EXT_COUNT_MASK  0xFFFFu
+
+static inline int cfs_ext_compressed(const struct cfs_extent *e)
+{
+    return (e->count & CFS_EXT_COMPRESSED) != 0;
+}
+
+/* Logical blocks the run covers. */
+static inline uint32_t cfs_ext_count(const struct cfs_extent *e)
+{
+    return cfs_ext_compressed(e) ? (e->count & CFS_EXT_COUNT_MASK) : e->count;
+}
+
+/* Physical blocks it occupies: the same, unless it is compressed. */
+static inline uint32_t cfs_ext_psize(const struct cfs_extent *e)
+{
+    return cfs_ext_compressed(e) ? ((e->count >> CFS_EXT_PSIZE_SHIFT) & CFS_EXT_PSIZE_MASK) + 1u : cfs_ext_count(e);
+}
+
+static inline unsigned cfs_ext_algo(const struct cfs_extent *e)
+{
+    return cfs_ext_compressed(e) ? (unsigned)((e->count >> CFS_EXT_ALGO_SHIFT) & CFS_EXT_ALGO_MASK) : CFS_COMPRESS_NONE;
+}
+
+/* The `count` word for a compressed record; psize and count are both at
+ * least 1 and within their fields, which the caller has already bounded
+ * by CFS_RECORD_BLOCKS. */
+static inline uint32_t cfs_ext_pack(unsigned algo, uint32_t psize, uint32_t count)
+{
+    return CFS_EXT_COMPRESSED | ((algo & CFS_EXT_ALGO_MASK) << CFS_EXT_ALGO_SHIFT) |
+           (((psize - 1u) & CFS_EXT_PSIZE_MASK) << CFS_EXT_PSIZE_SHIFT) | (count & CFS_EXT_COUNT_MASK);
+}
 
 /* Payload of a CFS_KIND_EXTENTS block: the chain continues at `next` (0 ends it). */
 struct cfs_extent_block {
@@ -166,7 +230,8 @@ struct cfs_inode {
     uint32_t csum_algo;    /* CFS_CSUM_*: how data and directory blocks are checksummed */
     uint32_t csum_pad;
     uint64_t csum_root;    /* CFS_KIND_CSUMIDX block or 0 (no block written yet) */
-    uint64_t reserved;
+    uint32_t compress_algo;/* CFS_COMPRESS_*: what new records of this file are written with */
+    uint32_t reserved;
 };
 
 /* One pool member. Its allocation metadata lives on the member it
@@ -260,7 +325,9 @@ static inline unsigned cfs_imap_l1_index(uint64_t ino) { return (unsigned)(cfs_i
 static inline int cfs_map_block(const struct cfs_extent *ext, unsigned n, uint64_t lblk, uint64_t *pblk)
 {
     for (unsigned i = 0; i < n; i++) {
-        if (lblk >= ext[i].lblk && lblk < (uint64_t)ext[i].lblk + ext[i].count) {
+        if (lblk >= ext[i].lblk && lblk < (uint64_t)ext[i].lblk + cfs_ext_count(&ext[i])) {
+            if (cfs_ext_compressed(&ext[i]))
+                return -1;   /* a record: its blocks mean nothing apart from each other */
             *pblk = ext[i].start + (lblk - ext[i].lblk);
             return 1;
         }

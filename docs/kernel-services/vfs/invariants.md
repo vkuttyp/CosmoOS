@@ -335,3 +335,34 @@ have touched; a second scrub finds nothing; both copies rotted is `-EIO`
 for that file while the rest of the tree reads; a device aged by one
 generation, with valid checksums throughout, is refused and the mount
 reports one degraded copy).
+
+**V26. A compressed record is one object, and its checksums are of what
+is on the disk.** Compression works on records — up to
+`CFS_RECORD_BLOCKS` consecutive logical blocks written as one — because
+a single block that compresses to a quarter of itself still occupies a
+block. A record's physical size lives in the top bits of the extent's
+`count`, so no structure on disk changed width and every earlier
+filesystem's runs decode as uncompressed. A record is compressed only if
+it comes out strictly smaller in whole blocks; otherwise it is stored as
+it was, which is always allowed and never wrong.
+
+Nothing may cut a record. `set_extent` displaces one whole and frees its
+blocks; `drop_range` removes one before its surviving blocks are written
+back plain; both refuse a record that hangs out of the range they were
+given rather than freeing half of it. Overwriting one page inside a
+record reads the record, replaces the page and writes it again — the
+cost of compression, paid by the write that caused it. Truncating into
+one does the same and then keeps only the blocks below the new end, so
+what is past it cannot reappear when the file grows.
+
+The per-block checksums an inode keeps are checksums of what is *on the
+disk*, so for a record they cover its physical blocks: entry `i` of the
+record's logical range is the checksum of its `i`th physical block.
+Repair on read (V25) and scrub therefore work on a record without
+decompressing anything, and the scrub reads a record once rather than
+once per logical block it holds. Check: `cosmofs-compress` (a
+compressible file in a fraction of its blocks, an incompressible one
+stored as it is, a page rewritten inside a record, a partial page that
+has to read the record first, truncation into the middle of a record,
+re-extension reading zeros, and a clean scrub), `test_lz4` and
+`fuzz_lz4` for the codec that stands behind all of it.

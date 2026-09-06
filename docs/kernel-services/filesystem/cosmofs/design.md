@@ -735,6 +735,71 @@ against its checksum tree. It reports blocks read, blocks repaired, and
 blocks no copy could satisfy. Finding an error there is the same event
 as finding it on a read, except that nobody was waiting for the answer.
 
+## Format version 6: compressed records
+
+A 4 KiB block that compresses to 1 KiB still occupies a 4 KiB block: the
+allocator has nothing smaller to give it. Compression only pays if
+several logical blocks are compressed **together** into fewer physical
+ones, so version 6 introduces the *record* — a run of up to
+`CFS_RECORD_BLOCKS` consecutive logical blocks, compressed as a unit and
+stored in as many blocks as the result needs.
+
+### Where the size goes
+
+An extent is `{ start, count, lblk }` in 16 bytes, and `cfs_inode` is
+exactly full at 256 — there is no room to widen either without moving
+every derived capacity. So the physical size goes where the packed DVA
+went: inside a field that had room to spare.
+
+```c
+/* count, when bit 31 is set: 30..24 algorithm, 23..16 psize-1, 15..0 blocks */
+#define CFS_EXT_COMPRESSED (1u << 31)
+```
+
+An uncompressed run keeps bit 31 clear and 31 bits of count — two
+billion blocks, eight terabytes in one run. A compressed record needs
+far less: its logical length is at most `CFS_RECORD_BLOCKS`, and its
+physical length is at most that. Every filesystem written before this
+version has counts far below 2^31, so their extents decode as
+uncompressed without a conversion — the same property that let versions
+2 and 3 keep mounting when the DVA arrived.
+
+### Reading and writing a record
+
+Writing needs several dirty pages at once, and the page cache hands the
+filesystem one at a time. It gains `writepages`: the cache gathers a run
+of consecutive dirty pages, offers them together, and the filesystem
+says how many it took. A filesystem without the op, or a page with no
+neighbours, takes the old path unchanged.
+
+A record is compressed only if it comes out **strictly smaller in whole
+blocks** than it went in; otherwise it is stored as it was. An all-zero
+record is stored as nothing at all — cosmofs already reads an unmapped
+range as zeros, so the best compression available is the one the format
+already had.
+
+Overwriting one page inside a compressed record cannot patch it: the
+record is one object. The write path reads the record, replaces the
+page, and compresses again. That is the cost of compression, paid where
+it belongs rather than hidden.
+
+### What this costs, said plainly
+
+Reading one page of a compressed record decompresses the whole record,
+so reading a record page by page decompresses it once per page. There is
+no cache of decompressed records; `CFS_RECORD_BLOCKS` is kept small
+enough that the waste is bounded rather than solved. That is a
+deliberate first cut, not an oversight.
+
+### Checksums of a compressed record
+
+The per-block checksums an inode keeps are checksums of what is *on the
+disk*, so for a compressed record they cover its physical blocks: entry
+`i` of the record's range is the checksum of its `i`th physical block.
+Repair on read and scrub therefore work on a compressed record exactly
+as on any other, without decompressing anything to decide whether a copy
+is good.
+
 ### What this unit does not do
 
 - Per-block copy counts, parity (RAID-Z and friends), resilvering a

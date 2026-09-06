@@ -14,6 +14,7 @@
 #include <kernel/cred.h>
 #include <kernel/crc32c.h>
 #include <kernel/page.h>
+#include <kernel/lz4.h>
 #include <kernel/string.h>
 
 #include "cosmofs_internal.h"
@@ -30,15 +31,28 @@ static const struct vnode_ops cfs_file_ops;
  * a chain of CFS_KIND_EXTENTS blocks (253 runs each) for the rest.
  */
 
+static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
+                            enum cfs_alloc_class cls);
+
 static bool extent_valid(const struct cfs *fs, const struct cfs_extent *e)
 {
     /* A run lies on one member (cfs_alloc_run never crosses one), so
      * both ends are checked against that member; the logical range must
-     * not wrap the 32-bit lblk either. */
-    return e->count > 0 && cfs_dva_valid(fs, e->start) &&
-           cfs_dva_valid(fs, e->start + e->count - 1) &&
-           CFS_DVA_VDEV(e->start) == CFS_DVA_VDEV(e->start + e->count - 1) &&
-           (uint64_t)e->lblk + e->count <= 0x100000000ull;
+     * not wrap the 32-bit lblk either. A compressed record occupies
+     * fewer physical blocks than it covers logical ones, and never more
+     * of either than a record can hold. */
+    uint32_t count = cfs_ext_count(e), psize = cfs_ext_psize(e);
+    if (count == 0 || psize == 0)
+        return false;
+    if (cfs_ext_compressed(e)) {
+        if (count > CFS_RECORD_BLOCKS || psize > count)
+            return false;
+        if (cfs_ext_algo(e) != CFS_COMPRESS_LZ4)
+            return false;   /* nothing else can be read back */
+    }
+    return cfs_dva_valid(fs, e->start) && cfs_dva_valid(fs, e->start + psize - 1) &&
+           CFS_DVA_VDEV(e->start) == CFS_DVA_VDEV(e->start + psize - 1) &&
+           (uint64_t)e->lblk + count <= 0x100000000ull;
 }
 
 /* Gather the inode's runs into a kmalloc'd array (the caller frees). */
@@ -48,7 +62,7 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
     struct cfs_extent *ext = kmalloc(cap * sizeof(*ext), 0);
     if (ext == NULL)
         return -ENOMEM;
-    for (unsigned i = 0; i < CFS_DIRECT && in->direct[i].count; i++)
+    for (unsigned i = 0; i < CFS_DIRECT && cfs_ext_count(&in->direct[i]); i++)
         ext[k++] = in->direct[i];
     uint64_t next = in->indirect;
     unsigned chain = 0;
@@ -64,7 +78,7 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
             return rc;
         }
         const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
-        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && eb->ext[i].count; i++) {
+        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK && cfs_ext_count(&eb->ext[i]); i++) {
             if (k == cap) {
                 if (cap >= CFS_MAX_EXTENTS) {
                     cfs_buf_put(fs, b);
@@ -87,7 +101,8 @@ static int extents_load(struct cfs *fs, const struct cfs_inode *in, struct cfs_e
         cfs_buf_put(fs, b);
     }
     for (unsigned i = 0; i < k; i++) {
-        if (!extent_valid(fs, &ext[i]) || (i > 0 && ext[i].lblk < (uint64_t)ext[i - 1].lblk + ext[i - 1].count)) {
+        if (!extent_valid(fs, &ext[i]) ||
+            (i > 0 && ext[i].lblk < (uint64_t)ext[i - 1].lblk + cfs_ext_count(&ext[i - 1]))) {
             kfree(ext);
             return -EIO;   /* out of range, unsorted or overlapping */
         }
@@ -170,7 +185,7 @@ static int extents_store(struct cfs *fs, struct cfs_inode *in, const struct cfs_
 static bool direct_valid(const struct cfs *fs, const struct cfs_inode *in)
 {
     unsigned n = 0;
-    while (n < CFS_DIRECT && in->direct[n].count)
+    while (n < CFS_DIRECT && cfs_ext_count(&in->direct[n]))
         n++;
     for (unsigned i = n; i < CFS_DIRECT; i++)
         if (in->direct[i].count || in->direct[i].start || in->direct[i].lblk)
@@ -178,7 +193,7 @@ static bool direct_valid(const struct cfs *fs, const struct cfs_inode *in)
     for (unsigned i = 0; i < n; i++) {
         if (!extent_valid(fs, &in->direct[i]))
             return false;
-        if (i > 0 && in->direct[i].lblk < (uint64_t)in->direct[i - 1].lblk + in->direct[i - 1].count)
+        if (i > 0 && in->direct[i].lblk < (uint64_t)in->direct[i - 1].lblk + cfs_ext_count(&in->direct[i - 1]))
             return false;
     }
     return true;
@@ -205,16 +220,51 @@ int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t 
     return rc;
 }
 
-/* Merge runs that are adjacent both logically and physically, in place. */
+int cfs_map_ext(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, struct cfs_extent *out)
+{
+    if (!direct_valid(fs, in))
+        return -EIO;
+    for (unsigned i = 0; i < CFS_DIRECT; i++) {
+        const struct cfs_extent *e = &in->direct[i];
+        if (cfs_ext_count(e) && lblk >= e->lblk && lblk < (uint64_t)e->lblk + cfs_ext_count(e)) {
+            *out = *e;
+            return 1;
+        }
+    }
+    if (in->indirect == 0)
+        return 0;
+    struct cfs_extent *ext;
+    unsigned n;
+    int rc = extents_load(fs, in, &ext, &n);
+    if (rc)
+        return rc;
+    rc = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (lblk >= ext[i].lblk && lblk < (uint64_t)ext[i].lblk + cfs_ext_count(&ext[i])) {
+            *out = ext[i];
+            rc = 1;
+            break;
+        }
+        if (ext[i].lblk > lblk)
+            break;
+    }
+    kfree(ext);
+    return rc;
+}
+
+/* Merge runs that are adjacent both logically and physically, in place.
+ * A compressed record is one object -- its blocks mean nothing apart
+ * from each other -- so it neither merges nor is merged into. */
 static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
 {
     unsigned w = 0;
     for (unsigned i = 0; i < n; i++) {
-        if (ext[i].count == 0)
+        if (cfs_ext_count(&ext[i]) == 0)
             continue;
-        if (w > 0 && ext[w - 1].start + ext[w - 1].count == ext[i].start &&
+        if (w > 0 && !cfs_ext_compressed(&ext[w - 1]) && !cfs_ext_compressed(&ext[i]) &&
+            ext[w - 1].start + ext[w - 1].count == ext[i].start &&
             (uint64_t)ext[w - 1].lblk + ext[w - 1].count == ext[i].lblk &&
-            (uint64_t)ext[w - 1].count + ext[i].count < 0xffffffffu) {
+            (uint64_t)ext[w - 1].count + ext[i].count < 0x7fffffffu) {
             ext[w - 1].count += ext[i].count;
         } else {
             ext[w++] = ext[i];
@@ -223,20 +273,44 @@ static unsigned extents_merge(struct cfs_extent *ext, unsigned n)
     return w;
 }
 
-/* Map logical block `lblk` to `pblk`, replacing a previous mapping (its
- * block is returned in *old) or filling a hole. */
-int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t pblk, uint64_t *old)
+/*
+ * Put `ne` into the map, displacing whatever covered its logical range.
+ * A plain run that overlaps is split; a compressed record that overlaps
+ * is displaced whole and its blocks freed, because a record is one
+ * object and half of one is nothing. Records are aligned to
+ * CFS_RECORD_BLOCKS and so is every range written over them, so a record
+ * that hangs out of the range is a map this code did not write: it is
+ * refused rather than half-freed.
+ *
+ * Blocks that stop being referenced are freed here, except for the one
+ * block a single-block write replaces, which the caller frees after its
+ * own bookkeeping (that is what `old` is for).
+ */
+static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old)
 {
-    if (lblk >= 0x100000000ull)
+    uint64_t lblk = ne.lblk, count = cfs_ext_count(&ne);
+    if (lblk + count > 0x100000000ull)
         return -EFBIG;
     struct cfs_extent *ext;
     unsigned n;
     int rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
-    *old = 0;
+    if (old)
+        *old = 0;
     struct cfs_extent *out = kmalloc((n + 2) * sizeof(*out), 0);
-    if (out == NULL) {
+    /* Displaced blocks are noted here and released only once the new map
+     * is stored. Releasing them as they are found would hand them to the
+     * next commit while the inode still pointed at them, if storing the
+     * map then failed -- and a block freed while something references it
+     * is the one mistake this filesystem must never make. A range of
+     * `count` logical blocks displaces at most `count` physical ones: a
+     * plain run uses one each, and a record uses fewer than it covers. */
+    uint64_t *freed = kmalloc((size_t)count * sizeof(*freed), 0);
+    unsigned nfreed = 0;
+    if (out == NULL || freed == NULL) {
+        kfree(out);
+        kfree(freed);
         kfree(ext);
         return -ENOMEM;
     }
@@ -244,49 +318,178 @@ int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t 
     bool placed = false;
     for (unsigned i = 0; i < n; i++) {
         struct cfs_extent e = ext[i];
+        uint64_t ecount = cfs_ext_count(&e), eend = e.lblk + ecount, end = lblk + count;
         if (!placed && lblk < e.lblk) {
-            out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };   /* a hole before this run */
+            out[m++] = ne;
             placed = true;
         }
-        if (lblk >= e.lblk && lblk < (uint64_t)e.lblk + e.count) {
-            uint32_t off = (uint32_t)(lblk - e.lblk);
-            *old = e.start + off;
-            if (off > 0)
-                out[m++] = (struct cfs_extent){ e.start, off, e.lblk };
-            out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };
-            if (off + 1 < e.count)
-                out[m++] = (struct cfs_extent){ e.start + off + 1, e.count - off - 1, e.lblk + off + 1 };
-            placed = true;
-        } else {
-            out[m++] = e;
+        if (eend <= lblk || e.lblk >= end) {
+            out[m++] = e;   /* no overlap */
+            continue;
         }
+        if (cfs_ext_compressed(&e)) {
+            if (e.lblk < lblk || eend > end) {
+                rc = -EIO;   /* a record straddling the range: not ours to cut */
+                goto out;
+            }
+            for (uint32_t k = 0; k < cfs_ext_psize(&e) && nfreed < count; k++)
+                freed[nfreed++] = e.start + k;
+            continue;   /* displaced whole */
+        }
+        /* In logical order: what of this run lies before the new
+         * extent, the new extent itself, then what lies after. */
+        if (e.lblk < lblk)
+            out[m++] = (struct cfs_extent){ e.start, (uint32_t)(lblk - e.lblk), e.lblk };
+        if (!placed) {
+            out[m++] = ne;
+            placed = true;
+        }
+        uint64_t from = lblk > e.lblk ? lblk : e.lblk;
+        uint64_t to = end < eend ? end : eend;
+        if (count == 1 && old && from == lblk)
+            *old = e.start + (lblk - e.lblk);   /* the caller frees this one */
+        else
+            for (uint64_t k = from; k < to && nfreed < count; k++)
+                freed[nfreed++] = e.start + (k - e.lblk);
+        if (eend > end)
+            out[m++] = (struct cfs_extent){ e.start + (end - e.lblk), (uint32_t)(eend - end), (uint32_t)end };
     }
     if (!placed)
-        out[m++] = (struct cfs_extent){ pblk, 1, (uint32_t)lblk };   /* beyond every run */
+        out[m++] = ne;   /* beyond every run */
     m = extents_merge(out, m);
     rc = extents_store(fs, in, out, m);
+    if (rc == 0)
+        for (unsigned i = 0; i < nfreed; i++)
+            cfs_free_block_deferred(fs, freed[i]);
+out:
+    kfree(freed);
     kfree(out);
     kfree(ext);
     return rc;
 }
 
-/* Keep logical blocks below `keep`; free the rest. */
-int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
+/* Map logical block `lblk` to `pblk`, replacing a previous mapping (its
+ * block is returned in *old) or filling a hole. */
+int cfs_set_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t pblk, uint64_t *old)
+{
+    struct cfs_extent ne = { pblk, 1, (uint32_t)lblk };
+    return set_extent(fs, in, ne, old);
+}
+
+/*
+ * Remove every mapping of [lblk, lblk+count) and free what it named. A
+ * plain run is split; a compressed record inside the range goes whole,
+ * because half a record is nothing. Unlike set_extent this puts nothing
+ * back: it is how a record stops existing before its surviving blocks
+ * are written again one at a time.
+ */
+static int drop_range(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t count)
 {
     struct cfs_extent *ext;
     unsigned n;
     int rc = extents_load(fs, in, &ext, &n);
     if (rc)
         return rc;
+    struct cfs_extent *out = kmalloc((n + 2) * sizeof(*out), 0);
+    uint64_t *freed = kmalloc((size_t)count * sizeof(*freed), 0);
+    unsigned nfreed = 0;
+    if (out == NULL || freed == NULL) {
+        kfree(out);
+        kfree(freed);
+        kfree(ext);
+        return -ENOMEM;
+    }
+    uint64_t end = lblk + count;
     unsigned m = 0;
     for (unsigned i = 0; i < n; i++) {
         struct cfs_extent e = ext[i];
+        uint64_t ecount = cfs_ext_count(&e), eend = e.lblk + ecount;
+        if (eend <= lblk || e.lblk >= end) {
+            out[m++] = e;
+            continue;
+        }
+        if (cfs_ext_compressed(&e)) {
+            if (e.lblk < lblk || eend > end) {
+                rc = -EIO;   /* a record hanging out of the range: not ours to cut */
+                goto out;
+            }
+            for (uint32_t k = 0; k < cfs_ext_psize(&e) && nfreed < count; k++)
+                freed[nfreed++] = e.start + k;
+            continue;
+        }
+        if (e.lblk < lblk)
+            out[m++] = (struct cfs_extent){ e.start, (uint32_t)(lblk - e.lblk), e.lblk };
+        uint64_t from = lblk > e.lblk ? lblk : e.lblk, to = end < eend ? end : eend;
+        for (uint64_t k = from; k < to && nfreed < count; k++)
+            freed[nfreed++] = e.start + (k - e.lblk);
+        if (eend > end)
+            out[m++] = (struct cfs_extent){ e.start + (end - e.lblk), (uint32_t)(eend - end), (uint32_t)end };
+    }
+    m = extents_merge(out, m);
+    rc = extents_store(fs, in, out, m);
+    if (rc == 0)
+        for (unsigned i = 0; i < nfreed; i++)
+            cfs_free_block_deferred(fs, freed[i]);
+out:
+    kfree(freed);
+    kfree(out);
+    kfree(ext);
+    return rc;
+}
+
+/*
+ * A compressed record that straddles the new end of the file cannot be
+ * cut: it is one object. It is read, dropped whole, and the part that
+ * survives is written back as ordinary blocks -- which is what makes the
+ * blocks past the end unreachable rather than merely unread. Doing it
+ * the other way round, writing over the record block by block, would ask
+ * set_extent to cut the record it is standing on.
+ */
+static int truncate_record(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
+{
+    struct cfs_extent e;
+    int rc = cfs_map_ext(fs, in, keep, &e);
+    if (rc != 1 || !cfs_ext_compressed(&e) || e.lblk >= keep)
+        return rc < 0 ? rc : 0;
+    uint32_t count = cfs_ext_count(&e);
+    uint8_t *rec = kmalloc((size_t)count * CFS_BLOCK, 0);
+    if (rec == NULL)
+        return -ENOMEM;
+    rc = cfs_record_read(fs, in, &e, rec);
+    if (rc == 0)
+        rc = drop_range(fs, in, e.lblk, count);
+    if (rc == 0) {
+        unsigned survives = (unsigned)(keep - e.lblk);
+        for (unsigned i = 0; i < survives && rc == 0; i++)
+            rc = data_write_block(fs, in, e.lblk + i, rec + (size_t)i * CFS_BLOCK, CFS_ALLOC_DATA);
+    }
+    kfree(rec);
+    return rc;
+}
+
+/* Keep logical blocks below `keep`; free the rest. */
+int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
+{
+    int rc = keep > 0 ? truncate_record(fs, in, keep) : 0;
+    if (rc)
+        return rc;
+    struct cfs_extent *ext;
+    unsigned n;
+    rc = extents_load(fs, in, &ext, &n);
+    if (rc)
+        return rc;
+    unsigned m = 0;
+    for (unsigned i = 0; i < n; i++) {
+        struct cfs_extent e = ext[i];
+        uint32_t count = cfs_ext_count(&e), psize = cfs_ext_psize(&e);
         if (e.lblk >= keep) {
-            for (uint32_t k = 0; k < e.count; k++)
+            for (uint32_t k = 0; k < psize; k++)
                 cfs_free_block_deferred(fs, e.start + k);
-        } else if ((uint64_t)e.lblk + e.count > keep) {
+        } else if ((uint64_t)e.lblk + count > keep) {
+            /* truncate_record has already replaced any record here, so
+             * what straddles the end now is a plain run. */
             uint32_t keepc = (uint32_t)(keep - e.lblk);
-            for (uint32_t k = keepc; k < e.count; k++)
+            for (uint32_t k = keepc; k < count; k++)
                 cfs_free_block_deferred(fs, e.start + k);
             e.count = keepc;
             ext[m++] = e;
@@ -413,6 +616,41 @@ int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, 
                (unsigned long long)lblk);
         fs->csum_failures++;
     }
+    return rc;
+}
+
+/*
+ * A compressed record, read and decompressed whole. Its checksums are
+ * checksums of what is on the disk, so they cover its physical blocks:
+ * entry i of the record's logical range is the i'th physical block. That
+ * is what lets a mirrored copy be checked and repaired without
+ * decompressing anything.
+ */
+int cfs_record_read(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *e, uint8_t *out)
+{
+    uint32_t psize = cfs_ext_psize(e), count = cfs_ext_count(e);
+    if (count == 0 || count > CFS_RECORD_BLOCKS || psize == 0 || psize > count)
+        return -EIO;
+    if (cfs_ext_algo(e) != CFS_COMPRESS_LZ4)
+        return -EIO;   /* an algorithm this kernel does not have */
+    uint8_t *packed = kmalloc((size_t)psize * CFS_BLOCK, 0);
+    if (packed == NULL)
+        return -ENOMEM;
+    int rc = 0;
+    for (uint32_t i = 0; i < psize && rc == 0; i++)
+        rc = cfs_data_read_verified(fs, in, e->lblk + i, e->start + i, packed + (size_t)i * CFS_BLOCK);
+    if (rc == 0) {
+        /* The compressed length is not stored: the record occupies whole
+         * blocks and the codec stops when it has produced the logical
+         * length, so the padding after it is never read. */
+        size_t got = lz4_decompress(packed, (size_t)psize * CFS_BLOCK, out, (size_t)count * CFS_BLOCK);
+        if (got != (size_t)count * CFS_BLOCK) {
+            kerror("cosmofs: inode %llu record at %u: %zu bytes out of a %u-block record",
+                   (unsigned long long)in->ino, e->lblk, got, count);
+            rc = -EIO;
+        }
+    }
+    kfree(packed);
     return rc;
 }
 
@@ -615,6 +853,74 @@ static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk,
     }
     if (old)
         cfs_free_block_deferred(fs, old);
+    return 0;
+}
+
+/*
+ * Write an aligned record's worth of logical blocks, compressed if that
+ * makes it strictly smaller in whole blocks. Anything else -- it does
+ * not compress, the algorithm is off, there is no room for a contiguous
+ * run -- is written as ordinary blocks, which is always allowed and
+ * never wrong.
+ */
+static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n)
+{
+    if (n > 1 && in->compress_algo == CFS_COMPRESS_LZ4) {
+        /* Room for one block less than it takes now: a record that
+         * compresses to the same number of blocks has cost work and
+         * saved nothing, and would have to be decompressed on every
+         * read for ever after. */
+        size_t cap = (size_t)(n - 1) * CFS_BLOCK;
+        uint8_t *packed = kmalloc(cap, KMEM_ZERO);
+        if (packed == NULL)
+            return -ENOMEM;
+        size_t clen = lz4_compress(data, (size_t)n * CFS_BLOCK, packed, cap);
+        if (clen > 0) {
+            uint32_t psize = (uint32_t)((clen + CFS_BLOCK - 1) / CFS_BLOCK);
+            uint64_t start, got;
+            int rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, next_block_hint(fs, in, lblk0), psize, &start, &got);
+            if (rc == 0 && got < psize) {
+                /* Not contiguous enough for a record; give it back. */
+                for (uint64_t k = 0; k < got; k++)
+                    cfs_free_block_deferred(fs, start + k);
+                rc = -ENOSPC;
+            }
+            if (rc == 0) {
+                /* The tail of the last block is whatever kzalloc left:
+                 * zeros, so the record's blocks are deterministic and a
+                 * repeated write of the same data gives the same bytes. */
+                for (uint32_t i = 0; i < psize && rc == 0; i++) {
+                    const uint8_t *blk = packed + (size_t)i * CFS_BLOCK;
+                    rc = cfs_data_write(fs, start + i, blk);
+                    if (rc == 0)
+                        rc = cfs_csum_put(fs, in, lblk0 + i, crc32c(blk, CFS_BLOCK));
+                }
+                if (rc == 0) {
+                    struct cfs_extent ne = { start, cfs_ext_pack(CFS_COMPRESS_LZ4, psize, n), (uint32_t)lblk0 };
+                    rc = set_extent(fs, in, ne, NULL);
+                }
+                if (rc) {
+                    for (uint32_t i = 0; i < psize; i++)
+                        cfs_free_block_deferred(fs, start + i);
+                } else {
+                    kfree(packed);
+                    return 0;
+                }
+            }
+            if (rc != -ENOSPC) {
+                kfree(packed);
+                return rc;   /* a real failure, not "it did not fit" */
+            }
+        }
+        kfree(packed);
+    }
+    /* Plain blocks. A record that used to cover this range is displaced
+     * by the first of them, which set_extent frees whole. */
+    for (unsigned i = 0; i < n; i++) {
+        int rc = data_write_block(fs, in, lblk0 + i, data + (size_t)i * CFS_BLOCK, CFS_ALLOC_DATA);
+        if (rc)
+            return rc;
+    }
     return 0;
 }
 
@@ -881,6 +1187,9 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     in.ino = ino;
     in.parent = dir->ino;
     in.csum_algo = CFS_CSUM_CRC32C;
+    /* Regular files compress; a directory's blocks are written one at a
+     * time and a record cannot be formed from them. */
+    in.compress_algo = type == CFS_TYPE_REG ? CFS_COMPRESS_LZ4 : CFS_COMPRESS_NONE;
     in.mtime_ns = in.ctime_ns = vfs_now_ns();
     rc = cfs_inode_write(fs, ino, &in);
     if (rc)
@@ -1214,20 +1523,70 @@ static int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void 
 
 /* --- regular files ------------------------------------------------------------------ */
 
+/* One logical block, wherever it lives: a hole, a plain block, or one
+ * page of a compressed record. */
+static int read_logical_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, void *buf)
+{
+    struct cfs_extent e;
+    int rc = cfs_map_ext(fs, in, lblk, &e);
+    if (rc < 0)
+        return rc;
+    if (rc == 0) {
+        memset(buf, 0, CFS_BLOCK);   /* a hole */
+        return 0;
+    }
+    if (!cfs_ext_compressed(&e))
+        return cfs_data_read_verified(fs, in, lblk, e.start + (lblk - e.lblk), buf);
+    /* One page of a record costs the whole record: there is no cache of
+     * decompressed records (design.md, "What this costs"). */
+    uint8_t *rec = kmalloc((size_t)cfs_ext_count(&e) * CFS_BLOCK, 0);
+    if (rec == NULL)
+        return -ENOMEM;
+    rc = cfs_record_read(fs, in, &e, rec);
+    if (rc == 0)
+        memcpy(buf, rec + (size_t)(lblk - e.lblk) * CFS_BLOCK, CFS_BLOCK);
+    kfree(rec);
+    return rc;
+}
+
 static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
 {
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
-    uint64_t pblk = 0;
-    int rc = cfs_map(fs, cfs_inode_of(vn), index, &pblk);
-    if (rc == 0)
-        memset(buf, 0, CFS_BLOCK);   /* a hole */
-    else if (rc == 1)
-        rc = cfs_data_read_verified(fs, cfs_inode_of(vn), index, pblk, buf);
+    int rc = read_logical_block(fs, cfs_inode_of(vn), index, buf);
     mutex_unlock(&fs->lock);
     return rc > 0 ? 0 : rc;
+}
+
+/*
+ * One page. If it falls inside a compressed record the record has to be
+ * rebuilt around it: a record is one object, and there is no way to
+ * patch a block of it in place. That is the cost of compression, paid
+ * by the write that caused it.
+ */
+static int write_one_page(struct cfs *fs, struct cfs_inode *in, uint64_t index, const void *buf)
+{
+    struct cfs_extent e;
+    int rc = cfs_map_ext(fs, in, index, &e);
+    if (rc < 0)
+        return rc;
+    if (rc == 1 && cfs_ext_compressed(&e)) {
+        uint32_t count = cfs_ext_count(&e);
+        uint8_t *rec = kmalloc((size_t)count * CFS_BLOCK, 0);
+        if (rec == NULL)
+            return -ENOMEM;
+        rc = cfs_record_read(fs, in, &e, rec);
+        if (rc == 0) {
+            memcpy(rec + (size_t)(index - e.lblk) * CFS_BLOCK, buf, CFS_BLOCK);
+            rc = record_write(fs, in, e.lblk, rec, count);
+        }
+        kfree(rec);
+        return rc;
+    }
+    /* Holes are representable: only this block is written. */
+    return data_write_block(fs, in, index, buf, CFS_ALLOC_DATA);
 }
 
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
@@ -1238,8 +1597,47 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
-    /* Holes are representable: only this block is written. */
-    int rc = data_write_block(fs, cfs_inode_of(vn), index, buf, CFS_ALLOC_DATA);
+    int rc = write_one_page(fs, cfs_inode_of(vn), index, buf);
+    if (rc == 0)
+        rc = inode_sync(fs, vn);
+    mutex_unlock(&fs->lock);
+    return rc;
+}
+
+/*
+ * Several consecutive dirty pages at once. A whole aligned record is
+ * written as one -- that is the only shape compression can shrink -- and
+ * anything else falls back to one page, which the cache will offer again
+ * with what is left.
+ */
+static int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done)
+{
+    if (snap_tag_of(vn))
+        return -EROFS;
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;
+    mutex_lock(&fs->lock);
+    struct cfs_inode *in = cfs_inode_of(vn);
+    int rc;
+    if (index % CFS_RECORD_BLOCKS == 0 && n >= CFS_RECORD_BLOCKS && in->compress_algo != CFS_COMPRESS_NONE) {
+        /* Gather the record; the pages are separate frames. */
+        uint8_t *rec = kmalloc((size_t)CFS_RECORD_BLOCKS * CFS_BLOCK, 0);
+        if (rec == NULL) {
+            mutex_unlock(&fs->lock);
+            return -ENOMEM;
+        }
+        for (unsigned i = 0; i < CFS_RECORD_BLOCKS; i++)
+            memcpy(rec + (size_t)i * CFS_BLOCK, pages[i], CFS_BLOCK);
+        rc = record_write(fs, in, index, rec, CFS_RECORD_BLOCKS);
+        kfree(rec);
+        if (rc == 0)
+            *done = CFS_RECORD_BLOCKS;
+    } else {
+        rc = write_one_page(fs, in, index, pages[0]);
+        if (rc == 0)
+            *done = 1;
+    }
     if (rc == 0)
         rc = inode_sync(fs, vn);
     mutex_unlock(&fs->lock);
@@ -1257,6 +1655,30 @@ static int cfs_truncate(struct vnode *vn, uint64_t size)
     mutex_lock(&fs->lock);
     uint64_t keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;
     int rc = cfs_truncate_blocks(fs, cfs_inode_of(vn), keep);
+    /* The last block may now be partial. What is past the new end has to
+     * read as zeros if the file grows again, and the page cache only
+     * cleared its own copy, so the block itself is cleared here -- on
+     * disk, where a later read will look for it. */
+    if (rc == 0 && size % CFS_BLOCK != 0) {
+        uint64_t lblk = size / CFS_BLOCK;
+        struct cfs_extent e;
+        int mrc = cfs_map_ext(fs, cfs_inode_of(vn), lblk, &e);
+        if (mrc < 0) {
+            rc = mrc;
+        } else if (mrc == 1) {
+            uint8_t *page = kmalloc(CFS_BLOCK, 0);
+            if (page == NULL)
+                rc = -ENOMEM;
+            else {
+                rc = read_logical_block(fs, cfs_inode_of(vn), lblk, page);
+                if (rc == 0) {
+                    memset(page + size % CFS_BLOCK, 0, CFS_BLOCK - size % CFS_BLOCK);
+                    rc = write_one_page(fs, cfs_inode_of(vn), lblk, page);
+                }
+                kfree(page);
+            }
+        }
+    }
     if (rc == 0) {
         vn->size = size;
         vn->mtime_ns = vfs_now_ns();
@@ -1319,6 +1741,7 @@ static const struct vnode_ops cfs_dir_ops = {
 static const struct vnode_ops cfs_file_ops = {
     .readpage = cfs_readpage,
     .writepage = cfs_writepage,
+    .writepages = cfs_writepages,
     .truncate = cfs_truncate,
     .sync = cfs_vnode_sync,
     .evict = cfs_evict,

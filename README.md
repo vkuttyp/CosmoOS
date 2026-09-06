@@ -532,6 +532,23 @@ See [docs/development.md](docs/development.md).
   self-test (141 in total) covers rot on either copy, rot on both, a
   scrub that repairs and a second that finds nothing, and a device aged
   by one generation whose checksums are all valid.
+- **Filesystem compression (done):** the last of the audit's four
+  storage features (`docs/kernel-services/filesystem/cosmofs/design.md`,
+  "Format version 6"). A block that compresses to a quarter of itself
+  still occupies a block, so compression works on **records** — eight
+  consecutive logical blocks written as one — and the page cache gained
+  `writepages` to offer a filesystem several dirty pages at once. The
+  physical size went into the top bits of the extent's `count`, so no
+  structure on disk changed width and every earlier filesystem's runs
+  decode as uncompressed. A record is compressed only if it comes out
+  strictly smaller in whole blocks; its checksums cover its physical
+  blocks, so a mirror repairs and a scrub verifies it without
+  decompressing anything. The codec is LZ4 (`kernel/core/lz4.c`) with a
+  host test and a fuzz target, because it is the one thing in the tree
+  that parses attacker-controlled bytes off a disk. Nothing may cut a
+  record: overwriting a page inside one rewrites it, and truncating into
+  one reads it, drops it and writes back what survives — which is why
+  `vfs_truncate` exists now at all. One new self-test (143 in total).
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

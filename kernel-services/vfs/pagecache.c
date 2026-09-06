@@ -331,19 +331,53 @@ int pagecache_sync(struct vnode *vn)
          * below the size: writes grow it and truncate drops what is above. */
         uint64_t npages = (vn->size + PAGE_SIZE - 1) / PAGE_SIZE;
         unsigned left = pc->nr_dirty;
+        struct pc_entry *run[PAGECACHE_WRITE_RUN];
+        void *bufs[PAGECACHE_WRITE_RUN];
         for (uint64_t idx = 0; idx < npages && left > 0 && rc == 0; idx++) {
             struct pc_entry *e = find(pc, idx);
             if (e == NULL || !e->dirty)
                 continue;
-            left--;
-            if (vn->ops->writepage)
-                rc = vn->ops->writepage(vn, e->index, page_to_virt(e->page));
+
+            /* Gather the consecutive dirty pages that follow, so a
+             * filesystem with writepages can write them as one object.
+             * Every page of the run is dirty and below the size, which
+             * is what the filesystem is promised. */
+            unsigned n = 0;
+            run[n] = e;
+            bufs[n] = page_to_virt(e->page);
+            n++;
+            if (vn->ops->writepages) {
+                for (uint64_t k = idx + 1; k < npages && n < PAGECACHE_WRITE_RUN; k++) {
+                    struct pc_entry *next = find(pc, k);
+                    if (next == NULL || !next->dirty)
+                        break;
+                    run[n] = next;
+                    bufs[n] = page_to_virt(next->page);
+                    n++;
+                }
+            }
+
+            unsigned done = 0;
+            if (n > 1 && vn->ops->writepages) {
+                rc = vn->ops->writepages(vn, e->index, bufs, n, &done);
+                if (rc == 0 && (done == 0 || done > n))
+                    rc = -EIO;   /* a filesystem that reports nonsense */
+            } else if (vn->ops->writepage) {
+                rc = vn->ops->writepage(vn, e->index, bufs[0]);
+                done = 1;
+            } else {
+                done = 1;
+            }
             if (rc == 0) {
-                e->dirty = false;
-                pc->nr_dirty--;
-                __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
-                stat_add(&g_stats.writebacks, 1);
-                lru_add(e);   /* clean again: reclaimable */
+                for (unsigned i = 0; i < done; i++) {
+                    run[i]->dirty = false;
+                    pc->nr_dirty--;
+                    __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+                    stat_add(&g_stats.writebacks, 1);
+                    lru_add(run[i]);   /* clean again: reclaimable */
+                }
+                left -= done < left ? done : left;
+                idx += done - 1;
             }
         }
     }
