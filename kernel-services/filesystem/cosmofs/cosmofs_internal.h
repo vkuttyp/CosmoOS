@@ -51,6 +51,7 @@ struct cfs {
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
+    unsigned snap_count;    /* live snapshots; commit holds their blocks rather than freeing */
     /* The writeback thread (design.md, "The writeback thread"). */
     struct thread *wb_thread;
     bool wb_stop;
@@ -78,6 +79,11 @@ void cfs_fail(struct cfs *fs, int rc);
 /* Per-vnode private state: the inode as last written through. */
 struct cfs_vnode {
     struct cfs_inode inode;
+    /* Zero for the live tree; otherwise the snapshot this vnode reads
+     * through, and the tag its inode numbers carry. */
+    unsigned snap_tag;
+    uint64_t snap_imap_root;
+    uint64_t snap_next_ino;
 };
 
 static inline struct cfs *cfs_of(struct mount *mnt) { return mnt->fs_priv; }
@@ -93,6 +99,22 @@ struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b);
  * updated to the new block number. */
 int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
+void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
+
+/* Snapshots (cosmofs_snap.c; design.md, "Format version 3"). */
+int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
+                      struct cfs_inode *out);
+int cfs_snapshot_create(struct cfs *fs, const char *name);
+int cfs_snapshot_delete(struct cfs *fs, const char *name);
+int cfs_snapshot_list(struct cfs *fs, struct cfs_snapshot *out, unsigned max, unsigned *count);
+bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *out);
+bool cfs_has_snapshots(struct cfs *fs);
+/* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
+ * False when no snapshot exists and the caller should free it. */
+bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
+/* Does this snapshot's tree still occupy `blk`? One lookup in the
+ * allocation bitmap the snapshot recorded. */
+bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of
  * the last allocation); at least one. -ENOSPC when only the reserve is left. */

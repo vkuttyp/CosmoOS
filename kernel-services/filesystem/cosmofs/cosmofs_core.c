@@ -174,6 +174,11 @@ static void buf_mark_dirty(struct cfs *fs, struct cfs_buf *b)
     note_dirty(fs);
 }
 
+void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b)
+{
+    buf_mark_dirty(fs, b);
+}
+
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out)
 {
     uint64_t blk;
@@ -321,12 +326,17 @@ static uint64_t *ptrs(struct cfs_buf *b)
 
 /* Fetch (and when `writable`, CoW) the L1, L0 and inode block for `ino`.
  * Missing L0/inode blocks are created when `create` is set. */
-static int inode_block(struct cfs *fs, uint64_t ino, bool writable, bool create, struct cfs_buf **out)
+/* `imap_root` is the live tree's, except for a read of a snapshot's
+ * inode, which passes that snapshot's root instead: its trees are
+ * ordinary trees, so nothing else in the walk changes
+ * (design.md, "Reading a snapshot"). */
+static int inode_block_at(struct cfs *fs, uint64_t imap_root, uint64_t ino, bool writable, bool create,
+                          struct cfs_buf **out)
 {
     if (ino == 0 || ino >= CFS_MAX_INODES)
         return -EIO;
     struct cfs_buf *l1, *l0, *ib;
-    int rc = cfs_buf_get(fs, fs->sb.imap_root, CFS_KIND_IMAP1, &l1);
+    int rc = cfs_buf_get(fs, imap_root, CFS_KIND_IMAP1, &l1);
     if (rc)
         return rc;
     if (writable && (rc = cfs_buf_cow(fs, &l1, &fs->sb.imap_root)) != 0) {
@@ -386,6 +396,27 @@ out:
 static struct cfs_inode *inode_slot(struct cfs_buf *ib, uint64_t ino)
 {
     return (struct cfs_inode *)(ib->data + CFS_MHDR_SIZE + cfs_inode_slot(ino) * CFS_INODE_SIZE);
+}
+
+static int inode_block(struct cfs *fs, uint64_t ino, bool writable, bool create, struct cfs_buf **out)
+{
+    return inode_block_at(fs, fs->sb.imap_root, ino, writable, create, out);
+}
+
+int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uint64_t ino,
+                      struct cfs_inode *out)
+{
+    if (ino == 0 || ino >= next_ino)
+        return -ENOENT;
+    struct cfs_buf *ib;
+    int rc = inode_block_at(fs, imap_root, ino, false, false, &ib);
+    if (rc)
+        return rc;
+    memcpy(out, inode_slot(ib, ino), sizeof(*out));
+    cfs_buf_put(fs, ib);
+    if (out->ino != ino || out->nlink == 0)
+        return -ENOENT;
+    return 0;
 }
 
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
@@ -560,13 +591,21 @@ int cfs_commit(struct cfs *fs)
         }
     }
     fs->nr_dirty = 0;
+    /* A block reaches pending_free exactly when the previous tree named
+     * it and the new one does not -- which is what a snapshot still
+     * names. While one exists the block is remembered on its deadlist
+     * and its bitmap bit stays set, so the allocator never hands it out
+     * (design.md, "Not freeing what a snapshot names"). */
+    bool snapshots = fs->snap_count > 0;
     for (unsigned i = 0; i < fs->nr_pending; i++) {
         uint64_t blk = fs->pending_free[i];
-        if (bit_test(fs->bitmap, blk)) {
-            bit_clear(fs->bitmap, blk);
-            fs->bitmap_dirty[blk / CFS_BITS_PER_BITMAP] = 1;
-            fs->free_blocks++;
-        }
+        if (!bit_test(fs->bitmap, blk))
+            continue;
+        if (snapshots && cfs_snapshot_hold_block(fs, blk))
+            continue;
+        bit_clear(fs->bitmap, blk);
+        fs->bitmap_dirty[blk / CFS_BITS_PER_BITMAP] = 1;
+        fs->free_blocks++;
     }
     fs->nr_pending = 0;
     fs->gen++;
@@ -732,10 +771,13 @@ static int super_read(struct cfs *fs, unsigned slot, struct cfs_super *out)
     int rc = pool_read(fs->pool, slot, block);
     if (rc == 0) {
         const struct cfs_super *sb = (const struct cfs_super *)block;
-        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->version != CFS_VERSION && sb->version != 0)
-            kerror("cosmofs: slot %u is format version %u; this kernel reads version %u only (reformat)", slot,
-                   sb->version, CFS_VERSION);
-        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version != CFS_VERSION || sb->block_size != CFS_BLOCK ||
+        /* Version 2 mounts unchanged: snapshots only use fields it
+         * already reserved, and its snap_root is 0 (no snapshots). */
+        bool version_ok = sb->version >= CFS_VERSION_MIN && sb->version <= CFS_VERSION;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && !version_ok && sb->version != 0)
+            kerror("cosmofs: slot %u is format version %u; this kernel reads versions %u to %u (reformat)", slot,
+                   sb->version, CFS_VERSION_MIN, CFS_VERSION);
+        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || !version_ok || sb->block_size != CFS_BLOCK ||
             sb->total_blocks != fs->nblocks || sb->generation == 0 ||
             block_crc(block, offsetof(struct cfs_super, crc)) != sb->crc || sb->imap_root >= fs->nblocks ||
             sb->alloc_root >= fs->nblocks)
@@ -824,6 +866,13 @@ static int load_root(struct cfs *fs, struct vnode **root)
     int rc = load_bitmap(fs);
     if (rc)
         return rc;
+    /* How many snapshots exist decides whether a commit may free the
+     * blocks it releases (design.md, "Format version 3"). */
+    unsigned n = 0;
+    if (cfs_snapshot_list(fs, NULL, 0, &n) == 0)
+        fs->snap_count = n;
+    if (n)
+        kinfo("cosmofs: %u snapshot(s)", n);
     return cfs_vnode_get(fs, CFS_ROOT_INO, root);
 }
 

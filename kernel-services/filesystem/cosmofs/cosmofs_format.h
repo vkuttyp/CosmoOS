@@ -15,7 +15,8 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      2u   /* version 2: extents carry lblk, extent blocks chain, per-inode checksum tree */
+#define CFS_VERSION      3u   /* version 3: snapshots (snap_root, CFS_KIND_SNAPLIST, CFS_KIND_DEADLIST) */
+#define CFS_VERSION_MIN  2u   /* version 2 mounts unchanged: every field it needs was reserved */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
 #define CFS_SUPER_A      0u
@@ -30,6 +31,8 @@ enum cfs_kind {
     CFS_KIND_EXTENTS = 6,
     CFS_KIND_CSUMIDX = 7,   /* an inode's checksum index: 508 pointers to CSUM blocks */
     CFS_KIND_CSUM = 8,      /* 1016 CRC32C values, one per logical block */
+    CFS_KIND_SNAPLIST = 9,  /* snapshots: CFS_SNAPS_PER_BLOCK entries and a `next` */
+    CFS_KIND_DEADLIST = 10, /* a snapshot's freed blocks: block numbers and a `next` */
 };
 
 /* Inode checksum algorithms (cfs_inode.csum_algo). */
@@ -77,6 +80,53 @@ struct cfs_extent {
 struct cfs_extent_block {
     uint64_t next;
     struct cfs_extent ext[CFS_EXTENTS_PER_BLOCK];
+};
+
+#define CFS_SNAP_NAME_MAX 31u
+
+/* A snapshot is the tuple a commit publishes, kept: every tree it names
+ * is copy-on-write, so nothing has to be copied to take one
+ * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 3"). */
+struct cfs_snapshot {          /* 96 bytes */
+    uint64_t generation;       /* the commit this snapshot pins */
+    uint64_t imap_root;
+    uint64_t alloc_root;
+    uint64_t next_ino;
+    uint64_t inode_count;
+    uint64_t deadlist;         /* head of a CFS_KIND_DEADLIST chain, or 0 */
+    uint64_t created_ns;
+    uint64_t reserved;
+    char name[CFS_SNAP_NAME_MAX + 1];
+};
+
+#define CFS_SNAPS_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 8) / sizeof(struct cfs_snapshot))
+
+/* A snapshot's vnodes share the mount's inode numbers, so they carry a
+ * tag in bits above the inode-number space: the VFS caches vnodes by
+ * (mount, ino) and a snapshot's root must not collide with the live
+ * one. CFS_MAX_INODES is far below 2^48, which is what makes the
+ * partition safe (design.md, "Reading a snapshot"). */
+#define CFS_SNAP_INO_SHIFT 48
+#define CFS_SNAPDIR_INO    ((uint64_t)0xFFFFull << CFS_SNAP_INO_SHIFT)   /* the .snapshots directory */
+#define CFS_SNAP_TAG(ino)  ((unsigned)(((uint64_t)(ino)) >> CFS_SNAP_INO_SHIFT))
+#define CFS_SNAP_INO(tag, ino) (((uint64_t)(tag) << CFS_SNAP_INO_SHIFT) | (uint64_t)(ino))
+#define CFS_INO_OF(ino)    ((ino) & ((1ull << CFS_SNAP_INO_SHIFT) - 1))
+#define CFS_SNAPDIR_NAME   ".snapshots"
+
+/* Payload of a CFS_KIND_SNAPLIST block; the chain continues at `next`. */
+struct cfs_snap_block {
+    uint64_t next;
+    struct cfs_snapshot snap[CFS_SNAPS_PER_BLOCK];
+};
+
+#define CFS_DEAD_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 16) / sizeof(uint64_t))
+
+/* Payload of a CFS_KIND_DEADLIST block: blocks a snapshot still names
+ * that the live tree has released. */
+struct cfs_dead_block {
+    uint64_t next;
+    uint64_t count;            /* entries used in this block */
+    uint64_t blk[CFS_DEAD_PER_BLOCK];
 };
 
 struct cfs_inode {
