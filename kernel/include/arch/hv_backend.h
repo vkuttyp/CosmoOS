@@ -1,15 +1,15 @@
 /*
- * hvops.h - The x86-64 hypervisor backends behind arch/hv.h.
+ * arch/hv_backend.h - A hypervisor backend behind arch/hv.h.
  *
- * Two implementations of the same interface (SVM and VMX) exist in one
- * kernel; `arch_hv_probe` picks the one this CPU has and every
- * `arch_hv_*` entry point forwards through this table
- * (kernel/arch/x86_64/hv.c). A machine with neither leaves it NULL and
- * the generic layer sees `caps.present == false`.
+ * More than one implementation of the same interface can exist in one
+ * kernel (x86-64: SVM and VMX; AArch64: EL2): `arch_hv_probe` picks the
+ * one this machine has and every `arch_hv_*` entry point forwards
+ * through this table. A machine with none leaves it NULL and the generic
+ * layer sees `caps.present == false`.
  */
 
-#ifndef X86_HVOPS_H
-#define X86_HVOPS_H
+#ifndef ARCH_HV_BACKEND_H
+#define ARCH_HV_BACKEND_H
 
 #include <arch/hv.h>
 
@@ -40,7 +40,11 @@ struct hv_backend {
     void (*vcpu_write_gpr)(struct arch_hv_vcpu *v, unsigned index, uint64_t value);
 };
 
+#if defined(ARCH_X86_64)
 extern const struct hv_backend svm_backend;
 extern const struct hv_backend vmx_backend;
+#elif defined(ARCH_AARCH64)
+extern const struct hv_backend el2_backend;
+#endif
 
-#endif /* X86_HVOPS_H */
+#endif /* ARCH_HV_BACKEND_H */
