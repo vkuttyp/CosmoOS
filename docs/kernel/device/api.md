@@ -262,7 +262,10 @@ Sleep; thread context only.
 
 ### `struct blkdev *blk_find(const char *name)` *(exported)*
 Referenced pointer or NULL; drop with `blkdev_put`. Sleeps.
-`blk_count()` and `blk_dump()` report the registry.
+`blk_count()` and `blk_dump()` report the registry. `blk_nth(i)` returns
+the i'th device, referenced, or NULL past the end -- for enumeration
+that tolerates a changing registry, which is how a storage pool finds
+its other members by reading each candidate's label.
 
 ### `struct bio`
 `dev`, `sector`, `nsectors`, `dir`, `flags`, `buf` or `vecs`/`nr_vecs`
