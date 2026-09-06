@@ -410,7 +410,7 @@ struct cfs_snapshot {          /* 96 bytes, in a CFS_KIND_SNAPLIST block */
     uint64_t inode_count;
     uint64_t deadlist;         /* head of a CFS_KIND_DEADLIST chain, or 0 */
     uint64_t created_ns;       /* wall clock, for `ls` */
-    uint64_t reserved;
+    uint64_t id;               /* never reused: the vnode tag (see below) */
     char name[32];             /* NUL terminated, unique in the mount */
 };
 ```
@@ -467,7 +467,12 @@ directory the root's `lookup` answers, whose children are the snapshots'
 root directories. A `struct cfs_vnode` gains a snapshot pointer; every
 read path that resolves an inode uses `vn->snap ? snap->imap_root :
 fs->sb.imap_root`, and every write path refuses with `-EROFS` when it is
-set. Nothing else in the read path changes, because a snapshot's trees
+set. The tag is the snapshot's `id`, which is **never reused**: a
+positional index would be reassigned when a deletion compacts the list,
+and a cached vnode would then be handed to a different snapshot
+entirely. Ids run to `CFS_SNAP_ID_MAX` (0xFFFE, since 0xFFFF is
+`.snapshots` itself and 0 is the live tree); creation past that is
+`-ENOSPC`. Nothing else in the read path changes, because a snapshot's trees
 are ordinary trees — that is the whole point of copy-on-write.
 
 `.snapshots` is not returned by `readdir` on the root: it is found by
@@ -485,6 +490,23 @@ a new system call: creating `/mnt/.snapshots/<name>` as a directory
 takes a snapshot, and `rmdir` on it deletes one. That keeps the surface
 to what `mkdir` and `rmdir` already are, and makes the shell test the
 same shape as every other filesystem test.
+
+### When something goes wrong
+
+Two rules, both the same one the storage layers above keep: never let go
+of a block whose fate is unknown, and never publish a change that was
+reported as failed.
+
+- A snapshot list that cannot be read makes the commit **hold** the
+  block rather than free it: an unreadable list is not evidence that
+  nothing needs it.
+- Deletion takes the whole list, however many blocks it spans — a
+  snapshot left out of that set would have its blocks freed while it
+  still named them.
+- A commit that fails after the list has changed marks the mount failed,
+  as every other unpublishable change here does, so a later commit
+  cannot publish a snapshot that `mkdir` reported as failed or drop one
+  `rmdir` did.
 
 ### What this unit does not do
 

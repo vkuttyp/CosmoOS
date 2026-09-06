@@ -95,7 +95,10 @@ struct cfs_snapshot {          /* 96 bytes */
     uint64_t inode_count;
     uint64_t deadlist;         /* head of a CFS_KIND_DEADLIST chain, or 0 */
     uint64_t created_ns;
-    uint64_t reserved;
+    /* Never reused while the filesystem lives: it is the tag a
+     * snapshot's vnodes carry, and a cached vnode must never be handed
+     * to a different snapshot (design.md, "Reading a snapshot"). */
+    uint64_t id;
     char name[CFS_SNAP_NAME_MAX + 1];
 };
 
@@ -108,6 +111,7 @@ struct cfs_snapshot {          /* 96 bytes */
  * partition safe (design.md, "Reading a snapshot"). */
 #define CFS_SNAP_INO_SHIFT 48
 #define CFS_SNAPDIR_INO    ((uint64_t)0xFFFFull << CFS_SNAP_INO_SHIFT)   /* the .snapshots directory */
+#define CFS_SNAP_ID_MAX    0xFFFEu   /* 0xFFFF is the .snapshots tag; 0 is the live tree */
 #define CFS_SNAP_TAG(ino)  ((unsigned)(((uint64_t)(ino)) >> CFS_SNAP_INO_SHIFT))
 #define CFS_SNAP_INO(tag, ino) (((uint64_t)(tag) << CFS_SNAP_INO_SHIFT) | (uint64_t)(ino))
 #define CFS_INO_OF(ino)    ((ino) & ((1ull << CFS_SNAP_INO_SHIFT) - 1))

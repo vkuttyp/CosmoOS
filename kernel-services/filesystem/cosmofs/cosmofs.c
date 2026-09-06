@@ -671,7 +671,9 @@ static int snapdir_get(struct cfs *fs, struct vnode **out)
     return 0;
 }
 
-/* The tag a snapshot's vnodes carry: its index in the list, plus one. */
+/* The tag a snapshot's vnodes carry is its id, which is never reused:
+ * a positional index would let a cached vnode be handed to a different
+ * snapshot after a deletion compacted the list. */
 static int snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs_snapshot *out, unsigned *tag)
 {
     char buf[CFS_SNAP_NAME_MAX + 1];
@@ -679,20 +681,12 @@ static int snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs
         return -ENOENT;
     memcpy(buf, name, len);
     buf[len] = '\0';
-    struct cfs_snapshot list[CFS_SNAPS_PER_BLOCK];
-    unsigned n = 0;
-    int rc = cfs_snapshot_list(fs, list, CFS_SNAPS_PER_BLOCK, &n);
-    if (rc)
-        return rc;
-    if (n > CFS_SNAPS_PER_BLOCK)
-        n = CFS_SNAPS_PER_BLOCK;
-    for (unsigned i = 0; i < n; i++)
-        if (strcmp(list[i].name, buf) == 0) {
-            *out = list[i];
-            *tag = i + 1;
-            return 0;
-        }
-    return -ENOENT;
+    if (!cfs_snapshot_find(fs, buf, out))   /* walks every list block */
+        return -ENOENT;
+    if (out->id == 0 || out->id > CFS_SNAP_ID_MAX)
+        return -EIO;
+    *tag = (unsigned)out->id;
+    return 0;
 }
 
 static bool is_snapdir(struct vnode *vn)

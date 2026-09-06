@@ -786,6 +786,24 @@ bool selftest_cosmofs_snapshot(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG "/.snapshots/first") == -ENOENT);
     CHECK(read_matches(ENG "/keep", "after!", 6));
 
+    /* A snapshot's identity must not be positional: after deleting one,
+     * a new snapshot must not inherit a cached vnode from the old. Take
+     * A and B, delete A, take C, and read through B and C -- if the tag
+     * were an index, C would land on B's cached root. */
+    CHECK(write_file(ENG "/ident", "aaa", 3));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/ident-a", 0755) == 0);
+    CHECK(write_file(ENG "/ident", "bbb", 3));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/ident-b", 0755) == 0);
+    CHECK(read_matches(ENG "/.snapshots/ident-a/ident", "aaa", 3));
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/ident-a") == 0);
+    CHECK(write_file(ENG "/ident", "ccc", 3));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/ident-c", 0755) == 0);
+    CHECK(read_matches(ENG "/.snapshots/ident-b/ident", "bbb", 3));
+    CHECK(read_matches(ENG "/.snapshots/ident-c/ident", "ccc", 3));
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/ident-b") == 0);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/ident-c") == 0);
+    CHECK(vfs_unlink(NULL, ENG "/ident") == 0);
+
     kinfo("selftest: cosmofs-snapshot: history kept and released (%llu free blocks, %llu after)",
           (unsigned long long)st0.free_blocks, (unsigned long long)st1.free_blocks);
     return engine_unmount(bd, reason);

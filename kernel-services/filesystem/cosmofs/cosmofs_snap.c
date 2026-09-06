@@ -257,8 +257,13 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
     bool any = false;
     while (blkno) {
         struct cfs_buf *b;
-        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
-            return false;
+        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b)) {
+            /* The list cannot be read, so which snapshot needs this
+             * block is unknown: hold it. Freeing on an unreadable list
+             * would hand a live snapshot's block to the allocator. */
+            kerror("cosmofs: snapshot list unreadable; holding block %llu", (unsigned long long)blk);
+            return true;
+        }
         struct cfs_snap_block *sb = snap_payload(b);
         uint64_t next = sb->next;
         for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
@@ -275,10 +280,12 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
         blkno = next;
     }
     if (!any)
-        return false;
+        return false;   /* no snapshots at all: the caller frees it */
     struct cfs_buf *b;
-    if (cfs_buf_get(fs, best_block, CFS_KIND_SNAPLIST, &b))
-        return false;
+    if (cfs_buf_get(fs, best_block, CFS_KIND_SNAPLIST, &b)) {
+        kerror("cosmofs: snapshot list unreadable; holding block %llu", (unsigned long long)blk);
+        return true;
+    }
     struct cfs_snap_block *sb = snap_payload(b);
     /* Testing the newest snapshot alone is exact here: a block reaching
      * the commit's free list was in the live tree until now, so if the
@@ -305,6 +312,52 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
 
 /* --- create and delete ---------------------------------------------------- */
 
+/* Both operations end by committing. If that fails the list has already
+ * been changed in memory, and a later commit would publish a snapshot
+ * mkdir reported as failed (or drop one rmdir did): the mount is marked
+ * failed instead, which is what every other unpublishable change here
+ * does. */
+static int snap_commit(struct cfs *fs, int rc_so_far)
+{
+    if (rc_so_far)
+        return rc_so_far;
+    int rc = cfs_commit(fs);
+    if (rc && !fs->failed) {
+        fs->failed = rc;
+        kerror("cosmofs: a snapshot change could not be committed (%d); the mount is now read-only", rc);
+    }
+    return rc;
+}
+
+struct maxid_ctx {
+    uint64_t max;
+    unsigned live;
+};
+
+static bool maxid_scan(struct cfs_snapshot *s, void *arg)
+{
+    struct maxid_ctx *c = arg;
+    if (s->id > c->max)
+        c->max = s->id;
+    c->live++;
+    return true;
+}
+
+/* The highest id in use, over the whole chain. Ids are never reused, so
+ * this only rises; a deleted snapshot's id is not handed out again while
+ * the filesystem is mounted, which is what keeps cached vnodes honest. */
+static int snap_max_id(struct cfs *fs, uint64_t *max, unsigned *live)
+{
+    struct maxid_ctx c = { .max = fs->snap_max_id, .live = 0 };
+    int rc = snap_walk(fs, maxid_scan, &c, false);
+    if (rc)
+        return rc;
+    *max = c.max;
+    *live = c.live;
+    fs->snap_max_id = c.max;
+    return 0;
+}
+
 int cfs_snapshot_create(struct cfs *fs, const char *name)
 {
     if (name == NULL || name[0] == '\0' || strlen(name) > CFS_SNAP_NAME_MAX)
@@ -319,8 +372,19 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
     if (rc)
         return rc;
 
+    /* An id no live snapshot has and none has had while this filesystem
+     * has been mounted: it is the tag this snapshot's vnodes carry. */
+    uint64_t max_id = 0;
+    unsigned live = 0;
+    rc = snap_max_id(fs, &max_id, &live);
+    if (rc)
+        return rc;
+    if (max_id >= CFS_SNAP_ID_MAX)
+        return -ENOSPC;
+
     struct cfs_snapshot s;
     memset(&s, 0, sizeof(s));
+    s.id = max_id + 1;
     s.generation = fs->sb.generation;
     s.imap_root = fs->sb.imap_root;
     s.alloc_root = fs->sb.alloc_root;
@@ -344,7 +408,8 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
                 cfs_buf_mark_dirty(fs, b);
                 cfs_buf_put(fs, b);
                 fs->snap_count++;
-                return cfs_commit(fs);
+                fs->snap_max_id = s.id;
+                return snap_commit(fs, 0);
             }
         }
         cfs_buf_put(fs, b);
@@ -360,7 +425,8 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
     fs->sb.snap_root = b->blkno;
     cfs_buf_put(fs, b);
     fs->snap_count++;
-    return cfs_commit(fs);
+    fs->snap_max_id = s.id;
+    return snap_commit(fs, 0);
 }
 
 struct clear_ctx {
@@ -381,22 +447,27 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     if (name == NULL || name[0] == '\0')
         return -EINVAL;
 
-    /* The whole list: the doomed entry, and the ones that remain and get
-     * to keep what they still occupy. */
-    struct cfs_snapshot *all = kmalloc(CFS_SNAPS_PER_BLOCK * sizeof(*all), 0);
+    /* The whole list, however many blocks it spans: a snapshot left out
+     * here would have its blocks freed while it still names them. Count
+     * first, then take exactly that many. */
+    unsigned total = 0;
+    int rc = cfs_snapshot_list(fs, NULL, 0, &total);
+    if (rc)
+        return rc;
+    if (total == 0)
+        return -ENOENT;
+    struct cfs_snapshot *all = kmalloc((size_t)total * sizeof(*all), 0);
     if (all == NULL)
         return -ENOMEM;
     unsigned n = 0;
-    int rc = cfs_snapshot_list(fs, all, CFS_SNAPS_PER_BLOCK, &n);
-    if (rc) {
+    rc = cfs_snapshot_list(fs, all, total, &n);
+    if (rc || n != total) {
         kfree(all);
-        return rc;
+        return rc ? rc : -EIO;   /* the list changed under the mount lock: refuse */
     }
-    if (n > CFS_SNAPS_PER_BLOCK)
-        n = CFS_SNAPS_PER_BLOCK;
 
     struct cfs_snapshot doomed;
-    struct cfs_snapshot *remaining = kmalloc(CFS_SNAPS_PER_BLOCK * sizeof(*remaining), 0);
+    struct cfs_snapshot *remaining = kmalloc((size_t)total * sizeof(*remaining), 0);
     if (remaining == NULL) {
         kfree(all);
         return -ENOMEM;
@@ -466,5 +537,5 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
            (unsigned long long)kept);
     if (fs->snap_count)
         fs->snap_count--;
-    return cfs_commit(fs);
+    return snap_commit(fs, 0);
 }

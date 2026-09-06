@@ -52,6 +52,7 @@ struct cfs {
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
     unsigned snap_count;    /* live snapshots; commit holds their blocks rather than freeing */
+    uint64_t snap_max_id;   /* the highest snapshot id ever used here: ids are never reused */
     /* The writeback thread (design.md, "The writeback thread"). */
     struct thread *wb_thread;
     bool wb_stop;
