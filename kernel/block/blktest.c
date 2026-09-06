@@ -59,6 +59,10 @@ bool selftest_blk_queue(const char **reason)
     g_done_count = 0;
     g_done_status = 0;
     uint64_t requeued0 = bd->requeued;
+    /* Nothing completes while the eight are submitted, so the two slots
+     * stay taken and the other six are refused and parked: the count is
+     * exact instead of a race with the worker's millisecond. */
+    ramblk_set_stall(bd, true);
     for (unsigned i = 0; i < N; i++) {
         memset(bufs + (size_t)i * 4096, (int)(0x10 + i), 4096);
         memset(&bios[i], 0, sizeof(bios[i]));
@@ -71,11 +75,13 @@ bool selftest_blk_queue(const char **reason)
         list_init(&bios[i].link);
         CHECK(blk_submit(&bios[i]) == 0);   /* never -EAGAIN */
     }
+    CHECK(bd->requeued - requeued0 == N - 2);
+    ramblk_set_stall(bd, false);
     uint64_t deadline = clock_now_ns() + 2000000000ULL;
     while (__atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) < N && clock_now_ns() < deadline)
         thread_sleep_ms(1);
     CHECK(g_done_count == N && g_done_status == 0);
-    CHECK(bd->requeued - requeued0 >= N - 2);
+    CHECK(bd->requeued - requeued0 == N - 2);
     uint8_t *back = kmalloc(4096, 0);
     CHECK(back != NULL);
     for (unsigned i = 0; i < N; i++) {
