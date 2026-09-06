@@ -55,7 +55,7 @@
  *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE
  *   3  the module becomes a ustar boot archive (archive_phys/archive_size,
  *      COSMOBOOT_MEM_ARCHIVE) holding init and the boot-time kernel modules */
-#define COSMOBOOT_VERSION 4
+#define COSMOBOOT_VERSION 5
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -83,6 +83,7 @@
 #define COSMOBOOT_MEM_MMIO              11u  /* memory-mapped I/O */
 #define COSMOBOOT_MEM_PERSISTENT        12u  /* persistent memory, not general RAM */
 #define COSMOBOOT_MEM_ARCHIVE           13u  /* boot archive (init, modules), v3 */
+#define COSMOBOOT_MEM_EL2_STUB          14u  /* AArch64: the resident EL2 stub, v5 */
 
 #define COSMOBOOT_ARCH_X86_64  1u
 #define COSMOBOOT_ARCH_AARCH64 2u
@@ -146,7 +147,14 @@ struct cosmoboot_info {
      * (AArch64: the TTBR0 identity table the loader still runs on; the
      * kernel adopts boot_pagetable_root as TTBR1). x86-64 writes 0. */
     uint64_t boot_pagetable_root_user;
-    uint64_t reserved1[5];
+    /* v5: AArch64 only. When firmware handed the loader control at EL2,
+     * the loader left a stub owning EL2 (a vector table plus a handler,
+     * VBAR_EL2 pointing at it, the EL2 MMU off) and dropped to EL1; this
+     * is that page's physical address, in memory of type
+     * COSMOBOOT_MEM_EL2_STUB. Zero when the machine has no EL2 or the
+     * loader could not reserve the page: EL1 then has no way up. */
+    uint64_t el2_stub_phys;
+    uint64_t reserved1[4];
 };
 
 #endif /* __ASSEMBLER__ */

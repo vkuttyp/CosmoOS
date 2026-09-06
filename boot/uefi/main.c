@@ -136,6 +136,7 @@ static uint32_t translate_type(uint32_t efi_type, uint64_t attr)
     case EFI_MEMORY_TYPE_COSMO_BOOTINFO:   return COSMOBOOT_MEM_BOOTINFO;
     case EFI_MEMORY_TYPE_COSMO_PAGETABLES: return COSMOBOOT_MEM_BOOT_PAGETABLES;
     case EFI_MEMORY_TYPE_COSMO_ARCHIVE:     return COSMOBOOT_MEM_ARCHIVE;
+    case EFI_MEMORY_TYPE_COSMO_EL2:        return COSMOBOOT_MEM_EL2_STUB;
     default:                           return COSMOBOOT_MEM_RESERVED;
     }
 }
@@ -362,6 +363,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->kernel_size = img.virt_end - img.virt_base;
     info->boot_pagetable_root = pg.root;
     info->boot_pagetable_root_user = pg.root_user;
+    info->el2_stub_phys = cpu_el2_stub();
     info->mem_map_phys = (uint64_t)(uintptr_t)entries;
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();

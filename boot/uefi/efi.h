@@ -87,6 +87,7 @@ typedef enum {
 #define EFI_MEMORY_TYPE_COSMO_BOOTINFO   0x80000001u
 #define EFI_MEMORY_TYPE_COSMO_PAGETABLES 0x80000002u
 #define EFI_MEMORY_TYPE_COSMO_ARCHIVE     0x80000003u
+#define EFI_MEMORY_TYPE_COSMO_EL2         0x80000004u
 
 typedef enum {
     AllocateAnyPages,
