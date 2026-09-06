@@ -25,6 +25,22 @@ struct cfs_buf {
     unsigned refs;
 };
 
+/* Per-member state. The allocator works on a linear index that
+ * concatenates the members, so that one flat bitmap and every algorithm
+ * over it stay as they were; `base` is where this member starts in that
+ * space and is a whole number of bitmap chunks, so no chunk straddles
+ * two members (design.md, "One bitmap, many members"). */
+struct cfs_memstate {
+    uint64_t nblocks;        /* blocks on the device */
+    uint64_t first_usable;   /* 2 on member 0 (the superblocks), 1 elsewhere (the label) */
+    uint64_t base;           /* linear index of this member's block 0 */
+    unsigned chunk0, nchunks;
+    uint64_t alloc_root;     /* this member's CFS_KIND_ALLOCIDX block, as a DVA */
+    uint64_t free_blocks;
+    uint64_t alloc_hint;     /* linear */
+    uint8_t uuid[16];
+};
+
 struct cfs {
     struct spool *pool;
     struct mount *mnt;
@@ -38,6 +54,10 @@ struct cfs {
     unsigned nr_chunks;
     uint64_t free_blocks;
     uint64_t alloc_hint;
+
+    /* The pool's members (one, for a version-2 or -3 filesystem). */
+    struct cfs_memstate *mem;
+    unsigned nmembers;
 
     uint64_t *pending_free; /* blocks freed in this transaction, reusable after commit */
     unsigned nr_pending, pending_cap;
@@ -116,6 +136,21 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);
+/* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
+bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);
+uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva);   /* CFS_DVA_NONE if the DVA is not ours */
+uint64_t cfs_lin_dva(const struct cfs *fs, uint64_t lin);   /* CFS_DVA_NONE for padding or past the end */
+/* Fill fs->mem from the superblock: the member table for version 4, a
+ * single synthesised member for versions 2 and 3. Assembles the other
+ * members' devices by label. */
+int cfs_members_load(struct cfs *fs, struct blkdev *first);
+/* Write fs->mem back into the (copy-on-write) member table; the version
+ * decides whether member 0's root lives there or in the superblock. */
+int cfs_members_store(struct cfs *fs);
+void cfs_members_free(struct cfs *fs);
+/* Format-time: the label that lets a mount find this member again. */
+int cfs_label_write(struct spool *pool, unsigned vdev, const uint8_t uuid[16], uint64_t nblocks);
+
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of
  * the last allocation); at least one. -ENOSPC when only the reserve is left. */

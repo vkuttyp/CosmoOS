@@ -15,8 +15,8 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      3u   /* version 3: snapshots (snap_root, CFS_KIND_SNAPLIST, CFS_KIND_DEADLIST) */
-#define CFS_VERSION_MIN  2u   /* version 2 mounts unchanged: every field it needs was reserved */
+#define CFS_VERSION      4u   /* version 4: many members (DVAs, CFS_KIND_MEMBERS) */
+#define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
 #define CFS_SUPER_A      0u
@@ -33,7 +33,24 @@ enum cfs_kind {
     CFS_KIND_CSUM = 8,      /* 1016 CRC32C values, one per logical block */
     CFS_KIND_SNAPLIST = 9,  /* snapshots: CFS_SNAPS_PER_BLOCK entries and a `next` */
     CFS_KIND_DEADLIST = 10, /* a snapshot's freed blocks: block numbers and a `next` */
+    CFS_KIND_MEMBERS = 11,  /* the pool's member table: CFS_MEMBERS_PER_BLOCK entries */
 };
+
+/* --- device-virtual addresses --------------------------------------------
+ *
+ * Every pointer on disk is a DVA: the member that holds the block in the
+ * top 8 bits, the block within that member in the low 56. A version-2 or
+ * -3 pointer is a version-4 DVA with vdev 0, which is why those formats
+ * mount unchanged (design.md, "Format version 4: many members").
+ */
+#define CFS_DVA_VDEV_SHIFT 56
+#define CFS_DVA_BLK_MASK   ((1ull << CFS_DVA_VDEV_SHIFT) - 1)
+#define CFS_MAX_MEMBERS    255u   /* vdev 255 is reserved: see CFS_DVA_NONE */
+#define CFS_DVA_NONE       0xFFFFFFFFFFFFFFFFull   /* not a block; distinct from 0 */
+
+#define CFS_DVA(vdev, blk) (((uint64_t)(vdev) << CFS_DVA_VDEV_SHIFT) | ((uint64_t)(blk) & CFS_DVA_BLK_MASK))
+#define CFS_DVA_VDEV(d)    ((unsigned)((uint64_t)(d) >> CFS_DVA_VDEV_SHIFT))
+#define CFS_DVA_BLK(d)     ((uint64_t)(d) & CFS_DVA_BLK_MASK)
 
 /* Inode checksum algorithms (cfs_inode.csum_algo). */
 #define CFS_CSUM_NONE   0u
@@ -152,6 +169,44 @@ struct cfs_inode {
     uint64_t reserved;
 };
 
+/* One pool member. Its allocation metadata lives on the member it
+ * describes: losing a member must not take another member's bitmap with
+ * it (design.md, "The member table"). */
+struct cfs_member {            /* 64 bytes */
+    uint8_t uuid[16];
+    uint64_t nblocks;
+    uint64_t first_usable;     /* 2 on member 0 (the superblocks), 1 elsewhere (the label) */
+    uint64_t alloc_root;       /* this member's CFS_KIND_ALLOCIDX block, as a DVA */
+    uint64_t free_blocks;
+    uint32_t flags;
+    uint32_t pad;
+    uint64_t reserved;
+};
+
+#define CFS_MEMBERS_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 8) / sizeof(struct cfs_member))
+
+/* Payload of a CFS_KIND_MEMBERS block. */
+struct cfs_member_block {
+    uint64_t count;
+    struct cfs_member m[CFS_MEMBERS_PER_BLOCK];
+};
+
+/* Block 0 of every member past the first: how a mount finds the rest of
+ * the pool from the one device it was given. Member 0 is identified by
+ * its superblock, which carries the same uuid. */
+#define CFS_LABEL_MAGIC "COSMOMBR"
+
+struct cfs_label {
+    uint8_t magic[8];
+    uint32_t version;
+    uint32_t index;            /* this member's vdev number, >= 1 */
+    uint8_t uuid[16];          /* the pool's, matching cfs_super.uuid */
+    uint64_t nblocks;
+    uint64_t reserved[4];
+    uint32_t crc;              /* CRC32C over the block with this field zero */
+    uint32_t pad;
+};
+
 struct cfs_dirent {
     uint64_t ino;          /* 0 = free slot */
     uint8_t type;          /* CFS_TYPE_* */
@@ -173,8 +228,9 @@ struct cfs_super {
     uint64_t free_blocks;
     uint64_t csum_root;    /* reserved: data checksum tree */
     uint64_t snap_root;    /* reserved: snapshot roots */
-    uint64_t members;      /* pool members, 1 */
-    uint64_t reserved[8];
+    uint64_t members;      /* v4: DVA of the CFS_KIND_MEMBERS block. v2/v3: the constant 1 */
+    uint8_t uuid[16];      /* v4: the pool's uuid, matching every member's label */
+    uint64_t reserved[6];
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };
