@@ -206,8 +206,14 @@ int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot)
         buf_mark_dirty(fs, b);
         return 0;
     }
-    uint64_t nblk;
-    int rc = cfs_alloc_block(fs, &nblk);
+    /* The copy stays on the member the block was on where that member
+     * has room. Otherwise a metadata tree drifts onto whichever member
+     * is emptiest, and a member's own allocation index could end up on
+     * a different device than the blocks it describes. */
+    unsigned v = CFS_DVA_VDEV(b->blkno);
+    uint64_t hint = v < fs->nmembers ? CFS_DVA(v, fs->mem[v].first_usable) : 0;
+    uint64_t nblk, got;
+    int rc = cfs_alloc_run(fs, CFS_ALLOC_META, hint, 1, &nblk, &got);
     if (rc)
         return rc;
     struct cfs_buf *nb = buf_alloc(fs, nblk);
@@ -514,6 +520,14 @@ static int commit_member_bitmap(struct cfs *fs, unsigned v, uint64_t *reserved)
         unsigned gc = m->chunk0 + c;
         if (!fs->bitmap_dirty[gc])
             continue;
+        if (reserved[gc] == 0) {
+            /* A dirty chunk the reservation pass did not see. Writing it
+             * to DVA 0 would put a bitmap on member 0's superblock, so
+             * the transaction fails instead. */
+            kerror("cosmofs: bitmap chunk %u has no reserved block", gc);
+            rc = -EIO;
+            goto out;
+        }
         struct cfs_buf *nb = buf_alloc(fs, reserved[gc]);
         if (nb == NULL) {
             rc = -ENOMEM;
@@ -556,6 +570,22 @@ static int commit_bitmap(struct cfs *fs)
      * allocation root is known; by then the block is writable in this
      * generation and the second call allocates nothing. */
     int rc = cfs_members_store(fs);
+
+    /* Every allocation index this commit will write is copied first, for
+     * the same reason: a copy takes a block, and that block has to be
+     * counted in the bitmaps this commit writes. Doing it inside the
+     * write loop instead dirties a chunk the reservation pass has
+     * already been over -- and on a pool of several members the block
+     * comes from whichever member has the most room, so the chunk it
+     * dirties need not even belong to the member being written. */
+    for (unsigned v = 0; v < fs->nmembers && rc == 0; v++) {
+        struct cfs_buf *idx;
+        rc = cfs_buf_get(fs, fs->mem[v].alloc_root, CFS_KIND_ALLOCIDX, &idx);
+        if (rc == 0) {
+            rc = cfs_buf_cow(fs, &idx, &fs->mem[v].alloc_root);
+            cfs_buf_put(fs, idx);
+        }
+    }
     for (bool progress = true; progress && rc == 0;) {
         progress = false;
         for (unsigned v = 0; v < fs->nmembers && rc == 0; v++) {

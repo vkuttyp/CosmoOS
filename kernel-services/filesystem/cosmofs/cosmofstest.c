@@ -840,6 +840,78 @@ bool selftest_cosmofs_snapshot(const char **reason)
 }
 
 /*
+ * A member table is disk data: its geometry decides how many bitmap
+ * chunks a mount reads and how far the allocator may reach, so it is
+ * checked against what the format can express before any of it is
+ * believed. Corrupting a freshly formatted pool leaves no older root to
+ * fall back to, so the refusal is the only outcome.
+ */
+bool selftest_cosmofs_badmembers(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[2] = { ramblk_create(256), ramblk_create(256) };
+    CHECK(bd[0] != NULL && bd[1] != NULL);
+    CHECK(cosmofs_format_pool(bd, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+
+    struct spool *p;
+    CHECK(pool_open(bd[0], &p) == 0);
+    uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+    CHECK(blk != NULL);
+    CHECK(pool_read(p, CFS_SUPER_A, blk) == 0);
+    const struct cfs_super *sb = (const struct cfs_super *)blk;
+    CHECK(memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation == 1);
+    uint64_t members = sb->members;
+    CHECK(members != 0);
+
+    CHECK(pool_read(p, members, blk) == 0);
+    struct cfs_member_block *mb = (struct cfs_member_block *)(blk + CFS_MHDR_SIZE);
+    struct cfs_mhdr *h = (struct cfs_mhdr *)blk;
+    CHECK(mb->count == 2);
+    uint64_t was = mb->m[1].nblocks;
+
+    /* More bitmap chunks than one allocation index can point at. */
+    mb->m[1].nblocks = CFS_MAX_BLOCKS + 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* A member larger than the device that carries it. */
+    mb->m[1].nblocks = was + 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* A first usable block inside the label. */
+    mb->m[1].nblocks = was;
+    mb->m[1].first_usable = 0;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* Put it back: the mount works, so the refusals above were about the
+     * corruption and not about the surgery. */
+    mb->m[1].first_usable = 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    kfree(blk);
+    pool_close(p);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    kinfo("selftest: cosmofs-badmembers: a member table that cannot be true is refused");
+    return true;
+}
+
+/*
  * A pool of two members. Everything the format change is for is here:
  * blocks are named by member, the allocator spreads across both, each
  * member carries its own bitmap, and a remount finds the second member
@@ -922,6 +994,19 @@ bool selftest_cosmofs_pool2(const char **reason)
     CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
 
+    /* The first commit touches member 0's metadata while member 1 is
+     * emptier, so the allocation index's copy-on-write lands on member 1
+     * and dirties a bitmap chunk that the reservation pass has already
+     * been over. Every dirty chunk must still have a reserved
+     * destination: writing one to DVA 0 would land on member 0's
+     * superblock. */
+    CHECK(write_file(ENG "/first", "one", 3));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(read_matches(ENG "/first", "one", 3));
+
     /* Both members' blocks are in the pool's total. */
     struct cosmofs_stats st;
     CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
@@ -976,6 +1061,7 @@ bool selftest_cosmofs_pool2(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG "/.snapshots/two") == 0);
 
     CHECK(vfs_umount(ENG) == 0);
+
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd[0]);
     ramblk_destroy(bd[1]);

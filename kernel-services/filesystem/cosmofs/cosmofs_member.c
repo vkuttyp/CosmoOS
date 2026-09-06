@@ -153,6 +153,36 @@ static int assemble_member(struct cfs *fs, unsigned vdev, const struct cfs_membe
 
 /* --- the member table ---------------------------------------------------- */
 
+/*
+ * A member table is disk data. Its geometry decides how many bitmap
+ * chunks are read and how far the allocator may reach, so every field
+ * is checked against what the format can express before any of it is
+ * believed -- the formatter's limits are not evidence about a disk this
+ * kernel did not write.
+ */
+static bool member_sane(const struct cfs_member *m, unsigned v, unsigned nmembers)
+{
+    if (m->nblocks < CFS_MIN_BLOCKS || m->nblocks > CFS_MAX_BLOCKS)
+        return false;
+    /* One allocation index holds CFS_PTRS_PER_BLOCK chunk pointers, so a
+     * member that claims more chunks than that would be read past the
+     * end of its index block. */
+    uint64_t chunks = (m->nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP;
+    if (chunks > CFS_PTRS_PER_BLOCK)
+        return false;
+    uint64_t first = v == 0 ? 2 : 1;   /* the superblocks, or the label */
+    if (m->first_usable < first || m->first_usable >= m->nblocks)
+        return false;
+    /* A member's allocation index is normally on that member (that is
+     * what the copy-on-write hint arranges), but a member with no free
+     * block at all leaves its replacement elsewhere rather than wedging
+     * the filesystem, so what is checked here is only that the address
+     * could name a block of this pool. */
+    if (CFS_DVA_VDEV(m->alloc_root) >= nmembers)
+        return false;
+    return m->free_blocks <= m->nblocks;
+}
+
 /* Lay the members out in the linear space the bitmap is indexed by:
  * each member starts at a whole chunk, so no chunk straddles two. */
 static void layout(struct cfs *fs)
@@ -216,6 +246,11 @@ int cfs_members_load(struct cfs *fs, struct blkdev *first)
     for (unsigned v = 0; v < fs->nmembers; v++) {
         const struct cfs_member *src = &mb->m[v];
         struct cfs_memstate *m = &fs->mem[v];
+        if (!member_sane(src, v, fs->nmembers)) {
+            kerror("cosmofs: member %u of the table is not a member this format can describe", v);
+            rc = -EIO;
+            break;
+        }
         m->nblocks = src->nblocks;
         m->first_usable = src->first_usable;
         m->alloc_root = src->alloc_root;
@@ -225,12 +260,16 @@ int cfs_members_load(struct cfs *fs, struct blkdev *first)
             rc = assemble_member(fs, v, src);
             if (rc)
                 break;
-        } else if (m->nblocks > fs->pool->m[0].nblocks) {
-            kerror("cosmofs: member 0 has %llu blocks, the device %llu",
-                   (unsigned long long)m->nblocks, (unsigned long long)fs->pool->m[0].nblocks);
-            rc = -EIO;
-            break;
         }
+        /* The table says how big the member is; the device says how big
+         * it really is, and the smaller of those is not negotiable. */
+        if (rc == 0 && m->nblocks > fs->pool->m[v].nblocks) {
+            kerror("cosmofs: member %u claims %llu blocks, the device has %llu", v,
+                   (unsigned long long)m->nblocks, (unsigned long long)fs->pool->m[v].nblocks);
+            rc = -EIO;
+        }
+        if (rc)
+            break;
     }
     kfree(block);
     if (rc) {

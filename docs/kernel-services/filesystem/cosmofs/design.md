@@ -582,9 +582,23 @@ member already does.
 `cfs_super.members` was the constant 1. In version 4 it is the DVA of a
 `CFS_KIND_MEMBERS` block holding one `struct cfs_member` per vdev: its
 uuid, block count, first usable block, free count, and **its own
-`alloc_root`**. Allocation metadata therefore lives on the member it
-describes — losing a member must not take the other members' bitmaps
-with it, which is the whole point of the unit after this one. A version
+`alloc_root`**. Allocation metadata belongs on the member it describes —
+losing a member must not take the other members' bitmaps with it, which
+is the whole point of the unit after this one — so a copy-on-write
+replacement is allocated with a hint that keeps it on the member the
+block was on. The one exception is a member with no free block at all,
+which leaves its replacement elsewhere rather than wedging the
+filesystem; the mount checks that an `alloc_root` names a block of this
+pool, not that it names one of that member's.
+
+A member table is disk data, and its geometry decides how many bitmap
+chunks a mount reads and how far the allocator may reach. Every field is
+therefore checked against what the format can express before any of it
+is believed — block count within `CFS_MIN_BLOCKS..CFS_MAX_BLOCKS` and no
+more chunks than one allocation index can point at, a first usable block
+past the superblocks or the label, and a member no larger than the
+device carrying it. The formatter's own limits are not evidence about a
+disk this kernel did not write. A version
 2 or 3 superblock has no member table; the mount synthesises a
 single-member one from `total_blocks` and `alloc_root`.
 
@@ -604,6 +618,16 @@ address space that concatenates the members: member `v` starts at
 `base[v]`, and `base` advances by whole bitmap chunks so no chunk
 straddles two members. The tail of a member's last chunk is padding —
 marked allocated at mount, so the allocator can never hand it out.
+
+A commit copies the member table and **every member's allocation index
+before it reserves anything**. A copy takes a block, and that block has
+to be counted in the bitmaps the same commit writes; doing it inside the
+write loop instead dirties a chunk the reservation pass has already been
+over, and on a pool of several members the block comes from whichever
+member has the most room, so the chunk it dirties need not even belong
+to the member being written. A dirty chunk with no reserved destination
+now fails the transaction rather than being written to DVA 0, which is
+member 0's superblock.
 
 DVA and linear index convert at the edges (`cfs_dva_lin`, `cfs_lin_dva`)
 and nowhere else. The first-fit run allocator, the metadata reserve, the

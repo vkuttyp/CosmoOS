@@ -122,6 +122,7 @@ bool selftest_cosmofs_snapshot(const char **reason);
 bool selftest_cosmofs_snapshot_remount(const char **reason);      /* fsync commits */
 bool selftest_cosmofs_pool2(const char **reason);                 /* a pool of two members */
 bool selftest_cosmofs_v3(const char **reason);                    /* the older on-disk format */
+bool selftest_cosmofs_badmembers(const char **reason);            /* a member table that cannot be true */
 bool selftest_cosmofs_reserve(const char **reason);    /* the metadata reserve on a full disk */
 bool selftest_cosmofs_fallback(const char **reason);   /* older-slot fallback at mount */
 bool selftest_cosmofs_writeback(const char **reason);  /* the writeback thread */

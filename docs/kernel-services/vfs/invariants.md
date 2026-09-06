@@ -278,11 +278,23 @@ laid out so no bitmap chunk straddles two members, and the padding at a
 member's end is marked allocated at mount so it can never be handed out.
 `cfs_alloc_run` never returns a run that crosses a member, which is what
 keeps an extent's `count` meaningful, and `extent_valid` checks both ends
-against the same member. A metadata block's self-check is its DVA, so a
+against the same member. A commit copies the member table and every
+member's allocation index before reserving destinations for its dirty
+bitmap chunks, because a copy takes a block that the same commit's
+bitmaps must show; a dirty chunk with no reserved destination fails the
+transaction rather than writing a bitmap over member 0's superblock. A
+member table is disk data and is checked against what the format can
+express — block count, chunk count, first usable block, and the size of
+the device actually carrying it — before a mount believes any of it. A metadata block's self-check is its DVA, so a
 read served from the wrong member fails exactly as a misdirected read
 within one does. Check: `cosmofs-pool2` (two members: both carry blocks,
 their free counts sum to the pool's, a remount finds the second by its
 label alone, and a snapshot spans both), `cosmofs-v3` (a version-3 disk
-mounts, writes, remounts and takes a snapshot under this kernel), `pool`
+mounts, writes, remounts and takes a snapshot under this kernel),
+`cosmofs-badmembers` (a member table claiming more chunks than an index
+can hold, a member larger than its device, or a first usable block
+inside the label: each refused on a freshly formatted pool, where there
+is no older root to fall back to, and the mount works again once the
+table is put back), `pool`
 (a DVA naming a member the pool does not have addresses nothing), and
 the host test's DVA arithmetic and member-table sizes.
