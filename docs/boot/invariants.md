@@ -97,3 +97,19 @@ set is a protocol version change.
 `\cosmo\kernel.elf` on the loader's own volume. A boot menu or config
 file is a future feature that adds a path, not a replacement for this
 default.
+
+## BT13. On AArch64 the kernel is entered at EL1, and EL2 — if there was any — is left reachable
+
+ Firmware hands the loader control at EL1 or
+at EL2 (`-machine virt,virtualization=on`). At EL2 the loader reserves a
+page, copies the stub into it, points `VBAR_EL2` there, turns the EL2
+MMU off so nothing it owns depends on firmware page tables the kernel
+will reclaim, and `eret`s to the kernel entry with the EL1 translation
+registers already programmed; `el2_stub_phys` names that page. Handing
+over at EL2 without a stub is forbidden: EL1 could neither use EL2 nor
+discover that it exists. A loader that cannot reserve the page hands
+over at EL1 with `el2_stub_phys = 0` and says so in its log. Check: the
+`el2` self-test (the stub answers its version, takes a new vector table
+and gives it back) and the two boot markers the harness requires when
+`QEMU_EL2` is not 0; `QEMU_EL2=0` covers the other side. Gap: only QEMU
+firmware has been tried, and only with a stub of one page.

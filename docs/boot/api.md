@@ -6,7 +6,9 @@ follows constitution section 52.
 
 ## Protocol (`boot/protocol/cosmoboot.h`)
 
-**ABI stability: stable.** Version 3 (version 1 plus the boot archive
+**ABI stability: stable.** Version 5 (version 4 plus `el2_stub_phys` and
+memory type `COSMOBOOT_MEM_EL2_STUB` = 14, taken from `reserved1`;
+version 4 added `boot_pagetable_root_user`). Version 3 (version 1 plus the boot archive
 fields `archive_phys`/`archive_size` and memory type
 `COSMOBOOT_MEM_ARCHIVE` = 13, taken from `reserved1`; version 2 used the
 same slots for one raw ELF module, `module_phys`/`module_size` and
@@ -32,7 +34,13 @@ is page-aligned memory inside the direct map holding the unmodified
 bytes of the file `\cosmo\boot.tar`, reported as
 `COSMOBOOT_MEM_ARCHIVE` (the loader retypes the range itself when the
 firmware rejected its memory types, see `mark_range` in `design.md`);
-the loader does not validate the archive's contents. The kernel keeps
+On AArch64 (v5): when firmware hands control over at EL2 the loader
+installs a stub owning EL2, points `VBAR_EL2` at it, turns the EL2 MMU
+off and `eret`s to the kernel entry at EL1, reporting the stub's page in
+`el2_stub_phys` as `COSMOBOOT_MEM_EL2_STUB`; a loader that cannot do
+this must hand over at EL1 with `el2_stub_phys = 0`, never at EL2 with
+no stub, because EL1 would then have no way to reach EL2 and no way to
+know it. The loader does not validate the archive's contents. The kernel keeps
 `ARCHIVE` ranges reserved by map type and treats the bytes as untrusted
 input: `bootarchive_init` validates every tar header, `elf_validate`
 the `init` entry, `modelf_validate` and `modsig_check` each module. The
