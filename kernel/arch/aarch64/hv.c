@@ -19,9 +19,9 @@ int arch_hv_probe(struct hv_caps *out)
 
 int arch_hv_vm_create(struct arch_hv_vm **out) { (void)out; return -ENOTSUP; }
 void arch_hv_vm_destroy(struct arch_hv_vm *vm) { (void)vm; }
-int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len)
+int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
 {
-    (void)vm; (void)gpa; (void)hpa; (void)len;
+    (void)vm; (void)gpa; (void)hpa; (void)len; (void)prot;
     return -ENOTSUP;
 }
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len) { (void)vm; (void)gpa; (void)len; return -ENOTSUP; }

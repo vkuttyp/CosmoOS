@@ -85,7 +85,7 @@ int vm_mem_add(struct vm *vm, uint64_t gpa, uint64_t len)
             rc = -ENOMEM;
             break;
         }
-        rc = arch_hv_vm_map(vm->arch, gpa + i * PAGE_SIZE, page_to_phys(r->pages[i]), PAGE_SIZE);
+        rc = arch_hv_vm_map(vm->arch, gpa + i * PAGE_SIZE, page_to_phys(r->pages[i]), PAGE_SIZE, HV_MAP_RWX);
         if (rc)
             break;
         mapped++;

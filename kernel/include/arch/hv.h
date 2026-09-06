@@ -19,11 +19,21 @@
 struct arch_hv_vm;     /* nested page table + address-space tag; opaque */
 struct arch_hv_vcpu;   /* control block + register spill; opaque */
 
+/* Permissions a guest-physical mapping grants. */
+#define HV_MAP_READ  (1u << 0)
+#define HV_MAP_WRITE (1u << 1)
+#define HV_MAP_EXEC  (1u << 2)
+#define HV_MAP_RWX   (HV_MAP_READ | HV_MAP_WRITE | HV_MAP_EXEC)
+
 struct hv_caps {
     bool present;
     const char *name;        /* "svm", "vmx", "none" */
     unsigned max_asids;
     bool nested_paging;
+    bool real_mode_guest;    /* the architectural reset state can run (VMX: unrestricted guest) */
+    bool map_prot;           /* arch_hv_vm_map honours prot; false means RWX only */
+    bool large_pages;        /* 2 MiB leaves for aligned mappings */
+    unsigned max_vcpus;      /* per VM, 0 = the manager's own limit */
 };
 
 enum hv_exit_kind {
@@ -69,8 +79,11 @@ int arch_hv_probe(struct hv_caps *out);
 
 int arch_hv_vm_create(struct arch_hv_vm **out);
 void arch_hv_vm_destroy(struct arch_hv_vm *vm);
-/* Map guest-physical [gpa, gpa+len) to host-physical pages, RWX, 4 KiB granular. */
-int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len);
+/* Map guest-physical [gpa, gpa+len) to host-physical pages with `prot`
+ * (HV_MAP_*, nonzero). 4 KiB granular; a backend reporting large_pages
+ * uses 2 MiB leaves where everything is aligned. -EINVAL for prot 0 or a
+ * prot a backend without `map_prot` cannot express. */
+int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 /* Host-physical page behind a guest-physical address, or false. */
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
