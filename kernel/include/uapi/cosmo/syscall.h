@@ -56,7 +56,8 @@
 #define SYS_wait      33  /* (int pid, int *status, unsigned flags) -> pid, 0 with WNOHANG */
 #define SYS_kill      34  /* (int pid, int sig) -> 0 */
 #define SYS_pipe      35  /* (int h[2]) -> 0; h[0] reads, h[1] writes */
-#define SYS_dup       36  /* (int h, int target) -> handle; target -1 = lowest free */
+#define SYS_dup       36  /* (int h, int target, unsigned rights) -> handle; target -1 = lowest
+                         free, rights COSMO_RIGHTS_SAME to keep them or a subset to drop some */
 #define SYS_getppid   37  /* () -> parent pid, 0 for kernel-created processes */
 #define SYS_chdir     38  /* (const char *path) -> 0 */
 #define SYS_getcwd    39  /* (char *buf, size_t len) -> length written (without NUL) */
@@ -99,11 +100,30 @@
 
 #define COSMO_NGROUPS_MAX 16
 
-/* spawn: the child receives exactly the mapped handles (same rights).
+/* A handle's rights (docs/kernel/object/architecture.md, "Rights").
+ * Bits 0..15 are generic; 16..31 belong to the object's type. */
+#define COSMO_RIGHT_READ     (1u << 0)
+#define COSMO_RIGHT_WRITE    (1u << 1)
+#define COSMO_RIGHT_DUP      (1u << 2)
+#define COSMO_RIGHT_TRANSFER (1u << 3)
+#define COSMO_RIGHT_MANAGE   (1u << 4)
+/* dup and spawn: keep what the caller holds. Zero, not all-ones,
+ * deliberately -- a zeroed field or a register left over from a caller
+ * that predates this argument then asks for the old behaviour, and
+ * "a handle with no rights at all" is not a request worth being able
+ * to make. */
+#define COSMO_RIGHTS_SAME    0u
+
+/* spawn: the child receives exactly the mapped handles.
  * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */
 struct cosmo_spawn_handle {
     int child;      /* slot in the child */
     int parent;     /* handle in the caller */
+    /* What the child gets: COSMO_RIGHTS_SAME (zero) for the caller's
+     * own rights, or a subset of them. Rights only ever shrink, so a
+     * process can give away a read-only view of what it can write. */
+    unsigned rights;
+    unsigned pad;
 };
 struct cosmo_spawn {
     const char *path;
