@@ -147,10 +147,14 @@ accepted, so port 0 uses queues 0/1); queue 0 receive with one 256-byte
 buffer posted and never read, queue 1 transmit; both polled
 (`callback == NULL`, no vectors). The console sink copies up to 2 KiB
 into a DMA bounce buffer, adds it, kicks, and polls `virtq_pop` for up
-to 200 ms (`clock_now_ns`); if the device stops consuming, the sink
-marks itself dead and drops output rather than wedging the console. A
-single sink instance is allowed (`-EBUSY` for a second console device).
-Remove unregisters the sink, resets, frees.
+to 200 ms (`clock_now_ns`); a device that does not answer within that
+spin costs the line, not the console — the buffer it still owns is left
+alone (overwriting it would race the device for the bounce buffer) and
+the next write waits for it again, so a host that stalls under load
+loses a line instead of every line after it. Dropped bytes are counted
+and reported at removal. A single sink instance is allowed (`-EBUSY`
+for a second console device). Remove unregisters the sink, resets,
+frees.
 
 **virtio_net** (`virtio_net.c`, Phase 8): features `MAC` and `STATUS`
 (a device without `MAC` is refused with `-ENODEV`), and since network

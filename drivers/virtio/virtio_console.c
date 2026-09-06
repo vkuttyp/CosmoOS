@@ -6,8 +6,12 @@
  * transmits. Transmit is polled so the sink can run in any context the
  * console runs in, including a panic with interrupts off: text is copied
  * into a DMA bounce buffer, queued, and the used ring is polled with a
- * bounded spin. Nothing reads the receive queue yet; one buffer is
- * posted so the device has somewhere to put input.
+ * bounded spin. A device that does not answer within that spin costs the
+ * line, not the console: the buffer it still owns is left alone and the
+ * next write waits for it again, so a host that stalls (a loaded machine
+ * under emulation) loses a line instead of every line after it. Nothing
+ * reads the receive queue yet; one buffer is posted so the device has
+ * somewhere to put input.
  */
 
 #include <kernel/console.h>
@@ -35,10 +39,30 @@ struct vcon {
     struct console_sink sink;
     spinlock_t lock;
     uint64_t bytes, drops;
-    bool dead;
+    unsigned outstanding;   /* buffers the device has not returned */
+    bool dead;              /* the driver is going away, not a slow device */
 };
 
 static struct vcon *g_vcon;   /* the console sink is a singleton */
+
+/* Wait until the device has returned every buffer it was given, so the
+ * bounce buffer is ours to overwrite. False when it did not within the
+ * spin: the buffer stays the device's and the caller drops the text.
+ * Lock held. */
+static bool vcon_drain(struct vcon *c)
+{
+    uint64_t deadline = clock_now_ns() + VCON_SPIN_NS;
+    while (c->outstanding > 0) {
+        uint32_t used;
+        if (virtq_pop(c->tx, &used) != NULL) {
+            c->outstanding--;
+            continue;
+        }
+        if (clock_now_ns() > deadline)
+            return false;
+    }
+    return true;
+}
 
 /* Send one chunk and wait for the device to consume it. Lock held. */
 static bool vcon_send(struct vcon *c, size_t len)
@@ -47,15 +71,9 @@ static bool vcon_send(struct vcon *c, size_t len)
     static int cookie;
     if (virtq_add(c->tx, &sg, 1, 0, &cookie) != 0)
         return false;
+    c->outstanding++;
     virtq_kick(c->tx);
-    uint64_t deadline = clock_now_ns() + VCON_SPIN_NS;
-    for (;;) {
-        uint32_t used;
-        if (virtq_pop(c->tx, &used) != NULL)
-            return true;
-        if (clock_now_ns() > deadline)
-            return false;
-    }
+    return vcon_drain(c);
 }
 
 static void vcon_write(struct console_sink *sink, const char *s, size_t len)
@@ -65,12 +83,15 @@ static void vcon_write(struct console_sink *sink, const char *s, size_t len)
         return;
     arch_irq_state_t st = spin_lock_irqsave(&c->lock);
     while (len > 0 && !c->dead) {
+        /* Anything the device still owns points at the bounce buffer. */
+        if (!vcon_drain(c)) {
+            c->drops++;
+            break;
+        }
         size_t n = len < VCON_TX_BUF ? len : VCON_TX_BUF;
         memcpy(c->txbuf, s, n);
         if (!vcon_send(c, n)) {
-            /* The device stopped consuming; do not wedge the console. */
-            c->drops++;
-            c->dead = true;
+            c->drops++;   /* the line is lost; the console is not */
             break;
         }
         c->bytes += n;
@@ -145,7 +166,8 @@ static void vcon_remove(struct virtio_device *vdev)
     virtq_free(c->tx);
     dma_free(&vdev->dev, VCON_TX_BUF, c->txbuf, c->txbuf_dma);
     dma_free(&vdev->dev, VCON_RX_BUF, c->rxbuf, c->rxbuf_dma);
-    kinfo("virtio-console: %s: removed after %llu bytes", vdev->dev.name, (unsigned long long)c->bytes);
+    kinfo("virtio-console: %s: removed after %llu bytes, %llu dropped", vdev->dev.name,
+          (unsigned long long)c->bytes, (unsigned long long)c->drops);
     kfree(c);
     vdev->priv = NULL;
 }
