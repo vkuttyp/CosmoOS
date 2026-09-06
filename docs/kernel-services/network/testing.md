@@ -145,9 +145,13 @@ the retransmission completes, `ipv4_pmtu_flush` restores 16384.
 or `-EINPROGRESS` (`-EALREADY` or `-EISCONN` on a repeat), becomes
 `WRITABLE`, then `-EISCONN`; the listener turns `READABLE` and accepts;
 `recvfrom` on the empty client is `-EAGAIN` and not `READABLE` until
-the server sends; non-blocking sends fill the rings and end in
-`-EAGAIN` with `WRITABLE` clear, the server drains exactly that many
-bytes and `WRITABLE` returns; closing the server end makes the client
+the server sends; non-blocking sends fill the rings until readiness
+reports no room, at which point even a one-byte send is `-EAGAIN` (the
+test sends while `WRITABLE` is set and stops when it clears, rather
+than sampling the state after a pause: an ACK arriving on another
+worker frees space again, which is what made the old form flaky under
+`QEMU_SMP=1`), the server drains exactly that many bytes and
+`WRITABLE` returns; closing the server end makes the client
 `HANGUP` and reads 0. A non-blocking datagram socket is `-EAGAIN` and
 `WRITABLE` only, then `READABLE` after a datagram to itself. Pipe ends
 through `kobject_io_of`, `kobject_set_nonblock` (-1 asks, returns the

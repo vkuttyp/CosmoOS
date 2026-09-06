@@ -1351,26 +1351,33 @@ bool selftest_net_nonblock(const char **reason)
         settle(10);
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == 5);
     /* Fill the pipe: a non-blocking send returns what fits, then -EAGAIN.
-     * An ACK still in flight (processed on another worker since unit 11)
-     * frees send space until the peer's window is zero and everything
-     * sent is acknowledged, so fill until two -EAGAINs 20 ms apart with
-     * no progress between: the steady state, in which readiness is stable. */
+     * The peer never reads here, so its window closes and the socket ends
+     * up unwritable for good -- but getting there is not instant, because
+     * an ACK still in flight (processed on another worker since unit 11)
+     * frees send space again. So converge on the state instead of
+     * sampling it: keep sending while readiness says there is room, and
+     * stop when it says there is none. A send that fails while readiness
+     * says writable is allowed (4 KiB may not fit where a byte would);
+     * readiness saying "full" while a send still succeeds is not, and is
+     * what the check below rules out. */
     memset(buf, 'f', sizeof(buf));
     uint64_t pushed = 0;
-    unsigned quiet = 0;
-    for (unsigned i = 0; i < 400 && quiet < 2; i++) {
-        int64_t n = ksock_sendto(c, buf, sizeof(buf), NULL);
-        if (n == -EAGAIN) {
-            quiet++;
-            settle(20);
-        } else if (n > 0) {
-            pushed += (uint64_t)n;
-            quiet = 0;
-        } else {
-            CHECK(n > 0);
+    bool full = false;
+    for (unsigned i = 0; i < 400 && !full; i++) {
+        if (!(ksock_ready(c) & COSMO_IO_WRITABLE)) {
+            full = true;
+            break;
         }
+        int64_t n = ksock_sendto(c, buf, sizeof(buf), NULL);
+        if (n > 0)
+            pushed += (uint64_t)n;
+        else if (n == -EAGAIN)
+            settle(10);
+        else
+            CHECK(n > 0);
     }
-    CHECK(quiet == 2 && pushed > 0);
+    CHECK(full && pushed > 0);
+    CHECK(ksock_sendto(c, buf, 1, NULL) == -EAGAIN);   /* not writable means not one byte */
     CHECK(!(ksock_ready(c) & COSMO_IO_WRITABLE));
     uint64_t drained = 0;
     for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
