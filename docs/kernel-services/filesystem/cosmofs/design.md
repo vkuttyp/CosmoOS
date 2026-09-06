@@ -640,10 +640,69 @@ Allocation picks the member with the most free blocks and then first-fits
 within it, so a pool fills evenly rather than filling member 0 first; a
 hint keeps a sequential file on one member.
 
+## Format version 5: mirrored members
+
+Version 4 gave a block an address that names a member. Version 5 lets a
+member be more than one device: a **mirror group** of up to four devices
+holding the same blocks at the same offsets. The DVA's vdev field names
+the group, so nothing above the pool changes — an extent, an imap
+pointer, a snapshot record all address exactly what they did.
+
+### Why a group, and not copies per block
+
+The other arrangement is ZFS's: each pointer carries several DVAs, so
+any block can have its own number of copies. That needs room for a
+second and third address in every pointer — a change to every structure
+on disk, which is the thing version 4's packing was chosen to avoid. A
+group keeps one address per block and puts the multiplicity in the
+member table, where it costs a field.
+
+What that gives up, said plainly: copies are per member, not per block,
+so metadata cannot be given more copies than data on the same member;
+and this is mirroring, not parity — `n` devices hold `n` copies. Both
+are recoverable later without moving a single pointer, which is the
+point of putting the decision in the table.
+
+### A mirror is only as good as its verifier
+
+Reading one copy of two and trusting it doubles the chance of returning
+something wrong, not half it. So a read verifies, and the verifier is
+the filesystem's, not the pool's:
+
+- metadata checks itself — `cfs_mhdr` carries the block's kind, its own
+  DVA and a CRC over the block;
+- data and directory blocks check against the per-block CRC32C in their
+  inode's checksum tree, which format version 2 already keeps.
+
+`pool_read` takes copy 0. If what comes back does not verify, the reader
+tries the remaining copies in turn, and the first that verifies is
+written back over the copies that did not — **repair on read**. A block
+whose copies all fail is the error it always was, `-EIO`, and the mount
+is not poisoned by it: one bad file is not a bad filesystem.
+
+Writes go to every copy. A copy that fails is an error like any other,
+returned before the transaction publishes a root, so a half-written
+mirror is never something a later mount can find.
+
+### Scrub
+
+Repair on read only finds what somebody reads. `cosmofs_scrub` reads
+everything reachable through the same verify-and-repair path: every
+member's allocation index and bitmap, the snapshot list, and every
+inode — its metadata blocks by their own headers, its data blocks
+against its checksum tree. It reports blocks read, blocks repaired, and
+blocks no copy could satisfy. Finding an error there is the same event
+as finding it on a read, except that nobody was waiting for the answer.
+
 ### What this unit does not do
 
-- Redundancy, compression, encryption: three separate units, in that
-  order, each with its own format extension.
+- Per-block copy counts, parity (RAID-Z and friends), resilvering a
+  replaced device, hot spares: the member table has room for the first,
+  and the rest are their own units.
+- Scrub is a kernel entry point and a self-test; no system call or shell
+  command reaches it yet.
+- Compression and encryption: two separate units, in that order, each
+  with its own format extension.
 - Rollback (making a snapshot the live tree), sending or receiving a
   snapshot, quotas, and per-snapshot space accounting beyond the
   deadlists.

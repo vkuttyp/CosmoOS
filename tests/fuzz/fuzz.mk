@@ -42,6 +42,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
+	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel/core/crc32c.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
 
 FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pkg $(FUZZ_OUT)/fuzz_linux \

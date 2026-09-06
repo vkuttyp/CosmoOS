@@ -514,6 +514,24 @@ See [docs/development.md](docs/development.md).
   exercised under this kernel. Redundancy — mirroring, read repair and
   scrub — is the next unit and changes only the pool and the read
   path.
+- **Storage redundancy (done):** a member may now be a **mirror group**
+  of up to four devices holding the same blocks
+  (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format version
+  5"), so adding a copy changes no address anywhere. The point of the
+  unit is what surrounds the mirror rather than the mirror itself:
+  reading one copy of two and trusting it doubles the chance of
+  returning something wrong, so every read is checked — metadata by its
+  own header, data by the per-block checksum its inode already kept —
+  and the first copy that verifies is written back over the copies that
+  did not. `cosmofs_scrub` reads *every* copy of every block the
+  filesystem reaches, because a read stops at the first good one and rot
+  behind it would wait until that copy was the one answering. Checksums
+  cannot tell a stale copy from a current one, so each device records
+  the commit it last took part in and a device that missed one is left
+  out of the mirror instead of quietly serving old blocks. One new
+  self-test (141 in total) covers rot on either copy, rot on both, a
+  scrub that repairs and a second that finds nothing, and a device aged
+  by one generation whose checksums are all valid.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
