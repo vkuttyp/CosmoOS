@@ -29,6 +29,7 @@ HOST_CRYPTO_SRCS := $(HOST_COMMON_SRCS) kernel/security/sha512.c kernel/security
 HOST_MODELF_SRCS := $(HOST_COMMON_SRCS) kernel/module/modelf.c tests/host/test_modelf.c
 HOST_COSMOFS_SRCS := $(HOST_COMMON_SRCS) tests/host/test_cosmofs.c
 HOST_LZ4_SRCS := $(HOST_COMMON_SRCS) kernel/core/lz4.c tests/host/test_lz4.c
+HOST_CHACHA_SRCS := $(HOST_COMMON_SRCS) kernel/security/chacha20.c tests/host/test_chacha20.c
 HOST_LIBC_SRCS := tests/host/test_libc.c
 HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
 HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
@@ -41,7 +42,7 @@ HOST_CRED_SRCS := $(HOST_COMMON_SRCS) kernel/process/cred.c tests/host/test_cred
 HOST_QUIESCE_SRCS := $(HOST_COMMON_SRCS) tests/host/test_quiesce.c
 HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 
-HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lz4
+HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20
 
 $(HOST_OUT)/test_buddy: $(addprefix $(ROOT)/,$(HOST_BUDDY_SRCS))
 	$(call log,HOSTCC,$@)
@@ -120,6 +121,11 @@ $(HOST_OUT)/test_lockdep: $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(ROOT)/ker
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_chacha20: $(addprefix $(ROOT)/,$(HOST_CHACHA_SRCS)) $(ROOT)/kernel/include/kernel/chacha20.h
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_lz4: $(addprefix $(ROOT)/,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h
 	$(call log,HOSTCC,$@)

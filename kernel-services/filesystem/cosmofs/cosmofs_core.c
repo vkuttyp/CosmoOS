@@ -63,6 +63,14 @@ struct mhdr_want {
     uint32_t kind;
 };
 
+void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation)
+{
+    struct cfs fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.gen = generation;
+    mhdr_seal(&fake, block, kind, dva);
+}
+
 bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind)
 {
     return mhdr_check(block, dva, kind) == 0;

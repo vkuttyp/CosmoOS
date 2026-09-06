@@ -800,6 +800,94 @@ Repair on read and scrub therefore work on a compressed record exactly
 as on any other, without decompressing anything to decide whether a copy
 is good.
 
+## Format version 7: encryption
+
+The constitution (section 52) asks for an explicit answer to seven
+questions rather than a copy of somebody else's semantics. Here they
+are, in the order the code implements them.
+
+### The layer: a pool, keyed per file
+
+Encryption sits at the **pool**: one filesystem, one master key. Not the
+device, because a pool spans devices and the mirror of a block must
+decrypt the same way on each; not per file as the unit of *policy*,
+because then every file needs its own key record and a directory's names
+would still be exposed by whoever holds the parent's key.
+
+Each *file* nevertheless gets its own key, derived from the master:
+
+```text
+  user key ──KDF(salt)──► wrapping key ──unwraps──► master key
+                                                      │
+                                          KDF(master, inode) ──► file key
+```
+
+The derivation is what makes the nonce problem tractable. A block is
+encrypted with its file's key and a nonce built from `(inode, logical
+block, the generation that wrote it)`. Copy-on-write is what makes that
+safe: rewriting a block allocates a new one in a new generation, so a
+(key, nonce) pair is never used twice with different plaintext. A
+snapshot shares the block unchanged, and the same nonce still decrypts
+it, which is why the nonce cannot be a per-file counter.
+
+### Key storage and rotation
+
+The master key is random and never leaves the kernel in the clear. It is
+stored **wrapped** in a `CFS_KIND_KEYS` block: salt, the wrapped key,
+and a tag over it, named by a reserved superblock field. The user key
+never encrypts data, so **rotation rewraps one block** — a new salt, the
+same master key, one commit — and no file is rewritten. Rotating the
+*master* key would mean rewriting every block and is not offered:
+saying so is better than pretending a cheap operation exists.
+
+A wrong user key is detected at mount, by the tag over the wrapped key,
+rather than by handing out plausible rubbish.
+
+### What is encrypted, and what is not
+
+Data blocks and directory blocks are encrypted — a directory's blocks
+are the data blocks of its inode, so **names are ciphertext**. Metadata
+that describes the shape of the filesystem is not: the allocation
+bitmaps, the inode map, inode records, extent chains, the member table
+and the superblock stay plaintext.
+
+That is a deliberate line, and what it leaks should be stated rather
+than discovered: an attacker with the disk learns how many files exist,
+how large they are, when they were written, their owners and modes, and
+the shape of the directory tree — but not a single file name or byte of
+content. Encrypting the inode map and allocation structures as well
+would mean a mount could not even find its own free space without a key;
+that is a different design, and this one says which it is.
+
+### Integrity, and why the tag is over the ciphertext
+
+CRC32C tells accident from intact; it says nothing about a deliberate
+change, because it is recomputable. An encrypted filesystem therefore
+authenticates: `csum_algo` becomes `CFS_CSUM_POLY1305` and the per-block
+entries in the checksum tree become 16-byte tags instead of 4-byte
+CRCs.
+
+The tag is computed over the **ciphertext**. That is what lets
+everything built in the last three units keep working without the key:
+a mirror can verify a copy and repair it, and a scrub can read the whole
+filesystem, on a machine that cannot decrypt a byte of it. Authenticate-
+then-decrypt in that order also means a forged block is refused before
+its plaintext is ever produced.
+
+### Boot-time unlock
+
+The key arrives through the platform's firmware configuration
+(`opt/cosmo/fskey`, the same channel fault injection uses), is derived
+into the wrapping key, and unwraps the master at mount. A mount whose
+filesystem is encrypted and has no key succeeds **read-only for
+metadata and refuses data**: `stat` and `readdir` of unencrypted
+metadata work, and every read of a file's contents is `-ENOKEY`.
+
+What is deliberately absent: a system call to add a key, a keyring, a
+passphrase prompt, per-user keys. The mechanism is one channel and one
+key, because that is what can be tested here; the wrapping format has
+room for more.
+
 ### What this unit does not do
 
 - Per-block copy counts, parity (RAID-Z and friends), resilvering a

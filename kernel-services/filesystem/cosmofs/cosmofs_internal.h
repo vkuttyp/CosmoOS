@@ -5,6 +5,7 @@
 #ifndef COSMOFS_INTERNAL_H
 #define COSMOFS_INTERNAL_H
 
+#include <kernel/chacha20.h>
 #include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/thread.h>
@@ -73,6 +74,13 @@ struct cfs {
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
     uint64_t repairs;       /* blocks written back from a good copy */
+    /* Encryption (design.md, "Format version 7"). The master key is
+     * unwrapped at mount and never written out in the clear; without it
+     * the metadata still mounts and every read of a file's contents is
+     * -ENOKEY. */
+    bool encrypted;         /* the filesystem has a key block */
+    bool have_key;          /* and this mount unwrapped it */
+    uint8_t master_key[CHACHA20_KEY_SIZE];
     uint64_t degraded;      /* copies the member table promised and the mount did not find */
     unsigned snap_count;    /* live snapshots; commit holds their blocks rather than freeing */
     uint64_t snap_max_id;   /* the highest snapshot id ever used here: ids are never reused */
@@ -171,6 +179,18 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
                    unsigned *repaired);
 /* A metadata block's own check: kind, its own DVA, and the CRC. */
 bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind);
+/* Seal a metadata block outside a transaction (format time). */
+void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation);
+
+/* Encryption (cosmofs_crypt.c; design.md, "Format version 7"). */
+void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t out[CHACHA20_KEY_SIZE]);
+void cfs_block_nonce(uint64_t lblk, uint64_t generation, uint8_t nonce[CHACHA20_NONCE_SIZE]);
+int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const uint8_t master[CHACHA20_KEY_SIZE],
+                   const void *user_key, size_t user_len);
+int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_len,
+                    uint8_t master[CHACHA20_KEY_SIZE]);
+int cfs_keys_load(struct cfs *fs, const void *user_key, size_t user_len);
+int cfs_keys_rotate(struct cfs *fs, const void *new_key, size_t new_len);
 /* A superblock's own check: magic, a version this kernel reads, and the
  * CRC. A zeroed slot is not a superblock and not an error. */
 bool cfs_super_ok(const void *block);
