@@ -126,15 +126,20 @@ static bool wait_eq(struct smmu *u, unsigned off, uint32_t want)
 
 /* --- the command queue (u->lock held) --- */
 
-static void cmd_issue(struct smmu *u, uint64_t w0, uint64_t w1)
+/* False when the queue never made room: the command was NOT written, and
+ * the caller may not treat whatever it asked for as done. */
+static bool cmd_issue(struct smmu *u, uint64_t w0, uint64_t w1)
 {
     uint32_t mask = (QUEUE_ENTRIES << 1) - 1;   /* index plus the wrap bit */
-    for (unsigned spin = 0; spin < 1000000; spin++) {
+    bool space = false;
+    for (unsigned spin = 0; spin < 1000000 && !space; spin++) {
         uint32_t cons = rd32(u, SMMU_CMDQ_CONS) & mask;
-        bool full = (u->cmdq_prod & (QUEUE_ENTRIES - 1)) == (cons & (QUEUE_ENTRIES - 1)) &&
-                    ((u->cmdq_prod ^ cons) & QUEUE_ENTRIES) != 0;
-        if (!full)
-            break;
+        space = !((u->cmdq_prod & (QUEUE_ENTRIES - 1)) == (cons & (QUEUE_ENTRIES - 1)) &&
+                  ((u->cmdq_prod ^ cons) & QUEUE_ENTRIES) != 0);
+    }
+    if (!space) {
+        kwarn("iommu: %s: command queue full; command dropped", u->unit.name);
+        return false;
     }
     uint64_t *e = (uint64_t *)((uint8_t *)phys_to_virt(u->cmdq) + (u->cmdq_prod & (QUEUE_ENTRIES - 1)) * 16);
     e[0] = w0;
@@ -142,16 +147,21 @@ static void cmd_issue(struct smmu *u, uint64_t w0, uint64_t w1)
     arch_dma_barrier();
     u->cmdq_prod = (u->cmdq_prod + 1) & mask;
     wr32(u, SMMU_CMDQ_PROD, u->cmdq_prod);
+    return true;
 }
 
-static void cmd_sync(struct smmu *u)
+/* False when the queue did not drain: the commands before it may not
+ * have taken effect. */
+static bool cmd_sync(struct smmu *u)
 {
-    cmd_issue(u, CMD_SYNC, 0);
+    if (!cmd_issue(u, CMD_SYNC, 0))
+        return false;
     uint32_t mask = (QUEUE_ENTRIES << 1) - 1;
     for (unsigned spin = 0; spin < 1000000; spin++)
         if ((rd32(u, SMMU_CMDQ_CONS) & mask) == u->cmdq_prod)
-            return;
+            return true;
     kwarn("iommu: %s: command queue did not drain", u->unit.name);
+    return false;
 }
 
 /* --- the page-table format --- */
@@ -239,25 +249,26 @@ static int smmu_attach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t s
     ste[0] = STE_V | STE_CFG_S2;
     arch_dma_barrier();
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    cmd_issue(u, CMD_CFGI_STE | ((uint64_t)sid << 32), 1 /* leaf */);
-    cmd_sync(u);
+    bool ok = cmd_issue(u, CMD_CFGI_STE | ((uint64_t)sid << 32), 1 /* leaf */);
+    ok = cmd_sync(u) && ok;
     spin_unlock_irqrestore(&u->lock, s);
-    return 0;
+    return ok ? 0 : -EIO;
 }
 
-static void smmu_detach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
+static int smmu_detach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
 {
     struct smmu *u = of(iu);
     if (sid >= STRTAB_ENTRIES)
-        return;
+        return 0;
     uint64_t *ste = (uint64_t *)((uint8_t *)phys_to_virt(u->strtab) + sid * 64);
     ste[0] = 0;
     arch_dma_barrier();
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    cmd_issue(u, CMD_CFGI_STE | ((uint64_t)sid << 32), 1);
-    cmd_issue(u, CMD_TLBI_S12_VMALL | ((uint64_t)d->id << 32), 0);
-    cmd_sync(u);
+    bool ok = cmd_issue(u, CMD_CFGI_STE | ((uint64_t)sid << 32), 1);
+    ok = cmd_issue(u, CMD_TLBI_S12_VMALL | ((uint64_t)d->id << 32), 0) && ok;
+    ok = cmd_sync(u) && ok;
     spin_unlock_irqrestore(&u->lock, s);
+    return ok ? 0 : -EIO;   /* the stream may still be translating */
 }
 
 static int smmu_map(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t pages, unsigned prot)
@@ -267,22 +278,28 @@ static int smmu_map(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t pa
     return rc;
 }
 
-static void smmu_unmap(struct iommu_domain *d, uint64_t iova, size_t pages)
+/* -EIO when the invalidation was not confirmed: the entries are gone from
+ * the tables, but the unit may still be translating from its TLB, so the
+ * caller may not let anything reuse the addresses or the pages. */
+static int smmu_unmap(struct iommu_domain *d, uint64_t iova, size_t pages)
 {
     struct smmu *u = of(d->unit);
     if (iommu_pt_unmap(d->root, &g_fmt, iova, pages) == 0)
-        return;
+        return 0;
     arch_dma_barrier();
+    bool ok = true;
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
     if (pages > 32) {
-        cmd_issue(u, CMD_TLBI_S12_VMALL | ((uint64_t)d->id << 32), 0);
+        ok = cmd_issue(u, CMD_TLBI_S12_VMALL | ((uint64_t)d->id << 32), 0);
     } else {
         for (size_t k = 0; k < pages; k++)
-            cmd_issue(u, CMD_TLBI_S2_IPA | ((uint64_t)d->id << 32),
-                      ((iova + (uint64_t)k * PAGE_SIZE) & 0x000ffffffffff000ull) | 1 /* leaf */);
+            ok = cmd_issue(u, CMD_TLBI_S2_IPA | ((uint64_t)d->id << 32),
+                           ((iova + (uint64_t)k * PAGE_SIZE) & 0x000ffffffffff000ull) | 1 /* leaf */) &&
+                 ok;
     }
-    cmd_sync(u);
+    ok = cmd_sync(u) && ok;
     spin_unlock_irqrestore(&u->lock, s);
+    return ok ? 0 : -EIO;
 }
 
 static bool smmu_lookup(struct iommu_domain *d, uint64_t iova, paddr_t *pa)
@@ -446,9 +463,9 @@ void arm_smmuv3_init(void)
     wr32(u, SMMU_CR0, CR0_CMDQEN);
     wait_eq(u, SMMU_CR0ACK, CR0_CMDQEN);
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    cmd_issue(u, CMD_CFGI_ALL, 31);   /* every STE: range 2^31 */
-    cmd_issue(u, CMD_TLBI_NSNH_ALL, 0);
-    cmd_sync(u);
+    (void)cmd_issue(u, CMD_CFGI_ALL, 31);   /* every STE: range 2^31 */
+    (void)cmd_issue(u, CMD_TLBI_NSNH_ALL, 0);
+    (void)cmd_sync(u);   /* nothing is attached yet: a failure here shows up at the first attach */
     spin_unlock_irqrestore(&u->lock, s);
     wr32(u, SMMU_CR0, CR0_CMDQEN | CR0_EVENTQEN);
     wait_eq(u, SMMU_CR0ACK, CR0_CMDQEN | CR0_EVENTQEN);

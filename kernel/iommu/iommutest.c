@@ -115,9 +115,10 @@ bool selftest_iommu(const char **reason)
     pmm_free_pages(pg, 2);
     iommu_domain_destroy(dom);
 
-    /* Nothing above, and nothing the boot did so far, faulted. */
+    /* Nothing above, and nothing the boot did so far, faulted; and every
+     * unmapping so far was confirmed by the unit (nothing retired). */
     iommu_get_stats(&s1);
-    CHECK(s1.faults == s0.faults && s1.domains == s0.domains);
+    CHECK(s1.faults == s0.faults && s1.domains == s0.domains && s1.retired == s0.retired);
 
     /* A real device DMAing outside its domain: the translation is refused,
      * the command fails, the unit reports the fault, and the device keeps

@@ -238,11 +238,19 @@ void iommu_detach_device(struct device *dev)
     struct iommu_domain *d = dev->iommu;
     if (d == NULL)
         return;
-    d->unit->ops->detach(d->unit, d, dev->iommu_sid);
+    int rc = d->unit->ops->detach(d->unit, d, dev->iommu_sid);
     dev->iommu = NULL;
     d->nr_devices = 0;
     if (d->iova.used != d->iova.reserved)
         kwarn("iommu: %s left %u pages mapped at detach", dev->name, d->iova.used - d->iova.reserved);
+    if (rc) {
+        /* The unit did not confirm that it stopped translating for this
+         * requester: its tables and its domain id stay allocated, because
+         * freeing them would hand a live translation someone else's
+         * memory. The domain is off the device and off no list it needs. */
+        kerror("iommu: %s: detach not confirmed; domain %u kept", dev->name, d->id);
+        return;
+    }
     iommu_domain_destroy(d);
 }
 
@@ -276,11 +284,11 @@ int iommu_unmap(struct iommu_domain *d, uint64_t iova, size_t len)
         return -EINVAL;
     size_t pages = pages_of(0, len);
     arch_irq_state_t s = spin_lock_irqsave(&d->lock);
-    d->unit->ops->unmap(d, iova, pages);
+    int rc = d->unit->ops->unmap(d, iova, pages);
     d->unmaps++;
     d->pages_mapped -= pages < d->pages_mapped ? pages : d->pages_mapped;   /* unmapping a hole is allowed */
     spin_unlock_irqrestore(&d->lock, s);
-    return 0;
+    return rc;
 }
 
 bool iommu_lookup(struct iommu_domain *d, uint64_t iova, paddr_t *pa)
@@ -317,17 +325,30 @@ uint64_t iommu_dma_map(struct iommu_domain *d, paddr_t pa, size_t len, unsigned 
     return iova + off;
 }
 
-void iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len)
+int iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len)
 {
     uint64_t iova = dma & ~(uint64_t)(PAGE_SIZE - 1);
     size_t pages = pages_of(dma, len);
     arch_irq_state_t s = spin_lock_irqsave(&d->lock);
-    d->unit->ops->unmap(d, iova, pages);
-    iova_free(&d->iova, iova, pages);
+    int rc = d->unit->ops->unmap(d, iova, pages);
+    if (rc == 0) {
+        iova_free(&d->iova, iova, pages);
+    } else {
+        /* The unit did not confirm the invalidation, so it may still
+         * translate this range: the addresses stay taken for the life of
+         * the domain rather than being handed to another buffer. The
+         * pages behind them are the caller's to retire (dma_free). */
+        d->iova.reserved += (unsigned)pages;
+        __atomic_fetch_add(&g_stats.retired, (uint64_t)pages, __ATOMIC_RELAXED);
+    }
     d->unmaps++;
-    d->pages_mapped -= pages;
+    d->pages_mapped -= pages < d->pages_mapped ? pages : d->pages_mapped;
     spin_unlock_irqrestore(&d->lock, s);
     __atomic_fetch_add(&g_stats.unmaps, 1, __ATOMIC_RELAXED);
+    if (rc)
+        kwarn("iommu: %s: domain %u: %zu page(s) at %p retired unrevoked", d->unit->name, d->id, pages,
+              (void *)(uintptr_t)iova);
+    return rc;
 }
 
 /* --- faults ------------------------------------------------------------------- */

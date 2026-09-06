@@ -89,7 +89,10 @@ vary between runs; the domain count and the faults do not)
 On AArch64 the same command produces 256 events — the controller
 retries the 4 KiB write in 16-byte pieces and the SMMU refuses each —
 of which eight are logged; that bound is exactly what `iommu_note_fault`
-exists for.
+exists for. The burst also fills the event queue faster than the handler
+drains it, so the unit raises a global error (`iommu: arm-smmuv3: global
+error 0x4`, an event-queue overflow) that the handler acknowledges: one
+expected `WARN` line in a passing run.
 
 ## Boot markers (`tests/boot/run_boot_test.py`)
 

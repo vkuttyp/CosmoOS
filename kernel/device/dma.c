@@ -7,6 +7,7 @@
 #include <arch/cpu.h>
 #include <kernel/errno.h>
 #include <kernel/iommu.h>
+#include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
@@ -78,11 +79,20 @@ void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma)
     if (size == 0)
         return;
     unsigned order = order_for(size);
+    bool revoked = true;
     if (dev && dev->iommu)
-        iommu_dma_unmap(dev->iommu, dma, (size_t)PAGE_SIZE << order);
+        revoked = iommu_dma_unmap(dev->iommu, dma, (size_t)PAGE_SIZE << order) == 0;
     struct page *page = phys_to_page(virt_to_phys(va));   /* dma may be an IOVA */
     KASSERT(page != NULL);
-    pmm_free_pages(page, order);
+    if (revoked) {
+        pmm_free_pages(page, order);
+    } else {
+        /* The unit still has the old translation: giving these frames to
+         * another allocation would give the device a window into it. They
+         * are lost for this boot, which is the cheap half of the trade. */
+        kerror("dma: %s: %zu byte(s) leaked: the IOMMU did not revoke them", dev->name, size);
+        g_stats.leaked += (uint64_t)PAGE_SIZE << order;
+    }
 
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     g_stats.frees++;
@@ -129,8 +139,8 @@ void dma_unmap(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)
 {
     (void)dir;
     KASSERT(dma != 0);
-    if (dev && dev->iommu)
-        iommu_dma_unmap(dev->iommu, dma, len);
+    if (dev && dev->iommu && iommu_dma_unmap(dev->iommu, dma, len) != 0)
+        kerror("dma: %s: buffer at %p still reachable by the device", dev->name, (void *)(uintptr_t)dma);
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     g_stats.unmaps++;   /* without a domain there is nothing to tear down; the pairing is the contract */
     spin_unlock_irqrestore(&g_stats_lock, s);

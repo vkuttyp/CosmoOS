@@ -68,17 +68,26 @@ none of them. Check: lockdep on every debug boot (the edges above);
 domain lock are never held together, which lockdep can only confirm for
 paths that ran.
 
-**IOM6. An IOVA is reusable only after the IOTLB no longer holds it.**
-`iommu_dma_unmap` calls the driver's `unmap`, which clears the leaves
-**and** invalidates (VT-d: page-selective or domain-selective
-`IOTLB_REG`; SMMUv3: `CMD_TLBI_S2_IPA` per page plus `CMD_SYNC`),
-before `iova_free` returns the range to the allocator, all under the
-domain's lock. A stale entry can therefore never translate a reused
-IOVA. Check: review, plus the absence of faults in a boot that maps and
-unmaps thousands of times (the network and cosmofs workloads recycle
-the low pages of the window constantly, so a missing invalidation would
-show as data corruption or faults). Gap: no test observes an
-invalidation directly; neither unit is asked whether it caches
+**IOM6. Nothing is reused until the unit has confirmed that it stopped
+translating it.** `iommu_dma_unmap` calls the driver's `unmap`, which
+clears the leaves **and** invalidates (VT-d: domain-selective
+`IOTLB_REG`; SMMUv3: `CMD_TLBI_S2_IPA` per page plus `CMD_SYNC`), under
+the domain's lock, before `iova_free` returns the range to the
+allocator. When the unit does *not* confirm — a VT-d invalidation that
+never clears its pending bit, an SMMU command queue that stays full or
+a `CMD_SYNC` that never drains — the operation returns `-EIO` and
+nothing is recycled: the IOVAs are retired for the life of the domain
+(`iommu_stats.retired`), `dma_free` leaks the frames instead of
+returning them to the PMM (`dma_stats.leaked`), and a failed detach
+keeps the domain and its id rather than freeing tables a device may
+still be walking. Leaking is the cheap half of that trade; handing a
+live translation to the next allocation is the expensive half. Check:
+the `iommu` self-test requires `retired` to be unchanged by a boot that
+maps and unmaps thousands of times (the network and cosmofs workloads
+recycle the low pages of the window constantly), and every failure path
+logs at `ERROR`. Gap: the failure itself is not injectable — no test
+makes a unit refuse to invalidate, so the retire-and-leak path is
+reviewed, not exercised. Neither unit is asked whether it caches
 not-present entries (both are configured so it does not matter: VT-d
 `CAP.CM = 0`, the SMMU walks on a miss).
 

@@ -121,18 +121,24 @@ static const struct iommu_pt_fmt g_fmt = { sl_table, sl_leaf, sl_present, sl_add
 
 /* --- invalidation (register based) --- */
 
-static void invalidate_context(struct vtd_unit *u, uint64_t scope)
+/* False when the unit did not report the invalidation done: whatever it
+ * covered may still be translated from a cache. */
+static bool invalidate_context(struct vtd_unit *u, uint64_t scope)
 {
     wr64(u, VTD_CCMD, VTD_CCMD_ICC | scope);
-    if (!wait64_clear(u, VTD_CCMD, VTD_CCMD_ICC))
-        kwarn("iommu: %s: context invalidation did not complete", u->unit.name);
+    if (wait64_clear(u, VTD_CCMD, VTD_CCMD_ICC))
+        return true;
+    kwarn("iommu: %s: context invalidation did not complete", u->unit.name);
+    return false;
 }
 
-static void invalidate_iotlb(struct vtd_unit *u, uint64_t scope)
+static bool invalidate_iotlb(struct vtd_unit *u, uint64_t scope)
 {
     wr64(u, u->iro + 8, VTD_IOTLB_IVT | scope);
-    if (!wait64_clear(u, u->iro + 8, VTD_IOTLB_IVT))
-        kwarn("iommu: %s: IOTLB invalidation did not complete", u->unit.name);
+    if (wait64_clear(u, u->iro + 8, VTD_IOTLB_IVT))
+        return true;
+    kwarn("iommu: %s: IOTLB invalidation did not complete", u->unit.name);
+    return false;
 }
 
 /* --- iommu_ops --- */
@@ -218,26 +224,27 @@ static int vtd_attach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t si
     ctx[devfn * 2] = (d->root & VTD_ADDR_MASK) | 1u;
     arch_dma_barrier();
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    invalidate_context(u, VTD_CCMD_GLOBAL);
-    invalidate_iotlb(u, VTD_IOTLB_GLOBAL);
+    bool ok = invalidate_context(u, VTD_CCMD_GLOBAL);
+    ok = invalidate_iotlb(u, VTD_IOTLB_GLOBAL) && ok;
     spin_unlock_irqrestore(&u->lock, s);
-    return 0;
+    return ok ? 0 : -EIO;   /* the unit may still be using the old entry */
 }
 
-static void vtd_detach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
+static int vtd_detach(struct iommu_unit *iu, struct iommu_domain *d, uint32_t sid)
 {
     struct vtd_unit *u = of(iu);
     unsigned bus = (sid >> 8) & 0xff, devfn = sid & 0xff;
     if (u->ctx_table[bus] == 0)
-        return;
+        return 0;
     uint64_t *ctx = phys_to_virt(u->ctx_table[bus]);
     ctx[devfn * 2] = 0;
     ctx[devfn * 2 + 1] = 0;
     arch_dma_barrier();
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    invalidate_context(u, VTD_CCMD_GLOBAL);
-    invalidate_iotlb(u, VTD_IOTLB_DOMAIN | ((uint64_t)d->id << 32));
+    bool ok = invalidate_context(u, VTD_CCMD_GLOBAL);
+    ok = invalidate_iotlb(u, VTD_IOTLB_DOMAIN | ((uint64_t)d->id << 32)) && ok;
     spin_unlock_irqrestore(&u->lock, s);
+    return ok ? 0 : -EIO;   /* the device may still be translating */
 }
 
 static int vtd_map(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t pages, unsigned prot)
@@ -247,15 +254,19 @@ static int vtd_map(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t pag
     return rc;
 }
 
-static void vtd_unmap(struct iommu_domain *d, uint64_t iova, size_t pages)
+/* -EIO when the invalidation was not confirmed: the entries are gone from
+ * the tables, but the unit may still translate them out of its IOTLB, so
+ * the caller may not let anything reuse the addresses or the pages. */
+static int vtd_unmap(struct iommu_domain *d, uint64_t iova, size_t pages)
 {
     struct vtd_unit *u = of(d->unit);
     if (iommu_pt_unmap(d->root, &g_fmt, iova, pages) == 0)
-        return;
+        return 0;
     arch_dma_barrier();
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    invalidate_iotlb(u, VTD_IOTLB_DOMAIN | ((uint64_t)d->id << 32));
+    bool ok = invalidate_iotlb(u, VTD_IOTLB_DOMAIN | ((uint64_t)d->id << 32));
     spin_unlock_irqrestore(&u->lock, s);
+    return ok ? 0 : -EIO;
 }
 
 static bool vtd_lookup(struct iommu_domain *d, uint64_t iova, paddr_t *pa)

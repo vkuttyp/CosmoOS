@@ -84,9 +84,12 @@ context.
 
 ### `int iommu_unmap(struct iommu_domain *d, uint64_t iova, size_t len)`
 Purpose: clear the range and invalidate the unit's IOTLB for it.
-Returns 0, or `-EINVAL` for an unaligned or empty range. Pages that
-were not mapped are not an error, and `pages_mapped` never goes below
-zero. Any context.
+Returns 0; `-EINVAL` for an unaligned or empty range; **`-EIO` when the
+unit did not confirm the invalidation**, which means the entries are
+gone from the tables but the hardware may still translate the range —
+the caller must treat the addresses and the memory behind them as still
+reachable by the device. Pages that were not mapped are not an error,
+and `pages_mapped` never goes below zero. Any context.
 
 ### `bool iommu_lookup(struct iommu_domain *d, uint64_t iova, paddr_t *pa)`
 Purpose: the translation the hardware would make, for tests and
@@ -100,10 +103,15 @@ address (the allocated IOVA plus `pa`'s page offset), or 0 when the
 window is full (counted in `iommu_stats.iova_failures`) or a table
 could not be allocated. Any context.
 
-### `void iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len)`
+### `int iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len)`
 Purpose: the inverse; takes the address `iommu_dma_map` returned and
 the same length. Unmaps the pages and returns the IOVA to the
-allocator. Any context.
+allocator; returns 0. On `-EIO` (the unit did not confirm the
+invalidation) the addresses are **not** returned to the allocator —
+they are retired for the life of the domain and counted in
+`iommu_stats.retired` — and the caller must not reuse the memory
+either: `dma_free` leaks the frames rather than handing a live
+translation to the next allocation. Any context.
 
 ## Faults and statistics
 
@@ -115,7 +123,8 @@ produce thousands). Interrupt context; takes no lock the caller holds.
 
 ### `void iommu_get_stats(struct iommu_stats *out)` *(exported)*
 Purpose: `units`, `domains`, `maps`, `unmaps`, `faults`,
-`iova_failures` since boot. Any context.
+`iova_failures`, and `retired` (pages never handed out again because an
+invalidation went unconfirmed) since boot. Any context.
 
 ## The IOVA allocator (`struct iova_space`)
 
@@ -144,9 +153,9 @@ domain's) serialises them.
 | `domain_init(u, d)` | thread | assign `d->id` and `d->root`; `-ENOSPC` when ids are exhausted |
 | `domain_fini(u, d)` | thread | free the tree and the id |
 | `attach(u, d, sid)` | thread | point the unit's entry for `sid` at `d` and invalidate |
-| `detach(u, d, sid)` | thread | clear it and invalidate |
+| `detach(u, d, sid)` | thread | clear it and invalidate; `-EIO` when the invalidation was not confirmed, and the domain is then kept for good |
 | `map(d, iova, pa, pages, prot)` | any, `d->lock` held | write leaves; `-EEXIST`/`-ENOMEM` leave nothing behind |
-| `unmap(d, iova, pages)` | any, `d->lock` held | clear leaves **and** invalidate the IOTLB |
+| `unmap(d, iova, pages)` | any, `d->lock` held | clear leaves **and** invalidate the IOTLB; `-EIO` when the unit did not confirm, and nothing it covered may be reused |
 | `lookup(d, iova, pa)` | any, `d->lock` held | the page's translation |
 
 ## The page-table walker (`kernel/include/kernel/iommu_pt.h`)

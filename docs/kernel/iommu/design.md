@@ -91,10 +91,16 @@ struct device { ...; struct iommu_domain *iommu; uint32_t iommu_sid; };
 - **Invalidation.** Neither unit caches not-present entries in the
   tested configuration (VT-d `CAP.CM = 0`; SMMU walks on a miss), so a
   new mapping needs no invalidation; an unmapping is followed by a
-  domain-selective IOTLB invalidation (VT-d `IOTLB_REG` domain-selective
-  after a page-selective range when `CAP.PSI` allows, else domain; SMMU
+  domain-selective IOTLB invalidation (VT-d `IOTLB_REG`; SMMU
   `CMD_TLBI_S2_IPA` per page plus `CMD_SYNC`). Table writes are made
   visible with `arch_dma_barrier` before the invalidation command.
+  **An invalidation that is not confirmed fails the unmap** (`-EIO`):
+  the unit may still be translating, so the IOVAs are retired instead of
+  freed, `dma_free` leaks the frames instead of returning them, and a
+  detach that is not confirmed keeps the domain. The alternative —
+  warning and recycling anyway — hands a device a window into whatever
+  the allocator gives out next, which is the failure this whole unit
+  exists to prevent.
 - **Faults.** Both units raise an interrupt (VT-d: the fault event as an
   MSI composed by `irq_request_msi`; SMMU: the event queue's wired SPI)
   and the driver decodes the record (VT-d fault recording registers;

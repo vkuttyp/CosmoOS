@@ -57,9 +57,13 @@ struct iommu_ops {
     int (*domain_init)(struct iommu_unit *u, struct iommu_domain *d);   /* d->id, d->root */
     void (*domain_fini)(struct iommu_unit *u, struct iommu_domain *d);
     int (*attach)(struct iommu_unit *u, struct iommu_domain *d, uint32_t sid);
-    void (*detach)(struct iommu_unit *u, struct iommu_domain *d, uint32_t sid);
+    /* -EIO when the unit did not confirm the invalidation: the device may
+     * still be translating, so the domain may not be torn down. */
+    int (*detach)(struct iommu_unit *u, struct iommu_domain *d, uint32_t sid);
     int (*map)(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t pages, unsigned prot);
-    void (*unmap)(struct iommu_domain *d, uint64_t iova, size_t pages);   /* also invalidates */
+    /* Clears the entries and invalidates; -EIO when the invalidation was
+     * not confirmed, and then nothing it covered may be reused. */
+    int (*unmap)(struct iommu_domain *d, uint64_t iova, size_t pages);
     bool (*lookup)(struct iommu_domain *d, uint64_t iova, paddr_t *pa);
 };
 
@@ -105,13 +109,18 @@ void iommu_domain_destroy(struct iommu_domain *d);
 /* Page-granular; -EEXIST when any page of the range is mapped (nothing
  * changes), -ENOMEM, -EINVAL. Any context. */
 int iommu_map(struct iommu_domain *d, uint64_t iova, paddr_t pa, size_t len, unsigned prot);
+/* -EIO when the unit did not confirm the invalidation: the range is
+ * unmapped in the tables but must be treated as still reachable. */
 int iommu_unmap(struct iommu_domain *d, uint64_t iova, size_t len);
 bool iommu_lookup(struct iommu_domain *d, uint64_t iova, paddr_t *pa);
 
 /* The DMA layer's shape: allocate IOVA for [pa, pa + len) and map it;
- * returns iova + the page offset, or 0. The unmap takes the same pair. */
+ * returns iova + the page offset, or 0. The unmap takes the same pair and
+ * returns 0, or -EIO when the unit did not confirm the invalidation: the
+ * addresses are then retired for the life of the domain (counted in
+ * iommu_stats.retired) and the caller must not reuse the memory either. */
 uint64_t iommu_dma_map(struct iommu_domain *d, paddr_t pa, size_t len, unsigned prot);
-void iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len);
+int iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len);
 
 /* A fault the unit reported: counted, logged (bounded). Interrupt context. */
 void iommu_note_fault(struct iommu_unit *u, uint32_t sid, uint64_t addr, unsigned reason, bool write);
@@ -119,6 +128,7 @@ void iommu_note_fault(struct iommu_unit *u, uint32_t sid, uint64_t addr, unsigne
 struct iommu_stats {
     unsigned units, domains;
     uint64_t maps, unmaps, faults, iova_failures;
+    uint64_t retired;   /* pages never handed out again: an unconfirmed invalidation */
 };
 void iommu_get_stats(struct iommu_stats *out);
 

@@ -128,7 +128,11 @@ interrupt handlers). NULL on failure.
 
 ### `void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma)` *(exported)*
 Purpose: release a `dma_alloc` block; `size` must be the size passed to
-`dma_alloc`. Not for interrupt context.
+`dma_alloc`. With an IOMMU domain the mapping is removed first, and if
+the unit does not confirm the invalidation the frames are **not**
+returned to the allocator: they are leaked (logged at `ERROR`, counted
+in `dma_stats.leaked`) rather than handed to another allocation the
+device could still reach. Not for interrupt context.
 
 ### `dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir dir)` *(exported)*
 Purpose: translate an existing buffer for device access. Only direct-map
@@ -144,7 +148,9 @@ recorded.
 ### `void dma_unmap(struct device *, dma_addr_t, size_t, enum dma_dir)` *(exported)*
 Undo a `dma_map`: with an IOMMU domain the pages are unmapped, the
 IOTLB invalidated and the addresses returned to the domain's
-allocator; without one there is nothing to tear down, but every map
+allocator (an unconfirmed invalidation is logged at `ERROR` and the
+addresses retired; the buffer is the caller's and cannot be held back,
+which is why the log line names it); without one there is nothing to tear down, but every map
 must have its unmap (`invariants.md` D5) and the call counts `unmaps`.
 `dma` must be a value `dma_map` returned (non-zero, asserted). Any
 context.

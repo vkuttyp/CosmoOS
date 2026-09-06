@@ -146,7 +146,8 @@ completes.
 
 `dma_unmap` counts, `dma_mappable` agrees with `dma_map`, and sixteen
 reads plus a write and a flush on `vda` leave `maps − unmaps` where it
-was. Since the IOMMU unit the same balance is what keeps a device's
+was. `dma_stats.leaked` stays zero: it counts frames an IOMMU refused
+to confirm the revocation of. Since the IOMMU unit the same balance is what keeps a device's
 domain from filling up: the `iommu` self-test
 (`docs/kernel/iommu/testing.md`) covers the mapped path of the same
 API, and every test in this file now runs with the devices translating.
