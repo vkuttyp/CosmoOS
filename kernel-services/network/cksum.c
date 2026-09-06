@@ -84,3 +84,21 @@ uint32_t cksum_pseudo6(const struct in6_addr *src, const struct in6_addr *dst, u
     ph[39] = proto;
     return cksum_partial(ph, sizeof(ph), 0);
 }
+
+bool m_csum_complete(struct mbuf *m)
+{
+    uint32_t start = m->pkt.csum_start, field = start + m->pkt.csum_offset;
+    if (start >= m->pkt.len || field + 2 > m->len)
+        return false;
+    uint16_t c = cksum_fold(m_cksum_partial(m, start, m->pkt.len - start, 0));
+    if ((m->pkt.csum_flags & NET_CSUM_UDP) && c == 0)
+        c = 0xffff;
+    memcpy(m->data + field, &c, sizeof(c));
+    m->pkt.csum_flags &= (uint16_t)~NET_CSUM_TX;
+    return true;
+}
+
+/* Module ABI exports (docs/kernel/module/api.md): the virtio-net module
+ * finishes NEEDS_CSUM frames with m_csum_complete (unit 11). */
+#include <kernel/module.h>
+EXPORT_SYMBOL(m_csum_complete);
