@@ -174,6 +174,57 @@ static void poly1305_blocks(struct poly1305_state *st, const uint8_t *m, size_t 
     }
 }
 
+/* The tail both callers share: carry, conditionally subtract p, and add
+ * the second half of the key. */
+static void poly1305_finish(struct poly1305_state *st, uint8_t tag[POLY1305_TAG_SIZE])
+{
+    /* Carry the limbs, then subtract p = 2^130 - 5 if h is at least p. */
+    uint32_t c = st->h[1] >> 26;
+    st->h[1] &= 0x3ffffffu;
+    st->h[2] += c;
+    c = st->h[2] >> 26;
+    st->h[2] &= 0x3ffffffu;
+    st->h[3] += c;
+    c = st->h[3] >> 26;
+    st->h[3] &= 0x3ffffffu;
+    st->h[4] += c;
+    c = st->h[4] >> 26;
+    st->h[4] &= 0x3ffffffu;
+    st->h[0] += c * 5;
+    c = st->h[0] >> 26;
+    st->h[0] &= 0x3ffffffu;
+    st->h[1] += c;
+
+    uint32_t g[5];
+    uint32_t gc = 5;
+    for (unsigned i = 0; i < 5; i++) {
+        gc += st->h[i];
+        g[i] = gc & 0x3ffffffu;
+        gc >>= 26;
+    }
+    /* gc is 1 exactly when h >= p. Choosing without a branch keeps the
+     * time independent of the value, which is the whole point of a MAC
+     * that an attacker gets to guess at. */
+    uint32_t mask = (uint32_t)0 - gc;   /* all ones when gc == 1 */
+    for (unsigned i = 0; i < 5; i++)
+        st->h[i] = (st->h[i] & ~mask) | (g[i] & mask);
+
+    uint32_t f0 = (st->h[0] | (st->h[1] << 26));
+    uint32_t f1 = ((st->h[1] >> 6) | (st->h[2] << 20));
+    uint32_t f2 = ((st->h[2] >> 12) | (st->h[3] << 14));
+    uint32_t f3 = ((st->h[3] >> 18) | (st->h[4] << 8));
+
+    uint64_t t = (uint64_t)f0 + st->pad[0];
+    store32le(tag + 0, (uint32_t)t);
+    t = (uint64_t)f1 + st->pad[1] + (t >> 32);
+    store32le(tag + 4, (uint32_t)t);
+    t = (uint64_t)f2 + st->pad[2] + (t >> 32);
+    store32le(tag + 8, (uint32_t)t);
+    t = (uint64_t)f3 + st->pad[3] + (t >> 32);
+    store32le(tag + 12, (uint32_t)t);
+
+}
+
 void poly1305(const uint8_t key[32], const void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE])
 {
     struct poly1305_state st;
@@ -193,51 +244,7 @@ void poly1305(const uint8_t key[32], const void *data, size_t len, uint8_t tag[P
         memset(last, 0, sizeof(last));
     }
 
-    /* Carry the limbs, then subtract p = 2^130 - 5 if h is at least p. */
-    uint32_t c = st.h[1] >> 26;
-    st.h[1] &= 0x3ffffffu;
-    st.h[2] += c;
-    c = st.h[2] >> 26;
-    st.h[2] &= 0x3ffffffu;
-    st.h[3] += c;
-    c = st.h[3] >> 26;
-    st.h[3] &= 0x3ffffffu;
-    st.h[4] += c;
-    c = st.h[4] >> 26;
-    st.h[4] &= 0x3ffffffu;
-    st.h[0] += c * 5;
-    c = st.h[0] >> 26;
-    st.h[0] &= 0x3ffffffu;
-    st.h[1] += c;
-
-    uint32_t g[5];
-    uint32_t gc = 5;
-    for (unsigned i = 0; i < 5; i++) {
-        gc += st.h[i];
-        g[i] = gc & 0x3ffffffu;
-        gc >>= 26;
-    }
-    /* gc is 1 exactly when h >= p. Choosing without a branch keeps the
-     * time independent of the value, which is the whole point of a MAC
-     * that an attacker gets to guess at. */
-    uint32_t mask = (uint32_t)0 - gc;   /* all ones when gc == 1 */
-    for (unsigned i = 0; i < 5; i++)
-        st.h[i] = (st.h[i] & ~mask) | (g[i] & mask);
-
-    uint32_t f0 = (st.h[0] | (st.h[1] << 26));
-    uint32_t f1 = ((st.h[1] >> 6) | (st.h[2] << 20));
-    uint32_t f2 = ((st.h[2] >> 12) | (st.h[3] << 14));
-    uint32_t f3 = ((st.h[3] >> 18) | (st.h[4] << 8));
-
-    uint64_t t = (uint64_t)f0 + st.pad[0];
-    store32le(tag + 0, (uint32_t)t);
-    t = (uint64_t)f1 + st.pad[1] + (t >> 32);
-    store32le(tag + 4, (uint32_t)t);
-    t = (uint64_t)f2 + st.pad[2] + (t >> 32);
-    store32le(tag + 8, (uint32_t)t);
-    t = (uint64_t)f3 + st.pad[3] + (t >> 32);
-    store32le(tag + 12, (uint32_t)t);
-
+    poly1305_finish(&st, tag);
     memset(&st, 0, sizeof(st));
 }
 
@@ -247,6 +254,51 @@ bool poly1305_verify(const uint8_t a[POLY1305_TAG_SIZE], const uint8_t b[POLY130
     for (unsigned i = 0; i < POLY1305_TAG_SIZE; i++)
         diff |= (uint8_t)(a[i] ^ b[i]);
     return diff == 0;
+}
+
+/*
+ * The RFC's AEAD construction (section 2.8): the MAC covers the
+ * associated data and the ciphertext, each padded to a multiple of
+ * sixteen, then the two lengths. The padding and the lengths are what
+ * stop an attacker moving bytes between the two halves.
+ */
+static void poly1305_aead(const uint8_t key[32], const void *aad, size_t aad_len, const void *data, size_t len,
+                          uint8_t tag[POLY1305_TAG_SIZE])
+{
+    struct poly1305_state st;
+    poly1305_init(&st, key);
+    uint8_t pad[16];
+    memset(pad, 0, sizeof(pad));
+
+    size_t whole = aad_len & ~(size_t)15;
+    poly1305_blocks(&st, aad, whole, 1u << 24);
+    if (aad_len > whole) {
+        uint8_t last[16];
+        memset(last, 0, sizeof(last));
+        memcpy(last, (const uint8_t *)aad + whole, aad_len - whole);
+        poly1305_blocks(&st, last, sizeof(last), 1u << 24);
+        memset(last, 0, sizeof(last));
+    }
+
+    whole = len & ~(size_t)15;
+    poly1305_blocks(&st, data, whole, 1u << 24);
+    if (len > whole) {
+        uint8_t last[16];
+        memset(last, 0, sizeof(last));
+        memcpy(last, (const uint8_t *)data + whole, len - whole);
+        poly1305_blocks(&st, last, sizeof(last), 1u << 24);
+        memset(last, 0, sizeof(last));
+    }
+
+    uint8_t lens[16];
+    for (unsigned i = 0; i < 8; i++)
+        lens[i] = (uint8_t)((uint64_t)aad_len >> (8 * i));
+    for (unsigned i = 0; i < 8; i++)
+        lens[8 + i] = (uint8_t)((uint64_t)len >> (8 * i));
+    poly1305_blocks(&st, lens, sizeof(lens), 1u << 24);
+
+    poly1305_finish(&st, tag);
+    memset(&st, 0, sizeof(st));
 }
 
 /* --- the shape the filesystem uses --------------------------------------- */
@@ -262,29 +314,29 @@ static void one_time_key(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t non
     memset(block, 0, sizeof(block));
 }
 
-void chacha20_tag_only(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE],
-                       const void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE])
+static void tag_of(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
+                   size_t aad_len, const void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE])
 {
     uint8_t otk[32];
     one_time_key(key, nonce, otk);
-    poly1305(otk, data, len, tag);
+    poly1305_aead(otk, aad, aad_len, data, len, tag);
     memset(otk, 0, sizeof(otk));
 }
 
-void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], void *data,
-                   size_t len, uint8_t tag[POLY1305_TAG_SIZE])
+void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
+                   size_t aad_len, void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE])
 {
     chacha20_xor(key, 1, nonce, data, data, len);
-    chacha20_tag_only(key, nonce, data, len, tag);
+    tag_of(key, nonce, aad, aad_len, data, len, tag);
 }
 
-bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], void *data,
-                   size_t len, const uint8_t tag[POLY1305_TAG_SIZE])
+bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
+                   size_t aad_len, void *data, size_t len, const uint8_t tag[POLY1305_TAG_SIZE])
 {
     uint8_t want[POLY1305_TAG_SIZE];
-    chacha20_tag_only(key, nonce, data, len, want);
+    tag_of(key, nonce, aad, aad_len, data, len, want);
     if (!poly1305_verify(want, tag))
-        return false;   /* a forged block never becomes plaintext */
+        return false;   /* a forged or displaced block never becomes plaintext */
     chacha20_xor(key, 1, nonce, data, data, len);
     return true;
 }

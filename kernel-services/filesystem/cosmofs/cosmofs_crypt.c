@@ -108,7 +108,7 @@ int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const 
     uint8_t wk[CHACHA20_KEY_SIZE], nonce[CHACHA20_NONCE_SIZE];
     wrapping_key(k->salt, user_key, user_len, wk);
     wrap_nonce(nonce);
-    chacha20_seal(wk, nonce, k->wrapped, sizeof(k->wrapped), k->tag);
+    chacha20_seal(wk, nonce, NULL, 0, k->wrapped, sizeof(k->wrapped), k->tag);
     memset(wk, 0, sizeof(wk));
 
     cfs_mhdr_seal_raw(block, CFS_KIND_KEYS, dva, generation);
@@ -132,7 +132,7 @@ int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_
     wrap_nonce(nonce);
     uint8_t buf[CHACHA20_KEY_SIZE];
     memcpy(buf, k->wrapped, sizeof(buf));
-    bool ok = chacha20_open(wk, nonce, buf, sizeof(buf), k->tag);
+    bool ok = chacha20_open(wk, nonce, NULL, 0, buf, sizeof(buf), k->tag);
     memset(wk, 0, sizeof(wk));
     if (!ok) {
         memset(buf, 0, sizeof(buf));
@@ -187,7 +187,7 @@ int cfs_keys_rotate(struct cfs *fs, const void *new_key, size_t new_len)
     uint8_t wk[CHACHA20_KEY_SIZE], nonce[CHACHA20_NONCE_SIZE];
     wrapping_key(k->salt, new_key, new_len, wk);
     wrap_nonce(nonce);
-    chacha20_seal(wk, nonce, k->wrapped, sizeof(k->wrapped), k->tag);
+    chacha20_seal(wk, nonce, NULL, 0, k->wrapped, sizeof(k->wrapped), k->tag);
     memset(wk, 0, sizeof(wk));
     cfs_buf_mark_dirty(fs, b);
     cfs_buf_put(fs, b);

@@ -185,6 +185,13 @@ void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t genera
 /* Encryption (cosmofs_crypt.c; design.md, "Format version 7"). */
 void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t out[CHACHA20_KEY_SIZE]);
 void cfs_block_nonce(uint8_t nonce[CHACHA20_NONCE_SIZE]);
+/* Where a block belongs, authenticated with it but never stored: the
+ * reader supplies what it believes the position to be, so a block moved
+ * to another offset of the same file fails its tag. */
+struct cfs_block_aad {
+    uint64_t ino;
+    uint64_t lblk;
+};
 int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const uint8_t master[CHACHA20_KEY_SIZE],
                    const void *user_key, size_t user_len);
 int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_len,

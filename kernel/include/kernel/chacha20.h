@@ -35,19 +35,24 @@ void poly1305(const uint8_t key[32], const void *data, size_t len, uint8_t tag[P
  * tells an attacker how much of a forgery was right. */
 bool poly1305_verify(const uint8_t a[POLY1305_TAG_SIZE], const uint8_t b[POLY1305_TAG_SIZE]);
 
-/* AEAD in the shape this filesystem needs: encrypt `len` bytes in place
- * and produce a tag over the *ciphertext*, so a holder of the disk and
- * no key can still check a block (design.md, "Integrity"). The Poly1305
- * key is the first block of the same keystream, which is why the data
- * starts at counter 1. */
-void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], void *data,
-                   size_t len, uint8_t tag[POLY1305_TAG_SIZE]);
-/* The reverse: check the tag over the ciphertext first and decrypt only
- * if it matches. False leaves `data` untouched. */
-bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], void *data,
-                   size_t len, const uint8_t tag[POLY1305_TAG_SIZE]);
-/* The tag alone, over ciphertext, for a reader with no key. */
-void chacha20_tag_only(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE],
-                       const void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE]);
+/*
+ * AEAD in the shape this filesystem needs: encrypt `len` bytes in place
+ * and produce a tag over the *ciphertext* and the associated data, so a
+ * holder of the disk and no key can still check a block (design.md,
+ * "Integrity"). The Poly1305 key is the first block of the same
+ * keystream, which is why the data starts at counter 1.
+ *
+ * `aad` is authenticated but not encrypted, and it is what says *where*
+ * a block belongs: without it a valid block and its tag could be moved
+ * to another offset of the same file and would open there, silently
+ * displacing content. It is not stored -- the reader supplies what it
+ * believes the position to be, and a lie makes the tag fail.
+ */
+void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
+                   size_t aad_len, void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE]);
+/* The reverse: check the tag first and decrypt only if it matches.
+ * False leaves `data` untouched. */
+bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
+                   size_t aad_len, void *data, size_t len, const uint8_t tag[POLY1305_TAG_SIZE]);
 
 #endif /* KERNEL_CHACHA20_H */

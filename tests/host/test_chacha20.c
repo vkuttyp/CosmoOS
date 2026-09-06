@@ -96,29 +96,35 @@ static void test_seal_open(void)
         key[i] = (uint8_t)(i * 7 + 1);
     uint8_t nonce[12] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
     uint8_t data[4096], copy[4096], tag[16];
+    static const uint8_t aad[16] = { 7, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0 };   /* inode 7, block 3 */
     for (unsigned i = 0; i < sizeof(data); i++)
         data[i] = (uint8_t)(i % 251);
     memcpy(copy, data, sizeof(data));
 
-    chacha20_seal(key, nonce, data, sizeof(data), tag);
+    chacha20_seal(key, nonce, aad, sizeof(aad), data, sizeof(data), tag);
     EXPECT(memcmp(data, copy, sizeof(data)) != 0);   /* it did something */
 
     /* The tag is over the ciphertext, so a reader with no key can check
      * a block -- which is what lets a mirror repair and a scrub run on a
      * machine that cannot decrypt anything. */
-    uint8_t again[16];
-    chacha20_tag_only(key, nonce, data, sizeof(data), again);
-    EXPECT(memcmp(tag, again, 16) == 0);
+    /* The associated data is authenticated but not encrypted, and moving
+     * a block to another position must fail even with its own tag. */
+    uint8_t elsewhere[16];
+    memcpy(elsewhere, aad, sizeof(aad));
+    elsewhere[8] ^= 1;
+    uint8_t moved[4096];
+    memcpy(moved, data, sizeof(moved));
+    EXPECT(!chacha20_open(key, nonce, elsewhere, sizeof(elsewhere), moved, sizeof(moved), tag));
 
     uint8_t work[4096];
     memcpy(work, data, sizeof(work));
-    EXPECT(chacha20_open(key, nonce, work, sizeof(work), tag));
+    EXPECT(chacha20_open(key, nonce, aad, sizeof(aad), work, sizeof(work), tag));
     EXPECT(memcmp(work, copy, sizeof(work)) == 0);
 
     /* A forged block never becomes plaintext. */
     memcpy(work, data, sizeof(work));
     work[100] ^= 0x40;
-    EXPECT(!chacha20_open(key, nonce, work, sizeof(work), tag));
+    EXPECT(!chacha20_open(key, nonce, aad, sizeof(aad), work, sizeof(work), tag));
     EXPECT(work[100] == (uint8_t)(data[100] ^ 0x40));   /* untouched */
 
     /* A right tag with the wrong nonce, and with the wrong key. */
@@ -126,23 +132,23 @@ static void test_seal_open(void)
     uint8_t other_nonce[12];
     memcpy(other_nonce, nonce, 12);
     other_nonce[0] ^= 1;
-    EXPECT(!chacha20_open(key, other_nonce, work, sizeof(work), tag));
+    EXPECT(!chacha20_open(key, other_nonce, aad, sizeof(aad), work, sizeof(work), tag));
     uint8_t other_key[32];
     memcpy(other_key, key, 32);
     other_key[31] ^= 1;
-    EXPECT(!chacha20_open(other_key, nonce, work, sizeof(work), tag));
+    EXPECT(!chacha20_open(other_key, nonce, aad, sizeof(aad), work, sizeof(work), tag));
 
     /* Deterministic: the same key and nonce give the same ciphertext,
      * which is what makes a rewritten block reproducible. */
     uint8_t twice[4096], tag2[16];
     memcpy(twice, copy, sizeof(twice));
-    chacha20_seal(key, nonce, twice, sizeof(twice), tag2);
+    chacha20_seal(key, nonce, aad, sizeof(aad), twice, sizeof(twice), tag2);
     EXPECT(memcmp(twice, data, sizeof(twice)) == 0 && memcmp(tag, tag2, 16) == 0);
 
     /* Different nonces give different ciphertext for the same plaintext:
      * the property the per-block nonce exists to provide. */
     memcpy(twice, copy, sizeof(twice));
-    chacha20_seal(key, other_nonce, twice, sizeof(twice), tag2);
+    chacha20_seal(key, other_nonce, aad, sizeof(aad), twice, sizeof(twice), tag2);
     EXPECT(memcmp(twice, data, sizeof(twice)) != 0);
 }
 
@@ -155,8 +161,8 @@ static void test_lengths(void)
         for (size_t i = 0; i < len; i++)
             buf[i] = (uint8_t)(i ^ len);
         memcpy(orig, buf, len);
-        chacha20_seal(key, nonce, buf, len, tag);
-        EXPECT(chacha20_open(key, nonce, buf, len, tag));
+        chacha20_seal(key, nonce, NULL, 0, buf, len, tag);
+        EXPECT(chacha20_open(key, nonce, NULL, 0, buf, len, tag));
         EXPECT(len == 0 || memcmp(buf, orig, len) == 0);
     }
 }

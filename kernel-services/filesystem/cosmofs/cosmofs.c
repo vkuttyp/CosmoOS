@@ -662,7 +662,8 @@ static int read_encrypted(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, u
 
     uint8_t key[CHACHA20_KEY_SIZE];
     cfs_file_key(fs, in->ino, key);
-    bool ok = chacha20_open(key, e.nonce, buf, CFS_BLOCK, e.tag);
+    struct cfs_block_aad aad = { .ino = in->ino, .lblk = lblk };
+    bool ok = chacha20_open(key, e.nonce, &aad, sizeof(aad), buf, CFS_BLOCK, e.tag);
     memset(key, 0, sizeof(key));
     if (!ok) {
         kerror("cosmofs: inode %llu block %llu: authentication failed", (unsigned long long)in->ino,
@@ -941,13 +942,15 @@ static int seal_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const
 {
     if (!fs->have_key)
         return -ENOKEY;
-    (void)lblk;
     memcpy(out, plain, CFS_BLOCK);
     uint8_t key[CHACHA20_KEY_SIZE];
     cfs_file_key(fs, in->ino, key);
     memset(e, 0, sizeof(*e));
     cfs_block_nonce(e->nonce);
-    chacha20_seal(key, e->nonce, out, CFS_BLOCK, e->tag);
+    /* The position is authenticated with the block, so a valid block
+     * cannot be moved to another offset and opened there. */
+    struct cfs_block_aad aad = { .ino = in->ino, .lblk = lblk };
+    chacha20_seal(key, e->nonce, &aad, sizeof(aad), out, CFS_BLOCK, e->tag);
     memset(key, 0, sizeof(key));
     e->crc = crc32c(out, CFS_BLOCK);
     return 0;

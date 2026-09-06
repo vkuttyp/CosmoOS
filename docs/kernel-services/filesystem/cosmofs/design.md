@@ -896,6 +896,14 @@ different questions and need different things:
 Authenticate-then-decrypt in that order means a forged block is refused
 before its plaintext is ever produced.
 
+The tag also covers **where the block belongs** -- its inode and logical
+block number, passed as associated data and never stored. Without that,
+a block of a file could be moved to another offset of the same file,
+tag and all, and would open there: the contents would be genuine and in
+the wrong place, which is a change an attacker can make without
+breaking anything. The reader supplies the position it believes it is
+reading, so a lie about it makes the tag fail.
+
 ### Boot-time unlock
 
 The key arrives through the platform's firmware configuration

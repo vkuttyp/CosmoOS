@@ -387,7 +387,9 @@ machine that cannot decrypt the filesystem; the tag needs the file's key
 and is what says a block is the one that was written, which a CRC cannot
 say because whoever changed it could recompute it. The tag is checked
 before the block is decrypted, so a forged block never becomes
-plaintext. A wrong user key is refused by the tag over the wrapped
+plaintext, and it covers the block's inode and logical number as
+associated data, so a genuine block moved to another offset of the same
+file is refused rather than opened in the wrong place. A wrong user key is refused by the tag over the wrapped
 master key rather than producing rubbish, and rotation rewraps that one
 block without rewriting a file.
 
@@ -402,6 +404,7 @@ ways: a mount with no key cannot walk a path at all, and answers
 `cosmofs-crypt` (the plaintext is absent from the block the file
 occupies; a wrong key is `-EKEYREJECTED`; a bent block is refused, not
 returned; a keyless scrub reads and repairs; rotation keeps every file
-readable; a keyless remount refuses lookups; and the same block written
+readable; a keyless remount refuses lookups; the same block written
 eight times gives eight different ciphertexts, which is what a repeated
-nonce would break), and `test_chacha20` against RFC 8439.
+nonce would break; and a genuine block of a file written over another of
+its own offsets is refused), and `test_chacha20` against RFC 8439.

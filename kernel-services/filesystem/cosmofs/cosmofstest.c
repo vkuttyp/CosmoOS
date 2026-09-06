@@ -1293,6 +1293,39 @@ bool selftest_cosmofs_crypt(const char **reason)
     struct cosmofs_scrub_stats sc;
     CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
+    /* A valid block of this very file, moved to another of its offsets,
+     * must be refused. The tag authenticates where the block belongs as
+     * well as what it holds, and the reader supplies the position it
+     * believes it is reading -- so a transplant fails even though the
+     * ciphertext, nonce and tag are all genuine. */
+    static char two[2 * CFS_BLOCK];
+    for (size_t i = 0; i < sizeof(two); i++)
+        two[i] = (char)(i / CFS_BLOCK ? 'B' : 'A');
+    CHECK(write_file(ENG "/moved.bin", two, sizeof(two)));
+    CHECK(vfs_sync() == 0);
+    struct file *mf;
+    CHECK(vfs_open(NULL, ENG "/moved.bin", COSMO_O_RDONLY, 0, &mf) == 0);
+    uint64_t mino = mf->vn->ino;
+    file_put(mf);
+    uint64_t dva0 = 0, dva1 = 0;
+    CHECK(cosmofs_test_block_of(mount_of(ENG), mino, 0, &dva0) == 0);
+    CHECK(cosmofs_test_block_of(mount_of(ENG), mino, 1, &dva1) == 0);
+    struct spool *mp;
+    CHECK(pool_open(bd, &mp) == 0);
+    uint8_t *blk0 = kmalloc(CFS_BLOCK, 0);
+    CHECK(blk0 != NULL);
+    CHECK(pool_read(mp, dva0, blk0) == 0);
+    CHECK(pool_write(mp, dva1, blk0) == 0 && pool_flush(mp) == 0);   /* block 0's bytes at block 1 */
+    kfree(blk0);
+    pool_close(mp);
+    /* Its own tag travels with it in the checksum tree? No: the entry
+     * stays with the position, so this also stands in for an attacker
+     * who moves both. Either way the position is wrong. */
+    CHECK(vfs_open(NULL, ENG "/moved.bin", COSMO_O_RDONLY, 0, &mf) == 0);
+    CHECK(file_pread(mf, got, 16, CFS_BLOCK) < 0);
+    file_put(mf);
+    CHECK(vfs_unlink(NULL, ENG "/moved.bin") == 0);
+
     /* No two writes of a block share a nonce, whatever the filesystem
      * does with generations. Writing the same plaintext to the same
      * logical block over and over must give different ciphertext every
