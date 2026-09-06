@@ -6,6 +6,8 @@
 #include <kernel/dma.h>
 #include <arch/cpu.h>
 #include <kernel/errno.h>
+#include <kernel/iommu.h>
+#include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
 #include <kernel/pmm.h>
@@ -53,7 +55,17 @@ void *dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_out, unsigned f
         pmm_free_pages(page, order);
         return NULL;
     }
-    *dma_out = (dma_addr_t)pa;
+    if (dev && dev->iommu) {
+        /* The device sees an I/O virtual address (kernel/iommu). */
+        uint64_t iova = iommu_dma_map(dev->iommu, pa, (size_t)PAGE_SIZE << order, IOMMU_PROT_READ | IOMMU_PROT_WRITE);
+        if (iova == 0) {
+            pmm_free_pages(page, order);
+            return NULL;
+        }
+        *dma_out = (dma_addr_t)iova;
+    } else {
+        *dma_out = (dma_addr_t)pa;
+    }
 
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     g_stats.allocs++;
@@ -64,14 +76,23 @@ void *dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_out, unsigned f
 
 void dma_free(struct device *dev, size_t size, void *va, dma_addr_t dma)
 {
-    (void)dev;
-    (void)va;
     if (size == 0)
         return;
     unsigned order = order_for(size);
-    struct page *page = phys_to_page((paddr_t)dma);
+    bool revoked = true;
+    if (dev && dev->iommu)
+        revoked = iommu_dma_unmap(dev->iommu, dma, (size_t)PAGE_SIZE << order) == 0;
+    struct page *page = phys_to_page(virt_to_phys(va));   /* dma may be an IOVA */
     KASSERT(page != NULL);
-    pmm_free_pages(page, order);
+    if (revoked) {
+        pmm_free_pages(page, order);
+    } else {
+        /* The unit still has the old translation: giving these frames to
+         * another allocation would give the device a window into it. They
+         * are lost for this boot, which is the cheap half of the trade. */
+        kerror("dma: %s: %zu byte(s) leaked: the IOMMU did not revoke them", dev->name, size);
+        g_stats.leaked += (uint64_t)PAGE_SIZE << order;
+    }
 
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     g_stats.frees++;
@@ -99,8 +120,11 @@ bool dma_mappable(struct device *dev, const void *va, size_t len)
 
 dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir dir)
 {
-    (void)dir;
     dma_addr_t dma = translate(dev, va, len);
+    if (dma != 0 && dev && dev->iommu) {
+        unsigned prot = IOMMU_PROT_READ | (dir == DMA_TO_DEVICE ? 0 : IOMMU_PROT_WRITE);
+        dma = (dma_addr_t)iommu_dma_map(dev->iommu, (paddr_t)dma, len, prot);
+    }
     bool ok = dma != 0;
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     if (ok)
@@ -113,12 +137,20 @@ dma_addr_t dma_map(struct device *dev, const void *va, size_t len, enum dma_dir 
 
 void dma_unmap(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)
 {
-    (void)dev;
-    (void)len;
     (void)dir;
     KASSERT(dma != 0);
+    if (dev && dev->iommu && iommu_dma_unmap(dev->iommu, dma, len) != 0) {
+        /* The buffer is the caller's: it goes back to kmalloc or to a
+         * page cache the moment this returns, and the device still holds
+         * a translation to it that the unit would not drop. There is
+         * nothing left to withhold and no way to warn the next owner, so
+         * this is where the kernel stops rather than let a device write
+         * into memory that has been handed to something else. */
+        panic("dma: %s: the IOMMU did not revoke %p; the device can still reach reused memory", dev->name,
+              (void *)(uintptr_t)dma);
+    }
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
-    g_stats.unmaps++;   /* identity mapping: nothing to tear down, but the pairing is the contract */
+    g_stats.unmaps++;   /* without a domain there is nothing to tear down; the pairing is the contract */
     spin_unlock_irqrestore(&g_stats_lock, s);
 }
 

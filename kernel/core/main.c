@@ -15,6 +15,7 @@
 #include <kernel/bootinfo.h>
 #include <kernel/cosmofs.h>
 #include <kernel/device.h>
+#include <kernel/iommu.h>
 #include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
 #include <kernel/ipi.h>
@@ -145,6 +146,7 @@ void kernel_main(const struct cosmoboot_info *info)
      * the entropy pool. Drivers themselves arrive as boot modules. */
     device_init();
     pci_init();
+    iommu_init();   /* DMA remapping on before the first driver enables bus mastering (kernel/iommu) */
     blk_init();
     random_init();
 

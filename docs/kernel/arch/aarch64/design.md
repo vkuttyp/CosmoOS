@@ -15,6 +15,7 @@ x86.
 ```text
 0x0800_0000  GICD           0x0801_0000  GICC          0x0802_0000  GICv2m frame (INTIDs 80..143 on QEMU: base 80, 64 SPIs)
 0x0900_0000  PL011 (SPI 1 → INTID 33)    0x0902_0000  fw_cfg (MMIO)
+0x0905_0000  SMMUv3 (iommu=smmuv3; event queue INTID 106, PRI 107, global error 109) — read from the ACPI IORT, not assumed
 0x1000_0000  PCI 32-bit MMIO window      0x4010_0000_0000  ECAM (from MCFG)   0x80_0000_0000  PCI 64-bit window
 0x4000_0000  RAM
 ```

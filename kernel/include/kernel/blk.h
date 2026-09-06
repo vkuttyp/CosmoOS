@@ -77,6 +77,13 @@ struct blkdev_ops {
      * request, then complete it (-ETIMEDOUT) through bio_complete as
      * usual. Without it the layer only warns and counts. */
     void (*timeout)(struct blkdev *dev, struct bio *bio);
+    /* Optional, tests only: make the device DMA into `addr` (a device
+     * address the caller chose, typically one no IOMMU mapping covers)
+     * with a harmless command and return the errno of its status. Used
+     * to provoke a translation fault on purpose. Returns the errno of the
+     * command's status, which may be 0: a device is free not to notice that
+     * its own DMA was dropped. Thread context. */
+    int (*debug_dma)(struct blkdev *dev, uint64_t addr);
 };
 
 #define BLKDEV_NAME_MAX 16

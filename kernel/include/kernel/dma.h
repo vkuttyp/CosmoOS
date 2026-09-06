@@ -54,6 +54,7 @@ int dma_set_mask(struct device *dev, unsigned bits);
 struct dma_stats {
     uint64_t allocs, frees, maps, unmaps, map_failures;
     uint64_t bytes_allocated;   /* currently outstanding */
+    uint64_t leaked;            /* bytes never returned: the IOMMU did not revoke them */
 };
 void dma_get_stats(struct dma_stats *out);
 

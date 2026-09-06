@@ -26,7 +26,12 @@ ECAM, 255 through the legacy mechanism (reads above return all ones,
 writes are dropped). Any context.
 
 ### `void pci_enable_device(struct pci_device *pdev, bool bus_master)` *(exported)*
-Set memory and I/O decode, and bus mastering when asked. Any context.
+Set memory and I/O decode, and bus mastering when asked. With
+`bus_master` it first attaches the device to an IOMMU domain of its own
+(`iommu_attach_device`, requester id `bus << 8 | slot << 3 | func`); a
+failure is logged and the device enabled anyway, its DMA then faulting
+instead of reaching memory. Sleeps when it attaches (allocation),
+otherwise any context.
 
 ### `vaddr_t pci_map_bar(struct pci_device *pdev, unsigned bar)` *(exported)*
 Purpose: map a memory BAR uncached; 0 for an absent or I/O BAR or on

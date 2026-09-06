@@ -314,6 +314,7 @@ static const struct selftest tests[] = {
     { "device",          selftest_device },
     { "pci",             selftest_pci },
     { "dma",             selftest_dma },
+    { "iommu",           selftest_iommu },
     { "blk-lifetime",    selftest_blk_lifetime },
     { "fault-kmalloc",   selftest_fault_kmalloc },
     { "fault-blk",       selftest_fault_blk },

@@ -29,6 +29,9 @@ EXIT_SUCCESS_VALUE = 0x10
 EXIT_FAILURE_VALUE = 0x11
 
 ARCH = os.environ.get("COSMO_ARCH", "x86_64")
+# The machine has an IOMMU unless the runner was told to leave it out
+# (scripts/qemu-run.sh, docs/kernel/iommu/testing.md).
+IOMMU = os.environ.get("QEMU_IOMMU", "1") != "0"
 
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
@@ -64,6 +67,13 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
 ]
+# DMA remapping is on before the drivers load, and every bus-mastering
+# device is in a domain (docs/kernel/iommu/testing.md).
+if IOMMU:
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] iommu: (intel-vtd0|arm-smmuv3) at .*; translation on$",
+        r"^\[ INFO\] iommu: (intel-vtd0|arm-smmuv3): pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] \(requester [0-9a-f]{4}\) in domain \d+",
+    ]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
 # The package system's script checks: output lines the harness also requires in self-test builds.

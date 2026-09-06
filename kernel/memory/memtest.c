@@ -235,7 +235,18 @@ bool selftest_vmm(const char **reason)
     pmm_free_page(mm);
     CHECK(free_pages() == baseline);
 
-    /* Arena allocations do not overlap and are page aligned. */
+    /* Arena allocations do not overlap and are page aligned. The first use
+     * of an arena region may create a page-table page that is kept (M19),
+     * so the region is warmed and the baseline retaken before the count is
+     * compared (the IOMMU's register windows moved the arena's layout). */
+    {
+        vaddr_t w1 = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_GUARD, VM_PROT_RW);
+        vaddr_t w2 = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_GUARD, VM_PROT_RW);
+        CHECK(w1 != 0 && w2 != 0);
+        vm_kernel_free(w1);
+        vm_kernel_free(w2);
+        baseline = free_pages();
+    }
     vaddr_t x = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_GUARD, VM_PROT_RW);
     vaddr_t y = vm_kernel_alloc(PAGE_SIZE, VM_KALLOC_GUARD, VM_PROT_RW);
     CHECK(x != 0 && y != 0 && x != y);
