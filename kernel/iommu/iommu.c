@@ -221,7 +221,9 @@ int iommu_attach_device(struct device *dev, uint32_t sid)
     if (d == NULL)
         return -ENOMEM;
     int rc = u->ops->attach(u, d, sid);
-    if (rc) {
+    if (rc && rc != -EIO) {
+        /* The unit refused before it published anything (no table memory,
+         * a stream id it cannot address): nothing points at the domain. */
         iommu_domain_destroy(d);
         kerror("iommu: %s: cannot attach %s (requester %04x): %d", u->name, dev->name, sid, rc);
         return rc;
@@ -229,6 +231,16 @@ int iommu_attach_device(struct device *dev, uint32_t sid)
     d->nr_devices = 1;
     dev->iommu = d;
     dev->iommu_sid = sid;
+    if (rc) {
+        /* -EIO: the entry is live and names this domain's tables, but the
+         * unit did not confirm that it dropped the cached one. The device
+         * keeps the domain -- freeing it here would leave the hardware
+         * pointing at reusable memory -- and its DMA may fault until the
+         * unit catches up. */
+        kerror("iommu: %s: %s (requester %04x) attached to domain %u unconfirmed", u->name, dev->name, sid,
+               d->id);
+        return rc;
+    }
     kinfo("iommu: %s: %s (requester %04x) in domain %u", u->name, dev->name, sid, d->id);
     return 0;
 }

@@ -56,6 +56,9 @@ struct iommu_ops {
     unsigned (*reserved)(struct iommu_unit *u, struct iommu_range *out, unsigned max);
     int (*domain_init)(struct iommu_unit *u, struct iommu_domain *d);   /* d->id, d->root */
     void (*domain_fini)(struct iommu_unit *u, struct iommu_domain *d);
+    /* -EIO only after the unit's entry for `sid` has been published (the
+     * domain must then be kept); any other error means nothing points at
+     * the domain and the caller may destroy it. */
     int (*attach)(struct iommu_unit *u, struct iommu_domain *d, uint32_t sid);
     /* -EIO when the unit did not confirm the invalidation: the device may
      * still be translating, so the domain may not be torn down. */
@@ -97,7 +100,10 @@ struct iommu_unit *iommu_unit_first(void);
 
 /* Give `dev` (requester id `sid`) a domain of its own on the unit that
  * covers it; 0 with dev->iommu set, 0 with dev->iommu NULL when no unit
- * covers the device, -ENOMEM, -ERANGE (an id the unit cannot table). */
+ * covers the device, -ENOMEM, -ERANGE (an id the unit cannot table), or
+ * -EIO with dev->iommu set: the entry is live but the unit did not
+ * confirm the invalidation, so the domain is kept and the device's DMA
+ * may fault. */
 int iommu_attach_device(struct device *dev, uint32_t sid);
 /* After the driver's remove: the device may not DMA any more. */
 void iommu_detach_device(struct device *dev);

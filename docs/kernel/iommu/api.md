@@ -47,10 +47,16 @@ Purpose: give `dev` an address space of its own. Inputs: a registered
 device and its requester id (`bus << 8 | slot << 3 | func` for PCI).
 Outputs: `dev->iommu` set to a fresh domain and `dev->iommu_sid` to
 `sid`, or `dev->iommu` left NULL when no unit covers the device.
-Returns 0 in **both** of those cases; `-ENOMEM`, `-ERANGE` (a stream id
-the unit cannot table), or a driver error otherwise, with nothing
-changed. Called by `pci_enable_device` before it sets the bus-master
-bit. Sleeps (allocation).
+Returns 0 in **both** of those cases. `-ENOMEM`, `-ERANGE` (a stream id
+the unit cannot table) or another driver error mean the unit published
+nothing and the domain was destroyed: nothing changed. `-EIO` is
+different — the unit's entry for the requester **is** live and names
+this domain's tables, but the invalidation of the cached one was not
+confirmed: `dev->iommu` is set and the domain is kept for good, because
+freeing tables the hardware still points at is the failure this layer
+exists to prevent. The device's DMA may fault until the unit catches
+up. Called by `pci_enable_device` before it sets the bus-master bit.
+Sleeps (allocation).
 
 ### `void iommu_detach_device(struct device *dev)`
 Purpose: end the device's ability to DMA. Clears the unit's entry for
@@ -152,7 +158,7 @@ domain's) serialises them.
 | `reserved(u, out, max)` | thread | the ranges every domain reserves (`base`, `len`, `identity`); may be NULL |
 | `domain_init(u, d)` | thread | assign `d->id` and `d->root`; `-ENOSPC` when ids are exhausted |
 | `domain_fini(u, d)` | thread | free the tree and the id |
-| `attach(u, d, sid)` | thread | point the unit's entry for `sid` at `d` and invalidate |
+| `attach(u, d, sid)` | thread | point the unit's entry for `sid` at `d` and invalidate; `-EIO` **only** after the entry is published (the core then keeps the domain), any other error means nothing points at `d` |
 | `detach(u, d, sid)` | thread | clear it and invalidate; `-EIO` when the invalidation was not confirmed, and the domain is then kept for good |
 | `map(d, iova, pa, pages, prot)` | any, `d->lock` held | write leaves; `-EEXIST`/`-ENOMEM` leave nothing behind |
 | `unmap(d, iova, pages)` | any, `d->lock` held | clear leaves **and** invalidate the IOTLB; `-EIO` when the unit did not confirm, and nothing it covered may be reused |

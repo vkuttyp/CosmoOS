@@ -24,7 +24,10 @@ context entry from the kernel's side.
 sets `PCI_COMMAND_MASTER`; a failure is logged at `ERROR` and the
 device is still enabled — the isolation guarantee then does the work of
 the failure path, since every DMA that device attempts faults instead of
-reaching memory. Check: the boot marker for the per-device attach line
+reaching memory. A failure that leaves the unit's entry published
+(`-EIO`, an unconfirmed invalidation) keeps the domain and the device's
+pointer to it: destroying a domain whose tables the hardware still
+names would be worse than the fault it was reporting. Check: the boot marker for the per-device attach line
 (`iommu: <unit>: pci:bb:ss.f (requester xxxx) in domain N`) and 5 (x86)
 and 6 (AArch64) such lines in a normal boot; every device self-test
 (virtio-blk, virtio-net, virtio-rng, NVMe, cosmofs on NVMe) runs
