@@ -323,9 +323,25 @@ struct cosmo_dirent {
 
 /* --- virtualization (docs/kernel-services/virtualization/) --- */
 
+/* Segment attributes in the architectural descriptor layout, which is
+ * neither vendor's control-block packing: a backend translates on the
+ * way in and out (docs/kernel-services/virtualization/design.md). Bits
+ * 9-11 are reserved and must be zero. */
+#define COSMO_SEG_TYPE     0x000Fu   /* descriptor type */
+#define COSMO_SEG_S        0x0010u   /* code/data, 0 = system */
+#define COSMO_SEG_DPL      0x0060u
+#define COSMO_SEG_DPL_SHIFT 5u
+#define COSMO_SEG_P        0x0080u   /* present */
+#define COSMO_SEG_UNUSABLE 0x0100u   /* no segment loaded */
+#define COSMO_SEG_AVL      0x1000u
+#define COSMO_SEG_L        0x2000u   /* 64-bit code segment */
+#define COSMO_SEG_DB       0x4000u
+#define COSMO_SEG_G        0x8000u   /* limit counts 4 KiB pages */
+#define COSMO_SEG_RESERVED 0x0E00u
+
 struct cosmo_vcpu_seg {          /* 16 bytes */
     uint16_t selector;
-    uint16_t attrib;             /* type(4) S DPL(2) P | AVL L DB G in bits 12-15 */
+    uint16_t attrib;             /* COSMO_SEG_* */
     uint32_t limit;
     uint64_t base;
 };

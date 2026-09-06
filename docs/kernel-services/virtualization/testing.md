@@ -21,8 +21,10 @@ CPU model carries AMD-V with nested paging.
 `scripts/qemu-run.sh` passes `-cpu qemu64,+nx,+svm,+npt` (override with
 `QEMU_CPU=...`; use `host` with `QEMU_ACCEL=kvm` or `hvf` on a machine
 with nested virtualization). TCG emulates SVM and NPT but not NRIP-save
-or decode assists, and not VT-x; the backend relies on neither (the I/O
-exit's next RIP comes from EXITINFO2, which is architectural). Without
+or decode assists, and **not VT-x at all** (`vmx: false` for every model,
+which is why the VMX backend is never exercised here); the SVM backend
+relies on neither optional feature (the I/O exit's next RIP comes from
+EXITINFO2, which is architectural). Without
 `+svm,+npt` the kernel logs `hv: no hardware virtualization backend on
 this CPU`, `/dev/vmm` reads `none asids=0 vms=0`, the guest self-tests
 log `selftest: hv: skipped: no backend` and pass, and `rc.test` prints
@@ -31,7 +33,19 @@ log `selftest: hv: skipped: no backend` and pass, and `rc.test` prints
 `HVTEST: PASS`, so a configuration that silently lost the backend fails
 the boot test rather than skipping it.
 
-## Host unit test: `tests/host/test_hv.c` (`make host-test`)
+## Host unit tests: `tests/host/test_hv.c` and `test_vmx.c` (`make host-test`)
+
+`test_vmx.c` is the VMX backend's only executable evidence in this
+repository (see "What is not tested yet"): `vmx_fix_ctls` against
+synthetic capability MSRs (a required bit is added, a forbidden one is
+dropped, and `vmx_ctls_ok` reports the difference), `vmx_decode_io` on
+the exit qualifications the SDM tabulates, `vmx_eptp`'s memory type and
+level count, and the EPT builder over the harness arena — mappings,
+per-page permissions in the leaf, 2 MiB leaves with their collision and
+splitting refusals, rollback of a partially failed map, and every table
+page returned at destroy. `test_hv.c` covers the same ground for NPT
+plus the segment translation both backends share.
+
 
 Compiled natively with ASan/UBSan against `kernel/arch/x86_64/svm_npt.c`
 and `x86/svm.h`, over the harness arena (`tests/host/harness.c`
@@ -67,7 +81,8 @@ Console output means bytes the guest wrote to port 0xE9, read back with
 
 | test | image | what it checks |
 |---|---|---|
-| `hv-probe` | — | backend name `svm` (or `vmx`), nested paging, ≥ 2 ASIDs; without a backend, `vm_create` is `-ENOTSUP` |
+| `hv-probe` | — | backend name `svm` (or `vmx`), nested paging, ≥ 2 ASIDs, and a backend that claims it can run the reset state; without a backend, `vm_create` is `-ENOTSUP` |
+| `hv-caps` | — | the capabilities reported are the ones honoured: `arch_hv_vm_map` refuses `prot` 0 and unknown bits, and with `map_prot` a read-only mapping is accepted, queried back and unmapped |
 | `hv-npt` | — | `hv_vm_count` up and down; regions at 0 (64 KiB) and 0x200000 (12 KiB); overlap, misalignment, window edge and the 64 MiB limit refused; a VM created with an 8 KiB cap refuses 12 KiB and takes 8 KiB; every page translates to its recorded frame (`arch_hv_vm_query` = `page_to_phys`), holes do not; copies: unbacked range `-EFAULT` before any byte, zeroed memory, a 16-byte round trip straddling a page boundary lands in the right frames |
 | `hv-guest-pio` | `guest_pio.S` | `HV` reaches the console without an exit; `outw $0x80` is an `IO` exit (write, size 2, value 0x1234, `rip` after the instruction); `hlt` is `HLT` at the next byte; `inb $0x81` is an `IO` read exit completed with `'Q'` on the next run; the guest echoes it to the console; `rax` low byte is `'Q'`; the reset `cr0` is 0x60000010; exit and entry counters grew |
 | `hv-guest-irq` | `guest_irq.S` | installs IVT[0x20]; `cli; hlt` exits with no pending flag; vectors 3 and 256 are `-EINVAL`; after `vcpu_inject(0x20)`, `pending_irq` reads 0x20; `sti; hlt` exits with `F_IRQ_PENDING` and nothing delivered (the STI shadow); the next run delivers it: `HLT` at 0x101A, flag clear, console `I`, `rflags.IF` set; a second injection is delivered on the next run |
@@ -156,6 +171,19 @@ decoder does not know (a `FAIL` exit followed).
 - String I/O (`INS`/`OUTS`) exits, `vm_mem_rw` across several regions,
   the 16-region and 8-VM limits, and concurrent runs of two vCPUs of one
   VM on different host CPUs.
-- Nothing runs on hardware SVM or on a VT-x machine (no VMX backend).
+- **The VMX backend is never executed here.** QEMU's TCG emulates AMD-V
+  and reports `vmx: false` for every CPU model
+  (`query-cpu-model-expansion` on `max`), and the development host is
+  AArch64, so VMXON, the VMCS writes, `VMLAUNCH` and the exit path have
+  run nowhere. What carries evidence is the pure logic
+  (`tests/host/test_vmx.c`: control fixing against capability MSR
+  values, the I/O exit qualification, the EPT pointer and builder) and
+  the fact that adding the backend left every SVM test passing; the
+  rest is compiled, statically analysed, and reviewed against the SDM.
+  A green chain says nothing about VMX working, and invariant V17 says
+  so as well. First contact with real hardware should expect the usual
+  bring-up failures — a control the CPU refuses, a VMCS field written in
+  the wrong order, a host-state field that does not describe the CPU.
+- Nothing runs on hardware SVM either.
 - No timer or interrupt controller model exists to test; guests are
   driven by the owner's injections.

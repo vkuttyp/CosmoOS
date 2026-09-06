@@ -12,10 +12,17 @@ Errors are negative errno values; the C library wrappers return them raw.
 ### `struct cosmo_vcpu_seg` (16 bytes)
 
 `uint16_t selector; uint16_t attrib; uint32_t limit; uint64_t base;`.
-`attrib` is the descriptor's access byte in bits 0–7 (type 4 bits, S,
-DPL 2 bits, P) and the flags nibble (AVL, L, D/B, G) in bits 12–15;
-bits 8–11 are zero. Real-mode code is `0x009B`, real-mode data `0x0093`,
-a flat 32-bit code segment `0x0C9B`, flat 32-bit data `0x0C93`.
+`attrib` is the architectural descriptor layout, named by the UAPI's own
+constants: `COSMO_SEG_TYPE` (bits 0–3), `_S`, `_DPL` (5–6), `_P`,
+`_UNUSABLE` (bit 8: no segment loaded), `_AVL` (12), `_L` (13), `_DB`
+(14), `_G` (15). Bits 9–11 (`COSMO_SEG_RESERVED`) must be zero, and
+`_UNUSABLE` may not be combined with `_P`; a backend refuses either with
+`-EINVAL`. Neither vendor's control-block packing appears here: SVM
+moves AVL/L/DB/G down to bits 8–11 and spells "unusable" as not present,
+VMX uses this layout with unusable at bit 16, and `x86/hvseg.h`
+translates both ways. Real-mode code is `0x009B`, real-mode data
+`0x0093`, a flat 32-bit code segment `0xC09B`, flat 32-bit data
+`0xC093`, a 64-bit code segment `0xA09B`.
 
 ### `struct cosmo_vcpu_regs` (448 bytes, the VMState)
 
@@ -124,8 +131,11 @@ convenience functions yet; `vmctl` uses `strerror(-rc)`.
 
 `/dev/vmm` is a character node created by `hv_init()` with mode 0600
 (`ramfs_mkchr`, `docs/kernel-services/vfs/api.md`). `read` at offset 0
-returns one line, `<backend>[ npt] asids=<n> vms=<m>\n`, for example
-`svm npt asids=16 vms=0` or `none asids=0 vms=0`; further offsets read
+returns one line, `<backend>[ npt][ realmode][ mapprot][ largepages]
+asids=<n> vms=<m>\n`, for example
+`svm npt realmode mapprot largepages asids=16 vms=0` or
+`none asids=0 vms=0` — the flags are the capabilities a user-space VMM
+must know before it builds anything; further offsets read
 the rest of that line, then 0. `write` is `ENOTSUP`. Holding it open with
 `O_WRONLY` or `O_RDWR` is the capability `vm_create` demands; the node's
 mode is therefore the whole access policy.
@@ -148,8 +158,9 @@ Lifecycle and manager:
 
 - `void hv_init(void)`: probe the backend, create `/dev/vmm`. Called
   from `kernel_main` after `ramfs_populate_boot()`.
-- `const struct hv_caps *hv_caps(void)`: `present`, `name`, `max_asids`,
-  `nested_paging`.
+- `const struct hv_caps *hv_caps(void)`: `present`, `name`,
+  `max_asids`, `nested_paging`, `real_mode_guest`, `map_prot`,
+  `large_pages`, `max_vcpus`.
 - `unsigned hv_vm_count(void)`; `void hv_stats(uint64_t *exits, uint64_t
   *entries, unsigned *vcpus)` (sums over live vCPUs; any pointer may be
   NULL); `int hv_sysctl(const char *name, char *out, size_t n)` answers
@@ -211,7 +222,9 @@ Kobject types: `vm` (a `kobject_io_type`: `read`, `write`, `stat`) and
 
 ## The arch interface (`kernel/include/arch/hv.h`)
 
-Implemented by `kernel/arch/x86_64/svm.c` (+ `svm_npt.c`, `svm_run.S`).
+Implemented twice on x86-64 — `svm.c` (+ `svm_npt.c`, `svm_run.S`) and
+`vmx.c` (+ `vmx_ept.c`, `vmx_run.S`) — behind `hv.c`, which probes both
+and forwards every call to the one this CPU has (`x86/hvops.h`).
 Everything is opaque above it: `struct arch_hv_vm` and `struct
 arch_hv_vcpu` are incomplete types to generic code.
 
@@ -219,8 +232,8 @@ arch_hv_vcpu` are incomplete types to generic code.
 |---|---|
 | `int arch_hv_probe(struct hv_caps *out)` | Once at boot. Detects the extension and prepares shared state; `-ENOTSUP` (with `present = false`, `name = "none"`) when the CPU lacks it, when firmware disabled it, or when nested paging is missing; `-ENOMEM`. Does not enable it on any CPU: that happens on first use inside `arch_hv_vcpu_run`. |
 | `int arch_hv_vm_create(struct arch_hv_vm **out)` / `void arch_hv_vm_destroy(struct arch_hv_vm *)` | A nested page table root and an address-space tag (ASID); `-ENOTSUP`, `-ENOMEM`, `-ENOSPC` (tags exhausted). Destroy frees every table page. |
-| `int arch_hv_vm_map(vm, uint64_t gpa, paddr_t hpa, size_t len)` | Maps 4 KiB pages RWX; `-EINVAL` (alignment), `-EEXIST` (a page already mapped: the call is rolled back), `-ENOMEM`. |
-| `int arch_hv_vm_unmap(vm, uint64_t gpa, size_t len)` | Clears leaves; unmapped pages are ignored; `-EINVAL` (alignment). Intermediate tables stay until destroy. |
+| `int arch_hv_vm_map(vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)` | Maps pages with `prot` (`HV_MAP_READ/WRITE/EXEC`, nonzero); a backend reporting `large_pages` uses a 2 MiB leaf where the guest-physical address, the host-physical address and the remaining length are all aligned. `-EINVAL` (alignment, `prot` 0 or unknown bits), `-EEXIST` (a page or a covering large leaf is already mapped: the call is rolled back), `-ENOMEM`. |
+| `int arch_hv_vm_unmap(vm, uint64_t gpa, size_t len)` | Clears leaves; unmapped pages are ignored; `-EINVAL` (alignment, or a range that would split a 2 MiB leaf — a large leaf goes as a whole). Intermediate tables stay until destroy. |
 | `bool arch_hv_vm_query(vm, uint64_t gpa, paddr_t *hpa)` | The host-physical address behind a guest-physical one (offset preserved). |
 | `int arch_hv_vcpu_create(vm, struct arch_hv_vcpu **out)` / `void arch_hv_vcpu_destroy(v)` | A control block at the reset state; `-ENOTSUP`, `-ENOMEM`. |
 | `void arch_hv_vcpu_get_state(v, struct cosmo_vcpu_regs *)` | The whole register file; `pending_irq` is `~0` (generic code fills it). |
@@ -237,7 +250,12 @@ arch_hv_vcpu` are incomplete types to generic code.
 | `void arch_hv_host_cpuid(leaf, subleaf, *eax, *ebx, *ecx, *edx)` / `uint64_t arch_hv_host_tsc(void)` | The host's values, for the emulation to filter; generic code never executes the instructions itself. |
 
 `struct hv_caps { bool present; const char *name; unsigned max_asids;
-bool nested_paging; }`; `struct hv_exit { enum hv_exit_kind kind; union
+bool nested_paging; bool real_mode_guest; bool map_prot; bool
+large_pages; unsigned max_vcpus; }` — `real_mode_guest` says the
+architectural reset state can run (SVM always; VMX only with EPT and
+unrestricted guest), `map_prot` that `arch_hv_vm_map` honours
+permissions, `large_pages` that it uses 2 MiB leaves, `max_vcpus` a
+backend limit below the manager's (0: none); `struct hv_exit { enum hv_exit_kind kind; union
 { io { port, size, write, string, rep, next_rip }; mmio { gpa, write };
 msr { index, write }; fail { code, info1, info2 }; }; }`.
 
@@ -247,6 +265,10 @@ msr { index, write }; fail { code, info1, info2 }; }; }`.
   the six flat guest images (`--image-base=0 -Ttext=0x1000
   --oformat=binary`), carried in the boot archive as `tests/hv/*.bin` →
   `/boot/tests/hv/`. Part of `all`.
-- `make host-test` includes `test_hv` (`tests/host/test_hv.c`).
+- `make host-test` includes `test_hv` (`tests/host/test_hv.c`: the NPT
+  builder, the SVM IOIO decoder, the VMCB and UAPI layouts, and the
+  segment translation both backends use) and `test_vmx`
+  (`tests/host/test_vmx.c`: control fixing, the VMX I/O qualification,
+  the EPT pointer and builder).
 - `QEMU_CPU` (default `qemu64,+nx,+svm,+npt`) selects the CPU model
   `scripts/qemu-run.sh` passes to QEMU; `host` for `QEMU_ACCEL=kvm`/`hvf`.

@@ -24,8 +24,10 @@ static int64_t vmm_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t le
 {
     (void)vn;
     char line[96];
-    int n = ksnprintf(line, sizeof(line), "%s%s asids=%u vms=%u\n", g_caps.name,
-                      g_caps.nested_paging ? " npt" : "", g_caps.max_asids, hv_vm_count());
+    int n = ksnprintf(line, sizeof(line), "%s%s%s%s%s asids=%u vms=%u\n", g_caps.name,
+                      g_caps.nested_paging ? " npt" : "", g_caps.real_mode_guest ? " realmode" : "",
+                      g_caps.map_prot ? " mapprot" : "", g_caps.large_pages ? " largepages" : "",
+                      g_caps.max_asids, hv_vm_count());
     if (n < 0)
         return -EIO;
     if (off >= (uint64_t)n)
@@ -71,8 +73,9 @@ static bool paging_off_is_translated(void)
     struct cosmo_vcpu_regs regs;
     vcpu_get_regs(v, &regs);
     regs.cr0 = 0x11;                                        /* PE | ET, paging off */
-    regs.cs.selector = 0x8;  regs.cs.attrib = 0xC9B; regs.cs.limit = 0xFFFFFFFFu; regs.cs.base = 0;
-    regs.ds.selector = 0x10; regs.ds.attrib = 0xC93; regs.ds.limit = 0xFFFFFFFFu; regs.ds.base = 0;
+    /* Neutral attributes (COSMO_SEG_*): a 32-bit code and data pair. */
+    regs.cs.selector = 0x8;  regs.cs.attrib = 0xC09B; regs.cs.limit = 0xFFFFFFFFu; regs.cs.base = 0;
+    regs.ds.selector = 0x10; regs.ds.attrib = 0xC093; regs.ds.limit = 0xFFFFFFFFu; regs.ds.base = 0;
     regs.es = regs.ss = regs.fs = regs.gs = regs.ds;
     regs.rip = SELFCHECK_GPA;
     regs.rsp = SELFCHECK_GPA + 0x1000;

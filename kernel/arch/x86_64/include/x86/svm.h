@@ -303,7 +303,9 @@ static inline struct svm_ioio svm_decode_ioio(uint64_t exitinfo1)
 /* Root table; every present entry is P|RW|US (nested walks need the User bit). */
 paddr_t npt_create(void);
 void npt_destroy(paddr_t root);
-int npt_map(paddr_t root, uint64_t gpa, paddr_t hpa, size_t len);   /* 4 KiB granular, -ENOMEM/-EEXIST */
+/* 4 KiB granular with 2 MiB leaves where gpa, hpa and len allow;
+ * `prot` is HV_MAP_* and must be nonzero. -EINVAL/-ENOMEM/-EEXIST. */
+int npt_map(paddr_t root, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
 int npt_unmap(paddr_t root, uint64_t gpa, size_t len);
 bool npt_query(paddr_t root, uint64_t gpa, paddr_t *hpa);
 /* Number of table pages (root included) currently allocated: accounting for tests. */

@@ -14,12 +14,27 @@
 #include <kernel/pmm.h>
 #include <kernel/string.h>
 
+#include <arch/hv.h>
 #include <x86/paging.h>
 #include <x86/svm.h>
 
 #define NPT_ENTRIES 512u
+#define NPT_LARGE   (2u * 1024 * 1024)
+/* Intermediate entries permit everything; the leaf decides (the walk
+ * ANDs the levels, so a permissive table costs nothing). */
 #define NPT_TABLE_FLAGS (PTE_P | PTE_RW | PTE_US)
-#define NPT_LEAF_FLAGS  (PTE_P | PTE_RW | PTE_US)
+
+/* A nested page table is walked with the guest as "user", so US is
+ * always set; write and execute follow the caller's prot. */
+static uint64_t leaf_flags(unsigned prot)
+{
+    uint64_t f = PTE_P | PTE_US;
+    if (prot & HV_MAP_WRITE)
+        f |= PTE_RW;
+    if (!(prot & HV_MAP_EXEC))
+        f |= PTE_NX;
+    return f;
+}
 
 static inline unsigned idx(uint64_t gpa, unsigned level)   /* level 3 = PML4 .. 0 = PT */
 {
@@ -47,7 +62,7 @@ static void destroy_level(paddr_t table, unsigned level)
     uint64_t *t = phys_to_virt(table);
     if (level > 0) {
         for (unsigned i = 0; i < NPT_ENTRIES; i++)
-            if (t[i] & PTE_P)
+            if ((t[i] & PTE_P) && !(t[i] & PTE_PS))   /* a large leaf points at guest memory */
                 destroy_level(t[i] & PTE_ADDR_MASK, level - 1);
     }
     table_free(table);
@@ -59,13 +74,17 @@ void npt_destroy(paddr_t root)
         destroy_level(root, 3);
 }
 
-/* The PT entry for gpa, allocating intermediate tables when `create`. */
-static uint64_t *walk(paddr_t root, uint64_t gpa, bool create)
+/* The entry for gpa at `stop` (0 = 4 KiB leaf, 1 = 2 MiB leaf),
+ * allocating intermediate tables when `create`. NULL when a level is
+ * absent, or when a large leaf already covers the address. */
+static uint64_t *walk_to(paddr_t root, uint64_t gpa, bool create, unsigned stop)
 {
     paddr_t table = root;
-    for (unsigned level = 3; level > 0; level--) {
+    for (unsigned level = 3; level > stop; level--) {
         uint64_t *t = phys_to_virt(table);
         uint64_t e = t[idx(gpa, level)];
+        if (e & PTE_PS)
+            return NULL;   /* a 2 MiB leaf already covers this address */
         if (!(e & PTE_P)) {
             if (!create)
                 return NULL;
@@ -78,15 +97,33 @@ static uint64_t *walk(paddr_t root, uint64_t gpa, bool create)
         table = e & PTE_ADDR_MASK;
     }
     uint64_t *pt = phys_to_virt(table);
-    return &pt[idx(gpa, 0)];
+    return &pt[idx(gpa, stop)];
 }
 
-int npt_map(paddr_t root, uint64_t gpa, paddr_t hpa, size_t len)
+static uint64_t *walk(paddr_t root, uint64_t gpa, bool create)
+{
+    return walk_to(root, gpa, create, 0);
+}
+
+int npt_map(paddr_t root, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
 {
     if ((gpa | hpa | len) & (PAGE_SIZE - 1))
         return -EINVAL;
-    for (size_t off = 0; off < len; off += PAGE_SIZE) {
-        uint64_t *pte = walk(root, gpa + off, true);
+    if (prot == 0 || (prot & ~(unsigned)HV_MAP_RWX))
+        return -EINVAL;
+    uint64_t flags = leaf_flags(prot);
+    for (size_t off = 0; off < len;) {
+        bool large = ((gpa + off) % NPT_LARGE) == 0 && ((hpa + off) % NPT_LARGE) == 0 && len - off >= NPT_LARGE;
+        if (!large) {
+            /* A 2 MiB leaf already covering the address is a collision,
+             * not a missing table. */
+            uint64_t *pde = walk_to(root, gpa + off, false, 1u);
+            if (pde != NULL && (*pde & (PTE_P | PTE_PS)) == (PTE_P | PTE_PS)) {
+                npt_unmap(root, gpa, off);
+                return -EEXIST;
+            }
+        }
+        uint64_t *pte = walk_to(root, gpa + off, true, large ? 1u : 0u);
         if (pte == NULL) {
             npt_unmap(root, gpa, off);
             return -ENOMEM;
@@ -95,7 +132,8 @@ int npt_map(paddr_t root, uint64_t gpa, paddr_t hpa, size_t len)
             npt_unmap(root, gpa, off);
             return -EEXIST;
         }
-        *pte = (hpa + off) | NPT_LEAF_FLAGS;
+        *pte = (hpa + off) | flags | (large ? PTE_PS : 0);
+        off += large ? NPT_LARGE : PAGE_SIZE;
     }
     return 0;
 }
@@ -104,10 +142,21 @@ int npt_unmap(paddr_t root, uint64_t gpa, size_t len)
 {
     if ((gpa | len) & (PAGE_SIZE - 1))
         return -EINVAL;
-    for (size_t off = 0; off < len; off += PAGE_SIZE) {
+    for (size_t off = 0; off < len;) {
+        uint64_t *pde = walk_to(root, gpa + off, false, 1u);
+        if (pde != NULL && (*pde & (PTE_P | PTE_PS)) == (PTE_P | PTE_PS)) {
+            /* A 2 MiB leaf: it goes as a whole or not at all. Splitting
+             * one is not needed by any caller and is not implemented. */
+            if (((gpa + off) % NPT_LARGE) != 0 || len - off < NPT_LARGE)
+                return -EINVAL;
+            *pde = 0;
+            off += NPT_LARGE;
+            continue;
+        }
         uint64_t *pte = walk(root, gpa + off, false);
         if (pte)
             *pte = 0;
+        off += PAGE_SIZE;
     }
     /* Intermediate tables are kept: regions are only added while a VM
      * lives, and destroy frees everything. */
@@ -116,6 +165,12 @@ int npt_unmap(paddr_t root, uint64_t gpa, size_t len)
 
 bool npt_query(paddr_t root, uint64_t gpa, paddr_t *hpa)
 {
+    uint64_t *pde = walk_to(root, gpa & ~(uint64_t)(NPT_LARGE - 1), false, 1u);
+    if (pde != NULL && (*pde & (PTE_P | PTE_PS)) == (PTE_P | PTE_PS)) {
+        if (hpa)
+            *hpa = (*pde & PTE_ADDR_MASK & ~(uint64_t)(NPT_LARGE - 1)) | (gpa & (NPT_LARGE - 1));
+        return true;
+    }
     uint64_t *pte = walk(root, gpa & ~(uint64_t)(PAGE_SIZE - 1), false);
     if (pte == NULL || !(*pte & PTE_P))
         return false;
@@ -130,7 +185,7 @@ static unsigned count_level(paddr_t table, unsigned level)
     if (level > 0) {
         const uint64_t *t = phys_to_virt(table);
         for (unsigned i = 0; i < NPT_ENTRIES; i++)
-            if (t[i] & PTE_P)
+            if ((t[i] & PTE_P) && !(t[i] & PTE_PS))   /* a large leaf is a frame, not a table */
                 n += count_level(t[i] & PTE_ADDR_MASK, level - 1);
     }
     return n;

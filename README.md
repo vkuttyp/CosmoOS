@@ -438,6 +438,23 @@ See [docs/development.md](docs/development.md).
   address. 128 self-tests. Not done: interrupt remapping (`intremap=off`
   in the test machines), AMD-Vi, huge pages, an IOVA cache, PASID/ATS,
   stream ids above 255, requester-id aliasing behind bridges.
+- **A vendor-neutral hypervisor seam, and the Intel VMX backend (done):**
+  the unit the audit names after the IOMMU (§11.4). Segment attributes
+  now cross `arch/hv.h` in the architectural descriptor layout instead
+  of the VMCB's packing, which is what the UAPI always claimed and what
+  made the long-mode `L && DB` check real; `hv_caps` grew the questions
+  a VMM has to ask (can the reset state run, are mapping permissions
+  honoured, are there large pages); `arch_hv_vm_map` takes permissions
+  and uses 2 MiB leaves. Both x86-64 backends are now compiled in behind
+  a small dispatcher: AMD-V as before, and a new Intel VT-x backend
+  (`vmx.c`, `vmx_ept.c`, `vmx_run.S`) with capability-MSR control
+  fixing, EPT, unrestricted guest, external-interrupt exiting and the
+  exit map. **The VMX backend has never been executed**: QEMU's TCG
+  emulates AMD-V only (`vmx: false`) and the development host is not
+  Intel, so its evidence is a host test of the pure logic (control
+  fixing, the I/O qualification, the EPT builder) plus every SVM test
+  still passing — the gap is recorded in the invariants and the testing
+  doc rather than papered over. 129 self-tests.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
