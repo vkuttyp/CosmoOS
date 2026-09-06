@@ -867,21 +867,40 @@ authenticates: `csum_algo` becomes `CFS_CSUM_POLY1305` and the per-block
 entries in the checksum tree become 16-byte tags instead of 4-byte
 CRCs.
 
-The tag is computed over the **ciphertext**. That is what lets
-everything built in the last three units keep working without the key:
-a mirror can verify a copy and repair it, and a scrub can read the whole
-filesystem, on a machine that cannot decrypt a byte of it. Authenticate-
-then-decrypt in that order also means a forged block is refused before
-its plaintext is ever produced.
+The tag is computed over the **ciphertext**, and beside it each entry
+keeps a plain CRC32C of the same bytes. Two checks, because they answer
+different questions and need different things:
+
+- the CRC needs no key, and is what a mirror repairs against and a scrub
+  verifies -- so both keep working on a machine that cannot decrypt a
+  byte of this filesystem. It tells damage from intact.
+- the tag needs the file's key, and is what says a block is the one that
+  was written. A CRC cannot: whoever changed the block could recompute
+  it.
+
+Authenticate-then-decrypt in that order means a forged block is refused
+before its plaintext is ever produced.
 
 ### Boot-time unlock
 
 The key arrives through the platform's firmware configuration
 (`opt/cosmo/fskey`, the same channel fault injection uses), is derived
-into the wrapping key, and unwraps the master at mount. A mount whose
-filesystem is encrypted and has no key succeeds **read-only for
-metadata and refuses data**: `stat` and `readdir` of unencrypted
-metadata work, and every read of a file's contents is `-ENOKEY`.
+into the wrapping key, and unwraps the master at mount.
+
+A mount whose filesystem is encrypted and has no key **succeeds**, and
+then refuses almost everything -- including, and this is worth being
+exact about, walking a path. A directory's entries are the data blocks
+of its inode, so with names encrypted a lookup cannot get past the root:
+`stat` of a file inside it is `-ENOKEY`, not a size. What a keyless
+mount can still do is the work that needs no names: the pool assembles,
+the allocation maps and inode records load, and `cosmofs_scrub` reads
+and repairs every block in the filesystem, because what it checks is the
+keyless CRC beside each tag. A key supplied later through the same
+channel or `cosmofs_test_unlock` opens the mount in place.
+
+An earlier draft of this section claimed `stat` and `readdir` would work
+without a key. They do not, and the reason is the design working as
+intended rather than a limitation: names are contents.
 
 What is deliberately absent: a system call to add a key, a keyring, a
 passphrase prompt, per-user keys. The mechanism is one channel and one

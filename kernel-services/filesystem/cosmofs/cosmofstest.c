@@ -1229,6 +1229,104 @@ bool selftest_cosmofs_compress(const char **reason)
 }
 
 /*
+ * Encryption. The claims worth checking are that the plaintext is not on
+ * the disk, that a wrong key is refused rather than believed, that a
+ * mount without the key still works for everything that is not a file's
+ * contents, and that a scrub -- which has no key -- can still read and
+ * repair the whole filesystem.
+ */
+bool selftest_cosmofs_crypt(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    static const char key[] = "correct horse battery staple";
+    CHECK(cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    /* No key has arrived: the metadata mounted, the contents are shut. */
+    CHECK(cosmofs_test_unlock(mount_of(ENG), "wrong key", 9) == -EKEYREJECTED);
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0);
+
+    static const char secret[] = "the quick brown fox jumps over the lazy dog, repeatedly and at length";
+    CHECK(write_file(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_mkdir(NULL, ENG "/private", 0755) == 0);
+    CHECK(write_file(ENG "/private/inner", secret, sizeof(secret) - 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+
+    /* The plaintext is not on the disk. Read the block the file's data
+     * actually occupies and look for it. */
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/secret.txt", COSMO_O_RDONLY, 0, &f) == 0);
+    uint64_t ino = f->vn->ino;
+    file_put(f);
+    uint64_t dva = 0;
+    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &dva) == 0);
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *raw = kmalloc(CFS_BLOCK, 0);
+    CHECK(raw != NULL);
+    CHECK(pool_read(p, dva, raw) == 0);
+    bool found = false;
+    for (size_t i = 0; i + sizeof(secret) - 1 < CFS_BLOCK; i++)
+        found = found || memcmp(raw + i, secret, sizeof(secret) - 1) == 0;
+    CHECK(!found);
+
+    /* A block bent behind the filesystem's back is refused, not
+     * returned: the tag is what says this is the block that was
+     * written, and a CRC could have been recomputed by whoever bent it. */
+    raw[100] ^= 0x20;
+    CHECK(pool_write(p, dva, raw) == 0 && pool_flush(p) == 0);
+    kfree(raw);
+    pool_close(p);
+    CHECK(vfs_open(NULL, ENG "/secret.txt", COSMO_O_RDONLY, 0, &f) == 0);
+    static char got[128];
+    CHECK(file_read(f, got, sizeof(got)) < 0);
+    file_put(f);
+
+    /* Put it back by rewriting the file, then check the scrub. */
+    CHECK(write_file(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+
+    /* Rotation rewrites one block: the old key stops working, the new
+     * one starts, and every file is still readable without being
+     * rewritten. */
+    static const char key2[] = "a different key entirely";
+    CHECK(cosmofs_rekey(mount_of(ENG), key2, sizeof(key2) - 1) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Remount with no key at all. The mount succeeds, and then refuses
+     * to walk a path: a directory's entries are its inode's data, so
+     * with names encrypted there is no way in. That is the design
+     * working, not a limitation of it. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmo_stat st;
+    CHECK(vfs_stat(NULL, ENG "/secret.txt", &st) == -ENOKEY);
+    CHECK(vfs_stat(NULL, ENG, &st) == 0 && st.type == COSMO_DT_DIR);   /* the root itself is a vnode */
+    /* And a scrub still runs, because what it checks needs no key. */
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0 && sc.blocks_read > 0);
+    /* The old key is refused; the new one opens it. */
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == -EKEYREJECTED);
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key2, sizeof(key2) - 1) == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(read_matches(ENG "/private/inner", secret, sizeof(secret) - 1));
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-crypt: %llu blocks scrubbed without a key", (unsigned long long)sc.blocks_read);
+    return true;
+}
+
+/*
  * A member table is disk data: its geometry decides how many bitmap
  * chunks a mount reads and how far the allocator may reach, so it is
  * checked against what the format can express before any of it is

@@ -26,6 +26,15 @@ int cosmofs_format_pool(struct blkdev **bd, unsigned n);
  * member by member. A member is then a mirror group and every write
  * goes to all of its devices. */
 int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies);
+/* Format an encrypted filesystem: a random master key wrapped with
+ * `key`. File contents and directory names become ciphertext; the
+ * allocation and inode metadata stay in the clear
+ * (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 7"). */
+int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len);
+/* Test hook: supply the key for a mount, as the unlock channel would. */
+int cosmofs_test_unlock(struct mount *mnt, const void *key, size_t len);
+/* Rewrap the master key with a new user key. No file is rewritten. */
+int cosmofs_rekey(struct mount *mnt, const void *key, size_t len);
 
 struct cosmofs_stats {
     uint64_t generation;      /* last committed */

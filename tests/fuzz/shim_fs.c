@@ -133,6 +133,15 @@ void random_get_bytes(void *buf, size_t len)
     memset(buf, 0, len);   /* deterministic: the fuzzer must reproduce */
 }
 
+/* The fuzz image is never unlocked: there is no firmware here, so an
+ * encrypted image mounts locked and every data read answers -ENOKEY,
+ * which is one of the paths worth fuzzing. */
+bool fwcfg_get_string(const char *key, char *buf, size_t len)
+{
+    (void)key; (void)buf; (void)len;
+    return false;
+}
+
 int pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags)
 {
     (void)flags;   /* the image is memory: flushes mean nothing here */

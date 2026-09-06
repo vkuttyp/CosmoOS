@@ -99,7 +99,14 @@ struct cfs_mhdr {
 struct cfs_csum_aead {          /* 32 bytes */
     uint8_t tag[16];
     uint64_t generation;
-    uint64_t reserved;
+    /* A plain CRC32C of the same ciphertext. The tag needs the file's
+     * key to check; this does not, which is what lets a mirror repair a
+     * copy and a scrub read the whole filesystem on a machine that
+     * cannot decrypt a byte of it. It detects damage, not forgery --
+     * the tag is what says a block is the one that was written
+     * (design.md, "Integrity"). */
+    uint32_t crc;
+    uint32_t reserved;
 };
 #define CFS_AEAD_PER_BLOCK   (CFS_PAYLOAD / sizeof(struct cfs_csum_aead))
 #define CFS_CSUM_MAX_BLOCKS  ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_CSUMS_PER_BLOCK)
@@ -391,5 +398,8 @@ static inline uint64_t cfs_extent_blocks(const struct cfs_extent *ext, unsigned 
 /* Where logical block `lblk`'s checksum lives: index slot and entry. */
 static inline unsigned cfs_csum_index(uint64_t lblk) { return (unsigned)(lblk / CFS_CSUMS_PER_BLOCK); }
 static inline unsigned cfs_csum_slot(uint64_t lblk) { return (unsigned)(lblk % CFS_CSUMS_PER_BLOCK); }
+/* The same, for the wider entries an authenticated filesystem keeps. */
+static inline unsigned cfs_aead_index(uint64_t lblk) { return (unsigned)(lblk / CFS_AEAD_PER_BLOCK); }
+static inline unsigned cfs_aead_slot(uint64_t lblk) { return (unsigned)(lblk % CFS_AEAD_PER_BLOCK); }
 
 #endif /* COSMOFS_FORMAT_H */

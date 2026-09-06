@@ -226,6 +226,8 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep_bloc
 int cfs_csum_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t crc);
 int cfs_csum_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t *crc);   /* -ENOENT: none stored */
 int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *block);
+int cfs_aead_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const struct cfs_csum_aead *e);
+int cfs_aead_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, struct cfs_csum_aead *e);
 /* Read a data or directory block and check it against the checksum its
  * inode records, taking another copy of a mirrored member when the
  * first does not match and repairing what did not. */

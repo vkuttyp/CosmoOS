@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 6 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 7 && CFS_VERSION_MIN == 2);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);
     EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
@@ -79,6 +79,16 @@ static void test_layout_sizes(void)
     uint64_t pblk = 0;
     EXPECT(cfs_map_block(&rec, 1, 18, &pblk) == -1);
     EXPECT(cfs_map_block(&plain, 1, 12, &pblk) == 1 && pblk == 4096 + 12);
+
+    /* Version 7: the authenticated checksum entry, and the key block. */
+    EXPECT(sizeof(struct cfs_csum_aead) == 32);
+    EXPECT(CFS_AEAD_PER_BLOCK == CFS_PAYLOAD / 32);
+    EXPECT(cfs_aead_index(0) == 0 && cfs_aead_slot(0) == 0);
+    EXPECT(cfs_aead_index(CFS_AEAD_PER_BLOCK) == 1 && cfs_aead_slot(CFS_AEAD_PER_BLOCK) == 0);
+    EXPECT(cfs_aead_slot(CFS_AEAD_PER_BLOCK - 1) == CFS_AEAD_PER_BLOCK - 1);
+    EXPECT(sizeof(struct cfs_keys) <= CFS_PAYLOAD);
+    EXPECT(CFS_CSUM_POLY1305 == 2 && CFS_KDF_SHA512 == 1);
+    EXPECT(sizeof(struct cfs_super) <= CFS_BLOCK);   /* key_root came out of reserved */
 }
 
 static void test_inode_indices(void)

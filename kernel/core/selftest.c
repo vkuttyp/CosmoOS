@@ -345,6 +345,7 @@ static const struct selftest tests[] = {
     { "cosmofs-mirror", selftest_cosmofs_mirror },
     { "cosmofs-mirror-stale", selftest_cosmofs_mirror_stale },
     { "cosmofs-compress", selftest_cosmofs_compress },
+    { "cosmofs-crypt", selftest_cosmofs_crypt },
     { "cosmofs-reserve", selftest_cosmofs_reserve },
     { "cosmofs-fallback", selftest_cosmofs_fallback },
     { "cosmofs-writeback", selftest_cosmofs_writeback },
