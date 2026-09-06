@@ -531,7 +531,12 @@ the only thing that runs there. So:
 1. `cpu_prepare` accepts EL2 and, when it sees it, allocates one page
    (EFI type `EFI_MEMORY_TYPE_COSMO_EL2`, reported as
    `COSMOBOOT_MEM_EL2_STUB`, which the kernel never frees) and copies the
-   stub into it. The stub is position-independent and self-contained: a
+   stub into it. If that page cannot be had, the loader refuses to boot:
+   there is no safe way to drop to EL1 leaving `VBAR_EL2` on firmware
+   vectors that `ExitBootServices` has invalidated. If the firmware
+   refused the loader's memory type, the range is retyped in the map
+   with the other loader ranges, so the kernel does not hand the EL2
+   vectors to its own allocator. The stub is position-independent and self-contained: a
    vector table plus a handler.
 2. `cpu_jump_to_kernel` programs the EL1 translation registers exactly
    as it always did, then programs EL2 — `HCR_EL2.RW` (EL1 is AArch64),

@@ -62,6 +62,11 @@ uint64_t cpu_el2_stub(void)
     return 0;   /* an AArch64 notion */
 }
 
+bool cpu_el2_type_fallback(void)
+{
+    return false;
+}
+
 bool cpu_prepare(void)
 {
     if (cpu_has_nx())

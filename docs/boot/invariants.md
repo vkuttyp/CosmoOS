@@ -107,8 +107,15 @@ MMU off so nothing it owns depends on firmware page tables the kernel
 will reclaim, and `eret`s to the kernel entry with the EL1 translation
 registers already programmed; `el2_stub_phys` names that page. Handing
 over at EL2 without a stub is forbidden: EL1 could neither use EL2 nor
-discover that it exists. A loader that cannot reserve the page hands
-over at EL1 with `el2_stub_phys = 0` and says so in its log. Check: the
+discover that it exists. A loader that started at EL2 and cannot reserve
+the page **refuses to boot** rather than handing over: dropping to EL1
+with `VBAR_EL2` still pointing at firmware vectors that
+`ExitBootServices` has made meaningless would turn the first exception
+to EL2 — an `HVC` from EL1, which is how PSCI is routed on some
+machines — into a jump through reclaimed memory. The page is also
+retyped in the memory map when the firmware refused the loader's own
+memory type, exactly as the kernel image and the archive are; otherwise
+the kernel would free the vectors EL2 is using. Check: the
 `el2` self-test (the stub answers its version, takes a new vector table
 and gives it back) and the two boot markers the harness requires when
 `QEMU_EL2` is not 0; `QEMU_EL2=0` covers the other side. Gap: only QEMU

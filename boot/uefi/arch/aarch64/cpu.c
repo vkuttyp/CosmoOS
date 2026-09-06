@@ -42,6 +42,12 @@ extern const uint8_t el2_stub_begin[];
 extern const uint8_t el2_stub_end[];
 
 static uint64_t g_el2_stub;   /* physical address of the copy, 0 when we booted at EL1 */
+static bool g_el2_type_fallback;   /* the firmware refused the loader's memory type */
+
+bool cpu_el2_type_fallback(void)
+{
+    return g_el2_type_fallback;
+}
 
 uint64_t cpu_el2_stub(void)
 {
@@ -60,19 +66,26 @@ bool cpu_prepare(void)
     /* EL2: keep it. One page, never freed by the kernel, holding a stub
      * that answers HVC so EL1 has a way back up
      * (docs/kernel/arch/aarch64/design.md, "Exception level 2"). */
+    /* Refusing here is the only safe answer. Dropping to EL1 without a
+     * stub would leave VBAR_EL2 pointing at firmware vectors that
+     * ExitBootServices makes meaningless, so the first exception to EL2
+     * -- an HVC from EL1, which is how PSCI is routed on some machines
+     * -- would jump into reclaimed memory. Better to say so and stop
+     * (docs/boot/invariants.md BT13). */
     size_t len = (size_t)(el2_stub_end - el2_stub_begin);
     if (len == 0 || len > PAGE_SIZE) {
-        lprintf("cosmoboot: EL2 stub is %u bytes; not installed\n", (unsigned)len);
-        return true;   /* boot on at EL1 without it: the kernel reports no EL2 */
+        lprintf("cosmoboot: the EL2 stub is %u bytes, which does not fit its page\n", (unsigned)len);
+        return false;
     }
     EFI_PHYSICAL_ADDRESS addr = 0;
     bool fallback = false;
     EFI_STATUS st = alloc_pages_low(1, EFI_MEMORY_TYPE_COSMO_EL2, &addr, &fallback);
     if (EFI_ERROR(st)) {
-        lprintf("cosmoboot: no page for the EL2 stub (0x%llx); continuing without EL2\n",
+        lprintf("cosmoboot: no page for the EL2 stub (0x%llx); cannot hand over from EL2\n",
                 (unsigned long long)st);
-        return true;
+        return false;
     }
+    g_el2_type_fallback = fallback;
     memcpy((void *)(uintptr_t)addr, el2_stub_begin, len);
     g_el2_stub = (uint64_t)addr;
     lprintf("cosmoboot: EL2 stub at 0x%llx (%u bytes)\n", (unsigned long long)addr, (unsigned)len);
@@ -118,6 +131,9 @@ static uint64_t tcr_value(void)
  * (docs/kernel/arch/aarch64/design.md, "Exception level 2"). */
 static void jump_from_el2(uint64_t stack_top, uint64_t info, uint64_t entry, uint64_t stub)
 {
+    /* cpu_prepare refused to continue without one. */
+    if (stub == 0)
+        cpu_halt();
     uint64_t midr, mpidr;
     __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
@@ -129,9 +145,7 @@ static void jump_from_el2(uint64_t stack_top, uint64_t info, uint64_t entry, uin
         "msr vttbr_el2, xzr\n\t"
         "msr vpidr_el2, %[midr]\n\t"
         "msr vmpidr_el2, %[mpidr]\n\t"
-        "cbz %[stub], 1f\n\t"
         "msr vbar_el2, %[stub]\n\t"
-        "1:\n\t"
         "isb\n\t"
         /* EL2 runs unmapped from here: this code is identity mapped by
          * firmware, and after the ERET nothing executes at EL2 until an

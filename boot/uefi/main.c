@@ -415,6 +415,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (n == 0)
         die("memory map does not fit in bootinfo", EFI_BUFFER_TOO_SMALL);
 
+    /* The EL2 stub is allocated in cpu_prepare, before this flag exists. */
+    if (cpu_el2_type_fallback())
+        type_fallback = true;
     if (type_fallback) {
         /* The firmware refused loader-defined types, so these ranges are
          * currently reclaimable in the map. Retype them from the explicit
@@ -425,7 +428,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                   mark_range(entries, &n, max, pg.pool_phys, pg.pool_pages * PAGE_SIZE,
                              COSMOBOOT_MEM_BOOT_PAGETABLES) &&
                   mark_range(entries, &n, max, (uint64_t)(uintptr_t)archive, BYTES_TO_PAGES(archive_size) * PAGE_SIZE,
-                             COSMOBOOT_MEM_ARCHIVE);
+                             COSMOBOOT_MEM_ARCHIVE) &&
+                  (cpu_el2_stub() == 0 ||
+                   mark_range(entries, &n, max, cpu_el2_stub(), PAGE_SIZE, COSMOBOOT_MEM_EL2_STUB));
         if (!ok)
             die("memory map has no room to retype loader ranges", EFI_BUFFER_TOO_SMALL);
     }

@@ -47,8 +47,14 @@ EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uin
 bool cpu_prepare(void);
 /* AArch64: the physical address of the resident EL2 stub, or 0 when
  * firmware handed control over at EL1 (no EL2 to keep). Other
- * architectures return 0. */
+ * architectures return 0. A loader that reaches ExitBootServices having
+ * started at EL2 always has one: `cpu_prepare` refuses to continue
+ * otherwise (docs/boot/invariants.md BT13). */
 uint64_t cpu_el2_stub(void);
+/* Whether that page had to fall back to a standard EFI memory type, so
+ * the caller retypes its range in the map like the other loader
+ * ranges. False on architectures without an EL2. */
+bool cpu_el2_type_fallback(void);
 /* After ExitBootServices, before the jump (x86-64: enable NX and WP). */
 void cpu_finish(void);
 void cpu_halt(void) __attribute__((noreturn));
