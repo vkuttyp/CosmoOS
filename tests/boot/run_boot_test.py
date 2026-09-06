@@ -129,6 +129,16 @@ HV_FORBIDDEN_MARKERS = [
     r"^HVTEST: skipped",
 ]
 
+# Snapshots through the shell (docs/kernel-services/filesystem/cosmofs/
+# testing.md): both machines carry an NVMe disk the nvme self-test leaves
+# formatted, so the shell always has a cosmofs to snapshot.
+SNAPTEST_MARKERS = [
+    r"^SNAPTEST: PASS$",
+]
+SNAP_FORBIDDEN_MARKERS = [
+    r"^SNAPTEST: skipped",
+]
+
 # Only produced by the self-test run of init (debug builds); required
 # whenever self-tests ran at all.
 USERTEST_MARKER = r"^USERTEST: PASS"
@@ -353,6 +363,13 @@ def main():
             # The Linux musl program is x86-only (milestone 10).
             if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
                 failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
+        for pat in SNAPTEST_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (filesystem snapshots)")
+        for pat in SNAP_FORBIDDEN_MARKERS:
+            hits = [ln for ln in lines if re.search(pat, ln)]
+            if hits:
+                failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
         # The Linux ABI programs run on both architectures (milestone 10).
         for pat in LINUXTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):

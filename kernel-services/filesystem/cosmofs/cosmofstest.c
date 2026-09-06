@@ -716,3 +716,99 @@ bool selftest_cosmofs_badmap(const char **reason)
 #else
 bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
 #endif
+
+/* Snapshots: what the tree was, kept, while the live tree moves on
+ * (design.md, "Format version 3"). */
+bool selftest_cosmofs_snapshot(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct cosmofs_stats st0, st1;
+
+    CHECK(write_file(ENG "/keep", "before", 6));
+    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    CHECK(write_file(ENG "/dir/deep", "old", 3));
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+
+    /* mkdir inside .snapshots takes one, and it commits. */
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/first", 0755) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(st1.generation > st0.generation);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/first", 0755) == -EEXIST);
+
+    /* The live tree moves: rewrite, delete, add. */
+    CHECK(write_file(ENG "/keep", "after!", 6));
+    CHECK(vfs_unlink(NULL, ENG "/dir/deep") == 0);
+    CHECK(write_file(ENG "/fresh", "new", 3));
+    CHECK(read_matches(ENG "/keep", "after!", 6));
+
+    /* The snapshot still has what was there, at every depth. */
+    CHECK(read_matches(ENG "/.snapshots/first/keep", "before", 6));
+    CHECK(read_matches(ENG "/.snapshots/first/dir/deep", "old", 3));
+    struct cosmo_stat s;
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/first/fresh", &s) == -ENOENT);   /* born after it */
+
+    /* A snapshot is read-only, and .snapshots is not a place for files. */
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/.snapshots/first/new", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == -EROFS);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/first/sub", 0755) == -EROFS);
+    CHECK(vfs_unlink(NULL, ENG "/.snapshots/first/keep") == -EROFS);
+
+    /* A second snapshot, with a file born between the two: its blocks
+     * belong to `second` alone, so deleting `second` must return them
+     * even though `first` still exists. That is what makes the
+     * accounting exact rather than conservative (design.md). */
+    static char big[8192];
+    memset(big, 'x', sizeof(big));
+    CHECK(write_file(ENG "/born-late", big, sizeof(big)));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/second", 0755) == 0);
+    CHECK(read_matches(ENG "/.snapshots/second/keep", "after!", 6));
+    CHECK(read_matches(ENG "/.snapshots/first/keep", "before", 6));   /* untouched by the newer one */
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/first/born-late", &s) == -ENOENT);
+
+    /* Kill the late file: its blocks die while only `second` names them. */
+    CHECK(vfs_unlink(NULL, ENG "/born-late") == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before_del, after_del;
+    CHECK(cosmofs_stats(mount_of(ENG), &before_del) == 0);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/second") == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &after_del) == 0);
+    /* Exact: those blocks come back now, not when `first` goes. */
+    CHECK(after_del.free_blocks > before_del.free_blocks);
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/second", &s) == -ENOENT);
+    CHECK(read_matches(ENG "/.snapshots/first/keep", "before", 6));
+    CHECK(read_matches(ENG "/keep", "after!", 6));
+
+    /* Deleting the last one returns its blocks: the free count recovers
+     * to at least what it was before the snapshot existed. */
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/first") == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(st1.free_blocks >= st0.free_blocks);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/first") == -ENOENT);
+    CHECK(read_matches(ENG "/keep", "after!", 6));
+
+    kinfo("selftest: cosmofs-snapshot: history kept and released (%llu free blocks, %llu after)",
+          (unsigned long long)st0.free_blocks, (unsigned long long)st1.free_blocks);
+    return engine_unmount(bd, reason);
+}
+
+/* A snapshot survives an unmount: its entry is on disk, not in memory. */
+bool selftest_cosmofs_snapshot_remount(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    CHECK(write_file(ENG "/f", "v1", 2));
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/s1", 0755) == 0);
+    CHECK(write_file(ENG "/f", "v2", 2));
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(read_matches(ENG "/f", "v2", 2));
+    CHECK(read_matches(ENG "/.snapshots/s1/f", "v1", 2));
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/s1") == 0);
+    kinfo("selftest: cosmofs-snapshot-remount: the snapshot survived the unmount");
+    return engine_unmount(bd, reason);
+}

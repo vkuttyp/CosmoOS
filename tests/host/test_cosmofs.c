@@ -21,7 +21,13 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 2);
+    EXPECT(CFS_VERSION == 3 && CFS_VERSION_MIN == 2);
+    /* The snapshot structures the version adds. */
+    EXPECT(sizeof(struct cfs_snapshot) == 96);
+    EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    EXPECT(sizeof(struct cfs_dead_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
+    EXPECT(CFS_SNAP_INO(3, 7) == ((3ull << 48) | 7) && CFS_INO_OF(CFS_SNAP_INO(3, 7)) == 7);
+    EXPECT(CFS_SNAP_TAG(CFS_SNAP_INO(3, 7)) == 3 && CFS_SNAP_TAG(7) == 0);
     EXPECT(CFS_MHDR_SIZE + CFS_INODES_PER_BLOCK * CFS_INODE_SIZE <= CFS_BLOCK);
 }
 
