@@ -713,9 +713,6 @@ bool selftest_cosmofs_badmap(const char **reason)
     kinfo("selftest: cosmofs-badmap: an inode with unsorted direct runs is refused, not read as holes");
     return engine_unmount(bd, reason);
 }
-#else
-bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
-#endif
 
 /* Snapshots: what the tree was, kept, while the live tree moves on
  * (design.md, "Format version 3"). */
@@ -812,3 +809,8 @@ bool selftest_cosmofs_snapshot_remount(const char **reason)
     kinfo("selftest: cosmofs-snapshot-remount: the snapshot survived the unmount");
     return engine_unmount(bd, reason);
 }
+#else
+bool selftest_cosmofs_badmap(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_snapshot(const char **reason) { (void)reason; return true; }
+bool selftest_cosmofs_snapshot_remount(const char **reason) { (void)reason; return true; }
+#endif

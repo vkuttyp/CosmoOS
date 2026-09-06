@@ -114,6 +114,12 @@ void thread_sleep_ns(uint64_t ns)
     (void)ns;
 }
 
+uint64_t clock_realtime_ns(void);
+uint64_t clock_realtime_ns(void)
+{
+    return 0;   /* a snapshot's creation time; the fuzzer does not read it back */
+}
+
 uint64_t clock_now_ns(void)
 {
     static uint64_t t;
