@@ -12,6 +12,7 @@
 #include <kernel/errno.h>
 #include <kernel/irq.h>
 #include <kernel/kmalloc.h>
+#include <kernel/iommu.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
@@ -374,6 +375,14 @@ void pci_init(void)
 
 void pci_enable_device(struct pci_device *p, bool bus_master)
 {
+    /* Before the device may master the bus it gets its DMA domain, so its
+     * first bus address is already a translated one (kernel/iommu). */
+    if (bus_master) {
+        uint32_t sid = ((uint32_t)p->bus << 8) | ((uint32_t)p->slot << 3) | p->func;
+        int rc = iommu_attach_device(&p->dev, sid);
+        if (rc)
+            kerror("pci: %s: no DMA domain (%d); bus mastering will fault", p->dev.name, rc);
+    }
     uint16_t cmd = pci_cfg_read16(p, PCI_COMMAND);
     cmd |= PCI_COMMAND_MEMORY | PCI_COMMAND_IO;
     if (bus_master)
