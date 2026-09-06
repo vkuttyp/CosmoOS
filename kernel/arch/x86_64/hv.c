@@ -14,7 +14,7 @@
 #include <arch/hv.h>
 #include <x86/cpu.h>
 #include <x86/fpu.h>
-#include <x86/hvops.h>
+#include <arch/hv_backend.h>
 
 static const struct hv_backend *g_be;
 

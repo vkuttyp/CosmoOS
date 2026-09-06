@@ -325,6 +325,22 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             fill_common(v, x, COSMO_VM_EXIT_HLT);
             break;
         }
+        if (e.kind == HV_EXIT_WFI) {
+            /* The AArch64 form of "the guest has nothing to do until an
+             * interrupt": the owner decides whether to inject one and
+             * run again, exactly as for HLT. */
+            fill_common(v, x, COSMO_VM_EXIT_WFI);
+            break;
+        }
+        if (e.kind == HV_EXIT_SYSREG) {
+            /* What CPUID is on x86: the model answers for the registers
+             * it implements, and everything else goes to the owner. */
+            fill_common(v, x, COSMO_VM_EXIT_SYSREG);
+            x->sysreg.iss = e.sysreg.iss;
+            x->sysreg.reg = e.sysreg.reg;
+            x->sysreg.write = e.sysreg.write;
+            break;
+        }
         if (e.kind == HV_EXIT_MMIO) {
             vmdev_mmio(vm, e.mmio.gpa, e.mmio.write);
             fill_common(v, x, COSMO_VM_EXIT_MMIO);
@@ -334,11 +350,22 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         }
         if (e.kind == HV_EXIT_HYPERCALL) {
             fill_common(v, x, COSMO_VM_EXIT_HYPERCALL);
+            /* The calling convention is the architecture's, not this
+             * layer's: x86 uses rax and rbx/rcx/rdx/rsi (the VMMCALL
+             * habit), AArch64 the first five argument registers. */
+#if defined(ARCH_AARCH64)
+            x->hypercall.nr = arch_hv_vcpu_read_gpr(v->arch, 0);
+            x->hypercall.a0 = arch_hv_vcpu_read_gpr(v->arch, 1);
+            x->hypercall.a1 = arch_hv_vcpu_read_gpr(v->arch, 2);
+            x->hypercall.a2 = arch_hv_vcpu_read_gpr(v->arch, 3);
+            x->hypercall.a3 = arch_hv_vcpu_read_gpr(v->arch, 4);
+#else
             x->hypercall.nr = arch_hv_vcpu_read_gpr(v->arch, HV_GPR_RAX);
             x->hypercall.a0 = arch_hv_vcpu_read_gpr(v->arch, HV_GPR_RBX);
             x->hypercall.a1 = arch_hv_vcpu_read_gpr(v->arch, HV_GPR_RCX);
             x->hypercall.a2 = arch_hv_vcpu_read_gpr(v->arch, HV_GPR_RDX);
             x->hypercall.a3 = arch_hv_vcpu_read_gpr(v->arch, HV_GPR_RSI);
+#endif
             break;
         }
         if (e.kind == HV_EXIT_SHUTDOWN) {

@@ -761,6 +761,152 @@ later, and it decides how the backend is verified:
 - The VMX backend's own instruction-level verification, for want of
   hardware.
 
+## The AArch64 EL2 backend
+
+The second half of the audit's AArch64 unit (§11.5), on the EL2 the
+loader now keeps (`docs/kernel/arch/aarch64/design.md`, "Exception level
+2"). Written before the code.
+
+### 1. What has to change above the backend
+
+The manager is vendor-neutral but not architecture-neutral: the register
+file is x86's, and three of the exit kinds describe x86 instructions.
+
+- **`struct cosmo_vcpu_regs` becomes per-architecture.** The UAPI
+  already splits by architecture where it must (`nr_x86_64.h` /
+  `nr_aarch64.h`), and a vCPU's register file is the clearest such case:
+  `rax`/`cs`/`cr0` have no AArch64 meaning and `x0`–`x30`/`sctlr_el1`
+  have no x86 one. Both blocks stay 448 bytes so the system-call shape,
+  the copy sizes and the host-test assertions do not vary by
+  architecture. The AArch64 block is
+  `x[31]`, `sp_el1`, `sp_el0`, `pc`, `pstate`, then the EL1 system state
+  a guest owns — `sctlr_el1`, `ttbr0_el1`, `ttbr1_el1`, `tcr_el1`,
+  `mair_el1`, `vbar_el1`, `esr_el1`, `far_el1`, `elr_el1`, `spsr_el1`,
+  `tpidr_el0`, `tpidr_el1`, `cpacr_el1` — and `pending_irq` where x86
+  has it.
+- **Two new exit kinds**, and one retired for this architecture:
+  `HV_EXIT_WFI` (the guest asked to wait; the manager treats it like
+  `HLT`) and `HV_EXIT_SYSREG` (a trapped system-register access, which
+  is what CPUID is for x86: the backend reports the encoding and the
+  register index, generic code answers). `HV_EXIT_IO` cannot occur —
+  AArch64 has no port space — and the manager's device model reaches
+  guests through `HV_EXIT_MMIO`, which already exists.
+- `HV_EXIT_HYPERCALL` keeps its meaning: `HVC` from the guest.
+
+### 2. Stage 2
+
+The guest's physical memory is a stage-2 translation, which is the same
+shape as the NPT/EPT builders and gets the same treatment: a four-level,
+4 KiB-granule tree of 512-entry tables, permissions per leaf, 2 MiB
+leaves where everything is aligned, and one builder
+(`kernel/arch/aarch64/hv_s2.c`) tested on the host next to the other
+two. The entries are LPAE stage-2 descriptors: `S2AP` (bits 6–7) for
+read and write, `XN` (bits 53–54) for execute, `MemAttr` (bits 2–5)
+normal write-back, `AF` set, `SH` inner-shareable.
+
+`VTCR_EL2` is derived from `ID_AA64MMFR0_EL1.PARange` exactly as the
+SMMU driver derives its stage-2 configuration from `IDR5.OAS` — the same
+lesson, in the same shape: `T0SZ = 64 - PARange bits`, `SL0` for a
+four-level walk, `TG0` 4 KiB, inner-shareable, write-back. `VTTBR_EL2`
+carries the root and the VMID; a VM allocates a VMID from a bitmap as
+the SVM backend allocates an ASID.
+
+Invalidation follows the rule the IOMMU unit wrote down (IOM6) and the
+VMX backend then had to learn: an unmapped page or a reused VMID must be
+invalidated on every CPU that ran the VM, with
+`TLBI VMALLS12E1IS` (which is inner-shareable, so unlike `INVEPT` it
+reaches the other CPUs by itself) followed by `DSB ISH`.
+
+### 3. The world switch
+
+The kernel runs at EL1 and the guest runs at EL1 too, so the switch goes
+through EL2: `el2_set_vectors` (this unit's use for the stub the loader
+left) installs the backend's own EL2 vector table, and a `HVC` with a
+private selector enters the world switch.
+
+```text
+  host EL1                     EL2                        guest EL1
+  vcpu_run ----HVC(RUN)----> save host EL1 state
+                             load guest EL1 state
+                             VTTBR_EL2 = root|VMID
+                             HCR_EL2 = VM|RW|IMO|FMO|TWI|TSC...
+                             ERET -------------------> guest instructions
+                             <----- exception ---------
+                             save guest state
+                             restore host state
+  exit reason <--ERET------- decode ESR_EL2
+```
+
+`HCR_EL2` bits: `VM` (stage 2 on), `RW` (EL1 is AArch64), `TWI` (WFI
+exits), `TSC` (SMC exits), `TID3` (ID-register reads trap, which is how
+the manager hides what the model does not implement), `IMO`/`FMO` so
+physical interrupts are taken to EL2 and the host handler runs after the
+exit — the analogue of SVM's `V_INTR_MASKING` and VMX's
+external-interrupt exiting.
+
+The EL2 code runs with the MMU off, as the stub does, so it addresses
+everything physically: the per-vCPU state it saves and restores lives in
+a page whose physical address the world switch is handed.
+
+### 4. Exits
+
+| `ESR_EL2.EC` | meaning | `hv_exit` |
+|---|---|---|
+| 0x16 | `HVC` from EL1 | `HYPERCALL` |
+| 0x17 | `SMC` | `HYPERCALL` (reported, not forwarded) |
+| 0x18 | trapped `MSR`/`MRS` | `SYSREG` |
+| 0x01 | `WFI`/`WFE` | `WFI` |
+| 0x24 | data abort from a lower EL | `MMIO` (the faulting IPA from `HPFAR_EL2`, direction from `ESR_EL2.WnR`) |
+| 0x20 | instruction abort from a lower EL | `MMIO`, or `FAIL` when the address is not a device |
+| anything else | — | `FAIL`, with `ESR_EL2` and `FAR_EL2` |
+
+A physical interrupt arriving while the guest runs is an EL2 exception
+too, and is reported as `INTR` — the manager's existing "nothing to do
+but run again" case.
+
+### 5. What this unit does not do
+
+- **Virtual interrupts.** GICv2 virtualization (the GICH list registers,
+  the GICV alias mapped into the guest, the maintenance interrupt) is
+  not built: `arch_hv_vcpu_set_irq` records the offer and never delivers
+  it, and the capability set says so, so the manager's `hv-guest-irq`
+  test skips on this architecture rather than lying. The x86 backends
+  are unaffected.
+- **Timers.** `CNTVOFF_EL2` stays 0 and the guest sees the host's
+  virtual counter; nothing traps `CNTV_*`.
+- Nested virtualization, SVE/SME state, debug-register virtualization,
+  PMU virtualization, VHE.
+
+### 6. Tests
+
+The guest images are per-architecture: `tests/hv/x86_64/*.S` and
+`tests/hv/aarch64/*.S`, each built for its own target as a flat binary
+at guest-physical 0x1000. The AArch64 set is one guest per exit the
+switch decodes — `guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`,
+`guest_spin` — and the five `el2-guest-*` self-tests run them:
+
+- **wfi**: the exit names WFI and leaves the PC past it, so a second run
+  reaches the second WFI; the guest's PSTATE still says EL1h.
+- **hvc**: the hypercall carries this architecture's calling convention
+  (`x0` the number, `x1`–`x4` the arguments — the generic loop reads
+  them per architecture), the PC is already past the `HVC` as the
+  architecture defines, and the guest runs on afterwards.
+- **mmio**: a store to guest-physical memory the VM does not have is a
+  stage-2 fault reported with the faulting address and the direction,
+  and the load that follows is reported as a read — the direction is
+  decoded, not guessed.
+- **sysreg**: `HCR_EL2.TID3` traps an ID-register read and the exit
+  names the destination register, which is what lets a model answer.
+- **spin**: a guest that never yields is ended by the host's timer tick
+  (`HCR_EL2.IMO`), which is what keeps it from owning a CPU.
+
+The x86 guest tests keep their images and skip on AArch64, and vice
+versa. `vmctl` runs whichever guest this build carries, so `HVTEST: PASS`
+means a guest really ran from userland on both machines; with
+`QEMU_EL2=0` there is no backend and the sections report skipped, which
+the harness checks too. The host test gains the stage-2 builder next to
+NPT and EPT.
+
 ## Testing strategy
 
 Specified in full in `testing.md`; in outline:

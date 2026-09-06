@@ -143,7 +143,11 @@ static int run(int argc, char **argv)
     }
     struct cosmo_vcpu_regs regs;
     cosmo_vcpu_get_regs(vcpu, &regs);
+#if defined(__aarch64__)
+    regs.pc = entry;      /* the register file is per-architecture (uapi) */
+#else
     regs.rip = entry;
+#endif
     rc = cosmo_vcpu_set_regs(vcpu, &regs);
     if (rc < 0) {
         fprintf(stderr, "vmctl: vcpu_regs: %s\n", strerror(-rc));
@@ -180,6 +184,14 @@ static int run(int argc, char **argv)
         case COSMO_VM_EXIT_MMIO:
             printf("vmctl: mmio %s at 0x%llx, rip 0x%llx: no device; stopping\n", x.mmio.write ? "write" : "read",
                    (unsigned long long)x.mmio.gpa, (unsigned long long)x.rip);
+            return 1;
+        case COSMO_VM_EXIT_WFI:
+            printf("vmctl: waiting for an interrupt at 0x%llx%s\n", (unsigned long long)x.rip,
+                   (x.flags & COSMO_VM_EXIT_F_IRQ_PENDING) ? " (interrupt pending)" : "");
+            return 0;
+        case COSMO_VM_EXIT_SYSREG:
+            printf("vmctl: system register %s (iss 0x%x) into x%u at 0x%llx: no model; stopping\n",
+                   x.sysreg.write ? "write" : "read", x.sysreg.iss, x.sysreg.reg, (unsigned long long)x.rip);
             return 1;
         case COSMO_VM_EXIT_SHUTDOWN:
             printf("vmctl: guest shutdown (triple fault) at 0x%llx\n", (unsigned long long)x.rip);

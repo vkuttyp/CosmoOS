@@ -346,7 +346,27 @@ struct cosmo_vcpu_seg {          /* 16 bytes */
     uint64_t base;
 };
 
-/* VMState: the whole architectural register file of a virtual CPU. */
+/* VMState: the whole architectural register file of a virtual CPU.
+ *
+ * Per architecture, because a register file is: `rax` and `cs` mean
+ * nothing on AArch64 and `x0`/`sctlr_el1` mean nothing on x86-64. Both
+ * blocks are 448 bytes so the system call, the copies and the tests do
+ * not vary with the architecture
+ * (docs/kernel-services/virtualization/design.md). */
+#if defined(__aarch64__)
+struct cosmo_vcpu_regs {         /* 448 bytes */
+    uint64_t x[31];              /* x0..x30 (x30 = LR) */
+    uint64_t sp_el1, sp_el0;
+    uint64_t pc, pstate;         /* ELR_EL1 and SPSR of the guest */
+    /* The EL1 system state a guest owns. */
+    uint64_t sctlr_el1, ttbr0_el1, ttbr1_el1, tcr_el1, mair_el1, amair_el1;
+    uint64_t vbar_el1, esr_el1, far_el1, elr_el1, spsr_el1;
+    uint64_t tpidr_el0, tpidrro_el0, tpidr_el1, contextidr_el1, cpacr_el1;
+    uint64_t par_el1, mdscr_el1;
+    uint64_t pending_irq;        /* get: lowest pending vector, or ~0 when none; set: ignored */
+    uint64_t reserved[8];
+};
+#else
 struct cosmo_vcpu_regs {         /* 448 bytes */
     uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15;
     uint64_t rip, rflags;
@@ -358,6 +378,7 @@ struct cosmo_vcpu_regs {         /* 448 bytes */
     uint64_t pending_irq;        /* get: lowest pending vector, or ~0 when none; set: ignored */
     uint64_t reserved[9];
 };
+#endif
 
 /* VMExit: why vcpu_run returned. */
 struct cosmo_vm_exit {           /* 64 bytes */
@@ -368,6 +389,7 @@ struct cosmo_vm_exit {           /* 64 bytes */
         struct { uint16_t port; uint8_t size; uint8_t write; uint8_t string; uint8_t rep; uint16_t pad;
                  uint32_t value; uint32_t pad2; } io;
         struct { uint64_t gpa; uint32_t write; uint32_t pad; } mmio;
+        struct { uint32_t iss; uint8_t reg; uint8_t write; uint16_t pad; uint32_t pad2; } sysreg;
         struct { uint64_t nr, a0, a1, a2, a3; } hypercall;
         struct { uint32_t code; uint32_t pad; uint64_t info1, info2; } fail;
         uint64_t raw[6];
@@ -380,6 +402,8 @@ struct cosmo_vm_exit {           /* 64 bytes */
 #define COSMO_VM_EXIT_HYPERCALL 4u  /* VMMCALL: nr = rax, args rbx rcx rdx rsi */
 #define COSMO_VM_EXIT_SHUTDOWN  5u  /* triple fault: the vCPU is dead */
 #define COSMO_VM_EXIT_FAIL      6u  /* the hardware refused the state, or an unknown exit */
+#define COSMO_VM_EXIT_WFI       7u  /* AArch64: the guest waited for an interrupt (x86: HLT) */
+#define COSMO_VM_EXIT_SYSREG    8u  /* AArch64: a trapped system register (x86: CPUID/MSR) */
 
 #define COSMO_VM_EXIT_F_IRQ_PENDING 1u  /* a pending vector was not delivered yet */
 

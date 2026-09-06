@@ -70,9 +70,13 @@ pkg list
 # Both architectures carry them (milestone 10); a build without them reports the section skipped.
 sh -c 'ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || exit 0; sh /etc/rc.linux' || FAILS=1
 ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || echo "LINUXTEST: skipped"
-# Virtualization (docs/kernel-services/virtualization/testing.md): run a guest under vmctl.
+# Virtualization (docs/kernel-services/virtualization/testing.md): run a
+# guest under vmctl. The guest images are per-architecture, so the shell
+# runs whichever one this build carries: the x86 console guest, or the
+# AArch64 guest that calls its hypervisor and waits.
 vmctl probe || echo "HVTEST: skipped"
-vmctl probe && vmctl run /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
+ls /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
+ls /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
 vmctl info
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

@@ -470,6 +470,17 @@ See [docs/development.md](docs/development.md).
   back; `QEMU_EL2=0` still boots at EL1 with everything skipping
   cleanly. 130 self-tests. The world switch, stage-2 translation, the
   GIC list registers and timer offsets are the next unit.
+- **The AArch64 EL2 hypervisor backend (in progress):** guests now run
+  on the EL2 the previous unit kept. A vendor-neutral seam came first —
+  `struct cosmo_vcpu_regs` is per architecture (x86's registers on
+  x86-64, `x0`–`x30` with the EL1 system state on AArch64, both 448
+  bytes) and two exits joined the set (`WFI`, `SYSREG`). Then stage-2
+  translation (a third page-table builder beside NPT and EPT, with
+  `VTCR_EL2` derived from `PARange`), and the world switch itself: EL2
+  vectors installed through the loader's stub, host and guest EL1 state
+  exchanged around every entry, exits decoded from `ESR_EL2`. Five
+  AArch64 guests, one per exit the switch decodes, are run by five new
+  self-tests — 135 in total — and `vmctl` runs one from userland.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

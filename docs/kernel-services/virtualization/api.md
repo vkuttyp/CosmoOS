@@ -26,6 +26,24 @@ translates both ways. Real-mode code is `0x009B`, real-mode data
 
 ### `struct cosmo_vcpu_regs` (448 bytes, the VMState)
 
+**Per architecture.** A register file is architecture-specific by
+nature, so the UAPI defines one block per architecture — both 448 bytes,
+so the system call, the copies and the tests do not vary. The AArch64
+block is:
+
+| field | meaning |
+|---|---|
+| `x[31]` | `x0`–`x30` (`x30` is the link register) |
+| `sp_el1`, `sp_el0` | the stack pointers of each level |
+| `pc`, `pstate` | where the guest resumes and in what state; on set, only EL0t/EL1t/EL1h in AArch64 are accepted |
+| `sctlr_el1 ttbr0_el1 ttbr1_el1 tcr_el1 mair_el1 amair_el1` | the guest's own translation state, saved and restored around every entry |
+| `vbar_el1 esr_el1 far_el1 elr_el1 spsr_el1` | its exception state |
+| `tpidr_el0 tpidrro_el0 tpidr_el1 contextidr_el1 cpacr_el1 par_el1 mdscr_el1` | the rest of the EL1 state a guest owns |
+| `pending_irq` | get: the lowest pending vector, `~0` when none; set: ignored |
+| `reserved[8]` | must be zero |
+
+The x86-64 block is:
+
 | field | meaning |
 |---|---|
 | `rax` … `r15` | the sixteen general registers, in the order `rax rbx rcx rdx rsi rdi rbp rsp r8 … r15` |
@@ -66,9 +84,11 @@ struct cosmo_vm_exit {
 | `COSMO_VM_EXIT_HLT` | 1 | the instruction after `hlt` | none; inject a vector and run again, or stop |
 | `COSMO_VM_EXIT_IO` | 2 | the instruction after `in`/`out` | `io`: `port`, `size` 1/2/4, `write`, `string`, `rep`; `value` holds the bytes written for an OUT; for an IN the caller fills `value` and calls `vcpu_run` again |
 | `COSMO_VM_EXIT_MMIO` | 3 | the faulting instruction (not advanced) | `mmio.gpa`, `mmio.write`; the owner completes the access itself (typically `vcpu_regs` to skip the instruction) |
-| `COSMO_VM_EXIT_HYPERCALL` | 4 | after `vmmcall` | `hypercall.nr` = rax, `a0..a3` = rbx rcx rdx rsi |
+| `COSMO_VM_EXIT_HYPERCALL` | 4 | after `vmmcall` (x86) or `hvc` (AArch64, where the architecture already puts it there) | `hypercall.nr` and `a0..a3`, read in the architecture's convention: rax then rbx rcx rdx rsi on x86-64, `x0` then `x1`–`x4` on AArch64 |
 | `COSMO_VM_EXIT_SHUTDOWN` | 5 | where the triple fault happened | none; the vCPU is dead |
 | `COSMO_VM_EXIT_FAIL` | 6 | current | `fail.code`, `info1`, `info2` from the backend; the vCPU is dead |
+| `COSMO_VM_EXIT_WFI` | 7 | after `wfi`/`wfe` | none. AArch64's `HLT`: the guest has nothing to do until an interrupt, and the owner decides whether to give it one |
+| `COSMO_VM_EXIT_SYSREG` | 8 | the trapping instruction (not advanced) | `sysreg.iss` (the `ESR_EL2` encoding), `sysreg.reg` (the guest register the value comes from or goes to), `sysreg.write`. AArch64's CPUID: the owner answers and steps over the instruction |
 
 `COSMO_VM_EXIT_F_IRQ_PENDING` (1): at least one injected vector has not
 been delivered yet.
@@ -233,7 +253,7 @@ arch_hv_vcpu` are incomplete types to generic code.
 | `int arch_hv_probe(struct hv_caps *out)` | Once at boot. Detects the extension and prepares shared state; `-ENOTSUP` (with `present = false`, `name = "none"`) when the CPU lacks it, when firmware disabled it, or when nested paging is missing; `-ENOMEM`. Does not enable it on any CPU: that happens on first use inside `arch_hv_vcpu_run`. |
 | `int arch_hv_vm_create(struct arch_hv_vm **out)` / `void arch_hv_vm_destroy(struct arch_hv_vm *)` | A nested page table root and an address-space tag (ASID); `-ENOTSUP`, `-ENOMEM`, `-ENOSPC` (tags exhausted). Destroy frees every table page. |
 | `int arch_hv_vm_map(vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)` | Maps pages with `prot` (`HV_MAP_READ/WRITE/EXEC`, nonzero); a backend reporting `large_pages` uses a 2 MiB leaf where the guest-physical address, the host-physical address and the remaining length are all aligned. `-EINVAL` (alignment, `prot` 0 or unknown bits), `-EEXIST` (a page or a covering large leaf is already mapped: the call is rolled back), `-ENOMEM`. |
-| `int arch_hv_vm_unmap(vm, uint64_t gpa, size_t len)` | Clears leaves; unmapped pages are ignored; `-EINVAL` (alignment, or a range that would split a 2 MiB leaf — a large leaf goes as a whole). Intermediate tables stay until destroy. |
+| `int arch_hv_vm_unmap(vm, uint64_t gpa, size_t len)` | Clears leaves **and invalidates what the hardware cached for them**; unmapped pages are ignored; `-EINVAL` (alignment, or a range that would split a 2 MiB leaf — a large leaf goes as a whole); `-EIO` when the invalidation could not be made, and the caller must then not reuse the memory (`guestmem` leaks those frames). Intermediate tables stay until destroy. |
 | `bool arch_hv_vm_query(vm, uint64_t gpa, paddr_t *hpa)` | The host-physical address behind a guest-physical one (offset preserved). |
 | `int arch_hv_vcpu_create(vm, struct arch_hv_vcpu **out)` / `void arch_hv_vcpu_destroy(v)` | A control block at the reset state; `-ENOTSUP`, `-ENOMEM`. |
 | `void arch_hv_vcpu_get_state(v, struct cosmo_vcpu_regs *)` | The whole register file; `pending_irq` is `~0` (generic code fills it). |

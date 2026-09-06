@@ -71,13 +71,16 @@ provides `pmm_alloc_pages` and an identity direct map):
 
 ## Kernel self-tests (`kernel-services/virtualization/hvtest.c`)
 
-Eight of the 70 self-tests, run after the Linux ELF test. Each guest test
-builds a VM with 1 MiB at guest-physical 0, copies an image from the boot
-archive (`tests/hv/<name>.bin`, built by `tests/hv/hv.mk` as flat
-binaries linked with `--image-base=0 -Ttext=0x1000 --oformat=binary`) to
-0x1000, creates vCPU 0 and sets `rip` = 0x1000 (real mode, `cs` 0).
-Console output means bytes the guest wrote to port 0xE9, read back with
-`vm_console_read`.
+Each guest test builds a VM with 1 MiB at guest-physical 0, copies an
+image from the boot archive (`tests/hv/<name>.bin`, built by
+`tests/hv/hv.mk` from `tests/hv/$(ARCH)/` as flat binaries linked with
+`--image-base=0 -Ttext=0x1000 --oformat=binary`) to 0x1000, creates vCPU
+0 and points it there: `rip` in real mode with `cs` 0 on x86-64, `pc`
+at EL1 with the MMU off on AArch64. Console output means bytes the guest
+wrote to port 0xE9, read back with `vm_console_read` (x86 only: there is
+no port space on AArch64, and its guests report through their exits).
+The `hv-guest-*` tests are x86's and skip elsewhere; the `el2-guest-*`
+tests are AArch64's and skip on x86.
 
 | test | image | what it checks |
 |---|---|---|
@@ -92,10 +95,28 @@ Console output means bytes the guest wrote to port 0xE9, read back with
 | `hv-guest-spin` | `guest_spin.S` | a guest that never exits: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick reaches the guest even with its IF clear); `.` on the console; a second vCPU, index reuse `-EEXIST`, index 4 `-EINVAL`, `nr_vcpus` bookkeeping; the VM count drops when the last references go |
 | `hv-guest-fpu` | `guest_fpu.S` | the guest rule of `arch/fpu.h`: the test thread takes ownership of register state (`arch_fpu_alloc`) and puts a pattern in xmm0; the guest enables SSE for itself, stores its initial xmm0 at 0x3000 (must be the reset state, zeros: nothing of the owner leaked in) and loads a pattern the test placed at 0x3010; afterwards the owner's xmm0 must still hold its own pattern (nothing of the guest leaked out), and a second run shows the guest kept running |
 
-Without a backend every guest test and `hv-npt` return true after the
-skip line; `hv-probe` then checks the `-ENOTSUP` path instead.
+| `el2-guest-wfi` | `aarch64/guest_wfi.S` | the first `WFI` is a `WFI` exit with the PC past it; a second run reaches the second `WFI`; the guest's PSTATE still reads EL1h, so the switch put it back where it was |
+| `el2-guest-hvc` | `aarch64/guest_hvc.S` | `HVC` is a `HYPERCALL` exit carrying this architecture's convention (`x0` = 0x2A the number, `x1`–`x4` = 1..4 the arguments), with the PC already past the instruction as the architecture defines; the guest runs on afterwards (`x0` becomes 0x2B) and reaches its `WFI` |
+| `el2-guest-mmio` | `aarch64/guest_mmio.S` | a store to 0x4000_0000, which the VM has no memory at, is a stage-2 fault reported as an `MMIO` exit with that address and `write` set; after the owner steps over it the load is reported as a read — the direction comes from `ESR_EL2`, not a guess |
+| `el2-guest-sysreg` | `aarch64/guest_sysreg.S` | `HCR_EL2.TID3` traps `mrs x5, id_aa64pfr0_el1`: a `SYSREG` exit naming register 5 and a read, which is what lets a model answer; the owner writes the answer and steps over it |
+| `el2-guest-spin` | `aarch64/guest_spin.S` | a guest in a one-instruction loop: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick is taken to EL2 through `HCR_EL2.IMO`), and the guest's PC never left the loop |
 
-## The guest images (`tests/hv/`)
+Without a backend every guest test and `hv-npt` return true after the
+skip line; `hv-probe` then checks the `-ENOTSUP` path instead. On
+AArch64 that is what `QEMU_EL2=0` produces.
+
+## The guest images (`tests/hv/<arch>/`)
+
+Each architecture has its own, built for its own target: x86-64's are
+the real-mode and protected-mode guests below, AArch64's are
+`guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg` and `guest_spin`,
+one per exit the EL2 switch decodes. Both sets are flat binaries linked
+at guest-physical 0x1000 and carried in the boot archive as
+`tests/hv/<name>.bin`; the self-tests and `vmctl` load them from there.
+The `el2-guest-*` self-tests are AArch64's, the `hv-guest-*` tests are
+x86's, and each set skips with a note on the other architecture.
+
+## The x86 guest images
 
 All are position-dependent flat binaries for 0x1000. `guest_pio.S`,
 `guest_irq.S`, `guest_cpuid.S`, `guest_shutdown.S`, `guest_spin.S` and

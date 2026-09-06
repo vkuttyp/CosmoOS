@@ -44,8 +44,10 @@ static bool skip_without_backend(const char **reason)
     return false;
 }
 
-/* A VM with 1 MiB at 0 and the named image at 0x1000; one vCPU with rip 0x1000. */
-static int make_guest(const char *image, struct vm **vm_out, struct vcpu **vcpu_out)
+/* A VM with 1 MiB at 0 and the named image at 0x1000; one vCPU entering
+ * there. The guests are per-architecture, so on a build whose guests are
+ * all compiled out these helpers go unused. */
+static __maybe_unused int make_guest(const char *image, struct vm **vm_out, struct vcpu **vcpu_out)
 {
     const void *data;
     size_t size;
@@ -64,7 +66,11 @@ static int make_guest(const char *image, struct vm **vm_out, struct vcpu **vcpu_
     if (rc == 0) {
         struct cosmo_vcpu_regs regs;
         vcpu_get_regs(v, &regs);
+#if defined(ARCH_AARCH64)
+        regs.pc = LOAD_GPA;
+#else
         regs.rip = LOAD_GPA;
+#endif
         rc = vcpu_set_regs(v, &regs);
     }
     if (rc) {
@@ -78,7 +84,7 @@ static int make_guest(const char *image, struct vm **vm_out, struct vcpu **vcpu_
     return 0;
 }
 
-static void drop_guest(struct vm *vm, struct vcpu *v)
+static __maybe_unused void drop_guest(struct vm *vm, struct vcpu *v)
 {
     kobject_put(&v->obj);
     kobject_put(&vm->obj);
@@ -88,6 +94,13 @@ static void drop_guest(struct vm *vm, struct vcpu *v)
 
 bool selftest_hv_guest_fpu(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-fpu: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     /* This (kernel) thread takes ownership of register state for the
@@ -125,9 +138,10 @@ bool selftest_hv_guest_fpu(const char **reason)
     if (!owned)
         arch_fpu_free(me);
     return true;
+#endif
 }
 
-static bool console_is(struct vm *vm, const char *expect)
+static __maybe_unused bool console_is(struct vm *vm, const char *expect)
 {
     char buf[64];
     size_t n = vm_console_read(vm, buf, sizeof(buf) - 1);
@@ -148,7 +162,7 @@ bool selftest_hv_probe(const char **reason)
         CHECK(vm_create(0, HV_VM_MEM_MAX, &vm) == -ENOTSUP);
         return true;
     }
-    CHECK(strcmp(c->name, "svm") == 0 || strcmp(c->name, "vmx") == 0);
+    CHECK(strcmp(c->name, "svm") == 0 || strcmp(c->name, "vmx") == 0 || strcmp(c->name, "el2") == 0);
     CHECK(c->nested_paging);
     CHECK(c->max_asids >= 2);
     /* A backend that cannot run the architectural reset state has no
@@ -241,6 +255,13 @@ bool selftest_hv_npt(const char **reason)
 
 bool selftest_hv_guest_pio(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-pio: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -267,10 +288,18 @@ bool selftest_hv_guest_pio(const char **reason)
     CHECK(v->exits >= 4 && v->entries >= 4);
     drop_guest(vm, v);
     return true;
+#endif
 }
 
 bool selftest_hv_guest_irq(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-irq: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -300,10 +329,18 @@ bool selftest_hv_guest_irq(const char **reason)
     CHECK(console_is(vm, "I"));
     drop_guest(vm, v);
     return true;
+#endif
 }
 
 bool selftest_hv_guest_cpuid(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-cpuid: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -321,10 +358,18 @@ bool selftest_hv_guest_cpuid(const char **reason)
     CHECK(vcpu_run(v, &x) == 0 && x.kind == COSMO_VM_EXIT_HLT);
     drop_guest(vm, v);
     return true;
+#endif
 }
 
 bool selftest_hv_guest_pm(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-pm: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -357,10 +402,18 @@ bool selftest_hv_guest_pm(const char **reason)
     CHECK(vcpu_set_regs(v, &regs) == -EINVAL);
     drop_guest(vm, v);
     return true;
+#endif
 }
 
 bool selftest_hv_guest_shutdown(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-shutdown: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -379,10 +432,18 @@ bool selftest_hv_guest_shutdown(const char **reason)
     CHECK(vcpu_get_regs(v, &regs) == 0);                /* state still readable */
     drop_guest(vm, v);
     return true;
+#endif
 }
 
 bool selftest_hv_guest_spin(const char **reason)
 {
+#if !defined(ARCH_X86_64)
+    /* This guest image and these expectations are x86's; the AArch64
+     * guests are covered by the el2-* tests. */
+    (void)reason;
+    kinfo("selftest: hv-spin: an x86 guest; skipping");
+    return true;
+#else
     if (skip_without_backend(reason))
         return true;
     struct vm *vm;
@@ -406,6 +467,7 @@ bool selftest_hv_guest_spin(const char **reason)
     drop_guest(vm, v);
     CHECK(hv_vm_count() == before - 1);
     return true;
+#endif
 }
 
 /* AArch64: the EL2 the loader kept (docs/kernel/arch/aarch64/design.md,
@@ -422,8 +484,17 @@ bool selftest_el2_stub(const char **reason)
     }
     uint64_t stub = el2_stub_phys();
     CHECK(stub != 0 && (stub & (PAGE_SIZE - 1)) == 0);
+    CHECK(el2_call_raw(0x1234, 0) == -1);            /* a selector nobody knows */
+    if (hv_caps()->present) {
+        /* The hypervisor backend owns EL2 on this CPU by now: its own
+         * vectors answer, and the stub's ABI is gone until they hand it
+         * back. That the switch answers at all is the check here. */
+        CHECK(el2_call_raw(HV_EL2_CALL_VERSION, 0) == HV_EL2_VERSION);
+        kinfo("selftest: el2: the EL2 backend owns the vectors (switch v%u), stub page 0x%llx",
+              HV_EL2_VERSION, (unsigned long long)stub);
+        return true;
+    }
     CHECK(el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION);
-    CHECK(el2_call_raw(0x1234, 0) == -1);            /* a selector it does not know */
     /* Hand EL2 to another vector table and take it back. The stub's own
      * base is a vector table, so this is the swap without the risk. */
     CHECK(el2_set_vectors(stub) == 0);
@@ -439,3 +510,142 @@ bool selftest_el2_stub(const char **reason)
     return true;
 #endif
 }
+
+/* --- AArch64 guests (docs/kernel-services/virtualization/testing.md) --- */
+
+#if defined(ARCH_AARCH64)
+/* The EL2 backend's own guests: one per exit the world switch decodes.
+ * Each image is loaded at guest-physical 0x1000 and entered at EL1 with
+ * the MMU off, which is this architecture's reset state. */
+
+bool selftest_el2_guest_wfi(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_wfi.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    /* The guest's first instruction is WFI: the exit names it, and the
+     * PC is past it so a second run reaches the second WFI. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI && x.rip == LOAD_GPA + 4);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI && x.rip == LOAD_GPA + 8);
+    /* The guest's own registers survive a round trip through EL2. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(regs.pc == LOAD_GPA + 8);
+    CHECK((regs.pstate & 0xF) == 0x5);          /* still EL1h */
+    drop_guest(vm, v);
+    return true;
+}
+
+bool selftest_el2_guest_hvc(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_hvc.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+    /* The registers the guest set, as the manager reports them. */
+    CHECK(x.hypercall.nr == 0x2A);
+    CHECK(x.hypercall.a0 == 1 && x.hypercall.a1 == 2 && x.hypercall.a2 == 3 && x.hypercall.a3 == 4);
+    /* HVC leaves the PC on the instruction after it: the guest runs on
+     * without the owner moving anything. */
+    CHECK(x.rip == LOAD_GPA + 6 * 4);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(regs.x[0] == 0x2B);                   /* the add after the HVC ran */
+    CHECK(regs.x[4] == 4);
+    drop_guest(vm, v);
+    return true;
+}
+
+bool selftest_el2_guest_mmio(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_mmio.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    /* A store to guest-physical memory the VM does not have: a stage-2
+     * fault, reported with the address and the direction. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_MMIO);
+    CHECK(x.mmio.gpa == 0x40000000ull);
+    CHECK(x.mmio.write);
+    /* The owner steps over the store; the load that follows is a read. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa == 0x40000000ull && !x.mmio.write);
+    drop_guest(vm, v);
+    return true;
+}
+
+bool selftest_el2_guest_sysreg(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_sysreg.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    /* HCR_EL2.TID3 traps the ID-register read: the manager is told which
+     * register the guest wanted it in, and that it was a read. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
+    CHECK(x.sysreg.reg == 5);                   /* mrs x5, ... */
+    CHECK(!x.sysreg.write);
+    /* Answer as a model would and step over the instruction. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.x[5] = 0;
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    drop_guest(vm, v);
+    return true;
+}
+
+bool selftest_el2_guest_spin(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_spin.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    /* The guest never leaves its loop; the host's timer tick is taken to
+     * EL2 (HCR_EL2.IMO) and ends the run, which is what keeps a guest
+     * from owning a CPU. */
+    CHECK(vcpu_run_limited(v, &x, 5) == -ETIMEDOUT);
+    CHECK(v->exits >= 5);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(regs.pc == LOAD_GPA);                 /* still in its one-instruction loop */
+    drop_guest(vm, v);
+    return true;
+}
+#else
+bool selftest_el2_guest_wfi(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
+#endif

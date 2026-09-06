@@ -23,7 +23,7 @@
 
 #include <x86/cpu.h>
 #include <x86/fpu.h>
-#include <x86/hvops.h>
+#include <arch/hv_backend.h>
 #include <x86/hvseg.h>
 #include <x86/svm.h>
 
