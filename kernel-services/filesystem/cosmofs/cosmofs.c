@@ -299,7 +299,18 @@ static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne
     if (old)
         *old = 0;
     struct cfs_extent *out = kmalloc((n + 2) * sizeof(*out), 0);
-    if (out == NULL) {
+    /* Displaced blocks are noted here and released only once the new map
+     * is stored. Releasing them as they are found would hand them to the
+     * next commit while the inode still pointed at them, if storing the
+     * map then failed -- and a block freed while something references it
+     * is the one mistake this filesystem must never make. A range of
+     * `count` logical blocks displaces at most `count` physical ones: a
+     * plain run uses one each, and a record uses fewer than it covers. */
+    uint64_t *freed = kmalloc((size_t)count * sizeof(*freed), 0);
+    unsigned nfreed = 0;
+    if (out == NULL || freed == NULL) {
+        kfree(out);
+        kfree(freed);
         kfree(ext);
         return -ENOMEM;
     }
@@ -321,8 +332,8 @@ static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne
                 rc = -EIO;   /* a record straddling the range: not ours to cut */
                 goto out;
             }
-            for (uint32_t k = 0; k < cfs_ext_psize(&e); k++)
-                cfs_free_block_deferred(fs, e.start + k);
+            for (uint32_t k = 0; k < cfs_ext_psize(&e) && nfreed < count; k++)
+                freed[nfreed++] = e.start + k;
             continue;   /* displaced whole */
         }
         /* In logical order: what of this run lies before the new
@@ -338,8 +349,8 @@ static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne
         if (count == 1 && old && from == lblk)
             *old = e.start + (lblk - e.lblk);   /* the caller frees this one */
         else
-            for (uint64_t k = from; k < to; k++)
-                cfs_free_block_deferred(fs, e.start + (k - e.lblk));
+            for (uint64_t k = from; k < to && nfreed < count; k++)
+                freed[nfreed++] = e.start + (k - e.lblk);
         if (eend > end)
             out[m++] = (struct cfs_extent){ e.start + (end - e.lblk), (uint32_t)(eend - end), (uint32_t)end };
     }
@@ -347,7 +358,11 @@ static int set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne
         out[m++] = ne;   /* beyond every run */
     m = extents_merge(out, m);
     rc = extents_store(fs, in, out, m);
+    if (rc == 0)
+        for (unsigned i = 0; i < nfreed; i++)
+            cfs_free_block_deferred(fs, freed[i]);
 out:
+    kfree(freed);
     kfree(out);
     kfree(ext);
     return rc;
@@ -376,7 +391,11 @@ static int drop_range(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint6
     if (rc)
         return rc;
     struct cfs_extent *out = kmalloc((n + 2) * sizeof(*out), 0);
-    if (out == NULL) {
+    uint64_t *freed = kmalloc((size_t)count * sizeof(*freed), 0);
+    unsigned nfreed = 0;
+    if (out == NULL || freed == NULL) {
+        kfree(out);
+        kfree(freed);
         kfree(ext);
         return -ENOMEM;
     }
@@ -394,21 +413,25 @@ static int drop_range(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint6
                 rc = -EIO;   /* a record hanging out of the range: not ours to cut */
                 goto out;
             }
-            for (uint32_t k = 0; k < cfs_ext_psize(&e); k++)
-                cfs_free_block_deferred(fs, e.start + k);
+            for (uint32_t k = 0; k < cfs_ext_psize(&e) && nfreed < count; k++)
+                freed[nfreed++] = e.start + k;
             continue;
         }
         if (e.lblk < lblk)
             out[m++] = (struct cfs_extent){ e.start, (uint32_t)(lblk - e.lblk), e.lblk };
         uint64_t from = lblk > e.lblk ? lblk : e.lblk, to = end < eend ? end : eend;
-        for (uint64_t k = from; k < to; k++)
-            cfs_free_block_deferred(fs, e.start + (k - e.lblk));
+        for (uint64_t k = from; k < to && nfreed < count; k++)
+            freed[nfreed++] = e.start + (k - e.lblk);
         if (eend > end)
             out[m++] = (struct cfs_extent){ e.start + (end - e.lblk), (uint32_t)(eend - end), (uint32_t)end };
     }
     m = extents_merge(out, m);
     rc = extents_store(fs, in, out, m);
+    if (rc == 0)
+        for (unsigned i = 0; i < nfreed; i++)
+            cfs_free_block_deferred(fs, freed[i]);
 out:
+    kfree(freed);
     kfree(out);
     kfree(ext);
     return rc;

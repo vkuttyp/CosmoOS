@@ -100,8 +100,10 @@ Referenced live vnode or NULL. The hash holds no reference of its own.
 **`int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done)`**
 Optional vnode operation: `n` consecutive dirty pages from `index`,
 offered together so a filesystem can write them as one object. It
-reports in `done` how many it took (at least 1), and the cache writes
-the rest through `writepage`. Called with the page cache's lock held, so
+reports in `done` how many it took (at least 1, at most `n`); the pages
+it did not take stay dirty and are offered again starting from the first
+of them, so a filesystem that takes one page at a time makes the same
+progress it would have through `writepage`. Called with the page cache's lock held, so
 it must not call back into the cache. Compression needs it: a single
 block that compresses to a quarter of itself still occupies a block, so
 the only thing worth compressing is several blocks at once.

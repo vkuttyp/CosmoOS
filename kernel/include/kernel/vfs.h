@@ -53,9 +53,12 @@ struct vnode_ops {
      * together so a filesystem can write them as one object -- which is
      * what compression needs, since a single block that compresses to a
      * quarter of itself still occupies a block. Reports in `done` how
-     * many it took (at least 1 on success); the cache writes the rest
-     * through writepage. Called with the page cache's lock held, so it
-     * must not call back into the cache. */
+     * many it took (at least 1 on success, at most `n`); the pages it
+     * did not take stay dirty and are offered again from the first of
+     * them, so a filesystem that takes one page at a time makes the
+     * same progress it would have through writepage. Called with the
+     * page cache's lock held, so it must not call back into the
+     * cache. */
     int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done);
     int (*truncate)(struct vnode *vn, uint64_t size);
     int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);      /* VNODE_CHR */
