@@ -90,6 +90,25 @@ changes (files). Implementations: sockets (`socket.wait`), pipe ends
 events)` applies the defaults (NULL for a plain object or a type without
 the operation).
 
+## Polling (`kernel/include/kernel/poll.h`, `kernel/io/poll.c`, milestone 10)
+
+### `int io_poll(struct io_pollfd *fds, unsigned n, uint64_t timeout_ns)`
+- `struct io_pollfd { struct kobject *obj; unsigned events; unsigned
+  revents; }`: `obj` NULL means the entry is ignored; `events` are
+  `COSMO_IO_*` bits of interest; `revents` receives `ready & events`
+  plus `HANGUP`/`ERROR` whenever set.
+- Returns the number of entries with any bit set; when none: sleeps on
+  every object's `poll_wq` (armed with `waitqueue_prepare` before
+  readiness is re-read, the AIO ring's protocol) until one may have
+  changed, `timeout_ns` passes (0: return at once; `IO_POLL_FOREVER`: no
+  timeout) or the process is killed or has a signal to take
+  (`-EINTR`). Objects without a `poll_wq` are re-checked only when
+  another entry wakes the caller or the timeout ends. `-ENOMEM` for the
+  wait entries. Thread context; may block. The caller holds every
+  object reference.
+- Users: Linux `poll`/`ppoll` (`compat/linux/syscalls.c`); a native
+  `poll` can be added the same way.
+
 ### `bool io_nonblocking(bool object_nonblock)` (`kernel/include/kernel/thread.h`)
 True when the object is non-blocking or the current thread is executing
 a ring entry (`thread.io_nonblock`). Every wait site that honours a

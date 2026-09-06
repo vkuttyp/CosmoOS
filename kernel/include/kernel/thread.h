@@ -17,6 +17,7 @@
 #include <kernel/completion.h>
 #include <kernel/lockdep_core.h>
 #include <kernel/list.h>
+#include <kernel/signal.h>
 #include <kernel/percpu.h>
 #include <kernel/types.h>
 
@@ -79,6 +80,16 @@ struct thread {
     struct lockdep_held held_mutex[LOCKDEP_MAX_HELD_MUTEX];   /* lockdep: mutexes this thread holds */
     unsigned nr_held_mutex;
     bool io_nonblock;                   /* the I/O ring executes an entry: object waits return -EAGAIN instead */
+    /* Milestone 10: user threads and signals (docs/kernel/process/design.md §11). */
+    struct arch_user_regs *init_regs;   /* a clone's first register set, freed at its first user entry */
+    uint64_t sig_pending, sig_blocked;  /* under proc->lock */
+    uint64_t sig_saved_blocked;         /* the mask to restore after a temporary one (sig_restore_blocked) */
+    bool sig_restore_blocked;
+    struct signal_info *sig_info;       /* SIG_MAX entries, the pending signals' details; user threads only */
+    struct sigaltstack_k altstack;
+    uint64_t syscall_nr, syscall_arg0;  /* the call in progress, for SA_RESTART */
+    uint64_t clear_child_tid;           /* Linux: zeroed and futex-woken at exit */
+    uint32_t lx_tid;                    /* the Linux view of the id */
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation

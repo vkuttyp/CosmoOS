@@ -24,7 +24,7 @@ static int g_failures;
 int main(void)
 {
     /* layouts */
-    CHECK(sizeof(struct lx_stat) == 144);
+    CHECK(sizeof(struct lx_stat) == LX_STAT_SIZE);
     CHECK(sizeof(struct lx_utsname) == 390);
     CHECK(sizeof(struct lx_sockaddr_in) == 16 && sizeof(struct lx_sockaddr_in6) == 28);
     CHECK(sizeof(struct lx_sigaction) == 32);

@@ -14,7 +14,12 @@ void aarch64_context_start(void);
 
 void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
 {
-    (void)prev;   /* no thread owns FP/SIMD state in stage 1 (fpu.c) */
+    /* No thread owns FP/SIMD state in stage 1 (fpu.c). The thread pointer
+     * register is user-writable (a libc sets it with MSR, not a system
+     * call), so the outgoing user thread's value is saved here before the
+     * incoming one's is loaded (milestone 10). */
+    if (prev != NULL && prev->proc != NULL)
+        prev->tls_base = (uintptr_t)READ_SYSREG(tpidr_el0);
     /* No TSS: the kernel stack for the next exception from EL0 is simply
      * SP_EL1 at the moment of eret, i.e. the thread's own stack. */
     uintptr_t kstack = next->stack_base + next->stack_size;

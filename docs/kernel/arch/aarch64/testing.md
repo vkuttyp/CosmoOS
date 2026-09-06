@@ -50,14 +50,14 @@ Architecture-dependent markers:
 
 | Marker | x86-64 | AArch64 |
 |---|---|---|
-| Linux ABI (`hello from linux abi`, `LINUXTEST: PASS`, musl line) | required | not checked |
+| Linux ABI (`hello from linux abi`, `LINUXTEST: PASS`, `lxinterp: ok`, `lxdyn: ok`, the seven `lxsig` lines) | required | **required** (milestone 10: the personality's AArch64 table) |
+| musl line | required when `HAVE_MUSL=1` | not built (x86-64 machine code) |
 | Virtualization (`HVTEST: PASS`, `hv-*` self-tests) | required; `HVTEST: skipped` and `selftest: hv: skipped` forbidden | not checked |
-| `LINUXTEST: skipped`, `HVTEST: skipped` | forbidden | **required** (the x86-only sections must report themselves skipped, proving `rc.test` reached them) |
+| `HVTEST: skipped` | forbidden | **required** (the x86-only section must report itself skipped, proving `rc.test` reached it) |
 
-`rc.test` runs `/etc/rc.linux` only if `/boot/tests/linux/lxhello`
-exists (the Makefile includes `tests/linux` and `tests/hv` only for
-`ARCH=x86_64`) and prints `LINUXTEST: skipped` otherwise; `vmctl probe`
-fails without `/dev/vmm` and prints `HVTEST: skipped`.
+`rc.test` runs `/etc/rc.linux` when `/boot/tests/linux/lxhello` exists
+(both architectures) and prints `LINUXTEST: skipped` otherwise; `vmctl
+probe` fails without `/dev/vmm` and prints `HVTEST: skipped`.
 
 The same chain as x86 is run before a phase is declared complete:
 `QEMU_SMP=1 make ARCH=aarch64 test`, `make ARCH=aarch64 BUILD=release

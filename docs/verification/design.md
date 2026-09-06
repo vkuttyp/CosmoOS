@@ -18,7 +18,7 @@ target adds assertions (below).
 | Target | Code under test | Extra assertions |
 |---|---|---|
 | `fuzz_modelf` | `modelf_validate`, `modelf_check_info` (`kernel/module/modelf.c`, `MODELF_HOST_TEST`) | a layout returned with 0 describes sections inside the image |
-| `fuzz_elf` | `elf_validate` (`kernel/process/elf.c`, `ELF_HOST_TEST` leaves out `elf_load_into`) | every segment reported lies inside the image and the user window |
+| `fuzz_elf` | `elf_validate` (`kernel/process/elf.c`, `ELF_HOST_TEST` leaves out `elf_load_into`) | every segment reported lies inside the image and the user window (relative to 0 and inside the window's span for `ET_DYN`, milestone 10) |
 | `fuzz_pkg` | `manifest_parse`, `index_parse`, `version_parse`, `depend_parse`, `path_allowed`, `hex_decode`, `tar_open`/`tar_next` (`pkg/`) | a tar member's data lies inside the buffer |
 | `fuzz_linux` | `lx_sockaddr_to_netaddr`, `lx_sockaddr_from_netaddr`, `lx_dirents_from_native`, `lx_open_flags`, `lx_prot` (`compat/linux/convert.c`) | the output length never exceeds the capacity given |
 | `fuzz_virtq` | the split virtqueue (`drivers/virtio/virtqueue.c`) against a device model driven by the input | `virtq_pop` returns only cookies the driver added and not yet reclaimed; `num_free` never exceeds the size |

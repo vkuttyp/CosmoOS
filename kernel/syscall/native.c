@@ -23,6 +23,7 @@
 #include <kernel/printf.h>
 #include <kernel/process.h>
 #include <kernel/sched.h>
+#include <kernel/signal.h>
 #include <kernel/socket.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
@@ -145,8 +146,11 @@ static int64_t sys_sleep_ns(struct syscall_args *a)
 
 static int64_t sys_clock_ns(struct syscall_args *a)
 {
-    (void)a;
-    return (int64_t)clock_now_ns();
+    switch ((unsigned)a->a[0]) {
+    case COSMO_CLOCK_MONOTONIC: return (int64_t)clock_now_ns();
+    case COSMO_CLOCK_REALTIME:  return (int64_t)clock_realtime_ns();
+    default:                    return -EINVAL;
+    }
 }
 
 static int64_t sys_mmap(struct syscall_args *a)
@@ -763,10 +767,16 @@ static int64_t sys_kill(struct syscall_args *a)
         return -ESRCH;
     struct process *cur = process_current();
     int rc = 0;
-    if (!cred_may_signal(&cur->cred, &target->cred))
+    if (!cred_may_signal(&cur->cred, &target->cred)) {
         rc = -EPERM;
-    else
-        process_kill(target, sig);
+    } else {
+        /* The signal core: a default-terminate signal ends the target
+         * (128 + sig) as before; default-ignore ones (SIGCHLD, ...) are
+         * discarded (milestone 10). Native processes install no handlers. */
+        struct signal_info info = { .sig = sig, .source = SIGSRC_USER, .sender_pid = cur->pid,
+                                    .sender_uid = cur->cred.ruid };
+        rc = signal_send(target, sig, &info);
+    }
     process_put(target);
     return rc;
 }

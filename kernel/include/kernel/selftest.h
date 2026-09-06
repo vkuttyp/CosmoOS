@@ -67,6 +67,8 @@ bool selftest_blk_segments(const char **reason); /* multi-segment bios (mileston
 bool selftest_blk_timeout(const char **reason);  /* a stalled request times out */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
+bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */
+bool selftest_realtime(const char **reason);   /* kernel/io/polltest.c: the wall clock */
 
 /* Phase 4: kernel/process/proctest.c */
 bool selftest_objects(const char **reason);

@@ -33,6 +33,19 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 - **Precision**: `((delta * g_ns_mult) >> 32)` with a 128-bit product;
   relative error below 1e-9.
 
+### `uint64_t clock_realtime_ns(void)` (milestone 10)
+- **Purpose**: nanoseconds since 1970-01-01 00:00 UTC: `clock_now_ns()`
+  plus an offset `timer_init` computed once from `arch_rtc_read_epoch`
+  (x86-64: the CMOS RTC, BCD or binary per status register B, the
+  century by heuristic; AArch64: the PL031 of the `virt` machine). Whole
+  seconds at boot, then it advances with the monotonic clock; a
+  machine without a readable RTC logs a warning and the offset stays 0
+  (the wall clock then reads as time since boot).
+- **Concurrency**: lock-free, interrupt context yes. Not settable.
+
+### `bool arch_rtc_read_epoch(uint64_t *seconds)` (`arch/timer.h`)
+- The architecture's one-shot RTC read; false when there is none.
+
 ### `uint64_t clock_hz(void)`, `const char *clock_name(void)`
 - Counter frequency and name (`"tsc"` on x86-64).
 

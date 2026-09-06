@@ -18,6 +18,8 @@
 #include <kernel/quiesce.h>
 #include <arch/user.h>
 #include <kernel/sched.h>
+#include <kernel/signal.h>
+#include <kernel/thread.h>
 
 #include <arch/irq.h>
 #include <arch/irqc.h>
@@ -96,7 +98,7 @@ void x86_trap_dispatch(struct arch_trap_frame *frame)
     /* Returning to ring 3: a pending kill ends the process here, so a
      * CPU-bound loop dies at its next timer tick. */
     if (arch_trap_frame_is_user(frame) && pc->irq_depth == 0 && pc->preempt_count == 0)
-        process_return_to_user();
+        process_return_to_user(frame);
 }
 
 /*
@@ -265,9 +267,33 @@ void arch_trap_frame_dump(const struct arch_trap_frame *f)
     }
 }
 
+/* An exception from user mode that no handler claimed: the process gets
+ * the signal Linux would send (a stack fault after a signal return with a
+ * bad rsp, an x87 or SIMD exception a restored control word unmasked, a
+ * bound-range or alignment trap). Queued, not delivered here: the return
+ * to user mode (or the next tick) delivers it, whatever stack this
+ * exception arrived on. A kernel-mode one is still a panic. */
+static int user_exception_signal(unsigned vector)
+{
+    switch (vector) {
+    case X86_TRAP_DE: case X86_TRAP_MF: case X86_TRAP_XM: return SIGFPE;
+    case X86_TRAP_DB: case X86_TRAP_BP: return SIGTRAP;
+    case X86_TRAP_UD: return SIGILL;
+    case X86_TRAP_AC: return SIGBUS;
+    default: return SIGSEGV;   /* #OF, #BR, #TS, #NP, #SS, #GP, ... */
+    }
+}
+
 void arch_trap_unhandled(unsigned vector, struct arch_trap_frame *frame)
 {
     if (arch_trap_is_exception(vector)) {
+        if (arch_trap_frame_is_user(frame) && process_current() != NULL) {
+            int sig = user_exception_signal(vector);
+            struct signal_info info = { .sig = sig, .source = SIGSRC_FAULT, .fault_addr = frame->rip, .code = 1 };
+            kdebug("x86: user %s at %p: signal %d", arch_trap_name(vector), (void *)frame->rip, sig);
+            signal_send_thread(thread_current(), sig, &info);
+            return;
+        }
         panic_frame(frame, "unhandled exception %u (%s)", vector, arch_trap_name(vector));
     }
 

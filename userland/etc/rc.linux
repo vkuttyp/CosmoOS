@@ -3,6 +3,22 @@
 # exit status of this script is the section's verdict.
 /boot/tests/linux/lxhello || exit 1
 /boot/tests/linux/lxtest || exit 1
+/boot/tests/linux/lxdyn || exit 1
+# Expected deaths (lxsig.c): the status is the shell's view, 128 + the signal.
+/boot/tests/linux/lxsig term
+echo "lxsig term: $?"
+/boot/tests/linux/lxsig segv
+echo "lxsig segv: $?"
+/boot/tests/linux/lxsig ill
+echo "lxsig ill: $?"
+/boot/tests/linux/lxsig badret
+echo "lxsig badret: $?"
+/boot/tests/linux/lxsig badstack
+echo "lxsig badstack: $?"
+/boot/tests/linux/lxsig group
+echo "lxsig group: $?"
+/boot/tests/linux/lxsig lastthread
+echo "lxsig lastthread: $?"
 ls /boot/tests/linux/hello_musl 2> /tmp/.musl.probe && /boot/tests/linux/hello_musl
 rm /tmp/.musl.probe
 exit 0

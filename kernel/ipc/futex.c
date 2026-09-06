@@ -15,7 +15,8 @@
 struct futex_waiter {
     struct list_node link;
     struct vm_space *space;
-    uint64_t uaddr;
+    uint64_t uaddr;             /* under the bucket lock: a requeue moves the waiter */
+    struct bucket *bucket;      /* the list the link is on; changed only with both buckets locked */
     struct thread *thread;
     bool woken;
     bool timed_out;
@@ -25,6 +26,7 @@ struct bucket {
     spinlock_t lock;
     struct list_node waiters;
     uint64_t wake_seq;   /* bumped by every futex_wake under the lock */
+    uint64_t queue_seq;  /* bumped by every change to the waiter list (enqueue, wake, requeue) */
 };
 
 static struct bucket g_buckets[FUTEX_BUCKETS];
@@ -58,7 +60,7 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
     if (uaddr & 3)
         return -EINVAL;
     struct bucket *b = bucket_of(space, uaddr);
-    struct futex_waiter w = { .space = space, .uaddr = uaddr, .thread = thread_current() };
+    struct futex_waiter w = { .space = space, .uaddr = uaddr, .bucket = b, .thread = thread_current() };
     list_init(&w.link);
 
     /*
@@ -87,6 +89,7 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
         return 0;
     }
     list_push_back(&b->waiters, &w.link);
+    b->queue_seq++;
     spin_unlock_irqrestore(&b->lock, s);
 
     struct timer t;
@@ -103,11 +106,22 @@ int futex_wait(struct vm_space *space, uint64_t uaddr, uint32_t val, uint64_t ti
     if (timeout_ns)
         timer_cancel(&t);
 
-    s = spin_lock_irqsave(&b->lock);
-    bool was_woken = w.woken;
-    if (!list_empty(&w.link))
-        list_remove(&w.link);
-    spin_unlock_irqrestore(&b->lock, s);
+    /* Leave whichever list the waiter is on now: a requeue may have moved
+     * it to another bucket, changing w.bucket under both buckets' locks,
+     * so the bucket read under its own lock is the one the link is on. */
+    bool was_woken;
+    for (;;) {
+        struct bucket *cur_b = __atomic_load_n(&w.bucket, __ATOMIC_ACQUIRE);
+        s = spin_lock_irqsave(&cur_b->lock);
+        if (w.bucket == cur_b) {
+            was_woken = w.woken;
+            if (!list_empty(&w.link))
+                list_remove(&w.link);
+            spin_unlock_irqrestore(&cur_b->lock, s);
+            break;
+        }
+        spin_unlock_irqrestore(&cur_b->lock, s);
+    }
 
     if (was_woken)
         return 0;
@@ -136,6 +150,80 @@ int futex_wake(struct vm_space *space, uint64_t uaddr, unsigned n)
         sched_wake(w->thread);
         woken++;
     }
+    if (woken)
+        b->queue_seq++;
     spin_unlock_irqrestore(&b->lock, s);
     return woken;
+}
+
+int futex_requeue(struct vm_space *space, uint64_t uaddr1, uint64_t uaddr2, unsigned nr_wake, unsigned nr_requeue,
+                  bool cmp, uint32_t cmpval)
+{
+    if ((uaddr1 & 3) || (uaddr2 & 3))
+        return -EINVAL;
+    struct bucket *b1 = bucket_of(space, uaddr1), *b2 = bucket_of(space, uaddr2);
+    /* Two buckets of one class: lower address first, always (no other path
+     * takes two), the second annotated as nested for lockdep
+     * (docs/kernel/lockdep/invariants.md, "futex"). */
+    struct bucket *lo = b1 < b2 ? b1 : b2, *hi = b1 < b2 ? b2 : b1;
+    arch_irq_state_t s;
+    for (;;) {
+        /*
+         * CMP_REQUEUE's compare must be atomic with respect to the other
+         * futex operations on uaddr1's bucket, as on Linux, where the word
+         * is read under the bucket lock. The user copy cannot run under the
+         * spinlock here (it may fault), so: note the bucket's queue
+         * sequence, compare unlocked, then take the locks and act only if
+         * no enqueue, wake or requeue touched the bucket in between;
+         * otherwise compare again. The same shape as futex_wait's
+         * compare-then-enqueue.
+         */
+        uint64_t seq = 0;
+        if (cmp) {
+            s = spin_lock_irqsave(&b1->lock);
+            seq = b1->queue_seq;
+            spin_unlock_irqrestore(&b1->lock, s);
+            uint32_t cur;
+            if (copy_from_user(&cur, uaddr1, sizeof(cur)))
+                return -EFAULT;
+            if (cur != cmpval)
+                return -EAGAIN;
+        }
+        s = spin_lock_irqsave(&lo->lock);
+        if (hi != lo)
+            spin_lock_nested(&hi->lock, 1);
+        if (!cmp || b1->queue_seq == seq)
+            break;
+        if (hi != lo)
+            spin_unlock(&hi->lock);
+        spin_unlock_irqrestore(&lo->lock, s);
+    }
+    b1->wake_seq++;
+    b1->queue_seq++;
+    b2->queue_seq++;
+    int woken = 0, requeued = 0;
+    struct futex_waiter *w, *tmp;
+    list_for_each_entry_safe(w, tmp, &b1->waiters, link) {
+        if (w->space != space || w->uaddr != uaddr1)
+            continue;
+        if ((unsigned)woken < nr_wake) {
+            list_remove(&w->link);
+            list_init(&w->link);
+            __atomic_store_n(&w->woken, true, __ATOMIC_RELEASE);
+            sched_wake(w->thread);
+            woken++;
+        } else if ((unsigned)requeued < nr_requeue) {
+            list_remove(&w->link);
+            w->uaddr = uaddr2;
+            __atomic_store_n(&w->bucket, b2, __ATOMIC_RELEASE);
+            list_push_back(&b2->waiters, &w->link);
+            requeued++;
+        } else {
+            break;
+        }
+    }
+    if (hi != lo)
+        spin_unlock(&hi->lock);
+    spin_unlock_irqrestore(&lo->lock, s);
+    return woken + requeued;
 }

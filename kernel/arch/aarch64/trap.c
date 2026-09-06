@@ -67,7 +67,7 @@ static void return_to_user_check(struct arch_trap_frame *frame)
 {
     struct percpu *pc = this_cpu();
     if (arch_trap_frame_is_user(frame) && pc->irq_depth == 0 && pc->preempt_count == 0)
-        process_return_to_user();
+        process_return_to_user(frame);
 }
 
 static void handle_syscall(struct arch_trap_frame *frame)

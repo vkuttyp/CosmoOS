@@ -170,6 +170,22 @@ Runs `init --probe rlimit-root` (exit 0), `rlimit-unpriv` (exit 0) and
 kernel threads create sixteen `init --probe hold` children of one uid
 under a limit of four while a sampler watches the count.
 
+### `process-user` additions (milestone 10)
+
+The user-mode trap tests now expect each exception's own signal:
+`ud` 132 (`SIGILL`), `gp` 139 (`SIGSEGV`), `de` 136 (`SIGFPE`), `db` 133
+(`SIGTRAP`); the native `kill` goes through the signal core (a
+default-ignore signal such as `SIGCHLD` no longer terminates). The
+Linux-side coverage of threads, signals, frames and the return guards is
+in `docs/compat/linux/testing.md` (`lxtest`, `lxsig`, `lxdyn`).
+
+### `elf` (milestone 10)
+
+An `ET_DYN` image with a segment at 0 validates with `is_dyn`, relative
+addresses and no interpreter; `elf_rebase` to `USER_PIE_BASE` moves the
+segment, the entry and `hi`; an `ET_DYN` segment beyond the window's span
+is refused.
+
 ## Harness markers (`tests/boot/run_boot_test.py`)
 
 Always required: `init: CosmoOS userland, pid N`, `CosmoOS userland
@@ -204,6 +220,10 @@ tests on x86-64 with 4 and 1 CPUs and on AArch64; `process-efault` 8 ms / 18 ms,
 `process-protnone` 9 / 27 ms, `process-oom` 16 / 27 ms (x86-64 /
 AArch64).
 
+Milestone 10 (2026-09-06): `SELFTEST: PASS (124 tests)` on both
+architectures; `process-user` about 800 ms; the Linux programs add the
+thread, signal and PIE coverage on both machines.
+
 ## Gaps and planned tests
 
 - `elf_validate` compiles on the host (`ELF_HOST_TEST`) but no host
@@ -214,8 +234,9 @@ AArch64).
 - No test kills a process blocked in a socket wait or in `sleep`; no
   test creates an orphan under the real init; no test exceeds
   `COSMO_ARG_MAX`.
-- No concurrency tests for the handle table (single thread per
-  process today).
+- No concurrency tests for the handle table from several threads of one
+  process (threads exist since milestone 10; the Linux tests use them
+  for signals and futexes only).
 - SMAP (`stac`/`clac`) is untested on `qemu64`; a run with
   `-cpu max` is planned in CI once TCG's SMAP emulation is confirmed.
 - Timing bounds in the user test (5 ms sleep, 200 ms ceiling) are

@@ -17,6 +17,7 @@
 static struct timer_queue g_queues[CONFIG_MAX_CPUS];
 static uint64_t g_clock_base;
 static uint64_t g_clock_hz;
+static uint64_t g_realtime_offset_ns;   /* wall time at monotonic zero */
 static uint64_t g_ns_mult;   /* (1e9 << CLOCK_SHIFT) / hz */
 static timer_tick_hook_fn g_tick_hook;
 static bool g_initialized;
@@ -35,6 +36,11 @@ uint64_t clock_now_ns(void)
      * kernel does not link. Relative error is below 1e-9. */
     unsigned __int128 ns = (unsigned __int128)delta * g_ns_mult;
     return (uint64_t)(ns >> CLOCK_SHIFT);
+}
+
+uint64_t clock_realtime_ns(void)
+{
+    return g_realtime_offset_ns + clock_now_ns();
 }
 
 uint64_t clock_hz(void)
@@ -247,6 +253,16 @@ void timer_init(void)
         panic("timer: cannot register tick handler (%d)", rc);
 
     timer_init_cpu();
+
+    /* The wall clock: whole seconds from the platform's RTC, anchored to
+     * the monotonic clock now. Sub-second phase starts at zero. */
+    uint64_t epoch = 0;
+    if (arch_rtc_read_epoch(&epoch)) {
+        g_realtime_offset_ns = epoch * NS_PER_SEC - clock_now_ns();
+        kinfo("timer: wall clock %llu s since 1970 from the RTC", (unsigned long long)epoch);
+    } else {
+        kwarn("timer: no real-time clock; the wall clock starts at 1970");
+    }
 
     kinfo("timer: %s at %llu.%03llu MHz, tick %u Hz", arch_clock_name(),
           (unsigned long long)(g_clock_hz / 1000000), (unsigned long long)((g_clock_hz / 1000) % 1000),

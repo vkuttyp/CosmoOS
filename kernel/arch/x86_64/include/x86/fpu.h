@@ -44,6 +44,15 @@ void x86_fpu_area_restore(const void *area);
 /* Fill `area` with the architectural reset state. */
 void x86_fpu_area_init(void *area);
 
+/* The calling thread's legacy (FXSAVE, 512-byte) image, for a signal
+ * frame: `get` saves the live registers and copies the image out; `set`
+ * replaces the x87 and SSE state with the image (MXCSR's reserved bits
+ * cleared so the load cannot fault; with XSAVE the header names x87 and
+ * SSE as present, other components keep their live values) and loads it.
+ * Both false for a thread that owns no state. */
+bool x86_fpu_legacy_get(void *out);
+bool x86_fpu_legacy_set(const void *in);
+
 /* The architectural reset state, area_size bytes, 64-byte aligned. */
 const void *x86_fpu_reset_image(void);
 

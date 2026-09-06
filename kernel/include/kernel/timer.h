@@ -47,6 +47,10 @@ void timer_init(void);
 void timer_init_cpu(void);
 
 uint64_t clock_now_ns(void);
+/* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
+ * read from the real-time clock at boot (0 when the platform has none).
+ * Lock-free, any context. */
+uint64_t clock_realtime_ns(void);
 uint64_t clock_hz(void);
 const char *clock_name(void);
 

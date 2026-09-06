@@ -1,8 +1,9 @@
 /*
- * linux_abi.h - The Linux x86-64 ABI as the personality needs it: system
- * call numbers, structure layouts, flags. Everything here is Linux's,
- * written out by hand so the translation depends on no Linux headers.
- * Used by the compat/linux sources and by the tests/linux programs (freestanding).
+ * linux_abi.h - The Linux ABI as the personality needs it: system call
+ * numbers (per architecture: nr_x86_64.h, nr_aarch64.h), structure
+ * layouts, flags. Everything here is Linux's, written out by hand so the
+ * translation depends on no Linux headers. Used by the compat/linux
+ * sources, the host tests and the tests/linux programs (freestanding).
  */
 
 #ifndef COMPAT_LINUX_ABI_H
@@ -11,124 +12,18 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* --- system call numbers (arch/x86/entry/syscalls/syscall_64.tbl) --- */
-#define LX_read 0
-#define LX_write 1
-#define LX_open 2
-#define LX_close 3
-#define LX_stat 4
-#define LX_fstat 5
-#define LX_lstat 6
-#define LX_poll 7
-#define LX_lseek 8
-#define LX_mmap 9
-#define LX_mprotect 10
-#define LX_munmap 11
-#define LX_brk 12
-#define LX_rt_sigaction 13
-#define LX_rt_sigprocmask 14
-#define LX_rt_sigreturn 15
-#define LX_ioctl 16
-#define LX_pread64 17
-#define LX_pwrite64 18
-#define LX_readv 19
-#define LX_writev 20
-#define LX_access 21
-#define LX_pipe 22
-#define LX_select 23
-#define LX_sched_yield 24
-#define LX_mremap 25
-#define LX_msync 26
-#define LX_madvise 28
-#define LX_dup 32
-#define LX_dup2 33
-#define LX_pause 34
-#define LX_nanosleep 35
-#define LX_getpid 39
-#define LX_socket 41
-#define LX_connect 42
-#define LX_accept 43
-#define LX_sendto 44
-#define LX_recvfrom 45
-#define LX_sendmsg 46
-#define LX_recvmsg 47
-#define LX_shutdown 48
-#define LX_bind 49
-#define LX_listen 50
-#define LX_getsockname 51
-#define LX_getpeername 52
-#define LX_setsockopt 54
-#define LX_getsockopt 55
-#define LX_clone 56
-#define LX_fork 57
-#define LX_vfork 58
-#define LX_execve 59
-#define LX_exit 60
-#define LX_wait4 61
-#define LX_kill 62
-#define LX_uname 63
-#define LX_fcntl 72
-#define LX_fsync 74
-#define LX_fdatasync 75
-#define LX_getcwd 79
-#define LX_chdir 80
-#define LX_rename 82
-#define LX_mkdir 83
-#define LX_rmdir 84
-#define LX_creat 85
-#define LX_unlink 87
-#define LX_readlink 89
-#define LX_umask 95
-#define LX_gettimeofday 96
-#define LX_getrlimit 97
-#define LX_sysinfo 99
-#define LX_getuid 102
-#define LX_getgid 104
-#define LX_setuid 105
-#define LX_setgid 106
-#define LX_geteuid 107
-#define LX_getegid 108
-#define LX_setreuid 113
-#define LX_setregid 114
-#define LX_getgroups 115
-#define LX_setgroups 116
-#define LX_setresuid 117
-#define LX_getresuid 118
-#define LX_setresgid 119
-#define LX_getresgid 120
-#define LX_setpgid 109
-#define LX_getppid 110
-#define LX_getpgrp 111
-#define LX_setsid 112
-#define LX_sigaltstack 131
-#define LX_arch_prctl 158
-#define LX_setrlimit 160
-#define LX_sync 162
-#define LX_gettid 186
-#define LX_time 201
-#define LX_futex 202
-#define LX_sched_getaffinity 204
-#define LX_getdents64 217
-#define LX_set_tid_address 218
-#define LX_clock_gettime 228
-#define LX_clock_nanosleep 230
-#define LX_exit_group 231
-#define LX_tgkill 234
-#define LX_openat 257
-#define LX_mkdirat 258
-#define LX_newfstatat 262
-#define LX_unlinkat 263
-#define LX_renameat 264
-#define LX_readlinkat 267
-#define LX_faccessat 269
-#define LX_set_robust_list 273
-#define LX_accept4 288
-#define LX_dup3 292
-#define LX_pipe2 293
-#define LX_prlimit64 302
-#define LX_getrandom 318
-#define LX_rseq 334
-#define LX_clone3 435
+/* --- system call numbers, per architecture (milestone 10) --- */
+#if defined(ARCH_X86_64) || (!defined(ARCH_AARCH64) && defined(__x86_64__))
+#include "nr_x86_64.h"
+#define LX_MACHINE "x86_64"
+#define LX_ABI_X86_64 1
+#elif defined(ARCH_AARCH64) || defined(__aarch64__)
+#include "nr_aarch64.h"
+#define LX_MACHINE "aarch64"
+#define LX_ABI_AARCH64 1
+#else
+#error "linux_abi.h: unknown architecture"
+#endif
 #define LX_NR_MAX 512
 
 /* --- errno (identical to the native values the kernel produces) --- */
@@ -196,9 +91,51 @@ struct lx_rlimit {
 /* --- futex --- */
 #define LX_FUTEX_WAIT 0
 #define LX_FUTEX_WAKE 1
+#define LX_FUTEX_REQUEUE 3
+#define LX_FUTEX_CMP_REQUEUE 4
+#define LX_FUTEX_WAIT_BITSET 9
+#define LX_FUTEX_WAKE_BITSET 10
+#define LX_FUTEX_BITSET_MATCH_ANY 0xffffffffu
 #define LX_FUTEX_PRIVATE_FLAG 128
 #define LX_FUTEX_CLOCK_REALTIME 256
 #define LX_FUTEX_CMD_MASK ~(LX_FUTEX_PRIVATE_FLAG | LX_FUTEX_CLOCK_REALTIME)
+
+/* --- poll --- */
+#define LX_POLLIN 0x001
+#define LX_POLLPRI 0x002
+#define LX_POLLOUT 0x004
+#define LX_POLLERR 0x008
+#define LX_POLLHUP 0x010
+#define LX_POLLNVAL 0x020
+#define LX_POLLRDNORM 0x040
+#define LX_POLLWRNORM 0x100
+#define LX_POLLRDHUP 0x2000
+#define LX_POLL_MAX 1024
+struct lx_pollfd {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+};
+
+/* --- clone --- */
+#define LX_CLONE_VM 0x00000100ull
+#define LX_CLONE_FS 0x00000200ull
+#define LX_CLONE_FILES 0x00000400ull
+#define LX_CLONE_SIGHAND 0x00000800ull
+#define LX_CLONE_THREAD 0x00010000ull
+#define LX_CLONE_SYSVSEM 0x00040000ull
+#define LX_CLONE_SETTLS 0x00080000ull
+#define LX_CLONE_PARENT_SETTID 0x00100000ull
+#define LX_CLONE_CHILD_CLEARTID 0x00200000ull
+#define LX_CLONE_DETACHED 0x00400000ull
+#define LX_CLONE_UNTRACED 0x00800000ull
+#define LX_CLONE_CHILD_SETTID 0x01000000ull
+/* The thread set: what pthread_create passes (musl, glibc). */
+#define LX_CLONE_THREAD_REQUIRED (LX_CLONE_VM | LX_CLONE_THREAD | LX_CLONE_SIGHAND)
+#define LX_CLONE_THREAD_ALLOWED                                                                              \
+    (LX_CLONE_THREAD_REQUIRED | LX_CLONE_FS | LX_CLONE_FILES | LX_CLONE_SYSVSEM | LX_CLONE_SETTLS |         \
+     LX_CLONE_PARENT_SETTID | LX_CLONE_CHILD_CLEARTID | LX_CLONE_CHILD_SETTID | LX_CLONE_DETACHED |         \
+     LX_CLONE_UNTRACED)
 
 /* --- wait4, signals --- */
 #define LX_WNOHANG 1
@@ -206,6 +143,30 @@ struct lx_rlimit {
 #define LX_SIGSEGV 11
 #define LX_SIGSTOP 19
 #define LX_NSIG 64
+#define LX_SIG_BLOCK 0
+#define LX_SIG_UNBLOCK 1
+#define LX_SIG_SETMASK 2
+#define LX_SA_SIGINFO 0x00000004u
+#define LX_SA_RESTORER 0x04000000u
+#define LX_SA_ONSTACK 0x08000000u
+#define LX_SA_RESTART 0x10000000u
+#define LX_SA_NODEFER 0x40000000u
+#define LX_SA_RESETHAND 0x80000000u
+#define LX_SS_ONSTACK 1
+#define LX_SS_DISABLE 2
+#define LX_SS_AUTODISARM (1u << 31)
+#define LX_MINSIGSTKSZ 2048
+#define LX_SI_USER 0
+#define LX_SI_KERNEL 0x80
+#define LX_SI_TKILL (-6)
+#define LX_SEGV_MAPERR 1
+#define LX_SEGV_ACCERR 2
+#define LX_UC_SIGCONTEXT_SS 0x2
+#define LX_UC_STRICT_RESTORE_SS 0x4
+/* The kernel's signal-return trampoline page (docs/compat/linux/design.md,
+ * stage 2): `mov $15, %eax; syscall` or `mov x8, #139; svc #0`. The page
+ * above the stack's top (USER_STACK_TOP), with one unmapped page between. */
+#define LX_SIGTRAMP 0x7FFFFFFF1000ull
 
 /* --- fcntl --- */
 #define LX_F_DUPFD 0
@@ -239,6 +200,10 @@ struct lx_rlimit {
 #define LX_AT_PHENT 4
 #define LX_AT_PHNUM 5
 #define LX_AT_PAGESZ 6
+#define LX_AT_BASE 7
+#define LX_AT_PLATFORM 15
+#define LX_AT_HWCAP2 26
+#define LX_AT_EXECFN 31
 #define LX_AT_ENTRY 9
 #define LX_AT_UID 11
 #define LX_AT_EUID 12
@@ -251,6 +216,7 @@ struct lx_rlimit {
 
 /* --- structures --- */
 
+#if defined(LX_ABI_X86_64)
 struct lx_stat {                 /* x86-64 struct stat: 144 bytes */
     uint64_t st_dev;
     uint64_t st_ino;
@@ -268,6 +234,28 @@ struct lx_stat {                 /* x86-64 struct stat: 144 bytes */
     int64_t st_ctime, st_ctime_nsec;
     int64_t unused[3];
 };
+#define LX_STAT_SIZE 144
+#else
+struct lx_stat {                 /* AArch64 (asm-generic) struct stat: 128 bytes */
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t pad1;
+    int64_t st_size;
+    int32_t st_blksize;
+    int32_t pad2;
+    int64_t st_blocks;
+    int64_t st_atime, st_atime_nsec;
+    int64_t st_mtime, st_mtime_nsec;
+    int64_t st_ctime, st_ctime_nsec;
+    uint32_t unused[2];
+};
+#define LX_STAT_SIZE 128
+#endif
 
 struct lx_timespec {
     int64_t tv_sec;
@@ -336,5 +324,65 @@ struct lx_stack_t {
     int32_t pad;
     uint64_t ss_size;
 };
+
+struct lx_siginfo {              /* 128 bytes, the same on both architectures */
+    int32_t si_signo;
+    int32_t si_errno;
+    int32_t si_code;
+    int32_t pad;
+    union {
+        struct { int32_t pid; uint32_t uid; } kill;
+        struct { uint64_t addr; } fault;
+        uint8_t fill[112];
+    } u;
+};
+
+/* x86-64: struct rt_sigframe as the handler sees it (rsp points at pretcode). */
+struct lx_sigcontext_x86 {
+    uint64_t r8, r9, r10, r11, r12, r13, r14, r15;
+    uint64_t rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags;
+    uint16_t cs, gs, fs, ss;
+    uint64_t err, trapno, oldmask, cr2;
+    uint64_t fpstate;            /* user pointer to the 512-byte FXSAVE image, or 0 */
+    uint64_t reserved[8];
+};
+struct lx_ucontext_x86 {
+    uint64_t uc_flags;
+    uint64_t uc_link;
+    struct lx_stack_t uc_stack;
+    struct lx_sigcontext_x86 uc_mcontext;
+    uint64_t uc_sigmask;
+};
+struct lx_rt_sigframe_x86 {
+    uint64_t pretcode;
+    struct lx_ucontext_x86 uc;
+    struct lx_siginfo info;
+};
+
+/* AArch64: struct rt_sigframe (sp points at it; a frame record lies below). */
+struct lx_sigcontext_a64 {
+    uint64_t fault_address;
+    uint64_t regs[31];
+    uint64_t sp, pc, pstate;
+    uint8_t reserved[4096] __attribute__((aligned(16)));   /* esr_context, terminator */
+};
+struct lx_ucontext_a64 {
+    uint64_t uc_flags;
+    uint64_t uc_link;
+    struct lx_stack_t uc_stack;
+    uint64_t uc_sigmask;
+    uint8_t unused[120];
+    struct lx_sigcontext_a64 uc_mcontext;
+};
+struct lx_rt_sigframe_a64 {
+    struct lx_siginfo info;
+    struct lx_ucontext_a64 uc;
+};
+struct lx_esr_context {
+    uint32_t magic;              /* 0x45535201 */
+    uint32_t size;               /* 16 */
+    uint64_t esr;
+};
+#define LX_ESR_MAGIC 0x45535201u
 
 #endif /* COMPAT_LINUX_ABI_H */

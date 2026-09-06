@@ -53,6 +53,15 @@ missing right is `-EBADF` in the completion. Check: `init --selftest`
 (handle 999 completes `-EBADF`). Gap: no test of a right actually
 dropped from a valid handle.
 
+**A8. `io_poll` loses no wake (milestone 10).** Every entry's `poll_wq`
+is prepared (the thread marked BLOCKED) before readiness is evaluated,
+the thread blocks only when nothing is ready, the timer has not fired and
+no kill or signal is pending, and every entry is finished afterwards; a
+wake between the evaluation and the block returns from
+`sched_block_current` at once. Check: `io-poll` (a write from another
+thread wakes a wait without timeout), `lxtest` (a clone's write wakes
+`poll(-1)`). Gap: the two-waiter and the storm cases are not tested.
+
 ## Gaps (documented, not invariants)
 
 - No cancellation of a single parked entry; closing the ring is the only

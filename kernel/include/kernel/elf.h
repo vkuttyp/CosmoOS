@@ -37,6 +37,10 @@ struct elf_info {
     bool cosmo_note;   /* PT_NOTE "CosmoOS" type 1: a native program (docs/compat/linux/) */
     uint64_t phdr_vaddr; /* the program header table's address in the image, 0 when not loaded */
     uint16_t phnum, phent;
+    /* Milestone 10: position-independent executables and interpreters. */
+    bool is_dyn;       /* ET_DYN: every address above is relative until elf_rebase */
+    bool has_interp;   /* PT_INTERP named a program interpreter */
+    char interp[256];  /* its path (NUL-terminated, at most 255 bytes) */
 };
 
 /* Validate a native static executable for the user range
@@ -44,6 +48,11 @@ struct elf_info {
  * non-NULL, points it at an immortal string naming the rule. */
 int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, struct elf_info *info,
                  const char **why);
+
+/* Add `base` to every address of an ET_DYN image's info (segments, entry,
+ * lo, hi, the program header table). The caller checks that the result
+ * still lies inside the user window. */
+void elf_rebase(struct elf_info *info, uint64_t base);
 
 struct vm_space;
 

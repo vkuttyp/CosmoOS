@@ -32,6 +32,18 @@ measured in `arch_timer_calibrate()`:
 CPUID leaf 0x15/0x16 are not used yet: TCG reports nothing useful there
 and the PIT method works on every machine this project targets.
 
+### The wall clock (milestone 10)
+
+`clock_realtime_ns() = clock_now_ns() + g_realtime_offset_ns`, the offset
+set once in `timer_init` from the architecture's RTC (`arch_rtc_read_epoch`:
+x86-64 reads CMOS registers 0x00/0x02/0x04/0x07/0x08/0x09/0x32 twice
+until stable and converts BCD unless status B says binary; AArch64 maps
+the PL031 at `0x09010000`, checks its peripheral id and reads `RTCDR`).
+There is no `settimeofday` and no NTP; the clock is the RTC's second
+plus the monotonic clock's progress since. Consumers: the native
+`clock_ns(COSMO_CLOCK_REALTIME)`, the Linux `CLOCK_REALTIME` family,
+`gettimeofday`, `time`, `FUTEX_CLOCK_REALTIME` and `TIMER_ABSTIME`.
+
 ## 2. Tick
 
 `CONFIG_HZ` = 250 → period 4 000 000 ns. `arch_timer_start_tick(hz)`

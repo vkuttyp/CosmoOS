@@ -49,8 +49,13 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
         return fail(why, "bad ELF magic");
     if (eh.e_ident[4] != ELFCLASS64 || eh.e_ident[5] != ELFDATA2LSB || eh.e_ident[6] != EV_CURRENT)
         return fail(why, "not ELF64 little-endian v1");
-    if (eh.e_type != ET_EXEC)
-        return fail(why, "not ET_EXEC (static executables only)");
+    if (eh.e_type != ET_EXEC && eh.e_type != ET_DYN)
+        return fail(why, "not ET_EXEC or ET_DYN");
+    info->is_dyn = eh.e_type == ET_DYN;
+    /* An ET_DYN image is validated relative to 0 and rebased by the caller;
+     * it must fit the window from wherever it is placed. */
+    uint64_t lo_bound = info->is_dyn ? 0 : user_lo;
+    uint64_t hi_bound = info->is_dyn ? user_hi - user_lo : user_hi;
     if (eh.e_machine != ELF_MACHINE_NATIVE)
         return fail(why, "not " ELF_MACHINE_NATIVE_NAME);
     if (eh.e_phentsize != sizeof(struct elf64_phdr) || eh.e_phnum == 0)
@@ -66,8 +71,18 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
         struct elf64_phdr ph;
         memcpy(&ph, file + eh.e_phoff + (uint64_t)i * sizeof(ph), sizeof(ph));
 
-        if (ph.p_type == PT_INTERP)
-            return fail(why, "PT_INTERP: dynamic executables are not supported");
+        if (ph.p_type == PT_INTERP) {
+            /* The interpreter's path: inside the file, 1..255 bytes, NUL-terminated. */
+            if (info->has_interp)
+                return fail(why, "two PT_INTERP entries");
+            if (ph.p_filesz < 2 || ph.p_filesz > sizeof(info->interp) - 1 || !in_file(ph.p_offset, ph.p_filesz, size))
+                return fail(why, "PT_INTERP path is empty, too long or outside the file");
+            if (file[ph.p_offset + ph.p_filesz - 1] != '\0')
+                return fail(why, "PT_INTERP path is not NUL-terminated");
+            memcpy(info->interp, file + ph.p_offset, (size_t)ph.p_filesz);
+            info->has_interp = true;
+            continue;
+        }
         if (ph.p_type == PT_NOTE) {
             /* Notes: namesz, descsz, type, name (padded to 4), desc (padded to 4). */
             if (!in_file(ph.p_offset, ph.p_filesz, size))
@@ -114,7 +129,7 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
 
         uint64_t seg_lo = ph.p_vaddr & ~(ELF_PAGE - 1);
         uint64_t seg_hi = (ph.p_vaddr + ph.p_memsz + ELF_PAGE - 1) & ~(ELF_PAGE - 1);
-        if (seg_lo < user_lo || seg_hi > user_hi || seg_hi < seg_lo)
+        if (seg_lo < lo_bound || seg_hi > hi_bound || seg_hi < seg_lo)
             return fail(why, "PT_LOAD outside the user address range");
 
         for (unsigned j = 0; j < info->nr_segments; j++) {
@@ -163,6 +178,19 @@ int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user
     info->lo = lo;
     info->hi = hi;
     return 0;
+}
+
+void elf_rebase(struct elf_info *info, uint64_t base)
+{
+    for (unsigned i = 0; i < info->nr_segments; i++) {
+        info->segments[i].vaddr += base;
+        info->segments[i].file_vaddr += base;
+    }
+    info->entry += base;
+    info->lo += base;
+    info->hi += base;
+    if (info->phdr_vaddr)
+        info->phdr_vaddr += base;
 }
 
 #ifndef ELF_HOST_TEST

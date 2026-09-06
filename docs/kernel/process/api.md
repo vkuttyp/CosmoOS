@@ -60,14 +60,56 @@ documented in `docs/kernel/syscall/api.md`.
 - Failure modes: on failure nothing is registered, the partial address
   space is destroyed, and `*out` is untouched.
 
+### `int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name, ...)` (milestone 10)
+- Purpose: the same, from an executable image plus, when it names a
+  program interpreter (`PT_INTERP`), the interpreter's image;
+  `struct process_image { const void *data; size_t size; const char
+  *path; }`, `path` being what `AT_EXECFN` reports.
+  `process_create_from_elf` is this with `interp == NULL`.
+- An `ET_DYN` executable is rebased to `USER_PIE_BASE`
+  (`0x555500000000`); an `ET_DYN` interpreter to the first free range at
+  or above `USER_INTERP_BASE` (`0x7F0000000000`) after the executable is
+  mapped; an `ET_EXEC` interpreter loads where it was linked. With an
+  interpreter the main thread starts at the interpreter's entry;
+  `p->interp_base` (0 without one) and `p->exec_entry` feed `AT_BASE`
+  and `AT_ENTRY`. An executable with `PT_INTERP` and no interpreter
+  image, an interpreter that itself has `PT_INTERP`, or a PIE that does
+  not fit at its base is `-ENOEXEC` (logged); no free range for the
+  interpreter is `-ENOMEM`.
+
 ### `void process_exit(int status)` (noreturn)
 - Purpose: terminate the calling process with `status`.
 - Inputs: `status` as reported by `process_wait_exit`.
-- Concurrency: sets state EXITING under `process.lock` then calls
-  `thread_exit`; never returns. Requires a process-owning thread and a
-  preemptible context (the fault hook re-enables interrupts first).
-- Only one thread per process exists in this phase; the multi-thread
-  signalling path is a documented gap.
+- Concurrency: runs the personality's `thread_exit` hook, sets state
+  EXITING under `process.lock` (keeping an earlier status), wakes every
+  other thread of the process (each leaves at its next return to user
+  mode or killable wait: `signal_pending` is true for an exiting
+  process), then calls `thread_exit`; never returns. Requires a
+  process-owning thread and a preemptible context (the fault hook and
+  the trap tail re-enable interrupts first).
+
+### `void process_thread_exit(int status)` (noreturn, milestone 10)
+- Ends the calling thread only (the hook, `nr_live--`); when it was the
+  last live thread the process exits with `status`. Linux `exit`.
+
+### `int process_add_thread(struct process *p, const struct arch_user_regs *regs, uintptr_t tls, struct thread **out)`, `void process_thread_start(struct thread *t)`, `void process_thread_abandon(struct thread *t)` (milestone 10)
+- Create a thread of `p` that enters user mode with the register set
+  `regs` (`arch_user_enter_regs`) and the thread pointer `tls`, with the
+  caller's blocked-signal set inherited and a fresh (reset) FPU state.
+  After `add` the thread is linked (`process_find_thread` sees it, it
+  counts in `nr_threads` and `nr_live`) but not runnable, and the caller
+  holds the creator's reference; `start` hands the reference to the
+  process and enqueues it; `abandon` starts it so that it exits at once
+  without running user code (a tid word could not be written). Errors:
+  `-ENOMEM`; `-EAGAIN` when the process is exiting or has
+  `PROCESS_MAX_THREADS` (256) live threads.
+
+### `struct thread *process_find_thread(struct process *p, uint32_t lx_tid)`
+- The live thread of `p` with that Linux tid (the pid for the main
+  thread, `0x10000 + kernel tid` otherwise), or NULL. A borrowed
+  pointer, used only to queue a signal under the process's lock, which
+  is safe while the process exists (`sig_info` lives until
+  `thread_put`).
 
 ### `int process_wait_exit(struct process *p)`
 - Purpose: block until `p` has exited; return its status (kernel
@@ -120,13 +162,69 @@ refused with `-EAGAIN` when its real uid already has
 - Concurrency: interrupt-safe (spinlock and `sched_wake` only); the
   caller holds a reference (`process_lookup`).
 
-### `void process_check_kill(void)`, `void process_return_to_user(void)`, `bool process_kill_pending(void)`
-- The delivery points. `process_check_kill` exits the current process
-  when `kill_sig` is set (called by `syscall_dispatch` before and after
-  the handler). `process_return_to_user` does the same after enabling
-  interrupts (called by the arch trap tail for user frames with
-  `irq_depth == 0` and `preempt_count == 0`). `process_kill_pending`
-  is the read used by `wait_event_killable` (declared in `wait.h`).
+### `void process_check_kill(void)`, `void process_return_to_user(struct arch_trap_frame *frame)`, `bool process_kill_pending(void)`
+- The delivery points (milestone 10: signals ride the same ones).
+  `process_check_kill` exits the current process when `kill_sig` is set
+  or the process is exiting (called by `syscall_dispatch` before the
+  handler; after it the dispatcher calls `signal_deliver(frame, true)`
+  when `signal_pending()`). `process_return_to_user(frame)` enables
+  interrupts, runs `signal_deliver(frame, false)` on the trap frame and
+  disables them again (called by the arch trap tail for user frames with
+  `irq_depth == 0` and `preempt_count == 0`); a handler frame set up
+  there is what the trap returns into. `process_kill_pending` is now
+  `signal_pending()`: a kill, an exiting process, or a deliverable
+  signal, so every killable wait returns `-EINTR` for all three
+  (declared in `wait.h`).
+
+### `kernel/signal.h` (milestone 10)
+The signal core, `kernel/process/signal.c`; `docs/kernel/process/design.md`
+§11. Linux numbers (`SIGHUP` 1 … `SIGSYS` 31, 64 signals), `SIGMASK(sig)`,
+`struct sigaction_k { handler, flags, restorer, mask }` (Linux's
+`k_sigaction`), `SA_*`, `struct sigaltstack_k { sp, size, flags }`,
+`struct signal_info { sig, source (SIGSRC_USER/TKILL/FAULT/KERNEL),
+fault_addr, code (1 unmapped, 2 protection), sender_pid, sender_uid }`.
+- `int signal_send(struct process *p, int sig, const struct signal_info *info)`,
+  `int signal_send_thread(struct thread *t, int sig, ...)`: queue (any
+  context; `-EINVAL` for a number outside 1..64, `-ESRCH` for a thread
+  without a process). Under `p->lock`: `SIGKILL` sets the kill flag and
+  wakes every thread; an ignored signal (action `SIG_IGN`, or `SIG_DFL`
+  with an ignore default: `SIGCHLD`, `SIGURG`, `SIGWINCH`, `SIGCONT` and
+  the stop signals) is discarded even when blocked; a default-terminate
+  signal sets the kill flag unless every candidate thread blocks it
+  (then it stays pending until one unblocks, `signal_set_blocked`
+  rechecks); anything else is queued on the thread or the process and a
+  thread that can take it is woken.
+- `void signal_fault(int sig, uint64_t addr, struct arch_trap_frame *frame)`,
+  `void signal_fault_info(const struct signal_info *, frame)`: a fault on
+  the calling thread; with a handler installed and unblocked the frame is
+  built now and the call returns (the trap returns into the handler),
+  otherwise the process terminates with `128 + sig` (logged) and the
+  call does not return.
+- `signal_set_action`/`signal_get_action` (per process),
+  `signal_blocked`/`signal_set_blocked` (the calling thread; `SIGKILL`
+  and `SIGSTOP` never block), `signal_pending_set`,
+  `signal_set_blocked_saved(mask)` (the mask to restore after a
+  temporary one: `rt_sigsuspend`, `ppoll`).
+- `bool signal_pending(void)`; `void signal_deliver(void *frame, bool
+  is_syscall)`: the delivery loop — terminate on a kill or an exiting
+  process; dequeue the lowest deliverable signal (synchronous faults
+  first); ignore, terminate, or build one handler frame through the
+  personality's `signal_frame(regs, act, info, blocked_before)` (with
+  `SA_RESTART` and a `-EINTR` result the call is re-armed first:
+  `arch_user_regs_restart_syscall` with `thread.syscall_nr`/`syscall_arg0`
+  unless the number is `SIGNAL_NO_RESTART`), then block the handler's
+  mask plus the signal (unless `SA_NODEFER`), reset the action under
+  `SA_RESETHAND`, sanitise the registers and write them back. A frame
+  the personality cannot build (`-EFAULT`: an unmapped stack) ends the
+  process with `128 + SIGSEGV`. One handler per return; the next runs
+  when that one returns. Interrupts are enabled around the frame build.
+- `void signal_return(void *syscall_frame, const struct arch_user_regs *regs, uint64_t blocked)`:
+  `rt_sigreturn`'s tail — sanitise, set the mask, write the frame (full
+  restore).
+- `int signal_wait(void)`: sleep until `signal_pending()`; returns
+  `-EINTR` (`pause`, `rt_sigsuspend`).
+- `int signal_process_init/void signal_process_release(struct process *)`:
+  the 64-entry action table (`kzalloc`).
 
 ### `int process_chdir(const char *path)`
 - Purpose: change the calling process's working directory.
@@ -201,7 +299,14 @@ Phase 9: `parent` (referenced or NULL), `children`/`sibling`,
 `child_wq`, `reaped`, `kill_sig`, `cwd` (referenced vnode),
 `cwd_path[1024]`; Phase 11: `linux` (`struct linux_state *`, the Linux
 personality's state, NULL for native processes; `docs/compat/linux/`),
-`image_end` (the page after the highest loaded segment). `struct
+`image_end` (the page after the highest loaded segment); milestone 10:
+`sigactions` (64 `struct sigaction_k`, owned), `sig_shared_pending` and
+`sig_shared_info` (process-directed signals not yet taken), `nr_live`
+(threads that have not exited; the process ends when it reaches 0),
+`main_thread`, `interp_base`, `exec_entry`, `exec_path[128]`. `struct
+personality` gained two optional hooks: `signal_frame` (build a handler
+frame on a register set; NULL means handlers cannot run) and
+`thread_exit` (a thread of this personality is leaving). `struct
 process_handle_map { int child, parent; }`
 (the shape of `struct cosmo_spawn_handle`, asserted) and
 `struct process_spawn_attr` are the spawn inputs; `PROCESS_WAIT_NOHANG`
@@ -209,13 +314,21 @@ is the wait flag.
 
 Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
 `USER_STACK_TOP` = `0x00007FFFFFFF0000`, `USER_STACK_SIZE` = 8 MiB,
-`USER_MMAP_BASE` = `0x0000100000000000`.
+`USER_MMAP_BASE` = `0x0000100000000000`, `USER_PIE_BASE` =
+`0x0000555500000000`, `USER_INTERP_BASE` = `0x00007F0000000000`,
+`PROCESS_MAX_THREADS` = 256.
 
 ## kernel/elf.h
 
 ### `int elf_validate(const void *image, size_t size, uint64_t user_lo, uint64_t user_hi, struct elf_info *info, const char **why)`
-- Purpose: decide whether `image` is a loadable static x86-64
-  executable and describe its segments.
+- Purpose: decide whether `image` is a loadable executable (`ET_EXEC`,
+  or since milestone 10 `ET_DYN`) for this machine and describe its
+  segments. An `ET_DYN` image is validated relative to address 0
+  (`is_dyn` set; its segments must fit the window's span) and the caller
+  rebases it with `elf_rebase(info, base)`, which adds `base` to every
+  segment, the entry, `lo`, `hi` and `phdr_vaddr`. A `PT_INTERP` is
+  recorded (`has_interp`, `interp[256]`: 1..255 bytes inside the file,
+  NUL-terminated), not refused.
 - Pure function (string.h only; compiled on the host with
   `ELF_HOST_TEST`). Never blocks, never allocates, interrupt-safe.
 - Outputs: 0 and `*info` (entry, lo, hi, page-rounded segments with
@@ -228,12 +341,14 @@ Constants: `USER_LO` = `VM_USER_LO` (4 MiB), `USER_HI` = `VM_USER_HI`,
   - "file shorter than the ELF header"
   - "bad ELF magic"
   - "not ELF64 little-endian v1"
-  - "not ET_EXEC (static executables only)"
-  - "not x86-64"
+  - "not ET_EXEC or ET_DYN"
+  - "not x86-64" (or "not AArch64")
   - "bad program header table"
   - "program header table outside the file"
   - "PT_NOTE outside the file"
-  - "PT_INTERP: dynamic executables are not supported"
+  - "two PT_INTERP entries"
+  - "PT_INTERP path is empty, too long or outside the file"
+  - "PT_INTERP path is not NUL-terminated"
   - "PT_GNU_STACK requests an executable stack"
   - "PT_LOAD memsz smaller than filesz"
   - "PT_LOAD file bytes outside the file"
@@ -289,7 +404,27 @@ no process every user address faults and is `-EFAULT`.
   `arch_thread_switch_prepare` reloads `MSR_FS_BASE` from
   `next->tls_base` for every thread with a process, so the user `%fs`
   base follows the thread. Used by the Linux `arch_prctl(ARCH_SET_FS)`;
-  no native call sets it yet.
+  no native call sets it yet. On AArch64 the register (`tpidr_el0`) is
+  user-writable, so the switch hook also *saves* the outgoing thread's
+  value (milestone 10).
+- Milestone 10, the register file (`struct arch_user_regs`, defined per
+  architecture in this header so generic code and modules see it:
+  x86-64 the 16 general registers plus `rip`, `rflags`; AArch64 `x[31]`,
+  `sp`, `pc`, `pstate`): `arch_user_regs_from_syscall/to_syscall` (the
+  system-call frame; `to_syscall` sets the user selectors and requests
+  the full-restore exit on x86-64), `from_trap/to_trap`, `pc`/`sp`/
+  `set_pc`/`set_sp`/`set_result`/`result`, `restart_syscall(r, nr,
+  arg0)` (`rip -= 2` / `pc -= 4`), `sanitize` (user-changeable flag
+  bits only; x86-64 also replaces a non-canonical or kernel-half `rip`
+  with 0), `arch_user_enter_regs(r)` (noreturn: the first entry of a
+  clone), `set_result_in_frame`/`result_in_frame`, and the FPU image
+  hooks `arch_user_fpu_image_size/save/restore` (x86-64: the 512-byte
+  FXSAVE image; AArch64: none).
+- `x86_syscall_return_check(frame)` (`user.c`): sets
+  `X86_SYSCALL_FULL_RESTORE` when `rip` is not canonical or `rflags`
+  carries a bit `SYSRET` may not load; the exit takes `iretq` then
+  (`syscall_entry.S`: the frame now carries `flags`, `rcx`, `r11` below
+  the saved registers).
 
 ## kernel/vmm.h additions
 
@@ -354,7 +489,12 @@ no process every user address faults and is `-EFAULT`.
 `tls_base` (the user `%fs` base, `arch_set_tls_base`; loaded on every
 switch to a thread with a process). `thread_put` of a process thread leaves the
 process's list and calls `process_last_thread_gone` when it was the
-last, then drops the reference.
+last, then drops the reference. Milestone 10: `init_regs` (a clone's
+first register set, freed at its first user entry), `sig_pending`,
+`sig_blocked`, `sig_saved_blocked`/`sig_restore_blocked`, `sig_info`
+(64 entries, freed by `thread_put`), `altstack`, `syscall_nr`/
+`syscall_arg0` (the call in progress, for `SA_RESTART`),
+`clear_child_tid`, `lx_tid`.
 
 ## kernel/wait.h additions (Phase 9)
 

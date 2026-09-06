@@ -9,6 +9,7 @@
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/string.h>
 
 #include <arch/cpu.h>
 #include <arch/irqc.h>
@@ -125,4 +126,71 @@ uint64_t arch_clock_hz(void)
 const char *arch_clock_name(void)
 {
     return "tsc";
+}
+
+/* --- the CMOS real-time clock (MC146818): seconds since 1970 ------------ */
+
+#define CMOS_ADDR 0x70
+#define CMOS_DATA 0x71
+
+static uint8_t cmos_read(uint8_t reg)
+{
+    outb(CMOS_ADDR, (uint8_t)(0x80 | reg));   /* NMI disabled bit kept set, as firmware left it */
+    return inb(CMOS_DATA);
+}
+
+static unsigned from_bcd(uint8_t v)
+{
+    return (unsigned)((v >> 4) * 10 + (v & 0x0f));
+}
+
+/* Days since 1970-01-01 for a proleptic Gregorian date. */
+static uint64_t days_from_civil(int64_t y, unsigned m, unsigned d)
+{
+    y -= m <= 2;
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (uint64_t)(era * 146097 + (int64_t)doe - 719468);
+}
+
+bool arch_rtc_read_epoch(uint64_t *seconds)
+{
+    /* Wait for an update cycle to end (bit 7 of status A), then read twice
+     * until the two reads agree. */
+    for (unsigned spin = 0; spin < 100000 && (cmos_read(0x0a) & 0x80); spin++)
+        arch_cpu_relax();
+    uint8_t raw[7], again[7];
+    static const uint8_t regs[7] = { 0x00, 0x02, 0x04, 0x07, 0x08, 0x09, 0x32 };
+    for (unsigned tries = 0; tries < 8; tries++) {
+        for (unsigned i = 0; i < 7; i++)
+            raw[i] = cmos_read(regs[i]);
+        for (unsigned i = 0; i < 7; i++)
+            again[i] = cmos_read(regs[i]);
+        if (memcmp(raw, again, sizeof(raw)) == 0)
+            break;
+    }
+    uint8_t status_b = cmos_read(0x0b);
+    bool binary = (status_b & 0x04) != 0, hour24 = (status_b & 0x02) != 0;
+    unsigned sec = binary ? raw[0] : from_bcd(raw[0]);
+    unsigned min = binary ? raw[1] : from_bcd(raw[1]);
+    bool pm = (raw[2] & 0x80) != 0;
+    unsigned hour = binary ? (raw[2] & 0x7f) : from_bcd(raw[2] & 0x7f);
+    unsigned day = binary ? raw[3] : from_bcd(raw[3]);
+    unsigned mon = binary ? raw[4] : from_bcd(raw[4]);
+    unsigned year = binary ? raw[5] : from_bcd(raw[5]);
+    unsigned century = binary ? raw[6] : from_bcd(raw[6]);
+    if (!hour24) {
+        hour %= 12;
+        if (pm)
+            hour += 12;
+    }
+    if (century < 19 || century > 22)
+        century = year < 70 ? 20 : 19;   /* no century register: 1970..2069 */
+    int64_t full_year = (int64_t)century * 100 + year;
+    if (mon < 1 || mon > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 || full_year < 1970)
+        return false;
+    *seconds = days_from_civil(full_year, mon, day) * 86400ull + hour * 3600ull + min * 60ull + sec;
+    return true;
 }

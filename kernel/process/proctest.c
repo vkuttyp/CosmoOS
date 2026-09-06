@@ -176,8 +176,15 @@ bool selftest_elf(const char **reason)
     e.ehdr[0] = 'X';
     CHECK(elf_validate(&e, sizeof(e), USER_LO, USER_HI, &info, &why) == -ENOEXEC);
 
-    make_elf(&e, 0x400010, 0x400000, ELF_PF_R | ELF_PF_X);
+    /* ET_DYN (milestone 10): accepted with relative addresses, rebased by the caller. */
+    make_elf(&e, 0x10, 0x0, ELF_PF_R | ELF_PF_X);
     put16(e.ehdr + 16, 3);                                           /* ET_DYN */
+    CHECK(elf_validate(&e, sizeof(e), USER_LO, USER_HI, &info, &why) == 0);
+    CHECK(info.is_dyn && !info.has_interp && info.lo == 0 && info.entry == 0x10);
+    elf_rebase(&info, USER_PIE_BASE);
+    CHECK(info.segments[0].vaddr == USER_PIE_BASE && info.entry == USER_PIE_BASE + 0x10 && info.hi == USER_PIE_BASE + 4096);
+    make_elf(&e, 0x10, USER_HI - USER_LO, ELF_PF_R | ELF_PF_X);     /* relative, yet past the window's span */
+    put16(e.ehdr + 16, 3);
     CHECK(elf_validate(&e, sizeof(e), USER_LO, USER_HI, &info, &why) == -ENOEXEC);
 
     CHECK(elf_validate(&e, 10, USER_LO, USER_HI, &info, &why) == -ENOEXEC);

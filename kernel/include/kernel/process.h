@@ -33,16 +33,26 @@ typedef uint32_t pid_t;
 #define USER_STACK_TOP  0x00007FFFFFFF0000ULL
 #define USER_STACK_SIZE ((size_t)8 << 20)
 #define USER_MMAP_BASE  0x0000100000000000ULL   /* hint-less mmap searches upward from here */
+#define USER_PIE_BASE    0x0000555500000000ULL   /* an ET_DYN executable's load bias (milestone 10) */
+#define USER_INTERP_BASE 0x00007F0000000000ULL   /* the interpreter: first free range at or above */
 
 enum process_state { PROCESS_RUNNING, PROCESS_EXITING, PROCESS_EXITED };
 
 struct syscall_args;
 typedef int64_t (*syscall_fn)(struct syscall_args *a);
 
+struct thread;
+struct arch_user_regs;
+struct sigaction_k;
+struct signal_info;
 struct personality {
     const char *name;
     const syscall_fn *table;
     unsigned count;
+    /* Milestone 10 (docs/kernel/process/design.md §11). Both optional. */
+    int (*signal_frame)(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
+                        uint64_t blocked_before);   /* build a handler frame; NULL: handlers cannot run */
+    void (*thread_exit)(struct thread *t);          /* a thread of this personality is leaving */
 };
 
 struct vm_space;
@@ -83,6 +93,14 @@ struct process {
     /* Phase 11: the Linux personality's state (NULL for native processes). */
     struct linux_state *linux;
     uint64_t image_end;                /* page after the highest loaded segment (brk starts here) */
+    /* Milestone 10: signals and threads (docs/kernel/process/design.md §11). */
+    struct sigaction_k *sigactions;    /* SIG_MAX entries, under lock */
+    uint64_t sig_shared_pending;       /* signals sent to the process, not yet taken by a thread */
+    struct signal_info *sig_shared_info;
+    unsigned nr_live;                  /* threads that have not exited (nr_threads counts until reaped) */
+    struct thread *main_thread;        /* the first thread; its Linux tid is the pid */
+    uint64_t interp_base, exec_entry;  /* dynamic executables: the interpreter's bias, the program's entry */
+    char exec_path[128];               /* AT_EXECFN */
 };
 
 /* How spawn builds a child (kernel creators pass NULL: console handles
@@ -116,6 +134,21 @@ void process_init(void);
 int process_create_from_elf(const void *image, size_t size, const char *name, const char *const argv[],
                             const char *const envp[], const struct process_spawn_attr *attr, struct process **out);
 
+/* Milestone 10: the same from an executable image plus, when it names a
+ * program interpreter (PT_INTERP), the interpreter's image; `path` is what
+ * AT_EXECFN reports. An ET_DYN executable loads at USER_PIE_BASE, an
+ * ET_DYN interpreter at the first free range at or above USER_INTERP_BASE;
+ * the process starts at the interpreter's entry when there is one. An
+ * executable with PT_INTERP and no interpreter image is -ENOEXEC. */
+struct process_image {
+    const void *data;
+    size_t size;
+    const char *path;
+};
+int process_create_from_images(const struct process_image *exe, const struct process_image *interp, const char *name,
+                               const char *const argv[], const char *const envp[],
+                               const struct process_spawn_attr *attr, struct process **out);
+
 /* Phase 9: create from an executable file, on behalf of the calling
  * process (kernel/process/spawn.c). `handles` must be validated as the
  * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
@@ -140,9 +173,13 @@ int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
 
 /* Terminate `p` asynchronously with status 128 + sig. */
 void process_kill(struct process *p, int sig);
-/* Delivery points: system-call boundary, return to user mode, killable waits. */
+/* Delivery points: system-call boundary, return to user mode, killable waits.
+ * process_return_to_user takes the frame about to be returned to (a trap
+ * frame) so a signal handler frame can be set up on it; the architecture's
+ * trap tail calls it with interrupts off and gets them back off. */
 void process_check_kill(void);
-void process_return_to_user(void);
+struct arch_trap_frame;
+void process_return_to_user(struct arch_trap_frame *frame);
 
 /* Working directory. */
 int process_chdir(const char *path);
@@ -160,9 +197,28 @@ struct credentials;
  * process for a privileged viewer, else those with the viewer's real uid. */
 unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer);
 
-/* Terminate the calling process (all its threads; only one exists in
- * this phase) with `status`. Never returns. */
+/* Terminate the calling process, every thread of it, with `status`. Never
+ * returns: the other threads leave at their next return to user mode or
+ * killable wait. */
 void process_exit(int status) __noreturn;
+/* End only the calling thread; the last live thread's exit ends the
+ * process with `status`. Never returns. */
+void process_thread_exit(int status) __noreturn;
+/* A further user thread in `p` (the calling process), starting with the
+ * register set `regs` and the thread pointer `tls`. Returns 0 and the new
+ * (referenced by the process) thread, or -ENOMEM/-EAGAIN. */
+/* Create a thread of `p` that will enter user mode with `regs` and the
+ * thread pointer `tls`; it is linked in the process (process_find_thread
+ * sees it) but not runnable until process_thread_start. The caller fills
+ * in what must be there before the thread runs (clear_child_tid), then
+ * starts it, or abandons it (it then exits at once without running user
+ * code). -ENOMEM, -EAGAIN (the process is exiting, or PROCESS_MAX_THREADS). */
+#define PROCESS_MAX_THREADS 256
+int process_add_thread(struct process *p, const struct arch_user_regs *regs, uintptr_t tls, struct thread **out);
+void process_thread_start(struct thread *t);
+void process_thread_abandon(struct thread *t);
+/* The thread of `p` with this Linux tid (pid for the main thread), or NULL. Not referenced. */
+struct thread *process_find_thread(struct process *p, uint32_t lx_tid);
 
 /* Wait for `p` to exit and return its status. */
 int process_wait_exit(struct process *p);
@@ -193,6 +249,13 @@ struct elf_info;
 int linux_process_init(struct process *p, const struct elf_info *info);   /* allocate p->linux */
 void linux_process_release(struct process *p);
 /* Lay out the Linux auxiliary vector: returns words written into `w` (pairs). */
-unsigned linux_auxv(struct process *p, const struct elf_info *info, uint64_t random_addr, uint64_t *w, unsigned max);
+struct linux_auxv_args {
+    uint64_t random_addr;    /* 16 bytes on the stack */
+    uint64_t execfn_addr;    /* the path string on the stack */
+    uint64_t platform_addr;  /* the machine string on the stack */
+    uint64_t interp_base;    /* AT_BASE: the interpreter's bias, 0 without one */
+};
+unsigned linux_auxv(struct process *p, const struct elf_info *exe, const struct linux_auxv_args *x, uint64_t *w,
+                    unsigned max);
 
 #endif /* KERNEL_PROCESS_H */

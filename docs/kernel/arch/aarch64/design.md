@@ -320,6 +320,12 @@ moment of `eret`, i.e. the thread's own kernel stack.
 `arch_user_enter(entry, sp)`: interrupts off, `TPIDR_EL0` = the thread's
 TLS base, then `aarch64_user_enter` (`vectors.S`): `ELR_EL1` = entry,
 `SP_EL0` = sp, `SPSR_EL1` = 0 (EL0t, DAIF clear), zero `x0..x30`, `eret`.
+`arch_user_enter_regs(regs)` (milestone 10, a clone's first entry and
+the shape every signal return takes) loads all 31 registers, `sp`, `pc`
+and the user bits of `pstate` from a `struct arch_user_regs`
+(`aarch64_user_enter_regs`). `TPIDR_EL0` is user-writable, so
+`arch_thread_switch_prepare` saves the outgoing thread's value into its
+`tls_base` before loading the incoming one's.
 `arch_user_access_begin/end` clear/set PSTATE.PAN through the raw
 encodings (`.inst 0xd500409f/0xd500419f`; the ARMv8.0 assembler refuses
 `msr pan`) when `ID_AA64MMFR1_EL1.PAN` reports the feature (`-cpu max`;
@@ -430,17 +436,20 @@ architecture as its second argument and expects `e_machine` 183.
   nothing, and `arch_hv_host_tsc` reads `CNTPCT_EL0`. `/dev/vmm` is not
   created, `vmctl probe` fails and `rc.test` prints `HVTEST: skipped`,
   which the harness requires on this architecture and forbids on x86-64.
-- `compat/linux/syscalls.c`: the x86-64 table is compiled under
-  `#if defined(ARCH_X86_64)`; elsewhere `personality_linux` has an empty
-  table (`count = 0`), so a Linux binary runs until its first system
-  call, which the dispatcher reports as unknown and answers `-ENOSYS`.
-  `linux_process_init/release/auxv` are generic and stay.
-- `tests/linux`, `tests/hv` and their archive entries are included by the
-  Makefile only when `ARCH` is `x86_64`; `rc.test` runs `/etc/rc.linux`
-  only if `/boot/tests/linux/lxhello` exists and prints
-  `LINUXTEST: skipped` otherwise; the kernel self-tests that use the
-  images (`linux-elf`, `hv-*`) skip when the images are absent or the
-  backend is missing.
+- `compat/linux/`: since milestone 10 the personality compiles for
+  both architectures with the AArch64 numbers (`nr_aarch64.h`), the
+  128-byte `struct stat`, `uname` `aarch64`, the arm64 `rt_sigframe`
+  and `clone`'s argument order; user code sets `tpidr_el0` itself and
+  the switch hook saves it. What is still missing here: FP/SIMD at EL0
+  (a libc with NEON `memcpy` takes `SIGILL`; the test programs are
+  built `-mgeneral-regs-only`), the `esr_context` carries syndrome 0,
+  and `hello_musl` (x86-64 machine code) is not built.
+- `tests/hv` and its archive entries are included by the Makefile only
+  when `ARCH` is `x86_64`; `tests/linux` builds for both. `rc.test` runs
+  `/etc/rc.linux` when `/boot/tests/linux/lxhello` exists (both
+  machines now) and prints `LINUXTEST: skipped` otherwise; the kernel
+  self-tests that use images or the backend (`hv-*`) skip when they are
+  absent.
 - `ELF_MACHINE_NATIVE`/`ELF_MACHINE_NATIVE_NAME` (`kernel/elf64.h`) replace
   the literal `EM_X86_64` in the process loader, the module validator and
   their tests (the module test's foreign-machine mutation now uses 0x1234
