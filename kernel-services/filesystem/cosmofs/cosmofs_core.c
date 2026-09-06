@@ -58,6 +58,23 @@ static int mhdr_check(const uint8_t *block, uint64_t blkno, uint32_t kind)
     return 0;
 }
 
+struct mhdr_want {
+    uint64_t dva;
+    uint32_t kind;
+};
+
+bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind)
+{
+    return mhdr_check(block, dva, kind) == 0;
+}
+
+/* The verifier cfs_read_repair calls for a metadata block. */
+static bool mhdr_ok(const void *block, void *arg)
+{
+    const struct mhdr_want *w = arg;
+    return mhdr_check(block, w->dva, w->kind) == 0;
+}
+
 struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b)
 {
     return (struct cfs_mhdr *)b->data;
@@ -141,9 +158,11 @@ int cfs_buf_get(struct cfs *fs, uint64_t blkno, uint32_t kind, struct cfs_buf **
     b = buf_alloc(fs, blkno);
     if (b == NULL)
         return -ENOMEM;
-    int rc = pool_read(fs->pool, blkno, b->data);
-    if (rc == 0)
-        rc = mhdr_check(b->data, blkno, kind);
+    /* A metadata block checks itself, so a mirrored member can answer
+     * from another copy and put the bad one right (design.md, "A mirror
+     * is only as good as its verifier"). */
+    struct mhdr_want want = { .dva = blkno, .kind = kind };
+    int rc = cfs_read_repair(fs, blkno, b->data, mhdr_ok, &want, NULL);
     if (rc) {
         kerror("cosmofs: block %llu: %s", (unsigned long long)blkno,
                rc == -EIO ? "bad metadata header or checksum" : "read error");
@@ -667,6 +686,14 @@ int cfs_commit(struct cfs *fs)
      * previous root until this one is on disk. */
     fs->sb.generation = fs->gen;
     fs->sb.free_blocks = fs->free_blocks;
+    /* Every device's label carries the commit it took part in, stamped
+     * after that commit's blocks are stable and before the root that
+     * publishes them: a label is never newer than the root it belongs
+     * to, so a device that misses a commit can be told apart at the
+     * next mount (design.md, "Format version 5"). */
+    rc = cfs_labels_update(fs);
+    if (rc)
+        return rc;
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
     rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc)
@@ -755,18 +782,30 @@ int cfs_sync_vnodes(struct cfs *fs)
  * losing one member does not take another's bitmap with it (design.md,
  * "The member table").
  */
-static int format_at(struct blkdev **bd, unsigned n, unsigned version)
+/*
+ * `copies` devices per member, taken from `bd` member by member: with
+ * copies = 2 and n = 2, bd[0] and bd[1] are member 0's mirror and bd[2]
+ * and bd[3] are member 1's.
+ */
+static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version)
 {
-    if (n == 0 || n > CFS_MAX_MEMBERS)
+    if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES)
         return -EINVAL;
-    if (version < 4 && n != 1)
-        return -EINVAL;   /* one member is all the older formats can name */
+    if (version < 4 && (n != 1 || copies != 1))
+        return -EINVAL;   /* one device is all the older formats can name */
+    if (version < 5 && copies != 1)
+        return -EINVAL;   /* a mirror group is what version 5 adds */
     struct spool *pool;
     int rc = pool_open(bd[0], &pool);
     if (rc)
         return rc;
-    for (unsigned v = 1; v < n && rc == 0; v++)
-        rc = pool_add_member(pool, bd[v], NULL);
+    for (unsigned c = 1; c < copies && rc == 0; c++)
+        rc = pool_add_copy(pool, 0, bd[c]);
+    for (unsigned v = 1; v < n && rc == 0; v++) {
+        rc = pool_add_member(pool, bd[v * copies], NULL);
+        for (unsigned c = 1; c < copies && rc == 0; c++)
+            rc = pool_add_copy(pool, v, bd[v * copies + c]);
+    }
     if (rc) {
         pool_close(pool);
         return rc;
@@ -790,6 +829,7 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned version)
         }
         memcpy(mem[v].uuid, uuid, 16);
         mem[v].nblocks = nb;
+        mem[v].copies = copies;
         mem[v].first_usable = v == 0 ? 2 : 1;
         total += nb;
     }
@@ -840,8 +880,9 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned version)
             mhdr_seal(&tmp, block, CFS_KIND_ALLOCIDX, CFS_DVA(v, idx_blk));
             rc = pool_write(pool, CFS_DVA(v, idx_blk), block);
         }
-        if (rc == 0 && v > 0)
-            rc = cfs_label_write(pool, v, uuid, nb);
+        /* Generation 1: the commit this device took part in. */
+        for (unsigned c = 0; c < copies && rc == 0 && v > 0; c++)
+            rc = cfs_label_write(pool, v, c, 1, uuid, nb);
         mem[v].alloc_root = CFS_DVA(v, idx_blk);
         mem[v].free_blocks = nb - used;
         free_total += nb - used;
@@ -917,12 +958,17 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned version)
 
 int cosmofs_format_pool(struct blkdev **bd, unsigned n)
 {
-    return format_at(bd, n, CFS_VERSION);
+    return format_at(bd, n, 1, CFS_VERSION);
+}
+
+int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
+{
+    return format_at(bd, n, copies, CFS_VERSION);
 }
 
 int cosmofs_format(struct blkdev *bd)
 {
-    return format_at(&bd, 1, CFS_VERSION);
+    return format_at(&bd, 1, 1, CFS_VERSION);
 }
 
 /* Test hook: write an older format, so that "versions 2 and 3 mount
@@ -932,7 +978,7 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
 {
     if (version < CFS_VERSION_MIN || version > CFS_VERSION)
         return -EINVAL;
-    return format_at(&bd, 1, version);
+    return format_at(&bd, 1, 1, version);
 }
 
 /* --- mount / unmount ------------------------------------------------------------ */
@@ -1068,7 +1114,7 @@ static int load_root(struct cfs *fs, struct vnode **root)
 {
     fs->gen = fs->sb.generation + 1;
     fs->alloc_hint = 2;
-    int rc = cfs_members_load(fs, fs->pool->m[0].dev);
+    int rc = cfs_members_load(fs);
     if (rc)
         return rc;
     /* From the blocks that exist, not the linear span: that is rounded
@@ -1247,6 +1293,11 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->wb_commits = fs->wb_commits;
     out->csum_failures = fs->csum_failures;
     out->members = fs->nmembers;
+    out->devices = 0;
+    for (unsigned v = 0; v < fs->nmembers; v++)
+        out->devices += pool_copies(fs->pool, CFS_DVA(v, 0));
+    out->repairs = fs->repairs;
+    out->degraded = fs->degraded;
     mutex_unlock(&fs->lock);
     return 0;
 }
@@ -1256,6 +1307,28 @@ void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
     struct cfs *fs = cfs_of(mnt);
     if (fs)
         fs->discard_on_unmount = discard;
+}
+
+int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return -EINVAL;
+    mutex_lock(&fs->lock);
+    struct cfs_inode in;
+    int rc = cfs_inode_read(fs, ino, &in);
+    if (rc == 0) {
+        uint64_t pblk = 0;
+        rc = cfs_map(fs, &in, lblk, &pblk);
+        if (rc == 1) {
+            *dva = pblk;
+            rc = 0;
+        } else if (rc == 0) {
+            rc = -ENOENT;   /* a hole */
+        }
+    }
+    mutex_unlock(&fs->lock);
+    return rc;
 }
 
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev)

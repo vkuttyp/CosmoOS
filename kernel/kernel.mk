@@ -108,6 +108,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
+	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \
