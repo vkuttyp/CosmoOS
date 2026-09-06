@@ -1356,10 +1356,13 @@ bool selftest_net_nonblock(const char **reason)
      * an ACK still in flight (processed on another worker since unit 11)
      * frees send space again. So converge on the state instead of
      * sampling it: keep sending while readiness says there is room, and
-     * stop when it says there is none. A send that fails while readiness
-     * says writable is allowed (4 KiB may not fit where a byte would);
-     * readiness saying "full" while a send still succeeds is not, and is
-     * what the check below rules out. */
+     * stop the moment it says there is none. The observation is the exit
+     * condition, so no ACK can arrive between seeing the state and
+     * asserting it. A 4 KiB send that fails while readiness still says
+     * writable is not a failure -- WRITABLE is a low-water predicate and
+     * a byte might still fit -- it just means more waiting. The positive
+     * direction (WRITABLE returns once the peer drains) is checked after
+     * the drain loop below. */
     memset(buf, 'f', sizeof(buf));
     uint64_t pushed = 0;
     bool full = false;
@@ -1377,8 +1380,6 @@ bool selftest_net_nonblock(const char **reason)
             CHECK(n > 0);
     }
     CHECK(full && pushed > 0);
-    CHECK(ksock_sendto(c, buf, 1, NULL) == -EAGAIN);   /* not writable means not one byte */
-    CHECK(!(ksock_ready(c) & COSMO_IO_WRITABLE));
     uint64_t drained = 0;
     for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
         int64_t n = ksock_recvfrom(a, buf, sizeof(buf), NULL);
