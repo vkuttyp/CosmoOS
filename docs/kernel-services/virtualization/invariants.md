@@ -147,3 +147,44 @@ the guest. The host kernel never panics because of what a guest does.
 *Checked by*: `hv-guest-shutdown` (`int $3` with an empty IDT → `SHUTDOWN`,
 then `-EIO`, then `vcpu_get_regs` still works), `hv-guest-pm` (an NPF
 becomes an `MMIO` exit the owner completes).
+
+### V15. Nothing vendor-specific crosses `arch/hv.h`
+
+Segment attributes travel in the architectural descriptor layout
+(`COSMO_SEG_*`), not in a control block's packing: SVM moves AVL/L/DB/G
+into VMCB bits 8–11 and writes an unusable segment as not present, VMX
+uses the layout with unusable at bit 16, and `x86/hvseg.h` is the only
+place either encoding exists. A backend refuses reserved attribute bits
+and an unusable-and-present combination before it writes anything.
+*Checked by*: `test_vmx`/`test_hv` (both translations round-trip every
+field, including the DPL and the unusable case), `hv-guest-pm` (a
+protected-mode guest built from neutral attributes runs), and the
+long-mode `L && DB` refusal in `check_state`, which the old packing made
+unreachable. *Gap*: only two backends have ever exercised the layout.
+
+### V16. A capability the backend reports is one it honours
+
+`hv_caps` says what a guest may be, not only what the extension is
+called: `real_mode_guest` (the architectural reset state can run at
+all — SVM always, VMX only with EPT and unrestricted guest), `map_prot`,
+`large_pages`, `max_vcpus`. Generic code asks rather than assumes, and
+`/dev/vmm` reports the whole set so a user-space VMM can decide before
+it builds anything. *Checked by*: `hv-caps` (the mapping call refuses
+`prot` 0 and unknown bits; a read-only mapping is accepted and reads
+back when `map_prot`), `hv-probe` (a backend that cannot run the reset
+state may not claim to). *Gap*: the false cases are unreachable on the
+machines the tests run on, so what is checked is the true branch.
+
+### V17. The VMX backend is inert until it is on Intel hardware
+
+Both backends are compiled into every x86-64 kernel and `arch_hv_probe`
+takes the one the CPU has; on every machine these tests run on that is
+SVM (QEMU's TCG emulates AMD-V and reports `vmx: false`), so no VMX
+instruction is executed by any test in this repository. What is verified
+here is the pure logic — control fixing against capability MSR values,
+the I/O qualification decoder, the EPT pointer and page-table builder,
+the segment translation — and the fact that adding the backend changed
+nothing for SVM. *Checked by*: `test_vmx`, and the whole `hv-*` suite
+still passing. *Gap*: VMXON, the VMCS field writes, `VMLAUNCH` and the
+exit path have never run. That is stated in `testing.md` too, so a green
+chain is not misread as evidence that VMX works.

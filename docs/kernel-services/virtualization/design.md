@@ -558,6 +558,198 @@ memory). Exits and entries are counted per vCPU and summed into
   never exits voluntarily still exits on every host tick.
 - Zeroed guest memory; the console ring is per VM.
 
+## Vendor-neutral vCPU state, capabilities, and the Intel VMX backend
+
+The unit the audit names after the IOMMU (§11.4 "Intel VMX readiness",
+§11.3's `attrib` finding, §19 "After these"). Written before the code.
+
+### 1. What was wrong
+
+`arch/hv.h` claims that nothing vendor-specific crosses it, and the
+UAPI documents `cosmo_vcpu_seg.attrib` as `type(4) S DPL(2) P | AVL L DB
+G in bits 12-15` — the layout of an x86 descriptor, which is what both
+vendors derive their control-block fields from. The SVM backend then
+copies `attrib` into the VMCB verbatim, where the same fields are packed
+into bits 0-11, so what actually crosses the interface is the VMCB's
+packing. Two consequences the audit found: `check_state`'s long-mode
+test reads bits 13 and 14 (`L`, `DB`) of a value whose `L` and `DB` sit
+at bits 9 and 10, so the check is dead and only the hardware's
+`VMEXIT_INVALID` catches the combination; and the tests encode `0xC9B`,
+teaching the VMCB packing to every reader of the UAPI.
+
+A second seam problem blocks more than VMX: `arch_hv_vm_map` maps RWX at
+4 KiB and takes no permission or size argument, so ballooning, dirty
+tracking, snapshots, device passthrough and stage-2 on EL2 all need the
+signature changed before they can start.
+
+And `struct hv_caps` describes the backend in four fields, none of which
+say what a guest may *be*: Intel needs EPT plus "unrestricted guest" to
+run the real-mode reset state at all, which is a capability the manager
+must be able to ask about rather than assume.
+
+### 2. Neutral segment attributes
+
+`attrib` keeps its 16 bits and its documented meaning, now stated as the
+UAPI's own constants rather than prose:
+
+```c
+#define COSMO_SEG_TYPE   0x00Fu   /* bits 0-3: descriptor type */
+#define COSMO_SEG_S      0x010u   /* code/data (0 = system) */
+#define COSMO_SEG_DPL    0x060u   /* bits 5-6 */
+#define COSMO_SEG_P      0x080u   /* present */
+#define COSMO_SEG_UNUSABLE 0x100u /* bit 8: no segment loaded (VMX's unusable) */
+#define COSMO_SEG_AVL    0x1000u  /* bit 12 */
+#define COSMO_SEG_L      0x2000u  /* bit 13: 64-bit code */
+#define COSMO_SEG_DB     0x4000u  /* bit 14 */
+#define COSMO_SEG_G      0x8000u  /* bit 15 */
+```
+
+Bits 9-11 stay reserved (zero, refused otherwise). The unusable bit is
+the one field neither the descriptor format nor SVM has: VMX needs it,
+so the neutral form carries it and the SVM backend renders it as
+"not present", which is how a VMCB says the same thing.
+
+- **SVM** packs on the way in (`bits 12-15 >> 4`) and unpacks on the way
+  out, so the VMCB's 12-bit form never leaves the backend. A segment
+  with `COSMO_SEG_UNUSABLE` is written with `P = 0`; on the way out a
+  segment with `P = 0` and a null selector reads back as unusable.
+- **VMX** uses the value nearly directly: its access-rights word is this
+  layout with unusable at bit 16, so the translation is
+  `(attrib & 0xF0FF) | ((attrib & COSMO_SEG_UNUSABLE) << 8)`.
+
+`check_state` moves onto the neutral bits, which makes the long-mode
+`L && DB` refusal real, and gains the checks VMX will need anyway
+(reserved `attrib` bits, `S` and type consistency for CS/SS/TR).
+
+### 3. Capabilities
+
+```c
+struct hv_caps {
+    bool present;
+    const char *name;          /* "svm", "vmx", "none" */
+    unsigned max_asids;        /* address-space tags (VMX: VPIDs) */
+    bool nested_paging;        /* NPT / EPT */
+    bool real_mode_guest;      /* the architectural reset state can run */
+    bool map_prot;             /* arch_hv_vm_map honours per-page permissions */
+    bool large_pages;          /* 2 MiB mappings when aligned */
+    unsigned max_vcpus;        /* per VM, backend limit */
+};
+```
+
+`real_mode_guest` is the bit the audit asked for: true on SVM always,
+true on VMX only with EPT **and** unrestricted guest. The manager
+refuses `vcpu_create` with `-ENOTSUP` when it is false rather than
+letting the guest fail its first entry, and `/dev/vmm` reports the whole
+set so a user-space VMM can decide before it builds anything. The
+`hv-caps` self-test asserts the reported set matches what the running
+backend does (a mapping refused for permissions it says it does not
+support, a real-mode vCPU refused when it says it cannot).
+
+### 4. Mapping permissions
+
+```c
+#define HV_MAP_READ  (1u << 0)
+#define HV_MAP_WRITE (1u << 1)
+#define HV_MAP_EXEC  (1u << 2)
+int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
+```
+
+`prot == 0` is `-EINVAL`; a backend that reports `map_prot == false`
+refuses anything but RWX. NPT gets the permission bits it always had
+(present/write/user, NX from EFER.NXE), EPT gets its own three, and both
+gain 2 MiB leaves when the guest-physical address, the host-physical
+address and the length are all 2 MiB aligned — which is what makes a
+64 MiB guest cost 33 tables instead of 16 385. Guest memory regions pass
+`HV_MAP_READ | HV_MAP_WRITE | HV_MAP_EXEC` today; the argument exists so
+that read-only regions (a ROM, a snapshot's clean pages) do not need
+another API change.
+
+### 5. The VMX backend
+
+`kernel/arch/x86_64/vmx.c`, `vmx_ept.c`, `vmx_run.S`, mirroring the SVM
+backend's structure so the two can be read side by side.
+
+- **Probe.** `CPUID.1:ECX.VMX`, then `IA32_FEATURE_CONTROL`: locked
+  without the VMX-outside-SMX bit is `-ENOTSUP` (firmware disabled it);
+  unlocked means the kernel sets `VMXON | LOCK` itself. `IA32_VMX_BASIC`
+  gives the VMCS revision id, the region size and whether the controls
+  are "true" (the `IA32_VMX_TRUE_*` MSRs). EPT and unrestricted guest
+  come from `IA32_VMX_EPT_VPID_CAP` and secondary controls; without EPT
+  the backend refuses to be used at all, as SVM does without NPT.
+- **Control fixing.** Every control word is filtered through its
+  capability MSR: `allowed-0` bits must be set, `allowed-1` bits may be.
+  `vmx_fix_ctls(uint64_t cap_msr, uint32_t want)` is a pure function, so
+  the host test can check it against the encodings the manuals give.
+- **VMXON per CPU**, lazily on the first run as SVM enables EFER.SVME,
+  with the VMXON region allocated from the PMM and `CR4.VMXE` set.
+- **VMCS layout** is not a structure: fields are read and written with
+  `vmread`/`vmwrite` by encoding. The backend keeps its own shadow of
+  what generic code asks for (the register file, segments, control
+  registers) and writes it into the VMCS at entry, so `get_state` and
+  `set_state` never need the vCPU to be loaded on this CPU.
+- **Entry and exit.** `vmx_run.S` saves the host GPRs, loads the guest's,
+  issues `VMLAUNCH` the first time and `VMRESUME` afterwards, and on exit
+  saves the guest GPRs and restores the host's. RSP/RIP for both sides
+  are VMCS fields, so there is no host VMCB analogue; what SVM does with
+  `VMSAVE`/`VMLOAD` the VMCS host-state area does declaratively.
+- **Interrupts.** SVM's `CLGI` + `sti` trick has no VMX form. Instead
+  pin-based "external-interrupt exiting" is set: a host interrupt causes
+  an exit with reason 1, the backend re-enables interrupts so the host
+  handler runs, and reports `HV_EXIT_INTR` — the same shape the manager
+  already handles.
+- **Exits.** Reason codes map to `hv_exit`: 10 CPUID, 12 HLT, 30 IO
+  (with the exit qualification decoded into port/size/direction/string/
+  rep), 31/32 MSR, 48 EPT violation → `HV_EXIT_MMIO`, 18 VMCALL →
+  `HV_EXIT_HYPERCALL`, 1 external interrupt → `HV_EXIT_INTR`, 2 triple
+  fault → `HV_EXIT_SHUTDOWN`, everything else → `HV_EXIT_FAIL` with the
+  reason and both qualification fields, as SVM reports unknown exits.
+- **MSR bitmaps** all-ones (every MSR exits), as SVM's MSRPM. The
+  backend-owned set differs: on VMX, FS/GS/TR bases and `IA32_EFER`,
+  `IA32_PAT`, `IA32_SYSENTER_*` are VMCS fields, while `STAR`, `LSTAR`,
+  `CSTAR`, `SFMASK` and `KERNEL_GS_BASE` need the VMCS MSR load/store
+  lists. `arch_hv_vcpu_msr` keeps its contract; only the storage differs.
+- **The guest cannot become a hypervisor**: `CR4.VMXE` is masked out of
+  what the guest may set (the CR4 guest/host mask), VMX instructions
+  exit and are reflected as `#UD`, and CPUID keeps hiding both VMX and
+  SVM, as it does today.
+- **XSAVE** handling is identical to SVM's and shared: the owner's state
+  is saved, the guest's restored under its own XCR0, and `XSETBV` is
+  intercepted (exit reason 55) and validated by the same code.
+
+### 6. What this environment can and cannot verify
+
+QEMU's TCG emulates AMD SVM and reports `vmx: false` for every CPU model
+(`query-cpu-model-expansion` on `max`), and the development host is
+AArch64, so **no VMX instruction in this unit is ever executed by any
+test in this repository.** That is stated here rather than discovered
+later, and it decides how the backend is verified:
+
+- Everything that is pure logic is factored so that it can run on the
+  host and is covered by `tests/host/test_vmx.c`: control fixing against
+  capability MSR values, segment translation both ways (round-tripping
+  every field, unusable included), the exit-reason table, the EPT
+  builder (the same treatment `svm_npt.c` already gets, over the
+  harness's arena), and the EPT entry encoding (memory type, permission
+  bits, large-page bit).
+- The rest — VMXON, VMCS field writes, `VMLAUNCH`, the exit path — is
+  compiled for the target and reviewed against the SDM, and runs the
+  first time on Intel hardware. `hv_caps.present` is false on every
+  machine the tests run on, so the backend is inert here: the `hv`
+  self-tests keep exercising SVM exactly as before, and a machine with
+  neither extension keeps reporting `none`.
+- `docs/kernel-services/virtualization/testing.md` says the same thing
+  in the gap list, so nobody reads a green chain as evidence that VMX
+  works.
+
+### 7. Not done
+
+- Nested virtualization on either vendor, APICv/AVIC, posted
+  interrupts, VPID beyond a single tag per VM, TSC offsetting and
+  scaling, dirty tracking (the EPT dirty bit is present but unused),
+  large pages above 2 MiB, MSR pass-through for performance.
+- The VMX backend's own instruction-level verification, for want of
+  hardware.
+
 ## Testing strategy
 
 Specified in full in `testing.md`; in outline:
