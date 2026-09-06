@@ -423,7 +423,43 @@ static void fill_vnode(struct vnode *vn, const struct cfs_inode *in)
     vn->ops = vn->type == VNODE_DIR ? &cfs_dir_ops : &cfs_file_ops;
 }
 
-/* Referenced vnode for `ino`, cached or instantiated. fs->lock held. */
+/* Referenced vnode for `ino` in a snapshot's tree (tag != 0) or the live
+ * one. fs->lock held. */
+static int cfs_vnode_get_tagged(struct cfs *fs, uint64_t ino, unsigned tag, const struct cfs_snapshot *snap,
+                                struct vnode **out)
+{
+    uint64_t key = CFS_SNAP_INO(tag, ino);
+    struct vnode *vn = vnode_lookup_cached(fs->mnt, key);
+    if (vn) {
+        *out = vn;
+        return 0;
+    }
+    struct cfs_vnode *cv = kzalloc(sizeof(*cv));
+    if (cv == NULL)
+        return -ENOMEM;
+    int rc = tag ? cfs_inode_read_at(fs, snap->imap_root, snap->next_ino, ino, &cv->inode)
+                 : cfs_inode_read(fs, ino, &cv->inode);
+    if (rc) {
+        kfree(cv);
+        return rc;
+    }
+    if (tag) {
+        cv->snap_tag = tag;
+        cv->snap_imap_root = snap->imap_root;
+        cv->snap_next_ino = snap->next_ino;
+    }
+    vn = vnode_alloc(fs->mnt, key);
+    if (vn == NULL) {
+        kfree(cv);
+        return -ENOMEM;
+    }
+    vn->fs_priv = cv;
+    fill_vnode(vn, &cv->inode);
+    vnode_hash_insert(vn);
+    *out = vn;
+    return 0;
+}
+
 int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out)
 {
     struct vnode *vn = vnode_lookup_cached(fs->mnt, ino);
@@ -606,6 +642,71 @@ static bool dir_is_empty(struct cfs *fs, struct vnode *dir, uint8_t *block)
     return true;
 }
 
+/* The synthetic .snapshots directory: an inode number no real inode can
+ * have, and just enough of an inode to be a directory. */
+static int snapdir_get(struct cfs *fs, struct vnode **out)
+{
+    struct vnode *vn = vnode_lookup_cached(fs->mnt, CFS_SNAPDIR_INO);
+    if (vn) {
+        *out = vn;
+        return 0;
+    }
+    struct cfs_vnode *cv = kzalloc(sizeof(*cv));
+    if (cv == NULL)
+        return -ENOMEM;
+    cv->inode.mode = CFS_MODE(CFS_TYPE_DIR, 0555);
+    cv->inode.nlink = 1;
+    cv->inode.ino = CFS_SNAPDIR_INO;
+    cv->inode.parent = CFS_ROOT_INO;
+    cv->snap_tag = 0xFFFFu;   /* not a snapshot's tree, but not the live one either */
+    vn = vnode_alloc(fs->mnt, CFS_SNAPDIR_INO);
+    if (vn == NULL) {
+        kfree(cv);
+        return -ENOMEM;
+    }
+    vn->fs_priv = cv;
+    fill_vnode(vn, &cv->inode);
+    vnode_hash_insert(vn);
+    *out = vn;
+    return 0;
+}
+
+/* The tag a snapshot's vnodes carry: its index in the list, plus one. */
+static int snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs_snapshot *out, unsigned *tag)
+{
+    char buf[CFS_SNAP_NAME_MAX + 1];
+    if (len > CFS_SNAP_NAME_MAX)
+        return -ENOENT;
+    memcpy(buf, name, len);
+    buf[len] = '\0';
+    struct cfs_snapshot list[CFS_SNAPS_PER_BLOCK];
+    unsigned n = 0;
+    int rc = cfs_snapshot_list(fs, list, CFS_SNAPS_PER_BLOCK, &n);
+    if (rc)
+        return rc;
+    if (n > CFS_SNAPS_PER_BLOCK)
+        n = CFS_SNAPS_PER_BLOCK;
+    for (unsigned i = 0; i < n; i++)
+        if (strcmp(list[i].name, buf) == 0) {
+            *out = list[i];
+            *tag = i + 1;
+            return 0;
+        }
+    return -ENOENT;
+}
+
+static bool is_snapdir(struct vnode *vn)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    return cv && cv->snap_tag == 0xFFFFu;
+}
+
+static unsigned snap_tag_of(struct vnode *vn)
+{
+    struct cfs_vnode *cv = vn->fs_priv;
+    return cv && cv->snap_tag != 0xFFFFu ? cv->snap_tag : 0;
+}
+
 static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
     struct cfs *fs = cfs_of(dir->mnt);
@@ -613,8 +714,44 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
         return -EIO;   /* unmounted, or the transaction was abandoned */
     mutex_lock(&fs->lock);
     int rc;
+    if (is_snapdir(dir)) {
+        /* Inside .snapshots: each name is a snapshot's root directory. */
+        struct cfs_snapshot s;
+        unsigned tag;
+        rc = snap_by_name(fs, name, len, &s, &tag);
+        if (rc == 0)
+            rc = cfs_vnode_get_tagged(fs, CFS_ROOT_INO, tag, &s, out);
+        mutex_unlock(&fs->lock);
+        return rc;
+    }
+    if (dir->ino == CFS_ROOT_INO && len == strlen(CFS_SNAPDIR_NAME) &&
+        memcmp(name, CFS_SNAPDIR_NAME, len) == 0) {
+        /* Found by name only: readdir does not list it, so nothing
+         * walking the tree descends into history by accident. */
+        rc = snapdir_get(fs, out);
+        mutex_unlock(&fs->lock);
+        return rc;
+    }
+    unsigned tag = snap_tag_of(dir);
     if (len == 2 && name[0] == '.' && name[1] == '.') {
         rc = cfs_vnode_get(fs, cfs_inode_of(dir)->parent, out);
+    } else if (tag) {
+        /* Inside a snapshot: an ordinary directory read, through that
+         * snapshot's inode map. */
+        uint8_t *block = kmalloc(CFS_BLOCK, 0);
+        if (block == NULL) {
+            mutex_unlock(&fs->lock);
+            return -ENOMEM;
+        }
+        uint64_t lblk;
+        unsigned slot;
+        rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
+        if (rc == 0) {
+            struct cfs_vnode *cv = dir->fs_priv;
+            struct cfs_snapshot s = { .imap_root = cv->snap_imap_root, .next_ino = cv->snap_next_ino };
+            rc = cfs_vnode_get_tagged(fs, ((struct cfs_dirent *)block)[slot].ino, tag, &s, out);
+        }
+        kfree(block);
     } else {
         uint8_t *block = kmalloc(CFS_BLOCK, 0);
         if (block == NULL) {
@@ -688,11 +825,40 @@ out:
 
 static int cfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
+    if (is_snapdir(dir) || snap_tag_of(dir))
+        return -EROFS;   /* .snapshots holds snapshots, not files */
     return cfs_create_common(dir, name, len, mode, CFS_TYPE_REG, out);
 }
 
 static int cfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
+    /* mkdir inside .snapshots takes a snapshot: the surface is what
+     * mkdir already is (design.md, "The interface"). */
+    if (is_snapdir(dir)) {
+        struct cfs *fs = cfs_of(dir->mnt);
+        if (fs == NULL || fs->failed)
+            return -EIO;
+        if (dir->mnt->flags & MOUNT_RDONLY)
+            return -EROFS;
+        char buf[CFS_SNAP_NAME_MAX + 1];
+        if (len > CFS_SNAP_NAME_MAX)
+            return -ENAMETOOLONG;
+        memcpy(buf, name, len);
+        buf[len] = '\0';
+        mutex_lock(&fs->lock);
+        int rc = cfs_snapshot_create(fs, buf);
+        struct cfs_snapshot s;
+        unsigned tag;
+        if (rc == 0 && out)
+            rc = snap_by_name(fs, name, len, &s, &tag) == 0 ? cfs_vnode_get_tagged(fs, CFS_ROOT_INO, tag, &s, out)
+                                                            : -EIO;
+        mutex_unlock(&fs->lock);
+        if (rc == 0)
+            kinfo("cosmofs: snapshot '%s' taken", buf);
+        return rc;
+    }
+    if (snap_tag_of(dir))
+        return -EROFS;   /* a snapshot is not writable */
     return cfs_create_common(dir, name, len, mode, CFS_TYPE_DIR, out);
 }
 
@@ -744,11 +910,33 @@ out:
 
 static int cfs_unlink(struct vnode *dir, const char *name, size_t len, struct vnode *victim)
 {
+    if (is_snapdir(dir) || snap_tag_of(dir))
+        return -EROFS;
     return cfs_unlink_common(dir, name, len, victim, false);
 }
 
 static int cfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vnode *victim)
 {
+    if (is_snapdir(dir)) {
+        struct cfs *fs = cfs_of(dir->mnt);
+        if (fs == NULL || fs->failed)
+            return -EIO;
+        if (dir->mnt->flags & MOUNT_RDONLY)
+            return -EROFS;
+        char buf[CFS_SNAP_NAME_MAX + 1];
+        if (len > CFS_SNAP_NAME_MAX)
+            return -ENAMETOOLONG;
+        memcpy(buf, name, len);
+        buf[len] = '\0';
+        mutex_lock(&fs->lock);
+        int rc = cfs_snapshot_delete(fs, buf);
+        mutex_unlock(&fs->lock);
+        if (rc == 0)
+            kinfo("cosmofs: snapshot '%s' deleted", buf);
+        return rc;
+    }
+    if (snap_tag_of(dir))
+        return -EROFS;
     return cfs_unlink_common(dir, name, len, victim, true);
 }
 
@@ -935,6 +1123,8 @@ static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
 
 static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 {
+    if (snap_tag_of(vn))
+        return -EROFS;   /* a snapshot is what the tree was, not what it is */
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
@@ -949,6 +1139,8 @@ static int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf)
 
 static int cfs_truncate(struct vnode *vn, uint64_t size)
 {
+    if (snap_tag_of(vn))
+        return -EROFS;
     struct cfs *fs = cfs_of(vn->mnt);
     if (fs == NULL || fs->failed)
         return -EIO;   /* unmounted, or the transaction was abandoned */
