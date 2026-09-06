@@ -371,6 +371,7 @@ static const struct selftest tests[] = {
     { "process-reject",  selftest_process_reject },
     { "process-spawn",   selftest_process_spawn },
     { "linux-elf",       selftest_linux_elf },
+    { "el2",             selftest_el2_stub },
     { "hv-probe",        selftest_hv_probe },
     { "hv-caps",         selftest_hv_caps },
     { "hv-npt",          selftest_hv_npt },

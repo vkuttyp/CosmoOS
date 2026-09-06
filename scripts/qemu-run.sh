@@ -74,8 +74,13 @@ if [ "$arch" = aarch64 ]; then
     # An SMMUv3 in front of the PCI root complex (kernel/iommu); QEMU_IOMMU=0 leaves it out.
     iommu_machine=""
     [ "${QEMU_IOMMU:-1}" != "0" ] && iommu_machine=",iommu=smmuv3"
+    # The virtualization extensions: firmware then hands the loader EL2,
+    # which it keeps for guests (docs/kernel/arch/aarch64/design.md,
+    # "Exception level 2"). QEMU_EL2=0 boots at EL1 as before.
+    el2_machine=""
+    [ "${QEMU_EL2:-1}" != "0" ] && el2_machine=",virtualization=on"
     exec qemu-system-aarch64 \
-        -machine "virt,gic-version=2${iommu_machine},accel=${QEMU_ACCEL:-tcg}" \
+        -machine "virt,gic-version=2${iommu_machine}${el2_machine},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
         -smp "${QEMU_SMP:-4}" \
         -m "${QEMU_MEM:-256M}" \

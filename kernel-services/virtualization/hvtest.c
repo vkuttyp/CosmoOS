@@ -19,6 +19,7 @@
 #include <kernel/thread.h>
 #include <arch/fpu.h>
 #include <arch/testhooks.h>
+#include <arch/el2.h>
 
 #define CHECK(c)                                                    \
     do {                                                            \
@@ -405,4 +406,36 @@ bool selftest_hv_guest_spin(const char **reason)
     drop_guest(vm, v);
     CHECK(hv_vm_count() == before - 1);
     return true;
+}
+
+/* AArch64: the EL2 the loader kept (docs/kernel/arch/aarch64/design.md,
+ * "Exception level 2"). The stub answers HVC, hands EL2 over when asked,
+ * and takes it back; a machine booted at EL1 (QEMU_EL2=0) skips. */
+bool selftest_el2_stub(const char **reason)
+{
+#if defined(ARCH_AARCH64)
+    if (!el2_available()) {
+        kinfo("selftest: el2: firmware handed over at EL1; skipping");
+        CHECK(el2_stub_phys() == 0);
+        CHECK(el2_set_vectors(0x1000) == -1);   /* nothing to talk to */
+        return true;
+    }
+    uint64_t stub = el2_stub_phys();
+    CHECK(stub != 0 && (stub & (PAGE_SIZE - 1)) == 0);
+    CHECK(el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION);
+    CHECK(el2_call_raw(0x1234, 0) == -1);            /* a selector it does not know */
+    /* Hand EL2 to another vector table and take it back. The stub's own
+     * base is a vector table, so this is the swap without the risk. */
+    CHECK(el2_set_vectors(stub) == 0);
+    CHECK(el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION);
+    CHECK(el2_restore_stub_vectors() == 0);
+    CHECK(el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION);
+    kinfo("selftest: el2: stub v%u at 0x%llx, vectors handed over and back", EL2_STUB_VERSION,
+          (unsigned long long)stub);
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: el2: x86-64 has no EL2; skipping");
+    return true;
+#endif
 }
