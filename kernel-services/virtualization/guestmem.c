@@ -6,6 +6,7 @@
 
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/pmm.h>
 #include <kernel/string.h>
@@ -37,11 +38,21 @@ static bool overlaps(struct vm *vm, uint64_t gpa, uint64_t len)
 static void region_free(struct vm *vm, struct guest_region *r, size_t mapped_pages)
 {
     size_t pages = r->len / PAGE_SIZE;
+    bool revoked = true;
     if (mapped_pages)
-        arch_hv_vm_unmap(vm->arch, r->gpa, mapped_pages * PAGE_SIZE);
+        revoked = arch_hv_vm_unmap(vm->arch, r->gpa, mapped_pages * PAGE_SIZE) == 0;
     for (size_t i = 0; i < pages; i++)
-        if (r->pages[i])
-            pmm_free_page(r->pages[i]);
+        if (r->pages[i]) {
+            /* A backend that could not revoke the guest's translations
+             * leaves them usable: returning these frames to the
+             * allocator would hand a running guest whatever gets them
+             * next, so they are lost for this boot instead. */
+            if (revoked)
+                pmm_free_page(r->pages[i]);
+        }
+    if (!revoked)
+        kerror("hv: vm%u: %zu page(s) leaked: the backend did not revoke the guest's translations", vm->id,
+               pages);
     kfree(r->pages);
     kfree(r);
 }

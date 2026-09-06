@@ -186,7 +186,12 @@ The EL2 backend has the same obligation and a cheaper instrument:
 itself, but its VMID comes from `VTTBR_EL2`, which only EL2 can write —
 so the backend asks EL2 to do it through a call of its own
 (`HV_EL2_CALL_TLBI`), at the moment the tables change and again before a
-destroyed VM's VMID can be reassigned. Deferring it to the next entry --
+destroyed VM's VMID can be reassigned. When that call cannot be made —
+EL2 unreachable on this CPU — **nothing of the VM is reused**: `unmap`
+returns `-EIO` and `region_free` leaks the guest's frames rather than
+returning them to the allocator, and `vm_destroy` keeps both the
+stage-2 tables and the VMID for the life of the boot. Leaking is the
+cheap half of that trade, as it is for the IOMMU. Deferring it to the next entry --
 the first shape this took -- would have been wrong twice over: a vCPU
 already inside the guest keeps its stale translations while the caller
 frees the pages, and a VMID handed to the next VM carries the previous

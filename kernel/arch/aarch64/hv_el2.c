@@ -149,18 +149,21 @@ static void vmid_free(uint16_t vmid)
  * twice over: a vCPU already running would keep its stale translations
  * while the caller frees the pages, and a VMID handed to the next VM
  * would carry the old one's entries. */
-static void invalidate_vm(struct arch_hv_vm *vm)
+static bool invalidate_vm(struct arch_hv_vm *vm)
 {
     uint64_t vttbr = (uint64_t)vm->s2_root | ((uint64_t)vm->vmid << 48);
     arch_irq_state_t s = arch_irq_save();
-    if (el2_ready_here()) {
+    bool ok = el2_ready_here();
+    if (ok) {
         register uint64_t x0 __asm__("x0") = HV_EL2_CALL_TLBI;
         register uint64_t x1 __asm__("x1") = vttbr;
         __asm__ volatile("hvc #0" : "+r"(x0) : "r"(x1) : "memory", "x2", "cc");
-    } else {
-        kerror("hv-el2: cannot reach EL2 to invalidate VMID %u", vm->vmid);
+        ok = (int64_t)x0 == 0;
     }
     arch_irq_restore(s);
+    if (!ok)
+        kerror("hv-el2: cannot reach EL2 to invalidate VMID %u; nothing of this VM may be reused", vm->vmid);
+    return ok;
 }
 
 static int el2_probe(struct hv_caps *out)
@@ -214,7 +217,17 @@ static void el2_vm_destroy(struct arch_hv_vm *vm)
 {
     if (vm == NULL)
         return;
-    invalidate_vm(vm);
+    if (!invalidate_vm(vm)) {
+        /* The hardware may still translate for this VMID: its tables
+         * stay allocated and its VMID is never handed out again, because
+         * either would give the next VM this one's memory. The cost is
+         * one leaked VMID and a few pages for the life of the boot
+         * (docs/kernel/iommu/invariants.md IOM6, in this architecture's
+         * terms). */
+        kerror("hv-el2: VMID %u retired unrevoked; its tables are kept", vm->vmid);
+        kfree(vm);
+        return;
+    }
     hv_s2_destroy(vm->s2_root);
     vmid_free(vm->vmid);
     kfree(vm);
@@ -228,8 +241,8 @@ static int el2_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t l
 static int el2_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
 {
     int rc = hv_s2_unmap(vm->s2_root, gpa, len);
-    if (rc == 0)
-        invalidate_vm(vm);
+    if (rc == 0 && !invalidate_vm(vm))
+        return -EIO;   /* the entries are gone, the caches are not: do not reuse the pages */
     return rc;
 }
 
