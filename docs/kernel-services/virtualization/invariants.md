@@ -191,7 +191,12 @@ EL2 unreachable on this CPU — **nothing of the VM is reused**: `unmap`
 returns `-EIO` and `region_free` leaks the guest's frames rather than
 returning them to the allocator, and `vm_destroy` keeps both the
 stage-2 tables and the VMID for the life of the boot. Leaking is the
-cheap half of that trade, as it is for the IOMMU. Deferring it to the next entry --
+cheap half of that trade, as it is for the IOMMU. The descriptors are
+cleared with ordinary stores, so a `DSB ISHST` orders them against the
+inner-shareable domain **before** the TLBI: a table walk is a memory
+access, and without that barrier a walker on another CPU can refill the
+entry the invalidation was meant to remove. The `DSB ISH` after the TLBI
+then waits for the invalidation itself. Deferring it to the next entry --
 the first shape this took -- would have been wrong twice over: a vCPU
 already inside the guest keeps its stale translations while the caller
 frees the pages, and a VMID handed to the next VM carries the previous

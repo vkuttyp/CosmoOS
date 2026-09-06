@@ -152,6 +152,15 @@ static void vmid_free(uint16_t vmid)
 static bool invalidate_vm(struct arch_hv_vm *vm)
 {
     uint64_t vttbr = (uint64_t)vm->s2_root | ((uint64_t)vm->vmid << 48);
+    /* The descriptors were cleared with ordinary stores. A table walk is
+     * a memory access like any other, so those stores must be visible to
+     * every walker before the invalidation runs -- otherwise a walk on
+     * another CPU can refill the entry the TLBI was meant to remove and
+     * the guest keeps a translation to memory the caller is about to
+     * free. DSB ISHST orders them against the inner-shareable domain,
+     * which is where the walkers are; the TLBI's own DSB ISH inside the
+     * switch then waits for the invalidation itself. */
+    __asm__ volatile("dsb ishst" ::: "memory");
     arch_irq_state_t s = arch_irq_save();
     bool ok = el2_ready_here();
     if (ok) {
@@ -235,7 +244,10 @@ static void el2_vm_destroy(struct arch_hv_vm *vm)
 
 static int el2_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
 {
-    return hv_s2_map(vm->s2_root, gpa, hpa, len, prot);
+    int rc = hv_s2_map(vm->s2_root, gpa, hpa, len, prot);
+    if (rc == 0)
+        __asm__ volatile("dsb ishst" ::: "memory");   /* visible to the walkers before a guest runs */
+    return rc;
 }
 
 static int el2_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)

@@ -153,8 +153,9 @@ el2_sync:
     mrs x2, vttbr_el2
     msr vttbr_el2, x1
     isb
+    dsb ishst                    /* the caller's table writes, before the invalidation */
     tlbi vmalls12e1is
-    dsb ish
+    dsb ish                      /* and wait for it to finish everywhere */
     msr vttbr_el2, x2
     isb
     mov x0, #0
