@@ -43,7 +43,12 @@ void pagecache_init(struct pagecache *pc);
 int64_t pagecache_read(struct vnode *vn, uint64_t off, void *buf, size_t len);
 /* Grows vn->size; returns bytes written or a negative errno. */
 int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t len);
-/* writepage() every dirty page. */
+/* The most consecutive dirty pages offered to writepages at once. A
+ * filesystem that compresses records wants its whole record; anything
+ * larger is memory held across one call for no gain. */
+#define PAGECACHE_WRITE_RUN 8u
+
+/* writepage() every dirty page, or writepages() for a run of them. */
 int pagecache_sync(struct vnode *vn);
 /* Drop pages entirely past `size` and zero the tail of the last page. */
 void pagecache_truncate(struct vnode *vn, uint64_t size);

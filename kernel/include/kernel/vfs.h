@@ -49,6 +49,14 @@ struct vnode_ops {
     int (*readdir)(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
     int (*readpage)(struct vnode *vn, uint64_t index, void *buf);
     int (*writepage)(struct vnode *vn, uint64_t index, const void *buf);
+    /* Optional: `n` consecutive dirty pages from `index`, offered
+     * together so a filesystem can write them as one object -- which is
+     * what compression needs, since a single block that compresses to a
+     * quarter of itself still occupies a block. Reports in `done` how
+     * many it took (at least 1 on success); the cache writes the rest
+     * through writepage. Called with the page cache's lock held, so it
+     * must not call back into the cache. */
+    int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done);
     int (*truncate)(struct vnode *vn, uint64_t size);
     int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);      /* VNODE_CHR */
     int64_t (*write)(struct vnode *vn, uint64_t off, const void *buf, size_t len);
@@ -188,6 +196,12 @@ int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode);
 int vfs_unlink(struct vnode *start, const char *path);
 int vfs_rmdir(struct vnode *start, const char *path);
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
+/* Set a regular file's length, dropping what is above it and reading as
+ * zeros below a length it grew to. O_TRUNC is this with a size of zero;
+ * this is the rest of it, which a filesystem that stores several blocks
+ * as one object has to implement anyway (a record cut in half is
+ * nothing). -EISDIR, -EACCES, -ENOTSUP. */
+int vfs_truncate(struct vnode *start, const char *path, uint64_t size);
 int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st);
 void vnode_stat(struct vnode *vn, struct cosmo_stat *st);
 

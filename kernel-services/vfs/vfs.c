@@ -1133,6 +1133,30 @@ static bool is_ancestor(struct vnode *anc, struct vnode *vn)
  * locked in address order: no other path locks two directories without
  * an ancestry between them, and other renames are excluded by the mutex.
  */
+int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
+{
+    struct vnode *vn;
+    int rc = vfs_lookup(start, path, &vn);
+    if (rc)
+        return rc;
+    if (vn->type == VNODE_DIR) {
+        vnode_put(vn);
+        return -EISDIR;
+    }
+    if (vn->type != VNODE_REG) {
+        vnode_put(vn);
+        return -EINVAL;
+    }
+    rc = vfs_permission(vn, VFS_MAY_WRITE);
+    if (rc == 0) {
+        mutex_lock(&vn->lock);
+        rc = vn->ops->truncate ? vn->ops->truncate(vn, size) : -ENOTSUP;
+        mutex_unlock(&vn->lock);
+    }
+    vnode_put(vn);
+    return rc;
+}
+
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
 {
     struct vnode *odir, *ndir;
