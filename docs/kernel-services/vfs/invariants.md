@@ -265,3 +265,24 @@ holds, and a walk already inside one holds a reference on the tagged
 vnode it is standing on. Check: `cosmofs-snapshot` (hold a file open
 inside a snapshot: `rmdir` gives `-EBUSY` and the file still reads; close
 it and the same `rmdir` succeeds).
+
+**V24. A block is named by the member that holds it, and a run lies on
+one member.** Every pointer on disk is a DVA: the member in the top 8
+bits, the block within it in the low 56. Nothing else in the filesystem
+changed shape, because a version-2 or -3 pointer *is* a version-4 DVA
+with vdev 0 — so those disks mount and are written unchanged, with no
+conversion and no second decoder. Each member carries its own allocation
+index and bitmap, so losing a member cannot take another member's bitmap
+with it; the allocator works on a linear index that concatenates them,
+laid out so no bitmap chunk straddles two members, and the padding at a
+member's end is marked allocated at mount so it can never be handed out.
+`cfs_alloc_run` never returns a run that crosses a member, which is what
+keeps an extent's `count` meaningful, and `extent_valid` checks both ends
+against the same member. A metadata block's self-check is its DVA, so a
+read served from the wrong member fails exactly as a misdirected read
+within one does. Check: `cosmofs-pool2` (two members: both carry blocks,
+their free counts sum to the pool's, a remount finds the second by its
+label alone, and a snapshot spans both), `cosmofs-v3` (a version-3 disk
+mounts, writes, remounts and takes a snapshot under this kernel), `pool`
+(a DVA naming a member the pool does not have addresses nothing), and
+the host test's DVA arithmetic and member-table sizes.

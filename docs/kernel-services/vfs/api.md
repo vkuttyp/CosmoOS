@@ -247,22 +247,35 @@ vnode lock; the functions take `pc.lock` beneath it.
 
 ## Storage pool (`kernel/include/kernel/storage.h`)
 
-`POOL_BLOCK` = 4096. `struct spool { dev, block_size, sectors_per_block,
-nblocks, reads, writes, flushes }`.
+`POOL_BLOCK` = 4096. `struct spool { m[POOL_MAX_MEMBERS], nmembers,
+block_size, nblocks (member 0's), reads, writes, flushes }`, each member
+`{ dev, sectors_per_block, nblocks }`.
 
-- **`int pool_open(struct blkdev *bd, struct spool **out)`** Takes a
-  reference on `bd`. `-EINVAL` if the sector size does not divide the
-  pool block, `-ENOMEM`.
-- **`void pool_close(struct spool *p)`** Drops the device reference.
-- **`int pool_read(p, blk, buf)` / `pool_write(p, blk, buf)`** One pool
+A block is addressed by a **DVA**: `POOL_DVA(vdev, blk)` packs the member
+into bits 63:56 and the block within it into 55:0, with
+`POOL_DVA_VDEV`/`POOL_DVA_BLK` to take them apart. Member 0 at block `b`
+is the DVA `b`, which is the sector a single-device pool always
+addressed — so a filesystem written before members existed reads back
+unchanged.
+
+- **`int pool_open(struct blkdev *bd, struct spool **out)`** A
+  one-member pool; takes a reference on `bd`. `-EINVAL` if the sector
+  size does not divide the pool block, `-ENOMEM`.
+- **`int pool_add_member(p, bd, unsigned *vdev)`** Appends a member and
+  reports its vdev number; takes a reference. `-EINVAL` for a bad sector
+  size, `-ENOSPC` past `POOL_MAX_MEMBERS` (255).
+- **`void pool_close(struct spool *p)`** Drops every device reference.
+- **`int pool_read(p, dva, buf)` / `pool_write(p, dva, buf)`** One pool
   block through `blk_read`/`blk_write` (synchronous, sleeps). `buf` must
-  be DMA-able (kmalloc or dma_alloc memory). `-EINVAL` past the end, or
-  the block layer's error.
-- **`int pool_write_flags(p, blk, buf, flags)`** The same write with
+  be DMA-able (kmalloc or dma_alloc memory). `-EINVAL` for a member the
+  pool does not have or past that member's end, or the block layer's
+  error.
+- **`int pool_write_flags(p, dva, buf, flags)`** The same write with
   `BIO_PREFLUSH` and/or `BIO_FUA`: the block layer flushes before and/or
   after it. cosmofs writes its root this way (one call for the two-flush
   commit).
-- **`int pool_flush(p)`** `blk_flush`.
+- **`int pool_flush(p)`** `blk_flush` on every member, first error wins:
+  a commit durable on one device and in another's cache is not durable.
 
 ## cosmofs (`kernel/include/kernel/cosmofs.h`)
 
@@ -270,16 +283,23 @@ nblocks, reads, writes, flushes }`.
   Registers it (once, after `vfs_init`; panics on failure).
 - **`int cosmofs_format(struct blkdev *bd)`** Writes a generation-1
   filesystem with an empty root over the whole device: superblock A,
-  a zeroed slot B, the allocation index, one bitmap block per 32512
-  blocks, imap L1, imap L0, inode block 0. `-EINVAL` for fewer than 64
-  blocks or more than 508 bitmap chunks, `-ENOMEM`, or the pool's error.
-  Existing contents are not preserved.
+  a zeroed slot B, the member table, the allocation index, one bitmap
+  block per 32512 blocks, imap L1, imap L0, inode block 0. `-EINVAL` for
+  fewer than 64 blocks or more than 508 bitmap chunks, `-ENOMEM`, or the
+  pool's error. Existing contents are not preserved.
+- **`int cosmofs_format_pool(struct blkdev **bd, unsigned n)`** The same
+  over `n` devices as one pool. Member 0 carries the superblocks and the
+  member table; every other member carries a label at its block 0 and
+  its own allocation index and bitmaps, so a mount handed member 0 finds
+  the rest by matching labels against the registered block devices.
+  `-EINVAL` past 255 members.
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which
   includes blocks freed since the last commit once that commit is
   done), `total_blocks`, `inode_count`, `dirty_buffers`, `pending_frees`,
   `reserve_blocks`, `commits`, `wb_commits` (by the writeback thread),
-  `csum_failures`. `-EINVAL` for a mount that is not a cosmofs.
+  `csum_failures`, `members`. `-EINVAL` for a mount that is not a
+  cosmofs.
 - **`void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)`**
   Test hook: the next unmount drops the open transaction instead of
   committing it, as a crash before the root write would.
