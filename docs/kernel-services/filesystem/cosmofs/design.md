@@ -507,6 +507,11 @@ reported as failed.
   as every other unpublishable change here does, so a later commit
   cannot publish a snapshot that `mkdir` reported as failed or drop one
   `rmdir` did.
+- A deletion releases blocks and clears the entry that names them in the
+  **same** transaction, so they reach the disk together or not at all. A
+  failure once releasing has begun therefore cannot simply return: it
+  abandons the transaction, because committing the frees without the
+  removal would hand a live snapshot's blocks to the allocator.
 
 ### What this unit does not do
 

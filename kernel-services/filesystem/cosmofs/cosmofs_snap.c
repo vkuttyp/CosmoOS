@@ -329,6 +329,20 @@ static int snap_commit(struct cfs *fs, int rc_so_far)
     return rc;
 }
 
+/* A deletion that has begun releasing blocks cannot simply return an
+ * error: the frees are in the open transaction, and the entry that
+ * still names them is too. Committing one without the other would hand
+ * a live snapshot's blocks to the allocator, so a failure past that
+ * point abandons the transaction instead -- the same answer the mount
+ * gives to any other change it cannot publish whole. */
+static int snap_abandon(struct cfs *fs, int rc)
+{
+    if (!fs->failed)
+        fs->failed = rc ? rc : -EIO;
+    kerror("cosmofs: a snapshot deletion failed partway (%d); the transaction is abandoned", rc);
+    return rc;
+}
+
 struct maxid_ctx {
     uint64_t max;
     unsigned live;
@@ -491,6 +505,8 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
         return -ENOENT;
     }
 
+    /* From here the open transaction holds both the frees and the entry
+     * that still names them: they go together or not at all. */
     uint64_t freed = 0, kept = 0, keeper_head = 0;
     if (nr_remaining == 0) {
         /* Nothing remains: everything the snapshot held goes back. */
@@ -509,7 +525,7 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
                 struct cfs_buf *b;
                 rc = cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b);
                 if (rc)
-                    break;
+                    break;   /* abandoned below: blocks are already released */
                 struct cfs_snap_block *sb = snap_payload(b);
                 uint64_t next = sb->next;
                 for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
@@ -527,12 +543,12 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     }
     kfree(remaining);
     if (rc)
-        return rc;
+        return snap_abandon(fs, rc);
 
     struct clear_ctx cc = { .name = name };
     rc = snap_walk(fs, clear_entry, &cc, true);
     if (rc)
-        return rc;
+        return snap_abandon(fs, rc);
     kdebug("cosmofs: snapshot '%s': %llu block(s) freed, %llu still held", name, (unsigned long long)freed,
            (unsigned long long)kept);
     if (fs->snap_count)

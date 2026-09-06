@@ -217,9 +217,15 @@ rewritten, and requires the free count to rise when a snapshot is
 deleted whose blocks were born after an older snapshot that still
 exists — the case a conservative scheme gets wrong;
 `cosmofs-snapshot-remount` shows the list is on disk, not in memory.
-Gap: nothing reports how much space a snapshot is keeping alive, and a
-deadlist that cannot be extended (no memory) logs and holds the block to
-the end of the mount rather than risk handing it out.
+The blocks a deletion releases and the entry that named
+them are one transaction, so a failure once releasing has begun abandons
+it rather than returning: the two must reach the disk together. An
+unreadable snapshot list makes the commit hold the block, since a failed
+read is not evidence that nothing needs it, and a deletion works from
+the whole list however many blocks it spans. Gap: nothing reports how
+much space a snapshot is keeping alive, and a deadlist that cannot be
+extended (no memory) logs and holds the block to the end of the mount
+rather than risk handing it out.
 
 **V22. A snapshot is read-only, and history is reachable only by
 name.** Every write path refuses a snapshot vnode with `-EROFS`, and
@@ -227,8 +233,12 @@ name.** Every write path refuses a snapshot vnode with `-EROFS`, and
 nothing walking the tree descends into history by accident and `rm -r`
 on the mount cannot reach a snapshot. Snapshot vnodes carry a tag above
 the inode-number space so the VFS cache cannot confuse a snapshot's
-inode with the live one. Check: `cosmofs-snapshot` (create, mkdir and
-unlink inside a snapshot all `-EROFS`), the shell test (`SNAPTEST`), and
-the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
+inode with the live one — and that tag is the snapshot's `id`, never
+reused while the filesystem lives, because a positional index would be
+reassigned when a deletion compacts the list and a cached vnode would
+then serve another snapshot's contents. Check: `cosmofs-snapshot`
+(create, mkdir and unlink inside a snapshot all `-EROFS`; and take A and
+B, delete A, take C, then require B and C each to read their own), the
+shell test (`SNAPTEST`), and the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
 lists the snapshots, but a snapshot's own `.snapshots` is not nested —
 untested because nothing creates one.
