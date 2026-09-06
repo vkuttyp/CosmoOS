@@ -30,8 +30,12 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/x86_64/serial.c \
 	kernel/arch/x86_64/backtrace.c \
 	kernel/arch/x86_64/shutdown.c \
+	kernel/arch/x86_64/hv.c \
 	kernel/arch/x86_64/svm.c \
 	kernel/arch/x86_64/svm_npt.c \
-	kernel/arch/x86_64/svm_run.S
+	kernel/arch/x86_64/svm_run.S \
+	kernel/arch/x86_64/vmx.c \
+	kernel/arch/x86_64/vmx_ept.c \
+	kernel/arch/x86_64/vmx_run.S
 
 KERNEL_LINKER_SCRIPT := $(ROOT)/kernel/arch/x86_64/linker.ld
