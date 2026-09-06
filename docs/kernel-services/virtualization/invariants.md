@@ -175,7 +175,19 @@ back when `map_prot`), `hv-probe` (a backend that cannot run the reset
 state may not claim to). *Gap*: the false cases are unreachable on the
 machines the tests run on, so what is checked is the true branch.
 
-### V17. The VMX backend is inert until it is on Intel hardware
+### V17. A guest's translations die with the mapping, on every CPU
+
+The VMX backend records the CPUs a VM has entered and sends `INVEPT`
+(and `INVVPID` where VPIDs are used) to each of them when guest-physical
+pages are unmapped, and again before a destroyed VM's EPT root and VPID
+can be handed to another VM — the rule the IOMMU layer states as IOM6.
+A CPU whose `IA32_VMX_EPT_VPID_CAP` offers no `INVEPT` is refused at
+probe. Adding a mapping needs no invalidation because an EPT violation
+caches nothing. SVM has the same property by a blunter route: every
+`VMRUN` flushes the guest's ASID. *Checked by*: review only — see V18.
+*Gap*: like everything else in the backend, this has never run.
+
+### V18. The VMX backend is inert until it is on Intel hardware
 
 Both backends are compiled into every x86-64 kernel and `arch_hv_probe`
 takes the one the CPU has; on every machine these tests run on that is

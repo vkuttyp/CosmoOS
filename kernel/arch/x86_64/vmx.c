@@ -22,6 +22,7 @@
 #include <kernel/page.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/smp.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 
@@ -141,6 +142,7 @@ struct vmx_state {
 struct arch_hv_vm {
     paddr_t eptp_root;
     uint16_t vpid;
+    cpumask_t ran_on;      /* CPUs that have entered this VM: where its cached translations can be */
 };
 
 struct arch_hv_vcpu {
@@ -176,6 +178,7 @@ static bool g_true_ctls;
 static uint32_t g_pin_ctls, g_cpu_ctls, g_cpu_ctls2, g_exit_ctls, g_entry_ctls;
 static uint64_t g_cr0_fixed0, g_cr0_fixed1, g_cr4_fixed0, g_cr4_fixed1;
 static uint32_t g_vpid_used = 1;   /* bit i: VPID i taken; 0 is the host's */
+static bool g_invept_single;       /* the CPU has single-context INVEPT */
 static spinlock_t g_vpid_lock = SPINLOCK_INIT("vmx-vpid");
 
 /* --- VMCS access -------------------------------------------------------- */
@@ -207,6 +210,56 @@ static inline void vmclear(paddr_t pa)
 /* vmx_run.S: loads the guest GPRs, enters, and saves them on the way
  * out. Returns 0 for an exit, 1 when the entry itself failed. */
 extern uint32_t vmx_run(struct vmx_gprs *gprs, uint32_t launched);
+
+/* --- invalidation ------------------------------------------------------- */
+
+/* INVEPT and INVVPID reach only the CPU that executes them, and a VM's
+ * translations can be cached on every CPU it has run on, so both are
+ * sent there with smp_call_function_single. Guest-physical mappings are
+ * only ever removed, never changed in place, so this is needed when a
+ * range is unmapped and when a VM (with its EPT root and its VPID) is
+ * about to be reused by another VM -- exactly the "an address is
+ * reusable only once the hardware has stopped translating it" rule the
+ * IOMMU layer keeps (docs/kernel/iommu/invariants.md IOM6). */
+struct invalidate_ctx {
+    uint64_t eptp;
+    uint16_t vpid;
+};
+
+static inline void invept(uint64_t type, uint64_t eptp)
+{
+    struct { uint64_t eptp, reserved; } desc = { eptp, 0 };
+    __asm__ volatile("invept %1, %0" : : "r"(type), "m"(desc) : "cc", "memory");
+}
+
+static inline void invvpid(uint64_t type, uint16_t vpid)
+{
+    struct { uint64_t vpid_and_pad, gla; } desc = { vpid, 0 };
+    __asm__ volatile("invvpid %1, %0" : : "r"(type), "m"(desc) : "cc", "memory");
+}
+
+static void invalidate_here(void *arg)
+{
+    const struct invalidate_ctx *c = arg;
+    if (!g_cpus[this_cpu()->cpu_id].enabled)
+        return;   /* this CPU never entered VMX operation: nothing is cached */
+    if (g_invept_single)
+        invept(1 /* single context */, c->eptp);
+    else
+        invept(2 /* all contexts */, 0);
+    if (c->vpid)
+        invvpid(2 /* all contexts */, c->vpid);
+}
+
+/* Interrupts enabled, no spinlock held (smp_call_function_single). */
+static void invalidate_vm(struct arch_hv_vm *vm)
+{
+    struct invalidate_ctx ctx = { .eptp = vmx_eptp(vm->eptp_root, false), .vpid = vm->vpid };
+    cpumask_t cpus = __atomic_load_n(&vm->ran_on, __ATOMIC_ACQUIRE);
+    for (unsigned cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++)
+        if (cpus & CPUMASK_OF(cpu))
+            smp_call_function_single(cpu, invalidate_here, &ctx);
+}
 
 /* --- setup helpers ------------------------------------------------------ */
 
@@ -299,6 +352,15 @@ static int vmx_be_probe(struct hv_caps *out)
         *out = g_caps;
         return -ENOTSUP;
     }
+    if (!(ept_cap & VMX_EPT_INVEPT) || !(ept_cap & (VMX_EPT_INVEPT_SINGLE | VMX_EPT_INVEPT_GLOBAL))) {
+        /* Without a way to invalidate, an unmapped page or a reused EPT
+         * root would keep translating; the backend will not run guests
+         * it cannot revoke memory from. */
+        kwarn("vmx: EPT without INVEPT; not used");
+        *out = g_caps;
+        return -ENOTSUP;
+    }
+    g_invept_single = (ept_cap & VMX_EPT_INVEPT_SINGLE) != 0;
     bool unrestricted = vmx_ctls_ok(cpu2_cap, CPU2_UNRESTRICTED);
     bool vpid = vmx_ctls_ok(cpu2_cap, CPU2_ENABLE_VPID) && (ept_cap & VMX_EPT_INVVPID);
     if (vpid)
@@ -393,12 +455,18 @@ static void vmx_be_vm_destroy(struct arch_hv_vm *vm)
 {
     if (vm == NULL)
         return;
+    /* Before the tables are freed and the VPID handed to the next VM:
+     * every CPU that ran this one drops what it cached for it. */
+    invalidate_vm(vm);
     ept_destroy(vm->eptp_root);
     if (vm->vpid)
         vpid_free(vm->vpid);
     kfree(vm);
 }
 
+/* Adding a mapping needs no invalidation: an EPT violation does not
+ * leave a cached translation behind, so nothing stale can cover the
+ * address. Removing one does (vmx_be_vm_unmap). */
 static int vmx_be_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
 {
     return ept_map(vm->eptp_root, gpa, hpa, len, prot);
@@ -406,7 +474,10 @@ static int vmx_be_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_
 
 static int vmx_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
 {
-    return ept_unmap(vm->eptp_root, gpa, len);
+    int rc = ept_unmap(vm->eptp_root, gpa, len);
+    if (rc == 0)
+        invalidate_vm(vm);   /* the entries are gone; the caches must be too */
+    return rc;
 }
 
 static bool vmx_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
@@ -637,8 +708,11 @@ static void vmx_be_vcpu_write_gpr(struct arch_hv_vcpu *v, unsigned index, uint64
 
 static void vmx_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size)
 {
-    uint64_t mask = size >= 8 ? ~0ull : ((1ull << (size * 8)) - 1);
-    v->gprs.rax = (v->gprs.rax & ~mask) | (value & mask);
+    switch (size) {
+    case 1: v->gprs.rax = (v->gprs.rax & ~0xFFull) | (value & 0xFF); break;
+    case 2: v->gprs.rax = (v->gprs.rax & ~0xFFFFull) | (value & 0xFFFF); break;
+    default: v->gprs.rax = value & 0xFFFFFFFFull; break;   /* a 32-bit IN zero-extends */
+    }
 }
 
 /* Advancing over an instruction also ends any interrupt shadow, as on
@@ -965,6 +1039,7 @@ static int vmx_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         return -ENOMEM;
     }
     int cpu = (int)this_cpu()->cpu_id;
+    __atomic_or_fetch(&v->vm->ran_on, CPUMASK_OF(cpu), __ATOMIC_RELEASE);
     if (v->loaded_cpu != cpu) {
         /* Moving a VMCS between CPUs: clear it where it was current, and
          * launch rather than resume on the new one. */

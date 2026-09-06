@@ -703,6 +703,17 @@ backend's structure so the two can be read side by side.
   `HV_EXIT_HYPERCALL`, 1 external interrupt → `HV_EXIT_INTR`, 2 triple
   fault → `HV_EXIT_SHUTDOWN`, everything else → `HV_EXIT_FAIL` with the
   reason and both qualification fields, as SVM reports unknown exits.
+- **Invalidation.** `INVEPT` and `INVVPID` reach only the CPU that runs
+  them, and a VM's translations can be cached on every CPU it has
+  entered, so the VM records that mask and both instructions are sent
+  there with `smp_call_function_single`. This happens when a range is
+  unmapped and before a destroyed VM's EPT root and VPID become
+  available to the next one — the same rule the IOMMU layer keeps
+  (`docs/kernel/iommu/invariants.md` IOM6): an address is reusable only
+  once the hardware has stopped translating it. Adding a mapping needs
+  nothing, because an EPT violation leaves no cached entry. A CPU
+  without `INVEPT` is refused at probe rather than run with memory it
+  cannot revoke.
 - **MSR bitmaps** all-ones (every MSR exits), as SVM's MSRPM. The
   backend-owned set differs: on VMX, FS/GS/TR bases and `IA32_EFER`,
   `IA32_PAT`, `IA32_SYSENTER_*` are VMCS fields, while `STAR`, `LSTAR`,
