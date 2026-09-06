@@ -59,10 +59,12 @@ through handles.
   transfers it.
 - **Interfaces** (`kernel/netif.h`): `struct netif` with name, MAC, MTU,
   IPv4 address/mask/gateway, IPv6 link-local address, operations,
-  statistics; registration; the receive queue drained by one network
-  worker thread (`netrx`) so protocol code runs in thread context with a
-  known locking model; the transmit path is called in the sender's
-  context.
+  statistics, capabilities (checksum offload); registration; since unit
+  11 one receive queue per CPU, each drained by a pinned worker thread
+  (`netrx/N`) so protocol code runs in thread context with a known
+  locking model, packets steered to a queue by their flow hash so one
+  flow is processed in order by one worker and different flows in
+  parallel; the transmit path is called in the sender's context.
 - **Ethernet and ARP**: frame validation, dispatch by EtherType, output
   with ARP resolution, an ARP table with pending-packet queues,
   request retransmission and entry ageing.
@@ -107,9 +109,12 @@ through handles.
   IPv4 fragmentation and reassembly, IPv6 path MTU discovery, TCP
   options beyond MSS, SACK, ECN, `SO_*` socket options beyond what the
   tests need (keepalive is always on, with global parameters), Unix
-  domain sockets, raw sockets, netfilter-style hooks, per-CPU queues
-  and RCU routing (section 36: one worker thread for now; the queue and
-  table shapes admit the upgrade).
+  domain sockets, raw sockets, netfilter-style hooks, RCU routing and
+  per-CPU protocol tables (the locks are uncontended at the tested
+  scale), device multi-queue negotiation (QEMU's user-mode backend has
+  one queue; the receive path is ready for it: `netif_rx_on`), TSO/LRO,
+  jumbo frames, zero-copy socket buffers (`design.md`, "Receive scaling
+  and offloads").
 - Any other NIC. Section 60's fuzzing of parsers is started with host
   tests over the pure parsers and is a standing item, not finished here.
 
@@ -118,9 +123,9 @@ through handles.
 | Interface | Header | Used by |
 |---|---|---|
 | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket`, `m_ref`, `mbufq_*` | `kernel/mbuf.h` | every layer, drivers |
-| `netif_register/unregister`, `netif_rx`, `netif_transmit`, `netif_find/default/loopback`, `netif_set_ipv4`, `netif_set_up`, `net_work_init/queue`, `loopback_set_filter` | `kernel/netif.h` | drivers, protocols, timers, tests |
+| `netif_register/unregister`, `netif_rx`, `netif_rx_on`, `net_flow_hash`, `netif_transmit`, `netif_find/default/loopback`, `netif_set_ipv4`, `netif_set_up`, `netif_set_steering`, `netif_cpu_stats`, `net_work_init/queue`, `loopback_set_filter`, `netif_set_rx_hook` | `kernel/netif.h` | drivers, protocols, timers, tests |
 | `struct netaddr`, `htons` .., `netaddr_*` | `kernel/net/inet.h` | every layer, system calls |
-| `in_cksum`, `cksum_partial/fold`, `m_cksum_partial`, `cksum_pseudo4/6` | `kernel/net/cksum.h` | IP, ICMP, UDP, TCP |
+| `in_cksum`, `cksum_partial/fold`, `m_cksum_partial`, `cksum_pseudo4/6`, `cksum_partial_field`, `m_csum_complete` | `kernel/net/cksum.h` | IP, ICMP, UDP, TCP, `netif_transmit`, virtio-net |
 | `ether_input/output`, `arp_resolve`, `arp_input`, `arp_lookup`, `arp_age` | `kernel/net/ether.h` | netif worker, IP output |
 | `ipv4_input/output`, `ipv6_input/output`, `icmp_*`, `icmpv6_input`, `nd_*` | `kernel/net/ip.h` | Ethernet dispatch, UDP, TCP |
 | `udp_*`, `tcp_*` | `kernel/net/udp.h`, `tcp.h` | socket layer |

@@ -22,6 +22,7 @@
 #include <kernel/pmm.h>
 #include <kernel/printf.h>
 #include <kernel/process.h>
+#include <kernel/netif.h>
 #include <kernel/sched.h>
 #include <kernel/signal.h>
 #include <kernel/socket.h>
@@ -1042,6 +1043,7 @@ static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
+    "net.steer",
     "sysctl.names",
     "debug.faultinject",
 };
@@ -1079,6 +1081,8 @@ static int sysctl_value(const char *name, char *out, size_t n)
     }
     if (strncmp(name, "hv.", 3) == 0)
         return hv_sysctl(name + 3, out, n);
+    if (strcmp(name, "net.steer") == 0)
+        return ksnprintf(out, n, "%u", netif_steering() ? 1u : 0u);
     if (strcmp(name, "debug.faultinject") == 0) {
         int len = faultinject_sysctl(out, n);
         return len < 0 ? -ENOENT : len;   /* -ENOENT in release builds: the knob does not exist */

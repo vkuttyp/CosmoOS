@@ -347,6 +347,8 @@ static int output_on(struct netif *nif, struct mbuf *m, const struct in6_addr *s
     h->src = *src;
     h->dst = *dst;
     m->pkt.proto = ETH_P_IPV6;
+    if (m->pkt.csum_flags & NET_CSUM_TX)
+        m->pkt.csum_start += sizeof(*h);
     STAT(tx);
     if (nif->flags & NETIF_LOOPBACK)
         return netif_transmit(nif, m);

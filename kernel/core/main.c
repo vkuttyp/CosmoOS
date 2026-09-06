@@ -167,6 +167,7 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Bring up the other CPUs now that this one can take interrupts:
      * the shootdowns and cross-CPU calls bring-up needs require it. */
     smp_init();
+    net_start_workers();   /* one receive queue and worker per online CPU (network unit 11) */
 
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */

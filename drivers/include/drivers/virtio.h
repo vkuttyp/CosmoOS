@@ -140,6 +140,7 @@ struct virtqueue {
     spinlock_t lock;
     int vector;                                 /* MSI-X vector or -1 */
     unsigned msix_index;                        /* transport use */
+    unsigned cpu;                               /* the CPU the vector is routed to (virtq_alloc_on) */
     uint64_t kicks, interrupts, bad_used;      /* bad_used: invalid device completions */
 };
 
@@ -180,6 +181,10 @@ uint64_t virtio_read_config64(struct virtio_device *vdev, unsigned off);
  * device's maximum, capped at VIRTQ_MAX_SIZE). Sleeps. */
 int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
                 struct virtqueue **out);
+/* The same with the queue's interrupt routed to `cpu` (virtq_alloc: CPU 0);
+ * a multi-queue driver binds each queue to the CPU that consumes it. */
+int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+                   unsigned cpu, struct virtqueue **out);
 void virtq_free(struct virtqueue *vq);
 
 /* Add a chain: `out` device-readable segments then `in` device-writable

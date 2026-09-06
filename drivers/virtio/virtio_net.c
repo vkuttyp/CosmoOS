@@ -2,10 +2,15 @@
  * virtio_net.c - virtio network device (VirtIO 1.1 section 5.1) as a
  * netif. Module `virtio_net`, depends on `virtio`.
  *
- * No offloads and no mergeable buffers are negotiated, so every received
- * frame is one posted cluster with a 12-byte virtio_net_hdr in front;
- * transmit prepends the same header and maps the mbuf chain (at most
- * four buffers, longer chains are linearised).
+ * No mergeable buffers are negotiated, so every received frame is one
+ * posted cluster with a 12-byte virtio_net_hdr in front; transmit
+ * prepends the same header and maps the mbuf chain (at most four
+ * buffers, longer chains are linearised). Checksum offload (unit 11):
+ * with CSUM the header asks the device to finish a transport checksum
+ * the stack left in its partial form; with GUEST_CSUM a received frame
+ * marked DATA_VALID is trusted and one marked NEEDS_CSUM is finished in
+ * software. One queue pair: QEMU's user-mode backend offers no MQ
+ * (docs/kernel-services/network/design.md, "virtio-net offloads").
  */
 
 #include <kernel/errno.h>
@@ -13,15 +18,31 @@
 #include <kernel/log.h>
 #include <kernel/mbuf.h>
 #include <kernel/module.h>
+#include <kernel/net/cksum.h>
 #include <kernel/netif.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
 
 #include <drivers/virtio.h>
 
-#define VIRTIO_NET_F_MAC    (1ULL << 5)
-#define VIRTIO_NET_F_STATUS (1ULL << 16)
-#define VNET_HDR_LEN        12u
+#define VIRTIO_NET_F_CSUM       (1ULL << 0)
+#define VIRTIO_NET_F_GUEST_CSUM (1ULL << 1)
+#define VIRTIO_NET_F_MAC        (1ULL << 5)
+#define VIRTIO_NET_F_STATUS     (1ULL << 16)
+#define VNET_HDR_LEN            12u
+#define VNET_HDR_F_NEEDS_CSUM   1u
+#define VNET_HDR_F_DATA_VALID   2u
+
+struct vnet_hdr {
+    uint8_t flags;
+    uint8_t gso_type;
+    uint16_t hdr_len;
+    uint16_t gso_size;
+    uint16_t csum_start;    /* from the start of the frame (after this header) */
+    uint16_t csum_offset;
+    uint16_t num_buffers;   /* VERSION_1: present without MRG_RXBUF too */
+} __packed;
+_Static_assert(sizeof(struct vnet_hdr) == VNET_HDR_LEN, "virtio_net_hdr is 12 bytes");
 #define VNET_RX_BUFS        32u
 #define VNET_MAX_SEGS       4u
 
@@ -31,7 +52,8 @@ struct vnet {
     struct netif nif;
     spinlock_t lock;
     unsigned rx_posted;
-    uint64_t rx_drops, tx_drops;
+    bool tx_csum, rx_csum;
+    uint64_t rx_drops, tx_drops, rx_csum_valid, rx_csum_finished, tx_csum_offloaded;
 };
 
 static void vnet_post_rx(struct vnet *v)
@@ -72,8 +94,27 @@ static void vnet_rx_done(struct virtqueue *vq)
             m_freem(m);
             continue;
         }
+        struct vnet_hdr hdr;
+        memcpy(&hdr, m->data, sizeof(hdr));
         m->len = m->pkt.len = len;
         m_adj(m, (int)VNET_HDR_LEN);
+        if (v->rx_csum && (hdr.flags & VNET_HDR_F_NEEDS_CSUM)) {
+            /* A partially checksummed frame (another guest's offload): finish it. */
+            m->pkt.csum_start = hdr.csum_start;
+            m->pkt.csum_offset = hdr.csum_offset;
+            m->pkt.csum_flags = NET_CSUM_TCP;
+            if (m_csum_complete(m)) {
+                m->flags |= M_CSUM_OK;
+                v->rx_csum_finished++;
+            } else {
+                v->rx_drops++;
+                m_freem(m);
+                continue;
+            }
+        } else if (v->rx_csum && (hdr.flags & VNET_HDR_F_DATA_VALID)) {
+            m->flags |= M_CSUM_OK;
+            v->rx_csum_valid++;
+        }
         netif_rx(&v->nif, m);
     }
     vnet_post_rx(v);
@@ -117,7 +158,16 @@ static int vnet_transmit(struct netif *nif, struct mbuf *m)
     m = m_prepend(m, VNET_HDR_LEN);
     if (m == NULL)
         return -ENOMEM;
-    memset(m->data, 0, VNET_HDR_LEN);   /* no flags, no GSO, no checksum offload */
+    struct vnet_hdr hdr;
+    memset(&hdr, 0, sizeof(hdr));   /* no GSO */
+    if (v->tx_csum && (m->pkt.csum_flags & NET_CSUM_TX)) {
+        /* csum_start counts from the frame's first byte, after this header. */
+        hdr.flags = VNET_HDR_F_NEEDS_CSUM;
+        hdr.csum_start = m->pkt.csum_start;
+        hdr.csum_offset = m->pkt.csum_offset;
+        v->tx_csum_offloaded++;
+    }
+    memcpy(m->data, &hdr, sizeof(hdr));
 
     struct virtq_sg sg[VNET_MAX_SEGS + 1];
     unsigned n = 0;
@@ -160,9 +210,12 @@ static int vnet_probe(struct virtio_device *vdev)
     vdev->priv = v;
     spinlock_init(&v->lock, "virtio-net");
 
-    int rc = virtio_device_init(vdev, VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS);
+    int rc = virtio_device_init(vdev, VIRTIO_NET_F_MAC | VIRTIO_NET_F_STATUS | VIRTIO_NET_F_CSUM |
+                                          VIRTIO_NET_F_GUEST_CSUM);
     if (rc)
         goto fail;
+    v->tx_csum = virtio_has_feature(vdev, VIRTIO_NET_F_CSUM);
+    v->rx_csum = virtio_has_feature(vdev, VIRTIO_NET_F_GUEST_CSUM);
     if (!virtio_has_feature(vdev, VIRTIO_NET_F_MAC)) {
         kerror("virtio-net: %s: device offers no MAC address", vdev->dev.name);
         rc = -ENODEV;
@@ -183,11 +236,13 @@ static int vnet_probe(struct virtio_device *vdev)
     v->nif.ops = &vnet_ops;
     v->nif.priv = v;
     v->nif.flags = 0;
+    v->nif.caps = (v->tx_csum ? NETIF_CAP_TXCSUM : 0) | (v->rx_csum ? NETIF_CAP_RXCSUM : 0);
     rc = netif_register(&v->nif);
     if (rc)
         goto fail;
     netif_set_up(&v->nif, true);
-    kinfo("virtio-net: %s is %s", vdev->dev.name, v->nif.name);
+    kinfo("virtio-net: %s is %s (checksum offload: tx %s, rx %s)", vdev->dev.name, v->nif.name,
+          v->tx_csum ? "on" : "off", v->rx_csum ? "on" : "off");
     return 0;
 
 fail:

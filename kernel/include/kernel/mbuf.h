@@ -19,13 +19,21 @@
 
 #define MCLBYTES     2048u
 #define MHLEN        128u
-#define NET_HEADROOM 64u
+#define NET_HEADROOM 128u   /* fits vnet(12) + eth(14) + IPv6(40) + TCP with options(60) (unit 11) */
 
 #define M_PKTHDR   (1u << 0)   /* first buffer of a packet: pkt valid */
 #define M_EXT      (1u << 1)   /* storage is a shared cluster */
 #define M_BCAST    (1u << 2)   /* received as link-layer broadcast */
 #define M_MCAST    (1u << 3)
 #define M_CSUM_OK  (1u << 4)   /* transport checksum verified by lower layer */
+
+/* pkt.csum_flags on transmit (unit 11): the transport left the pseudo-header
+ * sum (folded, not inverted) in its checksum field and asks the interface to
+ * finish the sum over [csum_start, end) into csum_start + csum_offset; an
+ * interface without NETIF_CAP_TXCSUM has netif_transmit finish it in software. */
+#define NET_CSUM_TCP (1u << 0)
+#define NET_CSUM_UDP (1u << 1)
+#define NET_CSUM_TX  (NET_CSUM_TCP | NET_CSUM_UDP)
 
 struct netif;
 
@@ -43,7 +51,10 @@ struct mbuf {
         struct netif *rcvif;
         uint64_t rx_ns;
         uint16_t proto;
-        uint16_t csum_flags;
+        uint16_t csum_flags;   /* NET_CSUM_* (transmit) */
+        uint16_t csum_start;   /* transmit offload: the transport header's offset from data (layers add theirs) */
+        uint16_t csum_offset;  /* the checksum field's offset within the transport header */
+        uint32_t flow_hash;    /* set by netif_rx: the receive-steering hash (unit 11) */
         struct netaddr src;    /* UDP: sender, set by udp_input */
         uint64_t dma;          /* a driver's dma_map of this buffer while the device holds it (unmapped on return) */
     } pkt;
@@ -87,7 +98,8 @@ bool m_copydata(const struct mbuf *m, uint32_t off, uint32_t len, void *dst);
 int m_append(struct mbuf *m, const void *src, uint32_t len);
 /* Total bytes in the chain, recomputed. */
 uint32_t m_length(const struct mbuf *m);
-/* Copy a whole chain into a fresh cluster-backed packet (linearise). */
+/* Copy a whole chain into a fresh cluster-backed packet: linear when it
+ * fits one cluster behind the headroom, else a chain of clusters. */
 struct mbuf *m_copypacket(const struct mbuf *m);
 
 struct mbufq {

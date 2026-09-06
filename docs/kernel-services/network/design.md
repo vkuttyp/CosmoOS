@@ -552,6 +552,191 @@ reporting it, `EINPROGRESS`/`EALREADY`/`EAGAIN` as above. `poll` itself
 remains Linux stage 3 (`docs/compat/linux/design.md`); the readiness
 operation is the piece it and async I/O need from every object.
 
+## Receive scaling and offloads (post-audit unit 11)
+
+The audit's plan (`docs/audit/2026-09-post-roadmap-audit.md` §19, "After
+these") names multi-queue networking and zero-copy readiness as the unit
+after the ten milestones, with the specification's rule (Prompt #2 §21):
+*do not introduce complexity unless benchmarks demonstrate benefit*. This
+section records what is done, what is measured, and what is deliberately
+not done.
+
+### What the audit found (§9.4–9.5)
+
+Nothing is per CPU: one receive queue (`g_rxq`), one worker thread
+(`netrx`), one work list; virtio-net has one RX and one TX queue with
+its vectors on CPU 0; every received packet is copied three times to the
+user and every sent byte four times; `m_pullup` leaves no headroom and
+`NET_HEADROOM` (64) is too small for `vnet(12) + eth(14) + IPv6(40) +
+TCP(20..60)`, so IPv6 transmit chains start with an extra buffer; no
+checksum offload at all (and, as it turned out, none to be had from
+QEMU's user-mode backend: it has no `vnet_hdr`, so the device clears
+`CSUM` and `GUEST_CSUM`; the loopback is where offload pays here).
+
+### Per-CPU receive queues and workers (RPS)
+
+```text
+driver (any CPU, IRQ) ──netif_rx──▶ steer(flow hash) ──▶ rxq[cpu k] ──▶ netrx/k (pinned to CPU k)
+loopback (caller)     ──netif_rx──▶ steer(flow hash) ──▶ rxq[cpu j] ──▶ netrx/j
+timer (IRQ)           ──net_work_queue──▶ work[this cpu] ──▶ netrx/this cpu
+```
+
+- One `struct net_cpu { struct mbufq rxq; struct list_node work;
+  spinlock_t work_lock; struct waitqueue wq; struct thread *worker;
+  bool ready; }` per online CPU; the worker `netrx/N` is created with
+  `thread_create_on(..., CPUMASK_OF(N))` at the same priority as today's
+  `netrx`. Every protocol input still runs in thread context with
+  interrupts on, one packet at a time per worker.
+- **Steering.** `netif_rx` computes a flow hash over the innermost
+  addresses and ports it can find without pulling the packet up
+  (`net_flow_hash`: Ethernet type → IPv4/IPv6 header → TCP/UDP ports;
+  a packet it cannot classify hashes to 0) and picks `cpu = hash %
+  cpu_count()`. Packets of one flow therefore always land on one queue
+  and are processed in order, whatever CPU the driver or the loopback
+  caller ran on; two flows may run in parallel. A driver whose receive
+  queue is bound to a CPU (a multi-queue NIC with RSS) calls
+  `netif_rx_on(nif, m, cpu)` and skips the hash: the device already
+  steered.
+- **Work.** `net_work_queue` appends to the calling CPU's list and wakes
+  that CPU's worker; a work item is on at most one list: `queued` is
+  claimed with an atomic exchange *before* any list lock is taken, since
+  two CPUs queueing the same item (two timers of one pcb firing on
+  different CPUs) hold different locks, and the worker clears it after
+  unlinking. The
+  TCP timers' `pcb_work` may therefore run on a different CPU than the
+  connection's input; the per-pcb lock (milestone 8) already serialises
+  the two, and `pcb_work` never assumed the input thread's context.
+- **Barrier.** `netif_unregister` purges every CPU's queue and posts a
+  barrier work item to every running worker, waiting for all: after that
+  no `input_one` of the interface is running anywhere. The barrier items
+  are static and unregister runs under a mutex, so the guarantee never
+  depends on an allocation. The lifetime rules
+  of `docs/kernel/quiesce/` are unchanged (`netif_rx` and `netif_transmit`
+  are read-side sections).
+- **What stays global.** The protocol tables and their spinlocks (TCP
+  hash and table lock, UDP list, ARP/ND tables, the SYN cache under its
+  listener, the ICMP rate limiter, the path MTU cache): all were made
+  IRQ-safe and lock-protected in milestone 8, none assumed one input
+  thread. `ipv4`'s datagram id is already atomic. Counters are atomic
+  adds as before; the per-CPU queues add `struct net_cpu_stats {
+  rx_queued, rx_dropped, rx_steered_local, work_runs }` per CPU for
+  `netif_dump`.
+- **Not done, and why.** No NAPI-style polling or interrupt moderation
+  (QEMU's virtio-net delivers one interrupt per completion batch already
+  and the boot tests measure nothing that would move); no busy polling;
+  no per-CPU protocol tables (the locks are uncontended at the tested
+  scale); no XPS beyond the driver's one transmit queue.
+
+### The next mbuf: headroom, flow id, checksum flags
+
+Prompt #2 §20 asks whether the mbuf can carry jumbo frames,
+scatter/gather, checksum offload, TSO/LRO, RSS, multiqueue, zero copy
+and DMA recycling. Scatter/gather, DMA mapping per buffer (`pkt.dma`)
+and shared clusters (`m_ref`) already exist. This unit adds what the
+measured paths need and leaves the rest recorded:
+
+- `NET_HEADROOM` becomes 128: every transmit chain on either IP version
+  fits its link, network and transport headers in the first cluster.
+  `m_pullup` places the pulled-up bytes `NET_HEADROOM` in as well, so a
+  later prepend (a reply built on a received packet: ICMP, TCP RST/ACK)
+  does not allocate.
+- `pkt.flow_hash` (32 bits) is computed once by `netif_rx` and kept for
+  the layers above (a future RSS-aware socket table, XPS on a multi-queue
+  driver).
+- `pkt.csum_flags` gets a defined meaning: on receive `M_CSUM_OK` (the
+  interface vouches for the transport checksum: TCP and UDP skip
+  `m_cksum_partial`); on transmit `NET_CSUM_TCP` set by TCP's segment
+  builder — which does not know the interface yet — with
+  `pkt.csum_start` (the transport header's offset from the packet's
+  first byte; IP and Ethernet add their header lengths as they prepend)
+  and `pkt.csum_offset` (the checksum field's offset within the
+  transport header), the checksum field holding the folded,
+  not-inverted pseudo-header sum: exactly the `virtio_net_hdr` contract.
+  `netif_transmit` is the one place that decides: an interface with
+  `NETIF_CAP_TXCSUM` gets the partial form, any other has the sum
+  finished in software right there (`m_csum_complete`). UDP keeps its
+  software checksum (its zero-means-none rule needs the final value;
+  the datagrams in the tests are small). Capabilities are a new
+  `nif->caps` word set by the driver before `netif_register`
+  (`NETIF_CAP_TXCSUM`, `NETIF_CAP_RXCSUM`). The loopback advertises
+  both and marks every packet `M_CSUM_OK`: a transfer between two
+  sockets of one machine computes no transport checksum at all, as
+  Linux's `lo` does.
+- Not done: jumbo frames and `MRG_RXBUF` (MTU stays 1500; QEMU's
+  user-mode network never offers more), TSO/LRO (no measured need
+  behind a 1500-byte MTU), page-granular or user-mappable clusters and
+  mbuf-based TCP buffers (the zero-copy blockers of §9.4; a rewrite of
+  the TCP data path, deferred with the copy counts recorded in
+  `testing.md`), an XDP-like fast path.
+
+### virtio-net offloads and per-queue CPUs
+
+The driver negotiates `VIRTIO_NET_F_CSUM` and `VIRTIO_NET_F_GUEST_CSUM`.
+Receive: a header with `VIRTIO_NET_HDR_F_DATA_VALID` sets `M_CSUM_OK`; a
+header with `NEEDS_CSUM` (a partially checksummed frame from another
+guest) has its checksum completed in software before input; neither
+flag means the stack verifies as before. Transmit: with `NET_CSUM_TCP`
+set the driver writes `NEEDS_CSUM`, `csum_start` and `csum_offset` into
+the `virtio_net_hdr`; the stack skipped the checksum loop. The
+interface advertises `NETIF_CAP_TXCSUM | NETIF_CAP_RXCSUM` accordingly;
+without the features the driver advertises nothing and
+`netif_transmit` finishes every sum in software, so a device that
+offers no offload sees no change. That is the tested configuration:
+QEMU's user-mode backend offers neither feature (the boot log says
+`checksum offload: tx off, rx off`), so the driver's header writes and
+`NEEDS_CSUM` completion are exercised by review only — a recorded gap,
+small and isolated; the stack side (the partial form, software
+completion, `M_CSUM_OK`) is covered by `net-csum-offload` and by every
+loopback test.
+
+`virtq_alloc_on(vdev, index, max, callback, cpu, out)` routes the
+queue's MSI-X vector to `cpu` (`virtq_alloc` is the CPU 0 form); the
+virtio-pci transport passes it to `pci_msix_request`, which NVMe already
+uses per CPU. virtio-net keeps one queue pair: QEMU's user-mode network
+backend has a single queue (`-netdev user,queues=N` is refused), so the
+device never offers `VIRTIO_NET_F_MQ` here and a multi-queue negotiation
+would be untestable code. The receive path is ready for it
+(`netif_rx_on`, per-CPU queues, `virtq_alloc_on`); the driver's
+`MQ`/`CTRL_VQ` negotiation is the recorded next step when a
+multi-queue backend (tap, vhost) is in the test matrix.
+
+### Benchmarks
+
+`net-bench` (debug builds; reports, never fails on timing) measures on
+loopback: TCP throughput of a 4 MiB transfer with one flow and with two
+concurrent flows, in MiB/s, and the UDP send rate over 10 000
+64-byte datagrams (with how many the receiver's 64-entry queue kept),
+once with steering disabled (every packet to CPU 0's queue: the old
+architecture) and once with steering on, on the boot test's 4 CPUs.
+Each round uses fresh ports (the previous round's connections sit in
+TIME_WAIT). The numbers are recorded in `testing.md` under "Receive
+scaling"; the deciding comparison is throughput with concurrent flows,
+which is where one worker serialises. Under TCG the absolute figures
+are small and noisy; the ratio between the two modes is the evidence
+the rule asks for. `netif_set_steering` selects the mode; the read-only
+`net.steer` sysctl reports it.
+
+### Tests
+
+`net-steer`: a fake interface injects packets of eight flows from every
+CPU (`smp_call` or pinned threads): each flow's packets arrive at one
+worker in order (the fake transport records `(cpu, sequence)` per
+flow), the eight flows use more than one queue on 4 CPUs, `netif_rx_on`
+lands where told, and `netif_unregister` purges every queue and its
+barrier returns with nothing in flight. `net-csum-offload`: a fake
+interface with `NETIF_CAP_TXCSUM` receives a hand-built IPv4/TCP packet
+in the partial form with `csum_flags`, `csum_start` and `csum_offset`
+right, and `m_csum_complete` turns it into a valid packet; the same
+interface without the capability gets it finished by `netif_transmit`;
+out-of-range offsets are refused (`-EINVAL`, nothing transmitted); a
+received packet with a wrong checksum is dropped and counted, and the
+same packet marked `M_CSUM_OK` is accepted (the interface's word is
+final); `lo` advertises both capabilities.
+`net-mbuf` gains the headroom checks (`m_pullup` keeps `NET_HEADROOM`;
+an IPv6 TCP header set fits one cluster). `net-lo-tcp` and the harness
+echo run unchanged over the steered path; `net-netif-lifetime` covers
+the multi-worker barrier.
+
 ## Memory
 
 mbuf 240 bytes (inline 128), cluster object 2052 (refcount + 2048);

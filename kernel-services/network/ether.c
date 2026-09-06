@@ -54,6 +54,8 @@ int ether_output(struct netif *nif, struct mbuf *m, const uint8_t dst[ETH_ALEN],
     memcpy(eh->dst, dst, ETH_ALEN);
     memcpy(eh->src, nif->mac, ETH_ALEN);
     eh->type = htons(type);
+    if (m->pkt.csum_flags & NET_CSUM_TX)
+        m->pkt.csum_start += ETH_HLEN;
     /* Minimum frame size (60 bytes before the FCS): switches and virtual
      * backends drop runts, and QEMU's user-mode network is one of them. */
     if (m->pkt.len < ETH_ZLEN) {

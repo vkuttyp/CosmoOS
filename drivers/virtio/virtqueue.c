@@ -55,6 +55,12 @@ static void vq_release(struct virtqueue *vq)
 int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
                 struct virtqueue **out)
 {
+    return virtq_alloc_on(vdev, index, max, callback, 0, out);
+}
+
+int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *),
+                   unsigned cpu, struct virtqueue **out)
+{
     if (index >= VIRTIO_MAX_QUEUES || vdev->vq[index] != NULL)
         return -EINVAL;
     unsigned devmax = vdev->tr->queue_max_size(vdev, index);
@@ -102,6 +108,7 @@ int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (
     vq->used_dma = vq->ring_dma + used_off;
     vq->callback = callback;
     vq->vector = -1;
+    vq->cpu = cpu;
     spinlock_init(&vq->lock, "virtq");
 
     /* The free list: descriptor i links to i + 1, in the driver's copy.
@@ -268,6 +275,7 @@ void virtq_interrupt(struct virtqueue *vq)
 }
 
 EXPORT_SYMBOL(virtq_alloc);
+EXPORT_SYMBOL(virtq_alloc_on);
 EXPORT_SYMBOL(virtq_free);
 EXPORT_SYMBOL(virtq_add);
 EXPORT_SYMBOL(virtq_kick);

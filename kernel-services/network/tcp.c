@@ -548,8 +548,13 @@ static void seg_checksum(struct mbuf *m, struct tcp_hdr *th, const struct netadd
 {
     uint32_t sum = src->family == COSMO_AF_INET ? cksum_pseudo4(src->v4, dst->v4, IPPROTO_TCP, (uint16_t)m->pkt.len)
                                                  : cksum_pseudo6(&src->v6, &dst->v6, IPPROTO_TCP, m->pkt.len);
-    th->cksum = 0;
-    th->cksum = cksum_fold(m_cksum_partial(m, 0, m->pkt.len, sum));
+    /* The partial form: the pseudo-header sum in the field and a request
+     * for the interface to finish it (netif_transmit finishes it in
+     * software for an interface without NETIF_CAP_TXCSUM; unit 11). */
+    th->cksum = cksum_partial_field(sum);
+    m->pkt.csum_flags |= NET_CSUM_TCP;
+    m->pkt.csum_start = 0;
+    m->pkt.csum_offset = offsetof(struct tcp_hdr, cksum);
 }
 
 /* A segment without a pcb: SYN-ACKs from a listener, resets, challenge ACKs. */
@@ -1557,7 +1562,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         g.dst.v6 = ip6->dst;
         sum = cksum_pseudo6(&ip6->src, &ip6->dst, IPPROTO_TCP, len);
     }
-    if (cksum_fold(m_cksum_partial(m, 0, len, sum)) != 0) {
+    if (!(m->flags & M_CSUM_OK) && cksum_fold(m_cksum_partial(m, 0, len, sum)) != 0) {
         STAT(bad_cksum);
         m_freem(m);
         return;

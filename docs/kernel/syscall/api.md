@@ -208,7 +208,9 @@ Details per call:
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
   `docs/kernel/security/design.md` §3), since Phase 12
   `hv.backend`, `hv.vms`, `hv.vcpus`, `hv.exits`
-  (`docs/kernel-services/virtualization/api.md`), in debug builds
+  (`docs/kernel-services/virtualization/api.md`), `net.steer` (1 when
+  received packets are steered to per-CPU queues, 0 when every packet
+  goes to CPU 0's; `docs/kernel-services/network/design.md`), in debug builds
   `debug.faultinject` (the fault-injection rules and counters, one line
   per kind; `docs/verification/api.md`), and `sysctl.names`
   (the list, newline separated); values are strings; read-only.

@@ -174,7 +174,7 @@ static int vpci_setup_queue(struct virtio_device *vdev, struct virtqueue *vq)
         if (entry >= v->msix_vectors)
             return -ENOSPC;
         vq->msix_index = entry;
-        int vector = pci_msix_request(v->pdev, entry, vpci_queue_irq, vq, "virtio-vq", 0);
+        int vector = pci_msix_request(v->pdev, entry, vpci_queue_irq, vq, "virtio-vq", vq->cpu);
         if (vector < 0)
             return vector;
         vq->vector = vector;

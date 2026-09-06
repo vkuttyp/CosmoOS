@@ -157,7 +157,10 @@ struct mbuf *m_pullup(struct mbuf *m, uint32_t n)
         m_freem(m);
         return NULL;
     }
-    h->data = h->buf;   /* the whole cluster is available to the pulled-up header */
+    /* Keep the headroom when the pulled-up bytes fit behind it, so a reply
+     * built on this packet (ICMP, a TCP RST or ACK) prepends in place. */
+    if (n > MCLBYTES - NET_HEADROOM)
+        h->data = h->buf;
     if (m->flags & M_PKTHDR) {
         h->pkt = m->pkt;
         m->flags &= ~M_PKTHDR;
@@ -267,20 +270,32 @@ int m_append(struct mbuf *m, const void *src, uint32_t len)
 struct mbuf *m_copypacket(const struct mbuf *m)
 {
     uint32_t total = m_length(m);
-    if (total > MCLBYTES - NET_HEADROOM)
-        return NULL;
     struct mbuf *n = m_getcl();
     if (n == NULL)
         return NULL;
-    if (!m_copydata(m, 0, total, n->data)) {
-        m_freem(n);
-        return NULL;
+    if (total <= m_trailingspace(n)) {
+        /* One cluster: linear, with the headroom kept. */
+        if (!m_copydata(m, 0, total, n->data)) {
+            m_freem(n);
+            return NULL;
+        }
+        n->len = total;
+    } else {
+        /* Longer: a chain of clusters (unit 11; a 16 KiB loopback segment
+         * held by a test filter used to be refused). */
+        uint8_t tmp[512];
+        for (uint32_t off = 0; off < total;) {
+            uint32_t k = total - off < sizeof(tmp) ? total - off : (uint32_t)sizeof(tmp);
+            if (!m_copydata(m, off, k, tmp) || m_append(n, tmp, k)) {
+                m_freem(n);
+                return NULL;
+            }
+            off += k;
+        }
     }
-    n->len = total;
-    if (m->flags & M_PKTHDR) {
+    if (m->flags & M_PKTHDR)
         n->pkt = m->pkt;
-        n->pkt.len = total;
-    }
+    n->pkt.len = total;
     n->flags |= m->flags & (M_BCAST | M_MCAST | M_CSUM_OK);
     return n;
 }

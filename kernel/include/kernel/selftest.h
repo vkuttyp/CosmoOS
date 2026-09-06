@@ -139,6 +139,9 @@ bool selftest_net_tcp_reorder(const char **reason);    /* out-of-order segments 
 bool selftest_net_tcp_keepalive(const char **reason);  /* keepalive timeout, orphaned FIN_WAIT_2 */
 bool selftest_net_icmp_limit(const char **reason);     /* ICMP rate limit, path MTU discovery */
 bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and readiness */
+bool selftest_net_steer(const char **reason);          /* unit 11: per-CPU receive queues and flow steering */
+bool selftest_net_csum_offload(const char **reason);   /* unit 11: the partial checksum form and M_CSUM_OK */
+bool selftest_net_bench(const char **reason);          /* unit 11: loopback throughput, steering off and on */
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
