@@ -533,7 +533,7 @@ See [docs/development.md](docs/development.md).
   scrub that repairs and a second that finds nothing, and a device aged
   by one generation whose checksums are all valid.
 - **Filesystem compression (done):** the third of the audit's four
-  storage features -- encryption is the one still outstanding (`docs/kernel-services/filesystem/cosmofs/design.md`,
+  storage features (`docs/kernel-services/filesystem/cosmofs/design.md`,
   "Format version 6"). A block that compresses to a quarter of itself
   still occupies a block, so compression works on **records** — eight
   consecutive logical blocks written as one — and the page cache gained
@@ -549,6 +549,24 @@ See [docs/development.md](docs/development.md).
   record: overwriting a page inside one rewrites it, and truncating into
   one reads it, drops it and writes back what survives — which is why
   `vfs_truncate` exists now at all. One new self-test (143 in total).
+- **Filesystem encryption (done):** the fourth of the audit's storage
+  features (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format
+  version 7"), answering the seven questions the constitution's section
+  52 asks rather than copying somebody else's semantics. One master key
+  per pool, wrapped by the user's key and never leaving the kernel in
+  the clear; a key per file derived from it; a nonce per block of the
+  block's number and the generation that wrote it, which copy-on-write
+  makes unique. Rotation rewraps one block and rewrites no file. Data
+  and directory blocks are encrypted — so **names are ciphertext** — and
+  the metadata that describes the filesystem's shape is not, which is
+  stated with what it leaks rather than left to be discovered. Each
+  checksum entry carries a Poly1305 tag over the ciphertext *and* a
+  keyless CRC of it: the CRC is what lets a mirror repair and a scrub
+  read the whole filesystem on a machine with no key, and the tag is
+  what says a block is the one that was written. ChaCha20 rather than
+  AES, because there is no AES instruction here and a software AES is
+  either slow or a key-dependent table lookup; both it and Poly1305 are
+  checked against RFC 8439's vectors. One new self-test (144 in total).
 - **Handle rights (done):** the first of the container primitives the
   constitution defers in section 53, and the beginning of section 54's
   aim that privileged operations stop depending on being uid 0. A handle
@@ -565,8 +583,8 @@ See [docs/development.md](docs/development.md).
   for the operations POSIX has no opinion about.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
-  (`docs/audit/2026-09-post-roadmap-audit.md`) is **filesystem
-  encryption**, the rest of the container primitives (per-process roots
+  (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
+  container primitives (per-process roots
   and mount namespaces, pid and uts namespaces, a syscall filter,
   per-type control rights in a handle's upper sixteen bits), a service
   manager and `/proc`. After those, the milestones the constitution
