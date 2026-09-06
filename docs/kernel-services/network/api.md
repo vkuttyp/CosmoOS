@@ -216,9 +216,9 @@ for good, in six steps: `NETIF_GONE` and not `UP` under `nif->lock`
 grace period (`synchronize_quiesce`: a transmit or `netif_rx` that read
 the old flags runs in a read-side section, so none is in flight after
 it); every packet of the interface purged from every CPU's receive queue and
-a barrier work item run on every worker (any `input_one` that had
-dequeued one has finished anywhere; when the barriers cannot be
-allocated, a grace period and a 10 ms pause stand in); `arp_flush` and
+a barrier work item run on every running worker (any `input_one` that
+had dequeued one has finished anywhere; the items are static, under the
+`netif-unregister` mutex that serialises unregisters); `arp_flush` and
 `nd_flush`; the registry's reference dropped. The driver then tears its queues down and drops its own
 reference; `ops->release` runs when the last holder is gone. Sleeps.
 
@@ -282,8 +282,9 @@ queues' lengths.
 
 **Deferred work**: `struct net_work { link, fn, arg, queued }`;
 `net_work_init(w, fn, arg)`; `net_work_queue(w)` schedules `fn(arg)` on
-the calling CPU's worker once (idempotent while queued anywhere). Any
-context; this is how timers reach protocol code (they never send from
+the calling CPU's worker once: `queued` is claimed atomically before any
+list is touched, so concurrent callers on different CPUs link the item
+exactly once and the losers return false. Any context; this is how timers reach protocol code (they never send from
 interrupt context). A TCP timer's `pcb_work` may therefore run on a
 different CPU than the connection's input; the pcb lock serialises them.
 

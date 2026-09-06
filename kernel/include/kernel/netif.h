@@ -121,7 +121,7 @@ struct net_work {
     struct list_node link;
     net_work_fn fn;
     void *arg;
-    bool queued;
+    bool queued;        /* claimed atomically by net_work_queue: on at most one CPU's list */
 };
 void net_work_init(struct net_work *w, net_work_fn fn, void *arg);
 bool net_work_queue(struct net_work *w);      /* any context; true if newly queued, false while already queued */

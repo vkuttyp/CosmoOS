@@ -50,7 +50,9 @@ per-flow order is the queue's FIFO order); `ether_input` and everything
 it calls run on that worker; the ARP/ND ageing timer and the TCP
 retransmit, delayed-ACK, TIME_WAIT and keepalive timers set a flag, take
 a pcb reference and call `net_work_queue`, and the calling CPU's worker
-runs the handler (`pcb_work`), which drops the reference; input and
+runs the handler (`pcb_work`), which drops the reference (an item is
+claimed atomically, so two timers of one pcb firing on two CPUs link it
+once and the second caller's reference is dropped at once); input and
 `pcb_work` for one connection may run on different workers and are
 serialised by the pcb lock (N14). Output runs on the caller's thread.
 Check: `net-steer` (eight flows injected from every CPU: each flow seen

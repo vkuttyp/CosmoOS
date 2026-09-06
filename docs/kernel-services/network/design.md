@@ -598,13 +598,19 @@ timer (IRQ)           ──net_work_queue──▶ work[this cpu] ──▶ net
   `netif_rx_on(nif, m, cpu)` and skips the hash: the device already
   steered.
 - **Work.** `net_work_queue` appends to the calling CPU's list and wakes
-  that CPU's worker; a work item is on at most one list (`queued`). The
+  that CPU's worker; a work item is on at most one list: `queued` is
+  claimed with an atomic exchange *before* any list lock is taken, since
+  two CPUs queueing the same item (two timers of one pcb firing on
+  different CPUs) hold different locks, and the worker clears it after
+  unlinking. The
   TCP timers' `pcb_work` may therefore run on a different CPU than the
   connection's input; the per-pcb lock (milestone 8) already serialises
   the two, and `pcb_work` never assumed the input thread's context.
 - **Barrier.** `netif_unregister` purges every CPU's queue and posts a
-  barrier work item to every worker, waiting for all: after that no
-  `input_one` of the interface is running anywhere. The lifetime rules
+  barrier work item to every running worker, waiting for all: after that
+  no `input_one` of the interface is running anywhere. The barrier items
+  are static and unregister runs under a mutex, so the guarantee never
+  depends on an allocation. The lifetime rules
   of `docs/kernel/quiesce/` are unchanged (`netif_rx` and `netif_transmit`
   are read-side sections).
 - **What stays global.** The protocol tables and their spinlocks (TCP

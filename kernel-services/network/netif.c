@@ -20,6 +20,7 @@
 #include <kernel/percpu.h>
 #include <arch/cpu.h>
 #include <kernel/log.h>
+#include <kernel/mutex.h>
 #include <kernel/netif.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
@@ -62,6 +63,10 @@ struct net_cpu {
 };
 static struct net_cpu g_cpu[CONFIG_MAX_CPUS];
 static unsigned g_ncpu = 1;            /* CPUs with a queue (workers may still be starting) */
+/* netif_unregister runs one at a time (it sleeps): the barrier items it
+ * posts to every worker are static, so tearing an interface down never
+ * depends on an allocation succeeding. */
+static struct mutex g_unregister_lock;
 static bool g_steer = true;
 static netif_rx_hook_fn g_rx_hook;
 static void *g_rx_hook_arg;
@@ -235,6 +240,8 @@ static bool net_work_queue_on(struct net_work *w, struct net_cpu *c);
 
 void netif_unregister(struct netif *nif)
 {
+    static struct worker_barrier barriers[CONFIG_MAX_CPUS];
+    mutex_lock(&g_unregister_lock);
     /* 1. Down and gone: netif_transmit and netif_rx refuse from here. */
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
     nif->flags = (nif->flags & ~NETIF_UP) | NETIF_GONE;
@@ -252,29 +259,21 @@ void netif_unregister(struct netif *nif)
     synchronize_quiesce();
 
     /* 4. Nothing of its left in any receive queue, and every worker has
-     * finished any input_one it had started: a barrier through each. */
+     * finished any input_one it had started: a barrier through each
+     * (static items under g_unregister_lock; a worker whose thread is not
+     * running yet has dequeued nothing). */
     unsigned dropped = rxq_purge(nif);
-    struct worker_barrier *bs = kmalloc(g_ncpu * sizeof(*bs), 0);
-    if (bs) {
-        unsigned posted = 0;
-        for (unsigned i = 0; i < g_ncpu; i++) {
-            if (!g_cpu[i].ready)
-                continue;
-            net_work_init(&bs[i].work, barrier_fn, &bs[i]);
-            completion_init(&bs[i].done, "netif-barrier");
-            if (net_work_queue_on(&bs[i].work, &g_cpu[i]))
-                posted |= 1u << (i % 32);
-        }
-        for (unsigned i = 0; i < g_ncpu; i++)
-            if (g_cpu[i].ready && (posted & (1u << (i % 32))))
-                wait_for_completion(&bs[i].done);
-        kfree(bs);
-    } else {
-        /* No memory for the barriers: a grace period plus a pause covers
-         * the one input_one per worker that may still run. */
-        synchronize_quiesce();
-        thread_sleep_ms(10);
+    bool posted[CONFIG_MAX_CPUS] = { false };
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        if (!g_cpu[i].ready)
+            continue;
+        net_work_init(&barriers[i].work, barrier_fn, &barriers[i]);
+        completion_init(&barriers[i].done, "netif-barrier");
+        posted[i] = net_work_queue_on(&barriers[i].work, &g_cpu[i]);
     }
+    for (unsigned i = 0; i < g_ncpu; i++)
+        if (posted[i])
+            wait_for_completion(&barriers[i].done);
 
     /* 5. Tables that name the interface. */
     arp_flush(nif);
@@ -283,6 +282,7 @@ void netif_unregister(struct netif *nif)
 
     /* 6. The registry's reference. */
     kobject_put(&nif->obj);
+    mutex_unlock(&g_unregister_lock);
 }
 
 struct netif *netif_find(const char *name)
@@ -559,15 +559,17 @@ void net_work_init(struct net_work *w, net_work_fn fn, void *arg)
 
 static bool net_work_queue_on(struct net_work *w, struct net_cpu *c)
 {
+    /* Claim the item with one atomic flag before touching any list: two
+     * CPUs queueing the same item (two timers of one pcb) take different
+     * work locks, so the flag, not a lock, decides who links it; the loser
+     * returns false and the item runs once, where the winner put it. */
+    if (__atomic_exchange_n(&w->queued, true, __ATOMIC_ACQ_REL))
+        return false;
     arch_irq_state_t s = spin_lock_irqsave(&c->work_lock);
-    bool fresh = !w->queued;
-    if (fresh) {
-        w->queued = true;
-        list_push_back(&c->work, &w->link);
-    }
+    list_push_back(&c->work, &w->link);
     spin_unlock_irqrestore(&c->work_lock, s);
     waitqueue_wake_one(&c->wq);
-    return fresh;
+    return true;
 }
 
 bool net_work_queue(struct net_work *w)
@@ -600,7 +602,7 @@ static void run_work(struct net_cpu *c)
         struct net_work *w = list_entry(c->work.next, struct net_work, link);
         list_remove(&w->link);
         list_init(&w->link);
-        w->queued = false;
+        __atomic_store_n(&w->queued, false, __ATOMIC_RELEASE);   /* the handler may queue it again */
         spin_unlock_irqrestore(&c->work_lock, s);
         c->stats.work_runs++;
         w->fn(w->arg);
@@ -677,6 +679,7 @@ extern void socket_init(void);
 void net_init(void)
 {
     cpu_init(&g_cpu[0], 0);
+    mutex_init(&g_unregister_lock, "netif-unregister");
     mbuf_init();
     arp_init();
     nd_init();
