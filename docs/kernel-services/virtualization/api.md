@@ -26,6 +26,24 @@ translates both ways. Real-mode code is `0x009B`, real-mode data
 
 ### `struct cosmo_vcpu_regs` (448 bytes, the VMState)
 
+**Per architecture.** A register file is architecture-specific by
+nature, so the UAPI defines one block per architecture — both 448 bytes,
+so the system call, the copies and the tests do not vary. The AArch64
+block is:
+
+| field | meaning |
+|---|---|
+| `x[31]` | `x0`–`x30` (`x30` is the link register) |
+| `sp_el1`, `sp_el0` | the stack pointers of each level |
+| `pc`, `pstate` | where the guest resumes and in what state; on set, only EL0t/EL1t/EL1h in AArch64 are accepted |
+| `sctlr_el1 ttbr0_el1 ttbr1_el1 tcr_el1 mair_el1 amair_el1` | the guest's own translation state, saved and restored around every entry |
+| `vbar_el1 esr_el1 far_el1 elr_el1 spsr_el1` | its exception state |
+| `tpidr_el0 tpidrro_el0 tpidr_el1 contextidr_el1 cpacr_el1 par_el1 mdscr_el1` | the rest of the EL1 state a guest owns |
+| `pending_irq` | get: the lowest pending vector, `~0` when none; set: ignored |
+| `reserved[8]` | must be zero |
+
+The x86-64 block is:
+
 | field | meaning |
 |---|---|
 | `rax` … `r15` | the sixteen general registers, in the order `rax rbx rcx rdx rsi rdi rbp rsp r8 … r15` |
@@ -66,9 +84,11 @@ struct cosmo_vm_exit {
 | `COSMO_VM_EXIT_HLT` | 1 | the instruction after `hlt` | none; inject a vector and run again, or stop |
 | `COSMO_VM_EXIT_IO` | 2 | the instruction after `in`/`out` | `io`: `port`, `size` 1/2/4, `write`, `string`, `rep`; `value` holds the bytes written for an OUT; for an IN the caller fills `value` and calls `vcpu_run` again |
 | `COSMO_VM_EXIT_MMIO` | 3 | the faulting instruction (not advanced) | `mmio.gpa`, `mmio.write`; the owner completes the access itself (typically `vcpu_regs` to skip the instruction) |
-| `COSMO_VM_EXIT_HYPERCALL` | 4 | after `vmmcall` | `hypercall.nr` = rax, `a0..a3` = rbx rcx rdx rsi |
+| `COSMO_VM_EXIT_HYPERCALL` | 4 | after `vmmcall` (x86) or `hvc` (AArch64, where the architecture already puts it there) | `hypercall.nr` and `a0..a3`, read in the architecture's convention: rax then rbx rcx rdx rsi on x86-64, `x0` then `x1`–`x4` on AArch64 |
 | `COSMO_VM_EXIT_SHUTDOWN` | 5 | where the triple fault happened | none; the vCPU is dead |
 | `COSMO_VM_EXIT_FAIL` | 6 | current | `fail.code`, `info1`, `info2` from the backend; the vCPU is dead |
+| `COSMO_VM_EXIT_WFI` | 7 | after `wfi`/`wfe` | none. AArch64's `HLT`: the guest has nothing to do until an interrupt, and the owner decides whether to give it one |
+| `COSMO_VM_EXIT_SYSREG` | 8 | the trapping instruction (not advanced) | `sysreg.iss` (the `ESR_EL2` encoding), `sysreg.reg` (the guest register the value comes from or goes to), `sysreg.write`. AArch64's CPUID: the owner answers and steps over the instruction |
 
 `COSMO_VM_EXIT_F_IRQ_PENDING` (1): at least one injected vector has not
 been delivered yet.

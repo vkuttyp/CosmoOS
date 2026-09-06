@@ -181,13 +181,37 @@ The VMX backend records the CPUs a VM has entered and sends `INVEPT`
 (and `INVVPID` where VPIDs are used) to each of them when guest-physical
 pages are unmapped, and again before a destroyed VM's EPT root and VPID
 can be handed to another VM — the rule the IOMMU layer states as IOM6.
+The EL2 backend has the same obligation and a cheaper instrument:
+`TLBI VMALLS12E1IS` is inner-shareable, so it reaches every CPU by
+itself, but its VMID comes from `VTTBR_EL2`, which only EL2 can write —
+so an unmap marks the VM and the next entry invalidates once the
+register names that VMID.
 A CPU whose `IA32_VMX_EPT_VPID_CAP` offers no `INVEPT` is refused at
 probe. Adding a mapping needs no invalidation because an EPT violation
 caches nothing. SVM has the same property by a blunter route: every
 `VMRUN` flushes the guest's ASID. *Checked by*: review only — see V18.
 *Gap*: like everything else in the backend, this has never run.
 
-### V18. The VMX backend is inert until it is on Intel hardware
+### V18. A guest runs at EL1 with EL2 in between, and nothing of the host goes with it
+
+On AArch64 the kernel and the guest both run at EL1, so the switch lives
+at EL2 (`hv_el2_switch.S`, installed through the loader's stub). Every
+entry saves the host's EL1 system registers, its callee-saved registers,
+its reserved `x18` and where its `HVC` came from, and every exit puts
+them all back before returning; the guest's own state is saved into the
+same context page. Stage 2 is on only while the guest runs
+(`HCR_EL2.VM`), which is also how the switch tells the host's call from
+a guest's exception. The EL2 code runs with its MMU off, so it never
+depends on tables the kernel may reclaim. *Checked by*: the five
+`el2-guest-*` tests — a guest's PSTATE and registers survive a round
+trip, `x0` keeps the value the guest computed after its `HVC`, and the
+host boots on normally afterwards, which it would not if a system
+register came back wrong. *Gap*: FP/SIMD state is not switched (guests
+run with `CPACR_EL1` as they set it, and the host's registers are
+saved by its own context switch), and nothing tests two vCPUs of one VM
+on different CPUs at once.
+
+### V19. The VMX backend is inert until it is on Intel hardware
 
 Both backends are compiled into every x86-64 kernel and `arch_hv_probe`
 takes the one the CPU has; on every machine these tests run on that is
