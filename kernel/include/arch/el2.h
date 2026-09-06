@@ -50,6 +50,10 @@ int el2_set_stack(uint64_t sp_phys);
  * asks who owns EL2. */
 #define HV_EL2_CALL_RUN      0x10
 #define HV_EL2_CALL_VERSION  0x11
+/* x1 = VTTBR value (stage-2 root | VMID): invalidate everything cached
+ * for that VMID, inner-shareable, and return. Only EL2 can name a VMID,
+ * which is why this is a call and not an instruction the host runs. */
+#define HV_EL2_CALL_TLBI     0x12
 #define HV_EL2_VERSION       1
 
 #ifndef __ASSEMBLER__

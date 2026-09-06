@@ -27,8 +27,16 @@ static uint64_t leaf_flags(unsigned prot, bool large)
 {
     /* MemAttr 0xF: normal, inner and outer write-back cacheable.
      * S2AP: bit 6 read, bit 7 write. AF set so no access flag faults.
-     * SH inner-shareable. XN (bits 53-54) 0b10 when execution is not
-     * allowed at EL1 or EL0. */
+     * SH inner-shareable.
+     *
+     * Execute-never is XN[1:0] at bits 54:53 where FEAT_XNX exists and
+     * bit 54 alone where it does not, so the encoding has to mean the
+     * same thing in both: bit 54 set with bit 53 clear (XN[1:0] = 0b10)
+     * is the value FEAT_XNX defines as "not executable at EL1 or EL0",
+     * precisely because it must keep the meaning the single XN bit had
+     * before that feature existed. Setting bit 53 as well (0b11) would
+     * be the opposite of what is wanted here: executable at EL0, not at
+     * EL1. */
     uint64_t f = S2_VALID | (0xFull << 2) | (3ull << 8) | (1ull << 10);
     if (!large)
         f |= S2_PAGE;

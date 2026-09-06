@@ -145,7 +145,22 @@ el2_sync:
     b.ne 1f
     mov x0, #HV_EL2_VERSION
     eret
-1:  cmp x0, #HV_EL2_CALL_RUN
+1:  cmp x0, #HV_EL2_CALL_TLBI
+    b.ne 2f
+    /* Invalidate stage 1 and stage 2 for the VMID in x1. VTTBR_EL2 names
+     * it; the invalidation is inner-shareable, so it reaches every CPU,
+     * including one inside a guest right now. */
+    mrs x2, vttbr_el2
+    msr vttbr_el2, x1
+    isb
+    tlbi vmalls12e1is
+    dsb ish
+    msr vttbr_el2, x2
+    isb
+    mov x0, #0
+    eret
+
+2:  cmp x0, #HV_EL2_CALL_RUN
     b.ne el2_return_x0_minus1
 
     str x18, [x1, #HV_CTX_HOST_X18]  /* the host's x18 is reserved (-ffixed-x18): keep it */
@@ -177,16 +192,6 @@ el2_sync:
     ldr x2, [x18, #HV_CTX_HCR]
     msr hcr_el2, x2
     isb
-    /* The stage-2 tables changed since the last entry: drop what this
-     * VMID has cached. VTTBR_EL2 is set above, so the VMID is ours; the
-     * invalidation is inner-shareable and reaches every CPU. */
-    ldr x2, [x18, #HV_CTX_FLUSH]
-    cbz x2, 2f
-    tlbi vmalls12e1is
-    dsb ish
-    isb
-    str xzr, [x18, #HV_CTX_FLUSH]
-2:
 
     LOAD_SYS x18, HV_CTX_GUEST_SYS, x4
     ldr x2, [x18, #HV_CTX_GUEST_SP_EL1]

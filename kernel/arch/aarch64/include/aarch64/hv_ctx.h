@@ -29,7 +29,7 @@
 #define HV_CTX_EXIT_FAR     0x2E8
 #define HV_CTX_EXIT_HPFAR   0x2F0
 #define HV_CTX_EXIT_KIND    0x2F8   /* 0 sync, 1 IRQ, 2 FIQ, 3 SError */
-#define HV_CTX_FLUSH        0x300   /* nonzero: invalidate this VM's stage 2 before entering */
+#define HV_CTX_UNUSED       0x300   /* was a deferred-flush flag; invalidation is immediate now */
 #define HV_CTX_HOST_X18     0x308   /* the host's x18: reserved by the ABI, so the switch keeps it */
 
 /* The EL1 system registers the switch moves, in this order. */
@@ -62,7 +62,7 @@ struct hv_ctx {
     uint64_t host_elr, host_spsr;
     uint64_t vttbr, vtcr, hcr;
     uint64_t exit_esr, exit_far, exit_hpfar, exit_kind;
-    uint64_t flush;
+    uint64_t unused;
     uint64_t host_x18;
 };
 
@@ -83,7 +83,7 @@ _Static_assert(__builtin_offsetof(struct hv_ctx, exit_esr) == HV_CTX_EXIT_ESR, "
 _Static_assert(__builtin_offsetof(struct hv_ctx, exit_far) == HV_CTX_EXIT_FAR, "ctx far");
 _Static_assert(__builtin_offsetof(struct hv_ctx, exit_hpfar) == HV_CTX_EXIT_HPFAR, "ctx hpfar");
 _Static_assert(__builtin_offsetof(struct hv_ctx, exit_kind) == HV_CTX_EXIT_KIND, "ctx kind");
-_Static_assert(__builtin_offsetof(struct hv_ctx, flush) == HV_CTX_FLUSH, "ctx flush");
+_Static_assert(__builtin_offsetof(struct hv_ctx, unused) == HV_CTX_UNUSED, "ctx spare");
 _Static_assert(__builtin_offsetof(struct hv_ctx, host_x18) == HV_CTX_HOST_X18, "ctx host x18");
 _Static_assert(sizeof(struct hv_ctx) <= 4096, "the context is one page");
 

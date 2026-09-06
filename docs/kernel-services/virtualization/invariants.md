@@ -184,8 +184,13 @@ can be handed to another VM — the rule the IOMMU layer states as IOM6.
 The EL2 backend has the same obligation and a cheaper instrument:
 `TLBI VMALLS12E1IS` is inner-shareable, so it reaches every CPU by
 itself, but its VMID comes from `VTTBR_EL2`, which only EL2 can write —
-so an unmap marks the VM and the next entry invalidates once the
-register names that VMID.
+so the backend asks EL2 to do it through a call of its own
+(`HV_EL2_CALL_TLBI`), at the moment the tables change and again before a
+destroyed VM's VMID can be reassigned. Deferring it to the next entry --
+the first shape this took -- would have been wrong twice over: a vCPU
+already inside the guest keeps its stale translations while the caller
+frees the pages, and a VMID handed to the next VM carries the previous
+one's entries.
 A CPU whose `IA32_VMX_EPT_VPID_CAP` offers no `INVEPT` is refused at
 probe. Adding a mapping needs no invalidation because an EPT violation
 caches nothing. SVM has the same property by a blunter route: every

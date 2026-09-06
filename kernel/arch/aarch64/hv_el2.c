@@ -53,7 +53,6 @@
 struct arch_hv_vm {
     paddr_t s2_root;
     uint16_t vmid;
-    uint32_t tlb_dirty;    /* the stage-2 tables changed: the next entry invalidates */
     cpumask_t ran_on;
 };
 
@@ -79,6 +78,8 @@ static paddr_t kernel_va_to_pa(const void *va)
     const struct cosmoboot_info *info = bootinfo_get();
     return info->kernel_phys_base + ((uintptr_t)va - info->kernel_virt_base);
 }
+
+static bool el2_ready_here(void);
 
 static int64_t el2_run(paddr_t ctx)
 {
@@ -139,15 +140,27 @@ static void vmid_free(uint16_t vmid)
     spin_unlock_irqrestore(&g_vmid_lock, s);
 }
 
-/* Stage-2 entries are cached per CPU, and `TLBI VMALLS12E1IS` takes its
- * VMID from VTTBR_EL2 -- a register only EL2 can write. The switch
- * therefore invalidates on the way in whenever the VM says its tables
- * changed since the last entry, which is also what makes the rule of
- * IOM6 hold here: nothing is reused before the hardware has dropped it.
- * The flag is set here and cleared by the entry path. */
+/* Drop everything the hardware cached for this VM, now, on every CPU.
+ * `TLBI VMALLS12E1IS` is inner-shareable, so one execution reaches them
+ * all -- including a CPU inside this guest at this moment -- but its
+ * VMID comes from VTTBR_EL2, which only EL2 can write: hence the call.
+ * This is the rule the IOMMU layer states as IOM6, in this
+ * architecture's terms. Deferring it to the next entry would be wrong
+ * twice over: a vCPU already running would keep its stale translations
+ * while the caller frees the pages, and a VMID handed to the next VM
+ * would carry the old one's entries. */
 static void invalidate_vm(struct arch_hv_vm *vm)
 {
-    __atomic_store_n(&vm->tlb_dirty, 1u, __ATOMIC_RELEASE);
+    uint64_t vttbr = (uint64_t)vm->s2_root | ((uint64_t)vm->vmid << 48);
+    arch_irq_state_t s = arch_irq_save();
+    if (el2_ready_here()) {
+        register uint64_t x0 __asm__("x0") = HV_EL2_CALL_TLBI;
+        register uint64_t x1 __asm__("x1") = vttbr;
+        __asm__ volatile("hvc #0" : "+r"(x0) : "r"(x1) : "memory", "x2", "cc");
+    } else {
+        kerror("hv-el2: cannot reach EL2 to invalidate VMID %u", vm->vmid);
+    }
+    arch_irq_restore(s);
 }
 
 static int el2_probe(struct hv_caps *out)
@@ -473,8 +486,6 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     }
     __atomic_or_fetch(&v->vm->ran_on, CPUMASK_OF(this_cpu()->cpu_id), __ATOMIC_RELEASE);
     v->irq_taken = false;
-    if (__atomic_exchange_n(&v->vm->tlb_dirty, 0u, __ATOMIC_ACQ_REL))
-        v->ctx->flush = 1;   /* the switch invalidates once VTTBR names this VMID */
     int64_t rc = el2_run(v->ctx_pa);
     arch_irq_restore(s);
     if (rc != 0) {

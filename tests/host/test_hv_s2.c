@@ -80,7 +80,10 @@ int main(void)
     CHECK(hv_s2_map(root, 0x10000, 0x50000, 0x1000, HV_MAP_READ) == 0);
     leaf = leaf_of(root, 0x10000, NULL);
     CHECK((leaf & (1ull << 6)) && !(leaf & (1ull << 7)));
-    CHECK(((leaf >> 53) & 3) == 2);               /* XN */
+    /* XN[1:0] = 0b10: not executable at either exception level, which
+     * is also what bit 54 alone means without FEAT_XNX. */
+    CHECK(((leaf >> 53) & 3) == 2);
+    CHECK((leaf & (1ull << 54)) && !(leaf & (1ull << 53)));
     CHECK(hv_s2_map(root, 0x11000, 0x51000, 0x1000, HV_MAP_READ | HV_MAP_EXEC) == 0);
     leaf = leaf_of(root, 0x11000, NULL);
     CHECK(((leaf >> 53) & 3) == 0 && !(leaf & (1ull << 7)));
