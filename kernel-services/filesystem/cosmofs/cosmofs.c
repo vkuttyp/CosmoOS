@@ -709,6 +709,12 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
     mutex_lock(&fs->lock);
     int rc;
     if (is_snapdir(dir)) {
+        /* ".." leaves history the only way out: the live root. */
+        if (len == 2 && name[0] == '.' && name[1] == '.') {
+            rc = cfs_vnode_get(fs, CFS_ROOT_INO, out);
+            mutex_unlock(&fs->lock);
+            return rc;
+        }
         /* Inside .snapshots: each name is a snapshot's root directory. */
         struct cfs_snapshot s;
         unsigned tag;
@@ -728,7 +734,22 @@ static int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vn
     }
     unsigned tag = snap_tag_of(dir);
     if (len == 2 && name[0] == '.' && name[1] == '.') {
-        rc = cfs_vnode_get(fs, cfs_inode_of(dir)->parent, out);
+        if (tag) {
+            /* ".." inside a snapshot stays inside it. An untagged parent
+             * would be the live tree's directory of that inode number:
+             * writable, and holding today's contents under a path that
+             * says history. At the snapshot's own root the way up is
+             * .snapshots, not the live root. */
+            struct cfs_vnode *cv = dir->fs_priv;
+            if (CFS_INO_OF(dir->ino) == CFS_ROOT_INO) {
+                rc = snapdir_get(fs, out);
+            } else {
+                struct cfs_snapshot s = { .imap_root = cv->snap_imap_root, .next_ino = cv->snap_next_ino };
+                rc = cfs_vnode_get_tagged(fs, cv->inode.parent, tag, &s, out);
+            }
+        } else {
+            rc = cfs_vnode_get(fs, cfs_inode_of(dir)->parent, out);
+        }
     } else if (tag) {
         /* Inside a snapshot: an ordinary directory read, through that
          * snapshot's inode map. */

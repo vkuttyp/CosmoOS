@@ -479,6 +479,14 @@ are ordinary trees — that is the whole point of copy-on-write.
 name only, so nothing walking the tree descends into history by
 accident, and `rm -r /mnt` cannot delete a snapshot.
 
+`..` is part of that tagging, not an exception to it. Resolved through
+the live inode map it would answer with the live tree's directory of
+that inode number — today's contents, and writable, under a path that
+says history — so inside a snapshot it is resolved through that
+snapshot's own map and keeps the tag. At a snapshot's root the way up is
+`.snapshots`, whose own `..` is the live root: one door in and the same
+door out.
+
 ### The interface
 
 Kernel: `cfs_snapshot_create(fs, name)`, `cfs_snapshot_delete(fs, name)`,

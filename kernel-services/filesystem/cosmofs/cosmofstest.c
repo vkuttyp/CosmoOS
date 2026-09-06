@@ -752,6 +752,18 @@ bool selftest_cosmofs_snapshot(const char **reason)
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/first/sub", 0755) == -EROFS);
     CHECK(vfs_unlink(NULL, ENG "/.snapshots/first/keep") == -EROFS);
 
+    /* ".." stays in history. Were the parent resolved through the live
+     * inode map, this path would leave a read-only snapshot for the
+     * live tree's directory of the same inode number -- today's
+     * contents, and writable, under a path that says otherwise. */
+    CHECK(read_matches(ENG "/.snapshots/first/dir/../keep", "before", 6));   /* not "after!" */
+    CHECK(vfs_unlink(NULL, ENG "/.snapshots/first/dir/../keep") == -EROFS);
+    CHECK(read_matches(ENG "/.snapshots/first/dir/../dir/deep", "old", 3));
+    /* At a snapshot's root the way up is .snapshots, and out of that is
+     * the live tree again. */
+    CHECK(read_matches(ENG "/.snapshots/first/../first/keep", "before", 6));
+    CHECK(read_matches(ENG "/.snapshots/../keep", "after!", 6));
+
     /* A second snapshot, with a file born between the two: its blocks
      * belong to `second` alone, so deleting `second` must return them
      * even though `first` still exists. That is what makes the

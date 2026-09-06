@@ -236,9 +236,15 @@ the inode-number space so the VFS cache cannot confuse a snapshot's
 inode with the live one — and that tag is the snapshot's `id`, never
 reused while the filesystem lives, because a positional index would be
 reassigned when a deletion compacts the list and a cached vnode would
-then serve another snapshot's contents. Check: `cosmofs-snapshot`
+then serve another snapshot's contents. `..` keeps the tag too — it is
+resolved through the snapshot's own inode map, and at the snapshot's
+root it is `.snapshots`, whose `..` is the live root — because an
+untagged parent would step out of a read-only snapshot into a live,
+writable vnode of the same inode number. Check: `cosmofs-snapshot`
 (create, mkdir and unlink inside a snapshot all `-EROFS`; and take A and
-B, delete A, take C, then require B and C each to read their own), the
+B, delete A, take C, then require B and C each to read their own; and
+`.snapshots/first/dir/../keep` reads the snapshot's contents and refuses
+a write, while `.snapshots/..` is the live root), the
 shell test (`SNAPTEST`), and the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
 lists the snapshots, but a snapshot's own `.snapshots` is not nested —
 untested because nothing creates one.
