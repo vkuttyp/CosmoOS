@@ -298,3 +298,40 @@ is no older root to fall back to, and the mount works again once the
 table is put back), `pool`
 (a DVA naming a member the pool does not have addresses nothing), and
 the host test's DVA arithmetic and member-table sizes.
+
+**V25. A mirror is read with a checker, and a copy that missed a commit
+is not mirrored.** A member may be a group of up to four devices holding
+the same blocks, so the DVA is unchanged by adding a copy. Reading one
+copy of two and trusting it doubles the chance of returning something
+wrong, so every read is verified by the filesystem — metadata by its own
+header (kind, its own DVA, CRC), data and directory blocks by the
+per-block CRC32C in their inode's checksum tree — and the first copy
+that verifies is written back over the copies that did not. A block no
+copy can satisfy is `-EIO` for that block, not a poisoned mount. Writes
+go to every copy, attempt all of them even after a failure, and return
+the first error before any root is published. The commit flushes every
+device of every member before the root write, because that write's own
+preflush reaches only the devices holding the superblock: a root naming
+blocks still in another member's cache could outlive them.
+
+Checksums cannot tell a *stale* copy from a current one: a device
+detached while the pool went on being written carries older blocks whose
+every checksum is valid. So each device past member 0 carries its own
+label stamped with the commit it last took part in, written after that
+commit's blocks are stable and before the root that publishes them, and
+member 0's devices carry the superblock, which is the same evidence. A
+copy whose generation is *older* than the one being mounted is left out
+and the pool comes up degraded — older rather than different, because a
+commit interrupted after the labels and before the root leaves labels
+one ahead of the durable root, and those devices hold everything that
+root names. Nor does the label's copy number decide which device serves:
+any current copy may be a member's first, since preferring the one
+labelled 0 would serve a stale disk ahead of a good one. `cosmofs_scrub` reads **every** copy of
+every block, because a read stops at the first copy that verifies and
+rot behind it would stay invisible until that copy was the one
+answering. Check: `cosmofs-mirror` (rot one copy of a data block and the
+read still answers; scrub finds and repairs rot on a copy no read would
+have touched; a second scrub finds nothing; both copies rotted is `-EIO`
+for that file while the rest of the tree reads; a device aged by one
+generation, with valid checksums throughout, is refused and the mount
+reports one degraded copy).

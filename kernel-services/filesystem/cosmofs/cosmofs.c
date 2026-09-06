@@ -374,6 +374,68 @@ int cfs_csum_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t *
 }
 
 /* Verify a data or directory block just read for logical block `lblk`. */
+struct data_want {
+    struct cfs *fs;
+    struct cfs_inode *in;
+    uint64_t lblk;
+    uint32_t crc;
+    bool have_crc;
+};
+
+/* The verifier cfs_read_repair calls for a data or directory block: the
+ * checksum its inode recorded when the block was written. An inode with
+ * no checksums at all (csum_algo NONE) has nothing to compare, so the
+ * first copy is the answer and a mirror cannot help it. */
+static bool data_ok(const void *block, void *arg)
+{
+    const struct data_want *w = arg;
+    if (!w->have_crc)
+        return true;
+    return crc32c(block, CFS_BLOCK) == w->crc;
+}
+
+int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf)
+{
+    struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .have_crc = false };
+    if (in->csum_algo != CFS_CSUM_NONE) {
+        int rc = cfs_csum_get(fs, in, lblk, &w.crc);
+        if (rc == -ENOENT)
+            rc = -EIO;   /* a mapped block without a checksum: the tree is damaged */
+        if (rc)
+            return rc;
+        w.have_crc = true;
+    }
+    if (!cfs_dva_valid(fs, dva))
+        return -EIO;
+    int rc = cfs_read_repair(fs, dva, buf, data_ok, &w, NULL);
+    if (rc && w.have_crc) {
+        kerror("cosmofs: inode %llu block %llu: no copy matches its checksum", (unsigned long long)in->ino,
+               (unsigned long long)lblk);
+        fs->csum_failures++;
+    }
+    return rc;
+}
+
+int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf,
+                         unsigned *repaired)
+{
+    struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .have_crc = false };
+    if (in->csum_algo != CFS_CSUM_NONE) {
+        int rc = cfs_csum_get(fs, in, lblk, &w.crc);
+        if (rc == -ENOENT)
+            rc = -EIO;
+        if (rc)
+            return rc;
+        w.have_crc = true;
+    }
+    if (!cfs_dva_valid(fs, dva))
+        return -EIO;
+    int rc = cfs_verify_all(fs, dva, buf, data_ok, &w, repaired);
+    if (rc && w.have_crc)
+        fs->csum_failures++;
+    return rc;
+}
+
 int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *block)
 {
     if (in->csum_algo == CFS_CSUM_NONE)
@@ -517,9 +579,7 @@ static int dir_read_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, uint
         memset(buf, 0, CFS_BLOCK);
         return 0;
     }
-    rc = cfs_data_read(fs, pblk, buf);
-    if (rc == 0)
-        rc = cfs_csum_verify(fs, cfs_inode_of(dir), lblk, buf);
+    rc = cfs_data_read_verified(fs, cfs_inode_of(dir), lblk, pblk, buf);
     return rc;
 }
 
@@ -1164,11 +1224,8 @@ static int cfs_readpage(struct vnode *vn, uint64_t index, void *buf)
     int rc = cfs_map(fs, cfs_inode_of(vn), index, &pblk);
     if (rc == 0)
         memset(buf, 0, CFS_BLOCK);   /* a hole */
-    else if (rc == 1) {
-        rc = cfs_data_read(fs, pblk, buf);
-        if (rc == 0)
-            rc = cfs_csum_verify(fs, cfs_inode_of(vn), index, buf);
-    }
+    else if (rc == 1)
+        rc = cfs_data_read_verified(fs, cfs_inode_of(vn), index, pblk, buf);
     mutex_unlock(&fs->lock);
     return rc > 0 ? 0 : rc;
 }

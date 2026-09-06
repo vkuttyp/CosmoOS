@@ -56,11 +56,12 @@ int pool_open(struct blkdev *bd, struct spool **out)
     struct spool *p = kzalloc(sizeof(*p));
     if (p == NULL)
         return -ENOMEM;
-    p->m[0].dev = bd;
-    p->m[0].sectors_per_block = POOL_BLOCK / bd->sector_size;
+    p->m[0].dev[0] = bd;
+    p->m[0].sectors_per_block[0] = POOL_BLOCK / bd->sector_size;
+    p->m[0].ncopies = 1;
     p->nmembers = 1;
     p->block_size = POOL_BLOCK;
-    p->nblocks = bd->capacity / p->m[0].sectors_per_block;
+    p->nblocks = bd->capacity / p->m[0].sectors_per_block[0];
     if (p->nblocks > g_image_blocks)
         p->nblocks = g_image_blocks;
     p->m[0].nblocks = p->nblocks;
@@ -98,6 +99,27 @@ int pool_add_member(struct spool *p, struct blkdev *bd, unsigned *vdev)
 {
     (void)p; (void)bd; (void)vdev;
     return -ENOSPC;   /* the fuzz image is a single member */
+}
+
+int pool_add_copy(struct spool *p, unsigned vdev, struct blkdev *bd)
+{
+    (void)p; (void)vdev; (void)bd;
+    return -ENOSPC;   /* and a single copy of it */
+}
+
+unsigned pool_copies(const struct spool *p, uint64_t dva)
+{
+    return POOL_DVA_VDEV(dva) == 0 && POOL_DVA_BLK(dva) < p->nblocks ? 1u : 0u;
+}
+
+int pool_read_copy(struct spool *p, uint64_t dva, unsigned copy, void *buf)
+{
+    return copy == 0 ? pool_read(p, dva, buf) : -EINVAL;
+}
+
+int pool_write_copy(struct spool *p, uint64_t dva, unsigned copy, const void *buf)
+{
+    return copy == 0 ? pool_write(p, dva, buf) : -EINVAL;
 }
 
 struct blkdev *blk_nth(unsigned i)

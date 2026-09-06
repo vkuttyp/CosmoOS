@@ -640,10 +640,112 @@ Allocation picks the member with the most free blocks and then first-fits
 within it, so a pool fills evenly rather than filling member 0 first; a
 hint keeps a sequential file on one member.
 
+## Format version 5: mirrored members
+
+Version 4 gave a block an address that names a member. Version 5 lets a
+member be more than one device: a **mirror group** of up to four devices
+holding the same blocks at the same offsets. The DVA's vdev field names
+the group, so nothing above the pool changes — an extent, an imap
+pointer, a snapshot record all address exactly what they did.
+
+### Why a group, and not copies per block
+
+The other arrangement is ZFS's: each pointer carries several DVAs, so
+any block can have its own number of copies. That needs room for a
+second and third address in every pointer — a change to every structure
+on disk, which is the thing version 4's packing was chosen to avoid. A
+group keeps one address per block and puts the multiplicity in the
+member table, where it costs a field.
+
+What that gives up, said plainly: copies are per member, not per block,
+so metadata cannot be given more copies than data on the same member;
+and this is mirroring, not parity — `n` devices hold `n` copies. Both
+are recoverable later without moving a single pointer, which is the
+point of putting the decision in the table.
+
+### A mirror is only as good as its verifier
+
+Reading one copy of two and trusting it doubles the chance of returning
+something wrong, not half it. So a read verifies, and the verifier is
+the filesystem's, not the pool's:
+
+- metadata checks itself — `cfs_mhdr` carries the block's kind, its own
+  DVA and a CRC over the block;
+- data and directory blocks check against the per-block CRC32C in their
+  inode's checksum tree, which format version 2 already keeps.
+
+`pool_read` takes copy 0. If what comes back does not verify, the reader
+tries the remaining copies in turn, and the first that verifies is
+written back over the copies that did not — **repair on read**. A scrub
+cannot be built on that path, because it stops at the first copy that
+verifies: rot behind a good copy would stay invisible until that copy
+was the one answering. `cfs_verify_all` reads every copy, and the scrub
+uses it — walking the inode map itself rather than reading inodes by
+number, so that every imap, inode, extent-chain and checksum block is
+checked on every copy rather than only on the one that answers. A block
+whose copies all fail is the error it always was, `-EIO`, and the mount
+is not poisoned by it: one bad file is not a bad filesystem.
+
+### The failure a checksum cannot see
+
+A device detached while the pool goes on being written comes back
+holding older blocks whose every checksum is valid. Verification cannot
+help: each block is exactly what it claimed to be, at the generation it
+was written. So every device past member 0 carries a label recording
+the commit it last took part in, stamped after that commit's blocks are
+stable and before the root that publishes them — a label is therefore
+never newer than the root it belongs to by more than one interrupted
+attempt.
+
+The commit flushes **every device** once its blocks and labels are
+written and before the root is written. The root write's own preflush
+reaches only the devices carrying the superblock — member 0's — and a
+root that names blocks still sitting in another member's write cache is
+a root that can outlive them. That is true of every block on another
+member, not only of labels, and has been since a pool could have more
+than one member.
+
+A copy is current when its label is **not older** than the generation
+being mounted. Not "equal": a commit interrupted after the labels and
+before the root leaves labels one ahead of the durable root, and those
+devices hold everything that root names, so treating them as stale
+would degrade a healthy mirror over an interrupted commit. Nor does the
+label's copy number decide which device serves a member: any current
+copy may be its first, because preferring the one labelled 0 would
+serve a stale disk ahead of a good one — exactly what the generation is
+recorded to prevent.
+
+Member 0 cannot do quite as well, and the reason is structural: its
+root *is* the block a commit publishes, so a device that missed only
+that write is indistinguishable from one detached for a whole commit,
+and promoting the wrong one would serve old blocks. Such a copy stays
+out until something resilvers it, and nothing does yet.
+
+Writes go to every copy. A copy that fails is an error like any other,
+returned before the transaction publishes a root, so a half-written
+mirror is never something a later mount can find.
+
+### Scrub
+
+Repair on read only finds what somebody reads. `cosmofs_scrub` reads
+everything reachable through the same verify-and-repair path: every
+member's allocation index and bitmap, the snapshot list, and every
+inode — its metadata blocks by their own headers, its data blocks
+against its checksum tree. It reports blocks read, blocks repaired, and
+blocks no copy could satisfy. Finding an error there is the same event
+as finding it on a read, except that nobody was waiting for the answer.
+
 ### What this unit does not do
 
-- Redundancy, compression, encryption: three separate units, in that
-  order, each with its own format extension.
+- Per-block copy counts, parity (RAID-Z and friends), resilvering a
+  replaced device, hot spares: the member table has room for the first,
+  and the rest are their own units. Without resilver, a copy left out
+  for being stale stays out: the pool runs degraded until it is
+  reformatted.
+- Scrub is a kernel entry point and a self-test; no system call or shell
+  command reaches it yet.
+- Compression and encryption: two separate units, in that order, each
+  with its own format extension.
 - Rollback (making a snapshot the live tree), sending or receiving a
   snapshot, quotas, and per-snapshot space accounting beyond the
   deadlists.

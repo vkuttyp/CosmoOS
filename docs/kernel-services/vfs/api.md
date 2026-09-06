@@ -261,15 +261,28 @@ unchanged.
 - **`int pool_open(struct blkdev *bd, struct spool **out)`** A
   one-member pool; takes a reference on `bd`. `-EINVAL` if the sector
   size does not divide the pool block, `-ENOMEM`.
-- **`int pool_add_member(p, bd, unsigned *vdev)`** Appends a member and
-  reports its vdev number; takes a reference. `-EINVAL` for a bad sector
-  size, `-ENOSPC` past `POOL_MAX_MEMBERS` (255).
+- **`int pool_add_member(p, bd, unsigned *vdev)`** Appends a member of
+  one device and reports its vdev number; takes a reference. `-EINVAL`
+  for a bad sector size, `-ENOSPC` past `POOL_MAX_MEMBERS` (255).
+- **`int pool_add_copy(p, vdev, bd)`** Adds a device to an existing
+  member, making it a mirror group: the same blocks at the same offsets
+  on every copy, so the DVA does not change. `-EINVAL` for a bad sector
+  size or a device that does not cover the group, `-ENOSPC` past
+  `POOL_MAX_COPIES` (4).
+- **`unsigned pool_copies(p, dva)`** Copies of the member `dva` names,
+  0 for a member the pool does not have.
+- **`int pool_read_copy(p, dva, copy, buf)` / `pool_write_copy(...)`**
+  One named copy. A reader that can check what it got uses these to try
+  the other copies and to write a good one back.
 - **`void pool_close(struct spool *p)`** Drops every device reference.
 - **`int pool_read(p, dva, buf)` / `pool_write(p, dva, buf)`** One pool
   block through `blk_read`/`blk_write` (synchronous, sleeps). `buf` must
   be DMA-able (kmalloc or dma_alloc memory). `-EINVAL` for a member the
   pool does not have or past that member's end, or the block layer's
-  error.
+  error. A read takes copy 0 — a mirror is only worth having if what it
+  returns is checked, and the check belongs to whoever knows the block's
+  format. A write goes to every copy, tries them all even after a
+  failure, and returns the first error.
 - **`int pool_write_flags(p, dva, buf, flags)`** The same write with
   `BIO_PREFLUSH` and/or `BIO_FUA`: the block layer flushes before and/or
   after it. cosmofs writes its root this way (one call for the two-flush
@@ -293,13 +306,23 @@ unchanged.
   its own allocation index and bitmaps, so a mount handed member 0 finds
   the rest by matching labels against the registered block devices.
   `-EINVAL` past 255 members.
+- **`int cosmofs_scrub(struct mount *mnt, struct cosmofs_scrub_stats *out)`**
+  Reads every block the filesystem reaches — allocation maps, snapshot
+  lists and deadlists, every inode and its data — checking **every
+  copy** of each and writing a good one back over any that fail.
+  Reports `blocks_read`, `inodes`, `repaired`, `unrecoverable`; returns
+  `-EIO` when something was unrecoverable (the counts still say what),
+  `-EINVAL` for a mount that is not a cosmofs. Holds the mount's lock
+  for the whole walk.
 - **`int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)`**
   `generation` (last committed), `free_blocks` (in-memory count, which
   includes blocks freed since the last commit once that commit is
   done), `total_blocks`, `inode_count`, `dirty_buffers`, `pending_frees`,
   `reserve_blocks`, `commits`, `wb_commits` (by the writeback thread),
-  `csum_failures`, `members`. `-EINVAL` for a mount that is not a
-  cosmofs.
+  `csum_failures`, `members`, `devices` (more than `members` means
+  mirroring), `repairs` (blocks written back from a good copy since
+  mount) and `degraded` (copies the member table promised and the mount
+  did not find). `-EINVAL` for a mount that is not a cosmofs.
 - **`void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)`**
   Test hook: the next unmount drops the open transaction instead of
   committing it, as a crash before the root write would.

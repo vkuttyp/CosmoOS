@@ -38,6 +38,7 @@ struct cfs_memstate {
     uint64_t alloc_root;     /* this member's CFS_KIND_ALLOCIDX block, as a DVA */
     uint64_t free_blocks;
     uint64_t alloc_hint;     /* linear */
+    unsigned copies;         /* devices the table says this member has */
     uint8_t uuid[16];
 };
 
@@ -71,6 +72,8 @@ struct cfs {
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
     uint64_t csum_failures;
+    uint64_t repairs;       /* blocks written back from a good copy */
+    uint64_t degraded;      /* copies the member table promised and the mount did not find */
     unsigned snap_count;    /* live snapshots; commit holds their blocks rather than freeing */
     uint64_t snap_max_id;   /* the highest snapshot id ever used here: ids are never reused */
     /* The writeback thread (design.md, "The writeback thread"). */
@@ -143,13 +146,34 @@ uint64_t cfs_lin_dva(const struct cfs *fs, uint64_t lin);   /* CFS_DVA_NONE for 
 /* Fill fs->mem from the superblock: the member table for version 4, a
  * single synthesised member for versions 2 and 3. Assembles the other
  * members' devices by label. */
-int cfs_members_load(struct cfs *fs, struct blkdev *first);
+int cfs_members_load(struct cfs *fs);
 /* Write fs->mem back into the (copy-on-write) member table; the version
  * decides whether member 0's root lives there or in the superblock. */
 int cfs_members_store(struct cfs *fs);
 void cfs_members_free(struct cfs *fs);
 /* Format-time: the label that lets a mount find this member again. */
-int cfs_label_write(struct spool *pool, unsigned vdev, const uint8_t uuid[16], uint64_t nblocks);
+int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t generation, const uint8_t uuid[16],
+                    uint64_t nblocks);
+/* Stamp every attached copy's label with this generation, just before
+ * the root that generation publishes. */
+int cfs_labels_update(struct cfs *fs);
+/* Read `dva` into `buf` and check it with `verify`, trying the member's
+ * copies in turn and writing the first good one back over the copies
+ * that failed. -EIO when no copy satisfies `verify`. */
+int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
+                    bool *repaired);
+/* Read *every* copy and check each one, writing a good copy back over
+ * the bad ones. This is what a scrub needs and a read does not: a read
+ * stops at the first copy that verifies, so rot on any other copy stays
+ * invisible until that copy is the one answering. `buf` comes back
+ * holding a good copy when there was one. -EIO when there was none. */
+int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
+                   unsigned *repaired);
+/* A metadata block's own check: kind, its own DVA, and the CRC. */
+bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind);
+/* A superblock's own check: magic, a version this kernel reads, and the
+ * CRC. A zeroed slot is not a superblock and not an error. */
+bool cfs_super_ok(const void *block);
 
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of
@@ -175,6 +199,13 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep_bloc
 int cfs_csum_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t crc);
 int cfs_csum_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t *crc);   /* -ENOENT: none stored */
 int cfs_csum_verify(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *block);
+/* Read a data or directory block and check it against the checksum its
+ * inode records, taking another copy of a mirrored member when the
+ * first does not match and repairing what did not. */
+int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf);
+/* The same block, every copy of it: what a scrub reads. */
+int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf,
+                         unsigned *repaired);
 void cfs_csum_free(struct cfs *fs, struct cfs_inode *in);
 
 #endif /* COSMOFS_INTERNAL_H */

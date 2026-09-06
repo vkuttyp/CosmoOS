@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 4 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 5 && CFS_VERSION_MIN == 2);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);
     EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
@@ -42,6 +42,14 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_member) == 64);
     EXPECT(CFS_MEMBERS_PER_BLOCK >= 60 && sizeof(struct cfs_member_block) <= CFS_PAYLOAD);
     EXPECT(sizeof(struct cfs_label) <= CFS_BLOCK);
+
+    /* Version 5: a member is a mirror group. The copy count sits in what
+     * version 4 wrote as padding, so 0 and 1 mean the same thing and the
+     * member entry stays 64 bytes. */
+    EXPECT(sizeof(struct cfs_member) == 64);
+    EXPECT(CFS_MAX_COPIES == 4);
+    EXPECT(offsetof(struct cfs_member, copies) == 52);   /* what version 4 wrote as padding */
+    EXPECT(offsetof(struct cfs_label, generation) < CFS_BLOCK);
 }
 
 static void test_inode_indices(void)

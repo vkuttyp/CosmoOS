@@ -69,7 +69,8 @@ static uint32_t label_crc(const uint8_t *block)
     return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
 }
 
-int cfs_label_write(struct spool *pool, unsigned vdev, const uint8_t uuid[16], uint64_t nblocks)
+int cfs_label_write(struct spool *pool, unsigned vdev, unsigned copy, uint64_t generation, const uint8_t uuid[16],
+                    uint64_t nblocks)
 {
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
@@ -78,10 +79,13 @@ int cfs_label_write(struct spool *pool, unsigned vdev, const uint8_t uuid[16], u
     memcpy(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic));
     l->version = CFS_VERSION;
     l->index = vdev;
+    l->copy = copy;
+    l->generation = generation;
     memcpy(l->uuid, uuid, 16);
     l->nblocks = nblocks;
     l->crc = label_crc(block);
-    int rc = pool_write(pool, CFS_DVA(vdev, 0), block);
+    /* To that copy alone: every device of a group carries its own. */
+    int rc = pool_write_copy(pool, CFS_DVA(vdev, 0), copy, block);
     kfree(block);
     return rc;
 }
@@ -104,7 +108,7 @@ static int label_read(struct blkdev *bd, struct cfs_label *out)
     if (rc == 0) {
         const struct cfs_label *l = (const struct cfs_label *)block;
         if (memcmp(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic)) != 0 || label_crc(block) != l->crc ||
-            l->index == 0 || l->index >= CFS_MAX_MEMBERS)
+            l->index >= CFS_MAX_MEMBERS || l->copy >= CFS_MAX_COPIES)
             rc = -ENOENT;
         else
             *out = *l;
@@ -115,11 +119,54 @@ static int label_read(struct blkdev *bd, struct cfs_label *out)
 }
 
 /*
- * Find the device carrying member `vdev` of this pool and append it.
- * Members are added in order, so the pool's vdev numbering is the
- * table's. A device whose label matches the uuid but not the recorded
- * size is refused rather than used: it is the right pool's member and
- * the wrong disk.
+ * A device is current if its label names the generation being mounted --
+ * or the one after it. Labels are stamped after a commit's blocks are
+ * stable and before the root that publishes them, so a commit
+ * interrupted between the two leaves labels one ahead of the durable
+ * root. Those devices did take part in everything that root names; a
+ * device that *missed* a commit is the one that is behind, and treating
+ * an interrupted commit as staleness would degrade a healthy mirror for
+ * nothing.
+ */
+static bool label_current(const struct cfs *fs, const struct cfs_label *l)
+{
+    return l->generation >= fs->sb.generation;
+}
+
+/* True if `bd` carries a current copy of member `vdev`. `stale` says it
+ * is ours and behind; `wrong_size` says it is this pool's member and the
+ * wrong disk, which is a different thing from the member being absent
+ * and is worth a different answer. */
+static bool copy_here(struct cfs *fs, struct blkdev *bd, unsigned vdev, const struct cfs_member *want, bool *stale,
+                      bool *wrong_size)
+{
+    struct cfs_label l;
+    *stale = false;
+    *wrong_size = false;
+    if (label_read(bd, &l) != 0 || l.index != vdev || memcmp(l.uuid, fs->sb.uuid, 16) != 0)
+        return false;
+    if (l.nblocks != want->nblocks) {
+        kerror("cosmofs: %s carries member %u but %llu blocks, not %llu", bd->name, vdev,
+               (unsigned long long)l.nblocks, (unsigned long long)want->nblocks);
+        *wrong_size = true;
+        return false;
+    }
+    if (!label_current(fs, &l)) {
+        kwarn("cosmofs: %s last took part in generation %llu, not %llu; not mirroring it", bd->name,
+              (unsigned long long)l.generation, (unsigned long long)fs->sb.generation);
+        *stale = true;
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Assemble member `vdev`: the first *current* device found becomes the
+ * pool's next member (members are added in order, so the pool's
+ * numbering is the table's). Which copy it was labelled is not the
+ * question -- copies of a mirror are interchangeable, and preferring
+ * the one labelled 0 would serve a stale disk in preference to a good
+ * one, which is precisely what the generation is recorded to prevent.
  */
 static int assemble_member(struct cfs *fs, unsigned vdev, const struct cfs_member *want)
 {
@@ -127,28 +174,114 @@ static int assemble_member(struct cfs *fs, unsigned vdev, const struct cfs_membe
         struct blkdev *bd = blk_nth(i);
         if (bd == NULL)
             break;
-        struct cfs_label l;
-        int rc = label_read(bd, &l);
-        if (rc == 0 && l.index == vdev && memcmp(l.uuid, fs->sb.uuid, 16) == 0) {
-            if (l.nblocks != want->nblocks) {
-                kerror("cosmofs: %s carries member %u but %llu blocks, not %llu", bd->name, vdev,
-                       (unsigned long long)l.nblocks, (unsigned long long)want->nblocks);
-                blkdev_put(bd);
-                return -EIO;
-            }
-            unsigned got;
-            rc = pool_add_member(fs->pool, bd, &got);
+        bool stale, wrong_size;
+        if (!copy_here(fs, bd, vdev, want, &stale, &wrong_size)) {
             blkdev_put(bd);
-            if (rc)
-                return rc;
-            if (got != vdev)
-                return -EIO;   /* the caller assembles in order; this cannot happen */
-            return 0;
+            if (wrong_size)
+                return -EIO;   /* this pool's member, and the wrong disk */
+            (void)stale;       /* counted once at the end, from what the pool has */
+            continue;
         }
+        unsigned got;
+        int rc = pool_add_member(fs->pool, bd, &got);
         blkdev_put(bd);
+        if (rc)
+            return rc;
+        if (got != vdev)
+            return -EIO;   /* the caller assembles in order; this cannot happen */
+        return 0;
     }
-    kerror("cosmofs: member %u of the pool is missing", vdev);
+    kerror("cosmofs: member %u of the pool has no current device", vdev);
     return -ENODEV;
+}
+
+/* Member 0's devices carry the superblock rather than a label -- block 0
+ * is the superblock -- so they are recognised by it: the pool's uuid,
+ * and a generation that says this device did not miss the commit the
+ * mount is coming up on. */
+static bool is_member0_copy(struct cfs *fs, struct blkdev *bd)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
+    if (block == NULL) {
+        pool_close(p);
+        return false;
+    }
+    uint64_t newest = 0;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        if (pool_read(p, CFS_DVA(0, slot), block) != 0)
+            continue;
+        const struct cfs_super *sb = (const struct cfs_super *)block;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || memcmp(sb->uuid, fs->sb.uuid, 16) != 0)
+            continue;
+        if (sb->generation > newest)
+            newest = sb->generation;
+    }
+    kfree(block);
+    pool_close(p);
+    /* Same rule as a label, and the same reason: never older than the
+     * root being mounted. Member 0 cannot do better than this, because
+     * its root *is* the block a commit publishes -- a copy that missed
+     * only that write is indistinguishable from one that was detached
+     * for a whole commit, and promoting the wrong one would serve old
+     * blocks. It stays out until something resilvers it. */
+    return newest >= fs->sb.generation;
+}
+
+/*
+ * Attach a member's other copies. A missing or stale copy is not a
+ * missing member: the group still has one, so the pool comes up
+ * degraded and says so rather than refusing to mount. That is the whole
+ * point of keeping a second copy -- and refusing a stale one is the
+ * point of the generation in its label, because its blocks would pass
+ * every checksum and still be the wrong contents.
+ */
+static void attach_copies(struct cfs *fs, unsigned vdev, const struct cfs_member *want, unsigned copies)
+{
+    for (unsigned c = 1; c < copies; c++) {
+        struct blkdev *bd = NULL;
+        if (vdev == 0) {
+            for (unsigned i = 0; bd == NULL; i++) {
+                struct blkdev *cand = blk_nth(i);
+                if (cand == NULL)
+                    break;
+                bool already = false;
+                for (unsigned k = 0; k < fs->pool->m[0].ncopies; k++)
+                    already = already || fs->pool->m[0].dev[k] == cand;
+                if (!already && is_member0_copy(fs, cand))
+                    bd = cand;   /* keep the reference */
+                else
+                    blkdev_put(cand);
+            }
+        } else {
+            /* Any current device of this member that the pool does not
+             * already hold; the label's copy number is how devices are
+             * told apart, not an order to be honoured. */
+            for (unsigned i = 0; bd == NULL; i++) {
+                struct blkdev *cand = blk_nth(i);
+                if (cand == NULL)
+                    break;
+                bool already = false;
+                for (unsigned k = 0; k < fs->pool->m[vdev].ncopies; k++)
+                    already = already || fs->pool->m[vdev].dev[k] == cand;
+                bool stale, wrong_size;
+                if (!already && copy_here(fs, cand, vdev, want, &stale, &wrong_size))
+                    bd = cand;   /* keep the reference */
+                else
+                    blkdev_put(cand);
+            }
+        }
+        if (bd == NULL) {
+            kwarn("cosmofs: member %u copy %u is missing or stale; the pool is degraded", vdev, c);
+            continue;
+        }
+        int rc = pool_add_copy(fs->pool, vdev, bd);
+        blkdev_put(bd);
+        if (rc)
+            kwarn("cosmofs: member %u copy %u could not be attached (%d); the pool is degraded", vdev, c, rc);
+    }
 }
 
 /* --- the member table ---------------------------------------------------- */
@@ -180,6 +313,8 @@ static bool member_sane(const struct cfs_member *m, unsigned v, unsigned nmember
      * could name a block of this pool. */
     if (CFS_DVA_VDEV(m->alloc_root) >= nmembers)
         return false;
+    if (m->copies > CFS_MAX_COPIES)
+        return false;
     return m->free_blocks <= m->nblocks;
 }
 
@@ -201,9 +336,9 @@ static void layout(struct cfs *fs)
     fs->nr_chunks = chunk;
 }
 
-int cfs_members_load(struct cfs *fs, struct blkdev *first)
+int cfs_members_load(struct cfs *fs)
 {
-    (void)first;   /* member 0 is the device the mount was given */
+    /* Member 0's first device is the one the mount was given. */
     if (fs->sb.version < 4) {
         /* One member, and its allocation root is where it always was. */
         fs->mem = kzalloc(sizeof(*fs->mem));
@@ -255,6 +390,7 @@ int cfs_members_load(struct cfs *fs, struct blkdev *first)
         m->first_usable = src->first_usable;
         m->alloc_root = src->alloc_root;
         m->free_blocks = src->free_blocks;
+        m->copies = src->copies ? src->copies : 1;   /* version 4 wrote 0 and meant one */
         memcpy(m->uuid, src->uuid, 16);
         if (v > 0) {
             rc = assemble_member(fs, v, src);
@@ -270,6 +406,8 @@ int cfs_members_load(struct cfs *fs, struct blkdev *first)
         }
         if (rc)
             break;
+        if (m->copies > 1)
+            attach_copies(fs, v, src, m->copies);
     }
     kfree(block);
     if (rc) {
@@ -279,8 +417,23 @@ int cfs_members_load(struct cfs *fs, struct blkdev *first)
         return rc;
     }
     layout(fs);
-    if (fs->nmembers > 1)
-        kinfo("cosmofs: pool of %u members, %llu blocks", fs->nmembers, (unsigned long long)fs->nblocks);
+    /* What the table promised, less what the pool actually has: counting
+     * as devices are passed over instead would count the same missing
+     * copy twice, once where it was rejected and once where its slot
+     * went unfilled. */
+    fs->degraded = 0;
+    for (unsigned v = 0; v < fs->nmembers; v++) {
+        unsigned have = pool_copies(fs->pool, CFS_DVA(v, 0));
+        if (fs->mem[v].copies > have)
+            fs->degraded += fs->mem[v].copies - have;
+    }
+    if (fs->nmembers > 1 || fs->mem[0].copies > 1) {
+        unsigned mirrored = 0;
+        for (unsigned v = 0; v < fs->nmembers; v++)
+            mirrored += pool_copies(fs->pool, CFS_DVA(v, 0));
+        kinfo("cosmofs: pool of %u members over %u device(s), %llu blocks%s", fs->nmembers, mirrored,
+              (unsigned long long)fs->sb.total_blocks, fs->degraded ? " (degraded)" : "");
+    }
     return 0;
 }
 
@@ -311,10 +464,130 @@ int cfs_members_store(struct cfs *fs)
         dst->first_usable = m->first_usable;
         dst->alloc_root = m->alloc_root;
         dst->free_blocks = m->free_blocks;
+        dst->copies = m->copies;
     }
     cfs_buf_mark_dirty(fs, b);
     cfs_buf_put(fs, b);
     return 0;
+}
+
+/*
+ * Stamp every attached copy of every member past the first with this
+ * generation. Called from the commit after every block of the
+ * transaction is stable and before the root is written, so a label is
+ * never newer than the root it belongs to: a device that misses a
+ * commit keeps the older number and is refused at the next mount.
+ *
+ * Member 0 needs none of this -- its devices carry the superblock
+ * itself, whose generation is the same evidence.
+ */
+int cfs_labels_update(struct cfs *fs)
+{
+    if (fs->sb.version < 5)
+        return 0;
+    for (unsigned v = 1; v < fs->nmembers; v++) {
+        unsigned n = pool_copies(fs->pool, CFS_DVA(v, 0));
+        for (unsigned c = 0; c < n; c++) {
+            int rc = cfs_label_write(fs->pool, v, c, fs->gen, fs->sb.uuid, fs->mem[v].nblocks);
+            if (rc)
+                return rc;
+        }
+    }
+    return 0;
+}
+
+/*
+ * One block, from whichever copy of its member can satisfy `verify`.
+ * Copy 0 first, because that is where a healthy pool answers from; then
+ * the rest, and the first that verifies is written back over the ones
+ * that did not. A mirror that is read without checking only doubles the
+ * chance of returning something wrong.
+ */
+int cfs_read_repair(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
+                    bool *repaired)
+{
+    if (repaired)
+        *repaired = false;
+    unsigned copies = pool_copies(fs->pool, dva);
+    if (copies == 0)
+        return -EINVAL;
+    bool bad[POOL_MAX_COPIES] = { false };
+    int first_err = 0;
+    for (unsigned c = 0; c < copies; c++) {
+        int rc = pool_read_copy(fs->pool, dva, c, buf);
+        if (rc == 0 && verify(buf, arg)) {
+            if (c == 0)
+                return 0;   /* the common case: nothing to repair */
+            /* Write this copy back over every copy that failed. */
+            unsigned fixed = 0;
+            for (unsigned b = 0; b < c; b++) {
+                if (!bad[b])
+                    continue;
+                if (pool_write_copy(fs->pool, dva, b, buf) == 0)
+                    fixed++;
+            }
+            kwarn("cosmofs: block %llu:%llu recovered from copy %u (%u repaired)",
+                  (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), c, fixed);
+            fs->repairs += fixed;
+            if (repaired)
+                *repaired = fixed > 0;
+            return 0;
+        }
+        bad[c] = true;
+        if (first_err == 0)
+            first_err = rc ? rc : -EIO;
+    }
+    return first_err;
+}
+
+/*
+ * Every copy, checked. A read stops at the first copy that verifies,
+ * because that is the answer; a scrub cannot, because the copy that
+ * verifies may be hiding a rotted one behind it that nobody will notice
+ * until it is the one answering.
+ */
+int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const void *blk, void *arg), void *arg,
+                   unsigned *repaired)
+{
+    if (repaired)
+        *repaired = 0;
+    unsigned copies = pool_copies(fs->pool, dva);
+    if (copies == 0)
+        return -EINVAL;
+    bool bad[POOL_MAX_COPIES] = { false };
+    unsigned nbad = 0;
+    int good = -1;
+    uint8_t *scratch = kmalloc(CFS_BLOCK, 0);
+    if (scratch == NULL)
+        return -ENOMEM;
+    for (unsigned c = 0; c < copies; c++) {
+        int rc = pool_read_copy(fs->pool, dva, c, scratch);
+        if (rc == 0 && verify(scratch, arg)) {
+            if (good < 0) {
+                good = (int)c;
+                memcpy(buf, scratch, CFS_BLOCK);
+            }
+            continue;
+        }
+        bad[c] = true;
+        nbad++;
+    }
+    int rc = 0;
+    if (good < 0) {
+        rc = -EIO;
+    } else if (nbad) {
+        unsigned fixed = 0;
+        for (unsigned c = 0; c < copies; c++)
+            if (bad[c] && pool_write_copy(fs->pool, dva, c, buf) == 0)
+                fixed++;
+        kwarn("cosmofs: block %llu:%llu: %u of %u copies rotted, %u repaired from copy %d",
+              (unsigned long long)CFS_DVA_VDEV(dva), (unsigned long long)CFS_DVA_BLK(dva), nbad, copies, fixed, good);
+        fs->repairs += fixed;
+        if (repaired)
+            *repaired = fixed;
+    }
+    kfree(scratch);
+    return rc;
 }
 
 void cfs_members_free(struct cfs *fs)

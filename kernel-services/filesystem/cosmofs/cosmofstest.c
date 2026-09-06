@@ -42,8 +42,8 @@ bool selftest_pool(const char **reason)
     }
     struct spool *p;
     CHECK(pool_open(bd, &p) == 0);
-    CHECK(p->block_size == 4096 && p->nmembers == 1 && p->m[0].sectors_per_block == 8 &&
-          p->nblocks == bd->capacity / 8);
+    CHECK(p->block_size == 4096 && p->nmembers == 1 && p->m[0].ncopies == 1 &&
+          p->m[0].sectors_per_block[0] == 8 && p->nblocks == bd->capacity / 8);
     uint8_t *w = kmalloc(4096, 0), *r = kmalloc(4096, 0);
     if (w == NULL || r == NULL) {
         kfree(w);
@@ -837,6 +837,280 @@ bool selftest_cosmofs_snapshot(const char **reason)
     kinfo("selftest: cosmofs-snapshot: history kept and released (%llu free blocks, %llu after)",
           (unsigned long long)st0.free_blocks, (unsigned long long)st1.free_blocks);
     return engine_unmount(bd, reason);
+}
+
+/* A label's CRC, at its own offset. */
+static uint32_t label_crc_test(const uint8_t *block)
+{
+    static const uint8_t zero4[4] = { 0 };
+    size_t off = offsetof(struct cfs_label, crc);
+    uint32_t c = crc32c(block, off);
+    c = crc32c_update(c, zero4, 4);
+    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
+}
+
+/* The superblock's CRC covers the whole block with its own field zeroed,
+ * at a different offset than a metadata header's. */
+static uint32_t super_crc_test(const uint8_t *block)
+{
+    static const uint8_t zero4[4] = { 0 };
+    size_t off = offsetof(struct cfs_super, crc);
+    uint32_t c = crc32c(block, off);
+    c = crc32c_update(c, zero4, 4);
+    return crc32c_update(c, block + off + 4, CFS_BLOCK - off - 4);
+}
+
+/* Make a device look like one that was detached a commit ago: its
+ * superblocks say an older generation, and every checksum on it is
+ * still perfectly valid. That is exactly the case a mirror cannot
+ * detect by checksums alone. */
+static bool age_device(struct blkdev *bd, uint64_t older)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    if (b == NULL) {
+        pool_close(p);
+        return false;
+    }
+    bool ok = true, aged = false;
+    for (unsigned slot = 0; slot < 2 && ok; slot++) {
+        if (pool_read_copy(p, CFS_DVA(0, slot), 0, b) != 0)
+            continue;
+        struct cfs_super *sb = (struct cfs_super *)b;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) != 0)
+            continue;   /* the unused slot */
+        sb->generation = older;
+        sb->crc = 0;
+        sb->crc = super_crc_test(b);
+        ok = pool_write_copy(p, CFS_DVA(0, slot), 0, b) == 0;
+        aged = aged || ok;
+    }
+    ok = ok && aged;   /* it has to have actually aged something */
+    ok = ok && pool_flush(p) == 0;
+    kfree(b);
+    pool_close(p);
+    return ok;
+}
+
+/* Rewrite a member's label with an older generation: the device now
+ * looks like one that missed a commit, with every checksum on it still
+ * valid. Returns false when this device carries no label. */
+static bool age_label(struct blkdev *bd, uint64_t older)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    if (b == NULL) {
+        pool_close(p);
+        return false;
+    }
+    bool ok = false;
+    if (pool_read(p, CFS_DVA(0, 0), b) == 0) {
+        struct cfs_label *l = (struct cfs_label *)b;
+        if (memcmp(l->magic, CFS_LABEL_MAGIC, sizeof(l->magic)) == 0) {
+            l->generation = older;
+            l->crc = 0;
+            l->crc = label_crc_test(b);
+            ok = pool_write(p, CFS_DVA(0, 0), b) == 0 && pool_flush(p) == 0;
+        }
+    }
+    kfree(b);
+    pool_close(p);
+    return ok;
+}
+
+/* Overwrite one copy of one block with rubbish, behind the
+ * filesystem's back: what a rotting disk does. */
+static bool rot_copy(struct blkdev *bd, uint64_t blk, uint8_t fill)
+{
+    struct spool *p;
+    if (pool_open(bd, &p))
+        return false;
+    uint8_t *b = kmalloc(CFS_BLOCK, 0);
+    if (b == NULL) {
+        pool_close(p);
+        return false;
+    }
+    memset(b, fill, CFS_BLOCK);
+    bool ok = pool_write(p, CFS_DVA(0, blk), b) == 0 && pool_flush(p) == 0;
+    kfree(b);
+    pool_close(p);
+    return ok;
+}
+
+/*
+ * A mirrored member: two devices holding the same blocks. Rot one copy
+ * of a metadata block and one of a data block, and the reads still
+ * answer -- from the other copy, which is then written back over the
+ * bad one. Rot both and the answer is -EIO, for that file and not for
+ * the filesystem.
+ */
+bool selftest_cosmofs_mirror(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[2] = { ramblk_create(512), ramblk_create(512) };
+    CHECK(bd[0] != NULL && bd[1] != NULL);
+    CHECK(cosmofs_format_mirror(bd, 1, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.members == 1 && st.devices == 2 && st.degraded == 0);
+    /* One member's worth of space: a mirror costs capacity, not blocks. */
+    CHECK(st.total_blocks == 512);
+
+    static char data[4096];
+    memset(data, 'm', sizeof(data));
+    CHECK(write_file(ENG "/mirrored", data, sizeof(data)));
+    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    CHECK(write_file(ENG "/dir/inner", "inner", 5));
+    CHECK(vfs_sync() == 0);
+
+    /* Where the file's one data block lives. */
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    uint64_t ino = f->vn->ino;
+    file_put(f);
+    uint64_t pblk = 0;
+    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &pblk) == 0);
+    CHECK(CFS_DVA_VDEV(pblk) == 0);
+
+    /* Rot the second copy of that data block; the read comes from copy 0
+     * and notices nothing. Then rot the first: the read has to fall back
+     * to the second, which by then holds what copy 0 had. */
+    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0xA5));
+    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    uint64_t repairs0 = st.repairs;
+
+    /* A scrub reads everything and puts the rotted copy right. */
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    CHECK(sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0);
+    CHECK(sc.repaired >= 1);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0);
+
+    /* A second scrub finds nothing to do: the first one fixed it. */
+    struct cosmofs_scrub_stats sc2;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0);
+    CHECK(sc2.repaired == 0 && sc2.unrecoverable == 0);
+
+    /* Rot the second copy of a *metadata* block that no read will
+     * choose -- the inode map's root, which is reached through copy 0
+     * every time. Only a scrub that looks at every copy can see it. */
+    uint8_t *sblk = kmalloc(CFS_BLOCK, 0);
+    CHECK(sblk != NULL);
+    struct spool *sp;
+    CHECK(pool_open(bd[0], &sp) == 0);
+    CHECK(pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, sblk) == 0);
+    uint64_t imap_root = 0, sgen = 0;
+    for (unsigned slot = 0; slot < 2; slot++) {
+        if (pool_read(sp, slot, sblk) != 0)
+            continue;
+        const struct cfs_super *sb = (const struct cfs_super *)sblk;
+        if (memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation > sgen) {
+            sgen = sb->generation;
+            imap_root = sb->imap_root;
+        }
+    }
+    pool_close(sp);
+    kfree(sblk);
+    CHECK(imap_root != 0);
+    CHECK(rot_copy(bd[1], CFS_DVA_BLK(imap_root), 0x77));
+    CHECK(read_matches(ENG "/dir/inner", "inner", 5));   /* copy 0 answers; nothing notices */
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0);
+    CHECK(sc.repaired >= 1 && sc.unrecoverable == 0);
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc2) == 0 && sc2.repaired == 0);
+
+    /* Now rot copy 0 of the same block: the read falls back to copy 1
+     * and repairs copy 0. */
+    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x5A));
+    CHECK(read_matches(ENG "/mirrored", data, sizeof(data)));
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+
+    /* Both copies gone: that file is unreadable, and the rest of the
+     * filesystem is not. */
+    CHECK(rot_copy(bd[0], CFS_DVA_BLK(pblk), 0x11));
+    CHECK(rot_copy(bd[1], CFS_DVA_BLK(pblk), 0x22));
+    CHECK(vfs_open(NULL, ENG "/mirrored", COSMO_O_RDONLY, 0, &f) == 0);
+    static char got[4096];
+    CHECK(file_read(f, got, sizeof(got)) == -EIO);
+    file_put(f);
+    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == -EIO && sc.unrecoverable == 1);
+
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* A device that was detached while the pool went on being written
+     * carries older contents that pass every checksum on it. It is
+     * recognised by the generation and left out of the mirror: the pool
+     * comes up degraded rather than quietly serving old blocks. */
+    CHECK(age_device(bd[1], 1));
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.devices == 1 && st.degraded == 1);
+    CHECK(read_matches(ENG "/dir/inner", "inner", 5));
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    kinfo("selftest: cosmofs-mirror: two copies, %llu blocks scrubbed", (unsigned long long)sc.blocks_read);
+    return true;
+}
+
+/*
+ * A mirrored member whose copy 0 is the stale one. The generation is
+ * recorded so that a device which missed a commit is not mirrored; it
+ * would be worth nothing if the copy that happens to be labelled first
+ * were served anyway.
+ */
+bool selftest_cosmofs_mirror_stale(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[4];
+    for (unsigned i = 0; i < 4; i++) {
+        bd[i] = ramblk_create(256);
+        CHECK(bd[i] != NULL);
+    }
+    /* Two members of two copies: bd[0..1] are member 0, bd[2..3] member 1. */
+    CHECK(cosmofs_format_mirror(bd, 2, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.members == 2 && st.devices == 4 && st.degraded == 0);
+    CHECK(write_file(ENG "/across", "two members, two copies", 23));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Age member 1's copy 0 by rewriting its label to an older
+     * generation: still a valid label, still valid checksums, older
+     * contents. The mount must pass over it and take the other copy. */
+    CHECK(age_label(bd[2], 1) || age_label(bd[3], 1));
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.members == 2 && st.devices == 3 && st.degraded == 1);
+    CHECK(read_matches(ENG "/across", "two members, two copies", 23));
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    for (unsigned i = 0; i < 4; i++)
+        ramblk_destroy(bd[i]);
+    kinfo("selftest: cosmofs-mirror-stale: a stale copy is passed over, whichever one it is");
+    return true;
 }
 
 /*
