@@ -125,6 +125,7 @@ bool selftest_cosmofs_v3(const char **reason);                    /* the older o
 bool selftest_cosmofs_badmembers(const char **reason);            /* a member table that cannot be true */
 bool selftest_cosmofs_mirror(const char **reason);                /* a mirrored member, repair and scrub */
 bool selftest_cosmofs_mirror_stale(const char **reason);          /* the stale copy is the first one */
+bool selftest_cosmofs_compress(const char **reason);              /* compressed records */
 bool selftest_cosmofs_reserve(const char **reason);    /* the metadata reserve on a full disk */
 bool selftest_cosmofs_fallback(const char **reason);   /* older-slot fallback at mount */
 bool selftest_cosmofs_writeback(const char **reason);  /* the writeback thread */

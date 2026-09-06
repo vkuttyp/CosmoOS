@@ -97,6 +97,15 @@ mount's hash (takes `mnt->lock`).
 **`struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)`**
 Referenced live vnode or NULL. The hash holds no reference of its own.
 
+**`int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done)`**
+Optional vnode operation: `n` consecutive dirty pages from `index`,
+offered together so a filesystem can write them as one object. It
+reports in `done` how many it took (at least 1), and the cache writes
+the rest through `writepage`. Called with the page cache's lock held, so
+it must not call back into the cache. Compression needs it: a single
+block that compresses to a quarter of itself still occupies a block, so
+the only thing worth compressing is several blocks at once.
+
 **`bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct
 vnode *vn, void *arg), void *arg)`** True if any vnode of the mount
 satisfies `pred`. A hashed vnode always holds a reference, so the cache
@@ -147,6 +156,16 @@ and readable until the last `file_put`.
 
 **`int vfs_rmdir(struct vnode *start, const char *path)`** `-ENOTDIR`,
 `-ENOTEMPTY`, `-EBUSY` (mountpoint), `-EINVAL` for `.`/`..`.
+
+**`int vfs_truncate(struct vnode *start, const char *path, uint64_t size)`**
+Set a regular file's length. `O_TRUNC` is this with a size of zero; this
+is the rest of it, which a filesystem storing several blocks as one
+object has to implement anyway — half a compressed record is nothing, so
+the record is read, dropped, and its surviving blocks written back
+plain. What is past the new end reads as zeros if the file grows again:
+the tail of the last partial block is cleared on the disk, not only in
+the page cache. `-EISDIR`, `-EINVAL` for anything that is not a regular
+file, `-EACCES`, `-ENOTSUP`.
 
 **`int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)`**
 Both parents on the same mount (`-EXDEV` otherwise). Parents are locked

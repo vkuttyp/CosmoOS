@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 5 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 6 && CFS_VERSION_MIN == 2);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);
     EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
@@ -50,6 +50,35 @@ static void test_layout_sizes(void)
     EXPECT(CFS_MAX_COPIES == 4);
     EXPECT(offsetof(struct cfs_member, copies) == 52);   /* what version 4 wrote as padding */
     EXPECT(offsetof(struct cfs_label, generation) < CFS_BLOCK);
+
+    /* Version 6: a compressed record's physical size lives in the top
+     * bits of `count`, which is why nothing above changed width. */
+    struct cfs_extent plain = { 4096, 300, 0 };
+    EXPECT(!cfs_ext_compressed(&plain));
+    EXPECT(cfs_ext_count(&plain) == 300 && cfs_ext_psize(&plain) == 300);
+    EXPECT(cfs_ext_algo(&plain) == CFS_COMPRESS_NONE);
+
+    struct cfs_extent rec = { 4096, cfs_ext_pack(CFS_COMPRESS_LZ4, 3, 8), 16 };
+    EXPECT(cfs_ext_compressed(&rec));
+    EXPECT(cfs_ext_count(&rec) == 8 && cfs_ext_psize(&rec) == 3);
+    EXPECT(cfs_ext_algo(&rec) == CFS_COMPRESS_LZ4);
+    /* A record of one physical block, and the widest a record can be. */
+    struct cfs_extent one = { 8, cfs_ext_pack(CFS_COMPRESS_LZ4, 1, 1), 0 };
+    EXPECT(cfs_ext_psize(&one) == 1 && cfs_ext_count(&one) == 1);
+    struct cfs_extent wide = { 8, cfs_ext_pack(CFS_COMPRESS_LZ4, 256, 0xFFFF), 0 };
+    EXPECT(cfs_ext_psize(&wide) == 256 && cfs_ext_count(&wide) == 0xFFFF);
+    EXPECT(CFS_RECORD_BLOCKS <= 0xFFFFu);
+
+    /* A run from before version 6 has bit 31 clear, so it reads as an
+     * ordinary run of exactly its count. */
+    struct cfs_extent old = { 4096, 0x7FFFFFFFu, 0 };
+    EXPECT(!cfs_ext_compressed(&old) && cfs_ext_count(&old) == 0x7FFFFFFFu);
+
+    /* And a record maps nothing one-to-one: cfs_map_block says so
+     * instead of computing an address inside it. */
+    uint64_t pblk = 0;
+    EXPECT(cfs_map_block(&rec, 1, 18, &pblk) == -1);
+    EXPECT(cfs_map_block(&plain, 1, 12, &pblk) == 1 && pblk == 4096 + 12);
 }
 
 static void test_inode_indices(void)

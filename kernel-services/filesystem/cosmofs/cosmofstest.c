@@ -203,7 +203,9 @@ bool selftest_cosmofs_ops(const char **reason)
     CHECK(vfs_unlink(NULL, "/mnt/big.bin") == 0);
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_stats(mount_of("/mnt"), &st) == 0);
-    CHECK(st.free_blocks > st0.free_blocks + 40);
+    /* Fewer than the 45 blocks it covers: its contents repeat, so it is
+     * stored as compressed records (cosmofs-compress measures that). */
+    CHECK(st.free_blocks > st0.free_blocks + 5);
     CHECK(st.inode_count == st0.inode_count - 1);
 
     /* Truncate through O_TRUNC and re-extend. */
@@ -295,6 +297,19 @@ bool selftest_cosmofs_crash(const char **reason)
 #include "cosmofs_format.h"
 
 #if CONFIG_DEBUG
+
+/* Bytes with nothing worth compressing in them. A test that measures
+ * space has to write these, or it measures the compressor instead of
+ * whatever it meant to measure. */
+static void fill_incompressible(uint8_t *buf, size_t len, uint32_t seed)
+{
+    uint32_t x = seed | 1u;
+    for (size_t i = 0; i < len; i++) {
+        x = x * 1103515245u + 12345u;
+        buf[i] = (uint8_t)(x >> 16);
+    }
+}
+
 
 #define ENG "/mnt/eng"
 
@@ -501,7 +516,7 @@ bool selftest_cosmofs_reserve(const char **reason)
     CHECK(st.reserve_blocks == 32);
     uint8_t *page = kmalloc(4096, 0);
     CHECK(page != NULL);
-    memset(page, 0x42, 4096);
+    fill_incompressible(page, 4096, 0x42);   /* the reserve is about space, not compression */
     /* Fill until data allocation is refused (pages are cached at write
      * and allocated at the sync that writes them back); the reserve
      * stays free. */
@@ -519,6 +534,10 @@ bool selftest_cosmofs_reserve(const char **reason)
         CHECK(orc == 0);
         files++;
         for (unsigned i = 0; i < 16; i++) {
+            /* Different bytes every time: the same page written sixteen
+             * times is a record that compresses to almost nothing, and
+             * this test is about running out of space. */
+            fill_incompressible(page, 4096, 0x42u + files * 16u + i);
             int64_t rc = file_write(f, page, 4096);
             if (rc == 4096) {
                 pages++;
@@ -1114,6 +1133,102 @@ bool selftest_cosmofs_mirror_stale(const char **reason)
 }
 
 /*
+ * Compression: what it saves, and that everything still reads back.
+ * A record is the unit -- eight logical blocks compressed together --
+ * so the interesting cases are the ones that cut across one: writing a
+ * page inside a record, and truncating into the middle of one.
+ */
+static bool read_matches_prefix(const char *path, const void *data, size_t len);
+
+bool selftest_cosmofs_compress(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    const size_t len = 32 * 4096;   /* four records */
+    uint8_t *dense = kmalloc(len, 0), *sparse_data = kmalloc(len, 0), *back = kmalloc(len, 0);
+    CHECK(dense != NULL && sparse_data != NULL && back != NULL);
+    /* Repetitive: what compression is for. */
+    for (size_t i = 0; i < len; i++)
+        sparse_data[i] = (uint8_t)(i % 61);
+    /* A counter through a multiplier: no repeats worth finding. */
+    uint32_t x = 7;
+    for (size_t i = 0; i < len; i++) {
+        x = x * 1103515245u + 12345u;
+        dense[i] = (uint8_t)(x >> 16);
+    }
+
+    struct cosmofs_stats st0, st1, st2;
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    CHECK(write_file(ENG "/small", sparse_data, len));
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(write_file(ENG "/big", dense, len));
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st2) == 0);
+
+    uint64_t compressible = st0.free_blocks - st1.free_blocks;
+    uint64_t incompressible = st1.free_blocks - st2.free_blocks;
+    /* The repetitive file is stored in a fraction of its 32 blocks; the
+     * other one cannot be, and is stored as it is. */
+    kinfo("cosmofs-compress: %llu blocks compressible, %llu not", (unsigned long long)compressible,
+          (unsigned long long)incompressible);
+    CHECK(compressible < 16 && incompressible >= 32);
+    CHECK(compressible * 3 < incompressible);
+
+    /* Both read back exactly, through the records and around them. */
+    CHECK(read_matches(ENG "/small", sparse_data, len));
+    CHECK(read_matches(ENG "/big", dense, len));
+
+    /* A page written inside a compressed record: the record is read,
+     * rebuilt around the new page, and written again. */
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    memset(sparse_data + 3 * 4096, 0x5a, 4096);
+    CHECK(file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+    CHECK(read_matches(ENG "/small", sparse_data, len));
+
+    /* A partial page inside a record, which reads the record to fill in
+     * what the write does not cover. */
+    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDWR, 0, &f) == 0);
+    memset(sparse_data + 9 * 4096 + 100, 0x33, 500);
+    CHECK(file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, 9 * 4096 + 100) == 500);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+    CHECK(read_matches(ENG "/small", sparse_data, len));
+
+    /* Truncating into the middle of a record: what survives is rewritten
+     * as ordinary blocks, and what is past the end must read as zeros
+     * when the file grows again -- not as the record's old contents. */
+    int trc = vfs_truncate(NULL, ENG "/small", 10 * 4096 + 7);
+    if (trc)
+        kerror("compress: truncate returned %d", trc);
+    CHECK(trc == 0);
+    CHECK(read_matches_prefix(ENG "/small", sparse_data, 10 * 4096 + 7));
+    CHECK(vfs_truncate(NULL, ENG "/small", len) == 0);
+    CHECK(vfs_open(NULL, ENG "/small", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(file_read(f, back, len) == (int64_t)len);
+    file_put(f);
+    CHECK(memcmp(back, sparse_data, 10 * 4096 + 7) == 0);
+    for (size_t i = 10 * 4096 + 7; i < len; i++)
+        CHECK(back[i] == 0);
+
+    /* A scrub reads every record through the checksums of its physical
+     * blocks. */
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+
+    kfree(dense);
+    kfree(sparse_data);
+    kfree(back);
+    kinfo("selftest: cosmofs-compress: %llu blocks for 32 compressible, %llu for 32 that are not",
+          (unsigned long long)compressible, (unsigned long long)incompressible);
+    return engine_unmount(bd, reason);
+}
+
+/*
  * A member table is disk data: its geometry decides how many bitmap
  * chunks a mount reads and how far the allocator may reach, so it is
  * checked against what the format can express before any of it is
@@ -1239,6 +1354,24 @@ bool selftest_cosmofs_v3(const char **reason)
     return true;
 }
 
+/* The first `len` bytes of a file, whatever its length. */
+static bool read_matches_prefix(const char *path, const void *data, size_t len)
+{
+    struct file *f;
+    if (vfs_open(NULL, path, COSMO_O_RDONLY, 0, &f))
+        return false;
+    uint8_t *b = kmalloc(len, 0);
+    if (b == NULL) {
+        file_put(f);
+        return false;
+    }
+    int64_t n = file_read(f, b, len);
+    bool ok = n == (int64_t)len && memcmp(b, data, len) == 0;
+    kfree(b);
+    file_put(f);
+    return ok;
+}
+
 /* The first block of a file, whatever the file's length. */
 static bool head_matches(const char *path, const void *data, size_t len)
 {
@@ -1288,15 +1421,18 @@ bool selftest_cosmofs_pool2(const char **reason)
 
     /* Enough data that a one-member pool of this size could not hold it:
      * the allocator has to reach the second member. */
-    static char buf[4096];
-    memset(buf, 'p', sizeof(buf));
+    /* Sixteen *different* pages per file: the same page written sixteen
+     * times is one of the most compressible things there is, and this
+     * test is about where blocks land, not how few of them there are. */
+    static uint8_t buf[16 * 4096];
+    fill_incompressible(buf, sizeof(buf), 0x9e37);
     for (unsigned i = 0; i < 24; i++) {
         char name[32];
         ksnprintf(name, sizeof(name), ENG "/f%u", i);
         struct file *f;
         CHECK(vfs_open(NULL, name, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
         for (unsigned k = 0; k < 16; k++)
-            CHECK(file_write(f, buf, sizeof(buf)) == (int64_t)sizeof(buf));
+            CHECK(file_write(f, buf + (size_t)k * 4096, 4096) == 4096);
         file_put(f);
     }
     CHECK(vfs_sync() == 0);
@@ -1324,14 +1460,14 @@ bool selftest_cosmofs_pool2(const char **reason)
         struct cosmo_stat s;
         CHECK(vfs_stat(NULL, name, &s) == 0 && s.size == 16 * 4096);
     }
-    CHECK(head_matches(ENG "/f7", buf, sizeof(buf)));
+    CHECK(head_matches(ENG "/f7", buf, 4096));
 
     /* A snapshot spans the members too: its record pins the member table
      * of its generation, so every member's bitmap is held. */
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/two", 0755) == 0);
     CHECK(vfs_unlink(NULL, ENG "/f3") == 0);
     CHECK(vfs_sync() == 0);
-    CHECK(head_matches(ENG "/.snapshots/two/f3", buf, sizeof(buf)));
+    CHECK(head_matches(ENG "/.snapshots/two/f3", buf, 4096));
     CHECK(vfs_rmdir(NULL, ENG "/.snapshots/two") == 0);
 
     CHECK(vfs_umount(ENG) == 0);

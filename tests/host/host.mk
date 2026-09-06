@@ -121,15 +121,19 @@ $(HOST_OUT)/test_lockdep: $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(ROOT)/ker
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_lz4: $(addprefix $(ROOT)/,$(HOST_LZ4_SRCS))
+$(HOST_OUT)/test_lz4: $(addprefix $(ROOT)/,$(HOST_LZ4_SRCS)) $(ROOT)/kernel/include/kernel/lz4.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_cosmofs: $(addprefix $(ROOT)/,$(HOST_COSMOFS_SRCS))
+# The format header is the thing under test here: without it as a
+# prerequisite a stale binary passes an assertion the header no longer
+# satisfies, which is exactly what happened when the version last moved.
+$(HOST_OUT)/test_cosmofs: $(addprefix $(ROOT)/,$(HOST_COSMOFS_SRCS)) \
+	$(ROOT)/kernel-services/filesystem/cosmofs/cosmofs_format.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel-services/filesystem/cosmofs $^ $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel-services/filesystem/cosmofs $(filter %.c,$^) $(HOST_LDFLAGS) -o $@
 
 .PHONY: host-test
 host-test: $(HOST_TESTS)
