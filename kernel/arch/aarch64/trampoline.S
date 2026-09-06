@@ -8,9 +8,16 @@
  * jump to the mailbox's entry (a higher-half address) then leaves the
  * identity map behind. Position-independent: no absolute references.
  *
+ * On a machine with the virtualization extensions PSCI starts the CPU
+ * at EL2, as it started the boot CPU; the same arrangement applies
+ * (docs/kernel/arch/aarch64/design.md, "Exception level 2"): program
+ * EL2, point VBAR_EL2 at the stub the loader left, and ERET to EL1 with
+ * the EL1 state already loaded. At EL1 the code below runs unchanged.
+ *
  * Mailbox layout (assembly ABI, see smp.c):
  *   0x00 ttbr0   0x08 ttbr1   0x10 mair   0x18 tcr   0x20 sctlr
  *   0x28 stack_top (VA)   0x30 entry (VA)   0x38 cpu index
+ *   0x40 el2_stub (PA, 0 when there is no EL2)
  */
 
     .section .text, "ax", @progbits
@@ -34,7 +41,42 @@ aarch64_ap_trampoline:
     tlbi vmalle1
     dsb sy
     isb
+    mrs x8, CurrentEL
+    lsr x8, x8, #2
+    cmp x8, #2
+    b.ne 1f
+
+    /* EL2: keep the door open, then leave through it. */
+    mov x9, #(1 << 31)          /* HCR_EL2.RW: EL1 is AArch64 */
+    msr hcr_el2, x9
+    mov x9, #0x33FF             /* CPTR_EL2 RES1 */
+    bic x9, x9, #(1 << 10)      /* TFP clear: EL1/EL0 may use FP */
+    msr cptr_el2, x9
+    mov x9, #3                  /* CNTHCTL_EL2: EL1 counters and timers */
+    msr cnthctl_el2, x9
+    msr cntvoff_el2, xzr
+    msr vttbr_el2, xzr
+    mrs x9, midr_el1
+    msr vpidr_el2, x9
+    mrs x9, mpidr_el1
+    msr vmpidr_el2, x9
+    ldr x9, [x19, #0x40]        /* the stub the loader installed */
+    cbz x9, 2f
+    msr vbar_el2, x9
+2:  ldr x9, =0x30C50830         /* SCTLR_EL2 with the MMU off */
+    msr sctlr_el2, x9
+    isb
     msr sctlr_el1, x5
+    isb
+    msr sp_el1, x6
+    ldr x9, =0x3C5              /* SPSR_EL2: EL1h, DAIF masked */
+    msr spsr_el2, x9
+    msr elr_el2, x7
+    mov x29, xzr
+    mov x30, xzr
+    eret
+
+1:  msr sctlr_el1, x5
     isb
     mov sp, x6
     mov x29, xzr
