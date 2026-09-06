@@ -98,7 +98,12 @@ struct cfs_mhdr {
  * generation) never repeats with different contents under one key. */
 struct cfs_csum_aead {          /* 32 bytes */
     uint8_t tag[16];
-    uint64_t generation;
+    /* The nonce this block was sealed with, drawn at random when it was
+     * written. Storing it costs twelve bytes that were going to be
+     * padding and buys the one property the cipher cannot do without:
+     * a nonce is never reused, whatever the filesystem does with
+     * generations afterwards (design.md, "The nonce"). */
+    uint8_t nonce[12];
     /* A plain CRC32C of the same ciphertext. The tag needs the file's
      * key to check; this does not, which is what lets a mirror repair a
      * copy and a scrub read the whole filesystem on a machine that
@@ -106,7 +111,6 @@ struct cfs_csum_aead {          /* 32 bytes */
      * the tag is what says a block is the one that was written
      * (design.md, "Integrity"). */
     uint32_t crc;
-    uint32_t reserved;
 };
 #define CFS_AEAD_PER_BLOCK   (CFS_PAYLOAD / sizeof(struct cfs_csum_aead))
 #define CFS_CSUM_MAX_BLOCKS  ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_CSUMS_PER_BLOCK)

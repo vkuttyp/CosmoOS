@@ -822,13 +822,28 @@ Each *file* nevertheless gets its own key, derived from the master:
                                           KDF(master, inode) ──► file key
 ```
 
-The derivation is what makes the nonce problem tractable. A block is
-encrypted with its file's key and a nonce built from `(inode, logical
-block, the generation that wrote it)`. Copy-on-write is what makes that
-safe: rewriting a block allocates a new one in a new generation, so a
-(key, nonce) pair is never used twice with different plaintext. A
-snapshot shares the block unchanged, and the same nonce still decrypts
-it, which is why the nonce cannot be a per-file counter.
+### The nonce
+
+A block's nonce is **ninety-six random bits, drawn when the block is
+written and stored beside its tag**.
+
+The first design derived it instead, from the block number and the
+generation that wrote it, on the argument that copy-on-write writes a
+block once per generation. That argument is wrong, and the way it fails
+is worth keeping written down: the older-root fallback at mount resumes
+from a *previous* superblock, so a generation is used a second time
+while the ciphertext the abandoned attempt wrote is still on the disk. A
+later write of the same block in the reused generation would repeat a
+(key, nonce) pair, and for a stream cipher that hands anyone holding
+both blocks the xor of the two plaintexts.
+
+Any derivation from values the filesystem manages has that shape of
+risk: it makes the cipher's one hard requirement depend on a property
+some other part of the filesystem has to keep promising. Random bits
+depend on nothing. With a key per file, a file would have to reach some
+2^48 blocks before a repeat is worth thinking about, and the format lets
+it hold 2^32. The cost is twelve bytes per block, in a checksum entry
+that was going to pad them anyway.
 
 ### Key storage and rotation
 

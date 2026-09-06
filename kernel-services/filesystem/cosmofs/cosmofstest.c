@@ -1293,6 +1293,40 @@ bool selftest_cosmofs_crypt(const char **reason)
     struct cosmofs_scrub_stats sc;
     CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
 
+    /* No two writes of a block share a nonce, whatever the filesystem
+     * does with generations. Writing the same plaintext to the same
+     * logical block over and over must give different ciphertext every
+     * time: if it did not, an attacker with two copies would have the
+     * xor of the two plaintexts, and after the older-root fallback
+     * reuses a generation that is exactly what a generation-derived
+     * nonce would produce. */
+    /* kmalloc'd, not on the stack: the pool reads into it by DMA, and
+     * eight blocks is far more than a kernel stack should carry. */
+    uint8_t *seen = kmalloc(8 * CFS_BLOCK, 0);
+    CHECK(seen != NULL);
+    unsigned kept = 0;
+    for (unsigned round = 0; round < 8; round++) {
+        CHECK(write_file(ENG "/nonce.bin", secret, sizeof(secret) - 1));
+        CHECK(vfs_sync() == 0);
+        struct file *nf;
+        CHECK(vfs_open(NULL, ENG "/nonce.bin", COSMO_O_RDONLY, 0, &nf) == 0);
+        uint64_t nino = nf->vn->ino;
+        file_put(nf);
+        uint64_t ndva = 0;
+        CHECK(cosmofs_test_block_of(mount_of(ENG), nino, 0, &ndva) == 0);
+        struct spool *np;
+        CHECK(pool_open(bd, &np) == 0);
+        int prc = pool_read(np, ndva, seen + (size_t)kept * CFS_BLOCK);
+        pool_close(np);
+        CHECK(prc == 0);
+        for (unsigned prev = 0; prev < kept; prev++)
+            CHECK(memcmp(seen + (size_t)prev * CFS_BLOCK, seen + (size_t)kept * CFS_BLOCK, CFS_BLOCK) != 0);
+        kept++;
+    }
+    kfree(seen);
+    CHECK(read_matches(ENG "/nonce.bin", secret, sizeof(secret) - 1));
+    CHECK(vfs_unlink(NULL, ENG "/nonce.bin") == 0);
+
     /* Rotation rewrites one block: the old key stops working, the new
      * one starts, and every file is still readable without being
      * rewritten. */

@@ -68,20 +68,27 @@ void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t out[CHACHA20_KEY_S
 }
 
 /*
- * A block's nonce: its logical block number and the generation that
- * wrote it. Copy-on-write is what makes that enough -- a block is
- * written once per generation, so the pair never repeats with different
- * contents, and a snapshot that keeps the old block keeps a nonce that
- * still decrypts it.
+ * A block's nonce is drawn at random when the block is written, and
+ * stored beside its tag.
+ *
+ * It was derived from the block number and the generation that wrote it,
+ * on the argument that copy-on-write writes a block once per generation.
+ * That argument is wrong, and Greptile found where: the older-root
+ * fallback at mount resumes from a *previous* superblock, so a
+ * generation is used again while the ciphertext the first attempt wrote
+ * is still on the disk. A second write of the same block in the reused
+ * generation would then repeat a (key, nonce) pair -- and for a stream
+ * cipher that hands an attacker the xor of the two plaintexts.
+ *
+ * Deriving it from something else the filesystem controls only moves the
+ * question. Ninety-six random bits per block do not need the filesystem
+ * to promise anything: with a key per file, a file would have to reach
+ * some 2^48 blocks before a repeat is worth thinking about, and it can
+ * hold 2^32.
  */
-void cfs_block_nonce(uint64_t lblk, uint64_t generation, uint8_t nonce[CHACHA20_NONCE_SIZE])
+void cfs_block_nonce(uint8_t nonce[CHACHA20_NONCE_SIZE])
 {
-    nonce[0] = (uint8_t)lblk;
-    nonce[1] = (uint8_t)(lblk >> 8);
-    nonce[2] = (uint8_t)(lblk >> 16);
-    nonce[3] = (uint8_t)(lblk >> 24);
-    for (unsigned i = 0; i < 8; i++)
-        nonce[4 + i] = (uint8_t)(generation >> (8 * i));
+    random_get_bytes(nonce, CHACHA20_NONCE_SIZE);
 }
 
 /* --- the key block -------------------------------------------------------- */

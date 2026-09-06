@@ -370,10 +370,12 @@ re-extension reading zeros, and a clean scrub), `test_lz4` and
 **V27. What is encrypted is authenticated, and what is not encrypted is
 said out loud.** An encrypted filesystem seals a block with its file's
 key — derived from a master key that the user's key only wraps — and a
-nonce of the block's logical number and the generation that wrote it.
-Copy-on-write is what makes that unique: a block is written once per
-generation, so the pair never repeats with different contents, and a
-snapshot that keeps the old block keeps a nonce that still decrypts it.
+nonce of ninety-six random bits, drawn at write time and stored beside
+the tag. Deriving the nonce from the block number and the generation
+would tie the cipher's one hard requirement to a promise the filesystem
+cannot keep: the older-root fallback reuses a generation while the
+abandoned attempt's ciphertext is still on the disk, and a stream cipher
+repeating a (key, nonce) pair hands out the xor of two plaintexts.
 Compression runs before encryption, because the other order leaves
 nothing to compress.
 
@@ -400,5 +402,6 @@ ways: a mount with no key cannot walk a path at all, and answers
 `cosmofs-crypt` (the plaintext is absent from the block the file
 occupies; a wrong key is `-EKEYREJECTED`; a bent block is refused, not
 returned; a keyless scrub reads and repairs; rotation keeps every file
-readable; a keyless remount refuses lookups), and `test_chacha20`
-against RFC 8439.
+readable; a keyless remount refuses lookups; and the same block written
+eight times gives eight different ciphertexts, which is what a repeated
+nonce would break), and `test_chacha20` against RFC 8439.
