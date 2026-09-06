@@ -41,6 +41,7 @@ pid_t getppid(void) { return (pid_t)cosmo_getppid(); }
 int chdir(const char *path) { return (int)__syscall_ret(cosmo_chdir(path)); }
 int dup(int fd) { return (int)__syscall_ret(cosmo_dup(fd, -1)); }
 int dup2(int fd, int newfd) { return (int)__syscall_ret(cosmo_dup(fd, newfd)); }
+int dup_rights(int fd, int newfd, unsigned rights) { return (int)__syscall_ret(cosmo_dup_rights(fd, newfd, rights)); }
 int pipe(int fd[2]) { return (int)__syscall_ret(cosmo_pipe(fd)); }
 
 /* Credentials (uid_t is unsigned; -1 as an argument means "keep"). */

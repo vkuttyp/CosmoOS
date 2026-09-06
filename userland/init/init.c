@@ -383,7 +383,7 @@ static void proc_selftest(void)
 
     /* spawn: a child's output through a pipe, its status through wait. */
     CHECK(pipe(p) == 0);
-    struct spawn_handle map[] = { { 1, p[1] }, { 2, 2 } };
+    struct spawn_handle map[] = { { .child = 1, .parent = p[1] }, { .child = 2, .parent = 2 } };
     const char *echo_argv[] = { "echo", "spawned", "child", NULL };
     pid_t pid = spawnvp("echo", echo_argv, map, 2);
     CHECK(pid > 1);
@@ -411,7 +411,8 @@ static void proc_selftest(void)
 
     /* Kill: a child blocked on a pipe read dies with 128 + SIGKILL. */
     CHECK(pipe(p) == 0);
-    struct spawn_handle in_map[] = { { 0, p[0] }, { 1, 1 }, { 2, 2 } };
+    struct spawn_handle in_map[] = { { .child = 0, .parent = p[0] }, { .child = 1, .parent = 1 },
+                                     { .child = 2, .parent = 2 } };
     const char *cat_argv[] = { "cat", NULL };
     pid = spawnvp("cat", cat_argv, in_map, 3);
     CHECK(pid > 1);
@@ -425,14 +426,63 @@ static void proc_selftest(void)
 
     /* Hostile spawn requests. */
     const char *true_argv[] = { "true", NULL };
-    struct spawn_handle bad_parent[] = { { 0, 63 } };
+    struct spawn_handle bad_parent[] = { { .child = 0, .parent = 63 } };
     CHECK(spawnve("/bin/true", true_argv, NULL, bad_parent, 1) < 0 && errno == EBADF);
-    struct spawn_handle dup_child[] = { { 0, 0 }, { 0, 1 } };
+    struct spawn_handle dup_child[] = { { .child = 0, .parent = 0 }, { .child = 0, .parent = 1 } };
     CHECK(spawnve("/bin/true", true_argv, NULL, dup_child, 2) < 0 && errno == EINVAL);
     CHECK(spawnve("/etc/rc", true_argv, NULL, NULL, 0) < 0 && errno == EACCES);   /* not executable */
     CHECK(spawnve("/bin", true_argv, NULL, NULL, 0) < 0 && errno == EACCES);      /* a directory */
     CHECK(spawnve("/bin/nothere", true_argv, NULL, NULL, 0) < 0 && errno == ENOENT);
     CHECK(spawnvp("nothere", true_argv, NULL, 0) < 0 && errno == ENOENT);
+
+    /* Handle rights: a handle says what may be done with it, and what it
+     * says only ever shrinks (docs/kernel/object/architecture.md). */
+    int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK(rw >= 0);
+    CHECK(write(rw, "abc", 3) == 3);
+
+    /* A copy with only READ can be read and not written, and cannot get
+     * back what it gave up. Writing through it is EBADF, not EPERM:
+     * POSIX says that of a descriptor that is not open for writing, and
+     * the capability layer does not change what read and write answer.
+     * EPERM is for the operations POSIX has no opinion about. */
+    int ro = dup_rights(rw, -1, COSMO_RIGHT_READ);
+    CHECK(ro >= 0);
+    CHECK(write(ro, "x", 1) < 0 && errno == EBADF);
+    CHECK(lseek(ro, 0, SEEK_SET) == 0);
+    char rb[4] = { 0 };
+    CHECK(read(ro, rb, 3) == 3 && rb[0] == 'a');
+    CHECK(dup_rights(ro, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE) < 0 && errno == EPERM);
+    /* It has no DUP either, so it cannot even be copied as it is. */
+    CHECK(dup(ro) < 0 && errno == EPERM);
+    /* And no TRANSFER, so it cannot be handed to a child. */
+    struct spawn_handle no_transfer[] = { { .child = 3, .parent = ro } };
+    CHECK(spawnve("/bin/true", true_argv, NULL, no_transfer, 1) < 0 && errno == EPERM);
+    /* Nor administered: making it non-blocking is a MANAGE operation. */
+    CHECK(cosmo_setnonblock(ro, 1) == -EPERM);
+
+    /* A copy that keeps DUP and TRANSFER but drops WRITE is still useful:
+     * that is the point of being able to hand over less. */
+    int share = dup_rights(rw, -1, COSMO_RIGHT_READ | COSMO_RIGHT_DUP | COSMO_RIGHT_TRANSFER);
+    CHECK(share >= 0);
+    CHECK(write(share, "x", 1) < 0 && errno == EBADF);
+    int share2 = dup(share);
+    CHECK(share2 >= 0);
+    CHECK(write(share2, "x", 1) < 0 && errno == EBADF);   /* the copy of a copy is no wider */
+    struct spawn_handle give[] = { { .child = 3, .parent = share } };
+    pid_t gp = spawnve("/bin/true", true_argv, NULL, give, 1);
+    CHECK(gp > 0);
+    int gst = 0;
+    CHECK(waitpid(gp, &gst, 0) == gp);
+
+    /* The original is untouched by any of it. */
+    CHECK(lseek(rw, 0, SEEK_SET) == 0);
+    CHECK(write(rw, "zzz", 3) == 3);
+    close(share2);
+    close(share);
+    close(ro);
+    close(rw);
+    CHECK(unlink("/tmp/rights.txt") == 0);
     const char *no_argv[] = { NULL };
     CHECK(spawnve("/bin/true", no_argv, NULL, NULL, 0) < 0 && errno == EINVAL);
     CHECK(waitpid(-1, &status, 0) < 0 && errno == ECHILD);
@@ -937,7 +987,8 @@ static void priv_selftest(void)
     /* A socket created by root, handed to the child as handle 3. */
     int rootsock = socket(AF_INET, SOCK_STREAM, 0);
     CHECK(rootsock >= 0);
-    struct spawn_handle map[] = { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, rootsock } };
+    struct spawn_handle map[] = { { .child = 0, .parent = 0 }, { .child = 1, .parent = 1 },
+                                  { .child = 2, .parent = 2 }, { .child = 3, .parent = rootsock } };
     const char *argv[] = { "init", "--unpriv-test", NULL };
     pid_t pid = spawnve("/boot/init", argv, NULL, map, 4);
     CHECK(pid > 0);

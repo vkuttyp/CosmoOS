@@ -20,6 +20,10 @@ int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 int dup(int fd);
 int dup2(int fd, int newfd);
+/* dup with fewer rights than the original: `rights` is a subset of
+ * COSMO_RIGHT_* that the caller already holds (0 keeps them all).
+ * EPERM when it asks for anything the original does not carry. */
+int dup_rights(int fd, int newfd, unsigned rights);
 int pipe(int fd[2]);
 int isatty(int fd);
 unsigned sleep(unsigned seconds);

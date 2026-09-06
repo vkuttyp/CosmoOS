@@ -63,7 +63,7 @@ kernel stack.
 | 33 | `wait` | `int pid, int *status, unsigned flags` | the reaped pid; 0 with `COSMO_WNOHANG` when none exited | `EINVAL` (pid 0 or < -1, unknown flag), `ECHILD`, `EINTR`, `EFAULT` |
 | 34 | `kill` | `int pid, int sig` | 0 | `EINVAL` (sig outside 1..31, pid <= 0), `ESRCH`, `EPERM` |
 | 35 | `pipe` | `int h[2]` | 0; `h[0]` reads, `h[1]` writes | `EFAULT`, `ENOMEM`, `EMFILE` |
-| 36 | `dup` | `int h, int target` | the new handle | `EBADF`, `EINVAL` (target < -1 or >= 64), `EMFILE` |
+| 36 | `dup` | `int h, int target, unsigned rights` | the new handle | `EBADF`, `EINVAL` (target < -1 or >= 64), `EMFILE`, `EPERM` (no DUP right, or `rights` asks for more than `h` holds) |
 | 37 | `getppid` | none | the parent's pid, 0 for a kernel-created process | none |
 | 38 | `chdir` | `const char *path` | 0 | `EFAULT`, `ENAMETOOLONG`, path errors, `ENOTDIR` |
 | 39 | `getcwd` | `char *buf, size_t len` | the path length (the NUL is written too) | `ERANGE`, `EFAULT` |
@@ -190,9 +190,14 @@ Details per call:
   `SIGTRAP` 133, `SIGSEGV` 139), not 139 for all.
 - **pipe**: two new handles in the lowest free slots, READ on `h[0]`,
   WRITE on `h[1]`; `docs/kernel/ipc/api.md` for the stream's rules.
-- **dup**: `target == -1` takes the lowest free slot; otherwise `target`
+- **dup**: needs the `DUP` right. `rights` is `COSMO_RIGHTS_SAME` (zero)
+  to keep what the caller holds, or a subset of it to hand over less;
+  asking for anything the original does not carry is `EPERM`. Rights
+  only ever shrink, so a process can pass a read-only view of something
+  it can write and cannot get it back. `target == -1` takes the lowest
+  free slot; otherwise `target`
   (0..63) is closed first if occupied and the copy installed there;
-  `dup(h, h)` returns `h`. Rights are copied.
+  `dup(h, h)` returns `h`.
 - **chdir**/**getcwd**: the working directory is a vnode reference plus
   a normalised absolute path (`.`, `..` and repeated slashes resolved);
   `getcwd` needs `len` at least the path length plus one (`ERANGE`).

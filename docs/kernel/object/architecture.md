@@ -31,10 +31,47 @@ pointer (constitution section 11).
 - `struct handle_table`: fixed 64 slots, spinlock, install/lookup/close,
   `handle_get` (object plus rights, for `dup` and `spawn`), destroy when
   the process's last thread is gone.
-- Rights: READ and WRITE now; the set grows with the object kinds.
-  Since Phase 9 handles cross process boundaries: `spawn` copies chosen
-  handles with their rights into the child (a capability-style map), and
-  `dup` copies within a process.
+- Rights: a capability vocabulary carried by the handle, not by the
+  object (see "Rights" below). Since Phase 9 handles cross process
+  boundaries: `spawn` copies chosen handles into the child (a
+  capability-style map), and `dup` copies within a process; both are now
+  gated by rights and both can hand over *less* than they hold.
+
+## Rights
+
+A handle is a capability: what a process may do with an object is what
+its handle says, not what the object is or who the process runs as. The
+constitution's aim for section 54 is that privileged operations stop
+depending on being uid 0, and that begins with a vocabulary wide enough
+to say something other than "read" and "write".
+
+```text
+  bits 0..15   generic, meaning the same for every object kind
+    READ       take data out of it
+    WRITE      put data into it
+    DUP        make another handle to it, in this process
+    TRANSFER   give a handle to it to another process
+    MANAGE     change how it behaves, as opposed to using it
+  bits 16..31  per type, meaning whatever that object kind says
+```
+
+Three rules make the vocabulary worth having:
+
+- **Rights only ever shrink.** `dup` and `spawn` may hand over a subset
+  of what the caller holds and nothing more, so a process can pass a
+  read-only view of something it can write, and cannot recover what it
+  gave up. There is no operation that adds a right to an existing
+  handle.
+- **Holding a handle is not permission to pass it on.** DUP and TRANSFER
+  are separate rights and separate from READ and WRITE, because "you may
+  read this" and "you may give this to anyone" are different statements.
+- **Using an object and administering it are different.** MANAGE covers
+  the operations that change an object's behaviour rather than its
+  contents -- making it non-blocking today, and whatever each type
+  decides its upper sixteen bits mean.
+
+A creator gets every right its type defines: reducing rights is
+something a process does deliberately, on the way to somebody else.
 
 ## Non-responsibilities
 

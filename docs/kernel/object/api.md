@@ -139,8 +139,21 @@ Acquire load; for tests and diagnostics only.
 
 `struct handle_table`: spinlock, `HANDLE_TABLE_SIZE` (64) entries of
 `{ struct kobject *obj; unsigned rights; }` with `NULL` meaning free,
-and a live count. Embedded in `struct process`. Rights:
-`HANDLE_RIGHT_READ` (1), `HANDLE_RIGHT_WRITE` (2), `HANDLE_RIGHT_ALL`.
+and a live count. Embedded in `struct process`.
+
+Rights (docs/kernel/object/architecture.md, "Rights"):
+`HANDLE_RIGHT_READ` (1), `WRITE` (2), `DUP` (4), `TRANSFER` (8),
+`MANAGE` (16) in bits 0..15; bits 16..31 belong to the object's type.
+`HANDLE_RIGHT_OWNER` is DUP|TRANSFER|MANAGE — what creating an object
+grants on top of the access rights that suit it — and
+`HANDLE_RIGHT_ALL` is the whole generic vocabulary. Rights only ever
+shrink: `dup` and the `spawn` map may hand over a subset, and nothing
+adds a right to a handle that exists.
+
+A table also has an **exiting** flag, raised before its slots are
+emptied. After that every lookup, get and install fails, so a thread
+still inside a syscall cannot be handed a reference the exit is
+releasing, or put one back for nobody to close.
 
 Common properties: the spinlock is taken `irqsave`, so every function
 is safe with interrupts disabled; none allocates; only
@@ -171,10 +184,21 @@ Zero the slots, count 0, initialise the lock. Once, before any use.
 ### `struct kobject *handle_lookup(struct handle_table *t, int h, unsigned rights_needed)`
 - Purpose: translate a handle to a referenced object.
 - Outputs: the object with one new reference, or NULL when `h` is out
-  of range, free, or lacks any bit of `rights_needed`. The caller must
-  `kobject_put` when done; the reference keeps the object valid even if
-  the slot is closed concurrently.
+  of range, free, the table is exiting, or the slot lacks any bit of
+  `rights_needed`. The caller must `kobject_put` when done; the
+  reference keeps the object valid even if the slot is closed
+  concurrently.
 - Concurrency: non-blocking, interrupt-safe.
+
+### `struct kobject *handle_lookup_rights(..., bool *missing_rights)`
+- Purpose: the same, for a caller that wants to tell "no such handle"
+  from "not through this handle". `*missing_rights` is set when the
+  slot holds an object and does not carry what was asked for.
+- Use: the capability operations answer `-EPERM` for that case — `dup`
+  without DUP, the `spawn` map without TRANSFER, `setnonblock` without
+  MANAGE. `read` and `write` deliberately do **not**: POSIX says
+  `EBADF` of a descriptor that is not open for that direction, and the
+  rights layer does not change what they answer.
 
 ### `int handle_close(struct handle_table *t, int h)`
 - Purpose: free the slot and drop the table's reference.
