@@ -13,6 +13,7 @@
 #include <kernel/hv.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
+#include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -149,6 +150,40 @@ bool selftest_hv_probe(const char **reason)
     CHECK(strcmp(c->name, "svm") == 0 || strcmp(c->name, "vmx") == 0);
     CHECK(c->nested_paging);
     CHECK(c->max_asids >= 2);
+    /* A backend that cannot run the architectural reset state has no
+     * business creating vCPUs with it (nothing here reports that today;
+     * VMX without unrestricted guest would). */
+    CHECK(c->real_mode_guest);
+    return true;
+}
+
+/* The capabilities a backend reports are the ones it honours. */
+bool selftest_hv_caps(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    const struct hv_caps *c = hv_caps();
+    struct vm *vm;
+    CHECK(vm_create(0, HV_VM_MEM_MAX, &vm) == 0);
+
+    /* Guest memory is mapped RWX; the mapping call refuses a prot the
+     * interface does not define, and 0. */
+    CHECK(arch_hv_vm_map(vm->arch, 0x10000000ull, 0x1000, PAGE_SIZE, 0) == -EINVAL);
+    CHECK(arch_hv_vm_map(vm->arch, 0x10000000ull, 0x1000, PAGE_SIZE, 0x10u) == -EINVAL);
+    if (c->map_prot) {
+        /* A read-only mapping is accepted and readable back. */
+        struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
+        CHECK(pg != NULL);
+        paddr_t pa = page_to_phys(pg), got = 0;
+        CHECK(arch_hv_vm_map(vm->arch, 0x10000000ull, pa, PAGE_SIZE, HV_MAP_READ) == 0);
+        CHECK(arch_hv_vm_query(vm->arch, 0x10000000ull, &got) && got == pa);
+        CHECK(arch_hv_vm_unmap(vm->arch, 0x10000000ull, PAGE_SIZE) == 0);
+        CHECK(!arch_hv_vm_query(vm->arch, 0x10000000ull, &got));
+        pmm_free_page(pg);
+    }
+    kobject_put(&vm->obj);
+    kinfo("selftest: hv-caps: %s%s%s%s, %u asids", c->name, c->nested_paging ? " npt" : "",
+          c->real_mode_guest ? " realmode" : "", c->large_pages ? " largepages" : "", c->max_asids);
     return true;
 }
 
@@ -297,8 +332,8 @@ bool selftest_hv_guest_pm(const char **reason)
     struct cosmo_vcpu_regs regs;
     CHECK(vcpu_get_regs(v, &regs) == 0);
     regs.cr0 = 0x11;                                    /* PE | ET */
-    regs.cs.selector = 0x8;  regs.cs.attrib = 0xC9B; regs.cs.limit = 0xFFFFFFFF; regs.cs.base = 0;
-    regs.ds.selector = 0x10; regs.ds.attrib = 0xC93; regs.ds.limit = 0xFFFFFFFF; regs.ds.base = 0;
+    regs.cs.selector = 0x8;  regs.cs.attrib = 0xC09B; regs.cs.limit = 0xFFFFFFFF; regs.cs.base = 0;
+    regs.ds.selector = 0x10; regs.ds.attrib = 0xC093; regs.ds.limit = 0xFFFFFFFF; regs.ds.base = 0;
     regs.es = regs.ss = regs.fs = regs.gs = regs.ds;
     regs.rsp = 0x8000;
     CHECK(vcpu_set_regs(v, &regs) == 0);

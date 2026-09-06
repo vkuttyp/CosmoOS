@@ -23,6 +23,8 @@
 
 #include <x86/cpu.h>
 #include <x86/fpu.h>
+#include <x86/hvops.h>
+#include <x86/hvseg.h>
 #include <x86/svm.h>
 
 #define SVM_ASIDS_MAX 64u
@@ -39,8 +41,8 @@
 #define CR0_CD (1ull << 30)
 #endif
 #define EFER_KNOWN (EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE | EFER_SVME | (1ull << 13) | (1ull << 14) | (1ull << 15))
-#define SEG_ATTR_L  (1u << 13)
-#define SEG_ATTR_DB (1u << 14)
+/* Segment attributes cross the interface in the neutral descriptor
+ * layout (uapi COSMO_SEG_*); x86/hvseg.h packs and unpacks the VMCB's. */
 
 struct arch_hv_vm {
     paddr_t ncr3;
@@ -63,6 +65,30 @@ struct arch_hv_vcpu {
 #define CR4_OSXSAVE_ (1ull << 18)
 
 static void skip_instruction(struct arch_hv_vcpu *v, uint64_t next_rip);
+static int svm_be_probe(struct hv_caps *out);
+static int svm_be_vm_create(struct arch_hv_vm **out);
+static void svm_be_vm_destroy(struct arch_hv_vm *vm);
+static int svm_be_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
+static int svm_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
+static bool svm_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
+static int svm_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out);
+static void svm_be_vcpu_destroy(struct arch_hv_vcpu *v);
+static bool svm_be_vcpu_xstate_enabled(struct arch_hv_vcpu *v);
+static void svm_be_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o);
+static int svm_be_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *i);
+static uint64_t svm_be_vcpu_guest_efer(struct arch_hv_vcpu *v);
+static int svm_be_vcpu_set_guest_efer(struct arch_hv_vcpu *v, uint64_t efer);
+static int svm_be_vcpu_msr(struct arch_hv_vcpu *v, uint32_t index, bool write, uint64_t *value);
+static uint64_t svm_be_vcpu_read_gpr(struct arch_hv_vcpu *v, unsigned index);
+static void svm_be_vcpu_write_gpr(struct arch_hv_vcpu *v, unsigned index, uint64_t value);
+static void svm_be_vcpu_advance_rip(struct arch_hv_vcpu *v, unsigned bytes);
+static void svm_be_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip);
+static uint64_t svm_be_vcpu_rip(struct arch_hv_vcpu *v);
+static void svm_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size);
+static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
+static bool svm_be_vcpu_irq_taken(struct arch_hv_vcpu *v);
+static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
+static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 
 struct svm_cpu {
     bool enabled;
@@ -87,7 +113,7 @@ static paddr_t alloc_pages_filled(unsigned order, size_t bytes, int fill)
     return page_to_phys(pg);
 }
 
-int arch_hv_probe(struct hv_caps *out)
+static int svm_be_probe(struct hv_caps *out)
 {
     struct cpuid_regs r;
     cpuid(0x80000000u, 0, &r);
@@ -122,6 +148,10 @@ int arch_hv_probe(struct hv_caps *out)
     g_caps.name = "svm";
     g_caps.max_asids = nasid < SVM_ASIDS_MAX ? nasid : SVM_ASIDS_MAX;
     g_caps.nested_paging = true;
+    g_caps.real_mode_guest = true;   /* SVM runs the reset state as it is */
+    g_caps.map_prot = true;
+    g_caps.large_pages = true;
+    g_caps.max_vcpus = 0;            /* no backend limit below the manager's */
     kinfo("svm: AMD-V with nested paging, %u ASIDs usable%s%s", g_caps.max_asids - 1,
           (r.edx & CPUID_SVM_EDX_NRIP) ? ", nrip" : "", (r.edx & CPUID_SVM_EDX_DECODE) ? ", decode-assists" : "");
     *out = g_caps;
@@ -175,7 +205,7 @@ static void asid_free(uint32_t asid)
     spin_unlock_irqrestore(&g_asid_lock, s);
 }
 
-int arch_hv_vm_create(struct arch_hv_vm **out)
+static int svm_be_vm_create(struct arch_hv_vm **out)
 {
     if (!g_caps.present)
         return -ENOTSUP;
@@ -197,7 +227,7 @@ int arch_hv_vm_create(struct arch_hv_vm **out)
     return 0;
 }
 
-void arch_hv_vm_destroy(struct arch_hv_vm *vm)
+static void svm_be_vm_destroy(struct arch_hv_vm *vm)
 {
     if (vm == NULL)
         return;
@@ -206,17 +236,17 @@ void arch_hv_vm_destroy(struct arch_hv_vm *vm)
     kfree(vm);
 }
 
-int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len)
+static int svm_be_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
 {
-    return npt_map(vm->ncr3, gpa, hpa, len);
+    return npt_map(vm->ncr3, gpa, hpa, len, prot);
 }
 
-int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
+static int svm_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
 {
     return npt_unmap(vm->ncr3, gpa, len);
 }
 
-bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
+static bool svm_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
 {
     return npt_query(vm->ncr3, gpa, hpa);
 }
@@ -279,7 +309,7 @@ static void vmcb_reset(struct arch_hv_vcpu *v)
     memcpy(v->fpu, x86_fpu_reset_image(), x86_fpu_info()->area_size);
 }
 
-int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
+static int svm_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
 {
     if (!g_caps.present)
         return -ENOTSUP;
@@ -304,7 +334,7 @@ int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
     return 0;
 }
 
-void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v)
+static void svm_be_vcpu_destroy(struct arch_hv_vcpu *v)
 {
     if (v == NULL)
         return;
@@ -313,13 +343,7 @@ void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v)
     kfree(v);
 }
 
-uint64_t arch_hv_host_xstate(void)
-{
-    const struct x86_fpu_info *fi = x86_fpu_info();
-    return fi->xsave ? fi->xcr0 : 0;
-}
-
-bool arch_hv_vcpu_xstate_enabled(struct arch_hv_vcpu *v)
+static bool svm_be_vcpu_xstate_enabled(struct arch_hv_vcpu *v)
 {
     return (v->vmcb->save.cr4 & CR4_OSXSAVE_) != 0;
 }
@@ -345,12 +369,12 @@ static void emulate_xsetbv(struct arch_hv_vcpu *v)
     const struct x86_fpu_info *fi = x86_fpu_info();
     struct vmcb *b = v->vmcb;
     if (!fi->xsave || !(b->save.cr4 & CR4_OSXSAVE_)) {
-        arch_hv_vcpu_inject_exception(v, 6, false, 0);              /* #UD: no XSAVE for this guest */
+        svm_be_vcpu_inject_exception(v, 6, false, 0);              /* #UD: no XSAVE for this guest */
         return;
     }
     uint64_t value = (v->gprs.rdx << 32) | (b->save.rax & 0xFFFFFFFFull);
     if (b->save.cpl != 0 || (uint32_t)v->gprs.rcx != 0 || !xcr0_acceptable(value, fi->xcr0)) {
-        arch_hv_vcpu_inject_exception(v, 13, true, 0);              /* #GP(0) */
+        svm_be_vcpu_inject_exception(v, 13, true, 0);              /* #GP(0) */
         return;
     }
     v->guest_xcr0 = value;
@@ -360,7 +384,7 @@ static void emulate_xsetbv(struct arch_hv_vcpu *v)
 static void seg_out(struct cosmo_vcpu_seg *o, const struct svm_seg *s)
 {
     o->selector = s->selector;
-    o->attrib = s->attrib;
+    o->attrib = hv_seg_from_svm(s->attrib, s->selector);
     o->limit = s->limit;
     o->base = s->base;
 }
@@ -368,12 +392,12 @@ static void seg_out(struct cosmo_vcpu_seg *o, const struct svm_seg *s)
 static void seg_in(struct svm_seg *s, const struct cosmo_vcpu_seg *i)
 {
     s->selector = i->selector;
-    s->attrib = i->attrib;
+    s->attrib = hv_seg_to_svm(i->attrib);
     s->limit = i->limit;
     s->base = i->base;
 }
 
-void arch_hv_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o)
+static void svm_be_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o)
 {
     const struct vmcb_save *s = &v->vmcb->save;
     const struct svm_gprs *g = &v->gprs;
@@ -407,14 +431,20 @@ static int check_state(const struct cosmo_vcpu_regs *i)
         return -EINVAL;             /* the guest may not become a hypervisor */
     if ((i->efer & EFER_LME) && (i->cr0 & CR0_PG) && !(i->cr4 & CR4_PAE))
         return -EINVAL;
-    if ((i->efer & EFER_LME) && (i->cr0 & CR0_PG) && (i->cs.attrib & SEG_ATTR_L) && (i->cs.attrib & SEG_ATTR_DB))
+    /* Neutral attributes: reserved bits clear, and a 64-bit code segment
+     * may not also be a 32-bit one (the check the packing used to hide). */
+    const struct cosmo_vcpu_seg *segs[] = { &i->cs, &i->ds, &i->es, &i->fs, &i->gs, &i->ss, &i->ldtr, &i->tr };
+    for (unsigned k = 0; k < sizeof(segs) / sizeof(segs[0]); k++)
+        if (!hv_seg_attrib_valid(segs[k]->attrib))
+            return -EINVAL;
+    if ((i->efer & EFER_LME) && (i->cr0 & CR0_PG) && (i->cs.attrib & COSMO_SEG_L) && (i->cs.attrib & COSMO_SEG_DB))
         return -EINVAL;
     if ((i->dr6 >> 32) || (i->dr7 >> 32))
         return -EINVAL;
     return 0;
 }
 
-int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *i)
+static int svm_be_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *i)
 {
     int rc = check_state(i);
     if (rc)
@@ -434,7 +464,7 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
     s->cr0 = i->cr0; s->cr2 = i->cr2; s->cr3 = i->cr3; s->cr4 = i->cr4;
     v->vmcb->control.v_tpr = (uint8_t)(i->cr8 & 0xF);
     s->dr6 = i->dr6; s->dr7 = i->dr7;
-    s->cpl = (i->cr0 & CR0_PE) ? (uint8_t)(i->ss.attrib >> 5 & 3) : 0;
+    s->cpl = (i->cr0 & CR0_PE) ? (uint8_t)((i->ss.attrib & COSMO_SEG_DPL) >> COSMO_SEG_DPL_SHIFT) : 0;
     uint64_t efer = i->efer & ~EFER_SVME & ~EFER_LMA;
     if ((efer & EFER_LME) && (i->cr0 & CR0_PG))
         efer |= EFER_LMA;
@@ -443,12 +473,12 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
     return 0;
 }
 
-uint64_t arch_hv_vcpu_guest_efer(struct arch_hv_vcpu *v)
+static uint64_t svm_be_vcpu_guest_efer(struct arch_hv_vcpu *v)
 {
     return v->guest_efer;
 }
 
-int arch_hv_vcpu_set_guest_efer(struct arch_hv_vcpu *v, uint64_t efer)
+static int svm_be_vcpu_set_guest_efer(struct arch_hv_vcpu *v, uint64_t efer)
 {
     if (efer & ~EFER_KNOWN)
         return -EINVAL;
@@ -462,7 +492,7 @@ int arch_hv_vcpu_set_guest_efer(struct arch_hv_vcpu *v, uint64_t efer)
     return 0;
 }
 
-int arch_hv_vcpu_msr(struct arch_hv_vcpu *v, uint32_t index, bool write, uint64_t *value)
+static int svm_be_vcpu_msr(struct arch_hv_vcpu *v, uint32_t index, bool write, uint64_t *value)
 {
     struct vmcb_save *s = &v->vmcb->save;
     uint64_t *slot;
@@ -511,12 +541,12 @@ static uint64_t *gpr_slot(struct arch_hv_vcpu *v, unsigned index)
     }
 }
 
-uint64_t arch_hv_vcpu_read_gpr(struct arch_hv_vcpu *v, unsigned index)
+static uint64_t svm_be_vcpu_read_gpr(struct arch_hv_vcpu *v, unsigned index)
 {
     return *gpr_slot(v, index);
 }
 
-void arch_hv_vcpu_write_gpr(struct arch_hv_vcpu *v, unsigned index, uint64_t value)
+static void svm_be_vcpu_write_gpr(struct arch_hv_vcpu *v, unsigned index, uint64_t value)
 {
     *gpr_slot(v, index) = value;
 }
@@ -531,39 +561,22 @@ static void skip_instruction(struct arch_hv_vcpu *v, uint64_t next_rip)
     v->vmcb->control.interrupt_shadow = 0;
 }
 
-void arch_hv_vcpu_advance_rip(struct arch_hv_vcpu *v, unsigned bytes)
+static void svm_be_vcpu_advance_rip(struct arch_hv_vcpu *v, unsigned bytes)
 {
     skip_instruction(v, v->vmcb->save.rip + bytes);
 }
 
-void arch_hv_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip)
+static void svm_be_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip)
 {
     skip_instruction(v, rip);
 }
 
-uint64_t arch_hv_vcpu_rip(struct arch_hv_vcpu *v)
+static uint64_t svm_be_vcpu_rip(struct arch_hv_vcpu *v)
 {
     return v->vmcb->save.rip;
 }
 
-void arch_hv_host_cpuid(uint32_t leaf, uint32_t subleaf, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx)
-{
-    struct cpuid_regs r;
-    cpuid(leaf, subleaf, &r);
-    *eax = r.eax;
-    *ebx = r.ebx;
-    *ecx = r.ecx;
-    *edx = r.edx;
-}
-
-uint64_t arch_hv_host_tsc(void)
-{
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
-void arch_hv_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size)
+static void svm_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size)
 {
     uint64_t *rax = &v->vmcb->save.rax;
     switch (size) {
@@ -573,7 +586,7 @@ void arch_hv_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned siz
     }
 }
 
-void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
+static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
     struct vmcb_control *c = &v->vmcb->control;
     if (vector < 0) {
@@ -587,12 +600,12 @@ void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
     v->offered = vector;
 }
 
-bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v)
+static bool svm_be_vcpu_irq_taken(struct arch_hv_vcpu *v)
 {
     return v->offered >= 0 && (v->vmcb->control.v_irq & 1) == 0;
 }
 
-void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
+static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {
     uint64_t e = vector | SVM_EVTINJ_TYPE_EXCP | SVM_EVTINJ_VALID;
     if (has_error)
@@ -602,7 +615,7 @@ void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool 
 
 /* --- run and decode --- */
 
-int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
+static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     struct vmcb *b = v->vmcb;
     const struct x86_fpu_info *fi = x86_fpu_info();
@@ -644,14 +657,14 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         out->kind = HV_EXIT_INTR;
         return 0;
     case SVM_EXIT_HLT:
-        arch_hv_vcpu_advance_rip(v, 1);
+        svm_be_vcpu_advance_rip(v, 1);
         out->kind = HV_EXIT_HLT;
         return 0;
     case SVM_EXIT_CPUID:
         out->kind = HV_EXIT_CPUID;
         return 0;
     case SVM_EXIT_INVD:
-        arch_hv_vcpu_advance_rip(v, 2);                 /* treated as a no-op (caches are coherent for the guest) */
+        svm_be_vcpu_advance_rip(v, 2);                 /* treated as a no-op (caches are coherent for the guest) */
         out->kind = HV_EXIT_INTR;
         return 0;
     case SVM_EXIT_IOIO: {
@@ -671,7 +684,7 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         out->msr.write = (b->control.exitinfo1 & 1) != 0;
         return 0;
     case SVM_EXIT_VMMCALL:
-        arch_hv_vcpu_advance_rip(v, 3);
+        svm_be_vcpu_advance_rip(v, 3);
         out->kind = HV_EXIT_HYPERCALL;
         return 0;
     case SVM_EXIT_NPF:
@@ -697,7 +710,7 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     case SVM_EXIT_MWAIT:
     case SVM_EXIT_MWAIT_COND:
         /* The guest is not a hypervisor and has no MONITOR: #UD, like a CPU without them. */
-        arch_hv_vcpu_inject_exception(v, 6, false, 0);
+        svm_be_vcpu_inject_exception(v, 6, false, 0);
         out->kind = HV_EXIT_INTR;
         return 0;
     default:
@@ -712,3 +725,32 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         return 0;
     }
 }
+
+/* The backend table (x86/hvops.h): kernel/arch/x86_64/hv.c forwards to
+ * whichever backend the CPU turned out to have. */
+const struct hv_backend svm_backend = {
+    .probe = svm_be_probe,
+    .vm_create = svm_be_vm_create,
+    .vm_destroy = svm_be_vm_destroy,
+    .vm_map = svm_be_vm_map,
+    .vm_unmap = svm_be_vm_unmap,
+    .vm_query = svm_be_vm_query,
+    .vcpu_create = svm_be_vcpu_create,
+    .vcpu_destroy = svm_be_vcpu_destroy,
+    .vcpu_get_state = svm_be_vcpu_get_state,
+    .vcpu_set_state = svm_be_vcpu_set_state,
+    .vcpu_run = svm_be_vcpu_run,
+    .vcpu_set_irq = svm_be_vcpu_set_irq,
+    .vcpu_irq_taken = svm_be_vcpu_irq_taken,
+    .vcpu_inject_exception = svm_be_vcpu_inject_exception,
+    .vcpu_advance_rip = svm_be_vcpu_advance_rip,
+    .vcpu_set_rip = svm_be_vcpu_set_rip,
+    .vcpu_rip = svm_be_vcpu_rip,
+    .vcpu_guest_efer = svm_be_vcpu_guest_efer,
+    .vcpu_set_guest_efer = svm_be_vcpu_set_guest_efer,
+    .vcpu_msr = svm_be_vcpu_msr,
+    .vcpu_xstate_enabled = svm_be_vcpu_xstate_enabled,
+    .vcpu_write_rax = svm_be_vcpu_write_rax,
+    .vcpu_read_gpr = svm_be_vcpu_read_gpr,
+    .vcpu_write_gpr = svm_be_vcpu_write_gpr,
+};
