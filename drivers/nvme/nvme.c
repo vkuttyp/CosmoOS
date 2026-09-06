@@ -602,10 +602,20 @@ static void nvme_release(struct blkdev *bd)
     kfree(ns);
 }
 
+/* Test hook: Identify Controller into `addr`. With `addr` unmapped in the
+ * device's IOMMU domain the unit refuses the write; QEMU's controller does
+ * not notice and completes the command anyway. Either way it stays usable. */
+static int nvme_debug_dma(struct blkdev *bd, uint64_t addr)
+{
+    struct nvme_ns *ns = bd->priv;
+    return identify(ns->ctrl, 1, 0, NULL, addr);
+}
+
 static const struct blkdev_ops nvme_ops = {
     .submit = nvme_submit,
     .release = nvme_release,
     .timeout = nvme_timeout,
+    .debug_dma = nvme_debug_dma,
 };
 
 /* --- probe ---------------------------------------------------------------------- */
