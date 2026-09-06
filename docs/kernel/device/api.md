@@ -148,9 +148,11 @@ recorded.
 ### `void dma_unmap(struct device *, dma_addr_t, size_t, enum dma_dir)` *(exported)*
 Undo a `dma_map`: with an IOMMU domain the pages are unmapped, the
 IOTLB invalidated and the addresses returned to the domain's
-allocator (an unconfirmed invalidation is logged at `ERROR` and the
-addresses retired; the buffer is the caller's and cannot be held back,
-which is why the log line names it); without one there is nothing to tear down, but every map
+allocator. An unconfirmed invalidation **panics**: the buffer is the
+caller's and returns to `kmalloc` or the page cache the moment this
+call does, so there is nothing to withhold and nobody to warn, and a
+device that can still reach it would corrupt whatever gets that memory
+next (`docs/kernel/iommu/invariants.md` IOM6); without one there is nothing to tear down, but every map
 must have its unmap (`invariants.md` D5) and the call counts `unmaps`.
 `dma` must be a value `dma_map` returned (non-zero, asserted). Any
 context.

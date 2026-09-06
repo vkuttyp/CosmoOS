@@ -139,8 +139,16 @@ void dma_unmap(struct device *dev, dma_addr_t dma, size_t len, enum dma_dir dir)
 {
     (void)dir;
     KASSERT(dma != 0);
-    if (dev && dev->iommu && iommu_dma_unmap(dev->iommu, dma, len) != 0)
-        kerror("dma: %s: buffer at %p still reachable by the device", dev->name, (void *)(uintptr_t)dma);
+    if (dev && dev->iommu && iommu_dma_unmap(dev->iommu, dma, len) != 0) {
+        /* The buffer is the caller's: it goes back to kmalloc or to a
+         * page cache the moment this returns, and the device still holds
+         * a translation to it that the unit would not drop. There is
+         * nothing left to withhold and no way to warn the next owner, so
+         * this is where the kernel stops rather than let a device write
+         * into memory that has been handed to something else. */
+        panic("dma: %s: the IOMMU did not revoke %p; the device can still reach reused memory", dev->name,
+              (void *)(uintptr_t)dma);
+    }
     arch_irq_state_t s = spin_lock_irqsave(&g_stats_lock);
     g_stats.unmaps++;   /* without a domain there is nothing to tear down; the pairing is the contract */
     spin_unlock_irqrestore(&g_stats_lock, s);

@@ -81,10 +81,15 @@ never clears its pending bit, an SMMU command queue that stays full or
 a `CMD_SYNC` that never drains — the operation returns `-EIO` and
 nothing is recycled: the IOVAs are retired for the life of the domain
 (`iommu_stats.retired`), `dma_free` leaks the frames instead of
-returning them to the PMM (`dma_stats.leaked`), and a failed detach
-keeps the domain and its id rather than freeing tables a device may
-still be walking. Leaking is the cheap half of that trade; handing a
-live translation to the next allocation is the expensive half. Check:
+returning them to the PMM (`dma_stats.leaked`), a failed detach keeps
+the domain and its id rather than freeing tables a device may still be
+walking, and a failed attach keeps the domain the unit's live entry
+names. Leaking is the cheap half of that trade; handing a live
+translation to the next allocation is the expensive half. `dma_unmap`
+is the one case with nothing to withhold — the buffer is the caller's
+and goes back to `kmalloc` or the page cache immediately — so there it
+is a panic: the kernel cannot uphold IOM3 for that memory and will not
+pretend to. Check:
 the `iommu` self-test requires `retired` to be unchanged by a boot that
 maps and unmaps thousands of times (the network and cosmofs workloads
 recycle the low pages of the window constantly), and every failure path

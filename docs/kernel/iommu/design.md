@@ -97,7 +97,9 @@ struct device { ...; struct iommu_domain *iommu; uint32_t iommu_sid; };
   **An invalidation that is not confirmed fails the unmap** (`-EIO`):
   the unit may still be translating, so the IOVAs are retired instead of
   freed, `dma_free` leaks the frames instead of returning them, and a
-  detach that is not confirmed keeps the domain. The alternative —
+  detach (or an attach whose entry is already published) keeps the
+  domain. `dma_unmap` has nothing to withhold — the buffer belongs to
+  the caller and is reused at once — so that case panics. The alternative —
   warning and recycling anyway — hands a device a window into whatever
   the allocator gives out next, which is the failure this whole unit
   exists to prevent.
