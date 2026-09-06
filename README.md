@@ -418,6 +418,26 @@ See [docs/development.md](docs/development.md).
   127 in total. Not done, by the specification's rule that complexity
   must earn its place: device multi-queue (QEMU's user-mode backend has
   one queue), TSO/LRO, jumbo frames, zero-copy socket buffers.
+- **DMA remapping (done):** the IOMMU unit the audit names next
+  (`docs/kernel/iommu/`). Every bus-mastering device gets its own
+  address space at `pci_enable_device`, and the buffers its driver
+  mapped are the only memory it can reach: the DMA API is unchanged,
+  but the bus address it returns is now an I/O virtual address in that
+  device's domain, mapped read-only for `DMA_TO_DEVICE`, unmapped and
+  invalidated when the driver is done. One core (domains, a bitmap IOVA
+  allocator over `[1 MiB, 4 GiB)`, a shared four-level page-table
+  walker, fault accounting) behind two drivers: Intel VT-d on q35
+  (DMAR, root and context tables, register invalidation, fault records
+  by MSI) and ARM SMMUv3, found through the ACPI IORT (a linear stream
+  table, stage-2 translation, polled command queue, event queue on the
+  interrupt the table names).
+  Both machines boot with translation on before the first driver loads
+  — 5 and 6 devices in domains, virtio, NVMe, cosmofs and the network
+  stack all translating, no fault in a full run — and the new `iommu`
+  self-test provokes one on purpose through an NVMe DMA to an unmapped
+  address. 128 self-tests. Not done: interrupt remapping (`intremap=off`
+  in the test machines), AMD-Vi, huge pages, an IOVA cache, PASID/ATS,
+  stream ids above 255, requester-id aliasing behind bridges.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

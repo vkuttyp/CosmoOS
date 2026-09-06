@@ -141,12 +141,21 @@ int   dma_set_mask(struct device *dev, unsigned bits);
 
 `dma_alloc` rounds to pages, takes an order-`n` block from the PMM in
 the zone the mask requires (`DMA32` for a 32-bit mask, `DMA` below 24
-bits), and returns the direct-map virtual address; the bus address is
-the physical address because there is no IOMMU. `dma_map` accepts
+bits), and returns the direct-map virtual address. `dma_map` accepts
 direct-map and `kmalloc` addresses (which are in the direct map),
-checks the range against the mask, and returns `virt_to_phys`; any
+checks the range against the mask, and returns a bus address; any
 other address (kernel arena, user) yields 0 so a driver cannot hand
-the device a stack or a vmalloc buffer by accident. Sync operations
+the device a stack or a vmalloc buffer by accident.
+
+The bus address is the physical address for a device without an IOMMU
+domain, and an I/O virtual address for a device with one
+(`dev->iommu`, set by `pci_enable_device`; `docs/kernel/iommu/`). In
+that case `dma_alloc` and `dma_map` map the pages into the device's
+domain — read-only for `DMA_TO_DEVICE`, read-write otherwise, so the
+direction is now enforced by hardware rather than recorded — and
+`dma_free`/`dma_unmap` remove the mapping and return the addresses to
+the domain's allocator. The API, the zones and the mask rules are
+unchanged; a driver cannot tell the difference, which is the point. Sync operations
 are `barrier()` plus `arch_dma_barrier()` (`sfence` on x86-64, `dsb sy`
 on AArch64; both platforms are DMA-coherent), kept as calls so a
 non-coherent port has one place to change. Every function is
@@ -448,8 +457,6 @@ test (`test_virtq.c`) with a fake transport. Details in `testing.md`.
 
 ## Future extensibility
 
-- IOMMU: `dma_map` becomes a real mapping; `dma_addr_t` already differs
-  from `paddr_t` in the API.
 - Scatter/gather: `struct dma_sg` list passed to `dma_map_sg`, and bios
   gaining a segment vector; virtqueues already take a segment array.
 - virtio-net in the networking phase, NVMe and AHCI as PCI drivers, USB.

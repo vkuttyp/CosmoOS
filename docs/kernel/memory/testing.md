@@ -34,7 +34,11 @@ The test first allocates and frees one guarded page in the arena as a
 warm-up. The first mapping in a fresh arena window allocates intermediate
 page-table pages that `arch_mmu_unmap` does not reclaim (invariant M19),
 so the free-page baseline is taken after that warm-up; without it every
-subsequent "back to baseline" check would be off by the table pages.
+subsequent "back to baseline" check would be off by the table pages. The
+arena-placement section repeats the warm-up and retakes the baseline for
+the same reason: what the earlier boot mapped decides which arena region
+the section's two allocations land in, and the IOMMU's register windows
+moved that (a warm-up is the fix, not a wider tolerance).
 
 | Step | Proves |
 |---|---|

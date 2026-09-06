@@ -139,9 +139,12 @@ TCG. ECAM accesses are single uncached loads.
 Only functions the firmware placed are trusted for their BAR addresses;
 sizes are re-derived by probing. MMIO is mapped uncached, kernel only.
 Bus mastering is enabled only by a driver's explicit
-`pci_enable_device(pdev, true)`; without an IOMMU a bus-mastering device
-can write any physical address, which is the state of the art for this
-phase and is why DMA addresses only ever come from `dma_alloc`/`dma_map`.
+`pci_enable_device(pdev, true)`, which first calls
+`iommu_attach_device` with the requester id (`bus << 8 | slot << 3 |
+func`), so the device has its own address space before it can master
+the bus (`docs/kernel/iommu/`). On a machine with no IOMMU unit the
+device can still write any physical address, which is why DMA
+addresses only ever come from `dma_alloc`/`dma_map`.
 
 ## Future extensibility
 

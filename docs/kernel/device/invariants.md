@@ -53,9 +53,11 @@ completion, abort or reset. Devices that address 64 bits say so
 (kmalloc maps, arena and stack do not, the predicate agrees with the
 map, `unmaps` counts, and a burst of I/O on `vda` leaves `maps − unmaps`
 unchanged), `nvme` self-test (the same on the NVMe namespace), `blk`
-self-test (stack buffer refused). Gap: a driver can still pass an
-arbitrary integer as a bus address; the API is a discipline boundary,
-not enforcement (no IOMMU).
+self-test (stack buffer refused), and with an IOMMU unit the discipline
+is enforced: an address the driver did not map does not reach memory
+(`docs/kernel/iommu/invariants.md` IOM3). Gap: a driver can still pass
+an arbitrary integer as a bus address and the call will be made — on a
+machine without an IOMMU it writes memory, on one with it faults.
 
 **D6. `dma_alloc` memory is physically contiguous, page granular, and
 inside the mask; `dma_free` gets the same `size`.** Zone selection by

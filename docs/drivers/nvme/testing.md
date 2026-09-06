@@ -45,7 +45,12 @@ CPU; cosmofs mounted and read back`.
 
 `blk-segments` and `blk-timeout` (`docs/kernel/device/testing.md`)
 cover the block-layer mechanisms the driver relies on; `dma` covers the
-map/unmap balance on the virtio disk.
+map/unmap balance on the virtio disk. The `iommu` self-test
+(`docs/kernel/iommu/testing.md`) drives the controller through the
+driver's `ops->debug_dma` hook — an Identify Controller aimed at an
+address in the controller's domain that nothing maps — to prove the
+unit refuses a DMA the driver did not ask for, and that the controller
+still serves a read afterwards.
 
 ## Gaps
 

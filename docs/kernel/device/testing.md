@@ -9,6 +9,7 @@
 | Boot markers | module load lines for the four driver modules, the `blk: vda:` line, the virtio-console registration line, and the `boot complete` line **inside the virtio console file** | `make test` |
 | Release | same drivers, no self-tests | `make BUILD=release test` |
 | Single CPU | MSI vectors and completions on one CPU | `QEMU_SMP=1 make test` |
+| Without an IOMMU | every driver on the identity DMA path | `QEMU_IOMMU=0 make test` |
 | Build-time | every driver module is signed and checked (`check-module-elf.py`) | `make modules` |
 
 The host fuzz target `fuzz_virtq` (`tests/fuzz/fuzz_virtq.c`) is the
@@ -145,7 +146,10 @@ completes.
 
 `dma_unmap` counts, `dma_mappable` agrees with `dma_map`, and sixteen
 reads plus a write and a flush on `vda` leave `maps − unmaps` where it
-was.
+was. Since the IOMMU unit the same balance is what keeps a device's
+domain from filling up: the `iommu` self-test
+(`docs/kernel/iommu/testing.md`) covers the mapped path of the same
+API, and every test in this file now runs with the devices translating.
 
 ## Boot markers (`tests/boot/run_boot_test.py`)
 
@@ -161,7 +165,12 @@ Required in the serial log on every normal run:
 [ INFO] module: loaded nvme 1.0
 [ INFO] blk: nvme0n1: 16384 sectors of 512 bytes
 [ INFO] nvme0: ... 1 namespace(s) of N, Q I/O queue(s) of depth 32
+[ INFO] iommu: intel-vtd0 at 0xfed90000: ...; translation on
+[ INFO] iommu: intel-vtd0: pci:00:02.0 (requester 0010) in domain 1
 ```
+
+(the two `iommu:` lines only when the machine has a unit, i.e. not
+under `QEMU_IOMMU=0`)
 
 and, read from `QEMU_VCON` after QEMU exits, `[ INFO] boot complete`:
 the console output really went through the virtqueue. The panic run

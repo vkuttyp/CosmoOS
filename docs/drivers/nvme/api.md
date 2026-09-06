@@ -40,6 +40,12 @@ block layer's timeout thread).
 
 `ops->release`: frees the namespace when the last holder is gone.
 
+`ops->debug_dma` (tests only): Identify Controller into the bus address
+the caller names, returning the errno of its status — used by the
+`iommu` self-test to make the controller DMA outside its domain. QEMU's
+controller reports success even when the write was refused, so the
+status says nothing; the point is the transaction. Thread context.
+
 ## Log lines
 
 ```text

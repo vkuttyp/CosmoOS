@@ -117,7 +117,8 @@ address, and callers must not rely on that.
 
 ### `void *dma_alloc(struct device *dev, size_t size, dma_addr_t *dma_out, unsigned flags)` *(exported)*
 Purpose: coherent, physically contiguous, page-granular memory the
-device can reach. Inputs: `dev` (NULL means a 32-bit mask), `size > 0`,
+device can reach (contiguous in its own address space: with an IOMMU
+domain the pages are mapped consecutively there). Inputs: `dev` (NULL means a 32-bit mask), `size > 0`,
 `flags` `DMA_ZERO`. The zone follows the mask: below 16 MiB for masks
 under 32 bits, `DMA32` for exactly 32 bits, any RAM otherwise; a block
 that lands above the mask is freed and NULL returned. Outputs: the
@@ -136,10 +137,14 @@ must fit below the device's mask; the direct map is linear so
 contiguity follows. Kernel-arena, stack, and user addresses return 0,
 which callers must treat as `-EINVAL`. Any context; lock-free apart
 from a statistics spinlock. `dir` is `DMA_TO_DEVICE`, `DMA_FROM_DEVICE`,
-or `DMA_BIDIRECTIONAL` and is currently only recorded.
+or `DMA_BIDIRECTIONAL`; with an IOMMU domain it is the mapping's
+permission (`DMA_TO_DEVICE` maps read-only), without one it is only
+recorded.
 
 ### `void dma_unmap(struct device *, dma_addr_t, size_t, enum dma_dir)` *(exported)*
-Undo a `dma_map`: nothing to tear down without an IOMMU, but every map
+Undo a `dma_map`: with an IOMMU domain the pages are unmapped, the
+IOTLB invalidated and the addresses returned to the domain's
+allocator; without one there is nothing to tear down, but every map
 must have its unmap (`invariants.md` D5) and the call counts `unmaps`.
 `dma` must be a value `dma_map` returned (non-zero, asserted). Any
 context.
@@ -233,6 +238,14 @@ because the request may complete on another CPU at any moment; if found,
 make the device forget it and complete it (`-ETIMEDOUT`) through
 `bio_complete`. Without the operation the layer only warns.
 
+### `ops->debug_dma(struct blkdev *dev, uint64_t addr)` (optional, tests only)
+Make the device DMA into a bus address the caller chose — typically one
+no IOMMU mapping covers — with a harmless command, and return the errno
+of its status, which may be 0: a device is free not to notice that its
+DMA was dropped. NVMe implements it as Identify Controller into `addr`;
+the `iommu` self-test uses it to provoke a translation fault
+(`docs/kernel/iommu/testing.md`). Thread context. No driver needs it.
+
 ### `int blk_read(struct blkdev *, uint64_t sector, uint32_t nsectors, void *buf)`, `blk_write(...)`, `blk_write_flags(..., unsigned flags)`, `blk_flush(...)` *(exported)*
 Purpose: synchronous helpers on a stack `completion`, splitting into
 `max_sectors` pieces. `-EINVAL` for zero sectors or a NULL buffer before
@@ -319,7 +332,7 @@ True if a sink of that name is registered. Diagnostics and self-tests.
 
 ## Boot-time order (`kernel/core/main.c`)
 
-`module_init` → `device_init` → `pci_init` → `blk_init` → `random_init`
+`module_init` → `device_init` → `pci_init` → `iommu_init` → `blk_init` → `random_init`
 → `arch_irq_enable` → `smp_init` → `module_load_boot` (which loads
 `virtio`, `virtio_blk`, `virtio_rng`, `virtio_console`) → self-tests →
 `init`.
@@ -331,6 +344,7 @@ True if a sink of that name is registered. Diagnostics and self-tests.
 | `QEMU_TESTDISK` | `<image dir>/testdisk.img`, created as 8 MiB of zeros if missing | Backing file of the `virtio-blk-pci` scratch disk (`vda`). The boot test creates a fresh `boot-test.log.testdisk.img` every run |
 | `QEMU_VCON` | `<image dir>/vcon.log`, truncated on start | File the `virtconsole` port writes to. The boot test uses `boot-test.log.vcon` and requires the `boot complete` line in it |
 | `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`, `QEMU_PCAP` | empty | Phase 8 network knobs (port forwards, the fw_cfg harness parameter, a pcap of the NIC); see `docs/kernel-services/network/testing.md` |
+| `QEMU_IOMMU` | `1` | `0` leaves the IOMMU out of the machine (`-device intel-iommu` / `iommu=smmuv3`): the devices take the identity DMA path and the harness drops the two `iommu:` markers. See `docs/kernel/iommu/testing.md` |
 
 `qemu-run.sh` always attaches, in this order after the AHCI boot disk:
 `virtio-blk-pci` (scratch disk), `virtio-rng-pci`, `virtio-serial-pci`
