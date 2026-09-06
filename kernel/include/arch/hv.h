@@ -38,13 +38,15 @@ struct hv_caps {
 
 enum hv_exit_kind {
     HV_EXIT_HLT,
-    HV_EXIT_IO,
+    HV_EXIT_IO,          /* x86 only: there is no port space on AArch64 */
     HV_EXIT_MMIO,
-    HV_EXIT_CPUID,
-    HV_EXIT_MSR,
+    HV_EXIT_CPUID,       /* x86 only */
+    HV_EXIT_MSR,         /* x86 only */
     HV_EXIT_HYPERCALL,
     HV_EXIT_SHUTDOWN,
     HV_EXIT_INTR,        /* a host interrupt arrived; nothing to do but run again */
+    HV_EXIT_WFI,         /* AArch64: WFI/WFE, the HLT of this architecture */
+    HV_EXIT_SYSREG,      /* AArch64: a trapped system-register access */
     HV_EXIT_FAIL,
 };
 
@@ -67,6 +69,11 @@ struct hv_exit {
             uint32_t index;
             bool write;
         } msr;
+        struct {
+            uint32_t iss;      /* ESR_EL2.ISS: the register encoding and direction */
+            uint8_t reg;       /* the guest GPR the value comes from or goes to */
+            bool write;
+        } sysreg;
         struct {
             uint64_t code, info1, info2;
         } fail;

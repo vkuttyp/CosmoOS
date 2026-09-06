@@ -66,7 +66,24 @@ static bool paging_off_is_translated(void)
     bool ok = false;
     if (vm_create(0, HV_VM_MEM_MAX, &vm))   /* the kernel's own self-check VM */
         return false;
+#if defined(ARCH_AARCH64)
+    /* The same question in this architecture's terms: a guest with its
+     * MMU off, one instruction at a guest-physical address the host does
+     * not have there, reaching WFI. */
+    static const uint32_t wfi = 0xD503207Fu;
+    const uint32_t want_kind = COSMO_VM_EXIT_WFI;
+    const uint64_t want_pc = SELFCHECK_GPA + 4;
+    if (vm_mem_add(vm, SELFCHECK_GPA, 0x1000) || vm_mem_write(vm, SELFCHECK_GPA, &wfi, sizeof(wfi)) ||
+        vcpu_create(vm, 0, &v))
+        goto out;
+    struct cosmo_vcpu_regs regs;
+    vcpu_get_regs(v, &regs);
+    regs.pc = SELFCHECK_GPA;
+    regs.sp_el1 = SELFCHECK_GPA + 0x1000;
+#else
     static const uint8_t hlt = 0xF4;
+    const uint32_t want_kind = COSMO_VM_EXIT_HLT;
+    const uint64_t want_pc = SELFCHECK_GPA + 1;
     if (vm_mem_add(vm, SELFCHECK_GPA, 0x1000) || vm_mem_write(vm, SELFCHECK_GPA, &hlt, 1) ||
         vcpu_create(vm, 0, &v))
         goto out;
@@ -80,15 +97,16 @@ static bool paging_off_is_translated(void)
     regs.rip = SELFCHECK_GPA;
     regs.rsp = SELFCHECK_GPA + 0x1000;
     regs.idtr.limit = 0;
+#endif
     if (vcpu_set_regs(v, &regs))
         goto out;
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     int rc = vcpu_run_limited(v, &x, 50);
-    ok = rc == 0 && x.kind == COSMO_VM_EXIT_HLT && x.rip == SELFCHECK_GPA + 1;
+    ok = rc == 0 && x.kind == want_kind && x.rip == want_pc;
     if (!ok)
-        kwarn("hv: self-check: paging-off guest exited with rc %d kind %u rip 0x%llx (expected hlt)", rc, x.kind,
-              (unsigned long long)x.rip);
+        kwarn("hv: self-check: a guest with paging off exited with rc %d kind %u pc 0x%llx (wanted kind %u)", rc,
+              x.kind, (unsigned long long)x.rip, want_kind);
 out:
     if (v)
         kobject_put(&v->obj);
