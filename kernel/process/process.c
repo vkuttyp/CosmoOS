@@ -321,12 +321,17 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
 {
     struct process *parent = attr->parent;
     if (attr->handles == NULL || attr->nr_handles == 0) {
+        /* The standard three, when the caller named no map at all.
+         * A parent that has given up TRANSFER on one of them keeps it to
+         * itself rather than passing it on silently. */
         for (int h = 0; h < 3; h++) {
             unsigned rights;
             struct kobject *obj = handle_get(&parent->handles, h, &rights);
             if (obj == NULL)
                 continue;
-            int rc = handle_install_at(&p->handles, h, obj, rights);
+            int rc = 0;
+            if (rights & HANDLE_RIGHT_TRANSFER)
+                rc = handle_install_at(&p->handles, h, obj, rights);
             kobject_put(obj);
             if (rc < 0)
                 return rc;
@@ -338,7 +343,16 @@ static int install_handles(struct process *p, const struct process_spawn_attr *a
         struct kobject *obj = handle_get(&parent->handles, attr->handles[i].parent, &rights);
         if (obj == NULL)
             return -EBADF;
-        int rc = handle_install_at(&p->handles, attr->handles[i].child, obj, rights);
+        /* Giving a handle to another process is its own right, separate
+         * from being able to read or write through it, and the child may
+         * be given less than the parent holds -- never more. */
+        unsigned give = attr->handles[i].rights;
+        if (!(rights & HANDLE_RIGHT_TRANSFER) || (give != COSMO_RIGHTS_SAME && (give & ~rights) != 0)) {
+            kobject_put(obj);
+            return -EPERM;
+        }
+        int rc = handle_install_at(&p->handles, attr->handles[i].child, obj,
+                                   give == COSMO_RIGHTS_SAME ? rights : give);
         kobject_put(obj);
         if (rc < 0)
             return rc;
@@ -528,10 +542,13 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         if (rc)
             goto fail;
     } else {
+        /* The first process owns its console handles: it may redirect
+         * them, hand them to children and administer them, which is what
+         * a shell does with them all day. */
         struct kobject *con = console_object();
-        handle_install_at(&p->handles, COSMO_STDIN, con, HANDLE_RIGHT_READ);
-        handle_install_at(&p->handles, COSMO_STDOUT, con, HANDLE_RIGHT_WRITE);
-        handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE);
+        handle_install_at(&p->handles, COSMO_STDIN, con, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+        handle_install_at(&p->handles, COSMO_STDOUT, con, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+        handle_install_at(&p->handles, COSMO_STDERR, con, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
     }
 
     /* Register. The COSMO_RLIMIT_NPROC admission is decided under the
