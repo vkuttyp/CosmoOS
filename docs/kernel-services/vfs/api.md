@@ -97,6 +97,14 @@ mount's hash (takes `mnt->lock`).
 **`struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)`**
 Referenced live vnode or NULL. The hash holds no reference of its own.
 
+**`bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct
+vnode *vn, void *arg), void *arg)`** True if any vnode of the mount
+satisfies `pred`. A hashed vnode always holds a reference, so the cache
+is exactly the set in use and this is how a filesystem asks whether
+something of its own is still open before taking its storage apart
+(V23). Holds `mnt->lock` across the walk: `pred` must not sleep, and the
+vnode it is shown is not referenced for it.
+
 **`vnode_get` / `vnode_put`** Reference counting. The last put runs the
 release path: unhash, sync dirty pages (regular files), drop the page
 cache, `ops->evict`, free. Release may therefore do block I/O and take
@@ -280,6 +288,31 @@ nblocks, reads, writes, flushes }`.
   Test hooks for the writeback thread (`docs/kernel-services/filesystem/cosmofs/design.md`).
 - **`file_sync`** on a cosmofs file writes its pages back and then commits
   the open transaction: the file is durable when the call returns.
+
+### Snapshots (format version 3)
+
+A snapshot is the tree a commit published, kept. There is no new system
+call: the interface is the two calls that already mean "make a
+directory" and "remove one", under a directory the mount root answers by
+name.
+
+- **`mkdir <mount>/.snapshots/<name>`** takes a snapshot. It commits
+  first, so a snapshot always names a durable tree. `-EEXIST` for a name
+  in use, `-ENAMETOOLONG` above 31 characters, `-EROFS` on a read-only
+  mount, and the commit's errors otherwise.
+- **`rmdir <mount>/.snapshots/<name>`** deletes one, returning every
+  block no remaining snapshot still occupies. `-ENOENT` when there is no
+  such snapshot.
+- **`<mount>/.snapshots/<name>/…`** reads it: an ordinary tree, because
+  every tree in a copy-on-write filesystem is. Every write is `-EROFS`.
+- **`readdir`** on `.snapshots` lists the snapshots; `readdir` on the
+  mount root does **not** list `.snapshots` itself, which is found by
+  name only.
+
+A version-2 filesystem mounts unchanged and has no snapshots
+(`CFS_VERSION_MIN`); the fields version 3 uses were reserved by version
+2. Kernel-internal: `cfs_snapshot_create/delete/list/find` and
+`cfs_snapshot_references` in `cosmofs_snap.c`.
 
 The on-disk format is `kernel-services/filesystem/cosmofs/cosmofs_format.h`;
 see `docs/kernel-services/filesystem/cosmofs/`.

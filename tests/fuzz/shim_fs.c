@@ -114,6 +114,12 @@ void thread_sleep_ns(uint64_t ns)
     (void)ns;
 }
 
+uint64_t clock_realtime_ns(void);
+uint64_t clock_realtime_ns(void)
+{
+    return 0;   /* a snapshot's creation time; the fuzzer does not read it back */
+}
+
 uint64_t clock_now_ns(void)
 {
     static uint64_t t;
@@ -278,6 +284,17 @@ struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)
         }
     }
     return NULL;
+}
+
+bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, void *arg), void *arg)
+{
+    for (unsigned b = 0; b < VNODE_HASH; b++) {
+        struct vnode *vn;
+        list_for_each_entry(vn, &mnt->vnodes[b], hash_link)
+            if (pred(vn, arg))
+                return true;
+    }
+    return false;
 }
 
 void vnode_put(struct vnode *vn)

@@ -201,3 +201,67 @@ reached by `-EAGAIN`).
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;
 `pool.c` calls `blk_*` only. Check: `pool` self-test; review of
 includes. Gap: none.
+
+**V21. A snapshot's blocks are never handed out while the snapshot
+exists, and are handed back the moment it stops needing them.** A commit
+either clears a released block's bitmap bit or holds the block on the
+newest snapshot's deadlist, decided by whether that snapshot's own
+allocation bitmap still occupies it — which is exact, because a
+snapshot's bitmap *is* the set of blocks its tree reaches, and a block
+reaching the free list was in the live tree until now. Deleting a
+snapshot asks the same question of every block it held against the
+snapshots that remain: what none of them occupies goes back to the
+allocator, the rest pass to the oldest remaining snapshot. Check:
+`cosmofs-snapshot` reads history at depth while the live tree is
+rewritten, and requires the free count to rise when a snapshot is
+deleted whose blocks were born after an older snapshot that still
+exists — the case a conservative scheme gets wrong;
+`cosmofs-snapshot-remount` shows the list is on disk, not in memory.
+The blocks a deletion releases and the entry that named
+them are one transaction, so a failure once releasing has begun abandons
+it rather than returning: the two must reach the disk together. An
+unreadable snapshot list makes the commit hold the block, since a failed
+read is not evidence that nothing needs it, and a deletion works from
+the whole list however many blocks it spans. Gap: nothing reports how
+much space a snapshot is keeping alive, and a deadlist that cannot be
+extended (no memory) logs and holds the block to the end of the mount
+rather than risk handing it out.
+
+**V22. A snapshot is read-only, and history is reachable only by
+name.** Every write path refuses a snapshot vnode with `-EROFS`, and
+`.snapshots` is answered by `lookup` but never listed by `readdir`, so
+nothing walking the tree descends into history by accident and `rm -r`
+on the mount cannot reach a snapshot. Snapshot vnodes carry a tag above
+the inode-number space so the VFS cache cannot confuse a snapshot's
+inode with the live one — and that tag is the snapshot's `id`, never
+reused while the filesystem lives, because a positional index would be
+reassigned when a deletion compacts the list and a cached vnode would
+then serve another snapshot's contents. `..` keeps the tag too — it is
+resolved through the snapshot's own inode map, and at the snapshot's
+root it is `.snapshots`, whose `..` is the live root — because an
+untagged parent would step out of a read-only snapshot into a live,
+writable vnode of the same inode number. Check: `cosmofs-snapshot`
+(create, mkdir and unlink inside a snapshot all `-EROFS`; and take A and
+B, delete A, take C, then require B and C each to read their own; and
+`.snapshots/first/dir/../keep` reads the snapshot's contents and refuses
+a write, while `.snapshots/..` is the live root), the
+shell test (`SNAPTEST`), and the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
+lists the snapshots, but a snapshot's own `.snapshots` is not nested —
+untested because nothing creates one.
+
+**V23. Storage somebody is reading is not dismantled.** A snapshot's
+blocks are freed by its deletion, but an open file inside it reads those
+blocks through extents its vnode already holds, so a deletion under an
+open handle would hand that reader whatever the allocator gave the
+blocks next. `rmdir` inside `.snapshots` therefore refuses with `-EBUSY`
+while any vnode of that snapshot is in use, the same answer a mount
+gives while anything on it is open. The census is exact and needs no
+counting of its own: a hashed vnode always holds a reference, so
+`vnode_cache_any` over the mount's cache *is* the set in use, and the
+only reference the deletion discounts is the one `rmdir` itself holds on
+the snapshot's root. Nothing new can appear while it decides — every
+path into a snapshot goes through `.snapshots`, whose lock `rmdir`
+holds, and a walk already inside one holds a reference on the tagged
+vnode it is standing on. Check: `cosmofs-snapshot` (hold a file open
+inside a snapshot: `rmdir` gives `-EBUSY` and the file still reads; close
+it and the same `rmdir` succeeds).

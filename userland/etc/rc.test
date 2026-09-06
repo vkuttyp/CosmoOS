@@ -70,6 +70,15 @@ pkg list
 # Both architectures carry them (milestone 10); a build without them reports the section skipped.
 sh -c 'ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || exit 0; sh /etc/rc.linux' || FAILS=1
 ls /boot/tests/linux/lxhello > /tmp/shtest/lx.probe 2>&1 || echo "LINUXTEST: skipped"
+# Snapshots (docs/kernel-services/filesystem/cosmofs/testing.md) through
+# the interface a user actually has: mkdir and rmdir under .snapshots.
+# The nvme self-test leaves a formatted cosmofs on nvme0n1, so the shell
+# has a real filesystem to snapshot; a build without it skips. The whole
+# check is one line because this shell has no multi-line quoting.
+mkdir -p /tmp/snapmnt || FAILS=1
+mount nvme0n1 /tmp/snapmnt cosmofs 2> /tmp/shtest/snap.err || echo "SNAPTEST: skipped"
+sh -c 'ls /tmp/snapmnt/.snapshots > /tmp/shtest/snap.probe 2>&1 || exit 0; echo before > /tmp/snapmnt/snapfile || exit 1; mkdir /tmp/snapmnt/.snapshots/shell || exit 1; echo after > /tmp/snapmnt/snapfile || exit 1; cat /tmp/snapmnt/.snapshots/shell/snapfile || exit 1; cat /tmp/snapmnt/snapfile || exit 1; echo nope > /tmp/snapmnt/.snapshots/shell/snapfile && exit 1; ls /tmp/snapmnt/.snapshots || exit 1; rmdir /tmp/snapmnt/.snapshots/shell || exit 1; rm /tmp/snapmnt/snapfile || exit 1; echo "SNAPTEST: PASS"' || FAILS=1
+umount /tmp/snapmnt 2> /tmp/shtest/snap.err2
 # Virtualization (docs/kernel-services/virtualization/testing.md): run a
 # guest under vmctl. The guest images are per-architecture, so the shell
 # runs whichever one this build carries: the x86 console guest, or the

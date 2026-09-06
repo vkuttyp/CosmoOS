@@ -337,6 +337,8 @@ static const struct selftest tests[] = {
     { "cosmofs-holes",   selftest_cosmofs_holes },
     { "cosmofs-csum",    selftest_cosmofs_csum },
     { "cosmofs-fsync",   selftest_cosmofs_fsync },
+    { "cosmofs-snapshot", selftest_cosmofs_snapshot },
+    { "cosmofs-snapshot-remount", selftest_cosmofs_snapshot_remount },
     { "cosmofs-reserve", selftest_cosmofs_reserve },
     { "cosmofs-fallback", selftest_cosmofs_fallback },
     { "cosmofs-writeback", selftest_cosmofs_writeback },
