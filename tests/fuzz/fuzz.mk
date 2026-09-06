@@ -38,15 +38,17 @@ FUZZ_ELF_SRCS     := tests/fuzz/fuzz_elf.c kernel/process/elf.c $(FUZZ_COMMON)
 FUZZ_PKG_SRCS     := tests/fuzz/fuzz_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c $(FUZZ_DRIVER)
 FUZZ_LINUX_SRCS   := tests/fuzz/fuzz_linux.c compat/linux/convert.c $(FUZZ_COMMON)
 FUZZ_VIRTQ_SRCS   := tests/fuzz/fuzz_virtq.c drivers/virtio/virtqueue.c $(FUZZ_COMMON)
+FUZZ_LZ4_SRCS     := tests/fuzz/fuzz_lz4.c kernel/core/lz4.c $(FUZZ_DRIVER)
 FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
+	kernel/core/lz4.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel/core/crc32c.c kernel/memory/slab.c kernel/memory/kmalloc.c $(FUZZ_COMMON)
 
 FUZZ_TARGETS := $(FUZZ_OUT)/fuzz_modelf $(FUZZ_OUT)/fuzz_elf $(FUZZ_OUT)/fuzz_pkg $(FUZZ_OUT)/fuzz_linux \
-	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs
+	$(FUZZ_OUT)/fuzz_virtq $(FUZZ_OUT)/fuzz_cosmofs $(FUZZ_OUT)/fuzz_lz4
 
 $(FUZZ_OUT)/fuzz_modelf: $(addprefix $(ROOT)/,$(FUZZ_MODELF_SRCS)) $(ROOT)/tests/host/modelf_image.h
 	$(call log,FUZZCC,$@)
@@ -70,6 +72,11 @@ $(FUZZ_OUT)/fuzz_linux: $(addprefix $(ROOT)/,$(FUZZ_LINUX_SRCS))
 	$(call log,FUZZCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) -I$(ROOT)/compat/linux $(addprefix $(ROOT)/,$(FUZZ_LINUX_SRCS)) $(FUZZ_LDFLAGS) -o $@
+
+$(FUZZ_OUT)/fuzz_lz4: $(addprefix $(ROOT)/,$(FUZZ_LZ4_SRCS))
+	$(call log,FUZZCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(FUZZ_CFLAGS) $(addprefix $(ROOT)/,$(FUZZ_LZ4_SRCS)) $(FUZZ_LDFLAGS) -o $@
 
 $(FUZZ_OUT)/fuzz_virtq: $(addprefix $(ROOT)/,$(FUZZ_VIRTQ_SRCS))
 	$(call log,FUZZCC,$@)

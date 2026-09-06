@@ -99,6 +99,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/block/blktest.c \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
+	kernel/core/lz4.c \
 	kernel/core/fwcfg.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/pagecache.c \
