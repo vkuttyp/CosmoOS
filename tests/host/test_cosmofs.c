@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 3 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 4 && CFS_VERSION_MIN == 2);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);
     EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);
@@ -29,6 +29,19 @@ static void test_layout_sizes(void)
     EXPECT(CFS_SNAP_INO(3, 7) == ((3ull << 48) | 7) && CFS_INO_OF(CFS_SNAP_INO(3, 7)) == 7);
     EXPECT(CFS_SNAP_TAG(CFS_SNAP_INO(3, 7)) == 3 && CFS_SNAP_TAG(7) == 0);
     EXPECT(CFS_MHDR_SIZE + CFS_INODES_PER_BLOCK * CFS_INODE_SIZE <= CFS_BLOCK);
+
+    /* Version 4: a DVA is a member and a block, packed into the eight
+     * bytes every pointer already had -- which is what leaves every
+     * structure above the size it was, and makes a version-3 pointer a
+     * version-4 pointer on member 0. */
+    EXPECT(CFS_DVA_VDEV(CFS_DVA(3, 7)) == 3 && CFS_DVA_BLK(CFS_DVA(3, 7)) == 7);
+    EXPECT(CFS_DVA(0, 12345) == 12345);                  /* member 0 is the bare block number */
+    EXPECT(CFS_DVA_VDEV(99) == 0 && CFS_DVA_BLK(99) == 99);
+    EXPECT(CFS_DVA_BLK(CFS_DVA(254, CFS_DVA_BLK_MASK)) == CFS_DVA_BLK_MASK);
+    EXPECT(CFS_DVA_VDEV(CFS_DVA_NONE) == 255 && CFS_MAX_MEMBERS == 255);
+    EXPECT(sizeof(struct cfs_member) == 64);
+    EXPECT(CFS_MEMBERS_PER_BLOCK >= 60 && sizeof(struct cfs_member_block) <= CFS_PAYLOAD);
+    EXPECT(sizeof(struct cfs_label) <= CFS_BLOCK);
 }
 
 static void test_inode_indices(void)

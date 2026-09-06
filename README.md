@@ -496,6 +496,24 @@ See [docs/development.md](docs/development.md).
   and is taken and deleted with `mkdir` and `rmdir` — no new system
   call. Version-2 filesystems mount unchanged. Two self-tests (137 in
   total) and a shell test that snapshots a real disk.
+- **Storage pools: many members (done):** the addressing change the
+  remaining storage features need
+  (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format version
+  4"). Every pointer on disk is now a DVA — the member that holds the
+  block in the top 8 bits, the block within it in the low 56 — and the
+  superblock carries a member table, each member its own allocation
+  index and bitmap, and every member past the first a label by which a
+  mount finds it. Packing the address into the eight bytes a pointer
+  already occupied is what makes this an extension rather than a
+  rewrite: no structure changes width, no capacity is re-derived, and a
+  version-2 or -3 pointer *is* a version-4 DVA on member 0, so those
+  disks still mount and are written with no conversion. The allocator
+  prefers whichever member has the most room and never lets a run cross
+  a member, so an extent's `count` still means what it did. Two new
+  self-tests (139 in total): a pool of two members, and a version-3 disk
+  exercised under this kernel. Redundancy — mirroring, read repair and
+  scrub — is the next unit and changes only the pool and the read
+  path.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

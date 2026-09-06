@@ -153,6 +153,9 @@ int blk_flush(struct blkdev *bd);
 struct blkdev *blk_find(const char *name);
 static inline void blkdev_get(struct blkdev *bd) { kobject_get(&bd->obj); }
 static inline void blkdev_put(struct blkdev *bd) { kobject_put(&bd->obj); }
+/* The i'th registered device, referenced, or NULL past the end; for
+ * enumeration that tolerates a changing registry (pool assembly). */
+struct blkdev *blk_nth(unsigned i);
 unsigned blk_count(void);
 void blk_dump(void);
 

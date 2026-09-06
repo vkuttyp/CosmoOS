@@ -42,7 +42,8 @@ bool selftest_pool(const char **reason)
     }
     struct spool *p;
     CHECK(pool_open(bd, &p) == 0);
-    CHECK(p->block_size == 4096 && p->sectors_per_block == 8 && p->nblocks == bd->capacity / 8);
+    CHECK(p->block_size == 4096 && p->nmembers == 1 && p->m[0].sectors_per_block == 8 &&
+          p->nblocks == bd->capacity / 8);
     uint8_t *w = kmalloc(4096, 0), *r = kmalloc(4096, 0);
     if (w == NULL || r == NULL) {
         kfree(w);
@@ -54,8 +55,12 @@ bool selftest_pool(const char **reason)
     }
     for (unsigned i = 0; i < 4096; i++)
         w[i] = (uint8_t)(i ^ 0x3c);
+    /* Member 0 addresses are the DVAs they always were, and a DVA
+     * naming a member the pool does not have addresses nothing. */
     bool ok = pool_write(p, p->nblocks - 1, w) == 0 && pool_flush(p) == 0 && pool_read(p, p->nblocks - 1, r) == 0 &&
-              memcmp(w, r, 4096) == 0 && pool_read(p, p->nblocks, r) == -EINVAL && pool_write(p, p->nblocks, w) == -EINVAL;
+              memcmp(w, r, 4096) == 0 && pool_read(p, p->nblocks, r) == -EINVAL &&
+              pool_write(p, p->nblocks, w) == -EINVAL && pool_read(p, POOL_DVA(1, 0), r) == -EINVAL &&
+              POOL_DVA_VDEV(POOL_DVA(3, 7)) == 3 && POOL_DVA_BLK(POOL_DVA(3, 7)) == 7;
     kfree(w);
     kfree(r);
     pool_close(p);
@@ -115,7 +120,7 @@ bool selftest_cosmofs_format(const char **reason)
     struct cosmofs_stats st;
     CHECK(cosmofs_stats(mount_of("/mnt"), &st) == 0);
     CHECK(st.generation == 1 && st.total_blocks == bd->capacity / 8 && st.inode_count == 1);
-    CHECK(st.free_blocks == st.total_blocks - 7);   /* 2 supers, index, bitmap, L1, L0, inodes */
+    CHECK(st.free_blocks == st.total_blocks - 8);   /* 2 supers, members, index, bitmap, L1, L0, inodes */
     struct cosmo_stat s;
     CHECK(vfs_stat(NULL, "/mnt", &s) == 0 && s.type == COSMO_DT_DIR && s.ino == 1 && s.nlink == 2);
     CHECK(vfs_stat(NULL, "/mnt/anything", &s) == -ENOENT);
@@ -832,6 +837,236 @@ bool selftest_cosmofs_snapshot(const char **reason)
     kinfo("selftest: cosmofs-snapshot: history kept and released (%llu free blocks, %llu after)",
           (unsigned long long)st0.free_blocks, (unsigned long long)st1.free_blocks);
     return engine_unmount(bd, reason);
+}
+
+/*
+ * A member table is disk data: its geometry decides how many bitmap
+ * chunks a mount reads and how far the allocator may reach, so it is
+ * checked against what the format can express before any of it is
+ * believed. Corrupting a freshly formatted pool leaves no older root to
+ * fall back to, so the refusal is the only outcome.
+ */
+bool selftest_cosmofs_badmembers(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[2] = { ramblk_create(256), ramblk_create(256) };
+    CHECK(bd[0] != NULL && bd[1] != NULL);
+    CHECK(cosmofs_format_pool(bd, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+
+    struct spool *p;
+    CHECK(pool_open(bd[0], &p) == 0);
+    uint8_t *blk = kmalloc(CFS_BLOCK, 0);
+    CHECK(blk != NULL);
+    CHECK(pool_read(p, CFS_SUPER_A, blk) == 0);
+    const struct cfs_super *sb = (const struct cfs_super *)blk;
+    CHECK(memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation == 1);
+    uint64_t members = sb->members;
+    CHECK(members != 0);
+
+    CHECK(pool_read(p, members, blk) == 0);
+    struct cfs_member_block *mb = (struct cfs_member_block *)(blk + CFS_MHDR_SIZE);
+    struct cfs_mhdr *h = (struct cfs_mhdr *)blk;
+    CHECK(mb->count == 2);
+    uint64_t was = mb->m[1].nblocks;
+
+    /* More bitmap chunks than one allocation index can point at. */
+    mb->m[1].nblocks = CFS_MAX_BLOCKS + 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* A member larger than the device that carries it. */
+    mb->m[1].nblocks = was + 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* A first usable block inside the label. */
+    mb->m[1].nblocks = was;
+    mb->m[1].first_usable = 0;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == -EIO);
+
+    /* Put it back: the mount works, so the refusals above were about the
+     * corruption and not about the surgery. */
+    mb->m[1].first_usable = 1;
+    h->crc = 0;
+    h->crc = block_crc_test(blk);
+    CHECK(pool_write(p, members, blk) == 0 && pool_flush(p) == 0);
+    kfree(blk);
+    pool_close(p);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    kinfo("selftest: cosmofs-badmembers: a member table that cannot be true is refused");
+    return true;
+}
+
+/*
+ * A pool of two members. Everything the format change is for is here:
+ * blocks are named by member, the allocator spreads across both, each
+ * member carries its own bitmap, and a remount finds the second member
+ * by its label rather than being told about it.
+ */
+/*
+ * A version-3 disk mounts, writes and remounts under this kernel. That
+ * is the whole benefit of packing the DVA into the eight bytes a pointer
+ * already had: an old pointer is a new one on member 0, so there is no
+ * conversion and no second decoder (design.md, "The DVA is 64 bits").
+ */
+bool selftest_cosmofs_v3(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_test_format_version(bd, 3) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.members == 1 && st.total_blocks == 512);
+    /* One member's worth of blocks, and one less metadata block than a
+     * version-4 disk: there is no member table. */
+    CHECK(st.free_blocks == 512 - 7);
+
+    CHECK(write_file(ENG "/old", "written by a new kernel", 23));
+    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    CHECK(write_file(ENG "/dir/deep", "deep", 4));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(read_matches(ENG "/old", "written by a new kernel", 23));
+    CHECK(read_matches(ENG "/dir/deep", "deep", 4));
+    /* Snapshots work on it too: a version-3 snapshot records the single
+     * allocation root, and that is what cfs_snapshot_references reads. */
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/v3", 0755) == 0);
+    CHECK(write_file(ENG "/old", "changed", 7));
+    CHECK(read_matches(ENG "/.snapshots/v3/old", "written by a new kernel", 23));
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/v3") == 0);
+    CHECK(read_matches(ENG "/old", "changed", 7));
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-v3: a version-3 disk still mounts and writes");
+    return true;
+}
+
+/* The first block of a file, whatever the file's length. */
+static bool head_matches(const char *path, const void *data, size_t len)
+{
+    struct file *f;
+    if (vfs_open(NULL, path, COSMO_O_RDONLY, 0, &f))
+        return false;
+    uint8_t *b = kmalloc(len, 0);
+    if (b == NULL) {
+        file_put(f);
+        return false;
+    }
+    int64_t n = file_read(f, b, len);
+    bool ok = n == (int64_t)len && memcmp(b, data, len) == 0;
+    kfree(b);
+    file_put(f);
+    return ok;
+}
+
+bool selftest_cosmofs_pool2(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd[2] = { ramblk_create(1024), ramblk_create(1024) };
+    CHECK(bd[0] != NULL && bd[1] != NULL);
+    CHECK(cosmofs_format_pool(bd, 2) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* The first commit touches member 0's metadata while member 1 is
+     * emptier, so the allocation index's copy-on-write lands on member 1
+     * and dirties a bitmap chunk that the reservation pass has already
+     * been over. Every dirty chunk must still have a reserved
+     * destination: writing one to DVA 0 would land on member 0's
+     * superblock. */
+    CHECK(write_file(ENG "/first", "one", 3));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(read_matches(ENG "/first", "one", 3));
+
+    /* Both members' blocks are in the pool's total. */
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.total_blocks == 2048);
+
+    /* Enough data that a one-member pool of this size could not hold it:
+     * the allocator has to reach the second member. */
+    static char buf[4096];
+    memset(buf, 'p', sizeof(buf));
+    for (unsigned i = 0; i < 24; i++) {
+        char name[32];
+        ksnprintf(name, sizeof(name), ENG "/f%u", i);
+        struct file *f;
+        CHECK(vfs_open(NULL, name, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+        for (unsigned k = 0; k < 16; k++)
+            CHECK(file_write(f, buf, sizeof(buf)) == (int64_t)sizeof(buf));
+        file_put(f);
+    }
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.members == 2);
+    CHECK(st.free_blocks < 2048 - 24 * 16);
+    /* Both members carry blocks -- the allocator prefers whichever has
+     * more room, so neither is left untouched -- and the pool's free
+     * count is exactly theirs. */
+    uint64_t f0 = cosmofs_test_member_free(mount_of(ENG), 0);
+    uint64_t f1 = cosmofs_test_member_free(mount_of(ENG), 1);
+    CHECK(f0 < 1024 && f1 < 1024);
+    CHECK(f0 + f1 == st.free_blocks);
+    CHECK(cosmofs_test_member_free(mount_of(ENG), 2) == UINT64_MAX);
+
+    /* A remount is handed member 0 only and has to find the other one by
+     * its label; the data reads back through both. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd[0], 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0 && st.total_blocks == 2048);
+    for (unsigned i = 0; i < 24; i++) {
+        char name[32];
+        ksnprintf(name, sizeof(name), ENG "/f%u", i);
+        struct cosmo_stat s;
+        CHECK(vfs_stat(NULL, name, &s) == 0 && s.size == 16 * 4096);
+    }
+    CHECK(head_matches(ENG "/f7", buf, sizeof(buf)));
+
+    /* A snapshot spans the members too: its record pins the member table
+     * of its generation, so every member's bitmap is held. */
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/two", 0755) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/f3") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(head_matches(ENG "/.snapshots/two/f3", buf, sizeof(buf)));
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/two") == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    kinfo("selftest: cosmofs-pool2: two members, %llu blocks", (unsigned long long)st.total_blocks);
+    return true;
 }
 
 /* A snapshot survives an unmount: its entry is on disk, not in memory. */

@@ -591,6 +591,26 @@ struct blkdev *blk_find(const char *name)
     return found;
 }
 
+/* The i'th registered device, referenced, or NULL past the end. The
+ * registry can change between calls, so this is for enumeration that
+ * tolerates a moving set -- pool assembly, which matches labels and
+ * rejects what it does not recognise. */
+struct blkdev *blk_nth(unsigned i)
+{
+    mutex_lock(&g_blk_lock);
+    struct blkdev *b, *found = NULL;
+    unsigned n = 0;
+    list_for_each_entry(b, &g_blkdevs, link) {
+        if (n++ == i) {
+            found = b;
+            kobject_get(&b->obj);
+            break;
+        }
+    }
+    mutex_unlock(&g_blk_lock);
+    return found;
+}
+
 unsigned blk_count(void)
 {
     mutex_lock(&g_blk_lock);

@@ -131,13 +131,48 @@ bool cfs_has_snapshots(struct cfs *fs)
  * name that block" is one bitmap lookup in the tree the snapshot already
  * recorded -- no birth times, no reference counts
  * (design.md, "Not freeing what a snapshot names"). */
-bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk)
+/* The ALLOCIDX root covering `vdev` in the tree a snapshot recorded:
+ * from version 4 that record is the member table of its generation, so
+ * each member's bitmap is found through the table the snapshot pinned;
+ * before it there was one member and one index. */
+static bool snap_alloc_root(struct cfs *fs, const struct cfs_snapshot *s, unsigned vdev, uint64_t *out, bool *unknown)
 {
-    if (blk >= fs->nblocks || s->alloc_root == 0)
+    *unknown = false;
+    if (fs->sb.version < 4) {
+        if (vdev != 0)
+            return false;
+        *out = s->alloc_root;
+        return s->alloc_root != 0;
+    }
+    struct cfs_buf *mb;
+    if (cfs_buf_get(fs, s->alloc_root, CFS_KIND_MEMBERS, &mb)) {
+        *unknown = true;   /* unreadable: the answer is not "free it" */
         return false;
+    }
+    const struct cfs_member_block *t = (const struct cfs_member_block *)(mb->data + CFS_MHDR_SIZE);
+    bool ok = false;
+    if (vdev < t->count && t->count <= CFS_MEMBERS_PER_BLOCK) {
+        *out = t->m[vdev].alloc_root;
+        ok = *out != 0;
+    }
+    cfs_buf_put(fs, mb);
+    return ok;
+}
+
+bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t dva)
+{
+    if (!cfs_dva_valid(fs, dva) || s->alloc_root == 0)
+        return false;
+    uint64_t root;
+    bool unknown;
+    if (!snap_alloc_root(fs, s, CFS_DVA_VDEV(dva), &root, &unknown))
+        return unknown;   /* unreadable: assume it is needed rather than free it */
+    /* A member's index covers that member's blocks, so the chunk is
+     * counted from the member's own block 0. */
+    uint64_t blk = CFS_DVA_BLK(dva);
     unsigned chunk = (unsigned)(blk / CFS_BITS_PER_BITMAP);
     struct cfs_buf *idx;
-    if (cfs_buf_get(fs, s->alloc_root, CFS_KIND_ALLOCIDX, &idx))
+    if (cfs_buf_get(fs, root, CFS_KIND_ALLOCIDX, &idx))
         return true;   /* unreadable: assume it is needed rather than free it */
     uint64_t bmblk = ((uint64_t *)(idx->data + CFS_MHDR_SIZE))[chunk];
     cfs_buf_put(fs, idx);
@@ -401,7 +436,10 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
     s.id = max_id + 1;
     s.generation = fs->sb.generation;
     s.imap_root = fs->sb.imap_root;
-    s.alloc_root = fs->sb.alloc_root;
+    /* From version 4 a snapshot pins the member table of its
+     * generation: every member's bitmap hangs off it, and the bitmap of
+     * a member *is* the set of blocks that member's tree reaches. */
+    s.alloc_root = fs->sb.version >= 4 ? fs->sb.members : fs->mem[0].alloc_root;
     s.next_ino = fs->sb.next_ino;
     s.inode_count = fs->sb.inode_count;
     s.created_ns = clock_realtime_ns();

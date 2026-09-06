@@ -38,7 +38,7 @@ wins and the document is wrong.
 | `drivers/nvme/` | The `nvme` module (milestone 9): controller bring-up, one I/O queue per CPU with its own MSI-X vector, PRP construction from bio segments, abort and reset, one block device per namespace |
 | `drivers/virtio/` | The `virtio` module (bus, device initialisation, split virtqueues, virtio-pci modern transport) and the `virtio_blk`, `virtio_rng`, `virtio_console` driver modules |
 | `kernel-services/vfs/` | The VFS (mounts, path walk, vnodes, files, the `fs_type` registry), the page cache, ramfs and the boot namespace, the storage pool (`kernel-services/storage/`), and the twelve filesystem system calls |
-| `kernel-services/filesystem/cosmofs/` | The copy-on-write filesystem: on-disk layout, transactions and commit, crash behaviour |
+| `kernel-services/filesystem/cosmofs/` | The copy-on-write filesystem: on-disk layout, transactions and commit, crash behaviour, snapshots, and the member table and device-virtual addresses of format version 4 |
 | `kernel-services/network/` | The network stack: mbufs, interfaces and the per-CPU `netrx/N` workers with flow steering (network unit 11), checksum offload, Ethernet/ARP, IPv4/ICMP, IPv6/ICMPv6/ND, UDP, TCP, sockets and system calls 23–31, the `virtio_net` driver's contract, fw_cfg boot parameters, the QEMU network harness |
 | `kernel/tty/` | The line discipline: the console tty fed by the serial receive interrupt, canonical editing and echo, killable reads through the console kobject |
 | `kernel/io/` | The asynchronous I/O ring (milestone 9): submission and completion over the readiness operation, execution in the submitting process, the multi-queue wait, system calls 60–62; `io_poll` (milestone 10), the multi-object wait behind Linux `poll`/`ppoll` |

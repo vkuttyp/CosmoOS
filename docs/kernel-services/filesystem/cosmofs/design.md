@@ -535,6 +535,111 @@ reported as failed.
   walk already inside one is holding a reference on the tagged vnode it
   is standing on.
 
+## Format version 4: many members
+
+Everything above addresses one device by a raw block number. Version 4
+replaces every one of those numbers with a **DVA** — a device-virtual
+address naming *which* member holds the block and *where* on it — and
+gives the pool a member table. This is the addressing change redundancy
+needs; mirroring itself is the next unit and changes only the pool and
+the read path.
+
+### The DVA is 64 bits
+
+```c
+/* bits 63:56 vdev, bits 55:0 block within that member */
+#define CFS_DVA(vdev, blk) (((uint64_t)(vdev) << 56) | (blk))
+#define CFS_DVA_VDEV(d)    ((unsigned)((d) >> 56))
+#define CFS_DVA_BLK(d)     ((d) & ((1ull << 56) - 1))
+```
+
+The audit sketches `{vdev, offset, size}`, which is 16 bytes. Packing it
+into the 8 bytes every pointer already occupies is worth more than the
+spare fields:
+
+- No structure changes width. `cfs_extent` stays 16 bytes,
+  `CFS_PTRS_PER_BLOCK` stays 508, `CFS_EXTENTS_PER_BLOCK` 253,
+  `cfs_inode` 256 — none of the derived capacities move, and none of the
+  code that walks them is rewritten.
+- **A version-2 or -3 pointer is a version-4 pointer with vdev 0.** The
+  old formats keep mounting read-write with no conversion and no second
+  decoder; `CFS_VERSION_MIN` stays 2. That is the same property the
+  reserved fields gave snapshots, one level down.
+- 255 members of 256 PiB each is not a limit anything here will reach.
+
+What the packing costs, stated rather than discovered later: the vdev
+field is 8 bits, and there is no room in the DVA for a per-record
+physical size. Compression needs that size, but it belongs in the extent
+entry beside `count`, not in every pointer — an extent is the only place
+a variable-length record is named.
+
+`cfs_mhdr.blkno` becomes the block's own DVA, so a read served from the
+wrong member fails its self-check exactly as a misdirected read within a
+member already does.
+
+### The member table
+
+`cfs_super.members` was the constant 1. In version 4 it is the DVA of a
+`CFS_KIND_MEMBERS` block holding one `struct cfs_member` per vdev: its
+uuid, block count, first usable block, free count, and **its own
+`alloc_root`**. Allocation metadata belongs on the member it describes —
+losing a member must not take the other members' bitmaps with it, which
+is the whole point of the unit after this one — so a copy-on-write
+replacement is allocated with a hint that keeps it on the member the
+block was on. The one exception is a member with no free block at all,
+which leaves its replacement elsewhere rather than wedging the
+filesystem; the mount checks that an `alloc_root` names a block of this
+pool, not that it names one of that member's.
+
+A member table is disk data, and its geometry decides how many bitmap
+chunks a mount reads and how far the allocator may reach. Every field is
+therefore checked against what the format can express before any of it
+is believed — block count within `CFS_MIN_BLOCKS..CFS_MAX_BLOCKS` and no
+more chunks than one allocation index can point at, a first usable block
+past the superblocks or the label, and a member no larger than the
+device carrying it. The formatter's own limits are not evidence about a
+disk this kernel did not write. A version
+2 or 3 superblock has no member table; the mount synthesises a
+single-member one from `total_blocks` and `alloc_root`.
+
+Members past the first carry a label block at block 0 (magic, pool uuid,
+index, block count, CRC) so a mount can find them: `vfs_mount` is handed
+one device, and the pool assembles the rest by matching labels against
+the registered block devices. Member 0 is identified by its superblock,
+which carries the pool uuid in what was reserved space — so member 0's
+layout is untouched and a version-3 disk is still exactly a version-4
+pool of one member.
+
+### One bitmap, many members
+
+On disk each member has its own ALLOCIDX chain over its own blocks. In
+memory the allocator keeps working on one flat bitmap, over a *linear*
+address space that concatenates the members: member `v` starts at
+`base[v]`, and `base` advances by whole bitmap chunks so no chunk
+straddles two members. The tail of a member's last chunk is padding —
+marked allocated at mount, so the allocator can never hand it out.
+
+A commit copies the member table and **every member's allocation index
+before it reserves anything**. A copy takes a block, and that block has
+to be counted in the bitmaps the same commit writes; doing it inside the
+write loop instead dirties a chunk the reservation pass has already been
+over, and on a pool of several members the block comes from whichever
+member has the most room, so the chunk it dirties need not even belong
+to the member being written. A dirty chunk with no reserved destination
+now fails the transaction rather than being written to DVA 0, which is
+member 0's superblock.
+
+DVA and linear index convert at the edges (`cfs_dva_lin`, `cfs_lin_dva`)
+and nowhere else. The first-fit run allocator, the metadata reserve, the
+snapshot bitmaps and the deadlists all keep operating on linear indices
+and are unchanged. A run never crosses a member boundary: the allocator
+stops at the member's end, which is what makes an extent's `count`
+meaningful in DVA terms.
+
+Allocation picks the member with the most free blocks and then first-fits
+within it, so a pool fills evenly rather than filling member 0 first; a
+hint keeps a sequential file on one member.
+
 ### What this unit does not do
 
 - Redundancy, compression, encryption: three separate units, in that

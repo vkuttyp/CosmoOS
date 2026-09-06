@@ -56,12 +56,14 @@ int pool_open(struct blkdev *bd, struct spool **out)
     struct spool *p = kzalloc(sizeof(*p));
     if (p == NULL)
         return -ENOMEM;
-    p->dev = bd;
+    p->m[0].dev = bd;
+    p->m[0].sectors_per_block = POOL_BLOCK / bd->sector_size;
+    p->nmembers = 1;
     p->block_size = POOL_BLOCK;
-    p->sectors_per_block = POOL_BLOCK / bd->sector_size;
-    p->nblocks = bd->capacity / p->sectors_per_block;
+    p->nblocks = bd->capacity / p->m[0].sectors_per_block;
     if (p->nblocks > g_image_blocks)
         p->nblocks = g_image_blocks;
+    p->m[0].nblocks = p->nblocks;
     *out = p;
     return 0;
 }
@@ -71,22 +73,42 @@ void pool_close(struct spool *p)
     kfree(p);
 }
 
-int pool_read(struct spool *p, uint64_t blk, void *buf)
+/* The image is one member; a DVA naming any other addresses nothing. */
+int pool_read(struct spool *p, uint64_t dva, void *buf)
 {
-    if (blk >= p->nblocks)
+    uint64_t blk = POOL_DVA_BLK(dva);
+    if (POOL_DVA_VDEV(dva) != 0 || blk >= p->nblocks)
         return -EINVAL;
     p->reads++;
     memcpy(buf, g_image + blk * POOL_BLOCK, POOL_BLOCK);
     return 0;
 }
 
-int pool_write(struct spool *p, uint64_t blk, const void *buf)
+int pool_write(struct spool *p, uint64_t dva, const void *buf)
 {
-    if (blk >= p->nblocks)
+    uint64_t blk = POOL_DVA_BLK(dva);
+    if (POOL_DVA_VDEV(dva) != 0 || blk >= p->nblocks)
         return -EINVAL;
     p->writes++;
     memcpy(g_image + blk * POOL_BLOCK, buf, POOL_BLOCK);
     return 0;
+}
+
+int pool_add_member(struct spool *p, struct blkdev *bd, unsigned *vdev)
+{
+    (void)p; (void)bd; (void)vdev;
+    return -ENOSPC;   /* the fuzz image is a single member */
+}
+
+struct blkdev *blk_nth(unsigned i)
+{
+    (void)i;
+    return NULL;      /* nothing to assemble: no registry here */
+}
+
+void random_get_bytes(void *buf, size_t len)
+{
+    memset(buf, 0, len);   /* deterministic: the fuzzer must reproduce */
 }
 
 int pool_write_flags(struct spool *p, uint64_t blk, const void *buf, unsigned flags)
