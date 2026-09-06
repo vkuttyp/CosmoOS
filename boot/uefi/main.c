@@ -136,6 +136,7 @@ static uint32_t translate_type(uint32_t efi_type, uint64_t attr)
     case EFI_MEMORY_TYPE_COSMO_BOOTINFO:   return COSMOBOOT_MEM_BOOTINFO;
     case EFI_MEMORY_TYPE_COSMO_PAGETABLES: return COSMOBOOT_MEM_BOOT_PAGETABLES;
     case EFI_MEMORY_TYPE_COSMO_ARCHIVE:     return COSMOBOOT_MEM_ARCHIVE;
+    case EFI_MEMORY_TYPE_COSMO_EL2:        return COSMOBOOT_MEM_EL2_STUB;
     default:                           return COSMOBOOT_MEM_RESERVED;
     }
 }
@@ -362,6 +363,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->kernel_size = img.virt_end - img.virt_base;
     info->boot_pagetable_root = pg.root;
     info->boot_pagetable_root_user = pg.root_user;
+    info->el2_stub_phys = cpu_el2_stub();
     info->mem_map_phys = (uint64_t)(uintptr_t)entries;
     info->mem_map_entry_size = sizeof(struct cosmoboot_mem_entry);
     info->acpi_rsdp = find_acpi_rsdp();
@@ -413,6 +415,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     if (n == 0)
         die("memory map does not fit in bootinfo", EFI_BUFFER_TOO_SMALL);
 
+    /* The EL2 stub is allocated in cpu_prepare, before this flag exists. */
+    if (cpu_el2_type_fallback())
+        type_fallback = true;
     if (type_fallback) {
         /* The firmware refused loader-defined types, so these ranges are
          * currently reclaimable in the map. Retype them from the explicit
@@ -423,7 +428,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                   mark_range(entries, &n, max, pg.pool_phys, pg.pool_pages * PAGE_SIZE,
                              COSMOBOOT_MEM_BOOT_PAGETABLES) &&
                   mark_range(entries, &n, max, (uint64_t)(uintptr_t)archive, BYTES_TO_PAGES(archive_size) * PAGE_SIZE,
-                             COSMOBOOT_MEM_ARCHIVE);
+                             COSMOBOOT_MEM_ARCHIVE) &&
+                  (cpu_el2_stub() == 0 ||
+                   mark_range(entries, &n, max, cpu_el2_stub(), PAGE_SIZE, COSMOBOOT_MEM_EL2_STUB));
         if (!ok)
             die("memory map has no room to retype loader ranges", EFI_BUFFER_TOO_SMALL);
     }

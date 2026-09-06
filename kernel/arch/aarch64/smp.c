@@ -19,6 +19,7 @@
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
 #include <arch/irqc.h>
+#include <arch/el2.h>
 #include <arch/percpu.h>
 #include <arch/smp.h>
 #include <arch/user.h>
@@ -28,6 +29,7 @@
 struct aarch64_ap_mailbox {
     uint64_t ttbr0, ttbr1, mair, tcr, sctlr;   /* 0x00 .. 0x20 */
     uint64_t stack_top, entry, cpu;            /* 0x28 .. 0x38 */
+    uint64_t el2_stub;                         /* 0x40: PA of the EL2 stub, 0 without EL2 */
 } __attribute__((aligned(64)));
 
 extern const uint8_t aarch64_ap_trampoline[], aarch64_ap_trampoline_end[];
@@ -59,6 +61,7 @@ static void psci_probe(void)
     if (probed)
         return;
     probed = true;
+    el2_init(bootinfo_get());   /* before any AP starts: they need the stub's address */
     const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
     uint16_t flags = 0;
     if (fadt && fadt->length >= 131)
@@ -123,6 +126,7 @@ int arch_smp_start_cpu(unsigned cpu, uint32_t hw_id, uintptr_t stack_top)
     mb->stack_top = stack_top;
     mb->entry = (uint64_t)(uintptr_t)aarch64_ap_entry;
     mb->cpu = cpu;
+    mb->el2_stub = el2_stub_phys();   /* PSCI starts it at EL2 too, if there is one */
     clean_lines(mb, sizeof(*mb));
     __atomic_store_n(&g_ap_started[cpu], 0u, __ATOMIC_RELEASE);
     /* MPIDR affinity fields back into the register layout PSCI expects. */

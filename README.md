@@ -455,6 +455,21 @@ See [docs/development.md](docs/development.md).
   fixing, the I/O qualification, the EPT builder) plus every SVM test
   still passing — the gap is recorded in the invariants and the testing
   doc rather than papered over. 129 self-tests.
+- **AArch64 exception level 2 (done):** the prerequisite for the EL2
+  hypervisor backend, and the first half of the audit's AArch64
+  virtualization unit. The test machine now runs with
+  `virt,virtualization=on`, so firmware hands the loader control at EL2;
+  the loader reserves a page, installs a small stub that owns EL2 and
+  answers `HVC` (report version, take a new `VBAR_EL2`, give it back),
+  turns the EL2 MMU off so nothing depends on firmware page tables the
+  kernel reclaims, and `eret`s to the kernel at EL1 — which is where a
+  higher-half kernel has to run, since the CPU model the tests use has
+  no VHE. Secondary CPUs come up at EL2 too and do the same. The boot
+  protocol carries the stub's address (version 5), the kernel reports
+  `EL2 available`, and a new `el2` self-test hands the vectors over and
+  back; `QEMU_EL2=0` still boots at EL1 with everything skipping
+  cleanly. 130 self-tests. The world switch, stage-2 translation, the
+  GIC list registers and timer offsets are the next unit.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,

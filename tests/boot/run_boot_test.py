@@ -32,6 +32,9 @@ ARCH = os.environ.get("COSMO_ARCH", "x86_64")
 # The machine has an IOMMU unless the runner was told to leave it out
 # (scripts/qemu-run.sh, docs/kernel/iommu/testing.md).
 IOMMU = os.environ.get("QEMU_IOMMU", "1") != "0"
+# AArch64: firmware hands over at EL2 unless QEMU_EL2=0
+# (docs/kernel/arch/aarch64/design.md, "Exception level 2").
+EL2 = ARCH == "aarch64" and os.environ.get("QEMU_EL2", "1") != "0"
 
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
@@ -67,6 +70,12 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
 ]
+# The loader kept EL2 and the kernel can reach it.
+if EL2:
+    REQUIRED_MARKERS += [
+        r"^cosmoboot: EL2 stub at 0x[0-9a-f]+ \(\d+ bytes\)$",
+        r"^\[ INFO\] el2: stub v\d+ at 0x[0-9a-f]+; EL2 available$",
+    ]
 # DMA remapping is on before the drivers load, and every bus-mastering
 # device is in a domain (docs/kernel/iommu/testing.md).
 if IOMMU:

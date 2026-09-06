@@ -89,6 +89,22 @@ A triple fault during the handoff shows in QEMU's `-d int` log as a
 | `jumping to kernel entry` then silence | the jump faulted before the kernel's IDT was loaded: wrong CR3, NX without NXE, or an unmapped entry address; use `-d int,cpu_reset` |
 | `bootinfo: ...` panic | the kernel rejected the structure; the message names the field |
 
+## AArch64 exception level 2
+
+`scripts/qemu-run.sh` passes `virtualization=on` unless `QEMU_EL2=0`, so
+the default AArch64 run has firmware hand over at EL2 and the loader
+keep it (`docs/kernel/arch/aarch64/design.md`, "Exception level 2").
+Two markers are required in that configuration —
+`cosmoboot: EL2 stub at 0x… (N bytes)` from the loader and
+`el2: stub v1 at 0x…; EL2 available` from the kernel — so a change that
+silently loses EL2 fails the boot test instead of passing quietly. The
+`el2` self-test then asks the stub for its version, hands it a different
+vector table and takes it back, and checks an unknown selector is
+refused; `QEMU_EL2=0` exercises the other path, where the same test
+asserts that there is no stub and that `el2_set_vectors` refuses. Both
+configurations run four CPUs, which is what proves the secondary
+trampoline's own drop from EL2 works: PSCI starts every AP at EL2 too.
+
 ## Not yet tested
 
 - Host-side fuzzing of `elf_load()` and `parse_notes()` with malformed

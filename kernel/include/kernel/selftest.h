@@ -150,6 +150,7 @@ void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_caps(const char **reason);
+bool selftest_el2_stub(const char **reason);
 bool selftest_hv_npt(const char **reason);
 bool selftest_hv_guest_pio(const char **reason);
 bool selftest_hv_guest_irq(const char **reason);

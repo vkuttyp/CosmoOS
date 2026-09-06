@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 4). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 5). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 4 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots) |
+| `version` | `COSMOBOOT_VERSION` = 5 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -23,6 +23,7 @@ compiler.
 | `firmware_system_table` | physical `EFI_SYSTEM_TABLE *` for future runtime-services use |
 | `archive_phys`, `archive_size` | (v3) the boot archive `\cosmo\boot.tar`, a ustar archive holding `init` and the boot-time kernel modules (`modules/<name>.ko`) and test fixtures (`tests/*.ko`), in `COSMOBOOT_MEM_ARCHIVE` memory below 4 GiB; both zero when the file is absent. Written by `scripts/mkbootarchive.py`, parsed by `kernel/core/bootarchive.c` |
 | `boot_pagetable_root_user` | (v4) the second bootstrap root for architectures with split roots: the TTBR0 identity table on AArch64, 0 on x86-64. The kernel does not read it today; its pages are `COSMOBOOT_MEM_BOOT_PAGETABLES` and go with the rest at takeover |
+| `el2_stub_phys` | (v5, AArch64) the page holding the EL2 stub the loader installed before dropping to EL1, in memory of type `COSMOBOOT_MEM_EL2_STUB` (never freed). 0 when firmware handed over at EL1, when the machine has no EL2, or when the page could not be reserved — the kernel then reports no EL2 and boots exactly as before (`docs/kernel/arch/aarch64/design.md`, "Exception level 2") |
 | `reserved1[5]` | zero; reserved for framebuffer and command line under a version bump |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,

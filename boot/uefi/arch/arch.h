@@ -40,9 +40,21 @@ UINTN paging_pool_size(const struct elf_image *img);
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,
                         uint64_t loader_size, const uint8_t *mmap, UINTN mmap_size, UINTN desc_size);
 
-/* Before anything else: refuse a CPU the kernel cannot run on
- * (x86-64 without NX; AArch64 entered at EL2 or below EL1). */
+/* Before anything else: refuse a CPU the kernel cannot run on (x86-64
+ * without NX; AArch64 below EL1). On AArch64 at EL2 this also reserves
+ * and fills the page the EL2 stub will live in, which is why it runs
+ * while boot services are still up. */
 bool cpu_prepare(void);
+/* AArch64: the physical address of the resident EL2 stub, or 0 when
+ * firmware handed control over at EL1 (no EL2 to keep). Other
+ * architectures return 0. A loader that reaches ExitBootServices having
+ * started at EL2 always has one: `cpu_prepare` refuses to continue
+ * otherwise (docs/boot/invariants.md BT13). */
+uint64_t cpu_el2_stub(void);
+/* Whether that page had to fall back to a standard EFI memory type, so
+ * the caller retypes its range in the map like the other loader
+ * ranges. False on architectures without an EL2. */
+bool cpu_el2_type_fallback(void);
 /* After ExitBootServices, before the jump (x86-64: enable NX and WP). */
 void cpu_finish(void);
 void cpu_halt(void) __attribute__((noreturn));

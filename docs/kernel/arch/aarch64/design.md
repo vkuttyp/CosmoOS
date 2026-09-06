@@ -86,10 +86,11 @@ identity-maps the same 0–4 GiB with RAM executable at EL1, because the
 loader itself keeps running on it while the tables are switched. The
 bootinfo and handoff stack are in RAM the direct map covers.
 
-`cpu_prepare` reads `CurrentEL` and requires EL1: the `virt` machine
-runs EDK2 at EL1 unless `virtualization=on`, and the loader refuses EL2
-(or EL0) with a message rather than demoting itself. There is no EL2
-configuration code. `cpu_jump_to_kernel` runs with the MMU still on:
+`cpu_prepare` reads `CurrentEL` and accepts EL1 or EL2 (EL0 is refused).
+The `virt` machine runs EDK2 at EL1 unless `virtualization=on`, which
+the test harness now passes: firmware then hands off at EL2 and the
+loader **installs a resident EL2 stub and drops to EL1**, so everything
+downstream is unchanged. See "Exception level 2" below. `cpu_jump_to_kernel` runs with the MMU still on:
 mask DAIF, `dsb sy; isb`, `MAIR_EL1` = 0x0000000000440000FF (attr 0
 normal WB 0xFF, attr 1 device 0x00, attr 2 normal non-cacheable 0x44),
 `TCR_EL1` (T0SZ/T1SZ 16, 4 KiB granules both halves, inner-shareable
@@ -511,3 +512,78 @@ generic-unistd numbering shared with RISC-V later); an EL2 virtualization
 backend behind `arch/hv.h` with stage-2 tables as the GuestMemory and a
 vGIC as the VirtualInterrupt; device tree as a second platform
 description source; real hardware (Raspberry Pi 4/5 with UEFI).
+
+## Exception level 2
+
+The machine the tests run on (`-machine virt,virtualization=on`) has the
+virtualization extensions, and firmware hands the loader control at EL2.
+The kernel keeps running at EL1 — a higher-half kernel cannot run at EL2
+without VHE, and `cortex-a72`, the CPU model the tests use, is ARMv8.0
+and has none — so the arrangement is the one Linux calls nVHE: **the
+kernel runs at EL1, and a small resident stub owns EL2 until the
+hypervisor claims it.**
+
+### Who installs what
+
+Only code already at EL2 can leave a way back to EL2, and the loader is
+the only thing that runs there. So:
+
+1. `cpu_prepare` accepts EL2 and, when it sees it, allocates one page
+   (EFI type `EFI_MEMORY_TYPE_COSMO_EL2`, reported as
+   `COSMOBOOT_MEM_EL2_STUB`, which the kernel never frees) and copies the
+   stub into it. If that page cannot be had, the loader refuses to boot:
+   there is no safe way to drop to EL1 leaving `VBAR_EL2` on firmware
+   vectors that `ExitBootServices` has invalidated. If the firmware
+   refused the loader's memory type, the range is retyped in the map
+   with the other loader ranges, so the kernel does not hand the EL2
+   vectors to its own allocator. The stub is position-independent and self-contained: a
+   vector table plus a handler.
+2. `cpu_jump_to_kernel` programs the EL1 translation registers exactly
+   as it always did, then programs EL2 — `HCR_EL2.RW` (EL1 is AArch64),
+   `CPTR_EL2` with FP traps off, `CNTHCTL_EL2` letting EL1 read the
+   counters, `CNTVOFF_EL2 = 0`, `VTTBR_EL2 = 0`, `VPIDR_EL2`/`VMPIDR_EL2`
+   mirroring the CPU's own ids, `VBAR_EL2` = the stub — turns the EL2
+   MMU **off** (so the stub never depends on firmware page tables the
+   kernel will reclaim), and `eret`s to the kernel entry with
+   `SPSR_EL2 = EL1h, DAIF masked`. The ERET is the drop to EL1: the
+   instruction stream after it runs under the loader's EL1 tables, which
+   were already programmed.
+3. `cosmoboot_info` gains `el2_stub_phys` (version 5): the stub's
+   physical address, or 0 when the machine had no EL2. That is how the
+   kernel knows EL2 exists and where its door is.
+4. Secondary CPUs come up at EL2 too (PSCI CPU_ON enters at the highest
+   implemented level), so `aarch64_ap_trampoline` does the same
+   programming before its own `eret` to EL1 — with the MMU off at that
+   point, which is simpler than the loader's case.
+
+### The stub's ABI
+
+`HVC #0` from EL1, with the call selector in `x0`:
+
+| `x0` | meaning | returns |
+|---|---|---|
+| 0 | version | the stub's version (1) |
+| 1 | set `VBAR_EL2` to `x1` (a physical address; the EL2 MMU is off) | 0 |
+| 2 | restore `VBAR_EL2` to the stub itself | 0 |
+| other | — | `-1` |
+
+Anything else that reaches EL2 (an exception, an unknown HVC) returns to
+where it came from: the stub is not a hypervisor and refuses to pretend.
+`el2_set_vectors` is what the EL2 backend will use to install its own
+world-switch vectors; until then the stub is all there is.
+
+PSCI keeps working, and the reason is worth writing down because it is
+not what one would guess: with `virtualization=on` the firmware declares
+the **SMC** conduit in the FADT (`smp: PSCI 1.1 via SMC` in the boot
+log), so PSCI calls never pass through EL2 at all and the stub cannot
+intercept them. Without EL2 the same firmware declares HVC
+(`via HVC`), which is equally fine because nothing owns EL2 then. A
+machine that routed PSCI through EL2 while the kernel held the stub
+would need the stub to forward those calls; that case does not arise
+here and is recorded as a gap rather than written blind.
+
+### What this does not do
+
+Stage-2 translation, `VTTBR_EL2`, GIC list registers, `CNTVOFF`
+scheduling and the world switch itself are the next unit: this one only
+establishes that EL2 exists, is reachable, and stays reachable.
