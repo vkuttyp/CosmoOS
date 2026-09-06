@@ -487,7 +487,8 @@ always names a durable tree, then writes the list and commits again.
 
 Userland reaches them through the existing filesystem calls rather than
 a new system call: creating `/mnt/.snapshots/<name>` as a directory
-takes a snapshot, and `rmdir` on it deletes one. That keeps the surface
+takes a snapshot, and `rmdir` on it deletes one — or answers `-EBUSY`
+while anything inside that snapshot is still open. That keeps the surface
 to what `mkdir` and `rmdir` already are, and makes the shell test the
 same shape as every other filesystem test.
 
@@ -512,6 +513,19 @@ reported as failed.
   failure once releasing has begun therefore cannot simply return: it
   abandons the transaction, because committing the frees without the
   removal would hand a live snapshot's blocks to the allocator.
+- A snapshot somebody is reading is not taken apart. A file open inside
+  a snapshot reads its blocks through extents the vnode already holds,
+  so a deletion under that handle would go on serving it whatever the
+  allocator gave those blocks next. `rmdir` therefore answers `-EBUSY`
+  while any vnode of the snapshot is in use — the answer a mount already
+  gives while anything on it is open (V23). The set in use needs no
+  bookkeeping of its own: a hashed vnode always holds a reference, so
+  `vnode_cache_any` over the mount's cache is that set, and the only
+  reference discounted is the one `rmdir` holds on the snapshot's root.
+  Nothing can slip in while it decides, because every path into a
+  snapshot goes through `.snapshots`, whose lock `rmdir` holds, and a
+  walk already inside one is holding a reference on the tagged vnode it
+  is standing on.
 
 ### What this unit does not do
 

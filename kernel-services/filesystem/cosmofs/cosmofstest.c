@@ -786,6 +786,19 @@ bool selftest_cosmofs_snapshot(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG "/.snapshots/first") == -ENOENT);
     CHECK(read_matches(ENG "/keep", "after!", 6));
 
+    /* Storage somebody is reading is not dismantled. Hold a file open
+     * inside a snapshot and the deletion is refused: were it allowed,
+     * that handle would go on reading blocks the allocator had already
+     * given to somebody else. It succeeds once the handle closes. */
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/busy", 0755) == 0);
+    struct file *held;
+    CHECK(vfs_open(NULL, ENG "/.snapshots/busy/keep", COSMO_O_RDONLY, 0, &held) == 0);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/busy") == -EBUSY);
+    CHECK(read_matches(ENG "/.snapshots/busy/keep", "after!", 6));   /* refused, and intact */
+    file_put(held);
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/busy") == 0);
+    CHECK(vfs_stat(NULL, ENG "/.snapshots/busy", &s) == -ENOENT);
+
     /* A snapshot's identity must not be positional: after deleting one,
      * a new snapshot must not inherit a cached vnode from the old. Take
      * A and B, delete A, take C, and read through B and C -- if the tag

@@ -147,6 +147,14 @@ int vfs_sync(void);
 struct vnode *vnode_alloc(struct mount *mnt, uint64_t ino);
 void vnode_hash_insert(struct vnode *vn);
 struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino);   /* referenced or NULL */
+/* True if any vnode of `mnt` satisfies `pred`. A hashed vnode always
+ * holds a reference, so the cache is exactly the set of vnodes in use,
+ * and this answers "is anything of this kind open?" - which is how a
+ * filesystem refuses to dismantle storage someone is still reading
+ * (docs/kernel-services/vfs/invariants.md, V23). The mount's hash lock
+ * is held across the walk: `pred` must not sleep, and the vnode it is
+ * shown is not referenced for it and must not be kept. */
+bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, void *arg), void *arg);
 static inline void vnode_get(struct vnode *vn) { kobject_get(&vn->obj); }
 /* Drop a reference. The last one unhashes the vnode under the mount's hash
  * lock before it falls to zero, so a hashed vnode always has a reference

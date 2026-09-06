@@ -97,6 +97,14 @@ mount's hash (takes `mnt->lock`).
 **`struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)`**
 Referenced live vnode or NULL. The hash holds no reference of its own.
 
+**`bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct
+vnode *vn, void *arg), void *arg)`** True if any vnode of the mount
+satisfies `pred`. A hashed vnode always holds a reference, so the cache
+is exactly the set in use and this is how a filesystem asks whether
+something of its own is still open before taking its storage apart
+(V23). Holds `mnt->lock` across the walk: `pred` must not sleep, and the
+vnode it is shown is not referenced for it.
+
 **`vnode_get` / `vnode_put`** Reference counting. The last put runs the
 release path: unhash, sync dirty pages (regular files), drop the page
 cache, `ops->evict`, free. Release may therefore do block I/O and take

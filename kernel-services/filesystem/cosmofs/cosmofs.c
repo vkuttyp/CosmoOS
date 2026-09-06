@@ -909,6 +909,31 @@ static int cfs_unlink(struct vnode *dir, const char *name, size_t len, struct vn
     return cfs_unlink_common(dir, name, len, victim, false);
 }
 
+/* A deletion frees the blocks only this snapshot reaches. An open file
+ * inside it reads those blocks through extents it already holds, so a
+ * deletion under an open handle would hand that reader whatever the
+ * allocator gave the blocks next. The snapshot is therefore busy while
+ * any of its vnodes is in use, exactly as a mount is (V23).
+ *
+ * The victim is the snapshot's root directory, which rmdir itself holds
+ * one reference on; anything beyond that, on it or on any other vnode of
+ * the snapshot, is somebody else's. Nothing new can appear during the
+ * check: every path into the snapshot goes through .snapshots, whose
+ * lock this call holds, and a walk already inside it holds a reference
+ * on the tagged vnode it is standing on. */
+struct snap_users {
+    unsigned tag;
+    const struct vnode *victim;
+};
+
+static bool snap_vnode_in_use(const struct vnode *vn, void *arg)
+{
+    const struct snap_users *u = arg;
+    if (CFS_SNAP_TAG(vn->ino) != u->tag)
+        return false;
+    return kobject_refcount(&vn->obj) > (vn == u->victim ? 1u : 0u);
+}
+
 static int cfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vnode *victim)
 {
     if (is_snapdir(dir)) {
@@ -923,7 +948,16 @@ static int cfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vno
         memcpy(buf, name, len);
         buf[len] = '\0';
         mutex_lock(&fs->lock);
-        int rc = cfs_snapshot_delete(fs, buf);
+        struct cfs_snapshot snap;
+        unsigned tag;
+        int rc = snap_by_name(fs, name, len, &snap, &tag);
+        if (rc == 0) {
+            struct snap_users u = { .tag = tag, .victim = victim };
+            if (vnode_cache_any(dir->mnt, snap_vnode_in_use, &u))
+                rc = -EBUSY;
+        }
+        if (rc == 0)
+            rc = cfs_snapshot_delete(fs, buf);
         mutex_unlock(&fs->lock);
         if (rc == 0)
             kinfo("cosmofs: snapshot '%s' deleted", buf);

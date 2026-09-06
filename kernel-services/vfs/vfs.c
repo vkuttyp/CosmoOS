@@ -106,6 +106,30 @@ struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)
     return NULL;
 }
 
+/*
+ * The same reasoning read the other way: the hash holds every vnode that
+ * is in use and nothing else, so a walk of it is an exact census. The
+ * unmount check below asks its own question inline because it also needs
+ * nr_vnodes; this is that question made available to a filesystem, which
+ * has no other way to learn that something of its own is still open.
+ */
+bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, void *arg), void *arg)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
+    bool found = false;
+    for (unsigned b = 0; b < VNODE_HASH && !found; b++) {
+        struct vnode *vn;
+        list_for_each_entry(vn, &mnt->vnodes[b], hash_link) {
+            if (pred(vn, arg)) {
+                found = true;
+                break;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&mnt->lock, s);
+    return found;
+}
+
 void vnode_put(struct vnode *vn)
 {
     if (kobject_refcount(&vn->obj) == 1) {

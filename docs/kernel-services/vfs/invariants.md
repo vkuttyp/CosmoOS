@@ -242,3 +242,20 @@ B, delete A, take C, then require B and C each to read their own), the
 shell test (`SNAPTEST`), and the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
 lists the snapshots, but a snapshot's own `.snapshots` is not nested —
 untested because nothing creates one.
+
+**V23. Storage somebody is reading is not dismantled.** A snapshot's
+blocks are freed by its deletion, but an open file inside it reads those
+blocks through extents its vnode already holds, so a deletion under an
+open handle would hand that reader whatever the allocator gave the
+blocks next. `rmdir` inside `.snapshots` therefore refuses with `-EBUSY`
+while any vnode of that snapshot is in use, the same answer a mount
+gives while anything on it is open. The census is exact and needs no
+counting of its own: a hashed vnode always holds a reference, so
+`vnode_cache_any` over the mount's cache *is* the set in use, and the
+only reference the deletion discounts is the one `rmdir` itself holds on
+the snapshot's root. Nothing new can appear while it decides — every
+path into a snapshot goes through `.snapshots`, whose lock `rmdir`
+holds, and a walk already inside one holds a reference on the tagged
+vnode it is standing on. Check: `cosmofs-snapshot` (hold a file open
+inside a snapshot: `rmdir` gives `-EBUSY` and the file still reads; close
+it and the same `rmdir` succeeds).

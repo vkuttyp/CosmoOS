@@ -286,6 +286,17 @@ struct vnode *vnode_lookup_cached(struct mount *mnt, uint64_t ino)
     return NULL;
 }
 
+bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, void *arg), void *arg)
+{
+    for (unsigned b = 0; b < VNODE_HASH; b++) {
+        struct vnode *vn;
+        list_for_each_entry(vn, &mnt->vnodes[b], hash_link)
+            if (pred(vn, arg))
+                return true;
+    }
+    return false;
+}
+
 void vnode_put(struct vnode *vn)
 {
     if (kobject_refcount(&vn->obj) == 1 && !list_empty(&vn->hash_link)) {
