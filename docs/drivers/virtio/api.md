@@ -46,6 +46,12 @@ out-of-range requests return zeros. Any context.
 
 ## Virtqueues
 
+### `int virtq_alloc_on(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *), unsigned cpu, struct virtqueue **out)` *(exported, network unit 11)*
+`virtq_alloc` with the queue's MSI-X vector routed to `cpu`
+(`vq->cpu`, passed by the PCI transport to `pci_msix_request`); a
+multi-queue driver binds each queue to the CPU that consumes it.
+`virtq_alloc` is the CPU 0 form.
+
 ### `int virtq_alloc(struct virtio_device *vdev, unsigned index, unsigned max, void (*callback)(struct virtqueue *), struct virtqueue **out)` *(exported)*
 Purpose: allocate, program and enable queue `index`. Inputs: `max` caps
 the size (0 = device maximum), at most `VIRTQ_MAX_SIZE` (256), power of

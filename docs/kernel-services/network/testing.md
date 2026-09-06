@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | Nine self-tests: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
+| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -231,8 +231,57 @@ with `QEMU_PCAP` opens in Wireshark or `tcpdump -r`.
 - `netif_dump()` logs every interface's counters; the `*_get_stats`
   functions are what the tests compare before and after.
 
+## Receive scaling (unit 11)
+
+**`net-steer`**: a fake interface `steer0` (10.9.0.1); `net_flow_hash`
+of two frames of one flow is equal and non-zero, of another flow
+different; every CPU in turn injects 16 frames of each of 8 TCP flows
+(pinned threads) and the worker-side hook records the CPU and sequence
+per flow: no flow seen on two workers, no sequence out of order, and
+on 4 CPUs at least two workers used; `netif_rx_on(m, 1)` is seen on CPU
+1; with steering off the eight flows all arrive on CPU 0; CPU 0's
+queue counters are non-zero; unregister releases the interface.
+
+**`net-csum-offload`**: a fake interface `csum0` with both capabilities
+transmits a hand-built IPv4/TCP packet in the partial form (flags,
+`csum_start` 20, `csum_offset` 16, not yet valid; `m_csum_complete`
+makes it valid and clears the flags); without the capability
+`netif_transmit` finishes it; out-of-range offsets are `-EINVAL` with
+nothing transmitted; a received packet with a corrupted payload is
+dropped and counted in `bad_cksum`, and the same packet marked
+`M_CSUM_OK` passes the checksum and reaches the pcb lookup; `lo` has both
+capabilities.
+
+**`net-bench`** (reports only): loopback TCP with one and two concurrent
+4 MiB flows, and 10 000 64-byte UDP sends, steering off then on.
+Measured 2026-09-06 on the boot test (QEMU TCG, 4 CPUs, Apple Silicon
+host; noisy, indicative):
+
+| Mode | TCP 1 flow | TCP 2 flows (total) | UDP sends/s (delivered of 10 000) |
+|---|---|---|---|
+| steering off (one queue, CPU 0) | 31–38 MiB/s | 49–63 MiB/s | 43 000–53 000 (460–480) |
+| steering on (per-CPU queues) | 34–51 MiB/s | 68–71 MiB/s | ~42 000 (470–9 900) |
+
+Two concurrent flows gain 30–40 %; a single flow gains too, because
+its two directions hash to different workers. The UDP send rate is the
+sender's system-call rate in both modes; how many datagrams the
+receiver keeps depends on whether its thread gets to drain the 64-entry
+socket queue between bursts (with steering the receiver's worker is
+usually another CPU, and most runs deliver nearly all of them), so the
+delivered count varies from run to run and is reported, not compared.
+The reorder test (`net-tcp-reorder`) now delays every fifth data
+segment (13 per run) since `m_copypacket` copies segments longer than
+a cluster. On one CPU (`QEMU_SMP=1`) both modes are the same path and
+the numbers agree.
+
 ## Gaps
 
+- The virtio-net checksum offload paths (`NEEDS_CSUM` on transmit,
+  `DATA_VALID`/`NEEDS_CSUM` on receive) run only against a backend that
+  offers `CSUM`/`GUEST_CSUM`; QEMU's user-mode network does not, so they
+  are reviewed, not tested. Multi-queue negotiation (`VIRTIO_NET_F_MQ`)
+  is not implemented for the same reason (`design.md`, "virtio-net
+  offloads").
 - No host tests yet: the checksum and header parsers should get a
   `tests/host/test_net.c` with a bit-flip fuzz loop (constitution
   section 60); today only well-formed packets and QEMU's stack
@@ -245,8 +294,9 @@ with `QEMU_PCAP` opens in Wireshark or `tcpdump -r`.
 - `ETIMEDOUT` is reached through keepalive (`net-tcp-keepalive`); the
   retransmit limit itself (8 retransmissions, about 2 minutes with the
   RTO doubling) is not driven.
-- No concurrency stress beyond one server and one client thread; lock
-  order is reviewed, not checked.
+- Concurrency stress is two concurrent TCP flows and eight steered
+  flows from every CPU (`net-bench`, `net-steer`); lock order is checked
+  by lockdep on every boot.
 - No timed socket operations exist; non-blocking mode and readiness
   are tested, a wait primitive over readiness (`poll`) does not exist
   yet.

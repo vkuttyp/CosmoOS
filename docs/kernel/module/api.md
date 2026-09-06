@@ -100,13 +100,13 @@ removing or changing one bumps the version.
 | Entropy (`kernel/random.h`) | `random_add_entropy`, `random_get_bytes`, `random_u64`, `random_entropy_bits` |
 | Console (`kernel/console.h`) | `console_register`, `console_unregister` |
 | Packet buffers (`kernel/mbuf.h`) | `m_get`, `m_getcl`, `m_free`, `m_freem`, `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`, `m_length`, `m_copypacket` |
-| Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_set_ipv4`, `netif_set_up` |
+| Network interfaces (`kernel/netif.h`) | `netif_register`, `netif_unregister`, `netif_release_static`, `netif_rx`, `netif_rx_on`, `net_flow_hash`, `netif_set_ipv4`, `netif_set_up`; `m_csum_complete` (`kernel/net/cksum.h`) |
 
 Modules export too: the `virtio` module provides 15 symbols
 (`virtio_bus`, `virtio_register_driver`, `virtio_unregister_driver`,
 `virtio_device_init`, `virtio_device_ready`, `virtio_device_reset`,
 `virtio_read_config`, `virtio_read_config32`, `virtio_read_config64`,
-`virtq_alloc`, `virtq_free`, `virtq_add`, `virtq_kick`, `virtq_pop`,
+`virtq_alloc`, `virtq_alloc_on`, `virtq_free`, `virtq_add`, `virtq_kick`, `virtq_pop`,
 `virtq_free_count`) that `virtio_blk`, `virtio_rng`, `virtio_console`
 and `virtio_net` resolve by declaring `deps = "virtio"`; the loader
 resolves a foreign symbol only from a declared dependency (invariant

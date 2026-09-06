@@ -153,9 +153,14 @@ single sink instance is allowed (`-EBUSY` for a second console device).
 Remove unregisters the sink, resets, frees.
 
 **virtio_net** (`virtio_net.c`, Phase 8): features `MAC` and `STATUS`
-(a device without `MAC` is refused with `-ENODEV`); no offloads and no
-`MRG_RXBUF`, so each received frame is one buffer with a 12-byte
-`virtio_net_hdr` in front. Queue 0 receive: 32 mbuf clusters posted
+(a device without `MAC` is refused with `-ENODEV`), and since network
+unit 11 `CSUM` and `GUEST_CSUM` when offered (QEMU's user-mode backend
+offers neither): with `CSUM` the interface has `NETIF_CAP_TXCSUM` and a
+packet carrying `NET_CSUM_TCP` gets `NEEDS_CSUM`, `csum_start` and
+`csum_offset` in its header; with `GUEST_CSUM` a received `DATA_VALID`
+frame is marked `M_CSUM_OK` and a `NEEDS_CSUM` one is finished with
+`m_csum_complete` first. No `MRG_RXBUF`, so each received frame is one
+buffer with a 12-byte `virtio_net_hdr` in front. Queue 0 receive: 32 mbuf clusters posted
 whole (`data = buf`), `dma_map`ped device-writable; the completion
 callback drops frames shorter than header plus 14 bytes, sets the
 length, strips the header with `m_adj` and hands the mbuf to

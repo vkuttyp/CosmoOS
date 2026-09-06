@@ -42,16 +42,23 @@ bounds checks (`parse_mss`). Check: review of `ether_input`,
 `design.md` asks for is not written yet; parsers are exercised only by
 well-formed traffic and QEMU's user-mode stack.
 
-**N4. All protocol input runs on the `netrx` thread; timers never send.**
-`netif_rx` only enqueues; `ether_input` and everything it calls run on
-the worker; the ARP/ND ageing timer and the TCP retransmit, delayed-ACK,
-TIME_WAIT and keepalive timers set a flag, take a pcb reference and
-call `net_work_queue`, and the worker runs the handler (`pcb_work`),
-which drops the reference. Output runs on the caller's thread. Check:
-`KASSERT`-free today, by review: the only callers of `ether_input`,
-`*_input` and `pcb_work` are `worker_main`'s `input_one` and
-`run_work`. Gap: no runtime assertion that the current thread is the
-worker in the input functions.
+**N4. All protocol input runs on a `netrx/N` worker thread, one flow's
+packets on one worker in order; timers never send.** `netif_rx` only
+enqueues, on the queue of the CPU its flow hash selects (unit 11: the
+same hash for the same flow whatever CPU injected the packet, so
+per-flow order is the queue's FIFO order); `ether_input` and everything
+it calls run on that worker; the ARP/ND ageing timer and the TCP
+retransmit, delayed-ACK, TIME_WAIT and keepalive timers set a flag, take
+a pcb reference and call `net_work_queue`, and the calling CPU's worker
+runs the handler (`pcb_work`), which drops the reference; input and
+`pcb_work` for one connection may run on different workers and are
+serialised by the pcb lock (N14). Output runs on the caller's thread.
+Check: `net-steer` (eight flows injected from every CPU: each flow seen
+by one worker, in sequence; several workers used on 4 CPUs;
+`netif_rx_on` lands where told; steering off puts everything on CPU 0);
+review: the only callers of `ether_input`, `*_input` and `pcb_work` are
+`worker_main`'s `input_one` and `run_work`. Gap: no runtime assertion
+that the current thread is a worker in the input functions.
 
 **N5. No spinlock is held across a driver transmit, a user-memory
 copy, or a blocking wait.** TCP builds segments under its lock into a
@@ -238,6 +245,25 @@ computed from the same state the operation tests. Check: `net-nonblock`
 (kernel API and object operations), `init --selftest` (system calls),
 `lxtest` (Linux `SOCK_NONBLOCK`, `accept4`, `pipe2`, `fcntl`). Gap: no
 wait primitive consumes readiness yet (`poll` is Linux stage 3).
+
+**N20. A transport checksum is either verified or vouched for, never
+skipped.** On receive TCP and UDP verify unless `M_CSUM_OK`, which only
+an interface sets (`lo` for its own packets, virtio-net for frames the
+device marked `DATA_VALID` or whose `NEEDS_CSUM` it finished); a driver
+never sets it from a header flag it did not negotiate
+(`NETIF_CAP_RXCSUM`). On transmit TCP leaves the partial form with
+`NET_CSUM_TCP`, and `netif_transmit` finishes it in software unless the
+interface has `NETIF_CAP_TXCSUM`, so no packet leaves an interface that
+cannot finish it with an unfinished sum; the layers that prepend
+headers advance `csum_start`. Check: `net-csum-offload` (the partial
+form and its offsets after the IP header, software completion,
+`-EINVAL` for bad offsets, a wrong checksum dropped and counted, the
+same packet trusted with `M_CSUM_OK`), `net-lo-tcp` and every other
+loopback test (offloaded both ways), the host harness (`eth0`: QEMU's
+backend offers no offload, so software completion is what goes on the
+wire). Gap: the virtio-net header writes and `NEEDS_CSUM` completion run
+only where a backend offers the features (not QEMU user-mode), so they
+are reviewed, not tested.
 
 **N-L4. A socket woken outside a protocol lock is referenced with
 `kobject_tryget` for the wake.** `sock_ref` (TCP) and `udp_input`. Check:

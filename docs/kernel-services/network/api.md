@@ -47,17 +47,27 @@ enough); returns `buf`. For logs.
 ## Packet buffers (`kernel/include/kernel/mbuf.h`, `kernel-services/network/mbuf.c`)
 
 Constants: `MCLBYTES` 2048 (a cluster), `MHLEN` 128 (inline storage),
-`NET_HEADROOM` 64 (where `m_getcl` places `data`). Flags: `M_PKTHDR`
-(first buffer of a packet, `pkt` valid), `M_EXT` (cluster storage),
-`M_BCAST`, `M_MCAST` (link-layer destination class of a received
-frame), `M_CSUM_OK` (reserved for drivers that verify transport
-checksums; nothing sets it yet).
+`NET_HEADROOM` 128 since unit 11 (where `m_getcl` and `m_pullup` place
+`data`: room for `vnet(12) + eth(14) + IPv6(40) + TCP(60)`). Flags:
+`M_PKTHDR` (first buffer of a packet, `pkt` valid), `M_EXT` (cluster
+storage), `M_BCAST`, `M_MCAST` (link-layer destination class of a
+received frame), `M_CSUM_OK` (the interface vouches for the transport
+checksum: set by `lo` on every packet and by virtio-net for
+`DATA_VALID`/finished `NEEDS_CSUM` frames; TCP and UDP input skip
+verification). Transmit checksum flags in `pkt.csum_flags`:
+`NET_CSUM_TCP`, `NET_CSUM_UDP`, `NET_CSUM_TX` (both): the transport
+left the folded, not-inverted pseudo-header sum in its checksum field
+and asks the interface to finish the sum over `[pkt.csum_start, end)`
+into `csum_start + csum_offset`; `netif_transmit` finishes it in
+software for an interface without `NETIF_CAP_TXCSUM`.
 
 **`struct mbuf`**: `next` (same packet), `nextpkt` (queue), `data`,
 `len`, `flags`, `refcount` (atomic), `buf`/`size` (storage), `pkt`
 (`len` of the whole chain, `rcvif`, `rx_ns`, `proto`, `csum_flags`,
-`src`: the sender's `netaddr`, set by `udp_input`), `cl` (the cluster
-when `M_EXT`), `inl[MHLEN]`. 240 bytes; a `struct mbuf_cluster` is a
+`csum_start`, `csum_offset` (unit 11, above), `flow_hash` (set by
+`netif_rx`: the receive-steering hash), `src`: the sender's `netaddr`,
+set by `udp_input`, `dma`), `cl` (the cluster
+when `M_EXT`), `inl[MHLEN]`. A `struct mbuf_cluster` is a
 4-byte refcount plus 2048 data bytes. Both come from slab caches
 (`mbuf`, `mcluster`) whose memory is direct-mapped, so `dma_map`
 succeeds on `m->data`.
@@ -119,11 +129,12 @@ stay).
 **`uint32_t m_length(const struct mbuf *m)`** Sum of `len` over the
 chain (not `pkt.len`).
 
-**`struct mbuf *m_copypacket(const struct mbuf *m)`** Linearises a
-chain into one fresh cluster-backed packet (copying `pkt` and the
-`M_BCAST/M_MCAST/M_CSUM_OK` flags). NULL when longer than
-`MCLBYTES - NET_HEADROOM` (1984 bytes) or without memory. The source
-is **borrowed**.
+**`struct mbuf *m_copypacket(const struct mbuf *m)`** Copies a chain
+into a fresh cluster-backed packet (copying `pkt` and the
+`M_BCAST/M_MCAST/M_CSUM_OK` flags): linear in one cluster when it fits
+behind the headroom (up to 1920 bytes), else a chain of clusters (unit
+11; before it, longer packets were refused). NULL without memory. The
+source is **borrowed**.
 
 **Queues**: `struct mbufq { head, tail, len, maxlen, lock }`.
 `mbufq_init(q, maxlen, name)`; `bool mbufq_enqueue(q, m)` takes the
@@ -145,9 +156,16 @@ len, sum)` accumulates over a chain range, handling odd-length buffer
 boundaries; `cksum_pseudo4(src, dst, proto, len)` and
 `cksum_pseudo6(src, dst, proto, len)` return the pseudo-header sum to
 seed a transport checksum with. Verification is
-`cksum_fold(m_cksum_partial(m, 0, len, pseudo)) == 0`.
+`cksum_fold(m_cksum_partial(m, 0, len, pseudo)) == 0`. Unit 11:
+`uint16_t cksum_partial_field(pseudo)` is the value a transport stores
+for an offloading interface (`~cksum_fold(pseudo)`: folded, not
+inverted); `bool m_csum_complete(m)` finishes such a packet in software
+(the sum over `[pkt.csum_start, end)` including that field, written at
+`csum_start + csum_offset`, `0xffff` for a zero UDP result, the flags
+cleared); false and the packet untouched when the offsets do not fit
+the first buffer.
 
-## Interfaces and the worker (`kernel/include/kernel/netif.h`, `netif.c`, `loopback.c`)
+## Interfaces and the workers (`kernel/include/kernel/netif.h`, `netif.c`, `loopback.c`)
 
 **`struct netif_ops { int (*transmit)(struct netif *nif, struct mbuf *m); void (*release)(struct netif *nif); }`**
 `transmit` is called in thread context with no stack lock held, inside a
@@ -162,8 +180,11 @@ mandatory: the last reference to the interface dropped, after
 registration), `mac[6]`, `mtu`, `flags` (`NETIF_UP`, `NETIF_LOOPBACK`,
 `NETIF_NOARP`, `NETIF_GONE` once unregistered), `ip4 { addr, mask,
 gateway }` (network order, 0 = unset), `ip6_ll` (derived from the MAC at
-registration), `ops`, `priv`, `stats` (`rx_packets/bytes/dropped/errors`,
-`tx_*`), `link`, `lock` (spinlock for addresses and flags). The creator
+registration), `ops`, `priv`, `caps` (unit 11: `NETIF_CAP_TXCSUM`, the
+driver finishes `NET_CSUM_*` checksums; `NETIF_CAP_RXCSUM`, it may mark
+received packets `M_CSUM_OK`; set before `netif_register`), `stats`
+(`rx_packets/bytes/dropped/errors`, `tx_*`), `link`, `lock` (spinlock
+for addresses and flags). The creator
 holds reference 1, the registry one more; `netif_find`, `netif_default`
 and `netif_loopback` hand out referenced pointers (`netif_put` when
 done); `ops->release` frees the storage after the last put
@@ -172,8 +193,12 @@ done); `ops->release` frees the storage after the last put
 **`void net_init(void)`** Once, from `kernel_main` after
 `ramfs_populate_boot` and before `module_load_boot` (drivers register
 interfaces during module init). Creates the mbuf caches, initialises
-ARP, ND, UDP, TCP and sockets, starts the `netrx` thread (priority 40)
-and registers `lo`. Logs `net: stack ready`.
+ARP, ND, UDP, TCP and sockets, starts CPU 0's worker `netrx/0`
+(priority 40) and registers `lo`. Logs `net: stack ready`.
+**`void net_start_workers(void)`** (unit 11) Once, after `smp_init`:
+one receive queue and one pinned worker `netrx/N` per online CPU
+(`thread_create_on`); logs `net: N receive queues`. Until a CPU's worker
+is ready, packets steered to it go to CPU 0's queue.
 
 **`int netif_register(struct netif *nif)`** Adds an interface prepared
 by the driver (`name`, `mac`, `mtu`, `ops`, `priv`, `flags`): assigns
@@ -190,10 +215,11 @@ for good, in six steps: `NETIF_GONE` and not `UP` under `nif->lock`
 (transmit and `netif_rx` refuse from here); out of the registry; one
 grace period (`synchronize_quiesce`: a transmit or `netif_rx` that read
 the old flags runs in a read-side section, so none is in flight after
-it); every packet of the interface purged from the receive queue and a
-barrier work item run on the worker (any `input_one` that had dequeued
-one has finished); `arp_flush` and `nd_flush`; the registry's reference
-dropped. The driver then tears its queues down and drops its own
+it); every packet of the interface purged from every CPU's receive queue and
+a barrier work item run on every worker (any `input_one` that had
+dequeued one has finished anywhere; when the barriers cannot be
+allocated, a grace period and a 10 ms pause stand in); `arp_flush` and
+`nd_flush`; the registry's reference dropped. The driver then tears its queues down and drops its own
 reference; `ops->release` runs when the last holder is gone. Sleeps.
 
 **`struct netif *netif_find(const char *name)`**, **`netif_default(void)`**,
@@ -213,35 +239,64 @@ True when the address belongs to a registered interface (loopback
 addresses included). Any context.
 
 **`void netif_rx(struct netif *nif, struct mbuf *m)`** Driver to stack:
-stamps `pkt.rcvif` and `pkt.rx_ns`, enqueues on the 512-packet receive
-queue and wakes the worker. Takes the packet; drops (freed, counted in
+stamps `pkt.rcvif` and `pkt.rx_ns`, computes `pkt.flow_hash`
+(`net_flow_hash`), enqueues on the 512-packet receive queue of CPU
+`hash % cpus` (with steering on and that CPU's worker ready; CPU 0's
+otherwise) and wakes that worker, so one flow's packets are processed
+in order by one thread whatever CPU injected them (unit 11). Takes the
+packet; drops (freed, counted in `rx_dropped` and the CPU's
 `rx_dropped`) when the queue is full. **Any context**, including
 interrupt handlers and virtio callbacks. `m->data` must point at the
 Ethernet header and `pkt.len` must be set; for `NETIF_LOOPBACK`
 interfaces `m->data` is at the IP header and `pkt.proto` carries the
 EtherType (`ETH_P_IP`/`ETH_P_IPV6`) that selects the input function.
+**`void netif_rx_on(nif, m, unsigned cpu)`** The same without the hash:
+a driver whose receive queue is bound to `cpu` (a multi-queue device
+that steered already) names the queue. **`uint32_t net_flow_hash(const
+struct mbuf *m, bool ether)`** The steering hash over the Ethernet type
+(when `ether`) or `pkt.proto`, the IPv4/IPv6 addresses and protocol,
+and the TCP/UDP ports (left out for an IPv4 fragment or an IPv6 packet
+with extension headers); 0 for a packet it cannot classify, never 0
+otherwise; reads at most the first 96 bytes; any context.
+**`void netif_set_steering(bool on)`, `bool netif_steering(void)`**
+Steering on (the default) or everything to CPU 0's queue (the
+benchmark's baseline; `sysctl net.steer` reports it).
+**`bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out)`**
+`{ rx_queued, rx_dropped, rx_steered_here (the packet was queued to the
+CPU that received it), work_runs }`; false for a CPU without a running
+worker. **`void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)`**
+Test hook: `fn(nif, m, arg)` runs on the worker for every dequeued
+packet before input; returning false takes the packet (the hook then
+owns it). NULL clears.
 
 **`int netif_transmit(struct netif *nif, struct mbuf *m)`** Stack to
 driver, thread context: inside a read-side section it checks the flags
 (`-ENODEV` once `NETIF_GONE`, `-ENETUNREACH` when not `UP`; the packet is
-freed either way), calls `ops->transmit` and counts the result.
-`netif_rx` is the mirror: a read-side section that drops the packet once
-`GONE`, else queues it for the worker. `netif_rxq_count` (tests) is the
-receive-queue length.
+freed either way), finishes a requested transport checksum in software
+when the interface lacks `NETIF_CAP_TXCSUM` (`m_csum_complete`;
+`-EINVAL` and the packet freed when its offsets are out of range),
+calls `ops->transmit` and counts the result. `netif_rx` is the mirror:
+a read-side section that drops the packet once `GONE`, else queues it
+for a worker. `netif_rxq_count` (tests) is the sum of the receive
+queues' lengths.
 
 **Deferred work**: `struct net_work { link, fn, arg, queued }`;
 `net_work_init(w, fn, arg)`; `net_work_queue(w)` schedules `fn(arg)` on
-the worker thread once (idempotent while queued). Any context; this is
-how timers reach protocol code (they never send from interrupt
-context).
+the calling CPU's worker once (idempotent while queued anywhere). Any
+context; this is how timers reach protocol code (they never send from
+interrupt context). A TCP timer's `pcb_work` may therefore run on a
+different CPU than the connection's input; the pcb lock serialises them.
 
 **`void loopback_set_filter(lo_filter_fn fn, void *arg)`** Test hook:
 `fn(m, arg)` runs on the sender's thread for every packet transmitted
 through `lo`; returning `false` drops it (freed by the caller). Pass
 NULL to clear. **`void loopback_init(void)`** registers `lo` (MTU
-65535, `NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP`, `127.0.0.1/8`).
+65535, `NETIF_LOOPBACK | NETIF_NOARP | NETIF_UP`, `NETIF_CAP_TXCSUM |
+NETIF_CAP_RXCSUM`, `127.0.0.1/8`); `lo_transmit` marks every packet
+`M_CSUM_OK` and clears its transmit checksum request.
 
-**`void netif_dump(void)`** Logs every interface with counters.
+**`void netif_dump(void)`** Logs every interface with counters, then
+one `netrx/N` line per CPU with its queue counters.
 
 ## Ethernet and ARP (`kernel/include/kernel/net/ether.h`, `ether.c`, `arp.c`)
 
@@ -777,6 +832,7 @@ Added to module ABI v1 in this phase (`EXPORT_SYMBOL` at the end of
 `mbuf.c` and `netif.c`): `m_get`, `m_getcl`, `m_free`, `m_freem`,
 `m_prepend`, `m_pullup`, `m_adj`, `m_copydata`, `m_append`,
 `m_length`, `m_copypacket`, `netif_register`, `netif_unregister`, `netif_release_static`,
-`netif_rx`, `netif_set_ipv4`, `netif_set_up`. This is the whole
+`netif_rx`, `netif_set_ipv4`, `netif_set_up`; unit 11 adds
+`netif_rx_on`, `net_flow_hash` and `m_csum_complete`. This is the whole
 surface a NIC driver module needs; `virtio_net.ko` uses nothing else
 from the stack.

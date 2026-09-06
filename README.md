@@ -400,6 +400,24 @@ See [docs/development.md](docs/development.md).
   its test programs and the boot harness now run on AArch64 too. New
   Linux fixtures `lxsig` (seven expected deaths, including the guard)
   and the PIE pair `lxinterp`/`lxdyn`; two new self-tests, 124 in total.
+- **Network receive scaling and checksum offload (done):** the unit the
+  audit names after its ten milestones
+  (`docs/kernel-services/network/design.md`, "Receive scaling and
+  offloads"). One receive queue and one pinned worker per CPU; a
+  received packet is steered to a queue by its flow hash, so one flow
+  is processed in order by one thread and different flows in parallel;
+  timers hand work to the calling CPU's worker; unregister barriers
+  every worker. The mbuf gains the headroom every transmit chain needs
+  (128), a flow hash, and defined checksum-offload fields; TCP leaves
+  its checksum in the partial form and `netif_transmit` finishes it in
+  software for interfaces without the capability; the loopback offloads
+  both ways; virtio-net negotiates `CSUM`/`GUEST_CSUM` where offered and
+  virtqueues can route their vectors per CPU. Measured on loopback with
+  4 CPUs: two concurrent TCP flows 30–40 % faster, one flow faster too;
+  `net-bench` reports the numbers on every boot. Three new self-tests,
+  127 in total. Not done, by the specification's rule that complexity
+  must earn its place: device multi-queue (QEMU's user-mode backend has
+  one queue), TSO/LRO, jumbo frames, zero-copy socket buffers.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
