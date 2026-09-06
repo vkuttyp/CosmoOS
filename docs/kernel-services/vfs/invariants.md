@@ -201,3 +201,34 @@ reached by `-EAGAIN`).
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;
 `pool.c` calls `blk_*` only. Check: `pool` self-test; review of
 includes. Gap: none.
+
+**V21. A snapshot's blocks are never handed out while the snapshot
+exists, and are handed back the moment it stops needing them.** A commit
+either clears a released block's bitmap bit or holds the block on the
+newest snapshot's deadlist, decided by whether that snapshot's own
+allocation bitmap still occupies it — which is exact, because a
+snapshot's bitmap *is* the set of blocks its tree reaches, and a block
+reaching the free list was in the live tree until now. Deleting a
+snapshot asks the same question of every block it held against the
+snapshots that remain: what none of them occupies goes back to the
+allocator, the rest pass to the oldest remaining snapshot. Check:
+`cosmofs-snapshot` reads history at depth while the live tree is
+rewritten, and requires the free count to rise when a snapshot is
+deleted whose blocks were born after an older snapshot that still
+exists — the case a conservative scheme gets wrong;
+`cosmofs-snapshot-remount` shows the list is on disk, not in memory.
+Gap: nothing reports how much space a snapshot is keeping alive, and a
+deadlist that cannot be extended (no memory) logs and holds the block to
+the end of the mount rather than risk handing it out.
+
+**V22. A snapshot is read-only, and history is reachable only by
+name.** Every write path refuses a snapshot vnode with `-EROFS`, and
+`.snapshots` is answered by `lookup` but never listed by `readdir`, so
+nothing walking the tree descends into history by accident and `rm -r`
+on the mount cannot reach a snapshot. Snapshot vnodes carry a tag above
+the inode-number space so the VFS cache cannot confuse a snapshot's
+inode with the live one. Check: `cosmofs-snapshot` (create, mkdir and
+unlink inside a snapshot all `-EROFS`), the shell test (`SNAPTEST`), and
+the host test's tag arithmetic. Gap: `readdir` on `.snapshots` itself
+lists the snapshots, but a snapshot's own `.snapshots` is not nested —
+untested because nothing creates one.

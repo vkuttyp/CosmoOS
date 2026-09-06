@@ -380,3 +380,120 @@ multi-device pools, a scrub, `fsck` and a host `mkfs` remain future
 work; the format keeps `snap_root`, `csum_root` and `members` reserved
 for them.
 
+
+## Format version 3: snapshots
+
+The audit's storage line names four features — snapshots, redundancy,
+compression, encryption (`docs/audit/2026-09-post-roadmap-audit.md` §19,
+§8.4). They are four units, not one: redundancy needs the `struct dva`
+addressing change §8.4 describes, compression needs a per-extent
+algorithm and length, encryption needs key management that reaches into
+`kernel/security`. **This unit is snapshots**, taken first because the
+filesystem is already copy-on-write — a snapshot is the feature the
+design was built for, and it is the only one of the four that needs no
+new on-disk addressing.
+
+### What a snapshot is here
+
+A commit publishes a superblock naming `imap_root`, `alloc_root`,
+`next_ino`, `inode_count` and a generation. Every one of those trees is
+copy-on-write: a block that a newer tree does not reference is exactly a
+block the commit put on `pending_free`. So a snapshot is that tuple,
+kept, plus a promise not to free what it still names.
+
+```c
+struct cfs_snapshot {          /* 96 bytes, in a CFS_KIND_SNAPLIST block */
+    uint64_t generation;       /* the commit this snapshot pins */
+    uint64_t imap_root;
+    uint64_t alloc_root;
+    uint64_t next_ino;
+    uint64_t inode_count;
+    uint64_t deadlist;         /* head of a CFS_KIND_DEADLIST chain, or 0 */
+    uint64_t created_ns;       /* wall clock, for `ls` */
+    uint64_t reserved;
+    char name[32];             /* NUL terminated, unique in the mount */
+};
+```
+
+`cfs_super.snap_root` — reserved since version 2 for exactly this —
+points at a `CFS_KIND_SNAPLIST` block of 42 such entries with a `next`
+pointer, so the list chains like the extent list does. The version goes
+to 3; a version-2 image mounts unchanged and gains an empty list on its
+first commit, because every field it needs was already reserved.
+
+### Not freeing what a snapshot names
+
+The commit's release loop is where a snapshot bites:
+
+```c
+for each blk in pending_free:
+    if no snapshot names blk:  clear the bitmap bit       /* as today */
+    else:                      append blk to the newest snapshot's deadlist
+```
+
+"Does a snapshot name this block" needs no new bookkeeping, because the
+question is already answered on disk: **a snapshot's allocation bitmap
+is the set of blocks its tree occupies.** The allocator's bit is set for
+a block exactly while something reaches it, and a commit publishes the
+bitmap and the tree together, so `cfs_snapshot_references` is one lookup
+in the `alloc_root` the snapshot already recorded — no birth times, no
+reference counts, no per-block table.
+
+At commit time the *newest* snapshot alone has to be asked: a block
+reaching the free list was in the live tree until now, so if the newest
+snapshot does not occupy it, it was born after that snapshot and no
+older one can name it either. It is freed immediately. Otherwise its
+bitmap bit stays set — the allocator never hands it out — and it is
+remembered on that snapshot's deadlist.
+
+Deleting a snapshot asks the same question of every block on its
+deadlist, against the snapshots that remain: a block none of them
+occupies goes straight back to the allocator, and the rest are handed to
+the oldest remaining snapshot, which is asked again when it goes. The
+deadlist's own blocks are always freed, since nothing else names them.
+
+That is exact, and the difference is visible: a file written after
+snapshot `first`, snapshotted by `second` and then deleted, has its
+blocks returned the moment `second` is deleted, even though `first` is
+still there. The first version of this code handed the whole deadlist to
+the previous snapshot — safe, but those blocks stayed held until that
+snapshot was deleted too. The `cosmofs-snapshot` self-test asserts the
+free count rises at exactly that point.
+
+### Reading a snapshot
+
+Snapshots appear as `.snapshots/<name>/…` at the mount root: a synthetic
+directory the root's `lookup` answers, whose children are the snapshots'
+root directories. A `struct cfs_vnode` gains a snapshot pointer; every
+read path that resolves an inode uses `vn->snap ? snap->imap_root :
+fs->sb.imap_root`, and every write path refuses with `-EROFS` when it is
+set. Nothing else in the read path changes, because a snapshot's trees
+are ordinary trees — that is the whole point of copy-on-write.
+
+`.snapshots` is not returned by `readdir` on the root: it is found by
+name only, so nothing walking the tree descends into history by
+accident, and `rm -r /mnt` cannot delete a snapshot.
+
+### The interface
+
+Kernel: `cfs_snapshot_create(fs, name)`, `cfs_snapshot_delete(fs, name)`,
+`cfs_snapshot_list(fs, out, max)`. Creation commits first, so a snapshot
+always names a durable tree, then writes the list and commits again.
+
+Userland reaches them through the existing filesystem calls rather than
+a new system call: creating `/mnt/.snapshots/<name>` as a directory
+takes a snapshot, and `rmdir` on it deletes one. That keeps the surface
+to what `mkdir` and `rmdir` already are, and makes the shell test the
+same shape as every other filesystem test.
+
+### What this unit does not do
+
+- Redundancy, compression, encryption: three separate units, in that
+  order, each with its own format extension.
+- Rollback (making a snapshot the live tree), sending or receiving a
+  snapshot, quotas, and per-snapshot space accounting beyond the
+  deadlists.
+- Space accounting *per snapshot* (how much a snapshot is keeping
+  alive): the deadlists know, but nothing reports it.
+- Snapshots of a mount that is read-only, and nested `.snapshots`
+  inside a snapshot: both refused.

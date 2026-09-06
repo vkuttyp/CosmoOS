@@ -481,6 +481,21 @@ See [docs/development.md](docs/development.md).
   exchanged around every entry, exits decoded from `ESR_EL2`. Five
   AArch64 guests, one per exit the switch decodes, are run by five new
   self-tests — 135 in total — and `vmctl` runs one from userland.
+- **Filesystem snapshots (done):** the first of the audit's four storage
+  features (`docs/kernel-services/filesystem/cosmofs/design.md`, "Format
+  version 3"); redundancy, compression and encryption are separate units
+  after it. cosmofs was already copy-on-write, so a snapshot is the
+  tuple a commit publishes — kept, with nothing copied. The commit's
+  release loop either frees a block as before or holds it for a
+  snapshot, decided exactly: a snapshot's allocation bitmap *is* the set
+  of blocks its tree reaches, so the question needs no birth times and
+  no reference counts, only the `alloc_root` the snapshot already
+  records. Deleting a snapshot asks the same question of every block it
+  held, so space comes back the moment nothing needs it rather than when
+  the oldest snapshot goes. History reads at `<mount>/.snapshots/<name>`
+  and is taken and deleted with `mkdir` and `rmdir` — no new system
+  call. Version-2 filesystems mount unchanged. Two self-tests (137 in
+  total) and a shell test that snapshots a real disk.
 - **Next:** the roadmap's numbered phases are complete. What follows are
   the milestones the constitution defers in section 68 (among them the
   USB stack, AHCI and the full NVMe feature set, containers, eBPF,
