@@ -68,6 +68,14 @@ bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind)
     return mhdr_check(block, dva, kind) == 0;
 }
 
+bool cfs_super_ok(const void *block)
+{
+    const struct cfs_super *sb = block;
+    if (memcmp(sb->magic, CFS_MAGIC, 8) != 0 || sb->version < CFS_VERSION_MIN || sb->version > CFS_VERSION)
+        return false;
+    return block_crc(block, offsetof(struct cfs_super, crc)) == sb->crc;
+}
+
 /* The verifier cfs_read_repair calls for a metadata block. */
 static bool mhdr_ok(const void *block, void *arg)
 {

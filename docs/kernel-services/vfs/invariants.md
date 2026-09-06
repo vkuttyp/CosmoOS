@@ -317,8 +317,13 @@ every checksum is valid. So each device past member 0 carries its own
 label stamped with the commit it last took part in, written after that
 commit's blocks are stable and before the root that publishes them, and
 member 0's devices carry the superblock, which is the same evidence. A
-copy whose generation is not the one being mounted is left out: the pool
-comes up degraded and says so. `cosmofs_scrub` reads **every** copy of
+copy whose generation is *older* than the one being mounted is left out
+and the pool comes up degraded — older rather than different, because a
+commit interrupted after the labels and before the root leaves labels
+one ahead of the durable root, and those devices hold everything that
+root names. Nor does the label's copy number decide which device serves:
+any current copy may be a member's first, since preferring the one
+labelled 0 would serve a stale disk ahead of a good one. `cosmofs_scrub` reads **every** copy of
 every block, because a read stops at the first copy that verifies and
 rot behind it would stay invisible until that copy was the one
 answering. Check: `cosmofs-mirror` (rot one copy of a data block and the

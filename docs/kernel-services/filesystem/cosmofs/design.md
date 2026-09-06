@@ -676,9 +676,42 @@ the filesystem's, not the pool's:
 
 `pool_read` takes copy 0. If what comes back does not verify, the reader
 tries the remaining copies in turn, and the first that verifies is
-written back over the copies that did not — **repair on read**. A block
+written back over the copies that did not — **repair on read**. A scrub
+cannot be built on that path, because it stops at the first copy that
+verifies: rot behind a good copy would stay invisible until that copy
+was the one answering. `cfs_verify_all` reads every copy, and the scrub
+uses it — walking the inode map itself rather than reading inodes by
+number, so that every imap, inode, extent-chain and checksum block is
+checked on every copy rather than only on the one that answers. A block
 whose copies all fail is the error it always was, `-EIO`, and the mount
 is not poisoned by it: one bad file is not a bad filesystem.
+
+### The failure a checksum cannot see
+
+A device detached while the pool goes on being written comes back
+holding older blocks whose every checksum is valid. Verification cannot
+help: each block is exactly what it claimed to be, at the generation it
+was written. So every device past member 0 carries a label recording
+the commit it last took part in, stamped after that commit's blocks are
+stable and before the root that publishes them — a label is therefore
+never newer than the root it belongs to by more than one interrupted
+attempt.
+
+A copy is current when its label is **not older** than the generation
+being mounted. Not "equal": a commit interrupted after the labels and
+before the root leaves labels one ahead of the durable root, and those
+devices hold everything that root names, so treating them as stale
+would degrade a healthy mirror over an interrupted commit. Nor does the
+label's copy number decide which device serves a member: any current
+copy may be its first, because preferring the one labelled 0 would
+serve a stale disk ahead of a good one — exactly what the generation is
+recorded to prevent.
+
+Member 0 cannot do quite as well, and the reason is structural: its
+root *is* the block a commit publishes, so a device that missed only
+that write is indistinguishable from one detached for a whole commit,
+and promoting the wrong one would serve old blocks. Such a copy stays
+out until something resilvers it, and nothing does yet.
 
 Writes go to every copy. A copy that fails is an error like any other,
 returned before the transaction publishes a root, so a half-written
@@ -698,7 +731,9 @@ as finding it on a read, except that nobody was waiting for the answer.
 
 - Per-block copy counts, parity (RAID-Z and friends), resilvering a
   replaced device, hot spares: the member table has room for the first,
-  and the rest are their own units.
+  and the rest are their own units. Without resilver, a copy left out
+  for being stale stays out: the pool runs degraded until it is
+  reformatted.
 - Scrub is a kernel entry point and a self-test; no system call or shell
   command reaches it yet.
 - Compression and encryption: two separate units, in that order, each

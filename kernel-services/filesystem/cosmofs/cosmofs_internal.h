@@ -171,6 +171,9 @@ int cfs_verify_all(struct cfs *fs, uint64_t dva, void *buf, bool (*verify)(const
                    unsigned *repaired);
 /* A metadata block's own check: kind, its own DVA, and the CRC. */
 bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind);
+/* A superblock's own check: magic, a version this kernel reads, and the
+ * CRC. A zeroed slot is not a superblock and not an error. */
+bool cfs_super_ok(const void *block);
 
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of
