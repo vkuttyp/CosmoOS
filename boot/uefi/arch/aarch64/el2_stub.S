@@ -11,12 +11,14 @@
  *   0 -> the stub's version in x0
  *   1 -> VBAR_EL2 = x1 (physical), x0 = 0
  *   2 -> VBAR_EL2 = this stub again, x0 = 0
+ *   3 -> SP_EL2 = x1, x0 = 0 (a hypervisor's EL2 vectors need a stack
+ *        before their first exception, and only code at EL2 can set it)
  *   anything else -> x0 = -1
  * Any other exception at EL2 returns where it came from: this is a door,
  * not a hypervisor.
  */
 
-#define EL2_STUB_VERSION 1
+#define EL2_STUB_VERSION 2
 
     /* The loader is PE/COFF: plain .text, no ELF section attributes. */
     .text
@@ -65,6 +67,8 @@ el2_stub_sync:
     b.eq 2f
     cmp x0, #2
     b.eq 3f
+    cmp x0, #3
+    b.eq 4f
     mov x0, #-1
     b el2_stub_return
 
@@ -79,6 +83,11 @@ el2_stub_sync:
 3:  adr x1, el2_stub_begin       /* within a page: no page-relative relocation */
     msr vbar_el2, x1
     isb
+    mov x0, #0
+    b el2_stub_return
+
+4:  mov x2, sp                   /* SP_EL2 is `sp` while executing at EL2 */
+    mov sp, x1
     mov x0, #0
     /* fall through */
 

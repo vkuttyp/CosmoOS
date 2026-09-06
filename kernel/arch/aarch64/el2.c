@@ -27,6 +27,10 @@ static int64_t el2_hvc(uint64_t selector, uint64_t arg)
 
 void el2_init(const struct cosmoboot_info *info)
 {
+    static bool done;   /* called from the PSCI probe and from arch_hv_probe */
+    if (done)
+        return;
+    done = true;
     g_stub_phys = info->el2_stub_phys;
     if (g_stub_phys == 0) {
         kinfo("el2: firmware handed over at EL1; no EL2 for guests");
@@ -65,6 +69,13 @@ int el2_restore_stub_vectors(void)
     if (!g_have_el2)
         return -1;
     return (int)el2_hvc(EL2_STUB_RESTORE, 0);
+}
+
+int el2_set_stack(uint64_t sp_phys)
+{
+    if (!g_have_el2)
+        return -1;
+    return (int)el2_hvc(EL2_STUB_SET_STACK, sp_phys);
 }
 
 int64_t el2_call_raw(uint64_t selector, uint64_t arg)
