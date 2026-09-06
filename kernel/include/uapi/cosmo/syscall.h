@@ -116,6 +116,8 @@
 
 /* spawn: the child receives exactly the mapped handles.
  * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */
+/* With COSMO_SPAWN_HANDLE_RIGHTS. Without it the map is an array of
+ * just the first two fields, which is what it was before rights. */
 struct cosmo_spawn_handle {
     int child;      /* slot in the child */
     int parent;     /* handle in the caller */
@@ -139,6 +141,13 @@ struct cosmo_spawn {
  * supplementary groups. A privileged caller names any ids; an unprivileged
  * one only ids it holds (docs/kernel/security/design.md §1). */
 #define COSMO_SPAWN_SETCRED (1u << 0)
+/* The handle map is an array of struct cosmo_spawn_handle as declared
+ * above -- child, parent, rights, pad. Without this flag the kernel
+ * reads the two-int elements that were the whole of the map before
+ * rights existed, and gives the child the caller's own rights. A
+ * program built against the older header therefore keeps working
+ * unchanged; libc sets the flag. */
+#define COSMO_SPAWN_HANDLE_RIGHTS (1u << 1)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

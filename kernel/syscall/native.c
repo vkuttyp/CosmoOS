@@ -703,7 +703,7 @@ static int64_t sys_spawn(struct syscall_args *a)
     struct cosmo_spawn req;
     if (copy_from_user(&req, a->a[0], sizeof(req)))
         return -EFAULT;
-    if ((req.flags & ~COSMO_SPAWN_SETCRED) || req.path == NULL || req.argv == NULL)
+    if ((req.flags & ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS)) || req.path == NULL || req.argv == NULL)
         return -EINVAL;
     struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
@@ -730,10 +730,33 @@ static int64_t sys_spawn(struct syscall_args *a)
         goto out;
     if (req.nr_handles) {
         STATIC_ASSERT(sizeof(struct process_handle_map) == sizeof(struct cosmo_spawn_handle), "handle map shape");
-        if (copy_from_user(sc->map, (uint64_t)(uintptr_t)req.handles,
-                           req.nr_handles * sizeof(struct cosmo_spawn_handle))) {
-            rc = -EFAULT;
-            goto out;
+        if (req.flags & COSMO_SPAWN_HANDLE_RIGHTS) {
+            if (copy_from_user(sc->map, (uint64_t)(uintptr_t)req.handles,
+                               req.nr_handles * sizeof(struct cosmo_spawn_handle))) {
+                rc = -EFAULT;
+                goto out;
+            }
+        } else {
+            /* The map as it was before rights existed: two ints per
+             * entry, and the child gets what the caller holds. Reading
+             * the wider element would take the next entry's child for
+             * this one's rights. */
+            struct legacy_handle {
+                int child;
+                int parent;
+            };
+            struct legacy_handle legacy[HANDLE_TABLE_SIZE];
+            if (copy_from_user(legacy, (uint64_t)(uintptr_t)req.handles,
+                               req.nr_handles * sizeof(struct legacy_handle))) {
+                rc = -EFAULT;
+                goto out;
+            }
+            for (unsigned i = 0; i < req.nr_handles; i++) {
+                sc->map[i].child = legacy[i].child;
+                sc->map[i].parent = legacy[i].parent;
+                sc->map[i].rights = COSMO_RIGHTS_SAME;
+                sc->map[i].pad = 0;
+            }
         }
     }
     pid_t pid = 0;

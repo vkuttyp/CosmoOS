@@ -475,6 +475,29 @@ static void proc_selftest(void)
     int gst = 0;
     CHECK(waitpid(gp, &gst, 0) == gp);
 
+    /* The map as it was before rights existed: two ints per entry, and
+     * no COSMO_SPAWN_HANDLE_RIGHTS flag. A program built against the
+     * older header passes exactly this, and must still work -- reading
+     * it as the wider element would take the next entry's child for
+     * this one's rights. */
+    struct legacy_map {
+        int child;
+        int parent;
+    } legacy[] = { { 0, 0 }, { 1, 1 }, { 2, 2 } };
+    struct cosmo_spawn old_req = {
+        .path = "/bin/true",
+        .argv = true_argv,
+        .envp = NULL,
+        .handles = (const struct cosmo_spawn_handle *)legacy,
+        .nr_handles = 3,
+        .cwd = NULL,
+        .flags = 0,
+    };
+    long lp = cosmo_spawn(&old_req);
+    CHECK(lp > 0);
+    int lst = 0;
+    CHECK(waitpid((pid_t)lp, &lst, 0) == (pid_t)lp && WIFEXITED(lst) && WEXITSTATUS(lst) == 0);
+
     /* The original is untouched by any of it. */
     CHECK(lseek(rw, 0, SEEK_SET) == 0);
     CHECK(write(rw, "zzz", 3) == 3);
