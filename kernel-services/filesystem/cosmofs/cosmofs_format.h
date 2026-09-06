@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      4u   /* version 4: many members (DVAs, CFS_KIND_MEMBERS) */
+#define CFS_VERSION      5u   /* version 5: a member may be a mirror group (cfs_member.copies) */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -179,9 +179,14 @@ struct cfs_member {            /* 64 bytes */
     uint64_t alloc_root;       /* this member's CFS_KIND_ALLOCIDX block, as a DVA */
     uint64_t free_blocks;
     uint32_t flags;
-    uint32_t pad;
+    /* Devices holding this member's blocks: a mirror group. Written as 0
+     * by version 4, which had one device per member and read the field
+     * as padding, so 0 and 1 mean the same thing. */
+    uint32_t copies;
     uint64_t reserved;
 };
+
+#define CFS_MAX_COPIES 4u
 
 #define CFS_MEMBERS_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 8) / sizeof(struct cfs_member))
 
@@ -199,10 +204,18 @@ struct cfs_member_block {
 struct cfs_label {
     uint8_t magic[8];
     uint32_t version;
-    uint32_t index;            /* this member's vdev number, >= 1 */
+    uint32_t index;            /* this member's vdev number */
     uint8_t uuid[16];          /* the pool's, matching cfs_super.uuid */
     uint64_t nblocks;
-    uint64_t reserved[4];
+    uint32_t copy;             /* which copy of that member this device holds */
+    uint32_t pad2;
+    /* The commit this device last took part in. A device that was
+     * detached while the pool went on being written has an older one,
+     * and is refused rather than mirrored: its blocks would pass every
+     * checksum and still be the wrong contents (design.md, "A mirror is
+     * only as good as its verifier"). */
+    uint64_t generation;
+    uint64_t reserved[2];
     uint32_t crc;              /* CRC32C over the block with this field zero */
     uint32_t pad;
 };
