@@ -62,6 +62,8 @@ struct device {
     struct resource res[DEVICE_MAX_RESOURCES];
     unsigned nr_res;
     uint64_t dma_mask;          /* highest bus address the device can use */
+    struct iommu_domain *iommu; /* the device's DMA domain, NULL for the identity path (kernel/iommu.h) */
+    uint32_t iommu_sid;         /* its requester id (PCI: bus << 8 | slot << 3 | func) */
     enum device_state state;
     int probe_error;
     struct list_node bus_link;

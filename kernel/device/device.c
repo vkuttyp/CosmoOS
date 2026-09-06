@@ -3,6 +3,7 @@
  */
 
 #include <kernel/device.h>
+#include <kernel/iommu.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
@@ -210,6 +211,7 @@ void device_unregister(struct device *dev)
 {
     model_lock();
     unbind(dev);
+    iommu_detach_device(dev);   /* the driver's remove has returned: no DMA is in flight */
     list_remove(&dev->bus_link);
     list_init(&dev->bus_link);
     dev->bus->nr_devices--;

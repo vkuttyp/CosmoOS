@@ -123,7 +123,12 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/socket.c \
 	kernel-services/network/nettest.c \
 	drivers/acpi/acpi.c \
-	drivers/pci/pci.c
+	drivers/pci/pci.c \
+	kernel/iommu/iommu.c \
+	kernel/iommu/pt.c \
+	kernel/iommu/iommutest.c \
+	drivers/iommu/intel_vtd.c \
+	drivers/iommu/arm_smmuv3.c
 
 # The trusted key ring is generated from $(KEYRING_PUBS) (build/config.mk:
 # the developer key's public half plus tools/keys/*.pub, or the release
