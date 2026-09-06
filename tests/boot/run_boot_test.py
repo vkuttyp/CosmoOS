@@ -116,9 +116,11 @@ LINUXTEST_MARKERS = [
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 
-# Virtualization (docs/kernel-services/virtualization/testing.md): the QEMU
-# CPU model carries SVM + NPT, so the guest self-tests must run (not skip)
-# and vmctl must run the sample guest from the shell.
+# Virtualization (docs/kernel-services/virtualization/testing.md): both
+# machines have a backend now -- SVM + NPT on x86-64, EL2 with stage-2
+# translation on AArch64 (unless QEMU_EL2=0) -- so the guest self-tests
+# must run rather than skip, and vmctl must run this architecture's
+# sample guest from the shell.
 HVTEST_MARKERS = [
     r"^HVTEST: PASS$",
 ]
@@ -333,9 +335,9 @@ def main():
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (package test)")
-        if ARCH == "x86_64":
-            # The virtualization backend and the Linux table exist on x86-64 only
-            # (docs/kernel/arch/aarch64/design.md, "Stubs and exclusions").
+        # A machine with a backend must run its guests; AArch64 without
+        # EL2 (QEMU_EL2=0) has none and says so.
+        if ARCH == "x86_64" or EL2:
             for pat in HVTEST_MARKERS:
                 if not any(re.search(pat, ln) for ln in lines):
                     failures.append(f"missing marker /{pat}/ (virtualization test)")
@@ -343,12 +345,14 @@ def main():
                 hits = [ln for ln in lines if re.search(pat, ln)]
                 if hits:
                     failures.append(f"forbidden marker /{pat}/: {hits[0].strip()}")
-            if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
-                failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
         else:
             for pat in (r"^HVTEST: skipped$",):
                 if not any(re.search(pat, ln) for ln in lines):
-                    failures.append(f"missing marker /{pat}/ (x86-only sections must report skipped)")
+                    failures.append(f"missing marker /{pat}/ (no EL2: the guest sections must skip)")
+        if ARCH == "x86_64":
+            # The Linux musl program is x86-only (milestone 10).
+            if os.environ.get("HAVE_MUSL") == "1" and not any(re.search(MUSL_MARKER, ln) for ln in lines):
+                failures.append(f"missing marker /{MUSL_MARKER}/ (musl static program)")
         # The Linux ABI programs run on both architectures (milestone 10).
         for pat in LINUXTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):

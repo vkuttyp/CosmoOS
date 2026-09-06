@@ -29,17 +29,11 @@ include $(ROOT)/boot/uefi/boot.mk
 include $(ROOT)/libc/libc.mk
 include $(ROOT)/userland/userland.mk
 include $(ROOT)/pkg/pkg.mk
-# The Linux ABI test programs build for both architectures (milestone 10);
-# the virtualization guests are x86-64 machine code.
+# The Linux ABI test programs and the virtualization guests both build
+# for the architecture in hand; the guests live in tests/hv/$(ARCH)/.
 include $(ROOT)/tests/linux/linux.mk
-ifeq ($(ARCH),x86_64)
 include $(ROOT)/tests/hv/hv.mk
 ARCH_TEST_TARGETS := hv-guests linux-tests
-else
-HV_GUEST_BINS :=
-HV_ARCHIVE_ENTRIES :=
-ARCH_TEST_TARGETS := linux-tests
-endif
 include $(ROOT)/build/module.mk
 include $(ROOT)/tests/host/host.mk
 include $(ROOT)/tests/fuzz/fuzz.mk
