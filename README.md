@@ -674,14 +674,14 @@ See [docs/development.md](docs/development.md).
   `procinfo`, the lookup and the listing all call. `/sys` is not added:
   there is nothing to put in it that `sysctl` does not already hold.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
-  section 19 table are complete; what remains of the audit's own list
-  (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
-  container primitives (pid renumbering if it is wanted — the domain
-  deliberately does without it). After those, the milestones the constitution
-  defers in section 68 (among them the USB stack, AHCI and the full
-  NVMe feature set, eBPF, graphics and a desktop, fuller Linux
-  compatibility, NUMA, live migration, nested virtualization), and the
-  AArch64 follow-ups in `docs/kernel/arch/aarch64/design.md` that the
-  EL2 backend did not cover (GICv3, ASID allocation instead of a full
-  invalidate per switch, FP/SIMD at EL0). Design documents first, one
-  subsystem at a time.
+  own list are complete, apart from pid renumbering, which the process
+  domain deliberately does without and argues against. What follows is
+  the constitution's **section 60 hardware roadmap** — `NVMe` (done),
+  then an Intel/AMD modern NIC, USB, AHCI, with GPU, Wi-Fi and Bluetooth
+  explicitly later — and the AArch64 follow-ups in
+  `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
+  cover (GICv3, ASID allocation instead of a full invalidate per switch,
+  FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the
+  instruction to stop after the audit, name one subsystem in a fixed
+  shape and wait, which `docs/audit/next-subsystem.md` does. Design
+  documents first, one subsystem at a time.
