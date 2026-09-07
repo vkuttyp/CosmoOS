@@ -267,6 +267,24 @@ host; noisy, indicative):
 | steering off (one queue, CPU 0) | 31–38 MiB/s | 49–63 MiB/s | 43 000–53 000 (460–480) |
 | steering on (per-CPU queues) | 34–51 MiB/s | 68–71 MiB/s | ~42 000 (470–9 900) |
 
+**`net-nicbench`** (reports; fails only if fewer than half the ARP
+replies return): per non-loopback interface, 2 000 ARP round trips
+through the driver's rings to the gateway with at most 64 in flight,
+10 000 UDP sends of 1 KiB through the whole stack and out the NIC, and
+the software checksum's share of a send. The results table and the
+offload decision they gate are in `docs/drivers/e1000e/design.md`
+("Offloads"): 12–14 k round trips/s and 20–23 k sends/s on x86_64,
+about 60 % of that on aarch64, a checksum share of 1–2 %, and the two
+drivers within noise of each other.
+
+Two things it found on its first run. An open-loop sender lost
+three quarters of its replies in the receive queue — the driver had
+received every one — which is why the ARP loop is windowed: a round
+trip is only a round trip if the reply is waited for. And the e1000e
+driver was double-counting the interface statistics that `netif` already
+keeps, which looked plausible alone and was obvious beside virtio-net's
+figures in the same boot.
+
 Two concurrent flows gain 30–40 %; a single flow gains too, because
 its two directions hash to different workers. The UDP send rate is the
 sender's system-call rate in both modes; how many datagrams the

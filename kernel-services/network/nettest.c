@@ -2111,3 +2111,212 @@ bool selftest_net_second_nic(const char **reason)
     netif_put(first);
     return ok;
 }
+
+/* --- the NIC-path benchmark (design.md, "The NIC-path benchmark") ----------------
+ *
+ * Traffic that leaves the machine, per interface: ARP round trips
+ * counted at the driver boundary, UDP sends through the whole stack,
+ * and the software checksum's share of a send -- the number that gates
+ * a driver's transmit offload.
+ */
+#define NICBENCH_ARP     2000u
+#define NICBENCH_WINDOW  64u      /* requests in flight: the receive queue is short, and an open loop overruns it */
+#define NICBENCH_UDP     10000u
+#define NICBENCH_UDP_LEN 1024u
+#define NICBENCH_PORT    33434u   /* nobody listens on the host; the send is the measurement */
+
+struct arp_frame {
+    uint16_t htype, ptype;
+    uint8_t hlen, plen;
+    uint16_t op;
+    uint8_t sha[ETH_ALEN];
+    uint8_t spa[4];
+    uint8_t tha[ETH_ALEN];
+    uint8_t tpa[4];
+} __packed;
+
+struct nicbench_hook {
+    struct netif *nif;
+    uint32_t replies;   /* atomic: the worker of whichever CPU the flow hashes to */
+};
+
+/* At the driver boundary, before any protocol layer: an ARP reply from
+ * the interface under test is counted and taken. */
+static bool nicbench_rx_hook(struct netif *nif, struct mbuf *m, void *arg)
+{
+    struct nicbench_hook *h = arg;
+    if (nif != h->nif || m->pkt.len < ETH_HLEN + sizeof(struct arp_frame))
+        return true;
+    uint8_t hdr[ETH_HLEN + sizeof(struct arp_frame)];
+    if (!m_copydata(m, 0, sizeof(hdr), hdr))
+        return true;
+    uint16_t type = (uint16_t)((hdr[12] << 8) | hdr[13]);
+    const struct arp_frame *a = (const struct arp_frame *)(hdr + ETH_HLEN);
+    if (type != ETH_P_ARP || a->op != htons(2))
+        return true;
+    __atomic_fetch_add(&h->replies, 1u, __ATOMIC_RELAXED);
+    m_freem(m);
+    return false;
+}
+
+/* Receive-queue drops across every CPU's worker: where an open-loop
+ * sender's replies go when they arrive faster than they are taken. */
+static uint64_t rxq_drops_total(void)
+{
+    uint64_t total = 0;
+    for (unsigned cpu = 0; cpu < cpu_count(); cpu++) {
+        struct net_cpu_stats st;
+        if (netif_cpu_stats(cpu, &st))
+            total += st.rx_dropped;
+    }
+    return total;
+}
+
+/*
+ * Closed loop: at most NICBENCH_WINDOW requests outstanding. The first
+ * version sent all 2000 at once; the driver received every reply and
+ * the receive queue kept 512 of them, which measured the queue's depth
+ * and nothing about the NIC. A round trip is only a round trip if the
+ * reply is waited for.
+ */
+static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_per_s, uint64_t *ns_per_rt)
+{
+    static const uint8_t bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    struct nicbench_hook h = { .nif = nif, .replies = 0 };
+    uint64_t rx0 = nif->stats.rx_packets, drops0 = rxq_drops_total();
+    netif_set_rx_hook(nicbench_rx_hook, &h);
+    uint64_t t0 = clock_now_ns();
+    unsigned sent = 0;
+    for (unsigned i = 0; i < NICBENCH_ARP; i++) {
+        /* Wait for the window to open; give up on this round if it never does. */
+        uint64_t wait_until = clock_now_ns() + 200ull * 1000000ull;
+        unsigned spins = 0;
+        while (sent - __atomic_load_n(&h.replies, __ATOMIC_RELAXED) >= NICBENCH_WINDOW) {
+            if (clock_now_ns() > wait_until)
+                goto stop;
+            if (++spins < 64)
+                sched_yield();
+            else
+                thread_sleep_ms(1);
+        }
+        struct mbuf *m = m_getcl();
+        if (m == NULL)
+            break;
+        m->data = m->buf + 64;   /* headroom for the Ethernet header */
+        struct arp_frame *a = (struct arp_frame *)m->data;
+        a->htype = htons(1);
+        a->ptype = htons(ETH_P_IP);
+        a->hlen = ETH_ALEN;
+        a->plen = 4;
+        a->op = htons(1);
+        memcpy(a->sha, nif->mac, ETH_ALEN);
+        memcpy(a->spa, &nif->ip4.addr, 4);
+        memset(a->tha, 0, ETH_ALEN);
+        memcpy(a->tpa, &nif->ip4.gateway, 4);
+        m->len = m->pkt.len = sizeof(*a);
+        if (ether_output(nif, m, bcast, ETH_P_ARP) != 0)
+            break;
+        sent++;
+    }
+stop:;
+    /* The clock stops when the replies have caught up, or when it is
+     * clear they are not going to. */
+    uint64_t deadline = clock_now_ns() + 500ull * 1000000ull;
+    while (__atomic_load_n(&h.replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
+        thread_sleep_ms(1);
+    uint64_t dt = clock_now_ns() - t0;
+    netif_set_rx_hook(NULL, NULL);
+    unsigned got = __atomic_load_n(&h.replies, __ATOMIC_RELAXED);
+    kinfo("selftest: net-nicbench: %s: %u ARP requests sent, %u replies counted at the boundary, %llu frames received by the driver, %llu dropped at the receive queue",
+          nif->name, sent, got, (unsigned long long)(nif->stats.rx_packets - rx0),
+          (unsigned long long)(rxq_drops_total() - drops0));
+    CHECK(sent > 0);
+    CHECK(got * 2 >= sent);   /* fewer than half back is a broken path, not a slow one */
+    *rt_per_s = dt ? (unsigned)(((uint64_t)got * 1000000000ull) / dt) : 0;
+    *ns_per_rt = got ? dt / got : 0;
+    return true;
+}
+
+static bool nicbench_udp(const char **reason, struct netif *nif, unsigned *sends_per_s, uint64_t *ns_per_send,
+                         uint64_t *frames_out, unsigned *accepted)
+{
+    struct socket *tx;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+    struct netaddr to = v4addr(nif->ip4.gateway, NICBENCH_PORT);
+    static uint8_t payload[NICBENCH_UDP_LEN];
+    /* Warm up: the first send resolves the gateway and parks behind it. */
+    for (unsigned i = 0; i < 8; i++)
+        (void)ksock_sendto(tx, payload, sizeof(payload), &to);
+    thread_sleep_ms(20);
+    uint64_t tx0 = nif->stats.tx_packets;
+    uint64_t t0 = clock_now_ns();
+    unsigned sent = 0;
+    for (unsigned i = 0; i < NICBENCH_UDP; i++) {
+        if (ksock_sendto(tx, payload, sizeof(payload), &to) == (int64_t)sizeof(payload))
+            sent++;
+        if ((i & 63) == 63)
+            sched_yield();
+    }
+    uint64_t dt = clock_now_ns() - t0;
+    thread_sleep_ms(20);   /* the driver's completions and counters settle */
+    *frames_out = nif->stats.tx_packets - tx0;
+    ksock_put(tx);
+    *accepted = sent;
+    *sends_per_s = dt ? (unsigned)(((uint64_t)sent * 1000000000ull) / dt) : 0;
+    *ns_per_send = sent ? dt / sent : 0;
+    return true;
+}
+
+/* in_cksum over a datagram's worth, by itself: what a transmit checksum
+ * offload could save per packet, and no more. */
+static uint64_t nicbench_cksum_ns(void)
+{
+    static uint8_t buf[NICBENCH_UDP_LEN];
+    volatile uint32_t sink = 0;
+    uint64_t t0 = clock_now_ns();
+    for (unsigned i = 0; i < NICBENCH_UDP; i++) {
+        buf[i & (NICBENCH_UDP_LEN - 1)] = (uint8_t)i;   /* defeat a hoisted result */
+        sink += in_cksum(buf, sizeof(buf));
+    }
+    return (clock_now_ns() - t0) / NICBENCH_UDP;
+}
+
+static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)
+{
+    unsigned rt_s = 0, sends_s = 0, accepted = 0;
+    uint64_t ns_rt = 0, ns_send = 0, frames = 0;
+    if (!nicbench_arp(reason, nif, &rt_s, &ns_rt))
+        return false;
+    if (!nicbench_udp(reason, nif, &sends_s, &ns_send, &frames, &accepted))
+        return false;
+    unsigned share = ns_send ? (unsigned)((cksum_ns * 100) / ns_send) : 0;
+    kinfo("selftest: net-nicbench: %s (caps 0x%x): arp %u rt/s (%llu ns per round trip); udp %u sends/s (%llu ns per send, "
+          "%llu of %u frames left the driver); sw checksum of 1 KiB %llu ns = %u%% of a send",
+          nif->name, nif->caps, rt_s, (unsigned long long)ns_rt, sends_s, (unsigned long long)ns_send,
+          (unsigned long long)frames, accepted, (unsigned long long)cksum_ns, share);
+    return true;
+}
+
+bool selftest_net_nicbench(const char **reason)
+{
+    struct netif *first = netif_default();
+    if (first == NULL) {
+        kinfo("selftest: net-nicbench: no ethernet interface; skipping");
+        return true;
+    }
+    uint64_t cksum_ns = nicbench_cksum_ns();
+    bool ok = nicbench_one(reason, first, cksum_ns);
+    struct netif *second = ok ? find_other_interface(first) : NULL;
+    if (second != NULL) {
+        /* The same numbers over the other driver, on the same host and
+         * the same kind of backend: bring the default down so the stack
+         * routes through the second, as net-second-nic does. */
+        netif_set_up(first, false);
+        arp_age(clock_now_ns() + 3600ull * NS_PER_SEC);
+        ok = nicbench_one(reason, second, cksum_ns);
+        netif_set_up(first, true);
+        netif_put(second);
+    }
+    netif_put(first);
+    return ok;
+}

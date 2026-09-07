@@ -45,6 +45,17 @@ that has been true in fact. It is a step in the verification chain.
   memory of another Intel family, which is exactly what this step exists
   to catch.
 
+## What the NIC-path benchmark found
+
+`net-nicbench` (network `design.md`) runs over this driver on every
+boot. Its first run showed 4 000 frames received for 2 000 replies and
+20 000 transmitted for 10 000 sends, against virtio-net's 2 000 and
+10 000 in the same boot: the driver was incrementing counters that
+`netif_rx` and `netif_transmit` already maintain. Fixed; the driver now
+counts only its own drops and hardware errors. The offload decision the
+benchmark gates is in `design.md`, "Offloads": one to two percent, not
+worth it.
+
 ## Not covered
 
 Ring wrap under sustained load (the tests move a few hundred frames);

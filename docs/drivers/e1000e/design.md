@@ -104,15 +104,42 @@ left alone. This mirrors NVMe's timeout-and-reset rather than inventing
 a second idiom, and it is bounded: a device that keeps hanging keeps
 being reset, and each reset says so.
 
-## Offloads: measured, not assumed
+## Offloads: measured, and not worth it
 
 `nif->caps` is 0: neither `NETIF_CAP_RXCSUM` nor `NETIF_CAP_TXCSUM` is
 claimed. The 82574 can do both (`RXCSUM.TUOFL`, context descriptors),
-but §21 forbids complexity without a benchmark, and the benchmark that
-would justify it does not exist yet — `net-bench` drives loopback.
-`docs/audit/next-subsystem.md` makes that benchmark part of this unit;
-until it exists the frames are checksummed in software like everyone
-else's, and the decision is recorded here rather than left implicit.
+and §21 forbids that complexity without a benchmark showing it pays.
+`net-nicbench` (`docs/kernel-services/network/design.md`, "The NIC-path
+benchmark") is that benchmark, and it says no. Measured 2026-09-07 on
+the boot test (QEMU TCG, 4 CPUs, Apple Silicon host; noisy, indicative):
+
+| Shape | Interface | ARP round trips | UDP 1 KiB sends | sw checksum of 1 KiB |
+|---|---|---|---|---|
+| x86_64, both | virtio-net `eth0` | 12 568/s, 80 µs | 22 567/s, 44 µs | 1.1 µs = 2 % of a send |
+| x86_64, both | e1000e `eth1` | 14 299/s, 70 µs | 21 855/s, 46 µs | 1.1 µs = 2 % |
+| x86_64, e1000e only | e1000e `eth0` | 12 870/s, 78 µs | 20 072/s, 50 µs | 1.2 µs = 2 % |
+| aarch64, both | virtio-net `eth0` | 7 915/s, 126 µs | 13 976/s, 72 µs | 1.0 µs = 1 % |
+| aarch64, both | e1000e `eth1` | 7 583/s, 132 µs | 15 559/s, 64 µs | 1.0 µs = 1 % |
+
+A transmit checksum offload can save at most the checksum's share of a
+send, and that share is one to two percent of a path dominated by the
+stack and the device model. Receive offload saves the same order per
+inbound packet. Context descriptors, the transmit context state machine
+and the receive status-bit handling would buy two percent on a machine
+where they can be measured at all, so they are not written, and this
+table is why. The decision is revisited when the path gets ten times
+cheaper or the traffic gets ten times larger, not before.
+
+The two drivers are within noise of each other, each faster on one
+column. That is a result too: the driver is not where this path spends
+its time, so a faster driver would not show.
+
+The benchmark also found a bug in this driver that nothing else had: it
+incremented `rx_packets`, `rx_bytes`, `tx_packets` and `tx_bytes` that
+`netif_rx` and `netif_transmit` already count, so every figure was
+doubled. Beside virtio-net's numbers in the same boot it was obvious;
+alone it had looked plausible. The driver now counts only what the layer
+cannot see: its own ring-level drops and hardware-reported errors.
 
 ## Naming and coexistence
 

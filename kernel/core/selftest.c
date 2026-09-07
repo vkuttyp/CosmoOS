@@ -373,6 +373,7 @@ static const struct selftest tests[] = {
     { "net-steer",       selftest_net_steer },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
+    { "net-nicbench",    selftest_net_nicbench },
     { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */

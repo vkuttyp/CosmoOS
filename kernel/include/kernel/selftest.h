@@ -155,6 +155,7 @@ bool selftest_net_nonblock(const char **reason);       /* non-blocking mode and 
 bool selftest_net_steer(const char **reason);          /* unit 11: per-CPU receive queues and flow steering */
 bool selftest_net_csum_offload(const char **reason);   /* unit 11: the partial checksum form and M_CSUM_OK */
 bool selftest_net_bench(const char **reason);          /* unit 11: loopback throughput, steering off and on */
+bool selftest_net_nicbench(const char **reason);       /* traffic that leaves the machine, per interface */
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */

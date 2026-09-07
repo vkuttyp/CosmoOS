@@ -681,11 +681,17 @@ See [docs/development.md](docs/development.md).
   whatever the cause bits say (the legacy and queue-mapped schemes
   differ and a model raises one or the other), and a watchdog that
   resets a transmitter whose head has not moved in five seconds and says
-  so. It claims no checksum offload: the device can do it, but §21 wants
-  a benchmark first and the one that exists drives loopback. A default
-  boot now has two interfaces, and a self-test brings the first down and
-  requires the second to take over and resolve its gateway through its
-  own rings.
+  so. It claims no checksum offload, and now with a number rather than a
+  deferral: `net-nicbench` sends traffic that leaves the machine over
+  every interface — ARP round trips through the driver's rings, UDP
+  through the whole stack — and shows the software checksum is one to
+  two percent of a send on both drivers and both architectures, so the
+  offload machinery would buy two percent and is not written. The same
+  benchmark found the driver double-counting statistics the stack
+  already keeps, which looked plausible alone and was obvious beside
+  virtio-net in the same boot. A default boot has two interfaces, and a
+  self-test brings the first down and requires the second to take over
+  and resolve its gateway through its own rings.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. What follows is
