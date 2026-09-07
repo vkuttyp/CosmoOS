@@ -329,6 +329,7 @@ static const struct selftest tests[] = {
     { "pagecache",       selftest_pagecache },
     { "vfs-ramfs",       selftest_vfs_ramfs },
     { "vfs-concurrency", selftest_vfs_concurrency },
+    { "vfs-put-race",    selftest_vfs_put_race },
     { "mountns",         selftest_mountns },
     { "utsns",           selftest_utsns },
     { "pool",            selftest_pool },

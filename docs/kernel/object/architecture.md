@@ -123,6 +123,22 @@ ACCEPT or CONNECT, which are meaningless on an established connection.
 Granting rights that name impossible operations costs nothing and says
 something false.
 
+### Leaving a table
+
+An object that lives in a lookup table (the vnode hash, the process
+table) must leave it in the same act that takes its count to zero, under
+the lock a lookup holds -- or the table will, for a moment, hold a dead
+object, and a lookup in that moment either takes a reference on it (a
+panic in `kobject_get`) or hands out something whose release is already
+running. `kobject_put_and_lock` is that act: it drops the count without
+the lock while more than one reference remains and takes the lock only
+for the drop that reaches zero, returning with the lock held so the
+caller can unlink; `kobject_release_final` then runs the release. The
+alternative -- read the count, decide, then drop -- is three steps, and
+two holders dropping from 2 both read 2. The vnode cache did exactly
+that until `vfs-put-race` reproduced it (`docs/kernel-services/vfs/design.md`,
+"Vnode cache").
+
 ## Non-responsibilities
 
 - Global object namespace, object naming, capability transfer over IPC

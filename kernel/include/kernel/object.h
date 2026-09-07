@@ -21,6 +21,7 @@
 #define KERNEL_OBJECT_H
 
 #include <kernel/compiler.h>
+#include <kernel/spinlock.h>   /* kobject_put_and_lock */
 
 struct kobject;
 
@@ -48,6 +49,24 @@ void kobject_get(struct kobject *obj);
  * under a lock the looker holds: a plain get would panic. */
 bool kobject_tryget(struct kobject *obj);
 void kobject_put(struct kobject *obj);
+/*
+ * Drop a reference, taking `lock` only for the drop that reaches zero.
+ * Returns true with the lock HELD when this was the last reference: the
+ * caller removes the object from whatever table the lock guards, drops
+ * the lock, and then calls kobject_release_final. Returns false, lock
+ * not held, otherwise.
+ *
+ * This is how an object leaves a lookup table without the table ever
+ * holding a dead one. A lookup that takes `lock` and finds the object
+ * may kobject_get it plainly, because the count only reaches zero under
+ * that lock, and an object at zero has already left the table. The
+ * pattern it replaces -- read the count, then decide, then decrement --
+ * let two holders dropping from 2 both see 2 and neither clean up.
+ */
+bool kobject_put_and_lock(struct kobject *obj, spinlock_t *lock, arch_irq_state_t *state);
+/* The release of an object kobject_put_and_lock reported as last, once
+ * the caller has finished with the table. Count must be zero. */
+void kobject_release_final(struct kobject *obj);
 uint32_t kobject_refcount(const struct kobject *obj);
 
 /* Types whose release trampolines to a per-object callback (device,

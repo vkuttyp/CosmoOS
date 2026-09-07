@@ -167,13 +167,23 @@ device released.
 Vnode cache: `vnode_lookup_cached(mnt, ino)` returns a referenced vnode
 if one is hashed; a filesystem's `lookup` calls it before instantiating.
 The cache holds **no** reference, but a hashed vnode always has one:
-`vnode_put` reads the count and, when it is 1, takes the mount's hash
-spinlock, re-reads it (a lookup that raised it since must have held the
-same lock, so the re-read is final) and unhashes before dropping; the
-`release` path therefore takes no mount lock and only syncs dirty pages
-(`pagecache_sync`), drops the cache, calls `evict`, and frees. This closes
-the check-then-get of the audit (a second vnode for an inode whose first
-was mid-release). ramfs
+`vnode_put` drops through `kobject_put_and_lock`, which decrements
+without the lock while the count is above one and takes the mount's hash
+spinlock only for the drop that reaches zero; the unhash happens in that
+same hold, and only then does the release run -- so it takes no mount
+lock and only syncs dirty pages (`pagecache_sync`), drops the cache,
+calls `evict`, and frees. A lookup under the hash lock may therefore
+take a plain reference: the count reaches zero only under that lock, and
+an object at zero has already left the hash.
+
+The first version of this read the count, decided it was the last
+holder, and then dropped -- three steps, and two holders dropping from 2
+each read 2, neither unhashed, and the second drop reached zero with the
+vnode still hashed. `vfs-concurrency` caught it on aarch64 as the
+release assertion, once in many runs; `vfs-put-race` reproduces it on
+demand by dropping the last references of one vnode from every CPU at
+once. It is the audit's `pmm_page_put` finding again, in the cache that
+was written to close a neighbouring one. ramfs
 pins its vnodes (`VNODE_PINNED`: the fs holds a reference while
 `nlink > 0`) because the page cache is its only copy of the data;
 cosmofs vnodes are re-read from disk after eviction. Directory vnodes
