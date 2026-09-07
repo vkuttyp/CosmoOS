@@ -203,7 +203,9 @@ knob is a chain step, not a change to the default.
 - `scripts/qemu-run.sh` (the controller, the disk, `QEMU_USB`).
 - `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` (the
   tests below); `kernel/iommu/iommutest.c` (the fault test walks every
-  blkdev with `debug_dma` instead of naming `nvme0n1`).
+  blkdev with `debug_dma` instead of naming `nvme0n1`);
+  `kernel/include/kernel/iommu.h` and `kernel/iommu/iommu.c` (the last
+  fault's requester id and address in `iommu_stats`).
 - `README.md`, `docs/README.md`, `docs/kernel/device/design.md` (a
   paragraph on the DMA-through-the-controller rule, if the model
   accepts it unchanged).
@@ -216,9 +218,18 @@ Driver-facing, in `drivers/include/drivers/usb.h` and exported from the
 `usb_control_msg`, `usb_bulk_msg`, `usb_submit`, `usb_clear_halt`,
 `usb_device_put`, and the descriptor types.
 
-Kernel-facing: **none is planned, and that is the hypothesis being
-tested**, as it was for the NIC. Two places where it may fail, named
-now so a change there is a finding and not a surprise:
+Kernel-facing: one small, known addition, and otherwise **none is
+planned — that is the hypothesis being tested**, as it was for the NIC.
+
+The known one: `struct iommu_stats` gains `last_fault_sid` and
+`last_fault_addr`, set by `iommu_note_fault` under the unit's lock
+beside the fault count, so a test can assert *which device* faulted and
+not only that something did. Without it the `usb-iommu` check above
+would be an assertion the test cannot make. Observability, not an
+interface change; the same accessor serves NVMe's existing check.
+
+Two places where the hypothesis proper may fail, named now so a change
+there is a finding and not a surprise:
 
 - `device_unregister` of a device that has children (a controller
   removed with devices enumerated). The model does not cascade;
@@ -297,7 +308,12 @@ against the export list before the first boot.
   (`nvme0n1` and `sda`; `vda` has neither), provoking one fault per
   device and checking that the fault the unit reports carries *the
   controller's* requester id for `sda` — the disk has none — which is
-  the DMA-through-the-controller rule made observable.
+  the DMA-through-the-controller rule made observable. Today the test
+  cannot see that: `iommu_get_stats` has only counts, and
+  `iommu_note_fault` puts the requester id in the log alone. So
+  `struct iommu_stats` gains `last_fault_sid` and `last_fault_addr`,
+  recorded by `iommu_note_fault` beside the count — the one kernel
+  change this report knows it needs, listed under New APIs.
 - **Shapes**: `QEMU_USB=0` (skips), `QEMU_IOMMU=0`, `QEMU_SMP=1`,
   release, aarch64 (xHCI on `virt`'s PCI with the SMMU in front),
   `test-crash`, `analyze`, `fuzz` (the descriptor parser gets a host
