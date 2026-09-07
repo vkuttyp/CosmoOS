@@ -497,7 +497,15 @@ static void proc_selftest(void)
     CHECK(waitpid(pid, &status, 0) == pid && status == 128 + SIGKILL);
     close(p[1]);
     CHECK(kill(999999, SIGTERM) < 0 && errno == ESRCH);
-    CHECK(kill(pid, 0) < 0 && errno == EINVAL);
+    /* Signal 0 sends nothing and reports whether the target is there:
+     * a reaped pid is gone, this process is not, and a pid nobody has
+     * is ESRCH. It is how a supervisor tells a live process from a
+     * stale pid file. */
+    CHECK(kill(pid, 0) < 0 && errno == ESRCH);   /* just reaped */
+    CHECK(kill(getpid(), 0) == 0);
+    CHECK(kill(999999, 0) < 0 && errno == ESRCH);
+    CHECK(kill(getpid(), -1) < 0 && errno == EINVAL);
+    CHECK(kill(getpid(), 32) < 0 && errno == EINVAL);
 
     /* Hostile spawn requests. */
     const char *true_argv[] = { "true", NULL };
@@ -1544,6 +1552,242 @@ static void priv_selftest(void)
     puts("usertest: privilege boundary ok");
 }
 
+/* Read a whole file, NUL-terminated. Returns bytes read, or -1. */
+static ssize_t slurp(const char *path, char *buf, size_t n)
+{
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return -1;
+    ssize_t got = read(fd, buf, n - 1);
+    close(fd);
+    if (got < 0)
+        return -1;
+    buf[got] = 0;
+    return got;
+}
+
+static void write_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        CHECK(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+        CHECK(close(fd) == 0);
+    }
+}
+
+/*
+ * Is the supervisor up? The same question `svc status` answers, asked
+ * without spawning anything: every poll through the command is a
+ * process, and a loop of them costs more than the thing being waited
+ * for. That is what pushed init's self-test past the five-second
+ * budget the kernel gives it on the slower architecture.
+ */
+static int svc_up(const char *name)
+{
+    char path[64], buf[32] = { 0 };
+    snprintf(path, sizeof(path), "/run/svc/%s.pid", name);
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    pid_t p = (pid_t)atoi(buf);
+    return p > 0 && kill(p, 0) == 0;
+}
+
+static int svc_run(const char *a, const char *b)
+{
+    const char *argv[] = { "svc", a, b, NULL };
+    pid_t pid = spawnve("/sbin/svc", argv, NULL, NULL, 0);
+    if (pid < 0)
+        return -1;
+    int status = -1;
+    return waitpid(pid, &status, 0) == pid ? status : -1;
+}
+
+/*
+ * The service manager (docs/userland/design.md, "Services"; U8, U9,
+ * U10). Definitions are written here rather than shipped, so each test
+ * says on the spot what it is testing.
+ */
+static void svc_selftest(void)
+{
+    CHECK(mkdir("/etc/svc", 0755) == 0 || errno == EEXIST);
+
+    /* U9: an unknown key fails the service rather than starting it with
+     * whatever the typo did not say. */
+    write_file("/etc/svc/typo", "exec /bin/true\nrooot /tmp\n");
+    CHECK(svc_run("start", "typo") != 0);
+    CHECK(svc_run("status", "typo") != 0);   /* and it is not running */
+
+    /*
+     * U9 again, and the sharper half: a number that is not a number.
+     * `user daemon` through atoi is uid 0, so a typo in the one key
+     * that reduces privilege would have granted the most. Every number
+     * in a definition is parsed strictly, so each of these fails the
+     * service rather than defaulting.
+     */
+    write_file("/etc/svc/baduser", "exec /bin/true\nuser daemon\n");
+    CHECK(svc_run("start", "baduser") != 0);
+    /* A uid past what the field can hold is refused; one inside it is
+     * a uid like any other. 4000000000 is above INT_MAX, which is
+     * where a signed field read it as "no user set" and therefore as
+     * root -- it must now start, and start as that uid. */
+    write_file("/etc/svc/hugeuser", "exec /bin/true\nuser 99999999999999999999\n");
+    CHECK(svc_run("start", "hugeuser") != 0);
+
+    /*
+     * And the credentials are really applied, which is the thing that
+     * matters and which "it started" does not show. The service asks to
+     * rename the machine, which only root may do, as uid 4000000000 --
+     * chosen because it is above INT_MAX, where a signed field read it
+     * as "no user set" and the service ran as root. Refused, the
+     * machine keeps its name; run as root it would succeed, which is
+     * exactly the bug this guards.
+     */
+    char host_before[HOST_NAME_MAX];
+    CHECK(gethostname(host_before, sizeof(host_before)) >= 0);
+    write_file("/etc/svc/unprivsvc", "exec /sbin/hostname stolen-by-service\nuser 4000000000\n");
+    CHECK(svc_run("start", "unprivsvc") == 0);   /* the supervisor ran it */
+    char ulog[512];
+    for (int i = 0; i < 200; i++) {
+        if (slurp("/var/log/svc/unprivsvc", ulog, sizeof(ulog)) > 0 && strstr(ulog, "exited with") != NULL)
+            break;
+        cosmo_sleep_ns(5000000ULL);
+    }
+    CHECK(strstr(ulog, "exited with status 0") == NULL);   /* it was refused */
+    char host_after[HOST_NAME_MAX];
+    CHECK(gethostname(host_after, sizeof(host_after)) >= 0);
+    CHECK(strcmp(host_before, host_after) == 0);
+    write_file("/etc/svc/badnum", "exec /bin/true\nretries plenty\n");
+    CHECK(svc_run("start", "badnum") != 0);
+    write_file("/etc/svc/badlimit", "exec /bin/true\nlimit-nofile lots\n");
+    CHECK(svc_run("start", "badlimit") != 0);
+
+    /* A service whose program does not exist did not start, and says
+     * so: reporting success would make `svc boot` start its
+     * dependents (U10). */
+    write_file("/etc/svc/missing", "exec /bin/nothing-here\n");
+    CHECK(svc_run("start", "missing") != 0);
+
+    /* And one that runs once and finishes is a success, not a failure
+     * -- it is gone before the pid file can be seen, which is the case
+     * a liveness poll alone gets wrong. */
+    write_file("/etc/svc/oneshot", "exec /bin/true\n");
+    CHECK(svc_run("start", "oneshot") == 0);
+
+    /* U8: a service that always fails is restarted, with a wait between
+     * tries, and then given up on. Two retries at 60 ms and 120 ms, so
+     * a supervisor that did not wait would come back too fast. */
+    write_file("/etc/svc/flap",
+               "exec /bin/false\nrestart on-failure\nretries 2\nbackoff-ms 60\n");
+    uint64_t t0 = cosmo_clock_ns();
+    CHECK(svc_run("start", "flap") == 0);
+    /* The supervisor exits by itself once it gives up; wait for it. */
+    int gone = 0;
+    for (int i = 0; i < 400; i++) {
+        if (!svc_up("flap")) {
+            gone = 1;
+            break;
+        }
+        cosmo_sleep_ns(10000000ULL);
+    }
+    CHECK(gone);
+    uint64_t elapsed = cosmo_clock_ns() - t0;
+    CHECK(elapsed >= 180000000ULL);   /* 60 + 120 ms of backoff at least */
+    char log[1024];
+    CHECK(slurp("/var/log/svc/flap", log, sizeof(log)) > 0);
+    CHECK(strstr(log, "giving up after 2 restarts") != NULL);
+    CHECK(strstr(log, "restarting in 60 ms") != NULL);
+    CHECK(strstr(log, "restarting in 120 ms") != NULL);   /* doubled, not repeated */
+
+    /*
+     * U10: a dependency that did not start stops what depends on it and
+     * the message names it, and a cycle is refused rather than run in
+     * some order. Both are things `svc boot` says on its standard
+     * error, so the child gets a file for it and this reads it back --
+     * a non-zero exit alone would not say which of the two happened.
+     */
+    write_file("/etc/svc/broken", "exec /bin/true\nnonsense 1\n");
+    write_file("/etc/svc/dependent", "exec /bin/true\nafter broken\n");
+    write_file("/etc/svc/loop-a", "exec /bin/true\nafter loop-b\n");
+    write_file("/etc/svc/loop-b", "exec /bin/true\nafter loop-a\n");
+    int errfd = open("/tmp/svcboot.err", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(errfd >= 0);
+    struct spawn_handle bmap[] = { { .child = 0, .parent = 0 },
+                                   { .child = 1, .parent = 1 },
+                                   { .child = 2, .parent = errfd } };
+    const char *boot_argv[] = { "svc", "boot", NULL };
+    pid_t bp = spawnve("/sbin/svc", boot_argv, NULL, bmap, 3);
+    CHECK(bp > 0);
+    int bstatus = -1;
+    CHECK(waitpid(bp, &bstatus, 0) == bp);
+    CHECK(bstatus != 0);   /* the cycle and the bad definition are both failures */
+    CHECK(close(errfd) == 0);
+    char err[1024];
+    CHECK(slurp("/tmp/svcboot.err", err, sizeof(err)) > 0);
+    CHECK(strstr(err, "dependent: not started: broken did not start") != NULL);
+    CHECK(strstr(err, "dependency cycle among:") != NULL);
+    CHECK(strstr(err, "loop-a") != NULL && strstr(err, "loop-b") != NULL);
+
+    /* A long-running service can be stopped, and stopping it takes the
+     * service with the supervisor. */
+    write_file("/etc/svc/sleeper", "exec /bin/sleep 30\nrestart always\nretries 9\n");
+    CHECK(svc_run("start", "sleeper") == 0);
+    CHECK(svc_run("status", "sleeper") == 0);
+    CHECK(svc_run("stop", "sleeper") == 0);
+    CHECK(svc_run("status", "sleeper") != 0);
+
+    /*
+     * Leave nothing behind. A supervisor still exiting when this
+     * process does becomes an orphan for real init to reap, and the
+     * kernel's process-count self-test counts processes -- a test that
+     * litters is a test that makes another one flaky.
+     */
+    static const char *const written[] = { "typo",     "flap",    "broken",  "dependent", "loop-a",
+                                           "loop-b",   "sleeper", "baduser", "badnum",    "badlimit",
+                                           "missing",  "oneshot", "hugeuser", "unprivsvc" };
+    static const char *const shipped[] = { "hello", "greeter" };
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++)
+        (void)svc_run("stop", written[i]);
+    for (size_t i = 0; i < sizeof(shipped) / sizeof(shipped[0]); i++)
+        (void)svc_run("stop", shipped[i]);
+    for (int i = 0; i < 500; i++) {
+        int any = 0;
+        for (size_t k = 0; k < sizeof(written) / sizeof(written[0]); k++)
+            any |= svc_up(written[k]);
+        for (size_t k = 0; k < sizeof(shipped) / sizeof(shipped[0]); k++)
+            any |= svc_up(shipped[k]);
+        if (!any)
+            break;
+        cosmo_sleep_ns(5000000ULL);
+    }
+    for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/etc/svc/%s", written[i]);
+        (void)unlink(path);
+    }
+    (void)unlink("/tmp/svcboot.err");
+    /*
+     * And reap them. A supervisor outlives the `svc start` that made
+     * it, so it is reparented here -- and this process, unlike init
+     * running a shell, is not sitting in waitpid. An unreaped zombie is
+     * still a process, which the kernel's process-count self-test
+     * rightly notices.
+     */
+    for (int i = 0; i < 200; i++) {
+        int st;
+        pid_t w = waitpid(-1, &st, COSMO_WNOHANG);
+        if (w <= 0)
+            break;
+    }
+
+    puts("usertest: services ok");
+}
+
 static void selftest(void)
 {
     fs_selftest();
@@ -1552,6 +1796,7 @@ static void selftest(void)
     fpu_selftest();
     trap_selftest();
     priv_selftest();
+    svc_selftest();
 
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);
     CHECK(cosmo_write(1, "", 0) == 0);

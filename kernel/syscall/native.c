@@ -855,7 +855,12 @@ static int64_t sys_kill(struct syscall_args *a)
 {
     int pid = (int)a->a[0];
     int sig = (int)a->a[1];
-    if (sig < 1 || sig >= COSMO_NSIG || pid <= 0)
+    /* Signal 0 sends nothing and reports whether the target exists and
+     * could be signalled, which is what POSIX says of it and the only
+     * way a supervisor can tell a live pid from a stale pid file
+     * (docs/userland/design.md, "Services"). It goes through every
+     * check below and stops before the delivery. */
+    if (sig < 0 || sig >= COSMO_NSIG || pid <= 0)
         return -EINVAL;
     struct process *target = process_lookup((pid_t)pid);
     if (target == NULL)
@@ -872,6 +877,8 @@ static int64_t sys_kill(struct syscall_args *a)
     }
     if (!cred_may_signal(&cur->cred, &target->cred)) {
         rc = -EPERM;
+    } else if (sig == 0) {
+        rc = 0;   /* it exists and could be signalled; nothing is sent */
     } else {
         /* The signal core: a default-terminate signal ends the target
          * (128 + sig) as before; default-ignore ones (SIGCHLD, ...) are

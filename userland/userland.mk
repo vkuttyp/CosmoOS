@@ -8,7 +8,7 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir rmdir pwd true false sleep
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -31,6 +31,7 @@ PROG_DIR_dmesg  := system
 PROG_DIR_sysctl := system
 PROG_DIR_vmctl  := system
 PROG_DIR_hostname := system
+PROG_DIR_svc    := system
 
 USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
 PROG_DIR_init := init
@@ -57,13 +58,16 @@ USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(p)=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
 	etc/rc=$(ROOT)/userland/etc/rc \
+	etc/svc/hello=$(ROOT)/userland/etc/svc/hello \
+	etc/svc/greeter=$(ROOT)/userland/etc/svc/greeter \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
 	etc/pkg/keys/$(notdir $(PKG_TRUST_PUB))=$(PKG_TRUST_PUB)
 ifeq ($(SELFTEST),1)
 USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
-	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB)
+	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) \
+	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter
 
 .PHONY: userland
 userland: $(USER_ELFS)

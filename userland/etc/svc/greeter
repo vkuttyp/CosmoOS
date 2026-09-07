@@ -1,0 +1,4 @@
+# Starts after hello, to show `after` doing something visible.
+exec /bin/echo the greeter follows hello
+after hello
+restart never

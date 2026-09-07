@@ -1,5 +1,8 @@
 # /etc/rc - run by init before the console shell (docs/userland/).
 echo "CosmoOS userland ready"
+# Services, in dependency order. Their output goes to /var/log/svc/<name>
+# and `svc status` says what is running (docs/userland/design.md).
+svc boot
 # The shell test script exists only in self-test builds (SELFTEST=1).
 ls /etc/rc.test 2> /tmp/.rc.probe && sh /etc/rc.test
 rm /tmp/.rc.probe

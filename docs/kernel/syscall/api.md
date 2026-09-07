@@ -61,7 +61,7 @@ kernel stack.
 | 31 | `getsockname` | `int h, struct cosmo_sockaddr *sa, size_t *len` | 0 | `EBADF`, `EFAULT` |
 | 32 | `spawn` | `const struct cosmo_spawn *req` | the child's pid | `EPERM` (`COSMO_SPAWN_SETCRED` naming ids the caller may not grant), `EAGAIN` (`COSMO_RLIMIT_NPROC`), `EFAULT`, `EINVAL` (unknown flags, NULL path/argv, empty argv, bad map), `E2BIG`, `ENAMETOOLONG`, `EBADF` (map names a free handle), path errors, `ENOTDIR` (cwd), `EACCES` (not a regular executable file), `ENOEXEC`, `ENOMEM` |
 | 33 | `wait` | `int pid, int *status, unsigned flags` | the reaped pid; 0 with `COSMO_WNOHANG` when none exited | `EINVAL` (pid 0 or < -1, unknown flag), `ECHILD`, `EINTR`, `EFAULT` |
-| 34 | `kill` | `int pid, int sig` | 0 | `EINVAL` (sig outside 1..31, pid <= 0), `ESRCH`, `EPERM` |
+| 34 | `kill` | `int pid, int sig` | 0 | `EINVAL` (sig outside 0..31, pid <= 0), `ESRCH`, `EPERM` |
 | 35 | `pipe` | `int h[2]` | 0; `h[0]` reads, `h[1]` writes | `EFAULT`, `ENOMEM`, `EMFILE` |
 | 36 | `dup` | `int h, int target, unsigned rights` | the new handle | `EBADF`, `EINVAL` (target < -1 or >= 64), `EMFILE`, `EPERM` (no DUP right, or `rights` asks for more than `h` holds) |
 | 37 | `getppid` | none | the parent's pid, 0 for a kernel-created process | none |
@@ -216,7 +216,12 @@ Details per call:
   a kill `128 + sig`, a fault 139); the child is gone once collected.
   Blocks until a matching child exits unless `COSMO_WNOHANG`; `EINTR`
   when the caller is killed while waiting.
-- **kill**: `sig` is `1..31` (`COSMO_SIGHUP` 1, `COSMO_SIGINT` 2,
+- **kill**: `sig` is `0..31`. **Signal 0 sends nothing** and reports
+  whether the target exists and could be signalled — it runs every
+  check, including the domain and credential ones, and stops before
+  delivery. It is how a supervisor tells a live process from a stale pid
+  file (`docs/userland/design.md`, "Services"). Otherwise `sig` is
+  `1..31` (`COSMO_SIGHUP` 1, `COSMO_SIGINT` 2,
   `COSMO_SIGKILL` 9, `COSMO_SIGSEGV` 11, `COSMO_SIGTERM` 15). Since
   milestone 10 the call goes through the kernel's signal core
   (`docs/kernel/process/design.md` §11) with every action at its

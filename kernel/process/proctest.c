@@ -226,9 +226,16 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
     CHECK(rc == 0);
     CHECK(p != NULL && p->pid > 0);
 
+    /*
+     * The bound catches a hang, not slowness: init's self-test now
+     * supervises services, which means spawning processes and waiting
+     * out real restart backoffs, and it runs on an emulated machine
+     * that may be several times slower than this one. Fifteen seconds
+     * still says "stuck" and no longer says "busy".
+     */
     uint64_t t0 = clock_now_ns();
     int status = process_wait_exit(p);
-    CHECK(clock_now_ns() - t0 < 5000000000ULL);
+    CHECK(clock_now_ns() - t0 < 15000000000ULL);
     process_put(p);
 
     /* The process object is released once its thread is reaped. */

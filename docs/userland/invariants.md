@@ -77,3 +77,43 @@ Gap: none.
 - No service supervision, `getty`, login, users.
 - The utilities are a rescue set; the ports system (Phase 10) brings
   real ones.
+
+**U8. A service that keeps dying stops being restarted, and says so.**
+The supervisor waits `backoff-ms` before a restart and doubles it each
+time to a five-second cap, and gives up after `retries` restarts. A
+supervisor without both of those turns a service that fails instantly
+into a machine that does nothing else, and one that gives up silently
+leaves a dead service looking like a running one. Giving up is written
+to the service's log with the reason, and the supervisor then exits, so
+its pid file going away is what says the service is not coming back.
+
+Check: the self-test runs a service that always fails with
+`restart on-failure`, `retries 2` and a short backoff, and requires the
+supervisor to exit on its own, the log to record two restarts and the
+reason it stopped, and the elapsed time to be at least the two backoffs
+-- so a supervisor that restarted without waiting would fail it.
+
+**U9. What a service is allowed is what its file says.** A definition is
+`key value` lines and an unknown key is an error, which fails that
+service rather than starting it. The keys that reduce authority --
+`user`, `root`, `mountns`, `utsns`, `domain`, `limit-*` -- turn into the
+spawn flags and limits of `docs/kernel/security/design.md` and nothing
+else; `svc` grants no authority of its own. A typo in one of them would
+otherwise leave a service running with more than its author wrote, and
+the file is the only place that is stated.
+
+Check: the self-test requires a definition with an unknown key to fail
+and the service not to run; requires a service given `root` to be unable
+to name a file outside it; and requires `limit-nofile` to bind on the
+service, which it inherits.
+
+**U10. A dependency that fails stops what depends on it.** `svc boot`
+starts in `after` order, refuses a cycle and names it, and does not
+start a service whose dependency did not start -- reporting which one.
+A dependency that is ignored when it fails is a dependency in name only,
+and the failure it hides is exactly the one worth seeing.
+
+Check: the self-test requires a two-service chain to start in order,
+requires a cycle to be refused rather than run in some order, and
+requires that when a dependency's definition is bad the dependent is not
+started and the message names the dependency.

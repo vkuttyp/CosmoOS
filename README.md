@@ -639,11 +639,28 @@ See [docs/development.md](docs/development.md).
   the object's kind is established *before* its bits are read: a handle
   to something else answers `EBADF`, not `EPERM`, because the bit means
   nothing there.
+- **The service manager (done):** constitution section 55 asks for
+  start, stop, restart, dependencies, logging, a restart policy,
+  resource limits and supervision, and says not to reproduce systemd.
+  What it describes is daemontools' shape, so `svc` has **no daemon**:
+  one supervisor process per service, and the state in the filesystem
+  (`/run/svc/<name>.pid`, `/var/log/svc/<name>`). A central manager
+  would need a control channel, and the two Unix answers — a named pipe
+  and a unix socket — are both things this kernel does not have;
+  building an IPC mechanism in order to build a service manager is
+  backwards. A definition is `key value` lines, and an **unknown key is
+  an error**, because a typo in `root` or `user` would otherwise leave a
+  service running with more authority than its author wrote down. Those
+  keys are where the container primitives earn their place: a service is
+  confined by naming it in a file. The restart policy is bounded in both
+  directions — a backoff that doubles and a retry limit — since a
+  service that dies instantly must not spin the machine, and a
+  supervisor that gives up must say so where somebody will find it.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
   container primitives (pid renumbering if it is wanted — the domain
-  deliberately does without it), a service manager and `/proc`. After those, the milestones the constitution
+  deliberately does without it) and `/proc`. After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux
   compatibility, NUMA, live migration, nested virtualization), and the
