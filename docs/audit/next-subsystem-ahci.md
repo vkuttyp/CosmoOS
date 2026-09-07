@@ -172,9 +172,14 @@ failed `-ENODEV`; a port that has a disk and no blkdev is identified
 and registered. The harness has no monitor, so the absent-device branch
 is driven the way the USB unit drives its detach: a test-only operation
 on the blkdev, `debug_presence(bd, present)`, runs the worker's own
-function for the port as if it had read `DET` = 0 (the disk is taken
-down, its commands failed `-ENODEV`, the blkdev unregistered while the
-hardware stays attached) or `DET` = 3 (identified and registered again).
+function for the port `bd` sits on as if it had read `DET` = 0 (the disk
+is taken down, its commands failed `-ENODEV`, the blkdev unregistered
+while the hardware stays attached) or `DET` = 3 (the port identified
+again and a *new* blkdev registered — the unregistered one is only the
+handle that names the controller and port; it is never re-registered,
+its reference count is never touched, and it is freed when its last
+holder lets go, exactly as a physically re-plugged disk gets a new
+object).
 The COMRESET test (below) covers the interrupt and re-identify half
 through the controller's own event; a physical pull is by hand with QMP.
 
@@ -287,10 +292,14 @@ may well run in probe — the design chooses when it knows).
   `debug_presence(bd, false)` runs the worker's function for the port as
   if `DET` had read 0. Then: the in-flight bio completed with `-ENODEV`
   and not never; `blk_find("ahci0p0")` is NULL; a read through the
-  test's own reference returns `-ENODEV`; the driver's per-port state is
-  released once (a counter the test reads). Then `debug_presence(bd,
-  true)` identifies and registers the disk again and it is readable.
-  Together with `ahci-reset` this covers both branches of the handler;
+  test's own reference returns `-ENODEV`. Then `debug_presence(bd,
+  true)` — the old object only naming the port — identifies the disk
+  again and registers a *new* blkdev under the same name; the test finds
+  it by name, reads through it, and checks it is not the old object;
+  then it drops its reference to the old one and the old one's release
+  runs (a counter the driver keeps, read by the test) — once, and only
+  then, because nothing re-registers a live kobject. Together with
+  `ahci-reset` this covers both branches of the handler;
   what neither covers is the controller raising `PCS` on a physical
   pull, which is by hand.
 - **`iommu`**: unchanged; it walks every blkdev with `debug_dma` and
