@@ -25,7 +25,8 @@ interface should be.
   `netif_register` with `struct netif_ops { transmit, release }`.
 - The driver-facing kernel APIs a second driver would use already exist
   and are exercised by NVMe, which is not virtio: `pci_enable_device`,
-  `pci_msix_request(pdev, index, fn, arg, cpu)` with per-CPU routing,
+  `pci_msix_request(pdev, index, fn, arg, name, cpu)` with per-CPU
+  routing,
   `dma_alloc`/`dma_map`/`dma_unmap`, `COSMO_MODULE(...)` with signing
   and `MODULE_CAP_DRIVER`.
 - The receive path takes packets on a per-CPU worker (network design.md,
@@ -109,16 +110,54 @@ which is itself a test that the stack holds two interfaces.
 
 ## Tests
 
-- The existing `net-*` self-tests, run with the new NIC as the default
-  interface: they are interface-agnostic by construction and this is the
-  first time that has been true in fact rather than in intent.
-- A boot shape with **both** NICs, requiring two interfaces to register,
-  each to carry traffic, and `netif_unregister` of one to leave the
-  other working.
+**There is no way to send traffic through a chosen interface**, and that
+shapes what can be tested. IPv4 and IPv6 transmit both take
+`netif_default()`, which is the first non-loopback interface that is up;
+there is no route table with an interface column and no bind-to-device
+option. So "both NICs carrying traffic at once" is not expressible today
+and is not proposed here.
+
+What is testable without inventing an API:
+
+- The existing `net-*` self-tests with the new NIC as **the only**
+  non-loopback interface, which makes it the default. They are
+  interface-agnostic by construction and this is the first time that
+  will have been true in fact rather than in intent.
+- A boot shape with both NICs registered, requiring both to appear and
+  the machine to work; then `netif_unregister` of the one that is
+  default, requiring the other to become default and carry traffic.
+  That covers the interesting half of the two-NIC case -- the registry
+  and the lifetime rules -- without needing to choose an interface per
+  packet.
 - Ring wrap: enough packets to pass the ring's end in both directions.
 - A transmit that never completes, injected, requiring the watchdog to
   reset and the interface to carry traffic afterwards.
 - Unregister under load, which is where the lifetime rules bite.
+
+If two interfaces carrying independent traffic is wanted, it needs an
+interface selector -- a route with an interface, or a socket option --
+and that is a networking unit of its own, not part of a driver.
+
+## Benchmarks
+
+**`net-bench` cannot measure this.** It drives `INADDR_LOOPBACK`, so
+every byte goes through `netif_loopback()` and no NIC is touched; its
+numbers are about the stack, the scheduler and the copies, which is what
+it was built for.
+
+Measuring a NIC needs traffic that leaves the machine, so this unit
+includes a benchmark that does not exist yet: a fixed transfer against
+the QEMU user-mode backend's gateway or a second guest, reporting
+packets per second and cycles per packet, run over the new NIC and over
+virtio-net on the same host and the same backend.
+
+That benchmark is the gate on the offloads. §21 forbids complexity
+without a demonstrated benefit, and the existing evidence points at
+there being none to demonstrate here: QEMU's user-mode backend has no
+`vnet_hdr`, so it offers no checksum offload, which is why unit 11
+found the loopback was where offload paid. If the same holds through a
+real NIC's descriptors, `NETIF_CAP_TXCSUM` and `NETIF_CAP_RXCSUM` are
+left unset with the figures written down beside the decision.
 
 ## Benchmarks
 
@@ -144,6 +183,11 @@ beside the decision rather than an opinion.
   enables it, against a budget that has already flaked twice this week.
   Mitigation: the two-NIC shape is its own step in the chain rather than
   a change to the default.
+- **The unit is larger than "a driver"**, because neither the existing
+  tests nor the existing benchmark reach a NIC. The benchmark is new
+  work, and the review that found this is the reason the estimate moved:
+  the first version of this report assumed `net-bench` and the `net-*`
+  suite would cover it, and neither does.
 - **Little of it is testable on real hardware here**, so "works" will
   mean "works in QEMU" for now, which §61's hardware matrix names as the
   eventual answer and not this unit's.
