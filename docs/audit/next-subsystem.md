@@ -203,6 +203,14 @@ architectures, so no offload is implemented, with the figures beside the
 decision in `docs/drivers/e1000e/design.md`. It also found the driver
 double-counting interface statistics, which nothing else had.
 
+The next report in this shape is `next-subsystem-usb.md` (§60's third
+item). Its choice contradicts a line below: "Alternatives considered"
+said USB "exercises no interface this project claims to have
+generalised". That was about the network interface, which is true, and
+it overlooked the device model, which USB is the first bus to exercise
+with run-time arrival, removal and children. The USB report argues that
+case; this line stands as what was thought at the time.
+
 ## Alternatives considered
 
 - **USB (§60 #3)** — larger by a wide margin (host controller, hub, and

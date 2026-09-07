@@ -702,5 +702,10 @@ See [docs/development.md](docs/development.md).
   cover (GICv3, ASID allocation instead of a full invalidate per switch,
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
-  shape and wait, which `docs/audit/next-subsystem.md` does. Design
-  documents first, one subsystem at a time.
+  shape and wait, which `docs/audit/next-subsystem.md` did for the NIC
+  and `docs/audit/next-subsystem-usb.md` does for USB: an xHCI host
+  controller, root-hub enumeration and mass storage as the first class
+  driver, chosen over AHCI because it is the first bus where devices
+  arrive, leave and have children — the cases the device model was
+  built for and has never met. Design documents first, one subsystem
+  at a time.
