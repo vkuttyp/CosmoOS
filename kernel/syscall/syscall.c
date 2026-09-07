@@ -46,16 +46,27 @@ bool syscall_allowed(const struct process *p, uint64_t nr)
  * Narrowing only: the new mask is the intersection with what is in
  * force, so no sequence of calls widens what a process may do.
  *
- * Atomically per word, because the threads of a process share one mask
- * and two of them may install at once: a plain read-modify-write lets
- * the later writer put back bits the earlier one had just removed. The
- * word is the unit a check reads, and a word only ever loses bits, so a
- * reader racing an install sees either state and both are honest.
+ * Under the process lock, which is what makes an install whole. The
+ * threads of a process share one mask, and two things race it: another
+ * install (a plain read-modify-write would let the later writer put
+ * back bits the earlier one had just removed) and a spawn, which copies
+ * every word to a child. Making the words individually atomic is not
+ * enough for the second -- a copy could take some words from before an
+ * install and some from after, and the child would keep a call the
+ * parent had already denied. Every writer and the copy take this lock,
+ * so a child gets the mask as it was before an install or as it is
+ * after, and never a mixture.
+ *
+ * The stores are still atomic because the check on the syscall path
+ * reads without the lock, and must see a whole word.
  */
 void syscall_filter_install(struct process *p, const uint64_t *mask, unsigned words)
 {
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     for (unsigned i = 0; i < COSMO_SYSCALL_MASK_WORDS; i++)
-        __atomic_fetch_and(&p->syscall_mask[i], i < words ? mask[i] : 0, __ATOMIC_ACQ_REL);
+        __atomic_store_n(&p->syscall_mask[i], p->syscall_mask[i] & (i < words ? mask[i] : 0),
+                         __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&p->lock, s);
 }
 
 uint64_t syscall_filtered_count(void)

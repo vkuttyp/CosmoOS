@@ -519,6 +519,10 @@ int process_create_from_images(const struct process_image *exe, const struct pro
          */
         memset(p->syscall_mask, 0, sizeof(p->syscall_mask));
     } else if (p->pers == parent->pers) {
+        /* Under the parent's lock, which every install also takes: the
+         * child gets the mask as it was before an install or as it is
+         * after, never some words from each -- which would hand it a
+         * call the parent had already denied. */
         arch_irq_state_t fs = spin_lock_irqsave(&parent->lock);
         memcpy(p->syscall_mask, parent->syscall_mask, sizeof(p->syscall_mask));
         spin_unlock_irqrestore(&parent->lock, fs);
