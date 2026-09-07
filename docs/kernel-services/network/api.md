@@ -265,9 +265,12 @@ benchmark's baseline; `sysctl net.steer` reports it).
 `{ rx_queued, rx_dropped, rx_steered_here (the packet was queued to the
 CPU that received it), work_runs }`; false for a CPU without a running
 worker. **`void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)`**
-Test hook: `fn(nif, m, arg)` runs on the worker for every dequeued
-packet before input; returning false takes the packet (the hook then
-owns it). NULL clears.
+Test hook: `fn(nif, m, arg)` runs on the worker, inside a read-side
+section (it must not block), for every dequeued packet before input;
+returning false takes the packet (the hook then owns it). Installing
+publishes `arg` before `fn`. NULL clears and returns only after a grace
+period, so the removed hook is running nowhere and `arg` may be freed --
+a hook's context can live on the caller's stack. Thread context.
 
 **`int netif_transmit(struct netif *nif, struct mbuf *m)`** Stack to
 driver, thread context: inside a read-side section it checks the flags

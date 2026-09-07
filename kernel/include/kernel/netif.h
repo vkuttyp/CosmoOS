@@ -105,8 +105,11 @@ struct net_cpu_stats {
     uint64_t rx_queued, rx_dropped, rx_steered_here, work_runs;
 };
 bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out);   /* false: no such worker */
-/* Test hook: called on the worker for every received packet before input;
- * return false to take the packet (the hook then owns it). */
+/* Test hook: called on the worker, inside a read-side section (no
+ * blocking), for every received packet before input; return false to
+ * take the packet (the hook then owns it). Clearing (fn NULL) returns
+ * only after a grace period: the old hook is no longer running anywhere
+ * and its `arg` may be freed. Thread context. */
 typedef bool (*netif_rx_hook_fn)(struct netif *nif, struct mbuf *m, void *arg);
 void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg);
 /* Stack -> driver: takes the packet. Thread context; -ENETUNREACH when

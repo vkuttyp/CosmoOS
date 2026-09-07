@@ -124,7 +124,7 @@ static void rx_process(struct e1000e *e)
              */
             if (fresh)
                 m_freem(fresh);
-            e->nif.stats.rx_dropped++;
+            __atomic_fetch_add(&e->nif.stats.rx_dropped, 1, __ATOMIC_RELAXED);
             d->length = 0;
             d->status = 0;
             d->errors = 0;
@@ -136,14 +136,17 @@ static void rx_process(struct e1000e *e)
                  * one split across descriptors (never, at 2 KiB buffers
                  * and a 1500 MTU): not handed up (E1). */
                 if (errors)
-                    e->nif.stats.rx_errors++;
+                    __atomic_fetch_add(&e->nif.stats.rx_errors, 1, __ATOMIC_RELAXED);
                 else
-                    e->nif.stats.rx_dropped++;
+                    __atomic_fetch_add(&e->nif.stats.rx_dropped, 1, __ATOMIC_RELAXED);
                 m_freem(m);
             } else {
+                /* netif_rx counts the packet and its bytes; the driver
+                 * counts only what the layer cannot see -- the drops and
+                 * errors above. The first version counted both here and
+                 * there, and the NIC-path benchmark, with virtio-net's
+                 * figures beside it, showed every number doubled. */
                 m->len = m->pkt.len = len;
-                e->nif.stats.rx_packets++;
-                e->nif.stats.rx_bytes += len;
                 netif_rx(&e->nif, m);
             }
         }
@@ -191,7 +194,7 @@ static void tx_drain(struct e1000e *e)
         if (e->tx_bufs[i] != NULL) {
             m_freem(e->tx_bufs[i]);
             e->tx_bufs[i] = NULL;
-            e->nif.stats.tx_dropped++;
+            __atomic_fetch_add(&e->nif.stats.tx_dropped, 1, __ATOMIC_RELAXED);   /* counted as sent by netif, then thrown away here */
         }
         e->tx_head = (i + 1) % E1000E_RING;
         e->tx_used--;
@@ -233,9 +236,8 @@ static int e1000e_transmit(struct netif *nif, struct mbuf *m)
     tx_reclaim(e);   /* free what has completed before deciding there is no room */
     if (e->tx_used + nsegs > E1000E_RING - 1) {
         spin_unlock_irqrestore(&e->lock, s);
-        e->nif.stats.tx_dropped++;
         m_freem(m);
-        return -ENOBUFS;
+        return -ENOBUFS;   /* netif_transmit counts an error return as tx_errors */
     }
 
     unsigned first = e->tx_tail, i = first, mapped = 0;
@@ -262,7 +264,6 @@ static int e1000e_transmit(struct netif *nif, struct mbuf *m)
         for (unsigned k = first, n = 0; n < mapped; n++, k = (k + 1) % E1000E_RING)
             dma_unmap(&e->pdev->dev, e->txd[k].addr, e->txd[k].length, DMA_TO_DEVICE);
         spin_unlock_irqrestore(&e->lock, s);
-        e->nif.stats.tx_dropped++;
         m_freem(m);
         return -EINVAL;
     }
@@ -271,8 +272,6 @@ static int e1000e_transmit(struct netif *nif, struct mbuf *m)
     e->tx_bufs[last] = m;   /* freed when its last descriptor completes */
     e->tx_tail = i;
     e->tx_used += nsegs;
-    e->nif.stats.tx_packets++;
-    e->nif.stats.tx_bytes += m->pkt.len;
     wmb();
     wr32(e, E1000_TDT0, e->tx_tail);
     spin_unlock_irqrestore(&e->lock, s);

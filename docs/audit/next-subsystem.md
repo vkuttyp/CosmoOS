@@ -192,6 +192,17 @@ beside the decision rather than an opinion.
   mean "works in QEMU" for now, which §61's hardware matrix names as the
   eventual answer and not this unit's.
 
+## Outcome (2026-09-07)
+
+Built as #47 and the benchmark unit after it. The hypothesis held: the
+driver added nothing to the kernel's interface (one `EXPORT_SYMBOL`).
+The benchmark that this report said did not exist now does
+(`net-nicbench`), and it settled the offload question the report left
+open: the software checksum is 1–2 % of a send on both drivers and both
+architectures, so no offload is implemented, with the figures beside the
+decision in `docs/drivers/e1000e/design.md`. It also found the driver
+double-counting interface statistics, which nothing else had.
+
 ## Alternatives considered
 
 - **USB (§60 #3)** — larger by a wide margin (host controller, hub, and

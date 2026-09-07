@@ -206,6 +206,12 @@ another CPU without a lock is freed only from a kobject release or a
   reference under the lock before waking.
 - `vq` freeing (`virtq_free`) happens after `pci_msix_release`, which now
   synchronises with any handler still holding the queue pointer.
+- The receive hook (`netif_set_rx_hook`, tests): the worker loads and
+  calls it inside a read-side section; clearing it stores NULL and then
+  `synchronize_quiesce()`, so on return the hook runs nowhere and its
+  argument -- a test's stack frame -- may go. Before this the API asked
+  every hook to keep its context alive indefinitely and to tolerate a
+  stray late call, which `net-nicbench` got wrong across two rounds.
 
 ## Module unload protocol
 

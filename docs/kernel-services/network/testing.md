@@ -4,7 +4,7 @@
 
 | Layer | Mechanism | Command |
 |---|---|---|
-| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
+| Target, loopback | The self-tests below, since unit 11 also `net-steer`, `net-rxhook-grace`, `net-csum-offload` and `net-bench`: `net-mbuf`, `net-cksum`, `net-arp`, `net-lo-udp`, `net-lo-tcp`, `net-lo-tcp-loss`, `net-tcp-mss` (the path MSS is decided outside the TCP lock: loopback and own addresses give `TCP_MSS_LO`, the gateway `TCP_MSS_V4`, and both ends of a loopback connection settle on `TCP_MSS_LO`), `net-netif-lifetime` (a synthetic interface: registry and lookup references, `netif_unregister` stops transmit and receive, the release runs once after the last put) and `net-accept-race` (64 accepts against a client that connects and drops at once; every child names its socket when accept returns) | `make test` |
 | Target, real NIC | `net-harness`: echo services on `eth0` driven by the host through QEMU user-mode networking (`tests/boot/nettest.py`), plus the guest connecting back to the host | `make test` |
 | User mode | `init --selftest` runs `net_selftest()` over loopback through system calls 23–31 (`usertest: sockets ok`) | `make test` |
 | Boot markers | `module: loaded virtio_net 1.0`, `net: eth0 registered`, and in self-test builds `NETTEST: client ok` and `NETTEST: done ... quit=1` | every `make test`, release included for the first two |
@@ -247,6 +247,15 @@ on 4 CPUs at least two workers used; `netif_rx_on(m, 1)` is seen on CPU
 1; with steering off the eight flows all arrive on CPU 0; CPU 0's
 queue counters are non-zero; unregister releases the interface.
 
+**`net-rxhook-grace`**: the receive hook announces itself and then
+lingers 10 ms inside the worker; the test, seeing the announcement,
+clears the hook while it is lingering and checks on return that the
+hook has finished. On two or more CPUs the frame is queued to another
+CPU's worker (`netif_rx_on`), so the clear really does overlap the hook;
+without the grace period in `netif_set_rx_hook` the check fails there.
+This is what lets `net-nicbench` keep one hook context per round on its
+stack.
+
 **`net-csum-offload`**: a fake interface `csum0` with both capabilities
 transmits a hand-built IPv4/TCP packet in the partial form (flags,
 `csum_start` 20, `csum_offset` 16, not yet valid; `m_csum_complete`
@@ -266,6 +275,24 @@ host; noisy, indicative):
 |---|---|---|---|
 | steering off (one queue, CPU 0) | 31–38 MiB/s | 49–63 MiB/s | 43 000–53 000 (460–480) |
 | steering on (per-CPU queues) | 34–51 MiB/s | 68–71 MiB/s | ~42 000 (470–9 900) |
+
+**`net-nicbench`** (reports; fails only if fewer than half the ARP
+replies return): per non-loopback interface, 2 000 ARP round trips
+through the driver's rings to the gateway with at most 64 in flight,
+10 000 UDP sends of 1 KiB through the whole stack and out the NIC, and
+the software checksum's share of a send. The results table and the
+offload decision they gate are in `docs/drivers/e1000e/design.md`
+("Offloads"): 12–14 k round trips/s and 20–23 k sends/s on x86_64,
+about 60 % of that on aarch64, a checksum share of 1–2 %, and the two
+drivers within noise of each other.
+
+Two things it found on its first run. An open-loop sender lost
+three quarters of its replies in the receive queue — the driver had
+received every one — which is why the ARP loop is windowed: a round
+trip is only a round trip if the reply is waited for. And the e1000e
+driver was double-counting the interface statistics that `netif` already
+keeps, which looked plausible alone and was obvious beside virtio-net's
+figures in the same boot.
 
 Two concurrent flows gain 30–40 %; a single flow gains too, because
 its two directions hash to different workers. The UDP send rate is the

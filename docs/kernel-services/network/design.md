@@ -702,6 +702,45 @@ multi-queue backend (tap, vhost) is in the test matrix.
 
 ### Benchmarks
 
+### The NIC-path benchmark (`net-nicbench`, after the e1000e unit)
+
+`net-bench` drives loopback, so it measures the stack, the scheduler and
+the copies and never touches a device. The offload decision for a
+driver needs traffic that *leaves the machine*, and until this existed
+that decision was being made by assumption (`docs/audit/next-subsystem.md`,
+"Benchmarks"). `net-nicbench` runs on every non-loopback interface the
+machine has, bringing the default down to reach the second exactly as
+`net-second-nic` does, and reports three things per interface:
+
+- **ARP round trips through the driver's rings.** Requests for the
+  gateway are built by hand and sent with `ether_output`; the replies
+  are counted and consumed by the receive hook at the driver boundary,
+  before any protocol layer sees them. The hook's context is one per
+  round, on the round's stack frame: clearing the hook waits a grace
+  period (`netif_set_rx_hook`), so no worker is still counting into a
+  round that has ended, and a reply from one interface's round is never
+  credited to the next interface's. QEMU's user-mode backend answers
+  ARP in-process, so this is the lightest peer available and the number
+  is the driver plus the device model plus the worker hand-off, with
+  the IP stack out of the picture. Reported as round trips per second
+  and nanoseconds per round trip.
+- **UDP transmit through the whole stack and out the NIC.** 1 KiB
+  datagrams to the gateway from an in-kernel socket, so the cost is the
+  socket, UDP, IPv4, Ethernet, the driver and the device model. Reported
+  as sends per second and nanoseconds per send, with how many frames the
+  driver actually transmitted beside how many the socket accepted -- a
+  driver that drops under load shows up as the gap.
+- **The software checksum's share.** `in_cksum` over the same 1 KiB,
+  timed by itself, as a percentage of a send. This is the gate: a
+  transmit checksum offload can save at most that share, so if it is a
+  few percent of a packet that is already dominated by the device model,
+  the descriptor machinery it needs is not worth writing.
+
+Reported, not compared, for the same reason as `net-bench`: TCG timing
+on a shared host is noisy, and a benchmark that fails on a slow morning
+teaches nothing. It does fail if fewer than half the ARP replies come
+back, because that is a broken path rather than a slow one.
+
 `net-bench` (debug builds; reports, never fails on timing) measures on
 loopback: TCP throughput of a 4 MiB transfer with one flow and with two
 concurrent flows, in MiB/s, and the UDP send rate over 10 000
