@@ -357,6 +357,31 @@ virtio-blk and USB on the same device-model host. Two additions, per
 - **Size**: about 1 000 lines for the driver, near NVMe's 905, plus 400
   of tests. Step 1 is the check.
 
+## Outcome (2026-09-08)
+
+Built as one unit on `drivers/ahci` (`docs/drivers/ahci/`). The
+hypothesis held: no kernel interface changed shape; the additions are
+the test-only `debug_presence` op this report named and one
+fault-injection kind. The DMA-parent question is answered as proposed:
+a port's disk is a blkdev whose `dev` is the controller, there is no
+`struct device` per port, and hotplug did not change that.
+
+What the report did not know: on `q35` a plain `-drive` is a SATA disk
+on the ICH9's port 0, so the boot image was on the controller all along
+and the driver now drives the medium it booted from (`ahci0p0`); the
+test disk moved to port 1 on both machines. Every test in the plan
+exists and passes on both architectures; the racing readers found
+nothing new this time, and the second refusing driver exercised the
+pending queue's fix without incident.
+
+The benchmark answered the NCQ question the way the report allowed for:
+four concurrent streams through non-queued commands reach 87 % of
+NVMe's aggregate on this host, so the tag machinery is not written
+(`docs/drivers/ahci/testing.md`, "Benchmarks").
+
+Size: about 900 lines for the driver, 350 of tests — inside the
+estimate.
+
 ## Alternatives considered
 
 - **A `sata` bus with per-port devices** — models the DMA-parent

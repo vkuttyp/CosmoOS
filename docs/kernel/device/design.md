@@ -301,8 +301,13 @@ Neither changed an interface; both are rules the next such bus follows.
   controller's device (`usb_dma_dev`), and the storage driver's blkdev
   names the controller as its `dev`. An IOMMU fault provoked through the
   USB disk is attributed to the controller's requester id, which is the
-  truth. If a second bus of this kind arrives (AHCI ports), the rule
-  moves into `struct device` as a DMA-parent pointer; not before.
+  truth. The second case arrived with the AHCI unit and did not need
+  the rule to move: a SATA port has no identity of its own (no
+  configuration space, no requester id, no descriptors), so a port's
+  disk is a blkdev whose `dev` is the controller, as an NVMe namespace
+  is, and there is no `struct device` per port. The rule stays in USB's
+  header, for the one bus whose devices are devices
+  (`docs/drivers/ahci/design.md`, "What this unit answers").
 - **Removing a parent with children.** `device_unregister` does not
   cascade. The bus removes its children first -- the hardware order
   demands it anyway (a slot cannot be disabled after the controller is

@@ -166,6 +166,11 @@ bool selftest_usb_storage(const char **reason);  /* sda through the block layer:
 bool selftest_usb_storage_timeout(const char **reason);   /* a CSW that never comes: the block layer's timeout, recovery */
 bool selftest_usb_unplug(const char **reason);   /* the removal path with a bio in flight; re-enumeration */
 bool selftest_blk_bench(const char **reason);    /* reports: sequential I/O over every disk in the boot */
+bool selftest_ahci_identify(const char **reason); /* the SATA disk: geometry, controller as DMA device */
+bool selftest_ahci_io(const char **reason);       /* ahci0p0 through the block layer: round trips, PRDT, counters */
+bool selftest_ahci_timeout(const char **reason);  /* a command that never starts: the block layer's timeout, port restart */
+bool selftest_ahci_unplug(const char **reason);   /* the disk-gone path with a bio in flight; a new blkdev after */
+bool selftest_ahci_reset(const char **reason);    /* COMRESET with a command in flight; the same disk keeps serving */
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);

@@ -84,6 +84,32 @@ if [ "$usb" != "0" ]; then
     esac
     usb_devs="-device $xhci_model,id=xhci0 -drive if=none,id=usbdisk,format=raw,file=$usbdisk -device usb-storage,bus=xhci0.0,drive=usbdisk"
 fi
+# SATA (docs/drivers/ahci/api.md): a disk on an AHCI controller -- q35's
+# built-in ICH9 (its ports are ide.0..ide.5; the boot image above sits on
+# ide.0, which is where q35 puts a plain -drive, so the test disk goes on
+# port 1), or -device ahci on virt (port 1 too, so the disk has the same
+# name on both machines) -- backed by an 8 MiB image beside the others.
+# QEMU_SATA: disk (default), cd (an ATAPI device instead: the driver
+# refuses it), or 0 (no disk; q35 keeps its controller with only the boot
+# image on it, virt has none).
+sata=${QEMU_SATA:-disk}
+satadisk=${QEMU_SATADISK:-$outdir/sata.img}
+sata_drive=""
+sata_dev_x86=""
+sata_dev_a64=""
+if [ "$sata" != "0" ]; then
+    if [ ! -f "$satadisk" ]; then
+        dd if=/dev/zero of="$satadisk" bs=1048576 count=8 status=none 2>/dev/null \
+            || dd if=/dev/zero of="$satadisk" bs=1048576 count=8 2>/dev/null
+    fi
+    case "$sata" in
+    cd) sata_model=ide-cd ;;
+    *)  sata_model=ide-hd ;;
+    esac
+    sata_drive="-drive if=none,id=sata0,format=raw,file=$satadisk"
+    sata_dev_x86="-device $sata_model,drive=sata0,bus=ide.1"
+    sata_dev_a64="-device ahci,id=ahci0 -device $sata_model,drive=sata0,bus=ahci0.1"
+fi
 # QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
 pcap=""
 if [ -n "${QEMU_PCAP:-}" ]; then
@@ -127,6 +153,7 @@ if [ "$arch" = aarch64 ]; then
         -device virtconsole,chardev=vcon \
         $nic_devs \
         $usb_devs \
+        $sata_drive $sata_dev_a64 \
         $fwcfg \
         $pcap \
         -semihosting-config enable=on,target=native \
@@ -159,6 +186,7 @@ exec qemu-system-x86_64 \
     -device virtconsole,chardev=vcon \
     $nic_devs \
     $usb_devs \
+    $sata_drive $sata_dev_x86 \
     $fwcfg \
     $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

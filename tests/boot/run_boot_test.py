@@ -100,6 +100,25 @@ if USB != "0":
         r"^\[ INFO\] usb-storage: usb0-\d+ is sda: ",
         r"^\[ INFO\] blk: sda: 16384 sectors of 512 bytes",
     ]
+# The AHCI driver loads on every boot; the disk registers when QEMU was
+# given one (QEMU_SATA disk; docs/drivers/ahci/), an ATAPI device is
+# refused with a line (QEMU_SATA cd).
+SATA = os.environ.get("QEMU_SATA", "disk")
+REQUIRED_MARKERS += [r"^\[ INFO\] module: loaded ahci 1\.0 "]
+if ARCH == "x86_64":
+    # q35's boot image is a SATA disk on the ICH9's port 0: the driver drives it too.
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] ahci0: pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: AHCI ",
+        r"^\[ INFO\] ahci0: port 0: QEMU HARDDISK \(.*\) is ahci0p0: \d+ sectors of 512 bytes",
+    ]
+if SATA == "disk":
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] ahci0: pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: AHCI ",
+        r"^\[ INFO\] ahci0: port 1: QEMU HARDDISK \(.*\) is ahci0p1: 16384 sectors of 512 bytes",
+        r"^\[ INFO\] blk: ahci0p1: 16384 sectors of 512 bytes",
+    ]
+elif SATA == "cd":
+    REQUIRED_MARKERS += [r"^\[ INFO\] ahci0: port 1: an ATAPI device \(signature 0xeb140101\) is not driven"]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
 # The package system's script checks: output lines the harness also requires in self-test builds.

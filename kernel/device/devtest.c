@@ -10,6 +10,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
+#include <kernel/iommu.h>
 #include <kernel/kmalloc.h>
 #include <kernel/pmm.h>
 #include <kernel/log.h>
@@ -908,20 +909,21 @@ static void usbs_racer_main(void *arg)
  * another thread submits while the recovery runs. Five rounds, the
  * racing bio placed at different points of the recovery.
  */
-bool selftest_usb_storage_timeout(const char **reason)
+static bool disk_timeout_common(const char *name, enum fi_kind kind, const char *tag, const char **reason)
 {
 #if !CONFIG_FAULTINJECT
     (void)reason;
-    kinfo("selftest: usb-storage-timeout: no fault injection in this build; skipping");
+    (void)name; (void)kind; (void)tag;
+    kinfo("selftest: %s: no fault injection in this build; skipping", tag);
     return true;
 #else
-    struct blkdev *bd = blk_find("sda");
+    struct blkdev *bd = blk_find(name);
     if (bd == NULL) {
-        kinfo("selftest: usb-storage-timeout: no sda; skipping");
+        kinfo("selftest: %s: no %s; skipping", tag, name);
         return true;
     }
     bool ok = true;
-#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-storage-timeout: step failed at line %d (round %u)", __LINE__, round); ok = false; } } while (0)
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: %s: step failed at line %d (round %u)", tag, __LINE__, round); ok = false; } } while (0)
     static const unsigned delays_us[] = { 300, 800, 1500, 2500, 4000 };
     uint8_t *buf = kmalloc(4096, 0), *check = kmalloc(4096, 0);
     struct usbs_racer *racer = kzalloc(sizeof(*racer));
@@ -945,12 +947,12 @@ bool selftest_usb_storage_timeout(const char **reason)
         bd->timeout_ns = 200ull * 1000000ull;   /* the thread checks every 500 ms: one exchange, at most ~700 ms */
         struct thread *rt = thread_create(usbs_racer_main, racer, "usbs-racer", SCHED_PRIO_DEFAULT);
         STEP(rt != NULL);
-        faultinject_set(FI_USB_CSW, 1, 1, NULL);   /* the next CSW, once */
+        faultinject_set(kind, 1, 1, NULL);   /* the next CSW, once */
         uint64_t t0 = clock_now_ns();
         int rc = blk_read(bd, 0, 8, buf);
         uint64_t dt = clock_now_ns() - t0;
         total_dt += dt;
-        faultinject_clear(FI_USB_CSW);
+        faultinject_clear(kind);
         STEP(rc == -ETIMEDOUT);
         STEP(bd->timeouts == timeouts0 + 1);
         STEP(dt < 3000ull * 1000000ull);
@@ -961,8 +963,8 @@ bool selftest_usb_storage_timeout(const char **reason)
             thread_sleep_ms(1);
         if (racer->rc != 0 || !racer->mk.done || racer->mk.status != 0 || racer->rc2 != 0 || !racer->mk2.done ||
             racer->mk2.status != 0)
-            kerror("selftest: usb-storage-timeout: the bios submitted %u us into the recovery: submit %d/%d, done %d/%d, status %d/%d",
-                   racer->delay_us, racer->rc, racer->rc2, racer->mk.done, racer->mk2.done, racer->mk.status,
+            kerror("selftest: %s: the bios submitted %u us into the recovery: submit %d/%d, done %d/%d, status %d/%d",
+                   tag, racer->delay_us, racer->rc, racer->rc2, racer->mk.done, racer->mk2.done, racer->mk.status,
                    racer->mk2.status);
         STEP(racer->rc == 0 && racer->mk.done && racer->mk.status == 0);
         STEP(racer->rc2 == 0 && racer->mk2.done && racer->mk2.status == 0);
@@ -975,8 +977,8 @@ bool selftest_usb_storage_timeout(const char **reason)
     }
     bd->timeout_ns = saved;
     if (ok)
-        kinfo("selftest: usb-storage-timeout: %s: %u rounds of -ETIMEDOUT (%llu ms each on average), reset recovery, reads again; a bio submitted into each recovery was served",
-              bd->name, round, (unsigned long long)(total_dt / 1000000 / (round ? round : 1)));
+        kinfo("selftest: %s: %s: %u rounds of -ETIMEDOUT (%llu ms each on average), reset recovery, reads again; a bio submitted into each recovery was served",
+              tag, bd->name, round, (unsigned long long)(total_dt / 1000000 / (round ? round : 1)));
 #undef STEP
     if (racer) {
         kfree(racer->buf);
@@ -987,11 +989,21 @@ bool selftest_usb_storage_timeout(const char **reason)
     kfree(check);
     blkdev_put(bd);
     if (!ok) {
-        *reason = "usb-storage-timeout: see the log";
+        *reason = "timeout test: see the log";
         return false;
     }
     return true;
 #endif
+}
+
+bool selftest_usb_storage_timeout(const char **reason)
+{
+    return disk_timeout_common("sda", FI_USB_CSW, "usb-storage-timeout", reason);
+}
+
+bool selftest_ahci_timeout(const char **reason)
+{
+    return disk_timeout_common("ahci0p1", FI_AHCI_CI, "ahci-timeout", reason);
 }
 
 /*
@@ -1130,28 +1142,366 @@ static void blk_bench_one(struct blkdev *bd, bool write, uint32_t bio_bytes, uin
           (unsigned long long)((uint64_t)reqs * 1000000000ull / dt), (unsigned long long)(reqs ? dt / 1000 / reqs : 0));
 }
 
+/* Four threads, each reading 1 MiB in 4 KiB bios from its own region of
+ * the disk, at once: what several commands in flight buy on a device --
+ * the figure that decides whether NCQ is worth writing (docs/drivers/ahci/
+ * testing.md, "Benchmarks"). */
+struct bench_worker {
+    struct blkdev *bd;
+    uint64_t start;
+    unsigned reqs;
+    int rc;
+    uint8_t *buf;
+};
+
+static void bench_worker_main(void *arg)
+{
+    struct bench_worker *w = arg;
+    unsigned n = 4096 / w->bd->sector_size;
+    for (uint64_t s = w->start; s + n <= w->start + (1u << 20) / w->bd->sector_size; s += n) {
+        int rc = blk_read(w->bd, s, n, w->buf);
+        if (rc) {
+            w->rc = rc;
+            break;
+        }
+        w->reqs++;
+    }
+    thread_exit(0);
+}
+
+static void blk_bench_concurrent(struct blkdev *bd)
+{
+    enum { N = 4 };
+    struct bench_worker w[N];
+    struct thread *th[N];
+    unsigned started = 0;
+    for (unsigned i = 0; i < N; i++) {
+        w[i].bd = bd;
+        w[i].start = (uint64_t)i * ((1u << 20) / bd->sector_size);
+        w[i].reqs = 0;
+        w[i].rc = 0;
+        w[i].buf = kmalloc(4096, 0);
+        th[i] = w[i].buf ? thread_create(bench_worker_main, &w[i], "blk-bench", SCHED_PRIO_DEFAULT) : NULL;
+        if (th[i])
+            started++;
+    }
+    uint64_t t0 = clock_now_ns();
+    unsigned reqs = 0;
+    int rc = 0;
+    for (unsigned i = 0; i < N; i++) {
+        if (th[i]) {
+            thread_join(th[i]);
+            reqs += w[i].reqs;
+            if (w[i].rc)
+                rc = w[i].rc;
+        }
+        kfree(w[i].buf);
+    }
+    uint64_t dt = clock_now_ns() - t0;
+    if (dt == 0)
+        dt = 1;
+    kinfo("selftest: blk-bench: %s: %u threads reading 4 KiB bios at once: %u requests in %llu ms = %llu req/s%s",
+          bd->name, started, reqs, (unsigned long long)(dt / 1000000), (unsigned long long)((uint64_t)reqs * 1000000000ull / dt),
+          rc ? " (with errors)" : "");
+}
+
 bool selftest_blk_bench(const char **reason)
 {
     (void)reason;
-    static const char *const names[] = { "sda", "nvme0n1", "vda" };
+    static const char *const names[] = { "sda", "ahci0p1", "nvme0n1", "vda" };
     uint8_t *buf = kmalloc(65536, 0);
     if (buf == NULL)
         return true;
     for (unsigned i = 0; i < 65536; i++)
         buf[i] = (uint8_t)(i * 13 + 1);
-    for (unsigned k = 0; k < 3; k++) {
+    for (unsigned k = 0; k < ARRAY_SIZE(names); k++) {
         struct blkdev *bd = blk_find(names[k]);
         if (bd == NULL)
             continue;
-        bool writes = k == 0;   /* sda only: the others carry filesystems later tests use */
+        bool writes = k <= 1;   /* the USB and SATA disks only: the others carry filesystems later tests use */
         blk_bench_one(bd, false, 65536, 4u << 20, buf);
         if (writes)
             blk_bench_one(bd, true, 65536, 4u << 20, buf);
         blk_bench_one(bd, false, 4096, 1u << 20, buf);
         if (writes)
             blk_bench_one(bd, true, 4096, 1u << 20, buf);
+        blk_bench_concurrent(bd);
         blkdev_put(bd);
     }
     kfree(buf);
+    return true;
+}
+
+/* --- the SATA disk (docs/drivers/ahci/testing.md) ----------------------------------- */
+
+/*
+ * The AHCI driver's answer to the question the USB unit left: a port's
+ * disk is a blkdev whose DMA device is the controller, and nothing else
+ * -- no struct device per port. Geometry from IDENTIFY against the image
+ * the harness gave it.
+ */
+bool selftest_ahci_identify(const char **reason)
+{
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        kinfo("selftest: ahci-identify: no ahci0p1; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: ahci-identify: step failed at line %d", __LINE__); ok = false; } } while (0)
+    STEP(bd->sector_size == 512 && bd->capacity == 16384);
+    STEP(bd->max_sectors >= 64 && bd->max_segments >= 8);
+    STEP(bd->dev != NULL && bd->dev->bus == &pci_bus);   /* the controller: the DMA requester */
+    STEP(bd->dev->iommu != NULL || !iommu_present());   /* in a domain when there is a unit */
+    STEP(bd->ops->debug_dma != NULL && bd->ops->debug_presence != NULL && bd->ops->timeout != NULL);
+    STEP(bd->nr_queues == 1);
+    if (ok)
+        kinfo("selftest: ahci-identify: %s: %llu sectors of %u bytes through %s (%u segments per command)", bd->name,
+              (unsigned long long)bd->capacity, bd->sector_size, bd->dev->name, bd->max_segments);
+#undef STEP
+    blkdev_put(bd);
+    if (!ok) {
+        *reason = "ahci-identify: see the log";
+        return false;
+    }
+    return true;
+}
+
+/* The disk through the block layer, as usb-storage checks its disk. */
+bool selftest_ahci_io(const char **reason)
+{
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        kinfo("selftest: ahci-io: no ahci0p1; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: ahci-io: step failed at line %d", __LINE__); ok = false; } } while (0)
+    uint64_t reads0 = bd->reads, writes0 = bd->writes, flushes0 = bd->flushes, errors0 = bd->errors;
+    struct dma_stats d0, d1;
+    dma_get_stats(&d0);
+    uint8_t *w = kmalloc(131072, 0), *r = kmalloc(131072, 0);
+    STEP(w != NULL && r != NULL);
+    unsigned reads = 0, writes = 0, flushes = 0;
+    if (w && r) {
+        for (unsigned i = 0; i < 131072; i++)
+            w[i] = (uint8_t)(i * 5 + 9);
+        uint32_t n = bd->max_sectors < 256 ? bd->max_sectors : 256;   /* 128 KiB: one command */
+        const uint64_t at[3] = { 0, 8192, bd->capacity - n };
+        for (unsigned k = 0; k < 3 && ok; k++) {
+            w[0] = (uint8_t)(0xa0 + k);
+            STEP(blk_write(bd, at[k], n, w) == 0);
+            writes++;
+            memset(r, 0, 131072);
+            STEP(blk_read(bd, at[k], n, r) == 0 && memcmp(w, r, (size_t)n * 512) == 0);
+            reads++;
+        }
+        STEP(blk_flush(bd) == 0);
+        flushes++;
+        STEP(blk_read(bd, bd->capacity, 1, r) == -EINVAL);   /* refused by the layer: no command */
+        STEP(blk_read(bd, 1, 1, r) == 0 && memcmp(r, w + 512, 512) == 0);
+        reads++;
+    }
+    /* Four pages in two segments: a PRDT of two entries. */
+    dma_addr_t da, db, dc;
+    uint8_t *a = dma_alloc(NULL, 2 * PAGE_SIZE, &da, 0), *b = dma_alloc(NULL, 2 * PAGE_SIZE, &db, 0);
+    uint8_t *flat = dma_alloc(NULL, 4 * PAGE_SIZE, &dc, DMA_ZERO);
+    STEP(a && b && flat);
+    if (a && b && flat) {
+        for (unsigned i = 0; i < 2 * PAGE_SIZE; i++) {
+            a[i] = (uint8_t)(i ^ 0x6c);
+            b[i] = (uint8_t)(i ^ 0xc6);
+        }
+        struct bio_vec vecs[2] = { { a, (uint32_t)(2 * PAGE_SIZE) }, { b, (uint32_t)(2 * PAGE_SIZE) } };
+        struct sync_marker { volatile bool done; int status; } mk = { false, 0 };
+        struct bio bio;
+        memset(&bio, 0, sizeof(bio));
+        bio.dev = bd;
+        bio.dir = BIO_WRITE;
+        bio.sector = 4096;
+        bio.nsectors = (uint32_t)(4 * PAGE_SIZE / 512);
+        bio.vecs = vecs;
+        bio.nr_vecs = 2;
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        for (unsigned i = 0; ok && i < 5000 && !mk.done; i++)
+            thread_sleep_ms(1);
+        STEP(mk.done && mk.status == 0);
+        writes++;
+        STEP(blk_read(bd, 4096, bio.nsectors, flat) == 0);
+        reads++;
+        STEP(memcmp(flat, a, 2 * PAGE_SIZE) == 0 && memcmp(flat + 2 * PAGE_SIZE, b, 2 * PAGE_SIZE) == 0);
+    }
+    if (a)
+        dma_free(NULL, 2 * PAGE_SIZE, a, da);
+    if (b)
+        dma_free(NULL, 2 * PAGE_SIZE, b, db);
+    if (flat)
+        dma_free(NULL, 4 * PAGE_SIZE, flat, dc);
+    kfree(w);
+    kfree(r);
+    STEP(bd->reads - reads0 == reads && bd->writes - writes0 == writes && bd->flushes - flushes0 == flushes);
+    STEP(bd->errors == errors0);
+    dma_get_stats(&d1);
+    STEP(d1.maps - d0.maps == d1.unmaps - d0.unmaps);
+    if (ok)
+        kinfo("selftest: ahci-io: %s: %u reads, %u writes, %u flush through %s; %llu segments mapped and unmapped",
+              bd->name, reads, writes, flushes, bd->dev->name, (unsigned long long)(d1.maps - d0.maps));
+#undef STEP
+    blkdev_put(bd);
+    if (!ok) {
+        *reason = "ahci-io: see the log";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * The disk-gone path with a command in flight (its PxCI bit withheld by
+ * fault injection, so it *is* in flight), driven through the driver's
+ * own hotplug function: the bio completes -ENODEV and not never, the
+ * blkdev is gone, a read through a held reference is -ENODEV; then the
+ * port is probed again and a *new* blkdev appears under the same name.
+ */
+bool selftest_ahci_unplug(const char **reason)
+{
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        kinfo("selftest: ahci-unplug: no ahci0p1; skipping");
+        return true;
+    }
+    if (bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        kinfo("selftest: ahci-unplug: no presence hook; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: ahci-unplug: step failed at line %d", __LINE__); ok = false; } } while (0)
+    unsigned count0 = blk_count();
+    struct { volatile bool done; int status; } mk = { false, 0 };
+    uint8_t *buf = kmalloc(4096, 0);
+    STEP(buf != NULL);
+    struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    if (buf) {
+#if CONFIG_FAULTINJECT
+        faultinject_set(FI_AHCI_CI, 1, 1, NULL);   /* the next command never starts */
+#endif
+        bio.dev = bd;
+        bio.dir = BIO_READ;
+        bio.sector = 0;
+        bio.nsectors = 8;
+        bio.buf = buf;
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        thread_sleep_ms(20);
+    }
+    STEP(bd->ops->debug_presence(bd, false) == 0);
+#if CONFIG_FAULTINJECT
+    faultinject_clear(FI_AHCI_CI);
+    STEP(mk.done && mk.status == -ENODEV);   /* in flight at the detach: completed, with the right error */
+#else
+    for (unsigned i = 0; i < 2000 && !mk.done; i++)
+        thread_sleep_ms(1);
+    STEP(mk.done);
+#endif
+    struct blkdev *gone = blk_find("ahci0p1");
+    STEP(gone == NULL);
+    if (gone)
+        blkdev_put(gone);
+    STEP(blk_count() == count0 - 1);
+    STEP(buf && blk_read(bd, 0, 1, buf) == -ENODEV);   /* a holder's reference: refused, not served */
+
+    /* The disk is still physically there: probe the port through the old
+     * object -- it only names the port -- and a new blkdev appears. */
+    STEP(bd->ops->debug_presence(bd, true) == 0);
+    struct blkdev *again = blk_find("ahci0p1");
+    STEP(again != NULL && again != bd);
+    STEP(blk_count() == count0);
+    if (again) {
+        STEP(buf && blk_read(again, 0, 8, buf) == 0);
+        STEP(again->capacity == bd->capacity && again->sector_size == bd->sector_size);
+        blkdev_put(again);
+    }
+    blkdev_put(bd);   /* the old object's last holder: its release runs now */
+    if (ok)
+        kinfo("selftest: ahci-unplug: ahci0p1 detached with a command in flight (status %d), a new blkdev after the probe",
+              mk.status);
+#undef STEP
+    kfree(buf);
+    if (!ok) {
+        *reason = "ahci-unplug: see the log";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * A COMRESET with a command in flight (withheld PxCI, as above): the
+ * command completes -EIO and not never, the same disk answers IDENTIFY
+ * and the same blkdev keeps serving -- the recovery an error that needs
+ * a link reset goes through.
+ */
+bool selftest_ahci_reset(const char **reason)
+{
+    struct blkdev *bd = blk_find("ahci0p1");
+    if (bd == NULL) {
+        kinfo("selftest: ahci-reset: no ahci0p1; skipping");
+        return true;
+    }
+    if (bd->ops->debug_presence == NULL) {
+        blkdev_put(bd);
+        kinfo("selftest: ahci-reset: no presence hook; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: ahci-reset: step failed at line %d", __LINE__); ok = false; } } while (0)
+    struct { volatile bool done; int status; } mk = { false, 0 };
+    uint8_t *buf = kmalloc(4096, 0);
+    STEP(buf != NULL);
+    struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    uint64_t errors0 = bd->errors;
+    if (buf) {
+#if CONFIG_FAULTINJECT
+        faultinject_set(FI_AHCI_CI, 1, 1, NULL);
+#endif
+        bio.dev = bd;
+        bio.dir = BIO_READ;
+        bio.sector = 16;
+        bio.nsectors = 8;
+        bio.buf = buf;
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        thread_sleep_ms(20);
+    }
+    STEP(bd->ops->debug_presence(bd, true) == 0);   /* live disk: reset the link, re-identify, keep the blkdev */
+#if CONFIG_FAULTINJECT
+    faultinject_clear(FI_AHCI_CI);
+    STEP(mk.done && mk.status == -EIO);
+#else
+    for (unsigned i = 0; i < 2000 && !mk.done; i++)
+        thread_sleep_ms(1);
+    STEP(mk.done);
+#endif
+    struct blkdev *same = blk_find("ahci0p1");
+    STEP(same == bd);
+    if (same)
+        blkdev_put(same);
+    STEP(buf && blk_read(bd, 16, 8, buf) == 0 && blk_write(bd, 24, 1, buf) == 0);
+    STEP(bd->errors >= errors0);
+    if (ok)
+        kinfo("selftest: ahci-reset: %s reset with a command in flight (status %d); the same disk, the same blkdev, reads again",
+              bd->name, mk.status);
+#undef STEP
+    kfree(buf);
+    blkdev_put(bd);
+    if (!ok) {
+        *reason = "ahci-reset: see the log";
+        return false;
+    }
     return true;
 }
