@@ -53,6 +53,8 @@
 #define EHOSTUNREACH 113 /* host unreachable */
 #define EALREADY  114 /* operation already in progress */
 #define EINPROGRESS 115 /* operation in progress */
+#define ECANCELED 125 /* operation cancelled (a USB request taken back) */
+#define EOVERFLOW 75  /* value too large (a USB device sent more than asked) */
 #define ETIMEDOUT 110 /* operation timed out */
 #define ESRCH     3   /* no such process */
 #define EINTR     4   /* interrupted (the process is being killed) */

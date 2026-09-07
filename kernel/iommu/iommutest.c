@@ -120,39 +120,69 @@ bool selftest_iommu(const char **reason)
     iommu_get_stats(&s1);
     CHECK(s1.faults == s0.faults && s1.domains == s0.domains && s1.retired == s0.retired);
 
-    /* A real device DMAing outside its domain: the translation is refused,
-     * the command fails, the unit reports the fault, and the device keeps
-     * working. Skipped where the block device has no hook or no domain. */
-    struct blkdev *bd = blk_find("nvme0n1");
+    /* Real devices DMAing outside their domains: the translation is
+     * refused, the unit reports the fault *against the requester that
+     * issued it*, and the device keeps working. Every block device whose
+     * driver has the hook and whose DMA device has a domain: nvme0n1
+     * (its own function) and sda (the USB disk, whose DMA is the xHCI
+     * controller's -- docs/drivers/usb/invariants.md U1). Attribution is
+     * by counting per requester, not by ordering: a fault burst from one
+     * device (the SMMU reports 256 events for one 4 KiB write, in batches)
+     * cannot be mistaken for the next device's, because each is asked
+     * whether *its own* count rose. */
     unsigned long long faulted = 0;
+    unsigned provoked = 0;
     const char *why = NULL;
-    if (bd != NULL && bd->ops->debug_dma != NULL && bd->dev != NULL && bd->dev->iommu != NULL) {
+    for (unsigned i = 0; why == NULL; i++) {
+        struct blkdev *bd = blk_nth(i);
+        if (bd == NULL)
+            break;
+        if (bd->ops->debug_dma == NULL || bd->dev == NULL || bd->dev->iommu == NULL) {
+            blkdev_put(bd);
+            continue;
+        }
+        uint32_t sid = bd->dev->iommu_sid;
         uint64_t bad = IOMMU_IOVA_HI - PAGE_SIZE;      /* the last page: the allocator hands out the lowest */
         uint8_t *sec = kmalloc(512, 0);
+        struct iommu_stats before;
+        iommu_get_stats(&before);
+        uint64_t mine0 = 0;
+        for (unsigned k = 0; k < before.nr_requesters; k++)
+            if (before.by_requester[k].sid == sid)
+                mine0 = before.by_requester[k].faults;
         if (iommu_lookup(bd->dev->iommu, bad, &got)) {
             why = "the provoking address is mapped";
         } else {
             /* The status of the command itself is the device's business:
-             * QEMU's controller reports success for an Identify whose data
+             * QEMU's controllers report success for a transfer whose data
              * never arrived. What must hold is that the write did not reach
-             * memory and that the unit said so. */
+             * memory and that the unit said so, naming this requester. */
             (void)bd->ops->debug_dma(bd, bad);
-            for (unsigned ms = 0; ms < 500; ms++) {    /* the fault interrupt is asynchronous */
+            uint64_t mine = mine0;
+            for (unsigned ms = 0; ms < 500 && mine == mine0; ms++) {    /* the fault interrupt is asynchronous */
                 iommu_get_stats(&s1);
-                if (s1.faults != s0.faults)
-                    break;
-                thread_sleep_ms(1);
+                for (unsigned k = 0; k < s1.nr_requesters; k++)
+                    if (s1.by_requester[k].sid == sid)
+                        mine = s1.by_requester[k].faults;
+                if (mine == mine0)
+                    thread_sleep_ms(1);
             }
-            faulted = (unsigned long long)(s1.faults - s0.faults);
-            if (faulted == 0)
-                why = "the unit reported no fault";
+            if (mine == mine0)
+                why = "the unit reported no fault for the device's requester";
             else if (sec == NULL || blk_read(bd, 0, 1, sec) != 0)
                 why = "the device did not survive the fault";   /* mapped DMA still works */
+            else
+                kinfo("selftest: iommu: %s: fault attributed to requester %04x (%s), %llu event(s)", bd->name, sid,
+                      bd->dev->name, (unsigned long long)(mine - mine0));
+            provoked++;
         }
         kfree(sec);
-    }
-    if (bd != NULL)
         blkdev_put(bd);
+    }
+    iommu_get_stats(&s1);
+    faulted = (unsigned long long)(s1.faults - s0.faults);
+    if (why == NULL && provoked == 0)
+        why = "no block device could provoke a fault";
     if (why != NULL) {
         *reason = why;
         return false;

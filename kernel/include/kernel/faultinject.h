@@ -26,6 +26,7 @@ enum fi_kind {
     FI_BLK_COMPLETE,
     FI_DEMAND_PAGE,   /* the frame of a user-mode demand-zero fault (the process runs out) */
     FI_DEMAND_COPY,   /* the frame of a kernel-mode demand-zero fault in a user copy (-EFAULT) */
+    FI_USB_CSW,       /* usb_storage never asks for the CSW: the exchange hangs until the block layer's timeout */
     FI_KIND_COUNT,
 };
 

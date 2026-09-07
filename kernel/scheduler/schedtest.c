@@ -103,13 +103,26 @@ static void rearm_cb(struct timer *t, void *arg)
 
 bool selftest_timer(const char **reason)
 {
-    /* A callback may re-arm its own timer (periodic pattern). */
+    /* A callback may re-arm its own timer (periodic pattern). The probe
+     * lives on this stack, so it is cancelled -- synchronously -- before
+     * any check can return: a failed check that left a re-arming timer
+     * behind had it write into a dead frame from the next interrupt
+     * (found by the USB unit's chain under host load: the fourth fire was
+     * late, the check failed, the kernel panicked on the fifth). The
+     * check is about re-arming, not about how fast TCG delivers four
+     * interrupts, so the wait is generous. */
     struct rearm_probe rp = { .fires = 0, .limit = 4 };
     timer_setup(&rp.t, rearm_cb, NULL);
     timer_start(&rp.t, MS(2));
-    udelay(40000);
-    CHECK(rp.fires == 4);
-    CHECK(rp.t.state == TIMER_IDLE);
+    for (unsigned waited = 0; waited < 500 && rp.fires < 4; waited++)
+        udelay(1000);
+    udelay(3000);   /* the fourth callback returns and the timer settles */
+    unsigned fires = rp.fires;
+    unsigned state = rp.t.state;
+    if (fires != 4 || state != TIMER_IDLE)
+        timer_cancel_sync(&rp.t);
+    CHECK(fires == 4);
+    CHECK(state == TIMER_IDLE);
 
     /* Monotonic clock. */
     uint64_t last = clock_now_ns();

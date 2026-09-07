@@ -3,7 +3,7 @@
 ## Data structures (`kernel/include/kernel/lockdep_core.h`, `kernel/core/lockdep.c`)
 
 ```c
-#define LOCKDEP_MAX_CLASSES   160       /* classes in the tree today: ~95 (a mutex and its spinlock are two) */
+#define LOCKDEP_MAX_CLASSES   256       /* classes in the tree today: ~165 (a mutex and its spinlock are two) */
 #define LOCKDEP_SUBCLASSES    4         /* nesting levels per class */
 #define LOCKDEP_MAX_NODES     (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_MAX_HELD      24        /* per CPU: spinlocks, interrupt context included */
@@ -279,7 +279,7 @@ tracked lock and allocates nothing.
 
 ## Memory
 
-50 KiB graph, 160 classes × 40 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
+128 KiB graph, 256 classes × 40 bytes, 24 × 24 bytes per CPU, 8 × 24 bytes per
 thread. Debug builds only for all but the `class` field.
 
 ## Error handling

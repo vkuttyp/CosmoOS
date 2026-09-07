@@ -288,6 +288,27 @@ kicks, and polls the used ring for at most 200 ms (`clock_now_ns`),
 marking itself dead on timeout so the console can never wedge. The
 per-driver details are in `docs/drivers/virtio/design.md`.
 
+## Two things the USB bus taught the model (the USB unit)
+
+The first bus whose devices arrive after boot, have a parent that is a
+device, and leave with I/O in flight (`docs/drivers/usb/design.md`).
+Neither changed an interface; both are rules the next such bus follows.
+
+- **A device that does not DMA.** A `struct usb_device` has a `dma_mask`
+  and an `iommu` like every device and uses neither: the requester is
+  the host controller, so the DMA API -- keyed by `struct device`, which
+  is the right key because it names the requester -- is handed the
+  controller's device (`usb_dma_dev`), and the storage driver's blkdev
+  names the controller as its `dev`. An IOMMU fault provoked through the
+  USB disk is attributed to the controller's requester id, which is the
+  truth. If a second bus of this kind arrives (AHCI ports), the rule
+  moves into `struct device` as a DMA-parent pointer; not before.
+- **Removing a parent with children.** `device_unregister` does not
+  cascade. The bus removes its children first -- the hardware order
+  demands it anyway (a slot cannot be disabled after the controller is
+  reset) -- and only then itself. A model that cascaded would have to
+  know each bus's order; leaving it to the bus was the right call.
+
 ## The block layer for NVMe (audit milestone 9)
 
 Milestone 9 of `docs/audit/2026-09-post-roadmap-audit.md` §19 (finding

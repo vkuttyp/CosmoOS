@@ -9,6 +9,7 @@
 #include <kernel/device.h>
 #include <kernel/dma.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/kmalloc.h>
 #include <kernel/pmm.h>
 #include <kernel/log.h>
@@ -19,12 +20,14 @@
 #include <kernel/percpu.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
 #include <uapi/cosmo/syscall.h>
 
 #include <drivers/pci.h>
+#include <drivers/usb.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -631,5 +634,414 @@ bool selftest_blk_lifetime(const char **reason)
         CHECK(many[n].releases == 1);
     }
     CHECK(blk_count() == before);
+    return true;
+}
+
+/* --- the USB bus (docs/drivers/usb/testing.md) ------------------------------------- */
+
+struct usb_enum_walk {
+    unsigned devices;
+    struct usb_device *first;
+};
+
+static int usb_enum_visit(struct device *dev, void *arg)
+{
+    struct usb_enum_walk *w = arg;
+    w->devices++;
+    if (w->first == NULL) {
+        device_get(dev);
+        w->first = to_usb_device(dev);
+    }
+    return 0;
+}
+
+/*
+ * What enumeration must have produced for the harness's mass-storage
+ * device: one device on the bus whose parent is a PCI function, whose
+ * descriptors are consistent with each other and with the wire, and
+ * whose one interface is bulk-only mass storage with a bulk pair. The
+ * kernel reaches the module's objects only through the model and the
+ * shared header: no module symbol is called from here.
+ */
+bool selftest_usb_enum(const char **reason)
+{
+    struct bus_type *bus = bus_find("usb");
+    if (bus == NULL) {
+        kinfo("selftest: usb-enum: no usb bus (xhci module not loaded); skipping");
+        return true;
+    }
+    struct usb_enum_walk w = { 0, NULL };
+    device_for_each(bus, usb_enum_visit, &w);
+    if (w.devices == 0) {
+        kinfo("selftest: usb-enum: no device on the usb bus (QEMU_USB=0); skipping");
+        return true;
+    }
+    struct usb_device *udev = w.first;
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-enum: step failed at line %d", __LINE__); ok = false; } } while (0)
+    STEP(w.devices == 1);
+    STEP(udev->dev.parent != NULL && udev->dev.parent->bus == &pci_bus);   /* behind a controller, not a bus root */
+    STEP(udev->dev.iommu == NULL);   /* the device does no DMA of its own (U1); the controller does */
+    STEP(udev->port >= 1 && udev->port <= udev->hcd->nr_ports);
+    STEP(udev->hcd->port_dev[udev->port] == udev);
+    STEP(udev->slot != 0);
+    STEP(udev->speed == USB_SPEED_HIGH || udev->speed == USB_SPEED_SUPER);
+    STEP(udev->desc.bLength == 18 && udev->desc.bDescriptorType == USB_DT_DEVICE);
+    STEP(udev->desc.bNumConfigurations >= 1);
+    STEP(udev->desc.bMaxPacketSize0 == (udev->speed == USB_SPEED_SUPER ? 9 : 64));   /* SS: 2^9 */
+    STEP(udev->config.bDescriptorType == USB_DT_CONFIG && udev->config.wTotalLength == udev->raw_len);
+    STEP(udev->config.bNumInterfaces == udev->nr_intf && udev->nr_intf == 1);
+    const struct usb_interface *intf = &udev->intf[0];
+    STEP(intf->desc.bInterfaceClass == USB_CLASS_MASS_STORAGE && intf->desc.bInterfaceSubClass == 0x06 &&
+         intf->desc.bInterfaceProtocol == 0x50);
+    STEP(intf->desc.bNumEndpoints == intf->nr_ep && intf->nr_ep == 2);
+    bool have_in = false, have_out = false;
+    for (unsigned i = 0; i < intf->nr_ep; i++) {
+        const struct usb_endpoint_descriptor *e = &intf->ep[i].desc;
+        STEP(USB_EP_XFER(e->bmAttributes) == USB_EP_BULK);
+        STEP((e->wMaxPacketSize & 0x7ff) == (udev->speed == USB_SPEED_SUPER ? 1024 : 512));
+        if (e->bEndpointAddress & USB_EP_DIR_IN)
+            have_in = true;
+        else
+            have_out = true;
+    }
+    STEP(have_in && have_out);
+    STEP(!udev->gone);
+    if (ok)
+        kinfo("selftest: usb-enum: %s (%04x:%04x) on %s, port %u, slot %u: %u interface, bulk in/out of %u bytes",
+              udev->dev.name, udev->desc.idVendor, udev->desc.idProduct, udev->dev.parent->name, udev->port,
+              udev->slot, udev->nr_intf, intf->ep[0].desc.wMaxPacketSize & 0x7ff);
+#undef STEP
+    device_put(&udev->dev);
+    if (!ok) {
+        *reason = "usb-enum: see the log";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * The USB disk through the block layer, as nvme is checked above: the
+ * geometry the harness gave it, round trips at the start, a 64 KiB-aligned
+ * middle and the last sector, a multi-segment bio, a flush, a refused
+ * out-of-range read -- and the blkdev's counters advanced by exactly the
+ * operations issued, because the NIC benchmark found a driver counting
+ * what the layer already counts.
+ */
+bool selftest_usb_storage(const char **reason)
+{
+    struct blkdev *bd = blk_find("sda");
+    if (bd == NULL) {
+        kinfo("selftest: usb-storage: no sda; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-storage: step failed at line %d", __LINE__); ok = false; } } while (0)
+    STEP(bd->sector_size == 512 && bd->capacity == 16384 && bd->max_sectors >= 64 && bd->max_segments >= 4);
+    STEP(bd->dev != NULL && bd->dev->bus == &pci_bus);   /* DMA is the controller's (U1) */
+    uint64_t reads0 = bd->reads, writes0 = bd->writes, flushes0 = bd->flushes, errors0 = bd->errors;
+    struct dma_stats d0, d1;
+    dma_get_stats(&d0);
+
+    uint8_t *w = kmalloc(65536, 0), *r = kmalloc(65536, 0);
+    STEP(w != NULL && r != NULL);
+    unsigned reads = 0, writes = 0, flushes = 0;
+    if (w && r) {
+        for (unsigned i = 0; i < 65536; i++)
+            w[i] = (uint8_t)(i * 7 + 3);
+        uint32_t n = bd->max_sectors < 128 ? bd->max_sectors : 128;
+        const uint64_t at[3] = { 0, 8192, bd->capacity - n };   /* start, a 64 KiB-aligned middle, the end */
+        for (unsigned k = 0; k < 3 && ok; k++) {
+            w[0] = (uint8_t)k;
+            STEP(blk_write(bd, at[k], n, w) == 0);
+            writes++;
+            memset(r, 0, 65536);
+            STEP(blk_read(bd, at[k], n, r) == 0 && memcmp(w, r, (size_t)n * 512) == 0);
+            reads++;
+        }
+        STEP(blk_flush(bd) == 0);
+        flushes++;
+        STEP(blk_read(bd, bd->capacity, 1, r) == -EINVAL);   /* refused by the layer: no exchange */
+        STEP(blk_read(bd, 1, 1, r) == 0 && memcmp(r, w + 512, 512) == 0);   /* the first write's second sector */
+        reads++;
+    }
+
+    /* Four pages in two segments, one TD of chained TRBs. */
+    dma_addr_t da, db, dc;
+    uint8_t *a = dma_alloc(NULL, 2 * PAGE_SIZE, &da, 0), *b = dma_alloc(NULL, 2 * PAGE_SIZE, &db, 0);
+    uint8_t *flat = dma_alloc(NULL, 4 * PAGE_SIZE, &dc, DMA_ZERO);
+    STEP(a && b && flat);
+    if (a && b && flat) {
+        for (unsigned i = 0; i < 2 * PAGE_SIZE; i++) {
+            a[i] = (uint8_t)(i ^ 0x3c);
+            b[i] = (uint8_t)(i ^ 0xc3);
+        }
+        struct bio_vec vecs[2] = { { a, (uint32_t)(2 * PAGE_SIZE) }, { b, (uint32_t)(2 * PAGE_SIZE) } };
+        struct sync_marker { volatile bool done; int status; } mk = { false, 0 };
+        struct bio bio;
+        memset(&bio, 0, sizeof(bio));
+        bio.dev = bd;
+        bio.dir = BIO_WRITE;
+        bio.sector = 4096;
+        bio.nsectors = (uint32_t)(4 * PAGE_SIZE / 512);
+        bio.vecs = vecs;
+        bio.nr_vecs = 2;
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        for (unsigned i = 0; ok && i < 5000 && !mk.done; i++)
+            thread_sleep_ms(1);
+        STEP(mk.done && mk.status == 0);
+        writes++;
+        STEP(blk_read(bd, 4096, bio.nsectors, flat) == 0);
+        reads++;
+        STEP(memcmp(flat, a, 2 * PAGE_SIZE) == 0 && memcmp(flat + 2 * PAGE_SIZE, b, 2 * PAGE_SIZE) == 0);
+    }
+    if (a)
+        dma_free(NULL, 2 * PAGE_SIZE, a, da);
+    if (b)
+        dma_free(NULL, 2 * PAGE_SIZE, b, db);
+    if (flat)
+        dma_free(NULL, 4 * PAGE_SIZE, flat, dc);
+    kfree(w);
+    kfree(r);
+
+    /* Counted once each, by the layer; the driver adds nothing. */
+    STEP(bd->reads - reads0 == reads && bd->writes - writes0 == writes && bd->flushes - flushes0 == flushes);
+    STEP(bd->errors == errors0);
+    dma_get_stats(&d1);
+    STEP(d1.maps - d0.maps == d1.unmaps - d0.unmaps);   /* every segment mapped for a transfer was unmapped */
+    if (ok)
+        kinfo("selftest: usb-storage: %s: %u reads, %u writes, %u flush through %s; %llu segments mapped and unmapped",
+              bd->name, reads, writes, flushes, bd->dev->name, (unsigned long long)(d1.maps - d0.maps));
+#undef STEP
+    blkdev_put(bd);
+    if (!ok) {
+        *reason = "usb-storage: see the log";
+        return false;
+    }
+    return true;
+}
+
+/* The one device on the USB bus, referenced, or NULL. */
+static struct usb_device *usb_first_device(void)
+{
+    struct bus_type *bus = bus_find("usb");
+    if (bus == NULL)
+        return NULL;
+    struct usb_enum_walk w = { 0, NULL };
+    device_for_each(bus, usb_enum_visit, &w);
+    return w.first;
+}
+
+/*
+ * A device that stops answering: the CSW of one exchange is never asked
+ * for (fault injection, debug builds), the block layer's timeout thread
+ * finds the bio overdue, the driver takes the transfer back and resets
+ * the device, the bio completes -ETIMEDOUT -- and the next read works.
+ */
+bool selftest_usb_storage_timeout(const char **reason)
+{
+#if !CONFIG_FAULTINJECT
+    (void)reason;
+    kinfo("selftest: usb-storage-timeout: no fault injection in this build; skipping");
+    return true;
+#else
+    struct blkdev *bd = blk_find("sda");
+    if (bd == NULL) {
+        kinfo("selftest: usb-storage-timeout: no sda; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-storage-timeout: step failed at line %d", __LINE__); ok = false; } } while (0)
+    uint8_t *buf = kmalloc(4096, 0);
+    STEP(buf != NULL);
+    uint64_t saved = bd->timeout_ns, timeouts0 = bd->timeouts;
+    bd->timeout_ns = 200ull * 1000000ull;   /* the thread checks every 500 ms: one exchange, at most ~700 ms */
+    faultinject_set(FI_USB_CSW, 1, 1, NULL);   /* the next CSW, once */
+    uint64_t t0 = clock_now_ns();
+    int rc = buf ? blk_read(bd, 0, 8, buf) : -ENOMEM;
+    uint64_t dt = clock_now_ns() - t0;
+    faultinject_clear(FI_USB_CSW);
+    STEP(rc == -ETIMEDOUT);
+    STEP(bd->timeouts == timeouts0 + 1);
+    STEP(dt < 3000ull * 1000000ull);
+    bd->timeout_ns = saved;
+    /* Recovered: the device answers again, and the data is right. */
+    STEP(buf && blk_read(bd, 0, 8, buf) == 0);
+    STEP(buf && blk_write(bd, 16, 1, buf) == 0);
+    if (ok)
+        kinfo("selftest: usb-storage-timeout: %s: -ETIMEDOUT after %llu ms, reset recovery, reads again", bd->name,
+              (unsigned long long)(dt / 1000000));
+#undef STEP
+    kfree(buf);
+    blkdev_put(bd);
+    if (!ok) {
+        *reason = "usb-storage-timeout: see the log";
+        return false;
+    }
+    return true;
+#endif
+}
+
+/*
+ * The removal path the device model was built for and never met: the
+ * controller driver's own disconnect path is run for the port while a
+ * bio is in flight (its CSW held back by fault injection so it *is* in
+ * flight), and afterwards the disk is gone, the bio has completed with
+ * an error and not never, the device's release ran once -- then the
+ * port is connected again and the disk is back and readable.
+ */
+bool selftest_usb_unplug(const char **reason)
+{
+    struct usb_device *udev = usb_first_device();
+    if (udev == NULL) {
+        kinfo("selftest: usb-unplug: no device on the usb bus; skipping");
+        return true;
+    }
+    struct usb_hcd *hcd = udev->hcd;
+    unsigned port = udev->port;
+    char name[DEVICE_NAME_MAX];
+    strlcpy(name, udev->dev.name, sizeof(name));
+    if (hcd->ops->debug_port == NULL) {
+        device_put(&udev->dev);
+        kinfo("selftest: usb-unplug: the controller has no debug port hook; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-unplug: step failed at line %d", __LINE__); ok = false; } } while (0)
+    struct blkdev *bd = blk_find("sda");
+    STEP(bd != NULL);
+    uint64_t released0 = hcd->released, enumerated0 = hcd->enumerated;
+    struct bus_type *bus = bus_find("usb");
+    STEP(bus != NULL && device_count(bus) == 1);
+    device_put(&udev->dev);   /* the walk's reference: the release must be able to run */
+
+    struct { volatile bool done; int status; } mk = { false, 0 };
+    uint8_t *buf = kmalloc(4096, 0);
+    struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    if (bd != NULL && buf != NULL) {
+#if CONFIG_FAULTINJECT
+        /* A bio that stays in flight: its exchange never asks for the CSW. */
+        faultinject_set(FI_USB_CSW, 1, 1, NULL);
+#endif
+        bio.dev = bd;
+        bio.dir = BIO_READ;
+        bio.sector = 0;
+        bio.nsectors = 8;
+        bio.buf = buf;
+        bio.done = selftest_nvme_mark_done;
+        bio.arg = &mk;
+        STEP(blk_submit(&bio) == 0);
+        thread_sleep_ms(20);   /* the CBW and data phases run; the CSW is withheld */
+    }
+
+    /* The detach: the driver's remove, the slot, the device. */
+    STEP(hcd->ops->debug_port(hcd, port, false) == 0);
+#if CONFIG_FAULTINJECT
+    faultinject_clear(FI_USB_CSW);
+    STEP(mk.done && mk.status != 0);   /* in flight at the detach: completed, with an error, not never */
+#else
+    for (unsigned i = 0; i < 2000 && !mk.done; i++)
+        thread_sleep_ms(1);
+    STEP(mk.done);   /* without injection the bio may have finished first; it must have finished */
+#endif
+    struct blkdev *gone = blk_find("sda");
+    STEP(gone == NULL);
+    if (gone)
+        blkdev_put(gone);
+    STEP(device_count(bus) == 0);
+    STEP(bd == NULL || blk_read(bd, 0, 1, buf) == -ENODEV);   /* a holder's reference: refused, not served */
+    if (bd != NULL)
+        blkdev_put(bd);   /* the test's reference: the storage driver's memory can go */
+    STEP(hcd->released == released0 + 1);   /* the usb_device release ran, once */
+
+    /* Back: the port is reset and the device enumerated again; a fresh
+     * usb_device, a fresh sda. */
+    STEP(hcd->ops->debug_port(hcd, port, true) == 0);
+    STEP(hcd->enumerated == enumerated0 + 1);
+    STEP(device_count(bus) == 1);
+    struct blkdev *again = blk_find("sda");
+    STEP(again != NULL);
+    if (again != NULL) {
+        STEP(buf && blk_read(again, 0, 8, buf) == 0);
+        blkdev_put(again);
+    }
+    struct usb_device *udev2 = usb_first_device();
+    STEP(udev2 != NULL && udev2->port == port && strcmp(udev2->dev.name, name) == 0);
+    if (udev2)
+        device_put(&udev2->dev);
+    if (ok)
+        kinfo("selftest: usb-unplug: %s detached with a bio in flight (status %d), released once, re-enumerated as %s",
+              name, mk.status, name);
+#undef STEP
+    kfree(buf);
+    if (!ok) {
+        *reason = "usb-unplug: see the log";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Reports only (docs/drivers/usb/testing.md, "Benchmarks"): sequential
+ * reads over every disk in the boot and writes over the USB disk, 64 KiB
+ * and 4 KiB bios, one at a time through blk_read/blk_write, so the
+ * figure is the path's round trip per request. The USB disk beside
+ * nvme0n1 and vda in the same boot is what makes its number readable.
+ * Writes stay off nvme0n1 and vda: the nvme self-test leaves a cosmofs
+ * on the first that the shell's snapshot test mounts, and the second is
+ * the storage tests' scratch disk.
+ */
+static void blk_bench_one(struct blkdev *bd, bool write, uint32_t bio_bytes, uint64_t total_bytes, uint8_t *buf)
+{
+    uint32_t n = bio_bytes / bd->sector_size;
+    uint64_t sectors = total_bytes / bd->sector_size;
+    if (n > bd->max_sectors)
+        n = bd->max_sectors;
+    if (sectors > bd->capacity)
+        sectors = bd->capacity;
+    unsigned reqs = 0;
+    uint64_t t0 = clock_now_ns();
+    for (uint64_t s = 0; s + n <= sectors; s += n) {
+        int rc = write ? blk_write(bd, s, n, buf) : blk_read(bd, s, n, buf);
+        if (rc)
+            break;
+        reqs++;
+    }
+    uint64_t dt = clock_now_ns() - t0;
+    if (dt == 0)
+        dt = 1;
+    uint64_t bytes = (uint64_t)reqs * n * bd->sector_size;
+    kinfo("selftest: blk-bench: %s: %s %u KiB bios: %u requests in %llu ms = %llu MiB/s, %llu req/s, %llu us per request",
+          bd->name, write ? "write" : "read", (unsigned)(n * bd->sector_size / 1024), reqs,
+          (unsigned long long)(dt / 1000000), (unsigned long long)(bytes * 1000000000ull / dt / (1024 * 1024)),
+          (unsigned long long)((uint64_t)reqs * 1000000000ull / dt), (unsigned long long)(reqs ? dt / 1000 / reqs : 0));
+}
+
+bool selftest_blk_bench(const char **reason)
+{
+    (void)reason;
+    static const char *const names[] = { "sda", "nvme0n1", "vda" };
+    uint8_t *buf = kmalloc(65536, 0);
+    if (buf == NULL)
+        return true;
+    for (unsigned i = 0; i < 65536; i++)
+        buf[i] = (uint8_t)(i * 13 + 1);
+    for (unsigned k = 0; k < 3; k++) {
+        struct blkdev *bd = blk_find(names[k]);
+        if (bd == NULL)
+            continue;
+        bool writes = k == 0;   /* sda only: the others carry filesystems later tests use */
+        blk_bench_one(bd, false, 65536, 4u << 20, buf);
+        if (writes)
+            blk_bench_one(bd, true, 65536, 4u << 20, buf);
+        blk_bench_one(bd, false, 4096, 1u << 20, buf);
+        if (writes)
+            blk_bench_one(bd, true, 4096, 1u << 20, buf);
+        blkdev_put(bd);
+    }
+    kfree(buf);
     return true;
 }

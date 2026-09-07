@@ -78,7 +78,7 @@ futex race test; the lost-wake argument is by construction.
 ## Rules the checker keeps
 
 **L9. The checker allocates nothing and takes no tracked lock.** All
-tables are static (160 classes, 640 nodes, 24 held per CPU, 8 mutexes per
+tables are static (256 classes, 1024 nodes, 24 held per CPU, 8 mutexes per
 thread); the raw lock is a word. Exhaustion of any table is a report, not
 an overrun. Check: host `test_lockdep` (class table full → -1); review.
 

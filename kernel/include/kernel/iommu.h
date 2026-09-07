@@ -131,10 +131,16 @@ int iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len);
 /* A fault the unit reported: counted, logged (bounded). Interrupt context. */
 void iommu_note_fault(struct iommu_unit *u, uint32_t sid, uint64_t addr, unsigned reason, bool write);
 
+#define IOMMU_STATS_REQUESTERS 8
 struct iommu_stats {
     unsigned units, domains;
     uint64_t maps, unmaps, faults, iova_failures;
     uint64_t retired;   /* pages never handed out again: an unconfirmed invalidation */
+    /* The first requesters to fault, with their counts: a test asks whether
+     * *this* device's count rose after *its* provocation, which needs no
+     * ordering between devices (docs/drivers/usb/testing.md). */
+    struct { uint32_t sid; uint64_t faults; } by_requester[IOMMU_STATS_REQUESTERS];
+    unsigned nr_requesters;
 };
 void iommu_get_stats(struct iommu_stats *out);
 

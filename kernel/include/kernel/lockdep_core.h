@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define LOCKDEP_MAX_CLASSES    160u   /* the tree has ~95 (both kinds, tests included) */
+#define LOCKDEP_MAX_CLASSES    256u   /* the tree has ~165 (both kinds, tests included): the xhci module took it past 160 */
 #define LOCKDEP_SUBCLASSES     4u
 #define LOCKDEP_MAX_NODES      (LOCKDEP_MAX_CLASSES * LOCKDEP_SUBCLASSES)
 #define LOCKDEP_NODE_WORDS     (LOCKDEP_MAX_NODES / 64u)

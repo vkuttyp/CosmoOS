@@ -89,6 +89,17 @@ NIC = os.environ.get("QEMU_NIC", "both")
 REQUIRED_MARKERS += [r"^\[ INFO\] module: loaded e1000e 1\.0 "]
 if NIC in ("both", "e1000e"):
     REQUIRED_MARKERS += [r"^\[ INFO\] e1000e: pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] is eth[01] \("]
+# The xHCI driver loads on every boot; a device enumerates when QEMU was
+# given the controller (QEMU_USB qemu or nec; docs/drivers/usb/).
+USB = os.environ.get("QEMU_USB", "qemu")
+REQUIRED_MARKERS += [r"^\[ INFO\] module: loaded xhci 1\.0 ", r"^\[ INFO\] module: loaded usb_storage 1\.0 "]
+if USB != "0":
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] xhci0: pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]: xHCI ",
+        r"^\[ INFO\] usb: usb0-\d+: [0-9a-f]{4}:[0-9a-f]{4} at (high|super) speed, 1 interface\(s\), class 08/06/50",
+        r"^\[ INFO\] usb-storage: usb0-\d+ is sda: ",
+        r"^\[ INFO\] blk: sda: 16384 sectors of 512 bytes",
+    ]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
 # The package system's script checks: output lines the harness also requires in self-test builds.

@@ -395,6 +395,35 @@ What it gates:
   New APIs). As with the NIC: a finding, not a failure, and the reason
   this unit is worth more than AHCI.
 
+## Outcome (2026-09-08)
+
+Built as one unit on `drivers/usb` (`docs/drivers/usb/`). The hypothesis
+held: no kernel interface changed shape. What the kernel gained is
+observability and exports — the per-requester fault tally in
+`iommu_stats` this report asked for, a fault-injection kind for a CSW
+that never comes, two errno values, and nine exported symbols (a module
+thread that waits on a queue; `preemptible()`; the injector) — plus a
+lockdep class table raised from 160 to 256 because the tree was already
+at ~155. The two places named above where the model might bend did not:
+the DMA rule lives in the bus's header (`usb_dma_dev`) and the storage
+driver's blkdev names the controller, which the IOMMU test now checks by
+requester id; the controller driver removes its children first.
+
+Every test in the plan exists and passes on both architectures and both
+QEMU controller models. `usb-unplug` drives the driver's detach function
+as revised in review; the one thing it does not cover — the controller
+raising the event on a physical pull — is covered at boot and by hand.
+
+The benchmark answered its question: the USB disk is within noise of
+`nvme0n1` and `vda` for every bio size in the same boot, so
+`max_sectors` stays at 128, the chained-TRB path stays, and no further
+scatter-gather work is done (`docs/drivers/usb/testing.md`,
+"Benchmarks").
+
+Size: about 1 500 lines for `xhci` (core, parser and controller), 600
+for `usb_storage`, 500 of tests — inside the estimate, and the unit did
+not split.
+
 ## Alternatives considered
 
 - **AHCI (§60 #4)** — a third block driver on a static bus. It proves
