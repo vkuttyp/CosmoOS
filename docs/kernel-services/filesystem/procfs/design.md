@@ -65,16 +65,29 @@ directory rather than a symbolic link because this VFS has no symbolic
 links, and inventing them for one path would be the tail wagging the
 dog.
 
-## Generated on read, not stored
+## Each open is a snapshot
 
-A file's text is produced when it is read, into a buffer sized at open
-time, and the vnode holds no state between reads. That keeps the
-filesystem's memory proportional to what is being read rather than to
-how many processes exist, and it means a stale `/proc/<pid>` handle
-reports the process as gone rather than reporting what it last was.
+A file is rendered once, when it is opened, and that text is what every
+read of that handle returns.
 
-Reading a file of a process that has exited gives `ESRCH`: the path
-resolved, the process did not, and saying so is more useful than a
+The alternative -- measure the length at open and render again at read
+time -- lets the two disagree. A process whose syscall count gains a
+digit between them renders longer than the size the reader is clamped
+to, and one whose text shrinks leaves trailing zeroes in the difference.
+**A file that reports a length must return that length**, so the length
+and the text have to come from the same rendering.
+
+Vnodes are deliberately not hashed, so opening again takes a fresh one
+and a fresh snapshot; a reader that wants current facts opens again,
+which is what a reader of `/proc` does anyway. A handle held open keeps
+what it took, which is a truthful record of that moment rather than a
+mixture of two.
+
+The cost is bounded by what is open rather than by how many processes
+exist: one buffer per open file, freed when the vnode is evicted.
+
+Opening a file of a process that has already gone gives `ESRCH`: the
+path resolved, the process did not, and saying so is more useful than a
 zero-length read that looks like an idle process.
 
 ## Not done here

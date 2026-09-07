@@ -30,13 +30,20 @@ and `self`, and the self-test requires an unknown name under `/proc` and
 under `/proc/<pid>` to be `ENOENT`, so a file appears only when someone
 adds it deliberately.
 
-**P3. A file's text is made when it is read, and says so when the
-process is gone.** No vnode holds a rendering between reads, so the
-memory cost follows what is being read rather than how many processes
-exist. A read of a process that has exited is `ESRCH`: the path
+**P3. A file's length and its text come from the same rendering.** Each
+open renders once and every read of that handle returns that text. The
+alternative -- measuring at open and rendering at read -- lets a process
+whose text grew between the two be truncated to the older length, and
+one whose text shrank return trailing zeroes. A file that reports a
+length must return that length.
+
+Vnodes are not hashed, so opening again takes a fresh snapshot, and the
+memory is one buffer per open file rather than one per process.
+Opening a file of a process that has already gone is `ESRCH`: the path
 resolved and the process did not, which is worth saying rather than
 returning nothing and looking like an idle process.
 
-Check: the self-test opens a child's `status`, waits for the child to
-exit and be reaped, and requires the pending read to fail with `ESRCH`
-rather than return stale text.
+Check: the self-test reads `/proc/self/status` and requires the length
+it gets to match what the file reported; and it opens the `status` of a
+child that has exited and been reaped, requiring `ESRCH` rather than
+stale text.

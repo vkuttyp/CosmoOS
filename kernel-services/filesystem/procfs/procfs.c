@@ -138,40 +138,67 @@ static int render(uint64_t ino, char *out, size_t n)
     return len;
 }
 
-/* --- files ------------------------------------------------------------------ */
+/* --- files ------------------------------------------------------------------
+ *
+ * A file is rendered once, when it is opened, and that text is what
+ * every read of that handle returns. The alternative -- measuring the
+ * length now and rendering again at read time -- lets the two disagree:
+ * a process whose syscall count gains a digit between them renders
+ * longer than the size a reader is clamped to, and one that shrinks
+ * leaves trailing zeroes. A file that reports a length must return that
+ * length.
+ *
+ * So each open is a snapshot. Vnodes are not hashed, so opening again
+ * takes a fresh one; a handle held open keeps what it read, which is a
+ * truthful record of the moment it was taken rather than a mixture of
+ * two.
+ */
+struct proc_text {
+    size_t len;
+    char text[PROC_TEXT_MAX];
+};
 
 static int proc_readpage(struct vnode *vn, uint64_t index, void *buf)
 {
     memset(buf, 0, PAGE_SIZE);
-    if (index != 0)
+    const struct proc_text *t = vn->fs_priv;
+    if (index != 0 || t == NULL)
         return 0;   /* nothing here is longer than a page */
-    char *text = kmalloc(PROC_TEXT_MAX, 0);
-    if (text == NULL)
-        return -ENOMEM;
-    int len = render(vn->ino, text, PROC_TEXT_MAX);
-    if (len >= 0)
-        memcpy(buf, text, (size_t)len < PAGE_SIZE ? (size_t)len : PAGE_SIZE);
-    kfree(text);
-    return len < 0 ? len : 0;
+    memcpy(buf, t->text, t->len < PAGE_SIZE ? t->len : PAGE_SIZE);
+    return 0;
+}
+
+static void proc_evict(struct vnode *vn)
+{
+    kfree(vn->fs_priv);
+    vn->fs_priv = NULL;
 }
 
 static const struct vnode_ops proc_file_ops = {
     .readpage = proc_readpage,
+    .evict = proc_evict,
 };
 
-/* Instantiate one of a process's files. Its size is what it renders to
- * now, which is what a reader will get. */
+/* Instantiate one of a process's files, rendering it now. */
 static int proc_file(struct mount *mnt, pid_t pid, enum proc_kind kind, struct vnode **out)
 {
-    char probe[PROC_TEXT_MAX];
-    uint64_t ino = PROC_INO(pid, kind);
-    int len = render(ino, probe, sizeof(probe));
-    if (len < 0)
-        return len;
-    struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
-    if (vn == NULL)
+    struct proc_text *t = kmalloc(sizeof(*t), 0);
+    if (t == NULL)
         return -ENOMEM;
-    vn->size = (uint64_t)len;
+    uint64_t ino = PROC_INO(pid, kind);
+    int len = render(ino, t->text, sizeof(t->text));
+    if (len < 0) {
+        kfree(t);
+        return len;
+    }
+    t->len = (size_t)len;
+    struct vnode *vn = proc_vnode(mnt, ino, VNODE_REG, 0444, &proc_file_ops);
+    if (vn == NULL) {
+        kfree(t);
+        return -ENOMEM;
+    }
+    vn->fs_priv = t;
+    vn->size = t->len;
     *out = vn;
     return 0;
 }

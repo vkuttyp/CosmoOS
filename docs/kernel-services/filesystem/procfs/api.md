@@ -29,7 +29,7 @@ pid that fails it is `ENOENT` rather than `EACCES`.
 | Error | When |
 | --- | --- |
 | `ENOENT` | a name that is not `self`, a decimal pid, `status` or `limits`; a pid that does not exist or that the caller may not see |
-| `ESRCH` | reading a file whose process exited between the open and the read |
+| `ESRCH` | opening a file of a process that has already exited |
 | `EINVAL` | mounting with a block device |
 | `ENOMEM` | no memory for a vnode or a listing |
 

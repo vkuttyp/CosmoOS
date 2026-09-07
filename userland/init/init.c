@@ -1873,6 +1873,32 @@ static void proc_fs_selftest(void)
     CHECK(stat("/proc/99999", &pst) < 0 && errno == ENOENT);
     CHECK(lists("/proc", "self"));
 
+    /*
+     * P3: the length a file reports is the length it returns, and the
+     * text has no trailing zeroes. Measuring at open and rendering at
+     * read would break exactly this: a syscall count that gains a digit
+     * between the two renders longer than the size a reader is clamped
+     * to, and one that shrinks leaves NULs in the difference.
+     */
+    struct stat sst2;
+    CHECK(stat("/proc/self/status", &sst2) == 0);
+    ssize_t got = slurp("/proc/self/status", buf2, sizeof(buf2));
+    CHECK(got > 0 && (uint64_t)got == sst2.st_size);
+    CHECK(buf2[got - 1] == '\n');   /* the last byte is text, not padding */
+
+    /* Reading the same handle twice gives the same bytes: an open is a
+     * snapshot, so a reader is never handed a mixture of two moments. */
+    {
+        int fd = open("/proc/self/status", O_RDONLY, 0);
+        CHECK(fd >= 0);
+        char a[512] = { 0 }, b[512] = { 0 };
+        ssize_t na = read(fd, a, sizeof(a) - 1);
+        CHECK(lseek(fd, 0, SEEK_SET) == 0);
+        ssize_t nb = read(fd, b, sizeof(b) - 1);
+        CHECK(close(fd) == 0);
+        CHECK(na > 0 && na == nb && memcmp(a, b, (size_t)na) == 0);
+    }
+
     /* P3: a process that has gone is ESRCH, not stale text. The child
      * exits and is reaped before the read. */
     const char *t_argv[] = { "true", NULL };
