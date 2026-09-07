@@ -12,6 +12,7 @@
 
 #include <kernel/object.h>
 #include <kernel/spinlock.h>
+#include <uapi/cosmo/syscall.h>
 
 #define HANDLE_TABLE_SIZE 64
 
@@ -39,6 +40,37 @@
 #define HANDLE_RIGHT_ALL                                                       \
     (HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_DUP |               \
      HANDLE_RIGHT_TRANSFER | HANDLE_RIGHT_MANAGE)
+
+/*
+ * The upper sixteen bits, one set per type (uapi/cosmo/syscall.h, and
+ * docs/kernel/object/architecture.md, "The upper sixteen bits"). The
+ * same bit means different things on different types; that is safe
+ * because each is tested only by an accessor that has already converted
+ * the object and refuses another kind.
+ */
+#define HANDLE_RIGHT_SOCK_BIND     COSMO_RIGHT_SOCK_BIND
+#define HANDLE_RIGHT_SOCK_ACCEPT   COSMO_RIGHT_SOCK_ACCEPT
+#define HANDLE_RIGHT_SOCK_CONNECT  COSMO_RIGHT_SOCK_CONNECT
+#define HANDLE_RIGHT_SOCK_SHUTDOWN COSMO_RIGHT_SOCK_SHUTDOWN
+/* What a socket's creator gets. */
+#define HANDLE_RIGHT_SOCK_ALL                                                  \
+    (HANDLE_RIGHT_ALL | HANDLE_RIGHT_SOCK_BIND | HANDLE_RIGHT_SOCK_ACCEPT |    \
+     HANDLE_RIGHT_SOCK_CONNECT | HANDLE_RIGHT_SOCK_SHUTDOWN)
+/* What accept returns: what an established connection can actually use.
+ * Not BIND, ACCEPT or CONNECT, which name things it cannot do. */
+#define HANDLE_RIGHT_SOCK_CONNECTED                                            \
+    (HANDLE_RIGHT_ALL | HANDLE_RIGHT_SOCK_SHUTDOWN)
+
+#define HANDLE_RIGHT_VM_MAP   COSMO_RIGHT_VM_MAP
+#define HANDLE_RIGHT_VM_VCPU  COSMO_RIGHT_VM_VCPU
+#define HANDLE_RIGHT_VM_ALL   (HANDLE_RIGHT_ALL | HANDLE_RIGHT_VM_MAP | HANDLE_RIGHT_VM_VCPU)
+
+#define HANDLE_RIGHT_VCPU_RUN  COSMO_RIGHT_VCPU_RUN
+#define HANDLE_RIGHT_VCPU_REGS COSMO_RIGHT_VCPU_REGS
+#define HANDLE_RIGHT_VCPU_IRQ  COSMO_RIGHT_VCPU_IRQ
+#define HANDLE_RIGHT_VCPU_ALL                                                  \
+    (HANDLE_RIGHT_ALL | HANDLE_RIGHT_VCPU_RUN | HANDLE_RIGHT_VCPU_REGS |       \
+     HANDLE_RIGHT_VCPU_IRQ)
 
 struct handle_entry {
     struct kobject *obj;   /* NULL = free */

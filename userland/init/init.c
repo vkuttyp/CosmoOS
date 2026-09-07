@@ -182,6 +182,81 @@ static void net_selftest(void)
     CHECK(listen(t, 4) < 0 && errno == EINVAL);
     CHECK(send(t, "x", 1, 0) < 0 && errno == ENOTCONN);
     CHECK(close(t) == 0);
+    /*
+     * Per-type rights (docs/kernel/object/architecture.md, "The upper
+     * sixteen bits", S15). Each copy drops exactly one, so what fails
+     * names the right that was removed and nothing else. Before this,
+     * bind, listen, connect and shutdown asked for no right at all.
+     */
+    {
+        int full = socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(full >= 3);
+        struct sockaddr where = me;
+        where.sa_port = 5998;
+
+        /* No BIND: cannot name itself, and cannot listen either --
+         * one right covers both halves of becoming a listener. */
+        int no_bind = dup_rights(full, -1,
+                                 COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_DUP |
+                                     COSMO_RIGHT_SOCK_ACCEPT | COSMO_RIGHT_SOCK_CONNECT |
+                                     COSMO_RIGHT_SOCK_SHUTDOWN);
+        CHECK(no_bind >= 0);
+        CHECK(bind(no_bind, &where, sizeof(where)) < 0 && errno == EPERM);
+        CHECK(listen(no_bind, 4) < 0 && errno == EPERM);
+        CHECK(close(no_bind) == 0);
+
+        /* No CONNECT: reaching a peer is refused, and refused with
+         * EPERM rather than the ECONNREFUSED the same call gets with
+         * the right -- the difference between "not allowed to try" and
+         * "tried and failed". */
+        int no_conn = dup_rights(full, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_DUP);
+        CHECK(no_conn >= 0);
+        CHECK(connect(no_conn, &where, sizeof(where)) < 0 && errno == EPERM);
+        CHECK(close(no_conn) == 0);
+
+        /* The full handle still does both, so the refusals above are
+         * the rights and not the socket. */
+        CHECK(bind(full, &where, sizeof(where)) == 0);
+        CHECK(listen(full, 4) == 0);
+
+        /* No ACCEPT on a listener that is listening. */
+        int no_acc = dup_rights(full, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_DUP);
+        CHECK(no_acc >= 0);
+        struct sockaddr from;
+        socklen_t fromlen = sizeof(from);
+        CHECK(accept(no_acc, &from, &fromlen) < 0 && errno == EPERM);
+        CHECK(close(no_acc) == 0);
+
+        /* No SHUTDOWN: the operation that ends a connection is its own
+         * authority, which is what a read-only handle used to be able
+         * to do to a socket it was merely lent. */
+        int no_sd = dup_rights(full, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_DUP);
+        CHECK(no_sd >= 0);
+        CHECK(shutdown(no_sd, SHUT_RDWR) < 0 && errno == EPERM);
+        CHECK(close(no_sd) == 0);
+
+        /*
+         * And the same through the Linux ABI, because a handle is a
+         * capability whatever language asks about it. The child is a
+         * freestanding Linux program given the socket on fd 3 with
+         * CONNECT and SHUTDOWN removed; it must be refused there too,
+         * or the restriction lasts only until the holder switches ABI.
+         */
+        int lent = dup_rights(full, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_TRANSFER);
+        CHECK(lent >= 0);
+        struct spawn_handle lxmap[] = { { .child = 0, .parent = 0 },
+                                        { .child = 1, .parent = 1 },
+                                        { .child = 2, .parent = 2 },
+                                        { .child = 3, .parent = lent } };
+        static const char *const lxr_argv[] = { "lxrights", "acs", NULL };
+        pid_t lxp = spawnve("/boot/tests/linux/lxrights", lxr_argv, NULL, lxmap, 4);
+        CHECK(lxp > 1);
+        int lxst = -1;
+        CHECK(waitpid(lxp, &lxst, 0) == lxp);
+        CHECK(lxst == 0);
+        CHECK(close(lent) == 0);
+        CHECK(close(full) == 0);
+    }
     CHECK(socket(99, SOCK_STREAM, 0) < 0 && errno == EAFNOSUPPORT);
     CHECK(socket(AF_INET, 7, 0) < 0 && errno == EINVAL);
     CHECK(bind(1, &me, sizeof(me)) < 0 && errno == EBADF);
@@ -1071,6 +1146,54 @@ static int probe(const char *kind)
                     return 27;
                 if (cosmo_syscall3(SYS_vm_mem, vm, 0, 1ull << 20) != 0)
                     return 28;
+
+                /*
+                 * Per-type rights on the VM and its vCPUs (S15). Giving
+                 * the guest memory is VM_MAP, not WRITE: a copy without
+                 * it can still read and write guest memory, which is
+                 * the distinction between contents and shape.
+                 */
+                long no_map = cosmo_dup_rights((int)vm, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE);
+                if (no_map < 0)
+                    return 40;
+                if (cosmo_syscall3(SYS_vm_mem, no_map, 1ull << 20, 1ull << 20) != -COSMO_EPERM)
+                    return 41;
+                if (cosmo_syscall5(SYS_vm_mem_rw, no_map, 0, (long)"z", 1, 1) != 1)
+                    return 42;   /* contents are still READ/WRITE */
+                cosmo_close((int)no_map);
+
+                /* A vCPU, if this platform has a backend to make one
+                 * with. Asked for with full rights first, so a machine
+                 * without one is told apart from a refusal. */
+                long vcpu = cosmo_syscall2(SYS_vcpu_create, vm, 0);
+                if (vcpu >= 0) {
+                    /* No VM_VCPU: cannot make another. */
+                    long no_vcpu = cosmo_dup_rights((int)vm, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE);
+                    if (no_vcpu < 0)
+                        return 43;
+                    if (cosmo_syscall2(SYS_vcpu_create, no_vcpu, 1) != -COSMO_EPERM)
+                        return 44;
+                    cosmo_close((int)no_vcpu);
+
+                    /* No REGS: reading them is READ and still works,
+                     * writing them is refused. That pair is the whole
+                     * point of splitting WRITE up. */
+                    struct cosmo_vcpu_regs regs;
+                    long no_regs = cosmo_dup_rights((int)vcpu, -1, COSMO_RIGHT_READ | COSMO_RIGHT_VCPU_RUN);
+                    if (no_regs < 0)
+                        return 45;
+                    if (cosmo_syscall3(SYS_vcpu_regs, no_regs, (long)&regs, 0) != 0)
+                        return 46;
+                    if (cosmo_syscall3(SYS_vcpu_regs, no_regs, (long)&regs, 1) != -COSMO_EPERM)
+                        return 47;
+                    /* And no IRQ: injecting is its own authority. */
+                    if (cosmo_syscall2(SYS_vcpu_irq, no_regs, 32) != -COSMO_EPERM)
+                        return 48;
+                    cosmo_close((int)no_regs);
+                    cosmo_close((int)vcpu);
+                } else if (vcpu != -COSMO_EOPNOTSUPP) {
+                    return 49;
+                }
                 cosmo_close((int)vm);
             } else if (vm != -COSMO_EOPNOTSUPP) {   /* no backend on this platform */
                 return 29;

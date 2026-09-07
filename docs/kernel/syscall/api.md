@@ -104,7 +104,11 @@ credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 (milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 63. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
-WRITE rights from the access mode. A socket from `socket` or `accept` is
+WRITE rights from the access mode. A socket from `socket` carries every
+right its type defines; one from `accept` carries READ, WRITE, the owner
+rights and `SOCK_SHUTDOWN`, and not `SOCK_BIND`, `SOCK_ACCEPT` or
+`SOCK_CONNECT`, which name things an established connection cannot do.
+A socket from `socket` or `accept` is
 likewise a `struct socket` kobject with `read`/`write` (`recvfrom`/
 `sendto` without an address); a pipe end from `pipe` has `read` or
 `write`. `fstat` works on every I/O object with a `stat` operation:
@@ -229,8 +233,16 @@ Details per call:
   WRITE on `h[1]`; `docs/kernel/ipc/api.md` for the stream's rules.
 - **dup**: needs the `DUP` right. `rights` is `COSMO_RIGHTS_SAME` (zero)
   to keep what the caller holds, or a subset of it to hand over less;
-  asking for anything the original does not carry is `EPERM`. Rights
-  only ever shrink, so a process can pass a read-only view of something
+  asking for anything the original does not carry is `EPERM`. Bits
+  16..31 belong to the object's type and are dropped the same way:
+  `COSMO_RIGHT_SOCK_BIND`, `_SOCK_ACCEPT`, `_SOCK_CONNECT`,
+  `_SOCK_SHUTDOWN` on a socket; `COSMO_RIGHT_VM_MAP` and `_VM_VCPU` on a
+  VM; `COSMO_RIGHT_VCPU_RUN`, `_VCPU_REGS` and `_VCPU_IRQ` on a vCPU
+  (`docs/kernel/object/architecture.md`, "The upper sixteen bits"). The
+  operation each names answers `EPERM` without it, while a handle to an
+  object of another kind answers `EBADF` — the type is established
+  before its bits are read, so a bit cannot be spent on the wrong
+  object. Rights only ever shrink, so a process can pass a read-only view of something
   it can write and cannot get it back. `target == -1` takes the lowest
   free slot; otherwise `target`
   (0..63) is closed first if occupied and the copy installed there;

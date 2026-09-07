@@ -73,6 +73,56 @@ Three rules make the vocabulary worth having:
 A creator gets every right its type defines: reducing rights is
 something a process does deliberately, on the way to somebody else.
 
+### The upper sixteen bits
+
+The generic five say what a process may do with an object's *contents*.
+They say nothing about the operations that are neither reading nor
+writing: naming a socket, listening on it, connecting it somewhere,
+running a vCPU, injecting an interrupt into it. Those are what the
+type's own bits are for.
+
+```text
+  socket   BIND      give it a local address, and listen on it
+           ACCEPT    take a connection from its queue
+           CONNECT   reach out to a peer
+           SHUTDOWN  end a direction of an established connection
+  vm       MAP       give the guest memory
+           VCPU      make a vCPU in it
+  vcpu     RUN       enter the guest on it
+           REGS      set its registers (reading them is READ)
+           IRQ       make a vector pending in it
+```
+
+Sockets are where this was actually missing rather than merely coarse.
+`bind`, `listen`, `connect` and `shutdown` required **no right at all**:
+a socket handed to another process as read-only could still be pointed
+at a different peer or shut down by the receiver, which is most of what
+holding a socket is worth. The vCPU objects had the opposite problem --
+every mutating call needed WRITE and nothing finer, so "may run this
+guest" could not be given without also giving "may rewrite its
+registers".
+
+**A type right is checked on its own**, not on top of a generic one.
+The type bit already names the exact operation, and requiring MANAGE as
+well would bundle authorities that have nothing to do with each other:
+there would be no way to say "may accept connections" without also
+saying "may reconfigure the socket". Data movement keeps its generic
+meaning -- `vm_mem_rw` is READ and WRITE because guest memory is
+contents, and reading a vCPU's registers is READ for the same reason.
+
+**The same bit means different things on different types, and that is
+safe because a per-type right is only ever tested by code that has
+already established the type.** `sock_of`, `vm_of` and `vcpu_of` each
+convert the object and refuse anything of another kind, so bit 18
+(CONNECT on a socket, IRQ on a vCPU) cannot be spent on the wrong
+object: the conversion fails before the operation runs.
+
+**What `accept` returns carries what a connection can use.** The new
+handle gets READ, WRITE, the owner rights and SHUTDOWN -- not BIND,
+ACCEPT or CONNECT, which are meaningless on an established connection.
+Granting rights that name impossible operations costs nothing and says
+something false.
+
 ## Non-responsibilities
 
 - Global object namespace, object naming, capability transfer over IPC

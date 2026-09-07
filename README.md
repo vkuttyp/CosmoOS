@@ -622,11 +622,27 @@ See [docs/development.md](docs/development.md).
   filter that read one would be checking a value the process can change
   between the check and the call, and a filter that can only say things
   which stay true is worth more than one that can say more.
+- **Per-type handle rights (done):** the upper sixteen bits of a handle,
+  reserved when rights arrived, now say something. The generic five
+  describe an object's *contents*; the type's own bits name the
+  operations that are neither reading nor writing — for a socket `BIND`,
+  `ACCEPT`, `CONNECT` and `SHUTDOWN`, for a VM `MAP` and `VCPU`, for a
+  vCPU `RUN`, `REGS` and `IRQ`. Sockets are where this was missing
+  rather than merely coarse: `bind`, `listen`, `connect` and `shutdown`
+  required **no right at all**, so a socket lent to another process as
+  read-only could still be pointed at a different peer or shut down by
+  the borrower. The vCPU objects had the opposite fault — one WRITE
+  covered running a guest, rewriting its registers and injecting
+  interrupts. Each type right is required on its own rather than on top
+  of a generic one, since the bit already names the operation. The same
+  bit means different things on different types, which is safe because
+  the object's kind is established *before* its bits are read: a handle
+  to something else answers `EBADF`, not `EPERM`, because the bit means
+  nothing there.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
-  container primitives (per-type control rights in a handle's upper
-  sixteen bits, and pid renumbering if it is wanted — the domain
+  container primitives (pid renumbering if it is wanted — the domain
   deliberately does without it), a service manager and `/proc`. After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux

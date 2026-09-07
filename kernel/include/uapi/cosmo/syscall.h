@@ -128,6 +128,31 @@
  * to make. */
 #define COSMO_RIGHTS_SAME    0u
 
+/*
+ * Bits 16..31 belong to the object's type, so the same bit means
+ * different things on a socket and on a vCPU. That is safe because a
+ * per-type right is only ever tested by code that has already
+ * established the type: the operation's own accessor converts the
+ * object first and refuses anything of another kind.
+ *
+ * Each is required on its own, not on top of a generic right: the bit
+ * already names the operation, and demanding MANAGE as well would make
+ * "may accept connections" inseparable from "may reconfigure the
+ * socket". Data movement keeps the generic meaning -- guest memory is
+ * contents, so vm_mem_rw is READ and WRITE.
+ */
+#define COSMO_RIGHT_SOCK_BIND     (1u << 16)  /* bind, listen */
+#define COSMO_RIGHT_SOCK_ACCEPT   (1u << 17)  /* accept */
+#define COSMO_RIGHT_SOCK_CONNECT  (1u << 18)  /* connect */
+#define COSMO_RIGHT_SOCK_SHUTDOWN (1u << 19)  /* shutdown */
+
+#define COSMO_RIGHT_VM_MAP        (1u << 16)  /* vm_mem: give the guest memory */
+#define COSMO_RIGHT_VM_VCPU       (1u << 17)  /* vcpu_create */
+
+#define COSMO_RIGHT_VCPU_RUN      (1u << 16)  /* vcpu_run */
+#define COSMO_RIGHT_VCPU_REGS     (1u << 17)  /* vcpu_regs with set != 0 */
+#define COSMO_RIGHT_VCPU_IRQ      (1u << 18)  /* vcpu_irq */
+
 /* spawn: the child receives exactly the mapped handles.
  * handles == NULL with nr_handles == 0 means "0, 1, 2 as they are". */
 /* With COSMO_SPAWN_HANDLE_RIGHTS. Without it the map is an array of

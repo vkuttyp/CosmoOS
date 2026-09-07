@@ -6,7 +6,7 @@
 # musl-tools); HAVE_MUSL tells the boot harness to require its output.
 
 LINUX_TEST_OUT := $(OUT)/tests/linux
-LINUX_TEST_PROGRAMS := lxhello lxtest lxsig
+LINUX_TEST_PROGRAMS := lxhello lxtest lxsig lxrights
 LINUX_TEST_CFLAGS := $(USER_CFLAGS) -Wno-missing-prototypes
 
 # musl-gcc produces x86-64 code where the CI runner installs it; on other
