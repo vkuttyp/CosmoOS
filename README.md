@@ -673,12 +673,25 @@ See [docs/development.md](docs/development.md).
   extra steps, so the visibility rule lives in one function that
   `procinfo`, the lookup and the listing all call. `/sys` is not added:
   there is nothing to put in it that `sysctl` does not already hold.
+- **An Intel gigabit NIC (done):** the first network device here that
+  is not virtio, and so the first test of the stack's claim not to
+  depend on one — which held: the driver adds nothing to the kernel's
+  interface. `e1000e` drives the 82574L that QEMU models, with legacy
+  descriptor rings, one MSI-X vector whose handler services both rings
+  whatever the cause bits say (the legacy and queue-mapped schemes
+  differ and a model raises one or the other), and a watchdog that
+  resets a transmitter whose head has not moved in five seconds and says
+  so. It claims no checksum offload: the device can do it, but §21 wants
+  a benchmark first and the one that exists drives loopback. A default
+  boot now has two interfaces, and a self-test brings the first down and
+  requires the second to take over and resolve its gateway through its
+  own rings.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. What follows is
-  the constitution's **section 60 hardware roadmap** — `NVMe` (done),
-  then an Intel/AMD modern NIC, USB, AHCI, with GPU, Wi-Fi and Bluetooth
-  explicitly later — and the AArch64 follow-ups in
+  the constitution's **section 60 hardware roadmap** — `NVMe` and an Intel
+  NIC (done), then USB, AHCI, with GPU, Wi-Fi and Bluetooth explicitly
+  later — and the AArch64 follow-ups in
   `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
   cover (GICv3, ASID allocation instead of a full invalidate per switch,
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the

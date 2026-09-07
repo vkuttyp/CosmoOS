@@ -715,6 +715,7 @@ void netif_dump(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(netif_register);
+EXPORT_SYMBOL(netif_find);   /* a driver picking the first free ethN */
 EXPORT_SYMBOL(netif_unregister);
 EXPORT_SYMBOL(netif_release_static);
 EXPORT_SYMBOL(netif_rx);

@@ -54,6 +54,17 @@ fwcfg=""
 if [ -n "${QEMU_FWCFG_NETTEST:-}" ]; then
     fwcfg="-fw_cfg name=opt/cosmo/nettest,string=$QEMU_FWCFG_NETTEST"
 fi
+# The NICs (docs/drivers/e1000e/api.md). QEMU_NIC: both (default: virtio-net
+# on n0 as eth0 and an Intel 82574L on its own backend as eth1), virtio (as
+# before the e1000e driver), or e1000e (the Intel NIC alone, on n0, so it
+# is eth0 and the default interface and the whole network suite runs over
+# it). Port forwards and the pcap filter are on n0 whichever device it is.
+nic=${QEMU_NIC:-both}
+case "$nic" in
+virtio) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05" ;;
+e1000e) nic_devs="-netdev $netdev -device e1000e,netdev=n0,mac=52:54:00:c0:5f:06" ;;
+*) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 -netdev user,id=n1,ipv4=on,ipv6=on -device e1000e,netdev=n1,mac=52:54:00:c0:5f:06" ;;
+esac
 # QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
 pcap=""
 if [ -n "${QEMU_PCAP:-}" ]; then
@@ -95,8 +106,7 @@ if [ "$arch" = aarch64 ]; then
         -device virtio-serial-pci \
         -chardev file,id=vcon,path="$vcon" \
         -device virtconsole,chardev=vcon \
-        -netdev "$netdev" \
-        -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 \
+        $nic_devs \
         $fwcfg \
         $pcap \
         -semihosting-config enable=on,target=native \
@@ -127,8 +137,7 @@ exec qemu-system-x86_64 \
     -device virtio-serial-pci \
     -chardev file,id=vcon,path="$vcon" \
     -device virtconsole,chardev=vcon \
-    -netdev "$netdev" \
-    -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 \
+    $nic_devs \
     $fwcfg \
     $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

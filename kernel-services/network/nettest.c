@@ -2019,3 +2019,95 @@ bool selftest_net_bench(const char **reason)
     netif_set_steering(true);
     return true;
 }
+
+/* --- a second interface (docs/drivers/e1000e/testing.md) -----------------------
+ *
+ * The half of the two-interface question a driver can be checked on:
+ * when the default interface goes down, the other becomes the default
+ * and carries traffic through its own rings. Written against no driver
+ * in particular -- it finds whatever second non-loopback interface the
+ * machine has -- because that is the claim being tested.
+ */
+static struct netif *find_other_interface(struct netif *not_this)
+{
+    for (unsigned i = 0; i < 16; i++) {
+        char name[8];
+        ksnprintf(name, sizeof(name), "eth%u", i);
+        struct netif *n = netif_find(name);
+        if (n == NULL)
+            continue;
+        if (n != not_this && !(n->flags & NETIF_LOOPBACK))
+            return n;
+        netif_put(n);
+    }
+    return NULL;
+}
+
+static bool second_nic_body(const char **reason, struct netif *second)
+{
+    /* The other takes over as soon as the first is down. */
+    struct netif *now = netif_default();
+    CHECK(now == second);
+    netif_put(now);
+
+    /* The ARP cache is keyed by address alone, and both backends answer
+     * the same gateway address, so an entry learned through the first
+     * interface would make this pass without a frame ever crossing the
+     * second. Age everything out first. */
+    arp_age(clock_now_ns() + 3600ull * NS_PER_SEC);
+    uint8_t mac[ETH_ALEN];
+    uint32_t gw = second->ip4.gateway;
+    CHECK(gw != 0);
+    CHECK(!arp_lookup(gw, mac));
+
+    uint64_t rx0 = second->stats.rx_packets, tx0 = second->stats.tx_packets;
+    struct mbuf *m = m_getcl();
+    CHECK(m != NULL);
+    m->len = m->pkt.len = 20;
+    int rc = arp_resolve(second, gw, mac, m);   /* the request leaves through `second` */
+    CHECK(rc == -EINPROGRESS || rc == 0);
+    bool resolved = rc == 0;
+    for (unsigned waited = 0; waited < 2000 && !resolved; waited += 10) {
+        thread_sleep_ms(10);
+        resolved = arp_lookup(gw, mac);
+    }
+    CHECK(resolved);   /* the reply came back: a frame out and a frame in through its rings */
+    CHECK(second->stats.tx_packets > tx0);
+    CHECK(second->stats.rx_packets > rx0);
+    return true;
+}
+
+bool selftest_net_second_nic(const char **reason)
+{
+    struct netif *first = netif_default();
+    if (first == NULL) {
+        kinfo("selftest: net-second-nic: no ethernet interface; skipping");
+        return true;
+    }
+    struct netif *second = find_other_interface(first);
+    if (second == NULL) {
+        netif_put(first);
+        kinfo("selftest: net-second-nic: one interface; skipping");
+        return true;
+    }
+    netif_set_up(first, false);
+    bool ok = second_nic_body(reason, second);
+    /* Whatever happened, the machine leaves with its default interface
+     * back: a later test that finds it down would fail for this test's
+     * reason and say nothing about its own. */
+    netif_set_up(first, true);
+    struct netif *again = netif_default();
+    if (ok) {
+        ok = again == first;
+        if (!ok)
+            *reason = "the first interface did not become the default again";
+    }
+    if (again)
+        netif_put(again);
+    if (ok)
+        kinfo("selftest: net-second-nic: %s took over from %s and resolved the gateway through its own rings",
+              second->name, first->name);
+    netif_put(second);
+    netif_put(first);
+    return ok;
+}
