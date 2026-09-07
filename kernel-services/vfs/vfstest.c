@@ -8,6 +8,7 @@
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/page.h>
+#include <kernel/utsns.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
@@ -282,6 +283,59 @@ static void open_hammer(void *arg)
 static struct thread *hammer_on(void (*fn)(void *), struct vfs_hammer *h, unsigned cpu)
 {
     return thread_create_on(fn, h, "vfs-hammer", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+}
+
+/* --- the uts namespace (docs/kernel/security/design.md §1e, S13) -------------
+ *
+ * The namespace API takes the namespace to act on, so unlike the mount
+ * side this can be shown directly: a namespace made now carries the
+ * name current at that moment, and the two then move independently.
+ */
+bool selftest_utsns(const char **reason)
+{
+    /* On namespaces of its own, never on the one the system boots in:
+     * a CHECK that fails returns on the spot, and a test that had
+     * renamed the machine would leave the rest of the boot -- including
+     * the user-mode test, which compares names -- reading a test value
+     * and failing somewhere that says nothing about the cause. */
+    struct uts_ns *a = NULL, *b = NULL;
+    char got[COSMO_HOST_NAME_MAX];
+    CHECK(utsns_create(utsns_initial(), &a) == 0);
+    struct uts_ns *init = a;
+
+    CHECK(utsns_sethostname(init, "before", 6) == 0);
+    CHECK(utsns_create(init, &b) == 0);
+    /* The copy is of the name at the split. */
+    CHECK(utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, "before") == 0);
+
+    /* And the two then move independently, in both directions. */
+    CHECK(utsns_sethostname(init, "after", 5) == 0);
+    CHECK(utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, "before") == 0);
+    CHECK(utsns_sethostname(b, "child", 5) == 0);
+    CHECK(utsns_gethostname(init, got, sizeof(got)) == 5 && strcmp(got, "after") == 0);
+
+    /* A name that would arrive different from how it was sent is
+     * refused rather than trimmed: one holding a newline can forge a
+     * log line, one holding a NUL is not the string the setter set. */
+    CHECK(utsns_sethostname(init, "a\nb", 3) == -EINVAL);
+    CHECK(utsns_sethostname(init, "a\0b", 3) == -EINVAL);
+    CHECK(utsns_sethostname(init, "", 0) == -EINVAL);
+    char toolong[COSMO_HOST_NAME_MAX + 8];
+    memset(toolong, 'x', sizeof(toolong));
+    CHECK(utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX) == -EINVAL);
+    /* One byte short of the limit fits, terminator included. */
+    CHECK(utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX - 1) == 0);
+    CHECK(utsns_gethostname(init, got, sizeof(got)) == COSMO_HOST_NAME_MAX - 1);
+
+    /* A short buffer truncates and says how much it wrote, rather than
+     * overrunning or reporting the length it wanted. */
+    char small[4];
+    CHECK(utsns_gethostname(init, small, sizeof(small)) == 3 && small[3] == 0);
+
+    utsns_put(b);
+    utsns_put(a);
+    kinfo("selftest: utsns: a namespace carries the name it was made with, and the two move apart");
+    return true;
 }
 
 /* --- mount namespaces (docs/kernel/security/design.md §1d, V28) ---------------

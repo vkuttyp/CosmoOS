@@ -641,6 +641,55 @@ static void proc_selftest(void)
     CHECK(cosmo_umount("/tmp/nsm") == 0);
     CHECK(stat("/tmp/nsm/nsfile", &nst) == 0);
 
+    /*
+     * The uts namespace (docs/kernel/security/design.md §1e, S13). The
+     * child renames itself; this side must be unchanged, and the child
+     * must read back its own new name rather than this one.
+     */
+    char host0[HOST_NAME_MAX];
+    CHECK(gethostname(host0, sizeof(host0)) >= 0);
+    int hp[2];
+    CHECK(pipe(hp) == 0);
+    struct spawn_handle hmap[] = { { .child = 0, .parent = 0 },
+                                   { .child = 1, .parent = hp[1] },
+                                   { .child = 2, .parent = 2 } };
+    const char *h_argv[] = { "sh", "-c", "hostname inside && hostname", NULL };
+    pid_t hpid = spawnve_utsns("/bin/sh", h_argv, NULL, hmap, 3);
+    CHECK(hpid > 1);
+    CHECK(close(hp[1]) == 0);
+    ssize_t hn = read(hp[0], buf, sizeof(buf) - 1);
+    CHECK(hn >= 0);
+    buf[hn] = 0;
+    CHECK(close(hp[0]) == 0);
+    int hstatus = 0;
+    CHECK(waitpid(hpid, &hstatus, 0) == hpid && hstatus == 0);
+    CHECK(strstr(buf, "inside") != NULL);       /* its own new name */
+    CHECK(strstr(buf, host0) == NULL);          /* not this one */
+    /* And renaming in there did not rename the machine. */
+    char host1[HOST_NAME_MAX];
+    CHECK(gethostname(host1, sizeof(host1)) >= 0);
+    CHECK(strcmp(host0, host1) == 0);
+
+    /* A child *without* a namespace of its own shares this one, which
+     * is what says the isolation came from the namespace and not from
+     * being a different process. */
+    int sp2[2];
+    CHECK(pipe(sp2) == 0);
+    struct spawn_handle smap[] = { { .child = 0, .parent = 0 },
+                                   { .child = 1, .parent = sp2[1] },
+                                   { .child = 2, .parent = 2 } };
+    const char *s_argv[] = { "sh", "-c", "hostname", NULL };
+    pid_t spid = spawnve("/bin/sh", s_argv, NULL, smap, 3);
+    CHECK(spid > 1);
+    CHECK(close(sp2[1]) == 0);
+    ssize_t sn = read(sp2[0], buf, sizeof(buf) - 1);
+    CHECK(sn >= 0);
+    buf[sn] = 0;
+    CHECK(close(sp2[0]) == 0);
+    int sstatus = 0;
+    CHECK(waitpid(spid, &sstatus, 0) == spid && sstatus == 0);
+    CHECK(strstr(buf, host0) != NULL);
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -1142,6 +1191,11 @@ static int unpriv_test(void)
      * a whole subtree of processes sees. */
     static const char *const t_argv[] = { "true", NULL };
     UCHECK(spawnve_mountns("/bin/true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
+    UCHECK(spawnve_utsns("/bin/true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
+    /* Reading the name is fine; renaming the machine is not. */
+    char uh[HOST_NAME_MAX];
+    UCHECK(gethostname(uh, sizeof(uh)) >= 0);
+    UCHECK(sethostname("stolen", 6) < 0 && errno == EPERM);
     UCHECK(umount("/") < 0 && errno == EPERM);
     UCHECK(kill(parent, SIGTERM) < 0 && errno == EPERM);      /* root's process; must survive */
     char log[256];

@@ -249,6 +249,14 @@ static inline long cosmo_getcwd(char *buf, size_t len)
 {
     return cosmo_syscall2(SYS_getcwd, buf, len);
 }
+static inline long cosmo_gethostname(char *buf, size_t len)
+{
+    return cosmo_syscall2(SYS_gethostname, buf, len);
+}
+static inline long cosmo_sethostname(const char *name, size_t len)
+{
+    return cosmo_syscall2(SYS_sethostname, name, len);
+}
 static inline long cosmo_procinfo(struct cosmo_procinfo *buf, size_t count)
 {
     return cosmo_syscall2(SYS_procinfo, buf, count);

@@ -596,7 +596,12 @@ See [docs/development.md](docs/development.md).
   exists. A **mount namespace** says what is attached inside the root: a
   copy of the parent's view that then diverges, so what a confined
   process mounts stays its own and what is mounted outside does not
-  appear beneath it. A namespace copies the *view* and never a
+  appear beneath it. A **uts namespace** says what it believes it is
+  running on — which first meant giving the machine a name at all, since
+  `uname` had been answering with a constant; `gethostname`,
+  `sysctl kernel.hostname` and `uname` now all answer from the caller's
+  namespace, because three ways to ask must not give a contained process
+  three answers. A namespace copies the *view* and never a
   filesystem — one mount is one vnode cache, one open transaction and
   one device — and the last namespace that can see a mount is the one
   that unmounts it. All three are privileged to start and are entered
@@ -604,10 +609,9 @@ See [docs/development.md](docs/development.md).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
-  container primitives (a uts namespace, a syscall filter, per-type
-  control rights in a handle's upper sixteen bits, and pid renumbering
-  if it is wanted — the domain deliberately does without it), a service
-  manager and `/proc`. After those, the milestones the constitution
+  container primitives (a syscall filter, per-type control rights in a
+  handle's upper sixteen bits, and pid renumbering if it is wanted — the
+  domain deliberately does without it), a service manager and `/proc`. After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux
   compatibility, NUMA, live migration, nested virtualization), and the
