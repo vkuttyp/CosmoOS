@@ -507,6 +507,16 @@ bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out)
 
 void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
 {
+    /* Install: argument first, then the function, so a worker that sees
+     * the function sees its argument. Uninstall: the reverse, so a
+     * worker never sees a live function with a dead argument. A worker
+     * that loaded the old pair before the store may still be running it,
+     * so a hook's context must outlive the call that removed it. */
+    if (fn == NULL) {
+        __atomic_store_n(&g_rx_hook, NULL, __ATOMIC_RELEASE);
+        g_rx_hook_arg = NULL;
+        return;
+    }
     g_rx_hook_arg = arg;
     __atomic_store_n(&g_rx_hook, fn, __ATOMIC_RELEASE);
 }

@@ -2137,15 +2137,28 @@ struct arp_frame {
 
 struct nicbench_hook {
     struct netif *nif;
+    uint32_t gateway;   /* the reply we asked for is about this address */
+    uint32_t sent;      /* requests out so far: replies are never counted past it */
     uint32_t replies;   /* atomic: the worker of whichever CPU the flow hashes to */
 };
 
-/* At the driver boundary, before any protocol layer: an ARP reply from
- * the interface under test is counted and taken. */
+/*
+ * Static, not on nicbench_arp's stack: netif_set_rx_hook has no grace
+ * period, so a worker that loaded this hook just before it was removed
+ * may still call it after the round has ended, and the context it finds
+ * must be alive. Counting one stray reply into a finished round is
+ * harmless; a fault is not.
+ */
+static struct nicbench_hook g_nicbench_hook;
+
+/* At the driver boundary, before any protocol layer: a reply to *us*
+ * about the *gateway*, from the interface under test, is counted and
+ * taken. Anything else -- another interface, an unsolicited reply, a
+ * reply about some other host -- goes on to the ARP layer untouched. */
 static bool nicbench_rx_hook(struct netif *nif, struct mbuf *m, void *arg)
 {
     struct nicbench_hook *h = arg;
-    if (nif != h->nif || m->pkt.len < ETH_HLEN + sizeof(struct arp_frame))
+    if (h == NULL || nif != h->nif || m->pkt.len < ETH_HLEN + sizeof(struct arp_frame))
         return true;
     uint8_t hdr[ETH_HLEN + sizeof(struct arp_frame)];
     if (!m_copydata(m, 0, sizeof(hdr), hdr))
@@ -2153,6 +2166,13 @@ static bool nicbench_rx_hook(struct netif *nif, struct mbuf *m, void *arg)
     uint16_t type = (uint16_t)((hdr[12] << 8) | hdr[13]);
     const struct arp_frame *a = (const struct arp_frame *)(hdr + ETH_HLEN);
     if (type != ETH_P_ARP || a->op != htons(2))
+        return true;
+    if (memcmp(a->spa, &h->gateway, 4) != 0 || memcmp(a->tha, nif->mac, ETH_ALEN) != 0)
+        return true;   /* not the reply this benchmark asked for */
+    /* Never past what was sent: a duplicate cannot make the window
+     * arithmetic go negative or the count exceed the requests. */
+    uint32_t seen = __atomic_load_n(&h->replies, __ATOMIC_RELAXED);
+    if (seen >= __atomic_load_n(&h->sent, __ATOMIC_ACQUIRE))
         return true;
     __atomic_fetch_add(&h->replies, 1u, __ATOMIC_RELAXED);
     m_freem(m);
@@ -2182,16 +2202,20 @@ static uint64_t rxq_drops_total(void)
 static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_per_s, uint64_t *ns_per_rt)
 {
     static const uint8_t bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    struct nicbench_hook h = { .nif = nif, .replies = 0 };
+    struct nicbench_hook *h = &g_nicbench_hook;
+    h->nif = nif;
+    h->gateway = nif->ip4.gateway;
+    __atomic_store_n(&h->sent, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&h->replies, 0u, __ATOMIC_RELEASE);
     uint64_t rx0 = nif->stats.rx_packets, drops0 = rxq_drops_total();
-    netif_set_rx_hook(nicbench_rx_hook, &h);
+    netif_set_rx_hook(nicbench_rx_hook, h);
     uint64_t t0 = clock_now_ns();
     unsigned sent = 0;
     for (unsigned i = 0; i < NICBENCH_ARP; i++) {
         /* Wait for the window to open; give up on this round if it never does. */
         uint64_t wait_until = clock_now_ns() + 200ull * 1000000ull;
         unsigned spins = 0;
-        while (sent - __atomic_load_n(&h.replies, __ATOMIC_RELAXED) >= NICBENCH_WINDOW) {
+        while (sent - __atomic_load_n(&h->replies, __ATOMIC_RELAXED) >= NICBENCH_WINDOW) {
             if (clock_now_ns() > wait_until)
                 goto stop;
             if (++spins < 64)
@@ -2217,16 +2241,17 @@ static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_pe
         if (ether_output(nif, m, bcast, ETH_P_ARP) != 0)
             break;
         sent++;
+        __atomic_store_n(&h->sent, sent, __ATOMIC_RELEASE);
     }
 stop:;
     /* The clock stops when the replies have caught up, or when it is
      * clear they are not going to. */
     uint64_t deadline = clock_now_ns() + 500ull * 1000000ull;
-    while (__atomic_load_n(&h.replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
+    while (__atomic_load_n(&h->replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
         thread_sleep_ms(1);
     uint64_t dt = clock_now_ns() - t0;
     netif_set_rx_hook(NULL, NULL);
-    unsigned got = __atomic_load_n(&h.replies, __ATOMIC_RELAXED);
+    unsigned got = __atomic_load_n(&h->replies, __ATOMIC_RELAXED);
     kinfo("selftest: net-nicbench: %s: %u ARP requests sent, %u replies counted at the boundary, %llu frames received by the driver, %llu dropped at the receive queue",
           nif->name, sent, got, (unsigned long long)(nif->stats.rx_packets - rx0),
           (unsigned long long)(rxq_drops_total() - drops0));
