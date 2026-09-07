@@ -251,6 +251,15 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         kwarn("process: '%s' rejected: %s", basename_of(path), why ? why : "?");
         goto out_exe;
     }
+    /* A syscall filter is written in one personality's numbering, and
+     * the child's is chosen by the image. Refusing here says so, rather
+     * than handing the child bits that mean different calls. */
+    if (process_filter_blocks_personality(cur, peek.cosmo_note)) {
+        kwarn("process: '%s' rejected: a filtered %s process cannot start a %s program",
+              basename_of(path), cur->pers->name, peek.cosmo_note ? "native" : "Linux");
+        rc = -EPERM;
+        goto out_exe;
+    }
     if (peek.has_interp) {
         interp.path = peek.interp;
         rc = read_executable(cur, peek.interp, &interp);

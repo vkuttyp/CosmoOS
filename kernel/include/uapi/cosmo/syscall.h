@@ -92,7 +92,14 @@
  * (docs/kernel/security/design.md §1e). */
 #define SYS_gethostname 63  /* (char *buf, size_t len) -> length written (without NUL) */
 #define SYS_sethostname 64  /* (const char *name, size_t len) -> 0; privileged */
-#define SYS_COUNT       65
+/* Narrow the calls this process may make (docs/kernel/security/design.md
+ * §1f). Unprivileged: it only ever takes authority from the caller. */
+#define SYS_syscall_filter 65  /* (const uint64_t *mask, size_t words) -> 0 */
+#define SYS_COUNT       66
+
+/* A filter mask is this many 64-bit words, enough for every number any
+ * personality here uses (the Linux one goes to 512). */
+#define COSMO_SYSCALL_MASK_WORDS 8
 
 /* Including the terminator, as POSIX counts it for HOST_NAME_MAX + 1. */
 #define COSMO_HOST_NAME_MAX 64
@@ -197,6 +204,9 @@ struct cosmo_spawn {
 #define COSMO_SIGKILL 9
 #define COSMO_SIGSEGV 11
 #define COSMO_SIGTERM 15
+/* A system call the caller's filter does not allow (§1f). 31 as in
+ * Linux, so a status of 159 means the same thing in both. */
+#define COSMO_SIGSYS  31
 #define COSMO_NSIG    32
 
 struct cosmo_procinfo {

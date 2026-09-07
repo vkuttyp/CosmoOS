@@ -187,6 +187,17 @@ Details per call:
   `SETROOT`, so a caller built against the header that predates it
   passes the shorter struct (`COSMO_SPAWN_SIZE_V1`) and the kernel never
   reads past what it gave.
+- **syscall_filter**: `mask` is `words` (1..`COSMO_SYSCALL_MASK_WORDS`,
+  8) 64-bit words; bit N of the mask allows system call N in the
+  caller's personality, and the words not supplied are treated as zero.
+  The new filter is the **intersection** with the one in force, so no
+  sequence of calls widens what a process may do; children inherit it;
+  no privilege is needed, because it only ever takes authority from the
+  caller. A call the filter does not allow kills the process with
+  `SIGSYS` (status 159), except `exit` — and, in the Linux personality,
+  `exit_group` and `rt_sigreturn` — which are always allowed. A number
+  the kernel does not implement is still `ENOSYS`, filtered or not
+  (`docs/kernel/security/design.md` §1f).
 - **gethostname**: writes the caller's uts namespace's name and a
   terminator into `buf`, returning the length without it; `ERANGE` if
   `len` is too small for both. **sethostname**: `len` bytes, not

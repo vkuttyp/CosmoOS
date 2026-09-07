@@ -234,3 +234,32 @@ be refused. Confirmed against the bug: with the namespace ignored so that every
 process reads the initial one, the child's rename reaches this side and
 two assertions fail — the name here changed, and a child *without* a
 namespace no longer reports the name this side still believes it has.
+
+**S14. A process's system calls only ever get fewer.** A filter is a
+bitmap of allowed system-call numbers; installing one intersects with
+what is already in force, so no sequence of calls widens what a process
+may do. Children inherit it, because a child that could shed its
+parent's filter would make the filter one spawn away from meaningless.
+A denied call kills the process with `SIGSYS` rather than returning an
+error: a filter says what the program will ever need, so a call outside
+it is a bug or an exploit, and neither should be allowed to continue
+into a state the author never tested.
+
+Installing one needs no privilege -- it is the one primitive here that
+only ever takes authority from the caller, and a process that could not
+restrict itself would be unable to do the one safe thing it can do
+without asking. Three things stay allowed whatever the mask says:
+`exit`, and for the Linux personality `exit_group` and `rt_sigreturn`,
+without which a clean shutdown or a signal handler's return would itself
+be fatal. Bits beyond the supplied mask are clear, so a program built
+against a smaller system-call count denies what it has not heard of.
+
+Check: the user-mode self-test spawns children that filter themselves
+and then make a denied call, requiring each to die with status 159
+(128 + `SIGSYS`); requires a child that stays inside its mask to exit
+0; requires `exit` to work from a mask that does not name it; requires
+a second, wider mask not to restore what the first removed; and
+requires a spawned child to be killed by the filter its parent
+installed. Confirmed against the bug: with the intersection replaced by
+an assignment, the widening test's child survives a call its first mask
+had removed.

@@ -16,6 +16,63 @@
 
 static uint64_t g_calls;
 static uint64_t g_unknown;
+static uint64_t g_filtered;
+
+/*
+ * Whether this process may make this call. A number past the mask is
+ * denied rather than allowed: a program built against a smaller system
+ * call count must deny what it has never heard of, which is the
+ * direction that fails safe.
+ *
+ * The always-allowed set is the personality's, because it owns the
+ * numbering: without it a filter that forgot `exit` would turn every
+ * clean shutdown into a signal death, and one that forgot
+ * `rt_sigreturn` would make the first signal fatal for a reason
+ * unrelated to the filter.
+ */
+bool syscall_allowed(const struct process *p, uint64_t nr)
+{
+    if (nr >= COSMO_SYSCALL_MASK_WORDS * 64)
+        return false;
+    if (__atomic_load_n(&p->syscall_mask[nr / 64], __ATOMIC_RELAXED) & (1ull << (nr % 64)))
+        return true;
+    for (unsigned i = 0; i < p->pers->nr_always_allowed; i++)
+        if (p->pers->always_allowed[i] == nr)
+            return true;
+    return false;
+}
+
+/*
+ * Narrowing only: the new mask is the intersection with what is in
+ * force, so no sequence of calls widens what a process may do.
+ *
+ * Under the process lock, which is what makes an install whole. The
+ * threads of a process share one mask, and two things race it: another
+ * install (a plain read-modify-write would let the later writer put
+ * back bits the earlier one had just removed) and a spawn, which copies
+ * every word to a child. Making the words individually atomic is not
+ * enough for the second -- a copy could take some words from before an
+ * install and some from after, and the child would keep a call the
+ * parent had already denied. Every writer and the copy take this lock,
+ * so a child gets the mask as it was before an install or as it is
+ * after, and never a mixture.
+ *
+ * The stores are still atomic because the check on the syscall path
+ * reads without the lock, and must see a whole word.
+ */
+void syscall_filter_install(struct process *p, const uint64_t *mask, unsigned words)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    for (unsigned i = 0; i < COSMO_SYSCALL_MASK_WORDS; i++)
+        __atomic_store_n(&p->syscall_mask[i], p->syscall_mask[i] & (i < words ? mask[i] : 0),
+                         __ATOMIC_RELAXED);
+    spin_unlock_irqrestore(&p->lock, s);
+}
+
+uint64_t syscall_filtered_count(void)
+{
+    return __atomic_load_n(&g_filtered, __ATOMIC_RELAXED);
+}
 
 int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
 {
@@ -35,6 +92,25 @@ int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
         __atomic_fetch_add(&g_unknown, 1u, __ATOMIC_RELAXED);
         kdebug("syscall: pid %u unknown number %llu (%s)", p->pid, (unsigned long long)nr, pers->name);
         return -ENOSYS;
+    }
+
+    /*
+     * The filter (docs/kernel/security/design.md §1f), asked only of
+     * calls that exist. A filter takes away authority the process would
+     * otherwise have; it does not invent a death for a call nobody can
+     * make, and a number the kernel does not implement answers -ENOSYS
+     * whether or not a filter is installed -- installing nothing must
+     * change nothing.
+     *
+     * The mask is written only by this process through its own system
+     * call, so reading it here needs no lock.
+     */
+    if (!syscall_allowed(p, nr)) {
+        __atomic_fetch_add(&g_filtered, 1u, __ATOMIC_RELAXED);
+        kwarn("syscall: pid %u killed: number %llu is outside its filter", p->pid, (unsigned long long)nr);
+        process_kill(p, COSMO_SIGSYS);
+        process_check_kill();
+        return -EPERM;   /* not reached: process_check_kill does not return here */
     }
 
     struct syscall_args a = {

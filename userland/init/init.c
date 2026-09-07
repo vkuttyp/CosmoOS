@@ -690,6 +690,27 @@ static void proc_selftest(void)
     CHECK(waitpid(spid, &sstatus, 0) == spid && sstatus == 0);
     CHECK(strstr(buf, host0) != NULL);
 
+    /*
+     * The syscall filter (docs/kernel/security/design.md §1f, S14).
+     * Every case is a child of its own, since a filter cannot be taken
+     * back; the exit status is the whole result.
+     */
+    static const struct { const char *kind; int status; } fcases[] = {
+        { "inside", 0 },                        /* stays inside its mask */
+        { "outside", 128 + COSMO_SIGSYS },      /* one step outside it */
+        { "exit-unnamed", 0 },                  /* exit works unnamed */
+        { "widen", 128 + COSMO_SIGSYS },        /* a wider mask restores nothing */
+        { "inherit", 0 },                       /* the child dies of its parent's filter */
+        { "linux-child", 0 },                   /* a filter cannot cross a numbering */
+    };
+    for (size_t i = 0; i < sizeof(fcases) / sizeof(fcases[0]); i++) {
+        const char *fargv[] = { "init", "--filter", fcases[i].kind, NULL };
+        pid_t fp = spawnve("/boot/init", fargv, NULL, NULL, 0);
+        int fstatus = -1;
+        CHECK(fp > 0 && waitpid(fp, &fstatus, 0) == fp);
+        CHECK(fstatus == fcases[i].status);
+    }
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -824,6 +845,117 @@ static void proc_selftest(void)
  * "none-touch" and "oom-touch" end in a fatal fault. "oom-copy" reads
  * from a pipe into a never-touched page while the kernel injects a
  * failure into that demand fault: -EFAULT, exit 0. */
+/*
+ * The syscall filter (docs/kernel/security/design.md §1f, S14). Each
+ * case runs in a child of its own, because a filter cannot be taken
+ * back: the parent could not test one without ending its own run.
+ */
+#define LX_PROGRAM "/boot/tests/linux/lxhello"
+
+static int filter_case(const char *kind)
+{
+    uint64_t mask[COSMO_SYSCALL_MASK_WORDS];
+    memset(mask, 0, sizeof(mask));
+    /* Enough to write a byte and stop. exit is allowed whatever the
+     * mask says, and is named here only to show that saying so changes
+     * nothing. */
+    SYSCALL_ALLOW(mask, SYS_exit);
+    SYSCALL_ALLOW(mask, SYS_write);
+
+    if (strcmp(kind, "inside") == 0) {
+        /* Staying inside the mask: the process runs to a clean exit. */
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        const char ok[] = "";
+        (void)write(1, ok, 0);
+        return 0;
+    }
+    if (strcmp(kind, "outside") == 0) {
+        /* One step outside it: SIGSYS, so the parent sees 128 + 31. */
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        (void)getpid();
+        return 20;   /* not reached */
+    }
+    if (strcmp(kind, "exit-unnamed") == 0) {
+        /* A mask that does not name exit at all: exiting still works,
+         * or every clean shutdown would be a signal death. */
+        uint64_t only_write[COSMO_SYSCALL_MASK_WORDS];
+        memset(only_write, 0, sizeof(only_write));
+        SYSCALL_ALLOW(only_write, SYS_write);
+        if (syscall_filter(only_write, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        return 0;
+    }
+    if (strcmp(kind, "widen") == 0) {
+        /* A second, wider mask must not restore what the first removed:
+         * install one without getpid, then ask for everything.
+         *
+         * The first mask has to keep syscall_filter itself, or the
+         * second call is refused and the process dies of *that* --
+         * which is the same exit status and would let this pass
+         * without the intersection ever being exercised. */
+        SYSCALL_ALLOW(mask, SYS_syscall_filter);
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        uint64_t all[COSMO_SYSCALL_MASK_WORDS];
+        memset(all, 0xff, sizeof(all));
+        if (syscall_filter(all, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 11;
+        (void)getpid();
+        return 20;   /* not reached: the intersection still excludes it */
+    }
+    if (strcmp(kind, "inherit") == 0) {
+        /* A child is born with its parent's filter. spawn and wait stay
+         * allowed here so there is a child to be killed at all. */
+        SYSCALL_ALLOW(mask, SYS_spawn);
+        SYSCALL_ALLOW(mask, SYS_wait);
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        const char *argv[] = { "init", "--filter", "child-getpid", NULL };
+        long pid = cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/init", .argv = argv });
+        if (pid <= 0)
+            return 11;
+        int status = -1;
+        if (cosmo_wait((int)pid, &status, 0) != pid)
+            return 12;
+        return status == 128 + COSMO_SIGSYS ? 0 : 13;
+    }
+    if (strcmp(kind, "linux-child") == 0) {
+        /*
+         * A filter is bits by call number, and the two personalities
+         * number differently, so a filtered process cannot start a
+         * program of the other kind (§1f).
+         *
+         * Spawn it once *before* filtering, so a wrong path fails here
+         * with its own code rather than looking like the refusal this
+         * is trying to prove.
+         */
+        static const char *const lx_argv[] = { "lxhello", NULL };
+        pid_t first = spawnve(LX_PROGRAM, lx_argv, NULL, NULL, 0);
+        if (first <= 0)
+            return 30;   /* the program is not there: says nothing about filters */
+        int lstatus = -1;
+        if (waitpid(first, &lstatus, 0) != first)
+            return 31;
+
+        SYSCALL_ALLOW(mask, SYS_spawn);
+        SYSCALL_ALLOW(mask, SYS_wait);
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        /* Now the same spawn must be refused, and refused for this
+         * reason rather than by being killed for calling spawn. */
+        if (spawnve(LX_PROGRAM, lx_argv, NULL, NULL, 0) >= 0)
+            return 32;
+        return errno == EPERM ? 0 : 33;
+    }
+    if (strcmp(kind, "child-getpid") == 0) {
+        (void)getpid();   /* denied by the filter this was born with */
+        return 20;        /* not reached */
+    }
+    return 99;
+}
+
 static int probe(const char *kind)
 {
     const size_t P = 4096;
@@ -1638,6 +1770,8 @@ int main(int argc, char **argv)
         return trap_self(argv[2]);
     if (argc >= 3 && strcmp(argv[1], "--probe") == 0)
         return probe(argv[2]);
+    if (argc >= 3 && strcmp(argv[1], "--filter") == 0)
+        return filter_case(argv[2]);
     if (argc >= 4 && strcmp(argv[1], "--syscall-fuzz") == 0)
         return syscall_fuzz(strtoul(argv[2], NULL, 0), strtoull(argv[3], NULL, 0));
     if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {

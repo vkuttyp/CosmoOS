@@ -33,6 +33,9 @@
 #include "../scheduler/sched_internal.h"
 
 static struct kmem_cache *g_process_cache;
+
+/* Defined with the other syscall-filter helpers, below. */
+static void inherit_syscall_mask(struct process *p, struct process *parent);
 static LIST_HEAD(g_processes);
 
 /* docs/kernel/security/design.md §2. */
@@ -492,6 +495,14 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         p->mntns = mountns_get(parent->mntns);
         spin_unlock_irqrestore(&parent->lock, ns);
     }
+
+    /*
+     * The syscall filter: everything allowed until one is installed,
+     * and a child starts with its parent's. A child that could shed it
+     * would make the filter one spawn away from meaningless
+     * (docs/kernel/security/design.md §1f).
+     */
+    inherit_syscall_mask(p, parent);
 
     /* And the name it reads for the machine, the same way. */
     if (attr && attr->utsns) {
@@ -1183,6 +1194,71 @@ struct process *process_current(void)
  * reach, which is exactly the reasoning that produces such bugs, so it
  * is refused rather than assumed away.
  */
+/*
+ * Whether `p`'s syscall filter forbids handing it to a child of the
+ * other personality. A mask is bits indexed by system call number, and
+ * the two personalities number differently -- bit 3 is one call in one
+ * and another call in the other -- so carrying the bits across would
+ * both allow calls the parent had denied and kill the child for calls
+ * the parent allowed. There is no translation between the two
+ * numberings and inventing one would be guesswork, so a filtered
+ * process simply cannot start a program of the other kind.
+ */
+/* Caller holds p->lock. */
+static bool filter_in_force(const struct process *p)
+{
+    for (unsigned i = 0; i < COSMO_SYSCALL_MASK_WORDS; i++)
+        if (p->syscall_mask[i] != ~0ull)
+            return true;
+    return false;
+}
+
+bool process_filter_blocks_personality(struct process *p, bool child_is_native)
+{
+    if ((p->pers == &personality_native) == child_is_native)
+        return false;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    bool filtered = filter_in_force(p);
+    spin_unlock_irqrestore(&p->lock, s);
+    return filtered;
+}
+
+/*
+ * The child's mask, decided and taken in one hold of the parent's lock.
+ * Both halves have to be under it together: whether a filter is in
+ * force decides which branch runs, so reading that separately lets an
+ * install land in between and the child start unrestricted after a
+ * filter its parent had already finished installing.
+ */
+static void inherit_syscall_mask(struct process *p, struct process *parent)
+{
+    if (parent == NULL) {
+        memset(p->syscall_mask, 0xff, sizeof(p->syscall_mask));
+        return;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
+    if (p->pers == parent->pers) {
+        memcpy(p->syscall_mask, parent->syscall_mask, sizeof(p->syscall_mask));
+    } else if (!filter_in_force(parent)) {
+        /* No filter to carry. Every Linux program started by native
+         * init takes this path. */
+        memset(p->syscall_mask, 0xff, sizeof(p->syscall_mask));
+    } else {
+        /*
+         * A filtered parent and a child of the other personality.
+         * process_spawn refuses this with -EPERM, but its check and
+         * this are not one step, so a sibling thread can install a
+         * filter in between. The bits would mean different calls here
+         * than where they were written, so the child gets nothing --
+         * only the calls its personality always allows, which lets it
+         * exit and nothing else. Never the parent's bits, and never
+         * all-ones, which would widen.
+         */
+        memset(p->syscall_mask, 0, sizeof(p->syscall_mask));
+    }
+    spin_unlock_irqrestore(&parent->lock, s);
+}
+
 int process_domain_alloc(uint32_t *out)
 {
     static uint32_t next_domain = 1;

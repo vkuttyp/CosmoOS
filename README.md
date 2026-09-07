@@ -606,12 +606,28 @@ See [docs/development.md](docs/development.md).
   one device — and the last namespace that can see a mount is the one
   that unmounts it. All three are privileged to start and are entered
   only at spawn: privilege flows down and there is no way back up.
+- **The syscall filter (done):** a process may narrow the set of system
+  calls it is allowed to make — a bitmap by call number, intersected
+  with what is in force, inherited by children. It is the one primitive
+  here that is **unprivileged**, and that is its shape: the others
+  decide what a subtree of processes may see or reach, while this one
+  only ever takes authority away from the caller. A denied call kills
+  the process with `SIGSYS` rather than returning an error, because a
+  filter states what the program will ever need, so a call outside it is
+  a bug or an exploit and neither should continue into a state the
+  author never tested. `exit` — and, for Linux binaries, `exit_group`
+  and `rt_sigreturn` — stay allowed whatever the mask says, or a clean
+  shutdown or a signal handler's return would itself be fatal. It reads
+  the call number and nothing else: arguments live in user memory, so a
+  filter that read one would be checking a value the process can change
+  between the check and the call, and a filter that can only say things
+  which stay true is worth more than one that can say more.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
-  container primitives (a syscall filter, per-type control rights in a
-  handle's upper sixteen bits, and pid renumbering if it is wanted — the
-  domain deliberately does without it), a service manager and `/proc`. After those, the milestones the constitution
+  container primitives (per-type control rights in a handle's upper
+  sixteen bits, and pid renumbering if it is wanted — the domain
+  deliberately does without it), a service manager and `/proc`. After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux
   compatibility, NUMA, live migration, nested virtualization), and the
