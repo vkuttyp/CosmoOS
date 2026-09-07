@@ -1,0 +1,4 @@
+# A service that runs once and stops: the simplest thing that is a
+# service at all (docs/userland/design.md, "Services").
+exec /bin/echo hello from a service
+restart never

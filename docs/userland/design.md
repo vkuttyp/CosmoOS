@@ -175,6 +175,102 @@ through init's exit. Each command has patterns the log must contain
 `^init: shell exited with status 0`, `^init: CosmoOS userland, pid \d+`
 and, in self-test builds, `^SHTEST: PASS`.
 
+## Services (`userland/system/svc.c`)
+
+Constitution section 55 asks for start, stop, restart, dependencies,
+logging, a restart policy, resource limits and supervision, and says not
+to reproduce systemd. What it describes is daemontools' shape, and that
+is what this is.
+
+**There is no service daemon.** One supervisor process per service, and
+the state is in the filesystem. A central manager would need a control
+channel, and the two Unix answers to that -- a named pipe and a unix
+socket -- are both things this kernel does not have (`mknod` is not in
+`vnode_ops`, and sockets are AF_INET). Inventing a third would mean
+building an IPC mechanism in order to build a service manager, which is
+backwards. It also means a supervisor that dies takes one service with
+it rather than all of them, and that `svc` is an ordinary program with
+no privileged position: what it knows, `cat` can read.
+
+```text
+  /etc/svc/<name>        the service: key value lines, one per line
+  /run/svc/<name>.pid    the supervisor's pid while it runs
+  /var/log/svc/<name>    the service's output and its supervisor's notes
+```
+
+A definition is `key value`, no sections and no expressions:
+
+```text
+  exec /sbin/thing -f        what to run (required)
+  after net time             start these first
+  restart on-failure         never (default) | on-failure | always
+  retries 5                  give up after this many restarts (default 5)
+  backoff-ms 100             wait this long, doubled each retry, capped at 5s
+  user 1000                  and group, via COSMO_SPAWN_SETCRED
+  root /srv/thing            confine it there (COSMO_SPAWN_SETROOT)
+  mountns yes                a mount namespace of its own
+  utsns yes                  a uts namespace of its own
+  domain yes                 a process domain of its own
+  limit-nofile 32            any COSMO_RLIMIT_* by name
+```
+
+**An unknown key is an error, not a warning.** A typo in `root` or
+`user` would otherwise leave a service running with more authority than
+its author wrote down, and the file is the only place that authority is
+stated. The same reason makes an unreadable definition fatal to that
+service rather than a default.
+
+This is where the container primitives earn their place: a service is
+confined by naming it in a file, and `svc` does no more than turn those
+lines into the flags that already exist (`docs/kernel/security/design.md`
+sections 1--1f).
+
+### Supervision
+
+`svc --supervise <name>` is the supervisor: it spawns the service, waits
+for it, and decides. `svc start` spawns that and returns, so the
+supervisor is reparented to init, which reaps it -- there is no fork
+here, and none is needed.
+
+The restart policy is bounded in both directions. `never` and a clean
+exit under `on-failure` mean the supervisor exits with the service.
+Otherwise it waits `backoff-ms`, doubles it each time up to five
+seconds, and gives up after `retries` restarts, writing why. **A service
+that dies instantly must not spin the machine**, which is what a
+supervisor without a backoff and a limit does; and a supervisor that
+gives up must say so where somebody will find it, which is the log.
+
+`svc stop` is two kills, and their order matters. The supervisor goes
+first, or it would see its service die and start another one -- killing
+the service alone is a restart, not a stop. Then the service itself,
+whose pid the supervisor records in `/run/svc/<name>.child` for exactly
+this purpose.
+
+The supervisor cannot do the second kill, and that is a fact about this
+kernel rather than a choice: a native process has no signal handlers, so
+being told to stop kills it where it stands with no chance to tidy up.
+`svc` therefore removes the pid files as well. The first version of this
+did signal only the supervisor, and a `sleep 30` service outlived its
+own stop by half a minute.
+
+### Order
+
+`svc boot` reads every definition, sorts by `after`, and starts in that
+order. A cycle is refused and named. A service whose dependency did not
+start is not started either, and says which one -- a dependency that is
+ignored when it fails is a dependency in name only.
+
+Order here is *start order*, not readiness: `svc` knows a service is
+running, not that it is ready to serve. Readiness needs the service to
+say so, which needs a channel, which is the thing this design does
+without. Where that matters the dependent must retry, which it must do
+anyway on a machine where anything can restart.
+
+Not done, and each for a reason: socket activation (there are no unix
+sockets to activate on), a syscall filter per service (it would need a
+name-to-number table in userland that nothing else wants yet), timers,
+and any readiness protocol.
+
 ## Security
 
 Programs are uid 0 like everything else so far. The shell passes only

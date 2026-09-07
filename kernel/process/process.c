@@ -1385,15 +1385,24 @@ int process_setgroups(const uint32_t *groups, unsigned n)
     return rc;
 }
 
+/*
+ * A process leaves this table inside its own release, which runs after
+ * its count has already reached zero -- so a walker holding the table
+ * lock can find one that is being freed. kobject_tryget is exactly for
+ * that: it refuses rather than panicking, and a process whose release
+ * has begun is one that no longer exists as far as a caller is
+ * concerned. A plain get here made any `kill` racing an exit able to
+ * halt the machine.
+ */
 struct process *process_lookup(pid_t pid)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
         if (p->pid == pid) {
-            process_get(p);
+            bool got = kobject_tryget(&p->obj);
             spin_unlock_irqrestore(&g_process_table_lock, s);
-            return p;
+            return got ? p : NULL;
         }
     }
     spin_unlock_irqrestore(&g_process_table_lock, s);
