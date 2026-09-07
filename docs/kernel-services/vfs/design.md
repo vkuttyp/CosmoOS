@@ -104,11 +104,15 @@ is easy to get wrong: the list is protected by the mountpoint vnode's
 own lock, exactly as the pointer was. `follow_mount` reads it under that
 lock and `vfs_umount` removes from it under the same lock, so a walker
 either already holds the mounted root or is turned away by the
-`unmounting` flag. Which of the two accessors a caller uses is decided
-by what it already holds: `covering_mount` for a caller holding the
-vnode's lock (`remove_entry`, on the victim), `is_mountpoint_child` for
-one holding only the parent (`rename`), which takes the lock as a child
-in the V7 order.
+`unmounting` flag. Which accessor a caller uses is decided by what it
+already holds: `covering_mount` when it holds the vnode's own lock
+(`remove_entry`, on the victim); `is_mountpoint_child` when it holds
+only the parent, which takes the lock as a child in the V7 order; and
+`entry_is_mountpoint(vn, held1, held2)` in `rename`, which holds both
+parents and can look up an entry that *is* one of them -- renaming a
+directory onto its own parent, `/a/b` -> `/a`, returns the locked `/a`
+as the replaced entry -- so it compares against the two vnodes it holds
+rather than asking the mutex who owns it.
 
 Mount and unmount: `vfs_mount` refuses a target that is already covered
 by a mount, is itself a mount's root, or is `/` (`-EBUSY`): mounts do

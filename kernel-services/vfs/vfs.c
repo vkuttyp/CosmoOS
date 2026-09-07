@@ -284,6 +284,22 @@ static bool is_mountpoint_child(struct vnode *vn)
     return covered;
 }
 
+/*
+ * And the same question for rename, which holds *both* parents: an
+ * entry it looks up can be one of them -- renaming a directory onto its
+ * own parent, "/a/b" -> "/a", makes the destination lookup return the
+ * already-locked "/a" -- and taking that lock again panics. Compare
+ * against what is held rather than asking the mutex who owns it: the
+ * two vnodes are right here, and a lock the code can name is better
+ * than one it has to interrogate.
+ */
+static bool entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vnode *held2)
+{
+    if (vn == held1 || vn == held2)
+        return covering_mount(vn) != NULL;
+    return is_mountpoint_child(vn);
+}
+
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
 {
     KASSERT(g_initialized);
@@ -1278,7 +1294,7 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
         bool changed = rc == 0 && victim != victim0;   /* unlinked and re-created meanwhile */
         vnode_put(victim0);
         if (rc == 0 && !changed) {
-            if (is_mountpoint_child(victim) || victim->mnt != odir->mnt) {
+            if (entry_is_mountpoint(victim, odir, ndir) || victim->mnt != odir->mnt) {
                 rc = -EBUSY;
             } else if (sticky_denies(odir, victim)) {
                 rc = -EACCES;
@@ -1291,7 +1307,7 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
                     rc = -EISDIR;
                 else if (replaced->type != VNODE_DIR && victim->type == VNODE_DIR)
                     rc = -ENOTDIR;
-                else if (is_mountpoint_child(replaced) || replaced->mnt != odir->mnt)
+                else if (entry_is_mountpoint(replaced, odir, ndir) || replaced->mnt != odir->mnt)
                     rc = -EBUSY;
                 else if (sticky_denies(ndir, replaced))
                     rc = -EACCES;

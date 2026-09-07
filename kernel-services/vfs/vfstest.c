@@ -160,6 +160,11 @@ bool selftest_vfs_ramfs(const char **reason)
     CHECK(vfs_stat(NULL, "/tmp/a.txt", &st) == -ENOENT);
     CHECK(vfs_stat(NULL, "/tmp/d1/d2/b.txt", &st) == 0 && st.size == 14);
     CHECK(vfs_rename(NULL, "/tmp/d1", "/tmp/d1/d2/loop") == -EINVAL);   /* into itself */
+    /* Onto its own parent: the destination lookup returns a directory
+     * this rename has already locked, so every check on it must be one
+     * that does not take the lock again. */
+    CHECK(vfs_rename(NULL, "/tmp/d1/d2", "/tmp/d1") == -ENOTEMPTY);
+    CHECK(vfs_stat(NULL, "/tmp/d1/d2", &st) == 0);
     CHECK(vfs_rename(NULL, "/tmp/d1/d2", "/tmp/e2") == 0);
     CHECK(vfs_stat(NULL, "/tmp/e2/b.txt", &st) == 0);
     CHECK(vfs_stat(NULL, "/tmp/d1", &st) == 0 && st.nlink == 2);
