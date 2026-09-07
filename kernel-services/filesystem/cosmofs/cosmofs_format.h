@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      6u   /* version 6: compressed records (CFS_EXT_COMPRESSED) */
+#define CFS_VERSION      7u   /* version 7: encryption (CFS_KIND_KEYS, CFS_CSUM_POLY1305) */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -34,6 +34,7 @@ enum cfs_kind {
     CFS_KIND_SNAPLIST = 9,  /* snapshots: CFS_SNAPS_PER_BLOCK entries and a `next` */
     CFS_KIND_DEADLIST = 10, /* a snapshot's freed blocks: block numbers and a `next` */
     CFS_KIND_MEMBERS = 11,  /* the pool's member table: CFS_MEMBERS_PER_BLOCK entries */
+    CFS_KIND_KEYS = 12,     /* the wrapped master key (struct cfs_keys) */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -53,8 +54,13 @@ enum cfs_kind {
 #define CFS_DVA_BLK(d)     ((uint64_t)(d) & CFS_DVA_BLK_MASK)
 
 /* Inode checksum algorithms (cfs_inode.csum_algo). */
-#define CFS_CSUM_NONE   0u
-#define CFS_CSUM_CRC32C 1u
+#define CFS_CSUM_NONE     0u
+#define CFS_CSUM_CRC32C   1u
+/* Version 7: the entry is a Poly1305 tag over the block's *ciphertext*
+ * and the generation that wrote it, which is half of the nonce. A CRC
+ * says accident from intact; it says nothing about a deliberate change,
+ * because anyone can recompute it (design.md, "Integrity"). */
+#define CFS_CSUM_POLY1305 2u
 
 /* Compression algorithms (cfs_inode.compress_algo, and the algorithm of
  * a compressed extent). */
@@ -86,6 +92,27 @@ struct cfs_mhdr {
 #define CFS_DIRECT           10u
 #define CFS_MAX_EXTENTS      4096u   /* runs per inode the implementation will load (a fragmentation bound, not a format limit) */
 #define CFS_CSUMS_PER_BLOCK  (CFS_PAYLOAD / 4u)           /* 1016 */
+/* One authenticated entry per logical block. The generation is here
+ * because a data block carries no header to hold it, and the nonce
+ * needs it: a block is written once per generation, so (block, its
+ * generation) never repeats with different contents under one key. */
+struct cfs_csum_aead {          /* 32 bytes */
+    uint8_t tag[16];
+    /* The nonce this block was sealed with, drawn at random when it was
+     * written. Storing it costs twelve bytes that were going to be
+     * padding and buys the one property the cipher cannot do without:
+     * a nonce is never reused, whatever the filesystem does with
+     * generations afterwards (design.md, "The nonce"). */
+    uint8_t nonce[12];
+    /* A plain CRC32C of the same ciphertext. The tag needs the file's
+     * key to check; this does not, which is what lets a mirror repair a
+     * copy and a scrub read the whole filesystem on a machine that
+     * cannot decrypt a byte of it. It detects damage, not forgery --
+     * the tag is what says a block is the one that was written
+     * (design.md, "Integrity"). */
+    uint32_t crc;
+};
+#define CFS_AEAD_PER_BLOCK   (CFS_PAYLOAD / sizeof(struct cfs_csum_aead))
 #define CFS_CSUM_MAX_BLOCKS  ((uint64_t)CFS_PTRS_PER_BLOCK * CFS_CSUMS_PER_BLOCK)
 #define CFS_DIRENT_SIZE      64u
 #define CFS_DIRENTS_PER_BLOCK (CFS_BLOCK / CFS_DIRENT_SIZE)
@@ -285,6 +312,28 @@ struct cfs_label {
     uint32_t pad;
 };
 
+/*
+ * The wrapped master key (CFS_KIND_KEYS), named by cfs_super.key_root.
+ *
+ * The master key is random and never leaves the kernel in the clear.
+ * The user's key derives a wrapping key through the salt; the wrapping
+ * key encrypts the master and authenticates it, so a wrong key is
+ * refused at mount instead of producing plausible rubbish. Rotation
+ * rewrites this block alone -- no file is touched, because the user's
+ * key never encrypted any of them (design.md, "Key storage and
+ * rotation").
+ */
+struct cfs_keys {
+    uint32_t version;          /* 1 */
+    uint32_t kdf;              /* CFS_KDF_* */
+    uint8_t salt[16];
+    uint8_t wrapped[32];       /* the master key, encrypted with the wrapping key */
+    uint8_t tag[16];           /* over `wrapped`: what tells a wrong key from a right one */
+    uint64_t reserved[4];
+};
+
+#define CFS_KDF_SHA512 1u
+
 struct cfs_dirent {
     uint64_t ino;          /* 0 = free slot */
     uint8_t type;          /* CFS_TYPE_* */
@@ -308,7 +357,8 @@ struct cfs_super {
     uint64_t snap_root;    /* reserved: snapshot roots */
     uint64_t members;      /* v4: DVA of the CFS_KIND_MEMBERS block. v2/v3: the constant 1 */
     uint8_t uuid[16];      /* v4: the pool's uuid, matching every member's label */
-    uint64_t reserved[6];
+    uint64_t key_root;     /* v7: DVA of the CFS_KIND_KEYS block, or 0 when not encrypted */
+    uint64_t reserved[5];
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };
@@ -352,5 +402,8 @@ static inline uint64_t cfs_extent_blocks(const struct cfs_extent *ext, unsigned 
 /* Where logical block `lblk`'s checksum lives: index slot and entry. */
 static inline unsigned cfs_csum_index(uint64_t lblk) { return (unsigned)(lblk / CFS_CSUMS_PER_BLOCK); }
 static inline unsigned cfs_csum_slot(uint64_t lblk) { return (unsigned)(lblk % CFS_CSUMS_PER_BLOCK); }
+/* The same, for the wider entries an authenticated filesystem keeps. */
+static inline unsigned cfs_aead_index(uint64_t lblk) { return (unsigned)(lblk / CFS_AEAD_PER_BLOCK); }
+static inline unsigned cfs_aead_slot(uint64_t lblk) { return (unsigned)(lblk % CFS_AEAD_PER_BLOCK); }
 
 #endif /* COSMOFS_FORMAT_H */

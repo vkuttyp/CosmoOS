@@ -366,3 +366,45 @@ stored as it is, a page rewritten inside a record, a partial page that
 has to read the record first, truncation into the middle of a record,
 re-extension reading zeros, and a clean scrub), `test_lz4` and
 `fuzz_lz4` for the codec that stands behind all of it.
+
+**V27. What is encrypted is authenticated, and what is not encrypted is
+said out loud.** An encrypted filesystem seals a block with its file's
+key — derived from a master key that the user's key only wraps — and a
+nonce of ninety-six random bits, drawn at write time and stored beside
+the tag. Deriving the nonce from the block number and the generation
+would tie the cipher's one hard requirement to a promise the filesystem
+cannot keep: the older-root fallback reuses a generation while the
+abandoned attempt's ciphertext is still on the disk, and a stream cipher
+repeating a (key, nonce) pair hands out the xor of two plaintexts.
+Compression runs before encryption, because the other order leaves
+nothing to compress.
+
+Each entry in the checksum tree holds a Poly1305 tag over the
+ciphertext, the generation, and a plain CRC32C of the same bytes. The
+two answer different questions: the CRC needs no key and is what a
+mirror repairs against and a scrub verifies, so both keep working on a
+machine that cannot decrypt the filesystem; the tag needs the file's key
+and is what says a block is the one that was written, which a CRC cannot
+say because whoever changed it could recompute it. The tag is checked
+before the block is decrypted, so a forged block never becomes
+plaintext, and it covers the block's inode and logical number as
+associated data, so a genuine block moved to another offset of the same
+file is refused rather than opened in the wrong place. A wrong user key is refused by the tag over the wrapped
+master key rather than producing rubbish, and rotation rewraps that one
+block without rewriting a file.
+
+What is *not* encrypted is the shape of the filesystem: allocation
+bitmaps, the inode map, inode records, extent chains, the member table
+and the superblock. An attacker with the disk learns how many files
+exist, how large they are, when they were written, their owners and
+modes — and not one file name or byte of content, because a directory's
+entries are the data blocks of its inode. That last point cuts both
+ways: a mount with no key cannot walk a path at all, and answers
+`-ENOKEY` to a lookup while a scrub still reads every block. Check:
+`cosmofs-crypt` (the plaintext is absent from the block the file
+occupies; a wrong key is `-EKEYREJECTED`; a bent block is refused, not
+returned; a keyless scrub reads and repairs; rotation keeps every file
+readable; a keyless remount refuses lookups; the same block written
+eight times gives eight different ciphertexts, which is what a repeated
+nonce would break; and a genuine block of a file written over another of
+its own offsets is refused), and `test_chacha20` against RFC 8439.

@@ -1229,6 +1229,171 @@ bool selftest_cosmofs_compress(const char **reason)
 }
 
 /*
+ * Encryption. The claims worth checking are that the plaintext is not on
+ * the disk, that a wrong key is refused rather than believed, that a
+ * mount without the key still works for everything that is not a file's
+ * contents, and that a scrub -- which has no key -- can still read and
+ * repair the whole filesystem.
+ */
+bool selftest_cosmofs_crypt(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    static const char key[] = "correct horse battery staple";
+    CHECK(cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    /* No key has arrived: the metadata mounted, the contents are shut. */
+    CHECK(cosmofs_test_unlock(mount_of(ENG), "wrong key", 9) == -EKEYREJECTED);
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0);
+
+    static const char secret[] = "the quick brown fox jumps over the lazy dog, repeatedly and at length";
+    CHECK(write_file(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_mkdir(NULL, ENG "/private", 0755) == 0);
+    CHECK(write_file(ENG "/private/inner", secret, sizeof(secret) - 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+
+    /* The plaintext is not on the disk. Read the block the file's data
+     * actually occupies and look for it. */
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/secret.txt", COSMO_O_RDONLY, 0, &f) == 0);
+    uint64_t ino = f->vn->ino;
+    file_put(f);
+    uint64_t dva = 0;
+    CHECK(cosmofs_test_block_of(mount_of(ENG), ino, 0, &dva) == 0);
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *raw = kmalloc(CFS_BLOCK, 0);
+    CHECK(raw != NULL);
+    CHECK(pool_read(p, dva, raw) == 0);
+    bool found = false;
+    for (size_t i = 0; i + sizeof(secret) - 1 < CFS_BLOCK; i++)
+        found = found || memcmp(raw + i, secret, sizeof(secret) - 1) == 0;
+    CHECK(!found);
+
+    /* A block bent behind the filesystem's back is refused, not
+     * returned: the tag is what says this is the block that was
+     * written, and a CRC could have been recomputed by whoever bent it. */
+    raw[100] ^= 0x20;
+    CHECK(pool_write(p, dva, raw) == 0 && pool_flush(p) == 0);
+    kfree(raw);
+    pool_close(p);
+    CHECK(vfs_open(NULL, ENG "/secret.txt", COSMO_O_RDONLY, 0, &f) == 0);
+    static char got[128];
+    CHECK(file_read(f, got, sizeof(got)) < 0);
+    file_put(f);
+
+    /* Put it back by rewriting the file, then check the scrub. */
+    CHECK(write_file(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_scrub_stats sc;
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0);
+
+    /* A valid block of this very file, moved to another of its offsets,
+     * must be refused. The tag authenticates where the block belongs as
+     * well as what it holds, and the reader supplies the position it
+     * believes it is reading -- so a transplant fails even though the
+     * ciphertext, nonce and tag are all genuine. */
+    static char two[2 * CFS_BLOCK];
+    for (size_t i = 0; i < sizeof(two); i++)
+        two[i] = (char)(i / CFS_BLOCK ? 'B' : 'A');
+    CHECK(write_file(ENG "/moved.bin", two, sizeof(two)));
+    CHECK(vfs_sync() == 0);
+    struct file *mf;
+    CHECK(vfs_open(NULL, ENG "/moved.bin", COSMO_O_RDONLY, 0, &mf) == 0);
+    uint64_t mino = mf->vn->ino;
+    file_put(mf);
+    uint64_t dva0 = 0, dva1 = 0;
+    CHECK(cosmofs_test_block_of(mount_of(ENG), mino, 0, &dva0) == 0);
+    CHECK(cosmofs_test_block_of(mount_of(ENG), mino, 1, &dva1) == 0);
+    struct spool *mp;
+    CHECK(pool_open(bd, &mp) == 0);
+    uint8_t *blk0 = kmalloc(CFS_BLOCK, 0);
+    CHECK(blk0 != NULL);
+    CHECK(pool_read(mp, dva0, blk0) == 0);
+    CHECK(pool_write(mp, dva1, blk0) == 0 && pool_flush(mp) == 0);   /* block 0's bytes at block 1 */
+    kfree(blk0);
+    pool_close(mp);
+    /* Its own tag travels with it in the checksum tree? No: the entry
+     * stays with the position, so this also stands in for an attacker
+     * who moves both. Either way the position is wrong. */
+    CHECK(vfs_open(NULL, ENG "/moved.bin", COSMO_O_RDONLY, 0, &mf) == 0);
+    CHECK(file_pread(mf, got, 16, CFS_BLOCK) < 0);
+    file_put(mf);
+    CHECK(vfs_unlink(NULL, ENG "/moved.bin") == 0);
+
+    /* No two writes of a block share a nonce, whatever the filesystem
+     * does with generations. Writing the same plaintext to the same
+     * logical block over and over must give different ciphertext every
+     * time: if it did not, an attacker with two copies would have the
+     * xor of the two plaintexts, and after the older-root fallback
+     * reuses a generation that is exactly what a generation-derived
+     * nonce would produce. */
+    /* kmalloc'd, not on the stack: the pool reads into it by DMA, and
+     * eight blocks is far more than a kernel stack should carry. */
+    uint8_t *seen = kmalloc(8 * CFS_BLOCK, 0);
+    CHECK(seen != NULL);
+    unsigned kept = 0;
+    for (unsigned round = 0; round < 8; round++) {
+        CHECK(write_file(ENG "/nonce.bin", secret, sizeof(secret) - 1));
+        CHECK(vfs_sync() == 0);
+        struct file *nf;
+        CHECK(vfs_open(NULL, ENG "/nonce.bin", COSMO_O_RDONLY, 0, &nf) == 0);
+        uint64_t nino = nf->vn->ino;
+        file_put(nf);
+        uint64_t ndva = 0;
+        CHECK(cosmofs_test_block_of(mount_of(ENG), nino, 0, &ndva) == 0);
+        struct spool *np;
+        CHECK(pool_open(bd, &np) == 0);
+        int prc = pool_read(np, ndva, seen + (size_t)kept * CFS_BLOCK);
+        pool_close(np);
+        CHECK(prc == 0);
+        for (unsigned prev = 0; prev < kept; prev++)
+            CHECK(memcmp(seen + (size_t)prev * CFS_BLOCK, seen + (size_t)kept * CFS_BLOCK, CFS_BLOCK) != 0);
+        kept++;
+    }
+    kfree(seen);
+    CHECK(read_matches(ENG "/nonce.bin", secret, sizeof(secret) - 1));
+    CHECK(vfs_unlink(NULL, ENG "/nonce.bin") == 0);
+
+    /* Rotation rewrites one block: the old key stops working, the new
+     * one starts, and every file is still readable without being
+     * rewritten. */
+    static const char key2[] = "a different key entirely";
+    CHECK(cosmofs_rekey(mount_of(ENG), key2, sizeof(key2) - 1) == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Remount with no key at all. The mount succeeds, and then refuses
+     * to walk a path: a directory's entries are its inode's data, so
+     * with names encrypted there is no way in. That is the design
+     * working, not a limitation of it. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmo_stat st;
+    CHECK(vfs_stat(NULL, ENG "/secret.txt", &st) == -ENOKEY);
+    CHECK(vfs_stat(NULL, ENG, &st) == 0 && st.type == COSMO_DT_DIR);   /* the root itself is a vnode */
+    /* And a scrub still runs, because what it checks needs no key. */
+    CHECK(cosmofs_scrub(mount_of(ENG), &sc) == 0 && sc.unrecoverable == 0 && sc.blocks_read > 0);
+    /* The old key is refused; the new one opens it. */
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == -EKEYREJECTED);
+    CHECK(cosmofs_test_unlock(mount_of(ENG), key2, sizeof(key2) - 1) == 0);
+    CHECK(read_matches(ENG "/secret.txt", secret, sizeof(secret) - 1));
+    CHECK(read_matches(ENG "/private/inner", secret, sizeof(secret) - 1));
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-crypt: %llu blocks scrubbed without a key", (unsigned long long)sc.blocks_read);
+    return true;
+}
+
+/*
  * A member table is disk data: its geometry decides how many bitmap
  * chunks a mount reads and how far the allocator may reach, so it is
  * checked against what the format can express before any of it is

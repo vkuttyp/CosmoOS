@@ -100,6 +100,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/random.c \
 	kernel/core/crc32c.c \
 	kernel/core/lz4.c \
+	kernel/security/chacha20.c \
 	kernel/core/fwcfg.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/pagecache.c \
@@ -110,6 +111,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
+	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \

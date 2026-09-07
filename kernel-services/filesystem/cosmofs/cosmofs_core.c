@@ -17,6 +17,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
+#include <kernel/fwcfg.h>
 #include <kernel/random.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -62,6 +63,14 @@ struct mhdr_want {
     uint64_t dva;
     uint32_t kind;
 };
+
+void cfs_mhdr_seal_raw(void *block, uint32_t kind, uint64_t dva, uint64_t generation)
+{
+    struct cfs fake;
+    memset(&fake, 0, sizeof(fake));
+    fake.gen = generation;
+    mhdr_seal(&fake, block, kind, dva);
+}
 
 bool cfs_mhdr_ok(const void *block, uint64_t dva, uint32_t kind)
 {
@@ -804,6 +813,11 @@ int cfs_sync_vnodes(struct cfs *fs)
  * copies = 2 and n = 2, bd[0] and bd[1] are member 0's mirror and bd[2]
  * and bd[3] are member 1's.
  */
+/* The user key an encrypted format wraps its master key with; NULL for
+ * a filesystem in the clear. */
+static const void *g_format_key;
+static size_t g_format_key_len;
+
 static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned version)
 {
     if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES)
@@ -856,11 +870,13 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
      * Member v>0: 0 label; 1 alloc index; 2.. bitmaps. */
     unsigned chunks0 = (unsigned)((mem[0].nblocks + CFS_BITS_PER_BITMAP - 1) / CFS_BITS_PER_BITMAP);
     bool v4 = version >= 4;
+    bool crypt = version >= 7 && g_format_key != NULL;
     /* Before version 4 there is no member table, and the allocation
      * index is at block 2 where that format put it. */
     uint64_t members_blk = 2, alloc_idx = v4 ? 3 : 2, bitmap0 = v4 ? 4 : 3;
     uint64_t imap1 = bitmap0 + chunks0, imap0 = imap1 + 1, inodes0 = imap0 + 1;
-    uint64_t used0 = inodes0 + 1;
+    uint64_t keys_blk = inodes0 + 1;
+    uint64_t used0 = crypt ? keys_blk + 1 : inodes0 + 1;
 
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL) {
@@ -924,7 +940,10 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         root->ino = CFS_ROOT_INO;
         root->parent = CFS_ROOT_INO;
         root->generation = 1;
-        root->csum_algo = CFS_CSUM_CRC32C;
+        /* An encrypted filesystem authenticates rather than checksums:
+         * a CRC cannot tell a deliberate change from an accident. */
+        root->csum_algo = crypt ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
+        root->compress_algo = CFS_COMPRESS_NONE;
         mhdr_seal(&tmp, block, CFS_KIND_INODES, inodes0);
         rc = pool_write(pool, inodes0, block);
     }
@@ -939,6 +958,12 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         ((uint64_t *)(block + CFS_MHDR_SIZE))[0] = imap0;
         mhdr_seal(&tmp, block, CFS_KIND_IMAP1, imap1);
         rc = pool_write(pool, imap1, block);
+    }
+    uint8_t master[CHACHA20_KEY_SIZE];
+    if (rc == 0 && crypt) {
+        random_get_bytes(master, sizeof(master));
+        rc = cfs_keys_write(pool, CFS_DVA(0, keys_blk), 1, master, g_format_key, g_format_key_len);
+        memset(master, 0, sizeof(master));
     }
     if (rc == 0)
         rc = pool_flush(pool);
@@ -958,6 +983,7 @@ static int format_at(struct blkdev **bd, unsigned n, unsigned copies, unsigned v
         tmp.sb.inode_count = 1;
         tmp.sb.free_blocks = free_total;
         tmp.sb.members = v4 ? CFS_DVA(0, members_blk) : 1;
+        tmp.sb.key_root = crypt ? CFS_DVA(0, keys_blk) : 0;
         if (v4)
             memcpy(tmp.sb.uuid, uuid, 16);
         memset(block, 0, CFS_BLOCK);
@@ -986,6 +1012,19 @@ int cosmofs_format_mirror(struct blkdev **bd, unsigned n, unsigned copies)
 int cosmofs_format(struct blkdev *bd)
 {
     return format_at(&bd, 1, 1, CFS_VERSION);
+}
+
+/* Format with encryption: a random master key, wrapped with `key`. */
+int cosmofs_format_encrypted(struct blkdev *bd, const void *key, size_t len)
+{
+    if (key == NULL || len == 0)
+        return -EINVAL;
+    g_format_key = key;
+    g_format_key_len = len;
+    int rc = format_at(&bd, 1, 1, CFS_VERSION);
+    g_format_key = NULL;
+    g_format_key_len = 0;
+    return rc;
 }
 
 /* Test hook: write an older format, so that "versions 2 and 3 mount
@@ -1134,6 +1173,25 @@ static int load_root(struct cfs *fs, struct vnode **root)
     int rc = cfs_members_load(fs);
     if (rc)
         return rc;
+    /* The key, if this filesystem has one. A mount without it still
+     * works for everything that is not a file's contents: the metadata
+     * is plaintext by design, and every data read answers -ENOKEY
+     * (design.md, "Boot-time unlock"). */
+    fs->encrypted = fs->sb.version >= 7 && fs->sb.key_root != 0;
+    if (fs->encrypted && !fs->have_key) {
+        char key[128];
+        if (fwcfg_get_string("fskey", key, sizeof(key)) && key[0]) {
+            rc = cfs_keys_load(fs, key, strlen(key));
+            memset(key, 0, sizeof(key));
+            if (rc == -EKEYREJECTED)
+                kerror("cosmofs: the key in opt/cosmo/fskey does not unwrap this filesystem");
+            else if (rc)
+                return rc;
+        }
+        if (!fs->have_key)
+            kwarn("cosmofs: encrypted and locked; metadata only until a key arrives");
+    }
+    rc = 0;
     /* From the blocks that exist, not the linear span: that is rounded
      * up to whole bitmap chunks per member and is mostly padding on a
      * small device. */
@@ -1324,6 +1382,32 @@ void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
     struct cfs *fs = cfs_of(mnt);
     if (fs)
         fs->discard_on_unmount = discard;
+}
+
+int cosmofs_test_unlock(struct mount *mnt, const void *key, size_t len)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return -EINVAL;
+    if (!fs->encrypted)
+        return -ENOTSUP;
+    mutex_lock(&fs->lock);
+    int rc = fs->have_key ? 0 : cfs_keys_load(fs, key, len);
+    mutex_unlock(&fs->lock);
+    return rc;
+}
+
+int cosmofs_rekey(struct mount *mnt, const void *key, size_t len)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return -EINVAL;
+    if (!fs->encrypted)
+        return -ENOTSUP;
+    mutex_lock(&fs->lock);
+    int rc = cfs_keys_rotate(fs, key, len);
+    mutex_unlock(&fs->lock);
+    return rc;
 }
 
 int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva)

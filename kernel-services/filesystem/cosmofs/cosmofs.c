@@ -507,9 +507,12 @@ int cfs_truncate_blocks(struct cfs *fs, struct cfs_inode *in, uint64_t keep)
 /* --- checksums (docs/kernel-services/filesystem/cosmofs/design.md, version 2) --- */
 
 /* The CSUM block for `lblk`, created (and CoW'd) when `writable`. */
-static int csum_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool writable, struct cfs_buf **out)
+/* `index` is the leaf's position in the checksum index, which differs
+ * between the 4-byte CRC entries and the 32-byte authenticated ones. */
+static int csum_block_at(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, unsigned index, bool writable,
+                         struct cfs_buf **out)
 {
-    if (lblk >= CFS_CSUM_MAX_BLOCKS)
+    if (lblk >= CFS_CSUM_MAX_BLOCKS || index >= CFS_PTRS_PER_BLOCK)
         return -EFBIG;
     struct cfs_buf *idx, *cb;
     int rc;
@@ -529,7 +532,7 @@ static int csum_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool 
             return rc;
         }
     }
-    uint64_t *slot = &((uint64_t *)(idx->data + CFS_MHDR_SIZE))[cfs_csum_index(lblk)];
+    uint64_t *slot = &((uint64_t *)(idx->data + CFS_MHDR_SIZE))[index];
     if (*slot == 0) {
         if (!writable) {
             rc = -ENOENT;
@@ -552,6 +555,35 @@ static int csum_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool 
 out:
     cfs_buf_put(fs, idx);
     return rc;
+}
+
+static int csum_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, bool writable, struct cfs_buf **out)
+{
+    return csum_block_at(fs, in, lblk, cfs_csum_index(lblk), writable, out);
+}
+
+/* The authenticated entry for a block: the tag, the generation that is
+ * half its nonce, and a keyless CRC of the same ciphertext. */
+int cfs_aead_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const struct cfs_csum_aead *e)
+{
+    struct cfs_buf *cb;
+    int rc = csum_block_at(fs, in, lblk, cfs_aead_index(lblk), true, &cb);
+    if (rc)
+        return rc;
+    ((struct cfs_csum_aead *)(cb->data + CFS_MHDR_SIZE))[cfs_aead_slot(lblk)] = *e;
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+int cfs_aead_get(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, struct cfs_csum_aead *e)
+{
+    struct cfs_buf *cb;
+    int rc = csum_block_at(fs, in, lblk, cfs_aead_index(lblk), false, &cb);
+    if (rc)
+        return rc;
+    *e = ((const struct cfs_csum_aead *)(cb->data + CFS_MHDR_SIZE))[cfs_aead_slot(lblk)];
+    cfs_buf_put(fs, cb);
+    return 0;
 }
 
 int cfs_csum_put(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint32_t crc)
@@ -597,8 +629,58 @@ static bool data_ok(const void *block, void *arg)
     return crc32c(block, CFS_BLOCK) == w->crc;
 }
 
+/* An encrypted block is verified by the CRC of its ciphertext -- which
+ * needs no key -- and then authenticated and decrypted with one. The
+ * order matters: a forged block is refused before its plaintext exists. */
+static bool cipher_crc_ok(const void *block, void *arg)
+{
+    const struct data_want *w = arg;
+    return crc32c(block, CFS_BLOCK) == w->crc;
+}
+
+static int read_encrypted(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf)
+{
+    struct cfs_csum_aead e;
+    int rc = cfs_aead_get(fs, in, lblk, &e);
+    if (rc == -ENOENT)
+        rc = -EIO;   /* a mapped block with no entry: the tree is damaged */
+    if (rc)
+        return rc;
+
+    /* Reading the ciphertext needs no key: the CRC beside the tag is
+     * what a mirror repairs against (design.md, "Integrity"). */
+    struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .crc = e.crc, .have_crc = true };
+    rc = cfs_read_repair(fs, dva, buf, cipher_crc_ok, &w, NULL);
+    if (rc) {
+        kerror("cosmofs: inode %llu block %llu: no copy matches its checksum", (unsigned long long)in->ino,
+               (unsigned long long)lblk);
+        fs->csum_failures++;
+        return rc;
+    }
+    if (!fs->have_key)
+        return -ENOKEY;   /* the metadata mounted; the contents did not */
+
+    uint8_t key[CHACHA20_KEY_SIZE];
+    cfs_file_key(fs, in->ino, key);
+    struct cfs_block_aad aad = { .ino = in->ino, .lblk = lblk };
+    bool ok = chacha20_open(key, e.nonce, &aad, sizeof(aad), buf, CFS_BLOCK, e.tag);
+    memset(key, 0, sizeof(key));
+    if (!ok) {
+        kerror("cosmofs: inode %llu block %llu: authentication failed", (unsigned long long)in->ino,
+               (unsigned long long)lblk);
+        fs->csum_failures++;
+        return -EKEYREJECTED;   /* the block is not the one that was written */
+    }
+    return 0;
+}
+
 int cfs_data_read_verified(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf)
 {
+    if (in->csum_algo == CFS_CSUM_POLY1305) {
+        if (!cfs_dva_valid(fs, dva))
+            return -EIO;
+        return read_encrypted(fs, in, lblk, dva, buf);
+    }
     struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .have_crc = false };
     if (in->csum_algo != CFS_CSUM_NONE) {
         int rc = cfs_csum_get(fs, in, lblk, &w.crc);
@@ -657,6 +739,21 @@ int cfs_record_read(struct cfs *fs, struct cfs_inode *in, const struct cfs_exten
 int cfs_data_scrub_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, uint64_t dva, void *buf,
                          unsigned *repaired)
 {
+    if (in->csum_algo == CFS_CSUM_POLY1305) {
+        /* The keyless CRC of the ciphertext: a scrub runs, and repairs,
+         * on a machine that cannot decrypt any of this. */
+        struct cfs_csum_aead e;
+        int rc = cfs_aead_get(fs, in, lblk, &e);
+        if (rc)
+            return rc == -ENOENT ? -EIO : rc;
+        if (!cfs_dva_valid(fs, dva))
+            return -EIO;
+        struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .crc = e.crc, .have_crc = true };
+        rc = cfs_verify_all(fs, dva, buf, cipher_crc_ok, &w, repaired);
+        if (rc)
+            fs->csum_failures++;
+        return rc;
+    }
     struct data_want w = { .fs = fs, .in = in, .lblk = lblk, .have_crc = false };
     if (in->csum_algo != CFS_CSUM_NONE) {
         int rc = cfs_csum_get(fs, in, lblk, &w.crc);
@@ -835,16 +932,56 @@ static uint64_t next_block_hint(struct cfs *fs, const struct cfs_inode *in, uint
  * one (file data from the data class, directory blocks from the metadata
  * class so a deletion on a full disk still has a block to write), its
  * checksum recorded, the mapping replaced. */
+/*
+ * Encrypt a block into `out` and record what a reader needs: the tag
+ * that authenticates it, the generation that is half its nonce, and a
+ * keyless CRC of the ciphertext for whoever has no key.
+ */
+static int seal_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *plain, void *out,
+                      struct cfs_csum_aead *e)
+{
+    if (!fs->have_key)
+        return -ENOKEY;
+    memcpy(out, plain, CFS_BLOCK);
+    uint8_t key[CHACHA20_KEY_SIZE];
+    cfs_file_key(fs, in->ino, key);
+    memset(e, 0, sizeof(*e));
+    cfs_block_nonce(e->nonce);
+    /* The position is authenticated with the block, so a valid block
+     * cannot be moved to another offset and opened there. */
+    struct cfs_block_aad aad = { .ino = in->ino, .lblk = lblk };
+    chacha20_seal(key, e->nonce, &aad, sizeof(aad), out, CFS_BLOCK, e->tag);
+    memset(key, 0, sizeof(key));
+    e->crc = crc32c(out, CFS_BLOCK);
+    return 0;
+}
+
 static int data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
                             enum cfs_alloc_class cls)
 {
+    uint8_t *cipher = NULL;
+    struct cfs_csum_aead entry;
+    if (in->csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0);
+        if (cipher == NULL)
+            return -ENOMEM;
+        int crc = seal_block(fs, in, lblk, buf, cipher, &entry);
+        if (crc) {
+            kfree(cipher);
+            return crc;
+        }
+        buf = cipher;
+    }
     uint64_t nblk, got, old;
     int rc = cfs_alloc_run(fs, cls, next_block_hint(fs, in, lblk), 1, &nblk, &got);
-    if (rc)
+    if (rc) {
+        kfree(cipher);
         return rc;
+    }
     rc = cfs_data_write(fs, nblk, buf);
     if (rc == 0)
-        rc = cfs_csum_put(fs, in, lblk, crc32c(buf, CFS_BLOCK));
+        rc = cipher ? cfs_aead_put(fs, in, lblk, &entry) : cfs_csum_put(fs, in, lblk, crc32c(buf, CFS_BLOCK));
+    kfree(cipher);
     if (rc == 0)
         rc = cfs_set_block(fs, in, lblk, nblk, &old);
     if (rc) {
@@ -889,12 +1026,33 @@ static int record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, co
                 /* The tail of the last block is whatever kzalloc left:
                  * zeros, so the record's blocks are deterministic and a
                  * repeated write of the same data gives the same bytes. */
+                /* Compress, then encrypt: the other order would leave
+                 * nothing worth compressing. Each physical block of the
+                 * record is sealed on its own, so a mirror repairs one
+                 * without the key and a reader authenticates it with
+                 * one. */
+                uint8_t *cipher = NULL;
+                if (in->csum_algo == CFS_CSUM_POLY1305) {
+                    cipher = kmalloc(CFS_BLOCK, 0);
+                    if (cipher == NULL)
+                        rc = -ENOMEM;
+                }
                 for (uint32_t i = 0; i < psize && rc == 0; i++) {
                     const uint8_t *blk = packed + (size_t)i * CFS_BLOCK;
+                    if (cipher) {
+                        struct cfs_csum_aead entry;
+                        rc = seal_block(fs, in, lblk0 + i, blk, cipher, &entry);
+                        if (rc == 0)
+                            rc = cfs_data_write(fs, start + i, cipher);
+                        if (rc == 0)
+                            rc = cfs_aead_put(fs, in, lblk0 + i, &entry);
+                        continue;
+                    }
                     rc = cfs_data_write(fs, start + i, blk);
                     if (rc == 0)
                         rc = cfs_csum_put(fs, in, lblk0 + i, crc32c(blk, CFS_BLOCK));
                 }
+                kfree(cipher);
                 if (rc == 0) {
                     struct cfs_extent ne = { start, cfs_ext_pack(CFS_COMPRESS_LZ4, psize, n), (uint32_t)lblk0 };
                     rc = set_extent(fs, in, ne, NULL);
@@ -1186,7 +1344,9 @@ static int cfs_create_common(struct vnode *dir, const char *name, size_t len, ui
     in.nlink = type == CFS_TYPE_DIR ? 2 : 1;
     in.ino = ino;
     in.parent = dir->ino;
-    in.csum_algo = CFS_CSUM_CRC32C;
+    /* An encrypted filesystem authenticates every file it creates: a
+     * CRC would say a block is intact, not that it is the one written. */
+    in.csum_algo = fs->encrypted ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
     /* Regular files compress; a directory's blocks are written one at a
      * time and a record cannot be formed from them. */
     in.compress_algo = type == CFS_TYPE_REG ? CFS_COMPRESS_LZ4 : CFS_COMPRESS_NONE;

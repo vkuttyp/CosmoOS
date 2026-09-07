@@ -800,6 +800,136 @@ Repair on read and scrub therefore work on a compressed record exactly
 as on any other, without decompressing anything to decide whether a copy
 is good.
 
+## Format version 7: encryption
+
+The constitution (section 52) asks for an explicit answer to seven
+questions rather than a copy of somebody else's semantics. Here they
+are, in the order the code implements them.
+
+### The layer: a pool, keyed per file
+
+Encryption sits at the **pool**: one filesystem, one master key. Not the
+device, because a pool spans devices and the mirror of a block must
+decrypt the same way on each; not per file as the unit of *policy*,
+because then every file needs its own key record and a directory's names
+would still be exposed by whoever holds the parent's key.
+
+Each *file* nevertheless gets its own key, derived from the master:
+
+```text
+  user key ──KDF(salt)──► wrapping key ──unwraps──► master key
+                                                      │
+                                          KDF(master, inode) ──► file key
+```
+
+### The nonce
+
+A block's nonce is **ninety-six random bits, drawn when the block is
+written and stored beside its tag**.
+
+The first design derived it instead, from the block number and the
+generation that wrote it, on the argument that copy-on-write writes a
+block once per generation. That argument is wrong, and the way it fails
+is worth keeping written down: the older-root fallback at mount resumes
+from a *previous* superblock, so a generation is used a second time
+while the ciphertext the abandoned attempt wrote is still on the disk. A
+later write of the same block in the reused generation would repeat a
+(key, nonce) pair, and for a stream cipher that hands anyone holding
+both blocks the xor of the two plaintexts.
+
+Any derivation from values the filesystem manages has that shape of
+risk: it makes the cipher's one hard requirement depend on a property
+some other part of the filesystem has to keep promising. Random bits
+depend on nothing. With a key per file, a file would have to reach some
+2^48 blocks before a repeat is worth thinking about, and the format lets
+it hold 2^32. The cost is twelve bytes per block, in a checksum entry
+that was going to pad them anyway.
+
+### Key storage and rotation
+
+The master key is random and never leaves the kernel in the clear. It is
+stored **wrapped** in a `CFS_KIND_KEYS` block: salt, the wrapped key,
+and a tag over it, named by a reserved superblock field. The user key
+never encrypts data, so **rotation rewraps one block** — a new salt, the
+same master key, one commit — and no file is rewritten. Rotating the
+*master* key would mean rewriting every block and is not offered:
+saying so is better than pretending a cheap operation exists.
+
+A wrong user key is detected at mount, by the tag over the wrapped key,
+rather than by handing out plausible rubbish.
+
+### What is encrypted, and what is not
+
+Data blocks and directory blocks are encrypted — a directory's blocks
+are the data blocks of its inode, so **names are ciphertext**. Metadata
+that describes the shape of the filesystem is not: the allocation
+bitmaps, the inode map, inode records, extent chains, the member table
+and the superblock stay plaintext.
+
+That is a deliberate line, and what it leaks should be stated rather
+than discovered: an attacker with the disk learns how many files exist,
+how large they are, when they were written, their owners and modes, and
+the shape of the directory tree — but not a single file name or byte of
+content. Encrypting the inode map and allocation structures as well
+would mean a mount could not even find its own free space without a key;
+that is a different design, and this one says which it is.
+
+### Integrity, and why the tag is over the ciphertext
+
+CRC32C tells accident from intact; it says nothing about a deliberate
+change, because it is recomputable. An encrypted filesystem therefore
+authenticates: `csum_algo` becomes `CFS_CSUM_POLY1305` and the per-block
+entries in the checksum tree become 16-byte tags instead of 4-byte
+CRCs.
+
+The tag is computed over the **ciphertext**, and beside it each entry
+keeps a plain CRC32C of the same bytes. Two checks, because they answer
+different questions and need different things:
+
+- the CRC needs no key, and is what a mirror repairs against and a scrub
+  verifies -- so both keep working on a machine that cannot decrypt a
+  byte of this filesystem. It tells damage from intact.
+- the tag needs the file's key, and is what says a block is the one that
+  was written. A CRC cannot: whoever changed the block could recompute
+  it.
+
+Authenticate-then-decrypt in that order means a forged block is refused
+before its plaintext is ever produced.
+
+The tag also covers **where the block belongs** -- its inode and logical
+block number, passed as associated data and never stored. Without that,
+a block of a file could be moved to another offset of the same file,
+tag and all, and would open there: the contents would be genuine and in
+the wrong place, which is a change an attacker can make without
+breaking anything. The reader supplies the position it believes it is
+reading, so a lie about it makes the tag fail.
+
+### Boot-time unlock
+
+The key arrives through the platform's firmware configuration
+(`opt/cosmo/fskey`, the same channel fault injection uses), is derived
+into the wrapping key, and unwraps the master at mount.
+
+A mount whose filesystem is encrypted and has no key **succeeds**, and
+then refuses almost everything -- including, and this is worth being
+exact about, walking a path. A directory's entries are the data blocks
+of its inode, so with names encrypted a lookup cannot get past the root:
+`stat` of a file inside it is `-ENOKEY`, not a size. What a keyless
+mount can still do is the work that needs no names: the pool assembles,
+the allocation maps and inode records load, and `cosmofs_scrub` reads
+and repairs every block in the filesystem, because what it checks is the
+keyless CRC beside each tag. A key supplied later through the same
+channel or `cosmofs_test_unlock` opens the mount in place.
+
+An earlier draft of this section claimed `stat` and `readdir` would work
+without a key. They do not, and the reason is the design working as
+intended rather than a limitation: names are contents.
+
+What is deliberately absent: a system call to add a key, a keyring, a
+passphrase prompt, per-user keys. The mechanism is one channel and one
+key, because that is what can be tested here; the wrapping format has
+room for more.
+
 ### What this unit does not do
 
 - Per-block copy counts, parity (RAID-Z and friends), resilvering a
