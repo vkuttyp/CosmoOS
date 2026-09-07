@@ -203,6 +203,9 @@ architectures, so no offload is implemented, with the figures beside the
 decision in `docs/drivers/e1000e/design.md`. It also found the driver
 double-counting interface statistics, which nothing else had.
 
+The next report in this shape is `next-subsystem-usb.md` (§60's third
+item).
+
 ## Alternatives considered
 
 - **USB (§60 #3)** — larger by a wide margin (host controller, hub, and
