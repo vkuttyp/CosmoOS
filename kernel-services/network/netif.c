@@ -508,12 +508,14 @@ bool netif_cpu_stats(unsigned cpu, struct net_cpu_stats *out)
 void netif_set_rx_hook(netif_rx_hook_fn fn, void *arg)
 {
     /* Install: argument first, then the function, so a worker that sees
-     * the function sees its argument. Uninstall: the reverse, so a
-     * worker never sees a live function with a dead argument. A worker
-     * that loaded the old pair before the store may still be running it,
-     * so a hook's context must outlive the call that removed it. */
+     * the function sees its argument. Uninstall: clear the function, then
+     * wait one grace period. The worker loads and runs the hook inside a
+     * read-side section, so when this returns no worker is still inside
+     * the old hook or about to enter it, and the caller may free the
+     * hook's context -- it can live on the caller's stack. */
     if (fn == NULL) {
         __atomic_store_n(&g_rx_hook, NULL, __ATOMIC_RELEASE);
+        synchronize_quiesce();
         g_rx_hook_arg = NULL;
         return;
     }
@@ -622,8 +624,14 @@ static void run_work(struct net_cpu *c)
 static void input_one(struct mbuf *m)
 {
     struct netif *nif = m->pkt.rcvif;
+    /* Read-side section around the hook: netif_set_rx_hook(NULL) waits a
+     * grace period after clearing it, so a hook never runs after the
+     * call that removed it has returned. The hook must not block. */
+    quiesce_read_lock();
     netif_rx_hook_fn hook = __atomic_load_n(&g_rx_hook, __ATOMIC_ACQUIRE);
-    if (hook && !hook(nif, m, g_rx_hook_arg))
+    bool taken = hook != NULL && !hook(nif, m, g_rx_hook_arg);
+    quiesce_read_unlock();
+    if (taken)
         return;
     if (nif->flags & NETIF_LOOPBACK) {
         /* No link layer: pkt.proto carries the EtherType. */

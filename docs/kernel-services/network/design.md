@@ -715,7 +715,11 @@ machine has, bringing the default down to reach the second exactly as
 - **ARP round trips through the driver's rings.** Requests for the
   gateway are built by hand and sent with `ether_output`; the replies
   are counted and consumed by the receive hook at the driver boundary,
-  before any protocol layer sees them. QEMU's user-mode backend answers
+  before any protocol layer sees them. The hook's context is one per
+  round, on the round's stack frame: clearing the hook waits a grace
+  period (`netif_set_rx_hook`), so no worker is still counting into a
+  round that has ended, and a reply from one interface's round is never
+  credited to the next interface's. QEMU's user-mode backend answers
   ARP in-process, so this is the lightest peer available and the number
   is the driver plus the device model plus the worker hand-off, with
   the IP stack out of the picture. Reported as round trips per second

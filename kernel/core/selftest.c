@@ -371,6 +371,7 @@ static const struct selftest tests[] = {
     { "net-icmp-limit",  selftest_net_icmp_limit },
     { "net-nonblock",    selftest_net_nonblock },
     { "net-steer",       selftest_net_steer },
+    { "net-rxhook-grace", selftest_net_rxhook_grace },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
     { "net-nicbench",    selftest_net_nicbench },

@@ -2142,15 +2142,6 @@ struct nicbench_hook {
     uint32_t replies;   /* atomic: the worker of whichever CPU the flow hashes to */
 };
 
-/*
- * Static, not on nicbench_arp's stack: netif_set_rx_hook has no grace
- * period, so a worker that loaded this hook just before it was removed
- * may still call it after the round has ended, and the context it finds
- * must be alive. Counting one stray reply into a finished round is
- * harmless; a fault is not.
- */
-static struct nicbench_hook g_nicbench_hook;
-
 /* At the driver boundary, before any protocol layer: a reply to *us*
  * about the *gateway*, from the interface under test, is counted and
  * taken. Anything else -- another interface, an unsolicited reply, a
@@ -2158,7 +2149,7 @@ static struct nicbench_hook g_nicbench_hook;
 static bool nicbench_rx_hook(struct netif *nif, struct mbuf *m, void *arg)
 {
     struct nicbench_hook *h = arg;
-    if (h == NULL || nif != h->nif || m->pkt.len < ETH_HLEN + sizeof(struct arp_frame))
+    if (nif != h->nif || m->pkt.len < ETH_HLEN + sizeof(struct arp_frame))
         return true;
     uint8_t hdr[ETH_HLEN + sizeof(struct arp_frame)];
     if (!m_copydata(m, 0, sizeof(hdr), hdr))
@@ -2202,11 +2193,12 @@ static uint64_t rxq_drops_total(void)
 static bool nicbench_arp(const char **reason, struct netif *nif, unsigned *rt_per_s, uint64_t *ns_per_rt)
 {
     static const uint8_t bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
-    struct nicbench_hook *h = &g_nicbench_hook;
-    h->nif = nif;
-    h->gateway = nif->ip4.gateway;
-    __atomic_store_n(&h->sent, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&h->replies, 0u, __ATOMIC_RELEASE);
+    /* One context per round, on this frame: netif_set_rx_hook(NULL)
+     * returns only after a grace period, so no worker is still inside
+     * the hook when the round ends -- a reply from this interface's
+     * round cannot be counted into the next interface's. */
+    struct nicbench_hook ctx = { .nif = nif, .gateway = nif->ip4.gateway };
+    struct nicbench_hook *h = &ctx;
     uint64_t rx0 = nif->stats.rx_packets, drops0 = rxq_drops_total();
     netif_set_rx_hook(nicbench_rx_hook, h);
     uint64_t t0 = clock_now_ns();
@@ -2319,6 +2311,61 @@ static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_
           "%llu of %u frames left the driver); sw checksum of 1 KiB %llu ns = %u%% of a send",
           nif->name, nif->caps, rt_s, (unsigned long long)ns_rt, sends_s, (unsigned long long)ns_send,
           (unsigned long long)frames, accepted, (unsigned long long)cksum_ns, share);
+    return true;
+}
+
+/*
+ * The guarantee the benchmark's per-round context rests on: once
+ * netif_set_rx_hook(NULL) has returned, the hook it removed is not
+ * running on any worker. The hook lingers on purpose after announcing
+ * itself, the test removes it while it is lingering, and the removal
+ * must not return before the hook has left.
+ */
+struct rxhook_grace_state {
+    uint32_t entered, exited;
+};
+
+static bool rxhook_grace_hook(struct netif *nif, struct mbuf *m, void *arg)
+{
+    struct rxhook_grace_state *st = arg;
+    (void)nif;
+    __atomic_store_n(&st->entered, 1u, __ATOMIC_RELEASE);
+    /* Long enough for the test thread, on another CPU, to see `entered`
+     * and call netif_set_rx_hook(NULL) while this is still running. A
+     * spin, not a sleep: a hook runs inside a read-side section. */
+    uint64_t until = clock_now_ns() + 10ull * 1000000ull;
+    while (clock_now_ns() < until)
+        arch_cpu_relax();
+    m_freem(m);
+    __atomic_store_n(&st->exited, 1u, __ATOMIC_RELEASE);
+    return false;
+}
+
+bool selftest_net_rxhook_grace(const char **reason)
+{
+    struct netif *lo = netif_loopback();
+    CHECK(lo != NULL);
+    struct rxhook_grace_state st = { 0, 0 };
+    netif_set_rx_hook(rxhook_grace_hook, &st);
+    struct mbuf *m = m_getcl();
+    CHECK(m != NULL);
+    m->data = m->buf + 64;
+    m->len = m->pkt.len = 64;
+    memset(m->data, 0, 64);
+    m->pkt.proto = ETH_P_IP;   /* never reaches IP: the hook takes it */
+    /* To another CPU's worker when there is one. On the same CPU the
+     * hook, which does not yield, finishes before this thread runs
+     * again, and the removal has nothing to wait for. */
+    unsigned ncpu = cpu_count();
+    netif_rx_on(lo, m, ncpu > 1 ? (arch_cpu_id() + 1) % ncpu : 0);
+    for (unsigned i = 0; i < 1000 && !__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE); i++)
+        thread_sleep_ms(1);
+    CHECK(__atomic_load_n(&st.entered, __ATOMIC_ACQUIRE) == 1);
+    netif_set_rx_hook(NULL, NULL);
+    /* Returned: the hook has finished, and `st` -- this stack frame --
+     * may go. Without the grace period this fails on two or more CPUs. */
+    CHECK(__atomic_load_n(&st.exited, __ATOMIC_ACQUIRE) == 1);
+    netif_put(lo);
     return true;
 }
 
