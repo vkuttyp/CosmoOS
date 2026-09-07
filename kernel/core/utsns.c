@@ -14,22 +14,12 @@
  * every process, and its reference count is only ever a formality. */
 static struct uts_ns g_init_uts = {
     .refs = 1,
+    .lock = SPINLOCK_INIT("utsns"),
     .name = "cosmo",
 };
 
-static bool g_init_uts_ready;
-
-static void init_once(void)
-{
-    if (!g_init_uts_ready) {
-        spinlock_init(&g_init_uts.lock, "utsns");
-        g_init_uts_ready = true;
-    }
-}
-
 struct uts_ns *utsns_initial(void)
 {
-    init_once();
     return &g_init_uts;
 }
 

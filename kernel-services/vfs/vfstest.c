@@ -293,12 +293,17 @@ static struct thread *hammer_on(void (*fn)(void *), struct vfs_hammer *h, unsign
  */
 bool selftest_utsns(const char **reason)
 {
-    struct uts_ns *init = utsns_initial();
-    char was[COSMO_HOST_NAME_MAX], got[COSMO_HOST_NAME_MAX];
-    utsns_gethostname(init, was, sizeof(was));
+    /* On namespaces of its own, never on the one the system boots in:
+     * a CHECK that fails returns on the spot, and a test that had
+     * renamed the machine would leave the rest of the boot -- including
+     * the user-mode test, which compares names -- reading a test value
+     * and failing somewhere that says nothing about the cause. */
+    struct uts_ns *a = NULL, *b = NULL;
+    char got[COSMO_HOST_NAME_MAX];
+    CHECK(utsns_create(utsns_initial(), &a) == 0);
+    struct uts_ns *init = a;
 
     CHECK(utsns_sethostname(init, "before", 6) == 0);
-    struct uts_ns *b = NULL;
     CHECK(utsns_create(init, &b) == 0);
     /* The copy is of the name at the split. */
     CHECK(utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, "before") == 0);
@@ -328,7 +333,7 @@ bool selftest_utsns(const char **reason)
     CHECK(utsns_gethostname(init, small, sizeof(small)) == 3 && small[3] == 0);
 
     utsns_put(b);
-    CHECK(utsns_sethostname(init, was, strlen(was)) == 0);
+    utsns_put(a);
     kinfo("selftest: utsns: a namespace carries the name it was made with, and the two move apart");
     return true;
 }
