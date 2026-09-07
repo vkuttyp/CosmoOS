@@ -124,10 +124,16 @@ LBA28 count is used instead), the logical sector size (words 106 and
 117–118; 512 unless the device says otherwise, 4096 accepted), NCQ
 support (word 76 bit 8) and queue depth (word 75, plus one), write
 cache (word 85 bit 5) so `FLUSH CACHE EXT` is issued only when there is
-a cache to flush. Then a `struct blkdev` registered under the prefix
-`sd`: with the archive's module order (`usb_storage` before `ahci`)
-the USB disk is `sda` and the SATA disk `sdb`, which the boot test
-requires; `dev` is the controller, `sector_size` and `capacity` from
+a cache to flush. Then a `struct blkdev` registered under an exact,
+controller-scoped name — `ahci<controller>p<port>` (`ahci0p0`), the
+shape `nvme0n1` has — with `blk_register_named`, not under a letter
+prefix: the `sd` letters are handed out in registration order, and
+registration order between the USB disk (which the xHCI worker
+registers, the module's init merely waiting for it with a bound) and a
+SATA disk registered from probe would be a timing fact dressed up as a
+name. A name that says which controller and port a disk is on is what
+a machine with several disks needs anyway; `dev` is the controller,
+`sector_size` and `capacity` from
 IDENTIFY, `max_sectors` 256 (128 KiB at 512 bytes; a `DMA EXT`
 command's count field goes to 65 536 and the benchmark decides),
 `max_segments` `AHCI_PRDT_MAX`, `timeout_ns` 10 s, `nr_queues` 1.
@@ -163,10 +169,14 @@ change) are handled on a worker thread per controller, as the USB port
 worker is: the port is re-read after a 100 ms debounce; a disk that was
 present and is not (`DET` ≠ 3) is `blk_unregister`ed with its commands
 failed `-ENODEV`; a port that has a disk and no blkdev is identified
-and registered. The harness has no monitor, so the automated test of
-this path is an in-guest COMRESET (below), which raises `PRCS` and
-re-identifies through the same handler; a physical pull is by hand with
-QMP.
+and registered. The harness has no monitor, so the absent-device branch
+is driven the way the USB unit drives its detach: a test-only operation
+on the blkdev, `debug_presence(bd, present)`, runs the worker's own
+function for the port as if it had read `DET` = 0 (the disk is taken
+down, its commands failed `-ENODEV`, the blkdev unregistered while the
+hardware stays attached) or `DET` = 3 (identified and registered again).
+The COMRESET test (below) covers the interrupt and re-identify half
+through the controller's own event; a physical pull is by hand with QMP.
 
 **Removal** (`remove`): every port's blkdev unregistered (commands in
 flight `-ENODEV`), ports stopped, `GHC.IE` cleared, the vector released
@@ -195,8 +205,9 @@ the refusal of an ATAPI device is exercised.
   run_boot_test.py` (markers), `kernel/core/selftest.c` and
   `kernel/include/kernel/selftest.h` (the tests), `kernel/device/
   devtest.c` (the tests live beside the NVMe and USB ones; `blk-bench`
-  gains `sdb` and a concurrent variant), `kernel/include/kernel/
-  faultinject.h` (one kind: a command whose `PxCI` bit is never set).
+  gains `ahci0p0` and a concurrent variant), `kernel/include/kernel/
+  faultinject.h` (one kind: a command whose `PxCI` bit is never set),
+  `kernel/include/kernel/blk.h` (`debug_presence`).
 - `README.md`, `docs/README.md`, `docs/kernel/device/design.md` (the
   DMA-parent answer), `docs/audit/next-subsystem-usb.md` (the pointer).
 - The chain gains `x86-nosata-test`, `x86-atapi-test` and
@@ -204,10 +215,15 @@ the refusal of an ATAPI device is exercised.
 
 ## New APIs
 
-None kernel-facing is planned; the hypothesis held twice and is tested
-a third time. The module reaches the kernel through `blk_register`,
-`bio_complete`, `pci_*`, `dma_*`, the interrupt and thread APIs, and
-`faultinject_should_fail` — all exported already. The two places it
+One test-only operation, and otherwise none kernel-facing; the
+hypothesis held twice and is tested a third time. The one:
+`blkdev_ops.debug_presence(bd, bool present)`, optional, the same shape
+as `debug_dma` — the kernel's tests reach a module's code only through
+function pointers the module fills in, and the absent-device path needs
+reaching. The module otherwise reaches the kernel through
+`blk_register_named`, `bio_complete`, `pci_*`, `dma_*`, the interrupt
+and thread APIs, and `faultinject_should_fail` — all exported already.
+The two places it
 could fail, named now:
 
 - **A port as a device.** If hotplug or the removal order turns out to
@@ -228,7 +244,7 @@ Additive; the existing suite stays green at every step.
 1. Bring-up, port init, IDENTIFY, the blkdev registered read-only:
    `ahci0: pci:00:1f.2: AHCI 1.3, 6 ports, 32 slots, 64-bit` and
    `ahci0: port 0: QEMU HARDDISK, 16384 sectors of 512 bytes` in the
-   log; `ahci-identify` and `blk-bench` over `sdb` (reads).
+   log; `ahci-identify` and `blk-bench` over `ahci0p0` (reads).
 2. Writes, flush, the timeout and restart path, `debug_dma`; `ahci-io`,
    `ahci-timeout`, the IOMMU fault test finds a third disk.
 3. The port worker, `PCS`/`PRCS`, the in-guest COMRESET test.
@@ -245,7 +261,7 @@ may well run in probe — the design chooses when it knows).
 
 - **`ahci-identify`**: the controller bound; exactly one port with a
   device; its signature is a SATA disk; IDENTIFY gives a model string
-  starting `QEMU` and the image's sector count; `sdb` exists with that
+  starting `QEMU` and the image's sector count; `ahci0p0` exists with that
   geometry and its `dev` is the controller's PCI function.
 - **`ahci-io`**: as `usb-storage`: 128 KiB round trips at the start, a
   middle and the end; a flush; a refused out-of-range read; a
@@ -260,12 +276,25 @@ may well run in probe — the design chooses when it knows).
 - **`ahci-reset`**: with reads in flight, a COMRESET is issued through
   `PxSCTL` from inside the guest; the in-flight commands complete with
   an error and not never; the port raises `PRCS`, the worker
-  re-identifies the disk, `sdb` is readable; the disk's blkdev is the
-  same object (the disk never left) unless `DET` was seen at 0, in which
-  case it was unregistered and registered anew — the test accepts either
-  and asserts which happened.
+  re-identifies the disk, `ahci0p0` is readable; the disk's blkdev is
+  the same object (the disk never left) unless `DET` was seen at 0, in
+  which case it was unregistered and registered anew — the test accepts
+  either and asserts which happened. This covers the controller's event
+  and the re-identify branch.
+- **`ahci-unplug`**: the absent-device branch, as `usb-unplug` does it:
+  with a read in flight (its `PxCI` bit withheld by the same fault
+  injection `ahci-timeout` uses, so it *is* in flight),
+  `debug_presence(bd, false)` runs the worker's function for the port as
+  if `DET` had read 0. Then: the in-flight bio completed with `-ENODEV`
+  and not never; `blk_find("ahci0p0")` is NULL; a read through the
+  test's own reference returns `-ENODEV`; the driver's per-port state is
+  released once (a counter the test reads). Then `debug_presence(bd,
+  true)` identifies and registers the disk again and it is readable.
+  Together with `ahci-reset` this covers both branches of the handler;
+  what neither covers is the controller raising `PCS` on a physical
+  pull, which is by hand.
 - **`iommu`**: unchanged; it walks every blkdev with `debug_dma` and
-  now finds `sdb`, attributed to `pci:00:1f.2`.
+  now finds `ahci0p0`, attributed to `pci:00:1f.2`.
 - **Shapes**: `QEMU_SATA=0` (controller, no disk: the driver logs the
   empty ports and the tests skip), `QEMU_SATA=cd` (an ATAPI device is
   refused with one log line and no blkdev), aarch64 (`-device ahci`,
@@ -277,7 +306,7 @@ may well run in probe — the design chooses when it knows).
 ## Benchmarks
 
 `blk-bench` already reports sequential 64 KiB and 4 KiB bios over every
-disk in the boot; `sdb` joins the table, which puts AHCI beside NVMe,
+disk in the boot; `ahci0p0` joins the table, which puts AHCI beside NVMe,
 virtio-blk and USB on the same device-model host. Two additions, per
 §21:
 
@@ -297,16 +326,19 @@ virtio-blk and USB on the same device-model host. Two additions, per
 - **QEMU's ICH9 is not an ICH9.** The mitigation as before: write to the
   specification and list what only QEMU has exercised (the BIOS/OS
   handoff, port multipliers, 4 Kn sectors, INTx).
-- **A shared `sd` namespace.** USB and SATA disks both register under
-  `sd`; the boot test pins `sda` to USB and `sdb` to SATA through the
-  archive's module order. A machine with several of each gets letters
-  by probe order, as Linux does; stable naming by identity (serial,
-  path) is a later concern, and the report says so rather than
-  inventing a scheme.
-- **Hotplug is tested by reset, not by removal.** The COMRESET raises
-  the same interrupt a cable event does and runs the same handler, but
-  the disk never actually leaves; the removal branch is exercised only
-  by `remove` and by hand.
+- **Names.** `ahci0p0` says where a disk is, not what it is; a disk
+  moved to another port changes name. Stable naming by identity (serial,
+  label) is a later concern for every disk here, and the report says so
+  rather than inventing a scheme. The first draft shared USB's `sd`
+  letters and pinned them by module order, which review showed to be a
+  timing fact (the USB disk registers from the xHCI worker) dressed up
+  as a name.
+- **Hotplug's absent-device branch is driven, not observed.** The
+  COMRESET raises the same interrupt a cable event does and runs the
+  same handler, but the disk never leaves; `ahci-unplug` runs the
+  absent-device branch through a test-only operation, as the USB unit
+  does. The controller raising `PCS` on a physical pull is exercised by
+  hand only.
 - **ATAPI, port multipliers, INTx-only controllers** are refused, each
   with one log line; a machine whose only SATA controller is INTx-only
   gets no disk from this unit.
