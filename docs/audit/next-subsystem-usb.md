@@ -222,11 +222,16 @@ Kernel-facing: one small, known addition, and otherwise **none is
 planned — that is the hypothesis being tested**, as it was for the NIC.
 
 The known one: `struct iommu_stats` gains `last_fault_sid` and
-`last_fault_addr`, set by `iommu_note_fault` under the unit's lock
-beside the fault count, so a test can assert *which device* faulted and
-not only that something did. Without it the `usb-iommu` check above
-would be an assertion the test cannot make. Observability, not an
-interface change; the same accessor serves NVMe's existing check.
+`last_fault_addr`. Today `iommu_note_fault` bumps the count with a
+lock-free atomic and takes no lock at all; it will instead take the
+stats lock `g_lock` — the IRQ-safe lock `iommu_get_stats` already
+copies under — and write the two fields and the count in that one
+critical section, so a reader that sees the count advance sees the
+fields that belong to it. One slot, not a ring, because the test that
+reads it provokes faults one at a time (below) and nothing else faults
+during a boot that passes. Without this the `usb-iommu` check would be
+an assertion the test cannot make. Observability, not an interface
+change; NVMe's existing check gains the same assertion.
 
 Two places where the hypothesis proper may fail, named now so a change
 there is a finding and not a surprise:
@@ -312,8 +317,14 @@ against the export list before the first boot.
   cannot see that: `iommu_get_stats` has only counts, and
   `iommu_note_fault` puts the requester id in the log alone. So
   `struct iommu_stats` gains `last_fault_sid` and `last_fault_addr`,
-  recorded by `iommu_note_fault` beside the count — the one kernel
-  change this report knows it needs, listed under New APIs.
+  recorded with the count under the stats lock — the one kernel change
+  this report knows it needs, listed under New APIs. The test is
+  serial on purpose: provoke one device, wait until the fault count has
+  advanced by exactly one (the fault interrupt is asynchronous; the
+  existing test already waits for it), read the two fields, then the
+  next device. A second fault cannot overwrite the slot before it is
+  read because none has been provoked yet, and the "exactly one" check
+  is what says so.
 - **Shapes**: `QEMU_USB=0` (skips), `QEMU_IOMMU=0`, `QEMU_SMP=1`,
   release, aarch64 (xHCI on `virt`'s PCI with the SMMU in front),
   `test-crash`, `analyze`, `fuzz` (the descriptor parser gets a host
