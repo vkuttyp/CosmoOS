@@ -105,6 +105,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/fwcfg.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/mountns.c \
+	kernel-services/filesystem/procfs/procfs.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
 	kernel-services/vfs/vfstest.c \

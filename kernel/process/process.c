@@ -1141,22 +1141,67 @@ int process_chdir(const char *path)
     return 0;
 }
 
+/*
+ * Whether the caller may see this process at all. One function, because
+ * procinfo, /proc's lookup and /proc's listing must agree: a rule
+ * written out three times is a rule that will differ in one of them,
+ * and the one that differs is an information leak.
+ *
+ * A process outside domain 0 sees only its own domain, whatever its
+ * credentials say: being root inside a container is not being root over
+ * the machine. An unprivileged viewer sees only its own real uid's.
+ */
+static bool visible_to(const struct process *p, const struct credentials *viewer, uint32_t domain,
+                       bool all)
+{
+    if (domain != 0 && p->domain != domain)
+        return false;   /* another domain: not merely unreadable, invisible */
+    return all || p->cred.ruid == viewer->ruid;
+}
+
+bool process_visible_to_current(const struct process *p)
+{
+    const struct process *self = process_current();
+    const struct credentials *viewer = cred_current();
+    return visible_to(p, viewer, self ? self->domain : 0, cred_privileged(viewer));
+}
+
+/*
+ * The pids the caller may see, up to `max`, returning how many there
+ * are in all. Collected under the table lock and delivered afterwards:
+ * a caller that wants to render them must not run inside this lock.
+ */
+unsigned process_list_visible(pid_t *out, unsigned max)
+{
+    const struct process *self = process_current();
+    const struct credentials *viewer = cred_current();
+    uint32_t domain = self ? self->domain : 0;
+    bool all = cred_privileged(viewer);
+    unsigned total = 0;
+    arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link) {
+        if (!visible_to(p, viewer, domain, all))
+            continue;
+        if (total < max)
+            out[total] = p->pid;
+        total++;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, ts);
+    return total;
+}
+
 unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer)
 {
     unsigned total = 0;
     bool all = cred_privileged(viewer);
-    /* A process outside domain 0 sees only its own domain, whatever its
-     * credentials say: being root inside a container is not being root
-     * over the machine. */
     struct process *self = process_current();
     uint32_t domain = self ? self->domain : 0;
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
-        if (domain != 0 && p->domain != domain)
-            continue;   /* another domain: not merely unreadable, invisible */
-        if (!all && p->cred.ruid != viewer->ruid)
-            continue;   /* another user's process: invisible to an unprivileged viewer */
+        if (!visible_to(p, viewer, domain, all))
+            continue;
         if (total < count) {
             struct cosmo_procinfo *pi = &buf[total];
             memset(pi, 0, sizeof(*pi));

@@ -459,6 +459,7 @@ void ramfs_populate_boot(void)
         { "/boot", 0755 }, { "/boot/modules", 0755 }, { "/boot/tests", 0755 },
         { "/tmp", 01777 },   /* world-writable scratch space (the sticky bit is recorded, not yet enforced) */
         { "/mnt", 0755 },  { "/dev", 0755 }, { "/bin", 0755 }, { "/sbin", 0755 }, { "/etc", 0755 },
+        { "/proc", 0555 },
     };
     for (size_t i = 0; i < ARRAY_SIZE(dirs); i++) {
         int rc = vfs_mkdir(NULL, dirs[i].path, dirs[i].mode);

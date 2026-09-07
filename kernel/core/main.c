@@ -154,6 +154,10 @@ void kernel_main(const struct cosmoboot_info *info)
     vfs_init();
     cosmofs_init();
     ramfs_populate_boot();
+    /* /proc: facts about processes, addressable as files
+     * (docs/kernel-services/filesystem/procfs/design.md). */
+    if (vfs_mount("/proc", "procfs", NULL, 0) != 0)
+        kwarn("vfs: cannot mount /proc");
 
     /* The network stack: mbufs, the worker thread, loopback. NIC drivers
      * are boot modules and register their interfaces when they load. */

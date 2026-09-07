@@ -189,7 +189,11 @@ bool selftest_vfs_ramfs(const char **reason)
     CHECK(vfs_unlink(NULL, "/") == -EEXIST);
     CHECK(vfs_rmdir(NULL, "/tmp/..") == -EINVAL);
 
-    /* Mount a second ramfs on /mnt, use it, unmount it. */
+    /* Mount a second ramfs on /mnt, use it, unmount it. Counted
+     * against what was mounted when this started rather than against a
+     * number: what the system mounts at boot is not this test's
+     * business, and it grew a /proc. */
+    unsigned mounts0 = vfs_mount_count();
     CHECK(vfs_mount("/mnt", "ramfs", NULL, 0) == 0);
     CHECK(vfs_mount("/mnt", "ramfs", NULL, 0) == -EBUSY);
     CHECK(vfs_mount("/nope", "ramfs", NULL, 0) == -ENOENT);
@@ -203,12 +207,12 @@ bool selftest_vfs_ramfs(const char **reason)
     CHECK(vfs_umount("/mnt") == -EBUSY);                                 /* f is open */
     file_put(f);
     CHECK(vfs_rmdir(NULL, "/mnt") == -EBUSY);                            /* a mountpoint */
-    CHECK(vfs_mount_count() == 2);
+    CHECK(vfs_mount_count() == mounts0 + 1);
     CHECK(vfs_umount("/mnt") == 0);
     CHECK(vfs_umount("/mnt") == -EINVAL);                                /* not a mount root */
     CHECK(vfs_umount("/") == -EBUSY);
     CHECK(vfs_stat(NULL, "/mnt/inner", &st) == -ENOENT);                /* the ramfs is gone */
-    CHECK(vfs_mount_count() == 1);
+    CHECK(vfs_mount_count() == mounts0);
     CHECK(vfs_vnode_count() == vnodes0);
     return true;
 }

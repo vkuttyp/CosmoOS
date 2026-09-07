@@ -1490,6 +1490,7 @@ int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st)
 /* --- init and diagnostics ---------------------------------------------------- */
 
 extern struct fs_type ramfs_fs_type;
+extern struct fs_type procfs_fs_type;
 
 void vfs_init(void)
 {
@@ -1498,6 +1499,8 @@ void vfs_init(void)
     g_initialized = true;
     if (vfs_register_fs(&ramfs_fs_type))
         panic("vfs: cannot register ramfs");
+    if (vfs_register_fs(&procfs_fs_type))
+        panic("vfs: cannot register procfs");
     /* The page cache may hold a quarter of RAM before clean pages are
      * reclaimed (docs/kernel/security/design.md §3). */
     struct pmm_stats pst;
