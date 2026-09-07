@@ -100,7 +100,7 @@ struct ahci_port {
     uint32_t err_ci;                   /* PxCI at that moment: which commands the HBA still held */
     bool recovering;                   /* a restart is in progress: submit refuses (-EAGAIN) until the port runs again */
     bool change;                       /* PCS/PRCS: the worker re-reads the port */
-    uint64_t issued, completed, errors, resets, releases;
+    uint64_t issued, completed, errors, resets;
 };
 
 struct ahci {
@@ -360,6 +360,12 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
     struct ahci_sync w;
     completion_init(&w.done, "ahci-sync");
     w.status = -EINPROGRESS;
+    /* Not while the port is being restarted: a slot taken now would be
+     * absent from the recovery's PxCI snapshot and sorted wrongly (review,
+     * PR #53). Wait for the restart, bounded like the command itself. */
+    uint64_t until = clock_now_ns() + AHCI_SYNC_NS;
+    while (__atomic_load_n(&p->recovering, __ATOMIC_ACQUIRE) && clock_now_ns() < until)
+        thread_sleep_ms(1);
     dma_addr_t dma = raw_dma;
     if (len > 0 && raw_dma == 0) {
         dma = dma_map(&p->hba->pdev->dev, buf, len, write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
@@ -367,12 +373,13 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
             return -EINVAL;
     }
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
-    int slot = slot_alloc(p);
+    int slot = p->recovering ? -1 : slot_alloc(p);
     if (slot < 0) {
+        bool busy = p->recovering;
         spin_unlock_irqrestore(&p->lock, f);
         if (len > 0 && raw_dma == 0)
             dma_unmap(&p->hba->pdev->dev, dma, len, write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
-        return -EAGAIN;
+        return busy ? -EBUSY : -EAGAIN;
     }
     struct ahci_slot *s = &p->slots[slot];
     s->sync = &w;
@@ -466,11 +473,13 @@ static int disk_identify(struct ahci_port *p, struct ahci_disk *d, uint64_t *cap
     return 0;
 }
 
+/* The last holder let go. Nothing here may touch the port or the
+ * controller: a holder's reference can outlive ahci_remove, which has
+ * freed both by then (review, PR #53). The disk's own memory is all
+ * that is still ours. */
 static void disk_release(struct blkdev *bd)
 {
-    struct ahci_disk *d = disk_of(bd);
-    __atomic_fetch_add(&d->port->releases, 1u, __ATOMIC_RELAXED);
-    kfree(d);
+    kfree(disk_of(bd));
 }
 
 static const struct blkdev_ops ahci_blk_ops;

@@ -987,6 +987,17 @@ static void xhci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
             x->evt_cycle = !x->evt_cycle;
         }
         x->events++;
+        /* Tell the controller where the consumer is *now*, EHB left set
+         * (a 0 in a write-one-to-clear bit changes nothing): a completion
+         * callback below may submit the next transfer, and a device model
+         * that finishes transfers on the doorbell write posts its events
+         * while this handler is still running -- a chain of them, for a
+         * storage driver whose every completion starts the next exchange.
+         * With the dequeue pointer written only at the end, the controller
+         * counted the ring as full after 255 such events and declared an
+         * Event Ring Full error (CI's aarch64 QEMU, the four-thread
+         * benchmark; docs/drivers/usb/testing.md). */
+        wr64(ir + XHCI_ERDP, x->evt_dma + (dma_addr_t)x->evt_deq * sizeof(struct xhci_trb));
         struct usb_request *done = NULL;
         int status = 0;
         switch (TRB_TYPE_OF(e.control)) {

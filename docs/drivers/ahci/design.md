@@ -50,7 +50,9 @@ disk currently attached (NULL when none). A port outlives its disks.
 **`struct ahci_disk`** — one per detected disk, embedding the
 `struct blkdev`: the IDENTIFY facts (model, serial, LBA48, sector size,
 write cache), a pointer to its port. Allocated at detection, freed by the
-blkdev's release when the last holder lets go; the port counts releases.
+blkdev's release when the last holder lets go — and the release touches
+nothing but the disk's own memory, because a holder's reference can
+outlive `remove`, which has freed the port and controller by then.
 
 ## Bring-up (AHCI 1.3.1 §10.1)
 
@@ -158,6 +160,10 @@ and are completed now with success; those still set were never issued
 and are written to `PxCI` again once the port runs. (Reissuing every
 active slot would have run the completed ones twice and left their bios
 waiting — review, PR #53.)
+
+A synchronous command (IDENTIFY, the tests' one-offs) waits, bounded,
+while the port is restarting: a slot taken during a restart would be
+absent from the recovery's `PxCI` snapshot and sorted wrongly.
 
 **The block layer's timeout** (`blkdev_ops.timeout`, its thread) runs the
 same port restart synchronously: the victim completes `-ETIMEDOUT`, and

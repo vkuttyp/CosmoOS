@@ -127,17 +127,27 @@ Found while building, each by a test that then guards it:
 - The benchmark's writes over `nvme0n1` destroyed the cosmofs the nvme
   test leaves there for the shell's snapshot test. Writes are on `sda`
   only.
-- (CI, on the AHCI unit's PR.) The interrupt handler drained the event
-  ring, then wrote `ERDP` with `EHB` — and an event that landed between
-  the "caught up" check and that write raised no interrupt, because
-  `EHB` was still set, and sat there until the next event, which for a
-  serial device waiting on exactly that event never came. The new
-  four-thread benchmark on `sda` hit it on CI's slower aarch64 machine:
-  a read hung to the 10 s timeout, and with nobody reading the ring the
-  controller reported Event Ring Full (completion code 21) and was
-  declared dead. The handler now looks at the ring once more after
-  clearing `EHB` and handles what it finds; the same edge-triggered
-  hazard was closed in the AHCI handler by clearing `IS` first.
+- (CI, on the AHCI unit's PR; two findings from one symptom.) On CI's
+  aarch64 QEMU the four-thread benchmark on `sda` ended with the
+  controller reporting Event Ring Full (completion code 21) and being
+  declared dead. The first fix closed a real but different hazard: an
+  event landing between the handler's "caught up" check and its `ERDP`
+  write, with `EHB` still set, raised no interrupt and waited for the
+  next one, which for a serial device waiting on that event never comes
+  — the handler now looks once more after clearing `EHB`, and the AHCI
+  handler clears `IS` first for the same edge-triggered reason. CI
+  failed again the same way, and the real mechanism was this: the
+  handler wrote `ERDP` only when it had caught up, but a device model
+  that finishes a transfer on the doorbell write posts the resulting
+  event while the handler is still running — and every completion of the
+  storage driver submits the next transfer from its callback, so one
+  interrupt turned into a chain of hundreds of events, none of which the
+  controller saw dequeued; after 255 it declared the ring full. The
+  handler now writes `ERDP` after every event it consumes (`EHB` left
+  set) and once more with `EHB` when it is done. QEMU 11 on the
+  development host completes transfers on a bottom half, so each
+  doorbell's events arrived in a later interrupt and the chain never
+  formed there.
 - (Review, PR #51.) The timeout path freed the exchange slot the moment
   the cancelled transfer's callback ran, before the device was reset; a
   bio submitted from another CPU in that window started an exchange on

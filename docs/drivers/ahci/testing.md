@@ -113,6 +113,12 @@ to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).
   would have run twice and their bios waited (the handler snapshots
   `PxCI` at the error, and the worker completes the cleared ones, fails
   the executing one and reissues only the rest).
+- (Review, PR #53, second round.) The blkdev release counted into its
+  port, which a holder's reference surviving `remove` would have found
+  freed; the release now touches only the disk's memory. And a
+  synchronous command could take a slot during a port restart and be
+  sorted wrongly by the recovery's `PxCI` snapshot; it now waits,
+  bounded, for the restart to end (`-EBUSY` if it does not).
 - (Reintroduction.) With the detach path's `slots_fail` removed, the bio
   in flight at `ahci-unplug`'s detach never completes and the test fails
   at its "completed, with the right error" step; with it, the bio
