@@ -46,7 +46,11 @@ device never writes past the cluster. `RDT` is the last descriptor
 software has filled; hardware writes `DD` and `EOP` into `status` as it
 fills them. The handler walks from its own head while `DD` is set,
 unmaps, trims to `length`, and hands the frame to `netif_rx`; a fresh
-cluster replaces it before the descriptor is given back. Frames whose
+cluster replaces it before the descriptor is given back. When there is
+no fresh cluster the frame is dropped and its buffer serves again
+without being unmapped: the descriptor keeps the address it has, so
+there is no remap that could fail and no way for the device to be handed
+a descriptor pointing at memory the driver has freed. Frames whose
 `errors` byte is set, or shorter than an Ethernet header, are counted
 and dropped. `RCTL.SECRC` strips the CRC so `length` is the frame.
 

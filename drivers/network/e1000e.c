@@ -113,14 +113,21 @@ static void rx_process(struct e1000e *e)
 
         struct mbuf *fresh = m_getcl();
         if (fresh == NULL || !rx_arm(e, i, fresh)) {
-            /* No replacement: the frame is lost and its buffer serves
-             * again. Counted as a drop, which is what it is. */
+            /*
+             * No replacement: the frame is lost and its buffer serves
+             * again -- *as it is*. It stays mapped and the descriptor
+             * keeps its address, so there is no unmap-and-remap that
+             * could fail and leave the device a descriptor pointing at
+             * freed memory. Only the status has to be cleared. (rx_arm
+             * touches the descriptor only after its map succeeded, so a
+             * failed one has left it untouched.)
+             */
             if (fresh)
                 m_freem(fresh);
             e->nif.stats.rx_dropped++;
-            dma_unmap(&e->pdev->dev, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
-            if (!rx_arm(e, i, m))
-                m_freem(m);   /* the descriptor keeps its stale address; nothing better to do */
+            d->length = 0;
+            d->status = 0;
+            d->errors = 0;
         } else {
             dma_unmap(&e->pdev->dev, m->pkt.dma, MCLBYTES, DMA_FROM_DEVICE);
             m->pkt.dma = 0;
