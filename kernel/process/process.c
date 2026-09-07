@@ -434,7 +434,6 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 
     struct process *parent = attr ? attr->parent : NULL;
     /* Personality: the CosmoOS note selects native; kernel-created processes are always native. */
-    KASSERT(!(parent && process_filter_blocks_personality(parent, info.cosmo_note)));
     p->pers = (info.cosmo_note || parent == NULL) ? &personality_native : &personality_linux;
     if (parent) {
         p->parent_pid = parent->pid;
@@ -500,15 +499,33 @@ int process_create_from_images(const struct process_image *exe, const struct pro
      * would make the filter one spawn away from meaningless
      * (docs/kernel/security/design.md §1f).
      */
-    if (parent) {
-        /* Safe to copy raw only because a filtered parent cannot reach
-         * here with a child of another personality: process_spawn
-         * refuses that, since the same bits mean different calls under
-         * a different numbering (see process_filter_blocks_personality). */
+    if (parent == NULL) {
+        memset(p->syscall_mask, 0xff, sizeof(p->syscall_mask));
+    } else if (process_filter_blocks_personality(parent, p->pers == &personality_native)) {
+        /*
+         * process_spawn refuses this combination with -EPERM, but its
+         * check and this copy are not one atomic step: a sibling thread
+         * can install a filter in between, and the bits would then mean
+         * different calls here than where they were written. So the
+         * child gets nothing rather than the wrong thing -- only the
+         * calls its personality always allows, which lets it exit and
+         * nothing else.
+         *
+         * This is a fallback and not the path anyone takes: refusing
+         * here instead would be a nicer answer, but this runs after the
+         * process is built and past the point where a failure can be
+         * reported, and an assertion would let a process panic the
+         * machine by racing its own spawn.
+         */
+        memset(p->syscall_mask, 0, sizeof(p->syscall_mask));
+    } else if (p->pers == parent->pers) {
         arch_irq_state_t fs = spin_lock_irqsave(&parent->lock);
         memcpy(p->syscall_mask, parent->syscall_mask, sizeof(p->syscall_mask));
         spin_unlock_irqrestore(&parent->lock, fs);
     } else {
+        /* A different personality from an unfiltered parent: there is
+         * no filter to carry, and every Linux program started by native
+         * init takes this path. */
         memset(p->syscall_mask, 0xff, sizeof(p->syscall_mask));
     }
 
