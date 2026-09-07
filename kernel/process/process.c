@@ -67,6 +67,8 @@ static void process_release(struct kobject *obj)
         vm_space_destroy(p->space);
     if (p->cwd)
         vnode_put(p->cwd);
+    if (p->root)
+        vnode_put(p->root);
     if (p->parent)
         process_put(p->parent);
     if (p->linux)
@@ -441,6 +443,22 @@ int process_create_from_images(const struct process_image *exe, const struct pro
                                                                         : HANDLE_TABLE_SIZE;
     p->log_tokens = LOG_BUCKET;
     p->log_refill_ns = clock_now_ns();
+    /*
+     * The root: the request's, else the parent's. Confinement is
+     * inherited and only ever tightens -- a child of a confined process
+     * is confined at least as much, because the caller could only name a
+     * directory inside its own root to begin with.
+     */
+    if (attr && attr->root) {
+        vnode_get(attr->root);
+        p->root = attr->root;
+    } else if (parent) {
+        arch_irq_state_t ps = spin_lock_irqsave(&parent->lock);
+        p->root = parent->root;
+        if (p->root)
+            vnode_get(p->root);
+        spin_unlock_irqrestore(&parent->lock, ps);
+    }
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
         vnode_get(attr->cwd);
@@ -637,6 +655,8 @@ fail:
         vm_space_destroy(p->space);
     if (p->cwd)
         vnode_put(p->cwd);
+    if (p->root)
+        vnode_put(p->root);
     if (p->linux)
         linux_process_release(p);
     signal_process_release(p);
@@ -1098,6 +1118,20 @@ const struct credentials *cred_current(void)
 {
     struct process *p = process_current();
     return p ? &p->cred : &cred_kernel;
+}
+
+/*
+ * The root of the calling process, referenced. A kernel thread, and any
+ * caller before there are processes, gets the global root.
+ */
+struct vnode *vfs_current_root(void)
+{
+    struct process *p = process_current();
+    if (p && p->root) {
+        vnode_get(p->root);
+        return p->root;
+    }
+    return vfs_root();
 }
 
 unsigned process_count_uid(uint32_t ruid)

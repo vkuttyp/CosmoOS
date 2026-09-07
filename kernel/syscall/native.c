@@ -700,11 +700,19 @@ static int copy_strv(uint64_t uarr, const char **out, struct spawn_copy *sc, uns
 
 static int64_t sys_spawn(struct syscall_args *a)
 {
+    /* Copy what every caller has, decide from its flags whether it has
+     * the field added after that, and only then read further: a program
+     * built against the older header passes the older struct, and the
+     * kernel must not read past what it gave. */
     struct cosmo_spawn req;
-    if (copy_from_user(&req, a->a[0], sizeof(req)))
+    memset(&req, 0, sizeof(req));
+    if (copy_from_user(&req, a->a[0], COSMO_SPAWN_SIZE_V1))
         return -EFAULT;
-    if ((req.flags & ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS)) || req.path == NULL || req.argv == NULL)
+    if ((req.flags & ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT)) || req.path == NULL ||
+        req.argv == NULL)
         return -EINVAL;
+    if ((req.flags & COSMO_SPAWN_SETROOT) && copy_from_user(&req, a->a[0], sizeof(req)))
+        return -EFAULT;
     struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
         return -EINVAL;
@@ -760,8 +768,21 @@ static int64_t sys_spawn(struct syscall_args *a)
         }
     }
     pid_t pid = 0;
+    char rootbuf[VFS_PATH_MAX];
+    const char *rootp = NULL;
+    if (req.flags & COSMO_SPAWN_SETROOT) {
+        if (req.root == NULL) {
+            rc = -EINVAL;
+            goto out;
+        }
+        if (strncpy_from_user(rootbuf, (uint64_t)(uintptr_t)req.root, sizeof(rootbuf)) < 0) {
+            rc = -EFAULT;
+            goto out;
+        }
+        rootp = rootbuf;
+    }
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
-                       (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
+                       rootp, (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;

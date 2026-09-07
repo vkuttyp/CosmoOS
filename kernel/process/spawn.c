@@ -114,7 +114,7 @@ static int read_executable(struct process *cur, const char *path, struct process
 }
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
-                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd,
+                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   const struct process_spawn_cred *cred, pid_t *pid_out)
 {
     struct process *cur = process_current();
@@ -150,6 +150,50 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         }
         attr.cwd = vn;
         attr.cwd_path = cwd_path;
+    }
+    /*
+     * The child's root, resolved in the caller's own namespace -- so a
+     * caller already confined to a root can only hand its child a
+     * directory inside that one, and confinement only ever tightens.
+     * Privileged, like setting credentials: a process that could root
+     * itself anywhere could root itself at a directory whose contents it
+     * chose (docs/kernel/process/design.md, "Per-process roots").
+     */
+    if (root) {
+        if (!cred_privileged(&cur->cred)) {
+            rc = -EPERM;
+            goto out_cwd;
+        }
+        /* A root and a working directory together would need the cwd
+         * resolved in the child's namespace to be sure it lies inside
+         * the root, and this call resolves paths in the caller's. Until
+         * that exists, the two are not offered together: a rooted child
+         * starts at its root. Refusing is better than resolving it in
+         * the wrong namespace and hoping. */
+        if (cwd) {
+            rc = -EINVAL;
+            goto out_cwd;
+        }
+        struct vnode *rv;
+        rc = vfs_lookup(cur->cwd, root, &rv);
+        if (rc)
+            goto out_cwd;
+        if (rv->type != VNODE_DIR) {
+            vnode_put(rv);
+            rc = -ENOTDIR;
+            goto out_cwd;
+        }
+        attr.root = rv;
+        /*
+         * And the child starts *at* its root. Inheriting the parent's
+         * working directory would leave it standing outside its own
+         * root, where every relative path reaches outside it and ".."
+         * climbs to the global root rather than stopping -- the
+         * confinement would be bypassed by doing nothing at all.
+         */
+        vnode_get(rv);
+        attr.cwd = rv;
+        attr.cwd_path = "/";
     }
 
     /* The executable, and the interpreter it names (PT_INTERP), are found
@@ -190,5 +234,7 @@ out_exe:
 out_cwd:
     if (attr.cwd)
         vnode_put(attr.cwd);
+    if (attr.root)
+        vnode_put(attr.root);   /* the child took its own reference */
     return rc;
 }

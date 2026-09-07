@@ -435,6 +435,102 @@ static void proc_selftest(void)
     CHECK(spawnve("/bin/nothere", true_argv, NULL, NULL, 0) < 0 && errno == ENOENT);
     CHECK(spawnvp("nothere", true_argv, NULL, 0) < 0 && errno == ENOENT);
 
+    /* Per-process roots: a child given a root cannot name its way out.
+     * The executable is found in the *caller's* namespace, so /bin/sh
+     * need not exist inside the jail -- what the child cannot do is
+     * reach outside it afterwards. */
+    CHECK(mkdir("/tmp/jail", 0755) == 0 || errno == EEXIST);
+    int jf = open("/tmp/jail/inside.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(jf >= 0 && write(jf, "inside\n", 7) == 7 && close(jf) == 0);
+
+    int jp[2];
+    CHECK(pipe(jp) == 0);
+    struct spawn_handle jmap[] = { { .child = 1, .parent = jp[1] }, { .child = 2, .parent = 2 } };
+    /* "cd .." at the root stays at the root, and a write to an absolute
+     * path lands inside the jail. Only shell builtins are used: an
+     * external command would have to be found in the child's namespace,
+     * and /bin does not exist in there -- which is the confinement
+     * working, not a limitation of the test. */
+    /* Note what this does *not* do first: no "cd /". A rooted child
+     * starts at its own root, so if it inherited the parent's working
+     * directory it would be standing outside its root and every
+     * relative path from there would reach outside -- the confinement
+     * bypassed by doing nothing at all. */
+    const char *jail_argv[] = { "sh", "-c", "pwd && cd .. && pwd > /made.txt", NULL };
+    pid_t jpid = spawnve_in("/bin/sh", jail_argv, NULL, jmap, 2, "/tmp/jail");
+    CHECK(jpid > 1);
+    CHECK(close(jp[1]) == 0);
+    ssize_t jn = read(jp[0], buf, sizeof(buf));
+    CHECK(jn == 2 && memcmp(buf, "/\n", 2) == 0);   /* not /tmp/jail */
+    CHECK(close(jp[0]) == 0);
+    int jstatus = -1;
+    CHECK(waitpid(jpid, &jstatus, 0) == jpid && jstatus == 0);
+    /* The child's "/made.txt" is this process's /tmp/jail/made.txt. */
+    int mf = open("/tmp/jail/made.txt", O_RDONLY, 0);
+    CHECK(mf >= 0);
+    char mb[16] = { 0 };
+    CHECK(read(mf, mb, sizeof(mb)) == 2 && memcmp(mb, "/\n", 2) == 0);
+    CHECK(close(mf) == 0);
+
+    /* A root that is itself a mounted filesystem. Leaving a mount
+     * through ".." replaces the mount's root vnode with the covered
+     * vnode underneath it -- a different vnode, no longer equal to the
+     * process root -- so the boundary has to be tested before that step
+     * and not after. Without it a child rooted at a mount walks straight
+     * out of the mount it was confined to. */
+    CHECK(mkdir("/tmp/mjail", 0755) == 0 || errno == EEXIST);
+    CHECK(cosmo_mount("none", "/tmp/mjail", "ramfs", 0) == 0);
+    int mp[2];
+    CHECK(pipe(mp) == 0);
+    struct spawn_handle mmap_[] = { { .child = 1, .parent = mp[1] }, { .child = 2, .parent = 2 } };
+    /* "pwd" alone cannot tell the two apart -- escaping to the real
+     * root also prints "/" -- so the child then tries to enter a
+     * directory that exists only outside the jail. Confined, there is
+     * no /etc and the cd fails; escaped, it succeeds. */
+    const char *mount_argv[] = { "sh", "-c", "cd .. && cd .. && pwd && cd etc", NULL };
+    pid_t mpid = spawnve_in("/bin/sh", mount_argv, NULL, mmap_, 2, "/tmp/mjail");
+    CHECK(mpid > 1);
+    CHECK(close(mp[1]) == 0);
+    ssize_t mn = read(mp[0], buf, sizeof(buf));
+    CHECK(mn == 2 && memcmp(buf, "/\n", 2) == 0);   /* not /tmp or / of the real tree */
+    CHECK(close(mp[0]) == 0);
+    /* Nonzero: the last command must have failed, because /etc exists
+     * only outside the jail. A child that escaped would find it and
+     * exit 0. */
+    int mstatus = 0;
+    CHECK(waitpid(mpid, &mstatus, 0) == mpid && mstatus != 0);
+
+    /* A relative path from where the child starts cannot reach outside
+     * either: ../../etc is the same directory as /etc from a root, and
+     * neither exists in there. */
+    const char *rel_argv[] = { "sh", "-c", "cd ../../etc", NULL };
+    pid_t rpid = spawnve_in("/bin/sh", rel_argv, NULL, NULL, 0, "/tmp/jail");
+    CHECK(rpid > 1);
+    int rstatus = 0;
+    CHECK(waitpid(rpid, &rstatus, 0) == rpid && rstatus != 0);
+
+    /* A root and a working directory are not offered together: the cwd
+     * would have to be resolved in the child's namespace to know it is
+     * inside the root, and spawn resolves paths in the caller's. */
+    static const char *const true_only[] = { "sh", "-c", "exit 0", NULL };
+    struct cosmo_spawn both = {
+        .path = "/bin/sh",
+        .argv = true_only,
+        .envp = NULL,
+        .cwd = "/tmp",
+        .flags = COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT,
+        .root = "/tmp/jail",
+    };
+    CHECK(cosmo_spawn(&both) == -EINVAL);
+
+    /* Nothing outside the root is nameable: /etc exists here and not
+     * there, so the shell's cd fails and it exits nonzero. */
+    const char *escape_argv[] = { "sh", "-c", "cd /etc", NULL };
+    pid_t epid = spawnve_in("/bin/sh", escape_argv, NULL, NULL, 0, "/tmp/jail");
+    CHECK(epid > 1);
+    int estatus = 0;
+    CHECK(waitpid(epid, &estatus, 0) == epid && estatus != 0);
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);

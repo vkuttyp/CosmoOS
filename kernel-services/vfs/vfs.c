@@ -513,6 +513,26 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
         return 0;
     }
     if (len == 2 && name[0] == '.' && name[1] == '.') {
+        /*
+         * ".." stops at the caller's root as it stops at the global one,
+         * and the test comes *first* -- before the step that leaves a
+         * mount through its mountpoint. A process rooted at a mounted
+         * filesystem stands on that filesystem's root vnode, which the
+         * crossing would replace with the covered vnode underneath it:
+         * a different vnode, no longer equal to the root, and the walk
+         * would climb out of the very mount it was confined to.
+         */
+        struct vnode *proot = vfs_current_root();
+        bool at_root = dir == proot;
+        vnode_put(proot);
+        if (at_root) {
+            int prc = may_search(dir);
+            if (prc)
+                return prc;
+            *out = dir;
+            return 0;
+        }
+
         /* At a mount root, ".." leaves through the mountpoint. */
         struct vnode *base = dir;
         if (dir->mnt->root == dir && dir->mnt->mountpoint) {
@@ -558,7 +578,10 @@ static int walk_parent(struct vnode *start, const char *path, struct vnode **par
 
     struct vnode *cur;
     if (path[0] == '/' || start == NULL) {
-        cur = vfs_root();
+        /* Absolute means absolute *to this process*: a process given a
+         * root below the global one cannot name its way out with a
+         * leading slash. */
+        cur = vfs_current_root();
     } else {
         cur = start;
         vnode_get(cur);

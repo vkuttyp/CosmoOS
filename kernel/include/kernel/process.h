@@ -87,6 +87,13 @@ struct process {
     struct waitqueue child_wq;         /* the parent waits here */
     bool reaped;                       /* status collected, or nobody will */
     int kill_sig;                      /* 0, or the signal terminating the process */
+    /* The root this process sees: every absolute path starts here and
+     * ".." stops here. NULL means the global root. Referenced.
+     * Inherited by children, and only ever tightened -- the caller of
+     * spawn names the child's root in its own namespace, so a confined
+     * process can only confine further (docs/kernel/security/design.md,
+     * "Per-process roots"). */
+    struct vnode *root;
     struct vnode *cwd;                 /* referenced */
     char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
 
@@ -119,6 +126,10 @@ struct process_spawn_attr {
     unsigned nr_handles;                           /* 0 with handles NULL: inherit 0, 1, 2 */
     struct vnode *cwd;                             /* NULL: the parent's */
     const char *cwd_path;
+    /* The child's root (COSMO_SPAWN_SETROOT). NULL: the parent's. A
+     * child cannot be given a root its parent could not name, because
+     * the caller resolves the path in its own namespace first. */
+    struct vnode *root;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -157,7 +168,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
  * process (kernel/process/spawn.c). `handles` must be validated as the
  * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
-                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd,
+                  const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   const struct process_spawn_cred *cred, pid_t *pid_out);
 
 /* Resource limits of the calling process (docs/kernel/security/design.md §2):
