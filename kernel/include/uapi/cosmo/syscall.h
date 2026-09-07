@@ -162,6 +162,11 @@ struct cosmo_spawn {
  * that could give itself a root could also give itself one it does not
  * own the contents of. Privilege flows down and never up. */
 #define COSMO_SPAWN_SETROOT (1u << 2)
+/* The child starts a process domain of its own. It and its descendants
+ * see and may signal only each other; the domain the system boots in
+ * (0) still sees them, which is how a host manages what it started.
+ * Entered only here and never left. Privileged, like the flags above. */
+#define COSMO_SPAWN_NEWDOMAIN (1u << 3)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

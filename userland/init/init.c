@@ -531,6 +531,45 @@ static void proc_selftest(void)
     int estatus = 0;
     CHECK(waitpid(epid, &estatus, 0) == epid && estatus != 0);
 
+    /* Process domains: a child in one sees only its own domain, and
+     * cannot signal out of it. Run ps inside a domain and count what it
+     * reports -- init is pid 1 and always exists, so its absence from
+     * the listing is the property under test. */
+    int dp[2];
+    CHECK(pipe(dp) == 0);
+    /* All three: the shell spawns ps, and a child it cannot give a
+     * standard input to fails with EBADF before it starts. */
+    struct spawn_handle dmap[] = { { .child = 0, .parent = 0 },
+                                   { .child = 1, .parent = dp[1] },
+                                   { .child = 2, .parent = 2 } };
+    const char *ps_argv[] = { "sh", "-c", "ps", NULL };
+    pid_t dpid = spawnve_domain("/bin/sh", ps_argv, NULL, dmap, 3);
+    CHECK(dpid > 1);
+    CHECK(close(dp[1]) == 0);
+    static char psout[2048];
+    size_t got = 0;
+    for (;;) {
+        ssize_t chunk = read(dp[0], psout + got, sizeof(psout) - 1 - got);
+        if (chunk <= 0)
+            break;
+        got += (size_t)chunk;
+    }
+    psout[got] = '\0';
+    CHECK(close(dp[0]) == 0);
+    int dstatus = -1;
+    CHECK(waitpid(dpid, &dstatus, 0) == dpid && dstatus == 0);
+    /* Its own shell and ps are there; init is not. */
+    CHECK(strstr(psout, "sh") != NULL);
+    CHECK(strstr(psout, "init") == NULL);
+
+    /* And it cannot signal out of its domain: pid 1 exists, and inside
+     * the domain it must look as though it does not. */
+    const char *kill_argv[] = { "sh", "-c", "kill 1", NULL };
+    pid_t kpid = spawnve_domain("/bin/sh", kill_argv, NULL, NULL, 0);
+    CHECK(kpid > 1);
+    int kstatus = 0;
+    CHECK(waitpid(kpid, &kstatus, 0) == kpid && kstatus != 0);
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
