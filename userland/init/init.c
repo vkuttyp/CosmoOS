@@ -451,7 +451,12 @@ static void proc_selftest(void)
      * external command would have to be found in the child's namespace,
      * and /bin does not exist in there -- which is the confinement
      * working, not a limitation of the test. */
-    const char *jail_argv[] = { "sh", "-c", "cd / && cd .. && pwd && pwd > /made.txt", NULL };
+    /* Note what this does *not* do first: no "cd /". A rooted child
+     * starts at its own root, so if it inherited the parent's working
+     * directory it would be standing outside its root and every
+     * relative path from there would reach outside -- the confinement
+     * bypassed by doing nothing at all. */
+    const char *jail_argv[] = { "sh", "-c", "pwd && cd .. && pwd > /made.txt", NULL };
     pid_t jpid = spawnve_in("/bin/sh", jail_argv, NULL, jmap, 2, "/tmp/jail");
     CHECK(jpid > 1);
     CHECK(close(jp[1]) == 0);
@@ -466,6 +471,29 @@ static void proc_selftest(void)
     char mb[16] = { 0 };
     CHECK(read(mf, mb, sizeof(mb)) == 2 && memcmp(mb, "/\n", 2) == 0);
     CHECK(close(mf) == 0);
+
+    /* A relative path from where the child starts cannot reach outside
+     * either: ../../etc is the same directory as /etc from a root, and
+     * neither exists in there. */
+    const char *rel_argv[] = { "sh", "-c", "cd ../../etc", NULL };
+    pid_t rpid = spawnve_in("/bin/sh", rel_argv, NULL, NULL, 0, "/tmp/jail");
+    CHECK(rpid > 1);
+    int rstatus = 0;
+    CHECK(waitpid(rpid, &rstatus, 0) == rpid && rstatus != 0);
+
+    /* A root and a working directory are not offered together: the cwd
+     * would have to be resolved in the child's namespace to know it is
+     * inside the root, and spawn resolves paths in the caller's. */
+    static const char *const true_only[] = { "sh", "-c", "exit 0", NULL };
+    struct cosmo_spawn both = {
+        .path = "/bin/sh",
+        .argv = true_only,
+        .envp = NULL,
+        .cwd = "/tmp",
+        .flags = COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT,
+        .root = "/tmp/jail",
+    };
+    CHECK(cosmo_spawn(&both) == -EINVAL);
 
     /* Nothing outside the root is nameable: /etc exists here and not
      * there, so the shell's cd fails and it exits nonzero. */

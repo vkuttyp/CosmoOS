@@ -54,6 +54,15 @@ anything outside it. This is the filesystem half of what a container
 needs, and it is a primitive rather than a container: nothing here knows
 what a container is.
 
+A rooted child also **starts at its root**: it does not inherit the
+caller's working directory. Inheriting it would leave the child standing
+outside its own root, where every relative path reaches outside and
+`..` climbs to the global root instead of stopping — the confinement
+bypassed by doing nothing at all. For the same reason a root and an
+explicit working directory are not offered together (`-EINVAL`): the cwd
+would have to be resolved in the child's namespace to know it lies
+inside the root, and `spawn` resolves paths in the caller's.
+
 It is set at `spawn` alone, never on a running process, and the path is
 resolved in the caller's namespace. Two consequences that are the whole
 security argument:
@@ -71,9 +80,15 @@ root. What it runs *afterwards* it must find in there — a shell in a
 jail has its builtins and not `/bin/echo` — which is worth knowing
 before it looks like a bug.
 
+A handle cannot be used as a path base — nothing in the system opens
+relative to a directory handle — so passing a child a handle to a
+directory outside its root gives it no way to name anything through it.
+That is a property of the current syscall surface rather than a defence,
+and an `openat` would have to be written with this in mind.
+
 Not done here: mount namespaces (a confined process still sees the same
-mount table), pid and uts namespaces, and any way to give a running
-process a new root.
+mount table), pid and uts namespaces, a working directory for a rooted
+child, and any way to give a running process a new root.
 
 ## 2. Resource limits
 

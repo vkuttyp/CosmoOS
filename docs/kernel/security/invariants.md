@@ -124,6 +124,12 @@ and both are closed. `vfs_current_root` supplies it to the VFS the way
 `cred_current` supplies credentials: the caller's context is asked for,
 not threaded through every entry point.
 
+A rooted child starts *at* its root rather than inheriting the caller's
+working directory, because a child standing outside its own root escapes
+through any relative path without trying; a root and an explicit working
+directory are refused together, since the cwd would have to be resolved
+in the child's namespace to know it is inside.
+
 A root is set only at `spawn`, with `COSMO_SPAWN_SETROOT`, and the path
 is resolved **in the caller's own namespace** — so a process already
 confined can only name a directory inside its own root, and confinement
@@ -136,6 +142,6 @@ exists, so a confined child needs no copy of its own program — but
 anything it runs afterwards it must find inside its root, which is why
 a shell in a jail can use its builtins and not `/bin/echo`. Check: the
 user-mode self-test (a child rooted at a directory reports `/` for `pwd`
-after `cd ..`, writes through an absolute path into that directory as
+before touching its working directory at all, and again after `cd ..`, writes through an absolute path into that directory as
 seen from outside, and exits nonzero when it tries to reach a directory
 that exists only outside).

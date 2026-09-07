@@ -164,6 +164,16 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
             rc = -EPERM;
             goto out_cwd;
         }
+        /* A root and a working directory together would need the cwd
+         * resolved in the child's namespace to be sure it lies inside
+         * the root, and this call resolves paths in the caller's. Until
+         * that exists, the two are not offered together: a rooted child
+         * starts at its root. Refusing is better than resolving it in
+         * the wrong namespace and hoping. */
+        if (cwd) {
+            rc = -EINVAL;
+            goto out_cwd;
+        }
         struct vnode *rv;
         rc = vfs_lookup(cur->cwd, root, &rv);
         if (rc)
@@ -174,6 +184,16 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
             goto out_cwd;
         }
         attr.root = rv;
+        /*
+         * And the child starts *at* its root. Inheriting the parent's
+         * working directory would leave it standing outside its own
+         * root, where every relative path reaches outside it and ".."
+         * climbs to the global root rather than stopping -- the
+         * confinement would be bypassed by doing nothing at all.
+         */
+        vnode_get(rv);
+        attr.cwd = rv;
+        attr.cwd_path = "/";
     }
 
     /* The executable, and the interpreter it names (PT_INTERP), are found
@@ -214,5 +234,7 @@ out_exe:
 out_cwd:
     if (attr.cwd)
         vnode_put(attr.cwd);
+    if (attr.root)
+        vnode_put(attr.root);   /* the child took its own reference */
     return rc;
 }
