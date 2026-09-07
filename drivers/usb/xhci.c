@@ -536,7 +536,8 @@ static int xhci_submit(struct usb_hcd *hcd, struct usb_request *r)
     ring_commit(ring, first, first_cycle);
     x->transfers++;
     spin_unlock_irqrestore(&x->lock, s);
-    wr32(x->db + 4 * udev->slot, xhci_dci(r->ep));
+    if (!r->debug_no_doorbell)
+        wr32(x->db + 4 * udev->slot, xhci_dci(r->ep));
     return 0;
 }
 
@@ -673,9 +674,17 @@ static int xhci_reset_endpoint(struct usb_hcd *hcd, struct usb_device *udev, uin
         return -EINVAL;
     unsigned dci = xhci_dci(ep_addr);
     int cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_RESET_EP) | TRB_EP_ID(dci) | TRB_SLOT(udev->slot), NULL);
-    /* Context State: the endpoint was not halted after all; the dequeue
-     * move and the flush below still leave it clean. */
-    if (cc < 0 || (cc != CC_SUCCESS && cc != CC_CONTEXT_STATE))
+    if (cc == CC_CONTEXT_STATE) {
+        /* Not halted after all (a recovery run on a healthy endpoint):
+         * Set TR Dequeue needs the endpoint stopped, so stop it first --
+         * the first version moved the dequeue pointer of a running
+         * endpoint and the controller refused (usb-storage-timeout's
+         * racing readers found it). */
+        cc = xhci_cmd(x, 0, TRB_TYPE(TRB_CMD_STOP_EP) | TRB_EP_ID(dci) | TRB_SLOT(udev->slot), NULL);
+        if (cc == CC_CONTEXT_STATE)
+            cc = CC_SUCCESS;   /* already stopped */
+    }
+    if (cc < 0 || cc != CC_SUCCESS)
         return cmd_result(x, "reset endpoint", cc);
     struct xhci_dev *d = udev->hcd_priv;
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);

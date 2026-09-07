@@ -163,6 +163,8 @@ struct usb_request {
     unsigned nr_sgs;
     uint64_t debug_dma;             /* tests only: nonzero = use this bus address for one segment of
                                      * `len` bytes, unmapped and unchecked (the IOMMU fault test) */
+    bool debug_no_doorbell;         /* tests only: put the TRBs on the ring but never tell the controller,
+                                     * so the request stays in flight until cancelled (a device that never answers) */
     uint32_t actual;                /* bytes moved, set at completion */
     int status;                     /* 0, -EPIPE (stall: the endpoint is halted), -EOVERFLOW (babble),
                                      * -EIO, -ETIMEDOUT / -ECANCELED (usb_cancel), -ENODEV (gone) */

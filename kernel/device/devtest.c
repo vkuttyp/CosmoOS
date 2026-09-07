@@ -834,11 +834,79 @@ static struct usb_device *usb_first_device(void)
     return w.first;
 }
 
+#if CONFIG_FAULTINJECT
+struct usbs_racer {
+    struct blkdev *bd;
+    uint64_t timeouts0;
+    unsigned delay_us;      /* after the layer reports the timeout: where in the recovery to land */
+    int rc, rc2;            /* blk_submit's answers: the bio at delay_us, and a second one 1 ms later */
+    uint8_t *buf, *buf2;    /* kmalloc'd: a bio's buffer must be DMA-able */
+    struct bio bio, bio2;
+    struct { volatile bool done; int status; } mk, mk2;
+};
+
 /*
- * A device that stops answering: the CSW of one exchange is never asked
- * for (fault injection, debug builds), the block layer's timeout thread
- * finds the bio overdue, the driver takes the transfer back and resets
- * the device, the bio completes -ETIMEDOUT -- and the next read works.
+ * One bio submitted from another thread `delay_us` after the layer
+ * reports the timeout -- while the driver is cancelling the transfer and
+ * resetting the device. The block layer queues a bio behind a pending
+ * one without asking the driver, so a bio can reach the driver during
+ * the recovery only if nothing was queued before it: this racer is that
+ * bio, and the rounds below place it across the recovery's few
+ * milliseconds. It must either wait its turn (-EAGAIN, queued by the
+ * layer) or run after the recovery, and complete with the right data;
+ * a driver that freed its slot when the cancelled transfer's callback
+ * ran let it start on endpoints being reset (Greptile, PR #51).
+ */
+static void usbs_racer_main(void *arg)
+{
+    struct usbs_racer *r = arg;
+    for (unsigned i = 0; i < 30000 && r->bd->timeouts == r->timeouts0; i++)
+        thread_sleep_ns(100000);
+    thread_sleep_ns((uint64_t)r->delay_us * 1000);
+    struct bio *b = &r->bio;
+    memset(b, 0, sizeof(*b));
+    b->dev = r->bd;
+    b->dir = BIO_READ;
+    b->sector = 32;
+    b->nsectors = 8;
+    b->buf = r->buf;
+    b->done = selftest_nvme_mark_done;
+    b->arg = &r->mk;
+    r->rc = blk_submit(b);
+    if (r->rc) {
+        r->mk.status = r->rc;
+        r->mk.done = true;
+    }
+    /* A second bio a millisecond later: if the first started an exchange
+     * the driver then forgot (its slot freed under it), this one would
+     * reuse the exchange's request objects while they are in flight. */
+    thread_sleep_ns(1000000);
+    struct bio *b2 = &r->bio2;
+    memset(b2, 0, sizeof(*b2));
+    b2->dev = r->bd;
+    b2->dir = BIO_READ;
+    b2->sector = 48;
+    b2->nsectors = 8;
+    b2->buf = r->buf2;
+    b2->done = selftest_nvme_mark_done;
+    b2->arg = &r->mk2;
+    r->rc2 = blk_submit(b2);
+    if (r->rc2) {
+        r->mk2.status = r->rc2;
+        r->mk2.done = true;
+    }
+    thread_exit(0);
+}
+#endif /* CONFIG_FAULTINJECT */
+
+/*
+ * A device that stops answering: the CSW read of one exchange is put on
+ * the ring but the controller is never told (fault injection, debug
+ * builds), the block layer's timeout thread finds the bio overdue, the
+ * driver takes the transfer back and resets the device, the bio
+ * completes -ETIMEDOUT -- and the next read works, including one that
+ * another thread submits while the recovery runs. Five rounds, the
+ * racing bio placed at different points of the recovery.
  */
 bool selftest_usb_storage_timeout(const char **reason)
 {
@@ -853,28 +921,70 @@ bool selftest_usb_storage_timeout(const char **reason)
         return true;
     }
     bool ok = true;
-#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-storage-timeout: step failed at line %d", __LINE__); ok = false; } } while (0)
-    uint8_t *buf = kmalloc(4096, 0);
-    STEP(buf != NULL);
-    uint64_t saved = bd->timeout_ns, timeouts0 = bd->timeouts;
-    bd->timeout_ns = 200ull * 1000000ull;   /* the thread checks every 500 ms: one exchange, at most ~700 ms */
-    faultinject_set(FI_USB_CSW, 1, 1, NULL);   /* the next CSW, once */
-    uint64_t t0 = clock_now_ns();
-    int rc = buf ? blk_read(bd, 0, 8, buf) : -ENOMEM;
-    uint64_t dt = clock_now_ns() - t0;
-    faultinject_clear(FI_USB_CSW);
-    STEP(rc == -ETIMEDOUT);
-    STEP(bd->timeouts == timeouts0 + 1);
-    STEP(dt < 3000ull * 1000000ull);
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-storage-timeout: step failed at line %d (round %u)", __LINE__, round); ok = false; } } while (0)
+    static const unsigned delays_us[] = { 300, 800, 1500, 2500, 4000 };
+    uint8_t *buf = kmalloc(4096, 0), *check = kmalloc(4096, 0);
+    struct usbs_racer *racer = kzalloc(sizeof(*racer));
+    uint64_t saved = bd->timeout_ns;
+    uint64_t total_dt = 0;
+    unsigned round = 0;
+    STEP(buf != NULL && check != NULL && racer != NULL);
+    if (racer) {
+        racer->buf = kmalloc(4096, 0);
+        racer->buf2 = kmalloc(4096, 0);
+    }
+    STEP(racer && racer->buf != NULL && racer->buf2 != NULL);
+    for (round = 0; ok && round < ARRAY_SIZE(delays_us); round++) {
+        uint64_t timeouts0 = bd->timeouts;
+        racer->bd = bd;
+        racer->timeouts0 = timeouts0;
+        racer->delay_us = delays_us[round];
+        racer->rc = racer->rc2 = -1;
+        racer->mk.done = racer->mk2.done = false;
+        racer->mk.status = racer->mk2.status = -1;
+        bd->timeout_ns = 200ull * 1000000ull;   /* the thread checks every 500 ms: one exchange, at most ~700 ms */
+        struct thread *rt = thread_create(usbs_racer_main, racer, "usbs-racer", SCHED_PRIO_DEFAULT);
+        STEP(rt != NULL);
+        faultinject_set(FI_USB_CSW, 1, 1, NULL);   /* the next CSW, once */
+        uint64_t t0 = clock_now_ns();
+        int rc = blk_read(bd, 0, 8, buf);
+        uint64_t dt = clock_now_ns() - t0;
+        total_dt += dt;
+        faultinject_clear(FI_USB_CSW);
+        STEP(rc == -ETIMEDOUT);
+        STEP(bd->timeouts == timeouts0 + 1);
+        STEP(dt < 3000ull * 1000000ull);
+        if (rt)
+            thread_join(rt);
+        bd->timeout_ns = saved;
+        for (unsigned w = 0; w < 3000 && !(racer->mk.done && racer->mk2.done); w++)
+            thread_sleep_ms(1);
+        if (racer->rc != 0 || !racer->mk.done || racer->mk.status != 0 || racer->rc2 != 0 || !racer->mk2.done ||
+            racer->mk2.status != 0)
+            kerror("selftest: usb-storage-timeout: the bios submitted %u us into the recovery: submit %d/%d, done %d/%d, status %d/%d",
+                   racer->delay_us, racer->rc, racer->rc2, racer->mk.done, racer->mk2.done, racer->mk.status,
+                   racer->mk2.status);
+        STEP(racer->rc == 0 && racer->mk.done && racer->mk.status == 0);
+        STEP(racer->rc2 == 0 && racer->mk2.done && racer->mk2.status == 0);
+        /* Served correctly: the same sectors read again once everything settled. */
+        STEP(blk_read(bd, 32, 8, check) == 0 && memcmp(check, racer->buf, 4096) == 0);
+        STEP(blk_read(bd, 48, 8, check) == 0 && memcmp(check, racer->buf2, 4096) == 0);
+        /* Recovered: the victim's sectors read too, and a write works. */
+        STEP(blk_read(bd, 0, 8, buf) == 0);
+        STEP(blk_write(bd, 16, 1, buf) == 0);
+    }
     bd->timeout_ns = saved;
-    /* Recovered: the device answers again, and the data is right. */
-    STEP(buf && blk_read(bd, 0, 8, buf) == 0);
-    STEP(buf && blk_write(bd, 16, 1, buf) == 0);
     if (ok)
-        kinfo("selftest: usb-storage-timeout: %s: -ETIMEDOUT after %llu ms, reset recovery, reads again", bd->name,
-              (unsigned long long)(dt / 1000000));
+        kinfo("selftest: usb-storage-timeout: %s: %u rounds of -ETIMEDOUT (%llu ms each on average), reset recovery, reads again; a bio submitted into each recovery was served",
+              bd->name, round, (unsigned long long)(total_dt / 1000000 / (round ? round : 1)));
 #undef STEP
+    if (racer) {
+        kfree(racer->buf);
+        kfree(racer->buf2);
+    }
+    kfree(racer);
     kfree(buf);
+    kfree(check);
     blkdev_put(bd);
     if (!ok) {
         *reason = "usb-storage-timeout: see the log";

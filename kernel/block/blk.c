@@ -290,6 +290,17 @@ int blk_submit(struct bio *bio)
  * that is refused again goes back to the head and the next completion
  * tries once more. The caller's `done` runs exactly once, when the bio
  * finally completes.
+ *
+ * The window: between the refusal and the push back to the head, the
+ * queue is empty, and a completion that drains in that window finds
+ * nothing to resubmit. If it was the last bio the driver held, no
+ * further completion will come. So after the push the in-flight list is
+ * checked: empty means the driver has nothing that could wake this
+ * queue, and the bio is tried again at once; otherwise a completion is
+ * still due and, having been queued before the check, the bio is what
+ * it finds. Found by the USB storage driver, which refuses every bio
+ * while one exchange is in flight (usb-storage-timeout's racing
+ * readers): the second reader waited forever.
  */
 static void drain_pending(struct blkdev *bd)
 {
@@ -305,7 +316,12 @@ static void drain_pending(struct blkdev *bd)
         if (rc == -EAGAIN) {
             s = spin_lock_irqsave(&bd->qlock);
             list_push_front(&bd->pending, &bio->link);
+            bool idle = list_empty(&bd->inflight);
             spin_unlock_irqrestore(&bd->qlock, s);
+            if (idle) {
+                bd->redrained++;
+                continue;   /* nobody left to wake the queue: try again now */
+            }
             return;
         }
         if (rc)

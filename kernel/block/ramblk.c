@@ -35,6 +35,7 @@ struct ramblk {
     struct thread *worker;
     bool stop;
     bool stall;               /* deferred mode: the worker completes nothing */
+    bool refuse_completes;    /* deferred mode: a refusal first completes the oldest in-flight bio, synchronously */
 };
 
 static struct ramblk *of(struct blkdev *bd)
@@ -77,8 +78,21 @@ static int ramblk_submit(struct blkdev *bd, struct bio *bio)
     struct ramblk *r = of(bd);
     arch_irq_state_t s = spin_lock_irqsave(&r->lock);
     if (r->limit && r->inflight >= r->limit) {
+        /* The queue is full, like a virtqueue with every slot taken. With
+         * refuse_completes (a block-layer test), the oldest request
+         * completes right here, before the refusal is returned: the
+         * completion's resubmission then finds the queue empty, which is
+         * the window the layer must survive (blk_queue, "lost wakeup"). */
+        struct bio *oldest = NULL;
+        if (r->refuse_completes && !list_empty(&r->deferred)) {
+            oldest = container_of(list_pop_front(&r->deferred), struct bio, link);
+            list_init(&oldest->link);
+            r->inflight--;
+        }
         spin_unlock_irqrestore(&r->lock, s);
-        return -EAGAIN;   /* the queue is full, like a virtqueue with every slot taken */
+        if (oldest)
+            bio_complete(oldest, 0);
+        return -EAGAIN;
     }
     if (bio->dir != BIO_FLUSH) {
         uint64_t byte = bio->sector * 512;
@@ -166,6 +180,30 @@ void ramblk_set_stall(struct blkdev *bd, bool stall)
     arch_irq_state_t s = spin_lock_irqsave(&r->lock);
     r->stall = stall;
     spin_unlock_irqrestore(&r->lock, s);
+}
+
+void ramblk_set_refuse_completes(struct blkdev *bd, bool on)
+{
+    struct ramblk *r = of(bd);
+    arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    r->refuse_completes = on;
+    spin_unlock_irqrestore(&r->lock, s);
+}
+
+bool ramblk_complete_one(struct blkdev *bd)
+{
+    struct ramblk *r = of(bd);
+    struct bio *bio = NULL;
+    arch_irq_state_t s = spin_lock_irqsave(&r->lock);
+    if (!list_empty(&r->deferred)) {
+        bio = container_of(list_pop_front(&r->deferred), struct bio, link);
+        list_init(&bio->link);
+        r->inflight--;
+    }
+    spin_unlock_irqrestore(&r->lock, s);
+    if (bio)
+        bio_complete(bio, 0);
+    return bio != NULL;
 }
 
 void ramblk_set_deferred(struct blkdev *bd, unsigned limit)

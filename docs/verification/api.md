@@ -102,6 +102,15 @@ taken); 0 returns to synchronous completion after completing what is
 deferred. The block layer's pending queue is tested against it
 (`blk-queue`).
 
+### `void ramblk_set_refuse_completes(struct blkdev *bd, bool on)`, `bool ramblk_complete_one(struct blkdev *bd)`
+Deferred mode, block-layer tests. With `refuse_completes` on, a refusal
+(`-EAGAIN`) first completes the oldest in-flight bio synchronously, inside
+`submit`: the completion's resubmission then meets an empty queue, which
+is the window `drain_pending` must survive (the lost wakeup the USB
+storage driver found). `ramblk_complete_one` completes the oldest
+in-flight bio now, from the caller's context — a completion the test
+controls — and returns false if there was none.
+
 ### `void ramblk_replay(struct blkdev *bd, const struct ramblk_log *log, unsigned count, bool torn)`
 Apply the first `count` entries; with `torn` the last write's second half
 of sectors is left out (a write of one sector is applied whole).

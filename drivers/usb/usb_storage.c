@@ -84,7 +84,9 @@ struct usbs {
     struct usb_sg sgs[USBS_MAX_SEGS];
     uint32_t tag;
     bool broken;                        /* an exchange failed mid-way: recover before the next (thread context) */
-    bool drop_csw;                      /* fault injection, decided at submit: this exchange never asks for its CSW */
+    bool hang_csw;                      /* fault injection, decided at submit: the CSW read is queued but the
+                                         * controller is never told -- a hang with a transfer in flight */
+    bool recovering;                    /* usbs_timeout owns the slot: a cancelled transfer's callback must not free it */
     uint64_t exchanges, failures, recoveries;
     char vendor[9], product[17], rev[5];
 };
@@ -203,7 +205,13 @@ static void usbs_finish(struct usbs *s, int status)
     struct bio *bio = s->bio;
     s->bio = NULL;
     s->cur = NULL;
-    s->phase = USBS_IDLE;
+    /* During a timeout's recovery the slot stays taken: the cancelled
+     * transfer's callback lands here, and a submit from another CPU that
+     * found the slot free would start an exchange on endpoints being
+     * reset (Greptile, PR #51). usbs_timeout frees the slot when the
+     * device is back. */
+    if (!s->recovering)
+        s->phase = USBS_IDLE;
     if (status)
         s->failures++;
     spin_unlock_irqrestore(&s->lock, f);
@@ -233,20 +241,6 @@ static int usbs_start(struct usbs *s, struct usb_request *r, enum usbs_phase pha
 
 static void usbs_submit_csw(struct usbs *s)
 {
-    if (s->drop_csw) {
-        /* Debug builds, on request (decided in usbs_submit, which runs in
-         * thread context, where the injector answers): the status is never
-         * asked for, so the exchange hangs with the bio in flight until the
-         * block layer's timeout thread runs usbs_timeout -- the path a
-         * device that stops answering takes (usb-storage-timeout,
-         * usb-unplug). */
-        arch_irq_state_t f = spin_lock_irqsave(&s->lock);
-        s->drop_csw = false;
-        s->cur = NULL;
-        s->phase = USBS_CSW;
-        spin_unlock_irqrestore(&s->lock, f);
-        return;
-    }
     struct usb_request *r = &s->csw_req;
     memset(r, 0, sizeof(*r));
     r->udev = s->udev;
@@ -255,6 +249,16 @@ static void usbs_submit_csw(struct usbs *s)
     r->len = USBS_CSW_LEN;
     r->done = usbs_csw_done;
     r->arg = s;
+    if (s->hang_csw) {
+        /* Debug builds, on request (decided in usbs_submit, which runs in
+         * thread context, where the injector answers): the read is put on
+         * the ring and the controller is never told, so it stays in flight
+         * until the block layer's timeout thread runs usbs_timeout -- the
+         * path a device that stops answering takes, with a real transfer
+         * to take back (usb-storage-timeout, usb-unplug). */
+        s->hang_csw = false;
+        r->debug_no_doorbell = true;
+    }
     int rc = usbs_start(s, r, USBS_CSW);
     if (rc)
         usbs_finish(s, rc == -ENODEV ? -ENODEV : -EIO);
@@ -398,7 +402,7 @@ static int usbs_submit(struct blkdev *bd, struct bio *bio)
     }
     cbw_fill(s, cb, cb_len, data_len, in);
     s->exchanges++;
-    s->drop_csw = faultinject_should_fail(FI_USB_CSW);   /* answers only in thread context; false elsewhere */
+    s->hang_csw = faultinject_should_fail(FI_USB_CSW);   /* answers only in thread context; false elsewhere */
 
     struct usb_request *d = &s->data_req;
     memset(d, 0, sizeof(*d));
@@ -443,6 +447,7 @@ static void usbs_timeout(struct blkdev *bd, struct bio *victim)
     struct usb_request *cur = s->cur;
     enum usbs_phase phase = s->phase;
     s->bio = NULL;
+    s->recovering = true;   /* the slot is this path's until the device is back */
     spin_unlock_irqrestore(&s->lock, f);
     kwarn("usb-storage: %s: command timed out in phase %u; resetting", bd->name, phase);
     if (cur != NULL)
@@ -450,10 +455,13 @@ static void usbs_timeout(struct blkdev *bd, struct bio *victim)
     (void)usbs_reset_recovery(s);
     f = spin_lock_irqsave(&s->lock);
     s->cur = NULL;
+    s->recovering = false;
     s->phase = USBS_IDLE;
     s->broken = false;
     s->failures++;
     spin_unlock_irqrestore(&s->lock, f);
+    /* The slot is free before the completion runs: the block layer
+     * resubmits what queued up behind the exchange from bio_complete. */
     if (bio)
         bio_complete(bio, -ETIMEDOUT);
 }

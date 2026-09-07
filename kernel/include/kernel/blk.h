@@ -111,6 +111,7 @@ struct blkdev {
     struct list_node inflight;       /* bios the driver holds, oldest first */
     spinlock_t qlock;                /* the pending and in-flight lists */
     uint64_t requeued;               /* bios that waited in `pending` */
+    uint64_t redrained;              /* refusals retried at once because the driver held nothing that could wake the queue */
 };
 
 void blk_init(void);

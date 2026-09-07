@@ -37,6 +37,10 @@ the bytes moved or `-errno`. **`int usb_bulk_msg(udev, ep, buf, len,
 request is cancelled (`-ETIMEDOUT`).
 
 **`int usb_submit(struct usb_request *)`** — asynchronous, any context.
+Two fields are for tests only: `debug_dma` (a bus address used unmapped
+for one segment: the IOMMU fault test) and `debug_no_doorbell` (the TRBs
+go on the ring and the controller is never told: a request that stays in
+flight until cancelled).
 The request names the device, the endpoint (`ep`, a
 `bEndpointAddress`; 0 for control with `setup` filled), the buffer
 (`buf`/`len`, direct-map memory) or, for bulk, `sgs`/`nr_sgs`

@@ -208,7 +208,10 @@ Dequeue` past the halted TD (its request completed `-EPIPE` by the
 event that halted it; anything behind it `-ECANCELED`), then the class
 request `CLEAR_FEATURE(ENDPOINT_HALT)` to the device. The order is the
 specification's (§4.6.8): the controller's view of the endpoint is
-reset before the device's.
+reset before the device's. An endpoint that turns out not to be halted
+answers `Reset Endpoint` with Context State; it is then stopped before
+its dequeue pointer is moved, because `Set TR Dequeue` refuses a
+running endpoint.
 
 **The interrupt handler** acknowledges `USBSTS.EINT` and `IMAN.IP`,
 drains the event ring until the next TRB's cycle bit is not the
@@ -267,7 +270,11 @@ is `SYNCHRONIZE CACHE (10)`.
 `timeout` (the block layer's thread) runs bulk-only mass storage reset
 recovery (BOT §5.3.4): cancel whatever is in flight, the class request
 `Bulk-Only Mass Storage Reset`, clear both endpoints' halts, and
-complete the victim `-ETIMEDOUT`. A CSW with a phase error runs the
+complete the victim `-ETIMEDOUT`. The exchange slot stays taken for the
+whole of it (`recovering`): cancelling runs the transfer's callback,
+which would otherwise free the slot, and a bio submitted from another
+CPU then would start an exchange on endpoints being reset and be
+forgotten by the recovery's tail. A CSW with a phase error runs the
 same recovery. A stalled data or status phase clears the halt and reads
 the CSW again, as the specification prescribes.
 

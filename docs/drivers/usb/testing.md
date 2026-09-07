@@ -33,12 +33,24 @@ unchanged, and the DMA map count advanced by exactly the unmap count
 U2).
 
 **`usb-storage-timeout`** (debug builds; fault injection): the next
-exchange's CSW is never asked for (`FI_USB_CSW`, decided at submit in
-thread context), `sda`'s `timeout_ns` is 200 ms for the duration; a read
-returns `-ETIMEDOUT` (within about 700 ms: the layer's thread checks
-every 500 ms), the layer's `timeouts` counter is one higher, and after
-the driver's reset recovery the same read and a write succeed. Measured
-420 ms on x86_64.
+exchange's CSW read is put on the ring but the controller is never told
+(`FI_USB_CSW`, decided at submit in thread context; the request sets
+`debug_no_doorbell`), so a real transfer is in flight and never
+completes — what a device that stops answering looks like to the driver.
+`sda`'s `timeout_ns` is 200 ms for the duration; a read returns
+`-ETIMEDOUT` (within about 700 ms: the layer's thread checks every
+500 ms), the layer's `timeouts` counter is one higher, and after the
+driver's reset recovery the same read and a write succeed. Five rounds;
+in each, another thread submits one bio a chosen delay (0.3 to 4 ms)
+after the layer reports the timeout — into the cancel and recovery —
+and a second bio a millisecond after that. Both must complete with the
+right data: the block layer queues a bio behind a pending one without
+asking the driver, so only a bio that arrives when nothing is queued
+reaches the driver mid-recovery, and the second bio is what a driver
+that had freed its slot under the first would corrupt. About 2.6 s on
+x86_64. Confirmed against the bug: with the slot freed by the cancelled
+transfer's callback (the version Greptile reviewed), round 2 (800 µs)
+leaves the second bio never completing.
 
 **`usb-unplug`**: a read whose CSW is withheld the same way is in flight
 when the controller driver's own disconnect path is run for the port
@@ -115,6 +127,29 @@ Found while building, each by a test that then guards it:
 - The benchmark's writes over `nvme0n1` destroyed the cosmofs the nvme
   test leaves there for the shell's snapshot test. Writes are on `sda`
   only.
+- (Review, PR #51.) The timeout path freed the exchange slot the moment
+  the cancelled transfer's callback ran, before the device was reset; a
+  bio submitted from another CPU in that window started an exchange on
+  endpoints being reset, and the path's tail then forgot it. The slot
+  now stays taken (`recovering`) until the device is back; the racing
+  readers above found the first fix's version of this too.
+- `Reset Endpoint` on an endpoint that is not halted answers Context
+  State, and `Set TR Dequeue Pointer` then refuses because the endpoint
+  is running. A recovery run on a healthy endpoint (the racing readers
+  provoke one) now stops the endpoint first.
+- The racing readers then found a bug older than this unit, in the
+  block layer: `drain_pending` pops a queued bio, the driver refuses it,
+  and between the refusal and the push back to the head the queue is
+  empty; a completion that drains in that window finds nothing, and when
+  it was the last bio the driver held, no further completion comes and
+  the pushed-back bio waits forever. NVMe and virtio-blk rarely refuse,
+  so it never showed; a driver that refuses every bio while one exchange
+  is in flight showed it about one run in four (`QEMU_IOMMU=0` first).
+  The layer now retries at once when nothing is left in flight after the
+  push (`blkdev.redrained`); `blk-queue` reproduces the window
+  deterministically with two RAM-disk knobs and fails against the old
+  drain. A driver that refuses often is a stress test of the layer above
+  it.
 
 ## Benchmarks
 

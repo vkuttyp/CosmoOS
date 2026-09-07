@@ -66,7 +66,7 @@ controller answers a command id that holds nothing (counted, ignored).
 ## Statistics
 
 The block layer's per-device counters (`reads`, `writes`, `flushes`,
-`errors`, `timeouts`, `requeued`, `completed_local`, `completed_remote`)
+`errors`, `timeouts`, `requeued`, `redrained`, `completed_local`, `completed_remote`)
 are the driver's observable statistics; `completed_local` grows when a
 completion is handled on the CPU that issued the request, which is the
 per-CPU queue design working.
