@@ -152,3 +152,24 @@ that exists only outside; and a child rooted at a *mounted* filesystem
 cannot climb out through it -- checked by trying to enter a directory
 that exists only outside the mount, since `pwd` alone cannot tell an
 escape from confinement when both print `/`).
+
+**S11. A process sees and signals only its own domain, unless it is in
+the one the system booted in.** Every process belongs to a domain,
+inherited from its parent; a spawn may start a new one, and nothing
+leaves one. `procinfo` skips other domains entirely — invisible rather
+than merely unreadable — and a signal to another domain is `-ESRCH`
+rather than `-EPERM`, because refusing with "not permitted" would
+confirm the pid exists, which is what the domain is meant not to tell.
+Domain 0 sees and signals everything, subject to the credential rules
+that already applied: a host must be able to manage what it started, and
+what it started must not reach back. The process that starts a domain
+reports no parent, since its real parent is outside it.
+
+This is deliberately *not* a pid namespace: pids are not renumbered, and
+the doc says so rather than implying otherwise. Nothing outside the
+domain is nameable, so the number tells a confined process nothing.
+Check: the user-mode self-test runs `ps` inside a domain and requires
+its own shell to be listed and `init` — pid 1, which certainly exists —
+not to be; and runs `kill 1` inside a domain and requires it to fail.
+The visibility check was confirmed against the bug: with the filter
+removed, `ps` in the domain lists `init` and the assertion fails.

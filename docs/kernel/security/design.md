@@ -97,6 +97,39 @@ Not done here: mount namespaces (a confined process still sees the same
 mount table), pid and uts namespaces, a working directory for a rooted
 child, and any way to give a running process a new root.
 
+## 1c. Process domains
+
+A process belongs to a domain. The system boots in domain 0; a spawn may
+start a new one, which the child and its descendants belong to and which
+nothing leaves. A process outside domain 0 sees only its own domain in
+`procinfo` and may signal only its own domain; domain 0 sees and signals
+all of them.
+
+That asymmetry is the point: a host has to be able to manage what it
+started, and what it started must not be able to reach back. It is the
+same shape as the root — privilege flows down — and starting a domain is
+privileged for the same reason.
+
+Two details that are choices rather than accidents:
+
+- A signal to another domain is `-ESRCH`, not `-EPERM`. Refusing with
+  "not permitted" would confirm that the pid exists, which is the one
+  thing the domain is meant not to tell.
+- The process that starts a domain reports **no parent**: its real
+  parent is outside, and naming that pid would leak one number out of
+  the thing the domain hides. That is also what a process at the top of
+  a tree conventionally reports.
+
+**This is not a pid namespace.** Pids are not renumbered: a process in a
+domain sees its own real pid, not a private 1. Renumbering means a
+translation at every boundary that takes or returns a pid, and the
+isolation here does not need it — nothing outside the domain is
+nameable, so nothing is learned from the number. Saying which of the two
+this is matters more than the word.
+
+Not done here: pid renumbering, a domain-scoped `/proc` (there is no
+`/proc` yet), and any accounting per domain.
+
 ## 2. Resource limits
 
 `struct rlimits` is one 64-bit value per resource, inherited by copy at
