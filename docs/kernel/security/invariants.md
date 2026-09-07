@@ -115,3 +115,27 @@ handle"; after destroy, lookup, get and both installs all fail), and the
 user-mode self-test (a copy with only READ cannot be written, copied,
 transferred to a child or administered, while a copy that keeps DUP and
 TRANSFER can still be passed on and is no wider than its parent).
+
+**S10. A process cannot name anything outside its root.** A process has
+a root, inherited from its parent and defaulting to the global one.
+Every absolute path starts there, and `..` stops there exactly as it
+stops at the global root — those are the only two ways a path can climb,
+and both are closed. `vfs_current_root` supplies it to the VFS the way
+`cred_current` supplies credentials: the caller's context is asked for,
+not threaded through every entry point.
+
+A root is set only at `spawn`, with `COSMO_SPAWN_SETROOT`, and the path
+is resolved **in the caller's own namespace** — so a process already
+confined can only name a directory inside its own root, and confinement
+tightens but never loosens. It is privileged, like setting credentials:
+a process that could root itself anywhere could root itself at a
+directory whose contents it chose. Privilege flows down and never up.
+
+The executable is found in the *caller's* namespace before the child
+exists, so a confined child needs no copy of its own program — but
+anything it runs afterwards it must find inside its root, which is why
+a shell in a jail can use its builtins and not `/bin/echo`. Check: the
+user-mode self-test (a child rooted at a directory reports `/` for `pwd`
+after `cd ..`, writes through an absolute path into that directory as
+seen from outside, and exits nonzero when it tries to reach a directory
+that exists only outside).

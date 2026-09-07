@@ -137,6 +137,19 @@ void vfs_init(void);                           /* registers ramfs, mounts the ro
 int vfs_register_fs(struct fs_type *fs);
 struct fs_type *vfs_find_fs(const char *name);
 struct vnode *vfs_root(void);                  /* referenced */
+/*
+ * The root the calling process sees, referenced. Every absolute path
+ * starts here and ".." stops here, so a process given a root below the
+ * global one cannot name anything outside it -- filesystem isolation,
+ * the first of the container primitives that needs more than a handle
+ * (docs/kernel/process/design.md, "Per-process roots").
+ *
+ * Supplied by the process layer, the way cred_current supplies
+ * credentials: the VFS asks for the caller's context rather than having
+ * it threaded through every entry point. Falls back to the global root
+ * for kernel threads and before there are processes.
+ */
+struct vnode *vfs_current_root(void);
 
 /* Mount `fsname` (backed by bdev or NULL) on the directory `path`.
  * -ENOENT/-ENOTDIR for the target, -EBUSY if already a mountpoint,

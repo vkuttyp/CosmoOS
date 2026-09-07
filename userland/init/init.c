@@ -435,6 +435,46 @@ static void proc_selftest(void)
     CHECK(spawnve("/bin/nothere", true_argv, NULL, NULL, 0) < 0 && errno == ENOENT);
     CHECK(spawnvp("nothere", true_argv, NULL, 0) < 0 && errno == ENOENT);
 
+    /* Per-process roots: a child given a root cannot name its way out.
+     * The executable is found in the *caller's* namespace, so /bin/sh
+     * need not exist inside the jail -- what the child cannot do is
+     * reach outside it afterwards. */
+    CHECK(mkdir("/tmp/jail", 0755) == 0 || errno == EEXIST);
+    int jf = open("/tmp/jail/inside.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(jf >= 0 && write(jf, "inside\n", 7) == 7 && close(jf) == 0);
+
+    int jp[2];
+    CHECK(pipe(jp) == 0);
+    struct spawn_handle jmap[] = { { .child = 1, .parent = jp[1] }, { .child = 2, .parent = 2 } };
+    /* "cd .." at the root stays at the root, and a write to an absolute
+     * path lands inside the jail. Only shell builtins are used: an
+     * external command would have to be found in the child's namespace,
+     * and /bin does not exist in there -- which is the confinement
+     * working, not a limitation of the test. */
+    const char *jail_argv[] = { "sh", "-c", "cd / && cd .. && pwd && pwd > /made.txt", NULL };
+    pid_t jpid = spawnve_in("/bin/sh", jail_argv, NULL, jmap, 2, "/tmp/jail");
+    CHECK(jpid > 1);
+    CHECK(close(jp[1]) == 0);
+    ssize_t jn = read(jp[0], buf, sizeof(buf));
+    CHECK(jn == 2 && memcmp(buf, "/\n", 2) == 0);   /* not /tmp/jail */
+    CHECK(close(jp[0]) == 0);
+    int jstatus = -1;
+    CHECK(waitpid(jpid, &jstatus, 0) == jpid && jstatus == 0);
+    /* The child's "/made.txt" is this process's /tmp/jail/made.txt. */
+    int mf = open("/tmp/jail/made.txt", O_RDONLY, 0);
+    CHECK(mf >= 0);
+    char mb[16] = { 0 };
+    CHECK(read(mf, mb, sizeof(mb)) == 2 && memcmp(mb, "/\n", 2) == 0);
+    CHECK(close(mf) == 0);
+
+    /* Nothing outside the root is nameable: /etc exists here and not
+     * there, so the shell's cd fails and it exits nonzero. */
+    const char *escape_argv[] = { "sh", "-c", "cd /etc", NULL };
+    pid_t epid = spawnve_in("/bin/sh", escape_argv, NULL, NULL, 0, "/tmp/jail");
+    CHECK(epid > 1);
+    int estatus = 0;
+    CHECK(waitpid(epid, &estatus, 0) == epid && estatus != 0);
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);

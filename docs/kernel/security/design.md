@@ -45,6 +45,36 @@ Consequences the code enforces:
   process for unprivileged callers: a token bucket of 64 lines that
   refills at 16 lines per second; over it, `-EAGAIN`.
 
+## 1b. Per-process roots
+
+A process has a root. Every absolute path starts there and `..` stops
+there — the only two ways a path can climb out of a directory, both
+closed — so a process given a root below the global one cannot name
+anything outside it. This is the filesystem half of what a container
+needs, and it is a primitive rather than a container: nothing here knows
+what a container is.
+
+It is set at `spawn` alone, never on a running process, and the path is
+resolved in the caller's namespace. Two consequences that are the whole
+security argument:
+
+- **Confinement only tightens.** A confined caller can only name
+  directories inside its own root, so a child is confined at least as
+  much as its parent, and no operation widens a root.
+- **Setting one is privileged**, like setting credentials: a process
+  that could root itself anywhere could root itself at a directory whose
+  contents it chose. Privilege flows down and never up (§1).
+
+The executable is found in the caller's namespace before the child
+exists, so a confined child needs no copy of its own program inside its
+root. What it runs *afterwards* it must find in there — a shell in a
+jail has its builtins and not `/bin/echo` — which is worth knowing
+before it looks like a bug.
+
+Not done here: mount namespaces (a confined process still sees the same
+mount table), pid and uts namespaces, and any way to give a running
+process a new root.
+
 ## 2. Resource limits
 
 `struct rlimits` is one 64-bit value per resource, inherited by copy at

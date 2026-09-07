@@ -136,7 +136,15 @@ struct cosmo_spawn {
     const char *cwd;                           /* NULL: inherit */
     unsigned flags;                            /* COSMO_SPAWN_* or 0 */
     uint32_t uid, gid;                         /* with COSMO_SPAWN_SETCRED: the child's ids */
+    /* Added after the fields above, and read only when
+     * COSMO_SPAWN_SETROOT is set, so a caller built against the older
+     * header passes the older struct and the kernel never reads past
+     * what it gave. */
+    const char *root;                          /* with COSMO_SPAWN_SETROOT */
 };
+
+/* What a caller that predates `root` passes: everything up to it. */
+#define COSMO_SPAWN_SIZE_V1 __builtin_offsetof(struct cosmo_spawn, root)
 /* The child starts with real, effective and saved ids `uid`/`gid` and no
  * supplementary groups. A privileged caller names any ids; an unprivileged
  * one only ids it holds (docs/kernel/security/design.md §1). */
@@ -148,6 +156,12 @@ struct cosmo_spawn {
  * program built against the older header therefore keeps working
  * unchanged; libc sets the flag. */
 #define COSMO_SPAWN_HANDLE_RIGHTS (1u << 1)
+/* The child's root is `root`, resolved in the caller's own namespace.
+ * The child then cannot name anything outside it: absolute paths start
+ * there and ".." stops there. Privileged, like SETCRED -- a process
+ * that could give itself a root could also give itself one it does not
+ * own the contents of. Privilege flows down and never up. */
+#define COSMO_SPAWN_SETROOT (1u << 2)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

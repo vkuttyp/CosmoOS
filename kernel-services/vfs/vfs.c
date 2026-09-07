@@ -523,7 +523,13 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
         int rc = may_search(base);
         if (rc)
             return rc;
-        if (base->mnt->root == base) {   /* the global root: stays put */
+        /* ".." stops at the caller's root as it stops at the global one.
+         * Without this a process could walk out of the root it was
+         * given, which is the only way out a path has left. */
+        struct vnode *proot = vfs_current_root();
+        bool at_root = base == proot;
+        vnode_put(proot);
+        if (at_root || base->mnt->root == base) {
             *out = base;
             return 0;
         }
@@ -558,7 +564,10 @@ static int walk_parent(struct vnode *start, const char *path, struct vnode **par
 
     struct vnode *cur;
     if (path[0] == '/' || start == NULL) {
-        cur = vfs_root();
+        /* Absolute means absolute *to this process*: a process given a
+         * root below the global one cannot name its way out with a
+         * leading slash. */
+        cur = vfs_current_root();
     } else {
         cur = start;
         vnode_get(cur);

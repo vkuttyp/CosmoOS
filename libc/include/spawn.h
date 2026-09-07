@@ -17,6 +17,13 @@ struct spawn_handle {
 pid_t spawnve(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
               size_t nh);
 pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh);
+/* spawnve with COSMO_SPAWN_SETROOT: the child's root is `root`, resolved
+ * in the caller's own namespace, and the child cannot name anything
+ * outside it -- absolute paths start there and ".." stops there.
+ * Privileged, and confinement only ever tightens: a caller already
+ * confined can only name a directory inside its own root. */
+pid_t spawnve_in(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
+                 size_t nh, const char *root);
 /* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
  * supplementary groups; unprivileged callers may name only ids they hold. */
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
