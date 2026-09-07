@@ -115,7 +115,7 @@ static int read_executable(struct process *cur, const char *path, struct process
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
-                  const struct process_spawn_cred *cred, pid_t *pid_out)
+                  bool new_domain, const struct process_spawn_cred *cred, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -126,11 +126,16 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         return rc;
     if (cred && !may_set_cred(&cur->cred, cred->uid, cred->gid))
         return -EPERM;
+    /* Starting a domain is privileged for the same reason as the rest:
+     * it decides what a set of processes can see of the machine. */
+    if (new_domain && !cred_privileged(&cur->cred))
+        return -EPERM;
 
     struct process_spawn_attr attr = {
         .parent = cur,
         .handles = handles,
         .nr_handles = nr_handles,
+        .new_domain = new_domain,
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,

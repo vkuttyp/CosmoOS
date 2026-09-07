@@ -24,6 +24,12 @@ pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_han
  * confined can only name a directory inside its own root. */
 pid_t spawnve_in(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
                  size_t nh, const char *root);
+/* spawnve with COSMO_SPAWN_NEWDOMAIN: the child starts a process domain
+ * of its own. It and its descendants see and may signal only each
+ * other; the domain the system boots in still sees them. Entered only
+ * here and never left. Privileged. */
+pid_t spawnve_domain(const char *path, const char *const argv[], const char *const envp[],
+                     const struct spawn_handle *h, size_t nh);
 /* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
  * supplementary groups; unprivileged callers may name only ids they hold. */
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,

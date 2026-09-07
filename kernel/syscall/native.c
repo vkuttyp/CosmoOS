@@ -708,8 +708,9 @@ static int64_t sys_spawn(struct syscall_args *a)
     memset(&req, 0, sizeof(req));
     if (copy_from_user(&req, a->a[0], COSMO_SPAWN_SIZE_V1))
         return -EFAULT;
-    if ((req.flags & ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT)) || req.path == NULL ||
-        req.argv == NULL)
+    if ((req.flags &
+         ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN)) ||
+        req.path == NULL || req.argv == NULL)
         return -EINVAL;
     if ((req.flags & COSMO_SPAWN_SETROOT) && copy_from_user(&req, a->a[0], sizeof(req)))
         return -EFAULT;
@@ -782,7 +783,8 @@ static int64_t sys_spawn(struct syscall_args *a)
         rootp = rootbuf;
     }
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
-                       rootp, (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
+                       rootp, (req.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
+                       (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;
@@ -815,6 +817,14 @@ static int64_t sys_kill(struct syscall_args *a)
         return -ESRCH;
     struct process *cur = process_current();
     int rc = 0;
+    /* A process outside domain 0 cannot reach another domain, and is
+     * told the target does not exist rather than that it may not touch
+     * it: -EPERM would confirm the pid is in use, which is the one
+     * thing the domain is meant not to tell it. */
+    if (cur && cur->domain != 0 && target->domain != cur->domain) {
+        process_put(target);
+        return -ESRCH;
+    }
     if (!cred_may_signal(&cur->cred, &target->cred)) {
         rc = -EPERM;
     } else {
@@ -1042,7 +1052,19 @@ static int64_t sys_dup(struct syscall_args *a)
 static int64_t sys_getppid(struct syscall_args *a)
 {
     (void)a;
-    return (int64_t)process_current()->parent_pid;
+    struct process *cur = process_current();
+    /* The process that started a domain has a parent outside it. Naming
+     * that pid would leak one number out of the very thing the domain
+     * hides, so it reports no parent -- which is also what a process at
+     * the top of a tree conventionally reports. */
+    struct process *parent = cur->parent_pid ? process_lookup(cur->parent_pid) : NULL;
+    if (parent) {
+        bool outside = cur->domain != 0 && parent->domain != cur->domain;
+        process_put(parent);
+        if (outside)
+            return 0;
+    }
+    return (int64_t)cur->parent_pid;
 }
 
 static int64_t sys_chdir(struct syscall_args *a)

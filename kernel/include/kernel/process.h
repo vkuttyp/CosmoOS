@@ -93,6 +93,13 @@ struct process {
      * spawn names the child's root in its own namespace, so a confined
      * process can only confine further (docs/kernel/security/design.md,
      * "Per-process roots"). */
+    /* The process domain this belongs to: 0 is the one the system boots
+     * in. A process in a domain other than 0 sees and may signal only
+     * processes of the same domain; domain 0 sees all of them, which is
+     * the asymmetry that lets a host manage what it started
+     * (docs/kernel/security/design.md, "Process domains"). Inherited,
+     * and entered only at spawn -- there is no way back out. */
+    uint32_t domain;
     struct vnode *root;
     struct vnode *cwd;                 /* referenced */
     char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
@@ -130,6 +137,7 @@ struct process_spawn_attr {
      * child cannot be given a root its parent could not name, because
      * the caller resolves the path in its own namespace first. */
     struct vnode *root;
+    bool new_domain;                               /* COSMO_SPAWN_NEWDOMAIN */
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -169,7 +177,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
  * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
-                  const struct process_spawn_cred *cred, pid_t *pid_out);
+                  bool new_domain, const struct process_spawn_cred *cred, pid_t *pid_out);
 
 /* Resource limits of the calling process (docs/kernel/security/design.md §2):
  * -EINVAL for an unknown resource or a NOFILE value above the table size,

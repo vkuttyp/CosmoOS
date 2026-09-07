@@ -443,6 +443,17 @@ int process_create_from_images(const struct process_image *exe, const struct pro
                                                                         : HANDLE_TABLE_SIZE;
     p->log_tokens = LOG_BUCKET;
     p->log_refill_ns = clock_now_ns();
+    /* The domain: a fresh one on request, else the parent's. Entering
+     * one is a one-way door -- nothing takes a process back out. */
+    if (attr && attr->new_domain) {
+        static uint32_t next_domain = 1;
+        arch_irq_state_t ds = spin_lock_irqsave(&g_process_table_lock);
+        p->domain = next_domain++;
+        spin_unlock_irqrestore(&g_process_table_lock, ds);
+    } else if (parent) {
+        p->domain = parent->domain;
+    }
+
     /*
      * The root: the request's, else the parent's. Confinement is
      * inherited and only ever tightens -- a child of a confined process
@@ -1080,9 +1091,16 @@ unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct c
 {
     unsigned total = 0;
     bool all = cred_privileged(viewer);
+    /* A process outside domain 0 sees only its own domain, whatever its
+     * credentials say: being root inside a container is not being root
+     * over the machine. */
+    struct process *self = process_current();
+    uint32_t domain = self ? self->domain : 0;
     arch_irq_state_t ts = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
+        if (domain != 0 && p->domain != domain)
+            continue;   /* another domain: not merely unreadable, invisible */
         if (!all && p->cred.ruid != viewer->ruid)
             continue;   /* another user's process: invisible to an unprivileged viewer */
         if (total < count) {
