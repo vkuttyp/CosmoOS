@@ -194,7 +194,7 @@ no privileged position: what it knows, `cat` can read.
 
 ```text
   /etc/svc/<name>        the service: key value lines, one per line
-  /run/svc/<name>.pid    the supervisor's pid while it runs
+  /run/svc/<name>.pid    the supervisor's pid, once the service has run
   /var/log/svc/<name>    the service's output and its supervisor's notes
 ```
 
@@ -241,7 +241,10 @@ sections 1--1f).
 ### Supervision
 
 `svc --supervise <name>` is the supervisor: it spawns the service, waits
-for it, and decides. `svc start` spawns that and returns, so the
+for it, and decides. It writes its pid file only after the first spawn
+succeeds, because that file is what `svc start` reads as "the service is
+up" -- written earlier, a spawn that then failed would look like a
+running service for as long as it took to fail. `svc start` spawns that and returns, so the
 supervisor is reparented to init, which reaps it -- there is no fork
 here, and none is needed.
 

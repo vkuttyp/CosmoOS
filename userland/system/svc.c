@@ -52,7 +52,11 @@ struct service {
     int retries;
     unsigned backoff_ms;
     /* Confinement, straight from the file to the spawn flags. */
-    int uid, gid;              /* -1: the caller's */
+    /* `has_user` rather than a negative uid: a sentinel that a sign bit
+     * can forge is how `user 2147483648` came to mean "no user", and
+     * therefore "keep root". */
+    int has_user;
+    uint32_t uid, gid;
     char root[LINE_MAX_LEN];   /* empty: none */
     int mountns, utsns, domain;
     struct {
@@ -103,7 +107,7 @@ static char *next_word(char **p)
  * a typo asks for uid 0 -- the one value that must never be reached by
  * accident. Every number in a definition goes through here.
  */
-static int parse_uint(const char *s, unsigned long long *out)
+static int parse_uint(const char *s, unsigned long long max, unsigned long long *out)
 {
     if (*s == '\0')
         return -1;
@@ -111,8 +115,12 @@ static int parse_uint(const char *s, unsigned long long *out)
     for (const char *p = s; *p != '\0'; p++) {
         if (*p < '0' || *p > '9')
             return -1;
+        if (v > (~0ULL - (unsigned long long)(*p - '0')) / 10)
+            return -1;   /* would wrap; too large is not a number we meant */
         v = v * 10 + (unsigned long long)(*p - '0');
     }
+    if (v > max)
+        return -1;
     *out = v;
     return 0;
 }
@@ -150,7 +158,7 @@ static int load(const char *name, struct service *s)
     s->restart = R_NEVER;
     s->retries = 5;
     s->backoff_ms = 100;
-    s->uid = s->gid = -1;
+    s->has_user = 0;
 
     char line[LINE_MAX_LEN];
     int lineno = 0, bad = 0;
@@ -198,27 +206,29 @@ static int load(const char *name, struct service *s)
             }
         } else if (strcmp(key, "retries") == 0) {
             unsigned long long v;
-            if (parse_uint(val, &v) != 0) {
-                fprintf(stderr, "svc: %s:%d: retries '%s' is not a number\n", name, lineno, val);
+            if (parse_uint(val, 1000, &v) != 0) {
+                fprintf(stderr, "svc: %s:%d: retries '%s' is not a number 0..1000\n", name, lineno, val);
                 bad = 1;
             } else {
                 s->retries = (int)v;
             }
         } else if (strcmp(key, "backoff-ms") == 0) {
             unsigned long long v;
-            if (parse_uint(val, &v) != 0) {
-                fprintf(stderr, "svc: %s:%d: backoff-ms '%s' is not a number\n", name, lineno, val);
+            if (parse_uint(val, 60000, &v) != 0) {
+                fprintf(stderr, "svc: %s:%d: backoff-ms '%s' is not a number 0..60000\n", name, lineno,
+                        val);
                 bad = 1;
             } else {
                 s->backoff_ms = (unsigned)v;
             }
         } else if (strcmp(key, "user") == 0) {
             unsigned long long v;
-            if (parse_uint(val, &v) != 0 || v > 0xffffffffULL) {
-                fprintf(stderr, "svc: %s:%d: user '%s' is not a number\n", name, lineno, val);
-                bad = 1;   /* never uid 0 by accident */
+            if (parse_uint(val, 0xffffffffULL, &v) != 0) {
+                fprintf(stderr, "svc: %s:%d: user '%s' is not a uid\n", name, lineno, val);
+                bad = 1;   /* never root by accident, at either end of the range */
             } else {
-                s->uid = s->gid = (int)v;
+                s->uid = s->gid = (uint32_t)v;
+                s->has_user = 1;
             }
         } else if (strcmp(key, "root") == 0) {
             snprintf(s->root, sizeof(s->root), "%s", val);
@@ -239,7 +249,7 @@ static int load(const char *name, struct service *s)
                     break;
                 }
                 unsigned long long v;
-                if (parse_uint(val, &v) != 0) {
+                if (parse_uint(val, ~0ULL, &v) != 0) {
                     fprintf(stderr, "svc: %s:%d: limit-%s '%s' is not a number\n", name, lineno, which,
                             val);
                     bad = 1;
@@ -368,10 +378,17 @@ static int supervise(const char *name)
         return 2;
     }
 
+    /*
+     * The pid file is written after the first spawn succeeds, not
+     * before. It has to mean "this service has run", because that is
+     * what `svc start` reads it as: written earlier, a spawn that then
+     * failed would leave a live supervisor looking like a running
+     * service for as long as it took to fail, and `svc boot` would
+     * start the dependents of something that never ran.
+     */
     char pidfile[128], childfile[128];
     pid_path(name, pidfile, sizeof(pidfile));
     child_path(name, childfile, sizeof(childfile));
-    write_pid(pidfile, getpid());
 
     /* Limits are set on this process and inherited by the service, so
      * the supervisor lives under them too -- which is honest: it is
@@ -383,9 +400,8 @@ static int supervise(const char *name)
         if (cosmo_setrlimit(s.limits[i].resource, s.limits[i].value) != 0) {
             log_line(log, "svc: %s: not started: limit %u could not be set to %llu\n", name,
                      s.limits[i].resource, s.limits[i].value);
-            unlink(pidfile);
             close(log);
-            return 2;
+            return 2;   /* no pid file was written: nothing ran */
         }
     }
 
@@ -403,7 +419,7 @@ static int supervise(const char *name)
     }
 
     unsigned flags = COSMO_SPAWN_HANDLE_RIGHTS;
-    if (s.uid >= 0)
+    if (s.has_user)
         flags |= COSMO_SPAWN_SETCRED;
     if (s.root[0] != '\0')
         flags |= COSMO_SPAWN_SETROOT;
@@ -433,8 +449,8 @@ static int supervise(const char *name)
             .nr_handles = sizeof(map) / sizeof(map[0]),
             .cwd = NULL,
             .flags = flags,
-            .uid = (uint32_t)(s.uid < 0 ? 0 : s.uid),
-            .gid = (uint32_t)(s.gid < 0 ? 0 : s.gid),
+            .uid = s.uid,
+            .gid = s.gid,
             .root = s.root[0] ? s.root : NULL,
         };
         long pid = cosmo_spawn(&req);
@@ -442,8 +458,10 @@ static int supervise(const char *name)
             log_line(log, "svc: %s: cannot start %s: %d\n", name, argv[0], (int)-pid);
             break;
         }
-        ran_once = 1;
         write_pid(childfile, (pid_t)pid);
+        if (!ran_once)
+            write_pid(pidfile, getpid());
+        ran_once = 1;
         log_line(log, "svc: %s: started, pid %d\n", name, (int)pid);
 
         int status = -1;

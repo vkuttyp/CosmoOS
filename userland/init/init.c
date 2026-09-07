@@ -1610,6 +1610,36 @@ static void svc_selftest(void)
      */
     write_file("/etc/svc/baduser", "exec /bin/true\nuser daemon\n");
     CHECK(svc_run("start", "baduser") != 0);
+    /* A uid past what the field can hold is refused; one inside it is
+     * a uid like any other. 4000000000 is above INT_MAX, which is
+     * where a signed field read it as "no user set" and therefore as
+     * root -- it must now start, and start as that uid. */
+    write_file("/etc/svc/hugeuser", "exec /bin/true\nuser 99999999999999999999\n");
+    CHECK(svc_run("start", "hugeuser") != 0);
+
+    /*
+     * And the credentials are really applied, which is the thing that
+     * matters and which "it started" does not show. The service asks to
+     * rename the machine, which only root may do, as uid 4000000000 --
+     * chosen because it is above INT_MAX, where a signed field read it
+     * as "no user set" and the service ran as root. Refused, the
+     * machine keeps its name; run as root it would succeed, which is
+     * exactly the bug this guards.
+     */
+    char host_before[HOST_NAME_MAX];
+    CHECK(gethostname(host_before, sizeof(host_before)) >= 0);
+    write_file("/etc/svc/unprivsvc", "exec /sbin/hostname stolen-by-service\nuser 4000000000\n");
+    CHECK(svc_run("start", "unprivsvc") == 0);   /* the supervisor ran it */
+    char ulog[512];
+    for (int i = 0; i < 200; i++) {
+        if (slurp("/var/log/svc/unprivsvc", ulog, sizeof(ulog)) > 0 && strstr(ulog, "exited with") != NULL)
+            break;
+        cosmo_sleep_ns(10000000ULL);
+    }
+    CHECK(strstr(ulog, "exited with status 0") == NULL);   /* it was refused */
+    char host_after[HOST_NAME_MAX];
+    CHECK(gethostname(host_after, sizeof(host_after)) >= 0);
+    CHECK(strcmp(host_before, host_after) == 0);
     write_file("/etc/svc/badnum", "exec /bin/true\nretries plenty\n");
     CHECK(svc_run("start", "badnum") != 0);
     write_file("/etc/svc/badlimit", "exec /bin/true\nlimit-nofile lots\n");
@@ -1697,7 +1727,7 @@ static void svc_selftest(void)
      */
     static const char *const written[] = { "typo",     "flap",    "broken",  "dependent", "loop-a",
                                            "loop-b",   "sleeper", "baduser", "badnum",    "badlimit",
-                                           "missing",  "oneshot" };
+                                           "missing",  "oneshot", "hugeuser", "unprivsvc" };
     static const char *const shipped[] = { "hello", "greeter" };
     for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++)
         (void)svc_run("stop", written[i]);
