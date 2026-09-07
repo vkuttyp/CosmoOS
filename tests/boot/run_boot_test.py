@@ -83,6 +83,12 @@ if IOMMU:
         r"^\[ INFO\] iommu: (intel-vtd0|arm-smmuv3) at .*; translation on$",
         r"^\[ INFO\] iommu: (intel-vtd0|arm-smmuv3): pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] \(requester [0-9a-f]{4}\) in domain \d+",
     ]
+# The Intel NIC driver loads on every boot; the interface exists when QEMU
+# was given the device (QEMU_NIC both or e1000e; docs/drivers/e1000e/).
+NIC = os.environ.get("QEMU_NIC", "both")
+REQUIRED_MARKERS += [r"^\[ INFO\] module: loaded e1000e 1\.0 "]
+if NIC in ("both", "e1000e"):
+    REQUIRED_MARKERS += [r"^\[ INFO\] e1000e: pci:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7] is eth[01] \("]
 # Phase 9: the shell's own test script runs from /etc/rc in self-test builds.
 SHTEST_MARKER = r"^SHTEST: PASS"
 # The package system's script checks: output lines the harness also requires in self-test builds.
