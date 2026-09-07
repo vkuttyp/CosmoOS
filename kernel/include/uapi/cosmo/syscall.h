@@ -88,7 +88,14 @@
 #define SYS_aio_create  60  /* (unsigned entries 1..1024, unsigned flags 0) -> ring handle */
 #define SYS_aio_submit  61  /* (int ring, const struct cosmo_sqe *sqes, unsigned n) -> entries accepted */
 #define SYS_aio_wait    62  /* (int ring, struct cosmo_cqe *cqes, unsigned n, unsigned min, uint64_t timeout_ns) -> completions */
-#define SYS_COUNT       63
+/* The machine's name, from the caller's uts namespace
+ * (docs/kernel/security/design.md §1e). */
+#define SYS_gethostname 63  /* (char *buf, size_t len) -> length written (without NUL) */
+#define SYS_sethostname 64  /* (const char *name, size_t len) -> 0; privileged */
+#define SYS_COUNT       65
+
+/* Including the terminator, as POSIX counts it for HOST_NAME_MAX + 1. */
+#define COSMO_HOST_NAME_MAX 64
 
 #define COSMO_RLIMIT_AS     0   /* bytes of user address space mapped by regions */
 #define COSMO_RLIMIT_MEM    1   /* bytes of anonymous memory populated (resident) */
@@ -173,6 +180,11 @@ struct cosmo_spawn {
  * afterwards is invisible to the child. Privileged, like the flags
  * above, and joined only by being spawned into it. */
 #define COSMO_SPAWN_NEWMOUNTNS (1u << 4)
+/* The child starts a uts namespace of its own, holding a copy of the
+ * caller's hostname. Renaming there is invisible outside, so a
+ * contained process reports the name of its container rather than of
+ * the machine under it. Privileged, like the flags above. */
+#define COSMO_SPAWN_NEWUTSNS (1u << 5)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

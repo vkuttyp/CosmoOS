@@ -15,6 +15,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/bootinfo.c \
 	kernel/core/bootarchive.c \
 	kernel/core/console.c \
+	kernel/core/utsns.c \
 	kernel/core/log.c \
 	kernel/core/panic.c \
 	kernel/core/printf.c \

@@ -182,10 +182,20 @@ Details per call:
   resolved in the caller's own namespace, and starts it there — with
   `cwd` it is `EINVAL`; `NEWDOMAIN` (8) starts a process domain;
   `NEWMOUNTNS` (16) starts a mount namespace holding a copy of what the
-  caller can see. Anything else is `EINVAL`. `root` is read only with
+  caller can see; `NEWUTSNS` (32) starts a uts namespace holding a copy
+  of the caller's hostname. Anything else is `EINVAL`. `root` is read only with
   `SETROOT`, so a caller built against the header that predates it
   passes the shorter struct (`COSMO_SPAWN_SIZE_V1`) and the kernel never
   reads past what it gave.
+- **gethostname**: writes the caller's uts namespace's name and a
+  terminator into `buf`, returning the length without it; `ERANGE` if
+  `len` is too small for both. **sethostname**: `len` bytes, not
+  necessarily terminated, at most `COSMO_HOST_NAME_MAX - 1` (63).
+  Privileged (`EPERM`); `EINVAL` for an empty name, one that does not
+  fit, or one holding a NUL or a control character — a name reaches log
+  lines and peers, and one that arrives different from how it was sent
+  is worse than one that was refused. `sysctl kernel.hostname` and the
+  Linux `uname`'s `nodename` answer from the same namespace.
 - **wait**: `pid` is a child's pid or -1 for any child; `status` may be
   NULL; the status is the child's exit status (`exit(n)` gives `n & 0xff`,
   a kill `128 + sig`, a fault 139); the child is gone once collected.
@@ -224,7 +234,8 @@ Details per call:
 - **klog**: at most 32 KiB (`KLOG_RING_SIZE`); the ring holds every
   emitted line, oldest overwritten first; reading does not consume.
 - **sysctl**: names `kernel.name`, `kernel.version`, `kernel.build`,
-  `kernel.arch`, `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
+  `kernel.arch`, `kernel.hostname` (from the caller's uts namespace),
+  `kernel.uptime_ns`, `kernel.nprocs`, `hw.ncpu`,
   `vm.page_size`, `vm.pages_total`, `vm.pages_free`, `vm.cache_pages`
   and `vm.cache_limit` (the page cache's size and its reclaim limit,
   `docs/kernel/security/design.md` §3), since Phase 12

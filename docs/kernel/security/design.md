@@ -183,6 +183,42 @@ propagation (a shared mount whose children appear in peers), and any
 way to enter an existing namespace -- a namespace is joined by being
 spawned into it and in no other way.
 
+## 1e. The uts namespace, and a hostname to put in it
+
+The machine had no name. `uname` reported the constant "cosmo" to a
+Linux binary and nothing else asked, so the first half of this is
+introducing a hostname at all: a name a privileged process sets
+(`sethostname`), anyone reads (`gethostname`), `uname` reports and
+`sysctl kernel.hostname` shows.
+
+The second half is that a name a contained process reads should be the
+name of its container, not of the machine underneath it -- which is the
+whole reason the thing exists. So the hostname lives in a **uts
+namespace**: a spawn may start a new one holding a copy of the caller's
+name, and setting it there changes nothing outside.
+
+It is by far the smallest of these primitives -- one string, no
+lifetimes to get right, nothing to unmount -- and it is here because
+software asks the machine its name and believes the answer. A contained
+process that reports the host's name is telling every log line and every
+peer something false about where it is running.
+
+Two details that are choices rather than accidents:
+
+- **The domain name is not namespaced, and is not settable.** `uname`
+  reports the constant "(none)". Linux carries `domainname` in this
+  namespace for NIS, which nothing here has ever used; a second string
+  with a second syscall and no reader would be scaffolding, not a
+  feature. The namespace holds what something actually reads.
+- **Reading is unprivileged, setting is not.** A name is not a secret
+  -- every process that logs anything wants it -- but a process that
+  could rename the machine could make another one's logs and its peers'
+  records say whatever it liked.
+
+Not done here: any relationship between a hostname and the network
+stack, which does not consult one; and entering an existing namespace,
+which no namespace here offers.
+
 ## 2. Resource limits
 
 `struct rlimits` is one 64-bit value per resource, inherited by copy at

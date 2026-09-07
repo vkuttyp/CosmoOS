@@ -37,6 +37,11 @@ pid_t spawnve_domain(const char *path, const char *const argv[], const char *con
  * Privileged, and joined only by being spawned into it. */
 pid_t spawnve_mountns(const char *path, const char *const argv[], const char *const envp[],
                       const struct spawn_handle *h, size_t nh);
+/* spawnve with COSMO_SPAWN_NEWUTSNS: the child starts a uts namespace
+ * of its own, holding a copy of the caller's hostname. Renaming there
+ * is invisible outside. Privileged. */
+pid_t spawnve_utsns(const char *path, const char *const argv[], const char *const envp[],
+                    const struct spawn_handle *h, size_t nh);
 /* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
  * supplementary groups; unprivileged callers may name only ids they hold. */
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,

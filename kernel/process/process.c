@@ -10,6 +10,7 @@
 #include <kernel/page.h>
 #include <kernel/mountns.h>
 #include <kernel/panic.h>
+#include <kernel/utsns.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/process.h>
@@ -76,6 +77,10 @@ static void process_release(struct kobject *obj)
     if (p->mntns) {
         mountns_put(p->mntns);
         p->mntns = NULL;
+    }
+    if (p->utsns) {
+        utsns_put(p->utsns);
+        p->utsns = NULL;
     }
     if (p->parent)
         process_put(p->parent);
@@ -488,6 +493,15 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         spin_unlock_irqrestore(&parent->lock, ns);
     }
 
+    /* And the name it reads for the machine, the same way. */
+    if (attr && attr->utsns) {
+        p->utsns = utsns_get(attr->utsns);
+    } else if (parent) {
+        arch_irq_state_t us = spin_lock_irqsave(&parent->lock);
+        p->utsns = utsns_get(parent->utsns);
+        spin_unlock_irqrestore(&parent->lock, us);
+    }
+
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
         vnode_get(attr->cwd);
@@ -692,6 +706,10 @@ fail:
     if (p->mntns) {
         mountns_put(p->mntns);
         p->mntns = NULL;
+    }
+    if (p->utsns) {
+        utsns_put(p->utsns);
+        p->utsns = NULL;
     }
     if (p->linux)
         linux_process_release(p);

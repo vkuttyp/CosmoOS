@@ -34,6 +34,7 @@
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
+#include <kernel/utsns.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -710,7 +711,7 @@ static int64_t sys_spawn(struct syscall_args *a)
         return -EFAULT;
     if ((req.flags &
          ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
-           COSMO_SPAWN_NEWMOUNTNS)) ||
+           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
     if ((req.flags & COSMO_SPAWN_SETROOT) && copy_from_user(&req, a->a[0], sizeof(req)))
@@ -785,7 +786,7 @@ static int64_t sys_spawn(struct syscall_args *a)
     }
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
                        rootp, (req.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
-                       (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0,
+                       (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0, (req.flags & COSMO_SPAWN_NEWUTSNS) != 0,
                        (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
 out:
     kfree(sc);
@@ -1133,8 +1134,33 @@ static int64_t sys_klog(struct syscall_args *a)
     return rc ? rc : (int64_t)n;
 }
 
+static int64_t sys_gethostname(struct syscall_args *a)
+{
+    char buf[COSMO_HOST_NAME_MAX];
+    size_t n = utsns_gethostname(utsns_current(), buf, sizeof(buf));
+    if ((size_t)a->a[1] < n + 1)
+        return -ERANGE;
+    return copy_to_user(a->a[0], buf, n + 1) ? -EFAULT : (int64_t)n;
+}
+
+/* Privileged: a name is not a secret, but a process that could rename
+ * the machine could make another one's logs say whatever it liked. */
+static int64_t sys_sethostname(struct syscall_args *a)
+{
+    if (!cred_privileged(cred_current()))
+        return -EPERM;
+    size_t len = (size_t)a->a[1];
+    if (len >= COSMO_HOST_NAME_MAX)
+        return -EINVAL;
+    char buf[COSMO_HOST_NAME_MAX];
+    if (copy_from_user(buf, a->a[0], len))
+        return -EFAULT;
+    return utsns_sethostname(utsns_current(), buf, len);
+}
+
 static const char *const sysctl_names[] = {
     "kernel.name", "kernel.version", "kernel.build", "kernel.arch", "kernel.uptime_ns", "kernel.nprocs",
+    "kernel.hostname",
     "hw.ncpu", "vm.page_size", "vm.pages_total", "vm.pages_free", "vm.cache_pages", "vm.cache_limit",
     "hv.backend", "hv.vms", "hv.vcpus", "hv.exits",
     "net.steer",
@@ -1154,6 +1180,13 @@ static int sysctl_value(const char *name, char *out, size_t n)
         return ksnprintf(out, n, "%s", arch_name());
     if (strcmp(name, "kernel.uptime_ns") == 0)
         return ksnprintf(out, n, "%llu", (unsigned long long)clock_now_ns());
+    /* From the caller's namespace, like gethostname and uname: three
+     * ways to ask must not give a contained process three answers. */
+    if (strcmp(name, "kernel.hostname") == 0) {
+        char host[COSMO_HOST_NAME_MAX];
+        utsns_gethostname(utsns_current(), host, sizeof(host));
+        return ksnprintf(out, n, "%s", host);
+    }
     if (strcmp(name, "kernel.nprocs") == 0)
         return ksnprintf(out, n, "%u", process_count());
     if (strcmp(name, "hw.ncpu") == 0)
@@ -1258,6 +1291,8 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_chdir] = sys_chdir,
     [SYS_getcwd] = sys_getcwd,
     [SYS_procinfo] = sys_procinfo,
+    [SYS_gethostname] = sys_gethostname,
+    [SYS_sethostname] = sys_sethostname,
     [SYS_klog] = sys_klog,
     [SYS_sysctl] = sys_sysctl,
     [SYS_vm_create] = sys_vm_create,

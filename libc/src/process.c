@@ -72,6 +72,21 @@ pid_t spawnve_mountns(const char *path, const char *const argv[], const char *co
     return (pid_t)__syscall_ret(cosmo_spawn(&req));
 }
 
+pid_t spawnve_utsns(const char *path, const char *const argv[], const char *const envp[],
+                    const struct spawn_handle *h, size_t nh)
+{
+    struct cosmo_spawn req = {
+        .path = path,
+        .argv = argv,
+        .envp = envp,
+        .handles = (const struct cosmo_spawn_handle *)h,
+        .nr_handles = nh,
+        .cwd = NULL,
+        .flags = COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_NEWUTSNS,
+    };
+    return (pid_t)__syscall_ret(cosmo_spawn(&req));
+}
+
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
                  size_t nh, uid_t uid, gid_t gid)
 {

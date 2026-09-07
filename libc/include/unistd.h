@@ -1,5 +1,6 @@
 #ifndef _UNISTD_H
 #define _UNISTD_H
+#include <cosmo/syscall.h>
 #include <stddef.h>
 #include <sys/types.h>
 #define STDIN_FILENO 0
@@ -18,6 +19,11 @@ pid_t getpid(void);
 pid_t getppid(void);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
+/* The machine's name, from the caller's uts namespace. Setting it is
+ * privileged; HOST_NAME_MAX includes the terminator. */
+#define HOST_NAME_MAX COSMO_HOST_NAME_MAX
+int gethostname(char *buf, size_t size);
+int sethostname(const char *name, size_t len);
 int dup(int fd);
 int dup2(int fd, int newfd);
 /* dup with fewer rights than the original: `rights` is a subset of

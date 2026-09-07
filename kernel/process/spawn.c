@@ -15,6 +15,7 @@
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/utsns.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
@@ -116,7 +117,8 @@ static int read_executable(struct process *cur, const char *path, struct process
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
-                  bool new_domain, bool new_mountns, const struct process_spawn_cred *cred, pid_t *pid_out)
+                  bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
+                  pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -132,8 +134,9 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
     if (new_domain && !cred_privileged(&cur->cred))
         return -EPERM;
     /* And a mount namespace, for the same reason: it decides what
-     * filesystems a set of processes can see. */
-    if (new_mountns && !cred_privileged(&cur->cred))
+     * filesystems a set of processes can see. A uts namespace decides
+     * what they believe they are running on. */
+    if ((new_mountns || new_utsns) && !cred_privileged(&cur->cred))
         return -EPERM;
     uint32_t domain = 0;
     if (new_domain) {
@@ -141,14 +144,22 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         if (drc)
             return drc;
     }
+    struct uts_ns *utsns = NULL;
+    if (new_utsns) {
+        int urc = utsns_create(utsns_current(), &utsns);
+        if (urc)
+            return urc;
+    }
     struct mount_ns *mntns = NULL;
     if (new_mountns) {
         /* Built before anything is resolved, so the child's view is a
          * copy of what the caller could see when it asked, and a
          * failure here costs nothing that has to be undone. */
         int nrc = mountns_create(mountns_current(), &mntns);
-        if (nrc)
+        if (nrc) {
+            utsns_put(utsns);
             return nrc;
+        }
     }
 
     struct process_spawn_attr attr = {
@@ -157,6 +168,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .nr_handles = nr_handles,
         .domain = domain,
         .mntns = mntns,
+        .utsns = utsns,
 
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
@@ -265,5 +277,7 @@ out_cwd:
         vnode_put(attr.root);   /* the child took its own reference */
     if (mntns)
         mountns_put(mntns);     /* likewise; on failure this is the last one */
+    if (utsns)
+        utsns_put(utsns);
     return rc;
 }

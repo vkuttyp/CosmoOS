@@ -208,3 +208,29 @@ copied. An unprivileged spawn asking for a namespace is refused.
 
 Confirmed against the bug: with the visibility filter defeated, the
 waiting child lists an empty directory and the assertion fails.
+
+**S13. A process reads the name of its own container, and only a
+privileged one writes it.** The hostname lives in a uts namespace; a
+spawn may start a new one holding a copy of the caller's name, and
+setting it there is invisible outside. `gethostname`, `uname` and
+`sysctl kernel.hostname` all answer from the caller's namespace, so
+there is no path by which one of them reports the host's name to a
+process that the others tell otherwise. Setting requires privilege:
+a name is not a secret, but a process that could rename the machine
+could make another one's logs say whatever it liked.
+
+The name is bounded (`COSMO_HOST_NAME_MAX`, 64 including the
+terminator) and copied under the namespace's lock into a local buffer
+before it reaches user space, so a concurrent `sethostname` cannot be
+observed half-written.
+
+Check: the user-mode self-test has a child in a new namespace rename
+itself and requires the parent's name to be unchanged afterwards, and
+requires the child to read back its own new name rather than the
+parent's; the kernel self-test requires a namespace made *after* a
+rename to carry the name current at that moment and to be unaffected by
+later ones; and the unprivileged-process test requires `sethostname` to
+be refused. Confirmed against the bug: with the namespace ignored so that every
+process reads the initial one, the child's rename reaches this side and
+two assertions fail — the name here changed, and a child *without* a
+namespace no longer reports the name this side still believes it has.

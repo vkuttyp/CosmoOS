@@ -34,6 +34,7 @@
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 #include <kernel/wait.h>
+#include <kernel/utsns.h>
 #include <arch/user.h>
 
 #include "convert.h"
@@ -1134,7 +1135,10 @@ static int64_t lx_uname(struct syscall_args *a)
     struct lx_utsname u;
     memset(&u, 0, sizeof(u));
     strlcpy(u.sysname, "Linux", sizeof(u.sysname));
-    strlcpy(u.nodename, "cosmo", sizeof(u.nodename));
+    /* From the caller's uts namespace: a contained process asking the
+     * machine its name must be told its container's
+     * (docs/kernel/security/design.md §1e). */
+    utsns_gethostname(utsns_current(), u.nodename, sizeof(u.nodename));
     strlcpy(u.release, "6.0.0-cosmo", sizeof(u.release));
     ksnprintf(u.version, sizeof(u.version), "%s %s %s", KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
     strlcpy(u.machine, LX_MACHINE, sizeof(u.machine));
