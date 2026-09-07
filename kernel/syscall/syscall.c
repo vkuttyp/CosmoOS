@@ -34,7 +34,7 @@ bool syscall_allowed(const struct process *p, uint64_t nr)
 {
     if (nr >= COSMO_SYSCALL_MASK_WORDS * 64)
         return false;
-    if (p->syscall_mask[nr / 64] & (1ull << (nr % 64)))
+    if (__atomic_load_n(&p->syscall_mask[nr / 64], __ATOMIC_RELAXED) & (1ull << (nr % 64)))
         return true;
     for (unsigned i = 0; i < p->pers->nr_always_allowed; i++)
         if (p->pers->always_allowed[i] == nr)
@@ -42,12 +42,20 @@ bool syscall_allowed(const struct process *p, uint64_t nr)
     return false;
 }
 
-/* Narrowing only: the new mask is the intersection with what is in
- * force, so no sequence of calls widens what a process may do. */
+/*
+ * Narrowing only: the new mask is the intersection with what is in
+ * force, so no sequence of calls widens what a process may do.
+ *
+ * Atomically per word, because the threads of a process share one mask
+ * and two of them may install at once: a plain read-modify-write lets
+ * the later writer put back bits the earlier one had just removed. The
+ * word is the unit a check reads, and a word only ever loses bits, so a
+ * reader racing an install sees either state and both are honest.
+ */
 void syscall_filter_install(struct process *p, const uint64_t *mask, unsigned words)
 {
     for (unsigned i = 0; i < COSMO_SYSCALL_MASK_WORDS; i++)
-        p->syscall_mask[i] &= i < words ? mask[i] : 0;
+        __atomic_fetch_and(&p->syscall_mask[i], i < words ? mask[i] : 0, __ATOMIC_ACQ_REL);
 }
 
 uint64_t syscall_filtered_count(void)

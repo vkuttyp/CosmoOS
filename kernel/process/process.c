@@ -434,6 +434,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 
     struct process *parent = attr ? attr->parent : NULL;
     /* Personality: the CosmoOS note selects native; kernel-created processes are always native. */
+    KASSERT(!(parent && process_filter_blocks_personality(parent, info.cosmo_note)));
     p->pers = (info.cosmo_note || parent == NULL) ? &personality_native : &personality_linux;
     if (parent) {
         p->parent_pid = parent->pid;
@@ -500,6 +501,10 @@ int process_create_from_images(const struct process_image *exe, const struct pro
      * (docs/kernel/security/design.md §1f).
      */
     if (parent) {
+        /* Safe to copy raw only because a filtered parent cannot reach
+         * here with a child of another personality: process_spawn
+         * refuses that, since the same bits mean different calls under
+         * a different numbering (see process_filter_blocks_personality). */
         arch_irq_state_t fs = spin_lock_irqsave(&parent->lock);
         memcpy(p->syscall_mask, parent->syscall_mask, sizeof(p->syscall_mask));
         spin_unlock_irqrestore(&parent->lock, fs);
@@ -1197,6 +1202,27 @@ struct process *process_current(void)
  * reach, which is exactly the reasoning that produces such bugs, so it
  * is refused rather than assumed away.
  */
+/*
+ * Whether `p`'s syscall filter forbids handing it to a child of the
+ * other personality. A mask is bits indexed by system call number, and
+ * the two personalities number differently -- bit 3 is one call in one
+ * and another call in the other -- so carrying the bits across would
+ * both allow calls the parent had denied and kill the child for calls
+ * the parent allowed. There is no translation between the two
+ * numberings and inventing one would be guesswork, so a filtered
+ * process simply cannot start a program of the other kind.
+ */
+bool process_filter_blocks_personality(const struct process *p, bool child_is_native)
+{
+    bool parent_native = p->pers == &personality_native;
+    if (parent_native == child_is_native)
+        return false;
+    for (unsigned i = 0; i < COSMO_SYSCALL_MASK_WORDS; i++)
+        if (__atomic_load_n(&p->syscall_mask[i], __ATOMIC_RELAXED) != ~0ull)
+            return true;   /* a filter is in force */
+    return false;
+}
+
 int process_domain_alloc(uint32_t *out)
 {
     static uint32_t next_domain = 1;

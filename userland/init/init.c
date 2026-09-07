@@ -701,6 +701,7 @@ static void proc_selftest(void)
         { "exit-unnamed", 0 },                  /* exit works unnamed */
         { "widen", 128 + COSMO_SIGSYS },        /* a wider mask restores nothing */
         { "inherit", 0 },                       /* the child dies of its parent's filter */
+        { "linux-child", 0 },                   /* a filter cannot cross a numbering */
     };
     for (size_t i = 0; i < sizeof(fcases) / sizeof(fcases[0]); i++) {
         const char *fargv[] = { "init", "--filter", fcases[i].kind, NULL };
@@ -849,6 +850,8 @@ static void proc_selftest(void)
  * case runs in a child of its own, because a filter cannot be taken
  * back: the parent could not test one without ending its own run.
  */
+#define LX_PROGRAM "/boot/tests/linux/lxhello"
+
 static int filter_case(const char *kind)
 {
     uint64_t mask[COSMO_SYSCALL_MASK_WORDS];
@@ -917,6 +920,34 @@ static int filter_case(const char *kind)
         if (cosmo_wait((int)pid, &status, 0) != pid)
             return 12;
         return status == 128 + COSMO_SIGSYS ? 0 : 13;
+    }
+    if (strcmp(kind, "linux-child") == 0) {
+        /*
+         * A filter is bits by call number, and the two personalities
+         * number differently, so a filtered process cannot start a
+         * program of the other kind (§1f).
+         *
+         * Spawn it once *before* filtering, so a wrong path fails here
+         * with its own code rather than looking like the refusal this
+         * is trying to prove.
+         */
+        static const char *const lx_argv[] = { "lxhello", NULL };
+        pid_t first = spawnve(LX_PROGRAM, lx_argv, NULL, NULL, 0);
+        if (first <= 0)
+            return 30;   /* the program is not there: says nothing about filters */
+        int lstatus = -1;
+        if (waitpid(first, &lstatus, 0) != first)
+            return 31;
+
+        SYSCALL_ALLOW(mask, SYS_spawn);
+        SYSCALL_ALLOW(mask, SYS_wait);
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        /* Now the same spawn must be refused, and refused for this
+         * reason rather than by being killed for calling spawn. */
+        if (spawnve(LX_PROGRAM, lx_argv, NULL, NULL, 0) >= 0)
+            return 32;
+        return errno == EPERM ? 0 : 33;
     }
     if (strcmp(kind, "child-getpid") == 0) {
         (void)getpid();   /* denied by the filter this was born with */
