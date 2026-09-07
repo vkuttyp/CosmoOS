@@ -349,6 +349,32 @@ static void port_complete(struct ahci_port *p, int status)
 }
 
 /*
+ * Stop the port, fail everything it holds (the victim with
+ * `victim_status`, the rest with `status`), clear the error state, reset
+ * the link if the device is stuck, start again. `recovering` is set for
+ * the whole of it so submit and cmd_sync refuse meanwhile: a command
+ * accepted while the port is stopped would be failed with the rest or
+ * sit unissued until another timeout (review, PR #53, three rounds of
+ * finding paths that restarted without saying so). Thread context.
+ */
+static void port_restart(struct ahci_port *p, struct bio *victim, int victim_status, int status)
+{
+    arch_irq_state_t f = spin_lock_irqsave(&p->lock);
+    p->recovering = true;
+    spin_unlock_irqrestore(&p->lock, f);
+    (void)port_stop_cmd(p);
+    slots_fail(p, victim, victim_status, status);
+    pwr(p, PX_SERR, 0xffffffffu);
+    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
+        (void)port_comreset(p);
+    port_start(p);
+    f = spin_lock_irqsave(&p->lock);
+    p->recovering = false;
+    p->errors++;
+    spin_unlock_irqrestore(&p->lock, f);
+}
+
+/*
  * A synchronous command: one PRDT entry over `buf` (or `raw_dma`, a bus
  * address the caller chose, for debug_dma), waited for with a bound. On
  * the bound the port is restarted and the command fails -ETIMEDOUT.
@@ -401,13 +427,10 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
     while (!completion_done(&w.done) && clock_now_ns() < deadline)
         thread_sleep_ns(100000);
     if (!completion_done(&w.done)) {
-        /* Take the slot back: stop the port, fail what it holds, restart. */
+        /* Take the slot back: the same restart the block layer's timeout runs. */
         kwarn("ahci%u: port %u: command 0x%02x did not complete in %llu ms; restarting the port", p->hba->index,
               p->index, cmd, (unsigned long long)(AHCI_SYNC_NS / 1000000));
-        (void)port_stop_cmd(p);
-        slots_fail(p, NULL, 0, -ETIMEDOUT);
-        pwr(p, PX_SERR, 0xffffffffu);
-        port_start(p);
+        port_restart(p, NULL, 0, -ETIMEDOUT);
     }
     wait_for_completion(&w.done);
     return w.status;
@@ -681,23 +704,12 @@ static void ahci_timeout(struct blkdev *bd, struct bio *victim)
     for (unsigned i = 0; i < AHCI_MAX_SLOTS; i++)
         if ((p->active & (1u << i)) && p->slots[i].bio == victim)
             mine = true;
-    if (mine)
-        p->recovering = true;   /* from here to port_start nothing new is accepted */
     spin_unlock_irqrestore(&p->lock, f);
     if (!mine)
         return;   /* completed between the layer's decision and now */
     kwarn("ahci%u: port %u: command timed out (PxCI 0x%08x, PxTFD 0x%08x); restarting the port", p->hba->index,
           p->index, prd(p, PX_CI), prd(p, PX_TFD));
-    (void)port_stop_cmd(p);
-    slots_fail(p, victim, -ETIMEDOUT, -EIO);
-    pwr(p, PX_SERR, 0xffffffffu);
-    if (PXTFD_STS(prd(p, PX_TFD)) & (ATA_STS_BSY | ATA_STS_DRQ))
-        (void)port_comreset(p);
-    port_start(p);
-    f = spin_lock_irqsave(&p->lock);
-    p->recovering = false;
-    p->errors++;
-    spin_unlock_irqrestore(&p->lock, f);
+    port_restart(p, victim, -ETIMEDOUT, -EIO);
 }
 
 /* Tests only: a READ DMA EXT of one sector into an address the caller

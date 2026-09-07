@@ -165,6 +165,16 @@ A synchronous command (IDENTIFY, the tests' one-offs) waits, bounded,
 while the port is restarting: a slot taken during a restart would be
 absent from the recovery's `PxCI` snapshot and sorted wrongly.
 
+Every restart that fails what the port holds — the block layer's
+timeout and a synchronous command's — goes through one function
+(`port_restart`): mark the port `recovering`, stop command processing,
+fail what is held, clear `PxSERR`, COMRESET if the device is stuck,
+start, unmark. The error recovery (which sorts the held slots by the
+`PxCI` snapshot instead of failing them) and the reset on demand (which
+always resets the link) keep their own sequences and mark the port the
+same way. Review found three paths that restarted on their own and each
+forgot something.
+
 **The block layer's timeout** (`blkdev_ops.timeout`, its thread) runs the
 same port restart synchronously: the victim completes `-ETIMEDOUT`, and
 every other outstanding command completes `-EIO` — a port that has

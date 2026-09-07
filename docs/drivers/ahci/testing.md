@@ -119,6 +119,13 @@ to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).
   synchronous command could take a slot during a port restart and be
   sorted wrongly by the recovery's `PxCI` snapshot; it now waits,
   bounded, for the restart to end (`-EBUSY` if it does not).
+- (Review, PR #53, third round.) A synchronous command's timeout
+  restarted the port without marking it `recovering`, so a bio submitted
+  meanwhile could be accepted into a stopped port and sit unissued until
+  another timeout. Every restart that fails what the port holds now
+  goes through one function that marks the port for its whole duration;
+  three rounds of review found three paths that restarted without
+  saying so, which is the argument for one path.
 - (Reintroduction.) With the detach path's `slots_fail` removed, the bio
   in flight at `ahci-unplug`'s detach never completes and the test fails
   at its "completed, with the right error" step; with it, the bio
