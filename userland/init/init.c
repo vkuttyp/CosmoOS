@@ -570,6 +570,77 @@ static void proc_selftest(void)
     int kstatus = 0;
     CHECK(waitpid(kpid, &kstatus, 0) == kpid && kstatus != 0);
 
+    /*
+     * Mount namespaces (docs/kernel/security/design.md §1d, S12). Both
+     * directions, because a filter that is only checked one way can be
+     * a filter that copies too much or one that copies too little.
+     *
+     * The directory gets a file first: it is the underlying directory
+     * that shows through wherever the ramfs is *not* mounted, so
+     * whether "nsfile" is listed says which side of the split the
+     * listing came from.
+     */
+    CHECK(mkdir("/tmp/nsm", 0755) == 0 || errno == EEXIST);
+    int nsf = open("/tmp/nsm/nsfile", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(nsf >= 0 && close(nsf) == 0);
+
+    /* One: what the child mounts, the parent does not see. */
+    int np[2];
+    CHECK(pipe(np) == 0);
+    struct spawn_handle nmap[] = { { .child = 0, .parent = 0 },
+                                   { .child = 1, .parent = np[1] },
+                                   { .child = 2, .parent = 2 } };
+    const char *ns_argv[] = { "sh", "-c", "mount none /tmp/nsm ramfs && ls /tmp/nsm", NULL };
+    pid_t npid = spawnve_mountns("/bin/sh", ns_argv, NULL, nmap, 3);
+    CHECK(npid > 1);
+    CHECK(close(np[1]) == 0);
+    ssize_t nn = read(np[0], buf, sizeof(buf) - 1);
+    CHECK(nn >= 0);
+    buf[nn] = 0;
+    CHECK(close(np[0]) == 0);
+    int nstatus = 0;
+    CHECK(waitpid(npid, &nstatus, 0) == npid && nstatus == 0);
+    /* The child listed its own empty ramfs, not the directory under it. */
+    CHECK(strstr(buf, "nsfile") == NULL);
+    /* And here the mount never happened: the file is still listed, and
+     * the directory is free to mount on, which it would not be if the
+     * child's mount were in the way. */
+    struct stat nst;
+    CHECK(stat("/tmp/nsm/nsfile", &nst) == 0);
+    CHECK(cosmo_mount("none", "/tmp/nsm", "ramfs", 0) == 0);
+    CHECK(cosmo_umount("/tmp/nsm") == 0);
+
+    /*
+     * Two: what the parent mounts afterwards, the child does not see.
+     * The child blocks on its standard input until this side has
+     * mounted, so the mount certainly happens after its namespace was
+     * copied -- which is the only ordering that tests anything.
+     */
+    int sp[2], rp[2];
+    CHECK(pipe(sp) == 0 && pipe(rp) == 0);
+    struct spawn_handle wmap[] = { { .child = 0, .parent = sp[0] },
+                                   { .child = 1, .parent = rp[1] },
+                                   { .child = 2, .parent = 2 } };
+    const char *w_argv[] = { "sh", "-c", "cat > /dev/null && ls /tmp/nsm", NULL };
+    pid_t wpid = spawnve_mountns("/bin/sh", w_argv, NULL, wmap, 3);
+    CHECK(wpid > 1);
+    CHECK(close(sp[0]) == 0 && close(rp[1]) == 0);
+    CHECK(cosmo_mount("none", "/tmp/nsm", "ramfs", 0) == 0);
+    CHECK(close(sp[1]) == 0);   /* the child may go now */
+    ssize_t wn = read(rp[0], buf, sizeof(buf) - 1);
+    CHECK(wn >= 0);
+    buf[wn] = 0;
+    CHECK(close(rp[0]) == 0);
+    int wstatus = 0;
+    CHECK(waitpid(wpid, &wstatus, 0) == wpid && wstatus == 0);
+    /* The child still sees the directory underneath, because the mount
+     * that covers it here was made after its namespace was copied. */
+    CHECK(strstr(buf, "nsfile") != NULL);
+    /* This side does see it: an empty ramfs. */
+    CHECK(stat("/tmp/nsm/nsfile", &nst) < 0);
+    CHECK(cosmo_umount("/tmp/nsm") == 0);
+    CHECK(stat("/tmp/nsm/nsfile", &nst) == 0);
+
     /* Handle rights: a handle says what may be done with it, and what it
      * says only ever shrinks (docs/kernel/object/architecture.md). */
     int rw = open("/tmp/rights.txt", O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -1067,6 +1138,10 @@ static int unpriv_test(void)
 
     /* Privileged system calls. */
     UCHECK(mount("none", "/mnt", "ramfs", 0) < 0 && errno == EPERM);
+    /* And a mount namespace of its own, which decides what filesystems
+     * a whole subtree of processes sees. */
+    static const char *const t_argv[] = { "true", NULL };
+    UCHECK(spawnve_mountns("/bin/true", t_argv, NULL, NULL, 0) < 0 && errno == EPERM);
     UCHECK(umount("/") < 0 && errno == EPERM);
     UCHECK(kill(parent, SIGTERM) < 0 && errno == EPERM);      /* root's process; must survive */
     char log[256];

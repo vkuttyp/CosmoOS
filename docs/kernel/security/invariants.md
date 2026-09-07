@@ -180,3 +180,31 @@ its own shell to be listed and `init` — pid 1, which certainly exists —
 not to be; and runs `kill 1` inside a domain and requires it to fail.
 The visibility check was confirmed against the bug: with the filter
 removed, `ps` in the domain lists `init` and the assertion fails.
+
+**S12. A process sees the mounts of its namespace, and mounts into no
+other.** A process belongs to a mount namespace; a spawn may start a new
+one, which begins as a copy of the parent's view and diverges. A mount
+made afterwards is visible only where it was made, and an unmount only
+removes it from the namespace that asked; the last namespace to see a
+mount is the one that unmounts it, so nothing is released while anyone
+can still reach it and nothing is left behind that nobody can.
+
+This is the other half of the root (S10). A root says which subtree a
+process may name; a namespace says what is attached inside it. A
+confined process without one still shares the mount table, so what it
+mounts is system-wide and what is mounted system-wide appears under its
+root — the confinement holds for names and leaks through mounts.
+Starting a namespace is privileged, like a root and a domain: privilege
+flows down.
+
+Check: the user-mode self-test puts a file in a directory and then reads
+that directory from both sides of a split, since whether the file is
+listed says which side the listing came from. A child spawned into a new
+namespace mounts a ramfs over the directory and lists only its own empty
+mount, while this side still finds the file and can mount over the
+directory itself; and a child that waits until this side has mounted
+still lists the file, because the mount came after its namespace was
+copied. An unprivileged spawn asking for a namespace is refused.
+
+Confirmed against the bug: with the visibility filter defeated, the
+waiting child lists an empty directory and the assertion fails.

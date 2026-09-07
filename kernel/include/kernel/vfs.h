@@ -84,13 +84,11 @@ struct vnode {
     void *fs_priv;
     struct pagecache pc;
     struct mutex lock;
-    /* The mounts covering this directory, one per mount namespace at
-     * most, protected by this vnode's lock exactly as the single
-     * pointer here used to be. A list rather than a pointer because a
-     * directory can be a mountpoint in one namespace and an ordinary
-     * directory in another; today there is one namespace and the list
-     * holds at most one entry (docs/kernel-services/vfs/design.md,
-     * "Mounts and namespaces"). */
+    /* The mounts covering this directory, at most one per mount
+     * namespace, protected by this vnode's lock. A list rather than a
+     * pointer because a directory can be a mountpoint in one namespace
+     * and an ordinary directory in another
+     * (docs/kernel-services/vfs/design.md, "Mounts and namespaces"). */
     struct list_node covers;
     struct list_node hash_link;
     unsigned flags;
@@ -122,6 +120,13 @@ struct mount {
     struct mutex sync_lock;   /* fs->sync against fs->unmount */
     struct list_node link;
     struct list_node cover_link;   /* on its mountpoint's `covers` list */
+    /* The namespaces that can see this mount, as struct mount_ns_ref.
+     * Under the mountpoint's lock, the same lock as cover_link: where a
+     * mount is attached and who can see it are one question, and a
+     * walker holding that lock must be able to ask both without taking
+     * g_mounts_lock inside a vnode lock. The root mount is not on this
+     * machinery at all -- every namespace has it. */
+    struct list_node ns_refs;
     unsigned nr_vnodes;
     uint64_t next_ino;        /* for filesystems that number in memory */
     uint64_t cache_pages;     /* pages the page cache holds for this mount (atomic) */

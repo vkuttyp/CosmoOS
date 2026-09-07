@@ -11,6 +11,7 @@
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/log.h>
+#include <kernel/mountns.h>
 #include <kernel/panic.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
@@ -115,7 +116,7 @@ static int read_executable(struct process *cur, const char *path, struct process
 
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
-                  bool new_domain, const struct process_spawn_cred *cred, pid_t *pid_out)
+                  bool new_domain, bool new_mountns, const struct process_spawn_cred *cred, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -130,11 +131,24 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
      * it decides what a set of processes can see of the machine. */
     if (new_domain && !cred_privileged(&cur->cred))
         return -EPERM;
+    /* And a mount namespace, for the same reason: it decides what
+     * filesystems a set of processes can see. */
+    if (new_mountns && !cred_privileged(&cur->cred))
+        return -EPERM;
     uint32_t domain = 0;
     if (new_domain) {
         int drc = process_domain_alloc(&domain);
         if (drc)
             return drc;
+    }
+    struct mount_ns *mntns = NULL;
+    if (new_mountns) {
+        /* Built before anything is resolved, so the child's view is a
+         * copy of what the caller could see when it asked, and a
+         * failure here costs nothing that has to be undone. */
+        int nrc = mountns_create(mountns_current(), &mntns);
+        if (nrc)
+            return nrc;
     }
 
     struct process_spawn_attr attr = {
@@ -142,6 +156,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .handles = handles,
         .nr_handles = nr_handles,
         .domain = domain,
+        .mntns = mntns,
 
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
@@ -248,5 +263,7 @@ out_cwd:
         vnode_put(attr.cwd);
     if (attr.root)
         vnode_put(attr.root);   /* the child took its own reference */
+    if (mntns)
+        mountns_put(mntns);     /* likewise; on failure this is the last one */
     return rc;
 }

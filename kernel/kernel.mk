@@ -103,6 +103,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/security/chacha20.c \
 	kernel/core/fwcfg.c \
 	kernel-services/vfs/vfs.c \
+	kernel-services/vfs/mountns.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
 	kernel-services/vfs/vfstest.c \

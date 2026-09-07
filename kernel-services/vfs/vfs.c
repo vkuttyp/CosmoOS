@@ -12,6 +12,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
 #include <kernel/log.h>
+#include <kernel/mountns.h>
 #include <kernel/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
@@ -19,10 +20,12 @@
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
 
-static struct mutex g_mounts_lock;
+#include "vfs_internal.h"
+
+struct mutex g_mounts_lock;
 static LIST_HEAD(g_fs_types);
-static LIST_HEAD(g_mounts);
-static struct mount *g_root_mount;
+LIST_HEAD(g_mounts);
+struct mount *g_root_mount;
 static unsigned g_nr_mounts;
 static bool g_initialized;
 
@@ -226,6 +229,7 @@ static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsign
     mutex_init(&mnt->sync_lock, "mount-sync");
     list_init(&mnt->link);
     list_init(&mnt->cover_link);
+    list_init(&mnt->ns_refs);
     return mnt;
 }
 
@@ -269,6 +273,23 @@ static struct mount *covering_mount(const struct vnode *dir)
 }
 
 /*
+ * The mount covering this directory *in a namespace*: what a walker
+ * follows and what refuses a second mount on the same directory. The
+ * weaker question above -- covered in any namespace at all -- is what
+ * unlink and rename ask, because a mount is attached to the vnode and
+ * not to the path, so a namespace that cannot see one is exactly the
+ * one with no basis to decide its fate.
+ */
+static struct mount *covering_mount_ns(const struct vnode *dir, const struct mount_ns *ns)
+{
+    struct mount *m;
+    list_for_each_entry(m, &dir->covers, cover_link)
+        if (mountns_sees(ns, m))
+            return m;
+    return NULL;
+}
+
+/*
  * The same question asked of a child whose parent the caller already
  * holds: rename and unlink check whether the entry they are about to
  * move or remove is a mountpoint. The lock is taken as a child, which
@@ -300,6 +321,18 @@ static bool entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vn
     return is_mountpoint_child(vn);
 }
 
+/* A mount that was built but never attached: give it back to the
+ * filesystem and release everything it took. It is on no list and no
+ * namespace can see it, so there is nothing to detach first. */
+static void undo_mount(struct mount *mnt, struct blkdev *bdev)
+{
+    mnt->fs->unmount(mnt);
+    vnode_put(mnt->root);
+    if (bdev)
+        blkdev_put(bdev);
+    kobject_put(&mnt->obj);
+}
+
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
 {
     KASSERT(g_initialized);
@@ -323,30 +356,95 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
         return rc;
     }
 
+    struct mount_ns *ns = mountns_current();
+    struct mount_ns_ref *ref = kmalloc(sizeof(*ref), KMEM_ZERO);
+    if (ref == NULL) {
+        undo_mount(mnt, bdev);
+        vnode_put(dir);
+        return -ENOMEM;
+    }
+
     mutex_lock(&g_mounts_lock);
     mutex_lock(&dir->lock);
-    /* No stacking: a directory that is already a mountpoint (the lookup
-     * followed it, so `dir` is that mount's root) or the global root. */
-    if (covering_mount(dir) != NULL || dir->mnt->root == dir) {
+    /* No stacking *in this namespace*: a directory already covered here
+     * (the lookup followed it, so `dir` is that mount's root) or the
+     * global root. A mount another namespace has on the same directory
+     * is not in the way -- that is what makes them namespaces. */
+    if (covering_mount_ns(dir, ns) != NULL || dir->mnt->root == dir) {
         mutex_unlock(&dir->lock);
         mutex_unlock(&g_mounts_lock);
-        fs->unmount(mnt);
-        vnode_put(mnt->root);
-        if (bdev)
-            blkdev_put(bdev);
-        kobject_put(&mnt->obj);
+        kfree(ref);
+        undo_mount(mnt, bdev);
         vnode_put(dir);
         return -EBUSY;
     }
     mnt->mountpoint = dir;          /* keeps the lookup reference */
     mnt->parent = dir->mnt;
     list_push_back(&dir->covers, &mnt->cover_link);
+    /* Visible in the namespace that made it, and in no other. */
+    ref->mnt = mnt;
+    ref->ns = ns;
+    list_push_back(&mnt->ns_refs, &ref->mnt_link);
+    list_push_back(&ns->mounts, &ref->ns_link);
     mutex_unlock(&dir->lock);
     list_push_back(&g_mounts, &mnt->link);
     g_nr_mounts++;
     mutex_unlock(&g_mounts_lock);
     kinfo("vfs: mounted %s on %s from %s", fsname, path, bdev ? bdev->name : "memory");
     return 0;
+}
+
+/*
+ * Take a mount off the directory it covers and out of the mount table.
+ * g_mounts_lock held; the count lives here, so the removal does too --
+ * a second place that unlinks a mount is a second place that can
+ * forget to say so.
+ */
+void vfs_mount_detach(struct mount *mnt)
+{
+    mutex_lock(&mnt->mountpoint->lock);
+    list_remove(&mnt->cover_link);
+    list_init(&mnt->cover_link);
+    mutex_unlock(&mnt->mountpoint->lock);
+    list_remove(&mnt->link);
+    g_nr_mounts--;
+}
+
+/*
+ * A mount the last namespace that could see it has let go. It is
+ * already off `g_mounts` and off its mountpoint, so nothing can reach
+ * it and there is nobody to hand a failure back to -- which is the
+ * difference from vfs_umount2, where a failed commit leaves the mount
+ * in place for the caller to retry. Here a failed commit is reported
+ * loudly and the transaction dropped: the alternative is a filesystem
+ * left open that nothing will ever close again.
+ */
+void vfs_mount_orphaned(struct mount *mnt)
+{
+    const char *name = mnt->fs->name;
+    if (mnt->fs->sync) {
+        int rc = mnt->fs->sync(mnt);
+        if (rc)
+            kerror("vfs: %s: commit failed (%d) as its last mount namespace went away; "
+                   "the transaction is dropped",
+                   name, rc);
+    }
+    mutex_lock(&mnt->sync_lock);
+    int urc = mnt->fs->unmount(mnt);
+    mnt->unmounted = true;
+    mutex_unlock(&mnt->sync_lock);
+    struct vnode *root_vn = mnt->root;
+    mnt->root = NULL;
+    vnode_put(root_vn);
+    if (mnt->bdev)
+        blkdev_put(mnt->bdev);
+    if (mnt->mountpoint)
+        vnode_put(mnt->mountpoint);
+    if (urc)
+        kerror("vfs: %s: the filesystem reported %d while its last mount namespace went away", name, urc);
+    else
+        kinfo("vfs: unmounted %s: no mount namespace can see it", name);
+    kobject_put(&mnt->obj);
 }
 
 int vfs_umount2(const char *path, unsigned flags)
@@ -367,11 +465,43 @@ int vfs_umount2(const char *path, unsigned flags)
     vnode_put(root);   /* the lookup reference; the mount still holds one */
 
     mutex_lock(&g_mounts_lock);
+    /*
+     * If another namespace can still see this mount, unmounting is only
+     * this namespace forgetting it: the filesystem stays, so there is
+     * nothing to commit, nothing to tear down, and no reason to care
+     * whether anyone else has a file open on it. The last namespace out
+     * does the unmount below.
+     */
+    struct mount_ns *ns = mountns_current();
+    struct mount_ns_ref *myref = NULL, *r;
+    unsigned seen = 0;
+    struct vnode *mp = mnt->mountpoint;
+    mutex_lock(&mp->lock);
+    list_for_each_entry(r, &mnt->ns_refs, mnt_link) {
+        seen++;
+        if (r->ns == ns)
+            myref = r;
+    }
+    if (myref == NULL) {
+        mutex_unlock(&mp->lock);
+        mutex_unlock(&g_mounts_lock);
+        return -EINVAL;   /* not this namespace's mount to unmount */
+    }
+    if (seen > 1) {
+        list_remove(&myref->mnt_link);
+        mutex_unlock(&mp->lock);
+        list_remove(&myref->ns_link);
+        mutex_unlock(&g_mounts_lock);
+        kfree(myref);
+        kinfo("vfs: %s: dropped from this mount namespace; %u still see it", path, seen - 1);
+        return 0;
+    }
+    mutex_unlock(&mp->lock);
+
     /* Turn new walkers away first: follow_mount refuses (-EBUSY) while
      * `unmounting` is set and takes the root reference under the same
      * lock, so the reference scan below is final and nothing falls
      * through to the covered directory while the decision is pending. */
-    struct vnode *mp = mnt->mountpoint;
     mutex_lock(&mp->lock);
     mnt->unmounting = true;
     mutex_unlock(&mp->lock);
@@ -410,7 +540,10 @@ int vfs_umount2(const char *path, unsigned flags)
     mutex_lock(&mp->lock);
     list_remove(&mnt->cover_link);
     list_init(&mnt->cover_link);
+    list_remove(&myref->mnt_link);
     mutex_unlock(&mp->lock);
+    list_remove(&myref->ns_link);
+    kfree(myref);
     list_remove(&mnt->link);
     g_nr_mounts--;
     mutex_unlock(&g_mounts_lock);
@@ -500,7 +633,7 @@ static int follow_mount(struct vnode **vnp)
          * either already holds the root (the reference scan sees it) or
          * is turned away. */
         mutex_lock(&dir->lock);
-        struct mount *m = covering_mount(dir);
+        struct mount *m = covering_mount_ns(dir, mountns_current());
         if (m && m->unmounting) {
             mutex_unlock(&dir->lock);
             vnode_put(dir);

@@ -30,6 +30,13 @@ pid_t spawnve_in(const char *path, const char *const argv[], const char *const e
  * here and never left. Privileged. */
 pid_t spawnve_domain(const char *path, const char *const argv[], const char *const envp[],
                      const struct spawn_handle *h, size_t nh);
+/* spawnve with COSMO_SPAWN_NEWMOUNTNS: the child starts a mount
+ * namespace of its own -- a copy of what the caller can see now, which
+ * then diverges. What the child mounts afterwards the caller does not
+ * see, and what the caller mounts afterwards the child does not.
+ * Privileged, and joined only by being spawned into it. */
+pid_t spawnve_mountns(const char *path, const char *const argv[], const char *const envp[],
+                      const struct spawn_handle *h, size_t nh);
 /* spawnve with COSMO_SPAWN_SETCRED: the child starts as uid/gid with no
  * supplementary groups; unprivileged callers may name only ids they hold. */
 pid_t spawnve_as(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
