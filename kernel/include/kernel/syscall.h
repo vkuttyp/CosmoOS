@@ -39,6 +39,16 @@ int syscall_handle_stat(int h, struct cosmo_stat *st);
 /* Diagnostics: calls and unknown numbers seen. */
 uint64_t syscall_count(void);
 uint64_t syscall_unknown_count(void);
+/* Calls refused by a filter, over the life of the system. */
+uint64_t syscall_filtered_count(void);
+
+struct process;
+/* Whether `p` may make call `nr` (docs/kernel/security/design.md §1f).
+ * Numbers past the mask are denied: unknown fails safe. */
+bool syscall_allowed(const struct process *p, uint64_t nr);
+/* Intersect `p`'s filter with `mask` (`words` of it, the rest treated
+ * as zero). Only ever narrows. */
+void syscall_filter_install(struct process *p, const uint64_t *mask, unsigned words);
 
 /* Virtualization system calls (kernel-services/virtualization/hvsys.c). */
 int64_t sys_vm_create(struct syscall_args *a);

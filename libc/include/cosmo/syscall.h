@@ -249,6 +249,10 @@ static inline long cosmo_getcwd(char *buf, size_t len)
 {
     return cosmo_syscall2(SYS_getcwd, buf, len);
 }
+static inline long cosmo_syscall_filter(const uint64_t *mask, size_t words)
+{
+    return cosmo_syscall2(SYS_syscall_filter, mask, words);
+}
 static inline long cosmo_gethostname(char *buf, size_t len)
 {
     return cosmo_syscall2(SYS_gethostname, buf, len);

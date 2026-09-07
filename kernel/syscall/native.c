@@ -1134,6 +1134,24 @@ static int64_t sys_klog(struct syscall_args *a)
     return rc ? rc : (int64_t)n;
 }
 
+/*
+ * Unprivileged on purpose: it only ever takes authority from the caller
+ * and its children (docs/kernel/security/design.md §1f). Copied in
+ * fully before anything is applied, so a faulting mask leaves the
+ * process with the filter it had rather than half of a new one.
+ */
+static int64_t sys_syscall_filter(struct syscall_args *a)
+{
+    size_t words = (size_t)a->a[1];
+    if (words == 0 || words > COSMO_SYSCALL_MASK_WORDS)
+        return -EINVAL;
+    uint64_t mask[COSMO_SYSCALL_MASK_WORDS];
+    if (copy_from_user(mask, a->a[0], words * sizeof(mask[0])))
+        return -EFAULT;
+    syscall_filter_install(process_current(), mask, (unsigned)words);
+    return 0;
+}
+
 static int64_t sys_gethostname(struct syscall_args *a)
 {
     char buf[COSMO_HOST_NAME_MAX];
@@ -1291,6 +1309,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_chdir] = sys_chdir,
     [SYS_getcwd] = sys_getcwd,
     [SYS_procinfo] = sys_procinfo,
+    [SYS_syscall_filter] = sys_syscall_filter,
     [SYS_gethostname] = sys_gethostname,
     [SYS_sethostname] = sys_sethostname,
     [SYS_klog] = sys_klog,
@@ -1317,8 +1336,15 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_getgroups] = sys_getgroups,
 };
 
+/* A process must always be able to stop, whatever its filter says: a
+ * filter that killed a process for exiting would turn every clean
+ * shutdown into a signal death. */
+static const uint16_t native_always_allowed[] = { SYS_exit };
+
 const struct personality personality_native = {
     .name = "native",
     .table = native_table,
     .count = SYS_COUNT,
+    .always_allowed = native_always_allowed,
+    .nr_always_allowed = sizeof(native_always_allowed) / sizeof(native_always_allowed[0]),
 };

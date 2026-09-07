@@ -219,6 +219,69 @@ Not done here: any relationship between a hostname and the network
 stack, which does not consult one; and entering an existing namespace,
 which no namespace here offers.
 
+## 1f. The syscall filter
+
+A process may narrow the set of system calls it is allowed to make. The
+filter is a bitmap indexed by system-call number in the process's own
+personality: bit set, the call is allowed; bit clear, the process is
+killed. It is installed with `syscall_filter`, inherited by children,
+and can only ever be narrowed -- installing intersects with what is
+already in force.
+
+**It is the one primitive here that is unprivileged**, and the reason is
+the whole shape of it: every other one decides what a subtree of
+processes may see or reach, so starting one has to be privileged.
+This one only ever takes authority away from the caller and its
+children. A process that could not restrict itself would be unable to
+do the one safe thing it can do without asking anyone.
+
+Inheritance follows for the same reason confinement does elsewhere: a
+child that could shed its parent's filter would make the filter one
+spawn away from meaningless.
+
+**A denied call kills the process** (`SIGSYS`, 31, so the exit status is
+159 and says which of the ways to die this was). The alternative --
+returning `ENOSYS` or `EPERM` -- was considered and rejected: a filter is
+a statement about what this program will ever need, so a call outside it
+means the program is not doing what it was confined to do. That is
+either a bug or an exploit, and both are better stopped than handed an
+error code and allowed to continue into a state the author never tested.
+
+**Some calls cannot be denied.** `exit` always works: a process must be
+able to stop, and a filter that kills a process for exiting is a filter
+that turns every clean shutdown into a signal death. For the Linux
+personality `exit_group` and `rt_sigreturn` are likewise always allowed
+-- a signal handler must be able to return, or the first signal after a
+filter is installed is fatal for a reason that has nothing to do with
+the filter. The set is named by the personality, which owns the
+numbering.
+
+**The filter reads the number and nothing else.** It does not inspect
+arguments, and that is a decision rather than a missing feature.
+Arguments live in user memory, so a filter that read one would be
+checking a value the process can change between the check and the call
+-- the classic way argument-inspecting filters are defeated. A system
+call's *number* is fixed by the time the kernel has it. A filter that
+can only say things that stay true is worth more than one that can say
+more.
+
+Bits beyond the mask the caller supplies are treated as **clear**, so a
+program built against a smaller system-call count denies the calls it
+has never heard of rather than allowing them. Unknown means denied, in
+the direction that fails safe.
+
+The filter is asked only of calls that **exist**. A number the kernel
+does not implement answers `ENOSYS` whether or not a filter is
+installed: a filter takes away authority the process would otherwise
+have, and installing nothing must change nothing. Turning a nonexistent
+call into a signal death would also make the filter's presence
+detectable by a program that never tripped it.
+
+Not done here: any filtering on arguments or on the caller's state, a
+way to read the current mask back, and any notification to another
+process (seccomp's user notification), which needs a supervisor this
+system does not have.
+
 ## 2. Resource limits
 
 `struct rlimits` is one 64-bit value per resource, inherited by copy at

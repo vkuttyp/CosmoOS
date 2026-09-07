@@ -49,6 +49,11 @@ struct personality {
     const char *name;
     const syscall_fn *table;
     unsigned count;
+    /* The numbers a syscall filter may never deny: exit, and whatever
+     * else would make a clean shutdown or a signal return fatal
+     * (docs/kernel/security/design.md §1f). */
+    const uint16_t *always_allowed;
+    unsigned nr_always_allowed;
     /* Milestone 10 (docs/kernel/process/design.md §11). Both optional. */
     int (*signal_frame)(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
                         uint64_t blocked_before);   /* build a handler frame; NULL: handlers cannot run */
@@ -112,6 +117,12 @@ struct process {
      * one is started only at spawn. NULL means the initial namespace
      * (docs/kernel/security/design.md §1e). */
     struct uts_ns *utsns;
+    /* The calls this process may make: bit N set, number N is allowed.
+     * All ones until a filter is installed; intersected, never widened,
+     * and inherited by children (docs/kernel/security/design.md §1f).
+     * Written only by the process itself, through its own system call,
+     * so a reader in the syscall path needs no lock. */
+    uint64_t syscall_mask[COSMO_SYSCALL_MASK_WORDS];
     struct vnode *cwd;                 /* referenced */
     char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
 

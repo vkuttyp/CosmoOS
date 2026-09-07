@@ -1830,10 +1830,18 @@ static const syscall_fn *linux_table_get(void)
 
 /* The table is completed the first time a Linux process is created
  * (linux_process_init), before that process can make a call. */
+/* As for the native personality, plus rt_sigreturn: a signal handler
+ * must be able to return, or the first signal after a filter is
+ * installed is fatal for a reason that has nothing to do with the
+ * filter. */
+static const uint16_t linux_always_allowed[] = { LX_exit, LX_exit_group, LX_rt_sigreturn };
+
 const struct personality personality_linux = {
     .name = "linux",
     .table = g_table,
     .count = LX_NR_MAX,
+    .always_allowed = linux_always_allowed,
+    .nr_always_allowed = sizeof(linux_always_allowed) / sizeof(linux_always_allowed[0]),
     .signal_frame = linux_signal_frame,
     .thread_exit = linux_thread_exit,
 };

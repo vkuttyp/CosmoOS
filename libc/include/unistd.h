@@ -24,6 +24,13 @@ char *getcwd(char *buf, size_t size);
 #define HOST_NAME_MAX COSMO_HOST_NAME_MAX
 int gethostname(char *buf, size_t size);
 int sethostname(const char *name, size_t len);
+/* Narrow the calls this process may make: bit N of `mask` allows number
+ * N, `words` 64-bit words of it, the rest denied. Intersects with what
+ * is in force, is inherited by children, and needs no privilege -- it
+ * only ever takes authority away. A denied call kills the process with
+ * SIGSYS (docs/kernel/security/design.md §1f). */
+int syscall_filter(const uint64_t *mask, size_t words);
+#define SYSCALL_ALLOW(mask, nr) ((mask)[(nr) / 64] |= 1ull << ((nr) % 64))
 int dup(int fd);
 int dup2(int fd, int newfd);
 /* dup with fewer rights than the original: `rights` is a subset of

@@ -493,6 +493,20 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         spin_unlock_irqrestore(&parent->lock, ns);
     }
 
+    /*
+     * The syscall filter: everything allowed until one is installed,
+     * and a child starts with its parent's. A child that could shed it
+     * would make the filter one spawn away from meaningless
+     * (docs/kernel/security/design.md §1f).
+     */
+    if (parent) {
+        arch_irq_state_t fs = spin_lock_irqsave(&parent->lock);
+        memcpy(p->syscall_mask, parent->syscall_mask, sizeof(p->syscall_mask));
+        spin_unlock_irqrestore(&parent->lock, fs);
+    } else {
+        memset(p->syscall_mask, 0xff, sizeof(p->syscall_mask));
+    }
+
     /* And the name it reads for the machine, the same way. */
     if (attr && attr->utsns) {
         p->utsns = utsns_get(attr->utsns);

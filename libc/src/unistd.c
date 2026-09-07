@@ -76,6 +76,11 @@ int mount(const char *source, const char *target, const char *fstype, unsigned f
 int umount2(const char *target, unsigned flags) { return (int)__syscall_ret(cosmo_umount2(target, flags)); }
 int umount(const char *target) { return umount2(target, 0); }
 
+int syscall_filter(const uint64_t *mask, size_t words)
+{
+    return (int)__syscall_ret(cosmo_syscall_filter(mask, words));
+}
+
 int gethostname(char *buf, size_t size)
 {
     return (int)__syscall_ret(cosmo_gethostname(buf, size));
