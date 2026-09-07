@@ -33,6 +33,12 @@ a device model should be — the same sentence the NIC report wrote about
 the network interface, and it was right then (the interface held; the
 benchmark that the report said did not exist found two bugs).
 
+The NIC report's "Alternatives considered" said USB "exercises no
+interface this project claims to have generalised". That was written
+with the network interface in view and it undersold the device model;
+this report argues the opposite, for the reasons above, and the NIC
+report's outcome now says so rather than leaving the two to disagree.
+
 ## Current implementation
 
 - **Device model** (`kernel/device/`, `docs/kernel/device/`):
@@ -196,8 +202,8 @@ knob is a chain step, not a change to the default.
   list, `drivers/README.md`.
 - `scripts/qemu-run.sh` (the controller, the disk, `QEMU_USB`).
 - `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` (the
-  tests below); `kernel/iommu/iommutest.c` already finds any blkdev with
-  `debug_dma`, so it needs nothing.
+  tests below); `kernel/iommu/iommutest.c` (the fault test walks every
+  blkdev with `debug_dma` instead of naming `nvme0n1`).
 - `README.md`, `docs/README.md`, `docs/kernel/device/design.md` (a
   paragraph on the DMA-through-the-controller rule, if the model
   accepts it unchanged).
@@ -263,18 +269,35 @@ against the export list before the first boot.
   next CSW; the block layer's timeout fires within `timeout_ns`, the
   bio completes `-ETIMEDOUT`, `timeouts` is 1, recovery runs, and the
   next read succeeds.
-- **`usb-unplug`**: the device is disconnected *from inside the guest*
-  by writing `PORTSC.PED` to disable the root-hub port (the harness has
-  no monitor, so the unplug must not need one): `remove` runs,
-  `blk_find("sda")` is NULL, a bio submitted after that returns
-  `-ENODEV`, a bio in flight at the moment of the unplug completes
-  with an error and not never; the `usb_device` release runs once. The
-  port is re-enabled, the device re-enumerates, `sda` is back and
-  readable. This is the test the device model has never had.
-- **`usb-iommu`**: nothing new — `iommu-fault` already picks any blkdev
-  with `debug_dma` and provokes a translation fault; the docs record
-  that `sda` is among them, and that the fault is attributed to the
-  controller's requester id, not the disk's.
+- **`usb-unplug`**: the removal path, driven *from inside the guest*
+  because the harness runs `-monitor none`. Disabling the port in
+  `PORTSC` is not that: xHCI 1.2 §5.4.8 says a software write to `PED`
+  leaves the device connected and sets no change bit, so no Port Status
+  Change Event arrives and nothing would notice. The test instead calls
+  the controller driver's own detach entry (`xhci_debug_detach(port)`,
+  debug builds), which runs *exactly the code the port worker runs when
+  an event reports `CCS` = 0* — the shared function, not a copy — and
+  then asserts: `remove` ran, `blk_find("sda")` is NULL, a bio submitted
+  after that returns `-ENODEV`, a bio in flight at the moment of the
+  detach completes with an error and not never, and the `usb_device`
+  release runs once. Then the same entry replays a connect (`CCS` = 1),
+  the device re-enumerates, `sda` is back and readable. What this covers
+  is the kernel's removal and re-enumeration path, which is the part the
+  device model has never had; what it does not cover is the controller
+  generating the event on a physical detach. That half is exercised at
+  boot — a device present when the controller starts is reported to the
+  driver as a Port Status Change Event, the same event a hotplug raises
+  — and by hand with a QMP socket (`QEMU_EXTRA="-qmp unix:…"`,
+  `device_del`), which the docs describe and the suite does not depend
+  on.
+- **`usb-iommu`**: `iommu-fault` today does `blk_find("nvme0n1")` and
+  provokes the fault on that device alone, so a `debug_dma` on `sda`
+  would be dead code until the test changes. The test is extended to
+  walk every registered blkdev whose driver has `debug_dma` and a domain
+  (`nvme0n1` and `sda`; `vda` has neither), provoking one fault per
+  device and checking that the fault the unit reports carries *the
+  controller's* requester id for `sda` — the disk has none — which is
+  the DMA-through-the-controller rule made observable.
 - **Shapes**: `QEMU_USB=0` (skips), `QEMU_IOMMU=0`, `QEMU_SMP=1`,
   release, aarch64 (xHCI on `virt`'s PCI with the SMMU in front),
   `test-crash`, `analyze`, `fuzz` (the descriptor parser gets a host
@@ -317,10 +340,12 @@ What it gates:
   exercised, and keep `nec-usb-xhci` as a second model to boot against
   once — two device models catch what one does not, as the second NIC
   did.
-- **Hotplug without a monitor.** The harness runs `-monitor none`; the
-  in-guest `PORTSC` unplug covers the kernel's removal path but not the
-  controller's reaction to a real detach. A `QEMU_EXTRA` QMP socket
-  would cover it manually; the test plan does not depend on it.
+- **Hotplug without a monitor.** The harness runs `-monitor none`, and
+  the controller offers no software way to fake a detach (`PED` leaves
+  the device connected and raises no event), so the suite's `usb-unplug`
+  drives the driver's detach function directly and covers the kernel's
+  removal path, not the controller's event on a physical pull. The boot-
+  time connect event and a manual QMP `device_del` cover that half.
 - **External hubs are deferred.** The root hub's ports give the
   parent-child and removal cases; a hub driver (class 09, interrupt
   endpoint for status changes, per-port power and reset through class
