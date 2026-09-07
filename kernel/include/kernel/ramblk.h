@@ -49,6 +49,14 @@ void ramblk_set_deferred(struct blkdev *bd, unsigned limit);
  * the block layer's timeout thread then calls the driver's timeout
  * operation, which completes the request with -ETIMEDOUT. */
 void ramblk_set_stall(struct blkdev *bd, bool stall);
+/* Deferred mode, block-layer tests: a refusal (-EAGAIN) first completes the
+ * oldest in-flight bio synchronously, inside submit -- the completion's
+ * resubmission then meets an empty queue, the window drain_pending must
+ * survive. */
+void ramblk_set_refuse_completes(struct blkdev *bd, bool on);
+/* Deferred mode: complete the oldest in-flight bio now, from the caller's
+ * context (a completion the test controls). False if none. */
+bool ramblk_complete_one(struct blkdev *bd);
 
 /* Apply the first `count` entries of `log`; with `torn`, the last write is
  * applied only up to half its sectors (rounded down, at least one). */

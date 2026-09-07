@@ -416,3 +416,4 @@ void sched_dump(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(sched_yield);
+EXPORT_SYMBOL(sched_block_current);   /* wait_event from a module (the xhci port worker) */

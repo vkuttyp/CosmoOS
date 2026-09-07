@@ -46,3 +46,4 @@ unsigned arch_cpu_id(void)
 /* Module ABI export: a multi-queue driver picks the queue of the CPU it runs on. */
 #include <kernel/module.h>
 EXPORT_SYMBOL(arch_cpu_id);
+EXPORT_SYMBOL(arch_percpu_get);   /* this_cpu() and preemptible() inline to it: a module may ask whether it may sleep */

@@ -141,3 +141,7 @@ int thread_sleep_ns_killable(uint64_t ns)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(thread_sleep_ns);
+EXPORT_SYMBOL(waitqueue_init);
+EXPORT_SYMBOL(waitqueue_prepare);
+EXPORT_SYMBOL(waitqueue_finish);
+EXPORT_SYMBOL(waitqueue_wake_all);

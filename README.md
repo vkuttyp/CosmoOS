@@ -692,11 +692,24 @@ See [docs/development.md](docs/development.md).
   virtio-net in the same boot. A default boot has two interfaces, and a
   self-test brings the first down and requires the second to take over
   and resolve its gateway through its own rings.
+- **USB host stack (done):** `docs/drivers/usb/`. The `xhci` module
+  (the USB core and an xHCI 1.2 controller driver: rings, contexts,
+  commands, one interrupter, root-hub ports, a worker per controller) and
+  the `usb_storage` module (bulk-only mass storage as `sda`). The first
+  bus whose devices arrive after boot, have a parent that is a device,
+  and leave with I/O in flight; the model held, with two rules recorded:
+  DMA goes through the controller (a USB device has no requester id),
+  and a bus removes its children before itself. Tests: enumeration, the
+  disk through the block layer, a device that stops answering, an
+  unplug with a bio in flight (the driver's own detach path, since the
+  harness has no monitor), IOMMU fault attribution to the controller,
+  and `blk-bench`, which put the USB disk within noise of NVMe and
+  virtio-blk on this device model — so no further scatter-gather work.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. What follows is
-  the constitution's **section 60 hardware roadmap** — `NVMe` and an Intel
-  NIC (done), then USB, AHCI, with GPU, Wi-Fi and Bluetooth explicitly
+  the constitution's **section 60 hardware roadmap** — `NVMe`, an Intel
+  NIC and USB (done), then AHCI, with GPU, Wi-Fi and Bluetooth explicitly
   later — and the AArch64 follow-ups in
   `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
   cover (GICv3, ASID allocation instead of a full invalidate per switch,

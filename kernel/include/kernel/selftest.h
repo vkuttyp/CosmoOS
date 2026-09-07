@@ -161,6 +161,11 @@ bool selftest_net_nicbench(const char **reason);       /* traffic that leaves th
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */
+bool selftest_usb_enum(const char **reason);     /* the device on the USB bus: descriptors, parent, endpoints */
+bool selftest_usb_storage(const char **reason);  /* sda through the block layer: round trips, segments, counters */
+bool selftest_usb_storage_timeout(const char **reason);   /* a CSW that never comes: the block layer's timeout, recovery */
+bool selftest_usb_unplug(const char **reason);   /* the removal path with a bio in flight; re-enumeration */
+bool selftest_blk_bench(const char **reason);    /* reports: sequential I/O over every disk in the boot */
 void selftest_nvme_mark_done(struct bio *bio);
 bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);

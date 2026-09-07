@@ -30,6 +30,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_BLK_COMPLETE] = "blk-complete",
     [FI_DEMAND_PAGE] = "demand-page",
     [FI_DEMAND_COPY] = "demand-copy",
+    [FI_USB_CSW] = "usb-csw",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)
@@ -194,5 +195,8 @@ int faultinject_sysctl(char *out, size_t n)
     }
     return len;
 }
+
+#include <kernel/module.h>
+EXPORT_SYMBOL(faultinject_should_fail);   /* usb_storage's dropped-CSW injection point */
 
 #endif /* CONFIG_FAULTINJECT */

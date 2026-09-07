@@ -192,10 +192,19 @@ metadata the filesystem actually holds.
 
 **V20. A block-layer queue-full answer never reaches a filesystem.** A
 driver's `-EAGAIN` parks the bio in the device's pending list, resubmitted
-in order from completions; `blk_submit` returns 0 and `done` runs once.
+in order from completions; `blk_submit` returns 0 and `done` runs once —
+and a parked bio is never left with nobody to resubmit it: when a
+resubmission is refused and, after the bio is put back, the driver holds
+nothing in flight, the layer tries again at once (`redrained`), because
+the completion that would have drained the queue may have run in the
+window while the bio was in the drainer's hands (found by the USB
+storage driver, which refuses every bio while one exchange is in flight).
 Check: `blk-queue` (eight writes against two slots all complete, in
-order; `requeued` counts six), review of `cfs_fail` callers (none can be
-reached by `-EAGAIN`).
+order; `requeued` counts six; and the lost-wakeup case: one slot, a
+completion whose drain accepts one bio and is refused the next while the
+accepted one completes inside the refusal — the third bio completes and
+`redrained` counts one; the old drain left it behind), review of
+`cfs_fail` callers (none can be reached by `-EAGAIN`).
 
 **V18. The pool is the only thing cosmofs addresses, and the pool
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;

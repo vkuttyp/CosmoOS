@@ -66,8 +66,13 @@ skipping` when nothing registered. Otherwise, in order:
 5. **Nothing faulted**: the counter and the domain count are what they
    were before the test — the boot so far, with every driver mapping
    through its domain, produced no fault at all.
-6. **A provoked fault**: `blk_find("nvme0n1")` and, when the driver has
-   the `debug_dma` hook and the device has a domain, an Identify
+6. **A provoked fault**, per block device whose driver has the
+   `debug_dma` hook and whose DMA device has a domain — `nvme0n1` (its
+   own function) and `sda` (the USB disk, whose DMA is the xHCI
+   controller's) — checked by *the requester's own fault count*
+   (`iommu_stats.by_requester`), so a burst from one device cannot be
+   mistaken for the next device's and the USB fault is required to be
+   attributed to the controller. For NVMe, an Identify
    Controller aimed at the last page of the controller's own IOVA
    window (nothing maps it; the allocator hands out the lowest
    addresses). The unit's fault counter must rise within 500 ms (the

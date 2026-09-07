@@ -268,3 +268,5 @@ void thread_dump_all(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(thread_create);
+EXPORT_SYMBOL(thread_exit);
+EXPORT_SYMBOL(thread_join);

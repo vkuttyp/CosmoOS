@@ -367,7 +367,23 @@ int iommu_dma_unmap(struct iommu_domain *d, uint64_t dma, size_t len)
 
 void iommu_note_fault(struct iommu_unit *u, uint32_t sid, uint64_t addr, unsigned reason, bool write)
 {
-    uint64_t n = __atomic_add_fetch(&g_stats.faults, 1, __ATOMIC_RELAXED);
+    /* The count and the requester's tally in one critical section under
+     * the lock iommu_get_stats copies under, so a reader that sees the
+     * count sees the tally that goes with it. */
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    uint64_t n = ++g_stats.faults;
+    unsigned i;
+    for (i = 0; i < g_stats.nr_requesters; i++)
+        if (g_stats.by_requester[i].sid == sid)
+            break;
+    if (i == g_stats.nr_requesters && i < IOMMU_STATS_REQUESTERS) {
+        g_stats.by_requester[i].sid = sid;
+        g_stats.by_requester[i].faults = 0;
+        g_stats.nr_requesters++;
+    }
+    if (i < IOMMU_STATS_REQUESTERS)
+        g_stats.by_requester[i].faults++;
+    spin_unlock_irqrestore(&g_lock, s);
     u->faults++;
     if (n <= 8)
         kwarn("iommu: %s: fault: requester %02x:%02x.%u %s %p (reason 0x%x)", u->name, sid >> 8, (sid >> 3) & 0x1f,

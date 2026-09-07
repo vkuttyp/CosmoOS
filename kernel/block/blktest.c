@@ -90,6 +90,53 @@ bool selftest_blk_queue(const char **reason)
     }
     kfree(back);
     kfree(bufs);
+    /*
+     * The lost wakeup (found by the USB storage driver, which refuses
+     * every bio while one exchange is in flight). One slot; A in flight,
+     * B and C queued. A's completion drains: B is accepted, then C is
+     * refused -- and *inside that refusal* B completes (the driver knob
+     * makes the completion synchronous; on real hardware it is another
+     * CPU's interrupt in the same window). B's completion drains an
+     * empty queue -- C is in the drainer's hands -- and finds nothing.
+     * The drainer then puts C back: with nothing in flight, nobody will
+     * ever drain it again unless the layer notices, which it now does
+     * (blkdev.redrained). C must complete.
+     */
+    ramblk_set_deferred(bd, 0);   /* the limit is set at the worker's start: leave deferred mode, re-enter with one slot */
+    ramblk_set_deferred(bd, 1);
+    ramblk_set_stall(bd, true);
+    static struct bio abc[3];
+    uint8_t *abcbuf = kmalloc(3 * 4096, KMEM_ZERO);
+    CHECK(abcbuf != NULL);
+    g_done_count = 0;
+    g_done_status = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        memset(&abc[i], 0, sizeof(abc[i]));
+        abc[i].dev = bd;
+        abc[i].dir = BIO_WRITE;
+        abc[i].sector = 200 + (uint64_t)i * 8;
+        abc[i].nsectors = 8;
+        abc[i].buf = abcbuf + (size_t)i * 4096;
+        abc[i].done = count_done;
+        list_init(&abc[i].link);
+        CHECK(blk_submit(&abc[i]) == 0);
+    }
+    CHECK(g_done_count == 0);   /* A held by the stall; B and C queued */
+    uint64_t redrained0 = bd->redrained;
+    ramblk_set_refuse_completes(bd, true);
+    CHECK(ramblk_complete_one(bd));   /* A completes: the drain accepts B, refuses C, and B completes inside the refusal */
+    ramblk_set_refuse_completes(bd, false);
+    CHECK(g_done_count == 2);          /* A and B */
+    CHECK(bd->redrained == redrained0 + 1);   /* the layer noticed the empty in-flight list and tried C again */
+    ramblk_set_stall(bd, false);       /* C, accepted on the retry, completes on the worker */
+    deadline = clock_now_ns() + 2000000000ULL;
+    while (__atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) < 3 && clock_now_ns() < deadline)
+        thread_sleep_ms(1);
+    CHECK(g_done_count == 3 && g_done_status == 0);
+    kfree(abcbuf);
+    ramblk_set_deferred(bd, 0);
+    ramblk_set_deferred(bd, 2);
+
     /* A flagged write in the deferred mode: flush, write, flush in the
      * recorded stream, one completion for the caller. */
     ramblk_record_start(bd, 16);

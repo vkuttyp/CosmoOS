@@ -9,6 +9,7 @@ than sleep so the scheduler is not involved.
 
 | Step | Proves |
 |---|---|
+| a probe on the test's stack re-arms itself from its callback every 2 ms; four fires within 500 ms, then `TIMER_IDLE`; on any other outcome the timer is cancelled synchronously *before* the check returns | re-arming from a callback; and that a failing test leaves no armed timer behind — an earlier version returned with the probe still armed when the fourth fire was late under host load, and the fifth fire wrote into the dead frame and panicked the kernel (found by the USB unit's chain, 2026-09-08) |
 | 1000 consecutive `clock_now_ns()` reads never decrease | T1 monotonic clock |
 | `udelay(40 ms)`: clock advanced ≥ 40 ms and < 80 ms | delay honours the clock; TCG slack allowed |
 | ticks advanced by `elapsed / TICK_NS` ± 2 | T8: the LAPIC periodic timer runs at `CONFIG_HZ` relative to the TSC; the ±2 covers tick phase at both ends |
@@ -47,7 +48,6 @@ check above, which would drift if the multiplier were wrong.
 
 ## Gaps and planned tests
 
-- No test of `timer_start` from inside a callback (re-arm).
 - No cross-CPU cancel (SMP PR).
 - Timing bounds are loose for TCG; tighten under KVM/HVF.
 - A host test for the sorted queue and `run_expired` state machine is

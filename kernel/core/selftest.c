@@ -322,6 +322,10 @@ static const struct selftest tests[] = {
     { "blk-segments",    selftest_blk_segments },
     { "blk-timeout",     selftest_blk_timeout },
     { "nvme",            selftest_nvme },
+    { "usb-enum",        selftest_usb_enum },
+    { "usb-storage",     selftest_usb_storage },
+    { "usb-storage-timeout", selftest_usb_storage_timeout },
+    { "usb-unplug",      selftest_usb_unplug },
     { "random",          selftest_random },
     { "blk",             selftest_blk },
     { "virtio-console",  selftest_virtio_console },
@@ -375,6 +379,7 @@ static const struct selftest tests[] = {
     { "net-rxhook-grace", selftest_net_rxhook_grace },
     { "net-csum-offload", selftest_net_csum_offload },
     { "net-bench",       selftest_net_bench },
+    { "blk-bench",       selftest_blk_bench },
     { "net-nicbench",    selftest_net_nicbench },
     { "net-harness",     selftest_net_harness },
     /* Last: init's user-mode self-test mounts the cosmofs the tests above

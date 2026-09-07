@@ -65,6 +65,25 @@ virtio) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:
 e1000e) nic_devs="-netdev $netdev -device e1000e,netdev=n0,mac=52:54:00:c0:5f:06" ;;
 *) nic_devs="-netdev $netdev -device virtio-net-pci,netdev=n0,mac=52:54:00:c0:5f:05 -netdev user,id=n1,ipv4=on,ipv6=on -device e1000e,netdev=n1,mac=52:54:00:c0:5f:06" ;;
 esac
+# USB (docs/drivers/usb/api.md): an xHCI controller with a mass-storage
+# device on it, backed by an 8 MiB image beside the other disks (the
+# usb-storage self-test writes to it). QEMU_USB: qemu (default, the
+# qemu-xhci model), nec (the NEC uPD720200 model, nec-usb-xhci), or 0
+# (no controller: the USB tests skip).
+usb=${QEMU_USB:-qemu}
+usbdisk=${QEMU_USBDISK:-$outdir/usb.img}
+usb_devs=""
+if [ "$usb" != "0" ]; then
+    if [ ! -f "$usbdisk" ]; then
+        dd if=/dev/zero of="$usbdisk" bs=1048576 count=8 status=none 2>/dev/null \
+            || dd if=/dev/zero of="$usbdisk" bs=1048576 count=8 2>/dev/null
+    fi
+    case "$usb" in
+    nec) xhci_model=nec-usb-xhci ;;
+    *)   xhci_model=qemu-xhci ;;
+    esac
+    usb_devs="-device $xhci_model,id=xhci0 -drive if=none,id=usbdisk,format=raw,file=$usbdisk -device usb-storage,bus=xhci0.0,drive=usbdisk"
+fi
 # QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
 pcap=""
 if [ -n "${QEMU_PCAP:-}" ]; then
@@ -107,6 +126,7 @@ if [ "$arch" = aarch64 ]; then
         -chardev file,id=vcon,path="$vcon" \
         -device virtconsole,chardev=vcon \
         $nic_devs \
+        $usb_devs \
         $fwcfg \
         $pcap \
         -semihosting-config enable=on,target=native \
@@ -138,6 +158,7 @@ exec qemu-system-x86_64 \
     -chardev file,id=vcon,path="$vcon" \
     -device virtconsole,chardev=vcon \
     $nic_devs \
+    $usb_devs \
     $fwcfg \
     $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

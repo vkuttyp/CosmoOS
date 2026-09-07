@@ -12,4 +12,7 @@ framework in `kernel/device/`. Drivers contain no generic bus logic.
 - `virtio/`: the `virtio` module and the `virtio_blk`, `virtio_rng`,
   `virtio_console` driver modules, built by `build/module.mk` and loaded
   from the boot archive. `docs/drivers/virtio/`.
-- `nvme/`, `network/`, `storage/`: later phases.
+- `nvme/`: the `nvme` module (milestone 9). `docs/drivers/nvme/`.
+- `network/`: the `e1000e` module, the first NIC that is not virtio. `docs/drivers/e1000e/`.
+- `usb/`: the `xhci` module (USB core and controller driver) and the `usb_storage` module: the first bus whose devices arrive, leave and have a parent. `docs/drivers/usb/`.
+- `storage/`: later (AHCI).
