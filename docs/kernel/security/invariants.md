@@ -263,3 +263,32 @@ requires a spawned child to be killed by the filter its parent
 installed. Confirmed against the bug: with the intersection replaced by
 an assignment, the widening test's child survives a call its first mask
 had removed.
+
+**S15. An operation that is neither reading nor writing has a right of
+its own.** A handle's upper sixteen bits name the operations its type
+offers that the generic vocabulary cannot describe: for a socket
+`BIND`, `ACCEPT`, `CONNECT` and `SHUTDOWN`; for a VM `MAP` and `VCPU`;
+for a vCPU `RUN`, `REGS` and `IRQ`. Each is required on its own rather
+than on top of a generic right, because the bit already names the
+operation and demanding MANAGE as well would make "may accept
+connections" inseparable from "may reconfigure the socket".
+
+Before this, `bind`, `listen`, `connect` and `shutdown` required no
+right at all: a socket passed to another process as read-only could be
+pointed at a different peer or shut down by the receiver. A vCPU had the
+reverse fault -- one WRITE covered running a guest, rewriting its
+registers and injecting interrupts.
+
+The same bit means different things on different types, which is safe
+because a per-type right is only ever tested by code that has already
+established the type: the accessors convert the object first and refuse
+another kind, so a bit cannot be spent on the wrong object. What
+`accept` returns carries READ, WRITE, the owner rights and SHUTDOWN, and
+not the three that name things an established connection cannot do.
+
+Check: the user-mode self-test reduces a socket handle to each of these
+in turn and requires the operation it dropped to fail with `EPERM` while
+the ones it kept still work, and does the same for a vCPU handle without
+`REGS` and without `IRQ`. Confirmed against the bug: with the check
+removed from `shutdown`, a handle explicitly stripped of `SHUTDOWN`
+closes the connection and the assertion fails.

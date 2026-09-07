@@ -432,6 +432,40 @@ static int64_t sys_umount(struct syscall_args *a)
 
 /* --- Phase 8: sockets ------------------------------------------------------- */
 
+/*
+ * `err` distinguishes a handle that is not there from one that is and
+ * does not carry the right asked for. The caller is entitled to tell
+ * those apart: EBADF is what POSIX says of a descriptor that is not
+ * open, and a per-type right the holder was never given is EPERM --
+ * an operation POSIX has no opinion about (S9).
+ */
+static struct socket *sock_of_err(int h, unsigned rights, int *err)
+{
+    unsigned have = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, h, &have);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    /* The type first, then its rights. A bit in the upper half means
+     * whatever the object's kind says, so asking for one of a handle
+     * that is not a socket is not a rights failure -- it is the wrong
+     * handle, and answering EPERM would say the bit meant something
+     * here. */
+    struct socket *s = socket_from_kobject(obj);
+    if (s == NULL) {
+        kobject_put(obj);
+        *err = -EBADF;
+        return NULL;
+    }
+    if ((have & rights) != rights) {
+        ksock_put(s);
+        *err = -EPERM;
+        return NULL;
+    }
+    return s;
+}
+
 static struct socket *sock_of(int h, unsigned rights)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
@@ -484,7 +518,7 @@ static int64_t sys_socket(struct syscall_args *a)
         return rc;
     if (nonblock)
         ksock_set_nonblock(s, true);
-    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_ALL);
+    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_SOCK_ALL);
     ksock_put(s);
     return h;
 }
@@ -495,9 +529,10 @@ static int64_t sys_bind(struct syscall_args *a)
     int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_BIND, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     rc = ksock_bind(s, &addr);
     ksock_put(s);
     return rc;
@@ -505,9 +540,10 @@ static int64_t sys_bind(struct syscall_args *a)
 
 static int64_t sys_listen(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_BIND, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     int rc = ksock_listen(s, (int)a->a[1]);
     ksock_put(s);
     return rc;
@@ -515,9 +551,10 @@ static int64_t sys_listen(struct syscall_args *a)
 
 static int64_t sys_accept(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_READ);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_ACCEPT, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     struct socket *c;
     struct netaddr peer;
     int rc = ksock_accept(s, &c, &peer);
@@ -529,7 +566,10 @@ static int64_t sys_accept(struct syscall_args *a)
         ksock_put(c);
         return rc;
     }
-    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_ALL);
+    /* What an established connection can use, and not the three that
+     * name things it cannot do (architecture.md, "The upper sixteen
+     * bits"). */
+    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_SOCK_CONNECTED);
     ksock_put(c);
     return h;
 }
@@ -540,9 +580,10 @@ static int64_t sys_connect(struct syscall_args *a)
     int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_CONNECT, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     rc = ksock_connect(s, &addr);
     ksock_put(s);
     return rc;
@@ -637,9 +678,10 @@ static int64_t sys_recvfrom(struct syscall_args *a)
 
 static int64_t sys_shutdown(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_SHUTDOWN, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     int rc = ksock_shutdown(s, (int)a->a[1]);
     ksock_put(s);
     return rc;

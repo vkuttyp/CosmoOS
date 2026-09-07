@@ -17,6 +17,55 @@
 #include <kernel/uaccess.h>
 #include <kernel/vfs.h>
 
+/*
+ * `err` tells a handle that is not there from one that is and does not
+ * carry the right asked for: EBADF for the first, EPERM for the second,
+ * which is a distinction the caller is entitled to (S9).
+ */
+static struct vm *vm_of_err(int h, unsigned rights, int *err)
+{
+    unsigned have = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, h, &have);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    struct vm *vm = vm_from_kobject(obj);
+    if (vm == NULL) {
+        kobject_put(obj);
+        *err = -EBADF;
+        return NULL;
+    }
+    if ((have & rights) != rights) {
+        kobject_put(&vm->obj);
+        *err = -EPERM;
+        return NULL;
+    }
+    return vm;
+}
+
+static struct vcpu *vcpu_of_err(int h, unsigned rights, int *err)
+{
+    unsigned have = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, h, &have);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    struct vcpu *v = vcpu_from_kobject(obj);
+    if (v == NULL) {
+        kobject_put(obj);
+        *err = -EBADF;
+        return NULL;
+    }
+    if ((have & rights) != rights) {
+        kobject_put(&v->obj);
+        *err = -EPERM;
+        return NULL;
+    }
+    return v;
+}
+
 static struct vm *vm_of(int h, unsigned rights)
 {
     struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
@@ -26,17 +75,6 @@ static struct vm *vm_of(int h, unsigned rights)
     if (vm == NULL)
         kobject_put(obj);
     return vm;
-}
-
-static struct vcpu *vcpu_of(int h, unsigned rights)
-{
-    struct kobject *obj = handle_lookup(&process_current()->handles, h, rights);
-    if (obj == NULL)
-        return NULL;
-    struct vcpu *v = vcpu_from_kobject(obj);
-    if (v == NULL)
-        kobject_put(obj);
-    return v;
 }
 
 int64_t sys_vm_create(struct syscall_args *a)
@@ -54,16 +92,20 @@ int64_t sys_vm_create(struct syscall_args *a)
     int rc = vm_create(p->cred.euid, p->rlim.v[COSMO_RLIMIT_VMEM], &vm);
     if (rc)
         return rc;
-    int h = handle_install(&p->handles, &vm->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&p->handles, &vm->obj, HANDLE_RIGHT_VM_ALL);
     kobject_put(&vm->obj);
     return h;
 }
 
 int64_t sys_vm_mem(struct syscall_args *a)
 {
-    struct vm *vm = vm_of((int)a->a[0], HANDLE_RIGHT_WRITE);
+    /* Giving the guest memory is not writing to it: the contents are
+     * what READ and WRITE describe (architecture.md, "The upper sixteen
+     * bits"). */
+    int herr = 0;
+    struct vm *vm = vm_of_err((int)a->a[0], HANDLE_RIGHT_VM_MAP, &herr);
     if (vm == NULL)
-        return -EBADF;
+        return herr;
     int rc = vm_mem_add(vm, a->a[1], a->a[2]);
     kobject_put(&vm->obj);
     return rc;
@@ -112,15 +154,16 @@ int64_t sys_vm_mem_rw(struct syscall_args *a)
 
 int64_t sys_vcpu_create(struct syscall_args *a)
 {
-    struct vm *vm = vm_of((int)a->a[0], HANDLE_RIGHT_WRITE);
+    int herr = 0;
+    struct vm *vm = vm_of_err((int)a->a[0], HANDLE_RIGHT_VM_VCPU, &herr);
     if (vm == NULL)
-        return -EBADF;
+        return herr;
     struct vcpu *v;
     int rc = vcpu_create(vm, (unsigned)a->a[1], &v);
     kobject_put(&vm->obj);
     if (rc)
         return rc;
-    int h = handle_install(&process_current()->handles, &v->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &v->obj, HANDLE_RIGHT_VCPU_ALL);
     kobject_put(&v->obj);
     return h;
 }
@@ -130,9 +173,13 @@ int64_t sys_vcpu_regs(struct syscall_args *a)
     bool set = a->a[2] != 0;
     if (!user_range_ok(a->a[1], sizeof(struct cosmo_vcpu_regs)))
         return -EFAULT;
-    struct vcpu *v = vcpu_of((int)a->a[0], set ? HANDLE_RIGHT_WRITE : HANDLE_RIGHT_READ);
+    /* Reading registers is taking state out of the object; setting
+     * them is its own authority, so a monitor can be allowed to run a
+     * guest without being allowed to rewrite it. */
+    int herr = 0;
+    struct vcpu *v = vcpu_of_err((int)a->a[0], set ? HANDLE_RIGHT_VCPU_REGS : HANDLE_RIGHT_READ, &herr);
     if (v == NULL)
-        return -EBADF;
+        return herr;
     struct cosmo_vcpu_regs regs;
     int rc;
     if (set) {
@@ -150,9 +197,10 @@ int64_t sys_vcpu_run(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[1], sizeof(struct cosmo_vm_exit)))
         return -EFAULT;
-    struct vcpu *v = vcpu_of((int)a->a[0], HANDLE_RIGHT_WRITE);
+    int herr = 0;
+    struct vcpu *v = vcpu_of_err((int)a->a[0], HANDLE_RIGHT_VCPU_RUN, &herr);
     if (v == NULL)
-        return -EBADF;
+        return herr;
     struct cosmo_vm_exit x;
     if (copy_from_user(&x, a->a[1], sizeof(x))) {
         kobject_put(&v->obj);
@@ -167,9 +215,10 @@ int64_t sys_vcpu_run(struct syscall_args *a)
 
 int64_t sys_vcpu_irq(struct syscall_args *a)
 {
-    struct vcpu *v = vcpu_of((int)a->a[0], HANDLE_RIGHT_WRITE);
+    int herr = 0;
+    struct vcpu *v = vcpu_of_err((int)a->a[0], HANDLE_RIGHT_VCPU_IRQ, &herr);
     if (v == NULL)
-        return -EBADF;
+        return herr;
     int rc = vcpu_inject(v, (unsigned)a->a[1]);
     kobject_put(&v->obj);
     return rc;
