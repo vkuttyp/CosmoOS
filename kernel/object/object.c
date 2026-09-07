@@ -46,20 +46,50 @@ bool kobject_tryget(struct kobject *obj)
     }
 }
 
+void kobject_release_final(struct kobject *obj)
+{
+    if (__atomic_load_n(&obj->refcount, __ATOMIC_ACQUIRE) != 0)
+        panic("kobject_release_final on a live %s object %p", obj->type->name, (void *)obj);
+    /* The release frees the object: read the owner first. The owner's
+     * count is dropped after the release returned, so the module's
+     * text stays mapped while its release code runs. */
+    struct module *owner = obj->owner;
+    obj->type->release(obj);
+    if (owner)
+        module_object_released(owner);
+}
+
 void kobject_put(struct kobject *obj)
 {
     uint32_t old = __atomic_fetch_sub(&obj->refcount, 1u, __ATOMIC_ACQ_REL);
     if (old == 0)
         panic("kobject_put underflow on %s object %p", obj->type->name, (void *)obj);
-    if (old == 1) {
-        /* The release frees the object: read the owner first. The owner's
-         * count is dropped after the release returned, so the module's
-         * text stays mapped while its release code runs. */
-        struct module *owner = obj->owner;
-        obj->type->release(obj);
-        if (owner)
-            module_object_released(owner);
+    if (old == 1)
+        kobject_release_final(obj);
+}
+
+bool kobject_put_and_lock(struct kobject *obj, spinlock_t *lock, arch_irq_state_t *state)
+{
+    uint32_t cur = __atomic_load_n(&obj->refcount, __ATOMIC_ACQUIRE);
+    for (;;) {
+        if (cur == 0)
+            panic("kobject_put_and_lock underflow on %s object %p", obj->type->name, (void *)obj);
+        if (cur == 1)
+            break;   /* ours may be the last: decide under the lock */
+        /* Not the last: drop it without the lock. A concurrent dropper
+         * from the same count fails this exchange, re-reads, and finds
+         * itself at 1 -- which is the whole correction. */
+        if (__atomic_compare_exchange_n(&obj->refcount, &cur, cur - 1, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            return false;
     }
+    *state = spin_lock_irqsave(lock);
+    uint32_t old = __atomic_fetch_sub(&obj->refcount, 1u, __ATOMIC_ACQ_REL);
+    if (old == 1)
+        return true;   /* zero, and it happened under the lock: the table is ours to clean */
+    /* A lookup under this lock raised the count between our read and our
+     * drop; not the last after all. */
+    spin_unlock_irqrestore(lock, *state);
+    return false;
 }
 
 uint32_t kobject_refcount(const struct kobject *obj)
@@ -72,6 +102,8 @@ EXPORT_SYMBOL(kobject_init);
 EXPORT_SYMBOL(kobject_get);
 EXPORT_SYMBOL(kobject_tryget);
 EXPORT_SYMBOL(kobject_put);
+EXPORT_SYMBOL(kobject_put_and_lock);
+EXPORT_SYMBOL(kobject_release_final);
 EXPORT_SYMBOL(kobject_refcount);
 
 const struct kobject_io_type *kobject_io_of(const struct kobject *obj)

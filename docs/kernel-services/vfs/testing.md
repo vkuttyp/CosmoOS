@@ -159,6 +159,18 @@ errors injected under a cosmofs workload; every write and sync returns
 `-EIO` or succeeds, a forced unmount and a clean remount read every
 visible file back.
 
+**`vfs-put-race`**: one bare vnode on the root mount per round, one
+reference per racer, the racers pinned to CPUs 1..n−1 and spinning on a
+generation counter so they reach `vnode_put` together; 4 000 rounds or
+500 ms, whichever first, then the vnode census must equal what it was
+before. The version of `vnode_put` that read the count before deciding
+whether to unhash panics in the release assertion within seconds under
+this test (two drops from 2 both read 2); the decrement-and-lock version
+runs 4 000 rounds in 320 ms on x86_64 and 150 ms on aarch64 with every
+vnode released once. The racers must not occupy every CPU: the first
+version did, and the driving thread ran only on preemption ticks.
+Skipped below three CPUs.
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and
@@ -191,7 +203,7 @@ QEMU_TESTDISK=/tmp/d.img make run    # keep a formatted disk between runs
 
 - No fuzzing of on-disk images beyond one corrupted superblock byte;
   no fault injection inside the commit sequence.
-- No concurrency stress (every test is single-threaded); lock order is
+- Little concurrency stress beyond `vfs-concurrency`, `cache-budget-race` and `vfs-put-race`; lock order is
   reviewed, not checked.
 - No host `mkfs`; `cosmofs_format` runs only in the kernel.
 - `-EPERM` on `mount` has no test until a non-root process exists.

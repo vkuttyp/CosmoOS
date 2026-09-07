@@ -40,8 +40,9 @@ static void vnode_release(struct kobject *obj)
 {
     struct vnode *vn = container_of(obj, struct vnode, obj);
 
-    /* vnode_put unhashed it before dropping the last reference, so no
-     * lookup can find it now; the release takes no mount lock. */
+    /* vnode_put unhashed it under the mount lock in the same act that
+     * took the count to zero, so no lookup can find it now and the
+     * release takes no mount lock. */
     KASSERT(list_empty(&vn->hash_link));
 
     /* A vnode whose filesystem gave up between vnode_alloc and setting
@@ -134,22 +135,29 @@ bool vnode_cache_any(struct mount *mnt, bool (*pred)(const struct vnode *vn, voi
     return found;
 }
 
+/*
+ * The drop that reaches zero happens under the mount lock, and the
+ * unhash happens in the same hold, so a hashed vnode always has a
+ * count of at least one and a lookup under that lock may take a plain
+ * reference. The version before this read the count first and decided
+ * from that: two holders dropping from 2 each read 2, neither unhashed,
+ * and the second drop reached zero with the vnode still in the hash --
+ * caught by vfs-concurrency on aarch64 as the release assertion, and
+ * reproduced by vfs-put-race on purpose.
+ */
 void vnode_put(struct vnode *vn)
 {
-    if (kobject_refcount(&vn->obj) == 1) {
-        /* Ours is the only reference, so the count can only rise, and only
-         * through a hash lookup, which needs this lock: once we hold it a
-         * re-read of 1 is final and the unhash is safe. */
-        struct mount *mnt = vn->mnt;
-        arch_irq_state_t s = spin_lock_irqsave(&mnt->lock);
-        if (kobject_refcount(&vn->obj) == 1 && !list_empty(&vn->hash_link)) {
-            list_remove(&vn->hash_link);
-            list_init(&vn->hash_link);
-            mnt->nr_vnodes--;
-        }
-        spin_unlock_irqrestore(&mnt->lock, s);
+    struct mount *mnt = vn->mnt;
+    arch_irq_state_t s;
+    if (!kobject_put_and_lock(&vn->obj, &mnt->lock, &s))
+        return;
+    if (!list_empty(&vn->hash_link)) {
+        list_remove(&vn->hash_link);
+        list_init(&vn->hash_link);
+        mnt->nr_vnodes--;
     }
-    kobject_put(&vn->obj);
+    spin_unlock_irqrestore(&mnt->lock, s);
+    kobject_release_final(&vn->obj);
 }
 
 void vnode_stat(struct vnode *vn, struct cosmo_stat *st)

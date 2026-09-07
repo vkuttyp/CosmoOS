@@ -11,6 +11,7 @@
 #include <kernel/utsns.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/sched.h>
 #include <kernel/wait.h>
@@ -223,8 +224,9 @@ bool selftest_vfs_ramfs(const char **reason)
  * findings: rename locked its parents in address order while rmdir locked
  * parent then child (an ABBA, now excluded by the rename lock and the
  * ancestor-first order), and the vnode cache could instantiate a second
- * vnode for an inode whose first was mid-release (now excluded by the
- * unhash-before-drop in vnode_put). Under the debug-build checker any lock
+ * vnode for an inode whose first was mid-release (excluded now by
+ * vnode_put reaching zero and unhashing under the mount lock in one
+ * act; vfs-put-race is the direct test of that). Under the debug-build checker any lock
  * order this test provokes is also verified structurally.
  */
 struct vfs_hammer {
@@ -640,5 +642,107 @@ bool selftest_cache_limits(const char **reason)
     ramblk_destroy(bd);
     kinfo("selftest: cache-limits: ramfs budget refused %llu misses; %llu clean pages reclaimed under the global limit",
           (unsigned long long)s1.budget_refusals, (unsigned long long)reclaimed);
+    return true;
+}
+
+/* --- vfs-put-race: the last references of one vnode, dropped at once ------------
+ *
+ * One vnode, one reference per CPU, every CPU told to drop at the same
+ * moment, thousands of times. The version of vnode_put that read the
+ * count before deciding lets two of those drops both read 2 and neither
+ * unhash, and the release then asserts on a vnode still in the hash. The
+ * vnode is a bare one on the root mount with no ops, so the release has
+ * nothing to sync or evict: this is a test of the cache protocol alone.
+ */
+/*
+ * The handshake is release/acquire, not volatile: the driver publishes
+ * `vn` and then bumps `generation` with a release, and a racer that
+ * acquires the new generation is thereby guaranteed to see the new `vn`
+ * and not the previous round's, which has been freed. The first version
+ * used volatile loads, which order nothing on a weakly ordered machine
+ * and passed only because QEMU's TCG does not reorder loads as silicon
+ * does -- a test of vnode_put's ordering with an ordering bug of its own.
+ */
+struct put_racer {
+    struct vnode *vn;       /* the vnode to drop; published before `generation` */
+    unsigned generation;    /* bumped (release) by the driver for each round */
+    unsigned acks;          /* racers that have dropped this round */
+    unsigned stop;
+};
+
+static void put_racer_main(void *arg)
+{
+    struct put_racer *r = arg;
+    unsigned seen = 0;
+    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE)) {
+        unsigned g = __atomic_load_n(&r->generation, __ATOMIC_ACQUIRE);
+        if (g == seen) {
+            /* Spin, not yield: the point is to arrive at the drop at the
+             * same instant as the others, and a yield hands that instant
+             * away. */
+            continue;
+        }
+        seen = g;
+        struct vnode *vn = __atomic_load_n(&r->vn, __ATOMIC_ACQUIRE);
+        vnode_put(vn);
+        __atomic_fetch_add(&r->acks, 1u, __ATOMIC_RELEASE);
+    }
+}
+
+bool selftest_vfs_put_race(const char **reason)
+{
+    /* The racers spin, so each needs a CPU of its own and the driver
+     * needs one too: racers on CPUs 1..n-1, the driver left CPU 0. The
+     * first version put a spinning racer on every CPU and the driver ran
+     * only on preemption ticks -- 51 seconds for what takes a fraction of
+     * one. Two racers is enough to race; fewer than three CPUs is a skip. */
+    unsigned ncpu = cpu_count();
+    if (ncpu < 3) {
+        kinfo("selftest: vfs-put-race: %u CPU(s); skipping", ncpu);
+        return true;
+    }
+    unsigned racers = ncpu - 1 > 8 ? 8 : ncpu - 1;
+    unsigned vnodes0 = vfs_vnode_count();
+    struct vnode *rootv;
+    CHECK(vfs_lookup(NULL, "/", &rootv) == 0);
+    struct mount *mnt = rootv->mnt;   /* held through rootv for the whole test */
+
+    struct put_racer r = { 0 };
+    struct thread *t[8];
+    for (unsigned i = 0; i < racers; i++)
+        t[i] = thread_create_on(put_racer_main, &r, "put-racer", SCHED_PRIO_DEFAULT, CPUMASK_OF(i + 1));
+
+    /* Bounded by time as well as count, so a slow host runs fewer
+     * rounds rather than a long test. */
+    const unsigned max_rounds = 4000;
+    uint64_t stop_at = clock_now_ns() + 500ull * 1000000ull;
+    unsigned round = 0;
+    for (; round < max_rounds && clock_now_ns() < stop_at; round++) {
+        /* A fresh hashed vnode holding exactly one reference per racer:
+         * the creator's reference and racers-1 more. */
+        struct vnode *vn = vnode_alloc(mnt, 0x7f000000ull + round);
+        CHECK(vn != NULL);
+        vn->type = VNODE_REG;
+        vn->ops = NULL;
+        vnode_hash_insert(vn);
+        for (unsigned i = 1; i < racers; i++)
+            vnode_get(vn);
+        __atomic_store_n(&r.vn, vn, __ATOMIC_RELEASE);
+        __atomic_store_n(&r.acks, 0u, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&r.generation, 1u, __ATOMIC_RELEASE);
+        uint64_t deadline = clock_now_ns() + 2ull * NS_PER_SEC;
+        while (__atomic_load_n(&r.acks, __ATOMIC_ACQUIRE) < racers && clock_now_ns() < deadline)
+            sched_yield();
+        CHECK(__atomic_load_n(&r.acks, __ATOMIC_ACQUIRE) == racers);
+    }
+    __atomic_store_n(&r.stop, 1u, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < racers; i++)
+        if (t[i])
+            thread_join(t[i]);
+    vnode_put(rootv);
+    /* Every vnode was released exactly once and left the hash: the
+     * census is back where it started. */
+    CHECK(vfs_vnode_count() == vnodes0);
+    kinfo("selftest: vfs-put-race: %u rounds of %u concurrent last drops, every vnode released once", round, racers);
     return true;
 }
