@@ -217,7 +217,7 @@ int process_domain_alloc(uint32_t *out);
  * personality: the mask is indexed by call number and the two number
  * differently, so the bits cannot be carried across
  * (docs/kernel/security/design.md §1f). */
-bool process_filter_blocks_personality(const struct process *p, bool child_is_native);
+bool process_filter_blocks_personality(struct process *p, bool child_is_native);
 
 /* Resource limits of the calling process (docs/kernel/security/design.md §2):
  * -EINVAL for an unknown resource or a NOFILE value above the table size,
