@@ -424,6 +424,9 @@ Size: about 1 500 lines for `xhci` (core, parser and controller), 600
 for `usb_storage`, 500 of tests — inside the estimate, and the unit did
 not split.
 
+The next report in this shape is `next-subsystem-ahci.md` (§60's fourth
+item); it answers the DMA-parent question this report left open.
+
 ## Alternatives considered
 
 - **AHCI (§60 #4)** — a third block driver on a static bus. It proves

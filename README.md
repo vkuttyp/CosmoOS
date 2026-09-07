@@ -716,9 +716,10 @@ See [docs/development.md](docs/development.md).
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
   shape and wait, which `docs/audit/next-subsystem.md` did for the NIC
-  and `docs/audit/next-subsystem-usb.md` does for USB: an xHCI host
-  controller, root-hub enumeration and mass storage as the first class
-  driver, chosen over AHCI because it is the first bus where devices
-  arrive, leave and have children — the cases the device model was
-  built for and has never met. Design documents first, one subsystem
-  at a time.
+  and `docs/audit/next-subsystem-usb.md` did for USB (built as the
+  `xhci` and `usb_storage` modules). `docs/audit/next-subsystem-ahci.md`
+  does it for AHCI: SATA disks through the ICH9-class controller the q35
+  machine has carried undriven on every boot, a fourth model of device
+  behind the block layer, the second driver that refuses bios when its
+  slots are full, and the answer to the DMA-parent question USB left
+  open. Design documents first, one subsystem at a time.
