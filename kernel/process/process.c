@@ -443,16 +443,13 @@ int process_create_from_images(const struct process_image *exe, const struct pro
                                                                         : HANDLE_TABLE_SIZE;
     p->log_tokens = LOG_BUCKET;
     p->log_refill_ns = clock_now_ns();
-    /* The domain: a fresh one on request, else the parent's. Entering
-     * one is a one-way door -- nothing takes a process back out. */
-    if (attr && attr->new_domain) {
-        static uint32_t next_domain = 1;
-        arch_irq_state_t ds = spin_lock_irqsave(&g_process_table_lock);
-        p->domain = next_domain++;
-        spin_unlock_irqrestore(&g_process_table_lock, ds);
-    } else if (parent) {
+    /* The domain: the one the caller allocated, else the parent's.
+     * Entering one is a one-way door -- nothing takes a process back
+     * out. */
+    if (attr && attr->domain)
+        p->domain = attr->domain;
+    else if (parent)
         p->domain = parent->domain;
-    }
 
     /*
      * The root: the request's, else the parent's. Confinement is
@@ -1130,6 +1127,28 @@ struct process *process_current(void)
 {
     struct thread *t = this_cpu()->current;
     return t ? t->proc : NULL;
+}
+
+/*
+ * Domains are numbered from 1 and never reused: reusing one would give a
+ * second set of processes the identity of a live domain, and wrapping
+ * would eventually hand out 0, which is the domain the system boots in
+ * and sees everything. Four billion domains is not a number this will
+ * reach, which is exactly the reasoning that produces such bugs, so it
+ * is refused rather than assumed away.
+ */
+int process_domain_alloc(uint32_t *out)
+{
+    static uint32_t next_domain = 1;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    int rc = -ENOSPC;
+    if (next_domain != 0) {
+        *out = next_domain;
+        next_domain = next_domain == UINT32_MAX ? 0 : next_domain + 1;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return rc;
 }
 
 const struct credentials *cred_current(void)

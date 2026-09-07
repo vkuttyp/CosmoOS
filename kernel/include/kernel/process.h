@@ -137,7 +137,7 @@ struct process_spawn_attr {
      * child cannot be given a root its parent could not name, because
      * the caller resolves the path in its own namespace first. */
     struct vnode *root;
-    bool new_domain;                               /* COSMO_SPAWN_NEWDOMAIN */
+    uint32_t domain;                               /* nonzero: the child's own, from process_domain_alloc */
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -178,6 +178,12 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, const struct process_spawn_cred *cred, pid_t *pid_out);
+
+/* A domain identifier nobody has had. Monotonic and never reused, so a
+ * live domain's identity cannot be handed to a second set of processes;
+ * -ENOSPC at exhaustion rather than wrapping, because wrapping would
+ * eventually assign 0 -- the domain the system boots in. */
+int process_domain_alloc(uint32_t *out);
 
 /* Resource limits of the calling process (docs/kernel/security/design.md §2):
  * -EINVAL for an unknown resource or a NOFILE value above the table size,

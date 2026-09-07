@@ -165,6 +165,13 @@ that already applied: a host must be able to manage what it started, and
 what it started must not reach back. The process that starts a domain
 reports no parent, since its real parent is outside it.
 
+Domain identifiers are allocated from 1, monotonically, and are never
+reused: reusing one would give a second set of processes the identity of
+a live domain. Exhaustion is `-ENOSPC` rather than a wrap, because
+wrapping would eventually hand out 0 — the domain the system boots in,
+which sees everything. Four billion domains is not a number this will
+reach, which is exactly the reasoning that produces such bugs.
+
 This is deliberately *not* a pid namespace: pids are not renumbered, and
 the doc says so rather than implying otherwise. Nothing outside the
 domain is nameable, so the number tells a confined process nothing.

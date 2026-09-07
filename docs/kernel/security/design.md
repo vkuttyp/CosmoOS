@@ -127,6 +127,11 @@ isolation here does not need it — nothing outside the domain is
 nameable, so nothing is learned from the number. Saying which of the two
 this is matters more than the word.
 
+Identifiers come from a counter that starts at 1 and never wraps or
+repeats: a reused identifier would merge two sets of processes into one
+domain, and a wrapped one would eventually be 0, which is the host's.
+Exhaustion refuses the spawn.
+
 Not done here: pid renumbering, a domain-scoped `/proc` (there is no
 `/proc` yet), and any accounting per domain.
 

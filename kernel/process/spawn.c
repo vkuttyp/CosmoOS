@@ -130,12 +130,19 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
      * it decides what a set of processes can see of the machine. */
     if (new_domain && !cred_privileged(&cur->cred))
         return -EPERM;
+    uint32_t domain = 0;
+    if (new_domain) {
+        int drc = process_domain_alloc(&domain);
+        if (drc)
+            return drc;
+    }
 
     struct process_spawn_attr attr = {
         .parent = cur,
         .handles = handles,
         .nr_handles = nr_handles,
-        .new_domain = new_domain,
+        .domain = domain,
+
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,
