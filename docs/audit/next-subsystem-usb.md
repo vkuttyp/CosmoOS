@@ -228,8 +228,9 @@ stats lock `g_lock` — the IRQ-safe lock `iommu_get_stats` already
 copies under — and write the two fields and the count in that one
 critical section, so a reader that sees the count advance sees the
 fields that belong to it. One slot, not a ring, because the test that
-reads it provokes faults one at a time (below) and nothing else faults
-during a boot that passes. Without this the `usb-iommu` check would be
+reads it provokes faults one device at a time (below), every event a
+single operation produces comes from the same requester, and nothing
+else faults during a boot that passes. Without this the `usb-iommu` check would be
 an assertion the test cannot make. Observability, not an interface
 change; NVMe's existing check gains the same assertion.
 
@@ -320,11 +321,15 @@ against the export list before the first boot.
   recorded with the count under the stats lock — the one kernel change
   this report knows it needs, listed under New APIs. The test is
   serial on purpose: provoke one device, wait until the fault count has
-  advanced by exactly one (the fault interrupt is asynchronous; the
-  existing test already waits for it), read the two fields, then the
-  next device. A second fault cannot overwrite the slot before it is
-  read because none has been provoked yet, and the "exactly one" check
-  is what says so.
+  advanced and then stopped moving (the fault interrupt is asynchronous,
+  and one operation is not one event: VT-d reports it once, the SMMU
+  256 times because the controller retries — `docs/kernel/iommu/
+  testing.md` records both; the existing test already waits for the
+  count), read the two fields, then the next device. Every event of the
+  burst carries the same requester id, so the last one written is the
+  one asked about; a fault from another device cannot land in the slot
+  because none has been provoked yet, and the count's not moving is what
+  says the burst is over.
 - **Shapes**: `QEMU_USB=0` (skips), `QEMU_IOMMU=0`, `QEMU_SMP=1`,
   release, aarch64 (xHCI on `virt`'s PCI with the SMMU in front),
   `test-crash`, `analyze`, `fuzz` (the descriptor parser gets a host
