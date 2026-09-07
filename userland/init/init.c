@@ -472,6 +472,34 @@ static void proc_selftest(void)
     CHECK(read(mf, mb, sizeof(mb)) == 2 && memcmp(mb, "/\n", 2) == 0);
     CHECK(close(mf) == 0);
 
+    /* A root that is itself a mounted filesystem. Leaving a mount
+     * through ".." replaces the mount's root vnode with the covered
+     * vnode underneath it -- a different vnode, no longer equal to the
+     * process root -- so the boundary has to be tested before that step
+     * and not after. Without it a child rooted at a mount walks straight
+     * out of the mount it was confined to. */
+    CHECK(mkdir("/tmp/mjail", 0755) == 0 || errno == EEXIST);
+    CHECK(cosmo_mount("none", "/tmp/mjail", "ramfs", 0) == 0);
+    int mp[2];
+    CHECK(pipe(mp) == 0);
+    struct spawn_handle mmap_[] = { { .child = 1, .parent = mp[1] }, { .child = 2, .parent = 2 } };
+    /* "pwd" alone cannot tell the two apart -- escaping to the real
+     * root also prints "/" -- so the child then tries to enter a
+     * directory that exists only outside the jail. Confined, there is
+     * no /etc and the cd fails; escaped, it succeeds. */
+    const char *mount_argv[] = { "sh", "-c", "cd .. && cd .. && pwd && cd etc", NULL };
+    pid_t mpid = spawnve_in("/bin/sh", mount_argv, NULL, mmap_, 2, "/tmp/mjail");
+    CHECK(mpid > 1);
+    CHECK(close(mp[1]) == 0);
+    ssize_t mn = read(mp[0], buf, sizeof(buf));
+    CHECK(mn == 2 && memcmp(buf, "/\n", 2) == 0);   /* not /tmp or / of the real tree */
+    CHECK(close(mp[0]) == 0);
+    /* Nonzero: the last command must have failed, because /etc exists
+     * only outside the jail. A child that escaped would find it and
+     * exit 0. */
+    int mstatus = 0;
+    CHECK(waitpid(mpid, &mstatus, 0) == mpid && mstatus != 0);
+
     /* A relative path from where the child starts cannot reach outside
      * either: ../../etc is the same directory as /etc from a root, and
      * neither exists in there. */

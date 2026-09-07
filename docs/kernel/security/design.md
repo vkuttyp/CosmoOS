@@ -54,6 +54,13 @@ anything outside it. This is the filesystem half of what a container
 needs, and it is a primitive rather than a container: nothing here knows
 what a container is.
 
+The root test happens **before** the step that leaves a mount through
+its mountpoint, and the order is the whole of it. A process rooted at a
+mounted filesystem stands on that filesystem's root vnode; crossing
+replaces it with the covered vnode underneath, which is a different
+vnode and no longer equal to the root, so a check made afterwards never
+matches and the walk climbs out of the very mount it was confined to.
+
 A rooted child also **starts at its root**: it does not inherit the
 caller's working directory. Inheriting it would leave the child standing
 outside its own root, where every relative path reaches outside and

@@ -124,7 +124,11 @@ and both are closed. `vfs_current_root` supplies it to the VFS the way
 `cred_current` supplies credentials: the caller's context is asked for,
 not threaded through every entry point.
 
-A rooted child starts *at* its root rather than inheriting the caller's
+The root is tested before `..` crosses a mount, not after: a process
+rooted at a mounted filesystem stands on that filesystem's root vnode,
+and the crossing replaces it with the covered vnode beneath, which is
+not equal to it. A rooted child starts *at* its root rather than
+inheriting the caller's
 working directory, because a child standing outside its own root escapes
 through any relative path without trying; a root and an explicit working
 directory are refused together, since the cwd would have to be resolved
@@ -144,4 +148,7 @@ a shell in a jail can use its builtins and not `/bin/echo`. Check: the
 user-mode self-test (a child rooted at a directory reports `/` for `pwd`
 before touching its working directory at all, and again after `cd ..`, writes through an absolute path into that directory as
 seen from outside, and exits nonzero when it tries to reach a directory
-that exists only outside).
+that exists only outside; and a child rooted at a *mounted* filesystem
+cannot climb out through it -- checked by trying to enter a directory
+that exists only outside the mount, since `pwd` alone cannot tell an
+escape from confinement when both print `/`).

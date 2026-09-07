@@ -513,6 +513,26 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
         return 0;
     }
     if (len == 2 && name[0] == '.' && name[1] == '.') {
+        /*
+         * ".." stops at the caller's root as it stops at the global one,
+         * and the test comes *first* -- before the step that leaves a
+         * mount through its mountpoint. A process rooted at a mounted
+         * filesystem stands on that filesystem's root vnode, which the
+         * crossing would replace with the covered vnode underneath it:
+         * a different vnode, no longer equal to the root, and the walk
+         * would climb out of the very mount it was confined to.
+         */
+        struct vnode *proot = vfs_current_root();
+        bool at_root = dir == proot;
+        vnode_put(proot);
+        if (at_root) {
+            int prc = may_search(dir);
+            if (prc)
+                return prc;
+            *out = dir;
+            return 0;
+        }
+
         /* At a mount root, ".." leaves through the mountpoint. */
         struct vnode *base = dir;
         if (dir->mnt->root == dir && dir->mnt->mountpoint) {
@@ -523,13 +543,7 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
         int rc = may_search(base);
         if (rc)
             return rc;
-        /* ".." stops at the caller's root as it stops at the global one.
-         * Without this a process could walk out of the root it was
-         * given, which is the only way out a path has left. */
-        struct vnode *proot = vfs_current_root();
-        bool at_root = base == proot;
-        vnode_put(proot);
-        if (at_root || base->mnt->root == base) {
+        if (base->mnt->root == base) {   /* the global root: stays put */
             *out = base;
             return 0;
         }
