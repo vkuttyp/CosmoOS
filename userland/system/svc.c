@@ -520,12 +520,13 @@ static int cmd_start(const char *name)
      * which. Reporting success without looking would make `svc boot`
      * start the dependents of a service that never ran (U10).
      *
-     * Two ways to be sure. The supervisor writes its pid file before
-     * the first spawn, so seeing it means the service is up. And the
-     * supervisor exiting is the other answer -- for a service that runs
-     * once and finishes, that is success and happens too fast to catch
-     * by polling the pid file; for one that could not start at all, the
-     * supervisor's status says so.
+     * Two ways to be sure. The supervisor writes its pid file only
+     * after a spawn has succeeded, so seeing it means the service has
+     * actually run. And the supervisor exiting is the other answer --
+     * for a service that runs once and finishes, that is success and
+     * happens too fast to catch by polling the pid file; for one that
+     * could not start at all, the supervisor's status says so, because
+     * it exits non-zero when it never got the service running.
      */
     for (int i = 0; i < 200; i++) {
         if (running(name, NULL)) {

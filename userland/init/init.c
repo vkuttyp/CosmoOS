@@ -1576,6 +1576,28 @@ static void write_file(const char *path, const char *text)
     }
 }
 
+/*
+ * Is the supervisor up? The same question `svc status` answers, asked
+ * without spawning anything: every poll through the command is a
+ * process, and a loop of them costs more than the thing being waited
+ * for. That is what pushed init's self-test past the five-second
+ * budget the kernel gives it on the slower architecture.
+ */
+static int svc_up(const char *name)
+{
+    char path[64], buf[32] = { 0 };
+    snprintf(path, sizeof(path), "/run/svc/%s.pid", name);
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    pid_t p = (pid_t)atoi(buf);
+    return p > 0 && kill(p, 0) == 0;
+}
+
 static int svc_run(const char *a, const char *b)
 {
     const char *argv[] = { "svc", a, b, NULL };
@@ -1634,7 +1656,7 @@ static void svc_selftest(void)
     for (int i = 0; i < 200; i++) {
         if (slurp("/var/log/svc/unprivsvc", ulog, sizeof(ulog)) > 0 && strstr(ulog, "exited with") != NULL)
             break;
-        cosmo_sleep_ns(10000000ULL);
+        cosmo_sleep_ns(5000000ULL);
     }
     CHECK(strstr(ulog, "exited with status 0") == NULL);   /* it was refused */
     char host_after[HOST_NAME_MAX];
@@ -1667,7 +1689,7 @@ static void svc_selftest(void)
     /* The supervisor exits by itself once it gives up; wait for it. */
     int gone = 0;
     for (int i = 0; i < 400; i++) {
-        if (svc_run("status", "flap") != 0) {
+        if (!svc_up("flap")) {
             gone = 1;
             break;
         }
@@ -1736,12 +1758,12 @@ static void svc_selftest(void)
     for (int i = 0; i < 500; i++) {
         int any = 0;
         for (size_t k = 0; k < sizeof(written) / sizeof(written[0]); k++)
-            any |= svc_run("status", written[k]) == 0;
+            any |= svc_up(written[k]);
         for (size_t k = 0; k < sizeof(shipped) / sizeof(shipped[0]); k++)
-            any |= svc_run("status", shipped[k]) == 0;
+            any |= svc_up(shipped[k]);
         if (!any)
             break;
-        cosmo_sleep_ns(10000000ULL);
+        cosmo_sleep_ns(5000000ULL);
     }
     for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++) {
         char path[64];
