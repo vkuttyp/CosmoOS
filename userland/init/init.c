@@ -31,6 +31,8 @@
 
 static int g_failures;
 
+static int lists(const char *dir, const char *name);
+
 static void check(int cond, const char *what)
 {
     if (cond)
@@ -647,6 +649,14 @@ static void proc_selftest(void)
 
     /* And it cannot signal out of its domain: pid 1 exists, and inside
      * the domain it must look as though it does not. */
+    /* And /proc obeys the domain too, since it asks the same question:
+     * pid 1 certainly exists and must not be readable from in here. */
+    const char *dproc_argv[] = { "sh", "-c", "cat /proc/1/status", NULL };
+    pid_t dpp = spawnve_domain("/bin/sh", dproc_argv, NULL, NULL, 0);
+    CHECK(dpp > 1);
+    int dpstatus = 0;
+    CHECK(waitpid(dpp, &dpstatus, 0) == dpp && dpstatus != 0);
+
     const char *kill_argv[] = { "sh", "-c", "kill 1", NULL };
     pid_t kpid = spawnve_domain("/bin/sh", kill_argv, NULL, NULL, 0);
     CHECK(kpid > 1);
@@ -1461,6 +1471,28 @@ static int unpriv_test(void)
     UCHECK(sethostname("stolen", 6) < 0 && errno == EPERM);
     UCHECK(umount("/") < 0 && errno == EPERM);
     UCHECK(kill(parent, SIGTERM) < 0 && errno == EPERM);      /* root's process; must survive */
+
+    /*
+     * P1: /proc shows this process exactly what procinfo would. The
+     * parent is root's; it must be neither listed nor openable, and
+     * ENOENT rather than EACCES, since "not permitted" would confirm
+     * the pid is in use. A listing that names what it will not open is
+     * a leak with extra steps.
+     */
+    char ppath[64];
+    struct stat pst;
+    snprintf(ppath, sizeof(ppath), "/proc/%d", parent);
+    UCHECK(stat(ppath, &pst) < 0 && errno == ENOENT);
+    snprintf(ppath, sizeof(ppath), "/proc/%d/status", parent);
+    UCHECK(stat(ppath, &pst) < 0 && errno == ENOENT);
+    {
+        char own[32];
+        snprintf(own, sizeof(own), "%d", getpid());
+        UCHECK(lists("/proc", own));             /* its own is there */
+        char theirs[32];
+        snprintf(theirs, sizeof(theirs), "%d", parent);
+        UCHECK(!lists("/proc", theirs));         /* root's is not */
+    }
     char log[256];
     UCHECK(klog_read(log, sizeof(log)) < 0 && errno == EPERM);
 
@@ -1788,6 +1820,72 @@ static void svc_selftest(void)
     puts("usertest: services ok");
 }
 
+/* Does `dir` list `name`? */
+static int lists(const char *dir, const char *name)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL)
+        return 0;
+    struct dirent *e;
+    int found = 0;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, name) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    closedir(d);
+    return found;
+}
+
+/*
+ * /proc (docs/kernel-services/filesystem/procfs/, P1-P3). What it holds
+ * is facts about processes, and what it shows is exactly what procinfo
+ * would -- including in the listing, since names alone say which pids
+ * exist.
+ */
+static void proc_fs_selftest(void)
+{
+    char buf2[1024];
+
+    /* P3: self is the caller, resolved at lookup. */
+    CHECK(slurp("/proc/self/status", buf2, sizeof(buf2)) > 0);
+    char want[32];
+    snprintf(want, sizeof(want), "pid: %d\n", getpid());
+    CHECK(strstr(buf2, want) != NULL);
+    CHECK(strstr(buf2, "name: init") != NULL);
+    CHECK(strstr(buf2, "state: running") != NULL);
+    CHECK(slurp("/proc/self/limits", buf2, sizeof(buf2)) > 0);
+    CHECK(strstr(buf2, "nofile: ") != NULL);
+
+    /* The same facts under the caller's own pid. */
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/status", getpid());
+    CHECK(slurp(path, buf2, sizeof(buf2)) > 0);
+    CHECK(strstr(buf2, want) != NULL);
+
+    /* P2: nothing appears here that nobody added. */
+    struct stat pst;
+    CHECK(stat("/proc/meminfo", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/self/cmdline", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/0", &pst) < 0 && errno == ENOENT);
+    CHECK(stat("/proc/01", &pst) < 0 && errno == ENOENT);   /* not a pid, not rounded into one */
+    CHECK(stat("/proc/99999", &pst) < 0 && errno == ENOENT);
+    CHECK(lists("/proc", "self"));
+
+    /* P3: a process that has gone is ESRCH, not stale text. The child
+     * exits and is reaped before the read. */
+    const char *t_argv[] = { "true", NULL };
+    pid_t dead = spawnve("/bin/true", t_argv, NULL, NULL, 0);
+    CHECK(dead > 0);
+    int dstatus = -1;
+    CHECK(waitpid(dead, &dstatus, 0) == dead);
+    snprintf(path, sizeof(path), "/proc/%d/status", dead);
+    CHECK(slurp(path, buf2, sizeof(buf2)) < 0);
+
+    puts("usertest: /proc ok");
+}
+
 static void selftest(void)
 {
     fs_selftest();
@@ -1796,6 +1894,7 @@ static void selftest(void)
     fpu_selftest();
     trap_selftest();
     priv_selftest();
+    proc_fs_selftest();
     svc_selftest();
 
     CHECK(cosmo_write(1, "usertest: write ok\n", 19) == 19);

@@ -656,11 +656,28 @@ See [docs/development.md](docs/development.md).
   directions — a backoff that doubles and a retry limit — since a
   service that dies instantly must not spin the machine, and a
   supervisor that gives up must say so where somebody will find it.
+- **`/proc` (done):** the last item on the audit's list. Constitution
+  section 56 asks for pseudo-filesystems with clear ownership and says
+  not to make them a dumping ground for kernel internals, so the
+  ownership question is answered first and the answer is in the name:
+  **`/proc` holds facts about processes, and nothing else.** System-wide
+  values stay in `sysctl`, whose names are a curated list; the log stays
+  in `dmesg`; device nodes stay in `/dev`. There is no `/proc/meminfo`,
+  because `sysctl vm.pages_free` already answers that and a second
+  spelling of a fact is how a namespace rots. What it adds is
+  addressability — `/proc/self/status` and `/proc/<pid>/limits` are
+  readable by anything that reads files, where `procinfo` returns a
+  struct to a caller that knows the ABI. **A process sees exactly what
+  `procinfo` would show it, in the listing as well as the files**: a
+  directory that names what it will not open is an information leak with
+  extra steps, so the visibility rule lives in one function that
+  `procinfo`, the lookup and the listing all call. `/sys` is not added:
+  there is nothing to put in it that `sysctl` does not already hold.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
   container primitives (pid renumbering if it is wanted — the domain
-  deliberately does without it) and `/proc`. After those, the milestones the constitution
+  deliberately does without it). After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux
   compatibility, NUMA, live migration, nested virtualization), and the

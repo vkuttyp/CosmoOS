@@ -260,6 +260,14 @@ struct credentials;
  * process for a privileged viewer, else those with the viewer's real uid. */
 unsigned process_info(struct cosmo_procinfo *buf, unsigned count, const struct credentials *viewer);
 
+/* Whether the caller may see `p`: the same rule procinfo applies, so
+ * that /proc cannot show or name what `ps` would not
+ * (docs/kernel-services/filesystem/procfs/invariants.md, P1). */
+bool process_visible_to_current(const struct process *p);
+/* The pids the caller may see, up to `max`; returns how many there are.
+ * Collected under the table lock and delivered after it is dropped. */
+unsigned process_list_visible(pid_t *out, unsigned max);
+
 /* Terminate the calling process, every thread of it, with `status`. Never
  * returns: the other threads leave at their next return to user mode or
  * killable wait. */
