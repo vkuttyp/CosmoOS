@@ -234,6 +234,29 @@ static void net_selftest(void)
         CHECK(no_sd >= 0);
         CHECK(shutdown(no_sd, SHUT_RDWR) < 0 && errno == EPERM);
         CHECK(close(no_sd) == 0);
+
+        /*
+         * And the same through the Linux ABI, because a handle is a
+         * capability whatever language asks about it. The child is a
+         * freestanding Linux program given the socket on fd 3 with
+         * CONNECT and SHUTDOWN removed; it must be refused there too,
+         * or the restriction lasts only until the holder switches ABI.
+         */
+        int lent = dup_rights(full, -1,
+                              COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_TRANSFER |
+                                  COSMO_RIGHT_SOCK_ACCEPT);
+        CHECK(lent >= 0);
+        struct spawn_handle lxmap[] = { { .child = 0, .parent = 0 },
+                                        { .child = 1, .parent = 1 },
+                                        { .child = 2, .parent = 2 },
+                                        { .child = 3, .parent = lent } };
+        static const char *const lxr_argv[] = { "lxrights", "cs", NULL };
+        pid_t lxp = spawnve("/boot/tests/linux/lxrights", lxr_argv, NULL, lxmap, 4);
+        CHECK(lxp > 1);
+        int lxst = -1;
+        CHECK(waitpid(lxp, &lxst, 0) == lxp);
+        CHECK(lxst == 0);
+        CHECK(close(lent) == 0);
         CHECK(close(full) == 0);
     }
     CHECK(socket(99, SOCK_STREAM, 0) < 0 && errno == EAFNOSUPPORT);

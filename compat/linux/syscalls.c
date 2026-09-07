@@ -157,6 +157,35 @@ static struct socket *sock_of(int h, unsigned rights)
     return s;
 }
 
+/*
+ * The same as the native side's (kernel/syscall/native.c): the object's
+ * kind first, then the bits its kind defines. A handle is a capability
+ * whatever ABI asks about it, so a socket delegated with an operation
+ * removed must refuse that operation here too -- otherwise the
+ * restriction lasts exactly until the holder makes the Linux call.
+ */
+static struct socket *sock_of_err(int h, unsigned rights, int *err)
+{
+    unsigned have = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, h, &have);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    struct socket *s = socket_from_kobject(obj);
+    if (s == NULL) {
+        kobject_put(obj);
+        *err = -EBADF;
+        return NULL;
+    }
+    if ((have & rights) != rights) {
+        ksock_put(s);
+        *err = -EPERM;
+        return NULL;
+    }
+    return s;
+}
+
 static int64_t put_u64(uint64_t uptr, uint64_t v)
 {
     return copy_to_user(uptr, &v, sizeof(v)) ? -EFAULT : 0;
@@ -1450,7 +1479,7 @@ static int64_t lx_socket(struct syscall_args *a)
         return rc;
     if (nonblock)
         ksock_set_nonblock(s, true);
-    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &s->obj, HANDLE_RIGHT_SOCK_ALL);
     ksock_put(s);
     return h;
 }
@@ -1461,9 +1490,10 @@ static int64_t lx_bind(struct syscall_args *a)
     int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_BIND, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     rc = ksock_bind(s, &addr);
     ksock_put(s);
     return rc;
@@ -1475,9 +1505,10 @@ static int64_t lx_connect(struct syscall_args *a)
     int rc = addr_from_user(a->a[1], (size_t)a->a[2], &addr);
     if (rc)
         return rc;
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_CONNECT, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     rc = ksock_connect(s, &addr);
     ksock_put(s);
     return rc;
@@ -1485,9 +1516,10 @@ static int64_t lx_connect(struct syscall_args *a)
 
 static int64_t lx_listen(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_BIND, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     int rc = ksock_listen(s, (int)a->a[1]);
     ksock_put(s);
     return rc;
@@ -1495,7 +1527,8 @@ static int64_t lx_listen(struct syscall_args *a)
 
 static int64_t lx_accept(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_READ);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_ACCEPT, &serr);
     if (s == NULL)
         return -EBADF;
     struct socket *c;
@@ -1511,7 +1544,7 @@ static int64_t lx_accept(struct syscall_args *a)
         ksock_put(c);
         return rc;
     }
-    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    int h = handle_install(&process_current()->handles, &c->obj, HANDLE_RIGHT_SOCK_CONNECTED);
     ksock_put(c);
     return h;
 }
@@ -1602,9 +1635,10 @@ static int64_t lx_recvfrom(struct syscall_args *a)
 
 static int64_t lx_shutdown(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], 0);
+    int serr = 0;
+    struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_SHUTDOWN, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     int rc = ksock_shutdown(s, (int)a->a[1]);   /* SHUT_* values coincide */
     ksock_put(s);
     return rc;
@@ -1624,9 +1658,11 @@ static int64_t name_call(struct syscall_args *a, bool peer)
 static int64_t lx_getsockname(struct syscall_args *a) { return name_call(a, false); }
 static int64_t lx_getpeername(struct syscall_args *a) { return name_call(a, true); }
 
+/* Changing how a socket behaves is what MANAGE means, and it was asking
+ * for nothing (docs/kernel/object/architecture.md, "Rights"). */
 static int64_t lx_setsockopt(struct syscall_args *a)
 {
-    struct socket *s = sock_of((int)a->a[0], 0);
+    struct socket *s = sock_of((int)a->a[0], HANDLE_RIGHT_MANAGE);
     if (s == NULL)
         return -EBADF;
     ksock_put(s);
