@@ -167,6 +167,12 @@ struct cosmo_spawn {
  * (0) still sees them, which is how a host manages what it started.
  * Entered only here and never left. Privileged, like the flags above. */
 #define COSMO_SPAWN_NEWDOMAIN (1u << 3)
+/* The child starts a mount namespace of its own: a copy of what the
+ * caller can see now, which then diverges. What the child mounts
+ * afterwards is invisible to the caller, and what the caller mounts
+ * afterwards is invisible to the child. Privileged, like the flags
+ * above, and joined only by being spawned into it. */
+#define COSMO_SPAWN_NEWMOUNTNS (1u << 4)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */

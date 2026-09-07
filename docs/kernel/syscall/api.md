@@ -158,7 +158,7 @@ Details per call:
 - **close**: releases the handle; the slot can be reused by a later
   install. Closing 0–2 is allowed.
 - **spawn**: `req` is `struct cosmo_spawn { path, argv, envp, handles,
-  nr_handles, cwd, flags }`; `flags` must be 0; `argv` is required with
+  nr_handles, cwd, flags, uid, gid, root }`; `argv` is required with
   `argv[0]`; `envp` may be NULL; `argv` and `envp` together may hold at
   most `COSMO_ARG_ENTRIES` (128) strings of at most `COSMO_ARG_MAX`
   (2048) bytes including terminators, else `E2BIG`; `handles` is an
@@ -168,8 +168,24 @@ Details per call:
   `handles == NULL` with `nr_handles == 0` copies the caller's 0, 1, 2);
   `cwd` (optional) names the child's working directory relative to the
   caller's; the file must be regular with an execute bit and at most
-  16 MiB. The child gets the caller's uid/gid and is the caller's child
-  for `wait`. Every pointer is copied before use (`EFAULT`).
+  16 MiB. The child is the caller's child for `wait`, and by default
+  gets the caller's uid/gid, root, domain and mount namespace. Every
+  pointer is copied before use (`EFAULT`).
+
+  `flags` is zero or `COSMO_SPAWN_*`, and every one of them but the
+  first is privileged, because each decides what a whole subtree of
+  processes can see (`docs/kernel/security/design.md` §1–1d): `SETCRED`
+  (1) takes the child's ids from `uid`/`gid` — a privileged caller names
+  any, an unprivileged one only ids it holds; `HANDLE_RIGHTS` (2) says
+  the handle map is `struct cosmo_spawn_handle` with rights rather than
+  the older two-int pairs; `SETROOT` (4) roots the child at `root`,
+  resolved in the caller's own namespace, and starts it there — with
+  `cwd` it is `EINVAL`; `NEWDOMAIN` (8) starts a process domain;
+  `NEWMOUNTNS` (16) starts a mount namespace holding a copy of what the
+  caller can see. Anything else is `EINVAL`. `root` is read only with
+  `SETROOT`, so a caller built against the header that predates it
+  passes the shorter struct (`COSMO_SPAWN_SIZE_V1`) and the kernel never
+  reads past what it gave.
 - **wait**: `pid` is a child's pid or -1 for any child; `status` may be
   NULL; the status is the child's exit status (`exit(n)` gives `n & 0xff`,
   a kill `128 + sig`, a fault 139); the child is gone once collected.

@@ -93,11 +93,40 @@ are limited to `VFS_NAME_MAX` (255) bytes and paths to `VFS_PATH_MAX`
 (1024); more than 40 components or a walk through a dead vnode fails.
 Symbolic links do not exist.
 
-A mountpoint carries the mounts covering it on a list, `vnode.covers`,
-rather than a single `covered_by` pointer. The list holds at most one
-entry today and the behaviour is exactly what the pointer gave; it is a
-list because a directory can be a mountpoint in one mount namespace and
-an ordinary directory in another, which is where this is going.
+A mountpoint carries the mounts covering it on a list, `vnode.covers`:
+a directory can be a mountpoint in one mount namespace and an ordinary
+directory in another, and one pointer cannot say that.
+
+Mount namespaces (`kernel-services/vfs/mountns.c`,
+`docs/kernel/security/design.md` §1d). A `struct mount_ns` is a set of
+mounts a process can see; `process->mntns` names it, children inherit
+it, and `COSMO_SPAWN_NEWMOUNTNS` starts a new one that begins as a copy
+of the parent's view. The copy is of the *view*: a `struct mount_ns_ref`
+per (mount, namespace) pair, one on the mount's `ns_refs` and one on the
+namespace's `mounts`. The filesystem instance is never duplicated --
+one mount, one vnode cache, one transaction, however many namespaces
+show it.
+
+`covering_mount_ns(dir, ns)` walks `covers` and returns the first mount
+that `ns` can see, which is what `follow_mount` and `vfs_mount`'s
+no-stacking check use. `covering_mount(dir)` answers the weaker "in any
+namespace", which is what `remove_entry` and `rename` use: a mount is
+attached to the vnode rather than the path, so a namespace that cannot
+see one has no basis to remove the directory under it.
+
+A `ns_refs` list is protected by the mount's own mountpoint lock -- the
+same lock as `cover_link`, since where a mount is attached and who can
+see it are one question -- so `follow_mount`, already holding that lock
+as `dir->lock`, reads both without reaching for `g_mounts_lock` and
+inverting the order. The root mount is outside the machinery entirely:
+every namespace has it, none may unmount it.
+
+`vfs_umount` in a namespace that is not the last one to see a mount only
+removes that namespace's ref: nothing is committed and no busy check
+runs, because the filesystem stays. The last one out does the unmount
+that exists today. A namespace whose last reference goes drops its refs
+in reverse order, newest first, so a nested mount is gone before the one
+holding its mountpoint, and unmounts whatever that leaves unreachable.
 
 The lock discipline is deliberately unchanged, since it is the part that
 is easy to get wrong: the list is protected by the mountpoint vnode's

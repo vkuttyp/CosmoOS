@@ -408,3 +408,37 @@ readable; a keyless remount refuses lookups; the same block written
 eight times gives eight different ciphertexts, which is what a repeated
 nonce would break; and a genuine block of a file written over another of
 its own offsets is refused), and `test_chacha20` against RFC 8439.
+
+**V28. A mount is seen by the namespaces that were given it, and by no
+others.** A mount carries the set of namespaces that can see it; a new
+namespace copies its parent's view by adding itself to every mount in
+it, never by duplicating a filesystem — one mount is one vnode cache,
+one open transaction and one device, and a second instance of those over
+the same disk is not isolation but corruption. `follow_mount` crosses
+only a mount the walker's namespace can see, so a mount made after a
+split is invisible on the other side of it, in both directions.
+
+The visibility set lives under the same lock as the mount's place on its
+mountpoint — where a mount is attached and who can see it are one
+question — which is why a walker holding the mountpoint's lock reads
+both without taking `g_mounts_lock` inside a vnode lock and inverting
+the order. The root mount is not in the machinery at all: every
+namespace has it and none may unmount it.
+
+Unlink and rename ask the weaker question — is this a mountpoint in
+*any* namespace — and refuse if it is. A mount is attached to the vnode
+and not to the path, so a namespace that cannot see one is precisely the
+one with no basis to decide its fate.
+
+Check: the `mountns` self-test follows the mount count, which says what
+a walk from one namespace cannot. A mount two namespaces can see
+survives the first unmount and its directory is immediately free to
+mount on again; a mount made *after* a namespace was created is one that
+namespace never gets, so unmounting it is the last one out and the count
+falls; and the namespace that still holds the first mount takes it away
+when it goes. The user-mode test walks it from both sides (S12).
+
+Both were confirmed against the bug. With `mountns_sees` returning true
+for every mount, the self-test fails where it mounts on a directory the
+other namespace still covers, and the user-mode test fails where the
+child lists a directory the parent mounted over after the split.

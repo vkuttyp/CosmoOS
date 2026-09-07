@@ -135,6 +135,54 @@ Exhaustion refuses the spawn.
 Not done here: pid renumbering, a domain-scoped `/proc` (there is no
 `/proc` yet), and any accounting per domain.
 
+## 1d. Mount namespaces
+
+A process belongs to a mount namespace: the set of mounts it can see. A
+spawn may start a new one, which begins as a copy of the parent's view
+and diverges from there. A mount made afterwards is visible only in the
+namespace that made it, and an unmount only removes it from the
+namespace that asked.
+
+This completes the pair the root started. A root says which subtree a
+process may name; a namespace says what is attached inside it. Without
+the namespace a confined process still shares the mount table with
+everything else, so anything it mounts appears system-wide and anything
+mounted system-wide appears under its root. Starting one is privileged,
+like the root and the domain, and for the same reason: privilege flows
+down.
+
+**A namespace copies the view, not the filesystems.** A mount is one
+filesystem instance -- a vnode cache, an open transaction, a device --
+and duplicating it would give two namespaces two views of one disk with
+two sets of dirty state, which is not isolation but corruption. So a
+mount carries the set of namespaces that can see it, a new namespace
+adds itself to every mount its parent could see, and the filesystem is
+mounted exactly once no matter how many namespaces show it.
+
+Three details that are choices rather than accidents:
+
+- **Unlink and rename stay conservative.** A directory that is a
+  mountpoint in *any* namespace refuses to be removed or renamed, even
+  from a namespace that cannot see that mount. A mount is attached to
+  the vnode, not to the path, so a namespace that cannot see it is
+  exactly the one with no basis to decide its fate.
+- **The last namespace out unmounts.** A mount that no namespace can
+  see is unreachable, so a namespace that goes away takes with it every
+  mount only it could see -- children before parents, since a nested
+  mount holds a vnode of the one below it. This is the same rule as
+  everywhere else in this kernel: nothing is released while its fate is
+  unknown, and a mount nobody can reach whose data was never committed
+  is exactly that.
+- **The root filesystem is visible everywhere.** It is not on the
+  visibility machinery at all: every namespace needs a root, no
+  namespace may unmount it, and a set that always has the same one
+  member is a fact better stated than stored.
+
+Not done here: moving or rebinding a mount between namespaces, mount
+propagation (a shared mount whose children appear in peers), and any
+way to enter an existing namespace -- a namespace is joined by being
+spawned into it and in no other way.
+
 ## 2. Resource limits
 
 `struct rlimits` is one 64-bit value per resource, inherited by copy at

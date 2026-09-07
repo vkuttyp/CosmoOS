@@ -6,6 +6,7 @@
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
+#include <kernel/mountns.h>
 #include <kernel/page.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
@@ -281,6 +282,57 @@ static void open_hammer(void *arg)
 static struct thread *hammer_on(void (*fn)(void *), struct vfs_hammer *h, unsigned cpu)
 {
     return thread_create_on(fn, h, "vfs-hammer", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+}
+
+/* --- mount namespaces (docs/kernel/security/design.md §1d, V28) ---------------
+ *
+ * These run in the namespace the system boots in, which is the only one
+ * kmain has, so the isolation is shown through the mount count rather
+ * than by walking paths from two sides: a mount two namespaces can see
+ * survives the first unmount and goes on the second, and a mount made
+ * after a namespace was created is one that namespace never gets.
+ * Walking it from both sides is what the user-mode test does.
+ */
+bool selftest_mountns(const char **reason)
+{
+    unsigned n0 = vfs_mount_count();
+    CHECK(vfs_mkdir(NULL, "/tmp/ns", 0755) == 0);
+
+    /* A namespace made now can see the mount made before it. */
+    CHECK(vfs_mount("/tmp/ns", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mount_count() == n0 + 1);
+    struct mount_ns *b = NULL;
+    CHECK(mountns_create(mountns_initial(), &b) == 0);
+
+    /* Unmounting here only drops this namespace's view: b still sees
+     * it, so the filesystem stays and the count does not move. */
+    CHECK(vfs_umount("/tmp/ns") == 0);
+    CHECK(vfs_mount_count() == n0 + 1);
+    /* And it is gone from *this* namespace, so the directory is free
+     * for another mount even though the first one still exists. */
+    CHECK(vfs_mount("/tmp/ns", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mount_count() == n0 + 2);
+
+    /* The second mount was made after b, so b never saw it: unmounting
+     * it here is the last namespace out and takes it away. If b had
+     * copied it, this count would stay. */
+    CHECK(vfs_umount("/tmp/ns") == 0);
+    CHECK(vfs_mount_count() == n0 + 1);
+
+    /* And the last namespace that can see the first mount takes it
+     * with it when it goes. */
+    mountns_put(b);
+    CHECK(vfs_mount_count() == n0);
+
+    /* A namespace that goes away having mounted nothing costs nothing. */
+    struct mount_ns *c = NULL;
+    CHECK(mountns_create(mountns_initial(), &c) == 0);
+    mountns_put(c);
+    CHECK(vfs_mount_count() == n0);
+
+    CHECK(vfs_rmdir(NULL, "/tmp/ns") == 0);
+    kinfo("selftest: mountns: a mount two namespaces see survives the first unmount and goes on the second");
+    return true;
 }
 
 bool selftest_vfs_concurrency(const char **reason)

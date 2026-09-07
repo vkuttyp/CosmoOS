@@ -57,6 +57,7 @@ struct personality {
 
 struct vm_space;
 struct thread;
+struct mount_ns;
 struct linux_state;   /* compat/linux: per-process state of the Linux personality */
 
 struct process {
@@ -101,6 +102,11 @@ struct process {
      * and entered only at spawn -- there is no way back out. */
     uint32_t domain;
     struct vnode *root;
+    /* The mounts this process can see. Referenced; inherited, and a new
+     * one is started only at spawn. Never NULL for a user process; NULL
+     * means the initial namespace, which is what a kernel thread and
+     * everything before init get (docs/kernel/security/design.md §1d). */
+    struct mount_ns *mntns;
     struct vnode *cwd;                 /* referenced */
     char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
 
@@ -138,6 +144,9 @@ struct process_spawn_attr {
      * the caller resolves the path in its own namespace first. */
     struct vnode *root;
     uint32_t domain;                               /* nonzero: the child's own, from process_domain_alloc */
+    /* The child's mount namespace (COSMO_SPAWN_NEWMOUNTNS). NULL: the
+     * parent's. Referenced by the caller, handed over on success. */
+    struct mount_ns *mntns;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -177,7 +186,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
  * caller's; `cwd` may be NULL. Returns 0 and the child's pid. */
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
-                  bool new_domain, const struct process_spawn_cred *cred, pid_t *pid_out);
+                  bool new_domain, bool new_mountns, const struct process_spawn_cred *cred, pid_t *pid_out);
 
 /* A domain identifier nobody has had. Monotonic and never reused, so a
  * live domain's identity cannot be handed to a second set of processes;

@@ -8,6 +8,7 @@
 #include <kernel/log.h>
 #include <kernel/object.h>
 #include <kernel/page.h>
+#include <kernel/mountns.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
@@ -69,6 +70,13 @@ static void process_release(struct kobject *obj)
         vnode_put(p->cwd);
     if (p->root)
         vnode_put(p->root);
+    /* After the directories: a cwd or root inside one of this
+     * namespace's mounts holds that mount, and the namespace's last
+     * reference unmounts what only it could see. */
+    if (p->mntns) {
+        mountns_put(p->mntns);
+        p->mntns = NULL;
+    }
     if (p->parent)
         process_put(p->parent);
     if (p->linux)
@@ -467,6 +475,19 @@ int process_create_from_images(const struct process_image *exe, const struct pro
             vnode_get(p->root);
         spin_unlock_irqrestore(&parent->lock, ps);
     }
+    /*
+     * The mount namespace: the request's, else the parent's. A child
+     * shares its parent's view of the filesystems unless the spawn
+     * asked for a copy, and the copy was taken when it asked.
+     */
+    if (attr && attr->mntns) {
+        p->mntns = mountns_get(attr->mntns);
+    } else if (parent) {
+        arch_irq_state_t ns = spin_lock_irqsave(&parent->lock);
+        p->mntns = mountns_get(parent->mntns);
+        spin_unlock_irqrestore(&parent->lock, ns);
+    }
+
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
         vnode_get(attr->cwd);
@@ -665,6 +686,13 @@ fail:
         vnode_put(p->cwd);
     if (p->root)
         vnode_put(p->root);
+    /* After the directories: a cwd or root inside one of this
+     * namespace's mounts holds that mount, and the namespace's last
+     * reference unmounts what only it could see. */
+    if (p->mntns) {
+        mountns_put(p->mntns);
+        p->mntns = NULL;
+    }
     if (p->linux)
         linux_process_release(p);
     signal_process_release(p);

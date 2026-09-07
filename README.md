@@ -581,12 +581,32 @@ See [docs/development.md](docs/development.md).
   syscall cannot be handed a reference the exit is releasing. `read` and
   `write` still answer `EBADF` where POSIX says they should; `EPERM` is
   for the operations POSIX has no opinion about.
+- **Confinement: roots, domains and mount namespaces (done):** three
+  more of the container primitives, each answering a different question
+  about what a process can reach. A **root** says which subtree it may
+  name: absolute paths start there, `..` stops there, and a spawn names
+  the child's root in its own namespace, so confinement only ever
+  tightens. A rooted child starts *at* its root, because inheriting the
+  parent's working directory would leave it standing outside the thing
+  meant to contain it. A **domain** says which processes it can see and
+  signal: outside domain 0 a process sees only its own, and the domain
+  the system boots in still sees all of them, which is how a host
+  manages what it started; a signal across the boundary is `ESRCH`
+  rather than `EPERM`, since "not permitted" would confirm the pid
+  exists. A **mount namespace** says what is attached inside the root: a
+  copy of the parent's view that then diverges, so what a confined
+  process mounts stays its own and what is mounted outside does not
+  appear beneath it. A namespace copies the *view* and never a
+  filesystem — one mount is one vnode cache, one open transaction and
+  one device — and the last namespace that can see a mount is the one
+  that unmounts it. All three are privileged to start and are entered
+  only at spawn: privilege flows down and there is no way back up.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   section 19 table are complete; what remains of the audit's own list
   (`docs/audit/2026-09-post-roadmap-audit.md`) is the rest of the
-  container primitives (per-process roots
-  and mount namespaces, pid and uts namespaces, a syscall filter,
-  per-type control rights in a handle's upper sixteen bits), a service
+  container primitives (a uts namespace, a syscall filter, per-type
+  control rights in a handle's upper sixteen bits, and pid renumbering
+  if it is wanted — the domain deliberately does without it), a service
   manager and `/proc`. After those, the milestones the constitution
   defers in section 68 (among them the USB stack, AHCI and the full
   NVMe feature set, eBPF, graphics and a desktop, fuller Linux

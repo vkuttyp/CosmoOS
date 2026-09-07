@@ -709,7 +709,8 @@ static int64_t sys_spawn(struct syscall_args *a)
     if (copy_from_user(&req, a->a[0], COSMO_SPAWN_SIZE_V1))
         return -EFAULT;
     if ((req.flags &
-         ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN)) ||
+         ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
+           COSMO_SPAWN_NEWMOUNTNS)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
     if ((req.flags & COSMO_SPAWN_SETROOT) && copy_from_user(&req, a->a[0], sizeof(req)))
@@ -784,6 +785,7 @@ static int64_t sys_spawn(struct syscall_args *a)
     }
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
                        rootp, (req.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
+                       (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0,
                        (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
 out:
     kfree(sc);

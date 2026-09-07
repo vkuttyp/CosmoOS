@@ -60,6 +60,7 @@ bool selftest_lockdep_sleep(const char **reason);
 bool selftest_lockdep_mutex(const char **reason);
 bool selftest_lockdep_contention(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
+bool selftest_mountns(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
 bool selftest_fault_blk(const char **reason);
 bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */

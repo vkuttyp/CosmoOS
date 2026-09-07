@@ -81,10 +81,26 @@ static inline struct list_node *list_pop_front(struct list_node *head)
     return n;
 }
 
+/* Move every node of `from` onto the end of `to`, leaving `from` empty. */
+static inline void list_move_all(struct list_node *from, struct list_node *to)
+{
+    if (list_empty(from))
+        return;
+    struct list_node *first = from->next, *last = from->prev;
+    first->prev = to->prev;
+    to->prev->next = first;
+    last->next = to;
+    to->prev = last;
+    list_init(from);
+}
+
 #define list_entry(ptr, type, member) container_of(ptr, type, member)
 
 #define list_first_entry(head, type, member) \
     list_entry((head)->next, type, member)
+
+#define list_last_entry(head, type, member) \
+    list_entry((head)->prev, type, member)
 
 #define list_for_each(pos, head) \
     for ((pos) = (head)->next; (pos) != (head); (pos) = (pos)->next)
@@ -109,5 +125,13 @@ static inline struct list_node *list_pop_front(struct list_node *head)
          (tmp) = list_entry((pos)->member.next, __typeof__(*(pos)), member);   \
          &(pos)->member != (head);                                             \
          (pos) = (tmp), (tmp) = list_entry((tmp)->member.next, __typeof__(*(tmp)), member))
+
+/* The same from the back, for a list that must be emptied newest
+ * first. */
+#define list_for_each_entry_safe_reverse(pos, tmp, head, member)               \
+    for ((pos) = list_entry((head)->prev, __typeof__(*(pos)), member),         \
+         (tmp) = list_entry((pos)->member.prev, __typeof__(*(pos)), member);   \
+         &(pos)->member != (head);                                             \
+         (pos) = (tmp), (tmp) = list_entry((tmp)->member.prev, __typeof__(*(tmp)), member))
 
 #endif /* KERNEL_LIST_H */
