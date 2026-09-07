@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -95,6 +96,25 @@ static char *next_word(char **p)
         *s++ = '\0';
     *p = s;
     return start;
+}
+
+/*
+ * A number, or nothing. atoi answers 0 for text, which for `user` means
+ * a typo asks for uid 0 -- the one value that must never be reached by
+ * accident. Every number in a definition goes through here.
+ */
+static int parse_uint(const char *s, unsigned long long *out)
+{
+    if (*s == '\0')
+        return -1;
+    unsigned long long v = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9')
+            return -1;
+        v = v * 10 + (unsigned long long)(*p - '0');
+    }
+    *out = v;
+    return 0;
 }
 
 static int yes_no(const char *v, int *out)
@@ -177,11 +197,29 @@ static int load(const char *name, struct service *s)
                 bad = 1;
             }
         } else if (strcmp(key, "retries") == 0) {
-            s->retries = atoi(val);
+            unsigned long long v;
+            if (parse_uint(val, &v) != 0) {
+                fprintf(stderr, "svc: %s:%d: retries '%s' is not a number\n", name, lineno, val);
+                bad = 1;
+            } else {
+                s->retries = (int)v;
+            }
         } else if (strcmp(key, "backoff-ms") == 0) {
-            s->backoff_ms = (unsigned)atoi(val);
+            unsigned long long v;
+            if (parse_uint(val, &v) != 0) {
+                fprintf(stderr, "svc: %s:%d: backoff-ms '%s' is not a number\n", name, lineno, val);
+                bad = 1;
+            } else {
+                s->backoff_ms = (unsigned)v;
+            }
         } else if (strcmp(key, "user") == 0) {
-            s->uid = s->gid = atoi(val);
+            unsigned long long v;
+            if (parse_uint(val, &v) != 0 || v > 0xffffffffULL) {
+                fprintf(stderr, "svc: %s:%d: user '%s' is not a number\n", name, lineno, val);
+                bad = 1;   /* never uid 0 by accident */
+            } else {
+                s->uid = s->gid = (int)v;
+            }
         } else if (strcmp(key, "root") == 0) {
             snprintf(s->root, sizeof(s->root), "%s", val);
         } else if (strcmp(key, "mountns") == 0 || strcmp(key, "utsns") == 0 || strcmp(key, "domain") == 0) {
@@ -200,8 +238,16 @@ static int load(const char *name, struct service *s)
                     bad = 1;
                     break;
                 }
+                unsigned long long v;
+                if (parse_uint(val, &v) != 0) {
+                    fprintf(stderr, "svc: %s:%d: limit-%s '%s' is not a number\n", name, lineno, which,
+                            val);
+                    bad = 1;
+                    found = 1;
+                    break;
+                }
                 s->limits[s->nr_limits].resource = g_limit_names[i].resource;
-                s->limits[s->nr_limits].value = strtoull(val, NULL, 0);
+                s->limits[s->nr_limits].value = v;
                 s->nr_limits++;
                 found = 1;
                 break;
@@ -330,9 +376,17 @@ static int supervise(const char *name)
     /* Limits are set on this process and inherited by the service, so
      * the supervisor lives under them too -- which is honest: it is
      * part of what the service costs. */
+    /* A limit that cannot be set is not a warning: the service would
+     * then run without a restriction its definition asked for, which is
+     * the same failure as ignoring a key (U9). */
     for (int i = 0; i < s.nr_limits; i++) {
-        if (cosmo_setrlimit(s.limits[i].resource, s.limits[i].value) != 0)
-            log_line(log, "svc: %s: limit %u could not be set\n", name, s.limits[i].resource);
+        if (cosmo_setrlimit(s.limits[i].resource, s.limits[i].value) != 0) {
+            log_line(log, "svc: %s: not started: limit %u could not be set to %llu\n", name,
+                     s.limits[i].resource, s.limits[i].value);
+            unlink(pidfile);
+            close(log);
+            return 2;
+        }
     }
 
     char argv0[LINE_MAX_LEN];
@@ -369,6 +423,7 @@ static int supervise(const char *name)
     };
 
     unsigned wait_ms = s.backoff_ms;
+    int ran_once = 0;
     for (int attempt = 0;; attempt++) {
         struct cosmo_spawn req = {
             .path = argv[0],
@@ -387,6 +442,7 @@ static int supervise(const char *name)
             log_line(log, "svc: %s: cannot start %s: %d\n", name, argv[0], (int)-pid);
             break;
         }
+        ran_once = 1;
         write_pid(childfile, (pid_t)pid);
         log_line(log, "svc: %s: started, pid %d\n", name, (int)pid);
 
@@ -416,7 +472,11 @@ static int supervise(const char *name)
     unlink(childfile);
     unlink(pidfile);
     close(log);
-    return 0;
+    /* The supervisor's own status is about the supervisor's job, not
+     * the service's: zero means it managed to run the thing at least
+     * once. Never having started it is what `svc start` must be able to
+     * tell from a service that ran and finished. */
+    return ran_once ? 0 : 1;
 }
 
 /* --- the commands ----------------------------------------------------------- */
@@ -437,13 +497,38 @@ static int cmd_start(const char *name)
         fprintf(stderr, "svc: %s: cannot start a supervisor: %s\n", name, strerror(errno));
         return 1;
     }
-    /* The supervisor writes its pid file before the first spawn; wait
-     * for it so that `svc start x && svc status x` says what a person
-     * would expect. */
-    for (int i = 0; i < 200 && !running(name, NULL); i++)
+    /*
+     * Wait until the service is either up or demonstrably not, and say
+     * which. Reporting success without looking would make `svc boot`
+     * start the dependents of a service that never ran (U10).
+     *
+     * Two ways to be sure. The supervisor writes its pid file before
+     * the first spawn, so seeing it means the service is up. And the
+     * supervisor exiting is the other answer -- for a service that runs
+     * once and finishes, that is success and happens too fast to catch
+     * by polling the pid file; for one that could not start at all, the
+     * supervisor's status says so.
+     */
+    for (int i = 0; i < 200; i++) {
+        if (running(name, NULL)) {
+            printf("svc: %s started\n", name);
+            return 0;
+        }
+        int status = -1;
+        pid_t w = waitpid(pid, &status, COSMO_WNOHANG);
+        if (w == pid) {
+            if (status == 0) {
+                printf("svc: %s ran and finished\n", name);
+                return 0;
+            }
+            fprintf(stderr, "svc: %s: did not start (supervisor exited %d; see " LOG_DIR "/%s)\n", name,
+                    status, name);
+            return 1;
+        }
         cosmo_sleep_ns(1000000ULL);
-    printf("svc: %s started\n", name);
-    return 0;
+    }
+    fprintf(stderr, "svc: %s: did not start within 200 ms\n", name);
+    return 1;
 }
 
 /*
@@ -530,9 +615,18 @@ static int cmd_boot(void)
     if (d == NULL)
         return 0;   /* no services is not an error */
     struct dirent *e;
-    while ((e = readdir(d)) != NULL && n < MAX_SERVICES) {
+    int overflow = 0;
+    while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.')
             continue;
+        if (n == MAX_SERVICES) {
+            /* Not silently: which services got left out would depend on
+             * the order the directory happens to be read in. */
+            fprintf(stderr, "svc: more than %d services; '%s' and any after it were not started\n",
+                    MAX_SERVICES, e->d_name);
+            overflow = 1;
+            continue;
+        }
         snprintf(names[n], NAME_MAX_LEN, "%s", e->d_name);
         loaded[n] = load(names[n], &svcs[n]) == 0;
         n++;
@@ -543,7 +637,7 @@ static int cmd_boot(void)
      * is left when nothing moves is either blocked by a failure or in a
      * cycle, and the two are told apart by whether the dependency
      * loaded at all. */
-    int remaining = n, rc = 0;
+    int remaining = n, rc = overflow;
     while (remaining > 0) {
         int progress = 0;
         for (int i = 0; i < n; i++) {

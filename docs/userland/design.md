@@ -214,11 +214,24 @@ A definition is `key value`, no sections and no expressions:
   limit-nofile 32            any COSMO_RLIMIT_* by name
 ```
 
-**An unknown key is an error, not a warning.** A typo in `root` or
-`user` would otherwise leave a service running with more authority than
-its author wrote down, and the file is the only place that authority is
-stated. The same reason makes an unreadable definition fatal to that
-service rather than a default.
+**A definition that is not understood fails the service**, and that
+covers more than unknown keys. A typo in `root` or `user` would
+otherwise leave a service running with more authority than its author
+wrote down, and the file is the only place that authority is stated.
+So: an unknown key is an error; a number that is not a number is an
+error -- `user daemon` through `atoi` is uid 0, which makes a typo in
+the one key that reduces privilege grant the most of all; a limit that
+cannot be set stops the service rather than running it unrestricted;
+and an unreadable definition is fatal to that service rather than a
+default.
+
+The same rule applies to reporting. `svc start` says a service started
+only when it has seen it running or seen its supervisor finish having
+run it -- reporting success without looking would make `svc boot` start
+the dependents of a service that never ran. And more definitions than
+`svc` can hold is a message naming the first one left out, not silence,
+because which ones were dropped would otherwise depend on the order the
+directory happened to be read in.
 
 This is where the container primitives earn their place: a service is
 confined by naming it in a file, and `svc` does no more than turn those

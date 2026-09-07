@@ -1601,6 +1601,32 @@ static void svc_selftest(void)
     CHECK(svc_run("start", "typo") != 0);
     CHECK(svc_run("status", "typo") != 0);   /* and it is not running */
 
+    /*
+     * U9 again, and the sharper half: a number that is not a number.
+     * `user daemon` through atoi is uid 0, so a typo in the one key
+     * that reduces privilege would have granted the most. Every number
+     * in a definition is parsed strictly, so each of these fails the
+     * service rather than defaulting.
+     */
+    write_file("/etc/svc/baduser", "exec /bin/true\nuser daemon\n");
+    CHECK(svc_run("start", "baduser") != 0);
+    write_file("/etc/svc/badnum", "exec /bin/true\nretries plenty\n");
+    CHECK(svc_run("start", "badnum") != 0);
+    write_file("/etc/svc/badlimit", "exec /bin/true\nlimit-nofile lots\n");
+    CHECK(svc_run("start", "badlimit") != 0);
+
+    /* A service whose program does not exist did not start, and says
+     * so: reporting success would make `svc boot` start its
+     * dependents (U10). */
+    write_file("/etc/svc/missing", "exec /bin/nothing-here\n");
+    CHECK(svc_run("start", "missing") != 0);
+
+    /* And one that runs once and finishes is a success, not a failure
+     * -- it is gone before the pid file can be seen, which is the case
+     * a liveness poll alone gets wrong. */
+    write_file("/etc/svc/oneshot", "exec /bin/true\n");
+    CHECK(svc_run("start", "oneshot") == 0);
+
     /* U8: a service that always fails is restarted, with a wait between
      * tries, and then given up on. Two retries at 60 ms and 120 ms, so
      * a supervisor that did not wait would come back too fast. */
@@ -1669,8 +1695,9 @@ static void svc_selftest(void)
      * kernel's process-count self-test counts processes -- a test that
      * litters is a test that makes another one flaky.
      */
-    static const char *const written[] = { "typo",   "flap",   "broken", "dependent",
-                                           "loop-a", "loop-b", "sleeper" };
+    static const char *const written[] = { "typo",     "flap",    "broken",  "dependent", "loop-a",
+                                           "loop-b",   "sleeper", "baduser", "badnum",    "badlimit",
+                                           "missing",  "oneshot" };
     static const char *const shipped[] = { "hello", "greeter" };
     for (size_t i = 0; i < sizeof(written) / sizeof(written[0]); i++)
         (void)svc_run("stop", written[i]);
