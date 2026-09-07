@@ -68,7 +68,9 @@ image already sits on its port 0 (`ide.0`), so the 8 MiB test disk goes
 on port 1 (`-device ide-hd,drive=sata0,bus=ide.1`); on `virt`, `-device
 ahci,id=ahci0` first and the disk on `ahci0.1`, so the disk is `ahci0p1`
 on both machines. The image is `QEMU_SATADISK` (default `sata.img`
-beside the others). `QEMU_SATA` selects `disk` (default), `cd` (an
+beside the others for a hand-run `make run`; the boot test hands every
+run a fresh zeroed file beside its log, as it does for the NVMe and
+virtio disks, so no run's writes reach the next). `QEMU_SATA` selects `disk` (default), `cd` (an
 `ide-cd` instead: the ATAPI refusal), or `0` (no test disk; `q35` keeps
 the controller with the boot image on it, `virt` has no controller and
 the driver binds nothing).

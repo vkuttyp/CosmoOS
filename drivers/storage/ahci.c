@@ -25,6 +25,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/mutex.h>
 #include <kernel/page.h>
 #include <kernel/percpu.h>
 #include <kernel/printf.h>
@@ -89,12 +90,14 @@ struct ahci_port {
     struct ahci_cmd_table *tables;     /* one per slot */
     dma_addr_t tables_dma;
 
+    struct mutex hotplug;              /* attach, detach, probe and reset: one at a time per port (worker, tests, remove) */
     spinlock_t lock;                   /* active, slots[], disk, the flags below */
     uint32_t active;                   /* slots holding a command */
     struct ahci_slot slots[AHCI_MAX_SLOTS];
     struct ahci_disk *disk;            /* the disk attached, NULL when none */
     bool error;                        /* the handler saw a task-file or bus error: the worker recovers */
     unsigned err_slot;                 /* PxCMD.CCS at that moment */
+    uint32_t err_ci;                   /* PxCI at that moment: which commands the HBA still held */
     bool recovering;                   /* a restart is in progress: submit refuses (-EAGAIN) until the port runs again */
     bool change;                       /* PCS/PRCS: the worker re-reads the port */
     uint64_t issued, completed, errors, resets, releases;
@@ -294,6 +297,29 @@ static void slots_fail(struct ahci_port *p, struct bio *victim, int victim_statu
             s.sync->status = st;
             complete(&s.sync->done);
         }
+    }
+}
+
+/* Complete the slots in `done` with `status`; they are the caller's to
+ * complete (their PxCI bits cleared, or the port is stopped). p->lock held
+ * on entry and exit; dropped around each completion. */
+static void slots_complete_locked(struct ahci_port *p, uint32_t done, int status, arch_irq_state_t *f)
+{
+    while (done) {
+        unsigned slot = (unsigned)__builtin_ctz(done);
+        done &= ~(1u << slot);
+        struct ahci_slot s = p->slots[slot];
+        slot_unmap(p, slot);
+        p->active &= ~(1u << slot);
+        p->completed++;
+        spin_unlock_irqrestore(&p->lock, *f);
+        if (s.bio)
+            bio_complete(s.bio, status);
+        else if (s.sync) {
+            s.sync->status = status;
+            complete(&s.sync->done);
+        }
+        *f = spin_lock_irqsave(&p->lock);
     }
 }
 
@@ -524,7 +550,7 @@ static uint32_t port_signature(struct ahci_port *p)
 
 /* Look at the port and make the disk match: attach one that appeared,
  * detach one that left. Thread context. */
-static void port_probe(struct ahci_port *p)
+static void port_probe_locked(struct ahci_port *p)
 {
     uint32_t sig = port_signature(p);
     bool have = p->disk != NULL;
@@ -537,6 +563,13 @@ static void port_probe(struct ahci_port *p)
         kinfo("ahci%u: port %u: %s (signature 0x%08x) is not driven", p->hba->index, p->index,
               sig == SIG_ATAPI ? "an ATAPI device" : sig == SIG_PMP ? "a port multiplier" : "an unknown device", sig);
     }
+}
+
+static void port_probe(struct ahci_port *p)
+{
+    mutex_lock(&p->hotplug);
+    port_probe_locked(p);
+    mutex_unlock(&p->hotplug);
 }
 
 /* --- the block device ---------------------------------------------------------------------- */
@@ -671,20 +704,27 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
 {
     struct ahci_disk *d = disk_of(bd);
     struct ahci_port *p = d->port;
+    int rc = 0;
+    mutex_lock(&p->hotplug);   /* not while the worker probes or remove detaches */
     if (!present) {
-        if (p->disk != d)
-            return -ENODEV;
+        if (p->disk != d) {
+            rc = -ENODEV;
+            goto out;
+        }
         disk_detach(p, -ENODEV);
-        return 0;
+        goto out;
     }
     if (p->disk == NULL) {
         /* `bd` is unregistered and only names the port: probe it and
          * register a new disk. */
-        port_probe(p);
-        return p->disk != NULL ? 0 : -ENODEV;
+        port_probe_locked(p);
+        rc = p->disk != NULL ? 0 : -ENODEV;
+        goto out;
     }
-    if (p->disk != d)
-        return -EBUSY;
+    if (p->disk != d) {
+        rc = -EBUSY;
+        goto out;
+    }
     /* A live disk: reset the link with whatever is in flight, re-identify,
      * keep this blkdev if the same disk answers (the recovery an error
      * that needs a COMRESET goes through). */
@@ -700,26 +740,29 @@ static int ahci_debug_presence(struct blkdev *bd, bool present)
     spin_unlock_irqrestore(&p->lock, f);
     if (!up || port_signature(p) != SIG_SATA) {
         disk_detach(p, -ENODEV);
-        return -ENODEV;
+        rc = -ENODEV;
+        goto out;
     }
     struct ahci_disk probe;
     memset(&probe, 0, sizeof(probe));
     probe.port = p;
     uint64_t capacity = 0;
     uint32_t sector = 0;
-    int rc = disk_identify(p, &probe, &capacity, &sector);
+    rc = disk_identify(p, &probe, &capacity, &sector);
     if (rc) {
         disk_detach(p, -EIO);
-        return rc;
+        goto out;
     }
     if (strcmp(probe.serial, d->serial) != 0 || capacity != d->bd.capacity || sector != d->bd.sector_size) {
         kinfo("ahci%u: port %u: a different disk answered after the reset (%s)", p->hba->index, p->index,
               probe.serial);
         disk_detach(p, -ENODEV);
-        port_probe(p);
-        return -ENODEV;
+        port_probe_locked(p);
+        rc = -ENODEV;
     }
-    return 0;
+out:
+    mutex_unlock(&p->hotplug);
+    return rc;
 }
 
 static const struct blkdev_ops ahci_blk_ops = {
@@ -740,6 +783,12 @@ static void ahci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
     uint32_t is = rd32(h->abar + AHCI_IS);
     if (is == 0)
         return;
+    /* With a message-signalled interrupt IS is an edge: it is cleared
+     * *first* (§10.7.2.1), so a port event that lands while the ports below
+     * are being served sets its bit again and raises a new message. Cleared
+     * last, that event would be acknowledged unseen and wait for the next
+     * one (the lost-wakeup shape CI found in the xHCI handler). */
+    wr32(h->abar + AHCI_IS, is);
     h->irqs++;
     bool wake = false;
     for (unsigned i = 0; i < h->nports; i++) {
@@ -747,7 +796,7 @@ static void ahci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
             continue;
         struct ahci_port *p = &h->ports[i];
         uint32_t pis = prd(p, PX_IS);
-        pwr(p, PX_IS, pis);   /* write-one-to-clear, before the port's own bit in IS */
+        pwr(p, PX_IS, pis);   /* write-one-to-clear, before the completions are read */
         if (pis & (PXIS_PCS | PXIS_PRCS)) {
             p->change = true;
             wake = true;
@@ -760,6 +809,7 @@ static void ahci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
             if (!p->error) {
                 p->error = true;
                 p->err_slot = PXCMD_CCS(prd(p, PX_CMD));
+                p->err_ci = prd(p, PX_CI);   /* the HBA has halted: what it still holds, and so what completed */
             }
             spin_unlock_irqrestore(&p->lock, f);
             p->errors++;
@@ -768,7 +818,6 @@ static void ahci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
             port_complete(p, 0);
         }
     }
-    wr32(h->abar + AHCI_IS, is);
     if (wake) {
         __atomic_store_n(&h->wake, true, __ATOMIC_RELEASE);
         waitqueue_wake_all(&h->wq);
@@ -788,6 +837,16 @@ static void port_recover(struct ahci_port *p)
     f = spin_lock_irqsave(&p->lock);
     p->error = false;
     unsigned slot = p->err_slot;
+    uint32_t ci = p->err_ci;
+    /* Three kinds of slot at the error (§6.2.2.1): the one that was
+     * executing (PxCMD.CCS) failed; those whose PxCI bit had already
+     * cleared completed before it and are done; those still set in PxCI
+     * the HBA never issued and are reissued once the port runs again.
+     * PxCI itself is gone once ST is cleared, hence the handler's
+     * snapshot. Reissuing every active slot would have run the completed
+     * ones a second time and left their bios waiting (Greptile, PR #53). */
+    uint32_t done = p->active & ~ci & ~(1u << slot);
+    slots_complete_locked(p, done, 0, &f);
     struct ahci_slot s = p->slots[slot];
     bool failed = (p->active & (1u << slot)) != 0;
     if (failed) {
@@ -795,10 +854,11 @@ static void port_recover(struct ahci_port *p)
         p->active &= ~(1u << slot);
         p->completed++;
     }
-    uint32_t reissue = p->active;
+    uint32_t reissue = p->active & ci;
     spin_unlock_irqrestore(&p->lock, f);
-    kwarn("ahci%u: port %u: task file error (PxTFD 0x%08x, PxSERR 0x%08x) in slot %u; %u command(s) reissued",
-          p->hba->index, p->index, tfd, serr, slot, (unsigned)__builtin_popcount(reissue));
+    kwarn("ahci%u: port %u: task file error (PxTFD 0x%08x, PxSERR 0x%08x) in slot %u; %u completed, %u reissued",
+          p->hba->index, p->index, tfd, serr, slot, (unsigned)__builtin_popcount(done),
+          (unsigned)__builtin_popcount(reissue));
     if (failed) {
         if (s.bio)
             bio_complete(s.bio, -EIO);
@@ -918,6 +978,7 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
         h->ports[i].hba = h;
         h->ports[i].index = i;
         spinlock_init(&h->ports[i].lock, "ahci-port");
+        mutex_init(&h->ports[i].hotplug, "ahci-hotplug");
     }
 
     pci_enable_device(pdev, true);
@@ -1044,14 +1105,19 @@ static void ahci_remove(struct pci_device *pdev)
     struct ahci *h = pdev->dev.drvdata;
     if (h == NULL)
         return;
-    /* Disks first (their commands -ENODEV), then the worker, then the
-     * controller, then the memory. */
-    for (unsigned i = 0; i < h->nports; i++)
-        if (h->ports[i].implemented)
-            disk_detach(&h->ports[i], -ENODEV);
+    /* The worker first, so no probe can attach a disk behind the detach
+     * pass below (Greptile, PR #53); then the disks (their commands
+     * -ENODEV), then the controller, then the memory. */
     __atomic_store_n(&h->stop, true, __ATOMIC_RELEASE);
     waitqueue_wake_all(&h->wq);
     thread_join(h->worker);
+    for (unsigned i = 0; i < h->nports; i++) {
+        if (h->ports[i].implemented) {
+            mutex_lock(&h->ports[i].hotplug);
+            disk_detach(&h->ports[i], -ENODEV);
+            mutex_unlock(&h->ports[i].hotplug);
+        }
+    }
     wr32(h->abar + AHCI_GHC, rd32(h->abar + AHCI_GHC) & ~GHC_IE);
     for (unsigned i = 0; i < h->nports; i++) {
         if (h->ports[i].implemented) {

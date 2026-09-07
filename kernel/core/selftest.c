@@ -280,6 +280,7 @@ static const struct selftest tests[] = {
     { "mutex",           selftest_mutex },
     { "semaphore",       selftest_semaphore },
     { "completion",      selftest_completion },
+    { "completion-race", selftest_completion_race },
     { "waitqueue",       selftest_waitqueue },
     { "smp-online",      selftest_smp_online },
     { "smp-affinity",    selftest_smp_affinity },

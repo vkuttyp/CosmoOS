@@ -262,8 +262,19 @@ def main():
     nvmedisk = args.log + ".nvme.img"
     with open(nvmedisk, "wb") as f:
         f.truncate(8 * 1024 * 1024)
+    # The USB and SATA test disks too (docs/drivers/usb/, docs/drivers/ahci/):
+    # every run starts from a zeroed image, so no run's writes reach the
+    # next -- the firmware enumerates both disks before the kernel runs.
+    usbdisk = args.log + ".usb.img"
+    with open(usbdisk, "wb") as f:
+        f.truncate(8 * 1024 * 1024)
+    satadisk = args.log + ".sata.img"
+    with open(satadisk, "wb") as f:
+        f.truncate(8 * 1024 * 1024)
     env["QEMU_TESTDISK"] = testdisk
     env["QEMU_NVMEDISK"] = nvmedisk
+    env["QEMU_USBDISK"] = usbdisk
+    env["QEMU_SATADISK"] = satadisk
     env["QEMU_VCON"] = vcon
 
     # Phase 8: the network harness (only for normal runs with self-tests).
@@ -283,14 +294,48 @@ def main():
         shelltest = ShellTest()
     print(f"boot-test: booting {args.image} (timeout {args.timeout:.0f}s)")
     start = time.monotonic()
-    with open(args.log, "wb") as log:
-        proc = subprocess.Popen(
+
+    # The firmware occasionally never hands over on this host: QEMU runs,
+    # OVMF clears the screen and then sits in device connection forever,
+    # with no loader banner and no kernel output at all (measured at about
+    # 6 % of x86_64 boots on TCG, the same with and without the USB and SATA
+    # test devices). That is a host-side stall the kernel never saw, so a
+    # boot that shows *nothing* of ours within FIRMWARE_HANDOVER_S is killed
+    # and started once more; any boot that printed the loader banner is
+    # never retried, so a kernel that hangs still fails.
+    FIRMWARE_HANDOVER_S = 30.0
+
+    def launch(log):
+        return subprocess.Popen(
             [runner, args.image],
             stdin=subprocess.PIPE if shelltest is not None else subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
             env=env,
         )
+
+    def handed_over(path, proc, deadline):
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                return True   # it exited: whatever happened is in the log, not a stall
+            with open(path, "rb") as f:
+                if b"cosmoboot-uefi" in f.read():
+                    return True
+            time.sleep(0.5)
+        return False
+
+    log = open(args.log, "wb")
+    proc = launch(log)
+    if not handed_over(args.log, proc, time.monotonic() + FIRMWARE_HANDOVER_S):
+        proc.kill()
+        proc.wait()
+        log.close()
+        print(f"boot-test: the firmware did not hand over within {FIRMWARE_HANDOVER_S:.0f}s (no loader banner); "
+              "retrying the boot once")
+        start = time.monotonic()
+        log = open(args.log, "wb")
+        proc = launch(log)
+    with log:
         net_thread = None
         if nettest is not None:
             net_thread = threading.Thread(target=nettest.run_when_ready, args=(args.log, proc, args.timeout - 30),

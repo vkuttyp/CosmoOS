@@ -127,6 +127,17 @@ Found while building, each by a test that then guards it:
 - The benchmark's writes over `nvme0n1` destroyed the cosmofs the nvme
   test leaves there for the shell's snapshot test. Writes are on `sda`
   only.
+- (CI, on the AHCI unit's PR.) The interrupt handler drained the event
+  ring, then wrote `ERDP` with `EHB` — and an event that landed between
+  the "caught up" check and that write raised no interrupt, because
+  `EHB` was still set, and sat there until the next event, which for a
+  serial device waiting on exactly that event never came. The new
+  four-thread benchmark on `sda` hit it on CI's slower aarch64 machine:
+  a read hung to the 10 s timeout, and with nobody reading the ring the
+  controller reported Event Ring Full (completion code 21) and was
+  declared dead. The handler now looks at the ring once more after
+  clearing `EHB` and handles what it finds; the same edge-triggered
+  hazard was closed in the AHCI handler by clearing `IS` first.
 - (Review, PR #51.) The timeout path freed the exchange slot the moment
   the cancelled transfer's callback ran, before the device was reset; a
   bio submitted from another CPU in that window started an exchange on

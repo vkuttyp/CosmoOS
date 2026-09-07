@@ -98,6 +98,21 @@ to the controller's requester (`00fa`, `pci:00:1f.2` on `q35`).
   and `submit` refuses `-EAGAIN`; the same shape the USB unit's review
   found in its storage driver, found here by the test that review
   produced.
+- (From the USB finding above, by review.) `IS` was acknowledged after
+  the ports had been served; with a message-signalled interrupt it is an
+  edge, and a port event landing while the ports were served would have
+  been acknowledged unseen (§10.7.2.1). `IS` is cleared first now, so
+  such an event sets its bit again and raises a new message.
+- (Review, PR #53.) Two findings without a reproducer in QEMU, fixed by
+  review: `remove` detached the disks before stopping the worker, so a
+  probe in flight could attach a new disk behind the pass and leave it
+  registered over freed memory (the worker is joined first now, and
+  attach/detach/probe/reset are serialised per port by a mutex); and
+  the error recovery reissued every active slot, including those whose
+  `PxCI` bit had cleared before the error — commands that had completed
+  would have run twice and their bios waited (the handler snapshots
+  `PxCI` at the error, and the worker completes the cleared ones, fails
+  the executing one and reissues only the rest).
 - (Reintroduction.) With the detach path's `slots_fail` removed, the bio
   in flight at `ahci-unplug`'s detach never completes and the test fails
   at its "completed, with the right error" step; with it, the bio

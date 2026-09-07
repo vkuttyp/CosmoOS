@@ -3,7 +3,11 @@
  *
  * complete() may be called from interrupt context; wait_for_completion()
  * may not. Once completed it stays completed; waiters after the fact
- * return immediately.
+ * return immediately. When wait_for_completion returns, complete() has
+ * finished touching the completion, so a caller may free it (it usually
+ * lives on the caller's stack). completion_done() alone gives no such
+ * guarantee: a poller that saw it true must still call
+ * wait_for_completion before the memory goes.
  */
 
 #ifndef KERNEL_COMPLETION_H

@@ -148,12 +148,16 @@ completion on the caller's stack.
 byte) stops the port's command processing; §6.2.2.1's recovery is done
 on the worker thread: `PxCMD.ST` clear, wait `CR`; `PxSERR` cleared;
 if `PxTFD.STS.BSY|DRQ` are still set, a COMRESET (`PxSCTL.DET` = 1 for
-1 ms, then 0, wait for `PxSSTS.DET` = 3); `ST` set. The command in
-progress (`PxCMD.CCS`) fails with `-EIO`; the other outstanding
-commands, which the HBA had not issued, are reissued — their slots are
-still valid and their `PxCI` bits are written again. The handler only
-notes the error and wakes the worker, because the recovery waits on
-registers.
+1 ms, then 0, wait for `PxSSTS.DET` = 3); `ST` set. The handler notes
+the error, `PxCMD.CCS` (the slot that was executing) and a snapshot of
+`PxCI`, and wakes the worker, because the recovery waits on registers
+and because `PxCI` is gone once `ST` is cleared. The worker then sorts
+the active slots by that snapshot: the executing one fails `-EIO`;
+those whose `PxCI` bit had already cleared completed before the error
+and are completed now with success; those still set were never issued
+and are written to `PxCI` again once the port runs. (Reissuing every
+active slot would have run the completed ones twice and left their bios
+waiting — review, PR #53.)
 
 **The block layer's timeout** (`blkdev_ops.timeout`, its thread) runs the
 same port restart synchronously: the victim completes `-ETIMEDOUT`, and
@@ -180,7 +184,10 @@ link. `ahci-reset` uses it with reads in flight.
 
 `PxIS.PCS` (connect status change) and `PRCS` (PhyRdy change) wake the
 controller's worker (`ahci/<n>`), which re-reads the port after a 100 ms
-debounce: `DET` = 3 with a SATA signature and no disk → identify and
+debounce. Attach, detach, probe and the reset on demand are serialised
+per port by a mutex (`hotplug`) held by the worker, the test-only
+operations and removal, so a probe cannot run against a detach in
+progress. The worker's rule: `DET` = 3 with a SATA signature and no disk → identify and
 register; `DET` ≠ 3 with a disk → the disk is gone. Gone means: the
 port stopped, every outstanding command completed `-ENODEV`,
 `blk_unregister` (which refuses new bios and waits for submits in
@@ -198,9 +205,12 @@ physical pull is by hand with QMP.
 
 ## Removal
 
-`remove`: every port's disk gone (as above, `-ENODEV`), every port
-stopped, `GHC.IE` cleared, the vector released and synchronised, the
-worker stopped, memory freed, ABAR unmapped.
+`remove`: the worker stopped and joined *first* — a probe still in
+flight could otherwise attach a disk behind the detach pass and leave a
+blkdev registered over freed memory (review, PR #53) — then every
+port's disk gone (as above, `-ENODEV`), every port stopped, `GHC.IE`
+cleared, the vector released and synchronised, memory freed, ABAR
+unmapped.
 
 ## The harness
 

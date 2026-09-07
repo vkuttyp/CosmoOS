@@ -132,6 +132,18 @@ Nothing is within a factor of two of the 8 s budget. The four new tests
 add about 3.5 s to a debug boot; the boot test as a whole is 18 to 22 s
 under TCG.
 
+**A boot the firmware never hands over.** On this host OVMF under TCG
+clears the screen and then sits in device connection forever, with no
+loader banner and no kernel output, in about 6 % of x86_64 boots —
+measured at 2 of 32 in a controlled run during the AHCI unit, the same
+rate with and without the USB and SATA test devices, so it is not a
+device the kernel adds. `run_boot_test.py` therefore kills and restarts
+a boot once when no `cosmoboot-uefi` banner has appeared within 30 s,
+saying so on its own output. A boot that printed the banner is never
+retried, so a kernel that hangs still fails; a boot that stalls twice
+fails as before, with the serial log showing only the firmware's escape
+sequences.
+
 ## Results
 
 | Run | Result |
