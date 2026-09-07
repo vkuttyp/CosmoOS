@@ -654,19 +654,28 @@ bool selftest_cache_limits(const char **reason)
  * vnode is a bare one on the root mount with no ops, so the release has
  * nothing to sync or evict: this is a test of the cache protocol alone.
  */
+/*
+ * The handshake is release/acquire, not volatile: the driver publishes
+ * `vn` and then bumps `generation` with a release, and a racer that
+ * acquires the new generation is thereby guaranteed to see the new `vn`
+ * and not the previous round's, which has been freed. The first version
+ * used volatile loads, which order nothing on a weakly ordered machine
+ * and passed only because QEMU's TCG does not reorder loads as silicon
+ * does -- a test of vnode_put's ordering with an ordering bug of its own.
+ */
 struct put_racer {
-    struct vnode *volatile vn;      /* the vnode to drop, or NULL */
-    volatile unsigned generation;   /* bumped by the driver for each round */
-    volatile unsigned acks;         /* racers that have dropped this round */
-    volatile unsigned stop;
+    struct vnode *vn;       /* the vnode to drop; published before `generation` */
+    unsigned generation;    /* bumped (release) by the driver for each round */
+    unsigned acks;          /* racers that have dropped this round */
+    unsigned stop;
 };
 
 static void put_racer_main(void *arg)
 {
     struct put_racer *r = arg;
     unsigned seen = 0;
-    while (!r->stop) {
-        unsigned g = r->generation;
+    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE)) {
+        unsigned g = __atomic_load_n(&r->generation, __ATOMIC_ACQUIRE);
         if (g == seen) {
             /* Spin, not yield: the point is to arrive at the drop at the
              * same instant as the others, and a yield hands that instant
@@ -674,7 +683,7 @@ static void put_racer_main(void *arg)
             continue;
         }
         seen = g;
-        struct vnode *vn = r->vn;
+        struct vnode *vn = __atomic_load_n(&r->vn, __ATOMIC_ACQUIRE);
         vnode_put(vn);
         __atomic_fetch_add(&r->acks, 1u, __ATOMIC_RELEASE);
     }
@@ -718,15 +727,15 @@ bool selftest_vfs_put_race(const char **reason)
         vnode_hash_insert(vn);
         for (unsigned i = 1; i < racers; i++)
             vnode_get(vn);
-        r.vn = vn;
-        r.acks = 0;
+        __atomic_store_n(&r.vn, vn, __ATOMIC_RELEASE);
+        __atomic_store_n(&r.acks, 0u, __ATOMIC_RELEASE);
         __atomic_fetch_add(&r.generation, 1u, __ATOMIC_RELEASE);
         uint64_t deadline = clock_now_ns() + 2ull * NS_PER_SEC;
         while (__atomic_load_n(&r.acks, __ATOMIC_ACQUIRE) < racers && clock_now_ns() < deadline)
             sched_yield();
-        CHECK(r.acks == racers);
+        CHECK(__atomic_load_n(&r.acks, __ATOMIC_ACQUIRE) == racers);
     }
-    r.stop = 1;
+    __atomic_store_n(&r.stop, 1u, __ATOMIC_RELEASE);
     for (unsigned i = 0; i < racers; i++)
         if (t[i])
             thread_join(t[i]);
