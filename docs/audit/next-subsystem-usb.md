@@ -221,18 +221,21 @@ Driver-facing, in `drivers/include/drivers/usb.h` and exported from the
 Kernel-facing: one small, known addition, and otherwise **none is
 planned — that is the hypothesis being tested**, as it was for the NIC.
 
-The known one: `struct iommu_stats` gains `last_fault_sid` and
-`last_fault_addr`. Today `iommu_note_fault` bumps the count with a
-lock-free atomic and takes no lock at all; it will instead take the
-stats lock `g_lock` — the IRQ-safe lock `iommu_get_stats` already
-copies under — and write the two fields and the count in that one
-critical section, so a reader that sees the count advance sees the
-fields that belong to it. One slot, not a ring, because the test that
-reads it provokes faults one device at a time (below), every event a
-single operation produces comes from the same requester, and nothing
-else faults during a boot that passes. Without this the `usb-iommu` check would be
-an assertion the test cannot make. Observability, not an interface
-change; NVMe's existing check gains the same assertion.
+The known one: `struct iommu_stats` gains a fault tally **per
+requester** — `struct { uint32_t sid; uint64_t faults; }
+by_requester[8]`, the first eight requester ids to fault, filled by
+`iommu_note_fault` under the stats lock `g_lock` (the IRQ-safe lock
+`iommu_get_stats` already copies under; today the fault path takes no
+lock and bumps the count with an atomic). A tally, not a "last fault"
+slot: a slot needs the reader to know the burst is over, and the SMMU
+delivers its 256 events for one operation in batches with gaps, so
+"the count stopped moving" can be a gap. A per-requester count needs no
+quiescence at all — the test asks whether *this* requester's count rose
+after *this* provocation, and a late event from the previous device's
+burst lands in the previous device's tally where it belongs. Without
+this the `usb-iommu` check would be an assertion the test cannot make.
+Observability, not an interface change; NVMe's existing check gains the
+same assertion.
 
 Two places where the hypothesis proper may fail, named now so a change
 there is a finding and not a surprise:
@@ -315,21 +318,20 @@ against the export list before the first boot.
   device and checking that the fault the unit reports carries *the
   controller's* requester id for `sda` — the disk has none — which is
   the DMA-through-the-controller rule made observable. Today the test
-  cannot see that: `iommu_get_stats` has only counts, and
+  cannot see that: `iommu_get_stats` has only a total, and
   `iommu_note_fault` puts the requester id in the log alone. So
-  `struct iommu_stats` gains `last_fault_sid` and `last_fault_addr`,
-  recorded with the count under the stats lock — the one kernel change
-  this report knows it needs, listed under New APIs. The test is
-  serial on purpose: provoke one device, wait until the fault count has
-  advanced and then stopped moving (the fault interrupt is asynchronous,
-  and one operation is not one event: VT-d reports it once, the SMMU
-  256 times because the controller retries — `docs/kernel/iommu/
-  testing.md` records both; the existing test already waits for the
-  count), read the two fields, then the next device. Every event of the
-  burst carries the same requester id, so the last one written is the
-  one asked about; a fault from another device cannot land in the slot
-  because none has been provoked yet, and the count's not moving is what
-  says the burst is over.
+  `struct iommu_stats` gains a per-requester fault tally — the one
+  kernel change this report knows it needs, listed under New APIs. Per
+  device the test reads the tally for the requester it expects (the
+  controller's `iommu_sid` for `sda`, the NVMe function's for
+  `nvme0n1`), provokes, and waits — bounded, as the existing test
+  already waits for the asynchronous fault interrupt — for *that*
+  requester's count to rise. Nothing about the shape of the burst
+  matters: one operation is one event on VT-d and 256 on the SMMU,
+  delivered in batches (`docs/kernel/iommu/testing.md` records both),
+  and a straggler from the previous device's burst arrives after the
+  next device was provoked, is counted under the previous requester, and
+  changes nothing. Attribution by counting, not by ordering.
 - **Shapes**: `QEMU_USB=0` (skips), `QEMU_IOMMU=0`, `QEMU_SMP=1`,
   release, aarch64 (xHCI on `virt`'s PCI with the SMMU in front),
   `test-crash`, `analyze`, `fuzz` (the descriptor parser gets a host
