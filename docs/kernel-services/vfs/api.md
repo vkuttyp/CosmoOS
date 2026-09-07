@@ -30,8 +30,9 @@ walked before the last one), `VNODE_HASH` 64 (per-mount vnode buckets).
   operations). A NULL callback yields `-ENOTSUP` from the VFS entry.
 - `struct vnode`: kobject, `mnt`, `ino`, `type`, `mode`, `uid`, `gid`,
   `nlink`, `size`, `mtime_ns`, `ctime_ns`, `ops`, `fs_priv`, page cache
-  `pc`, `lock`, `covered_by` (a mount whose root replaces this
-  directory), `hash_link`, `flags` (`VNODE_PINNED`: the filesystem holds
+  `pc`, `lock`, `covers` (the mounts whose root replaces this
+  directory, read under the vnode's own lock; at most one today),
+  `hash_link`, `flags` (`VNODE_PINNED`: the filesystem holds
   a reference while the node is linked; `VNODE_DEAD`: unlinked, no new
   lookups).
 - `struct fs_type`: `name`, `mount(fs, bdev, flags, mnt)` (must set
