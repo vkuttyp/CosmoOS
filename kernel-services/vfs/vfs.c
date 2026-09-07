@@ -72,6 +72,7 @@ struct vnode *vnode_alloc(struct mount *mnt, uint64_t ino)
     mutex_init(&vn->lock, "vnode");
     pagecache_init(&vn->pc);
     list_init(&vn->hash_link);
+    list_init(&vn->covers);
     return vn;
 }
 
@@ -224,6 +225,7 @@ static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsign
     mutex_init(&mnt->rename_lock, "rename");
     mutex_init(&mnt->sync_lock, "mount-sync");
     list_init(&mnt->link);
+    list_init(&mnt->cover_link);
     return mnt;
 }
 
@@ -250,6 +252,36 @@ static int do_mount(struct fs_type *fs, struct blkdev *bdev, unsigned flags, str
         blkdev_get(bdev);
     *out = mnt;
     return 0;
+}
+
+/*
+ * The mount covering `dir`, or NULL. The caller holds dir->lock, which
+ * is what made the old single pointer safe against a concurrent umount
+ * and is what makes this list safe: umount removes its entry under the
+ * same lock. With one namespace the list holds at most one entry.
+ */
+static struct mount *covering_mount(const struct vnode *dir)
+{
+    struct mount *m;
+    list_for_each_entry(m, &dir->covers, cover_link)
+        return m;
+    return NULL;
+}
+
+/*
+ * The same question asked of a child whose parent the caller already
+ * holds: rename and unlink check whether the entry they are about to
+ * move or remove is a mountpoint. The lock is taken as a child, which
+ * is the order the rest of the VFS uses (V7) and what keeps lockdep
+ * satisfied; a caller that already holds the vnode's own lock calls
+ * covering_mount directly instead.
+ */
+static bool is_mountpoint_child(struct vnode *vn)
+{
+    mutex_lock_nested(&vn->lock, VNODE_NESTED_CHILD);
+    bool covered = covering_mount(vn) != NULL;
+    mutex_unlock(&vn->lock);
+    return covered;
 }
 
 int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigned flags)
@@ -279,7 +311,7 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
     mutex_lock(&dir->lock);
     /* No stacking: a directory that is already a mountpoint (the lookup
      * followed it, so `dir` is that mount's root) or the global root. */
-    if (dir->covered_by != NULL || dir->mnt->root == dir) {
+    if (covering_mount(dir) != NULL || dir->mnt->root == dir) {
         mutex_unlock(&dir->lock);
         mutex_unlock(&g_mounts_lock);
         fs->unmount(mnt);
@@ -292,7 +324,7 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
     }
     mnt->mountpoint = dir;          /* keeps the lookup reference */
     mnt->parent = dir->mnt;
-    dir->covered_by = mnt;
+    list_push_back(&dir->covers, &mnt->cover_link);
     mutex_unlock(&dir->lock);
     list_push_back(&g_mounts, &mnt->link);
     g_nr_mounts++;
@@ -360,7 +392,8 @@ int vfs_umount2(const char *path, unsigned flags)
     if (flags & VFS_UMOUNT_FORCE)
         kwarn("vfs: %s: forced unmount, open transaction dropped", path);
     mutex_lock(&mp->lock);
-    mp->covered_by = NULL;
+    list_remove(&mnt->cover_link);
+    list_init(&mnt->cover_link);
     mutex_unlock(&mp->lock);
     list_remove(&mnt->link);
     g_nr_mounts--;
@@ -447,11 +480,11 @@ static int follow_mount(struct vnode **vnp)
     struct vnode *dir = *vnp;
     for (unsigned depth = 0; depth < 16; depth++) {
         /* Taken under dir->lock: vfs_umount sets `unmounting` and, when
-         * it proceeds, clears covered_by under the same lock, so a walker
+         * it proceeds, removes its cover entry under the same lock, so a walker
          * either already holds the root (the reference scan sees it) or
          * is turned away. */
         mutex_lock(&dir->lock);
-        struct mount *m = dir->covered_by;
+        struct mount *m = covering_mount(dir);
         if (m && m->unmounting) {
             mutex_unlock(&dir->lock);
             vnode_put(dir);
@@ -1087,8 +1120,8 @@ static int remove_entry(struct vnode *start, const char *path, bool dir)
             rc = -ENOTDIR;
         else if (!dir && victim->type == VNODE_DIR)
             rc = -EISDIR;
-        else if (victim->covered_by != NULL || victim->mnt != parent->mnt)
-            rc = -EBUSY;   /* a mountpoint or a mount root */
+        else if (covering_mount(victim) != NULL || victim->mnt != parent->mnt)
+            rc = -EBUSY;   /* a mountpoint or a mount root; victim->lock is held */
         else if (sticky_denies(parent, victim))
             rc = -EACCES;  /* a sticky directory: only the owner of the entry, the directory or root */
         else if (dir)
@@ -1245,7 +1278,7 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
         bool changed = rc == 0 && victim != victim0;   /* unlinked and re-created meanwhile */
         vnode_put(victim0);
         if (rc == 0 && !changed) {
-            if (victim->covered_by || victim->mnt != odir->mnt) {
+            if (is_mountpoint_child(victim) || victim->mnt != odir->mnt) {
                 rc = -EBUSY;
             } else if (sticky_denies(odir, victim)) {
                 rc = -EACCES;
@@ -1258,7 +1291,7 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
                     rc = -EISDIR;
                 else if (replaced->type != VNODE_DIR && victim->type == VNODE_DIR)
                     rc = -ENOTDIR;
-                else if (replaced->covered_by || replaced->mnt != odir->mnt)
+                else if (is_mountpoint_child(replaced) || replaced->mnt != odir->mnt)
                     rc = -EBUSY;
                 else if (sticky_denies(ndir, replaced))
                     rc = -EACCES;

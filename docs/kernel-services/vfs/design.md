@@ -21,7 +21,7 @@ struct vnode {
     void *fs_priv;
     struct pagecache pc;            /* regular files */
     struct mutex lock;              /* size, links, directory contents, fs_priv */
-    struct mount *covered_by;       /* a mount whose root replaces this directory */
+    struct list_node covers;        /* mounts whose root replaces this directory */
     struct list_node hash_link;     /* mount->vnodes[ino % VNODE_HASH] */
     unsigned flags;                 /* VNODE_PINNED (fs holds a reference), VNODE_DEAD */
 };
@@ -62,7 +62,8 @@ struct mount {
     void *fs_priv;
     unsigned flags;                           /* MOUNT_RDONLY */
     struct list_node vnodes[VNODE_HASH];      /* 64 buckets; cached vnodes by ino */
-    struct mutex lock;                        /* the hash and covered_by pointers */
+    struct list_node cover_link;              /* mountpoint->covers */
+    struct mutex lock;                        /* the hash */
     struct list_node link;                    /* g_mounts */
     unsigned nr_vnodes;
     uint64_t next_ino;                        /* for filesystems that number in memory */
@@ -79,7 +80,7 @@ struct file {
 
 Path resolution (`vfs_walk`): start at the process's root (the global
 root in this phase), take one component at a time under the parent's
-`lock`, call `ops->lookup`, then follow `covered_by` to a mount's root
+`lock`, call `ops->lookup`, then follow `covers` to a mount's root
 (and `..` at a mount root back to the mountpoint's parent). Every step
 holds a reference to the current vnode and drops the previous one, so
 an unmount cannot free a directory under a walker (unmount fails with
@@ -91,6 +92,23 @@ directory (`-ENOTDIR` otherwise; `vfs_open` treats it as
 are limited to `VFS_NAME_MAX` (255) bytes and paths to `VFS_PATH_MAX`
 (1024); more than 40 components or a walk through a dead vnode fails.
 Symbolic links do not exist.
+
+A mountpoint carries the mounts covering it on a list, `vnode.covers`,
+rather than a single `covered_by` pointer. The list holds at most one
+entry today and the behaviour is exactly what the pointer gave; it is a
+list because a directory can be a mountpoint in one mount namespace and
+an ordinary directory in another, which is where this is going.
+
+The lock discipline is deliberately unchanged, since it is the part that
+is easy to get wrong: the list is protected by the mountpoint vnode's
+own lock, exactly as the pointer was. `follow_mount` reads it under that
+lock and `vfs_umount` removes from it under the same lock, so a walker
+either already holds the mounted root or is turned away by the
+`unmounting` flag. Which of the two accessors a caller uses is decided
+by what it already holds: `covering_mount` for a caller holding the
+vnode's lock (`remove_entry`, on the victim), `is_mountpoint_child` for
+one holding only the parent (`rename`), which takes the lock as a child
+in the V7 order.
 
 Mount and unmount: `vfs_mount` refuses a target that is already covered
 by a mount, is itself a mount's root, or is `/` (`-EBUSY`): mounts do
