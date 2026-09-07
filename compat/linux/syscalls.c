@@ -1530,7 +1530,7 @@ static int64_t lx_accept(struct syscall_args *a)
     int serr = 0;
     struct socket *s = sock_of_err((int)a->a[0], HANDLE_RIGHT_SOCK_ACCEPT, &serr);
     if (s == NULL)
-        return -EBADF;
+        return serr;
     struct socket *c;
     struct netaddr peer;
     int rc = ksock_accept(s, &c, &peer);

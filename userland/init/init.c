@@ -242,15 +242,13 @@ static void net_selftest(void)
          * CONNECT and SHUTDOWN removed; it must be refused there too,
          * or the restriction lasts only until the holder switches ABI.
          */
-        int lent = dup_rights(full, -1,
-                              COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_TRANSFER |
-                                  COSMO_RIGHT_SOCK_ACCEPT);
+        int lent = dup_rights(full, -1, COSMO_RIGHT_READ | COSMO_RIGHT_WRITE | COSMO_RIGHT_TRANSFER);
         CHECK(lent >= 0);
         struct spawn_handle lxmap[] = { { .child = 0, .parent = 0 },
                                         { .child = 1, .parent = 1 },
                                         { .child = 2, .parent = 2 },
                                         { .child = 3, .parent = lent } };
-        static const char *const lxr_argv[] = { "lxrights", "cs", NULL };
+        static const char *const lxr_argv[] = { "lxrights", "acs", NULL };
         pid_t lxp = spawnve("/boot/tests/linux/lxrights", lxr_argv, NULL, lxmap, 4);
         CHECK(lxp > 1);
         int lxst = -1;
