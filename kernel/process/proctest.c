@@ -514,6 +514,91 @@ bool selftest_tty_ttin(const char **reason)
     return true;
 }
 
+/*
+ * Non-canonical mode, driven from both ends: the probe claims the
+ * terminal and turns canonical mode off, this side types one byte, and
+ * the probe must read it without a newline ever arriving.
+ */
+static bool run_tty_probe(const char *kind, const uint8_t *type, size_t n, const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    struct tty *t = tty_console();
+    const char *argv[] = { "init", "--probe", kind, NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    uint64_t deadline = clock_now_ns() + 5000000000ULL;
+    while (tty_foreground_pgrp(t) != pid && clock_now_ns() < deadline)
+        sched_yield();
+    if (tty_foreground_pgrp(t) != pid) {
+        process_put(p);
+        *reason = "the probe never claimed the terminal";
+        return false;
+    }
+    /*
+     * Wait for the mode, not for a handshake: a byte typed while the
+     * line discipline is still canonical would be edited rather than
+     * delivered, and the probe has no handle to say "ready" on. The
+     * terminal's own state is the readiness signal.
+     */
+    if (n) {
+        deadline = clock_now_ns() + 5000000000ULL;
+        struct cosmo_termios tio;
+        for (;;) {
+            tty_get_termios(t, &tio);
+            if (!(tio.modes & COSMO_TTY_ICANON) || clock_now_ns() >= deadline)
+                break;
+            sched_yield();
+        }
+        if (tio.modes & COSMO_TTY_ICANON) {
+            process_put(p);
+            *reason = "the probe never left canonical mode";
+            return false;
+        }
+        tty_input(t, type, n);
+    }
+    int status = process_wait_exit(p);
+    process_put(p);
+    if (status != 0) {
+        kwarn("selftest: %s: the probe failed check %d", kind, status);
+        *reason = "the terminal-mode probe reported a failure";
+        return false;
+    }
+    return true;
+}
+
+bool selftest_tty_raw(const char **reason)
+{
+    static const uint8_t x = 'x';
+    return run_tty_probe("tty-raw", &x, 1, reason);
+}
+
+bool selftest_tty_nosig(const char **reason)
+{
+    static const uint8_t intr = 0x03;   /* ^C, which must arrive as a byte */
+    return run_tty_probe("tty-nosig", &intr, 1, reason);
+}
+
+bool selftest_tty_isatty(const char **reason)
+{
+    return run_signal_probe("tty-isatty", reason);
+}
+
+bool selftest_dev_tty(const char **reason)
+{
+    return run_tty_probe("dev-tty", NULL, 0, reason);
+}
+
+bool selftest_dev_tty_none(const char **reason)
+{
+    return run_signal_probe("dev-tty-none", reason);
+}
+
 bool selftest_tty_intr(const char **reason)
 {
     const void *image;

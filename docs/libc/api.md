@@ -105,8 +105,8 @@ An unknown conversion prints the `%` and the character.
   `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_DIRECTORY` (the native
   `COSMO_O_*` values); `read`, `write`, `close`, `lseek`, `unlink`,
   `rmdir`, `rename`, `mkdir(path, mode)`, `sync`, `access(path, mode)`
-  (`stat` plus a mode-bit check for `X_OK`), `isatty(fd)` (`fstat` and
-  `S_ISCHR`; sets `ENOTTY`), `getpid`, `getppid`, `chdir`, `getcwd(buf,
+  (`stat` plus a mode-bit check for `X_OK`), `isatty(fd)` (a successful
+  `tcgetattr`; sets `ENOTTY`), `getpid`, `getppid`, `chdir`, `getcwd(buf,
   size)` (NULL `buf` allocates), `dup`, `dup2`, `pipe`, `sleep`
   (seconds), `usleep`, `nanosleep` (through `SYS_sleep_ns`; at most one
   hour), `clock_gettime(CLOCK_MONOTONIC, ts)`.

@@ -161,7 +161,8 @@ copies use bounded kernel buffers (`readv` one iovec at a time,
 `pread64`/`sendto` in 4 KiB chunks, `getdents64`/`recvfrom` at most 64
 KiB). A Linux process can obtain nothing the native ABI would refuse.
 Check: `lxtest` (`close` twice `-EBADF`, `stat` of a missing path
-`-ENOENT`, `ioctl` `-ENOTTY`, `F_GETFL` reflects the pipe end's rights);
+`-ENOENT`, `ioctl` `-ENOTTY` on a plain file, `F_GETFL` reflects the pipe
+end's rights);
 review. Gap: no hostile-pointer sweep over the Linux table like `init
 --selftest`'s over the native one.
 
@@ -224,9 +225,10 @@ kernel's `unistd.h` tables.
   job-control unit, `wait4` included.)
 - `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
   unless the path is absolute; the VFS has no `openat` semantics yet.
-- `uname` reports a kernel release that is not the kernel's; `ioctl` is
-  `-ENOTTY` for every request, so Linux libcs never see the console as a
-  terminal.
+- `uname` reports a kernel release that is not the kernel's; `ioctl`
+  answers only the three terminal requests, so a Linux libc sees the
+  console as a terminal but gets `-ENOTTY` for everything else
+  (`FIONBIO` among them: non-blocking I/O still cannot be asked for).
 - `getdents64`'s `d_off` is not a seekable directory cookie.
 - Linux errno values pass through unchanged because the native numbers
   were chosen to match; a future native errno that Linux lacks would need

@@ -93,13 +93,56 @@ without which the shell could never claim the console after the
 self-tests have used it. Check: `tty-intr` (a second session refused,
 the release asserted after the leader exits).
 
+**T10. A terminal is left usable.** Releasing a terminal -- which
+happens when its session leader exits -- resets the modes as well as the
+foreground group. A program that dies in raw mode has no shell left to
+restore anything, so without this one crash leaves a machine nobody can
+type at. Check: `tty-raw` and `tty-nosig` both leave the terminal
+non-canonical when they fail, and every later test would fail with them
+if the reset were not there (it did, before it was).
+
+**T11. Canonical and raw input are never mixed.** The ring holds records
+in one mode and bare bytes in the other, and `lines` counts records or
+bytes to match. Changing `ICANON` drops what is queued, because the two
+shapes cannot be told apart afterwards. Check: `tty-raw`, which switches
+both ways and reads in each.
+
+**T12. `ISIG` off does not loosen the job-control rules.** A background
+reader is still refused, because that rule is about who may read rather
+than what the bytes mean. Check: `tty-nosig` reads `^C` as byte 3;
+`tty-ttin` is unaffected by it.
+
+**T13. A terminal is what answers terminal calls, not what has a
+character-device type.** `isatty` asks the terminal layer, so
+`/dev/vmm` -- a character device -- is not one. It was, until this unit.
+Check: `tty-isatty`.
+
 ## Gaps (documented, not invariants)
 
-- No raw mode, no `termios`, no window size, no `ioctl`.
+- **The raw *read* branch is not distinguishable by any test here.**
+  Disabling it leaves `tty-raw` passing, because the canonical reader
+  also returns a single byte that carries no terminator: it copies until
+  the ring empties and stops. What actually differs is the bookkeeping
+  -- the canonical path does not decrement `lines` for a record it never
+  saw a terminator for, so the count grows without bound -- and nothing
+  a program can call observes that. The branch is kept because the
+  accounting is right; it is recorded here because nothing proves it.
+  (The raw *input* branch is decisively proved: without it the boot
+  hangs.)
+- `VTIME` is accepted and not implemented: there is no timed read, so a
+  `VMIN`/`VTIME` combination asking for one behaves as `VMIN` alone.
+- No output processing beyond the serial sink's `\n` to `\r\n`: no
+  `OPOST` to turn off, and the Linux translation reports it always on.
+- The control characters are fixed: `^C`, `^\`, `^Z`, `^U`, `^W` and
+  backspace cannot be reassigned, so `c_cc` carries only `VMIN`/`VTIME`.
+- Line editing does not know the terminal's width: a line longer than
+  the screen wraps in the terminal's own way and the shell's redraw does
+  not account for it.
 - No `TOSTOP`: a background process writing to the terminal is not sent
   `SIGTTOU` (Linux's default too). Reads are stopped and `tcsetpgrp`
   from the background does raise it.
-- One tty; no pseudo-terminals; no `/dev/console` or `/dev/tty` nodes.
+- One tty; no pseudo-terminals. (`/dev/console` and `/dev/tty` exist
+  since the terminal-modes unit.)
 - Only the UART feeds the tty; the virtio-console receive queue and a
   keyboard driver are future producers.
 - Output processing is the serial sink's `\n` to `\r\n` only.

@@ -61,6 +61,7 @@
 #define E2BIG     7   /* argument list too long */
 #define ECHILD    10  /* no child processes */
 #define EACCES    13  /* permission denied */
+#define ENXIO      6  /* no such device or address: /dev/tty with no controlling terminal */
 #define ENOTTY    25  /* not a terminal */
 #define ENOKEY    126 /* required key not available */
 #define EKEYREJECTED 129 /* key or signature rejected */

@@ -93,6 +93,9 @@ kernel stack.
 | 72 | `setsid` | none | the new session id (the caller's pid) | `EPERM` (the caller already leads a group), `ESRCH` |
 | 73 | `getsid` | `int pid (0: self)` | the session | `ESRCH` |
 | 74 | `tcgetpgrp` | `int handle` | the terminal's foreground group | `EBADF`, `ENOTTY` (not a terminal, or not this session's) |
+| 76 | `tcgetattr` | `int handle, struct cosmo_termios *out` | 0 | `EBADF`, `ENOTTY` (not a terminal), `EFAULT` |
+| 77 | `tcsetattr` | `int handle, const struct cosmo_termios *in` | 0 | `EBADF`, `ENOTTY`, `EINVAL` (a mode this kernel does not have), `EFAULT` |
+| 78 | `ttysize` | `int handle, struct cosmo_ttysize *out` | 0; `cols`/`rows` 0 when the terminal does not know | `EBADF`, `ENOTTY`, `EFAULT` |
 | 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
 Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
@@ -316,7 +319,10 @@ reserved, restorer }`, `struct cosmo_siginfo { sig, code, pid, detail,
 addr }` with `COSMO_SI_USER/KERNEL/FAULT` 0/1/2;
 `COSMO_SPAWN_SETPGID` (0x40) with the `pgid` field of `struct
 cosmo_spawn` (0: a group of the child's own) and `COSMO_SPAWN_SIZE_V2`
-for a caller that predates it; `COSMO_ARG_MAX` 2048,
+for a caller that predates it; `COSMO_TTY_ECHO/ICRNL/ICANON/ISIG` 1/2/4/8 with `struct cosmo_termios
+{ modes, vmin, vtime }` and `struct cosmo_ttysize { cols, rows }`;
+`COSMO_ENXIO` 6 (`/dev/tty` with no controlling terminal);
+`COSMO_ARG_MAX` 2048,
 `COSMO_ARG_ENTRIES` 128, `COSMO_PATH_MAX` 1024.
 
 ### Initial process state

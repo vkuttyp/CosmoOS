@@ -166,6 +166,10 @@ void kernel_main(const struct cosmoboot_info *info)
     vfs_init();
     cosmofs_init();
     ramfs_populate_boot();
+    /* The terminal as a file: /dev/console and /dev/tty. After the
+     * ramfs root exists and after tty_init (docs/kernel/tty/design.md,
+     * "The terminal as a file"). */
+    tty_dev_init();
     /* /proc: facts about processes, addressable as files
      * (docs/kernel-services/filesystem/procfs/design.md). */
     if (vfs_mount("/proc", "procfs", NULL, 0) != 0)

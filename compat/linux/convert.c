@@ -77,6 +77,39 @@ int lx_wait_status(int native_status)
     return (native_status & 0xff) << 8;     /* exited normally */
 }
 
+/*
+ * The terminal's modes, both ways. Linux's structure has four flag
+ * words and nineteen control characters; this kernel has four flags and
+ * two numbers, so the translation is mostly deciding what to say about
+ * the fields that do not exist. It says the truth: the bits this tree
+ * implements are reported as they are, and the rest read as a plausible
+ * quiet terminal rather than as zero, because a libc that sees c_oflag
+ * with OPOST clear will stop translating newlines itself and the
+ * console does that translation in its sink.
+ */
+void lx_termios_from_native(struct lx_termios *out, const struct cosmo_termios *in)
+{
+    memset(out, 0, sizeof(*out));
+    out->c_iflag = (in->modes & COSMO_TTY_ICRNL) ? LX_ICRNL : 0;
+    out->c_oflag = LX_OPOST;
+    out->c_lflag = ((in->modes & COSMO_TTY_ISIG) ? LX_ISIG : 0) |
+                   ((in->modes & COSMO_TTY_ICANON) ? LX_ICANON : 0) |
+                   ((in->modes & COSMO_TTY_ECHO) ? LX_ECHO : 0);
+    out->c_cc[LX_VMIN] = in->vmin;
+    out->c_cc[LX_VTIME] = in->vtime;
+}
+
+void lx_termios_to_native(struct cosmo_termios *out, const struct lx_termios *in)
+{
+    memset(out, 0, sizeof(*out));
+    out->modes = ((in->c_iflag & LX_ICRNL) ? COSMO_TTY_ICRNL : 0) |
+                 ((in->c_lflag & LX_ISIG) ? COSMO_TTY_ISIG : 0) |
+                 ((in->c_lflag & LX_ICANON) ? COSMO_TTY_ICANON : 0) |
+                 ((in->c_lflag & LX_ECHO) ? COSMO_TTY_ECHO : 0);
+    out->vmin = in->c_cc[LX_VMIN];
+    out->vtime = in->c_cc[LX_VTIME];
+}
+
 int lx_sockaddr_to_netaddr(const void *sa, size_t len, struct netaddr *out)
 {
     memset(out, 0, sizeof(*out));

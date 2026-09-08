@@ -128,6 +128,67 @@ IRQ layer); `tty_input` is safe from any CPU. When no UART is present
 (no `serial0` sink) nothing is registered and the console tty simply
 never receives input.
 
+### Modes
+
+Four flags and two numbers, which is what this line discipline actually
+has. They are the same bits at the uapi and in the kernel
+(`COSMO_TTY_*` and `TTY_*` are one set of values), so nothing
+translates between them:
+
+| Mode | Off |
+|---|---|
+| `ECHO` | typed characters are not echoed |
+| `ICRNL` | a carriage return stays a carriage return |
+| `ICANON` | **raw**: bytes arrive as typed, with no editing and no line |
+| `ISIG` | `^C`, `^\` and `^Z` are ordinary bytes, not signals |
+
+`VMIN` is 1 by default: a non-canonical read blocks for at least one
+byte. `VMIN` 0 makes it answer immediately with whatever is there,
+including nothing. `VTIME` is carried and **not implemented** -- there
+is no timed read -- which is a recorded deviation rather than a
+silently different behaviour.
+
+**Canonical and non-canonical are two shapes in one ring.** In
+canonical mode the ring holds records (a line's bytes plus a
+terminator) and `lines` counts records; in raw mode it holds bare bytes
+and `lines` counts bytes. A reader takes a record in the first and up to
+its buffer's worth of bytes in the second. The two cannot be told apart
+by looking, so **changing `ICANON` drops whatever is queued** -- which is
+what POSIX's `TCSAFLUSH` does, and the only honest option when a
+reader would otherwise be handed a mixture.
+
+`ISIG` and `ICANON` are independent: a program that wants `^C` as a byte
+turns both off, and `cfmakeraw` does. Turning `ISIG` off does **not**
+loosen the job-control rules -- a background reader is still refused
+with `SIGTTIN`, because that rule is about *who* may read and not about
+what the bytes mean.
+
+**A terminal is put back when its session leader exits.** The release
+path resets the modes as well as the foreground group, because a program
+that dies in raw mode has no shell left to restore anything: the shell
+only restores what it set. Without that, one crash in an editor would
+leave a machine nobody could type at, which is the one failure of
+terminal modes that is worse than not having them. It is not
+theoretical -- an early version of the `tty-raw` self-test failed while
+raw, and every test after it failed too.
+
+### The terminal as a file
+
+`/dev/console` and `/dev/tty`, on the character-node mechanism
+`/dev/vmm` already uses. They are not the same node:
+
+- **`/dev/console`** is the machine's console, to whoever opens it.
+- **`/dev/tty`** is *the caller's controlling terminal*: a different
+  thing for different callers, and `-ENXIO` for a process whose session
+  has none. That question is only answerable because sessions exist.
+
+Until these, the console was reachable only as an inherited handle, so a
+process that closed handle 0 could never get it back. The terminal
+system calls accept either shape -- the console kobject that init
+inherits, or an open file on one of these nodes -- because a program
+that opened `/dev/tty` precisely *because* it had closed handle 0 would
+otherwise be told the thing it just opened is not a terminal.
+
 ### Reading from the background
 
 `tty_read` refuses a reader whose process group is not the terminal's

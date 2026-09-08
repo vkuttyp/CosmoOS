@@ -473,6 +473,11 @@ static const struct selftest tests[] = {
      * `^C` throws away whatever line is under edit. Run after the
      * harness has started typing, they eat its line. */
     { "signal-stop-restart", selftest_signal_stop_restart },
+    { "tty-raw",         selftest_tty_raw },
+    { "tty-nosig",       selftest_tty_nosig },
+    { "tty-isatty",      selftest_tty_isatty },
+    { "dev-tty",         selftest_dev_tty },
+    { "dev-tty-none",    selftest_dev_tty_none },
     { "tty-intr",        selftest_tty_intr },
     { "tty-stop",        selftest_tty_stop },
     { "tty-ttin",        selftest_tty_ttin },

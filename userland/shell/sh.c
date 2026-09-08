@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
+#include <termios.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -691,11 +692,20 @@ static int run_pipeline(struct pipeline *pl)
     {
         size_t n = 0;
         pl->text[0] = '\0';
+        /* Clamped after each step: snprintf returns what it would have
+         * written, and an `n` past the end would make the next size
+         * argument a very large unsigned number. */
         for (int i = 0; i < pl->ncmds && n < sizeof(pl->text) - 1; i++) {
-            for (int k = 0; k < pl->cmds[i].nwords && n < sizeof(pl->text) - 1; k++)
+            for (int k = 0; k < pl->cmds[i].nwords && n < sizeof(pl->text) - 1; k++) {
                 n += (size_t)snprintf(pl->text + n, sizeof(pl->text) - n, "%s%s", n ? " " : "", pl->cmds[i].words[k]);
-            if (i + 1 < pl->ncmds && n < sizeof(pl->text) - 1)
+                if (n > sizeof(pl->text) - 1)
+                    n = sizeof(pl->text) - 1;
+            }
+            if (i + 1 < pl->ncmds && n < sizeof(pl->text) - 1) {
                 n += (size_t)snprintf(pl->text + n, sizeof(pl->text) - n, " |");
+                if (n > sizeof(pl->text) - 1)
+                    n = sizeof(pl->text) - 1;
+            }
         }
     }
     pid_t pids[STAGES_MAX];
@@ -1120,25 +1130,231 @@ static void report_signal(const char *what, int status)
         fprintf(stderr, "sh: %s: signal %d\n", what, sig);
 }
 
+/* --- reading a line ---------------------------------------------------------
+ *
+ * With the terminal in raw mode the shell draws the line itself, which
+ * is the only way to have arrow keys or history: in canonical mode the
+ * kernel owns the line and hands it over only when it is finished.
+ *
+ * What is drawn is deliberately simple -- one line, no wrapping. A line
+ * longer than the terminal is wide will wrap in the terminal's own way
+ * and the redraw will not account for it; that is recorded rather than
+ * solved, because solving it means tracking the cursor across rows and
+ * this shell does not need to yet.
+ */
+#define HISTORY_MAX 32
+
+static char g_history[HISTORY_MAX][LINE_MAX_];
+static int g_hist_count;   /* entries used, oldest first */
+
+static void history_add(const char *line)
+{
+    if (line[0] == '\0')
+        return;
+    if (g_hist_count > 0 && strcmp(g_history[g_hist_count - 1], line) == 0)
+        return;   /* the same command twice is one history entry */
+    if (g_hist_count == HISTORY_MAX) {
+        memmove(g_history[0], g_history[1], (size_t)(HISTORY_MAX - 1) * LINE_MAX_);
+        g_hist_count--;
+    }
+    snprintf(g_history[g_hist_count++], LINE_MAX_, "%s", line);
+}
+
+/*
+ * Redraw the line and put the cursor where it belongs: carriage return,
+ * the prompt, the line, erase to end (spaces), then back to `pos`.
+ *
+ * Only for edits that move text about. Typing at the end of the line --
+ * which is what typing usually is -- echoes the one character instead,
+ * because a full redraw reprints the prompt and anything reading the
+ * serial log would see one prompt per keystroke. The boot harness
+ * counts prompts to know when the shell is ready, and it is not the
+ * only reader that would be confused.
+ */
+static void redraw(const char *buf, size_t len, size_t pos, size_t prev_len)
+{
+    char out[LINE_MAX_ * 2 + 32];
+    size_t n = 0;
+    /* snprintf reports what it would have written, not what it wrote, so
+     * every step is clamped: past the end `n` would both lie about the
+     * length passed to write() and turn the next size argument into a
+     * very large unsigned number. */
+    out[n++] = '\r';
+    n += (size_t)snprintf(out + n, sizeof(out) - n, "cosmo$ %.*s", (int)len, buf);
+    if (n > sizeof(out) - 1)
+        n = sizeof(out) - 1;
+    for (size_t i = len; i < prev_len && n < sizeof(out) - 1; i++)
+        out[n++] = ' ';
+    out[n++] = '\r';
+    n += (size_t)snprintf(out + n, sizeof(out) - n, "cosmo$ %.*s", (int)pos, buf);
+    if (n > sizeof(out))
+        n = sizeof(out);
+    (void)write(2, out, n);
+}
+
+/*
+ * One line, edited. Returns its length, or -1 at end of file. Falls back
+ * to a plain read when the terminal cannot be put into raw mode -- a
+ * pipe, or a shell without job control -- because a script must still
+ * work when nobody is typing.
+ */
+static ssize_t read_line(char *buf, size_t cap)
+{
+    struct termios cooked, raw;
+    if (!g_job_control || tcgetattr(0, &cooked) != 0) {
+        ssize_t n = read(0, buf, cap - 1);
+        if (n <= 0)
+            return -1;
+        buf[n] = '\0';
+        if (n && buf[n - 1] == '\n')
+            buf[--n] = '\0';
+        return n;
+    }
+    raw = cooked;
+    cfmakeraw(&raw);
+    if (tcsetattr(0, TCSANOW, &raw) != 0) {
+        ssize_t n = read(0, buf, cap - 1);
+        if (n <= 0)
+            return -1;
+        buf[n] = '\0';
+        if (n && buf[n - 1] == '\n')
+            buf[--n] = '\0';
+        return n;
+    }
+
+    size_t len = 0, pos = 0;
+    int hist = g_hist_count;   /* one past the newest: the line being typed */
+    char saved[LINE_MAX_];
+    saved[0] = '\0';
+    buf[0] = '\0';
+    (void)write(2, "cosmo$ ", 7);
+    ssize_t result = -1;
+    for (;;) {
+        char c;
+        ssize_t n = read(0, &c, 1);
+        if (n != 1) {
+            result = -1;
+            break;
+        }
+        if (c == '\r' || c == '\n') {
+            (void)write(2, "\n", 1);
+            buf[len] = '\0';
+            result = (ssize_t)len;
+            break;
+        }
+        if (c == 4) {   /* ^D on an empty line is end of input */
+            if (len == 0) {
+                result = -1;
+                break;
+            }
+            continue;
+        }
+        if (c == 3) {   /* ^C: abandon the line, prompt again */
+            (void)write(2, "^C\n", 3);
+            len = pos = 0;
+            buf[0] = '\0';
+            (void)write(2, "cosmo$ ", 7);
+            continue;
+        }
+        if (c == 21) {   /* ^U */
+            size_t was = len;
+            len = pos = 0;
+            buf[0] = '\0';
+            redraw(buf, len, pos, was);
+            continue;
+        }
+        if (c == 23) {   /* ^W: erase a word */
+            size_t was = len, p = pos;
+            while (p > 0 && buf[p - 1] == ' ')
+                p--;
+            while (p > 0 && buf[p - 1] != ' ')
+                p--;
+            memmove(buf + p, buf + pos, len - pos);
+            len -= pos - p;
+            pos = p;
+            redraw(buf, len, pos, was);
+            continue;
+        }
+        if (c == 1) {   /* ^A / ^E */
+            pos = 0;
+            redraw(buf, len, pos, len);
+            continue;
+        }
+        if (c == 5) {
+            pos = len;
+            redraw(buf, len, pos, len);
+            continue;
+        }
+        if (c == 0x7f || c == '\b') {
+            if (pos == 0)
+                continue;
+            size_t was = len;
+            memmove(buf + pos - 1, buf + pos, len - pos);
+            pos--;
+            len--;
+            if (pos == len)
+                (void)write(2, "\b \b", 3);   /* erasing the last character */
+            else
+                redraw(buf, len, pos, was);
+            continue;
+        }
+        if (c == 27) {   /* an escape sequence: CSI and one letter */
+            char b1, b2;
+            if (read(0, &b1, 1) != 1 || b1 != '[' || read(0, &b2, 1) != 1)
+                continue;
+            size_t was = len;
+            if (b2 == 'D' && pos > 0) {
+                pos--;
+                redraw(buf, len, pos, was);
+            } else if (b2 == 'C' && pos < len) {
+                pos++;
+                redraw(buf, len, pos, was);
+            } else if (b2 == 'A' || b2 == 'B') {
+                /* History. The line being typed is kept at the newest
+                 * slot so that walking down returns to it. */
+                if (hist == g_hist_count)
+                    snprintf(saved, sizeof(saved), "%.*s", (int)len, buf);
+                if (b2 == 'A' && hist > 0)
+                    hist--;
+                else if (b2 == 'B' && hist < g_hist_count)
+                    hist++;
+                const char *src = hist == g_hist_count ? saved : g_history[hist];
+                snprintf(buf, cap, "%s", src);
+                len = pos = strlen(buf);
+                redraw(buf, len, pos, was);
+            }
+            continue;
+        }
+        if ((unsigned char)c < 0x20 || len + 1 >= cap)
+            continue;
+        size_t was = len;
+        int at_end = pos == len;
+        memmove(buf + pos + 1, buf + pos, len - pos);
+        buf[pos++] = c;
+        len++;
+        buf[len] = '\0';
+        if (at_end)
+            (void)write(2, &c, 1);   /* the ordinary case: just echo it */
+        else
+            redraw(buf, len, pos, was);
+    }
+    (void)tcsetattr(0, TCSANOW, &cooked);
+    if (result >= 0)
+        history_add(buf);
+    return result;
+}
+
 static void interactive(void)
 {
     char line[LINE_MAX_];
     for (;;) {
         jobs_poll(1);   /* what background jobs did while we were away */
         fflush(stdout);
-        write(2, "cosmo$ ", 7);
-        ssize_t n = read(0, line, sizeof(line) - 1);
+        ssize_t n = read_line(line, sizeof(line));
         if (n < 0) {
-            perror("sh: read");
-            exit(1);
-        }
-        if (n == 0) {
             write(2, "\n", 1);   /* ^D */
             exit(g_last_status);
         }
-        line[n] = '\0';
-        if (n && line[n - 1] == '\n')
-            line[n - 1] = '\0';
         run_line(line);
     }
 }

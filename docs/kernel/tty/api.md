@@ -97,12 +97,32 @@ line count); the console object's `ready` operation reports
 ### `void tty_get_stats(struct tty *t, struct tty_stats *out)`
 Snapshot under the lock. For tests and diagnostics.
 
-### `unsigned tty_set_flags(struct tty *t, unsigned flags)`
-Replace the line-discipline flags (`TTY_ECHO`, `TTY_ICRNL`) and return
-what they were, under the lock. The keyboard test turns echo off while
-the harness is typing, so what it types does not land in the middle of a
-line the console is printing, and puts it back afterwards; nothing else
-has wanted this yet.
+### `void tty_get_termios(struct tty *t, struct cosmo_termios *out)`, `void tty_set_termios(struct tty *t, const struct cosmo_termios *in)`
+The modes a program sees and sets (`COSMO_TTY_ECHO`, `ICRNL`, `ICANON`,
+`ISIG`, plus `vmin`/`vtime`). Setting them **drops whatever input is
+queued when the canonical bit changes**: the ring holds records in one
+mode and bare bytes in the other, and a reader must not be handed a
+mixture. Any context; takes `tty->lock`.
+
+### `void tty_get_size(struct tty *t, struct cosmo_ttysize *out)`
+The terminal's size in characters, from the framebuffer console's
+geometry. **0x0 when it does not know** -- a serial line cannot be
+asked, and a made-up 80x24 is a lie a program cannot detect, where a 0
+is one it can act on.
+
+### `pid_t tty_session_of(struct tty *t)`
+The session that controls this terminal, 0 for none.
+
+### `struct tty *tty_of_vnode(const struct vnode *vn)`
+The tty behind an open file: `/dev/console` is the console, `/dev/tty`
+is the caller's controlling terminal (NULL when it has none), anything
+else is not a terminal. Note the per-caller resolution -- the same
+vnode answers differently for different processes, which is the whole
+point of `/dev/tty`.
+
+### `void tty_dev_init(void)`
+One-time: register `/dev/console` and `/dev/tty`. After the ramfs root
+exists and after `tty_init`.
 
 ### `int tty_set_pgrp(struct tty *t, pid_t pgid)`
 Name the terminal's foreground group -- the group `^C` and `^\` signal.
@@ -119,9 +139,12 @@ at all.
 
 ### `void tty_session_exit(pid_t sid)`
 The leader of session `sid` has exited: if that session held the
-console, `SIGHUP` goes to what was its foreground group and the terminal
-is released for the next session leader to claim. Called from the
-process exit path, with no process locks held.
+console, `SIGHUP` goes to what was its foreground group, the terminal is
+released for the next session leader to claim, **and its modes go back
+to a terminal a person can type at** -- echo, `ICRNL`, `ICANON`, `ISIG`,
+`VMIN` 1 -- with the input queue dropped. A program that dies in raw
+mode leaves no shell behind to restore anything. Called from the process
+exit path, with no process locks held.
 
 ### `pid_t tty_foreground_pgrp(struct tty *t)`
 The foreground group without the session check the system calls make; 0
@@ -130,6 +153,14 @@ when there is none. For the kernel's own tests and diagnostics.
 ### `struct tty *tty_of_object(struct kobject *obj)`
 The tty behind a handle's object, or NULL when it is not a terminal.
 The console object is the only terminal, so this is a comparison.
+
+### `struct tty *tty_of_open(struct kobject *obj)`
+The tty behind whatever a handle holds: the console object, or an open
+file on `/dev/console` or `/dev/tty`. Every system call that resolves a
+handle to a terminal goes through this one function, so the native and
+Linux calls cannot answer differently and a third way to hold a terminal
+changes one place. Takes no reference: the caller's reference on `obj`
+is what keeps an open file alive.
 
 ## The console kobject (`kernel/object/console_obj.c`)
 

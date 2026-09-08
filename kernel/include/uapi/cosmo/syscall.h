@@ -115,7 +115,15 @@
 #define SYS_getsid    73  /* (int pid (0: self)) -> the session */
 #define SYS_tcgetpgrp 74  /* (int handle) -> the terminal's foreground group */
 #define SYS_tcsetpgrp 75  /* (int handle, int pgid) -> 0 */
-#define SYS_COUNT     76
+
+/* The terminal's modes and its size (docs/kernel/tty/design.md,
+ * "Modes"). Typed calls rather than one `ttyctl(handle, op, arg)`: a
+ * call whose argument type depends on another argument cannot be
+ * reviewed by reading it, and `syscall_filter` works on numbers. */
+#define SYS_tcgetattr 76  /* (int handle, struct cosmo_termios *out) -> 0 */
+#define SYS_tcsetattr 77  /* (int handle, const struct cosmo_termios *in) -> 0 */
+#define SYS_ttysize   78  /* (int handle, struct cosmo_ttysize *out) -> 0 */
+#define SYS_COUNT     79
 
 /* A filter mask is this many 64-bit words, enough for every number any
  * personality here uses (the Linux one goes to 512). */
@@ -347,6 +355,35 @@ struct cosmo_siginfo {
 #define COSMO_SI_KERNEL 1   /* the kernel's own doing */
 #define COSMO_SI_FAULT  2   /* a trap: addr is set */
 
+/*
+ * What a program may change about its terminal. Four flags and two
+ * numbers, which is what this tree's line discipline actually has --
+ * POSIX's `termios` carries forty fields describing a serial line that
+ * is not modelled here, and `compat/linux/convert.c` builds one of
+ * those for Linux binaries out of this.
+ */
+#define COSMO_TTY_ECHO   (1u << 0)  /* echo what is typed */
+#define COSMO_TTY_ICRNL  (1u << 1)  /* carriage return arrives as newline */
+#define COSMO_TTY_ICANON (1u << 2)  /* line at a time, with erase and kill */
+#define COSMO_TTY_ISIG   (1u << 3)  /* ^C, ^\ and ^Z are signals, not bytes */
+#define COSMO_TTY_MODES  0xfu       /* every flag this kernel knows */
+
+struct cosmo_termios {
+    uint32_t modes;    /* COSMO_TTY_* */
+    /* Non-canonical mode only. `vmin` 0 means a read never blocks and
+     * may return 0; 1 or more means it blocks for at least one byte.
+     * `vtime` is accepted and not implemented (a recorded deviation):
+     * there is no timed read. */
+    uint8_t vmin;
+    uint8_t vtime;
+    uint16_t reserved;
+};
+
+struct cosmo_ttysize {
+    uint16_t cols, rows;   /* 0 when the terminal does not know */
+    uint32_t reserved;
+};
+
 struct cosmo_procinfo {
     uint32_t pid, ppid, uid, gid;
     uint32_t state;         /* 0 running, 1 exiting, 2 exited (zombie) */
@@ -488,6 +525,7 @@ struct cosmo_dirent {
 #define COSMO_ESPIPE  29
 #define COSMO_ERANGE  34
 #define COSMO_EIO     5
+#define COSMO_ENXIO      6   /* /dev/tty with no controlling terminal */
 #define COSMO_EBADF   9
 #define COSMO_EAGAIN  11
 #define COSMO_ENOMEM  12

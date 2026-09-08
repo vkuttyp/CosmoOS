@@ -84,7 +84,9 @@ before anything else is done.
   (`%f`, `%e`, `%g`) since the FP/SIMD unit; this line said "no floating
   point" until the job-control report swept it.
 - No `fork`, `exec*`, `system`, `popen`, `setjmp`, `termios`,
-  `getpwnam`, dynamic linking. (`signal` and `sigaction` arrived with
+  `getpwnam`, dynamic linking. (`termios` arrived with the
+  terminal-modes unit, carrying the four flags this kernel has rather
+  than POSIX's forty.) (`signal` and `sigaction` arrived with
   the signals unit; job control added `WUNTRACED`/`WIFSTOPPED` and the
   session calls.)
 - `sockaddr_in`/`sockaddr_in6` do not exist; the native address shape is

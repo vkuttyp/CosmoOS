@@ -62,7 +62,8 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 - **Files and handles** (`unistd.h`, `fcntl.h`, `sys/stat.h`,
   `dirent.h`): `open`, `close`, `read`, `write`, `lseek`, `stat`, `fstat`,
   `mkdir`, `rmdir`, `unlink`, `rename`, `chdir`, `getcwd`, `dup`, `dup2`,
-  `pipe`, `isatty` (fstat type), `sync`, `opendir`/`readdir`/`closedir`
+  `pipe`, `isatty` (a successful `tcgetattr`), `sync`,
+  `opendir`/`readdir`/`closedir`
   over `getdents`, `mount`/`umount` (`sys/mount.h`, native flags).
 - **Processes** (`spawn.h`, `sys/wait.h`, `signal.h`, `unistd.h`):
   `cosmo_spawn` exposed as `spawnve(path, argv, envp, handles, n)` with

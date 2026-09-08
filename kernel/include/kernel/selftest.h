@@ -94,6 +94,11 @@ bool selftest_signal_stop_mask(const char **reason);   /* SIGSTOP cannot be caug
 bool selftest_signal_stop_restart(const char **reason);/* a call cut short by a stop is restarted */
 bool selftest_signal_stop_late(const char **reason);   /* a continue that outruns the stop */
 bool selftest_signal_stop_threads(const char **reason); /* every thread parks before the stop is reported */
+bool selftest_tty_raw(const char **reason);             /* a byte readable without a newline */
+bool selftest_tty_nosig(const char **reason);          /* ISIG off: ^C is a byte */
+bool selftest_tty_isatty(const char **reason);         /* a character device is not a terminal */
+bool selftest_dev_tty(const char **reason);            /* /dev/tty and /dev/console open */
+bool selftest_dev_tty_none(const char **reason);       /* ... and ENXIO without a terminal */
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */
 bool selftest_tty_stop(const char **reason);           /* ^Z stops it rather than killing it */
 bool selftest_tty_ttin(const char **reason);           /* a background reader is refused the line */

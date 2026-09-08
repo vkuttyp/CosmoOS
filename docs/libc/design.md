@@ -114,7 +114,7 @@ Direct wrappers with `__syscall_ret`. Notes:
   normal on the console and pipes; a single call moves at most 1024
   bytes).
 - `dup2(old, new)` is `SYS_dup(old, new)`; `dup(old)` is `SYS_dup(old, -1)`.
-- `isatty(fd)`: `fstat` and `type == COSMO_DT_CHR`.
+- `isatty(fd)`: a successful `SYS_tcgetattr` (see "Terminals").
 - `getcwd(buf, size)`: `SYS_getcwd`; with `buf == NULL` allocates.
 - `stat`/`fstat` fill `struct stat` (the UAPI structure).
 - `opendir`: `open(path, O_RDONLY|O_DIRECTORY)`; `readdir` refills a
@@ -194,6 +194,28 @@ Not provided, because the kernel does not have them: real-time signals,
 queued siginfo, `sigaltstack`, `sigsuspend` and `sigwait`. Job control
 *is* provided -- `WUNTRACED`/`WCONTINUED` and the `WIFSTOPPED` family in
 `sys/wait.h`, and the session calls in `unistd.h`.
+
+## Terminals
+
+`termios.h` is the POSIX face of `struct cosmo_termios`:
+`tcgetattr`, `tcsetattr`, `cfmakeraw` and `tcgetwinsize`, over a
+`struct termios` carrying `c_iflag`, `c_lflag` and a two-entry `c_cc`.
+
+**The fields that would be lies are absent rather than ignored.** POSIX's
+structure describes a serial line -- baud rates, parity, `c_cflag` --
+that this tree does not model, and a program setting a baud rate on this
+terminal is a program whose expectations cannot be met. It fails to
+compile, which is the outcome it would want, rather than compiling and
+silently doing nothing. `tcsetattr`'s three `actions` behave alike here:
+the kernel drops queued input exactly when the canonical bit changes,
+and there is no output queue to drain.
+
+`isatty` asks the terminal layer -- a successful `tcgetattr` -- rather
+than testing `fstat`'s type for a character device. The question a
+caller means is whether terminal operations will work, and the two
+answers differ: `/dev/vmm` is a character device and is not a terminal.
+It reported itself as one until this unit, and nothing noticed because
+nothing asked.
 
 ## Sockets
 

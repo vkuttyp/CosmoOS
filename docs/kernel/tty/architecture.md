@@ -10,13 +10,18 @@ untrusted input; here: bytes from the wire).
 ## Where it sits
 
 ```text
-   user process       read(0, ...) / write(1, ...) on the standard handles
-        │             kernel/syscall/native.c → handle table → console kobject
-        ▼
-   kernel/object/console_obj.c    the console kobject: write → console_write, read → tty_read
-        │
-        ▼
-   kernel/tty/tty.c               the line discipline: input queue, canonical editing, echo, readers
+   user process    read(0, ...) on a standard handle   open("/dev/tty")
+        │          native.c → handle table            native.c → VFS
+        ▼                                                   ▼
+   kernel/object/console_obj.c                     kernel/tty/ttydev.c
+   the console kobject: write → console_write      the two character nodes:
+   read → tty_read                                 /dev/console is the machine's,
+        │                                          /dev/tty is the caller's
+        │                                                   │
+        └───────────────────┬───────────────────────────────┘
+                            ▼
+   kernel/tty/tty.c    the line discipline: modes, input queue, canonical
+                       editing and echo or a raw byte stream, readers
         ▲                                  │ echo
         │ tty_input()                      ▼
    kernel/arch/x86_64/serial.c    UART receive interrupt (IRQ 4)      kernel/core/console.c → sinks

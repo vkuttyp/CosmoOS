@@ -184,7 +184,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 292 | `dup3` | as `dup2` | `-EINVAL` when both are equal; flags dropped |
 | 22, 293 | `pipe`, `pipe2` | `pipe_create`; read end with READ, write end with WRITE | `pipe2` flags (`O_CLOEXEC`, `O_NONBLOCK`) dropped; `-EMFILE` installs nothing |
 | 72 | `fcntl` | `F_GETFD F_SETFD F_SETFL` → 0; `F_GETFL` → `O_RDONLY`/`O_WRONLY`/`O_RDWR` reconstructed from the handle's rights; `F_DUPFD`, `F_DUPFD_CLOEXEC` (1030) → first free slot at or above `arg` | other commands `-EINVAL` |
-| 16 | `ioctl` | `-ENOTTY` for every request on a valid handle | libcs then treat the console as a non-terminal (full buffering; `isatty` false) |
+| 16 | `ioctl` | `TCGETS`, `TCSETS`/`TCSETSW`/`TCSETSF`, `TIOCGWINSZ` on a terminal, through `lx_termios_*` | `-ENOTTY` for any other request, and for a handle that is not a terminal |
 
 ### Memory
 

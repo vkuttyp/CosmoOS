@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 static int g_failures;
@@ -2372,6 +2373,130 @@ static int probe_signal_stop_threads(void)
     return st == 0 ? 0 : 10 + st;
 }
 
+/* --- terminal modes --------------------------------------------------------- */
+
+/*
+ * Non-canonical mode: a byte is readable the moment it is typed, with
+ * no newline and no editing. The probe claims the terminal (only the
+ * foreground group may read it), turns canonical mode off, and reads
+ * one keystroke; the kernel side types it.
+ */
+static int probe_tty_raw(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    struct termios saved, raw;
+    if (tcgetattr(0, &saved) != 0)
+        return 4;
+    if (!(saved.c_lflag & ICANON) || !(saved.c_lflag & ECHO))
+        return 5;   /* a terminal starts cooked */
+    raw = saved;
+    cfmakeraw(&raw);
+    if (tcsetattr(0, TCSANOW, &raw) != 0)
+        return 6;
+    struct termios back;
+    if (tcgetattr(0, &back) != 0 || (back.c_lflag & (ICANON | ECHO | ISIG)) != 0)
+        return 7;   /* what was set is not what is reported */
+    char c = 0;
+    ssize_t n = read(0, &c, 1);   /* the kernel side types once the mode says raw */
+    if (n != 1)
+        return 9;   /* a raw read waited for a line */
+    if (c != 'x')
+        return 10;
+    /* And back: the terminal is line-at-a-time again. */
+    if (tcsetattr(0, TCSANOW, &saved) != 0)
+        return 11;
+    if (tcgetattr(0, &back) != 0 || !(back.c_lflag & ICANON))
+        return 12;
+    return 0;
+}
+
+/*
+ * ISIG off: ^C is byte 3 rather than a signal. The process would die if
+ * the signal still arrived, so surviving to report is the check.
+ */
+static int probe_tty_nosig(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    struct termios raw;
+    if (tcgetattr(0, &raw) != 0)
+        return 4;
+    cfmakeraw(&raw);
+    if (tcsetattr(0, TCSANOW, &raw) != 0)
+        return 5;
+    char c = 0;
+    if (read(0, &c, 1) != 1)
+        return 7;
+    return c == 3 ? 0 : 8;
+}
+
+/* isatty is about terminals, not about character devices. */
+static int probe_tty_isatty(void)
+{
+    if (!isatty(0))
+        return 3;   /* the console is one */
+    int v = open("/dev/vmm", O_RDONLY, 0);
+    if (v < 0)
+        return 0;   /* no virtualization on this machine: nothing to compare */
+    int wrong = isatty(v);
+    close(v);
+    return wrong ? 4 : 0;   /* a character device is not a terminal */
+}
+
+/*
+ * /dev/tty is the caller's controlling terminal -- reachable after
+ * handle 0 is closed, which was impossible before this unit -- and
+ * nothing at all to a process whose session has no terminal.
+ */
+static int probe_dev_tty(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    int fd = open("/dev/tty", O_RDWR, 0);
+    if (fd < 0)
+        return 4;
+    if (!isatty(fd))
+        return 5;
+    /* And it is *this* process's terminal, not merely some terminal:
+     * the foreground group it reports is the one claimed above. A
+     * zero-length write would prove nothing about which node this is. */
+    if (tcgetpgrp(fd) != getpgrp())
+        return 6;
+    close(fd);
+    /* /dev/console is the machine's console whoever asks. */
+    int con = open("/dev/console", O_RDWR, 0);
+    if (con < 0)
+        return 7;
+    if (!isatty(con))
+        return 8;
+    close(con);
+    return 0;
+}
+
+/*
+ * A session with no controlling terminal has no /dev/tty. This process
+ * is already in one: the kernel started it, so it has no parent and
+ * leads a session of its own, and that session has never claimed the
+ * console. (It cannot call setsid to get there -- a session leader is
+ * refused, which is what `signal-setsid` checks.)
+ */
+static int probe_dev_tty_none(void)
+{
+    if (getsid(0) != getpid())
+        return 3;   /* not a session leader: the probe would prove nothing */
+    if (tcgetpgrp(0) != -1 || errno != ENOTTY)
+        return 4;   /* it already holds a terminal after all */
+    int fd = open("/dev/tty", O_RDWR, 0);
+    if (fd >= 0) {
+        char b = 0;
+        ssize_t n = read(fd, &b, 1);
+        close(fd);
+        return n < 0 && errno == ENXIO ? 0 : 5;
+    }
+    return errno == ENXIO ? 0 : 6;
+}
+
 static int signal_probe(const char *kind)
 {
     if (strcmp(kind, "signal") == 0)
@@ -2428,6 +2553,16 @@ static int signal_probe(const char *kind)
         return probe_signal_job_orphan_parent();
     if (strcmp(kind, "signal-job-orphan") == 0)
         return probe_signal_job_orphan();
+    if (strcmp(kind, "tty-raw") == 0)
+        return probe_tty_raw();
+    if (strcmp(kind, "tty-nosig") == 0)
+        return probe_tty_nosig();
+    if (strcmp(kind, "tty-isatty") == 0)
+        return probe_tty_isatty();
+    if (strcmp(kind, "dev-tty") == 0)
+        return probe_dev_tty();
+    if (strcmp(kind, "dev-tty-none") == 0)
+        return probe_dev_tty_none();
     return 2;
 }
 

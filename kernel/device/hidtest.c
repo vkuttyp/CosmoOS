@@ -78,7 +78,7 @@ static int64_t read_a_line(char *buf, size_t len)
 
 static bool g_armed;
 static struct tty_stats g_before;
-static unsigned g_flags;
+static struct cosmo_termios g_modes;
 
 /*
  * Ask for the keys, and return. The harness types over a socket into an
@@ -103,7 +103,10 @@ bool selftest_hid_arm(const char **reason)
     /* Echo off while the harness types: the keys arrive over the whole
      * self-test run, and echoed characters in the middle of a line the
      * harness parses are a flaky boot, not a test. */
-    g_flags = tty_set_flags(tty_console(), 0);
+    tty_get_termios(tty_console(), &g_modes);
+    struct cosmo_termios quiet = g_modes;
+    quiet.modes &= ~(uint32_t)COSMO_TTY_ECHO;   /* echo only: the line discipline stays canonical */
+    tty_set_termios(tty_console(), &quiet);
     g_armed = true;
     /* The harness waits for this line before it starts typing, so that
      * the keys cannot arrive while an earlier test still owns the tty. */
@@ -116,7 +119,7 @@ bool selftest_hid_keyboard(const char **reason)
     if (!g_armed)
         return true;   /* nothing typed at this machine; hid-arm said so */
     struct tty_stats before = g_before;
-    tty_set_flags(tty_console(), g_flags);   /* the shell wants its echo back */
+    tty_set_termios(tty_console(), &g_modes);   /* the shell wants its echo back */
     uint64_t started = clock_now_ns();
     g_deadline = started + KEYTEST_WAIT_NS;
 

@@ -738,7 +738,14 @@ void vm_space_destroy(struct vm_space *space)
         user_range_teardown(space, base, size);
         kmem_cache_free(g_region_cache, r);
     }
-    KASSERT(space->anon_pages == 0);
+    /* Every frame this space populated has been handed back: the loop
+     * above tore down every region, and a region's range is where its
+     * frames are. A residue names a leak (frames the space still owns
+     * with nothing left to free them) and an underflow names a double
+     * free, so the number is printed rather than asserted away. */
+    if (space->anon_pages != 0)
+        panic("vm_space_destroy: %llu anon pages unaccounted (mapped_pages %llu)",
+              (unsigned long long)space->anon_pages, (unsigned long long)space->mapped_pages);
 
     arch_mmu_context_destroy(&space->mmu);
     kmem_cache_free(g_space_cache, space);

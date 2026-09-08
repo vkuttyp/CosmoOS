@@ -70,6 +70,36 @@ line discipline that remembered only the last signal of a batch would
 send the interrupt alone, the handler would run, and the process would
 still be there.
 
+## Terminal modes (`tty-raw`, `tty-nosig`, `tty-isatty`, `dev-tty`, `dev-tty-none`)
+
+The first three are driven from both ends, because the kernel has to
+type: the probe claims the terminal and changes its modes, and the
+kernel side **waits for the mode rather than for a handshake** before
+typing. A byte typed while the line discipline was still canonical would
+be edited rather than delivered, and a kernel-created probe has no spare
+handle to say "ready" on -- the terminal's own state is the readiness
+signal, which is both simpler and impossible to get out of step.
+
+- **`tty-raw`** -- a terminal starts cooked; `cfmakeraw` turns echo,
+  canonical mode and signals off and reads back as it was set; one byte
+  is readable with no newline ever typed; and restoring the saved modes
+  brings line-at-a-time reads back.
+- **`tty-nosig`** -- with `ISIG` off, `^C` arrives as byte 3. The probe
+  would die if the signal still arrived, so surviving to report is the
+  check.
+- **`tty-isatty`** -- true for the console, **false for `/dev/vmm`**.
+  It was true for both until this unit.
+- **`dev-tty`** -- `/dev/tty` and `/dev/console` open and are terminals.
+- **`dev-tty-none`** -- a process whose session holds no terminal gets
+  `-ENXIO`. It does not call `setsid` to get there: a probe the kernel
+  starts already leads a session of its own, and a session leader is
+  refused `setsid` anyway.
+
+The interactive boot test types the editing itself: `echo edit-okXY`
+followed by two backspaces must run `echo edit-ok`, and four left arrows
+followed by `-2` must run `echo -2edit`. Those are the first entries in
+the harness to send an escape sequence.
+
 ## Bring-up findings
 
 - `irq_request` registers and routes a legacy IRQ but leaves it masked;
