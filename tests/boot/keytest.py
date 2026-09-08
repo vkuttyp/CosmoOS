@@ -120,28 +120,39 @@ class KeyTest:
 
     def _send_rollover(self, sock):
         """x down, y down, x up, y up: two keys held at once."""
-        def ev(down, qcode):
-            return {"type": "key", "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}
-
-        for events in ([ev(True, "x")], [ev(True, "y")], [ev(False, "x")], [ev(False, "y")]):
-            self._command(sock, "input-send-event", {"events": events})
+        for qcode, down in (("x", True), ("y", True), ("x", False), ("y", False)):
+            self._command(sock, "input-send-event",
+                          {"events": [{"type": "key",
+                                       "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}]})
             time.sleep(self.ROLLOVER_GAP_S)
+
+    # Every transition is its own command with a gap after it, rather
+    # than a press and a release in one batch. A batch is one input sync,
+    # and a guest that does not poll between the two ends of it can see
+    # the key go down and come up without ever observing it held: on
+    # AArch64 CI the newline after the rollover line vanished exactly
+    # that way, while the same batching survived elsewhere in the same
+    # boot. One key state per command, spaced, is the shape that cannot
+    # be misread.
+    KEY_GAP_S = 0.02
+
+    def _send_key(self, sock, qcode, down):
+        self._command(sock, "input-send-event",
+                      {"events": [{"type": "key",
+                                   "data": {"down": down, "key": {"type": "qcode", "data": qcode}}}]})
+        time.sleep(self.KEY_GAP_S)
 
     def _send_char(self, sock, ch):
         key = _key_events(ch)
         if key is None:
             raise OSError(f"cannot type {ch!r}")
         qcode, shift = key
-        events = []
         if shift:
-            events.append({"type": "key", "data": {"down": True,
-                                                   "key": {"type": "qcode", "data": "shift"}}})
-        events.append({"type": "key", "data": {"down": True, "key": {"type": "qcode", "data": qcode}}})
-        events.append({"type": "key", "data": {"down": False, "key": {"type": "qcode", "data": qcode}}})
+            self._send_key(sock, "shift", True)
+        self._send_key(sock, qcode, True)
+        self._send_key(sock, qcode, False)
         if shift:
-            events.append({"type": "key", "data": {"down": False,
-                                                   "key": {"type": "qcode", "data": "shift"}}})
-        self._command(sock, "input-send-event", {"events": events})
+            self._send_key(sock, "shift", False)
 
     def _wait_ready(self, log_path, proc, deadline):
         while time.monotonic() < deadline and proc.poll() is None:
@@ -169,11 +180,11 @@ class KeyTest:
                 for ch in LINE + "\n":
                     self._send_char(sock, ch)
                     self.results["typed"] += 1
-                    time.sleep(0.02)   # one report per key, in order
                 self._send_rollover(sock)
                 self.results["typed"] += len(ROLLOVER)
                 self._send_char(sock, "\n")
                 self.results["typed"] += 1
+                time.sleep(0.3)   # let the last key reach the device before the socket goes
             self.ran = True
         except Exception as e:  # noqa: BLE001
             self.error = repr(e)
