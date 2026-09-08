@@ -79,17 +79,35 @@ write cannot be mistaken for the next device's.
 
 ## The keyboard
 
-**`hid-keyboard`** (both architectures, whenever the harness attached a
-keyboard). The harness opens QEMU's monitor protocol socket and sends
-key events into the emulated device (`tests/boot/keytest.py`,
-`input-send-event`), which is as close to a person at a keyboard as a
-test gets: the events go through the device model, the device reports
-them on its interrupt endpoint, the driver translates and calls
-`tty_input`, and the test reads the line back out of the tty the shell
-reads. `cosmo Types 42!` exercises letters, capitals through shift, a
-digit pair and a shifted symbol; the test checks the exact line, that
-the bytes were taken in while it waited (`tty_stats.rx_bytes`), and that
-nothing was dropped.
+**`hid-arm` and `hid-keyboard`** (both architectures, whenever the
+harness attached a keyboard). The harness opens QEMU's monitor protocol
+socket and sends key events into the emulated device
+(`tests/boot/keytest.py`, `input-send-event`), which is as close to a
+person at a keyboard as a test gets: the events go through the device
+model, the device reports them on its interrupt endpoint, the driver
+translates and calls `tty_input`, and the test reads the lines back out
+of the tty the shell reads. `cosmo Types 42!` exercises letters,
+capitals through shift, a digit pair and a shifted symbol; the checks
+are the exact lines, the bytes taken in while the test waited
+(`tty_stats.rx_bytes`), and nothing dropped.
+
+It is **two** tests because how long a host takes to type into an
+emulated machine on a loaded build runner is not this machine's
+business, and every self-test is held to a budget of 8 s. `hid-arm`
+records the tty's counters, prints the ready marker and returns in no
+time at all; `hid-keyboard` runs last, by which point the lines arrived
+long ago, so it also takes no time. The first version was one test that
+waited, and it passed everywhere except CI.
+
+`hid-arm` runs after the hotplug tests, not before them: unplugging the
+hub takes the keyboard with it, and keys typed while it is gone are gone
+too -- the first version armed first and read back `mo Types 42!`.
+
+`hid-arm` also turns the tty's echo off and `hid-keyboard` turns it back
+on. Keys arriving over the whole run would otherwise be echoed into the
+middle of whatever line the console was printing, and a self-test line
+with `cosmo Types 42!` through it is a boot the harness cannot parse --
+which is exactly what happened, and cost two of the run's timing lines.
 
 The guest cannot know by itself whether anything will type, so the
 harness says so through `fw_cfg` (`opt/cosmo/keytest`, the shape the

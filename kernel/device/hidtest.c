@@ -39,10 +39,9 @@
  * driver that types what the report holds instead of what changed in it
  * sends "xxyy". */
 #define KEYTEST_ROLLOVER "xy"
-/* The harness types within a second of the ready line; a wait much
- * longer than that only makes a failure slower to report, and the
- * per-test budget is 8 s. */
-#define KEYTEST_WAIT_MS 3000u
+/* The typing began at the start of the self-test run, so on any machine
+ * the lines are here by now; this is what a failure costs to report. */
+#define KEYTEST_WAIT_MS 5000u
 
 static int64_t read_a_line(char *buf, size_t len)
 {
@@ -61,8 +60,20 @@ static int64_t read_a_line(char *buf, size_t len)
     return -1;
 }
 
-bool selftest_hid_keyboard(const char **reason)
+static bool g_armed;
+static struct tty_stats g_before;
+static unsigned g_flags;
+
+/*
+ * Ask for the keys, and return. The harness types over a socket into an
+ * emulated device in a machine emulated on a loaded build runner, so how
+ * long that takes is not this machine's business and must not be one
+ * test's duration: the check runs at the end of the self-tests, by which
+ * time the lines have long arrived (`hid-keyboard`, below).
+ */
+bool selftest_hid_arm(const char **reason)
 {
+    (void)reason;
     char want[8];
 
     /* The driver lives in a module and the kernel does not call into
@@ -72,12 +83,24 @@ bool selftest_hid_keyboard(const char **reason)
         kinfo("selftest: hid-keyboard: nothing will type at this machine; skipped");
         return true;
     }
-    struct tty_stats before;
-    tty_get_stats(tty_console(), &before);
-
+    tty_get_stats(tty_console(), &g_before);
+    /* Echo off while the harness types: the keys arrive over the whole
+     * self-test run, and echoed characters in the middle of a line the
+     * harness parses are a flaky boot, not a test. */
+    g_flags = tty_set_flags(tty_console(), 0);
+    g_armed = true;
     /* The harness waits for this line before it starts typing, so that
      * the keys cannot arrive while an earlier test still owns the tty. */
     kprintf("HID-KEYTEST-READY\n");
+    return true;
+}
+
+bool selftest_hid_keyboard(const char **reason)
+{
+    if (!g_armed)
+        return true;   /* nothing typed at this machine; hid-arm said so */
+    struct tty_stats before = g_before;
+    tty_set_flags(tty_console(), g_flags);   /* the shell wants its echo back */
 
     char line[64];
     int64_t got = read_a_line(line, sizeof(line));

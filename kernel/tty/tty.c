@@ -167,6 +167,15 @@ void tty_get_stats(struct tty *t, struct tty_stats *out)
     spin_unlock_irqrestore(&t->lock, s);
 }
 
+unsigned tty_set_flags(struct tty *t, unsigned flags)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    unsigned was = t->flags;
+    t->flags = flags;
+    spin_unlock_irqrestore(&t->lock, s);
+    return was;
+}
+
 /* Module ABI v1 exports (docs/kernel/module/api.md). A driver for an
  * input device hands its bytes to the console tty exactly as the UARTs
  * do: usb_hid is the first, and the reason these are exported. */

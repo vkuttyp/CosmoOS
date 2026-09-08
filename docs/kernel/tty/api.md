@@ -96,6 +96,13 @@ line count); the console object's `ready` operation reports
 ### `void tty_get_stats(struct tty *t, struct tty_stats *out)`
 Snapshot under the lock. For tests and diagnostics.
 
+### `unsigned tty_set_flags(struct tty *t, unsigned flags)`
+Replace the line-discipline flags (`TTY_ECHO`, `TTY_ICRNL`) and return
+what they were, under the lock. The keyboard test turns echo off while
+the harness is typing, so what it types does not land in the middle of a
+line the console is printing, and puts it back afterwards; nothing else
+has wanted this yet.
+
 ## The console kobject (`kernel/object/console_obj.c`)
 
 `read(obj, buf, len)` is `tty_read(tty_console(), buf, len)`;

@@ -97,7 +97,8 @@ bool selftest_fb_bench(const char **reason);
 
 /* kernel/device/hidtest.c: keys typed at the emulated keyboard reach the
  * console tty (the harness types them over QMP). */
-bool selftest_hid_keyboard(const char **reason);
+bool selftest_hid_arm(const char **reason);       /* asks the harness to type */
+bool selftest_hid_keyboard(const char **reason);  /* reads back what it typed, at the end of the run */
 /* kernel/device/devtest.c: a hub unplugged with a device behind it. */
 bool selftest_usb_hub_unplug(const char **reason);       /* kernel/tty/ttytest.c */
 bool selftest_ipc_pipe(const char **reason);        /* kernel/ipc/pipetest.c */

@@ -393,8 +393,10 @@ static const struct selftest tests[] = {
     { "tty-ldisc",       selftest_tty_ldisc },
     { "fb-console",      selftest_fb_console },
     { "fb-bench",        selftest_fb_bench },
-    { "hid-keyboard",    selftest_hid_keyboard },
+    /* After the hotplug tests: unplugging the hub takes the keyboard
+     * with it, and keys typed while it is gone are gone too. */
     { "usb-hub-unplug",  selftest_usb_hub_unplug },
+    { "hid-arm",         selftest_hid_arm },
     { "ipc-pipe",        selftest_ipc_pipe },
     { "io-poll",         selftest_io_poll },
     { "realtime",        selftest_realtime },
@@ -425,6 +427,9 @@ static const struct selftest tests[] = {
     { "process-rlimit",  selftest_process_rlimit },
     { "process-nproc",   selftest_process_nproc },
     { "syscall-fuzz",    selftest_syscall_fuzz },
+    /* Last: what the harness typed at the keyboard while everything
+     * above ran (kernel/device/hidtest.c). */
+    { "hid-keyboard",    selftest_hid_keyboard },
 };
 
 int selftest_run_all(void)
