@@ -140,10 +140,11 @@ described by the same three pairs as the two common ones.
 words for base and size, four 32-bit words for width, height, pitch and
 bits per pixel, and one more word holding the three (shift, width) byte
 pairs with two bytes of padding. `reserved1[4]` holds 32 of those 40,
-so version 6 spends it and **grows the structure**, keeping a fresh
-reserved word for the command line the same comment
-(`cosmoboot.h:144`) still promises — the space was reserved for both,
-and it was never large enough for both. Growth is safe and cheaper than
+so version 6 spends it and **grows the structure by two words**: one
+covers the block's remaining 8 bytes, and the second is a fresh
+`reserved2` for the command line the same comment (`cosmoboot.h:144`)
+still promises — the space was reserved for both, and it was never
+large enough for both. Growth is safe and cheaper than
 squeezing: the loader writes `size = sizeof(*info)`, the kernel reads
 nothing beyond it, and the ELF note makes the version check exact
 equality (`boot/uefi/elf.c:198`), so no kernel ever sees a structure of
@@ -255,7 +256,7 @@ is a result, not a failure.
 
 | File | Change |
 | --- | --- |
-| `boot/protocol/cosmoboot.h` | the 40-byte framebuffer block: `reserved1` spent and the structure grown by a word; `COSMOBOOT_VERSION` 6 |
+| `boot/protocol/cosmoboot.h` | the 40-byte framebuffer block: `reserved1` spent and the structure grown by two words (8 for the block's remainder, 8 for a fresh `reserved2`); `COSMOBOOT_VERSION` 6 |
 | `boot/uefi/efi.h` | the Graphics Output Protocol GUID and its structures |
 | `boot/uefi/main.c`, `boot/uefi/loader.h` | locate the GOP, record the mode, fill the new fields |
 | `kernel/include/kernel/bootinfo.h`, the boot-info reader | carry the framebuffer description |
@@ -276,8 +277,9 @@ is a result, not a failure.
 
 - **Boot protocol v6**: `fb_phys`, `fb_size`, `fb_width`, `fb_height`,
   `fb_pitch`, `fb_bpp`, and three (shift, width) pairs — 40 bytes, of
-  which `reserved1[4]` covers 32, so the structure grows by a word and
-  keeps one reserved for the command line. Zero means none. The version
+  which `reserved1[4]` covers 32, so the structure grows by two words:
+  8 bytes for the block's remainder and 8 for a fresh `reserved2`,
+  which is the command line's. Zero means none. The version
   bump is the whole compatibility story: `size` says how much the loader
   wrote, and the ELF note pairs a kernel with a loader by exact equality
   (`elf.c:198`), so a v5 kernel refuses a v6 loader and the pair moves
