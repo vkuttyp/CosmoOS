@@ -38,9 +38,12 @@ capability the tree never needed until it had a keyboard:
   `SIGTTIN` and `SIGTTOU` are *ignored* rather than honoured, because
   nothing can stop (audit finding #30, written down at the time as a
   deliberate deviation from Linux).
-- **The libc has no `signal.h`**, and the shell has no notion of
-  interrupting anything: it spawns, it waits, and a child that never
-  exits keeps it waiting.
+- **The libc's `signal.h` is five constants and `kill`** — no
+  `sigaction`, no `signal`, no mask, because there is nothing behind
+  them. `userland/system/svc.c` even says so where it explains why it
+  does not bother: "a native process here has no signal handlers". And
+  the shell has no notion of interrupting anything: it spawns, it waits,
+  and a child that never exits keeps it waiting.
 
 What *is* here is most of the hard part. The signal core is complete and
 in use: per-process actions under `p->lock`, per-thread pending and
@@ -124,9 +127,18 @@ signal, the sender's pid and, for faults, the address — which is what
 The frame builder is the personality's, in a new
 `kernel/process/native_signal.c` beside the Linux one, and follows its
 shape: build on a copy of the registers, write the frame to the user
-stack (the alternate stack when one is set), block the handler's mask
-plus the signal, and return through a restorer. The libc supplies the
-restorer, so no trampoline page is needed for the native ABI.
+stack, block the handler's mask plus the signal, and return through a
+restorer. The libc supplies the restorer, so no trampoline page is
+needed for the native ABI.
+
+**No alternate signal stack**, and therefore no `sigaltstack` and no
+`SA_ONSTACK` (§21: an earlier draft of this report promised the
+alternate stack in one paragraph and left it out of the API list in the
+next). What an alternate stack buys is a `SIGSEGV` handler that still
+runs when the thread's own stack is what overflowed; nothing in this
+tree wants one, and the Linux personality already has `sigaltstack` for
+a program that does. It is named under what this unit does not cover, so
+that adding it later is a decision rather than a discovery.
 
 There is no compatibility burden here at all: the layout is whatever
 this project chooses, so it is chosen to be the smallest thing that
@@ -177,8 +189,9 @@ the argument for the shortcut is thin.
 
 ### 4. The libc and the shell
 
-`signal.h` with `signal()`, `sigaction()`, `sigprocmask()`, `raise()`,
-`kill()`, and the restorer. The shell then does what a shell does:
+`signal.h` grows `signal()`, `sigaction()`, `sigprocmask()`, `raise()`
+and the flag constants beside the `kill()` and the five numbers it
+already has, and `signal.c` supplies the restorer. The shell then does what a shell does:
 ignore `SIGINT` in itself, put each job in its own process group, hand
 the terminal to it, take the terminal back when the job ends, and print
 a fresh prompt when a job died of a signal rather than pretending it
@@ -203,7 +216,7 @@ needed for `^C` to work.
 | `kernel/process/process.c`, `kernel/include/kernel/process.h` | `pgid` (and `sid` if step 3 builds sessions), inheritance, the group lookup |
 | `kernel/process/signal.c` | sending to a group; the stopped state if step 5 happens |
 | `kernel/tty/tty.c`, `kernel/include/kernel/tty.h` | the foreground group, `^C`/`^\`, the echo |
-| `libc/include/signal.h` (new), `libc/src/signal.c` (new) | the user side and the restorer |
+| `libc/include/signal.h` (exists: five constants and `kill`), `libc/src/signal.c` (new) | `sigaction`, `signal`, `sigprocmask`, `raise`, the flag and `sa_mask` types, and the restorer |
 | `userland/shell/sh.c` | groups, the terminal, and a prompt after an interrupted job |
 | `kernel/device/…test.c`, `tests/boot/shelltest.py` | the tests below |
 | `docs/kernel/process/*`, `docs/kernel/tty/*`, `docs/libc/*`, `docs/userland/*`, `docs/compat/linux/*` | the model, and every place that says signals have no handlers |
@@ -215,7 +228,8 @@ needed for `^C` to work.
   sessions) `setsid`/`getsid`. `kill` gains the negative-pid form.
 - **Kernel-internal**: a group lookup (`process_group_for_each`), the
   tty's foreground group, and `signal_send_group`.
-- **libc**: `signal.h` as above.
+- **libc**: `signal.h` as above — an extension of the existing header,
+  not a new one. No `sigaltstack`: see step 1.
 - **Unchanged**: the signal core's interface. Everything the native
   personality needs is already there, which is the argument that this
   unit is plumbing rather than invention — and the check on that claim
@@ -302,6 +316,10 @@ usual chain.
 - **Step 5 is a scheduler change.** A stopped process is a state the run
   queue, `wait` and the shell all have opinions about. It is last, and
   droppable, for that reason.
+- **Not covered, and named now rather than discovered later**: an
+  alternate signal stack (`sigaltstack`, `SA_ONSTACK`), real-time
+  signals and queued `siginfo`, `sigsuspend`/`sigwait`, and — unless
+  step 5 survives — anything that stops a process.
 - **Size**: about 300 lines for the native ABI and frame, 150 for groups
   and sessions, 100 for the tty, 150 for the libc, 100 for the shell,
   and 350 of tests — roughly 1 150, plus whatever step 5 costs if it
