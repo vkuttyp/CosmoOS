@@ -140,23 +140,6 @@ void signal_set_blocked_saved(uint64_t saved)
     t->sig_restore_blocked = true;
 }
 
-/* Whether the calling thread would ignore `sig`: its action is SIG_IGN,
- * or it is blocked. POSIX lets a few calls proceed rather than stop the
- * caller when that is true -- `tcsetpgrp` from a background process is
- * the one this tree needs, and it is how a shell takes its terminal
- * back after a job without stopping itself. */
-bool signal_is_ignored(int sig)
-{
-    struct thread *t = thread_current();
-    struct process *p = t ? t->proc : NULL;
-    if (p == NULL || sig < 1 || sig > SIG_MAX)
-        return true;
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    bool ign = p->sigactions[sig - 1].handler == SIG_IGN || (t->sig_blocked & SIGMASK(sig)) != 0;
-    spin_unlock_irqrestore(&p->lock, s);
-    return ign;
-}
-
 uint64_t signal_pending_set(void)
 {
     struct thread *t = thread_current();
@@ -341,6 +324,37 @@ static void signal_after_route(struct process *p, bool woke_stopped, bool stoppe
         waitqueue_wake_all(&p->stopped_wq);
     if (woke_stopped || stopped_now)
         process_notify_parent_event(p);
+}
+
+/*
+ * Raise a stop signal on the calling process, and say whether anything
+ * will come of it: false when the signal is ignored or blocked, in
+ * which case the process will neither stop nor run a handler and the
+ * caller must not pretend otherwise. The terminal turns a false into
+ * `-EIO`, which is POSIX's answer for "this cannot be stopped".
+ *
+ * The test and the send are one critical section on purpose. Asking
+ * first and sending afterwards is a race a sibling thread can win by
+ * changing the action in between, and the loser is the reader: the
+ * signal is discarded and the read returns `-EINTR` for a stop that
+ * will never happen, which a retrying program retries for ever.
+ */
+bool signal_raise_stop_self(int sig, const struct signal_info *info)
+{
+    struct thread *t = thread_current();
+    struct process *p = t ? t->proc : NULL;
+    if (p == NULL || sig < 1 || sig > SIG_MAX)
+        return false;
+    bool woke_stopped = false;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    bool ignored = p->sigactions[sig - 1].handler == SIG_IGN || (t->sig_blocked & SIGMASK(sig)) != 0;
+    if (!ignored)
+        route_locked(p, NULL, sig, info, &woke_stopped);
+    bool stopped_now = p->stopped;
+    spin_unlock_irqrestore(&p->lock, s);
+    if (!ignored)
+        signal_after_route(p, woke_stopped, stopped_now);
+    return !ignored;
 }
 
 int signal_send(struct process *p, int sig, const struct signal_info *info)

@@ -71,9 +71,22 @@ host is. That is the platform being honest. Ticks *ahead* of the clock
 would mean a tick counted without time passing, which is a real bug, so
 that side keeps a bound of two.
 
-The lag allowance is a quarter of the window (ten ticks in forty). It
-was two, and the test failed about half the time in the busiest shape
-the chain runs (`QEMU_KBD=hub` on AArch64, where the hub's worker and
-the keyboard add interrupt work) on `main` as well as on a branch --
-which is what distinguishes a tolerance that is too tight from a
-regression.
+The lag allowance is **half** the window (twenty ticks in forty), and it
+has been widened twice against the same shape: `QEMU_KBD=hub` on
+AArch64, where the hub's worker and the keyboard add interrupt work.
+
+- It began at two ticks, and failed about half the time there -- on
+  `main` as well as on a branch, which is what distinguishes a tolerance
+  that is too tight from a regression.
+- A quarter of the window still failed **one run in three**, measured
+  over six runs while the job-control unit was being verified. It had by
+  then cost two units a clean verification chain.
+- Half the window passed 6/6 on that shape.
+
+The number was raised rather than the flake tolerated because what this
+check is worth is "the timer interrupt arrives at roughly the right
+rate", and half a window still says that; a tighter bound on the lag
+side was measuring the host's load and nothing else. **The failure now
+prints the observed tick count, the elapsed time and the expected
+count**, so a third widening -- if the machine ever gets slower again --
+starts from data rather than from a guess.

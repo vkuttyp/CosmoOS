@@ -235,10 +235,14 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
      * stopped, here as anywhere.
      */
     pid_t mine = process_current_pgid();
-    if (fg != 0 && mine != fg && !signal_is_ignored(SIGTTOU) && !process_group_is_orphaned(mine, sid)) {
+    if (fg != 0 && mine != fg && !process_group_is_orphaned(mine, sid)) {
         struct signal_info info = { .sig = SIGTTOU, .source = SIGSRC_KERNEL };
-        signal_send(self, SIGTTOU, &info);
-        return -EINTR;
+        /* A caller that ignores or blocks SIGTTOU -- which every shell
+         * does, because taking the terminal back after a job is done
+         * from the background -- gets to make the call instead. Asked
+         * and sent in one step, for the same reason as the read above. */
+        if (signal_raise_stop_self(SIGTTOU, &info))
+            return -EINTR;
     }
     s = spin_lock_irqsave(&t->lock);
     if (t->sid != sid) {
@@ -320,11 +324,11 @@ static int64_t tty_read_allowed(struct tty *t)
      * hand a retrying program an interruption that never becomes a
      * stop, and it would retry for ever. POSIX says -EIO.
      */
-    if (process_group_is_orphaned(pgid, sid) || signal_is_ignored(SIGTTIN))
+    if (process_group_is_orphaned(pgid, sid))
         return -EIO;
-    struct process *self = process_current();
     struct signal_info info = { .sig = SIGTTIN, .source = SIGSRC_KERNEL };
-    signal_send(self, SIGTTIN, &info);
+    if (!signal_raise_stop_self(SIGTTIN, &info))
+        return -EIO;   /* ignored or blocked: no stop will follow */
     return -EINTR;   /* the stop happens at the return to user mode */
 }
 

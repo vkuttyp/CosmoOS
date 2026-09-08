@@ -405,6 +405,17 @@ thread of the job is still running. Reporting is edge-triggered in both
 directions. Check: `signal-stop` (the edge); the all-threads half is
 **not covered** -- see the gaps.
 
+**P-J5a. A signal that will not stop anything is never reported as
+though it would.** `signal_raise_stop_self` tests the action and sends
+the signal under one acquisition of `p->lock` and returns whether either
+a stop or a handler will follow; the terminal turns a `false` into
+`-EIO`. Splitting the two -- ask, then send -- is a race another thread
+of the same process can win, and the read would then return `-EINTR` for
+a stop that never comes, which a retrying program retries for ever.
+Check: `tty-ttin`'s blocked-`SIGTTIN` reader, which fails with the ask
+removed. The multi-threaded race itself is not reproducible here for the
+usual reason.
+
 **P-J5. An orphaned process group is never stopped.** Nothing is left in
 its session that could continue it, so `^Z` at the terminal skips it and
 a background read from it is `-EIO` rather than `SIGTTIN`. Check:

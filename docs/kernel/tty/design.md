@@ -141,7 +141,13 @@ rescued:
   when it is continued, so a job brought to the foreground with `fg`
   reads the line it was waiting for rather than an `-EINTR` nobody
   expected.
-- **Orphaned**, or the caller blocks or ignores `SIGTTIN`: `-EIO`.
+- **Orphaned**, or the caller blocks or ignores `SIGTTIN`: `-EIO`. The
+  second half is decided by `signal_raise_stop_self`, which tests the
+  action and sends the signal **in one critical section** and answers
+  whether anything will come of it. Asking first and sending afterwards
+  is a race a sibling thread can win by changing the action in between,
+  and the loser is the reader: the signal is discarded and the read
+  returns `-EINTR` for a stop that never happens.
   Nothing is left that could continue it in the first case, and no stop
   can follow in the second -- and answering `-EINTR` for a stop that
   will never happen hands a retrying program an interruption it retries
@@ -154,7 +160,8 @@ left alone, as is any read while the terminal has no foreground group.
 Writes are allowed either way; `TOSTOP` is not built. `tcsetpgrp` from
 outside the foreground group raises `SIGTTOU` unless the caller ignores
 or blocks it -- which every shell does, because taking the terminal back
-after a job is by definition done from the background.
+after a job is by definition done from the background. It goes through
+the same one-step helper, for the same reason.
 
 ### The controlling terminal
 
