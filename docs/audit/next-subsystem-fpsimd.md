@@ -161,7 +161,9 @@ size, `fpsr`/`fpcr` and 32 vector registers — before the `esr_context`
 and the terminator, and `sigreturn` restores from it. Both go through
 the accessors the generic signal code already calls
 (`arch_user_fpu_image_size/save/restore`), which on AArch64 describe the
-`fpsimd_context` body rather than an FXSAVE image.
+`fpsimd_context` body rather than an FXSAVE image. The generic file
+(`kernel/process/signal.c`) is not touched: it calls the personality's
+frame builder, and there is only one.
 
 **Only the Linux personality has signal frames** (review, PR #56).
 `p->pers->signal_frame` is set by `compat/linux/syscalls.c` and by
@@ -211,8 +213,7 @@ is the same test with more work).
 | `kernel/arch/aarch64/trap.c` | EC `0x07` is no longer an invalid opcode |
 | `kernel/arch/aarch64/include/arch/*.h` | the image accessors' AArch64 shape |
 | `kernel/arch/aarch64/hv_el2*.c` | the guest rule for vector state |
-| `compat/linux/signal.c`, `compat/linux/abi_a64.h` | `fpsimd_context` in the frame and in `sigreturn` |
-| `kernel/process/signal.c` | the native frame, through the same accessors |
+| `compat/linux/signal.c`, `compat/linux/linux_abi.h` | `fpsimd_context` in the frame and in `sigreturn` (the only personality with frames; `kernel/process/signal.c` is not touched) |
 | `build/arch/aarch64.mk`, `build/arch/x86_64.mk`, `libc/libc.mk` | user flags lose `-mgeneral-regs-only` |
 | `libc/src/printf.c` | `%f`, `%e`, `%g` |
 | `kernel/core/selftest.c`, `kernel/arch/aarch64/testhooks.c` | `fpu-switch` becomes real on AArch64; new tests below |
@@ -292,10 +293,11 @@ unchanged.
 
 **The kernel rule, checked rather than promised**: a build step
 disassembles the kernel image and requires that no vector or
-floating-point register appears outside the save and restore functions.
-The hardware cannot help here on either architecture — EL1 and ring 0
-are exactly where the state is saved — so the check is the build's, it
-costs a second, and it holds on both.
+floating-point register appears outside the short list of functions the
+design names — the state save and restore, the guest swap, and the
+self-test hooks. The hardware cannot help here on either architecture —
+EL1 and ring 0 are exactly where the state is saved — so the check is
+the build's, it costs a second, and it holds on both.
 
 **The whole boot** (step 4): every user program compiled with SIMD.
 `sh`, `pkg`, `init`, the userland tools and the shell test exercise NEON
