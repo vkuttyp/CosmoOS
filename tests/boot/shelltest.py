@@ -78,6 +78,10 @@ COMMANDS = [
     # keystroke, not part of an escape the shell swallows. Without this
     # the `k` disappears and the line reads "esc-o".
     ("echo esc-o\x1bk", [r"^esc-ok$"]),
+    # And a CSI sequence this shell does not know -- Delete is `Esc [ 3 ~`
+    # -- is ignored whole. Reading only one byte after `[` left the `~`
+    # behind and ran `echo del-ok~`.
+    ("echo del-ok\x1b[3~", [r"^del-ok$"]),
     ("echo after-pipeline-ok", [r"^after-pipeline-ok$",
                                 r"'sleep' exited with status 130",
                                 r"'cat' exited with status 130"]),

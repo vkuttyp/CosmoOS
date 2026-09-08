@@ -1316,7 +1316,7 @@ static ssize_t read_line(char *buf, size_t cap)
              * which is recorded as a gap rather than solved -- but the
              * key it waits for is not eaten.
              */
-            char b1, b2;
+            char b1, b2 = 0;
             if (read(0, &b1, 1) != 1) {
                 result = -1;
                 break;
@@ -1326,10 +1326,31 @@ static ssize_t read_line(char *buf, size_t cap)
                 have_pending = 1;
                 continue;
             }
-            if (read(0, &b2, 1) != 1) {
+            /*
+             * A CSI sequence is parameter bytes (0x30-0x3f), then
+             * intermediates (0x20-0x2f), then one final byte
+             * (0x40-0x7e). Read to the end of it whatever it turns out
+             * to be: a sequence this shell does not know -- Delete is
+             * `Esc [ 3 ~` -- must be ignored whole, or its tail is left
+             * on the line. It used to leave the `~`.
+             */
+            unsigned params = 0;
+            int eof = 0;
+            for (;;) {
+                if (read(0, &b2, 1) != 1) {
+                    eof = 1;
+                    break;
+                }
+                if ((unsigned char)b2 >= 0x40 && (unsigned char)b2 <= 0x7e)
+                    break;   /* the final byte */
+                params++;
+            }
+            if (eof) {
                 result = -1;
                 break;
             }
+            if (params != 0)
+                continue;   /* parameterised: none of the four this shell knows */
             size_t was = len;
             if (b2 == 'D' && pos > 0) {
                 pos--;

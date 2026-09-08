@@ -191,13 +191,19 @@ jump to its ends, and `^C` abandons it and prompts again.
 
 Three details are load-bearing:
 
-- **An `Escape` that is not the start of a sequence gives its next byte
-  back.** The reads that look for `[` and the final letter block, since
-  this terminal has no `VTIME` to wait a moment on; so `Escape` alone
-  waits for the next key. That key is then handled as an ordinary
-  keystroke rather than discarded -- `Escape` then `x` leaves an `x` on
-  the line. Discarding it was the first version, and it silently ate the
-  character after every stray `Escape`.
+- **An escape sequence is consumed whole, and an `Escape` that is not
+  the start of one gives its next byte back.** A CSI sequence is
+  parameter bytes, then intermediates, then one final byte in
+  `0x40`-`0x7e`. Reading a single byte after `[` was right only for the
+  four arrow keys and left the tail of everything else on the line, so
+  Delete (`Esc [ 3 ~`) typed a `~`; the shell now reads to the final
+  byte and ignores what it does not know. A byte after `Escape` that is
+  not `[` is not part of a sequence at all, so it is handled as an
+  ordinary keystroke -- `Escape` then `x` leaves an `x` on the line,
+  where the first version silently ate it. The reads inside a sequence
+  do block: with no `VTIME` there is no way to wait a moment for the
+  rest and give up, so `Escape` alone waits for the next key. That is
+  recorded as part of the `VTIME` gap rather than solved.
 - **Typing at the end of the line echoes one character; only an edit
   that moves text about redraws.** A redraw is a carriage return, the
   prompt and the line, so redrawing on every keystroke would print a
