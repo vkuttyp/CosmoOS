@@ -5,6 +5,7 @@
 #include <kernel/string.h>
 #include <arch/cpu.h>
 #include <aarch64/platform.h>
+#include <aarch64/fpu.h>
 #include <aarch64/sysreg.h>
 
 static struct aarch64_cpu_info g_cpu;
@@ -58,6 +59,9 @@ void aarch64_cpu_init(void)
         __asm__ volatile(".inst 0xd500419f" ::: "memory");   /* msr pan, #1 */
         isb();
     }
+    /* FP/SIMD, for user threads and for the switch that saves them
+     * (fpu.c). Every CPU, because CPACR_EL1 is per-CPU state. */
+    aarch64_fpu_init_cpu();
 }
 
 const struct aarch64_cpu_info *aarch64_cpu_info(void)

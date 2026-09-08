@@ -1400,14 +1400,72 @@ static void fpu_selftest(void)
     puts("usertest: fpu isolation ok");
 }
 #else
+/* The same process rule on AArch64: each process holds its own pattern
+ * in V0-V15 across hundreds of yields and sleeps. The libc no longer
+ * refuses the vector registers, but the compiler has no reason to touch
+ * these sixteen, so what the loop observes is the kernel's switching and
+ * nothing else. The assembler is told to allow the instructions and told
+ * again to stop. */
+static void vreg_fill(uint8_t seed, uint8_t r[16][16])
+{
+    for (unsigned i = 0; i < 16; i++)
+        for (unsigned j = 0; j < 16; j++)
+            r[i][j] = (uint8_t)(seed ^ (i * 17u) ^ (j * 3u));
+}
+
+static void vreg_load(const uint8_t r[16][16])
+{
+    __asm__ volatile(".arch armv8-a+fp+simd\n\t"
+                     "ldp q0, q1, [%0, #0]\n\tldp q2, q3, [%0, #32]\n\t"
+                     "ldp q4, q5, [%0, #64]\n\tldp q6, q7, [%0, #96]\n\t"
+                     "ldp q8, q9, [%0, #128]\n\tldp q10, q11, [%0, #160]\n\t"
+                     "ldp q12, q13, [%0, #192]\n\tldp q14, q15, [%0, #224]\n\t"
+                     ".arch armv8-a"
+                     : : "r"(r) : "memory");
+}
+
+static void vreg_store(uint8_t r[16][16])
+{
+    __asm__ volatile(".arch armv8-a+fp+simd\n\t"
+                     "stp q0, q1, [%0, #0]\n\tstp q2, q3, [%0, #32]\n\t"
+                     "stp q4, q5, [%0, #64]\n\tstp q6, q7, [%0, #96]\n\t"
+                     "stp q8, q9, [%0, #128]\n\tstp q10, q11, [%0, #160]\n\t"
+                     "stp q12, q13, [%0, #192]\n\tstp q14, q15, [%0, #224]\n\t"
+                     ".arch armv8-a"
+                     : : "r"(r) : "memory");
+}
+
+#define FPU_ROUNDS 300
+
 static int fpu_hold(uint8_t seed)
 {
-    (void)seed;
+    uint8_t want[16][16], got[16][16];
+    vreg_fill(seed, want);
+    vreg_load(want);
+    for (unsigned i = 0; i < FPU_ROUNDS; i++) {
+        if (i & 1)
+            cosmo_yield();
+        else
+            usleep(200);
+        vreg_store(got);
+        if (memcmp(got, want, sizeof(got)) != 0)
+            return 3;
+    }
     return 0;
 }
 
 static void fpu_selftest(void)
 {
+    const char *a_argv[] = { "init", "--fpu-partner", "17", NULL };
+    const char *b_argv[] = { "init", "--fpu-partner", "170", NULL };
+    pid_t a = spawnve("/boot/init", a_argv, NULL, NULL, 0);
+    pid_t b = spawnve("/boot/init", b_argv, NULL, NULL, 0);
+    CHECK(a > 0 && b > 0);
+    CHECK(fpu_hold(0x5A) == 0);
+    int status = -1;
+    CHECK(waitpid(a, &status, 0) == a && status == 0);
+    CHECK(waitpid(b, &status, 0) == b && status == 0);
+    puts("usertest: fpu isolation ok");
 }
 
 static int trap_self(const char *kind)

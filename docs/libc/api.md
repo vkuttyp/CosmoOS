@@ -88,9 +88,14 @@ the console returns one typed line per system call.
 
 Formats: `%[flags][width][.prec][h|hh|l|ll|z|j|t][d i u x X o c s p %]`
 with flags `-`, `0`, `+`, space, `#`, and `*` for width and precision.
-`%s` with NULL prints `(null)`. `%f`, `%g`, `%e` print `?` (no floating
-point: user programs are built with `-mgeneral-regs-only`). An unknown
-conversion prints the `%` and the character.
+`%s` with NULL prints `(null)`. `%f`, `%e` and `%g` (and their capital
+forms) take a `double`, with `inf` and `nan` spelled out and the sign
+before any zero padding; precision defaults to 6 and is capped at 17,
+the digits a `double` carries. No `long double`, no `%a`, no libm: the
+conversion scales and divides, which is exact enough for diagnostics and
+does not claim an exactly rounded last digit. A value whose integer part
+will not fit 64 bits is printed in exponent form whatever was asked for.
+An unknown conversion prints the `%` and the character.
 
 ## unistd.h, fcntl.h, sys/stat.h, dirent.h, sys/mount.h, sys/mman.h, time.h
 

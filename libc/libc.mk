@@ -5,10 +5,14 @@
 LIBC_A    := $(OUT)/libc/libc.a
 LIBC_CRT0 := $(OUT)/libc/src/arch/$(ARCH)/crt0.o
 
+# User programs may use the floating-point and vector registers: the
+# kernel saves and restores them per thread (arch/fpu.h) and a signal
+# frame carries them. The kernel itself still may not, which is a
+# separate flag and a build check (scripts/check-fpregs.sh).
 USER_CFLAGS := \
 	--target=$(KERNEL_TARGET) \
 	$(COMMON_CFLAGS) \
-	-fno-pic -fno-pie -mgeneral-regs-only \
+	-fno-pic -fno-pie \
 	-Wno-missing-prototypes \
 	-I$(ROOT)/libc/include \
 	-I$(ROOT)/kernel/include

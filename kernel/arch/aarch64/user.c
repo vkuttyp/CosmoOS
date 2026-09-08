@@ -6,6 +6,7 @@
 #include <arch/irq.h>
 #include <arch/user.h>
 #include <aarch64/platform.h>
+#include <aarch64/fpu.h>
 #include <aarch64/sysreg.h>
 #include <aarch64/trapframe.h>
 
@@ -119,6 +120,33 @@ void arch_user_regs_set_result_in_frame(void *frame, int64_t v) { ((struct arch_
 int64_t arch_user_regs_result_in_frame(const void *frame) { return (int64_t)((const struct arch_trap_frame *)frame)->x[0]; }
 
 /* No user FP/SIMD state on AArch64 yet (fpu.c): the signal frame carries none. */
-size_t arch_user_fpu_image_size(void) { return 0; }
-bool arch_user_fpu_image_save(void *buf) { (void)buf; return false; }
-bool arch_user_fpu_image_restore(const void *buf) { (void)buf; return false; }
+/*
+ * The FP/SIMD image a signal frame carries: the body of a Linux
+ * `fpsimd_context` (docs/compat/linux/design.md, "Signals"). The kernel's
+ * own area orders the fields for the load and store pairs, so the two
+ * are converted here rather than aliased.
+ */
+size_t arch_user_fpu_image_size(void) { return sizeof(struct aarch64_fpsimd_image); }
+
+bool arch_user_fpu_image_save(void *buf)
+{
+    struct aarch64_fpu_area area;
+    if (!aarch64_fpu_get_current(&area))
+        return false;
+    struct aarch64_fpsimd_image *img = buf;
+    img->fpsr = area.fpsr;
+    img->fpcr = area.fpcr;
+    memcpy(img->vregs, area.vregs, sizeof(img->vregs));
+    return true;
+}
+
+bool arch_user_fpu_image_restore(const void *buf)
+{
+    const struct aarch64_fpsimd_image *img = buf;
+    struct aarch64_fpu_area area;
+    memset(&area, 0, sizeof(area));
+    area.fpsr = img->fpsr;
+    area.fpcr = img->fpcr;
+    memcpy(area.vregs, img->vregs, sizeof(area.vregs));
+    return aarch64_fpu_set_current(&area);
+}

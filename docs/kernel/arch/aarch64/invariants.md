@@ -131,13 +131,24 @@ completing (a re-fault would loop forever).
 `-ERANGE`. **Checked by** the `module-load` self-test (a module calls a
 kernel export) and `tests/host/test_reloc_aarch64.c` (range limits).
 
-## A17: The kernel and userland are general-registers-only
+## A17: The kernel is general-registers-only; userland is not
 
-`-mgeneral-regs-only` on the kernel, the loader and userland; a trapped
-FP/SIMD access is `ARCH_TRAP_INVALID_OPCODE`. The kernel saves no vector
-state on a context switch or exception. **Checked by** the compiler flags
-in `build/arch/aarch64.mk` (kernel, loader and user flags alike); a violation is a trap at
-run time.
+`-mgeneral-regs-only` on the kernel and the loader, and **not** on
+userland or the libc, which use the vector registers as any ordinary
+program does. `CPACR_EL1.FPEN` is `0b11` at every CPU's bring-up, so the
+instructions are allowed at EL0 and at EL1 -- the field has no encoding
+that allows EL0 and traps EL1, and none could be useful, since EL1 is
+where the registers are saved and restored.
+
+The kernel's abstention therefore has no hardware to lean on and is
+checked instead: `scripts/check-fpregs.sh` disassembles the built image
+during `make analyze` and fails on any vector register outside the state
+save and restore (`fpuregs.S`), the guest swap and the self-test hooks.
+
+**Checked by** that script (proved by putting a `movi v3.16b, #0` in
+`console_set_panic_mode` and watching the build fail), by the compiler
+flags in `build/arch/aarch64.mk`, and by `fpu-switch` and `usertest: fpu
+isolation` for the property the abstention exists to protect.
 
 ## A18: The exit status encoding is the same as x86-64
 

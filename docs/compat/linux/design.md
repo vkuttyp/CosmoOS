@@ -238,16 +238,19 @@ stack (or the alternate stack with `SA_ONSTACK`), 16-byte aligned:
   extended area too).
 - **AArch64**: `siginfo`, then `struct ucontext` (`uc_flags`, `uc_link`,
   `uc_stack`, `uc_sigmask`, `mcontext`: `fault_address`, `regs[31]`, `sp`,
-  `pc`, `pstate`, a reserved area holding an `esr_context` (syndrome 0:
-  the fault's ESR is not carried yet) and the terminator; no
-  `fpsimd_context`, FP/SIMD is off at EL0). Entry: `x0`,
+  `pc`, `pstate`, a reserved area holding a list of records: an
+  `fpsimd_context` (magic `0x46508001`, 528 bytes: `fpsr`, `fpcr` and
+  `Q0`-`Q31`), then an `esr_context` (syndrome 0: the fault's ESR is not
+  carried yet), then the terminator). Entry: `x0`,
   `x1`, `x2` as above, `pc` = handler, `sp` = the frame, `lr` = the
   restorer: `SA_RESTORER` when set, else the kernel's trampoline (below).
   Restart: `x8` = nr, `x0` = the first argument, `pc` -= 4.
 
 `rt_sigreturn` reads the `ucontext` back (x86-64: `rsp` points at it
 after the restorer's `ret` popped `pretcode`; AArch64: `sp` points at the
-frame record below the `rt_sigframe`), loads the FXSAVE image when the
+frame record below the `rt_sigframe`), walks the AArch64 reserved area's
+records rather than assuming their order and restores the vector
+registers from the `fpsimd_context` if one is there, loads the FXSAVE image when the
 frame names one, and hands the register set to the core's
 `signal_return`: `cs` and `ss` are the user selectors whatever the frame
 says, `rflags` keeps only the user-changeable bits, a non-canonical `rip`

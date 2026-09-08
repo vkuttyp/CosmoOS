@@ -148,7 +148,7 @@ int main(void)
     CHECK(c_snprintf(buf, sizeof(buf), "%*d|%-*d|%.*d", 4, 7, 4, 7, 3, 7) == 13 && strcmp(buf, "   7|7   |007") == 0);
     CHECK(c_snprintf(buf, sizeof(buf), "%.0d|%.0d", 0, 5) == 2 && strcmp(buf, "|5") == 0);
     CHECK(c_snprintf(buf, sizeof(buf), "%lld", LLONG_MIN) == 20 && strcmp(buf, "-9223372036854775808") == 0);
-    CHECK(c_snprintf(buf, sizeof(buf), "%f", 1.5) == 1 && strcmp(buf, "?") == 0);
+    CHECK(c_snprintf(buf, sizeof(buf), "%f", 1.5) == 8 && strcmp(buf, "1.500000") == 0);
     CHECK(c_snprintf(buf, sizeof(buf), "%q") == 2 && strcmp(buf, "%q") == 0);
 
     /* conversions */
@@ -211,6 +211,58 @@ int main(void)
     void *p0 = c_malloc(0);
     CHECK(p0 != NULL);
     c_free(p0);
+
+    /* The three floating conversions (libc/src/printf.c). Diagnostics,
+     * not numerics: fixed precision, `double` only, no libm -- so the
+     * checks are the shape of the output and the cases a naive
+     * implementation gets wrong, not the last bit of the mantissa. */
+    char f[64];
+    c_snprintf(f, sizeof(f), "%f", 3.14159265);
+    CHECK(strcmp(f, "3.141593") == 0);
+    c_snprintf(f, sizeof(f), "%.2f", 3.14159265);
+    CHECK(strcmp(f, "3.14") == 0);
+    c_snprintf(f, sizeof(f), "%.0f", 2.5);
+    CHECK(strcmp(f, "3") == 0);            /* rounds up into the next digit */
+    c_snprintf(f, sizeof(f), "%.2f", 9.999);
+    CHECK(strcmp(f, "10.00") == 0);        /* the carry reaches the integer part */
+    c_snprintf(f, sizeof(f), "%f", 0.0);
+    CHECK(strcmp(f, "0.000000") == 0);
+    c_snprintf(f, sizeof(f), "%f", -0.5);
+    CHECK(strcmp(f, "-0.500000") == 0);
+    c_snprintf(f, sizeof(f), "%+.1f", 1.0);
+    CHECK(strcmp(f, "+1.0") == 0);
+    c_snprintf(f, sizeof(f), "%8.2f|", 1.5);
+    CHECK(strcmp(f, "    1.50|") == 0);    /* width pads, and the sign is inside it */
+    c_snprintf(f, sizeof(f), "%-8.2f|", 1.5);
+    CHECK(strcmp(f, "1.50    |") == 0);
+    c_snprintf(f, sizeof(f), "%08.2f", -1.5);
+    CHECK(strcmp(f, "-0001.50") == 0);     /* the zeros go after the sign, as for an integer */
+    c_snprintf(f, sizeof(f), "%e", 1234.5);
+    CHECK(strcmp(f, "1.234500e+03") == 0);
+    c_snprintf(f, sizeof(f), "%.2e", 0.00042);
+    CHECK(strcmp(f, "4.20e-04") == 0);
+    c_snprintf(f, sizeof(f), "%E", 1234.5);
+    CHECK(strcmp(f, "1.234500E+03") == 0);
+    c_snprintf(f, sizeof(f), "%g", 100.0);
+    CHECK(strcmp(f, "100") == 0);          /* trailing zeros and the point go */
+    c_snprintf(f, sizeof(f), "%g", 0.0001);
+    CHECK(strcmp(f, "0.0001") == 0);
+    c_snprintf(f, sizeof(f), "%g", 0.00001);
+    CHECK(strcmp(f, "1e-05") == 0);        /* past the exponent where %g switches */
+    c_snprintf(f, sizeof(f), "%g", 1234567.0);
+    CHECK(strcmp(f, "1.23457e+06") == 0);
+    /* A value with no integer part a 64-bit split could hold: exponent
+     * form rather than a wrong answer. */
+    c_snprintf(f, sizeof(f), "%f", 1e30);
+    CHECK(f[0] == '1' && strchr(f, 'e') != NULL);
+    /* Not numbers. */
+    double zero = 0.0;
+    c_snprintf(f, sizeof(f), "%f", 1.0 / zero);
+    CHECK(strcmp(f, "inf") == 0);
+    c_snprintf(f, sizeof(f), "%f", -1.0 / zero);
+    CHECK(strcmp(f, "-inf") == 0);
+    c_snprintf(f, sizeof(f), "%F", zero / zero);
+    CHECK(strcmp(f, "NAN") == 0);
 
     if (g_failures) {
         printf("libc                          FAIL (%d)\n", g_failures);

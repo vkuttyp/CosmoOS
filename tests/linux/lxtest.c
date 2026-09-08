@@ -88,6 +88,10 @@ static struct {
     volatile unsigned long addr, sp, blocked;
 } g_sig;
 
+#if !defined(__x86_64__)
+static void lx_clobber_v0(void);
+#endif
+
 /* The restorer every handler returns through: rt_sigreturn. */
 #if defined(__x86_64__)
 __asm__(".text\n"
@@ -131,10 +135,26 @@ static void sig_handler(int sig, struct lx_siginfo *si, void *ucv)
     if (sig == 10)
         __asm__ volatile("pxor %%xmm0, %%xmm0" ::: "memory");   /* the frame must carry the caller's xmm0 */
 #else
-    /* No FP/SIMD state at EL0: the reserved area starts with the esr_context. */
-    struct lx_esr_context esr;
-    __builtin_memcpy(&esr, uc->uc_mcontext.reserved, sizeof(esr));
-    g_sig.fpstate_ok = esr.magic == LX_ESR_MAGIC && esr.size == 16 && uc->uc_mcontext.pc != 0;
+    /* The reserved area is a list of records: the FP/SIMD state, then
+     * the esr_context, then the terminator. Walk it rather than assume
+     * an order, which is what a real libc does. */
+    unsigned off = 0, seen_fp = 0, seen_esr = 0;
+    for (;;) {
+        struct { uint32_t magic, size; } head;
+        __builtin_memcpy(&head, uc->uc_mcontext.reserved + off, sizeof(head));
+        if (head.magic == 0 || head.size < sizeof(head))
+            break;
+        if (head.magic == LX_FPSIMD_MAGIC && head.size == 528)
+            seen_fp = 1;
+        if (head.magic == LX_ESR_MAGIC && head.size == 16)
+            seen_esr = 1;
+        off += head.size;
+        if (off + sizeof(head) > sizeof(uc->uc_mcontext.reserved))
+            break;
+    }
+    g_sig.fpstate_ok = seen_fp && seen_esr && uc->uc_mcontext.pc != 0;
+    if (sig == 10)
+        lx_clobber_v0();   /* the frame must carry the caller's Q0 */
     if (sig == 11)
         uc->uc_mcontext.pc += 4;    /* over the store of sig_fault_store */
 #endif
@@ -157,6 +177,37 @@ static void sig_fault_store(unsigned long addr)
     __asm__ volatile("strb %w1, [%0]" : : "r"(addr), "r"(1) : "memory");
 #endif
 }
+
+#if !defined(__x86_64__)
+/* The vector registers are off limits to the compiler here
+ * (-mgeneral-regs-only), so the two places this test uses them say so to
+ * the assembler and put it back. */
+static void lx_clobber_v0(void)
+{
+    __asm__ volatile(".arch armv8-a+fp+simd\n\t"
+                     "movi v0.16b, #0\n\t"
+                     ".arch armv8-a" ::: "memory");
+}
+
+/* Q0 loaded, kill(pid, SIGUSR1) with the handler clobbering it, Q0 read
+ * back: only the handler and the kernel's frame can change it between. */
+static unsigned long sig_vreg_roundtrip(long pid)
+{
+    unsigned long in = 0x0123456789abcdefull, out = 0;
+    register long x8 __asm__("x8") = (long)LX_kill;
+    register long x0 __asm__("x0") = pid;
+    register long x1 __asm__("x1") = 10;
+    __asm__ volatile(".arch armv8-a+fp+simd\n\t"
+                     "fmov d0, %[in]\n\t"
+                     "svc #0\n\t"
+                     "fmov %[out], d0\n\t"
+                     ".arch armv8-a"
+                     : [out] "=r"(out), "+r"(x0)
+                     : [in] "r"(in), "r"(x8), "r"(x1)
+                     : "memory");
+    return out;
+}
+#endif
 
 #if defined(__x86_64__)
 /* xmm0 loaded, kill(pid, SIGUSR1) with the handler clobbering xmm0, xmm0 read back. */
@@ -619,7 +670,7 @@ int main(int argc, char **argv)
 #if defined(__x86_64__)
     CHECKV(sig_xmm_roundtrip(pid) == 0x0123456789abcdefull, 0);
 #else
-    CHECKV(sc2(LX_kill, pid, 10) == 0, 0);   /* no FP/SIMD state at EL0 to carry */
+    CHECKV(sig_vreg_roundtrip(pid) == 0x0123456789abcdefull, 0);
 #endif
     CHECKV(g_sig.count == 9, g_sig.count);
     /* Back to defaults for the rest. */

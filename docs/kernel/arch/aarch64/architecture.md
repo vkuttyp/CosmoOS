@@ -119,9 +119,7 @@ contract is generalized, not special-cased.
 - No Linux personality table for AArch64 (the Linux AArch64 numbers
   differ from x86-64's; the personality is selected but every call is
   unknown), no virtualization backend (EL2 with stage-2 translation is a
-  later phase), no FP/SIMD state in user threads (userland is built with
-  `-mgeneral-regs-only` on both architectures; the kernel does not save
-  the vector registers), no big-endian, no 32-bit EL0, no device tree
+  later phase), no big-endian, no 32-bit EL0, no device tree
   (ACPI only, as on x86), no GICv3/ITS (GICv2 + GICv2m is what the
   `virt` machine offers with `gic-version=2`; a GICv3 backend fits the
   same `arch/irqc.h` later), no real hardware beyond QEMU `virt`, no KVM

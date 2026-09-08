@@ -59,8 +59,27 @@ loader was used.
 ## fpu.c: FPU and SIMD state
 
 The kernel is compiled `-mgeneral-regs-only` on every architecture and
-never touches x87, SSE or AVX registers itself; user threads and guests
-do, so their state must be owned explicitly (`arch/fpu.h`):
+never touches x87, SSE, AVX or NEON registers itself; user threads and
+guests do, so their state must be owned explicitly (`arch/fpu.h`). Both
+architectures implement the same three rules, and since the FP/SIMD unit
+they are both real: AArch64's implementation used to be no-ops over a
+CPU where the registers were unusable at EL0.
+
+**The kernel rule is checked, not promised.** Neither architecture can
+enforce it in hardware -- ring 0 and EL1 are exactly where a thread's
+state is saved and restored, so the levels that must abstain are the
+levels that must be allowed. `scripts/check-fpregs.sh` disassembles the
+built kernel after every `make analyze` and fails on any vector or
+floating-point register outside a short list of functions: the state
+save and restore, the hypervisor's guest swap, and the self-test hooks
+that put a known pattern in the registers. The list is in the script,
+and adding a name to it is a decision someone has to make on purpose.
+(One consequence worth knowing: inlining moves instructions into the
+caller, so on x86-64 the list has to name the self-test's thread
+function, where the helpers end up. AArch64's are assembly and cannot
+move.)
+
+The x86-64 half:
 
 - **CPU policy**, asserted on every CPU by `x86_fpu_init_cpu` from
   `x86_cpu_enable_features` (the boot CPU inherits whatever the firmware
@@ -86,6 +105,32 @@ do, so their state must be owned explicitly (`arch/fpu.h`):
   kernel-thread owner gets the reset image so nothing of the guest stays
   live). XSETBV is intercepted and emulated with the hardware's rules
   against the host's XCR0, since XCR0 is not in the VMCB.
+
+The AArch64 half (`kernel/arch/aarch64/fpu.c`, `fpuregs.S`):
+
+- **CPU policy**: `CPACR_EL1.FPEN = 0b11` at every CPU's bring-up --
+  including the secondaries, since CPACR is per-CPU state and the first
+  version of this unit forgot them, which showed up as an FP trap inside
+  the switch on CPU 1 before there were any threads. The field has no
+  encoding that allows EL0 and traps EL1, and none could be useful.
+- **Ownership and eager switching**: the same rules, over a 528-byte
+  area of `Q0`-`Q31`, `FPSR` and `FPCR`; the save and restore are the
+  sixteen load and store pairs in `fpuregs.S`, the only place in the
+  kernel that names those registers.
+- **Guests** (`hv_el2.c`): the owner's registers are saved, the vCPU's
+  loaded, and afterwards the guest's captured and the owner's put back;
+  a kernel-thread owner gets zeros so nothing of the guest stays live.
+
+**Eager, with a measurement.** `fpu-bench` times two threads handing the
+processor back and forth, with owned state and without: the save and
+restore are about 1 000 ns of a 21 600 ns switch on AArch64 and about
+270 ns of a 2 700 ns switch on x86-64 (QEMU TCG, so these measure the
+emulator more than the silicon). Lazy switching would trade that for a
+trap on each thread's first FP instruction -- and since the userland is
+now built without `-mgeneral-regs-only`, every user thread executes one.
+The trade is a fraction of a switch against a trap for everybody, so
+lazy is not written (section 21), and `arch/fpu.h` keeps one rule for
+both architectures.
 
 Tests: `fpu-switch` (two state-owning kernel threads pinned to one CPU
 trade patterns across 400 yields), `hv-guest-fpu` (a fresh guest sees the

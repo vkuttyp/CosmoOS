@@ -18,6 +18,7 @@
 #include <kernel/printf.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
+#include <arch/cpu.h>
 #include <kernel/string.h>
 
 #include <arch/irq.h>
@@ -257,6 +258,76 @@ static bool test_fpu_switch(const char **reason)
     return true;
 }
 
+/*
+ * What owning FP/SIMD state costs a context switch (reports only;
+ * docs/kernel/arch/design.md, "FPU and SIMD state"). Two threads pinned
+ * to this CPU hand the processor back and forth; the pair is timed with
+ * state and without, and the difference is the save and the restore.
+ *
+ * The number decides a policy: eager switching pays it on every switch
+ * between owners, which after this unit is every user thread. Lazy
+ * switching would pay a trap instead, on the first FP instruction a
+ * thread executes -- worth having only if this figure is large.
+ */
+#define FPU_BENCH_SWITCHES 2000u
+
+struct fpu_bench {
+    bool own;
+    unsigned rounds;
+};
+
+static void fpu_bench_thread(void *arg)
+{
+    struct fpu_bench *b = arg;
+    if (b->own)
+        (void)arch_fpu_alloc(thread_current());
+    for (unsigned i = 0; i < b->rounds; i++)
+        sched_yield();
+    thread_exit(0);
+}
+
+static uint64_t fpu_bench_pair(bool own)
+{
+    struct fpu_bench a = { .own = own, .rounds = FPU_BENCH_SWITCHES };
+    struct fpu_bench b = { .own = own, .rounds = FPU_BENCH_SWITCHES };
+    cpumask_t here = CPUMASK_OF(arch_cpu_id());
+    uint64_t t0 = clock_now_ns();
+    struct thread *ta = thread_create_on(fpu_bench_thread, &a, "fpu-bench-a", SCHED_PRIO_DEFAULT, here);
+    struct thread *tb = thread_create_on(fpu_bench_thread, &b, "fpu-bench-b", SCHED_PRIO_DEFAULT, here);
+    if (ta == NULL || tb == NULL) {
+        if (ta)
+            thread_join(ta);
+        if (tb)
+            thread_join(tb);
+        return 0;
+    }
+    thread_join(ta);
+    thread_join(tb);
+    return clock_now_ns() - t0;
+}
+
+static bool test_fpu_bench(const char **reason)
+{
+    (void)reason;
+    if (arch_fpu_state_size() == 0) {
+        kinfo("selftest: fpu-bench: no FP/SIMD state on this architecture; skipped");
+        return true;
+    }
+    uint64_t bare = fpu_bench_pair(false);
+    uint64_t owned = fpu_bench_pair(true);
+    if (bare == 0 || owned == 0) {
+        kinfo("selftest: fpu-bench: could not create the pair; skipped");
+        return true;
+    }
+    uint64_t switches = 2ull * FPU_BENCH_SWITCHES;
+    kinfo("selftest: fpu-bench: %llu-byte state; %llu ns a switch with it, %llu without, "
+          "%lld ns of save and restore",
+          (unsigned long long)arch_fpu_state_size(), (unsigned long long)(owned / switches),
+          (unsigned long long)(bare / switches),
+          (long long)((int64_t)owned - (int64_t)bare) / (int64_t)switches);
+    return true;
+}
+
 static const struct selftest tests[] = {
     { "printf",          test_printf },
     { "string",          test_string },
@@ -303,6 +374,7 @@ static const struct selftest tests[] = {
     { "lockdep-mutex",   selftest_lockdep_mutex },
     { "lockdep-contention", selftest_lockdep_contention },
     { "fpu-switch",      test_fpu_switch },
+    { "fpu-bench",       test_fpu_bench },
     { "objects",         selftest_objects },
     { "elf",             selftest_elf },
     { "bootarchive",     selftest_bootarchive },
