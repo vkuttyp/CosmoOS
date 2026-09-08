@@ -40,16 +40,26 @@
  * driver that types what the report holds instead of what changed in it
  * sends "xxyy". */
 #define KEYTEST_ROLLOVER "xy"
-/* The typing began at the start of the self-test run, so on any machine
- * the lines are here by now; this is what a failure costs to report.
- * Bounded by the clock and not by a count of sleeps: on a loaded build
- * runner a `thread_sleep_ms(1)` is worth several milliseconds, and the
- * first version of this waited 20 s where it meant to wait 5. */
-#define KEYTEST_WAIT_NS (5ull * 1000 * 1000 * 1000)
+/*
+ * One deadline for the whole check, not one per line. The harness types
+ * over a socket into an emulated machine on a build runner, so the gap
+ * between the first line and the second is the runner's to decide: on
+ * AArch64 CI the second line arrived 5.0 s after the first, against a
+ * five-second-per-line bound, and the test failed by a hair for no
+ * reason of its own. Everything here has already arrived on any machine
+ * that is not loaded; this bound is what a real failure costs to report.
+ *
+ * Bounded by the clock and not by a count of sleeps: on that runner a
+ * `thread_sleep_ms(1)` is worth several milliseconds, and the first
+ * version of this waited 20 s where it meant to wait 5.
+ */
+#define KEYTEST_WAIT_NS (25ull * 1000 * 1000 * 1000)
+
+static uint64_t g_deadline;
 
 static int64_t read_a_line(char *buf, size_t len)
 {
-    uint64_t deadline = clock_now_ns() + KEYTEST_WAIT_NS;
+    uint64_t deadline = g_deadline;
     for (;;) {
         if (tty_has_line(tty_console())) {
             int64_t got = tty_read(tty_console(), buf, len - 1);
@@ -107,6 +117,8 @@ bool selftest_hid_keyboard(const char **reason)
         return true;   /* nothing typed at this machine; hid-arm said so */
     struct tty_stats before = g_before;
     tty_set_flags(tty_console(), g_flags);   /* the shell wants its echo back */
+    uint64_t started = clock_now_ns();
+    g_deadline = started + KEYTEST_WAIT_NS;
 
     char line[64];
     int64_t got = read_a_line(line, sizeof(line));
@@ -130,10 +142,11 @@ bool selftest_hid_keyboard(const char **reason)
         struct tty_stats now;
         tty_get_stats(tty_console(), &now);
         kerror("selftest: hid-keyboard: keys held together read \"%s\" (%lld bytes), expected \"%s\"; "
-               "the tty took %llu bytes and %llu lines in all",
+               "the tty took %llu bytes and %llu lines in %llu ms of waiting",
                got2 > 0 ? rollover : "", (long long)got2, KEYTEST_ROLLOVER,
                (unsigned long long)(now.rx_bytes - before.rx_bytes),
-               (unsigned long long)(now.lines_in - before.lines_in));
+               (unsigned long long)(now.lines_in - before.lines_in),
+               (unsigned long long)((clock_now_ns() - started) / 1000000));
     }
     CHECK(got2 > 0 && strcmp(rollover, KEYTEST_ROLLOVER) == 0);
 

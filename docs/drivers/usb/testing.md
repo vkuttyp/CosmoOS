@@ -99,6 +99,13 @@ time at all; `hid-keyboard` runs last, by which point the lines arrived
 long ago, so it also takes no time. The first version was one test that
 waited, and it passed everywhere except CI.
 
+The check has **one** deadline for both lines, not one per line: the gap
+between them is the runner's to decide, and AArch64 CI delivered the
+second 5.0 s after the first against a five-second bound -- a failure by
+a hair, for no reason of the test's own. It is 25 s for the pair now,
+which costs nothing when they have already arrived and is what a real
+failure costs to report.
+
 The overlapping keys are spaced by a tenth of a second, not by the
 20 ms the rest of the typing uses. A key state has to last long enough
 for the guest to poll it, and a build runner emulating a machine
