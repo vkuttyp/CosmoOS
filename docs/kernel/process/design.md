@@ -695,10 +695,11 @@ struct process { ... struct sigaction_k *sigactions; uint64_t shared_pending; ..
   `-EINTR`. `SIGKILL` is never blocked or caught and ends the process at
   once (`process_kill` as today, status 128 + 9). A signal whose action
   is `SIG_IGN`, or whose default is *ignore* (`SIGCHLD`, `SIGURG`,
-  `SIGWINCH`, `SIGCONT`), is discarded when sent unless blocked. The stop
-  signals (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) have no job control
-  behind them: they are treated as ignored (a recorded deviation), not as
-  fatal, which was the audit's HIGH.
+  `SIGWINCH`, `SIGCONT`), is discarded when sent unless blocked. *The
+  stop signals had no job control behind them when this was written and
+  were treated as ignored, a recorded deviation and the audit's HIGH;
+  the job-control unit closed it, and their default now stops the
+  process -- see "Stopping" below.*
 - **Delivery.** `signal_pending()` is true when the calling thread has a
   deliverable signal (pending and not blocked, or the process is
   exiting); the killable waits check it where they checked the kill flag.

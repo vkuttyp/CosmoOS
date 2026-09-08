@@ -209,7 +209,9 @@ kernel refuses a real handler without one. `siginfo_t` is `struct
 cosmo_siginfo` under POSIX names, with the layout asserted field by
 field, so a handler reads the kernel's own record. `signal()` sets
 `SA_RESTART`. There is no `sigaltstack`, no real-time signal, no queued
-siginfo, no `sigsuspend`, and no job control.
+siginfo and no `sigsuspend`. Job control is here: `SIGSTOP` and friends
+stop a process, `WUNTRACED`/`WCONTINUED` report it, and the shell has
+`jobs`/`fg`/`bg`.
 
 ## sys/socket.h, netinet/in.h, arpa/inet.h
 

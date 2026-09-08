@@ -66,10 +66,12 @@ builtins (`cd`, `pwd`, `exit`, `export`, `unset`, `set` (list), `:`,
 with `spawnvp` and explicit handle maps for pipes and redirections;
 waits for every process of a pipeline and sets `$?` to the last one's
 status. Non-interactive use: `sh file [args]` and `sh -c 'command'`;
-with `-e` a failing command ends a script. No control flow (`if`,
-`while`, `for`, functions), globbing, background jobs, job control,
-here-documents, command substitution or arithmetic: recorded for the
-next shell phase; the parser is written so that these slot in.
+with `-e` a failing command ends a script. Background jobs (`&`) and
+job control (`^Z`, `jobs`, `fg`, `bg`) arrived with the job-control
+unit. Still missing: control flow (`if`, `while`, `for`, functions),
+globbing, here-documents, command substitution and arithmetic --
+recorded for the next shell phase; the parser is written so that these
+slot in.
 
 **coreutils** (`/bin`): `echo [-n]`, `cat [files]` (stdin without
 arguments), `ls [-la] [paths]` (names; `-l` type, mode, size, ino),

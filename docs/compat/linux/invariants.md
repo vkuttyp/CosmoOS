@@ -220,7 +220,8 @@ kernel's `unistd.h` tables.
   `kill(-pgid)` uses them, so this is a gap in `wait4` rather than in
   the kernel.
 - No `fork`, `execve`, `select`/`epoll`, `sendmsg`/`recvmsg`, shared
-  file mappings, real-time signal queues, job control.
+  file mappings, real-time signal queues. (Job control arrived with the
+  job-control unit, `wait4` included.)
 - `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)
   unless the path is absolute; the VFS has no `openat` semantics yet.
 - `uname` reports a kernel release that is not the kernel's; `ioctl` is
