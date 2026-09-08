@@ -143,8 +143,9 @@ from EL1) and data abort (0x24, 0x25) → `ARCH_TRAP_PAGE_FAULT`; BRK
 (0x3C), breakpoint and watchpoint → `ARCH_TRAP_BREAKPOINT`; software
 step (0x32/0x33) → `ARCH_TRAP_DEBUG`; unknown (0x00), illegal execution
 state (0x0E), trapped FP/SIMD (0x07, which no longer happens: FPEN is
-set at every CPU's bring-up; the kernel is built
-general-regs-only and user code too) and trapped system-register access
+0b11 at every CPU's bring-up, so the instructions are allowed at EL0 and
+EL1; the kernel abstains by its build flag and a build check, and user
+code does not abstain at all) and trapped system-register access
 → `ARCH_TRAP_INVALID_OPCODE`; everything else (PC/SP alignment, SError)
 → `ARCH_TRAP_GENERAL_PROTECTION`. There is no divide-error exception on
 AArch64; the kind exists for the contract and never fires. BRK is a

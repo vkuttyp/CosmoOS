@@ -129,7 +129,8 @@ static void pad(struct out *o, char c, int n)
  * built into `buf` and returned, so the caller applies width and the
  * padding flags exactly as it does for an integer.
  */
-static size_t format_double(char *buf, size_t cap, double v, char conv, int prec, int plus, int space, int upper)
+static size_t format_double(char *buf, size_t cap, double v, char conv, int prec, int plus, int space, int upper,
+                            int alt)
 {
     size_t n = 0;
     int neg = dbl_is_neg(v);
@@ -156,7 +157,8 @@ static size_t format_double(char *buf, size_t cap, double v, char conv, int prec
     if (prec > 17)
         prec = 17;   /* past the digits a double carries */
 
-    /* %g: the exponent decides the form, and trailing zeros go. */
+    /* %g: the exponent decides the form, and trailing zeros go -- unless
+     * '#' asked for them, which is what that flag means here. */
     int trim = 0;
     if (conv == 'g') {
         int e = dbl_exp10(v);
@@ -170,7 +172,7 @@ static size_t format_double(char *buf, size_t cap, double v, char conv, int prec
             if (prec < 0)
                 prec = 0;
         }
-        trim = 1;
+        trim = !alt;
     }
 
     int exp = 0;
@@ -226,6 +228,8 @@ static size_t format_double(char *buf, size_t cap, double v, char conv, int prec
         buf[n++] = digits[i];
 
     size_t point = n;
+    if (prec == 0 && alt && n < cap)
+        buf[n++] = '.';   /* '#' keeps the point a precision of zero would drop */
     if (prec > 0 && n < cap) {
         buf[n++] = '.';
         for (int i = 0; i < prec && n < cap; i++) {
@@ -434,7 +438,7 @@ static void format(struct out *o, const char *fmt, va_list ap)
             char fb[64];
             char conv = (char)(*p | 0x20);
             int upper = (*p >= 'A' && *p <= 'Z');
-            size_t n = format_double(fb, sizeof(fb), va_arg(ap, double), conv, prec, plus, space, upper);
+            size_t n = format_double(fb, sizeof(fb), va_arg(ap, double), conv, prec, plus, space, upper, alt);
             size_t sign = (n > 0 && (fb[0] == '-' || fb[0] == '+' || fb[0] == ' ')) ? 1u : 0u;
             if (!left && zero) {
                 /* Zero padding goes between the sign and the digits, as

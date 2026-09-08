@@ -255,6 +255,17 @@ int main(void)
      * form rather than a wrong answer. */
     c_snprintf(f, sizeof(f), "%f", 1e30);
     CHECK(f[0] == '1' && strchr(f, 'e') != NULL);
+    /* '#' keeps the decimal point a precision of zero would drop, and
+     * keeps %g's trailing zeros. */
+    c_snprintf(f, sizeof(f), "%#.0f", 1.0);
+    CHECK(strcmp(f, "1.") == 0);
+    c_snprintf(f, sizeof(f), "%#.0e", 1.0);
+    CHECK(strcmp(f, "1.e+00") == 0);
+    c_snprintf(f, sizeof(f), "%#g", 100.0);
+    CHECK(strcmp(f, "100.000") == 0);
+    c_snprintf(f, sizeof(f), "%.0f", 1.0);
+    CHECK(strcmp(f, "1") == 0);            /* and without it, no point */
+
     /* Not numbers. */
     double zero = 0.0;
     c_snprintf(f, sizeof(f), "%f", 1.0 / zero);

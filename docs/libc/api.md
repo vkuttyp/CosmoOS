@@ -91,7 +91,9 @@ with flags `-`, `0`, `+`, space, `#`, and `*` for width and precision.
 `%s` with NULL prints `(null)`. `%f`, `%e` and `%g` (and their capital
 forms) take a `double`, with `inf` and `nan` spelled out and the sign
 before any zero padding; precision defaults to 6 and is capped at 17,
-the digits a `double` carries. No `long double`, no `%a`, no libm: the
+the digits a `double` carries; `#` keeps the decimal point that a
+precision of zero would drop and `%g`'s trailing zeros. No `long
+double`, no `%a`, no libm: the
 conversion scales and divides, which is exact enough for diagnostics and
 does not claim an exactly rounded last digit. A value whose integer part
 will not fit 64 bits is printed in exponent form whatever was asked for.

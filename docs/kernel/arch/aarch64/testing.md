@@ -179,9 +179,10 @@ Recorded so their symptoms are recognisable:
 
 Real hardware, GICv3, KVM/HVF acceleration (the CI machine has none for
 AArch64 and the macOS host would need `virtualization=on`, which the
-loader refuses today), `-cpu max` in CI, big-endian, AArch32 EL0,
-FP/SIMD in userland, PSCI `CPU_OFF`/`SYSTEM_OFF` (shutdown is
-semihosting only).
+loader refuses today), `-cpu max` in CI, big-endian, AArch32 EL0, SVE
+(a machine with it runs the FP/SIMD state fine; the wider registers are
+not saved), PSCI `CPU_OFF`/`SYSTEM_OFF` (shutdown is semihosting
+only).
 
 ## FP/SIMD
 
