@@ -136,8 +136,19 @@ format reduced to three (shift, width) pairs for red, green and blue —
 so the kernel never needs the EFI enumeration, and a bit-mask format is
 described by the same three pairs as the two common ones.
 
-`struct cosmoboot_info` gains those fields in the space
-`cosmoboot.h:144` reserved for them, and `COSMOBOOT_VERSION` becomes 6.
+`struct cosmoboot_info` gains a 40-byte block for that: two 64-bit
+words for base and size, four 32-bit words for width, height, pitch and
+bits per pixel, and one more word holding the three (shift, width) byte
+pairs with two bytes of padding. `reserved1[4]` holds 32 of those 40,
+so version 6 spends it and **grows the structure**, keeping a fresh
+reserved word for the command line the same comment
+(`cosmoboot.h:144`) still promises — the space was reserved for both,
+and it was never large enough for both. Growth is safe and cheaper than
+squeezing: the loader writes `size = sizeof(*info)`, the kernel reads
+nothing beyond it, and the ELF note makes the version check exact
+equality (`boot/uefi/elf.c:198`), so no kernel ever sees a structure of
+a size it was not built for. `COSMOBOOT_VERSION` becomes 6.
+
 All zero means "no framebuffer", which is what a firmware without a GOP,
 or a machine whose display device the firmware did not drive, produces;
 the kernel then behaves exactly as it does today.
@@ -205,17 +216,34 @@ untouched.
 A module binding class `09`. It reads the hub descriptor, powers the
 ports, and watches the status-change endpoint — a second interrupt
 endpoint, and one whose reports are a bitmap of ports rather than a
-stream. On a connect it resets the port, reads the speed from the port
-status, and hands the core a device whose parent is the hub; on a
-disconnect it removes that device, children first.
+stream.
+
+**The completion does not enumerate.** It runs in interrupt context, so
+it records the change bitmap and wakes the hub's worker thread, and the
+worker does everything that sleeps: `GET_STATUS` on the port, the reset,
+`CLEAR_FEATURE` for each change bit, and the control transfers of
+enumeration itself. That is the shape the xHCI driver already uses — its
+own worker is what calls `usb_port_connected` today — and it is stated
+here so the implementation cannot drift into blocking work in a
+callback. On a connect the worker resets the port, reads the speed from
+the port status, and hands the core a device whose parent is the hub; on
+a disconnect it removes that device, children first.
 
 The core gains what it needs to say where a device is: a parent pointer,
 a depth, a route string, and a name that is a path (`usb0-1.2`) rather
-than a root-port number. The xHCI driver gains the two slot-context
-fields it has never had a reason to set: Route String, and — for a full-
-or low-speed device behind a high-speed hub — the TT's slot and port.
-QEMU's `usb-hub` is a full-speed hub, so a keyboard behind it exercises
-exactly the fields a root-port device leaves zero.
+than a root-port number. The xHCI driver gains the slot-context fields
+it has never had a reason to set: Route String and the parent's port,
+and — for a full- or low-speed device behind a *high-speed* hub — the
+TT's hub slot and port.
+
+QEMU offers a full-speed hub only, so the shape it tests is the route
+string and the depth. A transaction translator exists only in a
+high-speed hub with slower devices behind it, and with no such hub to
+attach, **the TT fields are written to the specification and left
+untested** — recorded in `testing.md` under "not covered", beside AHCI's
+task-file recovery, rather than quietly claimed by a test that cannot
+reach them. It is the one part of this unit whose first real exercise
+will be someone's dock or monitor hub.
 
 **This step is the droppable one.** It goes last because if it turns out
 to fight the core — if a hub's children want to be something the device
@@ -227,7 +255,7 @@ is a result, not a failure.
 
 | File | Change |
 | --- | --- |
-| `boot/protocol/cosmoboot.h` | framebuffer fields in the reserved space; `COSMOBOOT_VERSION` 6 |
+| `boot/protocol/cosmoboot.h` | the 40-byte framebuffer block: `reserved1` spent and the structure grown by a word; `COSMOBOOT_VERSION` 6 |
 | `boot/uefi/efi.h` | the Graphics Output Protocol GUID and its structures |
 | `boot/uefi/main.c`, `boot/uefi/loader.h` | locate the GOP, record the mode, fill the new fields |
 | `kernel/include/kernel/bootinfo.h`, the boot-info reader | carry the framebuffer description |
@@ -247,10 +275,13 @@ is a result, not a failure.
 ## New APIs
 
 - **Boot protocol v6**: `fb_phys`, `fb_size`, `fb_width`, `fb_height`,
-  `fb_pitch`, `fb_bpp`, and three (shift, width) pairs. Zero means none.
-  The version bump is the whole compatibility story: the ELF note pairs
-  a kernel with a loader, so a v5 kernel refuses a v6 loader and the
-  pair moves in one commit.
+  `fb_pitch`, `fb_bpp`, and three (shift, width) pairs — 40 bytes, of
+  which `reserved1[4]` covers 32, so the structure grows by a word and
+  keeps one reserved for the command line. Zero means none. The version
+  bump is the whole compatibility story: `size` says how much the loader
+  wrote, and the ELF note pairs a kernel with a loader by exact equality
+  (`elf.c:198`), so a v5 kernel refuses a v6 loader and the pair moves
+  in one commit.
 - **A mapping for a range with no device.** This is the one existing
   interface that is likely to change shape: `device_map_mmio` takes a
   `struct device` and a resource, and a firmware framebuffer has
@@ -341,7 +372,10 @@ never re-registered).
 
 **`usb-hub`** (the `QEMU_KBD=hub` shape). The hub enumerates, its child
 is named for its route, the whole `hid-keyboard` test passes one level
-down, and unplugging the hub removes the child before the hub.
+down, and unplugging the hub removes the child before the hub. What this
+shape does *not* cover is the transaction translator, for the reason
+given in step 4: QEMU's hub is full-speed, and a TT belongs to a
+high-speed one.
 
 **Shapes.** `QEMU_DISPLAY={bochs (default), virtio, 0}` and
 `QEMU_KBD={root (default), hub, 0}`, each on both architectures, plus
@@ -406,9 +440,13 @@ QEMU.
   rather than the boot.
 - **The hub's fields.** Route strings and TT are the part of xHCI most
   easily got wrong and least visible when wrong (a device that enumerates
-  and then answers nothing). QEMU's `usb-hub` is a full-speed device, so
-  the shape is at least exercised; if QEMU's xHCI will not take it, step
-  4 becomes review-only and is dropped.
+  and then answers nothing). The route string is testable here; the TT
+  is not, because QEMU has only a full-speed hub — so TT programming can
+  be wrong, pass every test in this plan, and fail on the first
+  high-speed hub with a keyboard behind it. That is a known hole, not an
+  oversight, and the alternative (writing TT support and pretending the
+  shape covers it) would be worse. If QEMU's xHCI will not take the hub
+  at all, step 4 becomes review-only and is dropped.
 - **Font provenance.** Drawn in-tree from a generator script, for the
   reason given above; no table is copied in.
 - **Size**: about 250 lines of loader and protocol, 450 of `fbcon`
