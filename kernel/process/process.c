@@ -946,7 +946,7 @@ void process_last_thread_gone(struct process *p)
         } else {
             c->parent_pid = 0;
             if (zombie)
-                c->reaped = true;
+                __atomic_store_n(&c->reaped, true, __ATOMIC_RELEASE);
         }
         spin_unlock_irqrestore(&c->lock, cs);
         list_remove(&c->sibling);
@@ -963,7 +963,7 @@ void process_last_thread_gone(struct process *p)
     struct process *parent = p->parent;
     bool zombie = parent != NULL;
     if (!zombie)
-        p->reaped = true;
+        __atomic_store_n(&p->reaped, true, __ATOMIC_RELEASE);
     /* A session leader takes its session's terminal with it: nothing
      * left can claim it back, and the processes still on it are told
      * the line dropped. Read here because the session fields live under
@@ -1040,7 +1040,7 @@ int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
         arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
         struct process *c = find_reapable_locked(cur, pid, &matched);
         if (c) {
-            c->reaped = true;
+            __atomic_store_n(&c->reaped, true, __ATOMIC_RELEASE);
             list_remove(&c->sibling);
             list_init(&c->sibling);
             spin_unlock_irqrestore(&cur->lock, s);
@@ -1487,11 +1487,20 @@ struct process *process_lookup(pid_t pid)
     arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
     struct process *p;
     list_for_each_entry(p, &g_processes, all_link) {
-        if (p->pid == pid) {
-            bool got = kobject_tryget(&p->obj);
-            spin_unlock_irqrestore(&g_process_table_lock, s);
-            return got ? p : NULL;
-        }
+        if (p->pid != pid)
+            continue;
+        /* A reaped process is gone as far as anything that looks a pid
+         * up is concerned: its status has been collected and POSIX says
+         * the pid may be reused. It stays in the table until the last
+         * reference drops -- the reaper thread's, usually -- and
+         * without this test `kill(pid, 0)` answers 0 for a child whose
+         * `waitpid` has already returned, which is the window CI caught
+         * between the reap and the release. `reaped` only ever goes
+         * false to true, so a stale read costs at worst the behaviour
+         * that was there before. */
+        bool got = !__atomic_load_n(&p->reaped, __ATOMIC_ACQUIRE) && kobject_tryget(&p->obj);
+        spin_unlock_irqrestore(&g_process_table_lock, s);
+        return got ? p : NULL;
     }
     spin_unlock_irqrestore(&g_process_table_lock, s);
     return NULL;

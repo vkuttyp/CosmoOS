@@ -85,6 +85,7 @@ bool selftest_signal_native(const char **reason);      /* a handler and its retu
 bool selftest_signal_async(const char **reason);       /* ... at an interrupt, with a child sending */
 bool selftest_signal_mask(const char **reason);        /* blocked, pending, delivered at the unblock */
 bool selftest_signal_fault(const char **reason);       /* ... at a fault, with the address in siginfo */
+bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfindable before its object goes */
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */

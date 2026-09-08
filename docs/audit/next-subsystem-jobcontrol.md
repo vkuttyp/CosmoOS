@@ -125,12 +125,41 @@ separate flag leaves every existing test meaning what it says.
 
 **Where a process stops** is `signal_deliver`, beside the handler case:
 a stop signal whose action is the default sets `stopped` and parks the
-calling thread on `stopped_wq`. Every thread of the process parks as it
-reaches its own return to user mode; threads blocked in a killable wait
-are woken by the same `sched_wake` the signal core already does, come
-out with `-EINTR`, and park at the syscall's return. Nothing is frozen
-mid-kernel, which is the property that makes this safe and is inherited
-free from where signals are delivered.
+calling thread on `stopped_wq`. Nothing is frozen mid-kernel, which is
+the property that makes this safe, and it is inherited free from where
+signals are delivered.
+
+**Getting the *other* threads to park is not free, and the core does not
+do it today.** Two facts decide the mechanism, and both are worth
+stating before anything is written:
+
+- A signal sent to the process, rather than to a thread, sets
+  `p->sig_shared_pending` and wakes **one** eligible thread —
+  `route_locked` breaks out of its walk at the first one. That is right
+  for an ordinary signal, where exactly one thread should take it, and
+  wrong for a stop, where every thread must park.
+- `wait_event` — the non-killable wait — never consults
+  `signal_pending()`. A thread inside one does not come out for a stop
+  and cannot be made to; it parks when whatever it waits for completes.
+
+So the stop needs its own routing, not the signal core's: whichever
+thread dequeues the stop signal sets `stopped` and then wakes *every*
+thread of the process, and the return-to-user path checks `stopped`
+directly rather than inferring it from a pending signal. A thread in a
+killable wait comes out with `-EINTR` and parks at the syscall's return;
+a thread in a non-killable wait parks when that wait ends.
+
+The consequence is worth being honest about rather than discovering in a
+test: **a stop is not instantaneous across threads.** A process is
+stopped when the last of its threads has parked, and a thread inside a
+non-killable wait delays that for as long as the wait lasts. Every such
+wait in the tree is bounded by an I/O completion or a timer, so this is
+a latency rather than a hang — but a `waitpid` that reports the stop
+must report it when the process is *fully* parked, or a shell will take
+the terminal back while a thread of the job is still running. All of the
+tree's own user processes are single-threaded today, so only the Linux
+personality's `clone` reaches this case; that is exactly why it needs to
+be designed rather than left to be found.
 
 **`SIGCONT`** clears `stopped`, wakes `stopped_wq`, and discards any
 pending stop signal; posting a stop signal discards a pending `SIGCONT`.
@@ -265,7 +294,9 @@ throwing the job away after `waitpid`.
   and `kill` already sends every signal this needs.
 - **Kernel-internal**: `process_stop(p, sig)` and `process_continue(p)`;
   `process_group_is_orphaned(pgid, sid)`; the delivery-side park in
-  `signal_deliver`; `tty_read`'s foreground check.
+  `signal_deliver` and the all-thread wake beside it;
+  `process_fully_stopped(p)`, which is what `waitpid` reports on;
+  `tty_read`'s foreground check.
 
 ## Migration plan
 
@@ -290,6 +321,11 @@ throwing the job away after `waitpid`.
 - **`signal-stop-kill`** — a stopped process is killed and dies; a
   stopped process blocked in `read` stops there and resumes; a `SIGSTOP`
   and a `SIGCONT` in one batch leave it running, not parked.
+- **`signal-stop-threads`** — a Linux-personality program with two
+  threads, one of them inside a wait: the stop must park both, and the
+  parent's `waitpid` must not report the stop until it has. This is the
+  test for the routing above, and the only one that needs more than one
+  thread, since the native ABI has no way to make one.
 - **`signal-stop-mask`** — `SIGSTOP` cannot be blocked, caught or
   ignored, which the core already enforces and this makes explicit.
 - **`tty-stop`** — the two-ended shape the signals unit used: a process
@@ -346,6 +382,11 @@ benchmark, and the tests cover both cases explicitly instead.
 - **Reporting a stop twice, or not at all.** Edge-triggered reporting is
   where this kind of code usually goes wrong; a parent polling with
   `WNOHANG | WUNTRACED` must not spin on the same stop.
+- **Reporting a stop before every thread has parked.** The shell would
+  take the terminal back while a thread of the job was still writing to
+  it. The report above makes `waitpid` wait for the last thread; the
+  risk is that "the last thread" is easy to get wrong when threads are
+  exiting at the same time.
 - **A `SIGCONT` that races a stop.** Both directions must be tried: the
   signal core's per-process lock covers the state, but the ordering
   rules (a stop discards a pending continue and the reverse) are the
@@ -372,6 +413,39 @@ Four of the five are the same failure the tree has lost findings to
 before: a design rule stated in one place and not swept everywhere it is
 quoted. The signals unit swept the files it changed and not the files
 that described what it changed.
+
+`docs/kernel/process/architecture.md` had it twice more, in two
+"non-responsibilities" lists that read as current status. They are
+records of what a *phase* deferred, so rather than keep three lists in
+sync, both now say which of their entries has since been built and point
+at the gaps section of `invariants.md` as the one that is maintained.
+Writing that correction produced two false claims of its own on the
+first attempt -- set-uid binaries and file-backed `mmap` do not exist,
+and `sys_mmap` still says so -- which is its own argument for one
+maintained list rather than several remembered ones.
+
+## A kernel fix this report's CI forced
+
+CI failed the first push of this report on a check it does not touch:
+`kill(pid, 0)` on a child whose `waitpid` had just returned answered 0
+instead of `-ESRCH`. The cause is older than this branch and older than
+the signals unit -- `process_lookup` did not consult `reaped`, so a
+process stayed findable by pid from the moment its status was collected
+until its last reference dropped, which is a window the reaper usually
+closes first and CI happened not to.
+
+`process_lookup` now refuses a reaped process. It is one line and it
+belongs to this PR only because a red CI cannot be merged; it is
+separable if the tree would rather have it on its own.
+
+The test for it is worth a note, because the obvious one does not work:
+reaping in a loop from user mode and asking immediately never lost the
+race in 200 consecutive tries here, so it would have shipped as a test
+that proves nothing at the price of 1.4 seconds. The kernel can hold the
+process object alive on purpose and ask while it is provably still in
+the table, which is `process-reaped` and fails every time the rule is
+removed. That is the same lesson the signals unit learned three times:
+a test that cannot fail on demand is not yet a test.
 
 ## Alternatives considered
 

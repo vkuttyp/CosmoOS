@@ -323,6 +323,40 @@ bool selftest_signal_fault(const char **reason)
     return run_signal_probe("signal-fault", reason);
 }
 
+/*
+ * A pid whose status has been collected must not be findable, even
+ * while the object behind it is still alive -- which is the state
+ * between the reap and the last reference going. From user mode that
+ * window is a race (CI lost it once on `kill(pid, 0)` after `waitpid`,
+ * and 200 tries in a row never lost it on the development machine); the
+ * kernel can simply hold the reference and look.
+ */
+bool selftest_process_reaped(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    static const char *const argv[] = { "init", "--probe", "signal-sleep", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    /* Alive and findable, and the lookup takes its own reference. */
+    struct process *found = process_lookup(pid);
+    CHECK(found == p);
+    process_put(found);
+
+    /* It has no parent, so exiting reaps it -- while this test still
+     * holds the creation reference, so the object cannot be released
+     * and the pid is still in the table. */
+    CHECK(process_wait_exit(p) == 0);
+    CHECK(process_lookup(pid) == NULL);
+    process_put(p);
+    return true;
+}
+
 bool selftest_signal_group(const char **reason)
 {
     return run_signal_probe("signal-group", reason);

@@ -80,12 +80,21 @@ carried `init.elf` as a single raw module.
 
 ## 4. Non-responsibilities (later)
 
+*What the phase this section describes did not build. Several of these
+have since been built; the list that is kept current is the gaps section
+of `docs/kernel/process/invariants.md`, and this one is left as the
+record of what was deferred and when.*
+
 - `fork` (needs CoW, which needs the VM object layer) and `exec`
   replacing the current image; `spawn` is the creation primitive.
+  **Still true.**
 - Signal handlers and masks, job control, sessions, controlling
-  terminals; `kill` only terminates.
+  terminals; `kill` only terminates. *Handlers, masks, sessions,
+  process groups and a controlling terminal arrived with the signals
+  unit; job control has not.*
 - Multi-threaded processes from user space (`thread_create` syscall) and
-  TLS setup (the fields exist).
+  TLS setup (the fields exist). *`clone(CLONE_THREAD)` arrived with the
+  Linux personality; the native ABI still has no way to make a thread.*
 - Dynamic linking, `PT_INTERP`, `PT_GNU_STACK` policy beyond refusing
   executable stacks.
 - The Linux personality's own behaviour: it lives in `compat/linux/`
@@ -241,11 +250,11 @@ in `design.md` section 10, the calls in `api.md`, the rules in
   reaped by the kernel as before. Handles close at exit, not at reaping.
 - **Kill** (`kill`, 34): the only asynchronous event a process can
   receive. `SIGKILL`, `SIGTERM`, `SIGINT` (and any number 1..31)
-  terminate the target with status `128 + sig`; there are no handlers.
-  (Superseded by the signals unit: the native personality has
-  `sigaction` and a frame builder, and only a signal with no handler
-  and a terminate default still ends the target this way. See
-  `docs/kernel/process/design.md`, "The native signal ABI".)
+  terminate the target with status `128 + sig`. *As of the signals unit
+  this is the default rather than the whole story: the native
+  personality has `sigaction` and a frame builder, so a signal with a
+  handler runs it, and `kill(-pgid, sig)` reaches a process group. See
+  `docs/kernel/process/design.md`, "The native signal ABI".*
   Permission: same uid or uid 0. Delivery points are the system-call
   boundary, the return from any interrupt or fault to user mode, and
   every killable wait in the kernel (`wait_event_killable`), so a
@@ -263,8 +272,14 @@ in `design.md` section 10, the calls in `api.md`, the rules in
   42): the process table for `ps`, the kernel log ring for `dmesg`, and
   a small read-only set of named values for `sysctl`.
 
-**Non-responsibilities (still)**: `fork`, `exec` replacing the current
-image, signal handlers and masks, process groups and sessions, threads
-in user programs, resource limits, argument sizes beyond one stack page
-(`COSMO_ARG_MAX` 2048 bytes and `COSMO_ARG_ENTRIES` 128 across `argv`
-and `envp`), file-backed `mmap`, set-uid.
+**Non-responsibilities (as of this phase)**: `fork`, `exec` replacing
+the current image, signal handlers and masks, process groups and
+sessions, threads in user programs, resource limits, argument sizes
+beyond one stack page (`COSMO_ARG_MAX` 2048 bytes and
+`COSMO_ARG_ENTRIES` 128 across `argv` and `envp`), file-backed `mmap`,
+set-uid. *Since then: resource limits arrived with the security
+milestones, and handlers, masks, process groups and sessions with the
+signals unit. `fork`, `exec`, native threads, set-uid binaries and
+file-backed `mmap` have not -- `sys_mmap` still refuses a file mapping
+with "file mappings arrive with the VFS". The current list is the gaps
+section of `docs/kernel/process/invariants.md`.*

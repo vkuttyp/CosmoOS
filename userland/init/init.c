@@ -504,6 +504,11 @@ static void proc_selftest(void)
      * is ESRCH. It is how a supervisor tells a live process from a
      * stale pid file. */
     CHECK(kill(pid, 0) < 0 && errno == ESRCH);   /* just reaped */
+    /* That it says so the *instant* `waitpid` returns, rather than once
+     * the kernel has released the object, is not something a user
+     * program can test without racing: see `process-reaped` in
+     * kernel/process/proctest.c, which holds the object alive on
+     * purpose. */
     CHECK(kill(getpid(), 0) == 0);
     CHECK(kill(999999, 0) < 0 && errno == ESRCH);
     CHECK(kill(getpid(), -1) < 0 && errno == EINVAL);

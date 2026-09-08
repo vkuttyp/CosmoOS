@@ -317,6 +317,18 @@ status 7), `lxsig lastthread` (the main thread exits, the other's
 `exit_group(5)` gives 5), `lxtest` joins through `CHILD_CLEARTID`.
 Gap: no test kills a process with a thread blocked in `futex_wait`.
 
+**P-P1. A reaped pid is not findable.** Once a process's status has been
+collected -- by its parent's `waitpid`, or by the exit path when it has
+no parent -- `process_lookup` refuses it, even though the object stays
+in the table until its last reference drops. Without that rule
+`kill(pid, 0)` answers 0 for a child whose `waitpid` has already
+returned, which is the one thing signal 0 exists to answer correctly,
+and POSIX says the pid may be reused by then. The window is between the
+reap and the release, so from user mode it is a race: CI lost it once
+and 200 consecutive tries never lost it on the development machine.
+Check: `process-reaped`, which holds the object alive on purpose and
+looks the pid up, and fails every time when the rule is removed.
+
 ## Signals a program can catch, sessions, and the terminal
 
 **P-S6. A handler returns to exactly the registers it interrupted.** The
