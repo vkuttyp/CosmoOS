@@ -239,8 +239,9 @@ Details per call:
   status `128 + sig` at its next system call, return from an interrupt,
   or killable wait; one whose default is *ignore* (`SIGCHLD` 17,
   `SIGURG` 23, `SIGWINCH` 28, `SIGCONT` 18, the stop signals) is
-  discarded. Native processes install no handlers, so nothing else can
-  happen. The caller must have the target's uid or uid 0. A zombie is a
+  discarded. *Since the signals unit a native process can install a
+  handler, and a signal with one runs it; the sentence below describes
+  what happens when it has not.* The caller must have the target's uid or uid 0. A zombie is a
   valid target (nothing happens). A user-mode CPU exception now ends the
   process with `128 + its own signal` (`SIGILL` 132, `SIGFPE` 136,
   `SIGTRAP` 133, `SIGSEGV` 139), not 139 for all.

@@ -453,6 +453,12 @@ first attempt -- set-uid binaries and file-backed `mmap` do not exist,
 and `sys_mmap` still says so -- which is its own argument for one
 maintained list rather than several remembered ones.
 
+The rule this unit should carry forward is narrower than "sweep
+everywhere": **after changing what the system can do, grep for the
+sentences that said it could not.** The signals unit swept the files it
+edited. Four rounds of review found nine places that merely *described*
+what it edited, in five documents it never opened.
+
 ## A kernel fix this report's CI forced
 
 CI failed the first push of this report on a check it does not touch:
