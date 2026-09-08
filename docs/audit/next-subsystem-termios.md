@@ -61,8 +61,14 @@ the next unit rather than a large one.
 - **The terminal knows its own size.** `struct fbcon` carries `cols` and
   `rows` (`kernel/include/kernel/fbcon.h:36`); the serial console does
   not, which is a question the design has to answer rather than a gap.
-- **`isatty` works**, through `fstat` reporting `COSMO_DT_CHR`. What it
-  cannot do is tell a program anything *about* the terminal.
+- **`isatty` answers, but answers the wrong question.** It tests
+  `fstat`'s type for `COSMO_DT_CHR` (`libc/src/unistd.c:109`), and
+  `vfs_stat` reports a vnode's type directly (`vfs.c:167`) — so *every*
+  character node passes, `/dev/vmm` included. A program holding
+  `/dev/vmm` is told it has a terminal and then refused every terminal
+  operation. Nothing has noticed because nothing asks, and this unit is
+  where it starts mattering: it is the call a ported program uses to
+  decide whether to draw a prompt at all.
 - **The session and foreground-group machinery is complete**, which is
   what `/dev/tty` needs to mean anything: "the terminal of my session"
   is a well-defined thing now, and was not two units ago.
@@ -93,15 +99,19 @@ Four steps.
 
 Three answers, and the report ranks them in this order:
 
-- **A native call with the tree's own structure** —
-  `SYS_ttyctl(handle, op, arg)` or a pair `tcgetattr`/`tcsetattr` over a
-  `struct cosmo_termios` of the tree's own design, with
+- **Typed calls over the tree's own structure**: `tcgetattr(handle,
+  struct cosmo_termios *)`, `tcsetattr(handle, const struct
+  cosmo_termios *)` and `ttysize(handle, struct cosmo_ttysize *)`, with
   `compat/linux/convert.c` translating to and from Linux's `termios` and
-  its `TCGETS`/`TCSETS` ioctls. This is exactly what the tree already
-  does for `sigaction`, `spawn` and the wait status: its own shape at
-  the native ABI, a translation layer for Linux binaries. It is the
-  house style and it keeps `ioctl` — a call whose argument type depends
-  on a number — out of the native ABI.
+  its `TCGETS`/`TCSETS`/`TIOCGWINSZ`. This is exactly what the tree
+  already does for `sigaction`, `spawn` and the wait status: its own
+  shape at the native ABI, a translation layer for Linux binaries.
+
+  A single `SYS_ttyctl(handle, op, arg)` was considered and is rejected
+  **for the same reason as `ioctl` below**: its argument type would
+  depend on `op`, which is the property being avoided. One multiplexer
+  is not better than the thing it imitates because it has fewer
+  operations.
 - **POSIX `termios` verbatim** as the native structure, with
   `tcgetattr`/`tcsetattr` as system calls. Smaller translation layer,
   and the struct is one of the most copied in Unix, so a ported program
@@ -144,6 +154,11 @@ raw mode and dies must not leave the machine unusable — the shell
 restores the modes it set, and a terminal whose session leader exits is
 already released.
 
+`isatty` moves with them: the question a program means is "is this a
+terminal", not "is this a character device", so the libc asks the
+terminal layer -- a successful `tcgetattr` is the natural test -- and
+`/dev/vmm` stops claiming to be one.
+
 ### 3. `/dev/tty` and `/dev/console`
 
 Two character nodes on the existing `ramfs_mkchr` mechanism.
@@ -176,13 +191,15 @@ saying so, rather than inventing a probe.
 | `kernel/object/console_obj.c`, a new `kernel/tty/ttydev.c` | `/dev/tty` and `/dev/console` through `ramfs_mkchr` |
 | `compat/linux/syscalls.c`, `compat/linux/convert.c` | `TCGETS`/`TCSETS`/`TIOCGWINSZ` in `lx_ioctl` instead of a blanket `-ENOTTY`, and the translation |
 | `libc/include/termios.h`, `libc/src/termios.c` | `tcgetattr`, `tcsetattr`, `cfmakeraw` |
+| `libc/src/unistd.c` | `isatty` asks the terminal layer instead of the file type |
 | `userland/shell/sh.c` | raw-mode line editing and history |
 | `kernel/core/fbcon.c` | the size the terminal reports |
 
 ## New APIs
 
-- **User-visible**: `tcgetattr`, `tcsetattr`, `cfmakeraw`, the terminal
-  size, `/dev/tty`, `/dev/console`; the shell's line editing.
+- **User-visible**: `tcgetattr`, `tcsetattr` and `ttysize` as typed
+  system calls (no multiplexer), `cfmakeraw` in the libc, `/dev/tty`,
+  `/dev/console`, a truthful `isatty`; the shell's line editing.
 - **Kernel-internal**: `tty_get_modes`/`tty_set_modes` replacing
   `tty_set_flags`; `tty_read` in non-canonical mode; a controlling-tty
   lookup for `/dev/tty`.
@@ -210,6 +227,10 @@ saying so, rather than inventing a probe.
   rule is about who reads and not about what the bytes mean.
 - **`tty-modes-restore`** — a process that dies in raw mode leaves a
   terminal the next one can use.
+- **`isatty-chr`** — `isatty` is true for the console and **false for
+  `/dev/vmm`**, which is a character device and not a terminal. It is
+  true for both today; that is the smallest thing in this unit and the
+  one most likely to be left as it was.
 - **`dev-tty`** — `/dev/tty` opens the caller's controlling terminal,
   `-ENXIO` without one, and a process that closed handle 0 can get the
   terminal back through it.
