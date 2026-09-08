@@ -54,6 +54,8 @@
 /* Phase 9: processes, pipes, the working directory, introspection. */
 #define SYS_spawn     32  /* (const struct cosmo_spawn *req) -> pid */
 #define SYS_wait      33  /* (int pid, int *status, unsigned flags) -> pid, 0 with WNOHANG */
+/* A negative pid names a process group and 0 the caller's own; the
+ * signal reaches every member the caller may signal. */
 #define SYS_kill      34  /* (int pid, int sig) -> 0 */
 #define SYS_pipe      35  /* (int h[2]) -> 0; h[0] reads, h[1] writes */
 #define SYS_dup       36  /* (int h, int target, unsigned rights) -> handle; target -1 = lowest
@@ -95,7 +97,25 @@
 /* Narrow the calls this process may make (docs/kernel/security/design.md
  * §1f). Unprivileged: it only ever takes authority from the caller. */
 #define SYS_syscall_filter 65  /* (const uint64_t *mask, size_t words) -> 0 */
-#define SYS_COUNT       66
+
+/* Signals a program can catch (docs/kernel/process/design.md, "The
+ * native signal ABI"). A handler runs on the thread's own stack; there
+ * is no alternate signal stack, so no sigaltstack and no SA_ONSTACK. */
+#define SYS_sigaction   66  /* (int sig, const struct cosmo_sigaction *act (NULL to query),
+                             *  struct cosmo_sigaction *old (NULL to ignore)) -> 0 */
+#define SYS_sigprocmask 67  /* (int how, const uint64_t *set (NULL to query), uint64_t *old) -> 0 */
+#define SYS_sigreturn   68  /* () -> does not return; only from a handler's restorer */
+#define SYS_sigpending  69  /* (uint64_t *set) -> 0: signals raised and still blocked */
+
+/* Sessions, process groups and the terminal's foreground group
+ * (docs/kernel/process/design.md, "Sessions and process groups"). */
+#define SYS_setpgid   70  /* (int pid (0: self), int pgid (0: pid)) -> 0 */
+#define SYS_getpgid   71  /* (int pid (0: self)) -> the group */
+#define SYS_setsid    72  /* () -> the new session id, which is the caller's pid */
+#define SYS_getsid    73  /* (int pid (0: self)) -> the session */
+#define SYS_tcgetpgrp 74  /* (int handle) -> the terminal's foreground group */
+#define SYS_tcsetpgrp 75  /* (int handle, int pgid) -> 0 */
+#define SYS_COUNT     76
 
 /* A filter mask is this many 64-bit words, enough for every number any
  * personality here uses (the Linux one goes to 512). */
@@ -180,10 +200,18 @@ struct cosmo_spawn {
      * header passes the older struct and the kernel never reads past
      * what it gave. */
     const char *root;                          /* with COSMO_SPAWN_SETROOT */
+    /* Added after `root`, and read only when COSMO_SPAWN_SETPGID is
+     * set. The child is put in the group before its first instruction,
+     * which is the only way to be sure a signal sent to the group
+     * straight after the spawn cannot miss it. */
+    uint32_t pgid;                             /* 0: a group of the child's own, named by its pid */
+    uint32_t pgid_pad;
 };
 
 /* What a caller that predates `root` passes: everything up to it. */
 #define COSMO_SPAWN_SIZE_V1 __builtin_offsetof(struct cosmo_spawn, root)
+/* And what a caller that predates `pgid` passes. */
+#define COSMO_SPAWN_SIZE_V2 __builtin_offsetof(struct cosmo_spawn, pgid)
 /* The child starts with real, effective and saved ids `uid`/`gid` and no
  * supplementary groups. A privileged caller names any ids; an unprivileged
  * one only ids it holds (docs/kernel/security/design.md §1). */
@@ -217,13 +245,19 @@ struct cosmo_spawn {
  * contained process reports the name of its container rather than of
  * the machine under it. Privileged, like the flags above. */
 #define COSMO_SPAWN_NEWUTSNS (1u << 5)
+/* The child joins process group `pgid`, or starts one of its own when
+ * that is 0. The group must be one of the caller's session, and the
+ * caller may not move a child into another session's group -- the same
+ * rule setpgid enforces, applied where the child cannot yet ask for
+ * itself. Unprivileged: a shell arranging its own jobs needs it. */
+#define COSMO_SPAWN_SETPGID (1u << 6)
 #define COSMO_ARG_MAX   2048   /* argv + envp string bytes; at most 128 entries in all */
 #define COSMO_ARG_ENTRIES 128
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */
 
 #define COSMO_WNOHANG 1u
-/* Signals are numbers only in this phase: every one terminates the target
- * with status 128 + sig; there are no handlers. */
+/* The signals a program is most likely to name. A process that has
+ * installed no handler for one is terminated with status 128 + sig. */
 #define COSMO_SIGHUP  1
 #define COSMO_SIGINT  2
 #define COSMO_SIGKILL 9
@@ -233,6 +267,65 @@ struct cosmo_spawn {
  * Linux, so a status of 159 means the same thing in both. */
 #define COSMO_SIGSYS  31
 #define COSMO_NSIG    32
+
+/* The rest of the numbers a handler may be installed for; they are
+ * Linux's, because the kernel's signal core is shared with the Linux
+ * personality and one table serves both. */
+#define COSMO_SIGQUIT  3
+#define COSMO_SIGILL   4
+#define COSMO_SIGTRAP  5
+#define COSMO_SIGABRT  6
+#define COSMO_SIGBUS   7
+#define COSMO_SIGFPE   8
+#define COSMO_SIGUSR1 10
+#define COSMO_SIGUSR2 12
+#define COSMO_SIGPIPE 13
+#define COSMO_SIGALRM 14
+#define COSMO_SIGCHLD 17
+#define COSMO_SIGCONT 18
+#define COSMO_SIGSTOP 19
+
+/* sa_handler's two reserved values. */
+#define COSMO_SIG_DFL 0ull
+#define COSMO_SIG_IGN 1ull
+
+/* sa_flags. SA_RESTART restarts an interrupted system call rather than
+ * failing it with -EINTR; SA_RESETHAND puts the action back to the
+ * default before the handler runs; SA_NODEFER leaves the signal itself
+ * unblocked inside its own handler. */
+#define COSMO_SA_NODEFER   0x40000000u
+#define COSMO_SA_RESETHAND 0x80000000u
+#define COSMO_SA_RESTART   0x10000000u
+
+/* sigprocmask's `how`. */
+#define COSMO_SIG_BLOCK   0
+#define COSMO_SIG_UNBLOCK 1
+#define COSMO_SIG_SETMASK 2
+
+struct cosmo_sigaction {
+    uint64_t handler;    /* the function, or COSMO_SIG_DFL / COSMO_SIG_IGN */
+    uint64_t mask;       /* blocked for the duration of the handler, bit (sig - 1) */
+    uint32_t flags;      /* COSMO_SA_* */
+    uint32_t reserved;
+    uint64_t restorer;   /* what the handler returns through; the libc's */
+};
+
+/* What a handler is told about the signal it received. The frame the
+ * kernel wrote is below it on the stack and is not described here: a
+ * handler has no business editing the registers it will return to, and
+ * `sigreturn` finds the frame from the stack pointer, not from the
+ * program. */
+struct cosmo_siginfo {
+    int32_t sig;
+    int32_t code;        /* COSMO_SI_* */
+    int32_t pid;         /* the sender, for a signal a process sent */
+    uint32_t detail;     /* COSMO_SI_FAULT: 1 nothing is mapped there, 2 a protection fault */
+    uint64_t addr;       /* COSMO_SI_FAULT: the address the fault names */
+};
+
+#define COSMO_SI_USER   0   /* kill() */
+#define COSMO_SI_KERNEL 1   /* the kernel's own doing */
+#define COSMO_SI_FAULT  2   /* a trap: addr is set */
 
 struct cosmo_procinfo {
     uint32_t pid, ppid, uid, gid;

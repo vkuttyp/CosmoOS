@@ -17,6 +17,16 @@ int close(int fd);
 off_t lseek(int fd, off_t off, int whence);
 pid_t getpid(void);
 pid_t getppid(void);
+/* Sessions and process groups (docs/kernel/process/design.md). `pid` 0
+ * means the caller and `pgid` 0 means `pid`, as POSIX has it. */
+int setpgid(pid_t pid, pid_t pgid);
+pid_t getpgid(pid_t pid);
+pid_t getpgrp(void);
+pid_t setsid(void);
+pid_t getsid(pid_t pid);
+/* The foreground process group of the terminal open on `fd`. */
+pid_t tcgetpgrp(int fd);
+int tcsetpgrp(int fd, pid_t pgid);
 int chdir(const char *path);
 char *getcwd(char *buf, size_t size);
 /* The machine's name, from the caller's uts namespace. Setting it is

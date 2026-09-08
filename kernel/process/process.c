@@ -19,6 +19,7 @@
 #include <kernel/signal.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/tty.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
@@ -641,6 +642,40 @@ int process_create_from_images(const struct process_image *exe, const struct pro
         }
     }
     p->pid = g_next_pid++;
+    /* The group and the session: a child joins its parent's, and a
+     * process with no parent -- init, and anything the kernel starts --
+     * begins a session and a group of its own, so that every process
+     * has both from its first instruction. Set here, under the table
+     * lock, because that is the lock these two fields live under. */
+    if (parent != NULL) {
+        p->pgid = parent->pgid;
+        p->sid = parent->sid;
+        /* A caller may place the child in a group of the caller's own
+         * session, or start one named by the child's pid. Anything else
+         * -- a group belonging to another session -- is refused here,
+         * the same rule setpgid applies, so that the child cannot be
+         * used to reach across a session boundary. */
+        if (attr != NULL && attr->set_pgid) {
+            pid_t want = attr->pgid == 0 ? p->pid : attr->pgid;
+            bool ok = want == p->pid;
+            if (!ok) {
+                struct process *q;
+                list_for_each_entry(q, &g_processes, all_link)
+                    if (q->pgid == want && q->sid == p->sid) {
+                        ok = true;
+                        break;
+                    }
+            }
+            if (!ok) {
+                spin_unlock_irqrestore(&g_process_table_lock, s);
+                rc = -EPERM;
+                goto fail;
+            }
+            p->pgid = want;
+        }
+    } else {
+        p->pgid = p->sid = p->pid;
+    }
     list_push_back(&g_processes, &p->all_link);
     g_process_count++;
     spin_unlock_irqrestore(&g_process_table_lock, s);
@@ -929,7 +964,15 @@ void process_last_thread_gone(struct process *p)
     bool zombie = parent != NULL;
     if (!zombie)
         p->reaped = true;
+    /* A session leader takes its session's terminal with it: nothing
+     * left can claim it back, and the processes still on it are told
+     * the line dropped. Read here because the session fields live under
+     * this lock; the hangup happens after it is released. */
+    bool was_session_leader = p->pid == p->sid;
+    pid_t leaving_sid = p->sid;
     spin_unlock_irqrestore(&g_process_table_lock, ts);
+    if (was_session_leader)
+        tty_session_exit(leaving_sid);
 
     /* Handles close at exit, not at reaping: a pipe whose writer has
      * exited must deliver EOF while the reader has yet to wait for it.
@@ -1457,6 +1500,188 @@ struct process *process_lookup(pid_t pid)
 unsigned process_count(void)
 {
     return g_process_count;
+}
+
+/* --- sessions and process groups (docs/kernel/process/design.md) ---------
+ *
+ * Three fields across two processes are involved in every one of these
+ * -- the caller's session, the target's session and its group -- so all
+ * of them are read and written under the process table's lock, and none
+ * of them is touched anywhere else. That is the whole locking rule.
+ */
+
+/* The table entry for `pid` (0: the caller). Table lock held. */
+static struct process *find_locked(pid_t pid)
+{
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link)
+        if (p->pid == pid)
+            return p;
+    return NULL;
+}
+
+/* What the caller may look at: its own domain, unless it is domain 0
+ * (docs/kernel/security/design.md, "Process domains"). */
+static bool domain_visible(const struct process *self, const struct process *p)
+{
+    return self == NULL || self->domain == 0 || self->domain == p->domain;
+}
+
+int process_getpgid(pid_t pid, pid_t *out)
+{
+    struct process *self = process_current();
+    if (self == NULL)
+        return -ESRCH;
+    int rc = -ESRCH;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p = pid == 0 ? self : find_locked(pid);
+    if (p != NULL && domain_visible(self, p)) {
+        *out = p->pgid;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return rc;
+}
+
+int process_getsid(pid_t pid, pid_t *out)
+{
+    struct process *self = process_current();
+    if (self == NULL)
+        return -ESRCH;
+    int rc = -ESRCH;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p = pid == 0 ? self : find_locked(pid);
+    if (p != NULL && domain_visible(self, p)) {
+        *out = p->sid;
+        rc = 0;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return rc;
+}
+
+/*
+ * Move a process into a group. The rules are POSIX's, and each of them
+ * exists to keep the session a closed set: a shell may arrange its own
+ * children into jobs and nothing else, and no arrangement can put a
+ * process in a group that belongs to another session -- which is what
+ * makes "the foreground group of this terminal" a safe thing for the
+ * tty to hold.
+ */
+int process_setpgid(pid_t pid, pid_t pgid)
+{
+    struct process *self = process_current();
+    if (self == NULL)
+        return -ESRCH;
+    if ((int32_t)pgid < 0)
+        return -EINVAL;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p = pid == 0 ? self : find_locked(pid);
+    int rc = 0;
+    if (p == NULL || !domain_visible(self, p)) {
+        rc = -ESRCH;
+    } else if (p != self && p->parent != self) {
+        rc = -ESRCH;   /* only the caller or a child of it */
+    } else if (p->sid != self->sid) {
+        rc = -EPERM;   /* a child that has already left for its own session */
+    } else if (p->pid == p->sid) {
+        rc = -EPERM;   /* a session leader cannot change group */
+    } else {
+        pid_t want = pgid == 0 ? p->pid : pgid;
+        /* The group must be one of this session's: either it already
+         * has a member here, or the process is starting it under its
+         * own pid, which is the only way a group is ever created. */
+        bool ok = want == p->pid;
+        if (!ok) {
+            struct process *q;
+            list_for_each_entry(q, &g_processes, all_link)
+                if (q->pgid == want && q->sid == p->sid) {
+                    ok = true;
+                    break;
+                }
+        }
+        if (ok)
+            p->pgid = want;
+        else
+            rc = -EPERM;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return rc;
+}
+
+/*
+ * Start a session. The caller becomes the leader of a new session and a
+ * new group, both named by its pid, and has no controlling terminal --
+ * the tty it may have been sharing is not this session's, so nothing it
+ * types there reaches this process as a signal any more. A process that
+ * already leads a group is refused, because its pid names that group
+ * and a session's name is its leader's pid: allowing it would give one
+ * pid two meanings.
+ */
+int process_setsid(pid_t *out)
+{
+    struct process *self = process_current();
+    if (self == NULL)
+        return -ESRCH;
+    int rc = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    if (self->pid == self->pgid) {
+        rc = -EPERM;
+    } else {
+        self->sid = self->pgid = self->pid;
+        *out = self->pid;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return rc;
+}
+
+struct process *process_group_next(pid_t pgid, pid_t after)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    for (;;) {
+        struct process *best = NULL, *p;
+        list_for_each_entry(p, &g_processes, all_link) {
+            if (p->pgid != pgid || p->pid <= after)
+                continue;
+            if (best == NULL || p->pid < best->pid)
+                best = p;
+        }
+        if (best == NULL)
+            break;
+        if (kobject_tryget(&best->obj)) {
+            spin_unlock_irqrestore(&g_process_table_lock, s);
+            return best;
+        }
+        /* On its way out: look past it rather than stopping, or one
+         * dying member would hide every member after it. */
+        after = best->pid;
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return NULL;
+}
+
+bool process_group_in_session(pid_t pgid, pid_t sid)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link)
+        if (p->pgid == pgid && p->sid == sid) {
+            found = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return found;
+}
+
+pid_t process_current_sid(void)
+{
+    struct process *self = process_current();
+    if (self == NULL)
+        return 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    pid_t sid = self->sid;
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return sid;
 }
 
 void process_dump_all(void)

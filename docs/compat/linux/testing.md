@@ -99,6 +99,7 @@ the shell collected, and the harness requires each line:
 | `badstack` | `rt_sigreturn` to a non-canonical `rsp`/`sp`, then a push (`#SS` / a data abort) | `lxsig badstack: 139` |
 | `group` | a second thread calls `exit_group(7)` while the main thread spins | `lxsig group: 7` |
 | `lastthread` | the main thread `exit`s; the other thread `exit_group(5)`s | `lxsig lastthread: 5` |
+| `session` | `setsid`, `getsid`, `getpgid` and `setpgid` answer for real rather than as the stubs they were before the kernel had process groups: a second `setsid` and a session leader's `setpgid` are both `EPERM` | `lxsig session: 0` |
 
 `lxinterp` and `lxdyn` (milestone 10): `lxdyn` is an `ET_DYN` executable
 (linked `-pie -z norelro`, no `user.ld`) whose `PT_INTERP` names
@@ -126,7 +127,7 @@ arrived, makes a system call and prints `lxdyn: ok`.
 After the package section, `rc.test` runs `/etc/rc.linux` when
 `/boot/tests/linux/lxhello` exists (both architectures since milestone
 10): `lxhello || exit 1`, `lxtest || exit 1`, `lxdyn || exit 1`, the
-seven `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then
+eight `lxsig` modes each followed by `echo "lxsig <mode>: $?"`, then
 `hello_musl` only if the file exists. A failing Linux program therefore
 also fails `SHTEST`.
 
@@ -137,7 +138,7 @@ The harness requires in self-test builds (`LINUXTEST_MARKERS`):
 | `^hello from linux abi$` | `lxhello` |
 | `^LINUXTEST: PASS$` | `lxtest` |
 | `^lxinterp: ok$`, `^lxdyn: ok$` | the PIE pair |
-| `^lxsig <mode>: <status>$` (seven lines) | `lxsig` through `rc.linux` |
+| `^lxsig <mode>: <status>$` (eight lines) | `lxsig` through `rc.linux` |
 | `^hello from musl on Linux x86_64 \(pid \d+\)$` (`MUSL_MARKER`) | `hello_musl`; required only when the environment has `HAVE_MUSL=1`, which `make test` sets from `tests/linux/linux.mk` |
 
 Release builds run no `rc.test`, so the Linux programs run only in
@@ -176,7 +177,7 @@ binary is about 200 KiB, static, with a `PT_GNU_STACK` and four
 
 | Configuration | Result |
 |---|---|
-| x86-64 debug, `-smp 4` and `-smp 1` | `SELFTEST: PASS (124 tests)`, `LINUXTEST: PASS`, `lxinterp: ok`, `lxdyn: ok`, the seven `lxsig` lines, `SHTEST: PASS` |
+| x86-64 debug, `-smp 4` and `-smp 1` | `SELFTEST: PASS (124 tests)`, `LINUXTEST: PASS`, `lxinterp: ok`, `lxdyn: ok`, the eight `lxsig` lines, `SHTEST: PASS` |
 | AArch64 debug | the same set (the Linux section now runs there) |
 | release, both | PASS (Linux programs present, not run) |
 

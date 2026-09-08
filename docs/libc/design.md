@@ -145,6 +145,54 @@ status from `waitpid` is the process's exit status as an int
 `WEXITSTATUS(s)` is `(s)` and `WIFSIGNALED(s)` is `(s) > 128`, provided
 for reading comfort.
 
+`spawnve_pgrp`/`spawnvp_pgrp` place the child in a process group -- or
+in one of its own, when `pgid` is 0 -- before its first instruction. A
+`setpgid` after the spawn would leave a window in which a signal sent to
+the new group missed the child, which is the one window a shell starting
+a job cannot afford. `setpgid`, `getpgid`, `getpgrp`, `setsid`,
+`getsid`, `tcgetpgrp` and `tcsetpgrp` are the rest of the session API,
+in `unistd.h` where POSIX puts them.
+
+## Signals
+
+```c
+typedef unsigned long sigset_t;
+typedef struct { int si_signo, si_code; pid_t si_pid; unsigned si_detail; void *si_addr; } siginfo_t;
+struct sigaction { union { void (*sa_handler)(int); void (*sa_sigaction)(int, siginfo_t *, void *); };
+                   sigset_t sa_mask; unsigned sa_flags; };
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+void (*signal(int sig, void (*handler)(int)))(int);
+int sigprocmask(int how, const sigset_t *set, sigset_t *old);
+int sigpending(sigset_t *set);
+int raise(int sig);
+int sigemptyset/sigfillset/sigaddset/sigdelset/sigismember(...);
+```
+
+The kernel's own shapes are `struct cosmo_sigaction` and `struct
+cosmo_siginfo`; this is the POSIX face of them.
+
+- **`siginfo_t` is the kernel's record, not a copy of it.** The two have
+  the same layout, asserted field by field with `_Static_assert`, so a
+  handler reads the bytes the kernel wrote and the library does not have
+  to interpose a trampoline on every signal to translate them. Drift
+  would make a handler read one field as another, which is why the
+  assertions are there rather than a comment.
+- **The restorer is the library's.** `__cosmo_sigreturn` is a two
+  instruction assembly stub -- the `sigreturn` call and a trap -- and it
+  is assembly rather than a naked C function because the kernel finds
+  the frame from the stack pointer, so it must not touch the stack.
+  `sigaction` fills it in for every real handler, so no program has to
+  know it exists; `SIG_DFL` and `SIG_IGN` are not addresses and get
+  none.
+- **`SA_SIGINFO` is accepted and stripped.** The kernel hands every
+  handler all three arguments, so the flag distinguishes nothing here;
+  it exists so that code written for POSIX compiles unchanged.
+- **`signal()` sets `SA_RESTART`**, which is what it has meant since
+  BSD.
+
+Not provided, because the kernel does not have them: real-time signals,
+queued siginfo, `sigaltstack`, `sigsuspend`, `sigwait`, and job control.
+
 ## Sockets
 
 `socket`, `bind`, `listen`, `accept`, `connect`, `sendto`, `recvfrom`,

@@ -179,6 +179,7 @@ LINUXTEST_MARKERS = [
     r"^lxsig badstack: 139$",
     r"^lxsig group: 7$",
     r"^lxsig lastthread: 5$",
+    r"^lxsig session: 0$",
 ]
 MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 

@@ -118,7 +118,7 @@ static int read_executable(struct process *cur, const char *path, struct process
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  pid_t *pid_out)
+                  bool set_pgid, pid_t pgid, pid_t *pid_out)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
@@ -170,6 +170,8 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .mntns = mntns,
         .utsns = utsns,
 
+        .set_pgid = set_pgid,
+        .pgid = pgid,
         .set_cred = cred != NULL,
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,

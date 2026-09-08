@@ -68,3 +68,11 @@ struct kobject *console_object(void)
 {
     return &g_console;
 }
+
+/* The console object is the one terminal there is, so this is the whole
+ * of "which tty is behind this handle". A second tty would put a tty
+ * pointer in the object instead. */
+struct tty *tty_of_object(struct kobject *obj)
+{
+    return obj == &g_console ? tty_console() : NULL;
+}

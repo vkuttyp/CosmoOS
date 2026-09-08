@@ -68,8 +68,16 @@ the end:
 | `sysctl kernel.name` | `^kernel.name = CosmoOS$` |
 | `dmesg` | the `serial: console input on IRQ 4` line |
 | `nosuchprogram` | `^sh: nosuchprogram: not found$` |
+| `sleep 5` then a bare `0x03` | `\^C` (the terminal's echo); the job exits 130 and the next prompt arrives without waiting out the five seconds |
+| `echo after-interrupt-ok` | `^after-interrupt-ok$` (the shell survived the interrupt it sent to the job) |
 | `pkg install hello && hello && pkg list` | `^hello, world \(hello 1\.1\)$`, `^hello\s+1\.1\s+prints a greeting$` (`docs/pkg/testing.md`) |
 | `exit 0` | the run ends: `init: shell exited with status 0` |
+
+The interrupt is the one entry that is not a line: it is sent as a raw
+byte half a second after the command it interrupts, without waiting for
+a prompt -- the shell is waiting for the job, not for a line, and that
+is the only state in which the byte means anything. It is also the only
+entry that does not advance the prompt count.
 
 Failures appear as `shell harness: ...` lines (`no prompt before
 command N`, `never sent`, `after 'cmd' missing /pattern/`).

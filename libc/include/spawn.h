@@ -17,6 +17,14 @@ struct spawn_handle {
 pid_t spawnve(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
               size_t nh);
 pid_t spawnvp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh);
+/* The same two, with the child placed in process group `pgid` -- or in
+ * a group of its own when that is 0 -- before its first instruction.
+ * The group must be one of the caller's session. A shell needs this
+ * rather than a setpgid after the spawn, because a signal sent to the
+ * new group in between would miss the child. */
+pid_t spawnve_pgrp(const char *path, const char *const argv[], const char *const envp[], const struct spawn_handle *h,
+                   size_t nh, pid_t pgid);
+pid_t spawnvp_pgrp(const char *file, const char *const argv[], const struct spawn_handle *h, size_t nh, pid_t pgid);
 /* spawnve with COSMO_SPAWN_SETROOT: the child's root is `root`, resolved
  * in the caller's own namespace, and the child cannot name anything
  * outside it -- absolute paths start there and ".." stops there.

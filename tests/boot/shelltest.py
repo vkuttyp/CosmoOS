@@ -11,6 +11,20 @@ import time
 
 PROMPT = b"cosmo$ "
 
+# Sent as a raw byte in the middle of a running command rather than as a
+# line: the shell is waiting for the job, not for a line, and the point
+# is that the kernel turns the keystroke into a signal to the job's
+# process group (docs/kernel/process/design.md, "Sessions and process
+# groups").
+INTERRUPT = "\x03"
+INTERRUPT_DELAY_S = 0.5   # long enough for the job to be the foreground group
+# What the interrupt has to prove is that the job died *early*: `sleep 5`
+# reaches its prompt on its own eventually, so a run in which ^C did
+# nothing at all still ends with a prompt and every pattern matched. The
+# time from the keystroke to the next prompt is the only thing that
+# separates the two, so it is measured and bounded.
+INTERRUPT_MAX_S = 3.0
+
 # (command, patterns the log must contain afterwards)
 COMMANDS = [
     ("echo interactive-ok", [r"^interactive-ok$"]),
@@ -22,6 +36,12 @@ COMMANDS = [
     ("sysctl kernel.name", [r"^kernel.name = CosmoOS$"]),
     ("dmesg", [r"\[ INFO\] tty: |\[ INFO\] serial: console input on IRQ \d+"]),
     ("nosuchprogram", [r"^sh: nosuchprogram: not found$"]),
+    # ^C interrupts the job and not the shell: `sleep` dies, the terminal
+    # echoes the keystroke, and the next prompt arrives without waiting
+    # out the five seconds.
+    ("sleep 5", []),
+    (INTERRUPT, [r"\^C"]),
+    ("echo after-interrupt-ok", [r"^after-interrupt-ok$"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
     ("exit 0", []),
 ]
@@ -29,7 +49,7 @@ COMMANDS = [
 
 class ShellTest:
     def __init__(self):
-        self.results = {"prompts": 0, "sent": []}
+        self.results = {"prompts": 0, "sent": [], "interrupt_s": None}
         self.error = None
 
     def _wait_prompt(self, log_path, proc, deadline, count):
@@ -47,12 +67,28 @@ class ShellTest:
 
     def run(self, log_path, proc, timeout):
         deadline = time.monotonic() + timeout
+        prompts = 0
+        sent_at = None   # when the interrupt went out, until its prompt arrives
         try:
-            for i, (cmd, _) in enumerate(COMMANDS):
-                if not self._wait_prompt(log_path, proc, deadline, i + 1):
-                    self.error = f"no prompt before command {i + 1} ({cmd!r})"
+            for cmd, _ in COMMANDS:
+                if cmd == INTERRUPT:
+                    # No prompt to wait for and no newline to send: the
+                    # previous command is still running, which is the
+                    # only state in which this means anything.
+                    time.sleep(INTERRUPT_DELAY_S)
+                    proc.stdin.write(INTERRUPT.encode())
+                    proc.stdin.flush()
+                    sent_at = time.monotonic()
+                    self.results["sent"].append(cmd)
+                    continue
+                prompts += 1
+                if not self._wait_prompt(log_path, proc, deadline, prompts):
+                    self.error = f"no prompt before command {prompts} ({cmd!r})"
                     return
-                self.results["prompts"] = i + 1
+                if sent_at is not None:
+                    self.results["interrupt_s"] = time.monotonic() - sent_at
+                    sent_at = None
+                self.results["prompts"] = prompts
                 proc.stdin.write((cmd + "\n").encode())
                 proc.stdin.flush()
                 self.results["sent"].append(cmd)
@@ -64,6 +100,12 @@ class ShellTest:
         out = []
         if self.error:
             out.append(f"shell harness: {self.error}")
+        took = self.results["interrupt_s"]
+        if took is None:
+            out.append("shell harness: no prompt was timed after the interrupt")
+        elif took >= INTERRUPT_MAX_S:
+            out.append(f"shell harness: the prompt took {took:.1f}s after ^C "
+                       f"(>= {INTERRUPT_MAX_S}s: the job ran to completion, so ^C reached nothing)")
         for cmd, patterns in COMMANDS:
             if cmd not in self.results["sent"]:
                 out.append(f"shell harness: never sent {cmd!r}")

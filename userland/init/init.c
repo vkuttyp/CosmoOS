@@ -1049,6 +1049,10 @@ static int filter_case(const char *kind)
     return 99;
 }
 
+/* The signal probes need the vector-register helpers below, so they
+ * live past them and probe() ends by handing the kind on. */
+static int signal_probe(const char *kind);
+
 static int probe(const char *kind)
 {
     const size_t P = 4096;
@@ -1298,7 +1302,7 @@ static int probe(const char *kind)
         *(volatile char *)fresh = 1;   /* the demand fault fails: fatal */
         return 9;
     }
-    return 2;
+    return signal_probe(kind);
 }
 
 #if defined(__x86_64__)
@@ -1478,6 +1482,476 @@ static void trap_selftest(void)
 {
 }
 #endif
+
+/* --- the native signal ABI (docs/kernel/process/design.md) -------------------
+ *
+ * A handler runs on a frame the kernel pushed and returns through the
+ * libc's restorer, and what the interrupted code must find when it
+ * resumes is every register it had: the general ones and the vector
+ * ones both, because a handler compiled by an ordinary toolchain uses
+ * whichever it likes. These probes check that at each of the three
+ * points a signal can be delivered -- the return from a system call
+ * (signal), from an interrupt (signal-async), and from a fault
+ * (signal-fault) -- and that the blocked mask travels with the frame.
+ */
+#if defined(__x86_64__)
+#define vec_fill xmm_fill
+#define vec_load xmm_load
+#define vec_store xmm_store
+#else
+#define vec_fill vreg_fill
+#define vec_load vreg_load
+#define vec_store vreg_store
+#endif
+
+#define SIGFAULT_ADDR 0x40000000ull   /* nothing is mapped there until the handler maps it */
+#define SIGBIT(s) (1ul << ((s) - 1))
+
+static volatile int g_sig_ran;
+static volatile int g_sig_num;
+static volatile int g_sig_code;
+static volatile int g_sig_pid;
+static volatile unsigned long g_sig_addr;
+static volatile unsigned long g_sig_mask;   /* the blocked set as the handler saw it */
+
+/* Put something else in every register a handler is free to use, so that
+ * what the interrupted code finds afterwards came out of the frame and
+ * not from a handler that happened to leave things as it found them. */
+static void trample(void)
+{
+    uint8_t junk[16][16];
+    vec_fill(0xC3, junk);
+    vec_load(junk);
+#if defined(__x86_64__)
+    __asm__ volatile("movq $-1, %%r8\n\tmovq $-1, %%r9\n\tmovq $-1, %%r10\n\tmovq $-1, %%r11"
+                     : : : "r8", "r9", "r10", "r11");
+#else
+    __asm__ volatile("mov x9, #-1\n\tmov x10, #-1\n\tmov x12, #-1\n\tmov x13, #-1"
+                     : : : "x9", "x10", "x12", "x13");
+#endif
+}
+
+static void sig_handler(int sig, siginfo_t *si, void *frame)
+{
+    (void)frame;
+    g_sig_num = sig;
+    g_sig_code = si->si_code;
+    g_sig_pid = si->si_pid;
+    g_sig_addr = (unsigned long)si->si_addr;
+    sigset_t m = 0;
+    sigprocmask(SIG_BLOCK, NULL, &m);
+    g_sig_mask = m;
+    /* A fault handler that returns runs the faulting instruction again,
+     * so this one gives it something to store into first. */
+    if (sig == SIGSEGV)
+        cosmo_mmap((void *)SIGFAULT_ADDR, 4096, COSMO_PROT_READ | COSMO_PROT_WRITE,
+                   COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED);
+    trample();
+    g_sig_ran++;
+}
+
+static int install(int sig, unsigned flags)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sig_handler;
+    sa.sa_flags = SA_SIGINFO | flags;
+    return sigaction(sig, &sa, NULL);
+}
+
+/*
+ * Spin until the handler has run, holding sentinels in four registers no
+ * calling convention preserves: if the kernel does not put them back, the
+ * loop comes out of the signal looking at the handler's leftovers. The
+ * count bounds the wait, so a signal that never arrives fails the probe
+ * rather than hanging the test.
+ */
+#define SIG_SPIN_MAX 40000000u
+#define SIG_SPIN_MIN (SIG_SPIN_MAX - 1000u)   /* iterations that prove the loop was running */
+
+static int spin_until_signalled(volatile int *flag)
+{
+    long bad;
+#if defined(__x86_64__)
+    __asm__ volatile(
+        "movabsq $0x0123456789abcdef, %%r8\n\t"
+        "movabsq $0xfedcba9876543210, %%r9\n\t"
+        "movabsq $0x5555aaaa3333cccc, %%r10\n\t"
+        "movabsq $0x00ff00ff00ff00ff, %%r11\n\t"
+        "movl %2, %%eax\n\t"
+        "1:\n\t"
+        "subl $1, %%eax\n\t"
+        "jz 4f\n\t"
+        "cmpl $0, (%1)\n\t"
+        "je 1b\n\t"
+        "xorl %k0, %k0\n\t"
+        "cmpl %3, %%eax\n\tjbe 7f\n\torq $32, %0\n\t"
+        "7:\n\t"
+        "movabsq $0x0123456789abcdef, %%rcx\n\tcmpq %%rcx, %%r8\n\tje 2f\n\torq $1, %0\n\t"
+        "2:\n\t"
+        "movabsq $0xfedcba9876543210, %%rcx\n\tcmpq %%rcx, %%r9\n\tje 3f\n\torq $2, %0\n\t"
+        "3:\n\t"
+        "movabsq $0x5555aaaa3333cccc, %%rcx\n\tcmpq %%rcx, %%r10\n\tje 5f\n\torq $4, %0\n\t"
+        "5:\n\t"
+        "movabsq $0x00ff00ff00ff00ff, %%rcx\n\tcmpq %%rcx, %%r11\n\tje 6f\n\torq $8, %0\n\t"
+        "jmp 6f\n\t"
+        "4:\n\tmovq $16, %0\n\t"
+        "6:\n\t"
+        : "=&r"(bad)
+        : "r"(flag), "i"(SIG_SPIN_MAX), "i"(SIG_SPIN_MIN)
+        : "rax", "rcx", "r8", "r9", "r10", "r11", "cc", "memory");
+#else
+    __asm__ volatile(
+        "movz x9, #0xcdef\n\tmovk x9, #0x89ab, lsl #16\n\tmovk x9, #0x4567, lsl #32\n\tmovk x9, #0x0123, lsl #48\n\t"
+        "movz x10, #0x3210\n\tmovk x10, #0x7654, lsl #16\n\tmovk x10, #0xba98, lsl #32\n\tmovk x10, #0xfedc, lsl #48\n\t"
+        "movz x12, #0xcccc\n\tmovk x12, #0x3333, lsl #16\n\tmovk x12, #0xaaaa, lsl #32\n\tmovk x12, #0x5555, lsl #48\n\t"
+        "movz x13, #0x00ff\n\tmovk x13, #0x00ff, lsl #16\n\tmovk x13, #0x00ff, lsl #32\n\tmovk x13, #0x00ff, lsl #48\n\t"
+        "mov w14, %w2\n\t"
+        "1:\n\t"
+        "subs w14, w14, #1\n\t"
+        "b.eq 4f\n\t"
+        "ldr w11, [%1]\n\t"
+        "cbz w11, 1b\n\t"
+        "mov %0, #0\n\t"
+        "cmp w14, %w3\n\tb.ls 7f\n\torr %0, %0, #32\n\t"
+        "7:\n\t"
+        "movz x11, #0xcdef\n\tmovk x11, #0x89ab, lsl #16\n\tmovk x11, #0x4567, lsl #32\n\tmovk x11, #0x0123, lsl #48\n\t"
+        "cmp x9, x11\n\tb.eq 2f\n\torr %0, %0, #1\n\t"
+        "2:\n\t"
+        "movz x11, #0x3210\n\tmovk x11, #0x7654, lsl #16\n\tmovk x11, #0xba98, lsl #32\n\tmovk x11, #0xfedc, lsl #48\n\t"
+        "cmp x10, x11\n\tb.eq 3f\n\torr %0, %0, #2\n\t"
+        "3:\n\t"
+        "movz x11, #0xcccc\n\tmovk x11, #0x3333, lsl #16\n\tmovk x11, #0xaaaa, lsl #32\n\tmovk x11, #0x5555, lsl #48\n\t"
+        "cmp x12, x11\n\tb.eq 5f\n\torr %0, %0, #4\n\t"
+        "5:\n\t"
+        "movz x11, #0x00ff\n\tmovk x11, #0x00ff, lsl #16\n\tmovk x11, #0x00ff, lsl #32\n\tmovk x11, #0x00ff, lsl #48\n\t"
+        "cmp x13, x11\n\tb.eq 6f\n\torr %0, %0, #8\n\t"
+        "b 6f\n\t"
+        "4:\n\tmov %0, #16\n\t"
+        "6:\n\t"
+        : "=&r"(bad)
+        : "r"(flag), "r"((unsigned)SIG_SPIN_MAX), "r"((unsigned)SIG_SPIN_MIN)
+        : "x9", "x10", "x11", "x12", "x13", "x14", "cc", "memory");
+#endif
+    return (int)bad;
+}
+
+/* Delivery at the return from a system call: kill to self. */
+static int probe_signal(void)
+{
+    uint8_t want[16][16], got[16][16];
+    if (install(SIGUSR1, 0) != 0)
+        return 3;
+    vec_fill(0x3C, want);
+    vec_load(want);
+    if (raise(SIGUSR1) != 0)
+        return 4;
+    vec_store(got);
+    if (memcmp(got, want, sizeof(got)) != 0)
+        return 5;   /* the handler's vector registers, not the interrupted code's */
+    if (g_sig_ran != 1 || g_sig_num != SIGUSR1)
+        return 6;
+    if (g_sig_code != SI_USER || g_sig_pid != (int)getpid())
+        return 7;
+    /* A signal is blocked inside its own handler and unblocked again
+     * when it returns: the mask travels in the frame. */
+    if (!(g_sig_mask & SIGBIT(SIGUSR1)))
+        return 8;
+    sigset_t now = 0;
+    if (sigprocmask(SIG_BLOCK, NULL, &now) != 0 || (now & SIGBIT(SIGUSR1)))
+        return 9;
+    /* SA_NODEFER leaves it unblocked inside its own handler. */
+    if (install(SIGUSR2, SA_NODEFER) != 0)
+        return 10;
+    if (raise(SIGUSR2) != 0 || g_sig_ran != 2)
+        return 11;
+    if (g_sig_mask & SIGBIT(SIGUSR2))
+        return 12;
+    /* SA_RESETHAND puts the default back before the handler runs, so
+     * `handler` is what the query returns before and SIG_DFL after. */
+    if (install(SIGUSR1, SA_RESETHAND) != 0)
+        return 13;
+    if (raise(SIGUSR1) != 0 || g_sig_ran != 3)
+        return 14;
+    struct sigaction old;
+    if (sigaction(SIGUSR1, NULL, &old) != 0 || old.sa_handler != SIG_DFL)
+        return 15;
+    /* SIGKILL and SIGSTOP have no action to install. */
+    struct sigaction ign;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    if (sigaction(SIGKILL, &ign, NULL) != -1 || errno != EINVAL)
+        return 16;
+    return 0;
+}
+
+/* Delivery at the return from an interrupt: a child sends the signal
+ * while this process is spinning in user code. */
+static int probe_signal_async(void)
+{
+    uint8_t want[16][16], got[16][16];
+    if (install(SIGUSR1, 0) != 0)
+        return 3;
+    const char *argv[] = { "init", "--probe", "signal-poke", NULL };
+    pid_t child = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (child <= 0)
+        return 4;
+    /* After the spawn, not before it: the libc's string handling is
+     * compiled with the vector registers available and uses them, so a
+     * pattern loaded any earlier would be the library's by now. The
+     * child sleeps first, which is what makes this ordering safe -- and
+     * the spin loop reports how many times it went round, so a signal
+     * that arrived before the loop started fails the probe rather than
+     * passing it without having proved anything. */
+    vec_fill(0x5A, want);
+    vec_load(want);
+    int bad = spin_until_signalled(&g_sig_ran);
+    vec_store(got);
+    if (bad)
+        return 20 + bad;   /* 36: it never arrived; 52: too early to prove anything; else a register bitmap */
+    if (memcmp(got, want, sizeof(got)) != 0)
+        return 5;
+    if (g_sig_num != SIGUSR1 || g_sig_code != SI_USER || g_sig_pid != child)
+        return 6;
+    int status = -1;
+    if (waitpid(child, &status, 0) != child || status != 0)
+        return 7;
+    return 0;
+}
+
+static int probe_signal_poke(void)
+{
+    usleep(20000);   /* long enough that the parent is spinning by now */
+    return kill(getppid(), SIGUSR1) == 0 ? 0 : 3;
+}
+
+/* Blocking: a blocked signal waits, is reported as pending, and is
+ * delivered the moment it is unblocked. */
+static int probe_signal_mask(void)
+{
+    if (install(SIGUSR1, 0) != 0)
+        return 3;
+    sigset_t block = SIGBIT(SIGUSR1), old = 0, pending = 0;
+    if (sigprocmask(SIG_BLOCK, &block, &old) != 0 || old != 0)
+        return 4;
+    if (raise(SIGUSR1) != 0)
+        return 5;
+    if (g_sig_ran != 0)
+        return 6;   /* delivered although blocked */
+    if (sigpending(&pending) != 0 || !(pending & SIGBIT(SIGUSR1)))
+        return 7;
+    sigset_t none = 0;
+    if (sigprocmask(SIG_SETMASK, &none, &old) != 0 || old != SIGBIT(SIGUSR1))
+        return 8;
+    if (g_sig_ran != 1 || g_sig_num != SIGUSR1)
+        return 9;   /* not delivered at the unblock */
+    if (sigpending(&pending) != 0 || pending != 0)
+        return 10;
+    /* The mask a handler returns to is the one it interrupted, and it
+     * comes back out of the frame: SIGUSR2 is blocked here, blocked
+     * inside the handler, and blocked again after it returns. A frame
+     * that carried no mask would leave it unblocked. */
+    sigset_t hold = SIGBIT(SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &hold, NULL) != 0)
+        return 15;
+    if (raise(SIGUSR1) != 0 || g_sig_ran != 2)
+        return 16;
+    if (!(g_sig_mask & SIGBIT(SIGUSR2)))
+        return 17;
+    sigset_t back = 0;
+    if (sigprocmask(SIG_BLOCK, NULL, &back) != 0 || back != SIGBIT(SIGUSR2))
+        return 18;
+    if (sigprocmask(SIG_SETMASK, &none, NULL) != 0)
+        return 19;
+    /* Asking to block SIGKILL and SIGSTOP is not an error, but it must
+     * not take: a process that could block them could not be killed. */
+    sigset_t all = ~0ul;
+    if (sigprocmask(SIG_SETMASK, &all, NULL) != 0 || sigprocmask(SIG_BLOCK, NULL, &old) != 0)
+        return 11;
+    if (old & (SIGBIT(SIGKILL) | SIGBIT(SIGSTOP)))
+        return 12;
+    if (sigprocmask(SIG_SETMASK, &none, NULL) != 0)
+        return 13;
+    /* SIG_IGN discards it instead. */
+    struct sigaction ign;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    if (sigaction(SIGUSR1, &ign, NULL) != 0 || raise(SIGUSR1) != 0 || g_sig_ran != 2)
+        return 14;
+    return 0;
+}
+
+/* Delivery at the return from a fault: the handler is told the address,
+ * maps a page there, and the store that faulted is run again. */
+static int probe_signal_fault(void)
+{
+    if (install(SIGSEGV, 0) != 0)
+        return 3;
+    volatile unsigned *p = (volatile unsigned *)SIGFAULT_ADDR;
+    *p = 0x1234u;
+    if (g_sig_ran != 1 || g_sig_num != SIGSEGV)
+        return 4;
+    if (g_sig_code != SI_FAULT || g_sig_addr != SIGFAULT_ADDR)
+        return 5;
+    if (*p != 0x1234u)
+        return 6;   /* the retried store did not land */
+    return 0;
+}
+
+/* --- sessions, process groups and the terminal ------------------------------ */
+
+static int probe_signal_sleep(void)
+{
+    usleep(300000);   /* long enough to still be here when the group is signalled */
+    return 0;
+}
+
+/*
+ * A group is signalled as a unit and nothing outside it is touched. The
+ * sender deliberately stays out of the group it signals, because
+ * `kill(-pgid)` would otherwise reach the process running the check.
+ */
+static int probe_signal_group(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-sleep", NULL };
+    pid_t a = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, 0);   /* a group of its own */
+    if (a <= 0)
+        return 3;
+    pid_t b = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, a);
+    pid_t c = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, a);
+    pid_t d = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, 0);   /* outside it */
+    if (b <= 0 || c <= 0 || d <= 0)
+        return 4;
+    if (getpgid(a) != a || getpgid(b) != a || getpgid(c) != a)
+        return 5;
+    if (getpgid(d) != d || getpgid(0) == a)
+        return 6;
+    if (kill(-a, SIGTERM) != 0)
+        return 7;
+    int st = -1;
+    if (waitpid(a, &st, 0) != a || st != 128 + SIGTERM)
+        return 8;
+    if (waitpid(b, &st, 0) != b || st != 128 + SIGTERM)
+        return 9;
+    if (waitpid(c, &st, 0) != c || st != 128 + SIGTERM)
+        return 10;
+    if (waitpid(d, &st, 0) != d || st != 0)
+        return 11;   /* the process outside the group was signalled too */
+    /* The group is empty now, and an empty group is no target at all. */
+    if (kill(-a, SIGTERM) != -1 || errno != ESRCH)
+        return 12;
+    /* A process that does not exist is not a target either. */
+    if (setpgid(999999, 0) != -1 || errno != ESRCH)
+        return 13;
+    /* Nor is a group with nobody in it a group to join: `a`'s group
+     * emptied when its members died. */
+    if (setpgid(0, a) != -1 || errno != EPERM)
+        return 14;
+    /* A session leader's group is its session's name, so this process
+     * -- which the kernel started, and which therefore leads its own
+     * session -- cannot change group at all. */
+    if (setpgid(0, 0) != -1 || errno != EPERM)
+        return 15;
+    /* A child can, and its parent may move it: one more sleeper, put
+     * into a group of its own after the fact. */
+    pid_t e = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (e <= 0)
+        return 16;
+    if (getpgid(e) != getpgid(0))
+        return 17;
+    if (setpgid(e, e) != 0 || getpgid(e) != e)
+        return 18;
+    if (kill(-e, SIGTERM) != 0)
+        return 19;
+    if (waitpid(e, &st, 0) != e || st != 128 + SIGTERM)
+        return 20;
+    return 0;
+}
+
+/*
+ * A session is started once: after it the caller leads a group, and a
+ * group leader has no second session to start. The process the kernel
+ * starts for a probe leads its own group already, so the checks run in
+ * a child of it, which inherits a group it does not lead.
+ */
+static int probe_signal_setsid_child(void)
+{
+    if (getpgid(0) == getpid())
+        return 20;   /* not inherited after all: the probe would prove nothing */
+    pid_t was = getsid(0);
+    if (setsid() != getpid())
+        return 21;
+    if (getsid(0) != getpid() || getpgid(0) != getpid() || getsid(0) == was)
+        return 22;
+    if (setsid() != -1 || errno != EPERM)
+        return 23;
+    return 0;
+}
+
+static int probe_signal_setsid(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-setsid-child", NULL };
+    pid_t child = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (child <= 0)
+        return 3;
+    if (getpgid(child) != getpgid(0))
+        return 4;   /* a child starts in its parent's group */
+    int st = -1;
+    if (waitpid(child, &st, 0) != child)
+        return 5;
+    return st == 0 ? 0 : st;
+}
+
+/* Claim the terminal and wait to be interrupted. The kernel side of the
+ * test types the ^C; reaching the end of this means it did not arrive,
+ * because the default action of SIGINT is to end the process. */
+static int probe_signal_tty(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    if (tcgetpgrp(0) != getpgrp())
+        return 4;
+    for (int i = 0; i < 500; i++)
+        usleep(20000);
+    return 5;
+}
+
+/* Another session cannot take the terminal, or even ask about it. */
+static int probe_signal_tty_steal(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != -1 || errno != EPERM)
+        return 3;
+    if (tcgetpgrp(0) != -1 || errno != ENOTTY)
+        return 4;
+    return 0;
+}
+
+static int signal_probe(const char *kind)
+{
+    if (strcmp(kind, "signal") == 0)
+        return probe_signal();
+    if (strcmp(kind, "signal-async") == 0)
+        return probe_signal_async();
+    if (strcmp(kind, "signal-poke") == 0)
+        return probe_signal_poke();
+    if (strcmp(kind, "signal-mask") == 0)
+        return probe_signal_mask();
+    if (strcmp(kind, "signal-fault") == 0)
+        return probe_signal_fault();
+    if (strcmp(kind, "signal-sleep") == 0)
+        return probe_signal_sleep();
+    if (strcmp(kind, "signal-group") == 0)
+        return probe_signal_group();
+    if (strcmp(kind, "signal-setsid") == 0)
+        return probe_signal_setsid();
+    if (strcmp(kind, "signal-setsid-child") == 0)
+        return probe_signal_setsid_child();
+    if (strcmp(kind, "signal-tty") == 0)
+        return probe_signal_tty();
+    if (strcmp(kind, "signal-tty-steal") == 0)
+        return probe_signal_tty_steal();
+    return 2;
+}
 
 /* --- the privilege boundary (Prompt #3, 3.6) --------------------------------
  *

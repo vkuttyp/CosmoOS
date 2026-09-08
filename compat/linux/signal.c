@@ -432,13 +432,47 @@ static int64_t send_to_process(struct process *target, int sig, enum signal_sour
     return signal_send(target, sig, &info);
 }
 
+/* A whole process group, POSIX's rule: the call succeeds if the signal
+ * reached anyone, and the refusals surface only when every member
+ * refused (kernel/syscall/native.c does the same for the native ABI). */
+static int64_t kill_group(pid_t pgid, int sig)
+{
+    unsigned sent = 0, denied = 0;
+    pid_t after = 0;
+    struct process *p;
+    while ((p = process_group_next(pgid, after)) != NULL) {
+        after = p->pid;
+        int64_t rc = send_to_process(p, sig, SIGSRC_USER);
+        process_put(p);
+        if (rc == 0)
+            sent++;
+        else if (rc == -EPERM)
+            denied++;
+    }
+    if (sent > 0)
+        return 0;
+    return denied > 0 ? -EPERM : -ESRCH;
+}
+
 int64_t lx_kill(struct syscall_args *a)
 {
     int pid = (int)a->a[0], sig = (int)a->a[1];
-    if (pid <= 0)
-        return -ESRCH;   /* process groups do not exist */
     if (sig != 0 && !valid_sig(sig))
         return -EINVAL;
+    if (pid == -1)
+        return -EINVAL;   /* every process: nothing here wants it */
+    if (pid <= 0) {
+        /* 0 is the caller's own group, a negative pid names one. */
+        pid_t pgid;
+        if (pid == 0) {
+            int rc = process_getpgid(0, &pgid);
+            if (rc)
+                return rc;
+        } else {
+            pgid = (pid_t)(-pid);
+        }
+        return kill_group(pgid, sig);
+    }
     struct process *target = process_lookup((pid_t)pid);
     if (target == NULL)
         return -ESRCH;

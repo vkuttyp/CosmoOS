@@ -14,6 +14,8 @@
 
 #include <kernel/console.h>
 #include <kernel/errno.h>
+#include <kernel/process.h>
+#include <kernel/signal.h>
 #include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -22,6 +24,21 @@
 #define TTY_EOF_MARK 0x04u
 
 static struct tty g_console_tty;
+
+/* Every process of the group, one signal each. The kernel is the sender,
+ * so no credential check applies: the person at the keyboard is already
+ * as privileged as this terminal's session. */
+static void tty_signal_group(pid_t pgid, int sig)
+{
+    struct signal_info info = { .sig = sig, .source = SIGSRC_KERNEL };
+    pid_t after = 0;
+    struct process *p;
+    while ((p = process_group_next(pgid, after)) != NULL) {
+        after = p->pid;
+        signal_send(p, sig, &info);
+        process_put(p);
+    }
+}
 
 void tty_setup(struct tty *t, const char *name)
 {
@@ -73,8 +90,27 @@ static void commit(struct tty *t, uint8_t term)
     t->line_len = 0;
 }
 
+/*
+ * The control characters that raise signals. What they name is a group,
+ * not a process: everything in the foreground job stops at once, which
+ * is the point of the group existing. The signal is sent after the lock
+ * is dropped -- sending walks the process table and wakes threads, and
+ * tty->lock is taken in interrupt context, so nothing that long-running
+ * belongs under it.
+ */
+static int signal_char(uint8_t c)
+{
+    switch (c) {
+    case 0x03: return SIGINT;    /* ^C */
+    case 0x1c: return SIGQUIT;   /* ^\ */
+    default: return 0;
+    }
+}
+
 void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
 {
+    int send_sig = 0;
+    pid_t send_pgid = 0;
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
     t->stats.rx_bytes += n;
     for (size_t i = 0; i < n; i++) {
@@ -96,6 +132,16 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
             }
         } else if (c == 0x04) {   /* ^D: end of file, or end the partial line */
             commit(t, TTY_EOF_MARK);
+        } else if (signal_char(c) != 0 && t->fg_pgid != 0) {
+            /* Echoed the way every terminal echoes it, the line under
+             * edit thrown away: what was typed before the interrupt is
+             * not part of the next command. */
+            char ctrl[2] = { '^', (char)('@' + c) };
+            echo(t, ctrl, 2);
+            echo(t, "\n", 1);
+            t->line_len = 0;
+            send_sig = signal_char(c);
+            send_pgid = t->fg_pgid;
         } else if ((c >= 0x20 && c < 0x7f) || c == '\t') {
             if (t->line_len < TTY_LINE_MAX - 1) {
                 t->line[t->line_len++] = c;
@@ -105,9 +151,82 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
                 echo(t, "\a", 1);
             }
         }
-        /* other control bytes are dropped (no signals yet, so ^C too) */
+        /* other control bytes are dropped */
     }
     spin_unlock_irqrestore(&t->lock, s);
+    if (send_sig != 0)
+        tty_signal_group(send_pgid, send_sig);
+}
+
+/*
+ * The controlling terminal. A session leader whose session has no
+ * terminal claims this one by naming a foreground group on it; from
+ * then on the terminal belongs to that session, and only that session
+ * may name a group -- which is what stops a second shell from taking
+ * the keyboard away from the first.
+ */
+int tty_set_pgrp(struct tty *t, pid_t pgid)
+{
+    struct process *self = process_current();
+    if (self == NULL || pgid == 0)
+        return -EINVAL;
+    pid_t sid = process_current_sid();
+    /* The group must be one of the caller's session, checked first and
+     * outside the tty lock because it walks the process table -- and
+     * first so that a caller naming a group it may not name does not
+     * claim the terminal on the way to being refused. A group that
+     * empties between here and the store signals nobody, which is what
+     * an empty group does anyway. */
+    if (!process_group_in_session(pgid, sid))
+        return -EPERM;
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    if (t->sid == 0) {
+        if (self->pid != sid) {
+            spin_unlock_irqrestore(&t->lock, s);
+            return -EPERM;   /* only a session leader claims a terminal */
+        }
+        t->sid = sid;   /* claimed and named in one step */
+    } else if (t->sid != sid) {
+        spin_unlock_irqrestore(&t->lock, s);
+        return -EPERM;
+    }
+    t->fg_pgid = pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    return 0;
+}
+
+void tty_session_exit(pid_t sid)
+{
+    struct tty *t = tty_console();
+    pid_t hangup = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    if (t->sid == sid) {
+        hangup = t->fg_pgid;
+        t->sid = 0;
+        t->fg_pgid = 0;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    if (hangup != 0)
+        tty_signal_group(hangup, SIGHUP);
+}
+
+pid_t tty_foreground_pgrp(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    pid_t pgid = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    return pgid;
+}
+
+int tty_get_pgrp(struct tty *t, pid_t *out)
+{
+    pid_t sid = process_current_sid();
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    int rc = (t->sid != 0 && t->sid == sid) ? 0 : -ENOTTY;
+    if (rc == 0)
+        *out = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    return rc;
 }
 
 bool tty_has_line(struct tty *t)

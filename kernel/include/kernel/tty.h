@@ -11,6 +11,7 @@
 #ifndef KERNEL_TTY_H
 #define KERNEL_TTY_H
 
+#include <kernel/process.h>
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
 #include <kernel/wait.h>
@@ -27,6 +28,12 @@ struct tty_stats {
 
 struct tty {
     spinlock_t lock;
+    /* The session that controls this terminal and, within it, the group
+     * whose processes the control characters signal
+     * (docs/kernel/tty/design.md, "The controlling terminal"). Both 0
+     * until a session leader claims the terminal. Under `lock`. */
+    pid_t sid;
+    pid_t fg_pgid;
     uint8_t line[TTY_LINE_MAX];
     unsigned line_len;
     uint8_t ring[TTY_INPUT_MAX];
@@ -61,5 +68,28 @@ void tty_get_stats(struct tty *t, struct tty_stats *out);
  * they were. The keyboard test turns echo off while the harness types,
  * so what it types does not land in the middle of a log line. */
 unsigned tty_set_flags(struct tty *t, unsigned flags);
+
+/*
+ * The controlling terminal (docs/kernel/tty/design.md).
+ *
+ * `tty_set_pgrp` names the foreground process group -- the one that
+ * `^C` and `^\` signal. A session leader whose session has no terminal
+ * yet claims one by naming a group on it; after that only processes of
+ * that session may name a group, and only a group of that session.
+ * `tty_get_pgrp` answers -ENOTTY to anyone outside the session, because
+ * to them this is not a controlling terminal at all.
+ */
+int tty_set_pgrp(struct tty *t, pid_t pgid);
+/* The leader of session `sid` has exited: any terminal that session
+ * controlled is released -- SIGHUP to what was its foreground group,
+ * and the terminal free for the next session leader to claim. */
+void tty_session_exit(pid_t sid);
+/* The foreground group as the kernel sees it, without the session check
+ * the system calls make; 0 when the terminal has none. */
+pid_t tty_foreground_pgrp(struct tty *t);
+int tty_get_pgrp(struct tty *t, pid_t *out);
+/* The tty behind a kobject, or NULL when the object is not a terminal. */
+struct kobject;
+struct tty *tty_of_object(struct kobject *obj);
 
 #endif /* KERNEL_TTY_H */

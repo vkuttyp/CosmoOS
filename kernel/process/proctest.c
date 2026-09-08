@@ -18,7 +18,9 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/signal.h>
 #include <kernel/timer.h>
+#include <kernel/tty.h>
 #include <kernel/vmm.h>
 
 #include <uapi/cosmo/syscall.h>
@@ -271,6 +273,127 @@ bool selftest_syscall_fuzz(const char **reason)
     if (status == -1)
         return true;
     CHECK(status == 0);
+    return true;
+}
+
+/*
+ * The native signal ABI (docs/kernel/process/design.md, "The native
+ * signal ABI"). Each probe is a user program that installs a handler,
+ * takes the signal, and checks what the handler left behind: the
+ * interrupted registers -- general and vector both -- the blocked mask,
+ * and the siginfo. The three cover the three delivery points, because
+ * the frame is built at each of them from a different arch frame.
+ */
+/* Each probe answers with the number of the check it failed, which is
+ * the only thing that says what broke: the kernel side sees one exit
+ * status and the program that knows the detail is gone. */
+static bool run_signal_probe(const char *kind, const char **reason)
+{
+    const char *argv[] = { "init", "--probe", kind, NULL };
+    int status;
+    if (!run_module(argv, &status, reason))
+        return false;
+    if (status == -1)
+        return true;   /* no init in the boot archive */
+    if (status != 0) {
+        kwarn("selftest: signal probe '%s' failed check %d", kind, status);
+        *reason = "the signal probe reported a failure";
+        return false;
+    }
+    return true;
+}
+
+bool selftest_signal_native(const char **reason)
+{
+    return run_signal_probe("signal", reason);
+}
+
+bool selftest_signal_async(const char **reason)
+{
+    return run_signal_probe("signal-async", reason);
+}
+
+bool selftest_signal_mask(const char **reason)
+{
+    return run_signal_probe("signal-mask", reason);
+}
+
+bool selftest_signal_fault(const char **reason)
+{
+    return run_signal_probe("signal-fault", reason);
+}
+
+bool selftest_signal_group(const char **reason)
+{
+    return run_signal_probe("signal-group", reason);
+}
+
+bool selftest_signal_setsid(const char **reason)
+{
+    return run_signal_probe("signal-setsid", reason);
+}
+
+/*
+ * The terminal's foreground group, driven from both ends: a user process
+ * claims the terminal and waits, another session is refused it, and the
+ * ^C this test types reaches exactly the process that holds it. Then the
+ * leader exits and the terminal is free again, which is what lets the
+ * shell claim it after the self-tests are over.
+ */
+bool selftest_tty_intr(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    struct tty *t = tty_console();
+    CHECK(tty_foreground_pgrp(t) == 0);   /* nothing holds it yet */
+
+    static const char *const argv[] = { "init", "--probe", "signal-tty", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;   /* it is its own group and its own session leader */
+
+    uint64_t deadline = clock_now_ns() + 5000000000ULL;
+    while (tty_foreground_pgrp(t) != pid && clock_now_ns() < deadline)
+        sched_yield();
+    if (tty_foreground_pgrp(t) != pid) {
+        process_put(p);
+        *reason = "the terminal was never claimed";
+        return false;
+    }
+
+    /* A second session is refused both the terminal and the question. */
+    static const char *const steal[] = { "init", "--probe", "signal-tty-steal", NULL };
+    struct process *q = NULL;
+    CHECK(process_create_from_elf(image, image_size, steal[0], steal, NULL, NULL, &q) == 0);
+    int steal_status = process_wait_exit(q);
+    process_put(q);
+    if (steal_status != 0) {
+        process_put(p);
+        kwarn("selftest: tty-intr: the stealing probe failed check %d", steal_status);
+        *reason = "another session was allowed the terminal";
+        return false;
+    }
+
+    /* A partial line and then the interrupt: the line under edit is
+     * thrown away -- no line reaches a reader -- and the signal reaches
+     * the foreground group. The console may already hold input typed by
+     * the harness, so what is checked is that this typing added none. */
+    struct tty_stats before, after;
+    tty_get_stats(t, &before);
+    tty_input(t, (const uint8_t *)"abc", 3);
+    uint8_t intr = 0x03;
+    tty_input(t, &intr, 1);
+    int status = process_wait_exit(p);
+    process_put(p);
+    CHECK(status == 128 + SIGINT);
+    tty_get_stats(t, &after);
+    CHECK(after.lines_in == before.lines_in);
+    /* The leader is gone, so the terminal is nobody's again. */
+    CHECK(tty_foreground_pgrp(t) == 0);
     return true;
 }
 

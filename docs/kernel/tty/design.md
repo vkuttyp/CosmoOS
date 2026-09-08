@@ -8,6 +8,8 @@
 
 struct tty {
     spinlock_t lock;                 /* IRQ-safe: tty_input runs in interrupt context */
+    pid_t sid;                       /* the session that controls this terminal; 0 for none */
+    pid_t fg_pgid;                   /* the foreground process group within it; 0 for none */
     /* line under edit (canonical mode) */
     uint8_t line[TTY_LINE_MAX];
     unsigned line_len;
@@ -49,9 +51,23 @@ Under `tty->lock` for each byte `c`:
    an empty record (end of file, `eofs++`); a partial line gives a
    record without a newline (Unix semantics: the read returns the
    partial line).
-6. Printable (0x20..0x7e) or tab: if `line_len < TTY_LINE_MAX - 1`,
+6. `^C` (0x03) or `^\` (0x1c) **when the terminal has a foreground
+   group**: echo `"^C"` (or `"^\"`) and a newline, throw the line under
+   edit away, and raise `SIGINT` (or `SIGQUIT`) on every process of that
+   group. The line is discarded because what was typed before an
+   interrupt is not part of the next command. With no foreground group
+   these are dropped as any other control byte, which is what a terminal
+   nobody has claimed does.
+7. Printable (0x20..0x7e) or tab: if `line_len < TTY_LINE_MAX - 1`,
    append and echo; else count `dropped_bytes` and echo a bell.
-7. Anything else: dropped silently (`^C` included; no signals yet).
+8. Anything else: dropped silently.
+
+The signal is sent **after** `tty->lock` is released: sending walks the
+process table and wakes threads, and this loop runs in interrupt
+context, so nothing that long belongs under the lock. The byte loop
+records the signal and the group, and one call at the end delivers it.
+That also keeps the lock order simple -- `tty.lock` is never held while
+the process table's lock is taken.
 
 Echo happens through `console_write`, which takes its own IRQ-safe lock
 and only polls the UART; it is called with `tty->lock` held. Lock order
@@ -103,6 +119,40 @@ The handler runs on the CPU the GSI is routed to (CPU 0 by the existing
 IRQ layer); `tty_input` is safe from any CPU. When no UART is present
 (no `serial0` sink) nothing is registered and the console tty simply
 never receives input.
+
+### The controlling terminal
+
+A terminal belongs to a *session*, and within that session one *process
+group* is in the foreground: the group whose processes `^C` and `^\`
+signal (`docs/kernel/process/design.md`, "Sessions and process groups").
+Two fields hold it, both under `tty->lock`, and three rules govern them:
+
+- **Claiming.** `tty_set_pgrp` on a terminal with no session (`sid ==
+  0`) claims it for the caller's session, provided the caller *leads*
+  that session. A process that is not a session leader, calling on an
+  unclaimed terminal, is refused: leading a session is what makes a
+  terminal yours to take.
+- **Using.** Once claimed, only processes of that session may name a
+  foreground group, and only a group of that session -- checked through
+  `process_group_in_session`, outside `tty->lock`, because it walks the
+  process table. `tty_get_pgrp` answers `-ENOTTY` to anyone outside the
+  session: to them this is not a controlling terminal at all.
+- **Releasing.** When the session's leader exits, the terminal is
+  released -- `SIGHUP` to what was its foreground group, then `sid` and
+  `fg_pgid` back to 0 -- so the next session leader can claim it. Without
+  this rule a terminal would be owned by a dead session forever, and the
+  next shell would never get the keyboard.
+
+That is the whole session model the tty needs. The alternative the
+design considered -- remembering one "controlling process" instead of a
+session -- was rejected in `docs/audit/next-subsystem-signals.md` for
+being the same machinery with a worse name: it still has to answer who
+may take the terminal, who inherits it, and when it is released, which
+are the three questions a session answers.
+
+`tty_of_object` maps a handle's kobject to a tty. The console object is
+the only terminal there is, so the mapping is a comparison; a second tty
+would put a `struct tty *` in the object instead.
 
 ### The console kobject
 
