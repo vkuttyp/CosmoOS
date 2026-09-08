@@ -512,6 +512,7 @@ static const struct selftest tests[] = {
     { "signal-stop-kill", selftest_signal_stop_kill },
     { "signal-stop-mask", selftest_signal_stop_mask },
     { "signal-stop-late", selftest_signal_stop_late },
+    { "signal-stop-threads", selftest_signal_stop_threads },
     { "process-efault",  selftest_process_efault },
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },

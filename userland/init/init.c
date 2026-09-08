@@ -2337,6 +2337,41 @@ static int probe_signal_stop_late(void)
     return 0;
 }
 
+/*
+ * The one invariant of stopping that needs more than one thread: a
+ * parent is told the process stopped only once *every* thread has
+ * parked. The program is a Linux-personality one, because the native
+ * ABI cannot make a thread; it clones a worker, puts it inside a sleep,
+ * and stops the whole process from the main thread. A worker that never
+ * parked would leave the process short of fully stopped and no stop
+ * would ever be reported, so the wait below is bounded.
+ */
+static int probe_signal_stop_threads(void)
+{
+    const char *argv[] = { "lxsig", "stopthreads", NULL };
+    pid_t c = spawnve("/boot/tests/linux/lxsig", argv, NULL, NULL, 0);
+    if (c <= 0)
+        return 0;   /* the Linux test programs are not in this image */
+    int st = -1;
+    int stopped = 0;
+    for (int i = 0; i < 200 && !stopped; i++) {   /* at most 4 s */
+        pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+        if (got == c && WIFSTOPPED(st))
+            stopped = 1;
+        else if (got == c)
+            return 3;   /* it exited instead of stopping */
+        else
+            usleep(20000);
+    }
+    if (!stopped)
+        return 4;   /* never fully stopped: a thread did not park */
+    if (kill(c, SIGCONT) != 0)
+        return 5;
+    if (waitpid(c, &st, 0) != c)
+        return 6;
+    return st == 0 ? 0 : 10 + st;
+}
+
 static int signal_probe(const char *kind)
 {
     if (strcmp(kind, "signal") == 0)
@@ -2377,6 +2412,8 @@ static int signal_probe(const char *kind)
         return probe_signal_stop_restart();
     if (strcmp(kind, "signal-stop-late") == 0)
         return probe_signal_stop_late();
+    if (strcmp(kind, "signal-stop-threads") == 0)
+        return probe_signal_stop_threads();
     if (strcmp(kind, "signal-tty-stop") == 0)
         return probe_signal_tty_stop();
     if (strcmp(kind, "signal-tty-background") == 0)

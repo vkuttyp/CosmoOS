@@ -93,6 +93,7 @@ bool selftest_signal_stop_kill(const char **reason);   /* a stopped process is s
 bool selftest_signal_stop_mask(const char **reason);   /* SIGSTOP cannot be caught or blocked */
 bool selftest_signal_stop_restart(const char **reason);/* a call cut short by a stop is restarted */
 bool selftest_signal_stop_late(const char **reason);   /* a continue that outruns the stop */
+bool selftest_signal_stop_threads(const char **reason); /* every thread parks before the stop is reported */
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */
 bool selftest_tty_stop(const char **reason);           /* ^Z stops it rather than killing it */
 bool selftest_tty_ttin(const char **reason);           /* a background reader is refused the line */

@@ -440,6 +440,11 @@ bool selftest_signal_stop_late(const char **reason)
     return run_signal_probe("signal-stop-late", reason);
 }
 
+bool selftest_signal_stop_threads(const char **reason)
+{
+    return run_signal_probe("signal-stop-threads", reason);
+}
+
 /*
  * ^Z at the terminal. The same two-ended shape as tty-intr: a process
  * claims the terminal and waits, the kernel types the keystroke, and

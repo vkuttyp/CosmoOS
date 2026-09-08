@@ -853,6 +853,12 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
         thread_put(t);
         return -EAGAIN;
     }
+    /* A thread created while the process is stopped belongs to a
+     * stopped process: it parks at its first return to user mode like
+     * every other. Without this it would count towards `nr_live` and
+     * never towards `nr_stopped`, so the process would never be *fully*
+     * stopped and a parent's waitpid(WUNTRACED) would wait for ever. */
+    t->sig_must_stop = p->stopped;
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads++;
     p->nr_live++;

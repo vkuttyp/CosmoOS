@@ -402,8 +402,12 @@ both `sigaction` gates refuse `SIGSTOP`. Check: `signal-stop-kill`,
 parked.** `nr_stopped` counts them and the last one to park sets
 `stop_reportable`, so a shell cannot take the terminal back while a
 thread of the job is still running. Reporting is edge-triggered in both
-directions. Check: `signal-stop` (the edge); the all-threads half is
-**not covered** -- see the gaps.
+directions. A thread cloned while the process is stopped inherits the
+flag, or it would count towards `nr_live` and never towards
+`nr_stopped` and the parent would wait for ever. Check: `signal-stop`
+(the edge) and `signal-stop-threads`, which clones a worker into a
+sleep and stops the process from the main thread -- with the sibling
+wake removed, the worker never parks and no stop is ever reported.
 
 **P-J5a. A signal that will not stop anything is never reported as
 though it would.** `signal_raise_stop_self` tests the action and sends
@@ -427,13 +431,13 @@ failing it -- which is what the rule exists to prevent.
 
 - No `fork` or `exec` replacing the current image; `spawn` is the only
   creation primitive; `clone` creates threads only.
-- **The multi-threaded half of stopping is untested.** The rule that a
-  parent is told of a stop only when the *last* thread has parked is
-  implemented and exercised only with one thread, where it is trivially
-  true: the native ABI cannot create a thread, so the test would have to
-  be a Linux-personality program, and it has not been written. The
-  report named `signal-stop-threads` and this unit did not build it.
-- **Two guards are not distinguishable by any single-threaded test**,
+- **One multi-threaded case remains unaimable**: a thread cloned
+  *during* a stop, between the stop being posted and the last thread
+  parking. It is handled -- the new thread inherits `sig_must_stop` --
+  but no test can reach it, because the main thread cannot clone while
+  it is itself stopped. `signal-stop-threads` covers the ordinary
+  multi-threaded stop, which is what two rounds of review were about.
+- **Two guards are not distinguishable by any test here**,
   and both are kept because they are plainly right rather than because
   anything proves them. Setting `stop_reportable` only when the *last*
   thread parks (rather than when the stop is posted) matters when a
