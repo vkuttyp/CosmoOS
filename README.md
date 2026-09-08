@@ -727,11 +727,15 @@ See [docs/development.md](docs/development.md).
   cover (GICv3, ASID allocation instead of a full invalidate per switch,
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
-  shape and wait, which `docs/audit/next-subsystem.md` did for the NIC
-  and `docs/audit/next-subsystem-usb.md` did for USB (built as the
-  `xhci` and `usb_storage` modules). `docs/audit/next-subsystem-ahci.md`
-  does it for AHCI: SATA disks through the ICH9-class controller the q35
-  machine has carried undriven on every boot, a fourth model of device
-  behind the block layer, the second driver that refuses bios when its
-  slots are full, and the answer to the DMA-parent question USB left
-  open. Design documents first, one subsystem at a time.
+  shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
+  `docs/audit/next-subsystem-usb.md` for USB (built as the `xhci` and
+  `usb_storage` modules) and `docs/audit/next-subsystem-ahci.md` for
+  AHCI (built as the `ahci` module).
+  `docs/audit/next-subsystem-console.md` does it for the machine's own
+  console: the framebuffer the UEFI firmware has already lit, carried
+  through a version 6 boot protocol into a second console sink, and a
+  USB keyboard feeding the same `tty_input` the two UARTs feed — the
+  first user of the xHCI driver's interrupt-endpoint path, and, with a
+  hub, the question of where USB topology lives. Section **61** wants
+  this kernel booted on real hardware, and real hardware has no serial
+  port. Design documents first, one subsystem at a time.

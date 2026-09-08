@@ -382,6 +382,10 @@ NVMe's aggregate on this host, so the tag machinery is not written
 Size: about 900 lines for the driver, 350 of tests — inside the
 estimate.
 
+The next report in this shape is `next-subsystem-console.md`, which
+leaves §60's hardware list (complete through AHCI) for the thing every
+unit so far has assumed: a console that is not a serial cable.
+
 ## Alternatives considered
 
 - **A `sata` bus with per-port devices** — models the DMA-parent
