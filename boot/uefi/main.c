@@ -113,6 +113,122 @@ static uint64_t find_acpi_rsdp(void)
     return rsdp10;
 }
 
+/* Decode one channel of a PixelBitMask format: the position of the
+ * lowest set bit and the number of contiguous bits above it. A mask with
+ * holes in it is not a channel, and is refused by returning 0 bits. */
+static void mask_to_field(uint32_t mask, uint8_t *shift, uint8_t *bits)
+{
+    *shift = 0;
+    *bits = 0;
+    if (mask == 0)
+        return;
+    uint32_t sh = 0;
+    while ((mask & 1u) == 0) {
+        mask >>= 1;
+        sh++;
+    }
+    uint32_t n = 0;
+    while (mask & 1u) {
+        mask >>= 1;
+        n++;
+    }
+    if (mask != 0)
+        return;   /* not contiguous */
+    *shift = (uint8_t)sh;
+    *bits = (uint8_t)n;
+}
+
+/*
+ * Record the framebuffer the firmware has already configured. The mode is
+ * taken as found: SetMode is never called, because the firmware's choice
+ * is known to work and choosing modes is a display driver's job.
+ *
+ * Leaves every field zero when there is no Graphics Output Protocol, when
+ * the protocol offers no linear framebuffer (PixelBltOnly), or when the
+ * mode it describes does not fit the memory it claims. A machine with no
+ * framebuffer is not an error; it is a machine with a serial console.
+ */
+static void find_framebuffer(struct cosmoboot_info *info)
+{
+    EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+
+    EFI_STATUS st = g_bs->LocateProtocol(&gop_guid, NULL, (void **)&gop);
+    if (EFI_ERROR(st) || gop == NULL || gop->Mode == NULL || gop->Mode->Info == NULL) {
+        lputs("framebuffer: no graphics output protocol; serial console only\n");
+        return;
+    }
+
+    const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *mi = gop->Mode->Info;
+    uint8_t rs = 0, rb = 0, gs = 0, gb = 0, bs = 0, bb = 0;
+    uint32_t bpp = 32;
+
+    switch (mi->PixelFormat) {
+    case PixelRedGreenBlueReserved8BitPerColor:
+        rs = 0; gs = 8; bs = 16;
+        rb = gb = bb = 8;
+        break;
+    case PixelBlueGreenRedReserved8BitPerColor:
+        bs = 0; gs = 8; rs = 16;
+        rb = gb = bb = 8;
+        break;
+    case PixelBitMask: {
+        mask_to_field(mi->PixelInformation.RedMask, &rs, &rb);
+        mask_to_field(mi->PixelInformation.GreenMask, &gs, &gb);
+        mask_to_field(mi->PixelInformation.BlueMask, &bs, &bb);
+        if (rb == 0 || gb == 0 || bb == 0) {
+            lputs("framebuffer: pixel bit mask has no usable channels; ignored\n");
+            return;
+        }
+        uint32_t all = mi->PixelInformation.RedMask | mi->PixelInformation.GreenMask |
+                       mi->PixelInformation.BlueMask | mi->PixelInformation.ReservedMask;
+        uint32_t top = 0;
+        for (uint32_t i = 0; i < 32; i++) {
+            if (all & (1u << i))
+                top = i + 1;
+        }
+        bpp = ALIGN_UP(top, 8);
+        break;
+    }
+    default:
+        lprintf("framebuffer: pixel format %u has no linear buffer; ignored\n",
+                (unsigned)mi->PixelFormat);
+        return;
+    }
+
+    uint64_t base = gop->Mode->FrameBufferBase;
+    uint64_t size = gop->Mode->FrameBufferSize;
+    uint64_t width = mi->HorizontalResolution;
+    uint64_t height = mi->VerticalResolution;
+    uint64_t per_line = mi->PixelsPerScanLine ? mi->PixelsPerScanLine : width;
+    uint64_t pitch = per_line * (bpp / 8);
+
+    if (base == 0 || size == 0 || width == 0 || height == 0 || per_line < width ||
+        pitch * height > size) {
+        lprintf("framebuffer: %llux%llu, %u bpp does not fit %llu bytes at 0x%llx; ignored\n",
+                (unsigned long long)width, (unsigned long long)height, (unsigned)bpp,
+                (unsigned long long)size, (unsigned long long)base);
+        return;
+    }
+
+    info->fb_phys = base;
+    info->fb_size = size;
+    info->fb_width = (uint32_t)width;
+    info->fb_height = (uint32_t)height;
+    info->fb_pitch = (uint32_t)pitch;
+    info->fb_bpp = bpp;
+    info->fb_red_shift = rs;
+    info->fb_red_bits = rb;
+    info->fb_green_shift = gs;
+    info->fb_green_bits = gb;
+    info->fb_blue_shift = bs;
+    info->fb_blue_bits = bb;
+
+    lprintf("framebuffer: %ux%u, %u bpp, pitch %u, at 0x%llx (%llu KiB)\n",
+            info->fb_width, info->fb_height, info->fb_bpp, info->fb_pitch,
+            (unsigned long long)base, (unsigned long long)(size >> 10));
+}
+
 static uint32_t translate_type(uint32_t efi_type, uint64_t attr)
 {
     if (attr & EFI_MEMORY_RUNTIME)
@@ -321,7 +437,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     struct paging_ctx pg;
     memset(&pg, 0, sizeof(pg));
     pg.nx = true;
-    pg.pool_pages = paging_pool_size(&img);
+    pg.pool_pages = paging_pool_size(&img, pre_desc > 0 ? pre_size / pre_desc : 0);
     status = alloc_pages_low(pg.pool_pages, EFI_MEMORY_TYPE_COSMO_PAGETABLES, &pg.pool_phys, &type_fallback);
     if (EFI_ERROR(status))
         die("cannot allocate page-table pool", status);
@@ -349,6 +465,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     struct cosmoboot_info *info = (struct cosmoboot_info *)(uintptr_t)info_phys;
     struct cosmoboot_mem_entry *entries = (struct cosmoboot_mem_entry *)(info + 1);
 
+    /* Every field the loader does not set must read zero: "absent" is
+     * how optional data (the archive, the EL2 stub, the framebuffer) is
+     * spelled, and firmware does not promise a fresh page is clean. */
+    memset(info, 0, sizeof(*info));
+
     info->magic = COSMOBOOT_MAGIC;
     info->version = COSMOBOOT_VERSION;
     info->size = sizeof(*info);
@@ -370,6 +491,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     info->firmware_system_table = (uint64_t)(uintptr_t)st;
     info->archive_phys = (uint64_t)(uintptr_t)archive;
     info->archive_size = archive_size;
+    find_framebuffer(info);
 
     if (type_fallback)
         lputs("warning: firmware rejected loader memory types; kernel, bootinfo, page-table and archive "

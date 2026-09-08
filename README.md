@@ -715,14 +715,41 @@ See [docs/development.md](docs/development.md).
   device` per port; the model gained no DMA-parent pointer. NCQ was
   measured (four streams reach 87 % of NVMe's aggregate without it) and
   not written.
+- **The machine's own console (done):** `docs/kernel/diagnostics/`
+  (the display) and `docs/drivers/usb/` (the keyboard and the hub).
+  Until this unit CosmoOS spoke to exactly one kind of console device, a
+  UART, and the only two callers of `tty_input` in the tree were the two
+  UART drivers -- so on the machines section 61 asks for next, none of
+  which has a serial port, it would have booted blind and deaf. Four
+  pieces: the UEFI Graphics Output Protocol's *already-set* mode carried
+  through boot protocol v6 (no mode is ever set: that is the display
+  driver section 60 defers); a framebuffer console sink with an in-tree
+  8x8 face, panic-safe by the serial sinks' rules, which replays the
+  newest screenful of the log ring when it registers; a HID
+  boot-protocol keyboard whose keys go to the console tty through the
+  same `tty_input` the UARTs call, so the shell cannot tell them apart;
+  and a hub, which is the first device on that bus with devices behind
+  it. The hub answered the unit's architectural question: topology lives
+  in the USB core as a parent, a depth and a route on `struct
+  usb_device`, and in two fields of the controller's slot context --
+  nothing else in the kernel learned that hubs exist. Tests turn on
+  reading the pixels back (a display is testable with no screen and no
+  screenshot) and on a QMP socket the harness had never had, so the boot
+  test now types on the emulated keyboard, including two keys held at
+  once. Three bugs the unit found were older than it: a mixed 2 MiB
+  block in the AArch64 loader's direct map (RAM behind a reserved range
+  got device attributes, and the kernel's first unaligned store into it
+  faulted), an AHCI fault injection that a second console sink's timing
+  exposed as unfaithful, and the rule that a transfer's buffer may not
+  be a kernel stack.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
   **section 60 hardware roadmap** is now done through AHCI — `NVMe`, an
   Intel NIC, USB, AHCI — with the IOMMU unit done earlier and GPU, Wi-Fi
   and Bluetooth explicitly later. What remains named are the follow-ups
-  each unit left (a USB hub driver and HID, NCQ if a real disk shows it
-  pays) and the AArch64 follow-ups in
+  each unit left (NCQ if a real disk shows it pays; the USB hub driver
+  and HID are done) and the AArch64 follow-ups in
   `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
   cover (GICv3, ASID allocation instead of a full invalidate per switch,
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the

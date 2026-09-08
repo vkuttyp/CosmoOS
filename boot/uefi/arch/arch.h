@@ -34,7 +34,10 @@ struct paging_ctx {
     bool     nx;          /* x86-64: NX available and to be set */
 };
 
-UINTN paging_pool_size(const struct elf_image *img);
+/* `mem_descriptors` is the number of entries in the firmware memory map:
+ * AArch64 splits a 2 MiB block that mixes RAM and device memory into 4 KiB
+ * pages, and there can be one such block per boundary between them. */
+UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors);
 /* `mmap` is a snapshot of the EFI memory map (descriptors of `desc_size`
  * bytes): AArch64 uses it to give RAM and MMIO different attributes. */
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,

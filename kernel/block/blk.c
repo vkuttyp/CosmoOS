@@ -23,6 +23,7 @@ static LIST_HEAD(g_blkdevs);
 static unsigned g_count;
 static struct thread *g_timeout_thread;   /* started at the first registration */
 static void blk_timeout_thread(void *arg);
+static void drain_pending(struct blkdev *bd);
 
 /* Internal bio flag: reported by the timeout thread once. */
 #define BIO_TIMED_OUT (1u << 30)
@@ -69,6 +70,8 @@ static void register_locked(struct blkdev *bd)
     kobject_track_code(&bd->obj, (uintptr_t)bd->ops->release);
     list_init(&bd->link);
     bd->reads = bd->writes = bd->flushes = bd->errors = bd->timeouts = 0;
+    bd->recovering = false;
+    bd->deferred = 0;
     bd->completed_local = bd->completed_remote = 0;
     if (bd->nr_queues == 0)
         bd->nr_queues = 1;
@@ -224,11 +227,25 @@ static void blk_timeout_thread(void *arg)
                     break;
             }
             spin_unlock_irqrestore(&bd->qlock, s);
+            if (n == 0)
+                continue;
+            /*
+             * From the decision to the end of the driver's recovery the
+             * device takes no new work. A driver's recovery fails what
+             * the device holds, and a bio submitted in this window would
+             * be accepted into a free slot a moment before that -- and
+             * die with the rest, having never had a chance. The pending
+             * queue is where it waits instead; every completion the
+             * recovery produces drains it.
+             */
+            __atomic_store_n(&bd->recovering, true, __ATOMIC_RELEASE);
             for (unsigned i = 0; i < n; i++) {
                 kwarn("blk: %s: request timed out after %llu ms", bd->name,
                       (unsigned long long)(bd->timeout_ns / 1000000));
                 bd->ops->timeout(bd, expired[i]);
             }
+            __atomic_store_n(&bd->recovering, false, __ATOMIC_RELEASE);
+            drain_pending(bd);   /* whatever waited out the recovery */
         }
         mutex_unlock(&g_blk_lock);
     }
@@ -305,6 +322,10 @@ int blk_submit(struct bio *bio)
 static void drain_pending(struct blkdev *bd)
 {
     for (;;) {
+        /* Nothing goes to a device the layer is recovering; the timeout
+         * thread drains the queue itself when the driver is done. */
+        if (__atomic_load_n(&bd->recovering, __ATOMIC_ACQUIRE))
+            return;
         arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
         if (list_empty(&bd->pending)) {
             spin_unlock_irqrestore(&bd->qlock, s);
@@ -348,7 +369,13 @@ static int driver_submit(struct blkdev *bd, struct bio *bio)
 {
     list_init(&bio->inflight_link);
     arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
-    bool waiting = !list_empty(&bd->pending);
+    /* A device whose timeout the layer has just declared is about to
+     * have everything it holds failed: this bio waits for that to be
+     * over instead of being caught in it. */
+    bool recovering = __atomic_load_n(&bd->recovering, __ATOMIC_ACQUIRE);
+    if (recovering)
+        bd->deferred++;
+    bool waiting = recovering || !list_empty(&bd->pending);
     if (waiting) {
         list_push_back(&bd->pending, &bio->link);   /* keep the order behind those already waiting */
         bd->requeued++;

@@ -15,6 +15,10 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/bootinfo.c \
 	kernel/core/bootarchive.c \
 	kernel/core/console.c \
+	kernel/core/fbvalid.c \
+	kernel/core/fbcon.c \
+	kernel/core/fbtest.c \
+	kernel/core/font8x8.c \
 	kernel/core/utsns.c \
 	kernel/core/log.c \
 	kernel/core/panic.c \
@@ -55,6 +59,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/object/object.c \
 	kernel/object/handle.c \
 	kernel/object/console_obj.c \
+	kernel/device/hidtest.c \
 	kernel/tty/tty.c \
 	kernel/tty/ttytest.c \
 	kernel/ipc/pipe.c \

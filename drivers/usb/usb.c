@@ -339,38 +339,53 @@ out:
     return rc;
 }
 
-int usb_port_connected(struct usb_hcd *hcd, unsigned port, enum usb_speed speed)
+/*
+ * Enumerate a device that is already enabled on its port, wherever that
+ * port is: `parent` is the hub it hangs from, or NULL for a root-hub
+ * port. On success the device is registered and holds a reference for
+ * its caller. The root-port caller holds hcd->lock; a hub's worker does
+ * not (see usb_hub_port_connected).
+ */
+static int usb_device_arrived(struct usb_hcd *hcd, struct usb_device *parent, unsigned port,
+                              enum usb_speed speed, struct usb_device **out)
 {
-    if (port == 0 || port > hcd->nr_ports)
-        return -EINVAL;
-    mutex_lock(&hcd->lock);
-    if (hcd->port_dev[port] != NULL) {
-        mutex_unlock(&hcd->lock);
-        return -EBUSY;   /* the worker reports a disconnect before a new connect */
-    }
     struct usb_device *udev = kzalloc(sizeof(*udev));
-    if (udev == NULL) {
-        mutex_unlock(&hcd->lock);
+    if (udev == NULL)
         return -ENOMEM;
-    }
+
     char name[DEVICE_NAME_MAX];
-    ksnprintf(name, sizeof(name), "usb%u-%u", hcd->index, port);
-    device_setup(&udev->dev, &usb_bus, hcd->dev, name);
+    if (parent == NULL)
+        ksnprintf(name, sizeof(name), "usb%u-%u", hcd->index, port);
+    else
+        ksnprintf(name, sizeof(name), "%s.%u", parent->dev.name, port);
+    device_setup(&udev->dev, &usb_bus, parent ? &parent->dev : hcd->dev, name);
     udev->dev.release = usb_device_release;
     udev->dev.dma_mask = hcd->dev->dma_mask;   /* informational: DMA goes through the controller (U1) */
     udev->hcd = hcd;
     udev->port = port;
     udev->speed = speed;
-    hcd->port_dev[port] = udev;
+    if (parent == NULL) {
+        udev->root_port = port;
+    } else {
+        /* One nibble a tier, the tier nearest the root hub lowest
+         * (xHCI §8.9). A port above 15 cannot be described, and a hub
+         * with more than 15 ports does not exist. */
+        udev->parent = parent;
+        udev->root_port = parent->root_port;
+        udev->depth = parent->depth + 1;
+        udev->route = parent->route | ((port > 15 ? 15u : port) << (4 * parent->depth));
+        device_get(&parent->dev);   /* the child keeps its hub alive */
+    }
 
     int rc = usb_enumerate(udev);
     if (rc) {
         /* Addressed or not, the slot goes; the port stays as it is until
          * its next change, and the log has said which step failed. */
         hcd->ops->disable_device(hcd, udev);
-        hcd->port_dev[port] = NULL;
-        mutex_unlock(&hcd->lock);
+        udev->parent = NULL;
         device_put(&udev->dev);
+        if (parent != NULL)
+            device_put(&parent->dev);   /* the reference taken above */
         return rc;
     }
     const struct usb_interface_descriptor *i0 = udev->nr_intf ? &udev->intf[0].desc : NULL;
@@ -383,13 +398,144 @@ int usb_port_connected(struct usb_hcd *hcd, unsigned port, enum usb_speed speed)
     if (rc) {
         kerror("usb: %s: device_register: %d", udev->dev.name, rc);
         hcd->ops->disable_device(hcd, udev);
-        hcd->port_dev[port] = NULL;
-        mutex_unlock(&hcd->lock);
+        udev->parent = NULL;
         device_put(&udev->dev);
+        if (parent != NULL)
+            device_put(&parent->dev);
         return rc;
     }
-    mutex_unlock(&hcd->lock);
+    *out = udev;
     return 0;
+}
+
+/* Devices whose parent is `parent`, with a reference on each. */
+struct child_walk {
+    const struct usb_device *parent;
+    struct usb_device *kids[USB_MAX_PORTS];
+    unsigned n;
+};
+
+static int collect_child(struct device *dev, void *arg)
+{
+    struct child_walk *w = arg;
+    struct usb_device *udev = to_usb_device(dev);
+    if (udev->parent == w->parent && w->n < USB_MAX_PORTS) {
+        device_get(dev);
+        w->kids[w->n++] = udev;
+    }
+    return 0;
+}
+
+static void usb_device_left(struct usb_hcd *hcd, struct usb_device *udev);
+
+/*
+ * Everything behind `parent` goes before `parent` does. The core does
+ * this rather than the hub driver because a driver's `remove` runs with
+ * the device model's lock held and so cannot wait for a thread that
+ * registers or unregisters devices (U9); the walk here happens before
+ * that lock is taken.
+ */
+static void remove_children(struct usb_hcd *hcd, struct usb_device *parent)
+{
+    for (;;) {
+        struct child_walk w = { parent, { NULL }, 0 };
+        device_for_each(&usb_bus, collect_child, &w);   /* the model's lock, and released again */
+        if (w.n == 0)
+            return;
+        for (unsigned i = 0; i < w.n; i++) {
+            usb_device_left(hcd, w.kids[i]);
+            device_put(&w.kids[i]->dev);
+        }
+        if (w.n < USB_MAX_PORTS)
+            return;   /* the walk saw them all */
+    }
+}
+
+/*
+ * A device gone from its port: everything behind it first, then refuse
+ * new submits, run the class driver's remove, and take the slot and
+ * everything on it, completing what was in flight with -ENODEV. The
+ * memory goes when the last holder lets go (design.md, "Disconnect").
+ *
+ * Idempotent, and it has to be: a hub's child can be taken down here as
+ * part of the hub's removal and again by the hub's worker when it drops
+ * what it held. The caller keeps its own reference and puts it after.
+ */
+static void usb_device_left(struct usb_hcd *hcd, struct usb_device *udev)
+{
+    if (__atomic_exchange_n(&udev->gone, true, __ATOMIC_ACQ_REL))
+        return;
+    remove_children(hcd, udev);
+    device_unregister(&udev->dev);
+    hcd->ops->disable_device(hcd, udev);
+    kinfo("usb: %s: disconnected", udev->dev.name);
+    struct usb_device *parent = udev->parent;
+    udev->parent = NULL;
+    if (parent != NULL)
+        device_put(&parent->dev);
+}
+
+int usb_port_connected(struct usb_hcd *hcd, unsigned port, enum usb_speed speed)
+{
+    if (port == 0 || port > hcd->nr_ports)
+        return -EINVAL;
+    mutex_lock(&hcd->lock);
+    if (hcd->port_dev[port] != NULL) {
+        mutex_unlock(&hcd->lock);
+        return -EBUSY;   /* the worker reports a disconnect before a new connect */
+    }
+    struct usb_device *udev = NULL;
+    int rc = usb_device_arrived(hcd, NULL, port, speed, &udev);
+    if (rc == 0)
+        hcd->port_dev[port] = udev;
+    mutex_unlock(&hcd->lock);
+    return rc;
+}
+
+/*
+ * A device on a hub's port. Like its disconnect counterpart below, this
+ * takes no controller lock: a hub's ports are the work of that hub's one
+ * worker thread, and the hub driver's `remove` -- which the core runs
+ * with the lock held -- joins that thread. Reaching for the lock here
+ * would deadlock a hub unplugged while it was enumerating, which is
+ * exactly what pulling a dock out does.
+ *
+ * What is left serialising this against a root port's enumeration on the
+ * same controller is the controller's own command lock, which is where
+ * that serialisation belongs: the core's mutex exists for the port
+ * bookkeeping (`port_dev[]`), and a hub's children have none.
+ */
+int usb_hub_port_connected(struct usb_device *hub, unsigned port, enum usb_speed speed,
+                           struct usb_device **out)
+{
+    if (hub == NULL || out == NULL || port == 0)
+        return -EINVAL;
+    if (hub->depth + 1 > USB_MAX_DEPTH)
+        return -ELOOP;   /* deeper than a route string can say */
+    if (__atomic_load_n(&hub->gone, __ATOMIC_ACQUIRE))
+        return -ENODEV;
+    return usb_device_arrived(hub->hcd, hub, port, speed, out);
+}
+
+/*
+ * A device behind a hub is gone. Unlike the root-hub pair, this takes no
+ * controller lock, and must not: it is called from the hub's worker,
+ * which the hub driver's `remove` joins -- and `remove` itself runs from
+ * inside `device_unregister` on the disconnect path, which holds that
+ * lock already. Taking it here would deadlock the first time a hub was
+ * unplugged or the controller unregistered.
+ *
+ * What the lock gives the root-hub pair is one enumeration or disconnect
+ * at a time per controller. A hub's ports have that anyway: every arrival
+ * and departure below a hub is the work of that hub's single worker
+ * thread, and `remove` stops the worker before anything else happens.
+ */
+void usb_hub_port_disconnected(struct usb_device *child)
+{
+    if (child == NULL)
+        return;
+    usb_device_left(child->hcd, child);
+    device_put(&child->dev);   /* the hub driver's reference */
 }
 
 void usb_port_disconnected(struct usb_hcd *hcd, unsigned port)
@@ -402,17 +548,10 @@ void usb_port_disconnected(struct usb_hcd *hcd, unsigned port)
         mutex_unlock(&hcd->lock);
         return;
     }
-    /* New submits fail from here; the class driver's remove runs with
-     * the rings still there; then the slot and everything on it goes,
-     * completing what was in flight -ENODEV; then the memory when the
-     * last holder lets go (design.md, "Disconnect"). */
-    __atomic_store_n(&udev->gone, true, __ATOMIC_RELEASE);
-    device_unregister(&udev->dev);
-    hcd->ops->disable_device(hcd, udev);
     hcd->port_dev[port] = NULL;
-    kinfo("usb: %s: disconnected", udev->dev.name);
+    usb_device_left(hcd, udev);
     mutex_unlock(&hcd->lock);
-    device_put(&udev->dev);
+    device_put(&udev->dev);   /* the port's reference */
 }
 
 /* --- controllers -------------------------------------------------------------- */
@@ -456,3 +595,5 @@ EXPORT_SYMBOL(usb_cancel);
 EXPORT_SYMBOL(usb_control_msg);
 EXPORT_SYMBOL(usb_bulk_msg);
 EXPORT_SYMBOL(usb_clear_halt);
+EXPORT_SYMBOL(usb_hub_port_connected);
+EXPORT_SYMBOL(usb_hub_port_disconnected);

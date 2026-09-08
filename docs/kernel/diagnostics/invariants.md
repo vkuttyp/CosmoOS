@@ -83,3 +83,36 @@ The fault is inside `#if CONFIG_CRASH_TEST`, which is `0` unless
 `CRASH_TEST=1` is passed to make, and `make test-crash` builds into a
 separate output tree. **Checked by** `build/config.mk` defaults and by
 `make test` forbidding the `KERNEL PANIC` marker.
+
+## I-DIAG-15: The console never writes outside the framebuffer
+
+Every pixel `fbcon` writes lies inside the mapping made from the
+description `bootinfo_fb_validate` accepted: rows fit the memory the
+firmware claimed, a pitch is at least a row wide, a pixel is 8, 16, 24
+or 32 bits, and each colour field lies inside a pixel. The cursor is
+bounded by the cell grid the same description gives.
+
+**Checked by** `tests/host/test_fbvalid.c` (the refusals, including a
+geometry that would overflow a 32-bit product), `tests/fuzz/fuzz_fbvalid.c`
+(everything accepted is arithmetically safe, including the last pixel of
+the last row), and `fb-console` (what is drawn is where it should be).
+
+## I-DIAG-16: The framebuffer sink obeys the rules the panic path sets
+
+It allocates nothing, sleeps never, and takes no lock: `console.c`
+serialises sinks and drops its lock in panic mode, and this sink relies
+on exactly that, as the serial sinks do. Its one allocation -- the text
+shadow -- happens once, in `fbcon_init`, before the sink is registered.
+
+**Checked by** review, and by the panic run (`make test-crash`), where
+the report is drawn after the other CPUs have been halted.
+
+## I-DIAG-17: A framebuffer is never memory somebody else owns
+
+`fbcon_init` refuses a range that overlaps a usable or reclaimable
+memory-map entry rather than share it with the page allocator. On
+AArch64 the framebuffer is RAM the firmware reserved (`ramfb`), which is
+precisely the case that makes the check worth having.
+
+**Checked by** `overlaps_usable_ram` and the boot's free-page count,
+which the framebuffer does not change.

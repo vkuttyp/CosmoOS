@@ -24,7 +24,7 @@ $(MODSIGN_KEY) $(SIGNING_PUB) &: $(ROOT)/scripts/devkey.sh $(ROOT)/scripts/modsi
 	$(Q)PYTHON=$(PYTHON) $(ROOT)/scripts/devkey.sh ensure $(COSMO_KEYDIR)
 endif
 
-MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net nvme e1000e xhci usb_storage ahci cosmotest cosmotest_dep cosmotest_fail
+MODULES := hello virtio virtio_blk virtio_rng virtio_console virtio_net nvme e1000e xhci usb_storage usb_hid usb_hub ahci cosmotest cosmotest_dep cosmotest_fail
 
 MODULE_hello_SRCS          := modules/hello/hello.c
 MODULE_virtio_SRCS         := drivers/virtio/virtio.c drivers/virtio/virtqueue.c drivers/virtio/virtio_pci.c
@@ -36,6 +36,8 @@ MODULE_nvme_SRCS           := drivers/nvme/nvme.c
 MODULE_e1000e_SRCS         := drivers/network/e1000e.c
 MODULE_xhci_SRCS           := drivers/usb/usb.c drivers/usb/usb_desc.c drivers/usb/xhci.c
 MODULE_usb_storage_SRCS    := drivers/usb/usb_storage.c
+MODULE_usb_hid_SRCS        := drivers/usb/usb_hid.c
+MODULE_usb_hub_SRCS        := drivers/usb/usb_hub.c
 MODULE_ahci_SRCS           := drivers/storage/ahci.c
 MODULE_cosmotest_SRCS      := tests/modules/cosmotest.c
 MODULE_cosmotest_dep_SRCS  := tests/modules/cosmotest_dep.c
@@ -53,6 +55,8 @@ MODULE_ARCHIVE_ENTRIES := \
 	modules/e1000e.ko=$(MODULE_OUT)/e1000e.ko \
 	modules/xhci.ko=$(MODULE_OUT)/xhci.ko \
 	modules/usb_storage.ko=$(MODULE_OUT)/usb_storage.ko \
+	modules/usb_hid.ko=$(MODULE_OUT)/usb_hid.ko \
+	modules/usb_hub.ko=$(MODULE_OUT)/usb_hub.ko \
 	modules/ahci.ko=$(MODULE_OUT)/ahci.ko \
 	tests/cosmotest.ko=$(MODULE_OUT)/cosmotest.ko \
 	tests/cosmotest_dep.ko=$(MODULE_OUT)/cosmotest_dep.ko \

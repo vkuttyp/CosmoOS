@@ -54,6 +54,11 @@ fwcfg=""
 if [ -n "${QEMU_FWCFG_NETTEST:-}" ]; then
     fwcfg="-fw_cfg name=opt/cosmo/nettest,string=$QEMU_FWCFG_NETTEST"
 fi
+# The key test tells the guest that something will type on the keyboard,
+# so the self-test waits for characters instead of skipping.
+if [ -n "${QEMU_FWCFG_KEYTEST:-}" ]; then
+    fwcfg="$fwcfg -fw_cfg name=opt/cosmo/keytest,string=$QEMU_FWCFG_KEYTEST"
+fi
 # The NICs (docs/drivers/e1000e/api.md). QEMU_NIC: both (default: virtio-net
 # on n0 as eth0 and an Intel 82574L on its own backend as eth1), virtio (as
 # before the e1000e driver), or e1000e (the Intel NIC alone, on n0, so it
@@ -83,6 +88,22 @@ if [ "$usb" != "0" ]; then
     *)   xhci_model=qemu-xhci ;;
     esac
     usb_devs="-device $xhci_model,id=xhci0 -drive if=none,id=usbdisk,format=raw,file=$usbdisk -device usb-storage,bus=xhci0.0,drive=usbdisk"
+    # The keyboard (docs/drivers/usb/api.md, "The keyboard"): QEMU_KBD is
+    # root (default: a usb-kbd on a root port), hub (the same keyboard
+    # behind a usb-hub, which is where the route string is exercised), or
+    # 0 (no keyboard: the key tests skip). Keys are injected over QMP by
+    # the boot test; there is no window and no host keyboard involved.
+    case "${QEMU_KBD:-root}" in
+    0)   ;;
+    hub) usb_devs="$usb_devs -device usb-hub,id=hub0,bus=xhci0.0,port=2 -device usb-kbd,bus=xhci0.0,port=2.1" ;;
+    *)   usb_devs="$usb_devs -device usb-kbd,bus=xhci0.0,port=3" ;;
+    esac
+fi
+# QMP, so the boot test can inject key events (input-send-event). Nothing
+# else uses it, and without QEMU_QMP the socket is not created at all.
+qmp=""
+if [ -n "${QEMU_QMP:-}" ]; then
+    qmp="-qmp unix:$QEMU_QMP,server=on,wait=off"
 fi
 # SATA (docs/drivers/ahci/api.md): a disk on an AHCI controller -- q35's
 # built-in ICH9 (its ports are ide.0..ide.5; the boot image above sits on
@@ -110,6 +131,27 @@ if [ "$sata" != "0" ]; then
     sata_dev_x86="-device $sata_model,drive=sata0,bus=ide.1"
     sata_dev_a64="-device ahci,id=ahci0 -device $sata_model,drive=sata0,bus=ahci0.1"
 fi
+# The display (docs/kernel/diagnostics/design.md, "The framebuffer
+# console"): whatever device the firmware lights and hands the loader as
+# a Graphics Output Protocol framebuffer, which the kernel then draws on.
+# QEMU_DISPLAY: on (default -- q35 keeps QEMU's built-in VGA at 1280x800;
+# virt gets a ramfb at 800x600, since edk2 for AArch64 carries the ramfb
+# driver), virtio (a virtio-gpu-pci: edk2's driver offers a Blt-only mode
+# with no linear buffer, which the loader refuses), bochs (a
+# bochs-display: a framebuffer on x86, and no GOP at all under AAVMF), or
+# 0 (no display device: the kernel keeps the serial console alone).
+# There is never a window: -display none is always passed.
+display=${QEMU_DISPLAY:-on}
+display_dev_x86=""
+display_dev_a64=""
+case "$display" in
+0)      display_dev_x86="-vga none" ;;
+bochs)  display_dev_x86="-vga none -device bochs-display"
+        display_dev_a64="-device bochs-display" ;;
+virtio) display_dev_x86="-vga none -device virtio-gpu-pci"
+        display_dev_a64="-device virtio-gpu-pci" ;;
+*)      display_dev_a64="-device ramfb" ;;
+esac
 # QEMU_PCAP=file.pcap records every frame on the guest NIC (debugging).
 pcap=""
 if [ -n "${QEMU_PCAP:-}" ]; then
@@ -154,6 +196,8 @@ if [ "$arch" = aarch64 ]; then
         $nic_devs \
         $usb_devs \
         $sata_drive $sata_dev_a64 \
+        $display_dev_a64 \
+        $qmp \
         $fwcfg \
         $pcap \
         -semihosting-config enable=on,target=native \
@@ -187,6 +231,8 @@ exec qemu-system-x86_64 \
     $nic_devs \
     $usb_devs \
     $sata_drive $sata_dev_x86 \
+    $display_dev_x86 \
+    $qmp \
     $fwcfg \
     $pcap \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \

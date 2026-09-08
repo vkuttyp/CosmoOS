@@ -116,6 +116,26 @@ same hook lets pipe ends report `COSMO_DT_FIFO` and sockets
 `COSMO_DT_SOCK`, so `sys_fstat` works on files, the console, pipes and
 sockets.
 
+## Where the bytes come from
+
+`tty_input` has three callers now, and they are all the same shape: a
+device driver with a byte in interrupt context.
+
+- `kernel/arch/x86_64/serial.c` and `kernel/arch/aarch64/pl011.c`: a
+  UART interrupt, one byte at a time.
+- `drivers/usb/usb_hid.c`: a USB keyboard's interrupt endpoint, whose
+  eight-byte reports the driver turns into presses and then characters,
+  including the control bytes this line discipline already understands
+  (`^D`, `^U`, backspace). It is a module, which is why `tty_console`
+  and `tty_input` are exported.
+
+Nothing above the tty can tell them apart, which is the point: the
+shell blocks in `tty_read` on a machine with a serial cable and on a
+machine with a keyboard, and the same test script drives both. The line
+discipline gained nothing for the keyboard -- no key codes, no modifier
+state, no event queue -- because a keyboard driver's job is to produce
+characters, and everything else it might produce has no consumer (§21).
+
 ## Ownership and lifetime
 
 The console tty is static and lives forever. A private tty created by

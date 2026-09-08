@@ -645,18 +645,34 @@ static int ep_stop_and_drain(struct xhci *x, struct usb_device *udev, unsigned d
     return cmd_result(x, "set dequeue pointer", cc);
 }
 
+/*
+ * "Already completed" has to mean "and its callback has finished". A
+ * request retired a moment ago is off the ring while its `done` may
+ * still be running: completions are called from the interrupt handler
+ * after the controller's lock is dropped, so a driver that took -ENOENT
+ * as permission to free the request would be freeing it under that call
+ * (review, PR #55). Waiting for the handler is what makes the answer
+ * true, and cancelling is rare enough to pay for it.
+ */
+static int xhci_gone(struct xhci *x)
+{
+    if (x->vector >= 0)
+        synchronize_irq((unsigned)x->vector);
+    return -ENOENT;
+}
+
 static int xhci_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
 {
     struct xhci *x = hcd_to_xhci(hcd);
     struct usb_device *udev = r->udev;
     struct xhci_ep *ep = xhci_ep_of(udev, r->ep);
     if (ep == NULL)
-        return -ENOENT;
+        return xhci_gone(x);
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);
     bool mine = r->hcd_priv != NULL && ep->ring->req[((struct xhci_td *)r->hcd_priv)->first] == r;
     spin_unlock_irqrestore(&x->lock, s);
     if (!mine)
-        return -ENOENT;
+        return xhci_gone(x);
     if (!x->dead) {
         int rc = ep_stop_and_drain(x, udev, xhci_dci(r->ep));
         if (rc && rc != -ETIMEDOUT)
@@ -745,8 +761,25 @@ static int xhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     icc->drop = 0;
     icc->add = (1u << 0) | (1u << 1);
     struct xhci_slot_ctx *sc = in_ctx(x, d, 0);
-    sc->dw[0] = SLOT_ENTRIES(1) | SLOT_SPEED(udev->speed);
-    sc->dw[1] = SLOT_ROOT_PORT(udev->port);
+    /* Where the device is: the root-hub port at the top of its chain and
+     * the route through the hubs below it, which is how the controller
+     * addresses a device it cannot see directly (§4.3.3). Both are zero
+     * and the root port is the device's own port when nothing is in
+     * between, which is every device this driver saw before hubs. */
+    sc->dw[0] = SLOT_ENTRIES(1) | SLOT_SPEED(udev->speed) | SLOT_ROUTE(udev->route);
+    sc->dw[1] = SLOT_ROOT_PORT(udev->root_port);
+    /* A full- or low-speed device behind a high-speed hub is reached
+     * through that hub's transaction translator, which the controller
+     * has to be told about (§4.3.3). QEMU offers only a full-speed hub,
+     * so this path is written to the specification and not exercised
+     * here (docs/drivers/usb/testing.md, "Not covered"). */
+    if ((udev->speed == USB_SPEED_FULL || udev->speed == USB_SPEED_LOW) && udev->parent != NULL) {
+        const struct usb_device *tt = udev->parent;
+        while (tt != NULL && tt->speed != USB_SPEED_HIGH)
+            tt = tt->parent;
+        if (tt != NULL)
+            sc->dw[2] = SLOT_TT_HUB(tt->slot) | SLOT_TT_PORT(udev->depth == tt->depth + 1 ? udev->port : 0);
+    }
     struct xhci_ep_ctx *ec = in_ctx(x, d, 1);
     ec->dw[1] = EP_TYPE(EP_TYPE_CONTROL) | EP_MPS(d->ep[1].mps) | EP_CERR(3);
     uint64_t deq = d->ep[1].ring->dma | EP_DCS;

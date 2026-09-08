@@ -82,3 +82,73 @@ not a bug.
 Check: `xhci_remove` runs `usb_hcd_unregister` first; the module's
 shutdown path is covered by `remove` (not exercised at boot: the
 controller lives until shutdown).
+
+**U8. Where a device is, is one description, and the controller is told
+the same one.** `parent`, `depth`, `route` and `root_port` on `struct
+usb_device` are set once, when the device arrives, and agree by
+construction: the depth is the parent's plus one, the root port is the
+parent's, and the route is the parent's with this port in the parent's
+nibble. Nothing else in the kernel is told about hubs -- not `struct
+device` beyond its ordinary parent pointer, not the DMA rule (U1: every
+transfer still goes through the controller), not the block layer.
+
+Check: `usb-enum` recomputes all four from the parent and compares, on
+whichever shape the harness runs (`QEMU_KBD=root` gives depth 0 and
+route 0; `QEMU_KBD=hub` gives depth 1 and a route naming the hub's
+port).
+
+**U9. A driver's `remove` never waits for a thread that touches the
+device model.** `device_unregister` holds the model's lock across the
+driver's `remove`, so a `remove` that joined such a thread would
+deadlock the moment the thread was inside `device_register`. The hub
+driver therefore does not join its worker: `remove` marks it stopping,
+cancels its request and returns, and the worker -- which holds a
+reference to the hub's device and owns the hub's state from then on --
+tidies up and frees it afterwards. For the same reason
+`usb_hub_port_connected` and `usb_hub_port_disconnected` take no
+`hcd->lock`: the hub driver's `remove` runs with it held too.
+
+Check: `usb-hub-unplug` takes a hub's root port away with a device
+behind it, which is the path that deadlocks if any part of this is
+broken, and waits for the two releases the rule makes asynchronous.
+
+Known: `xhci_remove` does join its port worker, which touches the model
+the same way. It is unreachable today (a controller is removed only by
+unloading the module, which nothing does at boot) and is named here
+rather than left implicit.
+
+**U9b. A hub's completion never enumerates, and children go before
+parents.** The status-change completion runs in interrupt context and
+does two things: record the changed ports and wake the worker. Every
+step that follows -- port status, reset, feature clearing, enumeration
+-- is a control transfer and runs in the worker thread. A child holds a
+reference to its hub, so the hub's memory cannot go while a device
+behind it exists, and the core removes a device's children before the
+device itself, so the order holds even though `remove` cannot wait.
+
+Check: by construction (the completion's only calls are
+`waitqueue_wake_all` and `usb_submit`); `usb-hub-unplug` (both devices
+leave, the child first, and both come back); the `QEMU_KBD=hub` shape
+runs the whole suite with a device one tier down.
+
+**U10. `usb_cancel` returning is permission to free.** Either answer
+means no callback for that request is running or will run: `0` because
+the endpoint was stopped and the ring flushed, `-ENOENT` because the
+request had already been retired *and* the controller's interrupt
+handler -- where completions are called, after its lock is dropped --
+has been waited for. Without the second half a driver that cancelled a
+request a moment after it completed would free the buffer under the
+callback still touching it.
+
+Check: review (`xhci_gone`); the shape is exercised by every
+`hid-unplug` and `usb-hub-unplug` teardown, where `remove` cancels and
+frees immediately afterwards.
+
+**U11. A transfer's buffer is memory the controller can reach.** Every
+buffer handed to `usb_control_msg`, `usb_bulk_msg` or `usb_submit` is
+direct-map memory (`kmalloc`, `kzalloc`, `dma_alloc`) and never a kernel
+stack, which lives in the arena and has no direct-map address.
+
+Check: by review, and by what happens without it -- the hub's first
+version read port status into a stack buffer, `dma_map` refused it, and
+the hub found no devices behind it at all.

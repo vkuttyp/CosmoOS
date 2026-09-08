@@ -66,3 +66,23 @@ reported as `shell harness: ...` lines by `run_boot_test.py`.
 - No fuzzing of `tty_input` with random bytes; the classifier is
   reviewed and the control-byte case is covered by one line.
 - Raw mode and pseudo-terminals arrive with their own tests.
+
+## Input from a keyboard
+
+`hid-arm` and `hid-keyboard` (`kernel/device/hidtest.c`) are the tty's end-to-end test
+with a real device in front of it: the boot harness types on QEMU's
+emulated USB keyboard over the monitor protocol, the driver hands the
+characters to `tty_input` from interrupt context, and the test reads the
+line back with `tty_read` and compares it exactly. Shift produces
+capitals and symbols, so the line covers more than the echo path does.
+The tty's own counters make the check strict: the bytes must have
+arrived while the test waited (`rx_bytes` and `lines_in` both move) and
+nothing may be dropped.
+
+The pair is split because the typing happens on the host and takes as
+long as the host takes: `hid-arm` asks for it (and turns echo off, so
+what arrives does not land in the middle of a log line), everything else
+in the run happens, and `hid-keyboard` reads the lines at the end and
+puts echo back for the shell. See `docs/drivers/usb/testing.md`, "The
+keyboard", for the harness side and the shapes (`QEMU_KBD=root`, `hub`,
+`0`).

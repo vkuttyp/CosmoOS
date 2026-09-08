@@ -57,4 +57,9 @@ bool tty_has_line(struct tty *t);
 
 void tty_get_stats(struct tty *t, struct tty_stats *out);
 
+/* Replace the line-discipline flags (TTY_ECHO, TTY_ICRNL); returns what
+ * they were. The keyboard test turns echo off while the harness types,
+ * so what it types does not land in the middle of a log line. */
+unsigned tty_set_flags(struct tty *t, unsigned flags);
+
 #endif /* KERNEL_TTY_H */

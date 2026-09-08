@@ -287,6 +287,110 @@ bookkeeping — then the blkdev's creator reference is dropped.
 `debug_dma`: a `READ (10)` of one block into the caller's address, so
 the IOMMU fault test can make the controller DMA somewhere it may not.
 
+## The keyboard (`usb_hid.c`)
+
+The first periodic transfer in the tree, and the first input device the
+kernel has that is not a UART.
+
+`SET_PROTOCOL(boot)` at probe makes the device send the fixed eight-byte
+boot report -- modifiers, a reserved byte, six keycodes -- so **there is
+no report-descriptor parser**. A device that speaks only the report
+protocol gets one log line and no driver; the parser waits for a device
+that needs one (section 21), and this sentence is here so the next unit
+does not have to re-argue it. `SET_IDLE(0)` asks the device to report
+only when something changes, which is what makes an idle keyboard free.
+
+One `struct usb_request` on the interrupt IN endpoint is resubmitted
+from its own completion, forever. A report is the set of keys held right
+now rather than a stream of events, so a press is a keycode in this
+report that was not in the last one; a key held down therefore repeats
+nothing, and auto-repeat is something the tty would have to want.
+Modifiers give shift (a second table) and control (control-letter
+becomes the control byte the tty already understands, so `^D` ends a
+line and `^U` clears it). A key with no character -- a function key,
+control-digit -- is counted and dropped, because the tty has no way to
+say what it is.
+
+Delivery is `tty_input(tty_console(), &byte, 1)` from interrupt context,
+which is exactly what `serial.c` and `pl011.c` do. A key from the
+keyboard and a byte from a serial line arrive by the same door: the
+shell reads the tty it always read, and nothing in userland knows the
+difference. The two symbols this needs (`tty_console`, `tty_input`) are
+the module ABI's newest exports.
+
+## Hubs (`usb_hub.c`)
+
+A hub is the first device on this bus that has devices behind it, which
+makes it the unit's architectural question: where does the topology
+live? The answer is **the core, in three fields**: `struct usb_device`
+gains a `parent` pointer, a `depth` and a `route`, and that is the whole
+change (U2). The controller driver puts the route string and the
+root-hub port into the slot context (§4.3.3); nothing else in the tree
+-- not `struct device`, not the DMA rule, not the block layer -- knows
+that hubs exist. A device's name becomes its path (`usb0-6.1`), and its
+`struct device` parent is the hub rather than the controller, so the
+model's children-first removal takes a subtree down in the right order
+without being told about hubs either.
+
+The driver itself: read the hub descriptor, power every port, wait
+`bPwrOn2PwrGood`, and watch the status-change endpoint -- a second
+interrupt endpoint, whose reports are a bitmap of ports and say nothing
+about what changed. **The completion does not enumerate.** It runs in
+interrupt context; every step of a port change (`GET_STATUS`, the reset,
+`CLEAR_FEATURE` for each change bit, and the control transfers of
+enumeration) sleeps. So the completion records the bitmap and wakes the
+hub's worker thread, and the worker asks each named port what is there
+now -- what is there, not what the change bits say happened, because two
+changes can land between reports. The worker's first pass is every port,
+since a device plugged in before the hub was driven is a change nobody
+reported.
+
+### Removal, and the two locks a hub must not wait for
+
+A driver's `remove` runs from inside `device_unregister`, **with the
+device model's lock held**, and this driver's worker registers and
+unregisters devices. So `remove` may not wait for the worker: a hub
+pulled out while it was enumerating would deadlock, the worker inside
+`device_register` waiting for the lock `remove`'s caller holds. It is a
+rule about the model, not about hubs -- a driver whose `remove` joins a
+thread that touches the model has the same bug -- and it decides the
+shape of everything below.
+
+So `remove` does not join. It marks the hub stopping (under the lock the
+completion resubmits under, so no request can reach the ring after the
+cancel), cancels the status request, wakes the worker and returns. From
+that moment the worker owns the hub's state: it drops what the driver
+held of its children, frees the state, and drops the reference to the
+hub's own device that it has held since probe -- so the device outlives
+`remove` for exactly as long as the worker needs it. Nobody is blocked
+meanwhile, and the hub's release runs a moment later, which is what
+`usb-hub-unplug` waits for.
+
+**The children go first, and the core does it.** `usb_device_left`
+removes every device whose parent is the one leaving before it removes
+that one, walking the bus outside the model's lock. Putting it there
+rather than in the hub driver is what makes the order hold even though
+`remove` cannot wait for anything: by the time the hub's own
+`device_unregister` runs, its children are already gone. The teardown is
+idempotent (`gone` is an atomic exchange), because the hub's worker will
+also let go of the same children when it tidies up.
+
+**And a hub's ports take no controller lock.** `hcd->lock` gives a root
+port one enumeration or disconnect at a time; it is the port bookkeeping
+(`port_dev[]`) that needs it, and a hub's children have none. Taking it
+in `usb_hub_port_connected` would deadlock against the same `remove`
+path for the same reason. What serialises a hub's enumeration against a
+root port's on the same controller is the controller's own command lock,
+which is where that belongs.
+
+What a hub costs a device behind it, in the controller: the Route String
+and the root port, both of which are zero for everything that came
+before. A full- or low-speed device behind a *high-speed* hub also needs
+that hub's transaction translator named in the slot context; that path
+is written to the specification and untested, because QEMU offers only a
+full-speed hub and a transaction translator belongs to a high-speed one
+(`testing.md`, "Not covered").
+
 ## The harness
 
 `scripts/qemu-run.sh` gives both machines `-device qemu-xhci` and a
@@ -318,13 +422,17 @@ kernel interface.
 
 ## What is deliberately not here
 
-- **External hubs.** The root hub's ports are handled by the controller
-  driver; a hub device (class 09) enumerates, is registered on the bus
-  and binds nothing. Devices behind it are not enumerated. The report
-  names the hub driver as the follow-up unit.
-- **Isochronous and interrupt transfers.** No class driver here uses
-  them; interrupt endpoints get a context and a ring but no client, and
-  isochronous endpoints get neither.
+- **Isochronous transfers.** No class driver here uses them; an
+  isochronous endpoint gets neither a context nor a ring. (Interrupt
+  endpoints had the same status until the keyboard and the hub, which
+  are the first clients that code ever had.)
+- **A HID report-descriptor parser**, and therefore mice, gamepads and
+  keyboards that refuse the boot protocol: one log line each.
+- **Hubs deeper than five tiers**, which is what a route string can say
+  and what USB allows; a sixth is refused with `-ELOOP`.
+- **Hub port power switching, over-current recovery, and suspend.**
+  Ports are powered once at probe; an over-current report is a warning
+  and nothing else.
 - **Streams, multiple interrupters, per-CPU event rings.** One
   interrupter on one CPU is the shape the benchmark measures; §21
   decides whether more is warranted, and nothing here needs it.

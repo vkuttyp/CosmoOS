@@ -34,6 +34,48 @@ checked at compile time; a non-literal format is a build error.
 - **Purpose**: emit bytes to every sink.
 - **Concurrency**: no lock; concurrent writers may interleave lines.
 
+## `kernel/fbcon.h`
+
+### `void fbcon_init(void)`
+
+Map the framebuffer the loader reported, replay the newest screenful of
+the log ring onto it, and register a console sink named `fbcon`. Called
+once, from `kernel_main` after `vmm_init`. A machine with no framebuffer
+(or one whose description the validator refuses, or one overlapping free
+memory) keeps the serial console and gets a line saying why; none of
+that is an error.
+
+### `bool fbcon_present(void)`
+
+Whether the sink is registered and drawing.
+
+### `bool fbcon_geometry(struct fbcon_geometry *out)` / `void fbcon_cursor(uint32_t *col, uint32_t *row)` / `void fbcon_get_stats(struct fbcon_stats *out)`
+
+The mapped base, pitch, pixel size, cell grid, the two packed colours and
+the scroll chunk; where the cursor is; and how much has been drawn
+(`bytes`, `glyphs`, `scrolls`, `repaints`). These exist for the
+self-test, which reads pixels back and compares them against the font
+table -- which is what makes a display testable with no screen and no
+screenshot. Nothing else should need them.
+
+## `kernel/bootinfo.h` (the framebuffer)
+
+### `bool bootinfo_fb_validate(const struct cosmoboot_info *info, struct bootinfo_framebuffer *out, const char **why)`
+
+True when the description is one the kernel may write to, with `out`
+filled; false with a static reason in `why` otherwise, including the
+ordinary case of no framebuffer at all. A pure function of the boot
+fields, with no kernel dependencies, so it compiles unchanged into the
+kernel, `tests/host/test_fbvalid.c` and `tests/fuzz/fuzz_fbvalid.c`. It
+refuses: rows that do not fit the memory claimed, a pitch shorter than a
+row, a pixel that is not 8, 16, 24 or 32 bits, a colour field that runs
+off the end of a pixel, a base of zero, and a range that wraps the
+address space.
+
+### `const struct bootinfo_framebuffer *bootinfo_framebuffer(void)`
+
+The validated description, or NULL. Set once by `bootinfo_init`.
+
 ## `kernel/log.h`
 
 ### `void klog(enum klog_level level, const char *fmt, ...)` / `void kvlog(level, fmt, va_list)`

@@ -77,11 +77,76 @@ write cannot be mistaken for the next device's.
 
 **`blk-bench`** (reports; see below).
 
+## The keyboard
+
+**`hid-arm` and `hid-keyboard`** (both architectures, whenever the
+harness attached a keyboard). The harness opens QEMU's monitor protocol
+socket and sends key events into the emulated device
+(`tests/boot/keytest.py`, `input-send-event`), which is as close to a
+person at a keyboard as a test gets: the events go through the device
+model, the device reports them on its interrupt endpoint, the driver
+translates and calls `tty_input`, and the test reads the lines back out
+of the tty the shell reads. `cosmo Types 42!` exercises letters,
+capitals through shift, a digit pair and a shifted symbol; the checks
+are the exact lines, the bytes taken in while the test waited
+(`tty_stats.rx_bytes`), and nothing dropped.
+
+It is **two** tests because how long a host takes to type into an
+emulated machine on a loaded build runner is not this machine's
+business, and every self-test is held to a budget of 8 s. `hid-arm`
+records the tty's counters, prints the ready marker and returns in no
+time at all; `hid-keyboard` runs last, by which point the lines arrived
+long ago, so it also takes no time. The first version was one test that
+waited, and it passed everywhere except CI.
+
+`hid-arm` runs after the hotplug tests, not before them: unplugging the
+hub takes the keyboard with it, and keys typed while it is gone are gone
+too -- the first version armed first and read back `mo Types 42!`.
+
+`hid-arm` also turns the tty's echo off and `hid-keyboard` turns it back
+on. Keys arriving over the whole run would otherwise be echoed into the
+middle of whatever line the console was printing, and a self-test line
+with `cosmo Types 42!` through it is a boot the harness cannot parse --
+which is exactly what happened, and cost two of the run's timing lines.
+
+The guest cannot know by itself whether anything will type, so the
+harness says so through `fw_cfg` (`opt/cosmo/keytest`, the shape the
+network test already used). Without it the test skips; with it, silence
+is a failure -- which is what makes "the driver stopped delivering keys"
+a red CI run rather than a quiet skip. The guest prints
+`HID-KEYTEST-READY` and the harness waits for it, so the keys cannot
+arrive while an earlier test still owns the tty.
+
+**`usb-hub-unplug`** (the `QEMU_KBD=hub` shape). The hub's root port is
+taken away with a device behind it: the hub and its child both leave the
+bus, both releases run, and putting the port back brings the hub and --
+after its worker's debounce and reset -- the device behind it back under
+the same names. What this proves is the shape of the teardown: the core
+runs the hub driver's `remove` with its own lock held, and `remove`
+joins the worker whose last act is to take the children down, so a child
+teardown that reached for that lock again would deadlock here and
+nowhere else. Nothing in an ordinary boot runs that path, which is why
+it is a test and not a review note.
+
+**`usb-enum`** also checks the keyboard: one interrupt IN endpoint, a
+boot-protocol interface, a packet of at least 8 bytes, a non-zero
+interval -- the first interrupt endpoint in the tree, and the first
+check that the controller driver's periodic path produces a device that
+works.
+
 ## Shapes
 
 - `QEMU_USB=0 gmake test`: no controller; the modules load, `xhci`
   binds nothing, every USB test skips with a message, and the boot test
   does not require the device lines. Both architectures, as chain steps.
+- `QEMU_KBD=hub gmake test`: the keyboard moves behind `-device
+  usb-hub`, so the hub driver binds, its worker enumerates the device on
+  its port, and the whole suite runs one tier down -- the keyboard is
+  `usb0-6.1`, its `struct device` parent is the hub, and `usb-enum`
+  recomputes its depth, route and root port from the hub's. Both
+  architectures, as chain steps.
+- `QEMU_KBD=0 gmake test`: no keyboard; `usb_hid` loads and binds
+  nothing, and `hid-keyboard` skips.
 - `QEMU_USB=nec gmake test`: the `nec-usb-xhci` model (NEC uPD720200)
   instead of `qemu-xhci`; two device models catch what one does not.
 - `ARCH=aarch64`: xHCI on `virt`'s PCI behind the SMMU; the same device
@@ -172,6 +237,46 @@ Found while building, each by a test that then guards it:
   drain. A driver that refuses often is a stress test of the layer above
   it.
 
+### Found by the keyboard and the hub
+
+- **A transfer's buffer may not be a kernel stack.** The hub's first
+  version read four bytes of port status into a stack array; the kernel
+  stack lives in the arena and has no direct-map address, so `dma_map`
+  refused it, every `GET_STATUS` failed, and the hub reported eight
+  ports with nothing behind any of them -- no error, just an empty tree.
+  The status buffer is now part of the hub's own allocation (U10), and
+  the port-status failure is logged instead of only counted.
+- **A withheld command is not a completed one.** The AHCI fault
+  injector fills a slot and never writes its `PxCI` bit, which is a
+  state real hardware cannot produce: the completion scan reads that bit
+  clear and takes the command for finished, so the *next interrupt from
+  any other command* completed the hung one successfully and
+  `ahci-timeout` failed with the read returning 0 while the layer
+  counted a timeout. Adding a second console sink is what slowed the
+  boot enough to interleave them. The injected slot is now excluded from
+  the scan (`withheld`), which is what the injection meant all along.
+- **A bio submitted into a recovery the layer had only just decided
+  on.** With the injection faithful, the AHCI timeout path ran for real
+  on every round -- and the racing readers `ahci-timeout` has submitted
+  since the AHCI unit started failing with `-EIO`. The window is in the
+  block layer, not the driver: the layer increments the timeout counter
+  and then calls the driver, and a bio submitted in between is accepted
+  into a free slot a moment before the recovery fails everything the
+  device holds. The layer now marks the device recovering across that
+  call and parks arrivals in the pending queue (`deferred`), which is
+  what the queue is for; the driver's own `recovering` flag still covers
+  the restarts the layer knows nothing about.
+- **The keyboard driver counts presses, not keys held** -- and the
+  first version of the test could not tell. With the press-detection
+  diff removed, `cosmo Types 42!` still arrived exactly right, because
+  the harness typed one key at a time and every report between two
+  presses was empty; a driver that reports what it holds and one that
+  reports what changed are the same driver until two keys are down at
+  once. The test now types a second line with the keys overlapping (x
+  down, y down, x up, y up), and with the diff removed it reads `xxyy`
+  where it wants `xy`. The lesson is about tests, not keyboards: a
+  harness that types politely proves less than a person in a hurry.
+
 ## Benchmarks
 
 `blk-bench` (reports only): sequential reads over every disk in the
@@ -207,10 +312,28 @@ requires, is not what limits this path on this device model.
   `device_del` covers the rest by hand.
 - A controller that stops completing commands (`hcd->dead`): no
   reproducer in QEMU.
-- External hubs, interrupt and isochronous endpoints, full- and
-  low-speed devices (QEMU attaches the disk to a USB3 port; the EP0
-  size update path for full speed is written to the specification and
-  untested), 32-bit-DMA controllers (`AC64` = 0; the mask is set, the
-  allocator honours it, no model to try it on), scratchpad buffers
-  (both QEMU models ask for none: the code path is written and untested).
+- **Transaction translators.** A full- or low-speed device behind a
+  *high-speed* hub is reached through that hub's TT, whose slot and port
+  the controller must be told. QEMU offers a full-speed hub only, and a
+  TT belongs to a high-speed one, so the `QEMU_KBD=hub` shape exercises
+  the route string and the depth and cannot touch the TT fields. They
+  are written to the specification and untested here: TT programming can
+  be wrong, pass every test in this tree, and fail on the first
+  high-speed dock or monitor hub. That is a known hole, not an
+  oversight.
+- **Hubs behind hubs**, and the depth limit (`-ELOOP` past five tiers):
+  reviewed, not run. QEMU will nest hubs by hand
+  (`-device usb-hub,port=2.1`) and nothing in the driver treats a hub's
+  parent specially, but the harness runs one tier.
+- **Port power switching and over-current recovery**: ports are powered
+  once and an over-current report is a warning.
+- A HID device that refuses the boot protocol, and every non-keyboard
+  HID device: refused with a line, by review.
+- Isochronous endpoints, full- and low-speed devices on a *root* port
+  (QEMU attaches the disk to a USB3 port and the hub takes the
+  full-speed path; the EP0 size update path for full speed is written to
+  the specification and untested), 32-bit-DMA controllers (`AC64` = 0;
+  the mask is set, the allocator honours it, no model to try it on),
+  scratchpad buffers (both QEMU models ask for none: the code path is
+  written and untested).
 - Real hardware, as for every driver here (§61).

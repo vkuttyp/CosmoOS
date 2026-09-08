@@ -2,7 +2,7 @@
 
 ## The protocol structure
 
-`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 5). All
+`struct cosmoboot_info` (`boot/protocol/cosmoboot.h`, version 6). All
 fields are fixed-width integers; there are no pointers, enums, or
 padding surprises, so the layout is identical on every architecture and
 compiler.
@@ -10,7 +10,7 @@ compiler.
 | Field | Meaning |
 |---|---|
 | `magic` | `COSMOBOOT_MAGIC` = `0x3154424F4D534F43` ("COSMOBT1") |
-| `version` | `COSMOBOOT_VERSION` = 5 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub) |
+| `version` | `COSMOBOOT_VERSION` = 6 (1: memory map, HHDM, kernel placement, page tables, RSDP; 2: added one raw boot module; 3: the module became the boot archive; 4: a second bootstrap table root for architectures with split roots; 5: the AArch64 EL2 stub; 6: the framebuffer) |
 | `size` | `sizeof(struct cosmoboot_info)` as written by the loader; lets a newer kernel detect an older loader |
 | `arch` | `COSMOBOOT_ARCH_X86_64` = 1, `COSMOBOOT_ARCH_AARCH64` = 2 |
 | `firmware` | `COSMOBOOT_FIRMWARE_UEFI` = 1 |
@@ -24,7 +24,8 @@ compiler.
 | `archive_phys`, `archive_size` | (v3) the boot archive `\cosmo\boot.tar`, a ustar archive holding `init` and the boot-time kernel modules (`modules/<name>.ko`) and test fixtures (`tests/*.ko`), in `COSMOBOOT_MEM_ARCHIVE` memory below 4 GiB; both zero when the file is absent. Written by `scripts/mkbootarchive.py`, parsed by `kernel/core/bootarchive.c` |
 | `boot_pagetable_root_user` | (v4) the second bootstrap root for architectures with split roots: the TTBR0 identity table on AArch64, 0 on x86-64. The kernel does not read it today; its pages are `COSMOBOOT_MEM_BOOT_PAGETABLES` and go with the rest at takeover |
 | `el2_stub_phys` | (v5, AArch64) the page holding the EL2 stub the loader installed before dropping to EL1, in memory of type `COSMOBOOT_MEM_EL2_STUB` (never freed). 0 when firmware handed over at EL1, when the machine has no EL2, or when the page could not be reserved — the kernel then reports no EL2 and boots exactly as before (`docs/kernel/arch/aarch64/design.md`, "Exception level 2") |
-| `reserved1[5]` | zero; reserved for framebuffer and command line under a version bump |
+| `fb_phys`, `fb_size`, `fb_width`, `fb_height`, `fb_pitch`, `fb_bpp`, and three (shift, bits) pairs | (v6) the framebuffer the firmware had already configured when the loader ran: the Graphics Output Protocol's *current* mode, never one the loader set. All zero when there is none, which is not an error. The pixel format is three (shift, bits) pairs rather than an enumeration, so a bit-mask format is described exactly like the two common ones. The range is not RAM: it is `EfiMemoryMappedIO` on a PCI display and `EfiReservedMemoryType` for a `ramfb`, and either way the PMM never hands it out |
+| `reserved2` | zero; reserved for the command line under a version bump |
 
 Memory types (`COSMOBOOT_MEM_*`): `USABLE` 1, `RESERVED` 2,
 `ACPI_RECLAIMABLE` 3, `ACPI_NVS` 4, `BAD` 5, `LOADER_RECLAIMABLE` 6,
@@ -146,7 +147,29 @@ PML4[511]  → PDPT_k → PD_k → PT_k*    : kernel, 4 KiB pages, P|G, RW from 
                                         NX unless PF_X
 ```
 
-`paging_pool_size(img)` = 1 (PML4) + (1 + 4) (identity PDPT + one PD per
+### AArch64: a 2 MiB block may not mix RAM and device memory
+
+The AArch64 loader gives the direct map RAM attributes (normal
+write-back) or device attributes per 2 MiB block, from the firmware
+memory map. A block that *mixes* the two -- firmware reserving a range
+inside RAM without 2 MiB alignment -- cannot have one answer: device
+attributes on RAM make every unaligned access fault, and normal
+attributes on MMIO let the CPU reorder and merge accesses to a device.
+Such a block is therefore mapped as 4 KiB pages, each with its own
+attributes, and the loader says how many it found.
+
+This is not hypothetical: a `ramfb` framebuffer is RAM the firmware
+reserves, and adding one to the AArch64 machine put a reserved range in
+the middle of memory for the first time. The kernel then took a page
+from the same 2 MiB block for a slab object, and the compiler's
+eight-byte store into a four-byte-aligned field of it raised an
+alignment fault inside `vmm_init` -- before the kernel had installed
+tables of its own. `paging_pool_size` accounts for the extra tables:
+one per root per mixed block, bounded by the number of memory-map
+descriptors, since a mixed block needs a boundary and a boundary needs
+a descriptor.
+
+`paging_pool_size(img, descriptors)` = 1 (PML4) + (1 + 4) (identity PDPT + one PD per
 GiB) + (1 + 1 + span/2MiB + 1) (kernel PDPT, PD, page tables) + 4 slack.
 For the current 120 KiB kernel that is 24 pages, of which 13 are used;
 `pool_take()` calls `die()` if the estimate is ever wrong.

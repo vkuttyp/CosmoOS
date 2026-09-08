@@ -9,11 +9,14 @@
 
 #include <kernel/bootinfo.h>
 #include <kernel/compiler.h>
+#include <kernel/log.h>
 #include <kernel/panic.h>
 
 static const struct cosmoboot_info *g_info;
 static const struct cosmoboot_mem_entry *g_map;
 static uint32_t g_map_count;
+static struct bootinfo_framebuffer g_fb;
+static bool g_have_fb;
 
 void bootinfo_init(const struct cosmoboot_info *info)
 {
@@ -42,6 +45,14 @@ void bootinfo_init(const struct cosmoboot_info *info)
     g_map = (const struct cosmoboot_mem_entry *)(uintptr_t)(info->hhdm_base + info->mem_map_phys);
     g_map_count = info->mem_map_entries;
 
+    /* A framebuffer the kernel may not write to is not a reason to stop
+     * booting: the serial console still works, and the reason is worth
+     * more on the screen of the next machine than a panic here. */
+    const char *why = "";
+    g_have_fb = bootinfo_fb_validate(info, &g_fb, &why);
+    if (!g_have_fb && info->fb_phys != 0)
+        klog(KLOG_WARN, "bootinfo: framebuffer ignored: %s", why);
+
     for (uint32_t i = 0; i < g_map_count; i++) {
         const struct cosmoboot_mem_entry *e = &g_map[i];
         if (e->length == 0)
@@ -52,6 +63,11 @@ void bootinfo_init(const struct cosmoboot_info *info)
         if (e->base + e->length < e->base)
             panic("bootinfo: memory map entry %u overflows", i);
     }
+}
+
+const struct bootinfo_framebuffer *bootinfo_framebuffer(void)
+{
+    return g_have_fb ? &g_fb : NULL;
 }
 
 const struct cosmoboot_info *bootinfo_get(void)

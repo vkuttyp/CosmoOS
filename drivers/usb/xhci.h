@@ -157,9 +157,15 @@ struct xhci_trb {
 struct xhci_slot_ctx {
     uint32_t dw[8];
 } __packed;
+#define SLOT_ROUTE(r)        ((uint32_t)(r) & 0xfffffu)   /* dword 0, bits 0-19 (five tiers of four bits) */
 #define SLOT_SPEED(s)        ((uint32_t)(s) << 20)
+#define SLOT_MTT             (1u << 25)
+#define SLOT_HUB             (1u << 26)
 #define SLOT_ENTRIES(n)      ((uint32_t)(n) << 27)
 #define SLOT_ROOT_PORT(p)    ((uint32_t)(p) << 16)   /* dword 1 */
+#define SLOT_PORTS(n)        ((uint32_t)(n) << 24)   /* dword 1: a hub's ports */
+#define SLOT_TT_HUB(s)       ((uint32_t)(s) & 0xffu)      /* dword 2: the transaction translator's slot */
+#define SLOT_TT_PORT(p)      ((uint32_t)(p) << 8)         /* dword 2: and its port */
 #define SLOT_ADDR_OF(dw3)    ((dw3) & 0xffu)
 #define SLOT_STATE_OF(dw3)   (((dw3) >> 27) & 0x1fu)
 

@@ -100,6 +100,36 @@ if USB != "0":
         r"^\[ INFO\] usb-storage: usb0-\d+ is sda: ",
         r"^\[ INFO\] blk: sda: 16384 sectors of 512 bytes",
     ]
+# The keyboard driver loads on every boot; a keyboard enumerates when QEMU
+# was given one (QEMU_KBD root or hub; docs/drivers/usb/, "The keyboard").
+KBD = os.environ.get("QEMU_KBD", "root") if USB != "0" else "0"
+REQUIRED_MARKERS += [r"^\[ INFO\] module: loaded usb_hid 1\.0 ", r"^\[ INFO\] module: loaded usb_hub 1\.0 "]
+if USB != "0" and KBD != "0":
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] usb-hid: usb0-\d+(\.\d+)* is a boot keyboard on endpoint 0x[0-9a-f]{2}, interval \d+",
+    ]
+if USB != "0" and KBD == "hub":
+    # The keyboard is one tier down: the hub is driven and the device is
+    # named for its route (docs/drivers/usb/testing.md).
+    REQUIRED_MARKERS += [
+        r"^\[ INFO\] usb-hub: usb0-\d+ has \d+ port\(s\), \d+ ms to power, status on endpoint 0x[0-9a-f]{2}",
+        r"^\[ INFO\] usb-hid: usb0-\d+\.\d+ is a boot keyboard",
+    ]
+# The framebuffer console: the firmware lights a display and the loader
+# hands it over (QEMU_DISPLAY on; docs/kernel/diagnostics/).
+DISPLAY = os.environ.get("QEMU_DISPLAY", "on")
+if DISPLAY not in ("0", "virtio") and not (DISPLAY == "bochs" and ARCH == "aarch64"):
+    REQUIRED_MARKERS += [
+        r"^framebuffer: \d+x\d+, \d+ bpp, pitch \d+, at 0x[0-9a-f]+",
+        r"^\[ INFO\] framebuffer: \d+x\d+, \d+ bpp, pitch \d+, at phys 0x[0-9a-f]+",
+        r"^\[ INFO\] fbcon: \d+x\d+ cells of 8x8 pixels at 0x[0-9a-f]+, scrolling \d+ rows at a time",
+    ]
+else:
+    # No linear framebuffer: the loader says so and the kernel keeps the
+    # serial console alone. virtio-gpu offers a Blt-only mode, which is
+    # the refusal this shape exercises.
+    REQUIRED_MARKERS += [r"^\[ INFO\] framebuffer: none; the console is the serial port alone$"]
+
 # The AHCI driver loads on every boot; the disk registers when QEMU was
 # given one (QEMU_SATA disk; docs/drivers/ahci/), an ATAPI device is
 # refused with a line (QEMU_SATA cd).
@@ -285,6 +315,16 @@ def main():
         nettest = NetTest()
         env.update(nettest.env())
 
+    # The keyboard harness types on the emulated USB keyboard over QMP
+    # (only when there is one, and only for runs with self-tests).
+    keytest = None
+    have_kbd = os.environ.get("QEMU_USB", "qemu") != "0" and os.environ.get("QEMU_KBD", "root") != "0"
+    if not args.expect_panic and args.expect_selftest != "no" and have_kbd:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from keytest import KeyTest
+        keytest = KeyTest()
+        env.update(keytest.env())
+
     # Phase 9: the interactive shell harness types at the console prompt
     # (normal runs only; the panic run never reaches a prompt).
     shelltest = None
@@ -341,6 +381,11 @@ def main():
             net_thread = threading.Thread(target=nettest.run_when_ready, args=(args.log, proc, args.timeout - 30),
                                           daemon=True)
             net_thread.start()
+        key_thread = None
+        if keytest is not None:
+            key_thread = threading.Thread(target=keytest.run_when_ready, args=(args.log, proc, args.timeout - 20),
+                                          daemon=True)
+            key_thread.start()
         shell_thread = None
         if shelltest is not None:
             shell_thread = threading.Thread(target=shelltest.run, args=(args.log, proc, args.timeout - 10),
@@ -416,6 +461,10 @@ def main():
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (network harness)")
 
+    if keytest is not None and want_selftest:
+        if key_thread is not None:
+            key_thread.join(5)
+        failures.extend(keytest.failures())
     if shelltest is not None:
         if shell_thread is not None:
             shell_thread.join(5)

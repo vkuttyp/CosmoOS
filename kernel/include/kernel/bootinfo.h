@@ -46,4 +46,37 @@ bool bootinfo_mem_type_is_ram(uint32_t type);
  * direct map covers it after vmm_init. */
 bool bootinfo_phys_is_ram(uint64_t pa);
 
+/* The framebuffer the firmware had already configured, as the loader
+ * found it (boot protocol v6). Fields are exactly the loader's. */
+struct bootinfo_framebuffer {
+    uint64_t phys;
+    uint64_t size;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;    /* bytes per row */
+    uint32_t bpp;      /* bits per pixel */
+    uint8_t  red_shift, red_bits;
+    uint8_t  green_shift, green_bits;
+    uint8_t  blue_shift, blue_bits;
+};
+
+/*
+ * Decide whether a framebuffer description is one the kernel may write
+ * to, and copy it out when it is. This is the whole trust boundary for
+ * the display: everything a fbcon does is bounded by these checks, so it
+ * is a pure function of the boot fields, tested on the host and fuzzed
+ * (kernel/core/fbvalid.c). `why` receives a static reason when the
+ * answer is false; either pointer may be NULL.
+ *
+ * False for a framebuffer that is absent (all zero), one whose rows do
+ * not fit the memory it claims, one whose pixels are not 8, 16, 24 or 32
+ * bits, and one whose colour fields run off the end of a pixel.
+ */
+bool bootinfo_fb_validate(const struct cosmoboot_info *info, struct bootinfo_framebuffer *out,
+                          const char **why);
+
+/* The validated framebuffer, or NULL when the machine has none. Set by
+ * bootinfo_init. */
+const struct bootinfo_framebuffer *bootinfo_framebuffer(void);
+
 #endif /* KERNEL_BOOTINFO_H */
