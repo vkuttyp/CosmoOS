@@ -82,6 +82,10 @@ COMMANDS = [
     # -- is ignored whole. Reading only one byte after `[` left the `~`
     # behind and ran `echo del-ok~`.
     ("echo del-ok\x1b[3~", [r"^del-ok$"]),
+    # A sequence that is never finished: Enter cannot be part of a CSI
+    # sequence, so it ends it and submits the line. Counting it as a
+    # parameter byte swallowed the Enter and the shell looked wedged.
+    ("echo csi-ok\x1b[3", [r"^csi-ok$"]),
     ("echo after-pipeline-ok", [r"^after-pipeline-ok$",
                                 r"'sleep' exited with status 130",
                                 r"'cat' exited with status 130"]),

@@ -1335,22 +1335,34 @@ static ssize_t read_line(char *buf, size_t cap)
              * on the line. It used to leave the `~`.
              */
             unsigned params = 0;
-            int eof = 0;
+            int eof = 0, aborted = 0;
             for (;;) {
                 if (read(0, &b2, 1) != 1) {
                     eof = 1;
                     break;
                 }
-                if ((unsigned char)b2 >= 0x40 && (unsigned char)b2 <= 0x7e)
+                unsigned char u = (unsigned char)b2;
+                if (u >= 0x40 && u <= 0x7e)
                     break;   /* the final byte */
-                params++;
+                if (u < 0x20 || u > 0x3f) {
+                    /* Not a byte a CSI sequence can contain: the
+                     * sequence was never finished. Give the byte back
+                     * rather than swallow it -- otherwise a stray
+                     * `Esc [` eats the Enter that would have submitted
+                     * the line, and the shell looks wedged. */
+                    pending = b2;
+                    have_pending = 1;
+                    aborted = 1;
+                    break;
+                }
+                params++;   /* a parameter (0x30-0x3f) or intermediate (0x20-0x2f) */
             }
             if (eof) {
                 result = -1;
                 break;
             }
-            if (params != 0)
-                continue;   /* parameterised: none of the four this shell knows */
+            if (aborted || params != 0)
+                continue;   /* abandoned, or parameterised: not one of the four */
             size_t was = len;
             if (b2 == 'D' && pos > 0) {
                 pos--;

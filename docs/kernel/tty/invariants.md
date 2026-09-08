@@ -126,6 +126,17 @@ still asleep. Check: `tty-ldisc`, where a reader blocked under `VMIN` 1
 is released, returning 0, by a `tcsetattr` that sets `VMIN` 0 and
 nothing else.
 
+**T15. Readiness answers the same question a read answers.** "Would
+this block?" is asked in three places -- poll readiness on the console
+object, the non-blocking path in `tty_read`, and the wait itself -- and
+all three go through `tty_read_ready`, which is `lines > 0` *or* the
+modes promising an answer without them. `VMIN` 0 is the case that
+separates it from `tty_has_line`: with nothing queued a read returns 0
+at once, so a poll that reported "not readable" would park a caller
+that a read would have served. Check: `tty-pollraw`, which sets `VMIN`
+0 on an empty terminal and requires the readiness answer and the read
+to agree.
+
 ## Gaps (documented, not invariants)
 
 - **The raw *read* branch is not distinguishable by any test here.**

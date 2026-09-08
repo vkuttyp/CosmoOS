@@ -600,6 +600,11 @@ bool selftest_tty_isatty(const char **reason)
     return run_signal_probe("tty-isatty", reason);
 }
 
+bool selftest_tty_pollraw(const char **reason)
+{
+    return run_signal_probe("tty-pollraw", reason);
+}
+
 bool selftest_dev_tty(const char **reason)
 {
     return run_tty_probe("dev-tty", NULL, 0, reason);

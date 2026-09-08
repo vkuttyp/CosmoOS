@@ -2431,6 +2431,36 @@ static int probe_tty_nosig(void)
     return c == 3 ? 0 : 8;
 }
 
+/*
+ * Readiness must answer the same question a read answers. With `VMIN` 0
+ * and nothing typed, a read returns 0 at once -- so the terminal is
+ * readable, and a poll that says otherwise parks a caller that a read
+ * would have served. Changing `ICANON` flushes, so the queue really is
+ * empty by the time the two are compared.
+ */
+static int probe_tty_poll_raw(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    struct termios saved, raw;
+    if (tcgetattr(0, &saved) != 0)
+        return 4;
+    raw = saved;
+    cfmakeraw(&raw);
+    raw.c_cc[VMIN] = 0;
+    if (tcsetattr(0, TCSANOW, &raw) != 0)
+        return 5;
+    long ready = cosmo_ioready(0);
+    char c = 0;
+    ssize_t n = read(0, &c, 1);
+    (void)tcsetattr(0, TCSANOW, &saved);
+    if (!(ready & COSMO_IO_READABLE))
+        return 6;   /* the poll said it would block */
+    if (n != 0)
+        return 7;   /* and the read must be what the poll promised */
+    return 0;
+}
+
 /* isatty is about terminals, not about character devices. */
 static int probe_tty_isatty(void)
 {
@@ -2559,6 +2589,8 @@ static int signal_probe(const char *kind)
         return probe_tty_nosig();
     if (strcmp(kind, "tty-isatty") == 0)
         return probe_tty_isatty();
+    if (strcmp(kind, "tty-pollraw") == 0)
+        return probe_tty_poll_raw();
     if (strcmp(kind, "dev-tty") == 0)
         return probe_dev_tty();
     if (strcmp(kind, "dev-tty-none") == 0)

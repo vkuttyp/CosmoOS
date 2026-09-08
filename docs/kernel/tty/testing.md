@@ -101,6 +101,10 @@ process that needs the CPU to get there.
   check.
 - **`tty-isatty`** -- true for the console, **false for `/dev/vmm`**.
   It was true for both until this unit.
+- **`tty-pollraw`** -- with `VMIN` 0 and an empty terminal, `ioready`
+  reports readable and the read returns 0. Readiness that consulted
+  only the queue said "would block" about a read that returns at once,
+  which parks a poll or an I/O ring entry until something is typed.
 - **`dev-tty`** -- `/dev/tty` and `/dev/console` open and are terminals.
 - **`dev-tty-none`** -- a process whose session holds no terminal gets
   `-ENXIO`. It does not call `setsid` to get there: a probe the kernel

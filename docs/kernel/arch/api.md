@@ -100,6 +100,15 @@ pointer.
 ### `uintptr_t arch_trap_frame_pc/sp/fp(const struct arch_trap_frame *)`
 - **Outputs**: interrupted program counter, stack pointer, frame pointer.
 
+### `uint64_t arch_trap_frame_detail(const struct arch_trap_frame *)`
+- **Outputs**: the architecture's own word about the cause -- the `ESR`
+  on AArch64, the error code on x86-64.
+- **Purpose**: several causes share one `arch_trap_kind`. An undefined
+  instruction, an illegal execution state and a **trapped FP access**
+  are all `ARCH_TRAP_INVALID_OPCODE`, so "undefined instruction at X"
+  names three very different bugs. A fatal user trap logs this so the
+  next occurrence says which.
+
 ### `void arch_trap_frame_dump(const struct arch_trap_frame *frame)`
 - **Purpose**: log full register state through `kprintf`.
 - **Concurrency**: output may interleave with other CPUs' output once SMP

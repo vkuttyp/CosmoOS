@@ -70,10 +70,17 @@ the line limit), `eofs` (empty `^D` records committed).
 - Failure modes: none reported; overflow is counted.
 
 ### `bool tty_has_line(struct tty *t)`
-True when a complete line or an end-of-file mark waits in the ring, so
-`tty_read` would not block. Any context, no lock (a relaxed load of the
-line count); the console object's `ready` operation reports
-`COSMO_IO_READABLE` from it.
+True when a complete line or an end-of-file mark waits in the ring --
+non-canonically, when any byte does. Any context, no lock (a relaxed
+load of the line count).
+
+### `bool tty_read_ready(struct tty *t)`
+True when `tty_read` would return rather than block, which is the wider
+question: `VMIN` 0 promises an answer with nothing queued at all. The
+console object's `ready` operation and the non-blocking path both ask
+this one, so neither can disagree with the read. Any context, no lock
+(relaxed loads); readiness is a hint by nature and the decision to
+return nothing is taken under the lock inside `tty_read`.
 
 ### `int64_t tty_read(struct tty *t, void *buf, size_t len)`
 - Purpose: deliver one record, or a prefix of it, to a reader.

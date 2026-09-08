@@ -197,7 +197,10 @@ Three details are load-bearing:
   `0x40`-`0x7e`. Reading a single byte after `[` was right only for the
   four arrow keys and left the tail of everything else on the line, so
   Delete (`Esc [ 3 ~`) typed a `~`; the shell now reads to the final
-  byte and ignores what it does not know. A byte after `Escape` that is
+  byte and ignores what it does not know. A byte that no CSI sequence
+  can contain -- a control byte, Enter among them -- ends the sequence
+  and is given back, so an unfinished `Esc [` cannot swallow the Enter
+  that would have submitted the line. A byte after `Escape` that is
   not `[` is not part of a sequence at all, so it is handled as an
   ordinary keystroke -- `Escape` then `x` leaves an `x` on the line,
   where the first version silently ate it. The reads inside a sequence

@@ -402,6 +402,23 @@ bool tty_has_line(struct tty *t)
 }
 
 /*
+ * Whether a read would return rather than block, which is not the same
+ * question: `VMIN` 0 promises an answer with nothing queued at all.
+ * Everything that asks "would this block?" -- poll readiness, the
+ * non-blocking path -- must answer it the same way `tty_read` does, or
+ * a poll parks a caller that a read would have served. Relaxed loads,
+ * like `tty_has_line`: readiness is a hint by nature, and the decision
+ * to return nothing is made under the lock in `tty_read`.
+ */
+bool tty_read_ready(struct tty *t)
+{
+    if (__atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0)
+        return true;
+    unsigned flags = __atomic_load_n(&t->flags, __ATOMIC_RELAXED);
+    return !(flags & TTY_ICANON) && __atomic_load_n(&t->vmin, __ATOMIC_RELAXED) == 0;
+}
+
+/*
  * A reader that is not in the terminal's foreground group is stopped
  * with SIGTTIN rather than allowed to take the line the shell is
  * waiting for -- without this, background jobs and a usable terminal
@@ -449,7 +466,7 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         int64_t allowed = tty_read_allowed(t);
         if (allowed != 0)
             return allowed;
-        if (io_nonblocking(false) && !tty_has_line(t))
+        if (io_nonblocking(false) && !tty_read_ready(t))
             return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
         /* VMIN 0 in non-canonical mode: answer with whatever is there,
          * including nothing. Checked before the wait, which is the only

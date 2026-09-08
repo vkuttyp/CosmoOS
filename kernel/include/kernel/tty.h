@@ -69,6 +69,10 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n);
 int64_t tty_read(struct tty *t, void *buf, size_t len);
 /* A complete line (or an EOF mark) waits: tty_read would not block. Any context. */
 bool tty_has_line(struct tty *t);
+/* Whether a read would return rather than block: something is queued,
+ * or `VMIN` 0 promises an answer without it. What poll readiness and
+ * the non-blocking path ask, so that both agree with `tty_read`. */
+bool tty_read_ready(struct tty *t);
 
 void tty_get_stats(struct tty *t, struct tty_stats *out);
 

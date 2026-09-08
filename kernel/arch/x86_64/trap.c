@@ -221,6 +221,11 @@ uintptr_t arch_trap_frame_pc(const struct arch_trap_frame *frame)
     return (uintptr_t)frame->rip;
 }
 
+uint64_t arch_trap_frame_detail(const struct arch_trap_frame *frame)
+{
+    return frame->error_code;
+}
+
 uintptr_t arch_trap_frame_sp(const struct arch_trap_frame *frame)
 {
     return (uintptr_t)frame->rsp;

@@ -476,6 +476,7 @@ static const struct selftest tests[] = {
     { "tty-raw",         selftest_tty_raw },
     { "tty-nosig",       selftest_tty_nosig },
     { "tty-isatty",      selftest_tty_isatty },
+    { "tty-pollraw",     selftest_tty_pollraw },
     { "dev-tty",         selftest_dev_tty },
     { "dev-tty-none",    selftest_dev_tty_none },
     { "tty-intr",        selftest_tty_intr },

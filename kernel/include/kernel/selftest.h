@@ -97,6 +97,7 @@ bool selftest_signal_stop_threads(const char **reason); /* every thread parks be
 bool selftest_tty_raw(const char **reason);             /* a byte readable without a newline */
 bool selftest_tty_nosig(const char **reason);          /* ISIG off: ^C is a byte */
 bool selftest_tty_isatty(const char **reason);         /* a character device is not a terminal */
+bool selftest_tty_pollraw(const char **reason);        /* readiness agrees with the read under VMIN 0 */
 bool selftest_dev_tty(const char **reason);            /* /dev/tty and /dev/console open */
 bool selftest_dev_tty_none(const char **reason);       /* ... and ENXIO without a terminal */
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */

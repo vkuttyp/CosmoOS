@@ -167,8 +167,9 @@ static void user_exception_handler(unsigned vector, struct arch_trap_frame *fram
     else if (vector == (unsigned)arch_trap_vector(ARCH_TRAP_DEBUG))
         sig = SIGTRAP;
     if (p->kill_sig == 0)
-        kdebug("process: pid %u '%s' %s at %p: signal %d", p->pid, p->name, arch_trap_name(vector),
-               (void *)arch_trap_frame_pc(frame), sig);
+        kdebug("process: pid %u '%s' %s at %p: signal %d (detail 0x%llx)", p->pid, p->name,
+               arch_trap_name(vector), (void *)arch_trap_frame_pc(frame), sig,
+               (unsigned long long)arch_trap_frame_detail(frame));
     /* Queued, not delivered here: the exception may have arrived on the
      * paranoid path (#DB), interrupt context on an IST stack; the
      * return-to-user hook or the next tick delivers it (a handler, or the
