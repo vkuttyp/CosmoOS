@@ -132,8 +132,14 @@ That leaves the kernel rule where x86-64 already keeps it: the build
 flag plus review. This report proposes making it a check rather than a
 promise, on both architectures, since it is cheap: **disassemble the
 built kernel and require that no vector or floating-point register
-appears outside the save and restore functions**. One rule, two
-architectures, enforced by the build instead of by intention.
+appears outside a short, named list of functions that must touch them**
+— the state save and restore, the guest swap in the hypervisor backend,
+and, in a build with self-tests, the test hooks that set and read a
+pattern (`arch_test_fpu_set/get`, which exist precisely to execute those
+instructions; review, PR #56). The value of the check is that the list
+is short and written down: anything else that reaches for a vector
+register fails the build, and adding a name to the list is a decision
+someone has to make on purpose.
 
 And it sharpens the eager-or-lazy question rather than settling it,
 because the architecture has an opinion. `FPEN = 0b01` — trap EL0, allow
@@ -232,9 +238,12 @@ is the same test with more work).
    built without FP. Nothing in the boot uses a vector register yet, so
    this step is proved by the tests alone: `fpu-switch` on AArch64, and
    a kernel that still faults if it touches a vector register itself.
-2. **The signal frames**, both native and Linux, both architectures.
-   Proved by a handler that clobbers vector registers and an interrupted
-   loop that notices if they change.
+2. **The signal frame**, which means the Linux personality's, on both
+   architectures — it is the only personality with one (see step 2 of
+   the design). Proved by a handler that clobbers vector registers and
+   an interrupted loop that notices if they change. The accessors are
+   shared so that a native signal ABI inherits this, but that ABI is not
+   part of this unit and step 2 does not wait for it.
 3. **The guest rule**, so `hv-guest-fpu` means something on AArch64.
 4. **Userland without the flag**, which turns the whole boot into the
    test, plus `%f`. This is the step with the blast radius, and it comes
@@ -263,9 +272,15 @@ the frames differ and the property does not.
 chosen, which is not the same sentence for both (review, PR #56, where
 the first version of this asked for the lazy answer while the plan built
 eager). **Under eager**: every user thread has state before its first
-instruction and every kernel thread has none, `fork` and `clone` copy
-the parent's, and `exec` resets it to the architectural values rather
-than carrying the previous program's. **Under lazy**, if the benchmark
+instruction and every kernel thread has none; a thread created by
+`clone` starts from the architectural reset values and **not** its
+creator's, which is both what `arch_fpu_alloc` does today and what a new
+thread gets on Linux; and `exec` resets it rather than carrying the
+previous program's. There is no `fork` here to inherit state through —
+`lx_clone` refuses a fork-like clone with `-ENOSYS` because no
+address-space copy exists — so no copy operation is needed and none is
+proposed (review, PR #56: an earlier draft said "`fork` and `clone` copy
+the parent's", which no code in the tree does or should). **Under lazy**, if the benchmark
 argues for it: the same, except that a thread has no state until its
 first FP instruction, so the test also requires that a thread which
 never executes one is never saved or restored — which is the whole
