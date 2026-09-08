@@ -312,7 +312,15 @@ static int64_t tty_read_allowed(struct tty *t)
     process_current_ids(&pgid, &sid);
     if (sid != tty_sid || pgid == fg)
         return 0;   /* another session's reader is not this one's business */
-    if (process_group_is_orphaned(pgid, sid))
+    /*
+     * Two ways the stop cannot happen, and both must fail the read
+     * rather than pretend: an orphaned group has nothing left to
+     * continue it, and a caller that blocks or ignores SIGTTIN will
+     * never be stopped by it. Returning -EINTR in either case would
+     * hand a retrying program an interruption that never becomes a
+     * stop, and it would retry for ever. POSIX says -EIO.
+     */
+    if (process_group_is_orphaned(pgid, sid) || signal_is_ignored(SIGTTIN))
         return -EIO;
     struct process *self = process_current();
     struct signal_info info = { .sig = SIGTTIN, .source = SIGSRC_KERNEL };

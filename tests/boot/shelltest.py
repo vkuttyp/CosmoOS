@@ -51,6 +51,20 @@ COMMANDS = [
     ("fg", []),
     (INTERRUPT, []),
     ("echo after-fg-ok", [r"^after-fg-ok$"]),
+    # A *pipeline* stopped by ^Z: every stage is in the job's group, so
+    # the shell must wait for all of them to park before it takes the
+    # terminal back, or a stage still running writes over the prompt.
+    ("sleep 30 | cat", []),
+    (SUSPEND, [r"\[\d+\]\+  Stopped\s+sleep 30 \| cat"]),
+    ("jobs", [r"\[\d+\]\+  Stopped\s+sleep 30 \| cat"]),
+    ("fg", []),
+    (INTERRUPT, []),
+    # Both stages must actually die: a shell that reported the job
+    # stopped without waiting for every stage would hand `fg` a job it
+    # then reports stopped again, and the ^C would reach nothing.
+    ("echo after-pipeline-ok", [r"^after-pipeline-ok$",
+                                r"'sleep' exited with status 130",
+                                r"'cat' exited with status 130"]),
     # And a background job: it runs without the terminal, and the shell
     # reports it finished before the next prompt.
     ("sleep 1 &", [r"^\[\d+\] \d+$"]),

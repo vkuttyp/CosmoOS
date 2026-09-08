@@ -66,6 +66,7 @@ struct job {
     pid_t pids[STAGES_MAX];
     int npids;
     int done[STAGES_MAX];
+    int parked[STAGES_MAX];  /* reported stopped; cleared when continued */
     int stopped;             /* the whole job is parked */
     int reported;            /* the shell has told the user about its current state */
     int last_status;
@@ -552,6 +553,8 @@ static int builtin(struct command *c, int *is_builtin)
          * starts again together. */
         j->stopped = 0;
         j->reported = 0;
+        for (int k = 0; k < j->npids; k++)
+            j->parked[k] = 0;
         if (kill(-j->pgrp, SIGCONT) != 0 && errno != ESRCH)
             perror("sh: kill");
         g_current_job = j->id;
@@ -1006,6 +1009,8 @@ static struct job *job_note(pid_t pid, int status)
             } else if (WIFCONTINUED(status)) {
                 j->stopped = 0;
                 j->reported = 0;
+                for (int m = 0; m < j->npids; m++)
+                    j->parked[m] = 0;
             } else {
                 j->done[k] = 1;
                 j->stopped = 0;
@@ -1047,14 +1052,23 @@ static void jobs_poll(int announce)
     }
 }
 
-/* Wait for one job in the foreground: the terminal is already its. */
+/*
+ * Wait for one job in the foreground: the terminal is already its.
+ *
+ * A ^Z stops the whole group, so every live stage has a stop to report
+ * and this waits for all of them before returning. Returning on the
+ * first would hand the terminal back to the shell while the other
+ * stages were still on their way to parking, and they would write over
+ * the prompt.
+ */
 static int job_wait_foreground(struct job *j)
 {
     int status = 0;
+    int any_stopped = 0;
     for (;;) {
         int alive = 0;
         for (int i = 0; i < j->npids; i++) {
-            if (j->pids[i] <= 0 || j->done[i])
+            if (j->pids[i] <= 0 || j->done[i] || j->parked[i])
                 continue;
             alive = 1;
             int st = 0;
@@ -1062,11 +1076,9 @@ static int job_wait_foreground(struct job *j)
             if (got != j->pids[i])
                 break;
             if (WIFSTOPPED(st)) {
-                j->stopped = 1;
-                j->reported = 1;
-                job_number(j);
-                job_print(j, "Stopped");
-                return JOB_STOPPED;
+                j->parked[i] = 1;
+                any_stopped = 1;
+                continue;   /* the rest of the group is stopping too */
             }
             j->done[i] = 1;
             if (i == j->npids - 1)
@@ -1074,8 +1086,13 @@ static int job_wait_foreground(struct job *j)
         }
         if (!alive)
             break;
-        if (job_all_done(j))
-            break;
+    }
+    if (any_stopped) {
+        j->stopped = 1;
+        j->reported = 1;
+        job_number(j);
+        job_print(j, "Stopped");
+        return JOB_STOPPED;
     }
     j->last_status = status;
     j->used = 0;   /* finished in the foreground: nothing to remember */

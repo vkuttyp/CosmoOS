@@ -1798,47 +1798,6 @@ void process_notify_parent_event(struct process *p)
  * happened, and therefore the one that was not watching.
  */
 
-void process_stop(struct process *p, int sig)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    if (p->state != PROCESS_RUNNING || p->kill_sig != 0 || p->stopped) {
-        spin_unlock_irqrestore(&p->lock, s);
-        return;   /* dying, or already stopped: a second stop is not an event */
-    }
-    p->stopped = true;
-    p->stop_sig = sig;
-    p->nr_stopped = 0;
-    p->cont_reportable = false;   /* a stop cancels an unreported continue */
-    struct thread *t;
-    list_for_each_entry(t, &p->threads, proc_link) {
-        t->sig_must_stop = true;
-        sched_wake(t);
-    }
-    spin_unlock_irqrestore(&p->lock, s);
-    /* The parent is told a stop is coming; it will not see the process
-     * as stopped until every thread has parked (process_fully_stopped). */
-    process_notify_parent_event(p);
-}
-
-void process_continue(struct process *p)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    if (!p->stopped) {
-        spin_unlock_irqrestore(&p->lock, s);
-        return;
-    }
-    p->stopped = false;
-    p->stop_sig = 0;
-    p->stop_reportable = false;   /* a continue cancels an unreported stop */
-    p->cont_reportable = true;
-    struct thread *t;
-    list_for_each_entry(t, &p->threads, proc_link)
-        t->sig_must_stop = false;
-    spin_unlock_irqrestore(&p->lock, s);
-    waitqueue_wake_all(&p->stopped_wq);
-    process_notify_parent_event(p);
-}
-
 bool process_fully_stopped(struct process *p)
 {
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);

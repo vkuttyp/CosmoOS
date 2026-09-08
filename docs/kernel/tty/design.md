@@ -141,8 +141,13 @@ rescued:
   when it is continued, so a job brought to the foreground with `fg`
   reads the line it was waiting for rather than an `-EINTR` nobody
   expected.
-- **Orphaned**: `-EIO`. Nothing is left that could continue it, so a
-  stop would be permanent.
+- **Orphaned**, or the caller blocks or ignores `SIGTTIN`: `-EIO`.
+  Nothing is left that could continue it in the first case, and no stop
+  can follow in the second -- and answering `-EINTR` for a stop that
+  will never happen hands a retrying program an interruption it retries
+  for ever. A *blocked* stop signal likewise stays pending in the signal
+  core rather than stopping the process: blocking `SIGTSTP` is a
+  process saying it does not want to be stopped by it.
 
 Readers from another session are not this terminal's business and are
 left alone, as is any read while the terminal has no foreground group.

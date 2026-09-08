@@ -275,10 +275,12 @@ number: the program that knows the detail is gone by then).
   in a group of its own (which is also what makes that group
   non-orphaned), and the kernel types the keystroke. The job must stop
   rather than die, and then continue and be killable.
-- **`tty-ttin`** -- both halves of the background-read rule at once. A
+- **`tty-ttin`** -- all three ways the rule can go, in one probe. A
   child in its own group with a live parent is stopped with `SIGTTIN`;
   a real orphan -- a grandchild whose parent exits, reporting through a
-  pipe because it cannot be waited for -- gets `-EIO` instead. Removing
+  pipe because it cannot be waited for -- gets `-EIO` instead, and so
+  does a reader that blocks `SIGTTIN`, because no stop can follow for
+  it either. Removing
   the orphan rule wedges the boot rather than failing it, which is
   precisely the failure the rule exists to prevent.
 

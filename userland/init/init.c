@@ -2044,6 +2044,20 @@ static int probe_signal_tty_background(void)
         return 8;
 
     /*
+     * And a background reader that blocks SIGTTIN: no stop can follow,
+     * so the read must fail with EIO rather than return an interruption
+     * the caller would retry for ever.
+     */
+    const char *bargv2[] = { "init", "--probe", "signal-job-read-blocked", NULL };
+    pid_t d = spawnve_pgrp("/boot/init", bargv2, NULL, NULL, 0, 0);
+    if (d <= 0)
+        return 14;
+    if (waitpid(d, &st, 0) != d)
+        return 15;
+    if (st != 0)
+        return 16 + st;
+
+    /*
      * The orphaned half. An orphaned group needs a member whose parent
      * is gone, so it takes a generation: this process spawns B, B
      * spawns G in a group of its own and exits, and G is left in the
@@ -2090,6 +2104,21 @@ static int probe_signal_job_orphan(void)
     char verdict = (n < 0 && errno == EIO) ? 'y' : 'n';
     (void)write(3, &verdict, 1);
     return 0;
+}
+
+/* Reads the terminal with SIGTTIN blocked, which means no stop can
+ * follow: the read must fail rather than hand back an interruption that
+ * will never become one. */
+static int probe_signal_job_read_blocked(void)
+{
+    sigset_t block = SIGBIT(SIGTTIN);
+    if (sigprocmask(SIG_BLOCK, &block, NULL) != 0)
+        return 40;
+    char b = 0;
+    ssize_t n = read(0, &b, 1);
+    if (n >= 0)
+        return 41;
+    return errno == EIO ? 0 : 42;
 }
 
 /* Another session cannot take the terminal, or even ask about it. */
@@ -2356,6 +2385,8 @@ static int signal_probe(const char *kind)
         return probe_signal_job();
     if (strcmp(kind, "signal-job-read") == 0)
         return probe_signal_job_read();
+    if (strcmp(kind, "signal-job-read-blocked") == 0)
+        return probe_signal_job_read_blocked();
     if (strcmp(kind, "signal-job-orphan-parent") == 0)
         return probe_signal_job_orphan_parent();
     if (strcmp(kind, "signal-job-orphan") == 0)

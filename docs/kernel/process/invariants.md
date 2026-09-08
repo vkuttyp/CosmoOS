@@ -422,6 +422,12 @@ failing it -- which is what the rule exists to prevent.
   true: the native ABI cannot create a thread, so the test would have to
   be a Linux-personality program, and it has not been written. The
   report named `signal-stop-threads` and this unit did not build it.
+- **Two guards are not distinguishable by any single-threaded test**,
+  and both are kept because they are plainly right rather than because
+  anything proves them. Setting `stop_reportable` only when the *last*
+  thread parks (rather than when the stop is posted) matters when a
+  parent's `waitpid` can win a race against a thread still on its way to
+  parking -- which needs more than one thread. So does the guard below.
 - **One guard in `process_stop_park` is not distinguishable by any
   test.** The re-read of `p->stopped` at the top of the function guards
   the bookkeeping (`nr_stopped`, `stop_reportable`) against a stale

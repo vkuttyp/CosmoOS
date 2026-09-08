@@ -157,8 +157,11 @@ is running. A job is remembered by its process group and its stages:
   it is backgrounded, or when it stops. Numbering every pipeline would
   print `[9]+ Stopped` on the ninth command of the session, which is not
   what a job number means.
-- `^Z` stops the foreground job; the shell prints `[1]+  Stopped`, takes
-  the terminal back and prompts. `fg` hands the terminal over, sends
+- `^Z` stops the foreground job; the shell waits for **every** live
+  stage to report stopped before it prints `[1]+  Stopped` and takes the
+  terminal back. Returning on the first would hand the terminal to the
+  shell while the other stages were still on their way to parking, and
+  they would write over the prompt. `fg` hands the terminal over, sends
   `SIGCONT` to the *group* so every stage resumes together, and waits
   again; `bg` continues it without the terminal.
 - A stopped foreground job is not reported as a death: `job_wait_foreground`

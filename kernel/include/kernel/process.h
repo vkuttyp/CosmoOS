@@ -340,18 +340,15 @@ struct process *process_lookup(pid_t pid);   /* referenced or NULL */
 
 /* Sessions and process groups (docs/kernel/process/design.md).
  * `pid` 0 means the caller in each of these, as POSIX has it. */
-/* Job control (docs/kernel/process/design.md, "Stopping").
- * `process_stop` posts the stop: it sets the process's own flag and
- * every thread's, and wakes them so each reaches a return to user mode
- * and parks there. `process_continue` undoes all of it -- including
- * every thread's flag, though the park re-reads the process state
- * anyway, because the thread that has to notice a continue is the one
- * that was not watching when it happened. Both under `p->lock`. */
-/* Tell `p`'s parent that something worth waiting for happened to it: a
+/* Job control (docs/kernel/process/design.md, "Stopping"). Posting a
+ * stop and performing a continue both happen inside the signal core's
+ * `route_locked`, which already holds `p->lock` and already walks the
+ * threads: a stop is a signal, and nothing else in the tree needs to
+ * cause one, so there is no separate entry point for it.
+ *
+ * Tell `p`'s parent that something worth waiting for happened to it: a
  * SIGCHLD and a poke of the parent's wait queue. Not under p->lock. */
 void process_notify_parent_event(struct process *p);
-void process_stop(struct process *p, int sig);
-void process_continue(struct process *p);
 /* True when the process is stopped and every live thread has parked:
  * what a parent is told, so a shell cannot take the terminal back while
  * a thread of the job is still running. */

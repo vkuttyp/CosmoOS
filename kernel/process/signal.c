@@ -250,13 +250,34 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
      * queued like any other and runs the handler instead.
      */
     if (a->handler == SIG_DFL && signal_default_is_stop(sig)) {
+        /* SIGSTOP cannot be blocked (UNBLOCKABLE), but SIGTSTP and the
+         * terminal pair can: a process that blocks one has said it does
+         * not want to be stopped by it, and the signal waits until it
+         * unblocks rather than stopping it now. */
+        bool blocked_everywhere = true;
+        if (t) {
+            blocked_everywhere = (t->sig_blocked & SIGMASK(sig)) != 0;
+        } else {
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link)
+                if (!(o->sig_blocked & SIGMASK(sig)))
+                    blocked_everywhere = false;
+        }
+        if (blocked_everywhere)
+            goto queue;   /* stays pending until one of them unblocks */
         drop_pending_locked(p, SIGMASK(SIGCONT));
         if (!p->stopped && p->kill_sig == 0) {
             p->stopped = true;
             p->stop_sig = sig;
             p->nr_stopped = 0;
             p->cont_reportable = false;
-            p->stop_reportable = true;
+            /* Not `stop_reportable` here: the process is not stopped
+             * until its last thread has parked, and the thread that
+             * parks last is what says so (process_stop_park). Setting
+             * it at post time lets a parent reclaim the terminal while
+             * a thread of the job is still running, and lets the same
+             * stop be reported twice -- once early, once again when
+             * the last thread arrives and sets it for real. */
             struct thread *o;
             list_for_each_entry(o, &p->threads, proc_link) {
                 o->sig_must_stop = true;
@@ -288,6 +309,7 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
         }
         /* Blocked by every candidate: stays pending until one unblocks. */
     }
+queue:
     if (t) {
         t->sig_pending |= SIGMASK(sig);
         fill_info(&t->sig_info[sig - 1], sig, info);
