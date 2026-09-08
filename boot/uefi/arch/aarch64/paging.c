@@ -79,6 +79,31 @@ static bool is_ram(uint64_t pa)
     return false;   /* not described: a device the firmware does not list */
 }
 
+/*
+ * How a 2 MiB block should be mapped. A block that is entirely RAM or
+ * entirely device memory becomes one block entry; one that mixes the two
+ * has to be mapped page by page, because the attributes differ and using
+ * either for the whole block is wrong in a way that shows up much later:
+ * device attributes on RAM make every unaligned access fault (the kernel's
+ * own allocations, before it installs its tables), and normal attributes
+ * on MMIO let the CPU reorder and merge accesses to a device.
+ *
+ * Mixed blocks appear wherever firmware puts a reserved range inside RAM
+ * without 2 MiB alignment -- a framebuffer, for one, which is how this
+ * was found.
+ */
+enum block_kind { BLOCK_RAM, BLOCK_DEVICE, BLOCK_MIXED };
+
+static enum block_kind block_kind(uint64_t base)
+{
+    bool first = is_ram(base);
+    for (uint64_t off = PAGE_SIZE; off < PAGE_2M; off += PAGE_SIZE) {
+        if (is_ram(base + off) != first)
+            return BLOCK_MIXED;
+    }
+    return first ? BLOCK_RAM : BLOCK_DEVICE;
+}
+
 static uint64_t block_attrs(bool ram, bool exec_el1)
 {
     uint64_t a = DESC_VALID | DESC_AF | DESC_SH_INNER | DESC_UXN;
@@ -105,13 +130,18 @@ static void map_4k(struct paging_ctx *ctx, uint64_t root, uint64_t virt, uint64_
     l3[L3_INDEX(virt)] = (phys & DESC_ADDR_MASK) | attrs | DESC_PAGE;
 }
 
-UINTN paging_pool_size(const struct elf_image *img)
+UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors)
 {
     UINTN gib = BOOT_HHDM_SIZE >> 30;
     UINTN kernel_span_2m = (img->virt_end - img->virt_base + PAGE_2M - 1) / PAGE_2M;
     /* TTBR1: L0 + L1 + one L2 per GiB of direct map; kernel: L1 + L2 + one L3 per 2 MiB.
-     * TTBR0: L0 + L1 + one L2 per GiB. Plus slack. */
-    return (2 + gib) + (2 + kernel_span_2m) + (2 + gib) + 4;
+     * TTBR0: L0 + L1 + one L2 per GiB. Plus slack.
+     *
+     * A 2 MiB block that mixes RAM and device memory is mapped as pages
+     * instead, which costs one L3 table in each root. There is at most
+     * one such block per boundary between the two kinds of memory, and a
+     * boundary needs a descriptor, so the map's size bounds them. */
+    return (2 + gib) + (2 + kernel_span_2m) + (2 + gib) + 4 + 2 * mem_descriptors;
 }
 
 EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uint64_t loader_base,
@@ -124,11 +154,25 @@ EFI_STATUS paging_build(struct paging_ctx *ctx, const struct elf_image *img, uin
     g_desc_size = desc_size;
     ctx->root = pool_take(ctx);
     ctx->root_user = pool_take(ctx);
+    UINTN mixed = 0;
     for (uint64_t p = 0; p < BOOT_HHDM_SIZE; p += PAGE_2M) {
-        bool ram = is_ram(p);
-        map_2m(ctx, ctx->root, BOOT_HHDM_BASE + p, p, block_attrs(ram, false));
-        map_2m(ctx, ctx->root_user, p, p, block_attrs(ram, true));
+        enum block_kind kind = block_kind(p);
+        if (kind != BLOCK_MIXED) {
+            bool ram = kind == BLOCK_RAM;
+            map_2m(ctx, ctx->root, BOOT_HHDM_BASE + p, p, block_attrs(ram, false));
+            map_2m(ctx, ctx->root_user, p, p, block_attrs(ram, true));
+            continue;
+        }
+        mixed++;
+        for (uint64_t off = 0; off < PAGE_2M; off += PAGE_SIZE) {
+            bool ram = is_ram(p + off);
+            map_4k(ctx, ctx->root, BOOT_HHDM_BASE + p + off, p + off, block_attrs(ram, false));
+            map_4k(ctx, ctx->root_user, p + off, p + off, block_attrs(ram, true));
+        }
     }
+    if (mixed > 0)
+        lprintf("paging: %u block(s) of 2 MiB mix RAM and device memory; mapped as 4 KiB pages\n",
+                (unsigned)mixed);
     for (uint32_t i = 0; i < img->segment_count; i++) {
         const struct elf_segment *seg = &img->segments[i];
         uint64_t attrs = DESC_VALID | DESC_AF | DESC_SH_INNER | DESC_ATTR(ATTR_NORMAL) | DESC_UXN;

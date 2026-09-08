@@ -10,10 +10,14 @@ block device the storage driver registers.
 | --- | --- |
 | Module `xhci` | `modules/xhci.ko`, `MODULE_CAP_DRIVER`, no dependencies; holds the USB core (`usb.c`) and the controller driver (`xhci.c`) |
 | Module `usb_storage` | `modules/usb_storage.ko`, `MODULE_CAP_DRIVER`, depends on `xhci` |
+| Module `usb_hid` | `modules/usb_hid.ko`, `MODULE_CAP_DRIVER`, depends on `xhci` |
+| Module `usb_hub` | `modules/usb_hub.ko`, `MODULE_CAP_DRIVER`, depends on `xhci` |
 | Controller | bus `pci`, class `0c/03` (serial bus, USB) with programming interface `0x30` checked in probe; UHCI/OHCI/EHCI functions are refused `-ENODEV` (the model logs `probe failed`) |
-| Devices | bus `usb`, one `struct usb_device` per attached device, named `usb<controller>-<port>` (`usb0-1`), `parent` = the controller's PCI device |
+| Devices | bus `usb`, one `struct usb_device` per attached device, named `usb<controller>-<port>` on a root port (`usb0-1`) and `<hub>.<port>` below one (`usb0-6.1`); `parent` = the controller's PCI device, or the hub |
 | Class driver | `struct usb_driver` with a `struct usb_id` table: `USB_ID_CLASS` matches an interface's class/subclass/protocol, `USB_ID_VENDOR` the device's `idVendor`/`idProduct` |
 | Storage | interface `08/06/50`; registers a `struct blkdev` under the prefix `sd` (`sda`), `dev` = the controller |
+| Keyboard | interface `03/01/01` (HID, boot protocol, keyboard); no device of its own -- characters go to the console tty through `tty_input`. A HID interface with another subclass is refused with a line |
+| Hub | interface `09/00/xx`; enumerates the devices on its ports as children of itself |
 | Interrupt | one MSI-X vector (entry 0) on CPU 0; single-message MSI when the function has no MSI-X; no INTx |
 
 ## For a class driver (`drivers/include/drivers/usb.h`)
@@ -66,6 +70,23 @@ Descriptors: `udev->desc` (device), `udev->config`, `udev->intf[i]` with
 `USB_MAX_INTERFACES` 4, `USB_MAX_ENDPOINTS` 8 per interface,
 `USB_CONFIG_MAX` 512.
 
+**`int usb_hub_port_connected(struct usb_device *hub, unsigned port, enum usb_speed speed, struct usb_device **out)`,
+`void usb_hub_port_disconnected(struct usb_device *child)`** — what
+`usb_port_connected` and `usb_port_disconnected` are for a root port,
+one tier down. Thread context, because enumeration is control transfers.
+The new device's `parent` is `hub`, its name is the hub's plus `.port`,
+its `depth` is the hub's plus one, and its `route` is the hub's with
+this port in the hub's nibble. `-ELOOP` past `USB_MAX_DEPTH` (five
+tiers, which is what a route string holds). On success `*out` holds a
+reference the caller gives back by passing it to
+`usb_hub_port_disconnected`.
+
+**`struct usb_device` fields for where a device is** — `parent` (the
+hub, or NULL on a root port; a reference is held), `port` (the port on
+that parent), `root_port`, `route` and `depth`. A driver has no reason
+to read them; the controller driver does, and the self-test checks they
+agree with each other.
+
 ## The controller seam (`struct usb_hcd_ops`, within the module)
 
 `enable_device` (slot and address; EP0 usable), `update_ep0` (the
@@ -110,6 +131,13 @@ through `sda` are attributed to the controller's requester id
 
 ## QEMU
 
+The keyboard is `-device usb-kbd`, on a root port by default and behind
+`-device usb-hub` with `QEMU_KBD=hub`; `QEMU_KBD=0` leaves it out.
+Nothing types at it by hand: the boot test opens QEMU's monitor protocol
+socket (`QEMU_QMP`) and sends key events (`input-send-event`), and tells
+the guest to expect them through `fw_cfg` (`opt/cosmo/keytest`), which
+is why the self-test can tell "nobody typed" from "no keyboard".
+
 `scripts/qemu-run.sh` adds `-device qemu-xhci,id=xhci0` and
 `-device usb-storage,bus=xhci0.0,drive=usbdisk` over an 8 MiB image
 (`QEMU_USBDISK`, default `usb.img` beside the others for a hand-run
@@ -126,6 +154,8 @@ with 512.
 `thread_exit`, `thread_join`, `sched_block_current`, `waitqueue_init`,
 `waitqueue_prepare`, `waitqueue_finish`, `waitqueue_wake_all` (a module
 thread that waits on a queue), `arch_percpu_get` (`preemptible()` from
-a module), `faultinject_should_fail` (debug builds). No kernel interface
-changed shape; `struct iommu_stats` gained the per-requester tally and
-`errno.h` the values `ECANCELED` and `EOVERFLOW`.
+a module), `faultinject_should_fail` (debug builds), and -- with the
+keyboard -- `tty_console` and `tty_input`, so an input driver can hand
+its bytes to the console tty exactly as the UARTs do. No kernel
+interface changed shape; `struct iommu_stats` gained the per-requester
+tally and `errno.h` the values `ECANCELED` and `EOVERFLOW`.

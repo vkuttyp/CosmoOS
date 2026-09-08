@@ -640,18 +640,33 @@ bool selftest_blk_lifetime(const char **reason)
 
 /* --- the USB bus (docs/drivers/usb/testing.md) ------------------------------------- */
 
+/* The bus holds more than one kind of device now (a disk and a keyboard),
+ * so a walk picks the one it means by interface class rather than taking
+ * whichever enumerated first. */
 struct usb_enum_walk {
     unsigned devices;
-    struct usb_device *first;
+    struct usb_device *storage;
+    struct usb_device *keyboard;
+    struct usb_device *hub;
 };
 
 static int usb_enum_visit(struct device *dev, void *arg)
 {
     struct usb_enum_walk *w = arg;
+    struct usb_device *udev = to_usb_device(dev);
     w->devices++;
-    if (w->first == NULL) {
+    if (udev->nr_intf == 0)
+        return 0;
+    uint8_t class = udev->intf[0].desc.bInterfaceClass;
+    if (class == USB_CLASS_MASS_STORAGE && w->storage == NULL) {
         device_get(dev);
-        w->first = to_usb_device(dev);
+        w->storage = udev;
+    } else if (class == USB_CLASS_HID && w->keyboard == NULL) {
+        device_get(dev);
+        w->keyboard = udev;
+    } else if (class == USB_CLASS_HUB && w->hub == NULL) {
+        device_get(dev);
+        w->hub = udev;
     }
     return 0;
 }
@@ -671,16 +686,24 @@ bool selftest_usb_enum(const char **reason)
         kinfo("selftest: usb-enum: no usb bus (xhci module not loaded); skipping");
         return true;
     }
-    struct usb_enum_walk w = { 0, NULL };
+    struct usb_enum_walk w = { 0, NULL, NULL, NULL };
     device_for_each(bus, usb_enum_visit, &w);
     if (w.devices == 0) {
         kinfo("selftest: usb-enum: no device on the usb bus (QEMU_USB=0); skipping");
         return true;
     }
-    struct usb_device *udev = w.first;
+    if (w.hub)
+        device_put(&w.hub->dev);
+    if (w.storage == NULL) {
+        kinfo("selftest: usb-enum: no mass-storage device on the usb bus; skipping");
+        if (w.keyboard)
+            device_put(&w.keyboard->dev);
+        return true;
+    }
+    struct usb_device *udev = w.storage;
     bool ok = true;
 #define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-enum: step failed at line %d", __LINE__); ok = false; } } while (0)
-    STEP(w.devices == 1);
+    STEP(w.devices >= 1);
     STEP(udev->dev.parent != NULL && udev->dev.parent->bus == &pci_bus);   /* behind a controller, not a bus root */
     STEP(udev->dev.iommu == NULL);   /* the device does no DMA of its own (U1); the controller does */
     STEP(udev->port >= 1 && udev->port <= udev->hcd->nr_ports);
@@ -712,6 +735,46 @@ bool selftest_usb_enum(const char **reason)
         kinfo("selftest: usb-enum: %s (%04x:%04x) on %s, port %u, slot %u: %u interface, bulk in/out of %u bytes",
               udev->dev.name, udev->desc.idVendor, udev->desc.idProduct, udev->dev.parent->name, udev->port,
               udev->slot, udev->nr_intf, intf->ep[0].desc.wMaxPacketSize & 0x7ff);
+    /* The keyboard, when the harness attached one: the first device in
+     * the tree with an interrupt endpoint, which is the part of the
+     * controller driver nothing exercised before this unit. */
+    if (w.keyboard != NULL) {
+        struct usb_device *kbd = w.keyboard;
+        const struct usb_interface *ki = &kbd->intf[0];
+        STEP(kbd->slot != 0 && !kbd->gone);
+        STEP(kbd->dev.parent != NULL);
+        /* Where it is, which is what the controller was told (U2). On a
+         * root port: no parent device on this bus, no route, the port is
+         * the root port. Behind a hub: the parent is that hub, the route
+         * names this port in the tier the hub sits at, and the root port
+         * is the hub's. */
+        if (kbd->parent == NULL) {
+            STEP(kbd->depth == 0 && kbd->route == 0 && kbd->root_port == kbd->port);
+            STEP(kbd->dev.parent == kbd->hcd->dev);
+        } else {
+            const struct usb_device *hub = kbd->parent;
+            STEP(kbd->dev.parent == &hub->dev);
+            STEP(kbd->depth == hub->depth + 1 && kbd->depth <= USB_MAX_DEPTH);
+            STEP(kbd->root_port == hub->root_port);
+            STEP(kbd->route == (hub->route | (kbd->port << (4 * hub->depth))));
+            STEP(kbd->route != 0);
+            STEP(hub->nr_intf > 0 && hub->intf[0].desc.bInterfaceClass == USB_CLASS_HUB);
+            if (ok)
+                kinfo("selftest: usb-enum: %s is behind %s: tier %u, route 0x%05x, root port %u",
+                      kbd->dev.name, hub->dev.name, kbd->depth, kbd->route, kbd->root_port);
+        }
+        STEP(ki->desc.bInterfaceSubClass == 1 && ki->desc.bInterfaceProtocol == 1);   /* boot keyboard */
+        STEP(ki->nr_ep == 1);
+        const struct usb_endpoint_descriptor *ke = &ki->ep[0].desc;
+        STEP(USB_EP_XFER(ke->bmAttributes) == USB_EP_INTERRUPT);
+        STEP((ke->bEndpointAddress & USB_EP_DIR_IN) != 0);
+        STEP((ke->wMaxPacketSize & 0x7ff) >= 8);
+        STEP(ke->bInterval > 0);
+        if (ok)
+            kinfo("selftest: usb-enum: %s is a boot keyboard: endpoint 0x%02x, %u bytes every %u frames",
+                  kbd->dev.name, ke->bEndpointAddress, ke->wMaxPacketSize & 0x7ff, ke->bInterval);
+        device_put(&kbd->dev);
+    }
 #undef STEP
     device_put(&udev->dev);
     if (!ok) {
@@ -825,14 +888,35 @@ bool selftest_usb_storage(const char **reason)
 }
 
 /* The one device on the USB bus, referenced, or NULL. */
+/* The mass-storage device, which is what the unplug and timeout tests
+ * mean by "the device"; the keyboard is another and is left alone. */
 static struct usb_device *usb_first_device(void)
 {
     struct bus_type *bus = bus_find("usb");
     if (bus == NULL)
         return NULL;
-    struct usb_enum_walk w = { 0, NULL };
+    struct usb_enum_walk w = { 0, NULL, NULL, NULL };
     device_for_each(bus, usb_enum_visit, &w);
-    return w.first;
+    if (w.keyboard)
+        device_put(&w.keyboard->dev);
+    if (w.hub)
+        device_put(&w.hub->dev);
+    return w.storage;
+}
+
+/* The hub, when the harness put one there (QEMU_KBD=hub). */
+static struct usb_device *usb_hub_device(void)
+{
+    struct bus_type *bus = bus_find("usb");
+    if (bus == NULL)
+        return NULL;
+    struct usb_enum_walk w = { 0, NULL, NULL, NULL };
+    device_for_each(bus, usb_enum_visit, &w);
+    if (w.keyboard)
+        device_put(&w.keyboard->dev);
+    if (w.storage)
+        device_put(&w.storage->dev);
+    return w.hub;
 }
 
 #if CONFIG_FAULTINJECT
@@ -953,6 +1037,10 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
         uint64_t dt = clock_now_ns() - t0;
         total_dt += dt;
         faultinject_clear(kind);
+        if (rc != -ETIMEDOUT)
+            kerror("selftest: %s: the read returned %d after %llu ms, not -ETIMEDOUT (timeouts %llu -> %llu)",
+                   tag, rc, (unsigned long long)(dt / 1000000), (unsigned long long)timeouts0,
+                   (unsigned long long)bd->timeouts);
         STEP(rc == -ETIMEDOUT);
         STEP(bd->timeouts == timeouts0 + 1);
         STEP(dt < 3000ull * 1000000ull);
@@ -1036,7 +1124,11 @@ bool selftest_usb_unplug(const char **reason)
     STEP(bd != NULL);
     uint64_t released0 = hcd->released, enumerated0 = hcd->enumerated;
     struct bus_type *bus = bus_find("usb");
-    STEP(bus != NULL && device_count(bus) == 1);
+    STEP(bus != NULL);
+    /* Counted against what is there, not against one: the keyboard is on
+     * the same bus and this test must not notice it. */
+    unsigned devices0 = bus != NULL ? device_count(bus) : 0;
+    STEP(devices0 >= 1);
     device_put(&udev->dev);   /* the walk's reference: the release must be able to run */
 
     struct { volatile bool done; int status; } mk = { false, 0 };
@@ -1073,7 +1165,7 @@ bool selftest_usb_unplug(const char **reason)
     STEP(gone == NULL);
     if (gone)
         blkdev_put(gone);
-    STEP(device_count(bus) == 0);
+    STEP(device_count(bus) == devices0 - 1);
     STEP(bd == NULL || blk_read(bd, 0, 1, buf) == -ENODEV);   /* a holder's reference: refused, not served */
     if (bd != NULL)
         blkdev_put(bd);   /* the test's reference: the storage driver's memory can go */
@@ -1083,7 +1175,7 @@ bool selftest_usb_unplug(const char **reason)
      * usb_device, a fresh sda. */
     STEP(hcd->ops->debug_port(hcd, port, true) == 0);
     STEP(hcd->enumerated == enumerated0 + 1);
-    STEP(device_count(bus) == 1);
+    STEP(device_count(bus) == devices0);
     struct blkdev *again = blk_find("sda");
     STEP(again != NULL);
     if (again != NULL) {
@@ -1101,6 +1193,76 @@ bool selftest_usb_unplug(const char **reason)
     kfree(buf);
     if (!ok) {
         *reason = "usb-unplug: see the log";
+        return false;
+    }
+    return true;
+}
+
+/*
+ * A hub unplugged with a device behind it (docs/drivers/usb/testing.md).
+ *
+ * The path this proves is the one the design is most easily got wrong
+ * on: the controller reports the hub's root port gone, the core runs the
+ * hub driver's `remove` with its own lock held, and `remove` joins the
+ * worker whose last act is to take the hub's children down. A child
+ * teardown that reached for that lock again would deadlock here and
+ * nowhere else, and nothing in an ordinary boot would ever run it.
+ */
+bool selftest_usb_hub_unplug(const char **reason)
+{
+    struct usb_device *hub = usb_hub_device();
+    if (hub == NULL) {
+        kinfo("selftest: usb-hub-unplug: no hub on this machine (QEMU_KBD is not hub); skipping");
+        return true;
+    }
+    struct usb_hcd *hcd = hub->hcd;
+    unsigned port = hub->port;
+    char name[DEVICE_NAME_MAX];
+    strlcpy(name, hub->dev.name, sizeof(name));
+    struct bus_type *bus = bus_find("usb");
+    if (hcd->ops->debug_port == NULL || bus == NULL) {
+        device_put(&hub->dev);
+        kinfo("selftest: usb-hub-unplug: the controller has no debug port hook; skipping");
+        return true;
+    }
+    bool ok = true;
+#define STEP(x) do { if (ok && !(x)) { kerror("selftest: usb-hub-unplug: step failed at line %d", __LINE__); ok = false; } } while (0)
+    unsigned devices0 = device_count(bus);
+    uint64_t released0 = hcd->released;
+    STEP(hub->parent == NULL && hub->depth == 0);   /* the harness puts the hub on a root port */
+    device_put(&hub->dev);   /* the walk's: the releases must be able to run */
+
+    /* Out: the hub and everything behind it, children first. The bus is
+     * clear of both by the time the port call returns, because the core
+     * takes the children down before the hub. */
+    STEP(hcd->ops->debug_port(hcd, port, false) == 0);
+    STEP(device_count(bus) == devices0 - 2);        /* the hub and its keyboard */
+    /* The releases are not synchronous: the hub's worker holds a
+     * reference to its own device until it has finished tidying up,
+     * which is after `remove` returned (U9). Both must arrive, and
+     * quickly. */
+    for (unsigned i = 0; i < 2000 && hcd->released != released0 + 2; i++)
+        thread_sleep_ms(1);
+    STEP(hcd->released == released0 + 2);
+
+    /* Back in: the hub enumerates, and its worker finds the device on
+     * its port again -- which takes a debounce and a reset, so this is
+     * the part of the test that waits. */
+    STEP(hcd->ops->debug_port(hcd, port, true) == 0);
+    for (unsigned i = 0; i < 2000 && device_count(bus) != devices0; i++)
+        thread_sleep_ms(1);
+    STEP(device_count(bus) == devices0);
+    struct usb_device *again = usb_hub_device();
+    STEP(again != NULL);
+    if (again != NULL) {
+        STEP(strcmp(again->dev.name, name) == 0);
+        device_put(&again->dev);
+    }
+    if (ok)
+        kinfo("selftest: usb-hub-unplug: %s and the device behind it went and came back", name);
+#undef STEP
+    if (!ok) {
+        *reason = "usb-hub-unplug: see the log";
         return false;
     }
     return true;

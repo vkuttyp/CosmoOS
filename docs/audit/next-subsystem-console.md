@@ -457,6 +457,89 @@ QEMU.
   — roughly 1 850, the largest unit since USB. The four steps are
   independent, each is observable on its own, and the last is droppable.
 
+## Outcome (2026-09-08)
+
+Built as one unit on `drivers/console`, all four steps, none dropped.
+Documented where the tree already documents these things --
+`docs/kernel/diagnostics/` for the display, `docs/drivers/usb/` for the
+keyboard and the hub, `docs/boot/` for the protocol -- rather than in
+the new `docs/drivers/console/` this report proposed, because the
+console is not a driver subsystem here.
+
+**The architectural question is answered: topology lives in the core.**
+`struct usb_device` gained `parent`, `depth`, `route` and `root_port`;
+the controller driver puts the route string and the root port into the
+slot context. Nothing else in the kernel learned that hubs exist -- not
+`struct device` beyond its ordinary parent pointer, not the DMA rule,
+not the block layer -- and a device's name became its path
+(`usb0-6.1`), which is what makes the model's children-first removal
+take a subtree down without being told about hubs. The step this report
+called droppable was not dropped, and the answer went the other way from
+AHCI's: a port has no identity, a hub's children do.
+
+**The one interface this report expected to change did not.**
+`vm_map_phys(pa, size, prot, cache)` already existed underneath
+`device_map_mmio`, so a framebuffer that belongs to no device maps
+through it as it stands. What the kernel gained instead: the boot
+protocol's version 6 fields, `bootinfo_fb_validate` and its accessor,
+`fbcon_init` and the sink's test-only accessors, the two USB core
+entry points for a hub's ports, and two exports (`tty_console`,
+`tty_input`) so an input driver can reach the console tty the way the
+UARTs do.
+
+What the report did not know:
+
+- **AArch64 has no framebuffer without help, and two of the three
+  candidates fail.** `bochs-display` gets no Graphics Output Protocol at
+  all under this firmware, and `virtio-gpu-pci` offers a Blt-only mode
+  with no linear buffer -- which the loader refuses, exercising a branch
+  the report only hoped to write. `ramfb` works, and is now what the
+  harness gives `virt`; both refusals are kept as shapes.
+- **A `ramfb` is RAM the firmware reserved**, which put a reserved range
+  inside memory for the first time and broke the AArch64 loader: it
+  classified 2 MiB blocks of the direct map by their first page, so RAM
+  sharing a block with that range got device attributes, and the
+  kernel's first unaligned store into a slab object there raised an
+  alignment fault inside `vmm_init`. Mixed blocks are now mapped as 4
+  KiB pages. Any real machine with a reserved range at an unaligned
+  boundary would have hit this.
+- **The second sink's timing exposed an unfaithful fault injection.**
+  AHCI's injector fills a command slot and never writes its `PxCI` bit
+  -- a state hardware cannot produce, and one the completion scan reads
+  as "finished", so any other command's interrupt completed the hung one
+  and `ahci-timeout` failed. The injected slot is now excluded from the
+  scan.
+- **A transfer's buffer may not be a kernel stack**, which the hub found
+  by reporting eight ports with nothing behind any of them: `dma_map`
+  refused the stack address and every port query failed silently.
+- **The replay is the newest screenful, not the whole boot.** Scrolling
+  a thousand lines through an uncached framebuffer costs hundreds of
+  megabytes to draw frames nobody sees, and ends on the same picture.
+- **A test that types politely proves less than a person in a hurry.**
+  The keyboard's press-detection diff could be deleted without failing
+  the first version of the test, because one key at a time never puts
+  two in a report. The test now types a line with the keys overlapping.
+
+The benchmarks decided what the report said they would. A scroll costs a
+screen repaint (10.6 ms on x86_64 under TCG) whatever distance it moves,
+so scrolling one row a line costs 10.9 ms a line against 1.17 ms at
+`rows / 8`; at one row a boot was measurably slower than with no display
+at all, and at `rows / 8` it is the same within noise. The text shadow
+was kept for the same kind of reason: it removes the framebuffer reads a
+scroll would otherwise do, and uncached reads cost several times what
+writes do. Write-combining would be the next thing to try and needs an
+arch change nothing has paid for yet.
+
+Size: about 200 lines of loader and protocol, 780 of console (including
+a 108-line generated font table and the 82-line validator), 305 of
+`usb_hid`, 447 of `usb_hub`, and 640 of tests and harness -- roughly
+2 400 against the report's 1 850, most of the difference in the tests.
+
+Not covered, and named: the transaction translator fields for a
+full-speed device behind a high-speed hub (QEMU has only a full-speed
+hub, so they are written to the specification and untested), hubs behind
+hubs, and every HID device that is not a boot keyboard.
+
 ## Alternatives considered
 
 - **A PS/2 keyboard (i8042)** — 200 lines, works on `q35` today, and

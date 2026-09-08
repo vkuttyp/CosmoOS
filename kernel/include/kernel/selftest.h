@@ -88,7 +88,18 @@ bool selftest_process_rlimit(const char **reason);    /* rlimits and SETCRED fro
 bool selftest_process_nproc(const char **reason);     /* NPROC admission under concurrent spawns */
 bool selftest_process_spawn(const char **reason);   /* kernel/process/proctest.c (Phase 9) */
 bool selftest_linux_elf(const char **reason);       /* kernel/process/proctest.c (Phase 11) */
-bool selftest_tty_ldisc(const char **reason);       /* kernel/tty/ttytest.c */
+bool selftest_tty_ldisc(const char **reason);
+
+/* kernel/core/fbtest.c: the framebuffer console, checked by reading the
+ * pixels back, and what it costs. */
+bool selftest_fb_console(const char **reason);
+bool selftest_fb_bench(const char **reason);
+
+/* kernel/device/hidtest.c: keys typed at the emulated keyboard reach the
+ * console tty (the harness types them over QMP). */
+bool selftest_hid_keyboard(const char **reason);
+/* kernel/device/devtest.c: a hub unplugged with a device behind it. */
+bool selftest_usb_hub_unplug(const char **reason);       /* kernel/tty/ttytest.c */
 bool selftest_ipc_pipe(const char **reason);        /* kernel/ipc/pipetest.c */
 
 /* Phase 5: kernel/module/modtest.c */

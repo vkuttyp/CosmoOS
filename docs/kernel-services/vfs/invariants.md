@@ -206,6 +206,24 @@ accepted one completes inside the refusal — the third bio completes and
 `redrained` counts one; the old drain left it behind), review of
 `cfs_fail` callers (none can be reached by `-EAGAIN`).
 
+**V20b. A bio submitted while the layer is recovering a device waits
+instead of dying with it.** From the moment the timeout thread decides a
+request has expired until the driver's `timeout` operation returns, the
+device takes no new work: `bd->recovering` is set, `driver_submit` parks
+arrivals in the pending queue (`deferred` counts them) and
+`drain_pending` refuses to feed a device in that state; the thread
+drains the queue itself when the recovery is over. Without it a bio
+submitted a millisecond into the window is accepted into a free slot and
+then failed with everything else the recovery fails, having never had a
+chance to run -- a driver cannot avoid this on its own, because the
+window opens before it is called.
+
+Check: `ahci-timeout` and `usb-storage-timeout` submit bios 0.3-4 ms
+into each recovery and require them served with the right data; the case
+appeared the moment an AHCI fault injection became faithful enough to
+make the recovery real (`docs/drivers/usb/testing.md`, "Found by the
+keyboard and the hub").
+
 **V18. The pool is the only thing cosmofs addresses, and the pool
 addresses one device.** `cosmofs_core.c`/`cosmofs.c` call `pool_*` only;
 `pool.c` calls `blk_*` only. Check: `pool` self-test; review of

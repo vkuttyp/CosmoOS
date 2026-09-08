@@ -27,6 +27,78 @@ any `SELFTEST:` line is present, forbids `SELFTEST: FAIL`, `KERNEL PANIC`,
 requires QEMU exit 33. This covers `klog` prefixing, `kprintf`, the
 console sink, and `kernel_shutdown` success path end to end.
 
+### The framebuffer console
+
+**`fb-console`** (both architectures, whenever the machine has a
+display). Everything is checked by reading the pixels back through the
+same mapping the console draws through and comparing them against the
+font table, in both colours -- which is what makes a display testable
+under `-display none` with no screenshot, and what makes a wrong pixel
+format a failure here rather than something illegible that a log marker
+would still match. In order: a line of text is drawn cell by cell where
+the cursor said it would be; a backspace moves the cursor back and the
+space the tty echoes after it clears the cell; a byte outside the font
+draws the replacement box, and the box is not the space (a silently
+blank cell would pass a test that only asked whether something
+appeared); a line longer than the screen wraps to the next row without
+losing a character; and filling the screen scrolls it by exactly
+`scroll_rows`, with the marker line found again where it moved to --
+which also says the repaint draws what the text shadow holds. Each check
+retries up to three times, because the screen is shared with everything
+else that prints and a self-test run is quiet but not silent.
+
+**`fb-geometry`** is not a boot test: the validator is a pure function,
+so it is a host test (`tests/host/test_fbvalid.c`, ASan/UBSan) and a
+fuzz target (`tests/fuzz/fuzz_fbvalid.c`). The host test names the
+refusals; the fuzz target asserts that whatever the validator accepts is
+arithmetically safe -- every row inside the memory claimed, the last
+pixel of the last row inside it, every colour field inside a pixel.
+
+**Shapes.** `QEMU_DISPLAY=on` (the default) is QEMU's built-in VGA on
+q35 at 1280x800 and a `ramfb` on virt at 800x600 -- the two devices
+whose firmware here hands over a linear framebuffer. `QEMU_DISPLAY=0` is
+a machine with no display: the loader says so, the kernel keeps the
+serial console, and the `fb-` tests skip. `QEMU_DISPLAY=virtio` is a
+`virtio-gpu-pci`, whose edk2 driver offers a Blt-only mode with no
+linear buffer: the loader names the format and ignores it, which is the
+refusal path. `QEMU_DISPLAY=bochs` is a framebuffer on x86 and, on
+AArch64, no Graphics Output Protocol at all -- the firmware there
+carries no driver for it.
+
+### Benchmarks
+
+`fb-bench` (reports only) times the real path -- `console_puts` under
+the console's own IRQ-safe lock -- because that is what a log line costs
+the machine. QEMU TCG, Apple Silicon host, indicative:
+
+| | x86_64, 1280x800 (160x100 cells) | AArch64, 800x600 (100x75 cells) |
+|---|---|---|
+| A line of 79 characters | 286 us (3.6 us a glyph) | 357 us (4.5 us a glyph) |
+| A scroll (a whole-screen repaint) | 10.6 ms | 9.9 ms |
+| Amortised, at `rows / 8` a scroll | 1.17 ms a line | 1.46 ms a line |
+
+What the numbers decided: **the scroll chunk**. A scroll costs a screen
+repaint whatever distance it moves, so the cost per line is the line
+plus a scroll divided by the chunk:
+
+| Rows a scroll | 1 | 4 | 8 (`rows / 8` here: 12) | 25 | 50 |
+|---|---|---|---|---|---|
+| Cost a line (x86_64) | 10.9 ms | 2.9 ms | 1.17 ms | 0.71 ms | 0.50 ms |
+
+One row at a time is nine times worse and made a boot measurably
+slower -- 40.1 s of self-tests against 34.3 s without a display; at
+`rows / 8` the same boot is 32.4 s, which is the no-display figure
+within noise. Past eight rows the gain is small and the cost is blank
+space at the bottom of the screen, so the chunk stays there (section
+21: the complexity that is kept is the complexity that was measured).
+
+The other decision was **the text shadow**: a scroll moves characters in
+RAM and repaints from them, rather than moving pixels within the
+framebuffer, because reading uncached memory is several times more
+expensive than writing it and the shadow removes the reads entirely.
+Write-combining would be the next thing to try and needs an arch change
+(`vm_cache_t` has no WC), which nothing has yet paid for.
+
 ### Panic path (`make test-crash`)
 
 Built with `CRASH_TEST=1`. Required markers (`--expect-panic`):

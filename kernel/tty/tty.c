@@ -166,3 +166,10 @@ void tty_get_stats(struct tty *t, struct tty_stats *out)
     *out = t->stats;
     spin_unlock_irqrestore(&t->lock, s);
 }
+
+/* Module ABI v1 exports (docs/kernel/module/api.md). A driver for an
+ * input device hands its bytes to the console tty exactly as the UARTs
+ * do: usb_hid is the first, and the reason these are exported. */
+#include <kernel/module.h>
+EXPORT_SYMBOL(tty_console);
+EXPORT_SYMBOL(tty_input);

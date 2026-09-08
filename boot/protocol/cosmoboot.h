@@ -54,8 +54,13 @@
  *   1  memory map, HHDM, kernel placement, page-table root, ACPI RSDP
  *   2  + one boot module (module_phys/module_size) and COSMOBOOT_MEM_MODULE
  *   3  the module becomes a ustar boot archive (archive_phys/archive_size,
- *      COSMOBOOT_MEM_ARCHIVE) holding init and the boot-time kernel modules */
-#define COSMOBOOT_VERSION 5
+ *      COSMOBOOT_MEM_ARCHIVE) holding init and the boot-time kernel modules
+ *   4  + boot_pagetable_root_user, for architectures with split roots
+ *   5  + el2_stub_phys (AArch64 booted at EL2)
+ *   6  + the framebuffer the firmware configured (fb_*), which spends the
+ *      reserved words and grows the structure; `size` says how much the
+ *      loader wrote and the ELF note pairs kernel and loader exactly */
+#define COSMOBOOT_VERSION 6
 
 /* ELF note carried by the kernel so the loader can verify protocol version.
  * Name "COSMO\0", type COSMOBOOT_NOTE_TYPE, desc = uint32_t version. */
@@ -141,8 +146,6 @@ struct cosmoboot_info {
     uint64_t archive_phys;
     uint64_t archive_size;
 
-    /* Reserved for framebuffer and command line in later versions.
-     * Must be zero in version 3. */
     /* v4: a second bootstrap root for architectures with split roots
      * (AArch64: the TTBR0 identity table the loader still runs on; the
      * kernel adopts boot_pagetable_root as TTBR1). x86-64 writes 0. */
@@ -154,7 +157,30 @@ struct cosmoboot_info {
      * COSMOBOOT_MEM_EL2_STUB. Zero when the machine has no EL2 or the
      * loader could not reserve the page: EL1 then has no way up. */
     uint64_t el2_stub_phys;
-    uint64_t reserved1[4];
+
+    /* v6: the framebuffer the firmware had already configured when the
+     * loader ran (UEFI: the Graphics Output Protocol's current mode). The
+     * loader never sets a mode; it reports the one it found. All zero
+     * when the firmware offered no linear framebuffer, and the kernel
+     * then has no display, which is not an error.
+     *
+     * The pixel format is three (shift, bits) pairs rather than an
+     * enumeration, so a bit-mask format is described exactly like the two
+     * common ones: a channel's value occupies `bits` bits starting at
+     * `shift` within a little-endian pixel of fb_bpp bits. */
+    uint64_t fb_phys;    /* physical base; the range is not RAM */
+    uint64_t fb_size;    /* bytes the firmware says the framebuffer spans */
+    uint32_t fb_width;   /* visible pixels per row */
+    uint32_t fb_height;  /* rows */
+    uint32_t fb_pitch;   /* bytes per row, >= fb_width * fb_bpp / 8 */
+    uint32_t fb_bpp;     /* bits per pixel; 32 on every mode seen so far */
+    uint8_t  fb_red_shift, fb_red_bits;
+    uint8_t  fb_green_shift, fb_green_bits;
+    uint8_t  fb_blue_shift, fb_blue_bits;
+    uint8_t  fb_pad[2];
+
+    /* Reserved for the command line in a later version. Must be zero. */
+    uint64_t reserved2;
 };
 
 #endif /* __ASSEMBLER__ */

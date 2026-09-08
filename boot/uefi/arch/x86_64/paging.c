@@ -83,8 +83,11 @@ static void map_4k(struct paging_ctx *ctx, uint64_t virt, uint64_t phys, uint64_
     pt[PT_INDEX(virt)] = (phys & PTE_ADDR_MASK) | PTE_P | flags;
 }
 
-UINTN paging_pool_size(const struct elf_image *img)
+UINTN paging_pool_size(const struct elf_image *img, UINTN mem_descriptors)
 {
+    /* x86-64 maps the whole direct map write-back and lets the MTRRs and
+     * the PAT sort out device memory, so a mixed block costs nothing. */
+    (void)mem_descriptors;
     /* PML4 + identity (1 PDPT + one PD per GiB) + kernel (1 PDPT + 1 PD +
      * one PT per 2 MiB of span, plus one for misalignment) + slack. */
     UINTN identity_gib = BOOT_HHDM_SIZE >> 30;

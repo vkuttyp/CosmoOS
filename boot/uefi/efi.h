@@ -313,6 +313,53 @@ typedef struct {
     CHAR16   FileName[1];
 } EFI_FILE_INFO;
 
+/* Graphics Output Protocol (UEFI 2.x §12.9). The loader reads the current
+ * mode and never sets one. */
+#define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID \
+    { 0x9042a9de, 0x23dc, 0x4a38, { 0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a } }
+
+typedef enum {
+    PixelRedGreenBlueReserved8BitPerColor = 0,
+    PixelBlueGreenRedReserved8BitPerColor = 1,
+    PixelBitMask                          = 2,
+    PixelBltOnly                          = 3,
+    PixelFormatMax                        = 4,
+} EFI_GRAPHICS_PIXEL_FORMAT;
+
+typedef struct {
+    uint32_t RedMask;
+    uint32_t GreenMask;
+    uint32_t BlueMask;
+    uint32_t ReservedMask;
+} EFI_PIXEL_BITMASK;
+
+typedef struct {
+    uint32_t                  Version;
+    uint32_t                  HorizontalResolution;
+    uint32_t                  VerticalResolution;
+    EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
+    EFI_PIXEL_BITMASK         PixelInformation;
+    uint32_t                  PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+    uint32_t                              MaxMode;
+    uint32_t                              Mode;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+    UINTN                                 SizeOfInfo;
+    EFI_PHYSICAL_ADDRESS                  FrameBufferBase;
+    UINTN                                 FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+/* QueryMode, SetMode and Blt are never called; their slots keep the
+ * layout right. */
+typedef struct {
+    void                              *QueryMode;
+    void                              *SetMode;
+    void                              *Blt;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
 /* Configuration table GUIDs. */
 #define EFI_ACPI_20_TABLE_GUID \
     { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }

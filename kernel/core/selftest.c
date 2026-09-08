@@ -391,6 +391,10 @@ static const struct selftest tests[] = {
     /* Last: init's user-mode self-test mounts the cosmofs the tests above
      * leave on the scratch disk. */
     { "tty-ldisc",       selftest_tty_ldisc },
+    { "fb-console",      selftest_fb_console },
+    { "fb-bench",        selftest_fb_bench },
+    { "hid-keyboard",    selftest_hid_keyboard },
+    { "usb-hub-unplug",  selftest_usb_hub_unplug },
     { "ipc-pipe",        selftest_ipc_pipe },
     { "io-poll",         selftest_io_poll },
     { "realtime",        selftest_realtime },

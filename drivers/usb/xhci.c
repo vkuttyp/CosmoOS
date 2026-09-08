@@ -745,8 +745,25 @@ static int xhci_enable_device(struct usb_hcd *hcd, struct usb_device *udev)
     icc->drop = 0;
     icc->add = (1u << 0) | (1u << 1);
     struct xhci_slot_ctx *sc = in_ctx(x, d, 0);
-    sc->dw[0] = SLOT_ENTRIES(1) | SLOT_SPEED(udev->speed);
-    sc->dw[1] = SLOT_ROOT_PORT(udev->port);
+    /* Where the device is: the root-hub port at the top of its chain and
+     * the route through the hubs below it, which is how the controller
+     * addresses a device it cannot see directly (§4.3.3). Both are zero
+     * and the root port is the device's own port when nothing is in
+     * between, which is every device this driver saw before hubs. */
+    sc->dw[0] = SLOT_ENTRIES(1) | SLOT_SPEED(udev->speed) | SLOT_ROUTE(udev->route);
+    sc->dw[1] = SLOT_ROOT_PORT(udev->root_port);
+    /* A full- or low-speed device behind a high-speed hub is reached
+     * through that hub's transaction translator, which the controller
+     * has to be told about (§4.3.3). QEMU offers only a full-speed hub,
+     * so this path is written to the specification and not exercised
+     * here (docs/drivers/usb/testing.md, "Not covered"). */
+    if ((udev->speed == USB_SPEED_FULL || udev->speed == USB_SPEED_LOW) && udev->parent != NULL) {
+        const struct usb_device *tt = udev->parent;
+        while (tt != NULL && tt->speed != USB_SPEED_HIGH)
+            tt = tt->parent;
+        if (tt != NULL)
+            sc->dw[2] = SLOT_TT_HUB(tt->slot) | SLOT_TT_PORT(udev->depth == tt->depth + 1 ? udev->port : 0);
+    }
     struct xhci_ep_ctx *ec = in_ctx(x, d, 1);
     ec->dw[1] = EP_TYPE(EP_TYPE_CONTROL) | EP_MPS(d->ep[1].mps) | EP_CERR(3);
     uint64_t deq = d->ep[1].ring->dma | EP_DCS;

@@ -13,6 +13,7 @@
 #include <kernel/bootarchive.h>
 #include <kernel/blk.h>
 #include <kernel/bootinfo.h>
+#include <kernel/fbcon.h>
 #include <kernel/cosmofs.h>
 #include <kernel/device.h>
 #include <kernel/iommu.h>
@@ -101,6 +102,13 @@ static void log_memory_map(void)
     kdebug("bootstrap page tables at phys 0x%llx", (unsigned long long)info->boot_pagetable_root);
     if (info->acpi_rsdp)
         kdebug("ACPI RSDP at phys 0x%llx", (unsigned long long)info->acpi_rsdp);
+    const struct bootinfo_framebuffer *fb = bootinfo_framebuffer();
+    if (fb)
+        kinfo("framebuffer: %ux%u, %u bpp, pitch %u, at phys 0x%llx (%llu KiB)",
+              fb->width, fb->height, fb->bpp, fb->pitch, (unsigned long long)fb->phys,
+              (unsigned long long)(fb->size >> 10));
+    else
+        kinfo("framebuffer: none; the console is the serial port alone");
 
     kdebug("memory map (%u entries):", n);
     for (uint32_t i = 0; i < n; i++) {
@@ -127,6 +135,10 @@ void kernel_main(const struct cosmoboot_info *info)
     pmm_init();
     kmalloc_init();
     vmm_init();
+    /* The display, as soon as its memory can be mapped: everything
+     * printed after this appears on the screen as well as the serial
+     * line, and the newest screenful of what came before is replayed. */
+    fbcon_init();
 
     /* Execution: firmware tables, interrupt controllers, the clock and
      * tick, then the scheduler (which adopts this context as thread 0). */

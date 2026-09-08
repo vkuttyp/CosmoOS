@@ -115,12 +115,16 @@ struct blkdev {
     uint64_t completed_local, completed_remote;   /* completions on the issuing CPU / elsewhere (queue locality) */
     unsigned nr_queues;              /* informational: hardware queues the driver uses (1 when it says nothing) */
     bool gone;                       /* unregistered: blk_submit refuses (-ENODEV) */
+    bool recovering;                 /* the layer has decided a request timed out and the driver's
+                                      * recovery has not finished: new bios wait rather than be
+                                      * accepted into a device that is about to fail everything */
     uint32_t submitting;             /* blk_submit calls inside ops->submit right now */
     struct list_node pending;        /* bios the driver refused with -EAGAIN, resubmitted in order */
     struct list_node inflight;       /* bios the driver holds, oldest first */
     spinlock_t qlock;                /* the pending and in-flight lists */
     uint64_t requeued;               /* bios that waited in `pending` */
     uint64_t redrained;              /* refusals retried at once because the driver held nothing that could wake the queue */
+    uint64_t deferred;               /* bios parked because the device was recovering from a timeout */
 };
 
 void blk_init(void);

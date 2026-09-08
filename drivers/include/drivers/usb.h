@@ -74,6 +74,7 @@ struct usb_setup {
 #define USB_RECIP_DEVICE     0x00u
 #define USB_RECIP_INTERFACE  0x01u
 #define USB_RECIP_ENDPOINT   0x02u
+#define USB_RECIP_OTHER      0x03u   /* a hub's port */
 
 #define USB_REQ_GET_STATUS         0
 #define USB_REQ_CLEAR_FEATURE      1
@@ -85,6 +86,7 @@ struct usb_setup {
 #define USB_REQ_SET_INTERFACE      11
 #define USB_FEATURE_ENDPOINT_HALT  0
 
+#define USB_CLASS_HID          0x03
 #define USB_CLASS_HUB          0x09
 #define USB_CLASS_MASS_STORAGE 0x08
 
@@ -116,10 +118,25 @@ struct usb_interface {
     struct usb_device *udev;
 };
 
+/* How deep a device may sit below the root hub. The route string holds
+ * one nibble per tier and xHCI defines five (§8.9), which is also what
+ * USB 3 allows. */
+#define USB_MAX_DEPTH 5
+
 struct usb_device {
-    struct device dev;              /* on usb_bus, "usb<hcd>-<port>"; parent = the controller */
+    struct device dev;              /* on usb_bus, "usb<hcd>-<port>" or "...-<port>.<port>"; parent = the
+                                     * controller, or the hub the device is plugged into */
     struct usb_hcd *hcd;
-    unsigned port;                  /* root-hub port, 1-based */
+    unsigned port;                  /* the port on `parent`, 1-based (a root-hub port when parent is NULL) */
+    /* Where the device is, which is what the controller must be told to
+     * reach it (U2): the root-hub port at the top of the chain, the
+     * route string of hub ports below it (four bits a tier, the first
+     * tier in the lowest nibble), and how many tiers that is. All zero
+     * for a device on a root port. */
+    struct usb_device *parent;      /* the hub, or NULL on a root port. A reference is held. */
+    unsigned root_port;
+    uint32_t route;
+    unsigned depth;
     enum usb_speed speed;
     unsigned slot;                  /* the HCD's slot id; 0 = none */
     struct usb_device_descriptor desc;
@@ -199,6 +216,7 @@ int usb_bulk_msg(struct usb_device *udev, uint8_t ep, void *buf, uint32_t len, u
  * (CLEAR_FEATURE ENDPOINT_HALT). Thread context. */
 int usb_clear_halt(struct usb_device *udev, uint8_t ep);
 
+
 /* --- class drivers ---------------------------------------------------------- */
 
 #define USB_ID_VENDOR (1u << 0)   /* match idVendor/idProduct */
@@ -269,6 +287,15 @@ void usb_hcd_unregister(struct usb_hcd *hcd);   /* disconnects every port first 
  * `port` (already enabled), or take down the one that was there. */
 int usb_port_connected(struct usb_hcd *hcd, unsigned port, enum usb_speed speed);
 void usb_port_disconnected(struct usb_hcd *hcd, unsigned port);
+
+/* The same, one tier down, for a hub driver (drivers/usb/usb_hub.c):
+ * `hub` is the hub's own device and `port` one of its ports, already
+ * powered, reset and enabled. Thread context. On success *out holds a
+ * reference the caller must give back with usb_hub_port_disconnected.
+ * -ELOOP when the device would sit deeper than USB_MAX_DEPTH. */
+int usb_hub_port_connected(struct usb_device *hub, unsigned port, enum usb_speed speed,
+                           struct usb_device **out);
+void usb_hub_port_disconnected(struct usb_device *child);
 
 /* The HCD reports a request finished (any context). */
 void usb_request_complete(struct usb_request *r, int status, uint32_t actual);

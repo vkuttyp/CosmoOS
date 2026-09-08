@@ -100,6 +100,9 @@ struct ahci_port {
     uint32_t err_ci;                   /* PxCI at that moment: which commands the HBA still held */
     bool recovering;                   /* a restart is in progress: submit refuses (-EAGAIN) until the port runs again */
     bool change;                       /* PCS/PRCS: the worker re-reads the port */
+#if CONFIG_FAULTINJECT
+    uint32_t withheld;                 /* tests: slots filled whose PxCI bit was never written */
+#endif
     uint64_t issued, completed, errors, resets;
 };
 
@@ -288,6 +291,9 @@ static void slots_fail(struct ahci_port *p, struct bio *victim, int victim_statu
         struct ahci_slot s = p->slots[slot];
         slot_unmap(p, (unsigned)slot);
         p->active &= ~(1u << slot);
+#if CONFIG_FAULTINJECT
+        p->withheld &= ~(1u << slot);
+#endif
         p->completed++;
         spin_unlock_irqrestore(&p->lock, f);
         int st = s.bio == victim && victim != NULL ? victim_status : status;
@@ -329,6 +335,14 @@ static void port_complete(struct ahci_port *p, int status)
     arch_irq_state_t f = spin_lock_irqsave(&p->lock);
     uint32_t ci = prd(p, PX_CI);
     uint32_t done = p->active & ~ci;
+#if CONFIG_FAULTINJECT
+    /* A withheld slot (FI_AHCI_CI) is filled and never issued, so its
+     * PxCI bit reads clear -- which is also how the HBA reports a
+     * finished command. Real hardware never produces that state; the
+     * injector does, so the injected command is excluded here or the
+     * next interrupt from any other command would "complete" it. */
+    done &= ~p->withheld;
+#endif
     while (done) {
         unsigned slot = (unsigned)__builtin_ctz(done);
         done &= ~(1u << slot);
@@ -686,6 +700,10 @@ static int ahci_submit(struct blkdev *bd, struct bio *bio)
     wmb();
     if (!hang)
         pwr(p, PX_CI, 1u << slot);
+#if CONFIG_FAULTINJECT
+    else
+        p->withheld |= 1u << slot;
+#endif
     p->issued++;
     spin_unlock_irqrestore(&p->lock, f);
     return 0;
@@ -705,8 +723,15 @@ static void ahci_timeout(struct blkdev *bd, struct bio *victim)
         if ((p->active & (1u << i)) && p->slots[i].bio == victim)
             mine = true;
     spin_unlock_irqrestore(&p->lock, f);
-    if (!mine)
-        return;   /* completed between the layer's decision and now */
+    if (!mine) {
+        /* Completed between the layer's decision and now -- or never
+         * reached the port at all, which the layer's own accounting
+         * would hide. Say which, since a timeout nobody acts on is
+         * otherwise invisible. */
+        kwarn("ahci%u: port %u: a bio the port does not hold timed out (sector %llu, %u sectors)",
+              p->hba->index, p->index, (unsigned long long)victim->sector, victim->nsectors);
+        return;
+    }
     kwarn("ahci%u: port %u: command timed out (PxCI 0x%08x, PxTFD 0x%08x); restarting the port", p->hba->index,
           p->index, prd(p, PX_CI), prd(p, PX_TFD));
     port_restart(p, victim, -ETIMEDOUT, -EIO);
@@ -867,6 +892,9 @@ static void port_recover(struct ahci_port *p)
      * snapshot. Reissuing every active slot would have run the completed
      * ones a second time and left their bios waiting (Greptile, PR #53). */
     uint32_t done = p->active & ~ci & ~(1u << slot);
+#if CONFIG_FAULTINJECT
+    done &= ~p->withheld;
+#endif
     slots_complete_locked(p, done, 0, &f);
     struct ahci_slot s = p->slots[slot];
     bool failed = (p->active & (1u << slot)) != 0;
