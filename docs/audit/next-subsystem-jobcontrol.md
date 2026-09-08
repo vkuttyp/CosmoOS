@@ -130,7 +130,7 @@ the property that makes this safe, and it is inherited free from where
 signals are delivered.
 
 **Getting the *other* threads to park is not free, and the core does not
-do it today.** Two facts decide the mechanism, and both are worth
+do it today.** Three facts decide the mechanism, and all three are worth
 stating before anything is written:
 
 - A signal sent to the process, rather than to a thread, sets
@@ -138,28 +138,46 @@ stating before anything is written:
   `route_locked` breaks out of its walk at the first one. That is right
   for an ordinary signal, where exactly one thread should take it, and
   wrong for a stop, where every thread must park.
+- **Waking a sibling is not enough.** `wait_event_killable` re-evaluates
+  its own condition and `signal_pending()`, and `signal_pending()` reads
+  `kill_sig`, the process state, and the pending sets — which the thread
+  that dequeued the stop has already cleared. A woken sibling therefore
+  finds nothing to report and blocks again. Waking without also giving
+  it something to see is a no-op with extra steps.
 - `wait_event` — the non-killable wait — never consults
-  `signal_pending()`. A thread inside one does not come out for a stop
-  and cannot be made to; it parks when whatever it waits for completes.
+  `signal_pending()` at all. A thread inside one cannot be made to come
+  out; it parks when whatever it waits for completes.
 
-So the stop needs its own routing, not the signal core's: whichever
-thread dequeues the stop signal sets `stopped` and then wakes *every*
-thread of the process, and the return-to-user path checks `stopped`
-directly rather than inferring it from a pending signal. A thread in a
-killable wait comes out with `-EINTR` and parks at the syscall's return;
-a thread in a non-killable wait parks when that wait ends.
+So the stop is a **per-thread flag, set on every thread at once**, in
+the same shape `kill_sig` already uses: a process-wide decision made
+visible to each thread's own wait predicate. `signal_pending()` reports
+it, so `wait_event_killable` returns `-EINTR` for a stop exactly as it
+does for a kill, and the return-to-user path parks the thread and clears
+its flag. The `stopped` flag on the process is then a summary — true
+while any thread still carries its bit or is parked — rather than the
+thing the waits consult.
 
-The consequence is worth being honest about rather than discovering in a
-test: **a stop is not instantaneous across threads.** A process is
-stopped when the last of its threads has parked, and a thread inside a
-non-killable wait delays that for as long as the wait lasts. Every such
-wait in the tree is bounded by an I/O completion or a timer, so this is
-a latency rather than a hang — but a `waitpid` that reports the stop
-must report it when the process is *fully* parked, or a shell will take
-the terminal back while a thread of the job is still running. All of the
-tree's own user processes are single-threaded today, so only the Linux
-personality's `clone` reaches this case; that is exactly why it needs to
-be designed rather than left to be found.
+**And the interrupted call must be restarted, not failed.** A syscall
+cut short by a stop has to resume when the process continues; a `read`
+that returns `-EINTR` because someone pressed `^Z` and then `fg` would
+be a bug in every program that does not expect it. The core already has
+the machinery — `thread.syscall_nr`, `syscall_arg0` and
+`arch_user_regs_restart_syscall` — but it gates restart on `SA_RESTART`,
+and a stop has no action to carry a flag. Parking for a stop must
+therefore mark the call for restart unconditionally, which is what Linux
+does and what this design has to say explicitly because the existing
+gate would otherwise say no.
+
+The remaining consequence is worth being honest about rather than
+discovering in a test: **a stop is still not instantaneous across
+threads.** A thread inside a non-killable wait parks only when that wait
+ends. Every such wait in the tree is bounded by an I/O completion or a
+timer, so this is a latency rather than a hang — but a `waitpid` that
+reports the stop must report it when the process is *fully* parked, or a
+shell will take the terminal back while a thread of the job is still
+running. All of the tree's own user processes are single-threaded today,
+so only the Linux personality's `clone` reaches any of this; that is
+exactly why it needs designing rather than finding.
 
 **`SIGCONT`** clears `stopped`, wakes `stopped_wq`, and discards any
 pending stop signal; posting a stop signal discards a pending `SIGCONT`.
@@ -293,10 +311,10 @@ throwing the job away after `waitpid`.
   `fg`, `bg` and `&`. No new system call numbers — `wait` gains flags
   and `kill` already sends every signal this needs.
 - **Kernel-internal**: `process_stop(p, sig)` and `process_continue(p)`;
-  `process_group_is_orphaned(pgid, sid)`; the delivery-side park in
-  `signal_deliver` and the all-thread wake beside it;
-  `process_fully_stopped(p)`, which is what `waitpid` reports on;
-  `tty_read`'s foreground check.
+  a per-thread stop flag that `signal_pending()` reports, beside
+  `kill_sig`; `process_group_is_orphaned(pgid, sid)`; the delivery-side
+  park in `signal_deliver`; `process_fully_stopped(p)`, which is what
+  `waitpid` reports on; `tty_read`'s foreground check.
 
 ## Migration plan
 
@@ -322,10 +340,16 @@ throwing the job away after `waitpid`.
   stopped process blocked in `read` stops there and resumes; a `SIGSTOP`
   and a `SIGCONT` in one batch leave it running, not parked.
 - **`signal-stop-threads`** — a Linux-personality program with two
-  threads, one of them inside a wait: the stop must park both, and the
-  parent's `waitpid` must not report the stop until it has. This is the
-  test for the routing above, and the only one that needs more than one
-  thread, since the native ABI has no way to make one.
+  threads, one of them blocked in a `read` that will never complete: the
+  stop must park both, and the parent's `waitpid` must not report the
+  stop until it has. This is the test for the routing above, and the
+  only one that needs more than one thread, since the native ABI has no
+  way to make one. It is also the test that fails if waking a sibling is
+  mistaken for stopping it.
+- **`signal-stop-restart`** — a process blocked in a `read` on a pipe is
+  stopped and continued, and the `read` then returns the byte that
+  arrives afterwards rather than `-EINTR`. Without the unconditional
+  restart this fails, and it fails in the way programs actually notice.
 - **`signal-stop-mask`** — `SIGSTOP` cannot be blocked, caught or
   ignored, which the core already enforces and this makes explicit.
 - **`tty-stop`** — the two-ended shape the signals unit used: a process
@@ -387,6 +411,11 @@ benchmark, and the tests cover both cases explicitly instead.
   it. The report above makes `waitpid` wait for the last thread; the
   risk is that "the last thread" is easy to get wrong when threads are
   exiting at the same time.
+- **A syscall that is failed rather than restarted.** The restart gate
+  exists and says no to anything without `SA_RESTART`; a stop has no
+  action. Getting this wrong turns `^Z`/`fg` into spurious `-EINTR` in
+  every program that was blocked, and it is the kind of thing that looks
+  fine in a test that only stops an idle process.
 - **A `SIGCONT` that races a stop.** Both directions must be tried: the
   signal core's per-process lock covers the state, but the ordering
   rules (a stop discards a pending continue and the reverse) are the
