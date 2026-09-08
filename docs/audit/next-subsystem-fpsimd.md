@@ -121,18 +121,29 @@ Five steps, in the order they should be built.
 with `FPCR` at its architectural reset value; the switch hook in
 `context.c` saves the outgoing owner's registers and restores the
 incoming owner's, exactly as x86-64's does; `arch_fpu_free` releases it.
-`CPACR_EL1.FPEN` is set to allow EL0 and **not** EL1, so the kernel rule
-is enforced by hardware rather than by the compiler alone: kernel code
-that touches a vector register still traps, which is the property x86-64
-gets from `-mgeneral-regs-only` plus review and AArch64 can get from the
-machine.
+**`CPACR_EL1.FPEN` has no mode that allows EL0 and traps EL1** (review,
+PR #56, and it is worth stating because the first version of this report
+proposed exactly that). The field is: `0b00` and `0b10` trap at both
+levels, `0b01` traps EL0 only, `0b11` traps neither. Nor could the
+missing mode be useful — EL1 is where the vector registers are saved and
+restored, so the kernel has to be allowed to touch them.
 
-The trap at EC `0x07` stops being an invalid opcode for user threads.
-What it becomes is the question in §4 above: with eager allocation it is
-"this thread should already own state" — a kernel bug, and a fault. With
-lazy allocation it is the ordinary path: allocate, enable, retry. The
-plan builds **eager first**, because it is the rule already written
-down, and lets the benchmark below argue for lazy if it can.
+That leaves the kernel rule where x86-64 already keeps it: the build
+flag plus review. This report proposes making it a check rather than a
+promise, on both architectures, since it is cheap: **disassemble the
+built kernel and require that no vector or floating-point register
+appears outside the save and restore functions**. One rule, two
+architectures, enforced by the build instead of by intention.
+
+And it sharpens the eager-or-lazy question rather than settling it,
+because the architecture has an opinion. `FPEN = 0b01` — trap EL0, allow
+EL1 — *is* the lazy design: the first FP instruction a thread executes
+traps to EC `0x07`, the handler gives it state and enables access, and a
+thread that never uses FP is never saved or restored. Eager takes
+`0b11`, gets nothing from the hardware, and pays for every switch. The
+plan still builds **eager first**, because that is the rule `arch/fpu.h`
+states and x86-64 keeps for a reason recorded in the critical-fix pass;
+the benchmark below is what would justify the fork.
 
 ### 2. The signal frames
 
@@ -141,10 +152,20 @@ using, which means the frame carries the state and `sigreturn` restores
 it. x86-64 does this already. AArch64 gains an `fpsimd_context` in the
 `mc->reserved` area of `struct lx_sigcontext_a64` — the ABI's magic,
 size, `fpsr`/`fpcr` and 32 vector registers — before the `esr_context`
-and the terminator, and `sigreturn` restores from it. The native signal
-path gets the same treatment through the same accessors
+and the terminator, and `sigreturn` restores from it. Both go through
+the accessors the generic signal code already calls
 (`arch_user_fpu_image_size/save/restore`), which on AArch64 describe the
 `fpsimd_context` body rather than an FXSAVE image.
+
+**Only the Linux personality has signal frames** (review, PR #56).
+`p->pers->signal_frame` is set by `compat/linux/syscalls.c` and by
+nothing else; a native process with a handler is terminated instead
+(`kernel/process/signal.c:312`), so there is no native frame to put FP
+state into and this unit does not invent one. What it does is put the
+work behind the shared accessors, so that a native signal ABI — its own
+unit, whenever someone wants handlers outside the personality — inherits
+it. The signal test below therefore runs under the Linux personality,
+which is where handlers run at all.
 
 ### 3. The guest rule
 
@@ -180,7 +201,7 @@ is the same test with more work).
 | File | Change |
 | --- | --- |
 | `kernel/arch/aarch64/fpu.c` | the state, the switch, the trap path; the test hooks become real |
-| `kernel/arch/aarch64/context.c`, `cpu.c` | the switch hook; `CPACR_EL1.FPEN` for EL0 at CPU bring-up |
+| `kernel/arch/aarch64/context.c`, `cpu.c` | the switch hook; `CPACR_EL1.FPEN` at CPU bring-up (`0b11` for eager, `0b01` for lazy) |
 | `kernel/arch/aarch64/trap.c` | EC `0x07` is no longer an invalid opcode |
 | `kernel/arch/aarch64/include/arch/*.h` | the image accessors' AArch64 shape |
 | `kernel/arch/aarch64/hv_el2*.c` | the guest rule for vector state |
@@ -189,6 +210,7 @@ is the same test with more work).
 | `build/arch/aarch64.mk`, `build/arch/x86_64.mk`, `libc/libc.mk` | user flags lose `-mgeneral-regs-only` |
 | `libc/src/printf.c` | `%f`, `%e`, `%g` |
 | `kernel/core/selftest.c`, `kernel/arch/aarch64/testhooks.c` | `fpu-switch` becomes real on AArch64; new tests below |
+| `scripts/` and the build | the disassembly check that the kernel touches no vector register |
 | `tests/linux/linux.mk`, `tests/linux/lxsig.c` | the canary and an FP signal case |
 | `docs/kernel/arch/aarch64/*`, `docs/kernel/arch/design.md`, `docs/compat/linux/*`, `docs/libc/*` | the rules, now enforced on both |
 
@@ -229,26 +251,36 @@ in the matrix — would keep the current behaviour by leaving FPEN alone.
 true): two threads set different patterns in `Q0`–`Q31`, yield to each
 other repeatedly, and each finds its own pattern intact.
 
-**`fpu-signal`** (new, both architectures): a user thread computes in
-vector registers in a loop; a signal arrives; the handler fills every
-vector register with a different pattern and returns; the interrupted
-loop's registers are unchanged and its result is right. This is where FP
-bugs live, and it is one test on both architectures because the frames
-differ and the property does not.
+**`fpu-signal`** (new, both architectures, **under the Linux
+personality**, which is the only one with handler frames): a user thread
+computes in vector registers in a loop; a signal arrives; the handler
+fills every vector register with a different pattern and returns; the
+interrupted loop's registers are unchanged and its result is right. This
+is where FP bugs live, and it is one test on both architectures because
+the frames differ and the property does not.
 
-**`fpu-exec`** (new): a thread that has never used FP has no state
-(`thread->fpu == NULL`), and one that has, has it; after `exec` the
-state is the architectural reset value and not the previous program's.
-`fork` and `clone` copy it.
+**`fpu-lifetime`** (new): what "owns state" means under the policy
+chosen, which is not the same sentence for both (review, PR #56, where
+the first version of this asked for the lazy answer while the plan built
+eager). **Under eager**: every user thread has state before its first
+instruction and every kernel thread has none, `fork` and `clone` copy
+the parent's, and `exec` resets it to the architectural values rather
+than carrying the previous program's. **Under lazy**, if the benchmark
+argues for it: the same, except that a thread has no state until its
+first FP instruction, so the test also requires that a thread which
+never executes one is never saved or restored — which is the whole
+benefit, and therefore the thing to check.
 
 **`hv-guest-fpu` on AArch64** (the existing x86 test, second
 architecture): a guest fills the vector registers, the host thread's are
 unchanged.
 
-**The kernel rule, still enforced**: a self-test that executes a vector
-instruction from kernel context must fault, not corrupt a thread's
-state. On AArch64 that is `FPEN` denying EL1; on x86-64 it stays a
-review property of the build flags, which the test states.
+**The kernel rule, checked rather than promised**: a build step
+disassembles the kernel image and requires that no vector or
+floating-point register appears outside the save and restore functions.
+The hardware cannot help here on either architecture — EL1 and ring 0
+are exactly where the state is saved — so the check is the build's, it
+costs a second, and it holds on both.
 
 **The whole boot** (step 4): every user program compiled with SIMD.
 `sh`, `pkg`, `init`, the userland tools and the shell test exercise NEON
