@@ -108,6 +108,16 @@ class KeyTest:
                     raise OSError(f"QMP {cmd}: {reply['error']}")
                 return reply
 
+    # A key state has to last long enough for the guest to poll it. The
+    # keyboard's interval is 8 ms and a loaded runner emulating a machine
+    # emulating a keyboard is slower than that by a wide margin, so these
+    # four transitions are spaced by a tenth of a second rather than the
+    # 20 ms the rest of the typing uses: with 20 ms, CI saw the two
+    # overlapping presses land in one polled state and read back an empty
+    # line. Four tenths of a second, once a boot, buys the property the
+    # test exists for.
+    ROLLOVER_GAP_S = 0.1
+
     def _send_rollover(self, sock):
         """x down, y down, x up, y up: two keys held at once."""
         def ev(down, qcode):
@@ -115,7 +125,7 @@ class KeyTest:
 
         for events in ([ev(True, "x")], [ev(True, "y")], [ev(False, "x")], [ev(False, "y")]):
             self._command(sock, "input-send-event", {"events": events})
-            time.sleep(0.02)
+            time.sleep(self.ROLLOVER_GAP_S)
 
     def _send_char(self, sock, ch):
         key = _key_events(ch)
