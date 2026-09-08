@@ -535,6 +535,11 @@ a 108-line generated font table and the 82-line validator), 305 of
 `usb_hid`, 447 of `usb_hub`, and 640 of tests and harness -- roughly
 2 400 against the report's 1 850, most of the difference in the tests.
 
+The next report in this shape is `next-subsystem-fpsimd.md`: with a
+screen and a keyboard, the machine can be used by a person -- and what
+it can run is still only what was compiled to avoid the vector
+registers.
+
 Not covered, and named: the transaction translator fields for a
 full-speed device behind a high-speed hub (QEMU has only a full-speed
 hub, so they are written to the specification and untested), hubs behind
