@@ -71,8 +71,9 @@ Gap: none.
 
 - Every process runs as uid 0; the kernel's uid checks (`kill`,
   `mount`, privileged ports) are enforced but never fail in practice.
-- No control flow, globbing, background jobs, job control,
-  here-documents, command substitution or arithmetic in the shell.
+- No control flow, globbing, here-documents, command substitution or
+  arithmetic in the shell. (Background jobs and job control arrived with
+  the job-control unit.)
 - No `getopt`; options are parsed by hand and must precede operands.
 - No service supervision, `getty`, login, users.
 - The utilities are a rescue set; the ports system (Phase 10) brings

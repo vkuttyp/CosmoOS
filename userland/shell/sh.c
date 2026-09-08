@@ -8,8 +8,8 @@
  * There is no fork: pipelines are built by spawning every stage with its
  * pipe ends mapped, then waiting for all of them.
  *
- * No control flow, globbing, background jobs or command substitution in
- * this phase; the structures are shaped so they slot in.
+ * No control flow, globbing or command substitution in this phase; the
+ * structures are shaped so they slot in.
  *
  * An interactive shell also runs the terminal: it starts a session of
  * its own, puts each pipeline in a process group of its own, and hands

@@ -191,7 +191,9 @@ cosmo_siginfo`; this is the POSIX face of them.
   BSD.
 
 Not provided, because the kernel does not have them: real-time signals,
-queued siginfo, `sigaltstack`, `sigsuspend`, `sigwait`, and job control.
+queued siginfo, `sigaltstack`, `sigsuspend` and `sigwait`. Job control
+*is* provided -- `WUNTRACED`/`WCONTINUED` and the `WIFSTOPPED` family in
+`sys/wait.h`, and the session calls in `unistd.h`.
 
 ## Sockets
 

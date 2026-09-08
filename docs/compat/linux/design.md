@@ -274,9 +274,11 @@ through `SA_RESTORER` = 0 — which Linux refuses; so does this kernel
 (`SIGSEGV`). The page is a `VM_REGION_ANON` region named `sigtramp`,
 populated at process creation.
 
-Default dispositions follow Linux except the stop signals (ignored: no
-job control), and `SIGKILL`/`SIGTERM`/`SIGINT` and the rest terminate
-with `128 + sig`, the status `wait4` encodes as a termination by signal.
+Default dispositions follow Linux: the stop signals stop the process
+(since the job-control unit; they were ignored before it), `SIGCONT`
+continues one, and `SIGKILL`/`SIGTERM`/`SIGINT` and the rest terminate
+with `128 + sig`, the status `wait4` encodes as a termination by
+signal.
 
 ### Threads: `clone`
 

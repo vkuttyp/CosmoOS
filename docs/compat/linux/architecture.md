@@ -107,7 +107,9 @@ what Linux is.
 - `execve`, `fork`, `vfork`, `clone3`: `-ENOSYS` (`clone` creates
   threads only); a real `ld.so` has not been run (the tree has no
   shared objects), though `PT_INTERP` loading and file `mmap` exist.
-- Real-time signal queues, job control (stop signals are ignored).
+- Real-time signal queues. (Job control arrived with the job-control
+  unit: the stop signals stop, and `wait4` takes `WUNTRACED` and
+  `WCONTINUED`.)
 - `/proc`, `/sys`, `/dev` nodes, `ioctl` beyond "not a terminal",
   `epoll`/`select`, `sendmsg`/`recvmsg`, writable shared file mappings,
   `mremap`, shared memory, namespaces, seccomp: later stages or never.
