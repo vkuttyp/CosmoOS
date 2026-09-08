@@ -367,6 +367,69 @@ Two questions, both of which decide code:
   its host test, and 300 of tests — roughly 1 100, spread thin across
   many files rather than concentrated in a new one.
 
+## Outcome (2026-09-08)
+
+Built as one unit on `arch/fpsimd`, all five steps.
+
+**The architectural question is answered with a measurement, and the
+answer is eager.** `fpu-bench` times two threads handing the processor
+back and forth with owned state and without: the save and restore are
+about 1 000 ns of a 21 600 ns switch on AArch64 and about 270 ns of a
+2 700 ns switch on x86-64 (QEMU TCG, so these measure the emulator more
+than the silicon). Lazy switching would trade that for a trap on each
+thread's first FP instruction -- and since the userland is now built
+without `-mgeneral-regs-only`, every user thread executes one within a
+few instructions of `_start`. A fraction of a switch against a trap for
+everybody: lazy is not written, and `arch/fpu.h` keeps one rule for both
+architectures, which is what it said in the first place.
+
+What the report had right: `CPACR_EL1.FPEN` is `0b11` (the review round
+had already corrected the claim that EL1 could be trapped), the state is
+528 bytes, the signal frame carries an `fpsimd_context` before the
+`esr_context`, the EL2 backend swaps guest and owner around an entry,
+and no interface in `arch/fpu.h` had to change shape.
+
+What it did not know:
+
+- **Removing the flag changes nothing by itself.** The shell has no
+  vector instructions with or without `-mgeneral-regs-only`: the
+  compiler uses those registers when they help, and a small shell gives
+  it no reason. What made the userland exercise the kernel's saving was
+  `%f` -- the float conversions put 39 FP instructions in the AArch64
+  libc and 37 in the x86 one. The report treated the flag as the test
+  and the conversions as a nicety; it is the other way round.
+- **`CPACR_EL1` is per-CPU state**, and the first version told only the
+  boot CPU. CPU 1 took an FP trap inside the context switch before any
+  thread existed -- `EC=0x07`, "context: boot (no threads yet)".
+- **The kernel-rule check needs the assembler's permission too.** The
+  save and restore live in their own file with `.arch armv8-a+fp+simd`,
+  because `-mgeneral-regs-only` tells the assembler to refuse those
+  instructions as well; the file that asks for them back is the same
+  file the check allows, which is a pleasant symmetry.
+- **Zero padding goes after the sign**, which the first `%f` got wrong
+  (`000-1.50` for `%08.2f`), and the host test now pins.
+
+Also fixed here, and not part of the unit: the `timer` self-test allowed
+the tick counter to lag the clock by two ticks in a 40 ms window, which
+failed about half the time in the busiest shape the chain runs -- on
+`main` as much as on this branch, which is what distinguishes a
+tolerance that is too tight from a regression. A coalesced tick is the
+platform being honest; the allowance is a quarter of the window now, and
+the other side, where a tick ahead of the clock would be a real bug,
+keeps its bound of two.
+
+Size: about 250 lines for the AArch64 state, switch and assembly, 90 for
+the signal frame on both sides, 20 for the guest rule, 200 for the float
+conversions, 60 for the check script, and 250 of tests -- roughly 900,
+against the report's estimate of 1 100.
+
+Not covered, and named: SVE (a machine with it runs the FP/SIMD state
+fine), `long double` and `%a`, exactly rounded conversion in the last
+digit, a native signal ABI (the personality is still the only thing with
+handler frames), and `hello_musl` on AArch64, which needs a cross musl
+the runner does not install -- the canary there is `lxtest`'s own vector
+round-trip through a handler instead.
+
 ## Alternatives considered
 
 - **GICv3** (`docs/kernel/arch/aarch64/design.md`, "Future

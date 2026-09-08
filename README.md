@@ -742,6 +742,29 @@ See [docs/development.md](docs/development.md).
   faulted), an AHCI fault injection that a second console sink's timing
   exposed as unfaithful, and the rule that a transfer's buffer may not
   be a kernel stack.
+- **Floating point and SIMD (done):** `docs/kernel/arch/design.md`
+  ("FPU and SIMD state") and `docs/kernel/arch/aarch64/`.
+  `printf("%f", 3.14)` printed `?`, and that was the visible end of a
+  rule that ran through the tree: the kernel is built
+  `-mgeneral-regs-only`, which is right, and so were the libc and every
+  user program, which was not. On x86-64 that was a build choice over a
+  kernel that was ready; on AArch64 `CPACR_EL1.FPEN` sat at its reset
+  value, so every FP instruction trapped at EL0 and EL1 alike. AArch64
+  now has a 528-byte state per thread with eager switching, the arm64
+  signal frame carries an `fpsimd_context` (so a handler may use the
+  vector registers without losing the interrupted code's), the EL2
+  backend swaps guest and owner around an entry, and the userland is
+  built without the flag with real `%f`, `%e` and `%g` behind it. The
+  kernel's own abstention is checked rather than promised —
+  `scripts/check-fpregs.sh` disassembles the built image during `make
+  analyze` and fails on any vector register outside a named short list,
+  because neither architecture can enforce it in hardware: ring 0 and
+  EL1 are exactly where the state is saved. Eager stayed, with the
+  measurement §21 asks for: the save and restore are about 1 000 ns of a
+  21 600 ns switch on AArch64 and 270 of 2 700 on x86-64, against a trap
+  for every thread under lazy. What the report got backwards: removing
+  the build flag changes nothing by itself — the compiler uses those
+  registers when they help, and it was `%f` that gave it a reason.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -762,9 +785,8 @@ See [docs/development.md](docs/development.md).
   console (built: the framebuffer the UEFI firmware has already lit,
   carried through a version 6 boot protocol into a second console sink,
   and a USB keyboard feeding the same `tty_input` the two UARTs feed).
-  `docs/audit/next-subsystem-fpsimd.md` does it for floating point and
-  SIMD: the kernel is built `-mgeneral-regs-only` and so is every user
-  program, `printf` prints `?` for `%f`, and on AArch64 it is not a
-  build choice — `CPACR_EL1.FPEN` is at its reset value, so a real
-  Linux binary's NEON `memcpy` takes `SIGILL` on its first instruction.
-  Design documents first, one subsystem at a time.
+  `docs/audit/next-subsystem-fpsimd.md` did it for floating point and
+  SIMD (built: AArch64 threads own vector state, the signal frame
+  carries it, and the userland is no longer compiled to avoid the
+  registers every real program uses). Design documents first, one
+  subsystem at a time.
