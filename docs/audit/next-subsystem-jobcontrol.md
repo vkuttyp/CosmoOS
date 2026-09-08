@@ -179,12 +179,32 @@ running. All of the tree's own user processes are single-threaded today,
 so only the Linux personality's `clone` reaches any of this; that is
 exactly why it needs designing rather than finding.
 
-**`SIGCONT`** clears `stopped`, wakes `stopped_wq`, and discards any
-pending stop signal; posting a stop signal discards a pending `SIGCONT`.
-Both leave the ignore table: `SIGCONT`'s default becomes *continue*, and
-the four stop signals' default becomes *stop*. `SIGKILL` un-stops and
-kills — a process that could not be killed while stopped would be worse
-than one that cannot stop.
+**`SIGCONT`** clears `stopped`, clears the per-thread stop flag on
+**every** thread, wakes `stopped_wq`, and discards any pending stop
+signal; posting a stop signal discards a pending `SIGCONT`. Both leave
+the ignore table: `SIGCONT`'s default becomes *continue*, and the four
+stop signals' default becomes *stop*. `SIGKILL` un-stops and kills — a
+process that could not be killed while stopped would be worse than one
+that cannot stop.
+
+**Clearing every thread's flag is not on its own enough**, and the case
+that shows why is the one the non-killable wait creates. A thread inside
+`wait_event` never sees the stop; if `SIGCONT` arrives before that wait
+ends, the continue sweeps a flag on a thread that is not looking, the
+wait then finishes, and the thread arrives at the return-to-user path
+carrying a flag from a stop that is over. Parking it there would stop a
+process that has already been continued, with nothing left to continue
+it again — a hang, from the same gap between per-thread and
+process-wide state that the routing above had in the other direction.
+
+So **the park is decided by re-reading the process's stop state under
+`p->lock` at the parking point**, and the per-thread flag is only a
+reason to *look* — it makes `signal_pending()` true so a killable wait
+returns and the return path runs, and it is never itself the authority
+on whether to park. A stale flag then costs one lock acquisition and a
+re-check, which is the correct amount for a race that cannot otherwise
+be closed: the thread that must observe the continue is by definition
+the one that was not watching when it happened.
 
 ### 2. `^Z`, `SIGTTIN` and `SIGTTOU` at the terminal
 
@@ -350,6 +370,13 @@ throwing the job away after `waitpid`.
   stopped and continued, and the `read` then returns the byte that
   arrives afterwards rather than `-EINTR`. Without the unconditional
   restart this fails, and it fails in the way programs actually notice.
+- **`signal-stop-late`** — the continue that outruns the thread: a stop
+  and then a `SIGCONT` while one thread is still inside a wait it cannot
+  be interrupted from. When that wait ends the thread must return to
+  user mode and keep running, not park. A design that trusts the
+  per-thread flag rather than re-reading the process's state hangs here,
+  and hangs in the way that needs a reset button, so the test is
+  bounded and fails rather than waiting.
 - **`signal-stop-mask`** — `SIGSTOP` cannot be blocked, caught or
   ignored, which the core already enforces and this makes explicit.
 - **`tty-stop`** — the two-ended shape the signals unit used: a process
@@ -411,6 +438,12 @@ benchmark, and the tests cover both cases explicitly instead.
   it. The report above makes `waitpid` wait for the last thread; the
   risk is that "the last thread" is easy to get wrong when threads are
   exiting at the same time.
+- **A continue that outruns the thread it is continuing.** The stop is
+  per-thread and the continue is process-wide, so any design in which
+  the thread's own flag decides whether to park has a window where a
+  flag outlives the stop that set it. Parking on a stale flag is a hang
+  rather than a wrong answer, which is why the park re-reads the
+  process's state under the lock instead.
 - **A syscall that is failed rather than restarted.** The restart gate
   exists and says no to anything without `SA_RESTART`; a stop has no
   action. Getting this wrong turns `^Z`/`fg` into spurious `-EINTR` in
