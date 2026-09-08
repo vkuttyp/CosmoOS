@@ -303,9 +303,12 @@ the service alone is a restart, not a stop. Then the service itself,
 whose pid the supervisor records in `/run/svc/<name>.child` for exactly
 this purpose.
 
-The supervisor cannot do the second kill, and that is a fact about this
-kernel rather than a choice: a native process has no signal handlers, so
-being told to stop kills it where it stands with no chance to tidy up.
+The supervisor does not do the second kill, and that used to be a fact
+about this kernel rather than a choice: `svc` installs no signal
+handler, so being told to stop kills it where it stands with no chance
+to tidy up. Since the signals unit a native process *can* catch
+`SIGTERM`; teaching the supervisor to is a change to `svc`, which
+nothing has asked for yet.
 `svc` therefore removes the pid files as well. The first version of this
 did signal only the supervisor, and a `sleep 30` service outlived its
 own stop by half a minute.

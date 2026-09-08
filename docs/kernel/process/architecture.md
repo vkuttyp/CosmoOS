@@ -242,6 +242,10 @@ in `design.md` section 10, the calls in `api.md`, the rules in
 - **Kill** (`kill`, 34): the only asynchronous event a process can
   receive. `SIGKILL`, `SIGTERM`, `SIGINT` (and any number 1..31)
   terminate the target with status `128 + sig`; there are no handlers.
+  (Superseded by the signals unit: the native personality has
+  `sigaction` and a frame builder, and only a signal with no handler
+  and a terminate default still ends the target this way. See
+  `docs/kernel/process/design.md`, "The native signal ABI".)
   Permission: same uid or uid 0. Delivery points are the system-call
   boundary, the return from any interrupt or fault to user mode, and
   every killable wait in the kernel (`wait_event_killable`), so a

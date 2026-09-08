@@ -294,9 +294,10 @@ static void pid_path(const char *name, char *out, size_t n)
 }
 
 /* The service's own pid, written by the supervisor after each spawn.
- * `svc stop` needs it because the supervisor cannot clean up after
- * itself: a native process here has no signal handlers, so being told
- * to stop kills it on the spot. */
+ * `svc stop` needs it because the supervisor does not clean up after
+ * itself: it installs no handler for SIGTERM -- the native ABI has had
+ * them since the signals unit, and nothing here has been taught to use
+ * one -- so being told to stop kills it on the spot. */
 static void child_path(const char *name, char *out, size_t n)
 {
     snprintf(out, n, RUN_DIR "/%s.child", name);
@@ -554,10 +555,11 @@ static int cmd_start(const char *name)
  * Stopping is two kills and they are ordered. The supervisor goes
  * first, or it would see its service die and start another one --
  * killing the service alone is a restart, not a stop. Then the service
- * itself, because the supervisor cannot do it: a native process here
- * has no signal handlers, so being told to stop kills it where it
- * stands, with no chance to tidy up. `svc` therefore removes the pid
- * files too.
+ * itself, because the supervisor cannot do it: neither installs a
+ * handler for SIGTERM, so being told to stop kills it where it stands,
+ * with no chance to tidy up. Handlers exist now (the signals unit);
+ * teaching the supervisor to shut down cleanly is a change to `svc`,
+ * not to the kernel. `svc` therefore removes the pid files too.
  */
 static int cmd_stop(const char *name)
 {

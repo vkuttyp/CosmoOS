@@ -1086,8 +1086,12 @@ static int64_t lx_wait4(struct syscall_args *a)
 {
     int pid = (int)a->a[0];
     unsigned options = (unsigned)a->a[2];
+    /* Waiting for a process group -- pid 0 or a negative pgid -- is not
+     * built. Process groups themselves exist (the signals unit), so
+     * this is a gap in wait4 rather than in the kernel; it is named in
+     * docs/compat/linux/invariants.md and in the job-control report. */
     if (pid == 0 || pid < -1)
-        return -ECHILD;   /* process groups do not exist */
+        return -ECHILD;
     pid_t got = 0;
     int status = 0;
     int rc = process_wait_child(pid, (options & LX_WNOHANG) ? PROCESS_WAIT_NOHANG : 0, &got, &status);
