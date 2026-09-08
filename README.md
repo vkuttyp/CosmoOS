@@ -705,12 +705,24 @@ See [docs/development.md](docs/development.md).
   harness has no monitor), IOMMU fault attribution to the controller,
   and `blk-bench`, which put the USB disk within noise of NVMe and
   virtio-blk on this device model — so no further scatter-gather work.
+- **AHCI (done):** `docs/drivers/ahci/`. The `ahci` module drives SATA
+  disks through an AHCI host bus adapter — on `q35` the ICH9 the machine
+  always had, which turned out to carry the boot image too — as one
+  blkdev per port (`ahci0p1`), non-queued commands in the HBA's 32
+  slots, task-file recovery, hotplug through a worker. It answered the
+  question the USB unit left: a SATA port has no identity of its own,
+  so its disk's DMA device is the controller and there is no `struct
+  device` per port; the model gained no DMA-parent pointer. NCQ was
+  measured (four streams reach 87 % of NVMe's aggregate without it) and
+  not written.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
-  domain deliberately does without and argues against. What follows is
-  the constitution's **section 60 hardware roadmap** — `NVMe`, an Intel
-  NIC and USB (done), then AHCI, with GPU, Wi-Fi and Bluetooth explicitly
-  later — and the AArch64 follow-ups in
+  domain deliberately does without and argues against. The constitution's
+  **section 60 hardware roadmap** is now done through AHCI — `NVMe`, an
+  Intel NIC, USB, AHCI — with the IOMMU unit done earlier and GPU, Wi-Fi
+  and Bluetooth explicitly later. What remains named are the follow-ups
+  each unit left (a USB hub driver and HID, NCQ if a real disk shows it
+  pays) and the AArch64 follow-ups in
   `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
   cover (GICv3, ASID allocation instead of a full invalidate per switch,
   FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the

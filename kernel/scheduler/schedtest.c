@@ -18,6 +18,8 @@
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <kernel/semaphore.h>
+#include <kernel/smp.h>
+#include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/wait.h>
@@ -530,5 +532,69 @@ bool selftest_waitqueue(const char **reason)
     CHECK(wt.woke == 2);
     CHECK(waitqueue_empty(&wt.wq));
     CHECK(threads_settle(before));
+    return true;
+}
+
+/* --- completion-race ---------------------------------------------------------- */
+
+/*
+ * A completion on the waiter's stack, completed from another CPU, and the
+ * frame reused the moment the waiter returns. complete() must have let go
+ * of the completion by then: the first version set `done`, dropped its
+ * lock and only then woke -- a waiter that arrived in that window (or
+ * polled) saw `done`, returned, and the wake ran on memory that belonged
+ * to the next call. The AHCI unit's concurrent block benchmark hit it as
+ * a spinlock assertion inside wake(). Here the waiter varies its arrival
+ * so the completer often completes first, then poisons the frame; with
+ * the old complete() the wake walks a zeroed wait queue and faults.
+ */
+struct cr_shared {
+    struct completion *volatile c;
+    volatile unsigned round;
+    volatile bool stop;
+};
+
+static void cr_completer(void *arg)
+{
+    struct cr_shared *sh = arg;
+    unsigned seen = 0;
+    while (!__atomic_load_n(&sh->stop, __ATOMIC_ACQUIRE)) {
+        unsigned r = __atomic_load_n(&sh->round, __ATOMIC_ACQUIRE);
+        if (r != seen) {
+            struct completion *c = __atomic_load_n(&sh->c, __ATOMIC_ACQUIRE);
+            seen = r;
+            complete(c);
+        } else {
+            arch_cpu_relax();
+        }
+    }
+    thread_exit(0);
+}
+
+bool selftest_completion_race(const char **reason)
+{
+    if (cpu_count() < 2) {
+        kinfo("selftest: completion-race: one CPU; skipping");
+        return true;
+    }
+    struct cr_shared sh = { NULL, 0, false };
+    struct thread *t = thread_create_on(cr_completer, &sh, "cr-completer", SCHED_PRIO_DEFAULT, CPUMASK_OF(1));
+    CHECK(t != NULL);
+    enum { ROUNDS = 20000 };
+    struct completion c;
+    uint64_t t0 = clock_now_ns();
+    for (unsigned r = 1; r <= ROUNDS; r++) {
+        completion_init(&c, "cr");
+        __atomic_store_n(&sh.c, &c, __ATOMIC_RELEASE);
+        __atomic_store_n(&sh.round, r, __ATOMIC_RELEASE);
+        for (unsigned k = 0; k < (r % 64); k++)
+            arch_cpu_relax();   /* sometimes the completer is first: that is the window */
+        wait_for_completion(&c);
+        memset(&c, 0, sizeof(c));   /* the frame is the next call's now */
+    }
+    __atomic_store_n(&sh.stop, true, __ATOMIC_RELEASE);
+    thread_join(t);
+    kinfo("selftest: completion-race: %u completions across two CPUs, the frame reused after each, in %llu ms", ROUNDS,
+          (unsigned long long)((clock_now_ns() - t0) / 1000000));
     return true;
 }

@@ -221,8 +221,23 @@ sleeping thread; `wait_event(&t->sleep_wq, timer fired)`.
   `down` waits for `count > 0`, `up` increments and wakes one. `up` is
   interrupt-safe.
 - `completion`: `{ spinlock_t lock; bool done; struct waitqueue wq; }`;
-  `complete` sets done and wakes all; `wait_for_completion` waits for
-  done. One-shot.
+  `complete` sets done and wakes all *under one hold of the lock*, and
+  `wait_for_completion`, having seen done, takes the lock once before
+  returning — so a waiter cannot return, and free the completion (it
+  usually lives on the waiter's stack), while `complete` is still inside
+  it. The first version dropped the lock between setting done and
+  waking; a waiter that arrived or polled in that window returned and
+  its frame was reused under the wake (found by the AHCI unit's
+  concurrent block benchmark). `completion-race` reproduces the shape —
+  20 000 completions across two CPUs with the waiter's frame zeroed the
+  moment it returns — and against the old code it panicked on aarch64
+  with the completer's own lock found zeroed at its unlock, exactly the
+  sequence above; on x86_64 the same rounds did not hit the window, which
+  is a few instructions wide and needs the completing CPU stalled inside
+  it. So the test is a reproducer on one architecture and a stress on the
+  other; the fix follows from the sequence. One-shot.
+  The wait queue's lock has its own class, `completion-wq`, because it is
+  taken inside the completion's own lock.
 
 ## 6. Timer subsystem (summary; full text in docs/kernel/timer/)
 

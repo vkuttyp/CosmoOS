@@ -112,8 +112,9 @@ through `sda` are attributed to the controller's requester id
 
 `scripts/qemu-run.sh` adds `-device qemu-xhci,id=xhci0` and
 `-device usb-storage,bus=xhci0.0,drive=usbdisk` over an 8 MiB image
-(`QEMU_USBDISK`, default `usb.img` beside the others) on both machine
-types. `QEMU_USB` selects: `qemu` (default), `nec` (the NEC uPD720200
+(`QEMU_USBDISK`, default `usb.img` beside the others for a hand-run
+`make run`; the boot test hands every run a fresh zeroed file beside its
+log) on both machine types. `QEMU_USB` selects: `qemu` (default), `nec` (the NEC uPD720200
 model, `nec-usb-xhci`), `0` (no controller: the USB tests skip and the
 boot test does not require the device lines). QEMU attaches the disk to
 a USB3 port, so it enumerates at super speed with 1024-byte bulk

@@ -254,9 +254,13 @@ kernel ABI; nothing here is visible to user space.
 
 `struct completion { spinlock_t lock; bool done; struct waitqueue wq; }`
 
-- `completion_init(c, name)`, `complete(c)` (sets `done`, wakes all;
-  interrupt-safe; idempotent), `wait_for_completion(c)` (returns at once
-  if done; panics in interrupt context), `completion_done(c)`.
+- `completion_init(c, name)`, `complete(c)` (sets `done` and wakes all
+  under the lock; interrupt-safe; idempotent), `wait_for_completion(c)`
+  (returns at once if done; panics in interrupt context; when it returns,
+  `complete` has finished touching `c`, so the caller may free it),
+  `completion_done(c)` (a lock-free read: true does *not* mean `complete`
+  has returned — a poller that saw it must still call
+  `wait_for_completion` before freeing `c`).
 
 ---
 

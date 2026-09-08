@@ -27,6 +27,7 @@ enum fi_kind {
     FI_DEMAND_PAGE,   /* the frame of a user-mode demand-zero fault (the process runs out) */
     FI_DEMAND_COPY,   /* the frame of a kernel-mode demand-zero fault in a user copy (-EFAULT) */
     FI_USB_CSW,       /* usb_storage queues the CSW read without ringing the doorbell: a hang with a transfer in flight */
+    FI_AHCI_CI,       /* ahci fills a slot and never sets its PxCI bit: a command that never starts */
     FI_KIND_COUNT,
 };
 

@@ -84,6 +84,15 @@ struct blkdev_ops {
      * command's status, which may be 0: a device is free not to notice that
      * its own DMA was dropped. Thread context. */
     int (*debug_dma)(struct blkdev *dev, uint64_t addr);
+    /* Optional, tests only: run the driver's own hotplug path for the
+     * device's slot as if the hardware had reported it absent (false:
+     * the disk goes, its requests fail -ENODEV, the blkdev is
+     * unregistered) or present (true: on an unregistered blkdev, probe
+     * the slot again and register a *new* blkdev; on a live one, reset
+     * the link and re-identify, keeping this blkdev if the same disk
+     * answers). The unregistered object is only the handle naming the
+     * slot; it is never re-registered. Thread context. */
+    int (*debug_presence)(struct blkdev *dev, bool present);
 };
 
 #define BLKDEV_NAME_MAX 16

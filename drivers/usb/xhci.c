@@ -277,6 +277,8 @@ static int xhci_cmd(struct xhci *x, uint64_t ptr, uint32_t control, unsigned *sl
     uint64_t deadline = clock_now_ns() + XHCI_CMD_TIMEOUT_NS;
     while (!completion_done(&x->cmdw.done) && clock_now_ns() < deadline)
         thread_sleep_ns(100000);
+    if (completion_done(&x->cmdw.done))
+        wait_for_completion(&x->cmdw.done);   /* the handshake: complete() has let go before the next init */
     int rc;
     s = spin_lock_irqsave(&x->lock);
     if (!completion_done(&x->cmdw.done)) {
@@ -959,10 +961,23 @@ static void xhci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
         volatile struct xhci_trb *ev = &x->evt[x->evt_deq];
         uint32_t control = ev->control;
         if (((control & TRB_CYCLE) != 0) != x->evt_cycle) {
-            /* Caught up: tell the controller where, and that the handler is done. */
+            /* Caught up: tell the controller where, and that the handler is
+             * done (EHB cleared). Then look once more: an event that landed
+             * between the check above and this write raised no interrupt,
+             * because EHB was still set, and would sit there until the next
+             * one -- which for a serial device waiting on this very event
+             * never comes. CI's aarch64 run found it under the concurrent
+             * benchmark: the ring filled (completion code 21) with nobody
+             * reading (docs/drivers/usb/testing.md). */
             wr64(ir + XHCI_ERDP, (x->evt_dma + (dma_addr_t)x->evt_deq * sizeof(struct xhci_trb)) | ERDP_EHB);
-            spin_unlock_irqrestore(&x->lock, s);
-            break;
+            rmb();
+            control = ev->control;
+            if (((control & TRB_CYCLE) != 0) != x->evt_cycle) {
+                spin_unlock_irqrestore(&x->lock, s);
+                break;
+            }
+            /* One arrived in the window: EHB is clear now, so the controller
+             * will interrupt for the next, and this one is handled here. */
         }
         rmb();
         struct xhci_trb e = { .ptr = ev->ptr, .status = ev->status, .control = control };
@@ -972,6 +987,17 @@ static void xhci_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
             x->evt_cycle = !x->evt_cycle;
         }
         x->events++;
+        /* Tell the controller where the consumer is *now*, EHB left set
+         * (a 0 in a write-one-to-clear bit changes nothing): a completion
+         * callback below may submit the next transfer, and a device model
+         * that finishes transfers on the doorbell write posts its events
+         * while this handler is still running -- a chain of them, for a
+         * storage driver whose every completion starts the next exchange.
+         * With the dequeue pointer written only at the end, the controller
+         * counted the ring as full after 255 such events and declared an
+         * Event Ring Full error (CI's aarch64 QEMU, the four-thread
+         * benchmark; docs/drivers/usb/testing.md). */
+        wr64(ir + XHCI_ERDP, x->evt_dma + (dma_addr_t)x->evt_deq * sizeof(struct xhci_trb));
         struct usb_request *done = NULL;
         int status = 0;
         switch (TRB_TYPE_OF(e.control)) {
