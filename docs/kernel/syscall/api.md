@@ -304,7 +304,10 @@ kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
 `struct cosmo_cqe` (16 bytes) (milestone 9);
 `COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags `COSMO_AT_NULL`
 0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9; `COSMO_DT_FIFO` 4,
-`COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*` (1..19
+`COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1, `COSMO_WUNTRACED` 2, `COSMO_WCONTINUED` 4 with
+`COSMO_STATUS_STOPPED(sig)` = `0x200 | sig` and
+`COSMO_STATUS_CONTINUED` = `0x400` (above the byte exit statuses use, so
+no existing status changed meaning); `COSMO_SIG*` (1..19
 and `COSMO_SIGSYS` 31), `COSMO_NSIG` 32; `COSMO_SIG_DFL` 0,
 `COSMO_SIG_IGN` 1, `COSMO_SA_RESTART` 0x10000000, `COSMO_SA_NODEFER`
 0x40000000, `COSMO_SA_RESETHAND` 0x80000000, `COSMO_SIG_BLOCK/UNBLOCK/

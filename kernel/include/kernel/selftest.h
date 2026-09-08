@@ -88,7 +88,14 @@ bool selftest_signal_fault(const char **reason);       /* ... at a fault, with t
 bool selftest_process_reaped(const char **reason);     /* a reaped pid is unfindable before its object goes */
 bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
 bool selftest_signal_setsid(const char **reason);      /* a session is started once */
+bool selftest_signal_stop(const char **reason);         /* a stop is an event a parent waits for */
+bool selftest_signal_stop_kill(const char **reason);   /* a stopped process is still killable */
+bool selftest_signal_stop_mask(const char **reason);   /* SIGSTOP cannot be caught or blocked */
+bool selftest_signal_stop_restart(const char **reason);/* a call cut short by a stop is restarted */
+bool selftest_signal_stop_late(const char **reason);   /* a continue that outruns the stop */
 bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */
+bool selftest_tty_stop(const char **reason);           /* ^Z stops it rather than killing it */
+bool selftest_tty_ttin(const char **reason);           /* a background reader is refused the line */
 bool selftest_process_efault(const char **reason);    /* -EFAULT through the fixup path, never a kill */
 bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
 bool selftest_process_oom(const char **reason);       /* injected demand-page failures */

@@ -138,6 +138,23 @@ struct process {
      * spawn; a process with no parent starts a session of its own. */
     pid_t pgid;
     pid_t sid;
+    /* Job control (docs/kernel/process/design.md, "Stopping"). Under
+     * `lock`. `stopped` is the process's own answer to "should a thread
+     * arriving at a return to user mode park?", and it is what the park
+     * re-reads; the per-thread flag only gets threads to that point.
+     * `stop_sig` is what stopped it, for the wait status; `nr_stopped`
+     * counts the threads actually parked, so a parent is told the
+     * process has stopped only once all of them have. */
+    bool stopped;
+    int stop_sig;
+    unsigned nr_stopped;
+    struct waitqueue stopped_wq;
+    /* Edge-triggered reporting to the parent: a stop or a continue that
+     * `waitpid` has not yet reported. Set by the stop and the continue,
+     * cleared by the report, so a parent polling with WNOHANG|WUNTRACED
+     * does not spin on the same stop. */
+    bool stop_reportable;
+    bool cont_reportable;
     struct sigaction_k *sigactions;    /* SIG_MAX entries, under lock */
     uint64_t sig_shared_pending;       /* signals sent to the process, not yet taken by a thread */
     struct signal_info *sig_shared_info;
@@ -247,6 +264,12 @@ bool process_log_permitted(void);
 /* Collect an exited child: pid > 0 for that child, -1 for any. Returns
  * 0 with *pid_out (0 when WNOHANG found none), -ECHILD, -EINTR. */
 #define PROCESS_WAIT_NOHANG (1u << 0)
+/* Report a child that stopped, or one that was continued, without
+ * reaping it (docs/kernel/process/design.md, "Stopping"). Both are
+ * edge-triggered: a stop is reported once per stop, so a parent polling
+ * with NOHANG does not spin on the same one. */
+#define PROCESS_WAIT_UNTRACED (1u << 1)
+#define PROCESS_WAIT_CONTINUED (1u << 2)
 int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out);
 
 /* Terminate `p` asynchronously with status 128 + sig. */
@@ -317,6 +340,27 @@ struct process *process_lookup(pid_t pid);   /* referenced or NULL */
 
 /* Sessions and process groups (docs/kernel/process/design.md).
  * `pid` 0 means the caller in each of these, as POSIX has it. */
+/* Job control (docs/kernel/process/design.md, "Stopping").
+ * `process_stop` posts the stop: it sets the process's own flag and
+ * every thread's, and wakes them so each reaches a return to user mode
+ * and parks there. `process_continue` undoes all of it -- including
+ * every thread's flag, though the park re-reads the process state
+ * anyway, because the thread that has to notice a continue is the one
+ * that was not watching when it happened. Both under `p->lock`. */
+/* Tell `p`'s parent that something worth waiting for happened to it: a
+ * SIGCHLD and a poke of the parent's wait queue. Not under p->lock. */
+void process_notify_parent_event(struct process *p);
+void process_stop(struct process *p, int sig);
+void process_continue(struct process *p);
+/* True when the process is stopped and every live thread has parked:
+ * what a parent is told, so a shell cannot take the terminal back while
+ * a thread of the job is still running. */
+bool process_fully_stopped(struct process *p);
+/* The calling thread has arrived at a return to user mode carrying a
+ * stop flag: park while the process is stopped. Returns true if it
+ * parked at all (the caller then re-checks everything). */
+bool process_stop_park(void);
+
 int process_getpgid(pid_t pid, pid_t *out);
 int process_getsid(pid_t pid, pid_t *out);
 int process_setpgid(pid_t pid, pid_t pgid);
@@ -329,6 +373,14 @@ struct process *process_group_next(pid_t pgid, pid_t after);
 /* True when at least one process of group `pgid` is in session `sid`.
  * An empty group belongs to no session and answers false. */
 bool process_group_in_session(pid_t pgid, pid_t sid);
+/* True when every member's parent is outside the group's session or
+ * gone: nothing is left that could continue it, so it must never be
+ * stopped (docs/kernel/tty/design.md, "The controlling terminal"). */
+bool process_group_is_orphaned(pid_t pgid, pid_t sid);
+/* The calling process's group, or 0 for a kernel thread. */
+pid_t process_current_pgid(void);
+/* The calling process's group and session under one lock acquisition. */
+void process_current_ids(pid_t *pgid, pid_t *sid);
 /* The calling process's session, or 0 for a kernel thread. */
 pid_t process_current_sid(void);
 

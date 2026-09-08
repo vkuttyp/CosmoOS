@@ -28,8 +28,20 @@ static struct tty g_console_tty;
 /* Every process of the group, one signal each. The kernel is the sender,
  * so no credential check applies: the person at the keyboard is already
  * as privileged as this terminal's session. */
-static void tty_signal_group(pid_t pgid, int sig)
+static void tty_signal_group(struct tty *t, pid_t pgid, int sig)
 {
+    /* An orphaned group must never be stopped: nothing is left in its
+     * session to continue it, so ^Z would take it away for good. The
+     * keystroke is dropped instead, which is what POSIX says and what
+     * keeps this from being able to wedge the machine. */
+    if (signal_default_is_stop(sig)) {
+        pid_t sid;
+        arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+        sid = t->sid;
+        spin_unlock_irqrestore(&t->lock, s);
+        if (process_group_is_orphaned(pgid, sid))
+            return;
+    }
     struct signal_info info = { .sig = sig, .source = SIGSRC_KERNEL };
     pid_t after = 0;
     struct process *p;
@@ -103,6 +115,7 @@ static int signal_char(uint8_t c)
     switch (c) {
     case 0x03: return SIGINT;    /* ^C */
     case 0x1c: return SIGQUIT;   /* ^\ */
+    case 0x1a: return SIGTSTP;   /* ^Z */
     default: return 0;
     }
 }
@@ -176,7 +189,7 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
          * threads, and this runs in interrupt context, so nothing that
          * long belongs under a lock the whole line discipline shares. */
         if (sig != 0)
-            tty_signal_group(pgid, sig);
+            tty_signal_group(t, pgid, sig);
     }
 }
 
@@ -202,6 +215,7 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
     if (!process_group_in_session(pgid, sid))
         return -EPERM;
     arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    pid_t fg = t->fg_pgid;
     if (t->sid == 0) {
         if (self->pid != sid) {
             spin_unlock_irqrestore(&t->lock, s);
@@ -211,6 +225,25 @@ int tty_set_pgrp(struct tty *t, pid_t pgid)
     } else if (t->sid != sid) {
         spin_unlock_irqrestore(&t->lock, s);
         return -EPERM;
+    }
+    spin_unlock_irqrestore(&t->lock, s);
+    /*
+     * Changing the foreground group from a background process is a
+     * SIGTTOU, unless the caller ignores or blocks it -- which every
+     * shell does, because taking the terminal back after a job means
+     * doing exactly this from the background. An orphaned group is not
+     * stopped, here as anywhere.
+     */
+    pid_t mine = process_current_pgid();
+    if (fg != 0 && mine != fg && !signal_is_ignored(SIGTTOU) && !process_group_is_orphaned(mine, sid)) {
+        struct signal_info info = { .sig = SIGTTOU, .source = SIGSRC_KERNEL };
+        signal_send(self, SIGTTOU, &info);
+        return -EINTR;
+    }
+    s = spin_lock_irqsave(&t->lock);
+    if (t->sid != sid) {
+        spin_unlock_irqrestore(&t->lock, s);
+        return -EPERM;   /* claimed by someone else in between */
     }
     t->fg_pgid = pgid;
     spin_unlock_irqrestore(&t->lock, s);
@@ -229,7 +262,7 @@ void tty_session_exit(pid_t sid)
     }
     spin_unlock_irqrestore(&t->lock, s);
     if (hangup != 0)
-        tty_signal_group(hangup, SIGHUP);
+        tty_signal_group(t, hangup, SIGHUP);
 }
 
 pid_t tty_foreground_pgrp(struct tty *t)
@@ -256,12 +289,46 @@ bool tty_has_line(struct tty *t)
     return __atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0;
 }
 
+/*
+ * A reader that is not in the terminal's foreground group is stopped
+ * with SIGTTIN rather than allowed to take the line the shell is
+ * waiting for -- without this, background jobs and a usable terminal
+ * are mutually exclusive. An *orphaned* group gets -EIO instead: it
+ * cannot be stopped, because nothing is left to continue it.
+ *
+ * Returns 0 to go ahead, or a negative errno. A stop is not an error:
+ * the caller loops and asks again once it has been continued, by which
+ * time it may legitimately be the foreground group.
+ */
+static int64_t tty_read_allowed(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    pid_t tty_sid = t->sid;
+    pid_t fg = t->fg_pgid;
+    spin_unlock_irqrestore(&t->lock, s);
+    if (tty_sid == 0 || fg == 0)
+        return 0;   /* nobody's terminal: the old behaviour */
+    pid_t sid = 0, pgid = 0;
+    process_current_ids(&pgid, &sid);
+    if (sid != tty_sid || pgid == fg)
+        return 0;   /* another session's reader is not this one's business */
+    if (process_group_is_orphaned(pgid, sid))
+        return -EIO;
+    struct process *self = process_current();
+    struct signal_info info = { .sig = SIGTTIN, .source = SIGSRC_KERNEL };
+    signal_send(self, SIGTTIN, &info);
+    return -EINTR;   /* the stop happens at the return to user mode */
+}
+
 int64_t tty_read(struct tty *t, void *buf, size_t len)
 {
     if (len == 0)
         return 0;
     uint8_t *out = buf;
     for (;;) {
+        int64_t allowed = tty_read_allowed(t);
+        if (allowed != 0)
+            return allowed;
         if (io_nonblocking(false) && !tty_has_line(t))
             return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
         int rc = wait_event_killable(&t->readers, t->lines > 0);

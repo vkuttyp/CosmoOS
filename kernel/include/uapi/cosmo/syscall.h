@@ -256,6 +256,23 @@ struct cosmo_spawn {
 #define COSMO_PATH_MAX  1024   /* = VFS_PATH_MAX */
 
 #define COSMO_WNOHANG 1u
+/* Report a stopped or continued child without reaping it. */
+#define COSMO_WUNTRACED 2u
+#define COSMO_WCONTINUED 4u
+/*
+ * A wait status. Exit statuses are the exit status itself (0..255) and a
+ * kill is 128 + sig, which is what they have always been -- job control
+ * needed two more outcomes and they are put *above* those rather than
+ * replacing the encoding, so nothing that already reads a status
+ * changes meaning. Linux's own encoding is produced by
+ * `compat/linux/convert.c` for Linux binaries, so nothing outside this
+ * tree ever sees these values.
+ */
+#define COSMO_STATUS_STOPPED(sig) (0x200 | ((sig) & 0xff))
+#define COSMO_STATUS_CONTINUED 0x400
+#define COSMO_STATUS_IS_STOPPED(s) (((s) & ~0xff) == 0x200)
+#define COSMO_STATUS_STOPSIG(s) ((s) & 0xff)
+#define COSMO_STATUS_IS_CONTINUED(s) ((s) == COSMO_STATUS_CONTINUED)
 /* The signals a program is most likely to name. A process that has
  * installed no handler for one is terminated with status 128 + sig. */
 #define COSMO_SIGHUP  1
@@ -284,6 +301,9 @@ struct cosmo_spawn {
 #define COSMO_SIGCHLD 17
 #define COSMO_SIGCONT 18
 #define COSMO_SIGSTOP 19
+#define COSMO_SIGTSTP 20
+#define COSMO_SIGTTIN 21
+#define COSMO_SIGTTOU 22
 
 /* sa_handler's two reserved values. */
 #define COSMO_SIG_DFL 0ull

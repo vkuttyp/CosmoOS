@@ -96,9 +96,9 @@ the release asserted after the leader exits).
 ## Gaps (documented, not invariants)
 
 - No raw mode, no `termios`, no window size, no `ioctl`.
-- No job control: no `^Z`, and a background process reading the terminal
-  is not sent `SIGTTIN` (nor one writing, `SIGTTOU`). Both go through as
-  before.
+- No `TOSTOP`: a background process writing to the terminal is not sent
+  `SIGTTOU` (Linux's default too). Reads are stopped and `tcsetpgrp`
+  from the background does raise it.
 - One tty; no pseudo-terminals; no `/dev/console` or `/dev/tty` nodes.
 - Only the UART feeds the tty; the virtio-console receive queue and a
   keyboard driver are future producers.

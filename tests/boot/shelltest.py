@@ -17,6 +17,7 @@ PROMPT = b"cosmo$ "
 # process group (docs/kernel/process/design.md, "Sessions and process
 # groups").
 INTERRUPT = "\x03"
+SUSPEND = "\x1a"
 INTERRUPT_DELAY_S = 0.5   # long enough for the job to be the foreground group
 # What the interrupt has to prove is that the job died *early*: `sleep 5`
 # reaches its prompt on its own eventually, so a run in which ^C did
@@ -42,6 +43,18 @@ COMMANDS = [
     ("sleep 5", []),
     (INTERRUPT, [r"\^C"]),
     ("echo after-interrupt-ok", [r"^after-interrupt-ok$"]),
+    # ^Z stops the job instead of killing it: the shell says so, `jobs`
+    # still lists it, and `fg` brings it back to be interrupted.
+    ("sleep 30", []),
+    (SUSPEND, [r"\[1\]\+  Stopped"]),
+    ("jobs", [r"\[1\]\+  Stopped\s+sleep 30"]),
+    ("fg", []),
+    (INTERRUPT, []),
+    ("echo after-fg-ok", [r"^after-fg-ok$"]),
+    # And a background job: it runs without the terminal, and the shell
+    # reports it finished before the next prompt.
+    ("sleep 1 &", [r"^\[\d+\] \d+$"]),
+    ("jobs", [r"\[\d+\][+ ]  (Running|Done)\s+sleep 1"]),
     ("pkg update && pkg install hello && hello && pkg list", [r"^hello, world \(hello 1\.1\)$", r"^hello\s+1\.1\s+prints a greeting$"]),
     ("exit 0", []),
 ]
@@ -71,6 +84,16 @@ class ShellTest:
         sent_at = None   # when the interrupt went out, until its prompt arrives
         try:
             for cmd, _ in COMMANDS:
+                if cmd == SUSPEND:
+                    # Like the interrupt: a raw byte at a running job,
+                    # with no prompt to wait for first. The prompt it
+                    # produces is counted by the next command's wait.
+                    time.sleep(INTERRUPT_DELAY_S)
+                    proc.stdin.write(SUSPEND.encode())
+                    proc.stdin.flush()
+                    sent_at = time.monotonic()
+                    self.results["sent"].append(cmd)
+                    continue
                 if cmd == INTERRUPT:
                     # No prompt to wait for and no newline to send: the
                     # previous command is still running, which is the
@@ -100,6 +123,9 @@ class ShellTest:
         out = []
         if self.error:
             out.append(f"shell harness: {self.error}")
+        # The bound is on the *first* timed keystroke, which is the ^C
+        # at `sleep 5`; the later ones share the counter and only make
+        # it stricter, since each also has to beat its own job.
         took = self.results["interrupt_s"]
         if took is None:
             out.append("shell harness: no prompt was timed after the interrupt")

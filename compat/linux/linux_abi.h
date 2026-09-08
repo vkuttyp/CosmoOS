@@ -139,6 +139,8 @@ struct lx_pollfd {
 
 /* --- wait4, signals --- */
 #define LX_WNOHANG 1
+#define LX_WUNTRACED 2
+#define LX_WCONTINUED 8
 #define LX_SIGKILL 9
 #define LX_SIGSEGV 11
 #define LX_SIGSTOP 19

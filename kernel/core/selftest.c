@@ -468,6 +468,14 @@ static const struct selftest tests[] = {
     /* After the hotplug tests: unplugging the hub takes the keyboard
      * with it, and keys typed while it is gone are gone too. */
     { "usb-hub-unplug",  selftest_usb_hub_unplug },
+    /* And before the keyboard is armed: these three drive the console
+     * themselves -- they claim it, type control characters at it, and
+     * `^C` throws away whatever line is under edit. Run after the
+     * harness has started typing, they eat its line. */
+    { "signal-stop-restart", selftest_signal_stop_restart },
+    { "tty-intr",        selftest_tty_intr },
+    { "tty-stop",        selftest_tty_stop },
+    { "tty-ttin",        selftest_tty_ttin },
     { "hid-arm",         selftest_hid_arm },
     { "ipc-pipe",        selftest_ipc_pipe },
     { "io-poll",         selftest_io_poll },
@@ -500,7 +508,10 @@ static const struct selftest tests[] = {
     { "process-reaped",  selftest_process_reaped },
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
-    { "tty-intr",        selftest_tty_intr },
+    { "signal-stop",     selftest_signal_stop },
+    { "signal-stop-kill", selftest_signal_stop_kill },
+    { "signal-stop-mask", selftest_signal_stop_mask },
+    { "signal-stop-late", selftest_signal_stop_late },
     { "process-efault",  selftest_process_efault },
     { "process-protnone", selftest_process_protnone },
     { "process-oom",     selftest_process_oom },

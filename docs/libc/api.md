@@ -191,7 +191,13 @@ int raise(int sig);
 int sigemptyset/sigfillset/sigaddset/sigdelset/sigismember(...);
 ```
 
+`WUNTRACED` and `WCONTINUED` report a stopped or continued child without
+reaping it; `WIFSTOPPED`, `WSTOPSIG` and `WIFCONTINUED` read those
+statuses, and `WIFEXITED`/`WIFSIGNALED` gained an upper bound so they
+cannot claim one.
+
 Numbers: `SIGHUP` 1 … `SIGCHLD` 17, `SIGCONT` 18, `SIGSTOP` 19,
+`SIGTSTP` 20, `SIGTTIN` 21, `SIGTTOU` 22,
 `SIGSYS` 31, `NSIG` 32. Flags: `SA_NODEFER`, `SA_RESETHAND`,
 `SA_RESTART`, and `SA_SIGINFO`, which is accepted and stripped -- the
 kernel hands every handler all three arguments, so it distinguishes

@@ -136,6 +136,12 @@ void signal_return(void *syscall_frame, const struct arch_user_regs *regs, uint6
 int signal_wait(void);
 /* Default disposition of a signal: 0 terminate, 1 ignore. */
 int signal_default_is_ignore(int sig);
+/* ... and the third outcome: the stop signals, whose default parks the
+ * process until a SIGCONT (docs/kernel/process/design.md, "Stopping").
+ * SIGSTOP additionally cannot be caught or blocked. */
+int signal_default_is_stop(int sig);
+/* True when the calling thread ignores or blocks `sig`. */
+bool signal_is_ignored(int sig);
 
 /* Process-side setup and teardown (kernel/process/process.c). */
 int signal_process_init(struct process *p);

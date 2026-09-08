@@ -63,6 +63,13 @@ void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out)
 
 int lx_wait_status(int native_status)
 {
+    /* The two job-control outcomes sit above the byte the exit and kill
+     * encodings use, so they are tested first and cannot be mistaken
+     * for either (docs/kernel/process/design.md, "Stopping"). */
+    if (COSMO_STATUS_IS_STOPPED(native_status))
+        return (COSMO_STATUS_STOPSIG(native_status) << 8) | 0x7f;   /* WIFSTOPPED */
+    if (COSMO_STATUS_IS_CONTINUED(native_status))
+        return 0xffff;                      /* WIFCONTINUED */
     if (native_status == COSMO_EXIT_FAULT)
         return LX_SIGSEGV;                  /* terminated by SIGSEGV */
     if (native_status > 128 && native_status < 128 + 64)

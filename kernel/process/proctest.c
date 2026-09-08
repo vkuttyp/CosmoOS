@@ -374,6 +374,141 @@ bool selftest_signal_setsid(const char **reason)
  * leader exits and the terminal is free again, which is what lets the
  * shell claim it after the self-tests are over.
  */
+bool selftest_signal_stop(const char **reason)
+{
+    return run_signal_probe("signal-stop", reason);
+}
+
+bool selftest_signal_stop_kill(const char **reason)
+{
+    return run_signal_probe("signal-stop-kill", reason);
+}
+
+bool selftest_signal_stop_mask(const char **reason)
+{
+    return run_signal_probe("signal-stop-mask", reason);
+}
+
+/*
+ * The restart, driven from both ends. The probe puts a reader in the
+ * background so that its own read stops it -- the only way to be sure
+ * the stop lands *inside* the call under test -- then hands it the
+ * terminal and continues it. This side types the line the restarted
+ * read must find.
+ */
+bool selftest_signal_stop_restart(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    struct tty *t = tty_console();
+    static const char *const argv[] = { "init", "--probe", "signal-stop-restart", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    /* Wait until the reader, not the probe, is the foreground group:
+     * that is the probe saying it has stopped it and continued it. */
+    uint64_t deadline = clock_now_ns() + 8000000000ULL;
+    pid_t fg = 0;
+    while (clock_now_ns() < deadline) {
+        fg = tty_foreground_pgrp(t);
+        if (fg != 0 && fg != pid)
+            break;
+        sched_yield();
+    }
+    if (fg == 0 || fg == pid) {
+        process_put(p);
+        *reason = "the reader never reached the foreground";
+        return false;
+    }
+    tty_input(t, (const uint8_t *)"x\n", 2);
+    int status = process_wait_exit(p);
+    process_put(p);
+    if (status != 0) {
+        kwarn("selftest: signal-stop-restart: the probe failed check %d", status);
+        *reason = "a call cut short by a stop was failed rather than restarted";
+        return false;
+    }
+    return true;
+}
+
+bool selftest_signal_stop_late(const char **reason)
+{
+    return run_signal_probe("signal-stop-late", reason);
+}
+
+/*
+ * ^Z at the terminal. The same two-ended shape as tty-intr: a process
+ * claims the terminal and waits, the kernel types the keystroke, and
+ * the process must *stop* -- not die, which is what every other control
+ * character here does. Then a SIGCONT and it finishes.
+ */
+bool selftest_tty_stop(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    struct tty *t = tty_console();
+    static const char *const argv[] = { "init", "--probe", "signal-tty-stop", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    pid_t pid = p->pid;
+    /* It claims the terminal for its *child's* group, so the foreground
+     * group is something other than its own pid. */
+    uint64_t deadline = clock_now_ns() + 5000000000ULL;
+    pid_t fg = 0;
+    while (clock_now_ns() < deadline) {
+        fg = tty_foreground_pgrp(t);
+        if (fg != 0 && fg != pid)
+            break;
+        sched_yield();
+    }
+    if (fg == 0 || fg == pid) {
+        process_put(p);
+        *reason = "the job never became the foreground group";
+        return false;
+    }
+    uint8_t susp = 0x1a;   /* ^Z */
+    tty_input(t, &susp, 1);
+    int status = process_wait_exit(p);
+    process_put(p);
+    if (status != 0) {
+        kwarn("selftest: tty-stop: the probe failed check %d", status);
+        *reason = "^Z did not stop the foreground job";
+        return false;
+    }
+    CHECK(tty_foreground_pgrp(t) == 0);
+    return true;
+}
+
+bool selftest_tty_ttin(const char **reason)
+{
+    const void *image;
+    size_t image_size;
+    if (!bootarchive_find("init", &image, &image_size)) {
+        kinfo("selftest: no init in the boot archive; skipping");
+        return true;
+    }
+    static const char *const argv[] = { "init", "--probe", "signal-tty-background", NULL };
+    struct process *p = NULL;
+    CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
+    int status = process_wait_exit(p);
+    process_put(p);
+    if (status != 0) {
+        kwarn("selftest: tty-ttin: the probe failed check %d", status);
+        *reason = "a background reader was not refused the terminal";
+        return false;
+    }
+    CHECK(tty_foreground_pgrp(tty_console()) == 0);
+    return true;
+}
+
 bool selftest_tty_intr(const char **reason)
 {
     const void *image;

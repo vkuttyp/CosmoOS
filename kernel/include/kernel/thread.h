@@ -85,6 +85,14 @@ struct thread {
     uint64_t sig_pending, sig_blocked;  /* under proc->lock */
     uint64_t sig_saved_blocked;         /* the mask to restore after a temporary one (sig_restore_blocked) */
     bool sig_restore_blocked;
+    /* Job control (docs/kernel/process/design.md, "Stopping"): set on
+     * every thread when the process stops, and a *reason to look*, not
+     * the authority on whether to park -- `signal_pending()` reports it
+     * so a killable wait returns and the return-to-user path runs, and
+     * that path re-reads the process's own state under p->lock. A flag
+     * left over from a stop that a SIGCONT has already ended must not
+     * park anything. Under proc->lock. */
+    bool sig_must_stop;
     struct signal_info *sig_info;       /* SIG_MAX entries, the pending signals' details; user threads only */
     struct sigaltstack_k altstack;
     uint64_t syscall_nr, syscall_arg0;  /* the call in progress, for SA_RESTART */

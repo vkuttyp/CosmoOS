@@ -430,6 +430,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     list_init(&p->children);
     list_init(&p->sibling);
     waitqueue_init(&p->child_wq, "children");
+    waitqueue_init(&p->stopped_wq, "stopped");
     handle_table_init(&p->handles);
     spinlock_init(&p->lock, "process");
     completion_init(&p->exited, "process-exit");
@@ -1009,25 +1010,57 @@ int process_wait_exit(struct process *p)
 /* --- Phase 9: wait, kill, cwd, introspection --- */
 
 /* Parent lock held. */
-static struct process *find_reapable_locked(struct process *parent, int pid, bool *matched)
+/*
+ * What `waitpid` reports about one child. A stop or a continue is
+ * reported *without* reaping -- the child is still alive -- and each is
+ * edge-triggered, so the flag is cleared as it is reported and a parent
+ * polling with NOHANG does not see the same stop for ever.
+ *
+ * A stop is only reported once every thread has parked: reporting it
+ * earlier would let a shell take the terminal back while a thread of
+ * the job was still running.
+ */
+enum wait_event_kind { WAIT_NONE, WAIT_EXITED, WAIT_STOPPED, WAIT_CONTINUED };
+
+/* parent->lock held. */
+static enum wait_event_kind child_event_locked(struct process *c, unsigned flags)
+{
+    if (__atomic_load_n(&c->state, __ATOMIC_ACQUIRE) == PROCESS_EXITED && !c->reaped)
+        return WAIT_EXITED;
+    /* `stop_reportable` is set by the last thread of `c` to park, so it
+     * already means "stopped, and every thread has arrived". */
+    if ((flags & PROCESS_WAIT_UNTRACED) && c->stop_reportable)
+        return WAIT_STOPPED;
+    if ((flags & PROCESS_WAIT_CONTINUED) && c->cont_reportable)
+        return WAIT_CONTINUED;
+    return WAIT_NONE;
+}
+
+static struct process *find_reapable_locked(struct process *parent, int pid, unsigned flags, bool *matched,
+                                            enum wait_event_kind *kind)
 {
     struct process *c;
     *matched = false;
+    *kind = WAIT_NONE;
     list_for_each_entry(c, &parent->children, sibling) {
         if (pid > 0 && (int)c->pid != pid)
             continue;
         *matched = true;
-        if (__atomic_load_n(&c->state, __ATOMIC_ACQUIRE) == PROCESS_EXITED && !c->reaped)
+        enum wait_event_kind k = child_event_locked(c, flags);
+        if (k != WAIT_NONE) {
+            *kind = k;
             return c;
+        }
     }
     return NULL;
 }
 
-static bool child_reapable(struct process *parent, int pid)
+static bool child_reapable(struct process *parent, int pid, unsigned flags)
 {
     bool matched;
+    enum wait_event_kind kind;
     arch_irq_state_t s = spin_lock_irqsave(&parent->lock);
-    struct process *c = find_reapable_locked(parent, pid, &matched);
+    struct process *c = find_reapable_locked(parent, pid, flags, &matched, &kind);
     spin_unlock_irqrestore(&parent->lock, s);
     return c != NULL || !matched;
 }
@@ -1037,8 +1070,22 @@ int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
     struct process *cur = process_current();
     for (;;) {
         bool matched;
+        enum wait_event_kind kind;
         arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
-        struct process *c = find_reapable_locked(cur, pid, &matched);
+        struct process *c = find_reapable_locked(cur, pid, flags, &matched, &kind);
+        if (c && kind != WAIT_EXITED) {
+            /* Alive: report the edge and leave the child where it is. */
+            if (kind == WAIT_STOPPED) {
+                c->stop_reportable = false;
+                *status_out = COSMO_STATUS_STOPPED(c->stop_sig);
+            } else {
+                c->cont_reportable = false;
+                *status_out = COSMO_STATUS_CONTINUED;
+            }
+            *pid_out = c->pid;
+            spin_unlock_irqrestore(&cur->lock, s);
+            return 0;
+        }
         if (c) {
             __atomic_store_n(&c->reaped, true, __ATOMIC_RELEASE);
             list_remove(&c->sibling);
@@ -1056,7 +1103,7 @@ int process_wait_child(int pid, unsigned flags, pid_t *pid_out, int *status_out)
             *pid_out = 0;
             return 0;
         }
-        int rc = wait_event_killable(&cur->child_wq, child_reapable(cur, pid));
+        int rc = wait_event_killable(&cur->child_wq, child_reapable(cur, pid, flags));
         if (rc)
             return rc;
     }
@@ -1668,6 +1715,37 @@ struct process *process_group_next(pid_t pgid, pid_t after)
     return NULL;
 }
 
+/*
+ * POSIX's orphaned process group: every member's parent is either in
+ * another session or gone. Stopping such a group would leave it with
+ * nothing that could continue it -- no shell of its session is left to
+ * type `fg` -- so the terminal refuses to stop it and hands its readers
+ * -EIO instead. This is the rule that keeps job control from being able
+ * to wedge the machine, which is why it is here rather than left as a
+ * refinement.
+ */
+bool process_group_is_orphaned(pid_t pgid, pid_t sid)
+{
+    bool orphaned = true;
+    bool any = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    struct process *p;
+    list_for_each_entry(p, &g_processes, all_link) {
+        if (p->pgid != pgid)
+            continue;
+        any = true;
+        struct process *parent = p->parent;
+        /* A parent in the same session but a different group is what
+         * makes the group *not* orphaned: that is the shell. */
+        if (parent != NULL && parent->sid == sid && parent->pgid != pgid) {
+            orphaned = false;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&g_process_table_lock, s);
+    return any && orphaned;
+}
+
 bool process_group_in_session(pid_t pgid, pid_t sid)
 {
     bool found = false;
@@ -1680,6 +1758,156 @@ bool process_group_in_session(pid_t pgid, pid_t sid)
         }
     spin_unlock_irqrestore(&g_process_table_lock, s);
     return found;
+}
+
+/* Wake the parent's `wait` and send it SIGCHLD: a stop and a continue
+ * are events a parent can wait for, the same way an exit is. The
+ * parent's lock is not held here and its child list is not walked --
+ * only its wait queue is poked, which is what `waitpid` re-scans on. */
+void process_notify_parent_event(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct process *parent = p->parent;
+    if (parent != NULL)
+        process_get(parent);
+    spin_unlock_irqrestore(&p->lock, s);
+    if (parent == NULL)
+        return;
+    struct signal_info info = { .sig = SIGCHLD, .source = SIGSRC_KERNEL, .sender_pid = p->pid };
+    signal_send(parent, SIGCHLD, &info);
+    waitqueue_wake_all(&parent->child_wq);
+    process_put(parent);
+}
+
+/* --- job control (docs/kernel/process/design.md, "Stopping") ---------------
+ *
+ * A process stops at a return to user mode and nowhere else, which is
+ * what makes it safe: no kernel lock is held there and the register set
+ * is already saved. Getting every thread *to* such a point is the whole
+ * of the machinery below, and it is split in two on purpose:
+ *
+ *   - the per-thread flag is a reason to look. It makes signal_pending()
+ *     true, so a killable wait returns -EINTR and the thread runs the
+ *     return-to-user path;
+ *   - the process's own `stopped` is the authority. The park re-reads it
+ *     under the lock, so a flag left over from a stop that a SIGCONT has
+ *     already ended parks nothing.
+ *
+ * The second half exists because the thread that most needs to notice a
+ * continue is the one that was inside a non-killable wait when it
+ * happened, and therefore the one that was not watching.
+ */
+
+void process_stop(struct process *p, int sig)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (p->state != PROCESS_RUNNING || p->kill_sig != 0 || p->stopped) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return;   /* dying, or already stopped: a second stop is not an event */
+    }
+    p->stopped = true;
+    p->stop_sig = sig;
+    p->nr_stopped = 0;
+    p->cont_reportable = false;   /* a stop cancels an unreported continue */
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link) {
+        t->sig_must_stop = true;
+        sched_wake(t);
+    }
+    spin_unlock_irqrestore(&p->lock, s);
+    /* The parent is told a stop is coming; it will not see the process
+     * as stopped until every thread has parked (process_fully_stopped). */
+    process_notify_parent_event(p);
+}
+
+void process_continue(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    if (!p->stopped) {
+        spin_unlock_irqrestore(&p->lock, s);
+        return;
+    }
+    p->stopped = false;
+    p->stop_sig = 0;
+    p->stop_reportable = false;   /* a continue cancels an unreported stop */
+    p->cont_reportable = true;
+    struct thread *t;
+    list_for_each_entry(t, &p->threads, proc_link)
+        t->sig_must_stop = false;
+    spin_unlock_irqrestore(&p->lock, s);
+    waitqueue_wake_all(&p->stopped_wq);
+    process_notify_parent_event(p);
+}
+
+bool process_fully_stopped(struct process *p)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    bool done = p->stopped && p->nr_stopped >= p->nr_live;
+    spin_unlock_irqrestore(&p->lock, s);
+    return done;
+}
+
+bool process_stop_park(void)
+{
+    struct thread *t = thread_current();
+    struct process *p = t ? t->proc : NULL;
+    if (p == NULL)
+        return false;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    t->sig_must_stop = false;
+    if (!p->stopped || p->kill_sig != 0 || p->state != PROCESS_RUNNING) {
+        /* The authority says no: either this flag outlived its stop, or
+         * the process is on its way out and must not park. */
+        spin_unlock_irqrestore(&p->lock, s);
+        return false;
+    }
+    p->nr_stopped++;
+    /* The last thread to park is what makes the process stopped, so it
+     * is what makes the stop reportable. Setting the flag here rather
+     * than when the stop was posted is what lets a parent's wait scan
+     * test one bool instead of reaching into this process's lock while
+     * holding its own -- two process locks nested is not an order this
+     * kernel has. */
+    bool all = p->nr_stopped >= p->nr_live;
+    if (all)
+        p->stop_reportable = true;
+    spin_unlock_irqrestore(&p->lock, s);
+    if (all)
+        process_notify_parent_event(p);   /* now it is really stopped */
+
+    /* Park. A kill must get through, so the wait ends for that too; the
+     * caller re-checks everything on return. */
+    wait_event(&p->stopped_wq, !__atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE) ||
+                                   __atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 ||
+                                   __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING);
+    s = spin_lock_irqsave(&p->lock);
+    if (p->nr_stopped > 0)
+        p->nr_stopped--;
+    spin_unlock_irqrestore(&p->lock, s);
+    return true;
+}
+
+pid_t process_current_pgid(void)
+{
+    pid_t pgid = 0, sid = 0;
+    process_current_ids(&pgid, &sid);
+    return pgid;
+}
+
+/* Both at once, under one acquisition: the tty asks for both on every
+ * read, and two trips through the table's lock per line is two too many. */
+void process_current_ids(pid_t *pgid, pid_t *sid)
+{
+    struct process *self = process_current();
+    if (self == NULL) {
+        *pgid = 0;
+        *sid = 0;
+        return;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&g_process_table_lock);
+    *pgid = self->pgid;
+    *sid = self->sid;
+    spin_unlock_irqrestore(&g_process_table_lock, s);
 }
 
 pid_t process_current_sid(void)
