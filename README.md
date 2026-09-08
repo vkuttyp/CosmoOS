@@ -758,11 +758,13 @@ See [docs/development.md](docs/development.md).
   `docs/audit/next-subsystem-usb.md` for USB (built as the `xhci` and
   `usb_storage` modules) and `docs/audit/next-subsystem-ahci.md` for
   AHCI (built as the `ahci` module).
-  `docs/audit/next-subsystem-console.md` does it for the machine's own
-  console: the framebuffer the UEFI firmware has already lit, carried
-  through a version 6 boot protocol into a second console sink, and a
-  USB keyboard feeding the same `tty_input` the two UARTs feed — the
-  first user of the xHCI driver's interrupt-endpoint path, and, with a
-  hub, the question of where USB topology lives. Section **61** wants
-  this kernel booted on real hardware, and real hardware has no serial
-  port. Design documents first, one subsystem at a time.
+  `docs/audit/next-subsystem-console.md` did it for the machine's own
+  console (built: the framebuffer the UEFI firmware has already lit,
+  carried through a version 6 boot protocol into a second console sink,
+  and a USB keyboard feeding the same `tty_input` the two UARTs feed).
+  `docs/audit/next-subsystem-fpsimd.md` does it for floating point and
+  SIMD: the kernel is built `-mgeneral-regs-only` and so is every user
+  program, `printf` prints `?` for `%f`, and on AArch64 it is not a
+  build choice — `CPACR_EL1.FPEN` is at its reset value, so a real
+  Linux binary's NEON `memcpy` takes `SIGILL` on its first instruction.
+  Design documents first, one subsystem at a time.
