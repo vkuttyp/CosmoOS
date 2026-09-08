@@ -79,7 +79,7 @@ error, protecting reproducibility.
 |---|---|
 | `-mcmodel=kernel` | image linked in the top 2 GiB (`0xFFFFFFFF80000000`); sign-extended 32-bit displacements reach everything |
 | `-mno-red-zone` | interrupts run on the interrupted stack; the red zone would be clobbered |
-| `-mgeneral-regs-only` | no SSE/x87 in the kernel, so traps and context switches never save FP state |
+| `-mgeneral-regs-only` | no SSE/x87/NEON in the kernel; a context switch saves the *thread's* FP state and never the kernel's own, and `scripts/check-fpregs.sh` checks the built image |
 | `-fno-pic -fno-pie` | fixed link address; no dynamic relocation |
 | `-nostdlib -static --no-dynamic-linker` | freestanding link |
 | `-z max-page-size=0x1000` | segments aligned to 4 KiB, not 2 MiB, so the file stays small and the loader's page-granular mapping applies |

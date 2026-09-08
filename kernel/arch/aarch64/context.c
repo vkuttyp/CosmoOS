@@ -8,16 +8,19 @@
 #include <kernel/vmm.h>
 #include <arch/context.h>
 #include <arch/mmu.h>
+#include <aarch64/fpu.h>
 #include <aarch64/sysreg.h>
 
 void aarch64_context_start(void);
 
 void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
 {
-    /* No thread owns FP/SIMD state in stage 1 (fpu.c). The thread pointer
-     * register is user-writable (a libc sets it with MSR, not a system
-     * call), so the outgoing user thread's value is saved here before the
-     * incoming one's is loaded (milestone 10). */
+    /* The vector registers belong to whichever thread owns state
+     * (fpu.c): the outgoing owner's are saved and the incoming owner's
+     * restored, here, with interrupts off. The thread pointer register
+     * is user-writable (a libc sets it with MSR, not a system call), so
+     * the outgoing user thread's value is saved too (milestone 10). */
+    aarch64_fpu_switch(prev, next);
     if (prev != NULL && prev->proc != NULL)
         prev->tls_base = (uintptr_t)READ_SYSREG(tpidr_el0);
     /* No TSS: the kernel stack for the next exception from EL0 is simply

@@ -30,7 +30,12 @@ libc/
   (pointer-returning calls such as `mmap` have their own check).
 - No function in the library blocks on anything but a system call; no
   static buffers except the `FILE` objects and `strerror`'s table.
-- `-mgeneral-regs-only`, `-fno-builtin` is **not** used: the compiler
+- The library is **not** built `-mgeneral-regs-only` any more: the
+  compiler may use the vector registers wherever it likes, which it
+  does in the float conversions and wherever it vectorises a loop. The
+  kernel still is, and a build check enforces that
+  (`scripts/check-fpregs.sh`).
+- `-fno-builtin` is **not** used: the compiler
   may turn loops into `memcpy`/`memset` calls, which the library
   provides; `string.c` is compiled with `-fno-builtin` itself so those
   functions are not turned into calls to themselves.

@@ -385,4 +385,21 @@ struct lx_esr_context {
 };
 #define LX_ESR_MAGIC 0x45535201u
 
+/* The FP/SIMD state a handler must not lose: the two status words then
+ * Q0-Q31, behind an eight-byte header, in the same reserved area. */
+struct lx_fpsimd_context {
+    uint32_t magic;              /* 0x46508001 */
+    uint32_t size;               /* 528 */
+    uint32_t fpsr;
+    uint32_t fpcr;
+    uint8_t vregs[32][16];
+};
+#define LX_FPSIMD_MAGIC 0x46508001u
+
+/* The end of the reserved area's list of records. */
+struct lx_ctx_terminator {
+    uint32_t magic;              /* 0 */
+    uint32_t size;               /* 0 */
+};
+
 #endif /* COMPAT_LINUX_ABI_H */

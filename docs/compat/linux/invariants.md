@@ -226,5 +226,8 @@ kernel's `unistd.h` tables.
 - Linux errno values pass through unchanged because the native numbers
   were chosen to match; a future native errno that Linux lacks would need
   a mapping here.
-- AArch64: no FP/SIMD at EL0, so a libc built with NEON `memcpy` traps
-  (`SIGILL`); the test programs are built `-mgeneral-regs-only`.
+- AArch64: FP/SIMD works at EL0 since the FP/SIMD unit -- a libc with a
+  NEON `memcpy` runs, the signal frame carries an `fpsimd_context`, and
+  the test programs are built without `-mgeneral-regs-only` like every
+  other user program. What a real Linux binary still meets here is the
+  syscall table's coverage, not the instruction set.

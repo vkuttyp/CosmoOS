@@ -179,6 +179,41 @@ Recorded so their symptoms are recognisable:
 
 Real hardware, GICv3, KVM/HVF acceleration (the CI machine has none for
 AArch64 and the macOS host would need `virtualization=on`, which the
-loader refuses today), `-cpu max` in CI, big-endian, AArch32 EL0,
-FP/SIMD in userland, PSCI `CPU_OFF`/`SYSTEM_OFF` (shutdown is
-semihosting only).
+loader refuses today), `-cpu max` in CI, big-endian, AArch32 EL0, SVE
+(a machine with it runs the FP/SIMD state fine; the wider registers are
+not saved), PSCI `CPU_OFF`/`SYSTEM_OFF` (shutdown is semihosting
+only).
+
+## FP/SIMD
+
+**`fpu-switch`** was true by default on this architecture until the
+FP/SIMD unit: no thread could own vector state, so none could leak. It
+is a real test now -- two threads pinned to one CPU hold different
+patterns in `Q0`-`Q15` across sixty-four yields each and find their own
+intact.
+
+**`usertest: fpu isolation`** is the same property between processes,
+from user mode: three processes each hold a pattern across three hundred
+yields and sleeps. This is the test that would notice a switch hook that
+saved into the wrong area or a signal frame that restored the wrong one.
+
+**`LINUXTEST`** covers the signal frame: the handler walks the reserved
+area's records and requires an `fpsimd_context` and an `esr_context`,
+and `sig_vreg_roundtrip` puts a value in `d0`, takes a signal whose
+handler clobbers `v0`, and requires the value back.
+
+**`fpu-bench`** reports what owning state costs a context switch (about
+1 000 ns of 21 600 on this architecture under TCG, against 270 of 2 700
+on x86-64). It is what decided against lazy switching.
+
+**`scripts/check-fpregs.sh`** runs in `make analyze` and fails the build
+if the kernel names a vector register outside the save, the restore, the
+guest swap and the test hooks. Proved by putting `movi v3.16b, #0` in
+`console_set_panic_mode`: `check-fpregs: console_set_panic_mode: v3.16b`
+and exit 1.
+
+The bug this unit found in itself: `CPACR_EL1` is per-CPU, and the first
+version set it only on the boot CPU. CPU 1 then took an FP trap inside
+the context switch before any thread existed -- a panic at `EC=0x07`
+with "context: boot (no threads yet)", which is as clear a message as
+that mistake could produce.

@@ -91,9 +91,14 @@ update `design.md`.
 
 ## I-ARCH-13: Kernel code uses no FPU/SIMD registers; every thread that does owns its state
 
-`-mgeneral-regs-only` is on for the kernel target (and the loader,
-modules and native libc); the trap path saves no vector state. A thread
-executes x87/SSE/AVX instructions only if `thread->fpu` is set
+`-mgeneral-regs-only` is on for the kernel target and the loader and
+modules, and **not** on the libc or user programs since the FP/SIMD
+unit; the trap path saves no vector state. Since the compiler flag no
+longer covers everything that links against the kernel, the rule is
+checked on the built image (`scripts/check-fpregs.sh`, in `make
+analyze`): no vector register outside the state save and restore, the
+guest swap and the self-test hooks. A thread executes x87/SSE/AVX/NEON
+instructions only if `thread->fpu` is set
 (`arch_fpu_alloc`: every user thread before its first instruction; test
 threads explicitly), and `arch_thread_switch_prepare` saves the outgoing
 owner's registers and loads the incoming owner's on every switch between

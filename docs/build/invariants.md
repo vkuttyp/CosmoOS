@@ -55,8 +55,12 @@ segments and keep `.note.cosmoboot`.
 ## B8. The kernel never uses floating point or vector registers
 
 `-mgeneral-regs-only` is mandatory in `KERNEL_ARCH_CFLAGS` for every
-architecture. Trap entry saves only general registers on that basis
-(`kernel/arch/x86_64/isr.S`).
+architecture -- and only there: `USER_CFLAGS` dropped it with the
+FP/SIMD unit, because user code has state the kernel saves. Trap entry
+saves only general registers on that basis
+(`kernel/arch/x86_64/isr.S`), and `scripts/check-fpregs.sh` checks the
+built image during `make analyze`, since neither architecture can
+enforce the rule in hardware.
 
 ## B9. Frame pointers are never omitted
 

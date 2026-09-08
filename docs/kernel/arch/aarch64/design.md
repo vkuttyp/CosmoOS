@@ -142,8 +142,10 @@ enabled around `syscall_dispatch(x8, args, frame)`, result to the frame's
 from EL1) and data abort (0x24, 0x25) → `ARCH_TRAP_PAGE_FAULT`; BRK
 (0x3C), breakpoint and watchpoint → `ARCH_TRAP_BREAKPOINT`; software
 step (0x32/0x33) → `ARCH_TRAP_DEBUG`; unknown (0x00), illegal execution
-state (0x0E), trapped FP/SIMD (0x07: the kernel is built
-general-regs-only and user code too) and trapped system-register access
+state (0x0E), trapped FP/SIMD (0x07, which no longer happens: FPEN is
+0b11 at every CPU's bring-up, so the instructions are allowed at EL0 and
+EL1; the kernel abstains by its build flag and a build check, and user
+code does not abstain at all) and trapped system-register access
 → `ARCH_TRAP_INVALID_OPCODE`; everything else (PC/SP alignment, SError)
 → `ARCH_TRAP_GENERAL_PROTECTION`. There is no divide-error exception on
 AArch64; the kind exists for the contract and never fires. BRK is a
@@ -442,10 +444,11 @@ architecture as its second argument and expects `e_machine` 183.
   both architectures with the AArch64 numbers (`nr_aarch64.h`), the
   128-byte `struct stat`, `uname` `aarch64`, the arm64 `rt_sigframe`
   and `clone`'s argument order; user code sets `tpidr_el0` itself and
-  the switch hook saves it. What is still missing here: FP/SIMD at EL0
-  (a libc with NEON `memcpy` takes `SIGILL`; the test programs are
-  built `-mgeneral-regs-only`), the `esr_context` carries syndrome 0,
-  and `hello_musl` (x86-64 machine code) is not built.
+  the switch hook saves it. The signal frame carries an `fpsimd_context`
+  since the FP/SIMD unit, so a handler may use the vector registers
+  without losing the interrupted code's; what is still missing here is
+  the `esr_context`'s syndrome (carried as 0) and `hello_musl`, which is
+  x86-64 machine code and not built for this architecture.
 - `tests/hv` and its archive entries are included by the Makefile only
   when `ARCH` is `x86_64`; `tests/linux` builds for both. `rc.test` runs
   `/etc/rc.linux` when `/boot/tests/linux/lxhello` exists (both
@@ -507,7 +510,7 @@ Details in `testing.md`. In outline:
 
 GICv3 (system-register interface, redistributors, ITS for MSI) behind the
 same `arch/irqc.h`; ASID allocation instead of the full invalidate per
-switch; FP/SIMD state save for userland; the Linux AArch64 table (a
+switch; the Linux AArch64 table (a
 generic-unistd numbering shared with RISC-V later); an EL2 virtualization
 backend behind `arch/hv.h` with stage-2 tables as the GuestMemory and a
 vGIC as the VirtualInterrupt; device tree as a second platform

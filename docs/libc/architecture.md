@@ -54,9 +54,9 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
   `stderr`, `fopen`/`fdopen`/`fclose`, `fread`/`fwrite`/`fgets`/`fgetc`/
   `fputs`/`fputc`/`puts`/`putchar`, `fflush`, `printf` family including
   `snprintf`/`vsnprintf`/`dprintf`. Formats: `d i u x X o c s p %`, length
-  `l ll z`, flags `- 0 +`, width and precision (also `*`). No floating
-  point (programs are built with `-mgeneral-regs-only`: the kernel does
-  not yet save FPU state for user threads; `%f` prints `?`).
+  `l ll z`, flags `- 0 +`, width and precision (also `*`), and the
+  three floating conversions over `double` (the kernel saves FP/SIMD
+  state per thread on both architectures, so user code may use it).
   `stdout` is line-buffered, `stderr` unbuffered, files fully buffered;
   `exit` flushes.
 - **Files and handles** (`unistd.h`, `fcntl.h`, `sys/stat.h`,

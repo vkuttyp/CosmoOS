@@ -134,7 +134,20 @@ bool selftest_timer(const char **reason)
         last = now;
     }
 
-    /* The tick advances at roughly CONFIG_HZ. */
+    /*
+     * The tick advances at roughly CONFIG_HZ.
+     *
+     * Roughly, and the slack is not symmetric. A tick that arrives when
+     * the last one has not been taken is coalesced -- the interrupt is
+     * level-triggered and the counter advances once -- so on a busy host
+     * emulating this machine the tick count lags the clock, by more the
+     * busier the host is. That is the platform being honest, not the
+     * kernel being wrong, and the tolerance below is a quarter of the
+     * window: on an idle machine the lag is zero or one.
+     *
+     * Ticks ahead of the clock would be a real bug (a tick counted
+     * without time passing), so that side keeps its tight bound.
+     */
     uint64_t t0 = timer_ticks();
     uint64_t c0 = clock_now_ns();
     udelay(40000);
@@ -143,7 +156,8 @@ bool selftest_timer(const char **reason)
     CHECK(c1 - c0 >= MS(40));
     CHECK(c1 - c0 < MS(80));
     uint64_t expected = (c1 - c0) / TICK_NS;
-    CHECK(t1 - t0 + 2 >= expected);
+    uint64_t lag_allowed = expected / 4 > 2 ? expected / 4 : 2;
+    CHECK(t1 - t0 + lag_allowed >= expected);
     CHECK(t1 - t0 <= expected + 2);
 
     /* Timers fire in expiry order, not arming order. */

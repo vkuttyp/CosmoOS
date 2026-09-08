@@ -205,10 +205,28 @@ int linux_signal_frame(struct arch_user_regs *r, const struct sigaction_k *act, 
     mc->sp = r->sp;
     mc->pc = r->pc;
     mc->pstate = r->pstate;
-    /* No fpsimd_context: FP/SIMD is off at EL0 (kernel/arch/aarch64/fpu.c).
-     * An esr_context (syndrome 0: not carried yet) and the terminator. */
+    /*
+     * The reserved area holds a list of records: the FP/SIMD state, then
+     * an esr_context (syndrome 0: not carried yet), then the terminator.
+     * A handler that uses vector registers -- which is every handler in
+     * a program built by an ordinary toolchain -- would otherwise return
+     * into an interrupted function whose registers it had overwritten.
+     */
+    unsigned off = 0;
+    struct lx_fpsimd_context fp;
+    memset(&fp, 0, sizeof(fp));
+    fp.magic = LX_FPSIMD_MAGIC;
+    fp.size = sizeof(fp);
+    if (arch_user_fpu_image_size() == sizeof(fp) - offsetof(struct lx_fpsimd_context, fpsr) &&
+        arch_user_fpu_image_save(&fp.fpsr)) {
+        memcpy(mc->reserved + off, &fp, sizeof(fp));
+        off += sizeof(fp);
+    }
     struct lx_esr_context esr = { .magic = LX_ESR_MAGIC, .size = sizeof(esr), .esr = 0 };
-    memcpy(mc->reserved, &esr, sizeof(esr));
+    memcpy(mc->reserved + off, &esr, sizeof(esr));
+    off += sizeof(esr);
+    struct lx_ctx_terminator end = { .magic = 0, .size = 0 };
+    memcpy(mc->reserved + off, &end, sizeof(end));
     uint64_t record[2] = { r->x[29], r->x[30] };
     if (copy_to_user(frame, &f, sizeof(f)) || copy_to_user(sp, record, sizeof(record)))
         return -EFAULT;
@@ -240,6 +258,23 @@ int64_t lx_rt_sigreturn(struct syscall_args *a)
     r.sp = uc.uc_mcontext.sp;
     r.pc = uc.uc_mcontext.pc;
     r.pstate = uc.uc_mcontext.pstate;
+    /* Put the interrupted code's vector registers back, if the frame
+     * still carries them: a handler is free to have used its own. The
+     * records are walked rather than assumed, because a program may
+     * build its own frame. */
+    for (unsigned off = 0; off + sizeof(struct lx_ctx_terminator) <= sizeof(uc.uc_mcontext.reserved);) {
+        struct lx_ctx_terminator head;
+        memcpy(&head, uc.uc_mcontext.reserved + off, sizeof(head));
+        if (head.magic == 0 || head.size < sizeof(head) || head.size > sizeof(uc.uc_mcontext.reserved) - off)
+            break;
+        if (head.magic == LX_FPSIMD_MAGIC && head.size == sizeof(struct lx_fpsimd_context)) {
+            struct lx_fpsimd_context fp;
+            memcpy(&fp, uc.uc_mcontext.reserved + off, sizeof(fp));
+            (void)arch_user_fpu_image_restore(&fp.fpsr);
+            break;
+        }
+        off += head.size;
+    }
     signal_return(a->frame, &r, uc.uc_sigmask);
     t->syscall_nr = SIGNAL_NO_RESTART;
     return (int64_t)r.x[0];

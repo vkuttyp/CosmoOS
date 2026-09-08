@@ -75,7 +75,8 @@ test-crash:
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
 
-analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE)
+analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
+	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)
 	@echo "static analysis: clean"
 
 reproducible:

@@ -156,9 +156,10 @@ the standard headers (`stdio.h`, `stdlib.h`, `string.h`, `unistd.h`,
 `spawn.h`, `sys/wait.h`, ...) and `libc/src/` the implementation;
 `libc/libc.mk` builds `libc.a` and `crt0.o` with the user flags
 (`USER_CFLAGS`, defined there): the kernel target triple, no
-`-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie
--mgeneral-regs-only` (no floating point: the kernel does not save FPU
-state for user threads yet), `-I libc/include -I kernel/include` (the
+`-mcmodel=kernel`, no `-mno-red-zone`, `-fno-pic -fno-pie` and **no**
+`-mgeneral-regs-only` (user code uses the floating-point and vector
+registers; the kernel saves them per thread and still abstains itself,
+which `scripts/check-fpregs.sh` enforces), `-I libc/include -I kernel/include` (the
 UAPI header). `string.c` is compiled with `-fno-builtin`.
 
 `userland/` holds the programs (`docs/userland/`): `init/`, `shell/`

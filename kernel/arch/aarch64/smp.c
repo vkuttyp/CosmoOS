@@ -24,6 +24,7 @@
 #include <arch/smp.h>
 #include <arch/user.h>
 #include <aarch64/platform.h>
+#include <aarch64/fpu.h>
 #include <aarch64/sysreg.h>
 
 struct aarch64_ap_mailbox {
@@ -172,6 +173,7 @@ void aarch64_ap_entry(unsigned cpu)
         __asm__ volatile(".inst 0xd500419f" ::: "memory");   /* msr pan, #1 */
         isb();
     }
+    aarch64_fpu_init_cpu();   /* CPACR_EL1 is per-CPU: this one traps FP until told otherwise */
     arch_syscall_init_cpu();
     arch_irqc_init_cpu();
     pc->hw_id = (uint32_t)MPIDR_AFFINITY(READ_SYSREG(mpidr_el1));

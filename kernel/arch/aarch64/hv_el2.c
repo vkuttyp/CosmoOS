@@ -25,6 +25,7 @@
 #include <arch/hv_backend.h>
 #include <arch/irq.h>
 
+#include <aarch64/fpu.h>
 #include <aarch64/hv_ctx.h>
 #include <aarch64/hv_s2.h>
 #include <aarch64/sysreg.h>
@@ -64,6 +65,7 @@ struct arch_hv_vcpu {
     bool irq_taken;
     unsigned unknown_exits;
     uint32_t pending_event;  /* a queued exception vector, ~0 for none */
+    struct aarch64_fpu_area fpu;   /* the guest's vector registers (arch/fpu.h, guest rule) */
 };
 
 static struct hv_caps g_caps = { .present = false, .name = "none" };
@@ -511,7 +513,20 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     }
     __atomic_or_fetch(&v->vm->ran_on, CPUMASK_OF(this_cpu()->cpu_id), __ATOMIC_RELEASE);
     v->irq_taken = false;
+    /* Guest rule (arch/fpu.h): the owner thread's vector registers are
+     * saved, the guest's are loaded, and afterwards the guest's are
+     * captured and the owner's put back. A kernel-thread owner holds no
+     * state and gets zeros, so no guest register stays live in the
+     * kernel. Interrupts are off from here to the restore, so nothing
+     * can switch threads in between. */
+    bool owner = aarch64_fpu_save_current();
+    aarch64_fpu_area_restore(&v->fpu);
     int64_t rc = el2_run(v->ctx_pa);
+    aarch64_fpu_area_save(&v->fpu);
+    if (!owner || !aarch64_fpu_restore_current()) {
+        static const struct aarch64_fpu_area zero;
+        aarch64_fpu_area_restore(&zero);
+    }
     arch_irq_restore(s);
     if (rc != 0) {
         out->kind = HV_EXIT_FAIL;
