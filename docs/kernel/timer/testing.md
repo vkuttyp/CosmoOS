@@ -59,3 +59,21 @@ check above, which would drift if the multiplier were wrong.
 ```sh
 make test          # SELFTEST: timer ... ok, SELFTEST: sleep ... ok
 ```
+
+## The tick against the clock
+
+`timer` compares the tick counter with the monotonic clock over a 40 ms
+window. The tolerance is not symmetric, and the reason is worth stating:
+a tick interrupt that arrives while the previous one is still pending is
+coalesced -- the counter advances once -- so on a busy host emulating
+this machine the tick count *lags* the clock, by more the busier the
+host is. That is the platform being honest. Ticks *ahead* of the clock
+would mean a tick counted without time passing, which is a real bug, so
+that side keeps a bound of two.
+
+The lag allowance is a quarter of the window (ten ticks in forty). It
+was two, and the test failed about half the time in the busiest shape
+the chain runs (`QEMU_KBD=hub` on AArch64, where the hub's worker and
+the keyboard add interrupt work) on `main` as well as on a branch --
+which is what distinguishes a tolerance that is too tight from a
+regression.
