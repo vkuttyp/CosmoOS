@@ -59,4 +59,13 @@ int64_t sys_vcpu_regs(struct syscall_args *a);
 int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native signal ABI (kernel/process/native_signal.c): the frame a
+ * handler runs on, and the four calls that install and mask signals. */
+int native_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *act,
+                        const struct signal_info *info, uint64_t blocked_before);
+int64_t sys_sigaction(struct syscall_args *a);
+int64_t sys_sigprocmask(struct syscall_args *a);
+int64_t sys_sigpending(struct syscall_args *a);
+int64_t sys_sigreturn(struct syscall_args *a);
+
 #endif /* KERNEL_SYSCALL_H */

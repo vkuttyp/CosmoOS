@@ -84,6 +84,16 @@ kernel stack.
 | 47 | `vcpu_regs` | `int vcpu, struct cosmo_vcpu_regs *regs, int set` | 0 | `EBADF`, `EFAULT`, `EINVAL` |
 | 48 | `vcpu_run` | `int vcpu, struct cosmo_vm_exit *exit` | 0, `*exit` filled | `EBADF`, `EFAULT`, `ENOTSUP`, `EIO`, `EINTR`, `ENOMEM` |
 | 49 | `vcpu_irq` | `int vcpu, unsigned vector` | 0 | `EBADF`, `EINVAL` |
+| 66 | `sigaction` | `int sig, const struct cosmo_sigaction *act (NULL: query), struct cosmo_sigaction *old (NULL: ignore)` | 0 | `EINVAL` (`sig` outside 1..31, `SIGKILL`/`SIGSTOP`, an unknown flag, a handler with no restorer), `EFAULT` |
+| 67 | `sigprocmask` | `int how (BLOCK/UNBLOCK/SETMASK), const uint64_t *set (NULL: query), uint64_t *old` | 0 | `EINVAL`, `EFAULT` |
+| 68 | `sigreturn` | none; reached only from a handler's restorer | does not return | `EFAULT` (and `SIGSEGV` on the thread) when the frame is not the kernel's |
+| 69 | `sigpending` | `uint64_t *set` | 0; signals raised and still blocked | `EFAULT` |
+| 70 | `setpgid` | `int pid (0: self), int pgid (0: pid)` | 0 | `ESRCH` (not the caller or a child of it), `EPERM` (another session, a session leader, a group not of this session), `EINVAL` |
+| 71 | `getpgid` | `int pid (0: self)` | the process group | `ESRCH` |
+| 72 | `setsid` | none | the new session id (the caller's pid) | `EPERM` (the caller already leads a group), `ESRCH` |
+| 73 | `getsid` | `int pid (0: self)` | the session | `ESRCH` |
+| 74 | `tcgetpgrp` | `int handle` | the terminal's foreground group | `EBADF`, `ENOTTY` (not a terminal, or not this session's) |
+| 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
 Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
 `struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
@@ -293,9 +303,17 @@ kernel's `errno.h` values (`EBADF` 9, `EFAULT` 14, `EEXIST` 17,
 `struct cosmo_cqe` (16 bytes) (milestone 9);
 `COSMO_STDIN/STDOUT/STDERR` 0/1/2; auxiliary vector tags `COSMO_AT_NULL`
 0, `COSMO_AT_PAGESZ` 6, `COSMO_AT_ENTRY` 9; `COSMO_DT_FIFO` 4,
-`COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*`,
-`COSMO_NSIG` 32; `COSMO_ARG_MAX` 2048, `COSMO_ARG_ENTRIES` 128,
-`COSMO_PATH_MAX` 1024.
+`COSMO_DT_SOCK` 5 (reserved); `COSMO_WNOHANG` 1; `COSMO_SIG*` (1..19
+and `COSMO_SIGSYS` 31), `COSMO_NSIG` 32; `COSMO_SIG_DFL` 0,
+`COSMO_SIG_IGN` 1, `COSMO_SA_RESTART` 0x10000000, `COSMO_SA_NODEFER`
+0x40000000, `COSMO_SA_RESETHAND` 0x80000000, `COSMO_SIG_BLOCK/UNBLOCK/
+SETMASK` 0/1/2, `struct cosmo_sigaction { handler, mask, flags,
+reserved, restorer }`, `struct cosmo_siginfo { sig, code, pid, detail,
+addr }` with `COSMO_SI_USER/KERNEL/FAULT` 0/1/2;
+`COSMO_SPAWN_SETPGID` (0x40) with the `pgid` field of `struct
+cosmo_spawn` (0: a group of the child's own) and `COSMO_SPAWN_SIZE_V2`
+for a caller that predates it; `COSMO_ARG_MAX` 2048,
+`COSMO_ARG_ENTRIES` 128, `COSMO_PATH_MAX` 1024.
 
 ### Initial process state
 

@@ -1020,7 +1020,48 @@ static int64_t lx_setgroups(struct syscall_args *a)
 }
 static int64_t lx_zero(struct syscall_args *a) { (void)a; return 0; }
 static int64_t lx_nosys(struct syscall_args *a) { (void)a; return -ENOSYS; }
-static __maybe_unused int64_t lx_getpgrp(struct syscall_args *a) { (void)a; return process_current()->pid; }
+/*
+ * Sessions and process groups (docs/kernel/process/design.md). These
+ * were stubs -- setpgid did nothing, getpgrp and setsid answered the
+ * pid -- for as long as the kernel had no groups. It has them now, and a
+ * rule enforced at one personality's door and faked at the other's is
+ * not enforced at all, so these are the same calls the native
+ * personality makes.
+ */
+static __maybe_unused int64_t lx_getpgrp(struct syscall_args *a)
+{
+    (void)a;
+    pid_t pgid;
+    int rc = process_getpgid(0, &pgid);
+    return rc ? rc : (int64_t)pgid;
+}
+
+static int64_t lx_setpgid(struct syscall_args *a)
+{
+    return process_setpgid((pid_t)(int)a->a[0], (pid_t)(int)a->a[1]);
+}
+
+static int64_t lx_getpgid(struct syscall_args *a)
+{
+    pid_t pgid;
+    int rc = process_getpgid((pid_t)(int)a->a[0], &pgid);
+    return rc ? rc : (int64_t)pgid;
+}
+
+static int64_t lx_setsid(struct syscall_args *a)
+{
+    (void)a;
+    pid_t sid = 0;
+    int rc = process_setsid(&sid);
+    return rc ? rc : (int64_t)sid;
+}
+
+static int64_t lx_getsid(struct syscall_args *a)
+{
+    pid_t sid;
+    int rc = process_getsid((pid_t)(int)a->a[0], &sid);
+    return rc ? rc : (int64_t)sid;
+}
 
 static __maybe_unused int64_t lx_arch_prctl(struct syscall_args *a)
 {
@@ -1804,12 +1845,14 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_getresuid] = lx_getresuid,
     [LX_setresgid] = lx_setresgid,
     [LX_getresgid] = lx_getresgid,
-    [LX_setpgid] = lx_zero,
+    [LX_setpgid] = lx_setpgid,
+    [LX_getpgid] = lx_getpgid,
+    [LX_getsid] = lx_getsid,
     [LX_getppid] = lx_getppid,
 #ifdef LX_getpgrp
     [LX_getpgrp] = lx_getpgrp,
 #endif
-    [LX_setsid] = lx_getpgrp,
+    [LX_setsid] = lx_setsid,
     [LX_sigaltstack] = lx_sigaltstack,
 #ifdef LX_arch_prctl
     [LX_arch_prctl] = lx_arch_prctl,

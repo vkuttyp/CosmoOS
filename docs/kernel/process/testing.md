@@ -179,6 +179,73 @@ default-ignore signal such as `SIGCHLD` no longer terminates). The
 Linux-side coverage of threads, signals, frames and the return guards is
 in `docs/compat/linux/testing.md` (`lxtest`, `lxsig`, `lxdyn`).
 
+### The native signal ABI, sessions and the terminal
+
+Seven self-tests, each a user program the kernel runs and whose exit
+status is the number of the check it failed (the kernel side logs that
+number: the program that knows the detail is gone by then).
+
+- **`signal-native`** -- `init --probe signal`. Installs a handler,
+  loads a pattern into all sixteen vector registers, `raise`s the signal
+  and finds the pattern intact afterwards; the handler tramples the
+  vector registers and four scratch general registers on purpose. Then
+  the siginfo (`SI_USER`, the sender's pid), the mask (blocked inside
+  its own handler, unblocked after), `SA_NODEFER`, `SA_RESETHAND` (the
+  action reads back as `SIG_DFL`), and `sigaction(SIGKILL, ...)` being
+  `-EINVAL`.
+- **`signal-async`** -- `init --probe signal-async`. The same at the
+  other delivery point: a child (`signal-poke`) sleeps 20 ms and signals
+  its parent, which is spinning in hand-written assembly holding
+  sentinels in four registers no calling convention preserves. The loop
+  reports how many times it went round, so a signal that arrived before
+  the loop started fails the probe instead of passing it having proved
+  nothing. It is bounded, so a signal that never arrives fails rather
+  than hangs. The vector pattern is loaded *after* the spawn, because
+  the library's string handling uses vector registers and would
+  otherwise have overwritten it -- which is how this test first failed.
+- **`signal-mask`** -- blocked, pending, delivered at the unblock; the
+  mask coming back *out of the frame* (a second signal is blocked before
+  the handler runs, blocked inside it, and blocked again after it
+  returns -- a frame carrying no mask would leave it unblocked, and
+  nothing else in these tests notices that); `SIGKILL` and `SIGSTOP`
+  refusing to be blocked; `SIG_IGN` discarding.
+- **`signal-fault`** -- a `SIGSEGV` handler is told the faulting
+  address, maps a page there, and the store that faulted is run again
+  and lands.
+- **`signal-group`** -- four sleepers, three in one group and one
+  outside; `kill(-pgid, SIGTERM)` ends exactly the three and the
+  outsider runs to completion. Then an empty group as a target
+  (`-ESRCH`), a nonexistent pid to `setpgid` (`-ESRCH`), an empty group
+  to join (`-EPERM`), a session leader trying to change group
+  (`-EPERM`), and a child moved into a group of its own.
+- **`signal-setsid`** -- run in a child, because the process the kernel
+  starts for a probe already leads its own group: the child sees its
+  parent's group, `setsid` succeeds once, changes both ids, and is
+  `-EPERM` the second time. Inheritance is checked *from the child*
+  (`getpgid(0) == getpgid(getppid())`) rather than by the parent looking
+  at the child, which races the child's own `setsid` -- and lost, on one
+  architecture's CI runner and not the other's.
+- **`tty-intr`** -- two phases, driven from both ends. A user process claims the
+  console and waits; the test polls `tty_foreground_pgrp` until it is
+  the child's group, runs a second process from another session which
+  must be refused both `tcsetpgrp` (`-EPERM`) and `tcgetpgrp`
+  (`-ENOTTY`), types `abc` and then `^C`, and requires the child to exit
+  130 with no line committed (the partial line is thrown away) and the
+  terminal released once its session leader is gone. The second phase
+  writes `^\` and `^C` as one batch at a process that catches the
+  interrupt and leaves the quit fatal: it must die of the quit, which a
+  line discipline that kept only the last signal of a batch would not
+  manage.
+
+The interactive boot test (`tests/boot/shelltest.py`) covers the same
+path end to end: it runs `sleep 5`, waits half a second, sends a bare
+`0x03` byte, and requires the echoed `^C` and the next prompt **within
+three seconds** of the keystroke. The bound is the test: `sleep 5`
+reaches a prompt on its own eventually, so without it a run in which the
+`^C` did nothing still ends with every pattern matched -- which is what
+happened to the first version of this check, and what reintroducing the
+bug found. `sleep` exits 130 in the log.
+
 ### `elf` (milestone 10)
 
 An `ET_DYN` image with a segment at 0 validates with `is_dyn`, relative

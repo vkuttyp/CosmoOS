@@ -29,6 +29,7 @@
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 #include <kernel/timer.h>
+#include <kernel/tty.h>
 #include <kernel/uaccess.h>
 #include <kernel/version.h>
 #include <kernel/vfs.h>
@@ -753,10 +754,11 @@ static int64_t sys_spawn(struct syscall_args *a)
         return -EFAULT;
     if ((req.flags &
          ~(COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
-           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS)) ||
+           COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID)) ||
         req.path == NULL || req.argv == NULL)
         return -EINVAL;
-    if ((req.flags & COSMO_SPAWN_SETROOT) && copy_from_user(&req, a->a[0], sizeof(req)))
+    if ((req.flags & (COSMO_SPAWN_SETROOT | COSMO_SPAWN_SETPGID)) &&
+        copy_from_user(&req, a->a[0], (req.flags & COSMO_SPAWN_SETPGID) ? sizeof(req) : COSMO_SPAWN_SIZE_V2))
         return -EFAULT;
     struct process_spawn_cred cred = { .uid = req.uid, .gid = req.gid };
     if (req.nr_handles > HANDLE_TABLE_SIZE || (req.nr_handles != 0 && req.handles == NULL))
@@ -829,7 +831,8 @@ static int64_t sys_spawn(struct syscall_args *a)
     rc = process_spawn(sc->path, sc->argv, sc->envp, req.nr_handles ? sc->map : NULL, (unsigned)req.nr_handles, cwd,
                        rootp, (req.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
                        (req.flags & COSMO_SPAWN_NEWMOUNTNS) != 0, (req.flags & COSMO_SPAWN_NEWUTSNS) != 0,
-                       (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL, &pid);
+                       (req.flags & COSMO_SPAWN_SETCRED) ? &cred : NULL,
+                       (req.flags & COSMO_SPAWN_SETPGID) != 0, (pid_t)req.pgid, &pid);
 out:
     kfree(sc);
     return rc ? rc : (int64_t)pid;
@@ -851,6 +854,55 @@ static int64_t sys_wait(struct syscall_args *a)
     return got;
 }
 
+/* One target, every check. -ESRCH when the caller may not even see it,
+ * -EPERM when it may see it and not signal it, 0 when `sig` is 0 and
+ * the target passed both. */
+static int kill_one(struct process *target, int sig)
+{
+    struct process *cur = process_current();
+    /* A process outside domain 0 cannot reach another domain, and is
+     * told the target does not exist rather than that it may not touch
+     * it: -EPERM would confirm the pid is in use, which is the one
+     * thing the domain is meant not to tell it. */
+    if (cur && cur->domain != 0 && target->domain != cur->domain)
+        return -ESRCH;
+    if (!cred_may_signal(&cur->cred, &target->cred))
+        return -EPERM;
+    if (sig == 0)
+        return 0;   /* it exists and could be signalled; nothing is sent */
+    /* The signal core: a default-terminate signal ends the target
+     * (128 + sig); default-ignore ones (SIGCHLD, ...) are discarded; a
+     * process that installed a handler runs it. */
+    struct signal_info info = { .sig = sig, .source = SIGSRC_USER, .sender_pid = cur->pid,
+                                .sender_uid = cur->cred.ruid };
+    return signal_send(target, sig, &info);
+}
+
+/*
+ * A whole process group. POSIX's rule for the group form is that the
+ * call succeeds if the signal reached anyone, so a shell interrupting a
+ * job is not made to care that one member of it belongs to root: the
+ * refusals only surface when every member refused.
+ */
+static int64_t kill_group(pid_t pgid, int sig)
+{
+    unsigned sent = 0, denied = 0;
+    pid_t after = 0;
+    struct process *p;
+    while ((p = process_group_next(pgid, after)) != NULL) {
+        after = p->pid;
+        int rc = kill_one(p, sig);
+        process_put(p);
+        if (rc == 0)
+            sent++;
+        else if (rc == -EPERM)
+            denied++;
+    }
+    if (sent > 0)
+        return 0;
+    return denied > 0 ? -EPERM : -ESRCH;
+}
+
 static int64_t sys_kill(struct syscall_args *a)
 {
     int pid = (int)a->a[0];
@@ -860,35 +912,95 @@ static int64_t sys_kill(struct syscall_args *a)
      * way a supervisor can tell a live pid from a stale pid file
      * (docs/userland/design.md, "Services"). It goes through every
      * check below and stops before the delivery. */
-    if (sig < 0 || sig >= COSMO_NSIG || pid <= 0)
-        return -EINVAL;
+    if (sig < 0 || sig >= COSMO_NSIG || pid == -1)
+        return -EINVAL;   /* -1 is "every process", which nothing here wants */
+    if (pid <= 0) {
+        /* 0 is the caller's own group, a negative pid names one. */
+        pid_t pgid;
+        if (pid == 0) {
+            int rc = process_getpgid(0, &pgid);
+            if (rc)
+                return rc;
+        } else {
+            pgid = (pid_t)(-pid);
+        }
+        return kill_group(pgid, sig);
+    }
     struct process *target = process_lookup((pid_t)pid);
     if (target == NULL)
         return -ESRCH;
-    struct process *cur = process_current();
-    int rc = 0;
-    /* A process outside domain 0 cannot reach another domain, and is
-     * told the target does not exist rather than that it may not touch
-     * it: -EPERM would confirm the pid is in use, which is the one
-     * thing the domain is meant not to tell it. */
-    if (cur && cur->domain != 0 && target->domain != cur->domain) {
-        process_put(target);
-        return -ESRCH;
-    }
-    if (!cred_may_signal(&cur->cred, &target->cred)) {
-        rc = -EPERM;
-    } else if (sig == 0) {
-        rc = 0;   /* it exists and could be signalled; nothing is sent */
-    } else {
-        /* The signal core: a default-terminate signal ends the target
-         * (128 + sig) as before; default-ignore ones (SIGCHLD, ...) are
-         * discarded (milestone 10). Native processes install no handlers. */
-        struct signal_info info = { .sig = sig, .source = SIGSRC_USER, .sender_pid = cur->pid,
-                                    .sender_uid = cur->cred.ruid };
-        rc = signal_send(target, sig, &info);
-    }
+    int rc = kill_one(target, sig);
     process_put(target);
     return rc;
+}
+
+/* --- sessions, process groups and the terminal ------------------------------ */
+
+static int64_t sys_setpgid(struct syscall_args *a)
+{
+    return process_setpgid((pid_t)(int)a->a[0], (pid_t)(int)a->a[1]);
+}
+
+static int64_t sys_getpgid(struct syscall_args *a)
+{
+    pid_t pgid;
+    int rc = process_getpgid((pid_t)(int)a->a[0], &pgid);
+    return rc ? rc : (int64_t)pgid;
+}
+
+static int64_t sys_setsid(struct syscall_args *a)
+{
+    (void)a;
+    pid_t sid = 0;
+    int rc = process_setsid(&sid);
+    return rc ? rc : (int64_t)sid;
+}
+
+static int64_t sys_getsid(struct syscall_args *a)
+{
+    pid_t sid;
+    int rc = process_getsid((pid_t)(int)a->a[0], &sid);
+    return rc ? rc : (int64_t)sid;
+}
+
+/* The tty behind a handle: a terminal is asked about its foreground
+ * group through a handle to it, the way every other object is named. */
+static struct tty *tty_of_handle(int h, int *err)
+{
+    unsigned rights = 0;
+    struct kobject *obj = handle_get(&process_current()->handles, h, &rights);
+    if (obj == NULL) {
+        *err = -EBADF;
+        return NULL;
+    }
+    struct tty *t = tty_of_object(obj);
+    kobject_put(obj);
+    if (t == NULL)
+        *err = -ENOTTY;
+    return t;
+}
+
+static int64_t sys_tcgetpgrp(struct syscall_args *a)
+{
+    int err = 0;
+    struct tty *t = tty_of_handle((int)a->a[0], &err);
+    if (t == NULL)
+        return err;
+    pid_t pgid = 0;
+    int rc = tty_get_pgrp(t, &pgid);
+    return rc ? rc : (int64_t)pgid;
+}
+
+static int64_t sys_tcsetpgrp(struct syscall_args *a)
+{
+    int err = 0;
+    struct tty *t = tty_of_handle((int)a->a[0], &err);
+    if (t == NULL)
+        return err;
+    int pgid = (int)a->a[1];
+    if (pgid <= 0)
+        return -EINVAL;
+    return tty_set_pgrp(t, (pid_t)pgid);
 }
 
 /* --- credentials (Prompt #3, 3.6) ------------------------------------------- */
@@ -1383,12 +1495,24 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_aio_wait] = sys_aio_wait,
     [SYS_setgroups] = sys_setgroups,
     [SYS_getgroups] = sys_getgroups,
+    [SYS_sigaction] = sys_sigaction,
+    [SYS_sigprocmask] = sys_sigprocmask,
+    [SYS_sigreturn] = sys_sigreturn,
+    [SYS_sigpending] = sys_sigpending,
+    [SYS_setpgid] = sys_setpgid,
+    [SYS_getpgid] = sys_getpgid,
+    [SYS_setsid] = sys_setsid,
+    [SYS_getsid] = sys_getsid,
+    [SYS_tcgetpgrp] = sys_tcgetpgrp,
+    [SYS_tcsetpgrp] = sys_tcsetpgrp,
 };
 
 /* A process must always be able to stop, whatever its filter says: a
  * filter that killed a process for exiting would turn every clean
  * shutdown into a signal death. */
-static const uint16_t native_always_allowed[] = { SYS_exit };
+/* sigreturn joins it: a filter that denied the return from a handler
+ * would turn every caught signal into a kill. */
+static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn };
 
 const struct personality personality_native = {
     .name = "native",
@@ -1396,4 +1520,5 @@ const struct personality personality_native = {
     .count = SYS_COUNT,
     .always_allowed = native_always_allowed,
     .nr_always_allowed = sizeof(native_always_allowed) / sizeof(native_always_allowed[0]),
+    .signal_frame = native_signal_frame,
 };

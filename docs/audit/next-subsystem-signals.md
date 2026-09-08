@@ -340,3 +340,58 @@ usual chain.
 - **Nothing: leave `^C` dropped.** Defensible while the only user is a
   test harness that never needs to interrupt anything, which stopped
   being true when the machine grew a keyboard.
+
+## Outcome (2026-09-08)
+
+Built: steps 1 to 4. Step 5, job control, was not built -- the report
+called it droppable and last, and that is what happened to it.
+
+**What the unit answered.** The architectural question was how much of
+the POSIX session model to build, and the answer the code gives is
+"all of the small part of it": `sid` and `pgid` on the process,
+`setsid`/`setpgid`/`getsid`/`getpgid`, a controlling session and a
+foreground group on the tty, and a release when the session leader
+exits. The count the report asked for -- *if sessions are eighty lines
+and a field, the argument for the shortcut is thin* -- came out at two
+fields and about 200 lines of kernel, of which the session rules
+themselves are perhaps 90. The shortcut ("remember one controlling
+process") would have saved almost none of it, because it still has to
+answer who may take the terminal, who inherits it, and when it is
+released. Sessions were the cheaper answer, not the more thorough one.
+
+**What the frame ended up carrying.** The general registers, the
+blocked mask, the FP/SIMD image and the siginfo, behind a magic number,
+opaque to the program, found from the stack pointer at `sigreturn`. The
+one thing the report did not anticipate is the failure mode that cost
+the most time: the frame originally hard-coded the FP image size per
+architecture, AArch64's is 520 bytes rather than the 528 assumed, and
+the mismatch made the frame carry *nothing* -- silently, with the only
+symptom a handler's vector registers surviving into the interrupted
+code. The frame now records the length it carries and reports the one
+case a length cannot express.
+
+**A second thing the tests found**, and it is a test-writing lesson
+rather than a kernel one: the first version of the asynchronous probe
+loaded its vector pattern before spawning the child that would signal
+it, and the library's string handling -- compiled with the vector
+registers available -- overwrote the pattern on the way through
+`spawn`. A test of the kernel's saving and restoring has to own the
+registers for the whole window it measures.
+
+**Three delivery points, three tests.** The report named the frame
+builder as the risk; what the tests actually cover is that the frame is
+built correctly at each of the three returns to user mode -- a system
+call, an interrupt, a fault -- because each starts from a different arch
+frame. The asynchronous one holds sentinels in four registers no calling
+convention preserves, and reports how many times its loop went round, so
+that a signal arriving before the loop started fails the probe rather
+than passing it having proved nothing.
+
+**Size**: about 2 100 lines changed against the report's estimate of
+1 150 for five steps; four steps came to roughly 900 lines of code and
+650 of tests, and the rest is documentation.
+
+**What is left for a later unit**, all of it named in the gaps of
+`docs/kernel/process/invariants.md`: job control (a stopped state,
+`^Z`, `SIGCONT`, `fg`/`bg`, `SIGTTIN`/`SIGTTOU`), an alternate signal
+stack, real-time signals and queued siginfo, and `sigsuspend`/`sigwait`.

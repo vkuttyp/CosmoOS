@@ -156,9 +156,54 @@ The wait status is the process's exit status itself: `0..255` from
 `s`; `WIFEXITED(s)` is `s < 128`; `WIFSIGNALED(s)` is `s > 128 && s !=
 139`; `WTERMSIG(s)` is `s - 128`. `waitpid(-1, ...)` waits for any
 child; `WNOHANG` returns 0 when none has exited; `ECHILD` when there is
-no such child. Signals are numbers only: `SIGHUP` 1, `SIGINT` 2,
-`SIGKILL` 9, `SIGSEGV` 11, `SIGTERM` 15, `NSIG` 32; every one
-terminates the target; there are no handlers.
+no such child.
+
+```c
+pid_t spawnve_pgrp(const char *path, const char *const argv[], const char *const envp[],
+                   const struct spawn_handle *h, size_t nh, pid_t pgid);
+pid_t spawnvp_pgrp(const char *file, const char *const argv[], const struct spawn_handle *h,
+                   size_t nh, pid_t pgid);          /* COSMO_SPAWN_SETPGID */
+int setpgid(pid_t pid, pid_t pgid);  pid_t getpgid(pid_t pid);  pid_t getpgrp(void);
+pid_t setsid(void);                  pid_t getsid(pid_t pid);
+pid_t tcgetpgrp(int fd);             int tcsetpgrp(int fd, pid_t pgid);   /* unistd.h */
+```
+
+The `_pgrp` spawns place the child in `pgid` -- or in a group of its
+own, when that is 0 -- before its first instruction, which a `setpgid`
+after the spawn cannot do: the window between them is one in which a
+signal to the group misses the child. The session calls are the
+kernel's, unchanged (`docs/kernel/process/design.md`, "Sessions and
+process groups"); `tcsetpgrp` on an unclaimed terminal claims it for the
+caller's session, and `tcgetpgrp` is `ENOTTY` outside the terminal's
+session.
+
+```c
+typedef unsigned long sigset_t;
+typedef struct { int si_signo, si_code; pid_t si_pid; unsigned si_detail; void *si_addr; } siginfo_t;
+struct sigaction { union { void (*sa_handler)(int);
+                           void (*sa_sigaction)(int, siginfo_t *, void *); };
+                   sigset_t sa_mask; unsigned sa_flags; };
+int sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+void (*signal(int sig, void (*handler)(int)))(int);
+int sigprocmask(int how, const sigset_t *set, sigset_t *old);
+int sigpending(sigset_t *set);
+int raise(int sig);
+int sigemptyset/sigfillset/sigaddset/sigdelset/sigismember(...);
+```
+
+Numbers: `SIGHUP` 1 … `SIGCHLD` 17, `SIGCONT` 18, `SIGSTOP` 19,
+`SIGSYS` 31, `NSIG` 32. Flags: `SA_NODEFER`, `SA_RESETHAND`,
+`SA_RESTART`, and `SA_SIGINFO`, which is accepted and stripped -- the
+kernel hands every handler all three arguments, so it distinguishes
+nothing here and exists so that POSIX code compiles. `sigaction` fills
+in the library's restorer (`__cosmo_sigreturn`, two instructions of
+assembly, because the kernel finds the frame from the stack pointer and
+a restorer must not touch it); `SIG_DFL` and `SIG_IGN` get none, and the
+kernel refuses a real handler without one. `siginfo_t` is `struct
+cosmo_siginfo` under POSIX names, with the layout asserted field by
+field, so a handler reads the kernel's own record. `signal()` sets
+`SA_RESTART`. There is no `sigaltstack`, no real-time signal, no queued
+siginfo, no `sigsuspend`, and no job control.
 
 ## sys/socket.h, netinet/in.h, arpa/inet.h
 

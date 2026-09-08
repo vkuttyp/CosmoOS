@@ -9,6 +9,7 @@
  *   badstack  rt_sigreturn to a non-canonical rsp, then a push   139
  *   group     a second thread calls exit_group(7)                  7
  *   lastthread the main thread exits; the other calls exit_group(5) 5
+ *   session   setsid/getsid/getpgid/setpgid answer for real           0
  */
 
 #include "lxabi.h"
@@ -117,6 +118,27 @@ int main(int argc, char **argv)
     if (streq(mode, "lastthread")) {
         lx_clone(t_last, stack + sizeof(stack), 0, flags, 0, 0, 0);
         sc1(LX_exit, 3);   /* this thread only; the process lives on */
+    }
+    /*
+     * Sessions through the Linux door. These four were stubs -- setpgid
+     * did nothing, setsid answered the pid -- until the kernel grew
+     * process groups, and a rule enforced at one personality's door and
+     * faked at the other's is not enforced at all. The raw calls return
+     * -errno, so -1 is EPERM.
+     */
+    if (streq(mode, "session")) {
+        long pid = sc0(LX_getpid);
+        if (sc1(LX_getpgid, 0) == pid)
+            return 3;   /* already a group leader: the checks would prove nothing */
+        if (sc0(LX_setsid) != pid)
+            return 4;
+        if (sc1(LX_getsid, 0) != pid || sc1(LX_getpgid, 0) != pid)
+            return 5;
+        if (sc0(LX_setsid) != -1)
+            return 6;   /* a group leader has no second session to start */
+        if (sc2(LX_setpgid, 0, 0) != -1)
+            return 7;   /* nor can a session leader change group */
+        return 0;
     }
     lx_puts("lxsig: unknown mode\n");
     return 2;

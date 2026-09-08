@@ -105,6 +105,46 @@ in-process too (there is no fork), with their input/output redirected
 by temporarily `dup2`-ing the shell's handles and restoring them: this
 is what makes `pwd > file` work.
 
+### Jobs, the terminal, and ^C
+
+An interactive shell runs the terminal. At start-up `job_control_init`
+does three things, and gives up on any of them failing -- a shell
+started inside another shell's job has no terminal to take, and
+commands still run, they just share the shell's group and its signals:
+
+1. `setsid()`, unless it already leads a group. A session of its own is
+   what makes this terminal *this* shell's.
+2. `tcsetpgrp(0, getpgrp())`, which claims the terminal for the shell's
+   own group.
+3. `signal(SIGINT, SIG_IGN)` and the same for `SIGQUIT`. The shell is
+   about to make each job the foreground group, and it has to still be
+   here to print a prompt when the job dies of the interrupt.
+
+Then every pipeline is one job and therefore one process group: the
+first stage is spawned with `spawnvp_pgrp(..., 0)` -- a group named by
+its own pid -- and the rest name that group, so `^C` interrupts the
+whole pipeline rather than whichever stage happened to be reading. The
+shell hands the terminal to the job with `tcsetpgrp` before waiting and
+takes it back afterwards; both calls may fail on a job that has already
+exited, and neither failure changes what happens next.
+
+Worth saying plainly: with no background jobs, **nothing observable yet
+distinguishes a per-job group from the shell's own group** -- with
+either, the terminal's foreground group contains the job, and `^C`
+reaches it. The per-job group is here because it is what the group model
+is for, and because the moment `&`, `fg` or `bg` exists the shell's
+group and the job's must differ. The mechanism itself is tested on its
+own (`signal-group`); the shell's use of it is not separately
+observable, and no test pretends otherwise.
+
+A job that died of a signal is reported (`sh: sleep: segmentation
+fault`) rather than left to look like an exit status, except for
+`SIGINT` -- the terminal has already echoed `^C` -- and `SIGPIPE`, which
+is how the second half of a pipeline tells the first to stop.
+
+`^Z` and `fg`/`bg` are not built: there is no stopped state in the
+kernel (`docs/kernel/process/design.md`, "Sessions and process groups").
+
 ### Input
 
 Interactive: write the prompt to handle 2, `read(0, line, 1023)` (the

@@ -249,12 +249,12 @@ error code and allowed to continue into a state the author never tested.
 
 **Some calls cannot be denied.** `exit` always works: a process must be
 able to stop, and a filter that kills a process for exiting is a filter
-that turns every clean shutdown into a signal death. For the Linux
-personality `exit_group` and `rt_sigreturn` are likewise always allowed
--- a signal handler must be able to return, or the first signal after a
-filter is installed is fatal for a reason that has nothing to do with
-the filter. The set is named by the personality, which owns the
-numbering.
+that turns every clean shutdown into a signal death. `sigreturn` is
+likewise always allowed in the native personality, and `exit_group` and
+`rt_sigreturn` in the Linux one -- a signal handler must be able to
+return, or the first signal after a filter is installed is fatal for a
+reason that has nothing to do with the filter. The set is named by the
+personality, which owns the numbering.
 
 **The filter reads the number and nothing else.** It does not inspect
 arguments, and that is a decision rather than a missing feature.

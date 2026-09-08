@@ -10,10 +10,19 @@
  *
  * No control flow, globbing, background jobs or command substitution in
  * this phase; the structures are shaped so they slot in.
+ *
+ * An interactive shell also runs the terminal: it starts a session of
+ * its own, puts each pipeline in a process group of its own, and hands
+ * the terminal to that group while it runs. That is what makes ^C
+ * interrupt the command and not the shell -- the kernel sends SIGINT to
+ * the terminal's foreground group, and the shell has arranged for that
+ * to be the job (docs/kernel/process/design.md, "Sessions and process
+ * groups").
  */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +43,8 @@
 static int g_last_status;
 static int g_opt_errexit;
 static int g_interactive;
+static int g_job_control;        /* the terminal is this shell's to hand out */
+static pid_t g_shell_pgrp;
 static const char *g_script_name = "sh";
 static char **g_script_args;     /* $1.. */
 static int g_script_argc;
@@ -394,6 +405,7 @@ static int is_assignment(const char *w)
 }
 
 static int run_script_file(const char *path);
+static void report_signal(const char *what, int status);
 
 static int builtin(struct command *c, int *is_builtin)
 {
@@ -583,6 +595,12 @@ static int run_pipeline(struct pipeline *pl)
     pid_t pids[STAGES_MAX];
     int prev_read = -1;
     int last_status = 0;
+    /* Every stage of one pipeline is one job, so it is one process
+     * group: ^C at the terminal interrupts the whole pipeline, not
+     * whichever stage happened to be reading. The group is named by the
+     * first stage's pid, which is why the first spawn asks for a group
+     * of the child's own and the rest name it. */
+    pid_t job_pgrp = 0;
     for (int i = 0; i < pl->ncmds; i++) {
         struct command *c = &pl->cmds[i];
         struct spawn_handle map[3] = { { .child = 0, .parent = prev_read >= 0 ? prev_read : 0 },
@@ -602,7 +620,10 @@ static int run_pipeline(struct pipeline *pl)
             pids[i] = -1;
             last_status = 1;
         } else {
-            pids[i] = spawnvp(c->words[0], (const char *const *)c->words, map, 3);
+            pids[i] = g_job_control ? spawnvp_pgrp(c->words[0], (const char *const *)c->words, map, 3, job_pgrp)
+                                    : spawnvp(c->words[0], (const char *const *)c->words, map, 3);
+            if (pids[i] > 0 && job_pgrp == 0)
+                job_pgrp = pids[i];
             if (pids[i] < 0) {
                 fprintf(stderr, "sh: %s: %s\n", c->words[0],
                         errno == ENOENT ? "not found" : errno == EACCES ? "not executable" : strerror(errno));
@@ -619,6 +640,11 @@ static int run_pipeline(struct pipeline *pl)
     }
     if (prev_read >= 0)
         close(prev_read);
+    /* Hand the terminal to the job while it runs, and take it back
+     * afterwards. Both may fail -- a job that has already exited is no
+     * longer a group -- and neither failure changes what happens next. */
+    if (g_job_control && job_pgrp != 0)
+        (void)tcsetpgrp(0, job_pgrp);
     for (int i = 0; i < pl->ncmds; i++) {
         if (pids[i] < 0)
             continue;
@@ -626,6 +652,10 @@ static int run_pipeline(struct pipeline *pl)
         if (waitpid(pids[i], &st, 0) == pids[i] && i == pl->ncmds - 1)
             last_status = st;
     }
+    if (g_job_control)
+        (void)tcsetpgrp(0, g_shell_pgrp);
+    if (last_status > 128 && pl->cmds[pl->ncmds - 1].nwords > 0)
+        report_signal(pl->cmds[pl->ncmds - 1].words[0], last_status);
     return last_status;
 }
 
@@ -701,6 +731,56 @@ static int run_script_file(const char *path)
     return g_last_status;
 }
 
+/*
+ * Take charge of the terminal, if there is one to take. A shell that is
+ * not already a process group leader starts a session, which is what
+ * gives it a terminal of its own; then it claims the terminal for its
+ * own group. Both can fail -- a shell started from another shell's job,
+ * a terminal another session already holds -- and a failure simply
+ * means no job control: commands still run, they just share the
+ * shell's group and its signals.
+ */
+static void job_control_init(void)
+{
+    if (getpgrp() != getpid() && setsid() < 0)
+        return;
+    g_shell_pgrp = getpgrp();
+    /* The shell survives what it sends to its jobs: it is about to make
+     * each job the foreground group, and it must still be here to print
+     * a prompt when the job dies of the interrupt. Set before the
+     * terminal is claimed, not after, so there is no instant in which
+     * the shell is the foreground group and still dies of a ^C. */
+    signal(SIGINT, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    if (tcsetpgrp(0, g_shell_pgrp) != 0) {
+        signal(SIGINT, SIG_DFL);
+        signal(SIGQUIT, SIG_DFL);
+        return;
+    }
+    g_job_control = 1;
+}
+
+/* What to say about a job that did not exit on its own. The terminal has
+ * already echoed "^C", so an interrupt needs no announcement; anything
+ * else does, or the shell would report a plausible-looking exit status
+ * for a command that was killed. */
+static void report_signal(const char *what, int status)
+{
+    static const char *const names[] = { [SIGHUP] = "hangup",  [SIGINT] = "interrupt", [SIGQUIT] = "quit",
+                                         [SIGILL] = "illegal instruction", [SIGABRT] = "aborted",
+                                         [SIGBUS] = "bus error", [SIGFPE] = "arithmetic exception",
+                                         [SIGKILL] = "killed", [SIGSEGV] = "segmentation fault",
+                                         [SIGPIPE] = "broken pipe", [SIGTERM] = "terminated" };
+    int sig = status - 128;
+    if (sig <= 0 || sig >= NSIG || sig == SIGINT || sig == SIGPIPE)
+        return;
+    const char *name = (size_t)sig < sizeof(names) / sizeof(names[0]) && names[sig] ? names[sig] : NULL;
+    if (name)
+        fprintf(stderr, "sh: %s: %s\n", what, name);
+    else
+        fprintf(stderr, "sh: %s: signal %d\n", what, sig);
+}
+
 static void interactive(void)
 {
     char line[LINE_MAX_];
@@ -754,6 +834,7 @@ int main(int argc, char **argv)
         return st;
     }
     g_interactive = 1;
+    job_control_init();
     interactive();
     return 0;
 }

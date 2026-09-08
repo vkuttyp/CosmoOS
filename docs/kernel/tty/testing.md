@@ -50,6 +50,26 @@ line and a `ps` line in the `ps` output, `^/$` and `^/tmp$` from `pwd`,
 must end through `init: shell exited with status 0`. Failures are
 reported as `shell harness: ...` lines by `run_boot_test.py`.
 
+## The foreground group (`tty-intr`, `kernel/process/proctest.c`)
+
+Driven from both ends, because neither end alone proves it. A user
+process (`init --probe signal-tty`) claims the console with
+`tcsetpgrp` and waits; the kernel side polls `tty_foreground_pgrp` until
+it is that process's group, then runs a second process from another
+session (`signal-tty-steal`) which must be refused `tcsetpgrp`
+(`-EPERM`) and `tcgetpgrp` (`-ENOTTY`); then it types `abc` and `^C` and
+requires the child to exit 130, no line to have been committed (the
+partial line is discarded -- checked through `lines_in`, because the
+console may already hold input the harness typed), and the terminal to
+be released once its session leader is gone.
+
+A second phase then checks that a batch delivers every signal it
+carries: one process with `SIGINT` caught and `SIGQUIT` left fatal, and
+one `tty_input` of `^\` followed by `^C`, which must end it with 131. A
+line discipline that remembered only the last signal of a batch would
+send the interrupt alone, the handler would run, and the process would
+still be there.
+
 ## Bring-up findings
 
 - `irq_request` registers and routes a legacy IRQ but leaves it masked;

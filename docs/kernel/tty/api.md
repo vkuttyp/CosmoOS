@@ -32,10 +32,11 @@ contract is in `docs/kernel/syscall/api.md`.
 | `TTY_ICRNL` | bit 1 | `'\r'` becomes `'\n'` (on by default) |
 
 ### `struct tty`
-`lock`; `line[TTY_LINE_MAX]`, `line_len` (the line under edit);
-`ring[TTY_INPUT_MAX]`, `head`, `tail`, `used`; `lines` (complete records
-in the ring); `readers` (wait queue); `stats`; `flags`; `name`. About
-5.2 KiB; never placed on a stack.
+`lock`; `sid`, `fg_pgid` (the controlling session and its foreground
+process group, 0 for none); `line[TTY_LINE_MAX]`, `line_len` (the line
+under edit); `ring[TTY_INPUT_MAX]`, `head`, `tail`, `used`; `lines`
+(complete records in the ring); `readers` (wait queue); `stats`;
+`flags`; `name`. About 5.2 KiB; never placed on a stack.
 
 ### `struct tty_stats`
 `rx_bytes` (bytes handed to `tty_input`), `lines_in` (records
@@ -102,6 +103,33 @@ what they were, under the lock. The keyboard test turns echo off while
 the harness is typing, so what it types does not land in the middle of a
 line the console is printing, and puts it back afterwards; nothing else
 has wanted this yet.
+
+### `int tty_set_pgrp(struct tty *t, pid_t pgid)`
+Name the terminal's foreground group -- the group `^C` and `^\` signal.
+A session leader whose session holds no terminal claims this one by
+being the first to call; after that, `-EPERM` to a caller outside the
+terminal's session, and `-EPERM` for a group with no member in it.
+`pgid` 0 is `-EINVAL`. Thread context: the session check walks the
+process table, so `tty->lock` is dropped across it and re-taken.
+
+### `int tty_get_pgrp(struct tty *t, pid_t *out)`
+The foreground group, or `-ENOTTY` when the caller's session is not the
+terminal's -- to a caller outside it, this is not a controlling terminal
+at all.
+
+### `void tty_session_exit(pid_t sid)`
+The leader of session `sid` has exited: if that session held the
+console, `SIGHUP` goes to what was its foreground group and the terminal
+is released for the next session leader to claim. Called from the
+process exit path, with no process locks held.
+
+### `pid_t tty_foreground_pgrp(struct tty *t)`
+The foreground group without the session check the system calls make; 0
+when there is none. For the kernel's own tests and diagnostics.
+
+### `struct tty *tty_of_object(struct kobject *obj)`
+The tty behind a handle's object, or NULL when it is not a terminal.
+The console object is the only terminal, so this is a comparison.
 
 ## The console kobject (`kernel/object/console_obj.c`)
 

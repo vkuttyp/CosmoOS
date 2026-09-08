@@ -81,6 +81,13 @@ bool selftest_elf(const char **reason);
 bool selftest_process_reject(const char **reason);
 bool selftest_process_selftest(const char **reason);
 bool selftest_process_fault(const char **reason);
+bool selftest_signal_native(const char **reason);      /* a handler and its return, at a syscall */
+bool selftest_signal_async(const char **reason);       /* ... at an interrupt, with a child sending */
+bool selftest_signal_mask(const char **reason);        /* blocked, pending, delivered at the unblock */
+bool selftest_signal_fault(const char **reason);       /* ... at a fault, with the address in siginfo */
+bool selftest_signal_group(const char **reason);        /* kill(-pgid) reaches the group and nothing else */
+bool selftest_signal_setsid(const char **reason);      /* a session is started once */
+bool selftest_tty_intr(const char **reason);           /* ^C to the terminal's foreground group */
 bool selftest_process_efault(const char **reason);    /* -EFAULT through the fixup path, never a kill */
 bool selftest_process_protnone(const char **reason);  /* a PROT_NONE touch is fatal */
 bool selftest_process_oom(const char **reason);       /* injected demand-page failures */

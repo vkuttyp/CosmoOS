@@ -334,4 +334,46 @@ static inline long cosmo_aio_wait(int ring, struct cosmo_cqe *cqes, unsigned n, 
     return cosmo_syscall5(SYS_aio_wait, ring, cqes, n, min, timeout_ns);
 }
 
+/* Signals a program can catch (docs/kernel/process/design.md, "The
+ * native signal ABI"). `sigreturn` is not here: it is reached only from
+ * the restorer the libc installs, which cannot be a C function. */
+static inline long cosmo_sigaction(int sig, const struct cosmo_sigaction *act, struct cosmo_sigaction *old)
+{
+    return cosmo_syscall3(SYS_sigaction, sig, act, old);
+}
+static inline long cosmo_sigprocmask(int how, const uint64_t *set, uint64_t *old)
+{
+    return cosmo_syscall3(SYS_sigprocmask, how, set, old);
+}
+static inline long cosmo_sigpending(uint64_t *set)
+{
+    return cosmo_syscall1(SYS_sigpending, set);
+}
+
+/* Sessions, process groups and the terminal's foreground group. */
+static inline long cosmo_setpgid(int pid, int pgid)
+{
+    return cosmo_syscall2(SYS_setpgid, pid, pgid);
+}
+static inline long cosmo_getpgid(int pid)
+{
+    return cosmo_syscall1(SYS_getpgid, pid);
+}
+static inline long cosmo_setsid(void)
+{
+    return cosmo_syscall0(SYS_setsid);
+}
+static inline long cosmo_getsid(int pid)
+{
+    return cosmo_syscall1(SYS_getsid, pid);
+}
+static inline long cosmo_tcgetpgrp(int h)
+{
+    return cosmo_syscall1(SYS_tcgetpgrp, h);
+}
+static inline long cosmo_tcsetpgrp(int h, int pgid)
+{
+    return cosmo_syscall2(SYS_tcsetpgrp, h, pgid);
+}
+
 #endif /* COSMO_SYSCALL_H */

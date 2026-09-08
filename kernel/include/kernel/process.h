@@ -130,6 +130,14 @@ struct process {
     struct linux_state *linux;
     uint64_t image_end;                /* page after the highest loaded segment (brk starts here) */
     /* Milestone 10: signals and threads (docs/kernel/process/design.md §11). */
+    /* The process group and the session it belongs to
+     * (docs/kernel/process/design.md, "Sessions and process groups").
+     * Both are read and written only under the process table's lock,
+     * which is also what the group walk holds -- one rule for three
+     * fields that are always looked at across processes. Inherited at
+     * spawn; a process with no parent starts a session of its own. */
+    pid_t pgid;
+    pid_t sid;
     struct sigaction_k *sigactions;    /* SIG_MAX entries, under lock */
     uint64_t sig_shared_pending;       /* signals sent to the process, not yet taken by a thread */
     struct signal_info *sig_shared_info;
@@ -165,6 +173,13 @@ struct process_spawn_attr {
     struct mount_ns *mntns;
     /* Likewise the child's uts namespace (COSMO_SPAWN_NEWUTSNS). */
     struct uts_ns *utsns;
+    /* The child's process group (COSMO_SPAWN_SETPGID). `set_pgid`
+     * false leaves it in the parent's; true with `pgid` 0 starts a
+     * group named by the child's own pid. Checked against the parent's
+     * session by the process code, under the table lock, because that
+     * is where the group fields live. */
+    bool set_pgid;
+    pid_t pgid;
     bool set_cred;                                 /* validated by the caller (COSMO_SPAWN_SETCRED) */
     uint32_t uid, gid;
     const struct rlimits *rlim;                    /* NULL: the parent's limits (or the defaults) */
@@ -205,7 +220,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
 int process_spawn(const char *path, const char *const argv[], const char *const envp[],
                   const struct process_handle_map *handles, unsigned nr_handles, const char *cwd, const char *root,
                   bool new_domain, bool new_mountns, bool new_utsns, const struct process_spawn_cred *cred,
-                  pid_t *pid_out);
+                  bool set_pgid, pid_t pgid, pid_t *pid_out);
 
 /* A domain identifier nobody has had. Monotonic and never reused, so a
  * live domain's identity cannot be handed to a second set of processes;
@@ -299,6 +314,23 @@ int process_wait_exit(struct process *p);
 struct process *process_current(void);
 
 struct process *process_lookup(pid_t pid);   /* referenced or NULL */
+
+/* Sessions and process groups (docs/kernel/process/design.md).
+ * `pid` 0 means the caller in each of these, as POSIX has it. */
+int process_getpgid(pid_t pid, pid_t *out);
+int process_getsid(pid_t pid, pid_t *out);
+int process_setpgid(pid_t pid, pid_t pgid);
+int process_setsid(pid_t *out);
+/* Walk a process group: the member with the smallest pid greater than
+ * `after`, referenced, or NULL when there are no more. The table's lock
+ * is dropped before it returns, so the caller may block, signal or take
+ * any other lock while it holds the member. */
+struct process *process_group_next(pid_t pgid, pid_t after);
+/* True when at least one process of group `pgid` is in session `sid`.
+ * An empty group belongs to no session and answers false. */
+bool process_group_in_session(pid_t pgid, pid_t sid);
+/* The calling process's session, or 0 for a kernel thread. */
+pid_t process_current_sid(void);
 
 /* The system's init: orphans are reparented to it. Set once by kernel_main. */
 void process_set_init(struct process *p);

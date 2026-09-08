@@ -317,13 +317,68 @@ status 7), `lxsig lastthread` (the main thread exits, the other's
 `exit_group(5)` gives 5), `lxtest` joins through `CHILD_CLEARTID`.
 Gap: no test kills a process with a thread blocked in `futex_wait`.
 
+## Signals a program can catch, sessions, and the terminal
+
+**P-S6. A handler returns to exactly the registers it interrupted.** The
+native frame carries the general registers, the blocked mask and the
+architecture's FP/SIMD image, and `sigreturn` puts all three back --
+because a handler compiled by an ordinary toolchain uses the caller-saved
+general registers and the vector registers freely. The frame records the
+length of the FP image it carries rather than assuming it, so a mismatch
+between the frame and the architecture cannot silently carry nothing.
+Check: `signal-native` (a handler that tramples four scratch registers
+and all sixteen vector registers, at a system call), `signal-async` (the
+same at an interrupt return, with a spin loop that reports how many
+times it went round so that a signal arriving too early fails the probe
+instead of passing it vacuously), `signal-fault` (at a fault, with the
+handler mapping the page and the store retried).
+
+**P-S7. `sigreturn` trusts nothing the program can write.** The frame is
+found from the stack pointer, so a program can point it anywhere; the
+magic is checked (a mismatch is `SIGSEGV` on the thread) and the
+registers go through `signal_return`'s sanitiser and the full-restore
+exit. `sigreturn` is in the personality's `always_allowed` list, so no
+syscall filter can turn a caught signal into a kill. Check: review, and
+the syscall fuzzer, which reaches `sigreturn` with arbitrary stacks.
+
+**P-S8. A process group is a closed subset of one session.** `setpgid`
+moves only the caller or a child of it, only within the caller's
+session, never a session leader, and only into a group that already has
+a member in that session or is named by the target's own pid;
+`COSMO_SPAWN_SETPGID` applies the same rules where the child cannot yet
+ask for itself. `setsid` is refused to a process that already leads a
+group. This is what makes "the foreground group of this terminal" a
+group the terminal's session can reason about. Check: `signal-group`,
+`signal-setsid`.
+
+**P-S9. `^C` reaches the terminal's foreground group and nothing else.**
+The line discipline raises `SIGINT` (and `SIGQUIT` for `^\`) on every
+process of `fg_pgid` and throws the line under edit away; with no
+foreground group the byte is dropped as before. Only the session that
+holds the terminal may name a foreground group, and only a group of that
+session; a terminal is released when its session leader exits (`SIGHUP`
+to the foreground group), so a dead session cannot keep the keyboard.
+Check: `tty-intr` (claim, a second session refused, `^C` delivered, the
+terminal released), and the interactive boot test, which types `^C` at a
+running `sleep` and sees it exit 130 with the next prompt immediately
+after.
+
 ## Gaps (documented, not invariants)
 
 - No `fork` or `exec` replacing the current image; `spawn` is the only
   creation primitive; `clone` creates threads only.
-- Stop signals are ignored (no job control); a clone's FPU state is the
-  reset state, not the caller's; AVX state above the SSE halves does not
-  survive a handler on x86-64 (the frame carries the FXSAVE image only).
+- Stop signals are ignored: there is no stopped process state, so no
+  `^Z`, no `SIGCONT`, and no `fg`/`bg` in the shell. Named as the step
+  not taken in `docs/audit/next-subsystem-signals.md`.
+- A clone's FPU state is the reset state, not the caller's; AVX state
+  above the SSE halves does not survive a handler on x86-64 (the frame
+  carries the FXSAVE image only).
+- The native signal ABI has no alternate signal stack, no real-time
+  signals, no queue of siginfo per signal, and no `sigsuspend`; a
+  handler that overflows the stack it was called on is not caught.
+- A background process reading from the terminal is not sent `SIGTTIN`,
+  nor one writing `SIGTTOU`: both go through as they did before, because
+  both are job control.
 - One console object shared by every process that inherited it; no
   device nodes, so a process that closed handle 0 cannot reopen the
   console.

@@ -739,6 +739,125 @@ struct process { ... struct sigaction_k *sigactions; uint64_t shared_pending; ..
   no frame builder: a handler can never run there, so every non-ignored
   signal terminates, as before.
 
+### The native signal ABI (`kernel/process/native_signal.c`)
+
+The signal core above decides everything about a signal except the shape
+of the frame a handler runs on; that belongs to the personality. Where
+the Linux personality copies Linux's layout bit for bit, the native one
+chooses, and chooses the smallest frame `sigreturn` can restore exactly:
+
+```c
+struct native_sigframe {
+    uint64_t magic;                 /* "CosmoSig" */
+    uint64_t mask;                  /* the blocked set the return restores */
+    struct arch_user_regs regs;     /* what the signal interrupted */
+    uint32_t fpu_len; uint32_t pad; /* the length actually carried, 0 for none */
+    uint8_t fpu[640];               /* the architecture's FP/SIMD image */
+    struct cosmo_siginfo info;      /* what the handler is told */
+};
+```
+
+- **Where it goes.** On the thread's own stack, below the red zone the
+  ABI grants leaf functions, 16-byte aligned. There is no alternate
+  signal stack -- no `sigaltstack`, no `SA_ONSTACK` -- so there is no
+  choice to make: a handler that overflows the stack it was called on
+  belongs to a program that was already out of stack.
+- **Entering the handler.** x86-64: the restorer's address is pushed
+  where a `CALL` would have left it, so a handler that simply returns
+  lands in the restorer and the stack pointer at entry is 8 mod 16 as
+  the ABI promises. AArch64: the restorer goes in `x30`, with the
+  interrupted `fp`/`lr` in a frame record below the frame so that a
+  debugger unwinding out of a handler finds the interrupted code. Both
+  hand the handler three arguments: the signal, a `struct cosmo_siginfo
+  *`, and the frame's address.
+- **The FP/SIMD image.** Carried, and the frame records the length it
+  carries rather than assuming it: a handler compiled by an ordinary
+  toolchain uses vector registers, so without the image the interrupted
+  code would resume with the handler's. The one case a length cannot
+  express -- an image too large for the frame -- is reported rather than
+  passed over, because that failure is silent by nature. (It was: the
+  first version hard-coded 528 bytes for AArch64's 520-byte image and
+  simply carried nothing.)
+- **Coming back.** `sigreturn` finds the frame from the stack pointer,
+  as Linux does, and trusts nothing in it: a program can point its stack
+  pointer at bytes it wrote itself, so the magic is checked (a mismatch
+  is `SIGSEGV` on the thread) and the registers go through the core's
+  `signal_return`, which sanitises the flag register and marks the frame
+  for a full restore. The thread's `syscall_nr` is set to
+  `SIGNAL_NO_RESTART` so the restored result register is never mistaken
+  for an `-EINTR` to restart.
+- **Opaque by design.** No uapi structure describes the frame, so
+  nothing outside this file can depend on the layout.
+- **The calls.** `sigaction`, `sigprocmask`, `sigpending`, `sigreturn`
+  (numbers 66-69). `sigreturn` joins `exit` in the personality's
+  `always_allowed` list: a syscall filter that denied the return from a
+  handler would turn every caught signal into a kill.
+- **Not carried**, and named so the omissions are visible: real-time
+  signals, a queue of siginfo per signal, the alternate stack,
+  `sigsuspend`/`sigwait`, and job control (below).
+
+### Sessions and process groups
+
+A signal is often meant for a *job* rather than a process -- everything
+in a pipeline, not whichever stage happened to be reading -- and a
+terminal has to name the job its keystrokes reach. Two fields answer
+both:
+
+```c
+struct process { ... pid_t pgid; pid_t sid; ... };   /* under the process table lock */
+```
+
+**The locking rule is one sentence: `pgid` and `sid` are read and
+written only under `g_process_table_lock`, and nowhere else.** Every one
+of these operations looks at fields of two processes at once -- the
+caller's session and the target's session and group -- so a per-process
+lock would have to be taken twice in an order somebody would eventually
+get wrong. The group walk holds the same lock, which is what makes "the
+members of group *g*" a well-defined set.
+
+- **Inheritance.** A child joins its parent's group and session. A
+  process with no parent -- init, and anything the kernel starts --
+  begins a session and a group of its own, so every process has both
+  from its first instruction.
+- **`setpgid(pid, pgid)`.** `pid` 0 means the caller, `pgid` 0 means
+  `pid`. The target must be the caller or a child of it, in the caller's
+  session, and not a session leader; the group must already have a
+  member in that session, or be named by the target's own pid, which is
+  the only way a group is created. Each clause keeps the session a
+  closed set, which is what makes "the foreground group of this
+  terminal" safe for the tty to hold.
+- **`setsid()`.** The caller becomes the leader of a new session and a
+  new group, both named by its pid, and has no controlling terminal. A
+  process that already leads a group is refused: its pid names that
+  group, and a session is named by its leader's pid, so allowing it
+  would give one pid two meanings.
+- **`getpgid`/`getsid`** answer for any process the caller may see; a
+  process outside domain 0 sees only its own domain, as everywhere else.
+- **`kill(-pgid, sig)`** signals a group and `kill(0, sig)` the caller's
+  own. POSIX's rule for the group form is that the call succeeds if the
+  signal reached anyone, so a shell interrupting a job is not made to
+  care that one member belongs to root; the refusals surface only when
+  every member refused. `kill(-1, ...)` -- every process -- is
+  `-EINVAL`: nothing here wants it.
+- **The walk.** `process_group_next(pgid, after)` returns the member
+  with the smallest pid greater than `after`, referenced, with the table
+  lock already dropped. The caller may therefore block, signal, or take
+  any lock while it holds the member -- which is what sending a signal
+  needs. It is quadratic in the size of the group and the groups here
+  have single digits of members.
+- **Spawning into a group.** `COSMO_SPAWN_SETPGID` puts the child in a
+  group before its first instruction (`pgid` 0: a group named by the
+  child's own pid). A `setpgid` after the spawn would leave a window in
+  which a signal sent to the new group missed the child, which is
+  exactly the window a shell cannot afford between starting a job and
+  handing it the terminal. The same session rules apply, checked where
+  the child is registered.
+
+Job control -- `^Z`, a stopped state, `SIGCONT`, `fg`/`bg` -- is **not**
+built. The stop signals stay as milestone 10 left them, treated as
+ignored, and `docs/audit/next-subsystem-signals.md` names it as the step
+this unit deliberately did not take.
+
 ### The SYSRET canonical guard and the full-restore exit (x86-64)
 
 `SYSRET` with a non-canonical `rcx` raises `#GP` in the kernel with the

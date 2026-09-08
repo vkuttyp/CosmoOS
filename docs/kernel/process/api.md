@@ -176,6 +176,31 @@ refused with `-EAGAIN` when its real uid already has
   signal, so every killable wait returns `-EINTR` for all three
   (declared in `wait.h`).
 
+### Sessions and process groups (`kernel/process.h`)
+`pid_t pgid, sid` on `struct process`, read and written **only** under
+the process table's lock (`docs/kernel/process/design.md`, "Sessions and
+process groups"). `pid` 0 means the caller in each of these.
+- `int process_getpgid(pid_t pid, pid_t *out)`,
+  `int process_getsid(pid_t pid, pid_t *out)`: `-ESRCH` for a process
+  the caller may not see (its own domain, unless it is domain 0).
+- `int process_setpgid(pid_t pid, pid_t pgid)`: the target must be the
+  caller or a child of it (`-ESRCH`), in the caller's session and not a
+  session leader (`-EPERM`); the group must have a member in that
+  session or be named by the target's own pid (`-EPERM`).
+- `int process_setsid(pid_t *out)`: `-EPERM` when the caller already
+  leads a group; otherwise `sid = pgid = pid` and no controlling
+  terminal.
+- `struct process *process_group_next(pid_t pgid, pid_t after)`: the
+  member with the smallest pid greater than `after`, **referenced**,
+  with the table lock already dropped -- so the caller may block, signal
+  or take any lock while it holds it. `NULL` ends the walk.
+- `bool process_group_in_session(pid_t pgid, pid_t sid)`,
+  `pid_t process_current_sid(void)`.
+- `struct process_spawn_attr { ... bool set_pgid; pid_t pgid; ... }`
+  (`COSMO_SPAWN_SETPGID`): the child is placed in the group before its
+  first instruction, under the same session rules; `pgid` 0 starts a
+  group named by the child's own pid.
+
 ### `kernel/signal.h` (milestone 10)
 The signal core, `kernel/process/signal.c`; `docs/kernel/process/design.md`
 §11. Linux numbers (`SIGHUP` 1 … `SIGSYS` 31, 64 signals), `SIGMASK(sig)`,

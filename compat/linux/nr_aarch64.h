@@ -81,6 +81,8 @@
 #define LX_setpgid 154
 #define LX_getppid 173
 #define LX_setsid 157
+#define LX_getpgid 155
+#define LX_getsid 156
 #define LX_sigaltstack 132
 #define LX_setrlimit 164
 #define LX_sync 81

@@ -69,10 +69,36 @@ warning and leaves input disabled. Check: the boot log line
 looks for; the interactive harness proves bytes arrive. Gap: no test
 boots without a UART.
 
+**T8. `^C` and `^\` reach the terminal's foreground group and nothing
+else, and a batch delivers every one of them.** The line discipline
+raises `SIGINT`/`SIGQUIT` on every process of `fg_pgid`, echoes the
+keystroke and throws the line under edit away; with no foreground group
+the byte is dropped as any other control character. The signal is sent
+after `tty->lock` is released, so the process table walk and the thread
+wake-ups never happen under a lock taken in interrupt context, and
+`tty.lock` is never held while the process table's lock is taken --
+which is why the byte loop stops at each signal and resumes after
+sending, rather than remembering one signal for the whole batch. Check:
+`tty-intr` (a single write of `^\` then `^C` at a process that catches
+the interrupt and dies of the quit); the interactive harness types a
+bare `0x03` at a running `sleep`, which exits 130.
+
+**T9. A terminal belongs to one session, and only that session names its
+foreground group.** An unclaimed terminal is claimed by a session
+leader; afterwards `tcsetpgrp` from another session is `-EPERM` and
+`tcgetpgrp` is `-ENOTTY`, and the group named must have a member in the
+terminal's session. When the session's leader exits the terminal is
+released (`SIGHUP` first), so a dead session cannot keep the keyboard --
+without which the shell could never claim the console after the
+self-tests have used it. Check: `tty-intr` (a second session refused,
+the release asserted after the leader exits).
+
 ## Gaps (documented, not invariants)
 
 - No raw mode, no `termios`, no window size, no `ioctl`.
-- No job control and no signals from the keyboard: `^C` is dropped.
+- No job control: no `^Z`, and a background process reading the terminal
+  is not sent `SIGTTIN` (nor one writing, `SIGTTOU`). Both go through as
+  before.
 - One tty; no pseudo-terminals; no `/dev/console` or `/dev/tty` nodes.
 - Only the UART feeds the tty; the virtio-console receive queue and a
   keyboard driver are future producers.
