@@ -99,6 +99,15 @@ time at all; `hid-keyboard` runs last, by which point the lines arrived
 long ago, so it also takes no time. The first version was one test that
 waited, and it passed everywhere except CI.
 
+The overlapping keys are spaced by a tenth of a second, not by the
+20 ms the rest of the typing uses. A key state has to last long enough
+for the guest to poll it, and a build runner emulating a machine
+emulating a keyboard is slower than the 8 ms interval by a wide margin:
+at 20 ms, CI read back an empty line where it wanted `xy` -- the two
+presses had landed in one polled state. The guest's waits are bounded by
+the clock rather than by a count of `thread_sleep_ms(1)`, for the same
+reason: on that runner the first version waited 20 s where it meant 5.
+
 `hid-arm` runs after the hotplug tests, not before them: unplugging the
 hub takes the keyboard with it, and keys typed while it is gone are gone
 too -- the first version armed first and read back `mo Types 42!`.

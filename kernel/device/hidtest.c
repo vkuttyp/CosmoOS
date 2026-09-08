@@ -21,6 +21,7 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/tty.h>
 
 #define CHECK(cond)                                                                          \
@@ -40,12 +41,16 @@
  * sends "xxyy". */
 #define KEYTEST_ROLLOVER "xy"
 /* The typing began at the start of the self-test run, so on any machine
- * the lines are here by now; this is what a failure costs to report. */
-#define KEYTEST_WAIT_MS 5000u
+ * the lines are here by now; this is what a failure costs to report.
+ * Bounded by the clock and not by a count of sleeps: on a loaded build
+ * runner a `thread_sleep_ms(1)` is worth several milliseconds, and the
+ * first version of this waited 20 s where it meant to wait 5. */
+#define KEYTEST_WAIT_NS (5ull * 1000 * 1000 * 1000)
 
 static int64_t read_a_line(char *buf, size_t len)
 {
-    for (unsigned ms = 0; ms < KEYTEST_WAIT_MS; ms++) {
+    uint64_t deadline = clock_now_ns() + KEYTEST_WAIT_NS;
+    for (;;) {
         if (tty_has_line(tty_console())) {
             int64_t got = tty_read(tty_console(), buf, len - 1);
             if (got > 0) {
@@ -55,9 +60,10 @@ static int64_t read_a_line(char *buf, size_t len)
             }
             return got;
         }
+        if (clock_now_ns() >= deadline)
+            return -1;
         thread_sleep_ms(1);
     }
-    return -1;
 }
 
 static bool g_armed;
@@ -104,9 +110,13 @@ bool selftest_hid_keyboard(const char **reason)
 
     char line[64];
     int64_t got = read_a_line(line, sizeof(line));
-    if (got <= 0)
-        kerror("selftest: hid-keyboard: nothing arrived in %u ms (the tty has taken %llu bytes)",
-               KEYTEST_WAIT_MS, (unsigned long long)before.rx_bytes);
+    if (got <= 0) {
+        struct tty_stats now;
+        tty_get_stats(tty_console(), &now);
+        kerror("selftest: hid-keyboard: nothing arrived (the tty took %llu bytes and %llu lines while waiting)",
+               (unsigned long long)(now.rx_bytes - before.rx_bytes),
+               (unsigned long long)(now.lines_in - before.lines_in));
+    }
     CHECK(got > 0);
     if (strcmp(line, KEYTEST_LINE) != 0)
         kerror("selftest: hid-keyboard: read \"%s\", expected \"%s\"", line, KEYTEST_LINE);
@@ -116,9 +126,15 @@ bool selftest_hid_keyboard(const char **reason)
      * many reports the two keys' four transitions produced. */
     char rollover[64];
     int64_t got2 = read_a_line(rollover, sizeof(rollover));
-    if (got2 <= 0 || strcmp(rollover, KEYTEST_ROLLOVER) != 0)
-        kerror("selftest: hid-keyboard: keys held together read \"%s\", expected \"%s\"",
-               got2 > 0 ? rollover : "", KEYTEST_ROLLOVER);
+    if (got2 <= 0 || strcmp(rollover, KEYTEST_ROLLOVER) != 0) {
+        struct tty_stats now;
+        tty_get_stats(tty_console(), &now);
+        kerror("selftest: hid-keyboard: keys held together read \"%s\" (%lld bytes), expected \"%s\"; "
+               "the tty took %llu bytes and %llu lines in all",
+               got2 > 0 ? rollover : "", (long long)got2, KEYTEST_ROLLOVER,
+               (unsigned long long)(now.rx_bytes - before.rx_bytes),
+               (unsigned long long)(now.lines_in - before.lines_in));
+    }
     CHECK(got2 > 0 && strcmp(rollover, KEYTEST_ROLLOVER) == 0);
 
     /* Every character of the line, plus its newline, came in through
