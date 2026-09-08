@@ -106,6 +106,14 @@ a hair, for no reason of the test's own. It is 25 s for the pair now,
 which costs nothing when they have already arrived and is what a real
 failure costs to report.
 
+Every key transition is its own command with a gap after it, rather than
+a press and a release in one batch. A batch is one input sync, and a
+guest that does not poll between the two ends of it can see a key go
+down and come up without ever observing it held: on AArch64 CI the
+newline that ends the second line vanished exactly that way, while the
+same batching survived everywhere else in the same boot. The harness
+also waits a moment after the last key before closing the socket.
+
 The overlapping keys are spaced by a tenth of a second, not by the
 20 ms the rest of the typing uses. A key state has to last long enough
 for the guest to poll it, and a build runner emulating a machine
