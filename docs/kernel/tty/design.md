@@ -51,13 +51,15 @@ Under `tty->lock` for each byte `c`:
    an empty record (end of file, `eofs++`); a partial line gives a
    record without a newline (Unix semantics: the read returns the
    partial line).
-6. `^C` (0x03) or `^\` (0x1c) **when the terminal has a foreground
-   group**: echo `"^C"` (or `"^\"`) and a newline, throw the line under
+6. `^C` (0x03), `^\` (0x1c) or `^Z` (0x1a) **when the terminal has a
+   foreground group**: echo `"^C"` (or `"^\"`) and a newline, throw the line under
    edit away, and raise `SIGINT` (or `SIGQUIT`) on every process of that
-   group. The line is discarded because what was typed before an
-   interrupt is not part of the next command. With no foreground group
-   these are dropped as any other control byte, which is what a terminal
-   nobody has claimed does.
+   group -- `SIGINT`, `SIGQUIT` and `SIGTSTP` respectively. The line is
+   discarded because what was typed before an interrupt is not part of
+   the next command. With no foreground group these are dropped as any
+   other control byte, which is what a terminal nobody has claimed does.
+   `^Z` additionally skips an **orphaned** group: stopping one would
+   leave nothing able to continue it.
 7. Printable (0x20..0x7e) or tab: if `line_len < TTY_LINE_MAX - 1`,
    append and echo; else count `dropped_bytes` and echo a bell.
 8. Anything else: dropped silently.
@@ -125,6 +127,41 @@ The handler runs on the CPU the GSI is routed to (CPU 0 by the existing
 IRQ layer); `tty_input` is safe from any CPU. When no UART is present
 (no `serial0` sink) nothing is registered and the console tty simply
 never receives input.
+
+### Reading from the background
+
+`tty_read` refuses a reader whose process group is not the terminal's
+foreground group, because a background job that took the line the shell
+is waiting for would make background jobs and a usable terminal mutually
+exclusive. What it does instead depends on whether the group can be
+rescued:
+
+- **Not orphaned** (some member has a parent in the session, outside the
+  group -- the shell): `SIGTTIN`, which stops it. The read is restarted
+  when it is continued, so a job brought to the foreground with `fg`
+  reads the line it was waiting for rather than an `-EINTR` nobody
+  expected.
+- **Orphaned**, or the caller blocks or ignores `SIGTTIN`: `-EIO`. The
+  second half is decided by `signal_raise_stop_self`, which tests the
+  action and sends the signal **in one critical section** and answers
+  whether anything will come of it. Asking first and sending afterwards
+  is a race a sibling thread can win by changing the action in between,
+  and the loser is the reader: the signal is discarded and the read
+  returns `-EINTR` for a stop that never happens.
+  Nothing is left that could continue it in the first case, and no stop
+  can follow in the second -- and answering `-EINTR` for a stop that
+  will never happen hands a retrying program an interruption it retries
+  for ever. A *blocked* stop signal likewise stays pending in the signal
+  core rather than stopping the process: blocking `SIGTSTP` is a
+  process saying it does not want to be stopped by it.
+
+Readers from another session are not this terminal's business and are
+left alone, as is any read while the terminal has no foreground group.
+Writes are allowed either way; `TOSTOP` is not built. `tcsetpgrp` from
+outside the foreground group raises `SIGTTOU` unless the caller ignores
+or blocks it -- which every shell does, because taking the terminal back
+after a job is by definition done from the background. It goes through
+the same one-step helper, for the same reason.
 
 ### The controlling terminal
 

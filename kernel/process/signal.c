@@ -29,18 +29,25 @@ int signal_default_is_ignore(int sig)
     case SIGCHLD:
     case SIGURG:
     case SIGWINCH:
+    /* SIGCONT resumes a stopped process and then does nothing more:
+     * route_locked performs the continue before it consults this table,
+     * so what is left for the default action to do is nothing. Leaving
+     * it out here would make an uncaught SIGCONT *terminate* the process
+     * it had just continued. */
     case SIGCONT:
-    /* No job control: the stop signals cannot stop anything and must not
-     * kill anything (audit finding #30); they are ignored, a recorded
-     * deviation from Linux. */
-    case SIGSTOP:
-    case SIGTSTP:
-    case SIGTTIN:
-    case SIGTTOU:
         return 1;
     default:
         return 0;
     }
+}
+
+/* The stop signals. Their default is to stop the process, which is a
+ * third outcome beside terminate and ignore (audit finding #30, closed
+ * by the job-control unit). SIGSTOP additionally cannot be caught or
+ * blocked, which UNBLOCKABLE enforces above. */
+int signal_default_is_stop(int sig)
+{
+    return sig == SIGSTOP || sig == SIGTSTP || sig == SIGTTIN || sig == SIGTTOU;
 }
 
 int signal_process_init(struct process *p)
@@ -162,11 +169,30 @@ static void fill_info(struct signal_info *slot, int sig, const struct signal_inf
  * or to `t`: returns true when it was consumed here (ignored, or turned
  * into a process termination), false when it was queued for delivery.
  */
-static bool route_locked(struct process *p, struct thread *t, int sig, const struct signal_info *info)
+/* p->lock held. Every stop signal off every set: a continue cancels
+ * stops that have not been taken yet, and a stop cancels a continue. */
+static void drop_pending_locked(struct process *p, uint64_t mask)
+{
+    p->sig_shared_pending &= ~mask;
+    struct thread *o;
+    list_for_each_entry(o, &p->threads, proc_link)
+        o->sig_pending &= ~mask;
+}
+
+#define STOP_SIGNALS (SIGMASK(SIGSTOP) | SIGMASK(SIGTSTP) | SIGMASK(SIGTTIN) | SIGMASK(SIGTTOU))
+
+static bool route_locked(struct process *p, struct thread *t, int sig, const struct signal_info *info,
+                         bool *woke_stopped)
 {
     if (p->state != PROCESS_RUNNING)
         return true;
     if (sig == SIGKILL) {
+        /* A stopped process is still killable, and needs nothing extra
+         * here to be: the parked threads wait on `kill_sig` as well as
+         * on `stopped` (process_stop_park), and the wake below is what
+         * ends that wait. An explicit un-stop was written here first and
+         * removed again, because no test could tell it from its absence
+         * -- which is the honest sign that it did nothing. */
         if (p->kill_sig == 0) {
             p->kill_sig = sig;
             p->exit_status = 128 + sig;
@@ -176,9 +202,73 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
         }
         return true;
     }
+    /*
+     * Continue first, and whatever the action is: SIGCONT resumes a
+     * stopped process even when a handler is installed for it, and the
+     * handler then runs on top. It also throws away stop signals that
+     * were posted and not yet taken -- otherwise the process would
+     * resume and immediately stop again on a stale one.
+     */
+    if (sig == SIGCONT) {
+        drop_pending_locked(p, STOP_SIGNALS);
+        if (p->stopped) {
+            p->stopped = false;
+            p->stop_sig = 0;
+            p->stop_reportable = false;
+            p->cont_reportable = true;
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link)
+                o->sig_must_stop = false;
+            *woke_stopped = true;
+        }
+    }
     const struct sigaction_k *a = action_locked(p, sig);
     if (a->handler == SIG_IGN || (a->handler == SIG_DFL && signal_default_is_ignore(sig)))
         return true;   /* discarded, blocked or not (a recorded deviation: Linux keeps a blocked one) */
+    /*
+     * The stop signals' default. The process stops as a unit: its own
+     * flag is the authority, and every thread gets a reason to reach a
+     * return to user mode and look at it. A stop signal with a handler
+     * installed (SIGTSTP and friends may have one; SIGSTOP may not) is
+     * queued like any other and runs the handler instead.
+     */
+    if (a->handler == SIG_DFL && signal_default_is_stop(sig)) {
+        /* SIGSTOP cannot be blocked (UNBLOCKABLE), but SIGTSTP and the
+         * terminal pair can: a process that blocks one has said it does
+         * not want to be stopped by it, and the signal waits until it
+         * unblocks rather than stopping it now. */
+        bool blocked_everywhere = true;
+        if (t) {
+            blocked_everywhere = (t->sig_blocked & SIGMASK(sig)) != 0;
+        } else {
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link)
+                if (!(o->sig_blocked & SIGMASK(sig)))
+                    blocked_everywhere = false;
+        }
+        if (blocked_everywhere)
+            goto queue;   /* stays pending until one of them unblocks */
+        drop_pending_locked(p, SIGMASK(SIGCONT));
+        if (!p->stopped && p->kill_sig == 0) {
+            p->stopped = true;
+            p->stop_sig = sig;
+            p->nr_stopped = 0;
+            p->cont_reportable = false;
+            /* Not `stop_reportable` here: the process is not stopped
+             * until its last thread has parked, and the thread that
+             * parks last is what says so (process_stop_park). Setting
+             * it at post time lets a parent reclaim the terminal while
+             * a thread of the job is still running, and lets the same
+             * stop be reported twice -- once early, once again when
+             * the last thread arrives and sets it for real. */
+            struct thread *o;
+            list_for_each_entry(o, &p->threads, proc_link) {
+                o->sig_must_stop = true;
+                sched_wake(o);
+            }
+        }
+        return true;
+    }
     if (a->handler == SIG_DFL) {
         /* Default: terminate, as soon as some thread would take it. */
         bool blocked_everywhere = true;
@@ -202,6 +292,7 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
         }
         /* Blocked by every candidate: stays pending until one unblocks. */
     }
+queue:
     if (t) {
         t->sig_pending |= SIGMASK(sig);
         fill_info(&t->sig_info[sig - 1], sig, info);
@@ -221,13 +312,61 @@ static bool route_locked(struct process *p, struct thread *t, int sig, const str
     return false;
 }
 
+/*
+ * What a stop or a continue needs doing once p->lock is free: waking the
+ * parked threads, and telling the parent an event happened. Neither can
+ * be done under the lock -- the first takes a wait queue's lock and the
+ * second sends a signal to another process.
+ */
+static void signal_after_route(struct process *p, bool woke_stopped, bool stopped_now)
+{
+    if (woke_stopped)
+        waitqueue_wake_all(&p->stopped_wq);
+    if (woke_stopped || stopped_now)
+        process_notify_parent_event(p);
+}
+
+/*
+ * Raise a stop signal on the calling process, and say whether anything
+ * will come of it: false when the signal is ignored or blocked, in
+ * which case the process will neither stop nor run a handler and the
+ * caller must not pretend otherwise. The terminal turns a false into
+ * `-EIO`, which is POSIX's answer for "this cannot be stopped".
+ *
+ * The test and the send are one critical section on purpose. Asking
+ * first and sending afterwards is a race a sibling thread can win by
+ * changing the action in between, and the loser is the reader: the
+ * signal is discarded and the read returns `-EINTR` for a stop that
+ * will never happen, which a retrying program retries for ever.
+ */
+bool signal_raise_stop_self(int sig, const struct signal_info *info)
+{
+    struct thread *t = thread_current();
+    struct process *p = t ? t->proc : NULL;
+    if (p == NULL || sig < 1 || sig > SIG_MAX)
+        return false;
+    bool woke_stopped = false;
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    bool ignored = p->sigactions[sig - 1].handler == SIG_IGN || (t->sig_blocked & SIGMASK(sig)) != 0;
+    if (!ignored)
+        route_locked(p, NULL, sig, info, &woke_stopped);
+    bool stopped_now = p->stopped;
+    spin_unlock_irqrestore(&p->lock, s);
+    if (!ignored)
+        signal_after_route(p, woke_stopped, stopped_now);
+    return !ignored;
+}
+
 int signal_send(struct process *p, int sig, const struct signal_info *info)
 {
     if (sig < 1 || sig > SIG_MAX)
         return -EINVAL;
+    bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    route_locked(p, NULL, sig, info);
+    route_locked(p, NULL, sig, info, &woke_stopped);
+    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
+    signal_after_route(p, woke_stopped, stopped_now);
     return 0;
 }
 
@@ -238,9 +377,12 @@ int signal_send_thread(struct thread *t, int sig, const struct signal_info *info
     struct process *p = t->proc;
     if (p == NULL)
         return -ESRCH;
+    bool woke_stopped = false;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    route_locked(p, t, sig, info);
+    route_locked(p, t, sig, info, &woke_stopped);
+    bool stopped_now = p->stopped;
     spin_unlock_irqrestore(&p->lock, s);
+    signal_after_route(p, woke_stopped, stopped_now);
     return 0;
 }
 
@@ -253,6 +395,12 @@ bool signal_pending(void)
     if (p == NULL)
         return false;
     if (__atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING)
+        return true;
+    /* A stop this thread has not parked for yet. Without this a sibling
+     * woken by process_stop re-evaluates its wait, finds the shared
+     * pending bit already taken by whichever thread dequeued the stop,
+     * and blocks again -- so the process would never fully stop. */
+    if (__atomic_load_n(&t->sig_must_stop, __ATOMIC_ACQUIRE))
         return true;
     uint64_t pend = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) | __atomic_load_n(&p->sig_shared_pending, __ATOMIC_ACQUIRE);
     return (pend & ~t->sig_blocked) != 0;
@@ -293,6 +441,36 @@ void signal_deliver(void *frame, bool is_syscall)
     for (;;) {
         if (__atomic_load_n(&p->kill_sig, __ATOMIC_ACQUIRE) != 0 || __atomic_load_n(&p->state, __ATOMIC_ACQUIRE) != PROCESS_RUNNING)
             terminate(p, p->exit_status);
+        /*
+         * Park here if the process is stopped. This is the only place a
+         * thread stops, and it re-reads the process's own state rather
+         * than trusting the flag that got it here -- a SIGCONT may have
+         * ended the stop while this thread was inside a wait it could
+         * not be interrupted from, and parking on that stale flag would
+         * stop a process nothing is left to continue.
+         *
+         * A system call cut short by the stop is restarted, not failed:
+         * `^Z` and then `fg` must not turn a blocked `read` into
+         * -EINTR. That is unconditional here, because a stop has no
+         * action to carry SA_RESTART.
+         */
+        if (__atomic_load_n(&t->sig_must_stop, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&p->stopped, __ATOMIC_ACQUIRE)) {
+            bool irqs_were_on = arch_irq_enabled();
+            arch_irq_enable();   /* parking blocks; the trap tail runs with interrupts off */
+            bool parked = process_stop_park();
+            if (!irqs_were_on)
+                arch_irq_disable();
+            if (parked && is_syscall && t->syscall_nr != SIGNAL_NO_RESTART) {
+                struct arch_user_regs regs;
+                arch_user_regs_from_syscall(frame, &regs);
+                if (arch_user_regs_result(&regs) == -EINTR) {
+                    arch_user_regs_restart_syscall(&regs, t->syscall_nr, t->syscall_arg0);
+                    arch_user_regs_to_syscall(frame, &regs);
+                }
+            }
+            continue;   /* everything may have changed: a kill, another stop, a signal */
+        }
         struct signal_info info;
         struct sigaction_k act;
         arch_irq_state_t s = spin_lock_irqsave(&p->lock);

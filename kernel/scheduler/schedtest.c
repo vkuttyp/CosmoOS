@@ -141,12 +141,21 @@ bool selftest_timer(const char **reason)
      * the last one has not been taken is coalesced -- the interrupt is
      * level-triggered and the counter advances once -- so on a busy host
      * emulating this machine the tick count lags the clock, by more the
-     * busier the host is. That is the platform being honest, not the
-     * kernel being wrong, and the tolerance below is a quarter of the
-     * window: on an idle machine the lag is zero or one.
+     * busier the host is. That is the platform being honest rather than
+     * the kernel being wrong, so the lag side is bounded loosely and the
+     * other side tightly: ticks *ahead* of the clock would mean a tick
+     * counted without time passing, which is a real bug.
      *
-     * Ticks ahead of the clock would be a real bug (a tick counted
-     * without time passing), so that side keeps its tight bound.
+     * The loose bound is half the window, and it has been widened twice.
+     * It began at two ticks, went to a quarter of the window in the
+     * FP/SIMD unit, and still failed about one run in three in the
+     * busiest device shape (`QEMU_KBD=hub` on AArch64, where the whole
+     * USB hub and keyboard are emulated alongside everything else). What
+     * this check is worth is "the timer interrupt arrives at roughly the
+     * right rate", and half a window still says that; a tighter bound
+     * was only ever measuring the host's load. The observed values go
+     * into the failure message, so the next person to widen it does not
+     * have to guess again.
      */
     uint64_t t0 = timer_ticks();
     uint64_t c0 = clock_now_ns();
@@ -156,8 +165,14 @@ bool selftest_timer(const char **reason)
     CHECK(c1 - c0 >= MS(40));
     CHECK(c1 - c0 < MS(80));
     uint64_t expected = (c1 - c0) / TICK_NS;
-    uint64_t lag_allowed = expected / 4 > 2 ? expected / 4 : 2;
-    CHECK(t1 - t0 + lag_allowed >= expected);
+    uint64_t lag_allowed = expected / 2 > 2 ? expected / 2 : 2;
+    if (t1 - t0 + lag_allowed < expected) {
+        kwarn("selftest: timer: %llu ticks in %llu ns, expected about %llu (lag allowed %llu)",
+              (unsigned long long)(t1 - t0), (unsigned long long)(c1 - c0), (unsigned long long)expected,
+              (unsigned long long)lag_allowed);
+        *reason = "the tick count lagged the clock by more than half the window";
+        return false;
+    }
     CHECK(t1 - t0 <= expected + 2);
 
     /* Timers fire in expiry order, not arming order. */

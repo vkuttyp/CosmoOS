@@ -858,10 +858,72 @@ members of group *g*" a well-defined set.
   handing it the terminal. The same session rules apply, checked where
   the child is registered.
 
-Job control -- `^Z`, a stopped state, `SIGCONT`, `fg`/`bg` -- is **not**
-built. The stop signals stay as milestone 10 left them, treated as
-ignored, and `docs/audit/next-subsystem-signals.md` names it as the step
-this unit deliberately did not take.
+### Stopping (job control)
+
+A process that is neither running nor ending, which closes audit finding
+#30. `docs/audit/next-subsystem-jobcontrol.md` is the design; what it
+came to is:
+
+```c
+struct process { ... bool stopped; int stop_sig; unsigned nr_stopped;
+                     struct waitqueue stopped_wq;
+                     bool stop_reportable, cont_reportable; ... };
+struct thread  { ... bool sig_must_stop; ... };            /* under p->lock */
+```
+
+- **Not a fourth `process_state`.** Every `state != PROCESS_RUNNING`
+  test in the tree means "on its way out", and the most damaging one to
+  change would be `route_locked`, which discards signals to such a
+  process -- including the `SIGCONT` that is the only way back.
+- **A process stops at a return to user mode and nowhere else**, in
+  `signal_deliver` beside the handler case. No kernel lock is held
+  there and the register set is already saved, so nothing is frozen
+  mid-kernel. That property is inherited free from where signals are
+  delivered, and it is what makes the whole feature safe.
+- **The split between the flag and the state.** `sig_must_stop` is set
+  on *every* thread when the stop is posted and is a **reason to look**:
+  it makes `signal_pending()` true, so a killable wait returns `-EINTR`
+  and the thread runs the return-to-user path. `p->stopped` is the
+  **authority**: the park re-reads it under the lock, and the wait it
+  then blocks on re-reads it again. A thread woken for a stop that a
+  `SIGCONT` has already ended therefore parks for nothing rather than
+  parking for ever. Both halves are needed and in both directions --
+  waking a thread that has nothing to see is a no-op with extra steps,
+  and trusting a flag that outlived its stop is a hang.
+- **`wait_event` cannot be interrupted**, so a thread inside one parks
+  only when that wait ends. A stop is therefore not instantaneous across
+  threads; `nr_stopped` counts the parked ones and the *last* one to
+  park is what sets `stop_reportable`, so a parent is never told the
+  process stopped while a thread of it is still running.
+- **The interrupted call is restarted, not failed** -- unconditionally,
+  because a stop has no action to carry `SA_RESTART`. Without this, `^Z`
+  followed by `fg` returns `-EINTR` from every blocked `read`, in every
+  program that does not expect it.
+- **`SIGCONT` clears everything and stays an ignore.** It resumes the
+  process in `route_locked` *before* the default-action table is
+  consulted, and then does nothing more -- so it must remain in
+  `signal_default_is_ignore`, or an uncaught `SIGCONT` would terminate
+  the process it had just continued. (It did, for one commit.)
+- **A stopped process is still killable** with nothing extra: the park's
+  wait ends on `kill_sig` as well as on `stopped`.
+- **Reporting is edge-triggered.** `stop_reportable` and
+  `cont_reportable` are set by the event and cleared by the report, so a
+  parent polling with `WNOHANG | WUNTRACED` does not see the same stop
+  for ever; a stop cancels an unreported continue and the reverse.
+
+**The wait status** grew two outcomes rather than changing:
+`COSMO_STATUS_STOPPED(sig)` is `0x200 | sig` and
+`COSMO_STATUS_CONTINUED` is `0x400`, both *above* the byte that exit
+statuses and `128 + sig` use, so nothing that already read a status
+changed meaning. Linux's own encoding is produced by `lx_wait_status`
+for Linux binaries, so nothing outside this tree ever sees these values
+-- which is the whole argument for extending rather than adopting.
+
+**Orphaned process groups.** A group whose every member's parent is
+outside its session or gone has nothing left that could continue it, so
+it must never be stopped: `process_group_is_orphaned` gates the
+terminal's `^Z` and turns a background read into `-EIO`. This is the one
+rule whose absence can wedge the machine rather than merely misbehave.
 
 ### The SYSRET canonical guard and the full-restore exit (x86-64)
 

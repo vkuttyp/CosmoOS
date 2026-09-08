@@ -375,22 +375,93 @@ terminal released), and the interactive boot test, which types `^C` at a
 running `sleep` and sees it exit 130 with the next prompt immediately
 after.
 
+**P-J1. A process stops only at a return to user mode, and only while
+its own state says so.** The per-thread `sig_must_stop` gets a thread to
+that point (through `signal_pending`, so a killable wait returns
+`-EINTR`); `p->stopped`, re-read under the lock at the park and again in
+the wait it blocks on, decides whether it stays there. A flag that
+outlived its stop parks nothing. Check: `signal-stop`, `signal-stop-late`
+(a stop and a continue back to back, before the target has run, six
+times, bounded so the failure is a failure rather than a hang).
+
+**P-J2. A call cut short by a stop is restarted, not failed.**
+Unconditionally, because a stop carries no `SA_RESTART`. Check:
+`signal-stop-restart`, in which a background reader is stopped *by its
+own read* -- the only way to be sure the stop lands inside the call
+under test -- then given the terminal and continued, and must return the
+line rather than `-EINTR`. Two earlier versions of this test aimed a
+stop at a sleeping child from its parent and passed with the restart
+deliberately broken, because the stop kept landing between calls.
+
+**P-J3. A stopped process is still killable, and `SIGSTOP` is still
+uncatchable.** The park's wait ends on `kill_sig`; `UNBLOCKABLE` and
+both `sigaction` gates refuse `SIGSTOP`. Check: `signal-stop-kill`,
+`signal-stop-mask`.
+
+**P-J4. A parent is told a process stopped only once every thread has
+parked.** `nr_stopped` counts them and the last one to park sets
+`stop_reportable`, so a shell cannot take the terminal back while a
+thread of the job is still running. Reporting is edge-triggered in both
+directions. A thread cloned while the process is stopped inherits the
+flag, or it would count towards `nr_live` and never towards
+`nr_stopped` and the parent would wait for ever. Check: `signal-stop`
+(the edge) and `signal-stop-threads`, which clones a worker into a
+sleep and stops the process from the main thread -- with the sibling
+wake removed, the worker never parks and no stop is ever reported.
+
+**P-J5a. A signal that will not stop anything is never reported as
+though it would.** `signal_raise_stop_self` tests the action and sends
+the signal under one acquisition of `p->lock` and returns whether either
+a stop or a handler will follow; the terminal turns a `false` into
+`-EIO`. Splitting the two -- ask, then send -- is a race another thread
+of the same process can win, and the read would then return `-EINTR` for
+a stop that never comes, which a retrying program retries for ever.
+Check: `tty-ttin`'s blocked-`SIGTTIN` reader, which fails with the ask
+removed. The multi-threaded race itself is not reproducible here for the
+usual reason.
+
+**P-J5. An orphaned process group is never stopped.** Nothing is left in
+its session that could continue it, so `^Z` at the terminal skips it and
+a background read from it is `-EIO` rather than `SIGTTIN`. Check:
+`tty-ttin`, which builds a real orphan (a grandchild whose parent exits)
+and requires `-EIO`, and whose absence wedges the boot rather than
+failing it -- which is what the rule exists to prevent.
+
 ## Gaps (documented, not invariants)
 
 - No `fork` or `exec` replacing the current image; `spawn` is the only
   creation primitive; `clone` creates threads only.
-- Stop signals are ignored: there is no stopped process state, so no
-  `^Z`, no `SIGCONT`, and no `fg`/`bg` in the shell. Named as the step
-  not taken in `docs/audit/next-subsystem-signals.md`.
+- **One multi-threaded case remains unaimable**: a thread cloned
+  *during* a stop, between the stop being posted and the last thread
+  parking. It is handled -- the new thread inherits `sig_must_stop` --
+  but no test can reach it, because the main thread cannot clone while
+  it is itself stopped. `signal-stop-threads` covers the ordinary
+  multi-threaded stop, which is what two rounds of review were about.
+- **Two guards are not distinguishable by any test here**,
+  and both are kept because they are plainly right rather than because
+  anything proves them. Setting `stop_reportable` only when the *last*
+  thread parks (rather than when the stop is posted) matters when a
+  parent's `waitpid` can win a race against a thread still on its way to
+  parking -- which needs more than one thread. So does the guard below.
+- **One guard in `process_stop_park` is not distinguishable by any
+  test.** The re-read of `p->stopped` at the top of the function guards
+  the bookkeeping (`nr_stopped`, `stop_reportable`) against a stale
+  flag; the *hang* it would otherwise allow is already prevented by the
+  wait condition below it, which reads the same field. With the
+  continue's sweep intact the stale-flag state is unreachable at all.
+  It is kept because it is the guard for a phantom stop report, and
+  recorded here because nothing proves it. (The equivalent belt-and-
+  braces in the `SIGKILL` path *was* deleted, for the same reason.)
 - A clone's FPU state is the reset state, not the caller's; AVX state
   above the SSE halves does not survive a handler on x86-64 (the frame
   carries the FXSAVE image only).
 - The native signal ABI has no alternate signal stack, no real-time
   signals, no queue of siginfo per signal, and no `sigsuspend`; a
   handler that overflows the stack it was called on is not caught.
-- A background process reading from the terminal is not sent `SIGTTIN`,
-  nor one writing `SIGTTOU`: both go through as they did before, because
-  both are job control.
+- A background process *writing* to the terminal is not sent `SIGTTOU`:
+  writes go through, as they do on Linux by default (`TOSTOP` is not
+  built). Reads are stopped, and `tcsetpgrp` from the background does
+  raise `SIGTTOU`.
 - One console object shared by every process that inherited it; no
   device nodes, so a process that closed handle 0 cannot reopen the
   console.

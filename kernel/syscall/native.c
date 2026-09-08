@@ -842,11 +842,18 @@ static int64_t sys_wait(struct syscall_args *a)
 {
     int pid = (int)a->a[0];
     unsigned flags = (unsigned)a->a[2];
-    if (pid == 0 || pid < -1 || (flags & ~COSMO_WNOHANG))
+    if (pid == 0 || pid < -1 || (flags & ~(COSMO_WNOHANG | COSMO_WUNTRACED | COSMO_WCONTINUED)))
         return -EINVAL;
+    unsigned wf = 0;
+    if (flags & COSMO_WNOHANG)
+        wf |= PROCESS_WAIT_NOHANG;
+    if (flags & COSMO_WUNTRACED)
+        wf |= PROCESS_WAIT_UNTRACED;
+    if (flags & COSMO_WCONTINUED)
+        wf |= PROCESS_WAIT_CONTINUED;
     pid_t got = 0;
     int status = 0;
-    int rc = process_wait_child(pid, (flags & COSMO_WNOHANG) ? PROCESS_WAIT_NOHANG : 0, &got, &status);
+    int rc = process_wait_child(pid, wf, &got, &status);
     if (rc)
         return rc;
     if (got != 0 && a->a[1] != 0 && copy_to_user(a->a[1], &status, sizeof(status)))

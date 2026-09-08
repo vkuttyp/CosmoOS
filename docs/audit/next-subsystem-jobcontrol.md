@@ -536,3 +536,65 @@ a test that cannot fail on demand is not yet a test.
 - **Nothing: leave finding #30 open.** Defensible while one command at a
   time is enough, which is exactly as true as it was before the machine
   had a keyboard.
+
+## Outcome (2026-09-08)
+
+Built, all five steps. Audit finding #30 is closed: `^Z` stops the
+foreground job, `jobs`/`fg`/`bg` manage it, `&` backgrounds a pipeline,
+and a background job that reads the terminal is stopped rather than
+allowed to steal the shell's line.
+
+**The wait-status question resolved as the report argued.** The
+encoding was extended upward and nothing that already read a status
+changed meaning; `lx_wait_status` gained two cases. No caller needed
+touching, which was the whole argument.
+
+**What the design got right in advance**, because four rounds of review
+had already found it: the split between the per-thread flag (a reason to
+look) and the process's own state (the authority), in both directions.
+Implementing it was mechanical once stated.
+
+**What it got wrong, and the tests found:**
+
+- **`SIGCONT` must stay an *ignore*.** The report treated "continue" as
+  a new default action and said the stop signals and `SIGCONT` both
+  leave the ignore table. `SIGCONT` performs its continue in
+  `route_locked` *before* the default-action table is consulted, so
+  what is left for its default to do is nothing -- and taking it out of
+  the ignore list made an uncaught `SIGCONT` **terminate the process it
+  had just continued**. Two tests caught it as one root cause.
+- **The parent's wait scan must not reach into a child's lock.** The
+  first version asked `process_fully_stopped(child)` while holding the
+  parent's lock -- two process locks nested, an order this kernel does
+  not have. It surfaced as a global slowdown (`syscall-fuzz` 3 s to
+  10.5 s) before it could surface as a deadlock. The last thread to park
+  now sets `stop_reportable` itself, so the scan tests one bool.
+- **The `SIGKILL` un-stop was redundant** and is deleted: the park's own
+  wait ends on `kill_sig`. No test could tell it from its absence, which
+  is the honest sign that it did nothing.
+
+**Three tests did not test what they claimed**, all found by
+reintroducing the bug, and all the same lesson as the signals unit:
+
+- `signal-stop-kill` passed with the un-stop removed (above).
+- `signal-stop-restart` passed twice with the restart deliberately
+  broken. First it stopped the child between its handshake and its
+  sleep; then it measured *elapsed time*, which includes however long
+  the process sat parked, so a failed call and a restarted one are
+  indistinguishable by duration. It now uses `SIGTTIN`, where **the
+  call under test causes its own stop** -- the only way to aim one
+  reliably.
+- `tty-ttin` could let its child reach the read before the terminal had
+  a foreground group, in which case the read was legitimately allowed.
+
+**Not built, and recorded in the gaps**: the multi-threaded half of
+stopping. That a parent is told of a stop only when the *last* thread
+has parked is implemented and exercised only with one thread, where it
+is trivially true; `signal-stop-threads` would need a Linux-personality
+program and was not written. One guard in `process_stop_park` is
+likewise not distinguishable by any test, and is recorded rather than
+quietly kept.
+
+**Size**: about 1 500 lines changed against the report's estimate --
+roughly 400 of kernel, 350 of shell, 500 of tests, the rest
+documentation.

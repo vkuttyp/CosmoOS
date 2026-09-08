@@ -84,6 +84,26 @@ static int t_group(void *arg)
     return 0;
 }
 
+/*
+ * Job control with more than one thread, which only this personality can
+ * make. The worker sleeps across the stop; the main thread stops the
+ * whole process while it is in there. Both must park before the parent
+ * is told the process stopped, and the worker's sleep must be restarted
+ * rather than failed, or `g_worker_done` is never set.
+ */
+static volatile int g_worker_done;
+static char worker_stack[16384] __attribute__((aligned(16)));
+
+static int t_stopworker(void *arg)
+{
+    (void)arg;
+    struct lx_timespec ts = { 0, 400000000 };
+    if (sc2(LX_nanosleep, &ts, 0) == 0)
+        g_worker_done = 1;
+    sc1(LX_exit, 0);   /* this thread only */
+    return 0;
+}
+
 static int t_last(void *arg)
 {
     (void)arg;
@@ -139,6 +159,19 @@ int main(int argc, char **argv)
         if (sc2(LX_setpgid, 0, 0) != -1)
             return 7;   /* nor can a session leader change group */
         return 0;
+    }
+    if (streq(mode, "stopthreads")) {
+        lx_clone(t_stopworker, worker_stack + sizeof(worker_stack), 0, flags, 0, 0, 0);
+        struct lx_timespec ts = { 0, 50000000 };
+        sc2(LX_nanosleep, &ts, 0);          /* the worker is inside its sleep */
+        sc2(LX_kill, sc0(LX_getpid), 19);   /* SIGSTOP: both threads must park */
+        /* Continued by the parent. The worker finishes the sleep it was
+         * stopped in -- restarted, not failed -- and says so. */
+        for (int i = 0; i < 200 && !g_worker_done; i++) {
+            struct lx_timespec s2 = { 0, 20000000 };
+            sc2(LX_nanosleep, &s2, 0);
+        }
+        sc1(LX_exit_group, g_worker_done ? 0 : 4);
     }
     lx_puts("lxsig: unknown mode\n");
     return 2;

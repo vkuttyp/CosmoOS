@@ -1943,6 +1943,184 @@ static int probe_signal_tty_quit(void)
     return 5;
 }
 
+/* A job: it sits there until something stops or kills it. */
+static int probe_signal_job(void)
+{
+    for (int i = 0; i < 1000; i++)
+        usleep(20000);
+    return 9;
+}
+
+/* A job that reads the terminal, which is the thing a background job
+ * must not be allowed to do. */
+static int probe_signal_job_read(void)
+{
+    char b = 0;
+    ssize_t n = read(0, &b, 1);
+    if (n < 0)
+        return errno == EIO ? 30 : 31;
+    return 32;
+}
+
+/*
+ * ^Z, in the shape a shell uses: this process leads the session and
+ * holds the terminal, and the *job* is a child in a group of its own.
+ * That is also what makes the job's group non-orphaned -- its parent is
+ * here, in the same session and a different group -- so the terminal is
+ * allowed to stop it. The kernel side types the keystroke; everything
+ * below is bounded, because a stop that never arrives would otherwise
+ * hang the boot rather than fail it.
+ */
+static int probe_signal_tty_stop(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-job", NULL };
+    pid_t c = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, 0);
+    if (c <= 0)
+        return 3;
+    if (tcsetpgrp(0, c) != 0)   /* the child leads its own group, named by its pid */
+        return 4;
+    int st = -1;
+    int stopped = 0;
+    for (int i = 0; i < 200 && !stopped; i++) {   /* at most 4 s; the stop needs milliseconds */
+        pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+        if (got == c && WIFSTOPPED(st))
+            stopped = 1;
+        else if (got == c)
+            return 5;   /* it died instead of stopping */
+        else
+            usleep(20000);
+    }
+    if (!stopped)
+        return 6;
+    if (WSTOPSIG(st) != SIGTSTP)
+        return 7;
+    /* Still there to be continued, and the continue reaches the group. */
+    if (kill(-c, SIGCONT) != 0)
+        return 8;
+    if (kill(-c, SIGTERM) != 0)
+        return 9;
+    if (waitpid(c, &st, 0) != c || st != 128 + SIGTERM)
+        return 10;
+    return 0;
+}
+
+/*
+ * Reading the terminal from the background, both halves of the rule at
+ * once. The child is in its own group with this process as its parent,
+ * so its group is *not* orphaned and it is stopped with SIGTTIN. This
+ * process is in its own group too and has no parent at all -- the
+ * kernel started it -- so its group *is* orphaned, and the same read
+ * must hand it -EIO rather than stop it, because nothing would be left
+ * to continue it.
+ */
+static int probe_signal_tty_background(void)
+{
+    /* The terminal is claimed *before* the child exists: a child that
+     * reached its read while the terminal still had no foreground group
+     * would be allowed to read, and would block there for ever rather
+     * than being stopped. */
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    const char *argv[] = { "init", "--probe", "signal-job-read", NULL };
+    pid_t c = spawnve_pgrp("/boot/init", argv, NULL, NULL, 0, 0);
+    if (c <= 0)
+        return 4;
+    int st = -1;
+    int stopped = 0;
+    for (int i = 0; i < 200 && !stopped; i++) {   /* at most 4 s */
+        pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+        if (got == c && WIFSTOPPED(st))
+            stopped = 1;
+        else if (got == c)
+            return 5;   /* it read the line, or died */
+        else
+            usleep(20000);
+    }
+    if (!stopped)
+        return 6;
+    if (WSTOPSIG(st) != SIGTTIN)
+        return 7;
+    if (kill(-c, SIGKILL) != 0 || waitpid(c, &st, 0) != c)
+        return 8;
+
+    /*
+     * And a background reader that blocks SIGTTIN: no stop can follow,
+     * so the read must fail with EIO rather than return an interruption
+     * the caller would retry for ever.
+     */
+    const char *bargv2[] = { "init", "--probe", "signal-job-read-blocked", NULL };
+    pid_t d = spawnve_pgrp("/boot/init", bargv2, NULL, NULL, 0, 0);
+    if (d <= 0)
+        return 14;
+    if (waitpid(d, &st, 0) != d)
+        return 15;
+    if (st != 0)
+        return 16 + st;
+
+    /*
+     * The orphaned half. An orphaned group needs a member whose parent
+     * is gone, so it takes a generation: this process spawns B, B
+     * spawns G in a group of its own and exits, and G is left in the
+     * terminal's session with nothing above it that could ever continue
+     * it. G reports through a pipe, because it is a grandchild and
+     * cannot be waited for here.
+     */
+    int q[2];
+    if (pipe(q) != 0)
+        return 9;
+    struct spawn_handle map[] = { { .child = 0, .parent = 0 }, { .child = 1, .parent = 1 },
+                                  { .child = 2, .parent = 2 }, { .child = 3, .parent = q[1] } };
+    const char *bargv[] = { "init", "--probe", "signal-job-orphan-parent", NULL };
+    pid_t b = spawnve("/boot/init", bargv, NULL, map, 4);
+    close(q[1]);
+    if (b <= 0)
+        return 10;
+    if (waitpid(b, &st, 0) != b || st != 0)
+        return 11;
+    char verdict = 0;
+    if (read(q[0], &verdict, 1) != 1)
+        return 12;   /* the grandchild never answered */
+    close(q[0]);
+    return verdict == 'y' ? 0 : 13;
+}
+
+/* Spawns the orphan into a group of its own and gets out of the way. */
+static int probe_signal_job_orphan_parent(void)
+{
+    struct spawn_handle map[] = { { .child = 0, .parent = 0 }, { .child = 1, .parent = 1 },
+                                  { .child = 2, .parent = 2 }, { .child = 3, .parent = 3 } };
+    const char *argv[] = { "init", "--probe", "signal-job-orphan", NULL };
+    return spawnve_pgrp("/boot/init", argv, NULL, map, 4, 0) > 0 ? 0 : 20;
+}
+
+/* Orphaned, in the terminal's session, not the foreground group: the
+ * read must be refused with EIO rather than stop it, because a stop
+ * here would last for ever. */
+static int probe_signal_job_orphan(void)
+{
+    usleep(200000);   /* long enough that the parent is gone */
+    char b = 0;
+    ssize_t n = read(0, &b, 1);
+    char verdict = (n < 0 && errno == EIO) ? 'y' : 'n';
+    (void)write(3, &verdict, 1);
+    return 0;
+}
+
+/* Reads the terminal with SIGTTIN blocked, which means no stop can
+ * follow: the read must fail rather than hand back an interruption that
+ * will never become one. */
+static int probe_signal_job_read_blocked(void)
+{
+    sigset_t block = SIGBIT(SIGTTIN);
+    if (sigprocmask(SIG_BLOCK, &block, NULL) != 0)
+        return 40;
+    char b = 0;
+    ssize_t n = read(0, &b, 1);
+    if (n >= 0)
+        return 41;
+    return errno == EIO ? 0 : 42;
+}
+
 /* Another session cannot take the terminal, or even ask about it. */
 static int probe_signal_tty_steal(void)
 {
@@ -1951,6 +2129,247 @@ static int probe_signal_tty_steal(void)
     if (tcgetpgrp(0) != -1 || errno != ENOTTY)
         return 4;
     return 0;
+}
+
+/* --- job control ------------------------------------------------------------ */
+
+/* Stops itself and, once continued, says so with an exit status nothing
+ * else produces. */
+static int probe_signal_stop_child(void)
+{
+    if (raise(SIGSTOP) != 0)
+        return 20;
+    return 7;
+}
+
+/* A stop is an event a parent waits for, reported once per stop. */
+static int probe_signal_stop(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-stop-child", NULL };
+    pid_t c = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (c <= 0)
+        return 3;
+    int st = -1;
+    if (waitpid(c, &st, WUNTRACED) != c)
+        return 4;
+    if (!WIFSTOPPED(st) || WSTOPSIG(st) != SIGSTOP)
+        return 5;
+    if (WIFEXITED(st) || WIFSIGNALED(st))
+        return 6;   /* a stopped status must not read as either */
+    /* Edge-triggered: the same stop is not reported twice. */
+    if (waitpid(c, &st, WNOHANG | WUNTRACED) != 0)
+        return 7;
+    if (kill(c, SIGCONT) != 0)
+        return 8;
+    if (waitpid(c, &st, WUNTRACED | WCONTINUED) != c || !WIFCONTINUED(st))
+        return 9;
+    if (waitpid(c, &st, 0) != c || st != 7)
+        return 10;
+    return 0;
+}
+
+/* Stopped is not a place a process can hide from SIGKILL. */
+static int probe_signal_stop_kill(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-stop-child", NULL };
+    pid_t c = spawnve("/boot/init", argv, NULL, NULL, 0);
+    if (c <= 0)
+        return 3;
+    int st = -1;
+    if (waitpid(c, &st, WUNTRACED) != c || !WIFSTOPPED(st))
+        return 4;
+    if (kill(c, SIGKILL) != 0)
+        return 5;
+    if (waitpid(c, &st, 0) != c || st != 128 + SIGKILL)
+        return 6;
+    return 0;
+}
+
+/* SIGSTOP cannot be caught, blocked or ignored -- the one rule that
+ * makes it worth having. */
+static int probe_signal_stop_mask(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = sig_handler;
+    sa.sa_flags = SA_SIGINFO;
+    if (sigaction(SIGSTOP, &sa, NULL) != -1 || errno != EINVAL)
+        return 3;
+    sa.sa_handler = SIG_IGN;
+    if (sigaction(SIGSTOP, &sa, NULL) != -1 || errno != EINVAL)
+        return 4;
+    sigset_t all = ~0ul, now = 0;
+    if (sigprocmask(SIG_SETMASK, &all, NULL) != 0 || sigprocmask(SIG_BLOCK, NULL, &now) != 0)
+        return 5;
+    if (now & SIGBIT(SIGSTOP))
+        return 6;
+    sigset_t none = 0;
+    if (sigprocmask(SIG_SETMASK, &none, NULL) != 0)
+        return 7;
+    return 0;
+}
+
+/*
+ * Reads one line from the terminal. It is started in the background, so
+ * its own read is what stops it (SIGTTIN); once it has been made the
+ * foreground group and continued, the same read must be *restarted* and
+ * return the line. A read that was failed rather than restarted comes
+ * back -EINTR and this says so.
+ *
+ * The stop is caused by the call under test, which is the only way to
+ * aim one reliably: two earlier versions of this test tried to hit a
+ * sleeping child from the parent, and both passed with the restart
+ * deliberately broken because the stop kept landing between calls.
+ */
+static int probe_signal_stop_reader(void)
+{
+    if (write(3, "r", 1) != 1)
+        return 22;
+    char buf[64];
+    ssize_t n = read(0, buf, sizeof(buf));
+    if (n < 0)
+        return errno == EINTR ? 20 : 21;   /* failed, not restarted */
+    return n > 0 ? 0 : 23;
+}
+
+/*
+ * A system call cut short by a stop is restarted, not failed. The child
+ * reads the terminal from the background, which stops it where it
+ * stands; this process then hands it the terminal and continues it, and
+ * the kernel side types a line for it to find.
+ */
+static int probe_signal_stop_restart(void)
+{
+    if (tcsetpgrp(0, getpgrp()) != 0)
+        return 3;
+    int ready[2];
+    if (pipe(ready) != 0)
+        return 4;
+    struct spawn_handle map[] = { { .child = 0, .parent = 0 }, { .child = 1, .parent = 1 },
+                                  { .child = 2, .parent = 2 }, { .child = 3, .parent = ready[1] } };
+    const char *argv[] = { "init", "--probe", "signal-stop-reader", NULL };
+    pid_t c = spawnve_pgrp("/boot/init", argv, NULL, map, 4, 0);
+    close(ready[1]);
+    if (c <= 0)
+        return 5;
+    char r = 0;
+    if (read(ready[0], &r, 1) != 1)
+        return 6;
+    close(ready[0]);
+    int st = -1;
+    int stopped = 0;
+    for (int i = 0; i < 200 && !stopped; i++) {   /* at most 4 s */
+        pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+        if (got == c && WIFSTOPPED(st))
+            stopped = 1;
+        else if (got == c)
+            return 7;   /* it read something, or died, instead of stopping */
+        else
+            usleep(20000);
+    }
+    if (!stopped)
+        return 8;
+    if (WSTOPSIG(st) != SIGTTIN)
+        return 9;
+    /* Its turn at the terminal, and on with it. */
+    if (tcsetpgrp(0, c) != 0)
+        return 10;
+    if (kill(-c, SIGCONT) != 0)
+        return 11;
+    if (waitpid(c, &st, 0) != c)
+        return 12;
+    return st == 0 ? 0 : 30 + st;
+}
+
+/*
+ * The continue that outruns the thread it is continuing: a stop and a
+ * SIGCONT sent back to back, before the target has reached the return
+ * to user mode where it would park. It must end up running. A park that
+ * trusted the flag it was woken with rather than re-reading the
+ * process's state would stop a process that has already been continued,
+ * so the wait below is bounded -- that failure is a hang, and a test
+ * that hangs is not a test.
+ */
+static int probe_signal_stop_late(void)
+{
+    const char *argv[] = { "init", "--probe", "signal-sleep", NULL };
+    /* Six rounds, not twenty: the ordering under test is decided by the
+     * two kills arriving before the child has run at all, which one
+     * round already achieves. The rest are for luck, and each costs the
+     * child's own sleep. */
+    for (int round = 0; round < 6; round++) {
+        pid_t c = spawnve("/boot/init", argv, NULL, NULL, 0);
+        if (c <= 0)
+            return 3;
+        if (kill(c, SIGSTOP) != 0)
+            return 4;
+        if (kill(c, SIGCONT) != 0)
+            return 5;
+        int st = -1;
+        int done = 0;
+        for (int i = 0; i < 200; i++) {   /* at most 2 s, then it is stuck */
+            pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+            if (got == c && WIFSTOPPED(st)) {
+                /* A stop reported *after* the continue: the child
+                 * parked on a flag its stop no longer owns, and told
+                 * its parent so. Nothing continued it, so this is also
+                 * how the hang begins. */
+                kill(c, SIGCONT);
+                kill(c, SIGKILL);
+                waitpid(c, &st, 0);
+                return 8;
+            }
+            if (got == c) {
+                done = 1;
+                break;
+            }
+            usleep(10000);
+        }
+        if (!done) {
+            kill(c, SIGCONT);
+            kill(c, SIGKILL);
+            waitpid(c, &st, 0);
+            return 6;   /* parked after the continue: stopped for good */
+        }
+        if (st != 0)
+            return 7;
+    }
+    return 0;
+}
+
+/*
+ * The one invariant of stopping that needs more than one thread: a
+ * parent is told the process stopped only once *every* thread has
+ * parked. The program is a Linux-personality one, because the native
+ * ABI cannot make a thread; it clones a worker, puts it inside a sleep,
+ * and stops the whole process from the main thread. A worker that never
+ * parked would leave the process short of fully stopped and no stop
+ * would ever be reported, so the wait below is bounded.
+ */
+static int probe_signal_stop_threads(void)
+{
+    const char *argv[] = { "lxsig", "stopthreads", NULL };
+    pid_t c = spawnve("/boot/tests/linux/lxsig", argv, NULL, NULL, 0);
+    if (c <= 0)
+        return 0;   /* the Linux test programs are not in this image */
+    int st = -1;
+    int stopped = 0;
+    for (int i = 0; i < 200 && !stopped; i++) {   /* at most 4 s */
+        pid_t got = waitpid(c, &st, WNOHANG | WUNTRACED);
+        if (got == c && WIFSTOPPED(st))
+            stopped = 1;
+        else if (got == c)
+            return 3;   /* it exited instead of stopping */
+        else
+            usleep(20000);
+    }
+    if (!stopped)
+        return 4;   /* never fully stopped: a thread did not park */
+    if (kill(c, SIGCONT) != 0)
+        return 5;
+    if (waitpid(c, &st, 0) != c)
+        return 6;
+    return st == 0 ? 0 : 10 + st;
 }
 
 static int signal_probe(const char *kind)
@@ -1979,6 +2398,36 @@ static int signal_probe(const char *kind)
         return probe_signal_tty_steal();
     if (strcmp(kind, "signal-tty-quit") == 0)
         return probe_signal_tty_quit();
+    if (strcmp(kind, "signal-stop-child") == 0)
+        return probe_signal_stop_child();
+    if (strcmp(kind, "signal-stop") == 0)
+        return probe_signal_stop();
+    if (strcmp(kind, "signal-stop-kill") == 0)
+        return probe_signal_stop_kill();
+    if (strcmp(kind, "signal-stop-mask") == 0)
+        return probe_signal_stop_mask();
+    if (strcmp(kind, "signal-stop-reader") == 0)
+        return probe_signal_stop_reader();
+    if (strcmp(kind, "signal-stop-restart") == 0)
+        return probe_signal_stop_restart();
+    if (strcmp(kind, "signal-stop-late") == 0)
+        return probe_signal_stop_late();
+    if (strcmp(kind, "signal-stop-threads") == 0)
+        return probe_signal_stop_threads();
+    if (strcmp(kind, "signal-tty-stop") == 0)
+        return probe_signal_tty_stop();
+    if (strcmp(kind, "signal-tty-background") == 0)
+        return probe_signal_tty_background();
+    if (strcmp(kind, "signal-job") == 0)
+        return probe_signal_job();
+    if (strcmp(kind, "signal-job-read") == 0)
+        return probe_signal_job_read();
+    if (strcmp(kind, "signal-job-read-blocked") == 0)
+        return probe_signal_job_read_blocked();
+    if (strcmp(kind, "signal-job-orphan-parent") == 0)
+        return probe_signal_job_orphan_parent();
+    if (strcmp(kind, "signal-job-orphan") == 0)
+        return probe_signal_job_orphan();
     return 2;
 }
 

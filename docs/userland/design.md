@@ -128,8 +128,14 @@ shell hands the terminal to the job with `tcsetpgrp` before waiting and
 takes it back afterwards; both calls may fail on a job that has already
 exited, and neither failure changes what happens next.
 
-Worth saying plainly: with no background jobs, **nothing observable yet
-distinguishes a per-job group from the shell's own group** -- with
+(Until job control existed, nothing observable distinguished a per-job
+group from the shell's own group. It does now: a background job is in a
+group that is not the terminal's foreground one, which is what stops it
+from reading the line the shell is waiting for.)
+
+Worth saying plainly about the original signals unit: with no background
+jobs, **nothing observable distinguished a per-job group from the
+shell's own group** -- with
 either, the terminal's foreground group contains the job, and `^C`
 reaches it. The per-job group is here because it is what the group model
 is for, and because the moment `&`, `fg` or `bg` exists the shell's
@@ -142,8 +148,37 @@ fault`) rather than left to look like an exit status, except for
 `SIGINT` -- the terminal has already echoed `^C` -- and `SIGPIPE`, which
 is how the second half of a pipeline tells the first to stop.
 
-`^Z` and `fg`/`bg` are not built: there is no stopped state in the
-kernel (`docs/kernel/process/design.md`, "Sessions and process groups").
+### Jobs proper
+
+`&` puts a pipeline in the background; `jobs`, `fg` and `bg` manage what
+is running. A job is remembered by its process group and its stages:
+
+- A job takes a **number only when it outlives the foreground** -- when
+  it is backgrounded, or when it stops. Numbering every pipeline would
+  print `[9]+ Stopped` on the ninth command of the session, which is not
+  what a job number means.
+- `^Z` stops the foreground job; the shell waits for **every** live
+  stage to report stopped before it prints `[1]+  Stopped` and takes the
+  terminal back. Returning on the first would hand the terminal to the
+  shell while the other stages were still on their way to parking, and
+  they would write over the prompt. `fg` hands the terminal over, sends
+  `SIGCONT` to the *group* so every stage resumes together, and waits
+  again; `bg` continues it without the terminal.
+- A stopped foreground job is not reported as a death: `job_wait_foreground`
+  answers `JOB_STOPPED` (128 + `SIGTSTP`, which is what `$?` is after a
+  `^Z`) and the caller tests for it by name before calling
+  `report_signal`.
+- Background jobs are collected before each prompt with
+  `waitpid(-1, WNOHANG | WUNTRACED | WCONTINUED)`, which is where a
+  shell reports `Done` and `Stopped`.
+- The shell ignores `SIGTTOU`, `SIGTTIN` and `SIGTSTP` as well as
+  `SIGINT` and `SIGQUIT`. `SIGTTOU` is the load-bearing one: taking the
+  terminal back after a job is done from the background, so a shell that
+  did not ignore it would stop itself every time a job finished.
+
+Without job control -- a non-interactive shell, or one that could not
+claim a terminal -- `&` says so and runs the pipeline in the foreground
+rather than pretending to background it.
 
 ### Input
 

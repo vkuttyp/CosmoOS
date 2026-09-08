@@ -247,10 +247,56 @@ number: the program that knows the detail is gone by then).
   line discipline that kept only the last signal of a batch would not
   manage.
 
+### Job control
+
+- **`signal-stop`** -- a child stops itself, the parent sees
+  `WIFSTOPPED` with the right signal and *not* a second time without a
+  second stop, continues it, sees `WIFCONTINUED`, and collects the exit
+  status the child only reaches after being resumed.
+- **`signal-stop-kill`** -- a stopped process is killed and dies.
+- **`signal-stop-mask`** -- `SIGSTOP` cannot be caught, ignored or
+  blocked.
+- **`signal-stop-restart`** -- driven from both ends, because the stop
+  has to land *inside* the call under test: a reader in a background
+  group is stopped by its own `read` (`SIGTTIN`), the probe then hands
+  it the terminal and continues it, and the kernel side types a line the
+  restarted read must return. Two earlier versions aimed a stop at a
+  sleeping child from the parent and both passed with the restart
+  deliberately broken -- the first because the stop landed between the
+  handshake and the sleep, the second because it measured elapsed time,
+  which includes however long the process sat parked and so cannot tell
+  a failed call from a restarted one.
+- **`signal-stop-late`** -- a stop and a continue sent back to back
+  before the child has run at all, six times: it must end up running,
+  and no stop may be reported after the continue. Bounded, because the
+  failure it covers is a hang.
+- **`tty-stop`** -- `^Z` at the terminal in the shape a shell uses: the
+  probe leads the session and holds the terminal, the *job* is a child
+  in a group of its own (which is also what makes that group
+  non-orphaned), and the kernel types the keystroke. The job must stop
+  rather than die, and then continue and be killable.
+- **`tty-ttin`** -- all three ways the rule can go, in one probe. A
+  child in its own group with a live parent is stopped with `SIGTTIN`;
+  a real orphan -- a grandchild whose parent exits, reporting through a
+  pipe because it cannot be waited for -- gets `-EIO` instead, and so
+  does a reader that blocks `SIGTTIN`, because no stop can follow for
+  it either. Removing
+  the orphan rule wedges the boot rather than failing it, which is
+  precisely the failure the rule exists to prevent.
+
+These three console-driving tests run **before `hid-arm`**: they type
+control characters at the console, and `^C` throws away whatever line is
+under edit, so running them after the keyboard harness has started
+typing eats its line.
+
 The interactive boot test (`tests/boot/shelltest.py`) covers the same
 path end to end: it runs `sleep 5`, waits half a second, sends a bare
 `0x03` byte, and requires the echoed `^C` and the next prompt **within
-three seconds** of the keystroke. The bound is the test: `sleep 5`
+three seconds** of the keystroke. It then runs `sleep 30`, types `^Z`,
+and requires `[1]+  Stopped`, `jobs` to list it, `fg` to bring it back,
+and a `^C` to end it -- the same pid throughout, which is what says it
+was stopped and continued rather than restarted -- followed by
+`sleep 1 &` and a `jobs` that shows it running in the background. The bound is the test: `sleep 5`
 reaches a prompt on its own eventually, so without it a run in which the
 `^C` did nothing still ends with every pattern matched -- which is what
 happened to the first version of this check, and what reintroducing the

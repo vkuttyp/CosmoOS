@@ -85,6 +85,7 @@ before anything else is done.
   point" until the job-control report swept it.
 - No `fork`, `exec*`, `system`, `popen`, `setjmp`, `termios`,
   `getpwnam`, dynamic linking. (`signal` and `sigaction` arrived with
-  the signals unit; this line was not swept then.)
+  the signals unit; job control added `WUNTRACED`/`WIFSTOPPED` and the
+  session calls.)
 - `sockaddr_in`/`sockaddr_in6` do not exist; the native address shape is
   the only one.

@@ -45,6 +45,36 @@ static int g_opt_errexit;
 static int g_interactive;
 static int g_job_control;        /* the terminal is this shell's to hand out */
 static pid_t g_shell_pgrp;
+
+/*
+ * Jobs. One pipeline is one job and therefore one process group, so a
+ * job is remembered by its group and the stages in it: `fg` needs the
+ * group to hand the terminal to and the pids to wait for, and `jobs`
+ * needs the text to print. A job is forgotten when every stage has
+ * exited.
+ */
+#define JOBS_MAX 16
+/* What `job_wait_foreground` answers when the job stopped rather than
+ * finished. 148 is 128 + SIGTSTP, which is what `$?` is after a ^Z in
+ * every shell -- but it must not be mistaken for a death, so the caller
+ * tests for it by name before reporting a signal. */
+#define JOB_STOPPED (128 + COSMO_SIGTSTP)
+struct job {
+    int used;                /* the slot is in use */
+    int id;                  /* what %n names; 0 until the job outlives the foreground */
+    pid_t pgrp;
+    pid_t pids[STAGES_MAX];
+    int npids;
+    int done[STAGES_MAX];
+    int parked[STAGES_MAX];  /* reported stopped; cleared when continued */
+    int stopped;             /* the whole job is parked */
+    int reported;            /* the shell has told the user about its current state */
+    int last_status;
+    char text[128];          /* the command line, for `jobs` */
+};
+static struct job g_jobs[JOBS_MAX];
+static int g_next_job_id = 1;
+static int g_current_job;    /* the `%%` / `%+` one: what plain `fg` means */
 static const char *g_script_name = "sh";
 static char **g_script_args;     /* $1.. */
 static int g_script_argc;
@@ -58,7 +88,7 @@ static int g_nvars;
 
 /* --- tokens --- */
 
-enum tok_type { T_WORD, T_PIPE, T_SEMI, T_AND_IF, T_OR_IF, T_LESS, T_GREAT, T_DGREAT, T_GREAT2, T_GREAT2AND, T_END };
+enum tok_type { T_WORD, T_PIPE, T_SEMI, T_AND_IF, T_OR_IF, T_AMP, T_LESS, T_GREAT, T_DGREAT, T_GREAT2, T_GREAT2AND, T_END };
 
 struct token {
     enum tok_type type;
@@ -247,6 +277,9 @@ static int lex(const char *line, struct token *toks, int max, int *ntoks, int *h
         } else if (*p == '&' && p[1] == '&') {
             t->type = T_AND_IF;
             p += 2;
+        } else if (*p == '&') {
+            t->type = T_AMP;   /* a bare &: run the pipeline in the background */
+            p++;
         } else if (*p == ';') {
             t->type = T_SEMI;
             p++;
@@ -274,7 +307,7 @@ static int lex(const char *line, struct token *toks, int max, int *ntoks, int *h
             struct sbuf b = { 0 };
             int quoted = 0;
             while (*p && !(quoted == 0 && (*p == ' ' || *p == '\t' || *p == '|' || *p == ';' || *p == '<' ||
-                                           *p == '>' || (*p == '&' && p[1] == '&')))) {
+                                           *p == '>' || *p == '&'))) {
                 if (quoted == 0 && *p == '#' && b.len == 0)
                     break;
                 if (quoted == 0 && *p == '2' && p[1] == '>' && b.len == 0)
@@ -338,6 +371,8 @@ struct command {
 struct pipeline {
     struct command cmds[STAGES_MAX];
     int ncmds;
+    int background;    /* ended with a bare `&` */
+    char text[128];    /* what the user typed, for `jobs` */
 };
 
 static int parse_pipeline(struct token *toks, int *pos, struct pipeline *pl)
@@ -387,6 +422,10 @@ static int parse_pipeline(struct token *toks, int *pos, struct pipeline *pl)
             (*pos)++;
             continue;
         }
+        if (toks[*pos].type == T_AMP) {
+            (*pos)++;
+            pl->background = 1;
+        }
         return 0;
     }
 }
@@ -406,6 +445,14 @@ static int is_assignment(const char *w)
 
 static int run_script_file(const char *path);
 static void report_signal(const char *what, int status);
+struct job;
+static struct job *job_add(pid_t pgrp, const pid_t *pids, int npids, const char *text);
+static struct job *job_pick(const char *spec);
+static int job_wait_foreground(struct job *j);
+static void jobs_poll(int announce);
+static int job_all_done(const struct job *j);
+static void job_print(const struct job *j, const char *state);
+static void job_number(struct job *j);
 
 static int builtin(struct command *c, int *is_builtin)
 {
@@ -471,6 +518,52 @@ static int builtin(struct command *c, int *is_builtin)
         return 0;
     if (strcmp(name, "false") == 0)
         return 1;
+    if (strcmp(name, "jobs") == 0) {
+        jobs_poll(0);
+        for (int i = 0; i < JOBS_MAX; i++) {
+            struct job *j = &g_jobs[i];
+            if (!j->used || j->id == 0)
+                continue;
+            if (job_all_done(j)) {
+                job_print(j, j->last_status == 0 ? "Done" : "Exit");
+                j->used = 0;
+            } else {
+                job_print(j, j->stopped ? "Stopped" : "Running");
+                j->reported = 1;
+            }
+        }
+        return 0;
+    }
+    if (strcmp(name, "fg") == 0 || strcmp(name, "bg") == 0) {
+        int to_front = strcmp(name, "fg") == 0;
+        if (!g_job_control) {
+            fprintf(stderr, "sh: %s: no job control\n", name);
+            return 1;
+        }
+        struct job *j = job_pick(c->nwords > 1 ? c->words[1] : NULL);
+        if (j == NULL) {
+            fprintf(stderr, "sh: %s: no such job\n", name);
+            return 1;
+        }
+        printf("%s\n", j->text);
+        fflush(stdout);
+        if (to_front)
+            (void)tcsetpgrp(0, j->pgrp);
+        /* The SIGCONT goes to the group, so every stage of the pipeline
+         * starts again together. */
+        j->stopped = 0;
+        j->reported = 0;
+        for (int k = 0; k < j->npids; k++)
+            j->parked[k] = 0;
+        if (kill(-j->pgrp, SIGCONT) != 0 && errno != ESRCH)
+            perror("sh: kill");
+        g_current_job = j->id;
+        if (!to_front)
+            return 0;
+        int st = job_wait_foreground(j);
+        (void)tcsetpgrp(0, g_shell_pgrp);
+        return st;
+    }
     if (strcmp(name, "wait") == 0) {
         int st;
         while (waitpid(-1, &st, 0) > 0)
@@ -584,7 +677,8 @@ static int run_pipeline(struct pipeline *pl)
         } else {
             /* Probe whether it is a builtin without running it. */
             static const char *const names[] = { "cd", "pwd", "exit", "export", "unset", "set", ":", "true",
-                                                 "false", "wait", ".", "source" };
+                                                 "false", "wait", ".", "source",
+                                                 "jobs",  "fg",   "bg" };
             for (size_t k = 0; k < sizeof(names) / sizeof(names[0]); k++)
                 if (strcmp(c->words[0], names[k]) == 0)
                     return run_builtin_redirected(c);
@@ -592,6 +686,18 @@ static int run_pipeline(struct pipeline *pl)
     }
 
     fflush(stdout);
+    /* What `jobs` prints: the words as they were parsed, which is close
+     * enough to what was typed and does not need the raw line kept. */
+    {
+        size_t n = 0;
+        pl->text[0] = '\0';
+        for (int i = 0; i < pl->ncmds && n < sizeof(pl->text) - 1; i++) {
+            for (int k = 0; k < pl->cmds[i].nwords && n < sizeof(pl->text) - 1; k++)
+                n += (size_t)snprintf(pl->text + n, sizeof(pl->text) - n, "%s%s", n ? " " : "", pl->cmds[i].words[k]);
+            if (i + 1 < pl->ncmds && n < sizeof(pl->text) - 1)
+                n += (size_t)snprintf(pl->text + n, sizeof(pl->text) - n, " |");
+        }
+    }
     pid_t pids[STAGES_MAX];
     int prev_read = -1;
     int last_status = 0;
@@ -640,21 +746,61 @@ static int run_pipeline(struct pipeline *pl)
     }
     if (prev_read >= 0)
         close(prev_read);
+
+    /*
+     * A background job is remembered and left alone: it keeps its own
+     * process group, which is not the terminal's foreground one, so it
+     * cannot read the line the shell is waiting for (the kernel stops it
+     * with SIGTTIN if it tries).
+     */
+    if (pl->background && g_job_control && job_pgrp != 0) {
+        struct job *j = job_add(job_pgrp, pids, pl->ncmds, pl->text);
+        if (j != NULL) {
+            job_number(j);
+            printf("[%d] %d\n", j->id, (int)job_pgrp);
+        }
+        return 0;
+    }
+    if (pl->background) {
+        /* No job control: nothing can be handed a terminal or continued,
+         * so the honest thing is to run it in the foreground rather than
+         * pretend. Scripts reach this. */
+        fprintf(stderr, "sh: no job control: running in the foreground\n");
+    }
+
     /* Hand the terminal to the job while it runs, and take it back
      * afterwards. Both may fail -- a job that has already exited is no
-     * longer a group -- and neither failure changes what happens next. */
+     * longer a group -- and neither failure changes what happens next.
+     * Taking it back is done from the background, which is a SIGTTOU;
+     * the shell ignores that signal, which is what makes it legal. */
     if (g_job_control && job_pgrp != 0)
         (void)tcsetpgrp(0, job_pgrp);
-    for (int i = 0; i < pl->ncmds; i++) {
-        if (pids[i] < 0)
-            continue;
-        int st = 0;
-        if (waitpid(pids[i], &st, 0) == pids[i] && i == pl->ncmds - 1)
-            last_status = st;
+    if (g_job_control && job_pgrp != 0) {
+        struct job *j = job_add(job_pgrp, pids, pl->ncmds, pl->text);
+        if (j != NULL) {
+            last_status = job_wait_foreground(j);
+        } else {
+            for (int i = 0; i < pl->ncmds; i++) {
+                if (pids[i] < 0)
+                    continue;
+                int st = 0;
+                if (waitpid(pids[i], &st, 0) == pids[i] && i == pl->ncmds - 1)
+                    last_status = st;
+            }
+        }
+    } else {
+        for (int i = 0; i < pl->ncmds; i++) {
+            if (pids[i] < 0)
+                continue;
+            int st = 0;
+            if (waitpid(pids[i], &st, 0) == pids[i] && i == pl->ncmds - 1)
+                last_status = st;
+        }
     }
     if (g_job_control)
         (void)tcsetpgrp(0, g_shell_pgrp);
-    if (last_status > 128 && pl->cmds[pl->ncmds - 1].nwords > 0)
+    if (last_status != JOB_STOPPED && last_status > 128 && last_status < 256 &&
+        pl->cmds[pl->ncmds - 1].nwords > 0)
         report_signal(pl->cmds[pl->ncmds - 1].words[0], last_status);
     return last_status;
 }
@@ -672,7 +818,7 @@ static int run_line(const char *line)
     int skip = 0;   /* 0: run, 1: skip until next ';', 2: skip because && failed / || succeeded */
     while (toks[pos].type != T_END) {
         struct pipeline pl;
-        if (toks[pos].type == T_SEMI) {
+        if (toks[pos].type == T_SEMI || toks[pos].type == T_AMP) {
             pos++;
             skip = 0;
             continue;
@@ -752,12 +898,205 @@ static void job_control_init(void)
      * the shell is the foreground group and still dies of a ^C. */
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
+    /* And the two the terminal sends for touching it from the
+     * background. The shell hands the terminal to each job and takes it
+     * back afterwards, and taking it back is by definition done from
+     * the background -- so a shell that did not ignore SIGTTOU would
+     * stop itself every time a job finished. SIGTSTP likewise: ^Z is for
+     * the job, not for the shell that is waiting on it. */
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
     if (tcsetpgrp(0, g_shell_pgrp) != 0) {
         signal(SIGINT, SIG_DFL);
         signal(SIGQUIT, SIG_DFL);
+        signal(SIGTTOU, SIG_DFL);
+        signal(SIGTTIN, SIG_DFL);
+        signal(SIGTSTP, SIG_DFL);
         return;
     }
     g_job_control = 1;
+}
+
+/* --- the job table ---------------------------------------------------------- */
+
+static struct job *job_find(int id)
+{
+    if (id == 0)
+        return NULL;
+    for (int i = 0; i < JOBS_MAX; i++)
+        if (g_jobs[i].used && g_jobs[i].id == id)
+            return &g_jobs[i];
+    return NULL;
+}
+
+static struct job *job_slot(void)
+{
+    for (int i = 0; i < JOBS_MAX; i++)
+        if (!g_jobs[i].used)
+            return &g_jobs[i];
+    return NULL;
+}
+
+/* A job gets its number when it outlives the foreground -- when it is
+ * put in the background, or when it stops. Numbering every pipeline
+ * would have `[9]+ Stopped` on the ninth command of the session, which
+ * is not what a job number means. */
+static void job_number(struct job *j)
+{
+    if (j->id == 0) {
+        j->id = g_next_job_id++;
+        g_current_job = j->id;
+    }
+}
+
+/* `%n`, `%%`/`%+`, or nothing: the job a `fg`/`bg` argument names. */
+static struct job *job_pick(const char *spec)
+{
+    if (spec == NULL || spec[0] == '\0' || strcmp(spec, "%%") == 0 || strcmp(spec, "%+") == 0) {
+        struct job *j = job_find(g_current_job);
+        if (j != NULL && !job_all_done(j))
+            return j;
+        for (int i = 0; i < JOBS_MAX; i++)
+            if (g_jobs[i].used && g_jobs[i].id != 0 && !job_all_done(&g_jobs[i]))
+                return &g_jobs[i];
+        return NULL;
+    }
+    if (spec[0] == '%')
+        spec++;
+    struct job *j = job_find(atoi(spec));
+    return (j != NULL && !job_all_done(j)) ? j : NULL;
+}
+
+static struct job *job_add(pid_t pgrp, const pid_t *pids, int npids, const char *text)
+{
+    struct job *j = job_slot();
+    if (j == NULL)
+        return NULL;   /* the table is full: the job still runs, it is just not tracked */
+    memset(j, 0, sizeof(*j));
+    j->used = 1;
+    j->pgrp = pgrp;
+    j->npids = npids;
+    for (int i = 0; i < npids; i++)
+        j->pids[i] = pids[i];
+    snprintf(j->text, sizeof(j->text), "%s", text);
+    return j;
+}
+
+static int job_all_done(const struct job *j)
+{
+    for (int i = 0; i < j->npids; i++)
+        if (j->pids[i] > 0 && !j->done[i])
+            return 0;
+    return 1;
+}
+
+/* Fold one waitpid result into whichever job owns the pid. Returns the
+ * job, or NULL when the pid belongs to none of them. */
+static struct job *job_note(pid_t pid, int status)
+{
+    for (int i = 0; i < JOBS_MAX; i++) {
+        struct job *j = &g_jobs[i];
+        if (!j->used)
+            continue;
+        for (int k = 0; k < j->npids; k++) {
+            if (j->pids[k] != pid)
+                continue;
+            if (WIFSTOPPED(status)) {
+                j->stopped = 1;
+                j->reported = 0;
+                job_number(j);   /* it has outlived the foreground */
+            } else if (WIFCONTINUED(status)) {
+                j->stopped = 0;
+                j->reported = 0;
+                for (int m = 0; m < j->npids; m++)
+                    j->parked[m] = 0;
+            } else {
+                j->done[k] = 1;
+                j->stopped = 0;
+                if (k == j->npids - 1)
+                    j->last_status = status;
+            }
+            return j;
+        }
+    }
+    return NULL;
+}
+
+static void job_print(const struct job *j, const char *state)
+{
+    printf("[%d]%s  %-24s %s\n", j->id, j->id == g_current_job ? "+" : " ", state, j->text);
+}
+
+/* Collect what happened to background jobs without blocking, and say so.
+ * Called before each prompt, which is where a shell reports these. */
+static void jobs_poll(int announce)
+{
+    for (;;) {
+        int st = 0;
+        pid_t pid = waitpid(-1, &st, WNOHANG | WUNTRACED | WCONTINUED);
+        if (pid <= 0)
+            break;
+        struct job *j = job_note(pid, st);
+        if (j == NULL || !announce)
+            continue;
+        if (j->stopped && !j->reported) {
+            job_print(j, "Stopped");
+            j->reported = 1;
+        } else if (job_all_done(j) && j->id != 0) {
+            job_print(j, j->last_status == 0 ? "Done" : "Exit");
+            j->used = 0;
+        } else if (job_all_done(j)) {
+            j->used = 0;   /* a foreground job nobody was told about */
+        }
+    }
+}
+
+/*
+ * Wait for one job in the foreground: the terminal is already its.
+ *
+ * A ^Z stops the whole group, so every live stage has a stop to report
+ * and this waits for all of them before returning. Returning on the
+ * first would hand the terminal back to the shell while the other
+ * stages were still on their way to parking, and they would write over
+ * the prompt.
+ */
+static int job_wait_foreground(struct job *j)
+{
+    int status = 0;
+    int any_stopped = 0;
+    for (;;) {
+        int alive = 0;
+        for (int i = 0; i < j->npids; i++) {
+            if (j->pids[i] <= 0 || j->done[i] || j->parked[i])
+                continue;
+            alive = 1;
+            int st = 0;
+            pid_t got = waitpid(j->pids[i], &st, WUNTRACED);
+            if (got != j->pids[i])
+                break;
+            if (WIFSTOPPED(st)) {
+                j->parked[i] = 1;
+                any_stopped = 1;
+                continue;   /* the rest of the group is stopping too */
+            }
+            j->done[i] = 1;
+            if (i == j->npids - 1)
+                status = st;
+        }
+        if (!alive)
+            break;
+    }
+    if (any_stopped) {
+        j->stopped = 1;
+        j->reported = 1;
+        job_number(j);
+        job_print(j, "Stopped");
+        return JOB_STOPPED;
+    }
+    j->last_status = status;
+    j->used = 0;   /* finished in the foreground: nothing to remember */
+    return status;
 }
 
 /* What to say about a job that did not exit on its own. The terminal has
@@ -785,6 +1124,7 @@ static void interactive(void)
 {
     char line[LINE_MAX_];
     for (;;) {
+        jobs_poll(1);   /* what background jobs did while we were away */
         fflush(stdout);
         write(2, "cosmo$ ", 7);
         ssize_t n = read(0, line, sizeof(line) - 1);

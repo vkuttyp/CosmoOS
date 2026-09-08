@@ -1094,7 +1094,14 @@ static int64_t lx_wait4(struct syscall_args *a)
         return -ECHILD;
     pid_t got = 0;
     int status = 0;
-    int rc = process_wait_child(pid, (options & LX_WNOHANG) ? PROCESS_WAIT_NOHANG : 0, &got, &status);
+    unsigned wf = 0;
+    if (options & LX_WNOHANG)
+        wf |= PROCESS_WAIT_NOHANG;
+    if (options & LX_WUNTRACED)
+        wf |= PROCESS_WAIT_UNTRACED;
+    if (options & LX_WCONTINUED)
+        wf |= PROCESS_WAIT_CONTINUED;
+    int rc = process_wait_child(pid, wf, &got, &status);
     if (rc)
         return rc;
     if (got != 0 && a->a[1] != 0) {
