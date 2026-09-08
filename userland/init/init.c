@@ -1876,15 +1876,21 @@ static int probe_signal_group(void)
  */
 static int probe_signal_setsid_child(void)
 {
+    /* Inheritance is checked from this side, not the parent's: the
+     * parent cannot look at this group without racing the setsid below,
+     * and on a fast enough machine it loses -- which is how this test
+     * first failed, on one architecture's CI and not the other's. */
+    if (getpgid(0) != getpgid(getppid()))
+        return 20;   /* a child starts in its parent's group */
     if (getpgid(0) == getpid())
-        return 20;   /* not inherited after all: the probe would prove nothing */
+        return 21;   /* and does not lead it, or the checks below prove nothing */
     pid_t was = getsid(0);
     if (setsid() != getpid())
-        return 21;
-    if (getsid(0) != getpid() || getpgid(0) != getpid() || getsid(0) == was)
         return 22;
-    if (setsid() != -1 || errno != EPERM)
+    if (getsid(0) != getpid() || getpgid(0) != getpid() || getsid(0) == was)
         return 23;
+    if (setsid() != -1 || errno != EPERM)
+        return 24;
     return 0;
 }
 
@@ -1894,11 +1900,9 @@ static int probe_signal_setsid(void)
     pid_t child = spawnve("/boot/init", argv, NULL, NULL, 0);
     if (child <= 0)
         return 3;
-    if (getpgid(child) != getpgid(0))
-        return 4;   /* a child starts in its parent's group */
     int st = -1;
     if (waitpid(child, &st, 0) != child)
-        return 5;
+        return 4;
     return st == 0 ? 0 : st;
 }
 
@@ -1910,6 +1914,24 @@ static int probe_signal_tty(void)
     if (tcsetpgrp(0, getpgrp()) != 0)
         return 3;
     if (tcgetpgrp(0) != getpgrp())
+        return 4;
+    for (int i = 0; i < 500; i++)
+        usleep(20000);
+    return 5;
+}
+
+/*
+ * The same, with SIGINT caught and SIGQUIT left fatal. The kernel side
+ * types `^\` and `^C` as one batch: both must arrive, so this process
+ * must die of the quit. A tty that sent only the last signal of a batch
+ * would deliver the interrupt alone, the handler would run, and this
+ * would sit here until its own deadline.
+ */
+static int probe_signal_tty_quit(void)
+{
+    if (install(SIGINT, 0) != 0)
+        return 3;
+    if (tcsetpgrp(0, getpgrp()) != 0)
         return 4;
     for (int i = 0; i < 500; i++)
         usleep(20000);
@@ -1950,6 +1972,8 @@ static int signal_probe(const char *kind)
         return probe_signal_tty();
     if (strcmp(kind, "signal-tty-steal") == 0)
         return probe_signal_tty_steal();
+    if (strcmp(kind, "signal-tty-quit") == 0)
+        return probe_signal_tty_quit();
     return 2;
 }
 

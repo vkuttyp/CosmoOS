@@ -219,15 +219,23 @@ number: the program that knows the detail is gone by then).
   to join (`-EPERM`), a session leader trying to change group
   (`-EPERM`), and a child moved into a group of its own.
 - **`signal-setsid`** -- run in a child, because the process the kernel
-  starts for a probe already leads its own group: `setsid` succeeds
-  once, changes both ids, and is `-EPERM` the second time.
-- **`tty-intr`** -- driven from both ends. A user process claims the
+  starts for a probe already leads its own group: the child sees its
+  parent's group, `setsid` succeeds once, changes both ids, and is
+  `-EPERM` the second time. Inheritance is checked *from the child*
+  (`getpgid(0) == getpgid(getppid())`) rather than by the parent looking
+  at the child, which races the child's own `setsid` -- and lost, on one
+  architecture's CI runner and not the other's.
+- **`tty-intr`** -- two phases, driven from both ends. A user process claims the
   console and waits; the test polls `tty_foreground_pgrp` until it is
   the child's group, runs a second process from another session which
   must be refused both `tcsetpgrp` (`-EPERM`) and `tcgetpgrp`
   (`-ENOTTY`), types `abc` and then `^C`, and requires the child to exit
   130 with no line committed (the partial line is thrown away) and the
-  terminal released once its session leader is gone.
+  terminal released once its session leader is gone. The second phase
+  writes `^\` and `^C` as one batch at a process that catches the
+  interrupt and leaves the quit fatal: it must die of the quit, which a
+  line discipline that kept only the last signal of a batch would not
+  manage.
 
 The interactive boot test (`tests/boot/shelltest.py`) covers the same
 path end to end: it runs `sleep 5`, waits half a second, sends a bare

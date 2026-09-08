@@ -394,6 +394,32 @@ bool selftest_tty_intr(const char **reason)
     CHECK(after.lines_in == before.lines_in);
     /* The leader is gone, so the terminal is nobody's again. */
     CHECK(tty_foreground_pgrp(t) == 0);
+
+    /*
+     * Every signal a batch carries, not just its last. One process with
+     * SIGINT caught and SIGQUIT left fatal, and one write of `^\` then
+     * `^C`: it must die of the quit. A line discipline that remembered
+     * only the last signal of a batch would send the interrupt alone,
+     * the handler would run, and the process would still be here.
+     */
+    static const char *const quit[] = { "init", "--probe", "signal-tty-quit", NULL };
+    struct process *b = NULL;
+    CHECK(process_create_from_elf(image, image_size, quit[0], quit, NULL, NULL, &b) == 0);
+    pid_t bpid = b->pid;
+    deadline = clock_now_ns() + 5000000000ULL;
+    while (tty_foreground_pgrp(t) != bpid && clock_now_ns() < deadline)
+        sched_yield();
+    if (tty_foreground_pgrp(t) != bpid) {
+        process_put(b);
+        *reason = "the terminal was never claimed by the second probe";
+        return false;
+    }
+    static const uint8_t batch[2] = { 0x1c, 0x03 };   /* ^\ then ^C, one write */
+    tty_input(t, batch, sizeof(batch));
+    int bstatus = process_wait_exit(b);
+    process_put(b);
+    CHECK(bstatus == 128 + SIGQUIT);
+    CHECK(tty_foreground_pgrp(t) == 0);
     return true;
 }
 

@@ -63,6 +63,13 @@ partial line is discarded -- checked through `lines_in`, because the
 console may already hold input the harness typed), and the terminal to
 be released once its session leader is gone.
 
+A second phase then checks that a batch delivers every signal it
+carries: one process with `SIGINT` caught and `SIGQUIT` left fatal, and
+one `tty_input` of `^\` followed by `^C`, which must end it with 131. A
+line discipline that remembered only the last signal of a batch would
+send the interrupt alone, the handler would run, and the process would
+still be there.
+
 ## Bring-up findings
 
 - `irq_request` registers and routes a legacy IRQ but leaves it masked;

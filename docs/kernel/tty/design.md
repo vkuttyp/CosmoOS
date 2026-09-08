@@ -64,10 +64,16 @@ Under `tty->lock` for each byte `c`:
 
 The signal is sent **after** `tty->lock` is released: sending walks the
 process table and wakes threads, and this loop runs in interrupt
-context, so nothing that long belongs under the lock. The byte loop
-records the signal and the group, and one call at the end delivers it.
-That also keeps the lock order simple -- `tty.lock` is never held while
-the process table's lock is taken.
+context, so nothing that long belongs under the lock. That also keeps
+the lock order simple -- `tty.lock` is never held while the process
+table's lock is taken.
+
+So the byte loop is `feed_locked`, which stops at the first byte that
+raises a signal and tells `tty_input` what to send; `tty_input` sends it
+with the lock dropped and comes straight back for the rest. The
+alternative -- one pass recording "the signal to send" -- loses every
+signal in a batch but the last, and `tty_input` takes a batch: one write
+of `^\` then `^C` has to deliver both, in that order.
 
 Echo happens through `console_write`, which takes its own IRQ-safe lock
 and only polls the UART; it is called with `tty->lock` held. Lock order

@@ -107,12 +107,16 @@ static int signal_char(uint8_t c)
     }
 }
 
-void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
+/*
+ * The bytes up to and including the first one that raises a signal, or
+ * all of them when none does. Lock held; returns how many were eaten
+ * and, through `sig`/`pgid`, what the caller must send once it has let
+ * the lock go. Stopping at the first signal is what keeps a batch
+ * holding two of them from collapsing into one: `tty_input` comes
+ * straight back for the rest.
+ */
+static size_t feed_locked(struct tty *t, const uint8_t *bytes, size_t n, int *sig, pid_t *pgid)
 {
-    int send_sig = 0;
-    pid_t send_pgid = 0;
-    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
-    t->stats.rx_bytes += n;
     for (size_t i = 0; i < n; i++) {
         uint8_t c = bytes[i];
         if (c == '\r' && (t->flags & TTY_ICRNL))
@@ -140,8 +144,10 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
             echo(t, ctrl, 2);
             echo(t, "\n", 1);
             t->line_len = 0;
-            send_sig = signal_char(c);
-            send_pgid = t->fg_pgid;
+            *sig = signal_char(c);
+            *pgid = t->fg_pgid;
+            t->stats.rx_bytes += i + 1;
+            return i + 1;
         } else if ((c >= 0x20 && c < 0x7f) || c == '\t') {
             if (t->line_len < TTY_LINE_MAX - 1) {
                 t->line[t->line_len++] = c;
@@ -153,9 +159,25 @@ void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
         }
         /* other control bytes are dropped */
     }
-    spin_unlock_irqrestore(&t->lock, s);
-    if (send_sig != 0)
-        tty_signal_group(send_pgid, send_sig);
+    t->stats.rx_bytes += n;
+    return n;
+}
+
+void tty_input(struct tty *t, const uint8_t *bytes, size_t n)
+{
+    size_t off = 0;
+    while (off < n) {
+        int sig = 0;
+        pid_t pgid = 0;
+        arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+        off += feed_locked(t, bytes + off, n - off, &sig, &pgid);
+        spin_unlock_irqrestore(&t->lock, s);
+        /* Outside the lock: sending walks the process table and wakes
+         * threads, and this runs in interrupt context, so nothing that
+         * long belongs under a lock the whole line discipline shares. */
+        if (sig != 0)
+            tty_signal_group(pgid, sig);
+    }
 }
 
 /*
