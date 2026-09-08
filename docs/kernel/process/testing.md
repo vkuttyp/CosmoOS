@@ -179,6 +179,16 @@ default-ignore signal such as `SIGCHLD` no longer terminates). The
 Linux-side coverage of threads, signals, frames and the return guards is
 in `docs/compat/linux/testing.md` (`lxtest`, `lxsig`, `lxdyn`).
 
+### `process-reaped`
+
+Creates a process from the boot archive, checks `process_lookup` finds
+it, waits for it to exit -- it has no parent, so exiting reaps it --
+and requires `process_lookup` to return NULL while the test is still
+holding the creation reference, so the object is provably still in the
+table. The user-mode form of this check (`kill(pid, 0)` right after
+`waitpid`, in `init --selftest`) samples the same window but races the
+reaper; this one does not.
+
 ### The native signal ABI, sessions and the terminal
 
 Seven self-tests, each a user program the kernel runs and whose exit

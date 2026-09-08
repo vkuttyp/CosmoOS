@@ -497,6 +497,7 @@ static const struct selftest tests[] = {
     { "signal-async",    selftest_signal_async },
     { "signal-mask",     selftest_signal_mask },
     { "signal-fault",    selftest_signal_fault },
+    { "process-reaped",  selftest_process_reaped },
     { "signal-group",    selftest_signal_group },
     { "signal-setsid",   selftest_signal_setsid },
     { "tty-intr",        selftest_tty_intr },

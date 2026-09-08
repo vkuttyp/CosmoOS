@@ -79,9 +79,12 @@ before anything else is done.
 
 ## Gaps (documented, not invariants)
 
-- No floating point, `<math.h>`, locales, wide characters or a wall
-  clock (`clock_gettime` is monotonic only).
-- No `fork`, `exec*`, `system`, `popen`, `signal`, `sigaction`,
-  `setjmp`, `termios`, `getpwnam`, dynamic linking.
+- No `<math.h>`, locales, wide characters or a wall clock
+  (`clock_gettime` is monotonic only). `printf` does format doubles
+  (`%f`, `%e`, `%g`) since the FP/SIMD unit; this line said "no floating
+  point" until the job-control report swept it.
+- No `fork`, `exec*`, `system`, `popen`, `setjmp`, `termios`,
+  `getpwnam`, dynamic linking. (`signal` and `sigaction` arrived with
+  the signals unit; this line was not swept then.)
 - `sockaddr_in`/`sockaddr_in6` do not exist; the native address shape is
   the only one.

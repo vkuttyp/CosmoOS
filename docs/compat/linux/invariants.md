@@ -215,6 +215,10 @@ kernel's `unistd.h` tables.
 
 ## Gaps (documented, not invariants)
 
+- `wait4` does not wait for a process group: `pid` 0 or a negative
+  pgid is `-ECHILD`. Process groups exist (the signals unit) and
+  `kill(-pgid)` uses them, so this is a gap in `wait4` rather than in
+  the kernel.
 - No `fork`, `execve`, `select`/`epoll`, `sendmsg`/`recvmsg`, shared
   file mappings, real-time signal queues, job control.
 - `dirfd` arguments other than `AT_FDCWD` are refused (`-ENOSYS`)

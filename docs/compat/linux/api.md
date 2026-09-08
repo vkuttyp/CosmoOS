@@ -209,13 +209,13 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 110 | `getppid` | `parent_pid` | |
 | 102, 107 | `getuid`, `geteuid` | `cred.uid` | |
 | 104, 108 | `getgid`, `getegid` | `cred.gid` | |
-| 111, 112 | `getpgrp`, `setsid` | return `pid` | no process groups or sessions |
-| 109 | `setpgid` | 0 | |
+| 111, 112 | `getpgrp`, `setsid` | `process_getpgid(0)`; `process_setsid` -- the caller leads a new session and group, both named by its pid, and has no controlling terminal | `setsid` from a process that already leads a group `-EPERM` |
+| 109, 121, 124 | `setpgid`, `getpgid`, `getsid` | `process_setpgid` / `process_getpgid` / `process_getsid`; `pid` 0 is the caller and `pgid` 0 is `pid` | `setpgid` on anything but the caller or a child of it `-ESRCH`; another session, a session leader, or a group with no member in this session `-EPERM` |
 | 218 | `set_tid_address` | stores `thread->clear_child_tid`, returns the thread's tid | zeroed and `futex_wake`d (one waiter) when the thread exits (`linux_thread_exit`) |
 | 273 | `set_robust_list` | 0 | |
 | 158 | `arch_prctl` | `ARCH_SET_FS` (0x1002): `arch_set_tls_base(addr)`; `ARCH_GET_FS` (0x1003): copies `thread->tls_base` out | `SET_FS` with a non-zero address that is not 8 readable user bytes `-EPERM`; `ARCH_SET_GS`/`ARCH_GET_GS` and anything else `-EINVAL` |
-| 61 | `wait4` | `process_wait_child(pid, WNOHANG ? PROCESS_WAIT_NOHANG : 0)`; status through `lx_wait_status`; `rusage` zeroed (144 bytes) when given | `pid == 0` or `pid < -1` `-ECHILD` (no groups); `-ECHILD` with no children |
-| 62 | `kill` | `sig == 0`: existence and permission probe; else `signal_send(target, sig, SI_USER)` after `cred_may_signal` | `pid <= 0` `-ESRCH` (no groups); `sig` outside `1..63` `-EINVAL`; another uid's process `-EPERM` unless uid 0; a default-terminate signal ends the target with native status `128 + sig`, a handled one runs the handler, an ignored one is dropped |
+| 61 | `wait4` | `process_wait_child(pid, WNOHANG ? PROCESS_WAIT_NOHANG : 0)`; status through `lx_wait_status`; `rusage` zeroed (144 bytes) when given | `pid == 0` or `pid < -1` `-ECHILD`: waiting for a process *group* is not built, though groups themselves are (a recorded gap, not a missing kernel feature); `-ECHILD` with no children |
+| 62 | `kill` | `sig == 0`: existence and permission probe; else `signal_send(target, sig, SI_USER)` after `cred_may_signal`. `pid < -1` names a process group and `pid == 0` the caller's own; the group form succeeds if the signal reached anyone | `pid == -1` (every process) `-EINVAL`; `sig` outside `1..63` `-EINVAL`; another uid's process `-EPERM` unless uid 0; a group nobody in it may be signalled `-EPERM`, an empty one `-ESRCH`; a default-terminate signal ends the target with native status `128 + sig`, a handled one runs the handler, an ignored one is dropped |
 | 234 | `tgkill` | the thread of process `tgid` with that tid (`process_find_thread`): `signal_send_thread(SI_TKILL)` | `tgid`/`tid` ≤ 0 `-EINVAL`; unknown `-ESRCH`; `-EPERM` as `kill` |
 | 200 | `tkill` | the caller's own thread by tid, or another process's main thread by pid | as `tgkill` |
 | 13 | `rt_sigaction` | `signal_set_action`/`signal_get_action` on the shared 64-entry `struct sigaction_k` table (`handler flags restorer mask`) | `sigsetsize` must be 8; `sig` in `1..63`; a non-NULL `act` for `SIGKILL`/`SIGSTOP` `-EINVAL`; delivery: `design.md` "Signals" |

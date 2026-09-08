@@ -154,8 +154,10 @@ which the Linux `wait4` encodes as "terminated by signal `sig`".
 ### Processes and identity
 
 `getpid`, `getppid`, `gettid` (= pid), `getuid`, `geteuid`, `getgid`,
-`getegid` (credentials), `getpgrp`/`getpgid`/`setpgid`/`setsid` (pid or
-0: no groups), `exit`, `exit_group` (identical: one thread),
+`getegid` (credentials), `getpgrp`/`getpgid`/`setpgid`/`setsid`/`getsid`
+(the kernel's own, since the signals unit gave it process groups and
+sessions; they were stubs answering the pid or 0 before that),
+`exit`, `exit_group` (identical: one thread),
 `set_tid_address` (stores, returns pid), `set_robust_list` (0),
 `wait4(pid, status, options, rusage)` → `process_wait_child` with
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`

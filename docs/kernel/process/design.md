@@ -444,7 +444,9 @@ a fatal fault gives 139 (`COSMO_EXIT_FAULT`, as before), a kill gives
 
 ```text
 sys_kill(pid, sig):
-  1 ≤ sig ≤ 31 else -EINVAL; pid ≤ 0 → -EINVAL (no groups); target = process_lookup(pid) else -ESRCH
+  1 ≤ sig ≤ 31 else -EINVAL; pid == -1 → -EINVAL (every process: nothing wants it)
+  pid ≤ 0 → the process group -pid, or the caller's own when 0 (see "Sessions and process groups")
+  target = process_lookup(pid) else -ESRCH   (a reaped pid is not found)
   permission: cred_may_signal(&cur->cred, &target->cred) else -EPERM
               (privileged, or the sender's real/effective uid equals the target's real/saved uid)
   process_kill(target, sig)
@@ -673,9 +675,12 @@ gettid()` holds in the main thread as programs assume.
 
 ### The signal core (`kernel/process/signal.c`)
 
-POSIX signals as a kernel service that both personalities share; the
-native ABI keeps its behaviour (no handlers, `kill` terminates) as the
-special case in which every action is the default.
+POSIX signals as a kernel service that both personalities share. It was
+written with the native ABI as the special case in which every action is
+the default -- no handlers, `kill` terminates -- and the signals unit
+gave that ABI a frame builder of its own, so the special case is now
+just "no handler installed" rather than "no handlers possible"
+(see "The native signal ABI" below).
 
 ```c
 struct sigaction_k { uint64_t handler, flags, restorer, mask; };   /* per process, 64 entries, under p->lock */
