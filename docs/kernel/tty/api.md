@@ -102,7 +102,11 @@ The modes a program sees and sets (`COSMO_TTY_ECHO`, `ICRNL`, `ICANON`,
 `ISIG`, plus `vmin`/`vtime`). Setting them **drops whatever input is
 queued when the canonical bit changes**: the ring holds records in one
 mode and bare bytes in the other, and a reader must not be handed a
-mixture. Any context; takes `tty->lock`.
+mixture. It also **wakes every blocked reader**, because a reader that
+arrived under the old modes may have nothing left to wait for: `VMIN` 0
+means "answer with whatever is there, including nothing", and a thread
+asleep on the old promise would never hear that it was withdrawn. Any
+context; takes `tty->lock`.
 
 ### `void tty_get_size(struct tty *t, struct cosmo_ttysize *out)`
 The terminal's size in characters, from the framebuffer console's

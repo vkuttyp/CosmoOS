@@ -117,6 +117,15 @@ character-device type.** `isatty` asks the terminal layer, so
 `/dev/vmm` -- a character device -- is not one. It was, until this unit.
 Check: `tty-isatty`.
 
+**T14. A mode change never strands a reader.** A thread already blocked
+in `tty_read` arrived under the old modes; `tcsetattr` wakes every
+reader so each re-reads them. This matters for `VMIN` 0, which withdraws
+the promise the sleeping thread is waiting on -- "answer with whatever
+is there, including nothing" cannot be honoured by a thread that is
+still asleep. Check: `tty-ldisc`, where a reader blocked under `VMIN` 1
+is released, returning 0, by a `tcsetattr` that sets `VMIN` 0 and
+nothing else.
+
 ## Gaps (documented, not invariants)
 
 - **The raw *read* branch is not distinguishable by any test here.**
@@ -130,7 +139,12 @@ Check: `tty-isatty`.
   (The raw *input* branch is decisively proved: without it the boot
   hangs.)
 - `VTIME` is accepted and not implemented: there is no timed read, so a
-  `VMIN`/`VTIME` combination asking for one behaves as `VMIN` alone.
+  `VMIN`/`VTIME` combination asking for one behaves as `VMIN` alone. The
+  visible cost is in the shell: with no way to wait a moment for the
+  rest of an escape sequence and give up, `Escape` alone blocks the line
+  editor until the next key is pressed. That key is then handled as a
+  keystroke rather than swallowed, so nothing is lost -- but the pause
+  is real, and only `VTIME` removes it.
 - No output processing beyond the serial sink's `\n` to `\r\n`: no
   `OPOST` to turn off, and the Linux translation reports it always on.
 - The control characters are fixed: `^C`, `^\`, `^Z`, `^U`, `^W` and

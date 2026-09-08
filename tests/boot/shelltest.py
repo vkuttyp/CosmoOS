@@ -74,6 +74,10 @@ COMMANDS = [
     # backspaces remove "XY" and the left arrows put "ok" before "-2".
     ("echo edit-okXY\x7f\x7f", [r"^edit-ok$"]),
     ("echo edit\x1b[D\x1b[D\x1b[D\x1b[D-2", [r"^-2edit$"]),
+    # Escape that is not the start of a sequence: the byte after it is a
+    # keystroke, not part of an escape the shell swallows. Without this
+    # the `k` disappears and the line reads "esc-o".
+    ("echo esc-o\x1bk", [r"^esc-ok$"]),
     ("echo after-pipeline-ok", [r"^after-pipeline-ok$",
                                 r"'sleep' exited with status 130",
                                 r"'cat' exited with status 130"]),

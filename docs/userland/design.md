@@ -189,8 +189,15 @@ Left and right arrows move the cursor, up and down walk a
 thirty-two-entry history, `^W` erases a word, `^U` the line, `^A`/`^E`
 jump to its ends, and `^C` abandons it and prompts again.
 
-Two details are load-bearing:
+Three details are load-bearing:
 
+- **An `Escape` that is not the start of a sequence gives its next byte
+  back.** The reads that look for `[` and the final letter block, since
+  this terminal has no `VTIME` to wait a moment on; so `Escape` alone
+  waits for the next key. That key is then handled as an ordinary
+  keystroke rather than discarded -- `Escape` then `x` leaves an `x` on
+  the line. Discarding it was the first version, and it silently ate the
+  character after every stray `Escape`.
 - **Typing at the end of the line echoes one character; only an edit
   that moves text about redraws.** A redraw is a carriage return, the
   prompt and the line, so redrawing on every keystroke would print a

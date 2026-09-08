@@ -417,7 +417,7 @@ bool selftest_signal_stop_restart(const char **reason)
         fg = tty_foreground_pgrp(t);
         if (fg != 0 && fg != pid)
             break;
-        sched_yield();
+        thread_sleep_ms(1);   /* sleep, not yield: the probe needs the CPU */
     }
     if (fg == 0 || fg == pid) {
         process_put(p);
@@ -472,7 +472,7 @@ bool selftest_tty_stop(const char **reason)
         fg = tty_foreground_pgrp(t);
         if (fg != 0 && fg != pid)
             break;
-        sched_yield();
+        thread_sleep_ms(1);   /* sleep, not yield: the probe needs the CPU */
     }
     if (fg == 0 || fg == pid) {
         process_put(p);
@@ -532,28 +532,39 @@ static bool run_tty_probe(const char *kind, const uint8_t *type, size_t n, const
     struct process *p = NULL;
     CHECK(process_create_from_elf(image, image_size, argv[0], argv, NULL, NULL, &p) == 0);
     pid_t pid = p->pid;
-    uint64_t deadline = clock_now_ns() + 5000000000ULL;
-    while (tty_foreground_pgrp(t) != pid && clock_now_ns() < deadline)
-        sched_yield();
-    if (tty_foreground_pgrp(t) != pid) {
-        process_put(p);
-        *reason = "the probe never claimed the terminal";
-        return false;
-    }
     /*
-     * Wait for the mode, not for a handshake: a byte typed while the
-     * line discipline is still canonical would be edited rather than
-     * delivered, and the probe has no handle to say "ready" on. The
-     * terminal's own state is the readiness signal.
+     * Only a probe that must be typed at is waited for. A probe with
+     * nothing to type claims the terminal, does its work and exits, and
+     * releasing the terminal on the way out sets the foreground group
+     * back to 0 -- so watching for the claim is watching for a window
+     * that closes on its own, and a test that lost the race called a
+     * probe that had already passed a failure. What that probe proves,
+     * it proves by its exit status.
      */
     if (n) {
+        uint64_t deadline = clock_now_ns() + 5000000000ULL;
+        while (tty_foreground_pgrp(t) != pid && clock_now_ns() < deadline)
+            thread_sleep_ms(1);   /* sleep, not yield: the probe needs the CPU */
+        if (tty_foreground_pgrp(t) != pid) {
+            process_put(p);
+            *reason = "the probe never claimed the terminal";
+            return false;
+        }
+        /*
+         * Then wait for the mode, not for a handshake: a byte typed
+         * while the line discipline is still canonical would be edited
+         * rather than delivered, and the probe has no handle to say
+         * "ready" on. The terminal's own state is the readiness signal.
+         * This window does not close on its own -- the probe is blocked
+         * in the read that is waiting for the byte.
+         */
         deadline = clock_now_ns() + 5000000000ULL;
         struct cosmo_termios tio;
         for (;;) {
             tty_get_termios(t, &tio);
             if (!(tio.modes & COSMO_TTY_ICANON) || clock_now_ns() >= deadline)
                 break;
-            sched_yield();
+            thread_sleep_ms(1);
         }
         if (tio.modes & COSMO_TTY_ICANON) {
             process_put(p);
@@ -617,7 +628,7 @@ bool selftest_tty_intr(const char **reason)
 
     uint64_t deadline = clock_now_ns() + 5000000000ULL;
     while (tty_foreground_pgrp(t) != pid && clock_now_ns() < deadline)
-        sched_yield();
+        thread_sleep_ms(1);   /* sleep, not yield: the probe needs the CPU */
     if (tty_foreground_pgrp(t) != pid) {
         process_put(p);
         *reason = "the terminal was never claimed";
@@ -667,7 +678,7 @@ bool selftest_tty_intr(const char **reason)
     pid_t bpid = b->pid;
     deadline = clock_now_ns() + 5000000000ULL;
     while (tty_foreground_pgrp(t) != bpid && clock_now_ns() < deadline)
-        sched_yield();
+        thread_sleep_ms(1);
     if (tty_foreground_pgrp(t) != bpid) {
         process_put(b);
         *reason = "the terminal was never claimed by the second probe";

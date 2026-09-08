@@ -115,6 +115,32 @@ bool selftest_tty_ldisc(const char **reason)
     CHECK(r.done && r.got == 5 && memcmp(r.buf, "wake\n", 5) == 0);
     thread_join(th);
 
+    /*
+     * A blocked reader is released by a mode change. It is waiting for a
+     * byte under `VMIN` 1; `VMIN` 0 withdraws that promise -- the read
+     * must answer with nothing rather than sleep on a contract the
+     * terminal no longer offers.
+     */
+    struct cosmo_termios tio;
+    tty_get_termios(&t, &tio);
+    tio.modes &= ~(uint32_t)COSMO_TTY_ICANON;
+    tio.vmin = 1;
+    tty_set_termios(&t, &tio);
+    struct reader r2 = { .tty = &t };
+    struct thread *th2 = thread_create(reader_thread, &r2, "tty-vmin", 32);
+    CHECK(th2 != NULL);
+    thread_sleep_ms(20);
+    CHECK(!r2.done);   /* VMIN 1 with an empty ring: it waits */
+    tio.vmin = 0;
+    tty_set_termios(&t, &tio);
+    for (unsigned i = 0; i < 100 && !r2.done; i++)
+        thread_sleep_ms(10);
+    CHECK(r2.done && r2.got == 0);
+    thread_join(th2);
+    tio.modes |= COSMO_TTY_ICANON;   /* and back, for what follows */
+    tio.vmin = 1;
+    tty_set_termios(&t, &tio);
+
     /* Zero-length read never blocks. */
     CHECK(tty_read(&t, buf, 0) == 0);
     tty_get_stats(&t, &st);

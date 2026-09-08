@@ -1229,10 +1229,20 @@ static ssize_t read_line(char *buf, size_t cap)
     buf[0] = '\0';
     (void)write(2, "cosmo$ ", 7);
     ssize_t result = -1;
+    /*
+     * A byte read while looking for an escape sequence that turned out
+     * not to be one. It is a keystroke like any other and is handled as
+     * one on the next turn rather than dropped -- Escape followed by `x`
+     * must leave an `x` on the line, not nothing.
+     */
+    char pending = 0;
+    int have_pending = 0;
     for (;;) {
         char c;
-        ssize_t n = read(0, &c, 1);
-        if (n != 1) {
+        if (have_pending) {
+            c = pending;
+            have_pending = 0;
+        } else if (read(0, &c, 1) != 1) {
             result = -1;
             break;
         }
@@ -1299,9 +1309,27 @@ static ssize_t read_line(char *buf, size_t cap)
             continue;
         }
         if (c == 27) {   /* an escape sequence: CSI and one letter */
+            /*
+             * These reads block: this terminal has no VTIME, so there is
+             * no way to wait a moment for the rest of a sequence and
+             * give up. Escape alone therefore waits for the next key,
+             * which is recorded as a gap rather than solved -- but the
+             * key it waits for is not eaten.
+             */
             char b1, b2;
-            if (read(0, &b1, 1) != 1 || b1 != '[' || read(0, &b2, 1) != 1)
+            if (read(0, &b1, 1) != 1) {
+                result = -1;
+                break;
+            }
+            if (b1 != '[') {
+                pending = b1;
+                have_pending = 1;
                 continue;
+            }
+            if (read(0, &b2, 1) != 1) {
+                result = -1;
+                break;
+            }
             size_t was = len;
             if (b2 == 'D' && pos > 0) {
                 pos--;

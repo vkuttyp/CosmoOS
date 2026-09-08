@@ -32,6 +32,7 @@ after the network tests and before `ipc-pipe` and the process tests.
 | 1100 `a` then `\n` | `dropped_bytes` = 77; the read returns 1024 bytes ending in `\n` |
 | 100 lines of 99 `a` + `\n` | `dropped_lines > 0`, `lines == 40`; 40 reads of 100 bytes drain the ring (`used == 0`) |
 | a reader thread with nothing queued, then `wake\n` after 20 ms | the thread was still blocked, then returned `wake\n` |
+| a reader thread blocked non-canonically under `VMIN` 1, then a `tcsetattr` setting `VMIN` 0 | the thread was still blocked, then returned 0 -- a mode change releases a reader it no longer promises anything to |
 | `tty_read(t, buf, 0)` | 0 without blocking |
 | final statistics | `eofs == 1`, `lines_in > 0` |
 
@@ -79,6 +80,17 @@ typing. A byte typed while the line discipline was still canonical would
 be edited rather than delivered, and a kernel-created probe has no spare
 handle to say "ready" on -- the terminal's own state is the readiness
 signal, which is both simpler and impossible to get out of step.
+
+**Only a probe that is typed at is waited for.** A probe with nothing to
+type claims the terminal, does its work and exits, and releasing the
+terminal on the way out puts the foreground group back to 0: watching
+for the claim is watching a window that closes on its own, and a run
+that sampled a moment late called a probe that had already passed a
+failure. `dev-tty` did exactly that once, on `nic-virtio aarch64`, with
+its own probe logged as exiting 0 two lines above. What such a probe
+proves, it proves by its exit status. Where a wait is needed the loop
+**sleeps rather than yields**, because the thing it is waiting for is a
+process that needs the CPU to get there.
 
 - **`tty-raw`** -- a terminal starts cooked; `cfmakeraw` turns echo,
   canonical mode and signals off and reads back as it was set; one byte

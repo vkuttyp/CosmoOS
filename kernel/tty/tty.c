@@ -341,6 +341,12 @@ void tty_set_termios(struct tty *t, const struct cosmo_termios *in)
         t->head = t->tail = t->used = t->lines = 0;
         t->line_len = 0;
     }
+    /* A reader already blocked was told to wait for a line under the old
+     * modes; under the new ones it may have nothing left to wait for --
+     * `VMIN` 0 means "answer with whatever is there, including nothing".
+     * Waking it makes it re-read the modes rather than sleep on a
+     * promise that has been withdrawn. */
+    waitqueue_wake_all(&t->readers);
     spin_unlock_irqrestore(&t->lock, s);
 }
 
@@ -454,7 +460,12 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         spin_unlock_irqrestore(&t->lock, ms);
         if (poll_only)
             return 0;
-        int rc = wait_event_killable(&t->readers, t->lines > 0);
+        /* The `VMIN` 0 term is what lets a mode change release a reader
+         * that is already here: the condition is re-checked under the
+         * lock at the top of the loop, so a racy read of it costs at
+         * most one extra turn. */
+        int rc = wait_event_killable(&t->readers,
+                                     t->lines > 0 || (!(t->flags & TTY_ICANON) && t->vmin == 0));
         if (rc)
             return rc;
         arch_irq_state_t s = spin_lock_irqsave(&t->lock);
