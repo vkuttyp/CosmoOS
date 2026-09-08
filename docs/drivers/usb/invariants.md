@@ -131,7 +131,20 @@ Check: by construction (the completion's only calls are
 leave, the child first, and both come back); the `QEMU_KBD=hub` shape
 runs the whole suite with a device one tier down.
 
-**U10. A transfer's buffer is memory the controller can reach.** Every
+**U10. `usb_cancel` returning is permission to free.** Either answer
+means no callback for that request is running or will run: `0` because
+the endpoint was stopped and the ring flushed, `-ENOENT` because the
+request had already been retired *and* the controller's interrupt
+handler -- where completions are called, after its lock is dropped --
+has been waited for. Without the second half a driver that cancelled a
+request a moment after it completed would free the buffer under the
+callback still touching it.
+
+Check: review (`xhci_gone`); the shape is exercised by every
+`hid-unplug` and `usb-hub-unplug` teardown, where `remove` cancels and
+frees immediately afterwards.
+
+**U11. A transfer's buffer is memory the controller can reach.** Every
 buffer handed to `usb_control_msg`, `usb_bulk_msg` or `usb_submit` is
 direct-map memory (`kmalloc`, `kzalloc`, `dma_alloc`) and never a kernel
 stack, which lives in the arena and has no direct-map address.

@@ -200,7 +200,8 @@ int usb_submit(struct usb_request *r);
 /* Take a request back: the endpoint is stopped and its ring emptied;
  * every request on it completes (-ECANCELED, `r` itself with `status`)
  * before this returns. Thread context. 0, or -ENOENT if `r` had already
- * completed. */
+ * completed -- and in that case its `done` has finished too, so either
+ * answer means the caller may free what the request pointed at. */
 int usb_cancel(struct usb_request *r, int status);
 
 /* Synchronous shapes, thread context, bounded by `timeout_ns` (0: the

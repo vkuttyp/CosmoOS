@@ -645,18 +645,34 @@ static int ep_stop_and_drain(struct xhci *x, struct usb_device *udev, unsigned d
     return cmd_result(x, "set dequeue pointer", cc);
 }
 
+/*
+ * "Already completed" has to mean "and its callback has finished". A
+ * request retired a moment ago is off the ring while its `done` may
+ * still be running: completions are called from the interrupt handler
+ * after the controller's lock is dropped, so a driver that took -ENOENT
+ * as permission to free the request would be freeing it under that call
+ * (review, PR #55). Waiting for the handler is what makes the answer
+ * true, and cancelling is rare enough to pay for it.
+ */
+static int xhci_gone(struct xhci *x)
+{
+    if (x->vector >= 0)
+        synchronize_irq((unsigned)x->vector);
+    return -ENOENT;
+}
+
 static int xhci_cancel(struct usb_hcd *hcd, struct usb_request *r, int status)
 {
     struct xhci *x = hcd_to_xhci(hcd);
     struct usb_device *udev = r->udev;
     struct xhci_ep *ep = xhci_ep_of(udev, r->ep);
     if (ep == NULL)
-        return -ENOENT;
+        return xhci_gone(x);
     arch_irq_state_t s = spin_lock_irqsave(&x->lock);
     bool mine = r->hcd_priv != NULL && ep->ring->req[((struct xhci_td *)r->hcd_priv)->first] == r;
     spin_unlock_irqrestore(&x->lock, s);
     if (!mine)
-        return -ENOENT;
+        return xhci_gone(x);
     if (!x->dead) {
         int rc = ep_stop_and_drain(x, udev, xhci_dci(r->ep));
         if (rc && rc != -ETIMEDOUT)
