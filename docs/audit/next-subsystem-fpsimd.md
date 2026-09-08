@@ -423,6 +423,11 @@ the signal frame on both sides, 20 for the guest rule, 200 for the float
 conversions, 60 for the check script, and 250 of tests -- roughly 900,
 against the report's estimate of 1 100.
 
+The next report in this shape is `next-subsystem-signals.md`, which
+takes up the native signal ABI this one deferred -- and the reason it is
+wanted now: the console unit gave the machine a keyboard, and `^C` is
+dropped in the line discipline.
+
 Not covered, and named: SVE (a machine with it runs the FP/SIMD state
 fine), `long double` and `%a`, exactly rounded conversion in the last
 digit, a native signal ABI (the personality is still the only thing with

@@ -788,5 +788,10 @@ See [docs/development.md](docs/development.md).
   `docs/audit/next-subsystem-fpsimd.md` did it for floating point and
   SIMD (built: AArch64 threads own vector state, the signal frame
   carries it, and the userland is no longer compiled to avoid the
-  registers every real program uses). Design documents first, one
-  subsystem at a time.
+  registers every real program uses).
+  `docs/audit/next-subsystem-signals.md` does it for the signals a
+  person can send: the console unit gave the machine a keyboard, and
+  `^C` is dropped in the line discipline because the native personality
+  installs no handlers, there are no process groups for a terminal
+  interrupt to reach, and job control is a recorded deviation. Design
+  documents first, one subsystem at a time.
