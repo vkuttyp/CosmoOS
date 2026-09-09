@@ -226,6 +226,21 @@ el2_sync:
     add x2, x18, #4096               /* the rest of the context page is EL2's stack */
     mov sp, x2
 
+    /* The guest's interrupt state. Only on a machine whose virtual
+     * interface exists -- these registers are UNDEFINED without a GICv3
+     * CPU interface, and `vgic_on` is the host's statement that it
+     * found one. */
+    ldr x2, [x18, #HV_CTX_VGIC_ON]
+    cbz x2, 1f
+    ldr x2, [x18, #HV_CTX_VGIC_VMCR]
+    msr ich_vmcr_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_LR0]
+    msr ich_lr0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_HCR]
+    msr ich_hcr_el2, x2
+    isb
+1:
+
     /* Guest general-purpose registers; x18 last, from itself. */
     ldp x0, x1, [x18, #(HV_CTX_GUEST_X + 0)]
     ldp x2, x3, [x18, #(HV_CTX_GUEST_X + 16)]
@@ -309,6 +324,23 @@ el2_exit:
     mrs x2, hpfar_el2
     str x2, [x18, #HV_CTX_EXIT_HPFAR]
     SAVE_SYS x18, HV_CTX_GUEST_SYS, x4
+
+    /* What the guest did with its interrupts, and then the interface
+     * off: whatever it left enabled is not the host's business, and the
+     * host takes its own interrupts through the physical interface. */
+    ldr x2, [x18, #HV_CTX_VGIC_ON]
+    cbz x2, 2f
+    mrs x2, ich_lr0_el2
+    str x2, [x18, #HV_CTX_VGIC_LR0]
+    mrs x2, ich_vmcr_el2
+    str x2, [x18, #HV_CTX_VGIC_VMCR]
+    mrs x2, ich_elrsr_el2
+    str x2, [x18, #HV_CTX_VGIC_ELRSR]
+    mrs x2, ich_misr_el2
+    str x2, [x18, #HV_CTX_VGIC_MISR]
+    msr ich_hcr_el2, xzr
+    isb
+2:
 
     /* Back to the host: stage 2 off, its EL1 state and its registers. */
     msr vttbr_el2, xzr

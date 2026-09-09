@@ -114,6 +114,12 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 /* VirtualInterrupt: offer one vector (-1: none) for delivery when the
  * guest is interruptible; irq_taken tells, after a run, whether it went. */
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
+
+/* Diagnostics for the tests: the guest interrupt state the last run
+ * brought back -- list register 0 and the "which are free" mask. False
+ * where the architecture has no such state, which is everywhere but a
+ * GICv3 machine's EL2 backend. */
+bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
 bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v);
 /* Queue an exception for the next entry (vector < 32). */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);

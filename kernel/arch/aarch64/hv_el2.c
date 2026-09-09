@@ -27,6 +27,7 @@
 
 #include <aarch64/fpu.h>
 #include <aarch64/hv_ctx.h>
+#include <aarch64/hv_el2.h>
 #include <aarch64/irqc.h>
 #include <aarch64/vgic.h>
 #include <aarch64/hv_s2.h>
@@ -323,6 +324,14 @@ static void ctx_reset(struct arch_hv_vcpu *v)
     c->vttbr = (uint64_t)v->vm->s2_root | ((uint64_t)v->vm->vmid << 48);
     c->vtcr = g_vtcr;
     c->hcr = HCR_VM | HCR_RW | HCR_IMO | HCR_FMO | HCR_AMO | HCR_TWI | HCR_TWE | HCR_TID3 | HCR_TSC;
+    /*
+     * The guest's interrupt state, on a machine that has one. The
+     * interface starts disabled and every list register empty: nothing
+     * is pending until something is injected, and `ICH_VMCR_EL2` zero
+     * is a guest whose own PMR masks everything -- which is what a
+     * guest that has not configured its CPU interface should see.
+     */
+    c->vgic_on = g_caps.inject_irq ? 1 : 0;
     v->offered = -1;
     v->pending_event = ~0u;
 }
@@ -481,6 +490,15 @@ static void el2_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t pc)
 static uint64_t el2_vcpu_rip(struct arch_hv_vcpu *v)
 {
     return v->ctx->guest_pc;
+}
+
+bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
+{
+    if (!v->ctx->vgic_on)
+        return false;
+    *lr0 = v->ctx->vgic_lr0;
+    *elrsr = v->ctx->vgic_elrsr;
+    return true;
 }
 
 static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)

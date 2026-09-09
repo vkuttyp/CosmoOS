@@ -14,6 +14,7 @@
 #include <arch/el2.h>
 #include <arch/hv.h>
 #include <arch/hv_backend.h>
+#include <aarch64/hv_el2.h>
 #include <aarch64/sysreg.h>
 
 static const struct hv_backend *g_be;
@@ -35,11 +36,19 @@ int arch_hv_probe(struct hv_caps *out)
     out->map_prot = false;
     out->large_pages = false;
     out->max_vcpus = 0;
+    out->inject_irq = false;
     return -ENOTSUP;
 }
 
 /* Every call below happens only after a successful probe: the manager
  * refuses everything when caps.present is false (invariant V2). */
+
+/* Not a backend op: only this architecture has a virtual GIC, and only
+ * one backend here can drive one. */
+bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
+{
+    return el2_vcpu_vgic_state(v, lr0, elrsr);
+}
 
 int arch_hv_vm_create(struct arch_hv_vm **out) { return g_be->vm_create(out); }
 void arch_hv_vm_destroy(struct arch_hv_vm *vm) { g_be->vm_destroy(vm); }

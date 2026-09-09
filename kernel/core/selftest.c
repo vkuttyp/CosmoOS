@@ -501,6 +501,7 @@ static const struct selftest tests[] = {
     { "linux-elf",       selftest_linux_elf },
     { "el2",             selftest_el2_stub },
     { "el2-guest-wfi",   selftest_el2_guest_wfi },
+    { "el2-vgic-roundtrip", selftest_el2_vgic_roundtrip },
     { "el2-guest-hvc",   selftest_el2_guest_hvc },
     { "el2-guest-mmio",  selftest_el2_guest_mmio },
     { "el2-guest-sysreg", selftest_el2_guest_sysreg },

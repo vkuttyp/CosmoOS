@@ -61,6 +61,16 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 }
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out) { return g_be->vcpu_run(v, out); }
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_irq(v, vector); }
+
+/* An x86 guest's pending interrupt is a field in a control block, not a
+ * list register; there is no such state to report. */
+bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
+{
+    (void)v;
+    (void)lr0;
+    (void)elrsr;
+    return false;
+}
 bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_taken(v); }
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {

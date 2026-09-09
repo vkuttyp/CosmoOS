@@ -560,6 +560,48 @@ bool selftest_el2_guest_wfi(const char **reason)
     return true;
 }
 
+/* --- the guest's interrupt state crosses EL2 intact ---
+ *
+ * `ICH_*_EL2` cannot be touched from EL1, so the switch moves them
+ * through `struct hv_ctx`: written before the guest runs, read back
+ * after. Nothing is injected here -- what is checked is that the
+ * journey happens at all, which is the half of the delivery path that
+ * can be wrong without any interrupt being involved.
+ */
+bool selftest_el2_vgic_roundtrip(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_wfi.bin", &vm, &v) == 0);
+    uint64_t lr0 = ~0ull, elrsr = 0;
+
+    if (!hv_caps()->inject_irq) {
+        /* No virtual interface: the switch must not touch those
+         * registers at all, and says so by having no state to report. */
+        CHECK(!arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
+        drop_guest(vm, v);
+        kinfo("selftest: el2-vgic-roundtrip: no virtual GIC here; the switch leaves it alone");
+        return true;
+    }
+
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
+    /* An empty list register comes back empty, and the controller says
+     * it is free. Both are read from the hardware after the run, so a
+     * switch that wrote nothing or read nothing back fails here. */
+    CHECK(lr0 == 0);
+    CHECK((elrsr & 1u) != 0);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-vgic-roundtrip: LR0 %llu, ELRSR 0x%llx after a run",
+          (unsigned long long)lr0, (unsigned long long)elrsr);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -662,6 +704,7 @@ bool selftest_el2_guest_spin(const char **reason)
 }
 #else
 bool selftest_el2_guest_wfi(const char **reason) { (void)reason; return true; }
+bool selftest_el2_vgic_roundtrip(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
