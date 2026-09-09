@@ -180,12 +180,49 @@ Proposed: **do not**. Three reasons, in order of weight.
    and it is a one-line test.
 
 The consequence must be stated plainly rather than discovered: **the new
-tests run only under `QEMU_GIC=3`**, which the chain already has
-eight of. On the default GICv2 machine the guest-interrupt tests report
-themselves skipped and `el2-vgic-decline` runs instead, so the coverage
-exists -- it is just not where the default boot looks.
+tests run only under `QEMU_GIC=3`**, and *nothing checked into this
+repository runs that*. The eight GICv3 steps the last unit reports are
+steps in a sequence run by hand; `.github/workflows/ci.yml` runs
+`make ARCH=aarch64 ... test` and never sets `QEMU_GIC`, so CI has been
+exercising the GICv2 driver alone since GICv3 merged. The GICv3 driver
+and the ITS have no automated coverage at all today.
 
-### 3. Where the code lives
+That is a gap the previous unit left, and this unit inherits it rather
+than causing it -- but building a feature that only runs under an unset
+variable would compound it into a feature nothing ever runs. So **step 1
+of the migration plan is to wire the shapes in**, before any vGIC code:
+a `make ARCH=aarch64 test-gic` (or a matrix dimension) that runs the
+GICv3/ITS and GICv3/GICv2m boots, added to `ci.yml`. It is a small
+change, it retroactively covers work already merged, and without it the
+rest of this report's test plan is aspirational.
+
+On the default GICv2 machine the guest-interrupt tests then report
+themselves skipped and `el2-vgic-decline` runs instead.
+
+### 3. How the generic layer learns it cannot inject
+
+`vcpu_inject` is generic code; it cannot call `aarch64_vgic_available()`,
+and without something to ask it would go on returning 0 on a GICv2 host
+-- which is the very failure this unit exists to remove, moved one layer
+up. `el2-vgic-decline` could not pass.
+
+`struct hv_caps` is the right place, because it already answers exactly
+this kind of question -- `map_prot`, `large_pages`, `real_mode_guest` --
+and `hv_caps()` is what the generic layer already consults:
+
+```c
+struct hv_caps {
+    ...
+    bool inject_irq;   /* vcpu_inject can deliver; false: -ENOTSUP */
+};
+```
+
+The EL2 backend's `probe` sets it from `aarch64_vgic_available()`; SVM
+and VMX set it true; `vcpu_inject` returns `-ENOTSUP` when it is false,
+before any range check. `selftest_hv_caps` gains the assertion, so the
+flag is not merely declared.
+
+### 4. Where the code lives
 
 `gicv3.c` knows the GIC; `hv_el2.c` knows the guest. Propose a small
 interface between them, `aarch64/vgic.h`, implemented in a new
@@ -207,7 +244,7 @@ force `gic.c` to carry four stubs whose only content is "GICv2 does not
 do this here", which is worse than one `available()` that answers the
 question once.
 
-### 4. What the switch does
+### 5. What the switch does
 
 On entry, for each list register the host wants live:
 
@@ -222,13 +259,22 @@ On exit, the reverse: the LRs, `ICH_VMCR_EL2`, `ICH_MISR_EL2` and
 cleared so the host's own interrupts are unaffected by whatever the
 guest left behind.
 
-Reading the LRs back is what makes `vcpu_irq_taken` mean something: a
-list register whose state field has gone from Pending to Invalid was
-taken *and* completed by the guest; one still Pending was not taken.
-That is the fact the generic layer has been asking for and getting
-`false` for.
+Reading the LRs back is what makes `vcpu_irq_taken` mean something. The
+rule has to be **"the list register is no longer Pending"**, not "it has
+become Invalid", and the difference is a bug waiting to happen: an LR's
+state field is Invalid (0), Pending (1), Active (2) or Active+Pending
+(3), and a guest that acknowledges with `ICC_IAR1_EL1` moves it to
+Active. Only `ICC_EOIR1_EL1` makes it Invalid. A guest interrupted
+between the two -- by a host interrupt, which exits, or by a hypercall
+in its own handler -- leaves the LR Active with the interrupt very much
+delivered. Reporting that as untaken would leave the generic pending bit
+set and inject the same vector a second time into another list register,
+and the guest would take it twice.
 
-### 5. The guest's side needs no distributor
+So: taken ⟺ `state != Pending`. `el2-guest-irq-active` below is the test,
+and it forces exactly that window rather than hoping to hit it.
+
+### 6. The guest's side needs no distributor
 
 This is the part that makes the unit small enough to do. With
 `HCR_EL2.IMO` set — which it already is — a guest's `ICC_*_EL1` accesses
@@ -256,7 +302,7 @@ kernel's own `ICC_SRE_EL1` write works today under QEMU without anyone
 setting `ICC_SRE_EL2`, so QEMU is lenient; the guest's path should be
 verified in step 2 rather than assumed in step 4.
 
-### 6. The injectable range
+### 7. The injectable range
 
 `vcpu_inject`'s `vector < 32` check is x86's. Propose an arch-supplied
 range so the check stays meaningful on both:
@@ -274,7 +320,7 @@ void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
 `vcpu_inject(v, 3) == -EINVAL` keeps passing unchanged, which is the
 point of making the range arch-supplied rather than widening it.
 
-### 7. Deliberately out of scope
+### 8. Deliberately out of scope
 
 - **A virtual distributor** (above).
 - **The virtual timer.** `CNTVOFF_EL2` is already zeroed by the loader,
@@ -304,6 +350,8 @@ point of making the range arch-supplied rather than widening it.
 | `kernel-services/virtualization/vintr.c` | validate against that range |
 | `tests/hv/aarch64/guest_irq.S`, `tests/hv/hv.mk` | **new** guest fixture with a vector table |
 | `kernel-services/virtualization/hvtest.c` | the new tests |
+| `Makefile`, `.github/workflows/ci.yml` | a target and a CI step for the GICv3 shapes, so these tests -- and the already-merged GICv3 driver -- are run by something other than a person |
+| `kernel/include/arch/hv.h`, `kernel/arch/x86_64/{svm,vmx}.c` | `hv_caps.inject_irq` |
 | `docs/kernel/arch/aarch64/design.md`, `invariants.md`, `testing.md`, `docs/kernel/hv/` | the vGIC, its EL2-only constraint, the GICv2 decline |
 
 `gic.c` is not in the list, and that is deliberate: the GICv2 driver
@@ -318,6 +366,11 @@ unsigned aarch64_vgic_lr_count(void);
 
 /* arch/hv.h */
 void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
+
+struct hv_caps {
+    ...
+    bool inject_irq;   /* vcpu_inject can deliver; false: -ENOTSUP */
+};
 ```
 
 `struct hv_ctx` gains a vGIC block. `arch/hv.h`'s vcpu operations do not
@@ -326,27 +379,33 @@ they have always claimed.
 
 ## Migration plan
 
-1. **ACPI first, alone.** Parse and log GICV, GICH and the maintenance
-   GSIV. Nothing uses them. Verifiable by reading a boot log, exactly as
-   the GICv3 unit's first step was.
-2. **Discovery, no delivery.** `ICH_VTR_EL2` read at EL2 init and
-   reported; `aarch64_vgic_available()`; a GICv2 host logs once at probe
-   that guests will get no interrupts, and `vcpu_inject` starts
-   returning `-ENOTSUP` there. Also the place to confirm
-   `ICC_SRE_EL2.Enable` lets a guest reach its interface.
-3. **The context and the switch.** vGIC fields, written on entry and
+1. **Wire the GICv3 shapes into the build and CI, before any vGIC
+   code.** A target that runs the `QEMU_GIC=3` boots and a CI step that
+   calls it. This covers the already-merged GICv3 driver and ITS, which
+   nothing automated runs today, and it is what makes every test below
+   real rather than aspirational.
+2. **ACPI, alone.** Parse and log GICV, GICH and the maintenance GSIV.
+   Nothing uses them. Verifiable by reading a boot log, exactly as the
+   GICv3 unit's first step was.
+3. **Discovery, no delivery.** `ICH_VTR_EL2` read at EL2 init and
+   reported; `aarch64_vgic_available()`; `hv_caps.inject_irq` and
+   `vcpu_inject` returning `-ENOTSUP` where it is false; a GICv2 host
+   logs once at probe that guests will get no interrupts. Also the place
+   to confirm `ICC_SRE_EL2.Enable` lets a guest reach its interface.
+4. **The context and the switch.** vGIC fields, written on entry and
    read back on exit, with nothing yet placed in them. Proved by the
    existing `el2-*` tests being unchanged and by a read-back assertion:
    what the host wrote is what comes back.
-4. **One interrupt.** `set_irq` fills LR0; `irq_taken` from the
-   read-back; the new guest fixture and `el2-guest-irq`. This is the
-   step where the API stops lying.
-5. **The injectable range**, so SGIs and PPIs can be injected — and the
+5. **One interrupt.** `set_irq` fills LR0; `irq_taken` from the
+   read-back, on the "no longer Pending" rule; the new guest fixture,
+   `el2-guest-irq` and `el2-guest-irq-active`. This is the step where the
+   API stops lying.
+6. **The injectable range**, so SGIs and PPIs can be injected — and the
    masking test, which needs a guest that can set `PSTATE.I`.
-6. **Several in flight**: every list register, the underflow question,
+7. **Several in flight**: every list register, the underflow question,
    the docs sweep.
 
-Steps 3 and 4 are separate commits so a bisect lands on "the state
+Steps 4 and 5 are separate commits so a bisect lands on "the state
 crossed EL2 intact" or "the guest took it", not both.
 
 ## Tests
@@ -365,13 +424,21 @@ crossed EL2 intact" or "the guest took it", not both.
   test's `sti` shadow case, and it is the test that distinguishes "the
   interrupt was delivered" from "the interrupt was dropped and the guest
   happened to write the byte for another reason".
+- **`el2-guest-irq-active`** — the guest acknowledges with
+  `ICC_IAR1_EL1` and then executes `hvc` *before* `ICC_EOIR1_EL1`,
+  leaving the list register Active on exit. The host must report the
+  interrupt taken, clear the pending bit, and **not** inject it again on
+  the next entry; the guest completes its handler and the console byte
+  appears exactly once. Written against the rule in §5, and the reason
+  that rule is not "the LR became Invalid": with that rule this test
+  delivers the vector twice.
 - **`el2-guest-irq-private`** — inject PPI 27 and SGI 3, the range the
   current `vcpu_inject` refuses. Fails before step 5 with `-EINVAL`,
   which is the point.
-- **`el2-vgic-decline`** — on a GICv2 host, `vcpu_inject` returns
-  `-ENOTSUP` and `aarch64_vgic_available()` is false. Runs in the
-  default chain shape, where the others skip, so the GICv2 machine is
-  not left testing nothing.
+- **`el2-vgic-decline`** — on a GICv2 host, `hv_caps.inject_irq` is
+  false and `vcpu_inject` returns `-ENOTSUP`. Runs in the default chain
+  shape, where the others skip, so the GICv2 machine is not left testing
+  nothing. `hv-caps` gains the matching assertion for the GICv3 side.
 - **`hv-guest-irq` (x86) unchanged**, including
   `vcpu_inject(v, 3) == -EINVAL`. The range change is the one part of
   this unit that can break another architecture, so the test that
@@ -424,11 +491,13 @@ repeated. What can be measured honestly:
   exactly like a hypervisor bug. Build it in the smallest steps that can
   be observed: a guest that only enables the interface and exits;
   then one that unmasks and exits; then one that handles.
-- **The new tests do not run in the default chain shape.** GICv2 is
-  QEMU's default and the vGIC is GICv3-only, so `el2-guest-irq` and its
-  siblings run in the `QEMU_GIC=3` steps. A feature exercised only in a
-  non-default configuration is a feature that rots; `el2-vgic-decline`
-  running in the default shape is the mitigation, and it is a weak one.
+- **The new tests do not run in the default shape, and today nothing
+  automated runs the other one.** GICv2 is QEMU's default, CI never sets
+  `QEMU_GIC`, and the vGIC is GICv3-only — so without step 1 these tests
+  would be run by a person, occasionally. Step 1 is therefore not
+  housekeeping attached to the unit; it is the difference between a
+  tested feature and an untested one, and it happens to also cover the
+  GICv3 driver that merged without it.
   Worth considering — separately, and on its own evidence — whether the
   chain's aarch64 default should become `gic-version=3` now that both
   drivers are tested.
