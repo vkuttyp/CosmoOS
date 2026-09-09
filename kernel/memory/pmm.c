@@ -251,7 +251,11 @@ static void poison_check(struct page *page, unsigned order)
         kerror("pmm: pfn %llu was written while free: %zu byte(s) at offset %zu-%zu (poison %02x); last freed from %p",
                (unsigned long long)page_to_pfn(pg), last - first, first, last, POISON_BYTE,
                (void *)(uintptr_t)(header_ok ? h.free_pc : 0));
-        for (size_t off = first; off < last && off < first + 128; off += 16)
+        /* Whole 16-byte rows, aligned, and never past the frame: `first` is
+         * 8-aligned, so a row starting there could end 8 bytes into the
+         * next frame when the damage is the last word. */
+        size_t row0 = first & ~(size_t)15;
+        for (size_t off = row0; off < last && off < row0 + 128 && off + 16 <= PAGE_SIZE; off += 16)
             kerror("pmm:   +%4zu: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x", off,
                    va[off], va[off + 1], va[off + 2], va[off + 3], va[off + 4], va[off + 5], va[off + 6], va[off + 7],
                    va[off + 8], va[off + 9], va[off + 10], va[off + 11], va[off + 12], va[off + 13], va[off + 14],
