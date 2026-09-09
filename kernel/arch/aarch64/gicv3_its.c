@@ -261,13 +261,24 @@ struct gicv3_its *its_init(paddr_t base, unsigned lpi_base, unsigned nr_lpis)
     if (its->event_bits > GITS_TYPER_IDBITS(its->typer))
         its->event_bits = GITS_TYPER_IDBITS(its->typer);
 
-    /* Quiesce before touching the tables: an enabled ITS may be using
-     * whatever the firmware left. */
+    /* Quiesce before touching the tables: an enabled ITS may still be
+     * translating out of whatever the firmware left, and rewriting
+     * GITS_BASERn or GITS_CBASER under it is architecturally undefined.
+     * If it will not quiesce we must not proceed -- declining leaves
+     * the machine with the GICv2m fallback or with no MSI, which is a
+     * failure that reports itself; carrying on would give every device
+     * a message the ITS translates from a table nobody owns. */
     wr32(its, GITS_CTLR, 0);
-    for (unsigned spins = 0; spins < 1000000u; spins++) {
-        if (rd32(its, GITS_CTLR) & GITS_CTLR_QUIESCENT)
-            break;
-        arch_cpu_relax();
+    bool quiet = false;
+    for (unsigned spins = 0; spins < 1000000u && !quiet; spins++) {
+        quiet = (rd32(its, GITS_CTLR) & GITS_CTLR_QUIESCENT) != 0;
+        if (!quiet)
+            arch_cpu_relax();
+    }
+    if (!quiet) {
+        kwarn("its: did not quiesce (GITS_CTLR 0x%x); not used", rd32(its, GITS_CTLR));
+        kfree(its);
+        return NULL;
     }
 
     unsigned devbits = GITS_TYPER_DEVBITS(its->typer);

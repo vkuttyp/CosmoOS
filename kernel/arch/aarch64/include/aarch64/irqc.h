@@ -12,7 +12,9 @@
  *
  * Every entry point of `arch/irqc.h` has an entry here, plus the
  * interrupt dispatch itself, which reads a controller register to learn
- * what fired.
+ * what fired. The one thing the two do share is `gicv2m.c`, the MSI
+ * frame, because a GICv3 whose firmware describes a frame and no ITS
+ * uses exactly the frame a GICv2 does.
  */
 
 #ifndef AARCH64_IRQC_H

@@ -15,9 +15,14 @@
  *     Neither has the eight-bit CPU mask that capped GICv2 at eight
  *     CPUs.
  *
- * MSI is still a GICv2m frame here. The ITS, which is what real GICv3
- * hardware offers, is the next step; this file keeps `gicv2m.c` so that
- * the CPU-interface work can be tested on its own.
+ * MSI has an order of preference, decided at init from the MADT: the
+ * ITS (`gicv3_its.c`) if firmware described one, a GICv2m frame
+ * (`gicv2m.c`, shared with the GICv2 driver) if it described one of
+ * those instead, and otherwise -ENODEV -- a decline, since no driver in
+ * this tree falls back to INTx. The ITS is what real GICv3 hardware
+ * offers; the frame is what QEMU will still give a GICv3 on request,
+ * and keeping it is what let the CPU-interface work be tested before
+ * the ITS existed.
  */
 
 #include <kernel/acpi.h>
@@ -57,6 +62,8 @@
 #define GICD_CTLR_ENABLE_G1A (1u << 1)
 #define GICD_CTLR_ARE_NS     (1u << 4)   /* affinity routing: IROUTER, not ITARGETSR */
 #define GICD_CTLR_RWP        (1u << 31)  /* a previous write is still taking effect */
+#define GICD_TYPER_RSS       (1u << 26)  /* SGI target lists have a range selector */
+#define ICC_CTLR_RSS         (1ull << 18)
 
 /* Redistributor: two 64 KiB frames per CPU, the second holding what the
  * distributor used to bank. GICv4 adds two more, which is why the
@@ -130,6 +137,7 @@ static volatile uint8_t *g_gicr_window;    /* the discovery window, mapped once 
 static paddr_t g_gicr_pa;
 static uint64_t g_gicr_len;
 static unsigned g_gicr_stride = GICR_STRIDE;
+static bool g_rss;                                  /* SGI target lists reach past Aff0 15 */
 static volatile uint8_t *g_gicr[CONFIG_MAX_CPUS];   /* each CPU's own frame */
 static uint32_t g_affinity[CONFIG_MAX_CPUS];        /* MPIDR affinity, packed */
 
@@ -282,6 +290,7 @@ static void gicv3_init(const struct acpi_gic *acpi)
 
     gicd_wr(GICD_CTLR, 0);
     gicd_wait_rwp();
+    g_rss = (gicd_rd(GICD_TYPER) & GICD_TYPER_RSS) != 0;
     g_nr_lines = 32u * ((gicd_rd(GICD_TYPER) & 0x1F) + 1);
     if (g_nr_lines > GIC_INTID_COUNT)
         g_nr_lines = GIC_INTID_COUNT;
@@ -397,6 +406,13 @@ static void gicv3_init_cpu(void)
     WRITE_SYSREG(icc_ctlr_el1, ctlr & ~(ICC_CTLR_CBPR | ICC_CTLR_EOIMODE));
     WRITE_SYSREG(icc_igrpen1_el1, 1);
     isb();
+
+    /* An SGI to this CPU has to be able to name it. Both ends must have
+     * the range selector for an Aff0 past 15, and a CPU nobody can send
+     * an IPI to would deadlock the first shootdown instead of failing
+     * here. */
+    if ((aff & 0xFFu) >= 16 && !(g_rss && (READ_SYSREG(icc_ctlr_el1) & ICC_CTLR_RSS)))
+        panic("gicv3: CPU %u has Aff0 %u and this GIC has no SGI range selector", cpu, aff & 0xFFu);
 
     if (g_its) {
         paddr_t rd_pa = g_gicr_pa + (paddr_t)(g_gicr[cpu] - g_gicr_window);
@@ -727,14 +743,18 @@ static int sgi_for_vector(unsigned vector)
 }
 
 /* ICC_SGI1R_EL1: Aff3 at 48, Aff2 at 32, Aff1 at 16, the INTID at 24,
- * and a sixteen-bit list over Aff0 within that cluster. */
+ * and a sixteen-bit list over Aff0 within that cluster. Aff0 can go
+ * past 15, and then the list needs the Range Selector at 44 to say
+ * which group of sixteen it covers -- an extension (GICv3.1 RSS) that
+ * an implementation may not have. `g_rss` records whether this one
+ * does, and gicv3_init_cpu refuses a CPU it could never reach rather
+ * than leaving the discovery to the first IPI. */
 static uint64_t sgi1r_of(uint32_t aff, unsigned sgi)
 {
     unsigned aff0 = aff & 0xFFu;
-    if (aff0 >= 16)
-        panic("gicv3: Aff0 %u is outside one SGI target list", aff0);
     return ((uint64_t)((aff >> 24) & 0xFF) << 48) | ((uint64_t)((aff >> 16) & 0xFF) << 32) |
-           ((uint64_t)((aff >> 8) & 0xFF) << 16) | ((uint64_t)sgi << 24) | (1ull << aff0);
+           ((uint64_t)((aff >> 8) & 0xFF) << 16) | ((uint64_t)(aff0 / 16) << 44) |
+           ((uint64_t)sgi << 24) | (1ull << (aff0 % 16));
 }
 
 static void gicv3_ipi_send(unsigned cpu, unsigned vector)

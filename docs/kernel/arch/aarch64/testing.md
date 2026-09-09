@@ -139,8 +139,9 @@ each of them exercises in this backend:
   the `ELR + 4` resume, `eret`; the handler sees vector 1024 and an `elr`
   in kernel text.
 - Interrupt/IRQ tests: dynamic vector allocation in 1056..1311, GSI
-  routing to SPIs, mask/unmask, MSI compose through the GICv2m frame,
-  the periodic test IRQ on the virtual timer (INTID 27).
+  routing to SPIs, mask/unmask, MSI compose -- through whichever path
+  the machine offers, an ITS translation to an LPI or a GICv2m frame's
+  SPI -- and the periodic test IRQ on the virtual timer (INTID 27).
 - `irq-affinity` (`kernel/interrupt/irqtest.c`): the distributor's
   highest line -- which `virt` reports and wires to nothing -- is routed
   to each online CPU in turn, made pending with `GICD_ISPENDR` through
