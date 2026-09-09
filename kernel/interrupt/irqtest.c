@@ -147,7 +147,7 @@ bool selftest_irq_msi_overlap(const char **reason)
     }
 
     struct irq_msi_msg msg = { 0, 0 };
-    int vector = irq_request_msi(msi_handler, NULL, "selftest-msi", arch_cpu_id(), &msg);
+    int vector = irq_request_msi(msi_handler, NULL, "selftest-msi", arch_cpu_id(), 0, &msg);
     bool took_it = vector >= 0 && msg.data == (uint32_t)wired;
 
     /* The wired line still belongs to its handler: raise it and see. */

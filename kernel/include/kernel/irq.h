@@ -48,15 +48,17 @@ int irq_vector_of(irq_t irq);
 
 /* Message-signalled interrupts. The bus programs the returned message
  * into the device; the interrupt then arrives as a plain vector on
- * `cpu` and is dispatched to fn like any other. Returns the vector
- * (>= 0) or -ENOSPC/-EINVAL. Not for interrupt context (spinlock, but
- * allocation-free); release with the vector. */
+ * `cpu` and is dispatched to fn like any other. `devid` is the writing
+ * device's identity on its bus (PCI: bus << 8 | slot << 3 | func),
+ * which controllers that translate per device need and others ignore.
+ * Returns the vector (>= 0) or -ENOSPC/-EINVAL. Not for interrupt
+ * context (spinlock, but allocation-free); release with the vector. */
 struct irq_msi_msg {
     uint64_t addr;
     uint32_t data;
 };
 int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsigned cpu,
-                    struct irq_msi_msg *msg);
+                    uint32_t devid, struct irq_msi_msg *msg);
 int irq_release_msi(int vector);
 
 #endif /* KERNEL_IRQ_H */

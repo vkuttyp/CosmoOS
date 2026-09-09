@@ -378,8 +378,7 @@ void pci_enable_device(struct pci_device *p, bool bus_master)
     /* Before the device may master the bus it gets its DMA domain, so its
      * first bus address is already a translated one (kernel/iommu). */
     if (bus_master) {
-        uint32_t sid = ((uint32_t)p->bus << 8) | ((uint32_t)p->slot << 3) | p->func;
-        int rc = iommu_attach_device(&p->dev, sid);
+        int rc = iommu_attach_device(&p->dev, pci_requester_id(p));
         if (rc)
             kerror("pci: %s: no DMA domain (%d); bus mastering will fault", p->dev.name, rc);
     }
@@ -469,7 +468,7 @@ int pci_msix_request(struct pci_device *p, unsigned index, interrupt_handler_fn 
     if (p->msix.vectors[index] >= 0)
         return -EBUSY;
     struct irq_msi_msg msg;
-    int vector = irq_request_msi(fn, arg, name, cpu, &msg);
+    int vector = irq_request_msi(fn, arg, name, cpu, pci_requester_id(p), &msg);
     if (vector < 0)
         return vector;
     volatile uint32_t *e = (volatile uint32_t *)(p->msix.table + index * MSIX_ENTRY_SIZE);
@@ -518,7 +517,7 @@ int pci_msi_enable(struct pci_device *p, interrupt_handler_fn fn, void *arg, con
     if (p->msi_vector >= 0)
         return -EBUSY;
     struct irq_msi_msg msg;
-    int vector = irq_request_msi(fn, arg, name, cpu, &msg);
+    int vector = irq_request_msi(fn, arg, name, cpu, pci_requester_id(p), &msg);
     if (vector < 0)
         return vector;
     p->msi_vector = vector;

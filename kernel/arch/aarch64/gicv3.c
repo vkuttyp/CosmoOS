@@ -30,7 +30,10 @@
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/irqc.h>
+#include <kernel/page.h>
+#include <kernel/pmm.h>
 #include <aarch64/gicv2m.h>
+#include <aarch64/gicv3_its.h>
 #include <aarch64/irqc.h>
 #include <aarch64/platform.h>
 #include <aarch64/sysreg.h>
@@ -69,6 +72,11 @@
 #define GICR_STRIDE      0x20000u
 #define GICR_STRIDE_VLPI 0x40000u
 
+#define GICR_PROPBASER    0x0070
+#define GICR_PENDBASER    0x0078
+#define GICR_TYPER_PLPIS  (1ull << 0)
+#define GICR_CTLR_ENABLE_LPIS (1u << 0)
+
 #define GICR_SGI_BASE     0x10000
 #define GICR_IGROUPR0     (GICR_SGI_BASE + 0x0080)
 #define GICR_ISENABLER0   (GICR_SGI_BASE + 0x0100)
@@ -93,6 +101,22 @@
 #define PRIORITY_DEFAULT 0xA0u
 #define PMR_UNMASKED     0xF0u
 
+/*
+ * LPIs. Interrupt ids from 8192 up, delivered to a redistributor rather
+ * than through the distributor, and the only interrupts an ITS can
+ * produce. One per dynamic vector is all this kernel can use, but the
+ * property table must still cover the whole id space its `IDbits` says
+ * it does -- fourteen bits is the architectural minimum -- and the
+ * pending table must be 64 KiB aligned, so both are bigger than the 256
+ * entries actually in play.
+ */
+#define LPI_BASE      8192u
+#define NR_LPIS       VEC_DYNAMIC_COUNT
+#define LPI_ID_BITS   14u
+#define LPI_PROP_BYTES ((1u << LPI_ID_BITS) - LPI_BASE)
+#define LPI_PEND_BYTES (64u * 1024u)
+#define LPI_ENABLED   (1u << 0)
+
 static volatile uint32_t *g_gicd;
 static paddr_t g_gicd_pa;
 static unsigned g_nr_lines;
@@ -104,6 +128,15 @@ static uint64_t g_gicr_len;
 static unsigned g_gicr_stride = GICR_STRIDE;
 static volatile uint8_t *g_gicr[CONFIG_MAX_CPUS];   /* each CPU's own frame */
 static uint32_t g_affinity[CONFIG_MAX_CPUS];        /* MPIDR affinity, packed */
+
+static struct gicv3_its *g_its;                   /* NULL: MSI comes from the frame, or not at all */
+static uint8_t *g_lpi_prop;                       /* the shared LPI property table */
+static paddr_t g_lpi_prop_pa;
+static uint16_t g_lpi_vector[NR_LPIS];            /* LPI index -> vector, 0xFFFF none */
+static uint16_t g_lpi_of_vector[VEC_DYNAMIC_COUNT];
+static uint32_t g_lpi_devid[NR_LPIS];             /* who writes it, for the DISCARD */
+static uint8_t g_lpi_cpu[NR_LPIS];
+static uint64_t g_lpi_used[NR_LPIS / 64];
 
 static spinlock_t g_lock = SPINLOCK_INIT("gicv3");
 static uint16_t g_vector_of[GIC_INTID_COUNT];     /* INTID -> vector (identity when unrouted) */
@@ -137,6 +170,15 @@ static inline void gicr_wr(unsigned cpu, unsigned off, uint32_t v)
     *(volatile uint32_t *)(g_gicr[cpu] + off) = v;
 }
 
+static inline void gicr_wr64(unsigned cpu, unsigned off, uint64_t v)
+{
+    *(volatile uint64_t *)(g_gicr[cpu] + off) = v;
+}
+static inline uint64_t gicr_rd64(unsigned cpu, unsigned off)
+{
+    return *(volatile uint64_t *)(g_gicr[cpu] + off);
+}
+
 /* A write to an enable or control register is not in effect until the
  * controller says so; reading back too early sees the old state. */
 static void gicd_wait_rwp(void)
@@ -161,6 +203,15 @@ static volatile void *map(paddr_t pa, size_t len, const char *what)
     if (va == 0)
         panic("gicv3: cannot map %s at 0x%llx", what, (unsigned long long)pa);
     return (volatile void *)va;
+}
+
+static paddr_t alloc_zeroed(size_t bytes)
+{
+    unsigned order = 0;
+    while (((size_t)PAGE_SIZE << order) < bytes)
+        order++;
+    struct page *pg = pmm_alloc_pages(order, PMM_FLAGS_ZERO);
+    return pg ? page_to_phys(pg) : 0;
 }
 
 static uint32_t this_affinity(void)
@@ -252,12 +303,36 @@ static void gicv3_init(const struct acpi_gic *acpi)
     for (unsigned i = GIC_SPI_BASE; i < g_nr_lines; i++)
         gicd_wr64(GICD_IROUTER + i * 8, boot);
 
-    gicv2m_init(&g_v2m, acpi, g_nr_lines);
+    for (unsigned i = 0; i < NR_LPIS; i++) {
+        g_lpi_vector[i] = 0xFFFF;
+        g_lpi_devid[i] = 0;
+    }
+    for (unsigned i = 0; i < VEC_DYNAMIC_COUNT; i++)
+        g_lpi_of_vector[i] = 0xFFFF;
+
+    /* MSI, in the order the report argued for: an ITS if firmware
+     * described one, otherwise a GICv2m frame, otherwise none -- and
+     * "none" is a decline, not a fallback, because no driver here
+     * falls back to INTx. */
+    if (acpi->its_base) {
+        g_its = its_init(acpi->its_base, LPI_BASE, NR_LPIS);
+        if (g_its) {
+            g_lpi_prop_pa = alloc_zeroed(LPI_PROP_BYTES);
+            if (g_lpi_prop_pa == 0) {
+                kwarn("gicv3: no memory for the LPI property table; the ITS is not used");
+                g_its = NULL;
+            } else {
+                g_lpi_prop = phys_to_virt(g_lpi_prop_pa);
+            }
+        }
+    }
+    if (g_its == NULL)
+        gicv2m_init(&g_v2m, acpi, g_nr_lines);
     gicv3_init_cpu();
-    kinfo("gicv3: GICD at 0x%llx, GICR 0x%llx+0x%llx stride 0x%x, %u lines, MSI %s (SPIs %u+%u)",
+    kinfo("gicv3: GICD at 0x%llx, GICR 0x%llx+0x%llx stride 0x%x, %u lines, MSI %s",
           (unsigned long long)g_gicd_pa, (unsigned long long)g_gicr_pa,
           (unsigned long long)g_gicr_len, g_gicr_stride, g_nr_lines,
-          g_v2m.spi_count ? "via GICv2m" : "unavailable", g_v2m.spi_base, g_v2m.spi_count);
+          g_its ? "via the ITS" : g_v2m.spi_count ? "via GICv2m" : "unavailable");
 }
 
 static void gicv3_init_cpu(void)
@@ -283,6 +358,25 @@ static void gicv3_init_cpu(void)
     gicr_wr(cpu, GICR_ISENABLER0, 0x0000FFFFu | g_routed_ppi_mask);
     gicr_wait_rwp(cpu);
 
+    /* LPIs, if there is anything to deliver them: the property table is
+     * shared, the pending table is this redistributor's alone, and
+     * EnableLPIs is a one-way switch, so everything it reads must be in
+     * place first. */
+    if (g_lpi_prop_pa && (gicr_rd64(cpu, GICR_TYPER) & GICR_TYPER_PLPIS) &&
+        (gicr_rd(cpu, GICR_CTLR) & GICR_CTLR_ENABLE_LPIS) == 0) {
+        paddr_t pend = alloc_zeroed(LPI_PEND_BYTES);
+        if (pend == 0) {
+            panic("gicv3: CPU %u has no memory for its LPI pending table", cpu);
+        }
+        gicr_wr64(cpu, GICR_PROPBASER,
+                  (g_lpi_prop_pa & 0x000FFFFFFFFFF000ull) | (7ull << 7) | (1ull << 10) |
+                      (uint64_t)(LPI_ID_BITS - 1));
+        gicr_wr64(cpu, GICR_PENDBASER,
+                  (pend & 0x000FFFFFFFFF0000ull) | (7ull << 7) | (1ull << 10));
+        dsb_ish();
+        gicr_wr(cpu, GICR_CTLR, gicr_rd(cpu, GICR_CTLR) | GICR_CTLR_ENABLE_LPIS);
+    }
+
     uint64_t sre = READ_SYSREG(icc_sre_el1);
     WRITE_SYSREG(icc_sre_el1, sre | ICC_SRE_SRE | ICC_SRE_DFB | ICC_SRE_DIB);
     isb();
@@ -294,6 +388,12 @@ static void gicv3_init_cpu(void)
     WRITE_SYSREG(icc_ctlr_el1, ctlr & ~(ICC_CTLR_CBPR | ICC_CTLR_EOIMODE));
     WRITE_SYSREG(icc_igrpen1_el1, 1);
     isb();
+
+    if (g_its) {
+        paddr_t rd_pa = g_gicr_pa + (paddr_t)(g_gicr[cpu] - g_gicr_window);
+        unsigned rd_index = (unsigned)((gicr_rd64(cpu, GICR_TYPER) >> 8) & 0xFFFF);
+        its_init_cpu(g_its, cpu, rd_pa, rd_index);
+    }
 }
 
 static int gicv3_vector_alloc(void)
@@ -334,7 +434,32 @@ static void unbind_locked(unsigned vector)
 static void gicv3_vector_free(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
+    unsigned i = vector - VEC_DYNAMIC_BASE;
+
+    /* An LPI is given back by talking to the ITS, which waits on its
+     * command queue; that cannot happen under this lock, so the binding
+     * is taken out first and the LPI itself released after. */
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    unsigned lpi = g_lpi_of_vector[i];
+    uint32_t devid = 0;
+    unsigned lpi_cpu = 0;
+    if (lpi != 0xFFFF) {
+        devid = g_lpi_devid[lpi];
+        lpi_cpu = g_lpi_cpu[lpi];
+        g_lpi_of_vector[i] = 0xFFFF;
+        g_lpi_vector[lpi] = 0xFFFF;
+    }
+    spin_unlock_irqrestore(&g_lock, s);
+    if (lpi != 0xFFFF) {
+        g_lpi_prop[lpi] = 0;
+        dsb_ish();
+        its_unmap_event(g_its, devid, lpi, lpi_cpu);
+        s = spin_lock_irqsave(&g_lock);
+        g_lpi_used[lpi / 64] &= ~(1ull << (lpi % 64));
+        spin_unlock_irqrestore(&g_lock, s);
+    }
+
+    s = spin_lock_irqsave(&g_lock);
     unbind_locked(vector);
     g_vector_used[(vector - VEC_DYNAMIC_BASE) / 64] &= ~(1ull << ((vector - VEC_DYNAMIC_BASE) % 64));
     spin_unlock_irqrestore(&g_lock, s);
@@ -405,10 +530,67 @@ static int gicv3_unmask(unsigned gsi)
     return 0;
 }
 
-static int gicv3_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+/*
+ * An ITS translation, rather than a line: take an LPI, enable it in the
+ * property table, and tell the ITS that this device's event number maps
+ * to it in this CPU's collection. The event number *is* the LPI's index
+ * (gicv3_its.c), so the device's table needs no allocator of its own.
+ */
+static int its_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr, uint32_t *data)
+{
+    unsigned i = vector - VEC_DYNAMIC_BASE;
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    if (g_lpi_of_vector[i] != 0xFFFF) {
+        spin_unlock_irqrestore(&g_lock, s);
+        return -EBUSY;
+    }
+    int lpi = -1;
+    for (unsigned k = 0; k < NR_LPIS; k++) {
+        if ((g_lpi_used[k / 64] & (1ull << (k % 64))) == 0) {
+            g_lpi_used[k / 64] |= 1ull << (k % 64);
+            lpi = (int)k;
+            break;
+        }
+    }
+    if (lpi < 0) {
+        spin_unlock_irqrestore(&g_lock, s);
+        return -ENOSPC;
+    }
+    g_lpi_vector[lpi] = (uint16_t)vector;
+    g_lpi_of_vector[i] = (uint16_t)lpi;
+    g_lpi_devid[lpi] = devid;
+    g_lpi_cpu[lpi] = (uint8_t)cpu;
+    spin_unlock_irqrestore(&g_lock, s);
+
+    /* The redistributor reads this table; the ITS's INV in its_map_event
+     * is what makes it re-read this byte. */
+    g_lpi_prop[lpi] = (uint8_t)(PRIORITY_DEFAULT | LPI_ENABLED);
+    dsb_ish();
+
+    int rc = its_map_event(g_its, devid, (uint32_t)lpi, LPI_BASE + (unsigned)lpi, cpu);
+    if (rc) {
+        g_lpi_prop[lpi] = 0;
+        s = spin_lock_irqsave(&g_lock);
+        g_lpi_vector[lpi] = 0xFFFF;
+        g_lpi_of_vector[i] = 0xFFFF;
+        g_lpi_used[lpi / 64] &= ~(1ull << ((unsigned)lpi % 64));
+        spin_unlock_irqrestore(&g_lock, s);
+        return rc;
+    }
+    *addr = its_translater(g_its);
+    *data = (uint32_t)lpi;
+    return 0;
+}
+
+static int gicv3_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data)
 {
     if (!vector_is_dynamic(vector))
         return -EINVAL;
+    if (g_its)
+        return its_compose(vector, cpu, devid, addr, data);
+    if (g_v2m.spi_count == 0)
+        return -ENODEV;   /* neither an ITS nor a frame: nothing can deliver an MSI */
     /* The frame's SPI range can overlap lines firmware wired to devices
      * -- on QEMU's virt the SMMU's event and error interrupts sit inside
      * it -- and the frame has no way to know. Walk past any line that is
@@ -445,6 +627,18 @@ static void gicv3_eoi(unsigned vector)
     if (vector == VEC_SPURIOUS)
         return;
     WRITE_SYSREG(icc_eoir1_el1, g_cur_intid[arch_cpu_id()]);
+}
+
+static bool gicv3_msi_doorbell(paddr_t *pa, size_t *len)
+{
+    if (g_its)
+        *pa = its_translater(g_its) & ~(paddr_t)(PAGE_SIZE - 1);
+    else if (g_v2m.spi_count)
+        *pa = gicv2m_setspi_addr(&g_v2m) & ~(paddr_t)(PAGE_SIZE - 1);
+    else
+        return false;
+    *len = PAGE_SIZE;
+    return true;
 }
 
 static unsigned gicv3_gsi_count(void)
@@ -558,6 +752,20 @@ static void gicv3_dispatch(struct arch_trap_frame *frame)
 {
     unsigned cpu = arch_cpu_id();
     unsigned intid = (unsigned)(READ_SYSREG(icc_iar1_el1) & 0xFFFFFFu);
+    if (intid >= LPI_BASE && intid < LPI_BASE + NR_LPIS) {
+        g_cur_intid[cpu] = intid;
+        uint16_t v = g_lpi_vector[intid - LPI_BASE];
+        unsigned lpi_vector = v == 0xFFFF ? VEC_SPURIOUS : v;
+        frame->vector = lpi_vector;
+        if (lpi_vector == VEC_SPURIOUS) {
+            g_spurious++;
+            WRITE_SYSREG(icc_eoir1_el1, intid);
+            return;
+        }
+        interrupt_dispatch(lpi_vector, frame);
+        gicv3_eoi(lpi_vector);
+        return;
+    }
     if (intid >= GIC_INTID_COUNT) {
         g_spurious++;
         frame->vector = VEC_SPURIOUS;
@@ -599,6 +807,8 @@ static void gicv3_test_raise(unsigned gsi)
  * unbound: see the ops table. */
 static int gicv3_test_msi_overlap_gsi(void)
 {
+    if (g_its)
+        return -1;   /* an LPI is not a line; there is nothing to collide with */
     for (unsigned k = 0; k < g_v2m.spi_count; k++) {
         unsigned intid = g_v2m.spi_base + k;
         if (!gicv2m_is_free(&g_v2m, intid))
@@ -623,6 +833,7 @@ const struct aarch64_irqc_ops aarch64_gicv3_ops = {
     .unmask = gicv3_unmask,
     .eoi = gicv3_eoi,
     .msi_compose = gicv3_msi_compose,
+    .msi_doorbell = gicv3_msi_doorbell,
     .gsi_count = gicv3_gsi_count,
     .spurious_vector = gicv3_spurious_vector,
     .current_intid = gicv3_current_intid,

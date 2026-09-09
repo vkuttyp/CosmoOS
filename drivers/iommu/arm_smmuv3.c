@@ -14,6 +14,7 @@
 #include <kernel/pmm.h>
 #include <kernel/string.h>
 #include <kernel/vmm.h>
+#include <arch/irqc.h>
 #include <arch/cpu.h>
 
 #include <kernel/iommu_pt.h>
@@ -99,7 +100,6 @@ struct smmu {
     uint32_t vmid_bits[65536 / 32];
     unsigned vmid_max;
     unsigned oas_bits, ps;       /* the output address size IDR5 reports and its PS encoding */
-    uint64_t msi_frame;          /* the MSI doorbell every domain identity-maps */
     spinlock_t lock;
 };
 
@@ -192,7 +192,18 @@ static unsigned smmu_reserved(struct iommu_unit *iu, struct iommu_range *out, un
 {
     if (max == 0)
         return 0;
-    out[0] = (struct iommu_range){ .base = of(iu)->msi_frame, .len = PAGE_SIZE, .identity = true };
+    (void)iu;
+    /* Whatever the interrupt controller made the doorbell -- a GICv2m
+     * frame or an ITS translator -- a device's write to it is a DMA
+     * this unit will translate, so every domain keeps it out of the
+     * IOVA space and maps it to itself. Asking beats assuming: the two
+     * are at different addresses, and which one is live is the
+     * controller's decision, not this driver's. */
+    paddr_t pa;
+    size_t len;
+    if (!arch_irqc_msi_doorbell(&pa, &len))
+        return 0;
+    out[0] = (struct iommu_range){ .base = pa, .len = len, .identity = true };
     return 1;
 }
 
@@ -403,8 +414,6 @@ void arm_smmuv3_init(void)
     struct smmu_desc desc;
     if (!iort_find_smmuv3(&desc))
         return;   /* no SMMU on this machine: nothing may touch its registers */
-    struct acpi_gic gic;
-    u->msi_frame = acpi_madt_gic(&gic) && gic.v2m_base ? gic.v2m_base : VIRT_GICV2M_BASE;
     vaddr_t va = vm_map_phys(desc.base, 2 * 65536, VM_PROT_RW, VM_CACHE_UC);
     if (va == 0)
         return;

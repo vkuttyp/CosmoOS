@@ -119,6 +119,15 @@ vaddr_t pci_map_bar(struct pci_device *pdev, unsigned bar);
 /* Offset of the next capability with `id` after `prev` (0 = first), or 0. */
 uint8_t pci_find_capability(const struct pci_device *pdev, uint8_t id, uint8_t prev);
 
+/* The identity this function presents on the bus: what an IOMMU calls
+ * its stream or source id and what an interrupt controller that
+ * translates per device calls its device id. One number, two uses, so
+ * it is computed in one place. */
+static inline uint32_t pci_requester_id(const struct pci_device *p)
+{
+    return ((uint32_t)p->bus << 8) | ((uint32_t)p->slot << 3) | p->func;
+}
+
 /* MSI-X: map the table, mask every entry, enable the function. `want` is
  * the number of vectors the driver needs; the result is min(want,
  * table size) or a negative errno (-ENODEV without MSI-X). Sleeps. */

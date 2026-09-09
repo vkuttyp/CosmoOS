@@ -89,9 +89,15 @@ void arch_irqc_eoi(unsigned vector)
         g_ops->eoi(vector);
 }
 
-int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data)
 {
-    return g_ops->msi_compose(vector, cpu, addr, data);
+    return g_ops->msi_compose(vector, cpu, devid, addr, data);
+}
+
+bool arch_irqc_msi_doorbell(paddr_t *pa, size_t *len)
+{
+    return g_ops ? g_ops->msi_doorbell(pa, len) : false;
 }
 
 unsigned arch_irqc_gsi_count(void)

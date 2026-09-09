@@ -88,7 +88,7 @@ int irq_request(irq_t irq, interrupt_handler_fn fn, void *arg, const char *name,
 }
 
 int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsigned cpu,
-                    struct irq_msi_msg *msg)
+                    uint32_t devid, struct irq_msi_msg *msg)
 {
     KASSERT(g_initialized);
     if (fn == NULL || msg == NULL)
@@ -102,7 +102,7 @@ int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsign
     }
     int rc = interrupt_register((unsigned)vector, fn, arg, name);
     if (rc == 0) {
-        rc = arch_irqc_msi_compose((unsigned)vector, cpu, &msg->addr, &msg->data);
+        rc = arch_irqc_msi_compose((unsigned)vector, cpu, devid, &msg->addr, &msg->data);
         if (rc)
             interrupt_unregister((unsigned)vector, fn);
     }

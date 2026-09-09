@@ -385,7 +385,7 @@ static bool vtd_unit_init(struct vtd_unit *u, const struct dmar_drhd *drhd, cons
 
     /* The fault event as an MSI on CPU 0. */
     struct irq_msi_msg msg;
-    u->fault_vector = irq_request_msi(vtd_fault_irq, u, "vtd-fault", 0, &msg);
+    u->fault_vector = irq_request_msi(vtd_fault_irq, u, "vtd-fault", 0, 0, &msg);
     if (u->fault_vector >= 0) {
         wr32(u, VTD_FEDATA, msg.data);
         wr32(u, VTD_FEADDR, (uint32_t)msg.addr);

@@ -103,8 +103,10 @@ int arch_irqc_unmask(unsigned gsi)
     return ioapic_unmask(gsi);
 }
 
-int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data)
 {
+    (void)devid;   /* an APIC message names its target, not its sender */
     if (cpu >= CONFIG_MAX_CPUS || vector < VECTOR_DYNAMIC_FIRST || vector > VECTOR_DYNAMIC_LAST)
         return -EINVAL;
     uint32_t apic = x86_cpu_apic_id(cpu);

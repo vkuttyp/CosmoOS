@@ -16,6 +16,7 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
+#include <kernel/page.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/spinlock.h>
@@ -253,8 +254,10 @@ static int gicv2_unmask(unsigned gsi)
     return 0;
 }
 
-static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data)
 {
+    (void)devid;   /* a frame raises an SPI; which device wrote to it does not matter */
     if (!vector_is_dynamic(vector))
         return -EINVAL;
     /* The frame's SPI range can overlap lines firmware wired to devices
@@ -293,6 +296,15 @@ static void gicv2_eoi(unsigned vector)
     if (vector == VEC_SPURIOUS)
         return;
     gicc_wr(GICC_EOIR, g_cur_intid[arch_cpu_id()]);
+}
+
+static bool gicv2_msi_doorbell(paddr_t *pa, size_t *len)
+{
+    if (g_v2m.spi_count == 0)
+        return false;
+    *pa = gicv2m_setspi_addr(&g_v2m) & ~(paddr_t)(PAGE_SIZE - 1);
+    *len = PAGE_SIZE;
+    return true;
 }
 
 static unsigned gicv2_gsi_count(void)
@@ -457,6 +469,7 @@ const struct aarch64_irqc_ops aarch64_gicv2_ops = {
     .unmask = gicv2_unmask,
     .eoi = gicv2_eoi,
     .msi_compose = gicv2_msi_compose,
+    .msi_doorbell = gicv2_msi_doorbell,
     .gsi_count = gicv2_gsi_count,
     .spurious_vector = gicv2_spurious_vector,
     .current_intid = gicv2_current_intid,

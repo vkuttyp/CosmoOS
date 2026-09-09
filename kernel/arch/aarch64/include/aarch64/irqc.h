@@ -38,7 +38,11 @@ struct aarch64_irqc_ops {
     int  (*mask)(unsigned gsi);
     int  (*unmask)(unsigned gsi);
     void (*eoi)(unsigned vector);
-    int  (*msi_compose)(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data);
+    int  (*msi_compose)(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr, uint32_t *data);
+
+    /* Where this driver's MSI doorbell is, for an IOMMU to let
+     * through; false when it has no MSI at all. */
+    bool (*msi_doorbell)(paddr_t *pa, size_t *len);
 
     unsigned (*gsi_count)(void);
     unsigned (*spurious_vector)(void);
