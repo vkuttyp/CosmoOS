@@ -822,6 +822,11 @@ static int gicv3_test_msi_overlap_gsi(void)
     return -1;
 }
 
+static bool gicv3_test_msi_per_device(void)
+{
+    return g_its != NULL;
+}
+
 const struct aarch64_irqc_ops aarch64_gicv3_ops = {
     .name = "GICv3",
     .init = gicv3_init,
@@ -847,4 +852,5 @@ const struct aarch64_irqc_ops aarch64_gicv3_ops = {
     .test_spare_gsi = gicv3_test_spare_gsi,
     .test_raise = gicv3_test_raise,
     .test_msi_overlap_gsi = gicv3_test_msi_overlap_gsi,
+    .test_msi_per_device = gicv3_test_msi_per_device,
 };

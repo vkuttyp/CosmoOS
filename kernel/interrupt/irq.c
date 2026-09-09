@@ -5,6 +5,8 @@
 #include <kernel/acpi.h>
 #include <kernel/errno.h>
 #include <kernel/irq.h>
+#include <kernel/percpu.h>
+#include <kernel/smp.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/spinlock.h>
@@ -43,6 +45,27 @@ static unsigned arch_flags(unsigned flags)
     return f;
 }
 
+/*
+ * IRQ_CPU_ANY: the next online CPU, round-robin. Until the controllers
+ * could place an interrupt anywhere this was moot and every driver said
+ * "CPU 0"; now that they can (invariant A20, `irq-affinity`), a device
+ * with no preference should not add to the boot CPU's pile. Drivers
+ * that do have a preference -- a queue per CPU -- still name one.
+ */
+static unsigned place(unsigned cpu)
+{
+    static unsigned next;
+    if (cpu != IRQ_CPU_ANY)
+        return cpu;
+    unsigned n = cpu_count();
+    for (unsigned tries = 0; tries < n; tries++) {
+        unsigned c = __atomic_fetch_add(&next, 1u, __ATOMIC_RELAXED) % n;
+        if (cpu_online(c))
+            return c;
+    }
+    return 0;
+}
+
 int irq_request(irq_t irq, interrupt_handler_fn fn, void *arg, const char *name, unsigned flags,
                 unsigned cpu)
 {
@@ -52,6 +75,7 @@ int irq_request(irq_t irq, interrupt_handler_fn fn, void *arg, const char *name,
 
     arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
 
+    cpu = place(cpu);
     struct irq_slot *slot = &g_irqs[irq];
     if (slot->vector >= 0) {
         spin_unlock_irqrestore(&g_irq_lock, s);
@@ -93,6 +117,7 @@ int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsign
     KASSERT(g_initialized);
     if (fn == NULL || msg == NULL)
         return -EINVAL;
+    cpu = place(cpu);
 
     arch_irq_state_t s = spin_lock_irqsave(&g_irq_lock);
     int vector = arch_vector_alloc();

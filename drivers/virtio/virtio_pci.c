@@ -9,6 +9,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/irq.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -340,7 +341,7 @@ static int vpci_probe(struct pci_device *pdev, const struct pci_id *id)
         return granted < 0 ? granted : -ENODEV;
     }
     v->msix_vectors = (unsigned)granted;
-    if (pci_msix_request(pdev, 0, vpci_config_irq, v, "virtio-cfg", 0) < 0) {
+    if (pci_msix_request(pdev, 0, vpci_config_irq, v, "virtio-cfg", IRQ_CPU_ANY) < 0) {
         pci_msix_disable(pdev);
         vpci_unmap_all(v);
         kfree(v);

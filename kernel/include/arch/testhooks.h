@@ -55,4 +55,10 @@ void arch_test_irq_raise(unsigned gsi);
  * creates when it wires a device to a line inside the MSI frame. */
 int arch_test_msi_overlap_gsi(void);
 
+/* True when the controller translates an MSI per writing device, so the
+ * device id `irq_request_msi` carries is load-bearing and a device it
+ * cannot describe must be refused (a GICv3 ITS). False where the id is
+ * ignored, and the test that checks the refusal has nothing to check. */
+bool arch_test_msi_per_device(void);
+
 #endif /* ARCH_TESTHOOKS_H */

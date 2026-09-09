@@ -164,3 +164,8 @@ int arch_test_msi_overlap_gsi(void)
 {
     return g_ops ? g_ops->test_msi_overlap_gsi() : -1;
 }
+
+bool arch_test_msi_per_device(void)
+{
+    return g_ops ? g_ops->test_msi_per_device() : false;
+}

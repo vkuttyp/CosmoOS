@@ -72,6 +72,7 @@ struct aarch64_irqc_ops {
      * bound to it: binding it is how a test provokes the overlap
      * firmware can create between wired interrupts and the MSI frame. */
     int  (*test_msi_overlap_gsi)(void);
+    bool (*test_msi_per_device)(void);
 };
 
 extern const struct aarch64_irqc_ops aarch64_gicv2_ops;

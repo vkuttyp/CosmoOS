@@ -186,3 +186,35 @@ bool selftest_irq_msi_overlap(const char **reason)
     kinfo("selftest: irq-msi-overlap: GSI %d stayed wired; the MSI took %u instead", wired, msg.data);
     return true;
 }
+
+/* --- a device the controller cannot describe is refused ---
+ *
+ * An ITS translates (DeviceID, EventID), and its device table has a
+ * reach: a device id beyond it has nowhere to be recorded. Composing a
+ * message anyway would hand the driver an address to program and an
+ * interrupt that never arrives, which is the failure mode this whole
+ * unit keeps running into. So the id is load-bearing, and this is the
+ * test that it actually reaches the controller: with a device id no
+ * table can hold, the request must fail.
+ */
+bool selftest_irq_msi_devid(const char **reason)
+{
+    if (!arch_test_msi_per_device()) {
+        kinfo("selftest: irq-msi-devid: this controller ignores the device id; skipping");
+        return true;
+    }
+    struct irq_msi_msg msg = { 0, 0 };
+    int vector = irq_request_msi(msi_handler, NULL, "selftest-devid", arch_cpu_id(), 0xFFFFFFFFu, &msg);
+    if (vector >= 0) {
+        irq_release_msi(vector);
+        *reason = "a device id the controller cannot describe was given a message anyway";
+        return false;
+    }
+    /* And a device id it can describe still works, so the refusal above
+     * is about the id and not about MSIs being unavailable. */
+    vector = irq_request_msi(msi_handler, NULL, "selftest-devid", arch_cpu_id(), 0, &msg);
+    CHECK(vector >= 0);
+    irq_release_msi(vector);
+    kinfo("selftest: irq-msi-devid: device id 0xffffffff refused, 0 accepted");
+    return true;
+}

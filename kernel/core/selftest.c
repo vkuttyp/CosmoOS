@@ -353,6 +353,7 @@ static const struct selftest tests[] = {
     { "irq-route",       selftest_irq_route },
     { "irq-affinity",    selftest_irq_affinity },
     { "irq-msi-overlap", selftest_irq_msi_overlap },
+    { "irq-msi-devid",   selftest_irq_msi_devid },
     { "thread",          selftest_thread },
     { "yield",           selftest_yield },
     { "preempt",         selftest_preempt },

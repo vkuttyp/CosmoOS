@@ -22,6 +22,11 @@ typedef unsigned irq_t;
 
 #define IRQ_MAX 1024u   /* GSIs: IOAPIC pins on x86-64, GIC INTIDs on AArch64 */
 
+/* Placement: a driver that has no reason to prefer a CPU asks for this
+ * and the subsystem spreads its interrupts across the online ones. A
+ * driver that does have a reason -- a queue per CPU -- names the CPU. */
+#define IRQ_CPU_ANY (~0u)
+
 #define IRQ_TRIGGER_EDGE  0u
 #define IRQ_TRIGGER_LEVEL (1u << 0)
 #define IRQ_POLARITY_LOW  (1u << 1)

@@ -479,11 +479,11 @@ void arm_smmuv3_init(void)
     wr32(u, SMMU_CR0, CR0_CMDQEN | CR0_EVENTQEN);
     wait_eq(u, SMMU_CR0ACK, CR0_CMDQEN | CR0_EVENTQEN);
 
-    if (irq_request(desc.event_intid, smmu_event_irq, u, "smmu-eventq", IRQ_TRIGGER_EDGE, 0) == 0)
+    if (irq_request(desc.event_intid, smmu_event_irq, u, "smmu-eventq", IRQ_TRIGGER_EDGE, IRQ_CPU_ANY) == 0)
         irq_enable(desc.event_intid);
     else
         kwarn("iommu: smmuv3: cannot request the event queue interrupt");
-    if (irq_request(desc.gerror_intid, smmu_gerror_irq, u, "smmu-gerror", IRQ_TRIGGER_EDGE, 0) == 0)
+    if (irq_request(desc.gerror_intid, smmu_gerror_irq, u, "smmu-gerror", IRQ_TRIGGER_EDGE, IRQ_CPU_ANY) == 0)
         irq_enable(desc.gerror_intid);
     wr32(u, SMMU_IRQ_CTRL, IRQ_CTRL_GERROR_IRQEN | IRQ_CTRL_EVENTQ_IRQEN);
     wait_eq(u, SMMU_IRQ_CTRLACK, IRQ_CTRL_GERROR_IRQEN | IRQ_CTRL_EVENTQ_IRQEN);

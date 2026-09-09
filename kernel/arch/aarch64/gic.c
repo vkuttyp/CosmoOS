@@ -458,6 +458,11 @@ static int gicv2_test_msi_overlap_gsi(void)
     return -1;
 }
 
+static bool gicv2_test_msi_per_device(void)
+{
+    return false;   /* a frame raises its SPI whoever wrote to it */
+}
+
 const struct aarch64_irqc_ops aarch64_gicv2_ops = {
     .name = "GICv2",
     .init = gicv2_init,
@@ -483,4 +488,5 @@ const struct aarch64_irqc_ops aarch64_gicv2_ops = {
     .test_spare_gsi = gicv2_test_spare_gsi,
     .test_raise = gicv2_test_raise,
     .test_msi_overlap_gsi = gicv2_test_msi_overlap_gsi,
+    .test_msi_per_device = gicv2_test_msi_per_device,
 };

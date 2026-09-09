@@ -179,3 +179,8 @@ int arch_test_msi_overlap_gsi(void)
 {
     return -1;
 }
+
+bool arch_test_msi_per_device(void)
+{
+    return false;   /* an APIC message names its target, not its sender */
+}
