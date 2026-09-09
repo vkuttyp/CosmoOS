@@ -24,7 +24,13 @@ qemu-system-aarch64 -machine virt,gic-version=2,accel=tcg -cpu cortex-a72 -smp 4
   `QEMU_MSI` selects how an MSI reaches it: `its` (QEMU's default under
   `gic-version=3`, and what GICv3 hardware offers), `gicv2m` (the frame,
   the only path a GICv2 has and the fallback a GICv3 takes when firmware
-  describes no ITS), or `off`. **`msi=off` cannot boot this tree**: no
+  describes no ITS), or `off`. **`QEMU_MSI` needs QEMU 11 or newer**:
+  the `virt` machine's `msi` property does not exist in 10 and earlier,
+  where the boot fails half a second in with `Property
+  'virt-10.0-machine.msi' not found`. `qemu-run.sh` checks and says so
+  rather than passing it through. The ITS needs no property at all --
+  `gic-version=3` builds one by default -- so only the GICv2m-under-
+  GICv3 shape is affected. **`msi=off` cannot boot this tree**: no
   driver here falls back to INTx, so NVMe and AHCI fail to probe and the
   harness loses the device markers it requires; it exists so the decline
   path can be exercised deliberately. **`gic-version=2` caps the machine
@@ -86,9 +92,16 @@ QEMU's virt defaults to `gic-version=2`, `make test` does not set
 `QEMU_GIC`, and CI did not either -- so between the GICv3 unit landing
 and this target existing, **nothing automated ran the GICv3 driver or
 the ITS at all**. `make ARCH=aarch64 test-gic` runs the boot test on the
-GICv3 machine in both MSI configurations (an ITS, and a GICv2m frame),
-and `.github/workflows/ci.yml` calls it for every architecture in the
-matrix -- on x86-64 it prints that there is no GIC and succeeds.
+GICv3 machine with its default MSI path (an ITS) and then, where the
+QEMU is new enough to have the `msi` property, with a GICv2m frame; on
+an older QEMU it says which shape it skipped and why.
+`.github/workflows/ci.yml` calls it for every architecture in the matrix
+-- on x86-64 it prints that there is no GIC and succeeds.
+
+That version split is the first thing this step found. CI's QEMU is 10
+and the development host's is 11, so `QEMU_MSI` -- added by the GICv3
+unit and never run by CI, because CI never set `QEMU_GIC` either --
+worked everywhere it was tried and nowhere it was not.
 
 The virtual GIC is GICv3-only, so every `el2-guest-irq*` test runs there
 and nowhere else; this target is what keeps them run.

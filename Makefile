@@ -4,7 +4,7 @@
 #   make image        FAT boot image with loader and kernel
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
-#   make test-gic     AArch64: the same boot test on the GICv3 machine, both MSI paths
+#   make test-gic     AArch64: the same boot test on the GICv3 machine
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
@@ -75,8 +75,13 @@ test: $(IMAGE)
 # architectures with no GIC, so CI can call it for every target.
 test-gic:
 ifeq ($(ARCH),aarch64)
-	$(Q)QEMU_GIC=3 QEMU_MSI=its $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test
-	$(Q)QEMU_GIC=3 QEMU_MSI=gicv2m $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test
+	$(Q)QEMU_GIC=3 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test
+	$(Q)if qemu-system-aarch64 -machine virt,help 2>&1 | grep -q '^  *msi='; then \
+		QEMU_GIC=3 QEMU_MSI=gicv2m $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test; \
+	else \
+		echo "test-gic: this QEMU has no virt 'msi' property (needs 11 or newer);"; \
+		echo "test-gic: the GICv2m-under-GICv3 fallback is not exercised here."; \
+	fi
 else
 	@echo "test-gic: $(ARCH) has no GIC; nothing to do"
 endif
