@@ -59,6 +59,22 @@ struct acpi_gic {
     paddr_t gicc_gicr_base;  /* the first GICC entry's own redistributor base, 0 if none */
     paddr_t its_base;        /* GIC ITS entry: translator base, 0 if none */
     unsigned its_id;         /* the ITS's own id, for the command it is given */
+    /*
+     * Virtualisation. A GICv2 hypervisor drives guests through two more
+     * frames: GICH, which it programs, and GICV, which it maps where the
+     * guest expects its CPU interface. A GICv3 replaces both with EL2
+     * system registers and leaves the two addresses zero -- measured on
+     * QEMU's virt, which reports GICH 0x8030000 / GICV 0x8040000 under
+     * `gic-version=2` and 0 / 0 under `gic-version=3`.
+     *
+     * The maintenance interrupt is not part of that split: it is a PPI
+     * either way, and both machines report GSIV 25. So `gich_base` is
+     * what says which kind of hypervisor interface this is; the GSIV
+     * only says which line it raises.
+     */
+    paddr_t gicv_base;       /* GICC entry: the guest's CPU interface, 0 if none */
+    paddr_t gich_base;       /* the hypervisor control frame, 0 if none */
+    unsigned maint_gsiv;     /* the VGIC maintenance interrupt, 0 if none */
 };
 
 struct acpi_madt_override {
