@@ -12,6 +12,7 @@
 #include <kernel/bootinfo.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/irq.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/percpu.h>
@@ -29,6 +30,7 @@
 #include <aarch64/hv_ctx.h>
 #include <aarch64/hv_el2.h>
 #include <aarch64/irqc.h>
+#include <aarch64/platform.h>
 #include <aarch64/vgic.h>
 #include <aarch64/hv_s2.h>
 #include <aarch64/sysreg.h>
@@ -45,6 +47,11 @@
 #define HCR_TID3 (1ull << 18)   /* ID register reads trap */
 #define HCR_TSC  (1ull << 19)   /* SMC exits */
 #define HCR_RW   (1ull << 31)   /* EL1 is AArch64 */
+
+/* CNTV_CTL_EL0 */
+#define CNTV_CTL_ENABLE  (1ull << 0)
+#define CNTV_CTL_IMASK   (1ull << 1)
+#define CNTV_CTL_ISTATUS (1ull << 2)
 
 /*
  * A list register (ICH_LR<n>_EL2): the state in the top two bits, the
@@ -86,6 +93,7 @@ struct arch_hv_vm {
     paddr_t s2_root;
     uint16_t vmid;
     cpumask_t ran_on;
+    uint64_t cntvoff;        /* CNTVOFF_EL2 for every vCPU: the VM's clock starts here */
 };
 
 struct arch_hv_vcpu {
@@ -95,6 +103,8 @@ struct arch_hv_vcpu {
     int offered;
     int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
     bool lr_reported;        /* its delivery has already been told to the owner */
+    bool timer_reported;     /* this expiry has already been offered */
+    uint64_t host_cntv_after;/* host CNTV_CTL captured at the last exit, race-free */
     uint64_t irq_delivered;  /* interrupts the guest took */
     uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
@@ -157,6 +167,62 @@ static int64_t el2_run(paddr_t ctx)
     return (int64_t)x0;
 }
 
+/*
+ * The virtual timer's PPI is the hypervisor's. A guest's CNTV expiry has
+ * to become a physical interrupt for `HCR_EL2.IMO` to turn it into an
+ * exit, and a PPI that is not enabled in the redistributor raises
+ * nothing -- so the line is bound once here and enabled on each CPU as
+ * that CPU's switch is installed. The handler has nothing to do: by the
+ * time the host is back at EL1 the switch has disarmed the timer, the
+ * level source is down, and the decision to inject was already made from
+ * the CNTV_CTL the switch saved before disarming it. It exists so that
+ * a physical interrupt that does still arrive is acknowledged rather
+ * than left to storm.
+ */
+static unsigned g_vtimer_intid;
+static bool g_vtimer_bound;
+
+static void el2_vtimer_irq(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector;
+    (void)frame;
+    (void)arg;
+    /*
+     * If this ran with the virtual timer *enabled* in the host's own
+     * context, a guest's timer has leaked past the switch -- the host
+     * never arms CNTV -- and the level source will hold the line up until
+     * it is quieted. Quiet it, and say so: without this the leak is not
+     * a failed test but a storm nothing survives to report, which is how
+     * the first bug-proof of the disarm presented. The disarm on the
+     * switch's exit path is the fix; this is what makes a regression of
+     * it a message instead of a hang.
+     */
+    uint64_t ctl = READ_SYSREG(cntv_ctl_el0);
+    if ((ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE) {
+        WRITE_SYSREG(cntv_ctl_el0, 0);
+        isb();
+        static bool said;
+        if (!said) {
+            said = true;
+            kwarn("hv: a guest's virtual timer was live in the host (CNTV_CTL 0x%llx); disarmed",
+                  (unsigned long long)ctl);
+        }
+    }
+}
+
+static void el2_vtimer_bind(void)
+{
+    g_vtimer_intid = aarch64_timer_virt_intid();
+    int rc = irq_request(g_vtimer_intid, el2_vtimer_irq, NULL, "hv-vtimer", IRQ_TRIGGER_LEVEL, IRQ_CPU_ANY);
+    if (rc == 0)
+        rc = irq_enable(g_vtimer_intid);
+    if (rc) {
+        kwarn("hv: cannot take the virtual timer PPI %u (%d); guest timers will not fire", g_vtimer_intid, rc);
+        return;
+    }
+    g_vtimer_bound = true;
+}
+
 /* Every CPU installs the switch for itself: VBAR_EL2 and SP_EL2 are
  * per-CPU registers, and the stub is the only way to set either. The
  * stack comes first, because our own vectors do not implement that
@@ -176,6 +242,10 @@ static bool el2_ready_here(void)
         return false;
     if (el2_set_vectors(kernel_va_to_pa(hv_el2_vectors)) != 0)
         return false;
+    /* PPI enables are banked: this CPU's copy, so a guest's timer expiry
+     * here is an interrupt and therefore an exit. */
+    if (g_vtimer_bound)
+        gic_enable_local(g_vtimer_intid);
     g_el2_ready[cpu] = true;
     return true;
 }
@@ -277,6 +347,7 @@ static int el2_probe(struct hv_caps *out)
                 kwarn("hv: %u priority bits; only ICH_AP{0,1}R0_EL2 are saved per vCPU", pribits);
         }
     }
+    el2_vtimer_bind();
     kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs, guest interrupts %s",
           pa_bits[parange], HV_VMIDS_MAX - 1,
           g_caps.inject_irq ? "through the virtual GIC" : "unavailable (no GICv3 virtual interface)");
@@ -304,6 +375,10 @@ static int el2_vm_create(struct arch_hv_vm **out)
         kfree(vm);
         return -ENOMEM;
     }
+    /* One offset per VM, taken once: a vCPU created later than its
+     * siblings must see the same clock they do, so the value is the
+     * VM's and not the counter's at each vCPU's creation. */
+    vm->cntvoff = READ_SYSREG(cntpct_el0);
     *out = vm;
     return 0;
 }
@@ -368,9 +443,14 @@ static void ctx_reset(struct arch_hv_vcpu *v)
      * is a guest whose own PMR masks everything -- which is what a
      * guest that has not configured its CPU interface should see.
      */
+    /* The guest's timer starts disarmed and its clock at the VM's zero. */
+    c->cntv_ctl = 0;
+    c->cntv_cval = 0;
+    c->cntvoff = v->vm->cntvoff;
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
     v->lr_vector = -1;
     v->lr_reported = false;
+    v->timer_reported = false;
     c->vgic_hcr = c->vgic_on ? ICH_HCR_EN : 0;
     v->offered = -1;
     v->pending_event = ~0u;
@@ -548,6 +628,66 @@ bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
     return true;
 }
 
+bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff)
+{
+    *ctl = v->ctx->cntv_ctl;
+    *cntvoff = v->ctx->cntvoff;
+    return true;
+}
+
+uint64_t el2_vcpu_host_cntv_after(struct arch_hv_vcpu *v)
+{
+    return v->host_cntv_after;
+}
+
+/*
+ * Whether the guest's timer expired during the last run. Read from the
+ * CNTV_CTL the switch saved *before* disarming: ENABLE with IMASK clear
+ * and ISTATUS set is the timer's own statement that its condition was
+ * met and it was allowed to say so. Independent of which exit occurred
+ * and of whether the host ever saw the physical interrupt.
+ *
+ * Reported once per expiry: the guest's handler masks or re-arms, which
+ * clears the condition, and until it does the same expiry would read
+ * true on every exit and be injected again.
+ */
+
+static bool el2_vcpu_timer_expired(struct arch_hv_vcpu *v)
+{
+    uint64_t ctl = v->ctx->cntv_ctl;
+    bool firing = (ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS)) ==
+                  (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS);
+    if (!firing) {
+        v->timer_reported = false;
+        return false;
+    }
+    if (v->timer_reported)
+        return false;
+    v->timer_reported = true;
+    return true;
+}
+
+/*
+ * The guest's compare, in the host's counter. CNTV compares CNTVCT --
+ * CNTPCT minus the VM's offset -- against CVAL, so the host-counter
+ * value at which it fires is CVAL plus the offset. Only while the timer
+ * is armed, unmasked and has not fired: an expired timer is an
+ * interrupt to deliver, not a deadline to wait for.
+ */
+static bool el2_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
+{
+    uint64_t ctl = v->ctx->cntv_ctl;
+    if ((ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS)) != CNTV_CTL_ENABLE)
+        return false;
+    *host_ticks = v->ctx->cntv_cval + v->ctx->cntvoff;
+    return true;
+}
+
+unsigned el2_guest_timer_intid(void)
+{
+    return g_vtimer_bound ? g_vtimer_intid : 0;
+}
+
 static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
     v->offered = vector;
@@ -676,9 +816,38 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
      * state and gets zeros, so no guest register stays live in the
      * kernel. Interrupts are off from here to the restore, so nothing
      * can switch threads in between. */
+    /*
+     * An expired timer would storm. The switch restores the guest's
+     * CNTV_CTL on entry, and if its condition already holds the PPI is
+     * asserted before the guest executes an instruction -- IMO makes
+     * that an exit, and the next entry does it again, forever, with the
+     * guest's handler never reached. So while an expiry is queued the
+     * PPI is disabled in this CPU's redistributor: the guest's own
+     * CNTV_CTL is untouched and reads what it wrote, the *virtual*
+     * interrupt in the list register is unaffected, and the physical one
+     * cannot exit. It is enabled again once the guest's handler has
+     * masked or re-armed, which is when the saved CTL stops saying
+     * ISTATUS. Banked per CPU, so this is the running CPU's copy.
+     */
+    if (g_vtimer_bound) {
+        uint64_t ctl = v->ctx->cntv_ctl;
+        bool firing = (ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS)) ==
+                      (CNTV_CTL_ENABLE | CNTV_CTL_ISTATUS);
+        if (firing)
+            gic_disable_local(g_vtimer_intid);
+        else
+            gic_enable_local(g_vtimer_intid);
+    }
     bool owner = aarch64_fpu_save_current();
     aarch64_fpu_area_restore(&v->fpu);
     int64_t rc = el2_run(v->ctx_pa);
+    /* The host's CNTV_CTL as the switch left it, captured before
+     * interrupts are re-enabled so nothing -- least of all the PPI 27
+     * handler -- can touch it first. If the exit path disarmed the
+     * guest's timer this is 0; if it did not, it is whatever the guest
+     * left. This is what `el2-guest-timer-isolated` reads, so the test
+     * sees the switch's work and not a later cleanup. */
+    v->host_cntv_after = READ_SYSREG(cntv_ctl_el0);
     aarch64_fpu_area_save(&v->fpu);
     if (!owner || !aarch64_fpu_restore_current()) {
         static const struct aarch64_fpu_area zero;
@@ -710,6 +879,8 @@ const struct hv_backend el2_backend = {
     .vcpu_run = el2_vcpu_run,
     .vcpu_set_irq = el2_vcpu_set_irq,
     .vcpu_irq_delivered = el2_vcpu_irq_delivered,
+    .vcpu_timer_expired = el2_vcpu_timer_expired,
+    .vcpu_timer_deadline = el2_vcpu_timer_deadline,
     .vcpu_inject_exception = el2_vcpu_inject_exception,
     .vcpu_advance_rip = el2_vcpu_advance_rip,
     .vcpu_set_rip = el2_vcpu_set_rip,

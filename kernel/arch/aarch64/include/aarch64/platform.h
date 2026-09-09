@@ -55,6 +55,7 @@ extern uint64_t aarch64_hhdm_base;
 /* --- timer.c --- */
 void aarch64_timer_init_cpu(void);
 void aarch64_timer_ack(unsigned intid);   /* gic.c: before dispatching a PPI */
+unsigned aarch64_timer_virt_intid(void);  /* the virtual timer's PPI: a guest's, and the hypervisor's to bind */
 
 /* --- pl011.c --- */
 void pl011_early_putc(char c);

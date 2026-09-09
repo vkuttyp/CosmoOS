@@ -103,6 +103,11 @@ tests are AArch64's and skip on x86.
 | `el2-guest-irq` | `aarch64/guest_irq.S` | **the unit's point**: the guest enables its own CPU interface, the owner injects INTID 42, and the handler acknowledges and calls out with the number it was given. The hypercall is between `ICC_IAR1_EL1` and `ICC_EOIR1_EL1`, so the list register reads **Active** -- delivery, not completion -- and the pending bit must already be clear. A second injection (43) is delivered after the first completes, so the register was released and not merely emptied once |
 | `el2-guest-irq-masked` | `aarch64/guest_irq.S` | injected while the guest has `PSTATE.I` set, it stays Pending in the list register and pending in the owner's set; it arrives when the mask clears. This is what tells "delivered" apart from "the guest happened to call out for another reason", and it is the test the active-priority leak broke |
 | `el2-guest-irq-private` | `aarch64/guest_irq.S` | PPI 27 and SGI 0 -- the private interrupts the old x86-shaped range refused -- are delivered, and 1020 and 8192 (an LPI) are refused |
+| `el2-guest-timer-isolated` | `aarch64/guest_timer.S` | the guest arms `CNTV` and exits; the host's own `CNTV_CTL_EL0` reads exactly what it read before the run, and the guest's `ENABLE` is in the guest's saved state and nowhere else. This is the measurement that opened the virtual-timer report -- `0x1` in the host where `0x2` had been -- as a test |
+| `el2-guest-timer-offset` | `aarch64/guest_timer.S` | two VMs made at different times read different `CNTVCT_EL0`s, both a few milliseconds after their own creation rather than the host's uptime; two vCPUs of one VM made 20 ms apart read the *same* clock, the later one later by the 20 ms and nothing else. The second half is what a per-vCPU offset would fail |
+| `el2-guest-phys-timer` | `aarch64/guest_ptimer.S` | `mrs x3, CNTPCT_EL0` and `msr CNTP_CTL_EL0, x4` are both `SYSREG` exits naming CRn 14 and the right CRm/Op2; the owner answers the read and steps over both, and the guest ends with the owner's answer, not the host's clock -- and the host's tick untouched |
+| `el2-guest-timer` | `aarch64/guest_timer.S` | the guest arms its timer for ~15 ms and heartbeats; its handler eventually calls out with INTID 27, `CNTV_CTL` read in the handler showing `ENABLE|ISTATUS` before it masked, the pending bit already clear, and the timer -- masked -- not firing again. A backend that injected on every host interrupt would deliver on the host's tick and the handler's `CNTV_CTL` would not read `ISTATUS` |
+| `el2-guest-timer-ontime` | `aarch64/guest_timer_wfi.S` | the idle loop every guest kernel has: arm, `WFI`, be woken. The `WFI` run must hold for most of the ~15 ms the guest asked for (measured on the host's clock), and the handler's own `CNTVCT` minus its `CVAL` -- lateness, in the guest's ticks -- must be less than the interval asked for. Measured: asked 15.6 ms, held 17 ms, 2.6 ms late |
 | `el2-guest-spin` | `aarch64/guest_spin.S` | a guest in a one-instruction loop: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick is taken to EL2 through `HCR_EL2.IMO`), and the guest's PC never left the loop |
 
 Without a backend every guest test and `hv-npt` return true after the
@@ -113,8 +118,8 @@ AArch64 that is what `QEMU_EL2=0` produces.
 
 Each architecture has its own, built for its own target: x86-64's are
 the real-mode and protected-mode guests below, AArch64's are
-`guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`, `guest_spin` and
-`guest_irq`,
+`guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`, `guest_spin`,
+`guest_irq`, `guest_timer`, `guest_ptimer` and `guest_timer_wfi`,
 one per exit the EL2 switch decodes. Both sets are flat binaries linked
 at guest-physical 0x1000 and carried in the boot archive as
 `tests/hv/<name>.bin`; the self-tests and `vmctl` load them from there.
@@ -133,6 +138,23 @@ instead, which always exits.
 
 The handler also leaves the acknowledged INTID in `x0` rather than
 restoring it: the number the guest saw is the evidence the test wants.
+
+`guest_timer_wfi.S` *does* wait in `WFI`, and may: nothing in it is
+pending-but-masked, so the `WFI` either traps (a `WFI` exit, which
+`vcpu_run` now holds until the guest's deadline) or the timer interrupt
+is taken first. Both timer guests report their own clock in `x1` on every
+hypercall, so lateness is measured in units the guest controls and the
+owner never has to trust the host's clock to judge it.
+
+### The `irq-route` source moved
+
+`arch_test_periodic_irq_start` was the virtual timer -- the one hardware
+periodic source to hand -- and is not now: `CNTV` is a guest's and its
+PPI is the hypervisor's to bind. The hook raises the distributor's spare
+SPI (the `irq-affinity` line) from a kernel timer at the requested rate,
+at tick granularity. The line `irq-route` requests, enables, counts, masks
+and releases is as real as before; what asserts it moved from a compare
+register to a callback, and the test passes unchanged.
 
 ## The x86 guest images
 

@@ -424,6 +424,23 @@ arrive. LPIs (8192 and up) are excluded: nothing can translate one for a
 guest. `pending` is sized from the widest range rather than from the 256
 that once covered x86 alone.
 
+**A guest's own timer arrives the same way.** After every run the
+backend answers `arch_hv_vcpu_timer_expired` -- on AArch64, from the
+`CNTV_CTL` the switch saved before disarming, whose `ISTATUS` is the
+timer's own account -- and the run loop injects
+`arch_hv_guest_timer_intid()` (PPI 27 on `virt`) into this same pending
+set. A timer is therefore not a second kind of delivery to get wrong:
+whatever delivers an owner's injection delivers the guest's alarm.
+
+**And a guest that waits is woken when its alarm goes.** On a `WFI`
+exit, if `arch_hv_vcpu_timer_deadline` reports the timer armed, unmasked
+and unfired, `vcpu_run` waits -- until that deadline on the host's
+counter, or until something else becomes pending, in millisecond slices
+-- *before* returning the exit. The `WFI` exit itself is unchanged; it
+arrives when there is a reason to run again, and the owner's re-entry
+then delivers a timer that has expired in the meantime. A guest that
+never arms a timer sees exactly what it always saw.
+
 **And whether anything may be injected at all** is
 `hv_caps.inject_irq`. A backend with no way to raise an interrupt in a
 guest reports false and `vcpu_inject` returns `-ENOTSUP` before the

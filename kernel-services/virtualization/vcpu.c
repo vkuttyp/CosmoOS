@@ -8,6 +8,8 @@
 #include <kernel/log.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/wait.h>
+#include <arch/timer.h>
 
 #include "hv_internal.h"
 
@@ -283,6 +285,15 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         int delivered = arch_hv_vcpu_irq_delivered(v->arch);
         if (delivered >= 0)
             vintr_clear(v, delivered);
+        /* The guest's own timer went off during that run: it becomes a
+         * pending interrupt like any the owner injects, and arrives
+         * through the same path -- so a timer is not a second kind of
+         * delivery to get wrong. */
+        if (arch_hv_vcpu_timer_expired(v->arch)) {
+            unsigned intid = arch_hv_guest_timer_intid();
+            if (intid)
+                vcpu_inject(v, intid);
+        }
 
         if (e.kind == HV_EXIT_INTR) {
             if (max_intr && ++intr >= max_intr) {
@@ -330,9 +341,46 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             break;
         }
         if (e.kind == HV_EXIT_WFI) {
-            /* The AArch64 form of "the guest has nothing to do until an
+            /*
+             * The AArch64 form of "the guest has nothing to do until an
              * interrupt": the owner decides whether to inject one and
-             * run again, exactly as for HLT. */
+             * run again, exactly as for HLT.
+             *
+             * But if the guest's own timer is armed, the guest *has*
+             * something to wait for and knows exactly when. Returning at
+             * once would hand the owner a WFI it can only answer by
+             * spinning on re-entry, so the wait happens here: until the
+             * deadline, or until something else becomes pending. The exit
+             * is the same WFI it always was; it just arrives when there
+             * is a reason to run again, and the timer is then late by
+             * the owner's re-entry and nothing more.
+             */
+            uint64_t deadline;
+            if (arch_hv_vcpu_timer_deadline(v->arch, &deadline)) {
+                uint64_t hz = arch_clock_hz();
+                uint64_t slice_ticks = hz / 1000;      /* one 1 ms slice, in counter ticks */
+                for (;;) {
+                    uint64_t now = arch_clock_read();
+                    if (now >= deadline || vintr_any(v) || process_kill_pending())
+                        break;
+                    /*
+                     * A slice at a time, so an injection from another
+                     * thread is never made to wait for the guest's alarm.
+                     * The tick-to-ns multiply is done only once the
+                     * remaining interval is inside a slice -- a guest may
+                     * arm its timer hours out, and `(deadline - now) * 1e9`
+                     * overflows a 64-bit value at a few minutes, which
+                     * would collapse a long deadline into a near-zero
+                     * sleep and spin here holding run_lock.
+                     */
+                    uint64_t remaining = deadline - now;
+                    if (remaining > slice_ticks) {
+                        thread_sleep_ns(1000000ULL);
+                    } else {
+                        thread_sleep_ns(remaining * 1000000000ULL / hz);
+                    }
+                }
+            }
             fill_common(v, x, COSMO_VM_EXIT_WFI);
             break;
         }

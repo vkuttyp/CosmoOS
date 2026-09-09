@@ -17,9 +17,11 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <arch/fpu.h>
 #include <arch/testhooks.h>
 #include <arch/el2.h>
+#include <arch/timer.h>
 
 #define CHECK(c)                                                    \
     do {                                                            \
@@ -872,6 +874,280 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     return true;
 }
 
+/* --- a guest's timer does not outlive the guest ---
+ *
+ * The measurement that opened the virtual-timer report, as a test. The
+ * host's tick is the physical timer and the virtual one is the guest's,
+ * but they are one set of registers: before the switch saved and
+ * disarmed them, a guest that armed CNTV left ENABLE live in the host
+ * (CNTV_CTL_EL0 read 0x1 where the host's own IMASK, 0x2, had been).
+ */
+bool selftest_el2_guest_timer_isolated(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK(vcpu_run(v, &x) == 0);                                    /* armed, then the heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+
+    /* The guest armed its timer -- its saved state says so -- and the
+     * host's CNTV_CTL as that run's *exit* left it is disarmed. Read
+     * from the value the switch captured with interrupts off, so a
+     * missing disarm is seen here and not papered over by the host's
+     * PPI handler cleaning up a moment later. */
+    uint64_t ctl = 0, off = 0;
+    CHECK(arch_hv_vcpu_timer_state(v->arch, &ctl, &off));
+    CHECK((ctl & 1u) != 0);                                         /* the guest armed it */
+    uint64_t host_after = arch_hv_vcpu_host_vtimer_after(v->arch);
+    CHECK((host_after & 1u) == 0);                                  /* the exit disarmed it */
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-timer-isolated: guest saved CNTV_CTL 0x%llx, host left 0x%llx",
+          (unsigned long long)ctl, (unsigned long long)host_after);
+    return true;
+}
+
+/* --- a guest's clock is its VM's, not the host's and not its vCPU's ---
+ *
+ * CNTVOFF_EL2 is one value per VM. Two VMs created at different times
+ * must see different clocks, neither of them the host's uptime; two
+ * vCPUs of one VM created at different times must see the same one.
+ * The second half is what a per-vCPU offset would fail, and a guest
+ * that compares time across its CPUs would find them disagreeing by
+ * however long apart the vCPUs were made.
+ */
+bool selftest_el2_guest_timer_offset(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0;
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm, &v0) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_a = x.hypercall.a0;                               /* the guest's CNTVCT */
+
+    /* A second vCPU of the same VM, made later: same clock. */
+    thread_sleep_ms(20);
+    struct vcpu *v1;
+    CHECK(vcpu_create(vm, 1, &v1) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_a_cpu1 = x.hypercall.a0;
+    uint64_t off0 = 0, off1 = 0, c = 0;
+    CHECK(arch_hv_vcpu_timer_state(v0->arch, &c, &off0));
+    CHECK(arch_hv_vcpu_timer_state(v1->arch, &c, &off1));
+    CHECK(off0 == off1);                                            /* the VM's, copied */
+    /* Both read a clock that started at the VM's creation: small, and
+     * the later vCPU's later -- by the 20 ms plus the run, not by the
+     * host's uptime. */
+    CHECK(t_vm_a_cpu1 > t_vm_a);
+
+    /* A second VM, made later still: a different, also-small clock. */
+    struct vm *vm_b;
+    struct vcpu *vb;
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm_b, &vb) == 0);
+    CHECK(vcpu_run(vb, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_b = x.hypercall.a0;
+    uint64_t offb = 0;
+    CHECK(arch_hv_vcpu_timer_state(vb->arch, &c, &offb));
+    CHECK(offb != off0);                                            /* its own */
+    /* Neither VM sees the host's counter: the offset is subtracted, so a
+     * guest's first read is well below the offset itself. */
+    CHECK(t_vm_a < off0);
+    CHECK(t_vm_b < offb);
+    kobject_put(&v1->obj);
+    drop_guest(vm_b, vb);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-timer-offset: VM A read %llu then %llu on its second vCPU; VM B read %llu",
+          (unsigned long long)t_vm_a, (unsigned long long)t_vm_a_cpu1, (unsigned long long)t_vm_b);
+    return true;
+}
+
+/* --- a guest may not read the host's clock or arm the host's tick ---
+ *
+ * CNTPCT_EL0 is the host's uptime and CNTP_* is the host's tick timer;
+ * both were open to a guest at EL1 because the loader's CNTHCTL_EL2
+ * (0x3) permits EL1 to use them and a guest is at EL1. The switch clears
+ * it for a guest now, so each access is a trap the owner sees -- and the
+ * second half is the one worth having: a guest that armed the host's
+ * tick was a fault the host would have felt.
+ */
+bool selftest_el2_guest_phys_timer(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_ptimer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct cosmo_vcpu_regs regs;
+
+    /* mrs x3, CNTPCT_EL0: a read of a CRn 14 register, trapped. The
+     * ISS names the register: Op0[21:20]=3 Op1[16:14]=3 CRn[13:10]=14
+     * CRm[4:1]=0 Op2[19:17]=1 for the counter. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
+    CHECK(!x.sysreg.write && x.sysreg.reg == 3);
+    CHECK(((x.sysreg.iss >> 10) & 0xF) == 14);                     /* CRn: the timers */
+    CHECK(((x.sysreg.iss >> 1) & 0xF) == 0 && ((x.sysreg.iss >> 17) & 0x7) == 1);  /* CNTPCT */
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.x[3] = 0x1234;                                             /* the owner's answer */
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+
+    /* msr CNTP_CTL_EL0, x4: a write to CRm 2 Op2 1, trapped -- and the
+     * host's own timer control must not have moved. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
+    CHECK(x.sysreg.write && x.sysreg.reg == 4);
+    CHECK(((x.sysreg.iss >> 10) & 0xF) == 14);
+    CHECK(((x.sysreg.iss >> 1) & 0xF) == 2 && ((x.sysreg.iss >> 17) & 0x7) == 1);  /* CNTP_CTL */
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.x[3] == 0x1234);    /* the guest got the answer, not the clock */
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-phys-timer: CNTPCT_EL0 read and CNTP_CTL_EL0 write both trapped");
+    return true;
+}
+
+/* --- a guest is woken by its own timer ---
+ *
+ * The unit's point. The guest arms CNTV for ~15 ms and heartbeats; the
+ * owner runs it until the guest's handler calls out, and requires that
+ * what arrived was the timer's INTID -- not one the owner injected,
+ * since the owner injects nothing here -- and that the guest's own
+ * CNTV_CTL, read in the handler, shows the timer had fired. A backend
+ * that injected on every host interrupt would deliver on the host's
+ * tick instead, and the handler's CNTV_CTL would not read ISTATUS.
+ */
+bool selftest_el2_guest_timer(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq || arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-timer: no virtual GIC or no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t armed_at = x.hypercall.a0;
+
+    /* Heartbeats until the handler speaks; bounded, because a timer that
+     * never fires is the failure this test exists to catch. */
+    unsigned beats = 0;
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        if (x.hypercall.nr == intid)
+            break;
+        CHECK(x.hypercall.nr == 2);
+        CHECK(++beats < 20000);
+    }
+    /* The handler's x1 is CNTV_CTL as the guest read it: ENABLE and
+     * ISTATUS, before it masked. And a real expiry is at or after the
+     * deadline the guest asked for. */
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);
+    uint64_t ctl = 0, off = 0;
+    CHECK(arch_hv_vcpu_timer_state(v->arch, &ctl, &off));
+    CHECK((ctl & 0x2u) != 0);                                       /* the handler masked it */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);   /* delivered, cleared */
+
+    /* Completing the handler returns the guest to its heartbeat, whose
+     * clock is past the deadline; and the timer, masked, does not fire
+     * again. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(x.hypercall.a0 > armed_at);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-timer: INTID %u after %u heartbeat(s), handler saw CNTV_CTL 0x%llx", intid,
+          beats, (unsigned long long)ctl);
+    return true;
+}
+
+/* --- and woken on time ---
+ *
+ * A guest that arms its timer and waits in WFI is the shape of every
+ * idle loop. Before this, the WFI exit came back at once and the owner
+ * could only spin on re-entry; now `vcpu_run` waits until the guest's
+ * deadline (or an injection) before returning it. Two things are
+ * measured, both in units the guest controls: the WFI run must have
+ * taken most of the 15 ms the guest asked for, and the handler's own
+ * CNTVCT minus its CVAL -- the lateness -- must be a small number of
+ * guest ticks, not the "whenever the owner next ran it" of before.
+ */
+bool selftest_el2_guest_timer_ontime(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq || arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-timer-ontime: no virtual GIC or no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_timer_wfi.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);                                    /* armed */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t armed_at = x.hypercall.a0, cval = x.hypercall.a1;
+    uint64_t asked_ticks = cval - armed_at;                         /* ~15 ms of guest ticks */
+
+    /* The WFI: the guest has nothing to do until its timer, and the run
+     * must not come back until then. Measured on the host's clock. */
+    uint64_t t0 = clock_now_ns();
+    CHECK(vcpu_run(v, &x) == 0);
+    uint64_t waited = clock_now_ns() - t0;
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    uint64_t asked_ns = asked_ticks * 1000000000ULL / arch_clock_hz();
+    CHECK(waited >= asked_ns / 2);                                  /* it waited, rather than returning at once */
+
+    /* Re-entered, the guest takes its timer straight away. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == intid);
+    uint64_t fired_at = x.hypercall.a0, cval_seen = x.hypercall.a1;
+    CHECK(cval_seen == cval);
+    CHECK(fired_at >= cval);                                        /* never early */
+    uint64_t late_ticks = fired_at - cval;
+    /* Late by less than the time it asked for: the owner's re-entry and
+     * a tick's granularity, not a scheduling accident. */
+    CHECK(late_ticks < asked_ticks);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-timer-ontime: asked %llu ticks, WFI held the run %llu ms, "
+          "fired %llu ticks late",
+          (unsigned long long)asked_ticks, (unsigned long long)(waited / 1000000ULL),
+          (unsigned long long)late_ticks);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -979,6 +1255,11 @@ bool selftest_el2_guest_irq(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_masked(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_private(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_queue(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_isolated(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_phys_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_ontime(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
