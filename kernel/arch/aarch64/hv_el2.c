@@ -186,6 +186,27 @@ static void el2_vtimer_irq(unsigned vector, struct arch_trap_frame *frame, void 
     (void)vector;
     (void)frame;
     (void)arg;
+    /*
+     * If this ran with the virtual timer *enabled* in the host's own
+     * context, a guest's timer has leaked past the switch -- the host
+     * never arms CNTV -- and the level source will hold the line up until
+     * it is quieted. Quiet it, and say so: without this the leak is not
+     * a failed test but a storm nothing survives to report, which is how
+     * the first bug-proof of the disarm presented. The disarm on the
+     * switch's exit path is the fix; this is what makes a regression of
+     * it a message instead of a hang.
+     */
+    uint64_t ctl = READ_SYSREG(cntv_ctl_el0);
+    if ((ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK)) == CNTV_CTL_ENABLE) {
+        WRITE_SYSREG(cntv_ctl_el0, 0);
+        isb();
+        static bool said;
+        if (!said) {
+            said = true;
+            kwarn("hv: a guest's virtual timer was live in the host (CNTV_CTL 0x%llx); disarmed",
+                  (unsigned long long)ctl);
+        }
+    }
 }
 
 static void el2_vtimer_bind(void)
