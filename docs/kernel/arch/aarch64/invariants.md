@@ -201,3 +201,19 @@ stands between the device and the controller, the doorbell page
 domain. **Checked by** `irq-msi-overlap`, `irq-msi-devid`, and the boot
 suite under each of `QEMU_MSI=its` and `QEMU_MSI=gicv2m` with and
 without `QEMU_IOMMU`.
+
+## A22: A guest's interrupt state belongs to its vCPU
+
+Every `ICH_*_EL2` register the world switch touches is saved into that
+vCPU's `struct hv_ctx` on exit and restored from it on entry: the list
+register, `ICH_VMCR_EL2`, and both active-priority registers. They are
+EL2 registers shared by every guest on the CPU, so anything left behind
+is another guest's problem -- a vCPU destroyed inside its handler leaves
+an active priority that silently refuses the next guest's interrupts.
+The switch touches none of them when `vgic_on` is clear, because on a
+machine without a GICv3 virtual interface they do not exist.
+`ICH_HCR_EL2` is cleared on the way out: the host takes its own
+interrupts through the physical interface. **Checked by**
+`el2-vgic-roundtrip` (the state crosses and comes back read from
+hardware) and by `el2-guest-irq-masked`, which is the test the leak
+broke.

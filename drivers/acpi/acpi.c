@@ -212,6 +212,20 @@ static void parse_madt(const struct acpi_madt *madt)
                 memcpy(&mpidr, p + 68, 8);
                 if (g_gic.gicc_base == 0)
                     g_gic.gicc_base = base;
+                /* Virtualisation, from the first entry that offers it:
+                 * every CPU's frames are the same on the machines this
+                 * runs on, and a hypervisor that needed per-CPU frames
+                 * would have to walk the entries itself. */
+                if (e->length >= 60 && g_gic.gich_base == 0) {
+                    uint64_t gicv, gich;
+                    uint32_t maint;
+                    memcpy(&gicv, p + 40, 8);
+                    memcpy(&gich, p + 48, 8);
+                    memcpy(&maint, p + 56, 4);
+                    g_gic.gicv_base = gicv;
+                    g_gic.gich_base = gich;
+                    g_gic.maint_gsiv = maint;
+                }
                 /* GICv3: each CPU's redistributor may be named here
                  * instead of by a GICR entry (offset 60, ACPI 5.1+). */
                 if (e->length >= 68 && g_gic.gicc_gicr_base == 0) {
@@ -358,6 +372,15 @@ void acpi_init(void)
                   (unsigned long long)g_gic.gicr_base, (unsigned long long)g_gic.gicr_length,
                   (unsigned long long)g_gic.gicc_gicr_base, g_gic.its_id,
                   (unsigned long long)g_gic.its_base);
+        /* What a hypervisor needs to give a guest interrupts. A GICv3
+         * reports no GICH and no GICV -- it has EL2 system registers
+         * instead -- but does report the maintenance GSIV, which is a
+         * PPI on both. Saying what firmware offered is the first step in
+         * deciding what can be done with it. */
+        if (g_gic.gich_base || g_gic.gicv_base || g_gic.maint_gsiv)
+            kinfo("acpi: GICH 0x%llx, GICV 0x%llx, VGIC maintenance GSIV %u",
+                  (unsigned long long)g_gic.gich_base, (unsigned long long)g_gic.gicv_base,
+                  g_gic.maint_gsiv);
     }
     else
         kinfo("acpi: %.4s rev %u, %zu tables, LAPIC at 0x%llx, %zu CPUs, %zu IOAPICs, %zu overrides",

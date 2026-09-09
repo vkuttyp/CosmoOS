@@ -54,7 +54,15 @@ int el2_set_stack(uint64_t sp_phys);
  * for that VMID, inner-shareable, and return. Only EL2 can name a VMID,
  * which is why this is a call and not an instruction the host runs. */
 #define HV_EL2_CALL_TLBI     0x12
-#define HV_EL2_VERSION       1
+/* Prepare the GIC's virtual interface and report it: sets
+ * ICC_SRE_EL2.{SRE,Enable} so EL1 -- the host, and a guest under it --
+ * may use the system-register interface at all, then returns
+ * ICH_VTR_EL2. Both are EL2-only registers, which is the whole reason
+ * the virtual GIC needs a call here rather than a driver at EL1. Must
+ * not be issued on a machine without a GICv3 CPU interface: the
+ * registers do not exist there and the read is UNDEFINED. */
+#define HV_EL2_CALL_VGIC     0x13
+#define HV_EL2_VERSION       2
 
 #ifndef __ASSEMBLER__
 /* For tests: the raw call, including selectors the stub refuses. */

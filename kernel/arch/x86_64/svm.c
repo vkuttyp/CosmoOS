@@ -86,7 +86,7 @@ static void svm_be_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip);
 static uint64_t svm_be_vcpu_rip(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size);
 static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
-static bool svm_be_vcpu_irq_taken(struct arch_hv_vcpu *v);
+static int svm_be_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 
@@ -152,6 +152,7 @@ static int svm_be_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = true;
     g_caps.max_vcpus = 0;            /* no backend limit below the manager's */
+    g_caps.inject_irq = true;        /* event injection at VM entry */
     kinfo("svm: AMD-V with nested paging, %u ASIDs usable%s%s", g_caps.max_asids - 1,
           (r.edx & CPUID_SVM_EDX_NRIP) ? ", nrip" : "", (r.edx & CPUID_SVM_EDX_DECODE) ? ", decode-assists" : "");
     *out = g_caps;
@@ -600,9 +601,13 @@ static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
     v->offered = vector;
 }
 
-static bool svm_be_vcpu_irq_taken(struct arch_hv_vcpu *v)
+/* An x86 interrupt is injected at entry and is either taken then or not:
+ * nothing holds it across a run, so the answer is always the vector this
+ * entry offered. */
+static int svm_be_vcpu_irq_delivered(struct arch_hv_vcpu *v)
 {
-    return v->offered >= 0 && (v->vmcb->control.v_irq & 1) == 0;
+    bool taken = v->offered >= 0 && (v->vmcb->control.v_irq & 1) == 0;
+    return taken ? v->offered : -1;
 }
 
 static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
@@ -741,7 +746,7 @@ const struct hv_backend svm_backend = {
     .vcpu_set_state = svm_be_vcpu_set_state,
     .vcpu_run = svm_be_vcpu_run,
     .vcpu_set_irq = svm_be_vcpu_set_irq,
-    .vcpu_irq_taken = svm_be_vcpu_irq_taken,
+    .vcpu_irq_delivered = svm_be_vcpu_irq_delivered,
     .vcpu_inject_exception = svm_be_vcpu_inject_exception,
     .vcpu_advance_rip = svm_be_vcpu_advance_rip,
     .vcpu_set_rip = svm_be_vcpu_set_rip,

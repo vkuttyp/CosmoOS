@@ -161,7 +161,22 @@ el2_sync:
     mov x0, #0
     eret
 
-2:  cmp x0, #HV_EL2_CALL_RUN
+2:  cmp x0, #HV_EL2_CALL_VGIC
+    b.ne 3f
+    /* Let EL1 reach the GIC's system-register interface -- the host
+     * already does on every machine tested, but saying so is EL2's job
+     * and a guest depends on it -- then report how many list registers
+     * this implementation has. ICC_SRE_EL2 and ICH_VTR_EL2 are both
+     * EL2-only, which is why this is a call. */
+    mrs x1, icc_sre_el2
+    mov x2, #0x9                     /* SRE | Enable */
+    orr x1, x1, x2
+    msr icc_sre_el2, x1
+    isb
+    mrs x0, ich_vtr_el2
+    eret
+
+3:  cmp x0, #HV_EL2_CALL_RUN
     b.ne el2_return_x0_minus1
 
     str x18, [x1, #HV_CTX_HOST_X18]  /* the host's x18 is reserved (-ffixed-x18): keep it */
@@ -210,6 +225,25 @@ el2_sync:
     msr spsr_el2, x2
     add x2, x18, #4096               /* the rest of the context page is EL2's stack */
     mov sp, x2
+
+    /* The guest's interrupt state. Only on a machine whose virtual
+     * interface exists -- these registers are UNDEFINED without a GICv3
+     * CPU interface, and `vgic_on` is the host's statement that it
+     * found one. */
+    ldr x2, [x18, #HV_CTX_VGIC_ON]
+    cbz x2, 1f
+    ldr x2, [x18, #HV_CTX_VGIC_VMCR]
+    msr ich_vmcr_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_LR0]
+    msr ich_lr0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_AP0R0]
+    msr ich_ap0r0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_AP1R0]
+    msr ich_ap1r0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_HCR]
+    msr ich_hcr_el2, x2
+    isb
+1:
 
     /* Guest general-purpose registers; x18 last, from itself. */
     ldp x0, x1, [x18, #(HV_CTX_GUEST_X + 0)]
@@ -294,6 +328,27 @@ el2_exit:
     mrs x2, hpfar_el2
     str x2, [x18, #HV_CTX_EXIT_HPFAR]
     SAVE_SYS x18, HV_CTX_GUEST_SYS, x4
+
+    /* What the guest did with its interrupts, and then the interface
+     * off: whatever it left enabled is not the host's business, and the
+     * host takes its own interrupts through the physical interface. */
+    ldr x2, [x18, #HV_CTX_VGIC_ON]
+    cbz x2, 2f
+    mrs x2, ich_lr0_el2
+    str x2, [x18, #HV_CTX_VGIC_LR0]
+    mrs x2, ich_vmcr_el2
+    str x2, [x18, #HV_CTX_VGIC_VMCR]
+    mrs x2, ich_elrsr_el2
+    str x2, [x18, #HV_CTX_VGIC_ELRSR]
+    mrs x2, ich_misr_el2
+    str x2, [x18, #HV_CTX_VGIC_MISR]
+    mrs x2, ich_ap0r0_el2
+    str x2, [x18, #HV_CTX_VGIC_AP0R0]
+    mrs x2, ich_ap1r0_el2
+    str x2, [x18, #HV_CTX_VGIC_AP1R0]
+    msr ich_hcr_el2, xzr
+    isb
+2:
 
     /* Back to the host: stage 2 off, its EL1 state and its registers. */
     msr vttbr_el2, xzr

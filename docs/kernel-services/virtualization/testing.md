@@ -99,6 +99,10 @@ tests are AArch64's and skip on x86.
 | `el2-guest-hvc` | `aarch64/guest_hvc.S` | `HVC` is a `HYPERCALL` exit carrying this architecture's convention (`x0` = 0x2A the number, `x1`–`x4` = 1..4 the arguments), with the PC already past the instruction as the architecture defines; the guest runs on afterwards (`x0` becomes 0x2B) and reaches its `WFI` |
 | `el2-guest-mmio` | `aarch64/guest_mmio.S` | a store to 0x4000_0000, which the VM has no memory at, is a stage-2 fault reported as an `MMIO` exit with that address and `write` set; after the owner steps over it the load is reported as a read — the direction comes from `ESR_EL2`, not a guess |
 | `el2-guest-sysreg` | `aarch64/guest_sysreg.S` | `HCR_EL2.TID3` traps `mrs x5, id_aa64pfr0_el1`: a `SYSREG` exit naming register 5 and a read, which is what lets a model answer; the owner writes the answer and steps over it |
+| `el2-vgic-roundtrip` | `aarch64/guest_wfi.S` | the guest's interrupt state crosses EL2 and comes back read from hardware: after a run, list register 0 is empty and `ICH_ELRSR_EL2` says it is free. On a machine with no virtual GIC there is no such state and the switch leaves those registers alone |
+| `el2-guest-irq` | `aarch64/guest_irq.S` | **the unit's point**: the guest enables its own CPU interface, the owner injects INTID 42, and the handler acknowledges and calls out with the number it was given. The hypercall is between `ICC_IAR1_EL1` and `ICC_EOIR1_EL1`, so the list register reads **Active** -- delivery, not completion -- and the pending bit must already be clear. A second injection (43) is delivered after the first completes, so the register was released and not merely emptied once |
+| `el2-guest-irq-masked` | `aarch64/guest_irq.S` | injected while the guest has `PSTATE.I` set, it stays Pending in the list register and pending in the owner's set; it arrives when the mask clears. This is what tells "delivered" apart from "the guest happened to call out for another reason", and it is the test the active-priority leak broke |
+| `el2-guest-irq-private` | `aarch64/guest_irq.S` | PPI 27 and SGI 0 -- the private interrupts the old x86-shaped range refused -- are delivered, and 1020 and 8192 (an LPI) are refused |
 | `el2-guest-spin` | `aarch64/guest_spin.S` | a guest in a one-instruction loop: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick is taken to EL2 through `HCR_EL2.IMO`), and the guest's PC never left the loop |
 
 Without a backend every guest test and `hv-npt` return true after the
@@ -109,12 +113,26 @@ AArch64 that is what `QEMU_EL2=0` produces.
 
 Each architecture has its own, built for its own target: x86-64's are
 the real-mode and protected-mode guests below, AArch64's are
-`guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg` and `guest_spin`,
+`guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`, `guest_spin` and
+`guest_irq`,
 one per exit the EL2 switch decodes. Both sets are flat binaries linked
 at guest-physical 0x1000 and carried in the boot archive as
 `tests/hv/<name>.bin`; the self-tests and `vmctl` load them from there.
 The `el2-guest-*` self-tests are AArch64's, the `hv-guest-*` tests are
 x86's, and each set skips with a note on the other architecture.
+
+### `guest_irq.S` waits in a hypercall, not a `WFI`
+
+Worth recording, because the first version did the obvious thing and
+hung the kernel for the watchdog's eight seconds. `HCR_EL2.TWI` traps a
+`WFI` only when it would actually **wait**: with an interrupt already
+pending -- the masked case, where the guest cannot take it -- the `WFI`
+completes as a no-op and traps nothing, so a guest built around one
+spins forever and `vcpu_run` never returns. Its heartbeat is `hvc`
+instead, which always exits.
+
+The handler also leaves the acknowledged INTID in `x0` rather than
+restoring it: the number the guest saw is the evidence the test wants.
 
 ## The x86 guest images
 

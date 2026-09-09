@@ -14,6 +14,7 @@
 #include <arch/el2.h>
 #include <arch/hv.h>
 #include <arch/hv_backend.h>
+#include <aarch64/hv_el2.h>
 #include <aarch64/sysreg.h>
 
 static const struct hv_backend *g_be;
@@ -35,11 +36,29 @@ int arch_hv_probe(struct hv_caps *out)
     out->map_prot = false;
     out->large_pages = false;
     out->max_vcpus = 0;
+    out->inject_irq = false;
     return -ENOTSUP;
 }
 
 /* Every call below happens only after a successful probe: the manager
  * refuses everything when caps.present is false (invariant V2). */
+
+void arch_hv_vintr_range(unsigned *lo, unsigned *hi)
+{
+    /* Every INTID a list register can carry. SGIs (0..15) and PPIs
+     * (16..31) are private to a CPU and are what a guest's own software
+     * uses; SPIs run to 1019. LPIs are above 8192 and need an ITS
+     * translation nothing here can give a guest. */
+    *lo = 0;
+    *hi = HV_VINTR_MAX;
+}
+
+/* Not a backend op: only this architecture has a virtual GIC, and only
+ * one backend here can drive one. */
+bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
+{
+    return el2_vcpu_vgic_state(v, lr0, elrsr);
+}
 
 int arch_hv_vm_create(struct arch_hv_vm **out) { return g_be->vm_create(out); }
 void arch_hv_vm_destroy(struct arch_hv_vm *vm) { g_be->vm_destroy(vm); }
@@ -59,7 +78,7 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 }
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out) { return g_be->vcpu_run(v, out); }
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_irq(v, vector); }
-bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_taken(v); }
+int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {
     g_be->vcpu_inject_exception(v, vector, has_error, error);

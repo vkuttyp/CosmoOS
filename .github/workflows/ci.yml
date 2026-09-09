@@ -69,6 +69,12 @@ jobs:
       - name: Boot test (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test
 
+      # QEMU's virt defaults to gic-version=2, so the step above exercises
+      # the GICv2 driver and never the GICv3 one or the ITS. A no-op on
+      # x86-64.
+      - name: Boot test on the other interrupt controller (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-gic
+
       - name: Build and boot test (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 

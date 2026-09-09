@@ -32,6 +32,36 @@
 #define HV_CTX_HOST_SP_EL2  0x300   /* SP_EL2 at the HVC: the per-CPU EL2 stack, put back on exit */
 #define HV_CTX_HOST_X18     0x308   /* the host's x18: reserved by the ABI, so the switch keeps it */
 
+/*
+ * The virtual GIC. `ICH_*_EL2` cannot be reached from EL1, so a guest's
+ * interrupt state lives here and the switch moves it: written on entry,
+ * read back on exit. `vgic_on` is what says whether to touch those
+ * registers at all -- on a machine without a GICv3 virtual interface
+ * they do not exist and the accesses are UNDEFINED.
+ *
+ * One list register. The generic layer offers one vector at a time, so
+ * a second would carry nothing; `ICH_VTR_EL2`'s count is recorded at
+ * probe and the occupancy is measured before more assembly is written
+ * for them.
+ */
+#define HV_CTX_VGIC_ON      0x310   /* nonzero: the switch moves the fields below */
+#define HV_CTX_VGIC_HCR     0x318   /* ICH_HCR_EL2 */
+#define HV_CTX_VGIC_VMCR    0x320   /* ICH_VMCR_EL2: the guest's own PMR, BPR and group enables */
+#define HV_CTX_VGIC_LR0     0x328   /* ICH_LR0_EL2 */
+#define HV_CTX_VGIC_ELRSR   0x330   /* read back: which list registers are free */
+#define HV_CTX_VGIC_MISR    0x338   /* read back: why maintenance would have fired */
+/*
+ * The active priorities. A guest that has acknowledged an interrupt and
+ * not completed it is *running at* that priority, and the fact lives in
+ * ICH_AP<n>R<m>_EL2 -- EL2 registers, shared by every guest on the CPU.
+ * Left unsaved, a vCPU destroyed inside its handler leaves its priority
+ * active and the next guest on that CPU is refused every interrupt that
+ * does not outrank it. One register of each group, which covers an
+ * implementation with five priority bits; probe warns above that.
+ */
+#define HV_CTX_VGIC_AP0R0   0x340
+#define HV_CTX_VGIC_AP1R0   0x348
+
 /* The EL1 system registers the switch moves, in this order. */
 #define HV_CTX_SYS_COUNT 20
 
@@ -64,6 +94,10 @@ struct hv_ctx {
     uint64_t exit_esr, exit_far, exit_hpfar, exit_kind;
     uint64_t host_sp_el2;
     uint64_t host_x18;
+    uint64_t vgic_on;
+    uint64_t vgic_hcr, vgic_vmcr, vgic_lr0;
+    uint64_t vgic_elrsr, vgic_misr;
+    uint64_t vgic_ap0r0, vgic_ap1r0;
 };
 
 _Static_assert(sizeof(struct hv_sysregs) == HV_CTX_SYS_COUNT * 8, "hv_sysregs order");
@@ -85,6 +119,14 @@ _Static_assert(__builtin_offsetof(struct hv_ctx, exit_hpfar) == HV_CTX_EXIT_HPFA
 _Static_assert(__builtin_offsetof(struct hv_ctx, exit_kind) == HV_CTX_EXIT_KIND, "ctx kind");
 _Static_assert(__builtin_offsetof(struct hv_ctx, host_sp_el2) == HV_CTX_HOST_SP_EL2, "ctx host sp_el2");
 _Static_assert(__builtin_offsetof(struct hv_ctx, host_x18) == HV_CTX_HOST_X18, "ctx host x18");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_on) == HV_CTX_VGIC_ON, "ctx vgic on");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_hcr) == HV_CTX_VGIC_HCR, "ctx vgic hcr");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_vmcr) == HV_CTX_VGIC_VMCR, "ctx vgic vmcr");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_lr0) == HV_CTX_VGIC_LR0, "ctx vgic lr0");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_elrsr) == HV_CTX_VGIC_ELRSR, "ctx vgic elrsr");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_misr) == HV_CTX_VGIC_MISR, "ctx vgic misr");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_ap0r0) == HV_CTX_VGIC_AP0R0, "ctx vgic ap0r0");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vgic_ap1r0) == HV_CTX_VGIC_AP1R0, "ctx vgic ap1r0");
 _Static_assert(sizeof(struct hv_ctx) <= 4096, "the context is one page");
 
 /* The EL2 vector table this backend installs through el2_set_vectors. */

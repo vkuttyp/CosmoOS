@@ -390,6 +390,7 @@ static int vmx_be_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = (ept_cap & VMX_EPT_2MB) != 0;
     g_caps.max_vcpus = 0;
+    g_caps.inject_irq = true;        /* event injection at VM entry */
     kinfo("vmx: VT-x with EPT%s%s, revision %u", unrestricted ? ", unrestricted guest" : "",
           vpid ? ", VPID" : "", g_revision);
     *out = g_caps;
@@ -744,9 +745,10 @@ static void vmx_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
     v->offered = vector;
 }
 
-static bool vmx_be_vcpu_irq_taken(struct arch_hv_vcpu *v)
+/* See svm.c: nothing holds an x86 interrupt across a run. */
+static int vmx_be_vcpu_irq_delivered(struct arch_hv_vcpu *v)
 {
-    return v->irq_taken;
+    return v->irq_taken ? v->offered : -1;
 }
 
 static void vmx_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
@@ -1106,7 +1108,7 @@ const struct hv_backend vmx_backend = {
     .vcpu_set_state = vmx_be_vcpu_set_state,
     .vcpu_run = vmx_be_vcpu_run,
     .vcpu_set_irq = vmx_be_vcpu_set_irq,
-    .vcpu_irq_taken = vmx_be_vcpu_irq_taken,
+    .vcpu_irq_delivered = vmx_be_vcpu_irq_delivered,
     .vcpu_inject_exception = vmx_be_vcpu_inject_exception,
     .vcpu_advance_rip = vmx_be_vcpu_advance_rip,
     .vcpu_set_rip = vmx_be_vcpu_set_rip,

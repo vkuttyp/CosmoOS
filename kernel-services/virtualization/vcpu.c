@@ -277,8 +277,12 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         if (rc)
             break;
         v->exits++;
-        if (offered >= 0 && arch_hv_vcpu_irq_taken(v->arch))
-            vintr_clear(v, offered);
+        /* What the guest took, which need not be what this entry
+         * offered: a controller that holds an interrupt across entries
+         * can deliver one offered several entries ago. */
+        int delivered = arch_hv_vcpu_irq_delivered(v->arch);
+        if (delivered >= 0)
+            vintr_clear(v, delivered);
 
         if (e.kind == HV_EXIT_INTR) {
             if (max_intr && ++intr >= max_intr) {

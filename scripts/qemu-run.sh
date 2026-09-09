@@ -177,15 +177,31 @@ if [ "$arch" = aarch64 ]; then
     # (docs/kernel/arch/aarch64/design.md). The scratch disk comes first so it
     # is vda for the storage self-tests, as on x86; the boot image is read-only.
     # An SMMUv3 in front of the PCI root complex (kernel/iommu); QEMU_IOMMU=0 leaves it out.
-    # The interrupt controller. QEMU_GIC selects the distributor version (2,
-# the default and what this kernel drives today, or 3/4) and QEMU_MSI the
-# way an MSI reaches it: its, gicv2m, or off. `msi=off` is not a
-# configuration this tree can boot -- no driver here falls back to INTx
-# (docs/audit/next-subsystem-gicv3.md) -- and is offered only so that the
-# decline path can be exercised deliberately.
-gic_msi=""
-[ -n "${QEMU_MSI:-}" ] && gic_msi=",msi=${QEMU_MSI}"
-iommu_machine=""
+    # The interrupt controller. QEMU_GIC selects the distributor version
+    # (2, QEMU's default, or 3/4) and QEMU_MSI the way an MSI reaches it:
+    # its, gicv2m, or off. `msi=off` is not a configuration this tree can
+    # boot -- no driver here falls back to INTx
+    # (docs/audit/next-subsystem-gicv3.md) -- and is offered only so that
+    # the decline path can be exercised deliberately.
+    #
+    # The `msi` property is newer than the machine: QEMU 10 and earlier
+    # have only `its=on|off`, and asking for `msi=` there fails with
+    # "Property 'virt-N-machine.msi' not found" half a second into the
+    # boot. Say so here instead, because the useful configuration --
+    # gic-version=3 with an ITS -- needs no property at all: an ITS is
+    # what that machine builds by default.
+    gic_msi=""
+    if [ -n "${QEMU_MSI:-}" ]; then
+        if qemu-system-aarch64 -machine virt,help 2>&1 | grep -q '^  *msi='; then
+            gic_msi=",msi=${QEMU_MSI}"
+        else
+            echo "qemu-run: this QEMU's virt machine has no 'msi' property (needs QEMU 11 or newer);" >&2
+            echo "qemu-run: QEMU_MSI=${QEMU_MSI} cannot be honoured. Drop it for the ITS, which is" >&2
+            echo "qemu-run: what gic-version=3 builds by default." >&2
+            exit 1
+        fi
+    fi
+    iommu_machine=""
     [ "${QEMU_IOMMU:-1}" != "0" ] && iommu_machine=",iommu=smmuv3"
     # The virtualization extensions: firmware then hands the loader EL2,
     # which it keeps for guests (docs/kernel/arch/aarch64/design.md,

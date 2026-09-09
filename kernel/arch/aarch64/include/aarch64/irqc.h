@@ -77,6 +77,11 @@ struct aarch64_irqc_ops {
     bool (*test_msi_per_device)(void);
 };
 
+/* Whether the live driver is the GICv3 one. Asked by the hypervisor,
+ * which can only give a guest interrupts through a GICv3's virtual
+ * interface; nothing else should care which driver won. */
+bool aarch64_irqc_is_v3(void);
+
 extern const struct aarch64_irqc_ops aarch64_gicv2_ops;
 extern const struct aarch64_irqc_ops aarch64_gicv3_ops;
 

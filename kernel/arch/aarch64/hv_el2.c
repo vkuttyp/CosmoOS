@@ -27,6 +27,9 @@
 
 #include <aarch64/fpu.h>
 #include <aarch64/hv_ctx.h>
+#include <aarch64/hv_el2.h>
+#include <aarch64/irqc.h>
+#include <aarch64/vgic.h>
 #include <aarch64/hv_s2.h>
 #include <aarch64/sysreg.h>
 
@@ -42,6 +45,34 @@
 #define HCR_TID3 (1ull << 18)   /* ID register reads trap */
 #define HCR_TSC  (1ull << 19)   /* SMC exits */
 #define HCR_RW   (1ull << 31)   /* EL1 is AArch64 */
+
+/*
+ * A list register (ICH_LR<n>_EL2): the state in the top two bits, the
+ * group and priority the guest's own mask is compared against, and the
+ * interrupt number the guest will see in ICC_IAR1_EL1.
+ *
+ * State matters more than it looks. Invalid means the register is free;
+ * Pending means placed and not yet taken; **Active means the guest has
+ * acknowledged it** and has not completed it, which is delivery as much
+ * as Invalid is. A hypervisor that waits for Invalid re-injects
+ * everything a guest was still handling when it exited.
+ */
+#define LR_STATE_MASK    (3ull << 62)
+#define LR_STATE_INVALID (0ull << 62)
+#define LR_STATE_PENDING (1ull << 62)
+#define LR_GROUP1        (1ull << 60)
+#define LR_PRIORITY(p)   ((uint64_t)(p) << 48)
+#define ICH_HCR_EN       (1ull << 0)
+
+/* Below the guest's own PMR of 0xF0, so an interrupt it has not masked
+ * is delivered; the same number the host's driver uses for its own. */
+#define VGIC_PRIORITY 0xA0u
+
+static uint64_t lr_state(uint64_t lr)
+{
+    return lr & LR_STATE_MASK;
+}
+
 
 /* ESR_EL2.EC values this backend decodes. */
 #define EC_WFX        0x01u
@@ -62,7 +93,10 @@ struct arch_hv_vcpu {
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
     int offered;
-    bool irq_taken;
+    int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
+    bool lr_reported;        /* its delivery has already been told to the owner */
+    uint64_t irq_delivered;  /* interrupts the guest took */
+    uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
     uint32_t pending_event;  /* a queued exception vector, ~0 for none */
     struct aarch64_fpu_area fpu;   /* the guest's vector registers (arch/fpu.h, guest rule) */
@@ -82,6 +116,32 @@ static paddr_t kernel_va_to_pa(const void *va)
 }
 
 static bool el2_ready_here(void);
+
+/* How many virtual interrupts this implementation can hold at once, and
+ * whether it can hold any: ICH_VTR_EL2 read through the switch. Set once
+ * at probe on the boot CPU; the count is a property of the
+ * implementation, not of a CPU. */
+static unsigned g_vgic_lrs;
+
+/* Ask EL2 to open the virtual interface and say how big it is. Only
+ * valid on a machine with a GICv3 CPU interface; the registers do not
+ * exist otherwise. */
+static int64_t el2_vgic_query(void)
+{
+    register uint64_t x0 __asm__("x0") = HV_EL2_CALL_VGIC;
+    __asm__ volatile("hvc #0" : "+r"(x0) : : "memory", "x1", "x2", "cc");
+    return (int64_t)x0;
+}
+
+unsigned aarch64_vgic_lr_count(void)
+{
+    return g_vgic_lrs;
+}
+
+bool aarch64_vgic_available(void)
+{
+    return g_vgic_lrs > 0;
+}
 
 static int64_t el2_run(paddr_t ctx)
 {
@@ -197,7 +257,31 @@ static int el2_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = true;
     g_caps.max_vcpus = 0;
-    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs", pa_bits[parange], HV_VMIDS_MAX - 1);
+
+    /*
+     * Interrupts for guests. Only a GICv3's virtual interface can raise
+     * one, and its registers are EL2-only, so both the enabling and the
+     * capability come back from the switch -- which means the switch has
+     * to own EL2 on this CPU before the question can be asked.
+     */
+    if (aarch64_irqc_is_v3() && el2_ready_here()) {
+        int64_t vtr = el2_vgic_query();
+        if (vtr >= 0) {
+            g_vgic_lrs = (unsigned)(vtr & 0x1F) + 1;
+            g_caps.inject_irq = true;
+            /* ICH_VTR_EL2.PRIbits: with more than five priority bits an
+             * implementation has more than one active-priority register
+             * per group, and the switch moves only the first of each. */
+            unsigned pribits = (unsigned)((vtr >> 29) & 0x7) + 1;
+            if (pribits > 5)
+                kwarn("hv: %u priority bits; only ICH_AP{0,1}R0_EL2 are saved per vCPU", pribits);
+        }
+    }
+    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs, guest interrupts %s",
+          pa_bits[parange], HV_VMIDS_MAX - 1,
+          g_caps.inject_irq ? "through the virtual GIC" : "unavailable (no GICv3 virtual interface)");
+    if (g_caps.inject_irq)
+        kinfo("hv: the virtual GIC has %u list register(s)", g_vgic_lrs);
     *out = g_caps;
     return 0;
 }
@@ -277,6 +361,17 @@ static void ctx_reset(struct arch_hv_vcpu *v)
     c->vttbr = (uint64_t)v->vm->s2_root | ((uint64_t)v->vm->vmid << 48);
     c->vtcr = g_vtcr;
     c->hcr = HCR_VM | HCR_RW | HCR_IMO | HCR_FMO | HCR_AMO | HCR_TWI | HCR_TWE | HCR_TID3 | HCR_TSC;
+    /*
+     * The guest's interrupt state, on a machine that has one. The
+     * interface starts disabled and every list register empty: nothing
+     * is pending until something is injected, and `ICH_VMCR_EL2` zero
+     * is a guest whose own PMR masks everything -- which is what a
+     * guest that has not configured its CPU interface should see.
+     */
+    c->vgic_on = g_caps.inject_irq ? 1 : 0;
+    v->lr_vector = -1;
+    v->lr_reported = false;
+    c->vgic_hcr = c->vgic_on ? ICH_HCR_EN : 0;
     v->offered = -1;
     v->pending_event = ~0u;
 }
@@ -303,6 +398,13 @@ static int el2_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
 
 static void el2_vcpu_destroy(struct arch_hv_vcpu *v)
 {
+    /* What one list register cost: `deferred` counts entries where a
+     * *different* interrupt had to wait because the register was still
+     * holding one. A second is worth writing EL2 assembly for only if
+     * this is not zero in practice. */
+    if (v->irq_delivered || v->irq_deferred)
+        kdebug("hv-el2: vmid %u: %llu interrupt(s) delivered, %llu deferred for want of a list register",
+               v->vm->vmid, (unsigned long long)v->irq_delivered, (unsigned long long)v->irq_deferred);
     if (v == NULL)
         return;
     pmm_free_page(phys_to_page(v->ctx_pa));
@@ -437,14 +539,70 @@ static uint64_t el2_vcpu_rip(struct arch_hv_vcpu *v)
     return v->ctx->guest_pc;
 }
 
-static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
+bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
 {
-    v->offered = vector;   /* recorded; delivery needs the GIC list registers */
+    if (!v->ctx->vgic_on)
+        return false;
+    *lr0 = v->ctx->vgic_lr0;
+    *elrsr = v->ctx->vgic_elrsr;
+    return true;
 }
 
-static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
+static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
-    return v->irq_taken;
+    v->offered = vector;
+    if (!v->ctx->vgic_on || vector < 0)
+        return;
+    /*
+     * One list register, so one interrupt at a time. If the last one is
+     * still in it -- Pending because the guest has it masked, Active
+     * because the guest is in its handler -- overwriting would lose a
+     * state the guest is about to act on, and a guest that then
+     * completed an interrupt nobody had given it would take a spurious
+     * EOI. Whatever is in there is the interrupt whose fate the exit
+     * path reports; this offer waits its turn.
+     */
+    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID) {
+        /* A *different* interrupt had to wait: the number that says
+         * whether one register is enough. Offering the resident one
+         * again is the ordinary case and costs nothing. */
+        if (v->lr_vector != vector)
+            v->irq_deferred++;
+        return;
+    }
+    v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(VGIC_PRIORITY) | (uint32_t)vector;
+    v->lr_vector = vector;
+    v->lr_reported = false;
+}
+
+static int el2_vcpu_irq_delivered(struct arch_hv_vcpu *v)
+{
+    if (!v->ctx->vgic_on || v->lr_vector < 0)
+        return -1;
+    /*
+     * The list register's own occupant is what the guest can have
+     * taken, and it is not always what this entry offered: one placed
+     * while the guest had interrupts masked sits there across every
+     * entry until the guest unmasks, and a lower-numbered vector may be
+     * the current offer all the while.
+     *
+     * Pending is "placed, not yet taken". Active is taken and not yet
+     * completed -- delivery, and the guest is in its handler. Invalid is
+     * taken and completed, and the register is free again. Reported
+     * once, because Active can persist across several runs and the
+     * owner must clear it exactly one time.
+     */
+    uint64_t st = lr_state(v->ctx->vgic_lr0);
+    if (st == LR_STATE_PENDING)
+        return -1;
+    int taken = v->lr_vector;
+    if (st == LR_STATE_INVALID)
+        v->lr_vector = -1;
+    if (v->lr_reported)
+        return -1;
+    v->lr_reported = true;
+    v->irq_delivered++;
+    return taken;
 }
 
 static void el2_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
@@ -512,7 +670,6 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         return -ENOMEM;
     }
     __atomic_or_fetch(&v->vm->ran_on, CPUMASK_OF(this_cpu()->cpu_id), __ATOMIC_RELEASE);
-    v->irq_taken = false;
     /* Guest rule (arch/fpu.h): the owner thread's vector registers are
      * saved, the guest's are loaded, and afterwards the guest's are
      * captured and the owner's put back. A kernel-thread owner holds no
@@ -552,7 +709,7 @@ const struct hv_backend el2_backend = {
     .vcpu_set_state = el2_vcpu_set_state,
     .vcpu_run = el2_vcpu_run,
     .vcpu_set_irq = el2_vcpu_set_irq,
-    .vcpu_irq_taken = el2_vcpu_irq_taken,
+    .vcpu_irq_delivered = el2_vcpu_irq_delivered,
     .vcpu_inject_exception = el2_vcpu_inject_exception,
     .vcpu_advance_rip = el2_vcpu_advance_rip,
     .vcpu_set_rip = el2_vcpu_set_rip,

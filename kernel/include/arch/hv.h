@@ -25,6 +25,11 @@ struct arch_hv_vcpu;   /* control block + register spill; opaque */
 #define HV_MAP_EXEC  (1u << 2)
 #define HV_MAP_RWX   (HV_MAP_READ | HV_MAP_WRITE | HV_MAP_EXEC)
 
+/* The widest range any architecture allows, and therefore the size of
+ * the per-vCPU pending set. AArch64 INTIDs run to 1019; LPIs start at
+ * 8192 and are excluded, having nothing to map them to. */
+#define HV_VINTR_MAX 1019u
+
 struct hv_caps {
     bool present;
     const char *name;        /* "svm", "vmx", "none" */
@@ -34,6 +39,11 @@ struct hv_caps {
     bool map_prot;           /* arch_hv_vm_map honours prot; false means RWX only */
     bool large_pages;        /* 2 MiB leaves for aligned mappings */
     unsigned max_vcpus;      /* per VM, 0 = the manager's own limit */
+    /* Whether vcpu_inject can actually deliver. False means the backend
+     * has no way to raise an interrupt in a guest, and vcpu_inject says
+     * -ENOTSUP rather than reporting success for nothing: AArch64 needs
+     * a GICv3's virtual interface, and a GICv2 machine has none. */
+    bool inject_irq;
 };
 
 enum hv_exit_kind {
@@ -107,9 +117,31 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 
 /* VirtualInterrupt: offer one vector (-1: none) for delivery when the
- * guest is interruptible; irq_taken tells, after a run, whether it went. */
+ * guest is interruptible. */
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
-bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v);
+
+/* The interrupt numbers a guest of this architecture can be given,
+ * inclusive. x86-64 starts at 32 because 0..31 are exceptions and
+ * `vcpu_inject` is not how those are delivered; AArch64 starts at 0
+ * because SGIs and PPIs are ordinary private interrupts and are most of
+ * what a guest wants -- the virtual timer is PPI 27. */
+void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
+
+/* Diagnostics for the tests: the guest interrupt state the last run
+ * brought back -- list register 0 and the "which are free" mask. False
+ * where the architecture has no such state, which is everywhere but a
+ * GICv3 machine's EL2 backend. */
+bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
+/* Which interrupt the guest actually took during the last run, or -1.
+ *
+ * Not "was the offered one taken?". On an architecture whose controller
+ * *holds* an interrupt across entries -- a GICv3 list register keeps one
+ * Pending until the guest unmasks -- what a guest takes need not be what
+ * was offered for that entry: it can be one offered several entries ago,
+ * while a lower-numbered vector is the current offer. The owner clears
+ * what was delivered, so the question has to be *which*, and a boolean
+ * cannot answer it. */
+int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 /* Queue an exception for the next entry (vector < 32). */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 
