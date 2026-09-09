@@ -101,6 +101,18 @@ guest kernel expects to find at EL1 anyway. `CNTVOFF_EL2` becomes
 per-VM, so a guest's `CNTVCT_EL0` starts near zero at creation rather
 than reporting how long the host has been up.
 
+**Per-VM means one source, and the source is the VM.** `struct
+arch_hv_vm` gains `cntvoff`, set once in `el2_vm_create` to the host's
+`CNTPCT_EL0` at that moment. Every vCPU's `ctx->cntvoff` is a *copy* of
+it, taken in `el2_vcpu_create`, and the switch reads the copy because
+EL2 assembly reads the context page and nothing else. A vCPU created
+later than its siblings gets the same value, because the value is the
+VM's and not the clock's at creation time. Two vCPUs of one VM therefore
+read the same `CNTVCT_EL0` (to within the time between the reads), and
+two VMs read different ones — both of which are tests below, because a
+guest that compares time across its CPUs would find the per-vCPU-source
+version out by however long apart its vCPUs were created.
+
 The host's one virtual-timer user, `arch_test_periodic_irq_start`, has
 to go somewhere. Two honest options, and the report proposes the first:
 **move the test hook to the physical timer's spare compare** — there is
@@ -131,19 +143,49 @@ instruction. Restoring on entry is what makes the guest's timer
 
 ### 3. When it fires while the guest is running
 
-`HCR_EL2.IMO` already routes physical interrupts to EL2, so a virtual
-timer expiry during a guest run is a `HV_EXIT_INTR` — the exit the run
-loop already absorbs. The backend recognises it as the guest's timer
-(the interrupt is the virtual timer PPI and the guest's `CNTV_CTL`
-reads `ISTATUS`), and offers the guest's timer INTID to the vGIC the
-way `vcpu_inject` offers any other. The guest's handler acknowledges,
-its `CNTV_CTL_EL0` write masks or re-arms, and the state goes back
-through the switch.
+Three separate facts have to be arranged for, and a first draft of this
+section arranged for none of them.
+
+**Enablement.** The virtual timer's PPI (27 on `virt`; the GTDT's
+value in general) is *not enabled* in the host's redistributor today
+except while `arch_test_periodic_irq_start` is running. A disabled PPI
+raises nothing, so a guest's expiry would cause no exit and would be
+noticed only at the next unrelated one. The backend therefore owns that
+line: it binds it at probe (`gic_bind_ppi`, the way the tick is bound)
+and enables it on each CPU when that CPU's switch is installed
+(`el2_ready_here`, where the per-CPU EL2 stack is set up), so that an
+expiry during a guest run becomes a physical interrupt, which
+`HCR_EL2.IMO` takes to EL2, which is an exit.
+
+**Identification is from the timer, not from the exit.**
+`HV_EXIT_INTR` carries no INTID — it says only that a physical interrupt
+arrived, and it arrives for the host's tick just as readily. The exit
+path in the switch reads `CNTV_CTL_EL0` into `ctx->cntv_ctl` *before*
+disarming it, so the saved value carries `ISTATUS`: the timer's own
+statement that its condition was met. After any run, the backend checks
+`ctx->cntv_ctl` for `ENABLE && !IMASK && ISTATUS` and, if so, marks the
+guest's timer INTID pending for the next entry — through the vGIC, the
+way `vcpu_inject` does, so that PPI 27 is an INTID in a list register
+like any other. This is independent of which exit occurred and of
+whether the host ever saw the physical interrupt at all.
+
+**Acknowledgement belongs to the host, and is usually moot.** The
+generic timer interrupt is level-sensitive: asserted while the condition
+holds. The switch disarms `CNTV_CTL_EL0` on exit, so by the time the
+host is back at EL1 with interrupts enabled the line is down and a
+level PPI that is no longer asserted is no longer pending. If the
+redistributor does still hold it, the host's ordinary interrupt path
+takes it, and the backend's handler for PPI 27 acknowledges it and does
+nothing else — the timer is already disarmed, and the decision to
+inject was made from the saved `ISTATUS`, not from the handler running.
+So the physical interrupt is never "consumed and reobserved": the host
+consumes it (or finds nothing to consume), and the guest is given a
+*virtual* one from state captured before either could happen.
 
 This is the piece the vGIC unit was the prerequisite for, and it needs
-nothing new from it: a timer interrupt is an INTID in a list register
-like any other, and PPI 27 is inside the range
-`arch_hv_vintr_range` was widened to cover.
+nothing new from it. It does need one thing from `timer.c`: the test
+hook and the backend cannot both bind PPI 27, which is the reason §1
+moves the hook rather than merely asking it to share.
 
 ### 4. When it would fire while the guest is *not* running
 
@@ -193,8 +235,9 @@ that has to be undone to get to (b).
 |---|---|
 | `kernel/arch/aarch64/include/aarch64/hv_ctx.h` | `cntv_ctl`, `cntv_cval`, `cntvoff`, offsets, static asserts |
 | `kernel/arch/aarch64/hv_el2_switch.S` | save/restore and disarm; `CNTHCTL_EL2` for the guest and back |
-| `kernel/arch/aarch64/hv_el2.c` | per-VM `CNTVOFF`, the timer expiry → INTID offer, trapped `CNTP_*` |
-| `kernel/arch/aarch64/timer.c` | the test hook stops using `CNTV`; the guest timer PPI is named |
+| `kernel/arch/aarch64/hv_el2.c` | the expiry → INTID offer from the saved `ISTATUS`; trapped `CNTP_*` |
+| `kernel/arch/aarch64/timer.c` | the test hook stops using `CNTV` and stops binding PPI 27; the guest timer PPI is named |
+| `kernel/arch/aarch64/hv_el2.c` | binds PPI 27 at probe and enables it per CPU in `el2_ready_here`; a handler that acknowledges and nothing else; `struct arch_hv_vm.cntvoff` |
 | `kernel/arch/aarch64/hv.c`, `kernel/include/arch/hv.h` | the guest's timer INTID, for the test to inject against |
 | `tests/hv/aarch64/guest_timer.S` | **new**: arms its timer, takes the interrupt, reports |
 | `kernel-services/virtualization/hvtest.c` | the tests below |
@@ -217,16 +260,20 @@ unsigned arch_hv_guest_timer_intid(void);
 ## Migration plan
 
 1. **Isolation first, alone.** Save, restore and disarm `CNTV_*` across
-   the switch; per-VM `CNTVOFF_EL2`. No delivery yet. The measurement
-   above is the test: after a guest that arms its timer, the host's
-   `CNTV_CTL_EL0` reads what it read before that guest ran.
+   the switch; `CNTVOFF_EL2` from the VM's one value, copied into each
+   vCPU. No delivery yet. The measurement above is the test: after a
+   guest that arms its timer, the host's `CNTV_CTL_EL0` reads what it
+   read before that guest ran — and two vCPUs of one VM read the same
+   `CNTVCT_EL0`.
 2. **Close the physical-timer windows.** `CNTHCTL_EL2 = 0` for a
    running guest, restored on exit; trapped `CNTP_*` reported as a
    system-register exit. A guest can no longer read host uptime or
    touch the host's tick.
-3. **Deliver the expiry.** Recognise the virtual timer interrupt during
-   a guest run and offer the guest's timer INTID to the vGIC. The guest
-   fixture takes it.
+3. **Deliver the expiry.** The backend takes over PPI 27 from the test
+   hook, enables it per CPU, and after each run reads the saved
+   `CNTV_CTL` for `ISTATUS` and offers the guest's timer INTID to the
+   vGIC. The guest fixture takes it. This step and the test-hook move
+   are one commit, because neither is correct without the other.
 4. **On time.** The per-vCPU host timer of §4(b), and the lateness
    measured before and after.
 5. Docs, and the decision about `arch_test_periodic_irq_start`.
@@ -245,10 +292,18 @@ land on one.
   and the guest's own handler reports through a hypercall that the
   timer INTID arrived. The interrupt must be the *timer's*, not one the
   owner injected, which the fixture distinguishes by the INTID it
-  acknowledges.
+  acknowledges. It also asserts the exit that preceded delivery was a
+  timer expiry and not the host's tick — the saved `CNTV_CTL` read
+  `ISTATUS` — so a backend that injected on every `HV_EXIT_INTR` would
+  fail it by delivering on the tick.
 - **`el2-guest-timer-offset`** — two VMs created at different times
   both see `CNTVCT_EL0` start near zero, and neither sees the host's
-  uptime. Fails today, where both see exactly the host's counter.
+  uptime; and **two vCPUs of one VM, created at different times, read
+  the same `CNTVCT_EL0`** to within the gap between the reads. The
+  second half is what a per-vCPU offset source would fail — a guest
+  that compares time across its CPUs would see them disagree by however
+  long apart the vCPUs were created. Fails today, where every vCPU sees
+  exactly the host's counter.
 - **`el2-guest-phys-timer`** — a guest reading `CNTPCT_EL0` or writing
   `CNTP_CTL_EL0` gets an exit rather than the host's timer. Fails
   today, where it silently succeeds — and the second half of that is
