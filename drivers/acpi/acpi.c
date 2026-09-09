@@ -48,6 +48,8 @@ struct madt_entry {
 #define MADT_GICC           11
 #define MADT_GICD           12
 #define MADT_GIC_MSI_FRAME  13
+#define MADT_GICR           14
+#define MADT_GIC_ITS        15
 
 #define MADT_CPU_ENABLED        (1u << 0)
 #define MADT_CPU_ONLINE_CAPABLE (1u << 1)
@@ -210,6 +212,13 @@ static void parse_madt(const struct acpi_madt *madt)
                 memcpy(&mpidr, p + 68, 8);
                 if (g_gic.gicc_base == 0)
                     g_gic.gicc_base = base;
+                /* GICv3: each CPU's redistributor may be named here
+                 * instead of by a GICR entry (offset 60, ACPI 5.1+). */
+                if (e->length >= 68 && g_gic.gicc_gicr_base == 0) {
+                    uint64_t gicr;
+                    memcpy(&gicr, p + 60, 8);
+                    g_gic.gicc_gicr_base = gicr;
+                }
                 if (flags & (MADT_CPU_ENABLED | MADT_CPU_ONLINE_CAPABLE)) {
                     if (g_cpu_count < ACPI_MAX_CPUS) {
                         uint32_t acpi_id;
@@ -250,6 +259,28 @@ static void parse_madt(const struct acpi_madt *madt)
                         g_gic.v2m_spi_base = sbase;
                     }
                 }
+            }
+            break;
+        case MADT_GICR:
+            /* GICR: discovery window base 4, length 12. */
+            if (e->length >= 16 && g_gic.gicr_base == 0) {
+                uint64_t base;
+                uint32_t len;
+                memcpy(&base, p + 4, 8);
+                memcpy(&len, p + 12, 4);
+                g_gic.gicr_base = base;
+                g_gic.gicr_length = len;
+            }
+            break;
+        case MADT_GIC_ITS:
+            /* ITS: id 4, physical base 8. */
+            if (e->length >= 16 && g_gic.its_base == 0) {
+                uint32_t id;
+                uint64_t base;
+                memcpy(&id, p + 4, 4);
+                memcpy(&base, p + 8, 8);
+                g_gic.its_id = id;
+                g_gic.its_base = base;
             }
             break;
         default:
@@ -314,10 +345,20 @@ void acpi_init(void)
     parse_madt(madt);
     g_available = true;
 
-    if (g_gic_present)
+    if (g_gic_present) {
         kinfo("acpi: %.4s rev %u, %zu tables, GICv%u at 0x%llx, %zu CPUs, MSI frame 0x%llx", root->signature,
               rsdp->revision, g_table_count, g_gic.version, (unsigned long long)g_gic.gicd_base, g_cpu_count,
               (unsigned long long)g_gic.v2m_base);
+        /* What a GICv3 needs, whether or not this kernel can drive it
+         * yet: where the redistributors are and whether there is an ITS
+         * to translate an MSI. Logged so that a boot on such a machine
+         * says what it found before it decides what to do about it. */
+        if (g_gic.gicr_base || g_gic.gicc_gicr_base || g_gic.its_base)
+            kinfo("acpi: GICR window 0x%llx+0x%llx, GICC redistributor 0x%llx, ITS %u at 0x%llx",
+                  (unsigned long long)g_gic.gicr_base, (unsigned long long)g_gic.gicr_length,
+                  (unsigned long long)g_gic.gicc_gicr_base, g_gic.its_id,
+                  (unsigned long long)g_gic.its_base);
+    }
     else
         kinfo("acpi: %.4s rev %u, %zu tables, LAPIC at 0x%llx, %zu CPUs, %zu IOAPICs, %zu overrides",
               root->signature, rsdp->revision, g_table_count, (unsigned long long)g_lapic_base,
