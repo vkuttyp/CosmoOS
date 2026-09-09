@@ -30,6 +30,7 @@
  */
 
 #include <kernel/asid.h>
+#include <kernel/fwcfg.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -62,6 +63,23 @@ static uint64_t g_cpu_generation[CONFIG_MAX_CPUS];
  * that appears with tags trusted and disappears here is a stale
  * translation by construction. */
 static bool g_paranoid;
+
+/*
+ * `opt/cosmo/asid=paranoid` on the QEMU command line, the same shape the
+ * fault injector uses. A whole boot in paranoid mode is the bisecting
+ * run: every test still has to pass with no translation surviving a
+ * switch, which separates "the rule is wrong" from "a tag is stale".
+ */
+void asid_boot_config(void)
+{
+    char spec[32];
+    if (!fwcfg_get_string("asid", spec, sizeof(spec)))
+        return;
+    if (strcmp(spec, "paranoid") == 0)
+        asid_set_paranoid(true);
+    else
+        kwarn("asid: ignoring opt/cosmo/asid '%s' (expected 'paranoid')", spec);
+}
 
 void asid_set_paranoid(bool on)
 {

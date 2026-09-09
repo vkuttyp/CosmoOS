@@ -950,15 +950,24 @@ bool selftest_asid_quiet(const char **reason)
     vm_space_destroy(a);
     vm_space_destroy(b);
 
-    /* The instruction count, not the decision count: a switch path that
+    /*
+     * The instruction count, not the decision count: a switch path that
      * flushes without asking the allocator is exactly the regression
      * this is here to catch, and it would leave the decision count at
-     * zero. */
-    if (hw1 != hw0) {
-        *reason = "the switch path still flushes the TLB";
+     * zero.
+     *
+     * Paranoid mode inverts the expectation rather than excusing the
+     * test -- there, every switch must flush, and a run that flushed
+     * fewer times than it switched would mean the mode was not in force
+     * for the whole loop.
+     */
+    uint64_t want = asid_paranoid() ? 2 * ASID_QUIET_ROUNDS + 1 : 0;
+    if (hw1 - hw0 != want) {
+        *reason = asid_paranoid() ? "paranoid mode did not flush on every switch"
+                                  : "the switch path still flushes the TLB";
         return false;
     }
-    if (st1.flushes != st0.flushes) {
+    if (!asid_paranoid() && st1.flushes != st0.flushes) {
         *reason = "the allocator asked for a flush in the steady state";
         return false;
     }
@@ -991,9 +1000,10 @@ bool selftest_asid_paranoid(const char **reason)
         kinfo("selftest: asid-paranoid: no address-space tags on this machine; skipping");
         return true;
     }
+    bool was = asid_paranoid();
     asid_set_paranoid(true);
     bool ok = selftest_asid_isolation(reason);
-    asid_set_paranoid(false);
+    asid_set_paranoid(was);   /* restore, not force off: a whole boot may be paranoid */
     if (!ok)
         return false;
     kinfo("selftest: asid-paranoid: isolation holds with every switch flushing too");

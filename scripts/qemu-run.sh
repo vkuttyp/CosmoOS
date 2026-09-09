@@ -59,6 +59,13 @@ fi
 if [ -n "${QEMU_FWCFG_KEYTEST:-}" ]; then
     fwcfg="$fwcfg -fw_cfg name=opt/cosmo/keytest,string=$QEMU_FWCFG_KEYTEST"
 fi
+# QEMU_ASID=paranoid runs the whole boot with address-space tags allocated
+# and written but every switch flushing anyway (kernel/asid.h): a run in
+# which no translation survives a switch, so an isolation failure that
+# appears only without it is a stale translation by construction.
+if [ -n "${QEMU_ASID:-}" ]; then
+    fwcfg="$fwcfg -fw_cfg name=opt/cosmo/asid,string=$QEMU_ASID"
+fi
 # The NICs (docs/drivers/e1000e/api.md). QEMU_NIC: both (default: virtio-net
 # on n0 as eth0 and an Intel 82574L on its own backend as eth1), virtio (as
 # before the e1000e driver), or e1000e (the Intel NIC alone, on n0, so it

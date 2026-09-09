@@ -67,6 +67,9 @@ void asid_get_stats(struct asid_stats *out);
  * benchmark gets its "before" number without a second build.
  */
 void asid_set_paranoid(bool on);
+/* Read `opt/cosmo/asid` from the boot: `paranoid` turns the above on
+ * for the whole run. Called once, after asid_init. */
+void asid_boot_config(void);
 bool asid_paranoid(void);
 
 /*

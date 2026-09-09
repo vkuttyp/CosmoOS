@@ -215,6 +215,7 @@ void vmm_init(void)
     /* Address-space tags. The width is the boot CPU's, fixed by its
      * feature setup long before this; no space exists yet to be tagged. */
     asid_init(arch_mmu_asid_bits());
+    asid_boot_config();   /* opt/cosmo/asid=paranoid, if the boot asked for it */
 
     map_kernel_image(info);
     map_direct_map(info);
