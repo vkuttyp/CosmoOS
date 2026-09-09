@@ -10,12 +10,14 @@
 #include <kernel/errno.h>
 #include <kernel/hv.h>
 
+#include <arch/hv.h>
+
 #include "hv_internal.h"
 
 void vintr_init(struct vcpu *v)
 {
     spinlock_init(&v->irq_lock, "vcpu-irq");
-    for (unsigned i = 0; i < 4; i++)
+    for (unsigned i = 0; i < VINTR_WORDS; i++)
         v->pending[i] = 0;
     v->offered = -1;
 }
@@ -28,7 +30,9 @@ int vcpu_inject(struct vcpu *v, unsigned vector)
      * number is wrong". */
     if (!hv_caps()->inject_irq)
         return -ENOTSUP;
-    if (vector < 32 || vector > 255)
+    unsigned lo, hi;
+    arch_hv_vintr_range(&lo, &hi);
+    if (vector < lo || vector > hi)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&v->irq_lock);
     v->pending[vector / 64] |= 1ull << (vector % 64);
@@ -38,7 +42,7 @@ int vcpu_inject(struct vcpu *v, unsigned vector)
 
 static int lowest_locked(const struct vcpu *v)
 {
-    for (unsigned w = 0; w < 4; w++) {
+    for (unsigned w = 0; w < VINTR_WORDS; w++) {
         if (v->pending[w])
             return (int)(w * 64 + (unsigned)__builtin_ctzll(v->pending[w]));
     }

@@ -43,6 +43,16 @@ int arch_hv_probe(struct hv_caps *out)
 /* Every call below happens only after a successful probe: the manager
  * refuses everything when caps.present is false (invariant V2). */
 
+void arch_hv_vintr_range(unsigned *lo, unsigned *hi)
+{
+    /* Every INTID a list register can carry. SGIs (0..15) and PPIs
+     * (16..31) are private to a CPU and are what a guest's own software
+     * uses; SPIs run to 1019. LPIs are above 8192 and need an ITS
+     * translation nothing here can give a guest. */
+    *lo = 0;
+    *hi = HV_VINTR_MAX;
+}
+
 /* Not a backend op: only this architecture has a virtual GIC, and only
  * one backend here can drive one. */
 bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)

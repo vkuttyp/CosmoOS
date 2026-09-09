@@ -73,6 +73,9 @@ struct vm {
     struct list_node link;               /* the manager's list */
 };
 
+/* Wide enough for the widest architecture's range (arch/hv.h). */
+#define VINTR_WORDS ((HV_VINTR_MAX + 64) / 64)
+
 struct vcpu {
     struct kobject obj;
     struct vm *vm;                       /* referenced */
@@ -80,7 +83,7 @@ struct vcpu {
     struct mutex run_lock;               /* run and regs */
     struct arch_hv_vcpu *arch;
     spinlock_t irq_lock;
-    uint64_t pending[4];                 /* VirtualInterrupt: 256-bit pending set */
+    uint64_t pending[VINTR_WORDS];        /* VirtualInterrupt: one bit per injectable number */
     int offered;                         /* vector offered to the backend for this entry, -1 none */
     bool in_completion;                  /* an IN waits for its value */
     uint8_t in_size;

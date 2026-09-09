@@ -25,6 +25,11 @@ struct arch_hv_vcpu;   /* control block + register spill; opaque */
 #define HV_MAP_EXEC  (1u << 2)
 #define HV_MAP_RWX   (HV_MAP_READ | HV_MAP_WRITE | HV_MAP_EXEC)
 
+/* The widest range any architecture allows, and therefore the size of
+ * the per-vCPU pending set. AArch64 INTIDs run to 1019; LPIs start at
+ * 8192 and are excluded, having nothing to map them to. */
+#define HV_VINTR_MAX 1019u
+
 struct hv_caps {
     bool present;
     const char *name;        /* "svm", "vmx", "none" */
@@ -114,6 +119,13 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 /* VirtualInterrupt: offer one vector (-1: none) for delivery when the
  * guest is interruptible; irq_taken tells, after a run, whether it went. */
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
+
+/* The interrupt numbers a guest of this architecture can be given,
+ * inclusive. x86-64 starts at 32 because 0..31 are exceptions and
+ * `vcpu_inject` is not how those are delivered; AArch64 starts at 0
+ * because SGIs and PPIs are ordinary private interrupts and are most of
+ * what a guest wants -- the virtual timer is PPI 27. */
+void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
 
 /* Diagnostics for the tests: the guest interrupt state the last run
  * brought back -- list register 0 and the "which are free" mask. False

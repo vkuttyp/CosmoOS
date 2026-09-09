@@ -64,6 +64,12 @@ void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_i
 
 /* An x86 guest's pending interrupt is a field in a control block, not a
  * list register; there is no such state to report. */
+void arch_hv_vintr_range(unsigned *lo, unsigned *hi)
+{
+    *lo = 32;    /* 0..31 are exceptions: vcpu_inject_exception delivers those */
+    *hi = 255;
+}
+
 bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
 {
     (void)v;

@@ -731,6 +731,54 @@ bool selftest_el2_guest_irq_masked(const char **reason)
     return true;
 }
 
+/* --- the private interrupts, which the old range refused ---
+ *
+ * SGIs (0..15) and PPIs (16..31) are how a guest's own software
+ * interrupts itself and how its timer will reach it; `vcpu_inject`
+ * used to refuse everything below 32 because on x86 those numbers are
+ * exceptions. The range is the architecture's now, and this is the
+ * test that AArch64's is right and x86's is unchanged.
+ */
+bool selftest_el2_guest_irq_private(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: el2-guest-irq-private: no virtual GIC on this machine; skipping");
+        return true;
+    }
+    unsigned lo, hi;
+    arch_hv_vintr_range(&lo, &hi);
+    CHECK(lo == 0 && hi == 1019);
+
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_irq.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+
+    /* A PPI: the number the virtual timer will use when it exists. */
+    CHECK(vcpu_inject(v, 27) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 27);
+    CHECK(vcpu_run(v, &x) == 0);                         /* the EOI, then the heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+
+    /* And an SGI, the lowest number there is. */
+    CHECK(vcpu_inject(v, 0) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0);
+
+    /* Past the end is still refused. */
+    CHECK(vcpu_inject(v, 1020) == -EINVAL);
+    CHECK(vcpu_inject(v, 8192) == -EINVAL);              /* an LPI: nothing maps one */
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-irq-private: PPI 27 and SGI 0 delivered, 1020 refused");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -836,6 +884,7 @@ bool selftest_el2_guest_wfi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_vgic_roundtrip(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_masked(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_irq_private(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
