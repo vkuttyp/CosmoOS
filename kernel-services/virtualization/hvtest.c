@@ -888,7 +888,7 @@ bool selftest_el2_guest_timer_isolated(const char **reason)
         return true;
     struct vm *vm;
     struct vcpu *v;
-    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
+    CHECK(make_guest("tests/hv/guest_timer_far.bin", &vm, &v) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     uint64_t before = arch_test_host_vtimer_ctl();
