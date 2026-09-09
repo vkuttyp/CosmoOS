@@ -519,3 +519,92 @@ sentences now so they are edited on the day the code changes:
 - **ASIDs for the kernel half too** (giving kernel entries a tag and
   dropping the `nG`/global distinction). No: the kernel half is shared
   by construction (`TTBR1`, `PGE`), and A5/M36 depend on that.
+
+## Outcome (2026-09-09)
+
+Built on AArch64, deliberately not on x86-64, and the difference is the
+first thing the unit found.
+
+**TCG implements PCID on no CPU model.** Not `qemu64`, not `Haswell`,
+not `-cpu max`; a model that requests it is refused with "TCG doesn't
+support requested feature". The report assumed the opposite and planned
+around `+pcid,+invpcid`. Every environment this tree is tested in is
+TCG -- the boot test, the whole chain, CI -- so an x86-64 tagged switch
+path could not have been exercised anywhere, and this is the one place
+in the kernel where an untested mistake is a silent loss of isolation
+between processes. So it is not written. `arch_mmu_asid_bits()` returns
+0 there, which is what a real machine without PCID reports, and the path
+that selects -- no tag, flush every switch -- is what x86-64 has always
+done and is now exercised on every boot rather than being dead code
+waiting for hardware. PCID and INVPCID are detected and logged;
+`CR4.PCIDE` stays clear until there is tested code behind it.
+
+**The architectural question resolved as proposed**, and the answer was
+the rule rather than the allocator. `active_cpus` became `tlb_cpus`, and
+the rename was the sweep: five doc sites the compiler could not reach
+still described the old rule, which is why the field was renamed rather
+than redefined.
+
+**What the report did not anticipate:**
+
+- **A space can hold two tags at once.** After a rollover it may be
+  re-tagged on one CPU while another is still running it under the old
+  tag. So an ASID-qualified range invalidate -- the obvious
+  optimisation, and what the report implied -- would miss the stale one.
+  Range invalidates stay all-ASID (`tlbi vaae1is`, as before); only
+  destruction names a tag, where nothing runs the space. Both sides of
+  that dependency now say so in the code.
+- **The destroy-path invalidate cannot be tested.** By the time it runs,
+  the region teardown has invalidated every mapped page across every
+  tag, so removing it changes nothing observable. It is kept -- so that
+  destroying a space does not depend for its safety on a decision made
+  in `arch_mmu_invalidate` -- and recorded as a gap rather than counted
+  as proved.
+- **The kernel's root was being given a tag.** `vm_space_switch` asked
+  the allocator on every switch, including to the kernel space, which
+  runs under tag 0 by construction and whose tag `arch_mmu_activate`
+  discards. One tag per generation, never released. Found by writing the
+  destroy test, not by review.
+- **Timing this change under TCG is impossible**, and the numbers
+  mislead in the flattering direction's opposite: a tagged switch
+  measures 6-20x *slower* than a flushing one, swinging threefold
+  between runs of one binary, because QEMU's software TLB is not
+  ASID-tagged. The unit's claim is therefore counted, not timed:
+  `asid-quiet` proves 401 switches perform zero flushes, and 401 when
+  paranoid. Whole-boot totals are unchanged, so nothing real is slower.
+
+**Not built:** PCIDs (above); lazy TLB for kernel threads, dropped
+because the win shrank once the switch stopped flushing and the x86 test
+CPU has no SMAP, so leaving a departed process's mappings live would
+remove a real safety net on the architecture that gains nothing here.
+
+**Five of six properties are proved by reintroducing the bug**, each
+failing for its own stated reason; the sixth is the destroy invalidate
+above. The proof harness itself had to be rebuilt twice: `cp` backups
+silently reverted edits made while it ran, and `git checkout --`
+restored to HEAD -- which, on an uncommitted branch, deleted the unit
+from a file rather than the injected bug. It now refuses to start on a
+dirty tree, verifies each injection by content, and checks the tree is
+clean when it exits.
+
+**And one failure that was mine but looked like someone else's.** The
+chain's `boot kbd-hub aarch64` step began failing in `selftest_kmalloc`,
+on an assertion that the machine's live-object count is unchanged across
+its run. The tag tests leak nothing -- the count is identical entering
+every test, `vm_space` live is zero, and the difference of two-to-four
+objects appears in a generic bucket at a varying point inside
+`kmalloc`'s own window. What they do is wake other CPUs, whose deferred
+work lands wherever it lands. Four attempts to shrink that disturbance
+moved the rate without removing it; ordering the tag tests after
+`kmalloc` removed it. Two of those attempts were kept anyway, because
+they were right independently: the measured loop no longer disables
+interrupts (the counters do not move for anyone in the steady state, so
+the property is proved under real scheduling, and a self-test has no
+business holding interrupts off for tens of milliseconds), and it no
+longer routes hundreds of switches through the kernel's root. The
+underlying fragility -- a test asserting something about the whole
+machine rather than about the allocator under test -- is recorded rather
+than papered over.
+
+**Chain: 40 steps, all passing**, including a new
+`boot asid-paranoid aarch64`.
