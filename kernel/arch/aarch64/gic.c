@@ -22,6 +22,7 @@
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/irqc.h>
+#include <aarch64/gicv2m.h>
 #include <aarch64/irqc.h>
 #include <aarch64/platform.h>
 #include <aarch64/sysreg.h>
@@ -45,17 +46,12 @@
 #define GICC_BPR  0x008
 #define GICC_IAR  0x00C
 #define GICC_EOIR 0x010
-/* GICv2m */
-#define V2M_MSI_TYPER     0x008
-#define V2M_MSI_SETSPI_NS 0x040
-
 #define PRIORITY_DEFAULT 0x80u
 
-static volatile uint32_t *g_gicd, *g_gicc, *g_v2m;
-static paddr_t g_gicd_pa, g_gicc_pa, g_v2m_pa;
+static volatile uint32_t *g_gicd, *g_gicc;
+static paddr_t g_gicd_pa, g_gicc_pa;
 static unsigned g_nr_lines;                      /* from TYPER */
-static unsigned g_v2m_spi_base, g_v2m_spi_count;
-static uint64_t g_v2m_used[32];                  /* up to 2048 SPIs */
+static struct gicv2m g_v2m;
 
 static spinlock_t g_lock = SPINLOCK_INIT("gic");
 static uint16_t g_vector_of[GIC_INTID_COUNT];     /* INTID -> vector (identity when unrouted) */
@@ -104,7 +100,6 @@ static void gicv2_init(const struct acpi_gic *acpi)
     struct acpi_gic gic = *acpi;
     g_gicd_pa = gic.gicd_base ? gic.gicd_base : VIRT_GICD_BASE;
     g_gicc_pa = gic.gicc_base ? gic.gicc_base : VIRT_GICC_BASE;
-    g_v2m_pa = gic.v2m_base;
     g_gicd = map(g_gicd_pa, 0x10000, "GICD");
     g_gicc = map(g_gicc_pa, 0x2000, "GICC");
 
@@ -134,25 +129,11 @@ static void gicv2_init(const struct acpi_gic *acpi)
         gicd_wr(GICD_ICFGR + (i / 16) * 4, 0);
     gicd_wr(GICD_CTLR, 1);
 
-    if (g_v2m_pa) {
-        g_v2m = map(g_v2m_pa, 0x1000, "GICv2m");
-        uint32_t typer = g_v2m[V2M_MSI_TYPER / 4];
-        g_v2m_spi_base = (typer >> 16) & 0x3FF;
-        g_v2m_spi_count = typer & 0x3FF;
-        if (gic.v2m_spi_count) {
-            g_v2m_spi_base = gic.v2m_spi_base;
-            g_v2m_spi_count = gic.v2m_spi_count;
-        }
-        if (g_v2m_spi_base < GIC_SPI_BASE || g_v2m_spi_base + g_v2m_spi_count > g_nr_lines) {
-            kwarn("gic: GICv2m SPI range %u+%u is outside the distributor's %u lines; MSI disabled",
-                  g_v2m_spi_base, g_v2m_spi_count, g_nr_lines);
-            g_v2m_spi_count = 0;
-        }
-    }
+    gicv2m_init(&g_v2m, &gic, g_nr_lines);
     gicv2_init_cpu();
     kinfo("gic: GICv2 at 0x%llx/0x%llx, %u lines, MSI %s (SPIs %u+%u)", (unsigned long long)g_gicd_pa,
-          (unsigned long long)g_gicc_pa, g_nr_lines, g_v2m_spi_count ? "via GICv2m" : "unavailable",
-          g_v2m_spi_base, g_v2m_spi_count);
+          (unsigned long long)g_gicc_pa, g_nr_lines, g_v2m.spi_count ? "via GICv2m" : "unavailable",
+          g_v2m.spi_base, g_v2m.spi_count);
 }
 
 static void gicv2_init_cpu(void)
@@ -196,10 +177,8 @@ static void unbind_locked(unsigned vector)
         if (intid >= GIC_SPI_BASE)
             gicd_wr(GICD_ICENABLER + (intid / 32) * 4, 1u << (intid % 32));
         g_vector_of[intid] = (uint16_t)intid;
-        if (g_v2m_spi_count && intid >= g_v2m_spi_base && intid < g_v2m_spi_base + g_v2m_spi_count) {
-            unsigned k = intid - g_v2m_spi_base;
-            g_v2m_used[k / 64] &= ~(1ull << (k % 64));
-        }
+        if (gicv2m_owns(&g_v2m, intid))
+            gicv2m_free(&g_v2m, intid);
         if (intid >= GIC_PPI_BASE && intid < GIC_SPI_BASE)
             g_routed_ppi_mask &= ~(1u << intid);
     }
@@ -269,31 +248,22 @@ static int gicv2_unmask(unsigned gsi)
 
 static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
 {
-    if (!vector_is_dynamic(vector) || g_v2m_spi_count == 0)
+    if (!vector_is_dynamic(vector))
         return -EINVAL;
+    unsigned intid;
+    int rc = gicv2m_alloc(&g_v2m, &intid);
+    if (rc)
+        return rc;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    int found = -1;
-    for (unsigned k = 0; k < g_v2m_spi_count; k++) {
-        if ((g_v2m_used[k / 64] & (1ull << (k % 64))) == 0) {
-            g_v2m_used[k / 64] |= 1ull << (k % 64);
-            found = (int)k;
-            break;
-        }
-    }
-    if (found < 0) {
-        spin_unlock_irqrestore(&g_lock, s);
-        return -ENOSPC;
-    }
-    unsigned intid = g_v2m_spi_base + (unsigned)found;
-    int rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
+    rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
+    if (rc == 0)
+        gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
+    spin_unlock_irqrestore(&g_lock, s);
     if (rc) {
-        g_v2m_used[found / 64] &= ~(1ull << (found % 64));
-        spin_unlock_irqrestore(&g_lock, s);
+        gicv2m_free(&g_v2m, intid);
         return rc;
     }
-    gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
-    spin_unlock_irqrestore(&g_lock, s);
-    *addr = g_v2m_pa + V2M_MSI_SETSPI_NS;
+    *addr = gicv2m_setspi_addr(&g_v2m);
     *data = intid;
     return 0;
 }

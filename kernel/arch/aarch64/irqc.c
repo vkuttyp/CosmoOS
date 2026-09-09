@@ -42,8 +42,12 @@ void arch_irqc_init(void)
     case 2:
         g_ops = &aarch64_gicv2_ops;
         break;
+    case 3:
+    case 4:   /* a GICv4 distributor drives GICv3 interrupts identically */
+        g_ops = &aarch64_gicv3_ops;
+        break;
     default:
-        panic("gic: distributor version %u; only GICv2 is implemented", gic.version);
+        panic("gic: distributor version %u is not a GIC this kernel drives", gic.version);
     }
     g_ops->init(&gic);
 }

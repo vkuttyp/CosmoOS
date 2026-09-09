@@ -61,5 +61,6 @@ struct aarch64_irqc_ops {
 };
 
 extern const struct aarch64_irqc_ops aarch64_gicv2_ops;
+extern const struct aarch64_irqc_ops aarch64_gicv3_ops;
 
 #endif /* AARCH64_IRQC_H */
