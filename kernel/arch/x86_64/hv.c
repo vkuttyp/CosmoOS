@@ -86,6 +86,8 @@ bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *c
     return false;   /* an x86 guest's timer is the LAPIC's, and stage 1 has none */
 }
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
+bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v) { return g_be->vcpu_timer_expired(v); }
+unsigned arch_hv_guest_timer_intid(void) { return 0; }   /* no guest timer in stage 1 */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {
     g_be->vcpu_inject_exception(v, vector, has_error, error);

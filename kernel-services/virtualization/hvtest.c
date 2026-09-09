@@ -1024,6 +1024,69 @@ bool selftest_el2_guest_phys_timer(const char **reason)
     return true;
 }
 
+/* --- a guest is woken by its own timer ---
+ *
+ * The unit's point. The guest arms CNTV for ~15 ms and heartbeats; the
+ * owner runs it until the guest's handler calls out, and requires that
+ * what arrived was the timer's INTID -- not one the owner injected,
+ * since the owner injects nothing here -- and that the guest's own
+ * CNTV_CTL, read in the handler, shows the timer had fired. A backend
+ * that injected on every host interrupt would deliver on the host's
+ * tick instead, and the handler's CNTV_CTL would not read ISTATUS.
+ */
+bool selftest_el2_guest_timer(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq || arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-timer: no virtual GIC or no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t armed_at = x.hypercall.a0;
+
+    /* Heartbeats until the handler speaks; bounded, because a timer that
+     * never fires is the failure this test exists to catch. */
+    unsigned beats = 0;
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        if (x.hypercall.nr == intid)
+            break;
+        CHECK(x.hypercall.nr == 2);
+        CHECK(++beats < 20000);
+    }
+    /* The handler's x1 is CNTV_CTL as the guest read it: ENABLE and
+     * ISTATUS, before it masked. And a real expiry is at or after the
+     * deadline the guest asked for. */
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);
+    uint64_t ctl = 0, off = 0;
+    CHECK(arch_hv_vcpu_timer_state(v->arch, &ctl, &off));
+    CHECK((ctl & 0x2u) != 0);                                       /* the handler masked it */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);   /* delivered, cleared */
+
+    /* Completing the handler returns the guest to its heartbeat, whose
+     * clock is past the deadline; and the timer, masked, does not fire
+     * again. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(x.hypercall.a0 > armed_at);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-timer: INTID %u after %u heartbeat(s), handler saw CNTV_CTL 0x%llx", intid,
+          beats, (unsigned long long)ctl);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1134,6 +1197,7 @@ bool selftest_el2_guest_irq_queue(const char **reason) { (void)reason; return tr
 bool selftest_el2_guest_timer_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_phys_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

@@ -27,6 +27,7 @@ struct hv_backend {
     int (*vcpu_run)(struct arch_hv_vcpu *v, struct hv_exit *out);
     void (*vcpu_set_irq)(struct arch_hv_vcpu *v, int vector);
     int (*vcpu_irq_delivered)(struct arch_hv_vcpu *v);
+    bool (*vcpu_timer_expired)(struct arch_hv_vcpu *v);
     void (*vcpu_inject_exception)(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
     void (*vcpu_advance_rip)(struct arch_hv_vcpu *v, unsigned bytes);
     void (*vcpu_set_rip)(struct arch_hv_vcpu *v, uint64_t rip);

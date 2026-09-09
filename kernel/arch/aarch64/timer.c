@@ -11,6 +11,7 @@
 #include <kernel/acpi.h>
 #include <kernel/errno.h>
 #include <kernel/log.h>
+#include <kernel/timer.h>
 #include <kernel/panic.h>
 #include <kernel/string.h>
 #include <kernel/percpu.h>
@@ -32,7 +33,6 @@ static int g_tick_vector = -1;
 static uint64_t g_tick_period;          /* counter ticks per tick */
 static unsigned g_phys_intid = VIRT_TIMER_EL1_PHYS_INTID;
 static unsigned g_virt_intid = VIRT_TIMER_EL1_VIRT_INTID;
-static uint64_t g_test_period;
 static uint64_t g_next_cval[CONFIG_MAX_CPUS];   /* the tick's next absolute compare value, per CPU */
 
 /* GTDT (ACPI 5.1+): non-secure EL1 timer GSIV at 80, virtual timer GSIV at 88. */
@@ -129,11 +129,11 @@ void aarch64_timer_ack(unsigned intid)
 {
     if (intid == g_phys_intid && g_tick_period)
         arm_phys();
-    else if (intid == g_virt_intid && g_test_period) {
-        WRITE_SYSREG(cntv_tval_el0, g_test_period);
-        WRITE_SYSREG(cntv_ctl_el0, CNT_CTL_ENABLE);
-        isb();
-    }
+}
+
+unsigned aarch64_timer_virt_intid(void)
+{
+    return g_virt_intid;
 }
 
 void aarch64_timer_init_cpu(void)
@@ -141,25 +141,50 @@ void aarch64_timer_init_cpu(void)
     gic_enable_local(g_phys_intid);
 }
 
-/* arch/testhooks.h: a periodic interrupt for the interrupt tests, on the virtual timer. */
+/*
+ * arch/testhooks.h: a periodic interrupt for the interrupt tests.
+ *
+ * This used to be the virtual timer, which was the one hardware source
+ * to hand and was nobody else's -- until guests. A guest's timer *is*
+ * CNTV now, and the hypervisor owns its PPI, so the hook raises a line
+ * of its own instead: the distributor's spare SPI, made pending from a
+ * kernel timer at the requested rate. The interrupt the test requests,
+ * enables, counts, masks and releases is as real as before; only what
+ * asserts it has moved from a compare register to a callback.
+ */
+static struct timer g_test_timer;
+static uint64_t g_test_ns;
+static int g_test_gsi = -1;
+
+static void test_tick(struct timer *t, void *arg)
+{
+    (void)arg;
+    if (g_test_gsi >= 0) {
+        arch_test_irq_raise((unsigned)g_test_gsi);
+        timer_start(t, g_test_ns);
+    }
+}
+
 int arch_test_periodic_irq_start(unsigned hz)
 {
+    int gsi = arch_test_irq_spare_gsi();
+    if (gsi < 0)
+        return -1;
     if (hz == 0)
         hz = 100;
-    g_test_period = g_hz / hz;
-    if (g_test_period == 0)
-        g_test_period = 1;
-    WRITE_SYSREG(cntv_tval_el0, g_test_period);
-    WRITE_SYSREG(cntv_ctl_el0, CNT_CTL_ENABLE);
-    isb();
-    return (int)g_virt_intid;
+    g_test_ns = NS_PER_SEC / hz;
+    if (g_test_ns < TICK_NS)
+        g_test_ns = TICK_NS;   /* a kernel timer fires at tick granularity, no faster */
+    g_test_gsi = gsi;
+    timer_setup(&g_test_timer, test_tick, NULL);
+    timer_start(&g_test_timer, g_test_ns);
+    return gsi;
 }
 
 void arch_test_periodic_irq_stop(void)
 {
-    WRITE_SYSREG(cntv_ctl_el0, CNT_CTL_IMASK);
-    isb();
-    g_test_period = 0;
+    g_test_gsi = -1;
+    timer_cancel_sync(&g_test_timer);
 }
 
 /* --- the PL031 real-time clock of the virt machine ------------------------- */

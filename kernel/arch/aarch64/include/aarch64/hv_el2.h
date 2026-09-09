@@ -19,5 +19,7 @@ struct arch_hv_vcpu;
  * False when this machine has no virtual GIC. */
 bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
 bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff);
+/* The INTID a guest's virtual timer raises, 0 when the backend could not bind it. */
+unsigned el2_guest_timer_intid(void);
 
 #endif /* AARCH64_HV_EL2_H */

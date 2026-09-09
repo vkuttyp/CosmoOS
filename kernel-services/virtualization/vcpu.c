@@ -283,6 +283,15 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         int delivered = arch_hv_vcpu_irq_delivered(v->arch);
         if (delivered >= 0)
             vintr_clear(v, delivered);
+        /* The guest's own timer went off during that run: it becomes a
+         * pending interrupt like any the owner injects, and arrives
+         * through the same path -- so a timer is not a second kind of
+         * delivery to get wrong. */
+        if (arch_hv_vcpu_timer_expired(v->arch)) {
+            unsigned intid = arch_hv_guest_timer_intid();
+            if (intid)
+                vcpu_inject(v, intid);
+        }
 
         if (e.kind == HV_EXIT_INTR) {
             if (max_intr && ++intr >= max_intr) {

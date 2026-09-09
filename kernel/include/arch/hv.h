@@ -146,6 +146,17 @@ bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *c
  * what was delivered, so the question has to be *which*, and a boolean
  * cannot answer it. */
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v);
+
+/* Whether the guest's own timer expired during the last run, reported
+ * once per expiry. The owner then injects `arch_hv_guest_timer_intid()`
+ * like any other interrupt, so a guest's timer arrives through the same
+ * path everything else does. False on an architecture whose guests have
+ * no timer of their own (x86-64: stage 1 gives a guest no LAPIC). */
+bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v);
+
+/* The interrupt number a guest's timer raises (AArch64: the GTDT's
+ * virtual timer PPI, 27 on QEMU's virt). 0 where there is none. */
+unsigned arch_hv_guest_timer_intid(void);
 /* Queue an exception for the next entry (vector < 32). */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 
