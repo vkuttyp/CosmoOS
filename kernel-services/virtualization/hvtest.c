@@ -141,6 +141,14 @@ bool selftest_hv_guest_fpu(const char **reason)
 #endif
 }
 
+/* A list register is back on offer when it holds nothing and the
+ * controller agrees it is free. Both, because either alone would pass
+ * on a switch that read one of them and not the other. */
+static __maybe_unused bool lr_free(uint64_t lr0, uint64_t elrsr)
+{
+    return (lr0 >> 62) == 0 && (elrsr & 1u) != 0;
+}
+
 static __maybe_unused bool console_is(struct vm *vm, const char *expect)
 {
     char buf[64];
@@ -602,6 +610,127 @@ bool selftest_el2_vgic_roundtrip(const char **reason)
     return true;
 }
 
+/* --- a guest takes an interrupt ---
+ *
+ * The whole point of the unit. The guest enables its own CPU interface
+ * and says "ready"; the host injects; the guest's handler acknowledges
+ * and reports the interrupt number it was given. Nothing here emulates
+ * a distributor: a virtual interrupt placed in a list register bypasses
+ * one, and the guest's `ICC_*_EL1` accesses reach the virtual interface
+ * because `HCR_EL2.IMO` is set.
+ */
+bool selftest_el2_guest_irq(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: el2-guest-irq: no virtual GIC on this machine; skipping");
+        return true;
+    }
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_irq.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+
+    /* The guest sets up its interface and says it is ready. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+
+    /* Nothing has been offered yet, so nothing is pending. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+
+    CHECK(vcpu_inject(v, 42) == 0);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
+
+    /* The guest takes it, acknowledges it, and calls out from inside
+     * its handler with the number it was given. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+    CHECK(x.hypercall.nr == 42);
+
+    /* --- the Active window ---
+     * The guest has acknowledged and not completed, so the list
+     * register is Active. That is delivery: the pending bit must be
+     * clear, or the same interrupt is given to a guest already handling
+     * it. */
+    uint64_t lr0 = 0, elrsr = 0;
+    CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
+    CHECK((lr0 >> 62) == 2);                 /* Active */
+    CHECK((lr0 & 0xFFFFFFFFu) == 42);
+    CHECK((elrsr & 1u) == 0);                /* and so not free */
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+
+    /* The handler completes and the guest returns to its heartbeat. The
+     * list register is free again and the interrupt is not redelivered:
+     * one injection, one delivery. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
+    CHECK(lr_free(lr0, elrsr));
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+
+    /* A second injection is delivered too: the register was released,
+     * not merely emptied once. */
+    CHECK(vcpu_inject(v, 43) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 43);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-irq: a guest took INTID 42 and then 43, acknowledged and completed");
+    return true;
+}
+
+/* --- an interrupt the guest has masked is not lost ---
+ *
+ * Injected while the guest has PSTATE.I set, it stays Pending in the
+ * list register and stays pending in the owner's set; the guest takes it
+ * when it unmasks. This is the AArch64 shape of the x86 test's `sti`
+ * shadow case, and it is what tells "delivered" apart from "the guest
+ * happened to call out for another reason".
+ */
+bool selftest_el2_guest_irq_masked(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: el2-guest-irq-masked: no virtual GIC on this machine; skipping");
+        return true;
+    }
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_irq.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+
+    /* Mask IRQ in the guest, behind its back. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.pstate |= (1u << 7);                /* PSTATE.I */
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+
+    CHECK(vcpu_inject(v, 42) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    /* It did not take it: the guest reached its heartbeat instead of its
+     * handler, and the list register is still Pending. */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    uint64_t lr0 = 0, elrsr = 0;
+    CHECK(arch_hv_vcpu_vgic_state(v->arch, &lr0, &elrsr));
+    CHECK((lr0 >> 62) == 1);                 /* Pending */
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
+
+    /* Unmask, and it arrives. */
+    regs.pstate &= ~(uint64_t)(1u << 7);
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-irq-masked: held while PSTATE.I was set, delivered when it cleared");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -705,6 +834,8 @@ bool selftest_el2_guest_spin(const char **reason)
 #else
 bool selftest_el2_guest_wfi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_vgic_roundtrip(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_irq(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_irq_masked(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

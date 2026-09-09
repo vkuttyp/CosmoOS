@@ -223,6 +223,8 @@ bool selftest_hv_caps(const char **reason);
 bool selftest_el2_stub(const char **reason);
 bool selftest_el2_guest_wfi(const char **reason);
 bool selftest_el2_vgic_roundtrip(const char **reason);  /* the guest's interrupt state crosses EL2 */
+bool selftest_el2_guest_irq(const char **reason);       /* a guest takes one, acknowledges, completes */
+bool selftest_el2_guest_irq_masked(const char **reason);/* one it has masked waits rather than vanishing */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

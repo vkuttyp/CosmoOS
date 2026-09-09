@@ -236,6 +236,10 @@ el2_sync:
     msr ich_vmcr_el2, x2
     ldr x2, [x18, #HV_CTX_VGIC_LR0]
     msr ich_lr0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_AP0R0]
+    msr ich_ap0r0_el2, x2
+    ldr x2, [x18, #HV_CTX_VGIC_AP1R0]
+    msr ich_ap1r0_el2, x2
     ldr x2, [x18, #HV_CTX_VGIC_HCR]
     msr ich_hcr_el2, x2
     isb
@@ -338,6 +342,10 @@ el2_exit:
     str x2, [x18, #HV_CTX_VGIC_ELRSR]
     mrs x2, ich_misr_el2
     str x2, [x18, #HV_CTX_VGIC_MISR]
+    mrs x2, ich_ap0r0_el2
+    str x2, [x18, #HV_CTX_VGIC_AP0R0]
+    mrs x2, ich_ap1r0_el2
+    str x2, [x18, #HV_CTX_VGIC_AP1R0]
     msr ich_hcr_el2, xzr
     isb
 2:

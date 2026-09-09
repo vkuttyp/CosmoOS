@@ -46,6 +46,34 @@
 #define HCR_TSC  (1ull << 19)   /* SMC exits */
 #define HCR_RW   (1ull << 31)   /* EL1 is AArch64 */
 
+/*
+ * A list register (ICH_LR<n>_EL2): the state in the top two bits, the
+ * group and priority the guest's own mask is compared against, and the
+ * interrupt number the guest will see in ICC_IAR1_EL1.
+ *
+ * State matters more than it looks. Invalid means the register is free;
+ * Pending means placed and not yet taken; **Active means the guest has
+ * acknowledged it** and has not completed it, which is delivery as much
+ * as Invalid is. A hypervisor that waits for Invalid re-injects
+ * everything a guest was still handling when it exited.
+ */
+#define LR_STATE_MASK    (3ull << 62)
+#define LR_STATE_INVALID (0ull << 62)
+#define LR_STATE_PENDING (1ull << 62)
+#define LR_GROUP1        (1ull << 60)
+#define LR_PRIORITY(p)   ((uint64_t)(p) << 48)
+#define ICH_HCR_EN       (1ull << 0)
+
+/* Below the guest's own PMR of 0xF0, so an interrupt it has not masked
+ * is delivered; the same number the host's driver uses for its own. */
+#define VGIC_PRIORITY 0xA0u
+
+static uint64_t lr_state(uint64_t lr)
+{
+    return lr & LR_STATE_MASK;
+}
+
+
 /* ESR_EL2.EC values this backend decodes. */
 #define EC_WFX        0x01u
 #define EC_HVC64      0x16u
@@ -65,7 +93,7 @@ struct arch_hv_vcpu {
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
     int offered;
-    bool irq_taken;
+    bool irq_placed;         /* this entry put `offered` in a list register */
     unsigned unknown_exits;
     uint32_t pending_event;  /* a queued exception vector, ~0 for none */
     struct aarch64_fpu_area fpu;   /* the guest's vector registers (arch/fpu.h, guest rule) */
@@ -238,6 +266,12 @@ static int el2_probe(struct hv_caps *out)
         if (vtr >= 0) {
             g_vgic_lrs = (unsigned)(vtr & 0x1F) + 1;
             g_caps.inject_irq = true;
+            /* ICH_VTR_EL2.PRIbits: with more than five priority bits an
+             * implementation has more than one active-priority register
+             * per group, and the switch moves only the first of each. */
+            unsigned pribits = (unsigned)((vtr >> 29) & 0x7) + 1;
+            if (pribits > 5)
+                kwarn("hv: %u priority bits; only ICH_AP{0,1}R0_EL2 are saved per vCPU", pribits);
         }
     }
     kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs, guest interrupts %s",
@@ -332,6 +366,7 @@ static void ctx_reset(struct arch_hv_vcpu *v)
      * guest that has not configured its CPU interface should see.
      */
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
+    c->vgic_hcr = c->vgic_on ? ICH_HCR_EN : 0;
     v->offered = -1;
     v->pending_event = ~0u;
 }
@@ -503,12 +538,36 @@ bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
 
 static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
-    v->offered = vector;   /* recorded; delivery needs the GIC list registers */
+    v->offered = vector;
+    v->irq_placed = false;
+    if (!v->ctx->vgic_on || vector < 0)
+        return;
+    /*
+     * One list register, so one interrupt at a time. If the last one is
+     * still in it -- Pending because the guest has it masked, or Active
+     * because the guest is in its handler -- overwriting would lose a
+     * state the guest is about to act on, and a guest that then
+     * completed an interrupt nobody had given it would take a spurious
+     * EOI. Leave it; the vector stays pending in the generic set and is
+     * offered again on the next entry.
+     */
+    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID)
+        return;
+    v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(VGIC_PRIORITY) | (uint32_t)vector;
+    v->irq_placed = true;
 }
 
 static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
 {
-    return v->irq_taken;
+    /*
+     * Taken means the guest has it, not that the guest has finished
+     * with it: acknowledging moves the list register from Pending to
+     * Active, and only the EOI makes it Invalid. A guest that exits
+     * between the two -- a hypercall in its handler, or a host
+     * interrupt -- is very much holding the interrupt, and reporting
+     * otherwise would leave it pending and deliver it a second time.
+     */
+    return v->irq_placed && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
 }
 
 static void el2_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
@@ -576,7 +635,6 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         return -ENOMEM;
     }
     __atomic_or_fetch(&v->vm->ran_on, CPUMASK_OF(this_cpu()->cpu_id), __ATOMIC_RELEASE);
-    v->irq_taken = false;
     /* Guest rule (arch/fpu.h): the owner thread's vector registers are
      * saved, the guest's are loaded, and afterwards the guest's are
      * captured and the owner's put back. A kernel-thread owner holds no
