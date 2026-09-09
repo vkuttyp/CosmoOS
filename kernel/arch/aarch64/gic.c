@@ -2,6 +2,10 @@
  * gic.c - GICv2 distributor and CPU interface, GICv2m MSI, SGIs as IPIs,
  * the vector map (docs/kernel/arch/aarch64/design.md, "Vector numbering").
  *
+ * One implementation of `struct aarch64_irqc_ops`, reached only through
+ * `aarch64_gicv2_ops`; irqc.c decides whether this machine gets it. All
+ * of the state below is this driver's alone.
+ *
  * GSI = INTID on this architecture. Dynamic vectors (VEC_DYNAMIC_BASE..)
  * are software ids the generic layers allocate; `route` binds one to an
  * INTID, IPIs bind one to an SGI, MSIs to a GICv2m SPI. The IRQ path
@@ -18,6 +22,7 @@
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/irqc.h>
+#include <aarch64/irqc.h>
 #include <aarch64/platform.h>
 #include <aarch64/sysreg.h>
 #include <aarch64/trapframe.h>
@@ -92,20 +97,12 @@ static volatile uint32_t *map(paddr_t pa, size_t len, const char *what)
     return (volatile uint32_t *)va;
 }
 
-void arch_irqc_init(void)
+static void gicv2_init_cpu(void);
+
+static void gicv2_init(const struct acpi_gic *acpi)
 {
-    struct acpi_gic gic;
-    if (!acpi_madt_gic(&gic)) {
-        kwarn("gic: MADT has no GIC entries; using the virt defaults");
-        gic.gicd_base = VIRT_GICD_BASE;
-        gic.gicc_base = VIRT_GICC_BASE;
-        gic.v2m_base = VIRT_GICV2M_BASE;
-        gic.v2m_spi_base = 0;
-        gic.v2m_spi_count = 0;
-    }
-    if (gic.version != 0 && gic.version != 2)
-        panic("gic: distributor version %u; only GICv2 is implemented", gic.version);
-    g_gicd_pa = gic.gicd_base;
+    struct acpi_gic gic = *acpi;
+    g_gicd_pa = gic.gicd_base ? gic.gicd_base : VIRT_GICD_BASE;
     g_gicc_pa = gic.gicc_base ? gic.gicc_base : VIRT_GICC_BASE;
     g_v2m_pa = gic.v2m_base;
     g_gicd = map(g_gicd_pa, 0x10000, "GICD");
@@ -152,13 +149,13 @@ void arch_irqc_init(void)
             g_v2m_spi_count = 0;
         }
     }
-    arch_irqc_init_cpu();
+    gicv2_init_cpu();
     kinfo("gic: GICv2 at 0x%llx/0x%llx, %u lines, MSI %s (SPIs %u+%u)", (unsigned long long)g_gicd_pa,
           (unsigned long long)g_gicc_pa, g_nr_lines, g_v2m_spi_count ? "via GICv2m" : "unavailable",
           g_v2m_spi_base, g_v2m_spi_count);
 }
 
-void arch_irqc_init_cpu(void)
+static void gicv2_init_cpu(void)
 {
     unsigned cpu = arch_cpu_id();
     /* SGIs and PPIs are banked: disable, clear, set priorities, then enable what is routed. */
@@ -177,7 +174,7 @@ void arch_irqc_init_cpu(void)
     gicc_wr(GICC_CTLR, 1);
 }
 
-int arch_vector_alloc(void)
+static int gicv2_vector_alloc(void)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     for (unsigned i = 0; i < VEC_DYNAMIC_COUNT; i++) {
@@ -214,7 +211,7 @@ static void unbind_locked(unsigned vector)
     }
 }
 
-void arch_vector_free(unsigned vector)
+static void gicv2_vector_free(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -246,7 +243,7 @@ static int route_locked(unsigned intid, unsigned vector, unsigned cpu, unsigned 
     return 0;
 }
 
-int arch_irqc_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
+static int gicv2_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     int rc = route_locked(gsi, vector, cpu, flags);
@@ -254,7 +251,7 @@ int arch_irqc_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
     return rc;
 }
 
-int arch_irqc_mask(unsigned gsi)
+static int gicv2_mask(unsigned gsi)
 {
     if (gsi >= g_nr_lines)
         return -EINVAL;
@@ -262,7 +259,7 @@ int arch_irqc_mask(unsigned gsi)
     return 0;
 }
 
-int arch_irqc_unmask(unsigned gsi)
+static int gicv2_unmask(unsigned gsi)
 {
     if (gsi >= g_nr_lines)
         return -EINVAL;
@@ -270,7 +267,7 @@ int arch_irqc_unmask(unsigned gsi)
     return 0;
 }
 
-int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
 {
     if (!vector_is_dynamic(vector) || g_v2m_spi_count == 0)
         return -EINVAL;
@@ -301,7 +298,7 @@ int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_
     return 0;
 }
 
-void arch_irqc_eoi(unsigned vector)
+static void gicv2_eoi(unsigned vector)
 {
     if (vector >= VEC_SYNC_BASE && vector < VEC_DYNAMIC_BASE)
         return;   /* synchronous exceptions have no controller state */
@@ -310,23 +307,23 @@ void arch_irqc_eoi(unsigned vector)
     gicc_wr(GICC_EOIR, g_cur_intid[arch_cpu_id()]);
 }
 
-unsigned arch_irqc_gsi_count(void)
+static unsigned gicv2_gsi_count(void)
 {
     return GIC_INTID_COUNT;
 }
 
-unsigned arch_irqc_spurious_vector(void)
+static unsigned gicv2_spurious_vector(void)
 {
     return VEC_SPURIOUS;
 }
 
-unsigned gic_current_intid(void)
+static unsigned gicv2_current_intid(void)
 {
     return g_cur_intid[arch_cpu_id()];
 }
 
 /* PPI helpers for the timer (banked per CPU, routed once). */
-void gic_bind_ppi(unsigned intid, unsigned vector)
+static void gicv2_bind_ppi(unsigned intid, unsigned vector)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     KASSERT(intid >= GIC_PPI_BASE && intid < GIC_SPI_BASE && vector_is_dynamic(vector));
@@ -336,12 +333,12 @@ void gic_bind_ppi(unsigned intid, unsigned vector)
     spin_unlock_irqrestore(&g_lock, s);
 }
 
-void gic_enable_local(unsigned intid)
+static void gicv2_enable_local(unsigned intid)
 {
     gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
 }
 
-void gic_disable_local(unsigned intid)
+static void gicv2_disable_local(unsigned intid)
 {
     gicd_wr(GICD_ICENABLER + (intid / 32) * 4, 1u << (intid % 32));
 }
@@ -361,7 +358,7 @@ static int sgi_for_vector_locked(unsigned vector)
     return -1;
 }
 
-void arch_ipi_bind(unsigned vector)
+static void gicv2_ipi_bind(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -383,7 +380,7 @@ static int sgi_for_vector(unsigned vector)
     return sgi;
 }
 
-void arch_ipi_send(unsigned cpu, unsigned vector)
+static void gicv2_ipi_send(unsigned cpu, unsigned vector)
 {
     KASSERT(cpu < CONFIG_MAX_CPUS);
     int sgi = sgi_for_vector(vector);
@@ -391,7 +388,7 @@ void arch_ipi_send(unsigned cpu, unsigned vector)
     gicd_wr(GICD_SGIR, ((uint32_t)g_cpu_iface_mask[cpu] << 16) | (uint32_t)sgi);
 }
 
-void arch_ipi_broadcast_others(unsigned vector)
+static void gicv2_ipi_broadcast_others(unsigned vector)
 {
     int sgi = sgi_for_vector(vector);
     dsb_ishst();
@@ -400,7 +397,7 @@ void arch_ipi_broadcast_others(unsigned vector)
 
 void aarch64_timer_ack(unsigned intid);
 
-void gic_irq_dispatch(struct arch_trap_frame *frame)
+static void gicv2_dispatch(struct arch_trap_frame *frame)
 {
     unsigned cpu = arch_cpu_id();
     uint32_t iar = gicc_rd(GICC_IAR);
@@ -427,5 +424,28 @@ void gic_irq_dispatch(struct arch_trap_frame *frame)
         return;
     }
     interrupt_dispatch(vector, frame);
-    arch_irqc_eoi(vector);
+    gicv2_eoi(vector);
 }
+
+const struct aarch64_irqc_ops aarch64_gicv2_ops = {
+    .name = "GICv2",
+    .init = gicv2_init,
+    .init_cpu = gicv2_init_cpu,
+    .vector_alloc = gicv2_vector_alloc,
+    .vector_free = gicv2_vector_free,
+    .route = gicv2_route,
+    .mask = gicv2_mask,
+    .unmask = gicv2_unmask,
+    .eoi = gicv2_eoi,
+    .msi_compose = gicv2_msi_compose,
+    .gsi_count = gicv2_gsi_count,
+    .spurious_vector = gicv2_spurious_vector,
+    .current_intid = gicv2_current_intid,
+    .bind_ppi = gicv2_bind_ppi,
+    .enable_local = gicv2_enable_local,
+    .disable_local = gicv2_disable_local,
+    .ipi_bind = gicv2_ipi_bind,
+    .ipi_send = gicv2_ipi_send,
+    .ipi_broadcast_others = gicv2_ipi_broadcast_others,
+    .dispatch = gicv2_dispatch,
+};

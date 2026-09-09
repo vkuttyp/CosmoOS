@@ -17,6 +17,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/aarch64/fpu.c \
 	kernel/arch/aarch64/irq.c \
 	kernel/arch/aarch64/trap.c \
+	kernel/arch/aarch64/irqc.c \
 	kernel/arch/aarch64/gic.c \
 	kernel/arch/aarch64/timer.c \
 	kernel/arch/aarch64/mmu.c \
