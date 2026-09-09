@@ -606,5 +606,31 @@ underlying fragility -- a test asserting something about the whole
 machine rather than about the allocator under test -- is recorded rather
 than papered over.
 
-**Chain: 40 steps, all passing**, including a new
-`boot asid-paranoid aarch64`.
+**Two more concurrency claims argued rather than measured, both wrong.**
+Review found the first: the staleness check was made before the
+allocator's lock and not remade under it, so two CPUs starting the
+threads of one process could both find a space untagged and both
+allocate -- the second write winning and the first tag reserved with
+nothing pointing at it until the next rollover. Not an isolation
+failure, since both tags name the same tables, which is why the test for
+it counts rather than compares bytes: `asid-race` has two CPUs
+rendezvous on a barrier and tag the same fresh context 300 times, and
+with the check removed 290-299 of those rounds allocate twice.
+`asid-alloc` could never have found it -- it hammers the allocator from
+one CPU, and no number of iterations there crosses a window between two.
+
+CI found the second, on a machine whose scheduling differs from this
+one's: `asid-quiet` asserted on `asid_get_stats`, which counts the whole
+machine. Another CPU may legitimately move both of its numbers during
+the window -- its first switch after a generation change flushes, and a
+space it enters for the first time is given a tag. The assertions were
+unsound rather than unlucky, so forty local chain steps passing twice
+could not have caught them. They are now reported; what is asserted is
+this CPU's own instruction count and the kernel root's tag, which are
+the checks that caught the bugs the others were credited with. The same
+change pinned the measurement with `preempt_disable`, because removing
+the interrupts-off window had left the thread free to migrate between
+reading the two counters.
+
+**Chain: 40 steps** (two runs needed re-running for the recorded
+timer/host-load flake family); **CI green on both architectures**.
