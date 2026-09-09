@@ -888,7 +888,7 @@ bool selftest_el2_guest_timer_isolated(const char **reason)
         return true;
     struct vm *vm;
     struct vcpu *v;
-    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm, &v) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
@@ -927,7 +927,7 @@ bool selftest_el2_guest_timer_offset(const char **reason)
         return true;
     struct vm *vm;
     struct vcpu *v0;
-    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v0) == 0);
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm, &v0) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v0, &x) == 0);
@@ -957,7 +957,7 @@ bool selftest_el2_guest_timer_offset(const char **reason)
     /* A second VM, made later still: a different, also-small clock. */
     struct vm *vm_b;
     struct vcpu *vb;
-    CHECK(make_guest("tests/hv/guest_timer.bin", &vm_b, &vb) == 0);
+    CHECK(make_guest("tests/hv/guest_ctimer.bin", &vm_b, &vb) == 0);
     CHECK(vcpu_run(vb, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
     uint64_t t_vm_b = x.hypercall.a0;
