@@ -106,12 +106,17 @@ char *getcwd(char *buf, size_t size)
     return __syscall_ret(cosmo_getcwd(buf, size)) < 0 ? NULL : buf;
 }
 
+/*
+ * Is this a terminal? The question a caller means is whether terminal
+ * operations will work, not whether the object is a character device --
+ * `/dev/vmm` is one of those and is not a terminal. Asking the terminal
+ * layer is the only answer that cannot drift from the truth, and
+ * `tcgetattr` is exactly the operation the caller is about to rely on.
+ */
 int isatty(int fd)
 {
-    struct stat st;
-    if (fstat(fd, &st) < 0)
-        return 0;
-    if (!S_ISCHR(st.st_type)) {
+    struct cosmo_termios t;
+    if (cosmo_tcgetattr(fd, &t) < 0) {
         errno = ENOTTY;
         return 0;
     }

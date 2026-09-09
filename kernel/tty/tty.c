@@ -13,6 +13,7 @@
  */
 
 #include <kernel/console.h>
+#include <kernel/fbcon.h>
 #include <kernel/errno.h>
 #include <kernel/process.h>
 #include <kernel/signal.h>
@@ -57,7 +58,8 @@ void tty_setup(struct tty *t, const char *name)
     memset(t, 0, sizeof(*t));
     spinlock_init(&t->lock, "tty");
     waitqueue_init(&t->readers, "tty-readers");
-    t->flags = TTY_ECHO | TTY_ICRNL;
+    t->vmin = 1;   /* a non-canonical read blocks for one byte */
+    t->flags = TTY_ECHO | TTY_ICRNL | TTY_ICANON | TTY_ISIG;
     t->name = name;
 }
 
@@ -102,6 +104,24 @@ static void commit(struct tty *t, uint8_t term)
     t->line_len = 0;
 }
 
+/* Lock held. Non-canonical mode: the byte goes straight into the ring
+ * and `lines` counts bytes rather than records, so a reader takes what
+ * is there without waiting for a terminator. Nothing is echoed and
+ * nothing is edited -- a program in this mode is drawing its own line
+ * and would have to undraw ours. */
+static void push_raw(struct tty *t, uint8_t c)
+{
+    if (t->used >= TTY_INPUT_MAX) {
+        t->stats.dropped_bytes++;
+        return;
+    }
+    t->ring[t->tail] = c;
+    t->tail = (t->tail + 1) % TTY_INPUT_MAX;
+    t->used++;
+    t->lines++;
+    waitqueue_wake_all(&t->readers);
+}
+
 /*
  * The control characters that raise signals. What they name is a group,
  * not a process: everything in the foreground job stops at once, which
@@ -134,6 +154,20 @@ static size_t feed_locked(struct tty *t, const uint8_t *bytes, size_t n, int *si
         uint8_t c = bytes[i];
         if (c == '\r' && (t->flags & TTY_ICRNL))
             c = '\n';
+        /* Non-canonical: every byte is data, including the ones that
+         * would have been editing keys. The signal characters are still
+         * signals if ISIG is on -- the two modes are independent, and a
+         * program that wants ^C as a byte turns ISIG off as well. */
+        if (!(t->flags & TTY_ICANON)) {
+            if ((t->flags & TTY_ISIG) && signal_char(c) != 0 && t->fg_pgid != 0) {
+                *sig = signal_char(c);
+                *pgid = t->fg_pgid;
+                t->stats.rx_bytes += i + 1;
+                return i + 1;
+            }
+            push_raw(t, c);
+            continue;
+        }
         if (c == '\n') {
             echo(t, "\n", 1);
             commit(t, '\n');
@@ -149,7 +183,7 @@ static size_t feed_locked(struct tty *t, const uint8_t *bytes, size_t n, int *si
             }
         } else if (c == 0x04) {   /* ^D: end of file, or end the partial line */
             commit(t, TTY_EOF_MARK);
-        } else if (signal_char(c) != 0 && t->fg_pgid != 0) {
+        } else if ((t->flags & TTY_ISIG) && signal_char(c) != 0 && t->fg_pgid != 0) {
             /* Echoed the way every terminal echoes it, the line under
              * edit thrown away: what was typed before the interrupt is
              * not part of the next command. */
@@ -263,10 +297,84 @@ void tty_session_exit(pid_t sid)
         hangup = t->fg_pgid;
         t->sid = 0;
         t->fg_pgid = 0;
+        /*
+         * And the modes go back to a terminal a person can type at. A
+         * program that dies in raw mode has no shell left to restore
+         * anything -- the shell only restores what *it* set -- so
+         * without this the machine stays unusable until it is reset,
+         * which is the one failure of terminal modes that is worse than
+         * not having them.
+         */
+        t->flags = TTY_ECHO | TTY_ICRNL | TTY_ICANON | TTY_ISIG;
+        t->vmin = 1;
+        t->vtime = 0;
+        t->head = t->tail = t->used = t->lines = 0;
+        t->line_len = 0;
     }
     spin_unlock_irqrestore(&t->lock, s);
     if (hangup != 0)
         tty_signal_group(t, hangup, SIGHUP);
+}
+
+void tty_get_termios(struct tty *t, struct cosmo_termios *out)
+{
+    memset(out, 0, sizeof(*out));
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    out->modes = t->flags & COSMO_TTY_MODES;
+    out->vmin = t->vmin;
+    out->vtime = t->vtime;
+    spin_unlock_irqrestore(&t->lock, s);
+}
+
+void tty_set_termios(struct tty *t, const struct cosmo_termios *in)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    unsigned was = t->flags;
+    t->flags = in->modes & COSMO_TTY_MODES;
+    t->vmin = in->vmin;
+    t->vtime = in->vtime;
+    /* The ring holds records in one mode and bare bytes in the other,
+     * so anything queued across the change would be read as the wrong
+     * shape. Dropping it is what POSIX's TCSAFLUSH does, and the only
+     * honest option when the two formats cannot be told apart. */
+    if ((was & TTY_ICANON) != (t->flags & TTY_ICANON)) {
+        t->head = t->tail = t->used = t->lines = 0;
+        t->line_len = 0;
+    }
+    /* A reader already blocked was told to wait for a line under the old
+     * modes; under the new ones it may have nothing left to wait for --
+     * `VMIN` 0 means "answer with whatever is there, including nothing".
+     * Waking it makes it re-read the modes rather than sleep on a
+     * promise that has been withdrawn. */
+    waitqueue_wake_all(&t->readers);
+    spin_unlock_irqrestore(&t->lock, s);
+}
+
+void tty_get_size(struct tty *t, struct cosmo_ttysize *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (t != tty_console())
+        return;
+    /*
+     * The framebuffer console knows its geometry; a serial line does
+     * not, and there is no way to ask one. Zero is the honest answer
+     * there -- a made-up 80x24 is a lie a program cannot detect, and a
+     * program that gets 0 can fall back to its own default knowing that
+     * is what it is doing.
+     */
+    struct fbcon_geometry g;
+    if (fbcon_geometry(&g)) {
+        out->cols = (uint16_t)g.cols;
+        out->rows = (uint16_t)g.rows;
+    }
+}
+
+pid_t tty_session_of(struct tty *t)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
+    pid_t sid = t->sid;
+    spin_unlock_irqrestore(&t->lock, s);
+    return sid;
 }
 
 pid_t tty_foreground_pgrp(struct tty *t)
@@ -291,6 +399,23 @@ int tty_get_pgrp(struct tty *t, pid_t *out)
 bool tty_has_line(struct tty *t)
 {
     return __atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0;
+}
+
+/*
+ * Whether a read would return rather than block, which is not the same
+ * question: `VMIN` 0 promises an answer with nothing queued at all.
+ * Everything that asks "would this block?" -- poll readiness, the
+ * non-blocking path -- must answer it the same way `tty_read` does, or
+ * a poll parks a caller that a read would have served. Relaxed loads,
+ * like `tty_has_line`: readiness is a hint by nature, and the decision
+ * to return nothing is made under the lock in `tty_read`.
+ */
+bool tty_read_ready(struct tty *t)
+{
+    if (__atomic_load_n(&t->lines, __ATOMIC_RELAXED) > 0)
+        return true;
+    unsigned flags = __atomic_load_n(&t->flags, __ATOMIC_RELAXED);
+    return !(flags & TTY_ICANON) && __atomic_load_n(&t->vmin, __ATOMIC_RELAXED) == 0;
 }
 
 /*
@@ -341,15 +466,44 @@ int64_t tty_read(struct tty *t, void *buf, size_t len)
         int64_t allowed = tty_read_allowed(t);
         if (allowed != 0)
             return allowed;
-        if (io_nonblocking(false) && !tty_has_line(t))
+        if (io_nonblocking(false) && !tty_read_ready(t))
             return -EAGAIN;   /* an I/O ring entry: it parks instead of waiting here */
-        int rc = wait_event_killable(&t->readers, t->lines > 0);
+        /* VMIN 0 in non-canonical mode: answer with whatever is there,
+         * including nothing. Checked before the wait, which is the only
+         * thing that distinguishes it -- and under the lock, because the
+         * modes belong to it like every other field of the terminal. */
+        arch_irq_state_t ms = spin_lock_irqsave(&t->lock);
+        bool poll_only = !(t->flags & TTY_ICANON) && t->vmin == 0 && t->lines == 0;
+        spin_unlock_irqrestore(&t->lock, ms);
+        if (poll_only)
+            return 0;
+        /* The `VMIN` 0 term is what lets a mode change release a reader
+         * that is already here: the condition is re-checked under the
+         * lock at the top of the loop, so a racy read of it costs at
+         * most one extra turn. */
+        int rc = wait_event_killable(&t->readers,
+                                     t->lines > 0 || (!(t->flags & TTY_ICANON) && t->vmin == 0));
         if (rc)
             return rc;
         arch_irq_state_t s = spin_lock_irqsave(&t->lock);
         if (t->lines == 0) {
             spin_unlock_irqrestore(&t->lock, s);
             continue;   /* another reader took the line */
+        }
+        /* Non-canonical: `lines` counts bytes, so take what is there up
+         * to the caller's buffer. There is no terminator to look for --
+         * the record structure belongs to the canonical mode. */
+        if (!(t->flags & TTY_ICANON)) {
+            size_t got = 0;
+            while (got < len && t->used > 0 && t->lines > 0) {
+                out[got++] = t->ring[t->head];
+                t->head = (t->head + 1) % TTY_INPUT_MAX;
+                t->used--;
+                t->lines--;
+            }
+            t->stats.lines_read++;
+            spin_unlock_irqrestore(&t->lock, s);
+            return (int64_t)got;
         }
         size_t n = 0;
         bool ended = false;
@@ -387,14 +541,6 @@ void tty_get_stats(struct tty *t, struct tty_stats *out)
     spin_unlock_irqrestore(&t->lock, s);
 }
 
-unsigned tty_set_flags(struct tty *t, unsigned flags)
-{
-    arch_irq_state_t s = spin_lock_irqsave(&t->lock);
-    unsigned was = t->flags;
-    t->flags = flags;
-    spin_unlock_irqrestore(&t->lock, s);
-    return was;
-}
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). A driver for an
  * input device hands its bytes to the console tty exactly as the UARTs

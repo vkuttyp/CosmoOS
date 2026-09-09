@@ -173,6 +173,7 @@ const char *arch_trap_name(unsigned vector)
 }
 
 uintptr_t arch_trap_frame_pc(const struct arch_trap_frame *frame) { return (uintptr_t)frame->elr; }
+uint64_t arch_trap_frame_detail(const struct arch_trap_frame *frame) { return frame->esr; }
 uintptr_t arch_trap_frame_sp(const struct arch_trap_frame *frame) { return (uintptr_t)frame->sp; }
 uintptr_t arch_trap_frame_fp(const struct arch_trap_frame *frame) { return (uintptr_t)frame->x[29]; }
 

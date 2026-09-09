@@ -180,6 +180,49 @@ Without job control -- a non-interactive shell, or one that could not
 claim a terminal -- `&` says so and runs the pipeline in the foreground
 rather than pretending to background it.
 
+### Line editing
+
+An interactive shell reads its line in **raw mode** and draws it itself,
+which is the only way to have arrow keys or history: in canonical mode
+the kernel owns the line and hands it over only when it is finished.
+Left and right arrows move the cursor, up and down walk a
+thirty-two-entry history, `^W` erases a word, `^U` the line, `^A`/`^E`
+jump to its ends, and `^C` abandons it and prompts again.
+
+Three details are load-bearing:
+
+- **An escape sequence is consumed whole, and an `Escape` that is not
+  the start of one gives its next byte back.** A CSI sequence is
+  parameter bytes, then intermediates, then one final byte in
+  `0x40`-`0x7e`. Reading a single byte after `[` was right only for the
+  four arrow keys and left the tail of everything else on the line, so
+  Delete (`Esc [ 3 ~`) typed a `~`; the shell now reads to the final
+  byte and ignores what it does not know. A byte that no CSI sequence
+  can contain -- a control byte, Enter among them -- ends the sequence
+  and is given back, so an unfinished `Esc [` cannot swallow the Enter
+  that would have submitted the line. A byte after `Escape` that is
+  not `[` is not part of a sequence at all, so it is handled as an
+  ordinary keystroke -- `Escape` then `x` leaves an `x` on the line,
+  where the first version silently ate it. The reads inside a sequence
+  do block: with no `VTIME` there is no way to wait a moment for the
+  rest and give up, so `Escape` alone waits for the next key. That is
+  recorded as part of the `VTIME` gap rather than solved.
+- **Typing at the end of the line echoes one character; only an edit
+  that moves text about redraws.** A redraw is a carriage return, the
+  prompt and the line, so redrawing on every keystroke would print a
+  prompt per character -- and anything reading the serial log, the boot
+  harness included, counts prompts to know when the shell is ready.
+- **It falls back to a plain `read`** when the terminal cannot be put
+  into raw mode: a script, a pipe, or a shell without job control. A
+  shell that required a terminal would not be able to run `/etc/rc`.
+
+The modes are restored before every command runs, so a job inherits a
+cooked terminal and `^C` reaches it through the kernel as before. What
+the shell does not know is the terminal's width, so a line longer than
+the screen wraps in the terminal's own way and the redraw does not
+account for it -- recorded rather than solved, because solving it means
+tracking the cursor across rows.
+
 ### Input
 
 Interactive: write the prompt to handle 2, `read(0, line, 1023)` (the

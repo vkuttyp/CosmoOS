@@ -9,7 +9,14 @@ checks are on the serial log.
 import re
 import time
 
-PROMPT = b"cosmo$ "
+# A prompt at the start of a line. The shell draws its own line now, and
+# an edit that moves text about redraws the whole thing -- prompt
+# included -- after a carriage return. Counting bare "cosmo$ " would
+# therefore count once per keystroke of an arrow-key edit and race the
+# shell badly. A *real* prompt is the one that follows a newline: either
+# the newline the shell echoes for Enter, or the end of a command's
+# output.
+PROMPT = b"\ncosmo$ "
 
 # Sent as a raw byte in the middle of a running command rather than as a
 # line: the shell is waiting for the job, not for a line, and the point
@@ -62,6 +69,23 @@ COMMANDS = [
     # Both stages must actually die: a shell that reported the job
     # stopped without waiting for every stage would hand `fg` a job it
     # then reports stopped again, and the ^C would reach nothing.
+    # Line editing, which needs the terminal in raw mode: the shell draws
+    # the line itself, so what runs is what is left after the edits. The
+    # backspaces remove "XY" and the left arrows put "ok" before "-2".
+    ("echo edit-okXY\x7f\x7f", [r"^edit-ok$"]),
+    ("echo edit\x1b[D\x1b[D\x1b[D\x1b[D-2", [r"^-2edit$"]),
+    # Escape that is not the start of a sequence: the byte after it is a
+    # keystroke, not part of an escape the shell swallows. Without this
+    # the `k` disappears and the line reads "esc-o".
+    ("echo esc-o\x1bk", [r"^esc-ok$"]),
+    # And a CSI sequence this shell does not know -- Delete is `Esc [ 3 ~`
+    # -- is ignored whole. Reading only one byte after `[` left the `~`
+    # behind and ran `echo del-ok~`.
+    ("echo del-ok\x1b[3~", [r"^del-ok$"]),
+    # A sequence that is never finished: Enter cannot be part of a CSI
+    # sequence, so it ends it and submits the line. Counting it as a
+    # parameter byte swallowed the Enter and the shell looked wedged.
+    ("echo csi-ok\x1b[3", [r"^csi-ok$"]),
     ("echo after-pipeline-ok", [r"^after-pipeline-ok$",
                                 r"'sleep' exited with status 130",
                                 r"'cat' exited with status 130"]),

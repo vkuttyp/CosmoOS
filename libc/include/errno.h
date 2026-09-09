@@ -7,6 +7,7 @@ extern int errno;
 #define ESRCH COSMO_ESRCH
 #define EINTR COSMO_EINTR
 #define EIO COSMO_EIO
+#define ENXIO COSMO_ENXIO
 #define E2BIG COSMO_E2BIG
 #define ENOEXEC COSMO_ENOEXEC
 #define EBADF COSMO_EBADF

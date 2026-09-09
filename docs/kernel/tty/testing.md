@@ -32,6 +32,7 @@ after the network tests and before `ipc-pipe` and the process tests.
 | 1100 `a` then `\n` | `dropped_bytes` = 77; the read returns 1024 bytes ending in `\n` |
 | 100 lines of 99 `a` + `\n` | `dropped_lines > 0`, `lines == 40`; 40 reads of 100 bytes drain the ring (`used == 0`) |
 | a reader thread with nothing queued, then `wake\n` after 20 ms | the thread was still blocked, then returned `wake\n` |
+| a reader thread blocked non-canonically under `VMIN` 1, then a `tcsetattr` setting `VMIN` 0 | the thread was still blocked, then returned 0 -- a mode change releases a reader it no longer promises anything to |
 | `tty_read(t, buf, 0)` | 0 without blocking |
 | final statistics | `eofs == 1`, `lines_in > 0` |
 
@@ -69,6 +70,51 @@ one `tty_input` of `^\` followed by `^C`, which must end it with 131. A
 line discipline that remembered only the last signal of a batch would
 send the interrupt alone, the handler would run, and the process would
 still be there.
+
+## Terminal modes (`tty-raw`, `tty-nosig`, `tty-isatty`, `dev-tty`, `dev-tty-none`)
+
+The first three are driven from both ends, because the kernel has to
+type: the probe claims the terminal and changes its modes, and the
+kernel side **waits for the mode rather than for a handshake** before
+typing. A byte typed while the line discipline was still canonical would
+be edited rather than delivered, and a kernel-created probe has no spare
+handle to say "ready" on -- the terminal's own state is the readiness
+signal, which is both simpler and impossible to get out of step.
+
+**Only a probe that is typed at is waited for.** A probe with nothing to
+type claims the terminal, does its work and exits, and releasing the
+terminal on the way out puts the foreground group back to 0: watching
+for the claim is watching a window that closes on its own, and a run
+that sampled a moment late called a probe that had already passed a
+failure. `dev-tty` did exactly that once, on `nic-virtio aarch64`, with
+its own probe logged as exiting 0 two lines above. What such a probe
+proves, it proves by its exit status. Where a wait is needed the loop
+**sleeps rather than yields**, because the thing it is waiting for is a
+process that needs the CPU to get there.
+
+- **`tty-raw`** -- a terminal starts cooked; `cfmakeraw` turns echo,
+  canonical mode and signals off and reads back as it was set; one byte
+  is readable with no newline ever typed; and restoring the saved modes
+  brings line-at-a-time reads back.
+- **`tty-nosig`** -- with `ISIG` off, `^C` arrives as byte 3. The probe
+  would die if the signal still arrived, so surviving to report is the
+  check.
+- **`tty-isatty`** -- true for the console, **false for `/dev/vmm`**.
+  It was true for both until this unit.
+- **`tty-pollraw`** -- with `VMIN` 0 and an empty terminal, `ioready`
+  reports readable and the read returns 0. Readiness that consulted
+  only the queue said "would block" about a read that returns at once,
+  which parks a poll or an I/O ring entry until something is typed.
+- **`dev-tty`** -- `/dev/tty` and `/dev/console` open and are terminals.
+- **`dev-tty-none`** -- a process whose session holds no terminal gets
+  `-ENXIO`. It does not call `setsid` to get there: a probe the kernel
+  starts already leads a session of its own, and a session leader is
+  refused `setsid` anyway.
+
+The interactive boot test types the editing itself: `echo edit-okXY`
+followed by two backspaces must run `echo edit-ok`, and four left arrows
+followed by `-2` must run `echo -2edit`. Those are the first entries in
+the harness to send an escape sequence.
 
 ## Bring-up findings
 

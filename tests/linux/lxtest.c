@@ -461,7 +461,37 @@ int main(int argc, char **argv)
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/nope", &st, 0) == -2, 0);
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp", &st, 0) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
     CHECKV(sc2(LX_fstat, 0, &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFCHR, st.st_mode);
-    CHECKV(sc3(LX_ioctl, 1, 0x5401, buf) == -25, 0);           /* TCGETS: ENOTTY */
+    /*
+     * TCGETS on the console: it answered -ENOTTY until the terminal-modes
+     * unit, and a libc told that fully buffers its output. It now
+     * succeeds and reports a canonical terminal with echo, which is what
+     * a libc reads to decide to line-buffer. `fd` is a plain file here
+     * and is still not a terminal.
+     */
+    {
+        struct {
+            uint32_t iflag, oflag, cflag, lflag;
+            uint8_t line, cc[19];
+        } tio;
+        CHECKV(sc3(LX_ioctl, 1, 0x5401, &tio) == 0, 0);        /* TCGETS on the console */
+        CHECKV((tio.lflag & 0000002) != 0, tio.lflag);         /* ICANON */
+        CHECKV((tio.lflag & 0000010) != 0, tio.lflag);         /* ECHO */
+        struct {
+            uint16_t row, col, xp, yp;
+        } ws;
+        CHECKV(sc3(LX_ioctl, 1, 0x5413, &ws) == 0, 0);         /* TIOCGWINSZ */
+        int tmp = (int)sc3(LX_openat, LX_AT_FDCWD, "/tmp/lxtest.txt", 0);
+        CHECKV(tmp >= 0, tmp);
+        CHECKV(sc3(LX_ioctl, tmp, 0x5401, &tio) == -25, 0);    /* a file is not a terminal */
+        sc1(LX_close, tmp);
+        /* And a terminal opened by name, not inherited as a handle: the
+         * two ABIs resolve a handle to a terminal through one function,
+         * so this answers exactly as handle 1 did. */
+        int con = (int)sc3(LX_openat, LX_AT_FDCWD, "/dev/console", 0);
+        CHECKV(con >= 0, con);
+        CHECKV(sc3(LX_ioctl, con, 0x5401, &tio) == 0, 0);
+        sc1(LX_close, con);
+    }
 #ifdef LX_access
     CHECKV(sc2(LX_access, "/tmp/lxtest.txt", 0) == 0, 0);
 #endif

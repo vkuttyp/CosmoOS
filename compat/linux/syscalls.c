@@ -27,6 +27,7 @@
 #include <kernel/socket.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
+#include <kernel/tty.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/uaccess.h>
@@ -663,13 +664,57 @@ static int64_t lx_fcntl(struct syscall_args *a)
     return rc;
 }
 
+/*
+ * `ioctl`, for the three requests a terminal needs and nothing else.
+ * Until this unit every request answered -ENOTTY, and the cost was not
+ * fidelity but correctness: a libc told the console is not a terminal
+ * fully buffers its output, so a hosted program's prompt does not
+ * appear until something flushes it.
+ *
+ * The native ABI has typed calls for these (docs/kernel/tty/design.md,
+ * "Modes"); this is the translation layer, and it is the only place in
+ * the tree where a call's argument type depends on another argument.
+ * That is a property of Linux's ABI, which this personality exists to
+ * imitate, not one the tree adopts.
+ */
 static int64_t lx_ioctl(struct syscall_args *a)
 {
+    unsigned req = (unsigned)a->a[1];
     struct kobject *obj = handle_lookup(&process_current()->handles, (int)a->a[0], 0);
     if (obj == NULL)
         return -EBADF;
+    struct tty *t = tty_of_open(obj);   /* the console object, or an open /dev/tty */
     kobject_put(obj);
-    return -ENOTTY;   /* every request: libcs then treat the console as a plain file */
+    if (t == NULL)
+        return -ENOTTY;
+    switch (req) {
+    case LX_TCGETS: {
+        struct cosmo_termios k;
+        tty_get_termios(t, &k);
+        struct lx_termios lt;
+        lx_termios_from_native(&lt, &k);
+        return copy_to_user(a->a[2], &lt, sizeof(lt)) ? -EFAULT : 0;
+    }
+    case LX_TCSETS:
+    case LX_TCSETSW:
+    case LX_TCSETSF: {
+        struct lx_termios lt;
+        if (copy_from_user(&lt, a->a[2], sizeof(lt)))
+            return -EFAULT;
+        struct cosmo_termios k;
+        lx_termios_to_native(&k, &lt);
+        tty_set_termios(t, &k);
+        return 0;
+    }
+    case LX_TIOCGWINSZ: {
+        struct cosmo_ttysize sz;
+        tty_get_size(t, &sz);
+        struct lx_winsize w = { .ws_row = sz.rows, .ws_col = sz.cols };
+        return copy_to_user(a->a[2], &w, sizeof(w)) ? -EFAULT : 0;
+    }
+    default:
+        return -ENOTTY;
+    }
 }
 
 static int64_t lx_sync(struct syscall_args *a) { (void)a; return vfs_sync(); }

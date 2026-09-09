@@ -37,6 +37,7 @@ LIBC_SRCS := \
 	libc/src/dirent.c \
 	libc/src/process.c \
 	libc/src/signal.c \
+	libc/src/termios.c \
 	libc/src/socket.c \
 	libc/src/cosmo.c
 

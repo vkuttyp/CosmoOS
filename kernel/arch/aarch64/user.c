@@ -119,7 +119,6 @@ void arch_user_enter_regs(const struct arch_user_regs *r)
 void arch_user_regs_set_result_in_frame(void *frame, int64_t v) { ((struct arch_trap_frame *)frame)->x[0] = (uint64_t)v; }
 int64_t arch_user_regs_result_in_frame(const void *frame) { return (int64_t)((const struct arch_trap_frame *)frame)->x[0]; }
 
-/* No user FP/SIMD state on AArch64 yet (fpu.c): the signal frame carries none. */
 /*
  * The FP/SIMD image a signal frame carries: the body of a Linux
  * `fpsimd_context` (docs/compat/linux/design.md, "Signals"). The kernel's

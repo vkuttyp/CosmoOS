@@ -83,9 +83,12 @@ before anything else is done.
   (`clock_gettime` is monotonic only). `printf` does format doubles
   (`%f`, `%e`, `%g`) since the FP/SIMD unit; this line said "no floating
   point" until the job-control report swept it.
-- No `fork`, `exec*`, `system`, `popen`, `setjmp`, `termios`,
-  `getpwnam`, dynamic linking. (`signal` and `sigaction` arrived with
-  the signals unit; job control added `WUNTRACED`/`WIFSTOPPED` and the
-  session calls.)
+- No `fork`, `exec*`, `system`, `popen`, `setjmp`, `getpwnam`, dynamic
+  linking. (`signal` and `sigaction` arrived with the signals unit; job
+  control added `WUNTRACED`/`WIFSTOPPED` and the session calls;
+  `<termios.h>` arrived with the terminal-modes unit, carrying the four
+  flags this kernel has rather than POSIX's forty -- `c_cflag`, the baud
+  rates and the other seventeen control characters are absent, not
+  ignored.)
 - `sockaddr_in`/`sockaddr_in6` do not exist; the native address shape is
   the only one.

@@ -44,7 +44,7 @@ static void console_obj_release(struct kobject *obj)
 static unsigned console_obj_ready(struct kobject *obj)
 {
     (void)obj;
-    return COSMO_IO_WRITABLE | (tty_has_line(tty_console()) ? COSMO_IO_READABLE : 0);
+    return COSMO_IO_WRITABLE | (tty_read_ready(tty_console()) ? COSMO_IO_READABLE : 0);
 }
 
 static struct waitqueue *console_obj_poll_wq(struct kobject *obj, unsigned events)

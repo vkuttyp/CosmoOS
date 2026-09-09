@@ -40,6 +40,15 @@ bool arch_trap_is_exception(unsigned vector);
 const char *arch_trap_name(unsigned vector);
 
 uintptr_t arch_trap_frame_pc(const struct arch_trap_frame *frame);
+/*
+ * The architecture's own word about why the trap happened: the ESR on
+ * AArch64, the error code on x86-64. Several causes share one
+ * `arch_trap_kind` -- an undefined instruction, an illegal execution
+ * state and a trapped FP access are all "invalid opcode" -- so a fatal
+ * user trap logs this to say which, rather than leaving the next
+ * occurrence as ambiguous as the last.
+ */
+uint64_t arch_trap_frame_detail(const struct arch_trap_frame *frame);
 uintptr_t arch_trap_frame_sp(const struct arch_trap_frame *frame);
 uintptr_t arch_trap_frame_fp(const struct arch_trap_frame *frame);
 

@@ -318,3 +318,68 @@ hit. It takes a minute and has caught nine, nine and now nine again.
 - **Nothing: leave the terminal cooked.** Defensible while every program
   reads whole lines, which is true of every program in this tree today
   and false of every program anyone would want to port.
+
+## Outcome (2026-09-08)
+
+Built, all four steps. A program can drive this terminal: modes,
+`/dev/tty`, and a shell with line editing and history.
+
+**The design question resolved as proposed.** Typed `tcgetattr`,
+`tcsetattr` and `ttysize` over a native structure, with
+`lx_termios_from_native`/`to_native` for Linux binaries. The count the
+report asked for came out at **four flags and two numbers** against
+POSIX's four flag words and nineteen control characters, which settles
+it: carrying `c_cflag` and the baud rates would have been forty fields
+of decoration. The libc's `struct termios` therefore *omits* what it
+cannot honour rather than accepting and ignoring it, so a program
+setting a baud rate fails to compile instead of silently doing nothing.
+
+**The risk the report led with arrived early, and from the tests.** An
+early `tty-raw` failed *while the terminal was raw*, and every test
+after it failed too -- the shell never started. The mitigation was
+already designed (the release path resets the modes) and had simply not
+been written yet. It is now, and the invariant is recorded.
+
+**What the report did not predict:**
+
+- **`tty_set_flags(t, 0)` changed meaning underneath its one caller.**
+  The keyboard self-test used it to mean "no echo"; once `0` also meant
+  "no `ICANON`, no `ISIG`" it put the console into raw mode for the rest
+  of the boot. The function is deleted -- the `termios` pair replaces it
+  -- so a caller has to say which modes it means. A widening set of
+  flag bits silently reinterprets every literal already passed.
+- **The Linux ABI test asserted the limitation.** `lxtest` checked that
+  `TCGETS` returns `-ENOTTY`, pinning the very behaviour this unit
+  removes. It now checks that the console answers and a plain file still
+  does not.
+- **The shell's redraw broke the boot harness.** Redrawing prints the
+  prompt, so a full redraw per keystroke printed one prompt per
+  character and the harness -- which counts prompts to pace itself --
+  raced the shell badly. Two changes: typing at the end of a line echoes
+  one character instead of redrawing, and the harness counts a prompt
+  only at the start of a line.
+- **`tty_of_handle` had to learn about files.** A program that opened
+  `/dev/tty` *because* it had closed handle 0 was told the thing it had
+  just opened was not a terminal, since the lookup only knew the console
+  kobject. Fixing it produced a refcount underflow panic on the first
+  try, because `file_from_kobject` converts without taking a reference.
+  And fixing it in the native call alone left the Linux `ioctl` path
+  answering the same question differently -- the second door again, the
+  lesson of the personality's `setpgid`. Both now go through one
+  `tty_of_open`, which is the only shape in which the two ABIs cannot
+  drift apart.
+
+**Seven of the eight behaviours are proved by reintroducing the bug**;
+the eighth is recorded rather than counted. Disabling the raw *read*
+branch leaves `tty-raw` passing, because the canonical reader also
+returns a lone byte with no terminator -- only the `lines` bookkeeping
+differs, and nothing a program can call observes it. The raw *input*
+branch, by contrast, hangs the boot when removed, as does answering
+`/dev/tty` for a session with no terminal, and leaving a released
+terminal in raw mode fails four self-tests and the shell harness at once
+-- which is the report's leading risk, demonstrated.
+
+**Not built, and recorded in the gaps**: `VTIME` (accepted, no timed
+read), output processing beyond the sink's newline translation,
+reassignable control characters, and a redraw that knows the terminal's
+width.

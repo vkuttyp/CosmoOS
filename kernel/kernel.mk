@@ -61,6 +61,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/object/console_obj.c \
 	kernel/device/hidtest.c \
 	kernel/tty/tty.c \
+	kernel/tty/ttydev.c \
 	kernel/tty/ttytest.c \
 	kernel/ipc/pipe.c \
 	kernel/ipc/pipetest.c \

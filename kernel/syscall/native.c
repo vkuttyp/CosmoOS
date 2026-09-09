@@ -970,8 +970,13 @@ static int64_t sys_getsid(struct syscall_args *a)
     return rc ? rc : (int64_t)sid;
 }
 
-/* The tty behind a handle: a terminal is asked about its foreground
- * group through a handle to it, the way every other object is named. */
+/*
+ * The tty behind a handle. There are two ways to hold one: the console
+ * kobject that init inherits as handles 0, 1 and 2, and an open file on
+ * `/dev/console` or `/dev/tty`. Both are terminals and both must answer
+ * -- a program that opened `/dev/tty` because it had closed handle 0
+ * would otherwise be told the thing it just opened is not a terminal.
+ */
 static struct tty *tty_of_handle(int h, int *err)
 {
     unsigned rights = 0;
@@ -980,7 +985,7 @@ static struct tty *tty_of_handle(int h, int *err)
         *err = -EBADF;
         return NULL;
     }
-    struct tty *t = tty_of_object(obj);
+    struct tty *t = tty_of_open(obj);
     kobject_put(obj);
     if (t == NULL)
         *err = -ENOTTY;
@@ -996,6 +1001,46 @@ static int64_t sys_tcgetpgrp(struct syscall_args *a)
     pid_t pgid = 0;
     int rc = tty_get_pgrp(t, &pgid);
     return rc ? rc : (int64_t)pgid;
+}
+
+static int64_t sys_tcgetattr(struct syscall_args *a)
+{
+    int err = 0;
+    struct tty *t = tty_of_handle((int)a->a[0], &err);
+    if (t == NULL)
+        return err;
+    struct cosmo_termios tio;
+    tty_get_termios(t, &tio);
+    return copy_to_user(a->a[1], &tio, sizeof(tio)) ? -EFAULT : 0;
+}
+
+static int64_t sys_tcsetattr(struct syscall_args *a)
+{
+    int err = 0;
+    struct tty *t = tty_of_handle((int)a->a[0], &err);
+    if (t == NULL)
+        return err;
+    struct cosmo_termios tio;
+    if (copy_from_user(&tio, a->a[1], sizeof(tio)))
+        return -EFAULT;
+    /* A mode this kernel does not have is a program asking for
+     * behaviour it will not get, which is worth refusing rather than
+     * silently dropping. */
+    if ((tio.modes & ~(uint32_t)COSMO_TTY_MODES) || tio.reserved != 0)
+        return -EINVAL;
+    tty_set_termios(t, &tio);
+    return 0;
+}
+
+static int64_t sys_ttysize(struct syscall_args *a)
+{
+    int err = 0;
+    struct tty *t = tty_of_handle((int)a->a[0], &err);
+    if (t == NULL)
+        return err;
+    struct cosmo_ttysize sz;
+    tty_get_size(t, &sz);
+    return copy_to_user(a->a[1], &sz, sizeof(sz)) ? -EFAULT : 0;
 }
 
 static int64_t sys_tcsetpgrp(struct syscall_args *a)
@@ -1512,6 +1557,9 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_getsid] = sys_getsid,
     [SYS_tcgetpgrp] = sys_tcgetpgrp,
     [SYS_tcsetpgrp] = sys_tcsetpgrp,
+    [SYS_tcgetattr] = sys_tcgetattr,
+    [SYS_tcsetattr] = sys_tcsetattr,
+    [SYS_ttysize] = sys_ttysize,
 };
 
 /* A process must always be able to stop, whatever its filter says: a

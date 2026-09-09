@@ -376,4 +376,18 @@ static inline long cosmo_tcsetpgrp(int h, int pgid)
     return cosmo_syscall2(SYS_tcsetpgrp, h, pgid);
 }
 
+/* The terminal's modes and size (docs/kernel/tty/design.md). */
+static inline long cosmo_tcgetattr(int h, struct cosmo_termios *out)
+{
+    return cosmo_syscall2(SYS_tcgetattr, h, out);
+}
+static inline long cosmo_tcsetattr(int h, const struct cosmo_termios *in)
+{
+    return cosmo_syscall2(SYS_tcsetattr, h, in);
+}
+static inline long cosmo_ttysize(int h, struct cosmo_ttysize *out)
+{
+    return cosmo_syscall2(SYS_ttysize, h, out);
+}
+
 #endif /* COSMO_SYSCALL_H */

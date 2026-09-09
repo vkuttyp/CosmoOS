@@ -22,6 +22,11 @@ int lx_open_flags(unsigned lx, unsigned *native);
 void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out);
 /* Native exit status (exit n, 128+sig, 139) to the Linux wait status word. */
 int lx_wait_status(int native_status);
+/* The terminal's modes, both ways (compat/linux/convert.c). */
+struct lx_termios;
+struct cosmo_termios;
+void lx_termios_from_native(struct lx_termios *out, const struct cosmo_termios *in);
+void lx_termios_to_native(struct cosmo_termios *out, const struct lx_termios *in);
 /* Linux sockaddr (in or in6, `len` bytes) to a netaddr; -EINVAL/-EAFNOSUPPORT. */
 int lx_sockaddr_to_netaddr(const void *sa, size_t len, struct netaddr *out);
 /* A netaddr as a Linux sockaddr into `out` (at most `cap` bytes written);

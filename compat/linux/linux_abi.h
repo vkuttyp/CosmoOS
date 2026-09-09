@@ -138,6 +138,35 @@ struct lx_pollfd {
      LX_CLONE_UNTRACED)
 
 /* --- wait4, signals --- */
+/* Terminal ioctls (asm-generic/ioctls.h) and the structure they carry.
+ * `c_cc` is 19 bytes on Linux with VMIN at 6 and VTIME at 5. */
+#define LX_TCGETS     0x5401
+#define LX_TCSETS     0x5402
+#define LX_TCSETSW    0x5403
+#define LX_TCSETSF    0x5404
+#define LX_TIOCGWINSZ 0x5413
+
+#define LX_NCCS 19
+#define LX_VTIME 5
+#define LX_VMIN  6
+
+struct lx_termios {
+    uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+    uint8_t c_line;
+    uint8_t c_cc[LX_NCCS];
+};
+
+struct lx_winsize {
+    uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel;
+};
+
+/* Linux's flag bits, which are not this tree's. */
+#define LX_ICRNL  0000400   /* c_iflag */
+#define LX_ISIG   0000001   /* c_lflag */
+#define LX_ICANON 0000002
+#define LX_ECHO   0000010
+#define LX_OPOST  0000001   /* c_oflag */
+
 #define LX_WNOHANG 1
 #define LX_WUNTRACED 2
 #define LX_WCONTINUED 8
