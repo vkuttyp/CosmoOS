@@ -46,6 +46,19 @@ struct acpi_gic {
     paddr_t gicc_base;       /* the first CPU interface's physical base (GICv2) */
     paddr_t v2m_base;        /* GIC MSI frame, 0 if none */
     unsigned v2m_spi_base, v2m_spi_count;   /* valid when the frame overrides its TYPER */
+    /*
+     * GICv3 and later. A redistributor per CPU replaces the single CPU
+     * interface, and it is described one of two ways: a GICR entry
+     * giving a contiguous window (base + length) that the kernel walks
+     * by stride, or a per-CPU base in each GICC entry. Firmware may use
+     * either; QEMU's virt uses the GICR entry. Both are recorded, and a
+     * zero in each says the MADT did not offer it.
+     */
+    paddr_t gicr_base;       /* GICR entry: discovery window base, 0 if none */
+    uint64_t gicr_length;    /* its length, so the walk knows where to stop */
+    paddr_t gicc_gicr_base;  /* the first GICC entry's own redistributor base, 0 if none */
+    paddr_t its_base;        /* GIC ITS entry: translator base, 0 if none */
+    unsigned its_id;         /* the ITS's own id, for the command it is given */
 };
 
 struct acpi_madt_override {

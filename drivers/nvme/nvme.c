@@ -15,6 +15,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
+#include <kernel/irq.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -736,7 +737,7 @@ static int nvme_probe(struct pci_device *pdev, const struct pci_id *id)
         rc = granted < 0 ? granted : -ENODEV;
         goto fail_disable;
     }
-    c->admin.vector = pci_msix_request(pdev, 0, nvme_irq, &c->admin, "nvme-admin", 0);
+    c->admin.vector = pci_msix_request(pdev, 0, nvme_irq, &c->admin, "nvme-admin", IRQ_CPU_ANY);
     if (c->admin.vector < 0) {
         rc = c->admin.vector;
         goto fail_msix;

@@ -22,6 +22,11 @@ typedef unsigned irq_t;
 
 #define IRQ_MAX 1024u   /* GSIs: IOAPIC pins on x86-64, GIC INTIDs on AArch64 */
 
+/* Placement: a driver that has no reason to prefer a CPU asks for this
+ * and the subsystem spreads its interrupts across the online ones. A
+ * driver that does have a reason -- a queue per CPU -- names the CPU. */
+#define IRQ_CPU_ANY (~0u)
+
 #define IRQ_TRIGGER_EDGE  0u
 #define IRQ_TRIGGER_LEVEL (1u << 0)
 #define IRQ_POLARITY_LOW  (1u << 1)
@@ -48,15 +53,17 @@ int irq_vector_of(irq_t irq);
 
 /* Message-signalled interrupts. The bus programs the returned message
  * into the device; the interrupt then arrives as a plain vector on
- * `cpu` and is dispatched to fn like any other. Returns the vector
- * (>= 0) or -ENOSPC/-EINVAL. Not for interrupt context (spinlock, but
- * allocation-free); release with the vector. */
+ * `cpu` and is dispatched to fn like any other. `devid` is the writing
+ * device's identity on its bus (PCI: bus << 8 | slot << 3 | func),
+ * which controllers that translate per device need and others ignore.
+ * Returns the vector (>= 0) or -ENOSPC/-EINVAL. Not for interrupt
+ * context (spinlock, but allocation-free); release with the vector. */
 struct irq_msi_msg {
     uint64_t addr;
     uint32_t data;
 };
 int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsigned cpu,
-                    struct irq_msi_msg *msg);
+                    uint32_t devid, struct irq_msi_msg *msg);
 int irq_release_msi(int vector);
 
 #endif /* KERNEL_IRQ_H */

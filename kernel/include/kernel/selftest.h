@@ -36,6 +36,9 @@ bool selftest_kmalloc(const char **reason);
 bool selftest_acpi(const char **reason);
 bool selftest_timer(const char **reason);
 bool selftest_irq_route(const char **reason);
+bool selftest_irq_affinity(const char **reason);  /* kernel/interrupt/irqtest.c: it lands on the CPU it was routed to */
+bool selftest_irq_msi_overlap(const char **reason); /* an MSI may not take a line a device is wired to */
+bool selftest_irq_msi_devid(const char **reason);   /* a device the controller cannot describe is refused */
 bool selftest_thread(const char **reason);
 bool selftest_yield(const char **reason);
 bool selftest_preempt(const char **reason);

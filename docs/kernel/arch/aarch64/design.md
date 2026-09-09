@@ -157,7 +157,8 @@ re-faulting forever. After every sync or IRQ frame from EL0 the common
 exit runs `process_return_to_user` (kill delivery) when the CPU is not
 in an interrupt and preemption is enabled.
 
-IRQ → `gic_irq_dispatch(frame)`: acknowledge (`GICC_IAR`), remember the
+IRQ → `gic_irq_dispatch(frame)`: acknowledge (`GICC_IAR` on GICv2,
+`ICC_IAR1_EL1` on GICv3), remember the
 INTID for EOI (`g_cur_intid[cpu]`), map INTID → vector, call
 `aarch64_timer_ack` first when the INTID is a PPI (the timers re-arm
 there), `interrupt_dispatch(vector, frame)`, `arch_irqc_eoi`; an
@@ -179,7 +180,28 @@ arch_trap_vector_count() = 1312
 
 The generic layers treat vectors as opaque, allocate with
 `arch_vector_alloc`, and route with `arch_irqc_route(gsi, vector, cpu,
-flags)`; on this architecture **GSI = INTID**. `gic.c` keeps
+flags)`; on this architecture **GSI = INTID**.
+
+### Two controllers, one seam (`irqc.c`, `gic.c`, `gicv3.c`)
+
+`arch/irqc.h` says nothing about controller generations, and this
+machine has two. `irqc.c` reads the MADT once at `arch_irqc_init`,
+picks a driver from the reported distributor version — 0, 1 or 2 →
+`aarch64_gicv2_ops` in `gic.c`, 3 or 4 → `aarch64_gicv3_ops` in
+`gicv3.c`, anything else panics — and forwards every `arch_irqc_*`,
+`arch_ipi_*` and `gic_*` call through `struct aarch64_irqc_ops`
+(`aarch64/irqc.h`). The pointer is set by the boot CPU before any AP
+runs or any interrupt is enabled, and read without synchronisation
+after.
+
+The two drivers share no state. They share one file: `gicv2m.c`, the
+MSI frame, because a GICv3 whose MADT describes a frame and no ITS uses
+exactly the frame a GICv2 does. `arch_irqc_spurious_vector` is also not
+an op — the vector map below is the architecture's, not a driver's.
+
+### GICv2 (`gic.c`)
+
+`gic.c` keeps
 `g_vector_of[1020]` (INTID → vector, identity for unrouted INTIDs) and
 `g_intid_of[256]` (dynamic vector → INTID, 0xFFFF for none). `route`
 writes both maps and, for an SPI, sets `GICD_IPRIORITYR` to 0x80,
@@ -194,11 +216,11 @@ entry, releases a GICv2m SPI or an SGI. `arch_irqc_gsi_count` = 1020
 (PPIs included). PPI and SGI enables are banked per CPU, so `init_cpu`
 enables all sixteen SGIs plus `g_routed_ppi_mask` on each CPU; the timer
 binds its PPI once with `gic_bind_ppi` and enables it per CPU with
-`gic_enable_local`. `arch_irqc_init` programs every SPI group 0,
+`gic_enable_local`. `init` programs every SPI group 0,
 disabled, inactive, priority 0x80, level, and enables the distributor;
 the GICv2m frame's `MSI_TYPER` gives the SPI base and count unless the
 MADT entry overrides them, and a range outside the distributor's lines
-disables MSI with a warning. A distributor version other than 2 panics.
+disables MSI with a warning.
 
 IPIs: the generic layer allocates a dynamic vector and calls
 `arch_ipi_send(cpu, vector)` or `arch_ipi_broadcast_others(vector)`;
@@ -213,6 +235,115 @@ free SPI from the GICv2m frame's range (QEMU: INTIDs 80..143), routes it
 edge-triggered to `vector` on `cpu`, enables it, and returns `addr` =
 frame + 0x40 (`MSI_SETSPI_NS`), `data` = INTID. Freeing the vector
 releases the SPI.
+
+**A frame's range can overlap lines firmware wired to devices** -- on
+QEMU's `virt` the SMMU's event and error interrupts are INTIDs 106 and
+109, inside the frame's 80..143 -- and the frame's bitmap cannot see
+that. So `route` refuses an INTID already bound to another vector
+(`-EBUSY`) and `msi_compose` walks past such a line, leaving it marked
+used because it is not the frame's to hand out, with one warning naming
+it. Before this, the twenty-seventh MSI took the SMMU's line and the
+SMMU stopped being interrupted; nothing noticed until sixteen CPUs
+asked for twenty-seven queues.
+
+The frame itself is `gicv2m.c`: a `struct gicv2m`
+holding the mapped window, the SPI range and a bitmap under its own
+lock, which both drivers own an instance of. Its lock is a leaf: the
+driver's `g_lock` may be taken around it and never the other way.
+
+### GICv3 (`gicv3.c`)
+
+Same vector map, same bookkeeping arrays, three differences, which are
+the whole of the file:
+
+- **The CPU interface is system registers.** `ICC_SRE_EL1` selects them
+  (`init_cpu` sets SRE, DFB and DIB, then panics if SRE reads back
+  clear), `ICC_PMR_EL1` = 0xF0 admits everything, `ICC_BPR1_EL1` = 0,
+  `ICC_CTLR_EL1` clears CBPR and EOImode so one `ICC_EOIR1_EL1` write
+  both drops priority and deactivates, and `ICC_IGRPEN1_EL1` = 1 opens
+  the interface. Acknowledging is `ICC_IAR1_EL1`. Interrupts are
+  **Group 1**, not GICv2's Group 0: the system-register interface
+  delivers Group 1 as IRQ and Group 0 as FIQ, and this kernel takes
+  IRQs. The default priority moves with it, to that view's 0xA0.
+  *(EL2 must leave `ICC_SRE_EL2.Enable` set for EL1 to reach these at
+  all. The loader does not program it — QEMU's does not need it — so a
+  machine whose firmware cleared it would trap on the first access.)*
+- **SGIs and PPIs live in a redistributor.** One frame pair per CPU,
+  found by walking the GICR window from the MADT (or, without one, the
+  GICC entry's own base) for a frame whose `GICR_TYPER[63:32]` is this
+  CPU's MPIDR affinity; the stride is 0x20000, or 0x40000 when the
+  first frame reports VLPIS (GICv4). `GICR_WAKER.ProcessorSleep` is
+  cleared and `ChildrenAsleep` waited on before anything else. So
+  `mask`, `unmask`, `gic_enable_local` and `gic_disable_local` go to the
+  calling CPU's redistributor for an INTID below 32 and to the
+  distributor above it.
+- **Routing is by affinity.** `GICD_CTLR` gains `ARE_NS`, and an SPI is
+  routed by writing the target's affinity to `GICD_IROUTER` (64 bits per
+  SPI, programmed after ARE is set because it means nothing before);
+  `arch_ipi_send` writes `ICC_SGI1R_EL1` with Aff3/Aff2/Aff1 and a
+  sixteen-bit target list over Aff0, and `arch_ipi_broadcast_others`
+  sets IRM. This is where GICv2's eight-bit `GICD_ITARGETSR` mask — and
+  its eight-CPU ceiling — stops being the limit; QEMU's `virt` numbers
+  sixteen CPUs per cluster under `gic-version=3` precisely so the target
+  list covers a cluster.
+
+A write to an enable or control register is not in effect until the
+controller says so, so `GICD_CTLR.RWP` and `GICR_CTLR.RWP` are polled
+after the writes that need it.
+
+### MSI under GICv3: the ITS (`gicv3_its.c`)
+
+MSI has a fallback order, decided at `init` from the MADT: an ITS if
+firmware described one, otherwise a GICv2m frame, otherwise
+`msi_compose` returns `-ENODEV`. That last is a **decline, not a
+fallback** -- no driver in this tree falls back to INTx, so a machine
+with neither loses its disks; it is a configuration the kernel reports
+rather than one it survives.
+
+An ITS *translates* instead of raising a fixed line. A device writes an
+event number to `GITS_TRANSLATER`; the ITS looks up (DeviceID, EventID)
+in tables the kernel built and raises an **LPI** -- an interrupt id from
+8192 up -- on the redistributor of whichever CPU that event belongs to.
+Three consequences run through the code:
+
+- **The device's identity matters.** `arch_irqc_msi_compose` and
+  `irq_request_msi` carry a device id, which `pci_requester_id()`
+  computes from bus:device:function -- the same number the IOMMU calls
+  a stream id. Backends that do not translate per device ignore it.
+  `irq-msi-devid` is the test that it arrives: an id no device table can
+  hold must be refused.
+- **LPIs need tables of their own.** A shared property table (one byte
+  per LPI: priority and an enable bit) in `GICR_PROPBASER`, a pending
+  table per redistributor in `GICR_PENDBASER`, and `GICR_CTLR.EnableLPIs`
+  -- a one-way switch, so both tables are in place first. This kernel
+  uses one LPI per dynamic vector (256), though the property table must
+  still cover the fourteen id bits the architecture's minimum implies
+  and the pending table must be 64 KiB aligned.
+- **Everything is said through a command queue.** MAPD gives a device
+  its translation table, MAPC gives a CPU a collection pointing at its
+  redistributor (by address or by processor number, as
+  `GITS_TYPER.PTA` dictates), MAPTI binds an event to an LPI in a
+  collection, INV drops what the redistributor cached, SYNC waits.
+  `its_map_event` and `its_unmap_event` are those sequences; the LPI is
+  released outside the driver's lock, because draining the queue is a
+  spin.
+
+Two simplifications, both deliberate. **The event id is the LPI's
+index**, so no device needs an event-number allocator of its own and
+every device's table is the same size. **The device table is flat and
+capped at 64 KiB**; `GITS_TYPER` may claim twenty device-id bits, which
+is an eight-megabyte flat table, and the architecture's answer -- a
+two-level table -- is a follow-up. A device id beyond the table is
+refused with a warning, never mistranslated.
+
+**And an MSI write is a DMA.** Where devices sit behind an IOMMU, the
+doorbell page has to be kept out of the IOVA space and identity-mapped
+into every domain, or the write faults and the interrupt never arrives.
+`arch_irqc_msi_doorbell()` is where the controller says which page that
+is; `arm_smmuv3.c` asks rather than assuming, because the answer moved
+when the ITS replaced the frame. On x86-64 it is false: a write to
+0xFEE00000 is an interrupt request, not a DMA, and the IOMMU never sees
+it.
 
 ### Timer (`timer.c`)
 

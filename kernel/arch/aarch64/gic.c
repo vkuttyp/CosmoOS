@@ -2,6 +2,10 @@
  * gic.c - GICv2 distributor and CPU interface, GICv2m MSI, SGIs as IPIs,
  * the vector map (docs/kernel/arch/aarch64/design.md, "Vector numbering").
  *
+ * One implementation of `struct aarch64_irqc_ops`, reached only through
+ * `aarch64_gicv2_ops`; irqc.c decides whether this machine gets it. All
+ * of the state below is this driver's alone.
+ *
  * GSI = INTID on this architecture. Dynamic vectors (VEC_DYNAMIC_BASE..)
  * are software ids the generic layers allocate; `route` binds one to an
  * INTID, IPIs bind one to an SGI, MSIs to a GICv2m SPI. The IRQ path
@@ -12,12 +16,15 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
+#include <kernel/page.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/spinlock.h>
 #include <kernel/vmm.h>
 #include <arch/cpu.h>
 #include <arch/irqc.h>
+#include <aarch64/gicv2m.h>
+#include <aarch64/irqc.h>
 #include <aarch64/platform.h>
 #include <aarch64/sysreg.h>
 #include <aarch64/trapframe.h>
@@ -28,6 +35,7 @@
 #define GICD_IGROUPR    0x080
 #define GICD_ISENABLER  0x100
 #define GICD_ICENABLER  0x180
+#define GICD_ISPENDR    0x200
 #define GICD_ICPENDR    0x280
 #define GICD_ICACTIVER  0x380
 #define GICD_IPRIORITYR 0x400
@@ -40,17 +48,12 @@
 #define GICC_BPR  0x008
 #define GICC_IAR  0x00C
 #define GICC_EOIR 0x010
-/* GICv2m */
-#define V2M_MSI_TYPER     0x008
-#define V2M_MSI_SETSPI_NS 0x040
-
 #define PRIORITY_DEFAULT 0x80u
 
-static volatile uint32_t *g_gicd, *g_gicc, *g_v2m;
-static paddr_t g_gicd_pa, g_gicc_pa, g_v2m_pa;
+static volatile uint32_t *g_gicd, *g_gicc;
+static paddr_t g_gicd_pa, g_gicc_pa;
 static unsigned g_nr_lines;                      /* from TYPER */
-static unsigned g_v2m_spi_base, g_v2m_spi_count;
-static uint64_t g_v2m_used[32];                  /* up to 2048 SPIs */
+static struct gicv2m g_v2m;
 
 static spinlock_t g_lock = SPINLOCK_INIT("gic");
 static uint16_t g_vector_of[GIC_INTID_COUNT];     /* INTID -> vector (identity when unrouted) */
@@ -92,22 +95,13 @@ static volatile uint32_t *map(paddr_t pa, size_t len, const char *what)
     return (volatile uint32_t *)va;
 }
 
-void arch_irqc_init(void)
+static void gicv2_init_cpu(void);
+
+static void gicv2_init(const struct acpi_gic *acpi)
 {
-    struct acpi_gic gic;
-    if (!acpi_madt_gic(&gic)) {
-        kwarn("gic: MADT has no GIC entries; using the virt defaults");
-        gic.gicd_base = VIRT_GICD_BASE;
-        gic.gicc_base = VIRT_GICC_BASE;
-        gic.v2m_base = VIRT_GICV2M_BASE;
-        gic.v2m_spi_base = 0;
-        gic.v2m_spi_count = 0;
-    }
-    if (gic.version != 0 && gic.version != 2)
-        panic("gic: distributor version %u; only GICv2 is implemented", gic.version);
-    g_gicd_pa = gic.gicd_base;
+    struct acpi_gic gic = *acpi;
+    g_gicd_pa = gic.gicd_base ? gic.gicd_base : VIRT_GICD_BASE;
     g_gicc_pa = gic.gicc_base ? gic.gicc_base : VIRT_GICC_BASE;
-    g_v2m_pa = gic.v2m_base;
     g_gicd = map(g_gicd_pa, 0x10000, "GICD");
     g_gicc = map(g_gicc_pa, 0x2000, "GICC");
 
@@ -137,28 +131,14 @@ void arch_irqc_init(void)
         gicd_wr(GICD_ICFGR + (i / 16) * 4, 0);
     gicd_wr(GICD_CTLR, 1);
 
-    if (g_v2m_pa) {
-        g_v2m = map(g_v2m_pa, 0x1000, "GICv2m");
-        uint32_t typer = g_v2m[V2M_MSI_TYPER / 4];
-        g_v2m_spi_base = (typer >> 16) & 0x3FF;
-        g_v2m_spi_count = typer & 0x3FF;
-        if (gic.v2m_spi_count) {
-            g_v2m_spi_base = gic.v2m_spi_base;
-            g_v2m_spi_count = gic.v2m_spi_count;
-        }
-        if (g_v2m_spi_base < GIC_SPI_BASE || g_v2m_spi_base + g_v2m_spi_count > g_nr_lines) {
-            kwarn("gic: GICv2m SPI range %u+%u is outside the distributor's %u lines; MSI disabled",
-                  g_v2m_spi_base, g_v2m_spi_count, g_nr_lines);
-            g_v2m_spi_count = 0;
-        }
-    }
-    arch_irqc_init_cpu();
+    gicv2m_init(&g_v2m, &gic, g_nr_lines);
+    gicv2_init_cpu();
     kinfo("gic: GICv2 at 0x%llx/0x%llx, %u lines, MSI %s (SPIs %u+%u)", (unsigned long long)g_gicd_pa,
-          (unsigned long long)g_gicc_pa, g_nr_lines, g_v2m_spi_count ? "via GICv2m" : "unavailable",
-          g_v2m_spi_base, g_v2m_spi_count);
+          (unsigned long long)g_gicc_pa, g_nr_lines, g_v2m.spi_count ? "via GICv2m" : "unavailable",
+          g_v2m.spi_base, g_v2m.spi_count);
 }
 
-void arch_irqc_init_cpu(void)
+static void gicv2_init_cpu(void)
 {
     unsigned cpu = arch_cpu_id();
     /* SGIs and PPIs are banked: disable, clear, set priorities, then enable what is routed. */
@@ -177,7 +157,7 @@ void arch_irqc_init_cpu(void)
     gicc_wr(GICC_CTLR, 1);
 }
 
-int arch_vector_alloc(void)
+static int gicv2_vector_alloc(void)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     for (unsigned i = 0; i < VEC_DYNAMIC_COUNT; i++) {
@@ -199,10 +179,8 @@ static void unbind_locked(unsigned vector)
         if (intid >= GIC_SPI_BASE)
             gicd_wr(GICD_ICENABLER + (intid / 32) * 4, 1u << (intid % 32));
         g_vector_of[intid] = (uint16_t)intid;
-        if (g_v2m_spi_count && intid >= g_v2m_spi_base && intid < g_v2m_spi_base + g_v2m_spi_count) {
-            unsigned k = intid - g_v2m_spi_base;
-            g_v2m_used[k / 64] &= ~(1ull << (k % 64));
-        }
+        if (gicv2m_owns(&g_v2m, intid))
+            gicv2m_free(&g_v2m, intid);
         if (intid >= GIC_PPI_BASE && intid < GIC_SPI_BASE)
             g_routed_ppi_mask &= ~(1u << intid);
     }
@@ -214,7 +192,7 @@ static void unbind_locked(unsigned vector)
     }
 }
 
-void arch_vector_free(unsigned vector)
+static void gicv2_vector_free(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -229,6 +207,12 @@ static int route_locked(unsigned intid, unsigned vector, unsigned cpu, unsigned 
         return -EINVAL;
     if (cpu >= CONFIG_MAX_CPUS || percpu_get(cpu) == NULL)
         return -EINVAL;
+    /* One INTID, one vector (invariant A9). Firmware may wire a device
+     * to a line that also falls inside the MSI frame's range, and the
+     * frame's allocator cannot see that; refusing here is what stops an
+     * MSI from silently taking a line something else is using. */
+    if (g_vector_of[intid] != intid && g_vector_of[intid] != vector)
+        return -EBUSY;
     g_vector_of[intid] = (uint16_t)vector;
     g_intid_of[vector - VEC_DYNAMIC_BASE] = (uint16_t)intid;
     if (intid >= GIC_SPI_BASE) {
@@ -246,7 +230,7 @@ static int route_locked(unsigned intid, unsigned vector, unsigned cpu, unsigned 
     return 0;
 }
 
-int arch_irqc_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
+static int gicv2_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     int rc = route_locked(gsi, vector, cpu, flags);
@@ -254,7 +238,7 @@ int arch_irqc_route(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags)
     return rc;
 }
 
-int arch_irqc_mask(unsigned gsi)
+static int gicv2_mask(unsigned gsi)
 {
     if (gsi >= g_nr_lines)
         return -EINVAL;
@@ -262,7 +246,7 @@ int arch_irqc_mask(unsigned gsi)
     return 0;
 }
 
-int arch_irqc_unmask(unsigned gsi)
+static int gicv2_unmask(unsigned gsi)
 {
     if (gsi >= g_nr_lines)
         return -EINVAL;
@@ -270,38 +254,42 @@ int arch_irqc_unmask(unsigned gsi)
     return 0;
 }
 
-int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)
+static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data)
 {
-    if (!vector_is_dynamic(vector) || g_v2m_spi_count == 0)
+    (void)devid;   /* a frame raises an SPI; which device wrote to it does not matter */
+    if (!vector_is_dynamic(vector))
         return -EINVAL;
-    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    int found = -1;
-    for (unsigned k = 0; k < g_v2m_spi_count; k++) {
-        if ((g_v2m_used[k / 64] & (1ull << (k % 64))) == 0) {
-            g_v2m_used[k / 64] |= 1ull << (k % 64);
-            found = (int)k;
-            break;
+    /* The frame's SPI range can overlap lines firmware wired to devices
+     * -- on QEMU's virt the SMMU's event and error interrupts sit inside
+     * it -- and the frame has no way to know. Walk past any line that is
+     * already bound, leaving it marked used so it is never offered
+     * again. */
+    for (;;) {
+        unsigned intid;
+        int rc = gicv2m_alloc(&g_v2m, &intid);
+        if (rc)
+            return rc;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
+        if (rc == 0)
+            gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
+        spin_unlock_irqrestore(&g_lock, s);
+        if (rc == -EBUSY) {
+            kwarn("gic: MSI frame SPI %u is wired to a device; not offering it", intid);
+            continue;   /* the SPI stays taken: it is not ours to hand out */
         }
+        if (rc) {
+            gicv2m_free(&g_v2m, intid);
+            return rc;
+        }
+        *addr = gicv2m_setspi_addr(&g_v2m);
+        *data = intid;
+        return 0;
     }
-    if (found < 0) {
-        spin_unlock_irqrestore(&g_lock, s);
-        return -ENOSPC;
-    }
-    unsigned intid = g_v2m_spi_base + (unsigned)found;
-    int rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
-    if (rc) {
-        g_v2m_used[found / 64] &= ~(1ull << (found % 64));
-        spin_unlock_irqrestore(&g_lock, s);
-        return rc;
-    }
-    gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
-    spin_unlock_irqrestore(&g_lock, s);
-    *addr = g_v2m_pa + V2M_MSI_SETSPI_NS;
-    *data = intid;
-    return 0;
 }
 
-void arch_irqc_eoi(unsigned vector)
+static void gicv2_eoi(unsigned vector)
 {
     if (vector >= VEC_SYNC_BASE && vector < VEC_DYNAMIC_BASE)
         return;   /* synchronous exceptions have no controller state */
@@ -310,23 +298,32 @@ void arch_irqc_eoi(unsigned vector)
     gicc_wr(GICC_EOIR, g_cur_intid[arch_cpu_id()]);
 }
 
-unsigned arch_irqc_gsi_count(void)
+static bool gicv2_msi_doorbell(paddr_t *pa, size_t *len)
+{
+    if (g_v2m.spi_count == 0)
+        return false;
+    *pa = gicv2m_setspi_addr(&g_v2m) & ~(paddr_t)(PAGE_SIZE - 1);
+    *len = PAGE_SIZE;
+    return true;
+}
+
+static unsigned gicv2_gsi_count(void)
 {
     return GIC_INTID_COUNT;
 }
 
-unsigned arch_irqc_spurious_vector(void)
+static unsigned gicv2_spurious_vector(void)
 {
     return VEC_SPURIOUS;
 }
 
-unsigned gic_current_intid(void)
+static unsigned gicv2_current_intid(void)
 {
     return g_cur_intid[arch_cpu_id()];
 }
 
 /* PPI helpers for the timer (banked per CPU, routed once). */
-void gic_bind_ppi(unsigned intid, unsigned vector)
+static void gicv2_bind_ppi(unsigned intid, unsigned vector)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
     KASSERT(intid >= GIC_PPI_BASE && intid < GIC_SPI_BASE && vector_is_dynamic(vector));
@@ -336,12 +333,12 @@ void gic_bind_ppi(unsigned intid, unsigned vector)
     spin_unlock_irqrestore(&g_lock, s);
 }
 
-void gic_enable_local(unsigned intid)
+static void gicv2_enable_local(unsigned intid)
 {
     gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
 }
 
-void gic_disable_local(unsigned intid)
+static void gicv2_disable_local(unsigned intid)
 {
     gicd_wr(GICD_ICENABLER + (intid / 32) * 4, 1u << (intid % 32));
 }
@@ -361,7 +358,7 @@ static int sgi_for_vector_locked(unsigned vector)
     return -1;
 }
 
-void arch_ipi_bind(unsigned vector)
+static void gicv2_ipi_bind(unsigned vector)
 {
     KASSERT(vector_is_dynamic(vector));
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
@@ -383,7 +380,7 @@ static int sgi_for_vector(unsigned vector)
     return sgi;
 }
 
-void arch_ipi_send(unsigned cpu, unsigned vector)
+static void gicv2_ipi_send(unsigned cpu, unsigned vector)
 {
     KASSERT(cpu < CONFIG_MAX_CPUS);
     int sgi = sgi_for_vector(vector);
@@ -391,7 +388,7 @@ void arch_ipi_send(unsigned cpu, unsigned vector)
     gicd_wr(GICD_SGIR, ((uint32_t)g_cpu_iface_mask[cpu] << 16) | (uint32_t)sgi);
 }
 
-void arch_ipi_broadcast_others(unsigned vector)
+static void gicv2_ipi_broadcast_others(unsigned vector)
 {
     int sgi = sgi_for_vector(vector);
     dsb_ishst();
@@ -400,7 +397,7 @@ void arch_ipi_broadcast_others(unsigned vector)
 
 void aarch64_timer_ack(unsigned intid);
 
-void gic_irq_dispatch(struct arch_trap_frame *frame)
+static void gicv2_dispatch(struct arch_trap_frame *frame)
 {
     unsigned cpu = arch_cpu_id();
     uint32_t iar = gicc_rd(GICC_IAR);
@@ -427,5 +424,69 @@ void gic_irq_dispatch(struct arch_trap_frame *frame)
         return;
     }
     interrupt_dispatch(vector, frame);
-    arch_irqc_eoi(vector);
+    gicv2_eoi(vector);
 }
+
+/* The distributor's highest line: QEMU's virt describes more lines than
+ * it wires devices to, so the last one is free to route anywhere and
+ * raise by hand. */
+static int gicv2_test_spare_gsi(void)
+{
+    return g_nr_lines > GIC_SPI_BASE ? (int)(g_nr_lines - 1) : -1;
+}
+
+static void gicv2_test_raise(unsigned gsi)
+{
+    dsb_ishst();
+    gicd_wr(GICD_ISPENDR + (gsi / 32) * 4, 1u << (gsi % 32));
+}
+
+/* The line the MSI allocator would hand out next, while it is still
+ * unbound: see the ops table. */
+static int gicv2_test_msi_overlap_gsi(void)
+{
+    for (unsigned k = 0; k < g_v2m.spi_count; k++) {
+        unsigned intid = g_v2m.spi_base + k;
+        if (!gicv2m_is_free(&g_v2m, intid))
+            continue;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        bool unbound = g_vector_of[intid] == intid;
+        spin_unlock_irqrestore(&g_lock, s);
+        if (unbound)
+            return (int)intid;
+    }
+    return -1;
+}
+
+static bool gicv2_test_msi_per_device(void)
+{
+    return false;   /* a frame raises its SPI whoever wrote to it */
+}
+
+const struct aarch64_irqc_ops aarch64_gicv2_ops = {
+    .name = "GICv2",
+    .init = gicv2_init,
+    .init_cpu = gicv2_init_cpu,
+    .vector_alloc = gicv2_vector_alloc,
+    .vector_free = gicv2_vector_free,
+    .route = gicv2_route,
+    .mask = gicv2_mask,
+    .unmask = gicv2_unmask,
+    .eoi = gicv2_eoi,
+    .msi_compose = gicv2_msi_compose,
+    .msi_doorbell = gicv2_msi_doorbell,
+    .gsi_count = gicv2_gsi_count,
+    .spurious_vector = gicv2_spurious_vector,
+    .current_intid = gicv2_current_intid,
+    .bind_ppi = gicv2_bind_ppi,
+    .enable_local = gicv2_enable_local,
+    .disable_local = gicv2_disable_local,
+    .ipi_bind = gicv2_ipi_bind,
+    .ipi_send = gicv2_ipi_send,
+    .ipi_broadcast_others = gicv2_ipi_broadcast_others,
+    .dispatch = gicv2_dispatch,
+    .test_spare_gsi = gicv2_test_spare_gsi,
+    .test_raise = gicv2_test_raise,
+    .test_msi_overlap_gsi = gicv2_test_msi_overlap_gsi,
+    .test_msi_per_device = gicv2_test_msi_per_device,
+};

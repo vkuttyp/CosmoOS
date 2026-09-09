@@ -177,7 +177,15 @@ if [ "$arch" = aarch64 ]; then
     # (docs/kernel/arch/aarch64/design.md). The scratch disk comes first so it
     # is vda for the storage self-tests, as on x86; the boot image is read-only.
     # An SMMUv3 in front of the PCI root complex (kernel/iommu); QEMU_IOMMU=0 leaves it out.
-    iommu_machine=""
+    # The interrupt controller. QEMU_GIC selects the distributor version (2,
+# the default and what this kernel drives today, or 3/4) and QEMU_MSI the
+# way an MSI reaches it: its, gicv2m, or off. `msi=off` is not a
+# configuration this tree can boot -- no driver here falls back to INTx
+# (docs/audit/next-subsystem-gicv3.md) -- and is offered only so that the
+# decline path can be exercised deliberately.
+gic_msi=""
+[ -n "${QEMU_MSI:-}" ] && gic_msi=",msi=${QEMU_MSI}"
+iommu_machine=""
     [ "${QEMU_IOMMU:-1}" != "0" ] && iommu_machine=",iommu=smmuv3"
     # The virtualization extensions: firmware then hands the loader EL2,
     # which it keeps for guests (docs/kernel/arch/aarch64/design.md,
@@ -185,7 +193,7 @@ if [ "$arch" = aarch64 ]; then
     el2_machine=""
     [ "${QEMU_EL2:-1}" != "0" ] && el2_machine=",virtualization=on"
     exec qemu-system-aarch64 \
-        -machine "virt,gic-version=2${iommu_machine}${el2_machine},accel=${QEMU_ACCEL:-tcg}" \
+        -machine "virt,gic-version=${QEMU_GIC:-2}${gic_msi}${iommu_machine}${el2_machine},accel=${QEMU_ACCEL:-tcg}" \
         -cpu "${QEMU_CPU:-cortex-a72}" \
         -smp "${QEMU_SMP:-4}" \
         -m "${QEMU_MEM:-256M}" \

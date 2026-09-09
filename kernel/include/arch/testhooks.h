@@ -40,4 +40,25 @@ bool arch_test_fpu_switch(const char **why);
 bool arch_test_fpu_set(const uint8_t pattern[16]);
 bool arch_test_fpu_get(uint8_t out[16]);
 
+/* A GSI the machine wires to nothing, safe for a test to route to any
+ * CPU and raise by hand, or -1 where the controller offers no such
+ * line. arch_test_irq_raise makes it pending as if a device had
+ * asserted it; the controller then delivers it wherever it is routed,
+ * which is the point of the test. */
+int  arch_test_irq_spare_gsi(void);
+void arch_test_irq_raise(unsigned gsi);
+
+/* A GSI the controller's MSI allocator would hand out next and that
+ * nothing is bound to, or -1 where MSIs do not come out of the GSI
+ * space at all (x86-64: they are vectors). Binding it and then asking
+ * for an MSI is how `irq-msi-overlap` provokes the collision firmware
+ * creates when it wires a device to a line inside the MSI frame. */
+int arch_test_msi_overlap_gsi(void);
+
+/* True when the controller translates an MSI per writing device, so the
+ * device id `irq_request_msi` carries is load-bearing and a device it
+ * cannot describe must be refused (a GICv3 ITS). False where the id is
+ * ignored, and the test that checks the refusal has nothing to check. */
+bool arch_test_msi_per_device(void);
+
 #endif /* ARCH_TESTHOOKS_H */

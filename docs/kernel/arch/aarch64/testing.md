@@ -19,6 +19,16 @@ qemu-system-aarch64 -machine virt,gic-version=2,accel=tcg -cpu cortex-a72 -smp 4
   `QEMU_TESTDISK`, `QEMU_VCON`, `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`,
   `QEMU_PCAP` and `OVMF_CODE` keep their meanings. `-cpu max` adds PAN and
   is also supported.
+- `QEMU_GIC` selects the interrupt controller: `2` (the default, the
+  GICv2 driver in `gic.c`) or `3` (the GICv3 driver in `gicv3.c`).
+  `QEMU_MSI` selects how an MSI reaches it: `its` (QEMU's default under
+  `gic-version=3`, and what GICv3 hardware offers), `gicv2m` (the frame,
+  the only path a GICv2 has and the fallback a GICv3 takes when firmware
+  describes no ITS), or `off`. **`msi=off` cannot boot this tree**: no
+  driver here falls back to INTx, so NVMe and AHCI fail to probe and the
+  harness loses the device markers it requires; it exists so the decline
+  path can be exercised deliberately. **`gic-version=2` caps the machine
+  at eight CPUs**, which is why `QEMU_SMP` above 8 needs `QEMU_GIC=3`.
 - The firmware (`scripts/find-firmware.sh aarch64`: `AAVMF`,
   `qemu-efi-aarch64`, Homebrew `edk2-aarch64-code.fd`) is copied and
   padded to the 64 MiB flash size the `virt` machine expects, into
@@ -64,7 +74,59 @@ The same chain as x86 is run before a phase is declared complete:
 test`, `make ARCH=aarch64 test-crash`, `make ARCH=aarch64
 MODULE_SIG_ENFORCE=0 test`, `make ARCH=aarch64 host-test`, `make
 ARCH=aarch64 analyze`, `make ARCH=aarch64 reproducible`
-(`check-reproducible.sh` compares `boot/BOOTAA64.EFI`).
+(`check-reproducible.sh` compares `boot/BOOTAA64.EFI`), plus the two
+interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=its`,
+`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=1` and
+`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=8`. The middle one exists because a
+fallback nothing runs is a fallback that regresses.
+
+### Sixteen CPUs
+
+`QEMU_GIC=3 QEMU_SMP=16` boots and brings all sixteen CPUs online --
+the first configuration in this tree to do so, and the one that proves
+the SGI target list is built from the right affinity fields (`smp-call`
+sends to each CPU in turn and requires the callback to run *there*).
+
+**It is worth running: it found the MSI/wired-SPI overlap.** At sixteen
+CPUs the drivers ask for twenty-seven MSI vectors, which is where the
+GICv2m frame's range (SPIs 80..143 on virt) reaches the lines firmware
+wired to the SMMU (106 and 109), and the SMMU stopped being interrupted
+-- `iommu` failed with `EVENTQ_PROD` at 256 and `CONS` at 0. Nine CPUs
+ask for twenty-three and never reach it. Fixed, and `irq-msi-overlap`
+now proves it at any CPU count; the boot logs `gicv3: MSI frame SPI 106
+is wired to a device; not offering it`.
+
+### What sixteen CPUs is worth, measured
+
+The three things this port can honestly measure about the change --
+interrupt latency under TCG is not one of them, for the reason
+`docs/kernel/memory/testing.md` records:
+
+| | 4 CPUs | 8 CPUs | 16 CPUs |
+|---|---|---|---|
+| CPUs online | 4 | 8 | **16** (was capped at 8) |
+| device interrupts on CPU 0 / elsewhere | 14 / 13 | 13 / 22 | 12 / 36 |
+| `net-nicbench` eth0 ARP round trips | 7590/s | 9348/s | 7595/s |
+| `net-nicbench` eth0 UDP sends | 14320/s | 19148/s | 13171/s |
+
+The interrupt column is the affinity change: what used to be entirely
+CPU 0 is now spread, and CPU 0's remainder is the interrupts registered
+before the APs are up, which have only one CPU to choose.
+
+The network columns are the point the report made about what this unit
+is worth to the ones after it: throughput improves from four CPUs to
+eight and then **falls back** at sixteen. Some of that is a ten-core
+host running sixteen MTTCG vCPUs, and none of it is a claim about
+hardware -- but the shape is now visible at all, which it could not be
+while eight was the ceiling. The single TCP lock and the single RX
+worker are where to look next.
+
+It is still **not** a chain step. One test remains over its budget at
+sixteen: `process-user`'s fifteen-second "this is stuck" bound, at 16.3
+s. That bound catches a hang, not slowness, and sixteen MTTCG vCPUs on a
+ten-core development host is slowness -- the same test takes 3.6 s at
+four CPUs and 6.6 s at eight, under both GIC drivers alike. Run sixteen
+by hand when changing the SGI, affinity or MSI paths.
 
 ## Kernel self-tests
 
@@ -77,8 +139,28 @@ each of them exercises in this backend:
   the `ELR + 4` resume, `eret`; the handler sees vector 1024 and an `elr`
   in kernel text.
 - Interrupt/IRQ tests: dynamic vector allocation in 1056..1311, GSI
-  routing to SPIs, mask/unmask, MSI compose through the GICv2m frame,
-  the periodic test IRQ on the virtual timer (INTID 27).
+  routing to SPIs, mask/unmask, MSI compose -- through whichever path
+  the machine offers, an ITS translation to an LPI or a GICv2m frame's
+  SPI -- and the periodic test IRQ on the virtual timer (INTID 27).
+- `irq-affinity` (`kernel/interrupt/irqtest.c`): the distributor's
+  highest line -- which `virt` reports and wires to nothing -- is routed
+  to each online CPU in turn, made pending with `GICD_ISPENDR` through
+  `arch_test_irq_raise`, and the handler must report `arch_cpu_id()`
+  equal to the CPU the route named. Every driver in the tree asks for
+  CPU 0, so without this a controller that ignored the CPU argument
+  would pass the whole suite. It runs on both GIC drivers and skips on
+  x86-64, where an I/O APIC pin cannot be asserted by software.
+- `irq-msi-devid` (same file): with an ITS, a device id no device table
+  can hold must be refused, and one it can hold must still succeed -- so
+  the refusal is about the id and not about MSIs being unavailable. It
+  is the test that the id `irq_request_msi` now carries actually reaches
+  the controller. Skips where the controller ignores it.
+- `irq-msi-overlap` (same file): binds the line the MSI allocator would
+  hand out *next* (`arch_test_msi_overlap_gsi`), asks for one MSI, and
+  requires both that the MSI took a different line and that the wired
+  one still delivers. This is the overlap above, provable without a
+  machine large enough to reach it by accident. Skips on x86-64, where
+  an MSI carries a vector rather than a GSI and cannot collide.
 - Timer tests: `CNTPCT` monotonicity and rate, the tick on `CNTP_CVAL`
   compares (the rate windows are what caught the `TVAL` drift), one-shot
   timers and sleeps.

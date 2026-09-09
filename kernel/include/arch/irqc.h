@@ -9,6 +9,7 @@
 #define ARCH_IRQC_H
 
 #include <kernel/compiler.h>
+#include <kernel/types.h>
 
 /* Routing flags (mirrored by kernel/irq.h). */
 #define ARCH_IRQ_TRIGGER_LEVEL (1u << 0)  /* default edge */
@@ -35,8 +36,23 @@ int  arch_irqc_unmask(unsigned gsi);
 void arch_irqc_eoi(unsigned vector);
 
 /* Compose the message a device must write to raise `vector` on `cpu`
- * (x86: APIC address + data). -EINVAL for an unknown CPU. */
-int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data);
+ * (x86: APIC address + data). -EINVAL for an unknown CPU.
+ *
+ * `devid` identifies the device that will write the message -- on PCIe
+ * its requester id. A controller that translates per device needs it
+ * (a GICv3 ITS keys its translation tables by it); one that does not
+ * ignores it, as x86-64 does, because an APIC message names the target
+ * and not the sender. */
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint32_t devid, uint64_t *addr,
+                          uint32_t *data);
+
+/* The page a device writes to raise an MSI, when that write is a DMA
+ * an IOMMU will translate: an IOMMU domain must keep it out of its
+ * address space and identity-map it, or the interrupt never arrives.
+ * False when the architecture has no such address to protect -- on
+ * x86-64 an interrupt request is not a DMA and the IOMMU never sees it.
+ * Valid only after arch_irqc_init. */
+bool arch_irqc_msi_doorbell(paddr_t *pa, size_t *len);
 
 /* Highest GSI + 1 the controllers cover (0 if none). */
 unsigned arch_irqc_gsi_count(void);

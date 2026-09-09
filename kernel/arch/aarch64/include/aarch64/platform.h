@@ -28,7 +28,8 @@ const struct aarch64_cpu_info *aarch64_cpu_info(void);
 void aarch64_start(const void *info) __attribute__((noreturn));
 void aarch64_ap_entry(unsigned cpu) __attribute__((noreturn));
 
-/* --- gic.c --- */
+/* --- irqc.c (the vector map is the architecture's; gic.c and gicv3.c
+ *     implement it) --- */
 #define GIC_INTID_COUNT      1020u
 #define GIC_SGI_COUNT        16u
 #define GIC_PPI_BASE         16u

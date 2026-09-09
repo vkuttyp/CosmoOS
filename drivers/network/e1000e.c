@@ -17,6 +17,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
+#include <kernel/irq.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mbuf.h>
@@ -463,7 +464,7 @@ static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
      * function has no MSI-X. */
     int granted = pci_msix_enable(pdev, 1);
     if (granted >= 1) {
-        e->vector = pci_msix_request(pdev, 0, e1000e_irq, e, "e1000e", 0);
+        e->vector = pci_msix_request(pdev, 0, e1000e_irq, e, "e1000e", IRQ_CPU_ANY);
         if (e->vector < 0) {
             pci_msix_disable(pdev);
             rc = e->vector;
@@ -473,7 +474,7 @@ static int e1000e_probe(struct pci_device *pdev, const struct pci_id *id)
         e->msix = true;
         wr32(e, E1000_IVAR, E1000_IVAR_RXQ0(0) | E1000_IVAR_TXQ0(0) | E1000_IVAR_OTHER(0));
     } else {
-        e->vector = pci_msi_enable(pdev, e1000e_irq, e, "e1000e", 0);
+        e->vector = pci_msi_enable(pdev, e1000e_irq, e, "e1000e", IRQ_CPU_ANY);
         if (e->vector < 0) {
             rc = e->vector;
             kerror("e1000e: %s: neither MSI-X nor MSI (%d)", pdev->dev.name, rc);

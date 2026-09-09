@@ -22,6 +22,7 @@
 #include <kernel/errno.h>
 #include <kernel/faultinject.h>
 #include <kernel/interrupt.h>
+#include <kernel/irq.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -1068,7 +1069,7 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
 
     int granted = pci_msix_enable(pdev, 1);
     if (granted >= 1) {
-        h->vector = pci_msix_request(pdev, 0, ahci_irq, h, "ahci", 0);
+        h->vector = pci_msix_request(pdev, 0, ahci_irq, h, "ahci", IRQ_CPU_ANY);
         if (h->vector < 0) {
             pci_msix_disable(pdev);
             rc = h->vector;
@@ -1076,7 +1077,7 @@ static int ahci_probe(struct pci_device *pdev, const struct pci_id *id)
         }
         h->msix = true;
     } else {
-        h->vector = pci_msi_enable(pdev, ahci_irq, h, "ahci", 0);
+        h->vector = pci_msi_enable(pdev, ahci_irq, h, "ahci", IRQ_CPU_ANY);
         if (h->vector < 0) {
             rc = h->vector;
             kerror("ahci%u: neither MSI-X nor MSI (%d); INTx is not driven", h->index, rc);

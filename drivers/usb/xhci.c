@@ -17,6 +17,7 @@
 #include <kernel/dma.h>
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
+#include <kernel/irq.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
@@ -1368,7 +1369,7 @@ static int xhci_probe(struct pci_device *pdev, const struct pci_id *id)
 
     int granted = pci_msix_enable(pdev, 1);
     if (granted >= 1) {
-        x->vector = pci_msix_request(pdev, 0, xhci_irq, x, "xhci", 0);
+        x->vector = pci_msix_request(pdev, 0, xhci_irq, x, "xhci", IRQ_CPU_ANY);
         if (x->vector < 0) {
             pci_msix_disable(pdev);
             rc = x->vector;
@@ -1377,7 +1378,7 @@ static int xhci_probe(struct pci_device *pdev, const struct pci_id *id)
         }
         x->msix = true;
     } else {
-        x->vector = pci_msi_enable(pdev, xhci_irq, x, "xhci", 0);
+        x->vector = pci_msi_enable(pdev, xhci_irq, x, "xhci", IRQ_CPU_ANY);
         if (x->vector < 0) {
             rc = x->vector;
             kerror("xhci%u: neither MSI-X nor MSI (%d)", x->hcd.index, rc);
