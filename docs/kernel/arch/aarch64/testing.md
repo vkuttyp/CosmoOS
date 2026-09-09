@@ -81,13 +81,22 @@ interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=1` and
 the first configuration in this tree to do so, and the one that proves
 the SGI target list is built from the right affinity fields (`smp-call`
 sends to each CPU in turn and requires the callback to run *there*).
-It is **not** a chain step, because on the development host sixteen TCG
-vCPUs on ten physical cores is enough oversubscription to break two
-wall-clock budgets that are not about interrupts: `process-user`'s
-fifteen-second "this is stuck" bound (18 s observed) and the `iommu`
-test's 500 ms wait for the fault event. Both fail the same way with
-sixteen CPUs on x86-64, where the interrupt controller is an I/O APIC.
-Run it by hand when changing the SGI or affinity paths.
+
+**It is worth running: it found the MSI/wired-SPI overlap.** At sixteen
+CPUs the drivers ask for twenty-seven MSI vectors, which is where the
+GICv2m frame's range (SPIs 80..143 on virt) reaches the lines firmware
+wired to the SMMU (106 and 109), and the SMMU stopped being interrupted
+-- `iommu` failed with `EVENTQ_PROD` at 256 and `CONS` at 0. Nine CPUs
+ask for twenty-three and never reach it. Fixed, and `irq-msi-overlap`
+now proves it at any CPU count; the boot logs `gicv3: MSI frame SPI 106
+is wired to a device; not offering it`.
+
+It is still **not** a chain step. One test remains over its budget at
+sixteen: `process-user`'s fifteen-second "this is stuck" bound, at 16.3
+s. That bound catches a hang, not slowness, and sixteen MTTCG vCPUs on a
+ten-core development host is slowness -- the same test takes 3.6 s at
+four CPUs and 6.6 s at eight, under both GIC drivers alike. Run sixteen
+by hand when changing the SGI, affinity or MSI paths.
 
 ## Kernel self-tests
 
@@ -110,6 +119,12 @@ each of them exercises in this backend:
   CPU 0, so without this a controller that ignored the CPU argument
   would pass the whole suite. It runs on both GIC drivers and skips on
   x86-64, where an I/O APIC pin cannot be asserted by software.
+- `irq-msi-overlap` (same file): binds the line the MSI allocator would
+  hand out *next* (`arch_test_msi_overlap_gsi`), asks for one MSI, and
+  requires both that the MSI took a different line and that the wired
+  one still delivers. This is the overlap above, provable without a
+  machine large enough to reach it by accident. Skips on x86-64, where
+  an MSI carries a vector rather than a GSI and cannot collide.
 - Timer tests: `CNTPCT` monotonicity and rate, the tick on `CNTP_CVAL`
   compares (the rate windows are what caught the `TVAL` drift), one-shot
   timers and sleeps.

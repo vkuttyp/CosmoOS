@@ -234,7 +234,19 @@ MSI: `arch_irqc_msi_compose(vector, cpu, &addr, &data)` takes the lowest
 free SPI from the GICv2m frame's range (QEMU: INTIDs 80..143), routes it
 edge-triggered to `vector` on `cpu`, enables it, and returns `addr` =
 frame + 0x40 (`MSI_SETSPI_NS`), `data` = INTID. Freeing the vector
-releases the SPI. The frame itself is `gicv2m.c`: a `struct gicv2m`
+releases the SPI.
+
+**A frame's range can overlap lines firmware wired to devices** -- on
+QEMU's `virt` the SMMU's event and error interrupts are INTIDs 106 and
+109, inside the frame's 80..143 -- and the frame's bitmap cannot see
+that. So `route` refuses an INTID already bound to another vector
+(`-EBUSY`) and `msi_compose` walks past such a line, leaving it marked
+used because it is not the frame's to hand out, with one warning naming
+it. Before this, the twenty-seventh MSI took the SMMU's line and the
+SMMU stopped being interrupted; nothing noticed until sixteen CPUs
+asked for twenty-seven queues.
+
+The frame itself is `gicv2m.c`: a `struct gicv2m`
 holding the mapped window, the SPI range and a bitmap under its own
 lock, which both drivers own an instance of. Its lock is a leaf: the
 driver's `g_lock` may be taken around it and never the other way.
