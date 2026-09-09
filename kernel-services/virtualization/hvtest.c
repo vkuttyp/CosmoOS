@@ -726,8 +726,24 @@ bool selftest_el2_guest_irq_masked(const char **reason)
     CHECK(vcpu_set_regs(v, &regs) == 0);
     CHECK(vcpu_run(v, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);
+
+    /*
+     * And it is delivered *once*. An interrupt that waited in the list
+     * register across an earlier entry was placed by that entry, not by
+     * this one, and a hypervisor that decides "was it taken?" from
+     * "did I place it just now?" answers no here -- leaving the pending
+     * bit set and handing the guest the same INTID again the moment the
+     * EOI frees the register. The guest acknowledged it above, so the
+     * bit must already be clear, and the runs after this must be
+     * heartbeats.
+     */
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+    CHECK(vcpu_run(v, &x) == 0);                 /* the EOI, then the heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_run(v, &x) == 0);                 /* and not INTID 42 a second time */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
     drop_guest(vm, v);
-    kinfo("selftest: el2-guest-irq-masked: held while PSTATE.I was set, delivered when it cleared");
+    kinfo("selftest: el2-guest-irq-masked: held while PSTATE.I was set, delivered once when it cleared");
     return true;
 }
 

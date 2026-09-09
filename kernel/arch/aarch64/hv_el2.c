@@ -93,7 +93,7 @@ struct arch_hv_vcpu {
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
     int offered;
-    bool irq_placed;         /* this entry put `offered` in a list register */
+    bool irq_live;           /* the offered vector is the one in the list register */
     uint64_t irq_delivered;  /* interrupts the guest took */
     uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
@@ -548,31 +548,39 @@ bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
 static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
     v->offered = vector;
-    v->irq_placed = false;
+    v->irq_live = false;
     if (!v->ctx->vgic_on || vector < 0)
         return;
+    uint64_t lr = v->ctx->vgic_lr0;
     /*
      * One list register, so one interrupt at a time. If the last one is
      * still in it -- Pending because the guest has it masked, or Active
      * because the guest is in its handler -- overwriting would lose a
      * state the guest is about to act on, and a guest that then
      * completed an interrupt nobody had given it would take a spurious
-     * EOI. Leave it; the vector stays pending in the generic set and is
-     * offered again on the next entry.
+     * EOI.
      */
-    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID) {
-        /* Counted only when a *different* interrupt had to wait: the
-         * offered vector already sitting in the register is the normal
-         * case -- it was placed on an earlier entry and the guest has
-         * not taken it yet -- and a second register would not have
-         * helped that. This is the number that says whether one is
-         * enough. */
-        if ((uint32_t)vector != (uint32_t)(v->ctx->vgic_lr0 & 0xFFFFFFFFu))
-            v->irq_deferred++;
+    if (lr_state(lr) != LR_STATE_INVALID) {
+        /*
+         * The offered vector already being in the register is the
+         * ordinary case: it was placed on an earlier entry and the
+         * guest has not taken it yet. It is still *this run's*
+         * interrupt, so it is live -- saying otherwise would make
+         * `irq_taken` false when the guest finally acknowledges it, and
+         * the generic layer would deliver the same INTID again as soon
+         * as the EOI freed the register.
+         */
+        if ((uint32_t)(lr & 0xFFFFFFFFu) == (uint32_t)vector) {
+            v->irq_live = true;
+            return;
+        }
+        /* A *different* interrupt had to wait. This is the number that
+         * says whether one register is enough. */
+        v->irq_deferred++;
         return;
     }
     v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(VGIC_PRIORITY) | (uint32_t)vector;
-    v->irq_placed = true;
+    v->irq_live = true;
 }
 
 static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
@@ -585,7 +593,7 @@ static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
      * interrupt -- is very much holding the interrupt, and reporting
      * otherwise would leave it pending and deliver it a second time.
      */
-    bool taken = v->irq_placed && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
+    bool taken = v->irq_live && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
     if (taken)
         v->irq_delivered++;
     return taken;
