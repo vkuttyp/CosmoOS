@@ -103,10 +103,19 @@ and the development host's is 11, so `QEMU_MSI` -- added by the GICv3
 unit and never run by CI, because CI never set `QEMU_GIC` either --
 worked everywhere it was tried and nowhere it was not.
 
-The virtual GIC is GICv3-only, so every `el2-guest-irq*` and
-`el2-guest-timer*` test runs there and nowhere else; this target is what
-keeps them run. (`el2-guest-timer-isolated`, `-offset` and
-`el2-guest-phys-timer` need no vGIC and run on the GICv2 machine too.)
+The virtual GIC is GICv3-only, so the tests that deliver an interrupt to
+a guest run there and nowhere else -- every `el2-guest-irq*`, and the two
+timer *delivery* tests `el2-guest-timer` and `el2-guest-timer-ontime`;
+this target is what keeps them run. The timer **state** tests --
+`el2-guest-timer-isolated`, `el2-guest-timer-offset` and
+`el2-guest-phys-timer` -- test only `CNTV`/`CNTVOFF`/`CNTHCTL` and touch
+no interrupt path, so they run on both GIC machines and skip nowhere.
+The coverage matrix is therefore:
+
+| test | GICv2 | GICv3 |
+|---|---|---|
+| `el2-guest-irq*`, `el2-guest-timer`, `el2-guest-timer-ontime` | skip | run |
+| `el2-guest-timer-isolated`, `-offset`, `-phys-timer` | run | run |
 
 ### Sixteen CPUs
 

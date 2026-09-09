@@ -358,14 +358,27 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             uint64_t deadline;
             if (arch_hv_vcpu_timer_deadline(v->arch, &deadline)) {
                 uint64_t hz = arch_clock_hz();
+                uint64_t slice_ticks = hz / 1000;      /* one 1 ms slice, in counter ticks */
                 for (;;) {
                     uint64_t now = arch_clock_read();
                     if (now >= deadline || vintr_any(v) || process_kill_pending())
                         break;
-                    uint64_t ns = (deadline - now) * 1000000000ULL / hz;
-                    if (ns > 1000000ULL)
-                        ns = 1000000ULL;   /* in slices, so an injection is not made to wait */
-                    thread_sleep_ns(ns);
+                    /*
+                     * A slice at a time, so an injection from another
+                     * thread is never made to wait for the guest's alarm.
+                     * The tick-to-ns multiply is done only once the
+                     * remaining interval is inside a slice -- a guest may
+                     * arm its timer hours out, and `(deadline - now) * 1e9`
+                     * overflows a 64-bit value at a few minutes, which
+                     * would collapse a long deadline into a near-zero
+                     * sleep and spin here holding run_lock.
+                     */
+                    uint64_t remaining = deadline - now;
+                    if (remaining > slice_ticks) {
+                        thread_sleep_ns(1000000ULL);
+                    } else {
+                        thread_sleep_ns(remaining * 1000000000ULL / hz);
+                    }
                 }
             }
             fill_common(v, x, COSMO_VM_EXIT_WFI);
