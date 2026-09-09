@@ -113,7 +113,11 @@
 #define LPI_BASE      8192u
 #define NR_LPIS       VEC_DYNAMIC_COUNT
 #define LPI_ID_BITS   14u
-#define LPI_PROP_BYTES ((1u << LPI_ID_BITS) - LPI_BASE)
+/* The property table needs (2^IDbits - 8192) bytes and GICR_PROPBASER
+ * would take a 4 KiB alignment, but every implementation and every
+ * other kernel gives it 64 KiB; matching that costs 56 KiB once and
+ * removes a class of doubt about hardware this has never run on. */
+#define LPI_PROP_BYTES (64u * 1024u)
 #define LPI_PEND_BYTES (64u * 1024u)
 #define LPI_ENABLED   (1u << 0)
 
@@ -363,7 +367,12 @@ static void gicv3_init_cpu(void)
      * EnableLPIs is a one-way switch, so everything it reads must be in
      * place first. */
     if (g_lpi_prop_pa && (gicr_rd64(cpu, GICR_TYPER) & GICR_TYPER_PLPIS) &&
-        (gicr_rd(cpu, GICR_CTLR) & GICR_CTLR_ENABLE_LPIS) == 0) {
+        (gicr_rd(cpu, GICR_CTLR) & GICR_CTLR_ENABLE_LPIS)) {
+        /* One-way switch, already thrown: this redistributor is reading
+         * whatever table the firmware gave it, not ours, and there is no
+         * way to take it back. Say so rather than deliver nothing. */
+        kwarn("gicv3: CPU %u had LPIs enabled before the kernel ran; its MSIs may not arrive", cpu);
+    } else if (g_lpi_prop_pa && (gicr_rd64(cpu, GICR_TYPER) & GICR_TYPER_PLPIS)) {
         paddr_t pend = alloc_zeroed(LPI_PEND_BYTES);
         if (pend == 0) {
             panic("gicv3: CPU %u has no memory for its LPI pending table", cpu);

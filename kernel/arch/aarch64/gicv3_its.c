@@ -108,6 +108,7 @@ struct gicv3_its {
     paddr_t cmdq_pa;
     uint64_t *cmdq;               /* CMDQ_BYTES of 32-byte commands */
     unsigned cmdq_write;          /* byte offset of the next free slot */
+    unsigned outstanding;         /* commands written since the last drain */
 
     paddr_t rd_target[CONFIG_MAX_CPUS];   /* what MAPC/SYNC call this CPU */
     bool collection_mapped[CONFIG_MAX_CPUS];
@@ -148,8 +149,14 @@ static paddr_t alloc_zeroed(size_t bytes)
  * command has taken effect when CREADR has passed it. Everything here
  * runs under `its->lock`. */
 
+/* Every caller here submits at most four commands and then drains, and
+ * the queue holds CMDQ_BYTES/32 of them, so it can never lap the reader.
+ * That is an invariant of this file rather than of the hardware, so it
+ * is asserted where a fifth command would be written. */
 static void cmd_submit(struct gicv3_its *its, uint64_t dw0, uint64_t dw1, uint64_t dw2, uint64_t dw3)
 {
+    KASSERT(its->outstanding < CMDQ_BYTES / CMD_BYTES);
+    its->outstanding++;
     uint64_t *slot = (uint64_t *)((uint8_t *)its->cmdq + its->cmdq_write);
     slot[0] = dw0;
     slot[1] = dw1;
@@ -167,8 +174,10 @@ static void cmd_submit(struct gicv3_its *its, uint64_t dw0, uint64_t dw1, uint64
 static bool cmd_drain(struct gicv3_its *its)
 {
     for (unsigned spins = 0; spins < 1000000u; spins++) {
-        if ((rd64(its, GITS_CREADR) & 0xFFFE0u) == its->cmdq_write)
+        if ((rd64(its, GITS_CREADR) & 0xFFFE0u) == its->cmdq_write) {
+            its->outstanding = 0;
             return true;
+        }
         arch_cpu_relax();
     }
     kwarn("its: the command queue did not drain (CREADR 0x%llx, CWRITER 0x%x)",

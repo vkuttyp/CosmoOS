@@ -26,6 +26,18 @@
  * interrupt is enabled; read without synchronisation afterwards. */
 static const struct aarch64_irqc_ops *g_ops;
 
+/* Every field of the ops table is a pointer, and a hole in one is a
+ * null call at the worst possible moment -- an interrupt, on a machine
+ * nobody tested. Check the lot once, at boot, so a driver added later
+ * fails loudly here instead. */
+static void ops_check(const struct aarch64_irqc_ops *o)
+{
+    const void *const *p = (const void *const *)o;
+    for (size_t i = 0; i < sizeof(*o) / sizeof(*p); i++)
+        if (p[i] == NULL)
+            panic("gic: the %s ops table has a hole at slot %u", o->name, (unsigned)i);
+}
+
 void arch_irqc_init(void)
 {
     struct acpi_gic gic;
@@ -50,6 +62,7 @@ void arch_irqc_init(void)
     default:
         panic("gic: distributor version %u is not a GIC this kernel drives", gic.version);
     }
+    ops_check(g_ops);
     g_ops->init(&gic);
 }
 
