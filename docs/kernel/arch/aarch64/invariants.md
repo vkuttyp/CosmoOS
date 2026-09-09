@@ -40,11 +40,15 @@ being freed is not the live `TTBR0`.
 
 ## A5: Kernel leaves are never `nG`; user leaves always are
 
-The single ASID (0) and the per-switch `tlbi vmalle1is` rely on kernel
-entries being global and user entries being tagged. `leaf_attrs` sets
-`nG` exactly when `ARCH_MMU_MAP_USER` is given. **Checked by review** and
-by the process self-tests (`process-spawn`: two processes' identical user addresses do
-not alias across a switch).
+Address-space tags rely on it, and so did the full flush that preceded
+them: a kernel entry must survive a switch between user spaces, and a
+user entry must not be reachable from another space's tag. `leaf_attrs`
+sets `nG` exactly when `ARCH_MMU_MAP_USER` is given. **Checked by**
+`asid-isolation` (two spaces mapping one address to different bytes, read
+across forty switches with no flush between them: with `nG` unset on user
+leaves, or the tag left out of `TTBR0`, the second space reads the
+first's byte) and `process-spawn` (two processes' identical user
+addresses do not alias across a switch).
 
 ## A6: Every mapping decides its own execute permission
 

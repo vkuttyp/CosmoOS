@@ -281,11 +281,15 @@ Checked by: `user-vmm` (region counts and frame counts after every step),
 `brk` shrink and regrow, `MAP_FIXED` replacement, lenient `munmap`).
 
 **M35. Frames of an unmapped range are freed only after the regions are
-gone and the TLBs of every CPU running the space are clean.** The range's
+gone and the TLBs of every CPU that may hold the space are clean.** The range's
 regions are unlinked or shrunk under the lock first, so a fault in the
 window finds no region; then per chunk: collect frames, unmap, unlock,
-shoot down on `active_cpus`, free. The mask is read after a full fence
+shoot down on `tlb_cpus`, free. The mask is read after a full fence
 that follows the PTE change; a CPU sets its bit before loading the root.
+The mask is `tlb_cpus`, and since address-space tags it names the CPUs
+that *may hold* the space rather than those running it now (design §6.4):
+a CPU keeps a tagged space's translations after leaving it, so its bit
+stays set until something flushes them.
 Checked by: review; `user-vmm` (a space no other CPU runs collects zero
 acknowledgements); `smp-shootdown` for the IPI mechanism on the kernel
 space. Gap: no test drives a shootdown against a CPU that is running the
@@ -312,3 +316,31 @@ registers of the next hypercall, freer `el2_vcpu_destroy`. Gap: a frame
 written *after* its reallocation is the new owner's problem and is not
 detected here; and a stray write that happens to store `0x5a` is
 invisible.
+
+**M38. A tag is only reused after every CPU that could hold translations
+under it has flushed them.** Tags come from one bitmap; when it fills the
+generation advances, which makes every tag issued earlier stale by
+arithmetic rather than by visiting every space. Each CPU carries the
+generation it last flushed everything at, and a CPU whose stamp is behind
+flushes before it trusts any tag of the new generation -- so the moment a
+tag reaches its next owner, the only CPUs that can use it have already
+dropped what the previous owner left. A destroyed space has its tag
+invalidated *before* it is released, in that order.
+Checked by: `asid-rollover` (a tag reissued across a forced rollover,
+asserting the tag really was the same number before checking that each
+space read its own page), `asid-destroy-reuse` (the pool filled first, so
+the reuse is certain rather than likely), `asid-isolation`, `asid-quiet`.
+Each fails with its own message when its half is removed. Gap: the
+destroy-path invalidate cannot be distinguished by any test -- the region
+teardown has already invalidated every mapped page across every tag by
+the time it runs -- so it is kept as a guard against a future
+tag-qualified range invalidate rather than counted as proved
+(`docs/kernel/memory/testing.md`).
+
+**M39. The kernel's root carries no tag.** It runs under tag 0, which no
+user space is ever given, so a kernel thread's user half cannot alias
+one and a switch to it costs no tag. Asking the allocator on its behalf
+consumed a tag per generation that nothing ever released.
+Checked by: `asid-quiet`, which asserts `kernel_space.mmu.asid == 0`
+after routing half of its four hundred switches through the kernel's
+root.

@@ -176,6 +176,40 @@ back to 1 first, which is what `pmm_free_pages` expects), so two
 concurrent putters cannot both read 2 and both merely decrement.
 Lock-free except the free path.
 
+## Address-space tags (`kernel/asid.h`)
+
+### `void asid_init(unsigned bits)`
+- **Purpose:** size the tag pool. `bits` is `arch_mmu_asid_bits()`; 0
+  disables tagging and every switch then flushes, as it always did.
+- **Concurrency:** once, from `vmm_init`, before any space exists.
+- **Note:** re-initialising **advances** the generation rather than
+  resetting it, so a tag issued under the old width can never read as
+  current under the new one. The self-test re-initialises at 8 bits.
+
+### `bool asid_switch_prepare(struct arch_mmu_context *ctx)`
+- **Purpose:** give `ctx` a tag valid in the current generation if it has
+  not got one, and say whether **this CPU** must flush every tag before
+  using it.
+- **Inputs:** `ctx` is NULL for the kernel's own root, which runs under
+  tag 0 and must never be given one (M39); the flush question is still
+  answered.
+- **Outputs:** true when the generation advanced since this CPU last
+  flushed, or when the machine has no tags, or in paranoid mode.
+- **Concurrency:** the caller switches address spaces with interrupts
+  off, which is what keeps the answer true until it is used. Takes the
+  allocator's lock only when a tag must be allocated.
+
+### `void asid_release(struct arch_mmu_context *ctx)`
+- **Purpose:** return a destroyed space's tag.
+- **Ownership:** the caller has already invalidated the tag's
+  translations everywhere they might be held. Releasing first would let
+  the tag's next owner inherit them.
+
+### `void asid_set_paranoid(bool)`, `bool asid_paranoid(void)`
+Keep the tags but flush on every switch. `opt/cosmo/asid=paranoid` sets
+it for a whole boot. An isolation failure that appears without it and
+vanishes with it is a stale translation.
+
 ### `void pmm_release_deferred(void)`
 
 Releases every `PG_DEFERRED` run into the buddy. Called by `vmm_init`
@@ -349,9 +383,11 @@ current use changes nothing already mapped.
 ### `void vm_space_switch(struct vm_space *prev, struct vm_space *next)`
 
 The calling CPU's root moves from `prev` to `next` (interrupts off, from
-`arch_thread_switch_prepare`): sets the CPU's bit in `next->active_cpus`,
-activates, clears it in `prev->active_cpus`. User-space shootdowns
-target `active_cpus` plus the caller (design.md §6.4).
+`arch_thread_switch_prepare`): sets the CPU's bit in `next->tlb_cpus`,
+asks `asid_switch_prepare` for the tag and the flush decision, then
+activates. `prev`'s bit is **not** cleared -- with address-space tags a
+CPU keeps a space's translations after leaving it. User-space shootdowns
+target `tlb_cpus` plus the caller (design.md §6.4).
 
 ## `kernel/extable.h`
 

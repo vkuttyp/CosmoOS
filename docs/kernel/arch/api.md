@@ -100,6 +100,30 @@ pointer.
 ### `uintptr_t arch_trap_frame_pc/sp/fp(const struct arch_trap_frame *)`
 - **Outputs**: interrupted program counter, stack pointer, frame pointer.
 
+### `unsigned arch_mmu_asid_bits(void)`
+- **Outputs:** how many bits of address-space tag this machine can carry
+  -- 8 or 16 on AArch64, 0 on x86-64 today (see
+  `docs/kernel/memory/design.md` §2.6 for why PCID is detected but not
+  enabled). Constant after the boot CPU's feature setup.
+
+### `void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)`
+- **Purpose:** make `ctx` this CPU's translation root, tagged with its
+  ASID.
+- **Inputs:** `flush` comes from `asid_switch_prepare`. A CPU that
+  flushes on a false `flush` is merely slow; a CPU that does not flush on
+  a true one runs one address space on another's translations.
+
+### `void arch_mmu_invalidate_asid(const struct arch_mmu_context *ctx, cpumask_t cpus)`
+- **Purpose:** drop every translation the tag names. The **only** place a
+  tag may be named, because it is the one moment -- destruction -- when
+  no CPU is running the space.
+- **Concurrency:** interrupts on, no space lock.
+
+### `uint64_t arch_mmu_activate_flushes(void)`
+- **Outputs:** full TLB invalidations `arch_mmu_activate` has performed
+  on this CPU, counted where the instruction issues so that a switch path
+  flushing without being asked is visible. What `asid-quiet` measures.
+
 ### `uint64_t arch_trap_frame_detail(const struct arch_trap_frame *)`
 - **Outputs**: the architecture's own word about the cause -- the `ESR`
   on AArch64, the error code on x86-64.

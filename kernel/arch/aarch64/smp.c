@@ -166,7 +166,7 @@ void aarch64_ap_entry(unsigned cpu)
     struct percpu *pc = percpu_get(cpu);
     KASSERT(pc != NULL);
     arch_percpu_install(pc);
-    arch_mmu_activate(&kernel_space.mmu);   /* leaves the trampoline's TTBR0 behind */
+    arch_mmu_activate(&kernel_space.mmu, true);   /* leaves the trampoline's TTBR0 behind */
     if (aarch64_cpu_info()->has_pan) {
         uint64_t sctlr = READ_SYSREG(sctlr_el1);
         WRITE_SYSREG(sctlr_el1, sctlr | SCTLR_SPAN);

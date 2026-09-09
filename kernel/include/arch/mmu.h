@@ -38,11 +38,32 @@ typedef enum vm_cache {
 #define ARCH_MMU_MAP_USER   (1u << 2)  /* user-accessible leaf and intermediate entries */
 
 struct arch_mmu_context {
-    paddr_t root;  /* physical address of the top-level table */
+    paddr_t root;       /* physical address of the top-level table */
+    uint32_t asid;      /* address-space tag, 0 = none yet (kernel/asid.h) */
+    uint64_t asid_gen;  /* the generation `asid` was issued in; 0 = never */
 };
 
 /* Allocate an empty top-level table for the kernel space. Returns 0 or
  * -ENOMEM. */
+/*
+ * How many bits of address-space tag this machine can carry: 8 or 16 on
+ * AArch64, 12 on x86-64 with PCID, and 0 when tags are unusable (no
+ * PCID), which means every switch must keep flushing. Constant after
+ * the boot CPU's feature setup.
+ */
+unsigned arch_mmu_asid_bits(void);
+
+/*
+ * Make `ctx` this CPU's translation root, tagged with its ASID.
+ *
+ * `flush` says this CPU must drop every tag's translations first --
+ * `asid_switch_prepare` returns it, true when the tag generation
+ * advanced since this CPU last flushed, and always true on a machine
+ * with no tags. A CPU that flushes on a false `flush` is merely slow; a
+ * CPU that does not flush on a true one runs one address space on
+ * another's translations.
+ */
+
 int arch_mmu_context_init(struct arch_mmu_context *ctx);
 
 /* Allocate a top-level table for a user space whose kernel half mirrors
@@ -79,7 +100,15 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
                     vm_prot_t *prot, vm_cache_t *cache, size_t *page_size);
 
 /* Make ctx the active translation on the calling CPU. */
-void arch_mmu_activate(const struct arch_mmu_context *ctx);
+void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush);
+
+/*
+ * How many full TLB invalidations `arch_mmu_activate` has performed on
+ * this CPU. Counted where the instruction is issued rather than where it
+ * is decided, so that a switch path which flushes without being asked is
+ * still visible -- which is the whole value of the number.
+ */
+uint64_t arch_mmu_activate_flushes(void);
 
 /* Invalidate cached translations for [va, va+len) on the calling CPU
  * only. */
@@ -96,6 +125,15 @@ void arch_mmu_shootdown(const struct arch_mmu_context *ctx, vaddr_t va, size_t l
  * included; CPUs not online are ignored). The VMM passes the set of CPUs
  * whose active root is `ctx` (docs/kernel/memory/design.md §6.4). */
 void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, size_t len, cpumask_t cpus);
+
+/*
+ * Drop every translation `ctx`'s tag names, on every CPU in `cpus`.
+ * Used where a whole space goes at once -- destruction -- and only there,
+ * because it is the one moment when no CPU is running the space and its
+ * tag is therefore the only one any CPU can be holding it under.
+ * Caller: interrupts on, no space lock (it may broadcast or send IPIs).
+ */
+void arch_mmu_invalidate_asid(const struct arch_mmu_context *ctx, cpumask_t cpus);
 
 /* Create the intermediate tables below the top level for every top-level
  * slot [va, va+len) touches, without mapping anything, so that later maps

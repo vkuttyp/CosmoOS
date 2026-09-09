@@ -265,11 +265,24 @@ default addresses are mapped device-type into the kernel root if
 takeover because the console page vanished); then `TTBR1_EL1` = root,
 `TTBR0_EL1` = `g_empty_root` (an empty table allocated with the first
 context so no stale user mapping is reachable from kernel context),
-`isb`, `tlbi vmalle1is`. `activate(user)`: `TTBR0_EL1` = root with
-ASID 0, `tlbi vmalle1is` (a single ASID and a full invalidate per switch;
-ASID allocation is a later optimisation; kernel entries never carry
-`nG` so a `vmalle1is` costs the kernel entries too, which is accepted
-today). `invalidate(ctx, va, len)`: `dsb ishst`, `tlbi vaae1is` per page
+`isb`, `tlbi vmalle1is`. `activate(user)`: `TTBR0_EL1` = root **with
+the space's ASID in bits [63:48]**, and a flush only when the caller says
+so -- `tlbi vmalle1`, *non*-shareable, because a CPU flushes on its own
+account after a tag-generation rollover and is never behind on another
+CPU's. Until the ASID unit this was ASID 0 and an unconditional `tlbi
+vmalle1is`: a broadcast that emptied the user TLB of every CPU in the
+machine on every process switch made by any of them, and that took the
+kernel's own entries with it since kernel leaves never carry `nG`.
+`TCR.AS` is set at boot when `ID_AA64MMFR0.ASIDBits` reports 16-bit
+ASIDs -- the kernel's only write to `TCR_EL1`, made before any space
+exists and while every `TTBR0` still carries ASID 0, which reads the same
+at either width. `invalidate(ctx, va, len)`: `dsb ishst`, `tlbi vaae1is`
+per page -- by address and for *every* tag, deliberately: after a
+rollover a space can be re-tagged on one CPU while another still runs it
+under the old tag, so naming the current tag would leave that CPU's
+entries behind. `invalidate_asid(ctx)` is the one call that names a tag
+(`tlbi aside1is`), used only when a space is destroyed and nothing runs
+it
 (or `vmalle1is` above 64 pages), `dsb ish; isb`. `shootdown` is the same
 instruction sequence: AArch64 broadcasts TLB maintenance to the
 inner-shareable domain in hardware, so no IPI is sent and
@@ -509,8 +522,7 @@ Details in `testing.md`. In outline:
 ## Future extensibility
 
 GICv3 (system-register interface, redistributors, ITS for MSI) behind the
-same `arch/irqc.h`; ASID allocation instead of the full invalidate per
-switch; the Linux AArch64 table (a
+same `arch/irqc.h`; the Linux AArch64 table (a
 generic-unistd numbering shared with RISC-V later); an EL2 virtualization
 backend behind `arch/hv.h` with stage-2 tables as the GuestMemory and a
 vGIC as the VirtualInterrupt; device tree as a second platform

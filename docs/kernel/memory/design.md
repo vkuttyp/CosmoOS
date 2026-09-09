@@ -157,6 +157,52 @@ naturally aligned to their order by construction (`pfn ^ (1 << order)`).
   takeover; pages must be `PG_RESERVED` and inside a
   `COSMOBOOT_MEM_BOOT_PAGETABLES` entry.
 
+### 2.6 Address-space tags (`asid.c`)
+
+A tag lets the TLB keep one address space's translations while another
+runs, so a process switch need not empty it. The hardware calls them
+ASIDs on AArch64 and PCIDs on x86-64; the difference is a width, which
+`arch_mmu_asid_bits()` reports (8 or 16, 12, or **0** for a machine
+that has none), so the allocator is generic.
+
+- **One global bitmap under one spinlock.** A per-CPU scheme is the right
+  shape for hundreds of CPUs and a scarce tag; this kernel caps at 64
+  CPUs and the narrowest width it will meet is 8 bits, so the lock is
+  taken once per *first* switch into a space, not once per switch.
+- **Tag 0 is never handed out.** It belongs to the kernel's own root, so
+  a kernel thread runs under a tag no user space can be given (M39).
+- **Generations for rollover.** When the bitmap fills, the generation
+  advances and the bitmap empties: every tag issued earlier is stale by
+  arithmetic, because a space carries the generation it was tagged in.
+  Each CPU carries the generation it last flushed everything at; a CPU
+  whose stamp is behind flushes before it trusts any tag of the new
+  generation. Rollover therefore costs one switch's worth of flushing per
+  CPU, once per 65,535 spaces at 16 bits, instead of on every switch
+  (M38).
+- **A space may hold two tags at once, briefly.** After a rollover a
+  space re-tagged on one CPU can still be running under its old tag on
+  another; both name the same tables, so both are correct. This is why
+  range invalidates stay all-ASID (`tlbi vaae1is`) and only destruction,
+  where nothing runs the space, names a tag.
+- **Destroy invalidates, then releases.** The other order is an aliasing
+  bug: a tag released while a CPU still holds its translations is a tag
+  whose next owner inherits them.
+- **Paranoid mode** (`opt/cosmo/asid=paranoid`) keeps the tags but tells
+  every switch to flush, so no translation survives one. An isolation
+  failure that appears without it and vanishes with it is a stale
+  translation by construction.
+
+**x86-64 has no tags today, by choice.** PCID and INVPCID are detected
+and reported, but `CR4.PCIDE` stays clear and `arch_mmu_asid_bits()`
+returns 0, because TCG implements PCID on no CPU model -- `-cpu max` does
+not offer it and a model that asks is refused -- and every environment
+this tree is tested in is TCG. The tagged path there could not be
+exercised anywhere, and this is the one place in the kernel where an
+untested mistake is a silent loss of isolation between processes.
+Returning 0 is not a stub: it is what a real machine without PCID
+reports, and the path it selects (no tag, flush every switch) is what
+x86-64 has always done and is exercised on every boot.
+
 ## 3. Virtual memory
 
 ### 3.1 Arch MMU interface (`arch/mmu.h`)
@@ -479,20 +525,32 @@ heap; a failure leaves the break unchanged) and growth merges into the
 existing heap region, so a shrink followed by a growth no longer fails
 with `-EEXIST` for the life of the process (finding #30, region part).
 
-### 6.4 Shootdown by the CPUs that run the space
+### 6.4 Shootdown by the CPUs that may hold the space
 
-`struct vm_space` gains `active_cpus`, the set of CPUs whose translation
-root is this space right now. `arch_thread_switch_prepare` maintains it
+`struct vm_space` gains `tlb_cpus`, the set of CPUs that may hold this
+space's translations. (It was `active_cpus`, "whose root is this space
+right now", which was the same set only while a root switch dropped
+everything the outgoing space had cached.) `arch_thread_switch_prepare`
+maintains it
 through `vm_space_switch(prev, next)`: set the CPU's bit in `next`
-(an atomic OR, a full barrier), write CR3 / TTBR0, then clear the bit
-in `prev`. Without PCID or ASIDs a CPU that leaves a space holds none of
-its translations, so the bit can be cleared at once.
+(an atomic OR, a full barrier), then write CR3 / TTBR0.
+
+**The bit is not cleared when the CPU leaves.** It was, while a root
+switch dropped every translation of the outgoing space -- but that is
+exactly what address-space tags stop doing (§2.6), so a CPU goes on
+holding a space's translations after leaving it and the mask has to say
+so. `tlb_cpus` therefore means *the CPUs that may hold this space's
+translations*: joined on switch-in, and left only when something flushes
+them -- a tag-generation rollover, or the space's own destruction. The
+mask is conservative after a rollover, since a CPU that has not yet
+flushed still names spaces it no longer holds; an over-broad shootdown
+mask costs IPIs and never correctness.
 
 `arch_mmu_shootdown_cpus(ctx, va, len, cpus)` invalidates on exactly the
 CPUs in `cpus`; `arch_mmu_shootdown` remains the all-online form for
 the kernel space. The VMM calls the mask form for user spaces after every
 PTE change that can leave a stale translation (unmap, protect), reading
-`active_cpus` after a full fence that orders the PTE write before the
+`tlb_cpus` after a full fence that orders the PTE write before the
 mask read. A CPU switching into the space either has its bit visible to
 the initiator (and is sent the IPI) or writes CR3 after the PTE change
 (and loads the fresh table). On x86-64 the IPIs are `ipi_send` per target
@@ -520,7 +578,8 @@ half lives in TTBR1 and is shared by construction.
 ### 6.6 What stays as it was
 
 Populated mappings (ELF segments) still allocate under `space->lock`
-with interrupts off; a region tree, per-CPU frame caches and ASIDs are
-scalability work (audit 5.4) outside this milestone. The native ABI does
+with interrupts off; a region tree and per-CPU frame caches are
+scalability work (audit 5.4) outside this milestone. (ASIDs were too,
+until the address-space tag unit built them: §2.6.) The native ABI does
 not gain `mprotect` or `brk`; both are Linux-personality calls, and the
 native `munmap` keeps its strict contract.

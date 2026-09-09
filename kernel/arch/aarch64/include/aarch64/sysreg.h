@@ -145,6 +145,9 @@ static inline void yield_hint(void) { __asm__ volatile("yield" ::: "memory"); }
 /* ID registers */
 #define ID_AA64MMFR1_PAN(v) (((v) >> 20) & 0xF)
 #define ID_AA64MMFR0_PARANGE(v) ((v) & 0xF)
+/* ASIDBits: 0b0000 = 8-bit ASIDs, 0b0010 = 16-bit. Nothing else is
+ * defined, and an unknown encoding is read as 8 (the safe half). */
+#define ID_AA64MMFR0_ASIDBITS(v) (((v) >> 4) & 0xF)
 #define ID_AA64PFR0_GIC(v) (((v) >> 24) & 0xF)
 
 /* MPIDR affinity fields (Aff0..Aff2 in bits 0-23, Aff3 in 32-39). */
@@ -161,9 +164,22 @@ static inline void tlbi_vmalle1is(void)
     __asm__ volatile("dsb ishst\n\ttlbi vmalle1is\n\tdsb ish\n\tisb" ::: "memory");
 }
 
+/* The same, on this CPU alone: what a CPU does for itself when the tag
+ * generation has moved on and it must not trust any tag it holds. No
+ * other CPU is behind on this CPU's account, so no broadcast. */
+static inline void tlbi_vmalle1(void)
+{
+    __asm__ volatile("dsb nshst\n\ttlbi vmalle1\n\tdsb nsh\n\tisb" ::: "memory");
+}
+
 static inline void tlbi_vaae1is(uint64_t va)
 {
     __asm__ volatile("tlbi vaae1is, %0" : : "r"(va >> 12) : "memory");
 }
+
+/* The ASID a TTBR0 value carries, in its top bits. With TCR.AS clear
+ * only [55:48] are the ASID and [63:56] are RES0; the shift is the same
+ * either way, so one macro serves both widths. */
+#define TTBR_ASID_SHIFT 48
 
 #endif /* AARCH64_SYSREG_H */

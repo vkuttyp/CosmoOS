@@ -6,6 +6,7 @@
  * process has thousands of mappings, behind the same functions.
  */
 
+#include <kernel/asid.h>
 #include <kernel/bootinfo.h>
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
@@ -14,6 +15,7 @@
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/printf.h>
 #include <kernel/string.h>
@@ -210,6 +212,11 @@ void vmm_init(void)
     if (arch_mmu_context_init(&kernel_space.mmu))
         panic("vmm: cannot allocate root page table");
 
+    /* Address-space tags. The width is the boot CPU's, fixed by its
+     * feature setup long before this; no space exists yet to be tagged. */
+    asid_init(arch_mmu_asid_bits());
+    asid_boot_config();   /* opt/cosmo/asid=paranoid, if the boot asked for it */
+
     map_kernel_image(info);
     map_direct_map(info);
     /* Every kernel-half top-level entry a later mapping could need exists
@@ -219,7 +226,7 @@ void vmm_init(void)
         panic("vmm: cannot pre-populate the arena's page tables");
 
     /* Switch. From here the loader's tables are unreferenced. */
-    arch_mmu_activate(&kernel_space.mmu);
+    arch_mmu_activate(&kernel_space.mmu, true);
     pmm_hhdm_limit = page_align_up(bootinfo_phys_limit());
     kdebug("vmm: kernel page tables active, root 0x%llx, direct map covers %llu MiB",
            (unsigned long long)kernel_space.mmu.root, (unsigned long long)(pmm_hhdm_limit >> 20));
@@ -628,7 +635,7 @@ int vm_space_create_user(struct vm_space **out)
     space->arena_lo = 0;
     space->arena_hi = 0;
     space->user = true;
-    space->active_cpus = 0;
+    space->tlb_cpus = 0;
     space->mapped_pages = 0;
     space->limit_mapped_pages = UINT64_MAX;
     space->limit_anon_pages = UINT64_MAX;
@@ -652,7 +659,7 @@ int vm_space_create_user(struct vm_space **out)
 static cpumask_t user_shootdown_targets(struct vm_space *space)
 {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    return __atomic_load_n(&space->active_cpus, __ATOMIC_SEQ_CST) | CPUMASK_OF(arch_cpu_id());
+    return __atomic_load_n(&space->tlb_cpus, __ATOMIC_SEQ_CST) | CPUMASK_OF(arch_cpu_id());
 }
 
 static void user_shootdown(struct vm_space *space, vaddr_t va, size_t len)
@@ -672,13 +679,23 @@ void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t
 void vm_space_switch(struct vm_space *prev, struct vm_space *next)
 {
     unsigned cpu = arch_cpu_id();
+    (void)prev;
     if (next->user)
-        __atomic_fetch_or(&next->active_cpus, CPUMASK_OF(cpu), __ATOMIC_SEQ_CST);
-    arch_mmu_activate(&next->mmu);
-    /* Without PCID/ASIDs the root switch dropped every translation of
-     * `prev` on this CPU: it needs no further shootdowns. */
-    if (prev != NULL && prev != next && prev->user)
-        __atomic_fetch_and(&prev->active_cpus, ~CPUMASK_OF(cpu), __ATOMIC_SEQ_CST);
+        __atomic_fetch_or(&next->tlb_cpus, CPUMASK_OF(cpu), __ATOMIC_SEQ_CST);
+    /* The tag, and whether this CPU must drop every tag it holds before
+     * using one of the current generation. The kernel's root runs under
+     * tag 0 and is passed as NULL: giving it a tag of its own would
+     * consume one per generation that nothing releases, and
+     * `arch_mmu_activate` would ignore it anyway. */
+    bool flush = asid_switch_prepare(next->user ? &next->mmu : NULL);
+    arch_mmu_activate(&next->mmu, flush);
+    /*
+     * `prev`'s bit is deliberately not cleared. It was cleared when a
+     * root switch dropped every translation of the outgoing space on
+     * this CPU; a tagged switch drops nothing, so this CPU goes on
+     * holding `prev`'s translations until something flushes them, and
+     * the mask has to say so. See M35.
+     */
 }
 
 /*
@@ -720,7 +737,13 @@ static void user_range_teardown(struct vm_space *space, vaddr_t base, size_t siz
 void vm_space_destroy(struct vm_space *space)
 {
     KASSERT(space != NULL && space->user);
-    KASSERT(!(space->active_cpus & CPUMASK_OF(arch_cpu_id())));
+    /*
+     * Nothing runs this space -- the last thread is gone. `tlb_cpus` may
+     * name this CPU all the same, because a CPU that leaves a tagged
+     * space keeps its translations; what must be true is that this CPU
+     * is not running it *now*.
+     */
+    KASSERT(this_cpu()->cur_space != space);
 
     for (;;) {
         arch_irq_state_t s = spin_lock_irqsave(&space->lock);
@@ -746,6 +769,24 @@ void vm_space_destroy(struct vm_space *space)
     if (space->anon_pages != 0)
         panic("vm_space_destroy: %llu anon pages unaccounted (mapped_pages %llu)",
               (unsigned long long)space->anon_pages, (unsigned long long)space->mapped_pages);
+
+    /*
+     * Whatever any CPU still holds under this space's tag goes now, and
+     * only then is the tag released. The other order is the bug the
+     * report was reviewed for: a tag released while a CPU still holds
+     * its translations is a tag whose next owner inherits them.
+     *
+     * Today this invalidate has nothing left to do -- the region
+     * teardown above already invalidated every mapped page across every
+     * tag -- so no test can distinguish its presence, and that is
+     * recorded rather than counted (docs/kernel/memory/testing.md). It
+     * is kept so that the safety of destroying a space does not depend
+     * on a decision made in `arch_mmu_invalidate`, where a future
+     * tag-qualified range invalidate would silently break it.
+     */
+    arch_mmu_invalidate_asid(&space->mmu, space->tlb_cpus);
+    asid_release(&space->mmu);
+    space->tlb_cpus = 0;
 
     arch_mmu_context_destroy(&space->mmu);
     kmem_cache_free(g_space_cache, space);

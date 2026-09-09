@@ -68,6 +68,7 @@ void x86_cpu_init(void)
         g_cpu.has_pge = (r.edx & (1u << 13)) != 0;
         g_cpu.has_apic = (r.edx & (1u << 9)) != 0;
         g_cpu.has_x2apic = (r.ecx & (1u << 21)) != 0;
+        g_cpu.has_pcid = (r.ecx & (1u << 17)) != 0;
     }
     if (g_cpu.max_basic_leaf >= 7) {
         cpuid(7, 0, &r);
@@ -75,6 +76,7 @@ void x86_cpu_init(void)
         g_cpu.has_smep = (r.ebx & (1u << 7)) != 0;
         g_cpu.has_smap = (r.ebx & (1u << 20)) != 0;
         g_cpu.has_umip = (r.ecx & (1u << 2)) != 0;
+        g_cpu.has_invpcid = (r.ebx & (1u << 10)) != 0;
     }
     if (g_cpu.max_ext_leaf >= 0x80000001u) {
         cpuid(0x80000001u, 0, &r);
@@ -107,6 +109,13 @@ void x86_cpu_enable_features(void)
         cr4 |= CR4_SMAP;
     if (g_cpu.has_umip)
         cr4 |= CR4_UMIP;
+    /*
+     * PCID is detected and reported but deliberately not enabled: see
+     * arch_mmu_asid_bits() in mmu.c. Setting CR4.PCIDE would change how
+     * this CPU reads every CR3 it is given, and the code that would make
+     * use of that cannot be tested in this tree's environment -- so the
+     * bit stays clear until it can be.
+     */
     /* The paranoid entry (isr.S) recognises the kernel's GS base by its
      * sign bit; that is sound only while user mode cannot choose a GS base
      * (no FSGSBASE, no ARCH_SET_GS). Assert the first half here. */

@@ -17,6 +17,7 @@ struct aarch64_cpu_info {
     uint64_t midr, mpidr;
     bool has_pan;
     unsigned parange;        /* ID_AA64MMFR0.PARange encoding */
+    unsigned asid_bits;      /* 8 or 16, after TCR.AS is set to match */
     unsigned gic_sysreg;     /* ID_AA64PFR0.GIC: 0 = memory-mapped only */
     char brand[48];
 };
