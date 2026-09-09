@@ -187,14 +187,27 @@ Proposed:
   there (statistics), as now. x86-64: on a CPU where the space is
   current, `invlpg` as today; on a CPU in `tlb_cpus` where it is not,
   `invpcid` type 0 (address + PCID) or type 1 (whole PCID) when the CPU
-  has INVPCID; without INVPCID the IPI handler sets a per-CPU
-  "flush this PCID at next switch-in" bit and the next `mov cr3` for
-  that space omits the no-flush bit. Correct in every case: the space's
-  translations on that CPU cannot be used until it is switched in, and
-  the switch-in flushes them first.
-- **Destroy**: `tlbi aside1is` (AArch64) / for each CPU in `tlb_cpus`
-  the same lazy-flush bit (x86-64), then free the ASID, then free the
-  tables. The per-chunk shootdown in `vm_space_destroy` is removed.
+  has INVPCID; without INVPCID, a per-CPU **bitmap of dirty tags**.
+  **The bitmap is indexed by PCID, not by space, and that is
+  load-bearing.** The IPI handler sets the bit for the space's tag; a
+  `mov cr3` loading a tag whose bit is set omits the no-flush bit
+  (which flushes exactly that PCID's entries) and clears the bit.
+  Keyed by *space* instead — "flush when this space next switches in" —
+  the mechanism has a hole at destroy: a destroyed space never switches
+  in again, so its bit is never consumed, and the moment the allocator
+  hands that tag to a new space the new space runs on the old one's
+  translations. Keyed by tag, the bit outlives the space that set it
+  and is consumed by whoever uses the tag next, which is exactly the
+  CPU that would otherwise alias. The invariant is inductive: a tag's
+  bit stays set on a CPU from the moment that CPU may hold stale
+  entries for it until the moment a switch-in flushes them.
+- **Destroy**: AArch64 `tlbi aside1is`, which is immediate and complete
+  before the ASID is released. x86-64 with INVPCID: type 1 on each CPU
+  in `tlb_cpus`, likewise before release. x86-64 without INVPCID: set
+  the dirty-tag bit on each CPU in `tlb_cpus`, and only then release
+  the tag — the release is safe precisely because the bit is keyed by
+  tag and survives into the next owner's first switch-in. The
+  per-chunk shootdown in `vm_space_destroy` is removed.
 - **ASID 0 is the kernel's**: `g_empty_root` and the kernel context keep
   it, so a kernel thread's user half is tagged with a value no user
   space ever gets, and switching to a kernel thread needs no flush
@@ -297,24 +310,37 @@ its signature.
 
 ## Migration plan
 
-1. **Allocator alone** (`asid.c`, host tests, `asid-alloc` self-test):
-   nothing uses the tags yet; the kernel behaves as today.
-2. **x86-64 detection and `CR4.PCIDE`**, with the tag written into CR3
-   but *every* switch still flushing (no-flush bit never set). Proves the
-   plumbing and the `#GP` conditions without changing what the TLB
-   holds. `boot nopcid x86_64` added here.
-3. **`tlb_cpus` semantics and the ASID-qualified invalidates** on both
+1. **Architecture enabling, alone and first.** AArch64: read
+   `ID_AA64MMFR0.ASIDBits` and set `TCR.AS` if 16-bit ASIDs are
+   implemented — the kernel's first ever write to `TCR_EL1`, one bit,
+   followed by the flush the architecture requires. x86-64: gather
+   `has_pcid`/`has_invpcid` and set `CR4.PCIDE` where present. **No tag
+   is written anywhere yet**: every root still carries 0, so a `mov cr3`
+   flushes all of PCID 0 and a `TTBR0` write is followed by the same
+   `vmalle1is` as today. This step changes what the hardware is
+   configured to allow, and nothing about what the kernel asks of it.
+   It is separated because it is the unit's only touch of boot-critical
+   state: a wrong `TCR_EL1` is a hang at the next instruction, and this
+   way the boot that proves it carries no other change.
+2. **Allocator alone** (`asid.c`, host tests, `asid-alloc` self-test),
+   sized by `arch_mmu_asid_bits()` from step 1. Still nothing uses the
+   tags.
+3. **The tag written into the root**, with *every* switch still
+   flushing (no-flush bit never set on x86-64; the `tlbi` kept on
+   AArch64). Proves the tagging and the `#GP` conditions without
+   changing what the TLB holds. `boot nopcid x86_64` added here.
+4. **`tlb_cpus` semantics and the ASID-qualified invalidates** on both
    architectures, still flushing on every switch. The shootdown rule
    changes here, while the old flush still makes it moot — so a mistake
    in the new rule cannot yet corrupt anything, and the tests of step 5
    are written against this step.
-4. **Stop flushing on switch-in.** The unit's actual change. AArch64
+5. **Stop flushing on switch-in.** The unit's actual change. AArch64
    first (broadcast invalidates, no IPI logic), x86-64 second (INVPCID,
-   then the lazy-flush fallback).
-5. **Destroy without shootdown; lazy TLB for kernel threads.**
-6. **Paranoid mode, the chain steps, the benchmark, the docs sweep.**
+   then the dirty-tag fallback).
+6. **Destroy without shootdown; lazy TLB for kernel threads.**
+7. **Paranoid mode, the chain steps, the benchmark, the docs sweep.**
 
-Each step boots green before the next starts; steps 3 and 4 are
+Each step boots green before the next starts; steps 4 and 5 are
 separate commits so a bisect lands on the rule or on the flush, not on
 both.
 
@@ -348,7 +374,11 @@ processes' identical addresses silently.
   reads the freed frame — the test fails by *not* faulting. On x86-64
   this runs three ways: INVPCID, the lazy-flush fallback (INVPCID
   masked off by a knob), and `nopcid`. This is the test M35's gap has
-  been asking for since milestone 5.
+  been asking for since milestone 5. It carries a second case for the
+  destroy path: destroy S while CPU A still holds it, spawn spaces until
+  the allocator hands S's tag to a new space T, run T on A and check it
+  reads its own bytes. With the dirty-tag bitmap keyed by space instead
+  of by tag, T reads S's.
 - **`asid-rollover-isolation`**: width forced to 8, spawn 300 short
   processes in a loop while a long-lived process checks its own byte
   after every switch: a rollover must not let a recycled tag alias the
@@ -422,8 +452,19 @@ what they are.
   a wrong write is a hang at the first instruction after `isb`. The
   write is one bit, guarded by `ASIDBits`, followed by the full flush the
   architecture requires, and secondary CPUs copy the result — but this
-  is the one place the unit touches boot-critical state, and it is done
-  first, alone, in step 1's boot.
+  is the one place the unit touches boot-critical state, which is why
+  step 1 is nothing but the enabling on both architectures, with no tag
+  written anywhere and no other change in that boot.
+- **The dirty-tag bitmap must be keyed by tag, not by space.** Keyed by
+  space, a destroyed space's pending flush is never consumed (it never
+  switches in again) and the next owner of that tag inherits its
+  translations — cross-address-space aliasing, on exactly the machines
+  with the least test coverage (PCID without INVPCID; no QEMU model in
+  the chain has that pair). `asid-shootdown-remote` runs with INVPCID
+  masked off for this reason, and a destroy-then-reuse case is added to
+  it: destroy a space that a second CPU still holds, immediately spawn
+  another until the tag is reused, and check the new space reads its own
+  bytes on that CPU.
 - **The rename `active_cpus` → `tlb_cpus`** is deliberately not a
   quiet one: every reader of the old name is a reader of the old rule,
   and the compiler finding each of them is the sweep.
