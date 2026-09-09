@@ -150,6 +150,19 @@ device, collection tables per CPU, and a `MAPD`/`MAPTI`/`INVALL` command
 dance at device-attach time. It is the largest single piece of this
 unit.
 
+**And it needs something the MSI interface does not currently carry: the
+device's identity.** `MAPD` and `MAPTI` are per-device commands keyed by
+a DeviceID -- on PCIe, the requester id -- and today
+`irq_request_msi(fn, arg, name, cpu, &msg)` and
+`arch_irqc_msi_compose(vector, cpu, addr, data)` know only a vector and a
+CPU. The PCI layer *has* the device at the call site (`pci_msix_request`
+holds `p`) and drops it. Without plumbing it through, an ITS backend
+cannot give two devices distinct translations, and `gic-its-map` below
+could not be written. So this unit changes the MSI interface, which is
+the one part of `arch/irqc.h` that does have to move: `msi_compose`
+gains a device id, x86-64 ignores it, and the PCI layer computes it from
+bus:device:function.
+
 ### 2. Two drivers behind one seam
 
 `arch/irqc.h` does not change. `kernel/arch/aarch64/gic.c` keeps the
@@ -191,10 +204,18 @@ is tested on.
 `arch_irqc_init` reads the version and dispatches. Within GICv3, MSI has
 a fallback order: an ITS if the MADT describes one; otherwise a GICv2m
 frame if it describes one (the existing code, unchanged); otherwise
-`arch_irqc_msi_compose` returns `-ENODEV` and PCI drivers fall back to
-the legacy INTx path they already have. A machine with neither is not a
-machine this tree has, but it is one the code should decline rather than
-mis-drive.
+`arch_irqc_msi_compose` returns `-ENODEV`.
+
+**And then the machine loses its disks**, which is worth stating rather
+than discovering: there is no INTx fallback in this tree. NVMe treats a
+failed MSI-X request as a failed probe (`goto fail_msix`), and AHCI says
+so in as many words -- `"neither MSI-X nor MSI (%d); INTx is not
+driven"`. So `msi=off` is not a configuration this kernel supports
+today, and a boot in it would lose the very device markers the boot test
+requires. Two consequences: the no-MSI path is a decline, not a
+fallback, and it cannot be a chain step; and **adding INTx to those
+drivers is a separate unit**, recorded here as the gap it is rather than
+smuggled into this one.
 
 ### 5. Interrupt affinity, which becomes possible here
 
@@ -234,11 +255,20 @@ struct aarch64_irqc_ops {           /* what gic.c and gicv3.c each provide */
     int  (*route)(unsigned gsi, unsigned vector, unsigned cpu, unsigned flags);
     int  (*mask)(unsigned gsi), (*unmask)(unsigned gsi);
     void (*eoi)(unsigned vector);
-    int  (*msi_compose)(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data);
+    int  (*msi_compose)(unsigned vector, unsigned cpu, uint32_t devid,
+                        uint64_t *addr, uint32_t *data);
     void (*ipi_bind)(unsigned vector);
     void (*ipi_send)(unsigned cpu, unsigned vector);
     void (*ipi_broadcast_others)(unsigned vector);
 };
+
+/* The MSI interface gains the device's identity, which an ITS needs for
+ * MAPD/MAPTI and every other backend ignores. The PCI layer computes it
+ * from bus:device:function; x86-64 and GICv2m discard it. */
+int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name,
+                    unsigned cpu, uint32_t devid, struct irq_msi_msg *msg);
+int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint32_t devid,
+                          uint64_t *addr, uint32_t *data);
 
 /* acpi.h additions */
 struct acpi_gic {
@@ -258,15 +288,22 @@ struct acpi_gic {
    panics having printed what it found.
 2. **The ops table**, with GICv2 as its only implementation. Pure
    refactor: identical behaviour, and the chain proves it.
-3. **GICv3 without MSI and without SMP**: distributor, one
-   redistributor, system-register interface, one CPU. `boot gicv3
-   aarch64` at `-smp 1`, with MSI off, so PCI falls back to INTx. The
-   first boot on a GICv3 machine.
+3. **GICv3 with the *existing* MSI path, one CPU**: distributor, one
+   redistributor, system-register interface, `-smp 1`, and
+   `gic-version=3,msi=gicv2m` -- the v2m frame code unchanged. This is
+   the better first step and it is Greptile's finding that produced it:
+   `msi=off` would have lost NVMe and AHCI, which have no INTx path, so
+   the first GICv3 boot could not have kept the boot test's device
+   markers. Keeping v2m also isolates the distributor and CPU-interface
+   work from the ITS work, so a failure in step 3 has one cause.
 4. **SGIs by affinity, then SMP.** `-smp 4`, then `-smp 16` — the step
    that could not previously exist.
-5. **The ITS.** Command queue, tables, `MAPD`/`MAPTI`/`MAPC`, LPI
-   configuration; `msi_compose` returns the translator. virtio and NVMe
-   get their MSI-X back.
+5. **The ITS.** The device id plumbed through `irq_request_msi` first
+   (a mechanical change every backend but this one ignores), then the
+   command queue, tables, `MAPD`/`MAPTI`/`MAPC` and LPI configuration;
+   `msi_compose` returns the translator address and the event id.
+   `msi=its` becomes the default GICv3 configuration, and `msi=gicv2m`
+   stays as a chain step so the fallback keeps being exercised.
 6. **Affinity policy and the docs sweep.**
 
 Steps 3 and 4 are separate commits so that a bisect lands on "the
@@ -280,8 +317,13 @@ on interrupts, so `boot gicv3 aarch64` passing 196 self-tests is a
 stronger statement than any new test. What is added is what that does
 *not* cover:
 
-- **`boot gicv3 aarch64`** and **`boot gicv3-nots aarch64`** (ITS
-  disabled, `msi=off`) as chain steps, so both MSI paths run every time.
+- **Three chain steps, one per MSI path**: `boot gicv3 aarch64`
+  (`gic-version=3,msi=its`), `boot gicv3-v2m aarch64`
+  (`gic-version=3,msi=gicv2m`, the fallback), and the existing
+  `gic-version=2` steps. The middle one exists because a fallback that
+  nothing runs is a fallback that regresses -- and because `msi=off`,
+  which an earlier draft proposed for it, exercises neither path and
+  cannot boot at all (§4).
 - **`boot smp16 aarch64`** — sixteen CPUs, which no configuration in
   this tree has ever booted. Reintroducing the eight-bit target mask
   fails it at CPU 8.
@@ -293,13 +335,17 @@ stronger statement than any new test. What is added is what that does
   by that CPU and no other. With the SGI target list built from the
   wrong affinity fields, the interrupt lands on a CPU whose Aff0 happens
   to match — which a broadcast-shaped test would not notice.
-- **`gic-its-map`**: attach two devices, map an event each, and require
-  each device's write to raise its own vector. The failure mode this
+- **`gic-its-map`**: attach two devices with *different* device ids, map
+  an event each, and require each device's write to raise its own
+  vector. This is the test that cannot be written without the device id
+  reaching `msi_compose`. The failure mode this
   catches is a shared translation table, which delivers *an* interrupt
   and so looks fine until two devices are busy at once.
-- **`msi-fallback`**: with no ITS in the MADT, `arch_irqc_msi_compose`
-  reports `-ENODEV` and the PCI layer takes INTx, rather than composing
-  a message nothing will deliver.
+- **`msi-decline`**: with neither an ITS nor a frame in the MADT,
+  `arch_irqc_msi_compose` reports `-ENODEV` rather than composing a
+  message nothing will deliver. A unit test of the compose path, not a
+  boot configuration -- booting that machine is what §4 says this tree
+  cannot do until the drivers learn INTx.
 
 The lesson the tag unit paid for applies directly here: a property about
 two CPUs needs a test with two CPUs. `gic-affinity` and
@@ -343,6 +389,13 @@ tag unit recorded, for the same reason. What can be measured honestly:
   already names. That is the point of the unit, but it means step 4 may
   uncover work that belongs to other subsystems, and those should be
   recorded rather than absorbed.
+- **No driver in this tree falls back to INTx.** NVMe fails its probe
+  when MSI-X setup fails and AHCI says so explicitly; virtio-pci is the
+  same shape. So every GICv3 configuration this unit ships must provide
+  a working MSI path from its first boot -- there is no degraded mode to
+  fall back on while the ITS is built, which is why step 3 keeps GICv2m.
+  Teaching those drivers INTx is a real and separable unit; it is
+  recorded here, not attempted.
 - **Sixteen CPUs may be too slow to test on this host.** Measured now, at
   the current maximum: four CPUs boot the test in ~60 s, eight in 78-85 s,
   and one run of two at eight failed on the recorded timer/host-load
