@@ -226,6 +226,7 @@ bool selftest_el2_vgic_roundtrip(const char **reason);  /* the guest's interrupt
 bool selftest_el2_guest_irq(const char **reason);       /* a guest takes one, acknowledges, completes */
 bool selftest_el2_guest_irq_masked(const char **reason);/* one it has masked waits rather than vanishing */
 bool selftest_el2_guest_irq_private(const char **reason);/* SGIs and PPIs, which the x86-shaped range refused */
+bool selftest_el2_guest_irq_queue(const char **reason);  /* the register's occupant is not always the offer */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

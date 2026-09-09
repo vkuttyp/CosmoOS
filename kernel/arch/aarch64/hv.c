@@ -78,7 +78,7 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 }
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out) { return g_be->vcpu_run(v, out); }
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_irq(v, vector); }
-bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_taken(v); }
+int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {
     g_be->vcpu_inject_exception(v, vector, has_error, error);

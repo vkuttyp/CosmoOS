@@ -93,7 +93,8 @@ struct arch_hv_vcpu {
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
     int offered;
-    bool irq_live;           /* the offered vector is the one in the list register */
+    int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
+    bool lr_reported;        /* its delivery has already been told to the owner */
     uint64_t irq_delivered;  /* interrupts the guest took */
     uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
@@ -368,6 +369,8 @@ static void ctx_reset(struct arch_hv_vcpu *v)
      * guest that has not configured its CPU interface should see.
      */
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
+    v->lr_vector = -1;
+    v->lr_reported = false;
     c->vgic_hcr = c->vgic_on ? ICH_HCR_EN : 0;
     v->offered = -1;
     v->pending_event = ~0u;
@@ -548,54 +551,57 @@ bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
 static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
     v->offered = vector;
-    v->irq_live = false;
     if (!v->ctx->vgic_on || vector < 0)
         return;
-    uint64_t lr = v->ctx->vgic_lr0;
     /*
      * One list register, so one interrupt at a time. If the last one is
-     * still in it -- Pending because the guest has it masked, or Active
+     * still in it -- Pending because the guest has it masked, Active
      * because the guest is in its handler -- overwriting would lose a
      * state the guest is about to act on, and a guest that then
      * completed an interrupt nobody had given it would take a spurious
-     * EOI.
+     * EOI. Whatever is in there is the interrupt whose fate the exit
+     * path reports; this offer waits its turn.
      */
-    if (lr_state(lr) != LR_STATE_INVALID) {
-        /*
-         * The offered vector already being in the register is the
-         * ordinary case: it was placed on an earlier entry and the
-         * guest has not taken it yet. It is still *this run's*
-         * interrupt, so it is live -- saying otherwise would make
-         * `irq_taken` false when the guest finally acknowledges it, and
-         * the generic layer would deliver the same INTID again as soon
-         * as the EOI freed the register.
-         */
-        if ((uint32_t)(lr & 0xFFFFFFFFu) == (uint32_t)vector) {
-            v->irq_live = true;
-            return;
-        }
-        /* A *different* interrupt had to wait. This is the number that
-         * says whether one register is enough. */
-        v->irq_deferred++;
+    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID) {
+        /* A *different* interrupt had to wait: the number that says
+         * whether one register is enough. Offering the resident one
+         * again is the ordinary case and costs nothing. */
+        if (v->lr_vector != vector)
+            v->irq_deferred++;
         return;
     }
     v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(VGIC_PRIORITY) | (uint32_t)vector;
-    v->irq_live = true;
+    v->lr_vector = vector;
+    v->lr_reported = false;
 }
 
-static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
+static int el2_vcpu_irq_delivered(struct arch_hv_vcpu *v)
 {
+    if (!v->ctx->vgic_on || v->lr_vector < 0)
+        return -1;
     /*
-     * Taken means the guest has it, not that the guest has finished
-     * with it: acknowledging moves the list register from Pending to
-     * Active, and only the EOI makes it Invalid. A guest that exits
-     * between the two -- a hypercall in its handler, or a host
-     * interrupt -- is very much holding the interrupt, and reporting
-     * otherwise would leave it pending and deliver it a second time.
+     * The list register's own occupant is what the guest can have
+     * taken, and it is not always what this entry offered: one placed
+     * while the guest had interrupts masked sits there across every
+     * entry until the guest unmasks, and a lower-numbered vector may be
+     * the current offer all the while.
+     *
+     * Pending is "placed, not yet taken". Active is taken and not yet
+     * completed -- delivery, and the guest is in its handler. Invalid is
+     * taken and completed, and the register is free again. Reported
+     * once, because Active can persist across several runs and the
+     * owner must clear it exactly one time.
      */
-    bool taken = v->irq_live && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
-    if (taken)
-        v->irq_delivered++;
+    uint64_t st = lr_state(v->ctx->vgic_lr0);
+    if (st == LR_STATE_PENDING)
+        return -1;
+    int taken = v->lr_vector;
+    if (st == LR_STATE_INVALID)
+        v->lr_vector = -1;
+    if (v->lr_reported)
+        return -1;
+    v->lr_reported = true;
+    v->irq_delivered++;
     return taken;
 }
 
@@ -703,7 +709,7 @@ const struct hv_backend el2_backend = {
     .vcpu_set_state = el2_vcpu_set_state,
     .vcpu_run = el2_vcpu_run,
     .vcpu_set_irq = el2_vcpu_set_irq,
-    .vcpu_irq_taken = el2_vcpu_irq_taken,
+    .vcpu_irq_delivered = el2_vcpu_irq_delivered,
     .vcpu_inject_exception = el2_vcpu_inject_exception,
     .vcpu_advance_rip = el2_vcpu_advance_rip,
     .vcpu_set_rip = el2_vcpu_set_rip,

@@ -117,7 +117,7 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
 
 /* VirtualInterrupt: offer one vector (-1: none) for delivery when the
- * guest is interruptible; irq_taken tells, after a run, whether it went. */
+ * guest is interruptible. */
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
 
 /* The interrupt numbers a guest of this architecture can be given,
@@ -132,7 +132,16 @@ void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
  * where the architecture has no such state, which is everywhere but a
  * GICv3 machine's EL2 backend. */
 bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
-bool arch_hv_vcpu_irq_taken(struct arch_hv_vcpu *v);
+/* Which interrupt the guest actually took during the last run, or -1.
+ *
+ * Not "was the offered one taken?". On an architecture whose controller
+ * *holds* an interrupt across entries -- a GICv3 list register keeps one
+ * Pending until the guest unmasks -- what a guest takes need not be what
+ * was offered for that entry: it can be one offered several entries ago,
+ * while a lower-numbered vector is the current offer. The owner clears
+ * what was delivered, so the question has to be *which*, and a boolean
+ * cannot answer it. */
+int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 /* Queue an exception for the next entry (vector < 32). */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 

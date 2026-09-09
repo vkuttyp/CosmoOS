@@ -795,6 +795,83 @@ bool selftest_el2_guest_irq_private(const char **reason)
     return true;
 }
 
+/* --- what the list register holds is not always what was offered ---
+ *
+ * With one list register, an interrupt the guest has masked stays in it
+ * across every entry until the guest unmasks. Two things follow, and
+ * both were wrong before this test existed:
+ *
+ *   - a *second* injection of the same INTID, while the first is still
+ *     Active in the register, must not be swallowed by the first one's
+ *     completion; and
+ *   - a resident interrupt the guest finally takes must be cleared from
+ *     the pending set even when a *lower-numbered* vector is the offer
+ *     for that entry, or it is delivered twice.
+ *
+ * Both are the same mistake: asking "was the offered vector taken?"
+ * when the question is "which interrupt did the guest take?".
+ */
+bool selftest_el2_guest_irq_queue(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: el2-guest-irq-queue: no virtual GIC on this machine; skipping");
+        return true;
+    }
+    struct vm *vm;
+    struct vcpu *v;
+    struct cosmo_vcpu_regs regs;
+    CHECK(make_guest("tests/hv/guest_irq.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+
+    /* --- the same INTID twice, the second while the first is Active --- */
+    CHECK(vcpu_inject(v, 42) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);   /* acknowledged */
+    CHECK(vcpu_inject(v, 42) == 0);                                     /* again, while Active */
+    CHECK(vcpu_run(v, &x) == 0);
+    /* The guest completed the first and went back to its heartbeat. The
+     * second injection must still be pending: the completion of one
+     * instance is not the delivery of the next. */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 42);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);   /* and now it arrives */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+
+    /* --- a resident interrupt taken while a lower number is offered --- */
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.pstate |= (1u << 7);                       /* mask */
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    CHECK(vcpu_inject(v, 42) == 0);
+    CHECK(vcpu_run(v, &x) == 0);                    /* 42 goes into the register, unheeded */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_inject(v, 5) == 0);                  /* now a lower number is the offer */
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 5);
+    regs.pstate &= ~(uint64_t)(1u << 7);            /* unmask */
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    /* The guest takes the resident 42, not the offered 5, and 42 is what
+     * must be cleared. */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 42);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == 5);
+    CHECK(vcpu_run(v, &x) == 0);                    /* the EOI frees the register */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 5);    /* then 5, once */
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pending_irq == ~0ull);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-irq-queue: a second instance is not swallowed, and a resident "
+          "interrupt is cleared when it is taken");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -901,6 +978,7 @@ bool selftest_el2_vgic_roundtrip(const char **reason) { (void)reason; return tru
 bool selftest_el2_guest_irq(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_masked(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_private(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_irq_queue(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
