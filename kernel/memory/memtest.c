@@ -882,6 +882,97 @@ bool selftest_asid_destroy_reuse(const char **reason)
 }
 
 /*
+ * Two CPUs starting the threads of one process reach an untagged space
+ * at the same moment. Both may find it untagged; only one may allocate.
+ *
+ * The bug this pins down was a check made before the lock and not
+ * remade under it: both CPUs allocated, the second write won, and the
+ * first tag stayed reserved with nothing pointing at it until the next
+ * rollover -- a pool emptying faster than it should and full flushes
+ * that need not have happened. It is not an isolation failure (both
+ * tags name the same tables), which is exactly why a counting test is
+ * the one that catches it.
+ *
+ * Each round hands both CPUs the same fresh context and requires the
+ * allocator to have handed out exactly one tag for it.
+ */
+#define ASID_RACE_ROUNDS 300u
+
+struct asid_race {
+    struct arch_mmu_context *ctx;
+    volatile uint32_t *round;    /* the round both sides are waiting for */
+    volatile uint32_t *arrived;  /* how many have reached it */
+    unsigned rounds;
+};
+
+static void asid_race_thread(void *arg)
+{
+    struct asid_race *r = arg;
+    for (unsigned i = 1; i <= r->rounds; i++) {
+        __atomic_fetch_add(r->arrived, 1u, __ATOMIC_ACQ_REL);
+        while (__atomic_load_n(r->round, __ATOMIC_ACQUIRE) != i)
+            arch_cpu_relax();
+        asid_switch_prepare(r->ctx);
+    }
+    thread_exit(0);
+}
+
+bool selftest_asid_race(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-race: no address-space tags on this machine; skipping");
+        return true;
+    }
+    if (__builtin_popcountll(cpu_online_mask()) < 2) {
+        kinfo("selftest: asid-race: one CPU online; the race needs two");
+        return true;
+    }
+    /* Anywhere but here, so the two callers are genuinely concurrent. */
+    cpumask_t others = cpu_online_mask() & ~CPUMASK_OF(arch_cpu_id());
+    static struct arch_mmu_context ctx;
+    static volatile uint32_t round, arrived;
+    round = 0;
+    arrived = 0;
+    struct asid_race r = { .ctx = &ctx, .round = &round, .arrived = &arrived, .rounds = ASID_RACE_ROUNDS };
+    struct thread *t = thread_create_on(asid_race_thread, &r, "asid-race", SCHED_PRIO_DEFAULT, others);
+    CHECK(t != NULL);
+
+    struct asid_stats st0, st1;
+    asid_get_stats(&st0);
+    uint64_t gen0 = asid_generation();
+    unsigned double_allocs = 0;
+
+    for (unsigned i = 1; i <= ASID_RACE_ROUNDS; i++) {
+        memset(&ctx, 0, sizeof(ctx));            /* untagged again */
+        struct asid_stats a, b;
+        asid_get_stats(&a);
+        __atomic_fetch_add(&arrived, 1u, __ATOMIC_ACQ_REL);
+        while (__atomic_load_n(&arrived, __ATOMIC_ACQUIRE) < 2u * i)
+            arch_cpu_relax();
+        __atomic_store_n(&round, i, __ATOMIC_RELEASE);   /* both go */
+        asid_switch_prepare(&ctx);
+        while (__atomic_load_n(&arrived, __ATOMIC_ACQUIRE) < 2u * i)
+            arch_cpu_relax();
+        asid_get_stats(&b);
+        if (b.allocs - a.allocs > 1)
+            double_allocs++;
+    }
+    thread_join(t);
+    asid_get_stats(&st1);
+
+    if (double_allocs != 0) {
+        kwarn("selftest: asid-race: %u of %u rounds allocated two tags for one space", double_allocs,
+              ASID_RACE_ROUNDS);
+        *reason = "two CPUs both tagged the same space: the check before the lock was not remade under it";
+        return false;
+    }
+    kinfo("selftest: asid-race: %u contested rounds, %llu tags for %u spaces, %llu rollovers",
+          ASID_RACE_ROUNDS, (unsigned long long)(st1.allocs - st0.allocs), ASID_RACE_ROUNDS,
+          (unsigned long long)(asid_generation() - gen0));
+    return true;
+}
+
+/*
  * What the unit actually changed, counted rather than timed: the number
  * of full TLB flushes the switch path performs.
  *

@@ -164,23 +164,36 @@ bool asid_switch_prepare(struct arch_mmu_context *ctx)
     uint64_t gen = __atomic_load_n(&g_generation, __ATOMIC_ACQUIRE);
     bool flush = false;
 
-    if (ctx != NULL && ctx->asid_gen != gen) {
+    if (ctx != NULL && __atomic_load_n(&ctx->asid_gen, __ATOMIC_ACQUIRE) != gen) {
         arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-        /* Re-read under the lock: another CPU may have rolled over
-         * between the load above and here, which would make a tag
-         * allocated from the old generation stale on arrival. */
+        /*
+         * Both questions are re-asked under the lock. The generation,
+         * because another CPU may have rolled over between the load
+         * above and here, which would make a tag allocated from the old
+         * generation stale on arrival. And the *context*, because two
+         * CPUs starting the threads of one process can both find it
+         * untagged and both allocate: the second write wins, and the
+         * first tag is reserved with nothing pointing at it until the
+         * next rollover -- a pool that empties faster than it should
+         * and full flushes that need not have happened.
+         */
         gen = g_generation;
-        uint32_t tag = bitmap_next_free();
-        if (tag == 0) {
-            rollover();
-            gen = g_generation;
-            tag = bitmap_next_free();
-            KASSERT(tag != 0);   /* an empty bitmap always has one */
+        if (ctx->asid_gen != gen) {
+            uint32_t tag = bitmap_next_free();
+            if (tag == 0) {
+                rollover();
+                gen = g_generation;
+                tag = bitmap_next_free();
+                KASSERT(tag != 0);   /* an empty bitmap always has one */
+            }
+            g_stats.allocs++;
+            ctx->asid = tag;
+            /* Released after the tag, so a CPU that sees the current
+             * generation on the fast path above sees the tag that goes
+             * with it. */
+            __atomic_store_n(&ctx->asid_gen, gen, __ATOMIC_RELEASE);
         }
-        g_stats.allocs++;
         spin_unlock_irqrestore(&g_lock, s);
-        ctx->asid = tag;
-        ctx->asid_gen = gen;
     }
 
     /* Whether this CPU may still hold tags from before a rollover. The
@@ -207,9 +220,9 @@ void asid_release(struct arch_mmu_context *ctx)
         g_bitmap[ctx->asid / 64u] &= ~(1ull << (ctx->asid % 64u));
         g_stats.releases++;
     }
-    spin_unlock_irqrestore(&g_lock, s);
     ctx->asid = 0;
-    ctx->asid_gen = 0;
+    __atomic_store_n(&ctx->asid_gen, 0, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&g_lock, s);
 }
 
 uint64_t asid_generation(void)

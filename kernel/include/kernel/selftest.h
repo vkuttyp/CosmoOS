@@ -24,6 +24,7 @@ bool selftest_asid_alloc(const char **reason);      /* kernel/memory/memtest.c: 
 bool selftest_asid_isolation(const char **reason);  /* two spaces, one address, no flush between them */
 bool selftest_asid_rollover(const char **reason);   /* a recycled tag does not carry the old space across */
 bool selftest_asid_destroy_reuse(const char **reason); /* a tag freed at destroy carries nothing forward */
+bool selftest_asid_race(const char **reason);       /* two CPUs may not both tag one space */
 bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
 bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */

@@ -346,6 +346,7 @@ static const struct selftest tests[] = {
     { "asid-rollover",   selftest_asid_rollover },
     { "asid-paranoid",   selftest_asid_paranoid },
     { "asid-destroy-reuse", selftest_asid_destroy_reuse },
+    { "asid-race",       selftest_asid_race },
     { "asid-quiet",      selftest_asid_quiet },
     { "acpi",            selftest_acpi },
     { "timer",           selftest_timer },
