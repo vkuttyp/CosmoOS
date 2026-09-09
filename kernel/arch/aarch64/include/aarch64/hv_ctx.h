@@ -75,6 +75,17 @@
 #define HV_CTX_CNTV_CTL     0x350   /* CNTV_CTL_EL0: ENABLE, IMASK, and ISTATUS as read on exit */
 #define HV_CTX_CNTV_CVAL    0x358   /* CNTV_CVAL_EL0 */
 #define HV_CTX_CNTVOFF      0x360   /* CNTVOFF_EL2: the VM's, copied */
+/*
+ * CNTHCTL_EL2 gates EL1's access to the *physical* counter and timer.
+ * The host is at EL1 and its tick is the physical timer, so the host's
+ * value (0x3, from the loader) must stay in force whenever the host
+ * runs -- getting that wrong stops the host's clock. A guest is also at
+ * EL1 and must get neither: the switch writes 0 for the guest and puts
+ * the host's own value back on exit. Saved rather than assumed, so a
+ * host that changes its mind about the bits does not have to change the
+ * switch.
+ */
+#define HV_CTX_HOST_CNTHCTL 0x368
 
 /* The EL1 system registers the switch moves, in this order. */
 #define HV_CTX_SYS_COUNT 20
@@ -113,6 +124,7 @@ struct hv_ctx {
     uint64_t vgic_elrsr, vgic_misr;
     uint64_t vgic_ap0r0, vgic_ap1r0;
     uint64_t cntv_ctl, cntv_cval, cntvoff;
+    uint64_t host_cnthctl;
 };
 
 _Static_assert(sizeof(struct hv_sysregs) == HV_CTX_SYS_COUNT * 8, "hv_sysregs order");
@@ -145,6 +157,7 @@ _Static_assert(__builtin_offsetof(struct hv_ctx, vgic_ap1r0) == HV_CTX_VGIC_AP1R
 _Static_assert(__builtin_offsetof(struct hv_ctx, cntv_ctl) == HV_CTX_CNTV_CTL, "ctx cntv ctl");
 _Static_assert(__builtin_offsetof(struct hv_ctx, cntv_cval) == HV_CTX_CNTV_CVAL, "ctx cntv cval");
 _Static_assert(__builtin_offsetof(struct hv_ctx, cntvoff) == HV_CTX_CNTVOFF, "ctx cntvoff");
+_Static_assert(__builtin_offsetof(struct hv_ctx, host_cnthctl) == HV_CTX_HOST_CNTHCTL, "ctx host cnthctl");
 _Static_assert(sizeof(struct hv_ctx) <= 4096, "the context is one page");
 
 /* The EL2 vector table this backend installs through el2_set_vectors. */

@@ -229,6 +229,7 @@ bool selftest_el2_guest_irq_private(const char **reason);/* SGIs and PPIs, which
 bool selftest_el2_guest_irq_queue(const char **reason);  /* the register's occupant is not always the offer */
 bool selftest_el2_guest_timer_isolated(const char **reason); /* a guest's CNTV does not outlive it */
 bool selftest_el2_guest_timer_offset(const char **reason);   /* one clock per VM, the same on every vCPU */
+bool selftest_el2_guest_phys_timer(const char **reason);     /* the host's clock and tick are not a guest's */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

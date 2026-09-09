@@ -253,6 +253,13 @@ el2_sync:
     msr cntv_cval_el0, x2
     ldr x2, [x18, #HV_CTX_CNTV_CTL]
     msr cntv_ctl_el0, x2
+    /* And nothing of the physical timer: a guest at EL1 may neither read
+     * CNTPCT_EL0 -- the host's uptime -- nor touch CNTP_*, the host's
+     * tick. The host's own CNTHCTL_EL2 goes into the context to come
+     * back on exit; the host is at EL1 too and needs its bits. */
+    mrs x2, cnthctl_el2
+    str x2, [x18, #HV_CTX_HOST_CNTHCTL]
+    msr cnthctl_el2, xzr
     isb
 
     /* Guest general-purpose registers; x18 last, from itself. */
@@ -369,6 +376,8 @@ el2_exit:
     str x2, [x18, #HV_CTX_CNTV_CVAL]
     msr cntv_ctl_el0, xzr
     msr cntvoff_el2, xzr
+    ldr x2, [x18, #HV_CTX_HOST_CNTHCTL]
+    msr cnthctl_el2, x2              /* the host may see its own clock again */
     isb
 
     /* Back to the host: stage 2 off, its EL1 state and its registers. */

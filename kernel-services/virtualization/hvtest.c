@@ -972,6 +972,58 @@ bool selftest_el2_guest_timer_offset(const char **reason)
     return true;
 }
 
+/* --- a guest may not read the host's clock or arm the host's tick ---
+ *
+ * CNTPCT_EL0 is the host's uptime and CNTP_* is the host's tick timer;
+ * both were open to a guest at EL1 because the loader's CNTHCTL_EL2
+ * (0x3) permits EL1 to use them and a guest is at EL1. The switch clears
+ * it for a guest now, so each access is a trap the owner sees -- and the
+ * second half is the one worth having: a guest that armed the host's
+ * tick was a fault the host would have felt.
+ */
+bool selftest_el2_guest_phys_timer(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_ptimer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct cosmo_vcpu_regs regs;
+
+    /* mrs x3, CNTPCT_EL0: a read of a CRn 14 register, trapped. The
+     * ISS names the register: Op0[21:20]=3 Op1[16:14]=3 CRn[13:10]=14
+     * CRm[4:1]=0 Op2[19:17]=1 for the counter. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
+    CHECK(!x.sysreg.write && x.sysreg.reg == 3);
+    CHECK(((x.sysreg.iss >> 10) & 0xF) == 14);                     /* CRn: the timers */
+    CHECK(((x.sysreg.iss >> 1) & 0xF) == 0 && ((x.sysreg.iss >> 17) & 0x7) == 1);  /* CNTPCT */
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.x[3] = 0x1234;                                             /* the owner's answer */
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+
+    /* msr CNTP_CTL_EL0, x4: a write to CRm 2 Op2 1, trapped -- and the
+     * host's own timer control must not have moved. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
+    CHECK(x.sysreg.write && x.sysreg.reg == 4);
+    CHECK(((x.sysreg.iss >> 10) & 0xF) == 14);
+    CHECK(((x.sysreg.iss >> 1) & 0xF) == 2 && ((x.sysreg.iss >> 17) & 0x7) == 1);  /* CNTP_CTL */
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.pc += 4;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.x[3] == 0x1234);    /* the guest got the answer, not the clock */
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-phys-timer: CNTPCT_EL0 read and CNTP_CTL_EL0 write both trapped");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1081,6 +1133,7 @@ bool selftest_el2_guest_irq_private(const char **reason) { (void)reason; return 
 bool selftest_el2_guest_irq_queue(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_phys_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
