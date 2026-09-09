@@ -157,7 +157,8 @@ re-faulting forever. After every sync or IRQ frame from EL0 the common
 exit runs `process_return_to_user` (kill delivery) when the CPU is not
 in an interrupt and preemption is enabled.
 
-IRQ → `gic_irq_dispatch(frame)`: acknowledge (`GICC_IAR`), remember the
+IRQ → `gic_irq_dispatch(frame)`: acknowledge (`GICC_IAR` on GICv2,
+`ICC_IAR1_EL1` on GICv3), remember the
 INTID for EOI (`g_cur_intid[cpu]`), map INTID → vector, call
 `aarch64_timer_ack` first when the INTID is a PPI (the timers re-arm
 there), `interrupt_dispatch(vector, frame)`, `arch_irqc_eoi`; an
@@ -179,7 +180,28 @@ arch_trap_vector_count() = 1312
 
 The generic layers treat vectors as opaque, allocate with
 `arch_vector_alloc`, and route with `arch_irqc_route(gsi, vector, cpu,
-flags)`; on this architecture **GSI = INTID**. `gic.c` keeps
+flags)`; on this architecture **GSI = INTID**.
+
+### Two controllers, one seam (`irqc.c`, `gic.c`, `gicv3.c`)
+
+`arch/irqc.h` says nothing about controller generations, and this
+machine has two. `irqc.c` reads the MADT once at `arch_irqc_init`,
+picks a driver from the reported distributor version — 0, 1 or 2 →
+`aarch64_gicv2_ops` in `gic.c`, 3 or 4 → `aarch64_gicv3_ops` in
+`gicv3.c`, anything else panics — and forwards every `arch_irqc_*`,
+`arch_ipi_*` and `gic_*` call through `struct aarch64_irqc_ops`
+(`aarch64/irqc.h`). The pointer is set by the boot CPU before any AP
+runs or any interrupt is enabled, and read without synchronisation
+after.
+
+The two drivers share no state. They share one file: `gicv2m.c`, the
+MSI frame, because a GICv3 whose MADT describes a frame and no ITS uses
+exactly the frame a GICv2 does. `arch_irqc_spurious_vector` is also not
+an op — the vector map below is the architecture's, not a driver's.
+
+### GICv2 (`gic.c`)
+
+`gic.c` keeps
 `g_vector_of[1020]` (INTID → vector, identity for unrouted INTIDs) and
 `g_intid_of[256]` (dynamic vector → INTID, 0xFFFF for none). `route`
 writes both maps and, for an SPI, sets `GICD_IPRIORITYR` to 0x80,
@@ -194,11 +216,11 @@ entry, releases a GICv2m SPI or an SGI. `arch_irqc_gsi_count` = 1020
 (PPIs included). PPI and SGI enables are banked per CPU, so `init_cpu`
 enables all sixteen SGIs plus `g_routed_ppi_mask` on each CPU; the timer
 binds its PPI once with `gic_bind_ppi` and enables it per CPU with
-`gic_enable_local`. `arch_irqc_init` programs every SPI group 0,
+`gic_enable_local`. `init` programs every SPI group 0,
 disabled, inactive, priority 0x80, level, and enables the distributor;
 the GICv2m frame's `MSI_TYPER` gives the SPI base and count unless the
 MADT entry overrides them, and a range outside the distributor's lines
-disables MSI with a warning. A distributor version other than 2 panics.
+disables MSI with a warning.
 
 IPIs: the generic layer allocates a dynamic vector and calls
 `arch_ipi_send(cpu, vector)` or `arch_ipi_broadcast_others(vector)`;
@@ -212,7 +234,51 @@ MSI: `arch_irqc_msi_compose(vector, cpu, &addr, &data)` takes the lowest
 free SPI from the GICv2m frame's range (QEMU: INTIDs 80..143), routes it
 edge-triggered to `vector` on `cpu`, enables it, and returns `addr` =
 frame + 0x40 (`MSI_SETSPI_NS`), `data` = INTID. Freeing the vector
-releases the SPI.
+releases the SPI. The frame itself is `gicv2m.c`: a `struct gicv2m`
+holding the mapped window, the SPI range and a bitmap under its own
+lock, which both drivers own an instance of. Its lock is a leaf: the
+driver's `g_lock` may be taken around it and never the other way.
+
+### GICv3 (`gicv3.c`)
+
+Same vector map, same bookkeeping arrays, three differences, which are
+the whole of the file:
+
+- **The CPU interface is system registers.** `ICC_SRE_EL1` selects them
+  (`init_cpu` sets SRE, DFB and DIB, then panics if SRE reads back
+  clear), `ICC_PMR_EL1` = 0xF0 admits everything, `ICC_BPR1_EL1` = 0,
+  `ICC_CTLR_EL1` clears CBPR and EOImode so one `ICC_EOIR1_EL1` write
+  both drops priority and deactivates, and `ICC_IGRPEN1_EL1` = 1 opens
+  the interface. Acknowledging is `ICC_IAR1_EL1`. Interrupts are
+  **Group 1**, not GICv2's Group 0: the system-register interface
+  delivers Group 1 as IRQ and Group 0 as FIQ, and this kernel takes
+  IRQs. The default priority moves with it, to that view's 0xA0.
+  *(EL2 must leave `ICC_SRE_EL2.Enable` set for EL1 to reach these at
+  all. The loader does not program it — QEMU's does not need it — so a
+  machine whose firmware cleared it would trap on the first access.)*
+- **SGIs and PPIs live in a redistributor.** One frame pair per CPU,
+  found by walking the GICR window from the MADT (or, without one, the
+  GICC entry's own base) for a frame whose `GICR_TYPER[63:32]` is this
+  CPU's MPIDR affinity; the stride is 0x20000, or 0x40000 when the
+  first frame reports VLPIS (GICv4). `GICR_WAKER.ProcessorSleep` is
+  cleared and `ChildrenAsleep` waited on before anything else. So
+  `mask`, `unmask`, `gic_enable_local` and `gic_disable_local` go to the
+  calling CPU's redistributor for an INTID below 32 and to the
+  distributor above it.
+- **Routing is by affinity.** `GICD_CTLR` gains `ARE_NS`, and an SPI is
+  routed by writing the target's affinity to `GICD_IROUTER` (64 bits per
+  SPI, programmed after ARE is set because it means nothing before);
+  `arch_ipi_send` writes `ICC_SGI1R_EL1` with Aff3/Aff2/Aff1 and a
+  sixteen-bit target list over Aff0, and `arch_ipi_broadcast_others`
+  sets IRM. This is where GICv2's eight-bit `GICD_ITARGETSR` mask — and
+  its eight-CPU ceiling — stops being the limit; QEMU's `virt` numbers
+  sixteen CPUs per cluster under `gic-version=3` precisely so the target
+  list covers a cluster.
+
+A write to an enable or control register is not in effect until the
+controller says so, so `GICD_CTLR.RWP` and `GICR_CTLR.RWP` are polled
+after the writes that need it. MSI is still the GICv2m frame; the ITS is
+not implemented.
 
 ### Timer (`timer.c`)
 

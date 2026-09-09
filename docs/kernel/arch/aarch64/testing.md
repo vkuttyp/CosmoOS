@@ -19,6 +19,13 @@ qemu-system-aarch64 -machine virt,gic-version=2,accel=tcg -cpu cortex-a72 -smp 4
   `QEMU_TESTDISK`, `QEMU_VCON`, `QEMU_NET_HOSTFWD`, `QEMU_FWCFG_NETTEST`,
   `QEMU_PCAP` and `OVMF_CODE` keep their meanings. `-cpu max` adds PAN and
   is also supported.
+- `QEMU_GIC` selects the interrupt controller: `2` (the default, the
+  GICv2 driver in `gic.c`) or `3` (the GICv3 driver in `gicv3.c`).
+  `QEMU_MSI` selects how an MSI reaches it: `gicv2m` (the frame, the
+  only path either driver implements today), `its` (the machine offers
+  an ITS instead of a frame -- the kernel then finds no MSI and NVMe and
+  AHCI fail to probe) or `off`. **`gic-version=2` caps the machine at
+  eight CPUs**, which is why `QEMU_SMP` above 8 needs `QEMU_GIC=3`.
 - The firmware (`scripts/find-firmware.sh aarch64`: `AAVMF`,
   `qemu-efi-aarch64`, Homebrew `edk2-aarch64-code.fd`) is copied and
   padded to the 64 MiB flash size the `virt` machine expects, into
@@ -64,7 +71,23 @@ The same chain as x86 is run before a phase is declared complete:
 test`, `make ARCH=aarch64 test-crash`, `make ARCH=aarch64
 MODULE_SIG_ENFORCE=0 test`, `make ARCH=aarch64 host-test`, `make
 ARCH=aarch64 analyze`, `make ARCH=aarch64 reproducible`
-(`check-reproducible.sh` compares `boot/BOOTAA64.EFI`).
+(`check-reproducible.sh` compares `boot/BOOTAA64.EFI`), plus the two
+interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=1` and
+`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=8`.
+
+### Sixteen CPUs
+
+`QEMU_GIC=3 QEMU_SMP=16` boots and brings all sixteen CPUs online --
+the first configuration in this tree to do so, and the one that proves
+the SGI target list is built from the right affinity fields (`smp-call`
+sends to each CPU in turn and requires the callback to run *there*).
+It is **not** a chain step, because on the development host sixteen TCG
+vCPUs on ten physical cores is enough oversubscription to break two
+wall-clock budgets that are not about interrupts: `process-user`'s
+fifteen-second "this is stuck" bound (18 s observed) and the `iommu`
+test's 500 ms wait for the fault event. Both fail the same way with
+sixteen CPUs on x86-64, where the interrupt controller is an I/O APIC.
+Run it by hand when changing the SGI or affinity paths.
 
 ## Kernel self-tests
 
@@ -79,6 +102,14 @@ each of them exercises in this backend:
 - Interrupt/IRQ tests: dynamic vector allocation in 1056..1311, GSI
   routing to SPIs, mask/unmask, MSI compose through the GICv2m frame,
   the periodic test IRQ on the virtual timer (INTID 27).
+- `irq-affinity` (`kernel/interrupt/irqtest.c`): the distributor's
+  highest line -- which `virt` reports and wires to nothing -- is routed
+  to each online CPU in turn, made pending with `GICD_ISPENDR` through
+  `arch_test_irq_raise`, and the handler must report `arch_cpu_id()`
+  equal to the CPU the route named. Every driver in the tree asks for
+  CPU 0, so without this a controller that ignored the CPU argument
+  would pass the whole suite. It runs on both GIC drivers and skips on
+  x86-64, where an I/O APIC pin cannot be asserted by software.
 - Timer tests: `CNTPCT` monotonicity and rate, the tick on `CNTP_CVAL`
   compares (the rate windows are what caught the `TVAL` drift), one-shot
   timers and sleeps.

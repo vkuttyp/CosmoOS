@@ -12,6 +12,7 @@
 
 #include <arch/cpu.h>
 #include <arch/irqc.h>
+#include <arch/testhooks.h>
 
 #include <x86/idt.h>
 #include <x86/ioapic.h>
@@ -153,4 +154,26 @@ void arch_ipi_send(unsigned cpu, unsigned vector)
 void arch_ipi_broadcast_others(unsigned vector)
 {
     lapic_send_ipi_all_others(vector);
+}
+
+/*
+ * An I/O APIC pin is asserted by a device and by nothing else: there is
+ * no register that makes one pending, so the routing test that needs it
+ * has no line to ask for here and skips.
+ */
+int arch_test_irq_spare_gsi(void)
+{
+    return -1;
+}
+
+void arch_test_irq_raise(unsigned gsi)
+{
+    (void)gsi;
+}
+
+/* An x86 MSI carries a vector, not a GSI, so no I/O APIC line can be
+ * taken by one and there is nothing to collide. */
+int arch_test_msi_overlap_gsi(void)
+{
+    return -1;
 }

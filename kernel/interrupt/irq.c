@@ -112,7 +112,8 @@ int irq_request_msi(interrupt_handler_fn fn, void *arg, const char *name, unsign
         return rc;
     }
     spin_unlock_irqrestore(&g_irq_lock, s);
-    kdebug("irq: MSI vector %d on CPU %u (%s)", vector, cpu, name ? name : "?");
+    kdebug("irq: MSI vector %d on CPU %u (%s), message 0x%llx/0x%x", vector, cpu, name ? name : "?",
+           (unsigned long long)msg->addr, msg->data);
     return vector;
 }
 

@@ -81,14 +81,19 @@ PL011 work only because of it.
 vector, and `g_intid_of[vector]` is its inverse; both change only under
 `g_lock`; the IRQ path reads them lock-free. EOI writes the INTID
 acknowledged on the same CPU (`g_cur_intid[cpu]`), never a reverse
-lookup. **Checked by** the interrupt and IRQ self-tests (route, mask,
-free, MSI compose) and the `smp-call`/`smp-wake` tests under `QEMU_SMP=4`.
+lookup. Each driver keeps its own pair of maps -- only one driver is
+ever live (A19). **Checked by** the interrupt and IRQ self-tests (route,
+mask, free, MSI compose) and the `smp-call`/`smp-wake` tests under
+`QEMU_SMP=4`.
 
 ## A10: PPI and SGI enables are re-established on every CPU
 
 `arch_irqc_init_cpu` enables all SGIs plus `g_routed_ppi_mask`, and the
 timer enables its PPI in `aarch64_timer_init_cpu`. A PPI routed after a
-CPU came up is enabled locally by the caller (`gic_enable_local`).
+CPU came up is enabled locally by the caller (`gic_enable_local`). The
+registers differ -- the distributor's banked copies under GICv2, the
+CPU's own redistributor under GICv3 -- but the rule does not, and
+neither does `gic_enable_local`'s meaning: *this* CPU's copy.
 **Checked by** the `smp-ticks` self-test: every CPU's tick count advances.
 
 ## A11: The tick is an absolute compare
@@ -159,3 +164,25 @@ isolation` for the property the abstention exists to protect.
 `arch_emulator_exit(code)` produces QEMU exit status `(code << 1) | 1`
 through semihosting, so `run_boot_test.py` decodes 33 as success on both
 architectures. **Checked by** every `make ARCH=aarch64 test` run.
+
+## A19: One interrupt controller driver, chosen once
+
+`irqc.c` sets `g_ops` from the MADT's distributor version on the boot
+CPU, before any AP runs and before any interrupt is enabled, and never
+changes it. Every `arch_irqc_*`, `arch_ipi_*` and `gic_*` call reaches a
+controller only through it; no code outside `gic.c` and `gicv3.c`
+touches a distributor, redistributor, CPU interface or `ICC_*_EL1`
+register, and the two drivers share no state (only `gicv2m.c`, of which
+each owns an instance). A version the tree cannot drive panics at
+`arch_irqc_init` rather than falling back to a driver that would program
+the wrong registers. **Checked by** review, and by the whole suite
+passing under both `QEMU_GIC=2` and `QEMU_GIC=3`: a driver reading
+another's state would not survive one boot.
+
+## A20: An interrupt arrives on the CPU it was routed to
+
+`arch_irqc_route(gsi, vector, cpu, flags)` means that CPU, and nothing
+else. **Checked by** `irq-affinity`, which routes the distributor's
+highest line to each online CPU in turn and requires the handler to
+report that CPU's id; and by `smp-call`, which does the same for IPIs.
+Both are vacuous with one CPU and meaningful from two.

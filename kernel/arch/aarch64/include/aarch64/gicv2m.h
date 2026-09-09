@@ -36,6 +36,8 @@ void gicv2m_init(struct gicv2m *m, const struct acpi_gic *acpi, unsigned nr_line
 int  gicv2m_alloc(struct gicv2m *m, unsigned *intid);
 void gicv2m_free(struct gicv2m *m, unsigned intid);
 bool gicv2m_owns(const struct gicv2m *m, unsigned intid);
+/* True while `intid` is one of this frame's SPIs and nothing holds it. */
+bool gicv2m_is_free(const struct gicv2m *m, unsigned intid);
 
 /* The address a device writes, with the SPI number as its data. */
 paddr_t gicv2m_setspi_addr(const struct gicv2m *m);

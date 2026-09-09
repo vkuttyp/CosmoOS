@@ -58,6 +58,16 @@ struct aarch64_irqc_ops {
     /* An interrupt has arrived: read the controller, set `frame->vector`,
      * run the handler, and acknowledge. */
     void (*dispatch)(struct arch_trap_frame *frame);
+
+    /* Self-test aids (arch/testhooks.h): a line no device on this
+     * machine uses, and a way to make it pending without a device, so a
+     * test can prove where a routed interrupt lands. */
+    int  (*test_spare_gsi)(void);
+    void (*test_raise)(unsigned gsi);
+    /* The next line the MSI allocator would hand out, if nothing is
+     * bound to it: binding it is how a test provokes the overlap
+     * firmware can create between wired interrupts and the MSI frame. */
+    int  (*test_msi_overlap_gsi)(void);
 };
 
 extern const struct aarch64_irqc_ops aarch64_gicv2_ops;

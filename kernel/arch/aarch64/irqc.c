@@ -19,6 +19,7 @@
 #include <arch/irqc.h>
 #include <aarch64/irqc.h>
 #include <aarch64/platform.h>
+#include <arch/testhooks.h>
 #include <aarch64/trapframe.h>
 
 /* Set once, by the boot CPU in arch_irqc_init, before any AP runs or any
@@ -141,4 +142,19 @@ void arch_ipi_broadcast_others(unsigned vector)
 void gic_irq_dispatch(struct arch_trap_frame *frame)
 {
     g_ops->dispatch(frame);
+}
+
+int arch_test_irq_spare_gsi(void)
+{
+    return g_ops ? g_ops->test_spare_gsi() : -1;
+}
+
+void arch_test_irq_raise(unsigned gsi)
+{
+    g_ops->test_raise(gsi);
+}
+
+int arch_test_msi_overlap_gsi(void)
+{
+    return g_ops ? g_ops->test_msi_overlap_gsi() : -1;
 }

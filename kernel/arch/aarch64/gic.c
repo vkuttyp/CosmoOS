@@ -34,6 +34,7 @@
 #define GICD_IGROUPR    0x080
 #define GICD_ISENABLER  0x100
 #define GICD_ICENABLER  0x180
+#define GICD_ISPENDR    0x200
 #define GICD_ICPENDR    0x280
 #define GICD_ICACTIVER  0x380
 #define GICD_IPRIORITYR 0x400
@@ -205,6 +206,12 @@ static int route_locked(unsigned intid, unsigned vector, unsigned cpu, unsigned 
         return -EINVAL;
     if (cpu >= CONFIG_MAX_CPUS || percpu_get(cpu) == NULL)
         return -EINVAL;
+    /* One INTID, one vector (invariant A9). Firmware may wire a device
+     * to a line that also falls inside the MSI frame's range, and the
+     * frame's allocator cannot see that; refusing here is what stops an
+     * MSI from silently taking a line something else is using. */
+    if (g_vector_of[intid] != intid && g_vector_of[intid] != vector)
+        return -EBUSY;
     g_vector_of[intid] = (uint16_t)vector;
     g_intid_of[vector - VEC_DYNAMIC_BASE] = (uint16_t)intid;
     if (intid >= GIC_SPI_BASE) {
@@ -250,22 +257,33 @@ static int gicv2_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint
 {
     if (!vector_is_dynamic(vector))
         return -EINVAL;
-    unsigned intid;
-    int rc = gicv2m_alloc(&g_v2m, &intid);
-    if (rc)
-        return rc;
-    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
-    if (rc == 0)
-        gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
-    spin_unlock_irqrestore(&g_lock, s);
-    if (rc) {
-        gicv2m_free(&g_v2m, intid);
-        return rc;
+    /* The frame's SPI range can overlap lines firmware wired to devices
+     * -- on QEMU's virt the SMMU's event and error interrupts sit inside
+     * it -- and the frame has no way to know. Walk past any line that is
+     * already bound, leaving it marked used so it is never offered
+     * again. */
+    for (;;) {
+        unsigned intid;
+        int rc = gicv2m_alloc(&g_v2m, &intid);
+        if (rc)
+            return rc;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        rc = route_locked(intid, vector, cpu, 0);   /* MSIs are edge triggered */
+        if (rc == 0)
+            gicd_wr(GICD_ISENABLER + (intid / 32) * 4, 1u << (intid % 32));
+        spin_unlock_irqrestore(&g_lock, s);
+        if (rc == -EBUSY) {
+            kwarn("gic: MSI frame SPI %u is wired to a device; not offering it", intid);
+            continue;   /* the SPI stays taken: it is not ours to hand out */
+        }
+        if (rc) {
+            gicv2m_free(&g_v2m, intid);
+            return rc;
+        }
+        *addr = gicv2m_setspi_addr(&g_v2m);
+        *data = intid;
+        return 0;
     }
-    *addr = gicv2m_setspi_addr(&g_v2m);
-    *data = intid;
-    return 0;
 }
 
 static void gicv2_eoi(unsigned vector)
@@ -397,6 +415,37 @@ static void gicv2_dispatch(struct arch_trap_frame *frame)
     gicv2_eoi(vector);
 }
 
+/* The distributor's highest line: QEMU's virt describes more lines than
+ * it wires devices to, so the last one is free to route anywhere and
+ * raise by hand. */
+static int gicv2_test_spare_gsi(void)
+{
+    return g_nr_lines > GIC_SPI_BASE ? (int)(g_nr_lines - 1) : -1;
+}
+
+static void gicv2_test_raise(unsigned gsi)
+{
+    dsb_ishst();
+    gicd_wr(GICD_ISPENDR + (gsi / 32) * 4, 1u << (gsi % 32));
+}
+
+/* The line the MSI allocator would hand out next, while it is still
+ * unbound: see the ops table. */
+static int gicv2_test_msi_overlap_gsi(void)
+{
+    for (unsigned k = 0; k < g_v2m.spi_count; k++) {
+        unsigned intid = g_v2m.spi_base + k;
+        if (!gicv2m_is_free(&g_v2m, intid))
+            continue;
+        arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+        bool unbound = g_vector_of[intid] == intid;
+        spin_unlock_irqrestore(&g_lock, s);
+        if (unbound)
+            return (int)intid;
+    }
+    return -1;
+}
+
 const struct aarch64_irqc_ops aarch64_gicv2_ops = {
     .name = "GICv2",
     .init = gicv2_init,
@@ -418,4 +467,7 @@ const struct aarch64_irqc_ops aarch64_gicv2_ops = {
     .ipi_send = gicv2_ipi_send,
     .ipi_broadcast_others = gicv2_ipi_broadcast_others,
     .dispatch = gicv2_dispatch,
+    .test_spare_gsi = gicv2_test_spare_gsi,
+    .test_raise = gicv2_test_raise,
+    .test_msi_overlap_gsi = gicv2_test_msi_overlap_gsi,
 };

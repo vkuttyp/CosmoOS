@@ -62,6 +62,14 @@ bool gicv2m_owns(const struct gicv2m *m, unsigned intid)
     return m->spi_count != 0 && intid >= m->spi_base && intid < m->spi_base + m->spi_count;
 }
 
+bool gicv2m_is_free(const struct gicv2m *m, unsigned intid)
+{
+    if (!gicv2m_owns(m, intid))
+        return false;
+    unsigned k = intid - m->spi_base;
+    return (m->used[k / 64] & (1ull << (k % 64))) == 0;
+}
+
 void gicv2m_free(struct gicv2m *m, unsigned intid)
 {
     KASSERT(gicv2m_owns(m, intid));
