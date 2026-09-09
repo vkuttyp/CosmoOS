@@ -217,3 +217,22 @@ interrupts through the physical interface. **Checked by**
 `el2-vgic-roundtrip` (the state crosses and comes back read from
 hardware) and by `el2-guest-irq-masked`, which is the test the leak
 broke.
+
+## A23: A guest's timer belongs to its vCPU, and the host's clock to the host
+
+`CNTV_CTL_EL0`, `CNTV_CVAL_EL0` and `CNTVOFF_EL2` are restored from the
+running vCPU's `struct hv_ctx` on entry and saved to it on exit, and on
+exit the timer is disarmed and the offset zeroed: the host's context
+holds nothing of the guest's, and a guest that armed its timer and
+exited leaves the host's `CNTV_CTL_EL0` exactly as it was (measured
+before the rule existed: `0x1` where `0x2` had been). The offset is one
+value per VM, so every vCPU of a VM reads the same `CNTVCT_EL0`.
+`CNTHCTL_EL2` is the host's value whenever the host runs and `0`
+whenever a guest does, saved on entry rather than assumed, because the
+host is at EL1 and its tick is the physical timer -- the wrong value
+there stops the host's clock. `CNTV_CTL` is saved *before* it is
+disarmed, because its `ISTATUS` is the only trustworthy account of an
+expiry: `HV_EXIT_INTR` names no interrupt. **Checked by**
+`el2-guest-timer-isolated`, `el2-guest-timer-offset`,
+`el2-guest-phys-timer`, and by the suite as a whole -- a wrong
+`CNTHCTL_EL2` restore does not fail a test, it hangs the boot.

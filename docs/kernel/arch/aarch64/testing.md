@@ -103,8 +103,10 @@ and the development host's is 11, so `QEMU_MSI` -- added by the GICv3
 unit and never run by CI, because CI never set `QEMU_GIC` either --
 worked everywhere it was tried and nowhere it was not.
 
-The virtual GIC is GICv3-only, so every `el2-guest-irq*` test runs there
-and nowhere else; this target is what keeps them run.
+The virtual GIC is GICv3-only, so every `el2-guest-irq*` and
+`el2-guest-timer*` test runs there and nowhere else; this target is what
+keeps them run. (`el2-guest-timer-isolated`, `-offset` and
+`el2-guest-phys-timer` need no vGIC and run on the GICv2 machine too.)
 
 ### Sixteen CPUs
 
@@ -167,7 +169,11 @@ each of them exercises in this backend:
 - Interrupt/IRQ tests: dynamic vector allocation in 1056..1311, GSI
   routing to SPIs, mask/unmask, MSI compose -- through whichever path
   the machine offers, an ITS translation to an LPI or a GICv2m frame's
-  SPI -- and the periodic test IRQ on the virtual timer (INTID 27).
+  SPI -- and the periodic test IRQ, which is the distributor's spare
+  SPI raised from a kernel timer. It was the virtual timer's PPI 27
+  until the virtual-timer unit made `CNTV` a guest's and PPI 27 the
+  hypervisor's; `irq-route` exercises the same request/enable/count/
+  mask/release path on a line asserted by a callback instead.
 - `irq-affinity` (`kernel/interrupt/irqtest.c`): the distributor's
   highest line -- which `virt` reports and wires to nothing -- is routed
   to each online CPU in turn, made pending with `GICD_ISPENDR` through

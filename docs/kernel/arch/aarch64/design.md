@@ -782,9 +782,83 @@ a second would carry nothing; the boot counts entries where a
 through `GICH`/`GICV` MMIO frames this kernel does not drive, so
 `hv_caps.inject_irq` is false there and `vcpu_inject` returns `-ENOTSUP`.
 
+## The guest's timer (`hv_el2.c`, `hv_el2_switch.S`, `vcpu.c`)
+
+The host's tick is the **physical** timer (`CNTP`, PPI 30), so the
+**virtual** one (`CNTV`, PPI 27) is a guest's -- which is what a guest
+kernel expects to find at EL1 anyway. That division was already nearly
+true; what was not true, and was measured before it was fixed, is that
+anything separated them: `CNTV_CTL_EL0` read `0x1` in the host after a
+guest armed it, the guest's `ENABLE` live in the host's context, because
+no timer register crossed the switch.
+
+Three registers travel now, the way the vGIC's do:
+
+| register | on entry | on exit |
+|---|---|---|
+| `CNTVOFF_EL2` | the VM's offset | zero: the host's clock is unshifted |
+| `CNTV_CVAL_EL0` | the guest's compare | saved |
+| `CNTV_CTL_EL0` | the guest's control | saved **before** being disarmed |
+
+`CNTVOFF_EL2` is **one value per VM** -- `struct arch_hv_vm.cntvoff`,
+taken from `CNTPCT_EL0` once at creation -- copied into each vCPU's
+context, because EL2 assembly reads the context page and nothing else. A
+vCPU created later than its siblings therefore sees the same clock they
+do; a per-vCPU source would have had a guest's CPUs disagree by however
+long apart they were made.
+
+`CNTHCTL_EL2` gates EL1's access to the *physical* counter and timer. The
+host is at EL1 and its tick is the physical timer, so the loader's `0x3`
+must be in force whenever the host runs; a guest is at EL1 too and must
+get neither, so the switch writes `0` for the guest and puts the host's
+saved value back on exit. A guest's `mrs CNTPCT_EL0` or `msr CNTP_*` is
+then a `SYSREG` exit the owner sees. Getting the restore wrong stops the
+host's clock -- a hang, not a wrong number -- which is why the value is
+saved on entry rather than assumed.
+
+**An expiry is identified from the timer, not from the exit.**
+`HV_EXIT_INTR` carries no INTID and fires for the host's tick just as
+readily. The switch saves `CNTV_CTL` *before* disarming it, so the saved
+value carries `ISTATUS`, and after every run the backend reads
+`ENABLE && !IMASK && ISTATUS` from it -- once per expiry, since the
+guest's handler masking or re-arming clears the condition. The generic
+layer then injects `arch_hv_guest_timer_intid()` into the same pending
+set anything else uses, and the vGIC delivers it: a timer is not a
+second kind of delivery. For the expiry to be an exit at all, PPI 27 has
+to be enabled in the redistributor, so the backend binds it at probe and
+enables it on each CPU as that CPU's switch is installed; its handler
+acknowledges and does nothing else, because by the time the host is at
+EL1 the level source has been disarmed and the decision was already
+made.
+
+**An expired timer would storm.** Restoring `ENABLE` on entry with the
+condition already met asserts the PPI before the guest executes an
+instruction; `IMO` makes that an exit; the next entry does it again,
+forever, and the handler is never reached -- which is how the watchdog
+found it. While an expiry is queued the PPI is *disabled* in this CPU's
+redistributor: the guest's own `CNTV_CTL` is untouched and reads what it
+wrote, the virtual interrupt in the list register is unaffected, and the
+physical one cannot exit. Re-enabled once the saved control stops saying
+`ISTATUS`.
+
+**Woken on time.** A guest that executes `WFI` with its timer armed and
+unexpired has something to wait for and knows exactly when.
+`vcpu_run` waits -- until `CVAL + CNTVOFF` on the host's counter, or
+until something else becomes pending, in millisecond slices -- *before*
+returning the `WFI` exit, which is otherwise unchanged. The owner
+re-enters, the timer has by then expired, and the guest takes it on the
+first entry. Measured: asked 15.6 ms, the run held 17 ms, fired 2.6 ms
+late -- the 250 Hz tick plus the re-entry.
+
+The periodic interrupt the `irq-route` self-test uses was `CNTV`, and is
+not now: `arch_test_periodic_irq_start` raises the distributor's spare
+SPI from a kernel timer instead. The line the test requests, enables,
+counts, masks and releases is as real as before; what asserts it moved
+from a compare register to a callback, because the compare register is
+a guest's and its PPI is the hypervisor's.
+
 ### What this does not do
 
-A virtual distributor (so a guest can run a stock GIC driver), the
-virtual timer (`CNTHCTL_EL2`, `CNTVOFF_EL2` and a per-vCPU timer model),
-maintenance interrupts, and the GICv2 `GICH` interface. Each is named
-rather than half-built.
+A virtual distributor (so a guest can run a stock GIC driver), maintenance
+interrupts, and the GICv2 `GICH` interface. Each is named rather than
+half-built.
