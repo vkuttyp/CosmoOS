@@ -390,6 +390,7 @@ static int vmx_be_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = (ept_cap & VMX_EPT_2MB) != 0;
     g_caps.max_vcpus = 0;
+    g_caps.inject_irq = true;        /* event injection at VM entry */
     kinfo("vmx: VT-x with EPT%s%s, revision %u", unrestricted ? ", unrestricted guest" : "",
           vpid ? ", VPID" : "", g_revision);
     *out = g_caps;

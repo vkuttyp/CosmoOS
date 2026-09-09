@@ -161,7 +161,22 @@ el2_sync:
     mov x0, #0
     eret
 
-2:  cmp x0, #HV_EL2_CALL_RUN
+2:  cmp x0, #HV_EL2_CALL_VGIC
+    b.ne 3f
+    /* Let EL1 reach the GIC's system-register interface -- the host
+     * already does on every machine tested, but saying so is EL2's job
+     * and a guest depends on it -- then report how many list registers
+     * this implementation has. ICC_SRE_EL2 and ICH_VTR_EL2 are both
+     * EL2-only, which is why this is a call. */
+    mrs x1, icc_sre_el2
+    mov x2, #0x9                     /* SRE | Enable */
+    orr x1, x1, x2
+    msr icc_sre_el2, x1
+    isb
+    mrs x0, ich_vtr_el2
+    eret
+
+3:  cmp x0, #HV_EL2_CALL_RUN
     b.ne el2_return_x0_minus1
 
     str x18, [x1, #HV_CTX_HOST_X18]  /* the host's x18 is reserved (-ffixed-x18): keep it */

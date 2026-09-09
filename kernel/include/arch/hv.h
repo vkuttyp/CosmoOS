@@ -34,6 +34,11 @@ struct hv_caps {
     bool map_prot;           /* arch_hv_vm_map honours prot; false means RWX only */
     bool large_pages;        /* 2 MiB leaves for aligned mappings */
     unsigned max_vcpus;      /* per VM, 0 = the manager's own limit */
+    /* Whether vcpu_inject can actually deliver. False means the backend
+     * has no way to raise an interrupt in a guest, and vcpu_inject says
+     * -ENOTSUP rather than reporting success for nothing: AArch64 needs
+     * a GICv3's virtual interface, and a GICv2 machine has none. */
+    bool inject_irq;
 };
 
 enum hv_exit_kind {

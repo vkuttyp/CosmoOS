@@ -197,8 +197,26 @@ bool selftest_hv_caps(const char **reason)
         pmm_free_page(pg);
     }
     kobject_put(&vm->obj);
-    kinfo("selftest: hv-caps: %s%s%s%s, %u asids", c->name, c->nested_paging ? " npt" : "",
-          c->real_mode_guest ? " realmode" : "", c->large_pages ? " largepages" : "", c->max_asids);
+
+    /* `inject_irq` is not decoration: it is what `vcpu_inject` consults
+     * before it promises anything, so the two must agree. Whichever way
+     * this machine answers, the answer is checked rather than logged. */
+    struct vm *ivm;
+    struct vcpu *iv;
+    CHECK(vm_create(0, HV_VM_MEM_MAX, &ivm) == 0);
+    if (vcpu_create(ivm, 0, &iv) == 0) {
+        int rc = vcpu_inject(iv, 64);
+        if (c->inject_irq)
+            CHECK(rc == 0);
+        else
+            CHECK(rc == -ENOTSUP);
+        kobject_put(&iv->obj);
+    }
+    kobject_put(&ivm->obj);
+
+    kinfo("selftest: hv-caps: %s%s%s%s%s, %u asids", c->name, c->nested_paging ? " npt" : "",
+          c->real_mode_guest ? " realmode" : "", c->large_pages ? " largepages" : "",
+          c->inject_irq ? " inject-irq" : "", c->max_asids);
     return true;
 }
 

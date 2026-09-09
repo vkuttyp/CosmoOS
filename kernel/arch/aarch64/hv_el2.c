@@ -27,6 +27,8 @@
 
 #include <aarch64/fpu.h>
 #include <aarch64/hv_ctx.h>
+#include <aarch64/irqc.h>
+#include <aarch64/vgic.h>
 #include <aarch64/hv_s2.h>
 #include <aarch64/sysreg.h>
 
@@ -82,6 +84,32 @@ static paddr_t kernel_va_to_pa(const void *va)
 }
 
 static bool el2_ready_here(void);
+
+/* How many virtual interrupts this implementation can hold at once, and
+ * whether it can hold any: ICH_VTR_EL2 read through the switch. Set once
+ * at probe on the boot CPU; the count is a property of the
+ * implementation, not of a CPU. */
+static unsigned g_vgic_lrs;
+
+/* Ask EL2 to open the virtual interface and say how big it is. Only
+ * valid on a machine with a GICv3 CPU interface; the registers do not
+ * exist otherwise. */
+static int64_t el2_vgic_query(void)
+{
+    register uint64_t x0 __asm__("x0") = HV_EL2_CALL_VGIC;
+    __asm__ volatile("hvc #0" : "+r"(x0) : : "memory", "x1", "x2", "cc");
+    return (int64_t)x0;
+}
+
+unsigned aarch64_vgic_lr_count(void)
+{
+    return g_vgic_lrs;
+}
+
+bool aarch64_vgic_available(void)
+{
+    return g_vgic_lrs > 0;
+}
 
 static int64_t el2_run(paddr_t ctx)
 {
@@ -197,7 +225,25 @@ static int el2_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = true;
     g_caps.max_vcpus = 0;
-    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs", pa_bits[parange], HV_VMIDS_MAX - 1);
+
+    /*
+     * Interrupts for guests. Only a GICv3's virtual interface can raise
+     * one, and its registers are EL2-only, so both the enabling and the
+     * capability come back from the switch -- which means the switch has
+     * to own EL2 on this CPU before the question can be asked.
+     */
+    if (aarch64_irqc_is_v3() && el2_ready_here()) {
+        int64_t vtr = el2_vgic_query();
+        if (vtr >= 0) {
+            g_vgic_lrs = (unsigned)(vtr & 0x1F) + 1;
+            g_caps.inject_irq = true;
+        }
+    }
+    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs, guest interrupts %s",
+          pa_bits[parange], HV_VMIDS_MAX - 1,
+          g_caps.inject_irq ? "through the virtual GIC" : "unavailable (no GICv3 virtual interface)");
+    if (g_caps.inject_irq)
+        kinfo("hv: the virtual GIC has %u list register(s)", g_vgic_lrs);
     *out = g_caps;
     return 0;
 }

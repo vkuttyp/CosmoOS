@@ -8,6 +8,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/hv.h>
 
 #include "hv_internal.h"
 
@@ -21,6 +22,12 @@ void vintr_init(struct vcpu *v)
 
 int vcpu_inject(struct vcpu *v, unsigned vector)
 {
+    /* A backend that cannot raise an interrupt in a guest says so
+     * rather than reporting success for nothing. Checked before the
+     * range, so a caller learns "this machine cannot" instead of "that
+     * number is wrong". */
+    if (!hv_caps()->inject_irq)
+        return -ENOTSUP;
     if (vector < 32 || vector > 255)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&v->irq_lock);

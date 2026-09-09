@@ -152,6 +152,7 @@ static int svm_be_probe(struct hv_caps *out)
     g_caps.map_prot = true;
     g_caps.large_pages = true;
     g_caps.max_vcpus = 0;            /* no backend limit below the manager's */
+    g_caps.inject_irq = true;        /* event injection at VM entry */
     kinfo("svm: AMD-V with nested paging, %u ASIDs usable%s%s", g_caps.max_asids - 1,
           (r.edx & CPUID_SVM_EDX_NRIP) ? ", nrip" : "", (r.edx & CPUID_SVM_EDX_DECODE) ? ", decode-assists" : "");
     *out = g_caps;

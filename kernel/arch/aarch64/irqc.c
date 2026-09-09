@@ -66,6 +66,11 @@ void arch_irqc_init(void)
     g_ops->init(&gic);
 }
 
+bool aarch64_irqc_is_v3(void)
+{
+    return g_ops == &aarch64_gicv3_ops;
+}
+
 void arch_irqc_init_cpu(void)
 {
     g_ops->init_cpu();
