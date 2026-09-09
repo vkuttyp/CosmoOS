@@ -96,6 +96,31 @@ ask for twenty-three and never reach it. Fixed, and `irq-msi-overlap`
 now proves it at any CPU count; the boot logs `gicv3: MSI frame SPI 106
 is wired to a device; not offering it`.
 
+### What sixteen CPUs is worth, measured
+
+The three things this port can honestly measure about the change --
+interrupt latency under TCG is not one of them, for the reason
+`docs/kernel/memory/testing.md` records:
+
+| | 4 CPUs | 8 CPUs | 16 CPUs |
+|---|---|---|---|
+| CPUs online | 4 | 8 | **16** (was capped at 8) |
+| device interrupts on CPU 0 / elsewhere | 14 / 13 | 13 / 22 | 12 / 36 |
+| `net-nicbench` eth0 ARP round trips | 7590/s | 9348/s | 7595/s |
+| `net-nicbench` eth0 UDP sends | 14320/s | 19148/s | 13171/s |
+
+The interrupt column is the affinity change: what used to be entirely
+CPU 0 is now spread, and CPU 0's remainder is the interrupts registered
+before the APs are up, which have only one CPU to choose.
+
+The network columns are the point the report made about what this unit
+is worth to the ones after it: throughput improves from four CPUs to
+eight and then **falls back** at sixteen. Some of that is a ten-core
+host running sixteen MTTCG vCPUs, and none of it is a claim about
+hardware -- but the shape is now visible at all, which it could not be
+while eight was the ceiling. The single TCP lock and the single RX
+worker are where to look next.
+
 It is still **not** a chain step. One test remains over its budget at
 sixteen: `process-user`'s fifteen-second "this is stuck" bound, at 16.3
 s. That bound catches a hang, not slowness, and sixteen MTTCG vCPUs on a
