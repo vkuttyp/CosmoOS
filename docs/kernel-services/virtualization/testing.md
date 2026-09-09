@@ -180,6 +180,21 @@ decoder does not know (a `FAIL` exit followed).
   pending at `rip 0x101a` meant the interrupt shadow was being restored
   on every entry, fixed by clearing it when skipping an instruction.
 
+## The page-poison check as the world switch's watchdog
+
+The memory manager's page-poison check (`docs/kernel/memory/testing.md`)
+is what found the world switch leaving `SP_EL2` in a freed vCPU context
+page, and it remains the check on that rule: with the restore removed,
+the `TLBI` hypercall in `el2_vm_destroy` writes its four registers into
+the page `el2_vcpu_destroy` has just freed, and the next allocation of
+that frame panics with `last freed from el2_vcpu_destroy+0x44` and a dump
+in which `x0` is `0x12` and `x1` is the VM's `VTTBR`. Ten seconds into
+every debug boot, during `hv-*`, before any userland runs. The gap it
+does not cover is a frame that has been *reallocated* before the stray
+push -- but the push happens on the very next hypercall, and the
+`el2_vm_destroy` that issues it follows the free immediately, so the
+window is short and always exercised.
+
 ## What is not tested yet
 
 - The owner-kill path (`process_kill_pending` in the run loop returning

@@ -87,7 +87,8 @@ the documented order is enforced by review.
 `zone`, and a union of the buddy list link or the owning `struct slab *`.
 
 Flags: `PG_RESERVED`, `PG_BUDDY`, `PG_SLAB`, `PG_KMALLOC_LARGE`,
-`PG_PAGETABLE`, `PG_DEFERRED`.
+`PG_PAGETABLE`, `PG_DEFERRED`, `PG_POISONED` (free and holding the
+debug poison pattern; checked and cleared at the next allocation).
 
 Globals set by `pmm_init`/`vmm_init`: `pmm_page_array`, `pmm_max_pfn`,
 `pmm_hhdm_base`, `pmm_hhdm_limit`.
@@ -143,7 +144,10 @@ Types: `struct pmm_free_area`, `struct pmm_zone`, `struct pmm_node`,
   refcount reaches zero via `pmm_page_put`.
 - **Concurrency:** `pmm_zone.lock` (irqsave) per zone tried.
 - **Failure:** `NULL`. `KASSERT`s that a zeroed block is inside the direct
-  map.
+  map. In debug builds, panics if a frame of the block carrying
+  `PG_POISONED` no longer holds the poison pattern its free left --
+  something wrote to it while it was free (M37); the report names the
+  pfn, the byte range, the bytes found and the freer.
 
 `pmm_alloc_page(flags)` is `pmm_alloc_pages(0, flags)`.
 
@@ -155,14 +159,22 @@ Types: `struct pmm_free_area`, `struct pmm_zone`, `struct pmm_node`,
 - **Concurrency:** `pmm_zone.lock`.
 - **Failure:** panics on reserved page, double free (`PG_BUDDY` set),
   owned page, refcount other than 1, or order mismatch.
+- **Debug builds:** fills every frame of the block with `0x5a`, stamps
+  the first 32 bytes with a magic, the pfn and the caller's return
+  address, and sets `PG_POISONED`, so the next allocation can tell
+  whether the frame was written while free. Frames outside the direct
+  map are left alone.
 
 `pmm_free_page(page)` is order 0.
 
 ### `void pmm_page_get(struct page *)`, `void pmm_page_put(struct page *)`
 
 Atomic reference counting for shared frames. `get` panics on a free
-frame. `put` frees with the stored order when the count drops from 1 to
-0, else decrements. Lock-free except the free path.
+frame. `put` is a single `fetch_sub`; the caller whose decrement took
+the count from 1 to 0 frees with the stored order (setting the count
+back to 1 first, which is what `pmm_free_pages` expects), so two
+concurrent putters cannot both read 2 and both merely decrement.
+Lock-free except the free path.
 
 ### `void pmm_release_deferred(void)`
 

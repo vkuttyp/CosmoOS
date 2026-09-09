@@ -217,14 +217,25 @@ them all back before returning; the guest's own state is saved into the
 same context page. Stage 2 is on only while the guest runs
 (`HCR_EL2.VM`), which is also how the switch tells the host's call from
 a guest's exception. The EL2 code runs with its MMU off, so it never
-depends on tables the kernel may reclaim. *Checked by*: the five
-`el2-guest-*` tests — a guest's PSTATE and registers survive a round
-trip, `x0` keeps the value the guest computed after its `HVC`, and the
-host boots on normally afterwards, which it would not if a system
-register came back wrong. *Gap*: FP/SIMD state is not switched (guests
-run with `CPACR_EL1` as they set it, and the host's registers are
-saved by its own context switch), and nothing tests two vCPUs of one VM
-on different CPUs at once.
+depends on tables the kernel may reclaim. **`SP_EL2` goes with the
+rest**: it is the per-CPU EL2 stack at the `HVC`, the top of the vCPU's
+context page while the guest runs, and the per-CPU stack again before
+the exit returns -- the context page is freed with its vCPU, and a stale
+`SP_EL2` makes the next host `HVC` push four registers onto whoever owns
+that frame by then. *Checked by*: the five `el2-guest-*` tests — a
+guest's PSTATE and registers survive a round trip, `x0` keeps the value
+the guest computed after its `HVC`, and the host boots on normally
+afterwards, which it would not if a system register came back wrong;
+and for `SP_EL2`, the page-poison check (M37): with the restore removed,
+the `TLBI` in `el2_vm_destroy` writes 32 bytes -- `x0` = the `TLBI`
+selector, `x1` = the `VTTBR` -- into the freed context page, and the
+next allocation of that frame panics, naming `el2_vcpu_destroy` as the
+freer. It did -- deterministically, ten seconds into every debug boot --
+the first time the check ran; until then the same write had landed
+silently on whatever the frame had become. *Gap*: nothing tests two vCPUs of
+one VM on different CPUs at once. (FP/SIMD *is* switched since the
+FP/SIMD unit: the owner thread's registers are saved, the guest's
+loaded, and the reverse on exit, with interrupts off across the run.)
 
 ### V19. The VMX backend is inert until it is on Intel hardware
 
