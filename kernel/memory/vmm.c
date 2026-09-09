@@ -774,6 +774,14 @@ void vm_space_destroy(struct vm_space *space)
      * only then is the tag released. The other order is the bug the
      * report was reviewed for: a tag released while a CPU still holds
      * its translations is a tag whose next owner inherits them.
+     *
+     * Today this invalidate has nothing left to do -- the region
+     * teardown above already invalidated every mapped page across every
+     * tag -- so no test can distinguish its presence, and that is
+     * recorded rather than counted (docs/kernel/memory/testing.md). It
+     * is kept so that the safety of destroying a space does not depend
+     * on a decision made in `arch_mmu_invalidate`, where a future
+     * tag-qualified range invalidate would silently break it.
      */
     arch_mmu_invalidate_asid(&space->mmu, space->tlb_cpus);
     asid_release(&space->mmu);

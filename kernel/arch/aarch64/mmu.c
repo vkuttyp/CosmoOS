@@ -382,6 +382,13 @@ static void map_early_devices(const struct arch_mmu_context *ctx)
     }
 }
 
+static uint64_t g_activate_flushes[CONFIG_MAX_CPUS];
+
+uint64_t arch_mmu_activate_flushes(void)
+{
+    return g_activate_flushes[arch_cpu_id()];
+}
+
 unsigned arch_mmu_asid_bits(void)
 {
     return aarch64_cpu_info()->asid_bits;   /* TCR.AS was set to match in aarch64_cpu_init */
@@ -407,10 +414,20 @@ void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
      * emptied the user TLB of every CPU in the machine on every process
      * switch made by any of them.
      */
-    if (flush)
+    if (flush) {
+        g_activate_flushes[arch_cpu_id()]++;
         tlbi_vmalle1();
+    }
 }
 
+/*
+ * By address and for *every* tag, deliberately. A tag-qualified range
+ * invalidate would be more precise and is not safe here: after a
+ * generation rollover a space can be re-tagged on one CPU while another
+ * is still running it under the old tag, and naming the current tag
+ * would leave that CPU's entries behind. `arch_mmu_invalidate_asid` is
+ * the one place a tag may be named, because nothing runs the space then.
+ */
 void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 {
     (void)ctx;

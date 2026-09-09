@@ -929,6 +929,7 @@ bool selftest_asid_quiet(const char **reason)
     arch_irq_restore(s);
 
     asid_get_stats(&st0);
+    uint64_t hw0 = arch_mmu_activate_flushes();
     cur = restore;
     s = arch_irq_save();
     for (unsigned i = 0; i < ASID_QUIET_ROUNDS; i++) {
@@ -944,12 +945,27 @@ bool selftest_asid_quiet(const char **reason)
     vm_space_switch(cur, restore);
     arch_irq_restore(s);
     asid_get_stats(&st1);
+    uint64_t hw1 = arch_mmu_activate_flushes();
 
     vm_space_destroy(a);
     vm_space_destroy(b);
 
-    if (st1.flushes != st0.flushes) {
+    /* The instruction count, not the decision count: a switch path that
+     * flushes without asking the allocator is exactly the regression
+     * this is here to catch, and it would leave the decision count at
+     * zero. */
+    if (hw1 != hw0) {
         *reason = "the switch path still flushes the TLB";
+        return false;
+    }
+    if (st1.flushes != st0.flushes) {
+        *reason = "the allocator asked for a flush in the steady state";
+        return false;
+    }
+    /* The kernel's root runs under tag 0 and must never be given one:
+     * a tag allocated for it is one per generation that nothing frees. */
+    if (kernel_space.mmu.asid != 0) {
+        *reason = "the kernel's root was given an address-space tag";
         return false;
     }
     if (st1.allocs != st0.allocs) {
@@ -957,8 +973,8 @@ bool selftest_asid_quiet(const char **reason)
         return false;
     }
     kinfo("selftest: asid-quiet: %u switches (half of them through the kernel's root), "
-          "%llu full flushes, %llu tags allocated",
-          2 * ASID_QUIET_ROUNDS + 1, (unsigned long long)(st1.flushes - st0.flushes),
+          "%llu TLB flushes performed, %llu tags allocated",
+          2 * ASID_QUIET_ROUNDS + 1, (unsigned long long)(hw1 - hw0),
           (unsigned long long)(st1.allocs - st0.allocs));
     return true;
 }

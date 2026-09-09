@@ -524,6 +524,13 @@ unsigned arch_mmu_asid_bits(void)
     return 0;
 }
 
+static uint64_t g_activate_flushes[CONFIG_MAX_CPUS];
+
+uint64_t arch_mmu_activate_flushes(void)
+{
+    return g_activate_flushes[arch_cpu_id()];
+}
+
 void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
 {
     /* CR4.PCIDE is clear (see arch_mmu_asid_bits), so CR3[11:0] must be
@@ -531,6 +538,7 @@ void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
      * what `flush` asks for and this architecture cannot yet avoid. */
     KASSERT(ctx->asid == 0);
     (void)flush;
+    g_activate_flushes[arch_cpu_id()]++;   /* a CR3 load always flushes here */
     __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->root) : "memory");
 }
 

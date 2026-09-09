@@ -102,6 +102,14 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
 /* Make ctx the active translation on the calling CPU. */
 void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush);
 
+/*
+ * How many full TLB invalidations `arch_mmu_activate` has performed on
+ * this CPU. Counted where the instruction is issued rather than where it
+ * is decided, so that a switch path which flushes without being asked is
+ * still visible -- which is the whole value of the number.
+ */
+uint64_t arch_mmu_activate_flushes(void);
+
 /* Invalidate cached translations for [va, va+len) on the calling CPU
  * only. */
 void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t len);
