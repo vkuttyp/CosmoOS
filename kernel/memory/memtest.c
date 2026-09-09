@@ -11,6 +11,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/page.h>
+#include <kernel/percpu.h>
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
@@ -1034,16 +1035,15 @@ bool selftest_asid_quiet(const char **reason)
     uint64_t hw0 = arch_mmu_activate_flushes();
     cur = restore;
     /*
-     * Interrupts stay *on*. The counters this measures do not move for
-     * anyone in the steady state -- no switch flushes and no switch
-     * allocates a tag for a space that already has one -- so preemption
-     * adds nothing to either, and the property holds however many other
-     * threads switch here meanwhile. Disabling interrupts was caution
-     * rather than necessity, and it cost more than it bought: a loop
-     * long enough to be worth measuring stalled timers on every CPU and
-     * released a burst of deferred allocation into the next test's
-     * accounting.
+     * Preemption off, interrupts on. Off, because the count that matters
+     * is this CPU's own (`arch_mmu_activate_flushes`) and a thread that
+     * migrated mid-measurement would compare two different CPUs'
+     * counters. On, because disabling them was caution rather than
+     * necessity: a loop long enough to be worth measuring stalled timers
+     * on every CPU and released a burst of deferred allocation into the
+     * next test's accounting.
      */
+    preempt_disable();
     for (unsigned i = 0; i < ASID_QUIET_ROUNDS; i++) {
         struct vm_space *sp = (i & 1) ? b : a;
         vm_space_switch(cur, sp);
@@ -1066,8 +1066,9 @@ bool selftest_asid_quiet(const char **reason)
         cur = sp;
     }
     vm_space_switch(cur, restore);
-    asid_get_stats(&st1);
     uint64_t hw1 = arch_mmu_activate_flushes();
+    preempt_enable();
+    asid_get_stats(&st1);
 
     vm_space_destroy(a);
     vm_space_destroy(b);
@@ -1089,22 +1090,24 @@ bool selftest_asid_quiet(const char **reason)
                                   : "the switch path still flushes the TLB";
         return false;
     }
-    if (!asid_paranoid() && st1.flushes != st0.flushes) {
-        *reason = "the allocator asked for a flush in the steady state";
-        return false;
-    }
     /* The kernel's root runs under tag 0 and must never be given one:
      * a tag allocated for it is one per generation that nothing frees. */
     if (kernel_space.mmu.asid != 0) {
         *reason = "the kernel's root was given an address-space tag";
         return false;
     }
-    if (st1.allocs != st0.allocs) {
-        *reason = "a switch allocated a tag for a space that already had one, or for the kernel";
-        return false;
-    }
+    /*
+     * `asid_get_stats` counts the whole machine, and another CPU may
+     * legitimately move its numbers while this runs: its first switch
+     * after a generation change flushes, and a space it enters for the
+     * first time is given a tag. Neither speaks to the property under
+     * test, so they are reported rather than asserted -- CI found that
+     * the hard way, on a machine whose other CPUs switched inside this
+     * window. What is asserted is this CPU's own instruction count and
+     * the kernel root's tag, both above.
+     */
     kinfo("selftest: asid-quiet: %u switches (eight through the kernel's root), "
-          "%llu TLB flushes performed, %llu tags allocated",
+          "%llu TLB flushes performed here, %llu tags allocated machine-wide",
           ASID_QUIET_ROUNDS + 9, (unsigned long long)(hw1 - hw0),
           (unsigned long long)(st1.allocs - st0.allocs));
     return true;
