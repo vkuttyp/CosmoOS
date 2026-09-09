@@ -21,11 +21,14 @@ qemu-system-aarch64 -machine virt,gic-version=2,accel=tcg -cpu cortex-a72 -smp 4
   is also supported.
 - `QEMU_GIC` selects the interrupt controller: `2` (the default, the
   GICv2 driver in `gic.c`) or `3` (the GICv3 driver in `gicv3.c`).
-  `QEMU_MSI` selects how an MSI reaches it: `gicv2m` (the frame, the
-  only path either driver implements today), `its` (the machine offers
-  an ITS instead of a frame -- the kernel then finds no MSI and NVMe and
-  AHCI fail to probe) or `off`. **`gic-version=2` caps the machine at
-  eight CPUs**, which is why `QEMU_SMP` above 8 needs `QEMU_GIC=3`.
+  `QEMU_MSI` selects how an MSI reaches it: `its` (QEMU's default under
+  `gic-version=3`, and what GICv3 hardware offers), `gicv2m` (the frame,
+  the only path a GICv2 has and the fallback a GICv3 takes when firmware
+  describes no ITS), or `off`. **`msi=off` cannot boot this tree**: no
+  driver here falls back to INTx, so NVMe and AHCI fail to probe and the
+  harness loses the device markers it requires; it exists so the decline
+  path can be exercised deliberately. **`gic-version=2` caps the machine
+  at eight CPUs**, which is why `QEMU_SMP` above 8 needs `QEMU_GIC=3`.
 - The firmware (`scripts/find-firmware.sh aarch64`: `AAVMF`,
   `qemu-efi-aarch64`, Homebrew `edk2-aarch64-code.fd`) is copied and
   padded to the 64 MiB flash size the `virt` machine expects, into
@@ -72,8 +75,10 @@ test`, `make ARCH=aarch64 test-crash`, `make ARCH=aarch64
 MODULE_SIG_ENFORCE=0 test`, `make ARCH=aarch64 host-test`, `make
 ARCH=aarch64 analyze`, `make ARCH=aarch64 reproducible`
 (`check-reproducible.sh` compares `boot/BOOTAA64.EFI`), plus the two
-interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=1` and
-`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=8`.
+interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=its`,
+`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=1` and
+`QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=8`. The middle one exists because a
+fallback nothing runs is a fallback that regresses.
 
 ### Sixteen CPUs
 
@@ -119,6 +124,11 @@ each of them exercises in this backend:
   CPU 0, so without this a controller that ignored the CPU argument
   would pass the whole suite. It runs on both GIC drivers and skips on
   x86-64, where an I/O APIC pin cannot be asserted by software.
+- `irq-msi-devid` (same file): with an ITS, a device id no device table
+  can hold must be refused, and one it can hold must still succeed -- so
+  the refusal is about the id and not about MSIs being unavailable. It
+  is the test that the id `irq_request_msi` now carries actually reaches
+  the controller. Skips where the controller ignores it.
 - `irq-msi-overlap` (same file): binds the line the MSI allocator would
   hand out *next* (`arch_test_msi_overlap_gsi`), asks for one MSI, and
   requires both that the MSI took a different line and that the wired

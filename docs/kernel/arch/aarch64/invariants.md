@@ -186,3 +186,18 @@ else. **Checked by** `irq-affinity`, which routes the distributor's
 highest line to each online CPU in turn and requires the handler to
 report that CPU's id; and by `smp-call`, which does the same for IPIs.
 Both are vacuous with one CPU and meaningful from two.
+
+## A21: An MSI reaches the controller or the request fails
+
+`arch_irqc_msi_compose` composes a message only when something can
+deliver it: an ITS that has recorded this device and event, or a GICv2m
+SPI that is the frame's to give (A9). Otherwise it returns an error and
+the driver reports a failed probe. It never hands back an address that
+nothing is listening to, which is the shape of every interrupt bug this
+port has had -- the SMMU's stolen line, the ITS doorbell the IOMMU was
+translating away, the device id no table could hold. Where an IOMMU
+stands between the device and the controller, the doorbell page
+`arch_irqc_msi_doorbell` names is reserved and identity-mapped in every
+domain. **Checked by** `irq-msi-overlap`, `irq-msi-devid`, and the boot
+suite under each of `QEMU_MSI=its` and `QEMU_MSI=gicv2m` with and
+without `QEMU_IOMMU`.

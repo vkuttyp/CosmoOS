@@ -289,8 +289,61 @@ the whole of the file:
 
 A write to an enable or control register is not in effect until the
 controller says so, so `GICD_CTLR.RWP` and `GICR_CTLR.RWP` are polled
-after the writes that need it. MSI is still the GICv2m frame; the ITS is
-not implemented.
+after the writes that need it.
+
+### MSI under GICv3: the ITS (`gicv3_its.c`)
+
+MSI has a fallback order, decided at `init` from the MADT: an ITS if
+firmware described one, otherwise a GICv2m frame, otherwise
+`msi_compose` returns `-ENODEV`. That last is a **decline, not a
+fallback** -- no driver in this tree falls back to INTx, so a machine
+with neither loses its disks; it is a configuration the kernel reports
+rather than one it survives.
+
+An ITS *translates* instead of raising a fixed line. A device writes an
+event number to `GITS_TRANSLATER`; the ITS looks up (DeviceID, EventID)
+in tables the kernel built and raises an **LPI** -- an interrupt id from
+8192 up -- on the redistributor of whichever CPU that event belongs to.
+Three consequences run through the code:
+
+- **The device's identity matters.** `arch_irqc_msi_compose` and
+  `irq_request_msi` carry a device id, which `pci_requester_id()`
+  computes from bus:device:function -- the same number the IOMMU calls
+  a stream id. Backends that do not translate per device ignore it.
+  `irq-msi-devid` is the test that it arrives: an id no device table can
+  hold must be refused.
+- **LPIs need tables of their own.** A shared property table (one byte
+  per LPI: priority and an enable bit) in `GICR_PROPBASER`, a pending
+  table per redistributor in `GICR_PENDBASER`, and `GICR_CTLR.EnableLPIs`
+  -- a one-way switch, so both tables are in place first. This kernel
+  uses one LPI per dynamic vector (256), though the property table must
+  still cover the fourteen id bits the architecture's minimum implies
+  and the pending table must be 64 KiB aligned.
+- **Everything is said through a command queue.** MAPD gives a device
+  its translation table, MAPC gives a CPU a collection pointing at its
+  redistributor (by address or by processor number, as
+  `GITS_TYPER.PTA` dictates), MAPTI binds an event to an LPI in a
+  collection, INV drops what the redistributor cached, SYNC waits.
+  `its_map_event` and `its_unmap_event` are those sequences; the LPI is
+  released outside the driver's lock, because draining the queue is a
+  spin.
+
+Two simplifications, both deliberate. **The event id is the LPI's
+index**, so no device needs an event-number allocator of its own and
+every device's table is the same size. **The device table is flat and
+capped at 64 KiB**; `GITS_TYPER` may claim twenty device-id bits, which
+is an eight-megabyte flat table, and the architecture's answer -- a
+two-level table -- is a follow-up. A device id beyond the table is
+refused with a warning, never mistranslated.
+
+**And an MSI write is a DMA.** Where devices sit behind an IOMMU, the
+doorbell page has to be kept out of the IOVA space and identity-mapped
+into every domain, or the write faults and the interrupt never arrives.
+`arch_irqc_msi_doorbell()` is where the controller says which page that
+is; `arm_smmuv3.c` asks rather than assuming, because the answer moved
+when the ITS replaced the frame. On x86-64 it is false: a write to
+0xFEE00000 is an interrupt request, not a DMA, and the IOMMU never sees
+it.
 
 ### Timer (`timer.c`)
 
