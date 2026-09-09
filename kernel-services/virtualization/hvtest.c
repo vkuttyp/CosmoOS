@@ -888,25 +888,27 @@ bool selftest_el2_guest_timer_isolated(const char **reason)
         return true;
     struct vm *vm;
     struct vcpu *v;
-    CHECK(make_guest("tests/hv/guest_timer_far.bin", &vm, &v) == 0);
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
-    uint64_t before = arch_test_host_vtimer_ctl();
-
     CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
     CHECK(vcpu_run(v, &x) == 0);                                    /* armed, then the heartbeat */
     CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
 
-    /* The guest's ENABLE is in the guest's saved state and nowhere else. */
+    /* The guest armed its timer -- its saved state says so -- and the
+     * host's CNTV_CTL as that run's *exit* left it is disarmed. Read
+     * from the value the switch captured with interrupts off, so a
+     * missing disarm is seen here and not papered over by the host's
+     * PPI handler cleaning up a moment later. */
     uint64_t ctl = 0, off = 0;
     CHECK(arch_hv_vcpu_timer_state(v->arch, &ctl, &off));
     CHECK((ctl & 1u) != 0);                                         /* the guest armed it */
-    CHECK(arch_test_host_vtimer_ctl() == before);                   /* and the host did not notice */
+    uint64_t host_after = arch_hv_vcpu_host_vtimer_after(v->arch);
+    CHECK((host_after & 1u) == 0);                                  /* the exit disarmed it */
     drop_guest(vm, v);
-    CHECK(arch_test_host_vtimer_ctl() == before);
-    kinfo("selftest: el2-guest-timer-isolated: guest CNTV_CTL 0x%llx, host's stayed 0x%llx",
-          (unsigned long long)ctl, (unsigned long long)before);
+    kinfo("selftest: el2-guest-timer-isolated: guest saved CNTV_CTL 0x%llx, host left 0x%llx",
+          (unsigned long long)ctl, (unsigned long long)host_after);
     return true;
 }
 

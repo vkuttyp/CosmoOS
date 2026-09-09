@@ -136,6 +136,10 @@ bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *el
  * left it (ISTATUS included), and the offset its clock runs at. False
  * where the architecture has no guest timer to report. */
 bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff);
+/* For the isolation test: the host's own virtual-timer control as the
+ * last guest exit left it, captured before interrupts were re-enabled --
+ * the switch's disarm, not a later cleanup. ~0 where there is none. */
+uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v);
 /* Which interrupt the guest actually took during the last run, or -1.
  *
  * Not "was the offered one taken?". On an architecture whose controller

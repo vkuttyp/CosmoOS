@@ -85,6 +85,12 @@ bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *c
     (void)cntvoff;
     return false;   /* an x86 guest's timer is the LAPIC's, and stage 1 has none */
 }
+
+uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v)
+{
+    (void)v;
+    return ~0ull;
+}
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
 bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v) { return g_be->vcpu_timer_expired(v); }
 bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *t) { return g_be->vcpu_timer_deadline(v, t); }

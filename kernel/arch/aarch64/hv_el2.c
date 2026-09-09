@@ -104,6 +104,7 @@ struct arch_hv_vcpu {
     int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
     bool lr_reported;        /* its delivery has already been told to the owner */
     bool timer_reported;     /* this expiry has already been offered */
+    uint64_t host_cntv_after;/* host CNTV_CTL captured at the last exit, race-free */
     uint64_t irq_delivered;  /* interrupts the guest took */
     uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
@@ -634,6 +635,11 @@ bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvo
     return true;
 }
 
+uint64_t el2_vcpu_host_cntv_after(struct arch_hv_vcpu *v)
+{
+    return v->host_cntv_after;
+}
+
 /*
  * Whether the guest's timer expired during the last run. Read from the
  * CNTV_CTL the switch saved *before* disarming: ENABLE with IMASK clear
@@ -835,6 +841,13 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     bool owner = aarch64_fpu_save_current();
     aarch64_fpu_area_restore(&v->fpu);
     int64_t rc = el2_run(v->ctx_pa);
+    /* The host's CNTV_CTL as the switch left it, captured before
+     * interrupts are re-enabled so nothing -- least of all the PPI 27
+     * handler -- can touch it first. If the exit path disarmed the
+     * guest's timer this is 0; if it did not, it is whatever the guest
+     * left. This is what `el2-guest-timer-isolated` reads, so the test
+     * sees the switch's work and not a later cleanup. */
+    v->host_cntv_after = READ_SYSREG(cntv_ctl_el0);
     aarch64_fpu_area_save(&v->fpu);
     if (!owner || !aarch64_fpu_restore_current()) {
         static const struct aarch64_fpu_area zero;

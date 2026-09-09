@@ -65,6 +65,11 @@ bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *c
     return el2_vcpu_timer_state(v, ctl, cntvoff);
 }
 
+uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v)
+{
+    return el2_vcpu_host_cntv_after(v);
+}
+
 int arch_hv_vm_create(struct arch_hv_vm **out) { return g_be->vm_create(out); }
 void arch_hv_vm_destroy(struct arch_hv_vm *vm) { g_be->vm_destroy(vm); }
 int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot)
