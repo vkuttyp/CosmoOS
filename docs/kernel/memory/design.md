@@ -54,7 +54,9 @@ struct page {
 Flags: `PG_RESERVED` (never allocatable), `PG_BUDDY` (head of a free
 block), `PG_SLAB`, `PG_KMALLOC_LARGE` (page-backed kmalloc; order in
 `order`), `PG_PAGETABLE`, `PG_DEFERRED` (RAM the bootstrap map cannot
-reach; released by the VMM).
+reach; released by the VMM), `PG_POISONED` (debug builds: the frame is
+free and holds the poison pattern its free wrote, which the next
+allocation verifies -- §2.5).
 
 Keeping the free-list link inside `struct page` rather than inside the
 free frame means the PMM never touches a frame's contents to manage it.
@@ -130,7 +132,25 @@ naturally aligned to their order by construction (`pfn ^ (1 << order)`).
   `struct page *` or NULL. `pmm_free_pages(page, order)` asserts the
   page is allocated, refcount 1, `page->order == order`, then frees.
 - `pmm_page_get/put`: atomic refcount; put to zero frees with the stored
-  order.
+  order. The put is one `fetch_sub`, and the caller that saw 1 frees: a
+  load, a compare and a separate decrement let two putters both read 2
+  and neither free (the `vnode_put` race of PR #49, in another coat).
+- **Page poisoning (`CONFIG_DEBUG`).** `pmm_free_pages` fills every
+  frame of the block with `0x5a`, writes a header -- a magic, the pfn,
+  and the return address of the freer -- into its first 32 bytes, and
+  sets `PG_POISONED`; `pmm_alloc_pages` checks every page of the block
+  that carries the flag, before any zeroing, and panics on a mismatch
+  with the pfn, the byte range that changed, the bytes now there and
+  the last freer. A frame written after it was freed -- a DMA engine
+  still holding the buffer, a stack pointer left in a page, a direct-map
+  pointer kept past the free -- is thereby reported at its next
+  allocation rather than when the frame's new owner trips over the
+  damage, which can be a process that wakes minutes later to find its
+  text page changed. Only frames inside the direct map are poisoned
+  (the rest cannot be written from here either) and only frames this
+  code poisoned are checked, so memory free since boot raises nothing.
+  The cost is one fill per free and one scan per allocation, debug
+  builds only; the release build's `pmm_free_pages` is unchanged.
 - `pmm_release_deferred()`: called by `vmm_init` after the full direct map
   exists; releases `PG_DEFERRED` runs into the buddy.
 - `pmm_free_reserved_range(paddr, size)`: for the boot page tables after

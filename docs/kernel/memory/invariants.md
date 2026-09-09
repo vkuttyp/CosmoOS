@@ -297,3 +297,18 @@ made; in debug builds `descend` panics if it would create a kernel-half
 PML4 entry after that (`arch_mmu_context_init_user` sets the flag). On
 AArch64 TTBR1 makes the rule structural.
 Checked by: the debug panic (never seen in the boot test), review.
+
+**M37. A free frame is not written.** Between `pmm_free_pages` and the
+next `pmm_alloc_pages` of the same frame nothing may store to it: not a
+device that still holds the buffer, not a stack pointer left pointing
+into it, not a direct-map pointer kept past the free. In debug builds
+the frame holds a poison pattern for exactly that interval and the
+allocation verifies it, so a violation is reported at the reuse with the
+pfn, the byte range, the bytes found and the code that freed the frame.
+Checked by: every debug boot, on every allocation. The first run of the
+check found the EL2 world switch leaving `SP_EL2` in a freed vCPU
+context page (virtualization V18): 32 bytes at offset 4064, the four
+registers of the next hypercall, freer `el2_vcpu_destroy`. Gap: a frame
+written *after* its reallocation is the new owner's problem and is not
+detected here; and a stray write that happens to store `0x5a` is
+invisible.

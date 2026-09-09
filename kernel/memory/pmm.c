@@ -176,6 +176,103 @@ void pmm_init(void)
           (unsigned long long)(array_bytes >> 10));
 }
 
+/*
+ * Page poisoning (CONFIG_DEBUG). A frame written after it was freed --
+ * by a DMA engine still holding the buffer, by a direct-map pointer kept
+ * past the free -- corrupts whoever is given the frame next, and that
+ * victim crashes long after the culprit has gone: a sleeping process
+ * wakes to find its text page holds someone else's bytes. So a freed
+ * frame is filled with a pattern and stamped with the address of the
+ * code that freed it, and the next allocation checks the pattern. A
+ * mismatch is reported at the reuse -- with the offset, the bytes found
+ * there, and the last freer -- which is as close to the culprit as the
+ * frame itself can point.
+ *
+ * Only the frames the direct map reaches are poisoned (the rest cannot
+ * be written from here either), and only a frame this code poisoned is
+ * checked: memory free since boot carries no pattern and no flag.
+ */
+#if CONFIG_DEBUG
+#define POISON_BYTE  0x5au
+#define POISON_WORD  0x5a5a5a5a5a5a5a5aull
+#define POISON_MAGIC 0x506f6973306e4672ull   /* "Pois0nFr" */
+
+struct poison_header {
+    uint64_t magic;
+    uint64_t free_pc;   /* who freed it */
+    uint64_t pfn;
+    uint64_t pad;
+};
+
+static void poison_fill(struct page *page, unsigned order, uint64_t free_pc)
+{
+    size_t bytes = PAGE_SIZE << order;
+    if (!phys_in_direct_map(page_to_phys(page) + bytes - 1))
+        return;
+    for (pfn_t i = 0; i < ((pfn_t)1 << order); i++) {
+        struct page *pg = page + i;
+        uint8_t *va = page_to_virt(pg);
+        memset(va, POISON_BYTE, PAGE_SIZE);
+        struct poison_header h = { POISON_MAGIC, free_pc, page_to_pfn(pg), POISON_WORD };
+        memcpy(va, &h, sizeof(h));
+        pg->flags |= PG_POISONED;
+    }
+}
+
+static void poison_check(struct page *page, unsigned order)
+{
+    for (pfn_t i = 0; i < ((pfn_t)1 << order); i++) {
+        struct page *pg = page + i;
+        if (!(pg->flags & PG_POISONED))
+            continue;
+        pg->flags &= ~PG_POISONED;
+        const uint8_t *va = page_to_virt(pg);
+        struct poison_header h;
+        memcpy(&h, va, sizeof(h));
+        /* The span of the damage: first and last word that is not poison,
+         * so the report shows the whole record that was written rather
+         * than its first sixteen bytes. */
+        size_t first = PAGE_SIZE, last = 0;
+        bool header_ok = h.magic == POISON_MAGIC && h.pfn == page_to_pfn(pg) && h.pad == POISON_WORD;
+        if (!header_ok)
+            first = 0;
+        const uint64_t *w = (const uint64_t *)va;
+        for (size_t k = header_ok ? sizeof(h) / 8 : 0; k < PAGE_SIZE / 8; k++) {
+            if (w[k] != POISON_WORD) {
+                if (first == PAGE_SIZE)
+                    first = k * 8;
+                last = k * 8 + 8;
+            }
+        }
+        if (first == PAGE_SIZE)
+            continue;
+        if (!header_ok && last < sizeof(h))
+            last = sizeof(h);
+        kerror("pmm: pfn %llu was written while free: %zu byte(s) at offset %zu-%zu (poison %02x); last freed from %p",
+               (unsigned long long)page_to_pfn(pg), last - first, first, last, POISON_BYTE,
+               (void *)(uintptr_t)(header_ok ? h.free_pc : 0));
+        for (size_t off = first; off < last && off < first + 128; off += 16)
+            kerror("pmm:   +%4zu: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x", off,
+                   va[off], va[off + 1], va[off + 2], va[off + 3], va[off + 4], va[off + 5], va[off + 6], va[off + 7],
+                   va[off + 8], va[off + 9], va[off + 10], va[off + 11], va[off + 12], va[off + 13], va[off + 14],
+                   va[off + 15]);
+        panic("pmm: use after free of pfn %llu (see the lines above)", (unsigned long long)page_to_pfn(pg));
+    }
+}
+#else
+static inline void poison_fill(struct page *page, unsigned order, uint64_t free_pc)
+{
+    (void)page;
+    (void)order;
+    (void)free_pc;
+}
+static inline void poison_check(struct page *page, unsigned order)
+{
+    (void)page;
+    (void)order;
+}
+#endif
+
 struct page *pmm_alloc_pages(unsigned order, unsigned flags)
 {
     KASSERT(g_initialized);
@@ -199,6 +296,7 @@ struct page *pmm_alloc_pages(unsigned order, unsigned flags)
     if (page == NULL)
         return NULL;
 
+    poison_check(page, order);   /* before the zeroing, or the evidence is gone */
     if (flags & PMM_FLAGS_ZERO) {
         size_t bytes = PAGE_SIZE << order;
         KASSERT(phys_in_direct_map(page_to_phys(page) + bytes - 1));
@@ -226,6 +324,7 @@ void pmm_free_pages(struct page *page, unsigned order)
               (unsigned long long)page_to_pfn(page), page->order, order);
 
     page->refcount = 0;
+    poison_fill(page, order, (uint64_t)(uintptr_t)__builtin_return_address(0));
 
     struct pmm_zone *zone = zone_for_pfn(page_to_pfn(page));
     arch_irq_state_t s = spin_lock_irqsave(&zone->lock);
@@ -242,15 +341,18 @@ void pmm_page_get(struct page *page)
 
 void pmm_page_put(struct page *page)
 {
-    uint32_t old = __atomic_load_n(&page->refcount, __ATOMIC_ACQUIRE);
+    /* One atomic decrement decides who held the last reference. A load,
+     * a compare and a separate decrement let two putters both read 2,
+     * both decrement, and neither free -- the vnode_put race of #49 in
+     * another coat. The last putter puts the count back to 1, which is
+     * what pmm_free_pages expects of a frame it is handed. */
+    uint32_t old = __atomic_fetch_sub(&page->refcount, 1u, __ATOMIC_ACQ_REL);
     if (old == 0)
         panic("pmm: put on free pfn %llu", (unsigned long long)page_to_pfn(page));
     if (old == 1) {
-        /* Last reference: pmm_free_pages expects refcount 1. */
+        page->refcount = 1;
         pmm_free_pages(page, page->order);
-        return;
     }
-    __atomic_fetch_sub(&page->refcount, 1u, __ATOMIC_ACQ_REL);
 }
 
 void pmm_release_deferred(void)

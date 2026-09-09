@@ -167,6 +167,13 @@ el2_sync:
     str x18, [x1, #HV_CTX_HOST_X18]  /* the host's x18 is reserved (-ffixed-x18): keep it */
     mov x18, x1                      /* the context, physically addressed */
     msr tpidr_el2, x18               /* how the exit path finds it again */
+    /* SP_EL2 is the per-CPU EL2 stack here; the guest runs on the top of
+     * its context page instead, and the exit path must put this back.
+     * Left as the context page, the next host HVC on this CPU would push
+     * its four scratch registers onto a page that belonged to a vCPU
+     * since destroyed -- and freed, and by then given to anyone. */
+    mov x2, sp
+    str x2, [x18, #HV_CTX_HOST_SP_EL2]
 
     /* Save the host: callee-saved registers, its stack, and where the
      * HVC came from, so the exit path can return into it. */
@@ -301,6 +308,8 @@ el2_exit:
     ldr x3, [x18, #HV_CTX_HOST_SPSR]
     msr elr_el2, x2
     msr spsr_el2, x3
+    ldr x2, [x18, #HV_CTX_HOST_SP_EL2]
+    mov sp, x2                       /* off the context page: it dies with its vCPU */
     ldp x19, x20, [x4, #0]
     ldp x21, x22, [x4, #16]
     ldp x23, x24, [x4, #32]

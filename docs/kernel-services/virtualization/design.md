@@ -848,6 +848,22 @@ The EL2 code runs with the MMU off, as the stub does, so it addresses
 everything physically: the per-vCPU state it saves and restores lives in
 a page whose physical address the world switch is handed.
 
+**EL2 has two stacks, and which one is live is a matter of lifetime.**
+Outside a guest run `SP_EL2` is the per-CPU EL2 stack the backend
+installed through the stub, which lives as long as the kernel. While a
+guest runs, `SP_EL2` is the top of that vCPU's context page -- the entry
+path has no free register when a guest exception arrives, so it pushes
+four onto whatever `SP_EL2` is, and the context page is the one place
+whose address the exit path can recover (`TPIDR_EL2`). The switch
+records the per-CPU stack at the `HVC` (`HV_CTX_HOST_SP_EL2`) and puts
+it back on every exit, because the context page dies with its vCPU: left
+as `SP_EL2`, the next host `HVC` on that CPU -- the `TLBI` that VM
+destruction issues right after the vCPU's page is freed -- pushes its
+four scratch registers onto a frame the allocator has already handed to
+someone else. That was a real bug (found by the page-poison check,
+`docs/kernel/memory/design.md` §2.5): 32 bytes at the top of a random
+frame, once a process's text page, once a page table, once in ~30 boots.
+
 ### 4. Exits
 
 | `ESR_EL2.EC` | meaning | `hv_exit` |

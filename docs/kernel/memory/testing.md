@@ -168,6 +168,43 @@ stack trace:
 and the failure exit code (QEMU status 35). This proves the fault report
 path, not the demand-zero path; `selftest_vmm` covers that.
 
+## The page-poison check (every debug boot)
+
+Not a test with a name in the list: `pmm_alloc_pages` verifies, on every
+allocation of a frame that has been freed before, that nothing wrote to
+it in between (M37). It runs for the whole of every debug boot, on both
+architectures, and a violation is a panic at the reuse:
+
+```text
+[ERROR] pmm: pfn 309343 was written while free: 32 byte(s) at offset 4064-4096 (poison 5a); last freed from 0xffffffff8007e090
+[ERROR] pmm:   +4064: 12 00 00 00 00 00 00 00  00 80 85 4b 00 00 01 00
+[ERROR] pmm:   +4080: b8 08 01 80 ff ff ff ff  00 00 00 00 00 00 00 00
+KERNEL PANIC: pmm: use after free of pfn 309343 (see the lines above)
+```
+
+Read it in this order. The **freer** is a return address inside the
+kernel: `llvm-nm -n out/<arch>-debug/kernel/kernel.elf` and take the
+last symbol at or below it (here `el2_vcpu_destroy+0x44`, the free of a
+vCPU's context page). The **offset and length** say what shape the
+write had: 32 bytes at the very top of a page is a stack push. The
+**bytes** say what was written: here `x0` = `0x12` (`HV_EL2_CALL_TLBI`)
+and `x1` = a `VTTBR` -- the arguments of the hypercall that VM
+destruction issues right after freeing that page. That was the whole
+diagnosis of a defect which had shown itself only as a shell jumping to
+address 0, `init` faulting on a valid `mov`, and an `anon_pages`
+residue, each once in tens of boots: one 32-byte write, landing on
+whatever the frame had become.
+
+Reintroducing that bug (removing the `SP_EL2` restore from
+`hv_el2_switch.S`) fails every debug boot with exactly the lines above,
+about ten seconds in; it is the bug-proof for virtualization V18 as well
+as the demonstration of this check.
+
+What the check cannot see: a frame written *after* it was handed to its
+next owner (the new owner's data simply changes), and a stray store of
+the poison byte itself. What it costs: one 4 KiB fill per freed frame
+and one 4 KiB scan per allocated one, in debug builds only.
+
 ## Measured results
 
 At the end of the Phase 2 bring-up on the Apple Silicon host under QEMU

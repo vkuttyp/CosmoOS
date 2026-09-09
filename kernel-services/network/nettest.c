@@ -1299,7 +1299,18 @@ bool selftest_net_icmp_limit(const char **reason)
     ((struct icmp_hdr *)good->data)->cksum = 0;
     ((struct icmp_hdr *)good->data)->cksum = in_cksum(good->data, good->len);
     ipv4_output(good, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);
-    settle(30);
+    /* Wait for the message to be processed, bounded, rather than a fixed
+     * 30 ms: the check is that the counters moved by exactly one, not
+     * that the netrx worker made a window on a loaded host (it missed
+     * one once, on `no-iommu x86_64`, with debug page poisoning adding
+     * a fill and a scan to every cluster). */
+    for (unsigned i = 0; i < 100; i++) {
+        tcp_get_stats(&t1);
+        if (t1.pmtu_updates != t0.pmtu_updates)
+            break;
+        settle(10);
+    }
+    settle(10);   /* and let the IP side's record land too */
     tcp_get_stats(&t1);
     ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates + 1 && i1.pmtu_updates == i0.pmtu_updates + 1);
