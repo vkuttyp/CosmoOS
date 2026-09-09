@@ -17,9 +17,11 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <arch/fpu.h>
 #include <arch/testhooks.h>
 #include <arch/el2.h>
+#include <arch/timer.h>
 
 #define CHECK(c)                                                    \
     do {                                                            \
@@ -1087,6 +1089,63 @@ bool selftest_el2_guest_timer(const char **reason)
     return true;
 }
 
+/* --- and woken on time ---
+ *
+ * A guest that arms its timer and waits in WFI is the shape of every
+ * idle loop. Before this, the WFI exit came back at once and the owner
+ * could only spin on re-entry; now `vcpu_run` waits until the guest's
+ * deadline (or an injection) before returning it. Two things are
+ * measured, both in units the guest controls: the WFI run must have
+ * taken most of the 15 ms the guest asked for, and the handler's own
+ * CNTVCT minus its CVAL -- the lateness -- must be a small number of
+ * guest ticks, not the "whenever the owner next ran it" of before.
+ */
+bool selftest_el2_guest_timer_ontime(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq || arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-timer-ontime: no virtual GIC or no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_timer_wfi.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);                                    /* armed */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t armed_at = x.hypercall.a0, cval = x.hypercall.a1;
+    uint64_t asked_ticks = cval - armed_at;                         /* ~15 ms of guest ticks */
+
+    /* The WFI: the guest has nothing to do until its timer, and the run
+     * must not come back until then. Measured on the host's clock. */
+    uint64_t t0 = clock_now_ns();
+    CHECK(vcpu_run(v, &x) == 0);
+    uint64_t waited = clock_now_ns() - t0;
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    uint64_t asked_ns = asked_ticks * 1000000000ULL / arch_clock_hz();
+    CHECK(waited >= asked_ns / 2);                                  /* it waited, rather than returning at once */
+
+    /* Re-entered, the guest takes its timer straight away. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == intid);
+    uint64_t fired_at = x.hypercall.a0, cval_seen = x.hypercall.a1;
+    CHECK(cval_seen == cval);
+    CHECK(fired_at >= cval);                                        /* never early */
+    uint64_t late_ticks = fired_at - cval;
+    /* Late by less than the time it asked for: the owner's re-entry and
+     * a tick's granularity, not a scheduling accident. */
+    CHECK(late_ticks < asked_ticks);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-timer-ontime: asked %llu ticks, WFI held the run %llu ms, "
+          "fired %llu ticks late",
+          (unsigned long long)asked_ticks, (unsigned long long)(waited / 1000000ULL),
+          (unsigned long long)late_ticks);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1198,6 +1257,7 @@ bool selftest_el2_guest_timer_isolated(const char **reason) { (void)reason; retu
 bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_phys_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_ontime(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

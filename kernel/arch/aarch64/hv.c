@@ -85,6 +85,7 @@ int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out) { return g_be-
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_irq(v, vector); }
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
 bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v) { return g_be->vcpu_timer_expired(v); }
+bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *t) { return g_be->vcpu_timer_deadline(v, t); }
 unsigned arch_hv_guest_timer_intid(void) { return el2_guest_timer_intid(); }
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
 {

@@ -231,6 +231,7 @@ bool selftest_el2_guest_timer_isolated(const char **reason); /* a guest's CNTV d
 bool selftest_el2_guest_timer_offset(const char **reason);   /* one clock per VM, the same on every vCPU */
 bool selftest_el2_guest_phys_timer(const char **reason);     /* the host's clock and tick are not a guest's */
 bool selftest_el2_guest_timer(const char **reason);          /* a guest is woken by its own timer */
+bool selftest_el2_guest_timer_ontime(const char **reason);   /* ... and on time, when it waits in WFI */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

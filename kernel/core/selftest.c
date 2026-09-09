@@ -510,6 +510,7 @@ static const struct selftest tests[] = {
     { "el2-guest-timer-offset", selftest_el2_guest_timer_offset },
     { "el2-guest-phys-timer", selftest_el2_guest_phys_timer },
     { "el2-guest-timer",  selftest_el2_guest_timer },
+    { "el2-guest-timer-ontime", selftest_el2_guest_timer_ontime },
     { "el2-guest-hvc",   selftest_el2_guest_hvc },
     { "el2-guest-mmio",  selftest_el2_guest_mmio },
     { "el2-guest-sysreg", selftest_el2_guest_sysreg },

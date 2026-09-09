@@ -8,6 +8,8 @@
 #include <kernel/log.h>
 #include <kernel/process.h>
 #include <kernel/string.h>
+#include <kernel/wait.h>
+#include <arch/timer.h>
 
 #include "hv_internal.h"
 
@@ -339,9 +341,33 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             break;
         }
         if (e.kind == HV_EXIT_WFI) {
-            /* The AArch64 form of "the guest has nothing to do until an
+            /*
+             * The AArch64 form of "the guest has nothing to do until an
              * interrupt": the owner decides whether to inject one and
-             * run again, exactly as for HLT. */
+             * run again, exactly as for HLT.
+             *
+             * But if the guest's own timer is armed, the guest *has*
+             * something to wait for and knows exactly when. Returning at
+             * once would hand the owner a WFI it can only answer by
+             * spinning on re-entry, so the wait happens here: until the
+             * deadline, or until something else becomes pending. The exit
+             * is the same WFI it always was; it just arrives when there
+             * is a reason to run again, and the timer is then late by
+             * the owner's re-entry and nothing more.
+             */
+            uint64_t deadline;
+            if (arch_hv_vcpu_timer_deadline(v->arch, &deadline)) {
+                uint64_t hz = arch_clock_hz();
+                for (;;) {
+                    uint64_t now = arch_clock_read();
+                    if (now >= deadline || vintr_any(v) || process_kill_pending())
+                        break;
+                    uint64_t ns = (deadline - now) * 1000000000ULL / hz;
+                    if (ns > 1000000ULL)
+                        ns = 1000000ULL;   /* in slices, so an injection is not made to wait */
+                    thread_sleep_ns(ns);
+                }
+            }
             fill_common(v, x, COSMO_VM_EXIT_WFI);
             break;
         }

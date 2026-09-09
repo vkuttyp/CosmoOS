@@ -640,6 +640,22 @@ static bool el2_vcpu_timer_expired(struct arch_hv_vcpu *v)
     return true;
 }
 
+/*
+ * The guest's compare, in the host's counter. CNTV compares CNTVCT --
+ * CNTPCT minus the VM's offset -- against CVAL, so the host-counter
+ * value at which it fires is CVAL plus the offset. Only while the timer
+ * is armed, unmasked and has not fired: an expired timer is an
+ * interrupt to deliver, not a deadline to wait for.
+ */
+static bool el2_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
+{
+    uint64_t ctl = v->ctx->cntv_ctl;
+    if ((ctl & (CNTV_CTL_ENABLE | CNTV_CTL_IMASK | CNTV_CTL_ISTATUS)) != CNTV_CTL_ENABLE)
+        return false;
+    *host_ticks = v->ctx->cntv_cval + v->ctx->cntvoff;
+    return true;
+}
+
 unsigned el2_guest_timer_intid(void)
 {
     return g_vtimer_bound ? g_vtimer_intid : 0;
@@ -830,6 +846,7 @@ const struct hv_backend el2_backend = {
     .vcpu_set_irq = el2_vcpu_set_irq,
     .vcpu_irq_delivered = el2_vcpu_irq_delivered,
     .vcpu_timer_expired = el2_vcpu_timer_expired,
+    .vcpu_timer_deadline = el2_vcpu_timer_deadline,
     .vcpu_inject_exception = el2_vcpu_inject_exception,
     .vcpu_advance_rip = el2_vcpu_advance_rip,
     .vcpu_set_rip = el2_vcpu_set_rip,

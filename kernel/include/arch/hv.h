@@ -157,6 +157,13 @@ bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v);
 /* The interrupt number a guest's timer raises (AArch64: the GTDT's
  * virtual timer PPI, 27 on QEMU's virt). 0 where there is none. */
 unsigned arch_hv_guest_timer_intid(void);
+
+/* When the guest's timer will next expire, as a value of the host's
+ * monotonic counter (arch_clock_read), if it is armed, unmasked and has
+ * not yet fired. False otherwise. This is what lets a guest that waits
+ * for an interrupt be re-entered *when* its timer fires rather than
+ * whenever its owner next gets round to it. */
+bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks);
 /* Queue an exception for the next entry (vector < 32). */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 

@@ -93,6 +93,13 @@ static bool svm_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
     return false;
 }
 
+static bool svm_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
+{
+    (void)v;
+    (void)host_ticks;
+    return false;
+}
+
 static int svm_be_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error);
 static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
@@ -755,6 +762,7 @@ const struct hv_backend svm_backend = {
     .vcpu_set_irq = svm_be_vcpu_set_irq,
     .vcpu_irq_delivered = svm_be_vcpu_irq_delivered,
     .vcpu_timer_expired = svm_be_vcpu_timer_expired,
+    .vcpu_timer_deadline = svm_be_vcpu_timer_deadline,
     .vcpu_inject_exception = svm_be_vcpu_inject_exception,
     .vcpu_advance_rip = svm_be_vcpu_advance_rip,
     .vcpu_set_rip = svm_be_vcpu_set_rip,

@@ -753,6 +753,13 @@ static bool vmx_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
     return false;
 }
 
+static bool vmx_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
+{
+    (void)v;
+    (void)host_ticks;
+    return false;
+}
+
 static int vmx_be_vcpu_irq_delivered(struct arch_hv_vcpu *v)
 {
     return v->irq_taken ? v->offered : -1;
@@ -1117,6 +1124,7 @@ const struct hv_backend vmx_backend = {
     .vcpu_set_irq = vmx_be_vcpu_set_irq,
     .vcpu_irq_delivered = vmx_be_vcpu_irq_delivered,
     .vcpu_timer_expired = vmx_be_vcpu_timer_expired,
+    .vcpu_timer_deadline = vmx_be_vcpu_timer_deadline,
     .vcpu_inject_exception = vmx_be_vcpu_inject_exception,
     .vcpu_advance_rip = vmx_be_vcpu_advance_rip,
     .vcpu_set_rip = vmx_be_vcpu_set_rip,
