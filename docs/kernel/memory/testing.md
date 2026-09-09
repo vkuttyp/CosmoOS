@@ -168,6 +168,74 @@ stack trace:
 and the failure exit code (QEMU status 35). This proves the fault report
 path, not the demand-zero path; `selftest_vmm` covers that.
 
+## Address-space tags (`asid-*`, `kernel/memory/memtest.c`)
+
+Six tests, each failing for its own stated reason when its property is
+removed. They run on AArch64 and **skip with a logged reason on x86-64**,
+where `arch_mmu_asid_bits()` is 0 and the untagged path is what runs.
+
+| Test | Proves | Failure when its bug is reintroduced |
+|---|---|---|
+| `asid-alloc` | 255 tags per generation at 8 bits, each distinct; exhaustion rolls over exactly once; a released tag is reusable and a stale one frees nothing | check fails on the count or the generation |
+| `asid-isolation` | two spaces at one address, 40 switches, no flush between them | `a space read another space's byte: the switch did not carry its tag` |
+| `asid-rollover` | a tag reissued across a forced rollover carries nothing forward | `a recycled tag carried the old space's translations across a rollover` |
+| `asid-paranoid` | the isolation property holds with every switch flushing too | as `asid-isolation` |
+| `asid-destroy-reuse` | a tag freed at destroy and handed to the next space | `a tag released at destroy carried the old space's translations to its next owner` |
+| `asid-quiet` | 401 switches, half through the kernel's root, perform 0 flushes and allocate 0 tags | `the switch path still flushes the TLB` / `the kernel's root was given an address-space tag` |
+
+Two details are deliberate. `asid-rollover` and `asid-destroy-reuse`
+**assert the tag was really reissued** (`tag_a == tag_b`) before checking
+the byte, so neither can pass by failing to reuse the tag. And every
+measurement runs with interrupts off and is checked *after* they are
+restored: `CHECK` returns, and returning with interrupts disabled hangs
+the kernel until the boot test's timeout -- which is how one early
+version of `asid-alloc` presented itself.
+
+### Counted, not timed
+
+`asid-quiet` counts full TLB invalidations performed on the switch path,
+at the instruction rather than at the decision, so a switch path that
+flushes without asking the allocator is still visible. In paranoid mode
+it inverts: 401 switches must perform 401 flushes. Measured both ways:
+
+```text
+QEMU_ASID='':          401 switches,   0 TLB flushes performed
+QEMU_ASID='paranoid':  401 switches, 401 TLB flushes performed
+```
+
+**Timing this change under TCG does not work, and the attempt is
+recorded so it is not repeated.** A microbenchmark of 200 back-to-back
+switches measured a *tagged* switch at 46,000-174,000 ns against a
+steady ~8,100 ns for a flushing one -- the tagged path apparently 6-20x
+slower, and swinging threefold between runs of one binary:
+
+| vCPUs | tagged | flushing every switch |
+|---|---|---|
+| 1 | 117,975 ns | 8,184 ns |
+| 2 | 46,160 ns | 8,615 ns |
+| 4 | 154,195 ns | 8,120 ns |
+
+That is emulation, not hardware: QEMU's software TLB is not ASID-tagged,
+so a root write that changes the ASID takes a path an explicit TLBI
+short-circuits, and adding a flush therefore makes emulation faster.
+Whole-boot self-test totals are unchanged (40-41 s before and after), so
+nothing real is slower. The claim this unit is entitled to is structural
+-- a broadcast TLB invalidate removed from every process switch, proved
+by count -- and what that is worth in nanoseconds needs hardware this
+tree has never run on.
+
+### The destroy-path invalidate has no test, and why
+
+Removing `arch_mmu_invalidate_asid` from `vm_space_destroy` leaves every
+test passing. It is not dead code and it is not proved: by the time it
+runs, `user_range_teardown` has already invalidated every mapped page of
+the space across *every* tag, so nothing observable remains for it to do.
+It is kept so that destroying a space does not depend for its safety on a
+decision made in `arch_mmu_invalidate` -- where the natural optimisation,
+naming the tag, is exactly what would break it (see M38's gap). Recorded
+rather than counted, as the FP/SIMD and terminal-mode units recorded
+theirs.
+
 ## The page-poison check (every debug boot)
 
 Not a test with a name in the list: `pmm_alloc_pages` verifies, on every
