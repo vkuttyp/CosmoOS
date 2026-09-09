@@ -4,6 +4,7 @@
 #   make image        FAT boot image with loader and kernel
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
+#   make test-gic     AArch64: the same boot test on the GICv3 machine, both MSI paths
 #   make test-crash   build a deliberately faulting kernel, verify panic path
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
@@ -21,7 +22,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-crash analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-crash analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -65,6 +66,20 @@ run: $(IMAGE)
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
+
+# QEMU's virt machine defaults to gic-version=2, so `test` exercises one
+# of the two AArch64 interrupt controllers and never the other. This runs
+# the other, in both of the MSI configurations a GICv3 can have: an ITS
+# (what GICv3 hardware offers, and QEMU's default for that machine) and a
+# GICv2m frame (the fallback when firmware describes no ITS). A no-op on
+# architectures with no GIC, so CI can call it for every target.
+test-gic:
+ifeq ($(ARCH),aarch64)
+	$(Q)QEMU_GIC=3 QEMU_MSI=its $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test
+	$(Q)QEMU_GIC=3 QEMU_MSI=gicv2m $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) test
+else
+	@echo "test-gic: $(ARCH) has no GIC; nothing to do"
+endif
 
 # Build a deliberately crashing kernel into a sibling output tree and
 # verify that the panic path reports properly and the harness sees FAIL.
