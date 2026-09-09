@@ -62,6 +62,20 @@
 #define HV_CTX_VGIC_AP0R0   0x340
 #define HV_CTX_VGIC_AP1R0   0x348
 
+/*
+ * The guest's virtual timer. The host's tick is the *physical* timer, so
+ * `CNTV_*` is the guest's to program -- but it is one set of hardware
+ * registers, and left alone a guest's `ENABLE` stays live in the host
+ * after the guest exits (measured: CNTV_CTL_EL0 read 0x1 in the host
+ * after a guest armed it). So the switch restores these on entry and
+ * saves them on exit, then disarms the timer and zeroes the offset: the
+ * host's context is its own. `cntvoff` is a copy of the VM's one value,
+ * so every vCPU of a VM sees the same `CNTVCT_EL0`.
+ */
+#define HV_CTX_CNTV_CTL     0x350   /* CNTV_CTL_EL0: ENABLE, IMASK, and ISTATUS as read on exit */
+#define HV_CTX_CNTV_CVAL    0x358   /* CNTV_CVAL_EL0 */
+#define HV_CTX_CNTVOFF      0x360   /* CNTVOFF_EL2: the VM's, copied */
+
 /* The EL1 system registers the switch moves, in this order. */
 #define HV_CTX_SYS_COUNT 20
 
@@ -98,6 +112,7 @@ struct hv_ctx {
     uint64_t vgic_hcr, vgic_vmcr, vgic_lr0;
     uint64_t vgic_elrsr, vgic_misr;
     uint64_t vgic_ap0r0, vgic_ap1r0;
+    uint64_t cntv_ctl, cntv_cval, cntvoff;
 };
 
 _Static_assert(sizeof(struct hv_sysregs) == HV_CTX_SYS_COUNT * 8, "hv_sysregs order");
@@ -127,6 +142,9 @@ _Static_assert(__builtin_offsetof(struct hv_ctx, vgic_elrsr) == HV_CTX_VGIC_ELRS
 _Static_assert(__builtin_offsetof(struct hv_ctx, vgic_misr) == HV_CTX_VGIC_MISR, "ctx vgic misr");
 _Static_assert(__builtin_offsetof(struct hv_ctx, vgic_ap0r0) == HV_CTX_VGIC_AP0R0, "ctx vgic ap0r0");
 _Static_assert(__builtin_offsetof(struct hv_ctx, vgic_ap1r0) == HV_CTX_VGIC_AP1R0, "ctx vgic ap1r0");
+_Static_assert(__builtin_offsetof(struct hv_ctx, cntv_ctl) == HV_CTX_CNTV_CTL, "ctx cntv ctl");
+_Static_assert(__builtin_offsetof(struct hv_ctx, cntv_cval) == HV_CTX_CNTV_CVAL, "ctx cntv cval");
+_Static_assert(__builtin_offsetof(struct hv_ctx, cntvoff) == HV_CTX_CNTVOFF, "ctx cntvoff");
 _Static_assert(sizeof(struct hv_ctx) <= 4096, "the context is one page");
 
 /* The EL2 vector table this backend installs through el2_set_vectors. */

@@ -506,6 +506,8 @@ static const struct selftest tests[] = {
     { "el2-guest-irq-masked", selftest_el2_guest_irq_masked },
     { "el2-guest-irq-private", selftest_el2_guest_irq_private },
     { "el2-guest-irq-queue", selftest_el2_guest_irq_queue },
+    { "el2-guest-timer-isolated", selftest_el2_guest_timer_isolated },
+    { "el2-guest-timer-offset", selftest_el2_guest_timer_offset },
     { "el2-guest-hvc",   selftest_el2_guest_hvc },
     { "el2-guest-mmio",  selftest_el2_guest_mmio },
     { "el2-guest-sysreg", selftest_el2_guest_sysreg },

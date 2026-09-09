@@ -86,6 +86,7 @@ struct arch_hv_vm {
     paddr_t s2_root;
     uint16_t vmid;
     cpumask_t ran_on;
+    uint64_t cntvoff;        /* CNTVOFF_EL2 for every vCPU: the VM's clock starts here */
 };
 
 struct arch_hv_vcpu {
@@ -304,6 +305,10 @@ static int el2_vm_create(struct arch_hv_vm **out)
         kfree(vm);
         return -ENOMEM;
     }
+    /* One offset per VM, taken once: a vCPU created later than its
+     * siblings must see the same clock they do, so the value is the
+     * VM's and not the counter's at each vCPU's creation. */
+    vm->cntvoff = READ_SYSREG(cntpct_el0);
     *out = vm;
     return 0;
 }
@@ -368,6 +373,10 @@ static void ctx_reset(struct arch_hv_vcpu *v)
      * is a guest whose own PMR masks everything -- which is what a
      * guest that has not configured its CPU interface should see.
      */
+    /* The guest's timer starts disarmed and its clock at the VM's zero. */
+    c->cntv_ctl = 0;
+    c->cntv_cval = 0;
+    c->cntvoff = v->vm->cntvoff;
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
     v->lr_vector = -1;
     v->lr_reported = false;
@@ -545,6 +554,13 @@ bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr)
         return false;
     *lr0 = v->ctx->vgic_lr0;
     *elrsr = v->ctx->vgic_elrsr;
+    return true;
+}
+
+bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff)
+{
+    *ctl = v->ctx->cntv_ctl;
+    *cntvoff = v->ctx->cntvoff;
     return true;
 }
 

@@ -61,4 +61,10 @@ int arch_test_msi_overlap_gsi(void);
  * ignored, and the test that checks the refusal has nothing to check. */
 bool arch_test_msi_per_device(void);
 
+/* The host's own virtual-timer control register, for the test that a
+ * guest's timer does not outlive the guest: read before and after a run,
+ * it must not have changed. 0 where the architecture has no such
+ * register. */
+uint64_t arch_test_host_vtimer_ctl(void);
+
 #endif /* ARCH_TESTHOOKS_H */

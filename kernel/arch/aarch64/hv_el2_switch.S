@@ -244,6 +244,16 @@ el2_sync:
     msr ich_hcr_el2, x2
     isb
 1:
+    /* The guest's virtual timer, and its view of time. Always present:
+     * CNTV is architectural, unlike the virtual GIC. The offset first,
+     * so the compare that follows is against the guest's clock. */
+    ldr x2, [x18, #HV_CTX_CNTVOFF]
+    msr cntvoff_el2, x2
+    ldr x2, [x18, #HV_CTX_CNTV_CVAL]
+    msr cntv_cval_el0, x2
+    ldr x2, [x18, #HV_CTX_CNTV_CTL]
+    msr cntv_ctl_el0, x2
+    isb
 
     /* Guest general-purpose registers; x18 last, from itself. */
     ldp x0, x1, [x18, #(HV_CTX_GUEST_X + 0)]
@@ -349,6 +359,17 @@ el2_exit:
     msr ich_hcr_el2, xzr
     isb
 2:
+    /* The guest's timer, as it left it -- CNTV_CTL first, because its
+     * ISTATUS is the fact the host reads to know an expiry happened --
+     * then disarmed and the offset zeroed, so the host's context holds
+     * nothing of the guest's. */
+    mrs x2, cntv_ctl_el0
+    str x2, [x18, #HV_CTX_CNTV_CTL]
+    mrs x2, cntv_cval_el0
+    str x2, [x18, #HV_CTX_CNTV_CVAL]
+    msr cntv_ctl_el0, xzr
+    msr cntvoff_el2, xzr
+    isb
 
     /* Back to the host: stage 2 off, its EL1 state and its registers. */
     msr vttbr_el2, xzr

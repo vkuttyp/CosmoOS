@@ -872,6 +872,106 @@ bool selftest_el2_guest_irq_queue(const char **reason)
     return true;
 }
 
+/* --- a guest's timer does not outlive the guest ---
+ *
+ * The measurement that opened the virtual-timer report, as a test. The
+ * host's tick is the physical timer and the virtual one is the guest's,
+ * but they are one set of registers: before the switch saved and
+ * disarmed them, a guest that armed CNTV left ENABLE live in the host
+ * (CNTV_CTL_EL0 read 0x1 where the host's own IMASK, 0x2, had been).
+ */
+bool selftest_el2_guest_timer_isolated(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    uint64_t before = arch_test_host_vtimer_ctl();
+
+    CHECK(vcpu_run(v, &x) == 0);                                    /* ready */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK(vcpu_run(v, &x) == 0);                                    /* armed, then the heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+
+    /* The guest's ENABLE is in the guest's saved state and nowhere else. */
+    uint64_t ctl = 0, off = 0;
+    CHECK(arch_hv_vcpu_timer_state(v->arch, &ctl, &off));
+    CHECK((ctl & 1u) != 0);                                         /* the guest armed it */
+    CHECK(arch_test_host_vtimer_ctl() == before);                   /* and the host did not notice */
+    drop_guest(vm, v);
+    CHECK(arch_test_host_vtimer_ctl() == before);
+    kinfo("selftest: el2-guest-timer-isolated: guest CNTV_CTL 0x%llx, host's stayed 0x%llx",
+          (unsigned long long)ctl, (unsigned long long)before);
+    return true;
+}
+
+/* --- a guest's clock is its VM's, not the host's and not its vCPU's ---
+ *
+ * CNTVOFF_EL2 is one value per VM. Two VMs created at different times
+ * must see different clocks, neither of them the host's uptime; two
+ * vCPUs of one VM created at different times must see the same one.
+ * The second half is what a per-vCPU offset would fail, and a guest
+ * that compares time across its CPUs would find them disagreeing by
+ * however long apart the vCPUs were made.
+ */
+bool selftest_el2_guest_timer_offset(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0;
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm, &v0) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_a = x.hypercall.a0;                               /* the guest's CNTVCT */
+
+    /* A second vCPU of the same VM, made later: same clock. */
+    thread_sleep_ms(20);
+    struct vcpu *v1;
+    CHECK(vcpu_create(vm, 1, &v1) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_a_cpu1 = x.hypercall.a0;
+    uint64_t off0 = 0, off1 = 0, c = 0;
+    CHECK(arch_hv_vcpu_timer_state(v0->arch, &c, &off0));
+    CHECK(arch_hv_vcpu_timer_state(v1->arch, &c, &off1));
+    CHECK(off0 == off1);                                            /* the VM's, copied */
+    /* Both read a clock that started at the VM's creation: small, and
+     * the later vCPU's later -- by the 20 ms plus the run, not by the
+     * host's uptime. */
+    CHECK(t_vm_a_cpu1 > t_vm_a);
+
+    /* A second VM, made later still: a different, also-small clock. */
+    struct vm *vm_b;
+    struct vcpu *vb;
+    CHECK(make_guest("tests/hv/guest_timer.bin", &vm_b, &vb) == 0);
+    CHECK(vcpu_run(vb, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    uint64_t t_vm_b = x.hypercall.a0;
+    uint64_t offb = 0;
+    CHECK(arch_hv_vcpu_timer_state(vb->arch, &c, &offb));
+    CHECK(offb != off0);                                            /* its own */
+    /* Neither VM sees the host's counter: the offset is subtracted, so a
+     * guest's first read is well below the offset itself. */
+    CHECK(t_vm_a < off0);
+    CHECK(t_vm_b < offb);
+    kobject_put(&v1->obj);
+    drop_guest(vm_b, vb);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-timer-offset: VM A read %llu then %llu on its second vCPU; VM B read %llu",
+          (unsigned long long)t_vm_a, (unsigned long long)t_vm_a_cpu1, (unsigned long long)t_vm_b);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -979,6 +1079,8 @@ bool selftest_el2_guest_irq(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_masked(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_private(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_irq_queue(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_isolated(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

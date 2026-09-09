@@ -184,3 +184,8 @@ bool arch_test_msi_per_device(void)
 {
     return false;   /* an APIC message names its target, not its sender */
 }
+
+uint64_t arch_test_host_vtimer_ctl(void)
+{
+    return 0;   /* no generic timer here */
+}

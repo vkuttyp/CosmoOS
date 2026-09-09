@@ -132,6 +132,10 @@ void arch_hv_vintr_range(unsigned *lo, unsigned *hi);
  * where the architecture has no such state, which is everywhere but a
  * GICv3 machine's EL2 backend. */
 bool arch_hv_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
+/* The guest timer state the last run brought back: CNTV_CTL as the guest
+ * left it (ISTATUS included), and the offset its clock runs at. False
+ * where the architecture has no guest timer to report. */
+bool arch_hv_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff);
 /* Which interrupt the guest actually took during the last run, or -1.
  *
  * Not "was the offered one taken?". On an architecture whose controller

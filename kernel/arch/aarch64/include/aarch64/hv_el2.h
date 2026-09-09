@@ -18,5 +18,6 @@ struct arch_hv_vcpu;
 /* List register 0 and the free-register mask as the last run left them.
  * False when this machine has no virtual GIC. */
 bool el2_vcpu_vgic_state(struct arch_hv_vcpu *v, uint64_t *lr0, uint64_t *elrsr);
+bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvoff);
 
 #endif /* AARCH64_HV_EL2_H */
