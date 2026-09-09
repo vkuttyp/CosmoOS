@@ -728,8 +728,63 @@ machine that routed PSCI through EL2 while the kernel held the stub
 would need the stub to forward those calls; that case does not arise
 here and is recorded as a gap rather than written blind.
 
+## Giving a guest an interrupt (`hv_el2.c`, `hv_el2_switch.S`)
+
+A guest is interrupted by a **virtual** interrupt placed in one of the
+GIC's list registers. With `HCR_EL2.IMO` set -- which it is, so that a
+host interrupt exits the guest -- the guest's own `ICC_*_EL1` accesses
+are redirected by hardware to the *virtual* CPU interface, so it
+enables, acknowledges and completes exactly as the host does on the
+physical one. **No distributor is emulated and none is needed**: a
+virtual interrupt in a list register bypasses one, because the register
+*is* the pending state, the group and the priority. Emulating a virtual
+distributor, so a guest can run an unmodified GIC driver, is a separate
+unit.
+
+**Everything about this is an EL2 register, and this kernel runs at
+EL1.** `ICH_HCR_EL2`, `ICH_VMCR_EL2`, `ICH_LR<n>_EL2`, `ICH_AP<n>R0_EL2`
+and `ICH_VTR_EL2` cannot be touched from EL1 at all, so the state
+travels the way `vttbr` and `hcr` already do: fields in `struct hv_ctx`,
+written by the world switch on the way in and read back on the way out.
+`vgic_on` gates the lot -- on a machine with no GICv3 virtual interface
+those registers do not exist and the accesses would be UNDEFINED.
+`HV_EL2_CALL_VGIC` is how the host asks EL2 the two questions it cannot
+answer itself: it sets `ICC_SRE_EL2.{SRE,Enable}` so EL1 may use the
+system-register interface, and returns `ICH_VTR_EL2`.
+
+| register | why it is per-vCPU |
+|---|---|
+| `ICH_LR0_EL2` | the interrupt itself: state, group, priority, INTID |
+| `ICH_VMCR_EL2` | the guest's *own* `ICC_PMR_EL1` and group enables land here |
+| `ICH_AP0R0_EL2`, `ICH_AP1R0_EL2` | the priority the guest is **running at** |
+| `ICH_ELRSR_EL2`, `ICH_MISR_EL2` | read back only: what the guest left behind |
+
+The active-priority registers are the subtle ones. A guest that has
+acknowledged an interrupt and not completed it is running at that
+priority, and the fact lives in an EL2 register shared by every guest on
+the CPU. Unsaved, a vCPU destroyed inside its handler leaves its
+priority active and the *next* guest on that CPU is refused every
+interrupt that does not outrank a dead one's -- which is exactly how
+this was found. One register per group covers an implementation with
+five priority bits; probe warns above that.
+
+**Taken means delivered, not completed.** `ICC_IAR1_EL1` moves a list
+register from Pending to Active and only `ICC_EOIR1_EL1` makes it
+Invalid, so `arch_hv_vcpu_irq_taken` is `state != Pending`. A guest that
+exits between the two -- a hypercall in its handler, or a host interrupt
+-- is holding the interrupt, and calling that untaken would deliver it
+a second time.
+
+**One list register.** The generic layer offers one vector at a time, so
+a second would carry nothing; the boot counts entries where a
+*different* interrupt had to wait for the register, and that number is
+0 across every test. A GICv2 machine gets none of this: it virtualises
+through `GICH`/`GICV` MMIO frames this kernel does not drive, so
+`hv_caps.inject_irq` is false there and `vcpu_inject` returns `-ENOTSUP`.
+
 ### What this does not do
 
-Stage-2 translation, `VTTBR_EL2`, GIC list registers, `CNTVOFF`
-scheduling and the world switch itself are the next unit: this one only
-establishes that EL2 exists, is reachable, and stays reachable.
+A virtual distributor (so a guest can run a stock GIC driver), the
+virtual timer (`CNTHCTL_EL2`, `CNTVOFF_EL2` and a per-vCPU timer model),
+maintenance interrupts, and the GICv2 `GICH` interface. Each is named
+rather than half-built.

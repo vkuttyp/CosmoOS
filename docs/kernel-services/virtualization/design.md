@@ -109,7 +109,7 @@ struct vcpu {
     struct mutex run_lock;              /* one runner at a time; also serialises regs get/set */
     struct arch_hv_vcpu *arch;          /* the VMCB and the backend's GPR block */
     spinlock_t irq_lock;                /* pending[]: inject comes from other threads */
-    uint64_t pending[4];                /* VirtualInterrupt: 256-bit pending vector set */
+    uint64_t pending[VINTR_WORDS];      /* VirtualInterrupt: one bit per injectable number */
     int offered;                        /* vector offered for the current entry, -1 none */
     bool in_completion;                 /* an IN is waiting for a value */
     uint8_t in_size;
@@ -413,9 +413,23 @@ exit, and the timer tick bounds that wait). Before each entry the runner
 offers the lowest pending vector (fixed priority by number, matching the
 8259/LAPIC convention that lower vectors are not higher priority — the
 choice is documented, not architectural; a virtual LAPIC in stage 2
-brings real priorities). Vectors 0–31 are refused (`-EINVAL`): those are
-exceptions, which a hypervisor injects as events, and stage 1 exposes no
-API for that.
+brings real priorities).
+
+**What may be injected is the architecture's answer**, not a constant.
+`arch_hv_vintr_range` gives x86-64 32..255, because 0..31 are exceptions
+which a hypervisor injects as events and stage 1 exposes no API for; and
+AArch64 0..1019, because there 0..15 are SGIs and 16..31 are PPIs — the
+private interrupts a guest's own software uses, and where its timer will
+arrive. LPIs (8192 and up) are excluded: nothing can translate one for a
+guest. `pending` is sized from the widest range rather than from the 256
+that once covered x86 alone.
+
+**And whether anything may be injected at all** is
+`hv_caps.inject_irq`. A backend with no way to raise an interrupt in a
+guest reports false and `vcpu_inject` returns `-ENOTSUP` before the
+range check — an AArch64 machine whose GIC is a v2 has no virtual
+interface this kernel drives, and reporting success for an interrupt
+that will never arrive is worse than refusing.
 
 ### Device backends (`vmdev.c`)
 

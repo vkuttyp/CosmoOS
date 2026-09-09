@@ -94,6 +94,8 @@ struct arch_hv_vcpu {
     paddr_t ctx_pa;
     int offered;
     bool irq_placed;         /* this entry put `offered` in a list register */
+    uint64_t irq_delivered;  /* interrupts the guest took */
+    uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
     unsigned unknown_exits;
     uint32_t pending_event;  /* a queued exception vector, ~0 for none */
     struct aarch64_fpu_area fpu;   /* the guest's vector registers (arch/fpu.h, guest rule) */
@@ -393,6 +395,13 @@ static int el2_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
 
 static void el2_vcpu_destroy(struct arch_hv_vcpu *v)
 {
+    /* What one list register cost: `deferred` counts entries where a
+     * *different* interrupt had to wait because the register was still
+     * holding one. A second is worth writing EL2 assembly for only if
+     * this is not zero in practice. */
+    if (v->irq_delivered || v->irq_deferred)
+        kdebug("hv-el2: vmid %u: %llu interrupt(s) delivered, %llu deferred for want of a list register",
+               v->vm->vmid, (unsigned long long)v->irq_delivered, (unsigned long long)v->irq_deferred);
     if (v == NULL)
         return;
     pmm_free_page(phys_to_page(v->ctx_pa));
@@ -551,8 +560,17 @@ static void el2_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
      * EOI. Leave it; the vector stays pending in the generic set and is
      * offered again on the next entry.
      */
-    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID)
+    if (lr_state(v->ctx->vgic_lr0) != LR_STATE_INVALID) {
+        /* Counted only when a *different* interrupt had to wait: the
+         * offered vector already sitting in the register is the normal
+         * case -- it was placed on an earlier entry and the guest has
+         * not taken it yet -- and a second register would not have
+         * helped that. This is the number that says whether one is
+         * enough. */
+        if ((uint32_t)vector != (uint32_t)(v->ctx->vgic_lr0 & 0xFFFFFFFFu))
+            v->irq_deferred++;
         return;
+    }
     v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(VGIC_PRIORITY) | (uint32_t)vector;
     v->irq_placed = true;
 }
@@ -567,7 +585,10 @@ static bool el2_vcpu_irq_taken(struct arch_hv_vcpu *v)
      * interrupt -- is very much holding the interrupt, and reporting
      * otherwise would leave it pending and deliver it a second time.
      */
-    return v->irq_placed && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
+    bool taken = v->irq_placed && lr_state(v->ctx->vgic_lr0) != LR_STATE_PENDING;
+    if (taken)
+        v->irq_delivered++;
+    return taken;
 }
 
 static void el2_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)

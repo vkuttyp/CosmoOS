@@ -80,6 +80,19 @@ interrupt-controller shapes: `QEMU_GIC=3 QEMU_MSI=its`,
 `QEMU_GIC=3 QEMU_MSI=gicv2m QEMU_SMP=8`. The middle one exists because a
 fallback nothing runs is a fallback that regresses.
 
+### `make test-gic`
+
+QEMU's virt defaults to `gic-version=2`, `make test` does not set
+`QEMU_GIC`, and CI did not either -- so between the GICv3 unit landing
+and this target existing, **nothing automated ran the GICv3 driver or
+the ITS at all**. `make ARCH=aarch64 test-gic` runs the boot test on the
+GICv3 machine in both MSI configurations (an ITS, and a GICv2m frame),
+and `.github/workflows/ci.yml` calls it for every architecture in the
+matrix -- on x86-64 it prints that there is no GIC and succeeds.
+
+The virtual GIC is GICv3-only, so every `el2-guest-irq*` test runs there
+and nowhere else; this target is what keeps them run.
+
 ### Sixteen CPUs
 
 `QEMU_GIC=3 QEMU_SMP=16` boots and brings all sixteen CPUs online --
