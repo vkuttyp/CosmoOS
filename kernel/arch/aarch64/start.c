@@ -22,8 +22,8 @@ void aarch64_start(const void *info_ptr)
     aarch64_cpu_init();
     arch_syscall_init_cpu();
     const struct aarch64_cpu_info *c = aarch64_cpu_info();
-    kdebug("aarch64: %s, EL%u, MPIDR 0x%llx, PAN %d, PARange %u, GIC sysregs %u", c->brand, current_el(),
-           (unsigned long long)c->mpidr, c->has_pan, c->parange, c->gic_sysreg);
+    kdebug("aarch64: %s, EL%u, MPIDR 0x%llx, PAN %d, PARange %u, GIC sysregs %u, ASID %u-bit", c->brand,
+           current_el(), (unsigned long long)c->mpidr, c->has_pan, c->parange, c->gic_sysreg, c->asid_bits);
     kdebug("aarch64: SCTLR 0x%llx TCR 0x%llx MAIR 0x%llx TTBR0 0x%llx TTBR1 0x%llx",
            (unsigned long long)READ_SYSREG(sctlr_el1), (unsigned long long)READ_SYSREG(tcr_el1),
            (unsigned long long)READ_SYSREG(mair_el1), (unsigned long long)READ_SYSREG(ttbr0_el1),

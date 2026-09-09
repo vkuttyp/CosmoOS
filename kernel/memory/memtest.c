@@ -6,6 +6,7 @@
  * the code under test fails the test rather than a later one.
  */
 
+#include <kernel/asid.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -13,7 +14,11 @@
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
+
+#include <arch/mmu.h>
+#include <arch/user.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -369,7 +374,7 @@ bool selftest_user_vmm(const char **reason)
 {
     struct vm_space *sp = NULL;
     CHECK(vm_space_create_user(&sp) == 0);
-    CHECK(sp != NULL && sp->active_cpus == 0);
+    CHECK(sp != NULL && sp->tlb_cpus == 0);
 
     const uint64_t A = 0x0000300000000000ULL;   /* far from anything a process maps */
     paddr_t pa;
@@ -514,5 +519,467 @@ bool selftest_rlimit(const char **reason)
     /* The per-uid count sees no process for an unused uid. */
     CHECK(process_count_uid(0xFFFF1234u) == 0);
     kinfo("selftest: rlimit: address-space, resident-memory and handle limits bind where they are enforced");
+    return true;
+}
+
+/* --- address-space tags (kernel/memory/asid.c) --- */
+
+/*
+ * The allocator, at a width narrow enough that rollover is reachable.
+ * Interrupts stay off across the loop so that nothing else switches
+ * address spaces and takes tags out of the pool being counted.
+ */
+/*
+ * Allocate tags into `ctx[0..]` until the generation advances; return
+ * how many the generation being left handed out, and clear `*distinct`
+ * if it ever gave the same tag twice.
+ *
+ * Interrupts stay off for the loop so that no other thread switches
+ * address spaces and takes a tag out of the pool being counted -- and
+ * are restored before the caller checks anything, because a failed
+ * CHECK returns, and returning with interrupts off hangs the kernel.
+ */
+static unsigned asid_fill_generation(struct arch_mmu_context *ctx, unsigned max, bool *distinct)
+{
+    static uint8_t seen[256];
+    memset(seen, 0, sizeof(seen));
+    uint64_t gen = asid_generation();
+    unsigned n = 0;
+    arch_irq_state_t s = arch_irq_save();
+    for (; n < max; n++) {
+        asid_switch_prepare(&ctx[n]);
+        if (asid_generation() != gen)
+            break;   /* this one already came from the next generation */
+        if (distinct && (ctx[n].asid == 0 || ctx[n].asid > 255 || seen[ctx[n].asid]))
+            *distinct = false;
+        if (ctx[n].asid <= 255)
+            seen[ctx[n].asid] = 1;
+    }
+    arch_irq_restore(s);
+    return n;
+}
+
+/*
+ * The allocator at 8 bits, where the 255-tag pool can be exhausted in a
+ * test rather than in the sixty-five-thousandth process.
+ *
+ * `asid_test_set_bits` re-initialises: a fresh generation and an empty
+ * bitmap. Every count below starts from that known state, so the numbers
+ * are exact rather than arithmetic about a cursor.
+ */
+bool selftest_asid_alloc(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-alloc: no address-space tags on this machine; skipping");
+        return true;
+    }
+    static struct arch_mmu_context ctx[300];
+    struct asid_stats st0, st1;
+
+    /* An empty pool gives out every one of its tags, each exactly once,
+     * and the next request rolls the generation over. */
+    CHECK(asid_test_set_bits(8));
+    memset(ctx, 0, sizeof(ctx));
+    uint64_t gen = asid_generation();
+    asid_get_stats(&st0);
+    bool distinct = true;
+    unsigned n = asid_fill_generation(ctx, 300, &distinct);
+    asid_get_stats(&st1);
+    CHECK(distinct);
+    CHECK(n == 255);                              /* 1..255; tag 0 is the kernel's */
+    CHECK(asid_generation() == gen + 1);
+    CHECK(st1.rollovers == st0.rollovers + 1);
+    CHECK(st1.allocs == st0.allocs + 256);        /* the 256th is the one that rolled over */
+
+    /* A tag released while its generation is current is free again --
+     * checked with the pool full, so the tag that comes back can only be
+     * the one just released. */
+    CHECK(asid_test_set_bits(8));
+    memset(ctx, 0, sizeof(ctx));
+    gen = asid_generation();
+    unsigned filled = 0;
+    uint32_t released = 0;
+    uint32_t reused = 0;
+    arch_irq_state_t s = arch_irq_save();
+    while (filled < 255) {
+        asid_switch_prepare(&ctx[filled]);
+        if (asid_generation() != gen)
+            break;
+        filled++;
+    }
+    if (filled == 255) {
+        released = ctx[100].asid;
+        asid_release(&ctx[100]);
+        struct arch_mmu_context back;
+        memset(&back, 0, sizeof(back));
+        asid_switch_prepare(&back);
+        reused = back.asid;
+    }
+    uint64_t gen_after = asid_generation();
+    arch_irq_restore(s);
+    CHECK(filled == 255);
+    CHECK(gen_after == gen);        /* a free bit existed, so nothing rolled over */
+    CHECK(reused == released);      /* and it was the one released */
+
+    /* Releasing a tag whose generation has passed frees nothing: that
+     * bit belongs to a later generation's bitmap, or to nobody. */
+    CHECK(asid_test_set_bits(8));
+    struct arch_mmu_context stale;
+    memset(&stale, 0, sizeof(stale));
+    s = arch_irq_save();
+    asid_switch_prepare(&stale);
+    arch_irq_restore(s);
+    CHECK(asid_test_set_bits(8));   /* a new generation: `stale` is now stale */
+    asid_get_stats(&st0);
+    asid_release(&stale);
+    asid_get_stats(&st1);
+    CHECK(st1.releases == st0.releases);
+    CHECK(stale.asid == 0 && stale.asid_gen == 0);
+
+    /* A context from an older generation is re-tagged, not trusted. */
+    CHECK(ctx[0].asid_gen != asid_generation());
+    s = arch_irq_save();
+    asid_switch_prepare(&ctx[0]);
+    arch_irq_restore(s);
+    CHECK(ctx[0].asid_gen == asid_generation());
+
+    CHECK(asid_test_set_bits(arch_mmu_asid_bits()));   /* back to the machine's width */
+    kinfo("selftest: asid-alloc: 255 tags per generation, exhaustion rolls over, release exact");
+    return true;
+}
+
+/*
+ * Isolation without a flush, which is the whole point of a tag.
+ *
+ * Two spaces map the same user address to different frames holding
+ * different bytes. This CPU switches between them with interrupts off --
+ * so nothing else runs and nothing else flushes -- and reads the address
+ * through the user mapping each time. If the switch did not carry a tag,
+ * the second space would read the first's byte out of a TLB entry that
+ * should not apply to it.
+ */
+bool selftest_asid_isolation(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-isolation: no address-space tags on this machine; skipping");
+        return true;
+    }
+    const uint64_t VA = 0x0000300000000000ULL;   /* far from anything a process maps */
+    struct vm_space *a = NULL, *b = NULL;
+    CHECK(vm_space_create_user(&a) == 0);
+    CHECK(vm_space_create_user(&b) == 0);
+    CHECK(vm_user_map_anon(a, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "asid-a") == 0);
+    CHECK(vm_user_map_anon(b, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "asid-b") == 0);
+
+    paddr_t pa;
+    CHECK(arch_mmu_query(&a->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xAA, PAGE_SIZE);
+    CHECK(arch_mmu_query(&b->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xBB, PAGE_SIZE);
+
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    struct vm_space *cur = restore;
+    unsigned wrong = 0, faults = 0;
+
+    arch_irq_state_t s = arch_irq_save();
+    for (unsigned i = 0; i < 20; i++) {
+        uint8_t v = 0;
+        vm_space_switch(cur, a);
+        cur = a;
+        if (arch_copy_user_raw(&v, (const void *)(uintptr_t)VA, 1) != 0)
+            faults++;
+        else if (v != 0xAA)
+            wrong++;
+        vm_space_switch(cur, b);
+        cur = b;
+        if (arch_copy_user_raw(&v, (const void *)(uintptr_t)VA, 1) != 0)
+            faults++;
+        else if (v != 0xBB)
+            wrong++;
+    }
+    vm_space_switch(cur, restore);
+    arch_irq_restore(s);
+
+    vm_space_destroy(a);
+    vm_space_destroy(b);
+    if (faults) {
+        *reason = "a user read faulted with the space active";
+        return false;
+    }
+    if (wrong) {
+        *reason = "a space read another space's byte: the switch did not carry its tag";
+        return false;
+    }
+    kinfo("selftest: asid-isolation: 40 tagged switches, each space read its own page");
+    return true;
+}
+
+/*
+ * The rollover, with live spaces rather than throwaway contexts.
+ *
+ * This is the case a normal boot never reaches: sixteen-bit tags give
+ * 65,535 of them, so nothing exhausts the pool, and the flush that makes
+ * a recycled tag safe is never exercised. Forced here, and arranged so
+ * that the recycled tag is handed straight back to a *different* space
+ * on the same CPU -- which is the only shape in which the missing flush
+ * is visible:
+ *
+ *   A runs under tag 1 and this CPU caches its page under (1, VA).
+ *   The generation rolls over; the bitmap empties and the cursor resets.
+ *   B switches in, is given tag 1 of the new generation, and reads VA.
+ *
+ * B must read B's byte. It can only do so because the rollover made this
+ * CPU flush before it trusted any tag of the new generation.
+ */
+bool selftest_asid_rollover(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-rollover: no address-space tags on this machine; skipping");
+        return true;
+    }
+    const uint64_t VA = 0x0000300000000000ULL;
+    struct vm_space *a = NULL, *b = NULL;
+    CHECK(vm_space_create_user(&a) == 0);
+    CHECK(vm_space_create_user(&b) == 0);
+    CHECK(vm_user_map_anon(a, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "roll-a") == 0);
+    CHECK(vm_user_map_anon(b, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "roll-b") == 0);
+    paddr_t pa;
+    CHECK(arch_mmu_query(&a->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xAA, PAGE_SIZE);
+    CHECK(arch_mmu_query(&b->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xBB, PAGE_SIZE);
+
+    /* A fresh generation with an empty bitmap and the cursor at 1, so
+     * that the tag A is about to get is the tag B will be given after
+     * the rollover. */
+    CHECK(asid_test_set_bits(8));
+
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    uint32_t tag_a = 0, tag_b = 0;
+    uint8_t va = 0, vb = 0;
+    size_t fa = 1, fb = 1;
+
+    arch_irq_state_t s = arch_irq_save();
+    vm_space_switch(restore, a);
+    tag_a = a->mmu.asid;
+    fa = arch_copy_user_raw(&va, (const void *)(uintptr_t)VA, 1);
+    /* Not by allocating: that would stamp this CPU as flushed and eat
+     * the flush under test. */
+    bool rolled = asid_test_force_rollover();
+    vm_space_switch(a, b);
+    tag_b = b->mmu.asid;
+    fb = arch_copy_user_raw(&vb, (const void *)(uintptr_t)VA, 1);
+    vm_space_switch(b, restore);
+    arch_irq_restore(s);
+
+    vm_space_destroy(a);
+    vm_space_destroy(b);
+    CHECK(asid_test_set_bits(arch_mmu_asid_bits()));
+
+    CHECK(rolled);
+    CHECK(fa == 0 && fb == 0);
+    CHECK(tag_a == tag_b);   /* the point: B really was handed A's tag */
+    if (va != 0xAA || vb != 0xBB) {
+        kwarn("selftest: asid-rollover: tag %u then %u, read 0x%02x then 0x%02x (wanted 0xaa then 0xbb)",
+              tag_a, tag_b, va, vb);
+        *reason = "a recycled tag carried the old space's translations across a rollover";
+        return false;
+    }
+    kinfo("selftest: asid-rollover: tag %u reissued across a generation, each space read its own page",
+          tag_a);
+    return true;
+}
+
+/*
+ * The destroy path, and the review finding the report was corrected for:
+ * a tag released before its translations are invalidated is a tag whose
+ * next owner inherits them.
+ *
+ * Arranged so that the reuse is certain rather than likely. The pool is
+ * filled to the brim while the old space holds its tag, so destroying it
+ * leaves exactly one free tag in the whole machine -- the one it just
+ * gave back -- and the next space to switch in must be given that one.
+ * (Self-tests run on an otherwise idle machine; if another thread did
+ * take that tag first, the check on the tag numbers below says so
+ * instead of passing quietly.)
+ */
+bool selftest_asid_destroy_reuse(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-destroy-reuse: no address-space tags on this machine; skipping");
+        return true;
+    }
+    const uint64_t VA = 0x0000300000000000ULL;
+    struct vm_space *old_sp = NULL, *new_sp = NULL;
+    paddr_t pa;
+
+    /* Both frames exist before either space is destroyed, so the second
+     * space cannot be handed the first's freed page and read its own
+     * byte out of it by accident. */
+    CHECK(vm_space_create_user(&old_sp) == 0);
+    CHECK(vm_user_map_anon(old_sp, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "d-old") == 0);
+    CHECK(arch_mmu_query(&old_sp->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xAA, PAGE_SIZE);
+    CHECK(vm_space_create_user(&new_sp) == 0);
+    CHECK(vm_user_map_anon(new_sp, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "d-new") == 0);
+    CHECK(arch_mmu_query(&new_sp->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0xBB, PAGE_SIZE);
+
+    CHECK(asid_test_set_bits(8));
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    uint32_t tag_old = 0, tag_new = 0;
+    uint8_t v1 = 0, v2 = 0;
+    size_t f1 = 1, f2 = 1;
+
+    /* The old space runs and this CPU caches its page under its tag. */
+    arch_irq_state_t s = arch_irq_save();
+    vm_space_switch(restore, old_sp);
+    tag_old = old_sp->mmu.asid;
+    f1 = arch_copy_user_raw(&v1, (const void *)(uintptr_t)VA, 1);
+    vm_space_switch(old_sp, restore);
+    arch_irq_restore(s);
+
+    /* Fill every other tag, so that the destroy below leaves exactly one. */
+    static struct arch_mmu_context fill[255];
+    memset(fill, 0, sizeof(fill));
+    uint64_t gen = asid_generation();
+    unsigned n = 0;
+    s = arch_irq_save();
+    while (n < 254) {
+        asid_switch_prepare(&fill[n]);
+        if (asid_generation() != gen)
+            break;
+        n++;
+    }
+    arch_irq_restore(s);
+
+    vm_space_destroy(old_sp);   /* invalidate the tag, then release it */
+
+    s = arch_irq_save();
+    vm_space_switch(restore, new_sp);
+    tag_new = new_sp->mmu.asid;
+    f2 = arch_copy_user_raw(&v2, (const void *)(uintptr_t)VA, 1);
+    vm_space_switch(new_sp, restore);
+    uint64_t gen_end = asid_generation();
+    arch_irq_restore(s);
+
+    vm_space_destroy(new_sp);
+    CHECK(asid_test_set_bits(arch_mmu_asid_bits()));
+
+    CHECK(n == 254);
+    CHECK(f1 == 0 && v1 == 0xAA);
+    CHECK(f2 == 0);
+    CHECK(gen_end == gen);            /* a tag was free: nothing rolled over */
+    CHECK(tag_new == tag_old);        /* and it was the destroyed space's */
+    if (v2 != 0xBB) {
+        *reason = "a tag released at destroy carried the old space's translations to its next owner";
+        return false;
+    }
+    kinfo("selftest: asid-destroy-reuse: tag %u reissued after destroy, the new space read its own page",
+          tag_old);
+    return true;
+}
+
+/*
+ * What the unit actually changed, counted rather than timed: the number
+ * of full TLB flushes the switch path performs.
+ *
+ * It used to be one per user switch, and on AArch64 that flush was
+ * inner-shareable -- every CPU in the machine emptied its user TLB
+ * because one CPU changed process. It should now be zero between
+ * rollovers, whatever the switch rate.
+ *
+ * Counting is the right instrument here and timing is not. Under TCG a
+ * tagged switch measures *slower* than a flushing one (see
+ * docs/kernel/memory/testing.md): QEMU's software TLB is not
+ * ASID-tagged, so a root write that changes the ASID sends it down a
+ * path an explicit TLBI short-circuits, and the figure swings threefold
+ * between runs of one binary. The count does not depend on emulation
+ * at all.
+ */
+#define ASID_QUIET_ROUNDS 200u
+
+bool selftest_asid_quiet(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-quiet: no address-space tags on this machine; skipping");
+        return true;
+    }
+    const uint64_t VA = 0x0000300000000000ULL;
+    struct vm_space *a = NULL, *b = NULL;
+    CHECK(vm_space_create_user(&a) == 0);
+    CHECK(vm_space_create_user(&b) == 0);
+    CHECK(vm_user_map_anon(a, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "quiet") == 0);
+    CHECK(vm_user_map_anon(b, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "quiet") == 0);
+
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    struct asid_stats st0, st1;
+
+    /* One warm pass first: the very first switch into each space
+     * allocates its tag, and this CPU's own first switch of a generation
+     * legitimately flushes. What is counted is the steady state. */
+    struct vm_space *cur = restore;
+    arch_irq_state_t s = arch_irq_save();
+    for (unsigned i = 0; i < 4; i++) {
+        struct vm_space *sp = (i & 1) ? b : a;
+        vm_space_switch(cur, sp);
+        cur = sp;
+    }
+    vm_space_switch(cur, restore);
+    arch_irq_restore(s);
+
+    asid_get_stats(&st0);
+    cur = restore;
+    s = arch_irq_save();
+    for (unsigned i = 0; i < ASID_QUIET_ROUNDS; i++) {
+        /* Through the kernel's root each time, as a real switch to a
+         * kernel thread does. It must cost no tag: the kernel runs under
+         * tag 0, and asking the allocator for one on its behalf would
+         * consume a tag per generation that nothing ever releases. */
+        struct vm_space *sp = (i & 1) ? b : a;
+        vm_space_switch(cur, &kernel_space);
+        vm_space_switch(&kernel_space, sp);
+        cur = sp;
+    }
+    vm_space_switch(cur, restore);
+    arch_irq_restore(s);
+    asid_get_stats(&st1);
+
+    vm_space_destroy(a);
+    vm_space_destroy(b);
+
+    if (st1.flushes != st0.flushes) {
+        *reason = "the switch path still flushes the TLB";
+        return false;
+    }
+    if (st1.allocs != st0.allocs) {
+        *reason = "a switch allocated a tag for a space that already had one, or for the kernel";
+        return false;
+    }
+    kinfo("selftest: asid-quiet: %u switches (half of them through the kernel's root), "
+          "%llu full flushes, %llu tags allocated",
+          2 * ASID_QUIET_ROUNDS + 1, (unsigned long long)(st1.flushes - st0.flushes),
+          (unsigned long long)(st1.allocs - st0.allocs));
+    return true;
+}
+
+/*
+ * Paranoid mode must not change what anything sees -- it is a
+ * performance switch, not a semantic one. Running the isolation property
+ * with every switch flushing proves the test is about the rule and not
+ * about a lucky TLB.
+ */
+bool selftest_asid_paranoid(const char **reason)
+{
+    if (arch_mmu_asid_bits() == 0) {
+        kinfo("selftest: asid-paranoid: no address-space tags on this machine; skipping");
+        return true;
+    }
+    asid_set_paranoid(true);
+    bool ok = selftest_asid_isolation(reason);
+    asid_set_paranoid(false);
+    if (!ok)
+        return false;
+    kinfo("selftest: asid-paranoid: isolation holds with every switch flushing too");
     return true;
 }

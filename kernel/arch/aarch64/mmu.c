@@ -382,17 +382,33 @@ static void map_early_devices(const struct arch_mmu_context *ctx)
     }
 }
 
-void arch_mmu_activate(const struct arch_mmu_context *ctx)
+unsigned arch_mmu_asid_bits(void)
+{
+    return aarch64_cpu_info()->asid_bits;   /* TCR.AS was set to match in aarch64_cpu_init */
+}
+
+void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
 {
     if (ctx_is_kernel(ctx)) {
         map_early_devices(ctx);
         WRITE_SYSREG(ttbr1_el1, ctx->root);
-        WRITE_SYSREG(ttbr0_el1, g_empty_root);
+        WRITE_SYSREG(ttbr0_el1, g_empty_root);   /* ASID 0 is the kernel's */
     } else {
-        WRITE_SYSREG(ttbr0_el1, ctx->root);   /* ASID 0: a full invalidate per switch */
+        /* The tag rides in the top bits of TTBR0. TCR.AS decides whether
+         * sixteen of them or eight are read as the ASID; either way the
+         * field starts at bit 48. */
+        WRITE_SYSREG(ttbr0_el1, ctx->root | ((uint64_t)ctx->asid << TTBR_ASID_SHIFT));
     }
     isb();
-    tlbi_vmalle1is();
+    /*
+     * Local, and only when the tag generation says this CPU may still
+     * hold tags it must not trust. This is the line the unit exists for:
+     * it used to be an unconditional `tlbi vmalle1is`, a broadcast that
+     * emptied the user TLB of every CPU in the machine on every process
+     * switch made by any of them.
+     */
+    if (flush)
+        tlbi_vmalle1();
 }
 
 void arch_mmu_invalidate(const struct arch_mmu_context *ctx, vaddr_t va, size_t len)
@@ -426,6 +442,23 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
         g_stats[arch_cpu_id()].acks_received += others;
     }
     arch_mmu_invalidate(ctx, va, len);
+}
+
+void arch_mmu_invalidate_asid(const struct arch_mmu_context *ctx, cpumask_t cpus)
+{
+    (void)cpus;   /* TLB maintenance is broadcast here; the mask is the caller's bookkeeping */
+    if (ctx->asid == 0)
+        return;   /* never tagged: nothing was ever cached under a tag of its own */
+    /*
+     * `aside1is` names one ASID and leaves every other space and the
+     * kernel alone. Safe to aim at the *current* tag even after a
+     * generation rollover: a CPU still holding this space under an older
+     * tag can only be a CPU that has not switched since the rollover,
+     * and a CPU that has not switched is still running the space -- which
+     * a space being destroyed is not.
+     */
+    uint64_t arg = (uint64_t)ctx->asid << TTBR_ASID_SHIFT;
+    __asm__ volatile("dsb ishst\n\ttlbi aside1is, %0\n\tdsb ish\n\tisb" : : "r"(arg) : "memory");
 }
 
 int arch_mmu_prepopulate(struct arch_mmu_context *ctx, vaddr_t va, size_t len)

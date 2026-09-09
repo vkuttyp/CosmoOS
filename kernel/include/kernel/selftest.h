@@ -20,6 +20,12 @@ int selftest_run_all(void);
  * or sets *reason to an immortal string and returns false. */
 bool selftest_pmm(const char **reason);
 bool selftest_vmm(const char **reason);
+bool selftest_asid_alloc(const char **reason);      /* kernel/memory/memtest.c: tags, generations, rollover */
+bool selftest_asid_isolation(const char **reason);  /* two spaces, one address, no flush between them */
+bool selftest_asid_rollover(const char **reason);   /* a recycled tag does not carry the old space across */
+bool selftest_asid_destroy_reuse(const char **reason); /* a tag freed at destroy carries nothing forward */
+bool selftest_asid_quiet(const char **reason);       /* the switch path performs no full flush at all */
+bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds when every switch flushes */
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
 bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: address-space, memory and handle limits */
 bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */

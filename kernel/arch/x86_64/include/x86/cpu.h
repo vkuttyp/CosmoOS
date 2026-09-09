@@ -30,6 +30,8 @@ struct x86_cpu_info {
     bool has_x2apic;
     bool has_fsgsbase;
     bool has_invariant_tsc;
+    bool has_pcid;       /* CPUID.1:ECX[17]; CR4.PCIDE is set when true */
+    bool has_invpcid;    /* CPUID.7:EBX[10]: invalidate a PCID that is not current */
 };
 
 /* Boot CPU once: identify the processor into the shared info block and
@@ -53,6 +55,7 @@ void x86_ap_entry(unsigned cpu) __noreturn;
 /* CR4 */
 #define CR4_PAE      (1ULL << 5)
 #define CR4_PGE      (1ULL << 7)
+#define CR4_PCIDE    (1ULL << 17)
 #define CR4_UMIP     (1ULL << 11)
 #define CR4_FSGSBASE (1ULL << 16)
 #define CR4_SMEP     (1ULL << 20)

@@ -214,6 +214,15 @@ int arch_mmu_context_init_user(struct arch_mmu_context *ctx, const struct arch_m
     return 0;
 }
 
+void arch_mmu_invalidate_asid(const struct arch_mmu_context *ctx, cpumask_t cpus)
+{
+    (void)cpus;
+    /* Nothing to do while this architecture has no tags: every switch
+     * away from a space already dropped its translations, so no CPU
+     * holds any of a space that is not running anywhere. */
+    KASSERT(ctx->asid == 0);
+}
+
 int arch_mmu_prepopulate(struct arch_mmu_context *ctx, vaddr_t va, size_t len)
 {
     vaddr_t end = va + len;
@@ -492,8 +501,36 @@ bool arch_mmu_query(const struct arch_mmu_context *ctx, vaddr_t va, paddr_t *pa,
     return true;
 }
 
-void arch_mmu_activate(const struct arch_mmu_context *ctx)
+/*
+ * No address-space tags on x86-64 yet, whatever the CPU reports.
+ *
+ * PCID gives 12 bits and INVPCID makes them cheap to invalidate, and
+ * `x86_cpu_info()` reports both -- but **TCG implements neither**, on
+ * any CPU model (`-cpu max` does not offer PCID; a model that requests
+ * it is refused with "TCG doesn't support requested feature"). Every
+ * environment this tree is tested in is TCG: the boot test, the whole
+ * verification chain, and CI. Writing the tagged switch path here would
+ * be writing a page of untestable code in the one place where a mistake
+ * is a silent loss of isolation between processes, so it is not written.
+ *
+ * Returning 0 is not a stub: it is the same answer a real machine
+ * without PCID gives, and the generic path it selects -- allocate no
+ * tag, flush on every switch -- is the path this architecture has
+ * always taken. It is therefore exercised on every x86-64 boot rather
+ * than being dead code waiting for hardware.
+ */
+unsigned arch_mmu_asid_bits(void)
 {
+    return 0;
+}
+
+void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
+{
+    /* CR4.PCIDE is clear (see arch_mmu_asid_bits), so CR3[11:0] must be
+     * zero and a load flushes every non-global translation -- which is
+     * what `flush` asks for and this architecture cannot yet avoid. */
+    KASSERT(ctx->asid == 0);
+    (void)flush;
     __asm__ volatile("mov %0, %%cr3" : : "r"(ctx->root) : "memory");
 }
 

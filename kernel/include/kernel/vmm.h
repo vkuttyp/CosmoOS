@@ -54,7 +54,15 @@ struct vm_space {
     vaddr_t near_hi;
     bool user;               /* a process address space (lower half) */
     uint64_t anon_pages;     /* frames populated for this space's ANON regions */
-    cpumask_t active_cpus;   /* user: CPUs whose translation root is this space now (atomic) */
+    /*
+     * User spaces: the CPUs that may hold translations of this space.
+     * A CPU joins on switch-in and leaves only when something flushes
+     * what it holds -- a tag-generation rollover, or this space's
+     * destruction. It is *not* cleared on switch-out: with address-space
+     * tags a CPU keeps a space's translations after leaving it, which is
+     * the whole point of the tags (M35, kernel/asid.h).
+     */
+    cpumask_t tlb_cpus;
     uint64_t mapped_pages;   /* user: pages covered by regions (COSMO_RLIMIT_AS) */
     uint64_t limit_mapped_pages;   /* user: vm_user_map_anon refuses beyond this (-ENOMEM) */
     uint64_t limit_anon_pages;     /* user: a demand-zero fault at or beyond this is "no memory" */
@@ -122,7 +130,7 @@ unsigned vm_user_region_count(struct vm_space *space);
 void vm_space_set_limits(struct vm_space *space, uint64_t mapped_pages, uint64_t anon_pages);
 
 /* The calling CPU switches its translation root from `prev` to `next`
- * (either may be the kernel space): maintains active_cpus around the
+ * (either may be the kernel space): maintains tlb_cpus around the
  * arch activation. Called by arch_thread_switch_prepare with interrupts
  * off. */
 void vm_space_switch(struct vm_space *prev, struct vm_space *next);

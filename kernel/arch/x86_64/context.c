@@ -52,7 +52,7 @@ void arch_thread_switch_prepare(struct thread *prev, struct thread *next)
     struct vm_space *space = next->proc ? next->proc->space : &kernel_space;
     if (read_cr3() != space->mmu.root) {
         struct percpu *pc = this_cpu();
-        vm_space_switch(pc->cur_space, space);   /* maintains active_cpus around the CR3 write */
+        vm_space_switch(pc->cur_space, space);   /* maintains tlb_cpus around the CR3 write */
         pc->cur_space = space;
     }
 

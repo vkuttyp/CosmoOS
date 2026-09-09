@@ -43,8 +43,9 @@ void x86_start(const struct cosmoboot_info *info)
     arch_syscall_init_cpu();
     const struct x86_cpu_info *c = x86_cpu_info();
     kdebug("x86: %s family %u model %u stepping %u", c->vendor, c->family, c->model, c->stepping);
-    kdebug("x86: nx=%d smep=%d smap=%d umip=%d pge=%d apic=%d x2apic=%d",
-           c->has_nx, c->has_smep, c->has_smap, c->has_umip, c->has_pge, c->has_apic, c->has_x2apic);
+    kdebug("x86: nx=%d smep=%d smap=%d umip=%d pge=%d apic=%d x2apic=%d pcid=%d invpcid=%d",
+           c->has_nx, c->has_smep, c->has_smap, c->has_umip, c->has_pge, c->has_apic, c->has_x2apic,
+           c->has_pcid, c->has_invpcid);
     kdebug("x86: cr0=0x%llx cr3=0x%llx cr4=0x%llx efer=0x%llx",
            (unsigned long long)read_cr0(), (unsigned long long)read_cr3(),
            (unsigned long long)read_cr4(), (unsigned long long)rdmsr(MSR_EFER));

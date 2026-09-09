@@ -40,6 +40,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/interrupt/irq.c \
 	kernel/interrupt/ipi.c \
 	kernel/memory/bootmem.c \
+	kernel/memory/asid.c \
 	kernel/memory/buddy.c \
 	kernel/memory/pmm.c \
 	kernel/memory/vmm.c \

@@ -40,6 +40,23 @@ void aarch64_cpu_init(void)
     g_cpu.mpidr = READ_SYSREG(mpidr_el1);
     g_cpu.has_pan = ID_AA64MMFR1_PAN(READ_SYSREG(id_aa64mmfr1_el1)) != 0;
     g_cpu.parange = (unsigned)ID_AA64MMFR0_PARANGE(READ_SYSREG(id_aa64mmfr0_el1));
+    /*
+     * ASID width. The loader left TCR_EL1 with AS clear (8-bit ASIDs);
+     * this is the kernel's only write to that register, and it happens
+     * here -- before any space exists, while every TTBR0 in the machine
+     * carries ASID 0, which reads the same at either width. Secondary
+     * CPUs copy TCR_EL1 from this one through the SMP mailbox, so the
+     * width is uniform without their doing anything.
+     */
+    g_cpu.asid_bits = ID_AA64MMFR0_ASIDBITS(READ_SYSREG(id_aa64mmfr0_el1)) == 2 ? 16 : 8;
+    if (g_cpu.asid_bits == 16) {
+        uint64_t tcr = READ_SYSREG(tcr_el1);
+        if (!(tcr & TCR_AS)) {
+            WRITE_SYSREG(tcr_el1, tcr | TCR_AS);
+            isb();
+            tlbi_vmalle1is();   /* a TCR change invalidates nothing by itself */
+        }
+    }
     g_cpu.gic_sysreg = (unsigned)ID_AA64PFR0_GIC(READ_SYSREG(id_aa64pfr0_el1));
     unsigned implementer = (unsigned)((g_cpu.midr >> 24) & 0xFF);
     unsigned part = (unsigned)((g_cpu.midr >> 4) & 0xFFF);
