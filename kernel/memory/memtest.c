@@ -14,6 +14,7 @@
 #include <kernel/pmm.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
 
@@ -897,7 +898,19 @@ bool selftest_asid_destroy_reuse(const char **reason)
  * between runs of one binary. The count does not depend on emulation
  * at all.
  */
-#define ASID_QUIET_ROUNDS 200u
+/*
+ * Deliberately small. The loop runs with interrupts off so that no other
+ * switch on this CPU perturbs the counts, and each switch costs ~140 us
+ * under TCG (QEMU's software TLB is not ASID-tagged, so changing the
+ * ASID takes a slow path). At 200 rounds that held interrupts off for
+ * nearly 60 ms -- long enough to stall timers on every CPU and then
+ * release a burst of deferred allocation into whatever test ran next,
+ * which is how this was found: `kmalloc`'s live-object equality failed
+ * intermittently, and the burst was landing on either side of its own
+ * snapshot. Fifty rounds prove the same property in a window the rest
+ * of the machine need not notice.
+ */
+#define ASID_QUIET_ROUNDS 50u
 
 bool selftest_asid_quiet(const char **reason)
 {
@@ -919,31 +932,49 @@ bool selftest_asid_quiet(const char **reason)
      * allocates its tag, and this CPU's own first switch of a generation
      * legitimately flushes. What is counted is the steady state. */
     struct vm_space *cur = restore;
-    arch_irq_state_t s = arch_irq_save();
     for (unsigned i = 0; i < 4; i++) {
         struct vm_space *sp = (i & 1) ? b : a;
         vm_space_switch(cur, sp);
         cur = sp;
     }
     vm_space_switch(cur, restore);
-    arch_irq_restore(s);
 
     asid_get_stats(&st0);
     uint64_t hw0 = arch_mmu_activate_flushes();
     cur = restore;
-    s = arch_irq_save();
+    /*
+     * Interrupts stay *on*. The counters this measures do not move for
+     * anyone in the steady state -- no switch flushes and no switch
+     * allocates a tag for a space that already has one -- so preemption
+     * adds nothing to either, and the property holds however many other
+     * threads switch here meanwhile. Disabling interrupts was caution
+     * rather than necessity, and it cost more than it bought: a loop
+     * long enough to be worth measuring stalled timers on every CPU and
+     * released a burst of deferred allocation into the next test's
+     * accounting.
+     */
     for (unsigned i = 0; i < ASID_QUIET_ROUNDS; i++) {
-        /* Through the kernel's root each time, as a real switch to a
-         * kernel thread does. It must cost no tag: the kernel runs under
-         * tag 0, and asking the allocator for one on its behalf would
-         * consume a tag per generation that nothing ever releases. */
+        struct vm_space *sp = (i & 1) ? b : a;
+        vm_space_switch(cur, sp);
+        cur = sp;
+    }
+    /*
+     * And a few through the kernel's root, which must cost no tag: the
+     * kernel runs under tag 0, and asking the allocator on its behalf
+     * would consume one per generation that nothing releases (M39).
+     * Only a few, because a switch to the kernel root re-walks the
+     * early-device mappings and changes TTBR0 twice, which under TCG is
+     * expensive enough that doing it hundreds of times disturbs the
+     * whole machine -- it made the next test's allocation accounting
+     * fail intermittently.
+     */
+    for (unsigned i = 0; i < 4; i++) {
         struct vm_space *sp = (i & 1) ? b : a;
         vm_space_switch(cur, &kernel_space);
         vm_space_switch(&kernel_space, sp);
         cur = sp;
     }
     vm_space_switch(cur, restore);
-    arch_irq_restore(s);
     asid_get_stats(&st1);
     uint64_t hw1 = arch_mmu_activate_flushes();
 
@@ -961,7 +992,7 @@ bool selftest_asid_quiet(const char **reason)
      * fewer times than it switched would mean the mode was not in force
      * for the whole loop.
      */
-    uint64_t want = asid_paranoid() ? 2 * ASID_QUIET_ROUNDS + 1 : 0;
+    uint64_t want = asid_paranoid() ? ASID_QUIET_ROUNDS + 9 : 0;
     if (hw1 - hw0 != want) {
         *reason = asid_paranoid() ? "paranoid mode did not flush on every switch"
                                   : "the switch path still flushes the TLB";
@@ -981,9 +1012,9 @@ bool selftest_asid_quiet(const char **reason)
         *reason = "a switch allocated a tag for a space that already had one, or for the kernel";
         return false;
     }
-    kinfo("selftest: asid-quiet: %u switches (half of them through the kernel's root), "
+    kinfo("selftest: asid-quiet: %u switches (eight through the kernel's root), "
           "%llu TLB flushes performed, %llu tags allocated",
-          2 * ASID_QUIET_ROUNDS + 1, (unsigned long long)(hw1 - hw0),
+          ASID_QUIET_ROUNDS + 9, (unsigned long long)(hw1 - hw0),
           (unsigned long long)(st1.allocs - st0.allocs));
     return true;
 }

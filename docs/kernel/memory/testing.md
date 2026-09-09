@@ -224,6 +224,34 @@ nothing real is slower. The claim this unit is entitled to is structural
 by count -- and what that is worth in nanoseconds needs hardware this
 tree has never run on.
 
+### `selftest_kmalloc` measures the whole machine, and that is fragile
+
+`selftest_kmalloc` asserts `ks1.live_objects == ks0.live_objects` across
+its own run. That is a statement about *the machine*, not about the
+allocator under test: any background allocation on any CPU breaks it.
+It held by luck until the six `asid-*` tests were placed before it,
+whereupon it failed in roughly three runs out of four under
+`QEMU_KBD=hub` -- always by two or four objects, always in the generic
+`kmalloc-64` bucket, never in `vm_space` or `vm_region`, and never at a
+test boundary (the count is identical entering every test). The tags
+tests leak nothing; they wake other CPUs, whose deferred work lands
+inside the next test's window.
+
+Reducing the disturbance did not remove it. Shortening the measured loop
+from 200 rounds to 50, measuring with interrupts enabled instead of
+disabled, cutting the switches through the kernel's root from 200 to
+four, and removing the destroy-path broadcast each moved the failure
+rate without eliminating it. What removed it was **ordering**: the
+`asid-*` tests now run *after* `kmalloc`, so nothing of theirs is in
+flight while it counts.
+
+That is a mitigation, not a repair. The assertion remains true only
+while whatever precedes it happens to be quiet, and the next test placed
+before it will find the same edge. Fixing it properly means measuring
+what the allocator itself allocates rather than what the machine holds
+-- a change to that test, and to the accounting it can reach, which
+belongs to a unit of its own rather than to this one.
+
 ### The destroy-path invalidate has no test, and why
 
 Removing `arch_mmu_invalidate_asid` from `vm_space_destroy` leaves every
