@@ -59,6 +59,16 @@ $(HV_TEST_OUT)/guest_dtb.bin: $(ROOT)/tests/hv/aarch64/guest_dtb_start.S $(ROOT)
 	$(Q)$(LD) -Ttext=0x40080000 --oformat=binary -o $@ $@.start.o $@.main.o $@.fdt.o
 HV_GUEST_BINS += $(HV_TEST_OUT)/guest_dtb.bin
 HV_ARCHIVE_ENTRIES += tests/hv/guest_dtb.bin=$(HV_TEST_OUT)/guest_dtb.bin
+
+# A stock Linux kernel Image, if a developer has dropped a raw arm64 Image
+# at tests/hv/aarch64/Image (gitignored): the boot archive carries it and
+# rc.test boots it (docs/kernel-services/virtualization/testing.md). Absent
+# -- as in CI -- everything below is empty and the Linux test skips.
+HV_LINUX_IMAGE := $(wildcard $(ROOT)/tests/hv/aarch64/Image)
+ifneq ($(HV_LINUX_IMAGE),)
+HV_ARCHIVE_ENTRIES += tests/hv/Image=$(HV_LINUX_IMAGE)
+HV_GUEST_BINS += $(HV_LINUX_IMAGE)
+endif
 endif
 
 .PHONY: hv-guests
