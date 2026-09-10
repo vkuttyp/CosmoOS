@@ -72,8 +72,12 @@ static int rx_serve(void *sctx, const struct vq_io *io, const struct vq_queue *q
         if (vq_read_desc(io, q, d.next, &d) != 0)
             return -1;
     }
-    if (cap < VNET_HDR_LEN)
-        return -1;                                   /* cannot hold even a header: a driver error */
+    /* A receive buffer must hold a full frame plus the header (this device
+     * offers no mergeable buffers). Requiring that here means the frame is
+     * never larger than the buffer, so the wire is never asked to truncate
+     * and a dequeued frame is never lost or delivered short. */
+    if (cap < VNET_BUF_MAX)
+        return -1;
 
     uint8_t stage[VNET_BUF_MAX];
     int framelen = nio->wire_rx(io->ctx, stage + VNET_HDR_LEN, cap - VNET_HDR_LEN);

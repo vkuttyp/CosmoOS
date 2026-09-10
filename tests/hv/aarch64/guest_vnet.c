@@ -98,6 +98,14 @@ void guest_main(void)
     setup_queue(1, TXDESC, TXAVAIL, TXUSED);   /* transmit */
     R(STATUS) = S_ACK | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK;
 
+    /* A queue that does not exist must not disturb the real ones: select it
+     * and scribble a bogus descriptor address. If the device aliased it to
+     * the receive queue, the loopback below would read descriptors from
+     * garbage and never complete. */
+    R(QUEUE_SEL) = 5;
+    R(Q_DESC_LO) = 0xdeadbeefu;
+    R(QUEUE_SEL) = 0;
+
     hvc3(1, magic, devid, mac_lo);
 
     /* post one receive buffer (device-writable) */

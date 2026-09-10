@@ -371,7 +371,10 @@ static int vnet_service(struct vnet_dev *d)
  * or transmit queue for the queue-shaped registers. */
 static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
 {
-    struct vq_queue *q = d->queue_sel == 1 ? &d->tq : &d->rq;
+    /* Only queues 0 (receive) and 1 (transmit) exist; a QueueSel past them
+     * selects nothing, so the queue-shaped registers read 0 and ignore
+     * writes rather than aliasing an existing queue's state. */
+    struct vq_queue *q = d->queue_sel == 0 ? &d->rq : d->queue_sel == 1 ? &d->tq : NULL;
     if (!write) {
         switch (off) {
         case 0x000: *val = 0x74726976u; return;                 /* MagicValue */
@@ -383,7 +386,7 @@ static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
             *val = d->feat_sel == 1 ? 1u : (1u << VIRTIO_NET_F_MAC);
             return;
         case 0x034: *val = VQ_MAX; return;                     /* QueueNumMax */
-        case 0x044: *val = (uint32_t)q->ready; return;
+        case 0x044: *val = q ? (uint32_t)q->ready : 0u; return;
         case 0x060: *val = d->irq_pending ? 1u : 0u; return;    /* InterruptStatus */
         case 0x070: *val = d->status; return;
         /* config space: virtio_net_config.mac[6] at offset 0 */
@@ -397,8 +400,6 @@ static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
     switch (off) {
     case 0x014: d->feat_sel = w; break;
     case 0x030: d->queue_sel = w; break;
-    case 0x038: q->size = (uint16_t)w; break;
-    case 0x044: q->ready = (int)w; break;
     case 0x050:                                                /* QueueNotify */
         if (vnet_service(d) > 0)
             d->draining = 1;
@@ -408,12 +409,16 @@ static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
         cosmo_vm_lower_spi(d->vm, COSMO_HVM_VIRTIO1_INTID);
         break;
     case 0x070: d->status = w; break;
-    case 0x080: q->desc_gpa = (q->desc_gpa & ~0xFFFFFFFFull) | w; break;
-    case 0x084: q->desc_gpa = (q->desc_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
-    case 0x090: q->avail_gpa = (q->avail_gpa & ~0xFFFFFFFFull) | w; break;
-    case 0x094: q->avail_gpa = (q->avail_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
-    case 0x0a0: q->used_gpa = (q->used_gpa & ~0xFFFFFFFFull) | w; break;
-    case 0x0a4: q->used_gpa = (q->used_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    /* the queue-shaped registers act on the selected queue, and do nothing
+     * when QueueSel names one that does not exist */
+    case 0x038: if (q) q->size = (uint16_t)w; break;
+    case 0x044: if (q) q->ready = (int)w; break;
+    case 0x080: if (q) q->desc_gpa = (q->desc_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x084: if (q) q->desc_gpa = (q->desc_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x090: if (q) q->avail_gpa = (q->avail_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x094: if (q) q->avail_gpa = (q->avail_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x0a0: if (q) q->used_gpa = (q->used_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x0a4: if (q) q->used_gpa = (q->used_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
     default: break;
     }
 }

@@ -2471,6 +2471,9 @@ static void net_notify(struct vm *vm, struct net_model *m)
 
 static void net_reg(struct vm *vm, struct net_model *m, unsigned off, bool write, uint64_t *val)
 {
+    /* only queues 0 and 1 exist; a QueueSel past them selects nothing, so
+     * the queue-shaped registers do not alias an existing queue's state */
+    int sel = m->queue_sel == 0 || m->queue_sel == 1;
     uint64_t *desc = m->queue_sel == 1 ? &m->tq_desc : &m->rq_desc;
     uint64_t *drv  = m->queue_sel == 1 ? &m->tq_avail : &m->rq_avail;
     uint64_t *dev  = m->queue_sel == 1 ? &m->tq_used : &m->rq_used;
@@ -2484,7 +2487,7 @@ static void net_reg(struct vm *vm, struct net_model *m, unsigned off, bool write
         case 0x00c: *val = 0x554d4551u; return;
         case 0x010: *val = m->feat_sel == 1 ? 1u : (1u << 5); return;  /* VERSION_1 ; NET_F_MAC */
         case 0x034: *val = 8; return;                  /* QueueNumMax */
-        case 0x044: *val = (uint32_t)*ready; return;
+        case 0x044: *val = sel ? (uint32_t)*ready : 0u; return;
         case 0x070: *val = m->status; return;
         case 0x100: *val = (uint32_t)m->mac[0] | ((uint32_t)m->mac[1] << 8) |
                            ((uint32_t)m->mac[2] << 16) | ((uint32_t)m->mac[3] << 24); return;
@@ -2496,16 +2499,16 @@ static void net_reg(struct vm *vm, struct net_model *m, unsigned off, bool write
     switch (off) {
     case 0x014: m->feat_sel = w; break;
     case 0x030: m->queue_sel = w; break;
-    case 0x038: *num = w; break;
-    case 0x044: *ready = (int)w; break;
     case 0x050: net_notify(vm, m); break;
     case 0x070: m->status = w; break;
-    case 0x080: *desc = (*desc & ~0xFFFFFFFFull) | w; break;
-    case 0x084: *desc = (*desc & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
-    case 0x090: *drv = (*drv & ~0xFFFFFFFFull) | w; break;
-    case 0x094: *drv = (*drv & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
-    case 0x0a0: *dev = (*dev & ~0xFFFFFFFFull) | w; break;
-    case 0x0a4: *dev = (*dev & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x038: if (sel) *num = w; break;
+    case 0x044: if (sel) *ready = (int)w; break;
+    case 0x080: if (sel) *desc = (*desc & ~0xFFFFFFFFull) | w; break;
+    case 0x084: if (sel) *desc = (*desc & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x090: if (sel) *drv = (*drv & ~0xFFFFFFFFull) | w; break;
+    case 0x094: if (sel) *drv = (*drv & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x0a0: if (sel) *dev = (*dev & ~0xFFFFFFFFull) | w; break;
+    case 0x0a4: if (sel) *dev = (*dev & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
     default: break;
     }
 }

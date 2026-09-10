@@ -727,7 +727,7 @@ read path's Linux boot has, not a CI gate.
 
 Not done, and named: discard and write-zeroes; a copy-on-write overlay;
 indirect and chained descriptors beyond the simple case; multiple queues
-and `VIRTIO_F_RING_EVENT_IDX`; virtio-net and a PCI transport.
+and `VIRTIO_F_RING_EVENT_IDX`; and a PCI transport.
 
 ### The shared virtqueue walk (`vq.c`), and a network interface (`vmctl --net loop`)
 

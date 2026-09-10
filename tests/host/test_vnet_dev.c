@@ -181,12 +181,24 @@ static void test_hostile(void)
     q = fresh_queue();
     EXPECT(vnet_process_rx(&io, &q) == -1);
 
-    /* (4) a receive buffer too small to hold even the header. */
+    /* (4) a receive buffer too small to hold a full frame. It must be refused
+       before the wire is touched, so the frame is not truncated or lost --
+       neither a buffer holding only part of a frame nor an exactly
+       header-sized one may dequeue it. */
     memset(g_ram, 0, GRAM); g_wire_head = g_wire_count = 0;
-    (void)wire_tx(NULL, (uint8_t[8]){ 0 }, 8);
-    build_rx(VNET_HDR_LEN - 1);
+    (void)wire_tx(NULL, (uint8_t[8]){ 1, 2, 3, 4, 5, 6, 7, 8 }, 8);
+    build_rx(VNET_HDR_LEN + 64);              /* header + part of a frame, < VNET_BUF_MAX */
     q = fresh_queue();
     EXPECT(vnet_process_rx(&io, &q) == -1);
+    EXPECT(g_wire_count == 1);                /* the frame was not consumed */
+    build_rx(VNET_HDR_LEN);                   /* exactly header-sized */
+    q = fresh_queue();
+    EXPECT(vnet_process_rx(&io, &q) == -1);
+    EXPECT(g_wire_count == 1);
+    build_rx(VNET_HDR_LEN - 1);               /* too small even for the header */
+    q = fresh_queue();
+    EXPECT(vnet_process_rx(&io, &q) == -1);
+    EXPECT(g_wire_count == 1);
 
     /* (5) a transmit buffer that points outside guest RAM. */
     memset(g_ram, 0, GRAM); g_oob = 0; g_wire_head = g_wire_count = 0;
