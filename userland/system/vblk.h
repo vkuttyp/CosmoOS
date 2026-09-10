@@ -1,25 +1,24 @@
 /*
- * vblk.h - The device side of a virtio-blk virtqueue
- * (docs/audit/next-subsystem-vblk.md).
+ * vblk.h - The device side of a virtio-blk virtqueue.
  *
- * The mirror of drivers/virtio/virtqueue.c: that is the driver end, which
- * produces the available ring and consumes the used ring; this is the
- * device end, which consumes available and produces used. It is the part
- * a guest's disk needs and the tree did not have.
+ * The block `serve` over the shared virtqueue walk (vq.h): given a head, it
+ * reads a virtio-blk request (a readable header, data buffers, a writable
+ * status byte) and moves the sectors between the disk and guest memory. The
+ * walk, the ring and the hostile-input disciplines are vq.h's, shared with
+ * every other device; this file is only what a block request means.
  *
  * It touches no system call: guest memory and the disk are reached through
  * callbacks, so the same code is compiled into vmctl (where the callbacks
  * are cosmo_vm_mem_read/write and a pread of the disk file) and into the
  * host test (where they are an in-memory guest and an in-memory disk).
- * Every byte read from the ring is the guest's, and therefore untrusted:
- * a descriptor index, a chain length, a buffer address or a length that is
- * out of range is refused, never followed.
  */
 #ifndef COSMO_VBLK_H
 #define COSMO_VBLK_H
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "vq.h"
 
 /* virtio-blk request types and status, and the sector size the protocol
  * fixes at 512 regardless of the backing file's block size. */
@@ -36,10 +35,11 @@
 #define VIRTIO_BLK_F_FLUSH   9u   /* writes may be buffered; T_FLUSH makes them durable */
 #define VIRTIO_F_VERSION_1  32u   /* a modern (non-legacy) device */
 
+#define VBLK_QUEUE_MAX     VQ_MAX   /* the transport's QueueNumMax */
+
 struct vblk_io {
-    /* Move `len` bytes between guest memory at `gpa` and `buf`; 0 ok, <0 a
-     * fault (an address outside the guest's regions -- the backstop against
-     * a descriptor that points anywhere). */
+    /* Guest memory and the per-notification ceiling: vq_process's needs, kept
+     * here so a vblk_io builds a vq_io view of these four fields. */
     int (*read_guest)(void *ctx, uint64_t gpa, void *buf, uint32_t len);
     int (*write_guest)(void *ctx, uint64_t gpa, const void *buf, uint32_t len);
     /* Serve a disk read: `len` bytes from byte offset `off`; 0 ok, <0 error. */
@@ -53,21 +53,8 @@ struct vblk_io {
     int (*disk_flush)(void *ctx);
     void *ctx;
     uint64_t capacity_sectors;   /* the disk's size, in 512-byte sectors */
-    /* The most bytes one QueueNotify may serve before the rest wait for the
-     * next: the ceiling on synchronous, guest-driven work in the owner's
-     * thread. 0 means unbounded. vmctl sets VBLK_MAX_BYTES_PER_CALL. */
-    uint64_t max_bytes_per_call;
+    uint64_t max_bytes_per_call; /* vq_io's ceiling; 0 unbounded. vmctl sets VBLK_MAX_BYTES_PER_CALL */
 };
-
-struct vblk_queue {
-    uint64_t desc_gpa, avail_gpa, used_gpa;   /* where the guest placed the ring */
-    uint16_t size;                            /* power of two, <= VBLK_QUEUE_MAX */
-    uint16_t last_avail;                      /* the next available index to serve */
-    uint16_t used_idx;                        /* the device's view of used->idx */
-    int ready;
-};
-
-#define VBLK_QUEUE_MAX 256u
 
 /* Guest-driven work is done synchronously in the owner's thread, so it must
  * be bounded on guest-controlled input. A single request may name at most
@@ -85,17 +72,13 @@ struct vblk_queue {
 #define VBLK_FLUSH_COST          VBLK_REQ_MAX_BYTES
 
 /*
- * Serve requests the guest has made available since the last call, at most
- * max_bytes_per_call of data before deferring the rest to the next call.
- * Returns the number served this call (>= 0), each appended to the used
- * ring; the caller raises the device's interrupt when this is > 0 and, if it
- * is > 0, calls again (the deferred remainder is served a batch at a time).
- * Returns -1 and stops on a hostile ring -- a malformed descriptor chain, an
- * index or length out of range, a guest-memory fault: a failure is never
- * reported as a positive count, so a draining caller does not replay the
- * faulting request. Requests completed before a mid-walk fault keep their
- * used-ring entries; they are just not counted on the failing call.
+ * Serve the block requests the guest has made available since the last call
+ * (a thin wrapper over vq_process with the block `serve`). Returns the number
+ * served this call (>= 0), each appended to the used ring; the caller raises
+ * the interrupt when the used ring advanced and calls again while > 0.
+ * Returns -1 and stops on a hostile ring or a fault -- never a positive count,
+ * so a draining caller does not replay the faulting request.
  */
-int vblk_process(struct vblk_io *io, struct vblk_queue *q);
+int vblk_process(struct vblk_io *io, struct vq_queue *q);
 
 #endif /* COSMO_VBLK_H */

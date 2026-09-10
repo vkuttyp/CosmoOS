@@ -158,7 +158,7 @@ struct vio {
     int writable;         /* --disk-rw: the disk is read-write, and offers flush */
     uint64_t capacity;    /* sectors */
     uint32_t feat_sel, status;
-    struct vblk_queue q;
+    struct vq_queue q;
     int irq_pending;
     int draining;         /* a notify left work the run loop is still serving */
 };

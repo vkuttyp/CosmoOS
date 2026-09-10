@@ -35,7 +35,7 @@ HOST_PKG_SRCS := tests/host/test_pkg.c pkg/manifest.c pkg/version.c pkg/tar.c
 HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
 HOST_HV_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/svm_npt.c tests/host/test_hv.c
 HOST_FDT_SRCS := $(HOST_COMMON_SRCS) tools/fdt/fdt.c tools/fdt/fdt_read.c tests/host/test_fdt.c
-HOST_VBLK_SRCS := $(HOST_COMMON_SRCS) userland/system/vblk.c tests/host/test_vblk_dev.c
+HOST_VBLK_SRCS := $(HOST_COMMON_SRCS) userland/system/vq.c userland/system/vblk.c tests/host/test_vblk_dev.c
 HOST_VMX_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/vmx_ept.c tests/host/test_vmx.c
 HOST_HV_S2_SRCS := $(HOST_COMMON_SRCS) kernel/arch/aarch64/hv_s2.c tests/host/test_hv_s2.c
 HOST_RELOC_A64_SRCS := $(HOST_COMMON_SRCS) kernel/arch/aarch64/modreloc.c tests/host/test_reloc_aarch64.c
@@ -95,7 +95,7 @@ $(HOST_OUT)/test_fdt: $(addprefix $(ROOT)/,$(HOST_FDT_SRCS)) $(ROOT)/tools/fdt/f
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/tools/fdt $(addprefix $(ROOT)/,$(HOST_FDT_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_vblk_dev: $(addprefix $(ROOT)/,$(HOST_VBLK_SRCS)) $(ROOT)/userland/system/vblk.h
+$(HOST_OUT)/test_vblk_dev: $(addprefix $(ROOT)/,$(HOST_VBLK_SRCS)) $(ROOT)/userland/system/vblk.h $(ROOT)/userland/system/vq.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_VBLK_SRCS)) $(HOST_LDFLAGS) -o $@
