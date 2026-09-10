@@ -40,6 +40,10 @@ struct vblk_io {
     int (*disk_read)(void *ctx, uint64_t off, void *buf, uint32_t len);
     void *ctx;
     uint64_t capacity_sectors;   /* the disk's size, in 512-byte sectors */
+    /* The most bytes one QueueNotify may serve before the rest wait for the
+     * next: the ceiling on synchronous, guest-driven work in the owner's
+     * thread. 0 means unbounded. vmctl sets VBLK_MAX_BYTES_PER_CALL. */
+    uint64_t max_bytes_per_call;
 };
 
 struct vblk_queue {
@@ -51,6 +55,16 @@ struct vblk_queue {
 };
 
 #define VBLK_QUEUE_MAX 256u
+
+/* Guest-driven work is done synchronously in the owner's thread, so it must
+ * be bounded on guest-controlled input. A single request may name at most
+ * VBLK_REQ_MAX_BYTES of data (a real driver's requests are far smaller; one
+ * larger is a driver error and is refused), and one QueueNotify serves at
+ * most VBLK_MAX_BYTES_PER_CALL across all requests before the rest wait for
+ * the next -- so no descriptor length and no ring backlog can turn one
+ * notification into unbounded reads and copies. */
+#define VBLK_REQ_MAX_BYTES       (4u << 20)   /* 4 MiB per request */
+#define VBLK_MAX_BYTES_PER_CALL  (32u << 20)  /* 32 MiB per notification */
 
 /*
  * Serve every request the guest has made available since the last call.

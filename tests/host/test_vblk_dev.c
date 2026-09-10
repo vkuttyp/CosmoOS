@@ -185,12 +185,52 @@ static void test_hostile(void)
     q = fresh_queue();                           /* last_avail 0 */
     EXPECT(vblk_process(&io, &q) == -1);
     EXPECT(g_oob_reads == 0);
+
+    /* (7) a single request naming more data than the device serves. The
+       length is refused before any disk read or guest write, so one
+       descriptor cannot drive an unbounded chunk loop. */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    build_read_req(0, VBLK_SECTOR);
+    put_desc(1, DATA, VBLK_REQ_MAX_BYTES + VBLK_SECTOR, 1 | 2, 2);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == -1);
+    EXPECT(g_oob_reads == 0);
+}
+
+/* The work ceiling: one notification serves at most max_bytes_per_call, and
+   the rest of the backlog waits for the next -- so a ring full of requests
+   (here three heads pointing at the same servable descriptor, the cheap way
+   to make the served bytes exceed the ceiling) cannot be served in one call. */
+static void test_work_ceiling(void)
+{
+    memset(g_ram, 0, GRAM);
+    for (unsigned i = 0; i < sizeof(g_disk); i++)
+        g_disk[i] = (uint8_t)(i * 7 + 1 + (i / VBLK_SECTOR) * 53);
+    build_read_req(0, VBLK_SECTOR);              /* head 0: a one-sector read */
+    put16(AVAIL + 4 + 2, 0); put16(AVAIL + 4 + 4, 0);   /* ring[1] = ring[2] = head 0 */
+    put16(AVAIL + 2, 3);                         /* three requests available */
+
+    struct vblk_io bio = io;
+    bio.max_bytes_per_call = VBLK_SECTOR;        /* room for one sector of data */
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&bio, &q) == 1);         /* only the first is served this call */
+    EXPECT(q.last_avail == 1);                   /* the other two still pending */
+    EXPECT(vblk_process(&bio, &q) == 1);         /* the next call serves the second */
+    EXPECT(q.last_avail == 2);
+    EXPECT(vblk_process(&bio, &q) == 1);         /* and the third */
+    EXPECT(q.last_avail == 3);
+    EXPECT(vblk_process(&bio, &q) == 0);         /* nothing left */
+
+    /* with no ceiling all three are served in one call */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == 3);
 }
 
 static const struct host_test tests[] = {
     { "read", test_read },
     { "write-refused", test_write_is_refused },
     { "hostile", test_hostile },
+    { "work-ceiling", test_work_ceiling },
 };
 
 int main(void)

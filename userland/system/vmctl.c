@@ -212,7 +212,8 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
     case 0x038: v->q.size = (uint16_t)w; break;
     case 0x044: v->q.ready = (int)w; break;
     case 0x050: {                                               /* QueueNotify */
-        struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity };
+        struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity,
+                              VBLK_MAX_BYTES_PER_CALL };
         if (vblk_process(&io, &v->q) > 0) {
             v->irq_pending = 1;
             cosmo_vm_raise_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);   /* through the guest's distributor */

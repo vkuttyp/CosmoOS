@@ -55,6 +55,7 @@ static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t he
 
     uint8_t status = VIRTIO_BLK_S_OK;
     uint32_t written = 0;
+    uint64_t req_bytes = 0;                       /* data this request names, so far */
     uint64_t off = hdr.sector * (uint64_t)VBLK_SECTOR;
     int unsupported = hdr.type != VIRTIO_BLK_T_IN;   /* read-only device: only IN is served */
 
@@ -75,6 +76,12 @@ static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t he
         }
         if (!(d.flags & VQ_DESC_F_WRITE))
             return -1;                           /* a data buffer for a read must be writable */
+        /* A request cannot name more data than the device serves; a length
+         * that would drive an unbounded chunk loop is a driver error, and is
+         * refused before a byte is read or copied. */
+        req_bytes += d.len;
+        if (req_bytes > VBLK_REQ_MAX_BYTES)
+            return -1;
         /* serve this data buffer, a sector at a time, from the disk */
         uint32_t remaining = d.len;
         uint64_t gpa = d.addr;
@@ -117,7 +124,14 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
     if ((uint16_t)(avail_idx - q->last_avail) > q->size)
         return -1;
     int served = 0;
+    uint64_t call_bytes = 0;                     /* work done this notification */
     while (q->last_avail != avail_idx) {
+        /* Stop before starting a request that would take this notification
+         * past its work ceiling; the rest of the backlog is served on the
+         * next notify, so one kick cannot monopolize the owner's thread even
+         * with a ring full of maximal (or overlapping) requests. */
+        if (io->max_bytes_per_call && call_bytes >= io->max_bytes_per_call)
+            break;
         uint16_t slot = q->last_avail % q->size;
         uint16_t head;
         if (read_u16(io, q->avail_gpa + 4u + (uint64_t)slot * 2u, &head) != 0)   /* avail->ring[slot] */
@@ -135,6 +149,7 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
             return served > 0 ? served : -1;
         q->last_avail++;
         served++;
+        call_bytes += used_len;
     }
     return served;
 }
