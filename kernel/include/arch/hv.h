@@ -57,6 +57,7 @@ enum hv_exit_kind {
     HV_EXIT_INTR,        /* a host interrupt arrived; nothing to do but run again */
     HV_EXIT_WFI,         /* AArch64: WFI/WFE, the HLT of this architecture */
     HV_EXIT_SYSREG,      /* AArch64: a trapped system-register access */
+    HV_EXIT_EMULATED,    /* the backend completed the access itself (a guest's own GIC); run again */
     HV_EXIT_FAIL,
 };
 
@@ -106,7 +107,9 @@ int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
 
 /* A vCPU starts at the architectural reset state (real mode, rip 0). */
-int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out);
+/* `index` is the vCPU's number within its VM: on AArch64 it is the MPIDR
+ * the guest reads and the redistributor frame that is its own. */
+int arch_hv_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out);
 void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v);
 void arch_hv_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *out);
 /* -EINVAL for a combination the hardware would refuse. */

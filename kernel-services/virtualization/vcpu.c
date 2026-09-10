@@ -38,7 +38,7 @@ int vcpu_create(struct vm *vm, unsigned index, struct vcpu **out)
     mutex_init(&v->run_lock, "vcpu");
     vintr_init(v);
     v->index = index;
-    int rc = arch_hv_vcpu_create(vm->arch, &v->arch);
+    int rc = arch_hv_vcpu_create(vm->arch, index, &v->arch);
     if (rc) {
         kfree(v);
         return rc;
@@ -295,6 +295,10 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
                 vcpu_inject(v, intid);
         }
 
+        /* The backend answered the access itself -- a guest talking to
+         * its own interrupt controller. Nothing for the owner; run on. */
+        if (e.kind == HV_EXIT_EMULATED)
+            continue;
         if (e.kind == HV_EXIT_INTR) {
             if (max_intr && ++intr >= max_intr) {
                 rc = -ETIMEDOUT;

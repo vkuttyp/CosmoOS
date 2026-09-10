@@ -527,8 +527,9 @@ static void vmx_state_reset(struct arch_hv_vcpu *v)
     memcpy(v->fpu, x86_fpu_reset_image(), x86_fpu_info()->area_size);
 }
 
-static int vmx_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
+static int vmx_be_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
 {
+    (void)index;   /* an x86 vCPU's identity is its APIC id, which the owner sets */
     if (!g_caps.present)
         return -ENOTSUP;
     struct arch_hv_vcpu *v = kzalloc(sizeof(*v));

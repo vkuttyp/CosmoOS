@@ -27,6 +27,7 @@
 #include <arch/irq.h>
 
 #include <aarch64/fpu.h>
+#include <aarch64/gicv3_vdist.h>
 #include <aarch64/hv_ctx.h>
 #include <aarch64/hv_el2.h>
 #include <aarch64/irqc.h>
@@ -94,10 +95,12 @@ struct arch_hv_vm {
     uint16_t vmid;
     cpumask_t ran_on;
     uint64_t cntvoff;        /* CNTVOFF_EL2 for every vCPU: the VM's clock starts here */
+    struct gicv3_vdist *vdist; /* the guest's distributor, on a machine whose guests have a GIC */
 };
 
 struct arch_hv_vcpu {
     struct arch_hv_vm *vm;
+    unsigned index;          /* which vCPU of its VM: its MPIDR and its redistributor frame */
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
     int offered;
@@ -379,6 +382,17 @@ static int el2_vm_create(struct arch_hv_vm **out)
      * siblings must see the same clock they do, so the value is the
      * VM's and not the counter's at each vCPU's creation. */
     vm->cntvoff = READ_SYSREG(cntpct_el0);
+    /* A guest with a CPU interface gets a distributor to drive it from;
+     * without one there is nothing for a distributor to deliver to. */
+    if (g_caps.inject_irq) {
+        vm->vdist = vdist_create();
+        if (vm->vdist == NULL) {
+            hv_s2_destroy(vm->s2_root);
+            vmid_free(vm->vmid);
+            kfree(vm);
+            return -ENOMEM;
+        }
+    }
     *out = vm;
     return 0;
 }
@@ -395,11 +409,13 @@ static void el2_vm_destroy(struct arch_hv_vm *vm)
          * (docs/kernel/iommu/invariants.md IOM6, in this architecture's
          * terms). */
         kerror("hv-el2: VMID %u retired unrevoked; its tables are kept", vm->vmid);
+        vdist_destroy(vm->vdist);
         kfree(vm);
         return;
     }
     hv_s2_destroy(vm->s2_root);
     vmid_free(vm->vmid);
+    vdist_destroy(vm->vdist);
     kfree(vm);
 }
 
@@ -447,6 +463,7 @@ static void ctx_reset(struct arch_hv_vcpu *v)
     c->cntv_ctl = 0;
     c->cntv_cval = 0;
     c->cntvoff = v->vm->cntvoff;
+    c->vmpidr = vdist_mpidr(v->index);   /* who this vCPU is, on every CPU it runs on */
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
     v->lr_vector = -1;
     v->lr_reported = false;
@@ -456,7 +473,7 @@ static void ctx_reset(struct arch_hv_vcpu *v)
     v->pending_event = ~0u;
 }
 
-static int el2_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
+static int el2_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
 {
     if (!g_caps.present)
         return -ENOTSUP;
@@ -469,9 +486,11 @@ static int el2_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
         return -ENOMEM;
     }
     v->vm = vm;
+    v->index = index;
     v->ctx = page_to_virt(pg);
     v->ctx_pa = page_to_phys(pg);
     ctx_reset(v);
+    vdist_vcpu_present(vm->vdist, index, true);   /* its redistributor frame now exists */
     *out = v;
     return 0;
 }
@@ -487,6 +506,7 @@ static void el2_vcpu_destroy(struct arch_hv_vcpu *v)
                v->vm->vmid, (unsigned long long)v->irq_delivered, (unsigned long long)v->irq_deferred);
     if (v == NULL)
         return;
+    vdist_vcpu_present(v->vm->vdist, v->index, false);
     pmm_free_page(phys_to_page(v->ctx_pa));
     kfree(v);
 }
@@ -752,6 +772,38 @@ static void el2_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bo
     v->pending_event = vector;   /* delivered as a guest exception at the next entry */
 }
 
+/*
+ * A data abort at the guest's GICD or a GICR: the access the guest made,
+ * decoded from ESR_EL2.ISS and completed against the VM's distributor.
+ * ISV clear means the hardware did not describe the access -- a pair
+ * or an exclusive, which no GIC driver uses on a register -- and the
+ * owner is told as before. The instruction is stepped over on success:
+ * a data abort does not advance the PC, and the access is done.
+ */
+static bool el2_vdist_access(struct arch_hv_vcpu *v, uint64_t gpa, bool write, uint32_t il)
+{
+    struct gicv3_vdist *d = v->vm->vdist;
+    if (d == NULL)
+        return false;
+    uint32_t iss = (uint32_t)(v->ctx->exit_esr & 0x1FFFFFFu);
+    if (!(iss & (1u << 24)))   /* ISV */
+        return false;
+    unsigned size = 1u << ((iss >> 22) & 3u);   /* SAS */
+    unsigned rt = (iss >> 16) & 0x1Fu;          /* SRT: 31 is XZR */
+    uint64_t val = 0;
+    if (write && rt < 31) {
+        val = v->ctx->guest_x[rt];
+        if (size < 8)
+            val &= (1ull << (size * 8u)) - 1u;
+    }
+    if (!vdist_mmio(d, v->index, gpa, size, write, &val))
+        return false;
+    if (!write && rt < 31)
+        v->ctx->guest_x[rt] = val;   /* zero-extended: no GIC register is signed */
+    v->ctx->guest_pc += il;
+    return true;
+}
+
 static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     const struct hv_ctx *c = v->ctx;
@@ -788,6 +840,10 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
          * shifted right by 8, with the page offset from FAR_EL2. */
         out->mmio.gpa = ((c->exit_hpfar & ~0xFull) << 8) | (c->exit_far & (PAGE_SIZE - 1));
         out->mmio.write = ec == EC_DABT_LOWER && (c->exit_esr & (1u << 6)) != 0;
+        if (ec == EC_DABT_LOWER && el2_vdist_access(v, out->mmio.gpa, out->mmio.write, il)) {
+            out->kind = HV_EXIT_EMULATED;   /* the guest's own GIC answered; nothing for the owner */
+            return 0;
+        }
         return 0;
     default:
         out->kind = HV_EXIT_FAIL;

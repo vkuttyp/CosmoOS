@@ -52,7 +52,10 @@ int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len,
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len) { return g_be->vm_unmap(vm, gpa, len); }
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa) { return g_be->vm_query(vm, gpa, hpa); }
 
-int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out) { return g_be->vcpu_create(vm, out); }
+int arch_hv_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
+{
+    return g_be->vcpu_create(vm, index, out);
+}
 void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v) { g_be->vcpu_destroy(v); }
 void arch_hv_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o) { g_be->vcpu_get_state(v, o); }
 int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *i)

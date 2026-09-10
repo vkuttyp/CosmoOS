@@ -20,7 +20,7 @@ struct hv_backend {
     int (*vm_map)(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
     int (*vm_unmap)(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
     bool (*vm_query)(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
-    int (*vcpu_create)(struct arch_hv_vm *vm, struct arch_hv_vcpu **out);
+    int (*vcpu_create)(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out);
     void (*vcpu_destroy)(struct arch_hv_vcpu *v);
     void (*vcpu_get_state)(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *out);
     int (*vcpu_set_state)(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *in);
