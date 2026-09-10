@@ -25,6 +25,28 @@
 
 static volatile uint32_t *g_uart;
 
+/* Two CPUs, one UART: a line is printed under a lock, as a kernel's
+ * console is, or the owner's round-robin interleaves the two CPUs'
+ * lines byte by byte -- which it did, on a loaded host, into
+ * "cpu1: up cpu_on 1 ctx=1234cafe" / "-> 0". */
+static volatile uint32_t g_print_lock;
+
+static void lock(volatile uint32_t *l)
+{
+    uint32_t tmp, one = 1;
+    __asm__ volatile(
+        "1: ldaxr %w0, [%2]\n"
+        "   cbnz  %w0, 1b\n"
+        "   stxr  %w0, %w1, [%2]\n"
+        "   cbnz  %w0, 1b\n"
+        : "=&r"(tmp) : "r"(one), "r"(l) : "memory");
+}
+
+static void unlock(volatile uint32_t *l)
+{
+    __asm__ volatile("stlr wzr, [%0]" : : "r"(l) : "memory");
+}
+
 static uint64_t hvc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
 {
     register uint64_t x0 __asm__("x0") = fn;
@@ -79,9 +101,11 @@ extern void secondary_start(void);
 
 void secondary_main(uint64_t ctx)
 {
+    lock(&g_print_lock);
     puts("cpu1: up ctx=");
     puthex(ctx);
     puts("\n");
+    unlock(&g_print_lock);
     hvc(PSCI_CPU_OFF, 0, 0, 0);
     for (;;)
         hvc(2, 0, 0, 0);
@@ -142,6 +166,7 @@ void guest_main(uint64_t dtb_pa)
     puts("\n");
 
     int64_t rc = (int64_t)hvc(PSCI_CPU_ON, 1, (uint64_t)(uintptr_t)secondary_start, 0x1234cafeull);
+    lock(&g_print_lock);
     puts("cpu_on 1 -> ");
     if (rc < 0) {
         puts("-");
@@ -150,6 +175,7 @@ void guest_main(uint64_t dtb_pa)
         putdec((uint64_t)rc);
     }
     puts("\n");
+    unlock(&g_print_lock);
 
     hvc(PSCI_SYSTEM_OFF, 0, 0, 0);
     for (;;)

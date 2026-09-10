@@ -1793,14 +1793,23 @@ static bool uart_race_phase(const char **reason, struct vm *vm, struct vcpu *v0,
         ts = thread_create(sibling_main, sib, "uart-sibling", SCHED_PRIO_DEFAULT);
         CHECK(ts != NULL);
     }
+    /* The guest's byte counter (x23) carries over from an earlier phase:
+     * take its value now, from the registers, before a single byte is
+     * typed. Taking it from the first heartbeat instead -- as the first
+     * version did -- misses any byte the guest consumed before that
+     * heartbeat, and a count that is one short never reaches the total:
+     * the loop then spins to its step bound, which is minutes, and two
+     * chain steps timed out inside this test. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    unsigned base = (unsigned)regs.x[23];
     struct typist t;
     memset(&t, 0, sizeof(t));
     t.vm = vm;
     t.bytes = bytes;
     struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
     CHECK(th != NULL);
-    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0, base = 0;
-    bool first = true;
+    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0;
     for (;;) {
         CHECK(vcpu_run(v0, &x) == 0);
         CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
@@ -1809,16 +1818,12 @@ static bool uart_race_phase(const char **reason, struct vm *vm, struct vcpu *v0,
                 spurious++;
         } else {
             CHECK(x.hypercall.nr == 2);
-            if (first) {                                  /* the guest's counters carry over from an earlier phase */
-                base = (unsigned)x.hypercall.a1;
-                first = false;
-            }
             irqs = (unsigned)x.hypercall.a0;
             consumed = (unsigned)x.hypercall.a1 - base;
             if (t.done && consumed + (v1 ? sib->consumed : 0) >= bytes)
                 break;
         }
-        CHECK(++steps < 2000000);
+        CHECK(++steps < 200000);   /* a phase is seconds; this is a failure, not a wait */
     }
     thread_join(th);
     if (v1) {
