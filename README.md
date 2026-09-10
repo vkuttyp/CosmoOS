@@ -988,6 +988,32 @@ See [docs/development.md](docs/development.md).
   `tests/hv/aarch64/Image` and skips cleanly otherwise, and `el2-guest-idreg`
   is the model's regression net in CI. A root filesystem (virtio-blk) is
   the next unit; the panic is the milestone.
+- **A root filesystem a guest mounts (done):**
+  `docs/audit/next-subsystem-vblk.md`,
+  `docs/kernel-services/virtualization/design.md` ("The root filesystem a
+  guest mounts"). The disk that ends the diskless panic is a virtio-blk
+  device. The split virtqueue lives in guest memory; the device only
+  reaches it through `vm_mem_read`/`vm_mem_write`. `userland/system/vblk.c`
+  is the device-side walk and nothing else -- no kernel headers, no
+  transport -- so the same function is linked into `vmctl` and exercised
+  on the host with no guest and no QEMU: it reads each new head's
+  descriptor chain (readable header, writable data buffers, writable
+  status), serves the sectors from the disk, and publishes the head on the
+  used ring. Every index is bounded by the queue size before it addresses
+  memory, a looping chain is refused, a buffer outside guest RAM faults
+  through the callback, and a read past the disk completes as an I/O error,
+  not a crash. The device is read-only: it offers `VIRTIO_BLK_F_RO` so the
+  driver never submits a write, and a `VIRTIO_BLK_T_OUT` that arrives
+  anyway completes as unsupported. `vmctl` models the transport at the
+  `virtio_mmio@a000000` node the device tree already advertises (SPI 48),
+  serves `QueueNotify` from a disk opened read-only, and raises the SPI
+  through the guest's distributor on completion; with no `--disk` the node
+  reports DeviceID 0 and the guest's driver skips it, so the boot test,
+  which runs no disk, is unchanged. The mechanism is proven end to end in
+  the kernel harness (`el2-virtq-device`: a guest negotiates the device and
+  reads a sector's bytes) and exhaustively on the host (`test_vblk_dev`).
+  Mounting a Linux root over it needs a root image and `QEMU_MEM=2G`, the
+  same demonstration-not-gate shape the Linux boot has.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
