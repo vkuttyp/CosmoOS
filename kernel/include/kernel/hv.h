@@ -53,6 +53,13 @@ struct vm_device {
      * hand the exit to the owner. Called with the access the hardware
      * described; never for one it did not (size 0 goes to the owner). */
     int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
+    /* A device with an interrupt line names it (an SPI; 0: none) and says
+     * whether the line is up. Level is the source's: before every entry the
+     * run loop raises the line of each device that says so, so a line still
+     * up after the guest acknowledged is delivered again, and a device
+     * lowers its own line (vm_lower_spi) when it drops. */
+    unsigned irq;
+    bool (*irq_asserted)(struct vm_device *d);
     void *priv;
 };
 
@@ -128,6 +135,13 @@ bool vm_mem_lookup(struct vm *vm, uint64_t gpa, struct page **page, size_t *offs
 int vm_device_register(struct vm *vm, struct vm_device *dev);
 /* The debug console ring (what the guest wrote to port 0xE9). */
 size_t vm_console_read(struct vm *vm, void *buf, size_t len);
+/* The owner's input to the guest: bytes into the console UART's receive
+ * FIFO, which interrupts the guest if it asked to be. -ENOTSUP where the
+ * VM has no such device (x86-64). */
+int64_t vm_console_write(struct vm *vm, const void *buf, size_t len);
+/* A device's shared interrupt line, up or down (arch_hv_vm_raise_spi). */
+int vm_raise_spi(struct vm *vm, unsigned intid);
+int vm_lower_spi(struct vm *vm, unsigned intid);
 size_t vm_console_pending(struct vm *vm);
 
 /* VirtualCPU. */

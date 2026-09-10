@@ -57,24 +57,82 @@
  * driver reads to know what it found: part 0x011, revision 1. */
 static const uint8_t pl011_ids[8] = { 0x11, 0x10, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1 };
 
+#define VUART_RX_FIFO 64u        /* the PL011's is 16; the owner types in bursts */
+
 struct vuart {
     struct vm *vm;
     spinlock_t lock;
     uint32_t ibrd, fbrd, lcr_h, cr, ifls, imsc, dmacr;
-    uint64_t tx_bytes;
+    uint8_t rx[VUART_RX_FIFO];
+    unsigned rx_head, rx_tail, rx_count;   /* head: next write; tail: next read */
+    uint64_t tx_bytes, rx_bytes, rx_dropped;
 };
 
 static uint32_t vuart_fr(const struct vuart *u)
 {
-    (void)u;
-    return FR_TXFE | FR_RXFE;
+    uint32_t fr = FR_TXFE;
+    if (u->rx_count == 0)
+        fr |= FR_RXFE;
+    if (u->rx_count == VUART_RX_FIFO)
+        fr |= FR_RXFF;
+    return fr;
 }
 
-/* The raw interrupt state: what is asserted before the mask. */
+/* The raw interrupt state: what is asserted before the mask. RX is a
+ * level -- up while a byte waits -- and so is TX, whose FIFO is never
+ * anything but empty; a guest that unmasks TXIM with nothing to send is
+ * interrupted for it, as on the hardware. */
 static uint32_t vuart_ris(const struct vuart *u)
 {
-    (void)u;
-    return INT_TX;
+    return INT_TX | (u->rx_count ? INT_RX : 0);
+}
+
+/* Caller holds the lock: is the line up? */
+static bool vuart_line_locked(const struct vuart *u)
+{
+    return (vuart_ris(u) & u->imsc) != 0;
+}
+
+static bool vuart_irq_asserted(struct vm_device *d)
+{
+    struct vuart *u = d->priv;
+    arch_irq_state_t s = spin_lock_irqsave(&u->lock);
+    bool up = vuart_line_locked(u);
+    spin_unlock_irqrestore(&u->lock, s);
+    return up;
+}
+
+/* The line changed under the lock; tell the distributor after it. */
+static void vuart_line_changed(struct vuart *u, bool was, bool now)
+{
+    if (was == now)
+        return;
+    if (now)
+        vm_raise_spi(u->vm, VUART_INTID);
+    else
+        vm_lower_spi(u->vm, VUART_INTID);
+}
+
+int64_t vuart_write(struct vuart *u, const void *buf, size_t len)
+{
+    const uint8_t *b = buf;
+    arch_irq_state_t s = spin_lock_irqsave(&u->lock);
+    bool was = vuart_line_locked(u);
+    for (size_t i = 0; i < len; i++) {
+        if (u->rx_count == VUART_RX_FIFO) {            /* full: drop the oldest, as the console ring does */
+            u->rx_tail = (u->rx_tail + 1) % VUART_RX_FIFO;
+            u->rx_count--;
+            u->rx_dropped++;
+        }
+        u->rx[u->rx_head] = b[i];
+        u->rx_head = (u->rx_head + 1) % VUART_RX_FIFO;
+        u->rx_count++;
+        u->rx_bytes++;
+    }
+    bool now = vuart_line_locked(u);
+    spin_unlock_irqrestore(&u->lock, s);
+    vuart_line_changed(u, was, now);
+    return (int64_t)len;
 }
 
 static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value)
@@ -101,16 +159,19 @@ static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned si
         case PL011_IMSC:
         case PL011_DMACR: {
             arch_irq_state_t s = spin_lock_irqsave(&u->lock);
+            bool was = vuart_line_locked(u);
             switch (off) {
             case PL011_IBRD: u->ibrd = v & 0xFFFFu; break;
             case PL011_FBRD: u->fbrd = v & 0x3Fu; break;
             case PL011_LCR_H: u->lcr_h = v & 0xFFu; break;
             case PL011_CR: u->cr = v & 0xFFFFu; break;
             case PL011_IFLS: u->ifls = v & 0x3Fu; break;
-            case PL011_IMSC: u->imsc = v & 0x7FFu; break;
+            case PL011_IMSC: u->imsc = v & 0x7FFu; break;   /* unmasking with a byte waiting raises the line */
             default: u->dmacr = v & 0x7u; break;
             }
+            bool now = vuart_line_locked(u);
             spin_unlock_irqrestore(&u->lock, s);
+            vuart_line_changed(u, was, now);
             return 0;
         }
         case PL011_ICR:
@@ -122,8 +183,15 @@ static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned si
     }
     uint32_t r = 0;
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
+    bool was = vuart_line_locked(u);
     switch (off) {
-    case PL011_DR: r = 0; break;               /* nothing to receive yet: FR says RXFE */
+    case PL011_DR:                             /* pop one byte; the level drops with the last */
+        if (u->rx_count) {
+            r = u->rx[u->rx_tail];
+            u->rx_tail = (u->rx_tail + 1) % VUART_RX_FIFO;
+            u->rx_count--;
+        }
+        break;
     case PL011_RSR: r = 0; break;
     case PL011_FR: r = vuart_fr(u); break;
     case PL011_IBRD: r = u->ibrd; break;
@@ -140,7 +208,9 @@ static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned si
             r = pl011_ids[(off - PL011_PERIPHID0) / 4];
         break;
     }
+    bool now = vuart_line_locked(u);
     spin_unlock_irqrestore(&u->lock, s);
+    vuart_line_changed(u, was, now);
     *value = r;
     return 0;
 }
@@ -158,6 +228,8 @@ struct vuart *vuart_create(struct vm *vm, struct vm_device *dev)
     dev->mmio_base = VUART_BASE;
     dev->mmio_len = VUART_SIZE;
     dev->mmio = vuart_mmio;
+    dev->irq = VUART_INTID;
+    dev->irq_asserted = vuart_irq_asserted;
     dev->priv = u;
     return u;
 }
@@ -166,7 +238,8 @@ void vuart_destroy(struct vuart *u)
 {
     if (u == NULL)
         return;
-    if (u->tx_bytes)
-        kdebug("vuart: %llu byte(s) printed", (unsigned long long)u->tx_bytes);
+    if (u->tx_bytes || u->rx_bytes)
+        kdebug("vuart: %llu byte(s) printed, %llu received, %llu dropped", (unsigned long long)u->tx_bytes,
+               (unsigned long long)u->rx_bytes, (unsigned long long)u->rx_dropped);
     kfree(u);
 }

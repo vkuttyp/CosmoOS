@@ -130,6 +130,33 @@ int vmdev_pio(struct vm *vm, uint16_t port, bool write, unsigned size, uint32_t 
     return -ENODEV;
 }
 
+int vm_raise_spi(struct vm *vm, unsigned intid)
+{
+    return arch_hv_vm_raise_spi(vm->arch, intid);
+}
+
+int vm_lower_spi(struct vm *vm, unsigned intid)
+{
+    return arch_hv_vm_lower_spi(vm->arch, intid);
+}
+
+void vmdev_reassert(struct vm *vm)
+{
+    struct list_node *n;
+    for (n = vm->devices.next; n != &vm->devices; n = n->next) {
+        struct vm_device *d = container_of(n, struct vm_device, link);
+        if (d->irq && d->irq_asserted && d->irq_asserted(d))
+            arch_hv_vm_raise_spi(vm->arch, d->irq);
+    }
+}
+
+int64_t vm_console_write(struct vm *vm, const void *buf, size_t len)
+{
+    if (vm->uart == NULL)
+        return -ENOTSUP;
+    return vuart_write(vm->uart, buf, len);
+}
+
 int vmdev_mmio(struct vm *vm, uint64_t gpa, bool write, unsigned size, uint64_t *value)
 {
     struct list_node *n;

@@ -1589,6 +1589,114 @@ bool selftest_el2_guest_uart(const char **reason)
     return true;
 }
 
+/*
+ * The owner types, and the guest is interrupted: the first device
+ * interrupt the distributor routes that the guest did not fake through
+ * ISPENDR. The guest has SPI 33 routed to itself and RXIM unmasked; the
+ * test writes 'x' to the VM as its owner would through the descriptor;
+ * the handler runs with INTID 33, reads RXMIS set, reads 'x' from DR,
+ * and the flag register then says the FIFO is empty. Then it heartbeats
+ * on with no further interrupt: one byte, one interrupt.
+ */
+bool selftest_el2_guest_uart_rx(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-uart-rx", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_uart_rx.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    for (unsigned i = 0; i < 5; i++) {                                 /* nothing typed: nothing arrives */
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 && x.hypercall.a0 == 0);
+    }
+    CHECK(vm_console_write(vm, "x", 1) == 1);
+    unsigned beats = 0;
+    CHECK(run_until(v, &x, 33, (1ull << 2), 100, &beats));
+    CHECK((x.hypercall.a0 & 0x10u) != 0);                              /* MIS: RXMIS */
+    CHECK(x.hypercall.a1 == 'x');
+    CHECK((x.hypercall.a2 & 0x10u) != 0);                              /* FR: RXFE after the read */
+    for (unsigned i = 0; i < 10; i++) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 && x.hypercall.a0 == 1);
+    }
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-uart-rx: 'x' typed at the guest arrived as SPI 33 after %u beat(s), and only once", beats);
+    return true;
+}
+
+static struct vm *g_wake_vm;
+static uint64_t g_wake_at;
+
+static void wake_by_typing(struct timer *t, void *arg)
+{
+    (void)t;
+    (void)arg;
+    g_wake_at = clock_now_ns();
+    vm_console_write(g_wake_vm, "w", 1);
+}
+
+/*
+ * Level, and the wake-up. Two bytes written before the guest runs: the
+ * handler drains exactly one and returns, the line is still up, and the
+ * handler runs again for the second -- an edge-triggered model would
+ * deliver one interrupt for two bytes. After the second the FIFO is empty
+ * and no third interrupt comes. Then a guest whose WFI has a two-second
+ * deadline is woken by a byte typed 20 ms in: the WFI run returns long
+ * before the deadline, with an interrupt pending, and the byte is taken.
+ */
+bool selftest_el2_guest_uart_level(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-uart-level", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_uart_rx.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    CHECK(vm_console_write(vm, "ab", 2) == 2);
+    CHECK(run_until(v, &x, 33, (1ull << 2), 100, NULL));
+    CHECK(x.hypercall.a1 == 'a');
+    CHECK((x.hypercall.a2 & 0x10u) == 0);                              /* FR: a byte still waits */
+    unsigned between = 0;
+    CHECK(run_until(v, &x, 33, (1ull << 2), 100, &between));           /* the line stayed up: again */
+    CHECK(x.hypercall.a1 == 'b');
+    CHECK((x.hypercall.a2 & 0x10u) != 0);                              /* now empty */
+    for (unsigned i = 0; i < 10; i++) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 && x.hypercall.a0 == 2);
+    }
+    drop_guest(vm, v);
+
+    /* The wake-up. */
+    CHECK(make_guest("tests/hv/guest_uart_wfi.bin", &vm, &v) == 0);
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    struct timer t;
+    g_wake_vm = vm;
+    g_wake_at = 0;
+    timer_setup(&t, wake_by_typing, NULL);
+    uint64_t t0 = clock_now_ns();
+    timer_start(&t, 20000000ull);                                      /* 20 ms in, a keystroke */
+    CHECK(vcpu_run(v, &x) == 0);                                       /* the WFI, with a 2 s deadline */
+    uint64_t waited = clock_now_ns() - t0;
+    timer_cancel_sync(&t);
+    CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    CHECK((x.flags & COSMO_VM_EXIT_F_IRQ_PENDING) != 0);               /* woken for a reason */
+    CHECK(g_wake_at != 0 && waited < 1000000000ull);                    /* long before two seconds */
+    CHECK(run_until(v, &x, 33, (1ull << 2), 100, NULL));
+    CHECK(x.hypercall.a1 == 'w');
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-uart-level: two bytes, two interrupts (%u beat(s) between); a WFI with a 2 s deadline woken by a keystroke after %llu ms",
+          between, (unsigned long long)(waited / 1000000ull));
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1713,6 +1821,8 @@ bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gicd_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_mmio_device(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_uart_rx(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_uart_level(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

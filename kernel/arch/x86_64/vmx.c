@@ -481,6 +481,15 @@ static int vmx_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
     return rc;
 }
 
+/* Stage 1 gives an x86 guest no interrupt controller of its own, so a
+ * device has no line to raise in it. */
+static int vmx_be_vm_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    (void)vm;
+    (void)intid;
+    return -ENOTSUP;
+}
+
 static bool vmx_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
 {
     return ept_query(vm->eptp_root, gpa, hpa);
@@ -1110,6 +1119,8 @@ const struct hv_backend vmx_backend = {
     .vm_map = vmx_be_vm_map,
     .vm_unmap = vmx_be_vm_unmap,
     .vm_query = vmx_be_vm_query,
+    .vm_raise_spi = vmx_be_vm_spi,
+    .vm_lower_spi = vmx_be_vm_spi,
     .vcpu_create = vmx_be_vcpu_create,
     .vcpu_destroy = vmx_be_vcpu_destroy,
     .vcpu_get_state = vmx_be_vcpu_get_state,

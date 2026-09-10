@@ -83,4 +83,12 @@ void vdist_raise_private(struct gicv3_vdist *d, unsigned i, unsigned intid);
  * that SGI there. Returns how many were targeted. */
 unsigned vdist_sgi(struct gicv3_vdist *d, unsigned from, uint64_t sgi1r);
 
+/* A device asserted (raise) or dropped (lower) shared interrupt `intid`,
+ * 32..VDIST_NR_LINES-1: the pending bit the guest also reaches through
+ * ISPENDR/ICPENDR. False for an INTID that is not an SPI here. Level is
+ * the source's business: a device whose line is still up after the guest
+ * acknowledged raises again, and lowering withdraws what was not taken. */
+bool vdist_raise_spi(struct gicv3_vdist *d, unsigned intid);
+bool vdist_lower_spi(struct gicv3_vdist *d, unsigned intid);
+
 #endif /* AARCH64_GICV3_VDIST_H */

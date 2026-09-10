@@ -301,6 +301,9 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             rc = -EINTR;
             break;
         }
+        /* Level lines first: a device whose line is still up after the
+         * guest acknowledged raises it again, here, before the offer. */
+        vmdev_reassert(vm);
         int offered = vintr_take_lowest(v);
         arch_hv_vcpu_set_irq(v->arch, offered);
         struct hv_exit e;

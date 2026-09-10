@@ -28,6 +28,10 @@ void vm_console_put(struct vm *vm, const uint8_t *bytes, size_t n);
 struct vuart;
 struct vuart *vuart_create(struct vm *vm, struct vm_device *dev);
 void vuart_destroy(struct vuart *u);
+int64_t vuart_write(struct vuart *u, const void *buf, size_t len);
+
+/* Before an entry: every device whose line is up raises it, so level lines stay delivered. */
+void vmdev_reassert(struct vm *vm);
 
 /* vintr.c */
 void vintr_init(struct vcpu *v);

@@ -437,6 +437,22 @@ static int el2_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
     return rc;
 }
 
+/* A device's line, into the guest's distributor: pending until the guest
+ * takes it, or until the device drops the line first. */
+static int el2_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    if (vm->vdist == NULL)
+        return -ENOTSUP;
+    return vdist_raise_spi(vm->vdist, intid) ? 0 : -EINVAL;
+}
+
+static int el2_vm_lower_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    if (vm->vdist == NULL)
+        return -ENOTSUP;
+    return vdist_lower_spi(vm->vdist, intid) ? 0 : -EINVAL;
+}
+
 static bool el2_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
 {
     return hv_s2_query(vm->s2_root, gpa, hpa);
@@ -1074,6 +1090,8 @@ const struct hv_backend el2_backend = {
     .vm_map = el2_vm_map,
     .vm_unmap = el2_vm_unmap,
     .vm_query = el2_vm_query,
+    .vm_raise_spi = el2_vm_raise_spi,
+    .vm_lower_spi = el2_vm_lower_spi,
     .vcpu_create = el2_vcpu_create,
     .vcpu_destroy = el2_vcpu_destroy,
     .vcpu_get_state = el2_vcpu_get_state,

@@ -111,6 +111,14 @@ int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len,
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 /* Host-physical page behind a guest-physical address, or false. */
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
+/* A device in the VM asserted (or dropped) shared interrupt `intid`: it
+ * becomes pending in the guest's distributor and is routed to whichever
+ * vCPU the guest's IROUTER names, when the guest has enabled it there.
+ * Lowering clears a pending state the guest has not yet taken, so a
+ * line the source dropped is not delivered late. -ENOTSUP where guests
+ * have no distributor. */
+int arch_hv_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid);
+int arch_hv_vm_lower_spi(struct arch_hv_vm *vm, unsigned intid);
 
 /* A vCPU starts at the architectural reset state (real mode, rip 0). */
 /* `index` is the vCPU's number within its VM: on AArch64 it is the MPIDR

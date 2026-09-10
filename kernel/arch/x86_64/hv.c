@@ -51,6 +51,8 @@ int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len,
 }
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len) { return g_be->vm_unmap(vm, gpa, len); }
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa) { return g_be->vm_query(vm, gpa, hpa); }
+int arch_hv_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid) { return g_be->vm_raise_spi(vm, intid); }
+int arch_hv_vm_lower_spi(struct arch_hv_vm *vm, unsigned intid) { return g_be->vm_lower_spi(vm, intid); }
 
 int arch_hv_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
 {
