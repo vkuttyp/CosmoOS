@@ -394,6 +394,19 @@ static int64_t sys_sync(struct syscall_args *a)
     return vfs_sync();
 }
 
+/* Commit one file, not every mount: fsync(fd). Unlike SYS_sync, a caller
+ * (e.g. a VM owner honouring a guest's virtio-blk flush) cannot force
+ * synchronous commits of filesystems it has nothing to do with. */
+static int64_t sys_fsync(struct syscall_args *a)
+{
+    struct file *f = file_of((int)a->a[0], 0);
+    if (f == NULL)
+        return -EBADF;
+    int rc = file_sync(f);
+    file_put(f);
+    return rc;
+}
+
 static int64_t sys_mount(struct syscall_args *a)
 {
     if (!cred_privileged(cred_current()))
@@ -1502,6 +1515,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_rename] = sys_rename,
     [SYS_getdents] = sys_getdents,
     [SYS_sync] = sys_sync,
+    [SYS_fsync] = sys_fsync,
     [SYS_mount] = sys_mount,
     [SYS_umount] = sys_umount,
     [SYS_socket] = sys_socket,

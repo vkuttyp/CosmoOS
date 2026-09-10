@@ -54,6 +54,16 @@ static int disk_rd(void *c, uint64_t off, void *buf, uint32_t len)
     memcpy(buf, g_disk + off, len);
     return 0;
 }
+static unsigned g_flushes;   /* how many times disk_flush was called */
+static int disk_wr(void *c, uint64_t off, const void *buf, uint32_t len)
+{
+    (void)c;
+    if (off + len > sizeof(g_disk))   /* the device bounds this too; the disk refuses regardless */
+        return -1;
+    memcpy(g_disk + off, buf, len);
+    return 0;
+}
+static int disk_fl(void *c) { (void)c; g_flushes++; return 0; }
 
 /* A ring built in g_ram: descriptors at 0x1000, avail at 0x2000, used at
  * 0x3000, request header at 0x4000, data buffer at 0x5000, status at
@@ -72,8 +82,14 @@ static void put_desc(unsigned i, uint64_t addr, uint32_t len, uint16_t flags, ui
 }
 static void put16(uint64_t gpa, uint16_t v) { memcpy(g_ram + gpa, &v, 2); }
 
+/* A read-only device (no disk_write/disk_flush) and a read-write one. */
 static struct vblk_io io = {
     .read_guest = rd_guest, .write_guest = wr_guest, .disk_read = disk_rd, .ctx = NULL,
+    .capacity_sectors = DISK_SECTORS,
+};
+static struct vblk_io io_rw = {
+    .read_guest = rd_guest, .write_guest = wr_guest, .disk_read = disk_rd,
+    .disk_write = disk_wr, .disk_flush = disk_fl, .ctx = NULL,
     .capacity_sectors = DISK_SECTORS,
 };
 
@@ -95,6 +111,19 @@ static void build_read_req(uint64_t sector, uint32_t data_len)
     put_desc(2, STATUS, 1, 2 /*WRITE*/, 0);
     put16(AVAIL + 4, 0);        /* avail->ring[0] = head 0 */
     put16(AVAIL + 2, 1);        /* avail->idx = 1 */
+}
+
+/* A standard write request: header (read), data buffer (read, NOT writable),
+ * status (write) -- the mirror of a read, with the data moving the other way. */
+static void build_write_req(uint64_t sector, uint32_t data_len)
+{
+    struct { uint32_t type, reserved; uint64_t sector; } hdr = { VIRTIO_BLK_T_OUT, 0, sector };
+    memcpy(g_ram + HDR, &hdr, sizeof(hdr));
+    put_desc(0, HDR, sizeof(hdr), 1 /*NEXT*/, 1);
+    put_desc(1, DATA, data_len, 1 /*NEXT, device-readable*/, 2);
+    put_desc(2, STATUS, 1, 2 /*WRITE*/, 0);
+    put16(AVAIL + 4, 0);
+    put16(AVAIL + 2, 1);
 }
 
 static void test_read(void)
@@ -279,9 +308,174 @@ static void test_work_ceiling(void)
     EXPECT(vblk_process(&io, &q) == 3);
 }
 
+/* The write side: a T_OUT drains a device-readable buffer to the disk, a
+   T_FLUSH makes it durable, and a written sector reads back byte for byte. */
+static void test_write(void)
+{
+    memset(g_ram, 0, GRAM);
+    memset(g_disk, 0, sizeof(g_disk));
+    g_oob_reads = 0; g_flushes = 0;
+    for (unsigned i = 0; i < VBLK_SECTOR; i++)
+        g_ram[DATA + i] = (uint8_t)(i * 3 + 5);   /* the bytes the guest wants written */
+    build_write_req(3 /*sector*/, VBLK_SECTOR);
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_OK);
+    /* sector 3 of the disk now holds the guest's bytes */
+    EXPECT(memcmp(g_disk + 3 * VBLK_SECTOR, g_ram + DATA, VBLK_SECTOR) == 0);
+    /* nothing was returned to the guest: used len is the status byte alone */
+    uint32_t id, len; memcpy(&id, g_ram + USED + 4, 4); memcpy(&len, g_ram + USED + 8, 4);
+    EXPECT(id == 0 && len == 1u);
+    EXPECT(g_oob_reads == 0);
+
+    /* a flush is served and reaches the disk */
+    memset(g_ram, 0, GRAM);
+    { struct { uint32_t t, r; uint64_t s; } h = { VIRTIO_BLK_T_FLUSH, 0, 0 };
+      memcpy(g_ram + HDR, &h, sizeof(h)); }
+    put_desc(0, HDR, 16, 1 /*NEXT*/, 1);          /* header -> status, no data */
+    put_desc(1, STATUS, 1, 2 /*WRITE*/, 0);
+    put16(AVAIL + 4, 0); put16(AVAIL + 2, 1);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_OK);
+    EXPECT(g_flushes == 1);
+
+    /* read sector 3 back into a fresh buffer: it is what was written */
+    memset(g_ram, 0, GRAM);
+    build_read_req(3, VBLK_SECTOR);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    for (unsigned i = 0; i < VBLK_SECTOR; i++)
+        EXPECT(g_ram[DATA + i] == (uint8_t)(i * 3 + 5));
+}
+
+/* Hostile and edge writes: the direction must match, a write past the disk
+   is an I/O error not a refusal, a buffer outside guest RAM is refused, and
+   a read-only device refuses a write outright. */
+static void test_write_hostile(void)
+{
+    struct vblk_queue q;
+
+    /* (a) a write whose data buffer is marked device-writable (wrong way). */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    build_write_req(0, VBLK_SECTOR);
+    put_desc(1, DATA, VBLK_SECTOR, 1 | 2 /*NEXT|WRITE*/, 2);   /* writable: wrong for a write */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == -1);
+    EXPECT(g_oob_reads == 0);
+
+    /* (b) a write past the end of the disk: completed as IOERR, not refused,
+       and nothing is written (the disk callback is never reached past it). */
+    memset(g_ram, 0, GRAM); memset(g_disk, 0xab, sizeof(g_disk));
+    build_write_req(DISK_SECTORS, VBLK_SECTOR);   /* one sector past the disk */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_IOERR);
+
+    /* (c) a write buffer outside guest RAM: refused, the read faulted. */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    build_write_req(0, VBLK_SECTOR);
+    put_desc(1, GRAM + 0x10000, VBLK_SECTOR, 1 /*NEXT, readable*/, 2);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == -1);
+    EXPECT(g_oob_reads == 1);
+
+    /* (d) a read-only device refuses a write as UNSUPP (io has no disk_write). */
+    memset(g_ram, 0, GRAM); g_flushes = 0;
+    build_write_req(0, VBLK_SECTOR);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_UNSUPP);
+    /* and a flush on a read-only device is likewise UNSUPP, calling nothing */
+    memset(g_ram, 0, GRAM);
+    { struct { uint32_t t, r; uint64_t s; } h = { VIRTIO_BLK_T_FLUSH, 0, 0 };
+      memcpy(g_ram + HDR, &h, sizeof(h)); }
+    put_desc(0, HDR, 16, 1, 1); put_desc(1, STATUS, 1, 2, 0);
+    put16(AVAIL + 4, 0); put16(AVAIL + 2, 1);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_UNSUPP);
+    EXPECT(g_flushes == 0);
+
+    /* (e) a sector so large that sector*512 wraps to a low, in-range offset.
+       Without a sector-vs-capacity check the write would land on sector 0;
+       it must be an I/O error and touch nothing. */
+    memset(g_ram, 0, GRAM); memset(g_disk, 0xcd, sizeof(g_disk));
+    for (unsigned i = 0; i < VBLK_SECTOR; i++) g_ram[DATA + i] = 0x11;
+    build_write_req((uint64_t)1 << 55, VBLK_SECTOR);   /* (1<<55)*512 == 0 mod 2^64 */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_IOERR);
+    EXPECT(g_disk[0] == 0xcd);                    /* sector 0 was not overwritten */
+    /* and the same on the read side: a wrapping sector is an I/O error, not a
+       read of the wrong part of the disk */
+    memset(g_ram, 0, GRAM);
+    build_read_req((uint64_t)1 << 55, VBLK_SECTOR);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_IOERR);
+}
+
+/* Writes count against the per-notification work ceiling by the bytes they
+   move, not by their one-byte used length -- otherwise a full queue of large
+   writes slips under the ceiling. Three one-sector writes under a one-sector
+   ceiling are served one per call. */
+static void test_write_ceiling(void)
+{
+    memset(g_ram, 0, GRAM); memset(g_disk, 0, sizeof(g_disk));
+    for (unsigned i = 0; i < VBLK_SECTOR; i++) g_ram[DATA + i] = (uint8_t)i;
+    build_write_req(0, VBLK_SECTOR);
+    put16(AVAIL + 4 + 2, 0); put16(AVAIL + 4 + 4, 0);   /* ring[1] = ring[2] = head 0 */
+    put16(AVAIL + 2, 3);
+
+    struct vblk_io bio = io_rw;
+    bio.max_bytes_per_call = VBLK_SECTOR;         /* room for one sector of write data */
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&bio, &q) == 1);          /* only one write this call */
+    EXPECT(q.last_avail == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 3);
+    EXPECT(vblk_process(&bio, &q) == 0);
+    /* with no ceiling all three writes go in one call */
+    memset(g_disk, 0, sizeof(g_disk));
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 3);
+}
+
+/* A flush moves no data but is a synchronous fsync, so it must count against
+   the per-notification ceiling too -- otherwise a queue full of flushes runs
+   a queue's worth of fsyncs in one batch. Three flushes under a one-flush
+   ceiling are served one per call. */
+static void test_flush_ceiling(void)
+{
+    memset(g_ram, 0, GRAM); g_flushes = 0;
+    struct { uint32_t t, r; uint64_t s; } h = { VIRTIO_BLK_T_FLUSH, 0, 0 };
+    memcpy(g_ram + HDR, &h, sizeof(h));
+    put_desc(0, HDR, 16, 1 /*NEXT*/, 1);          /* header -> status, no data */
+    put_desc(1, STATUS, 1, 2 /*WRITE*/, 0);
+    put16(AVAIL + 4, 0); put16(AVAIL + 4 + 2, 0); put16(AVAIL + 4 + 4, 0);
+    put16(AVAIL + 2, 3);
+
+    struct vblk_io bio = io_rw;
+    bio.max_bytes_per_call = VBLK_FLUSH_COST;     /* room for one flush */
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 1);
+    EXPECT(g_flushes == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 3);
+    EXPECT(g_flushes == 3);
+}
+
 static const struct host_test tests[] = {
     { "read", test_read },
     { "write-refused", test_write_is_refused },
+    { "write", test_write },
+    { "write-hostile", test_write_hostile },
+    { "write-ceiling", test_write_ceiling },
+    { "flush-ceiling", test_flush_ceiling },
     { "hostile", test_hostile },
     { "work-ceiling", test_work_ceiling },
 };

@@ -55,6 +55,7 @@ int unlink(const char *path);
 int rmdir(const char *path);
 int access(const char *path, int mode);
 void sync(void);
+int fsync(int fd);
 uid_t getuid(void);
 uid_t geteuid(void);
 gid_t getgid(void);

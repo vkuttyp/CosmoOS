@@ -25,10 +25,16 @@
  * fixes at 512 regardless of the backing file's block size. */
 #define VIRTIO_BLK_T_IN    0u
 #define VIRTIO_BLK_T_OUT   1u
+#define VIRTIO_BLK_T_FLUSH 4u
 #define VIRTIO_BLK_S_OK    0u
 #define VIRTIO_BLK_S_IOERR 1u
 #define VIRTIO_BLK_S_UNSUPP 2u
 #define VBLK_SECTOR        512u
+
+/* Device feature bits the transport negotiates (bit numbers, not masks). */
+#define VIRTIO_BLK_F_RO      5u   /* the disk is read-only */
+#define VIRTIO_BLK_F_FLUSH   9u   /* writes may be buffered; T_FLUSH makes them durable */
+#define VIRTIO_F_VERSION_1  32u   /* a modern (non-legacy) device */
 
 struct vblk_io {
     /* Move `len` bytes between guest memory at `gpa` and `buf`; 0 ok, <0 a
@@ -38,6 +44,13 @@ struct vblk_io {
     int (*write_guest)(void *ctx, uint64_t gpa, const void *buf, uint32_t len);
     /* Serve a disk read: `len` bytes from byte offset `off`; 0 ok, <0 error. */
     int (*disk_read)(void *ctx, uint64_t off, void *buf, uint32_t len);
+    /* The write side of a read-write disk. Both NULL on a read-only device,
+     * where T_OUT and T_FLUSH complete as UNSUPP and neither is ever called.
+     * disk_write moves `len` bytes at byte offset `off` to the disk; the
+     * caller bounds `off + len` to the capacity, so it never grows the file.
+     * disk_flush makes prior writes durable. Each returns 0 ok, <0 error. */
+    int (*disk_write)(void *ctx, uint64_t off, const void *buf, uint32_t len);
+    int (*disk_flush)(void *ctx);
     void *ctx;
     uint64_t capacity_sectors;   /* the disk's size, in 512-byte sectors */
     /* The most bytes one QueueNotify may serve before the rest wait for the
@@ -65,6 +78,11 @@ struct vblk_queue {
  * notification into unbounded reads and copies. */
 #define VBLK_REQ_MAX_BYTES       (4u << 20)   /* 4 MiB per request */
 #define VBLK_MAX_BYTES_PER_CALL  (32u << 20)  /* 32 MiB per notification */
+/* A flush moves no data but is a synchronous fsync, so it must count against
+ * the per-notification ceiling too -- otherwise a queue full of flushes runs
+ * a queue's worth of fsyncs in one batch. Charge it like a max-size request,
+ * so a flood of flushes is broken across owner turns like a flood of writes. */
+#define VBLK_FLUSH_COST          VBLK_REQ_MAX_BYTES
 
 /*
  * Serve requests the guest has made available since the last call, at most

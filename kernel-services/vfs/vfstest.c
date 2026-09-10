@@ -4,6 +4,7 @@
 
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/handle.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/mountns.h>
@@ -215,6 +216,40 @@ bool selftest_vfs_ramfs(const char **reason)
     CHECK(vfs_stat(NULL, "/mnt/inner", &st) == -ENOENT);                /* the ramfs is gone */
     CHECK(vfs_mount_count() == mounts0);
     CHECK(vfs_vnode_count() == vnodes0);
+    return true;
+}
+
+/* fsync(fd) is the exact path SYS_fsync runs: resolve a handle to a file and
+ * commit that one file (not every mount, which is SYS_sync). A bad handle is
+ * -EBADF. The device-side flush that leans on it lives in test_vblk_dev; this
+ * proves the handle-to-file-to-sync path the syscall wraps. */
+bool selftest_fsync_handle(const char **reason)
+{
+    struct handle_table *t = kmalloc(sizeof(*t), KMEM_ZERO);
+    CHECK(t != NULL);
+    handle_table_init(t);
+
+    struct file *f;
+    CHECK(vfs_open(NULL, "/tmp/fsync.txt", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    CHECK(file_write(f, "durable", 7) == 7);
+    int h = handle_install(t, &f->obj, HANDLE_RIGHT_OWNER);
+    CHECK(h >= 0);
+    file_put(f);   /* the table holds the reference now */
+
+    /* what sys_fsync does: look the handle up, take the file, sync it */
+    struct kobject *obj = handle_lookup(t, h, 0);
+    CHECK(obj != NULL);
+    struct file *lf = file_from_kobject(obj);
+    CHECK(lf != NULL);
+    CHECK(file_sync(lf) == 0);
+    kobject_put(obj);
+
+    /* a handle that names nothing is where the syscall returns -EBADF */
+    CHECK(handle_lookup(t, 99, 0) == NULL);
+
+    handle_table_destroy(t);
+    kfree(t);
+    CHECK(vfs_unlink(NULL, "/tmp/fsync.txt") == 0);
     return true;
 }
 

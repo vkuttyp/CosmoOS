@@ -684,10 +684,50 @@ The mechanism is proven end to end in the kernel harness
 (`el2-virtq-device`: a guest negotiates the device and reads a sector's
 bytes) and exhaustively on the host (`test_vblk_dev`).
 
-Not done, and named: writes and a writable root; indirect and chained
-descriptors beyond the simple case; multiple queues and
-`VIRTIO_F_RING_EVENT_IDX`; virtio-net and a PCI transport. A read-only
-root is enough to reach userspace, which is the milestone.
+### A writable root (`vmctl --disk-rw`)
+
+A read-only root reaches userspace; a writable one lets the guest keep
+what it does there. The write is the read walk with the data moving the
+other way, so the direction lives entirely in `serve_one`: a request is a
+read (`VIRTIO_BLK_T_IN`), a write (`T_OUT`) if the device has a
+`disk_write`, a flush (`T_FLUSH`) if it has a `disk_flush`, else
+unsupported. A read's data descriptors must be device-writable and are
+filled from the disk; a write's must be device-readable and are drained to
+the disk; a flush carries no data and makes prior writes durable. Every
+bound the read path carries -- the descriptor and backlog limits, the
+per-request and per-notification work ceilings, the atomic publish, and
+the rule that a fault returns `-1` -- lives above the direction branch and
+applies unchanged; `disk_write` is bounded to the capacity exactly as
+`disk_read` is, so a write past the disk is an I/O error and the file
+never grows.
+
+Read-write is opt-in: `--disk` stays read-only (it offers
+`VIRTIO_BLK_F_RO`, and a write or flush is `UNSUPP`), and `--disk-rw`
+opens the file `O_RDWR` and presents a device that offers
+`VIRTIO_BLK_F_FLUSH` and not `RO`. The two are mutually exclusive, and
+turning a disk writable is never the default, because a guest writing a
+file the owner meant to keep is silent data loss. A writable device that
+did not advertise flush would lie about durability, so the two are tied:
+`disk_write` is an `lseek`+`write`, and `disk_flush` is `fsync()` of the
+disk file -- a new `SYS_fsync` that commits one file rather than
+`sync()`'s every mount, so a guest that spams `T_FLUSH` cannot force
+synchronous commits of host filesystems it has nothing to do with.
+A crash between a write and the next flush loses the unflushed writes,
+which is what the flush feature tells the guest to expect and what its
+journal is built around; the harness cannot stage that interruption, so
+its crash-consistency is reasoned about, not executed.
+
+Proven end to end in the harness (`el2-virtq-device`: a real guest driver
+reads a sector, then writes one, flushes, and reads back what it wrote)
+and exhaustively on the host (`test_vblk_dev`: the write round-trip, the
+flush, and the hostile write rings). Mounting a stock Linux root
+read-write -- write a file, `sync`, and see the change in the backing file
+-- needs a root image and `QEMU_MEM=2G`, the same reproduction shape the
+read path's Linux boot has, not a CI gate.
+
+Not done, and named: discard and write-zeroes; a copy-on-write overlay;
+indirect and chained descriptors beyond the simple case; multiple queues
+and `VIRTIO_F_RING_EVENT_IDX`; virtio-net and a PCI transport.
 
 ### Guest memory (`guestmem.c`)
 

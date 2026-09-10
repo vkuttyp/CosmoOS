@@ -126,7 +126,8 @@
 #define SYS_ttysize   78  /* (int handle, struct cosmo_ttysize *out) -> 0 */
 #define SYS_vm_raise_spi 79  /* (int vm, unsigned intid) -> 0: a device asserts a shared interrupt through the guest's distributor */
 #define SYS_vm_lower_spi 80  /* (int vm, unsigned intid) -> 0: and drops it */
-#define SYS_COUNT     81
+#define SYS_fsync     81  /* (int handle) -> 0: commit one file's data, not every mount (cf. SYS_sync) */
+#define SYS_COUNT     82
 
 /* A filter mask is this many 64-bit words, enough for every number any
  * personality here uses (the Linux one goes to 512). */

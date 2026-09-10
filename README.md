@@ -1014,6 +1014,30 @@ See [docs/development.md](docs/development.md).
   reads a sector's bytes) and exhaustively on the host (`test_vblk_dev`).
   Mounting a Linux root over it needs a root image and `QEMU_MEM=2G`, the
   same demonstration-not-gate shape the Linux boot has.
+- **A writable root (done):** `docs/audit/next-subsystem-vblk-rw.md`,
+  `docs/kernel-services/virtualization/design.md` ("A writable root"). The
+  read-only root reaches userspace but keeps nothing; this adds the write
+  side. The write is the read walk with the data moving the other way, so
+  the direction lives entirely in `serve_one`: a read fills its
+  device-writable data buffer from the disk, a write (`VIRTIO_BLK_T_OUT`)
+  drains its device-readable buffer to the disk, a flush (`T_FLUSH`) makes
+  prior writes durable. Every hostile-input bound and the atomic-publish
+  rule the read path grew apply unchanged above the direction branch, and
+  `disk_write` is bounded to the capacity like `disk_read`, so a write past
+  the disk is an I/O error and the file never grows. Read-write is opt-in:
+  `--disk` stays read-only (offers `VIRTIO_BLK_F_RO`, writes `UNSUPP`), and
+  `--disk-rw` opens the file `O_RDWR` and offers `VIRTIO_BLK_F_FLUSH` and
+  not `RO` -- because a guest writing a file the owner meant to keep is
+  silent data loss, and a writable device without flush would lie about
+  durability. `disk_write` is an `lseek`+`write`; `disk_flush` is `fsync()`
+  of the disk file (a new `SYS_fsync` that commits one file, not `sync()`'s
+  every mount, so a guest cannot force commits of unrelated host mounts).
+  Proven end to end in the harness (`el2-virtq-device`: a guest reads a
+  sector, then writes one, flushes, and reads back what it wrote) and
+  exhaustively on the host (`test_vblk_dev`: the write round-trip, the
+  flush, the hostile write rings). Mounting a stock Linux root read-write
+  is the same `QEMU_MEM=2G`-and-a-root-image reproduction the read path's
+  Linux boot is, not a CI gate.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
