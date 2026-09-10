@@ -51,7 +51,15 @@ static inline int cosmo_vcpu_set_regs(int vcpu, const struct cosmo_vcpu_regs *re
 /* Runs until an exit; `exit` carries an IN completion in (io.value) and the exit out. */
 static inline int cosmo_vcpu_run(int vcpu, struct cosmo_vm_exit *exit)
 {
-    return (int)cosmo_syscall2(SYS_vcpu_run, vcpu, (long)exit);
+    return (int)cosmo_syscall3(SYS_vcpu_run, vcpu, (long)exit, 0);
+}
+
+/* The same, bounded: with COSMO_VCPU_RUN_ONE_TICK the run returns at the
+ * first host interrupt as COSMO_VM_EXIT_PREEMPTED, so one thread can run
+ * several vCPUs in turn. */
+static inline int cosmo_vcpu_run_flags(int vcpu, struct cosmo_vm_exit *exit, unsigned flags)
+{
+    return (int)cosmo_syscall3(SYS_vcpu_run, vcpu, (long)exit, flags);
 }
 
 static inline int cosmo_vcpu_irq(int vcpu, unsigned vector)

@@ -512,8 +512,10 @@ of `'A'` to `UARTDR` was an `MMIO` exit to an owner with nothing behind
 it, and the exit did not carry the `'A'`. The register set is the one the
 host's own `pl011.c` drives: `DR` writes go to the console ring the VM
 descriptor reads; `DR` reads pop a 64-byte receive FIFO that `write()` on
-the VM descriptor fills (`vm_console_write`; the oldest byte is dropped
-when full, as the ring does); `FR` says the transmitter is always ready
+the VM descriptor fills (`vm_console_write`; a full FIFO takes no more and
+the write returns short, so the owner knows and retries -- the first
+version dropped the oldest byte silently, and a loaded host lost bytes a
+typist had been told were taken); `FR` says the transmitter is always ready
 and whether the FIFO is empty or full; `IBRD`, `FBRD`, `LCR_H`, `CR`,
 `IFLS`, `IMSC`, `DMACR` are stored and returned; `RIS` carries `RXRIS`
 while a byte waits and `TXRIS` always (the transmit FIFO is never

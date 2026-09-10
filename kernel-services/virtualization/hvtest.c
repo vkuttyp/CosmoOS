@@ -1709,7 +1709,7 @@ static void typist_main(void *arg)
     struct typist *t = arg;
     for (unsigned i = 0; i < t->bytes; i++) {
         char c = (char)('a' + (i % 26));
-        while (vm_console_write(t->vm, &c, 1) != 1)
+        while (vm_console_write(t->vm, &c, 1) != 1)   /* the FIFO is full: the guest has not caught up */
             thread_sleep_ns(10000);
         /* Mostly fast, with a pause every eighth byte. A stale raise is
          * only visible as a spurious interrupt if no fresh byte arrives
@@ -2002,6 +2002,44 @@ bool selftest_el2_guest_psci(const char **reason)
     return true;
 }
 
+/*
+ * The bounded run an owner with one thread needs: a guest that never
+ * exits, run with ONE_TICK, comes back at the first host interrupt as
+ * PREEMPTED rather than never; run again it comes back again, having run
+ * in between; and the flag is per call -- without it the same guest still
+ * needs the tests' own bound to be stopped at all.
+ */
+bool selftest_el2_vcpu_run_tick(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_spin.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    uint64_t t0 = clock_now_ns();
+    CHECK(vcpu_run_flags(v, &x, COSMO_VCPU_RUN_ONE_TICK) == 0);
+    uint64_t first = clock_now_ns() - t0;
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    uint64_t entries = v->entries;
+    CHECK(entries >= 1);
+    CHECK(first < 100000000ull);                                   /* a tick, not forever: under 100 ms */
+    CHECK(vcpu_run_flags(v, &x, COSMO_VCPU_RUN_ONE_TICK) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    CHECK(v->entries > entries);                                   /* it ran again in between */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pc == LOAD_GPA);    /* and is still in its loop */
+    /* The flag is per call: without it, only the tests' bound stops this guest. */
+    CHECK(vcpu_run_limited(v, &x, 3) == -ETIMEDOUT);
+    CHECK(vcpu_run_flags(v, &x, 0x80000000u | COSMO_VCPU_RUN_ONE_TICK) == 0);   /* unknown bits are ignored */
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-vcpu-run-tick: a spinning guest gave its turn back after %llu us, twice",
+          (unsigned long long)(first / 1000));
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2131,6 +2169,7 @@ bool selftest_el2_guest_uart_level(const char **reason) { (void)reason; return t
 bool selftest_el2_guest_uart_race(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_dtb(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_psci(const char **reason) { (void)reason; return true; }
+bool selftest_el2_vcpu_run_tick(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

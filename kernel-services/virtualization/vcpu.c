@@ -256,13 +256,32 @@ static void fill_common(struct vcpu *v, struct cosmo_vm_exit *x, uint32_t kind)
     x->flags = (vintr_any(v) || arch_hv_vcpu_irq_waiting(v->arch)) ? COSMO_VM_EXIT_F_IRQ_PENDING : 0;
 }
 
+static int vcpu_run_bounded(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr, bool preempt);
+
 int vcpu_run(struct vcpu *v, struct cosmo_vm_exit *x)
 {
-    return vcpu_run_limited(v, x, 0);
+    return vcpu_run_bounded(v, x, 0, false);
 }
 
 /* max_intr > 0: give up with -ETIMEDOUT after that many host-interrupt exits (tests). */
 int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
+{
+    return vcpu_run_bounded(v, x, max_intr, false);
+}
+
+/* The owner's bounded run: ONE_TICK is "one host interrupt, then a
+ * PREEMPTED exit" -- a turn, for an owner that has other vCPUs to run
+ * and one thread to run them on. */
+int vcpu_run_flags(struct vcpu *v, struct cosmo_vm_exit *x, unsigned flags)
+{
+    if (flags & COSMO_VCPU_RUN_ONE_TICK)
+        return vcpu_run_bounded(v, x, 1, true);
+    return vcpu_run_bounded(v, x, 0, false);
+}
+
+/* The bound: after `max_intr` host-interrupt exits, -ETIMEDOUT (a test's
+ * failure) or, with `preempt`, a PREEMPTED exit (an owner's turn over). */
+static int vcpu_run_bounded(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr, bool preempt)
 {
     struct vm *vm = v->vm;
     unsigned intr = 0;
@@ -325,6 +344,10 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             continue;
         if (e.kind == HV_EXIT_INTR) {
             if (max_intr && ++intr >= max_intr) {
+                if (preempt) {
+                    fill_common(v, x, COSMO_VM_EXIT_PREEMPTED);
+                    break;
+                }
                 rc = -ETIMEDOUT;
                 break;
             }

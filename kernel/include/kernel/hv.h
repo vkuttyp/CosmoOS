@@ -141,8 +141,9 @@ int vm_device_register(struct vm *vm, struct vm_device *dev);
 /* The debug console ring (what the guest wrote to port 0xE9). */
 size_t vm_console_read(struct vm *vm, void *buf, size_t len);
 /* The owner's input to the guest: bytes into the console UART's receive
- * FIFO, which interrupts the guest if it asked to be. -ENOTSUP where the
- * VM has no such device (x86-64). */
+ * FIFO, which interrupts the guest if it asked to be. Returns how many
+ * were taken -- short, or 0, when the FIFO is full; the owner retries.
+ * -ENOTSUP where the VM has no such device (x86-64). */
 int64_t vm_console_write(struct vm *vm, const void *buf, size_t len);
 /* A device's shared interrupt line, up or down (arch_hv_vm_raise_spi). */
 int vm_raise_spi(struct vm *vm, unsigned intid);
@@ -158,6 +159,8 @@ int vcpu_set_regs(struct vcpu *v, const struct cosmo_vcpu_regs *in);
  * -EIO dead, -EINTR the caller is being killed, -ENOTSUP no backend. */
 int vcpu_run(struct vcpu *v, struct cosmo_vm_exit *exit);
 int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *exit, unsigned max_intr);
+/* The uapi entry: COSMO_VCPU_RUN_* flags; unknown bits are ignored. */
+int vcpu_run_flags(struct vcpu *v, struct cosmo_vm_exit *exit, unsigned flags);
 /* VirtualInterrupt: make a vector (32..255) pending. */
 int vcpu_inject(struct vcpu *v, unsigned vector);
 int vcpu_lowest_pending(struct vcpu *v);   /* -1 none */

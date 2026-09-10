@@ -243,7 +243,8 @@ bool selftest_el2_guest_uart_rx(const char **reason);       /* the owner types, 
 bool selftest_el2_guest_uart_level(const char **reason);    /* one interrupt per byte still waiting; a WFI woken by a keystroke */
 bool selftest_el2_guest_uart_race(const char **reason);
 bool selftest_el2_guest_dtb(const char **reason);           /* a guest learns its machine from the device tree it is handed */
-bool selftest_el2_guest_psci(const char **reason);          /* the owner is the firmware: version, CPU_ON, SYSTEM_OFF */     /* an owner typing against a guest draining: no spurious interrupt, no lost byte */         /* a device in the kernel completes a guest's access, by width and sign */  /* a guest's distributor is its VM's: not another's, not the host's */
+bool selftest_el2_guest_psci(const char **reason);
+bool selftest_el2_vcpu_run_tick(const char **reason);       /* a bounded run: one tick, then PREEMPTED, and the guest made progress */          /* the owner is the firmware: version, CPU_ON, SYSTEM_OFF */     /* an owner typing against a guest draining: no spurious interrupt, no lost byte */         /* a device in the kernel completes a guest's access, by width and sign */  /* a guest's distributor is its VM's: not another's, not the host's */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

@@ -206,7 +206,10 @@ int64_t sys_vcpu_run(struct syscall_args *a)
         kobject_put(&v->obj);
         return -EFAULT;
     }
-    int rc = vcpu_run(v, &x);
+    /* The third argument is new; an older libc passed two and this one
+     * passes zeros for the rest, but a register is not a promise: mask. */
+    unsigned flags = (unsigned)a->a[2] & COSMO_VCPU_RUN_ONE_TICK;
+    int rc = vcpu_run_flags(v, &x, flags);
     if (rc == 0 && copy_to_user(a->a[1], &x, sizeof(x)))
         rc = -EFAULT;
     kobject_put(&v->obj);
