@@ -1711,11 +1711,15 @@ static void typist_main(void *arg)
         char c = (char)('a' + (i % 26));
         while (vm_console_write(t->vm, &c, 1) != 1)   /* the FIFO is full: the guest has not caught up */
             thread_sleep_ns(10000);
-        /* Mostly fast, with a pause every eighth byte. A stale raise is
-         * only visible as a spurious interrupt if no fresh byte arrives
-         * before the handler reads MIS; a steady fast cadence would hide
-         * exactly the race this test exists to catch. */
-        thread_sleep_ns((i % 8 == 7) ? 3000000 : 150000);
+        /* In bursts, with a pause every eighth byte. A stale raise is only
+         * visible as a spurious interrupt if no fresh byte arrives before
+         * the handler reads MIS; a steady cadence would hide exactly the
+         * race this test exists to catch. No sleep between the bytes of a
+         * burst: every sleep here is at least one scheduler tick (4 ms),
+         * and a sleep per byte made the test 6 s on four host CPUs and
+         * 9.7 s on one, past the harness's 8 s budget. */
+        if (i % 8 == 7)
+            thread_sleep_ns(1000000);
     }
     t->done = true;
     thread_exit(0);
