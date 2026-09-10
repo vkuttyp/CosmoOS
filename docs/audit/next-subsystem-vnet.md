@@ -173,9 +173,15 @@ path to "a guest has an interface that sends and receives."
   with no out-of-bounds access (`test_vnet_dev`). Neither needs a real
   network.
 - **Demonstrated, reproducible:** a stock Linux brings up `eth0` on the
-  device and `ping`s its own address; reaching anything beyond the guest
-  waits for the host-bridge unit. Same `QEMU_MEM=2G` reproduction shape as
-  the block device's Linux demonstration, not a CI gate.
+  device and sends to an address on its subnet that is *not* its own, so
+  the frame must leave through `eth0` (pinging its own address would take
+  the kernel's local route and never touch the device); the loopback wire
+  returns the frame, and `eth0`'s transmit and receive counters
+  (`ip -s link show eth0`) both advance — an observable that fails if
+  transmit, the wire, receive, or the interrupt is broken. Reaching
+  anything beyond the guest waits for the host-bridge unit. Same
+  `QEMU_MEM=2G` reproduction shape as the block device's Linux
+  demonstration, not a CI gate.
 
 ### 7. Deliberately out of scope
 
