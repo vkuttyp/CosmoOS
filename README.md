@@ -967,6 +967,27 @@ See [docs/development.md](docs/development.md).
   powers off -- from the kernel's test and from `vmctl` alike. On the way:
   the UART's receive FIFO dropped silently when full and a loaded host
   lost bytes; it refuses now and the owner's write returns short.
+- **Booting Linux (done):** `docs/audit/next-subsystem-linux.md`,
+  `docs/kernel/arch/aarch64/design.md` ("The features a guest is told it
+  has"). The reader whose opinion of the device tree settles it: a stock
+  arm64 Linux (Alpine's `vmlinuz-virt`, its raw `Image` extracted) loaded
+  by its header and handed our device tree stopped at a trapped read of
+  `ID_AA64DFR0_EL1` -- `HCR_EL2.TID3` traps every feature-register read to
+  the owner, and the owner modelled none. A feature-register model in the
+  kernel (`hv_idregs.c`) answers the whole ID space from the host's own
+  registers, masked deny-by-default so a guest is never told it has a
+  feature the hypervisor does not isolate. That one model, plus raising
+  the per-VM RAM ceiling from 64 to 512 MiB so a modern kernel can run its
+  `init`, is the whole distance: **a stock Linux 6.6 now boots on CosmoOS,
+  prints its banner and `Machine model: cosmo,virt` -- read from our
+  device tree -- through the PL011 we emulate, and reaches the panic a
+  diskless machine reaches (`Unable to mount root fs`).** The claim the
+  whole hypervisor arc was for: it runs a kernel written for the
+  architecture, not for the hypervisor. The Image is not committed (34 MB,
+  someone else's binary); the boot test runs when a developer drops one at
+  `tests/hv/aarch64/Image` and skips cleanly otherwise, and `el2-guest-idreg`
+  is the model's regression net in CI. A root filesystem (virtio-blk) is
+  the next unit; the panic is the milestone.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1004,6 +1025,8 @@ See [docs/development.md](docs/development.md).
   device seam that completes an MMIO access by width and sign).
   `docs/audit/next-subsystem-machine.md` did it for the machine a guest is
   handed (built: a device tree, the entry convention, PSCI, and a C guest
-  that reads them). Its own out-of-scope names what comes next: booting
-  Linux, the only reader whose opinion of the blob settles it. Design
+  that reads them). `docs/audit/next-subsystem-linux.md` did it for
+  booting Linux, and Linux now boots (the feature registers modelled, the
+  RAM ceiling raised) to its diskless-root panic -- the reader whose
+  opinion of the device tree settles it, and it settled favourably. Design
   documents first, one subsystem at a time.

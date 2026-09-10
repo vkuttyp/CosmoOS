@@ -674,6 +674,7 @@ struct cosmo_vm_exit {           /* 64 bytes */
 
 #define COSMO_HV_VMS_MAX     8u
 #define COSMO_HV_VCPUS_MAX   4u
-#define COSMO_HV_VM_MEM_MAX  (64u << 20)
+#define COSMO_HV_VM_MEM_MAX  (512u << 20)   /* per-VM guest RAM ceiling and the default RLIMIT_VMEM: enough for a
+                                              * stock Linux kernel to boot to its root-filesystem panic */
 
 #endif /* UAPI_COSMO_SYSCALL_H */

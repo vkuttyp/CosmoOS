@@ -203,6 +203,7 @@ if ARCH == "aarch64":
         r"^cpu_on 1 -> 0$",
         r"^vmctl: guest powered off$",                        # SYSTEM_OFF ended the run
     ]
+
 HV_FORBIDDEN_MARKERS = [
     r"selftest: hv: skipped",
     r"^HVTEST: skipped",

@@ -9,7 +9,7 @@ HV_TEST_OUT := $(OUT)/tests/hv
 ifeq ($(ARCH),x86_64)
 HV_GUESTS := guest_pio guest_irq guest_cpuid guest_pm guest_shutdown guest_spin guest_fpu
 else
-HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_mmio_widths guest_uart guest_uart_rx guest_uart_wfi guest_uart_poll guest_ptimer guest_timer_wfi
+HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_idreg guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_mmio_widths guest_uart guest_uart_rx guest_uart_wfi guest_uart_poll guest_ptimer guest_timer_wfi
 endif
 
 define hv_guest_rule
@@ -59,6 +59,16 @@ $(HV_TEST_OUT)/guest_dtb.bin: $(ROOT)/tests/hv/aarch64/guest_dtb_start.S $(ROOT)
 	$(Q)$(LD) -Ttext=0x40080000 --oformat=binary -o $@ $@.start.o $@.main.o $@.fdt.o
 HV_GUEST_BINS += $(HV_TEST_OUT)/guest_dtb.bin
 HV_ARCHIVE_ENTRIES += tests/hv/guest_dtb.bin=$(HV_TEST_OUT)/guest_dtb.bin
+
+# A stock Linux kernel Image, if a developer has dropped a raw arm64 Image
+# at tests/hv/aarch64/Image (gitignored): the boot archive carries it and
+# rc.test boots it (docs/kernel-services/virtualization/testing.md). Absent
+# -- as in CI -- everything below is empty and the Linux test skips.
+HV_LINUX_IMAGE := $(wildcard $(ROOT)/tests/hv/aarch64/Image)
+ifneq ($(HV_LINUX_IMAGE),)
+HV_ARCHIVE_ENTRIES += tests/hv/Image=$(HV_LINUX_IMAGE)
+HV_GUEST_BINS += $(HV_LINUX_IMAGE)
+endif
 endif
 
 .PHONY: hv-guests

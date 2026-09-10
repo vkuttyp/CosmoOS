@@ -94,6 +94,17 @@ ls /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vm
 # of them (tests/boot/run_boot_test.py, HVTEST_MARKERS), since this shell
 # has no grep to check them with here.
 ls /boot/tests/hv/guest_dtb.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 2 /boot/tests/hv/guest_dtb.bin
+# A stock Linux kernel, when a developer has provided one at
+# tests/hv/aarch64/Image (docs/kernel-services/virtualization/testing.md):
+# vmctl builds the device tree, loads the Image by its header, answers PSCI,
+# and runs it -- a diskless kernel comes up and panics on the root
+# filesystem it cannot find, printing its banner and "Machine model:
+# cosmo,virt" through our PL011. This needs a large guest (256 MiB) in a
+# host with room for it, so the milestone appears in the log only under
+# QEMU_MEM=2G; at the boot-test's default 256M the allocation fails
+# harmlessly. It is a demonstration, not a gate -- el2-guest-idreg is the
+# model's automated regression test, and it needs no Image.
+ls /boot/tests/hv/Image > /tmp/shtest/linux.probe 2>&1 && vmctl run --machine -m 256 --append "earlycon=pl011,0x09000000 console=ttyAMA0 loglevel=8 nokaslr panic=-1" /boot/tests/hv/Image
 vmctl info
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

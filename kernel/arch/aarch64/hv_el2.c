@@ -28,6 +28,7 @@
 
 #include <aarch64/fpu.h>
 #include <aarch64/gicv3_vdist.h>
+#include <aarch64/hv_idregs.h>
 #include <aarch64/hv_ctx.h>
 #include <aarch64/hv_el2.h>
 #include <aarch64/irqc.h>
@@ -906,6 +907,30 @@ static bool el2_vdist_access(struct arch_hv_vcpu *v, uint64_t gpa, bool write, u
  * security state, which this guest has neither of: swallowed. Reads, and
  * every other register, are the owner's as before.
  */
+/*
+ * A trapped ID-register read (HCR_EL2.TID3): the feature model answers it
+ * from the host's own register, masked to what a guest may see, and the
+ * value lands in the guest's destination register. A write to the ID
+ * space cannot happen (they are read-only), and any encoding the model
+ * does not claim is the owner's, as before.
+ */
+static bool el2_idreg_read(struct arch_hv_vcpu *v, uint32_t il)
+{
+    uint32_t iss = (uint32_t)(v->ctx->exit_esr & 0x1FFFFFFu);
+    if ((iss & 1u) == 0)
+        return false;   /* a write: not an ID register */
+    uint32_t enc = iss & ~((0x1Fu << 5) | 1u);
+    bool handled = false;
+    uint64_t val = hv_idreg_read(enc, &handled);
+    if (!handled)
+        return false;
+    unsigned rt = (iss >> 5) & 0x1Fu;
+    if (rt < 31)
+        v->ctx->guest_x[rt] = val;
+    v->ctx->guest_pc += il;
+    return true;
+}
+
 static bool el2_vdist_sysreg(struct arch_hv_vcpu *v, uint32_t il)
 {
     struct gicv3_vdist *d = v->vm->vdist;
@@ -957,6 +982,10 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
     case EC_SYSREG:
         if (el2_vdist_sysreg(v, il)) {
             out->kind = HV_EXIT_EMULATED;   /* an SGI sent: the guest's GIC's business */
+            return 0;
+        }
+        if (el2_idreg_read(v, il)) {
+            out->kind = HV_EXIT_EMULATED;   /* an ID register: answered from the host, sanitized */
             return 0;
         }
         out->kind = HV_EXIT_SYSREG;

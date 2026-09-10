@@ -64,6 +64,13 @@ int vm_mem_add(struct vm *vm, uint64_t gpa, uint64_t len)
     if (gpa >= HV_GPA_LIMIT || len > HV_GPA_LIMIT - gpa)
         return -EINVAL;
     size_t pages = (size_t)(len / PAGE_SIZE);
+    /* The limit is checked before the page array is allocated: with the
+     * ceiling at 512 MiB, a rejected add would otherwise allocate a
+     * megabyte of pointers only to free it. mem_bytes only grows under
+     * the lock, so a race can let two adds pass here and one fail at the
+     * commit below -- which still holds the limit; this is the early-out. */
+    if (vm->mem_bytes + len > vm->mem_limit)
+        return -ENOMEM;
     struct guest_region *r = kzalloc(sizeof(*r));
     if (r == NULL)
         return -ENOMEM;
@@ -80,7 +87,7 @@ int vm_mem_add(struct vm *vm, uint64_t gpa, uint64_t len)
     int rc = 0;
     if (vm->nr_regions >= HV_REGIONS_MAX)
         rc = -ENOSPC;
-    else if (vm->mem_bytes + len > vm->mem_limit)   /* the creator's COSMO_RLIMIT_VMEM */
+    else if (vm->mem_bytes + len > vm->mem_limit)   /* the creator's COSMO_RLIMIT_VMEM, re-checked under the lock */
         rc = -ENOMEM;
     else if (overlaps(vm, gpa, len))
         rc = -EINVAL;

@@ -38,3 +38,8 @@ __pycache__/
 # Private signing material never belongs in the tree (scripts/check-secrets.sh
 # fails the build if it does); developer keys live in $COSMO_KEYDIR.
 *.key
+
+# A developer-provided Linux kernel Image for the optional Linux boot test
+# (docs/kernel-services/virtualization/testing.md). Not committed: it is
+# 34 MB and someone else's binary. The test skips cleanly when absent.
+tests/hv/aarch64/Image
