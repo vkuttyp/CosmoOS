@@ -28,6 +28,9 @@
 #define VNET_HDR_LEN         12u   /* struct virtio_net_hdr, zeroed (no offloads) */
 #define VNET_FRAME_MAX       1514u /* a full Ethernet frame, no jumbo */
 #define VNET_BUF_MAX         (VNET_HDR_LEN + VNET_FRAME_MAX)
+/* The per-notification work ceiling, as block has: the most frame data one
+ * QueueNotify serves before the rest waits for the next. */
+#define VNET_MAX_BYTES_PER_CALL  (1u << 20)   /* 1 MiB of frames per notification */
 
 struct vnet_io {
     /* Guest memory and the per-notification ceiling, as block's -- a vnet_io

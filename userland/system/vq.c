@@ -51,8 +51,11 @@ int vq_process(const struct vq_io *io, struct vq_queue *q, vq_serve_fn serve, vo
             return -1;
         uint32_t used_len = 0;
         uint64_t work = 0;
-        if (serve(sctx, io, q, head, &used_len, &work) != 0)
+        int r = serve(sctx, io, q, head, &used_len, &work);
+        if (r < 0)
             return -1;
+        if (r == 0)
+            break;                               /* a pull queue with nothing to serve now */
         /* used->ring[used_idx % size] = { head, used_len } at used_gpa + 4 + 8*slot,
          * then used->idx. The device's own used_idx and last_avail advance
          * only once both writes land: if the index write faults, this request

@@ -59,11 +59,16 @@ struct vq_io {
 int vq_read_desc(const struct vq_io *io, const struct vq_queue *q, uint16_t i, struct vq_desc *d);
 
 /*
- * Serve one head: walk its chain and move its data. Returns 0 with
- * `*used_len` set to the bytes to report on the used ring and `*work` to the
- * bytes moved (what counts against the ceiling), or -1 on a hostile or
- * faulting chain -- which stops the whole walk and is never counted as
- * progress.
+ * Serve one head: walk its chain and move its data. Returns:
+ *   1  served -- publish this head, with `*used_len` the bytes to report on
+ *      the used ring and `*work` the bytes moved (what counts against the
+ *      ceiling);
+ *   0  nothing to serve now -- stop the walk and leave this head available,
+ *      for a "pull" queue like virtio-net receive, where a posted buffer is
+ *      a pool the device fills only when a frame arrives;
+ *  -1  a hostile or faulting chain -- stop the walk and fail, never counted
+ *      as progress.
+ * A drain-all queue (block) always returns 1 for an available head.
  */
 typedef int (*vq_serve_fn)(void *sctx, const struct vq_io *io, const struct vq_queue *q,
                            uint16_t head, uint32_t *used_len, uint64_t *work);

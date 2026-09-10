@@ -119,7 +119,7 @@ static int blk_serve(void *sctx, const struct vq_io *io, const struct vq_queue *
     /* Work for the ceiling: the data moved, plus a fixed charge for a flush,
      * which moves nothing but does a synchronous fsync. */
     *work = req_bytes + (is_flush ? VBLK_FLUSH_COST : 0u);
-    return 0;
+    return 1;                                    /* block always serves an available head */
 }
 
 int vblk_process(struct vblk_io *io, struct vq_queue *q)
