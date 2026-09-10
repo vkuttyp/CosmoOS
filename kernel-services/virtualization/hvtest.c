@@ -1752,21 +1752,86 @@ static void sibling_main(void *arg)
 }
 
 /*
- * A property about two threads needs two threads; this one has three. A
- * kernel thread types at the guest, and the guest has two vCPUs each run
- * by its own thread, both polling DR and both able to take SPI 33 for it
- * -- so the owner's raise, either vCPU's lower, and either vCPU's
- * per-entry re-raise race in the UART for every byte. Two things must
- * hold whatever the interleaving: no interrupt arrives with MIS zero on
- * either vCPU -- a raise decided from a state a sibling has since
- * changed leaves SPI 33 pending with the line down, and that is what a
- * handler would see -- and every byte typed is consumed by one path on
- * one vCPU. Two versions of the UART could do the former: the one that
- * applied a transition after dropping its lock, and the one that
- * returned "the line is up" for the run loop to act on. Both windows are
- * narrow, so the bug-proofs widen them; this is the regression test that
- * the device decides and raises under one lock.
+ * A property about two threads needs two threads, and this test has two
+ * phases because two different things are being claimed.
+ *
+ * Phase one, one vCPU: a kernel thread types at a guest that both polls
+ * DR (with interrupts masked around the poll) and takes SPI 33 for it, so
+ * the owner's raise and the guest's lower race in the UART for every
+ * byte. No interrupt may arrive with MIS zero: with one vCPU there is no
+ * one else to drain the byte, so an interrupt whose cause is gone can
+ * only come from the hypervisor's own ordering -- a raise decided from a
+ * state the guest has since changed, which two versions of this UART
+ * could produce (a transition applied after dropping the lock; "the line
+ * is up" returned for the run loop to act on). Both windows are too
+ * narrow to hit on purpose, so their bug-proofs force them; this phase is
+ * the regression test that the device decides and raises under one lock.
+ *
+ * Phase two, two vCPUs each on its own thread, both polling and both able
+ * to take the interrupt: every byte typed is consumed by one path on one
+ * vCPU and none is lost. MIS-zero interrupts are counted and reported but
+ * NOT asserted absent here, because with a sibling they are not the
+ * hypervisor's to prevent: a sibling that drains the byte between the
+ * GIC forwarding the interrupt and the handler reading MIS makes MIS zero
+ * on real hardware too, and a guest driver treats it as no work (Linux's
+ * PL011 driver returns). One list register adds a window hardware does
+ * not have -- a line that drops after the interrupt was placed is still
+ * delivered, where a GIC would return 1023 at IAR -- and that is recorded
+ * in the design doc as a deviation a guest handler must tolerate. The
+ * first version of this test asserted zero in phase two as well and failed
+ * once in ten runs, on exactly that interleaving.
  */
+static bool uart_race_phase(const char **reason, struct vm *vm, struct vcpu *v0, struct vcpu *v1, unsigned bytes,
+                            unsigned *consumed_out, unsigned *irqs_out, unsigned *spurious_out, struct sibling *sib)
+{
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct thread *ts = NULL;
+    if (v1) {
+        memset(sib, 0, sizeof(*sib));
+        sib->v = v1;
+        ts = thread_create(sibling_main, sib, "uart-sibling", SCHED_PRIO_DEFAULT);
+        CHECK(ts != NULL);
+    }
+    struct typist t;
+    memset(&t, 0, sizeof(t));
+    t.vm = vm;
+    t.bytes = bytes;
+    struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
+    CHECK(th != NULL);
+    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0, base = 0;
+    bool first = true;
+    for (;;) {
+        CHECK(vcpu_run(v0, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        if (x.hypercall.nr == 33) {
+            if ((x.hypercall.a0 & 0x10u) == 0)
+                spurious++;
+        } else {
+            CHECK(x.hypercall.nr == 2);
+            if (first) {                                  /* the guest's counters carry over from an earlier phase */
+                base = (unsigned)x.hypercall.a1;
+                first = false;
+            }
+            irqs = (unsigned)x.hypercall.a0;
+            consumed = (unsigned)x.hypercall.a1 - base;
+            if (t.done && consumed + (v1 ? sib->consumed : 0) >= bytes)
+                break;
+        }
+        CHECK(++steps < 2000000);
+    }
+    thread_join(th);
+    if (v1) {
+        sib->stop = true;
+        thread_join(ts);
+        CHECK(!sib->failed);
+    }
+    *consumed_out = consumed;
+    *irqs_out = irqs;
+    *spurious_out = spurious;
+    return true;
+}
+
 bool selftest_el2_guest_uart_race(const char **reason)
 {
     if (skip_without_vdist("el2-guest-uart-race", reason))
@@ -1782,47 +1847,25 @@ bool selftest_el2_guest_uart_race(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
-    CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* routes SPI 33 to itself, last */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* vCPU 0 routes SPI 33 to itself */
 
+    /* Phase one: one vCPU, the hypervisor's own ordering under test. */
+    unsigned c1 = 0, i1 = 0, s1 = 0;
     struct sibling sib;
-    memset(&sib, 0, sizeof(sib));
-    sib.v = v1;
-    struct thread *ts = thread_create(sibling_main, &sib, "uart-sibling", SCHED_PRIO_DEFAULT);
-    CHECK(ts != NULL);
-    struct typist t;
-    memset(&t, 0, sizeof(t));
-    t.vm = vm;
-    t.bytes = 300;
-    struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
-    CHECK(th != NULL);
-    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0;
-    for (;;) {
-        CHECK(vcpu_run(v0, &x) == 0);
-        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
-        if (x.hypercall.nr == 33) {
-            if ((x.hypercall.a0 & 0x10u) == 0)
-                spurious++;
-        } else {
-            CHECK(x.hypercall.nr == 2);
-            irqs = (unsigned)x.hypercall.a0;
-            consumed = (unsigned)x.hypercall.a1;
-            if (t.done && consumed + sib.consumed >= t.bytes)
-                break;
-        }
-        CHECK(++steps < 2000000);
-    }
-    thread_join(th);
-    sib.stop = true;
-    thread_join(ts);
-    CHECK(!sib.failed);
-    CHECK(spurious == 0 && sib.spurious == 0);
-    CHECK(consumed + sib.consumed == t.bytes);
+    CHECK(uart_race_phase(reason, vm, v0, NULL, 200, &c1, &i1, &s1, &sib));
+    CHECK(s1 == 0);
+    CHECK(c1 == 200);
+
+    /* Phase two: the sibling joins (and routes the SPI to itself, last). */
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    unsigned c2 = 0, i2 = 0, s2 = 0;
+    CHECK(uart_race_phase(reason, vm, v0, v1, 300, &c2, &i2, &s2, &sib));
+    CHECK(c2 + sib.consumed == 300);
     kobject_put(&v1->obj);
     drop_guest(vm, v0);
-    kinfo("selftest: el2-guest-uart-race: %u bytes typed at two vCPUs on two threads; vCPU 0 took %u (%u by interrupt), vCPU 1 %u (%u); 0 spurious, none lost",
-          t.bytes, consumed, irqs, sib.consumed, sib.irqs);
+    kinfo("selftest: el2-guest-uart-race: one vCPU: %u bytes, %u by interrupt, 0 spurious; two vCPUs on two threads: 300 bytes, vCPU 0 took %u (%u by interrupt), vCPU 1 %u (%u), none lost, %u MIS-zero (a sibling drained first: tolerated)",
+          c1, i1, c2, i2, sib.consumed, sib.irqs, s2 + sib.spurious);
     return true;
 }
 

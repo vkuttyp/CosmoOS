@@ -502,6 +502,17 @@ distributor's "pending clears on acknowledge" is unchanged -- level is a
 property of the source, not a mode of the router. On x86 the ops return
 `-ENOTSUP`: stage 1 gives a guest no controller for a line to reach.
 
+One deviation from hardware, recorded: a level interrupt placed in the
+list register at entry is delivered even if its line drops before the
+guest acknowledges it -- a sibling vCPU drained the last byte, say --
+where a GIC would return 1023 at `IAR`. One list register cannot be
+withdrawn mid-run by another vCPU's thread (no thread writes another
+vCPU's register), and the guest can only look by running. A guest's
+handler must tolerate an interrupt whose `MIS` reads zero, as every real
+driver already does for the hardware window between forwarding and the
+handler's read; `el2-guest-uart-race` counts them with two vCPUs and
+asserts them absent with one.
+
 ### The guest's console (`vuart.c`)
 
 A PL011 per VM at `VUART_BASE` (`0x0900_0000`, where QEMU's `virt` puts

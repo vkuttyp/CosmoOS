@@ -64,6 +64,8 @@ _start:
     ldr  w0, [x14, #0x18]          /* FR */
     tbnz w0, #4, 3f                /* RXFE: nothing to take */
     ldr  w1, [x14]                 /* DR: take one by polling */
+    cbz  w1, 3f                    /* a sibling CPU took it first: an empty read is 0, and no
+                                      byte typed is ever 0 -- masking cannot exclude another CPU */
     add  x23, x23, #1
 3:  msr  daifclr, #2
     mov  x1, x22
@@ -80,6 +82,7 @@ irq_spx:
     ldr  w3, [x14, #0x18]
     tbnz w3, #4, 1f
     ldr  w2, [x14]                 /* a byte waited: take it */
+    cbz  w2, 1f                    /* unless a sibling CPU took it between FR and DR */
     add  x23, x23, #1
 1:  add  x22, x22, #1
     hvc  #0
