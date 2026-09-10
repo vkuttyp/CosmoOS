@@ -467,10 +467,19 @@ static int vcpu_run_bounded(struct vcpu *v, struct cosmo_vm_exit *x, unsigned ma
             x->mmio.sse = e.mmio.sse;
             x->mmio.sf = e.mmio.sf;
             x->mmio.value = e.mmio.value;
-            if (!e.mmio.write && e.mmio.size) {
+            /* An owner that handles this access -- a read it answers in
+             * x->mmio.value, or a write it acts on -- must step over the
+             * instruction on its next vcpu_run, because a data abort does
+             * not advance the PC. The completion does it: for a read it
+             * also writes the value into the register (by width and sign);
+             * for a write there is no register (reg 31, a no-op), only the
+             * advance. An owner that sets the registers itself instead
+             * cancels this in vcpu_set_regs. Only when the access was
+             * described (size != 0); a size-0 exit is the owner's entirely. */
+            if (e.mmio.size) {
                 v->mmio_completion.pending = true;
                 v->mmio_completion.size = e.mmio.size;
-                v->mmio_completion.reg = e.mmio.reg;
+                v->mmio_completion.reg = e.mmio.write ? 31u : e.mmio.reg;
                 v->mmio_completion.sse = e.mmio.sse;
                 v->mmio_completion.sf = e.mmio.sf;
                 v->mmio_completion.insn_len = e.mmio.insn_len;

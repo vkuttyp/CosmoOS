@@ -546,6 +546,7 @@ bool selftest_el2_stub(const char **reason)
 /* Reading a host ID register by its encoding, for the feature-model
  * test. kernel-services are built without the arch include path, so this
  * is inline rather than <aarch64/sysreg.h>. */
+#define VIRTIO_BLK_S_OK 0u
 #define HOST_IDREG(sname) ({ uint64_t v_; __asm__ volatile("mrs %0, " sname : "=r"(v_)); v_; })
 /* The EL2 backend's own guests: one per exit the world switch decodes.
  * Each image is loaded at guest-physical 0x1000 and entered at EL1 with
@@ -2203,6 +2204,160 @@ bool selftest_el2_vm_raise_spi(const char **reason)
     return true;
 }
 
+/*
+ * A guest drives a virtio-mmio block device the test models. This is the
+ * transport handshake and the queue, end to end in the kernel harness: the
+ * correctness and hostile-input handling of the device-side ring walk are
+ * proved exhaustively on the host (test_vblk_dev); here a real guest driver
+ * negotiates features, sets up its queue, reads a sector, and must get the
+ * bytes the test's disk holds. The transport window is unclaimed in the
+ * kernel, so the guest's register accesses arrive as MMIO exits the test
+ * answers -- the test is the owner, as vmctl will be.
+ */
+#define VIO_BASE 0x0A000000ull
+#define VIO_SIZE 0x200ull
+
+struct vio_model {
+    uint32_t feat_sel, drv_feat_sel;
+    uint64_t desc, avail, used;   /* assembled from the guest's lo/hi writes */
+    uint32_t status, q_num;
+    int ready;
+    uint16_t used_idx;
+    uint8_t disk[4 * 512];        /* the backing "disk": known bytes */
+};
+
+/* Serve whatever the guest has made available: one read request, its
+ * data buffer filled from the disk, status OK, used advanced. A compact
+ * happy-path device; the robust walk is test_vblk_dev's. */
+static void vio_notify(struct vm *vm, struct vio_model *m)
+{
+    uint16_t avail_idx = 0;
+    if (vm_mem_read(vm, m->avail + 2, &avail_idx, 2) != 0)
+        return;
+    while (m->used_idx != avail_idx) {
+        uint16_t head = 0;
+        vm_mem_read(vm, m->avail + 4 + (m->used_idx % m->q_num) * 2u, &head, 2);
+        struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } d;
+        vm_mem_read(vm, m->desc + (uint64_t)head * 16u, &d, sizeof(d));
+        struct { uint32_t type, reserved; uint64_t sector; } hdr;
+        vm_mem_read(vm, d.addr, &hdr, sizeof(hdr));          /* the request header */
+        vm_mem_read(vm, m->desc + (uint64_t)d.next * 16u, &d, sizeof(d));   /* the data buffer */
+        uint8_t status = 1;
+        uint32_t len = 0;
+        if (hdr.type == 0 && (hdr.sector + 1) * 512u <= sizeof(m->disk)) {
+            vm_mem_write(vm, d.addr, m->disk + hdr.sector * 512u, 512);
+            status = 0;
+            len = 512;
+        }
+        struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } st;
+        vm_mem_read(vm, m->desc + (uint64_t)d.next * 16u, &st, sizeof(st));   /* status descriptor */
+        vm_mem_write(vm, st.addr, &status, 1);
+        uint32_t elem[2] = { head, len + 1u };
+        vm_mem_write(vm, m->used + 4 + (m->used_idx % m->q_num) * 8u, elem, 8);
+        m->used_idx++;
+        vm_mem_write(vm, m->used + 2, &m->used_idx, 2);
+    }
+}
+
+/* Answer one transport register access; `*val` is the result on a read. */
+static void vio_reg(struct vm *vm, struct vio_model *m, unsigned off, bool write, uint64_t *val)
+{
+    if (!write) {
+        switch (off) {
+        case 0x000: *val = 0x74726976u; return;   /* MagicValue "virt" */
+        case 0x004: *val = 2; return;              /* Version 2 */
+        case 0x008: *val = 2; return;              /* DeviceID: block */
+        case 0x00c: *val = 0x554d4551u; return;    /* VendorID */
+        case 0x010: *val = m->feat_sel == 1 ? 1u : (1u << 5); return;   /* VERSION_1 (bit 32) ; BLK_F_RO (bit 5) */
+        case 0x034: *val = 8; return;              /* QueueNumMax */
+        case 0x044: *val = (uint32_t)m->ready; return;
+        case 0x070: *val = m->status; return;
+        case 0x100: *val = 8; return;              /* capacity low: 8 sectors */
+        case 0x104: *val = 0; return;              /* capacity high */
+        default: *val = 0; return;
+        }
+    }
+    uint32_t v = (uint32_t)*val;
+    switch (off) {
+    case 0x014: m->feat_sel = v; break;
+    case 0x024: m->drv_feat_sel = v; break;
+    case 0x038: m->q_num = v; break;
+    case 0x044: m->ready = (int)v; break;
+    case 0x050: vio_notify(vm, m); break;          /* QueueNotify */
+    case 0x070: m->status = v; break;
+    case 0x080: m->desc = (m->desc & ~0xFFFFFFFFull) | v; break;
+    case 0x084: m->desc = (m->desc & 0xFFFFFFFFull) | ((uint64_t)v << 32); break;
+    case 0x090: m->avail = (m->avail & ~0xFFFFFFFFull) | v; break;
+    case 0x094: m->avail = (m->avail & 0xFFFFFFFFull) | ((uint64_t)v << 32); break;
+    case 0x0a0: m->used = (m->used & ~0xFFFFFFFFull) | v; break;
+    case 0x0a4: m->used = (m->used & 0xFFFFFFFFull) | ((uint64_t)v << 32); break;
+    default: break;
+    }
+}
+
+bool selftest_el2_virtq_device(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_vblk.bin", &vm, &v) == 0);
+    struct vio_model m;
+    memset(&m, 0, sizeof(m));
+    for (unsigned i = 0; i < sizeof(m.disk); i++)
+        m.disk[i] = (uint8_t)(i * 5 + 3);          /* the known pattern the guest must read back */
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    unsigned steps = 0;
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= VIO_BASE && x.mmio.gpa < VIO_BASE + VIO_SIZE) {
+            uint64_t val = x.mmio.value;
+            vio_reg(vm, &m, (unsigned)(x.mmio.gpa - VIO_BASE), x.mmio.write, &val);
+            if (!x.mmio.write) {
+                struct cosmo_vcpu_regs r;
+                CHECK(vcpu_get_regs(v, &r) == 0);
+                /* the read's value goes to the guest register; the kernel's
+                 * completion path would also serve it, but answering in the
+                 * exit is how vmctl does it, so do that. */
+                x.mmio.value = val;
+            }
+            CHECK(++steps < 100000);
+            continue;   /* the kernel completes the read / steps the write on the next run */
+        }
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        break;
+    }
+    /* hvc 1: transport identity and the capacity from config space */
+    CHECK(x.hypercall.nr == 1);
+    CHECK(x.hypercall.a0 == 0x74726976u);          /* MagicValue */
+    CHECK(x.hypercall.a1 == 2);                     /* DeviceID block */
+    CHECK(x.hypercall.a2 == 8);                     /* capacity: 8 sectors */
+    /* run to the read result */
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= VIO_BASE && x.mmio.gpa < VIO_BASE + VIO_SIZE) {
+            uint64_t val = x.mmio.value;
+            vio_reg(vm, &m, (unsigned)(x.mmio.gpa - VIO_BASE), x.mmio.write, &val);
+            if (!x.mmio.write)
+                x.mmio.value = val;
+            CHECK(++steps < 200000);
+            continue;
+        }
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        break;
+    }
+    /* hvc 2: status OK and the first four bytes of sector 1 */
+    CHECK(x.hypercall.nr == 2);
+    CHECK(x.hypercall.a0 == VIRTIO_BLK_S_OK);
+    CHECK(x.hypercall.a1 == m.disk[512 + 0]);
+    CHECK(x.hypercall.a2 == m.disk[512 + 1]);
+    CHECK(x.hypercall.a3 == m.disk[512 + 2]);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-virtq-device: a guest negotiated a virtio-mmio block device, read sector 1, and got its bytes");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2335,5 +2490,6 @@ bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_idreg(const char **reason) { (void)reason; return true; }
 bool selftest_el2_vm_raise_spi(const char **reason) { (void)reason; return true; }
+bool selftest_el2_virtq_device(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif
