@@ -2223,12 +2223,14 @@ struct vio_model {
     uint32_t status, q_num;
     int ready;
     uint16_t used_idx;
-    uint8_t disk[4 * 512];        /* the backing "disk": known bytes */
+    unsigned flushes;             /* T_FLUSH requests served */
+    uint8_t disk[8 * 512];        /* the backing "disk": known bytes */
 };
 
-/* Serve whatever the guest has made available: one read request, its
- * data buffer filled from the disk, status OK, used advanced. A compact
- * happy-path device; the robust walk is test_vblk_dev's. */
+/* Serve whatever the guest has made available: a read fills its data buffer
+ * from the disk, a write drains its data buffer to the disk, a flush is
+ * counted. A compact, direction-aware, happy-path device; the robust
+ * hostile-input walk is test_vblk_dev's. */
 static void vio_notify(struct vm *vm, struct vio_model *m)
 {
     uint16_t avail_idx = 0;
@@ -2241,17 +2243,29 @@ static void vio_notify(struct vm *vm, struct vio_model *m)
         vm_mem_read(vm, m->desc + (uint64_t)head * 16u, &d, sizeof(d));
         struct { uint32_t type, reserved; uint64_t sector; } hdr;
         vm_mem_read(vm, d.addr, &hdr, sizeof(hdr));          /* the request header */
-        vm_mem_read(vm, m->desc + (uint64_t)d.next * 16u, &d, sizeof(d));   /* the data buffer */
-        uint8_t status = 1;
+        uint64_t off = hdr.sector * 512u;
+        uint8_t status = 0;                                  /* OK */
         uint32_t len = 0;
-        if (hdr.type == 0 && (hdr.sector + 1) * 512u <= sizeof(m->disk)) {
-            vm_mem_write(vm, d.addr, m->disk + hdr.sector * 512u, 512);
-            status = 0;
-            len = 512;
+        /* walk data descriptors to the status byte, moving each per direction */
+        while (d.flags & 1u) {                               /* NEXT */
+            vm_mem_read(vm, m->desc + (uint64_t)d.next * 16u, &d, sizeof(d));
+            if (!(d.flags & 1u))                             /* the last: status */
+                break;
+            uint32_t sz = d.len < 512u ? d.len : 512u;
+            if (off + sz > sizeof(m->disk))
+                status = 1;                                  /* IOERR: past the disk */
+            else if (hdr.type == 0) {                        /* IN: disk -> guest */
+                vm_mem_write(vm, d.addr, m->disk + off, sz);
+                len += sz;
+            } else if (hdr.type == 1)                        /* OUT: guest -> disk */
+                vm_mem_read(vm, d.addr, m->disk + off, sz);
+            off += sz;
         }
-        struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } st;
-        vm_mem_read(vm, m->desc + (uint64_t)d.next * 16u, &st, sizeof(st));   /* status descriptor */
-        vm_mem_write(vm, st.addr, &status, 1);
+        if (hdr.type == 4)                                   /* FLUSH */
+            m->flushes++;
+        else if (hdr.type != 0 && hdr.type != 1)
+            status = 2;                                       /* UNSUPP */
+        vm_mem_write(vm, d.addr, &status, 1);                /* d is the status descriptor */
         uint32_t elem[2] = { head, len + 1u };
         vm_mem_write(vm, m->used + 4 + (m->used_idx % m->q_num) * 8u, elem, 8);
         m->used_idx++;
@@ -2268,7 +2282,7 @@ static void vio_reg(struct vm *vm, struct vio_model *m, unsigned off, bool write
         case 0x004: *val = 2; return;              /* Version 2 */
         case 0x008: *val = 2; return;              /* DeviceID: block */
         case 0x00c: *val = 0x554d4551u; return;    /* VendorID */
-        case 0x010: *val = m->feat_sel == 1 ? 1u : (1u << 5); return;   /* VERSION_1 (bit 32) ; BLK_F_RO (bit 5) */
+        case 0x010: *val = m->feat_sel == 1 ? 1u : (1u << 9); return;   /* VERSION_1 (bit 32) ; BLK_F_FLUSH (bit 9): writable */
         case 0x034: *val = 8; return;              /* QueueNumMax */
         case 0x044: *val = (uint32_t)m->ready; return;
         case 0x070: *val = m->status; return;
@@ -2347,14 +2361,41 @@ bool selftest_el2_virtq_device(const char **reason)
         CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
         break;
     }
-    /* hvc 2: status OK and the first four bytes of sector 1 */
+    /* hvc 2: status OK and the first three bytes of sector 1 */
     CHECK(x.hypercall.nr == 2);
     CHECK(x.hypercall.a0 == VIRTIO_BLK_S_OK);
     CHECK(x.hypercall.a1 == m.disk[512 + 0]);
     CHECK(x.hypercall.a2 == m.disk[512 + 1]);
     CHECK(x.hypercall.a3 == m.disk[512 + 2]);
+    /* the guest now writes sector 2, flushes, and reads it back; run to hvc 3 */
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= VIO_BASE && x.mmio.gpa < VIO_BASE + VIO_SIZE) {
+            uint64_t val = x.mmio.value;
+            vio_reg(vm, &m, (unsigned)(x.mmio.gpa - VIO_BASE), x.mmio.write, &val);
+            if (!x.mmio.write)
+                x.mmio.value = val;
+            CHECK(++steps < 300000);
+            continue;
+        }
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        break;
+    }
+    /* hvc 3: the write, flush and read-back all OK, and the bytes read back
+     * are the ones the guest wrote (i + 0x40) -- so the write reached the
+     * disk and the read returned it, not stale sector-2 bytes. */
+    CHECK(x.hypercall.nr == 3);
+    CHECK((x.hypercall.a0 & 0xff) == VIRTIO_BLK_S_OK);          /* write */
+    CHECK(((x.hypercall.a0 >> 8) & 0xff) == VIRTIO_BLK_S_OK);   /* flush */
+    CHECK(((x.hypercall.a0 >> 16) & 0xff) == VIRTIO_BLK_S_OK);  /* read-back */
+    CHECK(x.hypercall.a1 == 0x40);
+    CHECK(x.hypercall.a2 == 0x41);
+    CHECK(x.hypercall.a3 == 0x42);
+    CHECK(m.flushes == 1);                                      /* the flush reached the device */
+    CHECK(m.disk[2 * 512] == 0x40);                             /* and the write reached the disk */
     drop_guest(vm, v);
-    kinfo("selftest: el2-virtq-device: a guest negotiated a virtio-mmio block device, read sector 1, and got its bytes");
+    kinfo("selftest: el2-virtq-device: a guest negotiated a virtio-mmio block device, read a sector, "
+          "then wrote one, flushed, and read back what it wrote");
     return true;
 }
 

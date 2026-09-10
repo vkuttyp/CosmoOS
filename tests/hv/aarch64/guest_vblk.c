@@ -12,7 +12,9 @@
  * the interrupt path.
  *
  *   hvc 1: x1 = MagicValue, x2 = DeviceID, x3 = capacity (sectors)
- *   hvc 2: x1 = status byte, x2..x5 = first 4 bytes the read returned
+ *   hvc 2: x1 = status byte, x2..x4 = first 3 bytes the read returned
+ *   hvc 3: x1 = write|flush|readback statuses packed, x2..x4 = first 3
+ *          bytes read back from the sector just written (the write side)
  */
 #include <stdint.h>
 
@@ -73,6 +75,23 @@ static uint64_t hvc5(uint64_t n, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
     return x0;
 }
 
+/* Make head 0 available in ring slot `k` (the k-th request this queue has
+ * served), notify, and poll the used ring until the device advances used->idx
+ * to k+1. */
+static void do_req(volatile uint16_t *avail, volatile uint16_t *used, unsigned k)
+{
+    avail[2 + k] = 0;            /* ring[k] = head 0 */
+    __asm__ volatile("dsb sy" ::: "memory");
+    avail[1] = (uint16_t)(k + 1);   /* idx */
+    __asm__ volatile("dsb sy" ::: "memory");
+    R(QUEUE_NOTIFY) = 0;
+    for (unsigned i = 0; i < 1000000; i++) {
+        __asm__ volatile("dsb sy" ::: "memory");
+        if (used[1] == (uint16_t)(k + 1))
+            break;
+    }
+}
+
 void guest_main(void)
 {
     uint32_t magic = R(MAGIC), devid = R(DEVICE_ID);
@@ -101,30 +120,46 @@ void guest_main(void)
 
     hvc3(1, magic, devid, cap);
 
-    /* build a one-sector read of sector 1 */
     struct { uint32_t type, reserved; uint64_t sector; } *hdr = (void *)HDR;
-    hdr->type = 0; hdr->reserved = 0; hdr->sector = 1;
     struct vq_desc *d = (struct vq_desc *)DESC;
-    d[0].addr = HDR;  d[0].len = 16;  d[0].flags = 1;       d[0].next = 1;  /* NEXT */
-    d[1].addr = DATA; d[1].len = 512; d[1].flags = 1 | 2;   d[1].next = 2;  /* NEXT|WRITE */
-    d[2].addr = STAT; d[2].len = 1;   d[2].flags = 2;       d[2].next = 0;  /* WRITE */
     volatile uint16_t *avail = (volatile uint16_t *)AVAIL;   /* flags, idx, ring[] */
-    avail[2] = 0;            /* ring[0] = head 0 */
-    __asm__ volatile("dsb sy" ::: "memory");
-    avail[1] = 1;            /* idx = 1 */
-    __asm__ volatile("dsb sy" ::: "memory");
-    R(QUEUE_NOTIFY) = 0;
-
-    /* poll the used ring until the device completes it */
     volatile uint16_t *used = (volatile uint16_t *)USED;     /* flags, idx, ring[] */
-    for (unsigned i = 0; i < 1000000; i++) {
-        __asm__ volatile("dsb sy" ::: "memory");
-        if (used[1] != 0)
-            break;
-    }
-    uint8_t status = *(volatile uint8_t *)STAT;
     uint8_t *data = (uint8_t *)DATA;
-    hvc5(2, status, data[0], data[1], data[2], data[3]);
+    d[2].addr = STAT; d[2].len = 1; d[2].flags = 2; d[2].next = 0;   /* the status byte */
+
+    /* (0) read sector 1: header -> writable data -> status */
+    hdr->type = 0; hdr->reserved = 0; hdr->sector = 1;
+    d[0].addr = HDR;  d[0].len = 16;  d[0].flags = 1;     d[0].next = 1;   /* NEXT */
+    d[1].addr = DATA; d[1].len = 512; d[1].flags = 1 | 2; d[1].next = 2;   /* NEXT|WRITE */
+    do_req(avail, used, 0);
+    hvc5(2, *(volatile uint8_t *)STAT, data[0], data[1], data[2], data[3]);
+
+    /* (1) write a known pattern to sector 2: the data buffer is device-
+     * readable now (no WRITE), because a write drains it into the disk. */
+    for (unsigned i = 0; i < 512; i++)
+        data[i] = (uint8_t)(i + 0x40);
+    hdr->type = 1; hdr->sector = 2;
+    d[1].flags = 1;                                      /* NEXT, device-readable */
+    do_req(avail, used, 1);
+    uint8_t wstatus = *(volatile uint8_t *)STAT;
+
+    /* (2) flush: header -> status, no data buffer */
+    hdr->type = 4;
+    d[0].next = 2;                                       /* skip the data descriptor */
+    do_req(avail, used, 2);
+    uint8_t fstatus = *(volatile uint8_t *)STAT;
+
+    /* (3) read sector 2 back into a cleared buffer: it must be what we wrote */
+    for (unsigned i = 0; i < 512; i++)
+        data[i] = 0;
+    hdr->type = 0; hdr->sector = 2;
+    d[0].next = 1;                                       /* header -> data -> status again */
+    d[1].flags = 1 | 2;                                  /* NEXT|WRITE */
+    do_req(avail, used, 3);
+    uint8_t rbstatus = *(volatile uint8_t *)STAT;
+
+    uint64_t packed = (uint64_t)wstatus | ((uint64_t)fstatus << 8) | ((uint64_t)rbstatus << 16);
+    hvc5(3, packed, data[0], data[1], data[2], data[3]);
     for (;;)
         hvc3(9, 0, 0, 0);
 }
