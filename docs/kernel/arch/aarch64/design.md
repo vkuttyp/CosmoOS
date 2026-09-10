@@ -968,3 +968,46 @@ guest did not fake through `ISPENDR`. Active state
 is not tracked (`ISACTIVER`/`ICACTIVER` are RAZ/WI): with one list
 register, "active" is that register's state. `GICD_STATUSR`, `NSACR`,
 `IGRPMODR` and the LPI base registers are RAZ/WI.
+
+## The features a guest is told it has (`hv_idregs.c`, `hv_el2.c`)
+
+A hand-written guest reads one ID register and the owner answers it; a
+stock kernel reads dozens before it finishes setting itself up, to learn
+what processor it is running on. `HCR_EL2.TID3` traps every one of those
+reads to EL2, and the owner cannot answer them with nothing -- a Linux
+whose first feature read is unanswered stops before it prints a line.
+
+`hv_idregs.c` answers them in the kernel (a new `el2_idreg_read` in the
+`SYSREG` decode, completing the access like the distributor's MMIO and
+the vGIC's SGI, so the owner never sees it). The value is the host's own
+register -- the guest runs on the same CPU -- masked to what a guest may
+safely see. The policy is **deny by default**: a field is present to the
+guest only where it is named, and the rule it enforces is that a guest is
+never told it has a feature the hypervisor does not isolate.
+
+The whole feature space (Op0=3, Op1=0, CRn=0, CRm 1..7) is answered: the
+registers the policy shapes, and every other encoding in the space as
+zero -- which is what the architecture already requires of an unallocated
+ID register, and is what makes the model robust to a register a future
+kernel reads that the policy does not name.
+
+| register | policy |
+|---|---|
+| `ID_AA64PFR0` | keep EL0, EL1, FP, AdvSIMD, GIC; hide EL2, EL3, RAS, SVE, MPAM (a guest has no EL2 of its own, and SVE the switch does not save) |
+| `ID_AA64PFR1` | zero (BT, SSBS, MTE: none this hypervisor virtualises) |
+| `ID_AA64DFR0` | a minimal debug architecture (DebugVer at the architectural minimum), no PMU, no breakpoints modelled |
+| `ID_AA64ISAR0` | pass through (instruction attributes are the CPU's own and safe to expose) |
+| `ID_AA64ISAR1/2` | pass through minus the pointer-authentication fields (a guest would authenticate with the host's keys) |
+| `ID_AA64MMFR0` | pass through (PARange, ASIDBits and the granules are the truth the guest's own MMU needs) |
+| `ID_AA64MMFR1` | pass through minus VH (a guest does not run at EL2) |
+| `ID_AA64MMFR2` | pass through |
+| everything else in the space | zero |
+
+With this, a stock arm64 Linux boots: it reads its feature registers,
+sets up its memory, drives the GIC, the timer and the console this tree
+built, and reaches the panic a machine with no disk reaches -- printing
+its banner and `Machine model: cosmo,virt`, read from the device tree
+this hypervisor handed it, through the PL011 this hypervisor emulates.
+The one thing the ID model did not itself provide was RAM: a modern
+kernel running its `init` needs more than the old 64 MiB per-VM ceiling,
+which is now 512 MiB (`COSMO_HV_VM_MEM_MAX`).
