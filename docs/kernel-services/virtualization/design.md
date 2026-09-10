@@ -708,9 +708,10 @@ opens the file `O_RDWR` and presents a device that offers
 turning a disk writable is never the default, because a guest writing a
 file the owner meant to keep is silent data loss. A writable device that
 did not advertise flush would lie about durability, so the two are tied:
-`disk_write` is an `lseek`+`write`, and `disk_flush` is `sync()`
-(`vfs_sync`, which commits every mount synchronously -- durable for the
-disk file, coarser than a per-fd fsync the native libc does not have).
+`disk_write` is an `lseek`+`write`, and `disk_flush` is `fsync()` of the
+disk file -- a new `SYS_fsync` that commits one file rather than
+`sync()`'s every mount, so a guest that spams `T_FLUSH` cannot force
+synchronous commits of host filesystems it has nothing to do with.
 A crash between a write and the next flush loses the unflushed writes,
 which is what the flush feature tells the guest to expect and what its
 journal is built around; the harness cannot stage that interruption, so

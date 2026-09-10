@@ -1029,8 +1029,9 @@ See [docs/development.md](docs/development.md).
   `--disk-rw` opens the file `O_RDWR` and offers `VIRTIO_BLK_F_FLUSH` and
   not `RO` -- because a guest writing a file the owner meant to keep is
   silent data loss, and a writable device without flush would lie about
-  durability. `disk_write` is an `lseek`+`write`; `disk_flush` is `sync()`
-  (`vfs_sync`, durable but coarser than a per-fd fsync the libc lacks).
+  durability. `disk_write` is an `lseek`+`write`; `disk_flush` is `fsync()`
+  of the disk file (a new `SYS_fsync` that commits one file, not `sync()`'s
+  every mount, so a guest cannot force commits of unrelated host mounts).
   Proven end to end in the harness (`el2-virtq-device`: a guest reads a
   sector, then writes one, flushes, and reads back what it wrote) and
   exhaustively on the host (`test_vblk_dev`: the write round-trip, the
