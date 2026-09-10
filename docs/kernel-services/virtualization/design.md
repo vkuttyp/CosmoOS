@@ -658,7 +658,15 @@ queue size before it is used, so a head or `next` past the ring is
 rejected before it addresses memory; a chain longer than the ring is a
 loop and is refused; a data buffer that points outside guest RAM faults
 through the memory callback and the request is dropped; a read past the
-end of the disk completes as `VIRTIO_BLK_S_IOERR`, not a crash. The
+end of the disk completes as `VIRTIO_BLK_S_IOERR`, not a crash. Because
+the walk is synchronous in the owner's thread, the work a guest can drive
+from one notification is bounded too: `avail->idx` more than a ring ahead
+of what the device last saw is a driver error (a driver cannot have more
+buffers in flight than the ring holds); a single request may name at most
+`VBLK_REQ_MAX_BYTES` of data, refused before a byte is read; and one
+notification serves at most `max_bytes_per_call` before the rest of the
+backlog waits for the next kick -- so neither a large descriptor nor a
+full ring can turn one kick into unbounded reads and copies. The
 device is read-only: it offers `VIRTIO_BLK_F_RO` so the driver never
 submits a write, and a `VIRTIO_BLK_T_OUT` that arrives anyway completes
 as `VIRTIO_BLK_S_UNSUPP`.
