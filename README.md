@@ -470,7 +470,7 @@ See [docs/development.md](docs/development.md).
   back; `QEMU_EL2=0` still boots at EL1 with everything skipping
   cleanly. 130 self-tests. The world switch, stage-2 translation, the
   GIC list registers and timer offsets are the next unit.
-- **The AArch64 EL2 hypervisor backend (in progress):** guests now run
+- **The AArch64 EL2 hypervisor backend (done):** guests now run
   on the EL2 the previous unit kept. A vendor-neutral seam came first —
   `struct cosmo_vcpu_regs` is per architecture (x86's registers on
   x86-64, `x0`–`x30` with the EL1 system state on AArch64, both 448
@@ -765,6 +765,160 @@ See [docs/development.md](docs/development.md).
   for every thread under lazy. What the report got backwards: removing
   the build flag changes nothing by itself — the compiler uses those
   registers when they help, and it was `%f` that gave it a reason.
+- **Signals a person can send (done):** `docs/audit/next-subsystem-signals.md`,
+  `docs/kernel/process/`. The console unit gave the machine a keyboard,
+  and `^C` was dropped in the line discipline: the native personality
+  installed no handlers, there were no process groups for a terminal
+  interrupt to reach. The native signal ABI chooses the frame a handler
+  runs on rather than inheriting one -- magic, blocked mask, registers,
+  the FP/SIMD image and the siginfo on the thread's own stack, trusted at
+  `sigreturn` no further than its magic, with `sigreturn` in the
+  always-allowed list so no syscall filter can turn a caught signal into
+  a kill. Sessions and process groups (`pgid`/`sid` read and written only
+  under the process table's lock -- one rule for fields always looked at
+  across two processes), `kill(-pgid)`, `COSMO_SPAWN_SETPGID` so a child
+  is in its group before its first instruction; a session claims the
+  console by naming a foreground group and releases it when its leader
+  exits. The Linux personality's stubs for the same calls now go through
+  the same code. Twelve regression tests, each proved by reintroducing
+  its bug; two proofs found the tests vacuous (the boot test's `^C`
+  passed with job control disabled because `sleep 5` reaches a prompt on
+  its own) and one found the frame carried nothing of AArch64's 520-byte
+  FP image because it hard-coded 528.
+- **Job control (done):** `docs/audit/next-subsystem-jobcontrol.md`.
+  Audit finding #30 closed: the stop signals stop something. A process
+  gains `stopped` and a wait queue, a thread gains `sig_must_stop`, and
+  the split is the whole design -- the per-thread flag is a *reason to
+  look*, the process's own `stopped` is the authority, re-read under the
+  lock at the park -- which four rounds of review on the report were spent
+  on. Stopping happens at a return to user mode and nowhere else, so no
+  kernel lock is held and nothing is frozen mid-kernel; a call cut short
+  by a stop is restarted unconditionally. `^Z`, `SIGTTIN`, `SIGTTOU`, an
+  orphaned group never stopped (removing that rule wedges the boot), and a
+  shell with `&`, a job table, `jobs`/`fg`/`bg`. Two things the report did
+  not predict, both found by tests: `SIGCONT` must stay in the ignore
+  table (it continues before the default-action table is consulted), and
+  the parent's wait scan must not reach into a child's lock -- two process
+  locks nested, an order this kernel does not have, which surfaced as a
+  global slowdown before it could as a deadlock. Eight regression tests,
+  three of which had to be rewritten first because they passed with the
+  bug in place.
+- **A terminal a program can drive (done):**
+  `docs/audit/next-subsystem-termios.md`, `docs/kernel/tty/`. The line
+  discipline's echo, canonical assembly and signal characters were fixed
+  at boot, which ruled out every full-screen program and every shell with
+  history. Four mode flags (`ECHO`, `ICRNL`, `ICANON`, `ISIG`) and two
+  numbers (`VMIN`, `VTIME`) over a native structure -- POSIX's other flag
+  words and nineteen control characters omitted rather than accepted and
+  ignored, so a program asking for what this terminal cannot do fails to
+  compile; a raw input path; `/dev/console` and `/dev/tty`; `isatty`,
+  `<termios.h>`, and the Linux `TCGETS`/`TCSETS`/`TIOCGWINSZ` over the
+  same structure. The shell reads its own line: arrows, `^A`/`^E`/`^U`/
+  `^W`, 32 lines of history. The terminal's modes reset when its session
+  ends -- the report's leading risk, and it arrived on the first test run.
+- **A hypervisor bug, found by poison (done):** two AArch64 crashes the
+  terminal chain surfaced once each in tens of boots were one bug: the EL2
+  world switch set `SP_EL2` to the top of the vCPU's context page and
+  never put it back, so the host's very next `HVC` on that CPU pushed four
+  registers into a frame the allocator had already handed to someone else
+  -- a page table's last four PTEs, or a text page's last 32 bytes. Found
+  by the other half of the change: debug builds now poison every freed
+  frame and verify the pattern at the next allocation (invariant M37),
+  which turned a 1-in-30 crash into a deterministic panic eight seconds in
+  that named the freer. Also `pmm_page_put`'s load-compare-decrement
+  became one `fetch_sub`, the `vnode_put` race in another coat.
+- **Address-space identifiers (done):** `docs/audit/next-subsystem-asid.md`,
+  `docs/kernel/memory/`. Every switch between two processes emptied the TLB,
+  and on AArch64 the flush was inner-shareable, so one CPU changing
+  process emptied the user TLB of every CPU in the machine. Tags are
+  allocated lazily from one bitmap with generations for rollover, so
+  exhausting the pool costs what a single switch used to, once per 65,535
+  spaces; the tag rides in `TTBR0[63:48]` and the flush is conditional and
+  *local*. `vm_space.tlb_cpus` is the CPUs that *may hold* a space's
+  translations, left only by a flush; range invalidates stay all-ASID
+  because a re-tagged space can still be running under its old tag on
+  another CPU; destroy invalidates before it releases, or a tag's next
+  owner inherits its translations. x86-64 deliberately unchanged: TCG
+  implements PCID on no CPU model, so a tagged path there could be
+  exercised nowhere this tree is tested. Six self-tests, including a
+  forced rollover that asserts the tag really was reissued before checking
+  the byte.
+- **GICv3 (done):** `docs/audit/next-subsystem-gicv3.md`,
+  `docs/kernel/arch/aarch64/design.md`. The machine section 61 asks for
+  next has no GICv2. Two controller generations now sit behind one seam
+  (`struct aarch64_irqc_ops`; `gic.c` keeps every line of its GICv2 logic
+  behind it), with the seam put in *before* the second driver existed so
+  the change that added GICv3 was only new code. `gicv3.c` drives the
+  distributor, the redistributors and the system-register CPU interface;
+  `gicv3_its.c` is the ITS -- `MAPD`/`MAPC`/`MAPTI`/`INV`/`SYNC`, LPIs
+  from 8192, a flat device table -- with the GICv2m frame kept as the
+  fallback when firmware describes no ITS, and `arch_irqc_msi_doorbell`
+  so the SMMU can let the doorbell page through. The GICv3 machine is the
+  first in this tree to bring all sixteen CPUs online, which is what
+  proves the SGI target list is built from the right affinity fields.
+  `QEMU_GIC=3` and `QEMU_MSI=its|gicv2m|off` select the shapes, and `make
+  test-gic` runs them in CI -- added by the next unit, which found that
+  since this one merged CI had exercised the GICv2 driver alone.
+- **The vGIC: a guest that can be interrupted (done):**
+  `docs/audit/next-subsystem-vgic.md`, `docs/kernel/arch/aarch64/design.md`
+  ("Giving a guest an interrupt"). `arch_hv_vcpu_set_irq` recorded the
+  offer and delivered nothing; now `ICH_*_EL2` state travels in `struct
+  hv_ctx` through the world switch, a new `HV_EL2_CALL_VGIC` lets EL1
+  reach the GIC's system-register interface and asks `ICH_VTR_EL2` how
+  many list registers there are (four on QEMU), and one of them carries
+  an interrupt into the guest, whose own `ICC_IAR1_EL1`/`ICC_EOIR1_EL1`
+  are redirected by hardware to the virtual interface. Two rules the unit
+  paid for: **Active means delivered** -- a hypervisor that waits for
+  Invalid re-injects everything a guest was still handling when it exited
+  -- and the question after a run is *which* interrupt was taken, not
+  *whether*: the register's occupant need not be this entry's offer.
+  GICv3-only; on GICv2 the capability says so and the tests skip rather
+  than lie. Guest fixtures heartbeat through `hvc`, not `WFI`, because
+  `TWI` traps a `WFI` only when it would actually wait -- measured, after
+  the first fixture hung the watchdog.
+- **The virtual timer: a guest that can be woken by time (done):**
+  `docs/audit/next-subsystem-vtimer.md`, `docs/kernel/arch/aarch64/design.md`
+  ("The guest's timer"). Measured first: `CNTV_CTL_EL0` read `0x1` in
+  the host after a guest armed it, the guest's `ENABLE` live in the host's
+  context, because no timer register crossed the switch. Three do now
+  (`CNTVOFF_EL2` one value per VM, `CNTV_CVAL`, `CNTV_CTL` saved *before*
+  being disarmed because its `ISTATUS` is the only trustworthy account of
+  an expiry -- `HV_EXIT_INTR` names no interrupt); `CNTHCTL_EL2` is `0`
+  for a guest and the host's saved value otherwise, so a guest may read
+  neither the host's uptime nor arm its tick. A guest that waits in `WFI`
+  is run again *when* its timer fires: asked 15.6 ms, held 17 ms, fired
+  2.6 ms late. Found on the way: an expired timer storms on entry (the
+  PPI is disabled locally while an expiry is queued), a leaked timer was
+  a hang rather than a failed test (the host's handler now recognises a
+  guest's timer past the switch and warns), and the isolation bug-proof
+  was defeated by that very safety net until the test read the host's
+  register the instant the switch returned. The default GICv2 boot caught
+  a hang the GICv3 boots could not: the timer-state fixtures set up the
+  GICv3 system-register interface, which faults on a GICv2 host.
+- **The virtual distributor: a guest that can run a stock GIC driver
+  (done):** `docs/audit/next-subsystem-vdist.md`,
+  `docs/kernel/arch/aarch64/design.md` ("The guest's distributor"),
+  invariant A24. Measured first: a guest's load from `GICD_TYPER` -- the
+  first register every GIC driver reads -- was an `MMIO` exit to an owner
+  with nothing behind it. An in-kernel GICv3 distributor per VM, because
+  its output is a list-register write an owner in userland cannot reach;
+  `GICD`/`GICR` at the addresses `virt` puts them, as the hypervisor's
+  own constants; stage-2 faults inside the windows decoded from
+  `ESR_EL2.ISS` and completed in the kernel with a new `HV_EXIT_EMULATED`
+  ("run again", not a host interrupt); vCPU `i` reads MPIDR Aff0 = `i`
+  through `VMPIDR_EL2`, so a driver's redistributor walk finds its own
+  frame; routing by the rule that the distributor decides and the vCPU's
+  own thread places; the timer PPI now arrives through the redistributor,
+  gated by the guest's own enable bit; a guest's `ICC_SGI1R_EL1` write is
+  routed by affinity to sibling vCPUs -- a guest can be SMP. Two
+  corrections recorded: the report said the SGI write was "not trapped"
+  (it was -- no `ICV_SGI1R_EL1` exists, so it traps unconditionally under
+  `IMO` -- to an owner that could not route it), and `ICH_HCR_EL2.TC`,
+  which the report proposed, traps every register common to both groups,
+  `ICC_PMR_EL1` among them, and stopped every interrupt guest before
+  "ready". Seven bug-proofs, all deterministic; one was vacuous with the
+  neighbouring priority bytes at reset zero until the fixture pre-filled
+  them.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -772,10 +926,11 @@ See [docs/development.md](docs/development.md).
   Intel NIC, USB, AHCI — with the IOMMU unit done earlier and GPU, Wi-Fi
   and Bluetooth explicitly later. What remains named are the follow-ups
   each unit left (NCQ if a real disk shows it pays; the USB hub driver
-  and HID are done) and the AArch64 follow-ups in
-  `docs/kernel/arch/aarch64/design.md` that the EL2 backend did not
-  cover (GICv3, ASID allocation instead of a full invalidate per switch,
-  FP/SIMD at EL0). Section **68** is not a list of deferrals: it is the
+  and HID are done). The AArch64 follow-ups the EL2 backend left --
+  GICv3, ASIDs, FP/SIMD at EL0 -- are done, and the hypervisor has gone
+  past them: a guest has a virtual CPU interface, a timer and a
+  distributor. What it lacks next is named in the open report below.
+  Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
   shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
   `docs/audit/next-subsystem-usb.md` for USB (built as the `xhci` and
@@ -789,9 +944,16 @@ See [docs/development.md](docs/development.md).
   SIMD (built: AArch64 threads own vector state, the signal frame
   carries it, and the userland is no longer compiled to avoid the
   registers every real program uses).
-  `docs/audit/next-subsystem-signals.md` does it for the signals a
-  person can send: the console unit gave the machine a keyboard, and
-  `^C` is dropped in the line discipline because the native personality
-  installs no handlers, there are no process groups for a terminal
-  interrupt to reach, and job control is a recorded deviation. Design
-  documents first, one subsystem at a time.
+  `docs/audit/next-subsystem-signals.md`, `-jobcontrol.md` and `-termios.md`
+  did it for the signals a person can send, for job control and for a
+  terminal a program can drive (all built). `-asid.md` did it for
+  address-space tags (built). `-gicv3.md`, `-vgic.md`, `-vtimer.md` and
+  `-vdist.md` did it for the other interrupt controller and then, one
+  piece at a time, for an AArch64 guest's interrupts, timer and
+  distributor (all built: a guest can run a stock GIC driver and be SMP).
+  `docs/audit/next-subsystem-vuart.md` does it for the guest's console:
+  a guest can be interrupted, keep time and drive its GIC, and still
+  cannot say a single character, because its store to the UART every
+  `virt` kernel prints to first reaches its owner as an MMIO exit that
+  does not even carry the byte. Design documents first, one subsystem at
+  a time.
