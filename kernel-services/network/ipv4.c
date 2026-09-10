@@ -9,6 +9,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/nat.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
@@ -446,13 +447,46 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
         return;
     }
 
+    /* Masquerade the source when the ingress interface asks for it and the
+     * egress subnet does not already hold the source. nat_out needs the
+     * transport header contiguous; a flow it cannot masquerade (an
+     * unsupported protocol, a truncated header, or a full table) is dropped
+     * rather than forwarded with the private source exposed. */
+    uint32_t new_src = src;
+    if (in->flags & NETIF_MASQUERADE) {
+        bool on_egress = out->ip4.addr && out->ip4.mask &&
+                         ((src ^ out->ip4.addr) & out->ip4.mask) == 0;
+        if (!on_egress && out->ip4.addr != 0) {
+            unsigned l4min = proto == IPPROTO_TCP ? 20u : 8u;
+            if ((proto != IPPROTO_UDP && proto != IPPROTO_TCP && proto != IPPROTO_ICMP) ||
+                m->pkt.len < (uint32_t)ihl + l4min) {
+                STAT(fwd_nat_drop);
+                netif_put(out);
+                m_freem(m);
+                return;
+            }
+            m = m_pullup(m, ihl + l4min);
+            if (m == NULL) {
+                netif_put(out);
+                return;
+            }
+            iph = (const struct ipv4_hdr *)m->data;
+            if (nat_out(in, out, m, iph, ihl, &new_src) != 0) {
+                STAT(fwd_nat_drop);
+                netif_put(out);
+                m_freem(m);
+                return;
+            }
+        }
+    }
+
     /* Trim any link padding, strip the L3 header, and re-emit: output_on
      * rebuilds the IPv4 header carrying the decremented TTL and routes the
      * next hop (ARP) on the chosen interface. */
     if (total < m->pkt.len)
         m_adj(m, -(int)(m->pkt.len - total));
     m_adj(m, (int)ihl);
-    output_on(out, m, src, dst, proto, ttl);
+    output_on(out, m, new_src, dst, proto, ttl);
     netif_put(out);
 }
 
@@ -509,6 +543,13 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
     }
     if (bcast)
         m->flags |= M_BCAST;
+
+    /* A datagram addressed to one of our own addresses may be the reply to a
+     * masqueraded guest flow (or an ICMP error quoting one): nat_in rewrites
+     * it back and forwards it to the guest. Non-NAT traffic falls through to
+     * normal delivery untouched. */
+    if (!bcast && netif_owns_ipv4(iph->dst) && nat_in(nif, m, iph, ihl, total))
+        return;
 
     /* Trim link padding, drop the header, deliver. The whole header,
      * options included, is copied out (60 bytes at most) so that an ICMP

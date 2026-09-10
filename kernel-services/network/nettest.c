@@ -12,6 +12,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/nat.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
@@ -2676,5 +2677,264 @@ bool selftest_net_forward(const char **reason)
     tap_destroy(g);
     kinfo("selftest: net-forward: a guest datagram was forwarded (TTL 64->63), a TTL-1 datagram "
           "drew a time-exceeded, and non-forwarding ingress stayed a non-router");
+    return true;
+}
+
+/* --- masquerade NAT ------------------------------------------------------- */
+
+/* The transport checksum (network order) for an L4 buffer of `len` bytes
+ * carrying its own zeroed checksum field, under the IPv4 pseudo-header. */
+static uint16_t nettest_l4cksum(uint32_t sip, uint32_t dip, uint8_t proto, const void *l4, uint16_t len)
+{
+    uint32_t sum = cksum_pseudo4(sip, dip, proto, len);
+    return cksum_fold(cksum_partial(l4, len, sum));
+}
+
+/* True if an L4 buffer's checksum (in place) is valid under the pseudo-header. */
+static bool nettest_l4_ok(uint32_t sip, uint32_t dip, uint8_t proto, const void *l4, uint16_t len)
+{
+    uint32_t sum = cksum_pseudo4(sip, dip, proto, len);
+    return cksum_fold(cksum_partial(l4, len, sum)) == 0;
+}
+
+/* Wrap an already-built L4 buffer in Ethernet+IPv4; returns frame length. */
+static uint32_t nettest_wrap(uint8_t *frame, const uint8_t dmac[6], const uint8_t smac[6],
+                             uint32_t sip, uint32_t dip, uint8_t ttl, uint8_t proto,
+                             const void *l4, uint16_t l4len)
+{
+    struct eth_hdr *eh = (struct eth_hdr *)frame;
+    memcpy(eh->dst, dmac, 6);
+    memcpy(eh->src, smac, 6);
+    eh->type = htons(ETH_P_IP);
+    struct ipv4_hdr *iph = (struct ipv4_hdr *)(frame + ETH_HLEN);
+    uint16_t total = (uint16_t)(sizeof(*iph) + l4len);
+    iph->vhl = 0x45; iph->tos = 0; iph->len = htons(total);
+    iph->id = htons(0x2000); iph->frag = 0; iph->ttl = ttl;
+    iph->proto = proto; iph->cksum = 0; iph->src = sip; iph->dst = dip;
+    iph->cksum = in_cksum(iph, sizeof(*iph));
+    memcpy(frame + ETH_HLEN + sizeof(*iph), l4, l4len);
+    return ETH_HLEN + total;
+}
+
+/* Build a UDP datagram (header+payload) into l4, checksum valid. */
+static uint16_t nettest_mk_udp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp,
+                               const uint8_t *pl, uint16_t pllen)
+{
+    struct udp_hdr *uh = (struct udp_hdr *)l4;
+    uint16_t len = (uint16_t)(sizeof(*uh) + pllen);
+    uh->sport = htons(sp); uh->dport = htons(dp); uh->len = htons(len); uh->cksum = 0;
+    memcpy(l4 + sizeof(*uh), pl, pllen);
+    uint16_t c = nettest_l4cksum(sip, dip, IPPROTO_UDP, l4, len);
+    uh->cksum = c ? c : 0xffff;
+    return len;
+}
+
+/* Build a bare TCP segment (flags given, no payload) into l4, checksum valid. */
+static uint16_t nettest_mk_tcp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp, uint8_t flags)
+{
+    struct tcp_hdr *th = (struct tcp_hdr *)l4;
+    memset(th, 0, sizeof(*th));
+    th->sport = htons(sp); th->dport = htons(dp);
+    th->seq = htonl(0x11223344); th->doff = 5 << 4; th->flags = flags; th->win = htons(64240);
+    th->cksum = nettest_l4cksum(sip, dip, IPPROTO_TCP, l4, sizeof(*th));
+    return sizeof(*th);
+}
+
+/* Build an ICMP echo (type 8) or reply (type 0) into l4, checksum valid. */
+static uint16_t nettest_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id, uint16_t seq,
+                                const uint8_t *pl, uint16_t pllen)
+{
+    struct icmp_hdr *ic = (struct icmp_hdr *)l4;
+    ic->type = type; ic->code = 0; ic->cksum = 0; ic->id = htons(id); ic->seq = htons(seq);
+    memcpy(l4 + sizeof(*ic), pl, pllen);
+    uint16_t len = (uint16_t)(sizeof(*ic) + pllen);
+    ic->cksum = in_cksum(l4, len);   /* ICMPv4: no pseudo-header */
+    return len;
+}
+
+bool selftest_net_nat(const char **reason)
+{
+    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x01 };
+    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x04, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x0f };
+    static const uint8_t peer_mac[6]  = { 0x52, 0x54, 0x00, 0x04, 0x00, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 3, 1), guest = IPV4_ADDR(10, 77, 3, 15);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 4, 1), peer = IPV4_ADDR(10, 77, 4, 99);
+
+    struct tap *g = tap_create("natg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = tap_create("natu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);
+    netif_set_masquerade(tap_netif(g), true);   /* masquerade flows forwarded from the guest tap */
+    nettest_seed_arp(tap_netif(u), peer, peer_mac);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);
+    nat_flush();
+
+    uint8_t payload[12];
+    for (unsigned i = 0; i < sizeof(payload); i++)
+        payload[i] = (uint8_t)(0x40 + i);
+    uint8_t frame[256], l4[128], hdr[ETH_HLEN + 20 + 40];
+
+    /* (1) UDP round trip: out masqueraded, reply un-masqueraded. */
+    uint16_t l4len = nettest_mk_udp(l4, guest, peer, 6001, 7001, payload, sizeof(payload));
+    uint32_t flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    struct mbuf *out = nettest_recv_ip(u);
+    CHECK(out != NULL);
+    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
+    struct ipv4_hdr *oi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
+    CHECK(oi->src == u_ip && oi->dst == peer && oi->ttl == 63);     /* source masqueraded */
+    uint8_t *ol4 = hdr + ETH_HLEN + 20;
+    uint16_t nat_port = (uint16_t)(ol4[0] << 8 | ol4[1]);           /* the lent source port */
+    CHECK(nat_port >= NAT_PORT_MIN && nat_port <= NAT_PORT_MAX);
+    CHECK((uint16_t)(ol4[2] << 8 | ol4[3]) == 7001);               /* dest port unchanged */
+    CHECK(nettest_l4_ok(u_ip, peer, IPPROTO_UDP, ol4, (uint16_t)(sizeof(struct udp_hdr) + sizeof(payload))));
+    m_freem(out);
+
+    l4len = nettest_mk_udp(l4, peer, u_ip, 7001, nat_port, payload, sizeof(payload));
+    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    struct mbuf *back = nettest_recv_ip(g);
+    CHECK(back != NULL);
+    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
+    struct ipv4_hdr *bi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
+    CHECK(bi->src == peer && bi->dst == guest && bi->ttl == 63);    /* delivered to the guest */
+    uint8_t *bl4 = hdr + ETH_HLEN + 20;
+    CHECK((uint16_t)(bl4[2] << 8 | bl4[3]) == 6001);               /* original guest port restored */
+    CHECK(nettest_l4_ok(peer, guest, IPPROTO_UDP, bl4, (uint16_t)(sizeof(struct udp_hdr) + sizeof(payload))));
+    CHECK(memcmp(bl4 + sizeof(struct udp_hdr), payload, sizeof(payload)) == 0);
+    m_freem(back);
+
+    /* (2) TCP SYN out, SYN-ACK back. */
+    l4len = nettest_mk_tcp(l4, guest, peer, 6002, 80, TH_SYN);
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    out = nettest_recv_ip(u);
+    CHECK(out != NULL);
+    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + 20, hdr));
+    ol4 = hdr + ETH_HLEN + 20;
+    uint16_t tcp_nat = (uint16_t)(ol4[0] << 8 | ol4[1]);
+    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->src == u_ip);
+    CHECK(nettest_l4_ok(u_ip, peer, IPPROTO_TCP, ol4, sizeof(struct tcp_hdr)));
+    m_freem(out);
+
+    l4len = nettest_mk_tcp(l4, peer, u_ip, 80, tcp_nat, TH_SYN | TH_ACK);
+    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    back = nettest_recv_ip(g);
+    CHECK(back != NULL);
+    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + 20, hdr));
+    bl4 = hdr + ETH_HLEN + 20;
+    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->dst == guest);
+    CHECK((uint16_t)(bl4[2] << 8 | bl4[3]) == 6002);
+    CHECK(nettest_l4_ok(peer, guest, IPPROTO_TCP, bl4, sizeof(struct tcp_hdr)));
+    m_freem(back);
+
+    /* (3) ICMP echo out, echo reply back (the id is the NAT identifier). */
+    l4len = nettest_mk_icmp(l4, ICMP_ECHO, 0x4321, 1, payload, sizeof(payload));
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_ICMP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    out = nettest_recv_ip(u);
+    CHECK(out != NULL);
+    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
+    ol4 = hdr + ETH_HLEN + 20;
+    uint16_t icmp_nat = (uint16_t)(ol4[4] << 8 | ol4[5]);
+    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->src == u_ip && ol4[0] == ICMP_ECHO);
+    CHECK(in_cksum(ol4, (uint16_t)(sizeof(struct icmp_hdr) + sizeof(payload))) == 0);
+    m_freem(out);
+
+    l4len = nettest_mk_icmp(l4, ICMP_ECHO_REPLY, icmp_nat, 1, payload, sizeof(payload));
+    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    back = nettest_recv_ip(g);
+    CHECK(back != NULL);
+    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + (int)sizeof(payload) + 8, hdr));
+    bl4 = hdr + ETH_HLEN + 20;
+    CHECK(((struct ipv4_hdr *)(hdr + ETH_HLEN))->dst == guest && bl4[0] == ICMP_ECHO_REPLY);
+    CHECK((uint16_t)(bl4[4] << 8 | bl4[5]) == 0x4321);            /* original id restored */
+    CHECK(in_cksum(bl4, (uint16_t)(sizeof(struct icmp_hdr) + sizeof(payload))) == 0);
+    m_freem(back);
+
+    /* (4) ICMP error quoting a NAT'd packet is translated back to the guest.
+     * First open a UDP flow, then deliver a dest-unreach whose quote is the
+     * packet we sent out. */
+    nat_flush();
+    l4len = nettest_mk_udp(l4, guest, peer, 6100, 53, payload, sizeof(payload));
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    out = nettest_recv_ip(u);
+    CHECK(out != NULL);
+    CHECK(m_copydata(out, 0, ETH_HLEN + 20 + 8, hdr));
+    ol4 = hdr + ETH_HLEN + 20;
+    uint16_t err_nat = (uint16_t)(ol4[0] << 8 | ol4[1]);
+    m_freem(out);
+    /* Build the ICMP error: [icmp hdr][quoted IP: u_ip->peer UDP][8 bytes of
+     * that UDP: sport=err_nat, dport=53]. */
+    uint8_t icmperr[8 + 20 + 8];
+    memset(icmperr, 0, sizeof(icmperr));
+    icmperr[0] = ICMP_DEST_UNREACH; icmperr[1] = ICMP_UNREACH_PORT;
+    struct ipv4_hdr *q = (struct ipv4_hdr *)(icmperr + 8);
+    q->vhl = 0x45; q->len = htons(20 + 8); q->ttl = 63; q->proto = IPPROTO_UDP;
+    q->src = u_ip; q->dst = peer; q->cksum = in_cksum(q, 20);
+    uint8_t *qudp = icmperr + 8 + 20;
+    qudp[0] = (uint8_t)(err_nat >> 8); qudp[1] = (uint8_t)err_nat;   /* sport = the lent port */
+    qudp[2] = 0; qudp[3] = 53;                                        /* dport */
+    uint16_t *ecs = (uint16_t *)(icmperr + 2);
+    *ecs = 0; *ecs = in_cksum(icmperr, sizeof(icmperr));
+    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, icmperr, sizeof(icmperr));
+    CHECK(tap_inject(u, frame, flen) == 0);
+    back = nettest_recv_ip(g);
+    CHECK(back != NULL);
+    CHECK(m_copydata(back, 0, ETH_HLEN + 20 + 8 + 20 + 8, hdr));
+    bi = (struct ipv4_hdr *)(hdr + ETH_HLEN);
+    CHECK(bi->dst == guest && bi->proto == IPPROTO_ICMP);
+    struct ipv4_hdr *iq = (struct ipv4_hdr *)(hdr + ETH_HLEN + 20 + 8);
+    CHECK(iq->src == guest);                                         /* inner src un-NAT'd */
+    uint8_t *iu = hdr + ETH_HLEN + 20 + 8 + 20;
+    CHECK((uint16_t)(iu[0] << 8 | iu[1]) == 6100);                  /* inner source port restored */
+    m_freem(back);
+
+    /* (5) Table exhaustion: many distinct flows fill the table; further ones
+     * are dropped, and the table does not grow past its bound. */
+    nat_flush();
+    struct nat_stats ns0, ns1;
+    nat_get_stats(&ns0);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE + 8; i++) {
+        l4len = nettest_mk_udp(l4, guest, peer, (uint16_t)(10000 + i), 9, payload, 4);
+        flen = nettest_wrap(frame, g_mac, guest_mac, guest, peer, 64, IPPROTO_UDP, l4, l4len);
+        tap_inject(g, frame, flen);
+        if ((i & 31) == 31) {                 /* keep the uplink queue drained */
+            struct mbuf *d;
+            while ((d = tap_recv(u)) != NULL)
+                m_freem(d);
+        }
+    }
+    for (unsigned i = 0; i < 200; i++) {
+        struct mbuf *d;
+        while ((d = tap_recv(u)) != NULL)
+            m_freem(d);
+        nat_get_stats(&ns1);
+        if (ns1.out_new + ns1.out_drop_full >= NAT_TABLE_SIZE + 8)
+            break;
+        thread_sleep_ms(10);
+    }
+    nat_get_stats(&ns1);
+    CHECK(ns1.entries == NAT_TABLE_SIZE);                 /* bounded, did not grow */
+    CHECK(ns1.out_drop_full > ns0.out_drop_full);        /* new flows dropped once full */
+
+    /* (6) Expiry: aging past the timeout reclaims the entries. */
+    nat_get_stats(&ns0);
+    CHECK(ns0.entries > 0);
+    nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_UDP_NS);
+    nat_get_stats(&ns1);
+    CHECK(ns1.entries == 0 && ns1.expired > ns0.expired);
+
+    nat_flush();
+    tap_destroy(u);
+    tap_destroy(g);
+    kinfo("selftest: net-nat: UDP/TCP/ICMP round trips masqueraded and restored (checksums valid), "
+          "an ICMP error translated back, the table bounded at %u and its entries expiring", NAT_TABLE_SIZE);
     return true;
 }

@@ -381,6 +381,16 @@ void netif_set_forward(struct netif *nif, bool on)
     spin_unlock_irqrestore(&nif->lock, s);
 }
 
+void netif_set_masquerade(struct netif *nif, bool on)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
+    if (on)
+        nif->flags |= NETIF_MASQUERADE;
+    else
+        nif->flags &= ~NETIF_MASQUERADE;
+    spin_unlock_irqrestore(&nif->lock, s);
+}
+
 bool netif_owns_ipv4(uint32_t addr)
 {
     if (addr == INADDR_LOOPBACK_N || (ntohl(addr) >> 24) == 127)
