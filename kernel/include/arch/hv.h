@@ -74,7 +74,13 @@ struct hv_exit {
         } io;
         struct {
             uint64_t gpa;
+            uint64_t value;      /* a write's value, masked to size */
+            uint8_t size;        /* 1, 2, 4, 8 -- or 0: the backend could not describe the access */
+            uint8_t reg;         /* the guest GPR the value comes from or goes to; 31 discards */
+            uint8_t insn_len;    /* what to step the PC by once the access is complete */
             bool write;
+            bool sse;            /* a read sign-extends (ldrsb/ldrsh/ldrsw) */
+            bool sf;             /* the destination is the full register; clear: its low 32 bits, upper zeroed */
         } mmio;
         struct {
             uint32_t index;
@@ -105,6 +111,14 @@ int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len,
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 /* Host-physical page behind a guest-physical address, or false. */
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
+/* A device in the VM asserted (or dropped) shared interrupt `intid`: it
+ * becomes pending in the guest's distributor and is routed to whichever
+ * vCPU the guest's IROUTER names, when the guest has enabled it there.
+ * Lowering clears a pending state the guest has not yet taken, so a
+ * line the source dropped is not delivered late. -ENOTSUP where guests
+ * have no distributor. */
+int arch_hv_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid);
+int arch_hv_vm_lower_spi(struct arch_hv_vm *vm, unsigned intid);
 
 /* A vCPU starts at the architectural reset state (real mode, rip 0). */
 /* `index` is the vCPU's number within its VM: on AArch64 it is the MPIDR

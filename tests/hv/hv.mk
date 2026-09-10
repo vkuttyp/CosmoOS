@@ -9,7 +9,7 @@ HV_TEST_OUT := $(OUT)/tests/hv
 ifeq ($(ARCH),x86_64)
 HV_GUESTS := guest_pio guest_irq guest_cpuid guest_pm guest_shutdown guest_spin guest_fpu
 else
-HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_ptimer guest_timer_wfi
+HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_mmio_widths guest_uart guest_uart_rx guest_uart_wfi guest_uart_poll guest_ptimer guest_timer_wfi
 endif
 
 define hv_guest_rule

@@ -640,7 +640,12 @@ struct cosmo_vm_exit {           /* 64 bytes */
     union {
         struct { uint16_t port; uint8_t size; uint8_t write; uint8_t string; uint8_t rep; uint16_t pad;
                  uint32_t value; uint32_t pad2; } io;
-        struct { uint64_t gpa; uint32_t write; uint32_t pad; } mmio;
+        /* size 0: the backend could not describe the access (x86-64 today);
+         * otherwise 1/2/4/8, `reg` the guest register (31 discards), `sse`
+         * a sign-extending load, `sf` a full-width destination. A read the
+         * owner answers: set `value` and run again; the kernel completes
+         * it into `reg` by those rules and steps over the instruction. */
+        struct { uint64_t gpa; uint32_t write; uint8_t size, reg, sse, sf; uint64_t value; } mmio;
         struct { uint32_t iss; uint8_t reg; uint8_t write; uint16_t pad; uint32_t pad2; } sysreg;
         struct { uint64_t nr, a0, a1, a2, a3; } hypercall;
         struct { uint32_t code; uint32_t pad; uint64_t info1, info2; } fail;

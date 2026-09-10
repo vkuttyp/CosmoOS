@@ -7,6 +7,7 @@
  * producer is the run loop, the consumer the owner's read.
  */
 
+#include <kernel/log.h>
 #include <kernel/errno.h>
 #include <kernel/string.h>
 
@@ -76,11 +77,22 @@ void vmdev_init(struct vm *vm)
     d->pio = debug_console_pio;
     d->priv = vm;
     list_push_back(&vm->devices, &d->link);
+#if defined(ARCH_AARCH64)
+    /* The guest's console is part of the machine this hypervisor defines,
+     * at the address a stock kernel expects it. Without it a guest's
+     * first printk is a fault to its owner. */
+    vm->uart = vuart_create(vm, &vm->uart_dev);
+    if (vm->uart != NULL)
+        list_push_back(&vm->devices, &vm->uart_dev.link);
+    else
+        kwarn("hv: vm%u: no memory for a console UART; the guest will have none", vm->id);
+#endif
 }
 
 int vm_device_register(struct vm *vm, struct vm_device *dev)
 {
-    if ((dev->pio_count == 0 && dev->mmio_len == 0) || (dev->pio_count && dev->pio == NULL))
+    if ((dev->pio_count == 0 && dev->mmio_len == 0) || (dev->pio_count && dev->pio == NULL) ||
+        (dev->mmio_len && dev->mmio == NULL))
         return -EINVAL;
     mutex_lock(&vm->lock);
     if (vm->started) {
@@ -118,14 +130,40 @@ int vmdev_pio(struct vm *vm, uint16_t port, bool write, unsigned size, uint32_t 
     return -ENODEV;
 }
 
-void vmdev_mmio(struct vm *vm, uint64_t gpa, bool write)
+int vm_raise_spi(struct vm *vm, unsigned intid)
+{
+    return arch_hv_vm_raise_spi(vm->arch, intid);
+}
+
+int vm_lower_spi(struct vm *vm, unsigned intid)
+{
+    return arch_hv_vm_lower_spi(vm->arch, intid);
+}
+
+void vmdev_reassert(struct vm *vm)
 {
     struct list_node *n;
     for (n = vm->devices.next; n != &vm->devices; n = n->next) {
         struct vm_device *d = container_of(n, struct vm_device, link);
-        if (d->mmio_len && gpa >= d->mmio_base && gpa < d->mmio_base + d->mmio_len && d->mmio) {
-            d->mmio(d, gpa, write);
-            return;
-        }
+        if (d->irq && d->irq_reassert)
+            d->irq_reassert(d);   /* decides and raises under its own lock */
     }
+}
+
+int64_t vm_console_write(struct vm *vm, const void *buf, size_t len)
+{
+    if (vm->uart == NULL)
+        return -ENOTSUP;
+    return vuart_write(vm->uart, buf, len);
+}
+
+int vmdev_mmio(struct vm *vm, uint64_t gpa, bool write, unsigned size, uint64_t *value)
+{
+    struct list_node *n;
+    for (n = vm->devices.next; n != &vm->devices; n = n->next) {
+        struct vm_device *d = container_of(n, struct vm_device, link);
+        if (d->mmio_len && gpa >= d->mmio_base && gpa < d->mmio_base + d->mmio_len && d->mmio)
+            return d->mmio(d, gpa, write, size, value);
+    }
+    return -ENODEV;
 }

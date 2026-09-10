@@ -18,12 +18,11 @@ static int64_t vm_obj_read(struct kobject *obj, void *buf, size_t len)
     return (int64_t)vm_console_read(vm, buf, len);
 }
 
+/* The owner's keyboard: bytes into the guest's console UART. */
 static int64_t vm_obj_write(struct kobject *obj, const void *buf, size_t len)
 {
-    (void)obj;
-    (void)buf;
-    (void)len;
-    return -ENOTSUP;
+    struct vm *vm = container_of(obj, struct vm, obj);
+    return vm_console_write(vm, buf, len);
 }
 
 static int vm_obj_stat(struct kobject *obj, struct cosmo_stat *st)
@@ -90,6 +89,7 @@ static void vm_release(struct kobject *obj)
     hv_unregister_vm(vm);
     guestmem_release(vm);
     arch_hv_vm_destroy(vm->arch);
+    vuart_destroy(vm->uart);
     kdebug("hv: vm%u released", vm->id);
     kfree(vm);
 }

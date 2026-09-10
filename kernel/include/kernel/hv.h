@@ -25,6 +25,11 @@
 #define HV_REGIONS_MAX  16u
 #define HV_GPA_LIMIT    (1ull << 32)     /* stage 1: a 4 GiB guest-physical window */
 #define HV_CONSOLE_SIZE 4096u
+/* The guest's console UART: where QEMU's virt puts UART0 and a stock guest's
+ * device tree names it. The hypervisor's constant, like the GIC's. */
+#define VUART_BASE      0x09000000ull
+#define VUART_SIZE      0x1000ull
+#define VUART_INTID     33u
 
 struct vm;
 struct vcpu;
@@ -44,8 +49,20 @@ struct vm_device {
     uint64_t mmio_base, mmio_len;        /* len 0: no memory range */
     /* 0: handled (value in for OUT, out for IN); -ENODEV: hand the exit to the owner. */
     int (*pio)(struct vm_device *d, uint16_t port, bool write, unsigned size, uint32_t *value);
-    /* Stage 1: notification only; the exit still reaches the owner. */
-    void (*mmio)(struct vm_device *d, uint64_t gpa, bool write);
+    /* 0: handled (a read's result in *value, up to `size` bytes); -ENODEV:
+     * hand the exit to the owner. Called with the access the hardware
+     * described; never for one it did not (size 0 goes to the owner). */
+    int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
+    /* A device with an interrupt line names it (an SPI; 0: none). Level is
+     * the source's: before every entry the run loop asks each such device
+     * to re-raise its line if it is up (vm_raise_spi), so a line still up
+     * after the guest acknowledged is delivered again; a device lowers its
+     * own line (vm_lower_spi) when it drops. The device decides AND raises
+     * under its own lock -- a sample returned to the caller and acted on
+     * outside that lock goes stale when a sibling vCPU drains the device in
+     * between, and a stale raise is a spurious interrupt. */
+    unsigned irq;
+    void (*irq_reassert)(struct vm_device *d);
     void *priv;
 };
 
@@ -69,6 +86,8 @@ struct vm {
         uint64_t dropped;
     } console;
     struct vm_device debug_console;      /* the built-in port 0xE9 backend */
+    struct vm_device uart_dev;           /* AArch64: the guest's PL011 at VUART_BASE */
+    struct vuart *uart;
     uint32_t owner_uid;
     struct list_node link;               /* the manager's list */
 };
@@ -87,6 +106,11 @@ struct vcpu {
     int offered;                         /* vector offered to the backend for this entry, -1 none */
     bool in_completion;                  /* an IN waits for its value */
     uint8_t in_size;
+    struct {                             /* an MMIO read the owner is answering */
+        bool pending;
+        uint8_t size, reg, insn_len;
+        bool sse, sf;
+    } mmio_completion;
     bool dead;
     uint64_t exits, entries;
     unsigned msr_gp;                     /* #GP injected for unmodelled MSRs */
@@ -114,6 +138,13 @@ bool vm_mem_lookup(struct vm *vm, uint64_t gpa, struct page **page, size_t *offs
 int vm_device_register(struct vm *vm, struct vm_device *dev);
 /* The debug console ring (what the guest wrote to port 0xE9). */
 size_t vm_console_read(struct vm *vm, void *buf, size_t len);
+/* The owner's input to the guest: bytes into the console UART's receive
+ * FIFO, which interrupts the guest if it asked to be. -ENOTSUP where the
+ * VM has no such device (x86-64). */
+int64_t vm_console_write(struct vm *vm, const void *buf, size_t len);
+/* A device's shared interrupt line, up or down (arch_hv_vm_raise_spi). */
+int vm_raise_spi(struct vm *vm, unsigned intid);
+int vm_lower_spi(struct vm *vm, unsigned intid);
 size_t vm_console_pending(struct vm *vm);
 
 /* VirtualCPU. */

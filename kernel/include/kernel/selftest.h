@@ -236,7 +236,12 @@ bool selftest_el2_guest_gicd_probe(const char **reason);     /* a guest finds a 
 bool selftest_el2_guest_gic_config(const char **reason);     /* what a guest writes to its GIC is what it reads back */
 bool selftest_el2_guest_gic_timer(const char **reason);      /* a guest drives its GIC the ordinary way and its timer arrives through it */
 bool selftest_el2_guest_sgi(const char **reason);            /* one vCPU interrupts another: a guest can be SMP */
-bool selftest_el2_guest_gicd_isolated(const char **reason);  /* a guest's distributor is its VM's: not another's, not the host's */
+bool selftest_el2_guest_gicd_isolated(const char **reason);
+bool selftest_el2_mmio_device(const char **reason);
+bool selftest_el2_guest_uart(const char **reason);          /* a guest prints, and its owner reads it */
+bool selftest_el2_guest_uart_rx(const char **reason);       /* the owner types, and the guest is interrupted */
+bool selftest_el2_guest_uart_level(const char **reason);    /* one interrupt per byte still waiting; a WFI woken by a keystroke */
+bool selftest_el2_guest_uart_race(const char **reason);     /* an owner typing against a guest draining: no spurious interrupt, no lost byte */         /* a device in the kernel completes a guest's access, by width and sign */  /* a guest's distributor is its VM's: not another's, not the host's */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);

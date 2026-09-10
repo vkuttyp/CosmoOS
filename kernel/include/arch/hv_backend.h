@@ -20,6 +20,10 @@ struct hv_backend {
     int (*vm_map)(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
     int (*vm_unmap)(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
     bool (*vm_query)(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
+    /* A device's shared interrupt line went up or down; -ENOTSUP where
+     * guests have no distributor to route it. */
+    int (*vm_raise_spi)(struct arch_hv_vm *vm, unsigned intid);
+    int (*vm_lower_spi)(struct arch_hv_vm *vm, unsigned intid);
     int (*vcpu_create)(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out);
     void (*vcpu_destroy)(struct arch_hv_vcpu *v);
     void (*vcpu_get_state)(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *out);

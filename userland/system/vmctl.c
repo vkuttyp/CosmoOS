@@ -182,8 +182,13 @@ static int run(int argc, char **argv)
                    (unsigned long long)x.hypercall.a2, (unsigned long long)x.hypercall.a3);
             continue;
         case COSMO_VM_EXIT_MMIO:
-            printf("vmctl: mmio %s at 0x%llx, rip 0x%llx: no device; stopping\n", x.mmio.write ? "write" : "read",
-                   (unsigned long long)x.mmio.gpa, (unsigned long long)x.rip);
+            if (x.mmio.size)
+                printf("vmctl: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",
+                       x.mmio.write ? "write" : "read", (unsigned long long)x.mmio.gpa, x.mmio.size, x.mmio.reg,
+                       (unsigned long long)x.mmio.value, (unsigned long long)x.rip);
+            else
+                printf("vmctl: mmio %s at 0x%llx, rip 0x%llx: no device; stopping\n", x.mmio.write ? "write" : "read",
+                       (unsigned long long)x.mmio.gpa, (unsigned long long)x.rip);
             return 1;
         case COSMO_VM_EXIT_WFI:
             printf("vmctl: waiting for an interrupt at 0x%llx%s\n", (unsigned long long)x.rip,

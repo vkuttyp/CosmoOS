@@ -16,8 +16,22 @@ void guestmem_release(struct vm *vm);
 void vmdev_init(struct vm *vm);
 /* 0 handled, -ENODEV no device claims the port. */
 int vmdev_pio(struct vm *vm, uint16_t port, bool write, unsigned size, uint32_t *value);
-void vmdev_mmio(struct vm *vm, uint64_t gpa, bool write);
+/* 0 when a device completed the access (a read's result in *value), -ENODEV when none claims the address. */
+int vmdev_mmio(struct vm *vm, uint64_t gpa, bool write, unsigned size, uint64_t *value);
+/* The one place a read's result becomes a register: zero-extended to
+ * `size`, sign-extended to the destination width if `sse`, the upper 32
+ * bits cleared if not `sf`, discarded for register 31. */
+void hv_mmio_complete_read(struct vcpu *v, unsigned size, bool sse, bool sf, unsigned reg, uint64_t value);
 void vm_console_put(struct vm *vm, const uint8_t *bytes, size_t n);
+
+/* The PL011 (vuart.c): created per VM on AArch64 and registered as `dev`. */
+struct vuart;
+struct vuart *vuart_create(struct vm *vm, struct vm_device *dev);
+void vuart_destroy(struct vuart *u);
+int64_t vuart_write(struct vuart *u, const void *buf, size_t len);
+
+/* Before an entry: every device whose line is up raises it, so level lines stay delivered. */
+void vmdev_reassert(struct vm *vm);
 
 /* vintr.c */
 void vintr_init(struct vcpu *v);

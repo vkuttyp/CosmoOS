@@ -255,6 +255,15 @@ static int svm_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
     return npt_unmap(vm->ncr3, gpa, len);
 }
 
+/* Stage 1 gives an x86 guest no interrupt controller of its own, so a
+ * device has no line to raise in it. */
+static int svm_be_vm_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    (void)vm;
+    (void)intid;
+    return -ENOTSUP;
+}
+
 static bool svm_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
 {
     return npt_query(vm->ncr3, gpa, hpa);
@@ -705,6 +714,7 @@ static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         out->kind = HV_EXIT_MMIO;
         out->mmio.gpa = b->control.exitinfo2;
         out->mmio.write = (b->control.exitinfo1 & SVM_NPF_WRITE) != 0;
+        out->mmio.size = 0;   /* the instruction is not decoded here: the owner's, as before */
         return 0;
     case SVM_EXIT_SHUTDOWN:
         out->kind = HV_EXIT_SHUTDOWN;
@@ -749,6 +759,8 @@ const struct hv_backend svm_backend = {
     .vm_map = svm_be_vm_map,
     .vm_unmap = svm_be_vm_unmap,
     .vm_query = svm_be_vm_query,
+    .vm_raise_spi = svm_be_vm_spi,
+    .vm_lower_spi = svm_be_vm_spi,
     .vcpu_create = svm_be_vcpu_create,
     .vcpu_destroy = svm_be_vcpu_destroy,
     .vcpu_get_state = svm_be_vcpu_get_state,

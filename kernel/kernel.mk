@@ -78,6 +78,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/virtualization/vm.c \
 	kernel-services/virtualization/guestmem.c \
 	kernel-services/virtualization/vmdev.c \
+	kernel-services/virtualization/vuart.c \
 	kernel-services/virtualization/vintr.c \
 	kernel-services/virtualization/vcpu.c \
 	kernel-services/virtualization/hvsys.c \

@@ -437,6 +437,22 @@ static int el2_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len)
     return rc;
 }
 
+/* A device's line, into the guest's distributor: pending until the guest
+ * takes it, or until the device drops the line first. */
+static int el2_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    if (vm->vdist == NULL)
+        return -ENOTSUP;
+    return vdist_raise_spi(vm->vdist, intid) ? 0 : -EINVAL;
+}
+
+static int el2_vm_lower_spi(struct arch_hv_vm *vm, unsigned intid)
+{
+    if (vm->vdist == NULL)
+        return -ENOTSUP;
+    return vdist_lower_spi(vm->vdist, intid) ? 0 : -EINVAL;
+}
+
 static bool el2_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa)
 {
     return hv_s2_query(vm->s2_root, gpa, hpa);
@@ -953,6 +969,35 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
             out->kind = HV_EXIT_EMULATED;   /* the guest's own GIC answered; nothing for the owner */
             return 0;
         }
+        /* What the access was, so a device -- in the kernel or the owner
+         * -- can complete it: size, register, a write's value, and how a
+         * read's result lands (sign-extended? the whole register?). Only
+         * when ISV says the hardware described it; a pair or an exclusive
+         * is reported with size 0, which means "as before: address and
+         * direction, and the owner works it out". */
+        {
+            uint32_t iss = (uint32_t)(c->exit_esr & 0x1FFFFFFu);
+            if (ec == EC_DABT_LOWER && (iss & (1u << 24))) {
+                out->mmio.size = (uint8_t)(1u << ((iss >> 22) & 3u));
+                out->mmio.reg = (uint8_t)((iss >> 16) & 0x1Fu);
+                out->mmio.sse = (iss & (1u << 21)) != 0;
+                out->mmio.sf = (iss & (1u << 15)) != 0;
+                out->mmio.insn_len = (uint8_t)il;
+                out->mmio.value = 0;
+                if (out->mmio.write && out->mmio.reg < 31) {
+                    out->mmio.value = c->guest_x[out->mmio.reg];
+                    if (out->mmio.size < 8)
+                        out->mmio.value &= (1ull << (out->mmio.size * 8u)) - 1u;
+                }
+            } else {
+                out->mmio.size = 0;
+                out->mmio.reg = 31;
+                out->mmio.sse = false;
+                out->mmio.sf = false;
+                out->mmio.insn_len = (uint8_t)il;
+                out->mmio.value = 0;
+            }
+        }
         return 0;
     default:
         out->kind = HV_EXIT_FAIL;
@@ -1045,6 +1090,8 @@ const struct hv_backend el2_backend = {
     .vm_map = el2_vm_map,
     .vm_unmap = el2_vm_unmap,
     .vm_query = el2_vm_query,
+    .vm_raise_spi = el2_vm_raise_spi,
+    .vm_lower_spi = el2_vm_lower_spi,
     .vcpu_create = el2_vcpu_create,
     .vcpu_destroy = el2_vcpu_destroy,
     .vcpu_get_state = el2_vcpu_get_state,

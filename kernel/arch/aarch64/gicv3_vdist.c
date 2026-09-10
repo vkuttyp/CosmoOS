@@ -90,7 +90,7 @@ struct gicv3_vdist {
     uint8_t prio[VDIST_NR_LINES];
     uint64_t irouter[VDIST_NR_LINES];   /* SPIs only; 0..31 stay zero */
     struct vdist_private priv[VDIST_GICR_FRAMES];
-    uint64_t reads, writes, sgis;
+    uint64_t reads, writes, sgis, spis_raised;
 };
 
 /* A word of a set-or-clear register: the bit in `val & mask` that is set
@@ -501,6 +501,27 @@ unsigned vdist_sgi(struct gicv3_vdist *d, unsigned from, uint64_t sgi1r)
     d->sgis += hit;
     spin_unlock_irqrestore(&d->lock, s);
     return hit;
+}
+
+bool vdist_raise_spi(struct gicv3_vdist *d, unsigned intid)
+{
+    if (d == NULL || intid < NR_PRIVATE || intid >= VDIST_NR_LINES)
+        return false;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    d->pending[intid / 32u] |= 1u << (intid % 32u);
+    d->spis_raised++;
+    spin_unlock_irqrestore(&d->lock, s);
+    return true;
+}
+
+bool vdist_lower_spi(struct gicv3_vdist *d, unsigned intid)
+{
+    if (d == NULL || intid < NR_PRIVATE || intid >= VDIST_NR_LINES)
+        return false;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    d->pending[intid / 32u] &= ~(1u << (intid % 32u));
+    spin_unlock_irqrestore(&d->lock, s);
+    return true;
 }
 
 /* --- access decode ---------------------------------------------------- */

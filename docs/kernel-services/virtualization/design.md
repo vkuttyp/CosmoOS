@@ -125,7 +125,9 @@ struct vm_device {
     uint64_t mmio_base, mmio_len;       /* 0 len: no memory range */
     /* return 0 handled (value in/out), -ENODEV to pass the exit to the caller */
     int (*pio)(struct vm_device *d, uint16_t port, bool write, unsigned size, uint32_t *value);
-    void (*mmio)(struct vm_device *d, uint64_t gpa, bool write);  /* stage 1: notification only */
+    int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
+    unsigned irq;                                 /* an SPI this device drives, 0 none */
+    void (*irq_reassert)(struct vm_device *d);    /* before every entry: raise the line if it is up, under the device's lock */
     void *priv;
 };
 ```
@@ -467,6 +469,73 @@ appends the low byte(s) to the ring (dropping the oldest when full), a
 read returns 0xE9 (the Bochs convention that lets a guest detect the
 port). The owner drains the ring with `read` on the VM handle; the VM's
 `stat` reports the number of buffered bytes as `size`.
+
+**An MMIO device completes the access, or declines it.** `mmio()` is the
+port handler's contract in memory: called with the access the hardware
+described -- size 1/2/4/8, a write's value -- it returns 0 handled (a
+read's result in `*value`) or `-ENODEV` to hand the exit to the owner.
+The run loop then completes a read into the guest's register through
+`hv_mmio_complete_read` -- zero-extended to `size`, sign-extended to the
+destination width if the load was `ldrsb`/`ldrsh`/`ldrsw` (`ISS.SSE`),
+the upper 32 bits cleared for a `W` destination (`ISS.SF` clear),
+discarded for register 31 -- and steps over the instruction; the run goes
+on with no exit. An access the hardware did not describe (`size` 0: a
+pair, an exclusive; and every x86 MMIO exit, since neither x86 backend
+decodes the instruction) goes to the owner as it always did. A read the
+owner answers -- `x->mmio.value` set, then `vcpu_run` again -- is
+completed by the same function, so the two paths cannot disagree; an
+owner that sets the registers itself instead cancels the completion with
+them. The order is: the guest's own distributor (in the backend), then
+devices, then the owner.
+
+**A device with an interrupt line** names it (`irq`, an SPI) and
+implements `irq_reassert()`. Level is the source's: before every entry
+the run loop asks each such device to raise its line if it is up
+(`vmdev_reassert`), so a line still up after the guest acknowledged is
+delivered again; a device lowers its own line (`vm_lower_spi`) when it
+drops, which withdraws a pending state the guest has not yet taken. The
+device decides *and* raises under its own lock: the first version
+returned a sample for the run loop to act on, and a sibling vCPU draining
+the device between the sample and the raise made the raise stale -- a
+spurious interrupt, the same race the line transitions had. The
+distributor's "pending clears on acknowledge" is unchanged -- level is a
+property of the source, not a mode of the router. On x86 the ops return
+`-ENOTSUP`: stage 1 gives a guest no controller for a line to reach.
+
+### The guest's console (`vuart.c`)
+
+A PL011 per VM at `VUART_BASE` (`0x0900_0000`, where QEMU's `virt` puts
+UART0 and a stock guest's device tree names it -- the hypervisor's
+constant, like the GIC's), registered by `vmdev_init` on AArch64 the way
+the debug console is on x86. Measured before it existed: a guest's store
+of `'A'` to `UARTDR` was an `MMIO` exit to an owner with nothing behind
+it, and the exit did not carry the `'A'`. The register set is the one the
+host's own `pl011.c` drives: `DR` writes go to the console ring the VM
+descriptor reads; `DR` reads pop a 64-byte receive FIFO that `write()` on
+the VM descriptor fills (`vm_console_write`; the oldest byte is dropped
+when full, as the ring does); `FR` says the transmitter is always ready
+and whether the FIFO is empty or full; `IBRD`, `FBRD`, `LCR_H`, `CR`,
+`IFLS`, `IMSC`, `DMACR` are stored and returned; `RIS` carries `RXRIS`
+while a byte waits and `TXRIS` always (the transmit FIFO is never
+anything but empty -- a guest that unmasks `TXIM` with nothing to send is
+interrupted for it, as on the hardware); `MIS = RIS & IMSC`; the
+peripheral and PrimeCell ids say a PL011. Its line is SPI 33
+(`VUART_INTID`), up while `MIS` is non-zero -- so a byte arriving with
+`RXIM` unmasked raises it at once (which is what wakes a vCPU sleeping in
+`WFI`: the wait already asks the distributor), the run loop re-raises it
+before each entry while bytes remain (one interrupt per byte still
+waiting), and reading the last byte lowers it. In the kernel because a
+console is written a byte at a time, the same argument that put the
+distributor there.
+
+Locking: the UART's lock covers its registers and FIFO **and is held
+while the line's new state is told to the distributor**. The first
+version dropped it first, and two threads -- an owner writing, a guest
+draining -- could decide their transitions in one order and tell the
+distributor in the other, leaving SPI 33 pending with the line down (a
+spurious interrupt the per-entry re-raise cannot repair, since it only
+raises). Order: the UART's lock, then the distributor's; the
+distributor's is a leaf that never calls back into a device.
 
 ### Guest memory (`guestmem.c`)
 
