@@ -14,6 +14,7 @@
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/pmm.h>
+#include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -1825,6 +1826,182 @@ bool selftest_el2_guest_uart_race(const char **reason)
     return true;
 }
 
+/* --- the machine a guest is handed -------------------------------------- */
+
+#define MACHINE_RAM_BYTES (8ull << 20)   /* what the archive's virt.dtb was built for */
+
+/*
+ * A VM laid out as machine mode lays one out: RAM at COSMO_HVM_RAM_BASE,
+ * the image where its arm64 Image header's text_offset says, the device
+ * tree at the first 2 MiB boundary past the image, vCPU 0 entering at the
+ * image with x0 = the tree -- the boot protocol, as an owner would follow
+ * it. The header is read, not assumed, so a fixture with the wrong magic
+ * or offset fails here and not in a guest that never prints.
+ */
+static __maybe_unused int make_machine_guest(const char *image, const char *dtb, struct vm **vm_out,
+                                             struct vcpu **vcpu_out, uint64_t *dtb_gpa_out)
+{
+    const void *img, *blob;
+    size_t img_len, blob_len;
+    if (!bootarchive_find(image, &img, &img_len) || !bootarchive_find(dtb, &blob, &blob_len))
+        return -ENOENT;
+    const uint8_t *h = img;
+    if (img_len < 64 || *(const uint32_t *)(h + COSMO_HVM_IMAGE_MAGIC_OFF) != COSMO_HVM_IMAGE_MAGIC)
+        return -EINVAL;
+    uint64_t text_off = *(const uint64_t *)(h + COSMO_HVM_IMAGE_TEXT_OFF);
+    uint64_t image_size = *(const uint64_t *)(h + COSMO_HVM_IMAGE_SIZE_OFF);
+    uint64_t load = COSMO_HVM_RAM_BASE + text_off;
+    uint64_t dtb_gpa = (load + image_size + (2ull << 20) - 1) & ~((2ull << 20) - 1);
+    if (dtb_gpa + blob_len > COSMO_HVM_RAM_BASE + MACHINE_RAM_BYTES)
+        return -ENOSPC;
+    struct vm *vm;
+    int rc = vm_create(0, HV_VM_MEM_MAX, &vm);
+    if (rc)
+        return rc;
+    rc = vm_mem_add(vm, COSMO_HVM_RAM_BASE, MACHINE_RAM_BYTES);
+    if (rc == 0)
+        rc = vm_mem_write(vm, load, img, img_len);
+    if (rc == 0)
+        rc = vm_mem_write(vm, dtb_gpa, blob, blob_len);
+    struct vcpu *v = NULL;
+    if (rc == 0)
+        rc = vcpu_create(vm, 0, &v);
+    if (rc == 0) {
+        struct cosmo_vcpu_regs regs;
+        vcpu_get_regs(v, &regs);
+        regs.pc = load;
+        regs.x[0] = dtb_gpa;
+        rc = vcpu_set_regs(v, &regs);
+    }
+    if (rc) {
+        if (v)
+            kobject_put(&v->obj);
+        kobject_put(&vm->obj);
+        return rc;
+    }
+    *vm_out = vm;
+    *vcpu_out = v;
+    *dtb_gpa_out = dtb_gpa;
+    return 0;
+}
+
+/* Everything the console holds, NUL-terminated, into `buf`. */
+static __maybe_unused size_t console_drain(struct vm *vm, char *buf, size_t cap)
+{
+    size_t n = vm_console_read(vm, buf, cap - 1);
+    buf[n] = '\0';
+    return n;
+}
+
+/*
+ * The whole unit in one line: a guest that knows nothing of this
+ * hypervisor reads the device tree in x0, finds its UART through
+ * stdout-path, and prints what it found through that UART -- so the line
+ * arrives only if the tree named the device the kernel implements, at the
+ * address it implements it. Every field is compared to the uapi constant
+ * it came from, not to a literal: the test is the header's, the blob's
+ * and the kernel's agreement.
+ */
+bool selftest_el2_guest_dtb(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    uint64_t dtb_gpa = 0;
+    int rc = make_machine_guest("tests/hv/guest_dtb.bin", "tests/hv/virt.dtb", &vm, &v, &dtb_gpa);
+    if (rc == -ENOENT) {
+        kinfo("selftest: el2-guest-dtb: no C guest or device tree in the archive; skipping");
+        return true;
+    }
+    CHECK(rc == 0);
+    CHECK(dtb_gpa == COSMO_HVM_RAM_BASE + (2ull << 20));   /* past a 256 KiB image at +0x80000 */
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+    CHECK(x.hypercall.nr == 0x84000000ull);                   /* PSCI_VERSION: the tree was read and the line printed */
+    char line[160], want[160];
+    console_drain(vm, line, sizeof(line));
+    ksnprintf(want, sizeof(want), "dtb: uart@%llx irq %u cpus %u mem %llx+%llx psci hvc\n",
+              (unsigned long long)COSMO_HVM_UART_BASE, COSMO_HVM_UART_INTID, 2u,
+              (unsigned long long)COSMO_HVM_RAM_BASE, (unsigned long long)MACHINE_RAM_BYTES);
+    if (strcmp(line, want) != 0)
+        kwarn("selftest: el2-guest-dtb: guest said \"%s\", wanted \"%s\"", line, want);
+    CHECK(strcmp(line, want) == 0);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-dtb: %s", line);
+    return true;
+}
+
+/*
+ * The owner is the machine's firmware. The kernel gives it the exit,
+ * set_regs, and vcpu_create after the VM has started; this test answers
+ * PSCI as vmctl will and requires the guest to see the answers: a
+ * version, a second CPU that starts at the entry it named with the
+ * context it gave -- checked through that vCPU's own first line, not by
+ * its existence -- and a power-off.
+ */
+bool selftest_el2_guest_psci(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0, *v1 = NULL;
+    uint64_t dtb_gpa = 0;
+    int rc = make_machine_guest("tests/hv/guest_dtb.bin", "tests/hv/virt.dtb", &vm, &v0, &dtb_gpa);
+    if (rc == -ENOENT) {
+        kinfo("selftest: el2-guest-psci: no C guest or device tree in the archive; skipping");
+        return true;
+    }
+    CHECK(rc == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct cosmo_vcpu_regs regs;
+    char line[160];
+
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000000ull);   /* PSCI_VERSION */
+    console_drain(vm, line, sizeof(line));
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    regs.x[0] = 0x10000;                                                          /* PSCI 1.0 */
+    CHECK(vcpu_set_regs(v0, &regs) == 0);
+
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0xC4000003ull);   /* CPU_ON */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "psci version 0x10000\n") == 0);
+    uint64_t target = x.hypercall.a0, entry = x.hypercall.a1, ctx = x.hypercall.a2;
+    CHECK(target == 1 && ctx == 0x1234cafeull);
+    CHECK(entry > COSMO_HVM_RAM_BASE && entry < COSMO_HVM_RAM_BASE + MACHINE_RAM_BYTES);
+    CHECK(vcpu_create(vm, (unsigned)target, &v1) == 0);                            /* after the VM started */
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = entry;
+    regs.x[0] = ctx;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    regs.x[0] = 0;                                                                /* SUCCESS */
+    CHECK(vcpu_set_regs(v0, &regs) == 0);
+
+    /* The second CPU runs from the entry with the context, prints, and
+     * powers itself off. */
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000002ull);   /* CPU_OFF */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "cpu1: up ctx=1234cafe\n") == 0);
+
+    /* The first sees SUCCESS and powers the machine off. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000008ull);   /* SYSTEM_OFF */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "cpu_on 1 -> 0\n") == 0);
+
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-psci: version answered, vCPU 1 brought up at the guest's entry with its context, power-off requested");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1952,6 +2129,8 @@ bool selftest_el2_guest_uart(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_rx(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_level(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_race(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_dtb(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_psci(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

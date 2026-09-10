@@ -521,6 +521,8 @@ static const struct selftest tests[] = {
     { "el2-guest-uart-rx", selftest_el2_guest_uart_rx },
     { "el2-guest-uart-level", selftest_el2_guest_uart_level },
     { "el2-guest-uart-race", selftest_el2_guest_uart_race },
+    { "el2-guest-dtb", selftest_el2_guest_dtb },
+    { "el2-guest-psci", selftest_el2_guest_psci },
     { "el2-guest-hvc",   selftest_el2_guest_hvc },
     { "el2-guest-mmio",  selftest_el2_guest_mmio },
     { "el2-guest-sysreg", selftest_el2_guest_sysreg },
