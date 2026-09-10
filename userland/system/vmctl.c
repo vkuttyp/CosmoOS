@@ -82,6 +82,50 @@ static void drain_console(int vm)
     fflush(stdout);
 }
 
+/* The whole file, or NULL with the reason printed. Every allocation is
+ * checked: an image is what a user hands us, and "large" is not an
+ * error a crash should report. */
+static unsigned char *read_image(const char *path, size_t *len_out)
+{
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "vmctl: %s: %s\n", path, strerror(errno));
+        return NULL;
+    }
+    size_t cap = 65536, len = 0;
+    unsigned char *image = malloc(cap);
+    if (image == NULL) {
+        fprintf(stderr, "vmctl: %s: out of memory\n", path);
+        fclose(f);
+        return NULL;
+    }
+    for (;;) {
+        if (len == cap) {
+            unsigned char *bigger = realloc(image, cap * 2);
+            if (bigger == NULL) {
+                fprintf(stderr, "vmctl: %s: out of memory at %zu bytes\n", path, cap);
+                free(image);
+                fclose(f);
+                return NULL;
+            }
+            image = bigger;
+            cap *= 2;
+        }
+        size_t n = fread(image + len, 1, cap - len, f);
+        if (n == 0)
+            break;
+        len += n;
+    }
+    fclose(f);
+    if (len == 0) {
+        fprintf(stderr, "vmctl: %s: empty image\n", path);
+        free(image);
+        return NULL;
+    }
+    *len_out = len;
+    return image;
+}
+
 /* --- machine mode: the machine a guest is handed ------------------------ */
 
 #define PSCI_VERSION          0x84000000ull
@@ -227,28 +271,10 @@ static int run_machine(int argc, char **argv)
         return usage();
     const char *path = argv[i];
 
-    FILE *f = fopen(path, "r");
-    if (f == NULL) {
-        fprintf(stderr, "vmctl: %s: %s\n", path, strerror(errno));
+    size_t len = 0;
+    unsigned char *image = read_image(path, &len);
+    if (image == NULL)
         return 1;
-    }
-    size_t cap = 65536, len = 0;
-    unsigned char *image = malloc(cap);
-    for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            image = realloc(image, cap);
-        }
-        size_t n = fread(image + len, 1, cap - len, f);
-        if (n == 0)
-            break;
-        len += n;
-    }
-    fclose(f);
-    if (len == 0) {
-        fprintf(stderr, "vmctl: %s: empty image\n", path);
-        return 1;
-    }
 
     /* Where the image goes: by its arm64 Image header, or at RAM's start
      * for a flat image without one. The header's image_size bounds the
@@ -427,28 +453,10 @@ static int run(int argc, char **argv)
     if (entry == 0)
         entry = gpa;
 
-    FILE *f = fopen(path, "r");
-    if (f == NULL) {
-        fprintf(stderr, "vmctl: %s: %s\n", path, strerror(errno));
+    size_t len = 0;
+    unsigned char *image = read_image(path, &len);
+    if (image == NULL)
         return 1;
-    }
-    size_t cap = 65536, len = 0;
-    unsigned char *image = malloc(cap);
-    for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            image = realloc(image, cap);
-        }
-        size_t n = fread(image + len, 1, cap - len, f);
-        if (n == 0)
-            break;
-        len += n;
-    }
-    fclose(f);
-    if (len == 0) {
-        fprintf(stderr, "vmctl: %s: empty image\n", path);
-        return 1;
-    }
 
     int vmm = open("/dev/vmm", O_RDWR);
     if (vmm < 0) {
