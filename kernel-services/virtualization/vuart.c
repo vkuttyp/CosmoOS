@@ -100,13 +100,17 @@ static bool vuart_line_locked(const struct vuart *u)
     return (vuart_ris(u) & u->imsc) != 0;
 }
 
-static bool vuart_irq_asserted(struct vm_device *d)
+/* Before an entry: if the line is up, raise it -- under the lock, in one
+ * step. Sampling under the lock and raising after it is the same race
+ * the transitions had: a sibling vCPU drains the last byte in between
+ * and the raise lands on an empty FIFO. */
+static void vuart_irq_reassert(struct vm_device *d)
 {
     struct vuart *u = d->priv;
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
-    bool up = vuart_line_locked(u);
+    if (vuart_line_locked(u))
+        vm_raise_spi(u->vm, VUART_INTID);
     spin_unlock_irqrestore(&u->lock, s);
-    return up;
 }
 
 /* The line changed; tell the distributor -- with the lock still held, so
@@ -234,7 +238,7 @@ struct vuart *vuart_create(struct vm *vm, struct vm_device *dev)
     dev->mmio_len = VUART_SIZE;
     dev->mmio = vuart_mmio;
     dev->irq = VUART_INTID;
-    dev->irq_asserted = vuart_irq_asserted;
+    dev->irq_reassert = vuart_irq_reassert;
     dev->priv = u;
     return u;
 }

@@ -127,7 +127,7 @@ struct vm_device {
     int (*pio)(struct vm_device *d, uint16_t port, bool write, unsigned size, uint32_t *value);
     int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
     unsigned irq;                                 /* an SPI this device drives, 0 none */
-    bool (*irq_asserted)(struct vm_device *d);    /* is its line up? asked before every entry */
+    void (*irq_reassert)(struct vm_device *d);    /* before every entry: raise the line if it is up, under the device's lock */
     void *priv;
 };
 ```
@@ -488,12 +488,16 @@ owner that sets the registers itself instead cancels the completion with
 them. The order is: the guest's own distributor (in the backend), then
 devices, then the owner.
 
-**A device with an interrupt line** names it (`irq`, an SPI) and answers
-`irq_asserted()`. Level is the source's: before every entry the run loop
-raises the line of each device whose line is up (`vmdev_reassert` →
-`arch_hv_vm_raise_spi`), so a line still up after the guest acknowledged
-is delivered again; a device lowers its own line (`vm_lower_spi`) when it
+**A device with an interrupt line** names it (`irq`, an SPI) and
+implements `irq_reassert()`. Level is the source's: before every entry
+the run loop asks each such device to raise its line if it is up
+(`vmdev_reassert`), so a line still up after the guest acknowledged is
+delivered again; a device lowers its own line (`vm_lower_spi`) when it
 drops, which withdraws a pending state the guest has not yet taken. The
+device decides *and* raises under its own lock: the first version
+returned a sample for the run loop to act on, and a sibling vCPU draining
+the device between the sample and the raise made the raise stale -- a
+spurious interrupt, the same race the line transitions had. The
 distributor's "pending clears on acknowledge" is unchanged -- level is a
 property of the source, not a mode of the router. On x86 the ops return
 `-ENOTSUP`: stage 1 gives a guest no controller for a line to reach.

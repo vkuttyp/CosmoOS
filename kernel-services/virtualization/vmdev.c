@@ -145,8 +145,8 @@ void vmdev_reassert(struct vm *vm)
     struct list_node *n;
     for (n = vm->devices.next; n != &vm->devices; n = n->next) {
         struct vm_device *d = container_of(n, struct vm_device, link);
-        if (d->irq && d->irq_asserted && d->irq_asserted(d))
-            arch_hv_vm_raise_spi(vm->arch, d->irq);
+        if (d->irq && d->irq_reassert)
+            d->irq_reassert(d);   /* decides and raises under its own lock */
     }
 }
 

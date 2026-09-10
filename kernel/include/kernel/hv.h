@@ -53,13 +53,16 @@ struct vm_device {
      * hand the exit to the owner. Called with the access the hardware
      * described; never for one it did not (size 0 goes to the owner). */
     int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
-    /* A device with an interrupt line names it (an SPI; 0: none) and says
-     * whether the line is up. Level is the source's: before every entry the
-     * run loop raises the line of each device that says so, so a line still
-     * up after the guest acknowledged is delivered again, and a device
-     * lowers its own line (vm_lower_spi) when it drops. */
+    /* A device with an interrupt line names it (an SPI; 0: none). Level is
+     * the source's: before every entry the run loop asks each such device
+     * to re-raise its line if it is up (vm_raise_spi), so a line still up
+     * after the guest acknowledged is delivered again; a device lowers its
+     * own line (vm_lower_spi) when it drops. The device decides AND raises
+     * under its own lock -- a sample returned to the caller and acted on
+     * outside that lock goes stale when a sibling vCPU drains the device in
+     * between, and a stale raise is a spurious interrupt. */
     unsigned irq;
-    bool (*irq_asserted)(struct vm_device *d);
+    void (*irq_reassert)(struct vm_device *d);
     void *priv;
 };
 
