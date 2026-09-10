@@ -195,6 +195,25 @@ static void test_hostile(void)
     q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == -1);
     EXPECT(g_oob_reads == 0);
+
+    /* (8) a request that serves cleanly followed by one that faults. The
+       fault must be reported as -1, not as the one request already served:
+       a draining caller that saw a positive count would replay the faulting
+       request forever, since last_avail never advances past it. */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    for (unsigned i = 0; i < sizeof(g_disk); i++)
+        g_disk[i] = (uint8_t)(i * 7 + 1 + (i / VBLK_SECTOR) * 53);
+    build_read_req(0, VBLK_SECTOR);              /* head 0: a clean read via desc 0..2 */
+    { struct { uint32_t t, r; uint64_t s; } h = { VIRTIO_BLK_T_IN, 0, 0 };
+      memcpy(g_ram + 0x7000, &h, sizeof(h)); }
+    put_desc(3, 0x7000, 16, 1, 4);               /* head 3: header */
+    put_desc(4, GRAM + 0x10000, VBLK_SECTOR, 1 | 2, 5);   /* data buffer outside guest RAM */
+    put_desc(5, 0x8000, 1, 2, 0);                /* status */
+    put16(AVAIL + 4, 0); put16(AVAIL + 4 + 2, 3);   /* ring[0] = head 0, ring[1] = head 3 */
+    put16(AVAIL + 2, 2);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == -1);         /* the fault, not "1 served" */
+    EXPECT(g_oob_reads == 1);                    /* the bad buffer was tried and refused */
 }
 
 /* The work ceiling: one notification serves at most max_bytes_per_call, and

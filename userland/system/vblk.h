@@ -67,12 +67,16 @@ struct vblk_queue {
 #define VBLK_MAX_BYTES_PER_CALL  (32u << 20)  /* 32 MiB per notification */
 
 /*
- * Serve every request the guest has made available since the last call.
- * Returns the number served (>= 0), each appended to the used ring; the
- * caller raises the device's interrupt when this is > 0. Returns -1 and
- * stops on a hostile ring -- a malformed descriptor chain, an index or
- * length out of range, a guest-memory fault -- having served whatever was
- * well-formed before it.
+ * Serve requests the guest has made available since the last call, at most
+ * max_bytes_per_call of data before deferring the rest to the next call.
+ * Returns the number served this call (>= 0), each appended to the used
+ * ring; the caller raises the device's interrupt when this is > 0 and, if it
+ * is > 0, calls again (the deferred remainder is served a batch at a time).
+ * Returns -1 and stops on a hostile ring -- a malformed descriptor chain, an
+ * index or length out of range, a guest-memory fault: a failure is never
+ * reported as a positive count, so a draining caller does not replay the
+ * faulting request. Requests completed before a mid-walk fault keep their
+ * used-ring entries; they are just not counted on the failing call.
  */
 int vblk_process(struct vblk_io *io, struct vblk_queue *q);
 

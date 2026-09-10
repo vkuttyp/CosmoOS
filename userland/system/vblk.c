@@ -134,19 +134,25 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
             break;
         uint16_t slot = q->last_avail % q->size;
         uint16_t head;
+        /* A fault anywhere in the walk stops it and is reported as failure
+         * (-1), never as the count served so far: a caller that drains on a
+         * positive return would otherwise replay the faulting request and
+         * re-raise its interrupt forever, since last_avail has not advanced
+         * past it. Requests completed before the fault already hold their
+         * used-ring entries; they are simply not counted on this call. */
         if (read_u16(io, q->avail_gpa + 4u + (uint64_t)slot * 2u, &head) != 0)   /* avail->ring[slot] */
-            return served > 0 ? served : -1;
+            return -1;
         uint32_t used_len = 0;
         if (serve_one(io, q, head, &used_len) != 0)
-            return served > 0 ? served : -1;
+            return -1;
         /* used->ring[used_idx % size] = { head, used_len } at used_gpa + 4 + 8*slot */
         uint16_t uslot = q->used_idx % q->size;
         uint32_t elem[2] = { head, used_len };
         if (io->write_guest(io->ctx, q->used_gpa + 4u + (uint64_t)uslot * 8u, elem, 8) != 0)
-            return served > 0 ? served : -1;
+            return -1;
         q->used_idx++;
         if (io->write_guest(io->ctx, q->used_gpa + 2u, &q->used_idx, 2) != 0)   /* used->idx */
-            return served > 0 ? served : -1;
+            return -1;
         q->last_avail++;
         served++;
         call_bytes += used_len;
