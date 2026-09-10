@@ -98,8 +98,15 @@ static void test_devices(void)
     EXPECT(p != NULL && len == 48);
     EXPECT(fdt_be32((const uint8_t *)p + 4) == COSMO_HVM_TIMER_PPI_SEC - 16);
     EXPECT(fdt_be32((const uint8_t *)p + 28) == COSMO_HVM_TIMER_PPI_VIRT - 16);
-    /* A node that is not there is not found, and neither is a property. */
-    EXPECT(fdt_get_prop(g_blob, "/virtio_mmio@a000000", "reg", &len) == NULL);
+    /* The virtio-mmio transport node: where the owner models a device. */
+    p = fdt_get_prop(g_blob, "/virtio_mmio@a000000", "compatible", &len);
+    EXPECT(p != NULL && strcmp(p, "virtio,mmio") == 0);
+    p = fdt_get_prop(g_blob, "/virtio_mmio@a000000", "reg", &len);
+    EXPECT(p != NULL && len == 16 && fdt_be64(p) == COSMO_HVM_VIRTIO0_BASE);
+    p = fdt_get_prop(g_blob, "/virtio_mmio@a000000", "interrupts", &len);
+    EXPECT(p != NULL && len == 12 && fdt_be32((const uint8_t *)p + 4) == COSMO_HVM_VIRTIO0_INTID - 32);
+    /* A node that really is not there is not found, and neither is a property. */
+    EXPECT(fdt_get_prop(g_blob, "/virtio_net@b000000", "reg", &len) == NULL);
     EXPECT(fdt_get_prop(g_blob, "/pl011@9000000", "dma", &len) == NULL);
 }
 

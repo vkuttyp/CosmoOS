@@ -24,6 +24,7 @@
 #include <cosmo/sysctl.h>
 #include <uapi/cosmo/hv_machine.h>
 #include "../../tools/fdt/fdt.h"
+#include "vblk.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -34,7 +35,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
-                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--append CMDLINE] IMAGE\n");
+                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE] [--append CMDLINE] IMAGE\n");
     return 2;
 }
 
@@ -148,6 +149,91 @@ static int is_psci(uint64_t fn)
     return (fn & 0xBFFFFFE0ull) == 0x84000000ull;
 }
 
+/* --- the virtio-mmio block device (docs/audit/next-subsystem-vblk.md) --- */
+
+struct vio {
+    int vm;               /* for cosmo_vm_mem_* and cosmo_vm_raise_spi */
+    int disk_fd;          /* -1 when no --disk: the transport reports no device */
+    uint64_t capacity;    /* sectors */
+    uint32_t feat_sel, status;
+    struct vblk_queue q;
+    int irq_pending;
+};
+
+static struct vio g_vio;
+
+static int vio_read_guest(void *c, uint64_t gpa, void *buf, uint32_t len)
+{
+    struct vio *v = c;
+    return cosmo_vm_mem_read(v->vm, gpa, buf, len) == (long)len ? 0 : -1;
+}
+static int vio_write_guest(void *c, uint64_t gpa, const void *buf, uint32_t len)
+{
+    struct vio *v = c;
+    return cosmo_vm_mem_write(v->vm, gpa, buf, len) == (long)len ? 0 : -1;
+}
+static int vio_disk_read(void *c, uint64_t off, void *buf, uint32_t len)
+{
+    struct vio *v = c;
+    if (lseek(v->disk_fd, (off_t)off, SEEK_SET) < 0)
+        return -1;
+    uint32_t done = 0;
+    while (done < len) {
+        ssize_t n = read(v->disk_fd, (char *)buf + done, len - done);
+        if (n <= 0)
+            return -1;
+        done += (uint32_t)n;
+    }
+    return 0;
+}
+
+/* The transport registers (virtio-mmio v2). `*val` is the read result. */
+static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
+{
+    if (!write) {
+        switch (off) {
+        case 0x000: *val = 0x74726976u; return;                 /* MagicValue */
+        case 0x004: *val = 2; return;                           /* Version */
+        case 0x008: *val = v->disk_fd >= 0 ? 2u : 0u; return;   /* DeviceID: block, or none */
+        case 0x00c: *val = 0x554d4551u; return;                 /* VendorID */
+        case 0x010: *val = v->feat_sel == 1 ? 1u : (1u << 5); return;  /* VERSION_1 ; BLK_F_RO */
+        case 0x034: *val = VBLK_QUEUE_MAX; return;              /* QueueNumMax */
+        case 0x044: *val = (uint32_t)v->q.ready; return;
+        case 0x060: *val = v->irq_pending ? 1u : 0u; return;    /* InterruptStatus: used-ring event */
+        case 0x070: *val = v->status; return;
+        case 0x100: *val = (uint32_t)v->capacity; return;       /* capacity low */
+        case 0x104: *val = (uint32_t)(v->capacity >> 32); return;
+        default: *val = 0; return;
+        }
+    }
+    uint32_t w = (uint32_t)*val;
+    switch (off) {
+    case 0x014: v->feat_sel = w; break;
+    case 0x038: v->q.size = (uint16_t)w; break;
+    case 0x044: v->q.ready = (int)w; break;
+    case 0x050: {                                               /* QueueNotify */
+        struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity };
+        if (vblk_process(&io, &v->q) > 0) {
+            v->irq_pending = 1;
+            cosmo_vm_raise_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);   /* through the guest's distributor */
+        }
+        break;
+    }
+    case 0x064:                                                 /* InterruptACK */
+        v->irq_pending = 0;
+        cosmo_vm_lower_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);
+        break;
+    case 0x070: v->status = w; break;
+    case 0x080: v->q.desc_gpa = (v->q.desc_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x084: v->q.desc_gpa = (v->q.desc_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x090: v->q.avail_gpa = (v->q.avail_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x094: v->q.avail_gpa = (v->q.avail_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x0a0: v->q.used_gpa = (v->q.used_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x0a4: v->q.used_gpa = (v->q.used_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    default: break;
+    }
+}
+
 struct machine {
     int vm;
     int vcpu[COSMO_HV_VCPUS_MAX];      /* -1: not created */
@@ -252,7 +338,7 @@ static int run_machine(int argc, char **argv)
 {
     unsigned long mem_mib = 16;
     unsigned nr_cpus = 1;
-    const char *bootargs = NULL;
+    const char *bootargs = NULL, *disk = NULL;
     int i = 0;
     while (i < argc && argv[i][0] == '-') {
         if (i + 1 >= argc)
@@ -263,6 +349,8 @@ static int run_machine(int argc, char **argv)
             nr_cpus = (unsigned)strtoul(argv[i + 1], NULL, 0);
         else if (strcmp(argv[i], "--append") == 0)
             bootargs = argv[i + 1];
+        else if (strcmp(argv[i], "--disk") == 0)
+            disk = argv[i + 1];
         else
             return usage();
         i += 2;
@@ -352,9 +440,25 @@ static int run_machine(int argc, char **argv)
         return 1;
     }
     m.running[0] = 1;
-    printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx\n",
+    /* The virtio-blk device: a file, opened read-only, its size in sectors
+     * the capacity. Without --disk the transport reports DeviceID 0 and the
+     * guest's virtio-mmio driver skips the node. */
+    memset(&g_vio, 0, sizeof(g_vio));
+    g_vio.vm = m.vm;
+    g_vio.disk_fd = -1;
+    if (disk != NULL) {
+        g_vio.disk_fd = open(disk, O_RDONLY);
+        if (g_vio.disk_fd < 0) {
+            fprintf(stderr, "vmctl: %s: %s\n", disk, strerror(errno));
+            return 1;
+        }
+        off_t end = lseek(g_vio.disk_fd, 0, SEEK_END);
+        g_vio.capacity = end > 0 ? (uint64_t)end / 512u : 0;
+    }
+    printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx%s\n",
            path, len, (unsigned long long)load, has_header ? "Image header" : "flat", mem_mib,
-           (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa);
+           (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa,
+           disk ? ", virtio-blk /dev/vda" : "");
 
     /* One thread, every running vCPU in turn, a tick each. A vCPU that
      * asks for an interrupt (WFI) gives up its turn; its next comes round. */
@@ -403,6 +507,14 @@ static int run_machine(int argc, char **argv)
             }
             break;
         case COSMO_VM_EXIT_MMIO:
+            if (x.mmio.gpa >= COSMO_HVM_VIRTIO0_BASE &&
+                x.mmio.gpa < COSMO_HVM_VIRTIO0_BASE + COSMO_HVM_VIRTIO0_SIZE) {
+                uint64_t val = x.mmio.value;
+                vio_reg(&g_vio, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO0_BASE), x.mmio.write, &val);
+                if (!x.mmio.write)
+                    x.mmio.value = val;   /* the kernel completes the read / steps the write */
+                break;   /* run again */
+            }
             printf("vmctl: cpu %u: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",
                    cpu, x.mmio.write ? "write" : "read", (unsigned long long)x.mmio.gpa, x.mmio.size, x.mmio.reg,
                    (unsigned long long)x.mmio.value, (unsigned long long)x.rip);
