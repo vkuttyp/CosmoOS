@@ -305,7 +305,7 @@ struct netif *netif_default(void)
     arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
     struct netif *n, *found = NULL;
     list_for_each_entry(n, &g_netifs, link) {
-        if (!(n->flags & NETIF_LOOPBACK) && (n->flags & NETIF_UP)) {
+        if (!(n->flags & (NETIF_LOOPBACK | NETIF_NODEFAULT)) && (n->flags & NETIF_UP)) {
             found = n;
             kobject_get(&n->obj);
             break;

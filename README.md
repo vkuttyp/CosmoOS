@@ -1068,8 +1068,8 @@ See [docs/development.md](docs/development.md).
   it through `/dev/net/tap`, a character device: read one frame the stack
   sent, write one from the guest (read returns 0 when none waits, so the
   owner polls it like the console; no new syscall). It is backed by one
-  `tap0` on `10.0.3.0/24`, created down at boot so it never becomes the
-  default interface. `vmctl --net tap` points the virtio-net wire at the
+  `tap0` on `10.0.3.0/24`; a tap is marked never-default (`NETIF_NODEFAULT`),
+  so even left up it is never the machine's route to the world. `vmctl --net tap` points the virtio-net wire at the
   channel, the device unchanged. Proven in the harness by the `tap`
   selftest (a frame out the tap read back, an injected ARP answered by the
   stack, the queue capped) and `el2-tap-host` (a guest's ARP request

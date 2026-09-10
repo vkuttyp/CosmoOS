@@ -2420,6 +2420,14 @@ bool selftest_tap(const char **reason)
     CHECK(t != NULL);
     struct netif *nif = tap_netif(t);
 
+    /* a tap is a point-to-point owner link, never the machine's default
+     * interface -- even brought up, so a persistent tap0 with no close hook
+     * cannot swallow the host's outbound traffic. */
+    struct netif *def = netif_default();
+    CHECK(def != nif);
+    if (def)
+        netif_put(def);
+
     /* (1) stack -> tap: a frame transmitted out the tap is there to read. */
     struct mbuf *m = m_getcl();
     CHECK(m != NULL);

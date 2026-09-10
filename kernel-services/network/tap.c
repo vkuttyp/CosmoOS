@@ -52,6 +52,11 @@ struct tap *tap_create(const char *name, uint32_t ip, uint32_t mask, const uint8
     strlcpy(t->nif.name, name, sizeof(t->nif.name));
     memcpy(t->nif.mac, mac, 6);
     t->nif.mtu = 1500;
+    /* A tap is a point-to-point link to one owner, never the machine's route
+     * to the world: keep it out of default-interface selection, so a tap left
+     * up (the persistent tap0 has no close hook to bring it down) can never
+     * swallow the host's outbound traffic, whatever the registration order. */
+    t->nif.flags = NETIF_NODEFAULT;
     t->nif.ops = &tap_ops;
     mbufq_init(&t->txq, TAP_TXQ_MAX, "tap-tx");
     if (netif_register(&t->nif) != 0) {

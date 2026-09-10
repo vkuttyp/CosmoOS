@@ -790,10 +790,13 @@ The owner reaches the tap through **`/dev/net/tap`**, a character device
 (as `/dev/vmm` is): `read` returns one frame the stack transmitted out the
 tap (0 when none waits, a frame never being zero-length, so the owner polls
 it in its run loop as it drains the console), `write` injects one from the
-guest. It is backed by one `tap0`, created down at boot so it never competes
-as the default interface and brought up when the owner first uses it; the
-tap sits on `10.0.3.0/24`, a subnet of its own (a NIC autoconfigures to
-`10.0.2.0/24`, and two interfaces on one subnet route ambiguously). A
+guest. It is backed by one `tap0`, created down at boot and brought up when
+the owner first uses it; a tap is marked never-default (`NETIF_NODEFAULT`),
+so even left up -- there is no close hook to bring it down again -- it is
+never the machine's route to the world and cannot swallow the host's
+outbound traffic. The tap sits on `10.0.3.0/24`, a subnet of its own (a NIC
+autoconfigures to `10.0.2.0/24`, and two interfaces on one subnet route
+ambiguously). A
 per-open create/destroy lifecycle would need chrdev open/close hooks the
 ramfs does not have, so one persistent `tap0` serves one guest.
 
