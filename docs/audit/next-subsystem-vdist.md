@@ -113,11 +113,19 @@ distributor's and emulates the access instead of returning
 offset within the `GICD`/`GICR` window) and the access size and
 direction from `ESR_EL2`, the same fields `decode_exit` already reads.
 
-Two GPAs are fixed by convention and told to the guest anyway (a guest
-learns them from its device tree or, here, from the same ACPI the host
-parsed): `GICD` at `0x0800_0000`, and a `GICR` window at
-`0x080A_0000` with a 128 KiB stride per vCPU — the layout QEMU's `virt`
-uses and the one the host's own driver already knows.
+The addresses are the **hypervisor's to choose**, not the host's to
+report. A guest's `GICD`/`GICR` are part of the virtual machine this
+hypervisor defines, and the guest will learn them from the device tree
+or ACPI the hypervisor hands it — not from anything about the host's own
+physical GIC, whose layout is irrelevant to a guest. So the guest-visible
+layout is fixed here, once, and both the decoder and the (future) guest
+device tree read it from one place: `GICD` at `0x0800_0000`, a `GICR`
+window at `0x080A_0000`, 128 KiB stride per vCPU. Those particular
+values match what QEMU's `virt` presents, which is convenient — it is
+the layout a stock guest kernel's default assumptions and a QEMU-derived
+device tree both already expect — but the point is that they are the
+hypervisor's constants, defined in `gicv3_vdist.h` and used by the
+decoder and nothing else consults the host for them.
 
 ### 3. What state the distributor holds
 
@@ -236,8 +244,10 @@ reaches the guest through the vGIC like any other.
 5. **A whole-GIC guest.** A fixture that initialises the distributor and
    its redistributor the ordinary way, enables the timer, and services
    a tick — the "a guest can run a stock GIC driver" test.
-6. Docs, and the decision on where the redistributor stride and base
-   come from (ACPI, as the host reads them, versus a fixed convention).
+6. Docs. (The guest-visible `GICD`/`GICR` layout is not a decision left
+   to this step: it is fixed in §2 as the hypervisor's own constants,
+   because the guest's controller addresses are the hypervisor's to
+   define and have nothing to do with the host's physical GIC.)
 
 Steps 3 and 4 are separate commits: "an SPI/PPI the guest configured is
 delivered" and "an SGI the guest sent is delivered" are different claims.
