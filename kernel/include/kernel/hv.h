@@ -44,8 +44,10 @@ struct vm_device {
     uint64_t mmio_base, mmio_len;        /* len 0: no memory range */
     /* 0: handled (value in for OUT, out for IN); -ENODEV: hand the exit to the owner. */
     int (*pio)(struct vm_device *d, uint16_t port, bool write, unsigned size, uint32_t *value);
-    /* Stage 1: notification only; the exit still reaches the owner. */
-    void (*mmio)(struct vm_device *d, uint64_t gpa, bool write);
+    /* 0: handled (a read's result in *value, up to `size` bytes); -ENODEV:
+     * hand the exit to the owner. Called with the access the hardware
+     * described; never for one it did not (size 0 goes to the owner). */
+    int (*mmio)(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value);
     void *priv;
 };
 
@@ -87,6 +89,11 @@ struct vcpu {
     int offered;                         /* vector offered to the backend for this entry, -1 none */
     bool in_completion;                  /* an IN waits for its value */
     uint8_t in_size;
+    struct {                             /* an MMIO read the owner is answering */
+        bool pending;
+        uint8_t size, reg, insn_len;
+        bool sse, sf;
+    } mmio_completion;
     bool dead;
     uint64_t exits, entries;
     unsigned msr_gp;                     /* #GP injected for unmodelled MSRs */

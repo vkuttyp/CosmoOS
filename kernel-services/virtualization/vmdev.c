@@ -80,7 +80,8 @@ void vmdev_init(struct vm *vm)
 
 int vm_device_register(struct vm *vm, struct vm_device *dev)
 {
-    if ((dev->pio_count == 0 && dev->mmio_len == 0) || (dev->pio_count && dev->pio == NULL))
+    if ((dev->pio_count == 0 && dev->mmio_len == 0) || (dev->pio_count && dev->pio == NULL) ||
+        (dev->mmio_len && dev->mmio == NULL))
         return -EINVAL;
     mutex_lock(&vm->lock);
     if (vm->started) {
@@ -118,14 +119,13 @@ int vmdev_pio(struct vm *vm, uint16_t port, bool write, unsigned size, uint32_t 
     return -ENODEV;
 }
 
-void vmdev_mmio(struct vm *vm, uint64_t gpa, bool write)
+int vmdev_mmio(struct vm *vm, uint64_t gpa, bool write, unsigned size, uint64_t *value)
 {
     struct list_node *n;
     for (n = vm->devices.next; n != &vm->devices; n = n->next) {
         struct vm_device *d = container_of(n, struct vm_device, link);
-        if (d->mmio_len && gpa >= d->mmio_base && gpa < d->mmio_base + d->mmio_len && d->mmio) {
-            d->mmio(d, gpa, write);
-            return;
-        }
+        if (d->mmio_len && gpa >= d->mmio_base && gpa < d->mmio_base + d->mmio_len && d->mmio)
+            return d->mmio(d, gpa, write, size, value);
     }
+    return -ENODEV;
 }

@@ -989,6 +989,7 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
         out->kind = HV_EXIT_MMIO;
         out->mmio.gpa = v->exit_gpa;
         out->mmio.write = (v->exit_qual & (1u << 1)) != 0;
+        out->mmio.size = 0;   /* the instruction is not decoded here: the owner's, as before */
         return 0;
     case VMX_EXIT_TRIPLE_FAULT:
         out->kind = HV_EXIT_SHUTDOWN;

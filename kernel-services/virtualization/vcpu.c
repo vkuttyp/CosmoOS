@@ -86,8 +86,10 @@ int vcpu_set_regs(struct vcpu *v, const struct cosmo_vcpu_regs *in)
 {
     mutex_lock(&v->run_lock);
     int rc = arch_hv_vcpu_set_state(v->arch, in);
-    if (rc == 0)
-        v->in_completion = false;   /* the owner rewrote rax itself */
+    if (rc == 0) {
+        v->in_completion = false;                /* the owner rewrote rax itself */
+        v->mmio_completion.pending = false;      /* and the register an MMIO read was waiting for */
+    }
     mutex_unlock(&v->run_lock);
     return rc;
 }
@@ -230,6 +232,22 @@ int vcpu_emulate_msr(struct vcpu *v, uint32_t index, bool write)
 
 /* --- the run loop --- */
 
+void hv_mmio_complete_read(struct vcpu *v, unsigned size, bool sse, bool sf, unsigned reg, uint64_t value)
+{
+    if (reg >= 31)
+        return;   /* XZR: the load had no destination */
+    if (size < 8)
+        value &= (1ull << (size * 8u)) - 1u;
+    if (sse && size < 8) {
+        uint64_t sign = 1ull << (size * 8u - 1u);
+        if (value & sign)
+            value |= ~((sign << 1) - 1u);   /* to 64 bits; a Wt destination is cut below */
+    }
+    if (!sf)
+        value &= 0xFFFFFFFFull;   /* a write to Wt zeroes the upper half */
+    arch_hv_vcpu_write_gpr(v->arch, reg, value);
+}
+
 static void fill_common(struct vcpu *v, struct cosmo_vm_exit *x, uint32_t kind)
 {
     x->kind = kind;
@@ -264,6 +282,17 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         uint64_t value = x->kind == COSMO_VM_EXIT_IO ? x->io.value : 0xFFFFFFFFu;
         arch_hv_vcpu_write_rax(v->arch, value, v->in_size);
         v->in_completion = false;
+    }
+    if (v->mmio_completion.pending) {
+        /* The owner answered an MMIO read: the value it left in the exit
+         * lands in the guest's register by the same rules a device's
+         * answer does, and the load is stepped over. An owner that set
+         * the registers itself instead cancelled this in vcpu_set_regs. */
+        uint64_t value = x->kind == COSMO_VM_EXIT_MMIO ? x->mmio.value : 0;
+        hv_mmio_complete_read(v, v->mmio_completion.size, v->mmio_completion.sse, v->mmio_completion.sf,
+                              v->mmio_completion.reg, value);
+        arch_hv_vcpu_advance_rip(v->arch, v->mmio_completion.insn_len);
+        v->mmio_completion.pending = false;
     }
     memset(x, 0, sizeof(*x));
     int rc = 0;
@@ -391,10 +420,35 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
             break;
         }
         if (e.kind == HV_EXIT_MMIO) {
-            vmdev_mmio(vm, e.mmio.gpa, e.mmio.write);
+            /* A device in the kernel may complete an access the hardware
+             * described. A read's result goes into the guest's register
+             * by width and sign, the instruction is stepped over, and the
+             * run goes on: no exit. An access no device claims -- or one
+             * with size 0, which nothing here can complete -- goes to the
+             * owner, now carrying everything it needs to be the device. */
+            uint64_t value = e.mmio.value;
+            if (e.mmio.size && vmdev_mmio(vm, e.mmio.gpa, e.mmio.write, e.mmio.size, &value) == 0) {
+                if (!e.mmio.write)
+                    hv_mmio_complete_read(v, e.mmio.size, e.mmio.sse, e.mmio.sf, e.mmio.reg, value);
+                arch_hv_vcpu_advance_rip(v->arch, e.mmio.insn_len);
+                continue;
+            }
             fill_common(v, x, COSMO_VM_EXIT_MMIO);
             x->mmio.gpa = e.mmio.gpa;
             x->mmio.write = e.mmio.write;
+            x->mmio.size = e.mmio.size;
+            x->mmio.reg = e.mmio.reg;
+            x->mmio.sse = e.mmio.sse;
+            x->mmio.sf = e.mmio.sf;
+            x->mmio.value = e.mmio.value;
+            if (!e.mmio.write && e.mmio.size) {
+                v->mmio_completion.pending = true;
+                v->mmio_completion.size = e.mmio.size;
+                v->mmio_completion.reg = e.mmio.reg;
+                v->mmio_completion.sse = e.mmio.sse;
+                v->mmio_completion.sf = e.mmio.sf;
+                v->mmio_completion.insn_len = e.mmio.insn_len;
+            }
             break;
         }
         if (e.kind == HV_EXIT_HYPERCALL) {

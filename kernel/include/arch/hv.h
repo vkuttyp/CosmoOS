@@ -74,7 +74,13 @@ struct hv_exit {
         } io;
         struct {
             uint64_t gpa;
+            uint64_t value;      /* a write's value, masked to size */
+            uint8_t size;        /* 1, 2, 4, 8 -- or 0: the backend could not describe the access */
+            uint8_t reg;         /* the guest GPR the value comes from or goes to; 31 discards */
+            uint8_t insn_len;    /* what to step the PC by once the access is complete */
             bool write;
+            bool sse;            /* a read sign-extends (ldrsb/ldrsh/ldrsw) */
+            bool sf;             /* the destination is the full register; clear: its low 32 bits, upper zeroed */
         } mmio;
         struct {
             uint32_t index;

@@ -953,6 +953,35 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
             out->kind = HV_EXIT_EMULATED;   /* the guest's own GIC answered; nothing for the owner */
             return 0;
         }
+        /* What the access was, so a device -- in the kernel or the owner
+         * -- can complete it: size, register, a write's value, and how a
+         * read's result lands (sign-extended? the whole register?). Only
+         * when ISV says the hardware described it; a pair or an exclusive
+         * is reported with size 0, which means "as before: address and
+         * direction, and the owner works it out". */
+        {
+            uint32_t iss = (uint32_t)(c->exit_esr & 0x1FFFFFFu);
+            if (ec == EC_DABT_LOWER && (iss & (1u << 24))) {
+                out->mmio.size = (uint8_t)(1u << ((iss >> 22) & 3u));
+                out->mmio.reg = (uint8_t)((iss >> 16) & 0x1Fu);
+                out->mmio.sse = (iss & (1u << 21)) != 0;
+                out->mmio.sf = (iss & (1u << 15)) != 0;
+                out->mmio.insn_len = (uint8_t)il;
+                out->mmio.value = 0;
+                if (out->mmio.write && out->mmio.reg < 31) {
+                    out->mmio.value = c->guest_x[out->mmio.reg];
+                    if (out->mmio.size < 8)
+                        out->mmio.value &= (1ull << (out->mmio.size * 8u)) - 1u;
+                }
+            } else {
+                out->mmio.size = 0;
+                out->mmio.reg = 31;
+                out->mmio.sse = false;
+                out->mmio.sf = false;
+                out->mmio.insn_len = (uint8_t)il;
+                out->mmio.value = 0;
+            }
+        }
         return 0;
     default:
         out->kind = HV_EXIT_FAIL;

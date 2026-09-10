@@ -1470,6 +1470,90 @@ bool selftest_el2_guest_gicd_isolated(const char **reason)
     return true;
 }
 
+/* --- devices ------------------------------------------------------------ */
+
+struct test_word_dev {
+    uint64_t word;
+    unsigned writes, wsize;
+    uint64_t wgpa, wval;
+};
+
+static __maybe_unused int test_word_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned size,
+                                         uint64_t *value)
+{
+    struct test_word_dev *t = d->priv;
+    unsigned off = (unsigned)(gpa & 0xFFFu);
+    if (write) {
+        t->writes++;
+        t->wsize = size;
+        t->wgpa = gpa;
+        t->wval = *value;
+        return 0;
+    }
+    uint64_t v = off < 8 ? t->word >> (8u * off) : 0;
+    *value = size >= 8 ? v : (v & ((1ull << (8u * size)) - 1u));
+    return 0;
+}
+
+/*
+ * The seam every device will use, tested before the first device leans
+ * on it. A word of memory the test registers at an address answers a
+ * guest's loads of every width and extension the architecture has, and
+ * each must land in the register as that load would leave it -- the
+ * ldrsb into a W register reads 0xFFFFFFF3 and not 0xF3 or
+ * 0xFFFFFFFFFFFFFFF3 -- with no exit to the owner; a halfword store
+ * reports its size and value; and a load no device claims goes to the
+ * owner, who answers it in the exit, and the answer lands the same way.
+ */
+bool selftest_el2_mmio_device(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_mmio_widths.bin", &vm, &v) == 0);
+    struct test_word_dev t;
+    memset(&t, 0, sizeof(t));
+    t.word = 0x80018081F0F1F2F3ull;
+    struct vm_device dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.name = "test-word";
+    dev.mmio_base = 0x0A001000ull;
+    dev.mmio_len = 0x1000;
+    dev.mmio = test_word_mmio;
+    dev.priv = &t;
+    CHECK(vm_device_register(vm, &dev) == 0);
+
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* seven loads, no exit */
+    CHECK(x.hypercall.a0 == 0xF3ull);                                   /* ldrb  w */
+    CHECK(x.hypercall.a1 == 0xF2F3ull);                                 /* ldrh  w */
+    CHECK(x.hypercall.a2 == 0xF0F1F2F3ull);                             /* ldr   w */
+    CHECK(x.hypercall.a3 == 0x80018081F0F1F2F3ull);                     /* ldr   x */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(regs.x[5] == 0xFFFFFFF3ull);                                  /* ldrsb w: signed to 32, zero above */
+    CHECK(regs.x[6] == 0xFFFFFFFFFFFFF2F3ull);                          /* ldrsh x: signed to 64 */
+    CHECK(regs.x[7] == 0xFFFFFFFFF0F1F2F3ull);                          /* ldrsw x */
+    CHECK(t.writes == 1 && t.wsize == 2 && t.wgpa == 0x0A001008ull && t.wval == 0xBEEFull);
+
+    /* No device at 0x40000000: the owner is asked, with everything it
+     * needs, and answers in the exit; the answer lands in x9. */
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa == 0x40000000ull && !x.mmio.write);
+    CHECK(x.mmio.size == 8 && x.mmio.reg == 9 && x.mmio.sf);
+    x.mmio.value = 0x1122334455667788ull;
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(regs.x[9] == 0x1122334455667788ull);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-mmio-device: seven loads completed in the kernel by width and sign, one by the owner");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1512,13 +1596,18 @@ bool selftest_el2_guest_mmio(const char **reason)
     CHECK(x.kind == COSMO_VM_EXIT_MMIO);
     CHECK(x.mmio.gpa == 0x40000000ull);
     CHECK(x.mmio.write);
-    /* The owner steps over the store; the load that follows is a read. */
+    /* And what the access was: eight bytes, from x1, the value it held. */
+    CHECK(x.mmio.size == 8 && x.mmio.reg == 1 && x.mmio.value == 0xABCDull);
+    /* The owner steps over the store; the load that follows is a read,
+     * into x2. Setting the registers is also how an owner declines to
+     * answer a read: the completion is cancelled with them. */
     struct cosmo_vcpu_regs regs;
     CHECK(vcpu_get_regs(v, &regs) == 0);
     regs.pc += 4;
     CHECK(vcpu_set_regs(v, &regs) == 0);
     CHECK(vcpu_run(v, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa == 0x40000000ull && !x.mmio.write);
+    CHECK(x.mmio.size == 8 && x.mmio.reg == 2 && x.mmio.sf && !x.mmio.sse);
     drop_guest(vm, v);
     return true;
 }
@@ -1587,6 +1676,7 @@ bool selftest_el2_guest_gic_config(const char **reason) { (void)reason; return t
 bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gicd_isolated(const char **reason) { (void)reason; return true; }
+bool selftest_el2_mmio_device(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
