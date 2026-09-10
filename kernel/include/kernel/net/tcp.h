@@ -158,6 +158,7 @@ uint16_t tcp_path_mss(uint16_t family, const struct netaddr *remote);
  * TIME_WAIT and free itself. */
 void tcp_close(struct tcp_pcb *pcb);
 int tcp_bind(struct tcp_pcb *pcb, const struct netaddr *local);
+bool tcp_port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr);  /* NAT port coordination */
 int tcp_listen(struct tcp_pcb *pcb, unsigned backlog);
 /* Take an established child off the accept queue, or NULL. */
 /* Dequeue an established child, attached to `owner` under the lock, or NULL. */

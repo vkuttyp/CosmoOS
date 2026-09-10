@@ -1074,9 +1074,9 @@ See [docs/development.md](docs/development.md).
   selftest (a frame out the tap read back, an injected ARP answered by the
   stack, the queue capped) and `el2-tap-host` (a guest's ARP request
   crossing virtio-net and the bridge into the real stack, which answers on
-  the tap). Reaching beyond the host -- routing, NAT, DHCP, DNS -- is the
-  next unit; a stock Linux `ping 10.0.3.1` of the host is the `QEMU_MEM=2G`
-  reproduction.
+  the tap). Routing and NAT past the host are done in the next entry; DHCP
+  and DNS remain. A stock Linux `ping 10.0.3.1` of the host is this unit's
+  `QEMU_MEM=2G` reproduction.
 - **The guest reaches beyond the host: IP forwarding and masquerade NAT
   (done):** `docs/audit/next-subsystem-nat.md`,
   `docs/kernel-services/network/design.md` ("Forwarding and NAT"). The tap

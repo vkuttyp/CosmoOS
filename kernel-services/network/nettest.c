@@ -2896,6 +2896,26 @@ bool selftest_net_nat(const char **reason)
     CHECK((uint16_t)(iu[0] << 8 | iu[1]) == 6100);                  /* inner source port restored */
     m_freem(back);
 
+    /* (4b) Anti-spoof: a guest frame sourced from the uplink subnet (not the
+     * guest tap's own) is dropped on forwarding, never masqueraded or
+     * emitted with the forged source. */
+    struct ip_stats is0, is1;
+    ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, IPV4_ADDR(10, 77, 4, 5), peer, 6200, 53, payload, sizeof(payload));
+    flen = nettest_wrap(frame, g_mac, guest_mac, IPV4_ADDR(10, 77, 4, 5), peer, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    CHECK(nettest_recv_ip(u) == NULL);                             /* forged source never leaves */
+    ipv4_get_stats(&is1);
+    CHECK(is1.fwd_spoofed > is0.fwd_spoofed);
+
+    /* (4c) An ICMP error with a bad checksum is not translated (the normal
+     * receive path would drop it; nat_in must not launder it). Reuse the
+     * error frame but corrupt the ICMP checksum. */
+    *ecs = (uint16_t)(*ecs ^ htons(0x1));
+    flen = nettest_wrap(frame, u_mac, peer_mac, peer, u_ip, 64, IPPROTO_ICMP, icmperr, sizeof(icmperr));
+    CHECK(tap_inject(u, frame, flen) == 0);
+    CHECK(nettest_recv_ip(g) == NULL);                             /* corrupt error not forwarded */
+
     /* (5) Table exhaustion: many distinct flows fill the table; further ones
      * are dropped, and the table does not grow past its bound. */
     nat_flush();

@@ -25,6 +25,7 @@
 #include <kernel/net/nat.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
+#include <kernel/socket.h>
 #include <kernel/netif.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
@@ -49,6 +50,9 @@ static struct nat_stats g_stats;
 static uint16_t g_port_next = NAT_PORT_MIN;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
+
+_Static_assert(NAT_PORT_MAX < NET_EPHEMERAL_LO,
+               "NAT ports must not overlap the host ephemeral range");
 
 /* Read / write a 16-bit field at a byte offset, unaligned-safe, keeping the
  * value in network order (as stored). */
@@ -135,6 +139,22 @@ static bool nat_port_taken(uint8_t proto, uint32_t nat_ip, uint16_t nat_port, ui
     return false;
 }
 
+/* Is a host transport socket already bound to this (proto, nat_ip, port)?
+ * The NAT must not lend a port a host service holds, or a reply for that
+ * service would be matched by nat_in and redirected to the guest. */
+static bool nat_local_port_taken(uint8_t proto, uint32_t nat_ip, uint16_t port)
+{
+    struct netaddr a;
+    memset(&a, 0, sizeof(a));
+    a.family = COSMO_AF_INET;
+    a.v4 = nat_ip;
+    if (proto == IPPROTO_UDP)
+        return udp_port_in_use(COSMO_AF_INET, port, &a);
+    if (proto == IPPROTO_TCP)
+        return tcp_port_in_use(COSMO_AF_INET, port, &a);
+    return false;   /* ICMP ids have no host namespace to collide with */
+}
+
 /* Allocate a free entry and lend a NAT identifier; NULL when the table is
  * full or no identifier is free. Prefers the guest's own port when it is
  * free (helps protocols that assume it). */
@@ -152,7 +172,8 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
         return NULL;
     }
     uint16_t port = 0;
-    if (want >= NAT_PORT_MIN && want <= NAT_PORT_MAX && !nat_port_taken(proto, nat_ip, want, now))
+    if (want >= NAT_PORT_MIN && want <= NAT_PORT_MAX &&
+        !nat_port_taken(proto, nat_ip, want, now) && !nat_local_port_taken(proto, nat_ip, want))
         port = want;
     for (unsigned tries = 0; port == 0 && tries < (NAT_PORT_MAX - NAT_PORT_MIN + 1); tries++) {
         uint16_t cand = g_port_next++;
@@ -160,7 +181,7 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
             g_port_next = NAT_PORT_MIN;
         if (cand < NAT_PORT_MIN)
             cand = NAT_PORT_MIN;
-        if (!nat_port_taken(proto, nat_ip, cand, now))
+        if (!nat_port_taken(proto, nat_ip, cand, now) && !nat_local_port_taken(proto, nat_ip, cand))
             port = cand;
     }
     if (port == 0) {
@@ -358,6 +379,17 @@ bool nat_in(struct netif *nif, struct mbuf *m,
     uint8_t l4[8];
     if (!m_copydata(m, ihl, sizeof(l4), l4))
         return false;
+
+    /* An ICMP message we might translate must pass the same checksum check
+     * the normal receive path applies -- nat_in runs before icmp_input, and
+     * the error path recomputes the checksum wholesale, which would launder
+     * a corrupt message into a valid one for the guest. A bad checksum is
+     * left for normal delivery to drop. */
+    if (proto == IPPROTO_ICMP) {
+        uint16_t icmp_len = (uint16_t)(total - ihl);
+        if (cksum_fold(m_cksum_partial(m, ihl, icmp_len, 0)) != 0)
+            return false;
+    }
 
     /* Decide without disturbing m (read-only via the copy), so a non-NAT
      * packet falls through to normal delivery untouched. */

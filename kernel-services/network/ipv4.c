@@ -422,6 +422,17 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
                          const struct ipv4_hdr *iph, unsigned ihl, uint16_t total)
 {
     STAT(fwd);
+    /* Anti-spoof (strict reverse path): a datagram forwarded from this
+     * interface must carry a source on the interface's own subnet, or a
+     * guest could forge a source from the uplink subnet (making masquerade
+     * skip it) and impersonate another machine on the uplink. A forwarding
+     * interface without a configured subnet cannot be checked and is not
+     * gated. */
+    if (in->ip4.addr && in->ip4.mask && ((iph->src ^ in->ip4.addr) & in->ip4.mask) != 0) {
+        STAT(fwd_spoofed);
+        m_freem(m);
+        return;
+    }
     if (iph->ttl <= 1) {                 /* would reach zero in transit */
         icmp_send_timxceed(m, iph);
         m_freem(m);

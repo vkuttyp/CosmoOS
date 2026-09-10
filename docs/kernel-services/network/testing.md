@@ -197,7 +197,10 @@ gate (the uplink packet is then forwarded to the guest).
 masqueraded out (checksum valid under the new pseudo-header, the lent
 port/id in range), the reply restored to the guest (original port/id,
 checksum valid, payload intact); an ICMP dest-unreach quoting a NAT'd packet
-translated back with its inner source and port un-NAT'd; the table bounded
+translated back with its inner source and port un-NAT'd (and a corrupt-
+checksum ICMP error is *not* translated); a guest frame forged with an
+uplink-subnet source is dropped by the reverse-path check, never emitted;
+the lent port is disjoint from the host ephemeral range; the table bounded
 (a flood of distinct flows fills it, further ones dropped, `entries` never
 exceeding `NAT_TABLE_SIZE`); and the entries reclaimed by `nat_age`. Proved
 by reintroducing a missing pseudo-header checksum fixup (the uplink reads an

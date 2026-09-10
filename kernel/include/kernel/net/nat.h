@@ -23,8 +23,10 @@ struct mbuf;
 struct ipv4_hdr;
 
 #define NAT_TABLE_SIZE 256u        /* conntrack entries; a full table drops new flows */
-#define NAT_PORT_MIN   20000u      /* the NAT identifier range (ports and ICMP ids) */
-#define NAT_PORT_MAX   60000u
+#define NAT_PORT_MIN   40000u      /* the NAT identifier range (ports and ICMP ids); kept below
+                                    * NET_EPHEMERAL_LO (49152) so a host outbound flow, which
+                                    * sources from an ephemeral port, never collides with a lent one */
+#define NAT_PORT_MAX   49151u
 
 /* Idle timeouts (RFC 5382 / 5508 order of magnitude, shortened). */
 #define NAT_TIMEOUT_UDP_NS   (30ull * 1000000000ull)
@@ -57,8 +59,11 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
 bool nat_in(struct netif *nif, struct mbuf *m,
             const struct ipv4_hdr *iph, unsigned ihl, uint16_t total);
 
-/* Reclaim entries whose idle timeout has passed (tests drive it with a
- * future timestamp; the network worker ages it periodically). */
+/* Reclaim entries whose idle timeout has passed. The network worker calls
+ * this from its periodic ARP/ND aging (arp.c age_work); tests drive it
+ * directly with a future timestamp. Lookups also skip expired entries and
+ * nat_alloc reclaims them on demand, so a missed sweep is never a
+ * correctness bug, only delayed reclamation. */
 void nat_age(uint64_t now_ns);
 void nat_flush(void);                 /* drop every entry (test isolation) */
 

@@ -34,6 +34,8 @@ struct udp_pcb {
 
 void udp_init(void);
 int udp_pcb_init(struct udp_pcb *pcb, uint16_t family);
+/* Is a UDP socket bound to this local (family, port, addr)? For NAT port coordination. */
+bool udp_port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr);
 /* Bind; port 0 picks an ephemeral one. -EADDRINUSE, -EADDRNOTAVAIL. */
 int udp_bind(struct udp_pcb *pcb, const struct netaddr *local);
 void udp_unbind(struct udp_pcb *pcb);

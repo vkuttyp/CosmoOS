@@ -577,7 +577,11 @@ then default), its TTL decremented (an ICMP time-exceeded at zero, RFC
 1812), and re-emitted with `output_on`; one with no route (ICMP
 net-unreachable) or that would hairpin back out its arrival interface is
 dropped. The datagram takes the same validated `ipv4_input` path -- header,
-checksum, martian checks -- before forwarding, with no shortcut.
+checksum, martian checks -- before forwarding, with no shortcut, and a
+strict reverse-path check drops any datagram whose source is not on the
+ingress interface's own subnet, so a guest cannot forge a source (an
+uplink-subnet address, say, which would otherwise make masquerade skip it
+and be emitted unchanged).
 
 **Masquerade NAT (`nat.c`).** A forwarded flow leaving an interface whose
 subnet does not hold its source -- a `10.0.3.x` guest going out the uplink
@@ -593,9 +597,18 @@ checksum is fixed up incrementally (RFC 1624, `csum_patch16`/`csum_patch32`,
 in this codebase's big-endian-word convention); the IP checksum is
 recomputed when the header is rebuilt downstream. Transport headers are
 read and written by byte offset -- they are `__packed`, so a pointer to a
-member could be unaligned. The table is bounded (`NAT_TABLE_SIZE`); entries
-expire (a short idle timeout, longer once a TCP flow is established, via
-`nat_age`), and a full table drops new flows. Because forwarding is enabled
+member could be unaligned. The lent identifiers come from a reserved range (`NAT_PORT_MIN..MAX`) kept
+below `NET_EPHEMERAL_LO`, so a host's own outbound flow -- which sources
+from an ephemeral port -- never collides with a lent one; and `nat_alloc`
+additionally skips any port a host UDP/TCP socket has bound
+(`udp_port_in_use`/`tcp_port_in_use`), so a reply for a host service is
+never redirected to the guest. An inbound ICMP message is checksum-validated
+before translation (the error path recomputes the checksum wholesale, which
+would otherwise launder a corrupt message the normal path would drop). The
+table is bounded (`NAT_TABLE_SIZE`); entries expire (a short idle timeout,
+longer once a TCP flow is established, via `nat_age`, which the network
+worker calls from its periodic ARP/ND aging), and a full table drops new
+flows. Because forwarding is enabled
 only on the one guest's tap, the table's flows are that guest's, so a guest
 that opens endless flows starves only itself; a per-client quota is the
 concern of a later unit that forwards for more than one client. Only IPv4
