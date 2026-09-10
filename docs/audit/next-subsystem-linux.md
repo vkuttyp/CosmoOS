@@ -50,14 +50,22 @@ in the uapi. The `SYSREG` exit carries the ISS (the register encoding and
 the destination) and the owner is left to answer, with nothing to answer
 from.
 
-**`WFI` returns to the owner.** The machine unit's round-robin treats a
-`WFI` exit as a turn boundary. Linux idles in `WFI`, and a kernel that is
-waiting for a timer interrupt it has armed must be re-entered when that
-interrupt is pending -- the vtimer unit's "woken on time" logic exists in
-the kernel (`vcpu_run` sleeps to the guest's deadline), but `vmctl`'s
-`ONE_TICK` bound returns before that, so a Linux that sleeps waits only a
-tick, which is correct but noisy, and a Linux that sleeps *forever*
-waiting for an interrupt the owner never delivers hangs.
+**`WFI` on a sole vCPU already sleeps to the deadline; the question is
+whether that is enough for Linux.** `vmctl`'s round-robin passes
+`ONE_TICK` only when more than one vCPU is running (`vmctl.c:374`,
+`nr_running > 1 ? ONE_TICK : 0`); a single running vCPU already gets an
+unbounded run, and an unbounded `WFI` run already sleeps in the kernel to
+the guest's virtual-timer deadline (the vtimer unit,
+`arch_hv_vcpu_timer_deadline`). So a one-CPU Linux idling between ticks is,
+in principle, already handled. What is *not* yet exercised is a `WFI` with
+no armed virtual timer -- a Linux waiting on a device interrupt the owner
+must deliver -- which today returns a `WFI` exit the owner treats as a
+turn boundary and re-enters immediately, a spin. This unit confirms the
+armed-timer path works for Linux and decides what the owner does with an
+unarmed `WFI` (block until a device interrupt is injected, rather than
+spin); it is a smaller change than the machine unit's report implied,
+because the sole-vCPU `ONE_TICK` avoidance the machine unit asked for is
+already there.
 
 **The device tree is a fixed shape.** `fdt_cosmo_virt` writes what the
 last unit's C guest needs. Linux needs more of it right, and some of it
@@ -66,9 +74,13 @@ it does not need at all -- but a wrong `compatible` string or a missing
 console among the drivers that might not.
 
 **No rootfs, and that is the milestone, not a failure.** A diskless
-`virt` machine boots Linux to `VFS: Cannot open root device` and panics;
+`virt` machine boots Linux to `VFS: Unable to mount root fs` and panics;
 that panic, printed through the PL011, is the proof the kernel came up.
-Reaching it is the goal, not passing it.
+Reaching it is the goal, not passing it. (The one panic string this
+report names throughout is `Unable to mount root fs`; earlier drafts also
+wrote `Cannot open root device`, which is a different kernel's wording --
+the test matches the string the pinned image actually prints, documented
+in step 5.)
 
 ## Why it matters
 
@@ -194,10 +206,17 @@ unit's `dtb:` line was.
   authentication, MTE, the debug architecture, the PMU are told-absent
   and stay that way until a guest that wants one is a unit.
 - **A specific Linux version as a committed artifact.** The `Image` is not
-  checked into the tree (it is 34 MB, and it is someone else's binary);
-  the test skips cleanly when it is absent, and CI does not carry it. What
-  is committed is the model, the device-tree corrections, and a test that
-  runs when an `Image` is provided.
+  checked into the tree (it is 34 MB, and it is someone else's binary).
+  The only image-identity check the loader has is presence: an `Image` in
+  the boot archive runs, an absent one makes the test skip with a note.
+  There is deliberately no version check -- a *different* image is loaded
+  and run like any other, and if it stops at a different wall the late
+  string the test requires is simply not printed and the test fails,
+  which is the correct and visible outcome for "a kernel we did not
+  develop against", not a silent skip. What is committed is the model,
+  the device-tree corrections, and the test; the image and the wall
+  sequence it produces are documented (its source and header values), not
+  pinned by a hash.
 - **Booting through EFI.** The `vmlinuz` is a PE/EFI image; this unit
   loads the raw `Image` extracted from it (gunzip of the zboot payload),
   as `vmctl --machine` already does by the Image header. An EFI boot is a
@@ -256,9 +275,10 @@ commit".
    speaks: its `earlycon` write to the PL011, then its real console
    driver probing our `pl011` node. When Linux prints its banner through
    our UART, the unit has its headline.
-4. **The idle path.** `WFI` on the sole vCPU held to the timer deadline
-   in the owner, so a Linux between ticks does not spin and does not
-   hang.
+4. **The idle path.** Confirm the armed-timer `WFI` (already unbounded
+   for a sole vCPU, already sleeping to the deadline in the kernel) is
+   what a one-CPU Linux needs between ticks, and give the owner an unarmed
+   `WFI` a way to block until an interrupt is injected rather than spin.
 5. **The milestone.** Linux to the diskless-root panic, its own strings
    captured from the console ring, `Machine model: cosmo,virt` among
    them. `el2-linux-boot`, skipped when no `Image` is present.
@@ -335,11 +355,16 @@ Counted:
   tree is never red for lack of a binary. The model and the device tree
   are version-independent; the exact wall sequence is not, and the doc
   says so.
-- **The idle path can hang a real kernel.** If `vmctl` bounds a sole
-  vCPU's `WFI` wrong, a Linux waiting on its timer either spins (a tick
-  bound) or hangs (no re-entry). The kernel's `arch_hv_vcpu_timer_deadline`
-  is the tested primitive; the risk is in the owner using it, and
-  `el2-guest-timer-ontime` is the in-kernel proof the primitive is right.
+- **The idle path can hang or spin a real kernel.** The armed-timer case
+  already sleeps to the deadline (the sole vCPU gets an unbounded run);
+  the risk is the *unarmed* `WFI` -- a Linux waiting only on a device
+  interrupt -- which today the owner re-enters at once, a spin, and which
+  a naive fix could turn into a hang if the owner blocks without a way for
+  an injected interrupt to wake it. `arch_hv_vcpu_timer_deadline` and
+  `arch_hv_vcpu_irq_waiting` are the tested primitives the owner composes;
+  `el2-guest-timer-ontime` and `el2-guest-uart-level` are the in-kernel
+  proofs they are right, so the owner-side risk is in the composition,
+  not the primitives.
 - **34 MB in a 64 MiB VM.** `COSMO_HV_VM_MEM_MAX` is 64 MiB; a 34 MB
   `Image` plus its `.bss` plus the device tree plus room to run is tight,
   and a real Linux wants more. The limit is a `#define`
