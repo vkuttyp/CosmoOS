@@ -109,6 +109,13 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
     uint16_t avail_idx;
     if (read_u16(io, q->avail_gpa + 2u, &avail_idx) != 0)   /* avail->idx */
         return -1;
+    /* A driver can expose at most q->size buffers before the device consumes
+     * one -- there are only that many descriptors. A larger gap between
+     * avail->idx and what we last saw is a fatal driver error, not work to
+     * do: refuse it, so one notification cannot drive up to 65535 disk reads
+     * and guest writes and monopolize the owner. */
+    if ((uint16_t)(avail_idx - q->last_avail) > q->size)
+        return -1;
     int served = 0;
     while (q->last_avail != avail_idx) {
         uint16_t slot = q->last_avail % q->size;

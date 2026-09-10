@@ -173,6 +173,18 @@ static void test_hostile(void)
     EXPECT(vblk_process(&io, &q) == -1);
     q = fresh_queue(); q.size = VBLK_QUEUE_MAX + 1;
     EXPECT(vblk_process(&io, &q) == -1);
+
+    /* (6) avail->idx moved further ahead than the ring is deep. A driver
+       can have at most `size` buffers in flight, so a larger gap is a fatal
+       driver error, not thousands of requests to serve synchronously. Even
+       though each reused slot points at a servable descriptor, the whole
+       notification is refused. */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    build_read_req(0, VBLK_SECTOR);
+    put16(AVAIL + 2, 9);                         /* idx 9, ring only 8 deep */
+    q = fresh_queue();                           /* last_avail 0 */
+    EXPECT(vblk_process(&io, &q) == -1);
+    EXPECT(g_oob_reads == 0);
 }
 
 static const struct host_test tests[] = {
