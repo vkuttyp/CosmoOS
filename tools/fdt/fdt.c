@@ -344,6 +344,18 @@ int fdt_cosmo_virt(void *buf, size_t cap, unsigned nr_cpus, uint64_t ram_base, u
     }
     fdt_end_node(&w);
 
+    snprintf(name, sizeof(name), "virtio_mmio@%llx", (unsigned long long)COSMO_HVM_VIRTIO1_BASE);
+    fdt_begin_node(&w, name);
+    {
+        fdt_prop_str(&w, "compatible", "virtio,mmio");
+        uint32_t reg[4] = { (uint32_t)(COSMO_HVM_VIRTIO1_BASE >> 32), (uint32_t)COSMO_HVM_VIRTIO1_BASE,
+                            (uint32_t)(COSMO_HVM_VIRTIO1_SIZE >> 32), (uint32_t)COSMO_HVM_VIRTIO1_SIZE };
+        fdt_prop_cells(&w, "reg", reg, 4);
+        uint32_t irq[3] = { IRQ_SPI, COSMO_HVM_VIRTIO1_INTID - 32u, IRQ_LEVEL_HIGH };
+        fdt_prop_cells(&w, "interrupts", irq, 3);
+    }
+    fdt_end_node(&w);
+
     fdt_end_node(&w);   /* / */
     return fdt_finish(&w, size);
 }

@@ -30,7 +30,7 @@ PROG_DIR_kill   := system
 PROG_DIR_dmesg  := system
 PROG_DIR_sysctl := system
 PROG_DIR_vmctl  := system
-PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq.c userland/system/vblk.c
+PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq.c userland/system/vblk.c userland/system/vnet.c
 PROG_DIR_hostname := system
 PROG_DIR_svc    := system
 
