@@ -36,7 +36,7 @@ uint64_t hv_idreg_read(uint32_t enc, bool *handled);
  * applied them rather than trust a constant. A field named here is kept
  * from the host; everything else in the register is forced to zero. */
 #define IDREG_PFR0_KEEP   0x0F0F00FFull   /* EL0, EL1, FP, AdvSIMD, GIC; EL2/EL3/RAS/SVE/MPAM zeroed */
-#define IDREG_ISAR1_DROP  0xF000F0F0ull   /* GPI, GPA, API, APA: pointer authentication with the host's keys */
+#define IDREG_ISAR1_DROP  0xFF000FF0ull   /* GPI[31:28], GPA[27:24], API[11:8], APA[7:4]: pointer authentication */
 #define IDREG_ISAR2_DROP  0x0000F000ull   /* APA3 */
 #define IDREG_MMFR1_DROP  0x00000F00ull   /* VH: a guest does not run at EL2 */
 #define IDREG_DFR0_VALUE  0x0000000000000006ull   /* DebugVer 6 (the architectural minimum), nothing else */

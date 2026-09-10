@@ -2130,10 +2130,14 @@ bool selftest_el2_guest_idreg(const char **reason)
     CHECK((got[0x50] & 0xF) >= 6);                              /* ID_AA64DFR0 DebugVer: the minimum */
     CHECK(((got[0x50] >> 8) & 0xF) == 0);                       /* PMUVer: none */
 
-    /* ID_AA64ISAR1: pointer authentication removed (APA, API, GPA, GPI). */
-    CHECK(((got[0x61] >> 4) & 0xF) == 0 && ((got[0x61] >> 8) & 0xF) == 0);
-    CHECK(((got[0x61] >> 24) & 0xF) == 0 && ((got[0x61] >> 28) & 0xF) == 0);
-    CHECK((got[0x61] & 0xF) == (host_isar1 & 0xF));            /* DPB and the rest: kept */
+    /* ID_AA64ISAR1: the host's, minus the pointer-authentication fields
+     * (APA, API, GPA, GPI: IDREG_ISAR1_DROP in the model's header). The
+     * exact-mask form catches a wrong ISAR1 value; the specific auth bits
+     * are only *observably* removed on a host that has them, and QEMU's
+     * TCG reports none, so on this host the mask is a no-op there and the
+     * check reduces to "the model returned the host's ISAR1". */
+    CHECK(got[0x61] == (host_isar1 & ~0xFF000FF0ull));
+    CHECK(((got[0x61] >> 24) & 0xF) == 0 && ((got[0x61] >> 28) & 0xF) == 0);   /* GPA, GPI: absent regardless */
 
     CHECK((got[0x70] & 0xF) == (host_mmfr0 & 0xF));            /* ID_AA64MMFR0 PARange: the truth */
     CHECK(((got[0x71] >> 8) & 0xF) == 0);                       /* ID_AA64MMFR1 VH: hidden */

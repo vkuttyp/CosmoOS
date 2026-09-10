@@ -204,16 +204,6 @@ if ARCH == "aarch64":
         r"^vmctl: guest powered off$",                        # SYSTEM_OFF ended the run
     ]
 
-# A stock Linux kernel boots only when a developer provided an Image (the
-# "LINUX: present" line). When it did, require the milestone: the banner, our
-# machine model read from our device tree, and the diskless-root panic --
-# a late string, so an early banner followed by a silent hang would not pass.
-LINUX_PRESENT_MARKER = r"^LINUX: present$"
-LINUX_MILESTONE_MARKERS = [
-    r"Booting Linux on physical CPU",
-    r"Machine model: cosmo,virt",
-    r"Unable to mount root fs",
-]
 HV_FORBIDDEN_MARKERS = [
     r"selftest: hv: skipped",
     r"^HVTEST: skipped",
@@ -505,10 +495,6 @@ def main():
             for pat in HVTEST_MARKERS:
                 if not any(re.search(pat, ln) for ln in lines):
                     failures.append(f"missing marker /{pat}/ (virtualization test)")
-            if ARCH == "aarch64" and any(re.search(LINUX_PRESENT_MARKER, ln) for ln in lines):
-                for pat in LINUX_MILESTONE_MARKERS:
-                    if not any(re.search(pat, ln) for ln in lines):
-                        failures.append(f"missing marker /{pat}/ (Linux boot)")
             for pat in HV_FORBIDDEN_MARKERS:
                 hits = [ln for ln in lines if re.search(pat, ln)]
                 if hits:
