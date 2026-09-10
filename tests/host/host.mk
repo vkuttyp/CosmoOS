@@ -36,6 +36,7 @@ HOST_LINUX_SRCS := tests/host/test_linux.c compat/linux/convert.c
 HOST_HV_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/svm_npt.c tests/host/test_hv.c
 HOST_FDT_SRCS := $(HOST_COMMON_SRCS) tools/fdt/fdt.c tools/fdt/fdt_read.c tests/host/test_fdt.c
 HOST_VBLK_SRCS := $(HOST_COMMON_SRCS) userland/system/vq.c userland/system/vblk.c tests/host/test_vblk_dev.c
+HOST_VNET_SRCS := $(HOST_COMMON_SRCS) userland/system/vq.c userland/system/vnet.c tests/host/test_vnet_dev.c
 HOST_VMX_SRCS := $(HOST_COMMON_SRCS) kernel/arch/x86_64/vmx_ept.c tests/host/test_vmx.c
 HOST_HV_S2_SRCS := $(HOST_COMMON_SRCS) kernel/arch/aarch64/hv_s2.c tests/host/test_hv_s2.c
 HOST_RELOC_A64_SRCS := $(HOST_COMMON_SRCS) kernel/arch/aarch64/modreloc.c tests/host/test_reloc_aarch64.c
@@ -45,7 +46,7 @@ HOST_QUIESCE_SRCS := $(HOST_COMMON_SRCS) tests/host/test_quiesce.c
 HOST_LOCKDEP_SRCS := $(HOST_COMMON_SRCS) tests/host/test_lockdep.c
 HOST_FBVALID_SRCS := $(HOST_COMMON_SRCS) kernel/core/fbvalid.c tests/host/test_fbvalid.c
 
-HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev
+HOST_TESTS := $(HOST_OUT)/test_buddy $(HOST_OUT)/test_slab $(HOST_OUT)/test_crypto $(HOST_OUT)/test_modelf $(HOST_OUT)/test_cosmofs $(HOST_OUT)/test_libc $(HOST_OUT)/test_pkg $(HOST_OUT)/test_linux $(HOST_OUT)/test_hv $(HOST_OUT)/test_vmx $(HOST_OUT)/test_hv_s2 $(HOST_OUT)/test_reloc_aarch64 $(HOST_OUT)/test_virtq $(HOST_OUT)/test_cred $(HOST_OUT)/test_quiesce $(HOST_OUT)/test_lockdep $(HOST_OUT)/test_lz4 $(HOST_OUT)/test_chacha20 $(HOST_OUT)/test_fbvalid $(HOST_OUT)/test_fdt $(HOST_OUT)/test_vblk_dev $(HOST_OUT)/test_vnet_dev
 
 $(HOST_OUT)/test_fbvalid: $(addprefix $(ROOT)/,$(HOST_FBVALID_SRCS))
 	$(call log,HOSTCC,$@)
@@ -99,6 +100,11 @@ $(HOST_OUT)/test_vblk_dev: $(addprefix $(ROOT)/,$(HOST_VBLK_SRCS)) $(ROOT)/userl
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_VBLK_SRCS)) $(HOST_LDFLAGS) -o $@
+
+$(HOST_OUT)/test_vnet_dev: $(addprefix $(ROOT)/,$(HOST_VNET_SRCS)) $(ROOT)/userland/system/vnet.h $(ROOT)/userland/system/vq.h
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_VNET_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_hv: $(addprefix $(ROOT)/,$(HOST_HV_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/svm.h
 	$(call log,HOSTCC,$@)
