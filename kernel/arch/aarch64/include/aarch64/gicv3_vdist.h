@@ -20,13 +20,19 @@
 #define AARCH64_GICV3_VDIST_H
 
 #include <kernel/types.h>
+#include <uapi/cosmo/hv_machine.h>
+#include <uapi/cosmo/syscall.h>
 
-#define VDIST_GICD_BASE    0x08000000ull
-#define VDIST_GICD_SIZE    0x10000ull
-#define VDIST_GICR_BASE    0x080A0000ull
-#define VDIST_GICR_STRIDE  0x20000ull          /* RD_base then SGI_base, 64 KiB each */
-#define VDIST_GICR_FRAMES  4u                  /* COSMO_HV_VCPUS_MAX */
-#define VDIST_NR_LINES     288u                /* 32 private + 256 SPIs: what virt has */
+/* The layout is the uapi's (cosmo/hv_machine.h): one source, read by the
+ * kernel that implements the registers and by the device-tree writer
+ * that tells a guest where they are. */
+#define VDIST_GICD_BASE    COSMO_HVM_GICD_BASE
+#define VDIST_GICD_SIZE    COSMO_HVM_GICD_SIZE
+#define VDIST_GICR_BASE    COSMO_HVM_GICR_BASE
+#define VDIST_GICR_STRIDE  COSMO_HVM_GICR_STRIDE
+#define VDIST_GICR_FRAMES  COSMO_HVM_GICR_FRAMES
+#define VDIST_NR_LINES     (32u + COSMO_HVM_NR_SPIS)   /* 32 private + the SPIs: what virt has */
+_Static_assert(COSMO_HVM_GICR_FRAMES == COSMO_HV_VCPUS_MAX, "a redistributor frame per vCPU");
 
 struct gicv3_vdist;
 

@@ -16,6 +16,7 @@
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
 #include <uapi/cosmo/syscall.h>
+#include <uapi/cosmo/hv_machine.h>
 
 #include <arch/hv.h>
 
@@ -25,11 +26,12 @@
 #define HV_REGIONS_MAX  16u
 #define HV_GPA_LIMIT    (1ull << 32)     /* stage 1: a 4 GiB guest-physical window */
 #define HV_CONSOLE_SIZE 4096u
-/* The guest's console UART: where QEMU's virt puts UART0 and a stock guest's
- * device tree names it. The hypervisor's constant, like the GIC's. */
-#define VUART_BASE      0x09000000ull
-#define VUART_SIZE      0x1000ull
-#define VUART_INTID     33u
+/* The guest's console UART, from the uapi's one description of the
+ * machine (cosmo/hv_machine.h): where the kernel implements it and where
+ * the device tree a guest is handed says it is. */
+#define VUART_BASE      COSMO_HVM_UART_BASE
+#define VUART_SIZE      COSMO_HVM_UART_SIZE
+#define VUART_INTID     COSMO_HVM_UART_INTID
 
 struct vm;
 struct vcpu;

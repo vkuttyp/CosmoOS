@@ -218,6 +218,12 @@ static void el2_vtimer_irq(unsigned vector, struct arch_trap_frame *frame, void 
 static void el2_vtimer_bind(void)
 {
     g_vtimer_intid = aarch64_timer_virt_intid();
+    /* The device tree a guest is handed names the PPI from the uapi's
+     * constant; if this machine's firmware wires the virtual timer
+     * elsewhere the guest would be told the wrong line. Say so. */
+    if (g_vtimer_intid != COSMO_HVM_TIMER_PPI_VIRT)
+        kwarn("hv: the virtual timer is PPI %u here, but guests are told %u", g_vtimer_intid,
+              COSMO_HVM_TIMER_PPI_VIRT);
     int rc = irq_request(g_vtimer_intid, el2_vtimer_irq, NULL, "hv-vtimer", IRQ_TRIGGER_LEVEL, IRQ_CPU_ANY);
     if (rc == 0)
         rc = irq_enable(g_vtimer_intid);

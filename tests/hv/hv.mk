@@ -25,5 +25,23 @@ $(foreach g,$(HV_GUESTS),$(eval $(call hv_guest_rule,$(g))))
 HV_GUEST_BINS := $(foreach g,$(HV_GUESTS),$(HV_TEST_OUT)/$(g).bin)
 HV_ARCHIVE_ENTRIES := $(foreach g,$(HV_GUESTS),tests/hv/$(g).bin=$(HV_TEST_OUT)/$(g).bin)
 
+# The machine's device tree, written by the same code the owner uses
+# (tools/fdt), so the kernel's tests hand a guest the blob vmctl would:
+# two vCPUs, 8 MiB at COSMO_HVM_RAM_BASE. mkdtb is a host program; the
+# compiler builds for the host when given no target.
+ifeq ($(ARCH),aarch64)
+HV_MKDTB := $(HV_TEST_OUT)/mkdtb
+$(HV_MKDTB): $(ROOT)/tools/fdt/mkdtb.c $(ROOT)/tools/fdt/fdt.c $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h
+	$(call log,HOSTCC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CC) -std=c11 -O2 -I$(ROOT)/kernel/include/uapi -I$(ROOT)/tools/fdt $< $(ROOT)/tools/fdt/fdt.c -o $@
+HV_DTB := $(HV_TEST_OUT)/virt.dtb
+$(HV_DTB): $(HV_MKDTB)
+	$(call log,DTB,$@)
+	$(Q)$(HV_MKDTB) $@ 2 8 "console=ttyAMA0"
+HV_GUEST_BINS += $(HV_DTB)
+HV_ARCHIVE_ENTRIES += tests/hv/virt.dtb=$(HV_DTB)
+endif
+
 .PHONY: hv-guests
 hv-guests: $(HV_GUEST_BINS)
