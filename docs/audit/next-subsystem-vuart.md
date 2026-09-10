@@ -92,11 +92,29 @@ needs modelled is the one the host already drives.
 ### 1. The MMIO exit describes the access, and a device may complete it
 
 `struct hv_exit.mmio` grows `size` (1, 2, 4, 8), `reg` (the guest GPR,
-31 for `XZR`), and `value` (for a write, the register's contents masked
-to the size). `decode_exit` fills them from `ESR_EL2.ISS` when `ISV` is
-set -- the same fields `el2_vdist_access` reads -- and the backend's
-distributor decode keeps its first refusal on the access, in the order it
-already has: **distributor first, then devices, then the owner**. On x86
+31 for `XZR`), `value` (for a write, the register's contents masked to
+the size), and the two bits that say how a read's result lands: `sse`
+(`ISS.SSE`: the load sign-extends -- `ldrsb`, `ldrsh`, `ldrsw`) and `sf`
+(`ISS.SF`: the destination is `Xt`, 64 bits wide; clear, it is `Wt` and
+the upper 32 bits become zero). `decode_exit` fills them from
+`ESR_EL2.ISS` when `ISV` is set -- the same fields `el2_vdist_access`
+reads, which ignores `SSE` because no GIC register is signed; a general
+seam may not -- and the backend's distributor decode keeps its first
+refusal on the access, in the order it already has: **distributor first,
+then devices, then the owner**.
+
+**Completing a read is defined, not assumed.** The device produces up to
+`size` bytes; the completion zero-extends them to `size`, then, if `sse`,
+sign-extends from bit `8*size-1` to the destination width -- 64 bits if
+`sf`, 32 if not -- and if not `sf` clears bits 63:32, because a write to
+`Wt` does. `reg` 31 discards the result. That is one function,
+`hv_mmio_complete_read(ctx, size, sse, sf, reg, value)`, used by the
+in-kernel path and the owner-answered path alike, so the two cannot
+disagree; `arch_hv_vcpu_write_gpr` on its own is not the contract. An
+`ldrsh` of `0x8001` from a device must read `0xFFFFFFFFFFFF8001` in an
+`Xt` and `0xFFFF8001` in a `Wt`, and an `ldrb` must read `0x01` with no
+high bits from before; `el2-mmio-device` checks each width and both
+extensions. On x86
 the `mmio` exit from NPT/EPT gains the same fields where the backend can
 supply them (it decodes the instruction today only for I/O; MMIO stays
 owner-handled there and `size` reads 0: "unknown"), so the generic layer
@@ -113,10 +131,15 @@ loop continues without an exit. An unhandled access reaches the owner as
 it does today, **now carrying size and value**, so an owner-side model
 becomes possible too.
 
-The uapi `cosmo_vm_exit.mmio` gains `size`, `reg` and `value` in its
-padding (`{ gpa, write, pad }` has room), and a read the owner answers
-completes the way an `IN` does: `x->mmio.value` on the next `vcpu_run`,
-by the `in_completion` mechanism generalised to "a register to write".
+The uapi `cosmo_vm_exit.mmio` gains `size`, `reg`, `sse` and `sf` in
+the four bytes of padding it has, and a 64-bit `value` after them, which
+grows the member from 16 to 24 bytes. That is within the union, whose
+size is fixed at 48 bytes by `raw[6]` (`struct cosmo_vm_exit` stays 64
+bytes), so existing userland is unaffected; but it is a new field, not a
+use of padding, and the implementation must add it, not squeeze `value`
+into 32 bits. A read the owner answers completes the way an `IN` does:
+`x->mmio.value` on the next `vcpu_run`, through the same
+`hv_mmio_complete_read` as an in-kernel device's answer.
 
 ### 2. A PL011 model, in the kernel, per VM
 
@@ -219,7 +242,10 @@ int vm_raise_spi(struct vm *vm, unsigned intid);          /* a device asserts a 
 int vm_console_write(struct vm *vm, const void *buf, size_t len);   /* the owner's input to the guest */
 
 /* kernel/include/arch/hv.h */
-struct hv_exit { ... struct { uint64_t gpa, value; uint8_t size, reg, insn_len; bool write; } mmio; ... };
+struct hv_exit { ... struct { uint64_t gpa, value; uint8_t size, reg, insn_len; bool write, sse, sf; } mmio; ... };
+/* One place a read's result becomes a register: zero-extend to size,
+ * sign-extend to the destination width if sse, clear 63:32 if !sf. */
+void hv_mmio_complete_read(struct arch_hv_vcpu *v, unsigned size, bool sse, bool sf, unsigned reg, uint64_t value);
 int arch_hv_vm_raise_spi(struct arch_hv_vm *vm, unsigned intid);
 
 /* kernel/arch/aarch64/include/aarch64/gicv3_vdist.h */
@@ -227,7 +253,7 @@ void vdist_raise_spi(struct gicv3_vdist *d, unsigned intid);
 void vdist_lower_spi(struct gicv3_vdist *d, unsigned intid);   /* the level dropped */
 
 /* uapi */
-struct cosmo_vm_exit { ... struct { uint64_t gpa; uint32_t write; uint8_t size, reg; uint16_t pad; uint64_t value; } mmio; ... };
+struct cosmo_vm_exit { ... struct { uint64_t gpa; uint32_t write; uint8_t size, reg, sse, sf; uint64_t value; } mmio; ... };   /* 24 of the union's 48 bytes */
 ```
 
 `vcpu_inject` and the owner's pending set are untouched; a device's
@@ -269,10 +295,17 @@ separate claims.
   load reports its register. Fails on the tree before step 1, where
   `size` is 0 and `value` is 0.
 - **`el2-mmio-device`** -- a test-registered device at an unused address
-  answers a read with a known word and records a write's size and value;
-  the guest sees the word in its register and continues without an exit;
-  an access outside the device still reaches the owner, now with size
-  and value. This is the seam, tested before the UART depends on it.
+  answers reads with a known pattern (`0x8001_8081_F0F1_F2F3`) and records
+  a write's size and value; the guest reads it back through every width
+  and extension a driver can use -- `ldrb`, `ldrh`, `ldr w`, `ldr x`,
+  `ldrsb w`, `ldrsh x`, `ldrsw x` -- and reports each register, which
+  must be `0xF3`, `0xF2F3`, `0xF0F1F2F3`, the whole word,
+  `0xFFFFFFF3`, `0xFFFFFFFFFFFFF2F3` and `0xFFFFFFFFF0F1F2F3`
+  respectively, with no exit to the owner; a store of a halfword reports
+  size 2 and the low sixteen bits; an access outside the device still
+  reaches the owner, now with size and value. This is the seam, tested
+  before the UART depends on it, and the widths and extensions are the
+  part a completion that merely wrote the value would fail.
 - **`el2-guest-uart`** -- the guest stores `"hello\n"` to `DR` a byte at a
   time and calls out; the VM's console reads back exactly `"hello\n"`;
   `FR` read `TXFE` throughout; the PL011 identification registers read
