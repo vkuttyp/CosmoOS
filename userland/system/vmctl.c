@@ -158,6 +158,7 @@ struct vio {
     uint32_t feat_sel, status;
     struct vblk_queue q;
     int irq_pending;
+    int draining;         /* a notify left work the run loop is still serving */
 };
 
 static struct vio g_vio;
@@ -187,6 +188,23 @@ static int vio_disk_read(void *c, uint64_t off, void *buf, uint32_t len)
     return 0;
 }
 
+/* Serve one bounded batch of the available ring. vblk_process serves at
+ * most VBLK_MAX_BYTES_PER_CALL and returns the number of requests it
+ * completed; > 0 means it made progress and there may be more, 0 means the
+ * ring is drained, < 0 a hostile ring. Raise the device's interrupt for the
+ * requests just completed. */
+static int vio_service(struct vio *v)
+{
+    struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity,
+                          VBLK_MAX_BYTES_PER_CALL };
+    int served = vblk_process(&io, &v->q);
+    if (served > 0) {
+        v->irq_pending = 1;
+        cosmo_vm_raise_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);   /* through the guest's distributor */
+    }
+    return served;
+}
+
 /* The transport registers (virtio-mmio v2). `*val` is the read result. */
 static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
 {
@@ -211,15 +229,14 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
     case 0x014: v->feat_sel = w; break;
     case 0x038: v->q.size = (uint16_t)w; break;
     case 0x044: v->q.ready = (int)w; break;
-    case 0x050: {                                               /* QueueNotify */
-        struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity,
-                              VBLK_MAX_BYTES_PER_CALL };
-        if (vblk_process(&io, &v->q) > 0) {
-            v->irq_pending = 1;
-            cosmo_vm_raise_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);   /* through the guest's distributor */
-        }
+    case 0x050:                                                /* QueueNotify */
+        /* Serve a first batch now; if it made progress the ring may hold
+         * more than one batch's worth, so mark it draining and let the run
+         * loop finish it a batch at a time -- the guest need not notify
+         * again for the rest to complete. */
+        if (vio_service(v) > 0)
+            v->draining = 1;
         break;
-    }
     case 0x064:                                                 /* InterruptACK */
         v->irq_pending = 0;
         cosmo_vm_lower_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);
@@ -467,6 +484,12 @@ static int run_machine(int argc, char **argv)
     memset(&x, 0, sizeof(x));
     unsigned cpu = 0;
     for (;;) {
+        /* Finish serving a ring the last notify could not drain in one
+         * bounded batch, one batch per turn so the guest's vCPUs keep
+         * running between them. When a batch serves nothing more, the ring
+         * is drained (or a hostile ring stopped it) and draining ends. */
+        if (g_vio.draining && vio_service(&g_vio) <= 0)
+            g_vio.draining = 0;
         unsigned nr_running = 0;
         for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
             nr_running += m.running[c] ? 1 : 0;
