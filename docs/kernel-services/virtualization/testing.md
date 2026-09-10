@@ -108,6 +108,11 @@ tests are AArch64's and skip on x86.
 | `el2-guest-phys-timer` | `aarch64/guest_ptimer.S` | `mrs x3, CNTPCT_EL0` and `msr CNTP_CTL_EL0, x4` are both `SYSREG` exits naming CRn 14 and the right CRm/Op2; the owner answers the read and steps over both, and the guest ends with the owner's answer, not the host's clock -- and the host's tick untouched |
 | `el2-guest-timer` | `aarch64/guest_timer.S` | the guest arms its timer for ~15 ms and heartbeats; its handler eventually calls out with INTID 27, `CNTV_CTL` read in the handler showing `ENABLE|ISTATUS` before it masked, the pending bit already clear, and the timer -- masked -- not firing again. A backend that injected on every host interrupt would deliver on the host's tick and the handler's `CNTV_CTL` would not read `ISTATUS` |
 | `el2-guest-timer-ontime` | `aarch64/guest_timer_wfi.S` | the idle loop every guest kernel has: arm, `WFI`, be woken. The `WFI` run must hold for most of the ~15 ms the guest asked for (measured on the host's clock), and the handler's own `CNTVCT` minus its `CVAL` -- lateness, in the guest's ticks -- must be less than the interval asked for. Measured: asked 15.6 ms, held 17 ms, 2.6 ms late |
+| `el2-guest-gicd-probe` | `aarch64/guest_gicd.S` | the first thing every GIC driver does: read `GICD_TYPER`, `IIDR`, `PIDR2`, then find the redistributor whose frame is this CPU's by its own MPIDR. The run ends in a hypercall, **not** an `MMIO` exit -- something answered; 288 lines, a GICv3; two vCPUs each find a frame carrying their own Aff0, `Last` on the higher one and not the lower; each reads an MPIDR that is its index |
+| `el2-guest-gic-config` | `aarch64/guest_gicc.S`, `guest_gicd.S` | the register file returns what was written through each access size a driver uses: a 64-bit route, 32-bit words, a single priority byte. vCPU 1 configures, so the route it writes -- its own affinity -- reads back as 1 and not the zero an unimplemented register would give; vCPU 0 sees the SPI's enable (the VM's) and not the PPI's (frame 1's); `ICENABLER` clears what `ISENABLER` set and only that |
+| `el2-guest-gic-timer` | `aarch64/guest_gic.S` | **the unit's point**: distributor on, redistributor found by MPIDR and woken, the timer PPI grouped, prioritised and enabled there, an SPI routed to itself, then the CPU interface -- and the timer arrives through the controller so configured. Then the phase only a distributor passes: with the PPI *disabled* in the redistributor the next expiry is held past its deadline (the guest counts zero handler runs); re-enabling releases it. Direct injection would deliver it disabled. Last, an SPI the guest makes pending through `ISPENDR` arrives at the vCPU its route names. Measured: held through 81 heartbeats while disabled, released after 1 |
+| `el2-guest-sgi` | `aarch64/guest_sgi.S` | a guest can be SMP: both vCPUs run one image and each finds its own redistributor; vCPU 0 writes `ICC_SGI1R_EL1` naming SGI 3 for Aff0 = 1 and its owner sees "sent", not a `SYSREG` exit; vCPU 1's handler runs with INTID 3 on a CPU whose MPIDR says 1; vCPU 0, not in the target list, heartbeats twenty times and never sees it. Routed, not broadcast |
+| `el2-guest-gicd-isolated` | `aarch64/guest_gicc.S`, `guest_gicd.S` | a guest enables the host's *spare* SPI in its distributor; the host's enable bit for that line (`arch_test_irq_is_enabled`) reads the same before and after -- a model that wrote through to hardware would fail here -- and a second VM reads a fresh distributor with nothing of the first's in it |
 | `el2-guest-spin` | `aarch64/guest_spin.S` | a guest in a one-instruction loop: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick is taken to EL2 through `HCR_EL2.IMO`), and the guest's PC never left the loop |
 
 Without a backend every guest test and `hv-npt` return true after the
@@ -119,8 +124,10 @@ AArch64 that is what `QEMU_EL2=0` produces.
 Each architecture has its own, built for its own target: x86-64's are
 the real-mode and protected-mode guests below, AArch64's are
 `guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`, `guest_spin`,
-`guest_irq`, `guest_timer`, `guest_ptimer` and `guest_timer_wfi`,
-one per exit the EL2 switch decodes. Both sets are flat binaries linked
+`guest_irq`, `guest_timer`, `guest_ctimer`, `guest_ptimer`,
+`guest_timer_wfi`, `guest_gicd`, `guest_gicc`, `guest_gic` and
+`guest_sgi` -- one per exit the EL2 switch decodes, then one per thing a
+guest does with its interrupt controller. Both sets are flat binaries linked
 at guest-physical 0x1000 and carried in the boot archive as
 `tests/hv/<name>.bin`; the self-tests and `vmctl` load them from there.
 The `el2-guest-*` self-tests are AArch64's, the `hv-guest-*` tests are
@@ -145,6 +152,23 @@ pending-but-masked, so the `WFI` either traps (a `WFI` exit, which
 is taken first. Both timer guests report their own clock in `x1` on every
 hypercall, so lateness is measured in units the guest controls and the
 owner never has to trust the host's clock to judge it.
+
+### The timer guests enable their PPI in their redistributor
+
+`guest_timer.S` and `guest_timer_wfi.S` now begin the way a kernel does:
+`GICD_CTLR` on, their redistributor found by MPIDR and woken, PPI 27
+grouped and enabled in `GICR_ISENABLER0`. Since the virtual distributor,
+an expiry is a pending PPI in the redistributor and reaches the guest
+only if the guest enabled it there -- a guest that never did gets no
+timer, which is the behaviour and not a gap. `guest_ctimer.S`, which the
+timer *state* tests use and which must run on a GICv2 host, touches no
+GIC at all and is unchanged.
+
+`guest_gicd.S`, `guest_gicc.S` (the prober and the configurer) are pure
+MMIO -- no `ICC_*`, no vectors -- so they too would run on any host; the
+tests that use them skip on GICv2 only because there is no distributor
+there to probe. `guest_gic.S` and `guest_sgi.S` bring up a CPU interface
+and are GICv3-only like `guest_irq.S`.
 
 ### The `irq-route` source moved
 

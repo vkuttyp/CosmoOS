@@ -115,6 +115,7 @@ The coverage matrix is therefore:
 | test | GICv2 | GICv3 |
 |---|---|---|
 | `el2-guest-irq*`, `el2-guest-timer`, `el2-guest-timer-ontime` | skip | run |
+| `el2-guest-gicd-probe`, `-gic-config`, `-gic-timer`, `-sgi`, `-gicd-isolated` (a guest has a distributor only where it has a vGIC) | skip | run |
 | `el2-guest-timer-isolated`, `-offset`, `-phys-timer` | run | run |
 
 ### Sixteen CPUs

@@ -144,7 +144,7 @@ inode. The vCPU object is a plain kobject.
 struct hv_caps { bool present; const char *name; unsigned max_asids; bool nested_paging; };
 
 enum hv_exit_kind { HV_EXIT_HLT, HV_EXIT_IO, HV_EXIT_MMIO, HV_EXIT_CPUID, HV_EXIT_MSR, HV_EXIT_HYPERCALL,
-                    HV_EXIT_SHUTDOWN, HV_EXIT_INTR, HV_EXIT_FAIL };
+                    HV_EXIT_SHUTDOWN, HV_EXIT_INTR, HV_EXIT_WFI, HV_EXIT_SYSREG, HV_EXIT_EMULATED, HV_EXIT_FAIL };
 struct hv_exit {
     enum hv_exit_kind kind;
     union {
@@ -424,13 +424,22 @@ arrive. LPIs (8192 and up) are excluded: nothing can translate one for a
 guest. `pending` is sized from the widest range rather than from the 256
 that once covered x86 alone.
 
-**A guest's own timer arrives the same way.** After every run the
-backend answers `arch_hv_vcpu_timer_expired` -- on AArch64, from the
-`CNTV_CTL` the switch saved before disarming, whose `ISTATUS` is the
-timer's own account -- and the run loop injects
-`arch_hv_guest_timer_intid()` (PPI 27 on `virt`) into this same pending
-set. A timer is therefore not a second kind of delivery to get wrong:
-whatever delivers an owner's injection delivers the guest's alarm.
+**A guest's own timer arrives through the guest's own controller.**
+After every run the AArch64 backend reads the `CNTV_CTL` the switch saved
+before disarming -- its `ISTATUS` is the timer's own account -- and an
+expiry becomes a pending PPI 27 in that vCPU's redistributor
+(`gicv3_vdist.c`), forwarded to the same list register the owner's
+injections use when, and only when, the guest has enabled it there. The
+generic layer no longer injects it and the backends no longer carry a
+`timer_expired` op: the backend that owns the timer routes the timer. A
+timer is still not a second kind of delivery -- but it is now gated by
+the guest's own enable bit, as a real timer is.
+
+**The guest's controller is a second source of pending interrupts**,
+beside the owner's `pending` set, and every place that asks "is there
+something for this vCPU" asks both: the `WFI` wait below breaks on either,
+and `COSMO_VM_EXIT_F_IRQ_PENDING` says so for either.
+`arch_hv_vcpu_irq_waiting` is that question; on x86 it is always false.
 
 **And a guest that waits is woken when its alarm goes.** On a `WFI`
 exit, if `arch_hv_vcpu_timer_deadline` reports the timer armed, unmasked
@@ -901,9 +910,9 @@ frame, once a process's text page, once a page table, once in ~30 boots.
 |---|---|---|
 | 0x16 | `HVC` from EL1 | `HYPERCALL` |
 | 0x17 | `SMC` | `HYPERCALL` (reported, not forwarded) |
-| 0x18 | trapped `MSR`/`MRS` | `SYSREG` |
+| 0x18 | trapped `MSR`/`MRS` | `SYSREG`; a write to `ICC_SGI1R_EL1` (or `SGI0R`/`ASGI1R`) is routed through the VM's distributor and is `EMULATED` |
 | 0x01 | `WFI`/`WFE` | `WFI` |
-| 0x24 | data abort from a lower EL | `MMIO` (the faulting IPA from `HPFAR_EL2`, direction from `ESR_EL2.WnR`) |
+| 0x24 | data abort from a lower EL | `MMIO` (the faulting IPA from `HPFAR_EL2`, direction from `ESR_EL2.WnR`); inside the guest's `GICD`/`GICR` windows, with `ISV` set, the access is completed in the kernel and the exit is `EMULATED` -- the generic layer runs again and the owner sees nothing |
 | 0x20 | instruction abort from a lower EL | `MMIO`, or `FAIL` when the address is not a device |
 | anything else | — | `FAIL`, with `ESR_EL2` and `FAR_EL2` |
 
@@ -913,14 +922,13 @@ but run again" case.
 
 ### 5. What this unit does not do
 
-- **Virtual interrupts.** GICv2 virtualization (the GICH list registers,
-  the GICV alias mapped into the guest, the maintenance interrupt) is
-  not built: `arch_hv_vcpu_set_irq` records the offer and never delivers
-  it, and the capability set says so, so the manager's `hv-guest-irq`
-  test skips on this architecture rather than lying. The x86 backends
-  are unaffected.
-- **Timers.** `CNTVOFF_EL2` stays 0 and the guest sees the host's
-  virtual counter; nothing traps `CNTV_*`.
+- **GICv2 virtualization** (the GICH list registers, the GICV alias, the
+  maintenance interrupt). On a GICv2 host `arch_hv_vcpu_set_irq` records
+  the offer and never delivers it, the capability set says so, and the
+  interrupt tests skip rather than lie. On a GICv3 host the virtual CPU
+  interface, the guest's timer and the guest's distributor are all built
+  (docs/kernel/arch/aarch64/design.md, the three sections after the
+  world switch); what a GICv3 guest still lacks is LPIs and an ITS.
 - Nested virtualization, SVE/SME state, debug-register virtualization,
   PMU virtualization, VHE.
 

@@ -821,10 +821,12 @@ saved on entry rather than assumed.
 readily. The switch saves `CNTV_CTL` *before* disarming it, so the saved
 value carries `ISTATUS`, and after every run the backend reads
 `ENABLE && !IMASK && ISTATUS` from it -- once per expiry, since the
-guest's handler masking or re-arming clears the condition. The generic
-layer then injects `arch_hv_guest_timer_intid()` into the same pending
-set anything else uses, and the vGIC delivers it: a timer is not a
-second kind of delivery. For the expiry to be an exit at all, PPI 27 has
+guest's handler masking or re-arming clears the condition. The expiry
+then becomes a pending PPI 27 in the vCPU's *redistributor* (the guest's
+distributor, below), and reaches the guest when the guest has enabled it
+there -- as a real timer reaches a real kernel, and through the same
+list register anything else uses: a timer is not a second kind of
+delivery. For the expiry to be an exit at all, PPI 27 has
 to be enabled in the redistributor, so the backend binds it at probe and
 enables it on each CPU as that CPU's switch is installed; its handler
 acknowledges and does nothing else, because by the time the host is at
@@ -859,6 +861,108 @@ a guest's and its PPI is the hypervisor's.
 
 ### What this does not do
 
-A virtual distributor (so a guest can run a stock GIC driver), maintenance
-interrupts, and the GICv2 `GICH` interface. Each is named rather than
-half-built.
+Maintenance interrupts, and the GICv2 `GICH` interface. Each is named
+rather than half-built. The virtual distributor that was on this list is
+the next section.
+
+## The guest's distributor (`gicv3_vdist.c`, `hv_el2.c`, `hv_el2_switch.S`)
+
+A guest could be interrupted and could keep time, and still could not
+boot, because it could not initialise its interrupt controller: every GIC
+driver begins by reading `GICD_TYPER`, and that load was a stage-2 fault
+handed to the owner as `MMIO` with nothing behind it (measured before
+this existed: exit kind 3 at `0x0800_0004`). The fixtures that took
+interrupts did so by programming `ICC_*` directly and never touching a
+distributor, which a guest kernel cannot be asked to do.
+
+**In the kernel, one per VM.** The distributor's output is a list-register
+write, and `ICH_LR<n>_EL2` is EL2 state an owner in userland cannot
+reach; emulating it in the owner would mean a round trip into the kernel
+per interrupt. So `struct gicv3_vdist` lives beside the vGIC that
+delivers from it, created with the VM when the host has a virtual GIC and
+not otherwise -- without a CPU interface there is nothing to deliver to.
+
+**The layout is the hypervisor's.** A guest's `GICD`/`GICR` are the
+virtual machine's addresses, defined here and read from nowhere else:
+`GICD` at `0x0800_0000`, `GICR` frames at `0x080A_0000` with a 128 KiB
+stride, 288 lines. They match what QEMU's `virt` presents -- a stock
+guest's device tree expects them -- but nothing consults the host's own
+GIC for them; the host's layout is irrelevant to a guest. Frame `i` is
+vCPU `i`'s, and vCPU `i` reads `MPIDR_EL1` Aff0 = `i`: `VMPIDR_EL2`
+travels in the context, set on entry and put back to the CPU's own on
+exit, so a vCPU has one identity on whichever host CPU it lands. Before
+this a vCPU read the *host* CPU's MPIDR, which changed under it as it
+migrated. `GICR_TYPER` carries the same affinity and `Last` on the
+highest present frame, so a driver that walks the frames for its own
+MPIDR finds its own.
+
+**A stage-2 fault inside a window is emulated, not reported.** `GICD` and
+`GICR` stay unmapped in stage 2; a data abort there is decoded from
+`ESR_EL2.ISS` -- `ISV` says the hardware described the access, `SAS` the
+size, `SRT` the register, `WnR` the direction -- and completed against
+the VM's distributor, the instruction stepped over, and the run continues
+with a new `HV_EXIT_EMULATED` that the generic layer treats as "run
+again" (distinct from `INTR`, so it is not counted as a host interrupt).
+An access `ISV` does not describe (a pair, an exclusive -- which no GIC
+driver uses on a register) still goes to the owner as `MMIO`. Every
+offset in a window is answered, RAZ/WI where the model keeps nothing,
+because a driver touches registers this model has no state for and a
+fault there ends the boot.
+
+**The register file** is 32-bit words over a small fixed array: group,
+enable, pending, priority, trigger per interrupt, and for SPIs a 64-bit
+route -- SGIs and PPIs in the redistributor, SPIs in the distributor, as
+affinity routing puts them (`GICD`'s words for INTIDs 0..31 are dead
+under ARE). A byte or halfword access is a masked read-modify-write of
+its word; an eight-byte one is two words, except `GICD_IROUTER` and
+`GICR_TYPER`, which are 64 bits by architecture. Set/clear pairs
+(`ISENABLER`/`ICENABLER`, `ISPENDR`/`ICPENDR`) act on one state.
+`GICR_WAKER.ChildrenAsleep` follows `ProcessorSleep`, because a driver
+polls it. One lock covers every field, taken by a guest's MMIO from
+whichever vCPU thread made it and by the backend at entry; **nothing in
+the distributor touches a list register.** The distributor decides; the
+vCPU's own run thread places.
+
+**Routing.** At entry, after the owner has made its offer, the backend
+asks `vdist_pending_for`: the highest-priority interrupt that is pending,
+enabled, in group 1 and routed to this vCPU (its own private bank, or an
+SPI whose `IROUTER` names its affinity -- `IRM` goes to the lowest
+present vCPU), with `GICD_CTLR.EnableGrp1` set and the redistributor
+awake. If the one list register is free it goes in at the guest's own
+priority; if not it waits, by the rule the vGIC unit set -- whatever is in
+the register stays until taken, and the owner, offering first, has it
+when both have something. Acknowledged, the pending state leaves the
+distributor as it does in hardware, or the same interrupt would be
+placed again at the next entry. A distributor interrupt placed and not
+yet taken is withdrawn at the next entry if the guest has since disabled
+or cleared it: the register shows the distributor's current mind, and the
+guest can only look by running, which is when this runs -- so no thread
+ever writes another vCPU's register.
+
+**SGIs.** A guest's `ICC_SGI1R_EL1` write has no virtual counterpart and
+traps to EL2 whenever `HCR_EL2.IMO` routes its interrupts there -- with
+nothing to set. (Not `ICH_HCR_EL2.TC`: that traps every register common
+to both groups, `ICC_PMR_EL1` among them, which every guest writes at
+init; measured when every interrupt guest stopped reaching "ready".)
+Before this the trap reached the owner as `SYSREG` and nobody answered
+it. Now the write is decoded the way the host's own `gicv3.c` composes
+one -- affinities, range selector, `IRM`, INTID, the sixteen-bit target
+list over Aff0 -- and the SGI becomes pending in each targeted vCPU's
+redistributor, to be forwarded when that vCPU has enabled it there. This
+is the secondary-CPU wake-up every SMP kernel does.
+
+**Two places that ask "is there something for this vCPU" ask both
+sources** -- the owner's injections and the guest's controller: the
+`WFI` wait breaks on either, and the exit's pending flag says so for
+either. `arch_hv_vcpu_irq_waiting` is that question.
+
+### What this does not do
+
+LPIs and a guest ITS (a guest that wants MSI is a guest with emulated
+PCIe, which it does not have); a GICv2 guest distributor (the vGIC is
+GICv3-only, for the same reason); device SPIs -- the distributor accepts
+a pending SPI, and a guest can make one pending through `ISPENDR`, but
+the *source* that a real device would be is its own unit. Active state
+is not tracked (`ISACTIVER`/`ICACTIVER` are RAZ/WI): with one list
+register, "active" is that register's state. `GICD_STATUSR`, `NSACR`,
+`IGRPMODR` and the LPI base registers are RAZ/WI.

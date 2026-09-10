@@ -236,3 +236,23 @@ expiry: `HV_EXIT_INTR` names no interrupt. **Checked by**
 `el2-guest-timer-isolated`, `el2-guest-timer-offset`,
 `el2-guest-phys-timer`, and by the suite as a whole -- a wrong
 `CNTHCTL_EL2` restore does not fail a test, it hangs the boot.
+
+## A24: A guest's distributor is its VM's -- not another VM's, not the host's
+
+A guest's `GICD`/`GICR` accesses are stage-2 faults completed against
+its own VM's `struct gicv3_vdist` and nothing else. The windows are never
+mapped in stage 2, so no guest access reaches the host's physical GIC at
+the same addresses; the model never writes through to hardware, so the
+host's enable, pending and routing state does not move when a guest
+configures its own (measured on the host's spare SPI: its bit reads the
+same before and after a guest enabled that line in its distributor). Each
+VM's file is its own allocation, so a second VM reads a fresh distributor
+whatever the first configured. A vCPU's identity is its index: `VMPIDR_EL2`
+is set on entry and restored to the CPU's own on exit, so the affinity a
+guest reads, the redistributor frame that is its own and the target of an
+SGI sent to it agree on every host CPU it runs on. No thread writes
+another vCPU's list register: the distributor decides, under its one
+lock, and each vCPU's run thread places at its own entry. **Checked by**
+`el2-guest-gicd-isolated` (the host's bit, the second VM), `el2-guest-sgi`
+(routed to one vCPU and not another), `el2-guest-gicd-probe` (each vCPU
+finds its own frame by the MPIDR it reads).
