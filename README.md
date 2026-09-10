@@ -920,6 +920,30 @@ See [docs/development.md](docs/development.md).
   "ready". Seven bug-proofs, all deterministic; one was vacuous with the
   neighbouring priority bytes at reset zero until the fixture pre-filled
   them.
+- **The guest's console: a PL011 a stock kernel can print to (done):**
+  `docs/audit/next-subsystem-vuart.md`,
+  `docs/kernel-services/virtualization/design.md` ("The guest's
+  console"). Measured first: a guest's store of `'A'` to `UARTDR` was an
+  `MMIO` exit to an owner with nothing behind it -- and the exit did not
+  even carry the `'A'`. Two things, the first the seam every device after
+  it will use: the MMIO exit now describes the access (size, register, a
+  write's value, and whether a read sign-extends and into which width of
+  register), `vm_device.mmio` goes from a stage-1 stub to a real handler,
+  and one function turns a read's result into a register by width and
+  sign for the in-kernel and owner-answered paths alike -- proved by a
+  test word answering seven load forms before any real device leaned on
+  it. Then the device: a PL011 per VM at `0x0900_0000` writing into the
+  console ring the VM descriptor already reads; `write()` on that
+  descriptor feeds a receive FIFO, and the device raises SPI 33 through
+  the distributor -- the first device interrupt it routes that a guest
+  did not fake -- level-triggered by the source's own rule (the run loop
+  re-raises a line still up before each entry; the device lowers its own),
+  and a vCPU asleep in `WFI` is woken by the keystroke. In the kernel by
+  the one-exit-per-byte argument that placed the distributor. A bug-proof
+  separated two promises that looked like one: with the write not raising
+  the line itself the receive test still passes (the next entry re-raises)
+  but the sleeping vCPU waits out its deadline -- the immediate raise is
+  for the sleeper, the re-raise for the level.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -952,10 +976,7 @@ See [docs/development.md](docs/development.md).
   `-vdist.md` did it for the other interrupt controller and then, one
   piece at a time, for an AArch64 guest's interrupts, timer and
   distributor (all built: a guest can run a stock GIC driver and be SMP).
-  The open report, under review as PR #77 and landing as
-  `docs/audit/next-subsystem-vuart.md`, does it for the guest's console:
-  a guest can be interrupted, keep time and drive its GIC, and still
-  cannot say a single character, because its store to the UART every
-  `virt` kernel prints to first reaches its owner as an MMIO exit that
-  does not even carry the byte. Design documents first, one subsystem at
-  a time.
+  `docs/audit/next-subsystem-vuart.md` did it for the guest's console
+  (built: a PL011 a stock kernel can print to and be typed at, on a
+  device seam that completes an MMIO access by width and sign). Design
+  documents first, one subsystem at a time.

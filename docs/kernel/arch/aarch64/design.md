@@ -960,9 +960,11 @@ either. `arch_hv_vcpu_irq_waiting` is that question.
 
 LPIs and a guest ITS (a guest that wants MSI is a guest with emulated
 PCIe, which it does not have); a GICv2 guest distributor (the vGIC is
-GICv3-only, for the same reason); device SPIs -- the distributor accepts
-a pending SPI, and a guest can make one pending through `ISPENDR`, but
-the *source* that a real device would be is its own unit. Active state
+GICv3-only, for the same reason). Device SPIs are no longer on this
+list: the guest's console UART (`kernel-services/virtualization/vuart.c`)
+raises SPI 33 through `vdist_raise_spi` and lowers it through
+`vdist_lower_spi`, and is the first source the distributor routes that a
+guest did not fake through `ISPENDR`. Active state
 is not tracked (`ISACTIVER`/`ICACTIVER` are RAZ/WI): with one list
 register, "active" is that register's state. `GICD_STATUSR`, `NSACR`,
 `IGRPMODR` and the LPI base registers are RAZ/WI.
