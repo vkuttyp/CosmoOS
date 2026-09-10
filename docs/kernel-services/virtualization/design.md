@@ -633,6 +633,62 @@ Not done, and named: booting Linux -- the only reader whose opinion of
 the blob settles it, and the next report; virtio-mmio nodes; an initrd;
 guest ACPI; forwarding the owner's stdin to the guest's UART.
 
+### The root filesystem a guest mounts (`userland/system/vblk.c`, `vmctl --disk`)
+
+Linux boots on CosmoOS and panics where a diskless machine does, unable
+to mount a root. The disk that ends that panic is a virtio-blk device:
+one virtio-mmio node the device tree already advertises
+(`virtio_mmio@a000000`, `COSMO_HVM_VIRTIO0_*`, SPI 48), a transport
+register file in the owner, and a virtqueue walk that serves a guest's
+read requests from a file on the host.
+
+The split virtqueue lives in guest memory; the device only reads and
+writes it through `vm_mem_read`/`vm_mem_write`. `vblk.c` is that walk,
+and nothing else: given callbacks to reach guest memory and the disk, it
+reads `avail->idx`, and for each new head it reads the descriptor chain
+(a readable request header, writable data buffers, a writable status
+byte), serves the sectors the header names from the disk into the data
+buffers, writes the status, and publishes the head on the used ring. It
+is self-contained -- no kernel headers, no transport -- so the same
+function is linked into `vmctl` and exercised on the host with no guest
+and no QEMU (`test_vblk_dev`).
+
+Hostile rings are the device's whole job. Every index is bounded by the
+queue size before it is used, so a head or `next` past the ring is
+rejected before it addresses memory; a chain longer than the ring is a
+loop and is refused; a data buffer that points outside guest RAM faults
+through the memory callback and the request is dropped; a read past the
+end of the disk completes as `VIRTIO_BLK_S_IOERR`, not a crash. Because
+the walk is synchronous in the owner's thread, the work a guest can drive
+from one notification is bounded too: `avail->idx` more than a ring ahead
+of what the device last saw is a driver error (a driver cannot have more
+buffers in flight than the ring holds); a single request may name at most
+`VBLK_REQ_MAX_BYTES` of data, refused before a byte is read; and one
+notification serves at most `max_bytes_per_call` before the rest of the
+backlog waits for the next kick -- so neither a large descriptor nor a
+full ring can turn one kick into unbounded reads and copies. The
+device is read-only: it offers `VIRTIO_BLK_F_RO` so the driver never
+submits a write, and a `VIRTIO_BLK_T_OUT` that arrives anyway completes
+as `VIRTIO_BLK_S_UNSUPP`.
+
+`vmctl` models the transport at the node's address: MagicValue, Version 2,
+DeviceID (block when `--disk` is given, 0 otherwise, so the driver skips
+the node when no disk is attached), feature negotiation
+(`VIRTIO_F_VERSION_1` and `VIRTIO_BLK_F_RO`, nothing else optional), the
+queue addresses the guest writes, Status, InterruptStatus/ACK, and the
+capacity in config space. On QueueNotify it runs `vblk_process` over a
+disk the host opened read-only (`lseek`+`read`; the native libc has no
+`pread`), and a served request raises SPI 48 through the guest's
+distributor (`cosmo_vm_raise_spi`); the guest's InterruptACK lowers it.
+The mechanism is proven end to end in the kernel harness
+(`el2-virtq-device`: a guest negotiates the device and reads a sector's
+bytes) and exhaustively on the host (`test_vblk_dev`).
+
+Not done, and named: writes and a writable root; indirect and chained
+descriptors beyond the simple case; multiple queues and
+`VIRTIO_F_RING_EVENT_IDX`; virtio-net and a PCI transport. A read-only
+root is enough to reach userspace, which is the milestone.
+
 ### Guest memory (`guestmem.c`)
 
 `vm_mem_add(vm, gpa, len)`: page-aligned, non-zero, within the 4 GiB

@@ -9,7 +9,7 @@ HV_TEST_OUT := $(OUT)/tests/hv
 ifeq ($(ARCH),x86_64)
 HV_GUESTS := guest_pio guest_irq guest_cpuid guest_pm guest_shutdown guest_spin guest_fpu
 else
-HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_idreg guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_mmio_widths guest_uart guest_uart_rx guest_uart_wfi guest_uart_poll guest_ptimer guest_timer_wfi
+HV_GUESTS := guest_wfi guest_hvc guest_mmio guest_sysreg guest_idreg guest_spi guest_spin guest_irq guest_timer guest_ctimer guest_gicd guest_gicc guest_gic guest_sgi guest_mmio_widths guest_uart guest_uart_rx guest_uart_wfi guest_uart_poll guest_ptimer guest_timer_wfi
 endif
 
 define hv_guest_rule
@@ -59,6 +59,18 @@ $(HV_TEST_OUT)/guest_dtb.bin: $(ROOT)/tests/hv/aarch64/guest_dtb_start.S $(ROOT)
 	$(Q)$(LD) -Ttext=0x40080000 --oformat=binary -o $@ $@.start.o $@.main.o $@.fdt.o
 HV_GUEST_BINS += $(HV_TEST_OUT)/guest_dtb.bin
 HV_ARCHIVE_ENTRIES += tests/hv/guest_dtb.bin=$(HV_TEST_OUT)/guest_dtb.bin
+
+# A flat C guest at 0x1000 (no Image header, loaded like the assembly
+# guests by make_guest): the virtio-blk driver that el2-virtq-device backs.
+$(HV_TEST_OUT)/guest_vblk.bin: $(ROOT)/tests/hv/aarch64/guest_vblk_start.S $(ROOT)/tests/hv/aarch64/guest_vblk.c
+	$(call log,CC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CC) --target=aarch64-unknown-none-elf -c $(ROOT)/tests/hv/aarch64/guest_vblk_start.S -o $@.start.o
+	$(Q)$(CC) $(HV_CGUEST_CFLAGS) -c $(ROOT)/tests/hv/aarch64/guest_vblk.c -o $@.main.o
+	$(call log,BIN,$@)
+	$(Q)$(LD) --image-base=0 -Ttext=0x1000 --oformat=binary -o $@ $@.start.o $@.main.o
+HV_GUEST_BINS += $(HV_TEST_OUT)/guest_vblk.bin
+HV_ARCHIVE_ENTRIES += tests/hv/guest_vblk.bin=$(HV_TEST_OUT)/guest_vblk.bin
 
 # A stock Linux kernel Image, if a developer has dropped a raw arm64 Image
 # at tests/hv/aarch64/Image (gitignored): the boot archive carries it and

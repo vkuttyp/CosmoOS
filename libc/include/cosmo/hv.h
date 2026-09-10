@@ -62,6 +62,20 @@ static inline int cosmo_vcpu_run_flags(int vcpu, struct cosmo_vm_exit *exit, uns
     return (int)cosmo_syscall3(SYS_vcpu_run, vcpu, (long)exit, flags);
 }
 
+/* A device in this process asserts (raise) or drops (lower) a shared
+ * interrupt into the guest's distributor, routed by the guest's own GIC
+ * configuration -- for an owner-side device model (virtio-mmio). Unlike
+ * cosmo_vcpu_irq, which injects past the distributor. */
+static inline int cosmo_vm_raise_spi(int vm, unsigned intid)
+{
+    return (int)cosmo_syscall2(SYS_vm_raise_spi, vm, intid);
+}
+
+static inline int cosmo_vm_lower_spi(int vm, unsigned intid)
+{
+    return (int)cosmo_syscall2(SYS_vm_lower_spi, vm, intid);
+}
+
 static inline int cosmo_vcpu_irq(int vcpu, unsigned vector)
 {
     return (int)cosmo_syscall2(SYS_vcpu_irq, vcpu, (long)vector);

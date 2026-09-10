@@ -248,7 +248,9 @@ bool selftest_el2_vcpu_run_tick(const char **reason);       /* a bounded run: on
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);
-bool selftest_el2_guest_idreg(const char **reason);        /* a guest reads its feature registers, answered from the host and sanitized */
+bool selftest_el2_guest_idreg(const char **reason);
+bool selftest_el2_vm_raise_spi(const char **reason);
+bool selftest_el2_virtq_device(const char **reason);      /* a guest drives a virtio-mmio block device the test models */       /* an owner-side device's SPI goes through the distributor, gated by the guest's GIC */        /* a guest reads its feature registers, answered from the host and sanitized */
 bool selftest_el2_guest_spin(const char **reason);
 bool selftest_hv_npt(const char **reason);
 bool selftest_hv_guest_pio(const char **reason);

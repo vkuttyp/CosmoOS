@@ -54,6 +54,8 @@ void syscall_filter_install(struct process *p, const uint64_t *mask, unsigned wo
 int64_t sys_vm_create(struct syscall_args *a);
 int64_t sys_vm_mem(struct syscall_args *a);
 int64_t sys_vm_mem_rw(struct syscall_args *a);
+int64_t sys_vm_raise_spi(struct syscall_args *a);
+int64_t sys_vm_lower_spi(struct syscall_args *a);
 int64_t sys_vcpu_create(struct syscall_args *a);
 int64_t sys_vcpu_regs(struct syscall_args *a);
 int64_t sys_vcpu_run(struct syscall_args *a);

@@ -43,6 +43,13 @@
 #define COSMO_HVM_TIMER_PPI_VIRT  27u
 #define COSMO_HVM_TIMER_PPI_HYP   26u
 
+/* One virtio-mmio transport window, where QEMU's virt puts its bank, with
+ * an SPI the distributor routes. An owner (vmctl) models the transport and
+ * the device behind it; a guest finds it through the device tree. */
+#define COSMO_HVM_VIRTIO0_BASE    0x0A000000ull
+#define COSMO_HVM_VIRTIO0_SIZE    0x200ull
+#define COSMO_HVM_VIRTIO0_INTID   48u
+
 /* The arm64 Image header, as the boot protocol defines it. */
 #define COSMO_HVM_IMAGE_MAGIC     0x644d5241u     /* "ARM\x64", little-endian at offset 56 */
 #define COSMO_HVM_IMAGE_MAGIC_OFF 56u
