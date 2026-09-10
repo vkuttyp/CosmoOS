@@ -115,12 +115,29 @@ static struct vnode *g_tapnode;
 /* Read one frame the stack transmitted out the tap, or 0 when none waits (a
  * frame is never zero-length, so 0 is unambiguously "nothing now"; the owner
  * polls in its run loop as it drains the console). Never blocks. */
+/* A VM has attached to the channel: bring the tap up and, once, turn on
+ * forwarding and masquerade so the guest reaches beyond the host (through
+ * the host's real interface, with its replies NAT'd back --
+ * docs/audit/next-subsystem-nat.md). The flags live on the tap, the guest's
+ * ingress, never on the NIC, so the host does not route for its real link. */
+static void tap_dev_activate(void)
+{
+    struct netif *nif = tap_netif(g_devtap);
+    if (nif->flags & NETIF_FORWARD) {
+        netif_set_up(nif, true);
+        return;
+    }
+    netif_set_up(nif, true);
+    netif_set_forward(nif, true);
+    netif_set_masquerade(nif, true);
+}
+
 static int64_t tap_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
     if (g_devtap == NULL)
         return 0;
-    netif_set_up(tap_netif(g_devtap), true);
+    tap_dev_activate();
     struct mbuf *m = tap_recv(g_devtap);
     if (m == NULL)
         return 0;
@@ -140,7 +157,7 @@ static int64_t tap_chr_write(struct vnode *vn, uint64_t off, const void *buf, si
     (void)vn; (void)off;
     if (g_devtap == NULL)
         return -ENODEV;
-    netif_set_up(tap_netif(g_devtap), true);
+    tap_dev_activate();
     int rc = tap_inject(g_devtap, buf, (uint32_t)len);
     return rc ? rc : (int64_t)len;
 }

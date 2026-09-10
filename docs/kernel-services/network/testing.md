@@ -168,6 +168,43 @@ processes the client's final ACK, and the test thread (higher priority)
 can run ahead of the worker now that `quiesce_read_unlock` at the end of
 a transmit is a prompt preemption point.
 
+## Forwarding and NAT
+
+These create their own taps on private subnets (`10.9.x`, `10.77.x`) chosen
+to collide with neither the QEMU user-net NIC (`10.0.2.0/24`) nor `tap0`
+(`10.0.3.0/24`), so routing reaches the test taps and not a live interface.
+Each seeds the ARP cache for its neighbours (a request from the neighbour to
+the tap's own IP, which the stack answers and records) so a forwarded packet
+transmits at once, and reads frames back skipping the ARP the stack queued.
+
+**`net-route`**: two taps with overlapping subnets -- a `/16` registered
+first, a `/24` second. An address in both routes to the `/24` (longest
+prefix, not registration order); an address only in the `/16` routes to it;
+loopback is unchanged. Proved by reintroducing a first-match walk, which
+lets the `/16` capture the `/24`'s address.
+
+**`net-forward`**: two taps, one marked `NETIF_FORWARD`. A guest datagram to
+the other subnet is read back on the uplink with the TTL down one, addresses
+and payload intact, IP checksum valid; a TTL-1 datagram draws an ICMP
+time-exceeded back to the guest and nothing on the uplink; a datagram
+arriving on the *non-forwarding* uplink is dropped as not-for-us, never
+forwarded (real-NIC ingress stays a non-router). Proved by reintroducing a
+missing TTL decrement (the forwarded TTL is then 64) and an ignored ingress
+gate (the uplink packet is then forwarded to the guest).
+
+**`net-nat`**: two taps, the guest side marked `NETIF_FORWARD` and
+`NETIF_MASQUERADE`. UDP, TCP-SYN and ICMP-echo round trips -- the source
+masqueraded out (checksum valid under the new pseudo-header, the lent
+port/id in range), the reply restored to the guest (original port/id,
+checksum valid, payload intact); an ICMP dest-unreach quoting a NAT'd packet
+translated back with its inner source and port un-NAT'd; the table bounded
+(a flood of distinct flows fills it, further ones dropped, `entries` never
+exceeding `NAT_TABLE_SIZE`); and the entries reclaimed by `nat_age`. Proved
+by reintroducing a missing pseudo-header checksum fixup (the uplink reads an
+invalid checksum), a table that clobbers instead of dropping when full
+(`out_drop_full` never rises), and an age that reclaims nothing (the entries
+never expire).
+
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 
 `run_boot_test.py` creates a `NetTest` for normal runs (not

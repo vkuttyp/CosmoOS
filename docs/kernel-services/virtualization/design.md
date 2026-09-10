@@ -807,9 +807,13 @@ out the tap read back, an injected ARP answered by the stack, the queue
 capped) and `el2-tap-host` (a guest's ARP request crossing virtio-net and
 the bridge into the real stack, which answers on the tap). A stock Linux
 bringing `eth0` up on `10.0.3.15` and reaching the host is the
-`QEMU_MEM=2G` reproduction. Not done, and named: reaching beyond the host
-(NAT, routing, DHCP, DNS -- the next unit); L2 bridging onto the host's
-physical LAN; raw/packet sockets for general userland.
+`QEMU_MEM=2G` reproduction. Reaching *beyond* the host is the next unit and
+now done: `tap0` turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when an
+owner first uses the channel, so a forwarded guest flow is routed out the
+host's real interface with its source NAT'd and the reply rewritten back
+(`docs/kernel-services/network/design.md`, "Forwarding and NAT"). Still
+named and not done: L2 bridging onto the host's physical LAN; raw/packet
+sockets for general userland; DHCP and DNS to autoconfigure the guest.
 
 ### Guest memory (`guestmem.c`)
 
