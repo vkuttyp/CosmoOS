@@ -10,9 +10,12 @@
 
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/log.h>
 #include <kernel/net/ether.h>
+#include <kernel/net/ip.h>
 #include <kernel/netif.h>
 #include <kernel/string.h>
+#include <kernel/vfs.h>
 
 #define TAP_TXQ_MAX 64u   /* frames the stack has queued for the reader; drops when full */
 
@@ -93,4 +96,66 @@ struct mbuf *tap_recv(struct tap *t)
 struct netif *tap_netif(struct tap *t)
 {
     return &t->nif;
+}
+
+/* --- /dev/net/tap: the owner's frame channel ---------------------------- */
+
+/* One tap for the one guest an owner runs. Created down at boot so it never
+ * competes as the default interface; brought up when the owner first uses
+ * the channel. (A per-open lifecycle would need chrdev open/close hooks the
+ * ramfs does not have; one persistent tap is enough for one guest.) */
+static struct tap *g_devtap;
+static struct vnode *g_tapnode;
+
+/* Read one frame the stack transmitted out the tap, or 0 when none waits (a
+ * frame is never zero-length, so 0 is unambiguously "nothing now"; the owner
+ * polls in its run loop as it drains the console). Never blocks. */
+static int64_t tap_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+{
+    (void)vn; (void)off;
+    if (g_devtap == NULL)
+        return 0;
+    netif_set_up(tap_netif(g_devtap), true);
+    struct mbuf *m = tap_recv(g_devtap);
+    if (m == NULL)
+        return 0;
+    uint32_t fl = m_length(m);
+    if (fl > len) {          /* the owner must offer a frame-sized buffer */
+        m_freem(m);
+        return -EMSGSIZE;
+    }
+    m_copydata(m, 0, fl, buf);
+    m_freem(m);
+    return (int64_t)fl;
+}
+
+/* Inject one frame from the guest into the stack. */
+static int64_t tap_chr_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+{
+    (void)vn; (void)off;
+    if (g_devtap == NULL)
+        return -ENODEV;
+    netif_set_up(tap_netif(g_devtap), true);
+    int rc = tap_inject(g_devtap, buf, (uint32_t)len);
+    return rc ? rc : (int64_t)len;
+}
+
+static const struct chrdev_ops tap_chr_ops = { .read = tap_chr_read, .write = tap_chr_write };
+
+void tap_dev_init(void)
+{
+    static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    /* 10.0.3.0/24, a subnet of its own: the interfaces the host autoconfigures
+     * (a NIC) default to 10.0.2.0/24, and two interfaces on one subnet route
+     * ambiguously. The guest gets 10.0.3.15, the host end is 10.0.3.1. */
+    g_devtap = tap_create("tap0", IPV4_ADDR(10, 0, 3, 1), htonl(0xffffff00u), host_mac);
+    if (g_devtap == NULL) {
+        kwarn("tap: cannot create tap0");
+        return;
+    }
+    netif_set_up(tap_netif(g_devtap), false);   /* down until the owner uses the channel */
+    vfs_mkdir(NULL, "/dev/net", 0755);           /* -EEXIST is fine */
+    int rc = ramfs_mkchr("/dev/net/tap", 0600, &tap_chr_ops, NULL, &g_tapnode);
+    if (rc)
+        kwarn("tap: cannot create /dev/net/tap (%d)", rc);
 }

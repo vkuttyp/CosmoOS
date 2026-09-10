@@ -36,4 +36,7 @@ struct mbuf *tap_recv(struct tap *t);
 
 struct netif *tap_netif(struct tap *t);   /* for tests and lookups */
 
+/* Create /dev/net/tap and its backing tap0 (down until first used), at boot. */
+void tap_dev_init(void);
+
 #endif /* KERNEL_NET_TAP_H */

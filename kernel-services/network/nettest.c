@@ -2415,7 +2415,7 @@ bool selftest_tap(const char **reason)
 {
     static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
     static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
-    uint32_t host_ip = IPV4_ADDR(10, 0, 2, 1), guest_ip = IPV4_ADDR(10, 0, 2, 15);
+    uint32_t host_ip = IPV4_ADDR(10, 0, 3, 1), guest_ip = IPV4_ADDR(10, 0, 3, 15);
     struct tap *t = tap_create("taptest", host_ip, htonl(0xffffff00u), host_mac);
     CHECK(t != NULL);
     struct netif *nif = tap_netif(t);
