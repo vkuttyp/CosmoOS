@@ -1710,7 +1710,11 @@ static void typist_main(void *arg)
         char c = (char)('a' + (i % 26));
         while (vm_console_write(t->vm, &c, 1) != 1)
             thread_sleep_ns(10000);
-        thread_sleep_ns(150000);                                       /* 150 us between keystrokes */
+        /* Mostly fast, with a pause every eighth byte. A stale raise is
+         * only visible as a spurious interrupt if no fresh byte arrives
+         * before the handler reads MIS; a steady fast cadence would hide
+         * exactly the race this test exists to catch. */
+        thread_sleep_ns((i % 8 == 7) ? 3000000 : 150000);
     }
     t->done = true;
     thread_exit(0);
