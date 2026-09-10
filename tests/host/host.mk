@@ -92,7 +92,7 @@ $(HOST_OUT)/test_linux: $(addprefix $(ROOT)/,$(HOST_LINUX_SRCS))
 $(HOST_OUT)/test_fdt: $(addprefix $(ROOT)/,$(HOST_FDT_SRCS)) $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/include/uapi -I$(ROOT)/tools/fdt $(addprefix $(ROOT)/,$(HOST_FDT_SRCS)) $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/tools/fdt $(addprefix $(ROOT)/,$(HOST_FDT_SRCS)) $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_hv: $(addprefix $(ROOT)/,$(HOST_HV_SRCS)) $(ROOT)/kernel/arch/x86_64/include/x86/svm.h
 	$(call log,HOSTCC,$@)

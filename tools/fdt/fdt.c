@@ -11,7 +11,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <cosmo/hv_machine.h>
+#include <uapi/cosmo/hv_machine.h>
 #include "fdt.h"
 
 static void put32(uint8_t *p, uint32_t v)

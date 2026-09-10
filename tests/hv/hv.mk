@@ -34,7 +34,7 @@ HV_MKDTB := $(HV_TEST_OUT)/mkdtb
 $(HV_MKDTB): $(ROOT)/tools/fdt/mkdtb.c $(ROOT)/tools/fdt/fdt.c $(ROOT)/tools/fdt/fdt.h $(ROOT)/kernel/include/uapi/cosmo/hv_machine.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(CC) -std=c11 -O2 -I$(ROOT)/kernel/include/uapi -I$(ROOT)/tools/fdt $< $(ROOT)/tools/fdt/fdt.c -o $@
+	$(Q)$(CC) -std=c11 -O2 -I$(ROOT)/kernel/include -I$(ROOT)/tools/fdt $< $(ROOT)/tools/fdt/fdt.c -o $@
 HV_DTB := $(HV_TEST_OUT)/virt.dtb
 $(HV_DTB): $(HV_MKDTB)
 	$(call log,DTB,$@)

@@ -9,7 +9,7 @@
  */
 #include "harness.h"
 
-#include <cosmo/hv_machine.h>
+#include <uapi/cosmo/hv_machine.h>
 #include <string.h>
 #include <stdio.h>
 

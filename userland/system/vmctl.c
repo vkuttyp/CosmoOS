@@ -7,10 +7,23 @@
  *                            load a flat image at GPA (default 0x1000), start a real-mode
  *                            vCPU at ENTRY (default GPA), run until HLT; echo the guest's
  *                            debug console; report other exits. Exit 0 on HLT, 1 otherwise.
+ *   vmctl run --machine [-m MIB] [-c NCPUS] [--append CMDLINE] IMAGE
+ *                            AArch64: the machine a guest is handed
+ *                            (docs/audit/next-subsystem-machine.md). RAM at
+ *                            COSMO_HVM_RAM_BASE, the image where its arm64 Image
+ *                            header's text_offset says (a flat image at RAM's
+ *                            start), a device tree describing the machine at the
+ *                            first 2 MiB boundary past the image and in x0. The
+ *                            owner is the firmware: PSCI is answered here -- CPU_ON
+ *                            creates a vCPU and runs it, in turn with the others,
+ *                            one tick each -- and SYSTEM_OFF ends the run. The
+ *                            guest's console is echoed. Exit 0 on power-off.
  */
 
 #include <cosmo/hv.h>
 #include <cosmo/sysctl.h>
+#include <uapi/cosmo/hv_machine.h>
+#include "../../tools/fdt/fdt.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -20,7 +33,8 @@
 
 static int usage(void)
 {
-    fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n");
+    fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
+                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--append CMDLINE] IMAGE\n");
     return 2;
 }
 
@@ -68,8 +82,329 @@ static void drain_console(int vm)
     fflush(stdout);
 }
 
+/* --- machine mode: the machine a guest is handed ------------------------ */
+
+#define PSCI_VERSION          0x84000000ull
+#define PSCI_CPU_OFF          0x84000002ull
+#define PSCI_CPU_ON           0xC4000003ull
+#define PSCI_AFFINITY_INFO    0xC4000004ull
+#define PSCI_MIGRATE_INFO     0x84000006ull
+#define PSCI_SYSTEM_OFF       0x84000008ull
+#define PSCI_SYSTEM_RESET     0x84000009ull
+#define PSCI_FEATURES         0x8400000Aull
+#define PSCI_SUCCESS          0
+#define PSCI_NOT_SUPPORTED    (-1)
+#define PSCI_INVALID_PARAMS   (-2)
+#define PSCI_ALREADY_ON       (-4)
+
+/* PSCI function ids: SMCCC fast calls, 32- or 64-bit, in the standard
+ * service range 0x84000000..0x8400001F / 0xC4000000..0xC400001F. */
+static int is_psci(uint64_t fn)
+{
+    return (fn & 0xBFFFFFE0ull) == 0x84000000ull;
+}
+
+struct machine {
+    int vm;
+    int vcpu[COSMO_HV_VCPUS_MAX];      /* -1: not created */
+    int running[COSMO_HV_VCPUS_MAX];
+    unsigned nr_cpus;                  /* what the device tree promises */
+};
+
+static int set_x0(int vcpu, uint64_t v)
+{
+    struct cosmo_vcpu_regs regs;
+    int rc = cosmo_vcpu_get_regs(vcpu, &regs);
+    if (rc < 0)
+        return rc;
+#if defined(__aarch64__)
+    regs.x[0] = v;
+#else
+    regs.rax = v;
+#endif
+    return cosmo_vcpu_set_regs(vcpu, &regs);
+}
+
+/* The owner is the firmware. `cpu` made the call in `x`; the answer goes
+ * back in its x0. Returns 1 when the guest asked to power off. */
+static int psci_answer(struct machine *m, unsigned cpu, const struct cosmo_vm_exit *x)
+{
+    uint64_t fn = x->hypercall.nr;
+    int64_t ret = PSCI_NOT_SUPPORTED;
+    int off = 0;
+    switch (fn) {
+    case PSCI_VERSION:
+        ret = 0x00010000;   /* 1.0 */
+        break;
+    case PSCI_FEATURES: {
+        uint64_t q = x->hypercall.a0;
+        ret = (q == PSCI_VERSION || q == PSCI_CPU_OFF || q == PSCI_CPU_ON || q == PSCI_AFFINITY_INFO ||
+               q == PSCI_MIGRATE_INFO || q == PSCI_SYSTEM_OFF || q == PSCI_SYSTEM_RESET || q == PSCI_FEATURES)
+                  ? 0 : PSCI_NOT_SUPPORTED;
+        break;
+    }
+    case PSCI_CPU_ON: {
+        unsigned target = (unsigned)(x->hypercall.a0 & 0xFFu);   /* Aff0: the vCPU's index */
+        uint64_t entry = x->hypercall.a1, ctx = x->hypercall.a2;
+        if ((x->hypercall.a0 & ~0xFFull) != 0 || target >= m->nr_cpus || target >= COSMO_HV_VCPUS_MAX) {
+            ret = PSCI_INVALID_PARAMS;
+            break;
+        }
+        if (m->running[target]) {
+            ret = PSCI_ALREADY_ON;
+            break;
+        }
+        if (m->vcpu[target] < 0) {
+            m->vcpu[target] = cosmo_vcpu_create(m->vm, target);
+            if (m->vcpu[target] < 0) {
+                fprintf(stderr, "vmctl: vcpu %u: %s\n", target, strerror(-m->vcpu[target]));
+                m->vcpu[target] = -1;
+                ret = PSCI_INVALID_PARAMS;
+                break;
+            }
+        }
+        struct cosmo_vcpu_regs regs;
+        cosmo_vcpu_get_regs(m->vcpu[target], &regs);
+#if defined(__aarch64__)
+        regs.pc = entry;
+        regs.x[0] = ctx;
+#else
+        (void)entry;   /* PSCI is AArch64's firmware interface; this path is never reached on x86 */
+        (void)ctx;
+#endif
+        if (cosmo_vcpu_set_regs(m->vcpu[target], &regs) < 0) {
+            ret = PSCI_INVALID_PARAMS;
+            break;
+        }
+        m->running[target] = 1;
+        ret = PSCI_SUCCESS;
+        break;
+    }
+    case PSCI_CPU_OFF:
+        m->running[cpu] = 0;
+        ret = PSCI_SUCCESS;
+        break;
+    case PSCI_AFFINITY_INFO: {
+        unsigned target = (unsigned)(x->hypercall.a0 & 0xFFu);
+        ret = target < COSMO_HV_VCPUS_MAX && m->running[target] ? 0 : 1;   /* ON : OFF */
+        break;
+    }
+    case PSCI_MIGRATE_INFO:
+        ret = 2;   /* no migration, no Trusted OS */
+        break;
+    case PSCI_SYSTEM_OFF:
+    case PSCI_SYSTEM_RESET:
+        off = 1;
+        ret = PSCI_SUCCESS;
+        break;
+    default:
+        break;
+    }
+    set_x0(m->vcpu[cpu], (uint64_t)ret);
+    return off;
+}
+
+static int run_machine(int argc, char **argv)
+{
+    unsigned long mem_mib = 16;
+    unsigned nr_cpus = 1;
+    const char *bootargs = NULL;
+    int i = 0;
+    while (i < argc && argv[i][0] == '-') {
+        if (i + 1 >= argc)
+            return usage();
+        if (strcmp(argv[i], "-m") == 0)
+            mem_mib = strtoul(argv[i + 1], NULL, 0);
+        else if (strcmp(argv[i], "-c") == 0)
+            nr_cpus = (unsigned)strtoul(argv[i + 1], NULL, 0);
+        else if (strcmp(argv[i], "--append") == 0)
+            bootargs = argv[i + 1];
+        else
+            return usage();
+        i += 2;
+    }
+    if (i != argc - 1 || nr_cpus == 0 || nr_cpus > COSMO_HV_VCPUS_MAX)
+        return usage();
+    const char *path = argv[i];
+
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "vmctl: %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    size_t cap = 65536, len = 0;
+    unsigned char *image = malloc(cap);
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            image = realloc(image, cap);
+        }
+        size_t n = fread(image + len, 1, cap - len, f);
+        if (n == 0)
+            break;
+        len += n;
+    }
+    fclose(f);
+    if (len == 0) {
+        fprintf(stderr, "vmctl: %s: empty image\n", path);
+        return 1;
+    }
+
+    /* Where the image goes: by its arm64 Image header, or at RAM's start
+     * for a flat image without one. The header's image_size bounds the
+     * image (it may be larger than the file: .bss), and the device tree
+     * goes at the first 2 MiB boundary past that -- the boot protocol's
+     * placement, relative to the image and never absolute. */
+    uint64_t ram_base = COSMO_HVM_RAM_BASE, ram_bytes = (uint64_t)mem_mib << 20;
+    uint64_t text_off = 0, image_size = len;
+    int has_header = len >= 64 && *(const uint32_t *)(image + COSMO_HVM_IMAGE_MAGIC_OFF) == COSMO_HVM_IMAGE_MAGIC;
+    if (has_header) {
+        memcpy(&text_off, image + COSMO_HVM_IMAGE_TEXT_OFF, 8);
+        memcpy(&image_size, image + COSMO_HVM_IMAGE_SIZE_OFF, 8);
+        if (image_size < len)
+            image_size = len;
+    }
+    uint64_t load = ram_base + text_off;
+    uint64_t dtb_gpa = (load + image_size + (2ull << 20) - 1) & ~((2ull << 20) - 1);
+    unsigned char dtb[8192];
+    size_t dtb_len = 0;
+    int rc = fdt_cosmo_virt(dtb, sizeof(dtb), nr_cpus, ram_base, ram_bytes, bootargs, &dtb_len);
+    if (rc) {
+        fprintf(stderr, "vmctl: device tree: %d\n", rc);
+        return 1;
+    }
+    if (load + image_size > ram_base + ram_bytes || dtb_gpa + dtb_len > ram_base + ram_bytes) {
+        fprintf(stderr, "vmctl: %lu MiB of RAM has no place for the image (0x%llx+0x%llx) and its device tree "
+                        "(0x%llx+%zu); refusing rather than placing it wrong\n",
+                mem_mib, (unsigned long long)load, (unsigned long long)image_size, (unsigned long long)dtb_gpa,
+                dtb_len);
+        return 1;
+    }
+
+    int vmm = open("/dev/vmm", O_RDWR);
+    if (vmm < 0) {
+        fprintf(stderr, "vmctl: /dev/vmm: %s\n", strerror(errno));
+        return 1;
+    }
+    struct machine m;
+    memset(&m, 0, sizeof(m));
+    for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
+        m.vcpu[c] = -1;
+    m.nr_cpus = nr_cpus;
+    m.vm = cosmo_vm_create(vmm);
+    close(vmm);
+    if (m.vm < 0) {
+        fprintf(stderr, "vmctl: vm_create: %s\n", strerror(-m.vm));
+        return 1;
+    }
+    rc = cosmo_vm_mem(m.vm, ram_base, ram_bytes);
+    if (rc < 0) {
+        fprintf(stderr, "vmctl: vm_mem(%lu MiB at 0x%llx): %s\n", mem_mib, (unsigned long long)ram_base, strerror(-rc));
+        return 1;
+    }
+    long w = cosmo_vm_mem_write(m.vm, load, image, len);
+    if (w >= 0)
+        w = cosmo_vm_mem_write(m.vm, dtb_gpa, dtb, dtb_len);
+    if (w < 0) {
+        fprintf(stderr, "vmctl: load: %s\n", strerror((int)-w));
+        return 1;
+    }
+    m.vcpu[0] = cosmo_vcpu_create(m.vm, 0);
+    if (m.vcpu[0] < 0) {
+        fprintf(stderr, "vmctl: vcpu_create: %s\n", strerror(-m.vcpu[0]));
+        return 1;
+    }
+    struct cosmo_vcpu_regs regs;
+    cosmo_vcpu_get_regs(m.vcpu[0], &regs);
+#if defined(__aarch64__)
+    regs.pc = load;
+    regs.x[0] = dtb_gpa;   /* the boot protocol: x0 is the device tree, x1..x3 zero */
+#endif
+    rc = cosmo_vcpu_set_regs(m.vcpu[0], &regs);
+    if (rc < 0) {
+        fprintf(stderr, "vmctl: vcpu_regs: %s\n", strerror(-rc));
+        return 1;
+    }
+    m.running[0] = 1;
+    printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx\n",
+           path, len, (unsigned long long)load, has_header ? "Image header" : "flat", mem_mib,
+           (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa);
+
+    /* One thread, every running vCPU in turn, a tick each. A vCPU that
+     * asks for an interrupt (WFI) gives up its turn; its next comes round. */
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    unsigned cpu = 0;
+    for (;;) {
+        unsigned nr_running = 0;
+        for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
+            nr_running += m.running[c] ? 1 : 0;
+        if (nr_running == 0) {
+            printf("vmctl: every cpu is off\n");
+            return 0;
+        }
+        while (!m.running[cpu])
+            cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
+        rc = cosmo_vcpu_run_flags(m.vcpu[cpu], &x, nr_running > 1 ? COSMO_VCPU_RUN_ONE_TICK : 0);
+        drain_console(m.vm);
+        if (rc < 0) {
+            fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
+            return 1;
+        }
+        int next = 0;
+        switch (x.kind) {
+        case COSMO_VM_EXIT_PREEMPTED:
+        case COSMO_VM_EXIT_WFI:
+            next = 1;
+            break;
+        case COSMO_VM_EXIT_HYPERCALL:
+            if (is_psci(x.hypercall.nr)) {
+                if (psci_answer(&m, cpu, &x)) {
+                    printf("vmctl: guest powered off\n");
+                    return 0;
+                }
+                /* A firmware call is a natural turn boundary: the vCPU that
+                 * just brought a sibling up would otherwise run on -- and
+                 * a small guest reaches SYSTEM_OFF within the same tick,
+                 * before the sibling has run a single instruction. The
+                 * first boot of this mode did exactly that. */
+                next = 1;
+            } else {
+                printf("vmctl: cpu %u: hypercall %llu (0x%llx 0x%llx 0x%llx 0x%llx)\n", cpu,
+                       (unsigned long long)x.hypercall.nr, (unsigned long long)x.hypercall.a0,
+                       (unsigned long long)x.hypercall.a1, (unsigned long long)x.hypercall.a2,
+                       (unsigned long long)x.hypercall.a3);
+            }
+            break;
+        case COSMO_VM_EXIT_MMIO:
+            printf("vmctl: cpu %u: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",
+                   cpu, x.mmio.write ? "write" : "read", (unsigned long long)x.mmio.gpa, x.mmio.size, x.mmio.reg,
+                   (unsigned long long)x.mmio.value, (unsigned long long)x.rip);
+            return 1;
+        case COSMO_VM_EXIT_SYSREG:
+            printf("vmctl: cpu %u: system register %s (iss 0x%x) into x%u at 0x%llx: no model; stopping\n", cpu,
+                   x.sysreg.write ? "write" : "read", x.sysreg.iss, x.sysreg.reg, (unsigned long long)x.rip);
+            return 1;
+        case COSMO_VM_EXIT_SHUTDOWN:
+            printf("vmctl: cpu %u: guest shutdown at 0x%llx\n", cpu, (unsigned long long)x.rip);
+            return 1;
+        case COSMO_VM_EXIT_FAIL:
+            printf("vmctl: cpu %u: entry failed: code 0x%x info 0x%llx 0x%llx\n", cpu, x.fail.code,
+                   (unsigned long long)x.fail.info1, (unsigned long long)x.fail.info2);
+            return 1;
+        default:
+            printf("vmctl: cpu %u: unknown exit %u\n", cpu, x.kind);
+            return 1;
+        }
+        if (next)
+            cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
+    }
+}
+
 static int run(int argc, char **argv)
 {
+    if (argc >= 1 && strcmp(argv[0], "--machine") == 0)
+        return run_machine(argc - 1, argv + 1);
     unsigned long mem_kib = 1024;
     unsigned long long gpa = 0x1000, entry = 0;
     int i = 0;
