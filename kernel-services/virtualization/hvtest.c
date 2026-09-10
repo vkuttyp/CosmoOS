@@ -12,6 +12,7 @@
 #include <kernel/errno.h>
 #include <kernel/hv.h>
 #include <kernel/log.h>
+#include <kernel/net/tap.h>
 #include <kernel/page.h>
 #include <kernel/pmm.h>
 #include <kernel/printf.h>
@@ -2417,9 +2418,10 @@ struct net_model {
     int rq_ready, tq_ready;
     uint16_t rq_used_idx, tq_used_idx;
     uint8_t mac[6];
-    uint8_t wire[NET_FRAME_MAX];   /* a single-frame loopback */
+    uint8_t wire[NET_FRAME_MAX];   /* a single-frame loopback (bridge == NULL) */
     uint32_t wire_len;
     int wire_full;
+    struct tap *bridge;            /* if set, transmit goes to this real tap instead */
 };
 
 /* Drain the transmit queue into the wire, then fill posted receive buffers
@@ -2437,7 +2439,10 @@ static void net_notify(struct vm *vm, struct net_model *m)
             uint32_t total = d.len <= sizeof(frame) ? d.len : 0;
             if (total)
                 vm_mem_read(vm, d.addr, frame, total);
-            if (total >= NET_HDR && !m->wire_full) {   /* strip the header, keep the frame */
+            if (m->bridge) {                            /* to a real tap: strip the virtio header */
+                if (total > NET_HDR)
+                    tap_inject(m->bridge, frame + NET_HDR, total - NET_HDR);
+            } else if (total >= NET_HDR && !m->wire_full) {   /* loopback: keep the frame */
                 m->wire_len = total - NET_HDR;
                 memcpy(m->wire, frame + NET_HDR, m->wire_len);
                 m->wire_full = 1;
@@ -2568,6 +2573,76 @@ bool selftest_el2_virtq_net(const char **reason)
     drop_guest(vm, v);
     kinfo("selftest: el2-virtq-net: a guest negotiated a virtio-mmio network device, "
           "transmitted a frame and received it back through the loopback wire");
+    return true;
+}
+
+/*
+ * el2-tap-host: a guest transmits an ARP request over virtio-net, the wire
+ * bridged to a real tap in the host stack, and the host stack answers on the
+ * tap. So the guest's frame crossed virtio-net, the owner's bridge, and into
+ * the real stack -- the outbound guest-to-host path end to end. (The reply
+ * reaching the guest's receive queue is el2-virtq-net's loopback and the tap
+ * selftest's stack->tap; this is the piece those do not cover.)
+ */
+bool selftest_el2_tap_host(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    static const uint8_t tap_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xdd };
+    /* a subnet of its own, distinct from tap0's 10.0.3.0/24 */
+    struct tap *t = tap_create("taphost", 0x0104000au /* 10.0.4.1 */, 0x00ffffffu, tap_mac);
+    CHECK(t != NULL);
+    struct vm *vm;
+    struct vcpu *v;
+    if (make_guest("tests/hv/guest_tap.bin", &vm, &v) != 0) {
+        tap_destroy(t);
+        CHECK(0);
+    }
+    struct net_model m;
+    memset(&m, 0, sizeof(m));
+    m.bridge = t;                                   /* transmit -> the real tap */
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    unsigned steps = 0;
+    for (;;) {
+        if (vcpu_run(v, &x) != 0) { tap_destroy(t); drop_guest(vm, v); CHECK(0); }
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= NET_BASE && x.mmio.gpa < NET_BASE + NET_SIZE) {
+            uint64_t val = x.mmio.value;
+            net_reg(vm, &m, (unsigned)(x.mmio.gpa - NET_BASE), x.mmio.write, &val);
+            if (!x.mmio.write)
+                x.mmio.value = val;
+            if (++steps >= 200000) { tap_destroy(t); drop_guest(vm, v); CHECK(0); }
+            continue;
+        }
+        if (x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2)
+            break;                                  /* the guest transmitted the ARP */
+        if (x.kind == COSMO_VM_EXIT_HYPERCALL)
+            continue;                               /* hvc 1 (identity), or the idle 9 */
+        tap_destroy(t); drop_guest(vm, v); CHECK(0);
+    }
+    /* the host stack processes the injected ARP on its worker and answers out
+     * the tap; poll the tap for the reply. */
+    struct mbuf *reply = NULL;
+    for (unsigned i = 0; i < 50 && reply == NULL; i++) {
+        reply = tap_recv(t);
+        if (reply == NULL)
+            thread_sleep_ms(10);
+    }
+    int ok = reply != NULL;
+    if (ok) {
+        uint8_t r[42];
+        ok = m_copydata(reply, 0, 42, r)
+             && r[12] == 0x08 && r[13] == 0x06   /* ARP */
+             && r[21] == 2                        /* reply */
+             && memcmp(r + 22, tap_mac, 6) == 0   /* from the tap's MAC */
+             && r[28] == 10 && r[29] == 0 && r[30] == 4 && r[31] == 1;   /* spa 10.0.4.1 */
+        m_freem(reply);
+    }
+    drop_guest(vm, v);
+    tap_destroy(t);
+    CHECK(ok);
+    kinfo("selftest: el2-tap-host: a guest's ARP crossed virtio-net and the bridge into the host stack, "
+          "which answered on the tap");
     return true;
 }
 
@@ -2705,5 +2780,6 @@ bool selftest_el2_guest_idreg(const char **reason) { (void)reason; return true; 
 bool selftest_el2_vm_raise_spi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_virtq_device(const char **reason) { (void)reason; return true; }
 bool selftest_el2_virtq_net(const char **reason) { (void)reason; return true; }
+bool selftest_el2_tap_host(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif

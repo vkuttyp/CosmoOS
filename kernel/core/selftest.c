@@ -533,6 +533,7 @@ static const struct selftest tests[] = {
     { "el2-vm-raise-spi", selftest_el2_vm_raise_spi },
     { "el2-virtq-device", selftest_el2_virtq_device },
     { "el2-virtq-net", selftest_el2_virtq_net },
+    { "el2-tap-host", selftest_el2_tap_host },
     { "el2-guest-spin",  selftest_el2_guest_spin },
     { "hv-probe",        selftest_hv_probe },
     { "hv-caps",         selftest_hv_caps },

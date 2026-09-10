@@ -84,6 +84,17 @@ $(HV_TEST_OUT)/guest_vnet.bin: $(ROOT)/tests/hv/aarch64/guest_vblk_start.S $(ROO
 HV_GUEST_BINS += $(HV_TEST_OUT)/guest_vnet.bin
 HV_ARCHIVE_ENTRIES += tests/hv/guest_vnet.bin=$(HV_TEST_OUT)/guest_vnet.bin
 
+# The ARP guest that el2-tap-host bridges to a real host tap.
+$(HV_TEST_OUT)/guest_tap.bin: $(ROOT)/tests/hv/aarch64/guest_vblk_start.S $(ROOT)/tests/hv/aarch64/guest_tap.c
+	$(call log,CC,$@)
+	$(Q)mkdir -p $(dir $@)
+	$(Q)$(CC) --target=aarch64-unknown-none-elf -c $(ROOT)/tests/hv/aarch64/guest_vblk_start.S -o $@.start.o
+	$(Q)$(CC) $(HV_CGUEST_CFLAGS) -c $(ROOT)/tests/hv/aarch64/guest_tap.c -o $@.main.o
+	$(call log,BIN,$@)
+	$(Q)$(LD) --image-base=0 -Ttext=0x1000 --oformat=binary -o $@ $@.start.o $@.main.o
+HV_GUEST_BINS += $(HV_TEST_OUT)/guest_tap.bin
+HV_ARCHIVE_ENTRIES += tests/hv/guest_tap.bin=$(HV_TEST_OUT)/guest_tap.bin
+
 # A stock Linux kernel Image, if a developer has dropped a raw arm64 Image
 # at tests/hv/aarch64/Image (gitignored): the boot archive carries it and
 # rc.test boots it (docs/kernel-services/virtualization/testing.md). Absent

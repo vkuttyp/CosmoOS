@@ -254,6 +254,7 @@ bool selftest_el2_guest_idreg(const char **reason);
 bool selftest_el2_vm_raise_spi(const char **reason);
 bool selftest_el2_virtq_device(const char **reason);
 bool selftest_el2_virtq_net(const char **reason);      /* a guest drives a virtio-mmio network device, a frame looped back */
+bool selftest_el2_tap_host(const char **reason);   /* a guest ARP crosses virtio-net + the bridge into the host stack */
 bool selftest_el2_guest_spin(const char **reason);
 bool selftest_hv_npt(const char **reason);
 bool selftest_hv_guest_pio(const char **reason);
