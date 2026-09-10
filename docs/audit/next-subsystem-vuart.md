@@ -123,11 +123,11 @@ is one shape.
 `vm_device.mmio` becomes `int (*mmio)(struct vm_device *d, uint64_t gpa,
 bool write, unsigned size, uint64_t *value)` -- the port handler's
 contract, in memory: 0 handled, `-ENODEV` to the owner. `vmdev_mmio`
-returns that. In `vcpu_run`, a handled read has its value written into
-the guest's register (`arch_hv_vcpu_write_gpr`) and the instruction
-stepped over (`arch_hv_vcpu_advance_rip` by the instruction length the
-exit now also carries); a handled write is stepped over; either way the
-loop continues without an exit. An unhandled access reaches the owner as
+returns that. In `vcpu_run`, a handled read is completed into the guest's
+register by `hv_mmio_complete_read` (width and sign as above) and the
+instruction stepped over (`arch_hv_vcpu_advance_rip` by the instruction
+length the exit now also carries); a handled write is stepped over;
+either way the loop continues without an exit. An unhandled access reaches the owner as
 it does today, **now carrying size and value**, so an owner-side model
 becomes possible too.
 
