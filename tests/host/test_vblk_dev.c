@@ -94,7 +94,7 @@ static void test_read(void)
     memset(g_ram, 0, GRAM);
     g_oob_reads = 0;
     for (unsigned i = 0; i < sizeof(g_disk); i++)
-        g_disk[i] = (uint8_t)(i * 7 + 1);    /* known pattern */
+        g_disk[i] = (uint8_t)(i * 7 + 1 + (i / VBLK_SECTOR) * 53);  /* per-sector pattern */
     build_read_req(2 /*sector*/, VBLK_SECTOR);
     struct vblk_queue q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == 1);       /* one request served */
@@ -129,9 +129,11 @@ static void test_hostile(void)
 {
     struct vblk_queue q;
 
-    /* (1) an available head index past the ring. */
+    /* (1) an available head index past the ring. 0xffff * 16 lands well
+       outside the test's guest RAM, so a missing bound reads out of bounds
+       (the backstop catches it); the bound rejects the index first. */
     memset(g_ram, 0, GRAM); g_oob_reads = 0;
-    put16(AVAIL + 4, 99); put16(AVAIL + 2, 1);
+    put16(AVAIL + 4, 0xffff); put16(AVAIL + 2, 1);
     q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == -1);
     EXPECT(g_oob_reads == 0);
