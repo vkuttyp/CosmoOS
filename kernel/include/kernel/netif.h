@@ -79,6 +79,7 @@ void netif_release_static(struct netif *nif);
 /* Lookups return a referenced pointer (netif_put when done) or NULL. */
 struct netif *netif_find(const char *name);
 struct netif *netif_default(void);            /* the non-loopback interface that is up, or NULL */
+struct netif *netif_connected(uint32_t dst);  /* the up interface whose subnet holds dst, longest prefix; referenced or NULL */
 struct netif *netif_loopback(void);
 static inline void netif_get(struct netif *nif) { kobject_get(&nif->obj); }
 static inline void netif_put(struct netif *nif) { kobject_put(&nif->obj); }

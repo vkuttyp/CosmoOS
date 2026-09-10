@@ -2500,3 +2500,32 @@ bool selftest_tap(const char **reason)
           "and the queue capped at %u", TAP_TXQ_MAX);
     return true;
 }
+
+/* net-route: connected routing picks the longest prefix, not the first
+ * interface registered. Two taps with overlapping subnets -- a broad /16
+ * first, a specific /24 second -- and an address in both must route to the
+ * /24. An address only in the /16 routes to it; loopback is unchanged. */
+bool selftest_net_route(const char **reason)
+{
+    static const uint8_t mac_a[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x01 };
+    static const uint8_t mac_b[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x02 };
+    struct tap *a = tap_create("rtbroad", IPV4_ADDR(10, 9, 0, 1), htonl(0xffff0000u), mac_a);   /* 10.9.0.0/16 */
+    CHECK(a != NULL);
+    struct tap *b = tap_create("rtnarrow", IPV4_ADDR(10, 9, 5, 1), htonl(0xffffff00u), mac_b);  /* 10.9.5.0/24 (later) */
+    CHECK(b != NULL);
+
+    struct netif *r = ipv4_route(IPV4_ADDR(10, 9, 5, 7));   /* in both: the /24 wins */
+    CHECK(r == tap_netif(b));
+    if (r) netif_put(r);
+    r = ipv4_route(IPV4_ADDR(10, 9, 9, 9));                 /* only the /16 */
+    CHECK(r == tap_netif(a));
+    if (r) netif_put(r);
+    r = ipv4_route(IPV4_ADDR(127, 0, 0, 1));                /* loopback unchanged */
+    CHECK(r != NULL && (r->flags & NETIF_LOOPBACK));
+    if (r) netif_put(r);
+
+    tap_destroy(b);
+    tap_destroy(a);
+    kinfo("selftest: net-route: longest-prefix connected routing picks the /24 over the /16");
+    return true;
+}

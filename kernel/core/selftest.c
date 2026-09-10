@@ -451,6 +451,7 @@ static const struct selftest tests[] = {
     { "net-mbuf",        selftest_net_mbuf },
     { "net-cksum",       selftest_net_cksum },
     { "net-arp",         selftest_net_arp },
+    { "net-route",       selftest_net_route },
     { "tap",             selftest_tap },
     { "net-second-nic",  selftest_net_second_nic },
     { "net-lo-udp",      selftest_net_lo_udp },

@@ -138,7 +138,10 @@ struct netif *ipv4_route(uint32_t dst)
 {
     if ((ntohl(dst) >> 24) == 127 || netif_owns_ipv4(dst))
         return netif_loopback();
-    struct netif *nif = netif_default();
+    struct netif *nif = netif_connected(dst);   /* a connected subnet (longest prefix) first */
+    if (nif != NULL)
+        return nif;
+    nif = netif_default();
     if (nif == NULL)
         return NULL;
     if (nif->ip4.addr == 0) {
