@@ -2118,6 +2118,7 @@ bool selftest_el2_guest_idreg(const char **reason)
     uint64_t host_pfr0 = HOST_IDREG("S3_0_c0_c4_0");
     uint64_t host_isar1 = HOST_IDREG("S3_0_c0_c6_1");
     uint64_t host_mmfr0 = HOST_IDREG("S3_0_c0_c7_0");
+    uint64_t host_isar2 = HOST_IDREG("S3_0_c0_c6_2");
 
     /* ID_AA64PFR0: EL2/EL3 hidden, FP and GIC kept from the host. */
     CHECK(((got[0x40] >> 8) & 0xF) == 0);                       /* EL2 */
@@ -2138,6 +2139,10 @@ bool selftest_el2_guest_idreg(const char **reason)
      * check reduces to "the model returned the host's ISAR1". */
     CHECK(got[0x61] == (host_isar1 & ~0xFF000FF0ull));
     CHECK(((got[0x61] >> 24) & 0xF) == 0 && ((got[0x61] >> 28) & 0xF) == 0);   /* GPA, GPI: absent regardless */
+    /* ID_AA64ISAR2: the host's, minus its pointer-auth fields APA3[15:12]
+     * and GPA3[11:8] (IDREG_ISAR2_DROP). Same host caveat as ISAR1. */
+    CHECK(got[0x62] == (host_isar2 & ~0x0000FF00ull));
+    CHECK(((got[0x62] >> 8) & 0xF) == 0 && ((got[0x62] >> 12) & 0xF) == 0);   /* GPA3, APA3: absent */
 
     CHECK((got[0x70] & 0xF) == (host_mmfr0 & 0xF));            /* ID_AA64MMFR0 PARange: the truth */
     CHECK(((got[0x71] >> 8) & 0xF) == 0);                       /* ID_AA64MMFR1 VH: hidden */

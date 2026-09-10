@@ -29,6 +29,9 @@ _start:
     mrs  x1, id_aa64isar1_el1
     movz x0, #0x61
     hvc  #0
+    mrs  x1, S3_0_c0_c6_2          /* ID_AA64ISAR2_EL1 */
+    movz x0, #0x62
+    hvc  #0
     mrs  x1, id_aa64mmfr0_el1
     movz x0, #0x70
     hvc  #0

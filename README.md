@@ -967,7 +967,7 @@ See [docs/development.md](docs/development.md).
   powers off -- from the kernel's test and from `vmctl` alike. On the way:
   the UART's receive FIFO dropped silently when full and a loaded host
   lost bytes; it refuses now and the owner's write returns short.
-- **Booting Linux (in progress):** `docs/audit/next-subsystem-linux.md`,
+- **Booting Linux (done):** `docs/audit/next-subsystem-linux.md`,
   `docs/kernel/arch/aarch64/design.md` ("The features a guest is told it
   has"). The reader whose opinion of the device tree settles it: a stock
   arm64 Linux (Alpine's `vmlinuz-virt`, its raw `Image` extracted) loaded
