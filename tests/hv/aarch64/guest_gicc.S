@@ -15,7 +15,7 @@
  *
  *   in:  x8 = the SPI to use (40 when 0)
  *   hvc x0 = 3: x1 = GICD_ISENABLER word, x2 = GICD_IPRIORITYR word,
- *               x3 = GICR_ISENABLER0, x4 = GICR_IPRIORITYR word 24..27,
+ *               x3 = GICR_ISENABLER0, x4 = GICR_IPRIORITYR word 24..27 (0x90332211),
  *               x6 = GICD_IROUTER (64-bit), x7 = GICD_IGROUPR word,
  *               x9 = GICR_WAKER, x15 = GICD_CTLR
  *   hvc x0 = 4: x1 = GICD_ISENABLER word after ICENABLER, x3 = GICR_ISENABLER0
@@ -71,9 +71,12 @@ _start:
     b.ne 2b
 3:  mov  w0, #0x8000000
     str  w0, [x13, #0x80]          /* GICR_IGROUPR0: PPI 27 in group 1 */
-    mov  w0, #0x90
     add  x17, x13, #0x400
-    strb w0, [x17, #27]            /* GICR_IPRIORITYR: PPI 27, one byte */
+    movz w0, #0x2211
+    movk w0, #0x4433, lsl #16
+    str  w0, [x17, #24]            /* GICR_IPRIORITYR 24..27: four lanes, all different */
+    mov  w0, #0x90
+    strb w0, [x17, #27]            /* then PPI 27 alone, one byte: its neighbours must keep theirs */
     mov  w0, #0x8000000
     str  w0, [x13, #0x100]         /* GICR_ISENABLER0 */
 

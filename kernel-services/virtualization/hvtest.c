@@ -1252,7 +1252,7 @@ bool selftest_el2_guest_gic_config(const char **reason)
     CHECK(x.hypercall.a0 == (1ull << 8));                       /* SPI 40 enabled: word 1, bit 8 */
     CHECK(x.hypercall.a1 == 0xA0u);                            /* its priority, lane 0 of its word */
     CHECK(x.hypercall.a2 == (1ull << 27));                      /* PPI 27 enabled in vCPU 1's frame */
-    CHECK(x.hypercall.a3 == 0x90000000u);                      /* its priority, written as one byte */
+    CHECK(x.hypercall.a3 == 0x90332211u);                      /* its priority, written as one byte, its three neighbours untouched */
     CHECK(vcpu_get_regs(v1, &regs) == 0);
     CHECK(regs.x[6] == 1);                                     /* routed to Aff0 = 1: the writer */
     CHECK(regs.x[7] == (1ull << 8));                           /* in group 1 */
