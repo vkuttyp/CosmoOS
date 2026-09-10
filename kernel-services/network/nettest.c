@@ -2529,3 +2529,152 @@ bool selftest_net_route(const char **reason)
     kinfo("selftest: net-route: longest-prefix connected routing picks the /24 over the /16");
     return true;
 }
+
+/* --- IP forwarding -------------------------------------------------------- */
+
+/* Teach the stack a neighbour `peer_ip`->`peer_mac` reachable on tap `t`, by
+ * feeding arp_input a request from that peer to the tap's own IP (a request
+ * addressed to us records the asker). The stack answers with a reply queued
+ * for the tap reader; nettest_recv_ip skips it. */
+static void nettest_seed_arp(struct netif *nif, uint32_t peer_ip, const uint8_t peer_mac[6])
+{
+    struct mbuf *f = m_getcl();
+    if (f == NULL)
+        return;
+    memset(f->data, 0, 28);
+    f->len = f->pkt.len = 28;
+    f->data[1] = 1;            /* htype Ethernet */
+    f->data[2] = 0x08;         /* ptype IPv4 */
+    f->data[4] = 6; f->data[5] = 4;
+    f->data[7] = 1;            /* op request */
+    memcpy(f->data + 8, peer_mac, 6);     /* sha = the neighbour */
+    memcpy(f->data + 14, &peer_ip, 4);    /* spa */
+    memcpy(f->data + 24, &nif->ip4.addr, 4);  /* tpa = us */
+    arp_input(nif, f);
+}
+
+/* Build an Ethernet+IPv4+UDP frame into buf; returns its length. The IP
+ * header checksum is valid (ipv4_input verifies it); the UDP checksum is
+ * left 0 (optional over IPv4) since forwarding does not inspect it. */
+static uint32_t nettest_build_udp(uint8_t *buf, const uint8_t dstmac[6], const uint8_t srcmac[6],
+                                  uint32_t sip, uint32_t dip, uint8_t ttl,
+                                  uint16_t sport, uint16_t dport, const uint8_t *pl, uint32_t pllen)
+{
+    struct eth_hdr *eh = (struct eth_hdr *)buf;
+    memcpy(eh->dst, dstmac, 6);
+    memcpy(eh->src, srcmac, 6);
+    eh->type = htons(ETH_P_IP);
+    struct ipv4_hdr *iph = (struct ipv4_hdr *)(buf + ETH_HLEN);
+    uint16_t total = (uint16_t)(sizeof(*iph) + sizeof(struct udp_hdr) + pllen);
+    iph->vhl = 0x45; iph->tos = 0; iph->len = htons(total);
+    iph->id = htons(0x1234); iph->frag = 0; iph->ttl = ttl;
+    iph->proto = IPPROTO_UDP; iph->cksum = 0; iph->src = sip; iph->dst = dip;
+    iph->cksum = in_cksum(iph, sizeof(*iph));
+    struct udp_hdr *uh = (struct udp_hdr *)(buf + ETH_HLEN + sizeof(*iph));
+    uh->sport = htons(sport); uh->dport = htons(dport);
+    uh->len = htons((uint16_t)(sizeof(*uh) + pllen)); uh->cksum = 0;
+    memcpy(buf + ETH_HLEN + sizeof(*iph) + sizeof(*uh), pl, pllen);
+    return ETH_HLEN + total;
+}
+
+/* The next IPv4 frame read back from tap `t`, skipping ARP the stack queued
+ * while resolving; NULL after ~500 ms of nothing. Caller frees it. */
+static struct mbuf *nettest_recv_ip(struct tap *t)
+{
+    for (unsigned i = 0; i < 50; i++) {
+        struct mbuf *m;
+        while ((m = tap_recv(t)) != NULL) {
+            uint8_t type[2];
+            if (m_copydata(m, 12, 2, type) && type[0] == 0x08 && type[1] == 0x00)
+                return m;   /* IPv4 */
+            m_freem(m);     /* an ARP reply from seeding: skip */
+        }
+        thread_sleep_ms(10);
+    }
+    return NULL;
+}
+
+bool selftest_net_forward(const char **reason)
+{
+    static const uint8_t g_gw_mac[6]  = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x01 };  /* guest-side tap */
+    static const uint8_t u_gw_mac[6]  = { 0x52, 0x54, 0x00, 0x02, 0x00, 0x01 };  /* uplink tap */
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x03, 0x00, 0x0f };  /* the guest neighbour */
+    static const uint8_t peer_mac[6]  = { 0x52, 0x54, 0x00, 0x02, 0x00, 0x63 };  /* a host on the uplink */
+    uint32_t mask = htonl(0xffffff00u);
+    /* Private subnets chosen to collide with neither the QEMU user-net NIC
+     * (10.0.2.0/24) nor the real tap0 (10.0.3.0/24), so netif_connected
+     * routes to these test taps and not to a live interface. */
+    uint32_t gw_ip = IPV4_ADDR(10, 77, 3, 1), guest_ip = IPV4_ADDR(10, 77, 3, 15);
+    uint32_t up_ip = IPV4_ADDR(10, 77, 4, 1), peer_ip = IPV4_ADDR(10, 77, 4, 99);
+
+    struct tap *g = tap_create("fwdg", gw_ip, mask, g_gw_mac);
+    CHECK(g != NULL);
+    struct tap *u = tap_create("fwdu", up_ip, mask, u_gw_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);   /* guest side forwards; uplink deliberately does not */
+
+    nettest_seed_arp(tap_netif(u), peer_ip, peer_mac);    /* so forwarding transmits at once */
+    nettest_seed_arp(tap_netif(g), guest_ip, guest_mac);
+
+    uint8_t payload[16];
+    for (unsigned i = 0; i < sizeof(payload); i++)
+        payload[i] = (uint8_t)(0xa0 + i);
+    uint8_t frame[128];
+
+    /* (1) a guest datagram to the uplink subnet is forwarded out the uplink,
+     * its TTL down one, its addresses and payload intact (no NAT yet). */
+    struct ip_stats s0, s1;
+    ipv4_get_stats(&s0);
+    uint32_t len = nettest_build_udp(frame, g_gw_mac, guest_mac, guest_ip, peer_ip, 64,
+                                     4000, 5000, payload, sizeof(payload));
+    CHECK(tap_inject(g, frame, len) == 0);
+    struct mbuf *out = nettest_recv_ip(u);
+    CHECK(out != NULL);
+    uint8_t hdr[ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr) + sizeof(payload)];
+    CHECK(m_copydata(out, 0, sizeof(hdr), hdr));
+    struct ipv4_hdr *oiph = (struct ipv4_hdr *)(hdr + ETH_HLEN);
+    CHECK(oiph->src == guest_ip && oiph->dst == peer_ip);
+    CHECK(oiph->ttl == 63);                                   /* decremented by one */
+    CHECK(in_cksum(oiph, sizeof(*oiph)) == 0);                /* checksum recomputed */
+    CHECK(memcmp(hdr + ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr),
+                 payload, sizeof(payload)) == 0);
+    m_freem(out);
+    ipv4_get_stats(&s1);
+    CHECK(s1.fwd == s0.fwd + 1);
+
+    /* (2) a TTL-1 datagram dies in transit: no frame on the uplink, an ICMP
+     * time-exceeded back to the guest instead. */
+    ipv4_get_stats(&s0);
+    len = nettest_build_udp(frame, g_gw_mac, guest_mac, guest_ip, peer_ip, 1,
+                            4001, 5000, payload, sizeof(payload));
+    CHECK(tap_inject(g, frame, len) == 0);
+    struct mbuf *err = nettest_recv_ip(g);
+    CHECK(err != NULL);
+    uint8_t ebuf[ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct icmp_hdr)];
+    CHECK(m_copydata(err, 0, sizeof(ebuf), ebuf));
+    struct ipv4_hdr *eiph = (struct ipv4_hdr *)(ebuf + ETH_HLEN);
+    CHECK(eiph->proto == IPPROTO_ICMP && eiph->dst == guest_ip);
+    struct icmp_hdr *eic = (struct icmp_hdr *)(ebuf + ETH_HLEN + sizeof(struct ipv4_hdr));
+    CHECK(eic->type == ICMP_TIME_EXCEEDED && eic->code == ICMP_TIMXCEED_INTRANS);
+    m_freem(err);
+    CHECK(nettest_recv_ip(u) == NULL);                       /* nothing forwarded */
+    ipv4_get_stats(&s1);
+    CHECK(s1.fwd_ttl_exceeded == s0.fwd_ttl_exceeded + 1);
+
+    /* (3) the gate: a datagram arriving on the non-forwarding uplink, bound
+     * for the guest subnet, is dropped as not-for-us -- never forwarded, so
+     * a real NIC's ingress cannot turn the host into a router. */
+    ipv4_get_stats(&s0);
+    len = nettest_build_udp(frame, u_gw_mac, peer_mac, peer_ip, guest_ip, 64,
+                            5000, 4000, payload, sizeof(payload));
+    CHECK(tap_inject(u, frame, len) == 0);
+    CHECK(nettest_recv_ip(g) == NULL);                       /* not forwarded to the guest */
+    ipv4_get_stats(&s1);
+    CHECK(s1.rx_not_for_us == s0.rx_not_for_us + 1 && s1.fwd == s0.fwd);
+
+    tap_destroy(u);
+    tap_destroy(g);
+    kinfo("selftest: net-forward: a guest datagram was forwarded (TTL 64->63), a TTL-1 datagram "
+          "drew a time-exceeded, and non-forwarding ingress stayed a non-router");
+    return true;
+}
