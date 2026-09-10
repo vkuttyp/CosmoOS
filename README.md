@@ -468,8 +468,9 @@ See [docs/development.md](docs/development.md).
   protocol carries the stub's address (version 5), the kernel reports
   `EL2 available`, and a new `el2` self-test hands the vectors over and
   back; `QEMU_EL2=0` still boots at EL1 with everything skipping
-  cleanly. 130 self-tests. The world switch, stage-2 translation, the
-  GIC list registers and timer offsets are the next unit.
+  cleanly. 130 self-tests. The world switch and stage-2 translation
+  came in the next entry; the GIC list registers and the timer offsets
+  became units of their own (the vGIC and the virtual timer, below).
 - **The AArch64 EL2 hypervisor backend (done):** guests now run
   on the EL2 the previous unit kept. A vendor-neutral seam came first —
   `struct cosmo_vcpu_regs` is per architecture (x86's registers on
@@ -951,7 +952,8 @@ See [docs/development.md](docs/development.md).
   `-vdist.md` did it for the other interrupt controller and then, one
   piece at a time, for an AArch64 guest's interrupts, timer and
   distributor (all built: a guest can run a stock GIC driver and be SMP).
-  `docs/audit/next-subsystem-vuart.md` does it for the guest's console:
+  The open report, under review as PR #77 and landing as
+  `docs/audit/next-subsystem-vuart.md`, does it for the guest's console:
   a guest can be interrupted, keep time and drive its GIC, and still
   cannot say a single character, because its store to the UART every
   `virt` kernel prints to first reaches its owner as an MMIO exit that
