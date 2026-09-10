@@ -57,6 +57,7 @@ enum hv_exit_kind {
     HV_EXIT_INTR,        /* a host interrupt arrived; nothing to do but run again */
     HV_EXIT_WFI,         /* AArch64: WFI/WFE, the HLT of this architecture */
     HV_EXIT_SYSREG,      /* AArch64: a trapped system-register access */
+    HV_EXIT_EMULATED,    /* the backend completed the access itself (a guest's own GIC); run again */
     HV_EXIT_FAIL,
 };
 
@@ -106,7 +107,9 @@ int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
 
 /* A vCPU starts at the architectural reset state (real mode, rip 0). */
-int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out);
+/* `index` is the vCPU's number within its VM: on AArch64 it is the MPIDR
+ * the guest reads and the redistributor frame that is its own. */
+int arch_hv_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out);
 void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v);
 void arch_hv_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *out);
 /* -EINVAL for a combination the hardware would refuse. */
@@ -151,12 +154,12 @@ uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v);
  * cannot answer it. */
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 
-/* Whether the guest's own timer expired during the last run, reported
- * once per expiry. The owner then injects `arch_hv_guest_timer_intid()`
- * like any other interrupt, so a guest's timer arrives through the same
- * path everything else does. False on an architecture whose guests have
- * no timer of their own (x86-64: stage 1 gives a guest no LAPIC). */
-bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v);
+/* Whether the guest's own interrupt controller holds an interrupt this
+ * vCPU can take -- pending, enabled and routed to it. The owner's own
+ * injections are counted separately (vintr); this is the other source,
+ * and anything that asks "is there something for this vCPU" must ask
+ * both. False where guests have no controller of their own. */
+bool arch_hv_vcpu_irq_waiting(struct arch_hv_vcpu *v);
 
 /* The interrupt number a guest's timer raises (AArch64: the GTDT's
  * virtual timer PPI, 27 on QEMU's virt). 0 where there is none. */

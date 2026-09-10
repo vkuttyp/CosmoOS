@@ -75,6 +75,9 @@ struct aarch64_irqc_ops {
      * firmware can create between wired interrupts and the MSI frame. */
     int  (*test_msi_overlap_gsi)(void);
     bool (*test_msi_per_device)(void);
+    /* The host distributor's enable bit for a line, so a test can see
+     * that a guest's distributor writes stayed in the guest's. */
+    int  (*test_enabled)(unsigned gsi);
 };
 
 /* Whether the live driver is the GICv3 one. Asked by the hypervisor,

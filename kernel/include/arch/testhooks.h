@@ -47,6 +47,10 @@ bool arch_test_fpu_get(uint8_t out[16]);
  * which is the point of the test. */
 int  arch_test_irq_spare_gsi(void);
 void arch_test_irq_raise(unsigned gsi);
+/* Whether the host's controller has `gsi` enabled: 1, 0, or -1 where it
+ * cannot say. For the test that a guest's writes to *its* distributor
+ * never reach the host's -- read before and after, it must not move. */
+int  arch_test_irq_is_enabled(unsigned gsi);
 
 /* A GSI the controller's MSI allocator would hand out next and that
  * nothing is bound to, or -1 where MSIs do not come out of the GSI

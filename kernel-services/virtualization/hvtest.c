@@ -1148,6 +1148,328 @@ bool selftest_el2_guest_timer_ontime(const char **reason)
     return true;
 }
 
+/* --- the guest's distributor ------------------------------------------- */
+
+static __maybe_unused bool skip_without_vdist(const char *name, const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    if (!hv_caps()->inject_irq) {
+        kinfo("selftest: %s: no virtual GIC, so no distributor here; skipping", name);
+        return true;
+    }
+    return false;
+}
+
+/*
+ * A guest that reads GICD_TYPER gets an answer and not a fault to its
+ * owner; the answer describes this distributor; and each of two vCPUs
+ * finds a redistributor frame that is its own, carrying its affinity,
+ * with Last on the frame of the higher one and not the lower. The MPIDR
+ * a vCPU reads is its index, on whatever host CPU it happened to run.
+ */
+bool selftest_el2_guest_gicd_probe(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gicd-probe", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0, *v1;
+    CHECK(make_guest("tests/hv/guest_gicd.bin", &vm, &v0) == 0);
+    CHECK(vcpu_create(vm, 1, &v1) == 0);          /* before either runs: both frames exist */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);      /* not MMIO: something answered */
+    CHECK(x.hypercall.nr == 7);
+    uint64_t typer = x.hypercall.a0;
+    unsigned lines = 32u * ((unsigned)(typer & 0x1Fu) + 1u);
+    CHECK(lines == 288);
+    CHECK(x.hypercall.a1 == 0x43Bu);              /* IIDR */
+    CHECK((x.hypercall.a2 & 0xF0u) == 0x30u);      /* PIDR2: a GICv3 */
+    uint64_t rtyper0 = x.hypercall.a3;
+    CHECK((rtyper0 >> 32) == 0);                   /* frame 0 carries Aff0 = 0 */
+    CHECK(((rtyper0 >> 8) & 0xFFFFu) == 0);        /* processor number 0 */
+    CHECK((rtyper0 & (1u << 4)) == 0);             /* not Last: vCPU 1's frame follows */
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    CHECK((regs.x[5] & 0xFFu) == 0 && (regs.x[5] & (1ull << 31)) != 0);   /* MPIDR: vCPU 0 */
+
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    uint64_t rtyper1 = x.hypercall.a3;
+    CHECK((rtyper1 >> 32) == 1);                   /* frame 1 carries Aff0 = 1 */
+    CHECK(((rtyper1 >> 8) & 0xFFFFu) == 1);
+    CHECK((rtyper1 & (1u << 4)) != 0);             /* and it is the last */
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    CHECK((regs.x[5] & 0xFFu) == 1);
+
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-gicd-probe: GICD_TYPER 0x%llx (%u lines), two vCPUs each found their frame",
+          (unsigned long long)typer, lines);
+    return true;
+}
+
+/*
+ * The register file returns what was written, through each access size
+ * a driver uses (a 64-bit route, 32-bit words, a single priority byte),
+ * a set/clear pair acts on one state, and the state is where the
+ * architecture puts it: an SPI's is the VM's and any vCPU reads it, a
+ * PPI's is one redistributor's and a sibling's frame does not show it.
+ * vCPU 1 configures, so the route it writes -- its own affinity -- reads
+ * back as 1 and not as the zero an unimplemented register would give.
+ */
+bool selftest_el2_guest_gic_config(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gic-config", reason))
+        return true;
+    const void *probe;
+    size_t probe_len;
+    CHECK(bootarchive_find("tests/hv/guest_gicd.bin", &probe, &probe_len));
+    struct vm *vm;
+    struct vcpu *v0, *v1;
+    CHECK(make_guest("tests/hv/guest_gicc.bin", &vm, &v0) == 0);
+    CHECK(vm_mem_write(vm, 0x20000, probe, probe_len) == 0);   /* the prober, for vCPU 0 */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    regs.pc = 0x20000;
+    regs.x[8] = 40;
+    CHECK(vcpu_set_regs(v0, &regs) == 0);
+    CHECK(vcpu_create(vm, 1, &v1) == 0);
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;                                        /* the configurer */
+    regs.x[8] = 40;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 3);
+    CHECK(x.hypercall.a0 == (1ull << 8));                       /* SPI 40 enabled: word 1, bit 8 */
+    CHECK(x.hypercall.a1 == 0xA0u);                            /* its priority, lane 0 of its word */
+    CHECK(x.hypercall.a2 == (1ull << 27));                      /* PPI 27 enabled in vCPU 1's frame */
+    CHECK(x.hypercall.a3 == 0x90332211u);                      /* its priority, written as one byte, its three neighbours untouched */
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    CHECK(regs.x[6] == 1);                                     /* routed to Aff0 = 1: the writer */
+    CHECK(regs.x[7] == (1ull << 8));                           /* in group 1 */
+    CHECK(regs.x[9] == 0);                                     /* awake, and its children with it */
+    CHECK(regs.x[15] == 0x53u);                                /* CTLR as written, plus DS */
+
+    /* vCPU 0 looks: the SPI's enable is the VM's and it sees it; the
+     * PPI's is vCPU 1's frame's and its own frame shows none. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    CHECK(regs.x[6] == (1ull << 8));
+    CHECK(regs.x[7] == 0);
+
+    /* Clearing through ICENABLER clears what ISENABLER set, and only that. */
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 4);
+    CHECK(x.hypercall.a0 == 0);
+    CHECK(x.hypercall.a2 == (1ull << 27));
+
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-gic-config: SPI 40 and PPI 27 configured and read back through 64-, 32- and 8-bit accesses");
+    return true;
+}
+
+/* Run until the guest's hypercall `want`, allowing only the numbers in
+ * `allowed` (a bitmask over 0..63) on the way; each stop is one guest
+ * exit. Fails the bound, or an unexpected number, by returning false. */
+static __maybe_unused bool run_until(struct vcpu *v, struct cosmo_vm_exit *x, unsigned want, uint64_t allowed,
+                                     unsigned bound, unsigned *steps)
+{
+    for (unsigned i = 0; i < bound; i++) {
+        if (vcpu_run(v, x) != 0 || x->kind != COSMO_VM_EXIT_HYPERCALL)
+            return false;
+        if (steps)
+            (*steps)++;
+        if (x->hypercall.nr == want)
+            return true;
+        if (x->hypercall.nr >= 64 || !(allowed & (1ull << x->hypercall.nr)))
+            return false;
+    }
+    return false;
+}
+
+/*
+ * The whole thing, the ordinary way: a guest switches on its distributor,
+ * wakes its redistributor, groups, prioritises and enables its timer PPI
+ * there, routes and enables an SPI in the distributor, then turns on its
+ * CPU interface -- and its timer arrives through the controller it
+ * configured. Then the part only a distributor can show: with the PPI
+ * disabled in the redistributor the next expiry is *held*, not delivered,
+ * past its deadline; re-enabling releases it. Last, an SPI the guest
+ * makes pending by hand through ISPENDR arrives at the vCPU its route
+ * names. Direct injection could pass the first phase; it cannot pass the
+ * second, which is the phase that proves the enable bit gates delivery.
+ */
+bool selftest_el2_guest_gic_timer(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gic-timer", reason))
+        return true;
+    if (arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-gic-timer: no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_gic.bin", &vm, &v) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.x[8] = 40;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);     /* configured, ready */
+
+    /* Phase A: the timer, through the redistributor the guest enabled it in. */
+    unsigned beats = 0;
+    CHECK(run_until(v, &x, intid, (1ull << 2), 20000, &beats));
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);                         /* ENABLE and ISTATUS, as the handler saw it */
+    CHECK(run_until(v, &x, 3, (1ull << 2), 4, NULL));               /* re-armed, PPI disabled */
+    uint64_t rearmed_at = x.hypercall.a0, cval = x.hypercall.a1;
+    CHECK(cval > rearmed_at);
+
+    /* Phase B: past the deadline with the PPI disabled -- heartbeats only,
+     * no handler. The guest's own count of handler runs must be zero. */
+    unsigned held = 0;
+    CHECK(run_until(v, &x, 5, (1ull << 4), 200000, &held));
+    CHECK(x.hypercall.a0 == 0);
+
+    /* Phase C: re-enabled; the held expiry arrives, and it is the timer. */
+    unsigned released = 0;
+    CHECK(run_until(v, &x, intid, (1ull << 6), 2000, &released));
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);
+
+    /* Phase D: an SPI made pending by the guest, routed to itself. */
+    CHECK(run_until(v, &x, 40, (1ull << 6) | (1ull << 7), 2000, NULL));
+    CHECK(run_until(v, &x, 8, (1ull << 7), 4, NULL));
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-gic-timer: PPI %u after %u beat(s); held through %u beat(s) while disabled, released after %u; SPI 40 by ISPENDR",
+          intid, beats, held, released);
+    return true;
+}
+
+/*
+ * A guest can be SMP: vCPU 0 writes ICC_SGI1R_EL1 naming SGI 3 for the
+ * CPU whose Aff0 is 1, and vCPU 1's handler runs with INTID 3 on a CPU
+ * whose MPIDR says 1. Untrapped, the write would go to the host's GIC or
+ * nowhere and vCPU 1 would wait forever -- the hang an SMP kernel would
+ * hit bringing up its second CPU. And it is routed, not broadcast: vCPU
+ * 0, which was not in the target list, does not take it.
+ */
+bool selftest_el2_guest_sgi(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-sgi", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0, *v1;
+    CHECK(make_guest("tests/hv/guest_sgi.bin", &vm, &v0) == 0);
+    CHECK(vcpu_create(vm, 1, &v1) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+
+    /* Both ready, each knowing who it is. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1 && (x.hypercall.a0 & 0xFFu) == 0);
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1 && (x.hypercall.a0 & 0xFFu) == 1);
+
+    /* vCPU 0 sends and says so; the write did not reach its owner. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+
+    /* vCPU 1 takes it: INTID 3, in a handler running as Aff0 = 1. */
+    unsigned beats = 0;
+    CHECK(run_until(v1, &x, 3, (1ull << 2), 100, &beats));
+    CHECK((x.hypercall.a0 & 0xFFu) == 1);
+    CHECK(vcpu_run(v1, &x) == 0);                                   /* completes, back to its heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+
+    /* vCPU 0 was not a target and never sees it. */
+    for (unsigned i = 0; i < 20; i++) {
+        CHECK(vcpu_run(v0, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    }
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-sgi: vCPU 0 sent SGI 3 to Aff0 1; vCPU 1 took it after %u beat(s), vCPU 0 never did", beats);
+    return true;
+}
+
+/*
+ * A guest's distributor writes land in its VM's distributor and nowhere
+ * else. Nowhere else has two readers: the host, whose physical GICD sits
+ * at the very address the guest wrote to and whose enable bit for that
+ * line must not move (a model that "helpfully" wrote through to hardware
+ * so a device could fire would fail here); and a second VM, whose own
+ * fresh distributor must show none of what the first configured (a model
+ * with one static register file for all VMs would fail here). The line is
+ * the host's spare SPI, so what the host's bit reads is not an accident
+ * of some device having enabled it already.
+ */
+bool selftest_el2_guest_gicd_isolated(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gicd-isolated", reason))
+        return true;
+    int spare = arch_test_irq_spare_gsi();
+    if (spare < 32 || spare >= 288) {
+        kinfo("selftest: el2-guest-gicd-isolated: no spare SPI a guest's distributor also has; skipping");
+        return true;
+    }
+    int host_before = arch_test_irq_is_enabled((unsigned)spare);
+    CHECK(host_before >= 0);
+
+    /* VM A configures the line in its distributor, and sees it there. */
+    struct vm *vm_a, *vm_b;
+    struct vcpu *va, *vb;
+    CHECK(make_guest("tests/hv/guest_gicc.bin", &vm_a, &va) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(va, &regs) == 0);
+    regs.x[8] = (uint64_t)spare;
+    CHECK(vcpu_set_regs(va, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(va, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 3);
+    CHECK(x.hypercall.a0 == (1ull << (spare % 32)));
+    CHECK(regs.x[8] == (uint64_t)spare);
+
+    /* The host's line did not move. */
+    CHECK(arch_test_irq_is_enabled((unsigned)spare) == host_before);
+
+    /* VM B looks at the same registers of its own distributor: nothing. */
+    CHECK(make_guest("tests/hv/guest_gicd.bin", &vm_b, &vb) == 0);
+    CHECK(vcpu_get_regs(vb, &regs) == 0);
+    regs.x[8] = (uint64_t)spare;
+    CHECK(vcpu_set_regs(vb, &regs) == 0);
+    CHECK(vcpu_run(vb, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK(vcpu_get_regs(vb, &regs) == 0);
+    CHECK(regs.x[6] == 0);                                  /* the SPI: not enabled here */
+    CHECK(regs.x[7] == 0);                                  /* the PPI: not here either */
+
+    drop_guest(vm_b, vb);
+    drop_guest(vm_a, va);
+    CHECK(arch_test_irq_is_enabled((unsigned)spare) == host_before);
+    kinfo("selftest: el2-guest-gicd-isolated: VM A enabled SPI %d in its distributor; the host's bit stayed %d and VM B saw 0",
+          spare, host_before);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1260,6 +1582,11 @@ bool selftest_el2_guest_timer_offset(const char **reason) { (void)reason; return
 bool selftest_el2_guest_phys_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_timer_ontime(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gicd_probe(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gic_config(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gicd_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

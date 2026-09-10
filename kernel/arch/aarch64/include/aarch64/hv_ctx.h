@@ -86,6 +86,7 @@
  * switch.
  */
 #define HV_CTX_HOST_CNTHCTL 0x368
+#define HV_CTX_VMPIDR       0x370   /* VMPIDR_EL2: the MPIDR this vCPU reads, Aff0 = its index */
 
 /* The EL1 system registers the switch moves, in this order. */
 #define HV_CTX_SYS_COUNT 20
@@ -125,6 +126,7 @@ struct hv_ctx {
     uint64_t vgic_ap0r0, vgic_ap1r0;
     uint64_t cntv_ctl, cntv_cval, cntvoff;
     uint64_t host_cnthctl;
+    uint64_t vmpidr;
 };
 
 _Static_assert(sizeof(struct hv_sysregs) == HV_CTX_SYS_COUNT * 8, "hv_sysregs order");
@@ -158,6 +160,7 @@ _Static_assert(__builtin_offsetof(struct hv_ctx, cntv_ctl) == HV_CTX_CNTV_CTL, "
 _Static_assert(__builtin_offsetof(struct hv_ctx, cntv_cval) == HV_CTX_CNTV_CVAL, "ctx cntv cval");
 _Static_assert(__builtin_offsetof(struct hv_ctx, cntvoff) == HV_CTX_CNTVOFF, "ctx cntvoff");
 _Static_assert(__builtin_offsetof(struct hv_ctx, host_cnthctl) == HV_CTX_HOST_CNTHCTL, "ctx host cnthctl");
+_Static_assert(__builtin_offsetof(struct hv_ctx, vmpidr) == HV_CTX_VMPIDR, "ctx vmpidr");
 _Static_assert(sizeof(struct hv_ctx) <= 4096, "the context is one page");
 
 /* The EL2 vector table this backend installs through el2_set_vectors. */

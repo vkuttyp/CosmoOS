@@ -71,7 +71,7 @@ static void svm_be_vm_destroy(struct arch_hv_vm *vm);
 static int svm_be_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len, unsigned prot);
 static int svm_be_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len);
 static bool svm_be_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa);
-static int svm_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out);
+static int svm_be_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out);
 static void svm_be_vcpu_destroy(struct arch_hv_vcpu *v);
 static bool svm_be_vcpu_xstate_enabled(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o);
@@ -86,12 +86,6 @@ static void svm_be_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip);
 static uint64_t svm_be_vcpu_rip(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size);
 static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
-/* Stage 1 gives an x86 guest no timer of its own: nothing to expire. */
-static bool svm_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
-{
-    (void)v;
-    return false;
-}
 
 static bool svm_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
 {
@@ -324,8 +318,9 @@ static void vmcb_reset(struct arch_hv_vcpu *v)
     memcpy(v->fpu, x86_fpu_reset_image(), x86_fpu_info()->area_size);
 }
 
-static int svm_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
+static int svm_be_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
 {
+    (void)index;   /* an x86 vCPU's identity is its APIC id, which the owner sets */
     if (!g_caps.present)
         return -ENOTSUP;
     struct arch_hv_vcpu *v = kzalloc(sizeof(*v));
@@ -761,7 +756,6 @@ const struct hv_backend svm_backend = {
     .vcpu_run = svm_be_vcpu_run,
     .vcpu_set_irq = svm_be_vcpu_set_irq,
     .vcpu_irq_delivered = svm_be_vcpu_irq_delivered,
-    .vcpu_timer_expired = svm_be_vcpu_timer_expired,
     .vcpu_timer_deadline = svm_be_vcpu_timer_deadline,
     .vcpu_inject_exception = svm_be_vcpu_inject_exception,
     .vcpu_advance_rip = svm_be_vcpu_advance_rip,

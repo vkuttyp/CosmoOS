@@ -52,7 +52,10 @@ int arch_hv_vm_map(struct arch_hv_vm *vm, uint64_t gpa, paddr_t hpa, size_t len,
 int arch_hv_vm_unmap(struct arch_hv_vm *vm, uint64_t gpa, size_t len) { return g_be->vm_unmap(vm, gpa, len); }
 bool arch_hv_vm_query(struct arch_hv_vm *vm, uint64_t gpa, paddr_t *hpa) { return g_be->vm_query(vm, gpa, hpa); }
 
-int arch_hv_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out) { return g_be->vcpu_create(vm, out); }
+int arch_hv_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
+{
+    return g_be->vcpu_create(vm, index, out);
+}
 void arch_hv_vcpu_destroy(struct arch_hv_vcpu *v) { g_be->vcpu_destroy(v); }
 void arch_hv_vcpu_get_state(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *o) { g_be->vcpu_get_state(v, o); }
 int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *i)
@@ -92,7 +95,11 @@ uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v)
     return ~0ull;
 }
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
-bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v) { return g_be->vcpu_timer_expired(v); }
+bool arch_hv_vcpu_irq_waiting(struct arch_hv_vcpu *v)
+{
+    (void)v;
+    return false;   /* stage 1 gives an x86 guest no interrupt controller of its own */
+}
 bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *t) { return g_be->vcpu_timer_deadline(v, t); }
 unsigned arch_hv_guest_timer_intid(void) { return 0; }   /* no guest timer in stage 1 */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)

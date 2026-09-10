@@ -27,6 +27,25 @@
 _start:
     adr  x0, vectors
     msr  vbar_el1, x0
+    /* The timer's PPI, in the redistributor: a kernel enables it there,
+     * and so does this guest, or the expiry it arms would stay pending
+     * in a controller that was never told to forward it. */
+    movz x10, #0x0800, lsl #16     /* GICD */
+    mov  w0, #0x13
+    str  w0, [x10]                 /* GICD_CTLR: affinity routing, group 1 on */
+    mrs  x11, mpidr_el1
+    and  x11, x11, #0xFF
+    lsl  x11, x11, #17
+    movz x12, #0x080A, lsl #16
+    add  x11, x11, x12             /* my redistributor, by my MPIDR */
+    ldr  w0, [x11, #0x14]
+    bic  w0, w0, #2
+    str  w0, [x11, #0x14]          /* GICR_WAKER: awake */
+    movz x12, #0x1, lsl #16
+    add  x12, x11, x12             /* its SGI_base */
+    mov  w0, #0x8000000
+    str  w0, [x12, #0x80]          /* GICR_IGROUPR0: PPI 27 in group 1 */
+    str  w0, [x12, #0x100]         /* GICR_ISENABLER0: PPI 27 on */
     mov  x0, #1
     msr  icc_sre_el1, x0
     isb

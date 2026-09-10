@@ -527,8 +527,9 @@ static void vmx_state_reset(struct arch_hv_vcpu *v)
     memcpy(v->fpu, x86_fpu_reset_image(), x86_fpu_info()->area_size);
 }
 
-static int vmx_be_vcpu_create(struct arch_hv_vm *vm, struct arch_hv_vcpu **out)
+static int vmx_be_vcpu_create(struct arch_hv_vm *vm, unsigned index, struct arch_hv_vcpu **out)
 {
+    (void)index;   /* an x86 vCPU's identity is its APIC id, which the owner sets */
     if (!g_caps.present)
         return -ENOTSUP;
     struct arch_hv_vcpu *v = kzalloc(sizeof(*v));
@@ -743,14 +744,6 @@ static uint64_t vmx_be_vcpu_rip(struct arch_hv_vcpu *v)
 static void vmx_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
 {
     v->offered = vector;
-}
-
-/* See svm.c: nothing holds an x86 interrupt across a run. */
-/* Stage 1 gives an x86 guest no timer of its own: nothing to expire. */
-static bool vmx_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
-{
-    (void)v;
-    return false;
 }
 
 static bool vmx_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
@@ -1123,7 +1116,6 @@ const struct hv_backend vmx_backend = {
     .vcpu_run = vmx_be_vcpu_run,
     .vcpu_set_irq = vmx_be_vcpu_set_irq,
     .vcpu_irq_delivered = vmx_be_vcpu_irq_delivered,
-    .vcpu_timer_expired = vmx_be_vcpu_timer_expired,
     .vcpu_timer_deadline = vmx_be_vcpu_timer_deadline,
     .vcpu_inject_exception = vmx_be_vcpu_inject_exception,
     .vcpu_advance_rip = vmx_be_vcpu_advance_rip,

@@ -260,6 +260,11 @@ el2_sync:
     mrs x2, cnthctl_el2
     str x2, [x18, #HV_CTX_HOST_CNTHCTL]
     msr cnthctl_el2, xzr
+    /* Who the guest is: MPIDR_EL1 at EL1 reads VMPIDR_EL2, and a vCPU
+     * must read the same identity on every host CPU it lands on, or
+     * the redistributor it finds and the SGIs sent to it disagree. */
+    ldr x2, [x18, #HV_CTX_VMPIDR]
+    msr vmpidr_el2, x2
     isb
 
     /* Guest general-purpose registers; x18 last, from itself. */
@@ -378,6 +383,8 @@ el2_exit:
     msr cntvoff_el2, xzr
     ldr x2, [x18, #HV_CTX_HOST_CNTHCTL]
     msr cnthctl_el2, x2              /* the host may see its own clock again */
+    mrs x2, mpidr_el1                /* at EL2 this is the physical one: the host is itself again */
+    msr vmpidr_el2, x2
     isb
 
     /* Back to the host: stage 2 off, its EL1 state and its registers. */

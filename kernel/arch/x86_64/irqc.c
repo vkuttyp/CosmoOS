@@ -173,6 +173,12 @@ void arch_test_irq_raise(unsigned gsi)
     (void)gsi;
 }
 
+int arch_test_irq_is_enabled(unsigned gsi)
+{
+    (void)gsi;
+    return -1;   /* no guest has a distributor here to be isolated from */
+}
+
 /* An x86 MSI carries a vector, not a GSI, so no I/O APIC line can be
  * taken by one and there is nothing to collide. */
 int arch_test_msi_overlap_gsi(void)
