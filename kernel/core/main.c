@@ -25,6 +25,7 @@
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/module.h>
+#include <kernel/net/tap.h>
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
 #include <kernel/futex.h>
@@ -184,6 +185,7 @@ void kernel_main(const struct cosmoboot_info *info)
 
     /* Virtualization: probe the backend and run its self-check guest (needs interrupts). */
     hv_init();
+    tap_dev_init();   /* /dev/net/tap: the owner's bridge to the host stack */
     arch_console_input_init();
 
     /* Bring up the other CPUs now that this one can take interrupts:

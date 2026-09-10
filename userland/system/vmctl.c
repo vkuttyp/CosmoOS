@@ -36,7 +36,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
-                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] [--net loop] "
+                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] [--net loop | --net tap] "
                     "[--append CMDLINE] IMAGE\n");
     return 2;
 }
@@ -298,14 +298,15 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
 
 struct vnet_dev {
     int vm;
-    int present;                          /* --net loop given */
+    int present;                          /* --net loop or --net tap given */
+    int tap_fd;                           /* >= 0 in --net tap: the /dev/net/tap channel */
     uint32_t feat_sel, status, queue_sel;
     struct vq_queue rq, tq;               /* receive (queue 0), transmit (queue 1) */
     int irq_pending;
     int draining;
     uint8_t mac[6];
     struct { uint8_t buf[VNET_FRAME_MAX]; uint32_t len; } wire[VNET_WIRE_SLOTS];
-    unsigned wire_head, wire_count;       /* the loopback FIFO */
+    unsigned wire_head, wire_count;       /* the loopback FIFO (--net loop) */
 };
 
 static struct vnet_dev g_vnet;
@@ -328,6 +329,10 @@ static int vnet_wire_tx(void *c, const void *frame, uint32_t len)
     struct vnet_dev *d = c;
     if (len > VNET_FRAME_MAX)
         return -1;
+    if (d->tap_fd >= 0) {                            /* --net tap: write the channel */
+        ssize_t n = write(d->tap_fd, frame, len);
+        return n == (ssize_t)len ? 0 : 0;           /* a short write is a drop, like a full wire */
+    }
     if (d->wire_count == VNET_WIRE_SLOTS)
         return 0;                                   /* dropped, not an error */
     unsigned slot = (d->wire_head + d->wire_count) % VNET_WIRE_SLOTS;
@@ -339,6 +344,10 @@ static int vnet_wire_tx(void *c, const void *frame, uint32_t len)
 static int vnet_wire_rx(void *c, void *buf, uint32_t max)
 {
     struct vnet_dev *d = c;
+    if (d->tap_fd >= 0) {                            /* --net tap: read the channel (0 = none now) */
+        ssize_t n = read(d->tap_fd, buf, max);
+        return n > 0 ? (int)n : 0;
+    }
     if (d->wire_count == 0)
         return 0;
     uint32_t len = d->wire[d->wire_head].len;
@@ -528,7 +537,8 @@ static int run_machine(int argc, char **argv)
     unsigned long mem_mib = 16;
     unsigned nr_cpus = 1;
     const char *bootargs = NULL, *disk = NULL;
-    int disk_writable = 0, net_loop = 0;
+    int disk_writable = 0;
+    const char *net = NULL;   /* "loop" or "tap" */
     int i = 0;
     while (i < argc && argv[i][0] == '-') {
         if (i + 1 >= argc)
@@ -545,9 +555,9 @@ static int run_machine(int argc, char **argv)
             disk = argv[i + 1];
             disk_writable = strcmp(argv[i], "--disk-rw") == 0;
         } else if (strcmp(argv[i], "--net") == 0) {
-            if (strcmp(argv[i + 1], "loop") != 0)
-                return usage();   /* only the loopback wire, for now */
-            net_loop = 1;
+            if (strcmp(argv[i + 1], "loop") != 0 && strcmp(argv[i + 1], "tap") != 0)
+                return usage();   /* the loopback wire, or the host tap */
+            net = argv[i + 1];
         } else
             return usage();
         i += 2;
@@ -653,20 +663,29 @@ static int run_machine(int argc, char **argv)
         off_t end = lseek(g_vio.disk_fd, 0, SEEK_END);
         g_vio.capacity = end > 0 ? (uint64_t)end / 512u : 0;
     }
-    /* The virtio-net device: a loopback wire. Without --net the transport
-     * reports DeviceID 0 and the guest's driver skips the node. */
+    /* The virtio-net device: a loopback wire (--net loop) or the host stack
+     * through /dev/net/tap (--net tap). Without --net the transport reports
+     * DeviceID 0 and the guest's driver skips the node. */
     memset(&g_vnet, 0, sizeof(g_vnet));
     g_vnet.vm = m.vm;
-    if (net_loop) {
+    g_vnet.tap_fd = -1;
+    if (net != NULL) {
         g_vnet.present = 1;
         const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };   /* locally administered */
         memcpy(g_vnet.mac, mac, 6);
+        if (strcmp(net, "tap") == 0) {
+            g_vnet.tap_fd = open("/dev/net/tap", O_RDWR);
+            if (g_vnet.tap_fd < 0) {
+                fprintf(stderr, "vmctl: /dev/net/tap: %s\n", strerror(errno));
+                return 1;
+            }
+        }
     }
     printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx%s%s\n",
            path, len, (unsigned long long)load, has_header ? "Image header" : "flat", mem_mib,
            (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa,
            disk ? (disk_writable ? ", virtio-blk /dev/vda (rw)" : ", virtio-blk /dev/vda (ro)") : "",
-           net_loop ? ", virtio-net eth0 (loop)" : "");
+           net ? (g_vnet.tap_fd >= 0 ? ", virtio-net eth0 (tap)" : ", virtio-net eth0 (loop)") : "");
 
     /* One thread, every running vCPU in turn, a tick each. A vCPU that
      * asks for an interrupt (WFI) gives up its turn; its next comes round. */
@@ -682,6 +701,11 @@ static int run_machine(int argc, char **argv)
             g_vio.draining = 0;
         if (g_vnet.draining && vnet_service(&g_vnet) <= 0)
             g_vnet.draining = 0;
+        /* A tap delivers host->guest frames at any time, not only on a guest
+         * kick, so poll it every turn: vnet_service reads the channel into any
+         * posted receive buffer and drains pending transmits. */
+        if (g_vnet.tap_fd >= 0)
+            vnet_service(&g_vnet);
         unsigned nr_running = 0;
         for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
             nr_running += m.running[c] ? 1 : 0;

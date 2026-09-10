@@ -19,6 +19,7 @@
 #define NETIF_LOOPBACK (1u << 1)
 #define NETIF_NOARP    (1u << 2)
 #define NETIF_GONE     (1u << 3)   /* netif_unregister ran: no transmit, no receive */
+#define NETIF_NODEFAULT (1u << 4)  /* never the machine's default interface (a tap: a point-to-point owner link) */
 
 /* nif->caps, set by the driver before netif_register (unit 11). */
 #define NETIF_CAP_TXCSUM (1u << 0)   /* finishes NET_CSUM_* transport checksums (virtio NEEDS_CSUM) */

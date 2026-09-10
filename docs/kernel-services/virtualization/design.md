@@ -769,11 +769,47 @@ skips the node.
 
 Proven end to end in the harness (`el2-virtq-net`: a guest transmits a
 frame and receives it back) and exhaustively on the host (`test_vnet_dev`:
-the transmit and receive walks and their hostile-ring refusals). Not done,
-and named: a real host network (bridging the guest's frames to the host's
-stack -- the next unit, and where the host userland's raw-frame API is
-designed); offloads and mergeable receive buffers; the control queue and
+the transmit and receive walks and their hostile-ring refusals). The wire's
+far end, a loopback here, is the host stack in the next section. Not done,
+and named: offloads and mergeable receive buffers; the control queue and
 multiqueue; a PCI transport.
+
+### The host bridge: a tap and a frame channel (`tap.c`, `vmctl --net tap`)
+
+The virtio-net wire loops back; this connects its far end to the host's own
+stack, so the guest reaches the host. A **tap** (`kernel-services/network/tap.c`)
+is a `netif` whose far end is userland: its `transmit` -- the stack sending
+a frame out the interface -- queues the frame for a reader rather than
+putting it on a wire, and `tap_inject` hands a frame from the writer to
+`netif_rx` as a driver's completion would. The stack does everything else,
+over an interface whose driver is a reader and a writer: it ARPs on the tap,
+routes to its subnet, answers what is addressed to its IP. A bounded queue
+drops when full.
+
+The owner reaches the tap through **`/dev/net/tap`**, a character device
+(as `/dev/vmm` is): `read` returns one frame the stack transmitted out the
+tap (0 when none waits, a frame never being zero-length, so the owner polls
+it in its run loop as it drains the console), `write` injects one from the
+guest. It is backed by one `tap0`, created down at boot and brought up when
+the owner first uses it; a tap is marked never-default (`NETIF_NODEFAULT`),
+so even left up -- there is no close hook to bring it down again -- it is
+never the machine's route to the world and cannot swallow the host's
+outbound traffic. The tap sits on `10.0.3.0/24`, a subnet of its own (a NIC
+autoconfigures to `10.0.2.0/24`, and two interfaces on one subnet route
+ambiguously). A
+per-open create/destroy lifecycle would need chrdev open/close hooks the
+ramfs does not have, so one persistent `tap0` serves one guest.
+
+`vmctl --net tap` points the virtio-net device's wire at the channel --
+`wire_tx` writes it, the run loop polls `read` into `wire_rx` -- the device
+otherwise unchanged. Proven in the harness by the `tap` selftest (a frame
+out the tap read back, an injected ARP answered by the stack, the queue
+capped) and `el2-tap-host` (a guest's ARP request crossing virtio-net and
+the bridge into the real stack, which answers on the tap). A stock Linux
+bringing `eth0` up on `10.0.3.15` and reaching the host is the
+`QEMU_MEM=2G` reproduction. Not done, and named: reaching beyond the host
+(NAT, routing, DHCP, DNS -- the next unit); L2 bridging onto the host's
+physical LAN; raw/packet sockets for general userland.
 
 ### Guest memory (`guestmem.c`)
 

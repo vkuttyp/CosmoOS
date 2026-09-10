@@ -185,6 +185,7 @@ bool selftest_cosmofs_badmap(const char **reason);     /* a crafted inode's dire
 bool selftest_net_mbuf(const char **reason);
 bool selftest_net_cksum(const char **reason);
 bool selftest_net_arp(const char **reason);
+bool selftest_tap(const char **reason);
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
@@ -253,6 +254,7 @@ bool selftest_el2_guest_idreg(const char **reason);
 bool selftest_el2_vm_raise_spi(const char **reason);
 bool selftest_el2_virtq_device(const char **reason);
 bool selftest_el2_virtq_net(const char **reason);      /* a guest drives a virtio-mmio network device, a frame looped back */
+bool selftest_el2_tap_host(const char **reason);   /* a guest ARP crosses virtio-net + the bridge into the host stack */
 bool selftest_el2_guest_spin(const char **reason);
 bool selftest_hv_npt(const char **reason);
 bool selftest_hv_guest_pio(const char **reason);

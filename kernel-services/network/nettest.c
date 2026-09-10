@@ -12,6 +12,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
@@ -2402,4 +2403,100 @@ bool selftest_net_nicbench(const char **reason)
     }
     netif_put(first);
     return ok;
+}
+
+/* tap: an interface whose far end is userland. A frame the stack transmits
+ * out the tap is read back; an ARP request injected for the tap's own IP is
+ * answered by the stack out the tap; the transmit queue caps rather than
+ * grows without bound. The owner's frame channel and the guest are proved
+ * elsewhere (the /dev/net/tap device and el2-tap-host); this is the tap
+ * itself against the real stack. */
+bool selftest_tap(const char **reason)
+{
+    static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
+    uint32_t host_ip = IPV4_ADDR(10, 0, 3, 1), guest_ip = IPV4_ADDR(10, 0, 3, 15);
+    struct tap *t = tap_create("taptest", host_ip, htonl(0xffffff00u), host_mac);
+    CHECK(t != NULL);
+    struct netif *nif = tap_netif(t);
+
+    /* a tap is a point-to-point owner link, never the machine's default
+     * interface -- even brought up, so a persistent tap0 with no close hook
+     * cannot swallow the host's outbound traffic. */
+    struct netif *def = netif_default();
+    CHECK(def != nif);
+    if (def)
+        netif_put(def);
+
+    /* (1) stack -> tap: a frame transmitted out the tap is there to read. */
+    struct mbuf *m = m_getcl();
+    CHECK(m != NULL);
+    uint8_t probe[64];
+    memset(probe, 0, sizeof(probe));
+    memcpy(probe, guest_mac, 6);
+    memcpy(probe + 6, host_mac, 6);
+    probe[12] = 0x08;
+    for (unsigned i = 14; i < 64; i++)
+        probe[i] = (uint8_t)i;
+    memcpy(m->data, probe, 64);
+    m->len = m->pkt.len = 64;
+    CHECK(netif_transmit(nif, m) == 0);
+    struct mbuf *got = tap_recv(t);
+    CHECK(got != NULL);
+    uint8_t out[64];
+    CHECK(m_copydata(got, 0, 64, out) && memcmp(out, probe, 64) == 0);
+    m_freem(got);
+    CHECK(tap_recv(t) == NULL);
+
+    /* (2) tap -> stack -> tap: an ARP request for the tap's IP is answered. */
+    uint8_t req[42];
+    memset(req, 0, sizeof(req));
+    memset(req, 0xff, 6);                 /* dst broadcast */
+    memcpy(req + 6, guest_mac, 6);        /* src */
+    req[12] = 0x08; req[13] = 0x06;       /* ethertype ARP */
+    req[15] = 1;                          /* htype Ethernet */
+    req[16] = 0x08;                       /* ptype IPv4 */
+    req[18] = 6; req[19] = 4;             /* hlen, plen */
+    req[21] = 1;                          /* op request */
+    memcpy(req + 22, guest_mac, 6);       /* sha */
+    memcpy(req + 28, &guest_ip, 4);       /* spa */
+    memcpy(req + 38, &host_ip, 4);        /* tpa */
+    CHECK(tap_inject(t, req, sizeof(req)) == 0);
+    struct mbuf *reply = NULL;
+    for (unsigned i = 0; i < 50 && reply == NULL; i++) {
+        reply = tap_recv(t);
+        if (reply == NULL)
+            thread_sleep_ms(10);
+    }
+    CHECK(reply != NULL);
+    uint8_t r[42];
+    CHECK(m_copydata(reply, 0, 42, r));
+    CHECK(memcmp(r, guest_mac, 6) == 0);         /* to the guest */
+    CHECK(r[12] == 0x08 && r[13] == 0x06);       /* ARP */
+    CHECK(r[21] == 2);                            /* reply */
+    CHECK(memcmp(r + 22, host_mac, 6) == 0);      /* sha = the tap's MAC */
+    CHECK(memcmp(r + 28, &host_ip, 4) == 0);      /* spa = the tap's IP */
+    CHECK(memcmp(r + 32, guest_mac, 6) == 0);     /* tha = the asker */
+    m_freem(reply);
+
+    /* (3) the transmit queue caps rather than growing without bound. */
+    for (unsigned i = 0; i < TAP_TXQ_MAX + 8; i++) {
+        struct mbuf *f = m_getcl();
+        if (f == NULL)
+            break;
+        f->len = f->pkt.len = 64;
+        netif_transmit(nif, f);
+    }
+    unsigned held = 0;
+    struct mbuf *d;
+    while ((d = tap_recv(t)) != NULL) {
+        m_freem(d);
+        held++;
+    }
+    CHECK(held == TAP_TXQ_MAX);
+
+    tap_destroy(t);
+    kinfo("selftest: tap: a transmitted frame was read back, an injected ARP was answered by the stack, "
+          "and the queue capped at %u", TAP_TXQ_MAX);
+    return true;
 }

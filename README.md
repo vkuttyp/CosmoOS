@@ -1055,10 +1055,28 @@ See [docs/development.md](docs/development.md).
   enough to prove both queues, the header and the interrupt end to end, and
   it drops when full rather than growing. Proven in the harness
   (`el2-virtq-net`: a guest transmits a frame and receives it back) and on
-  the host (`test_vnet_dev`). A real host network -- bridging the guest's
-  frames to the host's stack -- is the next unit; a stock Linux bringing
-  `eth0` up and seeing its counters advance over the loopback is the
-  `QEMU_MEM=2G` reproduction.
+  the host (`test_vnet_dev`). The wire's far end, a loopback here, becomes
+  the host stack in the next entry.
+- **A host bridge, so the guest reaches the host (done):**
+  `docs/audit/next-subsystem-tap.md`,
+  `docs/kernel-services/virtualization/design.md` ("The host bridge"). The
+  guest's NIC looped back to nothing; this connects its far end to the
+  host's own stack. `kernel-services/network/tap.c` is a tap -- a `netif`
+  whose far end is userland: `transmit` queues a frame for a reader,
+  `tap_inject` hands one to `netif_rx`, and the stack does the rest (it
+  ARPs on the tap, answers what is addressed to its IP). The owner reaches
+  it through `/dev/net/tap`, a character device: read one frame the stack
+  sent, write one from the guest (read returns 0 when none waits, so the
+  owner polls it like the console; no new syscall). It is backed by one
+  `tap0` on `10.0.3.0/24`; a tap is marked never-default (`NETIF_NODEFAULT`),
+  so even left up it is never the machine's route to the world. `vmctl --net tap` points the virtio-net wire at the
+  channel, the device unchanged. Proven in the harness by the `tap`
+  selftest (a frame out the tap read back, an injected ARP answered by the
+  stack, the queue capped) and `el2-tap-host` (a guest's ARP request
+  crossing virtio-net and the bridge into the real stack, which answers on
+  the tap). Reaching beyond the host -- NAT, routing, DHCP, DNS -- is the
+  next unit; a stock Linux `ping 10.0.3.1` of the host is the `QEMU_MEM=2G`
+  reproduction.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
