@@ -42,7 +42,8 @@ static int read_desc(struct vblk_io *io, const struct vblk_queue *q, uint16_t i,
  * buffers (writable for a read), and a writable one-byte status. Returns
  * the number of bytes written into the used entry, or -1 on a hostile or
  * faulting chain. */
-static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t head, uint32_t *used_len)
+static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t head,
+                     uint32_t *used_len, uint64_t *work)
 {
     struct vq_desc d;
     if (read_desc(io, q, head, &d) != 0)
@@ -66,6 +67,13 @@ static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t he
     int is_write = hdr.type == VIRTIO_BLK_T_OUT && io->disk_write != NULL;
     int is_flush = hdr.type == VIRTIO_BLK_T_FLUSH && io->disk_flush != NULL;
     int unsupported = !is_read && !is_write && !is_flush;
+
+    /* The starting sector must lie within the disk, checked before the
+     * multiply above is trusted: hdr.sector * 512 can wrap a huge sector down
+     * into a low, in-range offset that the per-chunk capacity check would
+     * then accept, landing the transfer on the wrong part of the disk. */
+    if ((is_read || is_write) && hdr.sector >= io->capacity_sectors)
+        status = VIRTIO_BLK_S_IOERR;
 
     /* Walk the data descriptors to the status byte, bounding the chain at
      * the queue size so a `next` that loops cannot spin us forever. */
@@ -136,6 +144,7 @@ static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t he
     if (io->write_guest(io->ctx, d.addr, &status, 1) != 0)
         return -1;
     *used_len = written + 1u;                    /* data returned to the guest plus the status byte */
+    *work = req_bytes;                           /* bytes moved, for the caller's work ceiling */
     return 0;
 }
 
@@ -173,7 +182,8 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
         if (read_u16(io, q->avail_gpa + 4u + (uint64_t)slot * 2u, &head) != 0)   /* avail->ring[slot] */
             return -1;
         uint32_t used_len = 0;
-        if (serve_one(io, q, head, &used_len) != 0)
+        uint64_t work = 0;
+        if (serve_one(io, q, head, &used_len, &work) != 0)
             return -1;
         /* used->ring[used_idx % size] = { head, used_len } at used_gpa + 4 + 8*slot,
          * then used->idx. The device's own used_idx and last_avail advance
@@ -191,7 +201,9 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
         q->used_idx = next_used;
         q->last_avail++;
         served++;
-        call_bytes += used_len;
+        call_bytes += work;      /* the data moved, not the used length: a write
+                                  * returns only its status byte but copies a
+                                  * bufferful, and must count against the ceiling */
     }
     return served;
 }

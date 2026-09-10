@@ -396,6 +396,51 @@ static void test_write_hostile(void)
     EXPECT(vblk_process(&io, &q) == 1);
     EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_UNSUPP);
     EXPECT(g_flushes == 0);
+
+    /* (e) a sector so large that sector*512 wraps to a low, in-range offset.
+       Without a sector-vs-capacity check the write would land on sector 0;
+       it must be an I/O error and touch nothing. */
+    memset(g_ram, 0, GRAM); memset(g_disk, 0xcd, sizeof(g_disk));
+    for (unsigned i = 0; i < VBLK_SECTOR; i++) g_ram[DATA + i] = 0x11;
+    build_write_req((uint64_t)1 << 55, VBLK_SECTOR);   /* (1<<55)*512 == 0 mod 2^64 */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_IOERR);
+    EXPECT(g_disk[0] == 0xcd);                    /* sector 0 was not overwritten */
+    /* and the same on the read side: a wrapping sector is an I/O error, not a
+       read of the wrong part of the disk */
+    memset(g_ram, 0, GRAM);
+    build_read_req((uint64_t)1 << 55, VBLK_SECTOR);
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 1);
+    EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_IOERR);
+}
+
+/* Writes count against the per-notification work ceiling by the bytes they
+   move, not by their one-byte used length -- otherwise a full queue of large
+   writes slips under the ceiling. Three one-sector writes under a one-sector
+   ceiling are served one per call. */
+static void test_write_ceiling(void)
+{
+    memset(g_ram, 0, GRAM); memset(g_disk, 0, sizeof(g_disk));
+    for (unsigned i = 0; i < VBLK_SECTOR; i++) g_ram[DATA + i] = (uint8_t)i;
+    build_write_req(0, VBLK_SECTOR);
+    put16(AVAIL + 4 + 2, 0); put16(AVAIL + 4 + 4, 0);   /* ring[1] = ring[2] = head 0 */
+    put16(AVAIL + 2, 3);
+
+    struct vblk_io bio = io_rw;
+    bio.max_bytes_per_call = VBLK_SECTOR;         /* room for one sector of write data */
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&bio, &q) == 1);          /* only one write this call */
+    EXPECT(q.last_avail == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 3);
+    EXPECT(vblk_process(&bio, &q) == 0);
+    /* with no ceiling all three writes go in one call */
+    memset(g_disk, 0, sizeof(g_disk));
+    q = fresh_queue();
+    EXPECT(vblk_process(&io_rw, &q) == 3);
 }
 
 static const struct host_test tests[] = {
@@ -403,6 +448,7 @@ static const struct host_test tests[] = {
     { "write-refused", test_write_is_refused },
     { "write", test_write },
     { "write-hostile", test_write_hostile },
+    { "write-ceiling", test_write_ceiling },
     { "hostile", test_hostile },
     { "work-ceiling", test_work_ceiling },
 };
