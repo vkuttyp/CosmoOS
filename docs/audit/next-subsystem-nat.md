@@ -73,25 +73,32 @@ computes.
 ### 1. Connected-subnet routing
 
 `ipv4_route(dst)` learns a middle case between "our own / loopback" and
-"the default interface": a **connected route** -- the interface whose
-address and mask contain `dst`. It walks the interfaces and returns the
-one on whose subnet `dst` falls (so `10.0.3.15` routes to `tap0`,
-`10.0.2.x` to the NIC), before falling back to the default for everything
-else. This is what lets a reply bound for the guest reach the tap, and a
-guest packet for the host's LAN reach the NIC, rather than both going to
-the default. Loopback and owned-address handling are unchanged.
+"the default interface": a **connected route** -- the interface on whose
+subnet `dst` falls (so `10.0.3.15` routes to `tap0`, `10.0.2.x` to the
+NIC), before falling back to the default for everything else. Because the
+interface registry permits overlapping masks and iterates in registration
+order, selection is **longest-prefix**: among the interfaces whose
+address and mask contain `dst`, the one with the longest mask wins, not
+whichever is encountered first, so a broad subnet registered early cannot
+capture traffic meant for a more-specific one. This is what lets a reply
+bound for the guest reach the tap, and a guest packet for the host's LAN
+reach the NIC, rather than both going to the default. Loopback and
+owned-address handling are unchanged.
 
 ### 2. IP forwarding
 
 Where `ipv4_input` today drops a packet that is not for the host, it
-instead -- when forwarding is enabled -- **forwards** it: route the
-destination (connected or default), decrement the TTL (send an ICMP
-time-exceeded and drop at zero, RFC 1812), and re-emit the datagram out
-the chosen interface with `output_on`. A packet that would go back out the
+instead **forwards** it -- but only when the packet arrived on an interface
+marked to forward. The gate is **per-ingress-interface**: a `NETIF_FORWARD`
+flag on the *receiving* interface, set on the tap and never on the real
+NIC. So a guest packet arriving on the tap is forwarded, while a packet
+arriving on the NIC for some other host is still dropped as not-for-us --
+the host does not become a router for its real link. A forwarded packet is
+routed (longest-prefix connected, then default), its TTL decremented (an
+ICMP time-exceeded and a drop at zero, RFC 1812), and re-emitted out the
+chosen interface with `output_on`; one that would go back out the
 interface it arrived on, or that has no route, is dropped (with the
-appropriate ICMP where the standard calls for it). Forwarding is off by
-default and enabled for the tap; the host does not silently become a
-router for its real NIC without being asked.
+appropriate ICMP where the standard calls for it).
 
 ### 3. Masquerade NAT (source NAT)
 
@@ -107,8 +114,13 @@ port, and forwarded to the guest. The transport checksum is fixed up
 incrementally (the pseudo-header changed); the IP checksum is recomputed.
 
 The table is bounded and its entries expire (a short timeout for
-completed or idle flows, longer for established TCP), so a guest cannot
-exhaust it; a full table drops new flows rather than growing. ICMP errors
+completed or idle flows, longer for established TCP); a full table drops
+new flows rather than growing. Because forwarding is enabled only on the
+tap (one guest), the table's flows are that guest's, so a guest that opens
+endless flows only drops its own new ones -- there is no other forwarding
+client to starve. A per-client quota is what keeps them isolated once
+forwarding serves more than one client (a container, a second tap), and is
+the concern of that unit, not this one. ICMP errors
 that quote a NAT'd packet are themselves translated so path-MTU and
 unreachables reach the guest.
 
@@ -162,8 +174,8 @@ are later units.
 - `kernel-services/network/nat.c` (new), `kernel/include/kernel/net/nat.h`
   — the connection-tracking table and the rewrite (out and back), with the
   incremental checksum fix-up.
-- `kernel-services/network/netif.c` / `netif.h` — a per-interface or
-  global "forwarding on" state and a "masquerade on this interface" flag.
+- `kernel-services/network/netif.c` / `netif.h` — the `NETIF_FORWARD`
+  (forward packets arriving here) and masquerade flags, set on the tap.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
   `selftest.h` — the two-tap forward-and-NAT selftest.
 - `docs/kernel-services/network/`, `docs/kernel-services/virtualization/`,
@@ -171,10 +183,13 @@ are later units.
 
 ## New APIs
 
-No new system call: forwarding and NAT are internal to the stack, enabled
-by the tap setup (and a sysctl for the host operator). The router-facing
-surface is `ipv4_route` gaining connected routes, a forwarding hook in
-`ipv4_input`, and `nat.c`'s translate-out / translate-back over the
+No new system call, and no new control-plane ABI: forwarding and NAT are
+internal to the stack, turned on by the tap setup setting `NETIF_FORWARD`
+and the masquerade flag on the tap when a VM attaches (the `/dev/vmm`
+sysctl surface is read-only, and this unit does not add a writable one).
+The router-facing surface is `ipv4_route` gaining longest-prefix connected
+routes, a forwarding hook in `ipv4_input` gated on the ingress
+interface's flag, and `nat.c`'s translate-out / translate-back over the
 conntrack table.
 
 ## Migration plan
@@ -183,12 +198,15 @@ conntrack table.
    destination on an interface's subnet routes to that interface, not the
    default; the default still catches the rest). The existing net tests
    are the check that owned/loopback routing is unchanged.
-2. **IP forwarding** at the `rx_not_for_us` point, off by default: a
-   packet not for the host is routed and re-emitted, the TTL decremented,
-   time-exceeded at zero, a routeless or hairpin packet dropped. Proved by
+2. **IP forwarding** at the `rx_not_for_us` point, gated on the ingress
+   interface's `NETIF_FORWARD`: a packet not for the host that arrived on a
+   forwarding interface is routed and re-emitted, the TTL decremented,
+   time-exceeded at zero, a routeless or hairpin packet dropped; a packet
+   that arrived on a non-forwarding interface is still dropped. Proved by
    forwarding between two taps with no NAT (a packet injected on one
    appears on the other, TTL down by one; TTL 1 yields an ICMP
-   time-exceeded read back).
+   time-exceeded read back), and by a packet injected on a non-forwarding
+   interface never appearing on the other.
 3. **Masquerade NAT** (`nat.c`): the conntrack table, the out/back rewrite
    with the checksum fix-up, bounded with expiry. Proved by the two-tap
    round trip (UDP, TCP-SYN, ICMP echo), table exhaustion, and expiry --
@@ -202,10 +220,12 @@ conntrack table.
 - `net-route` (host): a destination on an interface's connected subnet
   routes to that interface; the default catches the rest; loopback and
   owned addresses are unchanged.
-- `net-forward` (host): with forwarding on and two taps, a packet injected
-  on one is read back on the other with the TTL decremented; a TTL-1 packet
-  yields an ICMP time-exceeded; a packet with no route or that would
-  hairpin is dropped; forwarding off drops as before.
+- `net-forward` (host): two taps, one marked `NETIF_FORWARD`. A packet
+  injected on the forwarding tap is read back on the other with the TTL
+  decremented; a TTL-1 packet yields an ICMP time-exceeded; a packet with
+  no route or that would hairpin is dropped. And the gate: a packet
+  injected on the *non-forwarding* interface is never forwarded (dropped as
+  not-for-us) -- so real-NIC ingress stays disabled.
 - `net-nat` (host): the two-tap masquerade round trip for UDP, a TCP SYN,
   and an ICMP echo -- the source rewritten out, the reply un-rewritten
   back, the checksums valid; the table bounded (a flood drops new flows,
@@ -221,12 +241,16 @@ later regression (or the DHCP/DNS unit) has a baseline. No absolute target.
 
 ## Risks
 
-- **Becoming a router by accident.** Forwarding off by default, enabled
-  only for the tap path, so the host does not start forwarding for its real
-  NIC unasked.
+- **Becoming a router by accident.** The gate is per-ingress-interface
+  (`NETIF_FORWARD` on the tap, never the NIC), so only packets that arrive
+  on the tap are forwarded; a packet arriving on the real NIC for another
+  host is still dropped as not-for-us. The host does not become a router
+  for its real link.
 - **A conntrack table a guest can exhaust.** Bounded with expiry; a full
-  table drops new flows rather than grows, and a guest opening endless
-  flows loses only its own new connections.
+  table drops new flows rather than grows. With forwarding on only for the
+  tap, the table's flows are the one guest's, so it starves only itself;
+  when a later unit forwards for more than one client, a per-client quota
+  keeps them isolated.
 - **A checksum left wrong by a rewrite.** A NAT that rewrites an address or
   port must fix the transport checksum, or every translated packet is
   silently dropped by the receiver. The incremental fix-up is tested by
