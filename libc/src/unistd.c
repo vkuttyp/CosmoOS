@@ -36,6 +36,7 @@ int unlink(const char *path) { return (int)__syscall_ret(cosmo_unlink(path)); }
 int rmdir(const char *path) { return (int)__syscall_ret(cosmo_rmdir(path)); }
 int rename(const char *oldpath, const char *newpath) { return (int)__syscall_ret(cosmo_rename(oldpath, newpath)); }
 void sync(void) { cosmo_sync(); }
+int fsync(int fd) { return (int)__syscall_ret(cosmo_fsync(fd)); }
 pid_t getpid(void) { return (pid_t)cosmo_getpid(); }
 pid_t getppid(void) { return (pid_t)cosmo_getppid(); }
 int chdir(const char *path) { return (int)__syscall_ret(cosmo_chdir(path)); }

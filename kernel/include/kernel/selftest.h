@@ -153,6 +153,7 @@ bool selftest_virtio_console(const char **reason);
 
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
+bool selftest_fsync_handle(const char **reason);
 bool selftest_pagecache(const char **reason);
 bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */

@@ -208,12 +208,10 @@ static int vio_disk_write(void *c, uint64_t off, const void *buf, uint32_t len)
 }
 static int vio_disk_flush(void *c)
 {
-    (void)c;
-    /* The native libc has no per-fd fsync; sync() is vfs_sync(), which
-     * commits every mount synchronously -- durable for the disk file, just
-     * coarser than an fsync of the one file. */
-    sync();
-    return 0;
+    struct vio *v = c;
+    /* fsync the disk file alone: a guest that spams T_FLUSH commits its own
+     * file, and cannot force synchronous commits of unrelated host mounts. */
+    return fsync(v->disk_fd);
 }
 
 /* Serve one bounded batch of the available ring. vblk_process serves at

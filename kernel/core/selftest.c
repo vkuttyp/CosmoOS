@@ -420,6 +420,7 @@ static const struct selftest tests[] = {
     { "crc32c",          selftest_crc32c },
     { "pagecache",       selftest_pagecache },
     { "vfs-ramfs",       selftest_vfs_ramfs },
+    { "vfs-fsync",       selftest_fsync_handle },
     { "vfs-concurrency", selftest_vfs_concurrency },
     { "vfs-put-race",    selftest_vfs_put_race },
     { "mountns",         selftest_mountns },

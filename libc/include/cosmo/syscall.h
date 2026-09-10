@@ -155,6 +155,10 @@ static inline long cosmo_sync(void)
 {
     return cosmo_syscall0(SYS_sync);
 }
+static inline long cosmo_fsync(int h)
+{
+    return cosmo_syscall1(SYS_fsync, h);
+}
 static inline long cosmo_mount(const char *source, const char *target, const char *fstype, unsigned flags)
 {
     return cosmo_syscall4(SYS_mount, source, target, fstype, flags);
