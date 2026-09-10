@@ -1410,6 +1410,66 @@ bool selftest_el2_guest_sgi(const char **reason)
     return true;
 }
 
+/*
+ * A guest's distributor writes land in its VM's distributor and nowhere
+ * else. Nowhere else has two readers: the host, whose physical GICD sits
+ * at the very address the guest wrote to and whose enable bit for that
+ * line must not move (a model that "helpfully" wrote through to hardware
+ * so a device could fire would fail here); and a second VM, whose own
+ * fresh distributor must show none of what the first configured (a model
+ * with one static register file for all VMs would fail here). The line is
+ * the host's spare SPI, so what the host's bit reads is not an accident
+ * of some device having enabled it already.
+ */
+bool selftest_el2_guest_gicd_isolated(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gicd-isolated", reason))
+        return true;
+    int spare = arch_test_irq_spare_gsi();
+    if (spare < 32 || spare >= 288) {
+        kinfo("selftest: el2-guest-gicd-isolated: no spare SPI a guest's distributor also has; skipping");
+        return true;
+    }
+    int host_before = arch_test_irq_is_enabled((unsigned)spare);
+    CHECK(host_before >= 0);
+
+    /* VM A configures the line in its distributor, and sees it there. */
+    struct vm *vm_a, *vm_b;
+    struct vcpu *va, *vb;
+    CHECK(make_guest("tests/hv/guest_gicc.bin", &vm_a, &va) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(va, &regs) == 0);
+    regs.x[8] = (uint64_t)spare;
+    CHECK(vcpu_set_regs(va, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(va, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 3);
+    CHECK(x.hypercall.a0 == (1ull << (spare % 32)));
+    CHECK(regs.x[8] == (uint64_t)spare);
+
+    /* The host's line did not move. */
+    CHECK(arch_test_irq_is_enabled((unsigned)spare) == host_before);
+
+    /* VM B looks at the same registers of its own distributor: nothing. */
+    CHECK(make_guest("tests/hv/guest_gicd.bin", &vm_b, &vb) == 0);
+    CHECK(vcpu_get_regs(vb, &regs) == 0);
+    regs.x[8] = (uint64_t)spare;
+    CHECK(vcpu_set_regs(vb, &regs) == 0);
+    CHECK(vcpu_run(vb, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 7);
+    CHECK(vcpu_get_regs(vb, &regs) == 0);
+    CHECK(regs.x[6] == 0);                                  /* the SPI: not enabled here */
+    CHECK(regs.x[7] == 0);                                  /* the PPI: not here either */
+
+    drop_guest(vm_b, vb);
+    drop_guest(vm_a, va);
+    CHECK(arch_test_irq_is_enabled((unsigned)spare) == host_before);
+    kinfo("selftest: el2-guest-gicd-isolated: VM A enabled SPI %d in its distributor; the host's bit stayed %d and VM B saw 0",
+          spare, host_before);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1526,6 +1586,7 @@ bool selftest_el2_guest_gicd_probe(const char **reason) { (void)reason; return t
 bool selftest_el2_guest_gic_config(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gicd_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

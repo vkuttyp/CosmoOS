@@ -178,6 +178,11 @@ void arch_test_irq_raise(unsigned gsi)
     g_ops->test_raise(gsi);
 }
 
+int arch_test_irq_is_enabled(unsigned gsi)
+{
+    return g_ops && g_ops->test_enabled ? g_ops->test_enabled(gsi) : -1;
+}
+
 int arch_test_msi_overlap_gsi(void)
 {
     return g_ops ? g_ops->test_msi_overlap_gsi() : -1;

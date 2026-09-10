@@ -832,6 +832,13 @@ static void gicv3_test_raise(unsigned gsi)
     gicd_wr(GICD_ISPENDR + (gsi / 32) * 4, 1u << (gsi % 32));
 }
 
+static int gicv3_test_enabled(unsigned gsi)
+{
+    if (gsi >= g_nr_lines)
+        return -1;
+    return (int)((gicd_rd(GICD_ISENABLER + (gsi / 32) * 4) >> (gsi % 32)) & 1u);
+}
+
 /* The line the MSI allocator would hand out next, while it is still
  * unbound: see the ops table. */
 static int gicv3_test_msi_overlap_gsi(void)
@@ -880,6 +887,7 @@ const struct aarch64_irqc_ops aarch64_gicv3_ops = {
     .dispatch = gicv3_dispatch,
     .test_spare_gsi = gicv3_test_spare_gsi,
     .test_raise = gicv3_test_raise,
+    .test_enabled = gicv3_test_enabled,
     .test_msi_overlap_gsi = gicv3_test_msi_overlap_gsi,
     .test_msi_per_device = gicv3_test_msi_per_device,
 };
