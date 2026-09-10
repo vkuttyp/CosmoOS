@@ -145,14 +145,20 @@ int vblk_process(struct vblk_io *io, struct vblk_queue *q)
         uint32_t used_len = 0;
         if (serve_one(io, q, head, &used_len) != 0)
             return -1;
-        /* used->ring[used_idx % size] = { head, used_len } at used_gpa + 4 + 8*slot */
+        /* used->ring[used_idx % size] = { head, used_len } at used_gpa + 4 + 8*slot,
+         * then used->idx. The device's own used_idx and last_avail advance
+         * only once both writes land: if the index write faults, this request
+         * is not counted as published (no phantom interrupt, no advance) and
+         * the next call re-publishes it to the same slot -- idempotent, not a
+         * second entry with the ring left inconsistent. */
         uint16_t uslot = q->used_idx % q->size;
         uint32_t elem[2] = { head, used_len };
         if (io->write_guest(io->ctx, q->used_gpa + 4u + (uint64_t)uslot * 8u, elem, 8) != 0)
             return -1;
-        q->used_idx++;
-        if (io->write_guest(io->ctx, q->used_gpa + 2u, &q->used_idx, 2) != 0)   /* used->idx */
+        uint16_t next_used = (uint16_t)(q->used_idx + 1);
+        if (io->write_guest(io->ctx, q->used_gpa + 2u, &next_used, 2) != 0)   /* used->idx */
             return -1;
+        q->used_idx = next_used;
         q->last_avail++;
         served++;
         call_bytes += used_len;

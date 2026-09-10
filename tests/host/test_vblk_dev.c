@@ -24,6 +24,8 @@ static uint8_t g_ram[GRAM];
 static uint8_t g_disk[DISK_SECTORS * VBLK_SECTOR];
 static unsigned g_oob_reads;   /* guest reads/writes that fell outside RAM: must stay 0 */
 
+static uint64_t g_fault_write_gpa;   /* if set, a write to exactly this gpa faults (an unmapped word) */
+
 static int mem_rw(uint64_t gpa, void *buf, uint32_t len, int write)
 {
     if (gpa > GRAM || len > GRAM - gpa) {   /* the backstop: a descriptor may point anywhere */
@@ -37,7 +39,13 @@ static int mem_rw(uint64_t gpa, void *buf, uint32_t len, int write)
     return 0;
 }
 static int rd_guest(void *c, uint64_t gpa, void *buf, uint32_t len) { (void)c; return mem_rw(gpa, buf, len, 0); }
-static int wr_guest(void *c, uint64_t gpa, const void *buf, uint32_t len) { (void)c; return mem_rw(gpa, (void *)buf, len, 1); }
+static int wr_guest(void *c, uint64_t gpa, const void *buf, uint32_t len)
+{
+    (void)c;
+    if (g_fault_write_gpa && gpa == g_fault_write_gpa)
+        return -1;                          /* the guest left this word unmapped */
+    return mem_rw(gpa, (void *)buf, len, 1);
+}
 static int disk_rd(void *c, uint64_t off, void *buf, uint32_t len)
 {
     (void)c;
@@ -223,6 +231,23 @@ static void test_hostile(void)
     EXPECT(uidx8 == 1);
     uint32_t id8; memcpy(&id8, g_ram + USED + 4, 4);
     EXPECT(id8 == 0);                            /* the used entry is head 0 */
+
+    /* (9) the used-element write lands but the used->idx write faults (the
+       guest left that word unmapped). The device must not count the request
+       as published: used_idx and last_avail stay put, so no interrupt is
+       raised for a completion the guest cannot see and the next call
+       re-publishes to the same slot rather than a new one. */
+    memset(g_ram, 0, GRAM); g_oob_reads = 0;
+    build_read_req(0, VBLK_SECTOR);
+    g_fault_write_gpa = USED + 2;                /* used->idx is unmapped */
+    q = fresh_queue();
+    EXPECT(vblk_process(&io, &q) == -1);
+    EXPECT(q.used_idx == 0);                     /* not advanced: the publish did not finish */
+    EXPECT(q.last_avail == 0);
+    g_fault_write_gpa = 0;
+    /* with the word mapped again the same request publishes cleanly to slot 0 */
+    EXPECT(vblk_process(&io, &q) == 1);
+    EXPECT(q.used_idx == 1);
 }
 
 /* The work ceiling: one notification serves at most max_bytes_per_call, and
