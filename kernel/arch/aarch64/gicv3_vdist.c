@@ -85,7 +85,7 @@ struct gicv3_vdist {
     uint8_t prio[VDIST_NR_LINES];
     uint64_t irouter[VDIST_NR_LINES];   /* SPIs only; 0..31 stay zero */
     struct vdist_private priv[VDIST_GICR_FRAMES];
-    uint64_t reads, writes;
+    uint64_t reads, writes, sgis;
 };
 
 /* A word of a set-or-clear register: the bit in `val & mask` that is set
@@ -135,9 +135,9 @@ void vdist_destroy(struct gicv3_vdist *d)
 {
     if (d == NULL)
         return;
-    if (d->reads || d->writes)
-        kdebug("vdist: %llu register read(s), %llu write(s)", (unsigned long long)d->reads,
-               (unsigned long long)d->writes);
+    if (d->reads || d->writes || d->sgis)
+        kdebug("vdist: %llu register read(s), %llu write(s), %llu SGI target(s)", (unsigned long long)d->reads,
+               (unsigned long long)d->writes, (unsigned long long)d->sgis);
     kfree(d);
 }
 
@@ -451,6 +451,47 @@ void vdist_raise_private(struct gicv3_vdist *d, unsigned i, unsigned intid)
     arch_irq_state_t s = spin_lock_irqsave(&d->lock);
     d->priv[i].pending |= 1u << intid;
     spin_unlock_irqrestore(&d->lock, s);
+}
+
+/*
+ * ICC_SGI1R_EL1: Aff3 at 48, RS at 44, IRM at 40, Aff2 at 32, the INTID
+ * at 24, Aff1 at 16, and a sixteen-bit list over Aff0 within that cluster
+ * -- the same shape the host's own driver composes (gicv3.c). This
+ * machine's guests have one cluster with Aff1..3 zero, so a target is
+ * an Aff0 in the list, offset by sixteen times the range selector.
+ */
+unsigned vdist_sgi(struct gicv3_vdist *d, unsigned from, uint64_t sgi1r)
+{
+    if (d == NULL)
+        return 0;
+    unsigned sgi = (unsigned)((sgi1r >> 24) & 0xFu);
+    bool irm = (sgi1r >> 40) & 1u;
+    unsigned aff1 = (unsigned)((sgi1r >> 16) & 0xFFu);
+    unsigned aff2 = (unsigned)((sgi1r >> 32) & 0xFFu);
+    unsigned aff3 = (unsigned)((sgi1r >> 48) & 0xFFu);
+    unsigned rs = (unsigned)((sgi1r >> 44) & 0xFu);
+    uint32_t list = (uint32_t)(sgi1r & 0xFFFFu);
+    unsigned hit = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    for (unsigned i = 0; i < VDIST_GICR_FRAMES; i++) {
+        if (!d->priv[i].present)
+            continue;
+        bool target;
+        if (irm) {
+            target = i != from;
+        } else {
+            unsigned aff0 = (unsigned)(vdist_mpidr(i) & 0xFFu);
+            target = aff1 == 0 && aff2 == 0 && aff3 == 0 && aff0 / 16u == rs &&
+                     (list & (1u << (aff0 % 16u))) != 0;
+        }
+        if (target) {
+            d->priv[i].pending |= 1u << sgi;
+            hit++;
+        }
+    }
+    d->sgis += hit;
+    spin_unlock_irqrestore(&d->lock, s);
+    return hit;
 }
 
 /* --- access decode ---------------------------------------------------- */

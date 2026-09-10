@@ -1359,6 +1359,57 @@ bool selftest_el2_guest_gic_timer(const char **reason)
     return true;
 }
 
+/*
+ * A guest can be SMP: vCPU 0 writes ICC_SGI1R_EL1 naming SGI 3 for the
+ * CPU whose Aff0 is 1, and vCPU 1's handler runs with INTID 3 on a CPU
+ * whose MPIDR says 1. Untrapped, the write would go to the host's GIC or
+ * nowhere and vCPU 1 would wait forever -- the hang an SMP kernel would
+ * hit bringing up its second CPU. And it is routed, not broadcast: vCPU
+ * 0, which was not in the target list, does not take it.
+ */
+bool selftest_el2_guest_sgi(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-sgi", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0, *v1;
+    CHECK(make_guest("tests/hv/guest_sgi.bin", &vm, &v0) == 0);
+    CHECK(vcpu_create(vm, 1, &v1) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = LOAD_GPA;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+
+    /* Both ready, each knowing who it is. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1 && (x.hypercall.a0 & 0xFFu) == 0);
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1 && (x.hypercall.a0 & 0xFFu) == 1);
+
+    /* vCPU 0 sends and says so; the write did not reach its owner. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 9);
+
+    /* vCPU 1 takes it: INTID 3, in a handler running as Aff0 = 1. */
+    unsigned beats = 0;
+    CHECK(run_until(v1, &x, 3, (1ull << 2), 100, &beats));
+    CHECK((x.hypercall.a0 & 0xFFu) == 1);
+    CHECK(vcpu_run(v1, &x) == 0);                                   /* completes, back to its heartbeat */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+
+    /* vCPU 0 was not a target and never sees it. */
+    for (unsigned i = 0; i < 20; i++) {
+        CHECK(vcpu_run(v0, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+    }
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-sgi: vCPU 0 sent SGI 3 to Aff0 1; vCPU 1 took it after %u beat(s), vCPU 0 never did", beats);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1474,6 +1525,7 @@ bool selftest_el2_guest_timer_ontime(const char **reason) { (void)reason; return
 bool selftest_el2_guest_gicd_probe(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gic_config(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

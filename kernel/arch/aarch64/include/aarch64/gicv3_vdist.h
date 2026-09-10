@@ -77,4 +77,10 @@ bool vdist_deliverable(struct gicv3_vdist *d, unsigned i, unsigned intid);
 void vdist_ack(struct gicv3_vdist *d, unsigned i, unsigned intid);
 void vdist_raise_private(struct gicv3_vdist *d, unsigned i, unsigned intid);
 
+/* vCPU `from` wrote ICC_SGI1R_EL1: the SGI it names becomes pending in
+ * the redistributor of every vCPU the target list (or IRM, "all but
+ * me") selects, and each of those is forwarded it when it has enabled
+ * that SGI there. Returns how many were targeted. */
+unsigned vdist_sgi(struct gicv3_vdist *d, unsigned from, uint64_t sgi1r);
+
 #endif /* AARCH64_GICV3_VDIST_H */

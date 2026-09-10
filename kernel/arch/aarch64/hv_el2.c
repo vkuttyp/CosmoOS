@@ -862,6 +862,53 @@ static bool el2_vdist_access(struct arch_hv_vcpu *v, uint64_t gpa, bool write, u
     return true;
 }
 
+/* ESR_EL2.ISS for a trapped system register, with Rt and the direction
+ * stripped: Op0 at 20, Op2 at 17, Op1 at 14, CRn at 10, CRm at 1. */
+#define SYSREG_ENC(op0, op1, crn, crm, op2) \
+    (((uint32_t)(op0) << 20) | ((uint32_t)(op2) << 17) | ((uint32_t)(op1) << 14) | \
+     ((uint32_t)(crn) << 10) | ((uint32_t)(crm) << 1))
+#define ENC_ICC_SGI1R_EL1  SYSREG_ENC(3, 0, 12, 11, 5)
+#define ENC_ICC_ASGI1R_EL1 SYSREG_ENC(3, 0, 12, 11, 6)
+#define ENC_ICC_SGI0R_EL1  SYSREG_ENC(3, 0, 12, 11, 7)
+
+/*
+ * The SGI registers have no virtual counterpart -- there is no
+ * ICV_SGI1R_EL1 -- so a guest's write to one traps to EL2 whenever
+ * HCR_EL2.IMO routes its interrupts here, with nothing to set for it.
+ * (ICH_HCR_EL2.TC is *not* the way: it traps every register common to
+ * both groups, ICC_PMR_EL1 among them, and a guest writes that at every
+ * init; measured, when every guest stopped reaching "ready".) Until now
+ * that trap reached the owner as a SYSREG exit nobody answered. A write
+ * to ICC_SGI1R_EL1 is an SGI to route through the VM's distributor, by
+ * affinity, to sibling vCPUs. ICC_SGI0R/ASGI1R name Group 0 and the other
+ * security state, which this guest has neither of: swallowed. Reads, and
+ * every other register, are the owner's as before.
+ */
+static bool el2_vdist_sysreg(struct arch_hv_vcpu *v, uint32_t il)
+{
+    struct gicv3_vdist *d = v->vm->vdist;
+    if (d == NULL)
+        return false;
+    uint32_t iss = (uint32_t)(v->ctx->exit_esr & 0x1FFFFFFu);
+    if (iss & 1u)
+        return false;   /* a read */
+    uint32_t enc = iss & ~((0x1Fu << 5) | 1u);
+    unsigned rt = (iss >> 5) & 0x1Fu;
+    uint64_t val = rt < 31 ? v->ctx->guest_x[rt] : 0;
+    switch (enc) {
+    case ENC_ICC_SGI1R_EL1:
+        vdist_sgi(d, v->index, val);
+        break;
+    case ENC_ICC_SGI0R_EL1:
+    case ENC_ICC_ASGI1R_EL1:
+        break;
+    default:
+        return false;
+    }
+    v->ctx->guest_pc += il;
+    return true;
+}
+
 static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     const struct hv_ctx *c = v->ctx;
@@ -886,6 +933,10 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
         out->kind = HV_EXIT_WFI;
         return 0;
     case EC_SYSREG:
+        if (el2_vdist_sysreg(v, il)) {
+            out->kind = HV_EXIT_EMULATED;   /* an SGI sent: the guest's GIC's business */
+            return 0;
+        }
         out->kind = HV_EXIT_SYSREG;
         out->sysreg.iss = (uint32_t)(c->exit_esr & 0x1FFFFFFu);
         out->sysreg.reg = (uint8_t)((c->exit_esr >> 5) & 0x1F);

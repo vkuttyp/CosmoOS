@@ -235,6 +235,7 @@ bool selftest_el2_guest_timer_ontime(const char **reason);   /* ... and on time,
 bool selftest_el2_guest_gicd_probe(const char **reason);     /* a guest finds a distributor and its own redistributor */
 bool selftest_el2_guest_gic_config(const char **reason);     /* what a guest writes to its GIC is what it reads back */
 bool selftest_el2_guest_gic_timer(const char **reason);      /* a guest drives its GIC the ordinary way and its timer arrives through it */
+bool selftest_el2_guest_sgi(const char **reason);            /* one vCPU interrupts another: a guest can be SMP */
 bool selftest_el2_guest_hvc(const char **reason);
 bool selftest_el2_guest_mmio(const char **reason);
 bool selftest_el2_guest_sysreg(const char **reason);
