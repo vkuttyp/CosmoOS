@@ -35,7 +35,8 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
-                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE] [--append CMDLINE] IMAGE\n");
+                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] "
+                    "[--append CMDLINE] IMAGE\n");
     return 2;
 }
 
@@ -154,6 +155,7 @@ static int is_psci(uint64_t fn)
 struct vio {
     int vm;               /* for cosmo_vm_mem_* and cosmo_vm_raise_spi */
     int disk_fd;          /* -1 when no --disk: the transport reports no device */
+    int writable;         /* --disk-rw: the disk is read-write, and offers flush */
     uint64_t capacity;    /* sectors */
     uint32_t feat_sel, status;
     struct vblk_queue q;
@@ -187,6 +189,32 @@ static int vio_disk_read(void *c, uint64_t off, void *buf, uint32_t len)
     }
     return 0;
 }
+/* The write side, present only on a --disk-rw device (the callbacks are NULL
+ * otherwise and vblk never reaches them). The device has already bounded
+ * off+len to the capacity, so this never grows the file. */
+static int vio_disk_write(void *c, uint64_t off, const void *buf, uint32_t len)
+{
+    struct vio *v = c;
+    if (lseek(v->disk_fd, (off_t)off, SEEK_SET) < 0)
+        return -1;
+    uint32_t done = 0;
+    while (done < len) {
+        ssize_t n = write(v->disk_fd, (const char *)buf + done, len - done);
+        if (n <= 0)
+            return -1;
+        done += (uint32_t)n;
+    }
+    return 0;
+}
+static int vio_disk_flush(void *c)
+{
+    (void)c;
+    /* The native libc has no per-fd fsync; sync() is vfs_sync(), which
+     * commits every mount synchronously -- durable for the disk file, just
+     * coarser than an fsync of the one file. */
+    sync();
+    return 0;
+}
 
 /* Serve one bounded batch of the available ring. vblk_process serves at
  * most VBLK_MAX_BYTES_PER_CALL and returns the number of requests it
@@ -195,8 +223,10 @@ static int vio_disk_read(void *c, uint64_t off, void *buf, uint32_t len)
  * requests just completed. */
 static int vio_service(struct vio *v)
 {
-    struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity,
-                          VBLK_MAX_BYTES_PER_CALL };
+    struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read,
+                          v->writable ? vio_disk_write : NULL,
+                          v->writable ? vio_disk_flush : NULL,
+                          v, v->capacity, VBLK_MAX_BYTES_PER_CALL };
     uint16_t before = v->q.used_idx;
     int served = vblk_process(&io, &v->q);
     /* Interrupt on anything published this call, judged by the used ring the
@@ -220,7 +250,12 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
         case 0x004: *val = 2; return;                           /* Version */
         case 0x008: *val = v->disk_fd >= 0 ? 2u : 0u; return;   /* DeviceID: block, or none */
         case 0x00c: *val = 0x554d4551u; return;                 /* VendorID */
-        case 0x010: *val = v->feat_sel == 1 ? 1u : (1u << 5); return;  /* VERSION_1 ; BLK_F_RO */
+        case 0x010:                                             /* DeviceFeatures */
+            /* high word (feat_sel 1): VERSION_1 (bit 32). low word: a
+             * writable disk offers FLUSH, a read-only disk offers RO. */
+            if (v->feat_sel == 1) { *val = 1u; return; }
+            *val = v->writable ? (1u << VIRTIO_BLK_F_FLUSH) : (1u << VIRTIO_BLK_F_RO);
+            return;
         case 0x034: *val = VBLK_QUEUE_MAX; return;              /* QueueNumMax */
         case 0x044: *val = (uint32_t)v->q.ready; return;
         case 0x060: *val = v->irq_pending ? 1u : 0u; return;    /* InterruptStatus: used-ring event */
@@ -363,6 +398,7 @@ static int run_machine(int argc, char **argv)
     unsigned long mem_mib = 16;
     unsigned nr_cpus = 1;
     const char *bootargs = NULL, *disk = NULL;
+    int disk_writable = 0;
     int i = 0;
     while (i < argc && argv[i][0] == '-') {
         if (i + 1 >= argc)
@@ -373,9 +409,12 @@ static int run_machine(int argc, char **argv)
             nr_cpus = (unsigned)strtoul(argv[i + 1], NULL, 0);
         else if (strcmp(argv[i], "--append") == 0)
             bootargs = argv[i + 1];
-        else if (strcmp(argv[i], "--disk") == 0)
+        else if (strcmp(argv[i], "--disk") == 0 || strcmp(argv[i], "--disk-rw") == 0) {
+            if (disk != NULL)
+                return usage();   /* one disk, one mode */
             disk = argv[i + 1];
-        else
+            disk_writable = strcmp(argv[i], "--disk-rw") == 0;
+        } else
             return usage();
         i += 2;
     }
@@ -471,7 +510,8 @@ static int run_machine(int argc, char **argv)
     g_vio.vm = m.vm;
     g_vio.disk_fd = -1;
     if (disk != NULL) {
-        g_vio.disk_fd = open(disk, O_RDONLY);
+        g_vio.writable = disk_writable;
+        g_vio.disk_fd = open(disk, disk_writable ? O_RDWR : O_RDONLY);
         if (g_vio.disk_fd < 0) {
             fprintf(stderr, "vmctl: %s: %s\n", disk, strerror(errno));
             return 1;
@@ -482,7 +522,7 @@ static int run_machine(int argc, char **argv)
     printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx%s\n",
            path, len, (unsigned long long)load, has_header ? "Image header" : "flat", mem_mib,
            (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa,
-           disk ? ", virtio-blk /dev/vda" : "");
+           disk ? (disk_writable ? ", virtio-blk /dev/vda (rw)" : ", virtio-blk /dev/vda (ro)") : "");
 
     /* One thread, every running vCPU in turn, a tick each. A vCPU that
      * asks for an interrupt (WFI) gives up its turn; its next comes round. */
