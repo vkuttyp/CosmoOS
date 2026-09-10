@@ -116,6 +116,7 @@ tests are AArch64's and skip on x86.
 | `el2-mmio-device` | `aarch64/guest_mmio_widths.S` | the device seam, tested before the first device leans on it: a word the test registers at `0x0A001000` answers `ldrb`, `ldrh`, `ldr w`, `ldr x`, `ldrsb w`, `ldrsh x` and `ldrsw x`, and each register holds what the architecture says that load leaves in it -- the `ldrsb w` reads `0xFFFFFFF3`, not `0xF3` and not `0xFFFFFFFFFFFFFFF3` -- with no exit; a halfword store reports size 2 and `0xBEEF`; a load no device claims goes to the owner with size 8 and register 9, and the owner's answer, left in the exit, lands in `x9` |
 | `el2-guest-uart` | `aarch64/guest_uart.S` | the report's opening measurement as a test: six stores to `DR`, the way an `earlycon` prints, and the VM's console holds exactly `"hello\n"`; `FR` read `TXFE|RXFE` throughout; PeriphID0/1 and PCellID3 say a PL011 |
 | `el2-guest-uart-rx` | `aarch64/guest_uart_rx.S` | the first device interrupt the distributor routes that a guest did not fake through `ISPENDR`: with SPI 33 routed to itself and `RXIM` unmasked, the guest is interrupted when the test writes `'x'` to the VM, its handler reads `RXMIS` set, `'x'` from `DR`, and `RXFE` after; ten heartbeats follow with no second interrupt |
+| `el2-guest-uart-race` | `aarch64/guest_uart_poll.S` | a property about two threads, with two threads: a kernel thread types 300 bytes at a guest that both polls `DR` and takes SPI 33, so the owner's raise and the guest's lower race in the UART for every byte. No interrupt may arrive with `MIS` zero (the spurious one a transition applied out of order leaves behind) and every byte must be consumed by one path or the other. The bug it exists for -- the transition applied after the UART's lock was dropped -- has a window too narrow to hit on purpose, so its bug-proof widens the window; this is the regression test that the transition is applied under the lock |
 | `el2-guest-uart-level` | `aarch64/guest_uart_rx.S`, `guest_uart_wfi.S` | two bytes written before the guest handles: one interrupt drains `'a'` and `FR` says a byte still waits, a second interrupt drains `'b'` and `FR` says empty, no third -- an edge-triggered model would deliver one for two. Then a guest whose `WFI` has a two-second deadline is woken by a byte a kernel timer writes 20 ms in: the `WFI` run returns in well under a second with an interrupt pending, and the handler reads `'w'` |
 | `el2-guest-spin` | `aarch64/guest_spin.S` | a guest in a one-instruction loop: `vcpu_run_limited(5)` returns `-ETIMEDOUT` after five host-interrupt exits (the tick is taken to EL2 through `HCR_EL2.IMO`), and the guest's PC never left the loop |
 
@@ -130,8 +131,8 @@ the real-mode and protected-mode guests below, AArch64's are
 `guest_wfi`, `guest_hvc`, `guest_mmio`, `guest_sysreg`, `guest_spin`,
 `guest_irq`, `guest_timer`, `guest_ctimer`, `guest_ptimer`,
 `guest_timer_wfi`, `guest_gicd`, `guest_gicc`, `guest_gic` and
-`guest_sgi`, `guest_mmio_widths`, `guest_uart`, `guest_uart_rx` and
-`guest_uart_wfi` -- one per exit the EL2 switch decodes, then one per
+`guest_sgi`, `guest_mmio_widths`, `guest_uart`, `guest_uart_rx`,
+`guest_uart_wfi` and `guest_uart_poll` -- one per exit the EL2 switch decodes, then one per
 thing a guest does with its interrupt controller, then one per thing it
 does with its console. Both sets are flat binaries linked
 at guest-physical 0x1000 and carried in the boot archive as

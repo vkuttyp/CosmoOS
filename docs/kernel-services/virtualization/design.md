@@ -524,9 +524,14 @@ waiting), and reading the last byte lowers it. In the kernel because a
 console is written a byte at a time, the same argument that put the
 distributor there.
 
-Locking: the UART's lock covers its registers and FIFO and is never held
-while calling into the distributor -- the line's new state is decided
-under it and told to the distributor after it.
+Locking: the UART's lock covers its registers and FIFO **and is held
+while the line's new state is told to the distributor**. The first
+version dropped it first, and two threads -- an owner writing, a guest
+draining -- could decide their transitions in one order and tell the
+distributor in the other, leaving SPI 33 pending with the line down (a
+spurious interrupt the per-entry re-raise cannot repair, since it only
+raises). Order: the UART's lock, then the distributor's; the
+distributor's is a leaf that never calls back into a device.
 
 ### Guest memory (`guestmem.c`)
 

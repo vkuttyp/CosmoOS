@@ -17,9 +17,16 @@
  *
  * Locking: `lock` covers the register file and the receive FIFO, taken by
  * a guest's access from its vCPU thread and by the owner's write from
- * its own. It is never held while calling into the distributor: an
- * interrupt is raised or lowered after the lock is dropped, from a state
- * decided under it.
+ * its own, and it is HELD while the line's new state is told to the
+ * distributor. The first version dropped it first and told the
+ * distributor after, "from a state decided under it" -- and two threads
+ * can decide in one order and tell in the other: an owner's raise
+ * computed before a guest's lower can reach the distributor after it,
+ * leaving SPI 33 pending with the line down, a spurious interrupt that
+ * the per-entry re-raise cannot repair because it only raises. So the
+ * transition is applied under the lock that computed it. The order is
+ * UART lock, then the distributor's; the distributor's lock is a leaf
+ * that never calls back into a device, so the nesting is consistent.
  */
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -102,7 +109,8 @@ static bool vuart_irq_asserted(struct vm_device *d)
     return up;
 }
 
-/* The line changed under the lock; tell the distributor after it. */
+/* The line changed; tell the distributor -- with the lock still held, so
+ * the distributor sees transitions in the order they happened. */
 static void vuart_line_changed(struct vuart *u, bool was, bool now)
 {
     if (was == now)
@@ -129,9 +137,8 @@ int64_t vuart_write(struct vuart *u, const void *buf, size_t len)
         u->rx_count++;
         u->rx_bytes++;
     }
-    bool now = vuart_line_locked(u);
+    vuart_line_changed(u, was, vuart_line_locked(u));
     spin_unlock_irqrestore(&u->lock, s);
-    vuart_line_changed(u, was, now);
     return (int64_t)len;
 }
 
@@ -169,9 +176,8 @@ static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned si
             case PL011_IMSC: u->imsc = v & 0x7FFu; break;   /* unmasking with a byte waiting raises the line */
             default: u->dmacr = v & 0x7u; break;
             }
-            bool now = vuart_line_locked(u);
+            vuart_line_changed(u, was, vuart_line_locked(u));
             spin_unlock_irqrestore(&u->lock, s);
-            vuart_line_changed(u, was, now);
             return 0;
         }
         case PL011_ICR:
@@ -208,9 +214,8 @@ static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned si
             r = pl011_ids[(off - PL011_PERIPHID0) / 4];
         break;
     }
-    bool now = vuart_line_locked(u);
+    vuart_line_changed(u, was, vuart_line_locked(u));
     spin_unlock_irqrestore(&u->lock, s);
-    vuart_line_changed(u, was, now);
     *value = r;
     return 0;
 }

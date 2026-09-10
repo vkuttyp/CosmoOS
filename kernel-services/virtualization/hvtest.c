@@ -1697,6 +1697,80 @@ bool selftest_el2_guest_uart_level(const char **reason)
     return true;
 }
 
+struct typist {
+    struct vm *vm;
+    unsigned bytes;
+    volatile bool done;
+};
+
+static void typist_main(void *arg)
+{
+    struct typist *t = arg;
+    for (unsigned i = 0; i < t->bytes; i++) {
+        char c = (char)('a' + (i % 26));
+        while (vm_console_write(t->vm, &c, 1) != 1)
+            thread_sleep_ns(10000);
+        thread_sleep_ns(150000);                                       /* 150 us between keystrokes */
+    }
+    t->done = true;
+    thread_exit(0);
+}
+
+/*
+ * A property about two threads needs two threads. A kernel thread types
+ * at the guest while the guest both polls DR and takes SPI 33 for it, so
+ * the owner's raise and the guest's lower race in the UART for every
+ * byte. Two things must hold whatever the interleaving: no interrupt
+ * arrives with MIS zero -- a raise told to the distributor after a
+ * newer lower would leave SPI 33 pending with the line down, and that is
+ * what the handler would see -- and every byte typed is consumed by one
+ * path or the other. The first version of the UART applied the
+ * transition after dropping its lock and could do exactly the former;
+ * the window is narrow, so the bug-proof widens it, and this test is the
+ * regression test that the transition is applied under the lock.
+ */
+bool selftest_el2_guest_uart_race(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-uart-race", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_uart_poll.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    struct typist t;
+    memset(&t, 0, sizeof(t));
+    t.vm = vm;
+    t.bytes = 300;
+    struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
+    CHECK(th != NULL);
+    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0;
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        if (x.hypercall.nr == 33) {
+            if ((x.hypercall.a0 & 0x10u) == 0)
+                spurious++;
+        } else {
+            CHECK(x.hypercall.nr == 2);
+            irqs = (unsigned)x.hypercall.a0;
+            consumed = (unsigned)x.hypercall.a1;
+            if (t.done && consumed >= t.bytes)
+                break;
+        }
+        CHECK(++steps < 2000000);
+    }
+    thread_join(th);
+    CHECK(spurious == 0);
+    CHECK(consumed == t.bytes);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-uart-race: %u bytes typed against a polling guest, %u by interrupt, 0 spurious, none lost",
+          t.bytes, irqs);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1823,6 +1897,7 @@ bool selftest_el2_mmio_device(const char **reason) { (void)reason; return true; 
 bool selftest_el2_guest_uart(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_rx(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_level(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_uart_race(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
