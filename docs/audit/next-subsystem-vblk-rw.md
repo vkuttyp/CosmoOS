@@ -269,9 +269,11 @@ the file `O_RDWR` and presenting a writable device.
    `disk_flush` to `vblk_io`; branch `serve_one` on the request type; bound
    `disk_write` to capacity. Prove it with `test_vblk_dev`: a write
    round-trips through an in-memory disk, a flush is observed, and hostile
-   write rings (a write buffer marked writable, a write past capacity, a
-   data buffer outside guest RAM) are refused with no out-of-bounds
-   access — each proved by reintroducing the bug.
+   write rings (a write buffer marked writable, or a data buffer outside
+   guest RAM) are refused with no out-of-bounds access, while a write past
+   the disk completes with `VIRTIO_BLK_S_IOERR` (a full request, not a
+   refusal, exactly as a read past the disk does) — each proved by
+   reintroducing the bug.
 2. **The transport in `vmctl`.** `--disk-rw`, `O_RDWR`, the `writable`
    flag, `vio_disk_write`/`vio_disk_flush`, and the feature-register
    change so a writable disk advertises `F_FLUSH` and not `F_RO`. A
