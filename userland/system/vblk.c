@@ -144,7 +144,9 @@ static int serve_one(struct vblk_io *io, const struct vblk_queue *q, uint16_t he
     if (io->write_guest(io->ctx, d.addr, &status, 1) != 0)
         return -1;
     *used_len = written + 1u;                    /* data returned to the guest plus the status byte */
-    *work = req_bytes;                           /* bytes moved, for the caller's work ceiling */
+    /* Work for the caller's ceiling: the data moved, plus a fixed charge for a
+     * flush, which moves nothing but does a synchronous fsync. */
+    *work = req_bytes + (is_flush ? VBLK_FLUSH_COST : 0u);
     return 0;
 }
 

@@ -78,6 +78,11 @@ struct vblk_queue {
  * notification into unbounded reads and copies. */
 #define VBLK_REQ_MAX_BYTES       (4u << 20)   /* 4 MiB per request */
 #define VBLK_MAX_BYTES_PER_CALL  (32u << 20)  /* 32 MiB per notification */
+/* A flush moves no data but is a synchronous fsync, so it must count against
+ * the per-notification ceiling too -- otherwise a queue full of flushes runs
+ * a queue's worth of fsyncs in one batch. Charge it like a max-size request,
+ * so a flood of flushes is broken across owner turns like a flood of writes. */
+#define VBLK_FLUSH_COST          VBLK_REQ_MAX_BYTES
 
 /*
  * Serve requests the guest has made available since the last call, at most

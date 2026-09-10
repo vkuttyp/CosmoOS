@@ -443,12 +443,39 @@ static void test_write_ceiling(void)
     EXPECT(vblk_process(&io_rw, &q) == 3);
 }
 
+/* A flush moves no data but is a synchronous fsync, so it must count against
+   the per-notification ceiling too -- otherwise a queue full of flushes runs
+   a queue's worth of fsyncs in one batch. Three flushes under a one-flush
+   ceiling are served one per call. */
+static void test_flush_ceiling(void)
+{
+    memset(g_ram, 0, GRAM); g_flushes = 0;
+    struct { uint32_t t, r; uint64_t s; } h = { VIRTIO_BLK_T_FLUSH, 0, 0 };
+    memcpy(g_ram + HDR, &h, sizeof(h));
+    put_desc(0, HDR, 16, 1 /*NEXT*/, 1);          /* header -> status, no data */
+    put_desc(1, STATUS, 1, 2 /*WRITE*/, 0);
+    put16(AVAIL + 4, 0); put16(AVAIL + 4 + 2, 0); put16(AVAIL + 4 + 4, 0);
+    put16(AVAIL + 2, 3);
+
+    struct vblk_io bio = io_rw;
+    bio.max_bytes_per_call = VBLK_FLUSH_COST;     /* room for one flush */
+    struct vblk_queue q = fresh_queue();
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 1);
+    EXPECT(g_flushes == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(vblk_process(&bio, &q) == 1);
+    EXPECT(q.last_avail == 3);
+    EXPECT(g_flushes == 3);
+}
+
 static const struct host_test tests[] = {
     { "read", test_read },
     { "write-refused", test_write_is_refused },
     { "write", test_write },
     { "write-hostile", test_write_hostile },
     { "write-ceiling", test_write_ceiling },
+    { "flush-ceiling", test_flush_ceiling },
     { "hostile", test_hostile },
     { "work-ceiling", test_work_ceiling },
 };
