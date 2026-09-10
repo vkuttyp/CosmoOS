@@ -66,6 +66,11 @@
 #define GICD_IROUTER     0x6000u        /* 64 bits per SPI, indexed by INTID */
 #define IROUTER_KEEP     0x000000FF80FFFFFFull   /* Aff3, IRM, Aff2, Aff1, Aff0 */
 
+/* The idle priority: nothing can be higher than the CPU interface's
+ * running priority when it is idle, so an interrupt at 0xFF is never
+ * signalled. The GICv3 architecture's rule, kept here by name. */
+#define VDIST_PRIO_IDLE  0xFFu
+
 #define NR_WORDS         (VDIST_NR_LINES / 32u)
 #define NR_PRIVATE       32u
 
@@ -390,12 +395,16 @@ int vdist_pending_for(struct gicv3_vdist *d, unsigned i, uint8_t *prio)
     if (d == NULL || i >= VDIST_GICR_FRAMES)
         return -1;
     int best = -1;
-    uint8_t best_prio = 0xFF;
+    uint8_t best_prio = VDIST_PRIO_IDLE;
     arch_irq_state_t s = spin_lock_irqsave(&d->lock);
     const struct vdist_private *p = &d->priv[i];
     /* Private first, then the SPIs; the candidate words are cheap to
      * test before walking their bits. Lower value is higher priority;
-     * on a tie the lower INTID, as the architecture orders them. */
+     * on a tie the lower INTID, as the architecture orders them. A
+     * candidate has to beat the idle priority to be signalled at all --
+     * `pr < best_prio` against VDIST_PRIO_IDLE is that rule, not an
+     * accident of the starting value: an interrupt a guest sets to 0xFF
+     * stays pending and is never forwarded, on hardware or here. */
     uint32_t cand = p->pending & p->enable & p->group;
     for (unsigned b = 0; cand; b++, cand >>= 1) {
         uint8_t pr;
