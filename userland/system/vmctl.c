@@ -197,8 +197,14 @@ static int vio_service(struct vio *v)
 {
     struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read, v, v->capacity,
                           VBLK_MAX_BYTES_PER_CALL };
+    uint16_t before = v->q.used_idx;
     int served = vblk_process(&io, &v->q);
-    if (served > 0) {
+    /* Interrupt on anything published this call, judged by the used ring the
+     * device advances, not by the return value: a call that completes a
+     * request and then faults on a later one returns -1 but still owes the
+     * completed request its interrupt, or a guest waiting on it hangs. The
+     * return value governs draining (below); this governs notification. */
+    if (v->q.used_idx != before) {
         v->irq_pending = 1;
         cosmo_vm_raise_spi(v->vm, COSMO_HVM_VIRTIO0_INTID);   /* through the guest's distributor */
     }

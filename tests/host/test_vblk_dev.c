@@ -214,6 +214,15 @@ static void test_hostile(void)
     q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == -1);         /* the fault, not "1 served" */
     EXPECT(g_oob_reads == 1);                    /* the bad buffer was tried and refused */
+    /* head 0 was completed before the fault: used->idx advanced, and the
+       used entry names it -- so the owner, which raises the interrupt on a
+       used-ring advance rather than on the return value, still notifies the
+       guest waiting on head 0 even though the call returned -1. */
+    EXPECT(q.used_idx == 1);
+    uint16_t uidx8; memcpy(&uidx8, g_ram + USED + 2, 2);
+    EXPECT(uidx8 == 1);
+    uint32_t id8; memcpy(&id8, g_ram + USED + 4, 4);
+    EXPECT(id8 == 0);                            /* the used entry is head 0 */
 }
 
 /* The work ceiling: one notification serves at most max_bytes_per_call, and
