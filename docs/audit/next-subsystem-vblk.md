@@ -159,11 +159,16 @@ Linux unit's panic line was its predecessor's.
 
 - **Writes, and a writable root.** A read-only root is enough to reach
   userspace; `VIRTIO_BLK_T_OUT` and flush come when a guest needs to
-  persist, which the milestone does not. The device advertises read-only.
+  persist, which the milestone does not. The device **sets
+  `VIRTIO_BLK_F_RO`** so the driver knows the disk is read-only and never
+  submits a write -- without that bit Linux exposes `/dev/vda` as
+  writable and a mount, or the kernel's own write-back, submits a
+  `VIRTIO_BLK_T_OUT` the device does not implement, failing the root.
 - **Indirect and chained descriptors beyond the simple case, multiple
   queues, `VIRTIO_F_RING_EVENT_IDX`.** Block uses one queue; the owner
-  negotiates the minimal feature set (`VIRTIO_F_VERSION_1` and nothing
-  optional) so the guest's driver takes the simple path.
+  offers the minimal set -- `VIRTIO_F_VERSION_1` and `VIRTIO_BLK_F_RO`,
+  nothing else optional -- so the guest's driver takes the simple path
+  and treats the disk as read-only.
 - **virtio-net, virtio-console-with-dataplane, a PCI transport.** Each is
   a later unit on this same seam; block is the first because a root
   filesystem is what userspace needs.
@@ -300,9 +305,10 @@ Counted:
   virtio-mmio and virtio-blk drivers expect `VIRTIO_F_VERSION_1` and a
   precise status-bit dance (ACKNOWLEDGE, DRIVER, FEATURES_OK, DRIVER_OK);
   a transport that accepts the wrong order or offers a feature it does not
-  implement hangs the driver. The owner offers the minimal set and follows
-  the status machine exactly; `el2-virtq-device` drives it with a C guest
-  that does the same dance, so the handshake is tested before Linux.
+  implement hangs the driver. The owner offers the minimal set
+  (`VIRTIO_F_VERSION_1` and, for block, `VIRTIO_BLK_F_RO`) and follows the
+  status machine exactly; `el2-virtq-device` drives it with a C guest that
+  does the same dance, so the handshake is tested before Linux.
 - **A wrong `virtio_mmio` node is a driver that does not probe, silently.**
   As with the PL011, the device tree's `reg`, `interrupts` and
   `compatible` must be what Linux's driver matches; the proof is whether
