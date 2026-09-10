@@ -25,6 +25,7 @@
 #include <uapi/cosmo/hv_machine.h>
 #include "../../tools/fdt/fdt.h"
 #include "vblk.h"
+#include "vnet.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -35,7 +36,7 @@
 static int usage(void)
 {
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
-                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] "
+                    "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] [--net loop] "
                     "[--append CMDLINE] IMAGE\n");
     return 2;
 }
@@ -158,7 +159,7 @@ struct vio {
     int writable;         /* --disk-rw: the disk is read-write, and offers flush */
     uint64_t capacity;    /* sectors */
     uint32_t feat_sel, status;
-    struct vblk_queue q;
+    struct vq_queue q;
     int irq_pending;
     int draining;         /* a notify left work the run loop is still serving */
 };
@@ -291,6 +292,137 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
     }
 }
 
+/* --- the virtio-mmio network device (docs/audit/next-subsystem-vnet.md) --- */
+
+#define VNET_WIRE_SLOTS 16   /* the loopback wire's depth; frames past it drop */
+
+struct vnet_dev {
+    int vm;
+    int present;                          /* --net loop given */
+    uint32_t feat_sel, status, queue_sel;
+    struct vq_queue rq, tq;               /* receive (queue 0), transmit (queue 1) */
+    int irq_pending;
+    int draining;
+    uint8_t mac[6];
+    struct { uint8_t buf[VNET_FRAME_MAX]; uint32_t len; } wire[VNET_WIRE_SLOTS];
+    unsigned wire_head, wire_count;       /* the loopback FIFO */
+};
+
+static struct vnet_dev g_vnet;
+
+static int vnet_read_guest(void *c, uint64_t gpa, void *buf, uint32_t len)
+{
+    struct vnet_dev *d = c;
+    return cosmo_vm_mem_read(d->vm, gpa, buf, len) == (long)len ? 0 : -1;
+}
+static int vnet_write_guest(void *c, uint64_t gpa, const void *buf, uint32_t len)
+{
+    struct vnet_dev *d = c;
+    return cosmo_vm_mem_write(d->vm, gpa, buf, len) == (long)len ? 0 : -1;
+}
+/* The wire is a loopback FIFO: a transmitted frame is enqueued and comes back
+ * on receive. It drops when full -- a NIC drops with nowhere to put a frame,
+ * it does not grow without bound. */
+static int vnet_wire_tx(void *c, const void *frame, uint32_t len)
+{
+    struct vnet_dev *d = c;
+    if (len > VNET_FRAME_MAX)
+        return -1;
+    if (d->wire_count == VNET_WIRE_SLOTS)
+        return 0;                                   /* dropped, not an error */
+    unsigned slot = (d->wire_head + d->wire_count) % VNET_WIRE_SLOTS;
+    memcpy(d->wire[slot].buf, frame, len);
+    d->wire[slot].len = len;
+    d->wire_count++;
+    return 0;
+}
+static int vnet_wire_rx(void *c, void *buf, uint32_t max)
+{
+    struct vnet_dev *d = c;
+    if (d->wire_count == 0)
+        return 0;
+    uint32_t len = d->wire[d->wire_head].len;
+    if (len > max)
+        len = max;
+    memcpy(buf, d->wire[d->wire_head].buf, len);
+    d->wire_head = (d->wire_head + 1) % VNET_WIRE_SLOTS;
+    d->wire_count--;
+    return (int)len;
+}
+
+/* Serve both queues: drain transmit to the wire, then fill receive buffers
+ * from it. Interrupt on any used-ring advance; return whether either made
+ * progress, so the run loop keeps draining until neither does. */
+static int vnet_service(struct vnet_dev *d)
+{
+    struct vnet_io io = { vnet_read_guest, vnet_write_guest, vnet_wire_tx, vnet_wire_rx,
+                          d, VNET_MAX_BYTES_PER_CALL };
+    uint16_t tb = d->tq.used_idx, rb = d->rq.used_idx;
+    int t = vnet_process_tx(&io, &d->tq);
+    int r = vnet_process_rx(&io, &d->rq);
+    if (d->tq.used_idx != tb || d->rq.used_idx != rb) {
+        d->irq_pending = 1;
+        cosmo_vm_raise_spi(d->vm, COSMO_HVM_VIRTIO1_INTID);
+    }
+    return (t > 0 || r > 0) ? 1 : 0;
+}
+
+/* The transport registers for the net device. QueueSel selects the receive
+ * or transmit queue for the queue-shaped registers. */
+static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
+{
+    /* Only queues 0 (receive) and 1 (transmit) exist; a QueueSel past them
+     * selects nothing, so the queue-shaped registers read 0 and ignore
+     * writes rather than aliasing an existing queue's state. */
+    struct vq_queue *q = d->queue_sel == 0 ? &d->rq : d->queue_sel == 1 ? &d->tq : NULL;
+    if (!write) {
+        switch (off) {
+        case 0x000: *val = 0x74726976u; return;                 /* MagicValue */
+        case 0x004: *val = 2; return;                           /* Version */
+        case 0x008: *val = d->present ? 1u : 0u; return;        /* DeviceID: network, or none */
+        case 0x00c: *val = 0x554d4551u; return;                 /* VendorID */
+        case 0x010:                                             /* DeviceFeatures */
+            /* high word (feat_sel 1): VERSION_1 (bit 32). low word: MAC. */
+            *val = d->feat_sel == 1 ? 1u : (1u << VIRTIO_NET_F_MAC);
+            return;
+        case 0x034: *val = VQ_MAX; return;                     /* QueueNumMax */
+        case 0x044: *val = q ? (uint32_t)q->ready : 0u; return;
+        case 0x060: *val = d->irq_pending ? 1u : 0u; return;    /* InterruptStatus */
+        case 0x070: *val = d->status; return;
+        /* config space: virtio_net_config.mac[6] at offset 0 */
+        case 0x100: *val = (uint32_t)d->mac[0] | ((uint32_t)d->mac[1] << 8) |
+                           ((uint32_t)d->mac[2] << 16) | ((uint32_t)d->mac[3] << 24); return;
+        case 0x104: *val = (uint32_t)d->mac[4] | ((uint32_t)d->mac[5] << 8); return;
+        default: *val = 0; return;
+        }
+    }
+    uint32_t w = (uint32_t)*val;
+    switch (off) {
+    case 0x014: d->feat_sel = w; break;
+    case 0x030: d->queue_sel = w; break;
+    case 0x050:                                                /* QueueNotify */
+        if (vnet_service(d) > 0)
+            d->draining = 1;
+        break;
+    case 0x064:                                                /* InterruptACK */
+        d->irq_pending = 0;
+        cosmo_vm_lower_spi(d->vm, COSMO_HVM_VIRTIO1_INTID);
+        break;
+    case 0x070: d->status = w; break;
+    /* the queue-shaped registers act on the selected queue, and do nothing
+     * when QueueSel names one that does not exist */
+    case 0x038: if (q) q->size = (uint16_t)w; break;
+    case 0x044: if (q) q->ready = (int)w; break;
+    case 0x080: if (q) q->desc_gpa = (q->desc_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x084: if (q) q->desc_gpa = (q->desc_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x090: if (q) q->avail_gpa = (q->avail_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x094: if (q) q->avail_gpa = (q->avail_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x0a0: if (q) q->used_gpa = (q->used_gpa & ~0xFFFFFFFFull) | w; break;
+    case 0x0a4: if (q) q->used_gpa = (q->used_gpa & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    default: break;
+    }
+}
+
 struct machine {
     int vm;
     int vcpu[COSMO_HV_VCPUS_MAX];      /* -1: not created */
@@ -396,7 +528,7 @@ static int run_machine(int argc, char **argv)
     unsigned long mem_mib = 16;
     unsigned nr_cpus = 1;
     const char *bootargs = NULL, *disk = NULL;
-    int disk_writable = 0;
+    int disk_writable = 0, net_loop = 0;
     int i = 0;
     while (i < argc && argv[i][0] == '-') {
         if (i + 1 >= argc)
@@ -412,6 +544,10 @@ static int run_machine(int argc, char **argv)
                 return usage();   /* one disk, one mode */
             disk = argv[i + 1];
             disk_writable = strcmp(argv[i], "--disk-rw") == 0;
+        } else if (strcmp(argv[i], "--net") == 0) {
+            if (strcmp(argv[i + 1], "loop") != 0)
+                return usage();   /* only the loopback wire, for now */
+            net_loop = 1;
         } else
             return usage();
         i += 2;
@@ -517,10 +653,20 @@ static int run_machine(int argc, char **argv)
         off_t end = lseek(g_vio.disk_fd, 0, SEEK_END);
         g_vio.capacity = end > 0 ? (uint64_t)end / 512u : 0;
     }
-    printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx%s\n",
+    /* The virtio-net device: a loopback wire. Without --net the transport
+     * reports DeviceID 0 and the guest's driver skips the node. */
+    memset(&g_vnet, 0, sizeof(g_vnet));
+    g_vnet.vm = m.vm;
+    if (net_loop) {
+        g_vnet.present = 1;
+        const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };   /* locally administered */
+        memcpy(g_vnet.mac, mac, 6);
+    }
+    printf("vmctl: %s: %zu bytes at 0x%llx (%s), %lu MiB at 0x%llx, %u cpu(s), device tree %zu bytes at 0x%llx%s%s\n",
            path, len, (unsigned long long)load, has_header ? "Image header" : "flat", mem_mib,
            (unsigned long long)ram_base, nr_cpus, dtb_len, (unsigned long long)dtb_gpa,
-           disk ? (disk_writable ? ", virtio-blk /dev/vda (rw)" : ", virtio-blk /dev/vda (ro)") : "");
+           disk ? (disk_writable ? ", virtio-blk /dev/vda (rw)" : ", virtio-blk /dev/vda (ro)") : "",
+           net_loop ? ", virtio-net eth0 (loop)" : "");
 
     /* One thread, every running vCPU in turn, a tick each. A vCPU that
      * asks for an interrupt (WFI) gives up its turn; its next comes round. */
@@ -534,6 +680,8 @@ static int run_machine(int argc, char **argv)
          * is drained (or a hostile ring stopped it) and draining ends. */
         if (g_vio.draining && vio_service(&g_vio) <= 0)
             g_vio.draining = 0;
+        if (g_vnet.draining && vnet_service(&g_vnet) <= 0)
+            g_vnet.draining = 0;
         unsigned nr_running = 0;
         for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
             nr_running += m.running[c] ? 1 : 0;
@@ -581,6 +729,14 @@ static int run_machine(int argc, char **argv)
                 vio_reg(&g_vio, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO0_BASE), x.mmio.write, &val);
                 if (!x.mmio.write)
                     x.mmio.value = val;   /* the kernel completes the read / steps the write */
+                break;   /* run again */
+            }
+            if (x.mmio.gpa >= COSMO_HVM_VIRTIO1_BASE &&
+                x.mmio.gpa < COSMO_HVM_VIRTIO1_BASE + COSMO_HVM_VIRTIO1_SIZE) {
+                uint64_t val = x.mmio.value;
+                vnet_reg(&g_vnet, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO1_BASE), x.mmio.write, &val);
+                if (!x.mmio.write)
+                    x.mmio.value = val;
                 break;   /* run again */
             }
             printf("vmctl: cpu %u: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",

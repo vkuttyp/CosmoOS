@@ -727,7 +727,53 @@ read path's Linux boot has, not a CI gate.
 
 Not done, and named: discard and write-zeroes; a copy-on-write overlay;
 indirect and chained descriptors beyond the simple case; multiple queues
-and `VIRTIO_F_RING_EVENT_IDX`; virtio-net and a PCI transport.
+and `VIRTIO_F_RING_EVENT_IDX`; and a PCI transport.
+
+### The shared virtqueue walk (`vq.c`), and a network interface (`vmctl --net loop`)
+
+Adding a second device first meant lifting the ring walk out of the block
+device so the second one inherits it rather than re-earning it. `vq.c` is
+what is the same whatever the queue carries: the descriptor layout, the
+available/used rings, and `vq_process` -- the walk with the disciplines the
+block device earned over review (every index bounded, a looping chain
+refused, the available-ring backlog bounded, the per-notification work
+ceiling, the atomic publish, a fault reported as failure and never partial
+progress). A device supplies a `serve` that walks one head's chain and
+returns how much it moved; the walk lives once. A `serve` returns 1
+(served, publish), 0 (nothing to serve now -- leave the head available) or
+-1 (fault); the 0 case is what a *pull* queue needs, where a posted buffer
+is a pool the device draws from as work arrives, not a request to serve at
+once. Block's `serve` always returns 1; the refactor was proved by the
+block tests passing unchanged.
+
+The network device (`vnet.c`) is two `serve`s over that walk at a second
+virtio-mmio window (`COSMO_HVM_VIRTIO1_*`, SPI 49). Transmit (queue 1) is
+drain-all: each posted chain is a device-readable `virtio_net_hdr` and
+frame, gathered and handed to the wire. Receive (queue 0) is a pull queue:
+it measures a posted device-writable buffer's capacity, takes a frame off
+the wire only when there is room, and writes a zeroed header and the frame
+across the buffer -- returning 0 to leave the buffer when the wire is
+empty. There is no status byte; a net queue carries frames, and the
+direction is fixed by the queue, not read from a request. Every bound is
+`vq.c`'s; `vnet.c` adds the per-frame maximum and the direction each queue
+requires. The transport in `vmctl` learns `QueueSel` and per-queue state,
+reports `DeviceID` 1 and a MAC in config space, and offers
+`VIRTIO_F_VERSION_1` and `VIRTIO_NET_F_MAC` and nothing else.
+
+The wire is the owner's, and for now a **loopback**: a transmitted frame
+is delivered back on the receive queue, which is enough to prove both
+queues, the header and the interrupt end to end. It drops when full -- a
+NIC drops with nowhere to put a frame, it does not grow without bound.
+Without `--net` the transport reports `DeviceID` 0 and the guest's driver
+skips the node.
+
+Proven end to end in the harness (`el2-virtq-net`: a guest transmits a
+frame and receives it back) and exhaustively on the host (`test_vnet_dev`:
+the transmit and receive walks and their hostile-ring refusals). Not done,
+and named: a real host network (bridging the guest's frames to the host's
+stack -- the next unit, and where the host userland's raw-frame API is
+designed); offloads and mergeable receive buffers; the control queue and
+multiqueue; a PCI transport.
 
 ### Guest memory (`guestmem.c`)
 

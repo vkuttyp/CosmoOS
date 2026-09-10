@@ -93,9 +93,9 @@ static struct vblk_io io_rw = {
     .capacity_sectors = DISK_SECTORS,
 };
 
-static struct vblk_queue fresh_queue(void)
+static struct vq_queue fresh_queue(void)
 {
-    struct vblk_queue q;
+    struct vq_queue q;
     memset(&q, 0, sizeof(q));
     q.desc_gpa = DESC; q.avail_gpa = AVAIL; q.used_gpa = USED; q.size = 8; q.ready = 1;
     return q;
@@ -133,7 +133,7 @@ static void test_read(void)
     for (unsigned i = 0; i < sizeof(g_disk); i++)
         g_disk[i] = (uint8_t)(i * 7 + 1 + (i / VBLK_SECTOR) * 53);  /* per-sector pattern */
     build_read_req(2 /*sector*/, VBLK_SECTOR);
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == 1);       /* one request served */
     /* the guest's data buffer holds sector 2 of the disk */
     EXPECT(memcmp(g_ram + DATA, g_disk + 2 * VBLK_SECTOR, VBLK_SECTOR) == 0);
@@ -157,14 +157,14 @@ static void test_write_is_refused(void)
     put_desc(1, DATA, VBLK_SECTOR, 1 | 2, 2);
     put_desc(2, STATUS, 1, 2, 0);
     put16(AVAIL + 4, 0); put16(AVAIL + 2, 1);
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&io, &q) == 1);        /* completed... */
     EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_UNSUPP);  /* ...as unsupported, a read-only device */
 }
 
 static void test_hostile(void)
 {
-    struct vblk_queue q;
+    struct vq_queue q;
 
     /* (1) an available head index past the ring. 0xffff * 16 lands well
        outside the test's guest RAM, so a missing bound reads out of bounds
@@ -294,7 +294,7 @@ static void test_work_ceiling(void)
 
     struct vblk_io bio = io;
     bio.max_bytes_per_call = VBLK_SECTOR;        /* room for one sector of data */
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&bio, &q) == 1);         /* only the first is served this call */
     EXPECT(q.last_avail == 1);                   /* the other two still pending */
     EXPECT(vblk_process(&bio, &q) == 1);         /* the next call serves the second */
@@ -318,7 +318,7 @@ static void test_write(void)
     for (unsigned i = 0; i < VBLK_SECTOR; i++)
         g_ram[DATA + i] = (uint8_t)(i * 3 + 5);   /* the bytes the guest wants written */
     build_write_req(3 /*sector*/, VBLK_SECTOR);
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&io_rw, &q) == 1);
     EXPECT(g_ram[STATUS] == VIRTIO_BLK_S_OK);
     /* sector 3 of the disk now holds the guest's bytes */
@@ -354,7 +354,7 @@ static void test_write(void)
    a read-only device refuses a write outright. */
 static void test_write_hostile(void)
 {
-    struct vblk_queue q;
+    struct vq_queue q;
 
     /* (a) a write whose data buffer is marked device-writable (wrong way). */
     memset(g_ram, 0, GRAM); g_oob_reads = 0;
@@ -430,7 +430,7 @@ static void test_write_ceiling(void)
 
     struct vblk_io bio = io_rw;
     bio.max_bytes_per_call = VBLK_SECTOR;         /* room for one sector of write data */
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&bio, &q) == 1);          /* only one write this call */
     EXPECT(q.last_avail == 1);
     EXPECT(vblk_process(&bio, &q) == 1);
@@ -459,7 +459,7 @@ static void test_flush_ceiling(void)
 
     struct vblk_io bio = io_rw;
     bio.max_bytes_per_call = VBLK_FLUSH_COST;     /* room for one flush */
-    struct vblk_queue q = fresh_queue();
+    struct vq_queue q = fresh_queue();
     EXPECT(vblk_process(&bio, &q) == 1);
     EXPECT(q.last_avail == 1);
     EXPECT(g_flushes == 1);

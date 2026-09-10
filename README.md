@@ -1038,6 +1038,27 @@ See [docs/development.md](docs/development.md).
   flush, the hostile write rings). Mounting a stock Linux root read-write
   is the same `QEMU_MEM=2G`-and-a-root-image reproduction the read path's
   Linux boot is, not a CI gate.
+- **A guest network interface (done):** `docs/audit/next-subsystem-vnet.md`,
+  `docs/kernel-services/virtualization/design.md` ("The shared virtqueue
+  walk, and a network interface"). Adding a second device first meant
+  lifting the ring walk out of the block device: `userland/system/vq.c` now
+  holds the walk and every hostile-input discipline the block device earned
+  over its review, and `vblk.c` is one `serve` over it -- proved by the
+  block tests passing unchanged. `vnet.c` is the second `serve`: a
+  virtio-net device at a second virtio-mmio window (`COSMO_HVM_VIRTIO1_*`,
+  SPI 49), transmit draining posted frames to the wire and receive a *pull*
+  queue that fills posted buffers only as frames arrive (a serve returning
+  0 leaves a buffer available, the generalisation net needed). `vmctl`
+  learns `QueueSel` and per-queue state, reports DeviceID 1 and a MAC, and
+  offers `VIRTIO_F_VERSION_1` + `VIRTIO_NET_F_MAC`. The wire is the owner's
+  and for now a loopback -- a transmitted frame comes back on receive,
+  enough to prove both queues, the header and the interrupt end to end, and
+  it drops when full rather than growing. Proven in the harness
+  (`el2-virtq-net`: a guest transmits a frame and receives it back) and on
+  the host (`test_vnet_dev`). A real host network -- bridging the guest's
+  frames to the host's stack -- is the next unit; a stock Linux bringing
+  `eth0` up and seeing its counters advance over the loopback is the
+  `QEMU_MEM=2G` reproduction.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

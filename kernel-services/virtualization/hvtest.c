@@ -2399,6 +2399,178 @@ bool selftest_el2_virtq_device(const char **reason)
     return true;
 }
 
+/*
+ * el2-virtq-net: a guest drives a virtio-mmio network device at the second
+ * transport window, transmits a frame and -- the owner's wire being a
+ * loopback -- receives it back. The hostile-input walk is test_vnet_dev's;
+ * here a real guest driver negotiates two queues and the frame round-trips.
+ */
+#define NET_BASE 0x0A000200ull
+#define NET_SIZE 0x200ull
+#define NET_HDR  12u
+#define NET_FRAME_MAX 1514u
+
+struct net_model {
+    uint32_t feat_sel, status, queue_sel;
+    uint64_t rq_desc, rq_avail, rq_used, tq_desc, tq_avail, tq_used;
+    uint32_t rq_num, tq_num;
+    int rq_ready, tq_ready;
+    uint16_t rq_used_idx, tq_used_idx;
+    uint8_t mac[6];
+    uint8_t wire[NET_FRAME_MAX];   /* a single-frame loopback */
+    uint32_t wire_len;
+    int wire_full;
+};
+
+/* Drain the transmit queue into the wire, then fill posted receive buffers
+ * from it. A compact happy-path loopback; the robust walk is vnet.c's. */
+static void net_notify(struct vm *vm, struct net_model *m)
+{
+    struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } d;
+    uint16_t avail = 0;
+    if (m->tq_num && vm_mem_read(vm, m->tq_avail + 2, &avail, 2) == 0) {
+        while (m->tq_used_idx != avail) {
+            uint16_t head = 0;
+            vm_mem_read(vm, m->tq_avail + 4 + (m->tq_used_idx % m->tq_num) * 2u, &head, 2);
+            vm_mem_read(vm, m->tq_desc + (uint64_t)head * 16u, &d, sizeof(d));
+            uint8_t frame[NET_HDR + NET_FRAME_MAX];
+            uint32_t total = d.len <= sizeof(frame) ? d.len : 0;
+            if (total)
+                vm_mem_read(vm, d.addr, frame, total);
+            if (total >= NET_HDR && !m->wire_full) {   /* strip the header, keep the frame */
+                m->wire_len = total - NET_HDR;
+                memcpy(m->wire, frame + NET_HDR, m->wire_len);
+                m->wire_full = 1;
+            }
+            uint32_t elem[2] = { head, 0 };            /* transmit returns nothing */
+            vm_mem_write(vm, m->tq_used + 4 + (m->tq_used_idx % m->tq_num) * 8u, elem, 8);
+            m->tq_used_idx++;
+            vm_mem_write(vm, m->tq_used + 2, &m->tq_used_idx, 2);
+        }
+    }
+    avail = 0;
+    if (m->rq_num && vm_mem_read(vm, m->rq_avail + 2, &avail, 2) == 0) {
+        while (m->wire_full && m->rq_used_idx != avail) {
+            uint16_t head = 0;
+            vm_mem_read(vm, m->rq_avail + 4 + (m->rq_used_idx % m->rq_num) * 2u, &head, 2);
+            vm_mem_read(vm, m->rq_desc + (uint64_t)head * 16u, &d, sizeof(d));
+            uint8_t buf[NET_HDR + NET_FRAME_MAX];
+            memset(buf, 0, NET_HDR);
+            memcpy(buf + NET_HDR, m->wire, m->wire_len);
+            uint32_t total = NET_HDR + m->wire_len;
+            if (d.len >= total)
+                vm_mem_write(vm, d.addr, buf, total);
+            m->wire_full = 0;
+            uint32_t elem[2] = { head, total };
+            vm_mem_write(vm, m->rq_used + 4 + (m->rq_used_idx % m->rq_num) * 8u, elem, 8);
+            m->rq_used_idx++;
+            vm_mem_write(vm, m->rq_used + 2, &m->rq_used_idx, 2);
+        }
+    }
+}
+
+static void net_reg(struct vm *vm, struct net_model *m, unsigned off, bool write, uint64_t *val)
+{
+    /* only queues 0 and 1 exist; a QueueSel past them selects nothing, so
+     * the queue-shaped registers do not alias an existing queue's state */
+    int sel = m->queue_sel == 0 || m->queue_sel == 1;
+    uint64_t *desc = m->queue_sel == 1 ? &m->tq_desc : &m->rq_desc;
+    uint64_t *drv  = m->queue_sel == 1 ? &m->tq_avail : &m->rq_avail;
+    uint64_t *dev  = m->queue_sel == 1 ? &m->tq_used : &m->rq_used;
+    uint32_t *num  = m->queue_sel == 1 ? &m->tq_num : &m->rq_num;
+    int *ready     = m->queue_sel == 1 ? &m->tq_ready : &m->rq_ready;
+    if (!write) {
+        switch (off) {
+        case 0x000: *val = 0x74726976u; return;
+        case 0x004: *val = 2; return;
+        case 0x008: *val = 1; return;                  /* DeviceID: network */
+        case 0x00c: *val = 0x554d4551u; return;
+        case 0x010: *val = m->feat_sel == 1 ? 1u : (1u << 5); return;  /* VERSION_1 ; NET_F_MAC */
+        case 0x034: *val = 8; return;                  /* QueueNumMax */
+        case 0x044: *val = sel ? (uint32_t)*ready : 0u; return;
+        case 0x070: *val = m->status; return;
+        case 0x100: *val = (uint32_t)m->mac[0] | ((uint32_t)m->mac[1] << 8) |
+                           ((uint32_t)m->mac[2] << 16) | ((uint32_t)m->mac[3] << 24); return;
+        case 0x104: *val = (uint32_t)m->mac[4] | ((uint32_t)m->mac[5] << 8); return;
+        default: *val = 0; return;
+        }
+    }
+    uint32_t w = (uint32_t)*val;
+    switch (off) {
+    case 0x014: m->feat_sel = w; break;
+    case 0x030: m->queue_sel = w; break;
+    case 0x050: net_notify(vm, m); break;
+    case 0x070: m->status = w; break;
+    case 0x038: if (sel) *num = w; break;
+    case 0x044: if (sel) *ready = (int)w; break;
+    case 0x080: if (sel) *desc = (*desc & ~0xFFFFFFFFull) | w; break;
+    case 0x084: if (sel) *desc = (*desc & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x090: if (sel) *drv = (*drv & ~0xFFFFFFFFull) | w; break;
+    case 0x094: if (sel) *drv = (*drv & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    case 0x0a0: if (sel) *dev = (*dev & ~0xFFFFFFFFull) | w; break;
+    case 0x0a4: if (sel) *dev = (*dev & 0xFFFFFFFFull) | ((uint64_t)w << 32); break;
+    default: break;
+    }
+}
+
+bool selftest_el2_virtq_net(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_vnet.bin", &vm, &v) == 0);
+    struct net_model m;
+    memset(&m, 0, sizeof(m));
+    const uint8_t mac[6] = { 0x52, 0x54, 0x00, 0x00, 0x00, 0x01 };
+    memcpy(m.mac, mac, 6);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    unsigned steps = 0;
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= NET_BASE && x.mmio.gpa < NET_BASE + NET_SIZE) {
+            uint64_t val = x.mmio.value;
+            net_reg(vm, &m, (unsigned)(x.mmio.gpa - NET_BASE), x.mmio.write, &val);
+            if (!x.mmio.write)
+                x.mmio.value = val;
+            CHECK(++steps < 200000);
+            continue;
+        }
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        break;
+    }
+    /* hvc 1: transport identity and the MAC's low bytes from config space */
+    CHECK(x.hypercall.nr == 1);
+    CHECK(x.hypercall.a0 == 0x74726976u);          /* MagicValue */
+    CHECK(x.hypercall.a1 == 1);                     /* DeviceID network */
+    CHECK((x.hypercall.a2 & 0xff) == 0x52);         /* MAC[0] */
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        if (x.kind == COSMO_VM_EXIT_MMIO && x.mmio.gpa >= NET_BASE && x.mmio.gpa < NET_BASE + NET_SIZE) {
+            uint64_t val = x.mmio.value;
+            net_reg(vm, &m, (unsigned)(x.mmio.gpa - NET_BASE), x.mmio.write, &val);
+            if (!x.mmio.write)
+                x.mmio.value = val;
+            CHECK(++steps < 400000);
+            continue;
+        }
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        break;
+    }
+    /* hvc 2: the frame came back -- used length is header+frame, and the
+     * bytes are the ones transmitted (i + 0x30), not a stale buffer. */
+    CHECK(x.hypercall.nr == 2);
+    CHECK(x.hypercall.a0 == NET_HDR + 64u);
+    CHECK(x.hypercall.a1 == 0x30);
+    CHECK(x.hypercall.a2 == 0x31);
+    CHECK(x.hypercall.a3 == 0x32);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-virtq-net: a guest negotiated a virtio-mmio network device, "
+          "transmitted a frame and received it back through the loopback wire");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2532,5 +2704,6 @@ bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true;
 bool selftest_el2_guest_idreg(const char **reason) { (void)reason; return true; }
 bool selftest_el2_vm_raise_spi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_virtq_device(const char **reason) { (void)reason; return true; }
+bool selftest_el2_virtq_net(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif
