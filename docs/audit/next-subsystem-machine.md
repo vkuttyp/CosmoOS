@@ -145,8 +145,13 @@ the machine rather than a flat test: RAM at `COSMO_HVM_RAM_BASE`, the
 image loaded by its **arm64 Image header** -- magic `ARM\x64` at 56,
 `text_offset` at 8, `image_size` at 16 -- at `RAM_BASE + text_offset`
 (or at `RAM_BASE` for a flat binary with no header), the DTB written into
-guest memory after the image on an 8-byte boundary and below 512 MiB, and
-vCPU 0 started with `x0 = DTB`, `x1 = x2 = x3 = 0`, `pc = entry`, EL1h
+guest memory by the arm64 boot protocol's rules -- 8-byte aligned, at
+most 2 MiB, not sharing a 2 MiB region with the image, and within 512 MiB
+*of the image's start* (a bound older kernels enforce; the position is
+relative to the image, never absolute -- RAM at 1 GiB can meet it, an
+absolute "below 512 MiB" it never could) -- concretely at the first 2 MiB
+boundary past `image_size`, and vCPU 0 started with `x0 = DTB`,
+`x1 = x2 = x3 = 0`, `pc = entry`, EL1h
 with interrupts masked, MMU off -- which is what `ctx_reset` already
 gives it. The existing `vmctl run IMAGE` is unchanged: the flat tests
 keep their `0x1000`.
@@ -390,7 +395,10 @@ Counted, not timed:
 - **The Image header is a contract with a version.** `text_offset`
   semantics changed in Linux 3.17 (a flag bit says whether the offset is
   from a 2 MiB base). Read the flag; place accordingly; a flat binary with
-  no header goes at `RAM_BASE`.
+  no header goes at `RAM_BASE`. The DTB's placement rules are the same
+  document's, and all of them are relative to the image: a VM with less
+  RAM than `image_size` rounded up to 2 MiB plus the blob has no valid
+  place for it, and `--machine` must refuse rather than place it wrong.
 - **Two memory layouts.** The flat tests keep RAM at `0` and the image at
   `0x1000`; machine mode puts RAM at `0x40000000`. Both are the VM's
   owner's choice through `vm_mem_add`, and the kernel does not care; but
