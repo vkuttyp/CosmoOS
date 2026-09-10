@@ -15,6 +15,7 @@ KERNEL_ARCH_SRCS := \
 	kernel/arch/aarch64/hv_el2_switch.S \
 	kernel/arch/aarch64/hv_el2.c \
 	kernel/arch/aarch64/gicv3_vdist.c \
+	kernel/arch/aarch64/hv_idregs.c \
 	kernel/arch/aarch64/fpu.c \
 	kernel/arch/aarch64/irq.c \
 	kernel/arch/aarch64/trap.c \

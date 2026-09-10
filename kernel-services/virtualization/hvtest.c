@@ -543,6 +543,10 @@ bool selftest_el2_stub(const char **reason)
 /* --- AArch64 guests (docs/kernel-services/virtualization/testing.md) --- */
 
 #if defined(ARCH_AARCH64)
+/* Reading a host ID register by its encoding, for the feature-model
+ * test. kernel-services are built without the arch include path, so this
+ * is inline rather than <aarch64/sysreg.h>. */
+#define HOST_IDREG(sname) ({ uint64_t v_; __asm__ volatile("mrs %0, " sname : "=r"(v_)); v_; })
 /* The EL2 backend's own guests: one per exit the world switch decodes.
  * Each image is loaded at guest-physical 0x1000 and entered at EL1 with
  * the MMU off, which is this architecture's reset state. */
@@ -2092,6 +2096,54 @@ bool selftest_el2_vcpu_run_tick(const char **reason)
     return true;
 }
 
+bool selftest_el2_guest_idreg(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_idreg.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    uint64_t got[0x80];
+    memset(got, 0xFF, sizeof(got));
+    for (;;) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);   /* every read answered in-kernel: no SYSREG exit */
+        if (x.hypercall.nr == 0)
+            break;
+        CHECK(x.hypercall.nr < 0x80);
+        got[x.hypercall.nr] = x.hypercall.a0;
+    }
+    uint64_t host_pfr0 = HOST_IDREG("S3_0_c0_c4_0");
+    uint64_t host_isar1 = HOST_IDREG("S3_0_c0_c6_1");
+    uint64_t host_mmfr0 = HOST_IDREG("S3_0_c0_c7_0");
+
+    /* ID_AA64PFR0: EL2/EL3 hidden, FP and GIC kept from the host. */
+    CHECK(((got[0x40] >> 8) & 0xF) == 0);                       /* EL2 */
+    CHECK(((got[0x40] >> 12) & 0xF) == 0);                      /* EL3 */
+    CHECK(((got[0x40] >> 16) & 0xF) == ((host_pfr0 >> 16) & 0xF));   /* FP: as the host has it */
+    CHECK(((got[0x40] >> 24) & 0xF) == ((host_pfr0 >> 24) & 0xF));   /* GIC */
+    CHECK(got[0x40] != host_pfr0);                              /* something was masked (EL2 present on the host) */
+
+    CHECK(got[0x41] == 0);                                     /* ID_AA64PFR1 hidden */
+    CHECK((got[0x50] & 0xF) >= 6);                              /* ID_AA64DFR0 DebugVer: the minimum */
+    CHECK(((got[0x50] >> 8) & 0xF) == 0);                       /* PMUVer: none */
+
+    /* ID_AA64ISAR1: pointer authentication removed (APA, API, GPA, GPI). */
+    CHECK(((got[0x61] >> 4) & 0xF) == 0 && ((got[0x61] >> 8) & 0xF) == 0);
+    CHECK(((got[0x61] >> 24) & 0xF) == 0 && ((got[0x61] >> 28) & 0xF) == 0);
+    CHECK((got[0x61] & 0xF) == (host_isar1 & 0xF));            /* DPB and the rest: kept */
+
+    CHECK((got[0x70] & 0xF) == (host_mmfr0 & 0xF));            /* ID_AA64MMFR0 PARange: the truth */
+    CHECK(((got[0x71] >> 8) & 0xF) == 0);                       /* ID_AA64MMFR1 VH: hidden */
+
+    CHECK(got[0x44] == 0);                                     /* ID_AA64ZFR0 (SVE), in the space, unnamed: zero */
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-idreg: feature registers answered in-kernel -- EL2/EL3/SVE/PMU/pointer-auth hidden, FP/GIC/PARange kept");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2159,20 +2211,17 @@ bool selftest_el2_guest_sysreg(const char **reason)
     CHECK(make_guest("tests/hv/guest_sysreg.bin", &vm, &v) == 0);
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
-    /* HCR_EL2.TID3 traps the ID-register read: the manager is told which
-     * register the guest wanted it in, and that it was a read. */
-    CHECK(vcpu_run(v, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_SYSREG);
-    CHECK(x.sysreg.reg == 5);                   /* mrs x5, ... */
-    CHECK(!x.sysreg.write);
-    /* Answer as a model would and step over the instruction. */
-    struct cosmo_vcpu_regs regs;
-    CHECK(vcpu_get_regs(v, &regs) == 0);
-    regs.x[5] = 0;
-    regs.pc += 4;
-    CHECK(vcpu_set_regs(v, &regs) == 0);
+    /* HCR_EL2.TID3 traps the ID-register read, and the feature model now
+     * answers it in the kernel: the guest's mrs of id_aa64pfr0_el1 does
+     * not reach the owner at all -- the run goes straight to the WFI, and
+     * x5 holds the sanitized value (its EL2 field cleared, though this
+     * host runs at EL2, so it is not the host's raw register). */
     CHECK(vcpu_run(v, &x) == 0);
     CHECK(x.kind == COSMO_VM_EXIT_WFI);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    CHECK(((regs.x[5] >> 8) & 0xF) == 0);       /* EL2 field: hidden */
+    CHECK(regs.x[5] != HOST_IDREG("S3_0_c0_c4_0"));   /* not the host's own (EL2 is present there) */
     drop_guest(vm, v);
     return true;
 }
@@ -2225,5 +2274,6 @@ bool selftest_el2_vcpu_run_tick(const char **reason) { (void)reason; return true
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_idreg(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif
