@@ -25,6 +25,11 @@
 #define HV_REGIONS_MAX  16u
 #define HV_GPA_LIMIT    (1ull << 32)     /* stage 1: a 4 GiB guest-physical window */
 #define HV_CONSOLE_SIZE 4096u
+/* The guest's console UART: where QEMU's virt puts UART0 and a stock guest's
+ * device tree names it. The hypervisor's constant, like the GIC's. */
+#define VUART_BASE      0x09000000ull
+#define VUART_SIZE      0x1000ull
+#define VUART_INTID     33u
 
 struct vm;
 struct vcpu;
@@ -71,6 +76,8 @@ struct vm {
         uint64_t dropped;
     } console;
     struct vm_device debug_console;      /* the built-in port 0xE9 backend */
+    struct vm_device uart_dev;           /* AArch64: the guest's PL011 at VUART_BASE */
+    struct vuart *uart;
     uint32_t owner_uid;
     struct list_node link;               /* the manager's list */
 };

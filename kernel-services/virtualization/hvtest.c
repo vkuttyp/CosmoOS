@@ -1554,6 +1554,41 @@ bool selftest_el2_mmio_device(const char **reason)
     return true;
 }
 
+/*
+ * The measurement that opened the report, as a test: a guest stores
+ * "hello\n" to the UART's data register a byte at a time, the way an
+ * earlycon does, and the VM's console -- what the owner reads from the
+ * VM's descriptor -- holds exactly that. The flag register said the
+ * transmitter was ready throughout, and the identification registers
+ * say a PL011, so a driver that checks finds one. Before this the first
+ * store was an MMIO exit and the ring stayed empty.
+ */
+bool selftest_el2_guest_uart(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_uart.bin", &vm, &v) == 0);
+    CHECK(vm_console_pending(vm) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* six stores, no exit */
+    CHECK(x.hypercall.a0 == 0x90u);                                     /* FR: TXFE and RXFE, throughout */
+    CHECK(x.hypercall.a1 == 0x11u && x.hypercall.a2 == 0x10u);         /* PeriphID0, PeriphID1: a PL011 */
+    CHECK(x.hypercall.a3 == 0xB1u);                                    /* PCellID3 */
+    CHECK(vm_console_pending(vm) == 6);
+    char buf[16];
+    memset(buf, 0, sizeof(buf));
+    CHECK(vm_console_read(vm, buf, sizeof(buf) - 1) == 6);
+    CHECK(strcmp(buf, "hello\n") == 0);
+    CHECK(vm_console_pending(vm) == 0);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-uart: the guest printed \"hello\" through a PL011 and its owner read it back");
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1677,6 +1712,7 @@ bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return tr
 bool selftest_el2_guest_sgi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gicd_isolated(const char **reason) { (void)reason; return true; }
 bool selftest_el2_mmio_device(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_uart(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

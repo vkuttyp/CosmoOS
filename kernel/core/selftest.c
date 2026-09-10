@@ -517,6 +517,7 @@ static const struct selftest tests[] = {
     { "el2-guest-sgi", selftest_el2_guest_sgi },
     { "el2-guest-gicd-isolated", selftest_el2_guest_gicd_isolated },
     { "el2-mmio-device", selftest_el2_mmio_device },
+    { "el2-guest-uart", selftest_el2_guest_uart },
     { "el2-guest-hvc",   selftest_el2_guest_hvc },
     { "el2-guest-mmio",  selftest_el2_guest_mmio },
     { "el2-guest-sysreg", selftest_el2_guest_sysreg },

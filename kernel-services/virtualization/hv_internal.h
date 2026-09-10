@@ -24,6 +24,11 @@ int vmdev_mmio(struct vm *vm, uint64_t gpa, bool write, unsigned size, uint64_t 
 void hv_mmio_complete_read(struct vcpu *v, unsigned size, bool sse, bool sf, unsigned reg, uint64_t value);
 void vm_console_put(struct vm *vm, const uint8_t *bytes, size_t n);
 
+/* The PL011 (vuart.c): created per VM on AArch64 and registered as `dev`. */
+struct vuart;
+struct vuart *vuart_create(struct vm *vm, struct vm_device *dev);
+void vuart_destroy(struct vuart *u);
+
 /* vintr.c */
 void vintr_init(struct vcpu *v);
 int vintr_take_lowest(struct vcpu *v);        /* the vector to offer, -1 none (not cleared) */

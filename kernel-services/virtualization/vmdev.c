@@ -7,6 +7,7 @@
  * producer is the run loop, the consumer the owner's read.
  */
 
+#include <kernel/log.h>
 #include <kernel/errno.h>
 #include <kernel/string.h>
 
@@ -76,6 +77,16 @@ void vmdev_init(struct vm *vm)
     d->pio = debug_console_pio;
     d->priv = vm;
     list_push_back(&vm->devices, &d->link);
+#if defined(ARCH_AARCH64)
+    /* The guest's console is part of the machine this hypervisor defines,
+     * at the address a stock kernel expects it. Without it a guest's
+     * first printk is a fault to its owner. */
+    vm->uart = vuart_create(vm, &vm->uart_dev);
+    if (vm->uart != NULL)
+        list_push_back(&vm->devices, &vm->uart_dev.link);
+    else
+        kwarn("hv: vm%u: no memory for a console UART; the guest will have none", vm->id);
+#endif
 }
 
 int vm_device_register(struct vm *vm, struct vm_device *dev)

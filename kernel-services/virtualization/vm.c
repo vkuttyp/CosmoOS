@@ -90,6 +90,7 @@ static void vm_release(struct kobject *obj)
     hv_unregister_vm(vm);
     guestmem_release(vm);
     arch_hv_vm_destroy(vm->arch);
+    vuart_destroy(vm->uart);
     kdebug("hv: vm%u released", vm->id);
     kfree(vm);
 }
