@@ -234,7 +234,8 @@ static void fill_common(struct vcpu *v, struct cosmo_vm_exit *x, uint32_t kind)
 {
     x->kind = kind;
     x->rip = arch_hv_vcpu_rip(v->arch);
-    x->flags = vintr_any(v) ? COSMO_VM_EXIT_F_IRQ_PENDING : 0;
+    /* Two sources: the owner's injections, and the guest's own controller. */
+    x->flags = (vintr_any(v) || arch_hv_vcpu_irq_waiting(v->arch)) ? COSMO_VM_EXIT_F_IRQ_PENDING : 0;
 }
 
 int vcpu_run(struct vcpu *v, struct cosmo_vm_exit *x)
@@ -285,15 +286,6 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
         int delivered = arch_hv_vcpu_irq_delivered(v->arch);
         if (delivered >= 0)
             vintr_clear(v, delivered);
-        /* The guest's own timer went off during that run: it becomes a
-         * pending interrupt like any the owner injects, and arrives
-         * through the same path -- so a timer is not a second kind of
-         * delivery to get wrong. */
-        if (arch_hv_vcpu_timer_expired(v->arch)) {
-            unsigned intid = arch_hv_guest_timer_intid();
-            if (intid)
-                vcpu_inject(v, intid);
-        }
 
         /* The backend answered the access itself -- a guest talking to
          * its own interrupt controller. Nothing for the owner; run on. */
@@ -365,7 +357,8 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
                 uint64_t slice_ticks = hz / 1000;      /* one 1 ms slice, in counter ticks */
                 for (;;) {
                     uint64_t now = arch_clock_read();
-                    if (now >= deadline || vintr_any(v) || process_kill_pending())
+                    if (now >= deadline || vintr_any(v) || arch_hv_vcpu_irq_waiting(v->arch) ||
+                        process_kill_pending())
                         break;
                     /*
                      * A slice at a time, so an injection from another

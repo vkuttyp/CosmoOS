@@ -154,12 +154,12 @@ uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v);
  * cannot answer it. */
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v);
 
-/* Whether the guest's own timer expired during the last run, reported
- * once per expiry. The owner then injects `arch_hv_guest_timer_intid()`
- * like any other interrupt, so a guest's timer arrives through the same
- * path everything else does. False on an architecture whose guests have
- * no timer of their own (x86-64: stage 1 gives a guest no LAPIC). */
-bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v);
+/* Whether the guest's own interrupt controller holds an interrupt this
+ * vCPU can take -- pending, enabled and routed to it. The owner's own
+ * injections are counted separately (vintr); this is the other source,
+ * and anything that asks "is there something for this vCPU" must ask
+ * both. False where guests have no controller of their own. */
+bool arch_hv_vcpu_irq_waiting(struct arch_hv_vcpu *v);
 
 /* The interrupt number a guest's timer raises (AArch64: the GTDT's
  * virtual timer PPI, 27 on QEMU's virt). 0 where there is none. */

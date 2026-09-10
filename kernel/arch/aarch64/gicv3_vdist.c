@@ -336,6 +336,123 @@ static void gicr_wr(struct gicv3_vdist *d, unsigned i, unsigned off, uint32_t va
         prio_word_write(&p->prio[sgi - GICR_IPRIORITYR], val, mask);
 }
 
+/* --- routing ------------------------------------------------------------ */
+
+#define GICD_CTLR_ENABLE_G1 (1u << 1)
+#define IROUTER_IRM         (1ull << 31)   /* "any": to the lowest-numbered present vCPU */
+
+/* The affinity vCPU i has, in IROUTER's shape: Aff0..2 low, Aff3 at 32. */
+static uint64_t route_of(unsigned i)
+{
+    return vdist_mpidr(i) & 0xFFFFFFull;
+}
+
+static unsigned first_present(const struct gicv3_vdist *d)
+{
+    for (unsigned j = 0; j < VDIST_GICR_FRAMES; j++)
+        if (d->priv[j].present)
+            return j;
+    return 0;
+}
+
+/* Is `intid`, right now, one that vCPU i should be given? Caller holds the lock. */
+static bool deliverable_locked(const struct gicv3_vdist *d, unsigned i, unsigned intid, uint8_t *prio)
+{
+    if (i >= VDIST_GICR_FRAMES || intid >= VDIST_NR_LINES)
+        return false;
+    const struct vdist_private *p = &d->priv[i];
+    if (!p->present || (p->waker & GICR_WAKER_PS) || !(d->ctlr & GICD_CTLR_ENABLE_G1))
+        return false;
+    if (intid < NR_PRIVATE) {
+        uint32_t bit = 1u << intid;
+        if (!(p->pending & p->enable & p->group & bit))
+            return false;
+        *prio = p->prio[intid];
+        return true;
+    }
+    unsigned n = intid / 32u;
+    uint32_t bit = 1u << (intid % 32u);
+    if (!(d->pending[n] & d->enable[n] & d->group[n] & bit))
+        return false;
+    uint64_t r = d->irouter[intid];
+    if (r & IROUTER_IRM) {
+        if (i != first_present(d))
+            return false;
+    } else if ((r & ~IROUTER_IRM) != route_of(i)) {
+        return false;
+    }
+    *prio = d->prio[intid];
+    return true;
+}
+
+int vdist_pending_for(struct gicv3_vdist *d, unsigned i, uint8_t *prio)
+{
+    if (d == NULL || i >= VDIST_GICR_FRAMES)
+        return -1;
+    int best = -1;
+    uint8_t best_prio = 0xFF;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    const struct vdist_private *p = &d->priv[i];
+    /* Private first, then the SPIs; the candidate words are cheap to
+     * test before walking their bits. Lower value is higher priority;
+     * on a tie the lower INTID, as the architecture orders them. */
+    uint32_t cand = p->pending & p->enable & p->group;
+    for (unsigned b = 0; cand; b++, cand >>= 1) {
+        uint8_t pr;
+        if ((cand & 1u) && deliverable_locked(d, i, b, &pr) && pr < best_prio) {
+            best = (int)b;
+            best_prio = pr;
+        }
+    }
+    for (unsigned n = 1; n < NR_WORDS; n++) {
+        uint32_t w = d->pending[n] & d->enable[n] & d->group[n];
+        for (unsigned b = 0; w; b++, w >>= 1) {
+            uint8_t pr;
+            unsigned intid = n * 32u + b;
+            if ((w & 1u) && deliverable_locked(d, i, intid, &pr) && pr < best_prio) {
+                best = (int)intid;
+                best_prio = pr;
+            }
+        }
+    }
+    spin_unlock_irqrestore(&d->lock, s);
+    if (best >= 0)
+        *prio = best_prio;
+    return best;
+}
+
+bool vdist_deliverable(struct gicv3_vdist *d, unsigned i, unsigned intid)
+{
+    if (d == NULL)
+        return false;
+    uint8_t prio;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    bool ok = deliverable_locked(d, i, intid, &prio);
+    spin_unlock_irqrestore(&d->lock, s);
+    return ok;
+}
+
+void vdist_ack(struct gicv3_vdist *d, unsigned i, unsigned intid)
+{
+    if (d == NULL || i >= VDIST_GICR_FRAMES || intid >= VDIST_NR_LINES)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    if (intid < NR_PRIVATE)
+        d->priv[i].pending &= ~(1u << intid);
+    else
+        d->pending[intid / 32u] &= ~(1u << (intid % 32u));
+    spin_unlock_irqrestore(&d->lock, s);
+}
+
+void vdist_raise_private(struct gicv3_vdist *d, unsigned i, unsigned intid)
+{
+    if (d == NULL || i >= VDIST_GICR_FRAMES || intid >= NR_PRIVATE)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&d->lock);
+    d->priv[i].pending |= 1u << intid;
+    spin_unlock_irqrestore(&d->lock, s);
+}
+
 /* --- access decode ---------------------------------------------------- */
 
 enum window { WIN_NONE, WIN_GICD, WIN_GICR };

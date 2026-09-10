@@ -746,14 +746,6 @@ static void vmx_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector)
     v->offered = vector;
 }
 
-/* See svm.c: nothing holds an x86 interrupt across a run. */
-/* Stage 1 gives an x86 guest no timer of its own: nothing to expire. */
-static bool vmx_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
-{
-    (void)v;
-    return false;
-}
-
 static bool vmx_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
 {
     (void)v;
@@ -1124,7 +1116,6 @@ const struct hv_backend vmx_backend = {
     .vcpu_run = vmx_be_vcpu_run,
     .vcpu_set_irq = vmx_be_vcpu_set_irq,
     .vcpu_irq_delivered = vmx_be_vcpu_irq_delivered,
-    .vcpu_timer_expired = vmx_be_vcpu_timer_expired,
     .vcpu_timer_deadline = vmx_be_vcpu_timer_deadline,
     .vcpu_inject_exception = vmx_be_vcpu_inject_exception,
     .vcpu_advance_rip = vmx_be_vcpu_advance_rip,

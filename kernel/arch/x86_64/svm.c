@@ -86,12 +86,6 @@ static void svm_be_vcpu_set_rip(struct arch_hv_vcpu *v, uint64_t rip);
 static uint64_t svm_be_vcpu_rip(struct arch_hv_vcpu *v);
 static void svm_be_vcpu_write_rax(struct arch_hv_vcpu *v, uint64_t value, unsigned size);
 static void svm_be_vcpu_set_irq(struct arch_hv_vcpu *v, int vector);
-/* Stage 1 gives an x86 guest no timer of its own: nothing to expire. */
-static bool svm_be_vcpu_timer_expired(struct arch_hv_vcpu *v)
-{
-    (void)v;
-    return false;
-}
 
 static bool svm_be_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *host_ticks)
 {
@@ -762,7 +756,6 @@ const struct hv_backend svm_backend = {
     .vcpu_run = svm_be_vcpu_run,
     .vcpu_set_irq = svm_be_vcpu_set_irq,
     .vcpu_irq_delivered = svm_be_vcpu_irq_delivered,
-    .vcpu_timer_expired = svm_be_vcpu_timer_expired,
     .vcpu_timer_deadline = svm_be_vcpu_timer_deadline,
     .vcpu_inject_exception = svm_be_vcpu_inject_exception,
     .vcpu_advance_rip = svm_be_vcpu_advance_rip,

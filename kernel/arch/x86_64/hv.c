@@ -95,7 +95,11 @@ uint64_t arch_hv_vcpu_host_vtimer_after(struct arch_hv_vcpu *v)
     return ~0ull;
 }
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
-bool arch_hv_vcpu_timer_expired(struct arch_hv_vcpu *v) { return g_be->vcpu_timer_expired(v); }
+bool arch_hv_vcpu_irq_waiting(struct arch_hv_vcpu *v)
+{
+    (void)v;
+    return false;   /* stage 1 gives an x86 guest no interrupt controller of its own */
+}
 bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *t) { return g_be->vcpu_timer_deadline(v, t); }
 unsigned arch_hv_guest_timer_intid(void) { return 0; }   /* no guest timer in stage 1 */
 void arch_hv_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)

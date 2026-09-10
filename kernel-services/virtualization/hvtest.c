@@ -1279,6 +1279,86 @@ bool selftest_el2_guest_gic_config(const char **reason)
     return true;
 }
 
+/* Run until the guest's hypercall `want`, allowing only the numbers in
+ * `allowed` (a bitmask over 0..63) on the way; each stop is one guest
+ * exit. Fails the bound, or an unexpected number, by returning false. */
+static __maybe_unused bool run_until(struct vcpu *v, struct cosmo_vm_exit *x, unsigned want, uint64_t allowed,
+                                     unsigned bound, unsigned *steps)
+{
+    for (unsigned i = 0; i < bound; i++) {
+        if (vcpu_run(v, x) != 0 || x->kind != COSMO_VM_EXIT_HYPERCALL)
+            return false;
+        if (steps)
+            (*steps)++;
+        if (x->hypercall.nr == want)
+            return true;
+        if (x->hypercall.nr >= 64 || !(allowed & (1ull << x->hypercall.nr)))
+            return false;
+    }
+    return false;
+}
+
+/*
+ * The whole thing, the ordinary way: a guest switches on its distributor,
+ * wakes its redistributor, groups, prioritises and enables its timer PPI
+ * there, routes and enables an SPI in the distributor, then turns on its
+ * CPU interface -- and its timer arrives through the controller it
+ * configured. Then the part only a distributor can show: with the PPI
+ * disabled in the redistributor the next expiry is *held*, not delivered,
+ * past its deadline; re-enabling releases it. Last, an SPI the guest
+ * makes pending by hand through ISPENDR arrives at the vCPU its route
+ * names. Direct injection could pass the first phase; it cannot pass the
+ * second, which is the phase that proves the enable bit gates delivery.
+ */
+bool selftest_el2_guest_gic_timer(const char **reason)
+{
+    if (skip_without_vdist("el2-guest-gic-timer", reason))
+        return true;
+    if (arch_hv_guest_timer_intid() == 0) {
+        kinfo("selftest: el2-guest-gic-timer: no guest timer here; skipping");
+        return true;
+    }
+    unsigned intid = arch_hv_guest_timer_intid();
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_gic.bin", &vm, &v) == 0);
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0);
+    regs.x[8] = 40;
+    CHECK(vcpu_set_regs(v, &regs) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);     /* configured, ready */
+
+    /* Phase A: the timer, through the redistributor the guest enabled it in. */
+    unsigned beats = 0;
+    CHECK(run_until(v, &x, intid, (1ull << 2), 20000, &beats));
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);                         /* ENABLE and ISTATUS, as the handler saw it */
+    CHECK(run_until(v, &x, 3, (1ull << 2), 4, NULL));               /* re-armed, PPI disabled */
+    uint64_t rearmed_at = x.hypercall.a0, cval = x.hypercall.a1;
+    CHECK(cval > rearmed_at);
+
+    /* Phase B: past the deadline with the PPI disabled -- heartbeats only,
+     * no handler. The guest's own count of handler runs must be zero. */
+    unsigned held = 0;
+    CHECK(run_until(v, &x, 5, (1ull << 4), 200000, &held));
+    CHECK(x.hypercall.a0 == 0);
+
+    /* Phase C: re-enabled; the held expiry arrives, and it is the timer. */
+    unsigned released = 0;
+    CHECK(run_until(v, &x, intid, (1ull << 6), 2000, &released));
+    CHECK((x.hypercall.a0 & 0x5u) == 0x5u);
+
+    /* Phase D: an SPI made pending by the guest, routed to itself. */
+    CHECK(run_until(v, &x, 40, (1ull << 6) | (1ull << 7), 2000, NULL));
+    CHECK(run_until(v, &x, 8, (1ull << 7), 4, NULL));
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-gic-timer: PPI %u after %u beat(s); held through %u beat(s) while disabled, released after %u; SPI 40 by ISPENDR",
+          intid, beats, held, released);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -1393,6 +1473,7 @@ bool selftest_el2_guest_timer(const char **reason) { (void)reason; return true; 
 bool selftest_el2_guest_timer_ontime(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gicd_probe(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_gic_config(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_gic_timer(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

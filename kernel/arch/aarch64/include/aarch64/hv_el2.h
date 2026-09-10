@@ -23,5 +23,7 @@ bool el2_vcpu_timer_state(struct arch_hv_vcpu *v, uint64_t *ctl, uint64_t *cntvo
 uint64_t el2_vcpu_host_cntv_after(struct arch_hv_vcpu *v);
 /* The INTID a guest's virtual timer raises, 0 when the backend could not bind it. */
 unsigned el2_guest_timer_intid(void);
+/* Whether the guest's own distributor holds an interrupt this vCPU can take. */
+bool el2_vcpu_irq_waiting(struct arch_hv_vcpu *v);
 
 #endif /* AARCH64_HV_EL2_H */

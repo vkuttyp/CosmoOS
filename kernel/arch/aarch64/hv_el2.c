@@ -106,10 +106,12 @@ struct arch_hv_vcpu {
     int offered;
     int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
     bool lr_reported;        /* its delivery has already been told to the owner */
+    bool lr_from_dist;       /* it came from the guest's distributor, not the owner */
     bool timer_reported;     /* this expiry has already been offered */
     uint64_t host_cntv_after;/* host CNTV_CTL captured at the last exit, race-free */
     uint64_t irq_delivered;  /* interrupts the guest took */
     uint64_t irq_deferred;   /* entries where one was offered and no list register was free */
+    uint64_t irq_withdrawn;  /* placed by the distributor, then disabled or cleared before taken */
     unsigned unknown_exits;
     uint32_t pending_event;  /* a queued exception vector, ~0 for none */
     struct aarch64_fpu_area fpu;   /* the guest's vector registers (arch/fpu.h, guest rule) */
@@ -467,6 +469,7 @@ static void ctx_reset(struct arch_hv_vcpu *v)
     c->vgic_on = g_caps.inject_irq ? 1 : 0;
     v->lr_vector = -1;
     v->lr_reported = false;
+    v->lr_from_dist = false;
     v->timer_reported = false;
     c->vgic_hcr = c->vgic_on ? ICH_HCR_EN : 0;
     v->offered = -1;
@@ -501,9 +504,10 @@ static void el2_vcpu_destroy(struct arch_hv_vcpu *v)
      * *different* interrupt had to wait because the register was still
      * holding one. A second is worth writing EL2 assembly for only if
      * this is not zero in practice. */
-    if (v->irq_delivered || v->irq_deferred)
-        kdebug("hv-el2: vmid %u: %llu interrupt(s) delivered, %llu deferred for want of a list register",
-               v->vm->vmid, (unsigned long long)v->irq_delivered, (unsigned long long)v->irq_deferred);
+    if (v->irq_delivered || v->irq_deferred || v->irq_withdrawn)
+        kdebug("hv-el2: vmid %u: %llu interrupt(s) delivered, %llu deferred for want of a list register, %llu withdrawn",
+               v->vm->vmid, (unsigned long long)v->irq_delivered, (unsigned long long)v->irq_deferred,
+               (unsigned long long)v->irq_withdrawn);
     if (v == NULL)
         return;
     vdist_vcpu_present(v->vm->vdist, v->index, false);
@@ -669,7 +673,8 @@ uint64_t el2_vcpu_host_cntv_after(struct arch_hv_vcpu *v)
  *
  * Reported once per expiry: the guest's handler masks or re-arms, which
  * clears the condition, and until it does the same expiry would read
- * true on every exit and be injected again.
+ * true on every exit and be raised again. Consumed by el2_vcpu_run, which
+ * turns it into a pending PPI in the vCPU's redistributor.
  */
 
 static bool el2_vcpu_timer_expired(struct arch_hv_vcpu *v)
@@ -756,13 +761,66 @@ static int el2_vcpu_irq_delivered(struct arch_hv_vcpu *v)
     if (st == LR_STATE_PENDING)
         return -1;
     int taken = v->lr_vector;
-    if (st == LR_STATE_INVALID)
+    bool from_dist = v->lr_from_dist;
+    if (st == LR_STATE_INVALID) {
         v->lr_vector = -1;
+        v->lr_from_dist = false;
+    }
     if (v->lr_reported)
         return -1;
     v->lr_reported = true;
     v->irq_delivered++;
+    /* Acknowledged: the pending state has left the distributor for the
+     * CPU interface, as it does in hardware. Without this the same
+     * interrupt would be placed again at the next entry. */
+    if (from_dist)
+        vdist_ack(v->vm->vdist, v->index, (unsigned)taken);
     return taken;
+}
+
+/*
+ * At entry, after the owner has made its offer: what the guest's own
+ * distributor has for this vCPU. One list register, so the rule is the
+ * owner's -- whatever is in it stays until taken, and a second interrupt
+ * waits -- and the owner, offering first, gets the register when both
+ * have something. A distributor interrupt that was placed and not yet
+ * taken is withdrawn if the guest has since disabled or cleared it: the
+ * register shows the distributor's current mind, as hardware's would,
+ * and the guest can only look by running, which is when this runs.
+ */
+static void el2_vdist_offer(struct arch_hv_vcpu *v)
+{
+    struct gicv3_vdist *d = v->vm->vdist;
+    if (d == NULL || !v->ctx->vgic_on)
+        return;
+    uint64_t lr = v->ctx->vgic_lr0;
+    if (v->lr_from_dist && lr_state(lr) == LR_STATE_PENDING &&
+        !vdist_deliverable(d, v->index, (unsigned)v->lr_vector)) {
+        v->ctx->vgic_lr0 = 0;
+        v->lr_vector = -1;
+        v->lr_from_dist = false;
+        v->irq_withdrawn++;
+        lr = 0;
+    }
+    uint8_t prio = 0;
+    int intid = vdist_pending_for(d, v->index, &prio);
+    if (intid < 0)
+        return;
+    if (lr_state(lr) != LR_STATE_INVALID) {
+        if (v->lr_vector != intid)
+            v->irq_deferred++;
+        return;
+    }
+    v->ctx->vgic_lr0 = LR_STATE_PENDING | LR_GROUP1 | LR_PRIORITY(prio) | (uint32_t)intid;
+    v->lr_vector = intid;
+    v->lr_from_dist = true;
+    v->lr_reported = false;
+}
+
+bool el2_vcpu_irq_waiting(struct arch_hv_vcpu *v)
+{
+    uint8_t prio;
+    return v->vm->vdist != NULL && vdist_pending_for(v->vm->vdist, v->index, &prio) >= 0;
 }
 
 static void el2_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector, bool has_error, uint32_t error)
@@ -860,6 +918,7 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
 
 static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
+    el2_vdist_offer(v);
     arch_irq_state_t s = arch_irq_save();
     if (!el2_ready_here()) {
         arch_irq_restore(s);
@@ -910,6 +969,13 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         aarch64_fpu_area_restore(&zero);
     }
     arch_irq_restore(s);
+    /* The guest's timer went off during that run: its PPI becomes pending
+     * in this vCPU's redistributor, and reaches the guest when the guest
+     * has enabled it there -- the way a real timer reaches a real kernel.
+     * A guest that never enabled PPI 27 does not get it, which is the
+     * behaviour, not a gap. */
+    if (v->vm->vdist != NULL && el2_vcpu_timer_expired(v))
+        vdist_raise_private(v->vm->vdist, v->index, g_vtimer_intid);
     if (rc != 0) {
         out->kind = HV_EXIT_FAIL;
         out->fail.code = (uint64_t)rc;
@@ -935,7 +1001,6 @@ const struct hv_backend el2_backend = {
     .vcpu_run = el2_vcpu_run,
     .vcpu_set_irq = el2_vcpu_set_irq,
     .vcpu_irq_delivered = el2_vcpu_irq_delivered,
-    .vcpu_timer_expired = el2_vcpu_timer_expired,
     .vcpu_timer_deadline = el2_vcpu_timer_deadline,
     .vcpu_inject_exception = el2_vcpu_inject_exception,
     .vcpu_advance_rip = el2_vcpu_advance_rip,

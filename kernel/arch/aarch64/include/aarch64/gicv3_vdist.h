@@ -55,4 +55,26 @@ uint64_t vdist_mpidr(unsigned i);
 bool vdist_mmio(struct gicv3_vdist *d, unsigned vcpu, uint64_t gpa, unsigned size, bool write,
                 uint64_t *val);
 
+/*
+ * Routing, for the EL2 backend. The distributor decides; the vCPU's own
+ * run thread places, into the one list register it owns.
+ *
+ * vdist_pending_for: the INTID vCPU `i` should be given next -- the
+ *   highest-priority interrupt that is pending, enabled, in group 1 and
+ *   routed to it, with the distributor and its redistributor both on --
+ *   and that interrupt's priority; -1 when there is none.
+ * vdist_deliverable: whether one particular INTID still meets all of
+ *   that, so an interrupt placed but not yet taken can be withdrawn when
+ *   the guest has since disabled or cleared it.
+ * vdist_ack: the guest acknowledged `intid`: its pending state leaves the
+ *   distributor, as it does in hardware.
+ * vdist_raise_private: a PPI fired for vCPU `i` (its timer); it becomes
+ *   pending in that redistributor and is forwarded when, and only when,
+ *   the guest has enabled it there.
+ */
+int vdist_pending_for(struct gicv3_vdist *d, unsigned i, uint8_t *prio);
+bool vdist_deliverable(struct gicv3_vdist *d, unsigned i, unsigned intid);
+void vdist_ack(struct gicv3_vdist *d, unsigned i, unsigned intid);
+void vdist_raise_private(struct gicv3_vdist *d, unsigned i, unsigned intid);
+
 #endif /* AARCH64_GICV3_VDIST_H */
