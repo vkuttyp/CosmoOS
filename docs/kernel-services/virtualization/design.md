@@ -502,6 +502,17 @@ distributor's "pending clears on acknowledge" is unchanged -- level is a
 property of the source, not a mode of the router. On x86 the ops return
 `-ENOTSUP`: stage 1 gives a guest no controller for a line to reach.
 
+One deviation from hardware, recorded: a level interrupt placed in the
+list register at entry is delivered even if its line drops before the
+guest acknowledges it -- a sibling vCPU drained the last byte, say --
+where a GIC would return 1023 at `IAR`. One list register cannot be
+withdrawn mid-run by another vCPU's thread (no thread writes another
+vCPU's register), and the guest can only look by running. A guest's
+handler must tolerate an interrupt whose `MIS` reads zero, as every real
+driver already does for the hardware window between forwarding and the
+handler's read; `el2-guest-uart-race` counts them with two vCPUs and
+asserts them absent with one.
+
 ### The guest's console (`vuart.c`)
 
 A PL011 per VM at `VUART_BASE` (`0x0900_0000`, where QEMU's `virt` puts
@@ -512,8 +523,10 @@ of `'A'` to `UARTDR` was an `MMIO` exit to an owner with nothing behind
 it, and the exit did not carry the `'A'`. The register set is the one the
 host's own `pl011.c` drives: `DR` writes go to the console ring the VM
 descriptor reads; `DR` reads pop a 64-byte receive FIFO that `write()` on
-the VM descriptor fills (`vm_console_write`; the oldest byte is dropped
-when full, as the ring does); `FR` says the transmitter is always ready
+the VM descriptor fills (`vm_console_write`; a full FIFO takes no more and
+the write returns short, so the owner knows and retries -- the first
+version dropped the oldest byte silently, and a loaded host lost bytes a
+typist had been told were taken); `FR` says the transmitter is always ready
 and whether the FIFO is empty or full; `IBRD`, `FBRD`, `LCR_H`, `CR`,
 `IFLS`, `IMSC`, `DMACR` are stored and returned; `RIS` carries `RXRIS`
 while a byte waits and `TXRIS` always (the transmit FIFO is never
@@ -535,7 +548,90 @@ draining -- could decide their transitions in one order and tell the
 distributor in the other, leaving SPI 33 pending with the line down (a
 spurious interrupt the per-entry re-raise cannot repair, since it only
 raises). Order: the UART's lock, then the distributor's; the
-distributor's is a leaf that never calls back into a device.
+distributor's is a leaf that never calls back into a device. A full
+receive FIFO takes no more and the owner's write returns short; the first
+version dropped the oldest byte silently, and on a loaded host a typist
+that had been told every byte fit lost bytes the guest never saw.
+
+### The machine a guest is handed (`cosmo/hv_machine.h`, `tools/fdt`, `vmctl --machine`)
+
+Every device above sits at an address and an interrupt number the
+hypervisor chose, and until this unit nothing told a guest what they
+were: a guest entered with `x0 = 0`, and the tree had no code that wrote
+a device tree. The fixtures knew the layout because they were written
+against the kernel's headers; a kernel compiled for the architecture
+cannot be asked to do that -- its entry contract is `x0 = the device
+tree`, and handed `0` it stops before its first line.
+
+**The layout is in the uapi, once.** `cosmo/hv_machine.h` -- the
+distributor, the redistributor frames, the UART and its SPI, the timer
+PPIs, where machine mode puts RAM, the arm64 Image header's offsets. The
+kernel's `VDIST_*` and `VUART_*` are its aliases; the device-tree writer
+reads it; nothing else defines an address. Three headers that agreed
+because one person wrote them became one source with two readers.
+
+**A device-tree writer this tree owns** (`tools/fdt/fdt.c`, about three
+hundred lines: a header, one empty reservation, a structure block built
+by `begin_node`/`prop`/`end_node`, a deduplicated strings block -- not
+libfdt, which is a parser and an editor this unit does not need).
+`fdt_cosmo_virt()` describes exactly the machine the kernel implements,
+node for node in QEMU `virt`'s shape: `/chosen` with `stdout-path`,
+`/memory`, `/cpus/cpu@N` with `enable-method = "psci"`, `/psci` by `hvc`,
+the armv8 timer's four PPIs (numbered from 16), a GICv3 with the
+distributor and the redistributor frames, a fixed clock, and the PL011
+on SPI 33. `fdt_read.c` is the reader a guest needs -- a node by path, a
+property, a count of children -- with no library. The same writer is
+compiled into `vmctl` and into `mkdtb`, a host tool the AArch64 build
+runs to put `tests/hv/virt.dtb` in the boot archive, so the kernel's own
+tests hand a guest the blob the owner would.
+
+**The entry convention.** `vmctl run --machine` lays the machine out as
+the arm64 boot protocol asks: RAM at `COSMO_HVM_RAM_BASE`, the image
+where its Image header's `text_offset` says (magic `ARM\x64` at 56; a
+flat image with no header goes at RAM's start), the device tree at the
+first 2 MiB boundary past `image_size` -- the placement rules are
+relative to the image, never absolute, and a VM with no valid place for
+the blob is refused rather than placed wrong -- and vCPU 0 entering at
+the image with `x0 = the tree`, `x1..x3 = 0`, EL1h, MMU off.
+
+**The owner is the firmware.** PSCI is answered in `vmctl`, in the
+`HYPERCALL` case, by setting the caller's `x0`: `VERSION` (1.0),
+`FEATURES`, `CPU_ON` (a vCPU created after the VM has started, at the
+entry the guest named with the context it gave, added to the run set),
+`CPU_OFF`, `AFFINITY_INFO`, `MIGRATE_INFO_TYPE`, and `SYSTEM_OFF`, which
+ends the run. The kernel gives the owner what it needs -- the exit,
+`set_regs`, `vcpu_create` mid-flight -- and does not answer PSCI itself:
+`SYSTEM_OFF` has to end the owner's loop and `CPU_ON` has to add to the
+owner's run set. Hypercalls outside the SMCCC range keep the fixtures'
+own protocol.
+
+**More than one vCPU in one thread.** The native libc has no threads, and
+a single-threaded owner can run several vCPUs if a run can be bounded:
+`SYS_vcpu_run`'s third argument, `COSMO_VCPU_RUN_ONE_TICK`, returns at
+the first host-interrupt exit as `COSMO_VM_EXIT_PREEMPTED` -- "nothing
+happened; run again when you like" -- and `vmctl` round-robins its run
+set with it, a tick each. The kernel already had the bound for its own
+tests (`vcpu_run_limited`); it gained the caller. The third argument is
+masked to the bits the kernel defines, because an older libc passed two
+and a register is not a promise.
+
+**The first guest written in C** (`tests/hv/aarch64/guest_dtb.c`, with
+an Image header in its assembly entry) knows nothing of this hypervisor:
+it walks the tree in `x0`, finds its UART through `stdout-path`, and
+prints what it found through that UART -- so a wrong blob prints
+nowhere -- then asks PSCI its version, brings the second CPU up and
+powers off. From the kernel's test and from `vmctl` alike:
+
+```text
+dtb: uart@9000000 irq 33 cpus 2 mem 40000000+800000 psci hvc
+psci version 0x10000
+cpu1: up ctx=1234cafe
+cpu_on 1 -> 0
+```
+
+Not done, and named: booting Linux -- the only reader whose opinion of
+the blob settles it, and the next report; virtio-mmio nodes; an initrd;
+guest ACPI; forwarding the owner's stdin to the guest's UART.
 
 ### Guest memory (`guestmem.c`)
 

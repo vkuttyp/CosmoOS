@@ -30,13 +30,15 @@ PROG_DIR_kill   := system
 PROG_DIR_dmesg  := system
 PROG_DIR_sysctl := system
 PROG_DIR_vmctl  := system
+PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c
 PROG_DIR_hostname := system
 PROG_DIR_svc    := system
 
 USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
 PROG_DIR_init := init
 
-prog_srcs = userland/$(PROG_DIR_$(1))/$(1).c
+# A program is one file, plus whatever PROG_EXTRA_SRCS_<name> lists.
+prog_srcs = userland/$(PROG_DIR_$(1))/$(1).c $(PROG_EXTRA_SRCS_$(1))
 prog_elf  = $(OUT)/userland/$(1).elf
 
 USER_SRCS := $(foreach p,$(USER_PROGRAMS),$(call prog_srcs,$(p)))

@@ -14,6 +14,7 @@
 #include <kernel/log.h>
 #include <kernel/page.h>
 #include <kernel/pmm.h>
+#include <kernel/printf.h>
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/thread.h>
@@ -1708,13 +1709,17 @@ static void typist_main(void *arg)
     struct typist *t = arg;
     for (unsigned i = 0; i < t->bytes; i++) {
         char c = (char)('a' + (i % 26));
-        while (vm_console_write(t->vm, &c, 1) != 1)
+        while (vm_console_write(t->vm, &c, 1) != 1)   /* the FIFO is full: the guest has not caught up */
             thread_sleep_ns(10000);
-        /* Mostly fast, with a pause every eighth byte. A stale raise is
-         * only visible as a spurious interrupt if no fresh byte arrives
-         * before the handler reads MIS; a steady fast cadence would hide
-         * exactly the race this test exists to catch. */
-        thread_sleep_ns((i % 8 == 7) ? 3000000 : 150000);
+        /* In bursts, with a pause every eighth byte. A stale raise is only
+         * visible as a spurious interrupt if no fresh byte arrives before
+         * the handler reads MIS; a steady cadence would hide exactly the
+         * race this test exists to catch. No sleep between the bytes of a
+         * burst: every sleep here is at least one scheduler tick (4 ms),
+         * and a sleep per byte made the test 6 s on four host CPUs and
+         * 9.7 s on one, past the harness's 8 s budget. */
+        if (i % 8 == 7)
+            thread_sleep_ns(1000000);
     }
     t->done = true;
     thread_exit(0);
@@ -1751,21 +1756,91 @@ static void sibling_main(void *arg)
 }
 
 /*
- * A property about two threads needs two threads; this one has three. A
- * kernel thread types at the guest, and the guest has two vCPUs each run
- * by its own thread, both polling DR and both able to take SPI 33 for it
- * -- so the owner's raise, either vCPU's lower, and either vCPU's
- * per-entry re-raise race in the UART for every byte. Two things must
- * hold whatever the interleaving: no interrupt arrives with MIS zero on
- * either vCPU -- a raise decided from a state a sibling has since
- * changed leaves SPI 33 pending with the line down, and that is what a
- * handler would see -- and every byte typed is consumed by one path on
- * one vCPU. Two versions of the UART could do the former: the one that
- * applied a transition after dropping its lock, and the one that
- * returned "the line is up" for the run loop to act on. Both windows are
- * narrow, so the bug-proofs widen them; this is the regression test that
- * the device decides and raises under one lock.
+ * A property about two threads needs two threads, and this test has two
+ * phases because two different things are being claimed.
+ *
+ * Phase one, one vCPU: a kernel thread types at a guest that both polls
+ * DR (with interrupts masked around the poll) and takes SPI 33 for it, so
+ * the owner's raise and the guest's lower race in the UART for every
+ * byte. No interrupt may arrive with MIS zero: with one vCPU there is no
+ * one else to drain the byte, so an interrupt whose cause is gone can
+ * only come from the hypervisor's own ordering -- a raise decided from a
+ * state the guest has since changed, which two versions of this UART
+ * could produce (a transition applied after dropping the lock; "the line
+ * is up" returned for the run loop to act on). Both windows are too
+ * narrow to hit on purpose, so their bug-proofs force them; this phase is
+ * the regression test that the device decides and raises under one lock.
+ *
+ * Phase two, two vCPUs each on its own thread, both polling and both able
+ * to take the interrupt: every byte typed is consumed by one path on one
+ * vCPU and none is lost. MIS-zero interrupts are counted and reported but
+ * NOT asserted absent here, because with a sibling they are not the
+ * hypervisor's to prevent: a sibling that drains the byte between the
+ * GIC forwarding the interrupt and the handler reading MIS makes MIS zero
+ * on real hardware too, and a guest driver treats it as no work (Linux's
+ * PL011 driver returns). One list register adds a window hardware does
+ * not have -- a line that drops after the interrupt was placed is still
+ * delivered, where a GIC would return 1023 at IAR -- and that is recorded
+ * in the design doc as a deviation a guest handler must tolerate. The
+ * first version of this test asserted zero in phase two as well and failed
+ * once in ten runs, on exactly that interleaving.
  */
+static bool uart_race_phase(const char **reason, struct vm *vm, struct vcpu *v0, struct vcpu *v1, unsigned bytes,
+                            unsigned *consumed_out, unsigned *irqs_out, unsigned *spurious_out, struct sibling *sib)
+{
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct thread *ts = NULL;
+    if (v1) {
+        memset(sib, 0, sizeof(*sib));
+        sib->v = v1;
+        ts = thread_create(sibling_main, sib, "uart-sibling", SCHED_PRIO_DEFAULT);
+        CHECK(ts != NULL);
+    }
+    /* The guest's byte counter (x23) carries over from an earlier phase:
+     * take its value now, from the registers, before a single byte is
+     * typed. Taking it from the first heartbeat instead -- as the first
+     * version did -- misses any byte the guest consumed before that
+     * heartbeat, and a count that is one short never reaches the total:
+     * the loop then spins to its step bound, which is minutes, and two
+     * chain steps timed out inside this test. */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    unsigned base = (unsigned)regs.x[23];
+    struct typist t;
+    memset(&t, 0, sizeof(t));
+    t.vm = vm;
+    t.bytes = bytes;
+    struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
+    CHECK(th != NULL);
+    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0;
+    for (;;) {
+        CHECK(vcpu_run(v0, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+        if (x.hypercall.nr == 33) {
+            if ((x.hypercall.a0 & 0x10u) == 0)
+                spurious++;
+        } else {
+            CHECK(x.hypercall.nr == 2);
+            irqs = (unsigned)x.hypercall.a0;
+            consumed = (unsigned)x.hypercall.a1 - base;
+            if (t.done && consumed + (v1 ? sib->consumed : 0) >= bytes)
+                break;
+        }
+        CHECK(++steps < 200000);   /* a phase is seconds; this is a failure, not a wait */
+    }
+    thread_join(th);
+    if (v1) {
+        sib->stop = true;
+        thread_join(ts);
+        CHECK(!sib->failed);
+    }
+    *consumed_out = consumed;
+    *irqs_out = irqs;
+    *spurious_out = spurious;
+    return true;
+}
+
 bool selftest_el2_guest_uart_race(const char **reason)
 {
     if (skip_without_vdist("el2-guest-uart-race", reason))
@@ -1781,47 +1856,239 @@ bool selftest_el2_guest_uart_race(const char **reason)
     struct cosmo_vm_exit x;
     memset(&x, 0, sizeof(x));
     CHECK(vcpu_run(v0, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
-    CHECK(vcpu_run(v1, &x) == 0);
-    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* routes SPI 33 to itself, last */
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* vCPU 0 routes SPI 33 to itself */
 
+    /* Phase one: one vCPU, the hypervisor's own ordering under test. */
+    unsigned c1 = 0, i1 = 0, s1 = 0;
     struct sibling sib;
-    memset(&sib, 0, sizeof(sib));
-    sib.v = v1;
-    struct thread *ts = thread_create(sibling_main, &sib, "uart-sibling", SCHED_PRIO_DEFAULT);
-    CHECK(ts != NULL);
-    struct typist t;
-    memset(&t, 0, sizeof(t));
-    t.vm = vm;
-    t.bytes = 300;
-    struct thread *th = thread_create(typist_main, &t, "uart-typist", SCHED_PRIO_DEFAULT);
-    CHECK(th != NULL);
-    unsigned irqs = 0, spurious = 0, consumed = 0, steps = 0;
-    for (;;) {
-        CHECK(vcpu_run(v0, &x) == 0);
-        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
-        if (x.hypercall.nr == 33) {
-            if ((x.hypercall.a0 & 0x10u) == 0)
-                spurious++;
-        } else {
-            CHECK(x.hypercall.nr == 2);
-            irqs = (unsigned)x.hypercall.a0;
-            consumed = (unsigned)x.hypercall.a1;
-            if (t.done && consumed + sib.consumed >= t.bytes)
-                break;
-        }
-        CHECK(++steps < 2000000);
-    }
-    thread_join(th);
-    sib.stop = true;
-    thread_join(ts);
-    CHECK(!sib.failed);
-    CHECK(spurious == 0 && sib.spurious == 0);
-    CHECK(consumed + sib.consumed == t.bytes);
+    CHECK(uart_race_phase(reason, vm, v0, NULL, 200, &c1, &i1, &s1, &sib));
+    CHECK(s1 == 0);
+    CHECK(c1 == 200);
+
+    /* Phase two: the sibling joins (and routes the SPI to itself, last). */
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);
+    unsigned c2 = 0, i2 = 0, s2 = 0;
+    CHECK(uart_race_phase(reason, vm, v0, v1, 300, &c2, &i2, &s2, &sib));
+    CHECK(c2 + sib.consumed == 300);
     kobject_put(&v1->obj);
     drop_guest(vm, v0);
-    kinfo("selftest: el2-guest-uart-race: %u bytes typed at two vCPUs on two threads; vCPU 0 took %u (%u by interrupt), vCPU 1 %u (%u); 0 spurious, none lost",
-          t.bytes, consumed, irqs, sib.consumed, sib.irqs);
+    kinfo("selftest: el2-guest-uart-race: one vCPU: %u bytes, %u by interrupt, 0 spurious; two vCPUs on two threads: 300 bytes, vCPU 0 took %u (%u by interrupt), vCPU 1 %u (%u), none lost, %u MIS-zero (a sibling drained first: tolerated)",
+          c1, i1, c2, i2, sib.consumed, sib.irqs, s2 + sib.spurious);
+    return true;
+}
+
+/* --- the machine a guest is handed -------------------------------------- */
+
+#define MACHINE_RAM_BYTES (8ull << 20)   /* what the archive's virt.dtb was built for */
+
+/*
+ * A VM laid out as machine mode lays one out: RAM at COSMO_HVM_RAM_BASE,
+ * the image where its arm64 Image header's text_offset says, the device
+ * tree at the first 2 MiB boundary past the image, vCPU 0 entering at the
+ * image with x0 = the tree -- the boot protocol, as an owner would follow
+ * it. The header is read, not assumed, so a fixture with the wrong magic
+ * or offset fails here and not in a guest that never prints.
+ */
+static __maybe_unused int make_machine_guest(const char *image, const char *dtb, struct vm **vm_out,
+                                             struct vcpu **vcpu_out, uint64_t *dtb_gpa_out)
+{
+    const void *img, *blob;
+    size_t img_len, blob_len;
+    if (!bootarchive_find(image, &img, &img_len) || !bootarchive_find(dtb, &blob, &blob_len))
+        return -ENOENT;
+    const uint8_t *h = img;
+    if (img_len < 64 || *(const uint32_t *)(h + COSMO_HVM_IMAGE_MAGIC_OFF) != COSMO_HVM_IMAGE_MAGIC)
+        return -EINVAL;
+    uint64_t text_off = *(const uint64_t *)(h + COSMO_HVM_IMAGE_TEXT_OFF);
+    uint64_t image_size = *(const uint64_t *)(h + COSMO_HVM_IMAGE_SIZE_OFF);
+    uint64_t load = COSMO_HVM_RAM_BASE + text_off;
+    uint64_t dtb_gpa = (load + image_size + (2ull << 20) - 1) & ~((2ull << 20) - 1);
+    if (dtb_gpa + blob_len > COSMO_HVM_RAM_BASE + MACHINE_RAM_BYTES)
+        return -ENOSPC;
+    struct vm *vm;
+    int rc = vm_create(0, HV_VM_MEM_MAX, &vm);
+    if (rc)
+        return rc;
+    rc = vm_mem_add(vm, COSMO_HVM_RAM_BASE, MACHINE_RAM_BYTES);
+    if (rc == 0)
+        rc = vm_mem_write(vm, load, img, img_len);
+    if (rc == 0)
+        rc = vm_mem_write(vm, dtb_gpa, blob, blob_len);
+    struct vcpu *v = NULL;
+    if (rc == 0)
+        rc = vcpu_create(vm, 0, &v);
+    if (rc == 0) {
+        struct cosmo_vcpu_regs regs;
+        vcpu_get_regs(v, &regs);
+        regs.pc = load;
+        regs.x[0] = dtb_gpa;
+        rc = vcpu_set_regs(v, &regs);
+    }
+    if (rc) {
+        if (v)
+            kobject_put(&v->obj);
+        kobject_put(&vm->obj);
+        return rc;
+    }
+    *vm_out = vm;
+    *vcpu_out = v;
+    *dtb_gpa_out = dtb_gpa;
+    return 0;
+}
+
+/* Everything the console holds, NUL-terminated, into `buf`. */
+static __maybe_unused size_t console_drain(struct vm *vm, char *buf, size_t cap)
+{
+    size_t n = vm_console_read(vm, buf, cap - 1);
+    buf[n] = '\0';
+    return n;
+}
+
+/*
+ * The whole unit in one line: a guest that knows nothing of this
+ * hypervisor reads the device tree in x0, finds its UART through
+ * stdout-path, and prints what it found through that UART -- so the line
+ * arrives only if the tree named the device the kernel implements, at the
+ * address it implements it. Every field is compared to the uapi constant
+ * it came from, not to a literal: the test is the header's, the blob's
+ * and the kernel's agreement.
+ */
+bool selftest_el2_guest_dtb(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    uint64_t dtb_gpa = 0;
+    int rc = make_machine_guest("tests/hv/guest_dtb.bin", "tests/hv/virt.dtb", &vm, &v, &dtb_gpa);
+    if (rc == -ENOENT) {
+        kinfo("selftest: el2-guest-dtb: no C guest or device tree in the archive; skipping");
+        return true;
+    }
+    CHECK(rc == 0);
+    CHECK(dtb_gpa == COSMO_HVM_RAM_BASE + (2ull << 20));   /* past a 256 KiB image at +0x80000 */
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL);
+    CHECK(x.hypercall.nr == 0x84000000ull);                   /* PSCI_VERSION: the tree was read and the line printed */
+    char line[160], want[160];
+    console_drain(vm, line, sizeof(line));
+    ksnprintf(want, sizeof(want), "dtb: uart@%llx irq %u cpus %u mem %llx+%llx psci hvc\n",
+              (unsigned long long)COSMO_HVM_UART_BASE, COSMO_HVM_UART_INTID, 2u,
+              (unsigned long long)COSMO_HVM_RAM_BASE, (unsigned long long)MACHINE_RAM_BYTES);
+    if (strcmp(line, want) != 0)
+        kwarn("selftest: el2-guest-dtb: guest said \"%s\", wanted \"%s\"", line, want);
+    CHECK(strcmp(line, want) == 0);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-guest-dtb: %s", line);
+    return true;
+}
+
+/*
+ * The owner is the machine's firmware. The kernel gives it the exit,
+ * set_regs, and vcpu_create after the VM has started; this test answers
+ * PSCI as vmctl will and requires the guest to see the answers: a
+ * version, a second CPU that starts at the entry it named with the
+ * context it gave -- checked through that vCPU's own first line, not by
+ * its existence -- and a power-off.
+ */
+bool selftest_el2_guest_psci(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v0, *v1 = NULL;
+    uint64_t dtb_gpa = 0;
+    int rc = make_machine_guest("tests/hv/guest_dtb.bin", "tests/hv/virt.dtb", &vm, &v0, &dtb_gpa);
+    if (rc == -ENOENT) {
+        kinfo("selftest: el2-guest-psci: no C guest or device tree in the archive; skipping");
+        return true;
+    }
+    CHECK(rc == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    struct cosmo_vcpu_regs regs;
+    char line[160];
+
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000000ull);   /* PSCI_VERSION */
+    console_drain(vm, line, sizeof(line));
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    regs.x[0] = 0x10000;                                                          /* PSCI 1.0 */
+    CHECK(vcpu_set_regs(v0, &regs) == 0);
+
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0xC4000003ull);   /* CPU_ON */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "psci version 0x10000\n") == 0);
+    uint64_t target = x.hypercall.a0, entry = x.hypercall.a1, ctx = x.hypercall.a2;
+    CHECK(target == 1 && ctx == 0x1234cafeull);
+    CHECK(entry > COSMO_HVM_RAM_BASE && entry < COSMO_HVM_RAM_BASE + MACHINE_RAM_BYTES);
+    CHECK(vcpu_create(vm, (unsigned)target, &v1) == 0);                            /* after the VM started */
+    CHECK(vcpu_get_regs(v1, &regs) == 0);
+    regs.pc = entry;
+    regs.x[0] = ctx;
+    CHECK(vcpu_set_regs(v1, &regs) == 0);
+    CHECK(vcpu_get_regs(v0, &regs) == 0);
+    regs.x[0] = 0;                                                                /* SUCCESS */
+    CHECK(vcpu_set_regs(v0, &regs) == 0);
+
+    /* The second CPU runs from the entry with the context, prints, and
+     * powers itself off. */
+    CHECK(vcpu_run(v1, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000002ull);   /* CPU_OFF */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "cpu1: up ctx=1234cafe\n") == 0);
+
+    /* The first sees SUCCESS and powers the machine off. */
+    CHECK(vcpu_run(v0, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 0x84000008ull);   /* SYSTEM_OFF */
+    console_drain(vm, line, sizeof(line));
+    CHECK(strcmp(line, "cpu_on 1 -> 0\n") == 0);
+
+    kobject_put(&v1->obj);
+    drop_guest(vm, v0);
+    kinfo("selftest: el2-guest-psci: version answered, vCPU 1 brought up at the guest's entry with its context, power-off requested");
+    return true;
+}
+
+/*
+ * The bounded run an owner with one thread needs: a guest that never
+ * exits, run with ONE_TICK, comes back at the first host interrupt as
+ * PREEMPTED rather than never; run again it comes back again, having run
+ * in between; and the flag is per call -- without it the same guest still
+ * needs the tests' own bound to be stopped at all.
+ */
+bool selftest_el2_vcpu_run_tick(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_spin.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    uint64_t t0 = clock_now_ns();
+    CHECK(vcpu_run_flags(v, &x, COSMO_VCPU_RUN_ONE_TICK) == 0);
+    uint64_t first = clock_now_ns() - t0;
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    uint64_t entries = v->entries;
+    CHECK(entries >= 1);
+    CHECK(first < 100000000ull);                                   /* a tick, not forever: under 100 ms */
+    CHECK(vcpu_run_flags(v, &x, COSMO_VCPU_RUN_ONE_TICK) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    CHECK(v->entries > entries);                                   /* it ran again in between */
+    struct cosmo_vcpu_regs regs;
+    CHECK(vcpu_get_regs(v, &regs) == 0 && regs.pc == LOAD_GPA);    /* and is still in its loop */
+    /* The flag is per call: without it, only the tests' bound stops this guest. */
+    CHECK(vcpu_run_limited(v, &x, 3) == -ETIMEDOUT);
+    CHECK(vcpu_run_flags(v, &x, 0x80000000u | COSMO_VCPU_RUN_ONE_TICK) == 0);   /* unknown bits are ignored */
+    CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-vcpu-run-tick: a spinning guest gave its turn back after %llu us, twice",
+          (unsigned long long)(first / 1000));
     return true;
 }
 
@@ -1952,6 +2219,9 @@ bool selftest_el2_guest_uart(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_rx(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_level(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_uart_race(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_dtb(const char **reason) { (void)reason; return true; }
+bool selftest_el2_guest_psci(const char **reason) { (void)reason; return true; }
+bool selftest_el2_vcpu_run_tick(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }

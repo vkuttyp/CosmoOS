@@ -71,7 +71,8 @@
 #define SYS_vm_mem_rw   45  /* (int vm, uint64_t gpa, void *buf, size_t len, int write) -> bytes */
 #define SYS_vcpu_create 46  /* (int vm, unsigned index) -> vCPU handle at the reset state */
 #define SYS_vcpu_regs   47  /* (int vcpu, struct cosmo_vcpu_regs *regs, int set) -> 0 */
-#define SYS_vcpu_run    48  /* (int vcpu, struct cosmo_vm_exit *exit) -> 0; runs until an exit */
+#define SYS_vcpu_run    48  /* (int vcpu, struct cosmo_vm_exit *exit, unsigned flags) -> 0; runs until an exit,
+                             * or -- COSMO_VCPU_RUN_ONE_TICK -- until the first host interrupt, as PREEMPTED */
 #define SYS_vcpu_irq    49  /* (int vcpu, unsigned vector) -> 0: make a vector pending (>= 32) */
 /* Credentials (POSIX real/effective/saved ids; -1 keeps an id). Unprivileged
  * callers may set an id only to one they already hold; euid 0 is privileged. */
@@ -661,6 +662,13 @@ struct cosmo_vm_exit {           /* 64 bytes */
 #define COSMO_VM_EXIT_FAIL      6u  /* the hardware refused the state, or an unknown exit */
 #define COSMO_VM_EXIT_WFI       7u  /* AArch64: the guest waited for an interrupt (x86: HLT) */
 #define COSMO_VM_EXIT_SYSREG    8u  /* AArch64: a trapped system register (x86: CPUID/MSR) */
+#define COSMO_VM_EXIT_PREEMPTED 10u /* nothing happened: the run was bounded (ONE_TICK) and the bound came; run again when you like */
+
+/* vcpu_run flags. ONE_TICK bounds a run at the first host-interrupt exit
+ * -- about one scheduler tick -- so an owner with one thread can give
+ * several vCPUs turns. An owner that passes no flags gets the old
+ * behaviour; the kernel masks anything it does not define. */
+#define COSMO_VCPU_RUN_ONE_TICK 1u
 
 #define COSMO_VM_EXIT_F_IRQ_PENDING 1u  /* a pending vector was not delivered yet */
 

@@ -944,6 +944,29 @@ See [docs/development.md](docs/development.md).
   the line itself the receive test still passes (the next entry re-raises)
   but the sleeping vCPU waits out its deadline -- the immediate raise is
   for the sleeper, the re-raise for the level.
+- **The machine a guest is handed: a device tree, the entry convention,
+  and PSCI (done):** `docs/audit/next-subsystem-machine.md`,
+  `docs/kernel-services/virtualization/design.md` ("The machine a guest
+  is handed"). Every device the last four units built sits at an address
+  the hypervisor chose, and nothing told a guest what they were: `x0 = 0`
+  at entry, and no code in the tree wrote a device tree. Now the layout is
+  in the uapi once (`cosmo/hv_machine.h`; three kernel headers became its
+  aliases), a device-tree writer this tree owns describes exactly the
+  machine the kernel implements in `virt`'s shape and is compiled into
+  both `vmctl` and a host tool that puts a blob in the boot archive, and
+  `vmctl run --machine` lays the machine out as the arm64 boot protocol
+  asks -- RAM at 1 GiB, the image where its Image header says, the tree at
+  the first 2 MiB boundary past it and in `x0`. The owner is the firmware:
+  PSCI is answered in `vmctl`, and `CPU_ON` creates a vCPU after the VM
+  has started and runs it -- in one thread, because the native libc has
+  none, through a bounded run (`COSMO_VCPU_RUN_ONE_TICK` returns a new
+  `PREEMPTED` exit at the first host interrupt) that the kernel already
+  had for its own tests. The tree's first C guest knows nothing of this
+  hypervisor: it reads the tree, prints what it found through the UART
+  the tree named, asks PSCI its version, brings up the second CPU and
+  powers off -- from the kernel's test and from `vmctl` alike. On the way:
+  the UART's receive FIFO dropped silently when full and a loaded host
+  lost bytes; it refuses now and the owner's write returns short.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -978,5 +1001,9 @@ See [docs/development.md](docs/development.md).
   distributor (all built: a guest can run a stock GIC driver and be SMP).
   `docs/audit/next-subsystem-vuart.md` did it for the guest's console
   (built: a PL011 a stock kernel can print to and be typed at, on a
-  device seam that completes an MMIO access by width and sign). Design
+  device seam that completes an MMIO access by width and sign).
+  `docs/audit/next-subsystem-machine.md` did it for the machine a guest is
+  handed (built: a device tree, the entry convention, PSCI, and a C guest
+  that reads them). Its own out-of-scope names what comes next: booting
+  Linux, the only reader whose opinion of the blob settles it. Design
   documents first, one subsystem at a time.

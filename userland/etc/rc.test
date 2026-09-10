@@ -86,6 +86,14 @@ umount /tmp/snapmnt 2> /tmp/shtest/snap.err2
 vmctl probe || echo "HVTEST: skipped"
 ls /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
 ls /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
+# The machine a guest is handed: vmctl builds the device tree, loads the C
+# guest by its Image header, answers its PSCI, runs the second vCPU it
+# asks for, and stops when it powers off. Every line below came from the
+# guest through the UART the tree named.
+# guest through the UART the tree named; the boot harness requires each
+# of them (tests/boot/run_boot_test.py, HVTEST_MARKERS), since this shell
+# has no grep to check them with here.
+ls /boot/tests/hv/guest_dtb.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 2 /boot/tests/hv/guest_dtb.bin
 vmctl info
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

@@ -191,6 +191,18 @@ MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 HVTEST_MARKERS = [
     r"^HVTEST: PASS$",
 ]
+# Machine mode (docs/audit/next-subsystem-machine.md): vmctl builds the
+# device tree, loads by the Image header, answers PSCI and runs two vCPUs
+# in one thread; the C guest reports the machine it read through the
+# UART the tree named. AArch64 only: x86 guests have no such machine.
+if ARCH == "aarch64":
+    HVTEST_MARKERS += [
+        r"^dtb: uart@9000000 irq 33 cpus 2 mem 40000000\+",   # the C guest read the tree
+        r"^psci version 0x10000$",                            # and PSCI answered
+        r"^cpu1: up ctx=1234cafe$",                           # CPU_ON ran the second vCPU with its context
+        r"^cpu_on 1 -> 0$",
+        r"^vmctl: guest powered off$",                        # SYSTEM_OFF ended the run
+    ]
 HV_FORBIDDEN_MARKERS = [
     r"selftest: hv: skipped",
     r"^HVTEST: skipped",

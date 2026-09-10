@@ -72,7 +72,7 @@ struct vuart {
     uint32_t ibrd, fbrd, lcr_h, cr, ifls, imsc, dmacr;
     uint8_t rx[VUART_RX_FIFO];
     unsigned rx_head, rx_tail, rx_count;   /* head: next write; tail: next read */
-    uint64_t tx_bytes, rx_bytes, rx_dropped;
+    uint64_t tx_bytes, rx_bytes, rx_refused;
 };
 
 static uint32_t vuart_fr(const struct vuart *u)
@@ -130,20 +130,23 @@ int64_t vuart_write(struct vuart *u, const void *buf, size_t len)
     const uint8_t *b = buf;
     arch_irq_state_t s = spin_lock_irqsave(&u->lock);
     bool was = vuart_line_locked(u);
-    for (size_t i = 0; i < len; i++) {
-        if (u->rx_count == VUART_RX_FIFO) {            /* full: drop the oldest, as the console ring does */
-            u->rx_tail = (u->rx_tail + 1) % VUART_RX_FIFO;
-            u->rx_count--;
-            u->rx_dropped++;
-        }
-        u->rx[u->rx_head] = b[i];
+    /* A full FIFO takes no more, and the owner is told: the write returns
+     * short (0 when nothing fit), as a write to a full pipe does, and the
+     * owner writes the rest later. The first version dropped the oldest
+     * byte silently, as the console ring does -- and on a loaded host a
+     * typist that was told everything fit lost bytes the guest never saw. */
+    size_t n = 0;
+    while (n < len && u->rx_count < VUART_RX_FIFO) {
+        u->rx[u->rx_head] = b[n++];
         u->rx_head = (u->rx_head + 1) % VUART_RX_FIFO;
         u->rx_count++;
         u->rx_bytes++;
     }
+    if (n < len)
+        u->rx_refused += len - n;
     vuart_line_changed(u, was, vuart_line_locked(u));
     spin_unlock_irqrestore(&u->lock, s);
-    return (int64_t)len;
+    return (int64_t)n;
 }
 
 static int vuart_mmio(struct vm_device *d, uint64_t gpa, bool write, unsigned size, uint64_t *value)
@@ -248,7 +251,7 @@ void vuart_destroy(struct vuart *u)
     if (u == NULL)
         return;
     if (u->tx_bytes || u->rx_bytes)
-        kdebug("vuart: %llu byte(s) printed, %llu received, %llu dropped", (unsigned long long)u->tx_bytes,
-               (unsigned long long)u->rx_bytes, (unsigned long long)u->rx_dropped);
+        kdebug("vuart: %llu byte(s) printed, %llu received, %llu refused (FIFO full)", (unsigned long long)u->tx_bytes,
+               (unsigned long long)u->rx_bytes, (unsigned long long)u->rx_refused);
     kfree(u);
 }
