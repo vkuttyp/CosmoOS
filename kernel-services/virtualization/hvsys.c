@@ -226,3 +226,32 @@ int64_t sys_vcpu_irq(struct syscall_args *a)
     kobject_put(&v->obj);
     return rc;
 }
+
+/*
+ * A device in the owner (a virtio-blk, the serial line) asserts a shared
+ * interrupt into the guest's distributor -- which routes it by the guest's
+ * own enable, group and affinity, unlike sys_vcpu_irq's direct injection.
+ * An owner-side device model is why this exists: the console UART raises
+ * its SPI from the kernel, a virtio device raises it from here.
+ */
+int64_t sys_vm_raise_spi(struct syscall_args *a)
+{
+    int herr = 0;
+    struct vm *vm = vm_of_err((int)a->a[0], HANDLE_RIGHT_VM_IRQ, &herr);
+    if (vm == NULL)
+        return herr;
+    int rc = vm_raise_spi(vm, (unsigned)a->a[1]);
+    kobject_put(&vm->obj);
+    return rc;
+}
+
+int64_t sys_vm_lower_spi(struct syscall_args *a)
+{
+    int herr = 0;
+    struct vm *vm = vm_of_err((int)a->a[0], HANDLE_RIGHT_VM_IRQ, &herr);
+    if (vm == NULL)
+        return herr;
+    int rc = vm_lower_spi(vm, (unsigned)a->a[1]);
+    kobject_put(&vm->obj);
+    return rc;
+}

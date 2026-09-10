@@ -2153,6 +2153,56 @@ bool selftest_el2_guest_idreg(const char **reason)
     return true;
 }
 
+/*
+ * The interrupt an owner-side device raises goes through the guest's
+ * distributor -- routed and gated by the guest's own GIC configuration --
+ * not injected past it. The guest enables SPI 50 and routes it to itself;
+ * vm_raise_spi (what cosmo_vm_raise_spi reaches from userland, and what a
+ * virtio device will call) delivers it, and the handler runs. Lowered
+ * before the guest takes it, it is withdrawn. And the distinction from
+ * vcpu_inject: an SPI the guest has NOT enabled is not delivered by
+ * vm_raise_spi -- the distributor's enable gates it -- where a direct
+ * injection would reach the guest regardless.
+ */
+bool selftest_el2_vm_raise_spi(const char **reason)
+{
+    if (skip_without_vdist("el2-vm-raise-spi", reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_spi.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 1);   /* GIC up, SPI 50 enabled */
+
+    /* Raised through the distributor, the guest takes it. */
+    CHECK(vm_raise_spi(vm, 50) == 0);
+    unsigned beats = 0;
+    CHECK(run_until(v, &x, 50, (1ull << 2), 100, &beats));
+    /* The handler ran once; the line was level and the guest acknowledged,
+     * so lowering it now leaves nothing pending. */
+    CHECK(vm_lower_spi(vm, 50) == 0);
+    for (unsigned i = 0; i < 10; i++) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2 && x.hypercall.a0 == 1);
+    }
+
+    /* An SPI the guest never enabled: raised through the distributor it is
+     * gated (no delivery), so the guest heartbeats on with its handler
+     * count unchanged. A direct vcpu_inject would have delivered it. */
+    CHECK(vm_raise_spi(vm, 51) == 0);
+    for (unsigned i = 0; i < 20; i++) {
+        CHECK(vcpu_run(v, &x) == 0);
+        CHECK(x.kind == COSMO_VM_EXIT_HYPERCALL && x.hypercall.nr == 2);
+        CHECK(x.hypercall.a0 == 1);                                   /* still 1: SPI 51 was gated */
+    }
+    vm_lower_spi(vm, 51);
+    drop_guest(vm, v);
+    kinfo("selftest: el2-vm-raise-spi: SPI 50 raised through the distributor was taken after %u beat(s); SPI 51, not enabled, was gated", beats);
+    return true;
+}
+
 bool selftest_el2_guest_hvc(const char **reason)
 {
     if (skip_without_backend(reason))
@@ -2284,5 +2334,6 @@ bool selftest_el2_guest_hvc(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_mmio(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_sysreg(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_idreg(const char **reason) { (void)reason; return true; }
+bool selftest_el2_vm_raise_spi(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif

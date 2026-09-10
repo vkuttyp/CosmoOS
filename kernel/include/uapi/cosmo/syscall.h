@@ -124,7 +124,9 @@
 #define SYS_tcgetattr 76  /* (int handle, struct cosmo_termios *out) -> 0 */
 #define SYS_tcsetattr 77  /* (int handle, const struct cosmo_termios *in) -> 0 */
 #define SYS_ttysize   78  /* (int handle, struct cosmo_ttysize *out) -> 0 */
-#define SYS_COUNT     79
+#define SYS_vm_raise_spi 79  /* (int vm, unsigned intid) -> 0: a device asserts a shared interrupt through the guest's distributor */
+#define SYS_vm_lower_spi 80  /* (int vm, unsigned intid) -> 0: and drops it */
+#define SYS_COUNT     81
 
 /* A filter mask is this many 64-bit words, enough for every number any
  * personality here uses (the Linux one goes to 512). */
@@ -177,6 +179,7 @@
 
 #define COSMO_RIGHT_VM_MAP        (1u << 16)  /* vm_mem: give the guest memory */
 #define COSMO_RIGHT_VM_VCPU       (1u << 17)  /* vcpu_create */
+#define COSMO_RIGHT_VM_IRQ        (1u << 18)  /* vm_raise_spi / vm_lower_spi: a device's interrupt */
 
 #define COSMO_RIGHT_VCPU_RUN      (1u << 16)  /* vcpu_run */
 #define COSMO_RIGHT_VCPU_REGS     (1u << 17)  /* vcpu_regs with set != 0 */
