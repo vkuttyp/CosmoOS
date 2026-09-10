@@ -89,9 +89,11 @@ serving it to the guest by DHCP, is the NAT unit's, not this one's.)
 ### 2. The frame channel: a handle, read and write frames
 
 The owner reaches the tap through a **handle**, opened the way `/dev/vmm`
-is — a character device (`/dev/net/tap`, or a `SYS_tap_open` returning a
-handle; the device-node form reuses `open`/`read`/`write`/`close` and
-needs no new call). The contract is one frame per read and per write:
+is — a **character device**, `/dev/net/tap`. That is the settled interface
+(not a new system call): it reuses `open`/`read`/`write`/`close` and the
+existing readiness calls, adds no permanent syscall ABI, and matches how
+the hypervisor's own control device is reached. The contract is one frame
+per read and per write:
 
 - `read` returns the next frame the stack transmitted out the tap (a
   frame bound for the guest), or blocks / returns `EAGAIN` when none
@@ -166,8 +168,8 @@ and reaching beyond the host are the next unit's.
 
 - `kernel-services/network/tap.c` (new), `kernel-services/network/netif.h`
   or `kernel/include/kernel/net/tap.h` — the tap netif and its queues.
-- The frame channel: a character device under `kernel-services/vfs/ramfs`'s
-  chrdev mechanism (as `/dev/vmm` is), or `SYS_tap_open`; a
+- The frame channel: the `/dev/net/tap` character device under
+  `kernel-services/vfs/ramfs`'s chrdev mechanism (as `/dev/vmm` is); a
   `KOBJECT_TYPE_IO` object with `read`/`write`/`ready`/`set_nonblock`.
 - `userland/system/vmctl.c` — `--net tap`: open the channel, `wire_tx`
   writes it, the run loop reads it into `wire_rx`.
@@ -181,15 +183,14 @@ and reaching beyond the host are the next unit's.
 
 ## New APIs
 
-The frame channel, either as a device node (no new system call) or:
-
-```c
-#define SYS_tap_open  <n>   /* (const char *name) -> handle: a layer-2 endpoint on the host stack */
-```
-
-A `KOBJECT_TYPE_IO` handle: `read` one frame the stack transmitted,
-`write` one frame into the stack, `ready`/`set_nonblock` as the network
-unit defined them. No change to the virtio-net device or `vq.c`.
+**No new system call.** The frame channel is the `/dev/net/tap` character
+device, reached with the existing `open`/`read`/`write`/`close`. Its
+object is `KOBJECT_TYPE_IO`, so `read` returns one frame the stack
+transmitted, `write` injects one frame into the stack, and
+`ready`/`set_nonblock` work as the network unit defined them (`ioready`,
+`setnonblock`, `io_poll`). Opening the node registers and brings up the
+tap; closing it unregisters the tap. No change to the virtio-net device or
+`vq.c`.
 
 ## Migration plan
 
@@ -199,10 +200,10 @@ unit defined them. No change to the virtio-net device or `vq.c`.
    with `test_tap` — the stack transmits a frame and it is read back, a
    frame injected is received, an ARP for the tap's IP is answered, queues
    drop when full — with no guest.
-2. **The frame channel.** The handle (device node or `SYS_tap_open`)
-   over the tap: `read`/`write` move frames, `ready`/`set_nonblock` work,
-   close unregisters. Prove it drives the tap from a userland-shaped
-   caller in the host test.
+2. **The frame channel.** The `/dev/net/tap` device node over the tap:
+   `read`/`write` move frames, `ready`/`set_nonblock` work, close
+   unregisters. Prove it drives the tap from a userland-shaped caller in
+   the host test.
 3. **vmctl `--net tap`.** Open the channel, bridge `wire_tx`/`wire_rx`,
    read the channel in the run loop. `--net loop` unchanged.
 4. **The end-to-end guest test.** `el2-tap-host`: a guest ARPs and pings
