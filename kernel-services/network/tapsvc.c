@@ -18,6 +18,7 @@
 #include <kernel/net/tap.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
+#include <kernel/random.h>
 #include <kernel/netif.h>
 #include <kernel/fwcfg.h>
 #include <kernel/socket.h>
@@ -289,7 +290,6 @@ static struct {
     struct socket *usock;          /* faces the upstream resolver */
     struct thread *gth, *uth;
     uint32_t up_ip; uint16_t up_port; bool up_set;
-    uint16_t next_id;
     volatile bool running;
 } g_dns;
 
@@ -314,10 +314,16 @@ static bool dns_alloc(uint16_t guest_id, const struct netaddr *from, uint16_t *u
         spin_unlock_irqrestore(&g_dns_lock, s);
         return false;
     }
+    /* A random id (not a predictable counter) so an off-path attacker cannot
+     * guess the outstanding value and race a forged answer. */
     uint16_t id = 0;
-    for (unsigned tries = 0; tries < 0x10000u; tries++) {
-        uint16_t cand = g_dns.next_id++;
-        if (!dns_id_taken(cand, now)) { id = cand; break; }
+    for (unsigned tries = 0; tries < 4096u; tries++) {
+        uint16_t cand = (uint16_t)random_u64();
+        if (cand != 0 && !dns_id_taken(cand, now)) { id = cand; break; }
+    }
+    if (id == 0) {
+        spin_unlock_irqrestore(&g_dns_lock, s);
+        return false;
     }
     slot->in_use = true;
     slot->guest_id = guest_id;
@@ -397,8 +403,14 @@ static void dns_up_main(void *arg)
     (void)arg;
     uint8_t buf[512];
     while (g_dns.running) {
-        int64_t n = ksock_recvfrom(g_dns.usock, buf, sizeof(buf), NULL);
+        struct netaddr from;
+        int64_t n = ksock_recvfrom(g_dns.usock, buf, sizeof(buf), &from);
         if (n < DNS_HDR) { if (n <= 0) break; continue; }
+        /* Only the configured upstream may answer: an unconnected socket
+         * accepts packets from anyone, and matching on the id alone would let
+         * a reachable attacker race a forged response into the guest. */
+        if (from.v4 != g_dns.up_ip || from.port != g_dns.up_port)
+            continue;
         uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
         struct netaddr guest; uint16_t gid;
         if (!dns_take(uid, &guest, &gid))
@@ -427,11 +439,12 @@ static bool dns_parse_ip(const char *s, uint32_t *out)
     return true;
 }
 
+static void dns_stop(void);
+
 static void dns_start(struct tapsvc *svc)
 {
     memset(&g_dns, 0, sizeof(g_dns));
     memset(g_dns_tab, 0, sizeof(g_dns_tab));
-    g_dns.next_id = 1;
 
     char cfg[32];
     if (fwcfg_get_string("resolver", cfg, sizeof(cfg)) && dns_parse_ip(cfg, &g_dns.up_ip)) {
@@ -456,8 +469,11 @@ static void dns_start(struct tapsvc *svc)
     g_dns.running = true;
     g_dns.gth = thread_create(dns_guest_main, NULL, "dns-guest", SCHED_PRIO_DEFAULT);
     g_dns.uth = thread_create(dns_up_main, NULL, "dns-up", SCHED_PRIO_DEFAULT);
-    if (g_dns.gth == NULL || g_dns.uth == NULL)
-        kwarn("tapsvc: DNS proxy threads not started");
+    if (g_dns.gth == NULL || g_dns.uth == NULL) {
+        kwarn("tapsvc: DNS proxy threads not started; rolling back");
+        dns_stop();               /* tear the half-started service fully down */
+        return;
+    }
     kinfo("tapsvc: DNS proxy on %s:53 (upstream %sconfigured)", svc->nif->name, g_dns.up_set ? "" : "un");
 }
 

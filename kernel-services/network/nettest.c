@@ -3205,7 +3205,7 @@ static uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id)
 
 /* The test upstream resolver: echo each query as an answer with one A record. */
 static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
-static struct { struct socket *sock; volatile bool running; } g_dnsresp;
+static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; } g_dnsresp;
 
 static void dns_responder_main(void *arg)
 {
@@ -3226,7 +3226,9 @@ static void dns_responder_main(void *arg)
         q[o++] = 0; q[o++] = 0; q[o++] = 0; q[o++] = 4;   /* ttl */
         q[o++] = 0; q[o++] = 4;           /* rdlength */
         memcpy(q + o, dns_answer_ip, 4); o += 4;
-        ksock_sendto(g_dnsresp.sock, q, o, &from);
+        /* Normally reply from the configured upstream; in spoof mode reply from
+         * a different source, which the proxy must reject. */
+        ksock_sendto(g_dnsresp.spoofing ? g_dnsresp.spoof : g_dnsresp.sock, q, o, &from);
     }
     thread_exit(0);
 }
@@ -3249,6 +3251,11 @@ bool selftest_net_dns(const char **reason)
     rl.family = COSMO_AF_INET; rl.v4 = IPV4_ADDR(127, 0, 0, 1); rl.port = 5300;
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.sock) == 0);
     CHECK(ksock_bind(g_dnsresp.sock, &rl) == 0);
+    struct netaddr sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.family = COSMO_AF_INET; sp.v4 = IPV4_ADDR(127, 0, 0, 1); sp.port = 5301;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.spoof) == 0);
+    CHECK(ksock_bind(g_dnsresp.spoof, &sp) == 0);
     g_dnsresp.running = true;
     struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
     CHECK(rth != NULL);
@@ -3314,6 +3321,22 @@ bool selftest_net_dns(const char **reason)
     CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x7777);          /* id preserved */
     CHECK((dns[2] & 0x80) && (dns[3] & 0x0f) == 2);            /* QR + RCODE 2 (SERVFAIL) */
 
+    /* (3b) a response from a source other than the configured upstream is
+     * rejected -- an off-path attacker cannot race a forged answer into the
+     * guest even if it guesses the id. */
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+    struct tapsvc_stats sp0, sp1;
+    tapsvc_get_stats(&sp0);
+    g_dnsresp.spoofing = true;                                 /* responder replies from :5301 */
+    mlen = nettest_mk_dns(msg, 0x2468);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 6002, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    CHECK(nettest_recv_ip(t) == NULL);                         /* the forged-source answer is dropped */
+    tapsvc_get_stats(&sp1);
+    CHECK(sp1.dns_answer == sp0.dns_answer);                   /* nothing was relayed */
+    g_dnsresp.spoofing = false;
+
     /* (4) table bound: with the upstream a black hole, a flood fills the
      * pending table and further queries drop; it never exceeds the bound. */
     tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 1);      /* nothing answers there */
@@ -3349,7 +3372,9 @@ bool selftest_net_dns(const char **reason)
     ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);
     thread_join(rth);
     ksock_put(g_dnsresp.sock);
+    ksock_put(g_dnsresp.spoof);
     g_dnsresp.sock = NULL;
+    g_dnsresp.spoof = NULL;
     tapsvc_stop();
     tap_destroy(t);
     kinfo("selftest: net-dns: a query is relayed and its answer restored to the guest, two queries "

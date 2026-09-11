@@ -1,8 +1,14 @@
 # NEXT SUBSYSTEM — autoconfiguring the guest: DHCP and a DNS proxy
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it.
+
+> **Status: implemented (PR #95).** This report was the plan; it was built
+> as described and is now in `kernel-services/network/tapsvc.c`. The design
+> below is retained as the rationale of record; the built system is
+> documented in `docs/kernel-services/network/design.md` ("Autoconfiguring
+> the guest") and its tests in that directory's `testing.md`. Where the two
+> differ, the design doc is authoritative.
 
 **Subsystem: a DHCP server and a DNS proxy on the tap, so a guest that
 boots with a stock network configuration (DHCP client on) gets its address,
