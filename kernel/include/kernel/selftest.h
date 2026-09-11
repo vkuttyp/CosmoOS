@@ -189,6 +189,7 @@ bool selftest_tap(const char **reason);
 bool selftest_tap_filter(const char **reason);
 bool selftest_net_dhcp(const char **reason);
 bool selftest_net_dns(const char **reason);
+bool selftest_net_dnat(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);

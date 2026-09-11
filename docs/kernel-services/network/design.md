@@ -621,8 +621,44 @@ uses `/dev/net/tap` -- a VM attaching is the opt-in. No new system call and
 no writable control surface: the flags are internal, set by the tap setup.
 A stock Linux guest with the tap as its gateway reaching the host's network
 (and the internet, where the host has it) is the `QEMU_MEM=2G`
-reproduction. Inbound port-forwarding (DNAT), a filtering firewall, and
-IPv6 NAT are later units.
+reproduction. A filtering firewall and IPv6 NAT are later units; inbound
+port-forwarding (DNAT), once next, is done -- the next section.
+
+## Inbound port forwarding: DNAT (`nat.c`; audit unit "reaching the guest from outside")
+
+Masquerade let the guest reach out; DNAT lets the outside reach a service the
+guest runs (`docs/audit/next-subsystem-dnat.md`). A **static port-forward
+table** (`nat_portforward_config` from `fw_cfg` `opt/cosmo/portforward`, a
+list of `proto:hostport:guestaddr:guestport`, read on VM attach) maps a host
+port to a guest address and port. The bind is **wildcard on the host
+address**: a rule matches a connection to any of the host's own addresses on
+that port, so the match is the existing "addressed to one of our addresses"
+test plus the port. There is no writable control surface (a runtime API is a
+later unit).
+
+**Inbound** (`nat_in` → `nat_in_dnat`): a TCP/UDP packet addressed to the host
+that is *not* a masquerade reply and whose `(proto, dport)` matches a rule (or
+an established DNAT flow) records a conntrack entry, has its destination
+rewritten to the guest's address and port (checksum fixed incrementally), and
+is forwarded out the tap with `ipv4_output` — authorized by the *rule*, not by
+the ingress interface's `NETIF_FORWARD`, so a connection arriving on the
+uplink crosses to the guest though the uplink is not a forwarding interface.
+
+**The reply** (`nat_out`): the guest answers from `guest:Q`; that forwarded
+packet has its source rewritten back to what the client dialed (`host:P`),
+**with precedence over masquerade** — a flow that is half of a port-forward is
+never also masqueraded. Because the client sits on the egress subnet in the
+two-tap case (so the masquerade `on_egress` gate would otherwise skip
+`nat_out`), `ipv4_forward` now calls `nat_out` for every natable forwarded
+packet and `nat_out` decides DNAT-reply vs masquerade vs nothing.
+
+DNAT and masquerade entries share the one bounded, expiring `nat.c` table,
+told apart by a kind flag (the masquerade lookups filter to their kind), so
+inbound state a remote client can create is bounded exactly as outbound state
+the guest can. A stock Linux guest running a service reached from the host
+through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
+surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
+are later units.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

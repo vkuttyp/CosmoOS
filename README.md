@@ -1101,8 +1101,9 @@ See [docs/development.md](docs/development.md).
   `net-nat` (UDP/TCP/ICMP round trips masqueraded and restored with valid
   checksums, an ICMP error translated back, the table bounded and expiring).
   A stock Linux guest with the tap as its gateway reaching the host's network
-  is the `QEMU_MEM=2G` reproduction; inbound port-forwarding (DNAT), a
-  filtering firewall, and IPv6 NAT are later units.
+  is the `QEMU_MEM=2G` reproduction. A filtering firewall and IPv6 NAT are
+  later units. (Inbound port-forwarding, once listed here as next, is done --
+  see the entry below.)
 - **The guest configures itself: DHCP and a DNS proxy (done):**
   `docs/audit/next-subsystem-dhcp-dns.md`,
   `docs/kernel-services/network/design.md` ("Autoconfiguring the guest").
@@ -1128,6 +1129,26 @@ See [docs/development.md](docs/development.md).
   A stock Linux guest autoconfiguring `eth0` and resolving a name is the
   `QEMU_MEM=2G` reproduction; a general DHCP server, a caching resolver,
   DHCPv6, and DNS-over-TCP/DNSSEC are later units.
+- **The guest is reachable from outside: inbound port forwarding (done):**
+  `docs/audit/next-subsystem-dnat.md`,
+  `docs/kernel-services/network/design.md` ("Inbound port forwarding: DNAT").
+  Masquerade let the guest reach out; a service it *runs* was invisible.
+  `nat.c` gains destination NAT: a static port-forward table (`fw_cfg`
+  `opt/cosmo/portforward`, `proto:hostport:guestaddr:guestport`, a wildcard
+  host-address bind, read on VM attach) maps a host port to a guest
+  address/port. A TCP/UDP connection to the host on a forwarded port -- not a
+  masquerade reply -- is rewritten to the guest and forwarded out the tap,
+  authorized by the rule rather than `NETIF_FORWARD`; the guest's reply is
+  rewritten back to what the client dialed (`host:P`), with precedence over
+  masquerade, so `ipv4_forward` now runs `nat_out` on every natable forwarded
+  packet. DNAT and masquerade share the one bounded, expiring conntrack table
+  (a kind flag), so inbound state a remote can create is bounded as outbound
+  state the guest can. No new syscall, no writable control surface. Proven by
+  `net-dnat` (a client SYN forwarded to the guest, the SYN-ACK un-DNAT'd back
+  from `host:P`, a UDP round trip, an unruled port kept local, the table
+  bounded and expiring). A stock Linux guest running a service reached from
+  the host is the `QEMU_MEM=2G` reproduction; a writable control surface, a
+  filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1174,9 +1195,11 @@ See [docs/development.md](docs/development.md).
   filesystem it can mount and write; `-vnet.md`, a virtio-net interface;
   `-tap.md`, a host bridge that connects it to the host's own stack;
   `-nat.md`, connected-subnet routing, IP forwarding and masquerade NAT so
-  the guest reaches beyond the host; and `-dhcp-dns.md`, a DHCP server and a
+  the guest reaches beyond the host; `-dhcp-dns.md`, a DHCP server and a
   DNS proxy on the tap so a stock guest autoconfigures its interface and
-  resolves names with nothing set by hand. The named next steps are that
-  unit's own follow-ups (a general DHCP server, a caching resolver, DHCPv6,
-  DNS-over-TCP) and, on the guest itself, the `QEMU_MEM=2G` reproduction
-  reaching the real world. Design documents first, one subsystem at a time.
+  resolves names with nothing set by hand; and `-dnat.md`, inbound port
+  forwarding so a service the guest runs is reachable from outside through a
+  host port. The named next steps are that unit's own follow-ups (a writable
+  control surface for forwards, a filtering firewall, hairpin/NAT-reflection,
+  IPv6 DNAT) and, on the guest itself, the `QEMU_MEM=2G` reproduction reaching
+  the real world. Design documents first, one subsystem at a time.

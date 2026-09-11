@@ -31,9 +31,13 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 
+#define NAT_KIND_MASQ 0       /* outbound masquerade: guest -> world, reply back */
+#define NAT_KIND_DNAT 1       /* inbound port-forward: client -> host:P -> guest:Q */
+
 struct nat_entry {
     bool     in_use;
     bool     tcp_est;         /* a non-SYN segment has passed: the longer timeout */
+    uint8_t  kind;            /* NAT_KIND_MASQ / NAT_KIND_DNAT */
     uint8_t  proto;           /* IPPROTO_UDP / TCP / ICMP */
     uint16_t orig_port;       /* the guest's source port, or ICMP echo id (host order) */
     uint16_t nat_port;        /* the value we lend it on the uplink (host order) */
@@ -48,6 +52,16 @@ static struct nat_entry g_nat[NAT_TABLE_SIZE];
 static spinlock_t g_nat_lock = SPINLOCK_INIT("nat");
 static struct nat_stats g_stats;
 static uint16_t g_port_next = NAT_PORT_MIN;
+
+struct nat_pf {
+    bool in_use;
+    uint8_t proto;            /* IPPROTO_TCP / UDP */
+    uint16_t host_port;       /* the port a client dials on any host address (host order) */
+    uint32_t guest_ip;        /* network order */
+    uint16_t guest_port;      /* host order */
+};
+static struct nat_pf g_pf[NAT_PF_MAX];
+static spinlock_t g_pf_lock = SPINLOCK_INIT("nat-pf");
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
@@ -104,7 +118,8 @@ static struct nat_entry *nat_find_out(uint8_t proto, uint32_t orig_ip, uint16_t 
         struct nat_entry *e = &g_nat[i];
         if (!e->in_use || nat_expired(e, now))
             continue;
-        if (e->proto == proto && e->orig_ip == orig_ip && e->orig_port == orig_port &&
+        if (e->kind == NAT_KIND_MASQ && e->proto == proto &&
+            e->orig_ip == orig_ip && e->orig_port == orig_port &&
             e->peer_ip == peer_ip && e->peer_port == peer_port)
             return e;
     }
@@ -120,7 +135,8 @@ static struct nat_entry *nat_find_reply(uint8_t proto, uint32_t nat_ip, uint16_t
         struct nat_entry *e = &g_nat[i];
         if (!e->in_use || nat_expired(e, now))
             continue;
-        if (e->proto == proto && e->nat_ip == nat_ip && e->nat_port == nat_port &&
+        if (e->kind == NAT_KIND_MASQ && e->proto == proto &&
+            e->nat_ip == nat_ip && e->nat_port == nat_port &&
             e->peer_ip == peer_ip && e->peer_port == peer_port)
             return e;
     }
@@ -155,18 +171,101 @@ static bool nat_local_port_taken(uint8_t proto, uint32_t nat_ip, uint16_t port)
     return false;   /* ICMP ids have no host namespace to collide with */
 }
 
+/* A reclaimable slot (free or expired), or NULL when the table is full. */
+static struct nat_entry *nat_free_slot(uint64_t now)
+{
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (!g_nat[i].in_use || nat_expired(&g_nat[i], now))
+            return &g_nat[i];
+    return NULL;
+}
+
+/* --- port-forward rules and DNAT conntrack -------------------------------- */
+
+/* The (guest_ip, guest_port) a client-dialed (proto, host_port) forwards to,
+ * or false. Wildcard host-address bind: any host address matches. */
+static bool nat_pf_lookup(uint8_t proto, uint16_t host_port, uint32_t *guest_ip, uint16_t *guest_port)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
+    for (unsigned i = 0; i < NAT_PF_MAX; i++)
+        if (g_pf[i].in_use && g_pf[i].proto == proto && g_pf[i].host_port == host_port) {
+            *guest_ip = g_pf[i].guest_ip;
+            *guest_port = g_pf[i].guest_port;
+            found = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_pf_lock, s);
+    return found;
+}
+
+/* An established inbound DNAT flow (client -> host:P), or NULL. */
+static struct nat_entry *nat_find_dnat_in(uint8_t proto, uint32_t host_ip, uint16_t host_port,
+                                          uint32_t client_ip, uint16_t client_port, uint64_t now)
+{
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++) {
+        struct nat_entry *e = &g_nat[i];
+        if (!e->in_use || nat_expired(e, now) || e->kind != NAT_KIND_DNAT)
+            continue;
+        if (e->proto == proto && e->nat_ip == host_ip && e->nat_port == host_port &&
+            e->peer_ip == client_ip && e->peer_port == client_port)
+            return e;
+    }
+    return NULL;
+}
+
+/* The guest side of a DNAT flow (guest:Q -> client), for the reply. NULL if none. */
+static struct nat_entry *nat_find_dnat_reply(uint8_t proto, uint32_t guest_ip, uint16_t guest_port,
+                                             uint32_t client_ip, uint16_t client_port, uint64_t now)
+{
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++) {
+        struct nat_entry *e = &g_nat[i];
+        if (!e->in_use || nat_expired(e, now) || e->kind != NAT_KIND_DNAT)
+            continue;
+        if (e->proto == proto && e->orig_ip == guest_ip && e->orig_port == guest_port &&
+            e->peer_ip == client_ip && e->peer_port == client_port)
+            return e;
+    }
+    return NULL;
+}
+
+/* Create a DNAT entry for a new inbound flow. NULL when the table is full. */
+static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16_t host_port,
+                                         uint32_t client_ip, uint16_t client_port,
+                                         uint32_t guest_ip, uint16_t guest_port, uint64_t now)
+{
+    /* Refuse an entry whose reverse key (guest endpoint + client tuple) already
+     * exists: the guest's reply carries no host port, so two such flows could
+     * not be told apart on the way back. */
+    if (nat_find_dnat_reply(proto, guest_ip, guest_port, client_ip, client_port, now) != NULL) {
+        STAT(dnat_drop_full);
+        return NULL;
+    }
+    struct nat_entry *e = nat_free_slot(now);
+    if (e == NULL) {
+        STAT(dnat_drop_full);
+        return NULL;
+    }
+    memset(e, 0, sizeof(*e));
+    e->in_use = true;
+    e->kind = NAT_KIND_DNAT;
+    e->proto = proto;
+    e->nat_ip = host_ip;        /* what the client dialed */
+    e->nat_port = host_port;
+    e->orig_ip = guest_ip;      /* where it is forwarded */
+    e->orig_port = guest_port;
+    e->peer_ip = client_ip;
+    e->peer_port = client_port;
+    e->expires_ns = now + nat_timeout(e);
+    return e;
+}
+
 /* Allocate a free entry and lend a NAT identifier; NULL when the table is
  * full or no identifier is free. Prefers the guest's own port when it is
  * free (helps protocols that assume it). */
 static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want, uint64_t now)
 {
-    struct nat_entry *slot = NULL;
-    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++) {
-        if (!g_nat[i].in_use || nat_expired(&g_nat[i], now)) {
-            slot = &g_nat[i];
-            break;
-        }
-    }
+    struct nat_entry *slot = nat_free_slot(now);
     if (slot == NULL) {
         STAT(out_drop_full);
         return NULL;
@@ -192,6 +291,7 @@ static struct nat_entry *nat_alloc(uint8_t proto, uint32_t nat_ip, uint16_t want
         STAT(expired);            /* we are reclaiming an expired slot */
     memset(slot, 0, sizeof(*slot));
     slot->in_use = true;
+    slot->kind = NAT_KIND_MASQ;
     slot->proto = proto;
     slot->nat_ip = nat_ip;
     slot->nat_port = port;
@@ -204,6 +304,41 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
             const struct ipv4_hdr *iph, unsigned ihl, uint32_t *new_src)
 {
     *new_src = iph->src;
+
+    /* DNAT reply (precedence over masquerade): a forwarded guest packet that
+     * is the guest side of a port-forward has its source rewritten back to
+     * the address and port the client dialed (host:P), not a masquerade
+     * value. Checked even when the source is on the egress subnet, since a
+     * two-tap client sits there. */
+    if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP) {
+        uint8_t *dl4 = m->data + ihl;
+        unsigned dcoff = iph->proto == IPPROTO_TCP ? 16 : 6;
+        uint16_t sport = ntohs(get16(dl4 + 0));    /* guest port Q */
+        uint16_t dport = ntohs(get16(dl4 + 2));    /* the client's port */
+        uint64_t dnow = clock_now_ns();
+        arch_irq_state_t ds = spin_lock_irqsave(&g_nat_lock);
+        struct nat_entry *de = nat_find_dnat_reply(iph->proto, iph->src, sport, iph->dst, dport, dnow);
+        struct nat_entry dsnap;
+        bool dhave = false;
+        if (de) {
+            de->expires_ns = dnow + nat_timeout(de);
+            dsnap = *de;
+            dhave = true;
+        }
+        spin_unlock_irqrestore(&g_nat_lock, ds);
+        if (dhave) {
+            uint16_t ck = get16(dl4 + dcoff);
+            if (!(iph->proto == IPPROTO_UDP && ck == 0)) {
+                csum_patch32(&ck, ntohl(iph->src), ntohl(dsnap.nat_ip));
+                csum_patch16(&ck, sport, dsnap.nat_port);
+                put16(dl4 + dcoff, ck);
+            }
+            put16(dl4 + 0, htons(dsnap.nat_port));   /* source port Q -> P */
+            *new_src = dsnap.nat_ip;
+            STAT(dnat_reply);
+            return 0;
+        }
+    }
 
     /* Masquerade only flows forwarded from a NETIF_MASQUERADE interface that
      * leave an interface whose subnet does not already hold the source. */
@@ -368,6 +503,56 @@ static bool nat_in_icmp_error(struct mbuf *m, unsigned ihl, uint16_t total)
     return true;
 }
 
+/* Inbound DNAT: a TCP/UDP packet addressed to one of our own addresses,
+ * `host_port` (its dport) matched no masquerade reply. If a port-forward rule
+ * or an established DNAT flow claims it, rewrite the destination to the guest
+ * and forward it out the tap. Returns true (m consumed) when it did. */
+static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl,
+                        uint16_t total, uint8_t proto, uint16_t client_port, uint16_t host_port)
+{
+    uint32_t host_ip = iph->dst, client_ip = iph->src;
+    uint32_t guest_ip; uint16_t guest_port;
+    bool has_rule = nat_pf_lookup(proto, host_port, &guest_ip, &guest_port);
+
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_nat_lock);
+    struct nat_entry *e = nat_find_dnat_in(proto, host_ip, host_port, client_ip, client_port, now);
+    if (e == NULL && has_rule)
+        e = nat_dnat_create(proto, host_ip, host_port, client_ip, client_port, guest_ip, guest_port, now);
+    struct nat_entry snap;
+    bool have = false;
+    if (e) {
+        e->expires_ns = now + nat_timeout(e);   /* refreshed per packet; no est upgrade */
+        snap = *e;
+        have = true;
+    }
+    spin_unlock_irqrestore(&g_nat_lock, s);
+    if (!have) {
+        STAT(in_no_match);
+        return false;                 /* no rule and no flow: deliver to the host */
+    }
+
+    /* Rewrite the destination to the guest and forward it out the tap. */
+    unsigned l4min = proto == IPPROTO_TCP ? 20u : 8u;
+    m = m_pullup(m, ihl + l4min);
+    if (m == NULL)
+        return true;                  /* we own it; dropped */
+    struct ipv4_hdr *miph = (struct ipv4_hdr *)m->data;
+    uint8_t *mp = m->data + ihl;
+    unsigned coff = proto == IPPROTO_TCP ? 16u : 6u;
+    uint16_t ck = get16(mp + coff);
+    if (!(proto == IPPROTO_UDP && ck == 0)) {
+        csum_patch32(&ck, ntohl(miph->dst), ntohl(snap.orig_ip));      /* host -> guest */
+        csum_patch16(&ck, ntohs(get16(mp + 2)), snap.orig_port);       /* P -> Q */
+        put16(mp + coff, ck);
+    }
+    put16(mp + 2, htons(snap.orig_port));    /* dport -> Q */
+    uint8_t ttl = miph->ttl;
+    STAT(dnat_in);
+    nat_forward_to(m, ihl, total, client_ip, snap.orig_ip, proto, ttl);
+    return true;
+}
+
 bool nat_in(struct netif *nif, struct mbuf *m,
             const struct ipv4_hdr *iph, unsigned ihl, uint16_t total)
 {
@@ -419,6 +604,10 @@ bool nat_in(struct netif *nif, struct mbuf *m,
     }
     spin_unlock_irqrestore(&g_nat_lock, s);
     if (e == NULL) {
+        /* Not a masquerade reply. Is it a connection *into* the guest -- a
+         * TCP/UDP packet to one of our addresses on a forwarded port? */
+        if (proto == IPPROTO_TCP || proto == IPPROTO_UDP)
+            return nat_in_dnat(m, iph, ihl, total, proto, peer_port /*client port*/, nat_port /*host port*/);
         STAT(in_no_match);
         return false;
     }
@@ -464,6 +653,102 @@ bool nat_in(struct netif *nif, struct mbuf *m,
 }
 
 /* --- maintenance ---------------------------------------------------------- */
+
+/* --- port-forward configuration ------------------------------------------ */
+
+void nat_pf_clear(void)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
+    memset(g_pf, 0, sizeof(g_pf));
+    spin_unlock_irqrestore(&g_pf_lock, s);
+}
+
+bool nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t guest_port)
+{
+    if ((proto != IPPROTO_TCP && proto != IPPROTO_UDP) || host_port == 0 || guest_port == 0 ||
+        guest_ip == 0)
+        return false;
+    /* The target must sit on a connected subnet (a tap), so the forwarded
+     * packet routes to it and its reply passes the reverse-path check; an
+     * off-subnet target would relay out the default uplink and stall. */
+    struct netif *n = netif_connected(guest_ip);
+    if (n == NULL)
+        return false;
+    netif_put(n);
+    arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
+    bool ok = false;
+    for (unsigned i = 0; i < NAT_PF_MAX; i++)
+        if (!g_pf[i].in_use) {
+            g_pf[i].in_use = true;
+            g_pf[i].proto = proto;
+            g_pf[i].host_port = host_port;
+            g_pf[i].guest_ip = guest_ip;
+            g_pf[i].guest_port = guest_port;
+            ok = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_pf_lock, s);
+    return ok;
+}
+
+/* Parse a decimal in [0,65535] at *p, advancing *p; false on none/overflow. */
+static bool pf_num(const char **p, uint32_t *out, uint32_t max)
+{
+    const char *s = *p;
+    if (*s < '0' || *s > '9')
+        return false;
+    uint32_t v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (uint32_t)(*s++ - '0');
+        if (v > max)
+            return false;
+    }
+    *p = s;
+    *out = v;
+    return true;
+}
+
+/* Parse `a.b.c.d` at *p (up to a ':' or end), advancing *p; network order. */
+static bool pf_ip(const char **p, uint32_t *out)
+{
+    uint32_t o[4];
+    for (int i = 0; i < 4; i++) {
+        if (!pf_num(p, &o[i], 255))
+            return false;
+        if (i < 3) {
+            if (**p != '.')
+                return false;
+            (*p)++;
+        }
+    }
+    *out = IPV4_ADDR(o[0], o[1], o[2], o[3]);
+    return true;
+}
+
+void nat_portforward_config(const char *cfg)
+{
+    nat_pf_clear();
+    if (cfg == NULL)
+        return;
+    const char *p = cfg;
+    while (*p) {
+        /* proto:hostport:guestaddr:guestport[,...] */
+        uint8_t proto = 0;
+        if (p[0] == 't' && p[1] == 'c' && p[2] == 'p' && p[3] == ':') { proto = IPPROTO_TCP; p += 4; }
+        else if (p[0] == 'u' && p[1] == 'd' && p[2] == 'p' && p[3] == ':') { proto = IPPROTO_UDP; p += 4; }
+        uint32_t hport = 0, gip = 0, gport = 0;
+        bool ok = proto && pf_num(&p, &hport, 65535) && *p == ':' && (p++, pf_ip(&p, &gip)) &&
+                  *p == ':' && (p++, pf_num(&p, &gport, 65535));
+        if (ok)
+            nat_pf_add(proto, (uint16_t)hport, gip, (uint16_t)gport);
+        else
+            kwarn("nat: ignoring malformed port-forward rule near '%s'", p);
+        while (*p && *p != ',')   /* skip to the next rule */
+            p++;
+        if (*p == ',')
+            p++;
+    }
+}
 
 void nat_age(uint64_t now_ns)
 {

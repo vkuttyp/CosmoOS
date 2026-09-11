@@ -15,6 +15,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/nat.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -515,6 +516,9 @@ void tapsvc_start(struct tap *t)
 
     tap_set_input_filter(t, dhcp_filter, &g_svc);
     dns_start(&g_svc);
+    char pf[128];
+    if (fwcfg_get_string("portforward", pf, sizeof(pf)))
+        nat_portforward_config(pf);   /* inbound port-forward (DNAT) rules */
     kinfo("tapsvc: DHCP up on %s (gateway %u.%u.%u.%u, guest .%u)", nif->name,
           (ntohl(g_svc.gateway) >> 24) & 0xff, (ntohl(g_svc.gateway) >> 16) & 0xff,
           (ntohl(g_svc.gateway) >> 8) & 0xff, ntohl(g_svc.gateway) & 0xff, TAPSVC_GUEST_HOST);

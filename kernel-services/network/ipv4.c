@@ -458,24 +458,21 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
         return;
     }
 
-    /* Masquerade the source when the ingress interface asks for it and the
-     * egress subnet does not already hold the source. nat_out needs the
-     * transport header contiguous; a flow it cannot masquerade (an
-     * unsupported protocol, a truncated header, or a full table) is dropped
-     * rather than forwarded with the private source exposed. */
+    /* NAT on the way out. nat_out decides per packet: a DNAT reply (the guest
+     * side of a port-forward) has its source rewritten back to what the
+     * client dialed -- which must happen even when the source is on the
+     * egress subnet -- and otherwise a flow forwarded from a NETIF_MASQUERADE
+     * interface off its subnet is masqueraded. nat_out needs the transport
+     * header contiguous; a flow it cannot masquerade (unsupported protocol,
+     * truncated header, or a full table) is dropped rather than forwarded
+     * with the private source exposed. Non-transport protocols that need no
+     * masquerade (source already on the egress subnet) forward as-is. */
     uint32_t new_src = src;
     if (in->flags & NETIF_MASQUERADE) {
-        bool on_egress = out->ip4.addr && out->ip4.mask &&
-                         ((src ^ out->ip4.addr) & out->ip4.mask) == 0;
-        if (!on_egress && out->ip4.addr != 0) {
-            unsigned l4min = proto == IPPROTO_TCP ? 20u : 8u;
-            if ((proto != IPPROTO_UDP && proto != IPPROTO_TCP && proto != IPPROTO_ICMP) ||
-                m->pkt.len < (uint32_t)ihl + l4min) {
-                STAT(fwd_nat_drop);
-                netif_put(out);
-                m_freem(m);
-                return;
-            }
+        unsigned l4min = proto == IPPROTO_TCP ? 20u : 8u;
+        bool natable = (proto == IPPROTO_UDP || proto == IPPROTO_TCP || proto == IPPROTO_ICMP) &&
+                       m->pkt.len >= (uint32_t)ihl + l4min;
+        if (natable) {
             m = m_pullup(m, ihl + l4min);
             if (m == NULL) {
                 netif_put(out);
@@ -483,6 +480,17 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
             }
             iph = (const struct ipv4_hdr *)m->data;
             if (nat_out(in, out, m, iph, ihl, &new_src) != 0) {
+                STAT(fwd_nat_drop);
+                netif_put(out);
+                m_freem(m);
+                return;
+            }
+        } else {
+            /* Cannot NAT it; drop only if masquerade would be required (the
+             * source is not on the egress subnet), else forward as-is. */
+            bool on_egress = out->ip4.addr && out->ip4.mask &&
+                             ((src ^ out->ip4.addr) & out->ip4.mask) == 0;
+            if (!on_egress && out->ip4.addr != 0) {
                 STAT(fwd_nat_drop);
                 netif_put(out);
                 m_freem(m);
@@ -533,6 +541,12 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         m_freem(m);
         return;
     }
+    /* Trim any link padding to the IP total length before anyone downstream
+     * (forwarding, NAT, delivery) reads past it: a short datagram in a padded
+     * frame must not let a pullup reach into the padding and be taken for a
+     * transport header. After this, m->pkt.len == total. */
+    if (total < m->pkt.len)
+        m_adj(m, -(int)(m->pkt.len - total));
     /* Martians: loopback or our own addresses arriving from a real link. */
     if (!(nif->flags & NETIF_LOOPBACK) &&
         ((ntohl(iph->src) >> 24) == 127 || netif_owns_ipv4(iph->src))) {
