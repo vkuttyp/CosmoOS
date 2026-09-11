@@ -1067,8 +1067,9 @@ See [docs/development.md](docs/development.md).
   ARPs on the tap, answers what is addressed to its IP). The owner reaches
   it through `/dev/net/tap`, a character device: read one frame the stack
   sent, write one from the guest (read returns 0 when none waits, so the
-  owner polls it like the console; no new syscall). It is backed by one
-  `tap0` on `10.0.3.0/24`; a tap is marked never-default (`NETIF_NODEFAULT`),
+  owner polls it like the console; no new syscall). This unit backed it with
+  one persistent `tap0` on `10.0.3.0/24` (a tap per open came later -- see the
+  multi-guest entry); a tap is marked never-default (`NETIF_NODEFAULT`),
   so even left up it is never the machine's route to the world. `vmctl --net tap` points the virtio-net wire at the
   channel, the device unchanged. Proven in the harness by the `tap`
   selftest (a frame out the tap read back, an injected ARP answered by the
@@ -1093,8 +1094,8 @@ See [docs/development.md](docs/development.md).
   echo id) to a value a bounded conntrack table lends, fixing the transport
   checksum incrementally (RFC 1624) and rewriting the reply -- and an ICMP
   error quoting a NAT'd packet -- back to the guest. The table is bounded
-  and its entries expire; a full table drops new flows. `tap0` turns both
-  flags on when an owner first uses `/dev/net/tap` (no new syscall, no
+  and its entries expire; a full table drops new flows. The guest's tap turns
+  both flags on when an owner opens `/dev/net/tap` (no new syscall, no
   writable sysctl). Proven in the harness by `net-route` (longest-prefix
   connected routing), `net-forward` (a datagram forwarded TTL-1-lower, a
   TTL-1 time-exceeded, a non-forwarding ingress that stays a non-router) and
