@@ -10,6 +10,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
 #include <kernel/net/tcp.h>
 #include <kernel/random.h>
@@ -422,16 +423,24 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
                          const struct ipv4_hdr *iph, unsigned ihl, uint16_t total)
 {
     STAT(fwd);
-    /* Anti-spoof (strict reverse path): a datagram forwarded from this
-     * interface must carry a source on the interface's own subnet, or a
-     * guest could forge a source from the uplink subnet (making masquerade
-     * skip it) and impersonate another machine on the uplink. A forwarding
-     * interface without a configured subnet cannot be checked and is not
-     * gated. */
-    if (in->ip4.addr && in->ip4.mask && ((iph->src ^ in->ip4.addr) & in->ip4.mask) != 0) {
-        STAT(fwd_spoofed);
-        m_freem(m);
-        return;
+    /* Anti-spoof (strict reverse path). A masquerading tap is a point-to-point
+     * link to a single owner, whose DHCP hands out exactly <subnet>.15
+     * (TAPSVC_GUEST_HOST): require that one source, so a guest cannot forge
+     * another same-subnet identity toward a peer (guest-to-guest forwarding
+     * preserves the real source) nor a source from the uplink subnet (which
+     * would make masquerade skip it). A bare forwarder with several hosts
+     * behind it keeps the looser "source on my subnet" test; one without a
+     * configured subnet cannot be checked and is not gated. */
+    if (in->ip4.addr && in->ip4.mask) {
+        uint32_t net = in->ip4.addr & in->ip4.mask;
+        bool bad = (in->flags & NETIF_MASQUERADE)
+                       ? iph->src != (net | htonl(TAPSVC_GUEST_HOST))
+                       : ((iph->src ^ in->ip4.addr) & in->ip4.mask) != 0;
+        if (bad) {
+            STAT(fwd_spoofed);
+            m_freem(m);
+            return;
+        }
     }
     if (iph->ttl <= 1) {                 /* would reach zero in transit */
         icmp_send_timxceed(m, iph);

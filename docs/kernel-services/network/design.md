@@ -581,7 +581,9 @@ checksum, martian checks -- before forwarding, with no shortcut, and a
 strict reverse-path check drops any datagram whose source is not on the
 ingress interface's own subnet, so a guest cannot forge a source (an
 uplink-subnet address, say, which would otherwise make masquerade skip it
-and be emitted unchanged).
+and be emitted unchanged). On a masquerading tap — a point-to-point link to
+one owner — this is tightened further to the tap's single guest address (see
+"Many guests: a tap per open").
 
 **Masquerade NAT (`nat.c`).** A forwarded flow leaving an interface whose
 subnet does not hold its source -- a `10.0.3.x` guest going out the uplink
@@ -610,8 +612,9 @@ longer once a TCP flow is established, via `nat_age`, which the network
 worker calls from its periodic ARP/ND aging), and a full table drops new
 flows. Because forwarding is enabled
 only on the one guest's tap, the table's flows are that guest's, so a guest
-that opens endless flows starves only itself; a per-client quota is the
-concern of a later unit that forwards for more than one client. Only IPv4
+that opens endless flows starves only itself; once the table is shared among
+several guests, a per-guest quota bounds each one's footprint ("Many guests: a
+tap per open", below). Only IPv4
 UDP, TCP and ICMP echo are masqueraded; a flow that cannot be (an
 unsupported protocol, a truncated header, a full table) is dropped rather
 than forwarded with the private source exposed.
@@ -683,15 +686,26 @@ its own DNS proxy, whose socket is bound to *that tap's gateway* — a proxy on
 `0.0.0.0:53` would answer DNS on the host's real interface. The periodic
 `nat`/DNS age sweeps every live instance.
 
-**NAT for many.** Three changes keep a shared table fair and honest with
-several guests: a **per-guest quota** (`NAT_QUOTA_PER_GUEST = NAT_TABLE_SIZE /
-NAT_GUESTS`) caps each source's masquerade entries, so one guest's flood drops
-only its own new flows; **masquerade is skipped when the egress interface
-itself forwards** (a flow between two taps is guest-to-guest), so guests reach
-each other with real addresses; and **`nat_guest_purge(guest_ip)`** removes
-every port-forward rule targeting a guest and every conntrack entry on its
-guest side — and nothing else — the guest-scoped teardown a departing tap's
-`release` calls before its subnet returns to the pool.
+**NAT for many.** Four changes keep a shared table fair and honest with
+several guests. A **per-guest quota** (`NAT_QUOTA_PER_GUEST = NAT_TABLE_SIZE /
+NAT_GUESTS`) caps a guest's whole footprint — the guest is always the
+`orig_ip` side, for a masquerade flow it dialled out and a DNAT flow dialled
+in to its port-forward alike, so one count (`nat_guest_count`) bounds both;
+neither an outbound flood nor an inbound flood against one guest's forwards
+starves a peer. **Masquerade is skipped when the egress interface itself
+forwards** (a flow between two taps is guest-to-guest), so guests reach each
+other with real addresses — and because that leaves the source un-rewritten,
+the forwarding anti-spoof is tightened: a masquerading tap is a
+point-to-point link to a single owner at `<subnet>.15`, so `ipv4_forward`
+requires exactly that source (not merely one on the subnet), or a guest could
+forge a same-subnet identity toward a peer. A packet that matches a
+port-forward rule but cannot be forwarded (the guest is over quota, or the
+table is full) is **dropped, not delivered locally** — it is meant for the
+guest, not for a host service that happens to bind the same port. And
+**`nat_guest_purge(guest_ip)`** removes every port-forward rule targeting a
+guest and every conntrack entry on its guest side — and nothing else — the
+guest-scoped teardown a departing tap's `release` calls before its subnet
+returns to the pool.
 
 Each guest thus has its own channel (it sees only its own frames), its own
 lease and subnet, its own NAT share, and its own port-forwards; guests reach

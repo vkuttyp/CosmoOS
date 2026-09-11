@@ -3486,9 +3486,13 @@ bool selftest_net_dnat(const char **reason)
     nat_get_stats(&as1);
     CHECK(as1.dnat_drop_full > as0.dnat_drop_full);
 
-    /* (5) the table is bounded: a flood of distinct client flows fills it and
-     * further ones drop; then aging reclaims them. */
+    /* (5) one guest's inbound flood is bounded to its share of the table, not
+     * the whole table: from an empty table, a flood of distinct client flows
+     * against one guest's forward settles at NAT_QUOTA_PER_GUEST DNAT entries
+     * (so a peer's slots survive) and further ones drop; then aging reclaims
+     * them. */
     struct nat_stats ns0, ns1;
+    nat_flush();
     nat_get_stats(&ns0);
     for (unsigned i = 0; i < NAT_TABLE_SIZE + 16; i++) {
         l4len = nettest_mk_tcp(l4, client, u_ip, (uint16_t)(30000 + i), 8080, TH_SYN);
@@ -3507,8 +3511,8 @@ bool selftest_net_dnat(const char **reason)
         thread_sleep_ms(10);
     }
     nat_get_stats(&ns1);
-    CHECK(ns1.entries <= NAT_TABLE_SIZE);                  /* never exceeds the bound */
-    CHECK(ns1.dnat_drop_full > ns0.dnat_drop_full);        /* the flood dropped */
+    CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* capped to the guest's share, not 256 */
+    CHECK(ns1.dnat_drop_full > ns0.dnat_drop_full);        /* the flood past the share dropped */
     nat_get_stats(&ns0);
     CHECK(ns0.entries > 0);
     nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_TCP_NS);
@@ -3697,6 +3701,26 @@ bool selftest_net_multiguest(const char **reason)
     }
     CHECK(got);
     CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == ga);   /* real source, not masqueraded */
+
+    /* (2b') a guest cannot forge a same-subnet identity toward a peer: a frame
+     * from tap0's guest sourced as 10.0.3.50 (not its assigned .15) is dropped
+     * as spoofed and never reaches tap1. */
+    struct ip_stats mgs0, mgs1;
+    ipv4_get_stats(&mgs0);
+    uint32_t forged = IPV4_ADDR(10, 0, 3, 50);
+    l4len = nettest_mk_udp(l4, forged, gb, 7000, 7001, pl, sizeof(pl));
+    flen = nettest_wrap(frame, tap0mac, gmac, forged, gb, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(file_write(f[0], frame, flen) == (int64_t)flen);
+    bool leaked = false;
+    for (unsigned i = 0; i < 30 && !leaked; i++) {
+        int64_t sn = file_read(f[1], rx, sizeof(rx));
+        if (sn >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
+            leaked = true;                       /* the forged datagram reached the peer */
+        else if (sn <= 0)
+            thread_sleep_ms(10);
+    }
+    ipv4_get_stats(&mgs1);
+    CHECK(!leaked && mgs1.fwd_spoofed > mgs0.fwd_spoofed);
 
     /* (2c) a forward rule per guest; closing tap0's owner purges only its
      * guest's rule, tap1's remains. */

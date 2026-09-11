@@ -214,13 +214,16 @@ back on the guest tap rewritten to the guest's `:80` (source intact, checksum
 valid); the guest's SYN-ACK is read back on the uplink with its source
 rewritten to `host:8080` (checksum valid), so the client sees a reply from
 what it dialed; a UDP round trip through a second rule; a connection to an
-unruled port is delivered to the host, not forwarded to the guest; the table
-is bounded (a flood of distinct client flows fills it, further ones drop) and
-reclaimed by `nat_age`. Proved by reintroducing no reply un-rewrite (the
-reply's source port is then the guest's, not the dialed port), a rule that
-matches every port (an unruled port is then forwarded to the guest), and a
-table that clobbers instead of dropping when full (`dnat_drop_full` never
-rises).
+unruled port is delivered to the host, not forwarded to the guest; a flood of
+distinct client flows against one guest's rule settles at its share of the
+table (`NAT_QUOTA_PER_GUEST`, not the whole `NAT_TABLE_SIZE`) with the rest
+dropped — a busy forward cannot starve a peer — and the flows are reclaimed by
+`nat_age`. Proved by reintroducing no reply un-rewrite (the reply's source
+port is then the guest's, not the dialed port), a rule that matches every port
+(an unruled port is then forwarded to the guest), and — the finding that
+prompted the quota — a `nat_dnat_create` that ignores the per-guest cap (the
+flood then fills far past `NAT_QUOTA_PER_GUEST` and would exhaust a peer's
+slots).
 
 **`net-tapctl`**: drives the control device through the VFS
 (`/dev/net/tapctl`). A `FORWARD_ADD` command written to it installs a rule (a
@@ -271,12 +274,17 @@ and an age that reclaims nothing.
 one file is answered only on that file's tap (an ARP for `tap0`'s address
 replied on file 0, nothing on file 1). A datagram from `tap0`'s guest to
 `tap1`'s guest is read back on `tap1` with its source intact — guest-to-guest
-is routed, not masqueraded. With a port-forward rule per guest, closing
-`tap0`'s file destroys only its tap, purges only its guest's rule (`tap1`'s
-remains), and frees its slot for reuse. Proved by reintroducing a `release`
-that skips the purge (the departed guest's rule lingers) and a masquerade
-that fires between taps (the guest-to-guest source is then rewritten). The
-per-open lifecycle itself is `vfs-chrdev-open` (VFS tests).
+is routed, not masqueraded. A frame from `tap0`'s guest sourced as a forged
+same-subnet address (`10.0.3.50`, not its assigned `.15`) is dropped as
+spoofed (`fwd_spoofed` rises) and never reaches `tap1`. With a port-forward
+rule per guest, closing `tap0`'s file destroys only its tap, purges only its
+guest's rule (`tap1`'s remains), and frees its slot for reuse. Proved by
+reintroducing a `release` that skips the purge (the departed guest's rule
+lingers), a masquerade that fires between taps (the guest-to-guest source is
+then rewritten), and — the finding that prompted the tightening — the loose
+"any source on the subnet" reverse-path check (the forged `10.0.3.50` then
+reaches the peer). The per-open lifecycle itself is `vfs-chrdev-open` (VFS
+tests).
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

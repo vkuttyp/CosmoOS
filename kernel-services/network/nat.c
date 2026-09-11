@@ -213,7 +213,24 @@ static struct nat_entry *nat_find_dnat_reply(uint8_t proto, uint32_t guest_ip, u
     return NULL;
 }
 
-/* Create a DNAT entry for a new inbound flow. NULL when the table is full. */
+/* Count the conntrack entries a guest currently holds. Its address is always
+ * the `orig_ip` side -- for a masquerade flow (the guest dialled out) and for
+ * a DNAT flow (a client dialled in and it was forwarded to the guest) alike --
+ * so one count bounds a guest's whole footprint in the shared table. Caller
+ * holds g_nat_lock. */
+static unsigned nat_guest_count(uint32_t guest_ip, uint64_t now)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && !nat_expired(&g_nat[i], now) &&
+            g_nat[i].orig_ip == guest_ip)
+            n++;
+    return n;
+}
+
+/* Create a DNAT entry for a new inbound flow. NULL when the table is full or
+ * the target guest already holds its share (an inbound flood against one
+ * guest's forwards must not starve a peer's slots). */
 static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16_t host_port,
                                          uint32_t client_ip, uint16_t client_port,
                                          uint32_t guest_ip, uint16_t guest_port, uint64_t now)
@@ -222,6 +239,13 @@ static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16
      * exists: the guest's reply carries no host port, so two such flows could
      * not be told apart on the way back. */
     if (nat_find_dnat_reply(proto, guest_ip, guest_port, client_ip, client_port, now) != NULL) {
+        STAT(dnat_drop_full);
+        return NULL;
+    }
+    /* Bound the guest's footprint the same way an outbound flow is: an inbound
+     * flood using distinct client ports against one guest's forwards must fill
+     * only that guest's share, not the whole table. */
+    if (nat_guest_count(guest_ip, now) >= NAT_QUOTA_PER_GUEST) {
         STAT(dnat_drop_full);
         return NULL;
     }
@@ -367,13 +391,10 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
     bool fresh = false;
     if (e == NULL) {
         /* No guest may hold more than its share of the shared table, so one
-         * guest's flood drops only its own new flows, not another's. */
-        unsigned mine = 0;
-        for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
-            if (g_nat[i].in_use && !nat_expired(&g_nat[i], now) &&
-                g_nat[i].kind == NAT_KIND_MASQ && g_nat[i].orig_ip == iph->src)
-                mine++;
-        if (mine >= NAT_QUOTA_PER_GUEST) {
+         * guest's flood drops only its own new flows, not another's. The count
+         * spans both kinds (see nat_guest_count): a guest's outbound flows and
+         * the inbound flows to its port-forwards draw on one budget. */
+        if (nat_guest_count(iph->src, now) >= NAT_QUOTA_PER_GUEST) {
             spin_unlock_irqrestore(&g_nat_lock, s);
             STAT(out_drop_full);
             return -ENOSPC;
@@ -538,6 +559,15 @@ static bool nat_in_dnat(struct mbuf *m, const struct ipv4_hdr *iph, unsigned ihl
     spin_unlock_irqrestore(&g_nat_lock, s);
     spin_unlock_irqrestore(&g_pf_lock, ps);
     if (!have) {
+        if (has_rule) {
+            /* The port is forwarded, but no flow could be established (the
+             * guest is over its share or the table is full -- counted in
+             * nat_dnat_create). This packet is meant for the guest, not for a
+             * host service that happens to bind the same port: drop it rather
+             * than leak it to local delivery. */
+            m_freem(m);
+            return true;
+        }
         STAT(in_no_match);
         return false;                 /* no rule and no flow: deliver to the host */
     }
