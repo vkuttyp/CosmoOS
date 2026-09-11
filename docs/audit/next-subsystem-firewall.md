@@ -170,36 +170,53 @@ but deferred, keeping the unit to the guest-isolation problem it solves.
 Extend `/dev/net/tapctl` and `kernel/include/uapi/cosmo/netctl.h` with, under
 a bumped `COSMO_NETCTL_VERSION`:
 
-- `FILTER_ADD` — add a rule. The command struct names the guest explicitly
-  in its payload (a `guest_addr` field, exactly as `FORWARD_ADD` already
-  does), the direction, proto, dst addr/prefix, dst port, and verdict. The
-  **kernel assigns a stable rule id** (a small monotonic counter per guest,
-  never reused while the rule lives) and returns it to the caller (the write
-  yields the id, and it also appears in the read-listing). Ordering:
-  `FILTER_ADD` **appends** by default (evaluation order = insertion order);
-  an optional `before_id` field inserts ahead of an existing rule for
-  deterministic placement, `0` meaning append.
-- `FILTER_DEL` — remove the rule with a given `(guest_addr, rule_id)`.
+Identity follows the port-forward model, which deletes by the rule's **match
+key**, not by a kernel-assigned id — deliberately, because the `tapctl`
+`write` path returns only a byte count (`write_file` yields bytes-or-`-errno`)
+and cannot hand a freshly-minted id back to the caller. A firewall rule's
+identity is therefore its **full match tuple** `(guest_addr, direction, proto,
+dst_addr, dst_prefix, dst_port, verdict)`; duplicates are rejected (`-EEXIST`)
+exactly as a duplicate `(proto, host_port)` forward is, so every installed
+rule is uniquely addressable by its tuple with nothing to return.
+
+- `FILTER_ADD` — add a rule (the match tuple above). Ordering is explicit and
+  operator-supplied, needing no returned id: an `at_index` field places the
+  rule at that position in the guest's ordered list (evaluation is
+  first-match, top-down), and an out-of-range index appends. The read-listing
+  shows the resulting positions, so an operator re-reads to confirm order.
+- `FILTER_DEL` — remove the rule matching the given tuple (`guest_addr` +
+  match fields), as `FORWARD_DEL` removes by `(proto, host_port)`.
 - `FILTER_POLICY` — set the default policy (`ACCEPT`/`DROP`) for a
   `(guest_addr, direction)`.
 - The read snapshot grows a filter section — a second versioned list after
   the port-forward list (selected by a field in the read request) — emitting
-  each rule **with its id, in evaluation order**, plus the current default
-  policy per direction, so an operator reads back exactly what is installed
-  and can delete or re-order by id.
+  each rule in **evaluation order with its current index** (a display
+  ordinal, not an identity the caller must round-trip), plus the default
+  policy per direction, so an operator reads back exactly what is installed.
 
 **Guest binding — the same model the forwards use, not a handle-bound one.**
 `/dev/net/tapctl` carries no per-open guest state, and `vmctl` opens a fresh,
 transient handle per command (so a handle-scoped rule would be discarded the
 moment `vmctl` exits). A rule therefore identifies its guest **by address in
-the payload**, validated the way `nat_pf_add` validates a forward target —
-the address must be a live guest tap (`NETIF_FORWARD`), so a command cannot
-install policy for a non-existent or non-guest address, and rules survive the
-control handle closing. Teardown keys on that address: the tap's `release`
-calls `fw_guest_purge(guest_ip)` beside `nat_guest_purge`, removing only that
-guest's rules, policy and flow state. `vmctl` grows `filter add|del|list` and
+the payload**, validated to a live guest tap (`NETIF_FORWARD`), so a command
+cannot install policy for a non-existent or non-guest address, and rules
+survive the control handle closing. `vmctl` grows `filter add|del|list` and
 `filter policy` subcommands mirroring `port-forward`, each taking the guest
 address as `port-forward` does.
+
+**Validation, insertion and teardown must not race (the netctl TOCTOU
+lesson).** Validating "is `guest_addr` a live tap?" and then inserting under a
+separate lock leaves a window in which the tap is released and purged between
+the two — and because a freed slot's subnet is reused, a later guest at the
+same address would inherit the stale rule. The fix is the one the netctl unit
+adopted: **the liveness re-check and the insertion happen under a single hold
+of `g_fw_lock`, and the tap's `release` takes `g_fw_lock` to run
+`fw_guest_purge` before the slot is freed** — so an insert either completes
+before teardown starts or sees the guest already gone and is refused, and a
+reused address starts with no rules. (Equivalently, a per-slot generation the
+rule records and purge invalidates; the single-lock form is simpler and
+matches the existing `g_pf_lock` discipline.) Lock order: `g_fw_lock` →
+`g_nat_lock` (the filter runs before NAT).
 
 ### 5. Deliberately out of scope (named, later units)
 
@@ -239,18 +256,20 @@ address as `port-forward` does.
 - In-kernel (`fw.h`): `enum fw_verdict { FW_ACCEPT, FW_DROP };`
   `fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct
   mbuf *m, const struct ipv4_hdr *iph, unsigned ihl);`
-  `int fw_rule_add(uint32_t guest_ip, uint32_t before_id, const struct fw_rule
-  *r);` — **returns the assigned rule id (>0) or -errno**; `before_id == 0`
-  appends, else inserts ahead of that id. `int fw_rule_del(uint32_t guest_ip,
-  uint32_t rule_id);` `unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule
-  *out, unsigned max);` — fills each `fw_rule.id` in evaluation order.
-  `int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict);`
+  `int fw_rule_add(uint32_t guest_ip, unsigned at_index, const struct fw_rule
+  *r);` — inserts at `at_index` (clamped → append); `-EEXIST` on a duplicate
+  match tuple, `-ENOENT`/`-EINVAL` if the guest is not a live tap (re-checked
+  under `g_fw_lock`), `-ENOSPC` past the per-guest cap. `int
+  fw_rule_del(uint32_t guest_ip, const struct fw_rule *match);` — removes the
+  rule matching the tuple. `unsigned fw_rule_list(uint32_t guest_ip, struct
+  fw_rule *out, unsigned max);` — fills rules in evaluation order. `int
+  fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict);`
   `void fw_age(uint64_t now_ns);` `void fw_flush(void);` `void
   fw_guest_purge(uint32_t guest_ip);` `void fw_get_stats(struct fw_stats *);`
-  `struct fw_rule` carries `{ id, direction, proto, dst_ip, dst_prefix,
-  dst_port, verdict }`; the id is kernel-assigned (a per-guest monotonic
-  counter), so the caller never supplies one on add and always has one to
-  delete/re-order by.
+  `struct fw_rule` carries `{ direction, proto, dst_ip, dst_prefix, dst_port,
+  verdict }` — the **match tuple is the identity** (no kernel-assigned id to
+  round-trip, since the `write` path returns only a byte count); the listing
+  reports a display index, not an identity the caller must carry.
 - UAPI (`netctl.h`): `COSMO_NETCTL_FILTER_ADD/DEL/POLICY`, `struct
   cosmo_netctl_filter`, `struct cosmo_netctl_filter_rule`, a bumped version.
 - No new system call — the control channel is the surface, as the netctl and
@@ -301,15 +320,21 @@ are (`tap_inject`/`tap_recv`, `nettest_mk_udp/tcp`, `nettest_wrap`, stats via
   control handle closing** (added, handle closed, then the next A→B packet
   still obeys it); `fw_guest_purge` on A's tap release removes only A's
   rules/policy/flows, B's untouched.
-- **Rule identity and ordering**: `FILTER_ADD` returns a stable id; the read
-  snapshot lists rules with their ids in evaluation order; a second add with
-  `before_id` lands ahead of the named rule (a later-listed overlapping
-  DROP before an ACCEPT changes the verdict); `FILTER_DEL` by id removes
-  exactly that rule and the rest keep their order.
+- **Rule identity and ordering (no returned id)**: `FILTER_ADD` at an index
+  places the rule; the read snapshot lists rules in evaluation order with
+  their indices; inserting a DROP ahead of an existing ACCEPT for the same
+  traffic flips the verdict (first-match); `FILTER_DEL` by match tuple removes
+  exactly that rule and the rest keep their order; a duplicate tuple on add is
+  `-EEXIST`.
+- **Teardown race (the netctl lesson)**: closing a guest's tap concurrently
+  with a `FILTER_ADD` for that guest never leaves a rule behind — after the
+  tap is gone the listing for a freshly-reopened tap at the same address is
+  empty (the bug-proof reintroduces validate-then-insert without the shared
+  lock and shows a stale rule surviving onto the reused address).
 - **Control round-trip and rejection**: `FILTER_POLICY` flips a default and
   the next packet's verdict follows; a short write / wrong version /
-  non-guest `guest_addr` / unknown `rule_id` on DEL is rejected and changes
-  nothing.
+  non-guest `guest_addr` / a `FILTER_DEL` whose tuple matches nothing is
+  rejected and changes nothing.
 
 Each assertion bug-proofed by reintroducing the defect (e.g. a verdict that
 always ACCEPTs → the inter-guest drop test fails; a state table that never
@@ -343,10 +368,12 @@ the NAT table's.
   for the guest→guest direction, where both halves traverse `ipv4_forward`.
   A bug-proof asserts a guest→uplink reply is delivered without a filter flow
   entry, and a guest→guest reply is admitted by one.
-- **Lock ordering.** A new `g_fw_lock` joins `g_pf_lock`/`g_nat_lock`; it must
-  take a defined place in the order (the filter runs before NAT, so
-  `g_fw_lock` → `g_nat_lock`) and be lockdep-clean, as the netctl TOCTOU fix
-  taught.
+- **Lock ordering and add/teardown coherence.** A new `g_fw_lock` joins
+  `g_pf_lock`/`g_nat_lock` at a defined place (`g_fw_lock` → `g_nat_lock`,
+  the filter running before NAT) and must be lockdep-clean. The netctl TOCTOU
+  lesson applies directly: a rule's liveness re-check and insertion, and the
+  tap-release purge, all take `g_fw_lock`, so an add cannot interleave with a
+  teardown and a reused guest address never inherits a stale rule.
 
 ## Alternatives considered
 
