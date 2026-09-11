@@ -13,7 +13,9 @@
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
+#include <uapi/cosmo/netctl.h>
 #include <kernel/netif.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
@@ -178,6 +180,74 @@ static int64_t tap_chr_write(struct vnode *vn, uint64_t off, const void *buf, si
 
 static const struct chrdev_ops tap_chr_ops = { .read = tap_chr_read, .write = tap_chr_write };
 
+/* --- /dev/net/tapctl: the owner's runtime network-control channel -------- */
+
+static struct vnode *g_ctlnode;
+
+/* A privileged owner writes one struct cosmo_netctl to add or remove a
+ * port-forward (DNAT) rule. The command is applied whole or refused. */
+static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+{
+    (void)vn; (void)off;
+    if (len != sizeof(struct cosmo_netctl))
+        return -EINVAL;                         /* a command is exactly one struct, applied whole */
+    struct cosmo_netctl cmd;
+    memcpy(&cmd, buf, sizeof(cmd));
+    if (cmd.version != COSMO_NETCTL_VERSION)
+        return -ENOTSUP;
+    if (cmd.reserved != 0 || cmd.reserved2 != 0)
+        return -EINVAL;
+    if (cmd.proto != COSMO_NETCTL_PROTO_TCP && cmd.proto != COSMO_NETCTL_PROTO_UDP)
+        return -EINVAL;
+    uint8_t proto = cmd.proto == COSMO_NETCTL_PROTO_TCP ? IPPROTO_TCP : IPPROTO_UDP;
+
+    switch (cmd.op) {
+    case COSMO_NETCTL_FORWARD_ADD:
+        if (cmd.host_port == 0 || cmd.guest_port == 0 || cmd.guest_addr == 0)
+            return -EINVAL;
+        {
+            int rc = nat_pf_add(proto, cmd.host_port, cmd.guest_addr, cmd.guest_port);
+            if (rc != 0)
+                return rc;                      /* -EINVAL off-tap, -EEXIST dup, -ENOSPC full */
+        }
+        return (int64_t)sizeof(cmd);
+    case COSMO_NETCTL_FORWARD_DEL:
+        if (cmd.host_port == 0)
+            return -EINVAL;
+        if (!nat_pf_del(proto, cmd.host_port))
+            return -ENOENT;
+        return (int64_t)sizeof(cmd);
+    default:
+        return -EINVAL;
+    }
+}
+
+/* One read returns the whole snapshot: a struct cosmo_netctl_list header and
+ * its rules, or -EMSGSIZE if the buffer is too small (no partial read). */
+static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+{
+    (void)vn; (void)off;
+    struct nat_pf_rule rules[NAT_PF_MAX];
+    unsigned n = nat_pf_list(rules, NAT_PF_MAX);
+    size_t total = sizeof(struct cosmo_netctl_list) + (size_t)n * sizeof(struct cosmo_netctl_rule);
+    if (len < total)
+        return -EMSGSIZE;
+    struct cosmo_netctl_list hdr = { .version = COSMO_NETCTL_VERSION, .count = (uint16_t)n };
+    memcpy(buf, &hdr, sizeof(hdr));
+    struct cosmo_netctl_rule *out = (struct cosmo_netctl_rule *)((uint8_t *)buf + sizeof(hdr));
+    for (unsigned i = 0; i < n; i++) {
+        out[i].proto = rules[i].proto == IPPROTO_TCP ? COSMO_NETCTL_PROTO_TCP : COSMO_NETCTL_PROTO_UDP;
+        out[i].reserved = 0;
+        out[i].host_port = rules[i].host_port;
+        out[i].guest_port = rules[i].guest_port;
+        out[i].reserved2 = 0;
+        out[i].guest_addr = rules[i].guest_ip;
+    }
+    return (int64_t)total;
+}
+
+static const struct chrdev_ops tap_ctl_ops = { .read = tap_ctl_read, .write = tap_ctl_write };
+
 void tap_dev_init(void)
 {
     static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
@@ -194,4 +264,7 @@ void tap_dev_init(void)
     int rc = ramfs_mkchr("/dev/net/tap", 0600, &tap_chr_ops, NULL, &g_tapnode);
     if (rc)
         kwarn("tap: cannot create /dev/net/tap (%d)", rc);
+    rc = ramfs_mkchr("/dev/net/tapctl", 0600, &tap_ctl_ops, NULL, &g_ctlnode);
+    if (rc)
+        kwarn("tap: cannot create /dev/net/tapctl (%d)", rc);
 }

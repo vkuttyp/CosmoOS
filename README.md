@@ -1149,6 +1149,29 @@ See [docs/development.md](docs/development.md).
   bounded and expiring). A stock Linux guest running a service reached from
   the host is the `QEMU_MEM=2G` reproduction; a writable control surface, a
   filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT are later units.
+- **Configuring the guest's network at runtime (done):**
+  `docs/audit/next-subsystem-netctl.md`,
+  `docs/kernel-services/network/design.md` ("A runtime network control
+  channel"). Everything above was fixed at boot from read-only `fw_cfg`; this
+  adds the one writable control surface the arc deferred. `/dev/net/tapctl`
+  is a privileged character device (mode `0600`, separate from the frame
+  channel): a `write` submits one versioned, fixed-layout `struct
+  cosmo_netctl` command (`FORWARD_ADD` / `FORWARD_DEL`), applied whole or
+  refused (short / unknown version / unknown opcode / out-of-range change
+  nothing); a `read` returns the live rules as a versioned snapshot. The
+  commands reach the port-forward table, now with `nat_pf_del` (reaps the
+  rule's conntrack entries so a removed forward stops an in-flight flow),
+  `nat_pf_list`, and a tightened `nat_pf_add` (the target must be on the
+  guest tap's own subnet, and `(proto, host_port)` is a unique key, a
+  duplicate `-EEXIST`). Contained as the read-only surfaces were: privileged,
+  every command a range-checked struct, touching only the guest's forwards
+  and never the host's own network; no new syscall. Proven by `net-tapctl`
+  (add through the device takes effect and lists, delete reaps the flow,
+  duplicate/off-tap/short/bad-version refused). `vmctl port-forward
+  add|del|list` drives it; exposing and hiding a guest service on a running
+  Linux guest is the `QEMU_MEM=2G` reproduction. The channel is designed to
+  carry the tap's other settings (forwarding/masquerade toggles, the
+  resolver) in later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1197,9 +1220,11 @@ See [docs/development.md](docs/development.md).
   `-nat.md`, connected-subnet routing, IP forwarding and masquerade NAT so
   the guest reaches beyond the host; `-dhcp-dns.md`, a DHCP server and a
   DNS proxy on the tap so a stock guest autoconfigures its interface and
-  resolves names with nothing set by hand; and `-dnat.md`, inbound port
+  resolves names with nothing set by hand; `-dnat.md`, inbound port
   forwarding so a service the guest runs is reachable from outside through a
-  host port. The named next steps are that unit's own follow-ups (a writable
-  control surface for forwards, a filtering firewall, hairpin/NAT-reflection,
-  IPv6 DNAT) and, on the guest itself, the `QEMU_MEM=2G` reproduction reaching
-  the real world. Design documents first, one subsystem at a time.
+  host port; and `-netctl.md`, a privileged `/dev/net/tapctl` control channel
+  so an operator adds and removes port-forwards on a running machine. The
+  named next steps are that unit's own follow-ups (the tap's other settings on
+  the same channel, a filtering firewall, hairpin/NAT-reflection, IPv6 DNAT)
+  and, on the guest itself, the `QEMU_MEM=2G` reproduction reaching the real
+  world. Design documents first, one subsystem at a time.

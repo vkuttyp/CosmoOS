@@ -44,9 +44,22 @@ struct ipv4_hdr;
  * host-address bind. Replaces the table; ignores malformed rules. */
 void nat_portforward_config(const char *cfg);
 /* Add one rule (proto IPPROTO_TCP/UDP, ports host order, guest_ip network
- * order); false if the table is full or the rule is invalid. For tests. */
-bool nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t guest_port);
+ * order). 0 on success; -EINVAL (invalid fields or the target is not on the
+ * guest tap's subnet), -EEXIST (already bound), -ENOSPC (table full). */
+int nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t guest_port);
+/* Remove the rule bound to (proto, host_port) and reap the DNAT conntrack
+ * entries it created (so an in-flight flow stops at once). false if none. */
+bool nat_pf_del(uint8_t proto, uint16_t host_port);
 void nat_pf_clear(void);
+
+struct nat_pf_rule {              /* one port-forward rule, for listing */
+    uint8_t proto;
+    uint16_t host_port;           /* host order */
+    uint16_t guest_port;          /* host order */
+    uint32_t guest_ip;            /* network order */
+};
+/* Snapshot the live rules into out[0..max); returns the count written. */
+unsigned nat_pf_list(struct nat_pf_rule *out, unsigned max);
 
 /*
  * Outbound: masquerade a datagram being forwarded from `in` out `out`.

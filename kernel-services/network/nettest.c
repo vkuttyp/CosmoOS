@@ -14,6 +14,8 @@
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
+#include <uapi/cosmo/netctl.h>
+#include <kernel/vfs.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
@@ -3404,12 +3406,12 @@ bool selftest_net_dnat(const char **reason)
     nettest_seed_arp(tap_netif(u), client, client_mac);  /* replies reach the client */
     nat_flush();
     nat_pf_clear();
-    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80));
-    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53));
-    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80));   /* same guest endpoint as 8080 */
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
+    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53) == 0);
+    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80) == 0);   /* same guest endpoint as 8080 */
     /* A rule whose target is not on a connected subnet (would route out the
      * default uplink and stall) is refused. */
-    CHECK(!nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777));
+    CHECK(nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777) != 0);
 
     uint8_t l4[128], frame[256], rx[256];
 
@@ -3519,5 +3521,110 @@ bool selftest_net_dnat(const char **reason)
     tap_destroy(g);
     kinfo("selftest: net-dnat: a client connection was forwarded to the guest and its reply "
           "un-DNAT'd back from host:P (TCP and UDP), an unruled port stayed local, the table bounded");
+    return true;
+}
+
+/* --- the runtime network control channel (/dev/net/tapctl) ---------------- */
+
+bool selftest_net_tapctl(const char **reason)
+{
+    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x01 };
+    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x0b, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x0f };
+    static const uint8_t client_mac[6]= { 0x52, 0x54, 0x00, 0x0b, 0x00, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 7, 1), guest = IPV4_ADDR(10, 77, 7, 15);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1), client = IPV4_ADDR(10, 77, 8, 99);
+
+    struct tap *g = tap_create("nctlg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = tap_create("nctlu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);        /* the guest tap: the only valid target */
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);
+    nettest_seed_arp(tap_netif(u), client, client_mac);
+    nat_flush();
+    nat_pf_clear();
+
+    struct file *f = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+
+    struct cosmo_netctl cmd;
+    uint8_t rbuf[sizeof(struct cosmo_netctl_list) + NAT_PF_MAX * sizeof(struct cosmo_netctl_rule)];
+
+    /* (1) FORWARD_ADD through the device installs a rule. */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_ADD;
+    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080; cmd.guest_port = 80; cmd.guest_addr = guest;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+
+    /* (2) the read listing shows exactly that rule. */
+    int64_t rn = file_read(f, rbuf, sizeof(rbuf));
+    CHECK(rn == (int64_t)(sizeof(struct cosmo_netctl_list) + sizeof(struct cosmo_netctl_rule)));
+    struct cosmo_netctl_list *hdr = (struct cosmo_netctl_list *)rbuf;
+    CHECK(hdr->version == COSMO_NETCTL_VERSION && hdr->count == 1);
+    struct cosmo_netctl_rule *r0 = (struct cosmo_netctl_rule *)(rbuf + sizeof(*hdr));
+    CHECK(r0->proto == COSMO_NETCTL_PROTO_TCP && r0->host_port == 8080 &&
+          r0->guest_port == 80 && r0->guest_addr == guest);
+
+    /* (3) a client SYN to the host port is DNAT'd to the guest (the rule took
+     * effect through the device). */
+    uint8_t l4[128], frame[256], rx[256];
+    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 40001, 8080, TH_SYN);
+    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    struct mbuf *m = nettest_recv_ip(g);
+    CHECK(m != NULL);
+    CHECK(m_copydata(m, 0, ETH_HLEN + 20 + 20, rx)); m_freem(m);
+    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->dst == guest);
+    CHECK((uint16_t)(rx[ETH_HLEN + 22] << 8 | rx[ETH_HLEN + 23]) == 80);   /* dport -> 80 */
+
+    /* (4) FORWARD_DEL removes it and reaps the flow it created. */
+    struct nat_stats ns0, ns1;
+    nat_get_stats(&ns0);
+    CHECK(ns0.entries >= 1);                        /* the flow from (3) */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_DEL;
+    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    nat_get_stats(&ns1);
+    CHECK(ns1.entries < ns0.entries);               /* the rule's entries reaped */
+
+    /* (5) the listing is empty and a client SYN now stays local. */
+    rn = file_read(f, rbuf, sizeof(rbuf));
+    CHECK(rn == (int64_t)sizeof(struct cosmo_netctl_list));
+    CHECK(((struct cosmo_netctl_list *)rbuf)->count == 0);
+    l4len = nettest_mk_tcp(l4, client, u_ip, 40002, 8080, TH_SYN);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    CHECK(nettest_recv_ip(g) == NULL);              /* no rule: not forwarded */
+
+    /* (6) refusals: a duplicate, an off-tap target, a short write, a bad
+     * version -- each refused, the table unchanged. */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_NETCTL_VERSION; cmd.op = COSMO_NETCTL_FORWARD_ADD;
+    cmd.proto = COSMO_NETCTL_PROTO_TCP; cmd.host_port = 8080; cmd.guest_port = 80; cmd.guest_addr = guest;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));     /* re-add ok */
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EEXIST);                  /* duplicate */
+    struct cosmo_netctl bad = cmd;
+    bad.host_port = 9000; bad.guest_addr = u_ip;                        /* off the guest tap */
+    CHECK(file_write(f, &bad, sizeof(bad)) == -EINVAL);                  /* off-tap: distinct from dup */
+    CHECK(file_write(f, &cmd, 4) == -EINVAL);                            /* short */
+    uint8_t big[sizeof(cmd) + 8];
+    memcpy(big, &cmd, sizeof(cmd)); memset(big + sizeof(cmd), 0, 8);
+    CHECK(file_write(f, big, sizeof(big)) == -EINVAL);                   /* oversized: not applied */
+    bad = cmd; bad.version = 99;
+    CHECK(file_write(f, &bad, sizeof(bad)) == -ENOTSUP);                 /* wrong version */
+    rn = file_read(f, rbuf, sizeof(rbuf));
+    CHECK(((struct cosmo_netctl_list *)rbuf)->count == 1);              /* only the re-added rule */
+
+    file_put(f);
+    nat_pf_clear();
+    nat_flush();
+    tap_destroy(u);
+    tap_destroy(g);
+    kinfo("selftest: net-tapctl: a forward added through /dev/net/tapctl took effect and listed, "
+          "delete reaped its flow, and duplicate/off-tap/short/bad-version commands were refused");
     return true;
 }

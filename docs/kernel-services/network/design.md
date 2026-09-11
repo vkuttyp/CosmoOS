@@ -660,6 +660,46 @@ through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
 surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
 are later units.
 
+## A runtime network control channel (`tap.c`, `nat.c`; audit unit "configuring the guest's network at runtime")
+
+Everything above was fixed at boot from read-only `fw_cfg`; this adds the one
+writable control surface the arc deferred, so an operator changes the guest's
+networking on a running machine (`docs/audit/next-subsystem-netctl.md`).
+
+**`/dev/net/tapctl`**, a privileged character device (mode `0600`, beside
+`/dev/net/tap`), is the channel — separate from the frame channel, so
+configuration and data never share a descriptor. A `write` submits one
+fixed-layout, versioned command (`struct cosmo_netctl` in
+`uapi/cosmo/netctl.h`: a version, an opcode, and the fields), applied whole or
+refused — a short write, an unknown version (`-ENOTSUP`), an unknown opcode or
+an out-of-range field (`-EINVAL`) change nothing. The first opcodes are
+`FORWARD_ADD` and `FORWARD_DEL`. A `read` returns the live rules as a
+versioned snapshot (a `struct cosmo_netctl_list` header — version and count —
+then that many `struct cosmo_netctl_rule`), the whole snapshot in one read or
+`-EMSGSIZE`, so an operator never sees a half-updated table.
+
+The commands reach the existing port-forward table. `nat_pf_add` is **tightened**
+here: a rule's target must be on the **guest tap's own subnet** — a connected
+interface that forwards (`NETIF_FORWARD`) — not merely any connected subnet,
+which would also match the uplink and let a rule relay a host port to another
+machine; and `(proto, host_port)` is a **unique key** (a duplicate `ADD` is
+`-EEXIST`, never shadowed, so a listed rule is always the one that gets
+traffic). `nat_pf_del` removes the rule holding a `(proto, host_port)` —
+whatever its origin, since the privileged operator owns the one table — and
+**reaps the DNAT conntrack entries it created**, so a removed forward stops an
+in-flight flow at once, not after it idles out. `nat_pf_list` snapshots the
+rules for the `read`.
+
+The writable surface is contained by the same reasoning the arc used for the
+read-only ones: the device is privileged (`0600`, the owner only); every
+command is a versioned, range-checked struct refused whole on any doubt; and
+the operations touch only the guest's port-forward table with the
+guest-tap-subnet target check, never the host's own interface, routes, or
+another process. No new system call. `vmctl port-forward add|del|list` drives
+it; exposing and hiding a guest service on a running Linux guest is the
+`QEMU_MEM=2G` reproduction. The channel is designed to carry the tap's other
+settings (forwarding/masquerade toggles, the resolver) in later units.
+
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 
 Forwarding and NAT let a guest reach the world, but only after it was
