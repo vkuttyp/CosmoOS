@@ -183,18 +183,26 @@ echo request — is `FW_ACCEPT` outright (`hin_accept_established`), its
 flow refreshed; no rule is read. This is the FORWARD chain's rule
 (`fw.c:369-386`: "is this half of a flow already accepted?") applied to
 the host, and the ordering is the same for the same reason: a reply is
-not a new request and no rule was written about it. A forward-direction
-datagram that matches a recorded flow (a peer sending *to* the host on the
-tuple the host opened) is not a reply and takes the rules — `flow_find`
-reports the direction, and only `reverse` admits.
+not a new request and no rule was written about it.
 
-What this admits, precisely: a UDP datagram *from the peer address and
-port the host sent to, to the port the host sent from* — the same tuple a
-connected socket would insist on, now available to an unconnected one for
-the life of the flow (30 s idle, refreshed by the host's sends). It does
-not admit a datagram from another port at that peer (the proxy's
+What this admits, precisely, is **one tuple**: a UDP datagram *from the
+peer address and port the host sent to, to the port the host sent from* —
+the reverse of the recorded flow, the same tuple a connected socket would
+insist on, now available to an unconnected one for the life of the flow
+(30 s idle, refreshed by the host's sends). The firewall cannot know
+whether the peer *meant* it as a reply: any datagram on that exact tuple
+inside the window is admitted, a second and a third included — that is
+what "the host opened this flow" means, and the socket's own validation
+(the DNS id, the proxy's sender check) is the second line (see Risks).
+It does not admit a datagram from another port at that peer (the proxy's
 sender check, `tapsvc.c:426`, is a second line the firewall does not
-replace), nor from another host, nor to another local port.
+replace), nor from another host, nor to another local port; those match no
+flow and take the rules. The only other match `flow_find` can report is
+the *forward* direction — the host's own (src, dst, sport, dport) arriving
+inbound — which on a real link can only be a datagram spoofing the host's
+address, and `ipv4_input`'s martian check drops it before any chain
+(`ipv4.c:573-579`); the state step therefore admits on `reverse` alone,
+and a forward match, should the check ever be reached, takes the rules.
 
 ### 3. ICMP errors are delivered quiet, and the transport decides
 
@@ -334,10 +342,14 @@ except where noted; verdicts awaited on the worker.
   not in flight is freed by TCP's own check (`pmtu_updates` unchanged) —
   the firewall admitted it to the layer that could tell; a Destination
   Unreachable (port) quoting the connection is freed (no consumer).
-- **Forward direction is not a reply**: after the host's `sendto` to
-  `world:5300`, a datagram from `world:5300` to the host's port is the
-  reply and admitted; but the world *initiating* to a host port the host
-  never sent from takes the rules and drops.
+- **One tuple, and no notion of intent**: after the host's `sendto` to
+  `world:5300`, a *second* unsolicited datagram from `world:5300` to the
+  host's port inside the window is admitted too (the tuple is open, and
+  the socket's validation is the second line); the world *initiating* to a
+  host port the host never sent from takes the rules and drops; a
+  datagram carrying the host's own source address on that tuple, arriving
+  on the tap, is dropped as a martian (`rx_bad_header`) before the chain
+  and no `hin_*` counter moves.
 - **State refresh and expiry**: with the flow recorded, `fw_age(now + 31 s)`
   reclaims it and the next reply drops; a host send re-records it and the
   reply is admitted again; a send every few seconds keeps it alive across
@@ -360,10 +372,9 @@ except where noted; verdicts awaited on the worker.
 
 Bug-proofs: the state step removed from `fw_host_verdict` (the reply to the
 unconnected socket then drops and the proxy's answer never reaches A); the
-reverse check admitting the forward direction too (the world's initiation
-on the host's open tuple is then admitted without a rule); the port match
-loosened to the peer address alone (the same-peer-other-port datagram is
-then admitted); the record hook placed in `output_on` instead of
+port match loosened to the peer address alone (the same-peer-other-port
+datagram is then admitted); the local-port match dropped (the datagram to
+another local port is then admitted); the record hook placed in `output_on` instead of
 `ipv4_output` (the masqueraded guest flow then occupies the host's share:
 `hin_flow_new` rises for it); the egress test dropped (a loopback send
 then records); the host's share unbounded (the 65th flow records and the
