@@ -38,6 +38,8 @@ enum vnode_type {
 /* readdir callback: return nonzero to stop. */
 typedef int (*vfs_dirent_cb)(void *arg, const char *name, size_t len, uint64_t ino, enum vnode_type type);
 
+struct file;   /* defined below; named by the per-open vnode ops */
+
 struct vnode_ops {
     int (*lookup)(struct vnode *dir, const char *name, size_t len, struct vnode **out);
     int (*create)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
@@ -61,6 +63,16 @@ struct vnode_ops {
      * cache. */
     int (*writepages)(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done);
     int (*truncate)(struct vnode *vn, uint64_t size);
+    /* Optional per-open lifecycle (devices with an instance per open). open
+     * runs on every open of the node and may refuse; release runs once, when
+     * the last reference to that struct file drops. read_file/write_file are
+     * preferred over read/write by file_pread/pwrite and carry the file, so a
+     * device reaches its per-open state (f->priv). Per-open state lives and
+     * dies with the struct file, never with the vnode. */
+    int (*open)(struct vnode *vn, struct file *f);
+    void (*release)(struct vnode *vn, struct file *f);
+    int64_t (*read_file)(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len);
+    int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
     int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);      /* VNODE_CHR */
     int64_t (*write)(struct vnode *vn, uint64_t off, const void *buf, size_t len);
     int (*sync)(struct vnode *vn);
@@ -142,6 +154,8 @@ struct file {
     uint64_t pos;
     unsigned flags;           /* O_* */
     struct mutex lock;
+    void *priv;               /* a device's per-open instance (chrdev open/release) */
+    bool dev_open;            /* the vnode's open hook ran and succeeded; release will run */
 };
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -259,6 +273,13 @@ void ramfs_populate_boot(void);
 struct chrdev_ops {
     int64_t (*read)(struct vnode *vn, uint64_t off, void *buf, size_t len);
     int64_t (*write)(struct vnode *vn, uint64_t off, const void *buf, size_t len);
+    /* Optional: an instance per open. open sets f->priv (or refuses);
+     * release runs once on the last close; read_file/write_file, when set,
+     * are used instead of read/write and receive the file. */
+    int (*open)(struct vnode *vn, struct file *f);
+    void (*release)(struct vnode *vn, struct file *f);
+    int64_t (*read_file)(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len);
+    int64_t (*write_file)(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len);
 };
 int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, void *priv, struct vnode **out);
 void *ramfs_chr_priv(const struct vnode *vn);

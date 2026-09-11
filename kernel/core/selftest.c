@@ -423,6 +423,7 @@ static const struct selftest tests[] = {
     { "vfs-fsync",       selftest_fsync_handle },
     { "vfs-concurrency", selftest_vfs_concurrency },
     { "vfs-put-race",    selftest_vfs_put_race },
+    { "vfs-chrdev-open", selftest_vfs_chrdev_open },
     { "mountns",         selftest_mountns },
     { "utsns",           selftest_utsns },
     { "pool",            selftest_pool },

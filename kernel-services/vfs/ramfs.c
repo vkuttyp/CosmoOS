@@ -301,9 +301,43 @@ static int64_t ramfs_chr_write(struct vnode *vn, uint64_t off, const void *buf, 
     return n->chr->write ? n->chr->write(vn, off, buf, len) : -ENOTSUP;
 }
 
+static int ramfs_chr_open(struct vnode *vn, struct file *f)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    return n->chr->open ? n->chr->open(vn, f) : 0;
+}
+
+static void ramfs_chr_release(struct vnode *vn, struct file *f)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    if (n->chr->release)
+        n->chr->release(vn, f);
+}
+
+/* Devices with per-open state get the file; the others keep read/write. */
+static int64_t ramfs_chr_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    if (n->chr->read_file)
+        return n->chr->read_file(vn, f, off, buf, len);
+    return n->chr->read ? n->chr->read(vn, off, buf, len) : -ENOTSUP;
+}
+
+static int64_t ramfs_chr_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
+{
+    struct ramfs_node *n = vn->fs_priv;
+    if (n->chr->write_file)
+        return n->chr->write_file(vn, f, off, buf, len);
+    return n->chr->write ? n->chr->write(vn, off, buf, len) : -ENOTSUP;
+}
+
 static const struct vnode_ops ramfs_chr_ops = {
     .read = ramfs_chr_read,
     .write = ramfs_chr_write,
+    .open = ramfs_chr_open,
+    .release = ramfs_chr_release,
+    .read_file = ramfs_chr_read_file,
+    .write_file = ramfs_chr_write_file,
     .evict = ramfs_evict,
 };
 
