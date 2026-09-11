@@ -31,8 +31,10 @@ a **quiet-delivery policy carried on the datagram** (`M_FW_QUIET`): the
 transport, which owns acceptability, delivers it only if an existing
 connection accepts it by TCP's own checks (sequence, acknowledgment, the
 syncache completion of an admitted SYN) or a connected UDP socket names the
-sender, **creates no new connection**, and **emits nothing** — no SYN-ACK,
-RST, challenge ACK or port-unreachable —
+sender, **creates no new connection**, and **emits nothing** for a rejected
+segment — no SYN-ACK, RST, challenge ACK, window ACK or port-unreachable,
+enforced at the one flush every TCP response already passes through rather
+than at a list of sites —
 so a DROP rule means silence, not a RST that confirms the host is there. And
 the chain sits where the last unit proved it could not yet be observed:
 after `nat_in`, so a DNAT'd inbound connection is never re-gated — now
@@ -203,17 +205,28 @@ step protects:
    and `udp_input` take `(nif, m, ip4, ip6)`, so the policy rides on the
    packet with no signature change) and handed to the transport, which
    under that flag:
-   - **TCP** processes the segment only if an **existing connection accepts
-     it by TCP's own rules** — the sequence and acknowledgment checks it
-     already makes, an established or closing connection's data or FIN, a
-     `SYN_SENT` connection's valid SYN+ACK, and the **SYN-cache completion
-     of a passive open whose SYN was admitted earlier** (the ACK that creates
-     the child, exactly as today); it **allocates no SYN-cache entry** for a
-     new SYN (`tcp.c:1516`), and it **emits nothing** for any segment it
-     would otherwise answer — the "segment without a pcb" path that sends
-     listener SYN-ACKs, resets and challenge ACKs (`tcp.c:570`), the RFC
-     5961 challenge ACK (`tcp.c:673`), the ACK to a bad-sequence segment —
-     freeing such a segment silently and counting `quiet_dropped`.
+   - **TCP** decides one thing per segment — **accepted by an existing
+     connection, or rejected** — with the checks it already makes: the
+     sequence/acknowledgment acceptability test (`tcp.c:1703-1712`), an
+     established or closing connection's data or FIN, a `SYN_SENT`
+     connection's valid SYN+ACK, and the **SYN-cache completion of a passive
+     open whose SYN was admitted earlier** (the ACK that creates the child,
+     exactly as today). An *accepted* segment is processed exactly as today,
+     **its ACKs and window updates included** — they are the connection's
+     own traffic, which the policy lets persist. A *rejected* segment, under
+     the flag, is freed with **no response and no side effect**, enforced
+     **structurally rather than site by site**: every TCP response —
+     `build_raw` and `build_segment` alike, so listener SYN-ACKs, resets and
+     challenge ACKs (`:570`, `:673`) *and* the ACK to an out-of-window
+     segment (`:1712`) — goes through `batch_push` into the per-call
+     `struct tcp_batch` that `batch_send` flushes at the end of `tcp_input`;
+     under `M_FW_QUIET` a rejected segment's batch is **discarded instead of
+     sent**, one gate for every present and future response. Bookkeeping
+     moves after acceptance: `last_rx_ns = now` (`:1684`, today set before
+     the acceptability test) is updated only for an accepted segment, so a
+     rejected one cannot refresh the connection's keepalive clock — an
+     invalid segment should never have. And no SYN-cache entry is allocated
+     for a new SYN (`:1516`). Rejections are counted `quiet_dropped`.
    - **UDP** delivers only to a socket **connected** to the sender; a
      datagram to an unconnected or listening socket is freed silently, and
      no ICMP port-unreachable is sent (`udp.c:276`).
@@ -298,13 +311,17 @@ refuse a snapshot whose version is not the one it speaks.
 - `kernel/include/kernel/mbuf.h` — the `M_FW_QUIET` packet flag (beside
   `M_BCAST`): "deliver only to an existing connection or connected socket,
   create nothing, answer nothing".
-- `kernel-services/network/tcp.c` — honour `M_FW_QUIET` at the three places
-  a segment is answered or a connection begun: the "segment without a pcb"
-  response path (`:570`, listener SYN-ACKs, resets, challenge ACKs), the RFC
-  5961 challenge ACK (`:673`), and the SYN-cache allocation for a new SYN
-  (`:1516`); everything else — sequence/ack validation, established and
-  closing states, `SYN_SENT`'s SYN+ACK, the SYN-cache completion that creates
-  the child — runs unchanged. A `quiet_dropped` stat.
+- `kernel-services/network/tcp.c` — honour `M_FW_QUIET` structurally:
+  `tcp_input` records whether the segment was **accepted** by an existing
+  connection (the acceptability test at `:1703-1712`, or a SYN-cache
+  completion); at its end, under the flag, a rejected segment's
+  `struct tcp_batch` is **discarded instead of `batch_send`** — the one gate
+  through which every response (`build_raw`/`build_segment`: `:570`, `:673`,
+  the out-of-window ACK at `:1712`) already passes; `last_rx_ns = now`
+  moves from `:1684` (before the test) to after acceptance; no SYN-cache
+  allocation for a new SYN under the flag (`:1516`). Everything an accepted
+  segment does — including its ACKs — runs unchanged. A `quiet_dropped`
+  stat.
 - `kernel-services/network/udp.c` — honour `M_FW_QUIET`: deliver only to a
   socket connected to the sender, free anything else silently, and skip the
   ICMP port-unreachable (`:276`). A `quiet_dropped` stat.
@@ -345,8 +362,10 @@ refuse a snapshot whose version is not the one it speaks.
 ## Migration plan
 
 1. `ipv4.c`: the off-link invariant for every non-loopback ingress
-   (`rx_offlink`); the `M_FW_QUIET` flag and its three `tcp.c` silence
-   points plus the `udp.c` gate; `fw.c`: the host
+   (`rx_offlink`); the `M_FW_QUIET` flag — in `tcp.c` the accepted/rejected
+   disposition, the batch gate at the flush, `last_rx_ns` moved after
+   acceptance and the SYN-cache allocation gate; in `udp.c` the
+   connected-socket gate and the suppressed port-unreachable; `fw.c`: the host
    object, the source fields, the new direction, `fw_host_verdict`
    (connection-state bypass, rules/default); the second `ipv4.c` call site;
    both arches boot with the default ACCEPT and every existing test green
@@ -393,8 +412,10 @@ the host; verdicts awaited on the worker as in `net-input`.
   ACK arrives — and that ACK still opens the connection (the SYN-cache
   completion runs under `M_FW_QUIET`; the child is created and a listener
   `accept` returns it); a segment with a bad sequence number to the
-  established tuple draws **no challenge ACK** and leaves the connection's
-  state untouched; the host `connect`s out to a peer on the uplink tap (its
+  established tuple draws **no challenge ACK**, an out-of-window segment
+  draws **no window ACK**, and neither touches the connection's state — its
+  keepalive clock included (a keepalive probe scheduled before the rejected
+  segment still fires on time); the host `connect`s out to a peer on the uplink tap (its
   SYN is read back) under a DROP rule covering the peer, and the peer's valid
   SYN+ACK is admitted and completes the handshake while a bare ACK from that
   peer is freed silently; after the host closes an accepted connection
@@ -434,11 +455,13 @@ the host; verdicts awaited on the worker as in `net-input`.
 
 Bug-proofs: a verdict that ignores rules (the sourced DROP then delivers);
 a source match that ignores the prefix (the out-of-prefix SYN then drops);
-`M_FW_QUIET` not honoured at the no-pcb response path (the ACK-only probe
-from a source with no connection then draws a RST on the uplink tap);
-`M_FW_QUIET` not honoured at the SYN-cache allocation (a new SYN under the
-DROP rule then draws a SYN-ACK); `M_FW_QUIET` not honoured at the RFC 5961
-path (the bad-sequence segment then draws a challenge ACK); a DROP that
+the batch gate missing (a rejected segment's batch is sent as today: the
+ACK-only probe from a source with no connection then draws a RST, the
+bad-sequence segment a challenge ACK, and the out-of-window segment a
+window ACK — one revert, three observed responses); the SYN-cache
+allocation not gated (a new SYN under the DROP rule then draws a SYN-ACK);
+`last_rx_ns` left before the acceptability test (a rejected segment then
+refreshes the keepalive clock and the scheduled probe fires late); a DROP that
 frees TCP at the IP layer instead of marking it quiet (the established
 connection's data then stops flowing, and the admitted SYN's completing ACK
 never opens the connection); `udp_input` ignoring the flag (the datagram to
@@ -474,10 +497,14 @@ share it. Nothing on the tap or loopback paths changes.
   without a DROP rule. Semantically, rules gate *new* connections and
   unsolicited datagrams; a connection that exists when a DROP rule is added
   persists until it closes (FORWARD's flow state behaves the same way) —
-  documented; an operator who wants it cut closes the socket. Getting the
-  three `tcp.c` silence points wrong is the implementation risk, and each
-  has a bug-proof (a probe that draws a RST, a SYN that draws a SYN-ACK, a
-  bad-sequence segment that draws a challenge).
+  documented; an operator who wants it cut closes the socket. The
+  implementation risk is a response path that escapes the gate — which is
+  why the gate is the batch flush every response already passes through,
+  not a list of sites (a per-site list missed the out-of-window ACK at
+  `:1712` in review) — and a state update that precedes acceptance, of which
+  `last_rx_ns` is the one found; each has a bug-proof (one revert of the
+  gate draws a RST, a challenge ACK and a window ACK; the clock left early
+  delays a keepalive probe).
 - **ABI v4 grows two structs.** Exact-size dispatch refuses a v3 writer; a
   v3 `vmctl list` refuses a v4 snapshot by version; `SNAPSHOT_MAX` is
   recomputed and static-asserted; `vmctl` is built with the kernel.
@@ -530,6 +557,16 @@ share it. Nothing on the tap or loopback paths changes.
   called from several places; a flag on the packet reaches exactly the
   response and creation sites that must honour it with no signature churn,
   as `M_BCAST` already does for broadcast delivery.
+- **Silence by enumerating the emit sites.** The quiet design's first form
+  named three (`:570`, `:673`, `:1516`) and review found a fourth — the ACK
+  to an out-of-window segment at `:1712` via `build_segment`. Rejected: a
+  list of sites is only as complete as the last audit. Every TCP response
+  already goes through `batch_push` into the per-call batch that
+  `batch_send` flushes at the end of `tcp_input`, so the gate is that flush:
+  a rejected segment's batch is discarded, and any response added in the
+  future is silenced with it. The same review found bookkeeping
+  (`last_rx_ns`) done before acceptance, so "no side effect" is enforced the
+  same way — nothing is recorded until the segment is accepted.
 - **Drop at the socket layer (refuse a match whose ingress is not the
   bound interface).** Rejected: it scatters the invariant across every
   transport's demux and cannot be listed or counted as one thing; the IP
