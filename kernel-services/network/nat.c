@@ -668,27 +668,83 @@ bool nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t g
     if ((proto != IPPROTO_TCP && proto != IPPROTO_UDP) || host_port == 0 || guest_port == 0 ||
         guest_ip == 0)
         return false;
-    /* The target must sit on a connected subnet (a tap), so the forwarded
-     * packet routes to it and its reply passes the reverse-path check; an
-     * off-subnet target would relay out the default uplink and stall. */
+    /* The target must sit on the guest tap's own subnet -- a connected
+     * interface that forwards (NETIF_FORWARD). Any connected subnet would also
+     * match the uplink or a peer, and a rule pointing there would relay a host
+     * port to another machine on the real network; its reply would also fail
+     * the reverse-path check. */
     struct netif *n = netif_connected(guest_ip);
     if (n == NULL)
         return false;
+    bool on_guest_tap = (n->flags & NETIF_FORWARD) != 0;
     netif_put(n);
+    if (!on_guest_tap)
+        return false;
+
     arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
     bool ok = false;
+    int free_slot = -1;
+    for (unsigned i = 0; i < NAT_PF_MAX; i++) {
+        if (g_pf[i].in_use) {
+            if (g_pf[i].proto == proto && g_pf[i].host_port == host_port) {
+                spin_unlock_irqrestore(&g_pf_lock, s);
+                return false;          /* (proto, host_port) is already bound */
+            }
+        } else if (free_slot < 0) {
+            free_slot = (int)i;
+        }
+    }
+    if (free_slot >= 0) {
+        g_pf[free_slot].in_use = true;
+        g_pf[free_slot].proto = proto;
+        g_pf[free_slot].host_port = host_port;
+        g_pf[free_slot].guest_ip = guest_ip;
+        g_pf[free_slot].guest_port = guest_port;
+        ok = true;
+    }
+    spin_unlock_irqrestore(&g_pf_lock, s);
+    return ok;
+}
+
+/* Remove the rule bound to (proto, host_port) and reap the DNAT conntrack
+ * entries it created. false if no such rule. */
+bool nat_pf_del(uint8_t proto, uint16_t host_port)
+{
+    bool found = false;
+    arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
     for (unsigned i = 0; i < NAT_PF_MAX; i++)
-        if (!g_pf[i].in_use) {
-            g_pf[i].in_use = true;
-            g_pf[i].proto = proto;
-            g_pf[i].host_port = host_port;
-            g_pf[i].guest_ip = guest_ip;
-            g_pf[i].guest_port = guest_port;
-            ok = true;
+        if (g_pf[i].in_use && g_pf[i].proto == proto && g_pf[i].host_port == host_port) {
+            g_pf[i].in_use = false;
+            found = true;
             break;
         }
     spin_unlock_irqrestore(&g_pf_lock, s);
-    return ok;
+    if (!found)
+        return false;
+    /* Reap the flows the rule created so a removed forward stops at once. */
+    arch_irq_state_t ns = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && g_nat[i].kind == NAT_KIND_DNAT &&
+            g_nat[i].proto == proto && g_nat[i].nat_port == host_port)
+            g_nat[i].in_use = false;
+    spin_unlock_irqrestore(&g_nat_lock, ns);
+    return true;
+}
+
+unsigned nat_pf_list(struct nat_pf_rule *out, unsigned max)
+{
+    unsigned n = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
+    for (unsigned i = 0; i < NAT_PF_MAX && n < max; i++)
+        if (g_pf[i].in_use) {
+            out[n].proto = g_pf[i].proto;
+            out[n].host_port = g_pf[i].host_port;
+            out[n].guest_port = g_pf[i].guest_port;
+            out[n].guest_ip = g_pf[i].guest_ip;
+            n++;
+        }
+    spin_unlock_irqrestore(&g_pf_lock, s);
+    return n;
 }
 
 /* Parse a decimal in [0,65535] at *p, advancing *p; false on none/overflow. */

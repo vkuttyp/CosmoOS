@@ -222,6 +222,18 @@ matches every port (an unruled port is then forwarded to the guest), and a
 table that clobbers instead of dropping when full (`dnat_drop_full` never
 rises).
 
+**`net-tapctl`**: drives the control device through the VFS
+(`/dev/net/tapctl`). A `FORWARD_ADD` command written to it installs a rule (a
+subsequent client SYN is DNAT'd to the guest), the `read` snapshot lists
+exactly that rule, a `FORWARD_DEL` removes it and reaps its conntrack entry
+(the live flow count drops) so a re-sent SYN stays local and the listing is
+empty; a duplicate `(proto, host_port)` `ADD` is `-EEXIST`, an off-guest-tap
+target is refused, a short write is `-EINVAL`, and a wrong version is
+`-ENOTSUP` -- each changing nothing. Proved by reintroducing a delete that
+does not reap conntrack (the flow count does not drop), an add that accepts
+any connected subnet (the off-tap target is then installed), and an add that
+allows a duplicate binding (the duplicate is then accepted).
+
 ## Autoconfiguration (DHCP and DNS)
 
 **`tap-filter`**: the tap input filter that the DHCP server rides. A frame

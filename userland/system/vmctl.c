@@ -32,12 +32,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <uapi/cosmo/netctl.h>
 
 static int usage(void)
 {
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
                     "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] [--net loop | --net tap] "
-                    "[--append CMDLINE] IMAGE\n");
+                    "[--append CMDLINE] IMAGE\n"
+                    "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n");
     return 2;
 }
 
@@ -915,6 +919,77 @@ static int run(int argc, char **argv)
     }
 }
 
+static int pf_proto(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "tcp") == 0) { *out = COSMO_NETCTL_PROTO_TCP; return 0; }
+    if (strcmp(s, "udp") == 0) { *out = COSMO_NETCTL_PROTO_UDP; return 0; }
+    return -1;
+}
+
+/* vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT
+ *                   del PROTO HOSTPORT
+ *                   list
+ * Configures the guest's inbound port-forwards at runtime through
+ * /dev/net/tapctl (docs/audit/next-subsystem-netctl.md). */
+static int port_forward(int argc, char **argv)
+{
+    if (argc < 1)
+        return usage();
+    int fd = open("/dev/net/tapctl", O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "vmctl: cannot open /dev/net/tapctl: %s\n", strerror(errno));
+        return 1;
+    }
+    int rc = 1;
+    if (strcmp(argv[0], "list") == 0) {
+        unsigned char buf[sizeof(struct cosmo_netctl_list) + 64 * sizeof(struct cosmo_netctl_rule)];
+        int64_t n = read(fd, buf, sizeof(buf));
+        if (n < (int64_t)sizeof(struct cosmo_netctl_list)) {
+            fprintf(stderr, "vmctl: list failed: %s\n", strerror(errno));
+            goto out;
+        }
+        struct cosmo_netctl_list *h = (struct cosmo_netctl_list *)buf;
+        struct cosmo_netctl_rule *r = (struct cosmo_netctl_rule *)(buf + sizeof(*h));
+        for (unsigned i = 0; i < h->count; i++) {
+            uint32_t a = r[i].guest_addr;
+            char ip[16];
+            inet_ntop(AF_INET, &a, ip, sizeof(ip));
+            printf("%s %u -> %s:%u\n", r[i].proto == COSMO_NETCTL_PROTO_TCP ? "tcp" : "udp",
+                   r[i].host_port, ip, r[i].guest_port);
+        }
+        rc = 0;
+        goto out;
+    }
+
+    struct cosmo_netctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_NETCTL_VERSION;
+    if (strcmp(argv[0], "add") == 0) {
+        if (argc != 5 || pf_proto(argv[1], &cmd.proto) != 0) { usage(); goto out; }
+        cmd.op = COSMO_NETCTL_FORWARD_ADD;
+        cmd.host_port = (uint16_t)strtoul(argv[2], NULL, 0);
+        uint32_t a;
+        if (inet_pton(AF_INET, argv[3], &a) != 1) { fprintf(stderr, "vmctl: bad guest address\n"); goto out; }
+        cmd.guest_addr = a;
+        cmd.guest_port = (uint16_t)strtoul(argv[4], NULL, 0);
+    } else if (strcmp(argv[0], "del") == 0) {
+        if (argc != 3 || pf_proto(argv[1], &cmd.proto) != 0) { usage(); goto out; }
+        cmd.op = COSMO_NETCTL_FORWARD_DEL;
+        cmd.host_port = (uint16_t)strtoul(argv[2], NULL, 0);
+    } else {
+        usage();
+        goto out;
+    }
+    if (write(fd, &cmd, sizeof(cmd)) != (int64_t)sizeof(cmd)) {
+        fprintf(stderr, "vmctl: port-forward %s failed: %s\n", argv[0], strerror(errno));
+        goto out;
+    }
+    rc = 0;
+out:
+    close(fd);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -925,5 +1000,7 @@ int main(int argc, char **argv)
         return info();
     if (strcmp(argv[1], "run") == 0)
         return run(argc - 2, argv + 2);
+    if (strcmp(argv[1], "port-forward") == 0)
+        return port_forward(argc - 2, argv + 2);
     return usage();
 }
