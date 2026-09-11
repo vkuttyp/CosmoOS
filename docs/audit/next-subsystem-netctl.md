@@ -137,7 +137,7 @@ character device, as the frame channel is.
   submitted; the connection is then delivered to the host, not the guest, and
   the rule no longer appears in the `read` listing. A malformed or
   wrong-version command is refused and changes nothing; a forward whose
-  target is not on a connected subnet is refused.
+  target is not on the guest tap's subnet is refused.
 - **Demonstrated, reproducible:** `vmctl` gains a `port-forward add|del|list`
   subcommand that writes the control device, and a stock Linux guest's
   service is exposed and then hidden on a running machine under
@@ -224,7 +224,8 @@ None meaningful — a control operation is rare and not on the packet path.
   purpose. The mitigations are explicit: the device is privileged (`0600`,
   the owner only); every command is a fixed, version-checked, range-checked
   struct refused whole on any doubt; and the operations are confined to the
-  guest's port-forward table with the existing connected-subnet target check,
+  guest's port-forward table with the guest-tap-subnet target check (§4,
+  tightened from the connected-subnet check the DNAT unit shipped),
   so nothing a caller writes can reconfigure the host's own network or reach
   another process.
 - **A removed forward that keeps working.** Deleting a rule must also stop
