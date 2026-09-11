@@ -64,7 +64,10 @@ NIC address and the fault-injection and the encryption key already ride.
   again. The guest is told exactly one address (`10.0.3.1`, learned, not
   configured) and everything else follows.
 
-## Proposed design
+## Design (as built)
+
+This section was the proposal; it describes the system as it was built.
+
 
 ### 1. Where it lives: an in-kernel service tied to the tap
 
@@ -193,9 +196,9 @@ the DHCP parameters are the tap's own configuration, and the upstream
 resolver is a read-only `fw_cfg` value. The service is torn down when the
 tap goes away.
 
-### 5. The milestone
+### 5. The milestone (met)
 
-- **Gated, in the harness:** a synthetic guest on a tap (no external
+- **Gated, in the harness (the `net-dhcp` and `net-dns` self-tests):** a synthetic guest on a tap (no external
   network). It injects a `DHCPDISCOVER` on the tap with the broadcast flag set; the
   reply read back off the tap is a `DHCPOFFER` sent as the limited broadcast
   at both layers (IP `255.255.255.255`, Ethernet `ff:ff:ff:ff:ff:ff`), never
@@ -209,7 +212,7 @@ tap goes away.
   Two queries sharing an ID get distinct upstream IDs and unambiguous
   answers; the pending table is bounded (a flood of unanswered queries drops
   rather than grows) and its entries expire.
-- **Demonstrated, reproducible:** a stock Linux guest booted with its DHCP
+- **Demonstrated, reproducible (documented, not gated):** a stock Linux guest booted with its DHCP
   client on and the tap as its only network — it autoconfigures `eth0`
   (address, default route, resolver) from the host and resolves a name,
   under `QEMU_MEM=2G`, the same reproduction shape as the tap and NAT units.
