@@ -12,10 +12,14 @@
 
 #include <stdint.h>
 
-/* Version 2 adds the forwarding firewall (docs/audit/next-subsystem-firewall.md):
+/* Version 2 added the forwarding firewall (docs/audit/next-subsystem-firewall.md):
  * the FILTER_* commands below and a filter section appended to the read
- * snapshot after the port-forward list. */
-#define COSMO_NETCTL_VERSION 2
+ * snapshot after the port-forward list. Version 3 adds the INPUT chain
+ * (docs/audit/next-subsystem-input-chain.md): the DIR_TO_HOST direction, a
+ * third default policy in the per-guest record, and -- a semantic change --
+ * an ICMP rule's dst_port is now its ICMP type (version 2 required 0 there
+ * and meant "any"; a version-3 rule says a type or ICMP_TYPE_ANY). */
+#define COSMO_NETCTL_VERSION 3
 
 /* Opcodes. FORWARD_* are carried by struct cosmo_netctl; FILTER_* by struct
  * cosmo_netctl_filter. Every command is written whole, at its own struct's
@@ -33,10 +37,19 @@
 #define COSMO_NETCTL_PROTO_TCP 6
 #define COSMO_NETCTL_PROTO_UDP 17
 
-/* Filter directions: which way a forwarded datagram is leaving. */
-#define COSMO_NETCTL_DIR_ANY       0   /* a rule matching either direction */
+/* Filter directions: where a guest's datagram is going. TO_UPLINK/TO_GUEST
+ * are the FORWARD chain (decided by the egress); TO_HOST is the INPUT chain
+ * (a datagram the guest sends to the host itself). */
+#define COSMO_NETCTL_DIR_ANY       0   /* either forwarding direction (uplink or guest); never TO_HOST --
+                                        * a version-2 wildcard keeps its meaning; host traffic needs an
+                                        * explicit TO_HOST rule */
 #define COSMO_NETCTL_DIR_TO_UPLINK 1   /* egress is not a guest tap (the world) */
 #define COSMO_NETCTL_DIR_TO_GUEST  2   /* egress is another guest's tap */
+#define COSMO_NETCTL_DIR_TO_HOST   3   /* addressed to the host (one of its own addresses, or broadcast) */
+
+/* For an ICMP rule the transport selector (dst_port) is the ICMP type; this
+ * is its wildcard. (Type 0 is Echo Reply, so 0 cannot mean "any".) */
+#define COSMO_NETCTL_ICMP_TYPE_ANY 0xffff
 
 /* Filter verdicts. */
 #define COSMO_NETCTL_VERDICT_DROP   0
@@ -89,11 +102,13 @@ struct cosmo_netctl_filter {
     uint8_t  dst_prefix;   /* 0..32 bits of dst_addr that must match; ignored by POLICY */
     uint8_t  verdict;      /* COSMO_NETCTL_VERDICT_* */
     uint32_t dst_addr;     /* network byte order; ignored by POLICY */
-    uint16_t dst_port;     /* host byte order, 0 = any; ignored by POLICY and for ICMP */
+    uint16_t dst_port;     /* the transport selector, host byte order: for TCP/UDP/any a
+                            * destination port (0 = any); for ICMP the ICMP type 0..255
+                            * or COSMO_NETCTL_ICMP_TYPE_ANY; ignored by POLICY */
     uint16_t at_index;     /* ADD: insert position (>= count appends); else 0 */
 };
 
-/* The read snapshot, version 2: the port-forward list (struct
+/* The read snapshot, version 2 and later: the port-forward list (struct
  * cosmo_netctl_list + its rules, unchanged) followed by this filter section --
  * a header, `guest_count` per-guest policy records, then `rule_count` rules
  * in evaluation order, each carrying its guest and its current index. A
@@ -109,7 +124,8 @@ struct cosmo_netctl_filter_guest {
     uint32_t guest_addr;        /* network byte order */
     uint8_t  policy_to_uplink;  /* COSMO_NETCTL_VERDICT_* */
     uint8_t  policy_to_guest;
-    uint16_t reserved;
+    uint8_t  policy_to_host;    /* version 3: the INPUT chain's default */
+    uint8_t  reserved;
 };
 
 struct cosmo_netctl_filter_rule {

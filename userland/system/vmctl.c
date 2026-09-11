@@ -44,7 +44,8 @@ static int usage(void)
                     "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n"
                     "       vmctl filter add|del GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]\n"
                     "                    | policy GUESTADDR DIR VERDICT | list\n"
-                    "         DIR any|uplink|guest  PROTO any|icmp|tcp|udp  DST addr|any  PORT n|any  VERDICT accept|drop\n");
+                    "         DIR any(=uplink+guest, never host)|uplink|guest|host  PROTO any|icmp|tcp|udp\n"
+                    "         DST addr[/prefix]|any  PORT n|any (icmp: type 0-255|echo-request|echo-reply|any)  VERDICT accept|drop\n");
     return 2;
 }
 
@@ -949,6 +950,7 @@ static int fw_dir(const char *s, uint8_t *out)
     if (strcmp(s, "any") == 0)         *out = COSMO_NETCTL_DIR_ANY;
     else if (strcmp(s, "uplink") == 0) *out = COSMO_NETCTL_DIR_TO_UPLINK;
     else if (strcmp(s, "guest") == 0)  *out = COSMO_NETCTL_DIR_TO_GUEST;
+    else if (strcmp(s, "host") == 0)   *out = COSMO_NETCTL_DIR_TO_HOST;
     else return -1;
     return 0;
 }
@@ -994,7 +996,8 @@ static int fw_dst(const char *s, uint32_t *addr, uint8_t *prefix)
 
 static const char *fw_dir_name(uint8_t d)
 {
-    return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" : "any";
+    return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" :
+           d == COSMO_NETCTL_DIR_TO_HOST ? "host" : "any";
 }
 static const char *fw_proto_name(uint8_t p)
 {
@@ -1033,6 +1036,13 @@ static int filter(int argc, char **argv)
         }
         struct cosmo_netctl_list ph;
         memcpy(&ph, buf, sizeof(ph));
+        /* Walk only a snapshot of the version this vmctl speaks: the record
+         * layouts and the ICMP selector's meaning are version-bound, and a
+         * misread listing is worse than none. */
+        if (ph.version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: snapshot version %u, this vmctl speaks %u\n", ph.version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
         struct cosmo_netctl_filter_list fh;
         if ((size_t)n < off + sizeof(fh)) {
@@ -1040,14 +1050,18 @@ static int filter(int argc, char **argv)
             goto out;
         }
         memcpy(&fh, buf + off, sizeof(fh));
+        if (fh.version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: filter section version %u, this vmctl speaks %u\n", fh.version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         off += sizeof(fh);
         for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
             struct cosmo_netctl_filter_guest fg;
             memcpy(&fg, buf + off, sizeof(fg));
             char ip[16];
             inet_ntop(AF_INET, &fg.guest_addr, ip, sizeof(ip));
-            printf("%s policy: uplink %s, guest %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
-                   fw_verdict_name(fg.policy_to_guest));
+            printf("%s policy: uplink %s, guest %s, host %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
+                   fw_verdict_name(fg.policy_to_guest), fw_verdict_name(fg.policy_to_host));
         }
         for (unsigned i = 0; i < fh.rule_count; i++, off += sizeof(struct cosmo_netctl_filter_rule)) {
             struct cosmo_netctl_filter_rule fr;
@@ -1055,8 +1069,20 @@ static int filter(int argc, char **argv)
             char ip[16], dst[16];
             inet_ntop(AF_INET, &fr.guest_addr, ip, sizeof(ip));
             inet_ntop(AF_INET, &fr.dst_addr, dst, sizeof(dst));
-            printf("%s [%u] %s %s %s/%u %u %s\n", ip, fr.index, fw_dir_name(fr.direction),
-                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, fr.dst_port,
+            /* The selector prints in its protocol's terms: a port, or an ICMP type. */
+            char sel[16];
+            if (fr.proto == COSMO_NETCTL_PROTO_ICMP) {
+                if (fr.dst_port == COSMO_NETCTL_ICMP_TYPE_ANY) strcpy(sel, "any");
+                else if (fr.dst_port == 8)                     strcpy(sel, "echo-request");
+                else if (fr.dst_port == 0)                     strcpy(sel, "echo-reply");
+                else                                           snprintf(sel, sizeof(sel), "type%u", fr.dst_port);
+            } else if (fr.dst_port == 0) {
+                strcpy(sel, "any");
+            } else {
+                snprintf(sel, sizeof(sel), "%u", fr.dst_port);
+            }
+            printf("%s [%u] %s %s %s/%u %s %s\n", ip, fr.index, fw_dir_name(fr.direction),
+                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, sel,
                    fw_verdict_name(fr.verdict));
         }
         rc = 0;
@@ -1080,7 +1106,21 @@ static int filter(int argc, char **argv)
             fw_verdict(argv[6], &c.verdict) != 0) {
             usage(); goto out;
         }
-        if (strcmp(argv[5], "any") != 0 && pf_port(argv[5], &c.dst_port) != 0) {
+        /* The transport selector follows the protocol: a port for tcp/udp/any,
+         * an ICMP type (a number, echo-request or echo-reply) for icmp; `any`
+         * is the wildcard in the protocol's own encoding -- 0 for a port,
+         * ICMP_TYPE_ANY for a type (type 0 is echo-reply, so 0 cannot mean any). */
+        if (c.proto == COSMO_NETCTL_PROTO_ICMP) {
+            if (strcmp(argv[5], "any") == 0)               c.dst_port = COSMO_NETCTL_ICMP_TYPE_ANY;
+            else if (strcmp(argv[5], "echo-request") == 0) c.dst_port = 8;
+            else if (strcmp(argv[5], "echo-reply") == 0)   c.dst_port = 0;
+            else {
+                char *end;
+                unsigned long v = strtoul(argv[5], &end, 10);
+                if (*argv[5] == 0 || *end || v > 255) { fprintf(stderr, "vmctl: bad ICMP type\n"); goto out; }
+                c.dst_port = (uint16_t)v;
+            }
+        } else if (strcmp(argv[5], "any") != 0 && pf_port(argv[5], &c.dst_port) != 0) {
             fprintf(stderr, "vmctl: bad port\n"); goto out;
         }
         if (argc == 8) {
@@ -1127,6 +1167,10 @@ static int port_forward(int argc, char **argv)
             goto out;
         }
         struct cosmo_netctl_list *h = (struct cosmo_netctl_list *)buf;
+        if (h->version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: snapshot version %u, this vmctl speaks %u\n", h->version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         struct cosmo_netctl_rule *r = (struct cosmo_netctl_rule *)(buf + sizeof(*h));
         for (unsigned i = 0; i < h->count; i++) {
             uint32_t a = r[i].guest_addr;

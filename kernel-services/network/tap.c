@@ -184,7 +184,7 @@ static int tap_chr_open(struct vnode *vn, struct file *f)
     /* Attach the guest to the forwarding firewall (its rules and default
      * policy live from here to the last close). Last, after every step that
      * can fail, so an attachment never outlives a tap that failed to come up. */
-    fw_guest_attach((nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST));
+    fw_guest_attach((nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST), nif->ip4.addr);
     f->priv = o;
     return 0;
 
@@ -381,7 +381,7 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     p += sizeof(struct cosmo_netctl_filter_list);
     for (unsigned i = 0; i < ng; i++) {
         struct cosmo_netctl_filter_guest fg = { .guest_addr = guests[i] };
-        (void)fw_policy_get(guests[i], &fg.policy_to_uplink, &fg.policy_to_guest);
+        (void)fw_policy_get(guests[i], &fg.policy_to_uplink, &fg.policy_to_guest, &fg.policy_to_host);
         memcpy(p, &fg, sizeof(fg));
         p += sizeof(fg);
     }
