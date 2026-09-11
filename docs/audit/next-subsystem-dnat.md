@@ -64,22 +64,31 @@ address already rides.
 
 ### 1. The port-forward table, configured statically
 
-A small table of rules, each `(protocol, host address, host port) →
-(guest address, guest port)` — for example "TCP on the host's uplink address
-port 2222 → `10.0.3.15:22`." The rules are read once, at boot / tap
-activation, from `fw_cfg` `opt/cosmo/portforward` (a comma-separated list
-like `tcp:2222:10.0.3.15:22,tcp:8080:10.0.3.15:80`); there is **no writable
-control surface** in this unit, matching the read-only stance of the tap and
-NAT units. A runtime API to add and remove forwards (through `vmctl`) is a
+A small table of rules, each `(protocol, host port) → (guest address, guest
+port)` — for example "TCP port 2222 → `10.0.3.15:22`." A rule matches a
+connection to **any** of the host's own addresses on that port -- a wildcard
+host-address bind, as a container's default published port is `0.0.0.0`: the
+match in §2 is exactly the existing "addressed to one of our addresses"
+test plus the port, so `ssh -p 2222 localhost` on the host and a connection
+to the host's uplink address on 2222 both hit the same rule. Binding a
+forward to *one* specific host address (loopback only, or the uplink only) is
+a later refinement, and the grammar leaves room for it (an optional address
+prefix); this unit's rules are the wildcard form. The rules are read once, at
+boot / tap activation, from `fw_cfg` `opt/cosmo/portforward` (a comma-
+separated list of `proto:hostport:guestaddr:guestport`, e.g.
+`tcp:2222:10.0.3.15:22,tcp:8080:10.0.3.15:80` — no host-address field, since
+the bind is wildcard); there is **no writable control surface** in this unit,
+matching the read-only stance of the tap and NAT units. A runtime API to add and remove forwards (through `vmctl`) is a
 named later unit (§Alternatives); the static table is enough to prove the
 mechanism and to run the demonstration.
 
 ### 2. Inbound DNAT, before local delivery
 
 Where `ipv4_input` hands a packet addressed to the host to `nat_in`, `nat_in`
-gains a second job: if the packet is *not* a reply to an existing flow but
-its `(proto, dst, dport)` matches a port-forward rule, it is a connection
-**into** the guest. `nat_in` records a conntrack entry (the client's
+gains a second job: if the packet is *not* a reply to an existing flow but it
+is addressed to one of the host's own addresses (the wildcard bind, §1) and
+its `(proto, dport)` matches a port-forward rule, it is a connection **into**
+the guest. `nat_in` records a conntrack entry (the client's
 address and port, the matched rule, the guest target), rewrites the
 destination to the guest's address and port (transport checksum fixed
 incrementally, as the masquerade does), and **forwards it to the guest** out
@@ -115,9 +124,9 @@ table, now facing the outside rather than the guest.
 ### 5. The milestone
 
 - **Gated, in the harness:** two taps (a guest side `10.0.3.0/24` and an
-  uplink side), a port-forward rule "uplink-address TCP `P` → `10.0.3.15:Q`,"
-  and a synthetic outside client on the uplink. The client sends a TCP SYN
-  to the uplink address port `P`; it is read back on the guest tap with its
+  uplink side), a port-forward rule "TCP port `P` → `10.0.3.15:Q`" (a
+  wildcard host-address bind), and a synthetic outside client on the uplink.
+  The client sends a TCP SYN to the host's uplink address, port `P`; it is read back on the guest tap with its
   destination rewritten to `10.0.3.15:Q` (checksum valid) and its source
   intact. The guest answers (a SYN-ACK from `10.0.3.15:Q`); it is read back
   on the uplink with its source rewritten to the uplink address port `P`
