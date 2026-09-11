@@ -36,6 +36,15 @@ struct mbuf *tap_recv(struct tap *t);
 
 struct netif *tap_netif(struct tap *t);   /* for tests and lookups */
 
+/* A tap-local input filter: called on the injector's context for each frame
+ * the far end injects, before the stack sees it. Return true to claim the
+ * frame (the stack does not see it; the filter owns it and has copied what it
+ * needs), false to let it through to netif_rx. One filter per tap; NULL
+ * clears it. A claimed DHCP frame is answered by building a reply and sending
+ * it back out this tap with ether_output. */
+typedef bool (*tap_input_fn)(struct tap *t, const void *frame, uint32_t len, void *arg);
+void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg);
+
 /* Create /dev/net/tap and its backing tap0 (down until first used), at boot. */
 void tap_dev_init(void);
 

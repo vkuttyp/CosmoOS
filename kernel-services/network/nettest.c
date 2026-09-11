@@ -13,6 +13,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
@@ -2956,5 +2957,427 @@ bool selftest_net_nat(const char **reason)
     tap_destroy(g);
     kinfo("selftest: net-nat: UDP/TCP/ICMP round trips masqueraded and restored (checksums valid), "
           "an ICMP error translated back, the table bounded at %u and its entries expiring", NAT_TABLE_SIZE);
+    return true;
+}
+
+/* --- tap input filter (the DHCP responder's ingress/egress mechanism) ----- */
+
+/* Claim frames of a private ethertype and answer each with a canned reply
+ * built and sent back out the tap; pass everything else to the stack. */
+#define TAPFILT_ETYPE 0x88b5u
+static const uint8_t tapfilt_reply[4] = { 0xC0, 0xDE, 0xCA, 0xFE };
+
+static bool tapfilt_hook(struct tap *t, const void *frame, uint32_t len, void *arg)
+{
+    (void)len;
+    unsigned *calls = arg;
+    const uint8_t *f = frame;
+    uint16_t etype = (uint16_t)(f[12] << 8 | f[13]);
+    if (etype != TAPFILT_ETYPE)
+        return false;                       /* not ours: let the stack have it */
+    (*calls)++;
+    struct mbuf *m = m_getcl();
+    if (m != NULL) {
+        memcpy(m->data, tapfilt_reply, sizeof(tapfilt_reply));
+        m->len = m->pkt.len = sizeof(tapfilt_reply);
+        uint8_t dst[6];
+        memcpy(dst, f + 6, 6);              /* reply to the injector's source MAC */
+        ether_output(tap_netif(t), m, dst, TAPFILT_ETYPE);
+    }
+    return true;                            /* claimed */
+}
+
+bool selftest_tap_filter(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x0f };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 0, 1), guest_ip = IPV4_ADDR(10, 88, 0, 15);
+    struct tap *t = tap_create("filt", host_ip, htonl(0xffffff00u), host_mac);
+    CHECK(t != NULL);
+    unsigned calls = 0;
+    tap_set_input_filter(t, tapfilt_hook, &calls);
+
+    /* (1) a claimed frame is answered out the tap, and the stack never sees it. */
+    uint8_t f[60];
+    memset(f, 0, sizeof(f));
+    memcpy(f, host_mac, 6);
+    memcpy(f + 6, guest_mac, 6);
+    f[12] = 0x88; f[13] = 0xb5;
+    CHECK(tap_inject(t, f, sizeof(f)) == 0);
+    CHECK(calls == 1);
+    struct mbuf *r = tap_recv(t);
+    CHECK(r != NULL);
+    uint8_t out[18];
+    CHECK(m_copydata(r, 0, 18, out));
+    CHECK(memcmp(out, guest_mac, 6) == 0);              /* to the injector */
+    CHECK(out[12] == 0x88 && out[13] == 0xb5);
+    CHECK(memcmp(out + 14, tapfilt_reply, 4) == 0);
+    m_freem(r);
+    CHECK(tap_recv(t) == NULL);
+
+    /* (2) an unclaimed frame reaches the stack: an ARP request for the tap IP
+     * is answered by the stack itself, not the filter. */
+    uint8_t req[42];
+    memset(req, 0, sizeof(req));
+    memset(req, 0xff, 6);
+    memcpy(req + 6, guest_mac, 6);
+    req[12] = 0x08; req[13] = 0x06;
+    req[15] = 1; req[16] = 0x08; req[18] = 6; req[19] = 4; req[21] = 1;
+    memcpy(req + 22, guest_mac, 6);
+    memcpy(req + 28, &guest_ip, 4);
+    memcpy(req + 38, &host_ip, 4);
+    CHECK(tap_inject(t, req, sizeof(req)) == 0);
+    struct mbuf *arp = NULL;
+    for (unsigned i = 0; i < 50 && arp == NULL; i++) {
+        arp = tap_recv(t);
+        if (arp == NULL)
+            thread_sleep_ms(10);
+    }
+    CHECK(arp != NULL);
+    uint8_t a[42];
+    CHECK(m_copydata(arp, 0, 42, a) && a[12] == 0x08 && a[13] == 0x06 && a[21] == 2);
+    m_freem(arp);
+    CHECK(calls == 1);                                  /* the filter did not touch the ARP */
+
+    /* (3) clearing the filter lets a formerly-claimed frame reach the stack. */
+    tap_set_input_filter(t, NULL, NULL);
+    CHECK(tap_inject(t, f, sizeof(f)) == 0);
+    CHECK(calls == 1 && tap_recv(t) == NULL);           /* no reply: the stack drops the unknown type */
+
+    tap_destroy(t);
+    kinfo("selftest: tap-filter: a claimed frame answered out the tap, an unclaimed frame reached the stack");
+    return true;
+}
+
+/* --- DHCP server (tapsvc) -------------------------------------------------- */
+
+/* Build a DHCP client frame (Ethernet+IP+UDP+BOOTP+cookie+options) into buf.
+ * The DHCP server (a tap input filter) does not verify the UDP checksum, so
+ * it is left 0; the IP header checksum is valid. Returns the frame length. */
+static uint32_t nettest_mk_dhcp(uint8_t *buf, const uint8_t smac[6], uint8_t msgtype,
+                                uint32_t xid, bool bcast_flag, const uint8_t chaddr[6],
+                                uint32_t req_ip)
+{
+    memset(buf, 0, 400);
+    struct eth_hdr *eh = (struct eth_hdr *)buf;
+    memset(eh->dst, 0xff, 6);
+    memcpy(eh->src, smac, 6);
+    eh->type = htons(ETH_P_IP);
+    uint8_t *dh = buf + ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr);
+    dh[0] = 1;              /* op BOOTREQUEST */
+    dh[1] = 1; dh[2] = 6;   /* htype ETHER, hlen 6 */
+    memcpy(dh + 4, &xid, 4);
+    uint16_t flags = htons(bcast_flag ? 0x8000u : 0u);
+    memcpy(dh + 10, &flags, 2);
+    memcpy(dh + 28, chaddr, 6);
+    uint32_t cookie = htonl(0x63825363u);
+    memcpy(dh + 236, &cookie, 4);
+    uint8_t *o = dh + 240;
+    *o++ = 53; *o++ = 1; *o++ = msgtype;
+    if (req_ip) { *o++ = 50; *o++ = 4; memcpy(o, &req_ip, 4); o += 4; }
+    *o++ = 255;
+    uint32_t dhlen = (uint32_t)(o - dh);
+    uint32_t udplen = (uint32_t)sizeof(struct udp_hdr) + dhlen;
+    uint32_t iplen = (uint32_t)sizeof(struct ipv4_hdr) + udplen;
+    struct udp_hdr *uh = (struct udp_hdr *)(buf + ETH_HLEN + sizeof(struct ipv4_hdr));
+    uh->sport = htons(68); uh->dport = htons(67); uh->len = htons((uint16_t)udplen); uh->cksum = 0;
+    struct ipv4_hdr *iph = (struct ipv4_hdr *)(buf + ETH_HLEN);
+    iph->vhl = 0x45; iph->tos = 0; iph->len = htons((uint16_t)iplen); iph->id = 0; iph->frag = 0;
+    iph->ttl = 64; iph->proto = IPPROTO_UDP; iph->cksum = 0;
+    iph->src = 0; iph->dst = INADDR_BROADCAST_N;
+    iph->cksum = in_cksum(iph, sizeof(*iph));
+    return ETH_HLEN + iplen;
+}
+
+/* Find DHCP option `code` in a received reply frame; NULL or a pointer+len. */
+static const uint8_t *nettest_dhcp_opt(const uint8_t *dh, uint32_t dhlen, uint8_t code, uint8_t *olen)
+{
+    uint32_t i = 240;   /* past BOOTP + cookie */
+    while (i < dhlen) {
+        uint8_t c = dh[i++];
+        if (c == 255) break;
+        if (c == 0) continue;
+        if (i >= dhlen) break;
+        uint8_t l = dh[i++];
+        if (i + l > dhlen) break;
+        if (c == code) { *olen = l; return dh + i; }
+        i += l;
+    }
+    return NULL;
+}
+
+bool selftest_net_dhcp(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x0f };
+    static const uint8_t other_mac[6] = { 0x52, 0x54, 0x00, 0x06, 0x00, 0xaa };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 1, 1), mask = htonl(0xffffff00u);
+    uint32_t guest_ip = IPV4_ADDR(10, 88, 1, 15);
+    struct tap *t = tap_create("dhcp", host_ip, mask, host_mac);
+    CHECK(t != NULL);
+    tapsvc_stop();                 /* clear any instance (e.g. tap0) so ours binds */
+    tapsvc_start(t);
+
+    uint8_t frame[400], rx[400];
+
+    /* (1) DISCOVER with the broadcast flag -> OFFER as the limited broadcast
+     * at both layers, carrying the guest address and the right options. */
+    uint32_t len = nettest_mk_dhcp(frame, guest_mac, DHCP_DISCOVER, 0xAABBCCDD, true, guest_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    struct mbuf *r = tap_recv(t);
+    CHECK(r != NULL);
+    uint32_t rl = m_length(r);
+    CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx));
+    m_freem(r);
+    CHECK(memcmp(rx, "\xff\xff\xff\xff\xff\xff", 6) == 0);          /* Ethernet broadcast */
+    struct ipv4_hdr *oi = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(oi->dst == INADDR_BROADCAST_N && oi->src == host_ip);     /* IP limited broadcast */
+    uint8_t *dh = rx + ETH_HLEN + 20 + 8;
+    uint32_t dhlen = rl - (ETH_HLEN + 20 + 8);
+    CHECK(dh[0] == 2);                                              /* BOOTREPLY */
+    CHECK(memcmp(dh + 16, &guest_ip, 4) == 0);                     /* yiaddr = the guest */
+    uint8_t l; const uint8_t *op;
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && l == 1 && op[0] == DHCP_OFFER);
+    op = nettest_dhcp_opt(dh, dhlen, 54, &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 1,  &l); CHECK(op && l == 4 && memcmp(op, &mask, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 3,  &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 6,  &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 51, &l); CHECK(op && l == 4);
+
+    /* (2) REQUEST for that address -> ACK. */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_REQUEST, 0xAABBCCDD, true, guest_mac, guest_ip);
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    dh = rx + ETH_HLEN + 20 + 8; dhlen = rl - (ETH_HLEN + 20 + 8);
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && op[0] == DHCP_ACK);
+
+    /* (3) REQUEST for a different address -> NAK (always broadcast). */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_REQUEST, 0xAABBCCDD, true, guest_mac,
+                          IPV4_ADDR(10, 88, 1, 200));
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    dh = rx + ETH_HLEN + 20 + 8; dhlen = rl - (ETH_HLEN + 20 + 8);
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && op[0] == DHCP_NAK);
+
+    /* (4) A DISCOVER with the flag clear -> OFFER unicast to chaddr, IP to yiaddr. */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_DISCOVER, 0x11223344, false, guest_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    CHECK(memcmp(rx, guest_mac, 6) == 0);                          /* link-unicast to the client */
+    oi = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(oi->dst == guest_ip);                                    /* IP unicast to yiaddr */
+
+    /* (5) A second, different client is offered nothing (the lease is taken). */
+    struct tapsvc_stats s0, s1;
+    tapsvc_get_stats(&s0);
+    len = nettest_mk_dhcp(frame, other_mac, DHCP_DISCOVER, 0x99999999, true, other_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    CHECK(tap_recv(t) == NULL);                                    /* no reply */
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dhcp_ignored > s0.dhcp_ignored);
+
+    tapsvc_stop();
+    tap_destroy(t);
+    kinfo("selftest: net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, "
+          "the flag-clear reply is a chaddr unicast, a second client is refused");
+    return true;
+}
+
+/* --- DNS proxy (tapsvc) ---------------------------------------------------- */
+
+/* A fixed DNS query for "www.example.com" A IN, with a given id and RD set. */
+static uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id)
+{
+    static const uint8_t qname[] = { 3,'w','w','w', 7,'e','x','a','m','p','l','e', 3,'c','o','m', 0 };
+    msg[0] = (uint8_t)(id >> 8); msg[1] = (uint8_t)id;
+    msg[2] = 0x01; msg[3] = 0x00;         /* flags: RD */
+    msg[4] = 0; msg[5] = 1;               /* qdcount 1 */
+    msg[6] = 0; msg[7] = 0; msg[8] = 0; msg[9] = 0; msg[10] = 0; msg[11] = 0;
+    memcpy(msg + 12, qname, sizeof(qname));
+    uint32_t o = 12 + (uint32_t)sizeof(qname);
+    msg[o++] = 0; msg[o++] = 1;           /* qtype A */
+    msg[o++] = 0; msg[o++] = 1;           /* qclass IN */
+    return o;
+}
+
+/* The test upstream resolver: echo each query as an answer with one A record. */
+static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
+static struct { struct socket *sock; struct socket *spoof; volatile bool running; volatile bool spoofing; } g_dnsresp;
+
+static void dns_responder_main(void *arg)
+{
+    (void)arg;
+    uint8_t q[512];
+    while (g_dnsresp.running) {
+        struct netaddr from;
+        int64_t n = ksock_recvfrom(g_dnsresp.sock, q, sizeof(q), &from);
+        if (n < 12) { if (n <= 0) break; continue; }
+        /* Build the answer in place: keep id + question, set response flags,
+         * ancount 1, append an A record pointing at the question name. */
+        q[2] = 0x81; q[3] = 0x80;         /* QR + RD + RA */
+        q[6] = 0; q[7] = 1;               /* ancount 1 */
+        uint32_t o = (uint32_t)n;
+        q[o++] = 0xc0; q[o++] = 0x0c;     /* name pointer to offset 12 */
+        q[o++] = 0; q[o++] = 1;           /* type A */
+        q[o++] = 0; q[o++] = 1;           /* class IN */
+        q[o++] = 0; q[o++] = 0; q[o++] = 0; q[o++] = 4;   /* ttl */
+        q[o++] = 0; q[o++] = 4;           /* rdlength */
+        memcpy(q + o, dns_answer_ip, 4); o += 4;
+        /* Normally reply from the configured upstream; in spoof mode reply from
+         * a different source, which the proxy must reject. */
+        ksock_sendto(g_dnsresp.spoofing ? g_dnsresp.spoof : g_dnsresp.sock, q, o, &from);
+    }
+    thread_exit(0);
+}
+
+bool selftest_net_dns(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x07, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x07, 0x00, 0x0f };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 2, 1), mask = htonl(0xffffff00u);
+    uint32_t guest_ip = IPV4_ADDR(10, 88, 2, 15);
+    struct tap *t = tap_create("dns", host_ip, mask, host_mac);
+    CHECK(t != NULL);
+    nettest_seed_arp(tap_netif(t), guest_ip, guest_mac);   /* so replies reach the guest */
+    tapsvc_stop();
+    tapsvc_start(t);
+
+    /* A loopback upstream resolver the proxy will forward to. */
+    struct netaddr rl;
+    memset(&rl, 0, sizeof(rl));
+    rl.family = COSMO_AF_INET; rl.v4 = IPV4_ADDR(127, 0, 0, 1); rl.port = 5300;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.sock) == 0);
+    CHECK(ksock_bind(g_dnsresp.sock, &rl) == 0);
+    struct netaddr sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.family = COSMO_AF_INET; sp.v4 = IPV4_ADDR(127, 0, 0, 1); sp.port = 5301;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.spoof) == 0);
+    CHECK(ksock_bind(g_dnsresp.spoof, &sp) == 0);
+    g_dnsresp.running = true;
+    struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
+    CHECK(rth != NULL);
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+
+    uint8_t msg[64], l4[128], frame[256], rx[256];
+
+    /* (1) a guest query is relayed and the answer returns with the guest's
+     * original id and the upstream's A record. */
+    uint32_t mlen = nettest_mk_dns(msg, 0x1234);
+    uint16_t l4len = nettest_mk_udp(l4, guest_ip, host_ip, 4444, 53, msg, (uint16_t)mlen);
+    uint32_t flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64,
+                                 IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    struct mbuf *r = nettest_recv_ip(t);
+    CHECK(r != NULL);
+    uint32_t rl2 = m_length(r);
+    CHECK(rl2 <= sizeof(rx) && m_copydata(r, 0, rl2, rx));
+    m_freem(r);
+    struct ipv4_hdr *ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(ri->dst == guest_ip && ri->proto == IPPROTO_UDP);
+    uint8_t *rudp = rx + ETH_HLEN + 20;
+    CHECK((uint16_t)(rudp[2] << 8 | rudp[3]) == 4444);           /* back to the guest's port */
+    uint8_t *dns = rudp + 8;
+    CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x1234);           /* the guest's original id */
+    CHECK((dns[2] & 0x80) && (uint16_t)(dns[6] << 8 | dns[7]) >= 1);   /* a response with answers */
+    uint32_t anofs = rl2 - (ETH_HLEN + 20 + 8);
+    CHECK(anofs >= 4 && memcmp(rx + rl2 - 4, dns_answer_ip, 4) == 0);   /* the A record's address */
+
+    /* (2) two queries sharing an id but different source ports stay
+     * unambiguous: both answers come back to the right ports. */
+    mlen = nettest_mk_dns(msg, 0x5555);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 5001, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 5002, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    unsigned seen_ports = 0;
+    for (unsigned got = 0; got < 2; got++) {
+        r = nettest_recv_ip(t);
+        CHECK(r != NULL);
+        CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + 2, rx)); m_freem(r);
+        rudp = rx + ETH_HLEN + 20;
+        uint16_t port = (uint16_t)(rudp[2] << 8 | rudp[3]);
+        dns = rudp + 8;
+        CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x5555);
+        if (port == 5001) seen_ports |= 1;
+        if (port == 5002) seen_ports |= 2;
+    }
+    CHECK(seen_ports == 3);                                     /* both, unambiguous */
+
+    /* (3) with no upstream configured, the proxy answers SERVFAIL itself. */
+    tapsvc_test_set_upstream(0, 0);                            /* clear the upstream */
+    mlen = nettest_mk_dns(msg, 0x7777);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 6001, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    r = nettest_recv_ip(t);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + 4, rx)); m_freem(r);
+    dns = rx + ETH_HLEN + 20 + 8;
+    CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x7777);          /* id preserved */
+    CHECK((dns[2] & 0x80) && (dns[3] & 0x0f) == 2);            /* QR + RCODE 2 (SERVFAIL) */
+
+    /* (3b) a response from a source other than the configured upstream is
+     * rejected -- an off-path attacker cannot race a forged answer into the
+     * guest even if it guesses the id. */
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+    struct tapsvc_stats sp0, sp1;
+    tapsvc_get_stats(&sp0);
+    g_dnsresp.spoofing = true;                                 /* responder replies from :5301 */
+    mlen = nettest_mk_dns(msg, 0x2468);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 6002, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    CHECK(nettest_recv_ip(t) == NULL);                         /* the forged-source answer is dropped */
+    tapsvc_get_stats(&sp1);
+    CHECK(sp1.dns_answer == sp0.dns_answer);                   /* nothing was relayed */
+    g_dnsresp.spoofing = false;
+
+    /* (4) table bound: with the upstream a black hole, a flood fills the
+     * pending table and further queries drop; it never exceeds the bound. */
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 1);      /* nothing answers there */
+    struct tapsvc_stats s0, s1;
+    tapsvc_get_stats(&s0);
+    for (unsigned i = 0; i < 400; i++) {
+        mlen = nettest_mk_dns(msg, (uint16_t)(0x8000 + i));
+        l4len = nettest_mk_udp(l4, guest_ip, host_ip, (uint16_t)(20000 + i), 53, msg, (uint16_t)mlen);
+        flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+        tap_inject(t, frame, flen);
+        if ((i & 15) == 15)
+            thread_sleep_ms(5);                               /* let the guest thread drain */
+    }
+    for (unsigned i = 0; i < 100; i++) {
+        tapsvc_get_stats(&s1);
+        if (s1.dns_drop_full > s0.dns_drop_full)
+            break;
+        thread_sleep_ms(10);
+    }
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dns_pending <= 128);                              /* never exceeds the bound */
+    CHECK(s1.dns_drop_full > s0.dns_drop_full);                /* the flood was dropped */
+
+    /* (5) expiry reclaims the pending entries. */
+    tapsvc_get_stats(&s0);
+    CHECK(s0.dns_pending > 0);
+    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);
+
+    /* Tear down the responder and the service. */
+    g_dnsresp.running = false;
+    ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);
+    thread_join(rth);
+    ksock_put(g_dnsresp.sock);
+    ksock_put(g_dnsresp.spoof);
+    g_dnsresp.sock = NULL;
+    g_dnsresp.spoof = NULL;
+    tapsvc_stop();
+    tap_destroy(t);
+    kinfo("selftest: net-dns: a query is relayed and its answer restored to the guest, two queries "
+          "sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires");
     return true;
 }

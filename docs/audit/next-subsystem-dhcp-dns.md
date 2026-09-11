@@ -1,8 +1,14 @@
 # NEXT SUBSYSTEM — autoconfiguring the guest: DHCP and a DNS proxy
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it.
+
+> **Status: implemented (PR #95).** This report was the plan; it was built
+> as described and is now in `kernel-services/network/tapsvc.c`. The design
+> below is retained as the rationale of record; the built system is
+> documented in `docs/kernel-services/network/design.md` ("Autoconfiguring
+> the guest") and its tests in that directory's `testing.md`. Where the two
+> differ, the design doc is authoritative.
 
 **Subsystem: a DHCP server and a DNS proxy on the tap, so a guest that
 boots with a stock network configuration (DHCP client on) gets its address,
@@ -58,7 +64,10 @@ NIC address and the fault-injection and the encryption key already ride.
   again. The guest is told exactly one address (`10.0.3.1`, learned, not
   configured) and everything else follows.
 
-## Proposed design
+## Design (as built)
+
+This section was the proposal; it describes the system as it was built.
+
 
 ### 1. Where it lives: an in-kernel service tied to the tap
 
@@ -187,9 +196,9 @@ the DHCP parameters are the tap's own configuration, and the upstream
 resolver is a read-only `fw_cfg` value. The service is torn down when the
 tap goes away.
 
-### 5. The milestone
+### 5. The milestone (met)
 
-- **Gated, in the harness:** a synthetic guest on a tap (no external
+- **Gated, in the harness (the `net-dhcp` and `net-dns` self-tests):** a synthetic guest on a tap (no external
   network). It injects a `DHCPDISCOVER` on the tap with the broadcast flag set; the
   reply read back off the tap is a `DHCPOFFER` sent as the limited broadcast
   at both layers (IP `255.255.255.255`, Ethernet `ff:ff:ff:ff:ff:ff`), never
@@ -203,7 +212,7 @@ tap goes away.
   Two queries sharing an ID get distinct upstream IDs and unambiguous
   answers; the pending table is bounded (a flood of unanswered queries drops
   rather than grows) and its entries expire.
-- **Demonstrated, reproducible:** a stock Linux guest booted with its DHCP
+- **Demonstrated, reproducible (documented, not gated):** a stock Linux guest booted with its DHCP
   client on and the tap as its only network — it autoconfigures `eth0`
   (address, default route, resolver) from the host and resolves a name,
   under `QEMU_MEM=2G`, the same reproduction shape as the tap and NAT units.
@@ -218,32 +227,44 @@ tap goes away.
 - **DHCPv6 and IPv6 RA/DNS**, **DNS over TCP/EDNS0 large answers**, and
   **DNSSEC validation** — named, later.
 
-## Affected files
+## Affected files (all changed as planned)
+
+These are the files the unit changed.
 
 - `kernel-services/network/tapsvc.c` (new), `kernel/include/kernel/net/tapsvc.h`
-  — the frame-level DHCP responder, the DNS-proxy service thread and its
-  sockets, the pending table.
+  (new) — the frame-level DHCP responder, the DNS-proxy service threads and
+  their sockets, the pending table.
 - `kernel-services/network/tap.c` / `tap.h` — start the service on
-  `tap_dev_activate` and stop it on teardown; the tap-local receive filter
-  that hands the service each inbound frame before the stack sees it, and the
-  `ether_output`-based reply path out the tap.
+  `tap_dev_activate`; the tap-local receive filter (`tap_set_input_filter`)
+  that hands the service each inbound frame before the stack sees it, over
+  which the DHCP reply rides `ether_output`.
+- `kernel/kernel.mk` — build `tapsvc.c`.
+- `kernel-services/network/arp.c` — call `tapsvc_dns_age` from the periodic
+  ARP/ND aging.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
-  `selftest.h` — the `net-dhcp` and `net-dns` self-tests.
-- `kernel/core/fwcfg.c` / `kernel/fwcfg.h` (or the existing fw_cfg reader)
-  — the `opt/cosmo/resolver` upstream address.
-- `docs/kernel-services/network/`, `docs/kernel-services/virtualization/`,
-  `README.md` — the design and the Status entry.
+  `kernel/include/kernel/selftest.h` — the `tap-filter`, `net-dhcp` and
+  `net-dns` self-tests.
+- `docs/kernel-services/network/` (design + testing),
+  `docs/kernel-services/virtualization/design.md`, `README.md` — the design
+  and the Status entry.
+
+The `opt/cosmo/resolver` upstream is read through the *existing* fw_cfg
+reader (`fwcfg_get_string`); `kernel/core/fwcfg.c` and `kernel/fwcfg.h` were
+not changed.
 
 ## New APIs
 
 No new system call and no new control-plane ABI: the DHCP half rides a
 tap-local receive filter and `ether_output`, the DNS half binds an in-kernel
 `ksock` socket and reads one read-only `fw_cfg` value. The surface is
-internal — `tapsvc_start(struct netif *tap)` / `tapsvc_stop()`, called from
+internal — `tapsvc_start(struct tap *t)` / `tapsvc_stop()`, called from
 the tap's activation and teardown, plus the tap-local receive-filter hook the
 tap already needs for this.
 
-## Migration plan
+## Migration plan (completed)
+
+Every step below was implemented in the order given; each is done and its
+test passes.
 
 1. **The tap-local receive filter**: `tap.c` hands the service each inbound
    frame before `netif_rx`, and an `ether_output`-based reply path sends a
@@ -268,7 +289,9 @@ tap already needs for this.
    reproducible under `QEMU_MEM=2G`.
 5. **Docs and the Status entry**, and the full verification chain.
 
-## Tests
+## Tests (all passing)
+
+These self-tests exist and pass on both architectures.
 
 - `net-dhcp` (host): a synthetic guest injects DISCOVER on a tap with the
   broadcast flag set; the reply read back off the tap is an OFFER sent as the

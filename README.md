@@ -1103,6 +1103,31 @@ See [docs/development.md](docs/development.md).
   A stock Linux guest with the tap as its gateway reaching the host's network
   is the `QEMU_MEM=2G` reproduction; inbound port-forwarding (DNAT), a
   filtering firewall, and IPv6 NAT are later units.
+- **The guest configures itself: DHCP and a DNS proxy (done):**
+  `docs/audit/next-subsystem-dhcp-dns.md`,
+  `docs/kernel-services/network/design.md` ("Autoconfiguring the guest").
+  The guest reached the world only once configured by hand; now a stock
+  guest with its DHCP client on learns everything from the host.
+  `kernel-services/network/tapsvc.c` is the tap's autoconfiguration service,
+  started when the VM attaches. Its **DHCP server** runs at the frame level
+  (a tap input filter, since the guest has no address yet and a tap is
+  `NETIF_NODEFAULT`, so a routed broadcast cannot reach it): it answers
+  DISCOVER/REQUEST for the tap's single guest slot (`<subnet>.15`) with the
+  gateway as router and DNS and a lease, NAKs a wrong address, refuses a
+  second client, and sends each reply out the tap with `ether_output` per
+  the client's broadcast flag at both layers (RFC 2131 §4.1). Its **DNS
+  proxy** is a `ksock` UDP relay on `<gateway>:53`: it rewrites each query's
+  transaction id to a value unique in a bounded, expiring table, forwards to
+  the `fw_cfg` upstream (`opt/cosmo/resolver`) as the host's own traffic, and
+  restores the guest's id on the answer -- record-type-agnostic, SERVFAIL
+  with no upstream, dropping when the table is full. No new syscall, no
+  writable control surface. Proven by `tap-filter` (the ingress/egress
+  mechanism), `net-dhcp` (DORA, NAK, the broadcast-flag reply, a refused
+  second client) and `net-dns` (a relayed round trip with id rewrite and
+  restore, two queries sharing an id, SERVFAIL, the bounded expiring table).
+  A stock Linux guest autoconfiguring `eth0` and resolving a name is the
+  `QEMU_MEM=2G` reproduction; a general DHCP server, a caching resolver,
+  DHCPv6, and DNS-over-TCP/DNSSEC are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1143,5 +1168,15 @@ See [docs/development.md](docs/development.md).
   that reads them). `docs/audit/next-subsystem-linux.md` did it for
   booting Linux, and Linux now boots (the feature registers modelled, the
   RAM ceiling raised) to its diskless-root panic -- the reader whose
-  opinion of the device tree settles it, and it settled favourably. Design
-  documents first, one subsystem at a time.
+  opinion of the device tree settles it, and it settled favourably. From
+  there the arc gave the guest what a diskless kernel lacked, one subsystem
+  at a time (all built): `-vblk.md` and `-vblk-rw.md`, a virtio-blk root
+  filesystem it can mount and write; `-vnet.md`, a virtio-net interface;
+  `-tap.md`, a host bridge that connects it to the host's own stack;
+  `-nat.md`, connected-subnet routing, IP forwarding and masquerade NAT so
+  the guest reaches beyond the host; and `-dhcp-dns.md`, a DHCP server and a
+  DNS proxy on the tap so a stock guest autoconfigures its interface and
+  resolves names with nothing set by hand. The named next steps are that
+  unit's own follow-ups (a general DHCP server, a caching resolver, DHCPv6,
+  DNS-over-TCP) and, on the guest itself, the `QEMU_MEM=2G` reproduction
+  reaching the real world. Design documents first, one subsystem at a time.

@@ -624,6 +624,53 @@ A stock Linux guest with the tap as its gateway reaching the host's network
 reproduction. Inbound port-forwarding (DNAT), a filtering firewall, and
 IPv6 NAT are later units.
 
+## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
+
+Forwarding and NAT let a guest reach the world, but only after it was
+configured by hand. `tapsvc.c` is the tap's autoconfiguration service,
+started when the VM attaches (`tap_dev_activate`, alongside forward and
+masquerade). It has two halves that reach the guest by different paths
+(`docs/audit/next-subsystem-dhcp-dns.md`).
+
+**DHCP, at the frame level (§2).** The guest has no address yet and its
+DHCP replies are the limited broadcast; a routed socket cannot carry that to
+the tap, since `ipv4_route` sends `255.255.255.255` to `netif_default` and a
+tap is `NETIF_NODEFAULT`. So the DHCP server rides a **tap input filter**
+(`tap_set_input_filter`): the tap hands it each frame the guest injects
+before the stack sees it, and it claims the UDP-to-port-67 ones. It answers
+DISCOVER/REQUEST for the tap's single guest slot (`<subnet>.15`) with the
+tap's own address as router and DNS (`<subnet>.1`) and a lease; a REQUEST for
+any other address is NAK'd, DECLINE/RELEASE free the one binding (keyed by
+`chaddr`), a second client is offered nothing. The reply is built as a frame
+and sent out the tap with `ether_output`, its destination following the
+client's broadcast flag at both layers (RFC 2131 §4.1): flag set (or a NAK)
+→ the limited broadcast (IP `255.255.255.255`, Ethernet `ff:ff:ff:ff:ff:ff`);
+flag clear → IP `yiaddr` with a link-unicast to `chaddr`. Never IP-routed.
+
+**DNS, an ID-rewriting UDP relay (§3).** Once configured, the guest's query
+is a unicast to the gateway `:53` (an address the host owns) and the answer
+a unicast back to the guest (which `ipv4_route` sends out the tap by the
+connected-subnet route), so the proxy is an ordinary in-kernel `ksock`
+service: a socket on `<gateway>:53` and two threads over a bounded, expiring
+pending table. A query is recorded as (guest address, guest port, the
+guest's 16-bit id); the proxy allocates an id unique among outstanding
+entries, rewrites the query's id, and forwards it from one upstream socket to
+the `fw_cfg` upstream (`opt/cosmo/resolver`). The answer's id is the key: the
+proxy restores the guest's id and relays the answer back unchanged apart from
+that id, so two queries sharing an id stay unambiguous. The query leaves as
+the host's own traffic (no NAT), and the proxy never parses names, so any
+record type passes. No upstream configured → the proxy answers `SERVFAIL`.
+The table is bounded (`DNS_PENDING_MAX`) and drops when full; entries expire
+(`tapsvc_dns_age`, called from the periodic ARP/ND aging). UDP only, ≤512
+bytes; TCP DNS and EDNS0 are later.
+
+No new system call and no writable control surface: the DHCP parameters are
+the tap's own configuration and the upstream resolver is a read-only `fw_cfg`
+value. A stock Linux guest with its DHCP client on and the tap as its only
+network autoconfigures `eth0` and resolves a name — the `QEMU_MEM=2G`
+reproduction. A general DHCP server (pools, many clients), a caching or
+recursive resolver, DHCPv6/RA, DNS-over-TCP and DNSSEC are later units.
+
 ## Receive scaling and offloads (post-audit unit 11)
 
 The audit's plan (`docs/audit/2026-09-post-roadmap-audit.md` §19, "After
