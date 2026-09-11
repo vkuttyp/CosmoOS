@@ -214,14 +214,22 @@ step protects:
      `rcv_nxt` draws a challenge), the in-window-SYN check (`:1740` —
      challenge), the missing-ACK check (`:1744`), the RFC 5961 §5 ACK-range
      check (`:1747` — challenge) and the `SYN_RCVD` ACK check (`:1754` —
-     reset) before it is **applied** to the connection. Acceptance is that
-     application — the first mutation of connection state by the segment:
-     the ACK-processing step that advances `snd_una` (`≈:1758`, `≈:1769`),
-     from which data delivery, FIN handling and state transitions follow; a
-     **valid in-window reset** (`seq == rcv_nxt`, `:1731`), which tears the
-     connection down and emits nothing; and the **SYN-cache completion of a
-     passive open whose SYN was admitted earlier** (the ACK that creates the
-     child, exactly as today). A `SYN_SENT` connection's valid SYN+ACK is
+     reset) before it is **applied** to the connection. Acceptance is the point
+     `tcp_input` reaches **after its last rejection `goto out`** — after the
+     §5 range check (`:1750`), or after the `SYN_RCVD` ACK check (`:1757`)
+     when in that state — and **before** the accepted-segment processing that
+     follows, *whatever the segment then does*: the advancing ACK (`:1769`),
+     but equally a **duplicate ACK** whose third arrival builds a fast
+     retransmission (`:1803-1813`), a pure **window update** (`:1816`) that
+     re-enables output, **data with an unchanged ACK** that must be ACKed,
+     and a **FIN** that must be ACKed. Clearing only where `snd_una`
+     advances — an earlier draft — would have processed those four with the
+     batch still quiet and discarded the connection's own required output,
+     disrupting exactly the connections the policy preserves. The other two
+     acceptance points exit before this chain: a **valid in-window reset**
+     (`seq == rcv_nxt`, `:1731`), which tears the connection down and emits
+     nothing, and the **SYN-cache completion of a passive open whose SYN was
+     admitted earlier** (the ACK that creates the child, exactly as today). A `SYN_SENT` connection's valid SYN+ACK is
      applied on the same terms. An **in-window SYN on an existing
      connection** is *not* accepted under quiet: it is a connection-open
      attempt, which the policy refuses silently, and RFC 5961's challenge
@@ -238,7 +246,8 @@ step protects:
      gate is `batch_send` itself, not any one call to it: the batch carries a
      `quiet` bit, set from the mbuf's `M_FW_QUIET` when `tcp_input` begins
      and **cleared at exactly the three acceptance points above** — the
-     ACK-apply step, the valid in-window reset, the SYN-cache completion —
+     post-rejection point (`:1750`/`:1757`), the valid in-window reset, the
+     SYN-cache completion —
      and nowhere earlier; every `goto out` before them is a rejection whose
      batch stays quiet, so whatever it queued (a challenge ACK, a reset, a
      window ACK) is freed. `batch_send` frees a still-quiet batch instead of
@@ -345,11 +354,13 @@ refuse a snapshot whose version is not the one it speaks.
   create nothing, answer nothing".
 - `kernel-services/network/tcp.c` — honour `M_FW_QUIET` structurally:
   `struct tcp_batch` gains a `quiet` bit, set from the mbuf when `tcp_input`
-  begins and cleared at exactly three points — the ACK-apply step
-  (`≈:1758`/`:1769`, after the window `:1703`, RST-position `:1728`,
-  in-window-SYN `:1740`, missing-ACK `:1744`, ACK-range `:1747` and
-  `SYN_RCVD`-ACK `:1754` checks have all passed), a valid in-window reset
-  (`:1731`), and a SYN-cache completion; `batch_send` (`:681`, the sole emitter) frees a still-quiet
+  begins and cleared at exactly three points — the point after the last
+  rejection `goto out` (`:1750`, or `:1757` in `SYN_RCVD`; i.e. once the
+  window `:1703`, RST-position `:1728`, in-window-SYN `:1740`, missing-ACK
+  `:1744`, ACK-range `:1747` and `SYN_RCVD`-ACK `:1754` checks have all
+  passed, and *before* the advancing-ACK, duplicate-ACK/fast-retransmit
+  `:1803-1813`, window-update `:1816`, data and FIN paths), a valid
+  in-window reset (`:1731`), and a SYN-cache completion; `batch_send` (`:681`, the sole emitter) frees a still-quiet
   batch instead of transmitting — so the early flushes at `:1617`/`:1628`
   and the final one at `:1882` are all gated by one line; `challenge_ack`
   (`:673`) returns before `challenge_allowed()` when its batch is quiet
@@ -464,7 +475,7 @@ the host; verdicts awaited on the worker as in `net-input`.
   segment on an *accepted* connection (outside the rule) still draws its RFC
   5961 challenge ACK, proving the host-wide challenge budget was not spent
   on the rejected ones.
-- **The acceptance boundary is the apply step, not the window test**: under
+- **The acceptance boundary is the last rejection check, not the window test**: under
   a DROP rule covering the peer of an accepted connection, an **in-window
   SYN** on that connection draws no challenge ACK (a connection-open attempt
   is refused silently), an in-window segment whose ACK is outside the RFC
@@ -473,6 +484,15 @@ the host; verdicts awaited on the worker as in `net-input`.
   **valid reset** from the peer (`seq == rcv_nxt`) still tears the connection
   down (the accepted socket reports the reset), because a legitimate teardown
   of an existing connection is applied, and emits nothing anyway.
+- **Accepted segments that do not advance `snd_una` keep their output**:
+  under a DROP rule covering the peer of an accepted connection, three
+  **duplicate ACKs** from the peer trigger the fast retransmission (read back
+  on the uplink tap); a pure **window update** from a zero window re-enables
+  a blocked send (the queued data is read back); **data with an unchanged
+  ACK** is delivered and ACKed (the ACK is read back); and the peer's **FIN**
+  is ACKed and the close completes (the socket reads EOF, the connection
+  reaches `CLOSE_WAIT`/`LAST_ACK` as today) — none of the connection's own
+  output is lost to the quiet batch.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
   back, while a type-0 datagram to the host passes the default.
@@ -513,9 +533,12 @@ is sent as today: the ACK-only probe from a source with no connection then
 draws a RST, the bad-sequence segment a challenge ACK, and the out-of-window
 segment a window ACK — one revert, three observed responses); the gate
 placed at the final flush only (the no-pcb path's early flush at `:1617`
-then sends the RST); `quiet` cleared at the window test instead of the
-apply step (the in-window SYN, the out-of-range ACK and the mis-positioned
-reset then each draw a challenge ACK); `challenge_ack` consulting the budget before checking
+then sends the RST); `quiet` cleared at the window test instead of after the last rejection
+check (the in-window SYN, the out-of-range ACK and the mis-positioned reset
+then each draw a challenge ACK); `quiet` cleared only inside the
+advancing-ACK branch (the peer's FIN then draws no ACK and the close hangs,
+a duplicate-ACK triple builds no fast retransmission, and a window update
+re-enables no output); `challenge_ack` consulting the budget before checking
 the quiet bit (the probe burst then starves the accepted connection's
 legitimate challenge ACK); the SYN-cache
 allocation not gated (a new SYN under the DROP rule then draws a SYN-ACK);
