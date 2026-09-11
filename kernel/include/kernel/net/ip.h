@@ -111,6 +111,7 @@ struct ip_stats {
     uint64_t rx, rx_bad_header, rx_bad_cksum, rx_not_for_us, rx_fragments, rx_unknown_proto, tx, tx_no_route;
     uint64_t icmp_echo_rcvd, icmp_echo_replied, icmp_unreach_sent, icmp_ratelimited, icmp_needfrag_rcvd, pmtu_updates;
     uint64_t fwd, fwd_ttl_exceeded, fwd_no_route, fwd_hairpin, fwd_disabled, fwd_nat_drop, fwd_spoofed;
+    uint64_t fwd_filtered;             /* dropped by the forwarding firewall's verdict */
 };
 void ipv4_get_stats(struct ip_stats *out);
 void ipv6_get_stats(struct ip_stats *out);

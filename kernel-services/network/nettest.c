@@ -12,6 +12,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
 #include <uapi/cosmo/netctl.h>
@@ -3530,6 +3531,19 @@ bool selftest_net_dnat(const char **reason)
 
 /* --- the runtime network control channel (/dev/net/tapctl) ---------------- */
 
+/* The byte length a /dev/net/tapctl snapshot should have given `pf_rules`
+ * port-forwards: the port-forward list, then the version-2 filter section
+ * whose counts are read from the buffer itself (attached guests and rules
+ * vary with what other tests left open). */
+static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
+{
+    size_t off = sizeof(struct cosmo_netctl_list) + (size_t)pf_rules * sizeof(struct cosmo_netctl_rule);
+    struct cosmo_netctl_filter_list fh;
+    memcpy(&fh, buf + off, sizeof(fh));
+    return (int64_t)(off + sizeof(fh) + (size_t)fh.guest_count * sizeof(struct cosmo_netctl_filter_guest) +
+                     (size_t)fh.rule_count * sizeof(struct cosmo_netctl_filter_rule));
+}
+
 bool selftest_net_tapctl(const char **reason)
 {
     static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x0a, 0x00, 0x01 };
@@ -3555,7 +3569,11 @@ bool selftest_net_tapctl(const char **reason)
     CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
 
     struct cosmo_netctl cmd;
-    uint8_t rbuf[sizeof(struct cosmo_netctl_list) + NAT_PF_MAX * sizeof(struct cosmo_netctl_rule)];
+    /* Room for the port-forward list and the version-2 filter section that
+     * follows it (its header, up to every guest's policy, and a few rules). */
+    uint8_t rbuf[sizeof(struct cosmo_netctl_list) + NAT_PF_MAX * sizeof(struct cosmo_netctl_rule) +
+                 sizeof(struct cosmo_netctl_filter_list) + FW_MAX_GUESTS * sizeof(struct cosmo_netctl_filter_guest) +
+                 16 * sizeof(struct cosmo_netctl_filter_rule)];
 
     /* (1) FORWARD_ADD through the device installs a rule. */
     memset(&cmd, 0, sizeof(cmd));
@@ -3565,7 +3583,7 @@ bool selftest_net_tapctl(const char **reason)
 
     /* (2) the read listing shows exactly that rule. */
     int64_t rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == (int64_t)(sizeof(struct cosmo_netctl_list) + sizeof(struct cosmo_netctl_rule)));
+    CHECK(rn == netctl_snapshot_len(rbuf, 1));      /* one forward, then the filter section */
     struct cosmo_netctl_list *hdr = (struct cosmo_netctl_list *)rbuf;
     CHECK(hdr->version == COSMO_NETCTL_VERSION && hdr->count == 1);
     struct cosmo_netctl_rule *r0 = (struct cosmo_netctl_rule *)(rbuf + sizeof(*hdr));
@@ -3597,7 +3615,7 @@ bool selftest_net_tapctl(const char **reason)
 
     /* (5) the listing is empty and a client SYN now stays local. */
     rn = file_read(f, rbuf, sizeof(rbuf));
-    CHECK(rn == (int64_t)sizeof(struct cosmo_netctl_list));
+    CHECK(rn == netctl_snapshot_len(rbuf, 0));      /* no forwards, then the filter section */
     CHECK(((struct cosmo_netctl_list *)rbuf)->count == 0);
     l4len = nettest_mk_tcp(l4, client, u_ip, 40002, 8080, TH_SYN);
     flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
@@ -3684,6 +3702,10 @@ bool selftest_net_multiguest(const char **reason)
     static const uint8_t g1mac[6] = { 0x52, 0x54, 0x00, 0x0c, 0x00, 0x1f };
     static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
     uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
+    /* The forwarding firewall drops inter-guest traffic by default (its own
+     * unit, net-firewall, proves that); open A's to-guest policy here so this
+     * step asserts routing and the absence of masquerade, not policy. */
+    CHECK(fw_policy_set(ga, FW_DIR_TO_GUEST, FW_ACCEPT) == 0);
     { struct netif *n1 = netif_find("tap1"); CHECK(n1 != NULL); nettest_seed_arp(n1, gb, g1mac); netif_put(n1); }
     uint8_t pl[4] = { 9, 8, 7, 6 }, l4[64], frame[128], rx[128];
     uint16_t l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
@@ -3749,5 +3771,239 @@ bool selftest_net_multiguest(const char **reason)
 
     kinfo("selftest: net-multiguest: eight opens gave eight taps on eight subnets, a ninth was refused, "
           "frames stayed on their own tap, a close destroyed only its own and its slot was reused");
+    return true;
+}
+
+/* --- the forwarding firewall (docs/audit/next-subsystem-firewall.md) ----- */
+
+/* Inject one datagram from a guest (its file) toward the stack, addressed to
+ * its tap's MAC as a real guest would send to its gateway. */
+static bool fwt_send(struct file *from, const uint8_t tapmac[6], const uint8_t gmac[6],
+                     uint32_t sip, uint32_t dip, uint8_t proto, const uint8_t *l4, uint16_t l4len)
+{
+    uint8_t frame[128];
+    uint32_t flen = nettest_wrap(frame, tapmac, gmac, sip, dip, 64, proto, l4, l4len);
+    return file_write(from, frame, flen) == (int64_t)flen;
+}
+
+/* Poll a guest's file for a forwarded IPv4 datagram, skipping anything else
+ * the stack emits on the tap (ARP, ND). Length, or 0 when none arrived. */
+static int64_t fwt_recv(struct file *to, uint8_t *rx, size_t cap, unsigned tries)
+{
+    for (unsigned i = 0; i < tries; i++) {
+        int64_t n = file_read(to, rx, cap);
+        if (n >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
+            return n;
+        if (n <= 0)
+            thread_sleep_ms(10);
+    }
+    return 0;
+}
+
+/* An ICMP echo of `type` with identifier `id` (checksum left zero: the
+ * forwarding path does not validate it). 16 bytes. */
+static uint16_t fwt_mk_icmp(uint8_t *l4, uint8_t type, uint16_t id)
+{
+    memset(l4, 0, 16);
+    l4[0] = type;
+    l4[4] = (uint8_t)(id >> 8);
+    l4[5] = (uint8_t)id;
+    l4[7] = 1;                              /* sequence */
+    return 16;
+}
+
+bool selftest_net_firewall(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    /* Two guests through /dev/net/tap, as vmctl opens them (so each attaches
+     * to the firewall): A on tap0 (10.0.3.15), B on tap1 (10.0.4.15). */
+    struct file *fa = NULL, *fb = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0a };
+    static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x0d, 0x00, 0x0b };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    static const uint8_t tap1mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcd };
+    { struct netif *n = netif_find("tap0"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 3, 1)); nettest_seed_arp(n, ga, amac); netif_put(n); }
+    { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
+    uint32_t attached[FW_MAX_GUESTS];
+    unsigned na = fw_guest_list(attached, FW_MAX_GUESTS);
+    bool has_a = false, has_b = false;
+    for (unsigned i = 0; i < na; i++) { has_a |= attached[i] == ga; has_b |= attached[i] == gb; }
+    CHECK(has_a && has_b);                               /* both opens attached */
+
+    uint8_t pl[4] = { 1, 2, 3, 4 }, l4[32], rx[128];
+    uint16_t l4len;
+    struct fw_stats fs0, fs1;
+    struct ip_stats is0, is1;
+
+    /* (1) the default: a guest cannot reach its neighbour. A -> B is dropped
+     * by the default policy, counted on both the filter and the IP side. */
+    fw_get_stats(&fs0); ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
+    fw_get_stats(&fs1); ipv4_get_stats(&is1);
+    CHECK(fs1.drop_default > fs0.drop_default && is1.fwd_filtered > is0.fwd_filtered);
+
+    /* (2) the default toward the uplink is unchanged: A -> the world is
+     * accepted (the verdict is what is asserted; the NIC carries it on). */
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, IPV4_ADDR(10, 0, 2, 2), 7000, 53, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, IPV4_ADDR(10, 0, 2, 2), IPPROTO_UDP, l4, l4len));
+    for (unsigned i = 0; i < 20; i++) { fw_get_stats(&fs1); if (fs1.accept_default > fs0.accept_default) break; thread_sleep_ms(10); }
+    CHECK(fs1.accept_default > fs0.accept_default);
+
+    /* (3) one rule punches one hole: A -> B udp/7001 accepted, udp/7002 still dropped. */
+    struct fw_rule allow_udp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                                 .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 7001 };
+    CHECK(fw_rule_add(ga, 0, &allow_udp) == 0);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
+    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == ga && ((struct ipv4_hdr *)(rx + ETH_HLEN))->dst == gb);
+    fw_get_stats(&fs1);
+    CHECK(fs1.accept_rule > fs0.accept_rule && fs1.flow_new > fs0.flow_new);
+    l4len = nettest_mk_udp(l4, ga, gb, 7000, 7002, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
+
+    /* (4) stateful return, the guest-to-guest direction: B's reply to the
+     * accepted flow reaches A with no rule for B; an unsolicited B -> A does not. */
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, gb, ga, 7001, 7000, pl, sizeof(pl));
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);
+    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == gb);
+    fw_get_stats(&fs1);
+    CHECK(fs1.accept_established > fs0.accept_established);
+    l4len = nettest_mk_udp(l4, gb, ga, 9000, 9001, pl, sizeof(pl));
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);
+
+    /* (5) ICMP echo is stateful on the identifier, not a bare reverse tuple. */
+    struct fw_rule allow_icmp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
+                                  .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 0 };
+    CHECK(fw_rule_add(ga, 99, &allow_icmp) == 0);       /* out-of-range index appends */
+    l4len = fwt_mk_icmp(l4, ICMP_ECHO, 0x1234);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_ICMP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);        /* the request, by rule */
+    l4len = fwt_mk_icmp(l4, ICMP_ECHO_REPLY, 0x1234);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);        /* the reply: established */
+    l4len = fwt_mk_icmp(l4, ICMP_ECHO, 0x1234);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* a reverse *request* is not a reply */
+    l4len = fwt_mk_icmp(l4, ICMP_ECHO_REPLY, 0x9999);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_ICMP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* wrong id: no flow */
+
+    /* (6) ordering and identity: a DROP inserted at index 0 wins first-match
+     * for a new flow; deleting it by tuple restores the ACCEPT; a duplicate
+     * tuple is refused. */
+    struct fw_rule deny_udp = allow_udp;
+    deny_udp.verdict = FW_DROP;
+    CHECK(fw_rule_add(ga, 0, &deny_udp) == 0);
+    struct fw_rule listed[FW_RULES_PER_GUEST];
+    CHECK(fw_rule_list(ga, listed, FW_RULES_PER_GUEST) == 3 && listed[0].verdict == FW_DROP &&
+          listed[1].verdict == FW_ACCEPT && listed[1].proto == IPPROTO_UDP && listed[2].proto == IPPROTO_ICMP);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gb, 7100, 7001, pl, sizeof(pl));   /* a new flow, not the live one */
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
+    fw_get_stats(&fs1);
+    CHECK(fs1.drop_rule > fs0.drop_rule);
+    CHECK(fw_rule_del(ga, &deny_udp) == 0);
+    CHECK(fw_rule_del(ga, &deny_udp) == -ENOENT);
+    CHECK(fw_rule_add(ga, 0, &allow_udp) == -EEXIST);
+    l4len = nettest_mk_udp(l4, ga, gb, 7101, 7001, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
+
+    /* (7) a rule is bound to a guest by address, not to the control handle:
+     * added for B through /dev/net/tapctl, it takes effect after that handle
+     * is closed; B's release purges it, an add for the departed B is refused,
+     * and a fresh tap at B's address starts with no rules. */
+    struct file *fctl = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
+                                     .guest_addr = gb, .direction = COSMO_NETCTL_DIR_TO_GUEST,
+                                     .proto = COSMO_NETCTL_PROTO_UDP, .dst_prefix = 32,
+                                     .verdict = COSMO_NETCTL_VERDICT_ACCEPT, .dst_addr = ga, .dst_port = 5000 };
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    file_put(fctl); fctl = NULL;                         /* the transient handle vmctl would close */
+    l4len = nettest_mk_udp(l4, gb, ga, 5001, 5000, pl, sizeof(pl));
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);        /* the rule outlived its handle */
+    file_put(fb); fb = NULL;                             /* B departs: purged and detached */
+    struct fw_rule b_rule = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                              .verdict = FW_ACCEPT, .dst_ip = ga, .dst_port = 5000 };
+    CHECK(fw_rule_add(gb, 0, &b_rule) == -ENOENT);       /* an add after teardown is refused */
+    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);   /* slot 1 reused */
+    { struct netif *n = netif_find("tap1"); CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 4, 1)); nettest_seed_arp(n, gb, bmac); netif_put(n); }
+    CHECK(fw_rule_list(gb, listed, FW_RULES_PER_GUEST) == 0);   /* the reused address inherits nothing */
+    l4len = nettest_mk_udp(l4, gb, ga, 5001, 5000, pl, sizeof(pl));
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);       /* no stale rule, no stale flow */
+
+    /* (8) the control round trip: an ADD is listed with its guest and index;
+     * POLICY flips the default and the next verdict follows; bad writes change nothing. */
+    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    c.guest_addr = ga; c.proto = COSMO_NETCTL_PROTO_TCP; c.dst_addr = gb; c.dst_port = 445; c.at_index = 0;
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    uint8_t snap[512];
+    int64_t sn = file_read(fctl, snap, sizeof(snap));
+    CHECK(sn > 0);
+    {
+        struct cosmo_netctl_list ph; memcpy(&ph, snap, sizeof(ph));
+        size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
+        struct cosmo_netctl_filter_list fh; memcpy(&fh, snap + off, sizeof(fh));
+        CHECK(fh.version == COSMO_NETCTL_VERSION && fh.guest_count >= 2 && fh.rule_count >= 3);
+        off += sizeof(fh) + (size_t)fh.guest_count * sizeof(struct cosmo_netctl_filter_guest);
+        bool seen = false;
+        for (unsigned i = 0; i < fh.rule_count; i++) {
+            struct cosmo_netctl_filter_rule fr; memcpy(&fr, snap + off + i * sizeof(fr), sizeof(fr));
+            if (fr.guest_addr == ga && fr.proto == COSMO_NETCTL_PROTO_TCP && fr.dst_port == 445)
+                seen = fr.index == 0 && fr.verdict == COSMO_NETCTL_VERDICT_ACCEPT && fr.dst_addr == gb;
+        }
+        CHECK(seen);
+        CHECK(sn == netctl_snapshot_len(snap, ph.count));
+    }
+    struct cosmo_netctl_filter pol = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_POLICY,
+                                       .guest_addr = ga, .direction = COSMO_NETCTL_DIR_TO_GUEST,
+                                       .verdict = COSMO_NETCTL_VERDICT_ACCEPT };
+    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
+    l4len = nettest_mk_udp(l4, ga, gb, 7200, 7777, pl, sizeof(pl));   /* no rule: the default decides */
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);
+    pol.verdict = COSMO_NETCTL_VERDICT_DROP;
+    CHECK(file_write(fctl, &pol, sizeof(pol)) == (int64_t)sizeof(pol));
+    l4len = nettest_mk_udp(l4, ga, gb, 7201, 7777, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 15) == 0);
+    CHECK(file_write(fctl, &c, 4) == -EINVAL);                          /* short */
+    struct cosmo_netctl_filter bad = c;
+    bad.version = 99;
+    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOTSUP);             /* wrong version */
+    bad = c; bad.guest_addr = IPV4_ADDR(10, 0, 9, 15);
+    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOENT);              /* not an attached guest */
+    bad = c; bad.op = COSMO_NETCTL_FILTER_DEL; bad.dst_port = 446;
+    CHECK(file_write(fctl, &bad, sizeof(bad)) == -ENOENT);              /* no such tuple */
+    bad = c; bad.proto = COSMO_NETCTL_PROTO_ICMP; bad.dst_port = 53;
+    CHECK(file_write(fctl, &bad, sizeof(bad)) == -EINVAL);              /* ports do not apply to ICMP */
+    file_put(fctl);
+
+    file_put(fa);
+    file_put(fb);
+    fw_flush();
+    kinfo("selftest: net-firewall: inter-guest dropped by default and uplink accepted, one rule punched one hole, "
+          "a reply was admitted by state (echo by id, not a reverse request), a DROP inserted first won and was "
+          "deleted by tuple, a rule outlived its handle but not its guest, and the control listing round-tripped");
     return true;
 }

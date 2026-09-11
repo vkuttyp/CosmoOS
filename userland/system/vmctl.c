@@ -41,7 +41,10 @@ static int usage(void)
     fprintf(stderr, "usage: vmctl probe | info | run [-m KIB] [-a GPA] [-e ENTRY] IMAGE\n"
                     "       vmctl run --machine [-m MIB] [-c NCPUS] [--disk FILE | --disk-rw FILE] [--net loop | --net tap] "
                     "[--append CMDLINE] IMAGE\n"
-                    "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n");
+                    "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n"
+                    "       vmctl filter add|del GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]\n"
+                    "                    | policy GUESTADDR DIR VERDICT | list\n"
+                    "         DIR any|uplink|guest  PROTO any|icmp|tcp|udp  DST addr|any  PORT n|any  VERDICT accept|drop\n");
     return 2;
 }
 
@@ -939,6 +942,166 @@ static int pf_port(const char *s, uint16_t *out)
     return 0;
 }
 
+/* --- the forwarding firewall (docs/audit/next-subsystem-firewall.md) ----- */
+
+static int fw_dir(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "any") == 0)         *out = COSMO_NETCTL_DIR_ANY;
+    else if (strcmp(s, "uplink") == 0) *out = COSMO_NETCTL_DIR_TO_UPLINK;
+    else if (strcmp(s, "guest") == 0)  *out = COSMO_NETCTL_DIR_TO_GUEST;
+    else return -1;
+    return 0;
+}
+
+static int fw_proto(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "any") == 0)       *out = COSMO_NETCTL_PROTO_ANY;
+    else if (strcmp(s, "icmp") == 0) *out = COSMO_NETCTL_PROTO_ICMP;
+    else if (strcmp(s, "tcp") == 0)  *out = COSMO_NETCTL_PROTO_TCP;
+    else if (strcmp(s, "udp") == 0)  *out = COSMO_NETCTL_PROTO_UDP;
+    else return -1;
+    return 0;
+}
+
+static int fw_verdict(const char *s, uint8_t *out)
+{
+    if (strcmp(s, "accept") == 0)    *out = COSMO_NETCTL_VERDICT_ACCEPT;
+    else if (strcmp(s, "drop") == 0) *out = COSMO_NETCTL_VERDICT_DROP;
+    else return -1;
+    return 0;
+}
+
+/* "any" -> 0/0; "a.b.c.d" -> /32; "a.b.c.d/n" -> /n. */
+static int fw_dst(const char *s, uint32_t *addr, uint8_t *prefix)
+{
+    if (strcmp(s, "any") == 0) { *addr = 0; *prefix = 0; return 0; }
+    char buf[32];
+    if (strlen(s) >= sizeof(buf)) return -1;
+    strcpy(buf, s);
+    char *slash = strchr(buf, '/');
+    unsigned p = 32;
+    if (slash) {
+        *slash = 0;
+        char *end;
+        unsigned long v = strtoul(slash + 1, &end, 10);
+        if (*end || v > 32) return -1;
+        p = (unsigned)v;
+    }
+    if (inet_pton(AF_INET, buf, addr) != 1) return -1;
+    *prefix = (uint8_t)p;
+    return 0;
+}
+
+static const char *fw_dir_name(uint8_t d)
+{
+    return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" : "any";
+}
+static const char *fw_proto_name(uint8_t p)
+{
+    return p == COSMO_NETCTL_PROTO_TCP ? "tcp" : p == COSMO_NETCTL_PROTO_UDP ? "udp" :
+           p == COSMO_NETCTL_PROTO_ICMP ? "icmp" : "any";
+}
+static const char *fw_verdict_name(uint8_t v)
+{
+    return v == COSMO_NETCTL_VERDICT_ACCEPT ? "accept" : "drop";
+}
+
+/* vmctl filter add    GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]
+ *              del    GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT
+ *              policy GUESTADDR DIR VERDICT
+ *              list
+ * A rule is named by its whole tuple (there is no id to return through a
+ * write); `del` gives the tuple `add` installed. Over /dev/net/tapctl. */
+static int filter(int argc, char **argv)
+{
+    if (argc < 1)
+        return usage();
+    int fd = open("/dev/net/tapctl", O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "vmctl: cannot open /dev/net/tapctl: %s\n", strerror(errno));
+        return 1;
+    }
+    int rc = 1;
+    if (strcmp(argv[0], "list") == 0) {
+        unsigned char buf[4096];
+        int64_t n = read(fd, buf, sizeof(buf));
+        if (n < (int64_t)sizeof(struct cosmo_netctl_list)) {
+            fprintf(stderr, "vmctl: list failed: %s\n", strerror(errno));
+            goto out;
+        }
+        struct cosmo_netctl_list ph;
+        memcpy(&ph, buf, sizeof(ph));
+        size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
+        struct cosmo_netctl_filter_list fh;
+        if ((size_t)n < off + sizeof(fh)) {
+            fprintf(stderr, "vmctl: snapshot carries no filter section\n");
+            goto out;
+        }
+        memcpy(&fh, buf + off, sizeof(fh));
+        off += sizeof(fh);
+        for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
+            struct cosmo_netctl_filter_guest fg;
+            memcpy(&fg, buf + off, sizeof(fg));
+            char ip[16];
+            inet_ntop(AF_INET, &fg.guest_addr, ip, sizeof(ip));
+            printf("%s policy: uplink %s, guest %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
+                   fw_verdict_name(fg.policy_to_guest));
+        }
+        for (unsigned i = 0; i < fh.rule_count; i++, off += sizeof(struct cosmo_netctl_filter_rule)) {
+            struct cosmo_netctl_filter_rule fr;
+            memcpy(&fr, buf + off, sizeof(fr));
+            char ip[16], dst[16];
+            inet_ntop(AF_INET, &fr.guest_addr, ip, sizeof(ip));
+            inet_ntop(AF_INET, &fr.dst_addr, dst, sizeof(dst));
+            printf("%s [%u] %s %s %s/%u %u %s\n", ip, fr.index, fw_dir_name(fr.direction),
+                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, fr.dst_port,
+                   fw_verdict_name(fr.verdict));
+        }
+        rc = 0;
+        goto out;
+    }
+
+    struct cosmo_netctl_filter c;
+    memset(&c, 0, sizeof(c));
+    c.version = COSMO_NETCTL_VERSION;
+    if (strcmp(argv[0], "policy") == 0) {
+        if (argc != 4 || inet_pton(AF_INET, argv[1], &c.guest_addr) != 1 || fw_dir(argv[2], &c.direction) != 0 ||
+            c.direction == COSMO_NETCTL_DIR_ANY || fw_verdict(argv[3], &c.verdict) != 0) {
+            usage(); goto out;
+        }
+        c.op = COSMO_NETCTL_FILTER_POLICY;
+    } else if (strcmp(argv[0], "add") == 0 || strcmp(argv[0], "del") == 0) {
+        int add = argv[0][0] == 'a';
+        if (argc != 7 && !(add && argc == 8)) { usage(); goto out; }
+        if (inet_pton(AF_INET, argv[1], &c.guest_addr) != 1 || fw_dir(argv[2], &c.direction) != 0 ||
+            fw_proto(argv[3], &c.proto) != 0 || fw_dst(argv[4], &c.dst_addr, &c.dst_prefix) != 0 ||
+            fw_verdict(argv[6], &c.verdict) != 0) {
+            usage(); goto out;
+        }
+        if (strcmp(argv[5], "any") != 0 && pf_port(argv[5], &c.dst_port) != 0) {
+            fprintf(stderr, "vmctl: bad port\n"); goto out;
+        }
+        if (argc == 8) {
+            char *end;
+            unsigned long v = strtoul(argv[7], &end, 10);
+            if (*end || v > 0xffff) { usage(); goto out; }
+            c.at_index = (uint16_t)v;
+        }
+        c.op = add ? COSMO_NETCTL_FILTER_ADD : COSMO_NETCTL_FILTER_DEL;
+    } else {
+        usage();
+        goto out;
+    }
+    if (write(fd, &c, sizeof(c)) != (int64_t)sizeof(c)) {
+        fprintf(stderr, "vmctl: filter %s failed: %s\n", argv[0], strerror(errno));
+        goto out;
+    }
+    rc = 0;
+out:
+    close(fd);
+    return rc;
+}
+
 /* vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT
  *                   del PROTO HOSTPORT
  *                   list
@@ -1016,5 +1179,7 @@ int main(int argc, char **argv)
         return run(argc - 2, argv + 2);
     if (strcmp(argv[1], "port-forward") == 0)
         return port_forward(argc - 2, argv + 2);
+    if (strcmp(argv[1], "filter") == 0)
+        return filter(argc - 2, argv + 2);
     return usage();
 }

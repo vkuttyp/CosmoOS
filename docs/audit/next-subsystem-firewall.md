@@ -1,8 +1,11 @@
 # NEXT SUBSYSTEM — a stateful packet-filter firewall for the guest taps
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "A forwarding firewall: who may reach whom"), and the
+design below is as built — see `docs/kernel-services/network/design.md` ("A
+forwarding firewall") for the shipped description and
+`docs/kernel-services/network/testing.md` (`net-firewall`) for its proofs.
 
 **Subsystem: a stateful FORWARD-chain firewall over the guest taps. An
 ordered rule list and a per-direction default policy decide whether a
@@ -79,7 +82,7 @@ already exists.
   a counter, so each rule and the stateful return path can be bug-proofed by
   injection exactly as `net-forward`/`net-dnat` are.
 
-## Proposed design
+## Design (as built)
 
 ### 1. The filter model
 
@@ -213,9 +216,17 @@ adopted: **the liveness re-check and the insertion happen under a single hold
 of `g_fw_lock`, and the tap's `release` takes `g_fw_lock` to run
 `fw_guest_purge` before the slot is freed** — so an insert either completes
 before teardown starts or sees the guest already gone and is refused, and a
-reused address starts with no rules. (Equivalently, a per-slot generation the
-rule records and purge invalidates; the single-lock form is simpler and
-matches the existing `g_pf_lock` discipline.) Lock order: `g_fw_lock` →
+reused address starts with no rules. As built, the liveness check is the firewall's **own attachment registry**
+rather than a `netif_connected` re-check: `tap_chr_open` calls
+`fw_guest_attach` last (after every step that can fail), `tap_chr_release`
+calls `fw_guest_purge` (detach + remove rules, policy and every flow naming
+the address) beside `nat_guest_purge`, and `fw_rule_add`/`fw_policy_set`
+require the guest attached — all under `g_fw_lock`. A `netif_connected`
+re-check would not have closed the window, because the tap stays "connected"
+until `tap_destroy`, which runs *after* the purge; the registry flips
+atomically with the purge, so purge-then-add is refused (`-ENOENT`) and
+add-then-purge is cleaned. (The per-slot-generation alternative the draft
+allowed is subsumed: attachment *is* the generation.) Lock order: `g_fw_lock` →
 `g_nat_lock` (the filter runs before NAT).
 
 ### 5. Deliberately out of scope (named, later units)
@@ -275,7 +286,7 @@ matches the existing `g_pf_lock` discipline.) Lock order: `g_fw_lock` →
 - No new system call — the control channel is the surface, as the netctl and
   multi-guest units established.
 
-## Migration plan
+## Migration (done, in the planned order)
 
 1. `fw.h` + `fw.c`: the rule list, default policy (inter-guest DROP,
    to-uplink ACCEPT), and stateless verdict; wire `fw_forward_verdict` into

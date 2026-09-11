@@ -9,6 +9,7 @@
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
@@ -462,6 +463,19 @@ static void ipv4_forward(struct netif *in, struct mbuf *m,
         /* Back out the arrival interface (a redirect we do not do), or a
          * martian destination routing to loopback: drop, do not reflect. */
         STAT(fwd_hairpin);
+        netif_put(out);
+        m_freem(m);
+        return;
+    }
+
+    /* The forwarding firewall: an accept/drop verdict on the datagram as the
+     * guest sent it -- after anti-spoof and routing (so the direction, uplink
+     * or peer tap, is known from `out`) and before any source rewrite, so
+     * rules see guest-visible addresses. A guest-to-guest reply is admitted
+     * here by the filter's own flow state; a masqueraded reply never comes
+     * this way (nat_in delivers it on the strength of its conntrack entry). */
+    if (fw_forward_verdict(in, out, m, iph, ihl) == FW_DROP) {
+        STAT(fwd_filtered);
         netif_put(out);
         m_freem(m);
         return;
