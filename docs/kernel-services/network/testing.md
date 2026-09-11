@@ -457,7 +457,10 @@ DROP then delivers the SYN and a SYN-ACK is read back); a source match that
 ignores the prefix (the out-of-prefix SYN then drops); `batch_send` not
 honouring the quiet bit (the ACK-only probe then draws a RST, the
 out-of-window segment a window ACK, the in-window SYN a challenge — one
-revert, three observed responses); the quiet bit cleared at the window test
+revert, three observed responses); the gate placed at the final flush only
+instead of inside `batch_send` (the listener-rejection early flush then
+escapes it: the sourced DROP's SYN is not even counted `quiet_dropped`, and
+behind it the no-pcb flush sends the RST); the quiet bit cleared at the window test
 instead of after the last rejection (the in-window SYN and the mis-positioned
 reset then draw challenge ACKs); the bit cleared only inside the advancing-ACK
 branch (the window update then releases nothing, the third duplicate ACK

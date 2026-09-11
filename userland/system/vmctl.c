@@ -1197,7 +1197,10 @@ static int port_forward(int argc, char **argv)
     }
     int rc = 1;
     if (strcmp(argv[0], "list") == 0) {
-        unsigned char buf[sizeof(struct cosmo_netctl_list) + 64 * sizeof(struct cosmo_netctl_rule)];
+        /* The read returns the whole snapshot -- the port-forward list and
+         * the filter section behind it -- or refuses a short buffer, so this
+         * must hold every configuration the ABI allows, as `filter list` does. */
+        static unsigned char buf[COSMO_NETCTL_SNAPSHOT_MAX];
         int64_t n = read(fd, buf, sizeof(buf));
         if (n < (int64_t)sizeof(struct cosmo_netctl_list)) {
             fprintf(stderr, "vmctl: list failed: %s\n", strerror(errno));

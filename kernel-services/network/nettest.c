@@ -4861,7 +4861,14 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1013, iss1 + 151, TH_ACK, 64240, data, 10);   /* unchanged ACK */
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 50) == 20);
+    {
+        /* 20 bytes, whether the read catches them together or one segment
+         * at a time (the worker may still be queuing the second). */
+        int64_t got = 0, n;
+        while (got < 20 && (n = hin_recv_sock(a1, buf + got, sizeof(buf) - (size_t)got, 50)) > 0)
+            got += n;
+        CHECK(got == 20);
+    }
     {
         /* Both segments are acknowledged: at once, or the first at once and
          * the second by the delayed-ACK timer -- the last ACK names 1023. */

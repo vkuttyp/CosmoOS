@@ -1290,7 +1290,7 @@ See [docs/development.md](docs/development.md).
   outbound connections against every probe shape and every rejection check,
   no budget or keepalive side effect, dup-ACK/window-update/data/FIN output
   kept, a valid reset applied, ICMP by type, off-link drops, DNAT never
-  re-gated, scope refusals, the listing round trip) with thirteen bug-proofs.
+  re-gated, scope refusals, the listing round trip) with fourteen bug-proofs.
   Reply state for unconnected UDP and ICMP, per-interface host chains, an
   OUTPUT chain, rate-limit/log targets and IPv6 are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
