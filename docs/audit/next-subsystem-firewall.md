@@ -108,25 +108,51 @@ An operator tightens or loosens either default and inserts rules (e.g.
 deny, or "guest A → any udp/53 ACCEPT" then "guest A → any DROP" to confine a
 guest to DNS).
 
-### 2. Stateful return traffic
+### 2. Stateful return traffic — which direction actually needs filter state
 
-The filter is **stateful**: a NEW forwarded flow that a rule (or the default)
-accepts records a flow entry keyed on the connected 5-tuple + ingress; its
-reply — the reverse 5-tuple arriving on the forward path — matches as
-**ESTABLISHED** and is accepted without a reverse rule, the universal
-expectation of a stateful firewall. The filter keeps **its own** bounded
-flow table (it is not NAT's job, and guest→guest flows are absent from
-conntrack); entries carry the short/long idle timeouts conntrack already
-defines and are reclaimed by the same periodic `nat_age` tick the network
-worker runs. TCP state is coarse (NEW vs established-by-ACK, as `nat_entry.
-tcp_est` already is); a first cut need not track full TCP state machines.
+A correct reading of the reply paths (verified against `nat.c`) splits the
+problem in two, and only one half needs the filter's own state:
 
-Interaction with NAT, made explicit: a masqueraded guest→uplink reply
-re-enters through `nat_in`, is un-translated back to the guest 5-tuple, and
-then (routed to the tap) traverses `ipv4_forward` again — where the filter
-sees the guest-visible reverse tuple and matches the ESTABLISHED entry. The
-filter therefore reads the same tuple for a flow's request and its reply, so
-one flow entry covers both.
+- **guest→uplink (masqueraded).** The reply is addressed to the host's
+  uplink address, so `ipv4_input` hands it to `nat_in`, which un-translates
+  it and delivers it to the guest via `nat_forward_to` → `ipv4_output`
+  (`nat.c:444`, `nat.c:592`) — it **does not** re-enter `ipv4_forward`, so
+  `fw_forward_verdict` never sees it. That is safe and wanted: a masqueraded
+  reply exists only because a matching NAT conntrack entry exists, and that
+  entry was created only when the guest's outbound NEW flow was **accepted**
+  by `fw_forward_verdict` on the way out. **The NAT conntrack entry is the
+  stateful evidence for this direction** — no reply rule and no filter flow
+  entry are needed; `nat_in` already drops a reply with no matching entry.
+  (An earlier draft of this report wrongly claimed the reply re-traverses
+  `ipv4_forward`; it does not, and the design does not rely on it.)
+- **guest→guest (un-NAT'd).** Both the request and the reply traverse
+  `ipv4_forward` (neither is translated). This is the **only** direction in
+  which the firewall must carry its own state: an accepted NEW A→B flow
+  records a flow entry, and B→A matching the reverse of that entry is
+  **ESTABLISHED** and accepted without a reverse rule. Conntrack cannot serve
+  here because un-NAT'd guest→guest flows are absent from it.
+- **inbound DNAT (client→guest).** Authorized by the port-forward rule, and
+  also delivered via `nat_in` → `ipv4_output`, not the FORWARD chain — so the
+  FORWARD filter neither gates nor needs to gate it; the pf rule is its
+  policy. (Filtering inbound-to-guest beyond the pf rule is a later INPUT-
+  style refinement.)
+
+So the filter keeps **its own** bounded flow table used for the guest→guest
+direction, with the short/long idle timeouts conntrack already defines,
+reclaimed by the same periodic tick as `nat_age`. Flow-key semantics by
+protocol:
+
+- **TCP/UDP** — the 5-tuple `(proto, src_ip, src_port, dst_ip, dst_port)`;
+  the reply is the swapped tuple. TCP state is coarse (NEW vs
+  established-by-ACK, as `nat_entry.tcp_est` already is); no full TCP state
+  machine in this unit.
+- **ICMP** — only **echo** is stateful, keyed on `(src_ip, dst_ip, echo id)`
+  with the request being type 8 and its reply type 0 carrying the **same
+  echo identifier** (exactly what NAT already tracks in `orig_port` for ICMP
+  echo). A B→A echo *request* is not a reply and never matches A→B echo
+  state; non-echo ICMP is not stateful-tracked and is governed by rules /
+  default only. This prevents unrelated B→A ICMP being classified
+  ESTABLISHED.
 
 ### 3. Where the verdict is enforced
 
@@ -144,19 +170,36 @@ but deferred, keeping the unit to the guest-isolation problem it solves.
 Extend `/dev/net/tapctl` and `kernel/include/uapi/cosmo/netctl.h` with, under
 a bumped `COSMO_NETCTL_VERSION`:
 
-- `FILTER_ADD` / `FILTER_DEL` — add/remove a rule (a versioned
-  `struct cosmo_netctl_filter` carrying direction, proto, dst addr/prefix,
-  dst port, verdict, and a stable rule id or an explicit position for
-  ordering).
-- `FILTER_POLICY` — set the default policy for a direction.
-- The read snapshot grows a filter-rule section (a second versioned list
-  after the existing port-forward list, or a selector in the request), so an
-  operator reads back exactly the installed rules and policy.
+- `FILTER_ADD` — add a rule. The command struct names the guest explicitly
+  in its payload (a `guest_addr` field, exactly as `FORWARD_ADD` already
+  does), the direction, proto, dst addr/prefix, dst port, and verdict. The
+  **kernel assigns a stable rule id** (a small monotonic counter per guest,
+  never reused while the rule lives) and returns it to the caller (the write
+  yields the id, and it also appears in the read-listing). Ordering:
+  `FILTER_ADD` **appends** by default (evaluation order = insertion order);
+  an optional `before_id` field inserts ahead of an existing rule for
+  deterministic placement, `0` meaning append.
+- `FILTER_DEL` — remove the rule with a given `(guest_addr, rule_id)`.
+- `FILTER_POLICY` — set the default policy (`ACCEPT`/`DROP`) for a
+  `(guest_addr, direction)`.
+- The read snapshot grows a filter section — a second versioned list after
+  the port-forward list (selected by a field in the read request) — emitting
+  each rule **with its id, in evaluation order**, plus the current default
+  policy per direction, so an operator reads back exactly what is installed
+  and can delete or re-order by id.
 
-Rules are **guest-scoped** as the forwards are: a rule added through one
-guest's control handle binds to that guest's tap (its ingress), so one
-tenant cannot write another's policy. `vmctl` grows `filter add|del|list`
-and `filter policy` subcommands mirroring `port-forward`.
+**Guest binding — the same model the forwards use, not a handle-bound one.**
+`/dev/net/tapctl` carries no per-open guest state, and `vmctl` opens a fresh,
+transient handle per command (so a handle-scoped rule would be discarded the
+moment `vmctl` exits). A rule therefore identifies its guest **by address in
+the payload**, validated the way `nat_pf_add` validates a forward target —
+the address must be a live guest tap (`NETIF_FORWARD`), so a command cannot
+install policy for a non-existent or non-guest address, and rules survive the
+control handle closing. Teardown keys on that address: the tap's `release`
+calls `fw_guest_purge(guest_ip)` beside `nat_guest_purge`, removing only that
+guest's rules, policy and flow state. `vmctl` grows `filter add|del|list` and
+`filter policy` subcommands mirroring `port-forward`, each taking the guest
+address as `port-forward` does.
 
 ### 5. Deliberately out of scope (named, later units)
 
@@ -181,8 +224,8 @@ and `filter policy` subcommands mirroring `port-forward`.
 - `kernel-services/network/ipv4.c` — call `fw_forward_verdict` in
   `ipv4_forward`; a dropped datagram is freed and counted.
 - `kernel-services/network/tap.c` — dispatch the new opcodes in
-  `tap_ctl_write`; extend the `tap_ctl_read` snapshot; scope rules to the
-  opening handle's guest.
+  `tap_ctl_write`; extend the `tap_ctl_read` snapshot; validate each rule's
+  payload `guest_addr` against a live guest tap (as `nat_pf_add` does).
 - `kernel-services/network/nat.c` / the network worker — call `fw_age` from
   the same periodic sweep as `nat_age`.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
@@ -196,13 +239,18 @@ and `filter policy` subcommands mirroring `port-forward`.
 - In-kernel (`fw.h`): `enum fw_verdict { FW_ACCEPT, FW_DROP };`
   `fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct
   mbuf *m, const struct ipv4_hdr *iph, unsigned ihl);`
-  `int fw_rule_add(uint32_t guest_ip, const struct fw_rule *r);`
-  `int fw_rule_del(uint32_t guest_ip, uint32_t rule_id);`
-  `unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned
-  max);` `int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t
-  verdict);` `void fw_age(uint64_t now_ns);` `void fw_flush(void);`
-  `void fw_guest_purge(uint32_t guest_ip);` `void fw_get_stats(struct fw_stats
-  *);`
+  `int fw_rule_add(uint32_t guest_ip, uint32_t before_id, const struct fw_rule
+  *r);` — **returns the assigned rule id (>0) or -errno**; `before_id == 0`
+  appends, else inserts ahead of that id. `int fw_rule_del(uint32_t guest_ip,
+  uint32_t rule_id);` `unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule
+  *out, unsigned max);` — fills each `fw_rule.id` in evaluation order.
+  `int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict);`
+  `void fw_age(uint64_t now_ns);` `void fw_flush(void);` `void
+  fw_guest_purge(uint32_t guest_ip);` `void fw_get_stats(struct fw_stats *);`
+  `struct fw_rule` carries `{ id, direction, proto, dst_ip, dst_prefix,
+  dst_port, verdict }`; the id is kernel-assigned (a per-guest monotonic
+  counter), so the caller never supplies one on add and always has one to
+  delete/re-order by.
 - UAPI (`netctl.h`): `COSMO_NETCTL_FILTER_ADD/DEL/POLICY`, `struct
   cosmo_netctl_filter`, `struct cosmo_netctl_filter_rule`, a bumped version.
 - No new system call — the control channel is the surface, as the netctl and
@@ -237,18 +285,36 @@ are (`tap_inject`/`tap_recv`, `nettest_mk_udp/tcp`, `nettest_wrap`, stats via
   reaches B; A→B on another port/proto still drops.
 - **To-uplink default ACCEPT unchanged**: a guest→uplink flow forwards as it
   does today.
-- **Stateful return**: B's reply to an accepted A→B flow reaches A with no
-  reverse rule; an *unsolicited* B→A packet (no flow, no rule) is dropped.
-- **Guest-scoped rules**: a rule added on A's handle does not filter B's
-  traffic; `fw_guest_purge` on close removes only A's rules/flows.
-- **Control round-trip**: `FILTER_ADD` then the read snapshot lists exactly
-  that rule; `FILTER_DEL` removes it; `FILTER_POLICY` flips a default and the
-  next packet's verdict follows; a short write / wrong version / off-guest
-  target is rejected and changes nothing.
+- **Stateful return (guest→guest, the direction that needs filter state)**:
+  B's TCP/UDP reply to an accepted A→B flow reaches A with no reverse rule;
+  an *unsolicited* B→A packet (no flow, no rule) is dropped.
+- **NAT'd reply needs no filter state**: an accepted guest→uplink flow's
+  masqueraded reply reaches the guest (it is delivered by `nat_in`, gated by
+  the NAT conntrack entry, not by the FORWARD chain); a reply with no NAT
+  entry is dropped by `nat_in` as today.
+- **ICMP echo state, not a bare reverse tuple**: an accepted A→B echo request
+  (type 8, id X) admits B's echo reply (type 0, id X); a B→A echo *request*
+  (type 8) after it is still dropped (it is not a reply), and an echo reply
+  with a different id does not match.
+- **Rules are bound by payload address, not by handle**: a rule added for
+  guest A (named in the payload) filters only A's traffic and **survives the
+  control handle closing** (added, handle closed, then the next A→B packet
+  still obeys it); `fw_guest_purge` on A's tap release removes only A's
+  rules/policy/flows, B's untouched.
+- **Rule identity and ordering**: `FILTER_ADD` returns a stable id; the read
+  snapshot lists rules with their ids in evaluation order; a second add with
+  `before_id` lands ahead of the named rule (a later-listed overlapping
+  DROP before an ACCEPT changes the verdict); `FILTER_DEL` by id removes
+  exactly that rule and the rest keep their order.
+- **Control round-trip and rejection**: `FILTER_POLICY` flips a default and
+  the next packet's verdict follows; a short write / wrong version /
+  non-guest `guest_addr` / unknown `rule_id` on DEL is rejected and changes
+  nothing.
 
 Each assertion bug-proofed by reintroducing the defect (e.g. a verdict that
 always ACCEPTs → the inter-guest drop test fails; a state table that never
-records a flow → the stateful-return test fails).
+records a flow → the guest→guest stateful-return test fails; an ICMP match
+that ignores the echo id → the wrong-id reply is wrongly admitted).
 
 ## Benchmarks
 
@@ -268,13 +334,15 @@ the NAT table's.
 - **Stateful-table exhaustion / DoS.** A guest opening endless flows could
   fill the flow table. Mitigation: a per-guest quota as the NAT table has
   (`NAT_QUOTA_PER_GUEST`'s sibling), so one guest starves only itself.
-- **Filter/NAT ordering subtleties.** Evaluating on the guest-visible tuple
-  (pre-masquerade, post-un-NAT) is what makes request and reply share a flow
-  entry; getting the call site wrong (after `nat_out` rewrote the source)
-  would make rules see translated addresses. Mitigation: the verdict is
-  called before `nat_out`, and the reply is filtered after `nat_in`
-  un-translates — a specific bug-proof asserts a masqueraded flow's reply is
-  accepted as ESTABLISHED.
+- **Filter/NAT ordering subtleties.** The verdict must run on the
+  guest-visible tuple, so it is called in `ipv4_forward` **before** `nat_out`
+  rewrites the source; calling it after would make rules see translated
+  addresses. The NAT'd reply path is deliberately *not* filtered again (it is
+  delivered by `nat_in` → `ipv4_output`, and the NAT conntrack entry already
+  proves the flow was accepted outbound); the filter's own flow state is only
+  for the guest→guest direction, where both halves traverse `ipv4_forward`.
+  A bug-proof asserts a guest→uplink reply is delivered without a filter flow
+  entry, and a guest→guest reply is admitted by one.
 - **Lock ordering.** A new `g_fw_lock` joins `g_pf_lock`/`g_nat_lock`; it must
   take a defined place in the order (the filter runs before NAT, so
   `g_fw_lock` → `g_nat_lock`) and be lockdep-clean, as the netctl TOCTOU fix
