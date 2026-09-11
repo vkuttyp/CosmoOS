@@ -3406,12 +3406,12 @@ bool selftest_net_dnat(const char **reason)
     nettest_seed_arp(tap_netif(u), client, client_mac);  /* replies reach the client */
     nat_flush();
     nat_pf_clear();
-    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80));
-    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53));
-    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80));   /* same guest endpoint as 8080 */
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80) == 0);
+    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53) == 0);
+    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80) == 0);   /* same guest endpoint as 8080 */
     /* A rule whose target is not on a connected subnet (would route out the
      * default uplink and stall) is refused. */
-    CHECK(!nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777));
+    CHECK(nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777) != 0);
 
     uint8_t l4[128], frame[256], rx[256];
 
@@ -3609,8 +3609,11 @@ bool selftest_net_tapctl(const char **reason)
     CHECK(file_write(f, &cmd, sizeof(cmd)) == -EEXIST);                  /* duplicate */
     struct cosmo_netctl bad = cmd;
     bad.host_port = 9000; bad.guest_addr = u_ip;                        /* off the guest tap */
-    CHECK(file_write(f, &bad, sizeof(bad)) < 0);                         /* refused */
+    CHECK(file_write(f, &bad, sizeof(bad)) == -EINVAL);                  /* off-tap: distinct from dup */
     CHECK(file_write(f, &cmd, 4) == -EINVAL);                            /* short */
+    uint8_t big[sizeof(cmd) + 8];
+    memcpy(big, &cmd, sizeof(cmd)); memset(big + sizeof(cmd), 0, 8);
+    CHECK(file_write(f, big, sizeof(big)) == -EINVAL);                   /* oversized: not applied */
     bad = cmd; bad.version = 99;
     CHECK(file_write(f, &bad, sizeof(bad)) == -ENOTSUP);                 /* wrong version */
     rn = file_read(f, rbuf, sizeof(rbuf));

@@ -926,6 +926,19 @@ static int pf_proto(const char *s, uint8_t *out)
     return -1;
 }
 
+/* Parse a port in [1,65535]; rejects trailing junk, overflow and out-of-range
+ * rather than silently wrapping to uint16_t. Returns -1 on a bad argument. */
+static int pf_port(const char *s, uint16_t *out)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v < 1 || v > 65535)
+        return -1;
+    *out = (uint16_t)v;
+    return 0;
+}
+
 /* vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT
  *                   del PROTO HOSTPORT
  *                   list
@@ -967,15 +980,16 @@ static int port_forward(int argc, char **argv)
     if (strcmp(argv[0], "add") == 0) {
         if (argc != 5 || pf_proto(argv[1], &cmd.proto) != 0) { usage(); goto out; }
         cmd.op = COSMO_NETCTL_FORWARD_ADD;
-        cmd.host_port = (uint16_t)strtoul(argv[2], NULL, 0);
         uint32_t a;
+        if (pf_port(argv[2], &cmd.host_port) != 0 || pf_port(argv[4], &cmd.guest_port) != 0) {
+            fprintf(stderr, "vmctl: bad port\n"); goto out;
+        }
         if (inet_pton(AF_INET, argv[3], &a) != 1) { fprintf(stderr, "vmctl: bad guest address\n"); goto out; }
         cmd.guest_addr = a;
-        cmd.guest_port = (uint16_t)strtoul(argv[4], NULL, 0);
     } else if (strcmp(argv[0], "del") == 0) {
         if (argc != 3 || pf_proto(argv[1], &cmd.proto) != 0) { usage(); goto out; }
         cmd.op = COSMO_NETCTL_FORWARD_DEL;
-        cmd.host_port = (uint16_t)strtoul(argv[2], NULL, 0);
+        if (pf_port(argv[2], &cmd.host_port) != 0) { fprintf(stderr, "vmctl: bad port\n"); goto out; }
     } else {
         usage();
         goto out;

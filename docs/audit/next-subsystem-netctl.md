@@ -1,8 +1,14 @@
 # NEXT SUBSYSTEM — configuring the guest's network at runtime: a control channel
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it.
+
+> **Status: implemented (PR #99).** This report was the plan; it was built as
+> described and is now in `nat.c` (`nat_pf_add`/`del`/`list`) and `tap.c`
+> (`/dev/net/tapctl`), with the ABI in `uapi/cosmo/netctl.h` and `vmctl
+> port-forward`. The design below is the as-built record; the built system is
+> documented in `docs/kernel-services/network/design.md` ("A runtime network
+> control channel"). Where the two differ, the design doc is authoritative.
 
 **Subsystem: a writable control channel the VM owner uses to configure the
 guest's networking while it runs — first, adding and removing port-forwards
@@ -22,7 +28,7 @@ network unit so far chose this deliberately — a read-only `fw_cfg` surface
 cannot be abused, and it kept those units small — and each named "a writable
 control surface / a runtime API" as a later unit. This is that unit.
 
-## Current implementation
+## Current implementation (before this unit)
 
 **The control surfaces are read-only.** `fw_cfg` (`opt/cosmo/*`) is read
 once at boot; `/dev/vmm`'s sysctl view is read-only; `/dev/net/tap` carries
@@ -53,7 +59,9 @@ its guest; the credential model that gates a privileged device by its mode.
   up and down. Designing the channel now, with one operation, sets the shape
   the rest reuse — the same discipline the hypervisor and storage seams used.
 
-## Design (proposed)
+## Design (as built)
+
+This section was the proposal; it describes the system as built.
 
 ### 1. A privileged control device, `/dev/net/tapctl`
 
@@ -128,7 +136,7 @@ process — it is exactly the port-forward table (and, later, the tap's own
 settings), reachable at runtime. It adds **no new system call**: it is a
 character device, as the frame channel is.
 
-### 5. The milestone
+### 5. The milestone (met)
 
 - **Gated, in the harness:** with no static rule, a command `FORWARD_ADD tcp
   host-port → guest:Q` is submitted through the control device; a client

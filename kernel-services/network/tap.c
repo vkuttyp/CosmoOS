@@ -189,8 +189,8 @@ static struct vnode *g_ctlnode;
 static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
 {
     (void)vn; (void)off;
-    if (len < sizeof(struct cosmo_netctl))
-        return -EINVAL;                         /* short: refuse whole */
+    if (len != sizeof(struct cosmo_netctl))
+        return -EINVAL;                         /* a command is exactly one struct, applied whole */
     struct cosmo_netctl cmd;
     memcpy(&cmd, buf, sizeof(cmd));
     if (cmd.version != COSMO_NETCTL_VERSION)
@@ -205,8 +205,11 @@ static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, si
     case COSMO_NETCTL_FORWARD_ADD:
         if (cmd.host_port == 0 || cmd.guest_port == 0 || cmd.guest_addr == 0)
             return -EINVAL;
-        if (!nat_pf_add(proto, cmd.host_port, cmd.guest_addr, cmd.guest_port))
-            return -EEXIST;                     /* duplicate, full, or off-tap target */
+        {
+            int rc = nat_pf_add(proto, cmd.host_port, cmd.guest_addr, cmd.guest_port);
+            if (rc != 0)
+                return rc;                      /* -EINVAL off-tap, -EEXIST dup, -ENOSPC full */
+        }
         return (int64_t)sizeof(cmd);
     case COSMO_NETCTL_FORWARD_DEL:
         if (cmd.host_port == 0)
