@@ -59,11 +59,20 @@ its guest; the credential model that gates a privileged device by its mode.
 
 A character device created next to `/dev/net/tap` (in `tap_dev_init`), mode
 `0600` so only the owner (root / the VM owner) can open it — the same
-privilege gate `/dev/net/tap` uses. `write` submits one control command;
-`read` returns the current configuration (the live port-forward rules) so an
-operator can see the state. It is a control channel, entirely separate from
-the frame channel `/dev/net/tap`, so configuration and data never mix on one
-descriptor.
+privilege gate `/dev/net/tap` uses. `write` submits one control command
+(§2); `read` returns the live configuration so an operator can see the state.
+It is a control channel, entirely separate from the frame channel
+`/dev/net/tap`, so configuration and data never mix on one descriptor.
+
+The `read` reply is as much a versioned ABI as the write command: one
+`read` returns an atomic snapshot — a fixed `struct cosmo_netctl_list` header
+(the same version field as the command, and a rule count) followed by that
+many fixed `struct cosmo_netctl_rule` records (`proto, host_port,
+guest_addr, guest_port`). A single `read` yields the whole snapshot into the
+caller's buffer or `-EMSGSIZE` if it does not fit (as `/dev/net/tap`'s read
+does for a frame); there is no partial read or cursor, so the operator never
+sees a half-updated table. The count bounds the records (`NAT_PF_MAX`), and
+the version lets an old `vmctl` refuse a reply shape it does not know.
 
 ### 2. A versioned, structured control message
 
@@ -78,24 +87,41 @@ versions are refused (`-EINVAL` / `-ENOTSUP`), never guessed. A short write,
 or one whose fields are out of range, is refused whole; a command is applied
 or it is not, never half.
 
+`(proto, host_port)` is the rule's unique key: at most one rule binds a given
+protocol and host port. `FORWARD_ADD` of a binding that already exists
+(static or runtime) is refused (`-EEXIST`) rather than shadowed — so a listed
+rule is always the one that receives traffic, and there is no first-match
+ambiguity. `FORWARD_DEL` removes the rule holding a `(proto, host_port)`
+whatever its origin (runtime deletion may remove a boot-configured forward:
+the operator is privileged and the table is one table); a `DEL` of an absent
+binding is `-ENOENT`. Rules carry no static/runtime tag, because the unique
+key makes one unnecessary.
+
 ### 3. Backed by the existing table, with the same guarantees
 
-`NETCTL_FORWARD_ADD` calls the existing `nat_pf_add` (which already validates
-the target is on a connected subnet and refuses a full table);
-`NETCTL_FORWARD_DEL` calls a new `nat_pf_del` that removes the matching rule
-(and may reap the DNAT conntrack entries it created, so a removed forward
-stops immediately, not after the entries idle out); `read` lists the rules
-through a new `nat_pf_list`. Nothing about a rule's meaning changes — this
-unit is a *path to* the port-forward table, so a runtime-added forward
-behaves exactly as a `fw_cfg` one. The static `fw_cfg` rules remain, read at
-boot; the control channel adds and removes on top of them.
+`NETCTL_FORWARD_ADD` calls `nat_pf_add` (tightened per §4 to bind only to the
+guest tap and to reject a duplicate binding, §2), and refuses a full table;
+`NETCTL_FORWARD_DEL` calls a new `nat_pf_del` that removes the rule with the
+matching `(proto, host_port)` **and reaps the DNAT conntrack entries that
+rule created**, so a removed forward stops immediately — an in-flight flow
+included — not after the entries idle out (reaping is mandatory, asserted by
+the test, not optional). `read` lists the rules through a new `nat_pf_list`.
+Nothing about a rule's meaning changes — this unit is a *path to* the
+port-forward table, so a runtime-added forward behaves exactly as a `fw_cfg`
+one. The static `fw_cfg` rules remain, read at boot; the control channel adds
+and removes on top of them, in the one table.
 
 ### 4. Privilege and scope: what it may and may not do
 
 The channel configures the *guest's* networking and nothing of the host's.
-A forward's target must be on a connected subnet (a tap) — the existing
-`nat_pf_add` check — so a rule can never point at the host's own services or
-off into the default uplink. The device's `0600` mode confines writing to the
+A forward's target must be on **the guest tap's own subnet** — not merely
+any connected subnet: `netif_connected()` alone would also accept an address
+on the uplink or a peer subnet, and a rule pointing there would make the host
+relay a public port to another machine on its real network. So `nat_pf_add`
+is tightened to validate the target against the guest tap specifically (the
+interface the control channel belongs to), rejecting a target that is not on
+it. A rule can thus never point at the host's own services, at the uplink, or
+off into the default route. The device's `0600` mode confines writing to the
 privileged owner; an unprivileged process cannot open it. The channel adds no
 operation that touches the host's real interface, its routes, or another
 process — it is exactly the port-forward table (and, later, the tap's own
@@ -135,8 +161,10 @@ character device, as the frame channel is.
   `tap_dev_init`; the control `chrdev_ops` (`write` applies a command, `read`
   lists rules).
 - `kernel-services/network/nat.c`, `kernel/include/kernel/net/nat.h` —
-  `nat_pf_del` (remove a rule and reap its conntrack entries) and
-  `nat_pf_list` (enumerate rules); `nat_pf_add` is reused.
+  `nat_pf_del` (remove a rule by `(proto, host_port)` and reap its conntrack
+  entries) and `nat_pf_list` (snapshot the rules); `nat_pf_add` tightened to
+  bind only to the guest tap's subnet and to reject a duplicate
+  `(proto, host_port)`.
 - `kernel/include/uapi/cosmo/netctl.h` (new) — `struct cosmo_netctl`, the
   opcodes and the version.
 - `userland/system/vmctl.c` — a `port-forward add|del|list` subcommand.
@@ -154,12 +182,16 @@ kernel surface is `nat_pf_del` / `nat_pf_list` beside the existing
 
 ## Migration plan
 
-1. **`nat_pf_del` and `nat_pf_list`** in `nat.c`, with a test: a rule added
-   then deleted no longer matches, and a deleted forward's conntrack entries
-   are reaped so an in-flight flow stops.
+1. **`nat_pf_add` tightened, `nat_pf_del`, `nat_pf_list`** in `nat.c`, with a
+   test: a target off the guest tap's subnet is rejected; a duplicate
+   `(proto, host_port)` is rejected (`-EEXIST`); a rule added then deleted no
+   longer matches, its conntrack entries reaped so an in-flight flow stops;
+   `nat_pf_list` snapshots the rules.
 2. **The control device and its message**: `/dev/net/tapctl`, the
    `cosmo_netctl` parse (version and opcode checked, fields range-checked, a
-   short or unknown command refused whole), `read` listing the rules.
+   short or unknown command refused whole), and the versioned `read` reply
+   (a `cosmo_netctl_list` header + `cosmo_netctl_rule` records, whole snapshot
+   or `-EMSGSIZE`).
 3. **End to end through the device**: a `FORWARD_ADD` submitted through
    `/dev/net/tapctl` makes a connection DNAT to the guest; a `FORWARD_DEL`
    stops it; proved by `net-tapctl`. Each behaviour bug-proved by
@@ -172,9 +204,11 @@ kernel surface is `nat_pf_del` / `nat_pf_list` beside the existing
 
 - `net-tapctl` (host): a `FORWARD_ADD` command applied through the control
   path installs a rule (a subsequent client connection is DNAT'd to the
-  guest, as `net-dnat`'s machinery shows); a `read` lists it; a `FORWARD_DEL`
-  removes it (the connection then stays local and the listing is empty); a
-  malformed command, a wrong version, and an off-subnet target are each
+  guest, as `net-dnat`'s machinery shows); a `read` returns the versioned
+  list with that one rule; a `FORWARD_DEL` removes it (the connection then
+  stays local, an in-flight flow is dropped by the reap, and the listing is
+  empty); a duplicate `(proto, host_port)` `ADD` is `-EEXIST`; a malformed
+  command, a wrong version, and a target off the guest tap's subnet are each
   refused and change nothing. Each behaviour and refusal bug-proved by
   reintroducing its bug.
 - The existing net, NAT and DNAT tests and a net-less boot stay green; the
