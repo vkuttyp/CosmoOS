@@ -462,6 +462,7 @@ static const struct selftest tests[] = {
     { "net-dnat",        selftest_net_dnat },
     { "net-tapctl",      selftest_net_tapctl },
     { "net-multiguest",  selftest_net_multiguest },
+    { "net-firewall",    selftest_net_firewall },
     { "net-second-nic",  selftest_net_second_nic },
     { "net-lo-udp",      selftest_net_lo_udp },
     { "net-lo-tcp",      selftest_net_lo_tcp },

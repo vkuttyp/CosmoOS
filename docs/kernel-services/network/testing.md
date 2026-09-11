@@ -274,7 +274,9 @@ and an age that reclaims nothing.
 one file is answered only on that file's tap (an ARP for `tap0`'s address
 replied on file 0, nothing on file 1). A datagram from `tap0`'s guest to
 `tap1`'s guest is read back on `tap1` with its source intact — guest-to-guest
-is routed, not masqueraded. A frame from `tap0`'s guest sourced as a forged
+is routed, not masqueraded (with A's to-guest firewall policy opened first,
+since the firewall unit defaults inter-guest traffic to drop — this step
+asserts routing, not policy). A frame from `tap0`'s guest sourced as a forged
 same-subnet address (`10.0.3.50`, not its assigned `.15`) is dropped as
 spoofed (`fwd_spoofed` rises) and never reaches `tap1`. With a port-forward
 rule per guest, closing `tap0`'s file destroys only its tap, purges only its
@@ -285,6 +287,55 @@ then rewritten), and — the finding that prompted the tightening — the loose
 "any source on the subnet" reverse-path check (the forged `10.0.3.50` then
 reaches the peer). The per-open lifecycle itself is `vfs-chrdev-open` (VFS
 tests).
+
+## The forwarding firewall
+
+**`net-firewall`**: two guests opened through `/dev/net/tap` as `vmctl` opens
+them (so each attaches), A on `tap0` and B on `tap1`, driven by frame
+injection through their files. (1) With no rule, A→B UDP is dropped by the
+default policy (never read back on B's tap; `fw_stats.drop_default` and
+`ip_stats.fwd_filtered` rise). (2) A→the world is accepted by the to-uplink
+default (`accept_default` rises). (3) One rule — A→B udp/7001 ACCEPT — lets
+exactly that flow through (read back on B with A's real source; `accept_rule`
+and `flow_new` rise) while A→B udp/7002 still drops. (4) Stateful return in
+the guest→guest direction: B's reply to the accepted flow reaches A with no
+rule for B (`accept_established` rises); an unsolicited B→A datagram does
+not. (4b) TCP: on an accepted A→B connection, B's SYN-ACK and ACK are
+admitted as replies, but a **bare SYN from B on the reversed ports is a new
+connection**, not a reply — it takes B's default drop whatever the tuple says
+(a guest injects arbitrary flags, so the reverse-tuple shortcut must not
+honour a SYN without ACK). (5) ICMP echo state keyed on the identifier: an accepted A→B echo
+request admits B's echo *reply* with the same id, while a B→A echo *request*
+is dropped (a reverse request is not a reply) and a reply with a different id
+is dropped (no flow). (6) Ordering and identity: a DROP inserted at index 0
+for the same traffic wins first-match for a new flow (`drop_rule` rises), the
+listing shows the three rules in order, deleting the DROP by tuple restores
+the ACCEPT, a second delete is `-ENOENT`, and a duplicate add is `-EEXIST`.
+(7) Binding by address, not handle: a rule for B written through a
+`/dev/net/tapctl` handle that is then closed still admits B→A; closing B's
+tap purges it (`fw_rule_add` for the departed B is `-ENOENT`, its list is
+empty), and a fresh tap reusing B's address starts with no rules and no
+flows (the same B→A datagram now drops). (8) The control round trip: an ADD
+appears in the snapshot's filter section with its guest, fields and index,
+the snapshot's length equals the sum of its sections, `FILTER_POLICY`
+flipping A's to-guest default to ACCEPT lets an unruled A→B flow through and
+flipping it back drops the next; a short write is `-EINVAL`, a wrong version
+`-ENOTSUP`, an unattached `guest_addr` `-ENOENT`, a `FILTER_DEL` of an
+uninstalled tuple `-ENOENT`, and an ICMP rule carrying a port `-EINVAL` —
+each changing nothing.
+
+Proved by reintroducing a verdict that always ACCEPTs (the default-drop test
+then reads the datagram back on B), a flow table that records nothing (B's
+reply is then dropped as unsolicited), an ICMP match that ignores the echo
+id (the wrong-id reply is then admitted), an `fw_rule_add` that skips
+the attached-guest check (an add for the departed B then succeeds, and the
+reused address inherits the stale rule), and an ESTABLISHED shortcut that
+honours a reverse bare SYN (B's SYN on the reversed ports is then admitted).
+
+**`net-tapctl`** (extended): the snapshot's expected length is now computed
+from the version-2 filter section the read appends (its header, the
+attached guests' policies and rules), rather than assumed to end at the
+port-forward rules.
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

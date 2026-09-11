@@ -1102,9 +1102,10 @@ See [docs/development.md](docs/development.md).
   `net-nat` (UDP/TCP/ICMP round trips masqueraded and restored with valid
   checksums, an ICMP error translated back, the table bounded and expiring).
   A stock Linux guest with the tap as its gateway reaching the host's network
-  is the `QEMU_MEM=2G` reproduction. A filtering firewall and IPv6 NAT are
-  later units. (Inbound port-forwarding, once listed here as next, is done --
-  see the entry below.)
+  is the `QEMU_MEM=2G` reproduction. The filtering firewall over this
+  forwarding path is done (its own entry below); IPv6 NAT is a later unit.
+  (Inbound port-forwarding, once listed here as next, is done -- see the
+  entry below.)
 - **The guest configures itself: DHCP and a DNS proxy (done):**
   `docs/audit/next-subsystem-dhcp-dns.md`,
   `docs/kernel-services/network/design.md` ("Autoconfiguring the guest").
@@ -1148,8 +1149,9 @@ See [docs/development.md](docs/development.md).
   `net-dnat` (a client SYN forwarded to the guest, the SYN-ACK un-DNAT'd back
   from `host:P`, a UDP round trip, an unruled port kept local, the table
   bounded and expiring). A stock Linux guest running a service reached from
-  the host is the `QEMU_MEM=2G` reproduction; a writable control surface, a
-  filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT are later units.
+  the host is the `QEMU_MEM=2G` reproduction. The writable control surface
+  and the filtering firewall are done (their own entries below);
+  hairpin/NAT-reflection and IPv6 DNAT are later units.
 - **Configuring the guest's network at runtime (done):**
   `docs/audit/next-subsystem-netctl.md`,
   `docs/kernel-services/network/design.md` ("A runtime network control
@@ -1191,8 +1193,35 @@ See [docs/development.md](docs/development.md).
   (the lifecycle) and `net-multiguest` (eight taps on eight subnets, the
   ninth refused, frame isolation, guest-to-guest un-masqueraded, a close that
   tears down and purges only its own). Two stock Linux guests at once is the
-  `QEMU_MEM=2G` reproduction; a firewall forbidding inter-guest traffic, an
-  L2 bridge, and per-guest limits beyond the NAT quota are later units.
+  `QEMU_MEM=2G` reproduction. The firewall forbidding inter-guest traffic is
+  the next entry (done); an L2 bridge and per-guest limits beyond the NAT
+  quota are later units.
+- **A forwarding firewall: who may reach whom (done):**
+  `docs/audit/next-subsystem-firewall.md`,
+  `docs/kernel-services/network/design.md` ("A forwarding firewall"). The
+  multi-guest unit routed guests to each other and deferred a policy
+  forbidding it; this is that policy. `kernel-services/network/fw.c` is a
+  stateful FORWARD-chain filter called from `ipv4_forward` after anti-spoof
+  and routing and before NAT, so rules see the datagram as the guest sent
+  it. Each guest owns an ordered first-match rule list (direction, protocol,
+  destination prefix, destination port → accept/drop) and a default verdict
+  per direction; the defaults close the deferred gap -- inter-guest **drop**,
+  guest-to-uplink **accept**. It is stateful only where it must be: a
+  masqueraded reply is delivered by `nat_in` and never re-enters
+  `ipv4_forward` (its conntrack entry is its state), while a guest-to-guest
+  flow -- un-NAT'd, both halves through the chain -- is recorded in a bounded,
+  per-guest-quota flow table so its reply is admitted without a reverse rule;
+  ICMP is stateful for echo only, on the echo id. A rule's identity is its
+  whole match tuple (the control write returns only a byte count, so there is
+  no id to hand back), ordered by an explicit index; rules bind to a guest by
+  address and are attached/purged with the tap under one lock, so an add
+  cannot race a teardown. `/dev/net/tapctl` moves to ABI version 2 with
+  `FILTER_ADD`/`DEL`/`POLICY` and a filter section appended to the snapshot;
+  `vmctl filter add|del|policy|list` drives it; no new syscall. Proven by
+  `net-firewall` (default drop, one-rule hole, stateful return incl. echo by
+  id, first-match ordering and delete-by-tuple, a rule outliving its handle
+  but not its guest, the listing round trip and every rejection). INPUT/OUTPUT
+  chains, rate-limit/log targets, IPv6 and full TCP state are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1246,8 +1275,10 @@ See [docs/development.md](docs/development.md).
   host port; `-netctl.md`, a privileged `/dev/net/tapctl` control channel
   so an operator adds and removes port-forwards on a running machine; and
   `-multiguest.md`, a tap per open of `/dev/net/tap` so several stock guests
-  run at once, each a full networked machine, isolated and addressable. The
-  named next steps are the follow-ups these left (a filtering firewall,
-  hairpin/NAT-reflection, IPv6 DNAT, an L2 bridge, the tap's other settings on
+  run at once, each a full networked machine, isolated and addressable; and
+  `-firewall.md`, the policy over them -- a stateful forwarding filter that
+  drops inter-guest traffic by default and lets a rule open it (built). The
+  named next steps are the follow-ups these left (INPUT/OUTPUT firewall
+  chains, hairpin/NAT-reflection, IPv6 DNAT, an L2 bridge, the tap's other settings on
   the control channel) and, on the guest itself, the `QEMU_MEM=2G`
   reproduction reaching the real world. Design documents first, one subsystem at a time.

@@ -626,7 +626,8 @@ call and no writable control surface: the flags are internal, set by the tap
 setup.
 A stock Linux guest with the tap as its gateway reaching the host's network
 (and the internet, where the host has it) is the `QEMU_MEM=2G`
-reproduction. A filtering firewall and IPv6 NAT are later units; inbound
+reproduction. The filtering firewall over this forwarding path is done ("A
+forwarding firewall", below); IPv6 NAT is a later unit; inbound
 port-forwarding (DNAT), once next, is done -- the next section.
 
 ## Inbound port forwarding: DNAT (`nat.c`; audit unit "reaching the guest from outside")
@@ -638,8 +639,9 @@ list of `proto:hostport:guestaddr:guestport`, read on VM attach) maps a host
 port to a guest address and port. The bind is **wildcard on the host
 address**: a rule matches a connection to any of the host's own addresses on
 that port, so the match is the existing "addressed to one of our addresses"
-test plus the port. There is no writable control surface (a runtime API is a
-later unit).
+test plus the port. This unit had no writable control surface; the runtime
+API came two units later ("A runtime network control channel", below), and
+the firewall's rules ride the same channel.
 
 **Inbound** (`nat_in` → `nat_in_dnat`): a TCP/UDP packet addressed to the host
 that is *not* a masquerade reply and whose `(proto, dport)` matches a rule (or
@@ -661,9 +663,10 @@ DNAT and masquerade entries share the one bounded, expiring `nat.c` table,
 told apart by a kind flag (the masquerade lookups filter to their kind), so
 inbound state a remote client can create is bounded exactly as outbound state
 the guest can. A stock Linux guest running a service reached from the host
-through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
-surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
-are later units.
+through a port-forward is the `QEMU_MEM=2G` reproduction. The writable
+control surface and the filtering firewall are done ("A runtime network
+control channel" and "A forwarding firewall", below); hairpin/NAT-reflection
+and IPv6 DNAT are later units.
 
 ## Many guests: a tap per open (`tap.c`, `tapsvc.c`, `nat.c`; audit unit "from one guest to many")
 
@@ -712,8 +715,11 @@ returns to the pool.
 Each guest thus has its own channel (it sees only its own frames), its own
 lease and subnet, its own NAT share, and its own port-forwards; guests reach
 each other over routed IP as adjacent-subnet machines do — connectivity, not
-visibility. Policy forbidding inter-guest traffic, an L2 bridge sharing one
-subnet, and per-guest limits beyond the NAT quota are later units.
+visibility — *when policy allows it*: the forwarding firewall ("A forwarding
+firewall", below) now drops inter-guest traffic by default and a rule opens
+it, so this unit's routing is the mechanism and that unit's policy decides
+its use. An L2 bridge sharing one subnet and per-guest limits beyond the NAT
+quota are later units.
 
 ## A runtime network control channel (`tap.c`, `nat.c`; audit unit "configuring the guest's network at runtime")
 
@@ -754,6 +760,91 @@ another process. No new system call. `vmctl port-forward add|del|list` drives
 it; exposing and hiding a guest service on a running Linux guest is the
 `QEMU_MEM=2G` reproduction. The channel is designed to carry the tap's other
 settings (forwarding/masquerade toggles, the resolver) in later units.
+
+## A forwarding firewall (`fw.c`; audit unit "a stateful packet-filter firewall for the guest taps")
+
+The multi-guest unit routed guests to each other — "connectivity, not
+visibility" — and deferred *a policy forbidding inter-guest traffic*. This is
+that policy (`docs/audit/next-subsystem-firewall.md`): a stateful packet
+filter over the guest taps, deciding who may reach whom.
+
+**One chain, one call site.** A single FORWARD chain, evaluated by
+`fw_forward_verdict` in `ipv4_forward` **after** the anti-spoof and routing
+steps (so the direction is known from the egress: `TO_GUEST` when `out` is
+another forwarding tap, `TO_UPLINK` otherwise) and **before** `nat_out` (so
+rules see the datagram as the guest sent it, never a translated source). A
+`FW_DROP` frees the datagram and counts `fwd_filtered`. Each guest — attached
+by address when its tap opens — owns an ordered rule list evaluated
+first-match, and a default verdict per direction for a datagram no rule
+matches. The **defaults** are the deferred policy made concrete: `TO_GUEST`
+**DROP**, `TO_UPLINK` **ACCEPT** — a guest cannot reach its neighbour unless
+a rule allows it, and its path to the world is as it was. A rule matches on
+direction (or any), protocol (TCP/UDP/ICMP or any), destination address with
+a prefix (or any), and destination port (or any; a port constraint applies to
+TCP/UDP only and never matches a datagram without ports).
+
+**Stateful where it must be — and only there.** Reading the reply paths
+exactly: a masqueraded guest→uplink reply is addressed to the host, so
+`nat_in` un-translates it and delivers it via `ipv4_output` — it **never
+re-enters `ipv4_forward`** and needs no filter state, because it exists only
+on the strength of a NAT conntrack entry that was created when this filter
+accepted the outbound flow. Conntrack is that direction's state. A
+guest→guest flow is un-NAT'd, so *both* halves traverse `ipv4_forward`; that
+is the one direction with filter state of its own: an accepted NEW flow is
+recorded in a bounded flow table (`FW_FLOW_MAX`, a per-guest share
+`FW_FLOW_QUOTA_PER_GUEST` so a flood starves only its owner — and a NEW flow
+that cannot be recorded is refused, since state it cannot keep would strand
+the reply), and the reverse tuple is **ESTABLISHED** and accepted without a
+reverse rule — with one exception that matters because a guest injects
+arbitrary flags: a TCP segment with SYN set and ACK clear opens a connection
+and is never a reply, so a **reverse-direction bare SYN** on an accepted
+flow's ports is the *other* guest starting a flow and takes that guest's
+rules and default, not the shortcut. TCP is otherwise coarse (NEW until an
+ACK without SYN, then the longer timeout, as conntrack's `tcp_est`); the
+timeouts are conntrack's and `fw_age` runs on the same periodic tick as
+`nat_age`. **ICMP is stateful for echo
+only**, keyed on the echo identifier: a type-8 request records the id, and
+only a type-0 reply carrying that id is its reply — a reverse echo *request*
+is a new flow (and meets the default), and a reply with another id matches
+nothing. Inbound DNAT is authorized by its port-forward rule and delivered by
+`nat_in`, not the FORWARD chain, so it is not re-gated here.
+
+**Identity without an id.** The control channel's `write` returns only a
+byte count, so a kernel-assigned rule id could not reach the caller. A rule's
+identity is therefore its **whole match tuple**, exactly as a port-forward's
+is `(proto, host_port)`: `FILTER_DEL` names the tuple `FILTER_ADD` installed,
+a duplicate tuple is `-EEXIST`, and ordering is explicit — `FILTER_ADD`
+carries an `at_index` (clamped to append) and the listing reports each rule's
+current index as a display ordinal, not an identity to round-trip.
+
+**Bound by address, coherent with teardown.** `/dev/net/tapctl` has no
+per-open guest state and `vmctl` closes its handle after each command, so a
+rule names its guest **by address in the payload**, as a forward names its
+target, and survives the handle closing. Attachment is the firewall's own:
+`tap_chr_open` calls `fw_guest_attach` last (after every step that can fail),
+`tap_chr_release` calls `fw_guest_purge` beside `nat_guest_purge` before the
+subnet returns to the pool, and `fw_rule_add`/`fw_policy_set` require the
+guest attached — all under one `g_fw_lock`. So an add and a teardown are
+strictly ordered: the purge ran first and the add is refused (`-ENOENT`), or
+the add ran first and the purge removes it; a reused address inherits no
+rule and no flow (purge drops every flow naming the address on either side).
+This is the netctl unit's TOCTOU lesson applied by construction, rather than
+by re-checking `netif_connected` (which stays "live" until `tap_destroy`, after
+the purge, and would leave a window). Lock order: `g_fw_lock` → `g_nat_lock`;
+the verdict takes no other lock.
+
+**The control plane** is `/dev/net/tapctl` at ABI version 2
+(`uapi/cosmo/netctl.h`): `FILTER_ADD`/`FILTER_DEL`/`FILTER_POLICY` in a
+`struct cosmo_netctl_filter` (each op exactly its own struct; the dispatcher
+reads the common `(version, op)` first), and the read snapshot gains a filter
+section after the port-forward list — a header, the attached guests' default
+policies, then every rule in evaluation order with its guest and index. A
+reader that stops after the port-forward rules is unaffected. `vmctl filter
+add|del|policy|list` drives it. No new system call.
+
+Named and deferred: INPUT/OUTPUT chains for the host's own services and
+egress, rate-limit and logging targets, IPv6 filtering, and full TCP state
+tracking.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

@@ -5,6 +5,7 @@
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
+#include <kernel/net/fw.h>
 #include <kernel/net/nat.h>
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/ip.h>
@@ -287,6 +288,7 @@ static void age_work(void *arg)
     arp_age(now);
     nd_age(now);
     nat_age(now);
+    fw_age(now);
     tapsvc_dns_age(now);
     timer_start(&g_timer, ARP_RETRY_NS);
 }
