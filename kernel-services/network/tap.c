@@ -22,6 +22,8 @@
 struct tap {
     struct netif nif;
     struct mbufq txq;      /* stack -> far end: frames transmitted out the tap */
+    tap_input_fn in_filter;   /* claims far-end frames before the stack (tapsvc: DHCP) */
+    void *in_arg;
 };
 
 /* Stack -> tap: the stack is sending a frame out the interface. Queue it for
@@ -89,6 +91,10 @@ int tap_inject(struct tap *t, const void *frame, uint32_t len)
     }
     memcpy(m->data, frame, len);
     m->len = m->pkt.len = len;
+    if (t->in_filter && t->in_filter(t, m->data, len, t->in_arg)) {
+        m_freem(m);                  /* the filter claimed it (and copied what it needed) */
+        return 0;
+    }
     netif_rx(&t->nif, m);            /* into the stack, as a driver's completion would */
     return 0;
 }
@@ -101,6 +107,12 @@ struct mbuf *tap_recv(struct tap *t)
 struct netif *tap_netif(struct tap *t)
 {
     return &t->nif;
+}
+
+void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg)
+{
+    t->in_arg = arg;
+    t->in_filter = fn;   /* arg set first: the filter sees a consistent (fn, arg) */
 }
 
 /* --- /dev/net/tap: the owner's frame channel ---------------------------- */

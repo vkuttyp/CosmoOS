@@ -2958,3 +2958,92 @@ bool selftest_net_nat(const char **reason)
           "an ICMP error translated back, the table bounded at %u and its entries expiring", NAT_TABLE_SIZE);
     return true;
 }
+
+/* --- tap input filter (the DHCP responder's ingress/egress mechanism) ----- */
+
+/* Claim frames of a private ethertype and answer each with a canned reply
+ * built and sent back out the tap; pass everything else to the stack. */
+#define TAPFILT_ETYPE 0x88b5u
+static const uint8_t tapfilt_reply[4] = { 0xC0, 0xDE, 0xCA, 0xFE };
+
+static bool tapfilt_hook(struct tap *t, const void *frame, uint32_t len, void *arg)
+{
+    (void)len;
+    unsigned *calls = arg;
+    const uint8_t *f = frame;
+    uint16_t etype = (uint16_t)(f[12] << 8 | f[13]);
+    if (etype != TAPFILT_ETYPE)
+        return false;                       /* not ours: let the stack have it */
+    (*calls)++;
+    struct mbuf *m = m_getcl();
+    if (m != NULL) {
+        memcpy(m->data, tapfilt_reply, sizeof(tapfilt_reply));
+        m->len = m->pkt.len = sizeof(tapfilt_reply);
+        uint8_t dst[6];
+        memcpy(dst, f + 6, 6);              /* reply to the injector's source MAC */
+        ether_output(tap_netif(t), m, dst, TAPFILT_ETYPE);
+    }
+    return true;                            /* claimed */
+}
+
+bool selftest_tap_filter(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x05, 0x00, 0x0f };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 0, 1), guest_ip = IPV4_ADDR(10, 88, 0, 15);
+    struct tap *t = tap_create("filt", host_ip, htonl(0xffffff00u), host_mac);
+    CHECK(t != NULL);
+    unsigned calls = 0;
+    tap_set_input_filter(t, tapfilt_hook, &calls);
+
+    /* (1) a claimed frame is answered out the tap, and the stack never sees it. */
+    uint8_t f[60];
+    memset(f, 0, sizeof(f));
+    memcpy(f, host_mac, 6);
+    memcpy(f + 6, guest_mac, 6);
+    f[12] = 0x88; f[13] = 0xb5;
+    CHECK(tap_inject(t, f, sizeof(f)) == 0);
+    CHECK(calls == 1);
+    struct mbuf *r = tap_recv(t);
+    CHECK(r != NULL);
+    uint8_t out[18];
+    CHECK(m_copydata(r, 0, 18, out));
+    CHECK(memcmp(out, guest_mac, 6) == 0);              /* to the injector */
+    CHECK(out[12] == 0x88 && out[13] == 0xb5);
+    CHECK(memcmp(out + 14, tapfilt_reply, 4) == 0);
+    m_freem(r);
+    CHECK(tap_recv(t) == NULL);
+
+    /* (2) an unclaimed frame reaches the stack: an ARP request for the tap IP
+     * is answered by the stack itself, not the filter. */
+    uint8_t req[42];
+    memset(req, 0, sizeof(req));
+    memset(req, 0xff, 6);
+    memcpy(req + 6, guest_mac, 6);
+    req[12] = 0x08; req[13] = 0x06;
+    req[15] = 1; req[16] = 0x08; req[18] = 6; req[19] = 4; req[21] = 1;
+    memcpy(req + 22, guest_mac, 6);
+    memcpy(req + 28, &guest_ip, 4);
+    memcpy(req + 38, &host_ip, 4);
+    CHECK(tap_inject(t, req, sizeof(req)) == 0);
+    struct mbuf *arp = NULL;
+    for (unsigned i = 0; i < 50 && arp == NULL; i++) {
+        arp = tap_recv(t);
+        if (arp == NULL)
+            thread_sleep_ms(10);
+    }
+    CHECK(arp != NULL);
+    uint8_t a[42];
+    CHECK(m_copydata(arp, 0, 42, a) && a[12] == 0x08 && a[13] == 0x06 && a[21] == 2);
+    m_freem(arp);
+    CHECK(calls == 1);                                  /* the filter did not touch the ARP */
+
+    /* (3) clearing the filter lets a formerly-claimed frame reach the stack. */
+    tap_set_input_filter(t, NULL, NULL);
+    CHECK(tap_inject(t, f, sizeof(f)) == 0);
+    CHECK(calls == 1 && tap_recv(t) == NULL);           /* no reply: the stack drops the unknown type */
+
+    tap_destroy(t);
+    kinfo("selftest: tap-filter: a claimed frame answered out the tap, an unclaimed frame reached the stack");
+    return true;
+}
