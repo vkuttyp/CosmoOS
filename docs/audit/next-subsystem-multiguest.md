@@ -8,7 +8,9 @@ nothing in it is implemented.
 gets a tap of its own, on a subnet of its own, with its own DHCP/DNS
 service, its own share of the NAT table and its own port-forwards — so two
 (or eight) stock guests run at once, each a full machine on the network,
-neither able to starve or see into the other. The first unit of the
+neither able to starve the other nor to see the other's frames — guests
+reach each other only as two machines on adjacent subnets do, over routed
+IP, and a policy forbidding even that is a later unit. The first unit of the
 multi-guest arc, and the one that removes the "one guest" assumption every
 network unit has carried.**
 
@@ -109,9 +111,10 @@ pair). Per-tap gateway binding is deliberate — a single proxy on
 resolver to the LAN. Threads are bounded by the guest cap (two per tap).
 `tapsvc_start(t)` / `tapsvc_stop(t)` take the tap; the state hangs off it.
 
-### 4. NAT for many guests: a per-guest quota, and no masquerade between taps
+### 4. NAT for many guests: a quota, no masquerade between taps, a guest-scoped purge
 
-Two changes in `nat.c`, both named by earlier units:
+Three changes in `nat.c`; the first two named by earlier units, the third
+forced by guests that now come and go:
 
 - **A per-guest quota.** The conntrack table stays one bounded table, but no
   single guest (source address) may hold more than `NAT_TABLE_SIZE /
@@ -124,20 +127,35 @@ Two changes in `nat.c`, both named by earlier units:
   is not masqueraded — the egress is a forwarding tap, not the uplink — so
   guests see each other's real addresses. Masquerade applies when the egress
   is the uplink (not `NETIF_FORWARD`), as intended.
+- **A guest-scoped purge, `nat_guest_purge(guest_ip)`.** Today NAT state can
+  only be aged or flushed *globally*, a DNAT rule removed only by its own
+  `(proto, host_port)` key, and unregistering an interface clears neither —
+  so a departing guest would leave stale flows and rules behind, and a later
+  guest handed the same subnet would inherit them. `nat_guest_purge` removes
+  every DNAT rule whose target is the guest and every conntrack entry
+  (masquerade or DNAT) whose guest side is that address, and nothing else;
+  the tap's `release` calls it before the subnet returns to the pool. Other
+  guests' state is untouched — this is what lets a shared table be safely
+  reused without flushing it under the guests that remain.
 
-DNAT and `netctl` need no change: a rule names its guest by address, and
-`nat_pf_add` already requires the target to be on a forwarding tap — now any
-of them.
+DNAT and `netctl` keep their ABI unchanged: a rule names its guest by
+address, and `nat_pf_add` already requires the target to be on a forwarding
+tap — now any of them. The purge is the only new NAT entry point.
 
 ### 5. Isolation between guests
 
-Each guest is on its own subnet behind its own tap: it sees only its own
-frames (a per-open channel), gets only its own DHCP lease, and is reachable
-from outside only through rules that name *its* address. Guest-to-guest
-traffic is routed by the host (both taps forward) with real addresses, so
-guests can talk when they want to and are otherwise separate. A later unit
-may add policy (a firewall rule to forbid guest-to-guest); this unit gives
-them distinct, addressable identities.
+The boundary this unit draws is exact, and it is the one the subsystem
+statement makes: each guest has its **own channel** (it sees only its own
+frames — a per-open tap), its **own lease and identity** (its own subnet and
+DHCP binding), its **own share** (the NAT quota), and is reachable from
+outside only through rules that name *its* address. What it does **not**
+draw is network isolation between guests: guest-to-guest traffic is routed by
+the host (both taps forward) with real addresses, exactly as two machines on
+adjacent subnets reach each other. That is connectivity, not visibility — a
+guest cannot read another's frames or take its lease, but it can address its
+services. A policy that forbids inter-guest traffic is the later firewall
+unit; this unit gives guests distinct, addressable identities and leaves
+reachability on.
 
 ### 6. The milestone
 
@@ -176,7 +194,8 @@ them distinct, addressable identities.
   persistent `tap0`.
 - `kernel-services/network/tapsvc.c` / `tapsvc.h` — per-tap instances
   (DHCP binding and DNS proxy state, threads and sockets per tap).
-- `kernel-services/network/nat.c` / `nat.h` — the per-guest quota; masquerade
+- `kernel-services/network/nat.c` / `nat.h` — the per-guest quota;
+  `nat_guest_purge` (rules and conntrack of one guest); masquerade
   only toward a non-forwarding egress.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
   `selftest.h` — the `net-multiguest` self-test (and adjustments to the
@@ -199,15 +218,19 @@ file` — a VFS contract for devices with per-open instances — and `tapsvc_sta
    and releases; two opens see distinct private state; `release` fires on the
    last close and not before).
 2. **A tap per open**: `/dev/net/tap` creates a tap from the subnet pool on
-   `open`, destroys it on `release`, refuses past the cap; `tap0` at boot goes
-   away. Proved by two opens yielding two taps on distinct subnets, the
-   ninth refused, a close destroying only its own.
+   `open`, destroys it on `release` — stopping its service and purging its
+   NAT/DNAT state (step 4's `nat_guest_purge`) *before* the subnet is freed —
+   and refuses past the cap; `tap0` at boot goes away. Proved by two opens
+   yielding two taps on distinct subnets, the ninth refused, a close
+   destroying only its own with its state gone and the other's intact.
 3. **`tapsvc` per tap**: DHCP and DNS state per instance; each guest gets its
    own lease and resolver. Proved by two guests each completing DHCP and a
    DNS round trip through their own service.
-4. **NAT for many**: the per-guest quota and uplink-only masquerade. Proved
-   by A's flood dropping only A's new flows while B's pass, and by
-   guest-to-guest traffic arriving un-masqueraded. Each bound bug-proved.
+4. **NAT for many**: the per-guest quota, uplink-only masquerade, and
+   `nat_guest_purge`. Proved by A's flood dropping only A's new flows while
+   B's pass, by guest-to-guest traffic arriving un-masqueraded, and by a
+   purge of A removing A's rules and flows while B's remain. Each bound
+   bug-proved.
 5. **The two-guest Linux demonstration**, documented and reproducible under
    `QEMU_MEM=2G`; then docs and the Status entry, and the full chain.
 
@@ -220,8 +243,9 @@ file` — a VFS contract for devices with per-open instances — and `tapsvc_sta
   subnets; per-tap DHCP and DNS round trips; masquerade with distinct entries;
   per-guest DNAT; the quota (A's flood drops only A's new flows, B's flow
   passes); un-masqueraded guest-to-guest reachability; closing A tears down
-  only A; the ninth open refused. Each behaviour and bound proved by
-  reintroducing its bug.
+  only A — its tap, its service, its DNAT rules and its conntrack entries
+  purged, while B's flows and rules survive; the ninth open refused. Each
+  behaviour and bound proved by reintroducing its bug.
 - The existing tap, DHCP, DNS, NAT, DNAT and control-channel tests stay
   green, adjusted where they assumed the singleton.
 
@@ -243,8 +267,9 @@ target.
   destroy, as the singleton's `tapsvc_stop` already does.
 - **A subnet reused too early.** Returning a subnet to the pool while a
   guest's NAT/DNAT entries still name its old address could let a new guest
-  inherit flows; the release reaps the departing guest's conntrack and DNAT
-  entries (the DNAT delete-reap already exists) before the subnet is freed.
+  inherit flows; `release` calls `nat_guest_purge` — the guest-scoped
+  removal §4 adds, since nothing existing can clear one guest's state without
+  flushing everyone's — before the subnet is freed.
 - **Fairness that is only a cap.** The per-guest quota bounds each guest's
   share of the table; it is not a scheduler. It guarantees B is never starved
   by A, not equal throughput. The report says so.
