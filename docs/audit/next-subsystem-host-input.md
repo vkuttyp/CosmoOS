@@ -208,12 +208,24 @@ step protects:
    packet with no signature change) and handed to the transport, which
    under that flag:
    - **TCP** decides one thing per segment — **accepted by an existing
-     connection, or rejected** — with the checks it already makes: the
-     sequence/acknowledgment acceptability test (`tcp.c:1703-1712`), an
-     established or closing connection's data or FIN, a `SYN_SENT`
-     connection's valid SYN+ACK, and the **SYN-cache completion of a passive
-     open whose SYN was admitted earlier** (the ACK that creates the child,
-     exactly as today). An *accepted* segment is processed exactly as today,
+     connection, or rejected** — with the checks it already makes, **all of them**: the
+     sequence-window test (`tcp.c:1703-1712`) is only the first; a segment
+     must also pass the RST-position check (`:1728` — a reset not naming
+     `rcv_nxt` draws a challenge), the in-window-SYN check (`:1740` —
+     challenge), the missing-ACK check (`:1744`), the RFC 5961 §5 ACK-range
+     check (`:1747` — challenge) and the `SYN_RCVD` ACK check (`:1754` —
+     reset) before it is **applied** to the connection. Acceptance is that
+     application — the first mutation of connection state by the segment:
+     the ACK-processing step that advances `snd_una` (`≈:1758`, `≈:1769`),
+     from which data delivery, FIN handling and state transitions follow; a
+     **valid in-window reset** (`seq == rcv_nxt`, `:1731`), which tears the
+     connection down and emits nothing; and the **SYN-cache completion of a
+     passive open whose SYN was admitted earlier** (the ACK that creates the
+     child, exactly as today). A `SYN_SENT` connection's valid SYN+ACK is
+     applied on the same terms. An **in-window SYN on an existing
+     connection** is *not* accepted under quiet: it is a connection-open
+     attempt, which the policy refuses silently, and RFC 5961's challenge
+     exists only to probe the peer. An *accepted* segment is processed exactly as today,
      **its ACKs and window updates included** — they are the connection's
      own traffic, which the policy lets persist. A *rejected* segment, under
      the flag, is freed with **no response and no side effect**, enforced
@@ -225,8 +237,14 @@ step protects:
      emitter** — the only `ipv4_output`/`ipv6_output` calls in `tcp.c`. So the
      gate is `batch_send` itself, not any one call to it: the batch carries a
      `quiet` bit, set from the mbuf's `M_FW_QUIET` when `tcp_input` begins
-     and **cleared the moment the segment is accepted**; `batch_send` frees
-     a still-quiet batch instead of transmitting it. Every flush — the early
+     and **cleared at exactly the three acceptance points above** — the
+     ACK-apply step, the valid in-window reset, the SYN-cache completion —
+     and nowhere earlier; every `goto out` before them is a rejection whose
+     batch stays quiet, so whatever it queued (a challenge ACK, a reset, a
+     window ACK) is freed. `batch_send` frees a still-quiet batch instead of
+     transmitting it. Clearing at the window test would let the later
+     rejections answer; clearing without a named boundary could silence a
+     valid connection's own output — hence the three points. Every flush — the early
      no-pcb and listener-rejection flushes at `:1617` and `:1628` that
      return before `out:`, and the final one at `:1882` — passes through
      the same function, so no return path can leak a response. Side
@@ -327,9 +345,11 @@ refuse a snapshot whose version is not the one it speaks.
   create nothing, answer nothing".
 - `kernel-services/network/tcp.c` — honour `M_FW_QUIET` structurally:
   `struct tcp_batch` gains a `quiet` bit, set from the mbuf when `tcp_input`
-  begins and cleared when the segment is **accepted** by an existing
-  connection (the acceptability test at `:1703-1712`, or a SYN-cache
-  completion); `batch_send` (`:681`, the sole emitter) frees a still-quiet
+  begins and cleared at exactly three points — the ACK-apply step
+  (`≈:1758`/`:1769`, after the window `:1703`, RST-position `:1728`,
+  in-window-SYN `:1740`, missing-ACK `:1744`, ACK-range `:1747` and
+  `SYN_RCVD`-ACK `:1754` checks have all passed), a valid in-window reset
+  (`:1731`), and a SYN-cache completion; `batch_send` (`:681`, the sole emitter) frees a still-quiet
   batch instead of transmitting — so the early flushes at `:1617`/`:1628`
   and the final one at `:1882` are all gated by one line; `challenge_ack`
   (`:673`) returns before `challenge_allowed()` when its batch is quiet
@@ -444,6 +464,15 @@ the host; verdicts awaited on the worker as in `net-input`.
   segment on an *accepted* connection (outside the rule) still draws its RFC
   5961 challenge ACK, proving the host-wide challenge budget was not spent
   on the rejected ones.
+- **The acceptance boundary is the apply step, not the window test**: under
+  a DROP rule covering the peer of an accepted connection, an **in-window
+  SYN** on that connection draws no challenge ACK (a connection-open attempt
+  is refused silently), an in-window segment whose ACK is outside the RFC
+  5961 §5 range draws no challenge, a reset not naming `rcv_nxt` draws no
+  challenge — all three are in-window and all three are rejections; while a
+  **valid reset** from the peer (`seq == rcv_nxt`) still tears the connection
+  down (the accepted socket reports the reset), because a legitimate teardown
+  of an existing connection is applied, and emits nothing anyway.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
   back, while a type-0 datagram to the host passes the default.
@@ -484,7 +513,9 @@ is sent as today: the ACK-only probe from a source with no connection then
 draws a RST, the bad-sequence segment a challenge ACK, and the out-of-window
 segment a window ACK — one revert, three observed responses); the gate
 placed at the final flush only (the no-pcb path's early flush at `:1617`
-then sends the RST); `challenge_ack` consulting the budget before checking
+then sends the RST); `quiet` cleared at the window test instead of the
+apply step (the in-window SYN, the out-of-range ACK and the mis-positioned
+reset then each draw a challenge ACK); `challenge_ack` consulting the budget before checking
 the quiet bit (the probe burst then starves the accepted connection's
 legitimate challenge ACK); the SYN-cache
 allocation not gated (a new SYN under the DROP rule then draws a SYN-ACK);
@@ -502,10 +533,11 @@ rule — the proof the INPUT unit could not run).
 ## Benchmarks
 
 The uplink is the hot path: the NIC's receive rate with an empty host rule
-list (one flag test and the owner lookup on the destination) and with a
-short list, measured with `net-nicbench`; the owner lookup is the same
-`g_netifs` walk `netif_owns_ipv4` already does once per datagram, and can
-share it. Nothing on the tap or loopback paths changes.
+list (one flag test and the off-link compare, `iph->dst == nif->ip4.addr`)
+and with a short list, measured with `net-nicbench`; and, under a DROP rule,
+quiet delivery costs no extra lookup (the demux it would have taken, minus
+the responses). The guest-tap path gains exactly the off-link compare (the
+INPUT chain is otherwise unchanged); the loopback path is untouched.
 
 ## Risks
 
