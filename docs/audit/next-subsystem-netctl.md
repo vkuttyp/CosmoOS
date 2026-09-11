@@ -30,18 +30,20 @@ control surface / a runtime API" as a later unit. This is that unit.
 
 ## Current implementation (before this unit)
 
-**The control surfaces are read-only.** `fw_cfg` (`opt/cosmo/*`) is read
-once at boot; `/dev/vmm`'s sysctl view is read-only; `/dev/net/tap` carries
-frames, not configuration. Nothing a userland owner can write reconfigures
-the network. The port-forward table (`nat.c`) has `nat_pf_add` /
+**The control surfaces were read-only.** `fw_cfg` (`opt/cosmo/*`) was read
+once at boot; `/dev/vmm`'s sysctl view was read-only; `/dev/net/tap` carried
+frames, not configuration. Nothing a userland owner could write reconfigured
+the network. The port-forward table (`nat.c`) had `nat_pf_add` /
 `nat_pf_clear`, called only from `tapsvc` at tap setup with the `fw_cfg`
-string; there is no remove, no list, and no path from userland to any of it.
+string; there was no remove, no list, and no path from userland to any of it.
+This unit added all three (see the design below and the status banner).
 
-**The pieces that exist and are reused:** `nat.c`'s port-forward table and
-its target validation (a rule's guest address must be on a connected subnet);
-the `ramfs_mkchr` character-device mechanism `/dev/net/tap` already uses (a
-`chrdev_ops` with `read`/`write`, a file mode for permissions); the tap and
-its guest; the credential model that gates a privileged device by its mode.
+**The pieces that existed and were reused:** `nat.c`'s port-forward table and
+its target validation (then any connected subnet, tightened by this unit to
+the guest tap's own); the `ramfs_mkchr` character-device mechanism
+`/dev/net/tap` already used (a `chrdev_ops` with `read`/`write`, a file mode
+for permissions); the tap and its guest; the credential model that gates a
+privileged device by its mode.
 
 ## Why it matters
 
@@ -163,7 +165,9 @@ character device, as the frame channel is.
 - **A general firewall's rules**, **unprivileged/delegated control**, and a
   **query/subscribe interface** for live statistics — named, later.
 
-## Affected files
+## Affected files (all changed as planned)
+
+These are the files the unit changed.
 
 - `kernel-services/network/tap.c` — create `/dev/net/tapctl` in
   `tap_dev_init`; the control `chrdev_ops` (`write` applies a command, `read`
@@ -181,14 +185,17 @@ character device, as the frame channel is.
 - `docs/kernel-services/network/`, `docs/kernel-services/virtualization/`,
   `README.md` — the design and the Status entry.
 
-## New APIs
+## New APIs (as built)
 
 A new **character device** `/dev/net/tapctl` (a control ABI, `struct
 cosmo_netctl` in the uapi), not a system call and not a new syscall ABI. Its
 kernel surface is `nat_pf_del` / `nat_pf_list` beside the existing
 `nat_pf_add`. The device is privileged by its `0600` mode.
 
-## Migration plan
+## Migration plan (completed)
+
+Every step below was implemented in the order given; each is done and its
+test passes.
 
 1. **`nat_pf_add` tightened, `nat_pf_del`, `nat_pf_list`** in `nat.c`, with a
    test: a target off the guest tap's subnet is rejected; a duplicate
@@ -208,7 +215,9 @@ kernel surface is `nat_pf_del` / `nat_pf_list` beside the existing
    reproducible under `QEMU_MEM=2G`.
 5. **Docs and the Status entry**, and the full verification chain.
 
-## Tests
+## Tests (all passing)
+
+These self-tests exist and pass on both architectures.
 
 - `net-tapctl` (host): a `FORWARD_ADD` command applied through the control
   path installs a rule (a subsequent client connection is DNAT'd to the
