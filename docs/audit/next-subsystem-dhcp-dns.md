@@ -229,29 +229,35 @@ tap goes away.
 
 ## Affected files (all changed as planned)
 
-These were the files the unit changed; all were touched as listed.
-
+These are the files the unit changed.
 
 - `kernel-services/network/tapsvc.c` (new), `kernel/include/kernel/net/tapsvc.h`
-  — the frame-level DHCP responder, the DNS-proxy service thread and its
-  sockets, the pending table.
+  (new) — the frame-level DHCP responder, the DNS-proxy service threads and
+  their sockets, the pending table.
 - `kernel-services/network/tap.c` / `tap.h` — start the service on
-  `tap_dev_activate` and stop it on teardown; the tap-local receive filter
-  that hands the service each inbound frame before the stack sees it, and the
-  `ether_output`-based reply path out the tap.
+  `tap_dev_activate`; the tap-local receive filter (`tap_set_input_filter`)
+  that hands the service each inbound frame before the stack sees it, over
+  which the DHCP reply rides `ether_output`.
+- `kernel/kernel.mk` — build `tapsvc.c`.
+- `kernel-services/network/arp.c` — call `tapsvc_dns_age` from the periodic
+  ARP/ND aging.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
-  `selftest.h` — the `net-dhcp` and `net-dns` self-tests.
-- `kernel/core/fwcfg.c` / `kernel/fwcfg.h` (or the existing fw_cfg reader)
-  — the `opt/cosmo/resolver` upstream address.
-- `docs/kernel-services/network/`, `docs/kernel-services/virtualization/`,
-  `README.md` — the design and the Status entry.
+  `kernel/include/kernel/selftest.h` — the `tap-filter`, `net-dhcp` and
+  `net-dns` self-tests.
+- `docs/kernel-services/network/` (design + testing),
+  `docs/kernel-services/virtualization/design.md`, `README.md` — the design
+  and the Status entry.
+
+The `opt/cosmo/resolver` upstream is read through the *existing* fw_cfg
+reader (`fwcfg_get_string`); `kernel/core/fwcfg.c` and `kernel/fwcfg.h` were
+not changed.
 
 ## New APIs
 
 No new system call and no new control-plane ABI: the DHCP half rides a
 tap-local receive filter and `ether_output`, the DNS half binds an in-kernel
 `ksock` socket and reads one read-only `fw_cfg` value. The surface is
-internal — `tapsvc_start(struct netif *tap)` / `tapsvc_stop()`, called from
+internal — `tapsvc_start(struct tap *t)` / `tapsvc_stop()`, called from
 the tap's activation and teardown, plus the tap-local receive-filter hook the
 tap already needs for this.
 
