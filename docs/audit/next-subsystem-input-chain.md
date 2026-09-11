@@ -187,7 +187,17 @@ required `0` there and meant "any"; a version-3 ICMP rule says a type or
 spends one byte of its `reserved` pair on `policy_to_host` (layout and size
 unchanged); `COSMO_NETCTL_VERSION` → 3 (a v2 reader that ignores the byte
 sees zeros where it saw zeros). `vmctl filter` accepts `host` as a direction
-word; `vmctl filter list` prints the third policy. `/dev/net/tapctl`'s
+word; `vmctl filter list` prints the third policy. **The CLI's transport
+selector follows the protocol**, because `vmctl`'s existing PORT argument
+goes through `pf_port` (which accepts `1..65535`, and `any` leaves the field
+`0`) — under the new meaning that would make type 0 unwritable and encode
+`icmp … any` as "type 0", not the wildcard. So for `PROTO icmp` the PORT
+argument is parsed as an ICMP **type**: a number `0..255`, or the names
+`echo-request` (8) and `echo-reply` (0); `any` encodes
+`COSMO_NETCTL_ICMP_TYPE_ANY` (`0xffff`) when the protocol is `icmp` and `0`
+when it is `tcp`/`udp`/`any`; a value above 255 is rejected before the write.
+`vmctl filter list` prints an ICMP rule's selector as its type (with the two
+names where they apply) and `any` for the wildcard. `/dev/net/tapctl`'s
 dispatcher, exact-size discipline, guest-by-address binding, attachment
 coherence and snapshot bound (`COSMO_NETCTL_SNAPSHOT_MAX`, unchanged since the
 seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
@@ -224,7 +234,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
 - `kernel-services/network/tap.c` — the read snapshot emits `policy_to_host`
   (no dispatch change: the direction value flows through).
 - `userland/system/vmctl.c` — `host` direction word; list prints the third
-  policy.
+  policy; the PORT argument becomes protocol-aware (`icmp`: a type `0..255`
+  or `echo-request`/`echo-reply`, `any` → `ICMP_TYPE_ANY`; `tcp`/`udp`: the
+  existing `pf_port`, `any` → `0`), and `list` prints an ICMP rule's type.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
   `kernel/include/kernel/selftest.h` — the `net-input` selftest;
   `net-firewall`'s listing assertions account for the seeded rules
@@ -254,7 +266,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
 2. `ipv4.c`: the call site and the two stats; both arches boot, every
    existing test green (DNS and echo pass by the seeded rules; DHCP is
    untouched).
-3. UAPI v3, `tap.c` listing byte, `vmctl` direction word.
+3. UAPI v3 (`DIR_TO_HOST`, `ICMP_TYPE_ANY`, the ICMP-type meaning of
+   `dst_port`), `tap.c` listing byte, `vmctl`'s `host` direction word and
+   protocol-aware selector parsing/printing.
 4. `net-input` selftest; the `net-firewall` count adjustments; docs and
    README; the report as built.
 
@@ -297,6 +311,11 @@ plus ksock listeners on the host to prove delivery or its absence:
 - **Policy flip**: `FILTER_POLICY TO_HOST ACCEPT` admits an unruled port; back
   to DROP closes it. `vmctl`-shaped writes with `host` are accepted;
   `ANY` as a policy direction is rejected.
+- **The CLI encodes the ICMP selector correctly**: `vmctl`-shaped writes for
+  `icmp … echo-reply` land as type `0` (and admit a guest echo reply),
+  `icmp … any` lands as `ICMP_TYPE_ANY` (`0xffff`, admitting every type),
+  `udp … any` still lands as `0`, and `icmp … 256` is rejected before any
+  write — proving type 0 is writable and the wildcard is not mistaken for it.
 - **Regression**: `net-dns`, `net-dhcp`, `net-nat`, `net-firewall` unchanged
   in verdict (counts adjusted for the seeds).
 
