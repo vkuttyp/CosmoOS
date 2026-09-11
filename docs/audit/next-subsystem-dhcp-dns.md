@@ -86,8 +86,9 @@ wildcard `:67` socket would also *receive* broadcasts from every interface,
 not only the tap). So **DHCP is handled at the frame level, scoped to
 `tap0`** (§2): the tap hands the service each inbound frame before the stack
 sees it, and the service replies by building a frame and transmitting it out
-`tap0` to the client's hardware address — never through IP routing or a
-wildcard socket, so it is pinned to the tap on both ends by construction. DNS,
+`tap0` — addressed as the client's broadcast flag dictates (§2), never
+through IP routing or a wildcard socket, so it is pinned to the tap on both
+ends by construction. DNS,
 by contrast, happens *after* the guest is configured: its query is a unicast
 to `10.0.3.1` (an address the host owns) and the answer is a unicast to
 `10.0.3.15` (which `ipv4_route` sends out `tap0` by the connected-subnet
@@ -250,10 +251,12 @@ tap already needs for this.
    the service emits is read back off the tap and a frame it does not claim
    still reaches the stack.
 2. **The DHCP server** (frame-level): DISCOVER/OFFER/REQUEST/ACK/NAK/RELEASE
-   for the one guest slot, replies built and sent out `tap0` to the client's
-   hardware address. Proved by `net-dhcp` (a synthetic guest completes DORA
-   and the offer carries the right fields; a REQUEST for a wrong address is
-   NAK'd; a second hardware address is refused). Each behavior bug-proved by
+   for the one guest slot, replies built and sent out `tap0` to the
+   destination the client's broadcast flag selects (§2: the limited broadcast
+   at both layers when set, a link-unicast to `chaddr` with IP `yiaddr` when
+   clear). Proved by `net-dhcp` (a synthetic guest completes DORA and the
+   offer carries the right fields; a REQUEST for a wrong address is NAK'd; a
+   second hardware address is refused). Each behavior bug-proved by
    reintroducing its bug.
 3. **The DNS proxy**: the socket on `10.0.3.1:53`, the single upstream
    socket, the ID-rewriting relay, the bounded expiring pending table. Proved
@@ -267,14 +270,16 @@ tap already needs for this.
 
 ## Tests
 
-- `net-dhcp` (host): a synthetic guest injects DISCOVER on a tap and the
-  reply read back off the tap is an OFFER to the client's hardware address
-  with `10.0.3.15`, `/24`, router/DNS `10.0.3.1`, a lease; REQUEST → ACK; a
-  REQUEST for another address → NAK; a second hardware address is offered
-  nothing. With the broadcast flag set the reply is the limited broadcast at
-  both the IP and Ethernet layers and leaves only the tap (bug-proofs: an IP
-  destination of `10.0.3.15` under the flag, which the guest would drop; and
-  routing the reply instead of `ether_output`, which sends it off the default
+- `net-dhcp` (host): a synthetic guest injects DISCOVER on a tap with the
+  broadcast flag set; the reply read back off the tap is an OFFER sent as the
+  limited broadcast at both layers (IP `255.255.255.255`, Ethernet
+  `ff:ff:ff:ff:ff:ff`) carrying `10.0.3.15`, `/24`, router/DNS `10.0.3.1`, a
+  lease; REQUEST → ACK; a REQUEST for another address → NAK; a second
+  hardware address is offered nothing. A separate DISCOVER with the flag
+  *clear* is answered by a link-unicast to `chaddr` with IP `yiaddr`. The
+  reply leaves only the tap (bug-proofs: an IP destination of `10.0.3.15`
+  under the flag, which the guest would drop; and routing the reply instead
+  of `ether_output`, which sends it off the default
   interface so the tap read-back is empty).
 - `net-dns` (host): a guest query to `10.0.3.1:53` is forwarded to a
   test-controlled upstream (a loopback responder) with a rewritten ID, and
