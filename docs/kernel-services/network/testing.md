@@ -208,6 +208,20 @@ invalid checksum), a table that clobbers instead of dropping when full
 (`out_drop_full` never rises), and an age that reclaims nothing (the entries
 never expire).
 
+**`net-dnat`**: two taps and a static port-forward rule (`tcp:8080 →
+10.77.5.15:80`). A client SYN to the host's uplink address port 8080 is read
+back on the guest tap rewritten to the guest's `:80` (source intact, checksum
+valid); the guest's SYN-ACK is read back on the uplink with its source
+rewritten to `host:8080` (checksum valid), so the client sees a reply from
+what it dialed; a UDP round trip through a second rule; a connection to an
+unruled port is delivered to the host, not forwarded to the guest; the table
+is bounded (a flood of distinct client flows fills it, further ones drop) and
+reclaimed by `nat_age`. Proved by reintroducing no reply un-rewrite (the
+reply's source port is then the guest's, not the dialed port), a rule that
+matches every port (an unruled port is then forwarded to the guest), and a
+table that clobbers instead of dropping when full (`dnat_drop_full` never
+rises).
+
 ## Autoconfiguration (DHCP and DNS)
 
 **`tap-filter`**: the tap input filter that the DHCP server rides. A frame
