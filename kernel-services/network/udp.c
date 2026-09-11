@@ -46,6 +46,16 @@ static bool port_in_use(uint16_t family, uint16_t port, const struct netaddr *ad
     return false;
 }
 
+/* Is a UDP socket bound to this local (family, port, addr)? For NAT, which
+ * must not lend a port a host socket already holds. Takes the UDP lock. */
+bool udp_port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_lock);
+    bool r = port_in_use(family, port, addr);
+    spin_unlock_irqrestore(&g_lock, s);
+    return r;
+}
+
 static uint16_t pick_ephemeral(uint16_t family, const struct netaddr *addr)
 {
     for (unsigned n = 0; n < NET_EPHEMERAL_HI - NET_EPHEMERAL_LO; n++) {

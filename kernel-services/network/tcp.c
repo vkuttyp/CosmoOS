@@ -223,6 +223,16 @@ static bool port_in_use_locked(uint16_t family, uint16_t port, const struct neta
     return false;
 }
 
+/* Is a TCP socket bound to this local (family, port, addr)? For NAT port
+ * coordination. Takes the table lock. */
+bool tcp_port_in_use(uint16_t family, uint16_t port, const struct netaddr *addr)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_table_lock);
+    bool r = port_in_use_locked(family, port, addr, NULL);
+    spin_unlock_irqrestore(&g_table_lock, s);
+    return r;
+}
+
 /* Table lock held. A random start on every call (audit §9.2). */
 static uint16_t pick_ephemeral_locked(uint16_t family, const struct netaddr *addr)
 {

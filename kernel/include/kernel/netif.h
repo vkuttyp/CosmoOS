@@ -20,6 +20,8 @@
 #define NETIF_NOARP    (1u << 2)
 #define NETIF_GONE     (1u << 3)   /* netif_unregister ran: no transmit, no receive */
 #define NETIF_NODEFAULT (1u << 4)  /* never the machine's default interface (a tap: a point-to-point owner link) */
+#define NETIF_FORWARD  (1u << 5)  /* forward IPv4 datagrams arriving here that are not for the host (a tap, never the real NIC) */
+#define NETIF_MASQUERADE (1u << 6) /* masquerade flows forwarded from here: rewrite source to the egress address (a tap) */
 
 /* nif->caps, set by the driver before netif_register (unit 11). */
 #define NETIF_CAP_TXCSUM (1u << 0)   /* finishes NET_CSUM_* transport checksums (virtio NEEDS_CSUM) */
@@ -79,11 +81,14 @@ void netif_release_static(struct netif *nif);
 /* Lookups return a referenced pointer (netif_put when done) or NULL. */
 struct netif *netif_find(const char *name);
 struct netif *netif_default(void);            /* the non-loopback interface that is up, or NULL */
+struct netif *netif_connected(uint32_t dst);  /* the up interface whose subnet holds dst, longest prefix; referenced or NULL */
 struct netif *netif_loopback(void);
 static inline void netif_get(struct netif *nif) { kobject_get(&nif->obj); }
 static inline void netif_put(struct netif *nif) { kobject_put(&nif->obj); }
 void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t gateway);
 void netif_set_up(struct netif *nif, bool up);
+void netif_set_forward(struct netif *nif, bool on);   /* NETIF_FORWARD: forward not-for-us datagrams that arrive here */
+void netif_set_masquerade(struct netif *nif, bool on);   /* NETIF_MASQUERADE: source-NAT flows forwarded from here */
 bool netif_owns_ipv4(uint32_t addr);          /* one of our addresses (any interface) */
 bool netif_owns_ipv6(const struct in6_addr *a);
 

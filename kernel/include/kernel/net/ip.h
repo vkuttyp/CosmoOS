@@ -50,6 +50,9 @@ struct icmp_hdr {
 #define ICMP_ECHO         8
 #define ICMP_UNREACH_PORT 3
 #define ICMP_UNREACH_PROTO 2
+#define ICMP_UNREACH_NET 0        /* net unreachable: no route to forward */
+#define ICMP_TIME_EXCEEDED 11      /* TTL exceeded in transit (RFC 792) */
+#define ICMP_TIMXCEED_INTRANS 0
 #define ICMP_UNREACH_NEEDFRAG 4   /* fragmentation needed and DF set: next-hop MTU in the header's last 16 bits */
 #define ICMP_RATE_PER_SEC 100u    /* unreachables and echo replies a second, host-wide (v4 and v6) */
 #define IPV4_PMTU_ENTRIES 16u
@@ -79,6 +82,7 @@ struct netif *ipv6_route(const struct in6_addr *dst);
 
 void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph);
 void icmp_send_unreach(struct mbuf *orig, const struct ipv4_hdr *iph, uint8_t code);   /* borrows orig */
+void icmp_send_timxceed(struct mbuf *orig, const struct ipv4_hdr *iph);      /* borrows orig; TTL exceeded in transit */
 /* One token from the ICMP bucket (true = send). Shared by v4 and v6. */
 bool icmp_ratelimit_allow(void);
 /* Path MTU cache: what a datagram to `dst` may carry (the route's MTU when
@@ -106,6 +110,7 @@ void nd_flush(struct netif *nif);   /* drop every entry that names the interface
 struct ip_stats {
     uint64_t rx, rx_bad_header, rx_bad_cksum, rx_not_for_us, rx_fragments, rx_unknown_proto, tx, tx_no_route;
     uint64_t icmp_echo_rcvd, icmp_echo_replied, icmp_unreach_sent, icmp_ratelimited, icmp_needfrag_rcvd, pmtu_updates;
+    uint64_t fwd, fwd_ttl_exceeded, fwd_no_route, fwd_hairpin, fwd_disabled, fwd_nat_drop, fwd_spoofed;
 };
 void ipv4_get_stats(struct ip_stats *out);
 void ipv6_get_stats(struct ip_stats *out);

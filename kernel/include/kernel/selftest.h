@@ -186,6 +186,9 @@ bool selftest_net_mbuf(const char **reason);
 bool selftest_net_cksum(const char **reason);
 bool selftest_net_arp(const char **reason);
 bool selftest_tap(const char **reason);
+bool selftest_net_route(const char **reason);
+bool selftest_net_forward(const char **reason);
+bool selftest_net_nat(const char **reason);
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);

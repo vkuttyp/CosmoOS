@@ -552,6 +552,78 @@ reporting it, `EINPROGRESS`/`EALREADY`/`EAGAIN` as above. `poll` itself
 remains Linux stage 3 (`docs/compat/linux/design.md`); the readiness
 operation is the piece it and async I/O need from every object.
 
+## Forwarding and NAT (`ipv4.c`, `nat.c`; audit unit "reaching beyond the host")
+
+The stack was an endpoint: it delivered what was addressed to it and
+dropped the rest. This unit lets a guest on a tap reach past the host --
+through the host's own interface, its replies NAT'd back -- in three pieces
+(`docs/audit/next-subsystem-nat.md`).
+
+**Connected-route selection.** `ipv4_route` tried owned/loopback, then the
+single default interface. `netif_connected(dst)` now sits between them: the
+up, non-loopback interface on whose subnet `dst` falls, chosen by *longest
+prefix* so overlapping masks resolve by specificity, not registration
+order. So a reply for the guest routes to the tap (the guest's `/24`), not
+the default NIC. Owned and loopback destinations, and anything with no
+connected route (which still falls to the default), are unchanged.
+
+**IP forwarding.** Where `ipv4_input` dropped a unicast datagram not for the
+host (`rx_not_for_us`), it now **forwards** it -- but only when the packet
+arrived on an interface marked `NETIF_FORWARD`. The gate is
+*per-ingress-interface*: the flag is the tap's, never the real NIC's, so a
+packet arriving on the NIC for some other host is still dropped and the host
+is no router for its real link. A forwarded datagram is routed (connected,
+then default), its TTL decremented (an ICMP time-exceeded at zero, RFC
+1812), and re-emitted with `output_on`; one with no route (ICMP
+net-unreachable) or that would hairpin back out its arrival interface is
+dropped. The datagram takes the same validated `ipv4_input` path -- header,
+checksum, martian checks -- before forwarding, with no shortcut, and a
+strict reverse-path check drops any datagram whose source is not on the
+ingress interface's own subnet, so a guest cannot forge a source (an
+uplink-subnet address, say, which would otherwise make masquerade skip it
+and be emitted unchanged).
+
+**Masquerade NAT (`nat.c`).** A forwarded flow leaving an interface whose
+subnet does not hold its source -- a `10.0.3.x` guest going out the uplink
+-- has its source rewritten to the egress address and its transport
+identifier (TCP/UDP source port, ICMP echo id) rewritten to a value a
+bounded conntrack table lends; the reply, arriving for that value, is
+rewritten back to the guest and forwarded. `nat_out` runs in the forwarding
+path (gated on the ingress `NETIF_MASQUERADE`); `nat_in` runs in
+`ipv4_input` for datagrams addressed to us, before host delivery, and
+catches both a plain reply and an ICMP error quoting a NAT'd packet
+(translated so path-MTU and unreachables reach the guest). The transport
+checksum is fixed up incrementally (RFC 1624, `csum_patch16`/`csum_patch32`,
+in this codebase's big-endian-word convention); the IP checksum is
+recomputed when the header is rebuilt downstream. Transport headers are
+read and written by byte offset -- they are `__packed`, so a pointer to a
+member could be unaligned. The lent identifiers come from a reserved range (`NAT_PORT_MIN..MAX`) kept
+below `NET_EPHEMERAL_LO`, so a host's own outbound flow -- which sources
+from an ephemeral port -- never collides with a lent one; and `nat_alloc`
+additionally skips any port a host UDP/TCP socket has bound
+(`udp_port_in_use`/`tcp_port_in_use`), so a reply for a host service is
+never redirected to the guest. An inbound ICMP message is checksum-validated
+before translation (the error path recomputes the checksum wholesale, which
+would otherwise launder a corrupt message the normal path would drop). The
+table is bounded (`NAT_TABLE_SIZE`); entries expire (a short idle timeout,
+longer once a TCP flow is established, via `nat_age`, which the network
+worker calls from its periodic ARP/ND aging), and a full table drops new
+flows. Because forwarding is enabled
+only on the one guest's tap, the table's flows are that guest's, so a guest
+that opens endless flows starves only itself; a per-client quota is the
+concern of a later unit that forwards for more than one client. Only IPv4
+UDP, TCP and ICMP echo are masqueraded; a flow that cannot be (an
+unsupported protocol, a truncated header, a full table) is dropped rather
+than forwarded with the private source exposed.
+
+`tap0` turns `NETIF_FORWARD` and `NETIF_MASQUERADE` on when an owner first
+uses `/dev/net/tap` -- a VM attaching is the opt-in. No new system call and
+no writable control surface: the flags are internal, set by the tap setup.
+A stock Linux guest with the tap as its gateway reaching the host's network
+(and the internet, where the host has it) is the `QEMU_MEM=2G`
+reproduction. Inbound port-forwarding (DNAT), a filtering firewall, and
+IPv6 NAT are later units.
+
 ## Receive scaling and offloads (post-audit unit 11)
 
 The audit's plan (`docs/audit/2026-09-post-roadmap-audit.md` §19, "After

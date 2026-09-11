@@ -320,6 +320,36 @@ struct netif *netif_loopback(void)
     return netif_find("lo");
 }
 
+/* The up, non-loopback interface on whose subnet `dst` falls, by longest
+ * prefix (the registry allows overlapping masks in registration order, so a
+ * broad early subnet must not capture a more-specific one). Referenced, or
+ * NULL. A NETIF_NODEFAULT interface (a tap) is a connected route like any
+ * other -- it is only kept out of the *default* choice. */
+struct netif *netif_connected(uint32_t dst)
+{
+    struct netif *best = NULL;
+    uint32_t best_mask = 0;
+    arch_irq_state_t s = spin_lock_irqsave(&g_netif_lock);
+    struct netif *n;
+    list_for_each_entry(n, &g_netifs, link) {
+        if ((n->flags & NETIF_LOOPBACK) || !(n->flags & NETIF_UP))
+            continue;
+        if (n->ip4.addr == 0 || n->ip4.mask == 0)
+            continue;
+        if (((dst ^ n->ip4.addr) & n->ip4.mask) != 0)
+            continue;                            /* dst is not on this interface's subnet */
+        uint32_t m = ntohl(n->ip4.mask);
+        if (best == NULL || m > best_mask) {
+            best = n;
+            best_mask = m;
+        }
+    }
+    if (best != NULL)
+        kobject_get(&best->obj);
+    spin_unlock_irqrestore(&g_netif_lock, s);
+    return best;
+}
+
 void netif_set_ipv4(struct netif *nif, uint32_t addr, uint32_t mask, uint32_t gateway)
 {
     arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
@@ -338,6 +368,26 @@ void netif_set_up(struct netif *nif, bool up)
         nif->flags |= NETIF_UP;
     else
         nif->flags &= ~NETIF_UP;
+    spin_unlock_irqrestore(&nif->lock, s);
+}
+
+void netif_set_forward(struct netif *nif, bool on)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
+    if (on)
+        nif->flags |= NETIF_FORWARD;
+    else
+        nif->flags &= ~NETIF_FORWARD;
+    spin_unlock_irqrestore(&nif->lock, s);
+}
+
+void netif_set_masquerade(struct netif *nif, bool on)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&nif->lock);
+    if (on)
+        nif->flags |= NETIF_MASQUERADE;
+    else
+        nif->flags &= ~NETIF_MASQUERADE;
     spin_unlock_irqrestore(&nif->lock, s);
 }
 

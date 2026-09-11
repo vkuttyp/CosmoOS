@@ -1074,9 +1074,35 @@ See [docs/development.md](docs/development.md).
   selftest (a frame out the tap read back, an injected ARP answered by the
   stack, the queue capped) and `el2-tap-host` (a guest's ARP request
   crossing virtio-net and the bridge into the real stack, which answers on
-  the tap). Reaching beyond the host -- NAT, routing, DHCP, DNS -- is the
-  next unit; a stock Linux `ping 10.0.3.1` of the host is the `QEMU_MEM=2G`
-  reproduction.
+  the tap). Routing and NAT past the host are done in the next entry; DHCP
+  and DNS remain. A stock Linux `ping 10.0.3.1` of the host is this unit's
+  `QEMU_MEM=2G` reproduction.
+- **The guest reaches beyond the host: IP forwarding and masquerade NAT
+  (done):** `docs/audit/next-subsystem-nat.md`,
+  `docs/kernel-services/network/design.md` ("Forwarding and NAT"). The tap
+  boxed the guest into a two-node network with the host; this lets its
+  packets leave. Three pieces: `ipv4_route` now prefers a *connected* subnet
+  by longest prefix (so a reply for the guest routes to the tap, not the
+  default NIC); `ipv4_input` **forwards** a datagram that is not for the host
+  when it arrived on a `NETIF_FORWARD` interface -- routed, the TTL
+  decremented (an ICMP time-exceeded at zero, RFC 1812), re-emitted -- the
+  gate per-ingress so the flag is the tap's and never the NIC's, and the
+  host is no router for its real link; and `kernel-services/network/nat.c`
+  **masquerades** a forwarded flow whose source is not on the egress subnet,
+  rewriting the source to the egress address and the TCP/UDP port (or ICMP
+  echo id) to a value a bounded conntrack table lends, fixing the transport
+  checksum incrementally (RFC 1624) and rewriting the reply -- and an ICMP
+  error quoting a NAT'd packet -- back to the guest. The table is bounded
+  and its entries expire; a full table drops new flows. `tap0` turns both
+  flags on when an owner first uses `/dev/net/tap` (no new syscall, no
+  writable sysctl). Proven in the harness by `net-route` (longest-prefix
+  connected routing), `net-forward` (a datagram forwarded TTL-1-lower, a
+  TTL-1 time-exceeded, a non-forwarding ingress that stays a non-router) and
+  `net-nat` (UDP/TCP/ICMP round trips masqueraded and restored with valid
+  checksums, an ICMP error translated back, the table bounded and expiring).
+  A stock Linux guest with the tap as its gateway reaching the host's network
+  is the `QEMU_MEM=2G` reproduction; inbound port-forwarding (DNAT), a
+  filtering firewall, and IPv6 NAT are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

@@ -5,6 +5,7 @@
 #include <kernel/errno.h>
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
+#include <kernel/net/nat.h>
 #include <kernel/net/ip.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -281,8 +282,10 @@ void arp_age(uint64_t now)
 static void age_work(void *arg)
 {
     (void)arg;
-    arp_age(clock_now_ns());
-    nd_age(clock_now_ns());
+    uint64_t now = clock_now_ns();
+    arp_age(now);
+    nd_age(now);
+    nat_age(now);
     timer_start(&g_timer, ARP_RETRY_NS);
 }
 
