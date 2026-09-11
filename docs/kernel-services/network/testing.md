@@ -382,9 +382,108 @@ then changes nothing), and an ICMP match that ignores the type (a guest echo
 *reply* is then admitted by the echo-request seed). The report's fifth proof
 — the verdict placed *before* `nat_in` — is not runnable as stated: with the
 verdict gated on guest-tap ingress, nothing `nat_in` claims arrives on a
-guest tap (a masqueraded reply arrives on the uplink), so the ordering is
-unobservable today; the placement after `nat_in` is kept for the host-scoped
-chain that will make it matter.
+guest tap (a masqueraded reply arrives on the uplink), so the ordering was
+unobservable then; the host chain's `net-hostinput` makes it observable
+(below).
+
+**`net-hostinput`** (the host chain): an "uplink" tap `u` built as `net-dnat`
+builds one (a real, non-guest link) with five world addresses ARP-seeded on
+its far side, plus guest A through `/dev/net/tap`; host services as ksock
+sockets — TCP listeners on `:2222`/`:2223`, a UDP listener on `:7000`, a UDP
+socket bound `:7001` and *connected* to a world peer, a loopback-bound UDP
+listener `127.0.0.1:7002`; verdicts awaited on the worker; the world drives
+TCP by hand (`hin_mk_tcp` with sequence, acknowledgment, flags, window and
+payload) and reads the host's answers back from the tap by protocol and
+world port. (1) The host object ships with default ACCEPT and no rules; a
+world SYN to `:2222` draws a SYN-ACK (`hin_accept_default`) and a UDP
+datagram reaches the `:7000` listener. (2) A DROP rule with a source
+(`FROM_UPLINK tcp from 10.77.8.0/24 :2222`) drops a SYN from inside the prefix
+(`hin_drop_rule`, `hin_quiet`, `tcp quiet_dropped`; nothing read back) while
+a SYN from `10.0.9.9` is still accepted by the default. (3) Quiet delivery:
+C1's handshake completes under ACCEPT, then a port-2222 DROP rule is added —
+C1's data segment is delivered and acknowledged (`hin_quiet` rises,
+`quiet_dropped` does not); an ACK-only probe and a SYN+ACK from a source with
+no connection are freed (`quiet_dropped`) with no RST read back; a new SYN
+makes no SYN-cache entry or cookie (`syn_cached`, `syn_cookies_sent`
+unchanged) and draws no SYN-ACK; under a `udp any` DROP rule the connected
+socket's peer is delivered, the listener and an unbound port get nothing back
+(`udp quiet_dropped`, no port-unreachable) — and without the rule the unbound
+port draws its port-unreachable, so the negative is meaningful. (4) TCP's own
+validation, silenced: on C1 an out-of-window segment draws no window ACK, a
+reset not at `rcv_nxt`, an in-window SYN and an out-of-range ACK draw no
+challenge (`challenge_acks` unchanged) and the connection lives; a burst of
+`TCP_CHALLENGE_PER_SEC + 20` in-window SYNs under the rule is freed and then
+an in-window SYN on C2 (`:2223`, no rule) still draws its challenge ACK — the
+budget was not spent on the rejected ones; on C4 with a 150 ms keepalive idle
+armed at establishment and out-of-window probes arriving every 40 ms under a
+rule covering the peer, the keepalive probe still fires (`keepalive_probes`
+rises); the host `connect`s out to a world peer under a rule covering it — its
+SYN is read back, the peer's SYN+ACK is delivered quiet and the host's
+completing ACK is read back, `connect` returns 0 — while a bare ACK from that
+peer to a tuple with no connection is freed silently; the host then closes
+first, the peer's ACK and FIN are accepted (the FIN's ACK read back,
+`TIME_WAIT`), a bare ACK there draws nothing, and a *retransmitted* FIN is
+acknowledged (the fifth acceptance point). Accepted segments that do not
+advance `snd_una` keep their output on C1: three duplicate ACKs make the 100
+bytes in flight retransmit (`retransmits` rises); an ACK with window 0 blocks
+a 50-byte send (nothing of that size read back) and a pure window update
+releases it; two data segments with an unchanged ACK are delivered and
+acknowledged together; the peer's FIN is acknowledged and the accepted socket
+reads EOF. A valid reset (`seq == rcv_nxt`) from a peer under a DROP rule
+tears C2 down (`-ECONNRESET`, `rsts_in`) and emits nothing. (5) ICMP by type:
+an `icmp type 8` DROP frees an echo request (`hin_filtered`; no reply), a
+type-0 datagram passes the default, and without the rule echo is answered.
+(6) Off-link, with no rule installed: the world's UDP to guest A's gateway
+`:53` and to `127.0.0.1:7002` are dropped `rx_offlink` (the loopback listener
+hears nothing, yet a loopback sender still reaches it), as are guest A's
+datagrams to `127.0.0.1` and to the uplink's address (`in_filtered`
+unchanged — no longer INPUT's default drop); the host chain's counters do not
+move for any of them, nor for A's DNS query to its gateway, which INPUT's seed
+still admits. (7) Ordering after `nat_in`, now provable: with a port-forward
+`tcp:8080 → A:80` and the host default DROP, the world's SYN to `host:8080`
+is read back on A's tap, DNAT'd, and no `hin_*` counter moves; loopback is
+untouched by the default; under DROP an unruled SYN drops
+(`hin_drop_default`) and an explicit ACCEPT rule readmits it. (8) Scope: a
+host rule naming `TO_HOST` or `ANY`, a guest rule naming `FROM_UPLINK` or a
+source, a host rule with `src_prefix 0` and a non-zero address, and a policy
+in the other scope's direction are all `-EINVAL`. (9) The control channel: a
+host rule with a source written through `/dev/net/tapctl` (`guest_addr 0`)
+is listed in the host's record beside `policy_from_uplink`; a 20-byte
+(version-3) write, a host rule naming `TO_HOST` and a guest rule naming
+`FROM_UPLINK` are refused.
+
+Proved by reintroducing: a host verdict that ignores its rules (the sourced
+DROP then delivers the SYN and a SYN-ACK is read back); a source match that
+ignores the prefix (the out-of-prefix SYN then drops); `batch_send` not
+honouring the quiet bit (the ACK-only probe then draws a RST, the
+out-of-window segment a window ACK, the in-window SYN a challenge — one
+revert, three observed responses); the gate placed at the final flush only
+instead of inside `batch_send` (the listener-rejection early flush then
+escapes it: the sourced DROP's SYN is not even counted `quiet_dropped`, and
+behind it the no-pcb flush sends the RST); the quiet bit cleared at the window test
+instead of after the last rejection (the in-window SYN and the mis-positioned
+reset then draw challenge ACKs); the bit cleared only inside the advancing-ACK
+branch (the window update then releases nothing, the third duplicate ACK
+builds no retransmission and the peer's FIN draws no ACK); the `SYN_SENT`
+block not clearing it (the host's completing ACK is discarded and `connect`
+never returns); `challenge_ack` consulting the budget before the quiet bit
+(the burst then starves C2's legitimate challenge); the SYN-cache allocation
+not gated (the new SYN under the rule then draws a SYN-ACK); `last_rx_ns` left
+before the acceptability test (the keepalive probe then never fires while the
+rejected probes arrive); a DROP that frees TCP at the IP layer (C1's data then
+never arrives); `udp_input` ignoring the flag (the unbound port then draws a
+port-unreachable under the rule); the off-link invariant removed (`rx_offlink`
+never rises and the world's datagram reaches the loopback-bound listener); and
+the host verdict moved before `nat_in` (the DNAT'd SYN then drops under the
+host default DROP — the proof the INPUT unit could not run).
+
+**`net-input`** (adjusted): its "guest → the host's uplink address" case is
+now dropped by the off-link invariant (`rx_offlink`) before any chain, not by
+INPUT's default (`in_drop_default`).
+
+**`net-tapctl`, `net-firewall`, `net-input`** (adjusted for version 4): the
+snapshot buffers and lengths count one more policy record (the host's) and
+the grown rule record; `fw_policy_get` reports a fourth slot.
 
 **`net-firewall`** (adjusted for version 3): its ICMP rule now carries
 `FW_ICMP_TYPE_ANY` (version 2's `0` meant "any"; version 3's `0` is echo

@@ -1221,9 +1221,8 @@ See [docs/development.md](docs/development.md).
   `net-firewall` (default drop, one-rule hole, stateful return incl. echo by
   id, first-match ordering and delete-by-tuple, a rule outliving its handle
   but not its guest, the listing round trip and every rejection). The INPUT
-  chain is done (its own entry below); an OUTPUT chain, the host's
-  uplink-facing INPUT chain, rate-limit/log targets, IPv6 and full TCP state
-  are later units.
+  chain and the host chain are done (their own entries below); an OUTPUT
+  chain, rate-limit/log targets, IPv6 and full TCP state are later units.
 - **The INPUT chain: what a guest may ask of the host (done):**
   `docs/audit/next-subsystem-input-chain.md`,
   `docs/kernel-services/network/design.md` ("The INPUT chain"). The
@@ -1248,8 +1247,52 @@ See [docs/development.md](docs/development.md).
   (seeds reach the host and nothing else does, a rule opens a port per
   datagram, the seeds are deletable, echo reply and need-frag dropped by type,
   forged sources dropped as spoofed, per-guest and flippable policy, the
-  listing round trip). An OUTPUT chain and the host's uplink-facing INPUT
-  chain are later units.
+  listing round trip). The host chain for the uplink is done (its own entry
+  below); an OUTPUT chain is a later unit.
+- **The host chain: what the world may ask of the host (done):**
+  `docs/audit/next-subsystem-host-input.md`,
+  `docs/kernel-services/network/design.md` ("The host chain"). FORWARD
+  decided which machines a guest may reach and INPUT which of the host's
+  services a guest may reach; this decides which of the host's services the
+  **world** -- anything arriving on the uplink -- may reach, the fourth and
+  last ingress→egress pair the stack serves short of the host's own egress.
+  The same engine, consulted from a third place: the **host is a policy
+  object** (`guest_addr 0` on the existing control channel, permanent, kept
+  outside the guest table so no datagram's source can name it), holding
+  rules of a **fourth direction**, `FROM_UPLINK`, that alone may carry a
+  **source prefix** -- the field a world-facing rule cannot do without and
+  the one a guest's rule may not have. `fw_host_verdict` runs in `ipv4_input`
+  for the uplink's datagram to the host **after `nat_in` declines**, so a
+  DNAT'd connection is never re-gated (now provable: a port-forwarded SYN
+  reaches the guest under a host default DROP), with default **ACCEPT** --
+  today's behaviour; the operator drops by source/protocol/port or flips the
+  default. One thing closes with no rule: the **off-link invariant** -- a
+  datagram arriving on any non-loopback link must be for that link's own
+  address or a broadcast, else `rx_offlink`; this shuts the per-guest DNS
+  proxies that were open resolvers from the real network and the
+  loopback-bound services the uplink could reach (the martian check looks
+  only at the source). And a DROP is **quiet**: the chain never models TCP
+  state -- a DROP on TCP/UDP marks the datagram `M_FW_QUIET` and the
+  transport, which owns acceptability, delivers it only into an existing
+  connection or a connected UDP socket and **answers nothing** otherwise: no
+  SYN-ACK, RST, challenge ACK, window ACK or port-unreachable. In TCP the
+  gate is `batch_send`, the sole emitter, freeing a still-quiet batch; the
+  `quiet` bit clears at five acceptance points found by walking every `goto
+  out` in `tcp_input` (after the last rejection check, so dup-ACKs, window
+  updates, data and FINs keep their output; the `SYN_SENT` completion, so
+  the host's own connect completes; a valid reset; the SYN-cache completion;
+  a retransmitted FIN in `TIME_WAIT`), the RFC 5961 budget and the keepalive
+  clock are touched only for an accepted segment, and no SYN-cache entry is
+  made under the flag. ABI version 4 (`DIR_FROM_UPLINK`, `src_addr/src_prefix`,
+  `policy_from_uplink`, the host record listed first); `vmctl filter ... host
+  world PROTO SRC DST PORT VERDICT`. Proven by `net-hostinput` (default
+  accept, a sourced drop by prefix, quiet delivery on established and
+  outbound connections against every probe shape and every rejection check,
+  no budget or keepalive side effect, dup-ACK/window-update/data/FIN output
+  kept, a valid reset applied, ICMP by type, off-link drops, DNAT never
+  re-gated, scope refusals, the listing round trip) with fourteen bug-proofs.
+  Reply state for unconnected UDP and ICMP, per-interface host chains, an
+  OUTPUT chain, rate-limit/log targets and IPv6 are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1308,8 +1351,10 @@ See [docs/development.md](docs/development.md).
   drops inter-guest traffic by default and lets a rule open it (built); and
   `-input-chain.md`, its second chain -- which of the host's own services a
   guest may reach, default-deny with the tap's DNS and echo seeded as rules
-  (built). The named next steps are the follow-ups these left (an OUTPUT
-  chain and the host's uplink-facing INPUT chain, hairpin/NAT-reflection,
+  (built); and `-host-input.md`, its third -- which of the host's services
+  the world may reach, default-accept with a quiet drop and the off-link
+  invariant (built). The named next steps are the follow-ups these left (an
+  OUTPUT chain, reply state for unconnected UDP/ICMP, hairpin/NAT-reflection,
   IPv6 DNAT, an L2 bridge, the tap's other settings on
   the control channel) and, on the guest itself, the `QEMU_MEM=2G`
   reproduction reaching the real world. Design documents first, one subsystem at a time.

@@ -178,8 +178,11 @@ struct mbuf *udp_recv(struct udp_pcb *pcb)
     return mbufq_dequeue(&pcb->rxq);
 }
 
-/* Lock held: the best pcb for a destination (exact address beats wildcard). */
-static struct udp_pcb *lookup(uint16_t family, const struct netaddr *dst, const struct netaddr *src)
+/* Lock held: the best pcb for a destination (exact address beats wildcard).
+ * `connected_only` (an M_FW_QUIET datagram) admits only a socket connected to
+ * the sender: a listener or an unconnected socket does not exist for it. */
+static struct udp_pcb *lookup(uint16_t family, const struct netaddr *dst, const struct netaddr *src,
+                              bool connected_only)
 {
     struct udp_pcb *best = NULL;
     struct udp_pcb *p;
@@ -189,6 +192,8 @@ static struct udp_pcb *lookup(uint16_t family, const struct netaddr *dst, const 
         if (!netaddr_is_unspecified(&p->local) && !netaddr_addr_equal(&p->local, dst))
             continue;
         if (p->remote.port != 0 && !netaddr_equal(&p->remote, src))
+            continue;
+        if (connected_only && p->remote.port == 0)
             continue;
         if (best == NULL || netaddr_is_unspecified(&best->local))
             best = p;
@@ -250,8 +255,12 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     m_adj(m, (int)sizeof(*uh));
     m->pkt.src = src;
 
+    /* The host firewall said DROP (M_FW_QUIET): the datagram exists only for
+     * a socket connected to its sender -- a reply to the host's own flow --
+     * and draws no port-unreachable otherwise. */
+    bool quiet = (m->flags & M_FW_QUIET) != 0;
     arch_irq_state_t s = spin_lock_irqsave(&g_lock);
-    struct udp_pcb *pcb = lookup(dst.family, &dst, &src);
+    struct udp_pcb *pcb = lookup(dst.family, &dst, &src, quiet);
     struct socket *sock = NULL;
     bool queued = false;
     if (pcb) {
@@ -267,6 +276,11 @@ void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             sock = pcb->sock;
     }
     spin_unlock_irqrestore(&g_lock, s);
+    if (pcb == NULL && quiet) {
+        STAT(quiet_dropped);
+        m_freem(m);
+        return;
+    }
     if (pcb == NULL) {
         STAT(rx_no_port);
         if (ip4 && !(m->flags & M_BCAST)) {

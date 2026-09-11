@@ -3573,7 +3573,7 @@ bool selftest_net_tapctl(const char **reason)
      * (ABI version 2 and later: its header, up to every guest's policy, and a
      * few rules). */
     uint8_t rbuf[sizeof(struct cosmo_netctl_list) + NAT_PF_MAX * sizeof(struct cosmo_netctl_rule) +
-                 sizeof(struct cosmo_netctl_filter_list) + FW_MAX_GUESTS * sizeof(struct cosmo_netctl_filter_guest) +
+                 sizeof(struct cosmo_netctl_filter_list) + (FW_MAX_GUESTS + 1) * sizeof(struct cosmo_netctl_filter_guest) +
                  16 * sizeof(struct cosmo_netctl_filter_rule)];
 
     /* (1) FORWARD_ADD through the device installs a rule. */
@@ -4139,8 +4139,8 @@ bool selftest_net_input(const char **reason)
           listed[0].dst_ip == gwa && listed[0].dst_prefix == 32 && listed[0].dst_port == 53);
     CHECK(listed[1].direction == FW_DIR_TO_HOST && listed[1].proto == IPPROTO_ICMP &&
           listed[1].dst_ip == gwa && listed[1].dst_port == ICMP_ECHO);
-    uint8_t pu, pg, ph;
-    CHECK(fw_policy_get(ga, &pu, &pg, &ph) == 0 && ph == FW_DROP && pu == FW_ACCEPT && pg == FW_DROP);
+    uint8_t pu, pg, ph, pw;
+    CHECK(fw_policy_get(ga, &pu, &pg, &ph, &pw) == 0 && ph == FW_DROP && pu == FW_ACCEPT && pg == FW_DROP);
 
     /* (2) the seeds reach the host: a DNS query to the gateway is accepted by
      * rule; an echo request to the gateway draws an echo reply. */
@@ -4164,12 +4164,17 @@ bool selftest_net_input(const char **reason)
     l4len = nettest_mk_tcp(l4, ga, gwa, 40000, 2222, TH_SYN);
     CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
+    /* A datagram to the host's *uplink* address is not this tap's to deliver:
+     * the off-link invariant drops it before any chain (the host chain's
+     * unit), so INPUT's default is not what closes it any more. */
     uint32_t uplink = IPV4_ADDR(10, 0, 2, 15);
     if (netif_owns_ipv4(uplink)) {                    /* the NIC's autoconfigured address, when present */
-        fw_get_stats(&fs0);
+        fw_get_stats(&fs0); ipv4_get_stats(&is0);
         l4len = nettest_mk_udp(l4, ga, uplink, 4002, 7000, pl, sizeof(pl));
         CHECK(fwt_send(fa, tap0mac, amac, ga, uplink, IPPROTO_UDP, l4, l4len));
-        CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));
+        CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
+        fw_get_stats(&fs1);
+        CHECK(fs1.in_drop_default == fs0.in_drop_default);
     }
 
     /* (4) a rule opens a service, per datagram (stateless): a SYN and then a
@@ -4374,5 +4379,709 @@ bool selftest_net_input(const char **reason)
           "port per datagram, the seeds were deletable, the ICMP selector was a type (echo reply and need-frag "
           "dropped; type 0 and the wildcard admitted what they name), forged sources were dropped as spoofed, "
           "policy was per guest and flippable, and the control listing carried the third direction");
+    return true;
+}
+
+/* --- the host chain (docs/audit/next-subsystem-host-input.md) ------------- */
+
+/* One datagram as read back from the uplink tap: the world's view of what
+ * the host answered. For TCP the header fields and up to 64 bytes of payload;
+ * for UDP the ports and payload length; for ICMP the type in `flags`. */
+struct hin_seg {
+    uint32_t src, dst;
+    uint8_t  proto, flags;
+    uint16_t sport, dport, win, paylen;
+    uint32_t seq, ack;
+    uint8_t  pay[64];
+};
+
+/* A TCP segment with every field the world side needs to drive a connection
+ * by hand: sequence, acknowledgment, flags, window and payload, checksummed. */
+static uint16_t hin_mk_tcp(uint8_t *l4, uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp, uint32_t seq,
+                           uint32_t ack, uint8_t flags, uint16_t win, const void *pl, uint16_t pllen)
+{
+    struct tcp_hdr *th = (struct tcp_hdr *)l4;
+    memset(th, 0, sizeof(*th));
+    th->sport = htons(sp); th->dport = htons(dp);
+    th->seq = htonl(seq); th->ack = htonl(ack);
+    th->doff = 5 << 4; th->flags = flags; th->win = htons(win);
+    if (pllen)
+        memcpy(l4 + sizeof(*th), pl, pllen);
+    uint16_t len = (uint16_t)(sizeof(*th) + pllen);
+    th->cksum = nettest_l4cksum(sip, dip, IPPROTO_TCP, l4, len);
+    return len;
+}
+
+/* The world sends one IPv4 datagram in on the uplink tap. */
+static bool hin_send(struct tap *u, const uint8_t umac[6], const uint8_t wmac[6], uint32_t sip, uint32_t dip,
+                     uint8_t proto, const uint8_t *l4, uint16_t l4len)
+{
+    uint8_t frame[256];
+    uint32_t flen = nettest_wrap(frame, umac, wmac, sip, dip, 64, proto, l4, l4len);
+    return tap_inject(u, frame, flen) == 0;
+}
+
+static bool hin_parse(struct mbuf *m, struct hin_seg *o)
+{
+    uint8_t rx[256];
+    uint32_t n = m_length(m);
+    if (n > sizeof(rx))
+        n = sizeof(rx);
+    if (n < ETH_HLEN + 20 || !m_copydata(m, 0, n, rx) || rx[12] != 0x08 || rx[13] != 0x00)
+        return false;
+    const struct ipv4_hdr *ip = (const struct ipv4_hdr *)(rx + ETH_HLEN);
+    unsigned ihl = IPV4_HDR_LEN(ip);
+    uint16_t total = ntohs(ip->len);
+    if (total < ihl || (uint32_t)ETH_HLEN + total > n)
+        return false;
+    memset(o, 0, sizeof(*o));
+    o->src = ip->src; o->dst = ip->dst; o->proto = ip->proto;
+    const uint8_t *l4 = rx + ETH_HLEN + ihl;
+    unsigned l4len = total - ihl;
+    if (ip->proto == IPPROTO_TCP && l4len >= sizeof(struct tcp_hdr)) {
+        const struct tcp_hdr *th = (const struct tcp_hdr *)l4;
+        unsigned hl = TCP_HDR_LEN(th);
+        o->sport = ntohs(th->sport); o->dport = ntohs(th->dport);
+        o->seq = ntohl(th->seq); o->ack = ntohl(th->ack);
+        o->flags = th->flags; o->win = ntohs(th->win);
+        o->paylen = (uint16_t)(hl <= l4len ? l4len - hl : 0);
+        memcpy(o->pay, l4 + hl, o->paylen < sizeof(o->pay) ? o->paylen : sizeof(o->pay));
+    } else if (ip->proto == IPPROTO_UDP && l4len >= 8) {
+        o->sport = (uint16_t)(l4[0] << 8 | l4[1]); o->dport = (uint16_t)(l4[2] << 8 | l4[3]);
+        o->paylen = (uint16_t)((l4[4] << 8 | l4[5]) - 8);
+    } else if (ip->proto == IPPROTO_ICMP && l4len >= 4) {
+        o->flags = l4[0];
+    }
+    return true;
+}
+
+/* The next datagram of `proto` the host emitted on the uplink tap toward
+ * world port `wport` (0 = any), within tries x 10 ms; everything else the tap
+ * carries (ARP, another connection's segments) is skipped. False when none
+ * arrived -- the check a silent DROP is proved by. */
+static bool hin_recv(struct tap *u, uint8_t proto, uint16_t wport, struct hin_seg *o, unsigned tries)
+{
+    for (unsigned i = 0; i < tries; i++) {
+        struct mbuf *m;
+        while ((m = tap_recv(u)) != NULL) {
+            bool ok = hin_parse(m, o);
+            m_freem(m);
+            if (ok && o->proto == proto && (wport == 0 || o->dport == wport))
+                return true;
+        }
+        thread_sleep_ms(10);
+    }
+    return false;
+}
+
+static void hin_drain(struct tap *u)
+{
+    struct mbuf *m;
+    thread_sleep_ms(20);
+    while ((m = tap_recv(u)) != NULL)
+        m_freem(m);
+}
+
+/* A non-blocking accept, awaited. */
+static struct socket *hin_accept(struct socket *ls)
+{
+    for (unsigned i = 0; i < 100; i++) {
+        struct socket *a = NULL;
+        struct netaddr peer;
+        if (ksock_accept(ls, &a, &peer) == 0)
+            return a;
+        thread_sleep_ms(10);
+    }
+    return NULL;
+}
+
+/* A non-blocking receive, awaited: bytes, 0 at EOF, or the error (-EAGAIN
+ * when nothing came in tries x 10 ms). */
+static int64_t hin_recv_sock(struct socket *s, void *buf, size_t cap, unsigned tries)
+{
+    int64_t n = -EAGAIN;
+    for (unsigned i = 0; i < tries && n == -EAGAIN; i++) {
+        n = ksock_recvfrom(s, buf, cap, NULL);
+        if (n == -EAGAIN)
+            thread_sleep_ms(10);
+    }
+    return n;
+}
+
+/* The host's own outbound connection, on its own thread (connect blocks
+ * until the peer's SYN+ACK is admitted). */
+struct hin_conn {
+    struct netaddr peer;
+    struct socket *s;
+    int rc;
+    volatile bool done;
+};
+
+static void hin_connect_thread(void *arg)
+{
+    struct hin_conn *c = arg;
+    c->rc = ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c->s);
+    if (c->rc == 0)
+        c->rc = ksock_connect(c->s, &c->peer);
+    c->done = true;
+    thread_exit(0);
+}
+
+static bool hin_udp_listener(struct socket **out, uint32_t ip, uint16_t port)
+{
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, out) != 0)
+        return false;
+    struct netaddr a = v4addr(ip, port);
+    if (ksock_bind(*out, &a) != 0)
+        return false;
+    ksock_set_nonblock(*out, true);
+    return true;
+}
+
+static bool hin_tcp_listener(struct socket **out, uint16_t port)
+{
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, out) != 0)
+        return false;
+    struct netaddr a = v4addr(0, port);
+    if (ksock_bind(*out, &a) != 0 || ksock_listen(*out, 4) != 0)
+        return false;
+    ksock_set_nonblock(*out, true);
+    return true;
+}
+
+#define HIN_RULE(dir_, proto_, sip_, sp_, port_, verdict_) \
+    ((struct fw_rule){ .direction = (dir_), .proto = (proto_), .verdict = (verdict_), .dst_port = (port_), \
+                       .src_ip = (sip_), .src_prefix = (sp_) })
+
+bool selftest_net_hostinput(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    /* The uplink: a real, non-guest link (neither masquerading nor loopback),
+     * as net-dnat builds one, with the world on the far side. */
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x01 };
+    static const uint8_t wmac[5][6] = {
+        { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x63 }, { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x62 },
+        { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x61 }, { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x60 },
+        { 0x52, 0x54, 0x00, 0x1a, 0x00, 0x5f },
+    };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 8, 1);
+    uint32_t w[5] = { IPV4_ADDR(10, 77, 8, 99), IPV4_ADDR(10, 77, 8, 98), IPV4_ADDR(10, 77, 8, 97),
+                      IPV4_ADDR(10, 77, 8, 96), IPV4_ADDR(10, 77, 8, 95) };
+    struct tap *u = tap_create("hinu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    for (unsigned i = 0; i < 5; i++)
+        nettest_seed_arp(tap_netif(u), w[i], wmac[i]);
+    /* And one guest through /dev/net/tap (so it attaches): A on tap0. */
+    struct file *fa = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x0f, 0x00, 0x0a };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
+
+    /* The host's services: two TCP listeners, a UDP listener, a UDP socket
+     * connected to a world peer, and a loopback-bound UDP listener. */
+    struct socket *ls1 = NULL, *ls2 = NULL, *us = NULL, *uc = NULL, *ul = NULL;
+    CHECK(hin_tcp_listener(&ls1, 2222) && hin_tcp_listener(&ls2, 2223));
+    CHECK(hin_udp_listener(&us, 0, 7000));
+    CHECK(hin_udp_listener(&uc, 0, 7001));
+    { struct netaddr p = v4addr(w[0], 5555); CHECK(ksock_connect(uc, &p) == 0); }
+    CHECK(hin_udp_listener(&ul, INADDR_LOOPBACK_N, 7002));
+
+    uint8_t l4[160], buf[256], pl[4] = { 'a', 'b', 'c', 'd' };
+    uint16_t l4len;
+    struct hin_seg sg;
+    struct fw_stats fs0, fs1;
+    struct ip_stats is0, is1;
+    struct tcp_stats ts0, ts1;
+    struct udp_stats us0, us1;
+    hin_drain(u);
+
+    /* (1) the host object ships with default ACCEPT and no rules, and the
+     * world reaches the host's services under it. */
+    uint8_t pu, pg, ph, pw;
+    CHECK(fw_policy_get(FW_HOST_GUEST_IP, &pu, &pg, &ph, &pw) == 0 && pw == FW_ACCEPT);
+    { struct fw_rule none[1]; CHECK(fw_rule_list(FW_HOST_GUEST_IP, none, 1) == 0); }
+    fw_get_stats(&fs0);
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+          sg.ack == 1001);
+    uint32_t iss1 = sg.seq;
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_default, fs0.hin_accept_default));
+    l4len = nettest_mk_udp(l4, w[0], u_ip, 6000, 7000, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(us, buf, sizeof(buf), 50) == 4 && memcmp(buf, pl, 4) == 0);
+
+    /* (2) a DROP rule with a source: the prefix is matched, in both senses. */
+    struct fw_rule r_src = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, IPV4_ADDR(10, 77, 8, 0), 24, 2222, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_src) == 0);
+    fw_get_stats(&fs0); ipv4_get_stats(&is0); tcp_get_stats(&ts0);
+    hin_drain(u);
+    l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2222, 2000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_drop_rule, fs0.hin_drop_rule));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40002, &sg, 15));                 /* no SYN-ACK, no RST */
+    fw_get_stats(&fs0); tcp_get_stats(&ts0);
+    uint32_t far = IPV4_ADDR(10, 0, 9, 9);                            /* outside the prefix */
+    l4len = hin_mk_tcp(l4, far, u_ip, 40009, 2222, 2000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], far, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_default, fs0.hin_accept_default));
+    tcp_get_stats(&ts1);
+    CHECK(ts1.quiet_dropped == ts0.quiet_dropped);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_src) == 0);
+
+    /* (3) quiet delivery: the transport decides, and answers nothing. C1's
+     * handshake completes under ACCEPT; then a DROP rule covers its port. */
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1001, iss1 + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a1 = hin_accept(ls1);
+    CHECK(a1 != NULL);
+    ksock_set_nonblock(a1, true);
+    struct fw_rule r_2222 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, 0, 0, 2222, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_2222) == 0);
+    hin_drain(u);
+    ipv4_get_stats(&is0); tcp_get_stats(&ts0);
+    /* the established connection's data is delivered and acknowledged */
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1001, iss1 + 1, TH_ACK | TH_PSH, 64240, "hi", 2);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 50) == 2 && memcmp(buf, "hi", 2) == 0);
+    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1003);
+    tcp_get_stats(&ts1);
+    CHECK(ts1.quiet_dropped == ts0.quiet_dropped);
+    /* an ACK-only probe, and a SYN+ACK, from a source with no connection: freed, no RST */
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[2], u_ip, 4444, 2222, 999, 777, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 4444, &sg, 15));
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[2], u_ip, 4445, 2222, 999, 777, TH_SYN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 4445, &sg, 15));
+    /* a new SYN: no SYN-cache entry, no cookie, no SYN-ACK, no RST */
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[2], u_ip, 4446, 2222, 3333, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped));
+    CHECK(ts1.syn_cached == ts0.syn_cached && ts1.syn_cookies_sent == ts0.syn_cookies_sent);
+    CHECK(!hin_recv(u, IPPROTO_TCP, 4446, &sg, 15));
+    /* UDP under a DROP rule: a connected socket's peer is delivered; a
+     * listener and an unbound port get nothing back -- no port-unreachable. */
+    struct fw_rule r_udp = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_UDP, 0, 0, 0, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_udp) == 0);
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w[0], u_ip, 5555, 7001, (const uint8_t *)"conn", 4);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(uc, buf, sizeof(buf), 50) == 4 && memcmp(buf, "conn", 4) == 0);
+    udp_get_stats(&us1);
+    CHECK(us1.quiet_dropped == us0.quiet_dropped);
+    hin_drain(u);
+    l4len = nettest_mk_udp(l4, w[0], u_ip, 6001, 7000, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(us, buf, sizeof(buf), 10) == -EAGAIN);          /* the listener hears nothing */
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w[0], u_ip, 6002, 7009, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 15));                    /* no port-unreachable */
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_udp) == 0);
+    l4len = nettest_mk_udp(l4, w[0], u_ip, 6003, 7009, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_DEST_UNREACH);   /* ...which ACCEPT draws */
+
+    /* (4) TCP's own validation, silenced: on C1 under the DROP rule, an
+     * out-of-window segment draws no window ACK, a mis-positioned reset, an
+     * in-window SYN and an out-of-range ACK draw no challenge ACK -- all are
+     * in-window rejections past the window test -- and the connection lives. */
+    hin_drain(u);
+    static const struct { uint32_t seq, ack; uint8_t flags; } bad[4] = {
+        { 1003 + 100000, 0, TH_ACK },              /* out of window */
+        { 1003 + 10, 0, TH_RST },                  /* in window, not rcv_nxt */
+        { 1003, 0, TH_SYN },                       /* in-window SYN */
+        { 1003, 0x40000000u, TH_ACK },             /* ACK outside [snd_una - max window, snd_max] */
+    };
+    for (unsigned i = 0; i < 4; i++) {
+        tcp_get_stats(&ts0);
+        uint32_t ack = bad[i].flags == TH_RST ? 0 : iss1 + 1 + bad[i].ack;
+        l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, bad[i].seq, ack, bad[i].flags, 64240, NULL, 0);
+        CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+        CHECK(!hin_recv(u, IPPROTO_TCP, 40001, &sg, 10));               /* no window ACK, no challenge */
+        tcp_get_stats(&ts1);
+        CHECK(ts1.challenge_acks == ts0.challenge_acks);
+        CHECK(ts1.quiet_dropped > ts0.quiet_dropped);
+    }
+    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 2) == -EAGAIN);         /* alive, not reset */
+    /* Rejected probes consume no shared budget: more than TCP_CHALLENGE_PER_SEC
+     * in-window SYNs under the rule, then a legitimate in-window SYN on C2
+     * (port 2223, no rule) still draws its RFC 5961 challenge ACK. */
+    tcp_get_stats(&ts0);
+    for (unsigned i = 0; i < TCP_CHALLENGE_PER_SEC + 20; i++) {
+        l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 1, TH_SYN, 64240, NULL, 0);
+        CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+        if (i % 20 == 19)
+            thread_sleep_ms(10);   /* paced under the receive queue's depth, well inside one budget second */
+    }
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped + TCP_CHALLENGE_PER_SEC + 19));
+    CHECK(ts1.challenge_acks == ts0.challenge_acks);
+    l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, 50) && (sg.flags & TH_SYN) && sg.ack == 3001);
+    uint32_t iss2 = sg.seq;
+    l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a2 = hin_accept(ls2);
+    CHECK(a2 != NULL);
+    ksock_set_nonblock(a2, true);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, 50) && sg.flags == TH_ACK && sg.ack == 3001);   /* the challenge */
+    CHECK(FWT_RISES(tcp_get_stats, ts1, challenge_acks, ts0.challenge_acks));
+
+    /* The keepalive clock is not refreshed by a rejected segment: with a
+     * short idle time armed at C4's establishment and rejected probes arriving
+     * every 40 ms under a rule covering the peer, the probe still fires. */
+    tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
+    l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40004, &sg, 50) && (sg.flags & TH_SYN) && sg.ack == 4001);
+    uint32_t iss4 = sg.seq;
+    /* The DROP rule covering the peer lands between the admitted SYN and its
+     * completing ACK: the ACK is delivered quiet, and the SYN-cache completion
+     * still creates the child -- the fourth acceptance point. */
+    struct fw_rule r_w3 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[3], 32, 2223, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_w3) == 0);
+    ipv4_get_stats(&is0); tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4001, iss4 + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
+    struct socket *a4 = hin_accept(ls2);
+    CHECK(a4 != NULL);
+    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
+    tcp_get_stats(&ts1);
+    CHECK(ts1.quiet_dropped == ts0.quiet_dropped);
+    /* (the short idle stays in force until the probe has fired: the timer
+     * re-reads it when it re-arms, so restoring the default now would arm two
+     * hours and prove nothing) */
+    tcp_get_stats(&ts0);
+    for (unsigned i = 0; i < 10; i++) {
+        l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4001 + 100000, iss4 + 1, TH_ACK, 64240, NULL, 0);
+        CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
+        thread_sleep_ms(40);
+    }
+    tcp_get_stats(&ts1);
+    tcp_set_keepalive(0, 0, 0);
+    CHECK(ts1.keepalive_probes > ts0.keepalive_probes);
+    CHECK(ts1.quiet_dropped >= ts0.quiet_dropped + 10);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w3) == 0);
+    ksock_put(a4);
+
+    /* The host's own outbound connection completes under a rule covering the
+     * peer (the SYN_SENT acceptance point), and a bare ACK to a tuple with no
+     * connection from that peer is freed silently. */
+    struct fw_rule r_w4 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[4], 32, 0, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_w4) == 0);
+    hin_drain(u);
+    struct hin_conn cn = { .peer = v4addr(w[4], 9000) };
+    struct thread *ct = thread_create(hin_connect_thread, &cn, "hin-connect", SCHED_PRIO_DEFAULT);
+    CHECK(ct != NULL);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_SYN);   /* the host's SYN */
+    uint32_t hiss = sg.seq;
+    uint16_t hport = sg.sport;
+    ipv4_get_stats(&is0);
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5000, hiss + 1, TH_SYN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5001);   /* completing ACK */
+    for (unsigned i = 0; i < 100 && !cn.done; i++)
+        thread_sleep_ms(10);
+    CHECK(cn.done && cn.rc == 0);
+    thread_join(ct);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9001, hport, 5001, hiss + 1, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, quiet_dropped, ts0.quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 9001, &sg, 15));
+    /* The host closes first: its FIN goes out; the peer's ACK and FIN are
+     * accepted (TIME_WAIT); a bare ACK there draws nothing; a retransmitted
+     * FIN -- an exact-position match on the connection -- is acknowledged. */
+    ksock_put(cn.s);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && (sg.flags & TH_FIN) && sg.seq == hiss + 1);
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_FIN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5002);
+    hin_drain(u);
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5002, hiss + 2, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 9000, &sg, 10));
+    l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_FIN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5002);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w4) == 0);
+
+    /* Accepted segments that do not advance snd_una keep their output (C1,
+     * still under the port-2222 DROP rule): three duplicate ACKs build the
+     * fast retransmission; a window update from zero re-enables a blocked
+     * send; data with an unchanged ACK is delivered and acknowledged; the
+     * peer's FIN is acknowledged and the socket reads EOF. */
+    hin_drain(u);
+    uint8_t data[100];
+    for (unsigned i = 0; i < sizeof(data); i++)
+        data[i] = (uint8_t)i;
+    CHECK(ksock_sendto(a1, data, sizeof(data), NULL) == (int64_t)sizeof(data));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && sg.paylen == 100 && sg.seq == iss1 + 1);
+    tcp_get_stats(&ts0);
+    for (unsigned i = 0; i < 3; i++) {
+        l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 1, TH_ACK, 64240, NULL, 0);
+        CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    }
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 20) && sg.paylen == 100 && sg.seq == iss1 + 1);   /* retransmitted */
+    tcp_get_stats(&ts1);
+    CHECK(ts1.retransmits > ts0.retransmits && ts1.quiet_dropped == ts0.quiet_dropped);
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 101, TH_ACK, 0, NULL, 0);   /* all acked, window 0 */
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    hin_drain(u);
+    CHECK(ksock_sendto(a1, data, 50, NULL) == 50);
+    CHECK(!(hin_recv(u, IPPROTO_TCP, 40001, &sg, 15) && sg.paylen >= 50));   /* blocked by the zero window */
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 101, TH_ACK, 64240, NULL, 0);   /* window update */
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && sg.paylen == 50 && sg.seq == iss1 + 101);
+    hin_drain(u);
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 151, TH_ACK, 64240, data, 10);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1013, iss1 + 151, TH_ACK, 64240, data, 10);   /* unchanged ACK */
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    {
+        /* 20 bytes, whether the read catches them together or one segment
+         * at a time (the worker may still be queuing the second). */
+        int64_t got = 0, n;
+        while (got < 20 && (n = hin_recv_sock(a1, buf + got, sizeof(buf) - (size_t)got, 50)) > 0)
+            got += n;
+        CHECK(got == 20);
+    }
+    {
+        /* Both segments are acknowledged: at once, or the first at once and
+         * the second by the delayed-ACK timer -- the last ACK names 1023. */
+        bool acked = false;
+        for (unsigned i = 0; i < 3 && !acked; i++)
+            acked = hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1023;
+        CHECK(acked);
+    }
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1023, iss1 + 151, TH_FIN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1024);
+    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 50) == 0);                       /* EOF */
+    ksock_put(a1);
+    /* A valid reset (seq == rcv_nxt) from a peer under a DROP rule still tears
+     * C2 down: the socket reports it, and nothing is emitted. */
+    struct fw_rule r_w1 = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, w[1], 32, 2223, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_w1) == 0);
+    hin_drain(u);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_RST | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv_sock(a2, buf, sizeof(buf), 50) == -ECONNRESET);
+    tcp_get_stats(&ts1);
+    CHECK(ts1.rsts_in > ts0.rsts_in && ts1.quiet_dropped == ts0.quiet_dropped);
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40002, &sg, 10));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w1) == 0);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_2222) == 0);
+    ksock_put(a2);
+
+    /* (5) UDP and ICMP are per datagram: an icmp type-8 DROP drops an echo
+     * request (freed at the IP layer) and no reply comes back, a type-0
+     * datagram passes the default; without the rule echo is answered. */
+    struct fw_rule r_echo = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_ICMP, 0, 0, ICMP_ECHO, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_echo) == 0);
+    hin_drain(u);
+    fw_get_stats(&fs0); ipv4_get_stats(&is0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5151);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_drop_rule, fs0.hin_drop_rule));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_filtered, is0.hin_filtered));
+    CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 15));
+    fw_get_stats(&fs0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x5151);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_default, fs0.hin_accept_default));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_echo) == 0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5152);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_ECHO_REPLY);
+
+    /* (6) off-link: a link's datagrams are for that link's address. No rule
+     * installed. The world's query to guest A's gateway (the tap's DNS proxy)
+     * and its datagram to a loopback-bound listener are dropped before any
+     * chain; the loopback listener still hears a loopback sender; a guest's
+     * datagram to 127.0.0.1 or to the uplink's address is dropped likewise. */
+    fw_get_stats(&fs0); ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, w[0], gwa, 6100, 53, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
+    ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, w[0], INADDR_LOOPBACK_N, 6101, 7002, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac[0], w[0], INADDR_LOOPBACK_N, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
+    CHECK(hin_recv_sock(ul, buf, sizeof(buf), 5) == -EAGAIN);
+    {
+        struct socket *lo = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
+        CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
+        CHECK(hin_recv_sock(ul, buf, sizeof(buf), 50) == 4);
+        ksock_put(lo);
+    }
+    ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, ga, INADDR_LOOPBACK_N, 6102, 7002, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, INADDR_LOOPBACK_N, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
+    ipv4_get_stats(&is0);
+    l4len = nettest_mk_udp(l4, ga, u_ip, 6103, 7000, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_offlink, is0.rx_offlink));
+    CHECK(is1.in_filtered == is0.in_filtered);                           /* not INPUT's default any more */
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_accept_rule == fs0.hin_accept_rule && fs1.hin_drop_rule == fs0.hin_drop_rule &&
+          fs1.hin_accept_default == fs0.hin_accept_default && fs1.hin_drop_default == fs0.hin_drop_default);
+    /* Not this chain's ingress: a guest-tap datagram to the host still takes
+     * the INPUT chain (A's DNS seed admits it), and the host chain's counters
+     * do not move for it. */
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gwa, 6104, 53, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
+    CHECK(fs1.hin_accept_default == fs0.hin_accept_default && fs1.hin_drop_default == fs0.hin_drop_default);
+
+    /* (7) ordering after nat_in, now provable: with a port-forward to A and
+     * the host default DROP, the world's SYN to host:8080 is still DNAT'd to
+     * A -- authorized by the pf rule, never re-gated -- and the host chain's
+     * counters do not move. Loopback is untouched by the default. */
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, ga, 80) == 0);
+    CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_DROP) == 0);
+    fw_get_stats(&fs0);
+    l4len = hin_mk_tcp(l4, w[0], u_ip, 41000, 8080, 7000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
+    {
+        uint8_t rx[160];
+        int64_t n = fwt_recv(fa, rx, sizeof(rx), 50);
+        CHECK(n >= ETH_HLEN + 40);
+        const struct ipv4_hdr *ri = (const struct ipv4_hdr *)(rx + ETH_HLEN);
+        CHECK(ri->src == w[0] && ri->dst == ga && ri->proto == IPPROTO_TCP);
+        CHECK((uint16_t)(rx[ETH_HLEN + 20 + 2] << 8 | rx[ETH_HLEN + 20 + 3]) == 80);
+    }
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_drop_default == fs0.hin_drop_default && fs1.hin_drop_rule == fs0.hin_drop_rule);
+    {
+        struct socket *lo = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
+        CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
+        CHECK(hin_recv_sock(ul, buf, sizeof(buf), 50) == 4);
+        ksock_put(lo);
+    }
+    /* Default flip: under DROP an unruled SYN drops; an explicit ACCEPT rule
+     * readmits it; back to ACCEPT. */
+    hin_drain(u);
+    fw_get_stats(&fs0);
+    l4len = hin_mk_tcp(l4, w[2], u_ip, 40010, 2223, 8000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_drop_default, fs0.hin_drop_default));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40010, &sg, 15));
+    struct fw_rule r_open = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, 0, 0, 2223, FW_ACCEPT);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_open) == 0);
+    fw_get_stats(&fs0);
+    l4len = hin_mk_tcp(l4, w[2], u_ip, 40011, 2223, 8000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40011, &sg, 50) && (sg.flags & TH_SYN));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_rule, fs0.hin_accept_rule));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_open) == 0);
+    CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_ACCEPT) == 0);
+    CHECK(nat_pf_del(IPPROTO_TCP, 8080));
+
+    /* (8) scope discipline: the host owns FROM_UPLINK and the source; a guest
+     * owns the other three and no source; ANY is nobody's on the host. */
+    struct fw_rule bad_host = HIN_RULE(FW_DIR_TO_HOST, IPPROTO_TCP, 0, 0, 22, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &bad_host) == -EINVAL);
+    struct fw_rule bad_any = HIN_RULE(FW_DIR_ANY, IPPROTO_TCP, 0, 0, 22, FW_ACCEPT);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &bad_any) == -EINVAL);
+    struct fw_rule bad_guest = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, 0, 0, 22, FW_DROP);
+    CHECK(fw_rule_add(ga, 0, &bad_guest) == -EINVAL);
+    struct fw_rule bad_src = HIN_RULE(FW_DIR_TO_HOST, IPPROTO_TCP, IPV4_ADDR(10, 0, 0, 0), 8, 22, FW_ACCEPT);
+    CHECK(fw_rule_add(ga, 0, &bad_src) == -EINVAL);
+    struct fw_rule bad_wild = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, IPV4_ADDR(10, 0, 0, 0), 0, 22, FW_DROP);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &bad_wild) == -EINVAL);          /* "any source" is 0/0 */
+    CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_TO_HOST, FW_ACCEPT) == -EINVAL);
+    CHECK(fw_policy_set(ga, FW_DIR_FROM_UPLINK, FW_DROP) == -EINVAL);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_2222) == -ENOENT);
+
+    /* (9) the control channel: a host rule with a source written through
+     * tapctl (guest_addr 0) is listed in the host's record with its source
+     * beside policy_from_uplink; a host rule naming TO_HOST and a version-3
+     * sized write are refused. */
+    struct file *fctl = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
+                                     .guest_addr = COSMO_NETCTL_HOST_ADDR, .direction = COSMO_NETCTL_DIR_FROM_UPLINK,
+                                     .proto = COSMO_NETCTL_PROTO_TCP, .verdict = COSMO_NETCTL_VERDICT_DROP,
+                                     .dst_port = 2224, .src_addr = IPV4_ADDR(10, 77, 8, 0), .src_prefix = 24 };
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    CHECK(file_write(fctl, &c, 20) == -EINVAL);                            /* a version-3 sized command */
+    struct cosmo_netctl_filter cb = c;
+    cb.direction = COSMO_NETCTL_DIR_TO_HOST; cb.dst_port = 2225;
+    CHECK(file_write(fctl, &cb, sizeof(cb)) == -EINVAL);
+    cb = c; cb.guest_addr = ga; cb.dst_port = 2226;
+    CHECK(file_write(fctl, &cb, sizeof(cb)) == -EINVAL);                   /* a guest may not name FROM_UPLINK */
+    static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
+    int64_t sn = file_read(fctl, snap, sizeof(snap));
+    CHECK(sn > 0);
+    {
+        struct cosmo_netctl_list phh; memcpy(&phh, snap, sizeof(phh));
+        size_t off = sizeof(phh) + (size_t)phh.count * sizeof(struct cosmo_netctl_rule);
+        struct cosmo_netctl_filter_list fh; memcpy(&fh, snap + off, sizeof(fh));
+        CHECK(fh.version == COSMO_NETCTL_VERSION && fh.guest_count >= 2);
+        off += sizeof(fh);
+        bool host_seen = false;
+        for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
+            struct cosmo_netctl_filter_guest fg; memcpy(&fg, snap + off, sizeof(fg));
+            if (fg.guest_addr == COSMO_NETCTL_HOST_ADDR)
+                host_seen = fg.policy_from_uplink == COSMO_NETCTL_VERDICT_ACCEPT;
+        }
+        CHECK(host_seen);
+        bool rule_seen = false;
+        for (unsigned i = 0; i < fh.rule_count; i++) {
+            struct cosmo_netctl_filter_rule fr; memcpy(&fr, snap + off + i * sizeof(fr), sizeof(fr));
+            if (fr.guest_addr == COSMO_NETCTL_HOST_ADDR && fr.dst_port == 2224)
+                rule_seen = fr.direction == COSMO_NETCTL_DIR_FROM_UPLINK && fr.src_addr == IPV4_ADDR(10, 77, 8, 0) &&
+                            fr.src_prefix == 24 && fr.verdict == COSMO_NETCTL_VERDICT_DROP;
+        }
+        CHECK(rule_seen);
+    }
+    c.op = COSMO_NETCTL_FILTER_DEL;
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    { struct fw_rule none[1]; CHECK(fw_rule_list(FW_HOST_GUEST_IP, none, 1) == 0); }
+    file_put(fctl);
+
+    ksock_put(ls1); ksock_put(ls2); ksock_put(us); ksock_put(uc); ksock_put(ul);
+    file_put(fa);
+    hin_drain(u);
+    tap_destroy(u);
+    fw_flush();
+    nat_flush();
+    kinfo("selftest: net-hostinput: the world reached the host under the default, a sourced DROP matched by "
+          "prefix, a DROP was quiet (established data and the host's own connect completed, probes and new "
+          "SYNs drew no RST, SYN-ACK, challenge or window ACK, no port-unreachable, no budget spent, no "
+          "keepalive refresh; dup-ACKs, a window update, data and a FIN kept their output; a valid reset "
+          "applied), ICMP dropped by type, off-link datagrams dropped before any chain, DNAT never re-gated, "
+          "the scopes held, and the control listing carried the host record with its source");
     return true;
 }

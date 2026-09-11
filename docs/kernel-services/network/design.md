@@ -878,7 +878,7 @@ guest keeps working `fw_guest_attach` (now given the tap's gateway too)
 listed, ordered, deletable rules rather than hard-coded holes; `fw_flush`
 re-seeds them; DHCP needs none (frame-level). A guest never attached fails
 closed. Loopback and the uplink are not guests and are not consulted; the
-host-scoped chain for the uplink is a later unit.
+uplink has its own chain, the host chain below.
 
 **The ICMP selector is a type.** A default-deny chain guarding host handlers
 cannot admit "all ICMP": `icmp_input` dispatches Need-Fragmentation (type
@@ -892,11 +892,130 @@ version 3 refuses a v2 writer by version rather than reinterpret it.) The
 FORWARD chain's ICMP flow *state* (echo by id) is unchanged; this is the
 rule *match*, and lets FORWARD rules say "echo-request only" too.
 
-Named and deferred: an OUTPUT chain for the host's own egress (and, with it,
-filtering the host's replies to guests), the **host-scoped INPUT chain for
-the uplink** (not per-guest; needs its own policy object and control
-surface, and interacts with DNAT ordering), rate-limit and logging targets,
-IPv6 filtering, and full TCP state tracking.
+**The host chain: what the world may ask of the host** (audit unit "the host
+chain", `docs/audit/next-subsystem-host-input.md`). FORWARD decided which
+machines a guest may reach and INPUT which of the host's services a guest may
+reach; this decides which of the host's services the **world** — anything
+arriving on a real, non-guest link (`nif->flags` has neither
+`NETIF_MASQUERADE` nor `NETIF_LOOPBACK`; today the NIC) — may reach. It is
+the same engine consulted from a third place, with three additions.
+**A host-scoped policy object**: `FW_HOST_GUEST_IP` (`0`) names the host —
+one ordered rule list and one default, permanent (never attached or purged;
+`fw_flush` resets it), kept *outside* the guest table so no datagram's source
+can ever name it (`guest_find` searches guests; only the control path's
+`policy_find` maps `0` to the host). **A fourth direction**, `FROM_UPLINK`,
+which the host object alone may hold (`-EINVAL` for a guest; `-EINVAL` for
+any other direction on the host); `ANY` keeps its forwarding-only meaning and
+never matches it. **A source prefix** on `struct fw_rule` (`src_ip/src_prefix`,
+`0/0` = any), the field a world-facing rule cannot do without and permitted
+*only* on a host rule — a guest's rule must say `0/0`, its source being the
+guest, so tuples stay canonical. `fw_host_verdict` runs in `ipv4_input` for
+the uplink's datagram to the host at the same point as INPUT's verdict —
+**after `nat_in` has declined it** (a masqueraded reply or a DNAT is not
+host-bound and is never re-gated: with a port-forward to a guest and the host
+default DROP, the world's SYN to `host:8080` is still DNAT'd — the proof the
+INPUT unit could not run), before the transport demux — and is stateless:
+first-match over the host's rules, else the host default, **ACCEPT** (the
+host runs services meant to be reached; the harness's echo listeners, DNAT'd
+connections' host-side handling, ICMP echo and every reply to the host's own
+UDP sockets all arrive here; the operator hardens by rule or flips the
+default). Counted `hin_accept_rule/hin_drop_rule/hin_accept_default/
+hin_drop_default`.
+
+**The off-link invariant.** One thing closes with no rule: a datagram
+arriving on a link is for an address *on that link*. Before `nat_in` and
+before either chain, for **every non-loopback ingress** (uplink and guest
+taps alike), a locally-owned unicast destination must be the ingress
+interface's own address (`iph->dst == nif->ip4.addr`) or a broadcast; else it
+is dropped, `rx_offlink`. `netif_owns_ipv4` answered "ours" for *any*
+interface's address and the martian check looks only at the source, so until
+now an uplink datagram to a guest's gateway `:53` was delivered into that
+tap's DNS proxy (an open resolver per guest, reachable from the real network)
+and one to `127.0.0.1` reached **loopback-bound services** — the binding a
+service uses to mean "local callers only"; a guest's datagram to `127/8` or to
+the uplink's address was held back only by INPUT's default DROP, which an
+`any`-destination rule would have reopened. A fact of the topology, not a
+policy: no rule reopens it. Loopback ingress is the host talking to itself
+and is exempt; masqueraded replies and DNAT'd connections are addressed to
+the uplink's own address and are on link. `net-input`'s "guest → the host's
+uplink address" case moved from INPUT's default drop to this counter — the
+one existing-test adjustment and the one unconditional behaviour change.
+
+**A DROP is quiet: the transport decides, and answers nothing.** The chain
+does not model TCP state — three drafts of a firewall-side "established" test
+(flags; any non-listening PCB; an eligible-state list) each left `tcp_input`
+a way to *answer* a probe, and the last did not even match this stack
+(passive half-opens live in the listener's SYN cache, the child is born
+`ESTABLISHED`, `SYN_RCVD` is simultaneous open only). Instead a DROP verdict
+on a TCP or UDP datagram does not free it at the IP layer: it is marked
+**`M_FW_QUIET`** (an mbuf flag beside `M_BCAST` — `tcp_input`/`udp_input`
+take `(nif, m, ip4, ip6)`, so the policy rides on the packet with no
+signature change; `hin_quiet`) and delivered, and the transport, which owns
+acceptability, admits it only into an *existing* connection. Anything else —
+ICMP included — is freed (`hin_filtered`). In **TCP** the gate is structural,
+not a list of sites: every response `tcp.c` builds — listener SYN-ACKs,
+resets, challenge ACKs, the ACK to an out-of-window segment — goes through
+`batch_push` into the per-call `struct tcp_batch`, and `batch_send` is the
+sole function that transmits (the only `ipv4_output`/`ipv6_output` calls in
+the file), so the batch carries a `quiet` bit, set from the mbuf when
+`tcp_input` begins and **cleared only where the segment is accepted**;
+`batch_send` frees a still-quiet batch instead of transmitting it, whichever
+flush it reaches (the early no-pcb and listener-rejection flushes, or the
+final one), and counts it `quiet_dropped`. The acceptance points, each a path
+that queues output or mutates state on its own, were fixed by walking every
+`goto out` in `tcp_input` and classifying it: **(1)** the point after the
+*last* rejection check in the synchronized states — after the window test,
+the reset-position, in-window-SYN, missing-ACK and RFC 5961 §5 ACK-range
+checks, and the `SYN_RCVD` ACK check — and *before* the accepted-segment
+processing, so an accepted segment's own output is never lost, whether it
+advances `snd_una`, is a duplicate ACK whose third arrival builds a fast
+retransmission, a pure window update that re-enables a blocked send, data
+with an unchanged ACK, or a FIN; **(2)** the active-open `SYN_SENT`
+completion — the host's own outbound connection completes under any rule;
+**(3)** a valid reset (`seq == rcv_nxt`, or the refused active open), which
+tears the connection down and emits nothing; **(4)** the SYN-cache completion
+of a SYN admitted earlier (the ACK that creates the child); and **(5)** a
+retransmitted FIN in `TIME_WAIT` that names exactly `rcv_nxt` — an
+exact-position match on an existing connection, found in the walk (the
+design named four), whose ACK the peer needs to finish its own close.
+Side effects follow the same rule, *consumed at emission, not at decision*:
+`challenge_ack` returns before consulting `challenge_allowed()` when its
+batch is quiet, so a burst of rejected probes cannot burn the host-wide
+RFC 5961 budget and starve a legitimate connection's challenge; `last_rx_ns`
+and `keep_probes` are updated only for an accepted segment, so a rejected one
+cannot refresh the keepalive clock; no SYN-cache entry is allocated for a new
+SYN under the flag. **UDP** under the flag delivers only to a socket
+**connected** to the sender (`lookup(..., connected_only)`), frees anything
+else silently and sends no ICMP port-unreachable (`quiet_dropped`). So a
+DROP means silence — no SYN-ACK, RST, challenge ACK, window ACK or
+port-unreachable confirms the host is there — while the host's own outbound
+connections, its accepted inbound ones and its connected UDP flows keep
+working under any rule set. Rules therefore gate *new* connections and
+unsolicited datagrams; a connection that exists when a DROP rule is added
+persists until it closes (as FORWARD's flow state does), and an operator
+who wants it cut closes the socket. What quiet delivery cannot recognise —
+a reply to an *unconnected* UDP socket, and every ICMP reply — takes the
+rules, which the default ACCEPT admits; a broad `udp any any` DROP would drop
+the host's own unconnected replies (name listener ports or a source prefix);
+reply state for those is a later unit.
+
+**ABI version 4.** `DIR_FROM_UPLINK` (4); `src_addr`/`src_prefix` in the
+filter command and rule records (`struct cosmo_netctl_filter` 20→28 bytes,
+`struct cosmo_netctl_filter_rule` 16→24 — a version-3 writer is refused by
+size, never misread); `policy_from_uplink` in the per-guest record (its
+formerly reserved byte; meaningful in the host's record, which the snapshot
+lists first under `guest_addr 0`, `COSMO_NETCTL_HOST_ADDR`); `SNAPSHOT_MAX`
+recomputed for `MAX_GUESTS + 1` policy objects and static-asserted with the
+record sizes. `vmctl filter add|del host world PROTO SRC[/PREFIX]|any
+DST[/PREFIX]|any PORT VERDICT [INDEX]`, `policy host world accept|drop`;
+`list` prints the host record and its rules with their source, and refuses a
+snapshot of another version. No new opcode, no new syscall.
+
+Named and deferred: reply state for unconnected UDP and for ICMP;
+per-interface host chains (all real links share `FROM_UPLINK`); an OUTPUT
+chain for the host's own egress (and, with it, filtering the host's replies
+to guests); rate-limit and logging targets; IPv6 filtering; full TCP state
+tracking; DHCP-client protection, moot until the host has a DHCP client.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

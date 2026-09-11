@@ -28,6 +28,12 @@ _Static_assert(COSMO_NETCTL_MAX_FORWARDS == NAT_PF_MAX, "netctl.h forward bound 
 _Static_assert(COSMO_NETCTL_MAX_GUESTS == FW_MAX_GUESTS, "netctl.h guest bound drifted from FW_MAX_GUESTS");
 _Static_assert(COSMO_NETCTL_MAX_RULES_PER_GUEST == FW_RULES_PER_GUEST,
                "netctl.h rules-per-guest bound drifted from FW_RULES_PER_GUEST");
+_Static_assert(COSMO_NETCTL_HOST_ADDR == FW_HOST_GUEST_IP, "netctl.h host sentinel drifted from FW_HOST_GUEST_IP");
+/* The version-4 record sizes are the ABI; a v3 writer's 20-byte command must
+ * be refused by size, never misread. */
+_Static_assert(sizeof(struct cosmo_netctl_filter) == 28, "cosmo_netctl_filter is 28 bytes in version 4");
+_Static_assert(sizeof(struct cosmo_netctl_filter_rule) == 24, "cosmo_netctl_filter_rule is 24 bytes in version 4");
+_Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 8, "cosmo_netctl_filter_guest is 8 bytes");
 
 #define TAP_TXQ_MAX 64u   /* frames the stack has queued for the reader; drops when full */
 
@@ -295,15 +301,18 @@ static int64_t tap_ctl_forward(const void *buf, size_t len)
 
 /* A firewall command (FILTER_ADD / FILTER_DEL / FILTER_POLICY): exactly one
  * struct cosmo_netctl_filter. The guest is named by address in the payload,
- * as a forward names its target; the netctl direction/proto/verdict values
- * are the fw.h ones (fw_rule_add validates them). */
+ * as a forward names its target -- or the host, by COSMO_NETCTL_HOST_ADDR
+ * (0), the one address no guest or forward can mean; the netctl
+ * direction/proto/verdict values are the fw.h ones (fw_rule_add validates
+ * them, and the scope they may name: FROM_UPLINK and a source for the host
+ * alone). */
 static int64_t tap_ctl_filter(const void *buf, size_t len)
 {
     if (len != sizeof(struct cosmo_netctl_filter))
         return -EINVAL;
     struct cosmo_netctl_filter c;
     memcpy(&c, buf, sizeof(c));
-    if (c.guest_addr == 0)
+    if (c.reserved[0] != 0 || c.reserved[1] != 0 || c.reserved[2] != 0)
         return -EINVAL;
     int rc;
     if (c.op == COSMO_NETCTL_FILTER_POLICY) {
@@ -312,6 +321,7 @@ static int64_t tap_ctl_filter(const void *buf, size_t len)
         struct fw_rule r = {
             .direction = c.direction, .proto = c.proto, .dst_prefix = c.dst_prefix,
             .verdict = c.verdict, .dst_ip = c.dst_addr, .dst_port = c.dst_port,
+            .src_prefix = c.src_prefix, .src_ip = c.src_addr,
         };
         rc = c.op == COSMO_NETCTL_FILTER_ADD ? fw_rule_add(c.guest_addr, c.at_index, &r)
                                              : fw_rule_del(c.guest_addr, &r);
@@ -345,8 +355,9 @@ static int64_t tap_ctl_write(struct vnode *vn, uint64_t off, const void *buf, si
 
 /* One read returns the whole snapshot -- the port-forward list (a struct
  * cosmo_netctl_list header and its rules) followed by the filter section (a
- * struct cosmo_netctl_filter_list, the attached guests' policies, then every
- * rule in evaluation order) -- or -EMSGSIZE if the buffer is too small. */
+ * struct cosmo_netctl_filter_list; the host record (guest_addr 0) and then
+ * the attached guests' policies; then every rule in evaluation order, the
+ * host's first) -- or -EMSGSIZE if the buffer is too small. */
 static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
@@ -372,8 +383,9 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
      * even if a rule lands between two guests' listings. */
     uint8_t *p = (uint8_t *)buf + total;
     size_t room = len - total;
-    uint32_t guests[FW_MAX_GUESTS];
-    unsigned ng = fw_guest_list(guests, FW_MAX_GUESTS);
+    uint32_t guests[FW_MAX_GUESTS + 1];
+    guests[0] = COSMO_NETCTL_HOST_ADDR;          /* the host object, always present, listed first */
+    unsigned ng = 1 + fw_guest_list(guests + 1, FW_MAX_GUESTS);
     size_t need = sizeof(struct cosmo_netctl_filter_list) + (size_t)ng * sizeof(struct cosmo_netctl_filter_guest);
     if (room < need)
         return -EMSGSIZE;
@@ -381,7 +393,8 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     p += sizeof(struct cosmo_netctl_filter_list);
     for (unsigned i = 0; i < ng; i++) {
         struct cosmo_netctl_filter_guest fg = { .guest_addr = guests[i] };
-        (void)fw_policy_get(guests[i], &fg.policy_to_uplink, &fg.policy_to_guest, &fg.policy_to_host);
+        (void)fw_policy_get(guests[i], &fg.policy_to_uplink, &fg.policy_to_guest, &fg.policy_to_host,
+                            &fg.policy_from_uplink);
         memcpy(p, &fg, sizeof(fg));
         p += sizeof(fg);
     }
@@ -397,6 +410,7 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
                 .guest_addr = guests[i], .direction = rs[j].direction, .proto = rs[j].proto,
                 .dst_prefix = rs[j].dst_prefix, .verdict = rs[j].verdict, .dst_addr = rs[j].dst_ip,
                 .dst_port = rs[j].dst_port, .index = (uint16_t)j,
+                .src_addr = rs[j].src_ip, .src_prefix = rs[j].src_prefix,
             };
             memcpy(p, &fr, sizeof(fr));
             p += sizeof(fr);
