@@ -621,8 +621,8 @@ uses `/dev/net/tap` -- a VM attaching is the opt-in. No new system call and
 no writable control surface: the flags are internal, set by the tap setup.
 A stock Linux guest with the tap as its gateway reaching the host's network
 (and the internet, where the host has it) is the `QEMU_MEM=2G`
-reproduction. Inbound port-forwarding (DNAT), a filtering firewall, and
-IPv6 NAT are later units.
+reproduction. Inbound port-forwarding (DNAT) is the next section; a
+filtering firewall and IPv6 NAT are later units.
 
 ## Inbound port forwarding: DNAT (`nat.c`; audit unit "reaching the guest from outside")
 

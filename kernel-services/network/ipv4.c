@@ -541,6 +541,12 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
         m_freem(m);
         return;
     }
+    /* Trim any link padding to the IP total length before anyone downstream
+     * (forwarding, NAT, delivery) reads past it: a short datagram in a padded
+     * frame must not let a pullup reach into the padding and be taken for a
+     * transport header. After this, m->pkt.len == total. */
+    if (total < m->pkt.len)
+        m_adj(m, -(int)(m->pkt.len - total));
     /* Martians: loopback or our own addresses arriving from a real link. */
     if (!(nif->flags & NETIF_LOOPBACK) &&
         ((ntohl(iph->src) >> 24) == 127 || netif_owns_ipv4(iph->src))) {

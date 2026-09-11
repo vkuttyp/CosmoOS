@@ -3406,6 +3406,10 @@ bool selftest_net_dnat(const char **reason)
     nat_pf_clear();
     CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80));
     CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53));
+    CHECK(nat_pf_add(IPPROTO_TCP, 8081, guest, 80));   /* same guest endpoint as 8080 */
+    /* A rule whose target is not on a connected subnet (would route out the
+     * default uplink and stall) is refused. */
+    CHECK(!nat_pf_add(IPPROTO_TCP, 7777, IPV4_ADDR(203, 0, 113, 5), 7777));
 
     uint8_t l4[128], frame[256], rx[256];
 
@@ -3466,6 +3470,19 @@ bool selftest_net_dnat(const char **reason)
     flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
     CHECK(tap_inject(u, frame, flen) == 0);
     CHECK(nettest_recv_ip(g) == NULL);                     /* never forwarded to the guest */
+
+    /* (4b) two forwards to the same guest endpoint cannot alias: a client
+     * reusing its source tuple on the second forward (8081, same guest:80 as
+     * the live 8080 flow from part 1) is refused, since the reply could not
+     * be told from the first flow's. */
+    struct nat_stats as0, as1;
+    nat_get_stats(&as0);
+    l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8081, TH_SYN);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    CHECK(nettest_recv_ip(g) == NULL);                     /* ambiguous: not forwarded */
+    nat_get_stats(&as1);
+    CHECK(as1.dnat_drop_full > as0.dnat_drop_full);
 
     /* (5) the table is bounded: a flood of distinct client flows fills it and
      * further ones drop; then aging reclaims them. */

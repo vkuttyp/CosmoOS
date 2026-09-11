@@ -234,6 +234,13 @@ static struct nat_entry *nat_dnat_create(uint8_t proto, uint32_t host_ip, uint16
                                          uint32_t client_ip, uint16_t client_port,
                                          uint32_t guest_ip, uint16_t guest_port, uint64_t now)
 {
+    /* Refuse an entry whose reverse key (guest endpoint + client tuple) already
+     * exists: the guest's reply carries no host port, so two such flows could
+     * not be told apart on the way back. */
+    if (nat_find_dnat_reply(proto, guest_ip, guest_port, client_ip, client_port, now) != NULL) {
+        STAT(dnat_drop_full);
+        return NULL;
+    }
     struct nat_entry *e = nat_free_slot(now);
     if (e == NULL) {
         STAT(dnat_drop_full);
@@ -661,6 +668,13 @@ bool nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t g
     if ((proto != IPPROTO_TCP && proto != IPPROTO_UDP) || host_port == 0 || guest_port == 0 ||
         guest_ip == 0)
         return false;
+    /* The target must sit on a connected subnet (a tap), so the forwarded
+     * packet routes to it and its reply passes the reverse-path check; an
+     * off-subnet target would relay out the default uplink and stall. */
+    struct netif *n = netif_connected(guest_ip);
+    if (n == NULL)
+        return false;
+    netif_put(n);
     arch_irq_state_t s = spin_lock_irqsave(&g_pf_lock);
     bool ok = false;
     for (unsigned i = 0; i < NAT_PF_MAX; i++)
