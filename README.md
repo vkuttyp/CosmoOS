@@ -1103,6 +1103,31 @@ See [docs/development.md](docs/development.md).
   A stock Linux guest with the tap as its gateway reaching the host's network
   is the `QEMU_MEM=2G` reproduction; inbound port-forwarding (DNAT), a
   filtering firewall, and IPv6 NAT are later units.
+- **The guest configures itself: DHCP and a DNS proxy (done):**
+  `docs/audit/next-subsystem-dhcp-dns.md`,
+  `docs/kernel-services/network/design.md` ("Autoconfiguring the guest").
+  The guest reached the world only once configured by hand; now a stock
+  guest with its DHCP client on learns everything from the host.
+  `kernel-services/network/tapsvc.c` is the tap's autoconfiguration service,
+  started when the VM attaches. Its **DHCP server** runs at the frame level
+  (a tap input filter, since the guest has no address yet and a tap is
+  `NETIF_NODEFAULT`, so a routed broadcast cannot reach it): it answers
+  DISCOVER/REQUEST for the tap's single guest slot (`<subnet>.15`) with the
+  gateway as router and DNS and a lease, NAKs a wrong address, refuses a
+  second client, and sends each reply out the tap with `ether_output` per
+  the client's broadcast flag at both layers (RFC 2131 §4.1). Its **DNS
+  proxy** is a `ksock` UDP relay on `<gateway>:53`: it rewrites each query's
+  transaction id to a value unique in a bounded, expiring table, forwards to
+  the `fw_cfg` upstream (`opt/cosmo/resolver`) as the host's own traffic, and
+  restores the guest's id on the answer -- record-type-agnostic, SERVFAIL
+  with no upstream, dropping when the table is full. No new syscall, no
+  writable control surface. Proven by `tap-filter` (the ingress/egress
+  mechanism), `net-dhcp` (DORA, NAK, the broadcast-flag reply, a refused
+  second client) and `net-dns` (a relayed round trip with id rewrite and
+  restore, two queries sharing an id, SERVFAIL, the bounded expiring table).
+  A stock Linux guest autoconfiguring `eth0` and resolving a name is the
+  `QEMU_MEM=2G` reproduction; a general DHCP server, a caching resolver,
+  DHCPv6, and DNS-over-TCP/DNSSEC are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

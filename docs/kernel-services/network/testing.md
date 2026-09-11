@@ -208,6 +208,35 @@ invalid checksum), a table that clobbers instead of dropping when full
 (`out_drop_full` never rises), and an age that reclaims nothing (the entries
 never expire).
 
+## Autoconfiguration (DHCP and DNS)
+
+**`tap-filter`**: the tap input filter that the DHCP server rides. A frame
+of a private ethertype is claimed and answered out the tap (the stack never
+sees it); an ARP request is *not* claimed and the stack answers it; clearing
+the filter lets a formerly-claimed frame reach the stack. Proved by making
+`tap_inject` never consult the filter -- the claimed frame is then not
+answered.
+
+**`net-dhcp`**: a synthetic guest on a tap injects a DISCOVER with the
+broadcast flag set; the reply read back off the tap is an OFFER sent as the
+limited broadcast at both layers (IP `255.255.255.255`, Ethernet
+`ff:ff:ff:ff:ff:ff`) carrying the guest address, mask, router/DNS and lease;
+REQUEST → ACK; a REQUEST for a wrong address → NAK; a flag-clear DISCOVER →
+a `chaddr` link-unicast with IP `yiaddr`; a second hardware address is
+offered nothing. Proved by reintroducing an IP destination of `yiaddr` under
+the broadcast flag (the guest would drop it) and an unconditional ACK (a
+wrong address is then not NAK'd).
+
+**`net-dns`**: driven through a loopback upstream responder. A guest query
+is relayed with a rewritten id and its answer returned with the guest's
+original id and the upstream's A record; two queries sharing an id come back
+to the right ports; an unconfigured upstream yields SERVFAIL; a flood to a
+black-hole upstream fills the pending table (it never exceeds the bound,
+further queries drop) and `tapsvc_dns_age` reclaims it. Proved by
+reintroducing no id restoration (the answer carries the wrong id), a table
+that clobbers instead of dropping when full (`dns_drop_full` never rises),
+and an age that reclaims nothing.
+
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 
 `run_boot_test.py` creates a `NetTest` for normal runs (not

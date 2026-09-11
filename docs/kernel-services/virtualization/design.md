@@ -811,9 +811,12 @@ bringing `eth0` up on `10.0.3.15` and reaching the host is the
 `tap0` turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when an owner first
 uses the channel, so a forwarded guest flow is routed out the host's real
 interface with its source NAT'd and the reply rewritten back
-(`docs/kernel-services/network/design.md`, "Forwarding and NAT"). Still
-named and not done: L2 bridging onto the host's physical LAN; raw/packet
-sockets for general userland; DHCP and DNS to autoconfigure the guest.
+(`docs/kernel-services/network/design.md`, "Forwarding and NAT"). DHCP and a DNS proxy autoconfigure the guest (`tapsvc.c`,
+`docs/kernel-services/network/design.md`, "Autoconfiguring the guest"),
+started on the same VM-attach signal: a stock guest with its DHCP client on
+learns its address, gateway and resolver from the host and resolves names.
+Still named and not done: L2 bridging onto the host's physical LAN;
+raw/packet sockets for general userland; DHCPv6 and DNS-over-TCP/DNSSEC.
 
 ### Guest memory (`guestmem.c`)
 
