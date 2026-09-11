@@ -110,6 +110,23 @@ Match fields keep their meaning: `proto`; `dst_ip/dst_prefix` constrains
 the `TO_HOST` path — a guest reaching the host's uplink address is as much
 "the host" as its gateway.
 
+**ICMP gains a type constraint.** The forwarding unit's rule model checked
+an ICMP rule's protocol and destination but not its *type*, and required
+`dst_port == 0` for ICMP ("ports do not apply"). That is too coarse for a
+default-deny chain guarding host handlers: `icmp_input` dispatches
+Need-Fragmentation (type 3 code 4) into `ipv4_pmtu_update` and Echo Reply
+(type 0) into the echo hook, and an "all ICMP" allow would open both to a
+guest. So for `proto == ICMP` the 16-bit `dst_port` field now carries the
+**ICMP type** (0..255), with `COSMO_NETCTL_ICMP_TYPE_ANY` (`0xffff`) as the
+explicit wildcard — no new field, no size change; the field is
+"the transport selector": a port for TCP/UDP, a type for ICMP. `rule_valid`
+accepts `type <= 255 || type == ANY` for ICMP and rejects anything else. (A
+code-level constraint is not needed for anything in this unit — admitting a
+*type* is the granularity the handlers dispatch on — and is left for a later
+unit if a use appears.) The FORWARD chain's ICMP flow *state* (echo by id) is
+untouched; this is the rule *match*, and it lets FORWARD rules say
+"echo-request only" too.
+
 ### 2. Enforcement: one call in `ipv4_input`, after NAT declines
 
 `fw_input_verdict(nif, m, iph, ihl)` is called for a datagram that arrived on
@@ -144,7 +161,12 @@ guest's list — visible in the listing, ordered, deletable, identical in
 shape to any operator rule:
 
 - `TO_HOST udp dst <gateway>/32 port 53 ACCEPT` — the tap's DNS proxy;
-- `TO_HOST icmp dst <gateway>/32 ACCEPT` — echo to the gateway.
+- `TO_HOST icmp dst <gateway>/32 type 8 ACCEPT` — **echo request** to the
+  gateway, and only that: a guest's Echo Reply (type 0) or Need-Fragmentation
+  (type 3) toward the host meets the default and is dropped, so the echo hook
+  and `ipv4_pmtu_update` are never reachable from a guest unless an operator
+  opens them by type. (A host that pings its guest and wants the reply adds
+  `type 0`; nothing in the tree needs it.)
 
 (DHCP needs nothing: it is frame-level.) Seeding rules rather than
 hard-coding exceptions keeps the model honest — an operator who wants to
@@ -156,7 +178,12 @@ other host port, is dropped by default; a rule opens it.
 ### 4. The control plane: one value, one byte, version 3
 
 `kernel/include/uapi/cosmo/netctl.h`: `COSMO_NETCTL_DIR_TO_HOST = 3` for
-`FILTER_ADD`/`FILTER_DEL`/`FILTER_POLICY`; `struct cosmo_netctl_filter_guest`
+`FILTER_ADD`/`FILTER_DEL`/`FILTER_POLICY`; `COSMO_NETCTL_ICMP_TYPE_ANY =
+0xffff`, and the documented rule that for `proto == ICMP` the `dst_port`
+field is the ICMP type (a **semantic change under version 3**: version 2
+required `0` there and meant "any"; a version-3 ICMP rule says a type or
+`ICMP_TYPE_ANY`, and the dispatcher's version check rejects a v2 writer with
+`-ENOTSUP` rather than reinterpret it); `struct cosmo_netctl_filter_guest`
 spends one byte of its `reserved` pair on `policy_to_host` (layout and size
 unchanged); `COSMO_NETCTL_VERSION` → 3 (a v2 reader that ignores the byte
 sees zeros where it saw zeros). `vmctl filter` accepts `host` as a direction
@@ -184,7 +211,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
   `fw_stats` gains `in_accept_rule/in_accept_default/in_drop_rule/
   in_drop_default/in_spoofed`.
 - `kernel-services/network/fw.c` — the verdict (anti-spoof + `TO_HOST`
-  walk), `rule_valid` accepts the new direction, `fw_guest_attach`/
+  walk), `rule_valid` accepts the new direction and, for ICMP, a type
+  (`<= 255`) or `ICMP_TYPE_ANY` in `dst_port`; `rule_matches` compares the
+  ICMP type read by `l4_read` against it (TCP/UDP port matching unchanged); `fw_guest_attach`/
   `fw_flush` seed the two default rules, `fw_policy_set/get` handle the third
   slot, `dir_slot` maps it.
 - `kernel-services/network/ipv4.c` — the call after `nat_in` declines, for
@@ -200,7 +229,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
   `kernel/include/kernel/selftest.h` — the `net-input` selftest;
   `net-firewall`'s listing assertions account for the seeded rules
   (`rule_count >= 3` becomes `>= 5`, the rule-count check in step (6) counts
-  from the seeded baseline).
+  from the seeded baseline), and its ICMP rule and the `-EINVAL` "ICMP with a
+  port" rejection move to the version-3 meaning (`ICMP_TYPE_ANY` or type 8;
+  a type above 255 is what is now rejected).
 - `docs/kernel-services/network/design.md` ("A forwarding firewall" gains the
   INPUT chain; the "guest-to-host is unfiltered" statements swept),
   `testing.md`, `README.md` Status entry; this report converted to as-built.
@@ -240,6 +271,12 @@ plus ksock listeners on the host to prove delivery or its absence:
 - **Seeded services reach the host**: a guest DNS query to `gateway:53` is
   answered (the proxy still works: `net-dns`'s round trip, repeated here);
   a guest echo request to the gateway draws an echo reply.
+- **The ICMP seed is echo-request only**: a guest Echo *Reply* (type 0) and
+  a guest Need-Fragmentation (type 3 code 4, quoting a host datagram) toward
+  the gateway are dropped by default (`in_drop_default` rises; the host's
+  PMTU cache for the guest is unchanged — `pmtu_updates` does not rise);
+  a `TO_HOST icmp gateway/32 type 0 ACCEPT` rule then admits the reply
+  alone, leaving Need-Fragmentation dropped; `ICMP_TYPE_ANY` admits both.
 - **Everything else is closed by default**: a host UDP listener on
   `gateway:7000` (and a TCP listener) receives nothing from the guest
   (`in_drop_default` rises); the guest addressing the host's **uplink**
@@ -264,6 +301,8 @@ plus ksock listeners on the host to prove delivery or its absence:
   in verdict (counts adjusted for the seeds).
 
 Bug-proofs: a verdict that always accepts (the closed port then receives);
+an ICMP match that ignores the type (a guest Need-Fragmentation then reaches
+`ipv4_pmtu_update` and `pmtu_updates` rises);
 a missing anti-spoof (the forged source then reaches the listener); seeds
 implemented as hard-coded exceptions (deleting the DNS rule then changes
 nothing); the call site placed *before* `nat_in` (a masqueraded reply is
@@ -291,6 +330,13 @@ changes.
 - **Seeded rules and the per-guest cap.** Two of `FW_RULES_PER_GUEST` (32)
   are taken at attach; `-ENOSPC` arrives two rules earlier. Acceptable and
   documented.
+- **The ICMP `dst_port` field changes meaning under version 3.** A version-2
+  ICMP rule carried `0` and meant "any type"; a version-3 one carries a type
+  or `ICMP_TYPE_ANY`. Mitigation: the dispatcher already refuses a wrong
+  version with `-ENOTSUP` (a v2 `vmctl` cannot write a v3 kernel a rule it
+  would misread), the seeds are written by the kernel, and `vmctl` is built
+  with the kernel; `net-firewall`'s ICMP rule moves to the new meaning in the
+  same change.
 - **A v2 reader of the listing.** The third policy lives in a formerly
   reserved byte; a v2 reader ignores it. The version bump signals the
   semantic change.
@@ -307,6 +353,16 @@ changes.
   Rejected: it scatters policy across every service and cannot express
   per-guest or per-address rules; the network layer already has the guest's
   identity (its tap) and the engine.
+- **A separate `icmp_type` field in the rule.** Rejected: it grows both the
+  command and the listing structs (20→24 and 16→20 bytes with padding) for
+  a value that fits the existing 16-bit transport-selector field, whose
+  meaning already depends on `proto` (a port for TCP/UDP); one field, one
+  sentinel, no size change. Code-level matching, which *would* need a field,
+  has no use in this unit and is deferred.
+- **Open all ICMP from the guest to the host and justify it.** Rejected: it
+  hands a guest `ipv4_pmtu_update` (a shrink-the-host's-MTU attack) and the
+  echo-reply hook for no benefit — a guest needs only echo *request* to reach
+  the gateway.
 - **Include the uplink→host chain in this unit.** Rejected for scope: it is
   host-scoped, not per-guest, needs its own control surface, and interacts
   with DNAT; named as the next unit.
