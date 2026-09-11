@@ -300,7 +300,11 @@ exactly that flow through (read back on B with A's real source; `accept_rule`
 and `flow_new` rise) while A→B udp/7002 still drops. (4) Stateful return in
 the guest→guest direction: B's reply to the accepted flow reaches A with no
 rule for B (`accept_established` rises); an unsolicited B→A datagram does
-not. (5) ICMP echo state keyed on the identifier: an accepted A→B echo
+not. (4b) TCP: on an accepted A→B connection, B's SYN-ACK and ACK are
+admitted as replies, but a **bare SYN from B on the reversed ports is a new
+connection**, not a reply — it takes B's default drop whatever the tuple says
+(a guest injects arbitrary flags, so the reverse-tuple shortcut must not
+honour a SYN without ACK). (5) ICMP echo state keyed on the identifier: an accepted A→B echo
 request admits B's echo *reply* with the same id, while a B→A echo *request*
 is dropped (a reverse request is not a reply) and a reply with a different id
 is dropped (no flow). (6) Ordering and identity: a DROP inserted at index 0
@@ -323,9 +327,10 @@ each changing nothing.
 Proved by reintroducing a verdict that always ACCEPTs (the default-drop test
 then reads the datagram back on B), a flow table that records nothing (B's
 reply is then dropped as unsolicited), an ICMP match that ignores the echo
-id (the wrong-id reply is then admitted), and an `fw_rule_add` that skips
+id (the wrong-id reply is then admitted), an `fw_rule_add` that skips
 the attached-guest check (an add for the departed B then succeeds, and the
-reused address inherits the stale rule).
+reused address inherits the stale rule), and an ESTABLISHED shortcut that
+honours a reverse bare SYN (B's SYN on the reversed ports is then admitted).
 
 **`net-tapctl`** (extended): the snapshot's expected length is now computed
 from the version-2 filter section the read appends (its header, the

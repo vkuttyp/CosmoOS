@@ -13,31 +13,33 @@ forwarded datagram is accepted or dropped; a bounded flow table makes the
 filter stateful, so the reply to an accepted flow is accepted without a
 reverse rule. The default closes the gap the multi-guest unit deferred in
 writing — inter-guest traffic is dropped unless a rule allows it — while
-guest→uplink egress stays open as it is today. Rules are set at runtime over
+guest→uplink egress stays open as it already was. Rules are set at runtime over
 the existing `/dev/net/tapctl` control channel, alongside the port-forward
 rules it already carries. This is the multi-guest arc's policy unit: the tap
 made many guests reachable to each other; this lets an operator say who may
 reach whom.**
 
-## Problem
+## Problem (the state before this unit)
 
 The multi-guest unit (PR #101) gave every VM its own tap, subnet and NAT
-share, and routes guests to each other as adjacent-subnet machines —
+share, and routed guests to each other as adjacent-subnet machines —
 "connectivity, not visibility". Its report and the network design doc both
-name, as a deferred later unit, **a policy forbidding inter-guest traffic**.
-Today there is none: a guest on `10.0.3.15` can reach a guest on
-`10.0.4.15` with no restriction, and a guest can reach anything its routes
-resolve to. The only packet-level control in the stack is the DNAT
-port-forward table (what inbound connections reach a guest); there is no way
-to say "this guest may talk to the uplink but not to its neighbours", or
+named, as a deferred later unit, **a policy forbidding inter-guest traffic**.
+Before this unit there was none: a guest on `10.0.3.15` could reach a guest
+on `10.0.4.15` with no restriction, and a guest could reach anything its
+routes resolved to. The only packet-level control in the stack was the DNAT
+port-forward table (what inbound connections reach a guest); there was no
+way to say "this guest may talk to the uplink but not to its neighbours", or
 "only DNS and HTTP may leave this guest", or "drop everything by default".
-On a host running more than one tenant's guest, that absence is a real
+On a host running more than one tenant's guest, that absence was a real
 isolation hole, and it is the single most-requested control a container or
 VM host exposes (`iptables`/`nftables`, security groups, network policies).
+This unit closes it; the sections below describe what it replaced and what
+it built.
 
-## Current implementation
+## Implementation before this unit (what it replaced)
 
-`kernel-services/network/ipv4.c`:
+`kernel-services/network/ipv4.c`, as it stood (line numbers of that time):
 
 - `ipv4_input` (`ipv4.c:521`) hands a datagram not addressed to the host to
   `ipv4_forward` when it arrived on a `NETIF_FORWARD` interface
@@ -47,10 +49,12 @@ VM host exposes (`iptables`/`nftables`, security groups, network policies).
   routes (`ipv4_route`), drops a hairpin/route-less datagram, then either
   masquerades (`nat_out`, guest→uplink, `ipv4.c:491`) or — for a flow
   leaving another forwarding tap (guest→guest) — forwards the source
-  unchanged, and finally re-emits with `output_on`. **There is no accept/drop
-  decision anywhere on this path**: every routable, non-spoofed datagram is
-  forwarded.
-- Inbound is gated only by DNAT: `nat_in` (`ipv4.c:585`) rewrites a packet
+  unchanged, and finally re-emits with `output_on`. **There was no accept/drop
+  decision anywhere on this path**: every routable, non-spoofed datagram was
+  forwarded. (Now `fw_forward_verdict` sits between the hairpin check and
+  `nat_out`, and a `FW_DROP` frees the datagram and counts `fwd_filtered`.)
+- Inbound was gated only by DNAT (and, by design, still is -- the FORWARD
+  chain does not re-gate it): `nat_in` (`ipv4.c:585`) rewrites a packet
   matching a port-forward rule to the guest; everything else addressed to the
   host is delivered to host services (`udp_input`/`tcp_input`/`icmp_input`,
   `ipv4.c:599`).
@@ -63,11 +67,12 @@ table at all** — and its keys are NAT identifiers, not a direction-tagged
 5-tuple, so it is not by itself a filter state table.
 
 `/dev/net/tapctl` (`tap.c:249`, ABI `kernel/include/uapi/cosmo/netctl.h`)
-carries exactly two opcodes today — `FORWARD_ADD`/`FORWARD_DEL` — dispatched
-in `tap_ctl_write` to `nat_pf_add`/`nat_pf_del`, with a versioned read
-snapshot built from `nat_pf_list`. It is the natural place to add filter
-rules: a guest-scoped, privileged (`0600`), versioned control surface that
-already exists.
+carried exactly two opcodes — `FORWARD_ADD`/`FORWARD_DEL` — dispatched in
+`tap_ctl_write` to `nat_pf_add`/`nat_pf_del`, with a versioned read snapshot
+built from `nat_pf_list`. It was the natural place to add filter rules: a
+guest-scoped, privileged (`0600`), versioned control surface that already
+existed — and it is where they now live (ABI version 2, five opcodes, a
+filter section appended to the snapshot).
 
 ## Why it matters
 
@@ -99,7 +104,7 @@ for ICMP). The verdict is **ACCEPT** or **DROP**. Rules are an ordered list,
 first match wins; a datagram matching no rule takes the **default policy** for
 its direction.
 
-Default policy, chosen to close the gap without changing today's working
+Default policy, chosen to close the gap without changing the then-working
 paths:
 
 - `TO_GUEST` (inter-guest) default **DROP** — the deferred policy, now the
@@ -314,14 +319,14 @@ are (`tap_inject`/`tap_recv`, `nettest_mk_udp/tcp`, `nettest_wrap`, stats via
 - **An allow rule punches one hole**: "A→B tcp/445 ACCEPT" — that flow
   reaches B; A→B on another port/proto still drops.
 - **To-uplink default ACCEPT unchanged**: a guest→uplink flow forwards as it
-  does today.
+  did before this unit.
 - **Stateful return (guest→guest, the direction that needs filter state)**:
   B's TCP/UDP reply to an accepted A→B flow reaches A with no reverse rule;
   an *unsolicited* B→A packet (no flow, no rule) is dropped.
 - **NAT'd reply needs no filter state**: an accepted guest→uplink flow's
   masqueraded reply reaches the guest (it is delivered by `nat_in`, gated by
   the NAT conntrack entry, not by the FORWARD chain); a reply with no NAT
-  entry is dropped by `nat_in` as today.
+  entry is dropped by `nat_in` as before.
 - **ICMP echo state, not a bare reverse tuple**: an accepted A→B echo request
   (type 8, id X) admits B's echo reply (type 0, id X); a B→A echo *request*
   (type 8) after it is still dropped (it is not a reply), and an echo reply

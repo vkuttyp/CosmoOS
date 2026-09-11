@@ -123,4 +123,16 @@ struct cosmo_netctl_filter_rule {
     uint16_t index;        /* position in the guest's list (display) */
 };
 
+/* The snapshot's bounds, so a reader can size its buffer for every valid
+ * configuration rather than guess (the kernel refuses a short buffer with
+ * -EMSGSIZE and never returns a partial snapshot). These mirror the kernel's
+ * table limits and are checked against them at build time. */
+#define COSMO_NETCTL_MAX_FORWARDS        16   /* port-forward rules */
+#define COSMO_NETCTL_MAX_GUESTS          8    /* concurrent guests */
+#define COSMO_NETCTL_MAX_RULES_PER_GUEST 32   /* firewall rules per guest */
+#define COSMO_NETCTL_SNAPSHOT_MAX \
+    (sizeof(struct cosmo_netctl_list) + COSMO_NETCTL_MAX_FORWARDS * sizeof(struct cosmo_netctl_rule) + \
+     sizeof(struct cosmo_netctl_filter_list) + COSMO_NETCTL_MAX_GUESTS * sizeof(struct cosmo_netctl_filter_guest) + \
+     COSMO_NETCTL_MAX_GUESTS * COSMO_NETCTL_MAX_RULES_PER_GUEST * sizeof(struct cosmo_netctl_filter_rule))
+
 #endif /* UAPI_COSMO_NETCTL_H */

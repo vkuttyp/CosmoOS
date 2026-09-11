@@ -3886,6 +3886,27 @@ bool selftest_net_firewall(const char **reason)
     CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_UDP, l4, l4len));
     CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);
 
+    /* (4b) TCP: a reverse-direction bare SYN is a new connection, not a
+     * reply. On an accepted A -> B flow, B's SYN-ACK and ACK are established;
+     * a SYN from B on the reversed ports is B opening a connection and takes
+     * B's default drop, whatever the tuple says. */
+    struct fw_rule allow_tcp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_TCP, .dst_prefix = 32,
+                                 .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 8443 };
+    CHECK(fw_rule_add(ga, 0, &allow_tcp) == 0);
+    l4len = nettest_mk_tcp(l4, ga, gb, 40000, 8443, TH_SYN);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_TCP, l4, l4len));
+    CHECK(fwt_recv(fb, rx, sizeof(rx), 40) > 0);                        /* A's SYN, by rule */
+    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_SYN | TH_ACK);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);                        /* B's SYN-ACK: a reply */
+    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_SYN);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);                       /* B's bare SYN: not a reply */
+    l4len = nettest_mk_tcp(l4, gb, ga, 8443, 40000, TH_ACK);
+    CHECK(fwt_send(fb, tap1mac, bmac, gb, ga, IPPROTO_TCP, l4, l4len));
+    CHECK(fwt_recv(fa, rx, sizeof(rx), 40) > 0);                        /* B's ACK: still established */
+    CHECK(fw_rule_del(ga, &allow_tcp) == 0);
+
     /* (5) ICMP echo is stateful on the identifier, not a bare reverse tuple. */
     struct fw_rule allow_icmp = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
                                   .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 0 };

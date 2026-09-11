@@ -23,6 +23,12 @@
 #include <kernel/string.h>
 #include <kernel/vfs.h>
 
+/* The UAPI's snapshot bounds are promises about these tables; keep them true. */
+_Static_assert(COSMO_NETCTL_MAX_FORWARDS == NAT_PF_MAX, "netctl.h forward bound drifted from NAT_PF_MAX");
+_Static_assert(COSMO_NETCTL_MAX_GUESTS == FW_MAX_GUESTS, "netctl.h guest bound drifted from FW_MAX_GUESTS");
+_Static_assert(COSMO_NETCTL_MAX_RULES_PER_GUEST == FW_RULES_PER_GUEST,
+               "netctl.h rules-per-guest bound drifted from FW_RULES_PER_GUEST");
+
 #define TAP_TXQ_MAX 64u   /* frames the stack has queued for the reader; drops when full */
 
 struct tap {

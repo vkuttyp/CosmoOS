@@ -1023,7 +1023,9 @@ static int filter(int argc, char **argv)
     }
     int rc = 1;
     if (strcmp(argv[0], "list") == 0) {
-        unsigned char buf[4096];
+        /* Sized to the ABI's maximum snapshot, so every configuration the
+         * control plane lets an operator install can also be listed. */
+        static unsigned char buf[COSMO_NETCTL_SNAPSHOT_MAX];
         int64_t n = read(fd, buf, sizeof(buf));
         if (n < (int64_t)sizeof(struct cosmo_netctl_list)) {
             fprintf(stderr, "vmctl: list failed: %s\n", strerror(errno));

@@ -342,7 +342,14 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct m
     if (dir == FW_DIR_TO_GUEST && v.ok) {
         bool rev = false;
         struct fw_flow *f = flow_find(iph, &v, now, &rev);
-        if (f != NULL) {
+        /* A TCP segment with SYN set and ACK clear opens a connection; it is
+         * never a reply, whatever its ports. A guest injects arbitrary flags,
+         * so a reverse-direction bare SYN on an accepted flow's ports is a new
+         * flow from the *other* guest and takes that guest's rules and default
+         * -- not the ESTABLISHED shortcut. (The initiator's own SYN, forward,
+         * is the packet that made the flow; a retransmit of it is harmless.) */
+        bool bare_syn = iph->proto == IPPROTO_TCP && (v.tcp_flags & TH_SYN) && !(v.tcp_flags & TH_ACK);
+        if (f != NULL && !(rev && bare_syn)) {
             if (iph->proto == IPPROTO_TCP && (v.tcp_flags & TH_ACK) && !(v.tcp_flags & TH_SYN))
                 f->est = true;
             f->expires_ns = now + flow_timeout(f);

@@ -793,9 +793,14 @@ recorded in a bounded flow table (`FW_FLOW_MAX`, a per-guest share
 `FW_FLOW_QUOTA_PER_GUEST` so a flood starves only its owner — and a NEW flow
 that cannot be recorded is refused, since state it cannot keep would strand
 the reply), and the reverse tuple is **ESTABLISHED** and accepted without a
-reverse rule. TCP is coarse (NEW until an ACK without SYN, then the longer
-timeout, as conntrack's `tcp_est`); the timeouts are conntrack's and `fw_age`
-runs on the same periodic tick as `nat_age`. **ICMP is stateful for echo
+reverse rule — with one exception that matters because a guest injects
+arbitrary flags: a TCP segment with SYN set and ACK clear opens a connection
+and is never a reply, so a **reverse-direction bare SYN** on an accepted
+flow's ports is the *other* guest starting a flow and takes that guest's
+rules and default, not the shortcut. TCP is otherwise coarse (NEW until an
+ACK without SYN, then the longer timeout, as conntrack's `tcp_est`); the
+timeouts are conntrack's and `fw_age` runs on the same periodic tick as
+`nat_age`. **ICMP is stateful for echo
 only**, keyed on the echo identifier: a type-8 request records the id, and
 only a type-0 reply carrying that id is its reply — a reverse echo *request*
 is a new flow (and meets the default), and a reply with another id matches
