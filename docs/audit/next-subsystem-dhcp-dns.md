@@ -63,23 +63,44 @@ NIC address and the fault-injection and the encryption key already ride.
 ### 1. Where it lives: an in-kernel service tied to the tap
 
 The DHCP server and the DNS proxy are a small in-kernel service
-(`kernel-services/network/tapsvc.c`) that binds `ksock` UDP sockets and runs
-on a kernel thread, started when `tap0` is activated (the VM attaches,
-alongside forwarding and masquerade). It lives in the kernel, not a userland
-daemon, for three reasons: the tap and its addressing are already in-kernel
-(the service's whole configuration — the guest's address, the gateway, the
-lease subnet — *is* `tap0`'s config, derived, not chosen); the guest's DHCP
-and DNS packets land in the host stack, where an in-kernel socket receives
-them with no new plumbing; and it is directly testable by injecting frames
-on a tap and reading the answers back, the same harness shape as `net-nat`.
-The policy it carries is minimal and bounded (one guest, one address, one
-upstream), so the usual "policy belongs in userland" argument is weak here;
-a general DHCP server with pools and reservations would be a userland daemon,
-and this report says so in §Alternatives.
+(`kernel-services/network/tapsvc.c`), started when `tap0` is activated (the
+VM attaches, alongside forwarding and masquerade). It lives in the kernel,
+not a userland daemon, for three reasons: the tap and its addressing are
+already in-kernel (the service's whole configuration — the guest's address,
+the gateway, the lease subnet — *is* `tap0`'s config, derived, not chosen);
+the guest's DHCP and DNS packets land in the host stack, where the service
+receives them with no new plumbing; and it is directly testable by injecting
+frames on a tap and reading the answers back, the same harness shape as
+`net-nat`. The policy it carries is minimal and bounded (one guest, one
+address, one upstream), so the usual "policy belongs in userland" argument is
+weak here; a general DHCP server with pools and reservations would be a
+userland daemon, and this report says so in §Alternatives.
 
-### 2. The DHCP server (RFC 2131)
+**The two halves reach the guest by different paths, and the difference is
+the crux of the design.** DHCP happens before the guest has an address, and
+its replies are the *limited* broadcast `255.255.255.255`; a routed UDP
+socket cannot carry that to the tap — `ipv4_route` sends the limited
+broadcast to `netif_default`, and `tap0` is explicitly `NETIF_NODEFAULT`, so
+a socketed reply would leave the *physical NIC*, never the guest (and a
+wildcard `:67` socket would also *receive* broadcasts from every interface,
+not only the tap). So **DHCP is handled at the frame level, scoped to
+`tap0`** (§2): the tap hands the service each inbound frame before the stack
+sees it, and the service replies by building a frame and transmitting it out
+`tap0` to the client's hardware address — never through IP routing or a
+wildcard socket, so it is pinned to the tap on both ends by construction. DNS,
+by contrast, happens *after* the guest is configured: its query is a unicast
+to `10.0.3.1` (an address the host owns) and the answer is a unicast to
+`10.0.3.15` (which `ipv4_route` sends out `tap0` by the connected-subnet
+route the NAT unit added), so **DNS is an ordinary in-kernel `ksock` UDP
+service** (§3) with no interface-scoping problem.
 
-Bound to `0.0.0.0:67`, it answers the one guest on `tap0`:
+### 2. The DHCP server (RFC 2131), at the frame level on `tap0`
+
+The tap gives the service each frame the guest injects, before the stack
+handles it (a tap-local receive filter — the tap owns `tapsvc`, so it calls
+into it directly, not a machine-wide hook); the service claims the ones that
+are a UDP datagram to port 67 and lets everything else through unchanged. It
+answers the one guest:
 
 - **DISCOVER → OFFER, REQUEST → ACK.** The offered address is the tap's
   single guest slot (`10.0.3.15`, the address the tap unit already
@@ -91,39 +112,56 @@ Bound to `0.0.0.0:67`, it answers the one guest on `tap0`:
   keyed by the client's hardware address (chaddr); a second client is
   offered nothing (logged), not a second address. A per-client pool is the
   concern of the userland-daemon unit, not this one.
-- **Replying to a client with no address.** The client cannot yet receive a
-  unicast to `yiaddr`, so the reply is broadcast (or unicast to the
-  hardware address per the broadcast flag, RFC 2131 §4.1) out `tap0` —
-  built and sent through the bound socket to `255.255.255.255:68`, the stack
-  broadcasting it out the tap. (Delivering a broadcast `DHCPDISCOVER` *to*
-  the server also requires `udp_input` to hand a broadcast datagram to a
-  wildcard-bound socket; if it does not today, that is a one-line fix with
-  its own check.)
+- **Replying to a client with no address, out `tap0`.** The client cannot
+  yet receive a unicast to `yiaddr`, and the reply must reach the tap and
+  only the tap. The service builds the whole reply frame (Ethernet + IP +
+  UDP, source `10.0.3.1:67`, destination `10.0.3.15:68`) and transmits it out
+  `tap0` with `ether_output` to the client's hardware address (or the link
+  broadcast when the client set the broadcast flag, RFC 2131 §4.1) — an
+  interface-scoped send, not `ipv4_output`, so it never consults the route
+  table and never leaks to the NIC. Because ingress is the tap's own filter
+  and egress is an explicit `ether_output(tap0, …)`, both directions are
+  scoped to the tap by construction; no wildcard socket and no routed
+  broadcast is involved, so `NETIF_NODEFAULT` and the missing interface
+  scope on sockets are not in the path.
 
-### 3. The DNS proxy (a UDP relay)
+### 3. The DNS proxy: a UDP relay with one transaction model
 
-Bound to `10.0.3.1:53`, it forwards the guest's queries to a real upstream
-resolver and relays the answers:
+Bound to `10.0.3.1:53` (an in-kernel `ksock` UDP socket), it forwards the
+guest's queries to a real upstream resolver on a single host socket and
+relays the answers back. The one thing it rewrites is the transaction ID;
+everything else is relayed byte for byte.
 
-- **A byte relay, not a resolver.** A guest query arriving on `10.0.3.1:53`
-  is forwarded verbatim from a host socket to the upstream resolver; the
-  answer that comes back is relayed verbatim to the guest. The proxy does
-  not parse names or record types, so `A`, `AAAA`, `TXT`, anything, all
-  work — and the query leaves as the *host's* own traffic (source: the
-  host's egress interface), so it needs no NAT and reaches whatever the host
-  can reach.
+- **One transaction model, stated once.** A guest query arriving on
+  `10.0.3.1:53` is entered in a pending table as (guest source address,
+  guest source port, the guest's 16-bit query ID), and the proxy **allocates
+  a new 16-bit ID unique among the outstanding entries** and forwards the
+  query — its ID field replaced by that allocated ID, every other byte
+  unchanged — to the upstream from the proxy's single upstream socket. When
+  an answer arrives on that socket, its ID is the key: the proxy finds the
+  entry, **restores the guest's original ID**, and sends the answer (again
+  byte-for-byte apart from the ID) to the recorded guest address and port.
+  So the ID is rewritten going out and restored coming back; the payload
+  (names, questions, records) is never parsed, so `A`, `AAAA`, `TXT`,
+  anything all pass through. The query leaves as the *host's* own traffic
+  (source: the host's egress interface), so it needs no NAT and reaches
+  whatever the host can reach.
+- **Collisions, defined.** Because the proxy owns the upstream ID space, two
+  guest queries that happen to share an ID (different source ports, or an ID
+  reused before the first answered) get *distinct* allocated IDs, so their
+  answers are never ambiguous. When no ID is free (the table is full) the new
+  query is dropped, not forwarded — the same bound as everywhere else.
+- **A bounded, expiring pending table.** Entries expire (a query with no
+  answer within a short timeout is reclaimed, its ID freed), and a full table
+  drops new queries — the same "bounded, expiring, drops-when-full"
+  discipline as the NAT conntrack table, for the same reason: guest-driven
+  state must not grow without limit. The reader supplies nothing the proxy
+  trusts: an upstream answer whose ID matches no live entry is dropped.
 - **The upstream.** Configured through `fw_cfg` `opt/cosmo/resolver` (an
   IPv4 address); the harness points it at a test-controlled responder (a
   loopback socket), the `QEMU_MEM=2G` demo at a real resolver the host can
   reach. Absent configuration, the proxy answers `SERVFAIL` rather than
   guessing an upstream.
-- **A bounded pending table.** Each forwarded query records (guest address,
-  guest port, guest txid) → (upstream txid) so the answer routes back to the
-  right guest socket; entries are bounded and expire (a query with no answer
-  is dropped, not remembered forever), a full table drops new queries. This
-  is the same "bounded, expiring, drops-when-full" discipline as the NAT
-  conntrack table, for the same reason: guest-driven state must not grow
-  without limit.
 - **UDP only, ≤512 bytes for now.** TCP DNS and EDNS0 large responses
   (truncation/`TC` handling, fallback to TCP) are a later refinement; the
   proxy sets nothing it cannot honor.
@@ -140,14 +178,18 @@ tap goes away.
 ### 5. The milestone
 
 - **Gated, in the harness:** a synthetic guest on a tap (no external
-  network). It broadcasts a `DHCPDISCOVER`; the host answers a `DHCPOFFER`
-  carrying `10.0.3.15`, mask `/24`, router and DNS `10.0.3.1`, and a lease.
-  It `DHCPREQUEST`s that address and gets a `DHCPACK`; a `REQUEST` for a
-  different address gets a `DHCPNAK`. It sends a DNS query for a name to
-  `10.0.3.1:53`; the proxy forwards it to a test upstream (a loopback
-  responder the test controls) and relays the response back, the answer
-  matching what the upstream returned. The pending table is bounded (a flood
-  of unanswered queries drops rather than grows) and its entries expire.
+  network). It injects a `DHCPDISCOVER` on the tap; the reply read back off
+  the tap is a `DHCPOFFER` addressed to the client's hardware address (not
+  routed off some other interface) carrying `10.0.3.15`, mask `/24`, router
+  and DNS `10.0.3.1`, and a lease. It injects a `DHCPREQUEST` for that
+  address and reads back a `DHCPACK`; a `REQUEST` for a different address
+  reads back a `DHCPNAK`. Then, configured, it sends a DNS query to
+  `10.0.3.1:53`; the proxy forwards it (with a rewritten ID) to a test
+  upstream (a loopback responder the test controls) and the answer read back
+  off the tap carries the guest's *original* ID and the upstream's records.
+  Two queries sharing an ID get distinct upstream IDs and unambiguous
+  answers; the pending table is bounded (a flood of unanswered queries drops
+  rather than grows) and its entries expire.
 - **Demonstrated, reproducible:** a stock Linux guest booted with its DHCP
   client on and the tap as its only network — it autoconfigures `eth0`
   (address, default route, resolver) from the host and resolves a name,
@@ -166,11 +208,12 @@ tap goes away.
 ## Affected files
 
 - `kernel-services/network/tapsvc.c` (new), `kernel/include/kernel/net/tapsvc.h`
-  — the DHCP server, the DNS proxy, the service thread and its sockets.
-- `kernel-services/network/tap.c` — start the service on `tap_dev_activate`,
-  stop it on teardown.
-- `kernel-services/network/udp.c` — deliver a broadcast UDP datagram to a
-  wildcard-bound socket if it does not already (with its own check).
+  — the frame-level DHCP responder, the DNS-proxy service thread and its
+  sockets, the pending table.
+- `kernel-services/network/tap.c` / `tap.h` — start the service on
+  `tap_dev_activate` and stop it on teardown; the tap-local receive filter
+  that hands the service each inbound frame before the stack sees it, and the
+  `ether_output`-based reply path out the tap.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
   `selftest.h` — the `net-dhcp` and `net-dns` self-tests.
 - `kernel/core/fwcfg.c` / `kernel/fwcfg.h` (or the existing fw_cfg reader)
@@ -180,43 +223,51 @@ tap goes away.
 
 ## New APIs
 
-No new system call and no new control-plane ABI: the service binds in-kernel
-sockets and reads one read-only `fw_cfg` value. Its surface is internal —
-`tapsvc_start(struct netif *tap)` / `tapsvc_stop()`, called from the tap's
-activation and teardown.
+No new system call and no new control-plane ABI: the DHCP half rides a
+tap-local receive filter and `ether_output`, the DNS half binds an in-kernel
+`ksock` socket and reads one read-only `fw_cfg` value. The surface is
+internal — `tapsvc_start(struct netif *tap)` / `tapsvc_stop()`, called from
+the tap's activation and teardown, plus the tap-local receive-filter hook the
+tap already needs for this.
 
 ## Migration plan
 
-1. **Broadcast UDP delivery**: ensure `udp_input` hands a broadcast datagram
-   to a wildcard-bound socket, with a test (a socket bound to `0.0.0.0:port`
-   receives a datagram sent to the subnet broadcast). The DHCP server needs
-   this; it may already hold, in which case the test records that it does.
-2. **The DHCP server**: the service thread, the socket on `:67`, DISCOVER/
-   OFFER/REQUEST/ACK/NAK/RELEASE for the one guest slot, broadcast replies.
-   Proved by `net-dhcp` (a synthetic guest completes DORA and is offered the
-   right fields; a REQUEST for a wrong address is NAK'd; a second client is
-   refused). Each behavior bug-proved by reintroducing its bug.
-3. **The DNS proxy**: the socket on `10.0.3.1:53`, the byte relay to the
-   `fw_cfg` upstream, the bounded expiring pending table. Proved by
-   `net-dns` (a guest query is relayed to a test upstream and its answer
-   relayed back verbatim; an unconfigured upstream yields SERVFAIL; the
-   table is bounded and expires). Each bound bug-proved.
+1. **The tap-local receive filter**: `tap.c` hands the service each inbound
+   frame before `netif_rx`, and an `ether_output`-based reply path sends a
+   frame back out the tap to a given hardware address. A test proves a frame
+   the service emits is read back off the tap and a frame it does not claim
+   still reaches the stack.
+2. **The DHCP server** (frame-level): DISCOVER/OFFER/REQUEST/ACK/NAK/RELEASE
+   for the one guest slot, replies built and sent out `tap0` to the client's
+   hardware address. Proved by `net-dhcp` (a synthetic guest completes DORA
+   and the offer carries the right fields; a REQUEST for a wrong address is
+   NAK'd; a second hardware address is refused). Each behavior bug-proved by
+   reintroducing its bug.
+3. **The DNS proxy**: the socket on `10.0.3.1:53`, the single upstream
+   socket, the ID-rewriting relay, the bounded expiring pending table. Proved
+   by `net-dns` (a guest query is relayed with a rewritten ID and its answer
+   returned with the guest's original ID and the upstream's records; two
+   queries sharing an ID stay unambiguous; an unconfigured upstream yields
+   SERVFAIL; the table is bounded and expires). Each bound bug-proved.
 4. **Enabling on the tap** and **the Linux demonstration**, documented and
    reproducible under `QEMU_MEM=2G`.
 5. **Docs and the Status entry**, and the full verification chain.
 
 ## Tests
 
-- `net-dhcp` (host): a synthetic guest on a tap broadcasts DISCOVER and gets
-  an OFFER with `10.0.3.15`, `/24`, router/DNS `10.0.3.1`, a lease; REQUEST
-  → ACK; a REQUEST for another address → NAK; a second hardware address is
-  offered nothing. Replies observed on the tap are broadcast (the client has
-  no address yet).
-- `net-dns` (host): a guest query to `10.0.3.1:53` is relayed to a
-  test-controlled upstream (a loopback responder) and the response relayed
-  back, matching the upstream's answer for its txid and question; an
-  unconfigured upstream yields SERVFAIL; the pending table drops when full
-  and reclaims on expiry.
+- `net-dhcp` (host): a synthetic guest injects DISCOVER on a tap and the
+  reply read back off the tap is an OFFER to the client's hardware address
+  with `10.0.3.15`, `/24`, router/DNS `10.0.3.1`, a lease; REQUEST → ACK; a
+  REQUEST for another address → NAK; a second hardware address is offered
+  nothing. The reply is addressed to the client at the link layer and leaves
+  only the tap (a bug-proof: routing it instead sends it off the default
+  interface, and the tap read-back is then empty).
+- `net-dns` (host): a guest query to `10.0.3.1:53` is forwarded to a
+  test-controlled upstream (a loopback responder) with a rewritten ID, and
+  the answer read back off the tap carries the guest's *original* ID and the
+  upstream's records; two queries sharing an ID get distinct upstream IDs and
+  unambiguous answers; an unconfigured upstream yields SERVFAIL; the pending
+  table drops when full and reclaims on expiry.
 - The existing net, forwarding and NAT tests and a net-less boot stay green;
   the service is off until the tap is activated.
 
@@ -233,16 +284,20 @@ has a baseline. No absolute target.
   unbounded state); the DNS pending table is bounded and expiring and drops
   when full — the same discipline as the NAT conntrack table, for the same
   reason (guest-driven state must not grow without limit).
-- **Untrusted packets parsed by a new service.** The DHCP server parses a
-  guest-crafted BOOTP/DHCP packet and the DNS proxy reads a guest-crafted
-  query header (txid, and enough to route the answer); both validate lengths
-  and treat the input as hostile, and the DNS proxy relays bytes rather than
-  interpreting names, so its parse surface is a fixed-size header, not the
-  whole message.
-- **Replying to a client with no address.** A DHCP reply must reach a client
-  that cannot yet receive a unicast to the offered address; getting the
-  broadcast/hardware-address path wrong means the guest never sees the
-  offer. The test asserts the reply is observed on the tap as a broadcast.
+- **Untrusted packets parsed by a new service.** The DHCP responder parses a
+  guest-crafted BOOTP/DHCP frame and the DNS proxy reads a guest-crafted
+  query header (the ID, and enough to route the answer); both validate
+  lengths and treat the input as hostile, and the DNS proxy rewrites only the
+  ID rather than interpreting names, so its parse surface is a fixed-size
+  header, not the whole message.
+- **Reaching a client with no address, and only it.** A DHCP reply must reach
+  a client that cannot yet receive a unicast to the offered address, and it
+  must reach the tap and not the physical NIC — which is exactly why the
+  reply is built as a frame and sent with `ether_output` out `tap0` to the
+  client's hardware address, never through IP routing (`tap0` is
+  `NETIF_NODEFAULT`, so a routed limited broadcast would leave the wrong
+  interface). The test asserts the reply is read back off the tap and
+  addressed to the client's hardware address.
 - **Overselling reach.** The gated test resolves through a loopback upstream,
   not the internet; the unit says plainly that real-world resolution is the
   `QEMU_MEM=2G` reproduction, as the tap and NAT units said of theirs.
