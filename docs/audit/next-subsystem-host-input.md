@@ -16,15 +16,17 @@ refused by every op today), with rules that can finally name a **source**
 default is **ACCEPT** — today's behaviour, since the host runs services meant
 to be reached and the host's own connections must keep working — and the
 operator drops by source, protocol and port or flips to a hardened default.
-Two things close without any rule. First, an **off-link invariant**: a
+One thing closes without any rule — the **off-link invariant**: a
 datagram arriving on a link is for an address *on that link* — the ingress
 interface's own, or a broadcast — and anything else is dropped before any
 chain. Today `netif_owns_ipv4` treats every interface's address as the
 host's and the martian check looks only at the source, so an uplink datagram
 addressed to a guest's gateway is delivered into that guest's DNS proxy (an
 open resolver per guest), and one addressed to `127.0.0.1` reaches
-**loopback-bound services** — both reachable from the real network. Second,
-the chain does **not** try to know which TCP segments belong to a connection
+**loopback-bound services** — both reachable from the real network. Everything else waits for a rule or
+a hardened default — under the default ACCEPT nothing else changes — and
+when a rule *does* say DROP, the drop is **silent**: the chain does **not**
+try to know which TCP segments belong to a connection
 — three drafts of that (flags, "any PCB", "eligible states") each left a way
 for `tcp_input` to answer a probe. Instead a DROP verdict for TCP/UDP becomes
 a **quiet-delivery policy carried on the datagram** (`M_FW_QUIET`): the
@@ -33,8 +35,8 @@ connection accepts it by TCP's own checks (sequence, acknowledgment, the
 syncache completion of an admitted SYN) or a connected UDP socket names the
 sender, **creates no new connection**, and **emits nothing** for a rejected
 segment — no SYN-ACK, RST, challenge ACK, window ACK or port-unreachable,
-enforced at the one flush every TCP response already passes through rather
-than at a list of sites —
+enforced inside `batch_send`, the sole function that transmits a TCP
+response, rather than at a list of sites or at any one flush call —
 so a DROP rule means silence, not a RST that confirms the host is there. And
 the chain sits where the last unit proved it could not yet be observed:
 after `nat_in`, so a DNAT'd inbound connection is never re-gated — now
@@ -219,9 +221,21 @@ step protects:
      `build_raw` and `build_segment` alike, so listener SYN-ACKs, resets and
      challenge ACKs (`:570`, `:673`) *and* the ACK to an out-of-window
      segment (`:1712`) — goes through `batch_push` into the per-call
-     `struct tcp_batch` that `batch_send` flushes at the end of `tcp_input`;
-     under `M_FW_QUIET` a rejected segment's batch is **discarded instead of
-     sent**, one gate for every present and future response. Bookkeeping
+     `struct tcp_batch`, and `batch_send` (`:681-690`) is the **sole
+     emitter** — the only `ipv4_output`/`ipv6_output` calls in `tcp.c`. So the
+     gate is `batch_send` itself, not any one call to it: the batch carries a
+     `quiet` bit, set from the mbuf's `M_FW_QUIET` when `tcp_input` begins
+     and **cleared the moment the segment is accepted**; `batch_send` frees
+     a still-quiet batch instead of transmitting it. Every flush — the early
+     no-pcb and listener-rejection flushes at `:1617` and `:1628` that
+     return before `out:`, and the final one at `:1882` — passes through
+     the same function, so no return path can leak a response. Side
+     effects follow the same rule, *consumed at emission, not at decision*:
+     `challenge_ack` (`:673`) returns before consulting
+     `challenge_allowed()` when its batch is quiet, so a rejected probe
+     cannot burn the host-wide RFC 5961 budget (`g_chal_count`, `:667`,
+     otherwise incremented before the response is even queued) and starve
+     legitimate challenge ACKs. Bookkeeping
      moves after acceptance: `last_rx_ns = now` (`:1684`, today set before
      the acceptability test) is updated only for an accepted segment, so a
      rejected one cannot refresh the connection's keepalive clock — an
@@ -312,16 +326,18 @@ refuse a snapshot whose version is not the one it speaks.
   `M_BCAST`): "deliver only to an existing connection or connected socket,
   create nothing, answer nothing".
 - `kernel-services/network/tcp.c` — honour `M_FW_QUIET` structurally:
-  `tcp_input` records whether the segment was **accepted** by an existing
+  `struct tcp_batch` gains a `quiet` bit, set from the mbuf when `tcp_input`
+  begins and cleared when the segment is **accepted** by an existing
   connection (the acceptability test at `:1703-1712`, or a SYN-cache
-  completion); at its end, under the flag, a rejected segment's
-  `struct tcp_batch` is **discarded instead of `batch_send`** — the one gate
-  through which every response (`build_raw`/`build_segment`: `:570`, `:673`,
-  the out-of-window ACK at `:1712`) already passes; `last_rx_ns = now`
-  moves from `:1684` (before the test) to after acceptance; no SYN-cache
-  allocation for a new SYN under the flag (`:1516`). Everything an accepted
-  segment does — including its ACKs — runs unchanged. A `quiet_dropped`
-  stat.
+  completion); `batch_send` (`:681`, the sole emitter) frees a still-quiet
+  batch instead of transmitting — so the early flushes at `:1617`/`:1628`
+  and the final one at `:1882` are all gated by one line; `challenge_ack`
+  (`:673`) returns before `challenge_allowed()` when its batch is quiet
+  (the RFC 5961 budget is consumed only for a response that will be sent);
+  `last_rx_ns = now` moves from `:1684` (before the test) to after
+  acceptance; no SYN-cache allocation for a new SYN under the flag
+  (`:1516`). Everything an accepted segment does — including its ACKs —
+  runs unchanged. A `quiet_dropped` stat.
 - `kernel-services/network/udp.c` — honour `M_FW_QUIET`: deliver only to a
   socket connected to the sender, free anything else silently, and skip the
   ICMP port-unreachable (`:276`). A `quiet_dropped` stat.
@@ -363,8 +379,10 @@ refuse a snapshot whose version is not the one it speaks.
 
 1. `ipv4.c`: the off-link invariant for every non-loopback ingress
    (`rx_offlink`); the `M_FW_QUIET` flag — in `tcp.c` the accepted/rejected
-   disposition, the batch gate at the flush, `last_rx_ns` moved after
-   acceptance and the SYN-cache allocation gate; in `udp.c` the
+   disposition, the `quiet` bit on `struct tcp_batch` honoured in
+   `batch_send`, `challenge_ack` consulting the budget only when its batch
+   is not quiet, `last_rx_ns` moved after acceptance and the SYN-cache
+   allocation gate; in `udp.c` the
    connected-socket gate and the suppressed port-unreachable; `fw.c`: the host
    object, the source fields, the new direction, `fw_host_verdict`
    (connection-state bypass, rules/default); the second `ipv4.c` call site;
@@ -420,6 +438,12 @@ the host; verdicts awaited on the worker as in `net-input`.
   SYN+ACK is admitted and completes the handshake while a bare ACK from that
   peer is freed silently; after the host closes an accepted connection
   (`TIME_WAIT`), a bare ACK from the peer to that tuple draws nothing.
+- **Rejected probes consume no shared budget**: under a DROP rule, a burst of
+  more than `TCP_CHALLENGE_PER_SEC` bad-sequence probes at a covered port is
+  freed silently — and immediately afterwards a legitimate out-of-window
+  segment on an *accepted* connection (outside the rule) still draws its RFC
+  5961 challenge ACK, proving the host-wide challenge budget was not spent
+  on the rejected ones.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
   back, while a type-0 datagram to the host passes the default.
@@ -455,10 +479,14 @@ the host; verdicts awaited on the worker as in `net-input`.
 
 Bug-proofs: a verdict that ignores rules (the sourced DROP then delivers);
 a source match that ignores the prefix (the out-of-prefix SYN then drops);
-the batch gate missing (a rejected segment's batch is sent as today: the
-ACK-only probe from a source with no connection then draws a RST, the
-bad-sequence segment a challenge ACK, and the out-of-window segment a
-window ACK — one revert, three observed responses); the SYN-cache
+the `quiet` bit not honoured in `batch_send` (a rejected segment's batch
+is sent as today: the ACK-only probe from a source with no connection then
+draws a RST, the bad-sequence segment a challenge ACK, and the out-of-window
+segment a window ACK — one revert, three observed responses); the gate
+placed at the final flush only (the no-pcb path's early flush at `:1617`
+then sends the RST); `challenge_ack` consulting the budget before checking
+the quiet bit (the probe burst then starves the accepted connection's
+legitimate challenge ACK); the SYN-cache
 allocation not gated (a new SYN under the DROP rule then draws a SYN-ACK);
 `last_rx_ns` left before the acceptability test (a rejected segment then
 refreshes the keepalive clock and the scheduled probe fires late); a DROP that
@@ -499,10 +527,13 @@ share it. Nothing on the tap or loopback paths changes.
   persists until it closes (FORWARD's flow state behaves the same way) —
   documented; an operator who wants it cut closes the socket. The
   implementation risk is a response path that escapes the gate — which is
-  why the gate is the batch flush every response already passes through,
-  not a list of sites (a per-site list missed the out-of-window ACK at
-  `:1712` in review) — and a state update that precedes acceptance, of which
-  `last_rx_ns` is the one found; each has a bug-proof (one revert of the
+  why the gate is inside `batch_send` — the sole emitter, through which
+  every flush passes — not a list of sites (a per-site list missed the
+  out-of-window ACK at `:1712` in review) and not any one flush call (the
+  final-flush form missed the early flushes at `:1617`/`:1628` in review) —
+  and a side effect that precedes emission, of which two were found:
+  `last_rx_ns` updated before acceptance, and the RFC 5961 budget consumed
+  before the response is queued; each has a bug-proof (one revert of the
   gate draws a RST, a challenge ACK and a window ACK; the clock left early
   delays a keepalive probe).
 - **ABI v4 grows two structs.** Exact-size dispatch refuses a v3 writer; a
@@ -561,10 +592,14 @@ share it. Nothing on the tap or loopback paths changes.
   named three (`:570`, `:673`, `:1516`) and review found a fourth — the ACK
   to an out-of-window segment at `:1712` via `build_segment`. Rejected: a
   list of sites is only as complete as the last audit. Every TCP response
-  already goes through `batch_push` into the per-call batch that
-  `batch_send` flushes at the end of `tcp_input`, so the gate is that flush:
-  a rejected segment's batch is discarded, and any response added in the
-  future is silenced with it. The same review found bookkeeping
+  already goes through `batch_push` into the per-call batch, and
+  `batch_send` is the sole function that transmits it (the only
+  `ipv4_output`/`ipv6_output` calls in `tcp.c`), so the gate is `batch_send` itself,
+  the sole emitter — a `quiet` bit on the batch, set at entry and cleared on
+  acceptance, makes it free a rejected segment's batch — and not any one
+  call to it: the "final flush" form of this idea missed the early flushes
+  at `:1617`/`:1628` in review. Any response added in the future is
+  silenced with the rest. The same review found bookkeeping
   (`last_rx_ns`) done before acceptance, so "no side effect" is enforced the
   same way — nothing is recorded until the segment is accepted.
 - **Drop at the socket layer (refuse a match whose ingress is not the
