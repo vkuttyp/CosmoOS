@@ -109,8 +109,11 @@ What reaches the host from the uplink today and must keep working: the
 boot-test harness's echo listeners (`tests/boot/nettest.py` connects through
 QEMU `hostfwd` to ksock listeners on the NIC address), DNAT'd connections to
 guests (claimed by `nat_in` first), replies to the host's own outbound flows
-(TCP segments of its connections, UDP replies to its sockets), and ICMP echo
-to the host. The NIC's address is a static QEMU default (`netif.c`
+(TCP segments of its connections under any policy; UDP replies to its
+sockets under the default ACCEPT, and to *connected* UDP sockets under any
+policy — a reply to an unconnected socket matching an operator's DROP rule
+is dropped, as the design and Risks sections state), and ICMP echo to the
+host. The NIC's address is a static QEMU default (`netif.c`
 `netif_autoconfig`; "DHCP is a later unit"), so no DHCP client needs a hole.
 
 ## Why it matters
@@ -225,12 +228,22 @@ step protects:
      and a **FIN** that must be ACKed. Clearing only where `snd_una`
      advances — an earlier draft — would have processed those four with the
      batch still quiet and discarded the connection's own required output,
-     disrupting exactly the connections the policy preserves. The other two
-     acceptance points exit before this chain: a **valid in-window reset**
-     (`seq == rcv_nxt`, `:1731`), which tears the connection down and emits
-     nothing, and the **SYN-cache completion of a passive open whose SYN was
-     admitted earlier** (the ACK that creates the child, exactly as today). A `SYN_SENT` connection's valid SYN+ACK is
-     applied on the same terms. An **in-window SYN on an existing
+     disrupting exactly the connections the policy preserves. The other
+     acceptance points exit before this chain, and each is named because
+     each is a path that queues output or mutates state on its own: the
+     **active-open `SYN_SENT` completion** — the `SYN_SENT` block
+     (`:1639-1679`) has its own rejection checks (a bad ACK `:1641` draws a
+     reset; a missing SYN `:1656` is dropped) and then applies the segment
+     from `:1658` (`irs`/`rcv_nxt`, then `ESTABLISHED` and the completing
+     ACK queued by `tcp_output_locked` at `:1667-1672`, or the
+     simultaneous-open SYN+ACK at `:1675-1676`), so `quiet` clears at
+     `:1658` — the host's own outbound connection must complete under any
+     rule, and an earlier draft that listed only three points would have
+     discarded that completing ACK; a **valid reset** (in-window
+     `seq == rcv_nxt` at `:1731`, or the refused active open at
+     `:1647-1654`), which tears the connection down and emits nothing; and
+     the **SYN-cache completion of a passive open whose SYN was admitted
+     earlier** (the ACK that creates the child, exactly as today). An **in-window SYN on an existing
      connection** is *not* accepted under quiet: it is a connection-open
      attempt, which the policy refuses silently, and RFC 5961's challenge
      exists only to probe the peer. An *accepted* segment is processed exactly as today,
@@ -245,15 +258,17 @@ step protects:
      emitter** — the only `ipv4_output`/`ipv6_output` calls in `tcp.c`. So the
      gate is `batch_send` itself, not any one call to it: the batch carries a
      `quiet` bit, set from the mbuf's `M_FW_QUIET` when `tcp_input` begins
-     and **cleared at exactly the three acceptance points above** — the
-     post-rejection point (`:1750`/`:1757`), the valid in-window reset, the
-     SYN-cache completion —
+     and **cleared at exactly the four acceptance points above** — the
+     post-rejection point (`:1750`/`:1757`), the `SYN_SENT` completion
+     (`:1658`), a valid reset (`:1731`, `:1647-1654`), the SYN-cache
+     completion —
      and nowhere earlier; every `goto out` before them is a rejection whose
      batch stays quiet, so whatever it queued (a challenge ACK, a reset, a
      window ACK) is freed. `batch_send` frees a still-quiet batch instead of
      transmitting it. Clearing at the window test would let the later
      rejections answer; clearing without a named boundary could silence a
-     valid connection's own output — hence the three points. Every flush — the early
+     valid connection's own output — hence the four named points, each a path
+     that queues output or mutates state on its own. Every flush — the early
      no-pcb and listener-rejection flushes at `:1617` and `:1628` that
      return before `out:`, and the final one at `:1882` — passes through
      the same function, so no return path can leak a response. Side
@@ -354,13 +369,16 @@ refuse a snapshot whose version is not the one it speaks.
   create nothing, answer nothing".
 - `kernel-services/network/tcp.c` — honour `M_FW_QUIET` structurally:
   `struct tcp_batch` gains a `quiet` bit, set from the mbuf when `tcp_input`
-  begins and cleared at exactly three points — the point after the last
+  begins and cleared at exactly four points — the point after the last
   rejection `goto out` (`:1750`, or `:1757` in `SYN_RCVD`; i.e. once the
   window `:1703`, RST-position `:1728`, in-window-SYN `:1740`, missing-ACK
   `:1744`, ACK-range `:1747` and `SYN_RCVD`-ACK `:1754` checks have all
   passed, and *before* the advancing-ACK, duplicate-ACK/fast-retransmit
-  `:1803-1813`, window-update `:1816`, data and FIN paths), a valid
-  in-window reset (`:1731`), and a SYN-cache completion; `batch_send` (`:681`, the sole emitter) frees a still-quiet
+  `:1803-1813`, window-update `:1816`, data and FIN paths); the active-open
+  `SYN_SENT` completion (`:1658`, after that block's bad-ACK `:1641` and
+  missing-SYN `:1656` checks, before it queues the completing ACK at
+  `:1667-1672`); a valid reset (`:1731`, or `:1647-1654` in `SYN_SENT`); and
+  a SYN-cache completion; `batch_send` (`:681`, the sole emitter) frees a still-quiet
   batch instead of transmitting — so the early flushes at `:1617`/`:1628`
   and the final one at `:1882` are all gated by one line; `challenge_ack`
   (`:673`) returns before `challenge_allowed()` when its batch is quiet
@@ -466,8 +484,11 @@ the host; verdicts awaited on the worker as in `net-input`.
   keepalive clock included (a keepalive probe scheduled before the rejected
   segment still fires on time); the host `connect`s out to a peer on the uplink tap (its
   SYN is read back) under a DROP rule covering the peer, and the peer's valid
-  SYN+ACK is admitted and completes the handshake while a bare ACK from that
-  peer is freed silently; after the host closes an accepted connection
+  SYN+ACK is admitted and completes the handshake — the host's completing
+  ACK is **read back on the uplink tap** (the `SYN_SENT` acceptance point at
+  `:1658` cleared `quiet` before `tcp_output_locked` queued it) and the
+  socket's `connect` returns — while a bare ACK from that peer is freed
+  silently; after the host closes an accepted connection
   (`TIME_WAIT`), a bare ACK from the peer to that tuple draws nothing.
 - **Rejected probes consume no shared budget**: under a DROP rule, a burst of
   more than `TCP_CHALLENGE_PER_SEC` bad-sequence probes at a covered port is
@@ -538,7 +559,9 @@ check (the in-window SYN, the out-of-range ACK and the mis-positioned reset
 then each draw a challenge ACK); `quiet` cleared only inside the
 advancing-ACK branch (the peer's FIN then draws no ACK and the close hangs,
 a duplicate-ACK triple builds no fast retransmission, and a window update
-re-enables no output); `challenge_ack` consulting the budget before checking
+re-enables no output); the `SYN_SENT` block not clearing `quiet` (the
+host's completing ACK is then discarded, `connect` never returns, and its
+own outbound connection to a DROP-covered peer never completes); `challenge_ack` consulting the budget before checking
 the quiet bit (the probe burst then starves the accepted connection's
 legitimate challenge ACK); the SYN-cache
 allocation not gated (a new SYN under the DROP rule then draws a SYN-ACK);
