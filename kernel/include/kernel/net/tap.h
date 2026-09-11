@@ -45,7 +45,8 @@ struct netif *tap_netif(struct tap *t);   /* for tests and lookups */
 typedef bool (*tap_input_fn)(struct tap *t, const void *frame, uint32_t len, void *arg);
 void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg);
 
-/* Create /dev/net/tap and its backing tap0 (down until first used), at boot. */
+/* Create the /dev/net/tap and /dev/net/tapctl device nodes at boot; each open
+ * of /dev/net/tap creates a tap of its own (no tap exists until then). */
 void tap_dev_init(void);
 
 #endif /* KERNEL_NET_TAP_H */

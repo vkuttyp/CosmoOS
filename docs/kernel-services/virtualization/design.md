@@ -812,10 +812,12 @@ capped) and `el2-tap-host` (a guest's ARP request crossing virtio-net and
 the bridge into the real stack, which answers on the tap). A stock Linux
 bringing `eth0` up on `10.0.3.15` and reaching the host is the
 `QEMU_MEM=2G` reproduction. Reaching *beyond* the host is done:
-`tap0` turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when an owner first
-uses the channel, so a forwarded guest flow is routed out the host's real
-interface with its source NAT'd and the reply rewritten back
-(`docs/kernel-services/network/design.md`, "Forwarding and NAT"). DHCP and a DNS proxy autoconfigure the guest (`tapsvc.c`,
+Each tap turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when its owner opens
+the channel, so a forwarded guest flow bound for the uplink is routed out the
+host's real interface with its source NAT'd and the reply rewritten back;
+masquerade is uplink-only, so a flow between two guests' taps is routed
+un-translated (`docs/kernel-services/network/design.md`, "Forwarding and NAT"
+and "Many guests: a tap per open"). DHCP and a DNS proxy autoconfigure the guest (`tapsvc.c`,
 `docs/kernel-services/network/design.md`, "Autoconfiguring the guest"),
 started on the same VM-attach signal: a stock guest with its DHCP client on
 learns its address, gateway and resolver from the host and resolves names.

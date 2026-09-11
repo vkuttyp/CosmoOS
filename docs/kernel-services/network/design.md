@@ -619,9 +619,11 @@ UDP, TCP and ICMP echo are masqueraded; a flow that cannot be (an
 unsupported protocol, a truncated header, a full table) is dropped rather
 than forwarded with the private source exposed.
 
-`tap0` turns `NETIF_FORWARD` and `NETIF_MASQUERADE` on when an owner first
-uses `/dev/net/tap` -- a VM attaching is the opt-in. No new system call and
-no writable control surface: the flags are internal, set by the tap setup.
+A guest's tap turns `NETIF_FORWARD` and `NETIF_MASQUERADE` on when its owner
+opens `/dev/net/tap` -- a VM attaching is the opt-in (one persistent `tap0`
+then; a tap per open now, "Many guests: a tap per open" below). No new system
+call and no writable control surface: the flags are internal, set by the tap
+setup.
 A stock Linux guest with the tap as its gateway reaching the host's network
 (and the internet, where the host has it) is the `QEMU_MEM=2G`
 reproduction. A filtering firewall and IPv6 NAT are later units; inbound

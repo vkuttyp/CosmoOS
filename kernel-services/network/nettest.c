@@ -2425,8 +2425,8 @@ bool selftest_tap(const char **reason)
     struct netif *nif = tap_netif(t);
 
     /* a tap is a point-to-point owner link, never the machine's default
-     * interface -- even brought up, so a persistent tap0 with no close hook
-     * cannot swallow the host's outbound traffic. */
+     * interface -- even brought up, a tap cannot swallow the host's outbound
+     * traffic. */
     struct netif *def = netif_default();
     CHECK(def != nif);
     if (def)
