@@ -581,7 +581,9 @@ checksum, martian checks -- before forwarding, with no shortcut, and a
 strict reverse-path check drops any datagram whose source is not on the
 ingress interface's own subnet, so a guest cannot forge a source (an
 uplink-subnet address, say, which would otherwise make masquerade skip it
-and be emitted unchanged).
+and be emitted unchanged). On a masquerading tap — a point-to-point link to
+one owner — this is tightened further to the tap's single guest address (see
+"Many guests: a tap per open").
 
 **Masquerade NAT (`nat.c`).** A forwarded flow leaving an interface whose
 subnet does not hold its source -- a `10.0.3.x` guest going out the uplink
@@ -610,15 +612,18 @@ longer once a TCP flow is established, via `nat_age`, which the network
 worker calls from its periodic ARP/ND aging), and a full table drops new
 flows. Because forwarding is enabled
 only on the one guest's tap, the table's flows are that guest's, so a guest
-that opens endless flows starves only itself; a per-client quota is the
-concern of a later unit that forwards for more than one client. Only IPv4
+that opens endless flows starves only itself; once the table is shared among
+several guests, a per-guest quota bounds each one's footprint ("Many guests: a
+tap per open", below). Only IPv4
 UDP, TCP and ICMP echo are masqueraded; a flow that cannot be (an
 unsupported protocol, a truncated header, a full table) is dropped rather
 than forwarded with the private source exposed.
 
-`tap0` turns `NETIF_FORWARD` and `NETIF_MASQUERADE` on when an owner first
-uses `/dev/net/tap` -- a VM attaching is the opt-in. No new system call and
-no writable control surface: the flags are internal, set by the tap setup.
+A guest's tap turns `NETIF_FORWARD` and `NETIF_MASQUERADE` on when its owner
+opens `/dev/net/tap` -- a VM attaching is the opt-in (one persistent `tap0`
+then; a tap per open now, "Many guests: a tap per open" below). No new system
+call and no writable control surface: the flags are internal, set by the tap
+setup.
 A stock Linux guest with the tap as its gateway reaching the host's network
 (and the internet, where the host has it) is the `QEMU_MEM=2G`
 reproduction. A filtering firewall and IPv6 NAT are later units; inbound
@@ -659,6 +664,56 @@ the guest can. A stock Linux guest running a service reached from the host
 through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
 surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
 are later units.
+
+## Many guests: a tap per open (`tap.c`, `tapsvc.c`, `nat.c`; audit unit "from one guest to many")
+
+The stack served one guest — a persistent `tap0`, a singleton `tapsvc`, one
+NAT table — because the character device had no per-open lifecycle. Now every
+open of `/dev/net/tap` is a guest (`docs/audit/next-subsystem-multiguest.md`).
+
+**A tap per open.** `/dev/net/tap`'s `open` (the VFS chrdev lifecycle, below)
+takes a free slot from a pool of `TAP_MAX_GUESTS` (8) and creates `tap<k>` on
+`10.0.(3+k).0/24` — host `.1`, guest `.15`, the convention `tap0` set, which
+is now simply the first — forwarding and masquerade on, with its own `tapsvc`;
+`read`/`write` act on that file's tap; the ninth open is `-ENOSPC`. The last
+close (`release`) stops the service, purges the guest's NAT state, destroys
+the tap and frees the slot — in that order, so the service's threads and DHCP
+filter are gone before the tap they point at, and no flow survives for a
+reused subnet. A tap exists exactly while an owner holds the channel;
+`vmctl`, which opens once per run, is unchanged, and two runs are two guests.
+
+**`tapsvc` per tap.** The singleton is now an instance (`struct tapsvc`)
+allocated per tap: its own DHCP binding (a guest slot on its own subnet) and
+its own DNS proxy, whose socket is bound to *that tap's gateway* — a proxy on
+`0.0.0.0:53` would answer DNS on the host's real interface. The periodic
+`nat`/DNS age sweeps every live instance.
+
+**NAT for many.** Four changes keep a shared table fair and honest with
+several guests. A **per-guest quota** (`NAT_QUOTA_PER_GUEST = NAT_TABLE_SIZE /
+NAT_GUESTS`) caps a guest's whole footprint — the guest is always the
+`orig_ip` side, for a masquerade flow it dialled out and a DNAT flow dialled
+in to its port-forward alike, so one count (`nat_guest_count`) bounds both;
+neither an outbound flood nor an inbound flood against one guest's forwards
+starves a peer. **Masquerade is skipped when the egress interface itself
+forwards** (a flow between two taps is guest-to-guest), so guests reach each
+other with real addresses — and because that leaves the source un-rewritten,
+the forwarding anti-spoof is tightened: a masquerading tap is a
+point-to-point link to a single owner at `<subnet>.15`, so `ipv4_forward`
+requires exactly that source (not merely one on the subnet), or a guest could
+forge a same-subnet identity toward a peer. A packet that matches a
+port-forward rule but cannot be forwarded (the guest is over quota, or the
+table is full) is **dropped, not delivered locally** — it is meant for the
+guest, not for a host service that happens to bind the same port. And
+**`nat_guest_purge(guest_ip)`** removes every port-forward rule targeting a
+guest and every conntrack entry on its guest side — and nothing else — the
+guest-scoped teardown a departing tap's `release` calls before its subnet
+returns to the pool.
+
+Each guest thus has its own channel (it sees only its own frames), its own
+lease and subnet, its own NAT share, and its own port-forwards; guests reach
+each other over routed IP as adjacent-subnet machines do — connectivity, not
+visibility. Policy forbidding inter-guest traffic, an L2 bridge sharing one
+subnet, and per-guest limits beyond the NAT quota are later units.
 
 ## A runtime network control channel (`tap.c`, `nat.c`; audit unit "configuring the guest's network at runtime")
 

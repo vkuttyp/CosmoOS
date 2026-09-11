@@ -10,6 +10,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/net/cksum.h>
 #include <kernel/net/ether.h>
@@ -61,6 +62,22 @@
 #define BOOTP_OFF_SIADDR 20
 #define BOOTP_OFF_CHADDR 28
 
+/* --- DNS proxy (§3): per-instance state ------------------------------------ */
+
+#define DNS_PENDING_MAX 128u
+#define DNS_TIMEOUT_NS  (5ull * 1000000000ull)
+#define DNS_PORT 53
+#define DNS_HDR 12                 /* the fixed DNS header: id, flags, 4 counts */
+
+struct dns_pending {
+    bool in_use;
+    uint16_t guest_id;             /* the id the guest used (host order) */
+    uint16_t up_id;                /* the id we lent upstream (host order) */
+    struct netaddr guest;          /* where the answer goes back */
+    uint64_t expires_ns;
+};
+
+/* One service instance per tap: its DHCP binding and its DNS proxy. */
 struct tapsvc {
     struct tap *tap;
     struct netif *nif;
@@ -69,10 +86,21 @@ struct tapsvc {
     uint32_t guest;        /* the one guest's address (network order) */
     bool bound;            /* a client has taken the lease */
     uint8_t client_mac[6];
+    spinlock_t lock;       /* the DHCP binding */
+    /* DNS proxy */
+    struct dns_pending dns_tab[DNS_PENDING_MAX];
+    spinlock_t dns_lock;
+    struct socket *gsock;          /* bound gateway:53, faces the guest */
+    struct socket *usock;          /* faces the upstream resolver */
+    struct thread *gth, *uth;
+    uint32_t up_ip; uint16_t up_port; bool up_set;
+    volatile bool running;
 };
 
-static struct tapsvc g_svc;
-static spinlock_t g_svc_lock = SPINLOCK_INIT("tapsvc");
+/* The live instances, for the periodic age sweep and aggregate stats. */
+#define TAPSVC_MAX 8u
+static struct tapsvc *g_svcs[TAPSVC_MAX];
+static spinlock_t g_svcs_lock = SPINLOCK_INIT("tapsvc-list");
 static struct tapsvc_stats g_stats;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
@@ -223,15 +251,15 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
     }
     const uint8_t *chaddr = dh + BOOTP_OFF_CHADDR;
 
-    arch_irq_state_t st = spin_lock_irqsave(&g_svc_lock);
+    arch_irq_state_t st = spin_lock_irqsave(&s->lock);
     /* One binding: a second, different client is offered nothing. */
     bool mine = !s->bound || memcmp(s->client_mac, chaddr, 6) == 0;
 
     switch (mt[0]) {
     case DHCP_DISCOVER:
         STAT(dhcp_discover);
-        if (!mine) { STAT(dhcp_ignored); spin_unlock_irqrestore(&g_svc_lock, st); return true; }
-        spin_unlock_irqrestore(&g_svc_lock, st);
+        if (!mine) { STAT(dhcp_ignored); spin_unlock_irqrestore(&s->lock, st); return true; }
+        spin_unlock_irqrestore(&s->lock, st);
         STAT(dhcp_offer);
         dhcp_reply(s, dh, DHCP_OFFER);
         return true;
@@ -249,7 +277,7 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
             s->bound = true;
             memcpy(s->client_mac, chaddr, 6);
         }
-        spin_unlock_irqrestore(&g_svc_lock, st);
+        spin_unlock_irqrestore(&s->lock, st);
         if (ok) { STAT(dhcp_ack); dhcp_reply(s, dh, DHCP_ACK); }
         else    { STAT(dhcp_nak); dhcp_reply(s, dh, DHCP_NAK); }
         return true;
@@ -259,60 +287,35 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
         STAT(dhcp_release);
         if (mine)
             s->bound = false;
-        spin_unlock_irqrestore(&g_svc_lock, st);
+        spin_unlock_irqrestore(&s->lock, st);
         return true;
     default:
         STAT(dhcp_ignored);
-        spin_unlock_irqrestore(&g_svc_lock, st);
+        spin_unlock_irqrestore(&s->lock, st);
         return true;
     }
 }
 
-/* --- DNS proxy (§3): an ID-rewriting UDP relay ---------------------------- */
 
-#define DNS_PENDING_MAX 128u
-#define DNS_TIMEOUT_NS  (5ull * 1000000000ull)
-#define DNS_PORT 53
-#define DNS_HDR 12                 /* the fixed DNS header: id, flags, 4 counts */
-
-struct dns_pending {
-    bool in_use;
-    uint16_t guest_id;             /* the id the guest used (host order) */
-    uint16_t up_id;                /* the id we lent upstream (host order) */
-    struct netaddr guest;          /* where the answer goes back */
-    uint64_t expires_ns;
-};
-
-static struct dns_pending g_dns_tab[DNS_PENDING_MAX];
-static spinlock_t g_dns_lock = SPINLOCK_INIT("tapsvc-dns");
-
-static struct {
-    struct socket *gsock;          /* bound gateway:53, faces the guest */
-    struct socket *usock;          /* faces the upstream resolver */
-    struct thread *gth, *uth;
-    uint32_t up_ip; uint16_t up_port; bool up_set;
-    volatile bool running;
-} g_dns;
-
-/* True if some live entry already lent this upstream id. */
-static bool dns_id_taken(uint16_t id, uint64_t now)
+/* True if some live entry already lent this upstream id. Caller holds dns_lock. */
+static bool dns_id_taken(struct tapsvc *svc, uint16_t id, uint64_t now)
 {
     for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
-        if (g_dns_tab[i].in_use && now < g_dns_tab[i].expires_ns && g_dns_tab[i].up_id == id)
+        if (svc->dns_tab[i].in_use && now < svc->dns_tab[i].expires_ns && svc->dns_tab[i].up_id == id)
             return true;
     return false;
 }
 
-/* Record a guest query; lend a unique upstream id via *uid. false when full. */
-static bool dns_alloc(uint16_t guest_id, const struct netaddr *from, uint16_t *uid)
+/* Record a guest query; lend a unique random upstream id via *uid. false when full. */
+static bool dns_alloc(struct tapsvc *svc, uint16_t guest_id, const struct netaddr *from, uint16_t *uid)
 {
     uint64_t now = clock_now_ns();
-    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&svc->dns_lock);
     struct dns_pending *slot = NULL;
     for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
-        if (!g_dns_tab[i].in_use || now >= g_dns_tab[i].expires_ns) { slot = &g_dns_tab[i]; break; }
+        if (!svc->dns_tab[i].in_use || now >= svc->dns_tab[i].expires_ns) { slot = &svc->dns_tab[i]; break; }
     if (slot == NULL) {
-        spin_unlock_irqrestore(&g_dns_lock, s);
+        spin_unlock_irqrestore(&svc->dns_lock, s);
         return false;
     }
     /* A random id (not a predictable counter) so an off-path attacker cannot
@@ -320,10 +323,10 @@ static bool dns_alloc(uint16_t guest_id, const struct netaddr *from, uint16_t *u
     uint16_t id = 0;
     for (unsigned tries = 0; tries < 4096u; tries++) {
         uint16_t cand = (uint16_t)random_u64();
-        if (cand != 0 && !dns_id_taken(cand, now)) { id = cand; break; }
+        if (cand != 0 && !dns_id_taken(svc, cand, now)) { id = cand; break; }
     }
     if (id == 0) {
-        spin_unlock_irqrestore(&g_dns_lock, s);
+        spin_unlock_irqrestore(&svc->dns_lock, s);
         return false;
     }
     slot->in_use = true;
@@ -332,68 +335,78 @@ static bool dns_alloc(uint16_t guest_id, const struct netaddr *from, uint16_t *u
     slot->guest = *from;
     slot->expires_ns = now + DNS_TIMEOUT_NS;
     *uid = id;
-    spin_unlock_irqrestore(&g_dns_lock, s);
+    spin_unlock_irqrestore(&svc->dns_lock, s);
     return true;
 }
 
 /* Find and consume the entry for upstream id `uid`; false if none live. */
-static bool dns_take(uint16_t uid, struct netaddr *guest, uint16_t *guest_id)
+static bool dns_take(struct tapsvc *svc, uint16_t uid, struct netaddr *guest, uint16_t *guest_id)
 {
     uint64_t now = clock_now_ns();
-    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&svc->dns_lock);
     for (unsigned i = 0; i < DNS_PENDING_MAX; i++) {
-        struct dns_pending *e = &g_dns_tab[i];
+        struct dns_pending *e = &svc->dns_tab[i];
         if (e->in_use && now < e->expires_ns && e->up_id == uid) {
             *guest = e->guest;
             *guest_id = e->guest_id;
             e->in_use = false;
-            spin_unlock_irqrestore(&g_dns_lock, s);
+            spin_unlock_irqrestore(&svc->dns_lock, s);
             return true;
         }
     }
-    spin_unlock_irqrestore(&g_dns_lock, s);
+    spin_unlock_irqrestore(&svc->dns_lock, s);
     return false;
 }
 
-void tapsvc_dns_age(uint64_t now_ns)
+static void dns_age_one(struct tapsvc *svc, uint64_t now_ns)
 {
-    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    arch_irq_state_t s = spin_lock_irqsave(&svc->dns_lock);
     for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
-        if (g_dns_tab[i].in_use && now_ns >= g_dns_tab[i].expires_ns) {
-            g_dns_tab[i].in_use = false;
+        if (svc->dns_tab[i].in_use && now_ns >= svc->dns_tab[i].expires_ns) {
+            svc->dns_tab[i].in_use = false;
             STAT(dns_expired);
         }
-    spin_unlock_irqrestore(&g_dns_lock, s);
+    spin_unlock_irqrestore(&svc->dns_lock, s);
+}
+
+/* Reclaim expired pending queries across every live instance. */
+void tapsvc_dns_age(uint64_t now_ns)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i])
+            dns_age_one(g_svcs[i], now_ns);
+    spin_unlock_irqrestore(&g_svcs_lock, s);
 }
 
 /* No upstream configured: answer the guest itself with SERVFAIL. */
-static void dns_servfail(uint8_t *buf, uint32_t n, const struct netaddr *to)
+static void dns_servfail(struct tapsvc *svc, uint8_t *buf, uint32_t n, const struct netaddr *to)
 {
     buf[2] |= 0x80;                        /* QR = response */
     buf[3] = (uint8_t)((buf[3] & 0xf0) | 2);   /* RCODE = 2 (server failure) */
     STAT(dns_servfail);
-    ksock_sendto(g_dns.gsock, buf, n, to);
+    ksock_sendto(svc->gsock, buf, n, to);
 }
 
 /* Guest side: read a query, lend an upstream id, forward it. */
 static void dns_guest_main(void *arg)
 {
-    (void)arg;
+    struct tapsvc *svc = arg;
     uint8_t buf[512];
-    while (g_dns.running) {
+    while (svc->running) {
         struct netaddr from;
-        int64_t n = ksock_recvfrom(g_dns.gsock, buf, sizeof(buf), &from);
+        int64_t n = ksock_recvfrom(svc->gsock, buf, sizeof(buf), &from);
         if (n < DNS_HDR) { if (n <= 0) break; continue; }
         STAT(dns_query);
-        if (!g_dns.up_set) { dns_servfail(buf, (uint32_t)n, &from); continue; }
+        if (!svc->up_set) { dns_servfail(svc, buf, (uint32_t)n, &from); continue; }
         uint16_t gid = (uint16_t)(buf[0] << 8 | buf[1]);
         uint16_t uid;
-        if (!dns_alloc(gid, &from, &uid)) { STAT(dns_drop_full); continue; }
+        if (!dns_alloc(svc, gid, &from, &uid)) { STAT(dns_drop_full); continue; }
         buf[0] = (uint8_t)(uid >> 8); buf[1] = (uint8_t)uid;
         struct netaddr up;
         memset(&up, 0, sizeof(up));
-        up.family = COSMO_AF_INET; up.port = g_dns.up_port; up.v4 = g_dns.up_ip;
-        ksock_sendto(g_dns.usock, buf, (size_t)n, &up);
+        up.family = COSMO_AF_INET; up.port = svc->up_port; up.v4 = svc->up_ip;
+        ksock_sendto(svc->usock, buf, (size_t)n, &up);
     }
     thread_exit(0);
 }
@@ -401,24 +414,24 @@ static void dns_guest_main(void *arg)
 /* Upstream side: read an answer, restore the guest id, relay it back. */
 static void dns_up_main(void *arg)
 {
-    (void)arg;
+    struct tapsvc *svc = arg;
     uint8_t buf[512];
-    while (g_dns.running) {
+    while (svc->running) {
         struct netaddr from;
-        int64_t n = ksock_recvfrom(g_dns.usock, buf, sizeof(buf), &from);
+        int64_t n = ksock_recvfrom(svc->usock, buf, sizeof(buf), &from);
         if (n < DNS_HDR) { if (n <= 0) break; continue; }
         /* Only the configured upstream may answer: an unconnected socket
          * accepts packets from anyone, and matching on the id alone would let
          * a reachable attacker race a forged response into the guest. */
-        if (from.v4 != g_dns.up_ip || from.port != g_dns.up_port)
+        if (from.v4 != svc->up_ip || from.port != svc->up_port)
             continue;
         uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
         struct netaddr guest; uint16_t gid;
-        if (!dns_take(uid, &guest, &gid))
+        if (!dns_take(svc, uid, &guest, &gid))
             continue;                         /* no live entry: drop */
         buf[0] = (uint8_t)(gid >> 8); buf[1] = (uint8_t)gid;
         STAT(dns_answer);
-        ksock_sendto(g_dns.gsock, buf, (size_t)n, &guest);
+        ksock_sendto(svc->gsock, buf, (size_t)n, &guest);
     }
     thread_exit(0);
 }
@@ -440,99 +453,108 @@ static bool dns_parse_ip(const char *s, uint32_t *out)
     return true;
 }
 
-static void dns_stop(void);
+static void dns_stop(struct tapsvc *svc)
+{
+    svc->running = false;
+    if (svc->gsock) ksock_shutdown(svc->gsock, COSMO_SHUT_RD);
+    if (svc->usock) ksock_shutdown(svc->usock, COSMO_SHUT_RD);
+    if (svc->gth) { thread_join(svc->gth); svc->gth = NULL; }
+    if (svc->uth) { thread_join(svc->uth); svc->uth = NULL; }
+    if (svc->gsock) { ksock_put(svc->gsock); svc->gsock = NULL; }
+    if (svc->usock) { ksock_put(svc->usock); svc->usock = NULL; }
+}
 
 static void dns_start(struct tapsvc *svc)
 {
-    memset(&g_dns, 0, sizeof(g_dns));
-    memset(g_dns_tab, 0, sizeof(g_dns_tab));
-
     char cfg[32];
-    if (fwcfg_get_string("resolver", cfg, sizeof(cfg)) && dns_parse_ip(cfg, &g_dns.up_ip)) {
-        g_dns.up_port = DNS_PORT;
-        g_dns.up_set = true;
+    if (fwcfg_get_string("resolver", cfg, sizeof(cfg)) && dns_parse_ip(cfg, &svc->up_ip)) {
+        svc->up_port = DNS_PORT;
+        svc->up_set = true;
     }
-
+    /* Bound to this tap's own gateway address: a proxy on 0.0.0.0:53 would
+     * also answer DNS on the host's real interface, exposing a resolver. */
     struct netaddr me;
     memset(&me, 0, sizeof(me));
     me.family = COSMO_AF_INET; me.port = DNS_PORT; me.v4 = svc->gateway;
-    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dns.gsock) != 0)
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &svc->gsock) != 0)
         return;
-    if (ksock_bind(g_dns.gsock, &me) != 0) { ksock_put(g_dns.gsock); g_dns.gsock = NULL; return; }
-    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dns.usock) != 0) {
-        ksock_put(g_dns.gsock); g_dns.gsock = NULL; return;
+    if (ksock_bind(svc->gsock, &me) != 0) { ksock_put(svc->gsock); svc->gsock = NULL; return; }
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &svc->usock) != 0) {
+        ksock_put(svc->gsock); svc->gsock = NULL; return;
     }
     struct netaddr any;
     memset(&any, 0, sizeof(any));
     any.family = COSMO_AF_INET;
-    ksock_bind(g_dns.usock, &any);          /* an ephemeral local port */
+    ksock_bind(svc->usock, &any);          /* an ephemeral local port */
 
-    g_dns.running = true;
-    g_dns.gth = thread_create(dns_guest_main, NULL, "dns-guest", SCHED_PRIO_DEFAULT);
-    g_dns.uth = thread_create(dns_up_main, NULL, "dns-up", SCHED_PRIO_DEFAULT);
-    if (g_dns.gth == NULL || g_dns.uth == NULL) {
-        kwarn("tapsvc: DNS proxy threads not started; rolling back");
-        dns_stop();               /* tear the half-started service fully down */
+    svc->running = true;
+    svc->gth = thread_create(dns_guest_main, svc, "dns-guest", SCHED_PRIO_DEFAULT);
+    svc->uth = thread_create(dns_up_main, svc, "dns-up", SCHED_PRIO_DEFAULT);
+    if (svc->gth == NULL || svc->uth == NULL) {
+        kwarn("tapsvc: DNS proxy threads not started on %s; rolling back", svc->nif->name);
+        dns_stop(svc);            /* tear the half-started service fully down */
         return;
     }
-    kinfo("tapsvc: DNS proxy on %s:53 (upstream %sconfigured)", svc->nif->name, g_dns.up_set ? "" : "un");
+    kinfo("tapsvc: DNS proxy on %s:53 (upstream %sconfigured)", svc->nif->name, svc->up_set ? "" : "un");
 }
 
-static void dns_stop(void)
+void tapsvc_test_set_upstream(struct tapsvc *svc, uint32_t ip, uint16_t port)
 {
-    g_dns.running = false;
-    if (g_dns.gsock) ksock_shutdown(g_dns.gsock, COSMO_SHUT_RD);
-    if (g_dns.usock) ksock_shutdown(g_dns.usock, COSMO_SHUT_RD);
-    if (g_dns.gth) { thread_join(g_dns.gth); g_dns.gth = NULL; }
-    if (g_dns.uth) { thread_join(g_dns.uth); g_dns.uth = NULL; }
-    if (g_dns.gsock) { ksock_put(g_dns.gsock); g_dns.gsock = NULL; }
-    if (g_dns.usock) { ksock_put(g_dns.usock); g_dns.usock = NULL; }
-}
-
-void tapsvc_test_set_upstream(uint32_t ip, uint16_t port)
-{
-    g_dns.up_ip = ip;
-    g_dns.up_port = port;
-    g_dns.up_set = ip != 0;   /* ip 0 clears it: the proxy then answers SERVFAIL */
+    svc->up_ip = ip;
+    svc->up_port = port;
+    svc->up_set = ip != 0;   /* ip 0 clears it: the proxy then answers SERVFAIL */
 }
 
 /* --- lifecycle ------------------------------------------------------------ */
 
-void tapsvc_start(struct tap *t)
+struct tapsvc *tapsvc_start(struct tap *t)
 {
     struct netif *nif = tap_netif(t);
-    arch_irq_state_t st = spin_lock_irqsave(&g_svc_lock);
-    if (g_svc.tap != NULL) {          /* one instance at a time */
-        spin_unlock_irqrestore(&g_svc_lock, st);
-        return;
-    }
-    memset(&g_svc, 0, sizeof(g_svc));
-    g_svc.tap = t;
-    g_svc.nif = nif;
-    g_svc.gateway = nif->ip4.addr;
-    g_svc.mask = nif->ip4.mask;
-    g_svc.guest = (nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST);
-    spin_unlock_irqrestore(&g_svc_lock, st);
+    struct tapsvc *svc = kmalloc(sizeof(*svc), KMEM_ZERO);
+    if (svc == NULL)
+        return NULL;
+    spinlock_init(&svc->lock, "tapsvc");
+    spinlock_init(&svc->dns_lock, "tapsvc-dns");
+    svc->tap = t;
+    svc->nif = nif;
+    svc->gateway = nif->ip4.addr;
+    svc->mask = nif->ip4.mask;
+    svc->guest = (nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST);
 
-    tap_set_input_filter(t, dhcp_filter, &g_svc);
-    dns_start(&g_svc);
-    char pf[128];
-    if (fwcfg_get_string("portforward", pf, sizeof(pf)))
-        nat_portforward_config(pf);   /* inbound port-forward (DNAT) rules */
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    int slot = -1;
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i] == NULL) { slot = (int)i; break; }
+    if (slot >= 0)
+        g_svcs[slot] = svc;
+    spin_unlock_irqrestore(&g_svcs_lock, s);
+    if (slot < 0) {                   /* more instances than taps can exist */
+        kfree(svc);
+        return NULL;
+    }
+
+    tap_set_input_filter(t, dhcp_filter, svc);
+    dns_start(svc);
     kinfo("tapsvc: DHCP up on %s (gateway %u.%u.%u.%u, guest .%u)", nif->name,
-          (ntohl(g_svc.gateway) >> 24) & 0xff, (ntohl(g_svc.gateway) >> 16) & 0xff,
-          (ntohl(g_svc.gateway) >> 8) & 0xff, ntohl(g_svc.gateway) & 0xff, TAPSVC_GUEST_HOST);
+          (ntohl(svc->gateway) >> 24) & 0xff, (ntohl(svc->gateway) >> 16) & 0xff,
+          (ntohl(svc->gateway) >> 8) & 0xff, ntohl(svc->gateway) & 0xff, TAPSVC_GUEST_HOST);
+    return svc;
 }
 
-void tapsvc_stop(void)
+/* Stop the service (the DHCP filter first so no reply is built for a tap
+ * about to go, then the DNS threads joined before their sockets drop) and
+ * free it. The caller destroys the tap afterwards. */
+void tapsvc_stop(struct tapsvc *svc)
 {
-    arch_irq_state_t st = spin_lock_irqsave(&g_svc_lock);
-    struct tap *t = g_svc.tap;
-    g_svc.tap = NULL;
-    spin_unlock_irqrestore(&g_svc_lock, st);
-    if (t != NULL)
-        tap_set_input_filter(t, NULL, NULL);
-    dns_stop();
+    if (svc == NULL)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    for (unsigned i = 0; i < TAPSVC_MAX; i++)
+        if (g_svcs[i] == svc) { g_svcs[i] = NULL; break; }
+    spin_unlock_irqrestore(&g_svcs_lock, s);
+    tap_set_input_filter(svc->tap, NULL, NULL);
+    dns_stop(svc);
+    kfree(svc);
 }
 
 void tapsvc_get_stats(struct tapsvc_stats *out)
@@ -540,10 +562,16 @@ void tapsvc_get_stats(struct tapsvc_stats *out)
     *out = g_stats;
     uint32_t live = 0;
     uint64_t now = clock_now_ns();
-    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
-    for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
-        if (g_dns_tab[i].in_use && now < g_dns_tab[i].expires_ns)
-            live++;
-    spin_unlock_irqrestore(&g_dns_lock, s);
+    arch_irq_state_t s = spin_lock_irqsave(&g_svcs_lock);
+    for (unsigned k = 0; k < TAPSVC_MAX; k++) {
+        struct tapsvc *svc = g_svcs[k];
+        if (svc == NULL) continue;
+        arch_irq_state_t d = spin_lock_irqsave(&svc->dns_lock);
+        for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
+            if (svc->dns_tab[i].in_use && now < svc->dns_tab[i].expires_ns)
+                live++;
+        spin_unlock_irqrestore(&svc->dns_lock, d);
+    }
+    spin_unlock_irqrestore(&g_svcs_lock, s);
     out->dns_pending = live;
 }

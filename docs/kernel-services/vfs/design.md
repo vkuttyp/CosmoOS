@@ -396,6 +396,22 @@ max); `open` installs the file with `HANDLE_RIGHT_READ`/`WRITE` from the
 access mode, so `read`/`write`/`close` need no change. `mount` names a
 block device (`vda`) and requires uid 0.
 
+## Per-open character devices
+
+A character device may keep state per open, not just per node: `chrdev_ops`
+(and the underlying `vnode_ops`) carry optional `open`, `release`,
+`read_file` and `write_file`. `open` runs on each open of the node and may
+refuse (`-EBUSY`, `-ENOSPC`); it sets `struct file`'s `priv` to the device's
+per-open instance. `read_file`/`write_file`, preferred over `read`/`write` by
+`file_pread`/`pwrite`, carry the `struct file` so the device reaches `priv`.
+`release` runs exactly once, when the last reference to that `struct file`
+drops — the file is a `kobject`, so "last close" is a defined moment. A
+refused `open` drops the file without running `release` (the `dev_open` flag
+gates it), since `open` never succeeded. The invariant: a device's per-open
+state lives and dies with its `struct file`, never with the vnode. Devices
+that set none of the hooks (console, tty, `/dev/vmm`) behave exactly as
+before; `/dev/net/tap` uses them to give each opener its own tap.
+
 ## Ownership and lifetime
 
 Mounts hold their root and mountpoint; a mount is freed at `umount`

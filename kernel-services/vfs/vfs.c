@@ -854,6 +854,8 @@ int vfs_lookup(struct vnode *start, const char *path, struct vnode **out)
 static void file_release(struct kobject *obj)
 {
     struct file *f = container_of(obj, struct file, obj);
+    if (f->dev_open && f->vn->ops->release)
+        f->vn->ops->release(f->vn, f);   /* once, on the last reference */
     if (f->vn->type == VNODE_REG && f->vn->pc.nr_dirty && f->vn->ops->writepage) {
         mutex_lock(&f->vn->lock);
         pagecache_sync(f->vn);
@@ -882,6 +884,23 @@ static const struct kobject_io_type file_type = {
 struct file *file_from_kobject(struct kobject *obj)
 {
     return obj->type == &file_type.base ? container_of(obj, struct file, obj) : NULL;
+}
+
+/* Run the vnode's per-open hook, if any. On refusal the file is dropped
+ * (its release hook does not run, since open never succeeded) and the
+ * caller's vnode reference goes with it. */
+static int file_run_open(struct file *f)
+{
+    struct vnode *vn = f->vn;
+    if (vn->ops->open == NULL)
+        return 0;
+    int rc = vn->ops->open(vn, f);
+    if (rc != 0) {
+        file_put(f);
+        return rc;
+    }
+    f->dev_open = true;
+    return 0;
 }
 
 static struct file *file_alloc(struct vnode *vn, unsigned flags)
@@ -1002,6 +1021,9 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         vnode_put(vn);
         return -ENOMEM;
     }
+    int orc = file_run_open(f);
+    if (orc != 0)
+        return orc;
     *out = f;
     return 0;
 }
@@ -1013,6 +1035,9 @@ int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)
         vnode_put(vn);
         return -ENOMEM;
     }
+    int orc = file_run_open(f);
+    if (orc != 0)
+        return orc;
     *out = f;
     return 0;
 }
@@ -1029,7 +1054,8 @@ int64_t file_pread(struct file *f, void *buf, size_t len, uint64_t off)
     int64_t n;
     mutex_lock(&vn->lock);
     if (vn->type == VNODE_CHR)
-        n = vn->ops->read ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
+        n = vn->ops->read_file ? vn->ops->read_file(vn, f, off, buf, len)
+          : vn->ops->read      ? vn->ops->read(vn, off, buf, len) : -ENOTSUP;
     else
         n = pagecache_read(vn, off, buf, len);
     mutex_unlock(&vn->lock);
@@ -1050,7 +1076,8 @@ int64_t file_pwrite(struct file *f, const void *buf, size_t len, uint64_t off)
     int64_t n;
     mutex_lock(&vn->lock);
     if (vn->type == VNODE_CHR) {
-        n = vn->ops->write ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
+        n = vn->ops->write_file ? vn->ops->write_file(vn, f, off, buf, len)
+          : vn->ops->write      ? vn->ops->write(vn, off, buf, len) : -ENOTSUP;
     } else {
         n = pagecache_write(vn, off, buf, len);
         if (n > 0)

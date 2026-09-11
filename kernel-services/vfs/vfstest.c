@@ -781,3 +781,80 @@ bool selftest_vfs_put_race(const char **reason)
     kinfo("selftest: vfs-put-race: %u rounds of %u concurrent last drops, every vnode released once", round, racers);
     return true;
 }
+
+
+/* --- per-open character device lifecycle (chrdev open/release) ------------ */
+
+struct chropen_inst { unsigned id; };
+static unsigned g_chropen_opens, g_chropen_releases, g_chropen_refuse;
+
+static int chropen_open(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    if (g_chropen_refuse)
+        return -EBUSY;
+    struct chropen_inst *i = kmalloc(sizeof(*i), 0);
+    if (i == NULL)
+        return -ENOMEM;
+    i->id = ++g_chropen_opens;
+    f->priv = i;
+    return 0;
+}
+
+static void chropen_release(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    g_chropen_releases++;
+    kfree(f->priv);
+    f->priv = NULL;
+}
+
+/* read returns this open's id, so two files prove they carry distinct state */
+static int64_t chropen_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
+{
+    (void)vn; (void)off;
+    struct chropen_inst *i = f->priv;
+    if (len < sizeof(unsigned))
+        return -EMSGSIZE;
+    memcpy(buf, &i->id, sizeof(unsigned));
+    return (int64_t)sizeof(unsigned);
+}
+
+static const struct chrdev_ops chropen_ops = {
+    .open = chropen_open, .release = chropen_release, .read_file = chropen_read_file,
+};
+
+bool selftest_vfs_chrdev_open(const char **reason)
+{
+    struct vnode *node = NULL;
+    CHECK(ramfs_mkchr("/dev/chropen-test", 0600, &chropen_ops, NULL, &node) == 0);
+    g_chropen_opens = g_chropen_releases = 0; g_chropen_refuse = 0;
+
+    /* (1) two opens: two instances with distinct state, each read sees its own */
+    struct file *a = NULL, *b = NULL;
+    CHECK(vfs_open(NULL, "/dev/chropen-test", COSMO_O_RDWR, 0, &a) == 0 && a != NULL);
+    CHECK(vfs_open(NULL, "/dev/chropen-test", COSMO_O_RDWR, 0, &b) == 0 && b != NULL);
+    CHECK(g_chropen_opens == 2 && a->priv != b->priv);
+    unsigned ida = 0, idb = 0;
+    CHECK(file_read(a, &ida, sizeof(ida)) == (int64_t)sizeof(ida) && ida == 1);
+    CHECK(file_read(b, &idb, sizeof(idb)) == (int64_t)sizeof(idb) && idb == 2);
+
+    /* (2) release runs exactly once, on the last reference, and not before */
+    file_get(a);                                  /* a second reference */
+    file_put(a);
+    CHECK(g_chropen_releases == 0);               /* not the last one yet */
+    file_put(a);
+    CHECK(g_chropen_releases == 1);               /* now */
+    file_put(b);
+    CHECK(g_chropen_releases == 2);
+
+    /* (3) a refused open leaves no file and runs no release */
+    g_chropen_refuse = 1;
+    struct file *c = NULL;
+    CHECK(vfs_open(NULL, "/dev/chropen-test", COSMO_O_RDWR, 0, &c) == -EBUSY && c == NULL);
+    CHECK(g_chropen_opens == 2 && g_chropen_releases == 2);
+    g_chropen_refuse = 0;
+
+    kinfo("selftest: vfs-chrdev-open: per-open instances distinct, release once on last close, refusal clean");
+    return true;
+}

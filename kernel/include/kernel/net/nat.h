@@ -38,11 +38,17 @@ struct ipv4_hdr;
 #define NAT_TIMEOUT_TCPEST_NS (300ull * 1000000000ull)  /* once both sides have been seen */
 
 #define NAT_PF_MAX 16u             /* static port-forward (DNAT) rules */
+#define NAT_GUESTS 8u              /* max concurrent guests (mirrors tap.c TAP_MAX_GUESTS) */
+#define NAT_QUOTA_PER_GUEST (NAT_TABLE_SIZE / NAT_GUESTS)  /* one guest's share of the table */
 
 /* Configure the port-forward table from a fw_cfg string: a comma-separated
  * list of `proto:hostport:guestaddr:guestport` (proto tcp|udp), a wildcard
  * host-address bind. Replaces the table; ignores malformed rules. */
 void nat_portforward_config(const char *cfg);
+/* The same parse, but adds to the table without clearing it (a rule already
+ * bound, or targeting a tap that is not up, is skipped); for applying the
+ * boot-time rules as each guest's tap appears. */
+void nat_portforward_apply(const char *cfg);
 /* Add one rule (proto IPPROTO_TCP/UDP, ports host order, guest_ip network
  * order). 0 on success; -EINVAL (invalid fields or the target is not on the
  * guest tap's subnet), -EEXIST (already bound), -ENOSPC (table full). */
@@ -60,6 +66,13 @@ struct nat_pf_rule {              /* one port-forward rule, for listing */
 };
 /* Snapshot the live rules into out[0..max); returns the count written. */
 unsigned nat_pf_list(struct nat_pf_rule *out, unsigned max);
+
+/* Remove every port-forward rule whose target is `guest_ip` and every
+ * conntrack entry (masquerade or DNAT) whose guest side is that address, and
+ * nothing else -- called when a guest departs, before its subnet is reused,
+ * so a later guest handed the same address inherits no stale flows or rules.
+ * Other guests' state is untouched. */
+void nat_guest_purge(uint32_t guest_ip);
 
 /*
  * Outbound: masquerade a datagram being forwarded from `in` out `out`.

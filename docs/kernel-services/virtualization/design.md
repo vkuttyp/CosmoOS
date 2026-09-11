@@ -790,15 +790,19 @@ The owner reaches the tap through **`/dev/net/tap`**, a character device
 (as `/dev/vmm` is): `read` returns one frame the stack transmitted out the
 tap (0 when none waits, a frame never being zero-length, so the owner polls
 it in its run loop as it drains the console), `write` injects one from the
-guest. It is backed by one `tap0`, created down at boot and brought up when
-the owner first uses it; a tap is marked never-default (`NETIF_NODEFAULT`),
-so even left up -- there is no close hook to bring it down again -- it is
-never the machine's route to the world and cannot swallow the host's
-outbound traffic. The tap sits on `10.0.3.0/24`, a subnet of its own (a NIC
-autoconfigures to `10.0.2.0/24`, and two interfaces on one subnet route
-ambiguously). A
-per-open create/destroy lifecycle would need chrdev open/close hooks the
-ramfs does not have, so one persistent `tap0` serves one guest.
+guest. Each open of `/dev/net/tap` is one guest: the open hook creates a tap
+of its own from a pool (`tap<k>` on `10.0.(3+k).0/24`, up to
+`TAP_MAX_GUESTS`; the ninth concurrent open gets `-ENOSPC`), and the release
+hook on the last close tears it down -- these are the per-open chrdev hooks
+the VFS now carries (`docs/kernel-services/vfs/design.md`, "Per-open
+character devices"), so no persistent `tap0` is created at boot. A tap is
+marked never-default (`NETIF_NODEFAULT`), so it is never the machine's route
+to the world and cannot swallow the host's outbound traffic. Each tap sits
+on a subnet of its own (a NIC autoconfigures to `10.0.2.0/24`, and two
+interfaces on one subnet route ambiguously), with the host at `.1` and the
+guest at `.15`. See `docs/kernel-services/network/design.md`, "Many guests:
+a tap per open", for the pool, the per-guest DHCP/DNS and NAT share, and the
+teardown order.
 
 `vmctl --net tap` points the virtio-net device's wire at the channel --
 `wire_tx` writes it, the run loop polls `read` into `wire_rx` -- the device
@@ -808,10 +812,12 @@ capped) and `el2-tap-host` (a guest's ARP request crossing virtio-net and
 the bridge into the real stack, which answers on the tap). A stock Linux
 bringing `eth0` up on `10.0.3.15` and reaching the host is the
 `QEMU_MEM=2G` reproduction. Reaching *beyond* the host is done:
-`tap0` turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when an owner first
-uses the channel, so a forwarded guest flow is routed out the host's real
-interface with its source NAT'd and the reply rewritten back
-(`docs/kernel-services/network/design.md`, "Forwarding and NAT"). DHCP and a DNS proxy autoconfigure the guest (`tapsvc.c`,
+Each tap turns on `NETIF_FORWARD` and `NETIF_MASQUERADE` when its owner opens
+the channel, so a forwarded guest flow bound for the uplink is routed out the
+host's real interface with its source NAT'd and the reply rewritten back;
+masquerade is uplink-only, so a flow between two guests' taps is routed
+un-translated (`docs/kernel-services/network/design.md`, "Forwarding and NAT"
+and "Many guests: a tap per open"). DHCP and a DNS proxy autoconfigure the guest (`tapsvc.c`,
 `docs/kernel-services/network/design.md`, "Autoconfiguring the guest"),
 started on the same VM-attach signal: a stock guest with its DHCP client on
 learns its address, gateway and resolver from the host and resolves names.

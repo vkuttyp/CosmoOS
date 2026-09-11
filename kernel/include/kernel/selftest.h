@@ -71,7 +71,8 @@ bool selftest_lockdep_sleep(const char **reason);
 bool selftest_lockdep_mutex(const char **reason);
 bool selftest_lockdep_contention(const char **reason);
 bool selftest_vfs_concurrency(const char **reason);
-bool selftest_vfs_put_race(const char **reason);   /* the last references of one vnode dropped from every CPU at once */
+bool selftest_vfs_put_race(const char **reason);
+bool selftest_vfs_chrdev_open(const char **reason);   /* chrdev per-open instances: open/release/read_file */   /* the last references of one vnode dropped from every CPU at once */
 bool selftest_mountns(const char **reason);
 bool selftest_utsns(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
@@ -191,6 +192,7 @@ bool selftest_net_dhcp(const char **reason);
 bool selftest_net_dns(const char **reason);
 bool selftest_net_dnat(const char **reason);
 bool selftest_net_tapctl(const char **reason);
+bool selftest_net_multiguest(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);

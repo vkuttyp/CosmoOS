@@ -7,8 +7,8 @@
  * has no address yet and the tap is NETIF_NODEFAULT, so routing cannot carry
  * the reply. DNS is an ordinary in-kernel UDP relay on the gateway address.
  *
- * One instance at a time (one guest, one tap): tapsvc_start binds it to a
- * tap, tapsvc_stop tears it down. tap0 starts it when the VM attaches.
+ * One instance per tap: /dev/net/tap starts one for each owner's tap on
+ * open and stops it on the last close.
  */
 #ifndef KERNEL_NET_TAPSVC_H
 #define KERNEL_NET_TAPSVC_H
@@ -30,8 +30,13 @@ struct tap;
 #define DHCP_NAK      6
 #define DHCP_RELEASE  7
 
-void tapsvc_start(struct tap *t);      /* register the DHCP filter, start the DNS proxy */
-void tapsvc_stop(void);                /* tear both down (idempotent) */
+struct tapsvc;
+/* Start a service instance for this tap (its DHCP binding and DNS proxy);
+ * NULL on no memory or too many instances. The caller keeps the pointer. */
+struct tapsvc *tapsvc_start(struct tap *t);
+/* Stop and free it: the DHCP filter is dropped and the DNS threads joined
+ * before their sockets go. Call before destroying the tap. NULL is a no-op. */
+void tapsvc_stop(struct tapsvc *svc);
 
 struct tapsvc_stats {
     uint64_t dhcp_discover, dhcp_offer, dhcp_request, dhcp_ack, dhcp_nak, dhcp_release;
@@ -45,6 +50,6 @@ void tapsvc_get_stats(struct tapsvc_stats *out);
  * from periodic aging; tests drive it with a future timestamp). */
 void tapsvc_dns_age(uint64_t now_ns);
 /* Test hook: point the DNS proxy at a chosen upstream (ip/port network+host). */
-void tapsvc_test_set_upstream(uint32_t ip, uint16_t port);
+void tapsvc_test_set_upstream(struct tapsvc *svc, uint32_t ip, uint16_t port);
 
 #endif /* KERNEL_NET_TAPSVC_H */
