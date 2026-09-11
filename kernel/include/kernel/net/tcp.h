@@ -195,6 +195,7 @@ struct tcp_stats {
         conns_established, dropped_no_pcb, out_of_order, timeouts;
     uint64_t syn_cached, syn_cookies_sent, syn_cookies_ok, syn_bad_ack, challenge_acks, ooo_queued, ooo_dropped,
         keepalive_probes, fin_wait2_timeouts, pmtu_updates;
+    uint64_t quiet_dropped;   /* M_FW_QUIET segments no connection accepted: freed, nothing sent */
 };
 void tcp_get_stats(struct tcp_stats *out);
 const char *tcp_state_name(enum tcp_state s);

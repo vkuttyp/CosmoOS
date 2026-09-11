@@ -43,9 +43,11 @@ static int usage(void)
                     "[--append CMDLINE] IMAGE\n"
                     "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n"
                     "       vmctl filter add|del GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]\n"
-                    "                    | policy GUESTADDR DIR VERDICT | list\n"
+                    "                    | add|del host world PROTO SRC[/PREFIX] DST[/PREFIX] PORT VERDICT [INDEX]\n"
+                    "                    | policy GUESTADDR DIR VERDICT | policy host world VERDICT | list\n"
                     "         DIR any(=uplink+guest, never host)|uplink|guest|host  PROTO any|icmp|tcp|udp\n"
-                    "         DST addr[/prefix]|any  PORT n|any (icmp: type 0-255|echo-request|echo-reply|any)  VERDICT accept|drop\n");
+                    "         SRC (host rules only) addr[/prefix]|any  DST addr[/prefix]|any\n"
+                    "         PORT n|any (icmp: type 0-255|echo-request|echo-reply|any)  VERDICT accept|drop\n");
     return 2;
 }
 
@@ -951,8 +953,18 @@ static int fw_dir(const char *s, uint8_t *out)
     else if (strcmp(s, "uplink") == 0) *out = COSMO_NETCTL_DIR_TO_UPLINK;
     else if (strcmp(s, "guest") == 0)  *out = COSMO_NETCTL_DIR_TO_GUEST;
     else if (strcmp(s, "host") == 0)   *out = COSMO_NETCTL_DIR_TO_HOST;
+    else if (strcmp(s, "world") == 0)  *out = COSMO_NETCTL_DIR_FROM_UPLINK;   /* the host chain: the world -> the host */
     else return -1;
     return 0;
+}
+
+/* The policy object a filter command names: a guest by address, or the host
+ * itself by the word `host` (COSMO_NETCTL_HOST_ADDR -- the one address no
+ * guest can have). */
+static int fw_guest(const char *s, uint32_t *out)
+{
+    if (strcmp(s, "host") == 0) { *out = COSMO_NETCTL_HOST_ADDR; return 0; }
+    return inet_pton(AF_INET, s, out) == 1 ? 0 : -1;
 }
 
 static int fw_proto(const char *s, uint8_t *out)
@@ -997,7 +1009,7 @@ static int fw_dst(const char *s, uint32_t *addr, uint8_t *prefix)
 static const char *fw_dir_name(uint8_t d)
 {
     return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" :
-           d == COSMO_NETCTL_DIR_TO_HOST ? "host" : "any";
+           d == COSMO_NETCTL_DIR_TO_HOST ? "host" : d == COSMO_NETCTL_DIR_FROM_UPLINK ? "world" : "any";
 }
 static const char *fw_proto_name(uint8_t p)
 {
@@ -1010,11 +1022,15 @@ static const char *fw_verdict_name(uint8_t v)
 }
 
 /* vmctl filter add    GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]
- *              del    GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT
- *              policy GUESTADDR DIR VERDICT
+ *              add    host world PROTO SRC[/PREFIX] DST[/PREFIX] PORT VERDICT [INDEX]
+ *              del    (the same tuple as add)
+ *              policy GUESTADDR DIR VERDICT | policy host world VERDICT
  *              list
  * A rule is named by its whole tuple (there is no id to return through a
- * write); `del` gives the tuple `add` installed. Over /dev/net/tapctl. */
+ * write); `del` gives the tuple `add` installed. The host's rules (`host`,
+ * direction `world`: what the uplink may ask of the host) are the only ones
+ * with a SRC argument -- a guest's source is the guest, and its command
+ * writes 0/0 there. Over /dev/net/tapctl. */
 static int filter(int argc, char **argv)
 {
     if (argc < 1)
@@ -1025,6 +1041,7 @@ static int filter(int argc, char **argv)
         return 1;
     }
     int rc = 1;
+    const char *verb = argv[0];
     if (strcmp(argv[0], "list") == 0) {
         /* Sized to the ABI's maximum snapshot, so every configuration the
          * control plane lets an operator install can also be listed. */
@@ -1058,6 +1075,10 @@ static int filter(int argc, char **argv)
         for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
             struct cosmo_netctl_filter_guest fg;
             memcpy(&fg, buf + off, sizeof(fg));
+            if (fg.guest_addr == COSMO_NETCTL_HOST_ADDR) {   /* the host's record: its one direction */
+                printf("host policy: world %s\n", fw_verdict_name(fg.policy_from_uplink));
+                continue;
+            }
             char ip[16];
             inet_ntop(AF_INET, &fg.guest_addr, ip, sizeof(ip));
             printf("%s policy: uplink %s, guest %s, host %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
@@ -1066,9 +1087,16 @@ static int filter(int argc, char **argv)
         for (unsigned i = 0; i < fh.rule_count; i++, off += sizeof(struct cosmo_netctl_filter_rule)) {
             struct cosmo_netctl_filter_rule fr;
             memcpy(&fr, buf + off, sizeof(fr));
-            char ip[16], dst[16];
-            inet_ntop(AF_INET, &fr.guest_addr, ip, sizeof(ip));
+            char ip[16], dst[16], src[16], from[40] = "";
+            if (fr.guest_addr == COSMO_NETCTL_HOST_ADDR)
+                strcpy(ip, "host");
+            else
+                inet_ntop(AF_INET, &fr.guest_addr, ip, sizeof(ip));
             inet_ntop(AF_INET, &fr.dst_addr, dst, sizeof(dst));
+            if (fr.guest_addr == COSMO_NETCTL_HOST_ADDR) {   /* only a host rule has a source */
+                inet_ntop(AF_INET, &fr.src_addr, src, sizeof(src));
+                snprintf(from, sizeof(from), "from %s/%u ", fr.src_prefix ? src : "any", fr.src_prefix);
+            }
             /* The selector prints in its protocol's terms: a port, or an ICMP type. */
             char sel[16];
             if (fr.proto == COSMO_NETCTL_PROTO_ICMP) {
@@ -1081,8 +1109,8 @@ static int filter(int argc, char **argv)
             } else {
                 snprintf(sel, sizeof(sel), "%u", fr.dst_port);
             }
-            printf("%s [%u] %s %s %s/%u %s %s\n", ip, fr.index, fw_dir_name(fr.direction),
-                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, sel,
+            printf("%s [%u] %s %s %s%s/%u %s %s\n", ip, fr.index, fw_dir_name(fr.direction),
+                   fw_proto_name(fr.proto), from, fr.dst_prefix ? dst : "any", fr.dst_prefix, sel,
                    fw_verdict_name(fr.verdict));
         }
         rc = 0;
@@ -1093,19 +1121,28 @@ static int filter(int argc, char **argv)
     memset(&c, 0, sizeof(c));
     c.version = COSMO_NETCTL_VERSION;
     if (strcmp(argv[0], "policy") == 0) {
-        if (argc != 4 || inet_pton(AF_INET, argv[1], &c.guest_addr) != 1 || fw_dir(argv[2], &c.direction) != 0 ||
+        if (argc != 4 || fw_guest(argv[1], &c.guest_addr) != 0 || fw_dir(argv[2], &c.direction) != 0 ||
             c.direction == COSMO_NETCTL_DIR_ANY || fw_verdict(argv[3], &c.verdict) != 0) {
             usage(); goto out;
         }
         c.op = COSMO_NETCTL_FILTER_POLICY;
     } else if (strcmp(argv[0], "add") == 0 || strcmp(argv[0], "del") == 0) {
         int add = argv[0][0] == 'a';
-        if (argc != 7 && !(add && argc == 8)) { usage(); goto out; }
-        if (inet_pton(AF_INET, argv[1], &c.guest_addr) != 1 || fw_dir(argv[2], &c.direction) != 0 ||
-            fw_proto(argv[3], &c.proto) != 0 || fw_dst(argv[4], &c.dst_addr, &c.dst_prefix) != 0 ||
-            fw_verdict(argv[6], &c.verdict) != 0) {
+        if (argc < 2 || fw_guest(argv[1], &c.guest_addr) != 0) { usage(); goto out; }
+        /* A host rule carries one more argument, its source, before the
+         * destination; the rest of the tuple is in the same order after it. */
+        int host = c.guest_addr == COSMO_NETCTL_HOST_ADDR;
+        int tuple = host ? 8 : 7;
+        if (argc != tuple && !(add && argc == tuple + 1)) { usage(); goto out; }
+        if (host && fw_dst(argv[4], &c.src_addr, &c.src_prefix) != 0) { usage(); goto out; }
+        char **rest = argv + (host ? 1 : 0);   /* rest[4] = DST, rest[5] = PORT, rest[6] = VERDICT, rest[7] = INDEX */
+        if (fw_dir(argv[2], &c.direction) != 0 ||
+            fw_proto(argv[3], &c.proto) != 0 || fw_dst(rest[4], &c.dst_addr, &c.dst_prefix) != 0 ||
+            fw_verdict(rest[6], &c.verdict) != 0) {
             usage(); goto out;
         }
+        argv = rest;   /* the selector and index read from the same positions for both shapes */
+        argc = tuple == 8 ? argc - 1 : argc;
         /* The transport selector follows the protocol: a port for tcp/udp/any,
          * an ICMP type (a number, echo-request or echo-reply) for icmp; `any`
          * is the wildcard in the protocol's own encoding -- 0 for a port,
@@ -1135,7 +1172,7 @@ static int filter(int argc, char **argv)
         goto out;
     }
     if (write(fd, &c, sizeof(c)) != (int64_t)sizeof(c)) {
-        fprintf(stderr, "vmctl: filter %s failed: %s\n", argv[0], strerror(errno));
+        fprintf(stderr, "vmctl: filter %s failed: %s\n", verb, strerror(errno));
         goto out;
     }
     rc = 0;

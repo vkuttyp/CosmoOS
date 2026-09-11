@@ -592,6 +592,23 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
     if (bcast)
         m->flags |= M_BCAST;
 
+    /* The off-link invariant: a datagram arriving on a link is for an address
+     * *on that link* -- the ingress interface's own, or a broadcast. Every
+     * other locally-owned destination is off-link and dropped here, before
+     * NAT and before either chain: an uplink datagram to a guest's gateway
+     * (the tap's DNS proxy, an open resolver from the real network), an
+     * uplink datagram to 127/8 (a loopback binding means "local callers
+     * only"; the martian check above looks only at the source), a guest's
+     * datagram to 127/8 or to another interface's address. A fact of the
+     * topology, not a policy: no rule can reopen it. Loopback ingress is the
+     * host talking to itself and is exempt; masqueraded replies and DNAT are
+     * addressed to the uplink's own address and are on link. */
+    if (!bcast && !(nif->flags & NETIF_LOOPBACK) && iph->dst != nif->ip4.addr) {
+        STAT(rx_offlink);
+        m_freem(m);
+        return;
+    }
+
     /* A datagram addressed to one of our own addresses may be the reply to a
      * masqueraded guest flow (or an ICMP error quoting one): nat_in rewrites
      * it back and forwards it to the guest. Non-NAT traffic falls through to
@@ -603,12 +620,31 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * -- unicast to one of our addresses that nat_in did not claim, or a
      * broadcast -- gets a verdict before any host service sees it: the
      * anti-spoof first (the source must be the tap's guest), then the
-     * guest's TO_HOST rules and default. Loopback and the uplink are not
-     * guests and are not consulted; that host-scoped chain is a later unit. */
+     * guest's TO_HOST rules and default. Loopback is not consulted. */
     if ((nif->flags & NETIF_MASQUERADE) && fw_input_verdict(nif, m, iph, ihl) == FW_DROP) {
         STAT(in_filtered);
         m_freem(m);
         return;
+    }
+
+    /* The host chain: a real, non-guest link (the uplink) delivering to the
+     * host itself, at the same point -- after nat_in has declined, so a
+     * DNAT'd connection or a masqueraded reply is never re-gated -- and
+     * before any host service sees it. A DROP is quiet: a TCP or UDP datagram
+     * is not freed but marked M_FW_QUIET and delivered, and the transport,
+     * which owns acceptability, admits it only into an existing connection
+     * or a connected socket and answers nothing else -- no SYN-ACK, RST,
+     * challenge or window ACK, no port-unreachable -- so the firewall never
+     * models TCP state and a DROP means silence. Anything else is freed. */
+    if (!(nif->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) && fw_host_verdict(nif, m, iph, ihl) == FW_DROP) {
+        if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP) {
+            m->flags |= M_FW_QUIET;
+            STAT(hin_quiet);
+        } else {
+            STAT(hin_filtered);
+            m_freem(m);
+            return;
+        }
     }
 
     /* Trim link padding, drop the header, deliver. The whole header,

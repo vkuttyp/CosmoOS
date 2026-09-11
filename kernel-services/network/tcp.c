@@ -57,13 +57,20 @@ static unsigned g_chal_count;
 #define WORK_TIMEWAIT (1u << 2)
 #define WORK_KEEP     (1u << 3)
 
-/* Segments built under a lock, sent after it. */
+/* Segments built under a lock, sent after it. `quiet` is the host firewall's
+ * verdict riding on the segment being processed (M_FW_QUIET): set when
+ * tcp_input begins on such a segment and cleared only where the segment is
+ * *accepted* by an existing connection; batch_send, the sole emitter, frees a
+ * still-quiet batch instead of transmitting it, so every response a rejected
+ * segment queued -- SYN-ACK, RST, challenge ACK, window ACK -- is silenced by
+ * one gate, whichever flush it reaches. */
 struct tcp_batch {
     struct {
         struct mbuf *m;
         struct netaddr src, dst;
     } seg[16];
     unsigned n;
+    bool quiet;
 };
 
 static uint16_t family_mss(uint16_t family)
@@ -669,17 +676,29 @@ static bool challenge_allowed(void)
     return ok;
 }
 
-/* pcb lock held. */
+/* pcb lock held. A quiet batch consults nothing: the host-wide budget is
+ * consumed only for a challenge that will be sent, so a burst of rejected
+ * probes cannot starve a legitimate connection's challenge ACKs. */
 static void challenge_ack(struct tcp_pcb *pcb, struct tcp_batch *b)
 {
+    if (b->quiet)
+        return;
     STAT(challenge_acks);
     if (challenge_allowed())
         build_segment(pcb, b, TH_ACK, pcb->snd_nxt, 0, false);
 }
 
-/* No lock. */
+/* No lock. The only place tcp.c transmits: a quiet batch -- a segment no
+ * connection accepted -- is freed here, whatever it queued, and counted. */
 static void batch_send(struct tcp_batch *b)
 {
+    if (b->quiet) {
+        for (unsigned i = 0; i < b->n; i++)
+            m_freem(b->seg[i].m);
+        b->n = 0;
+        STAT(quiet_dropped);
+        return;
+    }
     for (unsigned i = 0; i < b->n; i++) {
         struct mbuf *m = b->seg[i].m;
         if (b->seg[i].src.family == COSMO_AF_INET)
@@ -1505,6 +1524,8 @@ static struct tcp_pcb *listen_input(struct tcp_pcb *l, struct seg *g, struct tcp
     }
     if (!(flags & TH_SYN))
         return NULL;
+    if (b->quiet)
+        return NULL;   /* a new connection the host firewall refused: no SYN-cache entry, no answer */
 
     /* A SYN: remember it, or answer statelessly. */
     uint16_t path_mss = g->via_lo ? TCP_MSS_LO : family_mss(local->family);
@@ -1540,6 +1561,13 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
      * connection it opens is a local one: the MSS cap is decided from the
      * interface here, never by a registry lookup under a lock. */
     g.via_lo = (nif->flags & NETIF_LOOPBACK) != 0;
+    /* The host firewall's DROP rides on the segment (M_FW_QUIET): from here
+     * the segment is on probation -- processed by every check below exactly
+     * as any other, but *rejected* silently (batch_send frees whatever it
+     * queued) and with no side effect, until an existing connection accepts
+     * it. The acceptance points, each a path that queues output or mutates
+     * state on its own, clear b.quiet and nothing else does. */
+    bool quiet = (m->flags & M_FW_QUIET) != 0;
     STAT(segs_in);
     uint32_t len = m->pkt.len;
     if (len < sizeof(struct tcp_hdr)) {
@@ -1596,7 +1624,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     uint8_t flags = g.flags;
     uint16_t win = g.win;
 
-    struct tcp_batch b = { .n = 0 };
+    struct tcp_batch b = { .n = 0, .quiet = quiet };
     struct socket *wake = NULL, *wake_listener = NULL;
     bool killed = false;
 
@@ -1632,6 +1660,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         pcb = child;
         s = spin_lock_irqsave(&pcb->lock);
         pcb->segs_in++;
+        b.quiet = false;   /* accepted: the SYN-cache completion of a SYN admitted earlier */
         /* The completing ACK is processed below as an ordinary segment of
          * the new connection (it may carry data). */
     }
@@ -1646,6 +1675,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         if (flags & TH_RST) {
             if (flags & TH_ACK) {
+                b.quiet = false;   /* accepted: a valid reset of the host's own open (emits nothing) */
                 STAT(rsts_in);
                 pcb->error = -ECONNREFUSED;
                 wake = sock_ref(pcb);
@@ -1655,6 +1685,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         if (!(flags & TH_SYN))
             goto out;
+        b.quiet = false;   /* accepted: the peer's SYN(+ACK) completes the host's own open */
         pcb->irs = seq;
         pcb->rcv_nxt = seq + 1;
         pcb->mss = parse_mss(g.opts, g.optlen, pcb->mss);
@@ -1681,7 +1712,9 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
 
     /* --- synchronized states --- */
     uint64_t now = clock_now_ns();
-    pcb->last_rx_ns = now;   /* the peer is alive, whatever it sent */
+    if (!b.quiet)
+        pcb->last_rx_ns = now;   /* the peer is alive, whatever it sent -- unless the segment is on
+                                  * probation: then only an accepted one says so (below) */
 
     if (pcb->state == TCP_TIME_WAIT) {
         if (flags & TH_RST)
@@ -1692,6 +1725,8 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         }
         /* Only a retransmitted FIN is acknowledged and restarts 2 MSL. */
         if ((flags & TH_FIN) && seq + seglen + 1 == pcb->rcv_nxt) {
+            b.quiet = false;   /* accepted: an exact-position retransmit of the connection's own FIN */
+            pcb->last_rx_ns = now;
             build_segment(pcb, &b, TH_ACK, pcb->snd_nxt, 0, false);
             timer_cancel(&pcb->timewait);
             timer_start(&pcb->timewait, TCP_TIMEWAIT_NS);
@@ -1730,6 +1765,7 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
             challenge_ack(pcb, &b);
             goto out;
         }
+        b.quiet = false;   /* accepted: a valid reset of an existing connection (emits nothing) */
         STAT(rsts_in);
         pcb->error = pcb->state == TCP_SYN_RCVD ? -ECONNREFUSED : -ECONNRESET;
         wake = sock_ref(pcb);
@@ -1748,7 +1784,6 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         challenge_ack(pcb, &b);
         goto out;
     }
-    pcb->keep_probes = 0;
 
     if (pcb->state == TCP_SYN_RCVD) {
         if (SEQ_LT(ack, pcb->snd_una) || SEQ_GT(ack, pcb->snd_nxt)) {
@@ -1764,6 +1799,17 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
         wake = sock_ref(pcb);   /* simultaneous open */
         /* fall through to data processing */
     }
+
+    /* Accepted. Every rejection is behind us -- the window test, the reset
+     * position, the in-window SYN, the missing ACK, the RFC 5961 ACK range
+     * and the SYN_RCVD ACK check -- and from here the segment is the
+     * connection's own, whatever it then does: advance snd_una, duplicate an
+     * ACK into a fast retransmission, update the window, carry data or a
+     * FIN. Its output is sent, and the bookkeeping a rejected segment must
+     * not touch is done here: the keepalive clock and probe count. */
+    b.quiet = false;
+    pcb->last_rx_ns = now;
+    pcb->keep_probes = 0;
 
     /* ACK processing. */
     if (SEQ_GT(ack, pcb->snd_una) && SEQ_LEQ(ack, pcb->snd_max)) {

@@ -1,9 +1,10 @@
 /*
- * fw.c - The forwarding firewall (docs/audit/next-subsystem-firewall.md).
+ * fw.c - The firewall (docs/audit/next-subsystem-firewall.md,
+ * docs/audit/next-subsystem-input-chain.md, docs/audit/next-subsystem-host-input.md).
  *
  * See fw.h for the model. Everything here is under one lock, g_fw_lock:
- * the per-guest rule lists and policies, the guest attachments, and the
- * stateful flow table. Order against the rest of the stack: g_fw_lock ->
+ * the per-guest rule lists and policies, the host object, the guest
+ * attachments, and the stateful flow table. Order against the rest of the stack: g_fw_lock ->
  * g_nat_lock (the filter runs before NAT and never holds NAT's lock); the
  * verdict path takes no other lock.
  *
@@ -29,7 +30,7 @@ struct fw_guest {
     bool     attached;
     uint32_t ip;                          /* network order */
     uint32_t gateway;                     /* its tap's host address (network order), for the seeds */
-    uint8_t  policy[FW_DIR_COUNT];        /* [0] TO_UPLINK, [1] TO_GUEST, [2] TO_HOST */
+    uint8_t  policy[FW_DIR_COUNT];        /* [0] TO_UPLINK, [1] TO_GUEST, [2] TO_HOST, [3] FROM_UPLINK (host only) */
     unsigned nrules;
     struct fw_rule rules[FW_RULES_PER_GUEST];
 };
@@ -46,32 +47,58 @@ struct fw_flow {
     uint64_t expires_ns;
 };
 
+/* The defaults: the world stays reachable; a neighbour and the host's own
+ * services do not -- except what the tap offers, seeded as rules below. The
+ * host chain's default is ACCEPT: the host runs services meant to be reached
+ * from the uplink, and the operator hardens by rule or flips it. */
+#define POLICY_TO_UPLINK_DEFAULT   FW_ACCEPT
+#define POLICY_TO_GUEST_DEFAULT    FW_DROP
+#define POLICY_TO_HOST_DEFAULT     FW_DROP
+#define POLICY_FROM_UPLINK_DEFAULT FW_ACCEPT
+
 static struct fw_guest g_guests[FW_MAX_GUESTS];
+/* The host object: a permanent policy object outside the guest table, so no
+ * datagram's source (guest_find on iph->src) can ever name it -- only the
+ * control path reaches it, through FW_HOST_GUEST_IP (policy_find below). */
+static struct fw_guest g_host = { .attached = true, .ip = FW_HOST_GUEST_IP,
+                                  .policy = { [3] = POLICY_FROM_UPLINK_DEFAULT } };
 static struct fw_flow g_flows[FW_FLOW_MAX];
 static spinlock_t g_fw_lock = SPINLOCK_INIT("fw");
 static struct fw_stats g_stats;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
-/* The defaults: the world stays reachable; a neighbour and the host's own
- * services do not -- except what the tap offers, seeded as rules below. */
-#define POLICY_TO_UPLINK_DEFAULT FW_ACCEPT
-#define POLICY_TO_GUEST_DEFAULT  FW_DROP
-#define POLICY_TO_HOST_DEFAULT   FW_DROP
-
 static inline unsigned dir_slot(uint8_t dir)
 {
-    return dir == FW_DIR_TO_GUEST ? 1u : dir == FW_DIR_TO_HOST ? 2u : 0u;
+    return dir == FW_DIR_TO_GUEST ? 1u : dir == FW_DIR_TO_HOST ? 2u : dir == FW_DIR_FROM_UPLINK ? 3u : 0u;
 }
 
 /* --- guests (caller holds g_fw_lock) -------------------------------------- */
 
+/* A datagram's guest, by its source address: never the host object. */
 static struct fw_guest *guest_find(uint32_t ip)
 {
     for (unsigned i = 0; i < FW_MAX_GUESTS; i++)
         if (g_guests[i].attached && g_guests[i].ip == ip)
             return &g_guests[i];
     return NULL;
+}
+
+/* A control operation's policy object: the host for FW_HOST_GUEST_IP, else
+ * the attached guest of that address. */
+static struct fw_guest *policy_find(uint32_t ip)
+{
+    return ip == FW_HOST_GUEST_IP ? &g_host : guest_find(ip);
+}
+
+/* The host object "as shipped": the default and no rules. There is no small
+ * known set of services the uplink is offered, so nothing is seeded. */
+static void host_reset(void)
+{
+    memset(&g_host, 0, sizeof(g_host));
+    g_host.attached = true;
+    g_host.ip = FW_HOST_GUEST_IP;
+    g_host.policy[3] = POLICY_FROM_UPLINK_DEFAULT;
 }
 
 /* "As attached": the defaults, and the two TO_HOST rules that keep the tap's
@@ -126,9 +153,18 @@ void fw_guest_purge(uint32_t guest_ip)
 
 /* --- rules ---------------------------------------------------------------- */
 
-static bool rule_valid(const struct fw_rule *r)
+/* A well-formed rule for its scope. The scope owns the direction: FROM_UPLINK
+ * is the host's and nothing else is; and only the host's rules may name a
+ * source (a guest's source is the guest, so its tuple stays canonical at 0/0).
+ * The world does not send "as a guest", and a guest's wildcard cannot grow
+ * into the more sensitive scope. */
+static bool rule_valid(const struct fw_rule *r, bool host_scoped)
 {
-    if (r->direction > FW_DIR_TO_HOST || r->verdict > FW_ACCEPT || r->dst_prefix > 32)
+    if (r->direction > FW_DIR_FROM_UPLINK || r->verdict > FW_ACCEPT || r->dst_prefix > 32 || r->src_prefix > 32)
+        return false;
+    if (r->reserved != 0)
+        return false;
+    if ((r->direction == FW_DIR_FROM_UPLINK) != host_scoped)
         return false;
     if (r->proto != 0 && r->proto != IPPROTO_TCP && r->proto != IPPROTO_UDP && r->proto != IPPROTO_ICMP)
         return false;
@@ -136,24 +172,29 @@ static bool rule_valid(const struct fw_rule *r)
         return false;                     /* for ICMP the selector is a type, or the wildcard */
     if (r->dst_prefix == 0 && r->dst_ip != 0)
         return false;                     /* "any destination" is written as 0/0 */
+    if (r->src_prefix == 0 && r->src_ip != 0)
+        return false;                     /* "any source" likewise */
+    if (!host_scoped && r->src_prefix != 0)
+        return false;                     /* a guest's source is the guest */
     return true;
 }
 
 static bool rule_same(const struct fw_rule *a, const struct fw_rule *b)
 {
     return a->direction == b->direction && a->proto == b->proto && a->dst_prefix == b->dst_prefix &&
-           a->verdict == b->verdict && a->dst_ip == b->dst_ip && a->dst_port == b->dst_port;
+           a->verdict == b->verdict && a->dst_ip == b->dst_ip && a->dst_port == b->dst_port &&
+           a->src_prefix == b->src_prefix && a->src_ip == b->src_ip;
 }
 
 int fw_rule_add(uint32_t guest_ip, unsigned at_index, const struct fw_rule *r)
 {
-    if (!rule_valid(r))
+    if (!rule_valid(r, guest_ip == FW_HOST_GUEST_IP))
         return -EINVAL;
     /* Liveness and insertion under one hold: a release's purge (also under
      * g_fw_lock) either ran first -- the guest is gone and this is refused --
      * or runs after and removes what was inserted. No window. */
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
-    struct fw_guest *g = guest_find(guest_ip);
+    struct fw_guest *g = policy_find(guest_ip);
     if (g == NULL) {
         spin_unlock_irqrestore(&g_fw_lock, s);
         return -ENOENT;
@@ -180,7 +221,7 @@ int fw_rule_add(uint32_t guest_ip, unsigned at_index, const struct fw_rule *r)
 int fw_rule_del(uint32_t guest_ip, const struct fw_rule *match)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
-    struct fw_guest *g = guest_find(guest_ip);
+    struct fw_guest *g = policy_find(guest_ip);
     int rc = -ENOENT;
     if (g != NULL) {
         for (unsigned i = 0; i < g->nrules; i++) {
@@ -200,7 +241,7 @@ int fw_rule_del(uint32_t guest_ip, const struct fw_rule *match)
 unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned max)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
-    struct fw_guest *g = guest_find(guest_ip);
+    struct fw_guest *g = policy_find(guest_ip);
     unsigned n = 0;
     if (g != NULL)
         for (; n < g->nrules && n < max; n++)
@@ -211,24 +252,32 @@ unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned max)
 
 int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict)
 {
-    if (direction < FW_DIR_TO_UPLINK || direction > FW_DIR_TO_HOST || verdict > FW_ACCEPT)
+    if (verdict > FW_ACCEPT)
+        return -EINVAL;
+    /* The scope owns the direction, as for a rule: the host's is FROM_UPLINK
+     * alone, a guest's are the three that describe its own datagrams. */
+    bool host_scoped = guest_ip == FW_HOST_GUEST_IP;
+    if (host_scoped ? direction != FW_DIR_FROM_UPLINK
+                    : (direction < FW_DIR_TO_UPLINK || direction > FW_DIR_TO_HOST))
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
-    struct fw_guest *g = guest_find(guest_ip);
+    struct fw_guest *g = policy_find(guest_ip);
     if (g != NULL)
         g->policy[dir_slot(direction)] = verdict;
     spin_unlock_irqrestore(&g_fw_lock, s);
     return g != NULL ? 0 : -ENOENT;
 }
 
-int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host)
+int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host,
+                  uint8_t *from_uplink)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
-    struct fw_guest *g = guest_find(guest_ip);
+    struct fw_guest *g = policy_find(guest_ip);
     if (g != NULL) {
         *to_uplink = g->policy[0];
         *to_guest = g->policy[1];
         *to_host = g->policy[2];
+        *from_uplink = g->policy[3];
     }
     spin_unlock_irqrestore(&g_fw_lock, s);
     return g != NULL ? 0 : -ENOENT;
@@ -279,22 +328,27 @@ static void l4_read(struct mbuf *m, unsigned ihl, uint8_t proto, struct l4_view 
         v->tcp_flags = b[13];
 }
 
+static inline bool prefix_matches(uint32_t addr, uint32_t net, uint8_t prefix)
+{
+    if (prefix == 0)
+        return true;
+    uint32_t mask = htonl(prefix == 32 ? 0xffffffffu : ~(0xffffffffu >> prefix));
+    return ((addr ^ net) & mask) == 0;
+}
+
 static bool rule_matches(const struct fw_rule *r, uint8_t dir, const struct ipv4_hdr *iph,
                          const struct l4_view *v)
 {
     /* ANY keeps its original meaning -- either *forwarding* direction. It
      * never reaches the host: a wildcard written to permit forwarding must
-     * not, by the INPUT chain's arrival, silently open a host service;
-     * host traffic needs an explicit TO_HOST rule. */
-    if (r->direction == FW_DIR_ANY ? dir == FW_DIR_TO_HOST : r->direction != dir)
+     * not, by a host chain's arrival, silently open a host service; host
+     * traffic needs an explicit TO_HOST or FROM_UPLINK rule. */
+    if (r->direction == FW_DIR_ANY ? (dir != FW_DIR_TO_UPLINK && dir != FW_DIR_TO_GUEST) : r->direction != dir)
         return false;
     if (r->proto != 0 && r->proto != iph->proto)
         return false;
-    if (r->dst_prefix != 0) {
-        uint32_t mask = htonl(r->dst_prefix == 32 ? 0xffffffffu : ~(0xffffffffu >> r->dst_prefix));
-        if (((iph->dst ^ r->dst_ip) & mask) != 0)
-            return false;
-    }
+    if (!prefix_matches(iph->dst, r->dst_ip, r->dst_prefix) || !prefix_matches(iph->src, r->src_ip, r->src_prefix))
+        return false;
     /* The transport selector follows the protocol. An ICMP rule names a type
      * (or the wildcard) and matches only a datagram whose ICMP header was
      * read; a TCP/UDP/any rule naming a port never matches a datagram that
@@ -494,6 +548,39 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
     return verdict;
 }
 
+/* --- the host chain ------------------------------------------------------- */
+
+enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
+                                const struct ipv4_hdr *iph, unsigned ihl)
+{
+    (void)nif;   /* every real link shares the one host chain; per-interface chains are a later unit */
+    struct l4_view v;
+    l4_read(m, ihl, iph->proto, &v);
+
+    /* The host's rules first-match, else its default. No connection state
+     * here: on DROP the caller delivers a TCP/UDP datagram quiet (M_FW_QUIET)
+     * and the transport -- which owns acceptability -- admits only what an
+     * existing connection or a connected socket accepts, answering nothing
+     * else. The firewall does not re-derive TCP's tests. */
+    arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
+    enum fw_verdict verdict = (enum fw_verdict)g_host.policy[dir_slot(FW_DIR_FROM_UPLINK)];
+    bool by_rule = false;
+    for (unsigned i = 0; i < g_host.nrules; i++)
+        if (rule_matches(&g_host.rules[i], FW_DIR_FROM_UPLINK, iph, &v)) {
+            verdict = (enum fw_verdict)g_host.rules[i].verdict;
+            by_rule = true;
+            break;
+        }
+    spin_unlock_irqrestore(&g_fw_lock, s);
+
+    if (verdict == FW_ACCEPT) {
+        if (by_rule) STAT(hin_accept_rule); else STAT(hin_accept_default);
+    } else {
+        if (by_rule) STAT(hin_drop_rule); else STAT(hin_drop_default);
+    }
+    return verdict;
+}
+
 /* --- maintenance ---------------------------------------------------------- */
 
 void fw_age(uint64_t now_ns)
@@ -514,6 +601,7 @@ void fw_flush(void)
     for (unsigned i = 0; i < FW_MAX_GUESTS; i++)
         if (g_guests[i].attached)
             guest_reset(&g_guests[i], g_guests[i].ip, g_guests[i].gateway);
+    host_reset();
     spin_unlock_irqrestore(&g_fw_lock, s);
 }
 
@@ -530,5 +618,6 @@ void fw_get_stats(struct fw_stats *out)
     for (unsigned i = 0; i < FW_MAX_GUESTS; i++)
         if (g_guests[i].attached)
             out->rules += g_guests[i].nrules;
+    out->rules += g_host.nrules;
     spin_unlock_irqrestore(&g_fw_lock, s);
 }

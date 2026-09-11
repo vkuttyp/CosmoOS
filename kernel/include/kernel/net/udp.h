@@ -46,6 +46,7 @@ struct mbuf *udp_recv(struct udp_pcb *pcb);
 void udp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, const struct ipv6_hdr *ip6);
 struct udp_stats {
     uint64_t rx, rx_bad_len, rx_bad_cksum, rx_no_port, rx_queue_full, tx;
+    uint64_t quiet_dropped;   /* M_FW_QUIET datagrams with no socket connected to the sender: freed, no ICMP */
 };
 void udp_get_stats(struct udp_stats *out);
 

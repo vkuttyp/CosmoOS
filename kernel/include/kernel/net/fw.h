@@ -1,8 +1,9 @@
 /*
- * fw.h - The firewall: a stateful packet filter over the guest taps
- * (docs/audit/next-subsystem-firewall.md, docs/audit/next-subsystem-input-chain.md).
+ * fw.h - The firewall: a stateful packet filter over the guest taps and the
+ * host's own uplink (docs/audit/next-subsystem-firewall.md,
+ * docs/audit/next-subsystem-input-chain.md, docs/audit/next-subsystem-host-input.md).
  *
- * Two chains on one engine. The FORWARD chain, evaluated in ipv4_forward after
+ * Three chains on one engine. The FORWARD chain, evaluated in ipv4_forward after
  * the anti-spoof and routing steps and before NAT, decides whether a datagram
  * a guest forwards is accepted or dropped -- toward the world (TO_UPLINK: the
  * egress is not a guest tap) or toward another guest (TO_GUEST). The INPUT
@@ -15,6 +16,21 @@
  * is as it was), TO_HOST DROP -- with the two services the tap offers, the DNS
  * proxy on gateway:53 and echo-request to the gateway, seeded at attach as
  * ordinary visible, deletable rules rather than hard-coded holes.
+ *
+ * The host chain is the third, and the first that is not about a guest: what
+ * the *world* -- anything arriving on a real, non-guest link (neither
+ * NETIF_MASQUERADE nor NETIF_LOOPBACK) -- may ask of the host. Its policy
+ * object is the host itself, addressed as FW_HOST_GUEST_IP (0): one ordered
+ * rule list and one default, always present, never attached or purged. Its
+ * rules name the direction FROM_UPLINK and may name a *source* prefix (the
+ * one thing a world-facing rule cannot do without); a guest-scoped rule may
+ * not (its source is the guest). The default is ACCEPT -- the host runs
+ * services meant to be reached -- and the operator drops by source, protocol
+ * and port or flips the default. A DROP on this chain is *quiet*: for TCP/UDP
+ * the verdict does not free the datagram but marks it M_FW_QUIET (mbuf.h)
+ * and lets the transport, which owns acceptability, deliver it only to an
+ * existing connection or a connected socket and answer nothing otherwise --
+ * the firewall never models TCP state, and a DROP means silence, not a RST.
  *
  * The filter is stateful where it has to be. A masqueraded guest-to-uplink
  * reply never re-enters ipv4_forward (nat_in delivers it via ipv4_output), and
@@ -56,24 +72,29 @@ struct ipv4_hdr;
 #define FW_FLOW_MAX           256u                        /* stateful entries (guest-to-guest) */
 #define FW_FLOW_QUOTA_PER_GUEST (FW_FLOW_MAX / FW_MAX_GUESTS) /* one guest's share; a flood starves itself */
 #define FW_ICMP_TYPE_ANY      0xffffu                     /* dst_port wildcard for an ICMP rule */
+#define FW_HOST_GUEST_IP      0u                          /* the host's policy object, as a guest address */
 
 enum fw_verdict { FW_DROP = 0, FW_ACCEPT = 1 };
 
 /* Directions. TO_UPLINK/TO_GUEST are decided by the egress in ipv4_forward
  * (the FORWARD chain); TO_HOST is a datagram a guest tap delivers to the host
- * itself, in ipv4_input (the INPUT chain). ANY is a rule wildcard for the
- * *forwarding* directions only -- it keeps the meaning it had before the
- * INPUT chain existed and never matches TO_HOST, so a wildcard written to
- * permit forwarding cannot silently open a host service; host traffic needs
- * an explicit TO_HOST rule. */
-enum fw_dir { FW_DIR_ANY = 0, FW_DIR_TO_UPLINK = 1, FW_DIR_TO_GUEST = 2, FW_DIR_TO_HOST = 3 };
-#define FW_DIR_COUNT 3u                                   /* policy slots: uplink, guest, host */
+ * itself, in ipv4_input (the INPUT chain); FROM_UPLINK is a datagram a real,
+ * non-guest link delivers to the host (the host chain), and belongs to the
+ * host object alone. ANY is a rule wildcard for the *forwarding* directions
+ * only -- it keeps the meaning it had before the INPUT chain existed and
+ * never matches TO_HOST or FROM_UPLINK, so a wildcard written to permit
+ * forwarding cannot silently open a host service; host traffic needs an
+ * explicit TO_HOST or FROM_UPLINK rule. */
+enum fw_dir { FW_DIR_ANY = 0, FW_DIR_TO_UPLINK = 1, FW_DIR_TO_GUEST = 2, FW_DIR_TO_HOST = 3, FW_DIR_FROM_UPLINK = 4 };
+#define FW_DIR_COUNT 4u                                   /* policy slots: uplink, guest, host, from-uplink */
 
 /* One rule: the match tuple plus the verdict. dst_prefix 0 matches any
  * destination (dst_ip must then be 0); proto 0 any protocol. dst_port is the
  * transport selector: for proto TCP/UDP/any, a destination port (0 = any; a
  * non-zero port matches only a TCP/UDP datagram with that port); for proto
- * ICMP, the ICMP type 0..255 or FW_ICMP_TYPE_ANY. */
+ * ICMP, the ICMP type 0..255 or FW_ICMP_TYPE_ANY. src_prefix/src_ip match the
+ * source the same way; only a host-scoped (FROM_UPLINK) rule may name one --
+ * a guest's rule carries 0/0, its source being the guest. */
 struct fw_rule {
     uint8_t  direction;   /* enum fw_dir */
     uint8_t  proto;       /* IPPROTO_TCP/UDP/ICMP, or 0 */
@@ -81,6 +102,9 @@ struct fw_rule {
     uint8_t  verdict;     /* enum fw_verdict */
     uint32_t dst_ip;      /* network order */
     uint16_t dst_port;    /* host order: port, or ICMP type / FW_ICMP_TYPE_ANY */
+    uint8_t  src_prefix;  /* 0..32; 0 = any source (src_ip then 0); host-scoped rules only */
+    uint8_t  reserved;
+    uint32_t src_ip;      /* network order */
 };
 
 /* Attach a guest (the tap's open): its address and its tap's gateway (the
@@ -94,19 +118,26 @@ void fw_guest_attach(uint32_t guest_ip, uint32_t gateway_ip);
 void fw_guest_purge(uint32_t guest_ip);
 
 /* Insert `r` into the guest's list at `at_index` (>= count appends). 0 on
- * success; -ENOENT (guest not attached), -EINVAL (bad field), -EEXIST (that
- * tuple is already installed), -ENOSPC (the guest's list is full). */
+ * success; -ENOENT (guest not attached), -EINVAL (bad field, or a direction
+ * the scope does not own: FROM_UPLINK is the host's, the others a guest's,
+ * and only the host's rules may name a source), -EEXIST (that tuple is
+ * already installed), -ENOSPC (the list is full). guest_ip FW_HOST_GUEST_IP
+ * names the host object, here and in every accessor below. */
 int fw_rule_add(uint32_t guest_ip, unsigned at_index, const struct fw_rule *r);
 /* Remove the guest's rule whose tuple equals `match`. 0, or -ENOENT. */
 int fw_rule_del(uint32_t guest_ip, const struct fw_rule *match);
 /* Snapshot the guest's rules in evaluation order; the count written. */
 unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned max);
-/* Set / read a guest's default verdicts. direction must be TO_UPLINK,
- * TO_GUEST or TO_HOST. -ENOENT if the guest is not attached, -EINVAL on a bad
- * field. */
+/* Set / read default verdicts. For a guest, direction must be TO_UPLINK,
+ * TO_GUEST or TO_HOST; for the host object, FROM_UPLINK. -ENOENT if the guest
+ * is not attached, -EINVAL on a bad field. fw_policy_get reports every slot;
+ * a guest's from_uplink slot is not consulted and reads 0, the host's other
+ * three likewise. */
 int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict);
-int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host);
-/* The attached guests' addresses; the count written. */
+int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host,
+                  uint8_t *from_uplink);
+/* The attached guests' addresses (the host object is not among them); the
+ * count written. */
 unsigned fw_guest_list(uint32_t *out, unsigned max);
 
 /*
@@ -133,11 +164,26 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct m
 enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
                                  const struct ipv4_hdr *iph, unsigned ihl);
 
+/*
+ * The host chain: the verdict for a datagram a real, non-guest link (`nif`,
+ * neither NETIF_MASQUERADE nor NETIF_LOOPBACK) is about to deliver to the host
+ * -- unicast to the link's own address after nat_in has declined it (a
+ * masqueraded reply or a DNAT is not host-bound and is never re-gated), or a
+ * broadcast. `m` still carries the whole IP header. The host's FROM_UPLINK
+ * rules first-match (source prefix, destination prefix, protocol, selector),
+ * else the host default (ACCEPT). Stateless here: on FW_DROP the caller does
+ * not free a TCP/UDP datagram but marks it M_FW_QUIET and delivers it, so the
+ * transport admits only what an existing connection or a connected socket
+ * accepts and answers nothing else; anything other than TCP/UDP is freed.
+ */
+enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
+                                const struct ipv4_hdr *iph, unsigned ihl);
+
 /* Reclaim expired flows (the network worker's periodic tick, beside nat_age). */
 void fw_age(uint64_t now_ns);
 /* Drop every flow and reset every attached guest to "as attached" -- the
  * default policies and the two seeded rules, nothing else (attachments
- * kept) -- test isolation. */
+ * kept) -- and the host object to its default with no rules: test isolation. */
 void fw_flush(void);
 
 struct fw_stats {
@@ -149,7 +195,9 @@ struct fw_stats {
     uint64_t in_accept_rule, in_drop_rule;       /* INPUT verdicts from a matching rule */
     uint64_t in_accept_default, in_drop_default; /* INPUT verdicts from the default policy */
     uint64_t in_spoofed;                         /* INPUT: source was not the tap's guest */
-    uint32_t flows, rules;                       /* live right now */
+    uint64_t hin_accept_rule, hin_drop_rule;     /* host-chain verdicts from a matching rule */
+    uint64_t hin_accept_default, hin_drop_default; /* host-chain verdicts from the host default */
+    uint32_t flows, rules;                       /* live right now (rules: every guest's and the host's) */
 };
 void fw_get_stats(struct fw_stats *out);
 

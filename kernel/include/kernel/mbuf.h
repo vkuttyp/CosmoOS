@@ -26,6 +26,10 @@
 #define M_BCAST    (1u << 2)   /* received as link-layer broadcast */
 #define M_MCAST    (1u << 3)
 #define M_CSUM_OK  (1u << 4)   /* transport checksum verified by lower layer */
+#define M_FW_QUIET (1u << 5)   /* the host firewall said DROP: deliver only to an existing
+                                * connection or a connected socket, create nothing, answer
+                                * nothing (no SYN-ACK, RST, challenge or window ACK, no ICMP
+                                * port-unreachable) -- the transport decides acceptability */
 
 /* pkt.csum_flags on transmit (unit 11): the transport left the pseudo-header
  * sum (folded, not inverted) in its checksum field and asks the interface to
