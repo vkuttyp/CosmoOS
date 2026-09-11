@@ -224,7 +224,10 @@ tap goes away.
 - **DHCPv6 and IPv6 RA/DNS**, **DNS over TCP/EDNS0 large answers**, and
   **DNSSEC validation** — named, later.
 
-## Affected files
+## Affected files (all changed as planned)
+
+These were the files the unit changed; all were touched as listed.
+
 
 - `kernel-services/network/tapsvc.c` (new), `kernel/include/kernel/net/tapsvc.h`
   — the frame-level DHCP responder, the DNS-proxy service thread and its
@@ -249,7 +252,10 @@ internal — `tapsvc_start(struct netif *tap)` / `tapsvc_stop()`, called from
 the tap's activation and teardown, plus the tap-local receive-filter hook the
 tap already needs for this.
 
-## Migration plan
+## Migration plan (completed)
+
+Every step below was implemented in the order given; each is done and its
+test passes.
 
 1. **The tap-local receive filter**: `tap.c` hands the service each inbound
    frame before `netif_rx`, and an `ether_output`-based reply path sends a
@@ -274,7 +280,9 @@ tap already needs for this.
    reproducible under `QEMU_MEM=2G`.
 5. **Docs and the Status entry**, and the full verification chain.
 
-## Tests
+## Tests (all passing)
+
+These self-tests exist and pass on both architectures.
 
 - `net-dhcp` (host): a synthetic guest injects DISCOVER on a tap with the
   broadcast flag set; the reply read back off the tap is an OFFER sent as the
