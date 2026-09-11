@@ -1220,8 +1220,35 @@ See [docs/development.md](docs/development.md).
   `vmctl filter add|del|policy|list` drives it; no new syscall. Proven by
   `net-firewall` (default drop, one-rule hole, stateful return incl. echo by
   id, first-match ordering and delete-by-tuple, a rule outliving its handle
-  but not its guest, the listing round trip and every rejection). INPUT/OUTPUT
-  chains, rate-limit/log targets, IPv6 and full TCP state are later units.
+  but not its guest, the listing round trip and every rejection). The INPUT
+  chain is the next entry (done); an OUTPUT chain, the host's uplink-facing
+  INPUT chain, rate-limit/log targets, IPv6 and full TCP state are later units.
+- **The INPUT chain: what a guest may ask of the host (done):**
+  `docs/audit/next-subsystem-input-chain.md`,
+  `docs/kernel-services/network/design.md` ("The INPUT chain"). The
+  forwarding firewall decided which *other machines* a guest may reach; this
+  decides which of the **host's own services** it may reach. Before it,
+  `ipv4_input` handed everything `nat_in` declined straight to the host's
+  ICMP/UDP/TCP handlers -- a guest could reach any host listener through its
+  gateway (or the host's uplink address) and forge its source doing so. Now
+  `fw_input_verdict` runs for a guest tap's datagram to the host, **after
+  `nat_in` declines** and before the transport demux: the anti-spoof first
+  (the source must be the tap's guest), then the guest's `TO_HOST` rules --
+  a **third direction on the same engine**, not a second rule list -- else
+  its `TO_HOST` default, **DROP**. The tap's own services are **seeded as
+  real, deletable rules** at attach (`udp gateway/32 :53`, `icmp gateway/32
+  type 8`), not hard-coded holes; stateless, since the host's reply passes no
+  filter and later segments match by port. **The ICMP selector is a type**:
+  for ICMP a rule's `dst_port` is the ICMP type (`0xffff` = any), so the echo
+  seed admits echo-request alone and a guest's echo reply or
+  Need-Fragmentation cannot reach the echo hook or `ipv4_pmtu_update`. ABI
+  version 3 (`DIR_TO_HOST`, `policy_to_host`, the type meaning); `vmctl
+  filter ... host ...` with a protocol-aware selector. Proven by `net-input`
+  (seeds reach the host and nothing else does, a rule opens a port per
+  datagram, the seeds are deletable, echo reply and need-frag dropped by type,
+  forged sources dropped as spoofed, per-guest and flippable policy, the
+  listing round trip). An OUTPUT chain and the host's uplink-facing INPUT
+  chain are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1277,8 +1304,11 @@ See [docs/development.md](docs/development.md).
   `-multiguest.md`, a tap per open of `/dev/net/tap` so several stock guests
   run at once, each a full networked machine, isolated and addressable; and
   `-firewall.md`, the policy over them -- a stateful forwarding filter that
-  drops inter-guest traffic by default and lets a rule open it (built). The
-  named next steps are the follow-ups these left (INPUT/OUTPUT firewall
-  chains, hairpin/NAT-reflection, IPv6 DNAT, an L2 bridge, the tap's other settings on
+  drops inter-guest traffic by default and lets a rule open it (built); and
+  `-input-chain.md`, its second chain -- which of the host's own services a
+  guest may reach, default-deny with the tap's DNS and echo seeded as rules
+  (built). The named next steps are the follow-ups these left (an OUTPUT
+  chain and the host's uplink-facing INPUT chain, hairpin/NAT-reflection,
+  IPv6 DNAT, an L2 bridge, the tap's other settings on
   the control channel) and, on the guest itself, the `QEMU_MEM=2G`
   reproduction reaching the real world. Design documents first, one subsystem at a time.

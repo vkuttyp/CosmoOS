@@ -949,6 +949,7 @@ static int fw_dir(const char *s, uint8_t *out)
     if (strcmp(s, "any") == 0)         *out = COSMO_NETCTL_DIR_ANY;
     else if (strcmp(s, "uplink") == 0) *out = COSMO_NETCTL_DIR_TO_UPLINK;
     else if (strcmp(s, "guest") == 0)  *out = COSMO_NETCTL_DIR_TO_GUEST;
+    else if (strcmp(s, "host") == 0)   *out = COSMO_NETCTL_DIR_TO_HOST;
     else return -1;
     return 0;
 }
@@ -994,7 +995,8 @@ static int fw_dst(const char *s, uint32_t *addr, uint8_t *prefix)
 
 static const char *fw_dir_name(uint8_t d)
 {
-    return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" : "any";
+    return d == COSMO_NETCTL_DIR_TO_UPLINK ? "uplink" : d == COSMO_NETCTL_DIR_TO_GUEST ? "guest" :
+           d == COSMO_NETCTL_DIR_TO_HOST ? "host" : "any";
 }
 static const char *fw_proto_name(uint8_t p)
 {
@@ -1046,8 +1048,8 @@ static int filter(int argc, char **argv)
             memcpy(&fg, buf + off, sizeof(fg));
             char ip[16];
             inet_ntop(AF_INET, &fg.guest_addr, ip, sizeof(ip));
-            printf("%s policy: uplink %s, guest %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
-                   fw_verdict_name(fg.policy_to_guest));
+            printf("%s policy: uplink %s, guest %s, host %s\n", ip, fw_verdict_name(fg.policy_to_uplink),
+                   fw_verdict_name(fg.policy_to_guest), fw_verdict_name(fg.policy_to_host));
         }
         for (unsigned i = 0; i < fh.rule_count; i++, off += sizeof(struct cosmo_netctl_filter_rule)) {
             struct cosmo_netctl_filter_rule fr;
@@ -1055,8 +1057,20 @@ static int filter(int argc, char **argv)
             char ip[16], dst[16];
             inet_ntop(AF_INET, &fr.guest_addr, ip, sizeof(ip));
             inet_ntop(AF_INET, &fr.dst_addr, dst, sizeof(dst));
-            printf("%s [%u] %s %s %s/%u %u %s\n", ip, fr.index, fw_dir_name(fr.direction),
-                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, fr.dst_port,
+            /* The selector prints in its protocol's terms: a port, or an ICMP type. */
+            char sel[16];
+            if (fr.proto == COSMO_NETCTL_PROTO_ICMP) {
+                if (fr.dst_port == COSMO_NETCTL_ICMP_TYPE_ANY) strcpy(sel, "any");
+                else if (fr.dst_port == 8)                     strcpy(sel, "echo-request");
+                else if (fr.dst_port == 0)                     strcpy(sel, "echo-reply");
+                else                                           snprintf(sel, sizeof(sel), "type%u", fr.dst_port);
+            } else if (fr.dst_port == 0) {
+                strcpy(sel, "any");
+            } else {
+                snprintf(sel, sizeof(sel), "%u", fr.dst_port);
+            }
+            printf("%s [%u] %s %s %s/%u %s %s\n", ip, fr.index, fw_dir_name(fr.direction),
+                   fw_proto_name(fr.proto), fr.dst_prefix ? dst : "any", fr.dst_prefix, sel,
                    fw_verdict_name(fr.verdict));
         }
         rc = 0;
@@ -1080,7 +1094,21 @@ static int filter(int argc, char **argv)
             fw_verdict(argv[6], &c.verdict) != 0) {
             usage(); goto out;
         }
-        if (strcmp(argv[5], "any") != 0 && pf_port(argv[5], &c.dst_port) != 0) {
+        /* The transport selector follows the protocol: a port for tcp/udp/any,
+         * an ICMP type (a number, echo-request or echo-reply) for icmp; `any`
+         * is the wildcard in the protocol's own encoding -- 0 for a port,
+         * ICMP_TYPE_ANY for a type (type 0 is echo-reply, so 0 cannot mean any). */
+        if (c.proto == COSMO_NETCTL_PROTO_ICMP) {
+            if (strcmp(argv[5], "any") == 0)               c.dst_port = COSMO_NETCTL_ICMP_TYPE_ANY;
+            else if (strcmp(argv[5], "echo-request") == 0) c.dst_port = 8;
+            else if (strcmp(argv[5], "echo-reply") == 0)   c.dst_port = 0;
+            else {
+                char *end;
+                unsigned long v = strtoul(argv[5], &end, 10);
+                if (*argv[5] == 0 || *end || v > 255) { fprintf(stderr, "vmctl: bad ICMP type\n"); goto out; }
+                c.dst_port = (uint16_t)v;
+            }
+        } else if (strcmp(argv[5], "any") != 0 && pf_port(argv[5], &c.dst_port) != 0) {
             fprintf(stderr, "vmctl: bad port\n"); goto out;
         }
         if (argc == 8) {

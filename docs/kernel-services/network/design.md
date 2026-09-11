@@ -780,8 +780,10 @@ matches. The **defaults** are the deferred policy made concrete: `TO_GUEST`
 **DROP**, `TO_UPLINK` **ACCEPT** — a guest cannot reach its neighbour unless
 a rule allows it, and its path to the world is as it was. A rule matches on
 direction (or any), protocol (TCP/UDP/ICMP or any), destination address with
-a prefix (or any), and destination port (or any; a port constraint applies to
-TCP/UDP only and never matches a datagram without ports).
+a prefix (or any), and a transport selector: for TCP/UDP a destination port
+(or any; a port constraint applies to TCP/UDP only and never matches a
+datagram without ports), for ICMP the ICMP type (or `FW_ICMP_TYPE_ANY`) —
+see "The ICMP selector is a type", below.
 
 **Stateful where it must be — and only there.** Reading the reply paths
 exactly: a masqueraded guest→uplink reply is addressed to the host, so
@@ -833,8 +835,10 @@ by re-checking `netif_connected` (which stays "live" until `tap_destroy`, after
 the purge, and would leave a window). Lock order: `g_fw_lock` → `g_nat_lock`;
 the verdict takes no other lock.
 
-**The control plane** is `/dev/net/tapctl` at ABI version 2
-(`uapi/cosmo/netctl.h`): `FILTER_ADD`/`FILTER_DEL`/`FILTER_POLICY` in a
+**The control plane** is `/dev/net/tapctl`, now at ABI version 3
+(`uapi/cosmo/netctl.h`; version 2 added the filter, version 3 the INPUT
+chain's `DIR_TO_HOST`, the per-guest `policy_to_host`, and the ICMP-type
+meaning of an ICMP rule's selector): `FILTER_ADD`/`FILTER_DEL`/`FILTER_POLICY` in a
 `struct cosmo_netctl_filter` (each op exactly its own struct; the dispatcher
 reads the common `(version, op)` first), and the read snapshot gains a filter
 section after the port-forward list — a header, the attached guests' default
@@ -842,9 +846,53 @@ policies, then every rule in evaluation order with its guest and index. A
 reader that stops after the port-forward rules is unaffected. `vmctl filter
 add|del|policy|list` drives it. No new system call.
 
-Named and deferred: INPUT/OUTPUT chains for the host's own services and
-egress, rate-limit and logging targets, IPv6 filtering, and full TCP state
-tracking.
+**The INPUT chain: what a guest may ask of the host** (audit unit "the INPUT
+chain", `docs/audit/next-subsystem-input-chain.md`). The FORWARD chain
+decided which *other machines* a guest may reach; this decides which of the
+**host's own services** it may reach. Before it, `ipv4_input` handed
+everything `nat_in` declined straight to `icmp_input`/`udp_input`/`tcp_input`
+— a guest could reach any host listener through its gateway (or the host's
+uplink address), and could forge its source doing so, since the strict `.15`
+check lived only in `ipv4_forward`. Now `fw_input_verdict` runs in
+`ipv4_input` for a datagram a **guest tap** (`NETIF_MASQUERADE` ingress)
+delivers to the host — unicast to one of our addresses *after* `nat_in` has
+declined it (a NAT'd reply or DNAT is not host-bound), or a broadcast — and
+before the transport demux; a drop frees the datagram and counts
+`in_filtered`. It is the same engine consulted from a second place:
+**`TO_HOST` is a third direction** (a rule's `direction`, a third default
+slot), not a second rule list. The verdict does two things in order: the
+**anti-spoof** (the source must be the tap's guest, `<subnet>.15`, else
+`in_spoofed` and drop — the forwarding rule made on both paths a tap datagram
+can take), then the guest's `TO_HOST` rules first-match, else its `TO_HOST`
+default. **No state on this chain**: the host's reply leaves by
+`ipv4_output` and passes no filter, and a guest's later segments match the
+same rule by destination port, so the verdict is per datagram (a bare ACK to
+an unruled port is dropped). The **default is DROP**, and so that a stock
+guest keeps working `fw_guest_attach` (now given the tap's gateway too)
+**seeds two rules** — `TO_HOST udp gateway/32 :53 ACCEPT` (the DNS proxy) and
+`TO_HOST icmp gateway/32 type 8 ACCEPT` (echo *request*) — as ordinary
+listed, ordered, deletable rules rather than hard-coded holes; `fw_flush`
+re-seeds them; DHCP needs none (frame-level). A guest never attached fails
+closed. Loopback and the uplink are not guests and are not consulted; the
+host-scoped chain for the uplink is a later unit.
+
+**The ICMP selector is a type.** A default-deny chain guarding host handlers
+cannot admit "all ICMP": `icmp_input` dispatches Need-Fragmentation (type
+3/4) into `ipv4_pmtu_update` and Echo Reply (type 0) into the echo hook. So
+for `proto == ICMP` a rule's `dst_port` field **is the ICMP type** (0..255),
+with `FW_ICMP_TYPE_ANY` (`0xffff`) as the wildcard — the field is the
+transport selector, a port for TCP/UDP and a type for ICMP, no new field or
+size — and the echo seed admits type 8 alone, leaving a guest's echo reply
+and need-frag to the default. (Version 2 required `0` there and meant "any";
+version 3 refuses a v2 writer by version rather than reinterpret it.) The
+FORWARD chain's ICMP flow *state* (echo by id) is unchanged; this is the
+rule *match*, and lets FORWARD rules say "echo-request only" too.
+
+Named and deferred: an OUTPUT chain for the host's own egress (and, with it,
+filtering the host's replies to guests), the **host-scoped INPUT chain for
+the uplink** (not per-guest; needs its own policy object and control
+surface, and interacts with DNAT ordering), rate-limit and logging targets,
+IPv6 filtering, and full TCP state tracking.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

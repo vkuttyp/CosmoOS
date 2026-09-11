@@ -309,7 +309,8 @@ request admits B's echo *reply* with the same id, while a B→A echo *request*
 is dropped (a reverse request is not a reply) and a reply with a different id
 is dropped (no flow). (6) Ordering and identity: a DROP inserted at index 0
 for the same traffic wins first-match for a new flow (`drop_rule` rises), the
-listing shows the three rules in order, deleting the DROP by tuple restores
+listing shows the five rules in order (the two `TO_HOST` seeds among them,
+since the INPUT-chain unit), deleting the DROP by tuple restores
 the ACCEPT, a second delete is `-ENOENT`, and a duplicate add is `-EEXIST`.
 (7) Binding by address, not handle: a rule for B written through a
 `/dev/net/tapctl` handle that is then closed still admits B→A; closing B's
@@ -321,8 +322,8 @@ the snapshot's length equals the sum of its sections, `FILTER_POLICY`
 flipping A's to-guest default to ACCEPT lets an unruled A→B flow through and
 flipping it back drops the next; a short write is `-EINVAL`, a wrong version
 `-ENOTSUP`, an unattached `guest_addr` `-ENOENT`, a `FILTER_DEL` of an
-uninstalled tuple `-ENOENT`, and an ICMP rule carrying a port `-EINVAL` —
-each changing nothing.
+uninstalled tuple `-ENOENT`, and an ICMP rule whose selector is above 255
+(not a type, not the wildcard) `-EINVAL` — each changing nothing.
 
 Proved by reintroducing a verdict that always ACCEPTs (the default-drop test
 then reads the datagram back on B), a flow table that records nothing (B's
@@ -331,6 +332,62 @@ id (the wrong-id reply is then admitted), an `fw_rule_add` that skips
 the attached-guest check (an add for the departed B then succeeds, and the
 reused address inherits the stale rule), and an ESTABLISHED shortcut that
 honours a reverse bare SYN (B's SYN on the reversed ports is then admitted).
+
+**`net-input`** (the INPUT chain): two guests opened through `/dev/net/tap`,
+A on `tap0` and B on `tap1`, driven by frame injection; a verdict is taken on
+the network worker, so counters are awaited. (1) Attach seeded exactly the
+tap's two services as `TO_HOST` rules on the gateway — `udp gateway/32 :53`
+and `icmp gateway/32 type 8` — and the `TO_HOST` default is DROP. (2) The
+seeds reach the host: a DNS query to the gateway is accepted by rule
+(`in_accept_rule`), and a checksummed echo request draws an echo *reply*
+back on A's tap. (3) Everything else is closed by default: UDP to
+`gateway:7000`, a TCP SYN to `gateway:2222`, and a datagram to the host's
+uplink address (when the NIC is present) are dropped (`in_drop_default`,
+`ip_stats.in_filtered`). (4) A rule opens a service per datagram, statelessly:
+a SYN and then a bare ACK to the ruled port are both admitted by the same
+rule. (5) The seeds are real rules: deleting the echo seed by tuple makes the
+next echo request drop with no reply; re-adding it reopens echo. (6) The ICMP
+selector is a type: a guest echo *reply* (type 0) and a guest
+Need-Fragmentation (type 3/4 quoting a host→guest datagram) are dropped by
+default and `pmtu_updates` does not move; a `type 0` rule admits the reply
+alone while need-frag still drops; `FW_ICMP_TYPE_ANY` admits need-frag too.
+(7) Anti-spoof on the local path: with B first given an any-destination DNS
+rule that would admit exactly this datagram under *B's* policy, sources from
+A's tap that are not A — a stray `10.0.3.50`, the neighbour B, a world
+address — toward the gateway's DNS are dropped as spoofed (`in_spoofed`,
+`in_filtered`) before any rule is read, so a guest cannot borrow its
+neighbour's permissions by forging its source; a datagram forged as the gateway *itself* never
+reaches the firewall, because `ipv4_input` already drops one of our own
+addresses arriving from a link as a martian (`rx_bad_header`) — a stronger
+drop, counted upstream. (8) Per guest: A's TCP rule does not open B's path;
+B's release purges its seeds (its list is empty); a reopened B re-seeds
+exactly two `TO_HOST` rules. (9) Policy: `TO_HOST` ACCEPT admits an unruled
+port (`in_accept_default`), DROP closes it again, and `ANY` is not a policy
+direction (`-EINVAL`). (10) The control channel: a `TO_HOST` rule written
+through `/dev/net/tapctl` is listed with its direction beside a guest record
+carrying `policy_to_host`; an ICMP rule with selector `0` (echo-reply) and
+one with `ICMP_TYPE_ANY` are both writable and deletable (type 0 is not
+mistaken for the wildcard), `256` is `-EINVAL`, and `FILTER_POLICY` with
+`DIR_ANY` is `-EINVAL`.
+
+Proved by reintroducing a verdict that always accepts (the closed port then
+counts an accept, not a drop), a missing anti-spoof (`in_spoofed` never
+rises; the datagram forged as B would then be admitted under B's own rule),
+echo as a hard-coded hole instead of a seeded rule (deleting the echo seed
+then changes nothing), and an ICMP match that ignores the type (a guest echo
+*reply* is then admitted by the echo-request seed). The report's fifth proof
+— the verdict placed *before* `nat_in` — is not runnable as stated: with the
+verdict gated on guest-tap ingress, nothing `nat_in` claims arrives on a
+guest tap (a masqueraded reply arrives on the uplink), so the ordering is
+unobservable today; the placement after `nat_in` is kept for the host-scoped
+chain that will make it matter.
+
+**`net-firewall`** (adjusted for version 3): its ICMP rule now carries
+`FW_ICMP_TYPE_ANY` (version 2's `0` meant "any"; version 3's `0` is echo
+reply), the "ICMP with a port" rejection became "a selector above 255", and
+its rule counts include the two `TO_HOST` seeds each guest attaches with (the
+step-6 list is five rules with the seeds at indices 2–3; a reopened guest
+lists exactly its two seeds; the snapshot carries at least five rules).
 
 **`net-tapctl`** (extended): the snapshot's expected length is now computed
 from the version-2 filter section the read appends (its header, the

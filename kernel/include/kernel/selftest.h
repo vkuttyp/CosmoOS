@@ -194,6 +194,7 @@ bool selftest_net_dnat(const char **reason);
 bool selftest_net_tapctl(const char **reason);
 bool selftest_net_multiguest(const char **reason);
 bool selftest_net_firewall(const char **reason);
+bool selftest_net_input(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);

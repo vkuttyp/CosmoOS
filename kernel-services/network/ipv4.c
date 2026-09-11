@@ -599,6 +599,18 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
     if (!bcast && netif_owns_ipv4(iph->dst) && nat_in(nif, m, iph, ihl, total))
         return;
 
+    /* The firewall's INPUT chain: a guest tap delivering to the host itself
+     * -- unicast to one of our addresses that nat_in did not claim, or a
+     * broadcast -- gets a verdict before any host service sees it: the
+     * anti-spoof first (the source must be the tap's guest), then the
+     * guest's TO_HOST rules and default. Loopback and the uplink are not
+     * guests and are not consulted; that host-scoped chain is a later unit. */
+    if ((nif->flags & NETIF_MASQUERADE) && fw_input_verdict(nif, m, iph, ihl) == FW_DROP) {
+        STAT(in_filtered);
+        m_freem(m);
+        return;
+    }
+
     /* Trim link padding, drop the header, deliver. The whole header,
      * options included, is copied out (60 bytes at most) so that an ICMP
      * error can quote exactly what arrived and never a byte beyond it. */

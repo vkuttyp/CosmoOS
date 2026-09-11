@@ -18,6 +18,7 @@
 #include <kernel/net/inet.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/net/tcp.h>
 #include <kernel/netif.h>
 #include <kernel/spinlock.h>
@@ -27,7 +28,8 @@
 struct fw_guest {
     bool     attached;
     uint32_t ip;                          /* network order */
-    uint8_t  policy[2];                   /* [0] TO_UPLINK, [1] TO_GUEST */
+    uint32_t gateway;                     /* its tap's host address (network order), for the seeds */
+    uint8_t  policy[FW_DIR_COUNT];        /* [0] TO_UPLINK, [1] TO_GUEST, [2] TO_HOST */
     unsigned nrules;
     struct fw_rule rules[FW_RULES_PER_GUEST];
 };
@@ -51,11 +53,16 @@ static struct fw_stats g_stats;
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
-/* The defaults: the world stays reachable, a neighbour does not. */
+/* The defaults: the world stays reachable; a neighbour and the host's own
+ * services do not -- except what the tap offers, seeded as rules below. */
 #define POLICY_TO_UPLINK_DEFAULT FW_ACCEPT
 #define POLICY_TO_GUEST_DEFAULT  FW_DROP
+#define POLICY_TO_HOST_DEFAULT   FW_DROP
 
-static inline unsigned dir_slot(uint8_t dir) { return dir == FW_DIR_TO_GUEST ? 1u : 0u; }
+static inline unsigned dir_slot(uint8_t dir)
+{
+    return dir == FW_DIR_TO_GUEST ? 1u : dir == FW_DIR_TO_HOST ? 2u : 0u;
+}
 
 /* --- guests (caller holds g_fw_lock) -------------------------------------- */
 
@@ -67,16 +74,27 @@ static struct fw_guest *guest_find(uint32_t ip)
     return NULL;
 }
 
-static void guest_reset(struct fw_guest *g, uint32_t ip)
+/* "As attached": the defaults, and the two TO_HOST rules that keep the tap's
+ * own services reachable through a default-deny INPUT chain -- ordinary
+ * rules, listed and deletable, not hard-coded holes. DHCP needs none (it is
+ * answered at the frame level, before the stack). */
+static void guest_reset(struct fw_guest *g, uint32_t ip, uint32_t gateway)
 {
     memset(g, 0, sizeof(*g));
     g->attached = true;
     g->ip = ip;
+    g->gateway = gateway;
     g->policy[0] = POLICY_TO_UPLINK_DEFAULT;
     g->policy[1] = POLICY_TO_GUEST_DEFAULT;
+    g->policy[2] = POLICY_TO_HOST_DEFAULT;
+    g->rules[0] = (struct fw_rule){ .direction = FW_DIR_TO_HOST, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                                    .verdict = FW_ACCEPT, .dst_ip = gateway, .dst_port = 53 };
+    g->rules[1] = (struct fw_rule){ .direction = FW_DIR_TO_HOST, .proto = IPPROTO_ICMP, .dst_prefix = 32,
+                                    .verdict = FW_ACCEPT, .dst_ip = gateway, .dst_port = ICMP_ECHO };
+    g->nrules = 2;
 }
 
-void fw_guest_attach(uint32_t guest_ip)
+void fw_guest_attach(uint32_t guest_ip, uint32_t gateway_ip)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
     struct fw_guest *g = guest_find(guest_ip);
@@ -85,7 +103,7 @@ void fw_guest_attach(uint32_t guest_ip)
             if (!g_guests[i].attached)
                 g = &g_guests[i];
     if (g != NULL)
-        guest_reset(g, guest_ip);
+        guest_reset(g, guest_ip, gateway_ip);
     spin_unlock_irqrestore(&g_fw_lock, s);
     if (g == NULL)
         kwarn("fw: no guest slot for a new tap; its traffic takes the built-in defaults");
@@ -110,12 +128,12 @@ void fw_guest_purge(uint32_t guest_ip)
 
 static bool rule_valid(const struct fw_rule *r)
 {
-    if (r->direction > FW_DIR_TO_GUEST || r->verdict > FW_ACCEPT || r->dst_prefix > 32)
+    if (r->direction > FW_DIR_TO_HOST || r->verdict > FW_ACCEPT || r->dst_prefix > 32)
         return false;
     if (r->proto != 0 && r->proto != IPPROTO_TCP && r->proto != IPPROTO_UDP && r->proto != IPPROTO_ICMP)
         return false;
-    if (r->proto == IPPROTO_ICMP && r->dst_port != 0)
-        return false;                     /* ports do not apply; keep the tuple canonical */
+    if (r->proto == IPPROTO_ICMP && r->dst_port > 255 && r->dst_port != FW_ICMP_TYPE_ANY)
+        return false;                     /* for ICMP the selector is a type, or the wildcard */
     if (r->dst_prefix == 0 && r->dst_ip != 0)
         return false;                     /* "any destination" is written as 0/0 */
     return true;
@@ -193,7 +211,7 @@ unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned max)
 
 int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict)
 {
-    if ((direction != FW_DIR_TO_UPLINK && direction != FW_DIR_TO_GUEST) || verdict > FW_ACCEPT)
+    if (direction < FW_DIR_TO_UPLINK || direction > FW_DIR_TO_HOST || verdict > FW_ACCEPT)
         return -EINVAL;
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
     struct fw_guest *g = guest_find(guest_ip);
@@ -203,13 +221,14 @@ int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict)
     return g != NULL ? 0 : -ENOENT;
 }
 
-int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest)
+int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
     struct fw_guest *g = guest_find(guest_ip);
     if (g != NULL) {
         *to_uplink = g->policy[0];
         *to_guest = g->policy[1];
+        *to_host = g->policy[2];
     }
     spin_unlock_irqrestore(&g_fw_lock, s);
     return g != NULL ? 0 : -ENOENT;
@@ -272,8 +291,12 @@ static bool rule_matches(const struct fw_rule *r, uint8_t dir, const struct ipv4
         if (((iph->dst ^ r->dst_ip) & mask) != 0)
             return false;
     }
-    /* A port constraint applies to TCP/UDP only: a rule naming a port never
-     * matches a datagram that has none. (An ICMP rule carries dst_port 0.) */
+    /* The transport selector follows the protocol. An ICMP rule names a type
+     * (or the wildcard) and matches only a datagram whose ICMP header was
+     * read; a TCP/UDP/any rule naming a port never matches a datagram that
+     * has none. */
+    if (r->proto == IPPROTO_ICMP)
+        return v->ok && (r->dst_port == FW_ICMP_TYPE_ANY || v->icmp_type == r->dst_port);
     if (r->dst_port != 0 && (!v->ports || v->dport != r->dst_port))
         return false;
     return true;
@@ -423,6 +446,50 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct m
     return verdict;
 }
 
+/* --- the INPUT chain ------------------------------------------------------ */
+
+enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
+                                 const struct ipv4_hdr *iph, unsigned ihl)
+{
+    /* Anti-spoof, the forwarding rule made on this path too: a masquerading
+     * tap is a point-to-point link to one owner at <subnet>.15, so any other
+     * source is a forgery -- of a neighbour, of the uplink, of the host
+     * itself -- and never reaches a host service, whatever the rules say. */
+    if (nif->ip4.addr && nif->ip4.mask &&
+        iph->src != ((nif->ip4.addr & nif->ip4.mask) | htonl(TAPSVC_GUEST_HOST))) {
+        STAT(in_spoofed);
+        return FW_DROP;
+    }
+    struct l4_view v;
+    l4_read(m, ihl, iph->proto, &v);
+
+    /* No state on this chain: the host's reply leaves by ipv4_output and
+     * passes no filter, and a guest's later segments match the same rule by
+     * destination port. A guest never attached (no tap open made it) fails
+     * closed: the built-in default and no seeded rules. */
+    arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
+    struct fw_guest *g = guest_find(iph->src);
+    enum fw_verdict verdict = POLICY_TO_HOST_DEFAULT;
+    bool by_rule = false;
+    if (g != NULL) {
+        verdict = (enum fw_verdict)g->policy[dir_slot(FW_DIR_TO_HOST)];
+        for (unsigned i = 0; i < g->nrules; i++)
+            if (rule_matches(&g->rules[i], FW_DIR_TO_HOST, iph, &v)) {
+                verdict = (enum fw_verdict)g->rules[i].verdict;
+                by_rule = true;
+                break;
+            }
+    }
+    spin_unlock_irqrestore(&g_fw_lock, s);
+
+    if (verdict == FW_ACCEPT) {
+        if (by_rule) STAT(in_accept_rule); else STAT(in_accept_default);
+    } else {
+        if (by_rule) STAT(in_drop_rule); else STAT(in_drop_default);
+    }
+    return verdict;
+}
+
 /* --- maintenance ---------------------------------------------------------- */
 
 void fw_age(uint64_t now_ns)
@@ -442,7 +509,7 @@ void fw_flush(void)
     memset(g_flows, 0, sizeof(g_flows));
     for (unsigned i = 0; i < FW_MAX_GUESTS; i++)
         if (g_guests[i].attached)
-            guest_reset(&g_guests[i], g_guests[i].ip);
+            guest_reset(&g_guests[i], g_guests[i].ip, g_guests[i].gateway);
     spin_unlock_irqrestore(&g_fw_lock, s);
 }
 

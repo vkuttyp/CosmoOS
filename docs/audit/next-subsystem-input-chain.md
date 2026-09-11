@@ -1,8 +1,11 @@
 # NEXT SUBSYSTEM — the INPUT chain: what a guest may ask of the host
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "The INPUT chain: what a guest may ask of the host"),
+and the design below is as built — see `docs/kernel-services/network/design.md`
+("The INPUT chain") for the shipped description and
+`docs/kernel-services/network/testing.md` (`net-input`) for its proofs.
 
 **Subsystem: the firewall's second chain. The forwarding firewall decided
 which *other machines* a guest may reach; this decides which of the **host's
@@ -11,41 +14,42 @@ gets a verdict at the local-delivery site in `ipv4_input`, after NAT declines
 it and before the transport demux — evaluated against the same per-guest,
 first-match rule engine as the FORWARD chain, as a third direction,
 `TO_HOST`, needing no new struct, only a new direction value and a third
-default policy. Two gaps close at once: (1) host-local delivery has **no
-filter today**, so a guest can reach any host listener through its gateway
+default policy. Two gaps close at once: (1) host-local delivery had **no
+filter**, so a guest could reach any host listener through its gateway
 address (management sockets, debug services, another tenant's helper) — the
 default becomes "the services the tap offers, and nothing else", with those
 services installed as visible, deletable rules rather than hard-coded holes;
-and (2) host-local delivery has **no anti-spoof today** — the strict-source
-check lives only in `ipv4_forward` — so a guest can forge its source toward
-host services; the same rule now guards the local path. The host's own
+and (2) host-local delivery had **no anti-spoof** — the strict-source
+check lived only in `ipv4_forward` — so a guest could forge its source
+toward host services; the same rule now guards the local path. The host's own
 exposure to the *uplink* (a host-scoped firewall) and the host's egress (an
 OUTPUT chain) are named as the next units.**
 
-## Problem
+## Problem (the state before this unit)
 
 The forwarding firewall (PR #103) isolated guests from each other and from
 the world by policy, and scoped itself to the FORWARD chain, naming an INPUT
-chain as the follow-up. That leaves the host itself as the exposed party:
+chain as the follow-up. That left the host itself as the exposed party:
 
-- **Any host listener is reachable from a guest.** A guest sends to its tap
+- **Any host listener was reachable from a guest.** A guest sends to its tap
   gateway (`10.0.(3+k).1`) — or to *any* address the host owns, its uplink
   address included — and `ipv4_input` delivers it to whatever UDP/TCP socket
   or ICMP handler is bound there. The guest-facing services (the DNS proxy on
   `gateway:53`, ICMP echo) are meant to be reachable; a host management
   service bound to `0.0.0.0`, a debug listener, a test harness socket, or the
   DNS proxy of *another* guest's tap (bound to *its* gateway, which the host
-  also owns) are not — and today there is no way to say so. On a multi-tenant
-  host that is the classic escape: the guests cannot see each other, but each
+  also owns) were not — and there was no way to say so. On a multi-tenant
+  host that was the classic escape: the guests cannot see each other, but each
   can see the hypervisor.
-- **A guest can lie about who it is to the host.** `ipv4_forward` requires a
+- **A guest could lie about who it is to the host.** `ipv4_forward` required a
   masquerading tap's source to be exactly `<subnet>.15`; `ipv4_input`'s local
-  path performs no such check, so a guest may source a datagram to a host
-  service as its neighbour, as the uplink, or as the host itself.
+  path performed no such check, so a guest could source a datagram to a host
+  service as its neighbour or as the uplink (as the host itself it was
+  already a martian, dropped by `ipv4_input` upstream).
 
-## Current implementation
+## Implementation before this unit (what it replaced)
 
-`kernel-services/network/ipv4.c`, `ipv4_input`:
+`kernel-services/network/ipv4.c`, `ipv4_input`, as it stood:
 
 - A datagram not addressed to the host is forwarded if the ingress is
   `NETIF_FORWARD` (`ipv4.c:583`); one that is addressed to the host is offered
@@ -54,11 +58,13 @@ chain as the follow-up. That leaves the host itself as the exposed party:
   reaches host services.
 - Everything else addressed to the host (and every broadcast) is trimmed and
   demuxed: `icmp_input` / `udp_input(nif, m, hdr, NULL)` / `tcp_input(...)`
-  (the `switch (hdr->proto)` that follows `:599`). **There is no verdict on
+  (the `switch (hdr->proto)` that follows `:599`). **There was no verdict on
   this path and no source check**: the anti-spoof (`ipv4.c:429-441`,
-  `fwd_spoofed`) runs only in `ipv4_forward`.
+  `fwd_spoofed`) ran only in `ipv4_forward`. (Now `fw_input_verdict` sits
+  between `nat_in` declining and the trim-and-demux, gated on guest-tap
+  ingress, and counts `in_filtered` on a drop.)
 
-`kernel-services/network/fw.c` (the firewall) knows two directions,
+`kernel-services/network/fw.c` (the firewall) knew two directions,
 `TO_UPLINK` and `TO_GUEST`, decided by the egress interface in
 `ipv4_forward`; its rule engine (per-guest ordered list, first match, a
 default per direction), attachment registry, control opcodes and listing are
@@ -90,7 +96,7 @@ tap, so a default that admits DNS and echo leaves the suite unchanged.
   policy slot, one verdict call, two seeded rules; the control ABI grows by a
   value and a byte.
 
-## Proposed design
+## Design (as built)
 
 ### 1. `TO_HOST`: the INPUT chain as a third direction
 
@@ -216,6 +222,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
 ## Affected files
 
 - `kernel/include/kernel/net/fw.h` — `FW_DIR_TO_HOST`; policy array to 3;
+  `fw_guest_attach(guest_ip, gateway_ip)` (as built the tap's gateway is
+  passed in for the seeds rather than derived from a `.1` convention, and
+  stored per guest so `fw_flush` can re-seed);
   `enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m, const
   struct ipv4_hdr *iph, unsigned ihl);` `fw_policy_get` gains `to_host`;
   `fw_stats` gains `in_accept_rule/in_accept_default/in_drop_rule/
@@ -228,7 +237,9 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
   slot, `dir_slot` maps it.
 - `kernel-services/network/ipv4.c` — the call after `nat_in` declines, for
   `NETIF_MASQUERADE` ingress; `ip_stats.in_filtered`, `in_spoofed`.
-- `kernel/include/kernel/net/ip.h` — the two stats.
+- `kernel/include/kernel/net/ip.h` — `in_filtered` (the INPUT drop count;
+  `in_spoofed` is counted in `fw_stats`, where the verdict is taken, rather
+  than duplicated here).
 - `kernel/include/uapi/cosmo/netctl.h` — `DIR_TO_HOST`, `policy_to_host`,
   version 3.
 - `kernel-services/network/tap.c` — the read snapshot emits `policy_to_host`
@@ -259,7 +270,7 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
 - UAPI: `COSMO_NETCTL_DIR_TO_HOST`, `cosmo_netctl_filter_guest.policy_to_host`,
   `COSMO_NETCTL_VERSION 3`. No new opcode, no new struct, no new syscall.
 
-## Migration plan
+## Migration (done, in the planned order)
 
 1. `fw.h`/`fw.c`: the third direction and policy slot; `fw_input_verdict`
    with the anti-spoof and the `TO_HOST` walk; seeding in attach/flush.
@@ -303,9 +314,12 @@ plus ksock listeners on the host to prove delivery or its absence:
   `fw_flush`'s re-seed); the listing shows both seeds with indices 0 and 1
   and `policy_to_host == DROP`.
 - **Anti-spoof on the local path**: a datagram from a guest tap sourced as
-  `10.0.3.50` (or as the host itself, or as the neighbour) toward
-  `gateway:53` is dropped with `in_spoofed`, though a rule would admit that
-  port from the real guest.
+  `10.0.3.50`, as the neighbour, or as a world address toward `gateway:53`
+  is dropped with `in_spoofed`, though a rule would admit that port from the
+  real guest. (Sourced as the host *itself*, it never reaches the firewall:
+  `ipv4_input` drops one of our own addresses arriving from a link as a
+  martian, `rx_bad_header` — a stronger drop, counted upstream; the test
+  asserts that too.)
 - **Per-guest**: A's `TO_HOST` rule does not open B's path; purge on release
   removes A's `TO_HOST` rules and policy; a reopened A re-seeds cleanly.
 - **Policy flip**: `FILTER_POLICY TO_HOST ACCEPT` admits an unruled port; back
@@ -319,13 +333,18 @@ plus ksock listeners on the host to prove delivery or its absence:
 - **Regression**: `net-dns`, `net-dhcp`, `net-nat`, `net-firewall` unchanged
   in verdict (counts adjusted for the seeds).
 
-Bug-proofs: a verdict that always accepts (the closed port then receives);
-an ICMP match that ignores the type (a guest Need-Fragmentation then reaches
-`ipv4_pmtu_update` and `pmtu_updates` rises);
-a missing anti-spoof (the forged source then reaches the listener); seeds
-implemented as hard-coded exceptions (deleting the DNS rule then changes
-nothing); the call site placed *before* `nat_in` (a masqueraded reply is
-then wrongly subjected to `TO_HOST` and dropped — `net-nat`'s reply fails).
+Bug-proofs (as run): a verdict that always accepts (the closed port then
+counts an accept, not a drop); a missing anti-spoof (`in_spoofed` never
+rises — and the datagram forged as the neighbour would then be admitted
+under the neighbour's own any-destination DNS rule, which the test installs
+for exactly this reason); echo as a hard-coded hole rather than a seeded
+rule (deleting the echo seed then changes nothing); an ICMP match that
+ignores the type (a guest echo *reply* is then admitted by the echo-request
+seed). The draft's fifth proof — the call site placed before `nat_in` — is
+not runnable as stated: with the verdict gated on guest-tap ingress, nothing
+`nat_in` claims arrives on a guest tap (a masqueraded reply arrives on the
+uplink), so the ordering is unobservable today; the placement after
+`nat_in` is kept for the host-scoped chain that will make it matter.
 
 ## Benchmarks
 
@@ -344,8 +363,11 @@ changes.
   the suite sources from the guest's `.15`; a survey precedes the change.
 - **Call-site ordering.** Placing the verdict before `nat_in` would filter
   NAT'd replies as host-bound traffic (they are not). Mitigation: after
-  `nat_in` declines, and a bug-proof asserts it (`net-nat`'s masqueraded
-  reply must still reach the guest).
+  `nat_in` declines. As built this ordering is unobservable today — the
+  verdict is gated on guest-tap ingress and nothing `nat_in` claims arrives
+  on a guest tap (a masqueraded reply arrives on the uplink) — so no runtime
+  proof exists yet; the placement is kept, and will be provable, when the
+  host-scoped chain consults the uplink.
 - **Seeded rules and the per-guest cap.** Two of `FW_RULES_PER_GUEST` (32)
   are taken at attach; `-ENOSPC` arrives two rules earlier. Acceptable and
   documented.
