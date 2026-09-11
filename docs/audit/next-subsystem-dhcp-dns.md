@@ -112,18 +112,29 @@ answers the one guest:
   keyed by the client's hardware address (chaddr); a second client is
   offered nothing (logged), not a second address. A per-client pool is the
   concern of the userland-daemon unit, not this one.
-- **Replying to a client with no address, out `tap0`.** The client cannot
-  yet receive a unicast to `yiaddr`, and the reply must reach the tap and
-  only the tap. The service builds the whole reply frame (Ethernet + IP +
-  UDP, source `10.0.3.1:67`, destination `10.0.3.15:68`) and transmits it out
-  `tap0` with `ether_output` to the client's hardware address (or the link
-  broadcast when the client set the broadcast flag, RFC 2131 §4.1) — an
-  interface-scoped send, not `ipv4_output`, so it never consults the route
-  table and never leaks to the NIC. Because ingress is the tap's own filter
-  and egress is an explicit `ether_output(tap0, …)`, both directions are
-  scoped to the tap by construction; no wildcard socket and no routed
-  broadcast is involved, so `NETIF_NODEFAULT` and the missing interface
-  scope on sockets are not in the path.
+- **Reaching a client with no address, out `tap0`, addressed the way RFC
+  2131 §4.1 requires.** The client does not own `10.0.3.15` when the OFFER
+  or ACK is sent, so the reply's destination follows the client's broadcast
+  flag, at *both* layers:
+  - **Broadcast flag set** (a fresh client, e.g. Linux `dhclient`): the reply
+    is the *limited broadcast* — IP destination `255.255.255.255`, UDP port
+    68, Ethernet destination the link broadcast `ff:ff:ff:ff:ff:ff`. Using
+    `10.0.3.15` as the IP destination here would let the guest's IPv4 input
+    drop the datagram before its DHCP client sees it (it owns no such
+    address yet), which is the failure this rule exists to avoid.
+  - **Broadcast flag clear:** IP destination `yiaddr` (`10.0.3.15`), UDP
+    port 68, Ethernet destination the client's hardware address (`chaddr`) —
+    a link-unicast to a client that has told us it will accept a datagram for
+    an address it does not yet own.
+
+  Either way the service builds the whole reply frame (source `10.0.3.1:67`)
+  and transmits it out `tap0` with `ether_output` — an interface-scoped send,
+  never `ipv4_output`, so it never consults the route table and never leaks
+  to the NIC. Because ingress is the tap's own filter and egress is an
+  explicit `ether_output(tap0, …)`, both directions are scoped to the tap by
+  construction; no wildcard socket and no routed broadcast is involved, so
+  `NETIF_NODEFAULT` and the missing interface scope on sockets are not in the
+  path.
 
 ### 3. The DNS proxy: a UDP relay with one transaction model
 
@@ -178,10 +189,11 @@ tap goes away.
 ### 5. The milestone
 
 - **Gated, in the harness:** a synthetic guest on a tap (no external
-  network). It injects a `DHCPDISCOVER` on the tap; the reply read back off
-  the tap is a `DHCPOFFER` addressed to the client's hardware address (not
-  routed off some other interface) carrying `10.0.3.15`, mask `/24`, router
-  and DNS `10.0.3.1`, and a lease. It injects a `DHCPREQUEST` for that
+  network). It injects a `DHCPDISCOVER` on the tap with the broadcast flag set; the
+  reply read back off the tap is a `DHCPOFFER` sent as the limited broadcast
+  at both layers (IP `255.255.255.255`, Ethernet `ff:ff:ff:ff:ff:ff`), never
+  routed off another interface, carrying `10.0.3.15`, mask `/24`, router and
+  DNS `10.0.3.1`, and a lease. It injects a `DHCPREQUEST` for that
   address and reads back a `DHCPACK`; a `REQUEST` for a different address
   reads back a `DHCPNAK`. Then, configured, it sends a DNS query to
   `10.0.3.1:53`; the proxy forwards it (with a rewritten ID) to a test
@@ -259,9 +271,11 @@ tap already needs for this.
   reply read back off the tap is an OFFER to the client's hardware address
   with `10.0.3.15`, `/24`, router/DNS `10.0.3.1`, a lease; REQUEST → ACK; a
   REQUEST for another address → NAK; a second hardware address is offered
-  nothing. The reply is addressed to the client at the link layer and leaves
-  only the tap (a bug-proof: routing it instead sends it off the default
-  interface, and the tap read-back is then empty).
+  nothing. With the broadcast flag set the reply is the limited broadcast at
+  both the IP and Ethernet layers and leaves only the tap (bug-proofs: an IP
+  destination of `10.0.3.15` under the flag, which the guest would drop; and
+  routing the reply instead of `ether_output`, which sends it off the default
+  interface so the tap read-back is empty).
 - `net-dns` (host): a guest query to `10.0.3.1:53` is forwarded to a
   test-controlled upstream (a loopback responder) with a rewritten ID, and
   the answer read back off the tap carries the guest's *original* ID and the
@@ -290,14 +304,16 @@ has a baseline. No absolute target.
   lengths and treat the input as hostile, and the DNS proxy rewrites only the
   ID rather than interpreting names, so its parse surface is a fixed-size
   header, not the whole message.
-- **Reaching a client with no address, and only it.** A DHCP reply must reach
-  a client that cannot yet receive a unicast to the offered address, and it
-  must reach the tap and not the physical NIC — which is exactly why the
-  reply is built as a frame and sent with `ether_output` out `tap0` to the
-  client's hardware address, never through IP routing (`tap0` is
-  `NETIF_NODEFAULT`, so a routed limited broadcast would leave the wrong
-  interface). The test asserts the reply is read back off the tap and
-  addressed to the client's hardware address.
+- **Reaching a client with no address, and only it, addressed correctly.** A
+  DHCP reply must reach a client that owns no address yet, over the tap and
+  not the physical NIC. Two things have to be right: the *interface* (built
+  as a frame and sent with `ether_output` out `tap0`, never IP-routed —
+  `tap0` is `NETIF_NODEFAULT`, so a routed reply would leave the wrong
+  interface) and the *destination* (RFC 2131 §4.1: with the broadcast flag
+  set, the limited broadcast at both IP and Ethernet layers; clear, a
+  link-unicast to `chaddr` with IP `yiaddr`). Getting the IP destination
+  wrong under the flag — using `yiaddr` — lets the guest drop the reply
+  before its DHCP client sees it. The test asserts both.
 - **Overselling reach.** The gated test resolves through a loopback upstream,
   not the internet; the unit says plainly that real-world resolution is the
   `QEMU_MEM=2G` reproduction, as the tap and NAT units said of theirs.
