@@ -1102,9 +1102,10 @@ See [docs/development.md](docs/development.md).
   `net-nat` (UDP/TCP/ICMP round trips masqueraded and restored with valid
   checksums, an ICMP error translated back, the table bounded and expiring).
   A stock Linux guest with the tap as its gateway reaching the host's network
-  is the `QEMU_MEM=2G` reproduction. A filtering firewall and IPv6 NAT are
-  later units. (Inbound port-forwarding, once listed here as next, is done --
-  see the entry below.)
+  is the `QEMU_MEM=2G` reproduction. The filtering firewall over this
+  forwarding path is done (its own entry below); IPv6 NAT is a later unit.
+  (Inbound port-forwarding, once listed here as next, is done -- see the
+  entry below.)
 - **The guest configures itself: DHCP and a DNS proxy (done):**
   `docs/audit/next-subsystem-dhcp-dns.md`,
   `docs/kernel-services/network/design.md` ("Autoconfiguring the guest").

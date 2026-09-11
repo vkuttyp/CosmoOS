@@ -639,8 +639,9 @@ list of `proto:hostport:guestaddr:guestport`, read on VM attach) maps a host
 port to a guest address and port. The bind is **wildcard on the host
 address**: a rule matches a connection to any of the host's own addresses on
 that port, so the match is the existing "addressed to one of our addresses"
-test plus the port. There is no writable control surface (a runtime API is a
-later unit).
+test plus the port. This unit had no writable control surface; the runtime
+API came two units later ("A runtime network control channel", below), and
+the firewall's rules ride the same channel.
 
 **Inbound** (`nat_in` → `nat_in_dnat`): a TCP/UDP packet addressed to the host
 that is *not* a masquerade reply and whose `(proto, dport)` matches a rule (or
@@ -662,9 +663,10 @@ DNAT and masquerade entries share the one bounded, expiring `nat.c` table,
 told apart by a kind flag (the masquerade lookups filter to their kind), so
 inbound state a remote client can create is bounded exactly as outbound state
 the guest can. A stock Linux guest running a service reached from the host
-through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
-surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
-are later units.
+through a port-forward is the `QEMU_MEM=2G` reproduction. The writable
+control surface and the filtering firewall are done ("A runtime network
+control channel" and "A forwarding firewall", below); hairpin/NAT-reflection
+and IPv6 DNAT are later units.
 
 ## Many guests: a tap per open (`tap.c`, `tapsvc.c`, `nat.c`; audit unit "from one guest to many")
 
