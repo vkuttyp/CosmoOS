@@ -10,6 +10,8 @@
 
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
+#include <kernel/printf.h>
+#include <kernel/fwcfg.h>
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
@@ -118,43 +120,99 @@ void tap_set_input_filter(struct tap *t, tap_input_fn fn, void *arg)
     t->in_filter = fn;   /* arg set first: the filter sees a consistent (fn, arg) */
 }
 
-/* --- /dev/net/tap: the owner's frame channel ---------------------------- */
+/* --- /dev/net/tap: a tap per open, the owner's frame channel ------------- */
 
-/* One tap for the one guest an owner runs. Created down at boot so it never
- * competes as the default interface; brought up when the owner first uses
- * the channel. (A per-open lifecycle would need chrdev open/close hooks the
- * ramfs does not have; one persistent tap is enough for one guest.) */
-static struct tap *g_devtap;
+/* Each open of /dev/net/tap is one guest: it gets a tap of its own on a
+ * subnet of its own from the pool 10.0.(3+k).0/24 (host .1, guest .15 -- the
+ * convention tap0 set), forwarding and masquerade on, and its own DHCP/DNS
+ * service; the last close stops the service and destroys the tap. A tap
+ * exists exactly while an owner holds the channel (docs/audit/
+ * next-subsystem-multiguest.md). */
+#define TAP_MAX_GUESTS 8u
+static bool g_tap_slot[TAP_MAX_GUESTS];
+static spinlock_t g_tap_slot_lock = SPINLOCK_INIT("tap-slots");
 static struct vnode *g_tapnode;
 
-/* Read one frame the stack transmitted out the tap, or 0 when none waits (a
- * frame is never zero-length, so 0 is unambiguously "nothing now"; the owner
- * polls in its run loop as it drains the console). Never blocks. */
-/* A VM has attached to the channel: bring the tap up and, once, turn on
- * forwarding and masquerade so the guest reaches beyond the host (through
- * the host's real interface, with its replies NAT'd back --
- * docs/audit/next-subsystem-nat.md). The flags live on the tap, the guest's
- * ingress, never on the NIC, so the host does not route for its real link. */
-static void tap_dev_activate(void)
+struct tap_open {                 /* struct file::priv for /dev/net/tap */
+    struct tap *tap;
+    struct tapsvc *svc;
+    unsigned slot;
+};
+
+static int tap_chr_open(struct vnode *vn, struct file *f)
 {
-    struct netif *nif = tap_netif(g_devtap);
-    if (nif->flags & NETIF_FORWARD) {
-        netif_set_up(nif, true);
-        return;
-    }
-    netif_set_up(nif, true);
+    (void)vn;
+    arch_irq_state_t s = spin_lock_irqsave(&g_tap_slot_lock);
+    int slot = -1;
+    for (unsigned i = 0; i < TAP_MAX_GUESTS; i++)
+        if (!g_tap_slot[i]) { g_tap_slot[i] = true; slot = (int)i; break; }
+    spin_unlock_irqrestore(&g_tap_slot_lock, s);
+    if (slot < 0)
+        return -ENOSPC;               /* the ninth guest */
+
+    struct tap_open *o = kmalloc(sizeof(*o), KMEM_ZERO);
+    if (o == NULL)
+        goto fail_slot;
+    char name[8];
+    ksnprintf(name, sizeof(name), "tap%d", slot);
+    uint8_t mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, (uint8_t)(0xcc + slot) };
+    o->slot = (unsigned)slot;
+    o->tap = tap_create(name, IPV4_ADDR(10, 0, 3 + slot, 1), htonl(0xffffff00u), mac);
+    if (o->tap == NULL)
+        goto fail_open;
+    /* The guest's ingress: forward its packets, masquerade them out the
+     * host's real interface. The flags are the tap's, never the NIC's. */
+    struct netif *nif = tap_netif(o->tap);
     netif_set_forward(nif, true);
     netif_set_masquerade(nif, true);
-    tapsvc_start(g_devtap);   /* DHCP + DNS for the guest that just attached */
+    o->svc = tapsvc_start(o->tap);
+    if (o->svc == NULL)
+        goto fail_tap;
+    /* Boot-time port-forwards (fw_cfg) name a guest by address; apply the
+     * ones that land on this tap now that it exists (others are skipped). */
+    char pf[128];
+    if (fwcfg_get_string("portforward", pf, sizeof(pf)))
+        nat_portforward_apply(pf);
+    f->priv = o;
+    return 0;
+
+fail_tap:
+    tap_destroy(o->tap);
+fail_open:
+    kfree(o);
+fail_slot:
+    s = spin_lock_irqsave(&g_tap_slot_lock);
+    g_tap_slot[slot] = false;
+    spin_unlock_irqrestore(&g_tap_slot_lock, s);
+    return -ENOMEM;
 }
 
-static int64_t tap_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t len)
+/* Last close: stop the service first (its threads and DHCP filter must be
+ * gone before the tap they point at), then the tap, then free the subnet. */
+static void tap_chr_release(struct vnode *vn, struct file *f)
+{
+    (void)vn;
+    struct tap_open *o = f->priv;
+    if (o == NULL)
+        return;
+    uint32_t guest = (tap_netif(o->tap)->ip4.addr & tap_netif(o->tap)->ip4.mask) | htonl(15u);
+    tapsvc_stop(o->svc);
+    nat_guest_purge(guest);    /* no stale rules/flows for a reused subnet */
+    tap_destroy(o->tap);
+    arch_irq_state_t s = spin_lock_irqsave(&g_tap_slot_lock);
+    g_tap_slot[o->slot] = false;
+    spin_unlock_irqrestore(&g_tap_slot_lock, s);
+    kfree(o);
+    f->priv = NULL;
+}
+
+/* Read one frame the stack transmitted out this owner's tap, or 0 when none
+ * waits (a frame is never zero-length; the owner polls). Never blocks. */
+static int64_t tap_chr_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn; (void)off;
-    if (g_devtap == NULL)
-        return 0;
-    tap_dev_activate();
-    struct mbuf *m = tap_recv(g_devtap);
+    struct tap_open *o = f->priv;
+    struct mbuf *m = tap_recv(o->tap);
     if (m == NULL)
         return 0;
     uint32_t fl = m_length(m);
@@ -167,18 +225,19 @@ static int64_t tap_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     return (int64_t)fl;
 }
 
-/* Inject one frame from the guest into the stack. */
-static int64_t tap_chr_write(struct vnode *vn, uint64_t off, const void *buf, size_t len)
+/* Inject one frame from this owner's guest into the stack. */
+static int64_t tap_chr_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
 {
     (void)vn; (void)off;
-    if (g_devtap == NULL)
-        return -ENODEV;
-    tap_dev_activate();
-    int rc = tap_inject(g_devtap, buf, (uint32_t)len);
+    struct tap_open *o = f->priv;
+    int rc = tap_inject(o->tap, buf, (uint32_t)len);
     return rc ? rc : (int64_t)len;
 }
 
-static const struct chrdev_ops tap_chr_ops = { .read = tap_chr_read, .write = tap_chr_write };
+static const struct chrdev_ops tap_chr_ops = {
+    .open = tap_chr_open, .release = tap_chr_release,
+    .read_file = tap_chr_read_file, .write_file = tap_chr_write_file,
+};
 
 /* --- /dev/net/tapctl: the owner's runtime network-control channel -------- */
 
@@ -250,16 +309,6 @@ static const struct chrdev_ops tap_ctl_ops = { .read = tap_ctl_read, .write = ta
 
 void tap_dev_init(void)
 {
-    static const uint8_t host_mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
-    /* 10.0.3.0/24, a subnet of its own: the interfaces the host autoconfigures
-     * (a NIC) default to 10.0.2.0/24, and two interfaces on one subnet route
-     * ambiguously. The guest gets 10.0.3.15, the host end is 10.0.3.1. */
-    g_devtap = tap_create("tap0", IPV4_ADDR(10, 0, 3, 1), htonl(0xffffff00u), host_mac);
-    if (g_devtap == NULL) {
-        kwarn("tap: cannot create tap0");
-        return;
-    }
-    netif_set_up(tap_netif(g_devtap), false);   /* down until the owner uses the channel */
     vfs_mkdir(NULL, "/dev/net", 0755);           /* -EEXIST is fine */
     int rc = ramfs_mkchr("/dev/net/tap", 0600, &tap_chr_ops, NULL, &g_tapnode);
     if (rc)

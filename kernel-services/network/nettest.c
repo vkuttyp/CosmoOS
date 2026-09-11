@@ -2944,7 +2944,7 @@ bool selftest_net_nat(const char **reason)
         thread_sleep_ms(10);
     }
     nat_get_stats(&ns1);
-    CHECK(ns1.entries == NAT_TABLE_SIZE);                 /* bounded, did not grow */
+    CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* one guest is capped at its quota */
     CHECK(ns1.out_drop_full > ns0.out_drop_full);        /* new flows dropped once full */
 
     /* (6) Expiry: aging past the timeout reclaims the entries. */
@@ -3117,8 +3117,8 @@ bool selftest_net_dhcp(const char **reason)
     uint32_t guest_ip = IPV4_ADDR(10, 88, 1, 15);
     struct tap *t = tap_create("dhcp", host_ip, mask, host_mac);
     CHECK(t != NULL);
-    tapsvc_stop();                 /* clear any instance (e.g. tap0) so ours binds */
-    tapsvc_start(t);
+    struct tapsvc *svc = tapsvc_start(t);
+    CHECK(svc != NULL);
 
     uint8_t frame[400], rx[400];
 
@@ -3181,7 +3181,7 @@ bool selftest_net_dhcp(const char **reason)
     tapsvc_get_stats(&s1);
     CHECK(s1.dhcp_ignored > s0.dhcp_ignored);
 
-    tapsvc_stop();
+    tapsvc_stop(svc);
     tap_destroy(t);
     kinfo("selftest: net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, "
           "the flag-clear reply is a chaddr unicast, a second client is refused");
@@ -3244,8 +3244,8 @@ bool selftest_net_dns(const char **reason)
     struct tap *t = tap_create("dns", host_ip, mask, host_mac);
     CHECK(t != NULL);
     nettest_seed_arp(tap_netif(t), guest_ip, guest_mac);   /* so replies reach the guest */
-    tapsvc_stop();
-    tapsvc_start(t);
+    struct tapsvc *svc = tapsvc_start(t);
+    CHECK(svc != NULL);
 
     /* A loopback upstream resolver the proxy will forward to. */
     struct netaddr rl;
@@ -3261,7 +3261,7 @@ bool selftest_net_dns(const char **reason)
     g_dnsresp.running = true;
     struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
     CHECK(rth != NULL);
-    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+    tapsvc_test_set_upstream(svc, IPV4_ADDR(127, 0, 0, 1), 5300);
 
     uint8_t msg[64], l4[128], frame[256], rx[256];
 
@@ -3311,7 +3311,7 @@ bool selftest_net_dns(const char **reason)
     CHECK(seen_ports == 3);                                     /* both, unambiguous */
 
     /* (3) with no upstream configured, the proxy answers SERVFAIL itself. */
-    tapsvc_test_set_upstream(0, 0);                            /* clear the upstream */
+    tapsvc_test_set_upstream(svc, 0, 0);                            /* clear the upstream */
     mlen = nettest_mk_dns(msg, 0x7777);
     l4len = nettest_mk_udp(l4, guest_ip, host_ip, 6001, 53, msg, (uint16_t)mlen);
     flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
@@ -3326,7 +3326,7 @@ bool selftest_net_dns(const char **reason)
     /* (3b) a response from a source other than the configured upstream is
      * rejected -- an off-path attacker cannot race a forged answer into the
      * guest even if it guesses the id. */
-    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+    tapsvc_test_set_upstream(svc, IPV4_ADDR(127, 0, 0, 1), 5300);
     struct tapsvc_stats sp0, sp1;
     tapsvc_get_stats(&sp0);
     g_dnsresp.spoofing = true;                                 /* responder replies from :5301 */
@@ -3341,7 +3341,7 @@ bool selftest_net_dns(const char **reason)
 
     /* (4) table bound: with the upstream a black hole, a flood fills the
      * pending table and further queries drop; it never exceeds the bound. */
-    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 1);      /* nothing answers there */
+    tapsvc_test_set_upstream(svc, IPV4_ADDR(127, 0, 0, 1), 1);      /* nothing answers there */
     struct tapsvc_stats s0, s1;
     tapsvc_get_stats(&s0);
     for (unsigned i = 0; i < 400; i++) {
@@ -3377,7 +3377,7 @@ bool selftest_net_dns(const char **reason)
     ksock_put(g_dnsresp.spoof);
     g_dnsresp.sock = NULL;
     g_dnsresp.spoof = NULL;
-    tapsvc_stop();
+    tapsvc_stop(svc);
     tap_destroy(t);
     kinfo("selftest: net-dns: a query is relayed and its answer restored to the guest, two queries "
           "sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires");
@@ -3626,5 +3626,104 @@ bool selftest_net_tapctl(const char **reason)
     tap_destroy(g);
     kinfo("selftest: net-tapctl: a forward added through /dev/net/tapctl took effect and listed, "
           "delete reaped its flow, and duplicate/off-tap/short/bad-version commands were refused");
+    return true;
+}
+
+/* --- many guests: a tap per open of /dev/net/tap ---------------------------- */
+
+#define MG_MAX 8u
+
+/* An ARP request from `smac` for the host address `tpa`, 42 bytes. */
+static void mg_arp_req(uint8_t *req, const uint8_t smac[6], uint32_t spa, uint32_t tpa)
+{
+    memset(req, 0, 42);
+    memset(req, 0xff, 6); memcpy(req + 6, smac, 6);
+    req[12] = 0x08; req[13] = 0x06; req[15] = 1; req[16] = 0x08; req[18] = 6; req[19] = 4; req[21] = 1;
+    memcpy(req + 22, smac, 6); memcpy(req + 28, &spa, 4); memcpy(req + 38, &tpa, 4);
+}
+
+bool selftest_net_multiguest(const char **reason)
+{
+    struct file *f[MG_MAX];
+    memset(f, 0, sizeof(f));
+
+    /* (1) eight opens are eight taps on eight distinct subnets; a ninth is refused. */
+    for (unsigned k = 0; k < MG_MAX; k++) {
+        CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f[k]) == 0 && f[k] != NULL);
+        char name[8];
+        ksnprintf(name, sizeof(name), "tap%u", k);
+        struct netif *n = netif_find(name);
+        CHECK(n != NULL && n->ip4.addr == IPV4_ADDR(10, 0, 3 + k, 1) && (n->flags & NETIF_FORWARD));
+        netif_put(n);
+    }
+    struct file *ninth = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &ninth) == -ENOSPC && ninth == NULL);
+
+    /* (2) a frame written to one file reaches only that file's tap: an ARP
+     * for tap0's address answered on file 0, nothing on file 1. */
+    static const uint8_t gmac[6] = { 0x52, 0x54, 0x00, 0x0c, 0x00, 0x0f };
+    uint8_t req[42], rep[64];
+    mg_arp_req(req, gmac, IPV4_ADDR(10, 0, 3, 15), IPV4_ADDR(10, 0, 3, 1));
+    CHECK(file_write(f[0], req, sizeof(req)) == (int64_t)sizeof(req));
+    int64_t n = 0;
+    for (unsigned i = 0; i < 50 && n <= 0; i++) {
+        n = file_read(f[0], rep, sizeof(rep));
+        if (n <= 0) thread_sleep_ms(10);
+    }
+    CHECK(n >= 42 && rep[12] == 0x08 && rep[13] == 0x06 && rep[21] == 2);   /* an ARP reply (padded to 60) */
+    CHECK(memcmp(rep + 28, "\x0a\x00\x03\x01", 4) == 0);                    /* from 10.0.3.1 */
+    CHECK(file_read(f[1], rep, sizeof(rep)) == 0);                            /* tap1 saw nothing */
+
+    /* (2b) guest-to-guest is routed with real addresses, not masqueraded:
+     * a datagram from tap0's guest to tap1's guest leaves tap1 with its
+     * source intact (both taps forward, so the egress is not the uplink). */
+    static const uint8_t g1mac[6] = { 0x52, 0x54, 0x00, 0x0c, 0x00, 0x1f };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
+    { struct netif *n1 = netif_find("tap1"); CHECK(n1 != NULL); nettest_seed_arp(n1, gb, g1mac); netif_put(n1); }
+    uint8_t pl[4] = { 9, 8, 7, 6 }, l4[64], frame[128], rx[128];
+    uint16_t l4len = nettest_mk_udp(l4, ga, gb, 7000, 7001, pl, sizeof(pl));
+    uint32_t flen = nettest_wrap(frame, tap0mac, gmac, ga, gb, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(file_write(f[0], frame, flen) == (int64_t)flen);
+    /* read f[1], skipping the ARP the stack queues while resolving, to the
+     * forwarded IPv4 datagram. */
+    int64_t gn = 0; bool got = false;
+    for (unsigned i = 0; i < 60 && !got; i++) {
+        gn = file_read(f[1], rx, sizeof(rx));
+        if (gn >= ETH_HLEN + 20 && rx[12] == 0x08 && rx[13] == 0x00)
+            got = true;
+        else if (gn <= 0)
+            thread_sleep_ms(10);
+    }
+    CHECK(got);
+    CHECK(((struct ipv4_hdr *)(rx + ETH_HLEN))->src == ga);   /* real source, not masqueraded */
+
+    /* (2c) a forward rule per guest; closing tap0's owner purges only its
+     * guest's rule, tap1's remains. */
+    nat_pf_clear();
+    CHECK(nat_pf_add(IPPROTO_TCP, 2222, ga, 22) == 0);
+    CHECK(nat_pf_add(IPPROTO_TCP, 3333, gb, 22) == 0);
+    struct nat_pf_rule rules[NAT_PF_MAX];
+    CHECK(nat_pf_list(rules, NAT_PF_MAX) == 2);
+
+    /* (3) the last close of one file destroys only its tap, purges only its
+     * guest's NAT state, and frees its slot; the others live on. */
+    file_put(f[0]); f[0] = NULL;
+    struct netif *gone = netif_find("tap0"), *kept = netif_find("tap1");
+    CHECK(gone == NULL && kept != NULL);
+    netif_put(kept);
+    unsigned nr = nat_pf_list(rules, NAT_PF_MAX);
+    CHECK(nr == 1 && rules[0].guest_ip == gb);   /* tap0's guest purged, tap1's kept */
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &f[0]) == 0);
+    struct netif *again = netif_find("tap0");
+    CHECK(again != NULL && again->ip4.addr == IPV4_ADDR(10, 0, 3, 1));
+    netif_put(again);
+
+    for (unsigned k = 0; k < MG_MAX; k++)
+        if (f[k]) file_put(f[k]);
+    CHECK(netif_find("tap0") == NULL && netif_find("tap7") == NULL);
+
+    kinfo("selftest: net-multiguest: eight opens gave eight taps on eight subnets, a ninth was refused, "
+          "frames stayed on their own tap, a close destroyed only its own and its slot was reused");
     return true;
 }

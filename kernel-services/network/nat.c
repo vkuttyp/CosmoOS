@@ -65,6 +65,7 @@ static spinlock_t g_pf_lock = SPINLOCK_INIT("nat-pf");
 
 #define STAT(f) __atomic_fetch_add(&g_stats.f, 1, __ATOMIC_RELAXED)
 
+
 _Static_assert(NAT_PORT_MAX < NET_EPHEMERAL_LO,
                "NAT ports must not overlap the host ephemeral range");
 
@@ -327,7 +328,11 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
      * leave an interface whose subnet does not already hold the source. */
     bool on_egress = out->ip4.addr && out->ip4.mask &&
                      ((iph->src ^ out->ip4.addr) & out->ip4.mask) == 0;
-    if (!(in->flags & NETIF_MASQUERADE) || on_egress || out->ip4.addr == 0)
+    /* Masquerade only toward the uplink. A flow leaving another forwarding
+     * tap is guest-to-guest (both taps forward); leave its source real so the
+     * guests see each other's addresses. */
+    if (!(in->flags & NETIF_MASQUERADE) || on_egress || out->ip4.addr == 0 ||
+        (out->flags & NETIF_FORWARD))
         return 0;
 
     uint8_t proto = iph->proto;
@@ -361,6 +366,18 @@ int nat_out(struct netif *in, struct netif *out, struct mbuf *m,
     struct nat_entry *e = nat_find_out(proto, iph->src, orig_port, iph->dst, peer_port, now);
     bool fresh = false;
     if (e == NULL) {
+        /* No guest may hold more than its share of the shared table, so one
+         * guest's flood drops only its own new flows, not another's. */
+        unsigned mine = 0;
+        for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+            if (g_nat[i].in_use && !nat_expired(&g_nat[i], now) &&
+                g_nat[i].kind == NAT_KIND_MASQ && g_nat[i].orig_ip == iph->src)
+                mine++;
+        if (mine >= NAT_QUOTA_PER_GUEST) {
+            spin_unlock_irqrestore(&g_nat_lock, s);
+            STAT(out_drop_full);
+            return -ENOSPC;
+        }
         e = nat_alloc(proto, out->ip4.addr, orig_port, now);
         if (e == NULL) {
             spin_unlock_irqrestore(&g_nat_lock, s);
@@ -728,6 +745,22 @@ bool nat_pf_del(uint8_t proto, uint16_t host_port)
     return true;
 }
 
+void nat_guest_purge(uint32_t guest_ip)
+{
+    /* Under g_pf_lock across both, as nat_pf_del is, so a create cannot slip
+     * a rule or entry back in for this address mid-purge. */
+    arch_irq_state_t ps = spin_lock_irqsave(&g_pf_lock);
+    for (unsigned i = 0; i < NAT_PF_MAX; i++)
+        if (g_pf[i].in_use && g_pf[i].guest_ip == guest_ip)
+            g_pf[i].in_use = false;
+    arch_irq_state_t ns = spin_lock_irqsave(&g_nat_lock);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE; i++)
+        if (g_nat[i].in_use && g_nat[i].orig_ip == guest_ip)   /* guest side: MASQ and DNAT both */
+            g_nat[i].in_use = false;
+    spin_unlock_irqrestore(&g_nat_lock, ns);
+    spin_unlock_irqrestore(&g_pf_lock, ps);
+}
+
 unsigned nat_pf_list(struct nat_pf_rule *out, unsigned max)
 {
     unsigned n = 0;
@@ -778,9 +811,21 @@ static bool pf_ip(const char **p, uint32_t *out)
     return true;
 }
 
+static void pf_parse_apply(const char *cfg);
+
 void nat_portforward_config(const char *cfg)
 {
     nat_pf_clear();
+    pf_parse_apply(cfg);
+}
+
+void nat_portforward_apply(const char *cfg)
+{
+    pf_parse_apply(cfg);
+}
+
+static void pf_parse_apply(const char *cfg)
+{
     if (cfg == NULL)
         return;
     const char *p = cfg;
@@ -793,7 +838,7 @@ void nat_portforward_config(const char *cfg)
         bool ok = proto && pf_num(&p, &hport, 65535) && *p == ':' && (p++, pf_ip(&p, &gip)) &&
                   *p == ':' && (p++, pf_num(&p, &gport, 65535));
         if (ok)
-            nat_pf_add(proto, (uint16_t)hport, gip, (uint16_t)gport);
+            (void)nat_pf_add(proto, (uint16_t)hport, gip, (uint16_t)gport);   /* dup / not-yet-up tap: skipped */
         else
             kwarn("nat: ignoring malformed port-forward rule near '%s'", p);
         while (*p && *p != ',')   /* skip to the next rule */
