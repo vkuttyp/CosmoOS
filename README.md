@@ -1168,5 +1168,15 @@ See [docs/development.md](docs/development.md).
   that reads them). `docs/audit/next-subsystem-linux.md` did it for
   booting Linux, and Linux now boots (the feature registers modelled, the
   RAM ceiling raised) to its diskless-root panic -- the reader whose
-  opinion of the device tree settles it, and it settled favourably. Design
-  documents first, one subsystem at a time.
+  opinion of the device tree settles it, and it settled favourably. From
+  there the arc gave the guest what a diskless kernel lacked, one subsystem
+  at a time (all built): `-vblk.md` and `-vblk-rw.md`, a virtio-blk root
+  filesystem it can mount and write; `-vnet.md`, a virtio-net interface;
+  `-tap.md`, a host bridge that connects it to the host's own stack;
+  `-nat.md`, connected-subnet routing, IP forwarding and masquerade NAT so
+  the guest reaches beyond the host; and `-dhcp-dns.md`, a DHCP server and a
+  DNS proxy on the tap so a stock guest autoconfigures its interface and
+  resolves names with nothing set by hand. The named next steps are that
+  unit's own follow-ups (a general DHCP server, a caching resolver, DHCPv6,
+  DNS-over-TCP) and, on the guest itself, the `QEMU_MEM=2G` reproduction
+  reaching the real world. Design documents first, one subsystem at a time.
