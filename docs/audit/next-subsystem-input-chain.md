@@ -104,9 +104,14 @@ The FORWARD chain's direction is decided by the egress (`TO_GUEST` when `out`
 is another forwarding tap, else `TO_UPLINK`). A datagram delivered locally
 has a third destination: **the host**. `enum fw_dir` gains `FW_DIR_TO_HOST`
 (and the UAPI `COSMO_NETCTL_DIR_TO_HOST = 3`); a guest's policy array gains a
-third slot. A rule with `direction == TO_HOST` (or `ANY`) is evaluated at the
-local-delivery site; `TO_UPLINK`/`TO_GUEST` rules are evaluated in
-`ipv4_forward` as now. One list per guest, one first-match walk, one
+third slot. A rule with `direction == TO_HOST` is evaluated at the local-delivery
+site; `TO_UPLINK`/`TO_GUEST` rules are evaluated in `ipv4_forward` as
+before. **`ANY` keeps its version-2 meaning — either *forwarding*
+direction — and never matches `TO_HOST`** (the draft had it match all
+three; review caught that an operator's existing `any … ACCEPT` forwarding
+rule would then have silently bypassed the host's default-deny). Host
+traffic needs an explicit `TO_HOST` rule, so no rule written before the
+INPUT chain existed opens the host. One list per guest, one first-match walk, one
 identity (the match tuple), one `at_index` ordering — the INPUT chain is not
 a second engine, it is the same engine consulted from a second place.
 
@@ -309,6 +314,9 @@ plus ksock listeners on the host to prove delivery or its absence:
 - **A rule opens a service**: `TO_HOST udp gateway/32 7000 ACCEPT` → the
   listener receives the datagram (`in_accept_rule` rises); a TCP rule admits
   a SYN *and* the guest's subsequent ACK (stateless per-datagram match).
+- **`ANY` stays forwarding-only**: an `ANY udp gateway/32 :7003 ACCEPT` rule
+  does not open host port 7003 (the default drop counts), while the same
+  tuple as `TO_HOST` does — no pre-existing wildcard silently opens the host.
 - **The seeds are real rules**: deleting the seeded DNS rule by tuple makes
   the next DNS query drop (and `net-dns`'s behaviour is restored by
   `fw_flush`'s re-seed); the listing shows both seeds with indices 0 and 1
@@ -334,7 +342,8 @@ plus ksock listeners on the host to prove delivery or its absence:
   in verdict (counts adjusted for the seeds).
 
 Bug-proofs (as run): a verdict that always accepts (the closed port then
-counts an accept, not a drop); a missing anti-spoof (`in_spoofed` never
+counts an accept, not a drop); an `ANY` direction that also matches the host
+(the wildcard rule then opens port 7003); a missing anti-spoof (`in_spoofed` never
 rises — and the datagram forged as the neighbour would then be admitted
 under the neighbour's own any-destination DNS rule, which the test installs
 for exactly this reason); echo as a hard-coded hole rather than a seeded

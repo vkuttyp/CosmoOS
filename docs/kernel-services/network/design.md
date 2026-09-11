@@ -860,7 +860,11 @@ declined it (a NAT'd reply or DNAT is not host-bound), or a broadcast — and
 before the transport demux; a drop frees the datagram and counts
 `in_filtered`. It is the same engine consulted from a second place:
 **`TO_HOST` is a third direction** (a rule's `direction`, a third default
-slot), not a second rule list. The verdict does two things in order: the
+slot), not a second rule list — and a rule's **`ANY` direction keeps its
+version-2 meaning, either *forwarding* direction, never `TO_HOST`**: a
+wildcard written to permit forwarding must not, by the INPUT chain's
+arrival, silently open a host service, so host traffic needs an explicit
+`TO_HOST` rule. The verdict does two things in order: the
 **anti-spoof** (the source must be the tap's guest, `<subnet>.15`, else
 `in_spoofed` and drop — the forwarding rule made on both paths a tap datagram
 can take), then the guest's `TO_HOST` rules first-match, else its `TO_HOST`

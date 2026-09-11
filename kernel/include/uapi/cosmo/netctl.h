@@ -40,7 +40,9 @@
 /* Filter directions: where a guest's datagram is going. TO_UPLINK/TO_GUEST
  * are the FORWARD chain (decided by the egress); TO_HOST is the INPUT chain
  * (a datagram the guest sends to the host itself). */
-#define COSMO_NETCTL_DIR_ANY       0   /* a rule matching every direction */
+#define COSMO_NETCTL_DIR_ANY       0   /* either forwarding direction (uplink or guest); never TO_HOST --
+                                        * a version-2 wildcard keeps its meaning; host traffic needs an
+                                        * explicit TO_HOST rule */
 #define COSMO_NETCTL_DIR_TO_UPLINK 1   /* egress is not a guest tap (the world) */
 #define COSMO_NETCTL_DIR_TO_GUEST  2   /* egress is another guest's tap */
 #define COSMO_NETCTL_DIR_TO_HOST   3   /* addressed to the host (one of its own addresses, or broadcast) */
@@ -106,7 +108,7 @@ struct cosmo_netctl_filter {
     uint16_t at_index;     /* ADD: insert position (>= count appends); else 0 */
 };
 
-/* The read snapshot, version 2: the port-forward list (struct
+/* The read snapshot, version 2 and later: the port-forward list (struct
  * cosmo_netctl_list + its rules, unchanged) followed by this filter section --
  * a header, `guest_count` per-guest policy records, then `rule_count` rules
  * in evaluation order, each carrying its guest and its current index. A

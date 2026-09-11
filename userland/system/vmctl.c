@@ -44,7 +44,8 @@ static int usage(void)
                     "       vmctl port-forward add PROTO HOSTPORT GUESTADDR GUESTPORT | del PROTO HOSTPORT | list\n"
                     "       vmctl filter add|del GUESTADDR DIR PROTO DST[/PREFIX] PORT VERDICT [INDEX]\n"
                     "                    | policy GUESTADDR DIR VERDICT | list\n"
-                    "         DIR any|uplink|guest  PROTO any|icmp|tcp|udp  DST addr|any  PORT n|any  VERDICT accept|drop\n");
+                    "         DIR any(=uplink+guest, never host)|uplink|guest|host  PROTO any|icmp|tcp|udp\n"
+                    "         DST addr[/prefix]|any  PORT n|any (icmp: type 0-255|echo-request|echo-reply|any)  VERDICT accept|drop\n");
     return 2;
 }
 
@@ -1035,6 +1036,13 @@ static int filter(int argc, char **argv)
         }
         struct cosmo_netctl_list ph;
         memcpy(&ph, buf, sizeof(ph));
+        /* Walk only a snapshot of the version this vmctl speaks: the record
+         * layouts and the ICMP selector's meaning are version-bound, and a
+         * misread listing is worse than none. */
+        if (ph.version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: snapshot version %u, this vmctl speaks %u\n", ph.version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         size_t off = sizeof(ph) + (size_t)ph.count * sizeof(struct cosmo_netctl_rule);
         struct cosmo_netctl_filter_list fh;
         if ((size_t)n < off + sizeof(fh)) {
@@ -1042,6 +1050,10 @@ static int filter(int argc, char **argv)
             goto out;
         }
         memcpy(&fh, buf + off, sizeof(fh));
+        if (fh.version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: filter section version %u, this vmctl speaks %u\n", fh.version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         off += sizeof(fh);
         for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
             struct cosmo_netctl_filter_guest fg;
@@ -1155,6 +1167,10 @@ static int port_forward(int argc, char **argv)
             goto out;
         }
         struct cosmo_netctl_list *h = (struct cosmo_netctl_list *)buf;
+        if (h->version != COSMO_NETCTL_VERSION) {
+            fprintf(stderr, "vmctl: snapshot version %u, this vmctl speaks %u\n", h->version, COSMO_NETCTL_VERSION);
+            goto out;
+        }
         struct cosmo_netctl_rule *r = (struct cosmo_netctl_rule *)(buf + sizeof(*h));
         for (unsigned i = 0; i < h->count; i++) {
             uint32_t a = r[i].guest_addr;

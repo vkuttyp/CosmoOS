@@ -345,7 +345,10 @@ back on A's tap. (3) Everything else is closed by default: UDP to
 uplink address (when the NIC is present) are dropped (`in_drop_default`,
 `ip_stats.in_filtered`). (4) A rule opens a service per datagram, statelessly:
 a SYN and then a bare ACK to the ruled port are both admitted by the same
-rule. (5) The seeds are real rules: deleting the echo seed by tuple makes the
+rule. (4c) `ANY` keeps its forwarding-only meaning: an `ANY udp gateway/32
+:7003 ACCEPT` rule does *not* open host port 7003 (`in_drop_default` rises),
+while the same tuple as `TO_HOST` does (`in_accept_rule`) — no wildcard
+written before the INPUT chain existed silently opens the host. (5) The seeds are real rules: deleting the echo seed by tuple makes the
 next echo request drop with no reply; re-adding it reopens echo. (6) The ICMP
 selector is a type: a guest echo *reply* (type 0) and a guest
 Need-Fragmentation (type 3/4 quoting a host→guest datagram) are dropped by
@@ -371,7 +374,8 @@ mistaken for the wildcard), `256` is `-EINVAL`, and `FILTER_POLICY` with
 `DIR_ANY` is `-EINVAL`.
 
 Proved by reintroducing a verdict that always accepts (the closed port then
-counts an accept, not a drop), a missing anti-spoof (`in_spoofed` never
+counts an accept, not a drop), an `ANY` direction that also matches the host
+(the wildcard rule then opens port 7003), a missing anti-spoof (`in_spoofed` never
 rises; the datagram forged as B would then be admitted under B's own rule),
 echo as a hard-coded hole instead of a seeded rule (deleting the echo seed
 then changes nothing), and an ICMP match that ignores the type (a guest echo
@@ -390,9 +394,9 @@ step-6 list is five rules with the seeds at indices 2–3; a reopened guest
 lists exactly its two seeds; the snapshot carries at least five rules).
 
 **`net-tapctl`** (extended): the snapshot's expected length is now computed
-from the version-2 filter section the read appends (its header, the
-attached guests' policies and rules), rather than assumed to end at the
-port-forward rules.
+from the filter section the read appends (ABI version 2 and later: its
+header, the attached guests' policies and rules), rather than assumed to end
+at the port-forward rules.
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

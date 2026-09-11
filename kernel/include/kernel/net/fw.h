@@ -59,10 +59,13 @@ struct ipv4_hdr;
 
 enum fw_verdict { FW_DROP = 0, FW_ACCEPT = 1 };
 
-/* Directions. ANY is a rule wildcard; a datagram is always one of the others.
- * TO_UPLINK/TO_GUEST are decided by the egress in ipv4_forward (the FORWARD
- * chain); TO_HOST is a datagram a guest tap delivers to the host itself, in
- * ipv4_input (the INPUT chain). */
+/* Directions. TO_UPLINK/TO_GUEST are decided by the egress in ipv4_forward
+ * (the FORWARD chain); TO_HOST is a datagram a guest tap delivers to the host
+ * itself, in ipv4_input (the INPUT chain). ANY is a rule wildcard for the
+ * *forwarding* directions only -- it keeps the meaning it had before the
+ * INPUT chain existed and never matches TO_HOST, so a wildcard written to
+ * permit forwarding cannot silently open a host service; host traffic needs
+ * an explicit TO_HOST rule. */
 enum fw_dir { FW_DIR_ANY = 0, FW_DIR_TO_UPLINK = 1, FW_DIR_TO_GUEST = 2, FW_DIR_TO_HOST = 3 };
 #define FW_DIR_COUNT 3u                                   /* policy slots: uplink, guest, host */
 

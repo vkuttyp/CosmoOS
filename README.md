@@ -1221,8 +1221,9 @@ See [docs/development.md](docs/development.md).
   `net-firewall` (default drop, one-rule hole, stateful return incl. echo by
   id, first-match ordering and delete-by-tuple, a rule outliving its handle
   but not its guest, the listing round trip and every rejection). The INPUT
-  chain is the next entry (done); an OUTPUT chain, the host's uplink-facing
-  INPUT chain, rate-limit/log targets, IPv6 and full TCP state are later units.
+  chain is done (its own entry below); an OUTPUT chain, the host's
+  uplink-facing INPUT chain, rate-limit/log targets, IPv6 and full TCP state
+  are later units.
 - **The INPUT chain: what a guest may ask of the host (done):**
   `docs/audit/next-subsystem-input-chain.md`,
   `docs/kernel-services/network/design.md` ("The INPUT chain"). The

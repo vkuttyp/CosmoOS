@@ -282,7 +282,11 @@ static void l4_read(struct mbuf *m, unsigned ihl, uint8_t proto, struct l4_view 
 static bool rule_matches(const struct fw_rule *r, uint8_t dir, const struct ipv4_hdr *iph,
                          const struct l4_view *v)
 {
-    if (r->direction != FW_DIR_ANY && r->direction != dir)
+    /* ANY keeps its original meaning -- either *forwarding* direction. It
+     * never reaches the host: a wildcard written to permit forwarding must
+     * not, by the INPUT chain's arrival, silently open a host service;
+     * host traffic needs an explicit TO_HOST rule. */
+    if (r->direction == FW_DIR_ANY ? dir == FW_DIR_TO_HOST : r->direction != dir)
         return false;
     if (r->proto != 0 && r->proto != iph->proto)
         return false;

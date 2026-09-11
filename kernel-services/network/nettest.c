@@ -3532,8 +3532,8 @@ bool selftest_net_dnat(const char **reason)
 /* --- the runtime network control channel (/dev/net/tapctl) ---------------- */
 
 /* The byte length a /dev/net/tapctl snapshot should have given `pf_rules`
- * port-forwards: the port-forward list, then the version-2 filter section
- * whose counts are read from the buffer itself (attached guests and rules
+ * port-forwards: the port-forward list, then the filter section (ABI version
+ * 2 and later) whose counts are read from the buffer itself (attached guests and rules
  * vary with what other tests left open). */
 static int64_t netctl_snapshot_len(const uint8_t *buf, unsigned pf_rules)
 {
@@ -3569,8 +3569,9 @@ bool selftest_net_tapctl(const char **reason)
     CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
 
     struct cosmo_netctl cmd;
-    /* Room for the port-forward list and the version-2 filter section that
-     * follows it (its header, up to every guest's policy, and a few rules). */
+    /* Room for the port-forward list and the filter section that follows it
+     * (ABI version 2 and later: its header, up to every guest's policy, and a
+     * few rules). */
     uint8_t rbuf[sizeof(struct cosmo_netctl_list) + NAT_PF_MAX * sizeof(struct cosmo_netctl_rule) +
                  sizeof(struct cosmo_netctl_filter_list) + FW_MAX_GUESTS * sizeof(struct cosmo_netctl_filter_guest) +
                  16 * sizeof(struct cosmo_netctl_filter_rule)];
@@ -4184,6 +4185,27 @@ bool selftest_net_input(const char **reason)
     l4len = nettest_mk_tcp(l4, ga, gwa, 40001, 2222, TH_ACK);
     CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));
+
+    /* (4c) the ANY direction keeps its forwarding-only meaning: a wildcard
+     * ACCEPT written to permit forwarding does not open a host port -- host
+     * traffic needs an explicit TO_HOST rule -- so no rule written before the
+     * INPUT chain existed silently opens the host. */
+    struct fw_rule any_udp = { .direction = FW_DIR_ANY, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                               .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = 7003 };
+    CHECK(fw_rule_add(ga, 0, &any_udp) == 0);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gwa, 4003, 7003, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, in_drop_default, fs0.in_drop_default));   /* ANY did not reach the host */
+    CHECK(fw_rule_del(ga, &any_udp) == 0);
+    struct fw_rule host_udp = any_udp;
+    host_udp.direction = FW_DIR_TO_HOST;
+    CHECK(fw_rule_add(ga, 0, &host_udp) == 0);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gwa, 4004, 7003, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, in_accept_rule, fs0.in_accept_rule));     /* TO_HOST does */
+    CHECK(fw_rule_del(ga, &host_udp) == 0);
 
     /* (5) the seeds are real rules, not hard-coded holes: deleting the echo
      * seed closes echo; re-adding it reopens it. */
