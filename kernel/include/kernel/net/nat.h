@@ -10,8 +10,11 @@
  * and identifier and forwarded to the guest. A bounded conntrack table
  * remembers each flow; entries expire and a full table drops new flows.
  *
- * Only IPv4 UDP, TCP and ICMP echo are masqueraded (docs/audit/
- * next-subsystem-nat.md); IPv6 and inbound port-forwarding are later units.
+ * Inbound port forwarding (DNAT, docs/audit/next-subsystem-dnat.md) is the
+ * mirror: a connection to a configured host port is rewritten to a guest
+ * address/port and forwarded to the guest, and the guest's reply is
+ * rewritten back. Only IPv4 UDP, TCP and ICMP echo are masqueraded; IPv6 is
+ * a later unit.
  */
 #ifndef KERNEL_NET_NAT_H
 #define KERNEL_NET_NAT_H
@@ -33,6 +36,17 @@ struct ipv4_hdr;
 #define NAT_TIMEOUT_ICMP_NS  (30ull * 1000000000ull)
 #define NAT_TIMEOUT_TCP_NS   (30ull * 1000000000ull)    /* a half-open / new TCP flow */
 #define NAT_TIMEOUT_TCPEST_NS (300ull * 1000000000ull)  /* once both sides have been seen */
+
+#define NAT_PF_MAX 16u             /* static port-forward (DNAT) rules */
+
+/* Configure the port-forward table from a fw_cfg string: a comma-separated
+ * list of `proto:hostport:guestaddr:guestport` (proto tcp|udp), a wildcard
+ * host-address bind. Replaces the table; ignores malformed rules. */
+void nat_portforward_config(const char *cfg);
+/* Add one rule (proto IPPROTO_TCP/UDP, ports host order, guest_ip network
+ * order); false if the table is full or the rule is invalid. For tests. */
+bool nat_pf_add(uint8_t proto, uint16_t host_port, uint32_t guest_ip, uint16_t guest_port);
+void nat_pf_clear(void);
 
 /*
  * Outbound: masquerade a datagram being forwarded from `in` out `out`.
@@ -70,6 +84,7 @@ void nat_flush(void);                 /* drop every entry (test isolation) */
 struct nat_stats {
     uint64_t out_new, out_reuse, out_drop_full, out_drop_noport;
     uint64_t in_translated, in_no_match, in_icmp_error;
+    uint64_t dnat_in, dnat_reply, dnat_drop_full;
     uint64_t expired;
     uint32_t entries;                 /* live entries right now */
 };

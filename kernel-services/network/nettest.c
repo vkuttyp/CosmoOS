@@ -3381,3 +3381,126 @@ bool selftest_net_dns(const char **reason)
           "sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires");
     return true;
 }
+
+/* --- inbound port forwarding (DNAT) --------------------------------------- */
+
+bool selftest_net_dnat(const char **reason)
+{
+    static const uint8_t g_mac[6]     = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x01 };
+    static const uint8_t u_mac[6]     = { 0x52, 0x54, 0x00, 0x09, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x08, 0x00, 0x0f };
+    static const uint8_t client_mac[6]= { 0x52, 0x54, 0x00, 0x09, 0x00, 0x63 };
+    uint32_t mask = htonl(0xffffff00u);
+    uint32_t g_ip = IPV4_ADDR(10, 77, 5, 1), guest = IPV4_ADDR(10, 77, 5, 15);
+    uint32_t u_ip = IPV4_ADDR(10, 77, 6, 1), client = IPV4_ADDR(10, 77, 6, 99);
+
+    struct tap *g = tap_create("dnatg", g_ip, mask, g_mac);
+    CHECK(g != NULL);
+    struct tap *u = tap_create("dnatu", u_ip, mask, u_mac);
+    CHECK(u != NULL);
+    netif_set_forward(tap_netif(g), true);        /* the guest side forwards its replies out */
+    netif_set_masquerade(tap_netif(g), true);
+    nettest_seed_arp(tap_netif(g), guest, guest_mac);    /* DNAT'd packets reach the guest */
+    nettest_seed_arp(tap_netif(u), client, client_mac);  /* replies reach the client */
+    nat_flush();
+    nat_pf_clear();
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, guest, 80));
+    CHECK(nat_pf_add(IPPROTO_UDP, 9090, guest, 53));
+
+    uint8_t l4[128], frame[256], rx[256];
+
+    /* (1) a client SYN to the host's uplink port 8080 is DNAT'd to the guest. */
+    uint16_t l4len = nettest_mk_tcp(l4, client, u_ip, 12345, 8080, TH_SYN);
+    uint32_t flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    struct mbuf *r = nettest_recv_ip(g);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 20, rx)); m_freem(r);
+    struct ipv4_hdr *ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(ri->src == client && ri->dst == guest);          /* dst rewritten to the guest */
+    uint8_t *rl4 = rx + ETH_HLEN + 20;
+    CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 12345);      /* source port intact */
+    CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 80);         /* dest port rewritten to the guest's */
+    CHECK(nettest_l4_ok(client, guest, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
+
+    /* (2) the guest's SYN-ACK is un-DNAT'd back to the client from host:8080. */
+    l4len = nettest_mk_tcp(l4, guest, client, 80, 12345, TH_SYN | TH_ACK);
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    r = nettest_recv_ip(u);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 20, rx)); m_freem(r);
+    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(ri->src == u_ip && ri->dst == client);           /* source rewritten to the host */
+    rl4 = rx + ETH_HLEN + 20;
+    CHECK((uint16_t)(rl4[0] << 8 | rl4[1]) == 8080);       /* source port = what the client dialed */
+    CHECK((uint16_t)(rl4[2] << 8 | rl4[3]) == 12345);
+    CHECK(nettest_l4_ok(u_ip, client, IPPROTO_TCP, rl4, sizeof(struct tcp_hdr)));
+
+    /* (3) a UDP round trip through the udp rule. */
+    uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    l4len = nettest_mk_udp(l4, client, u_ip, 5555, 9090, payload, sizeof(payload));
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    r = nettest_recv_ip(g);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + (int)sizeof(payload), rx)); m_freem(r);
+    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    rl4 = rx + ETH_HLEN + 20;
+    CHECK(ri->dst == guest && (uint16_t)(rl4[2] << 8 | rl4[3]) == 53);
+    CHECK(nettest_l4_ok(client, guest, IPPROTO_UDP, rl4, (uint16_t)(8 + sizeof(payload))));
+    /* the guest's UDP reply is un-DNAT'd back to the client from host:9090. */
+    l4len = nettest_mk_udp(l4, guest, client, 53, 5555, payload, sizeof(payload));
+    flen = nettest_wrap(frame, g_mac, guest_mac, guest, client, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(g, frame, flen) == 0);
+    r = nettest_recv_ip(u);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + (int)sizeof(payload), rx)); m_freem(r);
+    ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    rl4 = rx + ETH_HLEN + 20;
+    CHECK(ri->src == u_ip && (uint16_t)(rl4[0] << 8 | rl4[1]) == 9090);
+    CHECK(nettest_l4_ok(u_ip, client, IPPROTO_UDP, rl4, (uint16_t)(8 + sizeof(payload))));
+
+    /* (4) a connection to an unruled port is delivered to the host, not the guest. */
+    l4len = nettest_mk_tcp(l4, client, u_ip, 22222, 1234, TH_SYN);
+    flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+    CHECK(tap_inject(u, frame, flen) == 0);
+    CHECK(nettest_recv_ip(g) == NULL);                     /* never forwarded to the guest */
+
+    /* (5) the table is bounded: a flood of distinct client flows fills it and
+     * further ones drop; then aging reclaims them. */
+    struct nat_stats ns0, ns1;
+    nat_get_stats(&ns0);
+    for (unsigned i = 0; i < NAT_TABLE_SIZE + 16; i++) {
+        l4len = nettest_mk_tcp(l4, client, u_ip, (uint16_t)(30000 + i), 8080, TH_SYN);
+        flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
+        tap_inject(u, frame, flen);
+        if ((i & 31) == 31) {
+            struct mbuf *d;
+            while ((d = tap_recv(g)) != NULL) m_freem(d);
+        }
+    }
+    for (unsigned i = 0; i < 100; i++) {
+        struct mbuf *d;
+        while ((d = tap_recv(g)) != NULL) m_freem(d);
+        nat_get_stats(&ns1);
+        if (ns1.dnat_drop_full > ns0.dnat_drop_full) break;
+        thread_sleep_ms(10);
+    }
+    nat_get_stats(&ns1);
+    CHECK(ns1.entries <= NAT_TABLE_SIZE);                  /* never exceeds the bound */
+    CHECK(ns1.dnat_drop_full > ns0.dnat_drop_full);        /* the flood dropped */
+    nat_get_stats(&ns0);
+    CHECK(ns0.entries > 0);
+    nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_TCP_NS);
+    nat_get_stats(&ns1);
+    CHECK(ns1.entries == 0 && ns1.expired > ns0.expired);
+
+    nat_pf_clear();
+    nat_flush();
+    tap_destroy(u);
+    tap_destroy(g);
+    kinfo("selftest: net-dnat: a client connection was forwarded to the guest and its reply "
+          "un-DNAT'd back from host:P (TCP and UDP), an unruled port stayed local, the table bounded");
+    return true;
+}
