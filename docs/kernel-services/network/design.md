@@ -660,6 +660,45 @@ through a port-forward is the `QEMU_MEM=2G` reproduction; a writable control
 surface, a general filtering firewall, hairpin/NAT-reflection, and IPv6 DNAT
 are later units.
 
+## Many guests: a tap per open (`tap.c`, `tapsvc.c`, `nat.c`; audit unit "from one guest to many")
+
+The stack served one guest — a persistent `tap0`, a singleton `tapsvc`, one
+NAT table — because the character device had no per-open lifecycle. Now every
+open of `/dev/net/tap` is a guest (`docs/audit/next-subsystem-multiguest.md`).
+
+**A tap per open.** `/dev/net/tap`'s `open` (the VFS chrdev lifecycle, below)
+takes a free slot from a pool of `TAP_MAX_GUESTS` (8) and creates `tap<k>` on
+`10.0.(3+k).0/24` — host `.1`, guest `.15`, the convention `tap0` set, which
+is now simply the first — forwarding and masquerade on, with its own `tapsvc`;
+`read`/`write` act on that file's tap; the ninth open is `-ENOSPC`. The last
+close (`release`) stops the service, purges the guest's NAT state, destroys
+the tap and frees the slot — in that order, so the service's threads and DHCP
+filter are gone before the tap they point at, and no flow survives for a
+reused subnet. A tap exists exactly while an owner holds the channel;
+`vmctl`, which opens once per run, is unchanged, and two runs are two guests.
+
+**`tapsvc` per tap.** The singleton is now an instance (`struct tapsvc`)
+allocated per tap: its own DHCP binding (a guest slot on its own subnet) and
+its own DNS proxy, whose socket is bound to *that tap's gateway* — a proxy on
+`0.0.0.0:53` would answer DNS on the host's real interface. The periodic
+`nat`/DNS age sweeps every live instance.
+
+**NAT for many.** Three changes keep a shared table fair and honest with
+several guests: a **per-guest quota** (`NAT_QUOTA_PER_GUEST = NAT_TABLE_SIZE /
+NAT_GUESTS`) caps each source's masquerade entries, so one guest's flood drops
+only its own new flows; **masquerade is skipped when the egress interface
+itself forwards** (a flow between two taps is guest-to-guest), so guests reach
+each other with real addresses; and **`nat_guest_purge(guest_ip)`** removes
+every port-forward rule targeting a guest and every conntrack entry on its
+guest side — and nothing else — the guest-scoped teardown a departing tap's
+`release` calls before its subnet returns to the pool.
+
+Each guest thus has its own channel (it sees only its own frames), its own
+lease and subnet, its own NAT share, and its own port-forwards; guests reach
+each other over routed IP as adjacent-subnet machines do — connectivity, not
+visibility. Policy forbidding inter-guest traffic, an L2 bridge sharing one
+subnet, and per-guest limits beyond the NAT quota are later units.
+
 ## A runtime network control channel (`tap.c`, `nat.c`; audit unit "configuring the guest's network at runtime")
 
 Everything above was fixed at boot from read-only `fw_cfg`; this adds the one

@@ -171,6 +171,13 @@ vnode released once. The racers must not occupy every CPU: the first
 version did, and the driving thread ran only on preemption ticks.
 Skipped below three CPUs.
 
+**`vfs-chrdev-open`**: a synthetic character device with the per-open
+lifecycle. Two opens get distinct per-open instances (each read returns its
+own instance's id); `release` runs exactly once, on the last reference and
+not on an earlier `file_put`; a refused `open` leaves no file and runs no
+`release`. Proved by removing the `dev_open` gate — the refused open's file
+then runs `release` and the count is wrong.
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

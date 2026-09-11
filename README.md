@@ -1172,6 +1172,26 @@ See [docs/development.md](docs/development.md).
   Linux guest is the `QEMU_MEM=2G` reproduction. The channel is designed to
   carry the tap's other settings (forwarding/masquerade toggles, the
   resolver) in later units.
+- **From one guest to many: a tap per guest (done):**
+  `docs/audit/next-subsystem-multiguest.md`,
+  `docs/kernel-services/network/design.md` ("Many guests"),
+  `docs/kernel-services/vfs/design.md` ("Per-open character devices"). The
+  network served one guest; now every open of `/dev/net/tap` is a guest of
+  its own. The VFS gains a per-open character-device lifecycle
+  (`chrdev_ops.open`/`release` and a `priv` slot on `struct file`, release on
+  the file's last reference); `/dev/net/tap`'s `open` creates a tap on its
+  own subnet from a pool (`10.0.(3+k).0/24`, up to `TAP_MAX_GUESTS` = 8),
+  its `release` stops the service, purges the guest's NAT state and destroys
+  the tap, and a ninth open is refused. `tapsvc` is now an instance per tap
+  (its DHCP lease and a DNS proxy bound to its own gateway); `nat.c` gains a
+  per-guest quota, uplink-only masquerade (so guests reach each other with
+  real addresses), and `nat_guest_purge`. `vmctl` and the guest are
+  unchanged, so two `vmctl` runs are two machines. Proven by `vfs-chrdev-open`
+  (the lifecycle) and `net-multiguest` (eight taps on eight subnets, the
+  ninth refused, frame isolation, guest-to-guest un-masqueraded, a close that
+  tears down and purges only its own). Two stock Linux guests at once is the
+  `QEMU_MEM=2G` reproduction; a firewall forbidding inter-guest traffic, an
+  L2 bridge, and per-guest limits beyond the NAT quota are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1222,9 +1242,11 @@ See [docs/development.md](docs/development.md).
   DNS proxy on the tap so a stock guest autoconfigures its interface and
   resolves names with nothing set by hand; `-dnat.md`, inbound port
   forwarding so a service the guest runs is reachable from outside through a
-  host port; and `-netctl.md`, a privileged `/dev/net/tapctl` control channel
-  so an operator adds and removes port-forwards on a running machine. The
-  named next steps are that unit's own follow-ups (the tap's other settings on
-  the same channel, a filtering firewall, hairpin/NAT-reflection, IPv6 DNAT)
-  and, on the guest itself, the `QEMU_MEM=2G` reproduction reaching the real
-  world. Design documents first, one subsystem at a time.
+  host port; `-netctl.md`, a privileged `/dev/net/tapctl` control channel
+  so an operator adds and removes port-forwards on a running machine; and
+  `-multiguest.md`, a tap per open of `/dev/net/tap` so several stock guests
+  run at once, each a full networked machine, isolated and addressable. The
+  named next steps are the follow-ups these left (a filtering firewall,
+  hairpin/NAT-reflection, IPv6 DNAT, an L2 bridge, the tap's other settings on
+  the control channel) and, on the guest itself, the `QEMU_MEM=2G`
+  reproduction reaching the real world. Design documents first, one subsystem at a time.

@@ -263,6 +263,21 @@ reintroducing no id restoration (the answer carries the wrong id), a table
 that clobbers instead of dropping when full (`dns_drop_full` never rises),
 and an age that reclaims nothing.
 
+## Many guests
+
+**`net-multiguest`**: eight opens of `/dev/net/tap` (through the VFS, as
+`vmctl` does) yield eight taps on eight distinct subnets (`10.0.3.1` …
+`10.0.10.1`), each forwarding; a ninth open is `-ENOSPC`. A frame written to
+one file is answered only on that file's tap (an ARP for `tap0`'s address
+replied on file 0, nothing on file 1). A datagram from `tap0`'s guest to
+`tap1`'s guest is read back on `tap1` with its source intact — guest-to-guest
+is routed, not masqueraded. With a port-forward rule per guest, closing
+`tap0`'s file destroys only its tap, purges only its guest's rule (`tap1`'s
+remains), and frees its slot for reuse. Proved by reintroducing a `release`
+that skips the purge (the departed guest's rule lingers) and a masquerade
+that fires between taps (the guest-to-guest source is then rewritten). The
+per-open lifecycle itself is `vfs-chrdev-open` (VFS tests).
+
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 
 `run_boot_test.py` creates a `NetTest` for normal runs (not
