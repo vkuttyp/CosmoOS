@@ -24,12 +24,15 @@ host's and the martian check looks only at the source, so an uplink datagram
 addressed to a guest's gateway is delivered into that guest's DNS proxy (an
 open resolver per guest), and one addressed to `127.0.0.1` reaches
 **loopback-bound services** — both reachable from the real network. Second,
-the chain's "established" bypass is keyed on **actual connection state in
-an eligible state** — a connection that is established or actively closing,
-a half-open child whose SYN already passed the rules, or the very SYN+ACK the
-host solicited; a connected UDP socket's peer — never on flags alone and
-never on a mere transient tuple (`TIME_WAIT`, an unsolicited segment to
-`SYN_SENT`), which `tcp_input` would answer —
+the chain does **not** try to know which TCP segments belong to a connection
+— three drafts of that (flags, "any PCB", "eligible states") each left a way
+for `tcp_input` to answer a probe. Instead a DROP verdict for TCP/UDP becomes
+a **quiet-delivery policy carried on the datagram** (`M_FW_QUIET`): the
+transport, which owns acceptability, delivers it only if an existing
+connection accepts it by TCP's own checks (sequence, acknowledgment, the
+syncache completion of an admitted SYN) or a connected UDP socket names the
+sender, **creates no new connection**, and **emits nothing** — no SYN-ACK,
+RST, challenge ACK or port-unreachable —
 so a DROP rule means silence, not a RST that confirms the host is there. And
 the chain sits where the last unit proved it could not yet be observed:
 after `nat_in`, so a DNAT'd inbound connection is never re-gated — now
@@ -186,44 +189,63 @@ step protects:
    masqueraded traffic is addressed to the uplink's own address and is on
    link. INPUT's existing "guest → the host's uplink address" case moves from
    a default drop to this invariant (its test adjusts).
-2. **"Established" means a connection the host actually has, in a state
-   that expects this segment — never a flag, and never merely "some PCB".**
-   The state filter lives in the TCP layer, which owns the states:
-   `tcp_conn_accepts(local, lport, remote, rport, flags)` answers true only
-   when a connection for the four-tuple is in an **eligible state** —
-   `ESTABLISHED`, `FIN_WAIT_1/2`, `CLOSE_WAIT`, `CLOSING`, `LAST_ACK` (a peer
-   whose segments are expected); `SYN_RCVD` (a half-open child whose SYN
-   already passed the rules, so its completing ACK must be admitted); and
-   `SYN_SENT` **only for a segment carrying SYN+ACK or RST** (the handshake
-   reply the host itself solicited). `TIME_WAIT`, `LISTEN`, `CLOSED` and any
-   other segment to a transient tuple are **not** eligible and take the
-   rules — because `tcp_input` answers an invalid segment in those states
-   with a RST or a challenge ACK, and a DROP that answers is not a DROP. A
-   UDP datagram bypasses only if a *connected* UDP socket names that peer
-   (`udp_conn_exists`). Everything else — a SYN, an ACK-only or SYN+ACK probe
-   with no eligible connection behind it, a datagram to a listener — is
-   unsolicited and takes the rules. So the host's own outbound connections
-   and its connected UDP flows keep working under any rule set, and a DROP
-   answers a probe with **silence**: the flag-only bypass the draft first
-   proposed would have let an ACK probe through to `tcp_input`, and the
-   "any non-listening PCB" form that replaced it would still have let one
-   through when it happened to match a `SYN_SENT` or `TIME_WAIT` tuple.
+2. **The firewall does not decide which segments belong to a connection;
+   the transport does — under a policy the firewall hands it.** Three drafts
+   of a firewall-side "established" test (TCP flags; any non-listening PCB;
+   an eligible-state list) each left `tcp_input` a way to *answer* a probe,
+   and the last did not even match this stack: passive half-opens live in
+   the listener's **SYN cache** (`tcp.c:1301-1516`, SYN cookies) and the
+   child is created directly `ESTABLISHED`; `SYN_RCVD` is simultaneous open
+   only (`tcp.c:1675`). So the design inverts. `fw_host_verdict` computes
+   the rule/default verdict as before. On **ACCEPT** the datagram is
+   delivered normally. On **DROP**, a TCP or UDP datagram is *not* freed at
+   the IP layer: it is marked **`M_FW_QUIET`** (an mbuf flag — `tcp_input`
+   and `udp_input` take `(nif, m, ip4, ip6)`, so the policy rides on the
+   packet with no signature change) and handed to the transport, which
+   under that flag:
+   - **TCP** processes the segment only if an **existing connection accepts
+     it by TCP's own rules** — the sequence and acknowledgment checks it
+     already makes, an established or closing connection's data or FIN, a
+     `SYN_SENT` connection's valid SYN+ACK, and the **SYN-cache completion
+     of a passive open whose SYN was admitted earlier** (the ACK that creates
+     the child, exactly as today); it **allocates no SYN-cache entry** for a
+     new SYN (`tcp.c:1516`), and it **emits nothing** for any segment it
+     would otherwise answer — the "segment without a pcb" path that sends
+     listener SYN-ACKs, resets and challenge ACKs (`tcp.c:570`), the RFC
+     5961 challenge ACK (`tcp.c:673`), the ACK to a bad-sequence segment —
+     freeing such a segment silently and counting `quiet_dropped`.
+   - **UDP** delivers only to a socket **connected** to the sender; a
+     datagram to an unconnected or listening socket is freed silently, and
+     no ICMP port-unreachable is sent (`udp.c:276`).
+   - **ICMP** and anything else: a DROP is a plain drop (there is no
+     connection to deliver to).
+   The firewall thus never models TCP state, malformed segments are
+   rejected by the same validation that protects the connection today —
+   only now without a reply — and a DROP means **silence** by construction.
+   The host's own outbound connections, its accepted inbound ones, and its
+   connected UDP flows keep working under any rule set. Rules therefore gate
+   **new** connections and unsolicited datagrams; a connection that exists
+   when a DROP rule is added persists until it closes (as FORWARD's flow
+   state does) — documented, and the operator who wants it cut closes the
+   socket.
 3. **Rules, first match, else the host default.** A rule matches
    `FROM_UPLINK`, proto, **source prefix**, destination prefix and selector
    (port, or ICMP type as before).
 
-On `FW_DROP` the datagram is freed and `ip_stats.hin_filtered` counted.
+On `FW_DROP`, a TCP or UDP datagram is marked `M_FW_QUIET` and continues to
+the demux (`ip_stats.hin_quiet`); anything else is freed
+(`ip_stats.hin_filtered`).
 
-**What remains stateless and why that is acceptable here.** A datagram to
-an *unconnected* UDP socket (a listener, or a client socket that `sendto`s
-without connecting) and every ICMP message have no connection to key on, so
-a rule applies to each such datagram. With the default ACCEPT this costs
-nothing; an operator who writes a broad UDP DROP (`udp any any`) would drop
-replies to the host's unconnected UDP sockets — documented, with the
-guidance that UDP rules name listener ports (or a source prefix), and with
-reply state for unconnected UDP and for ICMP named as a later unit. ICMP echo
-to the host is gated by type as before (type 8); the host's own ping replies
-(type 0) pass the default.
+**What quiet delivery cannot recognise, and why that is acceptable here.** A
+reply to an *unconnected* UDP socket (a client that `sendto`s without
+connecting) and every ICMP message have no connection or connected peer to
+deliver to under `M_FW_QUIET`, so a DROP rule that matches them drops them.
+With the default ACCEPT this costs nothing; an operator who writes a broad
+UDP DROP (`udp any any`) would drop replies to the host's unconnected UDP
+sockets — documented, with the guidance that UDP rules name listener ports
+(or a source prefix), and with reply state for unconnected UDP and for ICMP
+named as a later unit. ICMP echo to the host is gated by type as before (type
+8); the host's own ping replies (type 0) pass the default.
 
 ### 5. The default: ACCEPT, and why
 
@@ -252,9 +274,9 @@ refuse a snapshot whose version is not the one it speaks.
 
 ### 7. Deliberately out of scope (named, later units)
 
-- **Reply state for unconnected UDP and for ICMP** (a connected UDP socket
-  is covered by `udp_conn_exists`; an unconnected client socket's replies
-  and ICMP replies still take the rules, which the default ACCEPT admits).
+- **Reply state for unconnected UDP and for ICMP** (quiet delivery reaches a
+  *connected* UDP socket; an unconnected client socket's replies and ICMP
+  replies still take the rules, which the default ACCEPT admits).
 - **Per-interface host chains** (all real links share `FROM_UPLINK` here).
 - **An OUTPUT chain** for the host's egress; rate-limit/log targets; IPv6.
 - **DHCP client protection** — moot until the host has a DHCP client.
@@ -266,25 +288,31 @@ refuse a snapshot whose version is not the one it speaks.
   fw_host_verdict(struct netif *nif, struct mbuf *m, const struct ipv4_hdr
   *iph, unsigned ihl);` host default in a separate policy slot;
   `fw_stats` gains `hin_accept_rule/hin_drop_rule/hin_accept_default/
-  hin_drop_default/hin_bypass_conn` (the off-link drop is an IP-layer
-  count, `ip_stats.rx_offlink`, since it precedes both chains).
+  hin_drop_default` (the off-link drop is an IP-layer count,
+  `ip_stats.rx_offlink`, since it precedes both chains; quiet delivery's
+  outcomes are `ip_stats.hin_quiet` and the transports' `quiet_dropped`).
 - `kernel-services/network/fw.c` — the host object (a permanent `fw_guest`
   slot with `ip == 0`, never attached/purged, `fw_flush` resets it);
   `rule_valid` (source `0/0` unless host-scoped; `FROM_UPLINK` only with
   host scope); `rule_matches` gains the source prefix; `fw_host_verdict`.
-- `kernel-services/network/tcp.c` / `kernel/include/kernel/net/tcp.h` —
-  `bool tcp_conn_accepts(uint32_t local, uint16_t lport, uint32_t remote,
-  uint16_t rport, uint8_t flags)`: does a connection for this four-tuple
-  exist in a state that expects this segment — `ESTABLISHED`, `FIN_WAIT_1/2`,
-  `CLOSE_WAIT`, `CLOSING`, `LAST_ACK`, `SYN_RCVD`, or `SYN_SENT` for a
-  SYN+ACK/RST — over the table `tcp_input` demuxes with; no state change;
-  the state filter lives here because the states do.
-- `kernel-services/network/udp.c` / `kernel/include/kernel/net/udp.h` —
-  `bool udp_conn_exists(...)`: is a *connected* UDP socket bound to this
-  four-tuple.
+- `kernel/include/kernel/mbuf.h` — the `M_FW_QUIET` packet flag (beside
+  `M_BCAST`): "deliver only to an existing connection or connected socket,
+  create nothing, answer nothing".
+- `kernel-services/network/tcp.c` — honour `M_FW_QUIET` at the three places
+  a segment is answered or a connection begun: the "segment without a pcb"
+  response path (`:570`, listener SYN-ACKs, resets, challenge ACKs), the RFC
+  5961 challenge ACK (`:673`), and the SYN-cache allocation for a new SYN
+  (`:1516`); everything else — sequence/ack validation, established and
+  closing states, `SYN_SENT`'s SYN+ACK, the SYN-cache completion that creates
+  the child — runs unchanged. A `quiet_dropped` stat.
+- `kernel-services/network/udp.c` — honour `M_FW_QUIET`: deliver only to a
+  socket connected to the sender, free anything else silently, and skip the
+  ICMP port-unreachable (`:276`). A `quiet_dropped` stat.
 - `kernel-services/network/ipv4.c` — the off-link check for every
   non-loopback ingress (before either chain; `ip_stats.rx_offlink`); the
-  second call site (uplink ingress); `ip_stats.hin_filtered`.
+  second call site (uplink ingress): on DROP a TCP/UDP datagram is marked
+  `M_FW_QUIET` and continues to the demux (`ip_stats.hin_quiet`), anything
+  else is freed (`ip_stats.hin_filtered`).
 - `kernel/include/uapi/cosmo/netctl.h` — version 4: `DIR_FROM_UPLINK`,
   `src_addr/src_prefix` in the filter command and rule records,
   `policy_from_uplink`, the grown `SNAPSHOT_MAX`.
@@ -305,8 +333,9 @@ refuse a snapshot whose version is not the one it speaks.
 ## New APIs
 
 - In-kernel: `FW_DIR_FROM_UPLINK`; `fw_host_verdict(...)`; `struct fw_rule
-  { …, src_ip, src_prefix }`; `tcp_conn_accepts(local, lport, remote,
-  rport, flags)` (the eligible-state query); `udp_conn_exists(...)`. `fw_rule_add/del/
+  { …, src_ip, src_prefix }`; the `M_FW_QUIET` mbuf flag, honoured by
+  `tcp_input` and `udp_input` (no signature change — the policy rides on the
+  packet). No firewall-side connection query of any kind. `fw_rule_add/del/
   list` and `fw_policy_set/get` accept `guest_ip == 0` for the host object.
 - UAPI (version 4): `COSMO_NETCTL_DIR_FROM_UPLINK`, `cosmo_netctl_filter.
   src_addr/src_prefix`, `cosmo_netctl_filter_rule.src_addr/src_prefix`,
@@ -316,8 +345,8 @@ refuse a snapshot whose version is not the one it speaks.
 ## Migration plan
 
 1. `ipv4.c`: the off-link invariant for every non-loopback ingress
-   (`rx_offlink`); `tcp_conn_accepts` (the eligible-state query) /
-   `udp_conn_exists`; `fw.c`: the host
+   (`rx_offlink`); the `M_FW_QUIET` flag and its three `tcp.c` silence
+   points plus the `udp.c` gate; `fw.c`: the host
    object, the source fields, the new direction, `fw_host_verdict`
    (connection-state bypass, rules/default); the second `ipv4.c` call site;
    both arches boot with the default ACCEPT and every existing test green
@@ -347,23 +376,29 @@ the host; verdicts awaited on the worker as in `net-input`.
   DROP` drops a SYN from `10.0.2.99` (`hin_drop_rule`) while a SYN from
   `10.0.9.9` (outside the prefix) is still delivered — the source match is
   real.
-- **"Established" is a connection, not a flag**: a world SYN accepted by a
-  rule to a host listener completes a handshake (the host's SYN-ACK is read
-  back on the uplink tap; the world's ACK is delivered); a DROP rule for that
-  port is then added — and the *established* connection's next ACK-carrying
-  segment still passes (`hin_bypass_conn` rises), while an **ACK-only probe
-  from a source with no connection** to the same port is dropped
-  (`hin_drop_rule`) and **no RST is read back** on the uplink tap. The same
-  for SYN+ACK with no connection. A datagram to a *connected* UDP socket's
-  peer bypasses; one to an unconnected listener takes the rules.
-- **Transient states are not "established"**: with a DROP rule for the port,
-  the host closes an accepted connection (the four-tuple enters `TIME_WAIT`)
-  and a bare ACK from the peer to that tuple is dropped with no RST or
-  challenge ACK read back; the host `connect`s out to a peer on the uplink
-  tap (its SYN is read back; the tuple is `SYN_SENT`) and a bare ACK from
-  that peer is dropped silently while the peer's SYN+ACK is admitted and
-  completes the handshake; a half-open `SYN_RCVD` child's completing ACK is
-  admitted (its SYN passed the rules).
+- **Quiet delivery: the transport decides, and answers nothing**: a world
+  SYN accepted by a rule to a host listener completes a handshake (the host's
+  SYN-ACK is read back on the uplink tap; the world's ACK creates the child
+  via the SYN cache); a DROP rule for that port is then added — the
+  *established* connection's next data segment is still delivered
+  (`hin_quiet` rises, `tcp quiet_dropped` does not), while an **ACK-only
+  probe from a source with no connection** to the same port is freed by TCP
+  (`quiet_dropped` rises) and **no RST is read back**; the same for a SYN+ACK
+  with no connection. A **new SYN** to that port under the DROP rule draws
+  **no SYN-ACK and no RST** (no SYN-cache entry is made). A datagram to a
+  *connected* UDP socket's peer is delivered; one to an unconnected listener
+  is freed with **no ICMP port-unreachable** read back.
+- **TCP's own validation, silenced**: a world SYN is admitted (default
+  ACCEPT), a DROP rule for the port is added *before* the world's completing
+  ACK arrives — and that ACK still opens the connection (the SYN-cache
+  completion runs under `M_FW_QUIET`; the child is created and a listener
+  `accept` returns it); a segment with a bad sequence number to the
+  established tuple draws **no challenge ACK** and leaves the connection's
+  state untouched; the host `connect`s out to a peer on the uplink tap (its
+  SYN is read back) under a DROP rule covering the peer, and the peer's valid
+  SYN+ACK is admitted and completes the handshake while a bare ACK from that
+  peer is freed silently; after the host closes an accepted connection
+  (`TIME_WAIT`), a bare ACK from the peer to that tuple draws nothing.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
   back, while a type-0 datagram to the host passes the default.
@@ -399,13 +434,15 @@ the host; verdicts awaited on the worker as in `net-input`.
 
 Bug-proofs: a verdict that ignores rules (the sourced DROP then delivers);
 a source match that ignores the prefix (the out-of-prefix SYN then drops);
-a bypass keyed on flags instead of the connection table (the ACK-only probe
-from a source with no connection then reaches `tcp_input` and a RST is read
-back on the uplink tap); a state filter that admits every non-listening PCB (a bare ACK to the
-host's `SYN_SENT` tuple, or to a `TIME_WAIT` tuple, then reaches
-`tcp_input` and a RST or challenge ACK is read back); a bypass that consults
-no state at all (the established connection's ACK then drops under the
-rule); the off-link
+`M_FW_QUIET` not honoured at the no-pcb response path (the ACK-only probe
+from a source with no connection then draws a RST on the uplink tap);
+`M_FW_QUIET` not honoured at the SYN-cache allocation (a new SYN under the
+DROP rule then draws a SYN-ACK); `M_FW_QUIET` not honoured at the RFC 5961
+path (the bad-sequence segment then draws a challenge ACK); a DROP that
+frees TCP at the IP layer instead of marking it quiet (the established
+connection's data then stops flowing, and the admitted SYN's completing ACK
+never opens the connection); `udp_input` ignoring the flag (the datagram to
+the unconnected listener then draws a port-unreachable); the off-link
 invariant removed (the world's query then reaches A's proxy and is relayed,
 and the world's datagram reaches the loopback-bound listener); the call
 site moved before `nat_in` (the DNAT'd SYN then drops under the host DROP
@@ -431,11 +468,16 @@ share it. Nothing on the tap or loopback paths changes.
   point-to-point link. The loopback exposure is pre-existing and this closes
   it. Documented as the one unconditional behaviour change (and the one
   existing-test adjustment, in `net-input`).
-- **The connection lookup on the hot path.** Every non-SYN TCP segment from
-  the uplink to a ruled or default-dropped port now costs a table lookup
-  that `tcp_input` would perform anyway a few instructions later; the
-  lookup is read-only and shares its table, and the benchmark measures it.
-  A segment for an established connection pays one lookup, then bypasses.
+- **Quiet delivery's cost and semantics.** No extra lookup: a dropped-by-rule
+  TCP/UDP datagram takes the demux it would have taken anyway, minus the
+  responses — the benchmark measures the uplink receive rate with and
+  without a DROP rule. Semantically, rules gate *new* connections and
+  unsolicited datagrams; a connection that exists when a DROP rule is added
+  persists until it closes (FORWARD's flow state behaves the same way) —
+  documented; an operator who wants it cut closes the socket. Getting the
+  three `tcp.c` silence points wrong is the implementation risk, and each
+  has a bug-proof (a probe that draws a RST, a SYN that draws a SYN-ACK, a
+  bad-sequence segment that draws a challenge).
 - **ABI v4 grows two structs.** Exact-size dispatch refuses a v3 writer; a
   v3 `vmctl list` refuses a v4 snapshot by version; `SNAPSHOT_MAX` is
   recomputed and static-asserted; `vmctl` is built with the kernel.
@@ -472,9 +514,22 @@ share it. Nothing on the tap or loopback paths changes.
   on review: the table also holds `SYN_SENT`, `SYN_RCVD`, the closing states
   and `TIME_WAIT`, and `tcp_input` answers an invalid segment in several of
   those with a RST or a challenge ACK — so a probe that happened to match a
-  transient tuple would still be answered. The eligible-state filter names
-  exactly the states in which a segment from that peer is expected, and
-  lives in the TCP layer with the states.
+  transient tuple would still be answered.
+- **An eligible-state filter (`ESTABLISHED`, closing states, `SYN_RCVD`,
+  `SYN_SENT` for SYN+ACK).** The draft's third form; rejected on review for
+  two reasons that settle the question: it did not match this stack (passive
+  half-opens live in the listener's SYN cache and the child is born
+  `ESTABLISHED`, so the completing ACK of an admitted SYN matched nothing
+  and a permitted connection could never open), and state-plus-flags still
+  admitted malformed segments that `tcp_input` answers. Any firewall-side
+  reconstruction of "does this segment belong to a connection" re-derives
+  TCP's acceptability test and will lag it; quiet delivery hands the
+  question to the layer that already answers it, and adds only silence.
+- **Carry the quiet policy as a new `tcp_input`/`udp_input` parameter.**
+  Rejected in favour of an mbuf flag: both take `(nif, m, ip4, ip6)` and are
+  called from several places; a flag on the packet reaches exactly the
+  response and creation sites that must honour it with no signature churn,
+  as `M_BCAST` already does for broadcast delivery.
 - **Drop at the socket layer (refuse a match whose ingress is not the
   bound interface).** Rejected: it scatters the invariant across every
   transport's demux and cannot be listed or counted as one thing; the IP
