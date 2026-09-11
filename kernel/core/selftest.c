@@ -457,6 +457,7 @@ static const struct selftest tests[] = {
     { "tap",             selftest_tap },
     { "tap-filter",      selftest_tap_filter },
     { "net-dhcp",        selftest_net_dhcp },
+    { "net-dns",         selftest_net_dns },
     { "net-second-nic",  selftest_net_second_nic },
     { "net-lo-udp",      selftest_net_lo_udp },
     { "net-lo-tcp",      selftest_net_lo_tcp },

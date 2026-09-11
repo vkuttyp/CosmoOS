@@ -6,6 +6,7 @@
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/net/ip.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
@@ -286,6 +287,7 @@ static void age_work(void *arg)
     arp_age(now);
     nd_age(now);
     nat_age(now);
+    tapsvc_dns_age(now);
     timer_start(&g_timer, ARP_RETRY_NS);
 }
 

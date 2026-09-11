@@ -19,8 +19,12 @@
 #include <kernel/net/tapsvc.h>
 #include <kernel/net/udp.h>
 #include <kernel/netif.h>
+#include <kernel/fwcfg.h>
+#include <kernel/socket.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
+#include <kernel/timer.h>
 
 /* --- DHCP wire format (RFC 2131 / 2132) ----------------------------------- */
 
@@ -262,6 +266,219 @@ static bool dhcp_filter(struct tap *t, const void *frame, uint32_t len, void *ar
     }
 }
 
+/* --- DNS proxy (§3): an ID-rewriting UDP relay ---------------------------- */
+
+#define DNS_PENDING_MAX 128u
+#define DNS_TIMEOUT_NS  (5ull * 1000000000ull)
+#define DNS_PORT 53
+#define DNS_HDR 12                 /* the fixed DNS header: id, flags, 4 counts */
+
+struct dns_pending {
+    bool in_use;
+    uint16_t guest_id;             /* the id the guest used (host order) */
+    uint16_t up_id;                /* the id we lent upstream (host order) */
+    struct netaddr guest;          /* where the answer goes back */
+    uint64_t expires_ns;
+};
+
+static struct dns_pending g_dns_tab[DNS_PENDING_MAX];
+static spinlock_t g_dns_lock = SPINLOCK_INIT("tapsvc-dns");
+
+static struct {
+    struct socket *gsock;          /* bound gateway:53, faces the guest */
+    struct socket *usock;          /* faces the upstream resolver */
+    struct thread *gth, *uth;
+    uint32_t up_ip; uint16_t up_port; bool up_set;
+    uint16_t next_id;
+    volatile bool running;
+} g_dns;
+
+/* True if some live entry already lent this upstream id. */
+static bool dns_id_taken(uint16_t id, uint64_t now)
+{
+    for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
+        if (g_dns_tab[i].in_use && now < g_dns_tab[i].expires_ns && g_dns_tab[i].up_id == id)
+            return true;
+    return false;
+}
+
+/* Record a guest query; lend a unique upstream id via *uid. false when full. */
+static bool dns_alloc(uint16_t guest_id, const struct netaddr *from, uint16_t *uid)
+{
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    struct dns_pending *slot = NULL;
+    for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
+        if (!g_dns_tab[i].in_use || now >= g_dns_tab[i].expires_ns) { slot = &g_dns_tab[i]; break; }
+    if (slot == NULL) {
+        spin_unlock_irqrestore(&g_dns_lock, s);
+        return false;
+    }
+    uint16_t id = 0;
+    for (unsigned tries = 0; tries < 0x10000u; tries++) {
+        uint16_t cand = g_dns.next_id++;
+        if (!dns_id_taken(cand, now)) { id = cand; break; }
+    }
+    slot->in_use = true;
+    slot->guest_id = guest_id;
+    slot->up_id = id;
+    slot->guest = *from;
+    slot->expires_ns = now + DNS_TIMEOUT_NS;
+    *uid = id;
+    spin_unlock_irqrestore(&g_dns_lock, s);
+    return true;
+}
+
+/* Find and consume the entry for upstream id `uid`; false if none live. */
+static bool dns_take(uint16_t uid, struct netaddr *guest, uint16_t *guest_id)
+{
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    for (unsigned i = 0; i < DNS_PENDING_MAX; i++) {
+        struct dns_pending *e = &g_dns_tab[i];
+        if (e->in_use && now < e->expires_ns && e->up_id == uid) {
+            *guest = e->guest;
+            *guest_id = e->guest_id;
+            e->in_use = false;
+            spin_unlock_irqrestore(&g_dns_lock, s);
+            return true;
+        }
+    }
+    spin_unlock_irqrestore(&g_dns_lock, s);
+    return false;
+}
+
+void tapsvc_dns_age(uint64_t now_ns)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
+        if (g_dns_tab[i].in_use && now_ns >= g_dns_tab[i].expires_ns) {
+            g_dns_tab[i].in_use = false;
+            STAT(dns_expired);
+        }
+    spin_unlock_irqrestore(&g_dns_lock, s);
+}
+
+/* No upstream configured: answer the guest itself with SERVFAIL. */
+static void dns_servfail(uint8_t *buf, uint32_t n, const struct netaddr *to)
+{
+    buf[2] |= 0x80;                        /* QR = response */
+    buf[3] = (uint8_t)((buf[3] & 0xf0) | 2);   /* RCODE = 2 (server failure) */
+    STAT(dns_servfail);
+    ksock_sendto(g_dns.gsock, buf, n, to);
+}
+
+/* Guest side: read a query, lend an upstream id, forward it. */
+static void dns_guest_main(void *arg)
+{
+    (void)arg;
+    uint8_t buf[512];
+    while (g_dns.running) {
+        struct netaddr from;
+        int64_t n = ksock_recvfrom(g_dns.gsock, buf, sizeof(buf), &from);
+        if (n < DNS_HDR) { if (n <= 0) break; continue; }
+        STAT(dns_query);
+        if (!g_dns.up_set) { dns_servfail(buf, (uint32_t)n, &from); continue; }
+        uint16_t gid = (uint16_t)(buf[0] << 8 | buf[1]);
+        uint16_t uid;
+        if (!dns_alloc(gid, &from, &uid)) { STAT(dns_drop_full); continue; }
+        buf[0] = (uint8_t)(uid >> 8); buf[1] = (uint8_t)uid;
+        struct netaddr up;
+        memset(&up, 0, sizeof(up));
+        up.family = COSMO_AF_INET; up.port = g_dns.up_port; up.v4 = g_dns.up_ip;
+        ksock_sendto(g_dns.usock, buf, (size_t)n, &up);
+    }
+    thread_exit(0);
+}
+
+/* Upstream side: read an answer, restore the guest id, relay it back. */
+static void dns_up_main(void *arg)
+{
+    (void)arg;
+    uint8_t buf[512];
+    while (g_dns.running) {
+        int64_t n = ksock_recvfrom(g_dns.usock, buf, sizeof(buf), NULL);
+        if (n < DNS_HDR) { if (n <= 0) break; continue; }
+        uint16_t uid = (uint16_t)(buf[0] << 8 | buf[1]);
+        struct netaddr guest; uint16_t gid;
+        if (!dns_take(uid, &guest, &gid))
+            continue;                         /* no live entry: drop */
+        buf[0] = (uint8_t)(gid >> 8); buf[1] = (uint8_t)gid;
+        STAT(dns_answer);
+        ksock_sendto(g_dns.gsock, buf, (size_t)n, &guest);
+    }
+    thread_exit(0);
+}
+
+/* Parse a dotted-quad into a network-order address; false on malformed. */
+static bool dns_parse_ip(const char *s, uint32_t *out)
+{
+    uint32_t o[4] = {0}; int part = 0, digits = 0; uint32_t v = 0;
+    for (;; s++) {
+        if (*s >= '0' && *s <= '9') { v = v * 10 + (uint32_t)(*s - '0'); digits++; if (v > 255) return false; }
+        else if (*s == '.' || *s == 0) {
+            if (!digits || part > 3) return false;
+            o[part++] = v; v = 0; digits = 0;
+            if (*s == 0) break;
+        } else return false;
+    }
+    if (part != 4) return false;
+    *out = IPV4_ADDR(o[0], o[1], o[2], o[3]);
+    return true;
+}
+
+static void dns_start(struct tapsvc *svc)
+{
+    memset(&g_dns, 0, sizeof(g_dns));
+    memset(g_dns_tab, 0, sizeof(g_dns_tab));
+    g_dns.next_id = 1;
+
+    char cfg[32];
+    if (fwcfg_get_string("resolver", cfg, sizeof(cfg)) && dns_parse_ip(cfg, &g_dns.up_ip)) {
+        g_dns.up_port = DNS_PORT;
+        g_dns.up_set = true;
+    }
+
+    struct netaddr me;
+    memset(&me, 0, sizeof(me));
+    me.family = COSMO_AF_INET; me.port = DNS_PORT; me.v4 = svc->gateway;
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dns.gsock) != 0)
+        return;
+    if (ksock_bind(g_dns.gsock, &me) != 0) { ksock_put(g_dns.gsock); g_dns.gsock = NULL; return; }
+    if (ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dns.usock) != 0) {
+        ksock_put(g_dns.gsock); g_dns.gsock = NULL; return;
+    }
+    struct netaddr any;
+    memset(&any, 0, sizeof(any));
+    any.family = COSMO_AF_INET;
+    ksock_bind(g_dns.usock, &any);          /* an ephemeral local port */
+
+    g_dns.running = true;
+    g_dns.gth = thread_create(dns_guest_main, NULL, "dns-guest", SCHED_PRIO_DEFAULT);
+    g_dns.uth = thread_create(dns_up_main, NULL, "dns-up", SCHED_PRIO_DEFAULT);
+    if (g_dns.gth == NULL || g_dns.uth == NULL)
+        kwarn("tapsvc: DNS proxy threads not started");
+    kinfo("tapsvc: DNS proxy on %s:53 (upstream %sconfigured)", svc->nif->name, g_dns.up_set ? "" : "un");
+}
+
+static void dns_stop(void)
+{
+    g_dns.running = false;
+    if (g_dns.gsock) ksock_shutdown(g_dns.gsock, COSMO_SHUT_RD);
+    if (g_dns.usock) ksock_shutdown(g_dns.usock, COSMO_SHUT_RD);
+    if (g_dns.gth) { thread_join(g_dns.gth); g_dns.gth = NULL; }
+    if (g_dns.uth) { thread_join(g_dns.uth); g_dns.uth = NULL; }
+    if (g_dns.gsock) { ksock_put(g_dns.gsock); g_dns.gsock = NULL; }
+    if (g_dns.usock) { ksock_put(g_dns.usock); g_dns.usock = NULL; }
+}
+
+void tapsvc_test_set_upstream(uint32_t ip, uint16_t port)
+{
+    g_dns.up_ip = ip;
+    g_dns.up_port = port;
+    g_dns.up_set = ip != 0;   /* ip 0 clears it: the proxy then answers SERVFAIL */
+}
+
 /* --- lifecycle ------------------------------------------------------------ */
 
 void tapsvc_start(struct tap *t)
@@ -281,6 +498,7 @@ void tapsvc_start(struct tap *t)
     spin_unlock_irqrestore(&g_svc_lock, st);
 
     tap_set_input_filter(t, dhcp_filter, &g_svc);
+    dns_start(&g_svc);
     kinfo("tapsvc: DHCP up on %s (gateway %u.%u.%u.%u, guest .%u)", nif->name,
           (ntohl(g_svc.gateway) >> 24) & 0xff, (ntohl(g_svc.gateway) >> 16) & 0xff,
           (ntohl(g_svc.gateway) >> 8) & 0xff, ntohl(g_svc.gateway) & 0xff, TAPSVC_GUEST_HOST);
@@ -294,9 +512,18 @@ void tapsvc_stop(void)
     spin_unlock_irqrestore(&g_svc_lock, st);
     if (t != NULL)
         tap_set_input_filter(t, NULL, NULL);
+    dns_stop();
 }
 
 void tapsvc_get_stats(struct tapsvc_stats *out)
 {
     *out = g_stats;
+    uint32_t live = 0;
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_dns_lock);
+    for (unsigned i = 0; i < DNS_PENDING_MAX; i++)
+        if (g_dns_tab[i].in_use && now < g_dns_tab[i].expires_ns)
+            live++;
+    spin_unlock_irqrestore(&g_dns_lock, s);
+    out->dns_pending = live;
 }

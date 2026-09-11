@@ -37,7 +37,14 @@ struct tapsvc_stats {
     uint64_t dhcp_discover, dhcp_offer, dhcp_request, dhcp_ack, dhcp_nak, dhcp_release;
     uint64_t dhcp_ignored;             /* a second client, or a malformed packet */
     uint64_t dns_query, dns_answer, dns_servfail, dns_drop_full, dns_expired;
+    uint32_t dns_pending;              /* live pending queries right now */
 };
 void tapsvc_get_stats(struct tapsvc_stats *out);
+
+/* Reclaim DNS pending entries past their timeout (the net worker calls this
+ * from periodic aging; tests drive it with a future timestamp). */
+void tapsvc_dns_age(uint64_t now_ns);
+/* Test hook: point the DNS proxy at a chosen upstream (ip/port network+host). */
+void tapsvc_test_set_upstream(uint32_t ip, uint16_t port);
 
 #endif /* KERNEL_NET_TAPSVC_H */

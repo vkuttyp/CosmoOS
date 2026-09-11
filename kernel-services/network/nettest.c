@@ -3185,3 +3185,174 @@ bool selftest_net_dhcp(const char **reason)
           "the flag-clear reply is a chaddr unicast, a second client is refused");
     return true;
 }
+
+/* --- DNS proxy (tapsvc) ---------------------------------------------------- */
+
+/* A fixed DNS query for "www.example.com" A IN, with a given id and RD set. */
+static uint32_t nettest_mk_dns(uint8_t *msg, uint16_t id)
+{
+    static const uint8_t qname[] = { 3,'w','w','w', 7,'e','x','a','m','p','l','e', 3,'c','o','m', 0 };
+    msg[0] = (uint8_t)(id >> 8); msg[1] = (uint8_t)id;
+    msg[2] = 0x01; msg[3] = 0x00;         /* flags: RD */
+    msg[4] = 0; msg[5] = 1;               /* qdcount 1 */
+    msg[6] = 0; msg[7] = 0; msg[8] = 0; msg[9] = 0; msg[10] = 0; msg[11] = 0;
+    memcpy(msg + 12, qname, sizeof(qname));
+    uint32_t o = 12 + (uint32_t)sizeof(qname);
+    msg[o++] = 0; msg[o++] = 1;           /* qtype A */
+    msg[o++] = 0; msg[o++] = 1;           /* qclass IN */
+    return o;
+}
+
+/* The test upstream resolver: echo each query as an answer with one A record. */
+static const uint8_t dns_answer_ip[4] = { 93, 184, 216, 34 };
+static struct { struct socket *sock; volatile bool running; } g_dnsresp;
+
+static void dns_responder_main(void *arg)
+{
+    (void)arg;
+    uint8_t q[512];
+    while (g_dnsresp.running) {
+        struct netaddr from;
+        int64_t n = ksock_recvfrom(g_dnsresp.sock, q, sizeof(q), &from);
+        if (n < 12) { if (n <= 0) break; continue; }
+        /* Build the answer in place: keep id + question, set response flags,
+         * ancount 1, append an A record pointing at the question name. */
+        q[2] = 0x81; q[3] = 0x80;         /* QR + RD + RA */
+        q[6] = 0; q[7] = 1;               /* ancount 1 */
+        uint32_t o = (uint32_t)n;
+        q[o++] = 0xc0; q[o++] = 0x0c;     /* name pointer to offset 12 */
+        q[o++] = 0; q[o++] = 1;           /* type A */
+        q[o++] = 0; q[o++] = 1;           /* class IN */
+        q[o++] = 0; q[o++] = 0; q[o++] = 0; q[o++] = 4;   /* ttl */
+        q[o++] = 0; q[o++] = 4;           /* rdlength */
+        memcpy(q + o, dns_answer_ip, 4); o += 4;
+        ksock_sendto(g_dnsresp.sock, q, o, &from);
+    }
+    thread_exit(0);
+}
+
+bool selftest_net_dns(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x07, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x07, 0x00, 0x0f };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 2, 1), mask = htonl(0xffffff00u);
+    uint32_t guest_ip = IPV4_ADDR(10, 88, 2, 15);
+    struct tap *t = tap_create("dns", host_ip, mask, host_mac);
+    CHECK(t != NULL);
+    nettest_seed_arp(tap_netif(t), guest_ip, guest_mac);   /* so replies reach the guest */
+    tapsvc_stop();
+    tapsvc_start(t);
+
+    /* A loopback upstream resolver the proxy will forward to. */
+    struct netaddr rl;
+    memset(&rl, 0, sizeof(rl));
+    rl.family = COSMO_AF_INET; rl.v4 = IPV4_ADDR(127, 0, 0, 1); rl.port = 5300;
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &g_dnsresp.sock) == 0);
+    CHECK(ksock_bind(g_dnsresp.sock, &rl) == 0);
+    g_dnsresp.running = true;
+    struct thread *rth = thread_create(dns_responder_main, NULL, "dns-resp", SCHED_PRIO_DEFAULT);
+    CHECK(rth != NULL);
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 5300);
+
+    uint8_t msg[64], l4[128], frame[256], rx[256];
+
+    /* (1) a guest query is relayed and the answer returns with the guest's
+     * original id and the upstream's A record. */
+    uint32_t mlen = nettest_mk_dns(msg, 0x1234);
+    uint16_t l4len = nettest_mk_udp(l4, guest_ip, host_ip, 4444, 53, msg, (uint16_t)mlen);
+    uint32_t flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64,
+                                 IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    struct mbuf *r = nettest_recv_ip(t);
+    CHECK(r != NULL);
+    uint32_t rl2 = m_length(r);
+    CHECK(rl2 <= sizeof(rx) && m_copydata(r, 0, rl2, rx));
+    m_freem(r);
+    struct ipv4_hdr *ri = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(ri->dst == guest_ip && ri->proto == IPPROTO_UDP);
+    uint8_t *rudp = rx + ETH_HLEN + 20;
+    CHECK((uint16_t)(rudp[2] << 8 | rudp[3]) == 4444);           /* back to the guest's port */
+    uint8_t *dns = rudp + 8;
+    CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x1234);           /* the guest's original id */
+    CHECK((dns[2] & 0x80) && (uint16_t)(dns[6] << 8 | dns[7]) >= 1);   /* a response with answers */
+    uint32_t anofs = rl2 - (ETH_HLEN + 20 + 8);
+    CHECK(anofs >= 4 && memcmp(rx + rl2 - 4, dns_answer_ip, 4) == 0);   /* the A record's address */
+
+    /* (2) two queries sharing an id but different source ports stay
+     * unambiguous: both answers come back to the right ports. */
+    mlen = nettest_mk_dns(msg, 0x5555);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 5001, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 5002, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    unsigned seen_ports = 0;
+    for (unsigned got = 0; got < 2; got++) {
+        r = nettest_recv_ip(t);
+        CHECK(r != NULL);
+        CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + 2, rx)); m_freem(r);
+        rudp = rx + ETH_HLEN + 20;
+        uint16_t port = (uint16_t)(rudp[2] << 8 | rudp[3]);
+        dns = rudp + 8;
+        CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x5555);
+        if (port == 5001) seen_ports |= 1;
+        if (port == 5002) seen_ports |= 2;
+    }
+    CHECK(seen_ports == 3);                                     /* both, unambiguous */
+
+    /* (3) with no upstream configured, the proxy answers SERVFAIL itself. */
+    tapsvc_test_set_upstream(0, 0);                            /* clear the upstream */
+    mlen = nettest_mk_dns(msg, 0x7777);
+    l4len = nettest_mk_udp(l4, guest_ip, host_ip, 6001, 53, msg, (uint16_t)mlen);
+    flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+    CHECK(tap_inject(t, frame, flen) == 0);
+    r = nettest_recv_ip(t);
+    CHECK(r != NULL);
+    CHECK(m_copydata(r, 0, ETH_HLEN + 20 + 8 + 4, rx)); m_freem(r);
+    dns = rx + ETH_HLEN + 20 + 8;
+    CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x7777);          /* id preserved */
+    CHECK((dns[2] & 0x80) && (dns[3] & 0x0f) == 2);            /* QR + RCODE 2 (SERVFAIL) */
+
+    /* (4) table bound: with the upstream a black hole, a flood fills the
+     * pending table and further queries drop; it never exceeds the bound. */
+    tapsvc_test_set_upstream(IPV4_ADDR(127, 0, 0, 1), 1);      /* nothing answers there */
+    struct tapsvc_stats s0, s1;
+    tapsvc_get_stats(&s0);
+    for (unsigned i = 0; i < 400; i++) {
+        mlen = nettest_mk_dns(msg, (uint16_t)(0x8000 + i));
+        l4len = nettest_mk_udp(l4, guest_ip, host_ip, (uint16_t)(20000 + i), 53, msg, (uint16_t)mlen);
+        flen = nettest_wrap(frame, host_mac, guest_mac, guest_ip, host_ip, 64, IPPROTO_UDP, l4, l4len);
+        tap_inject(t, frame, flen);
+        if ((i & 15) == 15)
+            thread_sleep_ms(5);                               /* let the guest thread drain */
+    }
+    for (unsigned i = 0; i < 100; i++) {
+        tapsvc_get_stats(&s1);
+        if (s1.dns_drop_full > s0.dns_drop_full)
+            break;
+        thread_sleep_ms(10);
+    }
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dns_pending <= 128);                              /* never exceeds the bound */
+    CHECK(s1.dns_drop_full > s0.dns_drop_full);                /* the flood was dropped */
+
+    /* (5) expiry reclaims the pending entries. */
+    tapsvc_get_stats(&s0);
+    CHECK(s0.dns_pending > 0);
+    tapsvc_dns_age(clock_now_ns() + 2ull * 5ull * NS_PER_SEC);
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dns_pending == 0 && s1.dns_expired > s0.dns_expired);
+
+    /* Tear down the responder and the service. */
+    g_dnsresp.running = false;
+    ksock_shutdown(g_dnsresp.sock, COSMO_SHUT_RD);
+    thread_join(rth);
+    ksock_put(g_dnsresp.sock);
+    g_dnsresp.sock = NULL;
+    tapsvc_stop();
+    tap_destroy(t);
+    kinfo("selftest: net-dns: a query is relayed and its answer restored to the guest, two queries "
+          "sharing an id stay unambiguous, an unconfigured upstream is SERVFAIL, the table bounds and expires");
+    return true;
+}
