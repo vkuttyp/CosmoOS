@@ -13,6 +13,7 @@
 #include <kernel/log.h>
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/netif.h>
 #include <kernel/string.h>
 #include <kernel/vfs.h>
@@ -142,6 +143,7 @@ static void tap_dev_activate(void)
     netif_set_up(nif, true);
     netif_set_forward(nif, true);
     netif_set_masquerade(nif, true);
+    tapsvc_start(g_devtap);   /* DHCP + DNS for the guest that just attached */
 }
 
 static int64_t tap_chr_read(struct vnode *vn, uint64_t off, void *buf, size_t len)

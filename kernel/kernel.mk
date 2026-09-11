@@ -134,6 +134,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/network/netif.c \
 	kernel-services/network/loopback.c \
 	kernel-services/network/tap.c \
+	kernel-services/network/tapsvc.c \
 	kernel-services/network/ether.c \
 	kernel-services/network/arp.c \
 	kernel-services/network/ipv4.c \

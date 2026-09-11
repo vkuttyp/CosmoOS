@@ -13,6 +13,7 @@
 #include <kernel/net/ether.h>
 #include <kernel/net/ip.h>
 #include <kernel/net/nat.h>
+#include <kernel/net/tapsvc.h>
 #include <kernel/net/tap.h>
 #include <kernel/net/tcp.h>
 #include <kernel/net/udp.h>
@@ -3045,5 +3046,142 @@ bool selftest_tap_filter(const char **reason)
 
     tap_destroy(t);
     kinfo("selftest: tap-filter: a claimed frame answered out the tap, an unclaimed frame reached the stack");
+    return true;
+}
+
+/* --- DHCP server (tapsvc) -------------------------------------------------- */
+
+/* Build a DHCP client frame (Ethernet+IP+UDP+BOOTP+cookie+options) into buf.
+ * The DHCP server (a tap input filter) does not verify the UDP checksum, so
+ * it is left 0; the IP header checksum is valid. Returns the frame length. */
+static uint32_t nettest_mk_dhcp(uint8_t *buf, const uint8_t smac[6], uint8_t msgtype,
+                                uint32_t xid, bool bcast_flag, const uint8_t chaddr[6],
+                                uint32_t req_ip)
+{
+    memset(buf, 0, 400);
+    struct eth_hdr *eh = (struct eth_hdr *)buf;
+    memset(eh->dst, 0xff, 6);
+    memcpy(eh->src, smac, 6);
+    eh->type = htons(ETH_P_IP);
+    uint8_t *dh = buf + ETH_HLEN + sizeof(struct ipv4_hdr) + sizeof(struct udp_hdr);
+    dh[0] = 1;              /* op BOOTREQUEST */
+    dh[1] = 1; dh[2] = 6;   /* htype ETHER, hlen 6 */
+    memcpy(dh + 4, &xid, 4);
+    uint16_t flags = htons(bcast_flag ? 0x8000u : 0u);
+    memcpy(dh + 10, &flags, 2);
+    memcpy(dh + 28, chaddr, 6);
+    uint32_t cookie = htonl(0x63825363u);
+    memcpy(dh + 236, &cookie, 4);
+    uint8_t *o = dh + 240;
+    *o++ = 53; *o++ = 1; *o++ = msgtype;
+    if (req_ip) { *o++ = 50; *o++ = 4; memcpy(o, &req_ip, 4); o += 4; }
+    *o++ = 255;
+    uint32_t dhlen = (uint32_t)(o - dh);
+    uint32_t udplen = (uint32_t)sizeof(struct udp_hdr) + dhlen;
+    uint32_t iplen = (uint32_t)sizeof(struct ipv4_hdr) + udplen;
+    struct udp_hdr *uh = (struct udp_hdr *)(buf + ETH_HLEN + sizeof(struct ipv4_hdr));
+    uh->sport = htons(68); uh->dport = htons(67); uh->len = htons((uint16_t)udplen); uh->cksum = 0;
+    struct ipv4_hdr *iph = (struct ipv4_hdr *)(buf + ETH_HLEN);
+    iph->vhl = 0x45; iph->tos = 0; iph->len = htons((uint16_t)iplen); iph->id = 0; iph->frag = 0;
+    iph->ttl = 64; iph->proto = IPPROTO_UDP; iph->cksum = 0;
+    iph->src = 0; iph->dst = INADDR_BROADCAST_N;
+    iph->cksum = in_cksum(iph, sizeof(*iph));
+    return ETH_HLEN + iplen;
+}
+
+/* Find DHCP option `code` in a received reply frame; NULL or a pointer+len. */
+static const uint8_t *nettest_dhcp_opt(const uint8_t *dh, uint32_t dhlen, uint8_t code, uint8_t *olen)
+{
+    uint32_t i = 240;   /* past BOOTP + cookie */
+    while (i < dhlen) {
+        uint8_t c = dh[i++];
+        if (c == 255) break;
+        if (c == 0) continue;
+        if (i >= dhlen) break;
+        uint8_t l = dh[i++];
+        if (i + l > dhlen) break;
+        if (c == code) { *olen = l; return dh + i; }
+        i += l;
+    }
+    return NULL;
+}
+
+bool selftest_net_dhcp(const char **reason)
+{
+    static const uint8_t host_mac[6]  = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x01 };
+    static const uint8_t guest_mac[6] = { 0x52, 0x54, 0x00, 0x06, 0x00, 0x0f };
+    static const uint8_t other_mac[6] = { 0x52, 0x54, 0x00, 0x06, 0x00, 0xaa };
+    uint32_t host_ip = IPV4_ADDR(10, 88, 1, 1), mask = htonl(0xffffff00u);
+    uint32_t guest_ip = IPV4_ADDR(10, 88, 1, 15);
+    struct tap *t = tap_create("dhcp", host_ip, mask, host_mac);
+    CHECK(t != NULL);
+    tapsvc_stop();                 /* clear any instance (e.g. tap0) so ours binds */
+    tapsvc_start(t);
+
+    uint8_t frame[400], rx[400];
+
+    /* (1) DISCOVER with the broadcast flag -> OFFER as the limited broadcast
+     * at both layers, carrying the guest address and the right options. */
+    uint32_t len = nettest_mk_dhcp(frame, guest_mac, DHCP_DISCOVER, 0xAABBCCDD, true, guest_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    struct mbuf *r = tap_recv(t);
+    CHECK(r != NULL);
+    uint32_t rl = m_length(r);
+    CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx));
+    m_freem(r);
+    CHECK(memcmp(rx, "\xff\xff\xff\xff\xff\xff", 6) == 0);          /* Ethernet broadcast */
+    struct ipv4_hdr *oi = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(oi->dst == INADDR_BROADCAST_N && oi->src == host_ip);     /* IP limited broadcast */
+    uint8_t *dh = rx + ETH_HLEN + 20 + 8;
+    uint32_t dhlen = rl - (ETH_HLEN + 20 + 8);
+    CHECK(dh[0] == 2);                                              /* BOOTREPLY */
+    CHECK(memcmp(dh + 16, &guest_ip, 4) == 0);                     /* yiaddr = the guest */
+    uint8_t l; const uint8_t *op;
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && l == 1 && op[0] == DHCP_OFFER);
+    op = nettest_dhcp_opt(dh, dhlen, 54, &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 1,  &l); CHECK(op && l == 4 && memcmp(op, &mask, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 3,  &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 6,  &l); CHECK(op && l == 4 && memcmp(op, &host_ip, 4) == 0);
+    op = nettest_dhcp_opt(dh, dhlen, 51, &l); CHECK(op && l == 4);
+
+    /* (2) REQUEST for that address -> ACK. */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_REQUEST, 0xAABBCCDD, true, guest_mac, guest_ip);
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    dh = rx + ETH_HLEN + 20 + 8; dhlen = rl - (ETH_HLEN + 20 + 8);
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && op[0] == DHCP_ACK);
+
+    /* (3) REQUEST for a different address -> NAK (always broadcast). */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_REQUEST, 0xAABBCCDD, true, guest_mac,
+                          IPV4_ADDR(10, 88, 1, 200));
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    dh = rx + ETH_HLEN + 20 + 8; dhlen = rl - (ETH_HLEN + 20 + 8);
+    op = nettest_dhcp_opt(dh, dhlen, 53, &l); CHECK(op && op[0] == DHCP_NAK);
+
+    /* (4) A DISCOVER with the flag clear -> OFFER unicast to chaddr, IP to yiaddr. */
+    len = nettest_mk_dhcp(frame, guest_mac, DHCP_DISCOVER, 0x11223344, false, guest_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    r = tap_recv(t); CHECK(r != NULL);
+    rl = m_length(r); CHECK(rl <= sizeof(rx) && m_copydata(r, 0, rl, rx)); m_freem(r);
+    CHECK(memcmp(rx, guest_mac, 6) == 0);                          /* link-unicast to the client */
+    oi = (struct ipv4_hdr *)(rx + ETH_HLEN);
+    CHECK(oi->dst == guest_ip);                                    /* IP unicast to yiaddr */
+
+    /* (5) A second, different client is offered nothing (the lease is taken). */
+    struct tapsvc_stats s0, s1;
+    tapsvc_get_stats(&s0);
+    len = nettest_mk_dhcp(frame, other_mac, DHCP_DISCOVER, 0x99999999, true, other_mac, 0);
+    CHECK(tap_inject(t, frame, len) == 0);
+    CHECK(tap_recv(t) == NULL);                                    /* no reply */
+    tapsvc_get_stats(&s1);
+    CHECK(s1.dhcp_ignored > s0.dhcp_ignored);
+
+    tapsvc_stop();
+    tap_destroy(t);
+    kinfo("selftest: net-dhcp: DORA completes with the guest's config, a wrong REQUEST is NAK'd, "
+          "the flag-clear reply is a chaddr unicast, a second client is refused");
     return true;
 }
