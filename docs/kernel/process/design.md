@@ -669,7 +669,8 @@ agree on who is last). A thread exit runs the personality's
 futex woken, while the address space is still the thread's).
 
 Thread ids: the kernel `tid` is global. The Linux view is
-`lx_tid = tid == main ? pid : LX_TID_BASE + tid` (`LX_TID_BASE`
+`user_tid = tid == main ? pid : LX_TID_BASE + tid` (named `lx_tid` until
+the native-threads unit; it is the id both personalities show) (`LX_TID_BASE`
 0x10000, above every pid this kernel will hand out), so `getpid() ==
 gettid()` holds in the main thread as programs assume.
 
@@ -968,3 +969,137 @@ clock id (`COSMO_CLOCK_MONOTONIC` 0, the former behaviour, or
 clocks, `gettimeofday` and `time` return it, `TIMER_ABSTIME` against it
 converts through the offset, and the one-year cap on timespec values is
 gone (they are bounded by 2^63 ns).
+
+## 12. Native threads (audit unit "native threads and a futex")
+
+`docs/audit/next-subsystem-threads.md`. §11 gave this kernel several user
+threads per process, per-thread signal masks and a futex, and a *native*
+program could reach none of it: the only door to a thread or a futex was
+the Linux personality's `clone(CLONE_THREAD)`. So a `musl` binary with
+`pthread_create` could use every CPU in the machine and a CosmoOS binary
+could not, which inverted the rule this project holds elsewhere -- the
+personality is a translation of what the machine offers, never a superset
+of it. This unit is the missing door, and it adds no mechanism.
+
+**Five system calls.** `SYS_thread_create` takes a `struct cosmo_thread`
+(as `SYS_spawn` takes a `struct cosmo_spawn`, and for the same reason: the
+fields will grow, and appending them behind a flag is how this interface
+grows without a version number) and returns the new thread's id.
+`SYS_thread_exit` ends the calling thread; `SYS_exit` still ends the
+process, which is what it already meant, `process_exit` and
+`process_thread_exit` having been two functions since §11.
+`SYS_thread_self` answers the caller's id. `SYS_futex_wait` and
+`SYS_futex_wake` are the kernel futex with the caller's address space and a
+range check -- the futex enforces its own 4-byte alignment and does its
+compare and enqueue under one lock, so a wake between them cannot be lost.
+
+**One id, seen by both doors.** `thread.user_tid` is the id userland sees:
+the pid for a process's first thread, `0x10000 + tid` for the rest, so a
+thread id and a pid can never collide. It was `lx_tid`, "the Linux view of
+the id", and the rename is the whole of this unit's change to the
+personality -- the number is now one number with two views, so `/proc`,
+`SYS_procinfo`, `tgkill` and `thread_self` cannot disagree. It is distinct
+from `thread.tid`, the scheduler's own id, which never leaves the kernel.
+
+**Creation is ordered by its failure modes.** `SYS_thread_create`
+validates the request; writes the top of the stack (below); builds the
+register set; `process_add_thread`; sets `clear_child_tid`; writes the tid
+into the `clear_tid` word; and only then `process_thread_start`.
+Everything before `process_add_thread` fails with nothing created, and
+everything after it fails with `process_thread_abandon` -- which is what
+§11's two-phase start is for. The tid write is the kernel's, not libc's,
+and it is ordered before the start for the reason `lx_clone`'s own comment
+gives: a caller that wrote the word after the syscall returned could lose
+the race to a child that had already exited, and leave a stale id a join
+waits on for ever.
+
+**The entry contract.** A thread is entered at a function without a `call`
+having happened, so the kernel hands the entry exactly what a call would
+have left. `arch_user_regs_init_thread` is the per-architecture half:
+x86-64 puts the argument in `rdi` and leaves `rsp` eight bytes below
+`stack_top`, so the entry sees `rsp % 16 == 8` -- the alignment SysV
+promises and aligned spills depend on; AArch64 puts it in `x0`, `sp` at
+`stack_top` and **zero in `x30`**. A `return` from the entry therefore
+jumps to address 0, which raises `SIGSEGV` and, its default action being
+to terminate, **ends the whole process** -- the same outcome a
+single-threaded program gets for returning off the end of its entry, and a
+thread whose function returns is a program bug either way. libc's
+trampoline is why it does not arise.
+
+`ARCH_THREAD_TOP_BYTES` (8, on every architecture) is what the caller
+zeroes at the top of the stack before those registers are used. x86-64
+needs that slot for the return address and AArch64 does not, but the write
+is also **what proves the stack is there**, and a validation that happened
+on one architecture and not the other would be a trap for a program that
+only runs on one: as built on AArch64 alone, a create with an unmapped
+`stack_top` succeeded and the thread died on its first push.
+
+**Joining is not a system call.** `clear_tid` names a 4-byte-aligned word
+that the kernel fills with the new thread's id before it can run, and
+zeroes and futex-wakes when it exits. That is the whole of joining: read
+the word, and wait on it with `SYS_futex_wait` while it is non-zero. The
+kernel keeps no table of unreaped threads, the same word answers "has it
+finished?" with no system call at all, and the convention lives in libc,
+where a `join` belongs.
+
+**That contract is generic, and used to be the personality's.** The
+zero-and-wake lived in `linux_thread_exit`, a `thread_exit` hook the Linux
+personality registered, because `CLONE_CHILD_CLEARTID` and
+`set_tid_address` were the only things that set the field. Both doors set
+it now, so the work is the field's contract rather than a Linux behaviour:
+it is `thread_clear_tid` in `process_thread_exit`, and the hook and its
+registration are gone. (Until it moved, a native thread's joiner was never
+woken -- which is how this was found.)
+
+**What is per-thread, and what the process shares.** Per-thread:
+registers, the user stack, the kernel stack, `tls_base`, `user_tid`,
+`sig_pending`, `sig_blocked` and `clear_child_tid`. Shared: the address
+space, the handle table, credentials, rlimits, signal *dispositions*, the
+working directory, the namespaces and the syscall filter. Two of those are
+observable only now that a native program can have two threads: **the
+signal mask is per-thread**, so `SYS_sigprocmask` affects the caller and a
+process-directed signal is taken by whichever thread does not block it
+(`signal_send` routes it into `p->sig_shared_pending`, and
+`recheck_defaults_locked` covers a thread that later unblocks a
+default-terminate signal already pending); and **the syscall filter is
+per-process**, so a thread cannot narrow its own.
+
+**`SYS_thread_exit` cannot be denied.** It joins `SYS_exit` and
+`SYS_sigreturn` in `native_always_allowed`, for the reason the security
+unit gives for `exit`: a denied call kills the process with `SIGSYS`, and a
+thread that cannot exit cannot be stopped.
+
+**The bound** is `PROCESS_MAX_THREADS` (256) per process, as it already was
+for Linux threads. No rlimit is added: threads are bounded per process
+here, processes per uid by `COSMO_RLIMIT_NPROC`, and a thread's stack is
+the caller's own mapping and therefore already charged to
+`COSMO_RLIMIT_AS` and `COSMO_RLIMIT_MEM`.
+
+**libc** (`libc/include/cosmo/thread.h`, `libc/src/thread.c`) owns
+everything the kernel deliberately does not: the stack and its **guard
+page**, the trampoline that calls the caller's function and then
+`SYS_thread_exit` with its result (so a return into the kernel's zero
+return address cannot happen), `cosmo_thread_join` over the `clear_tid`
+word, and a three-state mutex whose uncontended lock and unlock are one
+atomic each and no system call. The guard costs a reservation, a hole
+punched in it and a fixed map into the hole, because there is **no
+`mprotect` system call** -- the kernel has `vm_user_protect` and nothing
+asks it, which is a follow-up this unit names rather than smuggles in.
+
+**libc is not thread-safe inside, and that is now a constraint rather than
+a fact of the machine.** `errno` is a global and the allocator and stdio
+take no locks (`docs/libc/invariants.md`, L8, which anticipated exactly
+this day), so a threaded program must keep those calls on one thread.
+`cosmo/thread.h` is designed to need none of them -- it returns `-errno`,
+locks nothing, and maps its stacks directly -- so creating and joining
+threads is safe, and `thrtest` keeps to the same rule. Making the library
+itself safe is `errno` in thread-local storage plus locks in the allocator
+and stdio: a unit of its own, and the first follow-up this one owes.
+
+Named and deferred: **a thread-safe libc** (above); `SYS_mprotect`; futex
+requeue (the Linux door already exposes it); per-thread signal *targeting*
+(a native `tgkill`); a thread's name and priority in `struct cosmo_thread`;
+`COSMO_RLIMIT_NTHREAD`; `/proc` per-thread entries; the handle table under
+two threads, which native threads make reachable and nothing tests; and
+`vmctl`'s conversion to a thread per vCPU, which is the first consumer and
+its own unit.

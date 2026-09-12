@@ -17,7 +17,8 @@ initialises stdio, calls `main`, then `exit`. `__stdio_init`,
 
 ## errno.h
 
-`extern int errno` (a global; processes are single-threaded).
+`extern int errno` (a global: the library is single-threaded inside even
+now that processes need not be -- invariants L8).
 `E*` names are the `COSMO_E*` values of `uapi/cosmo/syscall.h`:
 `EPERM` 1, `ENOENT` 2, `ESRCH` 3, `EINTR` 4, `EIO` 5, `E2BIG` 7,
 `ENOEXEC` 8, `EBADF` 9, `ECHILD` 10, `EAGAIN` 11, `ENOMEM` 12,

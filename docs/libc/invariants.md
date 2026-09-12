@@ -71,11 +71,23 @@ requires an execute bit; `errno` ends as the last kernel error or
 
 **L8. The library is single-threaded and says so.** `errno` is a global,
 the allocator and stdio take no locks, `strerror` and `getcwd(NULL)`
-use static or heap storage without synchronisation. Threads in user
-programs do not exist (the kernel offers no `thread_create` call), so
-this is safe by construction. Check: review. Gap: the day user threads
-arrive, `errno` becomes TLS and the allocator and stdio take locks
-before anything else is done.
+use static or heap storage without synchronisation.
+
+**User threads have arrived** (`SYS_thread_create`, audit unit "native
+threads and a futex"), so this is no longer safe by construction, and the
+constraint is now on the *program*: a threaded program must keep every
+call that touches `errno`, the allocator or stdio on one thread until the
+thread-safe-libc unit lands. What that unit owes -- `errno` in
+thread-local storage, locks in the allocator and in stdio -- is unchanged
+and named; this note is here because shipping half of it would be worse
+than shipping none.
+
+`cosmo/thread.h` is built so that *using* threads needs none of it: every
+function there returns `-errno` directly rather than setting the global,
+takes no libc lock, and allocates its stacks with `mmap` rather than
+`malloc`. `tests/native/thrtest` keeps to the same rule -- only its main
+thread prints. Check: review, and `thrtest` (which would corrupt its own
+output if the rule were broken). Gap: the thread-safe libc itself.
 
 ## Gaps (documented, not invariants)
 

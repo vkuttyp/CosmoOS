@@ -4,7 +4,8 @@
  * Arenas of ARENA_SIZE hold blocks with a 16-byte header; a first-fit
  * free list threads through the free blocks; free coalesces with both
  * physical neighbours. Requests above BIG_THRESHOLD get their own mapping
- * and give it back on free. Single-threaded by design.
+ * and give it back on free. Single-threaded by design: it takes no lock,
+ * so a threaded program must allocate from one thread (invariants L8).
  */
 
 #include <errno.h>

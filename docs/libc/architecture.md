@@ -41,7 +41,8 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 - **Program start**: `crt0.S` (`_start`: argc/argv/envp from the System
   V stack, `environ`, `main`, `exit`). One copy for every program
   (replaces the copy under `userland/init/`).
-- **Errors**: `errno` (a global; programs are single-threaded), the
+- **Errors**: `errno` (a global; the library is single-threaded inside,
+  which is now a constraint on threaded programs -- invariants L8), the
   negative-return convention translated once in `__syscall_ret`,
   `strerror`, `perror`.
 - **Memory** (`string.h`): `mem*`, `str*`, `strl*`, `strtok_r`,
@@ -81,7 +82,10 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 
 ## Non-responsibilities
 
-- Threads, TLS, locking inside the library (single-threaded processes).
+- TLS and locking inside the library: `errno` is a global and the
+  allocator and stdio take no locks, so a threaded program must keep those
+  on one thread (invariants L8). Threads themselves exist --
+  `cosmo/thread.h`, whose own API avoids all three.
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
   calendar functions (there is no wall clock; `clock_gettime` gives the
   monotonic clock only).

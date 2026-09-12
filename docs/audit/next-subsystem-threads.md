@@ -1,8 +1,30 @@
 # NEXT SUBSYSTEM — native threads and a futex
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "Native threads and a futex"), and the design below
+is as built -- see `docs/kernel/process/design.md` §12 for the shipped
+description and `docs/kernel/process/testing.md` (`thrtest`) for its
+proofs. Five things came out differently and are marked where they arise:
+
+- **`lx_tid` became `user_tid`, not `tid`** -- that name was already taken
+  by the scheduler's own thread id, which never leaves the kernel.
+- **The `clear_child_tid` zero-and-wake was the Linux personality's**, in a
+  `thread_exit` hook, so a native thread's joiner was never woken until the
+  work moved into `process_thread_exit`. That was this unit's real finding,
+  and the third face of the "second door" lesson: not a check missing from
+  the front door, but a *behaviour* the side door owned privately.
+- **The stack probe is uniform across architectures.** This report had it
+  behind x86-64's need for a return slot, which left AArch64 accepting a
+  create with an unmapped stack and killing the thread on its first push.
+- **libc is not thread-safe inside**, and `docs/libc/invariants.md` L8 had
+  already named the day this would matter. `errno` is a global and the
+  allocator and stdio take no locks, so the constraint is documented and
+  `cosmo/thread.h` is built to need none of it; a thread-safe libc is the
+  first follow-up this unit owes. The report did not consider it.
+- **There is no `mprotect` system call**, so libc's guard page costs a
+  reservation, a hole and a fixed map. Named as a follow-up rather than
+  smuggled in.
 
 **Subsystem: the front door gets what the side door already has. This
 kernel runs threads, schedules them across every online CPU, gives each
@@ -129,7 +151,7 @@ id, futex wait, futex wake. `SYS_COUNT` is 82 and the native table
   kind of unit to get right — and the most expensive to get wrong, since a
   syscall's shape is permanent.
 
-## Proposed design
+## Design (as built)
 
 ### Five syscalls, and one that is deliberately absent
 
@@ -202,6 +224,13 @@ kernel hands the entry exactly what a call would have left:
   nothing to unwind. (The tid write into `clear_tid` is the one that
   cannot be done that early — the tid does not exist until the thread
   does — so it is the one that needs `process_thread_abandon`.)
+  **As built that write is unconditional** (`ARCH_THREAD_TOP_BYTES`, 8 on
+  every architecture): x86-64 needs the slot and AArch64 does not, but the
+  write is also what *proves the stack is there*, and with it x86-only —
+  which is how this report had it — AArch64 accepted a create with an
+  unmapped stack and the thread died on its first push. A validation that
+  happens on one architecture and not the other is a trap for a program
+  that only runs on one.
 - **AArch64**: `sp` is `stack_top`, 16-byte aligned as the AAPCS requires,
   and `x30` (the link register) is **zero**.
 
@@ -252,11 +281,17 @@ own the convention, which is where a `join` belongs.
 
 ### One id, two views
 
-`lx_tid` becomes `tid`, and `process_find_thread`'s parameter with it. The
-Linux view and the native view are **the same number** — one thread, one
-id, so `/proc`, `SYS_procinfo`, `tgkill` and a native `thread_self` cannot
-disagree. This is a rename plus the removal of the word "Linux" from a
-comment, and it is the only change this unit makes to the compat layer.
+`lx_tid` becomes **`user_tid`** — as built, not `tid`, because
+`struct thread` already has a `tid`: the scheduler's own, from a global
+counter, read by one debug print and never seen by userland. The id
+userland sees is derived as before (the pid for a process's first thread,
+`0x10000 + tid` for the rest, so a thread id and a pid can never collide)
+and is **the same number for both doors**, so `/proc`, `SYS_procinfo`,
+`tgkill` and a native `thread_self` cannot disagree. The scheduler's `tid`
+keeps its name: freeing it would churn the counter, the print and `tid_t`
+for a field no interface exposes. `process_find_thread`'s parameter
+follows, and that is the only change this unit makes to the compat
+layer.
 
 ### What is per-thread, and what is shared
 
@@ -336,7 +371,7 @@ creation is two-phase.
 | --- | --- |
 | `kernel/include/uapi/cosmo/syscall.h` | five numbers, `SYS_COUNT` 82→87, `struct cosmo_thread` |
 | `kernel/syscall/native.c` | five handlers; `SYS_thread_exit` added to `native_always_allowed` |
-| `kernel/include/kernel/thread.h`, `kernel/include/kernel/process.h` | `lx_tid` → `tid`, and the comments that name it |
+| `kernel/include/kernel/thread.h`, `kernel/include/kernel/process.h` | `lx_tid` → `user_tid` (as built: `tid` was taken), and the comments that name it |
 | `compat/linux/syscalls.c` | the rename's other side; no behaviour change |
 | `libc/include/cosmo/thread.h` (new), `libc/src/thread.c` (new) | `thread_create`/`thread_join`/`thread_exit` and a mutex over the futex — the library that owns the join convention, beside `libc/src/signal.c` and `process.c`, which wrap their syscalls the same way |
 | `tests/native/` (new), `tests/native/native.mk` | `thrtest`, the userland proof, mirroring `tests/linux`'s shape |
@@ -352,7 +387,10 @@ Five syscalls and one uapi struct, above (`thread_create`, `thread_exit`,
 new kernel subsystem. The userland library is new code but not new
 interface: it is the convention that makes `clear_tid` a `join`.
 
-## Migration plan
+## Migration plan (followed as written)
+
+Each step landed as its own commit with the tree green, in this order;
+step 1 is the only one whose shape changed (the rename's target).
 
 1. **The rename.** `lx_tid` → `tid` across the kernel and the compat layer.
    No behaviour change; the tree stays green.
@@ -419,28 +457,32 @@ run from `rc.test`, requiring `THREADTEST: PASS` in
    it; one that denies `SYS_thread_exit` **cannot**, because it is always
    allowed.
 
-**Bug-proofs** to run against the shipped code, each observed to fail for
-its stated reason — eight, each naming the step that catches it:
+**Bug-proofs**, nine of them as built rather than the seven listed above,
+each observed to fail for its stated reason and the source restored
+byte-identical every time. `docs/kernel/process/testing.md` lists them with
+the step that catches each; three are worth recording here because they
+changed how the unit was tested:
 
-1. The tid written into `clear_tid` **after** `process_thread_start` rather
-   than before → a child that exits first zeroes the word, the late write
-   leaves a stale tid, and **step 5**'s join waits on it until the test's
-   bound fails. This is the race `lx_clone`'s own comment says it was
-   written to avoid.
-2. The return address not pushed on x86-64 → **step 2**'s entry sees
-   `rsp % 16 == 0` and its aligned spill faults.
-3. `futex_wait` not re-checking the word under its lock → **step 4**'s
-   `-EAGAIN` becomes a sleep that no wake reaches.
-4. `clear_tid` not futex-woken at exit → **step 5**'s join hangs and the
-   test's bound fails it.
-5. `SYS_thread_exit` calling `process_exit` → **step 6**'s process dies
-   when a worker finishes.
-6. `SYS_thread_exit` removed from `native_always_allowed` → **step 10**'s
-   filtered thread cannot exit.
-7. The bound not checked → **step 8** runs past `PROCESS_MAX_THREADS` or
-   faults.
-8. The tid taken from a per-personality counter rather than shared → a
-   native `thread_self` and the Linux view disagree, which **step 1** sees.
+1. **The ordering proof needs its window widened.** Writing the tid after
+   `process_thread_start` is wrong, but the window is about a hundred
+   nanoseconds and a hundred contested attempts never lost it. The proof
+   inserts a deliberate sleep; with it, step 1's join waits for ever. That
+   is the most a test can establish here, and it is labelled as such.
+2. **Two proofs first perturbed the shared machinery** -- the futex's
+   value compare, and the zero-and-wake in `process_thread_exit` -- and
+   both hung the boot *before* `thrtest` ran, because the Linux
+   personality's own joins depend on exactly that code. Evidence that the
+   contract belongs where it now lives, but no evidence about this test,
+   so each was rewritten to perturb the native wrapper alone.
+3. **Two assertions were proving nothing** until a proof said so: the
+   ordering step ran once (see 1), and the test had no step for the thread
+   bound at all, which this report had promised.
+
+As built the test has **eleven** steps, not ten: a mutex step (a lock under
+two threads losing no update) earns its place because the futex exists to
+carry one, and the bound moved to the end so that reaching it cannot
+disturb anything before it.
+
 
 ## Benchmarks
 
@@ -504,7 +546,13 @@ once for the record.
   `SYS_ioready`, and the gap this unit closes is precisely the one it
   cannot: a second CPU.
 
-Named and deferred: futex requeue; per-thread signal targeting
-(`tgkill`-shaped); a thread's name and priority in `cosmo_thread`;
-`COSMO_RLIMIT_NTHREAD`; `/proc` per-thread entries; and the `vmctl`
-conversion, which is the first consumer.
+Named and deferred: **a thread-safe libc** (`errno` in thread-local
+storage, locks in the allocator and stdio), which this report did not
+foresee and which `docs/libc/invariants.md` L8 had already named as the
+thing owed on the day user threads arrived; **`SYS_mprotect`**, without
+which libc's guard page costs a reservation, a hole and a fixed map; futex
+requeue; per-thread signal targeting (`tgkill`-shaped); a thread's name and
+priority in `cosmo_thread`; `COSMO_RLIMIT_NTHREAD`; `/proc` per-thread
+entries; **the handle table under two threads**, which native threads make
+reachable from a CosmoOS program for the first time and nothing tests; and
+the `vmctl` conversion, which is the first consumer.

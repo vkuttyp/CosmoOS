@@ -358,9 +358,93 @@ thread, signal and PIE coverage on both machines.
   test creates an orphan under the real init; no test exceeds
   `COSMO_ARG_MAX`.
 - No concurrency tests for the handle table from several threads of one
-  process (threads exist since milestone 10; the Linux tests use them
-  for signals and futexes only).
+  process. Native threads make this reachable from a CosmoOS program for
+  the first time (`thrtest`), and it is still not tested: the handle table
+  under two threads sharing it is worth a unit of its own.
 - SMAP (`stac`/`clac`) is untested on `qemu64`; a run with
   `-cpu max` is planned in CI once TCG's SMAP emulation is confirmed.
 - Timing bounds in the user test (5 ms sleep, 200 ms ceiling) are
   loose for TCG.
+
+## Native threads (`thrtest`, audit unit "native threads and a futex")
+
+A kernel self-test cannot create a **user** thread, so this unit's proof is
+a native userland program: `tests/native/thrtest` in the boot archive
+(`SELFTEST` builds only), run from `/etc/rc.test`, gated by
+`THREADTEST: PASS` in `run_boot_test.py`'s own `THREAD_MARKERS` group --
+its own group and not the hypervisor's, which are gated on a backend,
+because native threads run on every build. Each step prints its number
+before running: two of the bug-proofs below kill the process outright, and
+"no output" would say a step failed without saying which.
+
+(1) A thread runs and is joined: its id is neither zero nor the pid, the
+work it did is visible afterwards, and `join` returns what the function
+returned. (2) **The entry conditions the ABI promises**, captured by a
+*naked* stub that records the stack pointer and tail-jumps to the C body,
+because reading `rsp` inside the C function measures the frame and not the
+entry -- an earlier version did that and passed on AArch64 by luck while
+x86-64 caught it. `rsp % 16 == 8` on x86-64, `sp % 16 == 0` on AArch64, the
+argument in the first argument register, and a 16-byte-aligned vector store
+that faults if the alignment is wrong rather than merely unusual. (3) Two
+threads make progress against each other under a bound: the assertion is
+*progress*, so a single-CPU run passes too (preemption suffices) and
+parallelism makes it fast rather than making it pass. (4) The futex answers
+`-EAGAIN` for a word that does not hold the expected value, `-ETIMEDOUT`
+for a timeout, zero woken when nobody waits, `-EINVAL` for an unaligned
+word and `-EFAULT` for one outside the caller's space. (5) **`clear_tid` is
+a join**, a hundred times: the word holds the child's tid the instant
+`thread_create` returns -- written by the kernel before the child could
+run, so it cannot be a stale value the caller wrote -- and is zero after
+the join, with every tenth iteration pausing so the child finishes *first*.
+One attempt is not enough: the property is a race over a few microseconds,
+and the bug-proof for the ordering passed against a single attempt.
+(6) Exit semantics: a worker's `thread_exit` leaves the process running and
+its joiner returns. (7) The **signal mask is per-thread**: a worker blocks
+`SIGUSR1`, the main thread does not, and the signal sent to the process is
+handled by the thread that does not block it. (8) Every argument check --
+a request outside the caller's space, an unmapped `stack_top`, an unaligned
+one, an unknown flag, an unaligned `clear_tid` -- using a page this test
+maps and frees, so the address is unmapped *by construction* rather than by
+assumption (0x400000 is the program's own load address, which an earlier
+version discovered by creating a thread whose stack was its own text).
+(9) A mutex under two threads loses no update, and `trylock` fails on a
+held one. (10) **The filter, observed from outside**: a denied call does not
+return an error, it kills the process with `SIGSYS` (status 159), so the
+filtered process cannot report on itself -- one child calls a denied
+`thread_create` and must die that way, and another, under a filter that
+denies *everything*, must still exit cleanly with its own status through
+`thread_exit`. (11) The bound holds: creating threads until `-EAGAIN` stops
+at `PROCESS_MAX_THREADS`, every one joins afterwards, and the next create
+still works, so reaching the limit leaves the process undamaged.
+
+Proved by reintroducing, each failure named by the step that caught it and
+the source restored byte-identical every time:
+
+1. The tid written **after** `process_thread_start` -- with the window
+   widened by a deliberate sleep, because the real one is about a hundred
+   nanoseconds and a hundred contested attempts never lost it: step 1's
+   join then waits for ever on a word the child had already zeroed.
+2. The x86-64 return address not pushed → step 2 dies of a **#GP** in its
+   aligned store, the entry having seen `rsp % 16 == 0`.
+3. `SYS_futex_wait` passing zero instead of the value it was given → step
+   4's `-ETIMEDOUT` becomes `-EAGAIN`.
+4. `SYS_thread_create` not arming `clear_child_tid` → step 1's join hangs.
+5. `SYS_thread_exit` calling `process_exit` → the process dies during step
+   1, when the first worker finishes.
+6. `SYS_thread_exit` removed from `native_always_allowed` → step 10's
+   deny-everything child dies with `SIGSYS` instead of exiting 7.
+7. The stack probe made x86-only again → on AArch64 step 8's create with an
+   unmapped stack **succeeds**, and the thread it made dies at address 0
+   and takes the process with it.
+8. `SYS_thread_self` answering the scheduler's `tid` → three checks fail at
+   once, the id being asserted in steps 1, 6 and 7.
+9. `PROCESS_MAX_THREADS` not checked → step 11 runs past 300 threads and
+   both its bound assertions fail.
+
+Two of those proofs were first written against the **shared** machinery --
+the futex's compare, and the zero-and-wake in `process_thread_exit` -- and
+both hung the boot *before* `thrtest` ran, because the Linux personality's
+own joins depend on exactly the same code. That is evidence the contract
+belongs where it now lives rather than in a personality, but it proves
+nothing about this test, so each was rewritten to perturb the native
+wrapper alone.

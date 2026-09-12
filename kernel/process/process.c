@@ -1520,9 +1520,10 @@ bool process_log_permitted(void)
     return ok;
 }
 
-/* setres{u,g}id for the calling process (system calls). The process is
- * single-threaded, so it is the only writer; the lock keeps the update
- * atomic against readers on other CPUs once threads exist. */
+/* setres{u,g}id for the calling process (system calls). Threads exist
+ * now, so there can be several writers as well as readers on other CPUs:
+ * the lock -- which was taken for that day -- is what keeps the update
+ * atomic. */
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid)
 {
     struct process *p = process_current();
