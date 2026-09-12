@@ -14,10 +14,10 @@ the Linux personality's `clone(CLONE_THREAD)`. So a Linux binary running
 under CosmoOS can use every CPU in the machine and a CosmoOS binary cannot,
 which inverts the rule this project has held since the compat layer was
 built: the personality is a translation of what the machine offers, never a
-superset of it. The unit closes that with four syscalls and no new
+superset of it. The unit closes that with five syscalls and no new
 mechanism — `SYS_thread_create` (a `struct cosmo_thread` request, as
 `SYS_spawn` takes a `struct cosmo_spawn`), `SYS_thread_exit`,
-`SYS_futex_wait` and `SYS_futex_wake` — because `process_add_thread`,
+`SYS_thread_self`, `SYS_futex_wait` and `SYS_futex_wake` — because `process_add_thread`,
 `process_thread_start`, `process_thread_abandon`, `process_thread_exit` and
 the futex are all already there, already used, and already tested through
 the other door. **Joining is not a syscall**: a thread names a word to be
@@ -124,14 +124,14 @@ id, futex wait, futex wake. `SYS_COUNT` is 82 and the native table
   power-off grace are all a single-threaded monitor's workarounds. They stay
   correct and stay tested; but the next unit can make them a *fallback*
   rather than the only way to run a machine.
-- **It is four syscalls over tested mechanism.** The risk is concentrated in
+- **It is five syscalls over tested mechanism.** The risk is concentrated in
   the interface decisions, not the implementation, which is the cheapest
   kind of unit to get right — and the most expensive to get wrong, since a
   syscall's shape is permanent.
 
 ## Proposed design
 
-### Four syscalls, and one that is deliberately absent
+### Five syscalls, and one that is deliberately absent
 
 ```c
 #define SYS_thread_create 82  /* (const struct cosmo_thread *req) -> tid */
@@ -149,7 +149,8 @@ struct cosmo_thread {
     uint64_t arg;
     uint64_t stack_top;    /* the stack pointer the thread starts with; the caller owns the mapping */
     uint64_t tls;          /* thread pointer (x86-64 FS base, AArch64 TPIDR_EL0); 0 = none */
-    uint64_t clear_tid;    /* a user word zeroed and futex-woken when the thread exits; 0 = none */
+    uint64_t clear_tid;    /* a user word: the kernel writes the tid into it before the thread
+                              runs and zeroes and futex-wakes it when the thread exits; 0 = none */
     unsigned flags;        /* 0 */
     uint32_t reserved;
 };
@@ -166,11 +167,43 @@ to that and should not be reinvented per syscall.
 `entry`/`arg`/`stack_top` (rather than copying the caller's, which is
 `clone`'s shape and wrong for a native call — a native thread starts at a
 function, not in the middle of a syscall), calls `process_add_thread`, sets
-`clear_child_tid`, and calls `process_thread_start`. It returns the tid, or
+`clear_child_tid`, **writes the tid into the `clear_tid` word**, and only
+then calls `process_thread_start`.
+
+That write is the kernel's, not libc's, and it is ordered before the start
+for the reason `lx_clone`'s own comment gives: if the caller wrote the word
+after the syscall returned, a child that ran and exited first would zero
+and wake it, and the caller's write would then leave a stale non-zero value
+that a join waits on for ever. The kernel writing it before the child can
+run makes the word's two states — the tid, then zero — the only two a
+joiner can observe, and the interface self-contained: libc writes nothing.
+A `clear_tid` the kernel cannot write is `-EFAULT` with the half-made
+thread abandoned, which is what the two-phase creation is for. It returns the tid, or
 `-EAGAIN` at `PROCESS_MAX_THREADS` or while the process is exiting,
 `-EFAULT` for a request or a `clear_tid` word outside the caller's space,
 `-EINVAL` for an unaligned `clear_tid`, an unknown flag or a `stack_top`
 that is not aligned to the architecture's stack alignment.
+
+**The entry-time stack invariant is part of the interface**, because a
+thread is entered at a function without a `call` having happened. The
+kernel hands the entry exactly what a call would have left:
+
+- **x86-64**: a zero return address is pushed, so the entry sees
+  `rsp % 16 == 8` — the alignment SysV promises a function, and the one
+  its prologue's aligned spills (`movaps`) depend on. `stack_top` itself
+  must be 16-byte aligned; the kernel does the push.
+- **AArch64**: `sp` is `stack_top`, 16-byte aligned as the AAPCS requires,
+  and `x30` (the link register) is **zero**.
+
+In both cases a `return` from the entry function therefore jumps to address
+zero, which is unmapped: a thread that returns dies with a fault at a
+recognisable address instead of wandering into whatever the stack held.
+Returning is not meant to happen — libc's `thread_create` passes a
+trampoline of its own as `entry`, which calls the caller's function and
+then `SYS_thread_exit` with its return value, so a native thread ends the
+way a `pthread` does — but an interface should say what the machine does
+when a program gets it wrong, and "fault at zero" is a better answer than
+"undefined".
 
 **`SYS_thread_exit`** calls `process_thread_exit`: this thread ends, its
 `clear_tid` word is zeroed and futex-woken, and if it was the last the
@@ -227,12 +260,25 @@ it safe for `SYS_thread_create` to be filterable like anything else.
 
 ### Where a signal is delivered
 
-Unchanged, and named rather than redesigned: a process-directed signal goes
-where `process_kill` already puts it. Per-thread signal *targeting* — a
-native `tgkill`, or a rule that picks a thread not blocking the signal — is
-a later unit, and until it exists a threaded native program should block
-signals in its worker threads and handle them in the one that spawned them.
-The report's job here is to say so, not to smuggle in a second design.
+Unchanged, and better than this report first described it. A
+process-directed signal goes through `signal_send` → `route_locked` into
+**`p->sig_shared_pending`** (`process.h:159`, "signals sent to the process,
+not yet taken by a thread"), and any thread that does not block it may take
+it: `sig_shared_pending & ~t->sig_blocked` (`signal.c:108`). That is
+Linux's rule, already implemented, and it means a threaded native program
+gets the behaviour it would expect — block a signal in the workers and the
+thread that does not block it is the one that handles it — without this
+unit designing anything. `recheck_defaults_locked` even covers the other
+direction: a default-terminate signal already pending on the process
+terminates it as soon as a thread stops blocking it.
+
+(`process_kill` is a different path — it records the default-termination
+state and wakes every thread — and this report named it by mistake in an
+earlier draft.)
+
+What is *not* here is per-thread signal **targeting**: there is no native
+equivalent of `tgkill`, so a native program cannot direct a signal at one
+of its own threads. That is a later unit, named and not smuggled in.
 
 ### The bound
 
@@ -284,7 +330,8 @@ creation is two-phase.
 
 ## New APIs
 
-Five syscalls and one uapi struct, above. No new device, no new ioctl, no
+Five syscalls and one uapi struct, above (`thread_create`, `thread_exit`,
+`thread_self`, `futex_wait`, `futex_wake`). No new device, no new ioctl, no
 new kernel subsystem. The userland library is new code but not new
 interface: it is the convention that makes `clear_tid` a `join`.
 
@@ -315,48 +362,68 @@ run from `rc.test`, requiring `THREADTEST: PASS` in
 
 1. **A thread runs, and is joined**: `thread_create` returns a tid, the
    child writes a word and exits, the parent's join returns and sees it.
-2. **Two CPUs are really used**: two threads each spin until both have
+2. **The entry conditions are what the ABI promises**: the thread's first
+   function reads its own stack pointer and reports it — `rsp % 16 == 8` on
+   x86-64 (what a `call` leaves) and `sp % 16 == 0` on AArch64 — and does
+   an aligned 16-byte spill, which is the thing that faults if the
+   invariant is wrong rather than merely unusual. It also checks it
+   received `arg` in the first argument register.
+3. **Two CPUs are really used**: two threads each spin until both have
    observed the other's flag set, with a bound. On one CPU this cannot
    complete without preemption; the assertion is that it completes.
    (Under `-smp 1` the same test must still pass, because preemption alone
    suffices — so the test asserts *progress*, not parallelism, and the
    parallel case is what makes it fast rather than what makes it pass.)
-3. **The futex closes the race it exists for**: a wait on a word that does
+4. **The futex closes the race it exists for**: a wait on a word that does
    not hold the expected value returns `-EAGAIN` without sleeping; a wait
    with a timeout returns `-ETIMEDOUT`; a wake returns the number woken;
    a wake with no waiter returns 0.
-4. **`clear_tid` is a join**: the word is non-zero while the thread runs,
-   zero after it exits, and a `futex_wait` on it returns when it does.
-5. **Exit semantics**: `SYS_thread_exit` from a worker leaves the process
+5. **`clear_tid` is a join**: the word holds the child's **tid** the
+   instant `thread_create` returns — written by the kernel before the child
+   could run, so the value cannot be a stale one the caller wrote — it is
+   zero after the child exits, and a `futex_wait` on it returns when that
+   happens. A child that exits before the parent looks is the same test
+   with a `thread_exit` first thing, and must behave identically.
+6. **Exit semantics**: `SYS_thread_exit` from a worker leaves the process
    running (the parent sees the join complete and keeps going);
    `SYS_exit` from *any* thread ends the whole process, and the harness
    sees the exit status the caller gave.
-6. **The mask is per-thread**: a worker blocks a signal, the main thread
+7. **The mask is per-thread**: a worker blocks a signal, the main thread
    does not, and a signal sent to the process is handled by the main
    thread — the property the table above claims.
-7. **The bound holds**: creating threads until `-EAGAIN` gives at most
+8. **The bound holds**: creating threads until `-EAGAIN` gives at most
    `PROCESS_MAX_THREADS`, and the process is still healthy afterwards
    (every thread joins, the next create succeeds).
-8. **The argument checks**: a request outside the caller's space, a
+9. **The argument checks**: a request outside the caller's space, a
    `clear_tid` that is unaligned or unmapped, an unknown flag, an
    unaligned `stack_top` — each `-EFAULT` or `-EINVAL`, and no thread
    created (`SYS_procinfo`'s thread count unchanged).
-9. **The filter**: a syscall filter that denies `SYS_thread_create` denies
+10. **The filter**: a syscall filter that denies `SYS_thread_create` denies
    it; one that denies `SYS_thread_exit` **cannot**, because it is always
    allowed.
 
 **Bug-proofs** to run against the shipped code, each observed to fail for
-its stated reason: the two-phase creation collapsed into one (the child
-runs before `clear_tid` is set, and the join races its exit — the bug
-`lx_clone`'s comment says it was written to avoid); `futex_wait` not
-re-checking the word under its lock (step 3's `-EAGAIN` becomes a sleep
-that no wake reaches); `clear_tid` not futex-woken (step 4's join hangs and
-the test's bound fails it); `SYS_thread_exit` calling `process_exit` (step
-5's process dies when a worker finishes); `SYS_thread_exit` removed from
-`native_always_allowed` (step 9's filtered thread cannot exit); the bound
-not checked (step 7 runs past 256 or faults); and the tid taken from a
-per-personality counter rather than shared (a native `thread_self` and the
-Linux view disagree, which step 1 sees).
+its stated reason — eight, each naming the step that catches it:
+
+1. The tid written into `clear_tid` **after** `process_thread_start` rather
+   than before → a child that exits first zeroes the word, the late write
+   leaves a stale tid, and **step 5**'s join waits on it until the test's
+   bound fails. This is the race `lx_clone`'s own comment says it was
+   written to avoid.
+2. The return address not pushed on x86-64 → **step 2**'s entry sees
+   `rsp % 16 == 0` and its aligned spill faults.
+3. `futex_wait` not re-checking the word under its lock → **step 4**'s
+   `-EAGAIN` becomes a sleep that no wake reaches.
+4. `clear_tid` not futex-woken at exit → **step 5**'s join hangs and the
+   test's bound fails it.
+5. `SYS_thread_exit` calling `process_exit` → **step 6**'s process dies
+   when a worker finishes.
+6. `SYS_thread_exit` removed from `native_always_allowed` → **step 10**'s
+   filtered thread cannot exit.
+7. The bound not checked → **step 8** runs past `PROCESS_MAX_THREADS` or
+   faults.
+8. The tid taken from a per-personality counter rather than shared → a
+   native `thread_self` and the Linux view disagree, which **step 1** sees.
 
 ## Benchmarks
 

@@ -320,7 +320,7 @@ place the personality is a superset rather than a translation: a native
 program has no syscall that creates a thread and none that waits on a
 futex, so a Linux binary can use every CPU in the machine and a CosmoOS
 binary cannot. `docs/audit/next-subsystem-threads.md` (not yet
-implemented) closes it with four native syscalls over exactly the
+implemented) closes it with five native syscalls over exactly the
 mechanism this section describes -- `process_add_thread`, the two-phase
 start, `clear_child_tid` and the futex -- and makes the thread id one
 number with two views rather than an `lx_tid`.
