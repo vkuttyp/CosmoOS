@@ -4148,8 +4148,8 @@ bool selftest_net_input(const char **reason)
           listed[0].dst_ip == gwa && listed[0].dst_prefix == 32 && listed[0].dst_port == 53);
     CHECK(listed[1].direction == FW_DIR_TO_HOST && listed[1].proto == IPPROTO_ICMP &&
           listed[1].dst_ip == gwa && listed[1].dst_port == ICMP_ECHO);
-    uint8_t pu, pg, ph, pw;
-    CHECK(fw_policy_get(ga, &pu, &pg, &ph, &pw) == 0 && ph == FW_DROP && pu == FW_ACCEPT && pg == FW_DROP);
+    uint8_t pu, pg, ph, pw, po;
+    CHECK(fw_policy_get(ga, &pu, &pg, &ph, &pw, &po) == 0 && ph == FW_DROP && pu == FW_ACCEPT && pg == FW_DROP);
 
     /* (2) the seeds reach the host: a DNS query to the gateway is accepted by
      * rule; an echo request to the gateway draws an echo reply. */
@@ -4629,8 +4629,8 @@ bool selftest_net_hostinput(const char **reason)
 
     /* (1) the host object ships with default ACCEPT and no rules, and the
      * world reaches the host's services under it. */
-    uint8_t pu, pg, ph, pw;
-    CHECK(fw_policy_get(FW_HOST_GUEST_IP, &pu, &pg, &ph, &pw) == 0 && pw == FW_ACCEPT);
+    uint8_t pu, pg, ph, pw, po;
+    CHECK(fw_policy_get(FW_HOST_GUEST_IP, &pu, &pg, &ph, &pw, &po) == 0 && pw == FW_ACCEPT && po == FW_ACCEPT);
     { struct fw_rule none[1]; CHECK(fw_rule_list(FW_HOST_GUEST_IP, none, 1) == 0); }
     fw_get_stats(&fs0);
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1000, 0, TH_SYN, 64240, NULL, 0);
@@ -5564,5 +5564,372 @@ bool selftest_net_hoststate(const char **reason)
           "consumed only where TCP confirmed the quoted segment and the segment came back inside the new MTU, an "
           "echo request drew nothing and spent no budget, a send refreshed rather than re-recorded, expiry closed "
           "the tuple, and the host's share held while the guests' pool stayed its own");
+    return true;
+}
+
+/* --- the OUTPUT chain (docs/audit/next-subsystem-output-chain.md) --------- */
+
+/* Nothing an earlier step left queued: a read-back assertion must see the
+ * frame this step produced, not the one before it. */
+static void out_drain_file(struct file *f)
+{
+    uint8_t rx[160];
+    thread_sleep_ms(20);
+    while (file_read(f, rx, sizeof(rx)) > 0)
+        ;
+}
+
+#define OUT_RULE(proto_, sip_, sp_, dip_, dp_, port_, verdict_, scope_) \
+    ((struct fw_rule){ .direction = FW_DIR_OUTPUT, .proto = (proto_), .verdict = (verdict_), \
+                       .dst_ip = (dip_), .dst_prefix = (dp_), .dst_port = (port_), \
+                       .src_ip = (sip_), .src_prefix = (sp_), .scope = (scope_) })
+
+bool selftest_net_output(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+
+    /* An uplink tap (the world) and a guest through /dev/net/tap -- so the
+     * guest's tap masquerades, which is what makes the host's sends to it
+     * FW_SCOPE_GUEST, and its INPUT seeds let its DNS query through. */
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x1c, 0x00, 0x01 };
+    static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x1c, 0x00, 0x63 };
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x1c, 0x00, 0x0a };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 10, 1), w = IPV4_ADDR(10, 77, 10, 99);
+    uint32_t wnet = IPV4_ADDR(10, 77, 10, 0);
+    struct tap *u = tap_create("outu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+    struct file *fa = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gwa = IPV4_ADDR(10, 0, 3, 1);
+    { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
+
+    struct socket *cs = NULL;
+    CHECK(hin_udp_listener(&cs, 0, 7200));        /* bound, never connected */
+    uint8_t pl[4] = { 'o', 'u', 't', '!' }, l4[160], buf[256];
+    uint16_t l4len;
+    struct hin_seg sg;
+    struct fw_stats fs0, fs1;
+    struct ip_stats is0, is1;
+    struct netaddr to;
+    hin_drain(u);
+
+    /* (1) the default is ACCEPT and changes nothing: the host's datagram to
+     * the world leaves as before. */
+    fw_get_stats(&fs0);
+    to = v4addr(w, 5300);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, HIN_TRIES) && sg.sport == 7200 && sg.src == u_ip);
+    CHECK(FWT_RISES(fw_get_stats, fs1, out_accept_default, fs0.out_accept_default));
+
+    /* (2) a rule refuses the send, and the sender is told. Nothing reaches
+     * the link, and -- because the verdict precedes the flow read -- nothing
+     * is recorded for a reply that can never come: with the host chain
+     * closed for this world, the reply that would have been admitted by that
+     * flow is dropped instead. */
+    struct fw_rule r_world = { .direction = FW_DIR_FROM_UPLINK, .verdict = FW_DROP,
+                               .src_ip = wnet, .src_prefix = 24 };
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_world) == 0);
+    /* A tuple of its own: step (1)'s successful send to :5300 left a live
+     * flow, and that flow -- not the refused send -- would have admitted the
+     * reply below. */
+    struct netaddr to2 = v4addr(w, 5301);
+    struct fw_rule out_5301 = OUT_RULE(IPPROTO_UDP, 0, 0, wnet, 24, 5301, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_5301) == 0);
+    hin_drain(u);
+    fw_get_stats(&fs0); ipv4_get_stats(&is0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to2) == -EPERM);
+    fw_get_stats(&fs1); ipv4_get_stats(&is1);
+    CHECK(fs1.out_drop_rule == fs0.out_drop_rule + 1);
+    CHECK(is1.tx_filtered == is0.tx_filtered + 1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new);              /* no reply state for a refused send */
+    CHECK(!hin_recv(u, IPPROTO_UDP, 5301, &sg, 15));          /* and nothing on the link */
+    l4len = nettest_mk_udp(l4, w, u_ip, 5301, 7200, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 10) == -EAGAIN);
+    /* Without the OUTPUT rule the same send records its flow and the same
+     * reply is admitted by it -- the ordering asserted from both sides. */
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_5301) == 0);
+    fw_get_stats(&fs0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to2) == (int64_t)sizeof(pl));
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5301, 7200, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_world) == 0);
+
+    /* (3) an ICMP rule refuses an echo request, and icmp_send_echo says so. */
+    struct fw_rule out_echo = OUT_RULE(IPPROTO_ICMP, 0, 0, 0, 0, ICMP_ECHO, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_echo) == 0);
+    ipv4_get_stats(&is0);
+    CHECK(icmp_send_echo(w, 0x6161, 1, "q", 1) == -EPERM);
+    CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
+    CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 15));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_echo) == 0);
+    CHECK(icmp_send_echo(w, 0x6162, 1, "q", 1) == 0);         /* and without it, out it goes */
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, HIN_TRIES) && sg.flags == ICMP_ECHO);
+    /* A source-prefix rule judges the address the wire will carry, not the
+     * unspecified one the sender passed: icmp_send_echo leaves the source to
+     * the route, and a rule naming this link's own address must still match. */
+    struct fw_rule out_src = OUT_RULE(IPPROTO_ICMP, u_ip, 32, 0, 0, ICMP_ECHO, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_src) == 0);
+    CHECK(icmp_send_echo(w, 0x6163, 1, "q", 1) == -EPERM);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_src) == 0);
+
+    /* (4) the scope separates the two egresses. The same datagram, to a
+     * guest and to the world, under one rule at a time. */
+    struct netaddr to_guest = v4addr(ga, 7300), to_world = v4addr(w, 7300);
+    struct fw_rule out_g = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_GUEST);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_g) == 0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_guest) == -EPERM);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_world) == (int64_t)sizeof(pl));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_g) == 0);
+    struct fw_rule out_w = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_WORLD);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_w) == 0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_world) == -EPERM);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_guest) == (int64_t)sizeof(pl));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_w) == 0);
+    struct fw_rule out_any = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_any) == 0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_guest) == -EPERM);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_world) == -EPERM);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_any) == 0);
+    /* The scope is part of a rule's identity: two rules alike but for it are
+     * two rules, each deletable by its own tuple. */
+    struct fw_rule two_g = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7302, FW_DROP, FW_SCOPE_GUEST);
+    struct fw_rule two_w = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7302, FW_DROP, FW_SCOPE_WORLD);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &two_g) == 0);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &two_w) == 0);     /* not -EEXIST: a different rule */
+    {
+        struct netaddr g2 = v4addr(ga, 7302), w2 = v4addr(w, 7302);
+        CHECK(ksock_sendto(cs, pl, sizeof(pl), &g2) == -EPERM);
+        CHECK(ksock_sendto(cs, pl, sizeof(pl), &w2) == -EPERM);
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &two_g) == 0);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &two_w) == 0);        /* each by its own tuple */
+
+    /* A rule that names a destination prefix instead still works: the scope
+     * adds a dimension rather than replacing one. */
+    struct fw_rule out_pfx = OUT_RULE(IPPROTO_UDP, 0, 0, IPV4_ADDR(10, 0, 3, 0), 24, 7300, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_pfx) == 0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_guest) == -EPERM);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &to_world) == (int64_t)sizeof(pl));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_pfx) == 0);
+
+    /* (5) the host's reply to a guest is filterable -- the case the INPUT and
+     * host chains both named and neither could express. The guest's DNS query
+     * reaches the proxy through INPUT's seed; the proxy's answer leaves
+     * through this chain, so a scope-guest rule on the guest's own port
+     * silences it. (No upstream is configured, so the answer is the proxy's
+     * own SERVFAIL -- which is still the host answering a guest.) */
+    uint8_t msg[64];
+    out_drain_file(fa);                           /* the scope tests' datagrams are not this step's */
+    uint32_t mlen = nettest_mk_dns(msg, 0x2468);
+    l4len = nettest_mk_udp(l4, ga, gwa, 4444, 53, msg, (uint16_t)mlen);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    {
+        uint8_t rx[160];
+        int64_t n = fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* the proxy answered */
+        CHECK(n >= ETH_HLEN + 20 + 8);
+        const uint8_t *rudp = rx + ETH_HLEN + 20;
+        CHECK((uint16_t)(rudp[2] << 8 | rudp[3]) == 4444);
+    }
+    struct fw_rule out_reply = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 4444, FW_DROP, FW_SCOPE_GUEST);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_reply) == 0);
+    out_drain_file(fa);
+    ipv4_get_stats(&is0);
+    mlen = nettest_mk_dns(msg, 0x2469);
+    l4len = nettest_mk_udp(l4, ga, gwa, 4444, 53, msg, (uint16_t)mlen);
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gwa, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
+    {
+        uint8_t rx[160];
+        CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* the answer never reached A */
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_reply) == 0);
+
+    /* (6) a failure that is not a verdict is not counted as one. A true
+     * no-route send cannot be produced from a socket here -- the NIC carries
+     * a default route, so every address routes somewhere -- so the case is
+     * made with the other non-policy failure on this path: an oversized
+     * datagram, which the chain accepts and output_on then refuses. Neither
+     * tx_filtered nor a flow may move for it. */
+    static uint8_t oversize[2000];
+    ipv4_get_stats(&is0); fw_get_stats(&fs0);
+    to = v4addr(w, 5999);
+    CHECK(ksock_sendto(cs, oversize, sizeof(oversize), &to) == -EMSGSIZE);
+    ipv4_get_stats(&is1); fw_get_stats(&fs1);
+    CHECK(is1.tx_filtered == is0.tx_filtered && fs1.hin_flow_new == fs0.hin_flow_new);
+    CHECK(fs1.out_accept_default > fs0.out_accept_default);   /* the chain did see it, and accepted */
+
+    /* (7) loopback passes no chain: a rule that matches by every other field
+     * does not touch the host talking to itself. */
+    struct socket *lo = NULL;
+    CHECK(hin_udp_listener(&lo, INADDR_LOOPBACK_N, 7201));
+    struct fw_rule out_lo = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7201, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_lo) == 0);
+    {
+        struct socket *tx = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &tx) == 0);
+        struct netaddr loto = v4addr(INADDR_LOOPBACK_N, 7201);
+        CHECK(ksock_sendto(tx, pl, sizeof(pl), &loto) == (int64_t)sizeof(pl));
+        CHECK(hin_recv_sock(lo, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
+        ksock_put(tx);
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
+    ksock_put(lo);
+
+    /* (8) TCP stalls rather than failing, the documented limit: batch_send
+     * ignores output errors, so the verdict is invisible to connect(). The
+     * rule is counted per attempt, no SYN reaches the link, and the socket's
+     * state is "connecting", not -EPERM. */
+    struct fw_rule out_tcp = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9200, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_tcp) == 0);
+    hin_drain(u);
+    fw_get_stats(&fs0);
+    {
+        struct socket *c = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        ksock_set_nonblock(c, true);
+        struct netaddr peer = v4addr(w, 9200);
+        CHECK(ksock_connect(c, &peer) == -EINPROGRESS);        /* not -EPERM: TCP never sees it */
+        CHECK(FWT_RISES(fw_get_stats, fs1, out_drop_rule, fs0.out_drop_rule));
+        CHECK(!hin_recv(u, IPPROTO_TCP, 9200, &sg, 15));       /* the SYN never left */
+        ksock_put(c);
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_tcp) == 0);
+
+    /* (9) nat_in's delivery to a guest is this chain's traffic too: it
+     * re-emits through ipv4_output, so a scope-guest rule stops a DNAT'd
+     * connection on its way to the guest. The sharp edge, asserted. */
+    CHECK(nat_pf_add(IPPROTO_TCP, 8080, ga, 80) == 0);
+    out_drain_file(fa);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40100, 8080, 3000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    {
+        uint8_t rx[160];
+        int64_t n = fwt_recv(fa, rx, sizeof(rx), HIN_TRIES);   /* without a rule it arrives */
+        CHECK(n >= ETH_HLEN + 40);
+        const struct ipv4_hdr *ri = (const struct ipv4_hdr *)(rx + ETH_HLEN);
+        CHECK(ri->dst == ga);
+    }
+    struct fw_rule out_dnat = OUT_RULE(IPPROTO_TCP, 0, 0, 0, 0, 80, FW_DROP, FW_SCOPE_GUEST);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_dnat) == 0);
+    out_drain_file(fa);
+    ipv4_get_stats(&is0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40101, 8080, 3000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
+    {
+        uint8_t rx[160];
+        CHECK(fwt_recv(fa, rx, sizeof(rx), 15) == 0);          /* and with one it does not */
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_dnat) == 0);
+    CHECK(nat_pf_del(IPPROTO_TCP, 8080));
+
+    /* (10) scope discipline: the scope belongs to OUTPUT, OUTPUT belongs to
+     * the host, and the policy follows the same rule. */
+    struct fw_rule bad_scope = { .direction = FW_DIR_TO_HOST, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                                 .verdict = FW_ACCEPT, .dst_ip = gwa, .dst_port = 53,
+                                 .scope = FW_SCOPE_GUEST };
+    CHECK(fw_rule_add(ga, 0, &bad_scope) == -EINVAL);
+    struct fw_rule bad_from_uplink = { .direction = FW_DIR_FROM_UPLINK, .verdict = FW_DROP,
+                                       .scope = FW_SCOPE_WORLD };
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &bad_from_uplink) == -EINVAL);
+    struct fw_rule guest_out = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(ga, 0, &guest_out) == -EINVAL);
+    struct fw_rule bad_scope_val = OUT_RULE(IPPROTO_UDP, 0, 0, 0, 0, 7300, FW_DROP, 3);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &bad_scope_val) == -EINVAL);
+    CHECK(fw_policy_set(ga, FW_DIR_OUTPUT, FW_DROP) == -EINVAL);
+    {
+        uint8_t pu, pg, ph, pw, po;
+        CHECK(fw_policy_get(FW_HOST_GUEST_IP, &pu, &pg, &ph, &pw, &po) == 0 && po == FW_ACCEPT);
+    }
+
+    /* (10b) the hardened default: with no rule at all, flipping the OUTPUT
+     * policy to DROP stops the machine sending anything -- so the verdicts
+     * are taken into locals and the default restored *before* any assertion,
+     * because a failure here would otherwise leave this machine mute for
+     * every test that follows. (It is also what makes the fast path honest:
+     * a policy flip with no rules must invalidate it.) */
+    {
+        struct netaddr tod = v4addr(w, 5998);
+        CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_OUTPUT, FW_DROP) == 0);
+        fw_get_stats(&fs0);
+        int64_t refused = ksock_sendto(cs, pl, sizeof(pl), &tod);
+        fw_get_stats(&fs1);
+        int restored = fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_OUTPUT, FW_ACCEPT);
+        int64_t allowed = ksock_sendto(cs, pl, sizeof(pl), &tod);
+        CHECK(restored == 0);
+        CHECK(refused == -EPERM && fs1.out_drop_default > fs0.out_drop_default);
+        CHECK(allowed == (int64_t)sizeof(pl));
+    }
+
+    /* (11) the control channel: an OUTPUT rule with a scope round-trips, the
+     * host record carries the fifth policy, a version-4 writer is refused by
+     * version (the command's size did not change), and the policy record is
+     * the version-5 one. */
+    _Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "the v5 policy record is 12 bytes");
+    struct file *fctl = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tapctl", COSMO_O_RDWR, 0, &fctl) == 0 && fctl != NULL);
+    struct cosmo_netctl_filter c = { .version = COSMO_NETCTL_VERSION, .op = COSMO_NETCTL_FILTER_ADD,
+                                     .guest_addr = COSMO_NETCTL_HOST_ADDR,
+                                     .direction = COSMO_NETCTL_DIR_OUTPUT,
+                                     .proto = COSMO_NETCTL_PROTO_UDP, .verdict = COSMO_NETCTL_VERDICT_DROP,
+                                     .dst_port = 7400, .scope = COSMO_NETCTL_SCOPE_GUEST };
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    struct cosmo_netctl_filter old = c;
+    old.version = 4;
+    CHECK(file_write(fctl, &old, sizeof(old)) == -ENOTSUP);   /* by version: the size is the same */
+    struct cosmo_netctl_filter bad = c;
+    bad.guest_addr = ga; bad.dst_port = 7401;
+    CHECK(file_write(fctl, &bad, sizeof(bad)) == -EINVAL);    /* a guest may not name OUTPUT */
+    static uint8_t snap[COSMO_NETCTL_SNAPSHOT_MAX];
+    int64_t sn = file_read(fctl, snap, sizeof(snap));
+    CHECK(sn > 0);
+    {
+        struct cosmo_netctl_list phh; memcpy(&phh, snap, sizeof(phh));
+        size_t off = sizeof(phh) + (size_t)phh.count * sizeof(struct cosmo_netctl_rule);
+        struct cosmo_netctl_filter_list fh; memcpy(&fh, snap + off, sizeof(fh));
+        CHECK(fh.version == COSMO_NETCTL_VERSION);
+        off += sizeof(fh);
+        bool host_seen = false;
+        for (unsigned i = 0; i < fh.guest_count; i++, off += sizeof(struct cosmo_netctl_filter_guest)) {
+            struct cosmo_netctl_filter_guest fg; memcpy(&fg, snap + off, sizeof(fg));
+            if (fg.guest_addr == COSMO_NETCTL_HOST_ADDR)
+                host_seen = fg.policy_output == COSMO_NETCTL_VERDICT_ACCEPT &&
+                            fg.policy_from_uplink == COSMO_NETCTL_VERDICT_ACCEPT;
+        }
+        CHECK(host_seen);
+        bool rule_seen = false;
+        for (unsigned i = 0; i < fh.rule_count; i++) {
+            struct cosmo_netctl_filter_rule fr; memcpy(&fr, snap + off + i * sizeof(fr), sizeof(fr));
+            if (fr.guest_addr == COSMO_NETCTL_HOST_ADDR && fr.dst_port == 7400)
+                rule_seen = fr.direction == COSMO_NETCTL_DIR_OUTPUT && fr.scope == COSMO_NETCTL_SCOPE_GUEST;
+        }
+        CHECK(rule_seen);
+    }
+    c.op = COSMO_NETCTL_FILTER_DEL;
+    CHECK(file_write(fctl, &c, sizeof(c)) == (int64_t)sizeof(c));
+    file_put(fctl);
+
+    ksock_put(cs);
+    file_put(fa);
+    hin_drain(u);
+    tap_destroy(u);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+    kinfo("selftest: net-output: the host's own egress takes a verdict -- the default let everything out, a rule "
+          "refused a send with -EPERM and left neither a frame nor reply state, an ICMP rule refused an echo, the "
+          "scope told a guest's tap from the world (and a destination prefix still worked), the proxy's answer to "
+          "a guest was silenced, no route stayed -ENETUNREACH, loopback passed no chain, TCP stalled rather than "
+          "failing, a DNAT'd delivery was this chain's traffic too, the scopes held, and the listing carried the "
+          "fifth policy with the rule's egress");
     return true;
 }

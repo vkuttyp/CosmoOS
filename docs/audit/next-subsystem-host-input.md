@@ -389,7 +389,8 @@ refuse a snapshot whose version is not the one it speaks.
   replies still take the rules, which the default ACCEPT admits). **Done in
   the next unit**, `next-subsystem-host-state.md`.
 - **Per-interface host chains** (all real links share `FROM_UPLINK` here).
-- **An OUTPUT chain** for the host's egress; rate-limit/log targets; IPv6.
+- **An OUTPUT chain** for the host's egress — **built**,
+  `next-subsystem-output-chain.md`; rate-limit/log targets; IPv6.
 - **DHCP client protection** — moot until the host has a DHCP client.
 
 ## Affected files

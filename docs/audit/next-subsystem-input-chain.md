@@ -23,7 +23,8 @@ and (2) host-local delivery had **no anti-spoof** — the strict-source
 check lived only in `ipv4_forward` — so a guest could forge its source
 toward host services; the same rule now guards the local path. The host's own
 exposure to the *uplink* (a host-scoped firewall) and the host's egress (an
-OUTPUT chain) are named as the next units.**
+OUTPUT chain) are named as the next units -- both since built, with the
+uplink chain's reply state between them.**
 
 ## Problem (the state before this unit)
 
@@ -158,8 +159,9 @@ The verdict does two things, in order:
 2. **The guest's `TO_HOST` rules, first match, else its `TO_HOST` default.**
 
 No flow state is needed for this chain: the host's *reply* to a guest leaves
-by `ipv4_output` → `output_on` → the tap and passes no filter (an OUTPUT
-chain is a later unit), and a guest's later segments on an accepted
+by `ipv4_output` → `output_on` → the tap and passed no filter when this unit
+shipped (the OUTPUT chain that filters it was the later unit named below,
+since built), and a guest's later segments on an accepted
 connection (its ACKs, its data) match the same `TO_HOST` rule by destination
 port, so per-datagram rule matching is sufficient and stateless. A guest
 sending a bare ACK to an unruled host port is dropped, as it should be.
@@ -220,7 +222,8 @@ seeded rules fit within `FW_RULES_PER_GUEST`) all carry over.
   host-level policy object and control surface (not `/dev/net/tapctl`), and
   it interacts with DNAT ordering; a unit of its own.
 - **An OUTPUT chain** for the host's own egress (and, with it, filtering the
-  host's replies to guests).
+  host's replies to guests). **Built**:
+  `next-subsystem-output-chain.md`.
 - **Loopback** is never filtered (the host talking to itself).
 - Rate-limit/log targets, IPv6, full TCP state — as before.
 

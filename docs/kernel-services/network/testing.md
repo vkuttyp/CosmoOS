@@ -557,6 +557,79 @@ refused echo request is then answered).
 now dropped by the off-link invariant (`rx_offlink`) before any chain, not by
 INPUT's default (`in_drop_default`).
 
+**`net-output`** (the OUTPUT chain): an "uplink" tap as `net-hoststate`
+builds one and a guest through `/dev/net/tap` — so the guest's tap
+masquerades, which is what makes the host's sends to it `FW_SCOPE_GUEST`,
+and its INPUT seeds let its DNS query through — plus a host UDP socket bound
+but never connected. (1) The default is ACCEPT and changes nothing: the
+host's datagram to the world leaves as before (`out_accept_default`).
+(2) A rule refuses a send and the sender is told: `ksock_sendto` returns
+**`-EPERM`**, `tx_filtered` and `out_drop_rule` rise by one, nothing reaches
+the link, and no reply state is opened — with the host chain closed for that
+world, the reply that a recorded flow would have admitted is dropped
+instead; delete the rule and the same send records its flow and the same
+reply is delivered, so the ordering is asserted from both sides. The step
+uses a destination port of its own, because step (1)'s successful send left a
+live flow that would have admitted the reply regardless. (3) An ICMP rule
+refuses an echo request and `icmp_send_echo` returns `-EPERM`; without the
+rule the request leaves; and a rule naming **this link's own address as the
+source** still matches a request whose source the sender left to the route,
+which is the resolve-once property. (4) The scope separates the egresses:
+the same datagram to a guest and to the world, under a `guest` rule, then a
+`world` rule, then `any`; a rule naming a destination prefix instead still
+works, so the scope adds a dimension rather than replacing one; and two
+rules alike but for the scope are two rules (the second `add` is not
+`-EEXIST`, both drop their own egress, each deletes by its own tuple).
+(5) The host's reply to a guest is filterable — the case the INPUT and host
+chains both named and neither could express: the guest's DNS query reaches
+the proxy through INPUT's seed and the proxy answers it, and with a
+`scope guest` rule on the guest's own port that answer never reaches the
+guest's tap (`tx_filtered` rises). (6) A failure that is not a verdict is not
+counted as one: an oversized datagram is accepted by the chain and refused by
+`output_on` (`-EMSGSIZE`), leaving `tx_filtered` and the flow count alone. A
+true no-route send is not reachable from a socket here, because the NIC
+carries a default route; the oversized case makes the same point
+deterministically. (7) Loopback passes no chain: a rule matching by every
+other field does not touch a `127.0.0.1` send. (8) TCP stalls rather than
+failing, the documented limit: a nonblocking `connect` to a refused port
+returns `-EINPROGRESS`, not `-EPERM`, while `out_drop_rule` rises and no SYN
+reaches the link. (9) `nat_in`'s delivery to a guest is this chain's traffic
+too: a DNAT'd SYN reaches the guest without a rule and is stopped by a
+`scope guest` one (`tx_filtered`). (10) Scope discipline: a scope on a
+`TO_HOST` or `FROM_UPLINK` rule is `-EINVAL`, an `OUTPUT` rule on a guest is
+`-EINVAL`, a scope value out of range is `-EINVAL`, and `policy <guest> out`
+is `-EINVAL` while the host's `policy_output` reads ACCEPT. (11) The control
+channel: an `OUTPUT` rule with a scope written through `/dev/net/tapctl`
+round-trips with its scope beside `policy_output` in the host's record; a
+version-4 writer is refused **by version**, since the command's size did not
+change; a guest naming `OUTPUT` is refused there too; and the policy record
+is the version-5 one, asserted by a static assert on its size.
+
+Proved by reintroducing: the gate counting the verdict but not stopping the
+datagram (the refused `sendto` then returns success and the datagram reaches
+the link); the loopback exemption removed (the `127.0.0.1` send then fails);
+the scope ignored in the match (the guest-scoped rule then drops the host's
+world traffic too); the scope left out of a rule's identity (the second of
+two rules alike but for it is refused `-EEXIST`); `-EPERM` replaced by a
+silent success (the failed `sendto` then returns the byte count and the
+caller cannot tell); the source resolved *after* the verdict (the
+source-prefix rule then judges `0` and misses the echo it should refuse —
+and `net-hoststate` fails with it, because the flow key takes the same
+unresolved value); `OUTPUT` allowed on a guest's object (the guest's add then
+succeeds); and the two that keep the send path's fast path honest — a new
+rule not invalidating it (the first rule then never binds, so the refused
+send succeeds) and a policy flip not invalidating it (the hardened default
+then lets everything out). Nine in all.
+
+One proof named in the report is **not observable, and the reason is worth
+keeping**: moving the verdict to *after* the host chain's flow read changes
+nothing the suite can see. `fw_host_record` is already conditional on
+`output_on` succeeding, so a datagram the verdict drops can never be
+recorded whichever side of the read the verdict sits on. The ordering is
+kept for clarity and for the work it saves; the property it was thought to
+guarantee holds for a stronger reason, which the host-state unit's own
+proof 13 covers.
+
 **`net-dnat` and `net-tapctl`** (races fixed with the host-state unit): two
 assertions in these tests were written without a barrier against the network
 worker, and the host-state unit's timing perturbation turned both into

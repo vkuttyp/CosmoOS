@@ -180,19 +180,39 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
         m_freem(m);
         return -ENETUNREACH;
     }
+    /* The source the header will carry, resolved once here and handed to all
+     * three of the firewall's OUTPUT verdict, the host chain's flow read and
+     * output_on -- so a source-prefix rule judges the address the wire does,
+     * for the senders that leave it to the route (icmp_send_echo, an unbound
+     * socket) as much as for those that name it. */
+    uint32_t from = src != 0 ? src : ipv4_source_for(dst);
+
+    /* The firewall's OUTPUT chain: what the host itself may send. Here --
+     * after the route, because the egress is the scope the rule may name,
+     * and before both the flow read and the link -- a refused datagram
+     * leaves nothing behind: no frame, and no reply state for a reply that
+     * can never come. The sender is local, so unlike the strangers the other
+     * chains hide from it is told: -EPERM, which udp_sendto and
+     * icmp_send_echo already return to their callers. Loopback is not
+     * offered: the host talking to itself passes no chain. */
+    if (!(nif->flags & NETIF_LOOPBACK) && fw_output_verdict(nif, m, from, dst, proto) == FW_DROP) {
+        STAT(tx_filtered);
+        m_freem(m);
+        netif_put(nif);
+        return -EPERM;
+    }
+
     /* The host chain's state. This is the one door every datagram the host
-     * itself originates passes -- a forwarded one goes straight to output_on,
-     * and nat_in's deliveries leave on a guest tap -- so the flow whose reply
-     * the chain must admit is read here, with the source the header will
-     * carry (output_on resolves a zero source the same way), and recorded
-     * only once output_on has accepted the datagram: a send refused for a
-     * size or a missing next hop never left, and must open nothing. (ARP
-     * resolution queues the frame and reports success; the stack accepted it,
-     * and whether the neighbour ever answers is a network condition, not a
-     * refused send.) */
+     * itself originates passes -- ipv4_forward transmits through output_on
+     * directly -- so the flow whose reply the chain must admit is read here
+     * and recorded only once output_on has accepted the datagram: a send
+     * refused for a size or a missing next hop never left, and must open
+     * nothing. (ARP resolution queues the frame and reports success; the
+     * stack accepted it, and whether the neighbour ever answers is a network
+     * condition, not a refused send.) */
     struct fw_host_flow hf;
-    bool track = fw_host_flow_of(nif, m, src != 0 ? src : ipv4_source_for(dst), dst, proto, &hf);
-    int rc = output_on(nif, m, src, dst, proto, ttl);
+    bool track = fw_host_flow_of(nif, m, from, dst, proto, &hf);
+    int rc = output_on(nif, m, from, dst, proto, ttl);
     if (track && rc == 0)
         fw_host_record(&hf);
     netif_put(nif);
@@ -201,8 +221,10 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
 
 static int output_on(struct netif *nif, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8_t ttl)
 {
-    if (src == 0)
-        src = ipv4_source_for(dst);
+    /* `src` is already the address to put on the wire: ipv4_output resolves
+     * an unspecified one before its OUTPUT verdict (so the rule and the
+     * header agree), and ipv4_forward passes the datagram's own source or
+     * the one NAT chose. */
     uint32_t total = m->pkt.len + sizeof(struct ipv4_hdr);
     if (total > nif->mtu || total > 65535) {
         m_freem(m);

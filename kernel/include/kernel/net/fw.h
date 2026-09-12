@@ -87,16 +87,27 @@ enum fw_verdict { FW_DROP = 0, FW_ACCEPT = 1 };
  * never matches TO_HOST or FROM_UPLINK, so a wildcard written to permit
  * forwarding cannot silently open a host service; host traffic needs an
  * explicit TO_HOST or FROM_UPLINK rule. */
-enum fw_dir { FW_DIR_ANY = 0, FW_DIR_TO_UPLINK = 1, FW_DIR_TO_GUEST = 2, FW_DIR_TO_HOST = 3, FW_DIR_FROM_UPLINK = 4 };
-#define FW_DIR_COUNT 4u                                   /* policy slots: uplink, guest, host, from-uplink */
+enum fw_dir { FW_DIR_ANY = 0, FW_DIR_TO_UPLINK = 1, FW_DIR_TO_GUEST = 2, FW_DIR_TO_HOST = 3, FW_DIR_FROM_UPLINK = 4,
+              FW_DIR_OUTPUT = 5 };
+#define FW_DIR_COUNT 5u                                   /* policy slots: uplink, guest, host, from-uplink, output */
+
+/* The egress a host-originated datagram is leaving by, for an OUTPUT rule:
+ * the world (a real, non-guest link) or a guest's tap. A rule's scope is
+ * ANY unless it means to separate the two, and must be ANY on every
+ * direction but OUTPUT -- the other chains are not decided by an egress the
+ * way this one is. Loopback reaches no chain at all. */
+#define FW_SCOPE_ANY   0u
+#define FW_SCOPE_WORLD 1u
+#define FW_SCOPE_GUEST 2u
 
 /* One rule: the match tuple plus the verdict. dst_prefix 0 matches any
  * destination (dst_ip must then be 0); proto 0 any protocol. dst_port is the
  * transport selector: for proto TCP/UDP/any, a destination port (0 = any; a
  * non-zero port matches only a TCP/UDP datagram with that port); for proto
  * ICMP, the ICMP type 0..255 or FW_ICMP_TYPE_ANY. src_prefix/src_ip match the
- * source the same way; only a host-scoped (FROM_UPLINK) rule may name one --
- * a guest's rule carries 0/0, its source being the guest. */
+ * source the same way; only a host-scoped rule (FROM_UPLINK or OUTPUT) may
+ * name one -- a guest's rule carries 0/0, its source being the guest. scope
+ * narrows an OUTPUT rule to one kind of egress and is ANY everywhere else. */
 struct fw_rule {
     uint8_t  direction;   /* enum fw_dir */
     uint8_t  proto;       /* IPPROTO_TCP/UDP/ICMP, or 0 */
@@ -105,7 +116,7 @@ struct fw_rule {
     uint32_t dst_ip;      /* network order */
     uint16_t dst_port;    /* host order: port, or ICMP type / FW_ICMP_TYPE_ANY */
     uint8_t  src_prefix;  /* 0..32; 0 = any source (src_ip then 0); host-scoped rules only */
-    uint8_t  reserved;
+    uint8_t  scope;       /* FW_SCOPE_*; OUTPUT rules only, ANY otherwise */
     uint32_t src_ip;      /* network order */
 };
 
@@ -137,7 +148,7 @@ unsigned fw_rule_list(uint32_t guest_ip, struct fw_rule *out, unsigned max);
  * three likewise. */
 int fw_policy_set(uint32_t guest_ip, uint8_t direction, uint8_t verdict);
 int fw_policy_get(uint32_t guest_ip, uint8_t *to_uplink, uint8_t *to_guest, uint8_t *to_host,
-                  uint8_t *from_uplink);
+                  uint8_t *from_uplink, uint8_t *output);
 /* The attached guests' addresses (the host object is not among them); the
  * count written. */
 unsigned fw_guest_list(uint32_t *out, unsigned max);
@@ -214,6 +225,23 @@ bool fw_host_flow_of(struct netif *out, struct mbuf *m, uint32_t src, uint32_t d
                      struct fw_host_flow *f);
 void fw_host_record(const struct fw_host_flow *f);
 
+/*
+ * OUTPUT: the verdict for a datagram the host itself is about to send out
+ * `out`, called from ipv4_output after the route (the egress is the scope)
+ * and before both the flow read and output_on, so that a datagram this
+ * chain refuses leaves nothing behind: no frame on the link and no reply
+ * state for a reply that can never come. `m` carries the transport header
+ * at offset 0 and `src`/`dst` are the addresses the header will carry --
+ * `src` already resolved by the caller, so a source-prefix rule judges the
+ * address the wire does. Loopback is not offered here (the host talking to
+ * itself passes no chain). The host's OUTPUT rules first-match, else its
+ * OUTPUT default, ACCEPT. On FW_DROP the caller frees the datagram and
+ * answers the sender -EPERM: the party refused is local, and unlike the
+ * strangers the other chains hide from, it can be told.
+ */
+enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst,
+                                  uint8_t proto);
+
 /* Reclaim expired flows (the network worker's periodic tick, beside nat_age). */
 void fw_age(uint64_t now_ns);
 /* Drop every flow and reset every attached guest to "as attached" -- the
@@ -234,6 +262,8 @@ struct fw_stats {
     uint64_t hin_accept_default, hin_drop_default; /* host-chain verdicts from the host default */
     uint64_t hin_accept_established;             /* host chain: the reverse of a flow the host opened */
     uint64_t hin_flow_new, hin_flow_drop_full;   /* host flows recorded / not recorded (share spent) */
+    uint64_t out_accept_rule, out_drop_rule;     /* OUTPUT verdicts from a matching rule */
+    uint64_t out_accept_default, out_drop_default; /* OUTPUT verdicts from the host's OUTPUT default */
     uint32_t flows, rules;                       /* live right now (rules: every guest's and the host's) */
 };
 void fw_get_stats(struct fw_stats *out);

@@ -113,6 +113,7 @@ struct ip_stats {
     uint64_t fwd, fwd_ttl_exceeded, fwd_no_route, fwd_hairpin, fwd_disabled, fwd_nat_drop, fwd_spoofed;
     uint64_t fwd_filtered;             /* dropped by the firewall's FORWARD verdict */
     uint64_t in_filtered;              /* dropped by the firewall's INPUT verdict (a guest tap -> the host) */
+    uint64_t tx_filtered;              /* dropped by the firewall's OUTPUT verdict (the host's own egress) */
     uint64_t rx_offlink;               /* a locally-addressed datagram not for its ingress link's own address */
     uint64_t hin_quiet;                /* host-chain DROP on TCP/UDP: delivered under M_FW_QUIET */
     uint64_t hin_filtered;             /* host-chain DROP on anything else: freed */
