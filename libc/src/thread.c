@@ -60,15 +60,17 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      */
     char *base = mmap(NULL, size + PAGE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (base == MAP_FAILED)
-        return -ENOMEM;
+        return -errno;                     /* the reservation */
     if (munmap(base + PAGE, size) != 0) {
+        int e = errno;
         munmap(base, size + PAGE);
-        return -ENOMEM;
+        return -e;                         /* the hole */
     }
     if (mmap(base + PAGE, size, PROT_READ | PROT_WRITE,
              MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+        int e = errno;
         munmap(base, PAGE);
-        return -ENOMEM;
+        return -e;                         /* the fixed map into the hole */
     }
 
     memset(t, 0, sizeof(*t));

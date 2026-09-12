@@ -441,13 +441,31 @@ int main(int argc, char **argv)
     {
         cosmo_thread_t h[3];
         heap_bad = heap_done = 0;
+        /*
+         * 16 KB stacks, not the 64 KB default: these threads print and
+         * allocate, they do not recurse, and a test should ask the machine
+         * for what it needs.
+         *
+         * And a create is allowed to fail. A thread's stack is a mapping
+         * and a mapping can be refused on a machine under pressure, which
+         * CI's aarch64 runner has done twice here and this machine never
+         * has. This step's subject is the allocator and stdio under
+         * concurrency, not the proposition that a create always succeeds,
+         * so it retries a bounded number of times and prints every refusal
+         * with the errno the library now reports -- rather than the
+         * -ENOMEM it used to flatten every mapping failure into, which is
+         * why the two CI failures could not say which call had failed.
+         */
         for (unsigned i = 0; i < 3u; i++) {
-            /* 16 KB, not the 64 KB default: these threads print and
-             * allocate, they do not recurse, and a test should ask the
-             * machine for what it needs. */
-            int rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 16u * 1024u);
-            if (rc != 0)
-                printf("thrtest: heap thread %u refused rc=%d\n", i + 1, rc);
+            int rc = -1;
+            for (unsigned attempt = 0; attempt < 20u && rc != 0; attempt++) {
+                rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 16u * 1024u);
+                if (rc != 0) {
+                    printf("thrtest: heap thread %u refused rc=%d (attempt %u)\n", i + 1, rc, attempt);
+                    fflush(stdout);
+                    cosmo_sleep_ns(20000000ull);   /* let the reaper catch up */
+                }
+            }
             CHECK(rc == 0);
         }
         for (unsigned i = 0; i < 3u; i++)

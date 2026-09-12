@@ -426,7 +426,12 @@ return an error, it kills the process with `SIGSYS` (status 159), so the
 filtered process cannot report on itself -- one child calls a denied
 `thread_create` and must die that way, and another, under a filter that
 denies *everything*, must still exit cleanly with its own status through
-`thread_exit`. (11) **The allocator and stdio under three threads at once**: each thread
+`thread_exit`. (11) **The allocator and stdio under three threads at once** -- whose
+creates **retry**, because a thread's stack is a mapping and a mapping can
+be refused on a machine under pressure: CI's aarch64 runner has refused
+one twice where this machine never has, and the step's subject is the
+allocator and stdio under concurrency rather than the proposition that a
+create always succeeds. Every refusal is printed with its errno: each thread
 allocates, fills its block with its own byte, verifies every byte of it,
 reallocates, frees, and prints as it goes. This is the step that would
 otherwise find out the hard way what an unlocked free list does -- a lost
