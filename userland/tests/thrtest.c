@@ -103,7 +103,7 @@ static void *pair_a(void *arg)
     return (void *)(unsigned long)flag_b;
 }
 
-/* (12) The allocator and stdio, from several threads at once: what an
+/* (11) The allocator and stdio, from several threads at once: what an
  * unlocked free list corrupts silently and an unlocked stream garbles.
  * Each thread allocates, writes a pattern, frees, and prints -- and checks
  * its own blocks, so a lost or shared block shows up as a wrong byte
@@ -116,17 +116,21 @@ static void *heap_user(void *arg)
         size_t n = 16u + ((i * 37u + id) % 700u);
         unsigned char *p = malloc(n);
         if (p == NULL) {
+            printf("thrtest: heap %u iter %u malloc(%u) NULL\n", id, i, (unsigned)n);
             heap_bad++;
             break;
         }
         memset(p, (int)(id & 0xff), n);
         for (size_t k = 0; k < n; k++)
             if (p[k] != (unsigned char)(id & 0xff)) {
+                printf("thrtest: heap %u iter %u byte %u is %u not %u\n", id, i,
+                       (unsigned)k, p[k], id & 0xff);
                 heap_bad++;
                 break;
             }
         void *q = realloc(p, n * 2);
         if (q == NULL) {
+            printf("thrtest: heap %u iter %u realloc(%u) NULL\n", id, i, (unsigned)(n * 2));
             free(p);
             heap_bad++;
             break;
@@ -139,7 +143,7 @@ static void *heap_user(void *arg)
     return NULL;
 }
 
-/* (11) A thread that waits to be told to stop, for the bound. */
+/* (12) A thread that waits to be told to stop, for the bound. */
 static volatile unsigned spin_stop;
 static void *spinner(void *arg)
 {
@@ -409,9 +413,34 @@ int main(int argc, char **argv)
     }
 
     STEP("11");
-    /* (11) The bound holds, and the process survives reaching it.
+    /* (11) */
+    {
+        cosmo_thread_t h[3];
+        heap_bad = heap_done = 0;
+        for (unsigned i = 0; i < 3u; i++) {
+            int rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 0);
+            if (rc != 0)
+                printf("thrtest: heap thread %u refused rc=%d\n", i + 1, rc);
+            CHECK(rc == 0);
+        }
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_join(&h[i], NULL) == 0);
+        CHECK(heap_done == 3);
+        CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
+    }
+
+    STEP("12");
+    /*
+     * (12) The bound holds, and the process survives reaching it. This is
+     * deliberately the LAST step: it is a resource-exhaustion test -- 256
+     * threads, and the memory they hold is returned as the kernel reaps
+     * them, not the instant their joins return -- so anything after it is
+     * running on a machine that is still recovering. An earlier version
+     * put the heap step after this one and saw malloc and thread_create
+     * refused for want of memory, which is this step working, not a bug.
      * PROCESS_MAX_THREADS is 256 per process; the stacks are one page each
-     * so that 256 of them cost little. */
+     * so that 256 of them cost little.
+     */
     {
         static cosmo_thread_t many[300];
         unsigned made = 0;
@@ -428,22 +457,22 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < made; i++)
             CHECK(cosmo_thread_join(&many[i], NULL) == 0);
         spin_stop = 0;
-        /* and the process is healthy: the next create works */
-        CHECK(cosmo_thread_start(&t, quick, NULL, 0) == 0);
-        CHECK(cosmo_thread_join(&t, NULL) == 0);
-    }
-
-    STEP("12");
-    /* (12) */
-    {
-        cosmo_thread_t h[3];
-        heap_bad = heap_done = 0;
+        /*
+         * And every slot a join released is usable at once. Three, not
+         * one: a join that woke before the kernel stopped counting its
+         * thread left the next create refused -EAGAIN, and one retry was
+         * enough to hide it. This is the assertion for "when your join
+         * returns, the slot is free".
+         */
+        cosmo_thread_t again[3];
+        for (unsigned i = 0; i < 3u; i++) {
+            int rc2 = cosmo_thread_start(&again[i], quick, NULL, PAGE);
+            if (rc2 != 0)
+                printf("thrtest: reuse %u refused rc=%d\n", i, rc2);
+            CHECK(rc2 == 0);
+        }
         for (unsigned i = 0; i < 3u; i++)
-            CHECK(cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 0) == 0);
-        for (unsigned i = 0; i < 3u; i++)
-            CHECK(cosmo_thread_join(&h[i], NULL) == 0);
-        CHECK(heap_done == 3);
-        CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
+            CHECK(cosmo_thread_join(&again[i], NULL) == 0);
     }
 
     if (failures == 0)

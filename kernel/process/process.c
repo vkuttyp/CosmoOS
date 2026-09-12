@@ -828,7 +828,6 @@ void process_thread_exit(int status)
     struct thread *self = thread_current();
     struct process *p = self->proc;
     KASSERT(p != NULL);
-    thread_clear_tid(self);
     if (p->pers->thread_exit)
         p->pers->thread_exit(self);
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
@@ -839,6 +838,18 @@ void process_thread_exit(int status)
         p->exit_status = status;
     }
     spin_unlock_irqrestore(&p->lock, s);
+    /*
+     * The joiner is woken *after* this thread stops being counted, so that
+     * a caller whose join has returned may immediately create another
+     * thread: waking first left nr_live still counting this one, and a
+     * program that joined PROCESS_MAX_THREADS threads and then created
+     * more was refused -EAGAIN for slots it had already released. (Found by
+     * thrtest under the GIC variant's schedule, where it fails and the
+     * default one passes.) The user copy and the futex cannot run under
+     * p->lock -- the copy may fault and the futex takes its own lock -- so
+     * this is last rather than inside the critical section.
+     */
+    thread_clear_tid(self);
     thread_exit(status);
 }
 

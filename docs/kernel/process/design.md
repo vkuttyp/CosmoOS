@@ -1040,7 +1040,15 @@ only runs on one: as built on AArch64 alone, a create with an unmapped
 
 **Joining is not a system call.** `clear_tid` names a 4-byte-aligned word
 that the kernel fills with the new thread's id before it can run, and
-zeroes and futex-wakes when it exits. That is the whole of joining: read
+zeroes and futex-wakes when it exits -- **after** the thread has stopped
+being counted, so a caller whose join has returned may create another
+thread at once. Waking first left `nr_live` still counting the exiting
+thread, and a program that joined `PROCESS_MAX_THREADS` threads and then
+created more was refused `-EAGAIN` for slots it had already released.
+What a returned join does *not* promise is that every resource the thread
+held is back: its memory returns as the kernel reaps it, so a program that
+has just retired hundreds of threads may still be refused an allocation
+for a moment. The slot is immediate; the memory is not. That is the whole of joining: read
 the word, and wait on it with `SYS_futex_wait` while it is non-zero. The
 kernel keeps no table of unreaped threads, the same word answers "has it
 finished?" with no system call at all, and the convention lives in libc,

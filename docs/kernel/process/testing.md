@@ -413,10 +413,20 @@ return an error, it kills the process with `SIGSYS` (status 159), so the
 filtered process cannot report on itself -- one child calls a denied
 `thread_create` and must die that way, and another, under a filter that
 denies *everything*, must still exit cleanly with its own status through
-`thread_exit`. (11) The bound holds: creating threads until `-EAGAIN` stops
-at `PROCESS_MAX_THREADS`, every one joins afterwards, and the next create
-still works, so reaching the limit leaves the process undamaged.
-(12) **The allocator and stdio under three threads at once**: each thread
+`thread_exit`. (12) The bound holds: creating threads until `-EAGAIN` stops
+at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
+creates succeed -- three rather than one, because a join that returned
+before the kernel stopped counting its thread left the next create refused
+`-EAGAIN`, and a single retry's worth of luck hides that. It is
+deliberately the **last** step: it exhausts a resource on purpose, and the
+memory those threads held returns as the kernel reaps them rather than the
+instant their joins return, so anything run after it is running on a
+machine still recovering. An earlier revision put the heap step after this
+one and watched `malloc` and `thread_create` be refused for want of
+memory, which is this step working rather than a bug -- and which cost two
+runs to diagnose only because the step counted three different causes as
+one number. Each cause now prints itself.
+(11) **The allocator and stdio under three threads at once**: each thread
 allocates, fills its block with its own byte, verifies every byte of it,
 reallocates, frees, and prints as it goes. This is the step that would
 otherwise find out the hard way what an unlocked free list does -- a lost
