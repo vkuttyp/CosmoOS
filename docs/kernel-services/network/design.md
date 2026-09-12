@@ -1081,8 +1081,104 @@ once, in the place that already reads it.
 
 Named and deferred: ICMP-error admission for a *UDP* flow (there is no
 consumer in the stack; when a UDP unreachable notifier exists it applies its
-own check under the flag, as TCP's does); a `vmctl` listing of live flows
-(observability, not policy); and, unchanged, the host chain's own list below.
+own check under the flag, as TCP's does), and a `vmctl` listing of live flows
+(observability, not policy).
+
+**The OUTPUT chain: what the host itself may send** (audit unit "the OUTPUT
+chain", `docs/audit/next-subsystem-output-chain.md`). The filter's fourth and
+last chain, and the only one whose subject is this machine. FORWARD decided
+which machines a guest may reach, INPUT which of the host's services a guest
+may reach, the host chain which of them the world may reach, and the host's
+own flows gave that chain its replies; OUTPUT decides what the host itself
+may put on a link. `fw_output_verdict` runs in **`ipv4_output`** — the one
+door every host-originated datagram passes — after the route and before both
+the flow read and `output_on`, and a `FW_DROP` frees the datagram, counts
+`ip_stats.tx_filtered` and returns **`-EPERM`**.
+
+**A refused send is told, not hidden.** This is the one chain whose DROP is
+not silence, and the asymmetry is deliberate: the other three hide the host
+from strangers, where a silent drop is the security property, while here the
+refused party is a local socket that already distinguishes `-ENETUNREACH`
+from success. `udp_sendto` and `icmp_send_echo` return `ipv4_output`'s value,
+so a program learns immediately and an operator debugging a rule sees the
+reason. **TCP does not**: `batch_send` ignores output errors, as it ignores
+`-ENETUNREACH` today, so a segment a rule refuses is dropped and `connect`
+stalls rather than failing — the verdict is counted per attempt and no SYN
+reaches the link, but the socket reports a timeout. Teaching TCP to carry a
+per-segment verdict back into the PCB (and deciding what a rule added
+mid-connection should do to an established one) is a unit of its own; the
+behaviour is asserted as it stands so that unit has a test to change.
+
+**One direction, and an egress scope.** `FW_DIR_OUTPUT` is the host object's
+fifth policy slot, valid on the host alone (a guest naming it is `-EINVAL`,
+as `FROM_UPLINK` already was). A rule matches the existing tuple — source
+prefix (which of the machine's addresses is sending), destination prefix,
+protocol, selector — plus one byte, `scope`: `FW_SCOPE_WORLD` for a real,
+non-guest egress, `FW_SCOPE_GUEST` for a guest's tap, `FW_SCOPE_ANY` for
+either, and `ANY` is required on every other direction so tuples stay
+canonical. The scope is what makes "the host may not answer guests on this
+port" expressible: a destination prefix can name a guest's subnet, but the
+tap pool reassigns `10.0.(3+k).0/24` as guests come and go, so a prefix rule
+follows whoever inherits the subnet while a scope keeps meaning what it said.
+Both are available, and the scope is part of a rule's identity — two rules
+alike but for it are two rules.
+
+**The source is resolved once.** `ipv4_output` computed an unspecified source
+twice before this unit (once for the host chain's flow read, once inside
+`output_on` for the header). A source-prefix rule judging the raw `0` that
+`icmp_send_echo` and any unbound socket pass would match a different address
+from the one sent, so the resolution moved up: `ipv4_output` resolves it
+before the verdict and hands the same value to the verdict, the flow read and
+`output_on`, whose own resolution is gone. The wire, the rule and the state
+now agree by construction.
+
+**Ordering, and what it does and does not guarantee.** The verdict sits after
+`ipv4_route`, because the egress *is* the scope a rule may name, and before
+`output_on`, because a refused datagram must not reach the link. It also sits
+before the host chain's flow read, which reads better and saves the work —
+but, found while proving it, that ordering is not what keeps a refused send
+from opening reply state: `fw_host_record` is already conditional on
+`output_on` succeeding, so the record cannot happen for a datagram the
+verdict dropped, whichever side of the read the verdict sits on. The
+property holds for the stronger reason, and `testing.md` records the proof
+that could not distinguish the two orderings.
+
+**What the chain sees that is not the host's own.** `nat_in` re-emits a
+masqueraded reply or a DNAT'd connection to a guest *through* `ipv4_output`
+(`ipv4_forward`'s own transmit path uses `output_on` directly and is
+FORWARD's business), so those datagrams reach this chain as `FW_SCOPE_GUEST`
+traffic. That is intended — what the host may send to a guest includes what
+it forwards on the guest's behalf — and it is the sharp edge of the unit: a
+scope-guest rule can break a guest's port-forwarded or masqueraded
+connectivity from the host side. Asserted in `net-output`, and flagged here
+because it is not what "the host's own egress" first suggests.
+
+**Loopback passes no chain**, as on every other: the host talking to itself
+is not traffic this machine polices, and a rule between a process and
+`127.0.0.1` would be invisible where it matters.
+
+**The default is ACCEPT**, and here that is least negotiable: a default DROP
+would stop `tapsvc`'s DHCP and DNS answers to every guest, the harness's
+replies on the NIC, `nat_in`'s deliveries, and the host's own name
+resolution, all at once — and seeding those back is a copy of the
+implementation, not a policy. The operator hardens by rule, or flips the
+default once the rules it needs are in place.
+
+**ABI version 5.** `DIR_OUTPUT`; a `scope` byte in the filter command and the
+rule record, taken from the three reserved bytes each already carried
+(`reserved[3]` → `scope` + `reserved[2]`, so neither changes size); and
+`policy_output` in the per-guest policy record, which had no spare byte left
+after version 4 and therefore grows from 8 to 12 bytes, with
+`COSMO_NETCTL_SNAPSHOT_MAX` and the static asserts following. A version-4
+writer is refused by version, not by size. `vmctl filter add|del host out
+PROTO SRC DST PORT VERDICT [world|guest|any] [INDEX]`, `policy host out
+accept|drop`, and `list` printing the fifth policy and an OUTPUT rule's
+egress; the trailing scope and index are recognised by shape, so either order
+reads.
+
+Named and deferred: a verdict TCP's callers can see; per-interface chains (a
+rule naming `eth1` rather than a scope); rate-limit and logging targets; IPv6
+filtering; full TCP state tracking.
 
 **ABI version 4.** `DIR_FROM_UPLINK` (4); `src_addr`/`src_prefix` in the
 filter command and rule records (`struct cosmo_netctl_filter` 20→28 bytes,
@@ -1097,10 +1193,10 @@ DST[/PREFIX]|any PORT VERDICT [INDEX]`, `policy host world accept|drop`;
 snapshot of another version. No new opcode, no new syscall.
 
 Named and deferred: per-interface host chains (all real links share
-`FROM_UPLINK`); an OUTPUT
-chain for the host's own egress (and, with it, filtering the host's replies
-to guests); rate-limit and logging targets; IPv6 filtering; full TCP state
-tracking; DHCP-client protection, moot until the host has a DHCP client.
+`FROM_UPLINK`); rate-limit and logging targets; IPv6 filtering; full TCP
+state tracking; DHCP-client protection, moot until the host has a DHCP
+client. The host's own egress -- and with it the filtering of the host's
+replies to guests -- is the OUTPUT chain, built below.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

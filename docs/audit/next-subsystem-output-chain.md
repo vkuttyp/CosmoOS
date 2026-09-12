@@ -1,8 +1,16 @@
 # NEXT SUBSYSTEM — the OUTPUT chain: what the host itself may send
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "The OUTPUT chain: what the host itself may send"),
+and the design below is as built — see
+`docs/kernel-services/network/design.md` ("The OUTPUT chain") for the
+shipped description and `docs/kernel-services/network/testing.md`
+(`net-output`) for its proofs. Two things came out differently and are
+marked where they arise: the ordering this report leaned on turns out **not**
+to be what guarantees the property it was chosen for, and the performance
+mitigation held in reserve **was** needed — on the evidence of the test
+suite's timing, not the benchmark's throughput.
 
 **Subsystem: the firewall's last chain. FORWARD decided which machines a
 guest may reach, INPUT which of the host's services a guest may reach, the
@@ -26,10 +34,10 @@ that one" are different rules. The default is **ACCEPT**: the host is the
 trusted party, and a default DROP would cut the tap services, the harness's
 replies and the machine's own name resolution in one stroke.**
 
-## Problem
+## Problem (the state before this unit)
 
-The filter now covers three of the four directions traffic can take through
-this machine, and the fourth is the one nothing watches:
+Before this unit the filter covered three of the four directions traffic can
+take through this machine, and the fourth was the one nothing watched:
 
 - **A compromised or buggy host service can call out freely.** Every
   listener the host runs, every module, every in-kernel service (`tapsvc`'s
@@ -55,7 +63,7 @@ this machine, and the fourth is the one nothing watches:
   when no route exists, `-EMSGSIZE` when the datagram is too large — and
   can be told `-EPERM` in exactly the same way.
 
-## Current implementation
+## Implementation before this unit
 
 `kernel-services/network/ipv4.c`, `ipv4_output` (`:175-200`) is the host's
 single egress door and, since the host-state unit, already the place where
@@ -111,7 +119,7 @@ the firewall reads a flow:
   that forwarded and loopback traffic do not pass it, and left the hook
   there. This unit adds the verdict beside the read.
 
-## Proposed design
+## Design (as built)
 
 ### 1. One direction, with an egress scope in the rule
 
@@ -184,13 +192,20 @@ A test asserts the equivalence directly: a source-prefix rule that names the
 NIC's own address matches an `icmp_send_echo` (which passes `src == 0`),
 which it could not do if the verdict saw the unresolved value.
 
-Two orderings matter and are the interesting part of this unit:
+Two orderings matter, and one of them turned out to matter less than this
+report claimed:
 
-- **Before the flow record.** A datagram the chain refuses never leaves, so
-  it must open no reply state — otherwise an OUTPUT DROP would still punch
-  a hole in the host chain for the reply to a datagram that was never sent.
-  The host-state unit already refuses to record what `output_on` rejects;
-  this is the same rule one step earlier, and the test asserts it.
+- **Before the flow record**, so that a datagram the chain refuses opens no
+  reply state — otherwise an OUTPUT DROP would punch a hole in the host chain
+  for the reply to a datagram that was never sent. The property holds and the
+  test asserts it. **But the ordering is not what guarantees it**, as the
+  bug-proof for it discovered: `fw_host_record` is already conditional on
+  `output_on` returning 0, so a datagram the verdict drops can never be
+  recorded whichever side of the *read* the verdict sits on — the read takes
+  no lock and mutates nothing. Moving the verdict after the read leaves the
+  whole suite green. The order is kept because it reads better and skips work
+  the verdict may waste, and the guarantee is credited to where it actually
+  lives (the host-state unit's own bug-proof 13).
 - **After the route.** The scope *is* the egress, so the verdict cannot
   precede `ipv4_route`. A datagram with no route keeps returning
   `-ENETUNREACH` and is counted as it is today: no route is not a policy
@@ -283,10 +298,14 @@ refuses a version-4 writer as before.
   `enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m,
   uint32_t src, uint32_t dst, uint8_t proto);` `fw_stats` gains
   `out_accept_rule/out_drop_rule/out_accept_default/out_drop_default`.
-- `kernel-services/network/fw.c` — `fw_output_verdict` (scope from the
-  egress flags, then the host's `OUTPUT` rules first-match, else its
-  default); `rule_valid` (scope only with `OUTPUT`, `OUTPUT` only on the
-  host object); `rule_same` includes the scope; `rule_matches` gains it.
+- `kernel-services/network/fw.c` — `fw_output_verdict` (the fast path first,
+  then the scope from the egress flags, then the host's `OUTPUT` rules
+  first-match, else its default); `g_out_fast` with `out_fast_update` called
+  under the lock from `fw_rule_add`, `fw_rule_del`, `fw_policy_set` and
+  `host_reset`; `rule_valid` (scope only with `OUTPUT`, and `OUTPUT` only on
+  the host object, beside `FROM_UPLINK`); `rule_same` includes the scope;
+  `rule_matches` takes the datagram's egress scope (`FW_SCOPE_ANY` from the
+  three chains that have none).
 - `kernel-services/network/ipv4.c` — the call in `ipv4_output` after the
   route, before the flow read; `-EPERM` and `ip_stats.tx_filtered`.
 - `kernel/include/kernel/net/ip.h` — `tx_filtered`.
@@ -307,13 +326,14 @@ refuses a version-4 writer as before.
 ## New APIs
 
 - In-kernel: `fw_output_verdict(...)`; `FW_DIR_OUTPUT`; `FW_SCOPE_*` and
-  `struct fw_rule.scope`. `ipv4_output` returns `-EPERM` for a refused
-  datagram.
+  `struct fw_rule.scope` (its one reserved byte, leaving the kernel rule
+  with no spare); `fw_policy_get` reports a fifth slot. `ipv4_output`
+  resolves the source once and returns `-EPERM` for a refused datagram.
 - UAPI (version 5): `COSMO_NETCTL_DIR_OUTPUT`, `COSMO_NETCTL_SCOPE_*`, the
   `scope` byte, `policy_output`. No new opcode and no new syscall; the
   per-guest policy record grows by four bytes, the other two do not.
 
-## Migration plan
+## Migration (done, in the planned order)
 
 1. `fw.h`/`fw.c`: the direction, the scope, the verdict; `ipv4.c`: the call
    site, `-EPERM`, `tx_filtered`. Both arches boot with the default ACCEPT
@@ -334,8 +354,9 @@ opened for it.
 builds them, host sockets, and the world ARP-seeded.
 
 - **Default ACCEPT changes nothing**: with no rule, the host's UDP to the
-  world, its echo request, its TCP connect and `tapsvc`'s DNS reply to a
-  guest all leave as before (`out_accept_default` rises).
+  world leaves as before (`out_accept_default` rises — and, as built, that
+  counter is incremented by the fast path too, so it still means "what this
+  chain let out by default").
 - **A rule refuses a send, and the sender is told**: `OUTPUT udp any
   10.77.9.0/24 :5300 DROP` makes `ksock_sendto` return **`-EPERM`**,
   nothing is read back on the tap, and `ip_stats.tx_filtered` and
@@ -351,50 +372,88 @@ builds them, host sockets, and the world ARP-seeded.
   upstream, but with an `OUTPUT udp scope guest :4444 DROP` rule the
   proxy's *answer* to A never reaches A's tap — the case both earlier
   reports named, now expressible.
-- **A refused datagram opens no reply state**: with a DROP rule on
-  `world:5300`, the host's `sendto` fails and `hin_flow_new` does **not**
-  rise; the world's datagram from `5300` to that port is then freed by the
-  host chain's default (there is no flow to admit it), so the two units'
-  ordering is asserted from both sides.
-- **No route still means no route**: a send to an unroutable address returns
-  `-ENETUNREACH` and counts `tx_no_route`, not `tx_filtered`, whatever the
-  rules say.
+- **A refused datagram opens no reply state**: with a DROP rule on its port
+  and the host chain closed for that world, the host's `sendto` fails,
+  `hin_flow_new` does **not** rise, and the world's reply is dropped for want
+  of a flow; delete the rule and the same send records its flow and the same
+  reply arrives. The step needs a destination port of its own — as built, the
+  first step's successful send leaves a live flow that would have admitted
+  the reply regardless, which the first run of this test discovered.
+- **A failure that is not a verdict is not counted as one**: as built this is
+  the oversized datagram (`-EMSGSIZE` from `output_on`), which the chain
+  accepts and the link refuses, leaving `tx_filtered` and the flow count
+  alone. The planned no-route case is **not reachable** from a socket here —
+  the NIC carries a default route, so every address routes somewhere — and
+  the substitute makes the same point deterministically.
 - **Loopback is exempt**: a rule that would match by every other field does
   not touch a `127.0.0.1` send.
-- **TCP stalls rather than failing** (the documented limit): with a rule
-  covering a world peer's port, the host's `connect` does not complete and
-  no SYN is read back; `out_drop_rule` rises once per retransmission. The
-  socket's error is a timeout, not `-EPERM` — asserted so the later unit
-  that changes it has a test to change.
+- **TCP stalls rather than failing** (the documented limit): a *nonblocking*
+  `connect` to a refused port returns `-EINPROGRESS`, not `-EPERM`, while
+  `out_drop_rule` rises and no SYN is read back — nonblocking as built, so
+  the test does not park a thread on a connect that will only time out.
+  Asserted so the later unit that changes it has a test to change.
 - **`nat_in`'s delivery is scope-guest traffic**: with a port-forward to A
   and an `OUTPUT scope guest DROP` rule, the DNAT'd SYN is dropped on its
   way to A (`tx_filtered`), and without the rule it arrives — the
   interaction the Risks section warns about, asserted rather than assumed.
-- **Scope discipline**: a scope on a non-`OUTPUT` rule is `-EINVAL`; an
-  `OUTPUT` rule on a guest is `-EINVAL`; `policy host out` works and
-  `policy <guest> out` is `-EINVAL`.
+- **Scope discipline**: a scope on a `TO_HOST` or `FROM_UPLINK` rule is
+  `-EINVAL`; an `OUTPUT` rule on a guest is `-EINVAL`; a scope value out of
+  range is `-EINVAL`; `policy <guest> out` is `-EINVAL`.
+- **The scope is part of a rule's identity** (added in the build, because the
+  proof for it was otherwise unobservable): two rules alike but for the
+  scope both install, both drop their own egress, and each deletes by its own
+  tuple.
+- **The hardened default** (added in the build): flipping the OUTPUT policy
+  to DROP with no rule at all refuses the next send and counts
+  `out_drop_default`, and ACCEPT restores it. The verdicts are taken into
+  locals and the default restored *before* any assertion — a failure here
+  would otherwise leave the machine unable to send for every test that
+  follows, the lesson the host-state unit paid for — and this is also what
+  keeps the fast path honest: a policy flip with no rules must invalidate it.
 - **Control round trip**: an `OUTPUT` rule with a scope written through
-  `/dev/net/tapctl` is listed with it, beside `policy_output`; a
-  version-4-sized write is refused; and the snapshot's length is the
-  version-5 one — the filter command and rule records unchanged, the policy
-  record four bytes wider — checked against `netctl_snapshot_len` as the
-  existing tests do, so the growth is asserted rather than assumed.
+  `/dev/net/tapctl` is listed with it, beside `policy_output`; a version-4
+  writer is refused **by version**, since the command's size did not change
+  (the report's "refused by size" was wrong about which check fires); a guest
+  naming `OUTPUT` is refused there too; and the policy record's version-5
+  width is asserted by a static assert in the test.
 - **Regression**: `net-hoststate`, `net-hostinput`, `net-input`,
   `net-firewall`, `net-dnat`, `net-dns`, `net-nat`, the harness's echo
   round trip.
 
-Bug-proofs: the verdict placed *after* the flow read (the refused send then
-records a flow and the world's datagram is admitted by state — the
-ordering this unit exists to get right); the verdict placed after
-`output_on` (the refused datagram reaches the link: it is read back on the
-tap); the loopback exemption removed (the `127.0.0.1` send then fails);
-the scope ignored in `rule_matches` (the guest-scoped rule then drops the
-host's world traffic too); the scope not part of `rule_same` (two rules
-differing only in scope collide on add); `-EPERM` replaced by a silent
-success (the failed `sendto` then returns the byte count and the caller
-cannot tell); `tx_filtered` counted for a no-route drop (the unroutable
-send then counts as filtered); the `OUTPUT`-on-a-guest check dropped (a
-guest rule then holds a direction whose scope it cannot have).
+Bug-proofs — **nine run**, each reintroduced, observed failing for the stated
+reason, the source restored byte-identical; and **one named that is not
+observable**, which is the more interesting entry:
+
+- the gate counting the verdict but not stopping the datagram (the refused
+  `sendto` then returns success and the datagram reaches the link — as built
+  this is how "the verdict must precede the link" is proved, the report's
+  "verdict after `output_on`" construction having crashed the boot by handing
+  `fw_output_verdict` a datagram that no longer existed);
+- the loopback exemption removed (the `127.0.0.1` send then fails);
+- the scope ignored in `rule_matches` (the guest-scoped rule then drops the
+  host's world traffic too);
+- the scope left out of `rule_same` (the second of two rules alike but for it
+  is refused `-EEXIST`);
+- `-EPERM` replaced by a silent success (the failed `sendto` then returns the
+  byte count and the caller cannot tell);
+- the source resolved *after* the verdict (the source-prefix rule then judges
+  `0` and misses the echo it should refuse — and `net-hoststate` fails with
+  it, since the flow key takes the same unresolved value);
+- `OUTPUT` allowed on a guest's object (the guest's add then succeeds);
+- a new rule not invalidating the fast path (the first rule then never binds:
+  the refused send succeeds);
+- a policy flip not invalidating it (the hardened default then lets
+  everything out).
+
+**Not observable: the verdict placed after the flow read.** The suite stays
+green, because `fw_host_record` is already conditional on `output_on`
+succeeding — so the ordering cannot be what keeps a refused send from opening
+reply state, and the claim above is corrected rather than defended. Two of
+the nine proofs also had to be rebuilt before they *were* observable (the
+scope-identity case needed two rules alike but for the scope; the
+source-resolution case needed a source-prefix rule in this unit's own test,
+which the report promised and the first draft omitted) — a reminder that a
+bug-proof tests the test as much as the code.
 
 ## Benchmarks
 
@@ -403,25 +462,43 @@ This is the host's send path, so the cost is one flag test (loopback), one
 datagram the machine sends to a non-loopback egress, TCP's segments
 included.
 
-**The instrument is `net-nicbench`'s UDP loop, and the host-state report was
-wrong about it** (corrected there in the same change as this report): it
-sends to `nif->ip4.gateway` on the NIC, a real egress, ten thousand times,
-so it exercises this path on every send. What it cannot do is resolve a cost
-this small — its spread on identical code has been 17.3k–22.9k sends/s. So
-the measurement here is: (a) `net-nicbench` on both arches, `main` versus
-this tree in one session, to show no gross regression, with the spread
-quoted so the number is not read as precision; (b) **not** `net-lo-tcp` —
-loopback is exempt from this chain, so those transfers never reach the
-verdict, and citing them would have measured nothing (the contradiction
-review caught); (c) a tap-based volume check if one is wanted for TCP, since
-a guest tap is a non-loopback egress and `net-hoststate`'s uplink tap
-already carries a 1200-byte transfer; and (d) eight consecutive boots on
-both arches and the GIC variant, which is the instrument that actually
-caught the last unit's cost, as flakiness rather than as throughput.
+**`net-nicbench`'s UDP loop is the instrument for throughput** — it sends to
+`nif->ip4.gateway` on the NIC ten thousand times, a real egress, so it
+exercises this path on every send — and it could not resolve the cost, again.
+Three runs of `main` (72ef489) and three of this tree, same session, aarch64:
 
-If the rule walk shows, the mitigation is the one already proven: skip it
-while the host holds no `OUTPUT` rule — every configuration but a
-deliberately hardened one.
+| UDP sends/s | run 1 | run 2 | run 3 | median |
+| --- | --- | --- | --- | --- |
+| `main` | 21470 | 15413 | 15177 | 15413 |
+| this unit | 20878 | 16893 | 20626 | 20626 |
+
+The chain measures *faster* on the median, and the spread within one build is
+40%. `net-lo-tcp` was dropped from the plan: loopback is exempt from this
+chain, so those transfers never reach the verdict and citing them would have
+measured nothing.
+
+**The cost showed where the last unit's did: in the suite's timing.** One
+aarch64 run in four failed three tap-driven tests at once — `net-hostinput`'s
+window-update read-back, `net-hoststate`'s masqueraded forward and
+`net-output`'s own proxy answer — the signature the host-state unit taught
+us to read as a slower send path, with x86 and the GIC variant green in the
+same batch. So **the mitigation this report held in reserve is implemented**:
+`g_out_fast`, a flag meaning "no rule of the host's names OUTPUT and its
+OUTPUT default is ACCEPT", maintained under `g_fw_lock` at every change to
+the host object and read with one relaxed load on the send path. When it is
+set — every configuration but a deliberately filtered one, and the state the
+machine boots in — a send skips the transport-header copy, the key, the lock
+and the walk, and is still counted, so the statistic keeps its meaning.
+Three consecutive aarch64 runs, x86_64, both GIC boots and the reproducible
+check are green with it, where the version without it failed one run in four.
+
+Two honest caveats. The mitigation's necessity rests on a 1-in-4 failure
+against a 3-in-3 recovery, which is suggestive rather than conclusive; it is
+also *free* in the case that matters, so the decision does not hang on the
+statistics. And the flag is read without the lock, so a rule added
+concurrently with a send in flight may not bind that datagram — the same
+"rules take effect now-ish" property every chain already has, since a
+datagram past its verdict is never re-judged.
 
 ## Risks
 
@@ -437,8 +514,10 @@ deliberately hardened one.
   changes behaviour under the default.
 - **TCP's asymmetry.** UDP and ICMP learn; TCP stalls. Documented, tested,
   and named as the next refinement rather than half-built here.
-- **The cost is on every send.** Measured as above, with the proven
-  mitigation named.
+- **The cost is on every send.** Measured as above; the mitigation is
+  implemented rather than merely named, because the suite's timing said it
+  was needed. What remains is one relaxed load per host-originated datagram
+  while no OUTPUT rule exists.
 - **ABI v5 grows the per-guest record.** The filter command and rule
   records spend one of their three reserved bytes each (`reserved[3]` →
   `scope` + `reserved[2]`) and keep their size; the policy record has none

@@ -23,8 +23,13 @@
  * DIR_FROM_UPLINK direction, a source prefix in the filter command and rule
  * records (both grow: 20 -> 28 and 16 -> 24 bytes, so a version-3 writer is
  * refused by size), a fourth default in the per-guest record, and the host
- * itself as a policy object under HOST_ADDR (guest_addr 0). */
-#define COSMO_NETCTL_VERSION 4
+ * itself as a policy object under HOST_ADDR (guest_addr 0). Version 5 adds
+ * the OUTPUT chain (docs/audit/next-subsystem-output-chain.md): the
+ * DIR_OUTPUT direction, an egress `scope` in a filter command and a rule
+ * record (one of the three reserved bytes each, so neither changes size),
+ * and a fifth default in the per-guest record -- which had no reserved byte
+ * left, so that record grows from 8 to 12 bytes and the snapshot with it. */
+#define COSMO_NETCTL_VERSION 5
 
 /* Opcodes. FORWARD_* are carried by struct cosmo_netctl; FILTER_* by struct
  * cosmo_netctl_filter. Every command is written whole, at its own struct's
@@ -54,6 +59,16 @@
 #define COSMO_NETCTL_DIR_TO_GUEST  2   /* egress is another guest's tap */
 #define COSMO_NETCTL_DIR_TO_HOST   3   /* addressed to the host (one of its own addresses, or broadcast) */
 #define COSMO_NETCTL_DIR_FROM_UPLINK 4 /* version 4: arriving on the uplink, addressed to the host */
+#define COSMO_NETCTL_DIR_OUTPUT      5 /* version 5: sent by the host itself, out any non-loopback link */
+
+/* The egress an OUTPUT rule applies to (version 5). ANY unless the rule
+ * means to separate the two, and ANY is required on every other direction.
+ * A destination prefix can also name a guest, but the tap pool reassigns
+ * 10.0.(3+k).0/24 as guests come and go, so a prefix follows whoever
+ * inherits the subnet while a scope keeps meaning what it said. */
+#define COSMO_NETCTL_SCOPE_ANY   0
+#define COSMO_NETCTL_SCOPE_WORLD 1   /* a real, non-guest link */
+#define COSMO_NETCTL_SCOPE_GUEST 2   /* a guest's tap, the host's replies to it included */
 
 /* The host as a policy object (version 4). guest_addr 0 in a FILTER_* command
  * names the host's own chain -- the one address no guest or forward can mean,
@@ -128,7 +143,8 @@ struct cosmo_netctl_filter {
     uint32_t src_addr;     /* version 4, network byte order: the source prefix; host rules only
                             * (a guest's rule must say 0/0 -- its source is the guest); ignored by POLICY */
     uint8_t  src_prefix;   /* 0..32 bits of src_addr that must match (0 = any source) */
-    uint8_t  reserved[3];  /* must be 0 */
+    uint8_t  scope;        /* version 5: COSMO_NETCTL_SCOPE_* -- DIR_OUTPUT rules only, ANY otherwise */
+    uint8_t  reserved[2];  /* must be 0 */
 };
 
 /* The read snapshot, version 2 and later: the port-forward list (struct
@@ -151,6 +167,8 @@ struct cosmo_netctl_filter_guest {
     uint8_t  policy_to_host;    /* version 3: the INPUT chain's default */
     uint8_t  policy_from_uplink; /* version 4: the host chain's default -- meaningful in the host's
                                   * record alone (a guest's reads 0; its other three read 0 in the host's) */
+    uint8_t  policy_output;      /* version 5: the OUTPUT chain's default, the host's record alone */
+    uint8_t  reserved[3];        /* version 5: the record grew to 12 bytes when this byte was added */
 };
 
 struct cosmo_netctl_filter_rule {
@@ -164,7 +182,8 @@ struct cosmo_netctl_filter_rule {
     uint16_t index;        /* position in the guest's list (display) */
     uint32_t src_addr;     /* version 4, network byte order (0/0 = any source; always so for a guest's rule) */
     uint8_t  src_prefix;
-    uint8_t  reserved[3];
+    uint8_t  scope;        /* version 5: COSMO_NETCTL_SCOPE_* (ANY unless a DIR_OUTPUT rule says otherwise) */
+    uint8_t  reserved[2];
 };
 
 /* The snapshot's bounds, so a reader can size its buffer for every valid

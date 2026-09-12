@@ -1330,8 +1330,50 @@ See [docs/development.md](docs/development.md).
   path-MTU discovery under DROP, the DNS proxy end to end, refresh and
   expiry, forwarded and loopback sends recording nothing, the share, and the
   hardened default) with thirteen bug-proofs. Reply state for a UDP flow's
-  ICMP errors, a listing of live flows, per-interface host chains, an OUTPUT
-  chain, rate-limit/log targets and IPv6 are later units.
+  ICMP errors, a listing of live flows, per-interface host chains,
+  rate-limit/log targets and IPv6 are later units; the OUTPUT chain is done
+  (its own entry below).
+- **The OUTPUT chain: what the host itself may send (done):**
+  `docs/audit/next-subsystem-output-chain.md`,
+  `docs/kernel-services/network/design.md` ("The OUTPUT chain"). The
+  filter's fourth and last chain, and the only one whose subject is this
+  machine: with it, every path through the stack is under policy --
+  guest→guest, guest→world, guest→host, world→host and now host→anywhere.
+  `fw_output_verdict` runs in `ipv4_output`, the one door every
+  host-originated datagram passes, **after the route** (the egress is the
+  scope a rule may name) and **before the link**, and a DROP frees the
+  datagram, counts `ip_stats.tx_filtered` and returns **`-EPERM`** -- the one
+  chain whose refusal is *spoken*, because the refused party is a local
+  socket that already reads errors, where the other three hide the host from
+  strangers and silence is the point. `udp_sendto` and `icmp_send_echo`
+  propagate it; **TCP stalls instead**, since `batch_send` ignores output
+  errors, which is documented, asserted and left to its own unit rather than
+  half-built. One new direction, `FW_DIR_OUTPUT`, on the host object alone,
+  plus an egress **scope** in the rule (`world` / `guest` / `any`): a
+  destination prefix can name a guest's subnet, but the tap pool reassigns
+  `10.0.(3+k).0/24` as guests come and go, so a prefix rule follows whoever
+  inherits the subnet while a scope keeps meaning what it said -- which is
+  what finally makes "the host may not answer guests on this port"
+  expressible, the case the INPUT and host chains both named and neither
+  could say. The **source is resolved once** in `ipv4_output` and handed to
+  the verdict, the host chain's flow read and `output_on`, so a
+  source-prefix rule judges the address the wire carries rather than the
+  zero an unbound sender passed. `nat_in`'s deliveries to guests pass this
+  door too and are scope-guest traffic -- intended, and the unit's sharp
+  edge. Loopback passes no chain; the default is **ACCEPT**, argued from
+  what a default DROP would cut. ABI version 5: the `scope` byte comes from
+  the filter command's and rule record's reserved bytes (no size change)
+  while the per-guest policy record grows 8 → 12 for `policy_output`, since
+  version 4 spent its last spare. Proven by `net-output` (the default, the
+  `-EPERM`, all three scopes and the scope as identity, the host's reply to a
+  guest silenced, no reply state for a refused send, a non-verdict failure
+  not counted as one, loopback exempt, TCP's documented stall, a DNAT'd
+  delivery, the scope discipline and the control round trip) with seven
+  bug-proofs and one honest non-proof: the verdict's position relative to the
+  flow read turns out not to be observable, because the flow record is
+  already conditional on the send succeeding. Per-interface chains, a verdict
+  TCP's callers can see, rate-limit/log targets, IPv6 filtering and full TCP
+  state tracking are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1396,16 +1438,19 @@ See [docs/development.md](docs/development.md).
   guest may reach, default-deny with the tap's DNS and echo seeded as rules
   (built); `-host-input.md`, its third -- which of the host's services
   the world may reach, default-accept with a quiet drop and the off-link
-  invariant (built); and `-host-state.md`, the state that makes the third
+  invariant (built); `-host-state.md`, the state that makes the third
   usable -- the host's own UDP sends and echo requests recorded where they
   leave, so a hardened default no longer costs the machine its DNS, its
-  pings or its path-MTU discovery (built).
+  pings or its path-MTU discovery (built); and `-output-chain.md`, the
+  fourth and last -- what the host itself may send, with a scope that tells
+  a guest's tap from the world and an `-EPERM` the sender can read (built).
 
-  The named next steps are the follow-ups these left. On the filter: an
-  **OUTPUT chain** for the host's own egress (and, with it, filtering the
-  host's replies to guests), **per-interface host chains** (all real links
-  share one chain today), **rate-limit and logging targets**, **IPv6
-  filtering**, and full TCP state tracking. On NAT and the bridge:
+  The named next steps are the follow-ups these left. On the filter --
+  whose four chains now cover every path through the machine -- **a verdict
+  TCP's callers can see** (OUTPUT's refusal reaches `sendto` but not
+  `connect`), **per-interface host chains** (all real links share one chain
+  today), **rate-limit and logging targets**, **IPv6 filtering**, and full
+  TCP state tracking. On NAT and the bridge:
   **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
   **tap's remaining settings** on `/dev/net/tapctl`. On the state: **ICMP
   errors for a UDP flow** (no consumer exists yet) and a **listing of live

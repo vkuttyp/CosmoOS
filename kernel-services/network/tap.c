@@ -29,11 +29,13 @@ _Static_assert(COSMO_NETCTL_MAX_GUESTS == FW_MAX_GUESTS, "netctl.h guest bound d
 _Static_assert(COSMO_NETCTL_MAX_RULES_PER_GUEST == FW_RULES_PER_GUEST,
                "netctl.h rules-per-guest bound drifted from FW_RULES_PER_GUEST");
 _Static_assert(COSMO_NETCTL_HOST_ADDR == FW_HOST_GUEST_IP, "netctl.h host sentinel drifted from FW_HOST_GUEST_IP");
-/* The version-4 record sizes are the ABI; a v3 writer's 20-byte command must
- * be refused by size, never misread. */
-_Static_assert(sizeof(struct cosmo_netctl_filter) == 28, "cosmo_netctl_filter is 28 bytes in version 4");
-_Static_assert(sizeof(struct cosmo_netctl_filter_rule) == 24, "cosmo_netctl_filter_rule is 24 bytes in version 4");
-_Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 8, "cosmo_netctl_filter_guest is 8 bytes");
+/* The record sizes are the ABI; a writer of the previous version must be
+ * refused by size, never misread. Version 5 spent one of the command's and
+ * the rule's three reserved bytes on `scope` (so those two are unchanged)
+ * and grew the policy record, which had none left, from 8 to 12. */
+_Static_assert(sizeof(struct cosmo_netctl_filter) == 28, "cosmo_netctl_filter is 28 bytes in version 5");
+_Static_assert(sizeof(struct cosmo_netctl_filter_rule) == 24, "cosmo_netctl_filter_rule is 24 bytes in version 5");
+_Static_assert(sizeof(struct cosmo_netctl_filter_guest) == 12, "cosmo_netctl_filter_guest is 12 bytes in version 5");
 
 #define TAP_TXQ_MAX 64u   /* frames the stack has queued for the reader; drops when full */
 
@@ -312,7 +314,7 @@ static int64_t tap_ctl_filter(const void *buf, size_t len)
         return -EINVAL;
     struct cosmo_netctl_filter c;
     memcpy(&c, buf, sizeof(c));
-    if (c.reserved[0] != 0 || c.reserved[1] != 0 || c.reserved[2] != 0)
+    if (c.reserved[0] != 0 || c.reserved[1] != 0)
         return -EINVAL;
     int rc;
     if (c.op == COSMO_NETCTL_FILTER_POLICY) {
@@ -321,7 +323,7 @@ static int64_t tap_ctl_filter(const void *buf, size_t len)
         struct fw_rule r = {
             .direction = c.direction, .proto = c.proto, .dst_prefix = c.dst_prefix,
             .verdict = c.verdict, .dst_ip = c.dst_addr, .dst_port = c.dst_port,
-            .src_prefix = c.src_prefix, .src_ip = c.src_addr,
+            .src_prefix = c.src_prefix, .src_ip = c.src_addr, .scope = c.scope,
         };
         rc = c.op == COSMO_NETCTL_FILTER_ADD ? fw_rule_add(c.guest_addr, c.at_index, &r)
                                              : fw_rule_del(c.guest_addr, &r);
@@ -394,7 +396,7 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
     for (unsigned i = 0; i < ng; i++) {
         struct cosmo_netctl_filter_guest fg = { .guest_addr = guests[i] };
         (void)fw_policy_get(guests[i], &fg.policy_to_uplink, &fg.policy_to_guest, &fg.policy_to_host,
-                            &fg.policy_from_uplink);
+                            &fg.policy_from_uplink, &fg.policy_output);
         memcpy(p, &fg, sizeof(fg));
         p += sizeof(fg);
     }
@@ -410,7 +412,7 @@ static int64_t tap_ctl_read(struct vnode *vn, uint64_t off, void *buf, size_t le
                 .guest_addr = guests[i], .direction = rs[j].direction, .proto = rs[j].proto,
                 .dst_prefix = rs[j].dst_prefix, .verdict = rs[j].verdict, .dst_addr = rs[j].dst_ip,
                 .dst_port = rs[j].dst_port, .index = (uint16_t)j,
-                .src_addr = rs[j].src_ip, .src_prefix = rs[j].src_prefix,
+                .src_addr = rs[j].src_ip, .src_prefix = rs[j].src_prefix, .scope = rs[j].scope,
             };
             memcpy(p, &fr, sizeof(fr));
             p += sizeof(fr);
