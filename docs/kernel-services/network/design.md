@@ -951,8 +951,10 @@ on a TCP or UDP datagram does not free it at the IP layer: it is marked
 **`M_FW_QUIET`** (an mbuf flag beside `M_BCAST` — `tcp_input`/`udp_input`
 take `(nif, m, ip4, ip6)`, so the policy rides on the packet with no
 signature change; `hin_quiet`) and delivered, and the transport, which owns
-acceptability, admits it only into an *existing* connection. Anything else —
-ICMP included — is freed (`hin_filtered`). In **TCP** the gate is structural,
+acceptability, admits it only into an *existing* connection. ICMP is
+delivered the same way and answered by its own consumer (the host's own
+flows, below); only a protocol the stack does not demux is freed at the IP
+layer (`hin_filtered`). In **TCP** the gate is structural,
 not a list of sites: every response `tcp.c` builds — listener SYN-ACKs,
 resets, challenge ACKs, the ACK to an out-of-window segment — goes through
 `batch_push` into the per-call `struct tcp_batch`, and `batch_send` is the

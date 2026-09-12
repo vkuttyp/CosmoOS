@@ -308,8 +308,12 @@ step protects:
    - **UDP** delivers only to a socket **connected** to the sender; a
      datagram to an unconnected or listening socket is freed silently, and
      no ICMP port-unreachable is sent (`udp.c:276`).
-   - **ICMP** and anything else: a DROP is a plain drop (there is no
-     connection to deliver to).
+   - **ICMP**, as this unit shipped it: a DROP was a plain drop, there
+     being no connection to deliver to. The host-state unit that followed
+     gave ICMP a consumer to ask — `icmp_input`'s TCP-confirmed
+     path-MTU check — so today a dropped ICMP message is delivered
+     `M_FW_QUIET` like TCP and UDP and freed there unless that check claims
+     it; "anything else" is now only a protocol the stack does not demux.
    The firewall thus never models TCP state, malformed segments are
    rejected by the same validation that protected the connection before —
    only now without a reply — and a DROP means **silence** by construction.
@@ -436,7 +440,9 @@ refuse a snapshot whose version is not the one it speaks.
   non-loopback ingress (before either chain; `ip_stats.rx_offlink`); the
   second call site (uplink ingress): on DROP a TCP/UDP datagram is marked
   `M_FW_QUIET` and continues to the demux (`ip_stats.hin_quiet`), anything
-  else is freed (`ip_stats.hin_filtered`).
+  else is freed (`ip_stats.hin_filtered`) — widened by the host-state unit
+  to mark ICMP too, leaving `hin_filtered` for a protocol the stack does not
+  demux.
 - `kernel/include/uapi/cosmo/netctl.h` — version 4: `DIR_FROM_UPLINK`,
   `src_addr/src_prefix` in the filter command and rule records,
   `policy_from_uplink`, the grown `SNAPSHOT_MAX`.
@@ -568,7 +574,10 @@ world port.
   output is lost to the quiet batch.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
-  back, while a type-0 datagram to the host passes the default.
+  back, while a type-0 datagram to the host passes the default. (As of the
+  host-state unit the drop happens in `icmp_input` under `M_FW_QUIET`, so
+  the test counts `icmp_quiet_dropped` where it first counted
+  `hin_filtered`; no reply, then or now.)
 - **Off-link: a link's datagrams are for that link's address**: with no
   rule installed, a datagram from the world to guest A's gateway `:53` is
   dropped with `rx_offlink` and no host-chain counter moves, while the same
