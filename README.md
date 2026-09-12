@@ -1411,13 +1411,21 @@ See [docs/development.md](docs/development.md).
   errors for a UDP flow** (no consumer exists yet) and a **listing of live
   flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
   reproduction reaching the real world. And one **known defect**, found
-  while diagnosing a CI failure rather than by a unit: `vmctl`'s machine
-  mode runs a guest's vCPUs in one thread, a tick each, and honours
-  `SYSTEM_OFF` as soon as the first vCPU asks for it -- so on a slow host a
-  secondary the guest started with `CPU_ON` can be powered off before its
-  first tick has reached a single `printf`, which is what intermittently
-  loses the `cpu1: up ctx=1234cafe` line the boot test expects. The fix is
-  fairness at that boundary (a started vCPU gets its first turn, or
-  runnable vCPUs are drained before the power-off is honoured), and it is
-  its own change, not a rerun. Design documents first, one subsystem at a
+  while diagnosing a CI failure rather than by a unit. `vmctl`'s machine
+  mode runs a guest's vCPUs in one thread, a tick each, and it *does* give a
+  vCPU started with `CPU_ON` its own turn: the loop takes a turn boundary
+  after every PSCI call for exactly that reason, and the comment there
+  records the first boot of this mode powering off too early. What it does
+  not bound is that turn's *length*. The secondary gets one tick, nothing
+  revisits it, and `SYSTEM_OFF` is honoured the moment the first vCPU asks
+  -- so when the tick expires before the secondary reaches its first UART
+  store, which a slow host makes likely, the machine powers off and that
+  output is lost. That is the most probable cause of the intermittent loss
+  of the `cpu1: up ctx=1234cafe` line the boot test expects: the guest's
+  other three machine-mode lines arrive, the in-kernel `el2-guest-psci`
+  self-test passes in the same boot, and the failures track the slowest
+  runners. The gap is fairness at the power-off boundary -- drain the
+  runnable vCPUs before honouring it, or leave a newly started vCPU's first
+  turn untimed -- and closing it is its own change, with its own way to
+  reproduce the slow tick, not a rerun. Design documents first, one subsystem at a
   time.
