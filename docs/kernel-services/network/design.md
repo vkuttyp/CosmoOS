@@ -1107,7 +1107,13 @@ stalls rather than failing — the verdict is counted per attempt and no SYN
 reaches the link, but the socket reports a timeout. Teaching TCP to carry a
 per-segment verdict back into the PCB (and deciding what a rule added
 mid-connection should do to an established one) is a unit of its own; the
-behaviour is asserted as it stands so that unit has a test to change.
+behaviour is asserted as it stands so that unit has a test to change. That
+unit is now designed: `docs/audit/next-subsystem-tcp-verdict.md` (not yet
+implemented) has `batch_send` return the first output error and the flush
+sites that own a connection apply it -- an opening connection aborted so
+`connect` fails with `-EPERM`, a synchronized one recording the verdict
+without being torn down, and a refused SYN-ACK's SYN-cache entry dropped,
+since a passive open's half-open has no PCB to tell.
 
 **One direction, and an egress scope.** `FW_DIR_OUTPUT` is the host object's
 fifth policy slot, valid on the host alone (a guest naming it is `-EINVAL`,
@@ -1176,9 +1182,11 @@ accept|drop`, and `list` printing the fifth policy and an OUTPUT rule's
 egress; the trailing scope and index are recognised by shape, so either order
 reads.
 
-Named and deferred: a verdict TCP's callers can see; per-interface chains (a
-rule naming `eth1` rather than a scope); rate-limit and logging targets; IPv6
-filtering; full TCP state tracking.
+Named and deferred: per-interface chains (a rule naming `eth1` rather than a
+scope); rate-limit and logging targets; IPv6 filtering; full TCP state
+tracking. A verdict TCP's callers can see has left this list for a report of
+its own, `docs/audit/next-subsystem-tcp-verdict.md`, and is awaiting the
+instruction to build.
 
 **ABI version 4.** `DIR_FROM_UPLINK` (4); `src_addr`/`src_prefix` in the
 filter command and rule records (`struct cosmo_netctl_filter` 20→28 bytes,
