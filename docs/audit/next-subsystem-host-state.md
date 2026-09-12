@@ -97,15 +97,15 @@ it — and it is the one with no state.
   (`:531`). `nat_in`'s delivery of a masqueraded reply or a DNAT to the
   guest does use `ipv4_output` (`nat.c:454`), but its egress is the guest's
   tap, a `NETIF_MASQUERADE` interface.
-- **`fw_host_verdict`** (`fw.c:553`) is stateless: first-match over the
-  host's rules, else the host default; on DROP, TCP/UDP is marked
-  `M_FW_QUIET` and delivered, anything else — every ICMP — is freed
+- **`fw_host_verdict`** (`fw.c:553`) was stateless: first-match over the
+  host's rules, else the host default; on DROP, TCP/UDP was marked
+  `M_FW_QUIET` and delivered, and anything else — every ICMP — was freed
   (`ipv4.c:639-648`).
-- **`icmp_input`** (`ipv4.c:338-378`) consumes exactly two things: Need-
+- **`icmp_input`** (`ipv4.c:338-378`) consumed exactly two things: Need-
   Fragmentation (to `icmp_needfrag`, TCP-confirmed) and echo requests (it
-  answers them, `:360-374`); an echo reply fires the hook (`:375-376`);
-  every other message is freed (`:377`). It does not honour `M_FW_QUIET`
-  (nothing sets it on ICMP today).
+  answers them, `:360-374`); an echo reply fired the hook (`:375-376`);
+  every other message was freed (`:377`). It did not honour `M_FW_QUIET`,
+  because nothing set that flag on ICMP before this unit.
 - **The flow table** (`fw.c:65`, `struct fw_flow`): `FW_FLOW_MAX` 256
   entries, keyed by initiator address for a per-guest quota
   (`FW_FLOW_QUOTA_PER_GUEST = 256 / 8 = 32`), so the table is exactly the
@@ -167,7 +167,7 @@ What is recorded, and only this:
   then depends on the rules. Counted `hin_flow_new` / `hin_flow_drop_full`.
 - **ICMP echo request** (type 8): (src, dst, identifier), as the FORWARD
   chain records a guest's echo. A reply is admitted by identifier; the
-  hook (`icmp_echo_reply_hook`) then fires as today.
+  hook (`icmp_echo_reply_hook`) then fires, unchanged by this unit.
 - **Nothing else.** TCP is *not* recorded: its segments are already admitted
   by the connection itself under quiet delivery, and recording every
   host TCP send would put a `g_fw_lock` hold and a table scan on the
@@ -225,12 +225,15 @@ and a forward match, should the check ever be reached, takes the rules.
 
 ### 3. ICMP is delivered quiet, and the consumer decides
 
-Under a DROP verdict, the IP layer today frees every ICMP. The design
-splits ICMP by what the host does with it:
+Before this unit, a DROP verdict had the IP layer free every ICMP message.
+The design split ICMP by what the host does with it, and **as built the
+split lives in `icmp_input` rather than at the IP layer** (the paragraph
+after the third bullet says why, and is what the machine does now):
 
 - An **echo reply** is admitted by state (§2) or takes the rules.
-- An **echo request** is a *request*, gated by the rules as today (the
-  `icmp type 8` selector exists for it).
+- An **echo request** is a *request*: the rules decide it (the `icmp type 8`
+  selector exists for it), and a DROP means it reaches `icmp_input` under
+  the flag, which answers nothing and frees it.
 - An **ICMP error** — Destination Unreachable (3), Time Exceeded (11),
   Parameter Problem (12) — under DROP is marked **`M_FW_QUIET`** and
   delivered, like TCP/UDP (`hin_quiet`); `icmp_input` under the flag runs
