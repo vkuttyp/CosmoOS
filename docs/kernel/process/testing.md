@@ -391,13 +391,21 @@ threads make progress against each other under a bound: the assertion is
 parallelism makes it fast rather than making it pass. (4) The futex answers
 `-EAGAIN` for a word that does not hold the expected value, `-ETIMEDOUT`
 for a timeout, zero woken when nobody waits, `-EINVAL` for an unaligned
-word and `-EFAULT` for one outside the caller's space. (5) **`clear_tid` is
-a join**, a hundred times: the word holds the child's tid the instant
+word and `-EFAULT` for one outside the caller's space. (5) **`clear_tid` is a join**, in two parts. First
+deterministically: a child that waits to be told to stop cannot have
+exited, so the word must still hold its tid. Asserting that against a
+child which returns at once is simply wrong -- on a machine with more
+parallelism the child finishes, the kernel zeroes the word, and the parent
+reads 0 -- and CI proved it after five local runs had not. Then a hundred
+times: the word holds the child's tid the instant
 `thread_create` returns -- written by the kernel before the child could
 run, so it cannot be a stale value the caller wrote -- and is zero after
 the join, with every tenth iteration pausing so the child finishes *first*.
-One attempt is not enough: the property is a race over a few microseconds,
-and the bug-proof for the ordering passed against a single attempt.
+There the word may legitimately read the tid *or* zero depending on who
+won, so what the loop proves is the **join**: a stale tid, written after
+the child had already zeroed it, is what hangs it. One attempt is not
+enough either way: the property is a race over a few microseconds, and the
+bug-proof for the ordering passed against a single attempt.
 (6) Exit semantics: a worker's `thread_exit` leaves the process running and
 its joiner returns. (7) The **signal mask is per-thread**: a worker blocks
 `SIGUSR1`, the main thread does not, and the signal sent to the process is

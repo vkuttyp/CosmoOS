@@ -296,13 +296,37 @@ int main(int argc, char **argv)
      * *first* must still leave it zero. One attempt almost never contests
      * that window -- an earlier version of this step used one, and the
      * bug-proof for the ordering passed. */
+    /*
+     * First, deterministically: a child that waits to be told to stop
+     * cannot have exited, so the word must still hold its tid. Asserting
+     * that against a child that returns at once is wrong, and CI proved
+     * it -- on a machine with more parallelism the child finishes, the
+     * kernel zeroes the word, and the parent reads 0. (This test passed
+     * five local runs and failed the first CI one.)
+     */
+    spin_stop = 0;
+    CHECK(cosmo_thread_start(&t, spinner, NULL, PAGE) == 0);
+    CHECK(t.done == t.tid);            /* written before it could run, and it is still running */
+    spin_stop = 1;
+    CHECK(cosmo_thread_join(&t, NULL) == 0);
+    CHECK(t.done == 0);                /* zeroed and woken at its exit */
+
+    /*
+     * Then the contested part, a hundred times, with a child that returns
+     * at once: what is checked here is the *join*, because the word may
+     * legitimately read either the tid or zero depending on who won. A
+     * stale tid -- written after the child had already zeroed it -- is
+     * what hangs the join, which is how the bug-proof for the ordering
+     * shows up.
+     */
     for (unsigned i = 0; i < 100u; i++) {
         CHECK(cosmo_thread_start(&t, quick, NULL, PAGE) == 0);
-        CHECK(t.done == t.tid);        /* written before the child could run */
+        unsigned d = t.done;
+        CHECK(d == t.tid || d == 0);   /* never a value neither side wrote */
         if (i % 10 == 0)
             cosmo_sleep_ns(2000000ull);   /* sometimes let it finish first */
         CHECK(cosmo_thread_join(&t, NULL) == 0);
-        CHECK(t.done == 0);            /* zeroed and woken at its exit */
+        CHECK(t.done == 0);
         if (failures)
             break;
     }
@@ -445,6 +469,8 @@ int main(int argc, char **argv)
         static cosmo_thread_t many[300];
         unsigned made = 0;
         int rc = 0;
+        spin_stop = 0;   /* these threads must stay alive to fill the table:
+                            step 5 uses the same flag and leaves it set */
         while (made < 300) {
             rc = cosmo_thread_start(&many[made], spinner, NULL, PAGE);
             if (rc != 0)
