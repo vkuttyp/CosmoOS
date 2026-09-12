@@ -224,12 +224,21 @@ explicitly below.
 
 ### 5. Control plane and `vmctl`
 
-ABI **version 5**: `COSMO_NETCTL_DIR_OUTPUT`, a `scope` byte in
-`struct cosmo_netctl_filter` and `cosmo_netctl_filter_rule` (both have a
-reserved byte to spend, so **neither struct changes size** and
-`SNAPSHOT_MAX` is unchanged — the version bump is for the new direction and
-the new meaning of that byte), and `policy_output` in the per-guest record
-(its last reserved byte, as `policy_from_uplink` took the one before).
+ABI **version 5**: `COSMO_NETCTL_DIR_OUTPUT`; a `scope` byte in
+`struct cosmo_netctl_filter` and `cosmo_netctl_filter_rule`, each of which
+still carries `reserved[3]`, so **those two do not change size**; and
+`policy_output` in the per-guest record, which **does** grow. That record is
+`{u32 guest_addr; u8 policy_to_uplink, policy_to_guest, policy_to_host,
+policy_from_uplink}` — version 4 spent its last spare byte, so a fifth
+policy makes it 9 bytes and, padded to its `u32` alignment, **8 → 12**.
+`COSMO_NETCTL_SNAPSHOT_MAX` therefore grows by 4 bytes per policy object
+(36 for nine objects) and is recomputed and static-asserted as before, and
+the three tapctl-reading tests carry the new expected lengths. Alternatives
+were to pack a fifth verdict into two bits of an existing byte, or to keep
+the host's OUTPUT default outside the per-guest record: both were rejected
+for the reason the record exists — one byte per direction, read the same way
+for every object, is what makes the listing legible and the reader's walk
+trivial.
 `vmctl filter add|del host out PROTO SRC[/PREFIX] DST[/PREFIX] PORT VERDICT
 [world|guest|any] [INDEX]`, `policy host out accept|drop`, and `list`
 printing the scope for a host `out` rule. The exact-size-per-op dispatch
@@ -259,7 +268,9 @@ refuses a version-4 writer as before.
   route, before the flow read; `-EPERM` and `ip_stats.tx_filtered`.
 - `kernel/include/kernel/net/ip.h` — `tx_filtered`.
 - `kernel/include/uapi/cosmo/netctl.h` — version 5: `DIR_OUTPUT`, the
-  `scope` byte in both records, `policy_output`; sizes unchanged.
+  `scope` byte in the filter command and rule records (from their
+  `reserved[3]`, no size change), `policy_output` in the per-guest record
+  (8 → 12 bytes), the recomputed `SNAPSHOT_MAX` and its static asserts.
 - `kernel-services/network/tap.c` — the v5 dispatch, the scope carried both
   ways, `policy_output` in the listing.
 - `userland/system/vmctl.c` — the `out` direction word, the optional scope
@@ -275,8 +286,8 @@ refuses a version-4 writer as before.
   `struct fw_rule.scope`. `ipv4_output` returns `-EPERM` for a refused
   datagram.
 - UAPI (version 5): `COSMO_NETCTL_DIR_OUTPUT`, `COSMO_NETCTL_SCOPE_*`, the
-  `scope` byte, `policy_output`. No new opcode, no new syscall, no size
-  change.
+  `scope` byte, `policy_output`. No new opcode and no new syscall; the
+  per-guest policy record grows by four bytes, the other two do not.
 
 ## Migration plan
 
@@ -340,8 +351,10 @@ builds them, host sockets, and the world ARP-seeded.
   `policy <guest> out` is `-EINVAL`.
 - **Control round trip**: an `OUTPUT` rule with a scope written through
   `/dev/net/tapctl` is listed with it, beside `policy_output`; a
-  version-4-sized write is refused; the snapshot length is unchanged from
-  version 4 (the byte was reserved).
+  version-4-sized write is refused; and the snapshot's length is the
+  version-5 one — the filter command and rule records unchanged, the policy
+  record four bytes wider — checked against `netctl_snapshot_len` as the
+  existing tests do, so the growth is asserted rather than assumed.
 - **Regression**: `net-hoststate`, `net-hostinput`, `net-input`,
   `net-firewall`, `net-dnat`, `net-dns`, `net-nat`, the harness's echo
   round trip.
@@ -390,8 +403,13 @@ rule, which is every configuration but a deliberately hardened one.
   and named as the next refinement rather than half-built here.
 - **The cost is on every send.** Measured as above, with the proven
   mitigation named.
-- **ABI v5 spends two reserved bytes.** Sizes and `SNAPSHOT_MAX` unchanged,
-  so only the version gate moves; a v4 writer is refused by version.
+- **ABI v5 grows the per-guest record.** The filter command and rule
+  records spend a reserved byte each and keep their size; the policy record
+  has none left and goes 8 → 12, so `SNAPSHOT_MAX` grows and every reader's
+  expected length moves with it. A v4 writer is refused by version, and a
+  v4 *reader* refuses a v5 snapshot by version rather than misreading the
+  wider record — the property the version gate exists for, exercised in the
+  tests.
 
 ## Alternatives considered
 
