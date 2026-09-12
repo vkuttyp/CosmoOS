@@ -3504,16 +3504,24 @@ bool selftest_net_dnat(const char **reason)
             while ((d = tap_recv(g)) != NULL) m_freem(d);
         }
     }
-    for (unsigned i = 0; i < 100; i++) {
+    /* The flood is asynchronous, and `dnat_drop_full` rising says only that
+     * *some* packet was refused -- not that every injected one has been
+     * processed. Every injected SYN ends as a translation or a refusal, so
+     * wait for that sum: aging while packets are still queued on the worker
+     * would expire the table and then see a fresh entry created behind it. */
+    uint64_t injected = NAT_TABLE_SIZE + 16;
+    for (unsigned i = 0; i < 200; i++) {
         struct mbuf *d;
         while ((d = tap_recv(g)) != NULL) m_freem(d);
         nat_get_stats(&ns1);
-        if (ns1.dnat_drop_full > ns0.dnat_drop_full) break;
+        if ((ns1.dnat_in - ns0.dnat_in) + (ns1.dnat_drop_full - ns0.dnat_drop_full) >= injected)
+            break;
         thread_sleep_ms(10);
     }
     nat_get_stats(&ns1);
     CHECK(ns1.entries == NAT_QUOTA_PER_GUEST);            /* capped to the guest's share, not 256 */
     CHECK(ns1.dnat_drop_full > ns0.dnat_drop_full);        /* the flood past the share dropped */
+    CHECK((ns1.dnat_in - ns0.dnat_in) + (ns1.dnat_drop_full - ns0.dnat_drop_full) >= injected);
     nat_get_stats(&ns0);
     CHECK(ns0.entries > 0);
     nat_age(clock_now_ns() + 2ull * NAT_TIMEOUT_TCP_NS);
@@ -3618,6 +3626,7 @@ bool selftest_net_tapctl(const char **reason)
     rn = file_read(f, rbuf, sizeof(rbuf));
     CHECK(rn == netctl_snapshot_len(rbuf, 0));      /* no forwards, then the filter section */
     CHECK(((struct cosmo_netctl_list *)rbuf)->count == 0);
+    { struct mbuf *d; while ((d = tap_recv(g)) != NULL) m_freem(d); }   /* nothing stale queued */
     l4len = nettest_mk_tcp(l4, client, u_ip, 40002, 8080, TH_SYN);
     flen = nettest_wrap(frame, u_mac, client_mac, client, u_ip, 64, IPPROTO_TCP, l4, l4len);
     CHECK(tap_inject(u, frame, flen) == 0);
@@ -4493,6 +4502,13 @@ static void hin_drain(struct tap *u)
         m_freem(m);
 }
 
+/* How long a *positive* wait polls: the loop returns as soon as what it
+ * waits for arrives, so being patient costs nothing when the stack is
+ * working and keeps a loaded machine (CI's shared runners, the GIC-variant
+ * boot) from failing an assertion that would have passed. Negative waits --
+ * "nothing arrives" -- keep their own short budgets. */
+#define HIN_TRIES 200u
+
 /* A non-blocking accept, awaited. */
 static struct socket *hin_accept(struct socket *ls)
 {
@@ -4619,13 +4635,13 @@ bool selftest_net_hostinput(const char **reason)
     fw_get_stats(&fs0);
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && (sg.flags & (TH_SYN | TH_ACK)) == (TH_SYN | TH_ACK) &&
           sg.ack == 1001);
     uint32_t iss1 = sg.seq;
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_default, fs0.hin_accept_default));
     l4len = nettest_mk_udp(l4, w[0], u_ip, 6000, 7000, pl, sizeof(pl));
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv_sock(us, buf, sizeof(buf), 50) == 4 && memcmp(buf, pl, 4) == 0);
+    CHECK(hin_recv_sock(us, buf, sizeof(buf), HIN_TRIES) == 4 && memcmp(buf, pl, 4) == 0);
 
     /* (2) a DROP rule with a source: the prefix is matched, in both senses. */
     struct fw_rule r_src = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_TCP, IPV4_ADDR(10, 77, 8, 0), 24, 2222, FW_DROP);
@@ -4661,9 +4677,9 @@ bool selftest_net_hostinput(const char **reason)
     /* the established connection's data is delivered and acknowledged */
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1001, iss1 + 1, TH_ACK | TH_PSH, 64240, "hi", 2);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 50) == 2 && memcmp(buf, "hi", 2) == 0);
+    CHECK(hin_recv_sock(a1, buf, sizeof(buf), HIN_TRIES) == 2 && memcmp(buf, "hi", 2) == 0);
     CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1003);
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && (sg.flags & TH_ACK) && sg.ack == 1003);
     tcp_get_stats(&ts1);
     CHECK(ts1.quiet_dropped == ts0.quiet_dropped);
     /* an ACK-only probe, and a SYN+ACK, from a source with no connection: freed, no RST */
@@ -4691,7 +4707,7 @@ bool selftest_net_hostinput(const char **reason)
     udp_get_stats(&us0);
     l4len = nettest_mk_udp(l4, w[0], u_ip, 5555, 7001, (const uint8_t *)"conn", 4);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv_sock(uc, buf, sizeof(buf), 50) == 4 && memcmp(buf, "conn", 4) == 0);
+    CHECK(hin_recv_sock(uc, buf, sizeof(buf), HIN_TRIES) == 4 && memcmp(buf, "conn", 4) == 0);
     udp_get_stats(&us1);
     CHECK(us1.quiet_dropped == us0.quiet_dropped);
     hin_drain(u);
@@ -4707,7 +4723,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_udp) == 0);
     l4len = nettest_mk_udp(l4, w[0], u_ip, 6003, 7009, pl, sizeof(pl));
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_DEST_UNREACH);   /* ...which ACCEPT draws */
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, HIN_TRIES) && sg.flags == ICMP_DEST_UNREACH);   /* ...which ACCEPT draws */
 
     /* (4) TCP's own validation, silenced: on C1 under the DROP rule, an
      * out-of-window segment draws no window ACK, a mis-positioned reset, an
@@ -4745,7 +4761,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(ts1.challenge_acks == ts0.challenge_acks);
     l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, 50) && (sg.flags & TH_SYN) && sg.ack == 3001);
+    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, HIN_TRIES) && (sg.flags & TH_SYN) && sg.ack == 3001);
     uint32_t iss2 = sg.seq;
     l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
@@ -4755,7 +4771,7 @@ bool selftest_net_hostinput(const char **reason)
     tcp_get_stats(&ts0);
     l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, 50) && sg.flags == TH_ACK && sg.ack == 3001);   /* the challenge */
+    CHECK(hin_recv(u, IPPROTO_TCP, 40002, &sg, HIN_TRIES) && sg.flags == TH_ACK && sg.ack == 3001);   /* the challenge */
     CHECK(FWT_RISES(tcp_get_stats, ts1, challenge_acks, ts0.challenge_acks));
 
     /* The keepalive clock is not refreshed by a rejected segment: with a
@@ -4764,7 +4780,7 @@ bool selftest_net_hostinput(const char **reason)
     tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     l4len = hin_mk_tcp(l4, w[3], u_ip, 40004, 2223, 4000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[3], w[3], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40004, &sg, 50) && (sg.flags & TH_SYN) && sg.ack == 4001);
+    CHECK(hin_recv(u, IPPROTO_TCP, 40004, &sg, HIN_TRIES) && (sg.flags & TH_SYN) && sg.ack == 4001);
     uint32_t iss4 = sg.seq;
     /* The DROP rule covering the peer lands between the admitted SYN and its
      * completing ACK: the ACK is delivered quiet, and the SYN-cache completion
@@ -4804,14 +4820,14 @@ bool selftest_net_hostinput(const char **reason)
     struct hin_conn cn = { .peer = v4addr(w[4], 9000) };
     struct thread *ct = thread_create(hin_connect_thread, &cn, "hin-connect", SCHED_PRIO_DEFAULT);
     CHECK(ct != NULL);
-    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_SYN);   /* the host's SYN */
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* the host's SYN */
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
     ipv4_get_stats(&is0);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5000, hiss + 1, TH_SYN | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(FWT_RISES(ipv4_get_stats, is1, hin_quiet, is0.hin_quiet));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5001);   /* completing ACK */
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_ACK && sg.ack == 5001);   /* completing ACK */
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
@@ -4825,19 +4841,19 @@ bool selftest_net_hostinput(const char **reason)
      * accepted (TIME_WAIT); a bare ACK there draws nothing; a retransmitted
      * FIN -- an exact-position match on the connection -- is acknowledged. */
     ksock_put(cn.s);
-    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && (sg.flags & TH_FIN) && sg.seq == hiss + 1);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && (sg.flags & TH_FIN) && sg.seq == hiss + 1);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_FIN | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5002);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_ACK && sg.ack == 5002);
     hin_drain(u);
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5002, hiss + 2, TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
     CHECK(!hin_recv(u, IPPROTO_TCP, 9000, &sg, 10));
     l4len = hin_mk_tcp(l4, w[4], u_ip, 9000, hport, 5001, hiss + 2, TH_FIN | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[4], w[4], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, 50) && sg.flags == TH_ACK && sg.ack == 5002);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9000, &sg, HIN_TRIES) && sg.flags == TH_ACK && sg.ack == 5002);
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_w4) == 0);
 
     /* Accepted segments that do not advance snd_una keep their output (C1,
@@ -4850,7 +4866,7 @@ bool selftest_net_hostinput(const char **reason)
     for (unsigned i = 0; i < sizeof(data); i++)
         data[i] = (uint8_t)i;
     CHECK(ksock_sendto(a1, data, sizeof(data), NULL) == (int64_t)sizeof(data));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && sg.paylen == 100 && sg.seq == iss1 + 1);
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && sg.paylen == 100 && sg.seq == iss1 + 1);
     tcp_get_stats(&ts0);
     for (unsigned i = 0; i < 3; i++) {
         l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 1, TH_ACK, 64240, NULL, 0);
@@ -4866,7 +4882,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(!(hin_recv(u, IPPROTO_TCP, 40001, &sg, 15) && sg.paylen >= 50));   /* blocked by the zero window */
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 101, TH_ACK, 64240, NULL, 0);   /* window update */
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && sg.paylen == 50 && sg.seq == iss1 + 101);
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && sg.paylen == 50 && sg.seq == iss1 + 101);
     hin_drain(u);
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1003, iss1 + 151, TH_ACK, 64240, data, 10);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
@@ -4885,13 +4901,13 @@ bool selftest_net_hostinput(const char **reason)
          * the second by the delayed-ACK timer -- the last ACK names 1023. */
         bool acked = false;
         for (unsigned i = 0; i < 3 && !acked; i++)
-            acked = hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1023;
+            acked = hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && (sg.flags & TH_ACK) && sg.ack == 1023;
         CHECK(acked);
     }
     l4len = hin_mk_tcp(l4, w[0], u_ip, 40001, 2222, 1023, iss1 + 151, TH_FIN | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, 50) && (sg.flags & TH_ACK) && sg.ack == 1024);
-    CHECK(hin_recv_sock(a1, buf, sizeof(buf), 50) == 0);                       /* EOF */
+    CHECK(hin_recv(u, IPPROTO_TCP, 40001, &sg, HIN_TRIES) && (sg.flags & TH_ACK) && sg.ack == 1024);
+    CHECK(hin_recv_sock(a1, buf, sizeof(buf), HIN_TRIES) == 0);                       /* EOF */
     ksock_put(a1);
     /* A valid reset (seq == rcv_nxt) from a peer under a DROP rule still tears
      * C2 down: the socket reports it, and nothing is emitted. */
@@ -4901,7 +4917,7 @@ bool selftest_net_hostinput(const char **reason)
     tcp_get_stats(&ts0);
     l4len = hin_mk_tcp(l4, w[1], u_ip, 40002, 2223, 3001, iss2 + 1, TH_RST | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[1], w[1], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv_sock(a2, buf, sizeof(buf), 50) == -ECONNRESET);
+    CHECK(hin_recv_sock(a2, buf, sizeof(buf), HIN_TRIES) == -ECONNRESET);
     tcp_get_stats(&ts1);
     CHECK(ts1.rsts_in > ts0.rsts_in && ts1.quiet_dropped == ts0.quiet_dropped);
     CHECK(!hin_recv(u, IPPROTO_TCP, 40002, &sg, 10));
@@ -4930,7 +4946,7 @@ bool selftest_net_hostinput(const char **reason)
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_echo) == 0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5152);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_ECHO_REPLY);
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, HIN_TRIES) && sg.flags == ICMP_ECHO_REPLY);
 
     /* (6) off-link: a link's datagrams are for that link's address. No rule
      * installed. The world's query to guest A's gateway (the tap's DNS proxy)
@@ -4951,7 +4967,7 @@ bool selftest_net_hostinput(const char **reason)
         CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
-        CHECK(hin_recv_sock(ul, buf, sizeof(buf), 50) == 4);
+        CHECK(hin_recv_sock(ul, buf, sizeof(buf), HIN_TRIES) == 4);
         ksock_put(lo);
     }
     ipv4_get_stats(&is0);
@@ -4999,7 +5015,7 @@ bool selftest_net_hostinput(const char **reason)
         CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7002);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == 4);
-        CHECK(hin_recv_sock(ul, buf, sizeof(buf), 50) == 4);
+        CHECK(hin_recv_sock(ul, buf, sizeof(buf), HIN_TRIES) == 4);
         ksock_put(lo);
     }
     /* Default flip: under DROP an unruled SYN drops; an explicit ACCEPT rule
@@ -5015,7 +5031,7 @@ bool selftest_net_hostinput(const char **reason)
     fw_get_stats(&fs0);
     l4len = hin_mk_tcp(l4, w[2], u_ip, 40011, 2223, 8000, 0, TH_SYN, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac[2], w[2], u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 40011, &sg, 50) && (sg.flags & TH_SYN));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40011, &sg, HIN_TRIES) && (sg.flags & TH_SYN));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_rule, fs0.hin_accept_rule));
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &r_open) == 0);
     CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_ACCEPT) == 0);
@@ -5209,13 +5225,13 @@ bool selftest_net_hoststate(const char **reason)
      * state, with no rule anywhere. */
     fw_get_stats(&fs0);
     CHECK(ksock_sendto(cs, pl, sizeof(pl), &peer) == (int64_t)sizeof(pl));
-    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.sport == 7100 && sg.src == u_ip);
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, HIN_TRIES) && sg.sport == 7100 && sg.src == u_ip);
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
 
     /* The tuple is exactly one: another port at that peer, another peer, and
@@ -5261,7 +5277,7 @@ bool selftest_net_hoststate(const char **reason)
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
     udp_get_stats(&us0);
     l4len = nettest_mk_udp(l4, w, u_ip, 5400, 7102, pl, sizeof(pl));
@@ -5288,7 +5304,7 @@ bool selftest_net_hoststate(const char **reason)
     unsigned echoes = g_hst_echo.n;
     fw_get_stats(&fs0);
     CHECK(icmp_send_echo(w, 0x7a7a, 1, "q", 1) == 0);
-    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_ECHO);
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, HIN_TRIES) && sg.flags == ICMP_ECHO);
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
     fw_get_stats(&fs0);
@@ -5326,12 +5342,12 @@ bool selftest_net_hoststate(const char **reason)
     struct hin_conn cn = { .peer = v4addr(w, 9100) };
     struct thread *ct = thread_create(hin_connect_thread, &cn, "hst-connect", SCHED_PRIO_DEFAULT);
     CHECK(ct != NULL);
-    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.flags == TH_SYN);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.flags == TH_SYN);
     uint32_t hiss = sg.seq;
     uint16_t hport = sg.sport;
     l4len = hin_mk_tcp(l4, w, u_ip, 9100, hport, 6000, hiss + 1, TH_SYN | TH_ACK, 64240, NULL, 0);
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.flags == TH_ACK && sg.ack == 6001);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.flags == TH_ACK && sg.ack == 6001);
     for (unsigned i = 0; i < 100 && !cn.done; i++)
         thread_sleep_ms(10);
     CHECK(cn.done && cn.rc == 0);
@@ -5342,7 +5358,7 @@ bool selftest_net_hoststate(const char **reason)
     for (unsigned i = 0; i < sizeof(big); i++)
         big[i] = (uint8_t)i;
     CHECK(ksock_sendto(cn.s, big, sizeof(big), NULL) == (int64_t)sizeof(big));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.paylen > 600);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.paylen > 600);
     uint32_t qseq = sg.seq;
     /* A Need-Fragmentation quoting a tuple with no connection reaches the
      * consumer (the firewall admitted it to the layer that can tell) and is
@@ -5361,7 +5377,7 @@ bool selftest_net_hoststate(const char **reason)
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(tcp_get_stats, ts1, pmtu_updates, ts0.pmtu_updates));
     CHECK(FWT_RISES(ipv4_get_stats, is1, pmtu_updates, is0.pmtu_updates));
-    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.seq == qseq && sg.paylen <= 536);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, HIN_TRIES) && sg.seq == qseq && sg.paylen <= 536);
     /* An ICMP error with no consumer is freed under the flag: nothing parses
      * it, nothing is answered. */
     ipv4_get_stats(&is0);
@@ -5389,7 +5405,7 @@ bool selftest_net_hoststate(const char **reason)
     uint32_t flen = nettest_wrap(frame, gtmac, gmac, guest, g_ip, 64, IPPROTO_UDP, l4, l4len);
     fw_get_stats(&fs0);
     CHECK(tap_inject(gt, frame, flen) == 0);
-    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.paylen >= 12 && sg.paylen <= sizeof(sg.pay));
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, HIN_TRIES) && sg.paylen >= 12 && sg.paylen <= sizeof(sg.pay));
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
     {
@@ -5446,7 +5462,7 @@ bool selftest_net_hoststate(const char **reason)
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
     l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
     CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
     hin_drain(u);
 
     /* (8) neither a forwarded guest flow nor a loopback send is the host's:
@@ -5463,7 +5479,7 @@ bool selftest_net_hoststate(const char **reason)
     fw_get_stats(&fs0);
     l4len = nettest_mk_udp(l4, ga, w, 4500, 5300, pl, sizeof(pl));
     CHECK(fwt_send(fa, tap0mac, amac, ga, w, IPPROTO_UDP, l4, l4len));
-    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.src == u_ip && sg.sport != 4500);   /* masqueraded */
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, HIN_TRIES) && sg.src == u_ip && sg.sport != 4500);   /* masqueraded */
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_new == fs0.hin_flow_new);                  /* not the host's flow */
     fw_get_stats(&fs0);
@@ -5472,7 +5488,7 @@ bool selftest_net_hoststate(const char **reason)
         CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
         struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7100);
         CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
-        CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+        CHECK(hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES) == (int64_t)sizeof(pl));
         ksock_put(lo);
     }
     fw_get_stats(&fs1);
@@ -5498,7 +5514,7 @@ bool selftest_net_hoststate(const char **reason)
     }
     fw_get_stats(&fs1);
     CHECK(fs1.hin_flow_drop_full == fs0.hin_flow_drop_full + 1 && fs1.hin_flow_new == fs0.hin_flow_new);
-    CHECK(hin_recv(u, IPPROTO_UDP, (uint16_t)(6000 + FW_FLOW_QUOTA_HOST), &sg, 50));   /* still sent */
+    CHECK(hin_recv(u, IPPROTO_UDP, (uint16_t)(6000 + FW_FLOW_QUOTA_HOST), &sg, HIN_TRIES));   /* still sent */
     /* A guest-to-guest flow still records with the host's share full. */
     { struct netif *n = netif_find("tap1"); CHECK(n != NULL); nettest_seed_arp(n, gb, bmac); netif_put(n); }
     struct fw_rule a_to_b = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
@@ -5524,7 +5540,7 @@ bool selftest_net_hoststate(const char **reason)
         bool sent = ksock_sendto(cs, pl, sizeof(pl), &p2) == (int64_t)sizeof(pl);
         l4len = nettest_mk_udp(l4, w, u_ip, 5500, 7100, pl, sizeof(pl));
         bool injected = hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len);
-        int64_t got = hin_recv_sock(cs, buf, sizeof(buf), 50);
+        int64_t got = hin_recv_sock(cs, buf, sizeof(buf), HIN_TRIES);
         l4len = nettest_mk_udp(l4, w, u_ip, 5501, 7100, pl, sizeof(pl));
         bool unsolicited = hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len);
         int64_t none = hin_recv_sock(cs, buf, sizeof(buf), 10);

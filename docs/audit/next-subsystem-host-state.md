@@ -527,12 +527,23 @@ Two additions removed them, and both are in the code for that reason:
   which is every test in the suite but this unit's own, and a quiet host's
   whole uptime.
 
-With both, eight consecutive boots of this tree are green, where the
-pre-cache version failed one in three. Recorded in full because the lesson
-is the measurement, not the number: a bounded per-packet scan that a
-throughput benchmark cannot see can still be visible as flakiness in tests
-that assert on traffic having drained — and flakiness introduced by a change
-is that change's to fix, not a pre-existing quirk to note in passing.
+With both, eight consecutive boots of this tree were green where the
+pre-cache version failed one in three — but **CI then failed the same
+cluster once on the GIC-variant boot**, which no local run had exercised,
+and four local `test-gic` boots could not reproduce it. At that point the
+odds were the wrong thing to keep tuning: the two neighbouring assertions
+are themselves racy, and a change that perturbs timing only reveals it.
+Both are now fixed at the root (`testing.md`): `net-dnat` waits for its
+injected flood to be accounted for before aging the NAT table, instead of
+aging it while packets are still draining; `net-tapctl` drains the guest tap
+before asserting that nothing is forwarded to it, instead of tripping over a
+frame an earlier step left queued. This unit's own positive waits became
+patient for the same reason. Recorded in full because the lesson is the
+measurement, not the number: a bounded per-packet scan a throughput
+benchmark cannot see can still surface as flakiness in tests that assert on
+traffic having drained; flakiness a change reveals is that change's to fix;
+and "it passes locally" is not the same claim as "it passes on the
+configuration CI runs".
 
 ## Risks
 

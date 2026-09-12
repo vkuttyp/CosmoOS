@@ -557,6 +557,26 @@ refused echo request is then answered).
 now dropped by the off-link invariant (`rx_offlink`) before any chain, not by
 INPUT's default (`in_drop_default`).
 
+**`net-dnat` and `net-tapctl`** (races fixed with the host-state unit): two
+assertions in these tests were written without a barrier against the network
+worker, and the host-state unit's timing perturbation turned both into
+intermittent CI failures — on the GIC-variant boot, where the same tree
+passed the default one. They are fixed rather than retried. `net-dnat` aged
+the NAT table while the flood it had just injected could still be draining
+(`dnat_drop_full` rising says *some* packet was refused, not that all were
+processed), so an entry created behind `nat_age` survived it; it now waits
+for translations plus refusals to account for every injected datagram, and
+asserts that sum. `net-tapctl` asserted that a client SYN is *not* forwarded
+to the guest without first draining the guest tap, so any frame an earlier
+step left queued failed it immediately (30 ms, not the 500 ms timeout); it
+now drains before injecting, which leaves the assertion's own meaning
+untouched. The host-chain and host-state tests' *positive* waits also became
+patient (`HIN_TRIES`): those loops return as soon as what they wait for
+arrives, so a generous budget costs nothing when the stack works and stops a
+loaded runner from failing an assertion that would have passed. Negative
+waits keep their short budgets, since they must not wait for something that
+should never come.
+
 **`net-tapctl`, `net-firewall`, `net-input`** (adjusted for version 4): the
 snapshot buffers and lengths count one more policy record (the host's) and
 the grown rule record; `fw_policy_get` reports a fourth slot.
