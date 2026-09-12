@@ -142,8 +142,9 @@ problem in two, and only one half needs the filter's own state:
 - **inbound DNAT (client→guest).** Authorized by the port-forward rule, and
   also delivered via `nat_in` → `ipv4_output`, not the FORWARD chain — so the
   FORWARD filter neither gates nor needs to gate it; the pf rule is its
-  policy. (Filtering inbound-to-guest beyond the pf rule is a later INPUT-
-  style refinement.)
+  policy. (Filtering inbound-to-guest beyond the pf rule was a later
+  refinement: the OUTPUT chain now sees those deliveries, since `nat_in`
+  re-emits through `ipv4_output`.)
 
 So the filter keeps **its own** bounded flow table used for the guest→guest
 direction, with the short/long idle timeouts conntrack already defines,
@@ -171,7 +172,9 @@ bumps a counter and the caller frees `m` and returns (the existing
 `fwd_*`-drop shape); on ACCEPT the packet continues unchanged. Scope for this
 unit is the **FORWARD chain only** — host-local delivery (an INPUT chain
 protecting the host's own services) and egress from the host itself are named
-but deferred, keeping the unit to the guest-isolation problem it solves.
+but deferred, keeping the unit to the guest-isolation problem it solves. Both
+were built afterwards, on this engine: `next-subsystem-input-chain.md` and
+`next-subsystem-output-chain.md`.
 
 ### 4. The control plane
 
@@ -237,7 +240,9 @@ allowed is subsumed: attachment *is* the generation.) Lock order: `g_fw_lock` �
 ### 5. Deliberately out of scope (named, later units)
 
 - An **INPUT chain** filtering traffic to the host's own services, and an
-  **OUTPUT chain** for the host's own egress.
+  **OUTPUT chain** for the host's own egress. **Both built** on this engine
+  (`next-subsystem-input-chain.md`, `next-subsystem-output-chain.md`), along
+  with the host chain and its reply state.
 - **L3/L4 richness** beyond first-match accept/drop: rate limits, logging
   targets, connection-count limits, NAT-before-filter ordering knobs.
 - **IPv6** filtering (tracks the deferred IPv6 NAT/DNAT units).

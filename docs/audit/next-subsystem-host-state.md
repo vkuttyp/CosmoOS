@@ -293,7 +293,9 @@ wanted. The seeded defaults are untouched.
   recorded UDP flow) — there is no consumer in the stack; when a UDP
   unreachable notifier exists it applies its own check under the flag.
 - **An OUTPUT chain** — rules on the host's egress. The record hook sits
-  where that chain will sit; this unit adds no rule there.
+  where that chain will sit; this unit adds no rule there. **Built**
+  (`next-subsystem-output-chain.md`): the verdict went in beside this hook,
+  just before it.
 - **Per-interface host chains**, rate-limit/log targets, IPv6 (as before).
 
 ## Affected files
