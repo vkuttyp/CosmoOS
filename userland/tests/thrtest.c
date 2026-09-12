@@ -451,6 +451,11 @@ int main(int argc, char **argv)
             CHECK(cosmo_thread_join(&h[i], NULL) == 0);
         CHECK(heap_done == 3);
         CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
+        /* fflush(NULL) flushes every stream, and must not deadlock against
+         * the lock its caller already holds -- nothing in this test called
+         * it until a review pointed out that it self-deadlocked. */
+        CHECK(fflush(NULL) == 0);
+        CHECK(fflush(stdout) == 0);
     }
 
     STEP("12");

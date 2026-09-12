@@ -1476,9 +1476,9 @@ See [docs/development.md](docs/development.md).
   architectures and is its own unit -- a threaded program must not rely on
   `errno` across threads until then, which costs a wrong error code and
   never corruption. Proven by
-  `tests/native/thrtest` -- eleven steps from userland, because a kernel
-  self-test cannot create a *user* thread -- with nine bug-proofs, three of
-  which sent the test back for a stronger assertion. `SYS_mprotect`, futex
+  `tests/native/thrtest` -- twelve steps from userland, because a kernel
+  self-test cannot create a *user* thread -- with eleven bug-proofs, four of
+  which sent the test back for a stronger assertion rather than the code. `SYS_mprotect`, futex
   requeue, per-thread signal targeting, the handle table under two threads,
   and `vmctl`'s conversion to a thread per vCPU (the first consumer, and
   the reason the machine-mode fairness rule exists) remain later units.

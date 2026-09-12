@@ -465,7 +465,7 @@ run from `rc.test`, requiring `THREADTEST: PASS` in
    it; one that denies `SYS_thread_exit` **cannot**, because it is always
    allowed.
 
-**Bug-proofs**, nine of them as built rather than the seven listed above,
+**Bug-proofs**, eleven of them as built rather than the seven listed above,
 each observed to fail for its stated reason and the source restored
 byte-identical every time. `docs/kernel/process/testing.md` lists them with
 the step that catches each; three are worth recording here because they
@@ -486,10 +486,11 @@ changed how the unit was tested:
    ordering step ran once (see 1), and the test had no step for the thread
    bound at all, which this report had promised.
 
-As built the test has **eleven** steps, not ten: a mutex step (a lock under
+As built the test has **twelve** steps, not ten: a mutex step (a lock under
 two threads losing no update) earns its place because the futex exists to
-carry one, and the bound moved to the end so that reaching it cannot
-disturb anything before it.
+carry one, a step for the allocator and stdio under three threads came
+with the locks a review asked for, and the bound moved to the end so that
+reaching it cannot disturb anything before it.
 
 
 ## Benchmarks

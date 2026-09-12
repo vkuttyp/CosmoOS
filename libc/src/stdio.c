@@ -72,6 +72,8 @@ void __stdio_init(void)
     file_init(&g_std[2], 2, F_WRITE | F_UNBUF | F_STATIC, g_bufs[2], BUFSIZ);
 }
 
+static void flush_all_nolock(void);   /* fflush(NULL), inside the lock */
+
 static int flush_out(FILE *f)
 {
     size_t done = 0;
@@ -92,7 +94,11 @@ static int flush_out(FILE *f)
 static int fflush_nolock(FILE *f)
 {
     if (f == NULL) {
-        __stdio_flush_all();
+        /* The documented fflush(NULL): every stream. The core, not
+         * __stdio_flush_all, because the caller already holds the lock and
+         * it is not recursive -- taking it again deadlocked a thread
+         * against itself, which is what fflush(NULL) used to do. */
+        flush_all_nolock();
         return 0;
     }
     if (f->flags & F_WRITING)
@@ -105,12 +111,18 @@ static int fflush_nolock(FILE *f)
     return 0;
 }
 
-void __stdio_flush_all(void)
+static void flush_all_nolock(void)
 {
-    __stdio_lock();
     for (struct _FILE *f = g_files; f; f = f->next)
         if (f->flags & F_WRITING)
             flush_out(f);
+}
+
+/* The exit path's entry point, which holds no lock of its own yet. */
+void __stdio_flush_all(void)
+{
+    __stdio_lock();
+    flush_all_nolock();
     __stdio_unlock();
 }
 

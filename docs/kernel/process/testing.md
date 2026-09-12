@@ -462,15 +462,22 @@ the source restored byte-identical every time:
    and takes the process with it.
 8. `SYS_thread_self` answering the scheduler's `tid` → three checks fail at
    once, the id being asserted in steps 1, 6 and 7.
-9. `PROCESS_MAX_THREADS` not checked → step 11 runs past 300 threads and
-   both its bound assertions fail.
+9. `PROCESS_MAX_THREADS` not checked → step **12** runs past 300 threads
+   and both its bound assertions fail.
 10. The futex timeout left unbounded → step 4's `-EINVAL` for a duration
     that would wrap the deadline becomes an immediate `-ETIMEDOUT`.
-11. The allocator's lock removed → step 12 **aborts** (`SIGABRT`, status
+11. The allocator's lock removed → step **11** aborts (`SIGABRT`, status
     134): three threads in one free list trip the allocator's own
     corruption check. That is the hazard a review said documentation could
     not excuse, and it is right -- the lock is the fix, and this is the
     proof it is load-bearing.
+
+A twelfth reintroduction is not needed for the one deadlock this locking
+caused, because the fix is what the test now asserts: `fflush(NULL)` used
+to take the stdio lock in the public `fflush` and take it again in
+`__stdio_flush_all`, so a thread deadlocked against itself. Nothing called
+`fflush(NULL)` until a review found it; step 11 calls it now, and the
+null-stream branch runs the unlocked core.
 
 stdio's lock has no proof of its own here. Racing a `FILE`'s buffer
 pointers garbles output rather than failing an assertion, and this test
@@ -488,7 +495,7 @@ three or more threads contend: the winner leaves 1, the unlock sees 1 and
 wakes nobody, and a thread already asleep on 2 is never called again. That
 is the variant Drepper's *Futexes Are Tricky* gives as flawed, and the fix
 is his correct one -- always exchange 2 in when taking the lock through the
-slow path. Reintroducing it does **not** fail step 9, because
+slow path. Reintroducing it does **not** fail step 9 (the mutex step), because
 `futex_wait` in this kernel returns 0 when a wake raced its enqueue (a
 spurious wake the futex contract permits, and this one takes), and the
 retry loop absorbs it: the stranded thread is rescued by the next
