@@ -1000,9 +1000,11 @@ opposite of what the caller asked for.
 **One id, seen by both doors.** `thread.user_tid` is the id userland sees:
 the pid for a process's first thread, `0x10000 + tid` for the rest, so a
 thread id and a pid can never collide. It was `lx_tid`, "the Linux view of
-the id", and the rename is the whole of this unit's change to the
-personality -- the number is now one number with two views, so `/proc`,
-`SYS_procinfo`, `tgkill` and `thread_self` cannot disagree. It is distinct
+the id" -- the number is now one number with two views, so `/proc`,
+`SYS_procinfo`, `tgkill` and `thread_self` cannot disagree. The rename is
+not the only change to the personality: `linux_thread_exit` and its
+`thread_exit` hook registration go too, the zero-and-wake they did having
+become generic (below). `clone` and `set_tid_address` are untouched. It is distinct
 from `thread.tid`, the scheduler's own id, which never leaves the kernel.
 
 **Creation is ordered by its failure modes.** `SYS_thread_create`

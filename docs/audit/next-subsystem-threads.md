@@ -316,8 +316,12 @@ and is **the same number for both doors**, so `/proc`, `SYS_procinfo`,
 `tgkill` and a native `thread_self` cannot disagree. The scheduler's `tid`
 keeps its name: freeing it would churn the counter, the print and `tid_t`
 for a field no interface exposes. `process_find_thread`'s parameter
-follows, and that is the only change this unit makes to the compat
-layer.
+follows. It is not the only change to the compat layer, though this report
+said so: `linux_thread_exit` and its `thread_exit` hook registration are
+**gone**, because the `clear_child_tid` zero-and-wake they performed turned
+out to be the field's contract rather than a Linux behaviour and moved into
+`process_thread_exit`. Nothing else there changes -- `clone` and
+`set_tid_address` are untouched.
 
 ### What is per-thread, and what is shared
 
