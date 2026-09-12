@@ -5,7 +5,7 @@ and wait for the instruction to build it. This was that report; the unit is
 now **implemented** (PR "Native threads and a futex"), and the design below
 is as built -- see `docs/kernel/process/design.md` §12 for the shipped
 description and `docs/kernel/process/testing.md` (`thrtest`) for its
-proofs. Seven things came out differently and are marked where they arise:
+proofs. Eight things came out differently and are marked where they arise:
 
 - **`lx_tid` became `user_tid`, not `tid`** -- that name was already taken
   by the scheduler's own thread id, which never leaves the kernel.
@@ -39,6 +39,12 @@ proofs. Seven things came out differently and are marked where they arise:
   `fflush(NULL)` took the stdio lock in the public entry and again in
   `__stdio_flush_all`. Both were in the concurrency primitives, where the
   tests as written could not catch me; each is now a test step.
+- **The proof is a userland program, not a freestanding one.** This report
+  put it in `tests/native/` with a makefile of its own, beside the Linux
+  ABI tests; it needs libc (for `mmap` and the thread library), so it is a
+  `SELFTEST`-only entry in `userland/userland.mk`, built like any other
+  userland program and archived at `tests/native/thrtest`. The
+  affected-files table below is regenerated from the diff for that reason.
 - **There is no `mprotect` system call**, so libc's guard page costs a
   reservation, a hole and a fixed map. Named as a follow-up rather than
   smuggled in.
@@ -387,18 +393,29 @@ creation is two-phase.
 
 ## Affected files
 
+As built, from the diff rather than from the plan: 35 files. The rows below
+are the whole of it, and the ones this report guessed wrong are marked.
+
 | file | change |
 | --- | --- |
-| `kernel/include/uapi/cosmo/syscall.h` | five numbers, `SYS_COUNT` 82→87, `struct cosmo_thread` |
-| `kernel/syscall/native.c` | five handlers; `SYS_thread_exit` added to `native_always_allowed` |
-| `kernel/include/kernel/thread.h`, `kernel/include/kernel/process.h` | `lx_tid` → `user_tid` (as built: `tid` was taken), and the comments that name it |
-| `compat/linux/syscalls.c` | the rename's other side; no behaviour change |
-| `libc/include/cosmo/thread.h` (new), `libc/src/thread.c` (new) | `thread_create`/`thread_join`/`thread_exit` and a mutex over the futex — the library that owns the join convention, beside `libc/src/signal.c` and `process.c`, which wrap their syscalls the same way |
-| `tests/native/` (new), `tests/native/native.mk` | `thrtest`, the userland proof, mirroring `tests/linux`'s shape |
-| `userland/etc/rc.test`, `tests/boot/run_boot_test.py` | run it, require its marker |
-| `docs/kernel/process/design.md`, `-/testing.md` | the model, the interface, what is per-thread |
-| `docs/compat/linux/design.md` | the personality is a translation again, not a superset |
-| `README.md` | Status entry |
+| `kernel/include/uapi/cosmo/syscall.h` | five numbers (`thread_self` 82, `futex_wait` 83, `futex_wake` 84, `thread_create` 85, `thread_exit` 86 — the order the migration landed them in, not the order this report listed), `SYS_COUNT` 82→87, `struct cosmo_thread` |
+| `kernel/syscall/native.c` | the five handlers; the creation order; the futex timeout bound; `SYS_thread_exit` in `native_always_allowed` |
+| `kernel/include/arch/user.h`, `kernel/arch/x86_64/user.c`, `kernel/arch/aarch64/user.c` | **not foreseen**: `arch_user_regs_init_thread` and `ARCH_THREAD_TOP_BYTES`, because the entry contract is per-architecture and `arch/user.h` exists so generic code does not `#ifdef` |
+| `kernel/include/kernel/thread.h`, `kernel/include/kernel/process.h` | `lx_tid` → `user_tid` (**as built**: `tid` was taken by the scheduler's own id) and the comments that name it |
+| `kernel/process/process.c` | **not foreseen**: `thread_clear_tid` — the zero-and-wake, moved here from the Linux personality — and its ordering after `leaving_locked`, so a returned join means the slot is free |
+| `kernel/include/kernel/cred.h` | a comment that said a process is single-threaded; the lock it already took is what makes it safe |
+| `compat/linux/syscalls.c`, `compat/linux/signal.c`, `compat/linux/linux_internal.h` | the rename's other side, and the removal of `linux_thread_exit` and its hook registration |
+| `libc/include/cosmo/syscall.h` | the five stubs |
+| `libc/include/cosmo/thread.h`, `libc/src/thread.c`, `libc/libc.mk` | the thread library: stacks with a guard, the trampoline, `join` over `clear_tid`, and the mutex — Drepper's *correct* variant, after a review found the flawed one here |
+| `libc/src/malloc.c`, `libc/src/stdio.c`, `libc/src/printf.c`, `libc/src/libc.h` | **not foreseen**: the allocator's and stdio's locks, which a review would not accept as documentation; `printf` holds stdio's across a whole format; both files still compile standalone for the host test |
+| `userland/tests/thrtest.c`, `userland/userland.mk` | **as built, not `tests/native/` with a `native.mk`**: the proof needs libc, so it is a userland program (a `SELFTEST`-only `USER_TEST_PROGRAMS` list) archived at `tests/native/thrtest`, rather than a freestanding binary like the Linux ABI tests |
+| `userland/etc/rc.test` | runs it, before the hypervisor section rather than after |
+| `tests/boot/run_boot_test.py` | `THREAD_MARKERS`, its own group and not the hypervisor's |
+| `docs/kernel/process/design.md`, `-/testing.md`, `-/api.md` | §12, `thrtest`, and the `process_find_thread` signature |
+| `docs/compat/linux/design.md`, `-/api.md` | the door is no longer the wider one; `gettid`'s field |
+| `docs/libc/invariants.md`, `-/architecture.md`, `-/api.md`, `libc/README.md` | **not foreseen**: L8 rewritten to what now holds — the allocator and stdio locked, `errno` still one global |
+| `README.md` | the Status entry |
+| `docs/audit/next-subsystem-threads.md` | this report, converted to as-built |
 
 ## New APIs
 
