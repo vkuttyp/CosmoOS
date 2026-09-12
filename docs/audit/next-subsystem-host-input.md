@@ -119,8 +119,9 @@ guests (claimed by `nat_in` first), replies to the host's own outbound flows
 (TCP segments of its connections under any policy; UDP replies to its
 sockets under the default ACCEPT, and to *connected* UDP sockets under any
 policy — a reply to an unconnected socket matching an operator's DROP rule
-is dropped, as the design and Risks sections state), and ICMP echo to the
-host. The NIC's address is a static QEMU default (`netif.c`
+was dropped in this unit, as the design and Risks sections state, and is
+admitted by the next one from the flow the host's own send records), and
+ICMP echo to the host. The NIC's address is a static QEMU default (`netif.c`
 `netif_autoconfig`; "DHCP is a later unit"), so no DHCP client needs a hole.
 
 ## Why it matters
@@ -349,8 +350,11 @@ own echo request are admitted by state before any rule, and ICMP reaches
 `FROM_UPLINK` default **ACCEPT**. This is the first chain where default DROP
 would break the machine rather than a guest: the harness's listeners, DNAT'd
 connections' host-side handling, ICMP echo, and — with reply state only for
-connected UDP sockets — every reply to an unconnected UDP socket of the host
-itself. A host firewall's first unit ships the
+connected UDP sockets, which is what this unit had — every reply to an
+unconnected UDP socket of the host itself. (The host-state unit that
+followed records the host's own sends, so a hardened default no longer costs
+those replies: flipping it is now an operator's decision rather than a
+broken machine.) A host firewall's first unit ships the
 mechanism and the one topology fix that needs no policy; the operator
 hardens with `FROM_UPLINK … DROP` rules by source/port, or flips the default
 to DROP and allows explicitly (a hardened host adds `tcp any :22 ACCEPT from
@@ -699,8 +703,10 @@ tuning.
   the defaults differ (guest DROP with seeds; world ACCEPT).
 - **Default DROP with seeded rules, as INPUT did.** Rejected: the host's
   services from the uplink are not a small known set, and without UDP/ICMP
-  reply state a default DROP breaks the host's own flows; ACCEPT-then-harden
-  is what every host firewall ships first.
+  reply state a default DROP broke the host's own flows; ACCEPT-then-harden
+  is what every host firewall ships first. (The reply state arrived in the
+  next unit; the default is still ACCEPT, because "which services the world
+  is offered" remains the operator's decision, not a default's.)
 - **A separate control node (`/dev/net/hostctl`).** Rejected: the existing
   channel's shape, dispatch, versioning and listing carry the host object
   unchanged under the `0` sentinel; a second node duplicates all of it.
