@@ -1291,8 +1291,47 @@ See [docs/development.md](docs/development.md).
   no budget or keepalive side effect, dup-ACK/window-update/data/FIN output
   kept, a valid reset applied, ICMP by type, off-link drops, DNAT never
   re-gated, scope refusals, the listing round trip) with fourteen bug-proofs.
-  Reply state for unconnected UDP and ICMP, per-interface host chains, an
+  Its reply state is done (its own entry below); per-interface host chains, an
   OUTPUT chain, rate-limit/log targets and IPv6 are later units.
+- **The host's own flows: reply state for the host chain (done):**
+  `docs/audit/next-subsystem-host-state.md`,
+  `docs/kernel-services/network/design.md` ("The host's own flows"). The
+  host chain shipped with default **ACCEPT** because it had no reply state,
+  and three of the host's own facilities depended on that: the **DNS proxy**
+  (its upstream socket is unconnected *by design* so it can authenticate the
+  sender, so quiet delivery's connected-socket rule freed the answer and
+  every guest would have lost DNS under a hardened host), the host's **own
+  pings**, and its **TCP path-MTU discovery** (the Need-Fragmentation errors
+  were freed before `icmp_needfrag` saw them, blackholing large segments).
+  This is that state, in the shape the stack already had: `fw_host_record`
+  records the host's **UDP sends and ICMP echo requests** in the FORWARD
+  chain's flow table at **`ipv4_output`** -- the one door every
+  host-originated datagram passes and no forwarded one does -- when the
+  egress is a real, non-guest link, and `fw_host_verdict` consults that
+  state **before its rules**, admitting the **reverse** tuple as the FORWARD
+  chain does. **TCP is deliberately not recorded** (quiet delivery already
+  admits its segments through the connection), so `g_fw_lock` stays off the
+  uplink's hottest send path, and a one-entry cache refreshes the repeated
+  tuple without walking the table. The table is split by share --
+  `FW_FLOW_GUEST_POOL` 256 (the guests' 8 x 32, unchanged) plus
+  `FW_FLOW_QUOTA_HOST` 64 -- so a flood starves only its own initiator, and a
+  send is never refused for the firewall's sake. **Exactly one tuple** is
+  opened per flow and intent is not modelled: a second datagram on it inside
+  the window is admitted too, the socket's own validation being the second
+  line. **ICMP is the consumer's decision, not the firewall's**: under a DROP
+  every ICMP message is delivered `M_FW_QUIET` to `icmp_input`, the single
+  dispatch point, which runs *only* the Need-Fragmentation path -- and that
+  path already accepts nothing TCP does not confirm (RFC 5927) -- freeing
+  everything else (`icmp_quiet_dropped`) without building a reply or
+  spending the host-wide echo-reply budget. No ABI change and nothing to
+  configure: state is earned by what the host sends. Proven by
+  `net-hoststate` (an unconnected client's reply, one tuple and its three
+  negatives, the host's ping, a refused echo request answering nothing,
+  path-MTU discovery under DROP, the DNS proxy end to end, refresh and
+  expiry, forwarded and loopback sends recording nothing, the share, and the
+  hardened default) with twelve bug-proofs. Reply state for a UDP flow's
+  ICMP errors, a listing of live flows, per-interface host chains, an OUTPUT
+  chain, rate-limit/log targets and IPv6 are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1354,7 +1393,7 @@ See [docs/development.md](docs/development.md).
   (built); and `-host-input.md`, its third -- which of the host's services
   the world may reach, default-accept with a quiet drop and the off-link
   invariant (built). The named next steps are the follow-ups these left (an
-  OUTPUT chain, reply state for unconnected UDP/ICMP, hairpin/NAT-reflection,
+  OUTPUT chain, hairpin/NAT-reflection,
   IPv6 DNAT, an L2 bridge, the tap's other settings on
   the control channel) and, on the guest itself, the `QEMU_MEM=2G`
   reproduction reaching the real world. Design documents first, one subsystem at a time.

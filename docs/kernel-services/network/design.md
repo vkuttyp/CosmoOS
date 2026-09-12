@@ -993,11 +993,88 @@ connections, its accepted inbound ones and its connected UDP flows keep
 working under any rule set. Rules therefore gate *new* connections and
 unsolicited datagrams; a connection that exists when a DROP rule is added
 persists until it closes (as FORWARD's flow state does), and an operator
-who wants it cut closes the socket. What quiet delivery cannot recognise —
-a reply to an *unconnected* UDP socket, and every ICMP reply — takes the
-rules, which the default ACCEPT admits; a broad `udp any any` DROP would drop
-the host's own unconnected replies (name listener ports or a source prefix);
-reply state for those is a later unit.
+who wants it cut closes the socket. What quiet delivery cannot recognise by
+itself — a reply to an *unconnected* UDP socket, and every ICMP — is what the
+host's own flow state, below, recognises instead.
+
+**The host's own flows: what it sent is what it may be answered** (audit
+unit "the host's own flows", `docs/audit/next-subsystem-host-state.md`). The
+chain above shipped with default ACCEPT because it had no reply state, and
+three of the host's own facilities depended on that default: the **DNS
+proxy**, whose upstream socket is unconnected *by design* so it can
+authenticate the sender itself (so quiet delivery's connected-socket rule
+freed the upstream's answer and every guest lost DNS), the host's **own
+pings** (an echo reply matches no inbound-service rule), and its **TCP
+path-MTU discovery** (the Need-Fragmentation errors `icmp_needfrag` consumes
+were freed before `icmp_input` saw them, blackholing large segments). State
+fixes all three in the shape the stack already had — the FORWARD chain's
+flow table, one more initiator.
+
+**Recorded where the host's datagrams leave.** `fw_host_record` is called
+from **`ipv4_output`**, after the route and before `output_on`, when the
+egress is a real, non-guest link. That is the one door every host-originated
+datagram passes and no forwarded one does: `ipv4_forward` transmits through
+`output_on` directly, and `nat_in`'s deliveries of a masqueraded reply or a
+DNAT leave on a guest tap (excluded by the same flag test the chain uses).
+The transport header is at offset 0 there (the IP header is prepended
+afterwards) and a zero source is resolved exactly as `output_on` resolves it,
+so the tuple recorded is the one the wire will carry. **UDP** is recorded by
+its ports and an **ICMP echo request** by its identifier; a send on a live
+flow refreshes it. **TCP is deliberately not recorded** — its inbound
+segments are already admitted by the connection itself under quiet delivery,
+so recording every host segment would put `g_fw_lock` on the uplink's
+hottest send path for no reader. A send is never refused for the firewall's
+sake: no room in the host's share simply leaves the reply to the rules
+(`hin_flow_drop_full`). The host's flows share the one table under the
+initiator key `FW_HOST_GUEST_IP`, so `flow_find`, `fw_age` and `fw_flush`
+apply unchanged and `fw_guest_purge` cannot touch them; the table is split by
+share — `FW_FLOW_GUEST_POOL` 256 (the guests' 8 × 32, unchanged) plus
+`FW_FLOW_QUOTA_HOST` 64, so a flood of host flows starves only the host, as
+a guest's starves only that guest. Because these paths are the uplink's, one pointer
+(`g_host_last`, always validated before use) keeps them cheap in two ways: it
+**refreshes the repeated tuple** on the send path — one socket to one peer,
+which is what the DNS proxy does — without walking the table, and while it is
+NULL, meaning no host flow has ever been recorded, the **receive** path does
+not scan at all. Both were added because a bounded per-packet scan that the
+throughput benchmark could not see was still visible as intermittent
+failures in tests that assert on in-flight traffic having drained
+(`testing.md`, `net-hoststate`).
+
+**Consulted before the rules.** `fw_host_verdict` now asks state first, as
+`fw_forward_verdict` does: a datagram that is the **reverse** of a flow the
+*host* opened is `FW_ACCEPT` (`hin_accept_established`), its flow refreshed,
+and no rule is read — a reply was never what a rule was written about. What
+is open is **exactly one tuple**: the peer address and port the host sent to,
+back to the port it sent from, for the life of the flow (30 s idle, refreshed
+by the host's sends). The firewall cannot know whether the peer *meant* it as
+a reply, so a second datagram on that tuple inside the window is admitted
+too, and the socket's own validation — the DNS id, the proxy's sender check —
+is the second line. A datagram from another port at that peer, from another
+peer, or to another local port matches no flow and takes the rules. A
+*forward* match on a real link could only be a datagram carrying one of our
+own addresses as its source, which `ipv4_input` drops as a martian before the
+chain; it is not admitted either. A guest's flow admits nothing here: this
+chain is the host's (`f->guest_ip == FW_HOST_GUEST_IP`).
+
+**ICMP: the consumer decides, not the firewall.** The firewall models no ICMP
+error and parses no quote. Under a DROP verdict **every** ICMP message is
+delivered `M_FW_QUIET` (`hin_quiet`) to `icmp_input`, the stack's single ICMP
+dispatch point, which under the flag runs **only** its Need-Fragmentation
+path — and that path already accepts nothing TCP does not confirm: the quoted
+segment must be one of ours *and* `tcp_pmtu_notify` must find a live
+connection with that sequence in flight (RFC 5927). Everything else under the
+flag is freed and counted `icmp_quiet_dropped`: no echo reply is built (so a
+refused probe cannot spend the host-wide echo-reply budget, the same
+"side effects are consumed at emission" rule the TCP gate follows), no reply
+hook fires. An echo *reply* that matches a flow the host opened never reaches
+that path — state admitted it before the rules. So `hin_filtered` now counts
+only a protocol the stack does not demux at all, and the ICMP type is read
+once, in the place that already reads it.
+
+Named and deferred: ICMP-error admission for a *UDP* flow (there is no
+consumer in the stack; when a UDP unreachable notifier exists it applies its
+own check under the flag, as TCP's does); a `vmctl` listing of live flows
+(observability, not policy); and, unchanged, the host chain's own list below.
 
 **ABI version 4.** `DIR_FROM_UPLINK` (4); `src_addr`/`src_prefix` in the
 filter command and rule records (`struct cosmo_netctl_filter` 20→28 bytes,
@@ -1011,8 +1088,8 @@ DST[/PREFIX]|any PORT VERDICT [INDEX]`, `policy host world accept|drop`;
 `list` prints the host record and its rules with their source, and refuses a
 snapshot of another version. No new opcode, no new syscall.
 
-Named and deferred: reply state for unconnected UDP and for ICMP;
-per-interface host chains (all real links share `FROM_UPLINK`); an OUTPUT
+Named and deferred: per-interface host chains (all real links share
+`FROM_UPLINK`); an OUTPUT
 chain for the host's own egress (and, with it, filtering the host's replies
 to guests); rate-limit and logging targets; IPv6 filtering; full TCP state
 tracking; DHCP-client protection, moot until the host has a DHCP client.

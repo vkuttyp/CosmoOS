@@ -1,8 +1,16 @@
 # NEXT SUBSYSTEM — the host's own flows: reply state for the host chain
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "The host's own flows: reply state for the host
+chain"), and the design below is as built — see
+`docs/kernel-services/network/design.md` ("The host's own flows") for the
+shipped description and `docs/kernel-services/network/testing.md`
+(`net-hoststate`) for its proofs. Three things came out differently and are
+marked where they arise: **every** ICMP message is delivered quiet rather
+than only the error types, a **one-entry cache** carries the send path
+instead of the hash index the Benchmarks section held in reserve, and the
+benchmark named there turned out not to touch the hook at all.
 
 **Subsystem: state for the host chain, so that `policy host world drop` is
 a configuration a host can run rather than one that cuts its own throat.
@@ -29,13 +37,13 @@ transport owns acceptability; the firewall adds only silence. No ABI
 change, no new syscall: state is not configured, it is earned by what the
 host sends.**
 
-## Problem
+## Problem (the state before this unit)
 
 The host chain's own Risks section put this first: *"A broad UDP/ICMP DROP
 breaks the host's own replies. No reply state in this unit."* Concretely,
-with `vmctl filter policy host world drop` — the configuration the unit's
-design calls "a hardened host" — or with `filter add host world udp any any
-any drop`:
+before this unit, with `vmctl filter policy host world drop` — the
+configuration that unit's design calls "a hardened host" — or with `filter
+add host world udp any any any drop`:
 
 - **Every guest loses DNS.** `tapsvc.c`'s proxy relays a guest's query
   upstream from `svc->usock` with `ksock_sendto` (`tapsvc.c:409`) and reads
@@ -76,7 +84,7 @@ before any rule (`:369-386`), ICMP echo by identifier (`flow_find`,
 filter). The host chain is the one chain whose *replies* arrive through
 it — and it is the one with no state.
 
-## Current implementation
+## Implementation before this unit
 
 - **Host egress has one door.** Every datagram the host originates —
   `udp_send` (`udp.c:156`), TCP's `batch_send`, `icmp_send_echo`
@@ -127,7 +135,7 @@ it — and it is the one with no state.
 - **It reuses what exists.** One flow table, one `flow_find`, one aging
   tick; the host is one more initiator with its own share.
 
-## Proposed design
+## Design (as built)
 
 ### 1. The host's flows are recorded where the host's datagrams leave
 
@@ -166,8 +174,12 @@ The host's flows live in the same table under the initiator key
 `FW_HOST_GUEST_IP` (0), so `flow_find`, `fw_age` and `fw_flush` apply
 unchanged; `fw_guest_purge` cannot touch them (it matches the departing
 guest's address on either side, and the host's addresses are never a
-guest's). **The table grows** to make room: `FW_FLOW_MAX` 256 → 320, the
-guests' shares unchanged (8 × 32) and the host's `FW_FLOW_QUOTA_HOST` 64
+guest's). As built, the slot search and the fill are factored into
+`flow_slot(initiator, quota, now)` and `flow_fill(...)`, which both chains
+share. **The table grows** to make room: `FW_FLOW_MAX` 256 → 320 — as built
+*derived*, `FW_FLOW_GUEST_POOL + FW_FLOW_QUOTA_HOST`, so the two pools
+cannot drift — the guests' shares unchanged (8 × 32) and the host's
+`FW_FLOW_QUOTA_HOST` 64
 — sized for the DNS proxy's pattern (one upstream socket, one upstream
 address: one flow, refreshed per query, however many guests query) with
 room for the host's other clients; a flood of distinct host UDP flows
@@ -180,7 +192,9 @@ The order becomes: **(a) state, (b) rules, (c) default.** A datagram that
 is the reverse of a recorded host flow — a UDP reply to a recorded (src,
 dst, sport, dport), an echo *reply* whose identifier matches a recorded
 echo request — is `FW_ACCEPT` outright (`hin_accept_established`), its
-flow refreshed; no rule is read. This is the FORWARD chain's rule
+flow refreshed; no rule is read. As built the state step also requires
+`f->guest_ip == FW_HOST_GUEST_IP`: a *guest's* flow admits nothing on this
+chain, which is the host's. This is the FORWARD chain's rule
 (`fw.c:369-386`: "is this half of a flow already accepted?") applied to
 the host, and the ordering is the same for the same reason: a reply is
 not a new request and no rule was written about it.
@@ -204,7 +218,7 @@ address, and `ipv4_input`'s martian check drops it before any chain
 (`ipv4.c:573-579`); the state step therefore admits on `reverse` alone,
 and a forward match, should the check ever be reached, takes the rules.
 
-### 3. ICMP errors are delivered quiet, and the transport decides
+### 3. ICMP is delivered quiet, and the consumer decides
 
 Under a DROP verdict, the IP layer today frees every ICMP. The design
 splits ICMP by what the host does with it:
@@ -217,11 +231,29 @@ splits ICMP by what the host does with it:
   delivered, like TCP/UDP (`hin_quiet`); `icmp_input` under the flag runs
   only its Need-Fragmentation path, and `icmp_needfrag` accepts only what
   TCP confirms (`tcp_pmtu_notify`: a live connection, the quoted sequence
-  in flight — RFC 5927, already there, `:334`). A quiet error that is not
-  Need-Fragmentation, or one TCP does not confirm, is freed
-  (`icmp quiet_dropped`) — which is what happens to it today without the
-  flag, since the host consumes no other ICMP error (`:377`). Nothing is
-  answered in either case (ICMP errors never are).
+  in flight — RFC 5927, already there, `:334`).
+
+  **As built, that is not a decision `ipv4_input` makes: *every* ICMP
+  message is delivered quiet, and `icmp_input` refuses all but that one
+  path.** Classifying the type at the IP layer would have meant reading the
+  ICMP type a second time there (`fw_host_verdict`'s `l4_read` already has
+  it but does not return it), in order to hand the same question to the one
+  function that parses ICMP for a living. So the gate sits in `icmp_input`,
+  immediately after the Need-Fragmentation branch and *before* the echo
+  branch and the reply hook: a quiet message that is not a TCP-confirmed
+  Need-Fragmentation is freed and counted `ip_stats.icmp_quiet_dropped`.
+  Placing it before the echo branch is the same rule the TCP gate follows —
+  a refused probe must not spend a shared budget, here the host-wide
+  echo-reply rate limit (`icmp_ratelimit_allow`). Two consequences: an echo
+  request under a DROP behaves exactly as the design said (no reply,
+  nothing answered) but is counted `icmp_quiet_dropped` rather than
+  `hin_filtered`, so `net-hostinput`'s ICMP case moved to that counter and
+  `hin_filtered` now counts only a protocol the stack does not demux at
+  all; and a Need-Fragmentation that TCP *refuses* is **not** counted
+  `icmp_quiet_dropped` — the needfrag branch runs before the gate and frees
+  it there, counting `icmp_needfrag_rcvd`. The test asserts that counter
+  instead, which is the better observable anyway: it proves the firewall
+  handed the message to the layer that could tell.
 
 So the firewall keeps **no TCP state and no ICMP-error model**: it does not
 parse the quote, match it against a table, or decide relatedness. It asks
@@ -258,30 +290,36 @@ wanted. The seeded defaults are untouched.
 
 ## Affected files
 
-- `kernel/include/kernel/net/fw.h` — `FW_FLOW_MAX` 320,
-  `FW_FLOW_QUOTA_HOST` 64 (the guests' `FW_FLOW_QUOTA_PER_GUEST` stays
-  `256 / FW_MAX_GUESTS`, computed from a new `FW_FLOW_GUEST_POOL` 256 rather
-  than from `FW_FLOW_MAX`); `void fw_host_record(struct netif *out, struct
-  mbuf *m, uint32_t src, uint32_t dst, uint8_t proto);` `fw_stats` gains
-  `hin_accept_established`, `hin_flow_new`, `hin_flow_drop_full`.
+- `kernel/include/kernel/net/fw.h` — `FW_FLOW_GUEST_POOL` 256,
+  `FW_FLOW_QUOTA_HOST` 64, `FW_FLOW_MAX` their sum (the guests'
+  `FW_FLOW_QUOTA_PER_GUEST` is `FW_FLOW_GUEST_POOL / FW_MAX_GUESTS`, so the
+  host's share cannot shrink theirs); `void fw_host_record(struct netif
+  *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto);`
+  `fw_stats` gained `hin_accept_established`, `hin_flow_new`,
+  `hin_flow_drop_full`.
 - `kernel-services/network/fw.c` — `fw_host_record` (UDP and echo-request
   only; the host's share counted under initiator `FW_HOST_GUEST_IP`; a
-  send on a live flow refreshes it); `fw_host_verdict` gains the state
-  step before the rule walk (reverse match only); the quota logic factored
-  so both chains share one "find a slot within this initiator's share"
-  helper.
+  send on a live flow refreshes it, through a one-entry cache
+  `g_host_last` validated in full before use — see Benchmarks);
+  `fw_host_verdict` gained the state step before the rule walk (reverse
+  match, host-initiated flows only); the quota logic factored into
+  `flow_slot`/`flow_fill`, shared by both chains.
 - `kernel-services/network/ipv4.c` — `ipv4_output` calls
   `fw_host_record` for a real-link egress (after `ipv4_route`, before
   `output_on`, with `src` resolved as `output_on` would); the host-chain
-  DROP branch marks ICMP errors (types 3, 11, 12) `M_FW_QUIET` and
-  delivers them, freeing the rest as today; `icmp_input` honours
-  `M_FW_QUIET` (Need-Fragmentation to `icmp_needfrag` only; everything else
-  freed, counted). `ip_stats` gains `icmp_quiet_dropped`.
+  DROP branch marks **every** TCP, UDP and ICMP datagram `M_FW_QUIET` and
+  delivers it, freeing only a protocol the stack does not demux;
+  `icmp_input` honours `M_FW_QUIET` (Need-Fragmentation to `icmp_needfrag`
+  only; everything else freed and counted, before the echo branch and the
+  hook). `ip_stats` gained `icmp_quiet_dropped`.
 - `kernel/include/kernel/mbuf.h` — the `M_FW_QUIET` comment names ICMP
-  errors among what the flag covers.
+  among what the flag covers, and the echo reply among what it silences.
 - `kernel-services/network/nettest.c`, `kernel/core/selftest.c`,
-  `kernel/include/kernel/selftest.h` — `net-hoststate`; `net-firewall`'s
-  quota arithmetic if it names `FW_FLOW_MAX`.
+  `kernel/include/kernel/selftest.h` — `net-hoststate`; `net-hostinput`'s
+  ICMP counter (above); and a fix to the shared helper `hin_parse`, which
+  refused any frame longer than its copy window and so could not see a
+  full-sized segment at all (it now takes the length from the header
+  fields, and captures a UDP payload too).
 - `docs/kernel-services/network/design.md` (the host chain section gains
   its state), `testing.md`, `README.md` Status; this report as built.
 
@@ -292,36 +330,48 @@ wanted. The seeded defaults are untouched.
   firewall-side TCP query, no ICMP-error model.
 - UAPI: **none**. `COSMO_NETCTL_VERSION` stays 4.
 
-## Migration plan
+## Migration (done, in the planned order)
 
 1. `fw.c`: the host share and `fw_host_record`; `ipv4.c`: the call in
    `ipv4_output`; `fw_host_verdict`'s state step. Both arches boot; every
    existing test green (under the default ACCEPT nothing observable
    changes; `net-hostinput`'s connected/unconnected UDP cases still hold —
    neither socket ever *sent*).
-2. ICMP errors quiet: the DROP branch in `ipv4_input`, `icmp_input` under
-   the flag.
+2. ICMP quiet: the DROP branch in `ipv4_input`, `icmp_input` under the flag
+   — one existing expectation moved with it (`net-hostinput`'s echo-request
+   counter).
 3. `net-hoststate`; docs; README; the report as built.
 
-The behaviour changes: none under the default ACCEPT. Under a DROP
+The behaviour that changed: none under the default ACCEPT. Under a DROP
 verdict, (a) replies to the host's own UDP sends and echo requests are
 admitted, (b) Need-Fragmentation for a live host TCP connection is
-consumed; nothing else.
+consumed, (c) ICMP reaches `icmp_input` (which answers nothing) instead of
+being freed at the IP layer, which moves one counter; nothing else.
 
 ## Tests
 
-`net-hoststate` (new): the uplink tap `u` as `net-hostinput` builds one,
-world addresses ARP-seeded; `policy host world drop` for the whole test
-except where noted; verdicts awaited on the worker.
+`net-hoststate`: the uplink tap `u` as `net-hostinput` builds one, world
+addresses ARP-seeded, plus a guest tap with its own `tapsvc` for the DNS leg
+and two guests through `/dev/net/tap` for the guests' pool; verdicts awaited
+on the worker. **As built the world is closed by a sourced DROP *rule*
+covering the test's subnet, not by `policy host world drop`**: a failing
+assertion returns immediately, and the machine-wide default would then stay
+hardened for every test that follows in the same boot — which is exactly
+what happened on the first run here, taking `net-harness` down with it. The
+hardened *default* is exercised in its own step at the end, where the
+verdicts are taken and the default restored **before** anything is
+asserted, so no failure can leave it set. Admitting by rule rather than by
+default also makes the claim stronger: state is consulted before an explicit
+DROP rule, not merely before a default.
 
 - **An unconnected UDP client's reply survives DROP**: the host `sendto`s
-  from an unbound-then-autobound socket to `world:5300`; the datagram is
-  read back on the tap (the record is taken on the way out:
-  `hin_flow_new` rises); the world's reply from `5300` to the host's port
-  is delivered (`hin_accept_established` rises, no rule installed); a
-  datagram from the *same peer, another port* to that socket is freed
-  (`quiet_dropped`, no state); one from *another host* likewise; one to
-  *another local port* likewise.
+  from a bound-but-never-connected socket to `world:5300`; the datagram is
+  read back on the tap with the source and port the record captured
+  (`hin_flow_new` rises by exactly one); the world's reply from `5300` to
+  the host's port is delivered (`hin_accept_established`); a datagram from
+  the *same peer, another port* is freed (`udp quiet_dropped`, no socket
+  sees it); one from *another host* likewise; one to *another local port*
+  likewise.
 - **The DNS proxy end to end under DROP**: guest A queries its gateway; the
   proxy relays upstream (`tapsvc_test_set_upstream` pointed at a world
   address on the tap — a new use of the hook, off loopback); the test
@@ -329,19 +379,24 @@ except where noted; verdicts awaited on the worker.
   through a host default of DROP, with the proxy's unconnected socket
   unchanged.
 - **The host can ping under DROP**: `icmp_send_echo` to a world address; the
-  request is read back; a reply with the same id fires the reply hook
-  (`hin_accept_established`); a reply with another id is freed
-  (`hin_drop_default`); an echo *request* from the world is still dropped
-  (a request is not a reply).
+  request is read back and recorded; a reply with the same identifier fires
+  the reply hook with that identifier and source
+  (`hin_accept_established`); a reply with another identifier is freed
+  (`icmp_quiet_dropped`, no hook); an echo *request* from the world draws
+  nothing, is counted `icmp_quiet_dropped`, and leaves `icmp_echo_rcvd` and
+  `icmp_echo_replied` untouched — the shared echo-reply budget is not spent
+  on a refused probe.
 - **Path-MTU discovery under DROP**: a host TCP connection to a world peer
-  (the `net-hostinput` outbound pattern); the host sends a segment; a
-  Need-Fragmentation quoting that segment (MTU 576) is delivered quiet and
-  consumed: `pmtu_updates` rises and the retransmission is read back
-  smaller. A Need-Fragmentation quoting a tuple with no connection is
-  freed (`icmp_quiet_dropped`); one quoting the live tuple with a sequence
-  not in flight is freed by TCP's own check (`pmtu_updates` unchanged) —
-  the firewall admitted it to the layer that could tell; a Destination
-  Unreachable (port) quoting the connection is freed (no consumer).
+  (the `net-hostinput` outbound pattern) — and opening it moves no
+  `hin_flow_new`, which pins that TCP is not recorded; the host sends 1200
+  bytes; a Need-Fragmentation quoting that segment (MTU 576) is delivered
+  quiet and consumed (`tcp` and `ip pmtu_updates` rise) and the segment is
+  retransmitted at the same sequence inside the new MTU (≤ 536 bytes). A
+  Need-Fragmentation quoting a tuple with no connection still *reaches* the
+  consumer (`icmp_needfrag_rcvd` rises) and is refused there
+  (`pmtu_updates` unmoved) — the firewall admitted it to the layer that
+  could tell. A Destination Unreachable (port) quoting the connection is
+  freed with no consumer (`icmp_quiet_dropped`).
 - **One tuple, and no notion of intent**: after the host's `sendto` to
   `world:5300`, a *second* unsolicited datagram from `world:5300` to the
   host's port inside the window is admitted too (the tuple is open, and
@@ -355,52 +410,113 @@ except where noted; verdicts awaited on the worker.
   reply is admitted again; a send every few seconds keeps it alive across
   a 31 s window (refresh, not re-creation: `hin_flow_new` does not rise
   again).
-- **The host's share**: 64 distinct UDP flows record; the 65th does not
-  (`hin_flow_drop_full`), its send still leaves (read back), and only its
-  reply drops; the guests' shares are untouched (a guest-to-guest flow
-  still records with the host's share full).
+- **The host's share**: `FW_FLOW_QUOTA_HOST` distinct UDP flows record and
+  the live count equals the share; the next does not
+  (`hin_flow_drop_full`), its datagram still leaves (read back), and only
+  its reply would then take the rules; the guests' pool is untouched (a
+  guest-to-guest flow still records, `flow_new`, with the host's share
+  full).
 - **Only host-originated, real-link egress records**: a masqueraded
-  guest→world UDP flow (through `ipv4_forward` → `output_on`) records
-  nothing in the host's share (`hin_flow_new` unchanged) and its reply is
-  claimed by `nat_in` as before; a loopback send records nothing; a DNAT'd
-  inbound delivered to a guest records nothing.
-- **Quiet delivery unchanged**: `net-hostinput`'s cases run green: the
-  connected socket still admits by socket, the listener that never sent is
-  still closed, TCP data is still admitted by the connection.
+  guest→world UDP flow (through `ipv4_forward` → `output_on`, read back
+  masqueraded on the uplink) records nothing in the host's share
+  (`hin_flow_new` unchanged), and neither does a loopback send.
+- **Quiet delivery unchanged**: `net-hostinput` runs green (its one moved
+  counter aside): the connected socket still admits by socket, the listener
+  that never sent is still closed, TCP data is still admitted by the
+  connection.
 - **Regression**: `net-firewall` (guest flow state and quota unchanged),
   `net-dns`, `net-nat`, `net-dnat`, the harness's echo round trip.
 
-Bug-proofs: the state step removed from `fw_host_verdict` (the reply to the
-unconnected socket then drops and the proxy's answer never reaches A); the
-port match loosened to the peer address alone (the same-peer-other-port
-datagram is then admitted); the local-port match dropped (the datagram to
-another local port is then admitted); the record hook placed in `output_on` instead of
-`ipv4_output` (the masqueraded guest flow then occupies the host's share:
-`hin_flow_new` rises for it); the egress test dropped (a loopback send
-then records); the host's share unbounded (the 65th flow records and the
-guests' table space shrinks — a guest flow then fails `flow_drop_full`);
-refresh treated as creation (`hin_flow_new` rises on every send and the
-share fills from one client); TCP recorded after all (the uplink send path
-then holds `g_fw_lock` per segment — observed as `hin_flow_new` rising for
-a TCP send); ICMP errors freed instead of quiet-delivered (the
-Need-Fragmentation then never reaches TCP and `pmtu_updates` stays flat);
-`icmp_input` ignoring the flag (a quiet echo *request* is then answered
-under DROP); echo replies admitted by type rather than by identifier (the
-wrong-id reply then fires the hook).
+Bug-proofs — **twelve, each run**: the bug reintroduced, the test observed
+failing for the stated reason, the source restored byte-identical. Three
+were added during the build (the local-port half of the match, the
+one-entry cache's validation, and the echo identifier), and the design's
+"reverse check admitting the forward direction too" is not among them: it
+is not runnable, for the reason the design itself gives — a forward match on
+a real link can only be a datagram carrying one of our own addresses, which
+the martian check drops before any chain. The test pins that instead (no
+`hin_*` counter moves; `rx_bad_header` rises).
 
-## Benchmarks
+The state step removed from `fw_host_verdict` (the reply to the unconnected
+socket then drops, and with it the proxy's answer); the reverse match
+loosened to the peer address alone (the same-peer-other-port datagram is
+then admitted — and, since `flow_find` is shared, `net-firewall`,
+`net-input` and `net-hostinput` fail with it); the local-port half of the
+match dropped (the datagram to another local port is then admitted); the
+echo identifier ignored (the wrong-identifier reply is admitted by state,
+so it is never counted quiet, and the hook fires); the record hook placed
+in `output_on` instead of `ipv4_output` (the masqueraded guest flow then
+occupies the host's share: `hin_flow_new` rises for it); the real-link
+egress test dropped (a loopback send then records); TCP recorded after all
+(`hin_flow_new` rises for the outbound connection — the lock landing on the
+uplink's hottest send path); refresh treated as creation (`hin_flow_new`
+and the live count rise on a send that should only refresh); the one-entry
+cache used without validating the tuple (the share's 64 distinct flows
+collapse into one refreshed entry); the host's share unbounded (the flow
+past the share records instead of counting `hin_flow_drop_full`); ICMP
+freed at the IP layer instead of delivered quiet (`icmp_quiet_dropped`
+never rises, and the Need-Fragmentation never reaches TCP so the path MTU
+never moves); `icmp_input` ignoring the flag (nothing is counted quiet and
+the refused echo request is answered).
 
-The record hook is on the uplink's UDP send path, the one `net-nicbench`
-measures directly (UDP sends/s per NIC; PR #107's tree: ~17.4k/s aarch64
-under TCG): a `g_fw_lock` hold and a scan of the flow table per send. The
-benchmark before and after, on both arches, is the unit's number; the
-expected cost is one lock and a 320-entry compare loop hitting the same
-refreshed entry (the benchmark sends from one socket to one destination),
-well under the ~57 µs a send costs today. If the scan shows, the host's
-flows get a small hash index before the unit ships; it is not designed in
-up front. The TCP send path is untouched by construction (TCP is not
-recorded) and the receive path gains one `flow_find` under a DROP verdict
-only.
+Three of the twelve — the echo identifier, ICMP freed at the IP layer, and
+the flag ignored — first show at the *same* assertion (the
+`icmp_quiet_dropped` rise on the wrong-identifier reply), for three
+different reasons: admitted by state, freed before delivery, delivered but
+neither counted nor freed. They are distinct bugs with one shared first
+observable, not three independent observations.
+
+One proof, the unbounded share, failed on its first run at an earlier
+assertion (a masqueraded guest datagram not arriving) together with
+`net-dnat` and `net-tapctl`; re-run, it failed exactly at
+`hin_flow_drop_full` with nothing else. The first run was the timing flake
+described under Benchmarks, not the bug's effect — recorded because only
+re-running told them apart.
+
+## Benchmarks (as measured, and what actually measured it)
+
+**The benchmark named here was the wrong instrument, and the test suite was
+the right one.** `net-nicbench`'s UDP loop sends to *loopback*
+(`INADDR_LOOPBACK_N`), so it never crosses a real link and the record hook
+returns on its first flag test: the figure it reports cannot see this unit
+at all. Measured anyway, from a worktree of `main` and this tree in the same
+session, it confirms only that nothing gross happened, and that its
+run-to-run spread under TCG dwarfs anything the hook could cost:
+
+| UDP sends/s, `net-nicbench` eth0 | `main` (161559f) | this unit |
+| --- | --- | --- |
+| aarch64 | 22906 | 19783 |
+| x86_64 | 17302 | 18970 |
+
+The two arches disagree in sign, and the same code path has been observed
+between 17.3k and 22.9k across runs, against a per-send cost of one flag
+test, one uncontended lock and a validated one-entry compare — order 10⁻⁴ of
+the ~50 µs a send takes here. So the honest statement is that this
+instrument cannot resolve the hook.
+
+What *could* resolve it was the suite's own timing-sensitive tests.
+`net-dnat` (`entries == 0` after an aging jump) and `net-tapctl` (`no frame
+on the guest tap`) both assert on in-flight traffic having drained, and both
+began failing intermittently — one run in three or four, in a cluster with
+`net-hostinput` and `net-hoststate` — while `main` passed every run.
+Two additions removed them, and both are in the code for that reason:
+
+- a **one-entry cache** (`g_host_last`, validated in full before use) so
+  that the *send* path's ordinary case — the same tuple again — refreshes
+  without walking the table. This is where the report's reserved "small hash
+  index" went: one entry was enough, because the pattern that matters (one
+  socket, one peer) has exactly one live tuple;
+- the same pointer as a **receive-path gate**: while no host flow has ever
+  been recorded (`g_host_last == NULL`) the state step does not scan at all,
+  which is every test in the suite but this unit's own, and a quiet host's
+  whole uptime.
+
+With both, eight consecutive boots of this tree are green, where the
+pre-cache version failed one in three. Recorded in full because the lesson
+is the measurement, not the number: a bounded per-packet scan that a
+throughput benchmark cannot see can still be visible as flakiness in tests
+that assert on traffic having drained — and flakiness introduced by a change
+is that change's to fix, not a pre-existing quirk to note in passing.
 
 ## Risks
 
@@ -421,8 +537,11 @@ only.
 - **The share and the DNS pattern.** If the proxy ever used a socket per
   query the share would be exhausted by eight busy guests; it does not,
   and the test pins the one-flow behaviour.
-- **Hot-path cost.** Measured, with a mitigation named (an index) if the
-  number demands it.
+- **Hot-path cost.** Realised, though not where it was expected and not as
+  a throughput loss: see Benchmarks. The mitigation shipped is one pointer
+  doing two jobs (a one-entry refresh cache on the send path, and a
+  "no host flow exists" gate on the receive path), not the hash index held
+  in reserve.
 - **A future ICMP-error consumer that forgets the flag** would act on a
   quiet error. The contract is in `mbuf.h` and `icmp_input` is the single
   dispatch point; the test that answers no echo request under quiet is
