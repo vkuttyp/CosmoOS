@@ -26,6 +26,8 @@
 #include <kernel/sched.h>
 #include <kernel/signal.h>
 #include <kernel/socket.h>
+#include <arch/user.h>
+#include <kernel/futex.h>
 #include <kernel/string.h>
 #include <kernel/syscall.h>
 #include <kernel/timer.h>
@@ -138,6 +140,86 @@ static int64_t sys_thread_self(struct syscall_args *a)
 {
     (void)a;
     return (int64_t)thread_current()->user_tid;
+}
+
+/* Wait while the word still holds `val`, and wake waiters on it. The futex
+ * itself requires 4-byte alignment (-EINVAL) and does the compare and the
+ * enqueue under one lock, so a wake between them cannot be lost; these add
+ * only the range check. */
+static int64_t sys_futex_wait(struct syscall_args *a)
+{
+    if (!user_range_ok(a->a[0], 4))
+        return -EFAULT;
+    return futex_wait(process_current()->space, a->a[0], (uint32_t)a->a[1], a->a[2]);
+}
+
+static int64_t sys_futex_wake(struct syscall_args *a)
+{
+    if (!user_range_ok(a->a[0], 4))
+        return -EFAULT;
+    return futex_wake(process_current()->space, a->a[0], (unsigned)a->a[1]);
+}
+
+/* This thread ends; the process ends with the last of them, carrying that
+ * thread's status. SYS_exit remains the process. */
+static int64_t sys_thread_exit(struct syscall_args *a)
+{
+    process_thread_exit((int)a->a[0]);
+}
+
+/*
+ * A thread of the calling process, at `entry` on a stack the caller owns.
+ * The order here is the order the failure modes want: everything before
+ * process_add_thread fails with nothing created, and everything after it
+ * fails with process_thread_abandon.
+ */
+static int64_t sys_thread_create(struct syscall_args *a)
+{
+    struct cosmo_thread req;
+    if (copy_from_user(&req, a->a[0], sizeof(req)))
+        return -EFAULT;
+    if (req.flags != 0 || req.reserved != 0 || req.entry == 0 || req.stack_top == 0)
+        return -EINVAL;
+    if (req.stack_top % 16u || req.stack_top <= ARCH_THREAD_RET_BYTES)
+        return -EINVAL;
+    if (req.clear_tid % 4u)
+        return -EINVAL;
+    if (req.clear_tid && !user_range_ok(req.clear_tid, 4))
+        return -EFAULT;
+
+#if ARCH_THREAD_RET_BYTES
+    /* The return slot the entry contract counts on. Written before
+     * anything is linked, because an aligned stack_top can still be
+     * unmapped or read-only and a failure here must leave nothing
+     * behind. */
+    {
+        uint64_t ret = 0;
+        uint64_t at = req.stack_top - ARCH_THREAD_RET_BYTES;
+        if (!user_range_ok(at, ARCH_THREAD_RET_BYTES) || copy_to_user(at, &ret, ARCH_THREAD_RET_BYTES))
+            return -EFAULT;
+    }
+#endif
+
+    struct arch_user_regs regs;
+    arch_user_regs_init_thread(&regs, (uintptr_t)req.entry, (uintptr_t)req.arg, (uintptr_t)req.stack_top);
+
+    struct thread *t;
+    int rc = process_add_thread(process_current(), &regs, (uintptr_t)req.tls, &t);
+    if (rc)
+        return rc;
+    uint32_t tid = t->user_tid;
+    if (req.clear_tid) {
+        t->clear_child_tid = req.clear_tid;
+        /* Before the start, so the word's only two states are this id and
+         * the zero the exit writes: a caller that wrote it afterwards could
+         * lose the race to a child that had already finished. */
+        if (copy_to_user(req.clear_tid, &tid, sizeof(tid))) {
+            process_thread_abandon(t);
+            return -EFAULT;
+        }
+    }
+    process_thread_start(t);
+    return (int64_t)tid;
 }
 
 static int64_t sys_yield(struct syscall_args *a)
@@ -1525,6 +1607,10 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_sync] = sys_sync,
     [SYS_fsync] = sys_fsync,
     [SYS_thread_self] = sys_thread_self,
+    [SYS_futex_wait] = sys_futex_wait,
+    [SYS_futex_wake] = sys_futex_wake,
+    [SYS_thread_create] = sys_thread_create,
+    [SYS_thread_exit] = sys_thread_exit,
     [SYS_mount] = sys_mount,
     [SYS_umount] = sys_umount,
     [SYS_socket] = sys_socket,
@@ -1592,7 +1678,10 @@ static const syscall_fn native_table[SYS_COUNT] = {
  * shutdown into a signal death. */
 /* sigreturn joins it: a filter that denied the return from a handler
  * would turn every caught signal into a kill. */
-static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn };
+static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_thread_exit };
+/* SYS_thread_exit is always allowed for the reason SYS_exit is: a thread
+ * that cannot exit cannot be stopped, and a filter that traps one in the
+ * kernel is a denial of service the filter unit did not intend. */
 
 const struct personality personality_native = {
     .name = "native",

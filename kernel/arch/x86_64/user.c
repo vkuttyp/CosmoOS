@@ -3,6 +3,7 @@
  * first entry into ring 3, SMAP access windows.
  */
 
+#include <kernel/string.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/syscall.h>
@@ -185,6 +186,15 @@ void arch_user_regs_restart_syscall(struct arch_user_regs *r, uint64_t nr, uint6
     r->rax = nr;
     r->rdi = arg0;
     r->rip -= 2;   /* the two-byte SYSCALL instruction */
+}
+
+void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintptr_t arg, uintptr_t sp)
+{
+    memset(r, 0, sizeof(*r));
+    r->rip = entry;
+    r->rdi = arg;               /* SysV: the first integer argument */
+    r->rsp = sp - 8;            /* the zeroed return slot: entry sees rsp % 16 == 8 */
+    arch_user_regs_sanitize(r);
 }
 
 void arch_user_regs_sanitize(struct arch_user_regs *r)
