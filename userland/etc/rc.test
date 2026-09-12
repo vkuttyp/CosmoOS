@@ -94,6 +94,10 @@ ls /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vm
 # of them (tests/boot/run_boot_test.py, HVTEST_MARKERS), since this shell
 # has no grep to check them with here.
 ls /boot/tests/hv/guest_dtb.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 2 /boot/tests/hv/guest_dtb.bin
+# A second CPU that never yields: the machine must still stop. vmctl holds a
+# SYSTEM_OFF for a sibling owed a turn, bounded in turns, so this run ends by
+# that bound rather than hanging (virtualization/design.md).
+ls /boot/tests/hv/guest_offspin.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 2 /boot/tests/hv/guest_offspin.bin && echo "HVTEST: offspin ok"
 # A stock Linux kernel, when a developer has provided one at
 # tests/hv/aarch64/Image (docs/kernel-services/virtualization/testing.md):
 # vmctl builds the device tree, loads the Image by its header, answers PSCI,

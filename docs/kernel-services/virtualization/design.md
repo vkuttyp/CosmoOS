@@ -641,7 +641,12 @@ then honoured as soon as no fresh sibling remains, when the grace runs out,
 or when the last vCPU powers itself off -- and prints `guest powered off`
 either way, because the guest did ask for the machine to stop. The bound is
 what keeps a hostile guest from holding the machine open: a secondary that
-spins forever costs the power-off 64 turns and no more.
+spins forever costs the power-off 64 turns and no more -- which is why, while
+a power-off is held, even the last runnable vCPU is run with
+`COSMO_VCPU_RUN_ONE_TICK`. Running it untimed, as the loop otherwise does
+when nothing else needs the thread, would hand the thread to a guest that
+never yields and the bound would mean nothing: `guest_offspin` is that
+guest, and it hangs the owner without this.
 
 This is not PSCI semantics -- a real `SYSTEM_OFF` does not wait for anything
 -- it is the correction for serialising what the hardware would have run in

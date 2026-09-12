@@ -763,7 +763,12 @@ static int run_machine(int argc, char **argv)
             m.off_grace--;
         while (!m.running[cpu])
             cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
-        rc = cosmo_vcpu_run_flags(m.vcpu[cpu], &x, nr_running > 1 ? COSMO_VCPU_RUN_ONE_TICK : 0);
+        /* One vCPU left may run untimed -- nothing else needs the thread --
+         * *except* while a power-off is held: the hold is bounded in turns,
+         * so every turn must end. A fresh sibling that spins would otherwise
+         * never come back and the bound would mean nothing. */
+        rc = cosmo_vcpu_run_flags(m.vcpu[cpu], &x,
+                                  (nr_running > 1 || m.off_pending) ? COSMO_VCPU_RUN_ONE_TICK : 0);
         drain_console(m.vm);
         if (rc < 0) {
             fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
@@ -794,9 +799,16 @@ static int run_machine(int argc, char **argv)
                      * runs. The vCPU that asked stops here either way: its
                      * guest must not run past SYSTEM_OFF. */
                     m.running[cpu] = 0;
-                    if (!m.off_pending && machine_fresh_sibling(&m, cpu)) {
-                        m.off_pending = 1;
-                        m.off_grace = MACHINE_OFF_GRACE_TURNS;
+                    if (machine_fresh_sibling(&m, cpu)) {
+                        /* Every requester waits, not just the first: with
+                         * four vCPUs a second SYSTEM_OFF must not power the
+                         * machine off under a sibling that still has a turn
+                         * owed. The grace is set once, so repeated requests
+                         * cannot extend the bound. */
+                        if (!m.off_pending) {
+                            m.off_pending = 1;
+                            m.off_grace = MACHINE_OFF_GRACE_TURNS;
+                        }
                         next = 1;
                         break;
                     }

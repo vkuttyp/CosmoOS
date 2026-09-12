@@ -202,6 +202,9 @@ if ARCH == "aarch64":
         r"^cpu1: up ctx=1234cafe$",                           # CPU_ON ran the second vCPU with its context
         r"^cpu_on 1 -> 0$",
         r"^vmctl: guest powered off$",                        # SYSTEM_OFF ended the run
+        # A second CPU that never yields: the held power-off is bounded in
+        # turns, so the machine stops instead of hanging the owner.
+        r"^HVTEST: offspin ok$",
     ]
 
 HV_FORBIDDEN_MARKERS = [

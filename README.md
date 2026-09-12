@@ -1474,6 +1474,9 @@ See [docs/development.md](docs/development.md).
   boot. `SYSTEM_OFF` now waits, for a bounded number of turns, on any vCPU
   that has never had a turn end on its own terms
   (`docs/kernel-services/virtualization/design.md`, "A started vCPU gets its
-  turn"), proved by robbing that vCPU of its first turn and watching the
-  marker vanish without the rule and survive with it. Design documents first, one subsystem at a
+  turn"), proved two ways: robbing that vCPU of its first turn makes the
+  marker vanish without the rule and survive with it, and a new guest whose
+  second CPU never yields (`guest_offspin`) shows the hold staying bounded --
+  without the timed turns that bound needs, `vmctl` hangs and the boot test
+  dies on its deadline at 187 s. Design documents first, one subsystem at a
   time.
