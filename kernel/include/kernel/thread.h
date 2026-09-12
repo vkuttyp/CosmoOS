@@ -97,7 +97,11 @@ struct thread {
     struct sigaltstack_k altstack;
     uint64_t syscall_nr, syscall_arg0;  /* the call in progress, for SA_RESTART */
     uint64_t clear_child_tid;           /* Linux: zeroed and futex-woken at exit */
-    uint32_t lx_tid;                    /* the Linux view of the id */
+    uint32_t user_tid;                  /* the id userland sees, in either personality: the pid for a
+                                           process's first thread, 0x10000 + tid for the rest, so a
+                                           thread id and a pid can never collide. Distinct from `tid`
+                                           above, which is the scheduler's own and never leaves the
+                                           kernel. */
 };
 
 /* Create a kernel thread and make it runnable. NULL on allocation

@@ -1487,7 +1487,7 @@ static int64_t lx_clone(struct syscall_args *a)
     int rc = process_add_thread(p, &regs, tls_base, &t);
     if (rc)
         return rc;
-    uint32_t tid = t->lx_tid;
+    uint32_t tid = t->user_tid;
     if (flags & LX_CLONE_CHILD_CLEARTID)
         t->clear_child_tid = ctid;
     /* The tid words are written before the child can run: a joiner that

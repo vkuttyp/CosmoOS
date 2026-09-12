@@ -711,7 +711,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     process_get(p);
     t->user_entry = (uintptr_t)entry;   /* the interpreter's when there is one */
     t->user_sp = (uintptr_t)sp;
-    t->lx_tid = p->pid;   /* the main thread's Linux tid is the pid */
+    t->user_tid = p->pid;   /* a first thread's id is the pid, in either personality */
     s = spin_lock_irqsave(&p->lock);
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads = 1;
@@ -843,7 +843,7 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
     t->sig_blocked = cur->sig_blocked;   /* inherited, as on Linux */
     t->proc = p;
     process_get(p);
-    t->lx_tid = 0x10000u + t->tid;
+    t->user_tid = 0x10000u + t->tid;   /* past every pid, so the two spaces cannot collide */
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     if (p->state != PROCESS_RUNNING || p->nr_live >= PROCESS_MAX_THREADS) {
         spin_unlock_irqrestore(&p->lock, s);
@@ -882,12 +882,12 @@ void process_thread_abandon(struct thread *t)
     process_thread_start(t);
 }
 
-struct thread *process_find_thread(struct process *p, uint32_t lx_tid)
+struct thread *process_find_thread(struct process *p, uint32_t user_tid)
 {
     struct thread *t, *found = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     list_for_each_entry(t, &p->threads, proc_link) {
-        if (t->lx_tid == lx_tid && t->state != THREAD_EXITED) {
+        if (t->user_tid == user_tid && t->state != THREAD_EXITED) {
             found = t;
             break;
         }

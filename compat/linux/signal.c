@@ -533,14 +533,14 @@ int64_t lx_tkill(struct syscall_args *a)
 int64_t lx_gettid(struct syscall_args *a)
 {
     (void)a;
-    return thread_current()->lx_tid;
+    return thread_current()->user_tid;
 }
 
 int64_t lx_set_tid_address(struct syscall_args *a)
 {
     struct thread *t = thread_current();
     t->clear_child_tid = a->a[0];
-    return t->lx_tid;
+    return t->user_tid;
 }
 
 /* exit ends the calling thread; the process ends with the last one. */
