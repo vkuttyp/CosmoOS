@@ -323,27 +323,32 @@ step protects:
    `FROM_UPLINK`, proto, **source prefix**, destination prefix and selector
    (port, or ICMP type as before).
 
-On `FW_DROP`, a TCP or UDP datagram is marked `M_FW_QUIET` and continues to
-the demux (`ip_stats.hin_quiet`); anything else is freed
-(`ip_stats.hin_filtered`). **Superseded by the host-state unit**
-(`next-subsystem-host-state.md`): ICMP is delivered quiet too, and
-`hin_filtered` now counts only a protocol the stack does not demux.
+On `FW_DROP`, **as this unit shipped it**, a TCP or UDP datagram was marked
+`M_FW_QUIET` and continued to the demux (`ip_stats.hin_quiet`) while
+anything else was freed (`ip_stats.hin_filtered`). The host-state unit that
+followed (`next-subsystem-host-state.md`) widened the first half to **every**
+ICMP message, so today `hin_quiet` covers ICMP as well and `hin_filtered`
+counts only a protocol the stack does not demux at all.
 
-**What quiet delivery cannot recognise, and why that was acceptable here.** A
-reply to an *unconnected* UDP socket (a client that `sendto`s without
-connecting) and every ICMP message have no connection or connected peer to
-deliver to under `M_FW_QUIET`, so a DROP rule that matched them dropped
-them. With the default ACCEPT this cost nothing; an operator who wrote a
-broad UDP DROP (`udp any any`) would have dropped replies to the host's
-unconnected UDP sockets — documented, with the guidance that UDP rules name
-listener ports (or a source prefix), and with reply state for unconnected
-UDP and for ICMP named as a later unit. ICMP echo to the host is gated by
-type as before (type 8); the host's own ping replies (type 0) pass the
-default. **That later unit is done** — the host's own flows
-(`next-subsystem-host-state.md`): what the host sent is recorded at
-`ipv4_output`, so the reply to an unconnected socket and the reply to its
-own echo request are admitted by state before any rule, and ICMP reaches
-`icmp_input` under the flag instead of being freed.
+**What quiet delivery could not recognise on its own, and why that was
+acceptable here.** A reply to an *unconnected* UDP socket (a client that
+`sendto`s without connecting) and every ICMP message had no connection or
+connected peer to deliver to under `M_FW_QUIET`, so a DROP rule that matched
+them dropped them. With the default ACCEPT that cost nothing; an operator who
+wrote a broad UDP DROP (`udp any any`) would have dropped replies to the
+host's own unconnected UDP sockets — documented in this unit, with the
+guidance that UDP rules name listener ports (or a source prefix), and with
+reply state for unconnected UDP and for ICMP named as the next unit. ICMP
+echo to the host is gated by type (type 8); the host's own ping replies
+(type 0) pass the default.
+
+**That next unit was built, and this paragraph no longer describes the
+machine** (`next-subsystem-host-state.md`): the host's own sends are recorded
+at `ipv4_output`, so the reply to an unconnected socket and the reply to its
+own echo request are admitted by state *before* any rule is read, and ICMP
+is delivered quiet to `icmp_input` rather than freed. What remains true of
+this unit is the mechanism it built — the flag, the rules and the default —
+which that state sits in front of.
 
 ### 5. The default: ACCEPT, and why
 
