@@ -31,7 +31,9 @@ invisible to `connect`, to `send` and to `poll`: the socket waits out
 eight retransmissions with a doubling RTO (about three minutes) and is
 told `-ETIMEDOUT`, which names a network that did not answer rather than
 a machine that decided not to ask. This unit carries the verdict back into
-the connection. `batch_send` returns the first output error; the flush
+the connection. `batch_send` returns what the link refused (as built, the
+*last* such fact in a batch that holds more than one -- see the banner);
+the flush
 sites that own a connection apply it under a rule shaped like RFC 1122
 §4.2.3.9's treatment of a hard error — **an opening connection is aborted**
 (`connect` returns `-EPERM` at once), **a synchronized one records it** and

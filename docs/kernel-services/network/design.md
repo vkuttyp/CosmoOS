@@ -1212,8 +1212,9 @@ minutes) to be told `-ETIMEDOUT`: a network that did not answer, rather
 than a machine that decided not to ask.
 
 `batch_send` now returns what became of the batch -- the number of segments
-that reached the link, or, negative, the first error the link refused one
-with -- and `output_result` carries a refusal back into the connection
+that reached the link, or, negative, the error the link refused one with
+(which of them, when a batch holds both, is settled below) -- and
+`output_result` carries a refusal back into the connection
 after the flush, under the connection's own lock, with nothing else held.
 **Only `-EPERM`** is a connection's business, and only because it is the
 chain's verdict: a rule matches the whole tuple and every segment of one
