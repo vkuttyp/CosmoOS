@@ -1349,9 +1349,9 @@ See [docs/development.md](docs/development.md).
   chain whose refusal is *spoken*, because the refused party is a local
   socket that already reads errors, where the other three hide the host from
   strangers and silence is the point. `udp_sendto` and `icmp_send_echo`
-  propagate it; **TCP stalls instead**, since `batch_send` ignores output
-  errors, which is documented, asserted and left to its own unit rather than
-  half-built. One new direction, `FW_DIR_OUTPUT`, on the host object alone,
+  propagate it; **TCP stalled instead**, since `batch_send` ignored output
+  errors -- documented, asserted and left to its own unit rather than
+  half-built, and that unit is the next entry. One new direction, `FW_DIR_OUTPUT`, on the host object alone,
   plus an egress **scope** in the rule (`world` / `guest` / `any`): a
   destination prefix can name a guest's subnet, but the tap pool reassigns
   `10.0.(3+k).0/24` as guests come and go, so a prefix rule follows whoever
@@ -1376,9 +1376,62 @@ See [docs/development.md](docs/development.md).
   honest, a rule and a policy flip each having to invalidate it -- and one
   honest non-proof: the verdict's position relative to the flow read turns
   out not to be observable, because the flow record is already conditional on
-  the send succeeding. Per-interface chains, a verdict
-  TCP's callers can see, rate-limit/log targets, IPv6 filtering and full TCP
-  state tracking are later units.
+  the send succeeding. A verdict TCP's callers can see became the
+  next unit; per-interface chains, rate-limit/log targets, IPv6 filtering and
+  full TCP state tracking are later ones.
+- **A verdict TCP's callers can see (done):**
+  `docs/audit/next-subsystem-tcp-verdict.md`,
+  `docs/kernel-services/network/design.md` ("A refused segment is the
+  connection's business"). The OUTPUT chain's own incompleteness, closed:
+  that unit made a refusal *spoken* for `udp_sendto` and
+  `icmp_send_echo` and left TCP deaf, because `batch_send` -- the sole
+  emitter, and by design the only code that touches the link after the
+  per-connection lock is dropped -- discarded `ipv4_output`'s return. A
+  rule that refused a connection's segments was therefore invisible to
+  `connect`, `send` and `poll`, and the socket waited out eight
+  retransmissions with a doubling RTO, **about three minutes**, to be told
+  `-ETIMEDOUT`: a network that did not answer rather than a machine that
+  decided not to ask. `batch_send` now returns what became of the batch and
+  `output_result` carries a refusal back into the connection after the
+  flush, under the connection's own lock with nothing else held. **Only
+  `-EPERM`** counts, and only because it is the chain's verdict: a rule
+  matches the whole tuple and every segment of a connection carries the
+  same tuple, so a rule that refused one will refuse them all -- a decision,
+  not the loss the retransmit timer repairs -- which makes `-EPERM` part of
+  the interface between the IP layer and TCP and leaves every other output
+  error discarded as before. What follows depends on the state, in RFC 1122
+  §4.2.3.9's shape: an **opening** connection is aborted (the same three
+  lines a valid reset uses, which is also what wakes a blocking `connect`,
+  whose wait watches the state and not the error), a **synchronized** one
+  **records** the verdict and is left standing -- the peer's half still
+  arrives, and a rule the operator deletes a moment later should leave a
+  connection to resume, which it does because **a flush in which a segment
+  reaches the link clears a recorded verdict**. `tcp_connect` is the one
+  site that *returns* the refusal rather than only recording it, its caller
+  being right there, so a nonblocking connect fails outright instead of
+  reporting an open already abandoned. Seven flush sites own a connection;
+  five were syscall-context functions with no unwind pair and each keeps its
+  own return contract -- `tcp_send` keeps the count it accepted, because
+  those bytes are queued and will be retransmitted, so the verdict is read
+  by the next call. The unit's sharpest finding is that **a refused SYN-ACK
+  has nothing to tell**: a passive open's half-open lives in the listener's
+  SYN cache and the child pcb is only created when the ACK completes, so
+  `SYN_RCVD` comes only from a simultaneous open -- there is no connection
+  to abort and no caller who has heard of it, and what is left is hygiene,
+  dropping the entry instead of holding one of sixty-four slots for eight
+  seconds for a connection the machine has decided not to answer. Two
+  consequences are stated rather than hidden: a recorded verdict reaches
+  `recv` too, once the bytes already buffered are drained, because a pending
+  error belongs to the socket and not to a direction; and an application
+  cannot send its way out of one, so the clearing segment is always the
+  timer's or one the peer's own traffic asks for. Proven by `net-tcpverdict`
+  (nine steps, one uplink tap) with eight bug-proofs, and one
+  discrimination **argued and not proved** exactly as the report promised in
+  advance: no TCP segment can reach a non-verdict output error in this
+  stack, so keying the helper on any negative error changes no test's
+  outcome -- the experiment was run and changed none. Per-interface chains,
+  rate-limit and logging targets, IPv6 filtering and full TCP state
+  tracking in the filter remain later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1451,11 +1504,11 @@ See [docs/development.md](docs/development.md).
   a guest's tap from the world and an `-EPERM` the sender can read (built).
 
   The named next steps are the follow-ups these left. On the filter --
-  whose four chains now cover every path through the machine -- **a verdict
-  TCP's callers can see** (OUTPUT's refusal reaches `sendto` but not
-  `connect`), **per-interface host chains** (all real links share one chain
-  today), **rate-limit and logging targets**, **IPv6 filtering**, and full
-  TCP state tracking. On NAT and the bridge:
+  whose four chains now cover every path through the machine, and whose
+  refusals now reach TCP's callers as well as `sendto`'s --
+  **per-interface host chains** (all real links share one chain today),
+  **rate-limit and logging targets**, **IPv6 filtering**, and full TCP state
+  tracking. On NAT and the bridge:
   **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
   **tap's remaining settings** on `/dev/net/tapctl`. On the state: **ICMP
   errors for a UDP flow** (no consumer exists yet) and a **listing of live

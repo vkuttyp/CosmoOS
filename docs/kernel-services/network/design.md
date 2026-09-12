@@ -1101,19 +1101,13 @@ from strangers, where a silent drop is the security property, while here the
 refused party is a local socket that already distinguishes `-ENETUNREACH`
 from success. `udp_sendto` and `icmp_send_echo` return `ipv4_output`'s value,
 so a program learns immediately and an operator debugging a rule sees the
-reason. **TCP does not**: `batch_send` ignores output errors, as it ignores
-`-ENETUNREACH` today, so a segment a rule refuses is dropped and `connect`
-stalls rather than failing — the verdict is counted per attempt and no SYN
-reaches the link, but the socket reports a timeout. Teaching TCP to carry a
-per-segment verdict back into the PCB (and deciding what a rule added
-mid-connection should do to an established one) is a unit of its own; the
-behaviour is asserted as it stands so that unit has a test to change. That
-unit is now designed: `docs/audit/next-subsystem-tcp-verdict.md` (not yet
-implemented) has `batch_send` return the first output error and the flush
-sites that own a connection apply it -- an opening connection aborted so
-`connect` fails with `-EPERM`, a synchronized one recording the verdict
-without being torn down, and a refused SYN-ACK's SYN-cache entry dropped,
-since a passive open's half-open has no PCB to tell.
+reason. **TCP is told too**, since the verdict unit below: `batch_send`
+reports what the link refused and `tcp_connect` returns it, so a refused
+`connect` fails with `-EPERM` instead of waiting out the retransmit budget.
+Its own section, "A refused segment is the connection's business", has the
+rule; a rule added mid-connection records the verdict rather than tearing
+the connection down, and a refused SYN-ACK — which belongs to a half-open
+with no PCB — drops its SYN-cache entry instead.
 
 **One direction, and an egress scope.** `FW_DIR_OUTPUT` is the host object's
 fifth policy slot, valid on the host alone (a guest naming it is `-EINVAL`,
@@ -1184,9 +1178,9 @@ reads.
 
 Named and deferred: per-interface chains (a rule naming `eth1` rather than a
 scope); rate-limit and logging targets; IPv6 filtering; full TCP state
-tracking. A verdict TCP's callers can see has left this list for a report of
-its own, `docs/audit/next-subsystem-tcp-verdict.md`, and is awaiting the
-instruction to build.
+tracking. A verdict TCP's callers can see left this list for a unit of its
+own and is built: see "A refused segment is the connection's business"
+below.
 
 **ABI version 4.** `DIR_FROM_UPLINK` (4); `src_addr`/`src_prefix` in the
 filter command and rule records (`struct cosmo_netctl_filter` 20→28 bytes,
@@ -1205,6 +1199,117 @@ Named and deferred: per-interface host chains (all real links share
 state tracking; DHCP-client protection, moot until the host has a DHCP
 client. The host's own egress -- and with it the filtering of the host's
 replies to guests -- is the OUTPUT chain, built below.
+
+**A refused segment is the connection's business** (audit unit "a verdict
+TCP's callers can see", `docs/audit/next-subsystem-tcp-verdict.md`). The
+OUTPUT chain made a refusal spoken for `udp_sendto` and `icmp_send_echo`
+and left TCP deaf: `batch_send` -- the sole emitter, and by design the only
+code that touches the link after the per-connection lock is dropped --
+discarded `ipv4_output`'s return, so a rule that refused a connection's
+segments was invisible to `connect`, to `send` and to `poll`, and the
+socket waited out eight retransmissions with a doubling RTO (about three
+minutes) to be told `-ETIMEDOUT`: a network that did not answer, rather
+than a machine that decided not to ask.
+
+`batch_send` now returns what became of the batch -- the number of segments
+that reached the link, or, negative, the error the link refused one with
+(which of them, when a batch holds both, is settled below) -- and
+`output_result` carries a refusal back into the connection
+after the flush, under the connection's own lock, with nothing else held.
+**Only `-EPERM`** is a connection's business, and only because it is the
+chain's verdict: a rule matches the whole tuple and every segment of one
+connection carries the same tuple, so a rule that refused one will refuse
+them all. That is a decision, not the loss the retransmit timer repairs,
+which is why every other output error stays discarded exactly as it was.
+`-EPERM` is thereby part of the interface between the IP layer and TCP:
+`ipv4_output` produces it for the verdict and for nothing else, and
+anything that wants TCP to react must use that value and no other.
+
+**What happens depends on the state, in RFC 1122 §4.2.3.9's shape.** A
+connection that is still opening cannot proceed, so it is **aborted** --
+the same three lines a valid reset uses. That is not what tells the caller
+of a refused `connect`: `tcp_connect` returns the refusal itself (below),
+and the call is over before the abort matters. What the abort is for is the
+connect that is *already waiting* -- the first SYN left before the rule
+existed, so the application is blocked on the state, `ksock_connect`'s wait
+watching the state and not the error, and the refusal of the retransmission
+a second later is what ends it -- and for not spending eight more
+retransmissions on a SYN the chain has already refused. A
+**synchronized** connection **records** the verdict and is left standing:
+the peer's half of the conversation still arrives, RFC 1122 treats a hard
+error on a synchronized connection as advisory for that reason, and a rule
+the operator deletes a moment later should leave a connection to resume.
+It does, because **a flush in which a segment reaches the link clears a
+recorded verdict** -- the other half of the rule, without which
+`pcb->error` would be a life sentence, since nothing else clears it. An
+error already recorded is never overwritten: a reset outranks a rule.
+
+`tcp_connect` is the one site that **returns** the refusal rather than only
+recording it, because its caller is right there: `ksock_connect` hands a
+non-zero `tcp_connect` straight to the application, so a nonblocking
+connect fails outright with `-EPERM` instead of reporting an open it has
+already abandoned. Seven flush sites own a connection and apply the rule;
+five of them are syscall-context functions that gained a local
+`wake`/`killed` pair and each keep their own return contract -- `tcp_send`
+returns the byte count it accepted, because those bytes are in the send
+buffer and will be retransmitted, so the verdict is read by the *next*
+call; `tcp_shutdown_write` still succeeds, the state having moved under the
+lock; `tcp_pmtu_notify` still reports the MSS it lowered.
+
+**A refused SYN-ACK has nothing to tell.** A passive open's half-open lives
+in the listener's SYN cache, not in a pcb -- the child is created
+ESTABLISHED when the completing ACK arrives, so `SYN_RCVD` is reached only
+by a simultaneous open -- so there is no connection to abort and no caller
+to report to, the listener's application never having heard of it. What is
+left is hygiene: the cache entry is **dropped** rather than held for its
+full `TCP_SYNCACHE_TTL_NS`, because it cannot be completed while the rule
+stands. What that buys, and what the test asserts, is that the slot is
+reusable: `listen_input` answers a repeat SYN from a live entry by reusing
+its `iss`, so only a dropped entry makes the next SYN from the same tuple
+cache anew. Sixty-four slots, eight seconds each, refillable by exactly the
+guest whose connections the rule exists to refuse, is the surface that
+closes. The LISTEN path holds the listener's reference across the flush to
+make the entry findable; the reference moves rather than being duplicated.
+
+**Two consequences worth stating.** A recorded verdict reaches `recv` as
+well as `send`, once the bytes already in the receive buffer are drained --
+`tcp_recv` delivers what it holds first and only then the error -- because
+a pending error belongs to the socket and not to one direction, which is
+what POSIX says of one. And an application cannot send its way out of a
+recorded verdict: `tcp_send` reports the error before it would build
+anything, so the segment that clears the record is always the retransmit
+timer's or an acknowledgment the peer's own traffic asks for.
+
+**A batch summarises the last thing the link said.** Every segment of one
+batch belongs to one connection and carries one tuple, so they share a
+verdict -- unless a rule is added or deleted while the loop runs, the only
+way a batch can hold both a refusal and a segment that left. The summary is
+then the *newer* fact: a segment that left supersedes an earlier refusal
+(the rule was deleted, and a connection that has just transmitted must not
+carry a record), and a refusal supersedes an earlier success (the rule was
+added, and it must). Reporting the first error instead would record a
+refusal against a connection that was sending again -- a spurious error the
+next flush would clear, but an application could see. The window is between
+two `ipv4_output` calls inside one flush and needs a concurrent rule change,
+so it is argued from the code rather than tested; `testing.md` records that.
+
+**Three kinds of flush, three answers.** Seven sites own a connection and
+get the rule above. Two own none -- the stray-segment RST and the SYN
+cache's SYN-ACK -- and are counted only, the second after dropping its
+entry. `tcp_close`'s flush is given no owner at all: its caller is gone and
+its batch can carry a parent's and its queued children's segments at once.
+The accepted path pays one signed compare and, for a connection carrying a
+record, one relaxed read of a field the flush has already touched; the lock
+is taken only when there is something to do. A quiet batch (the host
+chain's silent drop) reaches no link and reports nothing.
+
+`tcp_stats` gains `out_refused` (segments the chain refused, counted where
+they are refused, so a retransmission counts again), `out_aborted`,
+`out_recorded`, `out_cleared` and `syn_refused`.
+
+Named and deferred: a verdict for the *listener* of a refused SYN-ACK, if
+a use for it appears; per-interface chains; rate-limit and logging targets;
+IPv6 filtering; full TCP state tracking in the filter.
 
 ## Autoconfiguring the guest: DHCP and a DNS proxy (`tapsvc.c`; audit unit "autoconfiguring the guest")
 

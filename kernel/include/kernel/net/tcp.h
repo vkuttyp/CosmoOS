@@ -141,7 +141,10 @@ struct tcp_pcb {
     /* bookkeeping */
     struct socket *sock;
     struct list_node hash_link;    /* the table bucket for local.port; empty when not in the table */
-    int error;
+    int error;                     /* reported by send/recv/poll. Every state-machine error ends the
+                                      pcb; the firewall's OUTPUT verdict is the one a *live*
+                                      synchronized connection can carry, and the only one that is
+                                      cleared again (tcp.c, output_result) */
     uint64_t retransmits, segs_in, segs_out;
     struct net_work work;
     unsigned work_flags;
@@ -196,6 +199,13 @@ struct tcp_stats {
     uint64_t syn_cached, syn_cookies_sent, syn_cookies_ok, syn_bad_ack, challenge_acks, ooo_queued, ooo_dropped,
         keepalive_probes, fin_wait2_timeouts, pmtu_updates;
     uint64_t quiet_dropped;   /* M_FW_QUIET segments no connection accepted: freed, nothing sent */
+    /* The firewall's OUTPUT verdict, carried back into the connection
+     * (design.md, "A refused segment is the connection's business"). */
+    uint64_t out_refused;     /* segments the chain refused (a retransmission counts again) */
+    uint64_t out_aborted;     /* connections ended by a refusal: they were still opening */
+    uint64_t out_recorded;    /* verdicts recorded on a synchronized connection */
+    uint64_t out_cleared;     /* recorded verdicts cleared by a later segment that left */
+    uint64_t syn_refused;     /* half-open SYN-cache entries dropped: the SYN-ACK was refused */
 };
 void tcp_get_stats(struct tcp_stats *out);
 const char *tcp_state_name(enum tcp_state s);

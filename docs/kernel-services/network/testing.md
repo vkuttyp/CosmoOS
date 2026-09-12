@@ -590,10 +590,11 @@ counted as one: an oversized datagram is accepted by the chain and refused by
 true no-route send is not reachable from a socket here, because the NIC
 carries a default route; the oversized case makes the same point
 deterministically. (7) Loopback passes no chain: a rule matching by every
-other field does not touch a `127.0.0.1` send. (8) TCP stalls rather than
-failing, the documented limit: a nonblocking `connect` to a refused port
-returns `-EINPROGRESS`, not `-EPERM`, while `out_drop_rule` rises and no SYN
-reaches the link. (9) `nat_in`'s delivery to a guest is this chain's traffic
+other field does not touch a `127.0.0.1` send. (8) TCP is told too, since the
+verdict unit: a nonblocking `connect` to a refused port returns `-EPERM` on
+its first call — `tcp_connect` returns the refusal — while `out_drop_rule`
+rises and no SYN reaches the link. `net-tcpverdict` owns the rest of that
+behaviour; this step keeps the chain's end of it honest. (9) `nat_in`'s delivery to a guest is this chain's traffic
 too: a DNAT'd SYN reaches the guest without a rule and is stopped by a
 `scope guest` one (`tx_filtered`). (10) Scope discipline: a scope on a
 `TO_HOST` or `FROM_UPLINK` rule is `-EINVAL`, an `OUTPUT` rule on a guest is
@@ -629,6 +630,98 @@ recorded whichever side of the read the verdict sits on. The ordering is
 kept for clarity and for the work it saves; the property it was thought to
 guarantee holds for a stronger reason, which the host-state unit's own
 proof 13 covers.
+
+**`net-tcpverdict`** (the OUTPUT verdict inside a connection): one uplink
+tap, because every property here is what a *connection* does with a
+refusal — the scope dimension, a guest's tap told from the world, is
+`net-output`'s, and a SYN arriving from the world needs no INPUT seed,
+which is what makes the passive-open case deterministic. (1) A **blocking**
+`connect` to a refused peer is told `-EPERM`, and told at once: before this
+unit that call took the whole retransmit budget — eight tries with a
+doubling RTO, about three minutes — so a test that finishes inside two
+seconds *is* the assertion, and because the wait is bounded it fails rather
+than hanging. `out_refused`, `out_aborted` and `tx_filtered` rise and no
+SYN reaches the link. (1b) The abort earns its keep on a connect **already
+waiting**: the first SYN left before the rule existed, so the application is
+blocked on the state — `ksock_connect`'s wait watches the state, not the
+error — the rule then appears, and the refusal of the retransmission a
+second later is what ends the wait with `-EPERM` and counts `out_aborted`.
+The direct return cannot serve that case, the call being long past, and this
+step is the one that fails when the abort is removed. (2) A **nonblocking**
+`connect` fails outright with
+`-EPERM` rather than reporting an open already abandoned, and `ksock_ready`
+reports `COSMO_IO_ERROR`; delete the rule and the same call reports
+`-EINPROGRESS` with the SYN on the link. (3) A refused **SYN-ACK** drops its
+half-open: `syn_refused` and `out_refused` rise, `accept` has nothing, and
+`out_aborted` and `out_recorded` do *not* move — there is no pcb to abort or
+record on, a passive open's half-open living in the listener's SYN cache —
+and the rule names the *client's* port, because that is the destination of
+the segment being refused. The same SYN sent again under the same rule is cached
+**anew**, which is the assertion the drop is *for*: `listen_input` answers a
+repeat SYN from a live entry by reusing its `iss` without touching
+`syn_cached`, so only a dropped entry makes the second one allocate. And
+without the rule at all the same SYN is answered, so the assertions are
+about the rule and not the fixture. (4) A rule added
+**mid-connection** is recorded without tearing the connection down: the
+send that meets it keeps its count (its bytes are in the send buffer and
+will be retransmitted), `out_recorded` rises, nothing reaches the link, the
+state is still `ESTABLISHED`, `COSMO_IO_ERROR` is reported, the *next* send
+is told `-EPERM`, bytes the peer sent before the rule still read back, and
+the read after they are drained is told too — a pending error belongs to
+the socket, not to one direction. Then the peer keeps talking under the
+rule and the acknowledgment it is owed is refused in turn: the data still
+arrives (ingress is not this chain's business) and the connection still
+stands. (5) With the rule **deleted** the next segment that
+reaches the link clears the record (`out_cleared`), a send succeeds again
+and `COSMO_IO_ERROR` is gone; the peer's own data is the trigger, because
+an application cannot send its way out of a recorded verdict. (5b) The rule
+is added once more, and now the peer's data is the **first** thing refused —
+the record above having been cleared — which is the only path where a
+refusal meets a **wake already taken**, for the reader of that data. That is
+where the rule that such a waiter is *kept* rather than replaced is
+exercised, and the socket count at the end of the test is what shows its
+reference was not dropped on the floor. (An earlier refusal under a rule
+cannot serve: the record already exists, so no reference is taken at all.) (6) A stray
+segment's **reset**, refused, tells nobody: `out_refused` rises while
+`out_aborted`, `out_recorded`, `out_cleared` and `syn_refused` all stay put.
+(7) **Loopback** passes no chain, which is what keeps the other sixteen TCP
+selftests meaningful. (8) A refused **UDP** send is still immediate.
+
+Proved by reintroducing, each failure named by the assertion that actually
+caught it: `batch_send` discarding the error as it did before this unit
+(step 1's connect is never told — and `net-output` fails with it, which is
+the same verdict read from the chain's end); the abort applied to
+synchronized states too (step 4's `out_recorded` never rises, the connection
+having been torn down instead — an earlier assertion than the `ESTABLISHED`
+check, and the one that notices first); an opening connection recording
+instead of aborting (step 1b's waiting connect is never woken, while step 1
+still passes, because `tcp_connect` returns the refusal whatever the abort
+does); the clearing rule removed (step 5's `out_cleared` never rises); an
+already-taken wake replaced rather than kept (the socket count at the end is
+short by one); the refused half-open counted but **not dropped** (step 3's
+repeat SYN finds the live entry and `syn_cached` does not rise — the
+counter alone proved nothing, which is why that step exists); that half-open
+looked up with the tuple reversed (`syn_refused` stays zero); and an empty
+flush counted as "a segment left" (the `recv` that drains the buffer clears
+the record, and step 4's post-drain `-EPERM` becomes a success).
+
+**A second property is argued and not proved**, and unlike the first it was
+not foreseen: that a batch summarises the *last* thing the link said, so a
+segment leaving supersedes an earlier refusal and a refusal supersedes an
+earlier success. Both outcomes in one batch require a rule to be added or
+deleted between two `ipv4_output` calls inside a single flush -- every
+segment of a batch shares one connection's tuple and therefore one verdict
+otherwise -- which no selftest can arrange. The tests do cover what the
+change cannot disturb: a batch whose segments share a verdict summarises it
+either way, which is every batch the suite produces.
+
+One discrimination is **argued and not proved**, as the report said in
+advance: that only `-EPERM` is treated as a verdict while every other
+output error stays loss. No TCP segment can reach a non-verdict output
+error in this stack — every address routes somewhere (the NIC carries a
+default route), segments never exceed the MSS, and ARP resolution queues a
+frame and reports success — so the experiment that keys the helper on any
+negative error changes no test's outcome. It was run, and it changed none.
 
 **`net-dnat` and `net-tapctl`** (races fixed with the host-state unit): two
 assertions in these tests were written without a barrier against the network

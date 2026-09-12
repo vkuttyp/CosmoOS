@@ -1,8 +1,24 @@
 # NEXT SUBSYSTEM — a verdict TCP's callers can see
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. This was that report; the unit is
+now **implemented** (PR "A verdict TCP's callers can see"), and the design
+below is as built — see `docs/kernel-services/network/design.md` ("A
+refused segment is the connection's business") for the shipped description
+and `docs/kernel-services/network/testing.md` (`net-tcpverdict`) for its
+proofs. Seven things came out differently and are marked where they arise:
+the abort turns out **not** to be what tells the caller of a refused
+`connect` (`tcp_connect`'s own return is, so the abort's job is the connect
+*already waiting* — a case this report did not describe and the test now
+covers); the SYN-cache drop **is** separately observable after all, by the
+slot being reusable, where this report expected only its counter; a
+recorded verdict reaches `recv` as well as `send`, which the sweep found
+and this report had not stated; an application cannot send its way out of
+one; two of the eight bug-proofs are not the ones listed here, one because
+the bug it named was not observable and one because a listed assertion was
+proving nothing; and a review found that a multi-segment batch must
+summarise the **last** thing the link said rather than its first error,
+which this report had not considered at all.
 
 **Subsystem: the one hole the OUTPUT chain left in itself. That unit made
 the host's own egress filterable and, alone among the four chains, made a
@@ -15,7 +31,9 @@ invisible to `connect`, to `send` and to `poll`: the socket waits out
 eight retransmissions with a doubling RTO (about three minutes) and is
 told `-ETIMEDOUT`, which names a network that did not answer rather than
 a machine that decided not to ask. This unit carries the verdict back into
-the connection. `batch_send` returns the first output error; the flush
+the connection. `batch_send` returns what the link refused (as built, the
+*last* such fact in a batch that holds more than one -- see the banner);
+the flush
 sites that own a connection apply it under a rule shaped like RFC 1122
 §4.2.3.9's treatment of a hard error — **an opening connection is aborted**
 (`connect` returns `-EPERM` at once), **a synchronized one records it** and
@@ -159,14 +177,14 @@ counted as `quiet_dropped` and reach no chain.
   sends SYNs to a port the host is not allowed to answer on.
 - **It is the last follow-up the OUTPUT unit created for itself**, named
   in that report three times (§6 "Deliberately out of scope", the Tests
-  bullet "TCP stalls rather than failing", the Risks bullet "TCP's
+  bullet on TCP (now "TCP is told too"), the Risks bullet "TCP's
   asymmetry"), in `design.md` (the paragraph "A refused send is told, not
   hidden" and the section's "Named and deferred" line), in `testing.md`'s
   `net-output` step 8, and three times in the README. The other named follow-ups — per-interface chains,
   rate-limit and log targets, IPv6, full TCP state tracking — are new
   ground; this one is an incompleteness.
 
-## Proposed design
+## Design (as built)
 
 ### A refusal is local, deterministic and hard
 
@@ -203,10 +221,19 @@ sites. The state decides:
 | `TIME_WAIT`, `CLOSED`, `LISTEN` | counted only (nothing is waiting on the outcome, and a `TIME_WAIT` ACK's refusal changes nothing) |
 
 The abort is not a new mechanism: it is the same three lines the valid-RST
-path already uses (`:1680`) — `pcb->error`, `sock_ref`, `pcb_end_locked` —
-which is also what makes the blocking `connect` wake, because its wait
-condition is "the state left `SYN_SENT`/`SYN_RCVD`" (`socket.c:290`) and
-not "an error appeared".
+path already uses (`:1680`) — `pcb->error`, `sock_ref`, `pcb_end_locked`.
+**As built, it is not what tells the caller of a refused `connect`**, and
+this report said otherwise. `tcp_connect` returns the refusal itself (see
+its row below), so that call is over before the abort could matter — which
+a bug-proof demonstrated by removing the abort and watching step 1 pass
+anyway. What the abort is actually for is the connect *already waiting*:
+the first SYN left before the rule existed, the application is blocked on
+the state (`ksock_connect`'s wait condition is "the state left
+`SYN_SENT`/`SYN_RCVD`", `socket.c:290`, and not "an error appeared"), and
+the refusal of the retransmission a second later is what ends it. That case
+is now a test step of its own, and it is the step that fails when the abort
+is removed. The abort also stops the connection spending its remaining
+seven retransmissions on a SYN the chain has already refused.
 
 **2. A SYN-ACK for a half-open in the listener's SYN cache** — the
 owner-less LISTEN flush site. There is no PCB and no caller: the
@@ -243,6 +270,13 @@ This is the discipline the host chain's `quiet` bit taught: one gate
 that sets a flag, and an explicit, enumerated set of points that clear
 it. Here there is one of each.
 
+**As built, one consequence of that is worth stating and this report had
+not:** an application cannot send its way out of a recorded verdict.
+`tcp_send` reports the error before it would build anything, so the flush
+that clears a record is always the retransmit timer's, or an
+acknowledgment the peer's own traffic asks for — which is what the test
+uses as its trigger.
+
 ### The first refused `send` still returns its byte count
 
 `tcp_send` copies the caller's bytes into the send buffer, builds
@@ -269,9 +303,11 @@ must use that value and no other. `ipv4.c` gains a comment saying so.
 ### The mechanism
 
 ```c
-/* The first output error, or the number of segments that reached the
- * link. Negative means the link refused one; 0 means there was nothing
- * to send. */
+/* What became of the batch: the number of segments that reached the link,
+ * or -- negative -- the error one was refused with. As built this is the
+ * *last* such fact rather than the first error: only a rule added or
+ * deleted mid-flush can put both in one batch, and then the newer one is
+ * the truth about the connection. 0 means there was nothing to send. */
 static int batch_send(struct tcp_batch *b);
 
 /* After the flush, under the pcb lock, alone: apply a refusal or clear a
@@ -354,6 +390,18 @@ causes; `ksock_sendto`'s stream loop already returns
 no change is the strongest evidence the design sits where the existing
 one expected it to.
 
+**The sweep found one semantic this report had not stated**, and it is
+kept rather than coded around: a recorded verdict reaches `recv` as well
+as `send`. `tcp_recv` returns the bytes it holds first and the error only
+when there are none, so a refused *egress* eventually fails a *read* — and
+that is what a pending socket error does in POSIX, which is not
+direction-specific. Making it one would have meant teaching the socket
+layer to tell a send-side error from a receive-side one, and the wait
+conditions with it, for a connection that in this state cannot make
+progress anyway. The test asserts the behaviour in both directions: the
+peer's earlier bytes still read back, and the read after they are drained
+is told.
+
 ### The §70 gate
 
 **Correctness.** The rule is a function of one thing — the connection's
@@ -406,8 +454,8 @@ chain's side of the same events, so a test can assert both ends.
 | `kernel-services/network/nettest.c` | new selftest `net-tcpverdict`; `net-output` step 8 reversed — its nonblocking `connect` to a refused port now returns `-EPERM` on the *first* call, since `tcp_connect` returns the refusal itself |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | register `net-tcpverdict` |
 | `docs/kernel-services/network/design.md` | "The OUTPUT chain": the paragraph "A refused send is told, not hidden" rewritten from "TCP does not" to the state rule, its pointer to this report replaced by what was built; the section's "Named and deferred" line; a new subsection for the rule |
-| `docs/kernel-services/network/testing.md` | `net-tcpverdict`; `net-output` step 8's text (its "TCP stalls rather than failing" sentence) |
-| `docs/audit/next-subsystem-output-chain.md` | the three places that say TCP's callers cannot see a verdict — §6 "Deliberately out of scope", the Tests bullet "TCP stalls rather than failing", the Risks bullet "TCP's asymmetry" — each already pointed here by this report and to be converted to as-built by the implementation |
+| `docs/kernel-services/network/testing.md` | `net-tcpverdict`; `net-output` step 8's text (its sentence on TCP stalling) |
+| `docs/audit/next-subsystem-output-chain.md` | the three places that say TCP's callers cannot see a verdict — §6 "Deliberately out of scope", the Tests bullet on TCP, the Risks bullet "TCP's asymmetry" — each already pointed here by this report and to be converted to as-built by the implementation |
 | `README.md` | the OUTPUT Status entry's TCP sentence (`:1352`), the two "named next steps" mentions (`:1380`, `:1455`), and a Status entry for this unit |
 
 ## New APIs
@@ -417,7 +465,9 @@ No new syscall, no new uapi, no new device. Two internal functions
 `struct tcp_stats`, and one documented promotion of `-EPERM` from
 `ipv4_output` into a value TCP interprets.
 
-## Migration plan
+## Migration plan (followed as written)
+
+Each step landed as its own commit with the tree green, in this order.
 
 1. **`batch_send` returns.** Change the signature and the ten call sites
    to ignore the value. No behaviour change; the tree stays green. This
@@ -441,6 +491,11 @@ No new syscall, no new uapi, no new device. Two internal functions
 
 Steps 2–5 are each independently testable and each leaves the tree green.
 
+As built, step 2's run is worth recording: the tree between step 2 and the
+`net-output` edit failed on exactly the line that asserted the old limit,
+which is the flip this report promised at this step and the first proof
+that the verdict reaches the caller.
+
 ## Tests
 
 **`net-tcpverdict`** (new), on the fixtures `net-output` already builds —
@@ -448,11 +503,17 @@ an "uplink" tap with a host route and a guest tap through
 `/dev/net/tap`, so both scopes are available, plus a host listener:
 
 1. **A blocking `connect` to a refused peer returns `-EPERM`**, and
-   returns *promptly*: the call is bounded by the test's own budget, which
-   is the property — today's behaviour cannot return inside three
-   minutes, so a test that finishes at all proves the abort. `out_refused`
-   and `out_aborted` each rise by one, `tx_filtered` rises, and no SYN
-   reaches the tap.
+   returns *promptly*: the old behaviour cannot return inside three
+   minutes, so a test that finishes proves it. As built the wait is
+   **bounded by the test itself** (two seconds on its own thread) rather
+   than left to the harness's budget, so the step *fails* instead of
+   hanging the suite. `out_refused` and `out_aborted` rise, `tx_filtered`
+   rises, and no SYN reaches the tap.
+1b. **A connect already waiting is woken by the abort** — the step this
+   report did not foresee, added when a bug-proof showed step 1 passing
+   without the abort. The first SYN leaves before the rule exists, the
+   application blocks on the state, the rule appears, and the refusal of
+   the retransmission ends the wait with `-EPERM`.
 2. **A nonblocking `connect` fails outright**: the first call returns
    `-EPERM`, not `-EINPROGRESS`, because `tcp_connect` hands the refusal to
    `ksock_connect` directly; `tcp_ready` reports `COSMO_IO_ERROR` for a
@@ -460,22 +521,38 @@ an "uplink" tap with a host route and a guest tap through
    sequence connects. This is the assertion `net-output` step 8 has to
    change, and the reason that step was written nonblocking to begin
    with.
-3. **A refused SYN-ACK drops the half-open**: the guest's SYN reaches the
-   host listener (INPUT's seed), a `scope guest` OUTPUT rule on the
-   listener's port refuses the answer, no SYN-ACK reaches the guest's tap,
-   `out_refused` and `syn_refused` rise, and `accept` has nothing —
-   while `out_aborted` and `out_recorded` stay put, because this
-   connection has no PCB to abort or record on. Without the rule the same
-   SYN is answered and the connection completes.
+3. **A refused SYN-ACK drops the half-open.** As built this runs on the
+   **uplink** tap rather than a guest's, and the rule names the client's
+   port: every property here is what the *connection* does with a refusal,
+   the scope dimension is `net-output`'s, and a SYN from the world needs no
+   INPUT seed, which is what makes the case deterministic. `out_refused`
+   and `syn_refused` rise, `accept` has nothing, and `out_aborted` and
+   `out_recorded` stay put, this connection having no PCB to abort or
+   record on. **The drop is separately observable after all**, where this
+   report expected only its counter: the same SYN sent again under the same
+   rule caches *anew*, because `listen_input` answers a repeat SYN from a
+   live entry by reusing its `iss` without touching `syn_cached`. The
+   counter alone was proving nothing, which a bug-proof showed. Without the
+   rule the same SYN is answered.
 4. **A rule added mid-connection records, and does not tear down**: with
    an established connection, the first `send` after the rule returns its
    byte count, `out_recorded` rises, `tcp_state_of` is still
    `ESTABLISHED`, `tcp_ready` reports `COSMO_IO_ERROR`, the *next* `send`
    returns `-EPERM`, and data the peer sent before the rule is still
    readable — the recorded error must not swallow buffered bytes.
-5. **A deleted rule lets the connection resume**: with the rule gone, the
-   retransmit timer's segment leaves, `out_cleared` rises, and `send`
-   succeeds again.
+5. **A deleted rule lets the connection resume**: with the rule gone, a
+   segment leaves, `out_cleared` rises, and `send` succeeds again. As
+   built the trigger is the peer's own data — the acknowledgment the host
+   owes it is the segment that clears the record — rather than the
+   retransmit timer, because an application cannot send its way out of a
+   record and the timer would cost the test a second it need not spend.
+5b. **A refusal that records while a waiter is already held**, added
+   because the bug-proof for keeping that waiter had nothing to catch
+   otherwise: with the record cleared, the peer's next segment is the first
+   thing refused, so `tcp_input` has taken a reference for the reader of
+   that data before the acknowledgment it owes is refused. Replacing that
+   waiter rather than keeping it leaks one socket reference, and the
+   **socket count** at the end of the test is what sees it.
 6. **A stray segment's RST is refused with no connection to tell**: a
    segment for no PCB, with a rule refusing the RST — `out_refused` rises
    while `out_aborted`, `out_recorded` and `out_cleared` do not, and
@@ -492,34 +569,58 @@ its comment ("the documented limit: `batch_send` ignores output errors")
 goes, and the nonblocking `connect` must return `-EPERM` on its first
 call.
 
-**Bug-proofs** — each reintroduced against the shipped code, the failure
-observed for its stated reason, and the source restored byte-identical:
+**Bug-proofs** — eight, each reintroduced against the shipped code, the
+failure observed and named by **the assertion that actually caught it**,
+and the source restored byte-identical every time. Two are not the proofs
+this report listed, and the reasons are recorded rather than tidied away.
 
-1. `batch_send` returns `void` again → step 1 never completes and the test
-   dies on the per-test budget.
-2. The abort applied to synchronized states too → step 4's connection is
-   torn down and its buffered bytes are lost.
-3. The record applied to `SYN_SENT` instead of the abort → step 1's
-   blocking `connect` hangs, because its wait condition is the state, not
-   the error.
-4. The clearing rule removed → step 5 never resumes.
-5. `*wake` overwritten rather than reused → step 2's poll never reports.
-6. The SYN-cache drop removed → step 3's `syn_refused` stays zero.
-7. The owner-less sites given the looked-up connection → step 6 ends an
-   unrelated connection, or faults on a NULL.
-8. `output_result` keyed on `rc < 0` rather than `rc == -EPERM` → see the
-   named non-proof below.
+1. `batch_send` discards the error, as it did before this unit → step 1's
+   connect is never told (and `net-output` fails with it, the same verdict
+   read from the chain's end).
+2. The abort applied to synchronized states too → step 4's `out_recorded`
+   never rises, the connection having been torn down instead. This report
+   expected the `ESTABLISHED` check to catch it; the counter notices
+   first.
+3. The record applied to an opening connection instead of the abort → step
+   **1b** is never woken. This report said step 1 would hang; it passes,
+   because `tcp_connect` returns the refusal whatever the abort does —
+   which is what taught this unit what the abort is for.
+4. The clearing rule removed → step 5's `out_cleared` never rises.
+5. An already-taken `*wake` replaced rather than kept → the socket count
+   at the end of the test is short by one. This report predicted "step 2's
+   poll never reports", which was wrong twice over: the overwrite cannot
+   lose a wake (both references name the same socket), it can only leak
+   one, so the proof is a counting test — and on the first run it caught
+   nothing at all, because the path was unreachable until step 5b existed.
+6. The SYN-cache entry counted but **not dropped** → step 3's repeat SYN
+   finds the live entry and `syn_cached` does not rise. This report's
+   "the drop removed" could not compile (the helper became unused) and,
+   more to the point, the faithful version of the bug *passed*, because
+   the step asserted only the counter.
+7. The half-open looked up with its tuple reversed → `syn_refused` stays
+   zero. This replaces the listed proof "the owner-less sites given the
+   looked-up connection", which is not observable: the listener is in
+   `LISTEN`, where the rule does nothing, and a stray segment has no
+   connection to pass at all. The reversed tuple is the mistake a reader
+   of that call would actually make.
+8. An empty flush counted as "a segment left" (`rc >= 0` rather than
+   `rc > 0`) → the `recv` that drains the buffer clears the record, and
+   step 4's post-drain `-EPERM` becomes a success. Not in this report's
+   list; found while writing the helper.
 
-**One proof this unit cannot produce, named in advance.** Bug-proof 8's
-failure is not observable in this stack today: no TCP segment can reach a
-non-verdict output error. There is no unroutable destination a socket can
+**One proof this unit cannot produce, named in advance — and confirmed.**
+The discrimination between `-EPERM` and every other output error is not
+observable in this stack today: no TCP segment can reach a non-verdict
+output error. There is no unroutable destination a socket can
 name (the NIC carries a default route — the host-state unit established
 this), segments never exceed the MSS so `-EMSGSIZE` is unreachable, and
 ARP resolution queues a frame and reports success by design. So the
-discrimination between `-EPERM` and every other error is argued from the
-code and from the two-line comment in `ipv4.c`, and not from a test. The
-OUTPUT unit's precedent applies: better a named non-proof than a proof
-that does not prove what it claims.
+discrimination is argued from the code and from the comment in `ipv4.c`,
+and not from a test. The OUTPUT unit's precedent applies: better a named
+non-proof than a proof that does not prove what it claims. **It was run
+anyway**, as a ninth experiment — `output_result` keyed on any negative
+`rc` — and the whole suite passed, which is exactly what this report
+predicted and the only evidence available that the prediction was right.
 
 ## Benchmarks
 
@@ -531,7 +632,10 @@ and 20626 sends/s across two trees and a 40% spread inside a single
 build — so the measurement offered is the one that has worked twice: the
 suite's own per-test timing across three consecutive runs on each arch,
 with the claim being that no test's time moves outside its run-to-run
-spread. The unit's real performance argument is the other direction: a
+spread. As built the suite's total moved from 53.0 s to 58.1 s on aarch64
+— and 2.3 s of that is `net-tcpverdict` itself, a test that did not exist
+before, one second of which is a retransmit timeout it waits for on
+purpose. The unit's real performance argument is the other direction: a
 refused `connect` costs about three minutes today and a round trip to the
 lock after this.
 

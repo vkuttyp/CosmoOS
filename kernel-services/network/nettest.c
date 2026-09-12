@@ -5784,10 +5784,12 @@ bool selftest_net_output(const char **reason)
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
     ksock_put(lo);
 
-    /* (8) TCP stalls rather than failing, the documented limit: batch_send
-     * ignores output errors, so the verdict is invisible to connect(). The
-     * rule is counted per attempt, no SYN reaches the link, and the socket's
-     * state is "connecting", not -EPERM. */
+    /* (8) TCP is told too, since the verdict unit: batch_send reports what
+     * the link refused and tcp_connect returns it, so a nonblocking connect
+     * to a refused peer fails outright with -EPERM on its first call rather
+     * than reporting an open in progress. The rule is counted per attempt
+     * and no SYN reaches the link. net-tcpverdict owns the rest of that
+     * behaviour; this step only keeps the chain's end of it honest. */
     struct fw_rule out_tcp = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9200, FW_DROP, FW_SCOPE_ANY);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_tcp) == 0);
     hin_drain(u);
@@ -5797,7 +5799,7 @@ bool selftest_net_output(const char **reason)
         CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
         ksock_set_nonblock(c, true);
         struct netaddr peer = v4addr(w, 9200);
-        CHECK(ksock_connect(c, &peer) == -EINPROGRESS);        /* not -EPERM: TCP never sees it */
+        CHECK(ksock_connect(c, &peer) == -EPERM);              /* told, not left connecting */
         CHECK(FWT_RISES(fw_get_stats, fs1, out_drop_rule, fs0.out_drop_rule));
         CHECK(!hin_recv(u, IPPROTO_TCP, 9200, &sg, 15));       /* the SYN never left */
         ksock_put(c);
@@ -5928,8 +5930,300 @@ bool selftest_net_output(const char **reason)
     kinfo("selftest: net-output: the host's own egress takes a verdict -- the default let everything out, a rule "
           "refused a send with -EPERM and left neither a frame nor reply state, an ICMP rule refused an echo, the "
           "scope told a guest's tap from the world (and a destination prefix still worked), the proxy's answer to "
-          "a guest was silenced, no route stayed -ENETUNREACH, loopback passed no chain, TCP stalled rather than "
-          "failing, a DNAT'd delivery was this chain's traffic too, the scopes held, and the listing carried the "
+          "a guest was silenced, no route stayed -ENETUNREACH, loopback passed no chain, a refused TCP connect was "
+          "told -EPERM, a DNAT'd delivery was this chain's traffic too, the scopes held, and the listing carried the "
           "fifth policy with the rule's egress");
     return true;
 }
+/* --- the OUTPUT verdict, carried back into the connection ----------------- */
+
+bool selftest_net_tcpverdict(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+
+    /* One uplink tap is enough. Every property here is what a *connection*
+     * does with a refusal; the scope dimension -- a guest's tap told from the
+     * world -- is net-output's, and a SYN arriving from the world needs no
+     * INPUT seed, which keeps the passive-open case deterministic. */
+    static const uint8_t umac[6] = { 0x52, 0x54, 0x00, 0x1d, 0x00, 0x01 };
+    static const uint8_t wmac[6] = { 0x52, 0x54, 0x00, 0x1d, 0x00, 0x63 };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 11, 1), w = IPV4_ADDR(10, 77, 11, 99);
+    uint32_t wnet = IPV4_ADDR(10, 77, 11, 0);
+    struct tap *u = tap_create("tvu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+
+    uint8_t l4[160], buf[64];
+    uint16_t l4len;
+    struct hin_seg sg;
+    struct tcp_stats ts0, ts1;
+    struct ip_stats is0, is1;
+    unsigned socks0 = socket_count();
+    hin_drain(u);
+
+    /* (1) A blocking connect is told, and told at once. Before the verdict
+     * reached the pcb this took the whole retransmit budget -- eight tries
+     * with a doubling RTO, about three minutes -- so a test that finishes
+     * inside two seconds *is* the assertion. */
+    struct fw_rule out_c = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9300, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_c) == 0);
+    tcp_get_stats(&ts0);
+    ipv4_get_stats(&is0);
+    static struct hin_conn cn;   /* static: a stuck connect must not write a dead stack */
+    cn = (struct hin_conn){ .peer = v4addr(w, 9300) };
+    struct thread *ct = thread_create(hin_connect_thread, &cn, "tv-connect", SCHED_PRIO_DEFAULT);
+    CHECK(ct != NULL);
+    for (unsigned i = 0; i < HIN_TRIES && !cn.done; i++)
+        thread_sleep_ms(10);
+    CHECK(cn.done && cn.rc == -EPERM);
+    thread_join(ct);
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_refused, ts0.out_refused));
+    CHECK(ts1.out_aborted > ts0.out_aborted);
+    CHECK(FWT_RISES(ipv4_get_stats, is1, tx_filtered, is0.tx_filtered));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 9300, &sg, 15));   /* the SYN never left */
+    ksock_put(cn.s);
+
+    /* (1b) The abort earns its keep on a connect already waiting. Here the
+     * first SYN left before the rule existed, so the caller is blocked on
+     * the state -- ksock_connect's wait watches the state, not the error --
+     * and it is the refusal of the *retransmission* that ends the wait. The
+     * direct return in tcp_connect cannot serve this case: that call is
+     * long past. */
+    hin_drain(u);
+    static struct hin_conn cnw;
+    cnw = (struct hin_conn){ .peer = v4addr(w, 9303) };
+    struct thread *ctw = thread_create(hin_connect_thread, &cnw, "tv-connw", SCHED_PRIO_DEFAULT);
+    CHECK(ctw != NULL);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9303, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* it left */
+    struct fw_rule out_w = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9303, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_w) == 0);
+    tcp_get_stats(&ts0);
+    for (unsigned i = 0; i < 250 && !cnw.done; i++)     /* the first RTO is a second */
+        thread_sleep_ms(10);
+    CHECK(cnw.done && cnw.rc == -EPERM);
+    thread_join(ctw);
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_aborted, ts0.out_aborted));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_w) == 0);
+    ksock_put(cnw.s);
+
+    /* (2) A nonblocking connect fails outright, rather than reporting an open
+     * already abandoned: tcp_connect returns the refusal and ksock_connect
+     * hands it straight back. Poll says so too. Delete the rule and the same
+     * call reports an open in progress, with the SYN on the link. */
+    {
+        struct socket *c = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        ksock_set_nonblock(c, true);
+        struct netaddr peer = v4addr(w, 9300);
+        CHECK(ksock_connect(c, &peer) == -EPERM);
+        CHECK(ksock_ready(c) & COSMO_IO_ERROR);
+        ksock_put(c);
+    }
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_c) == 0);
+    hin_drain(u);
+    {
+        struct socket *c = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
+        ksock_set_nonblock(c, true);
+        struct netaddr peer = v4addr(w, 9300);
+        CHECK(ksock_connect(c, &peer) == -EINPROGRESS);
+        CHECK(hin_recv(u, IPPROTO_TCP, 9300, &sg, HIN_TRIES) && sg.flags == TH_SYN);
+        ksock_put(c);
+    }
+
+    /* (3) A refused SYN-ACK has no connection to tell -- a passive open's
+     * half-open lives in the listener's SYN cache, and the child pcb is only
+     * created when the ACK completes -- so the half-open is dropped instead
+     * of held for its full eight seconds. The rule names the *client's* port,
+     * because that is the destination of the segment being refused. */
+    struct socket *ls = NULL;
+    CHECK(hin_tcp_listener(&ls, 9301));
+    struct fw_rule out_sa = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 40300, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_sa) == 0);
+    hin_drain(u);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40300, 9301, 7000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, syn_refused, ts0.syn_refused));
+    CHECK(ts1.out_refused > ts0.out_refused);
+    CHECK(ts1.out_aborted == ts0.out_aborted && ts1.out_recorded == ts0.out_recorded);
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40300, &sg, 15));       /* no SYN-ACK left */
+    {
+        struct socket *a = NULL;
+        CHECK(ksock_accept(ls, &a, NULL) == -EAGAIN);        /* and nothing to accept */
+    }
+    /* The same SYN again, under the same rule: the slot the first one used is
+     * free, so it is cached anew. This is the assertion the drop is *for* --
+     * a refusal that counted without dropping would leave the entry live,
+     * and listen_input would answer from it (reusing its ISS) without
+     * touching syn_cached. */
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40300, 9301, 7000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, syn_cached, ts0.syn_cached));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40300, &sg, 15));
+
+    /* Without the rule the same SYN is answered, which is what makes the
+     * assertions above about the rule and not about the fixture. */
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_sa) == 0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40301, 9301, 7100, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 40301, &sg, HIN_TRIES) && sg.flags == (TH_SYN | TH_ACK));
+    ksock_put(ls);
+
+    /* An established connection of the host's own, driven from the world
+     * side, for (4) and (5). */
+    hin_drain(u);
+    static struct hin_conn cn2;
+    cn2 = (struct hin_conn){ .peer = v4addr(w, 9302) };
+    struct thread *ct2 = thread_create(hin_connect_thread, &cn2, "tv-conn2", SCHED_PRIO_DEFAULT);
+    CHECK(ct2 != NULL);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9302, &sg, HIN_TRIES) && sg.flags == TH_SYN);
+    uint32_t hiss = sg.seq;
+    uint16_t hport = sg.sport;
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5000, hiss + 1, TH_SYN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9302, &sg, HIN_TRIES) && sg.flags == TH_ACK);
+    for (unsigned i = 0; i < HIN_TRIES && !cn2.done; i++)
+        thread_sleep_ms(10);
+    CHECK(cn2.done && cn2.rc == 0);
+    thread_join(ct2);
+    ksock_set_nonblock(cn2.s, true);
+    /* Two bytes from the peer, in before the rule: they must stay readable. */
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5001, hiss + 1, TH_ACK | TH_PSH, 64240, "hi", 2);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    for (unsigned i = 0; i < 40 && tcp_recv_avail(cn2.s->tcp) < 2; i++)
+        thread_sleep_ms(10);
+    CHECK(tcp_recv_avail(cn2.s->tcp) == 2);
+
+    /* (4) A rule added mid-connection records the verdict and leaves the
+     * connection standing. The send that meets the rule still returns its
+     * count -- those bytes are in the send buffer and will be retransmitted,
+     * so failing them would either lose them or invite a double-send -- and
+     * the *next* call is the one that is told. */
+    struct fw_rule out_e = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9302, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_e) == 0);
+    hin_drain(u);
+    tcp_get_stats(&ts0);
+    CHECK(ksock_sendto(cn2.s, "abc", 3, NULL) == 3);
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_recorded, ts0.out_recorded));
+    CHECK(ts1.out_refused > ts0.out_refused);
+    CHECK(!hin_recv(u, IPPROTO_TCP, 9302, &sg, 15));              /* nothing reached the link */
+    CHECK(tcp_state_of(cn2.s->tcp) == TCP_ESTABLISHED);           /* and nothing was torn down */
+    CHECK(ksock_ready(cn2.s) & COSMO_IO_ERROR);
+    CHECK(ksock_sendto(cn2.s, "de", 2, NULL) == -EPERM);          /* the next call is told */
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "hi", 2) == 0);
+    CHECK(ksock_recvfrom(cn2.s, buf, sizeof(buf), NULL) == -EPERM);   /* drained, then told */
+
+    /* The peer keeps talking under the rule, and the acknowledgment the host
+     * owes it is refused in turn. This is the one path where the refusal
+     * meets a wake already taken -- for the reader of the data that just
+     * arrived -- so the rule that the waiter is *kept* rather than replaced
+     * is exercised here, and the socket count at the end of the test is what
+     * shows the reference it holds was not dropped on the floor. The bytes
+     * arrive whatever the chain says about the answer: ingress is not this
+     * chain's business. */
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5003, hiss + 1, TH_ACK | TH_PSH, 64240, "jk", 2);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_refused, ts0.out_refused));
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "jk", 2) == 0);
+    CHECK(tcp_state_of(cn2.s->tcp) == TCP_ESTABLISHED);
+
+    /* (5) The rule deleted, the connection resumes: the next segment that
+     * reaches the link clears the record. The peer's own data is the trigger
+     * -- the host's acknowledgment of it is that segment -- because the
+     * application cannot send its way out of a recorded verdict. */
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_e) == 0);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5005, hiss + 1, TH_ACK | TH_PSH, 64240, "yo", 2);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_cleared, ts0.out_cleared));
+    CHECK(ksock_sendto(cn2.s, "de", 2, NULL) == 2);               /* usable again */
+    CHECK(!(ksock_ready(cn2.s) & COSMO_IO_ERROR));
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "yo", 2) == 0);
+
+    /* (5b) A refusal that *records* while a wake is already taken. The
+     * record above is cleared, so the peer's next segment is the first thing
+     * refused this time: tcp_input takes a reference for the reader of that
+     * data, then the acknowledgment it owes is refused and the record is
+     * made with that waiter already in hand. Keeping it rather than
+     * replacing it is the rule under test, and a replacement would leak
+     * exactly one socket reference -- which is what the count below sees.
+     * (The earlier refusal under a rule could not exercise this: the record
+     * already existed, so no reference was taken at all.) */
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_e) == 0);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5007, hiss + 1, TH_ACK | TH_PSH, 64240, "pq", 2);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_recorded, ts0.out_recorded));
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "pq", 2) == 0);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_e) == 0);
+    ksock_put(cn2.s);
+
+    /* (6) A stray segment's reset is refused with no connection to tell:
+     * counted, and nothing else happens. */
+    hin_drain(u);
+    struct fw_rule out_r = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 40310, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_r) == 0);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40310, 9399, 8000, 8000, TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_refused, ts0.out_refused));
+    CHECK(ts1.out_aborted == ts0.out_aborted && ts1.out_recorded == ts0.out_recorded &&
+          ts1.out_cleared == ts0.out_cleared && ts1.syn_refused == ts0.syn_refused);
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40310, &sg, 15));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_r) == 0);
+
+    /* (7) Loopback passes no chain, which is what keeps every other TCP
+     * selftest meaningful: a rule matching by every other field does not
+     * touch a connection to 127.0.0.1. */
+    struct socket *lo_ls = NULL, *lo_c = NULL;
+    CHECK(hin_tcp_listener(&lo_ls, 9310));
+    struct fw_rule out_lo = OUT_RULE(IPPROTO_TCP, 0, 0, 0, 0, 9310, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_lo) == 0);
+    CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &lo_c) == 0);
+    struct netaddr lo_a = v4addr(INADDR_LOOPBACK_N, 9310);
+    CHECK(ksock_connect(lo_c, &lo_a) == 0);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
+    ksock_put(lo_c);
+    ksock_put(lo_ls);
+
+    /* (8) The datagram protocols are untouched by this unit: a refused UDP
+     * send is still told at once, by the same -EPERM this unit gave a new
+     * meaning to inside TCP. */
+    struct socket *us = NULL;
+    CHECK(hin_udp_listener(&us, 0, 7400));
+    struct fw_rule out_u = OUT_RULE(IPPROTO_UDP, 0, 0, wnet, 24, 7401, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_u) == 0);
+    struct netaddr uto = v4addr(w, 7401);
+    CHECK(ksock_sendto(us, "x", 1, &uto) == -EPERM);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_u) == 0);
+    ksock_put(us);
+
+    /* Every socket this test made is gone: a refusal takes a reference to
+     * the socket it has to wake, and one already taken is kept rather than
+     * replaced -- replacing it would leak exactly one per refused flush that
+     * arrives with a reader waiting, which the step above arranges. */
+    for (unsigned i = 0; i < 40 && socket_count() > socks0; i++)
+        thread_sleep_ms(10);
+    CHECK(socket_count() == socks0);
+
+    hin_drain(u);
+    tap_destroy(u);
+    fw_flush();
+    nat_flush();
+    nat_pf_clear();
+    kinfo("selftest: net-tcpverdict: the chain's refusal reaches the connection -- a blocking connect was told "
+          "-EPERM at once, a connect already waiting was woken by the refusal of its retransmission, a "
+          "nonblocking connect failed outright, a refused SYN-ACK dropped its half-open instead of "
+          "holding it, a rule added mid-connection was recorded without tearing the connection down (the send "
+          "that met it kept its count, the next was told, buffered bytes still read), deleting the rule let the "
+          "next segment clear the record, a stray reset's refusal told nobody, loopback passed no chain, and a "
+          "refused UDP send was still immediate");
+    return true;
+}
+

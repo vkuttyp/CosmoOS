@@ -690,23 +690,52 @@ static void challenge_ack(struct tcp_pcb *pcb, struct tcp_batch *b)
 
 /* No lock. The only place tcp.c transmits: a quiet batch -- a segment no
  * connection accepted -- is freed here, whatever it queued, and counted. */
-static void batch_send(struct tcp_batch *b)
+/* Sends what the batch holds and says what became of it: the number of
+ * segments that reached the link, or -- negative -- the error the link
+ * refused one with. The firewall's OUTPUT verdict arrives here as -EPERM
+ * (the only -EPERM ipv4_output produces), which output_result carries back
+ * into the connection; every other error stays what it has always been,
+ * loss for the retransmit timer to repair. A quiet batch reaches no link
+ * and reports nothing.
+ *
+ * Every segment of one batch belongs to one connection and so carries one
+ * tuple, so they share a verdict -- unless a rule is added or deleted
+ * while the loop runs, which is the only way a batch can hold both a
+ * refusal and a segment that left. The summary is then **the last thing
+ * the link said**: a segment that left supersedes an earlier refusal (the
+ * rule was deleted, and the record must not be made for a connection now
+ * sending) and a refusal supersedes an earlier success (the rule was
+ * added, and the record must be). Returning the first error instead would
+ * record a refusal against a connection that had just transmitted. */
+static int batch_send(struct tcp_batch *b)
 {
     if (b->quiet) {
         for (unsigned i = 0; i < b->n; i++)
             m_freem(b->seg[i].m);
         b->n = 0;
         STAT(quiet_dropped);
-        return;
+        return 0;
     }
+    int err = 0;
+    unsigned sent = 0;
     for (unsigned i = 0; i < b->n; i++) {
         struct mbuf *m = b->seg[i].m;
+        int rc;
         if (b->seg[i].src.family == COSMO_AF_INET)
-            ipv4_output(m, b->seg[i].src.v4, b->seg[i].dst.v4, IPPROTO_TCP, IP_DEFAULT_TTL);
+            rc = ipv4_output(m, b->seg[i].src.v4, b->seg[i].dst.v4, IPPROTO_TCP, IP_DEFAULT_TTL);
         else
-            ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
+            rc = ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
+        if (rc == 0) {
+            sent++;
+            err = 0;       /* it left: that is the newer fact about this connection */
+            continue;
+        }
+        if (rc == -EPERM)
+            STAT(out_refused);
+        err = rc;          /* and so is a refusal, over an earlier success */
     }
     b->n = 0;
+    return err ? err : (int)sent;
 }
 
 static void arm_rexmit(struct tcp_pcb *pcb)
@@ -826,6 +855,82 @@ static void orphan_fin_wait2(struct tcp_pcb *pcb)
         arm_keep(pcb, g_fin_wait2_ns);
 }
 
+/*
+ * After the flush, no lock held: what the link said about this
+ * connection's segments. `rc` is batch_send's return -- a count, or an
+ * error. Only -EPERM is the connection's business, and only because it is
+ * the firewall's OUTPUT verdict: a rule matches the whole tuple, and every
+ * segment of one connection carries the same tuple, so a rule that refused
+ * one will refuse them all. That is a decision, not the loss the
+ * retransmit timer repairs, which is why every other output error stays
+ * discarded here as it always was.
+ *
+ * A connection that is still opening cannot proceed, so it is aborted --
+ * exactly as a valid reset aborts it, which is also what wakes a blocking
+ * connect, whose wait watches the state and not the error.
+ *
+ * `wake` and `killed` are the caller's unwind pair; an already-set `wake`
+ * is kept, and a connection this flush already ended is left alone.
+ */
+static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, bool *killed)
+{
+    if (*killed)
+        return;
+    bool refused = rc == -EPERM;
+    bool sent = rc > 0;
+    /* The accepted path: one relaxed read of a field this flush has already
+     * touched, and no lock. */
+    if (!refused && !(sent && __atomic_load_n(&pcb->error, __ATOMIC_RELAXED) == -EPERM))
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&pcb->lock);
+    if (refused) {
+        switch (pcb->state) {
+        case TCP_SYN_SENT:
+        case TCP_SYN_RCVD:
+            STAT(out_aborted);
+            pcb->error = -EPERM;
+            *wake = *wake ? *wake : sock_ref(pcb);
+            *killed = pcb_end_locked(pcb);
+            break;
+        case TCP_ESTABLISHED:
+        case TCP_FIN_WAIT_1:
+        case TCP_FIN_WAIT_2:
+        case TCP_CLOSE_WAIT:
+        case TCP_CLOSING:
+        case TCP_LAST_ACK:
+            /* Synchronized: the connection exists and the peer's half of it
+             * still arrives, so the verdict is recorded and reported -- to
+             * the next send, and to a receive once the buffer it already
+             * holds is drained, because a pending error belongs to the
+             * socket and not to one direction -- while the state machine is
+             * left alone. RFC 1122 4.2.3.9 treats a hard error on a
+             * synchronized connection as advisory for the same reason, and
+             * a rule the operator deletes a moment from now should leave a
+             * connection to resume: see the clearing below. An error
+             * already recorded is never overwritten -- a reset outranks a
+             * rule. */
+            if (pcb->error == 0) {
+                STAT(out_recorded);
+                pcb->error = -EPERM;
+                *wake = *wake ? *wake : sock_ref(pcb);
+            }
+            break;
+        default:
+            break;   /* CLOSED, LISTEN, TIME_WAIT: nothing waits on the outcome */
+        }
+    } else if (pcb->error == -EPERM && pcb->state != TCP_CLOSED) {
+        /* A segment reached the link, so the rule that refused the last one
+         * is gone: the record goes with it, and the connection the
+         * retransmit timer kept alive is usable again. Only a verdict is
+         * cleared here; every other error the state machine sets comes with
+         * a connection that has ended. */
+        STAT(out_cleared);
+        pcb->error = 0;
+        *wake = *wake ? *wake : sock_ref(pcb);
+    }
+    spin_unlock_irqrestore(&pcb->lock, s);
+}
+
 /* --- worker-side timer handling ----------------------------------------------------- */
 
 /* pcb lock held. The keep timer: an orphaned FIN_WAIT_2 ends, an idle
@@ -924,7 +1029,7 @@ static void pcb_work(void *arg)
     }
 out:
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    output_result(pcb, batch_send(&b), &wake, &killed);
     sock_wake_after(wake);
     if (killed)
         pcb_put(pcb);   /* the state machine's */
@@ -1061,8 +1166,18 @@ int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote)
     build_segment(pcb, &b, TH_SYN, pcb->iss, 0, true);
     arm_rexmit(pcb);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
-    return 0;
+    struct socket *wake = NULL;
+    bool killed = false;
+    int out = batch_send(&b);
+    output_result(pcb, out, &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The caller of a refused open is right here, so it is told rather
+     * than left to read the record: ksock_connect hands a non-zero return
+     * straight to the application, so a nonblocking connect fails outright
+     * instead of reporting -EINPROGRESS for an open already abandoned. */
+    return out == -EPERM ? -EPERM : 0;
 }
 
 int64_t tcp_send(struct tcp_pcb *pcb, const void *data, size_t len)
@@ -1087,7 +1202,15 @@ int64_t tcp_send(struct tcp_pcb *pcb, const void *data, size_t len)
     if (n)
         tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The bytes above are in the send buffer and will be retransmitted, so
+     * a refused flush does not unsay them: the count stands and the verdict
+     * is read on the next call. */
     return (int64_t)n;
 }
 
@@ -1110,7 +1233,14 @@ int64_t tcp_recv(struct tcp_pcb *pcb, void *data, size_t len, bool *peer_closed)
     *peer_closed = pcb->fin_rcvd && pcb->rcvbuf.len == 0;
     int err = pcb->error;
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* `err` was read before the flush, so a verdict this call's own window
+     * update earns is reported by the next one -- as in tcp_send. */
     if (n == 0 && err && !*peer_closed)
         return err;
     return (int64_t)n;
@@ -1137,7 +1267,14 @@ int tcp_shutdown_write(struct tcp_pcb *pcb)
     pcb->fin_queued = true;
     tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The state moved under the lock: the shutdown happened whether or not
+     * the FIN reached the link. */
     return 0;
 }
 
@@ -1327,6 +1464,30 @@ static struct tcp_syn_entry *syncache_find(struct tcp_pcb *l, const struct netad
             return e;
     }
     return NULL;
+}
+
+/*
+ * The SYN-ACK for a half-open was refused by the firewall's OUTPUT chain.
+ * This is the one refusal with nothing to tell: a passive open's half-open
+ * lives here and not in a pcb -- the child is created ESTABLISHED when the
+ * ACK completes -- so there is no connection to abort and no caller to
+ * report to, the listener's application never having heard of it. What is
+ * left is to stop holding state for a connection the machine has decided
+ * not to answer: the entry goes now instead of expiring in
+ * TCP_SYNCACHE_TTL_NS, since it cannot be completed while the rule stands
+ * (the completing ACK would earn a SYN-ACK the chain refuses again).
+ */
+static void syncache_refused(struct tcp_pcb *l, const struct netaddr *local, const struct netaddr *remote)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&l->lock);
+    if (l->state == TCP_LISTEN && l->syncache) {
+        struct tcp_syn_entry *e = syncache_find(l, local, remote, clock_now_ns());
+        if (e) {
+            e->ts_ns = 0;
+            STAT(syn_refused);
+        }
+    }
+    spin_unlock_irqrestore(&l->lock, s);
 }
 
 /* Listener lock held. A free or expired slot in the probe range, or NULL. */
@@ -1648,15 +1809,21 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     pcb->segs_in++;
 
     if (pcb->state == TCP_LISTEN) {
+        struct tcp_pcb *listener = pcb;
         struct tcp_pcb *child = listen_input(pcb, &g, &b, &wake_listener);
         spin_unlock_irqrestore(&pcb->lock, s);
-        pcb_put(pcb);
         if (child == NULL) {
             m_freem(m);
-            batch_send(&b);
+            /* The listener's reference is held across the flush, so a
+             * refused SYN-ACK can be traced back to the half-open it was
+             * built for. */
+            if (batch_send(&b) == -EPERM)
+                syncache_refused(listener, &g.dst, &g.src);
+            pcb_put(listener);
             sock_wake_after(wake_listener);
             return;
         }
+        pcb_put(listener);
         pcb = child;
         s = spin_lock_irqsave(&pcb->lock);
         pcb->segs_in++;
@@ -1925,7 +2092,7 @@ out:
     spin_unlock_irqrestore(&pcb->lock, s);
     if (m)
         m_freem(m);
-    batch_send(&b);
+    output_result(pcb, batch_send(&b), &wake, &killed);
     sock_wake_after(wake);
     sock_wake_after(wake_listener);
     if (killed)
@@ -1965,8 +2132,14 @@ bool tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, 
     pcb->fin_sent = false;
     tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
-    pcb_put(pcb);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    pcb_put(pcb);       /* the lookup's */
+    /* The MSS was lowered under the lock, whether or not the resend left. */
     return true;
 }
 
