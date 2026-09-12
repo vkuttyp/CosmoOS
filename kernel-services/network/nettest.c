@@ -5986,6 +5986,29 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(!hin_recv(u, IPPROTO_TCP, 9300, &sg, 15));   /* the SYN never left */
     ksock_put(cn.s);
 
+    /* (1b) The abort earns its keep on a connect already waiting. Here the
+     * first SYN left before the rule existed, so the caller is blocked on
+     * the state -- ksock_connect's wait watches the state, not the error --
+     * and it is the refusal of the *retransmission* that ends the wait. The
+     * direct return in tcp_connect cannot serve this case: that call is
+     * long past. */
+    hin_drain(u);
+    static struct hin_conn cnw;
+    cnw = (struct hin_conn){ .peer = v4addr(w, 9303) };
+    struct thread *ctw = thread_create(hin_connect_thread, &cnw, "tv-connw", SCHED_PRIO_DEFAULT);
+    CHECK(ctw != NULL);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9303, &sg, HIN_TRIES) && sg.flags == TH_SYN);   /* it left */
+    struct fw_rule out_w = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9303, FW_DROP, FW_SCOPE_ANY);
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_w) == 0);
+    tcp_get_stats(&ts0);
+    for (unsigned i = 0; i < 250 && !cnw.done; i++)     /* the first RTO is a second */
+        thread_sleep_ms(10);
+    CHECK(cnw.done && cnw.rc == -EPERM);
+    thread_join(ctw);
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_aborted, ts0.out_aborted));
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_w) == 0);
+    ksock_put(cnw.s);
+
     /* (2) A nonblocking connect fails outright, rather than reporting an open
      * already abandoned: tcp_connect returns the refusal and ksock_connect
      * hands it straight back. Poll says so too. Delete the rule and the same
@@ -6166,7 +6189,8 @@ bool selftest_net_tcpverdict(const char **reason)
     nat_flush();
     nat_pf_clear();
     kinfo("selftest: net-tcpverdict: the chain's refusal reaches the connection -- a blocking connect was told "
-          "-EPERM at once and a nonblocking one outright, a refused SYN-ACK dropped its half-open instead of "
+          "-EPERM at once, a connect already waiting was woken by the refusal of its retransmission, a "
+          "nonblocking connect failed outright, a refused SYN-ACK dropped its half-open instead of "
           "holding it, a rule added mid-connection was recorded without tearing the connection down (the send "
           "that met it kept its count, the next was told, buffered bytes still read), deleting the rule let the "
           "next segment clear the record, a stray reset's refusal told nobody, loopback passed no chain, and a "
