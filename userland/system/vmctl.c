@@ -448,8 +448,34 @@ struct machine {
     int vm;
     int vcpu[COSMO_HV_VCPUS_MAX];      /* -1: not created */
     int running[COSMO_HV_VCPUS_MAX];
+    /* Started by CPU_ON and not yet seen to leave a turn of its own accord.
+     * A vCPU whose every turn so far ended in preemption has not run a
+     * single instruction as far as the guest can tell, and powering the
+     * machine off under it loses work the guest asked for -- so SYSTEM_OFF
+     * waits for it. Cleared by the first exit that is not a preemption. */
+    int fresh[COSMO_HV_VCPUS_MAX];
     unsigned nr_cpus;                  /* what the device tree promises */
+    int off_pending;                   /* SYSTEM_OFF answered, held for a fresh sibling */
+    unsigned off_grace;                /* turns left before it is honoured regardless */
 };
+
+/* How long SYSTEM_OFF waits for a sibling that has never had a turn end on
+ * its own terms. Each unit is one turn of the round-robin, so this bounds the
+ * delay whatever the guest does: a secondary that spins forever costs the
+ * power-off this many turns and no more. Two vCPUs needing two or three turns
+ * each to reach a first hypercall is the case this exists for. */
+#define MACHINE_OFF_GRACE_TURNS 64u
+
+/* Is any vCPU other than `self` running and still fresh? `self` may be
+ * MACHINE_NO_CPU to ask about every vCPU. */
+#define MACHINE_NO_CPU COSMO_HV_VCPUS_MAX
+static int machine_fresh_sibling(const struct machine *m, unsigned self)
+{
+    for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
+        if (c != self && m->running[c] && m->fresh[c])
+            return 1;
+    return 0;
+}
 
 static int set_x0(int vcpu, uint64_t v)
 {
@@ -517,6 +543,7 @@ static int psci_answer(struct machine *m, unsigned cpu, const struct cosmo_vm_ex
             break;
         }
         m->running[target] = 1;
+        m->fresh[target] = 1;      /* owed a turn that ends on its own terms */
         ret = PSCI_SUCCESS;
         break;
     }
@@ -722,9 +749,18 @@ static int run_machine(int argc, char **argv)
         for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
             nr_running += m.running[c] ? 1 : 0;
         if (nr_running == 0) {
-            printf("vmctl: every cpu is off\n");
+            /* A held SYSTEM_OFF is what ends the run, even if the last
+             * sibling powered itself off first: the guest asked for the
+             * machine to stop, and that is what happened. */
+            printf(m.off_pending ? "vmctl: guest powered off\n" : "vmctl: every cpu is off\n");
             return 0;
         }
+        if (m.off_pending && (m.off_grace == 0 || !machine_fresh_sibling(&m, MACHINE_NO_CPU))) {
+            printf("vmctl: guest powered off\n");
+            return 0;
+        }
+        if (m.off_pending)
+            m.off_grace--;
         while (!m.running[cpu])
             cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
         rc = cosmo_vcpu_run_flags(m.vcpu[cpu], &x, nr_running > 1 ? COSMO_VCPU_RUN_ONE_TICK : 0);
@@ -733,6 +769,11 @@ static int run_machine(int argc, char **argv)
             fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
             return 1;
         }
+        /* Anything but a preemption is the guest reaching a point of its own
+         * choosing -- a hypercall, a wait, an access -- so this vCPU has had
+         * a real turn and no longer holds the power-off. */
+        if (x.kind != COSMO_VM_EXIT_PREEMPTED)
+            m.fresh[cpu] = 0;
         int next = 0;
         switch (x.kind) {
         case COSMO_VM_EXIT_PREEMPTED:
@@ -742,6 +783,23 @@ static int run_machine(int argc, char **argv)
         case COSMO_VM_EXIT_HYPERCALL:
             if (is_psci(x.hypercall.nr)) {
                 if (psci_answer(&m, cpu, &x)) {
+                    /* SYSTEM_OFF. On a real machine a sibling the guest has
+                     * just started is running on its own core and has had
+                     * its chance; here it shares this thread and may have
+                     * been preempted before its first instruction, so
+                     * honouring the power-off at once loses output the guest
+                     * asked for -- which is how the boot test's `cpu1: up`
+                     * line went missing on a loaded host. Hold the power-off
+                     * for a bounded number of turns while such a sibling
+                     * runs. The vCPU that asked stops here either way: its
+                     * guest must not run past SYSTEM_OFF. */
+                    m.running[cpu] = 0;
+                    if (!m.off_pending && machine_fresh_sibling(&m, cpu)) {
+                        m.off_pending = 1;
+                        m.off_grace = MACHINE_OFF_GRACE_TURNS;
+                        next = 1;
+                        break;
+                    }
                     printf("vmctl: guest powered off\n");
                     return 0;
                 }

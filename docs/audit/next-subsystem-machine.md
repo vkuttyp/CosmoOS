@@ -170,7 +170,7 @@ needed: `hvc` already advanced the PC):
 | `CPU_OFF` (`0x84000002`) | the vCPU leaves the run set |
 | `AFFINITY_INFO` (`0xC4000004`) | `ON`/`OFF` from the run set |
 | `MIGRATE_INFO_TYPE` (`0x84000006`) | 2 (no migration) |
-| `SYSTEM_OFF` (`0x84000008`) | `vmctl` prints "guest powered off" and exits 0 |
+| `SYSTEM_OFF` (`0x84000008`) | `vmctl` prints "guest powered off" and exits 0 -- as of a later fix, after any vCPU `CPU_ON` started has had a turn that ended on its own terms (`virtualization/design.md`, "A started vCPU gets its turn") |
 | `SYSTEM_RESET` (`0x84000009`) | printed and exit 0, as `virt` without reboot would |
 | anything else in `0x8400_0000..0xC400_FFFF` | `NOT_SUPPORTED` (`-1`) |
 
