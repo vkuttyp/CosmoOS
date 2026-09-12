@@ -1221,8 +1221,9 @@ See [docs/development.md](docs/development.md).
   `net-firewall` (default drop, one-rule hole, stateful return incl. echo by
   id, first-match ordering and delete-by-tuple, a rule outliving its handle
   but not its guest, the listing round trip and every rejection). The INPUT
-  chain and the host chain are done (their own entries below); an OUTPUT
-  chain, rate-limit/log targets, IPv6 and full TCP state are later units.
+  chain, the host chain and the OUTPUT chain are done (their own entries
+  below), so all four chains exist; rate-limit/log targets, IPv6 and full
+  TCP state are later units.
 - **The INPUT chain: what a guest may ask of the host (done):**
   `docs/audit/next-subsystem-input-chain.md`,
   `docs/kernel-services/network/design.md` ("The INPUT chain"). The
@@ -1247,8 +1248,9 @@ See [docs/development.md](docs/development.md).
   (seeds reach the host and nothing else does, a rule opens a port per
   datagram, the seeds are deletable, echo reply and need-frag dropped by type,
   forged sources dropped as spoofed, per-guest and flippable policy, the
-  listing round trip). The host chain for the uplink is done (its own entry
-  below); an OUTPUT chain is a later unit.
+  listing round trip). The host chain for the uplink and the OUTPUT chain
+  that filters the host's replies to guests are both done (their own entries
+  below).
 - **The host chain: what the world may ask of the host (done):**
   `docs/audit/next-subsystem-host-input.md`,
   `docs/kernel-services/network/design.md` ("The host chain"). FORWARD
@@ -1291,8 +1293,9 @@ See [docs/development.md](docs/development.md).
   no budget or keepalive side effect, dup-ACK/window-update/data/FIN output
   kept, a valid reset applied, ICMP by type, off-link drops, DNAT never
   re-gated, scope refusals, the listing round trip) with fourteen bug-proofs.
-  Its reply state is done (its own entry below); per-interface host chains, an
-  OUTPUT chain, rate-limit/log targets and IPv6 are later units.
+  Its reply state and the OUTPUT chain are done (their own entries below);
+  per-interface host chains, rate-limit/log targets and IPv6 are later
+  units.
 - **The host's own flows: reply state for the host chain (done):**
   `docs/audit/next-subsystem-host-state.md`,
   `docs/kernel-services/network/design.md` ("The host's own flows"). The

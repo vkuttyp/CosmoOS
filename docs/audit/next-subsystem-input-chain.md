@@ -23,7 +23,8 @@ and (2) host-local delivery had **no anti-spoof** — the strict-source
 check lived only in `ipv4_forward` — so a guest could forge its source
 toward host services; the same rule now guards the local path. The host's own
 exposure to the *uplink* (a host-scoped firewall) and the host's egress (an
-OUTPUT chain) are named as the next units.**
+OUTPUT chain) are named as the next units -- both since built, with the
+uplink chain's reply state between them.**
 
 ## Problem (the state before this unit)
 

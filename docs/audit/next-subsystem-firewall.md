@@ -407,4 +407,6 @@ the NAT table's.
 - **A full `nftables`-shaped multi-chain/table engine now.** Rejected as
   over-scoped; the FORWARD chain with a default policy and ordered rules is
   the minimum that closes the deferred gap, and INPUT/OUTPUT chains and
-  richer targets are named follow-ups on the same engine.
+  richer targets are named follow-ups on the same engine. (Both chains were
+  built on it, along with the host chain and its reply state; the richer
+  targets are still named.)
