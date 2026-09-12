@@ -1466,11 +1466,16 @@ See [docs/development.md](docs/development.md).
   privately. Two more corrections came from building it: the stack probe is
   **uniform across architectures**, because with it x86-only AArch64
   accepted a create with an unmapped stack and killed the thread on its
-  first push; and **libc is not thread-safe inside** (`errno` is a global,
-  the allocator and stdio take no locks -- invariant L8, which had named
-  this day in advance), so that is now a documented constraint on threaded
-  programs, `cosmo/thread.h` is built to need none of it, and a
-  thread-safe libc is the first follow-up this unit owes. Proven by
+  first push; and **libc was not thread-safe inside** -- invariant L8 had
+  named this day in advance, and two thirds of what it asked for landed
+  here after review pushed back on merely documenting the hazard: the
+  **allocator** and **stdio** now take one lock each (an unlocked free
+  list is the one hazard that corrupts memory silently, and a whole
+  `printf` is one critical section), while **`errno` stays one global**,
+  because per-thread `errno` needs a TLS model and `crt0` changes on both
+  architectures and is its own unit -- a threaded program must not rely on
+  `errno` across threads until then, which costs a wrong error code and
+  never corruption. Proven by
   `tests/native/thrtest` -- eleven steps from userland, because a kernel
   self-test cannot create a *user* thread -- with nine bug-proofs, three of
   which sent the test back for a stronger assertion. `SYS_mprotect`, futex

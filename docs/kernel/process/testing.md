@@ -416,6 +416,12 @@ denies *everything*, must still exit cleanly with its own status through
 `thread_exit`. (11) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and the next create
 still works, so reaching the limit leaves the process undamaged.
+(12) **The allocator and stdio under three threads at once**: each thread
+allocates, fills its block with its own byte, verifies every byte of it,
+reallocates, frees, and prints as it goes. This is the step that would
+otherwise find out the hard way what an unlocked free list does -- a lost
+or shared block shows up as a wrong byte rather than only as a crash --
+and the whole lines from three threads in the log are stdio's side of it.
 
 Proved by reintroducing, each failure named by the step that caught it and
 the source restored byte-identical every time:
@@ -442,6 +448,20 @@ the source restored byte-identical every time:
    both its bound assertions fail.
 10. The futex timeout left unbounded → step 4's `-EINVAL` for a duration
     that would wrap the deadline becomes an immediate `-ETIMEDOUT`.
+11. The allocator's lock removed → step 12 **aborts** (`SIGABRT`, status
+    134): three threads in one free list trip the allocator's own
+    corruption check. That is the hazard a review said documentation could
+    not excuse, and it is right -- the lock is the fix, and this is the
+    proof it is load-bearing.
+
+stdio's lock has no proof of its own here. Racing a `FILE`'s buffer
+pointers garbles output rather than failing an assertion, and this test
+cannot read its own stdout; what the log does show is whole lines from
+three threads, where an unlocked stream would interleave inside them. The
+lock is argued from the code (everything funnels through `fputc`, and
+`vfprintf` holds it across a whole format so the sink writes through the
+unlocked core) and from the allocator's proof, which exercises the same
+mutex.
 
 **One fix cannot be proved here, and the reason is a property of this
 kernel.** The mutex used to hand the lock over as "held, no waiters"

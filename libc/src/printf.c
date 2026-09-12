@@ -19,6 +19,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#include "libc.h"
 #include <string.h>
 #include <unistd.h>
 
@@ -46,7 +48,7 @@ static void flush_tmp(struct out *o)
 {
     if (o->tmp_len) {
         if (o->file)
-            fwrite(o->tmp, 1, o->tmp_len, o->file);
+            __fwrite_nolock(o->tmp, 1, o->tmp_len, o->file);   /* the lock is held by vfprintf */
         else
             write(o->fd, o->tmp, o->tmp_len);
         o->tmp_len = 0;
@@ -517,8 +519,13 @@ int dprintf(int fd, const char *fmt, ...)
 int vfprintf(FILE *f, const char *fmt, va_list ap)
 {
     struct out o = { .put = put_stream, .file = f };
+    /* Held across the whole format, so one printf is one critical section
+     * and two threads cannot interleave inside a line -- the sink writes
+     * through the unlocked core for that reason. */
+    __stdio_lock();
     format(&o, fmt, ap);
     flush_tmp(&o);
+    __stdio_unlock();
     return (int)o.len;
 }
 

@@ -1101,15 +1101,23 @@ load, because a joiner can see the kernel's zero without ever entering
 `futex_wait` -- a thread that had already exited -- and then nothing else
 would order the worker's store before that read.
 
-**libc is not thread-safe inside, and that is now a constraint rather than
-a fact of the machine.** `errno` is a global and the allocator and stdio
-take no locks (`docs/libc/invariants.md`, L8, which anticipated exactly
-this day), so a threaded program must keep those calls on one thread.
-`cosmo/thread.h` is designed to need none of them -- it returns `-errno`,
-locks nothing, and maps its stacks directly -- so creating and joining
-threads is safe, and `thrtest` keeps to the same rule. Making the library
-itself safe is `errno` in thread-local storage plus locks in the allocator
-and stdio: a unit of its own, and the first follow-up this one owes.
+**What this unit owed libc, and what it paid.** `docs/libc/invariants.md`
+L8 said that the day user threads arrived, `errno` would become
+thread-local and the allocator and stdio would take locks. Two of the three
+are done here, split by consequence: the **allocator** takes one lock,
+because an unlocked free list is the one hazard that corrupts memory
+silently; **stdio** takes one, held across a whole `printf`, so two threads
+cannot interleave inside a line or race a `FILE`'s buffer pointers. Both
+use the mutex from `cosmo/thread.h`, and an uncontended lock is one atomic,
+so a single-threaded program pays one compare-and-swap per call.
+**`errno` is still one global**, and that is the named follow-up: making it
+per-thread needs a thread-local-storage model -- a per-thread block, an
+architecture-specific thread-pointer accessor, `crt0` installing one for
+the main thread on both architectures, and `errno` becoming an accessor in
+a public header -- which is a unit with its own report. A threaded program
+must not rely on `errno` across threads until then; the consequence is a
+wrong error code, never corruption. `cosmo/thread.h` itself needs none of
+the three.
 
 Named and deferred: **a thread-safe libc** (above); `SYS_mprotect`; futex
 requeue (the Linux door already exposes it); per-thread signal *targeting*

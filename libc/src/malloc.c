@@ -4,8 +4,16 @@
  * Arenas of ARENA_SIZE hold blocks with a 16-byte header; a first-fit
  * free list threads through the free blocks; free coalesces with both
  * physical neighbours. Requests above BIG_THRESHOLD get their own mapping
- * and give it back on free. Single-threaded by design: it takes no lock,
- * so a threaded program must allocate from one thread (invariants L8).
+ * and give it back on free.
+ *
+ * One lock covers the whole allocator (invariants L8). Native threads made
+ * an unlocked free list a way to corrupt a heap silently, which is worse
+ * than any other consequence of this library not being thread-safe, so it
+ * is locked here rather than left to a rule callers must know. The public
+ * functions take it once and call the unlocked core, because calloc and
+ * realloc are written in terms of malloc and free and the mutex is not
+ * recursive. An uncontended lock is one atomic, so a single-threaded
+ * program pays one compare-and-swap per call.
  */
 
 #include <errno.h>
@@ -13,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+
+#include <cosmo/thread.h>
 
 #define ARENA_SIZE    (64u * 1024u)
 #define BIG_THRESHOLD (16u * 1024u)
@@ -35,6 +45,7 @@ struct free_blk {
 };
 
 static struct free_blk *g_free;
+static cosmo_mutex_t g_lock = COSMO_MUTEX_INIT;
 
 static size_t blk_size(const struct hdr *h) { return h->size & ~(size_t)FLAGS; }
 static int blk_inuse(const struct hdr *h) { return (h->size & INUSE) != 0; }
@@ -95,7 +106,7 @@ static size_t round_up(size_t n)
     return (n + ALIGN - 1) & ~(size_t)(ALIGN - 1);
 }
 
-void *malloc(size_t n)
+static void *malloc_nolock(size_t n)
 {
     if (n > ((size_t)1 << 40)) {
         errno = ENOMEM;
@@ -140,19 +151,19 @@ void *malloc(size_t n)
     return NULL;
 }
 
-void *calloc(size_t n, size_t size)
+static void *calloc_nolock(size_t n, size_t size)
 {
     if (size && n > (size_t)-1 / size) {
         errno = ENOMEM;
         return NULL;
     }
-    void *p = malloc(n * size);
+    void *p = malloc_nolock(n * size);
     if (p)
         memset(p, 0, n * size);
     return p;
 }
 
-void free(void *p)
+static void free_nolock(void *p)
 {
     if (p == NULL)
         return;
@@ -179,12 +190,12 @@ void free(void *p)
     free_push(h);
 }
 
-void *realloc(void *p, size_t n)
+static void *realloc_nolock(void *p, size_t n)
 {
     if (p == NULL)
-        return malloc(n);
+        return malloc_nolock(n);
     if (n == 0) {
-        free(p);
+        free_nolock(p);
         return NULL;
     }
     struct hdr *h = (struct hdr *)p - 1;
@@ -201,10 +212,43 @@ void *realloc(void *p, size_t n)
             return p;
         }
     }
-    void *q = malloc(n);
+    void *q = malloc_nolock(n);
     if (q == NULL)
         return NULL;
     memcpy(q, p, have < n ? have : n);
-    free(p);
+    free_nolock(p);
+    return q;
+}
+
+/* --- the lock, and the four functions callers see ------------------------- */
+
+void *malloc(size_t n)
+{
+    cosmo_mutex_lock(&g_lock);
+    void *p = malloc_nolock(n);
+    cosmo_mutex_unlock(&g_lock);
+    return p;
+}
+
+void *calloc(size_t n, size_t size)
+{
+    cosmo_mutex_lock(&g_lock);
+    void *p = calloc_nolock(n, size);
+    cosmo_mutex_unlock(&g_lock);
+    return p;
+}
+
+void free(void *p)
+{
+    cosmo_mutex_lock(&g_lock);
+    free_nolock(p);
+    cosmo_mutex_unlock(&g_lock);
+}
+
+void *realloc(void *p, size_t n)
+{
+    cosmo_mutex_lock(&g_lock);
+    void *q = realloc_nolock(p, n);
+    cosmo_mutex_unlock(&g_lock);
     return q;
 }

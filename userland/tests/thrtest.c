@@ -103,6 +103,42 @@ static void *pair_a(void *arg)
     return (void *)(unsigned long)flag_b;
 }
 
+/* (12) The allocator and stdio, from several threads at once: what an
+ * unlocked free list corrupts silently and an unlocked stream garbles.
+ * Each thread allocates, writes a pattern, frees, and prints -- and checks
+ * its own blocks, so a lost or shared block shows up as a wrong byte
+ * rather than only as a crash. */
+static volatile unsigned heap_bad, heap_done;
+static void *heap_user(void *arg)
+{
+    unsigned id = (unsigned)(unsigned long)arg;
+    for (unsigned i = 0; i < 400u; i++) {
+        size_t n = 16u + ((i * 37u + id) % 700u);
+        unsigned char *p = malloc(n);
+        if (p == NULL) {
+            heap_bad++;
+            break;
+        }
+        memset(p, (int)(id & 0xff), n);
+        for (size_t k = 0; k < n; k++)
+            if (p[k] != (unsigned char)(id & 0xff)) {
+                heap_bad++;
+                break;
+            }
+        void *q = realloc(p, n * 2);
+        if (q == NULL) {
+            free(p);
+            heap_bad++;
+            break;
+        }
+        free(q);
+        if ((i % 100u) == 0)
+            printf("thrtest: heap thread %u at %u\n", id, i);
+    }
+    heap_done++;
+    return NULL;
+}
+
 /* (11) A thread that waits to be told to stop, for the bound. */
 static volatile unsigned spin_stop;
 static void *spinner(void *arg)
@@ -395,6 +431,19 @@ int main(int argc, char **argv)
         /* and the process is healthy: the next create works */
         CHECK(cosmo_thread_start(&t, quick, NULL, 0) == 0);
         CHECK(cosmo_thread_join(&t, NULL) == 0);
+    }
+
+    STEP("12");
+    /* (12) */
+    {
+        cosmo_thread_t h[3];
+        heap_bad = heap_done = 0;
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 0) == 0);
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_join(&h[i], NULL) == 0);
+        CHECK(heap_done == 3);
+        CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
     }
 
     if (failures == 0)

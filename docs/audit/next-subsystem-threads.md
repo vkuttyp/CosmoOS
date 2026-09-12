@@ -17,11 +17,15 @@ proofs. Five things came out differently and are marked where they arise:
 - **The stack probe is uniform across architectures.** This report had it
   behind x86-64's need for a return slot, which left AArch64 accepting a
   create with an unmapped stack and killing the thread on its first push.
-- **libc is not thread-safe inside**, and `docs/libc/invariants.md` L8 had
-  already named the day this would matter. `errno` is a global and the
-  allocator and stdio take no locks, so the constraint is documented and
-  `cosmo/thread.h` is built to need none of it; a thread-safe libc is the
-  first follow-up this unit owes. The report did not consider it.
+- **libc was not thread-safe inside**, which this report did not consider
+  at all, and `docs/libc/invariants.md` L8 had already named the day it
+  would matter. Two thirds of what L8 asked for is done here, split by
+  consequence after a review pushed back on documenting the hazard instead
+  of removing it: the **allocator** and **stdio** are locked, because an
+  unlocked free list corrupts memory silently and a raced `FILE` can run
+  off its buffer, while **`errno` stays one global** -- a wrong error code,
+  never corruption -- because per-thread `errno` needs a TLS model and
+  `crt0` changes on both architectures, which is its own unit.
 - **There is no `mprotect` system call**, so libc's guard page costs a
   reservation, a hole and a fixed map. Named as a follow-up rather than
   smuggled in.
@@ -550,10 +554,11 @@ once for the record.
   `SYS_ioready`, and the gap this unit closes is precisely the one it
   cannot: a second CPU.
 
-Named and deferred: **a thread-safe libc** (`errno` in thread-local
-storage, locks in the allocator and stdio), which this report did not
-foresee and which `docs/libc/invariants.md` L8 had already named as the
-thing owed on the day user threads arrived; **`SYS_mprotect`**, without
+Named and deferred: **a per-thread `errno`** (a TLS model, an
+architecture-specific thread-pointer accessor, `crt0` installing a block
+for the main thread, and `errno` becoming an accessor) -- the last third of
+what `docs/libc/invariants.md` L8 asked for, the allocator's and stdio's
+locks having landed with this unit; **`SYS_mprotect`**, without
 which libc's guard page costs a reservation, a hole and a fixed map; futex
 requeue; per-thread signal targeting (`tgkill`-shaped); a thread's name and
 priority in `cosmo_thread`; `COSMO_RLIMIT_NTHREAD`; `/proc` per-thread

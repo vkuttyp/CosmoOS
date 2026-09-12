@@ -8,14 +8,18 @@
  * the caller's function impossible, and the convention that turns the
  * kernel's `clear_tid` word into a join.
  *
- * WARNING -- THIS LIBRARY IS NOT YET THREAD-SAFE INSIDE. `errno` is a
- * single global, and the allocator and stdio take no locks
- * (`docs/libc/invariants.md`, L8). So a function running on two threads at
- * once must not call `malloc`/`free`, must not write through `stdio`, and
- * must not read `errno` -- keep those on one thread until the thread-safe
- * libc unit lands. Everything *here* is safe to call from any thread: each
- * function returns `-errno` rather than setting the global, takes no
- * library lock, and maps its stacks with `mmap` rather than `malloc`.
+ * What is safe to call from several threads (`docs/libc/invariants.md`,
+ * L8): the **allocator** and **stdio** are locked, so `malloc`, `free`,
+ * `realloc` and `printf` may be called from any thread -- a whole `printf`
+ * is one critical section. **`errno` is still one global**: a threaded
+ * program must not rely on it across threads, because the value it reads
+ * may be another thread's. That is a wrong error code, never corruption,
+ * and a per-thread `errno` needs a thread-local-storage model, which is
+ * its own unit.
+ *
+ * Everything in this header needs none of that: each function returns
+ * `-errno` rather than setting the global, takes no library lock, and maps
+ * its stacks with `mmap`.
  */
 
 #ifndef COSMO_THREAD_H
