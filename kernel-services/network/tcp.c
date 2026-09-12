@@ -691,12 +691,22 @@ static void challenge_ack(struct tcp_pcb *pcb, struct tcp_batch *b)
 /* No lock. The only place tcp.c transmits: a quiet batch -- a segment no
  * connection accepted -- is freed here, whatever it queued, and counted. */
 /* Sends what the batch holds and says what became of it: the number of
- * segments that reached the link, or -- negative -- the first error the
- * link refused one with. The firewall's OUTPUT verdict arrives here as
- * -EPERM (the only -EPERM ipv4_output produces), which output_result
- * carries back into the connection; every other error stays what it has
- * always been, loss for the retransmit timer to repair. A quiet batch
- * reaches no link and reports nothing. */
+ * segments that reached the link, or -- negative -- the error the link
+ * refused one with. The firewall's OUTPUT verdict arrives here as -EPERM
+ * (the only -EPERM ipv4_output produces), which output_result carries back
+ * into the connection; every other error stays what it has always been,
+ * loss for the retransmit timer to repair. A quiet batch reaches no link
+ * and reports nothing.
+ *
+ * Every segment of one batch belongs to one connection and so carries one
+ * tuple, so they share a verdict -- unless a rule is added or deleted
+ * while the loop runs, which is the only way a batch can hold both a
+ * refusal and a segment that left. The summary is then **the last thing
+ * the link said**: a segment that left supersedes an earlier refusal (the
+ * rule was deleted, and the record must not be made for a connection now
+ * sending) and a refusal supersedes an earlier success (the rule was
+ * added, and the record must be). Returning the first error instead would
+ * record a refusal against a connection that had just transmitted. */
 static int batch_send(struct tcp_batch *b)
 {
     if (b->quiet) {
@@ -717,12 +727,12 @@ static int batch_send(struct tcp_batch *b)
             rc = ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
         if (rc == 0) {
             sent++;
+            err = 0;       /* it left: that is the newer fact about this connection */
             continue;
         }
         if (rc == -EPERM)
             STAT(out_refused);
-        if (err == 0)
-            err = rc;
+        err = rc;          /* and so is a refusal, over an earlier success */
     }
     b->n = 0;
     return err ? err : (int)sent;

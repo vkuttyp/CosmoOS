@@ -1279,6 +1279,19 @@ recorded verdict: `tcp_send` reports the error before it would build
 anything, so the segment that clears the record is always the retransmit
 timer's or an acknowledgment the peer's own traffic asks for.
 
+**A batch summarises the last thing the link said.** Every segment of one
+batch belongs to one connection and carries one tuple, so they share a
+verdict -- unless a rule is added or deleted while the loop runs, the only
+way a batch can hold both a refusal and a segment that left. The summary is
+then the *newer* fact: a segment that left supersedes an earlier refusal
+(the rule was deleted, and a connection that has just transmitted must not
+carry a record), and a refusal supersedes an earlier success (the rule was
+added, and it must). Reporting the first error instead would record a
+refusal against a connection that was sending again -- a spurious error the
+next flush would clear, but an application could see. The window is between
+two `ipv4_output` calls inside one flush and needs a concurrent rule change,
+so it is argued from the code rather than tested; `testing.md` records that.
+
 **Three kinds of flush, three answers.** Seven sites own a connection and
 get the rule above. Two own none -- the stray-segment RST and the SYN
 cache's SYN-ACK -- and are counted only, the second after dropping its

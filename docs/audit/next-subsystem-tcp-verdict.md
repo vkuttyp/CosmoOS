@@ -6,7 +6,7 @@ now **implemented** (PR "A verdict TCP's callers can see"), and the design
 below is as built — see `docs/kernel-services/network/design.md` ("A
 refused segment is the connection's business") for the shipped description
 and `docs/kernel-services/network/testing.md` (`net-tcpverdict`) for its
-proofs. Six things came out differently and are marked where they arise:
+proofs. Seven things came out differently and are marked where they arise:
 the abort turns out **not** to be what tells the caller of a refused
 `connect` (`tcp_connect`'s own return is, so the abort's job is the connect
 *already waiting* — a case this report did not describe and the test now
@@ -14,9 +14,11 @@ covers); the SYN-cache drop **is** separately observable after all, by the
 slot being reusable, where this report expected only its counter; a
 recorded verdict reaches `recv` as well as `send`, which the sweep found
 and this report had not stated; an application cannot send its way out of
-one; and two of the eight bug-proofs are not the ones listed here, one
-because the bug it named was not observable and one because a listed
-assertion was proving nothing.
+one; two of the eight bug-proofs are not the ones listed here, one because
+the bug it named was not observable and one because a listed assertion was
+proving nothing; and a review found that a multi-segment batch must
+summarise the **last** thing the link said rather than its first error,
+which this report had not considered at all.
 
 **Subsystem: the one hole the OUTPUT chain left in itself. That unit made
 the host's own egress filterable and, alone among the four chains, made a
@@ -299,9 +301,11 @@ must use that value and no other. `ipv4.c` gains a comment saying so.
 ### The mechanism
 
 ```c
-/* The first output error, or the number of segments that reached the
- * link. Negative means the link refused one; 0 means there was nothing
- * to send. */
+/* What became of the batch: the number of segments that reached the link,
+ * or -- negative -- the error one was refused with. As built this is the
+ * *last* such fact rather than the first error: only a rule added or
+ * deleted mid-flush can put both in one batch, and then the newer one is
+ * the truth about the connection. 0 means there was nothing to send. */
 static int batch_send(struct tcp_batch *b);
 
 /* After the flush, under the pcb lock, alone: apply a refusal or clear a

@@ -705,6 +705,16 @@ looked up with the tuple reversed (`syn_refused` stays zero); and an empty
 flush counted as "a segment left" (the `recv` that drains the buffer clears
 the record, and step 4's post-drain `-EPERM` becomes a success).
 
+**A second property is argued and not proved**, and unlike the first it was
+not foreseen: that a batch summarises the *last* thing the link said, so a
+segment leaving supersedes an earlier refusal and a refusal supersedes an
+earlier success. Both outcomes in one batch require a rule to be added or
+deleted between two `ipv4_output` calls inside a single flush -- every
+segment of a batch shares one connection's tuple and therefore one verdict
+otherwise -- which no selftest can arrange. The tests do cover what the
+change cannot disturb: a batch whose segments share a verdict summarises it
+either way, which is every batch the suite produces.
+
 One discrimination is **argued and not proved**, as the report said in
 advance: that only `-EPERM` is treated as a verdict while every other
 output error stays loss. No TCP segment can reach a non-verdict output
