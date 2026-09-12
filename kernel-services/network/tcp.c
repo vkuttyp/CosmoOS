@@ -864,19 +864,59 @@ static void orphan_fin_wait2(struct tcp_pcb *pcb)
  */
 static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, bool *killed)
 {
-    if (rc != -EPERM || *killed)
+    if (*killed)
+        return;
+    bool refused = rc == -EPERM;
+    bool sent = rc > 0;
+    /* The accepted path: one relaxed read of a field this flush has already
+     * touched, and no lock. */
+    if (!refused && !(sent && __atomic_load_n(&pcb->error, __ATOMIC_RELAXED) == -EPERM))
         return;
     arch_irq_state_t s = spin_lock_irqsave(&pcb->lock);
-    switch (pcb->state) {
-    case TCP_SYN_SENT:
-    case TCP_SYN_RCVD:
-        STAT(out_aborted);
-        pcb->error = -EPERM;
+    if (refused) {
+        switch (pcb->state) {
+        case TCP_SYN_SENT:
+        case TCP_SYN_RCVD:
+            STAT(out_aborted);
+            pcb->error = -EPERM;
+            *wake = *wake ? *wake : sock_ref(pcb);
+            *killed = pcb_end_locked(pcb);
+            break;
+        case TCP_ESTABLISHED:
+        case TCP_FIN_WAIT_1:
+        case TCP_FIN_WAIT_2:
+        case TCP_CLOSE_WAIT:
+        case TCP_CLOSING:
+        case TCP_LAST_ACK:
+            /* Synchronized: the connection exists and the peer's half of it
+             * still arrives, so the verdict is recorded and reported -- to
+             * the next send, and to a receive once the buffer it already
+             * holds is drained, because a pending error belongs to the
+             * socket and not to one direction -- while the state machine is
+             * left alone. RFC 1122 4.2.3.9 treats a hard error on a
+             * synchronized connection as advisory for the same reason, and
+             * a rule the operator deletes a moment from now should leave a
+             * connection to resume: see the clearing below. An error
+             * already recorded is never overwritten -- a reset outranks a
+             * rule. */
+            if (pcb->error == 0) {
+                STAT(out_recorded);
+                pcb->error = -EPERM;
+                *wake = *wake ? *wake : sock_ref(pcb);
+            }
+            break;
+        default:
+            break;   /* CLOSED, LISTEN, TIME_WAIT: nothing waits on the outcome */
+        }
+    } else if (pcb->error == -EPERM && pcb->state != TCP_CLOSED) {
+        /* A segment reached the link, so the rule that refused the last one
+         * is gone: the record goes with it, and the connection the
+         * retransmit timer kept alive is usable again. Only a verdict is
+         * cleared here; every other error the state machine sets comes with
+         * a connection that has ended. */
+        STAT(out_cleared);
+        pcb->error = 0;
         *wake = *wake ? *wake : sock_ref(pcb);
-        *killed = pcb_end_locked(pcb);
-        break;
-    default:
-        break;
     }
     spin_unlock_irqrestore(&pcb->lock, s);
 }
