@@ -1342,7 +1342,11 @@ See [docs/development.md](docs/development.md).
   and HID are done). The AArch64 follow-ups the EL2 backend left --
   GICv3, ASIDs, FP/SIMD at EL0 -- are done, and the hypervisor has gone
   past them: a guest has a virtual CPU interface, a timer and a
-  distributor. What it lacks next is named in the open report below.
+  distributor, a console, a machine with a device tree, a disk, a network
+  interface and a route to the world -- and it boots Linux. Every §68
+  report named below has been built; what the hypervisor lacks next is
+  named in those units' own follow-ups, and one known defect is listed at
+  the end of this entry.
   Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
   shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
@@ -1390,10 +1394,30 @@ See [docs/development.md](docs/development.md).
   drops inter-guest traffic by default and lets a rule open it (built); and
   `-input-chain.md`, its second chain -- which of the host's own services a
   guest may reach, default-deny with the tap's DNS and echo seeded as rules
-  (built); and `-host-input.md`, its third -- which of the host's services
+  (built); `-host-input.md`, its third -- which of the host's services
   the world may reach, default-accept with a quiet drop and the off-link
-  invariant (built). The named next steps are the follow-ups these left (an
-  OUTPUT chain, hairpin/NAT-reflection,
-  IPv6 DNAT, an L2 bridge, the tap's other settings on
-  the control channel) and, on the guest itself, the `QEMU_MEM=2G`
-  reproduction reaching the real world. Design documents first, one subsystem at a time.
+  invariant (built); and `-host-state.md`, the state that makes the third
+  usable -- the host's own UDP sends and echo requests recorded where they
+  leave, so a hardened default no longer costs the machine its DNS, its
+  pings or its path-MTU discovery (built).
+
+  The named next steps are the follow-ups these left. On the filter: an
+  **OUTPUT chain** for the host's own egress (and, with it, filtering the
+  host's replies to guests), **per-interface host chains** (all real links
+  share one chain today), **rate-limit and logging targets**, **IPv6
+  filtering**, and full TCP state tracking. On NAT and the bridge:
+  **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
+  **tap's remaining settings** on `/dev/net/tapctl`. On the state: **ICMP
+  errors for a UDP flow** (no consumer exists yet) and a **listing of live
+  flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
+  reproduction reaching the real world. And one **known defect**, found
+  while diagnosing a CI failure rather than by a unit: `vmctl`'s machine
+  mode runs a guest's vCPUs in one thread, a tick each, and honours
+  `SYSTEM_OFF` as soon as the first vCPU asks for it -- so on a slow host a
+  secondary the guest started with `CPU_ON` can be powered off before its
+  first tick has reached a single `printf`, which is what intermittently
+  loses the `cpu1: up ctx=1234cafe` line the boot test expects. The fix is
+  fairness at that boundary (a started vCPU gets its first turn, or
+  runnable vCPUs are drained before the power-off is honoured), and it is
+  its own change, not a rerun. Design documents first, one subsystem at a
+  time.
