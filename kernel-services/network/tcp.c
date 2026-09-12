@@ -690,23 +690,38 @@ static void challenge_ack(struct tcp_pcb *pcb, struct tcp_batch *b)
 
 /* No lock. The only place tcp.c transmits: a quiet batch -- a segment no
  * connection accepted -- is freed here, whatever it queued, and counted. */
-static void batch_send(struct tcp_batch *b)
+/* Sends what the batch holds and says what became of it: the number of
+ * segments that reached the link, or -- negative -- the first error the
+ * link refused one with. The firewall's OUTPUT verdict arrives here as
+ * -EPERM (the only -EPERM ipv4_output produces), which output_result
+ * carries back into the connection; every other error stays what it has
+ * always been, loss for the retransmit timer to repair. A quiet batch
+ * reaches no link and reports nothing. */
+static int batch_send(struct tcp_batch *b)
 {
     if (b->quiet) {
         for (unsigned i = 0; i < b->n; i++)
             m_freem(b->seg[i].m);
         b->n = 0;
         STAT(quiet_dropped);
-        return;
+        return 0;
     }
+    int err = 0;
+    unsigned sent = 0;
     for (unsigned i = 0; i < b->n; i++) {
         struct mbuf *m = b->seg[i].m;
+        int rc;
         if (b->seg[i].src.family == COSMO_AF_INET)
-            ipv4_output(m, b->seg[i].src.v4, b->seg[i].dst.v4, IPPROTO_TCP, IP_DEFAULT_TTL);
+            rc = ipv4_output(m, b->seg[i].src.v4, b->seg[i].dst.v4, IPPROTO_TCP, IP_DEFAULT_TTL);
         else
-            ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
+            rc = ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
+        if (rc == 0)
+            sent++;
+        else if (err == 0)
+            err = rc;
     }
     b->n = 0;
+    return err ? err : (int)sent;
 }
 
 static void arm_rexmit(struct tcp_pcb *pcb)
