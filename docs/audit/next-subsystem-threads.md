@@ -163,12 +163,17 @@ for them, so a caller built against an older header passes an older struct
 and the kernel never reads past what it gave — is this repository's answer
 to that and should not be reinvented per syscall.
 
-**`SYS_thread_create`** validates the request, builds the register set from
-`entry`/`arg`/`stack_top` (rather than copying the caller's, which is
-`clone`'s shape and wrong for a native call — a native thread starts at a
-function, not in the middle of a syscall), calls `process_add_thread`, sets
-`clear_child_tid`, **writes the tid into the `clear_tid` word**, and only
-then calls `process_thread_start`.
+**`SYS_thread_create`** runs in an order the failure modes dictate:
+validate the request; write whatever the entry contract below puts on the
+stack (x86-64's synthetic return address), because that write is into the
+caller's own space and a failure there should leave nothing behind; build
+the register set from `entry`/`arg`/`stack_top` — rather than copying the
+caller's, which is `clone`'s shape and wrong for a native call, a native
+thread starting at a function and not in the middle of a syscall; then
+`process_add_thread`, `clear_child_tid`, **the tid written into the
+`clear_tid` word**, and only then `process_thread_start`. Everything up to
+`process_add_thread` fails with nothing created; everything after it fails
+with `process_thread_abandon`.
 
 That write is the kernel's, not libc's, and it is ordered before the start
 for the reason `lx_clone`'s own comment gives: if the caller wrote the word
@@ -191,19 +196,31 @@ kernel hands the entry exactly what a call would have left:
 - **x86-64**: a zero return address is pushed, so the entry sees
   `rsp % 16 == 8` — the alignment SysV promises a function, and the one
   its prologue's aligned spills (`movaps`) depend on. `stack_top` itself
-  must be 16-byte aligned; the kernel does the push.
+  must be 16-byte aligned; the kernel does the push, **before it links
+  anything**: an aligned `stack_top` can still be unmapped or read-only,
+  and a write that fails then is `-EFAULT` with no thread created and
+  nothing to unwind. (The tid write into `clear_tid` is the one that
+  cannot be done that early — the tid does not exist until the thread
+  does — so it is the one that needs `process_thread_abandon`.)
 - **AArch64**: `sp` is `stack_top`, 16-byte aligned as the AAPCS requires,
   and `x30` (the link register) is **zero**.
 
 In both cases a `return` from the entry function therefore jumps to address
-zero, which is unmapped: a thread that returns dies with a fault at a
-recognisable address instead of wandering into whatever the stack held.
-Returning is not meant to happen — libc's `thread_create` passes a
+zero, which is unmapped, so it raises `SIGSEGV` at a recognisable address
+instead of wandering into whatever the stack held. **That ends the whole
+process, not just the returning thread**, because `SIGSEGV`'s default
+action is to terminate — and it is worth being exact about it, since a
+reader could take "faults" to mean the worker dies alone. It is the same
+outcome a single-threaded program gets for returning off the end of its
+entry, and a thread whose function returns is a program bug either way.
+
+Returning is not meant to happen: libc's `thread_create` passes a
 trampoline of its own as `entry`, which calls the caller's function and
 then `SYS_thread_exit` with its return value, so a native thread ends the
-way a `pthread` does — but an interface should say what the machine does
-when a program gets it wrong, and "fault at zero" is a better answer than
-"undefined".
+way a `pthread` does. The kernel's contract is only about what the machine
+does when a program bypasses that — and "SIGSEGV at zero, process gone" is
+a better answer than "undefined", which is what a garbage return address
+would give.
 
 **`SYS_thread_exit`** calls `process_thread_exit`: this thread ends, its
 `clear_tid` word is zeroed and futex-woken, and if it was the last the
