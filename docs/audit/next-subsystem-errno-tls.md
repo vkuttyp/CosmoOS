@@ -205,6 +205,17 @@ address zero being readable.
   question rather than answering it. (An earlier draft mapped a page here
   and left that failure undefined; a review asked what it would do, and
   the honest answer was to make it unreachable.)
+
+  What remains is `SYS_set_tls` itself failing on a `.bss` address, which
+  the kernel can only do if the object is somehow outside the caller's
+  space or misaligned -- neither possible for a linked static object. The
+  policy is stated anyway, because "cannot happen" is where a missing
+  branch hides: `__libc_start` writes one line to file descriptor 2 and
+  exits **127**, because it cannot report the failure through `errno` (the
+  thing it just failed to provide) and a program that continued would
+  fault on its first error. That is a deliberate, visible death rather
+  than an undefined one, and it is the only startup failure this design
+  leaves.
 - **Every thread libc creates**: `cosmo_thread_start` already maps
   `guard + stack`; it maps `guard + stack + one page` instead, puts the
   block in the extra page and passes its address as `cosmo_thread.tls`, so
@@ -345,6 +356,13 @@ In `thrtest`, which already owns the threaded-libc questions:
    `SYS_thread_self` for the first thread and for a created one.
 6. **`strerror` and `perror` still work** from one thread, and the
    documents still say they are that thread's alone.
+7. **The startup policy is reachable in a test**, even though the failure
+   is not: a program that calls `SYS_set_tls` with a deliberately bad
+   address gets `-EFAULT`/`-EINVAL` and can then report it itself, which
+   is the same check `__libc_start` makes before it decides to exit 127.
+   The exit path itself is argued rather than tested, since nothing can
+   make a `.bss` address invalid -- named here so it is not mistaken for
+   something the suite proves.
 
 **Bug-proofs**: the accessor reading a single global (step 1 loses a
 value); the `self` word not written on x86-64 (`%fs:0` returns whatever
