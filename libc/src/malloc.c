@@ -22,8 +22,6 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#include <cosmo/thread.h>
-
 #define ARENA_SIZE    (64u * 1024u)
 #define BIG_THRESHOLD (16u * 1024u)
 #define ALIGN         16u
@@ -44,8 +42,23 @@ struct free_blk {
     struct free_blk *next;
 };
 
-static struct free_blk *g_free;
+/*
+ * The lock, declared the way printf.c declares stdio's and for the same
+ * reason: tests/host/test_libc.c compiles this file on its own with no
+ * include path (tests/host/host.mk). The host test is single-threaded, so
+ * there the lock is nothing.
+ */
+#if defined(LIBC_HOST_TEST)
+#define alloc_lock()   ((void)0)
+#define alloc_unlock() ((void)0)
+#else
+#include <cosmo/thread.h>
 static cosmo_mutex_t g_lock = COSMO_MUTEX_INIT;
+#define alloc_lock()   cosmo_mutex_lock(&g_lock)
+#define alloc_unlock() cosmo_mutex_unlock(&g_lock)
+#endif
+
+static struct free_blk *g_free;
 
 static size_t blk_size(const struct hdr *h) { return h->size & ~(size_t)FLAGS; }
 static int blk_inuse(const struct hdr *h) { return (h->size & INUSE) != 0; }
@@ -224,31 +237,31 @@ static void *realloc_nolock(void *p, size_t n)
 
 void *malloc(size_t n)
 {
-    cosmo_mutex_lock(&g_lock);
+    alloc_lock();
     void *p = malloc_nolock(n);
-    cosmo_mutex_unlock(&g_lock);
+    alloc_unlock();
     return p;
 }
 
 void *calloc(size_t n, size_t size)
 {
-    cosmo_mutex_lock(&g_lock);
+    alloc_lock();
     void *p = calloc_nolock(n, size);
-    cosmo_mutex_unlock(&g_lock);
+    alloc_unlock();
     return p;
 }
 
 void free(void *p)
 {
-    cosmo_mutex_lock(&g_lock);
+    alloc_lock();
     free_nolock(p);
-    cosmo_mutex_unlock(&g_lock);
+    alloc_unlock();
 }
 
 void *realloc(void *p, size_t n)
 {
-    cosmo_mutex_lock(&g_lock);
+    alloc_lock();
     void *q = realloc_nolock(p, n);
-    cosmo_mutex_unlock(&g_lock);
+    alloc_unlock();
     return q;
 }

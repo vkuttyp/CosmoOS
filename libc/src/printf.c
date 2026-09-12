@@ -19,8 +19,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-
-#include "libc.h"
 #include <string.h>
 #include <unistd.h>
 
@@ -43,6 +41,25 @@ static void put_buf(struct out *o, const char *s, size_t n)
     }
     o->len += n;
 }
+
+/*
+ * stdio's lock and its unlocked write core (libc/src/stdio.c), declared
+ * here rather than pulled in through libc.h: tests/host/test_libc.c
+ * compiles this file on its own with no include path and with FILE and
+ * fwrite renamed (tests/host/host.mk), so an include that needs the
+ * library's headers breaks that build. Under the host test the lock is
+ * nothing and the core is the host's fwrite, which is what the test wants
+ * -- it checks formatting, not locking.
+ */
+#if defined(LIBC_HOST_TEST)
+#define __stdio_lock()   ((void)0)
+#define __stdio_unlock() ((void)0)
+#define __fwrite_nolock  fwrite
+#else
+void __stdio_lock(void);
+void __stdio_unlock(void);
+size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);
+#endif
 
 static void flush_tmp(struct out *o)
 {
