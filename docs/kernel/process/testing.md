@@ -420,7 +420,12 @@ one, an unknown flag, an unaligned `clear_tid` -- using a page this test
 maps and frees, so the address is unmapped *by construction* rather than by
 assumption (0x400000 is the program's own load address, which an earlier
 version discovered by creating a thread whose stack was its own text).
-(9) A mutex under two threads loses no update, and `trylock` fails on a
+It also checks that **a refused start leaves a joinable handle**: a caller
+keeps its handles in one array, checks each start and then joins, so a
+start that fails must not leave the handle as the caller's stack found it.
+The handle is poisoned with `0xa5` and the start is refused for certain by
+asking for half the address space; the join must answer `-EINVAL` rather
+than wait on the poison. (9) A mutex under two threads loses no update, and `trylock` fails on a
 held one. (10) **The filter, observed from outside**: a denied call does not
 return an error, it kills the process with `SIGSYS` (status 159), so the
 filtered process cannot report on itself -- one child calls a denied
@@ -431,7 +436,16 @@ creates **retry**, because a thread's stack is a mapping and a mapping can
 be refused on a machine under pressure: CI's aarch64 runner has refused
 one twice where this machine never has, and the step's subject is the
 allocator and stdio under concurrency rather than the proposition that a
-create always succeeds. Every refusal is printed with its errno: each thread
+create always succeeds. Every refusal is printed with its errno. Retrying
+costs the step the very overlap it exists to measure, though -- a sleep
+between sequential retries lets an earlier worker finish before the last
+one exists -- so the workers wait on a **barrier**: each announces itself
+and spins until the main thread, having finished its creates, has seen all
+of them arrive and releases them. The release is unconditional and both
+waits are bounded, so no worker is left parked however the creates went,
+and the join afterwards joins exactly the slots that started -- counting
+them instead would join a refused slot and one thread twice, leaving a
+real thread running. Each thread
 allocates, fills its block with its own byte, verifies every byte of it,
 reallocates, frees, and prints as it goes. This is the step that would
 otherwise find out the hard way what an unlocked free list does -- a lost

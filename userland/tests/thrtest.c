@@ -108,10 +108,21 @@ static void *pair_a(void *arg)
  * Each thread allocates, writes a pattern, frees, and prints -- and checks
  * its own blocks, so a lost or shared block shows up as a wrong byte
  * rather than only as a crash. */
-static volatile unsigned heap_bad, heap_done;
+static volatile unsigned heap_bad, heap_done, heap_ready, heap_go;
 static void *heap_user(void *arg)
 {
     unsigned id = (unsigned)(unsigned long)arg;
+    /*
+     * Wait until every worker exists before doing any work. Without this
+     * the retries below can let one worker finish before the last one is
+     * created, and the step would pass without ever running three threads
+     * through the allocator at once -- which is the whole property. The
+     * wait is bounded so a worker cannot hang if a create was refused for
+     * good: main releases the barrier either way.
+     */
+    __atomic_fetch_add(&heap_ready, 1, __ATOMIC_ACQ_REL);
+    for (unsigned w = 0; w < 2000u && !heap_go; w++)
+        cosmo_yield();
     for (unsigned i = 0; i < 400u; i++) {
         size_t n = 16u + ((i * 37u + id) % 700u);
         unsigned char *p = malloc(n);
@@ -388,6 +399,22 @@ int main(int argc, char **argv)
         req.clear_tid = 3;                 /* unaligned */
         CHECK(cosmo_thread_create(&req) == -EINVAL);
         CHECK(cosmo_thread_create((const struct cosmo_thread *)16ul) == -EFAULT);
+
+        /*
+         * A refused start leaves a *joinable* handle. A caller keeps its
+         * handles in one array, checks each start, and then joins -- and
+         * if a refused start left the handle as the caller's stack found
+         * it, the join would wait on indeterminate memory or fault
+         * reading it. So the handle is zeroed before the first thing that
+         * can fail, and the poison below is what that promise is worth:
+         * without it `join` reads garbage rather than refusing. A stack
+         * of half the address space is the refusal, forced rather than
+         * waited for.
+         */
+        cosmo_thread_t poisoned;
+        memset(&poisoned, 0xa5, sizeof(poisoned));
+        CHECK(cosmo_thread_start(&poisoned, bump, NULL, ~(size_t)0 / 2) < 0);
+        CHECK(cosmo_thread_join(&poisoned, NULL) == -EINVAL);
     }
 
 
@@ -440,7 +467,9 @@ int main(int argc, char **argv)
     /* (11) */
     {
         cosmo_thread_t h[3];
-        heap_bad = heap_done = 0;
+        unsigned char started[3] = { 0, 0, 0 };
+        heap_bad = heap_done = heap_ready = heap_go = 0;
+        unsigned made = 0;
         /*
          * 16 KB stacks, not the 64 KB default: these threads print and
          * allocate, they do not recurse, and a test should ask the machine
@@ -467,10 +496,33 @@ int main(int argc, char **argv)
                 }
             }
             CHECK(rc == 0);
+            if (rc == 0) {
+                started[i] = 1;
+                made++;
+            }
         }
+        /*
+         * Every worker that started is now at the barrier, or on its way
+         * to it; wait for all of them to arrive before releasing it, so
+         * the work below really does run with `made` threads inside the
+         * allocator at once -- the property this step exists to test, and
+         * the one a sequential retry with a sleep in it would otherwise
+         * quietly drop. The wait is bounded and the release unconditional:
+         * a worker must never be left parked, however the creates went.
+         */
+        for (unsigned w = 0; w < 2000u && __atomic_load_n(&heap_ready, __ATOMIC_ACQUIRE) < made; w++)
+            cosmo_yield();
+        CHECK(heap_ready == made);            /* all of them, together */
+        __atomic_store_n(&heap_go, 1, __ATOMIC_RELEASE);
+        /* Join exactly the slots that started. A handle whose start was
+         * refused is safe to join now, but says nothing -- and joining it
+         * by a miscounted index would join a *different* slot's thread
+         * twice and leave a real one running. */
         for (unsigned i = 0; i < 3u; i++)
-            CHECK(cosmo_thread_join(&h[i], NULL) == 0);
-        CHECK(heap_done == 3);
+            if (started[i])
+                CHECK(cosmo_thread_join(&h[i], NULL) == 0);
+        CHECK(made == 3);
+        CHECK(heap_done == made);
         CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
         /* fflush(NULL) flushes every stream, and must not deadlock against
          * the lock its caller already holds -- nothing in this test called

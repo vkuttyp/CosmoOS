@@ -101,9 +101,13 @@ a word without the lock.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting the global, takes no libc lock, and maps its stacks
-with `mmap`. Check: review, plus `thrtest` step 12 -- three threads
-allocating, reallocating, freeing and printing at once, each verifying its
-own blocks, which an unlocked allocator fails. Gap: `errno`.
+with `mmap`. A handle is zeroed before the first thing in
+`cosmo_thread_start` that can fail, so a refused start leaves a handle
+`join` refuses rather than indeterminate memory it would wait on. Check:
+review, plus `thrtest` step 11 -- three threads allocating, reallocating,
+freeing and printing at once behind a start barrier, each verifying its
+own blocks, which an unlocked allocator fails -- and step 8 for the
+refused handle. Gap: `errno`.
 
 ## Gaps (documented, not invariants)
 

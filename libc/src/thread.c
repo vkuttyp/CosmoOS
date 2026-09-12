@@ -47,6 +47,15 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
 {
     if (t == NULL || fn == NULL)
         return -EINVAL;
+    /*
+     * Zeroed before anything can fail, so a handle whose start was refused
+     * is a handle `join` safely refuses (stack == NULL) rather than
+     * indeterminate stack memory it would wait on or fault reading. The
+     * mappings below can fail, and a caller that checks the return and
+     * then joins the lot -- which a test did -- must not be punished for
+     * it.
+     */
+    memset(t, 0, sizeof(*t));
     size_t size = stack_size ? stack_size : STACK_DEFAULT;
     size = (size + PAGE - 1) & ~(size_t)(PAGE - 1);
 
@@ -73,7 +82,6 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
         return -e;                         /* the fixed map into the hole */
     }
 
-    memset(t, 0, sizeof(*t));
     t->fn = fn;
     t->arg = arg;
     t->stack = base;
