@@ -132,6 +132,14 @@ static int64_t sys_getpid(struct syscall_args *a)
     return (int64_t)process_current()->pid;
 }
 
+/* The caller's own thread id: the pid for a process's first thread, so a
+ * single-threaded program's answer is its pid, as on Linux. */
+static int64_t sys_thread_self(struct syscall_args *a)
+{
+    (void)a;
+    return (int64_t)thread_current()->user_tid;
+}
+
 static int64_t sys_yield(struct syscall_args *a)
 {
     (void)a;
@@ -1516,6 +1524,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_getdents] = sys_getdents,
     [SYS_sync] = sys_sync,
     [SYS_fsync] = sys_fsync,
+    [SYS_thread_self] = sys_thread_self,
     [SYS_mount] = sys_mount,
     [SYS_umount] = sys_umount,
     [SYS_socket] = sys_socket,
