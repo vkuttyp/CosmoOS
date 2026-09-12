@@ -70,13 +70,19 @@ the firewall reads a flow:
         fw_host_record(&hf);
 ```
 
-- **Every host-originated datagram passes here and no forwarded one does.**
-  `udp_sendto` (`udp.c:156`, returning the result to the caller),
-  `icmp_send_echo` (`ipv4.c:434`, likewise), the host's ICMP errors and echo
-  replies (`:280`, `:308`, `:396`), TCP's `batch_send` (`tcp.c:705`), and
-  `nat_in`'s delivery of a masqueraded reply or a DNAT to a guest
-  (`nat.c:454`). `ipv4_forward` transmits through `output_on` directly
-  (`:531`), so forwarding is FORWARD's business and not this chain's.
+- **Every host-originated datagram passes here**: `udp_sendto`
+  (`udp.c:156`, returning the result to the caller), `icmp_send_echo`
+  (`ipv4.c:434`, likewise), the host's ICMP errors and echo replies
+  (`:280`, `:308`, `:396`) and TCP's `batch_send` (`tcp.c:705`).
+- **So does one kind of traffic that is not the host's own**: `nat_in`'s
+  delivery of a masqueraded reply or a DNAT'd connection to a guest
+  (`nat.c:454`) re-emits through `ipv4_output`. **`ipv4_forward`'s own
+  transmit path does not** — it calls `output_on` directly (`:531`) — so
+  the datagrams a guest forwards are FORWARD's business, while the ones NAT
+  re-emits on a guest's behalf will reach this chain as `FW_SCOPE_GUEST`
+  traffic. That is intended and is the sharp edge of this unit (see §3 and
+  Risks); it is stated here because "no forwarded datagram passes this
+  door" would be the wrong summary.
 - **Two senders already propagate the return value** (`udp_sendto`,
   `icmp_send_echo`); TCP's `batch_send` ignores it, as it ignores
   `-ENETUNREACH` today.
@@ -148,21 +154,35 @@ between a process and `127.0.0.1` with no way to notice.
 `fw_output_verdict(struct netif *out, struct mbuf *m, uint32_t src,
 uint32_t dst, uint8_t proto)` is called from `ipv4_output` **after the
 route** (the egress decides the scope) and **before `output_on`** and
-before the flow read, giving:
+before the flow read.
+
+The `src` it receives must be **the address the wire will carry**, and
+today that address is computed twice: `ipv4_output` resolves an unspecified
+source for the flow read (`src != 0 ? src : ipv4_source_for(dst)`) and
+`output_on` resolves it again for the header. A source-prefix rule judging
+a raw `0` — which `icmp_send_echo` passes, and any unbound UDP socket — would
+match a different address from the one sent, so this unit **resolves it once**
+in `ipv4_output` and hands the same value to the verdict, the flow read and
+`output_on`, whose own resolution then becomes dead and is removed:
 
 ```
     nif = ipv4_route(dst);                       /* -ENETUNREACH as today */
+    uint32_t from = src != 0 ? src : ipv4_source_for(dst);   /* once, for all three */
     if (!(nif->flags & NETIF_LOOPBACK) &&
-        fw_output_verdict(nif, m, src', dst, proto) == FW_DROP) {
+        fw_output_verdict(nif, m, from, dst, proto) == FW_DROP) {
         STAT(tx_filtered);
         m_freem(m);
         netif_put(nif);
         return -EPERM;                           /* the sender is local: tell it */
     }
-    hf = fw_host_flow_of(...);                   /* unchanged */
-    rc = output_on(...);
+    hf = fw_host_flow_of(nif, m, from, dst, proto, ...);      /* same value */
+    rc = output_on(nif, m, from, dst, proto, ttl);            /* no longer resolves */
     if (track && rc == 0) fw_host_record(&hf);
 ```
+
+A test asserts the equivalence directly: a source-prefix rule that names the
+NIC's own address matches an `icmp_send_echo` (which passes `src == 0`),
+which it could not do if the verdict saw the unresolved value.
 
 Two orderings matter and are the interesting part of this unit:
 
@@ -376,16 +396,28 @@ guest rule then holds a direction whose scope it cannot have).
 
 This is the host's send path, so the cost is one flag test (loopback), one
 `g_fw_lock` hold and a walk of the host's `OUTPUT` rules — paid by every
-datagram the machine sends, including TCP's. The host-state unit learned
-that `net-nicbench`'s UDP loop is loopback-only and therefore blind to this
-path, and that the sensitive instrument was the suite's timing: so the
-measurement here is (a) `net-nicbench` reported for continuity, (b) the
-loopback TCP transfer tests (`net-lo-tcp`, which *do* run through
-`ipv4_output` in volume) before and after, and (c) eight consecutive boots
-on both arches and the GIC variant, because that is what caught the last
-unit's real cost. If the rule walk shows on the TCP path, the mitigation is
-the one already proven here: skip the walk while the host holds no `OUTPUT`
-rule, which is every configuration but a deliberately hardened one.
+datagram the machine sends to a non-loopback egress, TCP's segments
+included.
+
+**The instrument is `net-nicbench`'s UDP loop, and the host-state report was
+wrong about it** (corrected there in the same change as this report): it
+sends to `nif->ip4.gateway` on the NIC, a real egress, ten thousand times,
+so it exercises this path on every send. What it cannot do is resolve a cost
+this small — its spread on identical code has been 17.3k–22.9k sends/s. So
+the measurement here is: (a) `net-nicbench` on both arches, `main` versus
+this tree in one session, to show no gross regression, with the spread
+quoted so the number is not read as precision; (b) **not** `net-lo-tcp` —
+loopback is exempt from this chain, so those transfers never reach the
+verdict, and citing them would have measured nothing (the contradiction
+review caught); (c) a tap-based volume check if one is wanted for TCP, since
+a guest tap is a non-loopback egress and `net-hoststate`'s uplink tap
+already carries a 1200-byte transfer; and (d) eight consecutive boots on
+both arches and the GIC variant, which is the instrument that actually
+caught the last unit's cost, as flakiness rather than as throughput.
+
+If the rule walk shows, the mitigation is the one already proven: skip it
+while the host holds no `OUTPUT` rule — every configuration but a
+deliberately hardened one.
 
 ## Risks
 

@@ -1043,9 +1043,10 @@ a guest's starves only that guest. Because these paths are the uplink's, one poi
 which is what the DNS proxy does — without walking the table, and while it is
 NULL, meaning no host flow has ever been recorded, the **receive** path does
 not scan at all. Both were added because a bounded per-packet scan that the
-throughput benchmark could not see was still visible as intermittent
-failures in tests that assert on in-flight traffic having drained
-(`testing.md`, `net-hoststate`).
+throughput benchmark exercised on every send but could not *resolve* (its
+run-to-run spread is far wider) was still visible as intermittent failures
+in tests that assert on in-flight traffic having drained (`testing.md`,
+`net-hoststate`).
 
 **Consulted before the rules.** `fw_host_verdict` now asks state first, as
 `fw_forward_verdict` does: a datagram that is the **reverse** of a flow the

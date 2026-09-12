@@ -494,13 +494,16 @@ re-running told them apart.
 
 ## Benchmarks (as measured, and what actually measured it)
 
-**The benchmark named here was the wrong instrument, and the test suite was
-the right one.** `net-nicbench`'s UDP loop sends to *loopback*
-(`INADDR_LOOPBACK_N`), so it never crosses a real link and the record hook
-returns on its first flag test: the figure it reports cannot see this unit
-at all. Measured anyway, from a worktree of `main` and this tree in the same
-session, it confirms only that nothing gross happened, and that its
-run-to-run spread under TCG dwarfs anything the hook could cost:
+**Corrected after review** (the OUTPUT-chain report's first round): an
+earlier version of this section claimed `net-nicbench`'s UDP loop is
+loopback-only and therefore blind to this unit. It is not. It sends to
+`nif->ip4.gateway` on the NIC (`NICBENCH_PORT`), a real, non-guest egress,
+so all ten thousand of its sends **do** pass `fw_host_flow_of` — one socket
+to one peer, so the one-entry cache answers all but the first. The loopback
+loop I had read belongs to `net-bench`'s steering measurement, a different
+test. So the benchmark *is* the right instrument for the send path; what it
+cannot do is **resolve** a cost this small. Measured from a worktree of
+`main` and this tree in the same session:
 
 | UDP sends/s, `net-nicbench` eth0 | `main` (161559f) | this unit |
 | --- | --- | --- |
@@ -510,8 +513,10 @@ run-to-run spread under TCG dwarfs anything the hook could cost:
 The two arches disagree in sign, and the same code path has been observed
 between 17.3k and 22.9k across runs, against a per-send cost of one flag
 test, one uncontended lock and a validated one-entry compare — order 10⁻⁴ of
-the ~50 µs a send takes here. So the honest statement is that this
-instrument cannot resolve the hook.
+the ~50 µs a send takes here. A run of the *pre-cache* build, which walked
+all 320 entries on every one of those sends, measured 18,819 sends/s: inside
+the same spread. So the honest statement is that this instrument exercises
+the hook on every send and still cannot resolve its cost.
 
 What *could* resolve it was the suite's own timing-sensitive tests.
 `net-dnat` (`entries == 0` after an aging jump) and `net-tapctl` (`no frame
