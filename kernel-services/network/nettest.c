@@ -5236,6 +5236,24 @@ bool selftest_net_hoststate(const char **reason)
     CHECK(hin_recv_sock(cs2, buf, sizeof(buf), 10) == -EAGAIN);
     CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
 
+    /* A send the stack refuses opens nothing: the tuple is read before
+     * output_on and recorded only after it accepts, so an oversized datagram
+     * -- rejected with -EMSGSIZE, never on the wire -- leaves no state and
+     * its reverse tuple stays closed. */
+    static uint8_t oversize[2000];
+    {
+        struct netaddr toobig = v4addr(w, 5600);
+        fw_get_stats(&fs0);
+        CHECK(ksock_sendto(cs, oversize, sizeof(oversize), &toobig) == -EMSGSIZE);
+        fw_get_stats(&fs1);
+        CHECK(fs1.hin_flow_new == fs0.hin_flow_new);
+        udp_get_stats(&us0);
+        l4len = nettest_mk_udp(l4, w, u_ip, 5600, 7100, pl, sizeof(pl));
+        CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+        CHECK(hin_recv_sock(cs, buf, sizeof(buf), 10) == -EAGAIN);
+        CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    }
+
     /* (2) one tuple, and no notion of intent: a second unsolicited datagram
      * on the open tuple is admitted too (the socket's own validation is the
      * second line), while the world initiating to a port the host never sent

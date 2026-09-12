@@ -492,7 +492,9 @@ the host's `sendto` to `world:5300` is read back on the tap and recorded
 delivered to the socket with no rule anywhere (`hin_accept_established`),
 while a datagram from another port at that peer, from another peer, or to
 another local port is freed (`udp quiet_dropped`) and no socket sees it.
-(2) One tuple, and no notion of intent: a *second* unsolicited datagram on
+(1b) A refused send opens nothing: an oversized datagram, rejected with
+`-EMSGSIZE` after its tuple was read, records no flow and leaves its reverse
+tuple closed. (2) One tuple, and no notion of intent: a *second* unsolicited datagram on
 the open tuple is admitted too (the socket's validation is the second line),
 while the world initiating to a port the host never sent from is freed; and
 a datagram carrying the host's *own* address as its source — the only thing
@@ -537,9 +539,10 @@ unconnected socket's reply then drops — and with it the proxy's answer);
 a peer match loosened to the address alone (the same-peer-other-port
 datagram is then admitted); the local-port match dropped (the datagram to
 another local port is then admitted); the echo identifier ignored (the
-wrong-identifier reply then fires the hook); the record hook moved from
-`ipv4_output` into `output_on` (the masqueraded guest flow then occupies the
-host's share); the real-link egress test dropped (a loopback send then
+wrong-identifier reply then fires the hook); the flow recorded before `output_on` accepts the
+datagram (the oversized send then opens a tuple); the record moved from
+`ipv4_output` into `output_on`, which shows at that same assertion and
+behind it puts the masqueraded guest flow in the host's share; the real-link egress test dropped (a loopback send then
 records); TCP recorded as well (the outbound connection then records a flow
 on the uplink's hottest send path); refresh treated as creation
 (`hin_flow_new` rises on every send and one client fills the share); the

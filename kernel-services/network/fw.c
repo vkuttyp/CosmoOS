@@ -583,27 +583,58 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
 
 /* --- the host chain ------------------------------------------------------- */
 
-/* The host is sending: record the flow whose reply the chain must admit. */
-void fw_host_record(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto)
+/* The host is sending: the flow whose reply the chain must admit, if any. */
+bool fw_host_flow_of(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto,
+                     struct fw_host_flow *f)
 {
     /* Only the world's links. A guest tap's egress carries the guest's own
      * traffic (whose state is NAT's or the FORWARD chain's), and nothing
      * delivered over loopback ever reaches a chain. */
     if (out->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))
-        return;
+        return false;
     if (proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
-        return;                              /* see fw.h: TCP is deliberately not recorded */
+        return false;                        /* see fw.h: TCP is deliberately not recorded */
     struct l4_view v;
     l4_read(m, 0, proto, &v);                /* the IP header is prepended after this: transport at 0 */
     if (!flow_trackable(proto, &v))
-        return;
-    /* flow_find reads only (proto, src, dst) from the header, which does not
-     * exist yet on this path, so the key is built here. */
+        return false;
+    memset(f, 0, sizeof(*f));
+    f->proto = proto;
+    f->src = src;
+    f->dst = dst;
+    if (proto == IPPROTO_ICMP) {
+        f->a_port = v.icmp_id;
+    } else {
+        f->a_port = v.sport;
+        f->b_port = v.dport;
+    }
+    return true;
+}
+
+/* The stack accepted that datagram for transmission: record its flow. */
+void fw_host_record(const struct fw_host_flow *hf)
+{
+    uint8_t proto = hf->proto;
+    uint32_t src = hf->src, dst = hf->dst;
+    /* flow_find and flow_fill read the tuple through the shapes the receive
+     * path hands them; on this path the header does not exist and the
+     * transport was parsed before the send, so both are rebuilt here. */
     struct ipv4_hdr key;
     memset(&key, 0, sizeof(key));
     key.proto = proto;
     key.src = src;
     key.dst = dst;
+    struct l4_view v;
+    memset(&v, 0, sizeof(v));
+    v.ok = true;
+    if (proto == IPPROTO_ICMP) {
+        v.icmp_type = ICMP_ECHO;
+        v.icmp_id = hf->a_port;
+    } else {
+        v.ports = true;
+        v.sport = hf->a_port;
+        v.dport = hf->b_port;
+    }
 
     uint64_t now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);

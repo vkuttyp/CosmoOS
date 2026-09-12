@@ -139,10 +139,15 @@ it — and it is the one with no state.
 
 ### 1. The host's flows are recorded where the host's datagrams leave
 
-`fw_host_record(struct netif *out, struct mbuf *m, uint32_t src, uint32_t
-dst, uint8_t proto)` is called from **`ipv4_output`** (`ipv4.c:175`), after
+`fw_host_flow_of(...)` is called from **`ipv4_output`** (`ipv4.c:175`), after
 `ipv4_route` and before `output_on`, when the egress is a **real,
-non-guest link** — `!(out->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))`,
+non-guest link**, and `fw_host_record(...)` records what it read once
+`output_on` has accepted the datagram — **two calls as built, one in the
+design**: recording before the send would have opened a tuple for a
+datagram the stack then refused (an oversized one, or no route to the next
+hop) and that never left the host, which is state describing nothing. (ARP
+resolution queues the frame and reports success: the stack accepted it, and
+whether the neighbour answers is a network condition, not a refused send.) — `!(out->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))`,
 the complement of the guest taps and the mirror of `fw_host_verdict`'s
 ingress test. `ipv4_output` is the door every host-originated datagram
 passes and no forwarded one does (`ipv4_forward` transmits through
@@ -304,9 +309,10 @@ wanted. The seeded defaults are untouched.
   `fw_host_verdict` gained the state step before the rule walk (reverse
   match, host-initiated flows only); the quota logic factored into
   `flow_slot`/`flow_fill`, shared by both chains.
-- `kernel-services/network/ipv4.c` — `ipv4_output` calls
-  `fw_host_record` for a real-link egress (after `ipv4_route`, before
-  `output_on`, with `src` resolved as `output_on` would); the host-chain
+- `kernel-services/network/ipv4.c` — `ipv4_output` reads the flow with
+  `fw_host_flow_of` (after `ipv4_route`, before `output_on`, with `src`
+  resolved as `output_on` would) and records it with `fw_host_record` only
+  when `output_on` returns 0; the host-chain
   DROP branch marks **every** TCP, UDP and ICMP datagram `M_FW_QUIET` and
   delivers it, freeing only a protocol the stack does not demux;
   `icmp_input` honours `M_FW_QUIET` (Need-Fragmentation to `icmp_needfrag`
@@ -325,9 +331,10 @@ wanted. The seeded defaults are untouched.
 
 ## New APIs
 
-- In-kernel: `fw_host_record(...)`, called from `ipv4_output`;
-  `FW_FLOW_QUOTA_HOST`; `M_FW_QUIET` honoured by `icmp_input`. No
-  firewall-side TCP query, no ICMP-error model.
+- In-kernel: `fw_host_flow_of(...)` and `fw_host_record(...)` with
+  `struct fw_host_flow`, called from `ipv4_output` either side of
+  `output_on`; `FW_FLOW_GUEST_POOL`, `FW_FLOW_QUOTA_HOST`; `M_FW_QUIET`
+  honoured by `icmp_input`. No firewall-side TCP query, no ICMP-error model.
 - UAPI: **none**. `COSMO_NETCTL_VERSION` stays 4.
 
 ## Migration (done, in the planned order)
@@ -416,6 +423,9 @@ DROP rule, not merely before a default.
   its reply would then take the rules; the guests' pool is untouched (a
   guest-to-guest flow still records, `flow_new`, with the host's share
   full).
+- **A refused send opens nothing**: an oversized datagram
+  (`ksock_sendto` → `-EMSGSIZE` from `output_on`) records no flow and its
+  reverse tuple stays closed — state must describe what left the host.
 - **Only host-originated, real-link egress records**: a masqueraded
   guest→world UDP flow (through `ipv4_forward` → `output_on`, read back
   masqueraded on the uplink) records nothing in the host's share
@@ -427,10 +437,11 @@ DROP rule, not merely before a default.
 - **Regression**: `net-firewall` (guest flow state and quota unchanged),
   `net-dns`, `net-nat`, `net-dnat`, the harness's echo round trip.
 
-Bug-proofs — **twelve, each run**: the bug reintroduced, the test observed
-failing for the stated reason, the source restored byte-identical. Three
+Bug-proofs — **thirteen, each run**: the bug reintroduced, the test observed
+failing for the stated reason, the source restored byte-identical. Four
 were added during the build (the local-port half of the match, the
-one-entry cache's validation, and the echo identifier), and the design's
+one-entry cache's validation, the echo identifier, and — from review —
+recording before the send is accepted), and the design's
 "reverse check admitting the forward direction too" is not among them: it
 is not runnable, for the reason the design itself gives — a forward match on
 a real link can only be a datagram carrying one of our own addresses, which
@@ -447,7 +458,12 @@ echo identifier ignored (the wrong-identifier reply is admitted by state,
 so it is never counted quiet, and the hook fires); the record hook placed
 in `output_on` instead of `ipv4_output` (the masqueraded guest flow then
 occupies the host's share: `hin_flow_new` rises for it); the real-link
-egress test dropped (a loopback send then records); TCP recorded after all
+egress test dropped (a loopback send then records); the flow recorded before
+`output_on` accepts the datagram (the oversized send then opens a tuple,
+`hin_flow_new` rising for a datagram that never left); the record moved
+into `output_on` itself, which shows first at that same refused-send
+assertion — `output_on` records before its own size check — and behind it
+puts the masqueraded guest flow in the host's share; TCP recorded after all
 (`hin_flow_new` rises for the outbound connection — the lock landing on the
 uplink's hottest send path); refresh treated as creation (`hin_flow_new`
 and the live count rise on a send that should only refresh); the one-entry

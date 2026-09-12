@@ -1329,7 +1329,7 @@ See [docs/development.md](docs/development.md).
   negatives, the host's ping, a refused echo request answering nothing,
   path-MTU discovery under DROP, the DNS proxy end to end, refresh and
   expiry, forwarded and loopback sends recording nothing, the share, and the
-  hardened default) with twelve bug-proofs. Reply state for a UDP flow's
+  hardened default) with thirteen bug-proofs. Reply state for a UDP flow's
   ICMP errors, a listing of live flows, per-interface host chains, an OUTPUT
   chain, rate-limit/log targets and IPv6 are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's

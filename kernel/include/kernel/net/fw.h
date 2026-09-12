@@ -182,20 +182,37 @@ enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
                                 const struct ipv4_hdr *iph, unsigned ihl);
 
 /*
- * Record a datagram the host itself is sending, so that the host chain admits
- * its reply: called from ipv4_output -- the one door every host-originated
- * datagram passes and no forwarded one does -- when the egress is a real,
- * non-guest link. `m` carries the transport header at offset 0 (the IP header
- * is prepended after this), and `src`/`dst` are the addresses the header will
- * carry. A UDP datagram is recorded by its ports and an ICMP echo request by
- * its identifier; a send on a live flow refreshes it. Nothing else is
- * recorded -- TCP above all, whose inbound segments quiet delivery already
- * admits through the connection itself, so recording them would put this
- * lock on the uplink's hottest send path for no reader. A send is never
- * refused for the firewall's sake: no room in the host's share simply leaves
- * the reply to the rules.
+ * The flow a datagram the host itself is sending would open, so that the host
+ * chain admits its reply. Read in ipv4_output -- the one door every
+ * host-originated datagram passes and no forwarded one does -- and recorded
+ * only once the stack has accepted the datagram for transmission, which is
+ * why this is two calls: state must describe something that was actually
+ * sent, not a send that was refused (an oversized datagram, no route to the
+ * next hop) and never left.
+ *
+ * fw_host_flow_of reads the tuple while the transport header is still at
+ * offset 0 of `m` (the IP header is prepended afterwards), with `src`/`dst`
+ * the addresses that header will carry, and takes no lock. It answers false
+ * -- this datagram opens no flow -- unless the egress is a real, non-guest
+ * link and the datagram is UDP (recorded by its ports) or an ICMP echo
+ * request (by its identifier). Nothing else is recorded, TCP above all:
+ * quiet delivery already admits its inbound segments through the connection
+ * itself, so recording them would put the firewall's lock on the uplink's
+ * hottest send path for no reader.
+ *
+ * fw_host_record then takes the lock and records it, refreshing instead if
+ * the flow is already live. A send is never refused for the firewall's sake:
+ * no room in the host's share simply leaves the reply to the rules.
  */
-void fw_host_record(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto);
+struct fw_host_flow {
+    uint32_t src, dst;    /* network order */
+    uint16_t a_port;      /* the host's port, or the echo identifier */
+    uint16_t b_port;      /* the peer's port (0 for ICMP) */
+    uint8_t  proto;
+};
+bool fw_host_flow_of(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto,
+                     struct fw_host_flow *f);
+void fw_host_record(const struct fw_host_flow *f);
 
 /* Reclaim expired flows (the network worker's periodic tick, beside nat_age). */
 void fw_age(uint64_t now_ns);

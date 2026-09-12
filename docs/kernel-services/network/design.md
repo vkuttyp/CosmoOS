@@ -1010,9 +1010,14 @@ were freed before `icmp_input` saw them, blackholing large segments). State
 fixes all three in the shape the stack already had — the FORWARD chain's
 flow table, one more initiator.
 
-**Recorded where the host's datagrams leave.** `fw_host_record` is called
-from **`ipv4_output`**, after the route and before `output_on`, when the
-egress is a real, non-guest link. That is the one door every host-originated
+**Recorded where the host's datagrams leave, once they have left.**
+`fw_host_flow_of` reads the tuple in **`ipv4_output`**, after the route and
+before `output_on`, when the egress is a real, non-guest link; `fw_host_record`
+records it only if `output_on` accepted the datagram, so a send the stack
+refused — an oversized datagram, no route to the next hop — opens nothing.
+(ARP resolution queues the frame and reports success; the stack accepted it,
+and whether the neighbour ever answers is a network condition, not a refused
+send.) That is the one door every host-originated
 datagram passes and no forwarded one does: `ipv4_forward` transmits through
 `output_on` directly, and `nat_in`'s deliveries of a masqueraded reply or a
 DNAT leave on a guest tap (excluded by the same flag test the chain uses).

@@ -324,18 +324,25 @@ step protects:
 
 On `FW_DROP`, a TCP or UDP datagram is marked `M_FW_QUIET` and continues to
 the demux (`ip_stats.hin_quiet`); anything else is freed
-(`ip_stats.hin_filtered`).
+(`ip_stats.hin_filtered`). **Superseded by the host-state unit**
+(`next-subsystem-host-state.md`): ICMP is delivered quiet too, and
+`hin_filtered` now counts only a protocol the stack does not demux.
 
-**What quiet delivery cannot recognise, and why that is acceptable here.** A
+**What quiet delivery cannot recognise, and why that was acceptable here.** A
 reply to an *unconnected* UDP socket (a client that `sendto`s without
 connecting) and every ICMP message have no connection or connected peer to
-deliver to under `M_FW_QUIET`, so a DROP rule that matches them drops them.
-With the default ACCEPT this costs nothing; an operator who writes a broad
-UDP DROP (`udp any any`) would drop replies to the host's unconnected UDP
-sockets — documented, with the guidance that UDP rules name listener ports
-(or a source prefix), and with reply state for unconnected UDP and for ICMP
-named as a later unit. ICMP echo to the host is gated by type as before (type
-8); the host's own ping replies (type 0) pass the default.
+deliver to under `M_FW_QUIET`, so a DROP rule that matched them dropped
+them. With the default ACCEPT this cost nothing; an operator who wrote a
+broad UDP DROP (`udp any any`) would have dropped replies to the host's
+unconnected UDP sockets — documented, with the guidance that UDP rules name
+listener ports (or a source prefix), and with reply state for unconnected
+UDP and for ICMP named as a later unit. ICMP echo to the host is gated by
+type as before (type 8); the host's own ping replies (type 0) pass the
+default. **That later unit is done** — the host's own flows
+(`next-subsystem-host-state.md`): what the host sent is recorded at
+`ipv4_output`, so the reply to an unconnected socket and the reply to its
+own echo request are admitted by state before any rule, and ICMP reaches
+`icmp_input` under the flag instead of being freed.
 
 ### 5. The default: ACCEPT, and why
 
@@ -366,7 +373,8 @@ refuse a snapshot whose version is not the one it speaks.
 
 - **Reply state for unconnected UDP and for ICMP** (quiet delivery reaches a
   *connected* UDP socket; an unconnected client socket's replies and ICMP
-  replies still take the rules, which the default ACCEPT admits).
+  replies still take the rules, which the default ACCEPT admits). **Done in
+  the next unit**, `next-subsystem-host-state.md`.
 - **Per-interface host chains** (all real links share `FROM_UPLINK` here).
 - **An OUTPUT chain** for the host's egress; rate-limit/log targets; IPv6.
 - **DHCP client protection** — moot until the host has a DHCP client.
@@ -648,7 +656,9 @@ tuning.
 
 - **A broad UDP/ICMP DROP breaks the host's own replies.** No reply state
   in this unit. Mitigation: default ACCEPT; documented guidance (name
-  listener ports or a source prefix); reply state named as the next unit.
+  listener ports or a source prefix); reply state named as the next unit —
+  **which is now built** (`next-subsystem-host-state.md`), so a broad DROP
+  no longer touches a reply to something the host itself sent.
 - **The off-link invariant surprises someone reaching a guest gateway, or
   `127.0.0.1`, from the LAN.** There is no legitimate case — a gateway
   address exists for the guest's link only, and a loopback binding *means*

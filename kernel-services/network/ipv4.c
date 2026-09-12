@@ -183,10 +183,18 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
     /* The host chain's state. This is the one door every datagram the host
      * itself originates passes -- a forwarded one goes straight to output_on,
      * and nat_in's deliveries leave on a guest tap -- so the flow whose reply
-     * the chain must admit is recorded here, with the source the header will
-     * carry (output_on resolves a zero source the same way). */
-    fw_host_record(nif, m, src != 0 ? src : ipv4_source_for(dst), dst, proto);
+     * the chain must admit is read here, with the source the header will
+     * carry (output_on resolves a zero source the same way), and recorded
+     * only once output_on has accepted the datagram: a send refused for a
+     * size or a missing next hop never left, and must open nothing. (ARP
+     * resolution queues the frame and reports success; the stack accepted it,
+     * and whether the neighbour ever answers is a network condition, not a
+     * refused send.) */
+    struct fw_host_flow hf;
+    bool track = fw_host_flow_of(nif, m, src != 0 ? src : ipv4_source_for(dst), dst, proto, &hf);
     int rc = output_on(nif, m, src, dst, proto, ttl);
+    if (track && rc == 0)
+        fw_host_record(&hf);
     netif_put(nif);
     return rc;
 }
