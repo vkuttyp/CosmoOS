@@ -284,6 +284,8 @@ refuses a version-4 writer as before.
 
 - **A verdict visible to TCP's callers** (`connect`/`send` failing with
   `-EPERM` instead of stalling): a `batch_send` error path into the PCB.
+  Designed since, in `next-subsystem-tcp-verdict.md`, and awaiting the
+  instruction to build.
 - **Per-interface chains** (a rule naming `eth1` rather than a scope).
 - **Rate-limit and logging targets**, IPv6 filtering, full TCP state.
 - **Filtering the host's *forwarded* traffic here**: that is FORWARD's, and
@@ -391,7 +393,10 @@ builds them, host sockets, and the world ARP-seeded.
   `connect` to a refused port returns `-EINPROGRESS`, not `-EPERM`, while
   `out_drop_rule` rises and no SYN is read back — nonblocking as built, so
   the test does not park a thread on a connect that will only time out.
-  Asserted so the later unit that changes it has a test to change.
+  Asserted so the later unit that changes it has a test to change — which
+  is `next-subsystem-tcp-verdict.md`, which reverses this assertion once
+  the verdict reaches the PCB: the nonblocking `connect` returns `-EPERM`
+  on its first call, because `tcp_connect` returns the refusal itself.
 - **`nat_in`'s delivery is scope-guest traffic**: with a port-forward to A
   and an `OUTPUT scope guest DROP` rule, the DNAT'd SYN is dropped on its
   way to A (`tx_filtered`), and without the rule it arrives — the
@@ -513,7 +518,11 @@ datagram past its verdict is never re-judged.
   point, but it is a new failure mode in userland. No in-tree caller
   changes behaviour under the default.
 - **TCP's asymmetry.** UDP and ICMP learn; TCP stalls. Documented, tested,
-  and named as the next refinement rather than half-built here.
+  and named as the next refinement rather than half-built here — and that
+  refinement is now the report `next-subsystem-tcp-verdict.md`, which keeps
+  the asymmetry only where it is honest: an opening connection is told at
+  once, a synchronized one on its next call, since by then its bytes are
+  already queued.
 - **The cost is on every send.** Measured as above; the mitigation is
   implemented rather than merely named, because the suite's timing said it
   was needed. What remains is one relaxed load per host-originated datagram
