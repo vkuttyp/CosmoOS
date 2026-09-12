@@ -24,7 +24,11 @@ static void thread_trampoline(void *arg)
 {
     cosmo_thread_t *t = arg;
     void *ret = t->fn(t->arg);
-    t->ret = ret;
+    /* Published with release, read with acquire in the join: the joiner can
+     * see the kernel's zero in `done` without ever entering futex_wait --
+     * a thread that has already exited -- and then nothing else would
+     * order this store before that read. */
+    __atomic_store_n(&t->ret, ret, __ATOMIC_RELEASE);
     cosmo_thread_finish(ret);
 }
 
@@ -102,7 +106,7 @@ int cosmo_thread_join(cosmo_thread_t *t, void **ret)
      * futex-woken when it exits, so this is the whole of joining: read it,
      * and wait on it while it is still non-zero. */
     for (;;) {
-        unsigned v = t->done;
+        unsigned v = __atomic_load_n(&t->done, __ATOMIC_ACQUIRE);
         if (v == 0)
             break;
         long rc = cosmo_futex_wait(&t->done, v, 0);
@@ -110,7 +114,7 @@ int cosmo_thread_join(cosmo_thread_t *t, void **ret)
             return (int)rc;
     }
     if (ret)
-        *ret = t->ret;
+        *ret = __atomic_load_n(&t->ret, __ATOMIC_RELAXED);   /* ordered by the acquire above */
     munmap(t->stack, t->stack_size);
     t->stack = NULL;
     return 0;
@@ -129,12 +133,21 @@ void cosmo_mutex_lock(cosmo_mutex_t *m)
     unsigned c = cas(&m->state, 0, 1);
     if (c == 0)
         return;                        /* uncontended: one atomic, no syscall */
-    do {
-        /* 2 means "held, and someone is waiting": the unlock must wake. */
-        if (c == 2 || cas(&m->state, 1, 2) != 0)
-            cosmo_futex_wait(&m->state, 2, 0);
-        c = cas(&m->state, 0, 1);
-    } while (c != 0);
+    /*
+     * Contended. From here the lock is *always* taken by exchanging 2 in,
+     * never 1, so "held, and a waiter may exist" survives the handover and
+     * the next unlock wakes. Taking it with 1 instead -- which this
+     * library did until a review -- strands a waiter whenever three or more
+     * contend: the winner leaves 1 behind, the unlock sees 1 and wakes
+     * nobody, and a thread already asleep on 2 is never called again. The
+     * cost of the conservative 2 is one futex_wake with no waiter.
+     */
+    if (c != 2)
+        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
+    while (c != 0) {
+        cosmo_futex_wait(&m->state, 2, 0);
+        c = __atomic_exchange_n(&m->state, 2, __ATOMIC_ACQ_REL);
+    }
 }
 
 void cosmo_mutex_unlock(cosmo_mutex_t *m)

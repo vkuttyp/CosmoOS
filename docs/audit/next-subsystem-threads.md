@@ -30,9 +30,9 @@ proofs. Five things came out differently and are marked where they arise:
 kernel runs threads, schedules them across every online CPU, gives each
 its own registers, stack, thread pointer, signal mask and pending set, and
 wakes them on a user-space word through `futex_wait`/`futex_wake` — and a
-**native** program can reach none of it. There is no native syscall that
-creates a thread and none that waits on a futex; the only door to either is
-the Linux personality's `clone(CLONE_THREAD)`. So a Linux binary running
+**native** program could reach none of it: there was no native syscall that
+creates a thread and none that waits on a futex, and the only door to
+either was the Linux personality's `clone(CLONE_THREAD)`. So a Linux binary running
 under CosmoOS can use every CPU in the machine and a CosmoOS binary cannot,
 which inverts the rule this project has held since the compat layer was
 built: the personality is a translation of what the machine offers, never a
@@ -127,9 +127,10 @@ starting the child so a joiner cannot read a stale value, and starts it.
 `lx_sched_setaffinity` is accepted and ignored; `lx_sched_getaffinity`
 answers `cpu_online_mask()`.
 
-**What has no native syscall**: thread creation, thread exit, a thread's own
-id, futex wait, futex wake. `SYS_COUNT` is 82 and the native table
-(`kernel/syscall/native.c:1497`) has no entry for any of them.
+**What had no native syscall** (this section is the state *before* the
+unit): thread creation, thread exit, a thread's own id, futex wait, futex
+wake. `SYS_COUNT` was 82 and the native table had no entry for any of
+them.
 
 ## Why it matters
 
@@ -156,11 +157,13 @@ id, futex wait, futex wake. `SYS_COUNT` is 82 and the native table
 ### Five syscalls, and one that is deliberately absent
 
 ```c
-#define SYS_thread_create 82  /* (const struct cosmo_thread *req) -> tid */
-#define SYS_thread_exit   83  /* (int status) -> does not return */
-#define SYS_thread_self   84  /* () -> tid */
-#define SYS_futex_wait    85  /* (uint32_t *word, uint32_t val, uint64_t timeout_ns) -> 0 */
-#define SYS_futex_wake    86  /* (uint32_t *word, unsigned n) -> threads woken */
+/* As built the numbers follow the order the migration plan landed them in,
+ * which is not the order this list was written in: */
+#define SYS_thread_self   82  /* () -> tid */
+#define SYS_futex_wait    83  /* (uint32_t *word, uint32_t val, uint64_t timeout_ns) -> 0 */
+#define SYS_futex_wake    84  /* (uint32_t *word, unsigned n) -> threads woken */
+#define SYS_thread_create 85  /* (const struct cosmo_thread *req) -> tid */
+#define SYS_thread_exit   86  /* (int status) -> does not return */
 ```
 
 `SYS_COUNT` 82 → 87.
@@ -392,8 +395,9 @@ interface: it is the convention that makes `clear_tid` a `join`.
 Each step landed as its own commit with the tree green, in this order;
 step 1 is the only one whose shape changed (the rename's target).
 
-1. **The rename.** `lx_tid` → `tid` across the kernel and the compat layer.
-   No behaviour change; the tree stays green.
+1. **The rename.** `lx_tid` → **`user_tid`** (as built: `tid` was taken by
+   the scheduler's own id) across the kernel and the compat layer. No
+   behaviour change; the tree stays green.
 2. **`SYS_thread_self`** alone: the smallest possible new syscall, which
    proves the table entry, the filter path and the test harness before
    anything can create a thread.

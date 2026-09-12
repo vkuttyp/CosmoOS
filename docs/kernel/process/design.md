@@ -992,6 +992,10 @@ process, which is what it already meant, `process_exit` and
 `SYS_futex_wake` are the kernel futex with the caller's address space and a
 range check -- the futex enforces its own 4-byte alignment and does its
 compare and enqueue under one lock, so a wake between them cannot be lost.
+A relative timeout past `INT64_MAX` is refused rather than truncated: the
+deadline is `clock_now_ns()` plus the duration, and a value near the top of
+the range would wrap into the past and expire at once, which is the
+opposite of what the caller asked for.
 
 **One id, seen by both doors.** `thread.user_tid` is the id userland sees:
 the pid for a process's first thread, `0x10000 + tid` for the rest, so a
@@ -1085,6 +1089,17 @@ atomic each and no system call. The guard costs a reservation, a hole
 punched in it and a fixed map into the hole, because there is **no
 `mprotect` system call** -- the kernel has `vm_user_protect` and nothing
 asks it, which is a follow-up this unit names rather than smuggles in.
+
+**The mutex is Drepper's correct variant**, not his flawed one: the lock is
+always taken by exchanging 2 into the state when it comes through the slow
+path, never 1, so "held, and a waiter may exist" survives the handover and
+the next unlock wakes. Taking it with 1 strands a sleeper whenever three or
+more threads contend. The cost is one `futex_wake` with no waiter; the
+alternative is a thread that never runs again. `cosmo_thread_join`
+publishes its result with a release store and reads `done` with an acquire
+load, because a joiner can see the kernel's zero without ever entering
+`futex_wait` -- a thread that had already exited -- and then nothing else
+would order the worker's store before that read.
 
 **libc is not thread-safe inside, and that is now a constraint rather than
 a fact of the machine.** `errno` is a global and the allocator and stdio

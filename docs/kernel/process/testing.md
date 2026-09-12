@@ -440,8 +440,27 @@ the source restored byte-identical every time:
    once, the id being asserted in steps 1, 6 and 7.
 9. `PROCESS_MAX_THREADS` not checked → step 11 runs past 300 threads and
    both its bound assertions fail.
+10. The futex timeout left unbounded → step 4's `-EINVAL` for a duration
+    that would wrap the deadline becomes an immediate `-ETIMEDOUT`.
 
-Two of those proofs were first written against the **shared** machinery --
+**One fix cannot be proved here, and the reason is a property of this
+kernel.** The mutex used to hand the lock over as "held, no waiters"
+(`cas(state, 0, 1)` in the retry loop), which strands a sleeper whenever
+three or more threads contend: the winner leaves 1, the unlock sees 1 and
+wakes nobody, and a thread already asleep on 2 is never called again. That
+is the variant Drepper's *Futexes Are Tricky* gives as flawed, and the fix
+is his correct one -- always exchange 2 in when taking the lock through the
+slow path. Reintroducing it does **not** fail step 9, because
+`futex_wait` in this kernel returns 0 when a wake raced its enqueue (a
+spurious wake the futex contract permits, and this one takes), and the
+retry loop absorbs it: the stranded thread is rescued by the next
+contender's wake. The flaw is real and the rescue is not something a
+correct mutex may rely on -- the contract permits spurious wakes, it does
+not promise them -- so the fix stands on the argument and the step stands
+as the regression guard for the lock's *mutual exclusion*, which it does
+prove (no lost update under three contenders).
+
+Two other proofs were first written against the **shared** machinery --
 the futex's compare, and the zero-and-wake in `process_thread_exit` -- and
 both hung the boot *before* `thrtest` ran, because the Linux personality's
 own joins depend on exactly the same code. That is evidence the contract

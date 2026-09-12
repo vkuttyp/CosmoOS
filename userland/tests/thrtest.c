@@ -242,6 +242,10 @@ int main(int argc, char **argv)
         volatile unsigned *bad = (volatile unsigned *)((char *)unaligned_holder + 1);
         CHECK(cosmo_futex_wait(bad, 0, 0) == -EINVAL);            /* alignment is the futex's rule */
         CHECK(cosmo_futex_wake((volatile unsigned *)16ul, 1) == -EFAULT);
+        /* A duration that would wrap the deadline is refused, not turned
+         * into an immediate timeout. */
+        CHECK(cosmo_futex_wait(&word, 1, 0xffffffffffffffffull) == -EINVAL);
+        CHECK(cosmo_futex_wait(&word, 1, 0x8000000000000000ull) == -EINVAL);
     }
 
 
@@ -325,12 +329,21 @@ int main(int argc, char **argv)
 
     STEP("9");
     /* (9) */
+    /* Three contenders, not two: with two, a mutex that hands the lock over
+     * as "held, no waiters" still works, because the only other thread is
+     * the one being handed it. Three is what strands a sleeper -- the
+     * winner leaves 1 behind, the unlock wakes nobody, and the third
+     * thread's join never returns, which is how a review's finding shows
+     * up here. */
     counter = 0;
+    cosmo_thread_t t3;
     CHECK(cosmo_thread_start(&t, bump, NULL, 0) == 0);
     CHECK(cosmo_thread_start(&t2, bump, NULL, 0) == 0);
+    CHECK(cosmo_thread_start(&t3, bump, NULL, 0) == 0);
     CHECK(cosmo_thread_join(&t, NULL) == 0);
     CHECK(cosmo_thread_join(&t2, NULL) == 0);
-    CHECK(counter == 40000ul);           /* no lost update: the mutex held */
+    CHECK(cosmo_thread_join(&t3, NULL) == 0);
+    CHECK(counter == 60000ul);           /* no lost update: the mutex held */
     CHECK(cosmo_mutex_trylock(&mx) == 0);
     CHECK(cosmo_mutex_trylock(&mx) == -EBUSY);
     cosmo_mutex_unlock(&mx);
