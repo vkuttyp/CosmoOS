@@ -403,7 +403,7 @@ chain's side of the same events, so a test can assert both ends.
 | `kernel-services/network/tcp.c` | `batch_send` returns `int`; new `output_result`; the seven owning flush sites call it; the LISTEN path holds the listener's reference across the flush and drops a refused SYN-cache entry; the `struct tcp_batch` comment records the new contract |
 | `kernel/include/kernel/net/tcp.h` | four new `tcp_stats` counters plus `syn_refused`; the comment on `int error` records that a live connection may now carry one |
 | `kernel-services/network/ipv4.c` | a comment at the OUTPUT verdict: `-EPERM` is the value TCP reacts to, and no other output error may use it |
-| `kernel-services/network/nettest.c` | new selftest `net-tcpverdict`; `net-output` step 8 reversed (the nonblocking `connect` now returns `-EPERM` on its second call, and the first returns `-EINPROGRESS` with the abort already done) |
+| `kernel-services/network/nettest.c` | new selftest `net-tcpverdict`; `net-output` step 8 reversed — its nonblocking `connect` to a refused port now returns `-EPERM` on the *first* call, since `tcp_connect` returns the refusal itself |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | register `net-tcpverdict` |
 | `docs/kernel-services/network/design.md` | "The OUTPUT chain": the paragraph "A refused send is told, not hidden" rewritten from "TCP does not" to the state rule, its pointer to this report replaced by what was built; the section's "Named and deferred" line; a new subsection for the rule |
 | `docs/kernel-services/network/testing.md` | `net-tcpverdict`; `net-output` step 8's text (its "TCP stalls rather than failing" sentence) |
@@ -423,9 +423,11 @@ No new syscall, no new uapi, no new device. Two internal functions
    to ignore the value. No behaviour change; the tree stays green. This
    step alone is the one that could regress everything, so it lands
    alone.
-2. **`output_result`, abort only.** Implement the opening-state abort and
-   wire the seven owning sites. `net-output` step 8 flips here; the
-   blocking-connect case becomes testable.
+2. **`output_result`, abort only**, and `tcp_connect`'s return. Implement
+   the opening-state abort, wire the seven owning sites (five of them
+   gaining the local `wake`/`killed` pair), and make `tcp_connect` return
+   `-EPERM`. `net-output` step 8 flips here — to `-EPERM` on the first
+   call — and the blocking-connect case becomes testable.
 3. **The synchronized record**, with `tcp_send`/`tcp_recv`/`tcp_ready`
    re-read against the new "a live PCB may carry an error" assumption —
    the sweep this unit turns on.

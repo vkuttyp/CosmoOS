@@ -394,8 +394,9 @@ builds them, host sockets, and the world ARP-seeded.
   `out_drop_rule` rises and no SYN is read back — nonblocking as built, so
   the test does not park a thread on a connect that will only time out.
   Asserted so the later unit that changes it has a test to change — which
-  is `next-subsystem-tcp-verdict.md`, whose first step reverses this
-  assertion.
+  is `next-subsystem-tcp-verdict.md`, which reverses this assertion once
+  the verdict reaches the PCB: the nonblocking `connect` returns `-EPERM`
+  on its first call, because `tcp_connect` returns the refusal itself.
 - **`nat_in`'s delivery is scope-guest traffic**: with a port-forward to A
   and an `OUTPUT scope guest DROP` rule, the DNAT'd SYN is dropped on its
   way to A (`tx_filtered`), and without the rule it arrives — the
