@@ -158,9 +158,11 @@ counted as `quiet_dropped` and reach no chain.
   Sixty-four slots held eight seconds each, refillable by a guest that
   sends SYNs to a port the host is not allowed to answer on.
 - **It is the last follow-up the OUTPUT unit created for itself**, named
-  in the report (`next-subsystem-output-chain.md:285`, `:390`, `:515`),
-  in `design.md:1108` and `:1179`, in `testing.md:593`, and three times
-  in the README. The other named follow-ups — per-interface chains,
+  in that report three times (§6 "Deliberately out of scope", the Tests
+  bullet "TCP stalls rather than failing", the Risks bullet "TCP's
+  asymmetry"), in `design.md` (the paragraph "A refused send is told, not
+  hidden" and the section's "Named and deferred" line), in `testing.md`'s
+  `net-output` step 8, and three times in the README. The other named follow-ups — per-interface chains,
   rate-limit and log targets, IPv6, full TCP state tracking — are new
   ground; this one is an incompleteness.
 
@@ -273,22 +275,41 @@ must use that value and no other. `ipv4.c` gains a comment saying so.
 static int batch_send(struct tcp_batch *b);
 
 /* After the flush, under the pcb lock, alone: apply a refusal or clear a
- * record. `rc` is batch_send's return; `wake`/`killed` are the caller's
- * existing epilogue pair, reused so no site grows a second one. */
+ * record. `rc` is batch_send's return; `wake` and `killed` are the
+ * caller's unwind pair -- two sites already have one, the other five gain
+ * a local pair (see the table below). */
 static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, bool *killed);
 ```
 
-Every owning flush site becomes:
+Only two of the seven owning sites have a `wake`/`killed` epilogue to
+reuse — `pcb_work` and `tcp_input`'s `out:` — and there the call slots into
+the existing unwind:
 
 ```c
     spin_unlock_irqrestore(&pcb->lock, s);
     int rc = batch_send(&b);
-    output_result(pcb, rc, &wake, &killed);
+    output_result(pcb, rc, &wake, &killed);      /* may set either */
     sock_wake_after(wake);
     if (killed)
-        pcb_put(pcb);
+        pcb_put(pcb);   /* the state machine's */
     pcb_put(pcb);
 ```
+
+The other five are syscall-context functions that today end with
+`batch_send(&b); return ...;` and have neither variable. Each gains a local
+pair and the two lines that unwind it, and each keeps its own return
+contract — which is not the same answer in all five, so they are given one
+by one rather than by a snippet:
+
+| site | context | a refusal there |
+| --- | --- | --- |
+| `pcb_work` (`:927`) | timer worker | `output_result`; the existing `wake`/`killed` pair carries it |
+| `tcp_input` `out:` (`:1928`) | network worker | the same |
+| `tcp_connect` (`:1064`) | syscall | the caller is right here, so the refusal is **returned**: abort, record, and `return -EPERM` instead of 0. `ksock_connect` needs no change — it hands a non-zero `tcp_connect` straight back to the application, so a *nonblocking* connect fails immediately with `-EPERM` rather than reporting `-EINPROGRESS` and failing on the next call, which is what POSIX asks of a connect that fails outright. The record is kept as well as returned, so a second thread polling the same socket sees `COSMO_IO_ERROR`. The socket is left unconnected with an ended PCB — the state a reset-refused connect already leaves, so no new case appears |
+| `tcp_send` (`:1090`) | syscall | `output_result`; returns the byte count it accepted, because those bytes are queued (above) |
+| `tcp_recv` (`:1113`) | syscall | `output_result`; the return is unchanged — it reads `pcb->error` *before* the flush (`:1111`), so a verdict its own window-update ACK earns is reported on the next call, consistently with `tcp_send` |
+| `tcp_shutdown_write` (`:1140`) | syscall | `output_result`; still returns 0 — the state moved to `FIN_WAIT_1`/`LAST_ACK` under the lock and the shutdown did happen; a refused FIN is recorded, not undone |
+| `tcp_pmtu_notify` (`:1968`) | network worker | `output_result`; still returns true — the MSS was lowered whether or not the resend left |
 
 Three properties make this the cheap version of the change:
 
@@ -310,7 +331,7 @@ Three properties make this the cheap version of the change:
 connection ended during the same flush; there is nothing left to tell) and
 when the state is `CLOSED`, `LISTEN` or `TIME_WAIT`. It reuses an
 already-set `*wake` rather than overwriting it, the way the FIN path does
-(`:1905`).
+(`:1905`), which arises only at the two sites that already have one.
 
 For the SYN-cache case the LISTEN path keeps the listener's reference
 across the flush instead of releasing it before (`:1653`), so a refusal
@@ -319,9 +340,14 @@ for. The tuple is in `struct seg`, which the site still has.
 
 ### What the socket layer needs
 
-Nothing. `ksock_connect`'s three completion paths already end with
-`take_error(s)`; the blocking `connect` wakes on the state change the
-abort causes; `ksock_sendto`'s stream loop already returns
+Nothing — though what it *reports* changes in two places. A non-zero
+`tcp_connect` is already handed straight back to the application, so the
+refused connect returns `-EPERM` from both the blocking and the
+nonblocking call without a line changing; `ksock_connect`'s three
+completion paths already end with `take_error(s)` for the refusals that
+arrive later (a keepalive or retransmission refused while the socket
+waits); the blocking `connect` wakes on the state change the abort
+causes; `ksock_sendto`'s stream loop already returns
 `s->tcp->error` when it has written nothing and already waits on it
 (`socket.c:349-353`); `ksock_recvfrom` drains buffered data first;
 `tcp_ready` already anticipates a live error. That the socket layer needs
@@ -379,9 +405,9 @@ chain's side of the same events, so a test can assert both ends.
 | `kernel-services/network/ipv4.c` | a comment at the OUTPUT verdict: `-EPERM` is the value TCP reacts to, and no other output error may use it |
 | `kernel-services/network/nettest.c` | new selftest `net-tcpverdict`; `net-output` step 8 reversed (the nonblocking `connect` now returns `-EPERM` on its second call, and the first returns `-EINPROGRESS` with the abort already done) |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | register `net-tcpverdict` |
-| `docs/kernel-services/network/design.md` | "The OUTPUT chain": the TCP paragraph (`:1100-1110`) rewritten from "TCP does not" to the state rule; the deferral list (`:1179`) loses this entry; a new subsection for the rule |
-| `docs/kernel-services/network/testing.md` | `net-tcpverdict`; `net-output` step 8's text (`:593`) |
-| `docs/audit/next-subsystem-output-chain.md` | three claims (`:285`, `:390`, `:515`) that TCP's callers cannot see a verdict |
+| `docs/kernel-services/network/design.md` | "The OUTPUT chain": the paragraph "A refused send is told, not hidden" rewritten from "TCP does not" to the state rule, its pointer to this report replaced by what was built; the section's "Named and deferred" line; a new subsection for the rule |
+| `docs/kernel-services/network/testing.md` | `net-tcpverdict`; `net-output` step 8's text (its "TCP stalls rather than failing" sentence) |
+| `docs/audit/next-subsystem-output-chain.md` | the three places that say TCP's callers cannot see a verdict — §6 "Deliberately out of scope", the Tests bullet "TCP stalls rather than failing", the Risks bullet "TCP's asymmetry" — each already pointed here by this report and to be converted to as-built by the implementation |
 | `README.md` | the OUTPUT Status entry's TCP sentence (`:1352`), the two "named next steps" mentions (`:1380`, `:1455`), and a Status entry for this unit |
 
 ## New APIs
@@ -425,11 +451,13 @@ an "uplink" tap with a host route and a guest tap through
    minutes, so a test that finishes at all proves the abort. `out_refused`
    and `out_aborted` each rise by one, `tx_filtered` rises, and no SYN
    reaches the tap.
-2. **A nonblocking `connect`**: the first call returns `-EINPROGRESS` (the
-   socket is `SS_CONNECTING` before the flush), the connection is already
-   aborted, the second call returns `-EPERM` through `take_error`, and
-   `tcp_ready` reports `COSMO_IO_ERROR`. Delete the rule and the same
-   sequence connects.
+2. **A nonblocking `connect` fails outright**: the first call returns
+   `-EPERM`, not `-EINPROGRESS`, because `tcp_connect` hands the refusal to
+   `ksock_connect` directly; `tcp_ready` reports `COSMO_IO_ERROR` for a
+   second thread polling the same socket. Delete the rule and the same
+   sequence connects. This is the assertion `net-output` step 8 has to
+   change, and the reason that step was written nonblocking to begin
+   with.
 3. **A refused SYN-ACK drops the half-open**: the guest's SYN reaches the
    host listener (INPUT's seed), a `scope guest` OUTPUT rule on the
    listener's port refuses the answer, no SYN-ACK reaches the guest's tap,
@@ -459,7 +487,8 @@ an "uplink" tap with a host route and a guest tap through
 
 **`net-output` step 8** stops asserting the limit and asserts the fix:
 its comment ("the documented limit: `batch_send` ignores output errors")
-goes, and the nonblocking `connect`'s second call must return `-EPERM`.
+goes, and the nonblocking `connect` must return `-EPERM` on its first
+call.
 
 **Bug-proofs** — each reintroduced against the shipped code, the failure
 observed for its stated reason, and the source restored byte-identical:
