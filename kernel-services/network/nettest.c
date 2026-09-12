@@ -5784,10 +5784,12 @@ bool selftest_net_output(const char **reason)
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_lo) == 0);
     ksock_put(lo);
 
-    /* (8) TCP stalls rather than failing, the documented limit: batch_send
-     * ignores output errors, so the verdict is invisible to connect(). The
-     * rule is counted per attempt, no SYN reaches the link, and the socket's
-     * state is "connecting", not -EPERM. */
+    /* (8) TCP is told too, since the verdict unit: batch_send reports what
+     * the link refused and tcp_connect returns it, so a nonblocking connect
+     * to a refused peer fails outright with -EPERM on its first call rather
+     * than reporting an open in progress. The rule is counted per attempt
+     * and no SYN reaches the link. net-tcpverdict owns the rest of that
+     * behaviour; this step only keeps the chain's end of it honest. */
     struct fw_rule out_tcp = OUT_RULE(IPPROTO_TCP, 0, 0, wnet, 24, 9200, FW_DROP, FW_SCOPE_ANY);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_tcp) == 0);
     hin_drain(u);
@@ -5797,7 +5799,7 @@ bool selftest_net_output(const char **reason)
         CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
         ksock_set_nonblock(c, true);
         struct netaddr peer = v4addr(w, 9200);
-        CHECK(ksock_connect(c, &peer) == -EINPROGRESS);        /* not -EPERM: TCP never sees it */
+        CHECK(ksock_connect(c, &peer) == -EPERM);              /* told, not left connecting */
         CHECK(FWT_RISES(fw_get_stats, fs1, out_drop_rule, fs0.out_drop_rule));
         CHECK(!hin_recv(u, IPPROTO_TCP, 9200, &sg, 15));       /* the SYN never left */
         ksock_put(c);

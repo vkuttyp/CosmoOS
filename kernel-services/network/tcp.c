@@ -715,9 +715,13 @@ static int batch_send(struct tcp_batch *b)
             rc = ipv4_output(m, b->seg[i].src.v4, b->seg[i].dst.v4, IPPROTO_TCP, IP_DEFAULT_TTL);
         else
             rc = ipv6_output(m, &b->seg[i].src.v6, &b->seg[i].dst.v6, IPPROTO_TCP, IP_DEFAULT_TTL);
-        if (rc == 0)
+        if (rc == 0) {
             sent++;
-        else if (err == 0)
+            continue;
+        }
+        if (rc == -EPERM)
+            STAT(out_refused);
+        if (err == 0)
             err = rc;
     }
     b->n = 0;
@@ -841,6 +845,42 @@ static void orphan_fin_wait2(struct tcp_pcb *pcb)
         arm_keep(pcb, g_fin_wait2_ns);
 }
 
+/*
+ * After the flush, no lock held: what the link said about this
+ * connection's segments. `rc` is batch_send's return -- a count, or an
+ * error. Only -EPERM is the connection's business, and only because it is
+ * the firewall's OUTPUT verdict: a rule matches the whole tuple, and every
+ * segment of one connection carries the same tuple, so a rule that refused
+ * one will refuse them all. That is a decision, not the loss the
+ * retransmit timer repairs, which is why every other output error stays
+ * discarded here as it always was.
+ *
+ * A connection that is still opening cannot proceed, so it is aborted --
+ * exactly as a valid reset aborts it, which is also what wakes a blocking
+ * connect, whose wait watches the state and not the error.
+ *
+ * `wake` and `killed` are the caller's unwind pair; an already-set `wake`
+ * is kept, and a connection this flush already ended is left alone.
+ */
+static void output_result(struct tcp_pcb *pcb, int rc, struct socket **wake, bool *killed)
+{
+    if (rc != -EPERM || *killed)
+        return;
+    arch_irq_state_t s = spin_lock_irqsave(&pcb->lock);
+    switch (pcb->state) {
+    case TCP_SYN_SENT:
+    case TCP_SYN_RCVD:
+        STAT(out_aborted);
+        pcb->error = -EPERM;
+        *wake = *wake ? *wake : sock_ref(pcb);
+        *killed = pcb_end_locked(pcb);
+        break;
+    default:
+        break;
+    }
+    spin_unlock_irqrestore(&pcb->lock, s);
+}
+
 /* --- worker-side timer handling ----------------------------------------------------- */
 
 /* pcb lock held. The keep timer: an orphaned FIN_WAIT_2 ends, an idle
@@ -939,7 +979,7 @@ static void pcb_work(void *arg)
     }
 out:
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    output_result(pcb, batch_send(&b), &wake, &killed);
     sock_wake_after(wake);
     if (killed)
         pcb_put(pcb);   /* the state machine's */
@@ -1076,8 +1116,18 @@ int tcp_connect(struct tcp_pcb *pcb, const struct netaddr *remote)
     build_segment(pcb, &b, TH_SYN, pcb->iss, 0, true);
     arm_rexmit(pcb);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
-    return 0;
+    struct socket *wake = NULL;
+    bool killed = false;
+    int out = batch_send(&b);
+    output_result(pcb, out, &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The caller of a refused open is right here, so it is told rather
+     * than left to read the record: ksock_connect hands a non-zero return
+     * straight to the application, so a nonblocking connect fails outright
+     * instead of reporting -EINPROGRESS for an open already abandoned. */
+    return out == -EPERM ? -EPERM : 0;
 }
 
 int64_t tcp_send(struct tcp_pcb *pcb, const void *data, size_t len)
@@ -1102,7 +1152,15 @@ int64_t tcp_send(struct tcp_pcb *pcb, const void *data, size_t len)
     if (n)
         tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The bytes above are in the send buffer and will be retransmitted, so
+     * a refused flush does not unsay them: the count stands and the verdict
+     * is read on the next call. */
     return (int64_t)n;
 }
 
@@ -1125,7 +1183,14 @@ int64_t tcp_recv(struct tcp_pcb *pcb, void *data, size_t len, bool *peer_closed)
     *peer_closed = pcb->fin_rcvd && pcb->rcvbuf.len == 0;
     int err = pcb->error;
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* `err` was read before the flush, so a verdict this call's own window
+     * update earns is reported by the next one -- as in tcp_send. */
     if (n == 0 && err && !*peer_closed)
         return err;
     return (int64_t)n;
@@ -1152,7 +1217,14 @@ int tcp_shutdown_write(struct tcp_pcb *pcb)
     pcb->fin_queued = true;
     tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    /* The state moved under the lock: the shutdown happened whether or not
+     * the FIN reached the link. */
     return 0;
 }
 
@@ -1940,7 +2012,7 @@ out:
     spin_unlock_irqrestore(&pcb->lock, s);
     if (m)
         m_freem(m);
-    batch_send(&b);
+    output_result(pcb, batch_send(&b), &wake, &killed);
     sock_wake_after(wake);
     sock_wake_after(wake_listener);
     if (killed)
@@ -1980,8 +2052,14 @@ bool tcp_pmtu_notify(const struct netaddr *local, const struct netaddr *remote, 
     pcb->fin_sent = false;
     tcp_output_locked(pcb, &b);
     spin_unlock_irqrestore(&pcb->lock, s);
-    batch_send(&b);
-    pcb_put(pcb);
+    struct socket *wake = NULL;
+    bool killed = false;
+    output_result(pcb, batch_send(&b), &wake, &killed);
+    sock_wake_after(wake);
+    if (killed)
+        pcb_put(pcb);   /* the state machine's */
+    pcb_put(pcb);       /* the lookup's */
+    /* The MSS was lowered under the lock, whether or not the resend left. */
     return true;
 }
 
