@@ -315,6 +315,16 @@ but without `CLONE_SIGHAND` or `CLONE_VM`, or with a flag outside the
 set, is `-EINVAL`; without `CLONE_THREAD` (a fork) `-ENOSYS`. The
 child's FPU state is the reset state (a recorded deviation).
 
+**This door is currently wider than the native one**, which is the one
+place the personality is a superset rather than a translation: a native
+program has no syscall that creates a thread and none that waits on a
+futex, so a Linux binary can use every CPU in the machine and a CosmoOS
+binary cannot. `docs/audit/next-subsystem-threads.md` (not yet
+implemented) closes it with five native syscalls over exactly the
+mechanism this section describes -- `process_add_thread`, the two-phase
+start, `clear_child_tid` and the futex -- and makes the thread id one
+number with two views rather than an `lx_tid`.
+
 ### Dynamic executables
 
 `elf_validate` accepts `ET_DYN` (`info->is_dyn`; segment addresses are
