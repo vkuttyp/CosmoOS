@@ -16,8 +16,9 @@
  * Linux personality maps onto it without translation tables.
  *
  * Ownership: a process's credentials are written only by that process
- * (its own setres* calls, while it is single-threaded; under
- * process->lock once threads exist) and inherited by copy at spawn.
+ * (its own setres* calls, under process->lock -- which is what serialises
+ * them now that a process can have several threads) and inherited by copy
+ * at spawn.
  * Other processes read them (kill, procinfo) without the lock: every
  * field is a naturally aligned 32-bit word and a torn view is at worst
  * an old id, never an invalid one.

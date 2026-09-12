@@ -34,7 +34,15 @@ PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq
 PROG_DIR_hostname := system
 PROG_DIR_svc    := system
 
+# Test-only programs: built and archived under SELFTEST, so a release
+# image carries none of them.
+USER_TEST_PROGRAMS := thrtest
+PROG_DIR_thrtest := tests
+
 USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
+ifeq ($(SELFTEST),1)
+USER_PROGRAMS += $(USER_TEST_PROGRAMS)
+endif
 PROG_DIR_init := init
 
 # A program is one file, plus whatever PROG_EXTRA_SRCS_<name> lists.
@@ -65,7 +73,8 @@ USER_ARCHIVE_ENTRIES := \
 	etc/pkg/repos.conf=$(ROOT)/userland/etc/pkg/repos.conf \
 	etc/pkg/keys/$(notdir $(PKG_TRUST_PUB))=$(PKG_TRUST_PUB)
 ifeq ($(SELFTEST),1)
-USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux
+USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(ROOT)/userland/etc/rc.linux \
+	$(foreach p,$(USER_TEST_PROGRAMS),tests/native/$(p)=$(call prog_elf,$(p)))
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
 	$(ROOT)/userland/etc/pkg/repos.conf $(PKG_TRUST_PUB) \

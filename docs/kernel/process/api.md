@@ -104,7 +104,7 @@ documented in `docs/kernel/syscall/api.md`.
   `-ENOMEM`; `-EAGAIN` when the process is exiting or has
   `PROCESS_MAX_THREADS` (256) live threads.
 
-### `struct thread *process_find_thread(struct process *p, uint32_t lx_tid)`
+### `struct thread *process_find_thread(struct process *p, uint32_t user_tid)`
 - The live thread of `p` with that Linux tid (the pid for the main
   thread, `0x10000 + kernel tid` otherwise), or NULL. A borrowed
   pointer, used only to queue a signal under the process's lock, which
@@ -519,7 +519,7 @@ first register set, freed at its first user entry), `sig_pending`,
 `sig_blocked`, `sig_saved_blocked`/`sig_restore_blocked`, `sig_info`
 (64 entries, freed by `thread_put`), `altstack`, `syscall_nr`/
 `syscall_arg0` (the call in progress, for `SA_RESTART`),
-`clear_child_tid`, `lx_tid`.
+`clear_child_tid`, `user_tid`.
 
 ## kernel/wait.h additions (Phase 9)
 

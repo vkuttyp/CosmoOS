@@ -203,7 +203,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 60 | `exit` | `process_thread_exit(status & 0xff)`: the calling thread; the process ends with that status when it was the last live thread | |
 | 231 | `exit_group` | `process_exit(status & 0xff)`: every thread | |
 | 39 | `getpid` | `pid` | |
-| 186 | `gettid` | `thread->lx_tid`: the pid for the main thread, `0x10000 + kernel tid` for a clone | |
+| 186 | `gettid` | `thread->user_tid`: the pid for the main thread, `0x10000 + kernel tid` for a clone | |
 | 56 | `clone` (milestone 10) | the thread set only: `CLONE_VM\|THREAD\|SIGHAND` required, plus any of `FS`, `FILES`, `SYSVSEM`, `SETTLS`, `PARENT_SETTID`, `CHILD_CLEARTID`, `CHILD_SETTID`, `DETACHED`, `UNTRACED`; `process_add_thread` with the caller's frame (result 0, `rsp`/`sp` = `stack` when non-zero, thread pointer = `tls` under `SETTLS` else the caller's), the tid words written before the child runs, `clear_child_tid` recorded; returns the child's tid. Argument order: x86-64 `flags, stack, ptid, ctid, tls`; AArch64 `flags, stack, ptid, tls, ctid` | without `CLONE_THREAD` (a fork) `-ENOSYS`; `THREAD` without `SIGHAND`/`VM`, or a flag outside the set, `-EINVAL`; an unwritable tid word `-EFAULT` (the child is abandoned); more than 256 live threads `-EAGAIN`; the child's FPU state is the reset state |
 | 203, 204 | `sched_setaffinity`, `sched_getaffinity` | set: accepted and ignored (`-EINVAL` below 8 bytes or an unreadable mask); get: the online CPU mask in 8 bytes, returns 8 | `pid` 0, the caller, one of its threads, or any live process; unknown `-ESRCH` |
 | 110 | `getppid` | `parent_pid` | |

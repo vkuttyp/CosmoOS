@@ -83,6 +83,15 @@ umount /tmp/snapmnt 2> /tmp/shtest/snap.err2
 # guest under vmctl. The guest images are per-architecture, so the shell
 # runs whichever one this build carries: the x86 console guest, or the
 # AArch64 guest that calls its hypervisor and waits.
+# Native threads and the futex, which no kernel self-test can reach: a
+# self-test cannot create a *user* thread (docs/kernel/process/testing.md).
+# Before the hypervisor section deliberately: that section asks for guests
+# of 16 MiB and, where a Linux Image exists, 256 MiB, and a test about
+# threads should not be hostage to what the frame allocator looks like
+# afterwards. CI refused this test's second thread stack with -ENOMEM when
+# it ran last.
+/boot/tests/native/thrtest || FAILS=1
+
 vmctl probe || echo "HVTEST: skipped"
 ls /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_pio.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"
 ls /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run /boot/tests/hv/guest_hvc.bin > /tmp/shtest/hv.out && cat /tmp/shtest/hv.out && echo "HVTEST: PASS"

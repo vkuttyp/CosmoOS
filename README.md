@@ -1432,6 +1432,56 @@ See [docs/development.md](docs/development.md).
   outcome -- the experiment was run and changed none. Per-interface chains,
   rate-limit and logging targets, IPv6 filtering and full TCP state
   tracking in the filter remain later units.
+- **Native threads and a futex (done):**
+  `docs/audit/next-subsystem-threads.md`,
+  `docs/kernel/process/design.md` (§12 "Native threads"). The one place
+  the compat layer was a **superset** of the machine rather than a
+  translation of it: this kernel has run threads across every CPU since
+  milestone 10, with per-thread signal masks and a futex, and a *native*
+  program could reach none of it -- the only door was the Linux
+  personality's `clone(CLONE_THREAD)`, so a `musl` binary with
+  `pthread_create` could use every CPU in the machine and a CosmoOS binary
+  could not. Five system calls close it and add no mechanism:
+  `SYS_thread_create` (a `struct cosmo_thread`, as `SYS_spawn` takes a
+  `cosmo_spawn`), `SYS_thread_exit`, `SYS_thread_self`, `SYS_futex_wait`
+  and `SYS_futex_wake`; `SYS_exit` needed no change, having meant *the
+  process* since `process_exit` and `process_thread_exit` became two
+  functions. **Joining is not a system call**: `clear_tid` names a word the
+  kernel fills with the new thread's id before it can run and zeroes and
+  futex-wakes at exit, so a join is a futex wait in libc, the kernel keeps
+  no table of unreaped threads, and the same word answers "has it
+  finished?" with no call at all. Creation is ordered by its failure modes
+  -- everything before the link fails with nothing created, everything
+  after it with `process_thread_abandon` -- and the **entry contract** is
+  part of the interface, a thread being entered at a function with no
+  `call` having happened: x86-64 gets a zeroed return slot so the entry
+  sees `rsp % 16 == 8` as SysV promises, AArch64 gets `sp` at `stack_top`
+  and `x30` zero, and a `return` therefore faults at address 0 and ends the
+  process, which libc's trampoline is there to prevent. The unit's real
+  finding was where a *behaviour* lived: the `clear_child_tid`
+  zero-and-wake was the Linux personality's `thread_exit` hook, so a native
+  thread's joiner was never woken until it moved into
+  `process_thread_exit` -- the "second door" lesson from a third side, not
+  a check missing from the front door but work the side door owned
+  privately. Two more corrections came from building it: the stack probe is
+  **uniform across architectures**, because with it x86-only AArch64
+  accepted a create with an unmapped stack and killed the thread on its
+  first push; and **libc was not thread-safe inside** -- invariant L8 had
+  named this day in advance, and two thirds of what it asked for landed
+  here after review pushed back on merely documenting the hazard: the
+  **allocator** and **stdio** now take one lock each (an unlocked free
+  list is the one hazard that corrupts memory silently, and a whole
+  `printf` is one critical section), while **`errno` stays one global**,
+  because per-thread `errno` needs a TLS model and `crt0` changes on both
+  architectures and is its own unit -- a threaded program must not rely on
+  `errno` across threads until then, which costs a wrong error code and
+  never corruption. Proven by
+  `tests/native/thrtest` -- twelve steps from userland, because a kernel
+  self-test cannot create a *user* thread -- with eleven bug-proofs, four of
+  which sent the test back for a stronger assertion rather than the code. `SYS_mprotect`, futex
+  requeue, per-thread signal targeting, the handle table under two threads,
+  and `vmctl`'s conversion to a thread per vCPU (the first consumer, and
+  the reason the machine-mode fairness rule exists) remain later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

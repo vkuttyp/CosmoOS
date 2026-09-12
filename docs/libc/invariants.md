@@ -69,13 +69,41 @@ requires an execute bit; `errno` ends as the last kernel error or
 `spawnve("/bin")` is `EACCES`, `spawnve("/etc/rc")` is `EACCES`). Gap:
 `PATH` entries longer than 1023 bytes are skipped silently.
 
-**L8. The library is single-threaded and says so.** `errno` is a global,
-the allocator and stdio take no locks, `strerror` and `getcwd(NULL)`
-use static or heap storage without synchronisation. Threads in user
-programs do not exist (the kernel offers no `thread_create` call), so
-this is safe by construction. Check: review. Gap: the day user threads
-arrive, `errno` becomes TLS and the allocator and stdio take locks
-before anything else is done.
+**L8. The allocator and stdio are locked; `errno` is not, and says so.**
+User threads arrived with the audit unit "native threads and a futex", and
+this invariant used to read "the library is single-threaded and says so"
+with a note that on that day `errno` would become thread-local and the
+allocator and stdio would take locks *before anything else was done*. Two
+thirds of that is done, and the split is by consequence rather than by
+convenience:
+
+- **The allocator takes one lock** (`libc/src/malloc.c`). An unlocked free
+  list is the one hazard here that corrupts memory silently, which is
+  worse than any other, so it is not left to a rule a caller must know.
+  The public functions take the lock once and call an unlocked core,
+  because `calloc` and `realloc` are written in terms of `malloc` and
+  `free` and the mutex is not recursive.
+- **stdio takes one lock** (`libc/src/stdio.c`), held across a whole
+  `printf` -- `vfprintf` takes it and the sink writes through the unlocked
+  core -- so two threads cannot interleave inside a line or race the
+  buffer pointers of a `FILE`.
+- **`errno` is still one global**, because per-thread `errno` needs a
+  thread-local-storage model: a per-thread block, an architecture-specific
+  thread-pointer accessor, `crt0` installing one for the main thread on
+  both architectures, and `errno` becoming an accessor in a public header.
+  That is its own unit. Until then a threaded program must not rely on
+  `errno` across threads: the value it reads may be another thread's. The
+  consequence is a wrong error code, never corruption.
+
+`strerror` and `getcwd(NULL)` still use static or heap storage without
+synchronisation of their own, and `feof`/`ferror`/`clearerr`/`fileno` read
+a word without the lock.
+
+`cosmo/thread.h` needs none of this: every function there returns `-errno`
+rather than setting the global, takes no libc lock, and maps its stacks
+with `mmap`. Check: review, plus `thrtest` step 12 -- three threads
+allocating, reallocating, freeing and printing at once, each verifying its
+own blocks, which an unlocked allocator fails. Gap: `errno`.
 
 ## Gaps (documented, not invariants)
 

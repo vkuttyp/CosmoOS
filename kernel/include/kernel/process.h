@@ -327,7 +327,7 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
 void process_thread_start(struct thread *t);
 void process_thread_abandon(struct thread *t);
 /* The thread of `p` with this Linux tid (pid for the main thread), or NULL. Not referenced. */
-struct thread *process_find_thread(struct process *p, uint32_t lx_tid);
+struct thread *process_find_thread(struct process *p, uint32_t user_tid);
 
 /* Wait for `p` to exit and return its status. */
 int process_wait_exit(struct process *p);

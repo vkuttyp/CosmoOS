@@ -17,7 +17,6 @@ struct sigaction_k;
  * trampoline page, and the signal-related system calls. */
 int linux_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
                        uint64_t blocked_before);
-void linux_thread_exit(struct thread *t);
 int linux_sigtramp_map(struct process *p);
 
 int64_t lx_rt_sigaction(struct syscall_args *a);

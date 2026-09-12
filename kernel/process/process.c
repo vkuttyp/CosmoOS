@@ -13,6 +13,8 @@
 #include <kernel/utsns.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/futex.h>
+#include <kernel/uaccess.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -711,7 +713,7 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     process_get(p);
     t->user_entry = (uintptr_t)entry;   /* the interpreter's when there is one */
     t->user_sp = (uintptr_t)sp;
-    t->lx_tid = p->pid;   /* the main thread's Linux tid is the pid */
+    t->user_tid = p->pid;   /* a first thread's id is the pid, in either personality */
     s = spin_lock_irqsave(&p->lock);
     list_push_back(&p->threads, &t->proc_link);
     p->nr_threads = 1;
@@ -801,6 +803,26 @@ void process_exit(int status)
     thread_exit(status);
 }
 
+/*
+ * The contract of thread.clear_child_tid, for whoever set it: the word is
+ * zeroed and one waiter woken when the thread exits, which is the whole of
+ * joining -- read the word, and wait on it while it is non-zero. Both
+ * doors set the field (SYS_thread_create's clear_tid, and Linux's
+ * CLONE_CHILD_CLEARTID and set_tid_address), so the work is generic; it
+ * lived in the Linux personality's thread_exit hook until a native thread
+ * needed it and no one woke its joiner.
+ */
+static void thread_clear_tid(struct thread *t)
+{
+    uint64_t addr = t->clear_child_tid;
+    if (addr == 0 || t->proc == NULL || t->proc->space == NULL)
+        return;
+    t->clear_child_tid = 0;
+    uint32_t zero = 0;
+    if (copy_to_user(addr, &zero, sizeof(zero)) == 0)
+        futex_wake(t->proc->space, addr, 1);
+}
+
 void process_thread_exit(int status)
 {
     struct thread *self = thread_current();
@@ -816,6 +838,18 @@ void process_thread_exit(int status)
         p->exit_status = status;
     }
     spin_unlock_irqrestore(&p->lock, s);
+    /*
+     * The joiner is woken *after* this thread stops being counted, so that
+     * a caller whose join has returned may immediately create another
+     * thread: waking first left nr_live still counting this one, and a
+     * program that joined PROCESS_MAX_THREADS threads and then created
+     * more was refused -EAGAIN for slots it had already released. (Found by
+     * thrtest under the GIC variant's schedule, where it fails and the
+     * default one passes.) The user copy and the futex cannot run under
+     * p->lock -- the copy may fault and the futex takes its own lock -- so
+     * this is last rather than inside the critical section.
+     */
+    thread_clear_tid(self);
     thread_exit(status);
 }
 
@@ -843,7 +877,7 @@ int process_add_thread(struct process *p, const struct arch_user_regs *regs, uin
     t->sig_blocked = cur->sig_blocked;   /* inherited, as on Linux */
     t->proc = p;
     process_get(p);
-    t->lx_tid = 0x10000u + t->tid;
+    t->user_tid = 0x10000u + t->tid;   /* past every pid, so the two spaces cannot collide */
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     if (p->state != PROCESS_RUNNING || p->nr_live >= PROCESS_MAX_THREADS) {
         spin_unlock_irqrestore(&p->lock, s);
@@ -882,12 +916,12 @@ void process_thread_abandon(struct thread *t)
     process_thread_start(t);
 }
 
-struct thread *process_find_thread(struct process *p, uint32_t lx_tid)
+struct thread *process_find_thread(struct process *p, uint32_t user_tid)
 {
     struct thread *t, *found = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     list_for_each_entry(t, &p->threads, proc_link) {
-        if (t->lx_tid == lx_tid && t->state != THREAD_EXITED) {
+        if (t->user_tid == user_tid && t->state != THREAD_EXITED) {
             found = t;
             break;
         }
@@ -1497,9 +1531,10 @@ bool process_log_permitted(void)
     return ok;
 }
 
-/* setres{u,g}id for the calling process (system calls). The process is
- * single-threaded, so it is the only writer; the lock keeps the update
- * atomic against readers on other CPUs once threads exist. */
+/* setres{u,g}id for the calling process (system calls). Threads exist
+ * now, so there can be several writers as well as readers on other CPUs:
+ * the lock -- which was taken for that day -- is what keeps the update
+ * atomic. */
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid)
 {
     struct process *p = process_current();

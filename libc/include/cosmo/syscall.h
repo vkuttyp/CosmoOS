@@ -394,4 +394,30 @@ static inline long cosmo_ttysize(int h, struct cosmo_ttysize *out)
     return cosmo_syscall2(SYS_ttysize, h, out);
 }
 
+/* Threads and the futex (docs/kernel/process/design.md, "Native
+ * threads"). cosmo_thread_create returns the new thread's id; a thread
+ * ends with cosmo_thread_exit, never by returning from its entry. */
+static inline long cosmo_thread_self(void)
+{
+    return cosmo_syscall0(SYS_thread_self);
+}
+static inline long cosmo_thread_create(const struct cosmo_thread *req)
+{
+    return cosmo_syscall1(SYS_thread_create, req);
+}
+static inline void cosmo_thread_exit(int status) __attribute__((noreturn));
+static inline void cosmo_thread_exit(int status)
+{
+    cosmo_syscall1(SYS_thread_exit, status);
+    __builtin_unreachable();
+}
+static inline long cosmo_futex_wait(volatile unsigned *word, unsigned val, unsigned long long timeout_ns)
+{
+    return cosmo_syscall3(SYS_futex_wait, word, val, timeout_ns);
+}
+static inline long cosmo_futex_wake(volatile unsigned *word, unsigned n)
+{
+    return cosmo_syscall2(SYS_futex_wake, word, n);
+}
+
 #endif /* COSMO_SYSCALL_H */

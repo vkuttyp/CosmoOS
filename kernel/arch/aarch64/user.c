@@ -99,6 +99,18 @@ void arch_user_regs_restart_syscall(struct arch_user_regs *r, uint64_t nr, uint6
     r->pc -= 4;   /* the SVC instruction */
 }
 
+void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintptr_t arg, uintptr_t sp)
+{
+    memset(r, 0, sizeof(*r));
+    r->pc = entry;
+    r->x[0] = arg;              /* AAPCS: the first argument */
+    r->sp = sp;                 /* 16-byte aligned, as AAPCS requires: the word the
+                                   caller zeroed below it is the thread's own stack,
+                                   there to prove the mapping exists */
+    r->x[30] = 0;               /* the link register: a return jumps to 0 */
+    arch_user_regs_sanitize(r);
+}
+
 void arch_user_regs_sanitize(struct arch_user_regs *r)
 {
     r->pstate = (r->pstate & AARCH64_PSTATE_USER_MASK) | SPSR_M_EL0T;

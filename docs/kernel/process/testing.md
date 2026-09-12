@@ -358,9 +358,165 @@ thread, signal and PIE coverage on both machines.
   test creates an orphan under the real init; no test exceeds
   `COSMO_ARG_MAX`.
 - No concurrency tests for the handle table from several threads of one
-  process (threads exist since milestone 10; the Linux tests use them
-  for signals and futexes only).
+  process. Native threads make this reachable from a CosmoOS program for
+  the first time (`thrtest`), and it is still not tested: the handle table
+  under two threads sharing it is worth a unit of its own.
 - SMAP (`stac`/`clac`) is untested on `qemu64`; a run with
   `-cpu max` is planned in CI once TCG's SMAP emulation is confirmed.
 - Timing bounds in the user test (5 ms sleep, 200 ms ceiling) are
   loose for TCG.
+
+## Native threads (`thrtest`, audit unit "native threads and a futex")
+
+A kernel self-test cannot create a **user** thread, so this unit's proof is
+a native userland program: `tests/native/thrtest` in the boot archive
+(`SELFTEST` builds only), run from `/etc/rc.test` -- **before** its hypervisor section, which asks
+for guests of 16 MiB and, where a Linux `Image` exists, 256 MiB: a test
+about threads should not be hostage to what the frame allocator looks like
+afterwards, and CI refused this test's second thread stack with `-ENOMEM`
+when it ran last. Its own threads ask for 16 KB stacks rather than the
+64 KB default, which is what they need -- gated by
+`THREADTEST: PASS` in `run_boot_test.py`'s own `THREAD_MARKERS` group --
+its own group and not the hypervisor's, which are gated on a backend,
+because native threads run on every build. Each step prints its number
+before running: two of the bug-proofs below kill the process outright, and
+"no output" would say a step failed without saying which.
+
+(1) A thread runs and is joined: its id is neither zero nor the pid, the
+work it did is visible afterwards, and `join` returns what the function
+returned. (2) **The entry conditions the ABI promises**, captured by a
+*naked* stub that records the stack pointer and tail-jumps to the C body,
+because reading `rsp` inside the C function measures the frame and not the
+entry -- an earlier version did that and passed on AArch64 by luck while
+x86-64 caught it. `rsp % 16 == 8` on x86-64, `sp % 16 == 0` on AArch64, the
+argument in the first argument register, and a 16-byte-aligned vector store
+that faults if the alignment is wrong rather than merely unusual. (3) Two
+threads make progress against each other under a bound: the assertion is
+*progress*, so a single-CPU run passes too (preemption suffices) and
+parallelism makes it fast rather than making it pass. (4) The futex answers
+`-EAGAIN` for a word that does not hold the expected value, `-ETIMEDOUT`
+for a timeout, zero woken when nobody waits, `-EINVAL` for an unaligned
+word and `-EFAULT` for one outside the caller's space. (5) **`clear_tid` is a join**, in two parts. First
+deterministically: a child that waits to be told to stop cannot have
+exited, so the word must still hold its tid. Asserting that against a
+child which returns at once is simply wrong -- on a machine with more
+parallelism the child finishes, the kernel zeroes the word, and the parent
+reads 0 -- and CI proved it after five local runs had not. Then a hundred
+times: the word holds the child's tid the instant
+`thread_create` returns -- written by the kernel before the child could
+run, so it cannot be a stale value the caller wrote -- and is zero after
+the join, with every tenth iteration pausing so the child finishes *first*.
+There the word may legitimately read the tid *or* zero depending on who
+won, so what the loop proves is the **join**: a stale tid, written after
+the child had already zeroed it, is what hangs it. One attempt is not
+enough either way: the property is a race over a few microseconds, and the
+bug-proof for the ordering passed against a single attempt.
+(6) Exit semantics: a worker's `thread_exit` leaves the process running and
+its joiner returns. (7) The **signal mask is per-thread**: a worker blocks
+`SIGUSR1`, the main thread does not, and the signal sent to the process is
+handled by the thread that does not block it. (8) Every argument check --
+a request outside the caller's space, an unmapped `stack_top`, an unaligned
+one, an unknown flag, an unaligned `clear_tid` -- using a page this test
+maps and frees, so the address is unmapped *by construction* rather than by
+assumption (0x400000 is the program's own load address, which an earlier
+version discovered by creating a thread whose stack was its own text).
+(9) A mutex under two threads loses no update, and `trylock` fails on a
+held one. (10) **The filter, observed from outside**: a denied call does not
+return an error, it kills the process with `SIGSYS` (status 159), so the
+filtered process cannot report on itself -- one child calls a denied
+`thread_create` and must die that way, and another, under a filter that
+denies *everything*, must still exit cleanly with its own status through
+`thread_exit`. (11) **The allocator and stdio under three threads at once**: each thread
+allocates, fills its block with its own byte, verifies every byte of it,
+reallocates, frees, and prints as it goes. This is the step that would
+otherwise find out the hard way what an unlocked free list does -- a lost
+or shared block shows up as a wrong byte rather than only as a crash --
+and the whole lines from three threads in the log are stdio's side of it.
+It also calls `fflush(NULL)` and `fflush(stdout)`, because nothing did
+until that locking was found to deadlock the first form against its own
+lock.
+(12) The bound holds: creating threads until `-EAGAIN` stops
+at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
+creates succeed -- three rather than one, because a join that returned
+before the kernel stopped counting its thread left the next create refused
+`-EAGAIN`, and a single retry's worth of luck hides that. It is
+deliberately the **last** step: it exhausts a resource on purpose, and the
+memory those threads held returns as the kernel reaps them rather than the
+instant their joins return, so anything run after it is running on a
+machine still recovering. An earlier revision put the heap step after this
+one and watched `malloc` and `thread_create` be refused for want of
+memory, which is this step working rather than a bug -- and which cost two
+runs to diagnose only because the step counted three different causes as
+one number. Each cause now prints itself.
+
+Proved by reintroducing, each failure named by the step that caught it and
+the source restored byte-identical every time:
+
+1. The tid written **after** `process_thread_start` -- with the window
+   widened by a deliberate sleep, because the real one is about a hundred
+   nanoseconds and a hundred contested attempts never lost it: step 1's
+   join then waits for ever on a word the child had already zeroed.
+2. The x86-64 return address not pushed → step 2 dies of a **#GP** in its
+   aligned store, the entry having seen `rsp % 16 == 0`.
+3. `SYS_futex_wait` passing zero instead of the value it was given → step
+   4's `-ETIMEDOUT` becomes `-EAGAIN`.
+4. `SYS_thread_create` not arming `clear_child_tid` → step 1's join hangs.
+5. `SYS_thread_exit` calling `process_exit` → the process dies during step
+   1, when the first worker finishes.
+6. `SYS_thread_exit` removed from `native_always_allowed` → step 10's
+   deny-everything child dies with `SIGSYS` instead of exiting 7.
+7. The stack probe made x86-only again → on AArch64 step 8's create with an
+   unmapped stack **succeeds**, and the thread it made dies at address 0
+   and takes the process with it.
+8. `SYS_thread_self` answering the scheduler's `tid` → three checks fail at
+   once, the id being asserted in steps 1, 6 and 7.
+9. `PROCESS_MAX_THREADS` not checked → step **12** runs past 300 threads
+   and both its bound assertions fail.
+10. The futex timeout left unbounded → step 4's `-EINVAL` for a duration
+    that would wrap the deadline becomes an immediate `-ETIMEDOUT`.
+11. The allocator's lock removed → step **11** aborts (`SIGABRT`, status
+    134): three threads in one free list trip the allocator's own
+    corruption check. That is the hazard a review said documentation could
+    not excuse, and it is right -- the lock is the fix, and this is the
+    proof it is load-bearing.
+
+A twelfth reintroduction is not needed for the one deadlock this locking
+caused, because the fix is what the test now asserts: `fflush(NULL)` used
+to take the stdio lock in the public `fflush` and take it again in
+`__stdio_flush_all`, so a thread deadlocked against itself. Nothing called
+`fflush(NULL)` until a review found it; step 11 calls it now, and the
+null-stream branch runs the unlocked core.
+
+stdio's lock has no proof of its own here. Racing a `FILE`'s buffer
+pointers garbles output rather than failing an assertion, and this test
+cannot read its own stdout; what the log does show is whole lines from
+three threads, where an unlocked stream would interleave inside them. The
+lock is argued from the code (everything funnels through `fputc`, and
+`vfprintf` holds it across a whole format so the sink writes through the
+unlocked core) and from the allocator's proof, which exercises the same
+mutex.
+
+**One fix cannot be proved here, and the reason is a property of this
+kernel.** The mutex used to hand the lock over as "held, no waiters"
+(`cas(state, 0, 1)` in the retry loop), which strands a sleeper whenever
+three or more threads contend: the winner leaves 1, the unlock sees 1 and
+wakes nobody, and a thread already asleep on 2 is never called again. That
+is the variant Drepper's *Futexes Are Tricky* gives as flawed, and the fix
+is his correct one -- always exchange 2 in when taking the lock through the
+slow path. Reintroducing it does **not** fail step 9 (the mutex step), because
+`futex_wait` in this kernel returns 0 when a wake raced its enqueue (a
+spurious wake the futex contract permits, and this one takes), and the
+retry loop absorbs it: the stranded thread is rescued by the next
+contender's wake. The flaw is real and the rescue is not something a
+correct mutex may rely on -- the contract permits spurious wakes, it does
+not promise them -- so the fix stands on the argument and the step stands
+as the regression guard for the lock's *mutual exclusion*, which it does
+prove (no lost update under three contenders).
+
+Two other proofs were first written against the **shared** machinery --
+the futex's compare, and the zero-and-wake in `process_thread_exit` -- and
+both hung the boot *before* `thrtest` ran, because the Linux personality's
+own joins depend on exactly the same code. That is evidence the contract
+belongs where it now lives rather than in a personality, but it proves
+nothing about this test, so each was rewritten to perturb the native
+wrapper alone.

@@ -42,11 +42,30 @@ static void put_buf(struct out *o, const char *s, size_t n)
     o->len += n;
 }
 
+/*
+ * stdio's lock and its unlocked write core (libc/src/stdio.c), declared
+ * here rather than pulled in through libc.h: tests/host/test_libc.c
+ * compiles this file on its own with no include path and with FILE and
+ * fwrite renamed (tests/host/host.mk), so an include that needs the
+ * library's headers breaks that build. Under the host test the lock is
+ * nothing and the core is the host's fwrite, which is what the test wants
+ * -- it checks formatting, not locking.
+ */
+#if defined(LIBC_HOST_TEST)
+#define __stdio_lock()   ((void)0)
+#define __stdio_unlock() ((void)0)
+#define __fwrite_nolock  fwrite
+#else
+void __stdio_lock(void);
+void __stdio_unlock(void);
+size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);
+#endif
+
 static void flush_tmp(struct out *o)
 {
     if (o->tmp_len) {
         if (o->file)
-            fwrite(o->tmp, 1, o->tmp_len, o->file);
+            __fwrite_nolock(o->tmp, 1, o->tmp_len, o->file);   /* the lock is held by vfprintf */
         else
             write(o->fd, o->tmp, o->tmp_len);
         o->tmp_len = 0;
@@ -517,8 +536,13 @@ int dprintf(int fd, const char *fmt, ...)
 int vfprintf(FILE *f, const char *fmt, va_list ap)
 {
     struct out o = { .put = put_stream, .file = f };
+    /* Held across the whole format, so one printf is one critical section
+     * and two threads cannot interleave inside a line -- the sink writes
+     * through the unlocked core for that reason. */
+    __stdio_lock();
     format(&o, fmt, ap);
     flush_tmp(&o);
+    __stdio_unlock();
     return (int)o.len;
 }
 

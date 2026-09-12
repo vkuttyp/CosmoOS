@@ -127,7 +127,39 @@
 #define SYS_vm_raise_spi 79  /* (int vm, unsigned intid) -> 0: a device asserts a shared interrupt through the guest's distributor */
 #define SYS_vm_lower_spi 80  /* (int vm, unsigned intid) -> 0: and drops it */
 #define SYS_fsync     81  /* (int handle) -> 0: commit one file's data, not every mount (cf. SYS_sync) */
-#define SYS_COUNT     82
+#define SYS_thread_self 82  /* () -> the calling thread's id (the pid for a process's first thread) */
+#define SYS_futex_wait  83  /* (uint32_t *word, uint32_t val, uint64_t timeout_ns) -> 0 while *word == val */
+#define SYS_futex_wake  84  /* (uint32_t *word, unsigned n) -> threads woken */
+#define SYS_thread_create 85  /* (const struct cosmo_thread *req) -> tid */
+#define SYS_thread_exit 86  /* (int status) -> does not return; the process ends with the last thread */
+#define SYS_COUNT     87
+
+/*
+ * What SYS_thread_create is asked for. A struct rather than five
+ * arguments, for the reason SYS_spawn takes one: the fields will grow, and
+ * cosmo_spawn's pattern -- new fields appended and read only when a flag
+ * asks for them -- is how this interface grows without a version number.
+ *
+ * `entry` is entered with `arg` in the first argument register and
+ * `stack_top` as the stack pointer; every other register is zero. A thread
+ * is entered at a function without a call having happened, so a `return`
+ * from `entry` jumps to address 0 and kills the process on the fault: end
+ * a thread with SYS_thread_exit, which is what libc's wrapper does.
+ *
+ * `clear_tid`, when non-zero, names a 4-byte-aligned word in the caller's
+ * space that the kernel fills with the new thread's id *before* it can run
+ * and zeroes and futex-wakes when it exits. That is the whole of joining:
+ * read the word, and if it is non-zero wait on it with SYS_futex_wait.
+ */
+struct cosmo_thread {
+    uint64_t entry;
+    uint64_t arg;
+    uint64_t stack_top;    /* 16-byte aligned; the caller owns the mapping and its guard */
+    uint64_t tls;          /* thread pointer (x86-64 FS base, AArch64 TPIDR_EL0); 0 = none */
+    uint64_t clear_tid;    /* 0 = none */
+    unsigned flags;        /* 0 */
+    uint32_t reserved;     /* 0 */
+};
 
 /* A filter mask is this many 64-bit words, enough for every number any
  * personality here uses (the Linux one goes to 512). */

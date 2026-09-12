@@ -83,6 +83,28 @@ void arch_user_enter_regs(const struct arch_user_regs *r) __noreturn;
  * privileged flag bits) so that loading it cannot escalate. */
 void arch_user_regs_sanitize(struct arch_user_regs *r);
 
+/*
+ * Build the register set a brand-new user thread starts with: `entry` as
+ * the first instruction, `arg` in the first argument register, `sp` as the
+ * stack pointer, every other register zero and the flags sanitised. A
+ * thread is entered at a function without a call having happened, so each
+ * architecture also arranges that a `return` from `entry` cannot be taken:
+ * x86-64 leaves rsp 8 below `sp` (the slot the caller must have zeroed,
+ * which gives the entry the `rsp % 16 == 8` SysV promises), AArch64 leaves
+ * x30 zero. Either way the return jumps to address 0 and the thread's
+ * process dies on the fault, which is a program bug caught loudly rather
+ * than a jump into whatever the stack held.
+ *
+ * The caller zeroes ARCH_THREAD_TOP_BYTES at the top of the stack before
+ * using these registers -- a user write, and so not done here. The size is
+ * the same on every architecture on purpose: x86-64 needs that slot for
+ * the return address, AArch64 does not, but the write is also what proves
+ * the stack is there, and a validation that happened on one architecture
+ * and not the other would be a trap for a program that only runs on one.
+ */
+void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintptr_t arg, uintptr_t sp);
+#define ARCH_THREAD_TOP_BYTES 8u
+
 /* Bracket direct kernel access to user memory (STAC/CLAC with SMAP). */
 void arch_user_access_begin(void);
 void arch_user_access_end(void);

@@ -188,6 +188,12 @@ MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 # translation on AArch64 (unless QEMU_EL2=0) -- so the guest self-tests
 # must run rather than skip, and vmctl must run this architecture's
 # sample guest from the shell.
+# Native threads and the futex, proved from userland because a kernel
+# self-test cannot create a *user* thread (docs/kernel/process/testing.md).
+THREAD_MARKERS = [
+    r"^THREADTEST: PASS$",
+]
+
 HVTEST_MARKERS = [
     r"^HVTEST: PASS$",
 ]
@@ -492,6 +498,11 @@ def main():
         for pat in PKGTEST_MARKERS:
             if not any(re.search(pat, ln) for ln in lines):
                 failures.append(f"missing marker /{pat}/ (package test)")
+        # Native threads run on every build: no backend, no architecture
+        # condition, nothing to skip.
+        for pat in THREAD_MARKERS:
+            if not any(re.search(pat, ln) for ln in lines):
+                failures.append(f"missing marker /{pat}/ (native threads)")
         # A machine with a backend must run its guests; AArch64 without
         # EL2 (QEMU_EL2=0) has none and says so.
         if ARCH == "x86_64" or EL2:

@@ -315,15 +315,20 @@ but without `CLONE_SIGHAND` or `CLONE_VM`, or with a flag outside the
 set, is `-EINVAL`; without `CLONE_THREAD` (a fork) `-ENOSYS`. The
 child's FPU state is the reset state (a recorded deviation).
 
-**This door is currently wider than the native one**, which is the one
-place the personality is a superset rather than a translation: a native
-program has no syscall that creates a thread and none that waits on a
-futex, so a Linux binary can use every CPU in the machine and a CosmoOS
-binary cannot. `docs/audit/next-subsystem-threads.md` (not yet
-implemented) closes it with five native syscalls over exactly the
-mechanism this section describes -- `process_add_thread`, the two-phase
-start, `clear_child_tid` and the futex -- and makes the thread id one
-number with two views rather than an `lx_tid`.
+**This door was wider than the native one** -- the one place the
+personality was a superset rather than a translation -- until the audit
+unit "native threads and a futex"
+(`docs/audit/next-subsystem-threads.md`, `docs/kernel/process/design.md`
+§12) gave native programs five system calls over exactly the mechanism
+this section describes: `process_add_thread`, the two-phase start,
+`clear_child_tid` and the futex. Two things here changed with it. `lx_tid`
+is `thread.user_tid`, the id **both** doors show, so a Linux `tgkill` and
+a native `thread_self` cannot disagree about a thread. And the
+`clear_child_tid` zero-and-wake is no longer this personality's: it was
+`linux_thread_exit`, registered as a `thread_exit` hook, and it is now
+`thread_clear_tid` in `process_thread_exit`, because both doors set the
+field and the work is the field's contract. The hook and the function are
+gone; nothing else about `clone` or `set_tid_address` changes.
 
 ### Dynamic executables
 

@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <cosmo/thread.h>
+
 #include "libc.h"
 
 #define F_READ    (1u << 0)
@@ -37,6 +39,20 @@ FILE *stdout = &g_std[1];
 FILE *stderr = &g_std[2];
 static struct _FILE *g_files;
 
+/*
+ * One lock for every stream (invariants L8). Native threads made the
+ * buffer pointers of a FILE racy, and two threads in fputc can corrupt a
+ * stream or run off its buffer, so this is locked rather than left to a
+ * rule. Everything funnels through fgetc and fputc, which are the cores
+ * below; the functions callers see take the lock once and call them, so a
+ * whole fputs or printf is one critical section rather than one per byte.
+ * An uncontended lock is one atomic.
+ */
+static cosmo_mutex_t g_io = COSMO_MUTEX_INIT;
+
+void __stdio_lock(void) { cosmo_mutex_lock(&g_io); }
+void __stdio_unlock(void) { cosmo_mutex_unlock(&g_io); }
+
 static void file_init(struct _FILE *f, int fd, unsigned flags, unsigned char *buf, size_t cap)
 {
     f->fd = fd;
@@ -56,6 +72,8 @@ void __stdio_init(void)
     file_init(&g_std[2], 2, F_WRITE | F_UNBUF | F_STATIC, g_bufs[2], BUFSIZ);
 }
 
+static void flush_all_nolock(void);   /* fflush(NULL), inside the lock */
+
 static int flush_out(FILE *f)
 {
     size_t done = 0;
@@ -73,10 +91,14 @@ static int flush_out(FILE *f)
     return 0;
 }
 
-int fflush(FILE *f)
+static int fflush_nolock(FILE *f)
 {
     if (f == NULL) {
-        __stdio_flush_all();
+        /* The documented fflush(NULL): every stream. The core, not
+         * __stdio_flush_all, because the caller already holds the lock and
+         * it is not recursive -- taking it again deadlocked a thread
+         * against itself, which is what fflush(NULL) used to do. */
+        flush_all_nolock();
         return 0;
     }
     if (f->flags & F_WRITING)
@@ -89,11 +111,19 @@ int fflush(FILE *f)
     return 0;
 }
 
-void __stdio_flush_all(void)
+static void flush_all_nolock(void)
 {
     for (struct _FILE *f = g_files; f; f = f->next)
         if (f->flags & F_WRITING)
             flush_out(f);
+}
+
+/* The exit path's entry point, which holds no lock of its own yet. */
+void __stdio_flush_all(void)
+{
+    __stdio_lock();
+    flush_all_nolock();
+    __stdio_unlock();
 }
 
 static int parse_mode(const char *mode, unsigned *flags)
@@ -200,7 +230,7 @@ static int fill(FILE *f)
     return 0;
 }
 
-int fgetc(FILE *f)
+static int fgetc_nolock(FILE *f)
 {
     if (f->ungot >= 0) {
         int c = f->ungot;
@@ -217,26 +247,32 @@ int getchar(void) { return fgetc(stdin); }
 
 int ungetc(int c, FILE *f)
 {
-    if (c == EOF || f->ungot >= 0)
-        return EOF;
-    f->ungot = (unsigned char)c;
-    f->flags &= ~F_EOF;
-    return f->ungot;
+    __stdio_lock();
+    int rc = EOF;
+    if (c != EOF && f->ungot < 0) {
+        f->ungot = (unsigned char)c;
+        f->flags &= ~F_EOF;
+        rc = f->ungot;
+    }
+    __stdio_unlock();
+    return rc;
 }
 
 char *fgets(char *s, int n, FILE *f)
 {
     if (n <= 0)
         return NULL;
+    __stdio_lock();
     int i = 0;
     while (i < n - 1) {
-        int c = fgetc(f);
+        int c = fgetc_nolock(f);
         if (c == EOF)
             break;
         s[i++] = (char)c;
         if (c == '\n')
             break;
     }
+    __stdio_unlock();
     if (i == 0)
         return NULL;
     s[i] = '\0';
@@ -247,25 +283,27 @@ size_t fread(void *buf, size_t size, size_t n, FILE *f)
 {
     size_t total = size * n, got = 0;
     unsigned char *out = buf;
+    __stdio_lock();
     while (got < total) {
-        int c = fgetc(f);
+        int c = fgetc_nolock(f);
         if (c == EOF)
             break;
         out[got++] = (unsigned char)c;
     }
+    __stdio_unlock();
     return size ? got / size : 0;
 }
 
 /* --- output --- */
 
-int fputc(int c, FILE *f)
+static int fputc_nolock(int c, FILE *f)
 {
     if (!(f->flags & F_WRITE)) {
         f->flags |= F_ERR;
         return EOF;
     }
     if (f->flags & F_READING)
-        fflush(f);
+        fflush_nolock(f);
     f->flags |= F_WRITING;
     if (f->len == f->cap && flush_out(f) < 0)
         return EOF;
@@ -279,26 +317,27 @@ int fputc(int c, FILE *f)
 int putc(int c, FILE *f) { return fputc(c, f); }
 int putchar(int c) { return fputc(c, stdout); }
 
-size_t fwrite(const void *buf, size_t size, size_t n, FILE *f)
+size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f)
 {
     const unsigned char *in = buf;
     size_t total = size * n;
     for (size_t i = 0; i < total; i++)
-        if (fputc(in[i], f) == EOF)
+        if (fputc_nolock(in[i], f) == EOF)
             return size ? i / size : 0;
     return n;
 }
 
-int fputs(const char *s, FILE *f)
+static int fputs_nolock(const char *s, FILE *f)
 {
-    return fwrite(s, 1, strlen(s), f) == strlen(s) ? 0 : EOF;
+    return __fwrite_nolock(s, 1, strlen(s), f) == strlen(s) ? 0 : EOF;
 }
 
 int puts(const char *s)
 {
-    if (fputs(s, stdout) == EOF || fputc('\n', stdout) == EOF)
-        return EOF;
-    return 0;
+    __stdio_lock();
+    int rc = (fputs_nolock(s, stdout) == EOF || fputc_nolock('\n', stdout) == EOF) ? EOF : 0;
+    __stdio_unlock();
+    return rc;
 }
 
 /* --- status and position --- */
@@ -339,4 +378,46 @@ void rewind(FILE *f)
 int remove(const char *path)
 {
     return unlink(path) == 0 ? 0 : (errno == EISDIR ? rmdir(path) : -1);
+}
+
+/* --- the lock, and the functions callers see ------------------------------ */
+
+int fflush(FILE *f)
+{
+    __stdio_lock();
+    int rc = fflush_nolock(f);
+    __stdio_unlock();
+    return rc;
+}
+
+int fgetc(FILE *f)
+{
+    __stdio_lock();
+    int c = fgetc_nolock(f);
+    __stdio_unlock();
+    return c;
+}
+
+int fputc(int c, FILE *f)
+{
+    __stdio_lock();
+    int rc = fputc_nolock(c, f);
+    __stdio_unlock();
+    return rc;
+}
+
+size_t fwrite(const void *buf, size_t size, size_t n, FILE *f)
+{
+    __stdio_lock();
+    size_t rc = __fwrite_nolock(buf, size, n, f);
+    __stdio_unlock();
+    return rc;
+}
+
+int fputs(const char *s, FILE *f)
+{
+    __stdio_lock();
+    int rc = fputs_nolock(s, f);
+    __stdio_unlock();
+    return rc;
 }

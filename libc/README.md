@@ -9,7 +9,9 @@ system-call wrappers (`cosmo/syscall.h`, internal); `src/` holds
 `crt0.S`, `errno`, strings, the allocator, stdio and `printf`, the
 system-call wrappers, directories, `spawnve`/`spawnvp`/`waitpid`/`kill`,
 sockets with `inet_pton`/`inet_ntop`. `libc.mk` builds `libc.a` and
-`crt0.o`; every program links against them. Single-threaded, no
+`crt0.o`; every program links against them. The allocator and stdio are
+locked for threaded programs; `errno` is still one global and must not be
+relied on across threads (`docs/libc/invariants.md` L8). No
 `fork`. Floating point is there since the FP/SIMD unit: `%f`, `%e` and
 `%g` over `double`, converted by scaling and integer division -- no
 `long double`, no `%a`, no libm, and no claim of an exactly rounded last
