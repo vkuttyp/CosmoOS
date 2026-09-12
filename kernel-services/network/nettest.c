@@ -6055,6 +6055,17 @@ bool selftest_net_tcpverdict(const char **reason)
         struct socket *a = NULL;
         CHECK(ksock_accept(ls, &a, NULL) == -EAGAIN);        /* and nothing to accept */
     }
+    /* The same SYN again, under the same rule: the slot the first one used is
+     * free, so it is cached anew. This is the assertion the drop is *for* --
+     * a refusal that counted without dropping would leave the entry live,
+     * and listen_input would answer from it (reusing its ISS) without
+     * touching syn_cached. */
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 40300, 9301, 7000, 0, TH_SYN, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, syn_cached, ts0.syn_cached));
+    CHECK(!hin_recv(u, IPPROTO_TCP, 40300, &sg, 15));
+
     /* Without the rule the same SYN is answered, which is what makes the
      * assertions above about the rule and not about the fixture. */
     CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_sa) == 0);
@@ -6133,6 +6144,24 @@ bool selftest_net_tcpverdict(const char **reason)
     CHECK(FWT_RISES(tcp_get_stats, ts1, out_cleared, ts0.out_cleared));
     CHECK(ksock_sendto(cn2.s, "de", 2, NULL) == 2);               /* usable again */
     CHECK(!(ksock_ready(cn2.s) & COSMO_IO_ERROR));
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "yo", 2) == 0);
+
+    /* (5b) A refusal that *records* while a wake is already taken. The
+     * record above is cleared, so the peer's next segment is the first thing
+     * refused this time: tcp_input takes a reference for the reader of that
+     * data, then the acknowledgment it owes is refused and the record is
+     * made with that waiter already in hand. Keeping it rather than
+     * replacing it is the rule under test, and a replacement would leak
+     * exactly one socket reference -- which is what the count below sees.
+     * (The earlier refusal under a rule could not exercise this: the record
+     * already existed, so no reference was taken at all.) */
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &out_e) == 0);
+    tcp_get_stats(&ts0);
+    l4len = hin_mk_tcp(l4, w, u_ip, 9302, hport, 5007, hiss + 1, TH_ACK | TH_PSH, 64240, "pq", 2);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, out_recorded, ts0.out_recorded));
+    CHECK(hin_recv_sock(cn2.s, buf, sizeof(buf), 5) == 2 && memcmp(buf, "pq", 2) == 0);
+    CHECK(fw_rule_del(FW_HOST_GUEST_IP, &out_e) == 0);
     ksock_put(cn2.s);
 
     /* (6) A stray segment's reset is refused with no connection to tell:
