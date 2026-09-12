@@ -5,7 +5,7 @@ and wait for the instruction to build it. This was that report; the unit is
 now **implemented** (PR "Native threads and a futex"), and the design below
 is as built -- see `docs/kernel/process/design.md` §12 for the shipped
 description and `docs/kernel/process/testing.md` (`thrtest`) for its
-proofs. Five things came out differently and are marked where they arise:
+proofs. Seven things came out differently and are marked where they arise:
 
 - **`lx_tid` became `user_tid`, not `tid`** -- that name was already taken
   by the scheduler's own thread id, which never leaves the kernel.
@@ -26,6 +26,19 @@ proofs. Five things came out differently and are marked where they arise:
   off its buffer, while **`errno` stays one global** -- a wrong error code,
   never corruption -- because per-thread `errno` needs a TLS model and
   `crt0` changes on both architectures, which is its own unit.
+- **The joiner is woken after the thread stops being counted**, which this
+  report did not think about: waking first left `nr_live` still counting
+  the exiting thread, so a program that joined `PROCESS_MAX_THREADS`
+  threads and created more was refused `-EAGAIN` for slots it had already
+  released. A returned join now means the *slot* is free -- it never meant
+  the *memory* is back, which waits on the reap, and that distinction is
+  why the exhaustion step must be the test's last.
+- **Two deadlock-class bugs were mine and a review found both**: the mutex
+  handed the lock over as "held, no waiters" and stranded a sleeper
+  whenever three threads contended (Drepper's flawed variant), and
+  `fflush(NULL)` took the stdio lock in the public entry and again in
+  `__stdio_flush_all`. Both were in the concurrency primitives, where the
+  tests as written could not catch me; each is now a test step.
 - **There is no `mprotect` system call**, so libc's guard page costs a
   reservation, a hole and a fixed map. Named as a follow-up rather than
   smuggled in.
@@ -420,8 +433,15 @@ step 1 is the only one whose shape changed (the rename's target).
 
 A kernel selftest cannot create a *user* thread, so the proof is a native
 userland program with a marker, as `HVTEST` is — `tests/native/thrtest`,
-run from `rc.test`, requiring `THREADTEST: PASS` in
-`run_boot_test.py`'s markers.
+run from `rc.test`, requiring `THREADTEST: PASS` in `run_boot_test.py`'s
+own `THREAD_MARKERS` group.
+
+**The list below is what this report proposed: ten steps.** The built test
+has **twelve**, numbered differently, and
+`docs/kernel/process/testing.md` is the authority on what they are and in
+what order — read it rather than this list if you want the test. The
+differences, and why each arose, are recorded after the list and in the
+banner at the top of this document.
 
 1. **A thread runs, and is joined**: `thread_create` returns a tid, the
    child writes a word and exits, the parent's join returns and sees it.
@@ -465,11 +485,16 @@ run from `rc.test`, requiring `THREADTEST: PASS` in
    it; one that denies `SYS_thread_exit` **cannot**, because it is always
    allowed.
 
-**Bug-proofs**, eleven of them as built rather than the seven listed above,
-each observed to fail for its stated reason and the source restored
-byte-identical every time. `docs/kernel/process/testing.md` lists them with
-the step that catches each; three are worth recording here because they
-changed how the unit was tested:
+**Bug-proofs: eleven as built**, against the eight this report first
+proposed (that list is gone: it named a proof for the shared clear-tid
+path that turned out to prove nothing about this test, and it had none for
+the mutex, the futex timeout or the allocator's lock, all of which arrived
+with a review). Each was observed to fail for its stated reason and the
+source restored byte-identical every time, and
+`docs/kernel/process/testing.md` is the enumeration -- eleven firing
+proofs, each naming the step that catches it, plus one named non-proof
+(the mutex). Three are worth recording here, because they changed how the
+unit was tested rather than what it does:
 
 1. **The ordering proof needs its window widened.** Writing the tid after
    `process_thread_start` is wrong, but the window is about a hundred
@@ -486,11 +511,18 @@ changed how the unit was tested:
    ordering step ran once (see 1), and the test had no step for the thread
    bound at all, which this report had promised.
 
-As built the test has **twelve** steps, not ten: a mutex step (a lock under
-two threads losing no update) earns its place because the futex exists to
-carry one, a step for the allocator and stdio under three threads came
-with the locks a review asked for, and the bound moved to the end so that
-reaching it cannot disturb anything before it.
+**Twelve steps as built, against the ten above.** Three arrived and one
+moved: a mutex step (a lock under *three* threads losing no update --
+three, because two cannot strand a waiter), a step for the allocator and
+stdio under three threads, which came with the locks a review asked for,
+and `fflush(NULL)` folded into it after that locking deadlocked against
+itself. The bound went to the end, because it exhausts a resource on
+purpose and the memory comes back as the kernel reaps rather than when a
+join returns; a step placed after it runs on a machine still recovering,
+which cost two runs to work out. `clear_tid`'s step also split in two --
+a child that waits, where the tid must still be there, and the contested
+loop, where either value is legal -- after CI falsified an assertion about
+who wins that race.
 
 
 ## Benchmarks

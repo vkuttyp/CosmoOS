@@ -421,7 +421,16 @@ return an error, it kills the process with `SIGSYS` (status 159), so the
 filtered process cannot report on itself -- one child calls a denied
 `thread_create` and must die that way, and another, under a filter that
 denies *everything*, must still exit cleanly with its own status through
-`thread_exit`. (12) The bound holds: creating threads until `-EAGAIN` stops
+`thread_exit`. (11) **The allocator and stdio under three threads at once**: each thread
+allocates, fills its block with its own byte, verifies every byte of it,
+reallocates, frees, and prints as it goes. This is the step that would
+otherwise find out the hard way what an unlocked free list does -- a lost
+or shared block shows up as a wrong byte rather than only as a crash --
+and the whole lines from three threads in the log are stdio's side of it.
+It also calls `fflush(NULL)` and `fflush(stdout)`, because nothing did
+until that locking was found to deadlock the first form against its own
+lock.
+(12) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
 creates succeed -- three rather than one, because a join that returned
 before the kernel stopped counting its thread left the next create refused
@@ -434,12 +443,6 @@ one and watched `malloc` and `thread_create` be refused for want of
 memory, which is this step working rather than a bug -- and which cost two
 runs to diagnose only because the step counted three different causes as
 one number. Each cause now prints itself.
-(11) **The allocator and stdio under three threads at once**: each thread
-allocates, fills its block with its own byte, verifies every byte of it,
-reallocates, frees, and prints as it goes. This is the step that would
-otherwise find out the hard way what an unlocked free list does -- a lost
-or shared block shows up as a wrong byte rather than only as a crash --
-and the whole lines from three threads in the log are stdio's side of it.
 
 Proved by reintroducing, each failure named by the step that caught it and
 the source restored byte-identical every time:
