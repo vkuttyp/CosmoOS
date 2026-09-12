@@ -198,6 +198,7 @@ bool selftest_net_input(const char **reason);
 bool selftest_net_hostinput(const char **reason);
 bool selftest_net_hoststate(const char **reason);
 bool selftest_net_output(const char **reason);
+bool selftest_net_tcpverdict(const char **reason);
 bool selftest_net_route(const char **reason);
 bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);

@@ -467,6 +467,7 @@ static const struct selftest tests[] = {
     { "net-hostinput",   selftest_net_hostinput },
     { "net-hoststate",   selftest_net_hoststate },
     { "net-output",      selftest_net_output },
+    { "net-tcpverdict",  selftest_net_tcpverdict },
     { "net-second-nic",  selftest_net_second_nic },
     { "net-lo-udp",      selftest_net_lo_udp },
     { "net-lo-tcp",      selftest_net_lo_tcp },
