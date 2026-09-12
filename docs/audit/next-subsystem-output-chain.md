@@ -246,7 +246,8 @@ explicitly below.
 
 ABI **version 5**: `COSMO_NETCTL_DIR_OUTPUT`; a `scope` byte in
 `struct cosmo_netctl_filter` and `cosmo_netctl_filter_rule`, each of which
-still carries `reserved[3]`, so **those two do not change size**; and
+carries `reserved[3]` today — version 5 spends one of those three bytes on
+`scope` and leaves `reserved[2]`, so **those two do not change size**; and
 `policy_output` in the per-guest record, which **does** grow. That record is
 `{u32 guest_addr; u8 policy_to_uplink, policy_to_guest, policy_to_host,
 policy_from_uplink}` — version 4 spent its last spare byte, so a fifth
@@ -276,7 +277,9 @@ refuses a version-4 writer as before.
 ## Affected files
 
 - `kernel/include/kernel/net/fw.h` — `FW_DIR_OUTPUT`, `FW_DIR_COUNT` 5,
-  `FW_SCOPE_*`, `scope` in `struct fw_rule` (a reserved byte);
+  `FW_SCOPE_*`, `scope` in `struct fw_rule` (its single `reserved` byte,
+  which leaves the kernel rule with no spare: the next field a rule needs
+  will grow that struct, and the unit that needs it should expect to);
   `enum fw_verdict fw_output_verdict(struct netif *out, struct mbuf *m,
   uint32_t src, uint32_t dst, uint8_t proto);` `fw_stats` gains
   `out_accept_rule/out_drop_rule/out_accept_default/out_drop_default`.
@@ -288,8 +291,9 @@ refuses a version-4 writer as before.
   route, before the flow read; `-EPERM` and `ip_stats.tx_filtered`.
 - `kernel/include/kernel/net/ip.h` — `tx_filtered`.
 - `kernel/include/uapi/cosmo/netctl.h` — version 5: `DIR_OUTPUT`, the
-  `scope` byte in the filter command and rule records (from their
-  `reserved[3]`, no size change), `policy_output` in the per-guest record
+  `scope` byte in the filter command and rule records (one of their three
+  reserved bytes each, leaving `reserved[2]`; no size change),
+  `policy_output` in the per-guest record
   (8 → 12 bytes), the recomputed `SNAPSHOT_MAX` and its static asserts.
 - `kernel-services/network/tap.c` — the v5 dispatch, the scope carried both
   ways, `policy_output` in the listing.
@@ -436,9 +440,10 @@ deliberately hardened one.
 - **The cost is on every send.** Measured as above, with the proven
   mitigation named.
 - **ABI v5 grows the per-guest record.** The filter command and rule
-  records spend a reserved byte each and keep their size; the policy record
-  has none left and goes 8 → 12, so `SNAPSHOT_MAX` grows and every reader's
-  expected length moves with it. A v4 writer is refused by version, and a
+  records spend one of their three reserved bytes each (`reserved[3]` →
+  `scope` + `reserved[2]`) and keep their size; the policy record has none
+  left and goes 8 → 12, so `SNAPSHOT_MAX` grows and every reader's expected
+  length moves with it. A v4 writer is refused by version, and a
   v4 *reader* refuses a v5 snapshot by version rather than misreading the
   wider record — the property the version gate exists for, exercised in the
   tests.
