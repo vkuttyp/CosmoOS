@@ -1166,18 +1166,25 @@ static int filter(int argc, char **argv)
         }
         /* What may follow the tuple: an egress scope (a host `out` rule
          * only) and, for `add`, an insert index -- in either order, each
-         * recognised by what it looks like rather than by its position. */
+         * recognised by what it looks like rather than by its position, and
+         * each at most once. A repeated word is refused rather than letting
+         * the last one win: `guest world` would otherwise install a
+         * world-scoped rule, and `0 5` insert at 5, neither of which is what
+         * the command says. */
+        int got_scope = 0, got_index = 0;
         for (int i = tuple; i < argc; i++) {
             uint8_t sc;
             if (fw_scope(argv[i], &sc) == 0) {
-                if (!host || c.direction != COSMO_NETCTL_DIR_OUTPUT) { usage(); goto out; }
+                if (!host || c.direction != COSMO_NETCTL_DIR_OUTPUT || got_scope) { usage(); goto out; }
                 c.scope = sc;
+                got_scope = 1;
                 continue;
             }
             char *end;
             unsigned long v = strtoul(argv[i], &end, 10);
-            if (!add || *argv[i] == 0 || *end || v > 0xffff) { usage(); goto out; }
+            if (!add || got_index || *argv[i] == 0 || *end || v > 0xffff) { usage(); goto out; }
             c.at_index = (uint16_t)v;
+            got_index = 1;
         }
         argv = rest;   /* the selector reads from the same position for both shapes */
         /* The transport selector follows the protocol: a port for tcp/udp/any,

@@ -615,8 +615,11 @@ silent success (the failed `sendto` then returns the byte count and the
 caller cannot tell); the source resolved *after* the verdict (the
 source-prefix rule then judges `0` and misses the echo it should refuse —
 and `net-hoststate` fails with it, because the flow key takes the same
-unresolved value); and `OUTPUT` allowed on a guest's object (the guest's add
-then succeeds).
+unresolved value); `OUTPUT` allowed on a guest's object (the guest's add then
+succeeds); and the two that keep the send path's fast path honest — a new
+rule not invalidating it (the first rule then never binds, so the refused
+send succeeds) and a policy flip not invalidating it (the hardened default
+then lets everything out). Nine in all.
 
 One proof named in the report is **not observable, and the reason is worth
 keeping**: moving the verdict to *after* the host chain's flow read changes

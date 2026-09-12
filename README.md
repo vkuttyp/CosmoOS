@@ -1368,10 +1368,12 @@ See [docs/development.md](docs/development.md).
   `-EPERM`, all three scopes and the scope as identity, the host's reply to a
   guest silenced, no reply state for a refused send, a non-verdict failure
   not counted as one, loopback exempt, TCP's documented stall, a DNAT'd
-  delivery, the scope discipline and the control round trip) with seven
-  bug-proofs and one honest non-proof: the verdict's position relative to the
-  flow read turns out not to be observable, because the flow record is
-  already conditional on the send succeeding. Per-interface chains, a verdict
+  delivery, the hardened default, the scope discipline and the control round
+  trip) with nine bug-proofs -- including the two that keep the fast path
+  honest, a rule and a policy flip each having to invalidate it -- and one
+  honest non-proof: the verdict's position relative to the flow read turns
+  out not to be observable, because the flow record is already conditional on
+  the send succeeding. Per-interface chains, a verdict
   TCP's callers can see, rate-limit/log targets, IPv6 filtering and full TCP
   state tracking are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
