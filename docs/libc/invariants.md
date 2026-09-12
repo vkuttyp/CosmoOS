@@ -99,6 +99,11 @@ convenience:
 synchronisation of their own, and `feof`/`ferror`/`clearerr`/`fileno` read
 a word without the lock.
 
+The `errno` third is designed:
+`docs/audit/next-subsystem-errno-tls.md` (not yet implemented) adds a
+`SYS_set_tls` syscall and a per-thread block in libc, with `errno` an
+accessor over it, which is what completes this invariant.
+
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting the global, takes no libc lock, and maps its stacks
 with `mmap`. A handle is zeroed before the first thing in
