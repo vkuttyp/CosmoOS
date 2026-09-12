@@ -442,7 +442,10 @@ int main(int argc, char **argv)
         cosmo_thread_t h[3];
         heap_bad = heap_done = 0;
         for (unsigned i = 0; i < 3u; i++) {
-            int rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 0);
+            /* 16 KB, not the 64 KB default: these threads print and
+             * allocate, they do not recurse, and a test should ask the
+             * machine for what it needs. */
+            int rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 16u * 1024u);
             if (rc != 0)
                 printf("thrtest: heap thread %u refused rc=%d\n", i + 1, rc);
             CHECK(rc == 0);

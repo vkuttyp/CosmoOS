@@ -370,7 +370,12 @@ thread, signal and PIE coverage on both machines.
 
 A kernel self-test cannot create a **user** thread, so this unit's proof is
 a native userland program: `tests/native/thrtest` in the boot archive
-(`SELFTEST` builds only), run from `/etc/rc.test`, gated by
+(`SELFTEST` builds only), run from `/etc/rc.test` -- **before** its hypervisor section, which asks
+for guests of 16 MiB and, where a Linux `Image` exists, 256 MiB: a test
+about threads should not be hostage to what the frame allocator looks like
+afterwards, and CI refused this test's second thread stack with `-ENOMEM`
+when it ran last. Its own threads ask for 16 KB stacks rather than the
+64 KB default, which is what they need -- gated by
 `THREADTEST: PASS` in `run_boot_test.py`'s own `THREAD_MARKERS` group --
 its own group and not the hypervisor's, which are gated on a backend,
 because native threads run on every build. Each step prints its number
