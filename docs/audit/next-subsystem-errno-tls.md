@@ -19,8 +19,12 @@ value, but there is **no way for a program to set its own**, so a process's
 first thread can never have one. This unit adds that one syscall,
 `SYS_set_tls`, and builds a per-thread block in libc over it: `errno`
 becomes `(*__errno_location())`, the block is a page beside each thread's
-stack (and one page at startup for the first thread), and a thread without
-a block falls back to today's global rather than faulting. It is also the
+stack and a `.bss` object for the first thread, and the accessor is a
+single unconditional load. **A first draft of this report promised a
+fallback for a thread with no block; a review showed it cannot exist on
+x86-64** -- `%fs:0` with a zero base dereferences address zero before any
+check can run -- so the design guarantees a block instead of testing for
+one, which is both simpler and faster. It is also the
 prerequisite for the unit everyone actually wants -- `vmctl` with a thread
 per vCPU -- because that program would be a multi-threaded native program
 using libc, which is precisely what is unsafe until this lands.**
@@ -144,7 +148,8 @@ struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
     unsigned tid;               /* cached, so thread_id() costs no syscall */
-    char reserved[104];         /* to 128 bytes; a program's own storage starts here */
+    char reserved[112];         /* to 128: 8 + 4 + 4 + 112. A program's own storage
+                                   starts at offset 128, never inside this. */
 };
 ```
 
@@ -157,25 +162,61 @@ architecture for a reason:
   pointer to itself** and the accessor loads `%fs:0`. This is the standard
   trick and the only reason the layout has a `self` field.
 
-**A thread with no block falls back.** `__errno_location()` returns the
-address of a single global when the thread pointer is 0 -- today's
-behaviour exactly, for any thread that libc did not create and any binary
-built before this unit. Nothing faults, and the fallback is what makes the
-change safe to land at all.
+**There is no fallback, because on x86-64 there cannot be one.** An
+earlier draft of this report promised that `__errno_location()` would
+return a global when the thread pointer is 0. That is impossible on
+x86-64: reading `%fs:0` with `FS_BASE == 0` dereferences virtual address
+zero, which is unmapped, so the thread faults *before* the accessor can
+test what it loaded. There is no fault-free way to ask "do I have a thread
+pointer?" on that architecture without `rdfsbase`, which needs
+`CR4.FSGSBASE` and is not guaranteed.
+
+So the design removes the need for a fallback instead of patching one:
+
+- **The first thread's block is `static`**, in libc's `.bss`. No mapping,
+  no allocation, nothing to fail: `__libc_start` sets the thread pointer to
+  `&__cosmo_main_tcb` before `__stdio_init` and before `main`. Every
+  process therefore has a thread pointer from its first libc call onward,
+  including every program built before this unit -- they gain one by being
+  relinked, and nothing about them changes otherwise.
+- **Every thread libc creates has one**, from the extra page in the
+  mapping `cosmo_thread_start` already makes.
+- **A thread created by a raw `SYS_thread_create` with `tls = 0` must not
+  call libc.** That is a contract, stated in `cosmo/thread.h` beside the
+  syscall's own description, and it is the same kind of contract as "the
+  stack you pass must be big enough": libc cannot check it and will fault
+  if it is broken. For a program that wants such a thread to use libc,
+  `cosmo_tcb_install(void *block, size_t len)` is named below -- it sets
+  the pointer from storage the caller owns.
+
+That is stricter than the earlier draft and simpler: one unconditional
+load, no branch on every `errno` access, and no code path that depends on
+address zero being readable.
 
 ### Where the block comes from
 
-- **The first thread**: `__libc_start` maps one page and calls
-  `SYS_set_tls` **before `__stdio_init` and before `main`**, so no libc
-  call can set `errno` into the fallback and then have it become
-  invisible.
+- **The first thread**: a `static struct __cosmo_tcb __cosmo_main_tcb` in
+  libc, whose address `__libc_start` installs with `SYS_set_tls`
+  **before `__stdio_init` and before `main`**. Static rather than mapped
+  on purpose: a mapping can fail, and a startup path that has to handle
+  failing to give the process an `errno` is a path with no good answer --
+  it cannot report the failure through `errno`, and continuing would fault
+  on the first error. A `.bss` object cannot fail, which removes the
+  question rather than answering it. (An earlier draft mapped a page here
+  and left that failure undefined; a review asked what it would do, and
+  the honest answer was to make it unreachable.)
 - **Every thread libc creates**: `cosmo_thread_start` already maps
   `guard + stack`; it maps `guard + stack + one page` instead, puts the
   block in the extra page and passes its address as `cosmo_thread.tls`, so
   the block exists before the thread's first instruction and is freed by
-  the `munmap` the join already does.
-- **A thread created by a raw `SYS_thread_create`** gets whatever `tls` the
-  caller passed, including 0, and then the fallback applies.
+  the `munmap` the join already does. That mapping can fail, and it
+  already has a failure path: `thread_start` returns `-ENOMEM` and no
+  thread is created.
+- **A thread created by a raw `SYS_thread_create` with `tls = 0`** has no
+  block and **must not call libc**, which `cosmo/thread.h` states beside
+  the syscall. `cosmo_tcb_install(void *block, size_t len)` is offered for
+  a program that wants one anyway: it checks the length against the
+  prefix, writes the `self` word and calls `SYS_set_tls`.
 
 ### `errno` becomes an accessor
 
@@ -203,13 +244,17 @@ this design is deliberately the one that does not block it.
 
 ### The §70 gate
 
-**Correctness.** One writer (`__syscall_ret`) and one accessor, and the
-accessor has two cases: a block or the fallback. The block is installed
-before the thread's first instruction in both paths that install one.
+**Correctness.** One accessor with **no cases**: an unconditional load of
+the thread pointer and an offset. Every thread libc knows about has a
+block before its first instruction -- the first thread's is a `.bss`
+object installed before anything else runs, and a created thread's is in
+the mapping that carries its stack. A thread libc did not make and that
+did not install one is outside the contract, and the contract says so
+where the syscall is described.
 
-**Concurrency.** Each thread writes its own `err` and nothing else touches
-it. The fallback global can be written by several block-less threads at
-once, which is exactly today's behaviour and no worse.
+**Concurrency.** Each thread writes its own `err`; nothing else reads or
+writes it. There is no shared location left for `errno` to land in, which
+is the point of the unit.
 
 **Ownership.** The block belongs to whoever mapped it: libc for the first
 thread (never freed, the process's lifetime) and for each thread it
@@ -231,9 +276,9 @@ handler wants.
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_set_tls` (87), `SYS_COUNT` 87→88 |
 | `kernel/syscall/native.c` | the handler: validate, `arch_set_tls_base` |
 | `libc/include/errno.h` | `__errno_location`, `#define errno` |
-| `libc/src/errno.c` | the accessor, the fallback, `int errno;` removed |
+| `libc/src/errno.c` | the accessor, the static first-thread block, `int errno;` removed |
 | `libc/include/cosmo/tcb.h` (new) | `struct __cosmo_tcb` and the reserved-prefix rule |
-| `libc/src/tcb.c` (new) | the accessor's arch halves and the installer |
+| `libc/src/tcb.c` (new) | the accessor's arch halves, `__cosmo_main_tcb`, and `cosmo_tcb_install` |
 | `libc/src/stdlib.c` | `__libc_start` installs the first thread's block first |
 | `libc/src/thread.c` | one more page in the mapping; `tls` passed; `cosmo_thread_id` reads the cache |
 | `libc/include/cosmo/syscall.h` | the `SYS_set_tls` stub |
@@ -256,11 +301,15 @@ its meaning.
 1. **`SYS_set_tls`** alone, with its validation and a test that a thread
    can set and re-set its own pointer and that a bad one is refused. No
    libc change; nothing depends on it yet.
-2. **The block and the accessor**, with the fallback, but nothing
-   installing a block: `errno` behaves exactly as before, through one more
-   indirection. The tree stays green and every existing test still passes.
-3. **`__libc_start` installs the first thread's block.** From here the main
-   thread's `errno` lives in its block.
+2. **The block, the accessor, and the first thread's install together**,
+   because they cannot be separated: the accessor is unconditional, so it
+   is only correct once something has installed a block, and the `.bss`
+   object plus `SYS_set_tls` in `__libc_start` is that something. At the
+   end of this step every single-threaded program has a per-thread
+   `errno` -- which is every program, until step 4 -- and the whole suite
+   is the regression test for it.
+3. **`cosmo_tcb_install`**, so a thread made outside libc's wrapper can
+   opt in, with the length check its bug-proof needs.
 4. **`cosmo_thread_start` installs one per thread**, and `cosmo_thread_id`
    reads the cached tid.
 5. **The tests**, then the bug-proofs.
@@ -278,29 +327,37 @@ In `thrtest`, which already owns the threaded-libc questions:
 2. **The first thread's `errno` survives a thread's**: main provokes one
    error, a thread provokes another and exits, main's value is still its
    own.
-3. **A thread with no block does not fault**: a raw `SYS_thread_create`
-   with `tls = 0`, whose entry calls something that fails and then reads
-   `errno`. It gets the fallback and lives.
+3. **A hand-made thread installs its own block**: a raw
+   `SYS_thread_create` with `tls = 0`, whose entry calls
+   `cosmo_tcb_install` on a buffer of its own and then provokes an error
+   and reads `errno` -- the path a program outside libc's wrapper must
+   take. The *un*installed case is deliberately **not** tested, because
+   the contract is that it faults: on x86-64 it dereferences address zero,
+   and a test that asserted a fault would be asserting the absence of a
+   fallback this design does not have.
 4. **`SYS_set_tls`'s validation**: unaligned is `-EINVAL`, outside the
-   caller's space is `-EFAULT`, 0 is accepted, and setting it twice works.
-   After a deliberate 0, `errno` still works (the fallback), which is the
-   property that makes the syscall safe to expose.
+   caller's space is `-EFAULT`, and setting it twice works -- the second
+   value takes effect, which is what `cosmo_tcb_install` relies on. Zero
+   is accepted by the kernel (it is what every thread starts with) and the
+   test sets it only on a thread it then lets exit without touching libc,
+   because that is the whole of what zero now means.
 5. **The cached tid agrees with the syscall**: `cosmo_thread_id()` equals
    `SYS_thread_self` for the first thread and for a created one.
 6. **`strerror` and `perror` still work** from one thread, and the
    documents still say they are that thread's alone.
 
-**Bug-proofs**: the accessor returning the global (step 1 loses a value);
-the fallback removed (step 3 faults at the thread pointer's zero); the
-`self` word not written on x86-64 (`%fs:0` reads whatever the stack left,
-so `errno`'s address is garbage -- an argument for the fallback being a
-*check* on the pointer, not on the word); the block installed *after*
-`__stdio_init` (a failure inside startup lands in the fallback and the
-main thread's first `errno` read disagrees with it); the extra page not
-mapped (the block overlaps the thread's stack and the two corrupt each
-other, which step 1 should see as a wrong value rather than a crash); and
-the block not freed on join (the address space grows across a thousand
-threads, which a counting test catches).
+**Bug-proofs**: the accessor reading a single global (step 1 loses a
+value); the `self` word not written on x86-64 (`%fs:0` returns whatever
+that memory held, so `errno`'s address is garbage -- the proof that the
+word is load-bearing, and the reason it is permanent); the first thread's
+block installed *after* `__stdio_init` rather than before (an error raised
+inside startup lands in a different place from every later one, which step
+2 sees); the extra page not added to the thread mapping (the block
+overlaps the thread's own stack and they corrupt each other -- step 1
+should see a wrong value rather than a crash); the block not freed on join
+(the address space grows across a thousand create/join cycles, which a
+counting test catches); and `cosmo_tcb_install` not checking the length
+(step 3's buffer is smaller than the prefix and the write runs past it).
 
 ## Benchmarks
 
@@ -317,13 +374,19 @@ gets *faster* (a syscall becomes a load), which the thread benchmark in
 - **A program that sets its own thread pointer breaks `errno`.** The
   reserved-prefix rule is the answer and it must be documented from the
   first commit, not after someone does it.
-- **The fallback is load-bearing and easy to get wrong.** It must be
-  chosen on the *pointer*, not on anything read through it, or a garbage
-  pointer becomes a fault instead of a fallback.
-- **Startup ordering.** Anything in `__libc_start` that can fail before the
-  block is installed writes the fallback, and the main thread would then
-  read a different location. Installing first is the rule; the bug-proof
-  exists to keep it.
+- **There is no fallback, so a thread without a block faults on its first
+  `errno`** -- on x86-64 at address zero, which is at least a recognisable
+  crash. That is the price of an unconditional accessor, and the
+  alternative does not exist on x86-64: `%fs:0` with a zero base
+  dereferences address zero before any check could run. The contract is
+  therefore the mitigation, and `cosmo_tcb_install` is the way out for a
+  program that needs one.
+- **Startup ordering.** Anything in `__libc_start` that sets `errno`
+  before the block is installed writes the `.bss` object *as itself*
+  rather than through the thread pointer -- harmless only because they are
+  the same object for the first thread. Install first anyway: a later
+  change that makes the first thread's block dynamic would turn this into
+  a real bug, and the bug-proof exists to keep the order.
 - **x86-64's `%fs:0` convention couples libc to its own layout.** Changing
   the block's first field later would break every compiled binary. The
   `self` pointer is therefore permanent, which is a cost worth naming.
