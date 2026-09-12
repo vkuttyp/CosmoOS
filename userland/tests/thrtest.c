@@ -26,6 +26,15 @@
 
 static int failures;
 
+/* Printed before each step, so a hang or a fault names the step it was in
+ * -- two of this unit's bug-proofs kill the process outright, and "no
+ * output" would not say where. */
+#define STEP(n)                                                              \
+    do {                                                                     \
+        printf("thrtest: step %s\n", (n));                                   \
+        fflush(stdout);                                                      \
+    } while (0)
+
 #define CHECK(cond)                                                          \
     do {                                                                     \
         if (!(cond)) {                                                       \
@@ -187,6 +196,7 @@ int main(int argc, char **argv)
 
     if (argc > 1)
         return filter_child(argv[1]);
+    STEP("1");
     /* (1) */
     CHECK(cosmo_thread_id() == (unsigned)getpid());   /* a first thread's id is the pid */
     CHECK(cosmo_thread_start(&t, simple, (void *)7ul, 0) == 0);
@@ -196,6 +206,7 @@ int main(int argc, char **argv)
     CHECK(ret == (void *)0x5eed);
 
 
+    STEP("2");
     /* (2) */
     CHECK(cosmo_thread_start(&t, (void *(*)(void *))entry_probe, (void *)0x1234ul, 0) == 0);
     CHECK(cosmo_thread_join(&t, NULL) == 0);
@@ -207,6 +218,7 @@ int main(int argc, char **argv)
 #endif
 
 
+    STEP("3");
     /* (3) */
     flag_a = flag_b = 0;
     CHECK(cosmo_thread_start(&t, pair_a, NULL, 0) == 0);
@@ -219,6 +231,7 @@ int main(int argc, char **argv)
     CHECK(ret == (void *)1ul);   /* it saw ours: both ran */
 
 
+    STEP("4");
     /* (4) The futex closes the race it exists for. */
     {
         volatile unsigned word = 1;
@@ -232,20 +245,33 @@ int main(int argc, char **argv)
     }
 
 
+    STEP("5");
     /* (5) */
-    CHECK(cosmo_thread_start(&t, quick, NULL, 0) == 0);
-    CHECK(t.done == t.tid);            /* the kernel wrote it before the thread could run */
-    cosmo_sleep_ns(50000000ull);       /* let it finish first: the join must still work */
-    CHECK(t.done == 0);
-    CHECK(cosmo_thread_join(&t, NULL) == 0);
+    /* A hundred of them, because the property is a race: the word must
+     * hold the tid before the child can run, and a child that exits
+     * *first* must still leave it zero. One attempt almost never contests
+     * that window -- an earlier version of this step used one, and the
+     * bug-proof for the ordering passed. */
+    for (unsigned i = 0; i < 100u; i++) {
+        CHECK(cosmo_thread_start(&t, quick, NULL, PAGE) == 0);
+        CHECK(t.done == t.tid);        /* written before the child could run */
+        if (i % 10 == 0)
+            cosmo_sleep_ns(2000000ull);   /* sometimes let it finish first */
+        CHECK(cosmo_thread_join(&t, NULL) == 0);
+        CHECK(t.done == 0);            /* zeroed and woken at its exit */
+        if (failures)
+            break;
+    }
 
 
+    STEP("6");
     /* (6) */
     CHECK(cosmo_thread_start(&t, exiter, NULL, 0) == 0);
     CHECK(cosmo_thread_join(&t, NULL) == 0);
     CHECK(cosmo_thread_id() == (unsigned)getpid());   /* still here */
 
 
+    STEP("7");
     /* (7) */
     {
         CHECK(signal(SIGUSR1, on_usr1) != SIG_ERR);
@@ -263,6 +289,7 @@ int main(int argc, char **argv)
     }
 
 
+    STEP("8");
     /* (8) The argument checks. */
     {
         struct cosmo_thread req;
@@ -296,6 +323,7 @@ int main(int argc, char **argv)
     }
 
 
+    STEP("9");
     /* (9) */
     counter = 0;
     CHECK(cosmo_thread_start(&t, bump, NULL, 0) == 0);
@@ -308,6 +336,7 @@ int main(int argc, char **argv)
     cosmo_mutex_unlock(&mx);
 
 
+    STEP("10");
     /* (10) The filter, observed from outside. A denied call does not
      * return an error: it kills the process with SIGSYS, so the exit
      * status is 159 (docs/kernel/security/design.md), which the filtered
@@ -330,6 +359,7 @@ int main(int argc, char **argv)
         CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 7);
     }
 
+    STEP("11");
     /* (11) The bound holds, and the process survives reaching it.
      * PROCESS_MAX_THREADS is 256 per process; the stacks are one page each
      * so that 256 of them cost little. */
