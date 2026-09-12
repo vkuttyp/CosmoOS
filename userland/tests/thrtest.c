@@ -94,6 +94,16 @@ static void *pair_a(void *arg)
     return (void *)(unsigned long)flag_b;
 }
 
+/* (11) A thread that waits to be told to stop, for the bound. */
+static volatile unsigned spin_stop;
+static void *spinner(void *arg)
+{
+    (void)arg;
+    while (!spin_stop)
+        cosmo_yield();
+    return NULL;
+}
+
 /* (5) clear_tid is a join: a thread that has already finished. */
 static void *quick(void *arg)
 {
@@ -318,6 +328,30 @@ int main(int argc, char **argv)
         CHECK(child > 0);
         CHECK(waitpid(child, &st, 0) == child);
         CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 7);
+    }
+
+    /* (11) The bound holds, and the process survives reaching it.
+     * PROCESS_MAX_THREADS is 256 per process; the stacks are one page each
+     * so that 256 of them cost little. */
+    {
+        static cosmo_thread_t many[300];
+        unsigned made = 0;
+        int rc = 0;
+        while (made < 300) {
+            rc = cosmo_thread_start(&many[made], spinner, NULL, PAGE);
+            if (rc != 0)
+                break;
+            made++;
+        }
+        CHECK(rc == -EAGAIN);          /* the bound, not some other failure */
+        CHECK(made > 1 && made < 300); /* it is a bound, and it is not one */
+        spin_stop = 1;
+        for (unsigned i = 0; i < made; i++)
+            CHECK(cosmo_thread_join(&many[i], NULL) == 0);
+        spin_stop = 0;
+        /* and the process is healthy: the next create works */
+        CHECK(cosmo_thread_start(&t, quick, NULL, 0) == 0);
+        CHECK(cosmo_thread_join(&t, NULL) == 0);
     }
 
     if (failures == 0)
