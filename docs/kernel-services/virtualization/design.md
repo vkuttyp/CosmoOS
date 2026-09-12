@@ -599,7 +599,8 @@ the image with `x0 = the tree`, `x1..x3 = 0`, EL1h, MMU off.
 `FEATURES`, `CPU_ON` (a vCPU created after the VM has started, at the
 entry the guest named with the context it gave, added to the run set),
 `CPU_OFF`, `AFFINITY_INFO`, `MIGRATE_INFO_TYPE`, and `SYSTEM_OFF`, which
-ends the run. The kernel gives the owner what it needs -- the exit,
+ends the run -- once a sibling the guest has just started has had a turn of
+its own (below). The kernel gives the owner what it needs -- the exit,
 `set_regs`, `vcpu_create` mid-flight -- and does not answer PSCI itself:
 `SYSTEM_OFF` has to end the owner's loop and `CPU_ON` has to add to the
 owner's run set. Hypercalls outside the SMCCC range keep the fixtures'
@@ -614,6 +615,43 @@ set with it, a tick each. The kernel already had the bound for its own
 tests (`vcpu_run_limited`); it gained the caller. The third argument is
 masked to the bits the kernel defines, because an older libc passed two
 and a register is not a promise.
+
+**A started vCPU gets its turn before the machine powers off.** Running
+several vCPUs in one thread has a consequence the round-robin did not
+account for. `CPU_ON` creates the sibling and marks it running, and the loop
+takes a turn boundary after every PSCI call so the sibling is scheduled next
+-- the comment there records that the first boot of this mode powered off
+before the sibling ran at all. But that boundary bounds the *order*, not the
+turn's *length*: the sibling gets one tick, and if the tick expires before it
+reaches its first instruction of consequence -- which a loaded host makes
+likely, since a tick is host time and the guest's progress within it is
+whatever the host scheduler allows -- the loop comes back to the primary,
+which prints its result and asks for `SYSTEM_OFF`. That was honoured at once,
+and the sibling's output was lost: on a real machine it would have been
+running on its own core all along.
+
+So `SYSTEM_OFF` now **waits for a sibling that has never had a turn end on
+its own terms**. A vCPU is *fresh* from `CPU_ON` until an exit that is not
+`COSMO_VM_EXIT_PREEMPTED` -- a hypercall, a wait, an access: any point the
+guest chose. When `SYSTEM_OFF` arrives and a fresh sibling is still running,
+the asking vCPU stops (its guest must not run past the call) and the
+power-off is held for at most `MACHINE_OFF_GRACE_TURNS` (64) turns of the
+round-robin, which the loop spends on the remaining vCPUs. The power-off is
+then honoured as soon as no fresh sibling remains, when the grace runs out,
+or when the last vCPU powers itself off -- and prints `guest powered off`
+either way, because the guest did ask for the machine to stop. The bound is
+what keeps a hostile guest from holding the machine open: a secondary that
+spins forever costs the power-off 64 turns and no more -- which is why, while
+a power-off is held, even the last runnable vCPU is run with
+`COSMO_VCPU_RUN_ONE_TICK`. Running it untimed, as the loop otherwise does
+when nothing else needs the thread, would hand the thread to a guest that
+never yields and the bound would mean nothing: `guest_offspin` is that
+guest, and it hangs the owner without this.
+
+This is not PSCI semantics -- a real `SYSTEM_OFF` does not wait for anything
+-- it is the correction for serialising what the hardware would have run in
+parallel. A guest that observes the difference would have to be counting its
+own instructions against a sibling's, which the interface never promised.
 
 **The first guest written in C** (`tests/hv/aarch64/guest_dtb.c`, with
 an Image header in its assembly entry) knows nothing of this hypervisor:
