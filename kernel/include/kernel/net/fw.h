@@ -69,8 +69,10 @@ struct ipv4_hdr;
 
 #define FW_MAX_GUESTS         8u                          /* mirrors tap.c TAP_MAX_GUESTS */
 #define FW_RULES_PER_GUEST    32u                         /* one guest's ordered rule list (two are seeded) */
-#define FW_FLOW_MAX           256u                        /* stateful entries (guest-to-guest) */
-#define FW_FLOW_QUOTA_PER_GUEST (FW_FLOW_MAX / FW_MAX_GUESTS) /* one guest's share; a flood starves itself */
+#define FW_FLOW_GUEST_POOL    256u                        /* the guests' share of the flow table */
+#define FW_FLOW_QUOTA_PER_GUEST (FW_FLOW_GUEST_POOL / FW_MAX_GUESTS) /* one guest's share; a flood starves itself */
+#define FW_FLOW_QUOTA_HOST    64u                         /* the host's own share (its outbound UDP and echo flows) */
+#define FW_FLOW_MAX           (FW_FLOW_GUEST_POOL + FW_FLOW_QUOTA_HOST)   /* stateful entries in all */
 #define FW_ICMP_TYPE_ANY      0xffffu                     /* dst_port wildcard for an ICMP rule */
 #define FW_HOST_GUEST_IP      0u                          /* the host's policy object, as a guest address */
 
@@ -179,6 +181,22 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
 enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
                                 const struct ipv4_hdr *iph, unsigned ihl);
 
+/*
+ * Record a datagram the host itself is sending, so that the host chain admits
+ * its reply: called from ipv4_output -- the one door every host-originated
+ * datagram passes and no forwarded one does -- when the egress is a real,
+ * non-guest link. `m` carries the transport header at offset 0 (the IP header
+ * is prepended after this), and `src`/`dst` are the addresses the header will
+ * carry. A UDP datagram is recorded by its ports and an ICMP echo request by
+ * its identifier; a send on a live flow refreshes it. Nothing else is
+ * recorded -- TCP above all, whose inbound segments quiet delivery already
+ * admits through the connection itself, so recording them would put this
+ * lock on the uplink's hottest send path for no reader. A send is never
+ * refused for the firewall's sake: no room in the host's share simply leaves
+ * the reply to the rules.
+ */
+void fw_host_record(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto);
+
 /* Reclaim expired flows (the network worker's periodic tick, beside nat_age). */
 void fw_age(uint64_t now_ns);
 /* Drop every flow and reset every attached guest to "as attached" -- the
@@ -197,6 +215,8 @@ struct fw_stats {
     uint64_t in_spoofed;                         /* INPUT: source was not the tap's guest */
     uint64_t hin_accept_rule, hin_drop_rule;     /* host-chain verdicts from a matching rule */
     uint64_t hin_accept_default, hin_drop_default; /* host-chain verdicts from the host default */
+    uint64_t hin_accept_established;             /* host chain: the reverse of a flow the host opened */
+    uint64_t hin_flow_new, hin_flow_drop_full;   /* host flows recorded / not recorded (share spent) */
     uint32_t flows, rules;                       /* live right now (rules: every guest's and the host's) */
 };
 void fw_get_stats(struct fw_stats *out);

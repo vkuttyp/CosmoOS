@@ -180,6 +180,12 @@ int ipv4_output(struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto, uint8
         m_freem(m);
         return -ENETUNREACH;
     }
+    /* The host chain's state. This is the one door every datagram the host
+     * itself originates passes -- a forwarded one goes straight to output_on,
+     * and nat_in's deliveries leave on a guest tap -- so the flow whose reply
+     * the chain must admit is recorded here, with the source the header will
+     * carry (output_on resolves a zero source the same way). */
+    fw_host_record(nif, m, src != 0 ? src : ipv4_source_for(dst), dst, proto);
     int rc = output_on(nif, m, src, dst, proto, ttl);
     netif_put(nif);
     return rc;
@@ -353,7 +359,17 @@ void icmp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *iph)
         return;
     struct icmp_hdr *ic = (struct icmp_hdr *)m->data;
     if (ic->type == ICMP_DEST_UNREACH && ic->code == ICMP_UNREACH_NEEDFRAG) {
-        icmp_needfrag(m, ic);
+        icmp_needfrag(m, ic);   /* admits nothing TCP does not confirm, and answers nothing */
+        m_freem(m);
+        return;
+    }
+    /* The host firewall said DROP (M_FW_QUIET) and no flow of the host's
+     * claimed this message: the path-MTU confirmation above was the only
+     * consumer, so nothing else here runs -- not the echo reply (whose
+     * host-wide rate-limit budget a refused probe must not spend), not the
+     * reply hook. */
+    if (m->flags & M_FW_QUIET) {
+        STAT(icmp_quiet_dropped);
         m_freem(m);
         return;
     }
@@ -635,9 +651,14 @@ void ipv4_input(struct netif *nif, struct mbuf *m)
      * which owns acceptability, admits it only into an existing connection
      * or a connected socket and answers nothing else -- no SYN-ACK, RST,
      * challenge or window ACK, no port-unreachable -- so the firewall never
-     * models TCP state and a DROP means silence. Anything else is freed. */
+     * models TCP state and a DROP means silence. ICMP is delivered quiet too:
+     * the one message the host consumes, Need-Fragmentation, is accepted only
+     * where TCP confirms the quoted segment is one of its own in flight
+     * (RFC 5927), and icmp_input under the flag runs that confirmation and
+     * nothing else -- no echo reply, no hook, no rate-limit budget spent.
+     * Anything else (an unknown protocol) is freed. */
     if (!(nif->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK)) && fw_host_verdict(nif, m, iph, ihl) == FW_DROP) {
-        if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP) {
+        if (iph->proto == IPPROTO_TCP || iph->proto == IPPROTO_UDP || iph->proto == IPPROTO_ICMP) {
             m->flags |= M_FW_QUIET;
             STAT(hin_quiet);
         } else {

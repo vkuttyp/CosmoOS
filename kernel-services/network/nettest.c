@@ -4423,35 +4423,46 @@ static bool hin_send(struct tap *u, const uint8_t umac[6], const uint8_t wmac[6]
 
 static bool hin_parse(struct mbuf *m, struct hin_seg *o)
 {
-    uint8_t rx[256];
+    /* A window big enough for the headers and the first of the payload: a
+     * frame may be far longer (a full-sized segment), so the *header fields*
+     * say how much data the datagram carries, never how much was copied. */
+    uint8_t rx[128];
     uint32_t n = m_length(m);
-    if (n > sizeof(rx))
-        n = sizeof(rx);
-    if (n < ETH_HLEN + 20 || !m_copydata(m, 0, n, rx) || rx[12] != 0x08 || rx[13] != 0x00)
+    uint32_t take = n < sizeof(rx) ? n : (uint32_t)sizeof(rx);
+    if (n < ETH_HLEN + 20u || !m_copydata(m, 0, take, rx) || rx[12] != 0x08 || rx[13] != 0x00)
         return false;
     const struct ipv4_hdr *ip = (const struct ipv4_hdr *)(rx + ETH_HLEN);
     unsigned ihl = IPV4_HDR_LEN(ip);
     uint16_t total = ntohs(ip->len);
-    if (total < ihl || (uint32_t)ETH_HLEN + total > n)
+    if (total < ihl || (uint32_t)ETH_HLEN + total > n || (uint32_t)ETH_HLEN + ihl + 8u > take)
         return false;
     memset(o, 0, sizeof(*o));
     o->src = ip->src; o->dst = ip->dst; o->proto = ip->proto;
     const uint8_t *l4 = rx + ETH_HLEN + ihl;
     unsigned l4len = total - ihl;
+    unsigned hl;
     if (ip->proto == IPPROTO_TCP && l4len >= sizeof(struct tcp_hdr)) {
         const struct tcp_hdr *th = (const struct tcp_hdr *)l4;
-        unsigned hl = TCP_HDR_LEN(th);
+        hl = TCP_HDR_LEN(th);
+        if (hl > l4len || (uint32_t)ETH_HLEN + ihl + hl > take)
+            return false;
         o->sport = ntohs(th->sport); o->dport = ntohs(th->dport);
         o->seq = ntohl(th->seq); o->ack = ntohl(th->ack);
         o->flags = th->flags; o->win = ntohs(th->win);
-        o->paylen = (uint16_t)(hl <= l4len ? l4len - hl : 0);
-        memcpy(o->pay, l4 + hl, o->paylen < sizeof(o->pay) ? o->paylen : sizeof(o->pay));
+        o->paylen = (uint16_t)(l4len - hl);
     } else if (ip->proto == IPPROTO_UDP && l4len >= 8) {
+        hl = 8;
         o->sport = (uint16_t)(l4[0] << 8 | l4[1]); o->dport = (uint16_t)(l4[2] << 8 | l4[3]);
         o->paylen = (uint16_t)((l4[4] << 8 | l4[5]) - 8);
-    } else if (ip->proto == IPPROTO_ICMP && l4len >= 4) {
-        o->flags = l4[0];
+    } else {
+        if (ip->proto == IPPROTO_ICMP && l4len >= 4)
+            o->flags = l4[0];
+        return true;
     }
+    /* As much of the payload as the window holds, up to what `pay` takes. */
+    uint32_t have = take - (uint32_t)(ETH_HLEN + ihl + hl);
+    uint32_t cp = o->paylen < have ? o->paylen : have;
+    memcpy(o->pay, l4 + hl, cp < sizeof(o->pay) ? cp : sizeof(o->pay));
     return true;
 }
 
@@ -4899,8 +4910,10 @@ bool selftest_net_hostinput(const char **reason)
     ksock_put(a2);
 
     /* (5) UDP and ICMP are per datagram: an icmp type-8 DROP drops an echo
-     * request (freed at the IP layer) and no reply comes back, a type-0
-     * datagram passes the default; without the rule echo is answered. */
+     * request -- delivered quiet, then freed by icmp_input, the one place
+     * that dispatches ICMP (the host-state unit) -- and no reply comes back;
+     * a type-0 datagram passes the default; without the rule echo is
+     * answered. */
     struct fw_rule r_echo = HIN_RULE(FW_DIR_FROM_UPLINK, IPPROTO_ICMP, 0, 0, ICMP_ECHO, FW_DROP);
     CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_echo) == 0);
     hin_drain(u);
@@ -4908,7 +4921,7 @@ bool selftest_net_hostinput(const char **reason)
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5151);
     CHECK(hin_send(u, umac, wmac[0], w[0], u_ip, IPPROTO_ICMP, l4, l4len));
     CHECK(FWT_RISES(fw_get_stats, fs1, hin_drop_rule, fs0.hin_drop_rule));
-    CHECK(FWT_RISES(ipv4_get_stats, is1, hin_filtered, is0.hin_filtered));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
     CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 15));
     fw_get_stats(&fs0);
     l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x5151);
@@ -5083,5 +5096,439 @@ bool selftest_net_hostinput(const char **reason)
           "keepalive refresh; dup-ACKs, a window update, data and a FIN kept their output; a valid reset "
           "applied), ICMP dropped by type, off-link datagrams dropped before any chain, DNAT never re-gated, "
           "the scopes held, and the control listing carried the host record with its source");
+    return true;
+}
+
+/* --- the host's own flows (docs/audit/next-subsystem-host-state.md) ------- */
+
+/* The host's echo-reply hook: what reached it, and how often. */
+static struct { volatile uint32_t src; volatile uint16_t id, seq; volatile unsigned n; } g_hst_echo;
+
+static void hst_echo_hook(uint32_t src, uint16_t id, uint16_t seq)
+{
+    g_hst_echo.src = src;
+    g_hst_echo.id = id;
+    g_hst_echo.seq = seq;
+    g_hst_echo.n++;
+}
+
+static bool hst_echo_arrived(unsigned base, unsigned tries)
+{
+    for (unsigned i = 0; i < tries; i++) {
+        if (g_hst_echo.n > base)
+            return true;
+        thread_sleep_ms(10);
+    }
+    return false;
+}
+
+/* An ICMP Need-Fragmentation (type 3 code 4, next-hop MTU `mtu`) quoting a
+ * TCP segment the host sent: the IP header the host wrote plus the first 8
+ * bytes of the segment (ports and sequence), which is all icmp_needfrag
+ * reads. 36 bytes, checksummed -- icmp_input validates it. */
+static uint16_t hst_mk_needfrag_tcp(uint8_t *l4, uint32_t host_ip, uint32_t peer_ip, uint16_t sport,
+                                    uint16_t dport, uint32_t seq, uint16_t mtu)
+{
+    memset(l4, 0, 36);
+    l4[0] = ICMP_DEST_UNREACH;
+    l4[1] = ICMP_UNREACH_NEEDFRAG;
+    l4[6] = (uint8_t)(mtu >> 8);                 /* the header's last 16 bits: the next-hop MTU */
+    l4[7] = (uint8_t)mtu;
+    struct ipv4_hdr *q = (struct ipv4_hdr *)(l4 + 8);
+    q->vhl = 0x45; q->len = htons(1240); q->ttl = 64; q->proto = IPPROTO_TCP;
+    q->src = host_ip; q->dst = peer_ip;
+    uint8_t *th = l4 + 8 + 20;
+    th[0] = (uint8_t)(sport >> 8); th[1] = (uint8_t)sport;
+    th[2] = (uint8_t)(dport >> 8); th[3] = (uint8_t)dport;
+    th[4] = (uint8_t)(seq >> 24); th[5] = (uint8_t)(seq >> 16);
+    th[6] = (uint8_t)(seq >> 8);  th[7] = (uint8_t)seq;
+    uint16_t ck = fwt_ones_sum(l4, 36);
+    l4[2] = (uint8_t)(ck >> 8);
+    l4[3] = (uint8_t)ck;
+    return 36;
+}
+
+/* An ICMP port-unreachable quoting a TCP segment: an error with no consumer. */
+static uint16_t hst_mk_unreach_tcp(uint8_t *l4, uint32_t host_ip, uint32_t peer_ip, uint16_t sport,
+                                   uint16_t dport, uint32_t seq)
+{
+    uint16_t n = hst_mk_needfrag_tcp(l4, host_ip, peer_ip, sport, dport, seq, 0);
+    l4[1] = ICMP_UNREACH_PORT;
+    l4[6] = l4[7] = 0;
+    l4[2] = l4[3] = 0;
+    uint16_t ck = fwt_ones_sum(l4, n);
+    l4[2] = (uint8_t)(ck >> 8);
+    l4[3] = (uint8_t)ck;
+    return n;
+}
+
+bool selftest_net_hoststate(const char **reason)
+{
+    *reason = NULL;
+    fw_flush();
+    nat_flush();
+
+    /* The uplink: a real, non-guest link, the world on its far side. */
+    static const uint8_t umac[6]  = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x01 };
+    static const uint8_t wmac[6]  = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x63 };
+    static const uint8_t gtmac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x11 };
+    static const uint8_t gmac[6]  = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x1f };
+    uint32_t u_ip = IPV4_ADDR(10, 77, 9, 1);
+    uint32_t w = IPV4_ADDR(10, 77, 9, 99), w2 = IPV4_ADDR(10, 77, 9, 98);
+    struct tap *u = tap_create("hstu", u_ip, htonl(0xffffff00u), umac);
+    CHECK(u != NULL);
+    nettest_seed_arp(tap_netif(u), w, wmac);
+    nettest_seed_arp(tap_netif(u), w2, wmac);
+
+    /* A DROP rule covering this test's world, so every admission below is
+     * the host's own state and nothing else -- and scoped by source rather
+     * than left as the machine-wide default, so that a failing assertion
+     * here cannot harden the real uplink for every test that follows. (The
+     * hardened *default* is exercised at the end, with its verdicts taken
+     * before anything is asserted.) */
+    struct fw_rule r_world = { .direction = FW_DIR_FROM_UPLINK, .verdict = FW_DROP,
+                               .src_ip = IPV4_ADDR(10, 77, 9, 0), .src_prefix = 24 };
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_world) == 0);
+
+    struct socket *cs = NULL, *cs2 = NULL, *cs3 = NULL;
+    CHECK(hin_udp_listener(&cs, 0, 7100));       /* bound, never connected */
+    CHECK(hin_udp_listener(&cs2, 0, 7101));
+    CHECK(hin_udp_listener(&cs3, 0, 7102));
+    struct netaddr peer = v4addr(w, 5300);
+    uint8_t pl[4] = { 'p', 'i', 'n', 'g' }, l4[160], buf[256], frame[512];
+    uint16_t l4len;
+    struct hin_seg sg;
+    struct fw_stats fs0, fs1;
+    struct udp_stats us0, us1;
+    struct tcp_stats ts0, ts1;
+    struct ip_stats is0, is1;
+    hin_drain(u);
+
+    /* (1) an unconnected UDP client's reply survives the DROP. The send is
+     * recorded on its way out; the reply on that one tuple is admitted by
+     * state, with no rule anywhere. */
+    fw_get_stats(&fs0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &peer) == (int64_t)sizeof(pl));
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.sport == 7100 && sg.src == u_ip);
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
+
+    /* The tuple is exactly one: another port at that peer, another peer, and
+     * another local port match no flow and take the default. */
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5301, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 10) == -EAGAIN);
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w2, u_ip, 5300, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w2, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 10) == -EAGAIN);
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7101, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs2, buf, sizeof(buf), 10) == -EAGAIN);
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+
+    /* (2) one tuple, and no notion of intent: a second unsolicited datagram
+     * on the open tuple is admitted too (the socket's own validation is the
+     * second line), while the world initiating to a port the host never sent
+     * from takes the rules. */
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5400, 7102, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs3, buf, sizeof(buf), 10) == -EAGAIN);
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    /* The only other match flow_find can report is the *forward* one -- the
+     * host's own tuple arriving inbound -- which on a real link means a
+     * datagram carrying one of our addresses as its source: ipv4_input drops
+     * it as a martian before any chain, which is why the state step need
+     * admit on the reverse match alone. */
+    ipv4_get_stats(&is0);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, u_ip, u_ip, 7100, 5300, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, u_ip, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, rx_bad_header, is0.rx_bad_header));
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_accept_established == fs0.hin_accept_established &&
+          fs1.hin_drop_rule == fs0.hin_drop_rule && fs1.hin_accept_rule == fs0.hin_accept_rule);
+
+    /* (3) the host can ping under the DROP: its echo request is recorded by
+     * identifier and the reply reaches the hook. */
+    icmp_set_echo_reply_hook(hst_echo_hook);
+    unsigned echoes = g_hst_echo.n;
+    fw_get_stats(&fs0);
+    CHECK(icmp_send_echo(w, 0x7a7a, 1, "q", 1) == 0);
+    CHECK(hin_recv(u, IPPROTO_ICMP, 0, &sg, 50) && sg.flags == ICMP_ECHO);
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
+    fw_get_stats(&fs0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7a);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(hst_echo_arrived(echoes, 50));
+    CHECK(g_hst_echo.id == 0x7a7a && g_hst_echo.src == w);
+    CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
+    /* A reply carrying another identifier matches no flow: freed, no hook. */
+    echoes = g_hst_echo.n;
+    ipv4_get_stats(&is0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO_REPLY, 0x7a7b);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
+    CHECK(!hst_echo_arrived(echoes, 5));
+
+    /* (4) an echo *request* is a request, not a reply: quiet delivery reaches
+     * icmp_input, which answers nothing and does not spend the host-wide
+     * echo-reply budget. */
+    hin_drain(u);
+    ipv4_get_stats(&is0);
+    l4len = fwt_mk_icmp_ck(l4, ICMP_ECHO, 0x5050);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
+    CHECK(!hin_recv(u, IPPROTO_ICMP, 0, &sg, 10));
+    CHECK(is1.icmp_echo_replied == is0.icmp_echo_replied && is1.icmp_echo_rcvd == is0.icmp_echo_rcvd);
+
+    /* (5) path-MTU discovery survives the DROP. The host opens a connection
+     * outbound (PR #107's SYN_SENT acceptance point admits the SYN+ACK),
+     * sends a large segment, and the router's Need-Fragmentation -- delivered
+     * quiet -- is consumed only because TCP confirms the quoted segment is
+     * one of its own in flight. */
+    hin_drain(u);
+    fw_get_stats(&fs0);
+    struct hin_conn cn = { .peer = v4addr(w, 9100) };
+    struct thread *ct = thread_create(hin_connect_thread, &cn, "hst-connect", SCHED_PRIO_DEFAULT);
+    CHECK(ct != NULL);
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.flags == TH_SYN);
+    uint32_t hiss = sg.seq;
+    uint16_t hport = sg.sport;
+    l4len = hin_mk_tcp(l4, w, u_ip, 9100, hport, 6000, hiss + 1, TH_SYN | TH_ACK, 64240, NULL, 0);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_TCP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.flags == TH_ACK && sg.ack == 6001);
+    for (unsigned i = 0; i < 100 && !cn.done; i++)
+        thread_sleep_ms(10);
+    CHECK(cn.done && cn.rc == 0);
+    thread_join(ct);
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new);   /* TCP is not recorded: no lock on that send path */
+    static uint8_t big[1200];
+    for (unsigned i = 0; i < sizeof(big); i++)
+        big[i] = (uint8_t)i;
+    CHECK(ksock_sendto(cn.s, big, sizeof(big), NULL) == (int64_t)sizeof(big));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.paylen > 600);
+    uint32_t qseq = sg.seq;
+    /* A Need-Fragmentation quoting a tuple with no connection reaches the
+     * consumer (the firewall admitted it to the layer that can tell) and is
+     * refused there: the cache does not move. */
+    ipv4_get_stats(&is0); tcp_get_stats(&ts0);
+    l4len = hst_mk_needfrag_tcp(l4, u_ip, w, 9999, 9100, qseq, 576);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_needfrag_rcvd, is0.icmp_needfrag_rcvd));
+    tcp_get_stats(&ts1);
+    CHECK(ts1.pmtu_updates == ts0.pmtu_updates && is1.pmtu_updates == is0.pmtu_updates);
+    /* The one quoting the live connection's in-flight segment is consumed,
+     * and the segment is retransmitted inside the new path MTU. */
+    hin_drain(u);
+    tcp_get_stats(&ts0); ipv4_get_stats(&is0);
+    l4len = hst_mk_needfrag_tcp(l4, u_ip, w, hport, 9100, qseq, 576);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(tcp_get_stats, ts1, pmtu_updates, ts0.pmtu_updates));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, pmtu_updates, is0.pmtu_updates));
+    CHECK(hin_recv(u, IPPROTO_TCP, 9100, &sg, 50) && sg.seq == qseq && sg.paylen <= 536);
+    /* An ICMP error with no consumer is freed under the flag: nothing parses
+     * it, nothing is answered. */
+    ipv4_get_stats(&is0);
+    l4len = hst_mk_unreach_tcp(l4, u_ip, w, hport, 9100, qseq);
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_ICMP, l4, l4len));
+    CHECK(FWT_RISES(ipv4_get_stats, is1, icmp_quiet_dropped, is0.icmp_quiet_dropped));
+    ksock_put(cn.s);
+    hin_drain(u);
+
+    /* (6) the DNS proxy end to end under the DROP: a guest's query, the
+     * proxy's relay out the uplink from its *unconnected* socket, the
+     * upstream's answer admitted by the host's flow, the guest's answer with
+     * its own id. The socket is unconnected by design (it authenticates the
+     * sender itself), so nothing but this state could admit the answer. */
+    uint32_t g_ip = IPV4_ADDR(10, 88, 9, 1), guest = IPV4_ADDR(10, 88, 9, 15);
+    struct tap *gt = tap_create("hstg", g_ip, htonl(0xffffff00u), gtmac);
+    CHECK(gt != NULL);
+    nettest_seed_arp(tap_netif(gt), guest, gmac);
+    struct tapsvc *svc = tapsvc_start(gt);
+    CHECK(svc != NULL);
+    tapsvc_test_set_upstream(svc, w, 5300);
+    uint8_t msg[64];
+    uint32_t mlen = nettest_mk_dns(msg, 0x1357);
+    l4len = nettest_mk_udp(l4, guest, g_ip, 4444, 53, msg, (uint16_t)mlen);
+    uint32_t flen = nettest_wrap(frame, gtmac, gmac, guest, g_ip, 64, IPPROTO_UDP, l4, l4len);
+    fw_get_stats(&fs0);
+    CHECK(tap_inject(gt, frame, flen) == 0);
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.paylen >= 12 && sg.paylen <= sizeof(sg.pay));
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
+    {
+        /* The upstream's answer to the port the proxy sent from, built from
+         * the relayed query as net-dns's responder builds it. */
+        uint8_t ans[128];
+        uint32_t alen = sg.paylen;
+        memcpy(ans, sg.pay, alen);
+        ans[2] = 0x81; ans[3] = 0x80;                /* QR + RD + RA */
+        ans[6] = 0; ans[7] = 1;                      /* ancount 1 */
+        uint32_t o = alen;
+        ans[o++] = 0xc0; ans[o++] = 0x0c;            /* name pointer */
+        ans[o++] = 0; ans[o++] = 1;                  /* type A */
+        ans[o++] = 0; ans[o++] = 1;                  /* class IN */
+        ans[o++] = 0; ans[o++] = 0; ans[o++] = 0; ans[o++] = 4;
+        ans[o++] = 0; ans[o++] = 4;
+        memcpy(ans + o, dns_answer_ip, 4); o += 4;
+        fw_get_stats(&fs0);
+        l4len = nettest_mk_udp(l4, w, u_ip, 5300, sg.sport, ans, (uint16_t)o);
+        CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+        CHECK(FWT_RISES(fw_get_stats, fs1, hin_accept_established, fs0.hin_accept_established));
+        struct mbuf *r = nettest_recv_ip(gt);
+        CHECK(r != NULL);
+        uint32_t rl = m_length(r);
+        CHECK(rl <= sizeof(buf) && m_copydata(r, 0, rl, buf));
+        m_freem(r);
+        const struct ipv4_hdr *ri = (const struct ipv4_hdr *)(buf + ETH_HLEN);
+        CHECK(ri->dst == guest && ri->proto == IPPROTO_UDP);
+        const uint8_t *rudp = buf + ETH_HLEN + 20;
+        CHECK((uint16_t)(rudp[2] << 8 | rudp[3]) == 4444);
+        const uint8_t *dns = rudp + 8;
+        CHECK((uint16_t)(dns[0] << 8 | dns[1]) == 0x1357);            /* the guest's own id */
+        CHECK((dns[2] & 0x80) && memcmp(buf + rl - 4, dns_answer_ip, 4) == 0);
+    }
+    tapsvc_stop(svc);
+    tap_destroy(gt);
+    hin_drain(u);
+
+    /* (7) a send on a live flow refreshes it rather than recording a second;
+     * expiry closes the tuple, and a fresh send opens it again. */
+    fw_get_stats(&fs0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &peer) == (int64_t)sizeof(pl));
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new && fs1.flows == fs0.flows);
+    fw_age(clock_now_ns() + 31ull * 1000000000ull);
+    udp_get_stats(&us0);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 10) == -EAGAIN);
+    CHECK(FWT_RISES(udp_get_stats, us1, quiet_dropped, us0.quiet_dropped));
+    fw_get_stats(&fs0);
+    CHECK(ksock_sendto(cs, pl, sizeof(pl), &peer) == (int64_t)sizeof(pl));
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + 1);
+    l4len = nettest_mk_udp(l4, w, u_ip, 5300, 7100, pl, sizeof(pl));
+    CHECK(hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+    hin_drain(u);
+
+    /* (8) neither a forwarded guest flow nor a loopback send is the host's:
+     * a masqueraded guest-to-world flow leaves through output_on, not
+     * ipv4_output, and loopback never reaches a chain. */
+    struct file *fa = NULL, *fb = NULL;
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fa) == 0 && fa != NULL);
+    CHECK(vfs_open(NULL, "/dev/net/tap", COSMO_O_RDWR, 0, &fb) == 0 && fb != NULL);
+    uint32_t ga = IPV4_ADDR(10, 0, 3, 15), gb = IPV4_ADDR(10, 0, 4, 15);
+    static const uint8_t amac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2a };
+    static const uint8_t bmac[6] = { 0x52, 0x54, 0x00, 0x1b, 0x00, 0x2b };
+    static const uint8_t tap0mac[6] = { 0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc };
+    { struct netif *n = netif_find("tap0"); CHECK(n != NULL); nettest_seed_arp(n, ga, amac); netif_put(n); }
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, w, 4500, 5300, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, w, IPPROTO_UDP, l4, l4len));
+    CHECK(hin_recv(u, IPPROTO_UDP, 5300, &sg, 50) && sg.src == u_ip && sg.sport != 4500);   /* masqueraded */
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new);                  /* not the host's flow */
+    fw_get_stats(&fs0);
+    {
+        struct socket *lo = NULL;
+        CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_DGRAM, 0, &lo) == 0);
+        struct netaddr to = v4addr(INADDR_LOOPBACK_N, 7100);
+        CHECK(ksock_sendto(lo, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
+        CHECK(hin_recv_sock(cs, buf, sizeof(buf), 50) == (int64_t)sizeof(pl));
+        ksock_put(lo);
+    }
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new);                  /* loopback records nothing */
+
+    /* (9) the host's share is its own: 64 flows record, the 65th does not --
+     * its datagram still leaves, only its reply then takes the rules -- and
+     * the guests' pool is untouched. */
+    fw_flush();
+    CHECK(fw_rule_add(FW_HOST_GUEST_IP, 0, &r_world) == 0);   /* fw_flush cleared it */
+    fw_get_stats(&fs0);
+    for (unsigned i = 0; i < FW_FLOW_QUOTA_HOST; i++) {
+        struct netaddr to = v4addr(w, (uint16_t)(6000 + i));
+        CHECK(ksock_sendto(cs, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
+    }
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_new == fs0.hin_flow_new + FW_FLOW_QUOTA_HOST && fs1.flows == FW_FLOW_QUOTA_HOST);
+    hin_drain(u);
+    fw_get_stats(&fs0);
+    {
+        struct netaddr to = v4addr(w, (uint16_t)(6000 + FW_FLOW_QUOTA_HOST));
+        CHECK(ksock_sendto(cs, pl, sizeof(pl), &to) == (int64_t)sizeof(pl));
+    }
+    fw_get_stats(&fs1);
+    CHECK(fs1.hin_flow_drop_full == fs0.hin_flow_drop_full + 1 && fs1.hin_flow_new == fs0.hin_flow_new);
+    CHECK(hin_recv(u, IPPROTO_UDP, (uint16_t)(6000 + FW_FLOW_QUOTA_HOST), &sg, 50));   /* still sent */
+    /* A guest-to-guest flow still records with the host's share full. */
+    { struct netif *n = netif_find("tap1"); CHECK(n != NULL); nettest_seed_arp(n, gb, bmac); netif_put(n); }
+    struct fw_rule a_to_b = { .direction = FW_DIR_TO_GUEST, .proto = IPPROTO_UDP, .dst_prefix = 32,
+                              .verdict = FW_ACCEPT, .dst_ip = gb, .dst_port = 7300 };
+    CHECK(fw_rule_add(ga, 0, &a_to_b) == 0);
+    fw_get_stats(&fs0);
+    l4len = nettest_mk_udp(l4, ga, gb, 4600, 7300, pl, sizeof(pl));
+    CHECK(fwt_send(fa, tap0mac, amac, ga, gb, IPPROTO_UDP, l4, l4len));
+    CHECK(FWT_RISES(fw_get_stats, fs1, flow_new, fs0.flow_new));
+    CHECK(fs1.hin_flow_drop_full == fs0.hin_flow_drop_full);
+
+    /* (10) state beats the hardened *default* too, not only a rule. A clean
+     * share first -- step (9) deliberately spent the host's, and a flow that
+     * is never recorded is exactly what the default then drops. The verdicts
+     * are taken and the default restored before anything is asserted, so no
+     * failure here can leave the machine hardened. */
+    fw_flush();
+    while (hin_recv_sock(cs, buf, sizeof(buf), 1) > 0)
+        ;                                      /* nothing of an earlier step's left queued */
+    CHECK(fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_DROP) == 0);
+    {
+        struct netaddr p2 = v4addr(w, 5500);
+        bool sent = ksock_sendto(cs, pl, sizeof(pl), &p2) == (int64_t)sizeof(pl);
+        l4len = nettest_mk_udp(l4, w, u_ip, 5500, 7100, pl, sizeof(pl));
+        bool injected = hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len);
+        int64_t got = hin_recv_sock(cs, buf, sizeof(buf), 50);
+        l4len = nettest_mk_udp(l4, w, u_ip, 5501, 7100, pl, sizeof(pl));
+        bool unsolicited = hin_send(u, umac, wmac, w, u_ip, IPPROTO_UDP, l4, l4len);
+        int64_t none = hin_recv_sock(cs, buf, sizeof(buf), 10);
+        int restored = fw_policy_set(FW_HOST_GUEST_IP, FW_DIR_FROM_UPLINK, FW_ACCEPT);
+        CHECK(restored == 0);
+        CHECK(sent && injected && got == (int64_t)sizeof(pl));
+        CHECK(unsolicited && none == -EAGAIN);
+    }
+
+    file_put(fa);
+    file_put(fb);
+    icmp_set_echo_reply_hook(NULL);
+    ksock_put(cs); ksock_put(cs2); ksock_put(cs3);
+    hin_drain(u);
+    tap_destroy(u);
+    fw_flush();
+    nat_flush();
+    kinfo("selftest: net-hoststate: under a hardened host the replies to its own unconnected UDP sends and echo "
+          "requests were admitted by state on exactly one tuple (another port, peer or local port was not), the "
+          "DNS proxy relayed and answered end to end through its unconnected socket, a Need-Fragmentation was "
+          "consumed only where TCP confirmed the quoted segment and the segment came back inside the new MTU, an "
+          "echo request drew nothing and spent no budget, a send refreshed rather than re-recorded, expiry closed "
+          "the tuple, and the host's share held while the guests' pool stayed its own");
     return true;
 }

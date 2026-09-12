@@ -116,6 +116,7 @@ struct ip_stats {
     uint64_t rx_offlink;               /* a locally-addressed datagram not for its ingress link's own address */
     uint64_t hin_quiet;                /* host-chain DROP on TCP/UDP: delivered under M_FW_QUIET */
     uint64_t hin_filtered;             /* host-chain DROP on anything else: freed */
+    uint64_t icmp_quiet_dropped;       /* M_FW_QUIET ICMP no consumer confirmed: freed, nothing answered */
 };
 void ipv4_get_stats(struct ip_stats *out);
 void ipv6_get_stats(struct ip_stats *out);

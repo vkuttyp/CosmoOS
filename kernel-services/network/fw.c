@@ -6,7 +6,11 @@
  * the per-guest rule lists and policies, the host object, the guest
  * attachments, and the stateful flow table. Order against the rest of the stack: g_fw_lock ->
  * g_nat_lock (the filter runs before NAT and never holds NAT's lock); the
- * verdict path takes no other lock.
+ * verdict path takes no other lock. The host-state unit added a second
+ * caller, fw_host_record from ipv4_output -- also holding nothing else: NAT
+ * decides under g_nat_lock and transmits after releasing it
+ * (nat_forward_to), so the output path never arrives here with NAT's lock
+ * held, and the order is unchanged.
  *
  * Transport headers are read by byte offset with m_copydata, so the packet
  * is never re-pointed and no pullup is needed here.
@@ -35,8 +39,12 @@ struct fw_guest {
     struct fw_rule rules[FW_RULES_PER_GUEST];
 };
 
-/* A guest-to-guest flow: `a` sent the accepted first packet to `b`. For ICMP
- * echo a_port is the echo identifier and b_port is 0. */
+/* A tracked flow: `a` sent the accepted first packet to `b`. For ICMP echo
+ * a_port is the echo identifier and b_port is 0. Two kinds share the table,
+ * told apart by the initiator in `guest_ip` and separated by their shares: a
+ * guest-to-guest flow recorded by the FORWARD chain, and a flow the *host*
+ * opened (guest_ip == FW_HOST_GUEST_IP) recorded at ipv4_output so the host
+ * chain admits its reply. */
 struct fw_flow {
     bool     in_use;
     bool     est;                         /* TCP: an ACK without SYN has passed */
@@ -63,6 +71,14 @@ static struct fw_guest g_guests[FW_MAX_GUESTS];
 static struct fw_guest g_host = { .attached = true, .ip = FW_HOST_GUEST_IP,
                                   .policy = { [3] = POLICY_FROM_UPLINK_DEFAULT } };
 static struct fw_flow g_flows[FW_FLOW_MAX];
+/* The host's most recent flow. Two jobs, both hints, both validated before
+ * use: a one-entry cache for the case that dominates the host's *send* path
+ * (the same tuple again -- one socket to one peer, as the DNS proxy's
+ * upstream does), and, by being NULL until the host has any flow at all, the
+ * answer to "is there any host state to look for?" on the *receive* path,
+ * which is the uplink's and must not walk the table for nothing. A stale
+ * non-NULL costs a scan that finds nothing; it cannot cost correctness. */
+static struct fw_flow *g_host_last;
 static spinlock_t g_fw_lock = SPINLOCK_INIT("fw");
 static struct fw_stats g_stats;
 
@@ -405,6 +421,45 @@ static bool flow_trackable(uint8_t proto, const struct l4_view *v)
     return v->ports;
 }
 
+/* A free slot for a new flow, if this initiator is still within its share.
+ * NULL when the table is full or the share is spent -- the caller decides what
+ * that means (the FORWARD chain refuses the flow; the host records nothing and
+ * sends anyway). Caller holds g_fw_lock. */
+static struct fw_flow *flow_slot(uint32_t initiator, unsigned quota, uint64_t now)
+{
+    unsigned mine = 0;
+    struct fw_flow *slot = NULL;
+    for (unsigned i = 0; i < FW_FLOW_MAX; i++) {
+        struct fw_flow *f = &g_flows[i];
+        if (f->in_use && now < f->expires_ns) {
+            if (f->guest_ip == initiator)
+                mine++;
+        } else if (slot == NULL) {
+            slot = f;
+        }
+    }
+    return mine >= quota ? NULL : slot;
+}
+
+/* Fill a slot with a flow `a_ip` opened to `b_ip`. Caller holds g_fw_lock. */
+static void flow_fill(struct fw_flow *slot, uint32_t initiator, uint8_t proto, uint32_t a_ip, uint32_t b_ip,
+                      const struct l4_view *v, uint64_t now)
+{
+    memset(slot, 0, sizeof(*slot));
+    slot->in_use = true;
+    slot->proto = proto;
+    slot->guest_ip = initiator;
+    slot->a_ip = a_ip;
+    slot->b_ip = b_ip;
+    if (proto == IPPROTO_ICMP) {
+        slot->a_port = v->icmp_id;
+    } else {
+        slot->a_port = v->sport;
+        slot->b_port = v->dport;
+    }
+    slot->expires_ns = now + flow_timeout(slot);
+}
+
 enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct mbuf *m,
                                    const struct ipv4_hdr *iph, unsigned ihl)
 {
@@ -463,35 +518,13 @@ enum fw_verdict fw_forward_verdict(struct netif *in, struct netif *out, struct m
      * the reply -- so the flow is refused outright, as a full NAT table
      * refuses a new masquerade, and the guest's flood starves only itself. */
     if (verdict == FW_ACCEPT && dir == FW_DIR_TO_GUEST && flow_trackable(iph->proto, &v)) {
-        unsigned mine = 0;
-        struct fw_flow *slot = NULL;
-        for (unsigned i = 0; i < FW_FLOW_MAX; i++) {
-            struct fw_flow *f = &g_flows[i];
-            if (f->in_use && now < f->expires_ns) {
-                if (f->guest_ip == iph->src)
-                    mine++;
-            } else if (slot == NULL) {
-                slot = f;
-            }
-        }
-        if (slot == NULL || mine >= FW_FLOW_QUOTA_PER_GUEST) {
+        struct fw_flow *slot = flow_slot(iph->src, FW_FLOW_QUOTA_PER_GUEST, now);
+        if (slot == NULL) {
             spin_unlock_irqrestore(&g_fw_lock, s);
             STAT(flow_drop_full);
             return FW_DROP;
         }
-        memset(slot, 0, sizeof(*slot));
-        slot->in_use = true;
-        slot->proto = iph->proto;
-        slot->guest_ip = iph->src;
-        slot->a_ip = iph->src;
-        slot->b_ip = iph->dst;
-        if (iph->proto == IPPROTO_ICMP) {
-            slot->a_port = v.icmp_id;
-        } else {
-            slot->a_port = v.sport;
-            slot->b_port = v.dport;
-        }
-        slot->expires_ns = now + flow_timeout(slot);
+        flow_fill(slot, iph->src, iph->proto, iph->src, iph->dst, &v, now);
         STAT(flow_new);
     }
     spin_unlock_irqrestore(&g_fw_lock, s);
@@ -550,19 +583,101 @@ enum fw_verdict fw_input_verdict(struct netif *nif, struct mbuf *m,
 
 /* --- the host chain ------------------------------------------------------- */
 
+/* The host is sending: record the flow whose reply the chain must admit. */
+void fw_host_record(struct netif *out, struct mbuf *m, uint32_t src, uint32_t dst, uint8_t proto)
+{
+    /* Only the world's links. A guest tap's egress carries the guest's own
+     * traffic (whose state is NAT's or the FORWARD chain's), and nothing
+     * delivered over loopback ever reaches a chain. */
+    if (out->flags & (NETIF_MASQUERADE | NETIF_LOOPBACK))
+        return;
+    if (proto != IPPROTO_UDP && proto != IPPROTO_ICMP)
+        return;                              /* see fw.h: TCP is deliberately not recorded */
+    struct l4_view v;
+    l4_read(m, 0, proto, &v);                /* the IP header is prepended after this: transport at 0 */
+    if (!flow_trackable(proto, &v))
+        return;
+    /* flow_find reads only (proto, src, dst) from the header, which does not
+     * exist yet on this path, so the key is built here. */
+    struct ipv4_hdr key;
+    memset(&key, 0, sizeof(key));
+    key.proto = proto;
+    key.src = src;
+    key.dst = dst;
+
+    uint64_t now = clock_now_ns();
+    arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
+    /* The same tuple again: refresh without walking the table. This is the
+     * host's ordinary case -- one socket sending to one peer -- and the send
+     * path is the uplink's, so it must not pay for the whole table. */
+    struct fw_flow *last = g_host_last;
+    if (last != NULL && last->in_use && now < last->expires_ns && last->guest_ip == FW_HOST_GUEST_IP &&
+        last->proto == proto && last->a_ip == src && last->b_ip == dst &&
+        (proto == IPPROTO_ICMP ? last->a_port == v.icmp_id
+                               : last->a_port == v.sport && last->b_port == v.dport)) {
+        last->expires_ns = now + flow_timeout(last);
+        spin_unlock_irqrestore(&g_fw_lock, s);
+        return;
+    }
+    bool rev = false;
+    struct fw_flow *f = flow_find(&key, &v, now, &rev);
+    if (f != NULL && !rev) {
+        f->expires_ns = now + flow_timeout(f);   /* a send on a live flow refreshes it */
+        g_host_last = f;
+        spin_unlock_irqrestore(&g_fw_lock, s);
+        return;
+    }
+    struct fw_flow *slot = flow_slot(FW_HOST_GUEST_IP, FW_FLOW_QUOTA_HOST, now);
+    if (slot == NULL) {
+        spin_unlock_irqrestore(&g_fw_lock, s);
+        STAT(hin_flow_drop_full);
+        return;                              /* the datagram still goes out; its reply takes the rules */
+    }
+    flow_fill(slot, FW_HOST_GUEST_IP, proto, src, dst, &v, now);
+    g_host_last = slot;
+    spin_unlock_irqrestore(&g_fw_lock, s);
+    STAT(hin_flow_new);
+}
+
 enum fw_verdict fw_host_verdict(struct netif *nif, struct mbuf *m,
                                 const struct ipv4_hdr *iph, unsigned ihl)
 {
     (void)nif;   /* every real link shares the one host chain; per-interface chains are a later unit */
     struct l4_view v;
     l4_read(m, ihl, iph->proto, &v);
+    uint64_t now = clock_now_ns();
 
-    /* The host's rules first-match, else its default. No connection state
-     * here: on DROP the caller delivers a TCP/UDP datagram quiet (M_FW_QUIET)
-     * and the transport -- which owns acceptability -- admits only what an
-     * existing connection or a connected socket accepts, answering nothing
-     * else. The firewall does not re-derive TCP's tests. */
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
+
+    /* State before rules, as the FORWARD chain does: a datagram that is the
+     * reverse of a flow the *host* opened is admitted before any rule is
+     * read -- a reply was never what a rule was written about. Exactly one
+     * tuple is open (the peer address and port the host sent to, back to the
+     * port it sent from), for the life of the flow; the firewall cannot know
+     * whether the peer meant it as a reply, so a second datagram on that
+     * tuple inside the window is admitted too and the socket's own
+     * validation is the second line. A *forward* match on a real link could
+     * only be a datagram carrying one of our own addresses as its source,
+     * which ipv4_input drops as a martian before this chain; it is not
+     * admitted here either. A guest's flow admits nothing here: this chain
+     * is the host's. */
+    if (v.ok && g_host_last != NULL) {   /* no host flow has ever been recorded: nothing to find */
+        bool rev = false;
+        struct fw_flow *f = flow_find(iph, &v, now, &rev);
+        if (f != NULL && rev && f->guest_ip == FW_HOST_GUEST_IP) {
+            f->expires_ns = now + flow_timeout(f);
+            spin_unlock_irqrestore(&g_fw_lock, s);
+            STAT(hin_accept_established);
+            return FW_ACCEPT;
+        }
+    }
+
+    /* Else the host's rules first-match, else its default. No connection
+     * state here: on DROP the caller delivers a TCP/UDP datagram, and an
+     * ICMP one, quiet (M_FW_QUIET) and the transport -- which owns
+     * acceptability -- admits only what an existing connection, a connected
+     * socket, or (for ICMP) TCP's own path-MTU confirmation accepts,
+     * answering nothing else. The firewall does not re-derive TCP's tests. */
     enum fw_verdict verdict = (enum fw_verdict)g_host.policy[dir_slot(FW_DIR_FROM_UPLINK)];
     bool by_rule = false;
     for (unsigned i = 0; i < g_host.nrules; i++)
@@ -598,6 +713,7 @@ void fw_flush(void)
 {
     arch_irq_state_t s = spin_lock_irqsave(&g_fw_lock);
     memset(g_flows, 0, sizeof(g_flows));
+    g_host_last = NULL;
     for (unsigned i = 0; i < FW_MAX_GUESTS; i++)
         if (g_guests[i].attached)
             guest_reset(&g_guests[i], g_guests[i].ip, g_guests[i].gateway);
