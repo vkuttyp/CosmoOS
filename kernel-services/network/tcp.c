@@ -1456,6 +1456,30 @@ static struct tcp_syn_entry *syncache_find(struct tcp_pcb *l, const struct netad
     return NULL;
 }
 
+/*
+ * The SYN-ACK for a half-open was refused by the firewall's OUTPUT chain.
+ * This is the one refusal with nothing to tell: a passive open's half-open
+ * lives here and not in a pcb -- the child is created ESTABLISHED when the
+ * ACK completes -- so there is no connection to abort and no caller to
+ * report to, the listener's application never having heard of it. What is
+ * left is to stop holding state for a connection the machine has decided
+ * not to answer: the entry goes now instead of expiring in
+ * TCP_SYNCACHE_TTL_NS, since it cannot be completed while the rule stands
+ * (the completing ACK would earn a SYN-ACK the chain refuses again).
+ */
+static void syncache_refused(struct tcp_pcb *l, const struct netaddr *local, const struct netaddr *remote)
+{
+    arch_irq_state_t s = spin_lock_irqsave(&l->lock);
+    if (l->state == TCP_LISTEN && l->syncache) {
+        struct tcp_syn_entry *e = syncache_find(l, local, remote, clock_now_ns());
+        if (e) {
+            e->ts_ns = 0;
+            STAT(syn_refused);
+        }
+    }
+    spin_unlock_irqrestore(&l->lock, s);
+}
+
 /* Listener lock held. A free or expired slot in the probe range, or NULL. */
 static struct tcp_syn_entry *syncache_alloc(struct tcp_pcb *l, const struct netaddr *local,
                                             const struct netaddr *remote, uint64_t now)
@@ -1775,15 +1799,21 @@ void tcp_input(struct netif *nif, struct mbuf *m, const struct ipv4_hdr *ip4, co
     pcb->segs_in++;
 
     if (pcb->state == TCP_LISTEN) {
+        struct tcp_pcb *listener = pcb;
         struct tcp_pcb *child = listen_input(pcb, &g, &b, &wake_listener);
         spin_unlock_irqrestore(&pcb->lock, s);
-        pcb_put(pcb);
         if (child == NULL) {
             m_freem(m);
-            batch_send(&b);
+            /* The listener's reference is held across the flush, so a
+             * refused SYN-ACK can be traced back to the half-open it was
+             * built for. */
+            if (batch_send(&b) == -EPERM)
+                syncache_refused(listener, &g.dst, &g.src);
+            pcb_put(listener);
             sock_wake_after(wake_listener);
             return;
         }
+        pcb_put(listener);
         pcb = child;
         s = spin_lock_irqsave(&pcb->lock);
         pcb->segs_in++;
