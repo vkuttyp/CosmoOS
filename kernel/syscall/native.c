@@ -180,25 +180,27 @@ static int64_t sys_thread_create(struct syscall_args *a)
         return -EFAULT;
     if (req.flags != 0 || req.reserved != 0 || req.entry == 0 || req.stack_top == 0)
         return -EINVAL;
-    if (req.stack_top % 16u || req.stack_top <= ARCH_THREAD_RET_BYTES)
+    if (req.stack_top % 16u || req.stack_top <= ARCH_THREAD_TOP_BYTES)
         return -EINVAL;
     if (req.clear_tid % 4u)
         return -EINVAL;
     if (req.clear_tid && !user_range_ok(req.clear_tid, 4))
         return -EFAULT;
 
-#if ARCH_THREAD_RET_BYTES
-    /* The return slot the entry contract counts on. Written before
-     * anything is linked, because an aligned stack_top can still be
-     * unmapped or read-only and a failure here must leave nothing
-     * behind. */
+    /* The top of the stack: x86-64's return slot, and on every
+     * architecture the write that proves the stack is really there. Done
+     * before anything is linked, because an aligned stack_top can still be
+     * unmapped or read-only and a failure here must leave nothing behind.
+     * Uniform across architectures deliberately: a validation that one
+     * architecture performed and the other did not would let a program
+     * that only runs on one create a thread doomed to fault on its first
+     * push. */
     {
-        uint64_t ret = 0;
-        uint64_t at = req.stack_top - ARCH_THREAD_RET_BYTES;
-        if (!user_range_ok(at, ARCH_THREAD_RET_BYTES) || copy_to_user(at, &ret, ARCH_THREAD_RET_BYTES))
+        uint64_t top = 0;
+        uint64_t at = req.stack_top - ARCH_THREAD_TOP_BYTES;
+        if (!user_range_ok(at, ARCH_THREAD_TOP_BYTES) || copy_to_user(at, &top, ARCH_THREAD_TOP_BYTES))
             return -EFAULT;
     }
-#endif
 
     struct arch_user_regs regs;
     arch_user_regs_init_thread(&regs, (uintptr_t)req.entry, (uintptr_t)req.arg, (uintptr_t)req.stack_top);

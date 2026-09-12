@@ -109,6 +109,9 @@ ls /boot/tests/hv/guest_offspin.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe &
 # harmlessly. It is a demonstration, not a gate -- el2-guest-idreg is the
 # model's automated regression test, and it needs no Image.
 ls /boot/tests/hv/Image > /tmp/shtest/linux.probe 2>&1 && vmctl run --machine -m 256 --append "earlycon=pl011,0x09000000 console=ttyAMA0 loglevel=8 nokaslr panic=-1" /boot/tests/hv/Image
+# Native threads and the futex, which no kernel self-test can reach: a
+# self-test cannot create a *user* thread (docs/kernel/process/testing.md).
+/boot/tests/native/thrtest || FAILS=1
 vmctl info
 rm -r /tmp/shtest || FAILS=1
 sh -c "exit $FAILS" && echo "SHTEST: PASS" || echo "SHTEST: FAIL $FAILS"

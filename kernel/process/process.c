@@ -13,6 +13,8 @@
 #include <kernel/utsns.h>
 #include <kernel/percpu.h>
 #include <kernel/pmm.h>
+#include <kernel/futex.h>
+#include <kernel/uaccess.h>
 #include <kernel/process.h>
 #include <kernel/random.h>
 #include <kernel/sched.h>
@@ -801,11 +803,32 @@ void process_exit(int status)
     thread_exit(status);
 }
 
+/*
+ * The contract of thread.clear_child_tid, for whoever set it: the word is
+ * zeroed and one waiter woken when the thread exits, which is the whole of
+ * joining -- read the word, and wait on it while it is non-zero. Both
+ * doors set the field (SYS_thread_create's clear_tid, and Linux's
+ * CLONE_CHILD_CLEARTID and set_tid_address), so the work is generic; it
+ * lived in the Linux personality's thread_exit hook until a native thread
+ * needed it and no one woke its joiner.
+ */
+static void thread_clear_tid(struct thread *t)
+{
+    uint64_t addr = t->clear_child_tid;
+    if (addr == 0 || t->proc == NULL || t->proc->space == NULL)
+        return;
+    t->clear_child_tid = 0;
+    uint32_t zero = 0;
+    if (copy_to_user(addr, &zero, sizeof(zero)) == 0)
+        futex_wake(t->proc->space, addr, 1);
+}
+
 void process_thread_exit(int status)
 {
     struct thread *self = thread_current();
     struct process *p = self->proc;
     KASSERT(p != NULL);
+    thread_clear_tid(self);
     if (p->pers->thread_exit)
         p->pers->thread_exit(self);
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);

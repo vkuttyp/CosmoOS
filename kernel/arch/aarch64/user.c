@@ -104,7 +104,9 @@ void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintp
     memset(r, 0, sizeof(*r));
     r->pc = entry;
     r->x[0] = arg;              /* AAPCS: the first argument */
-    r->sp = sp;                 /* 16-byte aligned, as AAPCS requires */
+    r->sp = sp;                 /* 16-byte aligned, as AAPCS requires: the word the
+                                   caller zeroed below it is the thread's own stack,
+                                   there to prove the mapping exists */
     r->x[30] = 0;               /* the link register: a return jumps to 0 */
     arch_user_regs_sanitize(r);
 }

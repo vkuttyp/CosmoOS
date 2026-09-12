@@ -1978,5 +1978,4 @@ const struct personality personality_linux = {
     .always_allowed = linux_always_allowed,
     .nr_always_allowed = sizeof(linux_always_allowed) / sizeof(linux_always_allowed[0]),
     .signal_frame = linux_signal_frame,
-    .thread_exit = linux_thread_exit,
 };

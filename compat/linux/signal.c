@@ -300,18 +300,6 @@ int linux_sigtramp_map(struct process *p)
     return vm_user_protect(p->space, LX_SIGTRAMP, PAGE_SIZE, VM_PROT_RX);
 }
 
-/* set_tid_address / CLONE_CHILD_CLEARTID: zero the word, wake one waiter. */
-void linux_thread_exit(struct thread *t)
-{
-    uint64_t addr = t->clear_child_tid;
-    if (addr == 0 || t->proc == NULL || t->proc->space == NULL)
-        return;
-    t->clear_child_tid = 0;
-    uint32_t zero = 0;
-    if (copy_to_user(addr, &zero, sizeof(zero)) == 0)
-        futex_wake(t->proc->space, addr, 1);
-}
-
 /* --- system calls -------------------------------------------------------------- */
 
 static bool valid_sig(int sig)

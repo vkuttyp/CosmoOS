@@ -190,6 +190,7 @@ MUSL_MARKER = r"^hello from musl on Linux x86_64 \(pid \d+\)$"
 # sample guest from the shell.
 HVTEST_MARKERS = [
     r"^HVTEST: PASS$",
+    r"^THREADTEST: PASS$",
 ]
 # Machine mode (docs/audit/next-subsystem-machine.md): vmctl builds the
 # device tree, loads by the Image header, answers PSCI and runs two vCPUs
