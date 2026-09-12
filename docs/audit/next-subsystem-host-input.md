@@ -119,8 +119,9 @@ guests (claimed by `nat_in` first), replies to the host's own outbound flows
 (TCP segments of its connections under any policy; UDP replies to its
 sockets under the default ACCEPT, and to *connected* UDP sockets under any
 policy — a reply to an unconnected socket matching an operator's DROP rule
-is dropped, as the design and Risks sections state), and ICMP echo to the
-host. The NIC's address is a static QEMU default (`netif.c`
+was dropped in this unit, as the design and Risks sections state, and is
+admitted by the next one from the flow the host's own send records), and
+ICMP echo to the host. The NIC's address is a static QEMU default (`netif.c`
 `netif_autoconfig`; "DHCP is a later unit"), so no DHCP client needs a hole.
 
 ## Why it matters
@@ -307,8 +308,12 @@ step protects:
    - **UDP** delivers only to a socket **connected** to the sender; a
      datagram to an unconnected or listening socket is freed silently, and
      no ICMP port-unreachable is sent (`udp.c:276`).
-   - **ICMP** and anything else: a DROP is a plain drop (there is no
-     connection to deliver to).
+   - **ICMP**, as this unit shipped it: a DROP was a plain drop, there
+     being no connection to deliver to. The host-state unit that followed
+     gave ICMP a consumer to ask — `icmp_input`'s TCP-confirmed
+     path-MTU check — so today a dropped ICMP message is delivered
+     `M_FW_QUIET` like TCP and UDP and freed there unless that check claims
+     it; "anything else" is now only a protocol the stack does not demux.
    The firewall thus never models TCP state, malformed segments are
    rejected by the same validation that protected the connection before —
    only now without a reply — and a DROP means **silence** by construction.
@@ -322,28 +327,43 @@ step protects:
    `FROM_UPLINK`, proto, **source prefix**, destination prefix and selector
    (port, or ICMP type as before).
 
-On `FW_DROP`, a TCP or UDP datagram is marked `M_FW_QUIET` and continues to
-the demux (`ip_stats.hin_quiet`); anything else is freed
-(`ip_stats.hin_filtered`).
+On `FW_DROP`, **as this unit shipped it**, a TCP or UDP datagram was marked
+`M_FW_QUIET` and continued to the demux (`ip_stats.hin_quiet`) while
+anything else was freed (`ip_stats.hin_filtered`). The host-state unit that
+followed (`next-subsystem-host-state.md`) widened the first half to **every**
+ICMP message, so today `hin_quiet` covers ICMP as well and `hin_filtered`
+counts only a protocol the stack does not demux at all.
 
-**What quiet delivery cannot recognise, and why that is acceptable here.** A
-reply to an *unconnected* UDP socket (a client that `sendto`s without
-connecting) and every ICMP message have no connection or connected peer to
-deliver to under `M_FW_QUIET`, so a DROP rule that matches them drops them.
-With the default ACCEPT this costs nothing; an operator who writes a broad
-UDP DROP (`udp any any`) would drop replies to the host's unconnected UDP
-sockets — documented, with the guidance that UDP rules name listener ports
-(or a source prefix), and with reply state for unconnected UDP and for ICMP
-named as a later unit. ICMP echo to the host is gated by type as before (type
-8); the host's own ping replies (type 0) pass the default.
+**What quiet delivery could not recognise on its own, and why that was
+acceptable here.** A reply to an *unconnected* UDP socket (a client that
+`sendto`s without connecting) and every ICMP message had no connection or
+connected peer to deliver to under `M_FW_QUIET`, so a DROP rule that matched
+them dropped them. With the default ACCEPT that cost nothing; an operator who
+wrote a broad UDP DROP (`udp any any`) would have dropped replies to the
+host's own unconnected UDP sockets — documented in this unit, with the
+guidance that UDP rules name listener ports (or a source prefix), and with
+reply state for unconnected UDP and for ICMP named as the next unit. ICMP
+echo to the host is gated by type (type 8); the host's own ping replies
+(type 0) pass the default.
+
+**That next unit was built, and this paragraph no longer describes the
+machine** (`next-subsystem-host-state.md`): the host's own sends are recorded
+at `ipv4_output`, so the reply to an unconnected socket and the reply to its
+own echo request are admitted by state *before* any rule is read, and ICMP
+is delivered quiet to `icmp_input` rather than freed. What remains true of
+this unit is the mechanism it built — the flag, the rules and the default —
+which that state sits in front of.
 
 ### 5. The default: ACCEPT, and why
 
 `FROM_UPLINK` default **ACCEPT**. This is the first chain where default DROP
 would break the machine rather than a guest: the harness's listeners, DNAT'd
 connections' host-side handling, ICMP echo, and — with reply state only for
-connected UDP sockets — every reply to an unconnected UDP socket of the host
-itself. A host firewall's first unit ships the
+connected UDP sockets, which is what this unit had — every reply to an
+unconnected UDP socket of the host itself. (The host-state unit that
+followed records the host's own sends, so a hardened default no longer costs
+those replies: flipping it is now an operator's decision rather than a
+broken machine.) A host firewall's first unit ships the
 mechanism and the one topology fix that needs no policy; the operator
 hardens with `FROM_UPLINK … DROP` rules by source/port, or flips the default
 to DROP and allows explicitly (a hardened host adds `tcp any :22 ACCEPT from
@@ -366,7 +386,8 @@ refuse a snapshot whose version is not the one it speaks.
 
 - **Reply state for unconnected UDP and for ICMP** (quiet delivery reaches a
   *connected* UDP socket; an unconnected client socket's replies and ICMP
-  replies still take the rules, which the default ACCEPT admits).
+  replies still take the rules, which the default ACCEPT admits). **Done in
+  the next unit**, `next-subsystem-host-state.md`.
 - **Per-interface host chains** (all real links share `FROM_UPLINK` here).
 - **An OUTPUT chain** for the host's egress; rate-limit/log targets; IPv6.
 - **DHCP client protection** — moot until the host has a DHCP client.
@@ -419,7 +440,9 @@ refuse a snapshot whose version is not the one it speaks.
   non-loopback ingress (before either chain; `ip_stats.rx_offlink`); the
   second call site (uplink ingress): on DROP a TCP/UDP datagram is marked
   `M_FW_QUIET` and continues to the demux (`ip_stats.hin_quiet`), anything
-  else is freed (`ip_stats.hin_filtered`).
+  else is freed (`ip_stats.hin_filtered`) — widened by the host-state unit
+  to mark ICMP too, leaving `hin_filtered` for a protocol the stack does not
+  demux.
 - `kernel/include/uapi/cosmo/netctl.h` — version 4: `DIR_FROM_UPLINK`,
   `src_addr/src_prefix` in the filter command and rule records,
   `policy_from_uplink`, the grown `SNAPSHOT_MAX`.
@@ -551,7 +574,10 @@ world port.
   output is lost to the quiet batch.
 - **UDP and ICMP are per datagram**: a UDP DROP rule drops every matching
   datagram; an `icmp type 8 DROP` drops an echo request and no reply comes
-  back, while a type-0 datagram to the host passes the default.
+  back, while a type-0 datagram to the host passes the default. (As of the
+  host-state unit the drop happens in `icmp_input` under `M_FW_QUIET`, so
+  the test counts `icmp_quiet_dropped` where it first counted
+  `hin_filtered`; no reply, then or now.)
 - **Off-link: a link's datagrams are for that link's address**: with no
   rule installed, a datagram from the world to guest A's gateway `:53` is
   dropped with `rx_offlink` and no host-chain counter moves, while the same
@@ -648,7 +674,9 @@ tuning.
 
 - **A broad UDP/ICMP DROP breaks the host's own replies.** No reply state
   in this unit. Mitigation: default ACCEPT; documented guidance (name
-  listener ports or a source prefix); reply state named as the next unit.
+  listener ports or a source prefix); reply state named as the next unit —
+  **which is now built** (`next-subsystem-host-state.md`), so a broad DROP
+  no longer touches a reply to something the host itself sent.
 - **The off-link invariant surprises someone reaching a guest gateway, or
   `127.0.0.1`, from the LAN.** There is no legitimate case — a gateway
   address exists for the guest's link only, and a loopback binding *means*
@@ -689,8 +717,10 @@ tuning.
   the defaults differ (guest DROP with seeds; world ACCEPT).
 - **Default DROP with seeded rules, as INPUT did.** Rejected: the host's
   services from the uplink are not a small known set, and without UDP/ICMP
-  reply state a default DROP breaks the host's own flows; ACCEPT-then-harden
-  is what every host firewall ships first.
+  reply state a default DROP broke the host's own flows; ACCEPT-then-harden
+  is what every host firewall ships first. (The reply state arrived in the
+  next unit; the default is still ACCEPT, because "which services the world
+  is offered" remains the operator's decision, not a default's.)
 - **A separate control node (`/dev/net/hostctl`).** Rejected: the existing
   channel's shape, dispatch, versioning and listing carry the host object
   unchanged under the `0` sentinel; a second node duplicates all of it.

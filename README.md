@@ -1291,8 +1291,47 @@ See [docs/development.md](docs/development.md).
   no budget or keepalive side effect, dup-ACK/window-update/data/FIN output
   kept, a valid reset applied, ICMP by type, off-link drops, DNAT never
   re-gated, scope refusals, the listing round trip) with fourteen bug-proofs.
-  Reply state for unconnected UDP and ICMP, per-interface host chains, an
+  Its reply state is done (its own entry below); per-interface host chains, an
   OUTPUT chain, rate-limit/log targets and IPv6 are later units.
+- **The host's own flows: reply state for the host chain (done):**
+  `docs/audit/next-subsystem-host-state.md`,
+  `docs/kernel-services/network/design.md` ("The host's own flows"). The
+  host chain shipped with default **ACCEPT** because it had no reply state,
+  and three of the host's own facilities depended on that: the **DNS proxy**
+  (its upstream socket is unconnected *by design* so it can authenticate the
+  sender, so quiet delivery's connected-socket rule freed the answer and
+  every guest would have lost DNS under a hardened host), the host's **own
+  pings**, and its **TCP path-MTU discovery** (the Need-Fragmentation errors
+  were freed before `icmp_needfrag` saw them, blackholing large segments).
+  This is that state, in the shape the stack already had: `fw_host_record`
+  records the host's **UDP sends and ICMP echo requests** in the FORWARD
+  chain's flow table at **`ipv4_output`** -- the one door every
+  host-originated datagram passes and no forwarded one does -- when the
+  egress is a real, non-guest link, and `fw_host_verdict` consults that
+  state **before its rules**, admitting the **reverse** tuple as the FORWARD
+  chain does. **TCP is deliberately not recorded** (quiet delivery already
+  admits its segments through the connection), so `g_fw_lock` stays off the
+  uplink's hottest send path, and a one-entry cache refreshes the repeated
+  tuple without walking the table. The table is split by share --
+  `FW_FLOW_GUEST_POOL` 256 (the guests' 8 x 32, unchanged) plus
+  `FW_FLOW_QUOTA_HOST` 64 -- so a flood starves only its own initiator, and a
+  send is never refused for the firewall's sake. **Exactly one tuple** is
+  opened per flow and intent is not modelled: a second datagram on it inside
+  the window is admitted too, the socket's own validation being the second
+  line. **ICMP is the consumer's decision, not the firewall's**: under a DROP
+  every ICMP message is delivered `M_FW_QUIET` to `icmp_input`, the single
+  dispatch point, which runs *only* the Need-Fragmentation path -- and that
+  path already accepts nothing TCP does not confirm (RFC 5927) -- freeing
+  everything else (`icmp_quiet_dropped`) without building a reply or
+  spending the host-wide echo-reply budget. No ABI change and nothing to
+  configure: state is earned by what the host sends. Proven by
+  `net-hoststate` (an unconnected client's reply, one tuple and its three
+  negatives, the host's ping, a refused echo request answering nothing,
+  path-MTU discovery under DROP, the DNS proxy end to end, refresh and
+  expiry, forwarded and loopback sends recording nothing, the share, and the
+  hardened default) with thirteen bug-proofs. Reply state for a UDP flow's
+  ICMP errors, a listing of live flows, per-interface host chains, an OUTPUT
+  chain, rate-limit/log targets and IPv6 are later units.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's
@@ -1303,7 +1342,11 @@ See [docs/development.md](docs/development.md).
   and HID are done). The AArch64 follow-ups the EL2 backend left --
   GICv3, ASIDs, FP/SIMD at EL0 -- are done, and the hypervisor has gone
   past them: a guest has a virtual CPU interface, a timer and a
-  distributor. What it lacks next is named in the open report below.
+  distributor, a console, a machine with a device tree, a disk, a network
+  interface and a route to the world -- and it boots Linux. Every §68
+  report named below has been built; what the hypervisor lacks next is
+  named in those units' own follow-ups, and one known defect is listed at
+  the end of this entry.
   Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
   shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
@@ -1351,10 +1394,38 @@ See [docs/development.md](docs/development.md).
   drops inter-guest traffic by default and lets a rule open it (built); and
   `-input-chain.md`, its second chain -- which of the host's own services a
   guest may reach, default-deny with the tap's DNS and echo seeded as rules
-  (built); and `-host-input.md`, its third -- which of the host's services
+  (built); `-host-input.md`, its third -- which of the host's services
   the world may reach, default-accept with a quiet drop and the off-link
-  invariant (built). The named next steps are the follow-ups these left (an
-  OUTPUT chain, reply state for unconnected UDP/ICMP, hairpin/NAT-reflection,
-  IPv6 DNAT, an L2 bridge, the tap's other settings on
-  the control channel) and, on the guest itself, the `QEMU_MEM=2G`
-  reproduction reaching the real world. Design documents first, one subsystem at a time.
+  invariant (built); and `-host-state.md`, the state that makes the third
+  usable -- the host's own UDP sends and echo requests recorded where they
+  leave, so a hardened default no longer costs the machine its DNS, its
+  pings or its path-MTU discovery (built).
+
+  The named next steps are the follow-ups these left. On the filter: an
+  **OUTPUT chain** for the host's own egress (and, with it, filtering the
+  host's replies to guests), **per-interface host chains** (all real links
+  share one chain today), **rate-limit and logging targets**, **IPv6
+  filtering**, and full TCP state tracking. On NAT and the bridge:
+  **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
+  **tap's remaining settings** on `/dev/net/tapctl`. On the state: **ICMP
+  errors for a UDP flow** (no consumer exists yet) and a **listing of live
+  flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
+  reproduction reaching the real world. And one **known defect**, found
+  while diagnosing a CI failure rather than by a unit. `vmctl`'s machine
+  mode runs a guest's vCPUs in one thread, a tick each, and it *does* give a
+  vCPU started with `CPU_ON` its own turn: the loop takes a turn boundary
+  after every PSCI call for exactly that reason, and the comment there
+  records the first boot of this mode powering off too early. What it does
+  not bound is that turn's *length*. The secondary gets one tick, nothing
+  revisits it, and `SYSTEM_OFF` is honoured the moment the first vCPU asks
+  -- so when the tick expires before the secondary reaches its first UART
+  store, which a slow host makes likely, the machine powers off and that
+  output is lost. That is the most probable cause of the intermittent loss
+  of the `cpu1: up ctx=1234cafe` line the boot test expects: the guest's
+  other three machine-mode lines arrive, the in-kernel `el2-guest-psci`
+  self-test passes in the same boot, and the failures track the slowest
+  runners. The gap is fairness at the power-off boundary -- drain the
+  runnable vCPUs before honouring it, or leave a newly started vCPU's first
+  turn untimed -- and closing it is its own change, with its own way to
+  reproduce the slow tick, not a rerun. Design documents first, one subsystem at a
+  time.

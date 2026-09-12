@@ -431,7 +431,8 @@ releases it; two data segments with an unchanged ACK are delivered and
 acknowledged together; the peer's FIN is acknowledged and the accepted socket
 reads EOF. A valid reset (`seq == rcv_nxt`) from a peer under a DROP rule
 tears C2 down (`-ECONNRESET`, `rsts_in`) and emits nothing. (5) ICMP by type:
-an `icmp type 8` DROP frees an echo request (`hin_filtered`; no reply), a
+an `icmp type 8` DROP drops an echo request (since the host-state unit,
+delivered quiet and freed by `icmp_input`: `icmp_quiet_dropped`; no reply), a
 type-0 datagram passes the default, and without the rule echo is answered.
 (6) Off-link, with no rule installed: the world's UDP to guest A's gateway
 `:53` and to `127.0.0.1:7002` are dropped `rx_offlink` (the loopback listener
@@ -477,9 +478,104 @@ never rises and the world's datagram reaches the loopback-bound listener); and
 the host verdict moved before `nat_in` (the DNAT'd SYN then drops under the
 host default DROP — the proof the INPUT unit could not run).
 
+**`net-hoststate`** (the host's own flows): an "uplink" tap as
+`net-hostinput` builds one with two world addresses ARP-seeded, a guest tap
+with its own `tapsvc` for the DNS leg, and two guests through `/dev/net/tap`
+for the guest pool; host sockets bound but never connected. The world's
+traffic is closed by a **sourced DROP rule** covering the test's subnet
+rather than by the machine-wide default, so that a failing assertion cannot
+harden the real uplink for every test that follows; the hardened *default*
+is exercised at the end, with its verdicts taken and the default restored
+*before* anything is asserted. (1) An unconnected client's reply survives:
+the host's `sendto` to `world:5300` is read back on the tap and recorded
+(`hin_flow_new` rises by exactly one), and the reply on that tuple is
+delivered to the socket with no rule anywhere (`hin_accept_established`),
+while a datagram from another port at that peer, from another peer, or to
+another local port is freed (`udp quiet_dropped`) and no socket sees it.
+(1b) A refused send opens nothing: an oversized datagram, rejected with
+`-EMSGSIZE` after its tuple was read, records no flow and leaves its reverse
+tuple closed. (2) One tuple, and no notion of intent: a *second* unsolicited datagram on
+the open tuple is admitted too (the socket's validation is the second line),
+while the world initiating to a port the host never sent from is freed; and
+a datagram carrying the host's *own* address as its source — the only thing
+a forward-direction match could be on a real link — is dropped as a martian
+(`rx_bad_header`) before any chain, no `hin_*` counter moving, which is why
+the state step admits on the reverse match alone.
+(3) The host can ping: its `icmp_send_echo` is recorded by identifier, the
+reply reaches the echo hook with that identifier and source, and a reply
+carrying another identifier is freed (`icmp_quiet_dropped`, no hook).
+(4) An echo *request* is a request: quiet delivery hands it to `icmp_input`,
+which answers nothing (`icmp_quiet_dropped`, nothing read back) and leaves
+`icmp_echo_rcvd`/`icmp_echo_replied` untouched — the host-wide echo-reply
+budget is not spent on a refused probe. (5) Path-MTU discovery survives: the
+host connects outbound (PR #107's `SYN_SENT` acceptance point admits the
+SYN+ACK) — and `hin_flow_new` does *not* move, because TCP is not recorded —
+sends 1200 bytes, and the router's Need-Fragmentation quoting that segment,
+delivered quiet, is consumed (`tcp`/`ip pmtu_updates` rise) and the segment
+comes back inside the new MTU (≤ 536 bytes, same sequence); one quoting a
+tuple with no connection still *reaches* the consumer
+(`icmp_needfrag_rcvd` rises — the firewall admitted it to the layer that can
+tell) and is refused there (`pmtu_updates` unmoved); a port-unreachable
+quoting the connection is freed (`icmp_quiet_dropped`, no consumer).
+(6) The DNS proxy end to end: a guest's query is relayed out the uplink from
+the proxy's **unconnected** socket (recorded, `hin_flow_new`), the
+upstream's answer to that port is admitted by state
+(`hin_accept_established`), and the guest reads the answer with its own id
+and the A record — through a DROP that would otherwise free it, with the
+proxy unchanged. (7) A send on a live flow refreshes rather than re-records
+(`hin_flow_new` and the live-flow count unmoved); `fw_age` past the idle
+timeout closes the tuple (the next reply is freed) and a fresh send opens it
+again. (8) Neither a forwarded guest flow nor a loopback send is the host's:
+a masqueraded guest→world datagram (read back masqueraded on the uplink) and
+a loopback send both leave `hin_flow_new` unmoved. (9) The share is the
+host's own: `FW_FLOW_QUOTA_HOST` distinct flows record and the live count
+equals the share, the next one does not (`hin_flow_drop_full`) yet its
+datagram still leaves (read back), and a guest-to-guest flow still records
+(`flow_new`) with the host's share full. (10) State beats the hardened
+default too, not only a rule.
+
+Proved by reintroducing: the state step removed from `fw_host_verdict` (the
+unconnected socket's reply then drops — and with it the proxy's answer);
+a peer match loosened to the address alone (the same-peer-other-port
+datagram is then admitted); the local-port match dropped (the datagram to
+another local port is then admitted); the echo identifier ignored (the
+wrong-identifier reply then fires the hook); the flow recorded before `output_on` accepts the
+datagram (the oversized send then opens a tuple); the record moved from
+`ipv4_output` into `output_on`, which shows at that same assertion and
+behind it puts the masqueraded guest flow in the host's share; the real-link egress test dropped (a loopback send then
+records); TCP recorded as well (the outbound connection then records a flow
+on the uplink's hottest send path); refresh treated as creation
+(`hin_flow_new` rises on every send and one client fills the share); the
+one-entry cache used without validating the tuple (64 distinct flows then
+collapse into one refreshed entry); the host's share unbounded (the flow
+past it records and the guests' pool shrinks); ICMP freed at the IP layer
+instead of delivered quiet (the Need-Fragmentation then never reaches TCP
+and the path MTU never moves); and `icmp_input` ignoring the flag (the
+refused echo request is then answered).
+
 **`net-input`** (adjusted): its "guest → the host's uplink address" case is
 now dropped by the off-link invariant (`rx_offlink`) before any chain, not by
 INPUT's default (`in_drop_default`).
+
+**`net-dnat` and `net-tapctl`** (races fixed with the host-state unit): two
+assertions in these tests were written without a barrier against the network
+worker, and the host-state unit's timing perturbation turned both into
+intermittent CI failures — on the GIC-variant boot, where the same tree
+passed the default one. They are fixed rather than retried. `net-dnat` aged
+the NAT table while the flood it had just injected could still be draining
+(`dnat_drop_full` rising says *some* packet was refused, not that all were
+processed), so an entry created behind `nat_age` survived it; it now waits
+for translations plus refusals to account for every injected datagram, and
+asserts that sum. `net-tapctl` asserted that a client SYN is *not* forwarded
+to the guest without first draining the guest tap, so any frame an earlier
+step left queued failed it immediately (30 ms, not the 500 ms timeout); it
+now drains before injecting, which leaves the assertion's own meaning
+untouched. The host-chain and host-state tests' *positive* waits also became
+patient (`HIN_TRIES`): those loops return as soon as what they wait for
+arrives, so a generous budget costs nothing when the stack works and stops a
+loaded runner from failing an assertion that would have passed. Negative
+waits keep their short budgets, since they must not wait for something that
+should never come.
 
 **`net-tapctl`, `net-firewall`, `net-input`** (adjusted for version 4): the
 snapshot buffers and lengths count one more policy record (the host's) and
