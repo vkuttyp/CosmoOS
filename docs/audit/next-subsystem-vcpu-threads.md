@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Three things in the first draft of this report were wrong, and review
+**Four things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -40,7 +40,13 @@ vCPU the tree promises" and "`CPU_ON` starts a thread", which would start
 a secondary twice or start it before PSCI asked; and test 4 asserted
 something the implementation it replaces already satisfies. Each is
 answered where it appears, and the third is answered by changing what the
-test measures.
+test measures. The fourth was a **deadlock in shutdown**: threads created
+parked have to be woken *and* told to quit, because the kick only reaches
+a vCPU inside the kernel's run loop and a secondary that was never
+`CPU_ON`ed is parked in userland -- so `live` would never reach zero on
+the most ordinary path there is, a guest that starts one secondary of four
+and powers off. The park is now a three-state word, which is also what
+makes the supervisor's `live == 0` mean "every thread has returned".
 
 ## Problem
 
@@ -168,14 +174,48 @@ The parked word is the thread's own, so a `CPU_ON` for a vCPU already
 running is the PSCI `ALREADY_ON` it is today, decided by the owner's
 `running[]` rather than by whether a thread exists.
 
+**The park has two exits, not one**, and this is the correction that makes
+shutdown terminate. The word is a state, not a flag:
+
+| state | meaning |
+| --- | --- |
+| `VCPU_PARKED` (0) | created, never started; waiting to be told which |
+| `VCPU_RUNNING` (1) | `CPU_ON` wrote the entry and woke it; run the guest |
+| `VCPU_QUIT` (2) | leave without running: the machine is stopping |
+
+A thread waits while the word is `PARKED`, and on waking does what the
+word now says. **Shutdown writes `QUIT` to every thread's word and wakes
+it**, *and* kicks every vCPU that is actually in the guest. Both are
+needed and neither is sufficient:
+
+- The **kick** reaches a thread inside `cosmo_vcpu_run` -- it is an IPI to
+  the host CPU the vCPU is loaded on, and it does nothing for a thread
+  that is not running one.
+- The **`QUIT` write and wake** reaches a thread still parked on its futex,
+  which a secondary that was never `CPU_ON`ed will be forever. Without it
+  that thread has no path out, `live` never reaches zero, and the
+  supervisor waits for a shutdown that cannot complete -- which is a hang
+  in the *owner*, on the ordinary path where a guest starts one secondary
+  of four and powers off.
+- A thread that has been released but has not yet entered its first run is
+  covered by the stop flag being **sticky**: it enters, sees the flag, and
+  leaves with `STOPPED` without executing a guest instruction.
+
+`live` therefore counts **every thread created**, not every thread
+running, and each decrements it exactly once on the way out by whichever
+of the three paths it took. That makes the supervisor's `live == 0` mean
+what it has to mean -- every thread has returned -- so the joins that
+follow always reap rather than wait.
+
 `COSMO_VCPU_RUN_ONE_TICK` stays in the ABI -- the kernel's own tests use
 it and it is what `-ETIMEDOUT` is built on -- but the owner stops passing
 it. `fresh[]`, `off_pending`, `off_grace`, `MACHINE_OFF_GRACE_TURNS` and
 `machine_fresh_sibling` all go, along with the PSCI turn boundary.
 
 `CPU_ON` releases a parked thread rather than marking a slot runnable.
-`SYSTEM_OFF` stops the machine: the asking vCPU's thread returns, the
-others are **kicked**, and the main thread reaps them once its drain loop
+`SYSTEM_OFF` stops the machine: the asking vCPU's thread returns, every
+other thread is told to `QUIT` **and** woken, every vCPU actually in a
+guest is **kicked**, and the main thread reaps them once its drain loop
 sees the live count reach zero. That is the honest PSCI shape -- a real
 `SYSTEM_OFF` does not wait -- and it is only implementable with the kick
 below.
@@ -238,7 +278,8 @@ across a system call that can block on the guest.** Concretely:
   for each thread: cosmo_thread_join(...)   /* returns at once: live == 0 */
   ```
 
-  `live` is the count of vCPU threads still running, decremented with
+  `live` is the count of vCPU threads **created** -- parked ones included,
+  for the reason the park's three states give above -- decremented with
   `__atomic_fetch_sub` and futex-woken by each thread as it leaves. The
   bounded wait is what keeps the ring drained while nothing exits; the
   wake is what stops the last drain from being a full interval late. The
@@ -306,8 +347,10 @@ keeps its meaning and its users.
    PSCI turn boundary deleted in the same commit -- they are one mechanism
    and half of it is not a state worth shipping. The main thread becomes
    the supervisor: drain, service the tap, wait on the live count.
-4. **`SYSTEM_OFF` kicks every other vCPU**, and the supervisor reaps them
-   when the count reaches zero.
+4. **`SYSTEM_OFF` sets every other thread to `QUIT` and wakes it, and
+   kicks every vCPU in a guest**, and the supervisor reaps them when the
+   count reaches zero. Both halves in one step: either alone leaves a
+   thread with no way out.
 5. **The tests**, then the bug-proofs.
 6. **The documents**, including the design document's own account of why
    the fairness rule existed, which becomes history rather than
@@ -365,7 +408,11 @@ keeps its meaning and its users.
    threads using one VM handle, plus the main thread reading the console
    through it, with no lost or duplicated handle operation.
 
-**Bug-proofs**: the kick's IPI not sent (the stop flag is set but a
+**Bug-proofs**: **`SYSTEM_OFF` kicking but not waking the parked threads**
+(a guest that starts one secondary of four and powers off leaves three
+threads parked forever, `live` never reaches zero, and the owner hangs --
+the boot's 180 s deadline again, on the most ordinary path there is, which
+is why this one is first); the kick's IPI not sent (the stop flag is set but a
 spinning vCPU never leaves, so `guest_offspin` hangs the boot -- the same
 180 s signature the bound's removal produced); the stop flag cleared by
 the kicker rather than the runner (a stop between runs is lost and the
