@@ -44,8 +44,14 @@ Five more differences, each found by running rather than reading:
 5. **`getcwd(NULL)` never needed fixing.** It `malloc`s per call and hands
    the buffer to its caller, so it has been safe since the allocator took
    its lock -- invariant L8 named it for two units after it stopped being
-   true. Only `strerror` had a shared buffer, which a `grep` for writable
-   statics in `libc/src` confirms was the only one.
+   true. Only `strerror` returned a pointer to a static, which is the
+   kind of shared state this invariant was about. **That is narrower than
+   "the only writable static in `libc/src`"**, which a later draft of this
+   claim said and review corrected: `atexit`'s table and the environment
+   are also process-global and unsynchronised. They are named as a gap in
+   `docs/libc/invariants.md` and in `cosmo/thread.h`, and they are process
+   state rather than per-thread state, which is why moving `strerror`
+   behind the thread pointer did nothing for them.
 
 **Review then found three defects in the built code, and a fourth in the
 build that had been hiding them.** All three are in this section because

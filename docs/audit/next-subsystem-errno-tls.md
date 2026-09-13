@@ -309,20 +309,26 @@ decades, and nothing in this tree takes its address.
 > does not contradict the tree. **`getcwd(NULL)` never needed the
 > change** -- it `malloc`s per call and hands the buffer to its caller, so
 > it stopped being shared state when the allocator took its lock;
-> `strerror`'s was the only writable static in `libc/src`. And
+> `strerror`'s was the only libc function *returning a pointer to a
+> static* -- not the only writable static in `libc/src`, since `atexit`'s
+> table and the environment are still process-global and unsynchronised
+> (named as a gap in `docs/libc/invariants.md`). And
 > **`reserved[112]` is not a program's to use**, which the paragraph on
 > the block's layout below promised: on AArch64 the ELF ABI puts the
 > first `__thread` variable exactly there. `__thread` is how a program
 > gets per-thread storage now.
 
-`strerror`'s static buffer and `getcwd(NULL)`'s storage stay shared: both
-now *can* be fixed, and doing it here would be a second subsystem in one
-unit. `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
+`strerror`'s static buffer and `getcwd(NULL)`'s storage **stayed shared
+through this unit**: both became fixable here, and doing it here would
+have been a second subsystem in one unit. (`strerror`'s moved behind the
+thread pointer in the `__thread` unit; `getcwd(NULL)`'s turned out never
+to have needed it.) `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
 call after the first, since the cache is filled lazily) because the block has to carry something more than `errno` to justify
 128 bytes, and the tid is the field the threads unit already makes every
-thread know. Compiler `__thread` is not attempted: that needs `spawn` to
-honour `PT_TLS`, a real TCB layout and the linker's TLS relocations, and
-this design is deliberately the one that does not block it.
+thread know. Compiler `__thread` was **not attempted in this unit**: it
+needs a real TCB layout and the linker's TLS relocations, and this design
+is deliberately the one that does not block it. (It was built next, and
+needed no `spawn` change at all -- see the correction above.)
 
 ### The §70 gate
 

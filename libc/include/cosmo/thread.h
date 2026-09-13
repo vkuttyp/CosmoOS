@@ -15,12 +15,20 @@
  * block behind each thread's thread pointer (`cosmo/tcb.h`). A thread this
  * header creates has one before its first instruction.
  *
- * **Nothing in libc is still shared.** `strerror`'s buffer is
- * `_Thread_local`, and `getcwd(NULL)` never needed it -- it `malloc`s per
- * call and hands the buffer to its caller, so it stopped being shared
- * state when the allocator took its lock. A `grep` for writable statics
- * in `libc/src` is what says so, rather than a list kept by hand. A
- * program gets per-thread storage of its own with `__thread`
+ * What is still shared: **`atexit`'s table** (`g_atexit`, `g_natexit` --
+ * registering is an unsynchronised read-modify-write) and **the
+ * environment** (`environ`, and `setenv`/`unsetenv` reallocating it).
+ * Both are process-global and neither takes a lock, so call them from one
+ * thread -- in practice before the others start, which is where a program
+ * registers its exit handlers and sets its environment anyway.
+ *
+ * No longer shared: `strerror`'s buffer is `_Thread_local`, and
+ * `getcwd(NULL)` never was -- it `malloc`s per call and hands the buffer
+ * to its caller, so it stopped being shared state when the allocator took
+ * its lock. Those two were the functions that returned a pointer to a
+ * static; the two above are process state, which is a different thing and
+ * is why fixing one did not fix the other. A program that wants
+ * per-thread storage of its own uses `__thread`
  * (`docs/audit/next-subsystem-pt-tls.md`).
  *
  * The warning that remains is about threads this header did *not* make.

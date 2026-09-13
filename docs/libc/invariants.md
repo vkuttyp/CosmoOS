@@ -116,9 +116,19 @@ library that provides it. `getcwd(NULL)` was already safe: it `malloc`s a
 fresh buffer per call and hands it to the caller, so once the allocator
 took its lock in the threads unit there was nothing shared left. This
 invariant went on naming it for two units afterwards, which is what an
-enumeration kept by hand does -- the list is now checked against
-`grep` for writable statics in `libc/src`, and `strerror`'s was the only
-one.
+enumeration kept by hand does -- the list is now checked against a
+`grep` for writable statics in `libc/src`.
+
+**What that `grep` actually says**, since a first draft of this paragraph
+read it too broadly and claimed `strerror`'s was the only writable static
+left. It was the only one of a particular kind: a function *returning a
+pointer to a static*, which is the kind `errno` and this invariant were
+about. The statics that remain fall in three groups. The allocator's
+`g_free` and stdio's `g_std`/`g_files` are behind `g_lock` and `g_io`.
+`tcb.c`'s `g_tls` is written once in `__libc_start`, before the process
+has a second thread, and read-only after. And `stdlib.c`'s `g_atexit`,
+`g_natexit`, `environ` and `g_env_owned` are **genuinely unsynchronised**
+-- see the gap below.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting `errno`, takes no libc lock, and maps its stacks
@@ -135,7 +145,19 @@ libc installing its own block, and the block sitting above the stack and
 freed with it. And step 17 for `__thread`: a `.tdata` variable read back as
 its initialiser in every thread, a `.tbss` array zero in a new one, an
 over-aligned variable aligned, and `strerror` of an unknown code answering
-each thread its own. **No gap left in this invariant.**
+each thread its own.
+
+**One gap is left, and it is not the one this invariant was about.**
+`atexit` does `g_atexit[g_natexit++] = fn`, an unsynchronised
+read-modify-write on process-global state, and `setenv`/`unsetenv`
+reallocate `environ` with `g_env_owned` tracking ownership -- so two
+threads registering handlers, or one setting the environment while
+another reads it, race. Nothing in the tree does either from a second
+thread: handlers and environment are set before threads start, which is
+the normal shape of both. It is named here rather than fixed because it
+is process state and not per-thread state, and this invariant is about
+the latter; the fix is a lock apiece and belongs to whichever unit needs
+it. `cosmo/thread.h` states the same restriction to callers.
 
 ## Gaps (documented, not invariants)
 

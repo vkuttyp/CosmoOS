@@ -1634,8 +1634,14 @@ See [docs/development.md](docs/development.md).
   needed doing: `getcwd(NULL)` `malloc`s per call and hands the buffer to
   its caller, so it was safe from the moment the allocator took its lock --
   the invariant named it for two units after that stopped being true.
-  `strerror`'s was the only writable static in `libc/src`, which a `grep`
-  now confirms rather than a list kept by hand. The header validation is a
+  `strerror`'s was the only libc function returning a pointer to a
+  static, which a `grep` now confirms rather than a list kept by hand.
+  Review corrected a broader version of that sentence: it is **not** the
+  only writable static left. `atexit`'s table and the environment remain
+  process-global and unsynchronised, which is a gap now named in
+  `docs/libc/invariants.md` and stated to callers in `cosmo/thread.h`,
+  and which moving `strerror` behind the thread pointer could not fix
+  because it is process state rather than per-thread state. The header validation is a
   pure function in a file of its own, tested on the host with
   **seventeen** tables no linker would emit -- where the report had
   proposed a single crafted binary in the boot archive.
