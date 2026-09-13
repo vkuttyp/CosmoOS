@@ -137,6 +137,24 @@ the nine are very tight:
 | `SELFTEST: sleep` | `schedtest.c:368` | B | 1 |
 | `smp-parallel` | `smptest.c:239` | B | 1 |
 | `el2-guest-timer-ontime` | `hvtest.c:1279` | B | 1 |
+| `net-icmp-limit` | `nettest.c:1236` | A | 1 — **on this report's own pull request** |
+
+**A fifth arrived while this report was being reviewed, and it is the one
+worth reading.** The pull request carrying this document — which changes
+one markdown file and no code — was failed by CI:
+
+```
+SELFTEST: net-icmp-limit ... FAIL: check failed:
+  i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300 at line 1236
+```
+
+That is the assertion three paragraphs of this report are about: the
+`== 300` immediately after `settle(100)`, in the test family whose
+deferral had been withdrawn an hour earlier on the grounds that converting
+the wait would fix it. **A document about tests that sleep and then count
+was blocked by a test that sleeps and then counts, at the line it
+quotes.** Eight flakes across five tests in one session, and the last one
+arrived to make the argument unassisted.
 
 Every one passed on re-run. That is the definition of the problem rather
 than a mitigation of it: **a suite that passes on the second attempt is a
