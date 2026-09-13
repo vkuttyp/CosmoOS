@@ -692,6 +692,13 @@ static int machine_release(struct machine *m, unsigned c)
      */
     uint64_t deadline = cosmo_clock_ns() + 200000000ull;
     while (__atomic_load_n(&m->ran[c], __ATOMIC_ACQUIRE) == 0) {
+        /* Nothing to wait for once the machine is stopping: the target has
+         * been told to quit and will not run a guest instruction, so the
+         * wait would be the whole timeout for an answer that cannot change.
+         * The answer stays SUCCESS -- the CPU *was* turned on, and a
+         * machine powering off afterwards is not a failure of this call. */
+        if (__atomic_load_n(&m->stopping, __ATOMIC_ACQUIRE))
+            break;
         uint64_t now = cosmo_clock_ns();
         if (now >= deadline)
             break;
@@ -886,12 +893,21 @@ static void *vcpu_thread(void *arg)
                 ;   /* another thread raised it meanwhile; `peak` now holds its value */
             int rc = cosmo_vcpu_run(m->vcpu[cpu], &x);
             __atomic_fetch_sub(&m->in_run, 1u, __ATOMIC_ACQ_REL);
-            /* The guest has executed: tell `CPU_ON`, which is waiting to be
-             * able to promise it. After the first run this is a store
-             * nobody reads, which is cheaper than a branch that tests
-             * whether anyone still cares. */
-            __atomic_store_n(&m->ran[cpu], 1u, __ATOMIC_RELEASE);
-            (void)cosmo_futex_wake(&m->ran[cpu], 1);
+            /*
+             * The guest has executed: tell `CPU_ON`, which is waiting to be
+             * able to promise it. **Except after a stop**, which returns
+             * without entering the guest at all -- so saying "it ran" there
+             * would make this word mean something weaker than its name, and
+             * `CPU_ON` would report a guest that executed when the machine
+             * was being powered off underneath it.
+             *
+             * After the first run this is a store nobody reads, which is
+             * cheaper than a branch asking whether anyone still cares.
+             */
+            if (x.kind != COSMO_VM_EXIT_STOPPED) {
+                __atomic_store_n(&m->ran[cpu], 1u, __ATOMIC_RELEASE);
+                (void)cosmo_futex_wake(&m->ran[cpu], 1);
+            }
             if (rc < 0) {
                 fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
                 status = 1;

@@ -645,6 +645,12 @@ which is the only evidence of "executing" that userland has. A timeout is
 still `SUCCESS` -- the vCPU is on -- and no part of the interface has to lie
 about turns.
 
+The word that says so is set only when a run really entered the guest: a
+first run that returns `STOPPED` -- kicked by a shutdown before its entry
+-- must not claim execution, or `CPU_ON` reports a guest that never ran.
+The wait also gives up as soon as the machine is stopping, because the
+answer cannot change.
+
 Waiting for the target's *thread* rather than its guest is not enough, and
 a loaded CI runner is what said so: a thread can exist, and even be
 scheduled, without its guest having executed an instruction, and the

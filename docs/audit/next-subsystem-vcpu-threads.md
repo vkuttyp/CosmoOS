@@ -17,10 +17,17 @@ run:
    to have **returned** -- the only evidence of "executing" available in
    userland. A timeout is still `SUCCESS`.
 
-   *Twice over*: the first version waited for the target's **thread** to
-   reach its entry, which CI's aarch64 disproved by losing `cpu1: up`
-   anyway. A thread can exist without its guest having executed, and the
-   power-off two instructions later kicks it first.
+   *Three times over.* The first version waited for the target's **thread**
+   to reach its entry, which CI's aarch64 disproved by losing `cpu1: up`
+   anyway -- a thread can exist without its guest having executed. The
+   second set the "has run" word after *any* first run, including one that
+   returned `STOPPED` without entering the guest at all, so a `CPU_ON`
+   racing a shutdown could report a guest that never executed. It is now
+   set only when the run really entered, and the wait gives up early once
+   the machine is stopping, since the answer cannot change and waiting the
+   whole timeout for it is pointless. The PSCI answer stays `SUCCESS`
+   either way: the CPU *was* turned on, and a machine powering off
+   afterwards is not a failure of the call that turned it on.
 2. **The kick's IPI buys promptness, not liveness** -- so the report's claim
    that a spinning guest would hang the owner without the kick is wrong on
    this machine. `guest_spin.S` says why in its own header: every host timer
