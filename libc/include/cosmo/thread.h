@@ -11,11 +11,19 @@
  * What is safe to call from several threads (`docs/libc/invariants.md`,
  * L8): the **allocator** and **stdio** are locked, so `malloc`, `free`,
  * `realloc` and `printf` may be called from any thread -- a whole `printf`
- * is one critical section. **`errno` is still one global**: a threaded
- * program must not rely on it across threads, because the value it reads
- * may be another thread's. That is a wrong error code, never corruption,
- * and a per-thread `errno` needs a thread-local-storage model, which is
- * its own unit.
+ * is one critical section -- and **`errno` is per-thread**, a field of the
+ * block behind each thread's thread pointer (`cosmo/tcb.h`). A thread this
+ * header creates has one before its first instruction.
+ *
+ * What is still shared: `strerror`'s buffer and `getcwd(NULL)`'s storage.
+ *
+ * The warning that remains is about threads this header did *not* make: a
+ * thread created by a raw `SYS_thread_create` with `tls = 0` has no block,
+ * and libc's `errno` is an unconditional load through the thread pointer,
+ * so such a thread **must not call libc** until it installs one with
+ * `cosmo_tcb_install`. There is no fallback and cannot be one -- on
+ * x86-64, reading `%fs:0` with a zero base faults at address zero before
+ * any check could run.
  *
  * Everything in this header needs none of that: each function returns
  * `-errno` rather than setting the global, takes no library lock, and maps

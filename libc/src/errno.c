@@ -6,8 +6,6 @@
 
 #include "libc.h"
 
-int errno;
-
 long __syscall_ret(long r)
 {
     if (r < 0 && r > -4096) {

@@ -411,6 +411,19 @@ static inline void cosmo_thread_exit(int status)
     cosmo_syscall1(SYS_thread_exit, status);
     __builtin_unreachable();
 }
+/*
+ * The calling thread's thread pointer. 0 is legal and is what every thread
+ * has until something sets it; a base must be 16-byte aligned (-EINVAL)
+ * and its first eight bytes inside the caller's space (-EFAULT). Only the
+ * calling thread is affected.
+ *
+ * libc installs a block of its own through this -- see cosmo/tcb.h -- so a
+ * program that calls it directly takes over errno's correctness with it.
+ */
+static inline long cosmo_set_tls(unsigned long long base)
+{
+    return cosmo_syscall1(SYS_set_tls, base);
+}
 static inline long cosmo_futex_wait(volatile unsigned *word, unsigned val, unsigned long long timeout_ns)
 {
     return cosmo_syscall3(SYS_futex_wait, word, val, timeout_ns);

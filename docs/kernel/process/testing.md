@@ -472,7 +472,54 @@ and the whole lines from three threads in the log are stdio's side of it.
 It also calls `fflush(NULL)` and `fflush(stdout)`, because nothing did
 until that locking was found to deadlock the first form against its own
 lock.
-(12) The bound holds: creating threads until `-EAGAIN` stops
+(12) **`SYS_set_tls`'s contract**: unaligned is `-EINVAL`, below or at the
+top of the user range is `-EFAULT`, and a thread can set its pointer, set
+it again, and set it to zero. The successful calls run on a *worker*, never
+on the main thread, because from this unit onward the main thread's pointer
+is libc's own block and a test that took it away would break `errno` for
+everything after it. That the call *took effect* is not asserted here:
+there is no architecture-independent way to read a thread pointer back --
+x86-64 cannot read the FS base without `rdfsbase`, which is the whole
+reason libc's block points at itself -- so the effect is what steps 14 to
+17 assert, through `errno` itself. A straddling base is not tested because
+the alignment makes it unreachable: an earlier version asserted it anyway
+and failed by *succeeding*, setting the main thread's pointer.
+(13) **Two threads, two `errno`s** -- the point of the unit. One thread
+provokes `EBADF` two thousand times, another provokes `ERANGE` through
+`strtoll` (a different code from a different call, so the two are not
+merely racing inside one syscall path), and the main thread provokes a
+third while they run; each reads its own value back every iteration. One
+shared `errno` loses this within a few iterations. The counts are counted
+rather than `CHECK`ed, because two thousand failing assertions would bury
+the log.
+(14) **The first thread's `errno` survives a thread's**: main sets
+`ERANGE`, a thread sets `EBADF` and exits, and main's is still `ERANGE`.
+(15) **A thread libc did not make, installing its own block**: a raw
+`SYS_thread_create` with `tls = 0`, whose entry calls `cosmo_tcb_install`
+-- refused for a buffer shorter than the prefix and for a misaligned one,
+both while the thread still has no block, which is why that function must
+not itself touch `errno` -- and only then uses `errno` and the tid cache.
+The *un*installed case is deliberately **not** tested: the contract is that
+it faults, and a test asserting a fault would be asserting the absence of a
+fallback this design does not have.
+(16) **The cache and the layout.** `cosmo_thread_id()` agrees with
+`SYS_thread_self` and with `getpid` for the first thread, and a created
+thread's cache holds the tid its creator was given. Then the layout, as a
+layout: a thread finds its own block through `&errno` -- no new interface
+needed, since `errno` is a field of it -- and checks that the block is
+*above* a local, which is on the stack by definition. That assertion exists
+because the obvious proof does not work: a block placed inside the stack
+corrupts `err` silently on AArch64, where the `self` word is unused, and
+every assertion that sets `errno` and reads it straight back still passes.
+Finally the block is shown to be *freed* with the stack: a write from its
+address after the join is `-EFAULT`. The report proposed counting the
+address space across a thousand cycles for this; asserting the thing itself
+is both shorter and stronger, and a count would have needed a limit to
+count against, since `getrlimit` reports the limit and not the usage.
+Proved by reintroducing, each failure named by the step that caught it and
+the source restored byte-identical every time:
+
+(17) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
 creates succeed -- three rather than one, because a join that returned
 before the kernel stopped counting its thread left the next create refused
@@ -485,9 +532,6 @@ one and watched `malloc` and `thread_create` be refused for want of
 memory, which is this step working rather than a bug -- and which cost two
 runs to diagnose only because the step counted three different causes as
 one number. Each cause now prints itself.
-
-Proved by reintroducing, each failure named by the step that caught it and
-the source restored byte-identical every time:
 
 1. The tid written **after** `process_thread_start` -- with the window
    widened by a deliberate sleep, because the real one is about a hundred

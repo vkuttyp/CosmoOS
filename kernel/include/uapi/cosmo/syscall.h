@@ -132,7 +132,8 @@
 #define SYS_futex_wake  84  /* (uint32_t *word, unsigned n) -> threads woken */
 #define SYS_thread_create 85  /* (const struct cosmo_thread *req) -> tid */
 #define SYS_thread_exit 86  /* (int status) -> does not return; the process ends with the last thread */
-#define SYS_COUNT     87
+#define SYS_set_tls   87  /* (uint64_t base) -> 0: the calling thread's thread pointer */
+#define SYS_COUNT     88
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five

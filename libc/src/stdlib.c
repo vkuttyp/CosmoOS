@@ -9,6 +9,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <cosmo/syscall.h>
+
 #include "libc.h"
 
 char **environ;
@@ -22,6 +24,24 @@ extern int main(int argc, char **argv, char **envp);
 
 void __libc_start(int argc, char **argv, char **envp)
 {
+    /*
+     * The thread pointer first, before __stdio_init and before anything
+     * that could set errno: from here on `errno` is a load through that
+     * pointer, so there is no ordering in which a libc call precedes it.
+     *
+     * The failure cannot happen -- the block is a linked static object, so
+     * its address is aligned and inside the program's own image, which is
+     * the whole of what SYS_set_tls checks. The policy is stated anyway,
+     * because "cannot happen" is where a missing branch hides: one line to
+     * file descriptor 2 and exit 127, written with the raw syscall because
+     * stdio is not up and errno is the thing that just failed. A program
+     * that continued would fault on its first error instead.
+     */
+    if (__cosmo_tcb_init() != 0) {
+        static const char msg[] = "libc: no thread pointer\n";
+        cosmo_write(2, msg, sizeof(msg) - 1u);
+        cosmo_exit(127);
+    }
     environ = envp;
     __stdio_init();
     exit(main(argc, argv, envp));

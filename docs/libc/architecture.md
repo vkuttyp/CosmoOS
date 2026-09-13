@@ -41,9 +41,8 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 - **Program start**: `crt0.S` (`_start`: argc/argv/envp from the System
   V stack, `environ`, `main`, `exit`). One copy for every program
   (replaces the copy under `userland/init/`).
-- **Errors**: `errno` (one global, the last unsynchronised thing in the
-  library: a threaded program must not rely on it across threads --
-  invariants L8), the
+- **Errors**: `errno` (per-thread: a field of the block behind the thread
+  pointer, reached through `__errno_location` -- invariants L8), the
   negative-return convention translated once in `__syscall_ret`,
   `strerror`, `perror`.
 - **Memory** (`string.h`): `mem*`, `str*`, `strl*`, `strtok_r`,
@@ -83,10 +82,11 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 
 ## Non-responsibilities
 
-- TLS, and with it a per-thread `errno`: one global remains, so a
-  threaded program must not rely on it across threads (invariants L8).
-  The allocator and stdio *are* locked, and threads themselves exist --
-  `cosmo/thread.h`, whose own API needs none of the three.
+- Compiler `__thread` and ELF `PT_TLS`: `spawn` does not place a TLS
+  image and the linker's TLS relocations are untried. What exists is the
+  thread *pointer* (`SYS_set_tls`) and libc's own 128-byte block behind
+  it, which is what makes `errno` per-thread (invariants L8) -- and which
+  is what a real `PT_TLS` unit would build on rather than replace.
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
   calendar functions (there is no wall clock; `clock_gettime` gives the
   monotonic clock only).
@@ -102,7 +102,8 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 
 | Header | Contents | Backed by |
 |---|---|---|
-| `errno.h` | `errno`, `E*` (values = `COSMO_E*`) | `__syscall_ret` |
+| `errno.h` | `errno` (per-thread, `__errno_location`), `E*` (values = `COSMO_E*`) | `__syscall_ret`, `tcb.c` |
+| `cosmo/tcb.h` | `struct __cosmo_tcb`, `cosmo_tcb_install` | `SYS_set_tls` |
 | `string.h`, `ctype.h`, `stdlib.h`, `stdio.h`, `assert.h`, `limits.h` | as above | pure C, `mmap`, `write`/`read` |
 | `unistd.h`, `fcntl.h`, `sys/stat.h`, `dirent.h`, `sys/mount.h` | files, handles, directories | system calls 1–22, 35–39 |
 | `spawn.h`, `sys/wait.h`, `signal.h` | processes | system calls 32–34, 37 |
