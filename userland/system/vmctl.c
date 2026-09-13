@@ -605,7 +605,18 @@ struct machine {
      */
     volatile unsigned in_run;
     volatile unsigned peak_in_run;
-    volatile unsigned entered[COSMO_HV_VCPUS_MAX];   /* the thread is about to enter its guest */
+    /*
+      * Set by a vCPU's thread once its first run has *returned* -- which is
+      * the only evidence available in userland that the guest has actually
+      * executed. `CPU_ON` waits for it.
+      *
+      * "About to enter" is not enough, and CI proved it: a thread that has
+      * been scheduled but whose guest has not run yet leaves `cpu1: up`
+      * missing exactly as the deleted fairness rule once did, because the
+      * power-off that follows two instructions later kicks it first. This
+      * machine never reproduced it; a loaded runner did, first time.
+      */
+    volatile unsigned ran[COSMO_HV_VCPUS_MAX];
     uint64_t entry[COSMO_HV_VCPUS_MAX];
     uint64_t ctx[COSMO_HV_VCPUS_MAX];
     cosmo_thread_t thread[COSMO_HV_VCPUS_MAX];
@@ -628,7 +639,7 @@ static int machine_reserve(struct machine *m, unsigned c)
     if (!__atomic_compare_exchange_n(&m->park[c], &want, VCPU_STARTING, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return want == VCPU_QUIT ? -EPERM : -EBUSY;
-    __atomic_store_n(&m->entered[c], 0u, __ATOMIC_RELAXED);   /* it will say so again */
+    __atomic_store_n(&m->ran[c], 0u, __ATOMIC_RELAXED);   /* it will say so again */
     return 0;
 }
 
@@ -680,11 +691,11 @@ static int machine_release(struct machine *m, unsigned c)
      * this firmware call cannot fix.
      */
     uint64_t deadline = cosmo_clock_ns() + 200000000ull;
-    while (__atomic_load_n(&m->entered[c], __ATOMIC_ACQUIRE) == 0) {
+    while (__atomic_load_n(&m->ran[c], __ATOMIC_ACQUIRE) == 0) {
         uint64_t now = cosmo_clock_ns();
         if (now >= deadline)
             break;
-        (void)cosmo_futex_wait(&m->entered[c], 0, deadline - now);
+        (void)cosmo_futex_wait(&m->ran[c], 0, deadline - now);
     }
     return 0;
 }
@@ -863,11 +874,6 @@ static void *vcpu_thread(void *arg)
         if (st == VCPU_QUIT)
             break;
 
-        /* Tell whoever released this vCPU that it is running: CPU_ON waits
-         * for this, so that it can promise what PSCI says it promises. */
-        __atomic_store_n(&m->entered[cpu], 1u, __ATOMIC_RELEASE);
-        (void)cosmo_futex_wake(&m->entered[cpu], 1);
-
         int repark = 0;
         while (__atomic_load_n(&m->park[cpu], __ATOMIC_ACQUIRE) == VCPU_RUNNING) {
             /* Untimed: nothing else needs this thread, and the kick is what
@@ -880,6 +886,12 @@ static void *vcpu_thread(void *arg)
                 ;   /* another thread raised it meanwhile; `peak` now holds its value */
             int rc = cosmo_vcpu_run(m->vcpu[cpu], &x);
             __atomic_fetch_sub(&m->in_run, 1u, __ATOMIC_ACQ_REL);
+            /* The guest has executed: tell `CPU_ON`, which is waiting to be
+             * able to promise it. After the first run this is a store
+             * nobody reads, which is cheaper than a branch that tests
+             * whether anyone still cares. */
+            __atomic_store_n(&m->ran[cpu], 1u, __ATOMIC_RELEASE);
+            (void)cosmo_futex_wake(&m->ran[cpu], 1);
             if (rc < 0) {
                 fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
                 status = 1;
