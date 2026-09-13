@@ -264,6 +264,18 @@ caller's own space, and buckets keyed by `struct vm_space` so two
 processes cannot reach each other's — are unchanged and are what confine
 this.
 
+The test seam is the one thing here that deserves a sentence rather than
+a dismissal: `__cosmo_cond_probe` is a **writable function pointer in
+every process's data**, and a writable function pointer is a control-flow
+target. The honest weighing is that an attacker who can write it can
+already write anything else in the process — there is no privilege
+boundary inside a process, and libc has other indirect calls — so it
+widens no boundary that was not already open. It is called on a path
+that is about to enter the kernel anyway, and it is the difference
+between a tested lost-wakeup guarantee and an untested one. If that
+trade is judged wrong, the fallback in Tests case 2 is the answer, and
+it costs the test rather than the security.
+
 **Performance.** The uncontended signal with no waiter is one atomic
 increment and one syscall that finds an empty bucket. Making *that* free
 (by keeping a waiter count and skipping the syscall) is a real
@@ -280,7 +292,8 @@ Benchmarks says which number would change the decision.
 | file | change |
 | --- | --- |
 | `libc/include/cosmo/thread.h` | `cosmo_cond_t`, `COSMO_COND_INIT`, the four functions, and the `while`-not-`if` contract stated where a caller will read it |
-| `libc/src/thread.c` | the four functions, beside the mutex they compose with |
+| `libc/src/thread.c` | the four functions, beside the mutex they compose with; and `__cosmo_cond_probe`, the NULL-by-default test seam at the sleep window (Tests, case 2) |
+| `libc/src/libc.h` | the probe's declaration, since it is libc's and not a program's |
 | `userland/system/vmctl.c` | the `CPU_ON` wait and the supervisor drain become `cosmo_cond_*`. **The park/run state machine is conditional**: it keeps its states either way, and loses its futex calls only if step 5 finds the result simpler — see the migration plan, which is the one place this is decided |
 | `userland/tests/thrtest.c` | the two yield-spin waits become condition waits; **new steps** for the primitive itself |
 | `docs/libc/invariants.md` | L8's neighbourhood: what a threaded program may now wait on, and the `while` contract as an invariant |
@@ -301,6 +314,13 @@ Four functions, one typedef, one macro, in a header that already exists.
 **No new syscall.** No new structure crossing the kernel boundary, and
 therefore no versioning question of the kind `struct cosmo_procinfo` raised
 two units ago.
+
+One internal symbol that is not an API: `__cosmo_cond_probe`, the test
+seam. It is declared in `libc/src/libc.h` rather than a public header
+because no program may set it, it is `__`-prefixed, and it is documented
+as libc's. It is nonetheless **in the shipped binary**, which is
+deliberate — a seam compiled out of production proves things about a
+binary nobody runs — and the cost of that is priced in Risks.
 
 ## Migration plan
 
@@ -358,40 +378,61 @@ inserted before it.
    for half of what it claims.
 
 2. **A signal delivered inside the sleep window is not lost.** This is
-   the lost-wakeup case and the hardest test here, so it is described
-   with its limitation rather than asserted.
+   the lost-wakeup case, it is the reason the unit exists, and **two
+   drafts of this test failed to test it.** The third takes a design
+   decision rather than a cleverer arrangement of threads.
 
-   The window is between the waiter's read of `seq` (under the mutex) and
-   its `futex_wait`. To put a signaller inside it: a signaller thread
-   **blocks on the mutex** while the waiter holds it, and the waiter then
-   calls `cosmo_cond_wait`. The `unlock` inside the wait is what releases
-   the signaller, so the signaller runs in the window by construction —
-   it is the `unlock` that wakes it. It sets the predicate and signals.
-   A correct implementation read `seq` *before* the unlock, so the
-   signal's increment makes `futex_wait` return `-EAGAIN` without
-   sleeping, and the waiter's `while` sees the predicate. An
-   implementation that read `seq` after the unlock reads the *new* value
-   and sleeps on it forever.
+   The window is a few instructions wide: between the waiter's read of
+   `seq` and its `futex_wait`. Nothing a *second thread* can do reaches
+   inside it. The second draft tried — a signaller blocked on the mutex,
+   released by the `unlock` inside `cosmo_cond_wait` — and a review
+   dismantled it: unlocking makes that thread **runnable, not running**.
+   The waiter is not preempted and carries on into `futex_wait` before
+   the signaller is scheduled, so the signal lands on a sleeper, the wake
+   works, and a read-after-unlock implementation passes. Repeating the
+   same scheduling sequence several hundred times repeats the same
+   outcome; it is not a probability that improves with attempts.
 
-   **This is likely, not certain**, and the report says so: the signaller
-   is released by the unlock but the scheduler decides when it runs. The
-   test therefore repeats the handshake several hundred times, and the
-   failure it detects is a **hang** that the boot deadline catches — the
-   same detection this tree already relies on for `guest_psci_race`.
+   **So the library provides the seam.** A single function pointer,
+   NULL in every real program, called at the window:
 
-   **The deterministic half is the bug-proof, not the test.** Widening the
-   window is what makes the failure certain, so the proof moves the `seq`
-   read after the unlock *and* inserts a sleep between them; the hang then
-   happens on the first iteration. That is the technique the vCPU-threads
-   unit used to reproduce a CI-only failure locally with a 40 ms sleep,
-   and it is the honest way to prove a window that cannot be hit on
-   demand from outside.
+   ```c
+   /* libc/src/thread.c -- test seam, NULL except under thrtest */
+   void (*__cosmo_cond_probe)(void);
+   ...
+       unsigned seq = __atomic_load_n(&c->seq, __ATOMIC_RELAXED);
+       cosmo_mutex_unlock(m);
+       if (__cosmo_cond_probe) __cosmo_cond_probe();   /* <- the window */
+       cosmo_futex_wait(&c->seq, seq, timeout_ns);
+   ```
 
-   A **previous draft of this test was vacuous** and a review caught it:
-   it had the signaller run to completion *before* the waiter called
-   `cosmo_cond_wait`, so the waiter's `while` saw the predicate and never
-   waited at all. That tests the caller's loop, not the library — neither
-   bug-proof below could have failed it, because nothing ever slept.
+   The test sets the probe to a function that performs the whole signal
+   synchronously — take the mutex, set the predicate, `cosmo_cond_signal`,
+   release — so the signal happens **inside the window, on the waiter's
+   own thread**, with no scheduler involved. A correct implementation read
+   `seq` before the unlock, so the probe's increment makes `futex_wait`
+   return `-EAGAIN` and the `while` sees the predicate. An implementation
+   that reads `seq` after the unlock reads it *after* the probe has run,
+   sleeps on the current value, and hangs. **Deterministic in both
+   directions, on one CPU, with no timing.**
+
+   **What it costs, stated rather than waved past.** One load and one
+   predictable not-taken branch, immediately before a syscall — and the
+   pointer is compiled in unconditionally, *not* behind `#ifdef`, so the
+   code path the tests exercise is the code path that ships. A seam that
+   exists only in a test build proves things about a binary nobody runs.
+   The symbol is `__`-prefixed and documented as libc's, not a program's.
+
+   If review prefers no seam in the library at all, the fallback is
+   explicit and worse: this property becomes **correct by construction,
+   proved only by the widened-window mutation** below, and the test
+   section says so in the shape `tests/hv/aarch64/guest_psci_race.S`
+   already uses — a "what this does not prove" paragraph naming the gap
+   rather than a test that quietly does not cover it. That is a real
+   option and it is how this tree has handled an unreachable window
+   before; the seam is proposed because this window *can* be reached, and
+   cheaply.
+
 3. **A broadcast reaches every waiter.** Four waiters, one broadcast, all
    four return; a `signal` in the same position releases exactly one, which
    is what distinguishes the two calls.
@@ -408,15 +449,18 @@ inserted before it.
 **Bug-proofs**, one per property, each expected to fail *for its own
 stated reason*:
 
-- `seq` read **after** the unlock instead of before, *with a sleep
-  inserted in the widened window* → test 2 hangs on its first iteration
-  and the boot deadline reports it. Without the inserted sleep the same
-  bug is merely likely to hang, which is why the proof widens the window
-  rather than trusting the race.
+- `seq` read **after** the unlock instead of before → test 2 hangs on its
+  first iteration, because the probe runs between the unlock and the read
+  and the waiter then sleeps on the value the probe already published. No
+  sleep, no repetition and no second CPU are needed: the seam makes this
+  the ordinary execution, which is the whole reason for it.
 - `signal` not incrementing `seq`, only waking → test 2 hangs the same
   way (the waiter sleeps on a value nothing changes), while test 1 still
   passes — which is what makes the two tests different rather than
   redundant.
+- **the probe left NULL by the test** → test 2 passes against *both* the
+  correct and the broken implementation, which is the proof that the
+  seam is what carries this test and not an ornament on it.
 - `broadcast` waking 1 instead of `UINT_MAX` → test 3 fails with three
   waiters still blocked.
 - `timedwait` returning 0 on timeout → test 4 fails.
@@ -472,6 +516,13 @@ Both are `thrtest`-shaped and neither needs new scaffolding.
   state it now: this is `cosmo_cond_t`, the native primitive, and a POSIX
   layer would sit on top of it or beside it rather than being retrofitted
   into it.
+- **The test seam is a writable function pointer in libc.** Named in the
+  §70 gate above with the argument for it; the counter-argument is that a
+  process that ships an indirect call nobody needs has shipped a gadget,
+  and "an attacker could already do worse" is the reasoning that
+  accumulates them one at a time. The mitigation if that view wins is
+  stated where the decision is — Tests case 2 — and is a weaker test
+  rather than a hidden one.
 - **Timeouts are relative, and a waiter that loops re-computes its
   deadline.** A caller that passes the same relative timeout each time
   round the loop waits longer than it meant to. This is inherent to a
