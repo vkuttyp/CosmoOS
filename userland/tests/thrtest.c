@@ -299,6 +299,89 @@ static void *layout_probe(void *arg)
     return NULL;
 }
 
+/* --- steps 18 to 22: the condition variable ------------------------------
+ *
+ * Shared between the steps because the shapes repeat: a mutex, a
+ * condition variable, a predicate, and a count of waiters that got
+ * through. Every waiter here loops on its predicate, which is the
+ * contract `cosmo/thread.h` states -- a waiter written with `if` would
+ * pass most of these on an unloaded machine, which is why the contract is
+ * a documented invariant and not a suggestion.
+ */
+/*
+ * libc's test seam, declared here because **no public header offers it**
+ * -- it is libc's own (`libc/src/libc.h`), and a program has no business
+ * with it. This test is the exception that the seam exists for, and
+ * reaching for the symbol by hand is the honest way to say so.
+ */
+extern void (*__cosmo_cond_probe)(void);
+
+static cosmo_mutex_t cv_m = COSMO_MUTEX_INIT;
+static cosmo_cond_t  cv_c = COSMO_COND_INIT;
+static volatile unsigned cv_ready;      /* the predicate */
+static volatile unsigned cv_woke;       /* waiters that returned with it true */
+static volatile unsigned cv_held_ok;    /* waiters that found the mutex re-taken */
+static volatile unsigned cv_entered;    /* waiters that have reached the wait */
+
+static void *cv_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    __atomic_fetch_add(&cv_entered, 1, __ATOMIC_ACQ_REL);
+    while (!cv_ready)
+        cosmo_cond_wait(&cv_c, &cv_m);
+    /*
+     * The predicate is true -- but the signaller made it true before this
+     * returned, so the predicate alone cannot tell a correct wait from one
+     * that never re-acquired the mutex. `trylock` can: the mutex is not
+     * recursive, so a thread that holds it is refused, and a thread that
+     * does not holds it after this call. -EBUSY is the assertion.
+     */
+    if (cosmo_mutex_trylock(&cv_m) == -EBUSY)
+        __atomic_fetch_add(&cv_held_ok, 1, __ATOMIC_ACQ_REL);
+    __atomic_fetch_add(&cv_woke, 1, __ATOMIC_ACQ_REL);
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/*
+ * Step 19's probe: the signal, performed *inside* `cosmo_cond_wait`'s
+ * window, on the waiting thread itself. `__cosmo_cond_probe` is called
+ * after the wait has released the mutex and before it sleeps, so taking
+ * the mutex here cannot deadlock -- and it means the signal lands in the
+ * window by construction rather than by asking the scheduler nicely.
+ *
+ * Two earlier designs of this test tried to do it with a second thread
+ * and could not: unlocking the mutex makes a blocked signaller runnable,
+ * not running, so the waiter reaches `futex_wait` first and a
+ * read-after-unlock implementation passes.
+ */
+static volatile unsigned cv_probe_ran;
+static void cv_probe(void)
+{
+    cosmo_mutex_lock(&cv_m);
+    cv_ready = 1;
+    cosmo_cond_signal(&cv_c);
+    cosmo_mutex_unlock(&cv_m);
+    __atomic_fetch_add(&cv_probe_ran, 1, __ATOMIC_ACQ_REL);
+}
+
+/* Step 22: a waiter whose predicate never becomes true, so that
+ * broadcasts at it prove only that a correct caller survives them. */
+static volatile unsigned cv_spur_stop, cv_spur_returns;
+static void *cv_spurious_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    __atomic_fetch_add(&cv_entered, 1, __ATOMIC_ACQ_REL);
+    while (!cv_spur_stop) {
+        cosmo_cond_wait(&cv_c, &cv_m);
+        __atomic_fetch_add(&cv_spur_returns, 1, __ATOMIC_ACQ_REL);
+    }
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
 /* Step 15: a thread that sets its errno and exits, so main can show that
  * its own survived. */
 static void *errno_setter(void *arg)
@@ -1014,7 +1097,183 @@ int main(int argc, char **argv)
 
     STEP("18");
     /*
-     * (18) The bound holds, and the process survives reaching it. This is
+     * (18) **A signal is seen, and the mutex comes back.** The first of
+     * the condition variable's steps
+     * (docs/audit/next-subsystem-condvar.md). One waiter, one signaller;
+     * the waiter must return with the predicate true *and* holding the
+     * mutex again.
+     */
+    {
+        cosmo_thread_t w;
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        CHECK(cosmo_thread_start(&w, cv_waiter, NULL, 32u * 1024u) == 0);
+        /* Wait for it to be *in* the wait, by its own report, rather than
+         * for a fixed interval: "N things after a fixed settle" is the
+         * flake family this tree keeps re-learning. */
+        while (__atomic_load_n(&cv_entered, __ATOMIC_ACQUIRE) == 0)
+            cosmo_yield();
+        cosmo_mutex_lock(&cv_m);
+        cv_ready = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+        CHECK(cv_woke == 1);
+        CHECK(cv_held_ok == 1);   /* trylock said -EBUSY: the wait re-took it */
+    }
+
+    STEP("19");
+    /*
+     * (19) **A signal delivered inside the sleep window is not lost.**
+     * The property the unit exists for, and the one no arrangement of
+     * threads can test: the window between `cosmo_cond_wait`'s read of
+     * `seq` and its `futex_wait` is a few instructions wide, and
+     * releasing a blocked signaller only makes it *runnable*.
+     *
+     * So libc's probe is armed, and it signals from inside the window on
+     * this very thread. A correct wait read `seq` before unlocking, so the
+     * probe's increment makes `futex_wait` return without sleeping and the
+     * `while` sees the predicate. A wait that read `seq` after unlocking
+     * reads the value the probe already published and sleeps on it
+     * forever -- which is a hang, caught by the boot deadline.
+     *
+     * The probe is armed immediately before the wait it instruments, and
+     * libc *takes* it rather than reading it, so it cannot fire inside a
+     * later step's waiter.
+     */
+    {
+        cv_ready = cv_probe_ran = 0;
+        __atomic_store_n(&__cosmo_cond_probe, cv_probe, __ATOMIC_RELEASE);
+        cosmo_mutex_lock(&cv_m);
+        while (!cv_ready)
+            cosmo_cond_wait(&cv_c, &cv_m);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cv_probe_ran == 1);                       /* the window was entered */
+        CHECK(__atomic_load_n(&__cosmo_cond_probe, __ATOMIC_ACQUIRE) == NULL);
+    }
+
+    STEP("20");
+    /*
+     * (20) **A broadcast reaches every waiter, and a signal reaches
+     * exactly one.** Four waiters either way; the two calls differ only
+     * in that number, so asserting both is what distinguishes them.
+     */
+    {
+        cosmo_thread_t w[4];
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_start(&w[i], cv_waiter, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&cv_entered, __ATOMIC_ACQUIRE) < 4u)
+            cosmo_yield();
+        cosmo_mutex_lock(&cv_m);
+        cv_ready = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_join(&w[i], NULL) == 0);
+        CHECK(cv_woke == 4);
+        CHECK(cv_held_ok == 4);
+
+        /*
+         * And `signal` with four waiting releases one. The other three
+         * are released by a broadcast afterwards, so the step still
+         * finishes -- the assertion is on what the *signal* did, sampled
+         * before the broadcast.
+         */
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_start(&w[i], cv_waiter, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&cv_entered, __ATOMIC_ACQUIRE) < 4u)
+            cosmo_yield();
+        cosmo_mutex_lock(&cv_m);
+        cv_ready = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        /* Exactly one gets through: wait for that one rather than sleeping
+         * and counting, then check no second followed it. */
+        while (__atomic_load_n(&cv_woke, __ATOMIC_ACQUIRE) < 1u)
+            cosmo_yield();
+        CHECK(cv_woke == 1);
+        cosmo_mutex_lock(&cv_m);
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_join(&w[i], NULL) == 0);
+        CHECK(cv_woke == 4);
+    }
+
+    STEP("21");
+    /*
+     * (21) **Timeouts.** One wait that expires and one that does not,
+     * both bounded by the clock rather than by a loop count.
+     */
+    {
+        cv_ready = 0;
+        cosmo_mutex_lock(&cv_m);
+        uint64_t t0 = cosmo_clock_ns();
+        int rc = cosmo_cond_timedwait(&cv_c, &cv_m, 20ull * 1000ull * 1000ull);
+        uint64_t elapsed = cosmo_clock_ns() - t0;
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(rc == -ETIMEDOUT);
+        CHECK(elapsed >= 20ull * 1000ull * 1000ull);   /* it waited at least what it was asked */
+        /* And the mutex came back on the timeout path too. */
+        CHECK(cosmo_mutex_trylock(&cv_m) == 0);
+        cosmo_mutex_unlock(&cv_m);
+
+        /* A timed wait that is signalled returns 0, and before its
+         * deadline -- a one-second budget against a signal that arrives
+         * as soon as the waiter is in. */
+        cosmo_thread_t w;
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        CHECK(cosmo_thread_start(&w, cv_waiter, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&cv_entered, __ATOMIC_ACQUIRE) == 0)
+            cosmo_yield();
+        cosmo_mutex_lock(&cv_m);
+        cv_ready = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+        CHECK(cv_woke == 1);
+    }
+
+    STEP("22");
+    /*
+     * (22) **A correct caller survives spurious wakeups.** A waiter whose
+     * predicate never becomes true, broadcast at repeatedly: every
+     * `cosmo_cond_wait` returns and every one goes back round the
+     * `while`, so the waiter is still waiting and the predicate is still
+     * false. This is the step that makes the loop contract a tested
+     * property rather than a comment -- an implementation that returned
+     * "the predicate is true" would strand this waiter's caller.
+     */
+    {
+        cosmo_thread_t w;
+        cv_spur_stop = cv_spur_returns = cv_entered = 0;
+        CHECK(cosmo_thread_start(&w, cv_spurious_waiter, NULL, 32u * 1024u) == 0);
+        while (__atomic_load_n(&cv_entered, __ATOMIC_ACQUIRE) == 0)
+            cosmo_yield();
+        for (unsigned i = 0; i < 20u; i++) {
+            unsigned before = __atomic_load_n(&cv_spur_returns, __ATOMIC_ACQUIRE);
+            cosmo_mutex_lock(&cv_m);
+            cosmo_cond_broadcast(&cv_c);
+            cosmo_mutex_unlock(&cv_m);
+            /* Wait for the wakeup to be observed, rather than assuming it
+             * was: the count is the thing, not the interval. */
+            while (__atomic_load_n(&cv_spur_returns, __ATOMIC_ACQUIRE) == before)
+                cosmo_yield();
+        }
+        CHECK(cv_spur_returns >= 20u);   /* it woke, repeatedly */
+        CHECK(cv_spur_stop == 0);        /* and its predicate never became true */
+        /* Release it. */
+        cosmo_mutex_lock(&cv_m);
+        cv_spur_stop = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+    }
+
+    STEP("23");
+    /*
+     * (23) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256
      * threads, and the memory they hold is returned as the kernel reaps
      * them, not the instant their joins return -- so anything after it is
@@ -1060,9 +1319,9 @@ int main(int argc, char **argv)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
     }
 
-    STEP("19");
+    STEP("24");
     /*
-     * (19) **A program can find its own program headers**, which is how it
+     * (24) **A program can find its own program headers**, which is how it
      * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
      * kernel passes the standard trio in the auxiliary vector and knows
      * nothing about thread-local storage; everything above that is the
