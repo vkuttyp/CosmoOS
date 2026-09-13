@@ -1,20 +1,70 @@
 # NEXT SUBSYSTEM — the wait, written once
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-**nothing in it is implemented**.
+and wait for the instruction to build it. **This report is as built**, and
+its premise about one of its two callers was wrong.
 
-**Subsystem: a condition variable.** The library gives a thread a way to
+**Subsystem: a condition variable.** The library gave a thread a way to
 *start*, to *end*, to *join* and to *exclude* — and no way to **wait for
-something another thread will do**. Every program that needs one writes
-it by hand, out of the raw futex or out of a yield loop, and there are
-five such hand-rolls in the tree already. This unit writes it once, in
-the library, and converts **four** of the five. The fifth — `vmctl`'s
-park/run handshake — is examined last and converted **only if it comes
-out simpler**, because it is concurrent code a review has already
-corrected twice; the scope is stated the same way in the affected-files
-table and in the migration plan, and "four, with the fifth conditional"
-is the commitment.
+something another thread will do**. `cosmo_cond_t` is that way now, and
+`thrtest`'s two hand-rolled waits are gone.
+
+**What the report got wrong: `vmctl` was never hand-rolling a condition
+variable.** It counted five hand-rolls and committed to converting four,
+and three of those five were `vmctl`'s. All three are
+`cosmo_futex_wait` on a **single atomic word** — `park[cpu]`, `ran[c]`,
+`live` — with lock-free compare-exchange state machines around them. That
+is what a futex is *for*. A condition variable is for a predicate over
+**mutex-protected** state; there is no mutex in `vmctl` for these, and
+adding one to acquire the primitive is backwards.
+
+This was measured rather than asserted. The simplest of the three, the
+supervisor's drain, was converted, built and booted (AArch64 PASS) before
+being reverted: **+14/−5**, six lines becoming fifteen, one field becoming
+three, and an exiting vCPU thread taking a mutex on its way out to guard a
+counter that had been lock-free. It gained nothing — the original
+compare-and-sleep has no lost-wakeup hazard, and the hard part of that
+loop (how the drain, the bound and the wake interact) was untouched, so
+nothing became simpler. The `park[]` conversion would have been worse
+still: that is a four-state lock-free lifecycle a review corrected twice.
+
+So the scope as built is **the primitive, and the two waits in `thrtest`
+that were genuinely wrong** — a 2,000,000-iteration loop count standing in
+for a duration, and an unbounded `cosmo_yield()` spin. `vmctl` is
+unchanged. The report had already reserved this outcome for step 5 and
+said a hand-rolled wait that reads better than its replacement is a
+finding worth recording; the finding turned out to cover steps 3 and 4 as
+well.
+
+**Four more differences, each found by building rather than reading:**
+
+1. **The seam is not optional, and now there is evidence.** The report
+   argued from first principles that no arrangement of threads can reach
+   the lost-wakeup window, because unlocking makes a signaller *runnable*
+   and not *running*. Bug-proof P6 tests that argument: the same
+   read-after-unlock bug that hangs the seam-armed test for the full
+   180-second deadline **passes in 75.9 s** when the test releases a
+   mutex-blocked signaller thread instead. The argument was right, and it
+   is now observed rather than reasoned.
+2. **One assertion in the first draft of the tests was simply wrong**, and
+   converting `thrtest` is what exposed it. Step 20 checked that
+   `cosmo_cond_signal` wakes **exactly one** waiter. The interface does
+   not promise that: spurious wakeups are permitted, the spurious-wakeup
+   step exists *because* callers must tolerate them, and waking extra
+   waiters is a cost rather than a defect — nor is the number of threads a
+   signal makes runnable observable from userland without a race. It is
+   replaced by the guarantee a caller depends on: tickets are *work*, and
+   however many threads wake, **no more work is taken than was made
+   available**, which stays true however long it is looked at.
+3. **`thrtest`'s steps are renumbered.** The condition variable's five
+   steps are 18–22, the thread-bound step moves to 23 and the
+   program-headers step to 24 — the bound stays last among thread-creating
+   steps, the same renumbering the errno unit did for the same reason.
+4. **The condition variable's own tests use it.** Waiting for waiters to
+   arrive was a `cosmo_yield()` poll on a counter in the first draft; it
+   is a condition wait on a second variable now. A spin inside the
+   primitive's own tests would be the clearest possible statement that the
+   author did not believe in it.
 
 ## Problem
 
@@ -294,8 +344,8 @@ Benchmarks says which number would change the decision.
 | `libc/include/cosmo/thread.h` | `cosmo_cond_t`, `COSMO_COND_INIT`, the four functions, and the `while`-not-`if` contract stated where a caller will read it |
 | `libc/src/thread.c` | the four functions, beside the mutex they compose with; and `__cosmo_cond_probe`, the NULL-by-default test seam at the sleep window (Tests, case 2) |
 | `libc/src/libc.h` | the probe's declaration, since it is libc's and not a program's |
-| `userland/system/vmctl.c` | the `CPU_ON` wait and the supervisor drain become `cosmo_cond_*`. **The park/run state machine is conditional**: it keeps its states either way, and loses its futex calls only if step 5 finds the result simpler — see the migration plan, which is the one place this is decided |
-| `userland/tests/thrtest.c` | the two yield-spin waits become condition waits; **new steps** for the primitive itself |
+| ~~`userland/system/vmctl.c`~~ | **Unchanged, as built.** All three of its waits are `futex_wait` on one atomic word, which is the futex's own job and not a hand-rolled condition variable; the measured conversion of the simplest was +14/−5 and simplified nothing. See the banner |
+| `userland/tests/thrtest.c` | the loop-count handshake and the unbounded yield spin become condition waits; five **new steps** for the primitive itself, renumbered 18–22 with the bound at 23 and the program headers at 24 |
 | `docs/libc/invariants.md` | L8's neighbourhood: what a threaded program may now wait on, and the `while` contract as an invariant |
 | `docs/libc/architecture.md` | the `cosmo/thread.h` row gains the condition variable |
 | `docs/audit/next-subsystem-threads.md` | its "named and deferred" list is stale in three ways this unit can fix while it is here: **a per-thread `errno`** and **the `vmctl` conversion** are built, and **futex requeue** is taken up and re-deferred with a measurement below. It does *not* defer a condition variable -- I assumed it did and checked; the list names requeue, not this |
@@ -344,17 +394,19 @@ binary nobody runs — and the cost of that is priced in Risks.
    as the regression.
 6. **The documents**, including the threads report's deferral list.
 
-Steps 3–5 are separable and each is independently revertible. **Steps 1–4
-are the unit**; step 5 is a judgement made with the code in front of us,
-and the banner and the affected-files table say so too rather than
-promising all five. **A conversion that makes the code longer is a
-conversion that should not happen**, and this plan expects to be told so
-at step 5 rather than to discover it after.
+**As built: steps 1, 2 and 6 landed; steps 3, 4 and 5 did not.** The rule
+this plan set for step 5 — *a conversion that makes the code longer is a
+conversion that should not happen* — turned out to govern all three
+`vmctl` steps, for a reason the plan had not seen: those waits are not
+hand-rolled condition variables at all. Step 3 was written, built and
+booted before being reverted, so the judgement rests on a measurement
+(+14/−5, a mutex added to a lock-free counter) rather than on a
+preference. The banner carries the full finding.
 
-If step 5 does not land, the report is converted as-built to say the
-park/run handshake keeps its futex calls **and why** — a hand-rolled wait
-that survived review twice and reads better than its replacement is a
-finding worth recording, not an embarrassment to bury.
+Steps 3–5 were separable and independently revertible, which is what made
+it cheap to find this out by doing it. That was the point of ordering them
+that way, and it is worth keeping for the next unit that plans to convert
+working concurrent code: **build the smallest one first and look at it.**
 
 ## Tests
 
@@ -453,8 +505,18 @@ inserted before it.
    cheaply.
 
 3. **A broadcast reaches every waiter.** Four waiters, one broadcast, all
-   four return; a `signal` in the same position releases exactly one, which
-   is what distinguishes the two calls.
+   four return.
+
+   **A first draft added "and a `signal` releases exactly one", which is
+   not true and is not promised.** Spurious wakeups are permitted (test 6
+   exists because callers must tolerate them), so waking more waiters than
+   necessary is a cost and not a defect; and how many threads a signal
+   makes runnable is not observable from userland without a race. As
+   built, the second half asserts what a caller actually depends on:
+   `cv_tickets` is *work*, one ticket is offered to four waiters, and
+   however many wake, exactly one ticket is taken. That remains true
+   however long it is looked at, which is what makes it an assertion
+   rather than a sample of a race.
 4. **A timed wait times out**, returning `-ETIMEDOUT` after at least the
    requested interval — bounded below by the clock, not by a loop count.
 5. **A timed wait that is signalled returns 0** before its deadline.
@@ -462,8 +524,9 @@ inserted before it.
    broadcasts repeatedly at a waiter whose predicate stays false, and
    asserts the waiter is still waiting and the predicate still false —
    i.e. that the `while` contract is what makes the caller correct.
-7. **`vmctl` keeps its guests**: `guest_offspin` and `guest_psci_race`
-   unchanged and still passing, which is the regression for steps 3–5.
+7. ~~**`vmctl` keeps its guests**~~: this was the regression for steps 3–5,
+   which did not happen. `guest_offspin` and `guest_psci_race` still pass,
+   for the uninteresting reason that `vmctl` was not touched.
 
 **Bug-proofs**, one per property, each expected to fail *for its own
 stated reason*:
@@ -500,6 +563,44 @@ a waiter that never sleeps and a waiter that is correctly woken both
 finish. Test 2 is the one that distinguishes them, and its bug-proof must
 show the *timeout*, not a wrong value. Each proof restores the source
 byte-identically, verified with `cmp`.
+
+### As run
+
+Ten proofs, all on x86-64 unless noted, each source restored
+byte-identically and verified with `cmp`. The step numbers are `thrtest`'s
+as built (18–22), not the test numbers above.
+
+| proof | outcome |
+| --- | --- |
+| `seq` read after the unlock | step 19 **hangs**, 184.1 s |
+| `signal` wakes without bumping `seq` | step 19 **hangs**, 184.6 s; step 18 still passes |
+| the same bug with **no seam** (a signaller thread instead) | **PASSES**, 75.9 s |
+| `broadcast` wakes 1 | step 20 **hangs**, 184.1 s |
+| timeout not reported | `FAIL rc == -ETIMEDOUT`, line 1216 |
+| mutex not re-acquired | `FAIL cv_held_ok == 1`, line 1121 |
+| probe read instead of taken | `FAIL probe == NULL` (1151) **and** `FAIL cv_woke == 1` (1195) |
+| `pair_a` never sets its flag | `FAIL flag_a == 1`, line 753, whole boot 77.1 s |
+| `worker_stop` set with no broadcast | step 7 **hangs**, 184.1 s |
+| two tickets offered instead of one | `FAIL cv_taken == 1`, line 1305 |
+
+Three of these are worth reading rather than counting.
+
+**The no-seam proof is the unit's own argument tested.** The report
+claimed no arrangement of threads could reach the window; the same
+lost-wakeup bug that hangs for 180 s with the seam armed passes in 75.9 s
+without it. That is the claim confirmed by experiment, and it is the
+justification for a writable function pointer shipping in libc.
+
+**The probe-read proof fails in a later test than the one it is written
+under** — `cv_woke == 1` in step 20, because a leaked probe fires inside
+*that* step's waiters. The bug-proof for a global's lifetime never lives
+in the test that sets it.
+
+**The no-broadcast proof is what shows a converted wait really sleeps.**
+Setting `worker_stop` without waking hangs step 7; the `cosmo_yield()`
+poll it replaced would have noticed the flag with no wake at all. A
+conversion from spinning to sleeping is not otherwise observable from a
+passing test.
 
 ## Benchmarks
 

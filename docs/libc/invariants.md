@@ -159,6 +159,37 @@ is process state and not per-thread state, and this invariant is about
 the latter; the fix is a lock apiece and belongs to whichever unit needs
 it. `cosmo/thread.h` states the same restriction to callers.
 
+**L9. A thread waits on a predicate in a `while`, never on a loop count
+and never on a spin.** `cosmo/thread.h` carries a condition variable
+(`docs/audit/next-subsystem-condvar.md`), and its contract has two halves
+that are each load-bearing. A **waiter** loops: `cosmo_cond_wait` may
+return with nothing having happened, so a caller that writes `if` instead
+of `while` has written a bug that passes every test on an unloaded
+machine. A **signaller** changes the predicate under the waiter's mutex:
+that is what orders every signal against the waiter's read of the
+sequence number, and it is why a wakeup cannot be lost rather than a
+convention that usually works.
+
+The rule against loop counts is the same invariant from the test side. A
+wait bounded by iterations measures the host's speed, not the property,
+and this tree has been bitten by that substitution repeatedly -- the
+threads unit's retry budget, and the family of boot-test flakes that count
+N things after a fixed `settle()`. A wait that must give up keeps a
+*deadline* and recomputes its relative timeout from it each pass; a wait
+that must not give up sleeps rather than yielding, because on a
+single-CPU boot the thing being waited for needs the CPU the polling loop
+is spinning on.
+
+*Checked by*: `thrtest` steps 18 to 22 -- a signal seen with the mutex
+proved retaken by `trylock` returning `-EBUSY`; a signal delivered inside
+the sleep window through libc's one-shot probe, since no arrangement of
+threads can reach a window a few instructions wide; a broadcast reaching
+four of four and one ticket taken by exactly one of four; both timeout
+paths; and a waiter broadcast at twenty times whose predicate never
+becomes true. The probe's necessity is itself proved: the same
+lost-wakeup bug that hangs step 19 **passes** when the test uses a
+signaller thread instead.
+
 ## Gaps (documented, not invariants)
 
 - No `<math.h>`, locales, wide characters or a wall clock

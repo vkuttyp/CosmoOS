@@ -1588,6 +1588,51 @@ See [docs/development.md](docs/development.md).
   testing them under two guest CPUs needs a guest-side virtio driver and is
   named as its own unit.
 
+- **The wait, written once** (`docs/audit/next-subsystem-condvar.md`).
+  `cosmo/thread.h` could start a thread, end one, join one and exclude
+  one, and had no way to **wait for something another thread will do**.
+  `cosmo_cond_t` is one word -- a sequence number every signal increments
+  -- with `wait`, `timedwait`, `signal` and `broadcast` over the futex the
+  threads unit already built. **No kernel change and no new syscall**:
+  `SYS_COUNT` stays 89, `futex_wake`'s count was already unbounded so a
+  broadcast is one call, and a `timeout_ns` of 0 already meant no timer.
+  The report offered that as a falsifiable check on its own design and it
+  held.
+  **The lost-wakeup guarantee lives in a window no arrangement of threads
+  can reach**, and two drafts of its test proved it the hard way: the
+  first had the signaller finish before the waiter ever called
+  `cosmo_cond_wait`, and the second relied on the wait's own `unlock` to
+  release a blocked signaller -- which makes that thread *runnable*, not
+  *running*, so the waiter reaches `futex_wait` first. libc therefore
+  ships a one-shot probe, `__cosmo_cond_probe`, NULL in every real program
+  and **taken with an atomic exchange rather than read** so it cannot fire
+  inside a later test's waiter. It is compiled in unconditionally, because
+  a seam that exists only in a test build proves things about a binary
+  nobody runs, and the §70 gate weighs what a writable function pointer in
+  every process costs against that. The evidence it was worth it: the same
+  read-after-unlock bug that hangs the seam-armed test for the full
+  180-second deadline **passes in 75.9 s** when the test uses a signaller
+  thread instead.
+  **The report's premise for its other caller was wrong.** It counted five
+  hand-rolled waits and committed to converting four; three were
+  `vmctl`'s, and all three are `futex_wait` on a **single atomic word**
+  (`park[cpu]`, `ran[c]`, `live`) with lock-free compare-exchange around
+  them -- which is the futex's own job, not a hand-rolled condition
+  variable. That was measured, not assumed: the simplest was converted,
+  built and booted before being reverted at **+14/−5**, six lines becoming
+  fifteen and a mutex appearing around a lock-free counter, with no
+  correctness or clarity gained. `vmctl` is unchanged; the two waits in
+  `thrtest` that were genuinely wrong -- a 2,000,000-iteration loop count
+  standing in for a duration, and an unbounded `cosmo_yield()` spin -- are
+  gone. Converting them also exposed a wrong assertion in the unit's own
+  first draft: it checked that `signal` wakes **exactly one** waiter,
+  which the interface does not promise, since spurious wakeups are
+  permitted and the number of threads a signal makes runnable is not
+  observable without a race. It asserts the guarantee a caller depends on
+  instead -- one ticket of work offered to four waiters is taken exactly
+  once, however many wake. Invariant **L9** states both halves of the
+  contract, and `thrtest` steps 18 to 22 check them.
+
 - **`__thread`, and the TLS image a program brings with it**
   (`docs/audit/next-subsystem-pt-tls.md`). The unit the per-thread `errno`
   was built as a prerequisite for. The compiler emitted thread-local
