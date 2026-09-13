@@ -402,9 +402,28 @@ inserted before it.
    ...
        unsigned seq = __atomic_load_n(&c->seq, __ATOMIC_RELAXED);
        cosmo_mutex_unlock(m);
-       if (__cosmo_cond_probe) __cosmo_cond_probe();   /* <- the window */
+       /* One-shot: taken, not read. See below for why. */
+       void (*probe)(void) = __atomic_exchange_n(&__cosmo_cond_probe, 0,
+                                                 __ATOMIC_ACQ_REL);
+       if (probe) probe();                             /* <- the window */
        cosmo_futex_wait(&c->seq, seq, timeout_ns);
    ```
+
+   **The probe is one-shot, and that is a correctness requirement rather
+   than tidiness.** It is process-global, and every other test here —
+   broadcast, both timed waits, the spurious-wakeup test — enters this
+   same path. A probe left installed would fire in *their* waiters,
+   calling test 2's callback against test 2's mutex and predicate, which
+   corrupts them or hangs them. Review found exactly that in a draft
+   where the test set the probe and never cleared it.
+
+   Clearing it in the test after each wait would work and would be one
+   `thrtest` edit away from being forgotten. Taking it with an exchange
+   cannot be forgotten: the seam fires once for the arming that asked for
+   it and is disarmed before the waiter it fired in has returned. The
+   test re-arms before each wait it wants instrumented, which also makes
+   every instrumented wait visible at the call site instead of implied by
+   a distant assignment.
 
    The test sets the probe to a function that performs the whole signal
    synchronously — take the mutex, set the predicate, `cosmo_cond_signal`,
@@ -461,6 +480,12 @@ stated reason*:
 - **the probe left NULL by the test** → test 2 passes against *both* the
   correct and the broken implementation, which is the proof that the
   seam is what carries this test and not an ornament on it.
+- **the exchange replaced by a plain read**, so the probe stays installed
+  → tests 3 to 6 fail or hang, because their waiters call test 2's
+  callback against test 2's objects. This is the proof for the one-shot
+  rule, and it fails in a *later* test than the one it is written under,
+  which is worth saying out loud: the bug-proof for a global's lifetime
+  is never in the test that sets it.
 - `broadcast` waking 1 instead of `UINT_MAX` → test 3 fails with three
   waiters still blocked.
 - `timedwait` returning 0 on timeout → test 4 fails.
@@ -516,6 +541,12 @@ Both are `thrtest`-shaped and neither needs new scaffolding.
   state it now: this is `cosmo_cond_t`, the native primitive, and a POSIX
   layer would sit on top of it or beside it rather than being retrofitted
   into it.
+- **The test seam is process-global, so its lifetime is a hazard in its
+  own right** — one test's probe firing inside another's wait. The design
+  answer is the one-shot exchange above rather than a documented
+  convention, because a convention is what a later test forgets. Any
+  future use of this seam inherits the same rule: arm it immediately
+  before the wait it instruments.
 - **The test seam is a writable function pointer in libc.** Named in the
   §70 gate above with the argument for it; the counter-argument is that a
   process that ships an indirect call nobody needs has shipped a gadget,
