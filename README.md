@@ -1477,9 +1477,9 @@ See [docs/development.md](docs/development.md).
   `tests/native/thrtest` -- from userland, because a kernel
   self-test cannot create a *user* thread -- with eleven bug-proofs, four of
   which sent the test back for a stronger assertion rather than the code. `SYS_mprotect`, futex
-  requeue, per-thread signal targeting, the handle table under two threads,
-  and `vmctl`'s conversion to a thread per vCPU (the first consumer, and
-  the reason the machine-mode fairness rule exists) remain later units.
+  requeue and per-thread signal targeting remain later units; `vmctl`'s
+  conversion to a thread per vCPU, which was the reason for all of this,
+  landed in the unit two entries below.
 - **A thread pointer, and `errno` per thread** (`docs/audit/next-subsystem-errno-tls.md`,
   `docs/kernel/process/design.md` §13). The last third of what invariant L8
   owed. The kernel had kept a thread pointer per thread all along and
@@ -1519,6 +1519,58 @@ See [docs/development.md](docs/development.md).
   shared -- now fixable, since there is somewhere per-thread to put them --
   and compiler `__thread` with ELF `PT_TLS` remains a later unit that this
   one is the prerequisite for.
+- **A thread per vCPU, and a way to stop one** (`docs/audit/next-subsystem-vcpu-threads.md`,
+  `docs/kernel-services/virtualization/design.md`). The consumer the thread
+  arc was built for. `vmctl --machine` ran a guest's vCPUs on **one thread,
+  a tick each**, and two corrections existed only because of that: an array
+  tracking which vCPU had never had a turn end on its own terms, and a
+  `SYSTEM_OFF` **held for up to 64 turns** while such a sibling ran. The
+  design document already called them what they were -- "not PSCI
+  semantics" -- and both are now gone: each vCPU has its own thread and runs
+  untimed, so a four-CPU guest gets four CPUs' worth of progress instead of
+  four slices of one thread's, and `vmctl: peak concurrent vcpus: 2` is a
+  required marker that the round-robin could never have produced.
+  **The threads were the cheap half.** Nothing could stop a vCPU already
+  inside `arch_hv_vcpu_run` except a fatal signal to the whole process, so
+  the unit adds the kick KVM has and this tree did not: **`SYS_vcpu_stop`
+  (88)** sets a sticky flag and IPIs the host CPU the vCPU is on, and the
+  run leaves with `COSMO_VM_EXIT_STOPPED` having done nothing to the guest.
+  Its handshake (`kernel/hvkick.h`) is **Dekker's** and is `SEQ_CST` on both
+  store-load pairs, because release/acquire permits exactly the reordering
+  that lets both sides miss -- the one place in this design where the
+  cheaper ordering is wrong in a way no amount of testing on one
+  architecture would show. The publication lives in the arch backends,
+  inside the interrupt-disabled region around the entry, because that is
+  what makes a late IPI stay pending and become an exit rather than a
+  missed kick.
+  The lifecycle is a word per vCPU -- parked, starting, running, quit -- in
+  which **quit is absorbing** and parked and running cycle, because a
+  `CPU_OFF` is not the end of a vCPU and its thread goes back to its park.
+  Every transition is a compare-and-swap, so a `CPU_ON` racing a
+  `SYSTEM_OFF` cannot revive a vCPU nobody waits to stop, and shutdown both
+  **waking** the parked threads
+  and **kicking** the running ones, because the kick reaches a thread inside
+  the kernel and nothing else. The main thread is a supervisor rather than a
+  joiner: `join` blocks, and the console ring drops its oldest bytes, so a
+  main thread that joined first would lose the guest's output.
+  Nine review rounds on the report caught **ten design errors before any of
+  it was built**, seven of them in the lifecycle -- including two deadlocks
+  and the memory-ordering bug above. Building it found three more that only
+  running can find: `CPU_ON` had to become **synchronous** (PSCI says a
+  SUCCESS means the target is executing, and a freshly released thread may
+  not have been scheduled at all -- the same race the deleted fairness rule
+  once papered over); a second stop-check in the run loop was **redundant**;
+  and **removing the kick's IPI entirely does not fail any test**, because a
+  host timer tick exits a spinning guest anyway, so liveness comes from the
+  tick plus the sticky flag and the IPI buys promptness. Proven by
+  `guest_dtb`, `guest_offspin` at `-c 2` and `-c 3`, `guest_psci_race`, the
+  peak-concurrency marker and the `hv-vcpu-stop` self-test, with bug-proofs
+  for each -- and two of those proofs recorded as *not* failing on demand,
+  which is the part a reader needs most. The device models take one lock
+  each, taken by whoever enters from outside and never held across a run;
+  testing them under two guest CPUs needs a guest-side virtio driver and is
+  named as its own unit.
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

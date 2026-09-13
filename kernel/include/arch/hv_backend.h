@@ -29,6 +29,7 @@ struct hv_backend {
     void (*vcpu_get_state)(struct arch_hv_vcpu *v, struct cosmo_vcpu_regs *out);
     int (*vcpu_set_state)(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs *in);
     int (*vcpu_run)(struct arch_hv_vcpu *v, struct hv_exit *out);
+    void (*vcpu_set_kick)(struct arch_hv_vcpu *v, struct hv_kick *k);
     void (*vcpu_set_irq)(struct arch_hv_vcpu *v, int vector);
     int (*vcpu_irq_delivered)(struct arch_hv_vcpu *v);
     bool (*vcpu_timer_deadline)(struct arch_hv_vcpu *v, uint64_t *host_ticks);

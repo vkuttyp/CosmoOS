@@ -133,7 +133,8 @@
 #define SYS_thread_create 85  /* (const struct cosmo_thread *req) -> tid */
 #define SYS_thread_exit 86  /* (int status) -> does not return; the process ends with the last thread */
 #define SYS_set_tls   87  /* (uint64_t base) -> 0: the calling thread's thread pointer */
-#define SYS_COUNT     88
+#define SYS_vcpu_stop 88  /* (int vcpu) -> 0: make a running vCPU leave its run */
+#define SYS_COUNT     89
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -700,6 +701,14 @@ struct cosmo_vm_exit {           /* 64 bytes */
 #define COSMO_VM_EXIT_WFI       7u  /* AArch64: the guest waited for an interrupt (x86: HLT) */
 #define COSMO_VM_EXIT_SYSREG    8u  /* AArch64: a trapped system register (x86: CPUID/MSR) */
 #define COSMO_VM_EXIT_PREEMPTED 10u /* nothing happened: the run was bounded (ONE_TICK) and the bound came; run again when you like */
+/*
+ * The owner asked this vCPU to leave its run (SYS_vcpu_stop). Its own kind
+ * rather than -EINTR, because -EINTR already means a fatal signal is
+ * pending and a caller must tell "the machine is stopping" from "this
+ * process is dying". Nothing happened to the guest: run it again and it
+ * continues where it was.
+ */
+#define COSMO_VM_EXIT_STOPPED   11u
 
 /* vcpu_run flags. ONE_TICK bounds a run at the first host-interrupt exit
  * -- about one scheduler tick -- so an owner with one thread can give

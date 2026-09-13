@@ -197,10 +197,11 @@ THREAD_MARKERS = [
 HVTEST_MARKERS = [
     r"^HVTEST: PASS$",
 ]
-# Machine mode (docs/audit/next-subsystem-machine.md): vmctl builds the
-# device tree, loads by the Image header, answers PSCI and runs two vCPUs
-# in one thread; the C guest reports the machine it read through the
-# UART the tree named. AArch64 only: x86 guests have no such machine.
+# Machine mode (docs/audit/next-subsystem-machine.md, and the vCPU-threads
+# unit): vmctl builds the device tree, loads by the Image header, answers
+# PSCI and runs each vCPU on its own thread; the C guest reports the machine
+# it read through the UART the tree named. AArch64 only: x86 guests have no
+# such machine.
 if ARCH == "aarch64":
     HVTEST_MARKERS += [
         r"^dtb: uart@9000000 irq 33 cpus 2 mem 40000000\+",   # the C guest read the tree
@@ -208,9 +209,27 @@ if ARCH == "aarch64":
         r"^cpu1: up ctx=1234cafe$",                           # CPU_ON ran the second vCPU with its context
         r"^cpu_on 1 -> 0$",
         r"^vmctl: guest powered off$",                        # SYSTEM_OFF ended the run
-        # A second CPU that never yields: the held power-off is bounded in
-        # turns, so the machine stops instead of hanging the owner.
+        # A second CPU that never yields: the kick stops it, so the machine
+        # stops instead of hanging the owner.
         r"^HVTEST: offspin ok$",
+        # Two vCPUs inside the hypervisor's run path at the same time, which
+        # is the vCPU-threads unit's whole claim. The round-robin this
+        # replaced ran every vCPU on one thread, so its peak could never
+        # exceed 1 however the ticks interleaved -- restoring it is this
+        # marker's bug-proof.
+        r"^vmctl: peak concurrent vcpus: 2$",
+        # A vCPU the guest never starts: its thread is parked on a futex
+        # when SYSTEM_OFF arrives, and the kick cannot reach it. Shutdown
+        # must wake it as well, or the owner waits forever for a thread
+        # with no way out -- a 180-second boot, not a wrong value.
+        r"^HVTEST: parked ok$",
+        # PSCI calls arriving from other vCPUs while the machine powers
+        # off: it must still stop. A gross breakage of the shutdown path
+        # shows up as a 180-second boot rather than a wrong value, the
+        # same shape as offspin's. (The narrow CPU_ON-over-QUIT window
+        # this guest is named for is not reliably reproducible; the guest
+        # says so.)
+        r"^HVTEST: psci-race ok$",
     ]
 
 HV_FORBIDDEN_MARKERS = [

@@ -59,6 +59,7 @@ int64_t sys_vm_lower_spi(struct syscall_args *a);
 int64_t sys_vcpu_create(struct syscall_args *a);
 int64_t sys_vcpu_regs(struct syscall_args *a);
 int64_t sys_vcpu_run(struct syscall_args *a);
+int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
 /* The native signal ABI (kernel/process/native_signal.c): the frame a

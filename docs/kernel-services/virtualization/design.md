@@ -606,52 +606,99 @@ its own (below). The kernel gives the owner what it needs -- the exit,
 owner's run set. Hypercalls outside the SMCCC range keep the fixtures'
 own protocol.
 
-**More than one vCPU in one thread.** The native libc has no threads, and
-a single-threaded owner can run several vCPUs if a run can be bounded:
-`SYS_vcpu_run`'s third argument, `COSMO_VCPU_RUN_ONE_TICK`, returns at
-the first host-interrupt exit as `COSMO_VM_EXIT_PREEMPTED` -- "nothing
-happened; run again when you like" -- and `vmctl` round-robins its run
-set with it, a tick each. The kernel already had the bound for its own
-tests (`vcpu_run_limited`); it gained the caller. The third argument is
-masked to the bits the kernel defines, because an older libc passed two
-and a register is not a promise.
+**More than one vCPU in one thread, and why it stopped being one thread.**
+`SYS_vcpu_run`'s third argument, `COSMO_VCPU_RUN_ONE_TICK`, returns at the
+first host-interrupt exit as `COSMO_VM_EXIT_PREEMPTED` -- "nothing
+happened; run again when you like" -- and it exists because the native
+libc once had no threads: a single-threaded owner can run several vCPUs if
+a run can be bounded, and `vmctl` round-robinned its run set with it, a
+tick each. The kernel already had the bound for its own tests
+(`vcpu_run_limited`); it gained the caller. The flag remains in the ABI and
+the kernel's tests still use it; `vmctl` no longer does.
 
-**A started vCPU gets its turn before the machine powers off.** Running
-several vCPUs in one thread has a consequence the round-robin did not
-account for. `CPU_ON` creates the sibling and marks it running, and the loop
-takes a turn boundary after every PSCI call so the sibling is scheduled next
--- the comment there records that the first boot of this mode powered off
-before the sibling ran at all. But that boundary bounds the *order*, not the
-turn's *length*: the sibling gets one tick, and if the tick expires before it
-reaches its first instruction of consequence -- which a loaded host makes
-likely, since a tick is host time and the guest's progress within it is
-whatever the host scheduler allows -- the loop comes back to the primary,
-which prints its result and asks for `SYSTEM_OFF`. That was honoured at once,
-and the sibling's output was lost: on a real machine it would have been
-running on its own core all along.
+**A thread per vCPU** (the audit unit "a thread per vCPU, and a way to stop
+one"). Each vCPU has its own thread and runs untimed, so a guest with four
+CPUs gets four CPUs' worth of progress instead of four slices of one
+thread's. The two corrections the round-robin needed went with it, and what
+they were is worth keeping because the shape recurs:
 
-So `SYSTEM_OFF` now **waits for a sibling that has never had a turn end on
-its own terms**. A vCPU is *fresh* from `CPU_ON` until an exit that is not
-`COSMO_VM_EXIT_PREEMPTED` -- a hypercall, a wait, an access: any point the
-guest chose. When `SYSTEM_OFF` arrives and a fresh sibling is still running,
-the asking vCPU stops (its guest must not run past the call) and the
-power-off is held for at most `MACHINE_OFF_GRACE_TURNS` (64) turns of the
-round-robin, which the loop spends on the remaining vCPUs. The power-off is
-then honoured as soon as no fresh sibling remains, when the grace runs out,
-or when the last vCPU powers itself off -- and prints `guest powered off`
-either way, because the guest did ask for the machine to stop. The bound is
-what keeps a hostile guest from holding the machine open: a secondary that
-spins forever costs the power-off 64 turns and no more -- which is why, while
-a power-off is held, even the last runnable vCPU is run with
-`COSMO_VCPU_RUN_ONE_TICK`. Running it untimed, as the loop otherwise does
-when nothing else needs the thread, would hand the thread to a guest that
-never yields and the bound would mean nothing: `guest_offspin` is that
-guest, and it hangs the owner without this.
+> A vCPU used to be *fresh* from `CPU_ON` until an exit that was not a
+> preemption, and `SYSTEM_OFF` was **held** for a fresh sibling for up to
+> 64 turns of the round-robin. The reason was that `CPU_ON` marked a
+> sibling running and the loop gave it one tick -- and if that tick expired
+> before the sibling reached its first instruction of consequence, which a
+> loaded host makes likely, the primary came back, printed its result and
+> asked for `SYSTEM_OFF`, and the sibling's output was lost. On a real
+> machine it would have been running on its own core all along. The hold
+> was not PSCI semantics; it was the correction for serialising what
+> hardware runs in parallel, and it is gone.
 
-This is not PSCI semantics -- a real `SYSTEM_OFF` does not wait for anything
--- it is the correction for serialising what the hardware would have run in
-parallel. A guest that observes the difference would have to be counting its
-own instructions against a sibling's, which the interface never promised.
+The race it corrected does not disappear with threads, though -- it moves.
+`guest_dtb.c` starts a CPU and powers the machine off two instructions
+later, and a freshly released thread may not have been scheduled at all, so
+the first build of this unit lost `cpu1: up` exactly as the round-robin
+once had. The answer is not another correction but a **more faithful
+`CPU_ON`**: PSCI says a `SUCCESS` means the target is powered on *and
+executing*, which on hardware is free because the core starts itself, and
+here costs a bounded wait for the target's thread to reach its first entry.
+A timeout is still `SUCCESS` -- the vCPU is on -- and no part of the
+interface has to lie about turns.
+
+**The lifecycle.** One word per vCPU:
+
+| state | meaning |
+| --- | --- |
+| `VCPU_PARKED` | created, or powered off; waiting to be told which guest to run |
+| `VCPU_STARTING` | `CPU_ON` has claimed it and is writing its registers |
+| `VCPU_RUNNING` | the entry and context are set: run the guest |
+| `VCPU_QUIT` | leave for good: the machine is stopping |
+
+`QUIT` is **absorbing**, and that is the invariant rather than "the states
+only increase": `PARKED` and `RUNNING` cycle, because `CPU_OFF` is not the
+end of a vCPU -- a guest may power one down and start it again, and its
+thread goes back to its park rather than exiting, so the live count stays
+the count of threads *created*. Every transition is a compare-and-swap, so
+nothing moves a vCPU out of `QUIT`. `STARTING` is there because `CPU_ON`
+has two jobs and either order is wrong in one step: writing the registers
+before claiming the vCPU corrupts one that is already running, and
+publishing `RUNNING` before writing them lets the target wake on a spurious
+futex return and enter with stale ones.
+
+Every thread and every vCPU is created before the guest runs, so `CPU_ON`
+is a register write and a wake with nothing in it that can fail for want of
+memory -- a failed create is a startup failure, reported where startup
+failures are, rather than a PSCI error code a guest has no good answer for.
+`CPU_ON` claims its target with a **compare-and-swap from `PARKED`** and
+publishes with another from `STARTING`, never a store: a `CPU_ON` racing a
+`SYSTEM_OFF` must not be able to put `RUNNING` over `QUIT` and revive a
+vCPU whose thread nobody is waiting to stop. A claim it cannot complete --
+registers the hardware refuses -- is given back, so the vCPU stays
+startable. A machine-wide `stopping` flag refuses such a call early; the swap is
+what makes the race safe whichever order the two land in.
+
+`SYSTEM_OFF` does three things and needs all of them: it sets `stopping`,
+writes `QUIT` to every word **and wakes it**, and **kicks** every vCPU that
+might be in a guest. The kick reaches a thread inside `cosmo_vcpu_run` and
+nothing else; the wake reaches one still parked on its futex, which a
+secondary the guest never started will be forever. Without the wake the
+owner's live count never reaches zero and it waits for a shutdown that
+cannot complete -- which `guest_offspin -c 3` is the test for.
+
+**The main thread is a supervisor, not a joiner.** `cosmo_thread_join`
+blocks until its thread exits, so a main thread that joined first would
+drain nothing -- and the guest's console ring drops its *oldest* bytes when
+full, which is output silently lost and the harness's markers are made of
+exactly that output. It drains the console, services the device models,
+polls the tap, and waits on the count of live vCPU threads with a bounded
+wait that an exiting thread cuts short. The joins happen after the count
+reaches zero, where they reap rather than wait.
+
+**The device models take one lock each** (`vmctl.c`), taken by whoever
+enters a model from outside -- the MMIO dispatch, the drain, the tap poll
+-- and never held across `cosmo_vcpu_run`, so a guest looping in MMIO
+cannot stall another vCPU. That last clause is not decorative: holding a
+lock across a run lets a guest that never yields hold it forever, which an
+experiment confirmed by hanging the boot.
 
 **The first guest written in C** (`tests/hv/aarch64/guest_dtb.c`, with
 an Image header in its assembly entry) knows nothing of this hypervisor:

@@ -89,6 +89,7 @@ struct cosmo_vm_exit {
 | `COSMO_VM_EXIT_FAIL` | 6 | current | `fail.code`, `info1`, `info2` from the backend; the vCPU is dead |
 | `COSMO_VM_EXIT_WFI` | 7 | after `wfi`/`wfe` | none. AArch64's `HLT`: the guest has nothing to do until an interrupt, and the owner decides whether to give it one |
 | `COSMO_VM_EXIT_SYSREG` | 8 | the trapping instruction (not advanced) | `sysreg.iss` (the `ESR_EL2` encoding), `sysreg.reg` (the guest register the value comes from or goes to), `sysreg.write`. AArch64's CPUID: the owner answers and steps over the instruction |
+| `COSMO_VM_EXIT_STOPPED` | 11 | current | none. `vcpu_stop` was called: nothing happened to the guest, and running it again continues where it was. Its own kind rather than `-EINTR`, because `-EINTR` already means a fatal signal is pending and a caller must tell "the machine is stopping" from "this process is dying" |
 
 `COSMO_VM_EXIT_F_IRQ_PENDING` (1): at least one injected vector has not
 been delivered yet.
@@ -118,6 +119,22 @@ console ring.
 | 47 | `vcpu_regs` | `int vcpu, struct cosmo_vcpu_regs *regs, int set` | 0 | `EFAULT`, `EBADF` (READ to get, WRITE to set), `EINVAL` (set: a state the hardware would refuse, see design.md "Register file"; the state is left unchanged) |
 | 48 | `vcpu_run` | `int vcpu, struct cosmo_vm_exit *exit` | 0, `*exit` filled | `EFAULT`, `EBADF` (WRITE), `ENOTSUP`, `EIO` (the vCPU is dead), `EINTR` (the calling process is being killed), `ENOMEM` (per-CPU backend state) |
 | 49 | `vcpu_irq` | `int vcpu, unsigned vector` | 0 | `EBADF` (WRITE), `EINVAL` (vector < 32 or > 255) |
+| 88 | `vcpu_stop` | `int vcpu` | 0 | `EBADF` (the handle, or no RUN right) |
+
+`vcpu_stop` makes a *running* vCPU leave its run, which is the one thing an
+owner with a thread per vCPU cannot do for itself: a thread inside
+`vcpu_run` is unreachable except through a host interrupt. It sets a sticky
+per-vCPU flag and, if the vCPU is inside a guest, sends an IPI to the host
+CPU it is on; the run returns `COSMO_VM_EXIT_STOPPED` having done nothing
+to the guest, so running it again continues where it was. Sticky means a
+stop set while the vCPU is *between* runs is taken by the next run, without
+entering the guest -- so the caller need not know what the vCPU is doing.
+It takes the RUN right rather than an IRQ right: stopping a vCPU is
+something only whoever may run it can want, and it is not an interrupt.
+
+Returning 0 for a vCPU that was not running is deliberate. The alternative
+would be a report of a race the caller cannot act on -- by the time it read
+the answer, the vCPU's state would have changed again.
 
 `vcpu_run` reads `*exit` before running: when the previous exit was an
 IN, `exit->kind == COSMO_VM_EXIT_IO` supplies `io.value` for the guest's
@@ -230,6 +247,12 @@ VirtualCPU:
   cosmo_vm_exit *, unsigned max_intr)`: the same, giving up with
   `-ETIMEDOUT` after `max_intr` host-interrupt exits (0 = unlimited; for
   tests of guests that never exit).
+- `int vcpu_stop(struct vcpu *)`: the kick. Sets the sticky flag and, if
+  the vCPU is inside a guest, IPIs the host CPU it is on; always 0. The
+  handshake it is half of lives in `kernel/hvkick.h`, which is also where
+  the reason both store-load pairs are `SEQ_CST` is written down -- it is
+  Dekker's, and release/acquire permits exactly the reordering that lets
+  both sides miss. Callable from any thread; meant for another one.
 - `int vcpu_inject(struct vcpu *, unsigned vector)`: make 32..255
   pending (`-EINVAL` otherwise); callable from any thread while the
   guest runs. `int vcpu_lowest_pending(struct vcpu *)`: the vector the
