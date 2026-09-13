@@ -439,22 +439,29 @@ allocator and stdio under concurrency rather than the proposition that a
 create always succeeds. Every refusal is printed with its errno. Retrying
 costs the step the very overlap it exists to measure, though -- a sleep
 between sequential retries lets an earlier worker finish before the last
-one exists -- so the workers wait on a **barrier**: each announces itself
-and spins until the main thread, having finished its creates, has seen all
-of them arrive and releases them. The release is unconditional and both
-waits are bounded, so no worker is left parked however the creates went.
-Both bounds are also **observable**, because a bound that expires
-silently is the flaw the barrier exists to remove -- a worker that gave
-up waiting would allocate alone and every assertion would still hold. The
-main thread asserts that every started worker arrived, and a worker whose
-wait expires says so and counts itself, which the step asserts never
-happened. Both bounds are **durations derived from the retry budget**,
-not yield counts: a worker starts waiting the moment it is created, main
-may still spend twenty attempts and twenty milliseconds apiece on the
-workers after it, and a bound that did not cover that would report the
-first worker late during exactly the refusal the retry exists to
-tolerate. The worker sleeps on the word with a futex rather than
-spinning, and main wakes it. The join afterwards joins exactly the slots that started -- counting
+one exists -- so the workers wait on a **barrier**: each announces
+itself and then sleeps on the release word with a futex, and the main
+thread, having finished its creates, waits for all of them to arrive
+before storing the release and waking them.
+
+Three properties make that barrier trustworthy, and each was a separate
+mistake first. The release is **unconditional**, so no worker is left
+parked however the creates went. Both waits are **bounded**, so neither
+side can hang the boot -- but a bound that expires silently is the flaw
+the barrier exists to remove, since a worker that gave up waiting would
+allocate alone while every assertion still held. So both bounds are
+**observable**: the main thread asserts that every started worker
+arrived, and a worker whose wait expires says so and counts itself, which
+the step asserts never happened. And both bounds are **durations derived
+from the retry budget** -- `HEAP_BARRIER_NS`, computed from the same
+constants the retry loop uses -- rather than yield counts, because a
+worker begins waiting the moment it is created while main may still spend
+twenty attempts and twenty milliseconds apiece on the workers after it. A
+count would have expired inside a successful retry sequence and reported
+the first worker late during exactly the refusal the retry exists to
+tolerate.
+
+The join afterwards joins exactly the slots that started -- counting
 them instead would join a refused slot and one thread twice, leaving a
 real thread running. Each thread
 allocates, fills its block with its own byte, verifies every byte of it,
