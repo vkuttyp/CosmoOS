@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Five things in the first drafts of this report were wrong, and review
+**Six things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -50,7 +50,10 @@ makes the supervisor's `live == 0` mean "every thread has returned" -- and
 a fifth was the mirror of it: a `CPU_ON` racing `SYSTEM_OFF` could store
 `RUNNING` over `QUIT` and revive a vCPU after shutdown began, so the
 states are monotonic and `CPU_ON` releases a thread with a
-compare-and-swap that fails once `QUIT` is set.
+compare-and-swap that fails once `QUIT` is set. The sixth was that none of
+that said anything about **memory ordering**, which for a lifecycle built
+out of five shared words is most of the correctness: there is now a table
+of every word, its writer, its reader and the ordering each needs.
 
 ## Problem
 
@@ -251,6 +254,29 @@ sees the live count reach zero. That is the honest PSCI shape -- a real
 `SYSTEM_OFF` does not wait -- and it is only implementable with the kick
 below.
 
+### The memory ordering, stated once
+
+Every word above is shared between threads, and three of the six findings
+this report collected were lifecycle races -- so the ordering is written
+down here rather than left to whoever writes the line. The precedent is in
+the tree: `cosmo_thread_join` read a thread's return value without an
+acquire and had to be corrected in review (#116). A publication whose
+ordering is implicit is a publication that is wrong on one architecture.
+
+| word | writer | reader | ordering, and why |
+| --- | --- | --- | --- |
+| `entry[i]`, `ctx[i]` -- the vCPU's entry point and context | `CPU_ON`, before the swap | the released thread, after its acquire | plain writes, **published by the release swap below**. A thread that could see `RUNNING` and then a stale entry point is a guest entered at the wrong address -- on AArch64 a fault at whatever the word last held |
+| `park[i]` -- `PARKED`/`RUNNING`/`QUIT` | `CPU_ON` (compare-and-swap from `PARKED`, **release**); `SYSTEM_OFF` (store `QUIT`, **release**) | the thread, in its park loop and after every `cosmo_vcpu_run` (**acquire**) | release on the write so the entry context is visible; acquire on the read so the thread that sees `RUNNING` sees that context. A *failed* swap needs no ordering -- it changes nothing |
+| `stopping` -- the machine is powering off | `SYSTEM_OFF`, **before** the first `QUIT`, **release** | `CPU_ON`'s fast path, **acquire** | the flag must not become visible after the `QUIT` it precedes, or a `CPU_ON` could pass the fast path *and* find `PARKED`. It is only the fast path: the swap is what makes the race safe, so a stale read here costs a refusal the swap would have made anyway |
+| `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason, test 4's timestamps -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
+| a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
+| test 4's `[enter, exit)` timestamps | each vCPU thread, plain writes | the supervisor, after `live == 0` | published by `live`'s release, which is why the supervisor reads them **after** the count reaches zero rather than while the threads run |
+
+The futex calls need no ordering on top of this: the kernel compares the
+word under its own lock, so a wake between a thread's check and its wait
+cannot be lost -- but the word must be written **before** the wake in
+every case, which is what the release stores above give.
+
 ### The kick
 
 ```c
@@ -447,8 +473,13 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **`CPU_ON` releasing a thread with a store instead of a
-compare-and-swap** (a `CPU_ON` racing `SYSTEM_OFF` revives a vCPU after
+**Bug-proofs**: **the entry context published without a release** (the
+swap made `__ATOMIC_RELAXED`: a released thread can see `RUNNING` with a
+stale entry point and enter its guest at whatever the word last held,
+which the owner reports as an unexpected exit -- and which a single-CPU
+run cannot produce, so the proof needs `-smp 4` and is exactly the kind
+that passes on the wrong machine); **`CPU_ON` releasing a thread with a
+store instead of a compare-and-swap** (a `CPU_ON` racing `SYSTEM_OFF` revives a vCPU after
 shutdown began, `live` never reaches zero, and the owner hangs -- the same
 180 s deadline as the parked case, which is why both belong to the
 lifecycle rather than to the kick); **`SYSTEM_OFF` kicking but not waking
