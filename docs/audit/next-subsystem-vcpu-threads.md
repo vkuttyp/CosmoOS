@@ -2,9 +2,10 @@
 
 Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built.** The
-design below is what shipped, and building it corrected the report in three
-ways that review could not have caught, because each needed the thing to
-run:
+design below is what shipped. Building it corrected the report in three
+ways that only running could catch, and review of the build found three
+more -- so the numbering below runs to six, and the lifecycle table two
+sections down carries two of them:
 
 1. **`CPU_ON` had to become synchronous.** The report assumed threads would
    make `cpu1: up` appear *more* reliably than the round-robin's fairness
@@ -42,6 +43,26 @@ run:
    `cosmo_vcpu_run`, with its peak kept, is the same property exactly -- a
    peak above one *is* an intersection -- with no clock, no per-run storage
    and no comparison pass to get wrong.
+
+4. **MMIO answers were being erased.** The exit structure carries the
+   answer to the last exit *into* the next run -- the kernel reads it before
+   entering so an answered MMIO read completes in the guest's register --
+   and the first threaded loop zeroed it every iteration, so every virtio
+   register read completed as zero. Nothing gated catches it: the
+   machine-mode guests use no virtio, and the Linux boot that does is a
+   demonstration rather than a gate. Found in review, not by a test.
+5. **The lifecycle needed a fourth state, and `PARKED` had to mean "or
+   powered off".** `CPU_ON` wrote its target's registers before asking
+   whether the target was already running, and `CPU_OFF` exited the thread
+   leaving the word `RUNNING`, so a powered-down CPU could never be
+   restarted -- something the run set this replaces allowed. The table two
+   sections down carries both.
+6. **"Has run" must not count a run that never entered the guest.** A first
+   run kicked by a concurrent shutdown returns `STOPPED` without entering,
+   and the word `CPU_ON` waits on was set anyway -- so the answer could
+   claim a guest that never executed. Three versions of that one wait were
+   wrong in the same shape: each watched something *adjacent* to the thing
+   it needed to know.
 
 Two smaller ones, both from bug-proofs that failed to fail: a second
 stop-check in the run loop was **redundant** (the top of the loop already
@@ -257,12 +278,28 @@ shutdown terminate. The word is a state, not a flag:
 
 | state | meaning |
 | --- | --- |
-| `VCPU_PARKED` (0) | created, never started; waiting to be told which |
-| `VCPU_RUNNING` (1) | `CPU_ON` wrote the entry and woke it; run the guest |
-| `VCPU_QUIT` (2) | leave without running: the machine is stopping |
+| `VCPU_PARKED` (0) | created, **or powered off**; waiting to be told which guest to run |
+| `VCPU_STARTING` (1) | **as built** (difference 5): `CPU_ON` has claimed it and is writing its registers |
+| `VCPU_RUNNING` (2) | the entry and context are set: run the guest |
+| `VCPU_QUIT` (3) | leave for good: the machine is stopping |
 
-A thread waits while the word is `PARKED`, and on waking does what the
-word now says.
+A thread waits while the word is `PARKED` **or `STARTING`**, and on waking
+does what the word now says. Two of those four rows are as-built rather
+than as-designed, and both for reasons review found rather than the report:
+
+- **`STARTING`** exists because `CPU_ON` has two jobs -- claim the vCPU and
+  write its entry point -- and either order in one step is wrong. Writing
+  the registers first corrupts a vCPU that is *already running*, which the
+  first threaded build did. Publishing `RUNNING` first lets the target wake
+  on a spurious futex return and enter with registers not yet written. So
+  the claim and the publication are separate transitions, and a claim that
+  cannot be completed is given back.
+- **`PARKED` means "or powered off"** because `CPU_OFF` is not the end of a
+  vCPU. The first build exited the thread and left the word `RUNNING`, so
+  `AFFINITY_INFO` reported the CPU on and a later `CPU_ON` answered
+  `ALREADY_ON` forever -- the run set this unit replaces allowed a guest to
+  restart a powered-down CPU, and the threaded version had silently taken
+  that away.
 
 **`QUIT` is absorbing, and that is the rule the transitions have to
 enforce.** *As built the states do not simply increase* (difference 4):
