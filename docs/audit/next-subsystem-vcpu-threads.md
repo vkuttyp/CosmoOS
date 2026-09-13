@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Eight things in the first drafts of this report were wrong, and review
+**Nine things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -63,7 +63,12 @@ written by the run loop cannot be read safely by a kicker that must not
 take `run_lock`, and stickiness stops a flag being lost without making a
 spinning guest look at it. That is what `in_guest` and the re-check before
 the VM entry are for, and they land in the arch backends -- which the
-affected-files table now says.
+affected-files table now says. The ninth was that the handshake those two
+make was specified with release/acquire, which permits exactly the
+StoreLoad reordering that lets **both** sides miss -- the kicker sending
+no IPI while the runner enters the guest. It is Dekker's handshake and it
+needs `SEQ_CST` on both store-load pairs, with the total-order argument
+written out rather than asserted.
 
 ## Problem
 
@@ -281,8 +286,8 @@ ordering is implicit is a publication that is wrong on one architecture.
 | `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason, test 4's timestamps -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
 | a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
 | test 4's `[enter, exit)` timestamps | each vCPU thread, plain writes | the supervisor, after `live == 0` | published by `live`'s release, which is why the supervisor reads them **after** the count reaches zero rather than while the threads run |
-| **`v->stop`** -- the kick's flag, in the kernel | `sys_vcpu_stop`, **release**, *then* the IPI | the run loop, **consumed with an `__atomic_exchange` (acq_rel)** at entry and after every host-interrupt exit | the store must be visible before the IPI that makes the target look at it, or the target exits, finds nothing and re-enters the guest -- a lost kick, which is a hang. Consumed by *exchange* rather than read-then-clear so that a stop arriving while one is being consumed is not swallowed: the exchange either returns it (this run stops) or lands after it (the next run stops) |
-| **`v->in_guest`** -- one word carrying "inside a guest" and the host CPU it is on | the run loop, **release**, immediately before the VM entry; cleared **release** immediately after the exit | `sys_vcpu_stop`, **acquire** | this replaces the `loaded_cpu` read a previous draft proposed, which **was wrong** rather than merely unsynchronised: `loaded_cpu` is a plain `int` written by the run loop, `sys_vcpu_stop` cannot take `run_lock` without waiting behind the very guest it means to interrupt, and stickiness only stops the flag being *lost* -- it does nothing to make a *spinning* guest look at it. A flag that lands after the runner's last check, with the IPI sent to a CPU the vCPU has since left, leaves a guest spinning forever with its stop pending, which is the hang the kick exists to prevent |
+| **`v->stop`** -- the kick's flag, in the kernel | `sys_vcpu_stop`, **`SEQ_CST`** (it is half of a Dekker handshake, below), *then* the IPI | the run loop, **consumed with an `__atomic_exchange`**; `SEQ_CST` for the re-read before a VM entry, `acq_rel` for the consume after an exit | the store must be visible before the IPI that makes the target look at it, or the target exits, finds nothing and re-enters the guest -- a lost kick, which is a hang. Consumed by *exchange* rather than read-then-clear so that a stop arriving while one is being consumed is not swallowed: the exchange either returns it (this run stops) or lands after it (the next run stops) |
+| **`v->in_guest`** -- one word carrying "inside a guest" and the host CPU it is on | the run loop, **`SEQ_CST`** immediately before the VM entry (the other half of the handshake); cleared **release** immediately after the exit | `sys_vcpu_stop`, **`SEQ_CST`** | this replaces the `loaded_cpu` read a previous draft proposed, which **was wrong** rather than merely unsynchronised: `loaded_cpu` is a plain `int` written by the run loop, `sys_vcpu_stop` cannot take `run_lock` without waiting behind the very guest it means to interrupt, and stickiness only stops the flag being *lost* -- it does nothing to make a *spinning* guest look at it. A flag that lands after the runner's last check, with the IPI sent to a CPU the vCPU has since left, leaves a guest spinning forever with its stop pending, which is the hang the kick exists to prevent |
 
 The futex calls need no ordering on top of this: the kernel compares the
 word under its own lock, so a wake between a thread's check and its wait
@@ -292,23 +297,45 @@ every case, which is what the release stores above give.
 **The kick needs one more thing than an ordering, and it is the reason
 `in_guest` exists.** Flag-then-IPI is necessary and not sufficient: the
 flag can land after the runner's last look at it and before the guest is
-entered, and then no IPI has anywhere correct to go. The answer is the
-double-check every VMM ends up with:
+entered, and then no IPI has anywhere correct to go. So both sides look at
+each other:
 
-1. the runner publishes `in_guest = CPU | IN_GUEST` (release) **before**
-   the VM entry;
-2. the runner then **re-reads the stop flag** (acquire) and abandons the
-   entry if it is set;
-3. the kicker stores the flag (release), then reads `in_guest` (acquire)
-   and IPIs the CPU it names.
+1. the runner publishes `in_guest = CPU | IN_GUEST` **before** the VM
+   entry;
+2. the runner then **re-reads the stop flag** and abandons the entry if it
+   is set;
+3. the kicker stores the flag, then reads `in_guest` and IPIs the CPU it
+   names.
 
-Either the flag was set before the runner's re-read -- and the entry never
-happens -- or it was set after, in which case the kicker sees `IN_GUEST`
+**Both of those store-then-load pairs must be sequentially consistent, and
+release/acquire is not enough.** This is the correction an earlier draft
+of this section needed, and the reason is the one reordering release and
+acquire permit: a release *store* followed by an acquire *load* may be
+reordered with each other. If both pairs are allowed to slip, both sides
+miss -- the kicker reads `in_guest` from before the runner published it
+and sends no IPI, *and* the runner reads the flag from before the kicker
+stored it and enters the guest. A spinning guest then runs forever with
+its stop pending, which is the hang this whole mechanism exists to
+prevent.
+
+So each side's store and load are `__ATOMIC_SEQ_CST` (equivalently, a full
+fence between them), and the argument that this suffices is the standard
+one: a single total order over the four accesses cannot contain both
+misses at once. If the kicker's load of `in_guest` precedes the runner's
+store of it, then the kicker's store of the flag precedes that load and so
+precedes the runner's store, and the runner's load of the flag -- which
+follows its own store -- must see it. The two misses would need a cycle,
+and a total order has none. **This is Dekker's handshake**, and it is worth
+naming as such: it is the one place in this design where the cheaper
+ordering is wrong in a way no amount of testing on one architecture would
+show.
+
+Either way, then: the flag was set before the runner's re-read and the
+entry never happens, or it was set after and the kicker sees `IN_GUEST`
 with a CPU that is still correct, because `in_guest` was published before
-the entry and is not cleared until the exit. There is no third case, which
-is what makes the kick a mechanism rather than a hope. `loaded_cpu` stays
-what it is -- a VMCS bookkeeping field private to the run path -- and the
-kick stops reading it.
+the entry and is not cleared until the exit. `loaded_cpu` stays what it is
+-- VMCS bookkeeping private to the run path -- and the kick stops reading
+it.
 
 ### The kick
 
@@ -507,7 +534,16 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **the entry's re-check of the stop flag removed** (the
+**Bug-proofs**: **the handshake weakened from `SEQ_CST` to
+release/acquire** -- the one bug-proof in this report that **cannot be
+demonstrated by running it**, and it is listed first for that reason. The
+reordering it permits is a StoreLoad slip that neither x86-64 (which does
+not reorder stores past loads in a way that breaks this) nor a
+four-CPU QEMU guest is likely ever to exhibit; the proof is the
+total-order argument above, plus review. A bug-proof that cannot fail on
+demand is worth naming as one rather than quietly omitting, because the
+alternative is a reader assuming the weaker ordering was tested and found
+adequate; **the entry's re-check of the stop flag removed** (the
 window the `in_guest` double-check exists to close: a stop that lands
 between the runner's last look and its VM entry is pending while the guest
 spins, no IPI has anywhere correct to go, and `guest_offspin` hangs on the
