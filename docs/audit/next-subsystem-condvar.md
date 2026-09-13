@@ -9,7 +9,12 @@ and wait for the instruction to build it. This is that report, and
 something another thread will do**. Every program that needs one writes
 it by hand, out of the raw futex or out of a yield loop, and there are
 five such hand-rolls in the tree already. This unit writes it once, in
-the library, and deletes them.
+the library, and converts **four** of the five. The fifth — `vmctl`'s
+park/run handshake — is examined last and converted **only if it comes
+out simpler**, because it is concurrent code a review has already
+corrected twice; the scope is stated the same way in the affected-files
+table and in the migration plan, and "four, with the fifth conditional"
+is the commitment.
 
 ## Problem
 
@@ -276,7 +281,7 @@ Benchmarks says which number would change the decision.
 | --- | --- |
 | `libc/include/cosmo/thread.h` | `cosmo_cond_t`, `COSMO_COND_INIT`, the four functions, and the `while`-not-`if` contract stated where a caller will read it |
 | `libc/src/thread.c` | the four functions, beside the mutex they compose with |
-| `userland/system/vmctl.c` | the three hand-rolled waits become `cosmo_cond_*`; the vCPU park/run state machine keeps its states and loses its futex calls |
+| `userland/system/vmctl.c` | the `CPU_ON` wait and the supervisor drain become `cosmo_cond_*`. **The park/run state machine is conditional**: it keeps its states either way, and loses its futex calls only if step 5 finds the result simpler — see the migration plan, which is the one place this is decided |
 | `userland/tests/thrtest.c` | the two yield-spin waits become condition waits; **new steps** for the primitive itself |
 | `docs/libc/invariants.md` | L8's neighbourhood: what a threaded program may now wait on, and the `while` contract as an invariant |
 | `docs/libc/architecture.md` | the `cosmo/thread.h` row gains the condition variable |
@@ -319,11 +324,17 @@ two units ago.
    as the regression.
 6. **The documents**, including the threads report's deferral list.
 
-Steps 3–5 are separable and each is independently revertible; if step 5
-looks worse than what it replaces, it should not land, and the unit is
-still complete without it. **A conversion that makes the code longer is a
+Steps 3–5 are separable and each is independently revertible. **Steps 1–4
+are the unit**; step 5 is a judgement made with the code in front of us,
+and the banner and the affected-files table say so too rather than
+promising all five. **A conversion that makes the code longer is a
 conversion that should not happen**, and this plan expects to be told so
 at step 5 rather than to discover it after.
+
+If step 5 does not land, the report is converted as-built to say the
+park/run handshake keeps its futex calls **and why** — a hand-rolled wait
+that survived review twice and reads better than its replacement is a
+finding worth recording, not an embarrassment to bury.
 
 ## Tests
 
@@ -331,14 +342,56 @@ In `thrtest`, which is where the threading story is certified. The thread
 bound step must stay last among thread-creating steps, so these are
 inserted before it.
 
-1. **A signal is seen.** One waiter on a predicate, one signaller that
-   sets it under the mutex and signals; the waiter returns with the
-   predicate true.
-2. **A signal that arrives before the wait is not lost.** The signaller
-   runs to completion — predicate set, signal sent — *before* the waiter
-   reaches `cosmo_cond_wait`. The waiter's `while` must see the predicate
-   and never sleep. This is the lost-wakeup case, and the one a naive
-   implementation that only wakes sleepers fails.
+1. **A signal is seen, and the mutex comes back.** One waiter on a
+   predicate, one signaller that sets it under the mutex and signals; the
+   waiter returns with the predicate true.
+
+   **The predicate is not the assertion that matters here**, because the
+   signaller made it true before the wait returned — an implementation
+   that forgot to re-acquire the mutex would pass on the predicate alone.
+   So the waiter, immediately on return, calls
+   `cosmo_mutex_trylock(&m)` and requires **`-EBUSY`**: the mutex is not
+   recursive, so a thread that holds it cannot take it again, and a
+   thread that does *not* hold it takes it successfully. One call, one
+   value, no timing — it is exactly the ownership assertion the
+   re-acquisition contract needs, and without it this test is vacuous
+   for half of what it claims.
+
+2. **A signal delivered inside the sleep window is not lost.** This is
+   the lost-wakeup case and the hardest test here, so it is described
+   with its limitation rather than asserted.
+
+   The window is between the waiter's read of `seq` (under the mutex) and
+   its `futex_wait`. To put a signaller inside it: a signaller thread
+   **blocks on the mutex** while the waiter holds it, and the waiter then
+   calls `cosmo_cond_wait`. The `unlock` inside the wait is what releases
+   the signaller, so the signaller runs in the window by construction —
+   it is the `unlock` that wakes it. It sets the predicate and signals.
+   A correct implementation read `seq` *before* the unlock, so the
+   signal's increment makes `futex_wait` return `-EAGAIN` without
+   sleeping, and the waiter's `while` sees the predicate. An
+   implementation that read `seq` after the unlock reads the *new* value
+   and sleeps on it forever.
+
+   **This is likely, not certain**, and the report says so: the signaller
+   is released by the unlock but the scheduler decides when it runs. The
+   test therefore repeats the handshake several hundred times, and the
+   failure it detects is a **hang** that the boot deadline catches — the
+   same detection this tree already relies on for `guest_psci_race`.
+
+   **The deterministic half is the bug-proof, not the test.** Widening the
+   window is what makes the failure certain, so the proof moves the `seq`
+   read after the unlock *and* inserts a sleep between them; the hang then
+   happens on the first iteration. That is the technique the vCPU-threads
+   unit used to reproduce a CI-only failure locally with a 40 ms sleep,
+   and it is the honest way to prove a window that cannot be hit on
+   demand from outside.
+
+   A **previous draft of this test was vacuous** and a review caught it:
+   it had the signaller run to completion *before* the waiter called
+   `cosmo_cond_wait`, so the waiter's `while` saw the predicate and never
+   waited at all. That tests the caller's loop, not the library — neither
+   bug-proof below could have failed it, because nothing ever slept.
 3. **A broadcast reaches every waiter.** Four waiters, one broadcast, all
    four return; a `signal` in the same position releases exactly one, which
    is what distinguishes the two calls.
@@ -355,17 +408,22 @@ inserted before it.
 **Bug-proofs**, one per property, each expected to fail *for its own
 stated reason*:
 
-- `seq` read **after** the unlock instead of before → test 2 fails
-  (the signal lands in the window and the waiter sleeps forever, so the
-  step times out).
-- `signal` not incrementing `seq`, only waking → test 2 fails the same
-  way, and test 1 still passes, which is what makes the two tests
-  different rather than redundant.
+- `seq` read **after** the unlock instead of before, *with a sleep
+  inserted in the widened window* → test 2 hangs on its first iteration
+  and the boot deadline reports it. Without the inserted sleep the same
+  bug is merely likely to hang, which is why the proof widens the window
+  rather than trusting the race.
+- `signal` not incrementing `seq`, only waking → test 2 hangs the same
+  way (the waiter sleeps on a value nothing changes), while test 1 still
+  passes — which is what makes the two tests different rather than
+  redundant.
 - `broadcast` waking 1 instead of `UINT_MAX` → test 3 fails with three
   waiters still blocked.
 - `timedwait` returning 0 on timeout → test 4 fails.
-- the mutex not re-acquired before returning → test 1's predicate read
-  races and the test fails under the loaded-host case.
+- **the mutex not re-acquired before returning** → test 1's
+  `cosmo_mutex_trylock` returns 0 instead of `-EBUSY`. Deterministic, and
+  the reason that assertion exists: the predicate alone cannot fail for
+  this bug, since the signaller already made it true.
 
 **On vacuity**, because this tree has been caught by it: a wait test that
 passes when the wait does nothing is the default failure mode here, since
