@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Four things in the first drafts of this report were wrong, and review
+**Five things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -46,7 +46,11 @@ a vCPU inside the kernel's run loop and a secondary that was never
 `CPU_ON`ed is parked in userland -- so `live` would never reach zero on
 the most ordinary path there is, a guest that starts one secondary of four
 and powers off. The park is now a three-state word, which is also what
-makes the supervisor's `live == 0` mean "every thread has returned".
+makes the supervisor's `live == 0` mean "every thread has returned" -- and
+a fifth was the mirror of it: a `CPU_ON` racing `SYSTEM_OFF` could store
+`RUNNING` over `QUIT` and revive a vCPU after shutdown began, so the
+states are monotonic and `CPU_ON` releases a thread with a
+compare-and-swap that fails once `QUIT` is set.
 
 ## Problem
 
@@ -184,7 +188,34 @@ shutdown terminate. The word is a state, not a flag:
 | `VCPU_QUIT` (2) | leave without running: the machine is stopping |
 
 A thread waits while the word is `PARKED`, and on waking does what the
-word now says. **Shutdown writes `QUIT` to every thread's word and wakes
+word now says.
+
+**The states only ever increase, and that is a rule the transitions have
+to enforce rather than a description of the usual order.** `SYSTEM_OFF`
+writes `QUIT` to every word; a *concurrent* `CPU_ON` -- from another vCPU
+thread that has not been kicked yet, which is the normal state of affairs
+during shutdown -- would otherwise store `RUNNING` over that `QUIT` and
+revive the target. That thread then runs a guest nobody is waiting to
+stop, `live` never reaches zero, and the owner hangs: the same failure the
+three states were introduced to fix, arriving from the other direction.
+
+So:
+
+- **`CPU_ON` releases a thread with a compare-and-swap from `PARKED`,
+  never a store.** If the word is already `QUIT` the swap fails and PSCI
+  answers `DENIED` -- a guest asking for a CPU while the machine powers
+  off gets a refusal, which is a coherent answer to an incoherent request.
+  If it is already `RUNNING`, that is `ALREADY_ON`, as today.
+- **`QUIT` is written unconditionally and is final**, because it is the
+  highest state: a thread reads its word after every `cosmo_vcpu_run`
+  returns and leaves on anything `>= QUIT`, so a `QUIT` that lands over
+  `RUNNING` is seen at the next boundary and the kick is what makes that
+  boundary arrive.
+- **A machine-wide `stopping` flag is set before the first `QUIT`**, so a
+  `CPU_ON` that has not yet reached its swap refuses early rather than
+  swapping successfully and being torn down a microsecond later. The flag
+  is the fast path; the swap is what makes the race safe whichever order
+  the two land in. **Shutdown writes `QUIT` to every thread's word and wakes
 it**, *and* kicks every vCPU that is actually in the guest. Both are
 needed and neither is sufficient:
 
@@ -347,10 +378,12 @@ keeps its meaning and its users.
    PSCI turn boundary deleted in the same commit -- they are one mechanism
    and half of it is not a state worth shipping. The main thread becomes
    the supervisor: drain, service the tap, wait on the live count.
-4. **`SYSTEM_OFF` sets every other thread to `QUIT` and wakes it, and
-   kicks every vCPU in a guest**, and the supervisor reaps them when the
-   count reaches zero. Both halves in one step: either alone leaves a
-   thread with no way out.
+4. **`SYSTEM_OFF` sets `stopping`, sets every other thread to `QUIT` and
+   wakes it, and kicks every vCPU in a guest**, and the supervisor reaps
+   them when the count reaches zero. All of it in one step: the `QUIT`
+   without the wake leaves a parked thread stuck, the wake without
+   `CPU_ON`'s compare-and-swap lets a racing `CPU_ON` undo it, and the
+   kick is what makes a running thread reach its next check.
 5. **The tests**, then the bug-proofs.
 6. **The documents**, including the design document's own account of why
    the fairness rule existed, which becomes history rather than
@@ -407,8 +440,19 @@ keeps its meaning and its users.
 6. **The handle table from several threads** (the §12 gap): four vCPU
    threads using one VM handle, plus the main thread reading the console
    through it, with no lost or duplicated handle operation.
+7. **`CPU_ON` racing `SYSTEM_OFF`**: a guest whose secondary asks for a
+   third CPU in a loop while the primary powers off. The observable is
+   that **the machine stops** -- with a plain store instead of the swap it
+   does not, because a revived thread keeps `live` above zero. This is the
+   lifecycle's own test, and like `guest_offspin` its failure is a hang
+   rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **`SYSTEM_OFF` kicking but not waking the parked threads**
+**Bug-proofs**: **`CPU_ON` releasing a thread with a store instead of a
+compare-and-swap** (a `CPU_ON` racing `SYSTEM_OFF` revives a vCPU after
+shutdown began, `live` never reaches zero, and the owner hangs -- the same
+180 s deadline as the parked case, which is why both belong to the
+lifecycle rather than to the kick); **`SYSTEM_OFF` kicking but not waking
+the parked threads**
 (a guest that starts one secondary of four and powers off leaves three
 threads parked forever, `live` never reaches zero, and the owner hangs --
 the boot's 180 s deadline again, on the most ordinary path there is, which
