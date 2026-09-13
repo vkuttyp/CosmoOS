@@ -1,8 +1,47 @@
 # NEXT SUBSYSTEM — a thread per vCPU, and a way to stop one
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. **This report is as built.** The
+design below is what shipped, and building it corrected the report in three
+ways that review could not have caught, because each needed the thing to
+run:
+
+1. **`CPU_ON` had to become synchronous.** The report assumed threads would
+   make `cpu1: up` appear *more* reliably than the round-robin's fairness
+   rule did. The first build lost it: `guest_dtb.c` starts a CPU and powers
+   the machine off two instructions later, and a freshly released thread may
+   not have been scheduled at all -- the same race the deleted rule papered
+   over, arriving in a new form. The answer is not another correction but a
+   more faithful `CPU_ON`: PSCI says a `SUCCESS` means the target is powered
+   on *and executing*, so it now waits, bounded, for the target's thread to
+   reach its first entry. A timeout is still `SUCCESS`.
+2. **The kick's IPI buys promptness, not liveness** -- so the report's claim
+   that a spinning guest would hang the owner without the kick is wrong on
+   this machine. `guest_spin.S` says why in its own header: every host timer
+   tick is taken to EL2, so the run loop sees interrupt exits anyway and the
+   sticky flag is noticed at the next one. **Removing the IPI entirely fails
+   no test.** It is still worth keeping -- ~60 us against up to a tick, and
+   independence from the host's tick policy -- but the honest statement is
+   that liveness comes from the tick plus the flag.
+3. **The peak-concurrency counter replaced the interval timestamps.** The
+   report proposed stamping a clock either side of each run and looking for
+   two intervals that intersect; a counter of threads inside
+   `cosmo_vcpu_run`, with its peak kept, is the same property exactly -- a
+   peak above one *is* an intersection -- with no clock, no per-run storage
+   and no comparison pass to get wrong.
+
+Two smaller ones, both from bug-proofs that failed to fail: a second
+stop-check in the run loop was **redundant** (the top of the loop already
+covers every path to an entry) and was deleted; and `guest_psci_race`'s
+proof **does not fail on demand**, because after the first `CPU_ON` for a
+target succeeds every later one returns `ALREADY_ON` before reaching the
+store. The guest says so in its own header rather than implying a proof it
+does not carry.
+
+One thing the report listed and this unit does **not** deliver: the device
+models under two guest CPUs. The locking rule landed and is
+uncontended-correct, but testing it needs a guest-side virtio-mmio driver,
+which is a unit of work rather than a test to add here. Named, not skipped.
 
 **Subsystem: `vmctl --machine` runs a guest's vCPUs on one thread, a tick
 each, and every artefact of that shows through the interface.** The
@@ -177,7 +216,7 @@ unit**, and that is the part to get right rather than to delete.
   native threads make reachable and nothing tests" (§12). Four vCPU
   threads sharing one VM handle is exactly that, on a path that matters.
 
-## Proposed design
+## Design (as built)
 
 ### A thread per vCPU, and the loop that remains
 
@@ -454,7 +493,7 @@ One syscall (`SYS_vcpu_stop`), one exit kind (`COSMO_VM_EXIT_STOPPED`),
 one libc stub. No new device, no new ioctl. `COSMO_VCPU_RUN_ONE_TICK`
 keeps its meaning and its users.
 
-## Migration plan
+## Migration plan (followed, with steps 3 and 4 landing together)
 
 1. **`SYS_vcpu_stop` and `COSMO_VM_EXIT_STOPPED` alone**, with a kernel
    self-test: a vCPU running a spin loop on one thread, stopped from
@@ -471,7 +510,9 @@ keeps its meaning and its users.
    the supervisor: drain, service the tap, wait on the live count.
 4. **`SYSTEM_OFF` sets `stopping`, sets every other thread to `QUIT` and
    wakes it, and kicks every vCPU in a guest**, and the supervisor reaps
-   them when the count reaches zero. All of it in one step: the `QUIT`
+   them when the count reaches zero. *As built this landed inside step 3*,
+   because it had to: without it the machine never stops, so step 3 could
+   not boot on its own. All of it together for the same reason: the `QUIT`
    without the wake leaves a parked thread stuck, the wake without
    `CPU_ON`'s compare-and-swap lets a racing `CPU_ON` undo it, and the
    kick is what makes a running thread reach its next check.
@@ -520,6 +561,14 @@ keeps its meaning and its users.
    200 ms" bound would -- a loaded host makes the intervals longer, which
    makes overlap more likely rather than less.
 
+   **As built this is a counter, not a pair of timestamps** (difference 3):
+   `vmctl` counts the threads inside `cosmo_vcpu_run` and keeps the peak,
+   and the harness requires `vmctl: peak concurrent vcpus: 2`. A peak above
+   one *is* two intervals intersecting, and the counter needs no clock, no
+   per-run storage and no comparison pass to get wrong. It also turned out
+   to need no host-CPU guard: the `-smp 4` the harness already uses gives a
+   peak of 2 on every `-c 2` machine-mode run.
+
    **It needs a host with at least two CPUs**, and says so: with
    `QEMU_SMP=1` the test prints that it is skipped and why, because a
    single-CPU host cannot produce overlap and a test that passed there
@@ -538,7 +587,24 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **the handshake weakened from `SEQ_CST` to
+**Bug-proofs, as run.** The four that fail on demand: the round-robin
+restored (as a mutex serialising the runs -- the peak is 1 and its marker
+missing, *and* the boot hangs, which is the lock-across-a-run hazard
+demonstrating itself); shutdown's wake removed while the `QUIT` store stays
+(`offspin ok` still passes, and the boot dies before `parked ok`, which
+localises the failure to the parked thread); the stop's take removed from
+the top of the run loop (`hv-vcpu-stop` fails on the entry counter); and
+the `QUIT` store removed altogether (the running threads never leave their
+loop -- a blunter injection than intended, and it is why the wake has a
+proof of its own). Two that do **not** fail: `guest_psci_race`'s plain
+store, for the reason its header gives, and the `SEQ_CST` weakening below.
+One that failed to fail and deleted code instead: a second stop-check in
+the host-interrupt branch, redundant because the top of the loop already
+covers every path to an entry. And one that failed to fail and rewrote a
+*measurement*: a kicker that busy-waited to land its stop mid-tick starved
+the vCPU thread it was observing and reported the guest as never entered.
+
+The report's original list, for the record: **the handshake weakened from `SEQ_CST` to
 release/acquire** -- the one bug-proof in this report that **cannot be
 demonstrated by running it**, and it is listed first for that reason. The
 reordering it permits is a StoreLoad slip that neither x86-64 (which does
