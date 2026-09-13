@@ -118,8 +118,10 @@ parked have to be woken *and* told to quit, because the kick only reaches
 a vCPU inside the kernel's run loop and a secondary that was never
 `CPU_ON`ed is parked in userland -- so `live` would never reach zero on
 the most ordinary path there is, a guest that starts one secondary of four
-and powers off. The park is now a three-state word, which is also what
-makes the supervisor's `live == 0` mean "every thread has returned" -- and
+and powers off. The park became a state word rather than a flag -- three
+states as designed and four as built, since `STARTING` was needed to claim
+a vCPU before writing its registers -- which is also what makes the
+supervisor's `live == 0` mean "every thread has returned" -- and
 a fifth was the mirror of it: a `CPU_ON` racing `SYSTEM_OFF` could store
 `RUNNING` over `QUIT` and revive a vCPU after shutdown began, so the
 states are compare-and-swapped rather than stored, so `QUIT` is absorbing
@@ -302,7 +304,7 @@ than as-designed, and both for reasons review found rather than the report:
   that away.
 
 **`QUIT` is absorbing, and that is the rule the transitions have to
-enforce.** *As built the states do not simply increase* (difference 4):
+enforce.** *As built the states do not simply increase* (difference 5):
 `PARKED` and `RUNNING` cycle, because `CPU_OFF` is not the end of a vCPU --
 a guest may power one down and start it again, which the run set this
 replaces allowed and a lifecycle that only ever increased would have taken
@@ -383,7 +385,7 @@ ordering is implicit is a publication that is wrong on one architecture.
 | word | writer | reader | ordering, and why |
 | --- | --- | --- | --- |
 | `entry[i]`, `ctx[i]` -- the vCPU's entry point and context | `CPU_ON`, before the swap | the released thread, after its acquire | plain writes, **published by the release swap below**. A thread that could see `RUNNING` and then a stale entry point is a guest entered at the wrong address -- on AArch64 a fault at whatever the word last held |
-| `park[i]` -- `PARKED`/`RUNNING`/`QUIT` | `CPU_ON` (compare-and-swap from `PARKED`, **release**); `SYSTEM_OFF` (store `QUIT`, **release**) | the thread, in its park loop and after every `cosmo_vcpu_run` (**acquire**) | release on the write so the entry context is visible; acquire on the read so the thread that sees `RUNNING` sees that context. A *failed* swap needs no ordering -- it changes nothing |
+| `park[i]` -- `PARKED`/`STARTING`/`RUNNING`/`QUIT` | `CPU_ON` in two steps, both compare-and-swaps: `PARKED -> STARTING` (**acq_rel**) to claim, then `STARTING -> RUNNING` (**release**) to publish; `CPU_OFF` `RUNNING -> PARKED` (**release**); `SYSTEM_OFF` stores `QUIT` (**release**) | the thread, in its park loop and after every `cosmo_vcpu_run` (**acquire**) | release on the publication so the entry context is visible; acquire on the read so the thread that sees `RUNNING` sees that context. **`STARTING` is as built** (difference 5): the claim and the publication have to be separate, or `CPU_ON` either overwrites a running vCPU's registers or publishes before writing them. A *failed* swap needs no ordering -- it changes nothing, which is what makes `QUIT` absorbing |
 | `stopping` -- the machine is powering off | `SYSTEM_OFF`, **before** the first `QUIT`, **release** | `CPU_ON`'s fast path, **acquire** | the flag must not become visible after the `QUIT` it precedes, or a `CPU_ON` could pass the fast path *and* find `PARKED`. It is only the fast path: the swap is what makes the race safe, so a stale read here costs a refusal the swap would have made anyway |
 | `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
 | a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
