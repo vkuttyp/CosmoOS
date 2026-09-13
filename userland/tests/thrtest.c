@@ -184,7 +184,7 @@ static void *id_reporter(void *arg)
  * `self` word is unused, and every assertion that sets `errno` and reads it
  * straight back still passes. The layout has to be checked as a layout.
  */
-static volatile unsigned layout_ok, layout_ran;
+static volatile unsigned layout_ok, layout_ran, layout_tp_ok, layout_head_ok;
 static volatile unsigned long layout_blk;
 static void *layout_probe(void *arg)
 {
@@ -193,6 +193,39 @@ static void *layout_probe(void *arg)
     const char *blk = (const char *)&errno - offsetof(struct __cosmo_tcb, err);
     layout_ok = (unsigned)(blk > &local);
     layout_blk = (unsigned long)blk;
+
+    /*
+     * The thread pointer sits at `COSMO_TCB_TP_OFFSET` into the storage,
+     * which is the block itself on x86-64 and 128 bytes above it on
+     * AArch64 -- because variant I reserves 16 bytes at the thread pointer
+     * and puts `__thread` variables above them.
+     *
+     * Asserted because it is silent on the architecture that needs no
+     * change: x86-64's thread pointer *is* the block and always was, so
+     * an AArch64 mistake here passes every x86 test. This is the check
+     * that differs between them.
+     */
+#if defined(__aarch64__)
+    char *tp = (char *)__builtin_thread_pointer();
+    layout_tp_ok = (unsigned)(tp - blk == (long)COSMO_TCB_TP_OFFSET);
+    /*
+     * And the ABI's 16 reserved bytes at the thread pointer are real
+     * memory that is **not** the block: writing them must leave `errno`,
+     * the cached tid and the `self` word alone. Under the old layout the
+     * thread pointer was the block, so these sixteen bytes were `self`,
+     * `err` and `tid` -- this is that collision, in miniature, before any
+     * TLS image exists to cause it in earnest.
+     */
+    struct __cosmo_tcb *b = (struct __cosmo_tcb *)(tp - COSMO_TCB_TP_OFFSET);
+    unsigned want_tid = cosmo_thread_id();
+    errno = ERANGE;
+    for (unsigned i = 0; i < 16u; i++)
+        ((volatile char *)tp)[i] = (char)0xA5;
+    layout_head_ok = (unsigned)(errno == ERANGE && b->self == b && b->tid == want_tid);
+#else
+    layout_tp_ok = (unsigned)(COSMO_TCB_TP_OFFSET == 0u);   /* the block is the thread pointer */
+    layout_head_ok = 1u;                                    /* no reserved head to write */
+#endif
     layout_ran = 1;
     return NULL;
 }
@@ -214,7 +247,7 @@ static void *errno_setter(void *arg)
  * cosmo/tcb.h states. It installs one from storage of its own and only then
  * uses errno.
  */
-static __attribute__((aligned(16))) char raw_blk[COSMO_TCB_SIZE];
+static __attribute__((aligned(16))) char raw_blk[COSMO_TCB_STORAGE];
 static volatile int raw_rc[3];
 static volatile unsigned raw_err, raw_done;
 static void raw_entry(void *arg)
@@ -223,8 +256,8 @@ static void raw_entry(void *arg)
     /* Too short, and misaligned: refused before anything is installed, and
      * both refusals happen while this thread still has no block -- which is
      * why cosmo_tcb_install must not itself touch errno. */
-    raw_rc[0] = cosmo_tcb_install(raw_blk, COSMO_TCB_SIZE - 1u);
-    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, COSMO_TCB_SIZE);
+    raw_rc[0] = cosmo_tcb_install(raw_blk, COSMO_TCB_STORAGE - 1u);
+    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, COSMO_TCB_STORAGE);
     raw_rc[2] = cosmo_tcb_install(raw_blk, sizeof(raw_blk));
     if (raw_rc[2] == 0) {
         errno = 0;
@@ -829,6 +862,8 @@ int main(int argc, char **argv)
         CHECK(cosmo_thread_join(&t, NULL) == 0);
         CHECK(layout_ran == 1);
         CHECK(layout_ok == 1);      /* the block is above the stack, not in it */
+        CHECK(layout_tp_ok == 1);   /* and the thread pointer is where the ABI wants it */
+        CHECK(layout_head_ok == 1); /* writing the ABI's reserved head leaves the block alone */
         /*
          * And the join freed it. The report proposed counting the address
          * space across a thousand cycles; this asserts the thing itself

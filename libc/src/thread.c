@@ -113,16 +113,24 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * the thread may already be reading it, and a thread that never asks
      * should not pay a syscall to be told.
      */
-    struct __cosmo_tcb *blk = (struct __cosmo_tcb *)(base + PAGE + size);
+    char *storage = base + PAGE + size;
+    struct __cosmo_tcb *blk = (struct __cosmo_tcb *)storage;
     blk->self = blk;
     blk->err = 0;
     blk->tid = 0;
+    /*
+     * The thread pointer is not always the block: on AArch64 the ELF TLS
+     * ABI reserves 16 bytes at the thread pointer and puts `__thread`
+     * variables above them, so the block sits below it
+     * (cosmo/tcb.h, COSMO_TCB_TP_OFFSET). Both live in this page.
+     */
+    unsigned long tp = (unsigned long)storage + COSMO_TCB_TP_OFFSET;
 
     struct cosmo_thread req = {
         .entry = (unsigned long)thread_trampoline,
         .arg = (unsigned long)t,
         .stack_top = top,
-        .tls = (unsigned long)blk,
+        .tls = tp,
         .clear_tid = (unsigned long)&t->done,
         .flags = 0,
         .reserved = 0,

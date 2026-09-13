@@ -20,7 +20,12 @@
  * an `errno` has no good answer -- it cannot report the failure through the
  * thing it just failed to provide. A .bss object removes the question.
  */
-static struct __cosmo_tcb main_tcb;
+/*
+ * The first thread's storage: the block, and on AArch64 the ABI's 16-byte
+ * head above it. Declared as bytes rather than as the struct, because the
+ * thread pointer is not the struct's address on every architecture.
+ */
+static __attribute__((aligned(16))) char main_storage[COSMO_TCB_STORAGE];
 
 /*
  * x86-64 cannot read the FS base without `rdfsbase` (CR4.FSGSBASE, not
@@ -30,11 +35,17 @@ static struct __cosmo_tcb main_tcb;
 static inline struct __cosmo_tcb *tcb_self(void)
 {
 #if defined(__x86_64__)
+    /* The thread pointer *is* the block: variant II wants a self-pointer
+     * at %fs:0, and TLS variables live below it. */
     struct __cosmo_tcb *t;
     __asm__("movq %%fs:0, %0" : "=r"(t));
     return t;
 #elif defined(__aarch64__)
-    return (struct __cosmo_tcb *)__builtin_thread_pointer();
+    /* The block is below the thread pointer: variant I reserves 16 bytes
+     * at TP and puts TLS variables above them, so the block cannot be
+     * there (cosmo/tcb.h). One register read and one constant offset --
+     * the same cost as before, and still no branch. */
+    return (struct __cosmo_tcb *)((char *)__builtin_thread_pointer() - COSMO_TCB_TP_OFFSET);
 #else
 #error "no thread-pointer read for this architecture"
 #endif
@@ -73,12 +84,19 @@ unsigned __cosmo_tcb_tid(void)
  * first use: a thread that has a block has always had one, so there is no
  * "not yet cached" value to distinguish from a real tid.
  */
-static int tcb_use(struct __cosmo_tcb *blk)
+/*
+ * Take `storage` as this thread's: the block lives at its start and the
+ * thread pointer at `COSMO_TCB_TP_OFFSET` into it, which is the block
+ * itself on x86-64 and the ABI head above it on AArch64.
+ */
+static int tcb_use(void *storage)
 {
+    struct __cosmo_tcb *blk = (struct __cosmo_tcb *)storage;
     blk->self = blk;
     blk->err = 0;
     blk->tid = 0;   /* asked for on first use; see __cosmo_tcb_tid */
-    return (int)cosmo_set_tls((unsigned long long)(unsigned long)blk);
+    unsigned long tp = (unsigned long)storage + COSMO_TCB_TP_OFFSET;
+    return (int)cosmo_set_tls(tp);
 }
 
 /*
@@ -90,14 +108,14 @@ static int tcb_use(struct __cosmo_tcb *blk)
  */
 int __cosmo_tcb_init(void)
 {
-    return tcb_use(&main_tcb);
+    return tcb_use(main_storage);
 }
 
 int cosmo_tcb_install(void *block, size_t len)
 {
-    if (block == NULL || len < COSMO_TCB_SIZE)
+    if (block == NULL || len < COSMO_TCB_STORAGE)
         return -EINVAL;
     if ((unsigned long)block % 16u)
         return -EINVAL;
-    return tcb_use((struct __cosmo_tcb *)block);
+    return tcb_use(block);
 }
