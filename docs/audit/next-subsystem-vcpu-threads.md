@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Six things in the first drafts of this report were wrong, and review
+**Seven things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -52,8 +52,12 @@ a fifth was the mirror of it: a `CPU_ON` racing `SYSTEM_OFF` could store
 states are monotonic and `CPU_ON` releases a thread with a
 compare-and-swap that fails once `QUIT` is set. The sixth was that none of
 that said anything about **memory ordering**, which for a lifecycle built
-out of five shared words is most of the correctness: there is now a table
-of every word, its writer, its reader and the ordering each needs.
+out of shared words is most of the correctness: there is now a table of
+every word, its writer, its reader and the ordering each needs. The
+seventh was that the table covered the *userland* words and stopped at the
+kernel boundary, leaving out the kick's own flag -- written by one
+thread's syscall and read by a different CPU's run loop, which is the one
+crossing the most CPUs of all.
 
 ## Problem
 
@@ -271,11 +275,16 @@ ordering is implicit is a publication that is wrong on one architecture.
 | `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason, test 4's timestamps -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
 | a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
 | test 4's `[enter, exit)` timestamps | each vCPU thread, plain writes | the supervisor, after `live == 0` | published by `live`'s release, which is why the supervisor reads them **after** the count reaches zero rather than while the threads run |
+| **`v->stop`** -- the kick's flag, in the kernel | `sys_vcpu_stop`, **release**, *then* the IPI | the run loop, **consumed with an `__atomic_exchange` (acq_rel)** at entry and after every host-interrupt exit | the store must be visible before the IPI that makes the target look at it, or the target exits, finds nothing and re-enters the guest -- a lost kick, which is a hang. Consumed by *exchange* rather than read-then-clear so that a stop arriving while one is being consumed is not swallowed: the exchange either returns it (this run stops) or lands after it (the next run stops) |
+| **`v->loaded_cpu`** -- which host CPU the vCPU is on | the run loop, when it loads the vCPU | `sys_vcpu_stop`, to choose the IPI's target, **acquire** | **a stale read here is safe, and that is an argument the design owes rather than an assumption.** A vCPU only changes `loaded_cpu` while it is *not* in the guest -- the move happens at the top of a run, under `run_lock`. So a kicker that reads `-1` loses nothing (the target checks the flag at entry before it enters), and a kicker that reads a CPU the vCPU has since left has sent a spurious IPI to an innocent CPU while the flag it set is still pending for the target's next entry. **Stickiness is what makes the IPI a latency optimisation rather than the mechanism**, which is the only reason this race is benign |
 
 The futex calls need no ordering on top of this: the kernel compares the
 word under its own lock, so a wake between a thread's check and its wait
 cannot be lost -- but the word must be written **before** the wake in
-every case, which is what the release stores above give.
+every case, which is what the release stores above give. The same shape
+governs the kick one layer down: **flag first, then the IPI**, and the
+flag is sticky so that the IPI never has to be the thing that carries the
+message.
 
 ### The kick
 
@@ -473,7 +482,14 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **the entry context published without a release** (the
+**Bug-proofs**: **the kick's flag stored after the IPI instead of before
+it** (the target exits on the interrupt, finds nothing, and re-enters the
+guest -- a lost kick, so `guest_offspin` hangs on the 180 s deadline,
+which is the same observable as no kick at all and is why the ordering is
+part of the mechanism rather than a detail of it); **the flag read and
+cleared instead of exchanged** (a stop arriving inside that window is
+swallowed and the vCPU runs on); **the entry context published without a
+release** (the
 swap made `__ATOMIC_RELAXED`: a released thread can see `RUNNING` with a
 stale entry point and enter its guest at whatever the word last held,
 which the owner reports as an unexpected exit -- and which a single-CPU
