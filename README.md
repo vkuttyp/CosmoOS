@@ -1636,9 +1636,27 @@ See [docs/development.md](docs/development.md).
   the invariant named it for two units after that stopped being true.
   `strerror`'s was the only writable static in `libc/src`, which a `grep`
   now confirms rather than a list kept by hand. The header validation is a
-  pure function in a file of its own, tested on the host with **twelve**
-  malformed tables no linker would emit -- where the report had proposed a
-  single crafted binary in the boot archive.
+  pure function in a file of its own, tested on the host with
+  **seventeen** tables no linker would emit -- where the report had
+  proposed a single crafted binary in the boot archive.
+  **Review then found three defects in the built code and a fourth in the
+  build.** A `PT_TLS` whose `p_vaddr + p_filesz` *wrapped* the address
+  space passed the containment test, because that test is an ordering of
+  sums and a sum that wraps defeats it -- and the accepted `p_vaddr` was
+  what `memcpy` read from; `cosmo_tcb_storage()` charged for one of the
+  placement's two roundings, so a program aligned more strictly than the
+  block's own offset had `cosmo_tcb_install` refuse exactly the size the
+  function documents; and a missing program-header table was read as "this
+  program has no TLS" rather than as "this cannot be answered", which is a
+  process whose `__thread` variables are never initialised and whose
+  storage was sized as if it had none. The fourth is the one worth
+  remembering: **three of those bug-proofs passed with the bug
+  reintroduced.** `tests/host/test_libc.c` is one translation unit that
+  `#include`s the sources it tests, and `host.mk` listed its prerequisites
+  by hand -- a list that had fallen one behind, so editing `tlsscan.c`
+  rebuilt nothing and `host-test` re-ran the previous binary and said ok.
+  The list is now `-MMD` output: a list nobody maintains cannot fall
+  behind.
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

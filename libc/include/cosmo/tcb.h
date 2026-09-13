@@ -100,6 +100,16 @@ struct __cosmo_tcb {
  * `COSMO_TCB_STORAGE` is the floor -- what a program with no `__thread`
  * variables needs -- and a caller that allocates storage for a thread must
  * ask this rather than assume it.
+ *
+ * **What this returns is installable**, at the 16-byte alignment
+ * `cosmo_tcb_install` demands and no better one. That is a contract and
+ * not an observation: the thread pointer is aligned to the template's
+ * alignment inside the caller's storage and the image is aligned again
+ * above it, so a size that charges for one of those two roundings is
+ * short whenever the template's alignment exceeds the block's own offset,
+ * and the caller is then refused for having done exactly what this header
+ * says. It was short, and `thrtest` now installs precisely this many
+ * bytes at precisely 16 so that it cannot silently become short again.
  */
 size_t cosmo_tcb_storage(void);
 

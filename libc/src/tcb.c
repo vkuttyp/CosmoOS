@@ -67,7 +67,19 @@ size_t __cosmo_tcb_storage(void)
     if (!g_tls.found)
         return COSMO_TCB_STORAGE;
     size_t a = g_tls.align > 16u ? g_tls.align : 16u;
-    return COSMO_TCB_STORAGE + round_up(g_tls.memsz, a) + a;
+    /*
+     * Two alignments' worth of slack, not one. `__cosmo_tcb_place` aligns
+     * the thread pointer *and* then aligns the image relative to it, so
+     * each rounding can cost up to `a - 1` bytes -- and an earlier version
+     * of this function charged for one, which made the number it returns
+     * smaller than the placement needs whenever the template's alignment
+     * exceeds the block's own offset. A caller that allocated exactly what
+     * this returned then had `cosmo_tcb_install` refuse it, having followed
+     * the contract exactly. The size and the placement have to agree, and
+     * the cheap way to guarantee that is to charge for the worst case of
+     * both roundings.
+     */
+    return COSMO_TCB_SIZE + COSMO_TCB_ABI_HEAD + 2u * a + round_up(g_tls.memsz, a);
 }
 
 /*

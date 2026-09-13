@@ -182,6 +182,14 @@ static void *errno_erange(void *arg)
 static __thread int tls_init = 0x5eed;
 static __thread char tls_zero[512];
 static __thread _Alignas(64) long tls_aligned;
+/*
+ * An alignment larger than the block's own offset, which is the case that
+ * made the storage size disagree with the placement: the thread pointer and
+ * the image are aligned independently, so each rounding costs up to an
+ * alignment. Having a program in the suite with one means the worst case is
+ * exercised on every boot rather than reasoned about.
+ */
+static __thread _Alignas(256) long tls_overaligned;
 
 static volatile unsigned tls_bad, tls_done;
 static void *tlsvar_user(void *arg)
@@ -194,6 +202,8 @@ static void *tlsvar_user(void *arg)
             tls_bad++;                   /* .tbss was not zeroed for this thread */
     if (((unsigned long)&tls_aligned % 64u) != 0)
         tls_bad++;                       /* the image ignored its own alignment */
+    if (((unsigned long)&tls_overaligned % 256u) != 0)
+        tls_bad++;                       /* ...including one past the block's offset */
     /* Now make this thread's copy distinctive, and check it stays so while
      * the others do the same: a shared image loses this immediately. */
     tls_init = (int)id;
@@ -311,7 +321,7 @@ static void *errno_setter(void *arg)
  * libc's wrapper has to ask rather than assume, because the size follows
  * the program's own `__thread` variables. */
 static __attribute__((aligned(16))) char raw_blk[4096];
-static volatile int raw_rc[3];
+static volatile int raw_rc[4];
 static volatile unsigned raw_err, raw_done;
 static void raw_entry(void *arg)
 {
@@ -321,6 +331,21 @@ static void raw_entry(void *arg)
      * why cosmo_tcb_install must not itself touch errno. */
     raw_rc[0] = cosmo_tcb_install(raw_blk, cosmo_tcb_storage() - 1u);
     raw_rc[1] = cosmo_tcb_install(raw_blk + 1, cosmo_tcb_storage());
+    /*
+     * Exactly the documented size, at exactly the documented alignment and
+     * no more. This is the case that costs the most, because the thread
+     * pointer is then rounded up to the template's alignment inside the
+     * storage *and* the image is rounded up again above it -- and a caller
+     * that asked `cosmo_tcb_storage()` and allocated the answer has
+     * followed the contract, so a refusal here is libc's bug, not the
+     * caller's. The size formula charged for one of those two roundings
+     * until a review noticed; the reason `raw_rc[1]` did not catch it is
+     * that it asks for the exact size at a *misaligned* address, so it is
+     * refused for the alignment before the size is ever weighed. This
+     * program's 256-byte-aligned thread-local is what makes the two
+     * roundings cost more than the block's own offset.
+     */
+    raw_rc[3] = cosmo_tcb_install(raw_blk, cosmo_tcb_storage());
     raw_rc[2] = cosmo_tcb_install(raw_blk, sizeof(raw_blk));
     if (raw_rc[2] == 0 && tls_init != 0x5eed)
         raw_rc[2] = -1;   /* installed, but its TLS image was not placed */
@@ -887,7 +912,7 @@ int main(int argc, char **argv)
         void *stk = mmap(NULL, 16u * 1024u, PROT_READ | PROT_WRITE,
                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         CHECK(stk != MAP_FAILED);
-        raw_rc[0] = raw_rc[1] = raw_rc[2] = 1;
+        raw_rc[0] = raw_rc[1] = raw_rc[2] = raw_rc[3] = 1;
         raw_err = 0;
         raw_done = 0;
         unsigned clear = 0;
@@ -904,6 +929,7 @@ int main(int argc, char **argv)
                 cosmo_yield();
             CHECK(raw_rc[0] == -EINVAL);       /* shorter than the prefix */
             CHECK(raw_rc[1] == -EINVAL);       /* and misaligned */
+            CHECK(raw_rc[3] == 0);             /* exactly the documented size, at 16 */
             CHECK(raw_rc[2] == 0);
             CHECK(raw_err == EBADF);           /* errno works once installed */
             CHECK(raw_done == (unsigned)tid);  /* and so does the tid cache */
@@ -970,6 +996,7 @@ int main(int argc, char **argv)
         CHECK(tls_init == 0x5eed);
         CHECK(tls_zero[0] == 0 && tls_zero[sizeof(tls_zero) - 1] == 0);
         CHECK(((unsigned long)&tls_aligned % 64u) == 0);
+        CHECK(((unsigned long)&tls_overaligned % 256u) == 0);
         tls_init = 0x1111;
         memset(tls_zero, 0x11, sizeof(tls_zero));
         for (unsigned i = 0; i < 3u; i++)

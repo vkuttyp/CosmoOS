@@ -159,8 +159,17 @@ static void test_tls_scan(void)
     struct elf_phdr tab[4];
     const unsigned long ent = sizeof(struct elf_phdr);
 
-    /* No headers at all: no template, and not an error. */
-    CHECK(tls_scan(NULL, 0, ent, &t) == 0 && t.found == 0);
+    /*
+     * No headers at all is a **refusal**. This library cannot see whether
+     * the program has a template, and the alternative answer -- "no
+     * template" -- is a program whose `__thread` variables are never
+     * initialised and whose storage was sized as if it had none, so the
+     * variables live past the end of the block. An unanswerable question
+     * gets refused, not guessed. (This case returned 0 once; a review
+     * found it.)
+     */
+    CHECK(tls_scan(NULL, 0, ent, &t) == -1);
+    CHECK(tls_scan(NULL, 4, ent, &t) == -1);
 
     /* The common case: a program with no thread-locals still gets a
      * PT_TLS from the linker, with memsz 0 and align 0. Not an error, and
@@ -215,6 +224,19 @@ static void test_tls_scan(void)
     /* An enormous memsz is refused: one thread's copy, times every
      * thread, is not a number a program image gets to choose freely. */
     tab[1] = ph_tls(0x400800, 0, 1u << 21, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+
+    /*
+     * A template whose own range wraps the address space. `p_vaddr +
+     * p_filesz` carries to a small number, which is below the end of the
+     * low `PT_LOAD` -- so the containment test passed and `p_vaddr`, an
+     * address nothing mapped, became the pointer `memcpy` reads from. The
+     * containment test is an ordering of sums, so a sum that wraps defeats
+     * it; the range has to be checked before it is used. A review found
+     * this, and no linker emits it, which is why it is tested here.
+     */
+    tab[0] = ph_load(0x400000, 0x1000);
+    tab[1] = ph_tls(0xFFFFFFFFFFFFFF00ull, 0x200, 0x200, 16);
     CHECK(tls_scan(tab, 2, ent, &t) == -1);
 }
 

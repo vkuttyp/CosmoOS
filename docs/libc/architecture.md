@@ -88,7 +88,10 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
   program's own `PT_TLS` is found through the auxiliary vector's `AT_PHDR`
   and copied into per-thread storage, per architecture -- below the thread
   pointer on x86-64, above it on AArch64
-  (`docs/audit/next-subsystem-pt-tls.md`).
+  (`docs/audit/next-subsystem-pt-tls.md`). A program whose headers are not
+  mapped, so that `AT_PHDR` is zero, **does not start**: that is not the
+  same as having no template, and guessing which it is would run the
+  program with uninitialised thread-local storage.
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
   calendar functions (there is no wall clock; `clock_gettime` gives the
   monotonic clock only).

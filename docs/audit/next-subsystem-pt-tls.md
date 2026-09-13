@@ -40,12 +40,59 @@ Five more differences, each found by running rather than reading:
 4. **The validation is a pure function in a file of its own**
    (`libc/src/tlsscan.c`), tested on the host with tables no linker would
    emit. The report proposed a deliberately malformed binary in the boot
-   archive; that would have proved one case, and this proves twelve.
+   archive; that would have proved one case, and this proves seventeen.
 5. **`getcwd(NULL)` never needed fixing.** It `malloc`s per call and hands
    the buffer to its caller, so it has been safe since the allocator took
    its lock -- invariant L8 named it for two units after it stopped being
    true. Only `strerror` had a shared buffer, which a `grep` for writable
    statics in `libc/src` confirms was the only one.
+
+**Review then found three defects in the built code, and a fourth in the
+build that had been hiding them.** All three are in this section because
+none of them is a detail of wording:
+
+6. **A `PT_TLS` whose range wrapped the address space passed the
+   containment check.** `p_vaddr + p_filesz` carries to a small number,
+   which compares below the end of a low `PT_LOAD`, so a template pointing
+   nowhere any segment maps was accepted -- and `p_vaddr` then became the
+   pointer `memcpy` reads from. The loader checks this for `PT_LOAD` and
+   leaves `PT_TLS` alone, so nothing else had. The range is now checked
+   before it is used. The *segment's* own wrap needs no check, and the
+   reasoning for that is in `tlsscan.c` beside the loop: a guard was
+   written there and removed when the case meant to fail without it passed
+   anyway.
+7. **`cosmo_tcb_storage()` could return less than the placement needs.**
+   The thread pointer is aligned to the template's alignment and the image
+   is then aligned again above it, so each rounding can cost an alignment
+   -- and the formula charged for one. A program whose template is aligned
+   more strictly than the block's own offset (256 bytes, say) therefore had
+   `cosmo_tcb_install` refuse storage of exactly the size this function
+   documented, which is libc's bug and not the caller's. It now charges for
+   both roundings. The existing test could not catch this: it asked for the
+   exact size at a *misaligned* address, so the refusal it asserted was the
+   alignment's, and the size was never weighed. `thrtest` now installs the
+   exact documented size at exactly the documented alignment, and this
+   program carries a 256-byte-aligned `__thread` variable so that the
+   expensive case is a real program's rather than a reasoned one.
+8. **A missing program-header table was read as "no thread-local
+   storage".** That answer is a program whose `__thread` variables are
+   never initialised *and* whose per-thread storage was sized as though it
+   had none -- so on AArch64 the variables sit past the end of the block.
+   The question is unanswerable without the headers, so it is now refused:
+   `tls_scan` returns -1 and startup exits 127. Every native program links
+   with the one `userland/user.ld`, which puts the header table in the text
+   segment, so no program in this system reaches it.
+9. **Three regression tests passed against reintroduced bugs**, which is
+   how the build defect surfaced. `tests/host/test_libc.c` is one
+   translation unit that `#include`s the library sources it exercises, and
+   its prerequisites were written out by hand in `tests/host/host.mk` --
+   one name per include, until the list fell one behind the file.
+   `libc/src/tlsscan.c` was the fourth include and the third name, so
+   editing it rebuilt nothing and `gmake host-test` re-ran the previous
+   binary. The list is now the compiler's: `-MMD` records every file the
+   translation unit reads, headers included, and a `-include` feeds them
+   back. **A list nobody maintains cannot fall behind.** Every bug-proof in
+   this unit was re-run against the fixed build.
 
 **Review has already corrected how the template reaches the program.** Two
 drafts got it wrong -- one by growing `struct cosmo_procinfo`, which would
@@ -246,14 +293,17 @@ the language's mechanism did not work.
 
 ### Per-thread images
 
-- **The first thread**: `__libc_start` allocates image + block together,
+- **The first thread**: `__libc_start` lays image and block out together,
   copies `filesz` bytes from the template and zeroes the rest, then
-  installs the thread pointer. The block is no longer a `.bss` object,
-  because its size now depends on the program's `memsz` -- which brings
-  back the failure path the errno unit deliberately removed, so the same
-  answer applies: **a failure here writes one line to file descriptor 2
-  and exits 127**, since a process with no TLS cannot run its own `main`.
-  A program with no `PT_TLS` keeps the static block and no allocation.
+  installs the thread pointer. **As built, the storage is a generous
+  static array (1 KiB) whenever the program fits in it**, and only a
+  program needing more maps at startup -- which is the third difference
+  listed above, and the reason is a syscall filter, not thrift. Where a
+  program does map, the failure path the errno unit deliberately removed
+  comes back, and gets the same answer: **a failure writes one line to
+  file descriptor 2 and exits 127**, since a process with no TLS cannot
+  run its own `main`. So does a program whose headers this library cannot
+  read or will not act on.
 - **Every thread `cosmo_thread_start` makes**: the mapping already carries
   a page for the block; it carries image + block instead, rounded to the
   template's alignment. A `memsz` larger than a page grows the mapping
@@ -277,11 +327,15 @@ mechanism and comes free.
 | --- | --- |
 | `kernel/process/process.c` | three more pairs in the native auxiliary vector, from `elf_info`'s existing `phdr_vaddr`, `phent`, `phnum` |
 | `kernel/include/uapi/cosmo/syscall.h` | `COSMO_AT_PHDR`, `-_PHENT`, `-_PHNUM` |
-| `libc/src/tcb.c` | allocate image + block; the AArch64 accessor's offset; `cosmo_tcb_install` takes an image |
+| `libc/src/tlsscan.c`, `-.h` | **new**: the validation as a pure function, so malformed tables can be given to it on the host |
+| `libc/src/auxv.c`, `libc/include/cosmo/auxv.h` | **new**: `cosmo_getauxval`, and the walk past `envp`'s NULL |
+| `libc/src/tcb.c` | lay image + block out; the AArch64 accessor's offset; `cosmo_tcb_storage` is a function of the program, not a constant; `cosmo_tcb_install` takes an image |
 | `libc/include/cosmo/tcb.h` | the layout, and the reserved-prefix rule that changes |
-| `libc/src/stdlib.c` | `__libc_start` places the first thread's image |
+| `libc/src/stdlib.c` | `__libc_start` reads the auxiliary vector **before** installing the thread pointer, then places the first thread's image |
 | `libc/src/thread.c` | image + block in the thread's mapping |
-| `libc/src/errno.c`, `-/unistd.c` | `strerror` and `getcwd(NULL)` become `_Thread_local` |
+| `libc/src/errno.c` | `strerror` becomes `_Thread_local`. **`unistd.c` does not change**: `getcwd(NULL)` never had a shared buffer |
+| `libc/libc.mk`, `tests/host/host.mk` | the new sources; and the host test's prerequisites become the compiler's `-MMD` output rather than a hand-written list |
+| `userland/user.ld` | declares `tls PT_TLS` and places `.tdata`/`.tbss` -- without which `ld.lld` refuses the link, which the report did not predict |
 | `libc/include/cosmo/thread.h` | the raw-thread contract gains the image |
 | `userland/tests/thrtest.c` | the new steps |
 | `docs/libc/invariants.md` | L8 finished; the reserved-prefix rule |
@@ -306,8 +360,9 @@ API at all. The kernel learns nothing about TLS.
    step that adds images is not also a layout change.
 3. **Images for every thread libc makes**, first thread included.
 4. **`cosmo_tcb_install` takes an image**, for threads libc did not make.
-5. **`strerror` and `getcwd(NULL)` become `_Thread_local`**, which is the
-   proof the feature works from inside the library that provides it.
+5. **`strerror` becomes `_Thread_local`**, which is the proof the feature
+   works from inside the library that provides it. `getcwd(NULL)` was in
+   this step too and turned out not to need it -- difference 5 above.
 6. **The tests**, then the bug-proofs.
 7. **The documents**, including the reserved-prefix rule and L8.
 
@@ -334,19 +389,48 @@ API at all. The kernel learns nothing about TLS.
 6. **`strerror` from two threads at once** returns each thread's own
    message, which is L8's last line.
 
+7. **The validation, on the host, with tables no linker emits**
+   (`tests/host/test_libc.c`, seventeen assertions against
+   `libc/src/tlsscan.c`): no headers at all, an empty `PT_TLS`, a sound
+   one, two `PT_TLS` segments, `memsz` below `filesz`, an alignment that
+   is not a power of two, one too large to honour, a template outside
+   every `PT_LOAD`, one running off the end of the segment it starts in,
+   a wrong `phent`, an absurd `phnum`, a `.tbss`-only template, an
+   enormous `memsz`, and a template whose range wraps the address space.
+8. **The documented size is installable**: a raw thread installs exactly
+   `cosmo_tcb_storage()` bytes at exactly the documented 16-byte
+   alignment and must succeed, with this program carrying a
+   256-byte-aligned `__thread` variable so that both of the placement's
+   roundings cost more than the block's own offset.
+
+**How the malformed cases are proved changed, and it is the fourth
+difference listed at the top.** The report proposed a deliberately
+malformed binary in the boot archive -- the one piece of test scaffolding
+it expected to add. There is none: the validation was extracted into a
+pure function instead, and a host test hands it tables directly. That
+proves seventeen cases where a binary would have proved one, and adds no
+scaffolding to the image at all.
+
 **Bug-proofs**: the image not copied (test 2 reads zero instead of the
 initialiser); the same image shared by two threads (test 1 loses values);
 `.tbss` not zeroed (test 3 sees the previous thread's bytes); the AArch64
 block left at the thread pointer (test 4 sees `errno` change when the
 array is written -- the collision, on demand); the alignment ignored (a
 `__thread` variable with `_Alignas(64)` lands misaligned, which an
-assertion on its address catches); and the header trusted
-without checks (a crafted binary with `memsz` smaller than `filesz`, two
-`PT_TLS` segments, an alignment that is not a power of two, or a template
-outside every mapped segment -- each must exit 127 rather than place a
-wrong image, and each needs a deliberately malformed binary in the boot
-archive to prove, which is the one piece of test scaffolding this unit
-adds).
+assertion on its address catches); each refusal in `tls_scan` turned back
+into an acceptance, one at a time, on the host; the wrap check removed
+(the wrapping template is accepted and its `p_vaddr` reaches `memcpy`);
+absent headers read as "no TLS" again (the two `NULL`-table assertions
+fail); and the storage formula charging for one rounding rather than two
+(`thrtest` fails `raw_rc[3] == 0` on AArch64 -- the exact-size install
+refused, which is the defect exactly).
+
+**Three of those bug-proofs passed with the bug in, the first time they
+were run**, because the host test's prerequisites were a hand-written list
+that had fallen behind its `#include`s and `gmake host-test` was re-running
+the previous binary. That is difference 9 at the top; the list is now
+`-MMD` output, and every bug-proof here was re-run after the build was
+fixed.
 
 ## Benchmarks
 
@@ -383,11 +467,20 @@ moves outside its spread.
   libc's.** This is the cost of the kernel learning nothing about TLS: the
   validation the loader would otherwise have done moves into the library,
   where a wrong answer is one process's rather than the machine's. An image
-  asking for a gigabyte per thread must fail its mapping and exit 127, and
-  the bug-proof for that needs a deliberately malformed binary in the boot
-  archive -- the one piece of scaffolding this unit adds. A reader who
-  expects the loader to bound it will not find that code, so the report
-  says where it is instead.
+  asking for a gigabyte per thread is refused outright by the `memsz`
+  bound, before any mapping is attempted. **As built, the bug-proof needs
+  no malformed binary**: `tls_scan` is a pure function, so the host test
+  hands it the malformed table directly and each refusal is turned back
+  into an acceptance one at a time. A reader who expects the loader to
+  bound this will not find that code, so the report says where it is
+  instead: `libc/src/tlsscan.c`.
+- **The library reads a structure the program image controls, so every
+  arithmetic step on it must survive hostile values.** Both defects review
+  found in this code were of that shape rather than of the shape the risks
+  above anticipated: a sum that wrapped and a size that was short. Neither
+  is a missing check on a field; both are checks whose *arithmetic* the
+  malformed case escaped. The bound on `memsz` is not enough on its own --
+  `p_vaddr` is unbounded, and it is what `memcpy` reads from.
 
 ## Alternatives considered
 
