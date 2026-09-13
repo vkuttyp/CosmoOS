@@ -69,13 +69,14 @@ requires an execute bit; `errno` ends as the last kernel error or
 `spawnve("/bin")` is `EACCES`, `spawnve("/etc/rc")` is `EACCES`). Gap:
 `PATH` entries longer than 1023 bytes are skipped silently.
 
-**L8. The allocator and stdio are locked; `errno` is not, and says so.**
-User threads arrived with the audit unit "native threads and a futex", and
-this invariant used to read "the library is single-threaded and says so"
-with a note that on that day `errno` would become thread-local and the
-allocator and stdio would take locks *before anything else was done*. Two
-thirds of that is done, and the split is by consequence rather than by
-convenience:
+**L8. The allocator, stdio and `errno` are each safe from more than one
+thread.** User threads arrived with the audit unit "native threads and a
+futex", and this invariant used to read "the library is single-threaded and
+says so" with a note that on that day `errno` would become thread-local and
+the allocator and stdio would take locks *before anything else was done*.
+The locks landed with the threads unit; `errno` landed with the unit after
+it, because it needed a thread pointer the machine did not have. All three
+are done, and the shape of each is set by its consequence:
 
 - **The allocator takes one lock** (`libc/src/malloc.c`). An unlocked free
   list is the one hazard here that corrupts memory silently, which is
@@ -87,32 +88,39 @@ convenience:
   `printf` -- `vfprintf` takes it and the sink writes through the unlocked
   core -- so two threads cannot interleave inside a line or race the
   buffer pointers of a `FILE`.
-- **`errno` is still one global**, because per-thread `errno` needs a
-  thread-local-storage model: a per-thread block, an architecture-specific
-  thread-pointer accessor, `crt0` installing one for the main thread on
-  both architectures, and `errno` becoming an accessor in a public header.
-  That is its own unit. Until then a threaded program must not rely on
-  `errno` across threads: the value it reads may be another thread's. The
-  consequence is a wrong error code, never corruption.
+- **`errno` is per-thread**, and takes no lock at all, because there is no
+  longer a shared location for two threads to contend over. It lives in a
+  128-byte block behind the thread pointer (`libc/include/cosmo/tcb.h`),
+  which `SYS_set_tls` sets: `__libc_start` installs a static block for the
+  first thread before anything else runs, and `cosmo_thread_start` puts one
+  in the page above each thread's stack, so every thread libc knows about
+  has a block before its first instruction. `errno` is
+  `(*__errno_location())`, one load of the thread pointer and an offset,
+  with **no case for a thread that has none** -- on x86-64 there cannot be
+  one, because reading `%fs:0` with a zero base dereferences address zero
+  and faults before any check could run. The consequence is a contract
+  rather than a fallback: **a thread created by a raw `SYS_thread_create`
+  with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
+  for a program that wants such a thread to use libc anyway.
 
 `strerror` and `getcwd(NULL)` still use static or heap storage without
 synchronisation of their own, and `feof`/`ferror`/`clearerr`/`fileno` read
 a word without the lock.
 
-The `errno` third is designed:
-`docs/audit/next-subsystem-errno-tls.md` (not yet implemented) adds a
-`SYS_set_tls` syscall and a per-thread block in libc, with `errno` an
-accessor over it, which is what completes this invariant.
-
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
-rather than setting the global, takes no libc lock, and maps its stacks
+rather than setting `errno`, takes no libc lock, and maps its stacks
 with `mmap`. A handle is zeroed before the first thing in
 `cosmo_thread_start` that can fail, so a refused start leaves a handle
 `join` refuses rather than indeterminate memory it would wait on. Check:
 review, plus `thrtest` step 11 -- three threads allocating, reallocating,
 freeing and printing at once behind a start barrier, each verifying its
-own blocks, which an unlocked allocator fails -- and step 8 for the
-refused handle. Gap: `errno`.
+own blocks, which an unlocked allocator fails -- step 8 for the refused
+handle, and steps 12 to 16 for `errno`: two threads provoking different
+failures two thousand times each while the first thread provokes a third,
+a thread's `errno` leaving the first thread's alone, a thread made outside
+libc installing its own block, and the block sitting above the stack and
+freed with it. Gap: `strerror` and `getcwd(NULL)`, which are now
+*fixable* -- the block is where they would go -- and are their own unit.
 
 ## Gaps (documented, not invariants)
 

@@ -1471,17 +1471,54 @@ See [docs/development.md](docs/development.md).
   here after review pushed back on merely documenting the hazard: the
   **allocator** and **stdio** now take one lock each (an unlocked free
   list is the one hazard that corrupts memory silently, and a whole
-  `printf` is one critical section), while **`errno` stays one global**,
-  because per-thread `errno` needs a TLS model and `crt0` changes on both
-  architectures and is its own unit -- a threaded program must not rely on
-  `errno` across threads until then, which costs a wrong error code and
-  never corruption. Proven by
-  `tests/native/thrtest` -- twelve steps from userland, because a kernel
+  `printf` is one critical section), while **`errno` stayed one global**
+  until the unit below, because per-thread `errno` needed a thread pointer
+  the machine did not have. Proven by
+  `tests/native/thrtest` -- from userland, because a kernel
   self-test cannot create a *user* thread -- with eleven bug-proofs, four of
   which sent the test back for a stronger assertion rather than the code. `SYS_mprotect`, futex
   requeue, per-thread signal targeting, the handle table under two threads,
   and `vmctl`'s conversion to a thread per vCPU (the first consumer, and
   the reason the machine-mode fairness rule exists) remain later units.
+- **A thread pointer, and `errno` per thread** (`docs/audit/next-subsystem-errno-tls.md`,
+  `docs/kernel/process/design.md` §13). The last third of what invariant L8
+  owed. The kernel had kept a thread pointer per thread all along and
+  `SYS_thread_create` took one for a *new* thread, but nothing let a thread
+  that already exists set its own -- so a process's first thread could never
+  have one. **`SYS_set_tls` (87)** is that and only that, and libc keeps a
+  128-byte block behind the pointer holding `errno` and a cached tid: a
+  `.bss` object for the first thread, installed before `__stdio_init` and
+  before `main`, and the page above each created thread's stack, freed by
+  the join's own `munmap`. `errno` becomes `(*__errno_location())` and all
+  **25 writers across ten files compile unchanged**, because every one
+  assigns through the name. There is deliberately **no fallback** for a
+  thread without a block: on x86-64 there cannot be one, since reading
+  `%fs:0` with a zero base faults at address zero before any check could
+  run -- so the contract is that a thread made by a raw `SYS_thread_create`
+  with `tls = 0` must not call libc, and `cosmo_tcb_install` is its way out.
+  Two things this unit taught, both from its own failures: the block needs
+  `aligned(16)` **on the type**, because the struct leads with a pointer and
+  one program out of the suite landed at an 8-mod-16 address -- caught in
+  one line by the exit-127 branch that "cannot happen"; and the `self` word
+  is load-bearing on exactly one architecture, which only a *pair* of runs
+  shows (unwritten, AArch64 passes everything and x86-64 loses every process
+  to SIGSEGV). Review added a third: **`SYS_set_tls` must be always-allowed
+  by the syscall filter**, beside `exit`, `sigreturn` and `thread_exit`,
+  because every native program installs its block before `main` -- a filter
+  omitting it killed every child of a filtered process during startup, and
+  the inherited-filter test could not see it, since its child is *expected*
+  to die of `SIGSYS` and a death in startup wears the same status. The
+  kernel log said `number 87 is outside its filter` where it used to name
+  the call the test was about; `init --filter inherit-start` now asserts
+  that a child of a filter naming only spawn and wait reaches its own
+  `main`. The tid cache became **lazy** for the same reason: read during
+  startup it made installing the pointer two syscalls, the second also
+  denied. Proven by `thrtest` steps 12-16 and six bug-proofs, one of
+  which failed to fail and sent the test back for an assertion about the
+  *layout* rather than about `errno`, plus one more for the filter. `strerror` and `getcwd(NULL)` stay
+  shared -- now fixable, since there is somewhere per-thread to put them --
+  and compiler `__thread` with ELF `PT_TLS` remains a later unit that this
+  one is the prerequisite for.
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

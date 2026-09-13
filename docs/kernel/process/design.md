@@ -1125,30 +1125,119 @@ silently; **stdio** takes one, held across a whole `printf`, so two threads
 cannot interleave inside a line or race a `FILE`'s buffer pointers. Both
 use the mutex from `cosmo/thread.h`, and an uncontended lock is one atomic,
 so a single-threaded program pays one compare-and-swap per call.
-**`errno` is still one global**, and that is the named follow-up: making it
-per-thread needs a thread-local-storage model -- a per-thread block, an
-architecture-specific thread-pointer accessor, `crt0` installing one for
-the main thread on both architectures, and `errno` becoming an accessor in
-a public header -- which is a unit with its own report. A threaded program
-must not rely on `errno` across threads until then; the consequence is a
-wrong error code, never corruption. `cosmo/thread.h` itself needs none of
-the three.
+**`errno` was the third**, and it landed in the unit after this one
+(`docs/audit/next-subsystem-errno-tls.md`, §13 below): `SYS_set_tls` gives
+a thread its own thread pointer, and libc keeps a 128-byte block behind it
+whose first fields are `errno` and the cached tid. `cosmo/thread.h` itself
+needs none of the three.
 
-Named and deferred: **a per-thread `errno`** -- designed since, in
-`docs/audit/next-subsystem-errno-tls.md` (not yet implemented): one
-syscall, `SYS_set_tls`, because the kernel keeps a thread pointer per
-thread and nothing lets a program set its own, plus a block libc installs
-for every thread it knows about -- a `.bss` object for the first, a page
-in the stack mapping for each one it creates -- with `errno` becoming an
-unconditional accessor over it. There is deliberately **no** fallback for
-a thread that has none: on x86-64, reading `%fs:0` with a zero base
-dereferences address zero before any check could run, so the design
-guarantees a block rather than testing for one, and a thread made by a raw
-`SYS_thread_create` with `tls = 0` must not call libc. It is also the prerequisite for the `vmctl` conversion below,
-whose vCPU threads would each read `errno`. `SYS_mprotect`; futex
+Named and deferred: `SYS_mprotect`; futex
 requeue (the Linux door already exposes it); per-thread signal *targeting*
 (a native `tgkill`); a thread's name and priority in `struct cosmo_thread`;
 `COSMO_RLIMIT_NTHREAD`; `/proc` per-thread entries; the handle table under
 two threads, which native threads make reachable and nothing tests; and
 `vmctl`'s conversion to a thread per vCPU, which is the first consumer and
 its own unit.
+
+## 13. A thread pointer, and `errno` per thread (audit unit "a thread pointer, and errno per thread")
+
+The threads unit left `errno` one global (§12), because fixing it needed
+something the machine did not have: **a way for a thread to set its own
+thread pointer**. The kernel has kept one per thread all along --
+`thread.tls_base`, written to `TPIDR_EL0` or `MSR_FS_BASE` on every switch
+to user -- and `SYS_thread_create` takes its value for a *new* thread, but
+nothing let a thread that already exists set its own, so a process's first
+thread could never have one.
+
+**`SYS_set_tls` (87)** is that, and only that: `(uint64_t base) -> 0`. It
+affects the calling thread alone -- a thread pointer is the definition of
+per-thread state, so it is shaped like `sigprocmask` and not like the
+syscall filter. `base` must be 16-byte aligned (`-EINVAL`) and its first
+eight bytes inside the caller's space (`-EFAULT`); **0 is legal**, and is
+what every thread has until something sets it. Eight bytes rather than a
+block's worth because eight is what the kernel can honestly promise: the
+layout behind the pointer is libc's business, but on x86-64 the
+architecture itself dereferences the first word, so a base whose first word
+is not in the caller's space is wrong on its face.
+
+**The block is libc's** (`libc/include/cosmo/tcb.h`): 128 bytes, `self`
+first, then `errno`, then the cached tid, then reserved space a program may
+not use before offset 128. `__errno_location()` returns `&tcb->err`, and
+finding the block differs by architecture -- AArch64 reads `TPIDR_EL0`
+through `__builtin_thread_pointer()`, while x86-64 cannot read the FS
+*base* without `rdfsbase` (which needs `CR4.FSGSBASE` and is not
+guaranteed) and so loads `%fs:0`, which is why the block points at itself.
+That `self` word is load-bearing on exactly one architecture, which a
+bug-proof shows precisely: unwritten, AArch64 passes the whole suite and
+x86-64 loses every user process to SIGSEGV.
+
+The struct carries `__attribute__((aligned(16)))` because the pointer must
+be 16-byte aligned and the struct's natural alignment is only 8 -- it leads
+with a pointer. Leaving that to each definition held until a linker put one
+block at an 8-mod-16 address, which is exactly what happened, to one
+program out of the suite, the first time this was built.
+
+**There is no fallback, because on x86-64 there cannot be one.** Reading
+`%fs:0` with a zero base dereferences address zero, so a thread with no
+block faults *before* an accessor could test what it loaded. The design
+removes the need instead of patching it:
+
+- **The first thread's block is static**, in libc's `.bss`, installed by
+  `__libc_start` before `__stdio_init` and before `main`. A mapping can
+  fail and a startup path that fails to give the process an `errno` has no
+  good answer -- it cannot report the failure through the thing it just
+  failed to provide. A `.bss` object cannot fail, which removes the
+  question rather than answering it. The one remaining failure, `SYS_set_tls`
+  refusing a linked static address, is handled anyway: one line to file
+  descriptor 2 and **exit 127**. That branch is not decoration -- it fired
+  during development and named the alignment bug above in one line.
+- **Every thread libc creates has one**: `cosmo_thread_start` maps
+  `guard + stack + one page` and puts the block in the page *above* the
+  stack, passing its address as `cosmo_thread.tls`, so the kernel installs
+  it before the thread's first instruction. It is freed by the `munmap` the
+  join already does: a thread cannot outlive the storage its `errno` is in.
+- **A thread created by a raw `SYS_thread_create` must carry a block whose
+  prefix is libc's to call libc at all.** `tls = 0` is the obvious case; a
+  `tls` pointing at a layout of the caller's own is the other, and it was
+  harmless before `errno` moved behind the thread pointer -- libc now reads
+  and writes that memory as its own block. Both are stated in
+  `cosmo/thread.h` and `cosmo/tcb.h`, and
+  `cosmo_tcb_install(void *block, size_t len)` is the way out for either.
+
+**`SYS_set_tls` is always allowed** by the syscall filter, alongside
+`SYS_exit`, `SYS_sigreturn` and `SYS_thread_exit`, for the same reason one
+step earlier: every native program installs its block before `main`, so a
+filter that omitted number 87 would kill every child of a filtered process
+during startup. A program that cannot reach its own `main` is not confined,
+only destroyed. `init --filter inherit-start` is the assertion -- a child of
+a filter naming only spawn and wait must reach `main` and exit with a status
+of its own -- and it exists because the older inherited-filter case cannot
+see this: its child is *expected* to die of SIGSYS, and a death in startup
+wears the same status as the death it means to provoke.
+
+The creator fills `self` and `err`; the **tid** is the one field it cannot,
+because it does not know the tid until `thread_create` returns and the
+thread may already be reading it. It is filled **on the first call that
+asks for it**, with zero meaning "not asked yet" -- unambiguous, because no
+thread's id is ever zero (a first thread answers its pid, every other
+`0x10000 + tid`). So `cosmo_thread_id()` costs one syscall the first time
+and a load afterwards, and a thread that never asks pays nothing.
+
+Lazily rather than at install time for a reason worth keeping: a tid read
+inside `__libc_start` would make installing the thread pointer *two*
+syscalls, and the second is not in the filter's always-allowed set -- which
+killed the children of filtered processes during startup on `SYS_thread_self`
+once `SYS_set_tls` itself had been allowed.
+
+`errno` becomes `(*__errno_location())` in `errno.h`. All 25 writers across
+ten files compile unchanged, because every one assigns through the name;
+`__syscall_ret` needed no edit. The one visible consequence is that
+`&errno` is no longer a link-time constant, which POSIX has required of
+`errno` for decades.
+
+Still shared, and now *fixable* because there is somewhere per-thread to
+put them: `strerror`'s buffer and `getcwd(NULL)`'s storage. Named and
+deferred: compiler `__thread` with ELF `PT_TLS` (this unit is its
+prerequisite, not a detour around it -- the thread pointer is what `PT_TLS`
+would use), a way to ask for the block's size, and the `vmctl` conversion
+this unblocks.

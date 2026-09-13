@@ -17,9 +17,11 @@ initialises stdio, calls `main`, then `exit`. `__stdio_init`,
 
 ## errno.h
 
-`extern int errno` (one global: the allocator and stdio are locked, this
-is not, so a threaded program must not rely on it across threads --
-invariants L8).
+`errno` is `(*__errno_location())`, a field of the calling thread's block
+(`cosmo/tcb.h`), so every thread has its own -- invariants L8. `&errno` is
+therefore not a link-time constant, which POSIX has required of `errno`
+for decades.  A thread made by a raw `SYS_thread_create` with `tls = 0`
+has no block and must not call libc; `cosmo_tcb_install` gives it one.
 `E*` names are the `COSMO_E*` values of `uapi/cosmo/syscall.h`:
 `EPERM` 1, `ENOENT` 2, `ESRCH` 3, `EINTR` 4, `EIO` 5, `E2BIG` 7,
 `ENOEXEC` 8, `EBADF` 9, `ECHILD` 10, `EAGAIN` 11, `ENOMEM` 12,

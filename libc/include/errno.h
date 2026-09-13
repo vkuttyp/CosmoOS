@@ -1,7 +1,16 @@
 #ifndef _ERRNO_H
 #define _ERRNO_H
 #include <uapi/cosmo/syscall.h>
-extern int errno;
+
+/*
+ * errno is per-thread: it lives in the block behind the thread pointer
+ * (cosmo/tcb.h). The accessor is one load and an offset, and every existing
+ * use -- reads, writes, `errno = 0` -- compiles unchanged. The one visible
+ * consequence is that `&errno` is not a link-time constant, which POSIX has
+ * required of errno for decades.
+ */
+int *__errno_location(void);
+#define errno (*__errno_location())
 #define EPERM COSMO_EPERM
 #define ENOENT COSMO_ENOENT
 #define ESRCH COSMO_ESRCH

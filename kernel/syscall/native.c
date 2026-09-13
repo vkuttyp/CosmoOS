@@ -167,6 +167,34 @@ static int64_t sys_futex_wake(struct syscall_args *a)
     return futex_wake(process_current()->space, a->a[0], (unsigned)a->a[1]);
 }
 
+/*
+ * The calling thread's thread pointer, and only the calling thread's: a
+ * thread pointer is the definition of per-thread state, so this is shaped
+ * like sigprocmask and not like the syscall filter. SYS_thread_create's
+ * `tls` remains how a *new* thread gets one before its first instruction;
+ * this is how a thread that already exists gets one, which in practice
+ * means a process's first thread, from libc's startup.
+ *
+ * Zero is legal, and is what every thread has until something sets it.
+ *
+ * The range check is eight bytes because eight is what the kernel can
+ * honestly promise: libc's block is libc's business and its size is not
+ * the kernel's to know, but on x86-64 the architecture itself dereferences
+ * the first word through %fs:0, so a base whose first word is not in the
+ * caller's space is wrong on its face. The alignment is 16, which every
+ * layout a C ABI will put there wants anyway.
+ */
+static int64_t sys_set_tls(struct syscall_args *a)
+{
+    uint64_t base = a->a[0];
+    if (base % 16u)
+        return -EINVAL;
+    if (base != 0 && !user_range_ok(base, 8))
+        return -EFAULT;
+    arch_set_tls_base((uintptr_t)base);
+    return 0;
+}
+
 /* This thread ends; the process ends with the last of them, carrying that
  * thread's status. SYS_exit remains the process. */
 static int64_t sys_thread_exit(struct syscall_args *a)
@@ -1620,6 +1648,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_futex_wake] = sys_futex_wake,
     [SYS_thread_create] = sys_thread_create,
     [SYS_thread_exit] = sys_thread_exit,
+    [SYS_set_tls] = sys_set_tls,
     [SYS_mount] = sys_mount,
     [SYS_umount] = sys_umount,
     [SYS_socket] = sys_socket,
@@ -1687,10 +1716,19 @@ static const syscall_fn native_table[SYS_COUNT] = {
  * shutdown into a signal death. */
 /* sigreturn joins it: a filter that denied the return from a handler
  * would turn every caught signal into a kill. */
-static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_thread_exit };
+static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_thread_exit, SYS_set_tls };
 /* SYS_thread_exit is always allowed for the reason SYS_exit is: a thread
  * that cannot exit cannot be stopped, and a filter that traps one in the
- * kernel is a denial of service the filter unit did not intend. */
+ * kernel is a denial of service the filter unit did not intend.
+ *
+ * SYS_set_tls joins them for the same reason one step earlier: every native
+ * program installs its thread block in `__libc_start`, before `main` and
+ * before anything a filter could be about, so a filter that omitted it
+ * would kill every child of a filtered process during startup -- a program
+ * that cannot reach its own `main` cannot be confined, only destroyed. This
+ * was not theoretical: the inherited-filter test's child died on number 87
+ * in startup instead of on the call the test was about, and the status was
+ * the same either way, so nothing failed. */
 
 const struct personality personality_native = {
     .name = "native",

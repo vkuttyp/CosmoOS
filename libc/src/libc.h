@@ -15,6 +15,12 @@
 long __syscall_ret(long r);
 
 void __libc_start(int argc, char **argv, char **envp) __attribute__((noreturn));
+/* tcb.c: the thread pointer. __cosmo_tcb_init installs the first thread's
+ * block and must run before anything that can set errno. A created
+ * thread's block is installed by the kernel from `cosmo_thread.tls`. */
+int __cosmo_tcb_init(void);
+unsigned __cosmo_tcb_tid(void);
+
 void __stdio_init(void);
 void __stdio_flush_all(void);
 

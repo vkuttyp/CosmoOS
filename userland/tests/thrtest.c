@@ -10,16 +10,19 @@
  */
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cosmo/syscall.h>
+#include <cosmo/tcb.h>
 #include <cosmo/thread.h>
 
 #define PAGE 4096u
@@ -124,6 +127,131 @@ static void *pair_a(void *arg)
 #define HEAP_BARRIER_NS \
     ((unsigned long long)(HEAP_WORKERS - 1u) * HEAP_RETRY_ATTEMPTS * HEAP_RETRY_SLEEP_NS \
      + 2000000000ull)
+
+/*
+ * Step 14's pair. Each provokes a *different* failure in a loop and reads
+ * its own errno back every iteration. One shared errno loses this within a
+ * few iterations -- whichever thread wrote last wins -- so the assertion is
+ * not "errno is right once" but "errno is right every time, while another
+ * thread is writing a different value into its own".
+ */
+static volatile unsigned errno_bad[2], errno_done;
+static void *errno_ebadf(void *arg)
+{
+    (void)arg;
+    for (unsigned i = 0; i < 2000u; i++) {
+        errno = 0;
+        if (close(-1) != -1 || errno != EBADF)
+            errno_bad[0]++;
+    }
+    __atomic_fetch_add(&errno_done, 1, __ATOMIC_ACQ_REL);
+    return NULL;
+}
+static void *errno_erange(void *arg)
+{
+    (void)arg;
+    for (unsigned i = 0; i < 2000u; i++) {
+        errno = 0;
+        /* A different code from the other thread's, from a different call:
+         * strtoll's overflow is ERANGE and touches no kernel at all, so the
+         * two threads are not merely racing inside one syscall path. */
+        (void)strtoll("99999999999999999999", NULL, 10);
+        if (errno != ERANGE)
+            errno_bad[1]++;
+    }
+    __atomic_fetch_add(&errno_done, 1, __ATOMIC_ACQ_REL);
+    return NULL;
+}
+
+/* Step 17: reports what the cache says its own id is, which the creator
+ * compares against the tid `thread_create` gave it. */
+static void *id_reporter(void *arg)
+{
+    (void)arg;
+    return (void *)(unsigned long)cosmo_thread_id();
+}
+
+/*
+ * Step 17's other half: **the block is not in the thread's stack.** A
+ * thread can find its own block without any new interface -- `&errno` is a
+ * field of it -- and compare it against a local, which is on the stack by
+ * definition. The block is mapped in the page *above* the stack, so it must
+ * be above the deepest thing the stack holds.
+ *
+ * This assertion exists because the obvious proof does not work: putting
+ * the block inside the stack corrupts `err` silently on AArch64, where the
+ * `self` word is unused, and every assertion that sets `errno` and reads it
+ * straight back still passes. The layout has to be checked as a layout.
+ */
+static volatile unsigned layout_ok, layout_ran;
+static volatile unsigned long layout_blk;
+static void *layout_probe(void *arg)
+{
+    char local;
+    (void)arg;
+    const char *blk = (const char *)&errno - offsetof(struct __cosmo_tcb, err);
+    layout_ok = (unsigned)(blk > &local);
+    layout_blk = (unsigned long)blk;
+    layout_ran = 1;
+    return NULL;
+}
+
+/* Step 15: a thread that sets its errno and exits, so main can show that
+ * its own survived. */
+static void *errno_setter(void *arg)
+{
+    (void)arg;
+    errno = 0;
+    (void)close(-1);
+    return (void *)(unsigned long)(unsigned)errno;
+}
+
+/*
+ * Step 16: the path a program outside libc's wrapper must take. This thread
+ * is made by a raw SYS_thread_create with tls = 0, so it has no block and
+ * must not touch libc until it installs one -- which is the contract
+ * cosmo/tcb.h states. It installs one from storage of its own and only then
+ * uses errno.
+ */
+static __attribute__((aligned(16))) char raw_blk[COSMO_TCB_SIZE];
+static volatile int raw_rc[3];
+static volatile unsigned raw_err, raw_done;
+static void raw_entry(void *arg)
+{
+    (void)arg;
+    /* Too short, and misaligned: refused before anything is installed, and
+     * both refusals happen while this thread still has no block -- which is
+     * why cosmo_tcb_install must not itself touch errno. */
+    raw_rc[0] = cosmo_tcb_install(raw_blk, COSMO_TCB_SIZE - 1u);
+    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, COSMO_TCB_SIZE);
+    raw_rc[2] = cosmo_tcb_install(raw_blk, sizeof(raw_blk));
+    if (raw_rc[2] == 0) {
+        errno = 0;
+        (void)close(-1);
+        raw_err = (unsigned)errno;
+        raw_done = cosmo_thread_id();   /* the cache install wrote */
+    }
+    cosmo_thread_exit(0);
+}
+
+/*
+ * Step 13's worker. It clobbers its *own* thread pointer, which is why the
+ * successful sets happen here and never on the main thread: from the unit's
+ * later steps the main thread's pointer is libc's own block, and a test
+ * that took it away would break `errno` for everything after it. Nothing
+ * this worker does after the first set touches libc -- it returns, and the
+ * trampoline's store and `thread_exit` are an atomic and a raw syscall.
+ */
+static volatile long tls_rc[3];
+static void *tls_user(void *arg)
+{
+    static __attribute__((aligned(16))) char a[128], b[128];
+    (void)arg;
+    tls_rc[0] = cosmo_set_tls((unsigned long long)(unsigned long)a);
+    tls_rc[1] = cosmo_set_tls((unsigned long long)(unsigned long)b);   /* re-set wins */
+    tls_rc[2] = cosmo_set_tls(0);                                      /* and zero is legal */
+    return NULL;
+}
 
 static volatile unsigned heap_bad, heap_done, heap_ready, heap_go, heap_late;
 static void *heap_user(void *arg)
@@ -572,6 +700,156 @@ int main(int argc, char **argv)
     }
 
     STEP("12");
+    /*
+     * (13) `SYS_set_tls`, the syscall the per-thread `errno` is built on.
+     * What it promises is checked here; that it *took effect* is checked by
+     * `errno` itself in the steps that follow, because there is no
+     * architecture-independent way to read a thread pointer back -- x86-64
+     * cannot read the FS base without `rdfsbase`, which is why libc's block
+     * points to itself at all.
+     *
+     * A refused call leaves the pointer alone, so the refusals are safe on
+     * any thread, including this one. The successful ones are not, and run
+     * on a worker.
+     */
+    {
+        static __attribute__((aligned(16))) char blk[128];
+        CHECK(cosmo_set_tls((unsigned long long)(unsigned long)blk + 8u) == -EINVAL);  /* 16-byte aligned */
+        CHECK(cosmo_set_tls(0x400000ull - 16u) == -EFAULT);          /* below the user range */
+        CHECK(cosmo_set_tls(0x7FFFFFFFF000ull) == -EFAULT);          /* and at the top, which is past it */
+        /*
+         * A base whose eight bytes straddle the top of the range is not
+         * checked here because the alignment makes it unreachable: the
+         * range ends 16-byte aligned, so the last 16-byte-aligned address
+         * below it has its whole word inside. An earlier version of this
+         * step asserted otherwise, and the assertion failed -- by
+         * *succeeding*, which set the main thread's pointer to an address
+         * the rest of this unit relies on libc owning.
+         */
+
+        cosmo_thread_t tt;
+        tls_rc[0] = tls_rc[1] = tls_rc[2] = -1;
+        CHECK(cosmo_thread_start(&tt, tls_user, NULL, 16u * 1024u) == 0);
+        CHECK(cosmo_thread_join(&tt, NULL) == 0);
+        CHECK(tls_rc[0] == 0);     /* a thread can set its own */
+        CHECK(tls_rc[1] == 0);     /* and set it again */
+        CHECK(tls_rc[2] == 0);     /* and zero is what every thread starts with */
+    }
+
+    STEP("13");
+    /*
+     * (14) **Two threads, two `errno`s.** The point of the unit. Each
+     * thread provokes its own failure two thousand times and reads its own
+     * value back each time; a shared `errno` loses one of the two within a
+     * few iterations. Main provokes a third code while they run, so all
+     * three are live at once.
+     */
+    {
+        cosmo_thread_t a, b;
+        errno_bad[0] = errno_bad[1] = errno_done = 0;
+        CHECK(cosmo_thread_start(&a, errno_ebadf, NULL, 16u * 1024u) == 0);
+        CHECK(cosmo_thread_start(&b, errno_erange, NULL, 16u * 1024u) == 0);
+        unsigned mine_bad = 0;
+        for (unsigned i = 0; i < 2000u; i++) {
+            errno = 0;
+            if (close(-2) != -1 || errno != EBADF)
+                mine_bad++;      /* counted, not printed: 2000 CHECKs would bury the log */
+        }
+        CHECK(cosmo_thread_join(&a, NULL) == 0);
+        CHECK(cosmo_thread_join(&b, NULL) == 0);
+        CHECK(errno_done == 2);
+        CHECK(mine_bad == 0);       /* main's own, while both threads ran */
+        CHECK(errno_bad[0] == 0);   /* EBADF never became ERANGE */
+        CHECK(errno_bad[1] == 0);   /* nor the other way */
+    }
+
+    STEP("14");
+    /* (15) Main's `errno` survives a thread's: it sets one code, a thread
+     * sets another and exits, and main's is still its own afterwards. */
+    {
+        errno = 0;
+        CHECK(strtoll("99999999999999999999", NULL, 10) == 0x7fffffffffffffffll);
+        CHECK(errno == ERANGE);
+        void *theirs = NULL;
+        CHECK(cosmo_thread_start(&t, errno_setter, NULL, 16u * 1024u) == 0);
+        CHECK(cosmo_thread_join(&t, &theirs) == 0);
+        CHECK((unsigned)(unsigned long)theirs == EBADF);   /* the thread's own */
+        CHECK(errno == ERANGE);                         /* and main's is untouched */
+    }
+
+    STEP("15");
+    /*
+     * (16) A thread libc did not make, installing its own block. The
+     * *un*installed case is deliberately not tested: the contract is that
+     * it faults, and a test asserting a fault would be asserting the
+     * absence of a fallback this design does not have.
+     */
+    {
+        void *stk = mmap(NULL, 16u * 1024u, PROT_READ | PROT_WRITE,
+                         MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        CHECK(stk != MAP_FAILED);
+        raw_rc[0] = raw_rc[1] = raw_rc[2] = 1;
+        raw_err = 0;
+        raw_done = 0;
+        unsigned clear = 0;
+        struct cosmo_thread req;
+        memset(&req, 0, sizeof(req));
+        req.entry = (unsigned long)raw_entry;
+        req.stack_top = ((unsigned long)stk + 16u * 1024u) & ~15ul;
+        req.tls = 0;                       /* no block: the contract's case */
+        req.clear_tid = (unsigned long)&clear;
+        long tid = cosmo_thread_create(&req);
+        CHECK(tid > 0);
+        if (tid > 0) {
+            while (__atomic_load_n(&clear, __ATOMIC_ACQUIRE) != 0)
+                cosmo_yield();
+            CHECK(raw_rc[0] == -EINVAL);       /* shorter than the prefix */
+            CHECK(raw_rc[1] == -EINVAL);       /* and misaligned */
+            CHECK(raw_rc[2] == 0);
+            CHECK(raw_err == EBADF);           /* errno works once installed */
+            CHECK(raw_done == (unsigned)tid);  /* and so does the tid cache */
+        }
+        CHECK(munmap(stk, 16u * 1024u) == 0);
+    }
+
+    STEP("16");
+    /* (17) The cached tid agrees with the syscall, for the first thread and
+     * for a created one, and `strerror`/`perror` still answer for the
+     * calling thread -- both still shared, which L8 still records. */
+    {
+        CHECK(cosmo_thread_id() == (cosmo_tid_t)cosmo_thread_self());
+        CHECK(cosmo_thread_id() == (cosmo_tid_t)getpid());   /* the first thread answers its pid */
+        void *said = NULL;
+        CHECK(cosmo_thread_start(&t, id_reporter, NULL, 16u * 1024u) == 0);
+        CHECK(cosmo_thread_join(&t, &said) == 0);
+        CHECK((unsigned long)said == (unsigned long)t.tid);   /* the cache is this thread's own */
+        layout_ok = layout_ran = 0;
+        CHECK(cosmo_thread_start(&t, layout_probe, NULL, 16u * 1024u) == 0);
+        CHECK(cosmo_thread_join(&t, NULL) == 0);
+        CHECK(layout_ran == 1);
+        CHECK(layout_ok == 1);      /* the block is above the stack, not in it */
+        /*
+         * And the join freed it. The report proposed counting the address
+         * space across a thousand cycles; this asserts the thing itself
+         * instead, because a leak is directly observable: a write from an
+         * unmapped address is -EFAULT, and this address was a live block
+         * one statement ago. (A count would also need a limit to count
+         * against -- `getrlimit` reports the limit, not the usage.)
+         */
+        int nul = open("/dev/null", O_WRONLY);
+        CHECK(nul >= 0);
+        if (nul >= 0) {
+            errno = 0;
+            CHECK(write(nul, (const void *)layout_blk, 1) == -1);
+            CHECK(errno == EFAULT);     /* the block page went with the stack */
+            CHECK(close(nul) == 0);
+        }
+        errno = EBADF;
+        CHECK(strcmp(strerror(EBADF), "Bad file descriptor") == 0);
+        CHECK(strcmp(strerror(ERANGE), "Result out of range") == 0);
+    }
+
+    STEP("17");
     /*
      * (12) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256

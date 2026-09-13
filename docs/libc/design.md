@@ -7,7 +7,8 @@ libc/
   include/          the public headers (standard names) and cosmo/ (native)
   src/
     arch/<arch>/crt0.S   _start (x86_64/, aarch64/)
-    errno.c         errno, __syscall_ret, strerror table
+    errno.c         __syscall_ret, strerror table
+    tcb.c           the thread pointer, errno behind it, cosmo_tcb_install
     string.c        mem*/str*
     ctype.c
     malloc.c        the allocator
@@ -249,7 +250,9 @@ Irrelevant at this scale; the allocator is O(n) in free blocks per call,
 
 ## Future extensibility
 
-- Threads: `errno` becomes TLS, the allocator and stdio take locks.
+- Threads: done -- the allocator and stdio take locks (threads unit), and
+  `errno` is a field of the per-thread block behind the thread pointer
+  (`cosmo/tcb.h`, `SYS_set_tls`).
 - Floating point once user FPU state is saved: `%f/%g/%e`, `strtod`,
   `<math.h>`.
 - Linux compatibility lives in `compat/linux/` (Phase 11), not here

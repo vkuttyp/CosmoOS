@@ -1,8 +1,50 @@
 # NEXT SUBSYSTEM — a thread pointer, and `errno` per thread
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. **This report is as built.** The
+design below is what shipped; six things differ from what was written, and
+each is marked where it appears:
+
+1. **The block needs `__attribute__((aligned(16)))` on the type.** The
+   report specified a 16-byte-aligned thread pointer but gave the struct no
+   alignment, and its natural alignment is 8 because it leads with a
+   pointer. One program out of the whole suite -- `sh` -- was linked at an
+   8-mod-16 address and died at startup. The exit-127 branch the report
+   argued for but expected never to run is what named it, in one line.
+2. **`cosmo_thread_start` does not install the block; the kernel does.**
+   The report had libc adopt it; passing the address as `cosmo_thread.tls`
+   is simpler and means the block is live *before* the thread's first
+   instruction rather than after its first libc call.
+3. **The tid is cached lazily, on the first call that asks for it.** The
+   creator cannot fill it -- it does not know the tid until
+   `thread_create` returns, and by then the thread may already be reading
+   it -- and a first version had the thread cache its own in the
+   trampoline. Review killed that: a tid read costs a syscall, and during
+   `__libc_start` that made installing the thread pointer *two* calls, the
+   second of which is not in the filter's always-allowed set. Zero means
+   "not asked yet", which is unambiguous because no thread's id is ever
+   zero.
+4. **The freed-block proof is a direct assertion, not a counting test.**
+   The report proposed a thousand create/join cycles against the address
+   space; a write from the block's address after the join is `-EFAULT`,
+   which is shorter and stronger -- and a count would have needed a limit
+   to count against, since `getrlimit` reports the limit, not the usage.
+5. **One bug-proof failed to fail, and the test changed rather than the
+   code.** Putting the block inside the stack corrupts `err` silently on
+   AArch64, where the `self` word is unused, and every assertion that sets
+   `errno` and reads it straight back still passed. The step now asserts
+   the *layout* -- a thread finds its own block through `&errno` and checks
+   it is above a local. A sixth proof, installing the first thread's block
+   after `__stdio_init` instead of before, **does not fail today** and is
+   recorded as an untested precaution below.
+6. **The second `errno` worker overflows `strtoll` for `ERANGE`** rather
+   than provoking `-ENOMEM` from an unmapped `mmap`. `strtoll` reaches no
+   kernel, so the two threads are not merely racing inside one syscall
+   path -- and a failing `mmap` two thousand times over is a syscall each.
+
+**One thing the report missed entirely** is in its own section below:
+`SYS_set_tls` has to be always-allowed by the syscall filter, which review
+found and the suite could not see.
 
 **Subsystem: the last third of what the threads unit owed. `errno` is one
 global (`libc/src/errno.c`, `int errno;`), so a threaded native program
@@ -119,7 +161,7 @@ and names `errno` as what remains.
   from two threads. After this, that warning shrinks to `strerror` and
   `getcwd(NULL)` -- and those become fixable.
 
-## Proposed design
+## Design (as built)
 
 ### One syscall
 
@@ -143,11 +185,14 @@ first thread, from `__libc_start`.
 ### A block libc owns, found without a second syscall
 
 ```c
-/* libc/include/cosmo/tcb.h -- the layout is libc's, not the kernel's. */
+/* libc/include/cosmo/tcb.h -- the layout is libc's, not the kernel's.
+ * As built the struct also carries __attribute__((aligned(16)))
+ * (difference 1): the thread pointer must be 16-byte aligned and this
+ * struct's natural alignment is 8, because it leads with a pointer. */
 struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
-    unsigned tid;               /* cached, so thread_id() costs no syscall */
+    unsigned tid;               /* the cached id; 0 means "not asked yet" */
     char reserved[112];         /* to 128: 8 + 4 + 4 + 112. A program's own storage
                                    starts at offset 128, never inside this. */
 };
@@ -218,16 +263,25 @@ address zero being readable.
   leaves.
 - **Every thread libc creates**: `cosmo_thread_start` already maps
   `guard + stack`; it maps `guard + stack + one page` instead, puts the
-  block in the extra page and passes its address as `cosmo_thread.tls`, so
-  the block exists before the thread's first instruction and is freed by
-  the `munmap` the join already does. That mapping can fail, and it
+  block in the extra page *above the stack* and passes its address as
+  `cosmo_thread.tls`, so **the kernel installs it** (difference 2) before
+  the thread's first instruction, and it is freed by the `munmap` the join
+  already does. The creator fills `self` and `err`; the **tid** is cached
+  lazily, on the first call that asks (difference 3), because the creator
+  does not know it until `thread_create` returns and the thread may already
+  be reading it -- and because a read during startup would make installing
+  the thread pointer two syscalls instead of one. That mapping can fail, and it
   already has a failure path: `thread_start` returns `-ENOMEM` and no
   thread is created.
-- **A thread created by a raw `SYS_thread_create` with `tls = 0`** has no
-  block and **must not call libc**, which `cosmo/thread.h` states beside
-  the syscall. `cosmo_tcb_install(void *block, size_t len)` is offered for
-  a program that wants one anyway: it checks the length against the
-  prefix, writes the `self` word and calls `SYS_set_tls`.
+- **A thread created by a raw `SYS_thread_create`** must carry a block
+  whose **prefix is libc's** to call libc at all, which `cosmo/thread.h`
+  and `cosmo/tcb.h` both state. `tls = 0` is the obvious case; the one
+  review had to point out is a `tls` pointing at a layout of the caller's
+  own, which was harmless before `errno` moved behind the thread pointer
+  and is not now -- libc reads and writes that memory as its own block.
+  `cosmo_tcb_install(void *block, size_t len)` is the way out for either:
+  it checks the length against the prefix, writes the `self` word and calls
+  `SYS_set_tls`.
 
 ### `errno` becomes an accessor
 
@@ -247,7 +301,7 @@ decades, and nothing in this tree takes its address.
 `strerror`'s static buffer and `getcwd(NULL)`'s storage stay shared: both
 now *can* be fixed, and doing it here would be a second subsystem in one
 unit. `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
-call) because the block has to carry something more than `errno` to justify
+call after the first, since the cache is filled lazily) because the block has to carry something more than `errno` to justify
 128 bytes, and the tid is the field the threads unit already makes every
 thread know. Compiler `__thread` is not attempted: that needs `spawn` to
 honour `PT_TLS`, a real TCB layout and the linker's TLS relocations, and
@@ -287,18 +341,22 @@ handler wants.
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_set_tls` (87), `SYS_COUNT` 87→88 |
 | `kernel/syscall/native.c` | the handler: validate, `arch_set_tls_base` |
 | `libc/include/errno.h` | `__errno_location`, `#define errno` |
-| `libc/src/errno.c` | the accessor, the static first-thread block, `int errno;` removed |
-| `libc/include/cosmo/tcb.h` (new) | `struct __cosmo_tcb` and the reserved-prefix rule |
-| `libc/src/tcb.c` (new) | the accessor's arch halves, `__cosmo_main_tcb`, and `cosmo_tcb_install` |
-| `libc/src/stdlib.c` | `__libc_start` installs the first thread's block first |
-| `libc/src/thread.c` | one more page in the mapping; `tls` passed; `cosmo_thread_id` reads the cache |
+| `libc/src/errno.c` | **as built only `int errno;` removed** -- the accessor and the block live in `tcb.c`, not here |
+| `libc/include/cosmo/tcb.h` (new) | `struct __cosmo_tcb` (`aligned(16)`), `COSMO_TCB_SIZE`, the reserved-prefix rule, `cosmo_tcb_install` |
+| `libc/src/tcb.c` (new) | the accessor's arch halves, the static first-thread block, `__cosmo_tcb_init`, the tid cache, `cosmo_tcb_install` |
+| `libc/src/libc.h` | **not in the report**: the internal declarations (`__cosmo_tcb_init`, `__cosmo_tcb_tid`) |
+| `libc/src/stdlib.c` | `__libc_start` installs the first thread's block first, and the exit-127 policy |
+| `libc/src/thread.c` | one more page in the mapping; `tls` passed so the kernel installs it; `cosmo_thread_id` reads the block's lazily-filled cache |
+| `kernel/security/…` docs, `userland/init/init.c` | **not in the report**: `SYS_set_tls` joins the always-allowed set, and `--filter inherit-start` asserts it |
+| `libc/include/cosmo/thread.h` | **not in the report's table** (the migration plan named it): the L8 warning shrinks to the raw-thread contract |
 | `libc/include/cosmo/syscall.h` | the `SYS_set_tls` stub |
 | `libc/libc.mk` | `tcb.c` |
-| `userland/tests/thrtest.c` | the new steps |
+| `userland/tests/thrtest.c` | steps 12-16, and the thread-bound step renumbered to 17 so it stays last |
 | `docs/libc/invariants.md` | L8 completed: the constraint goes |
-| `docs/libc/architecture.md`, `-/api.md`, `libc/README.md` | `errno` is per-thread |
-| `docs/kernel/process/design.md`, `-/testing.md` | §12's follow-up, satisfied; the new steps |
+| `docs/libc/architecture.md`, `-/api.md`, `-/design.md`, `libc/README.md` | `errno` is per-thread (`design.md` **not in the report's table**) |
+| `docs/kernel/process/design.md`, `-/testing.md` | §12's follow-up satisfied and a new **§13** for this unit; the new steps |
 | `README.md` | Status entry |
+| `docs/audit/next-subsystem-errno-tls.md` | this report, converted to as-built |
 
 ## New APIs
 
@@ -307,7 +365,7 @@ One syscall (`SYS_set_tls`), one libc header (`cosmo/tcb.h`), one accessor
 keeps its name and its type, and `SYS_thread_create`'s `tls` field keeps
 its meaning.
 
-## Migration plan
+## Migration plan (followed, except step 4)
 
 1. **`SYS_set_tls`** alone, with its validation and a test that a thread
    can set and re-set its own pointer and that a bad one is refused. No
@@ -321,24 +379,35 @@ its meaning.
    is the regression test for it.
 3. **`cosmo_tcb_install`**, so a thread made outside libc's wrapper can
    opt in, with the length check its bug-proof needs.
-4. **`cosmo_thread_start` installs one per thread**, and `cosmo_thread_id`
-   reads the cached tid.
+4. **`cosmo_thread_start` gives every thread one**, and `cosmo_thread_id`
+   reads the cached tid. *As built this step differs twice*: the block is
+   passed as `cosmo_thread.tls` and **the kernel installs it** rather than
+   libc adopting it (difference 2), and the tid cache is **lazy** rather
+   than filled at install time (difference 3).
 5. **The tests**, then the bug-proofs.
 6. **L8 and the documents**, including the warning in `cosmo/thread.h`,
    which shrinks rather than disappears.
 
 ## Tests
 
-In `thrtest`, which already owns the threaded-libc questions:
+In `thrtest`, which already owns the threaded-libc questions -- shipped as
+steps 12 to 16, with the thread-bound step renumbered to 17 so that it
+stays **last**: it exhausts threads on purpose, and every step below
+creates one.
 
-1. **Two threads, two `errno`s**: each provokes a different failure in a
-   loop (`close(-1)` for `-EBADF`, an unmapped `mmap` for `-ENOMEM`) and
-   reads its own value back every iteration. A shared `errno` loses this
-   within a few iterations; a per-thread one never does.
-2. **The first thread's `errno` survives a thread's**: main provokes one
+1. (step 13) **Two threads, two `errno`s**: each provokes a different failure in a
+   loop and reads its own value back every iteration. A shared `errno`
+   loses this within a few iterations; a per-thread one never does. *As
+   built the second worker overflows `strtoll` for `ERANGE` rather than
+   provoking `-ENOMEM` from an unmapped `mmap`* (difference 6): `strtoll`
+   touches no kernel at all, so the two threads are not merely racing
+   inside one syscall path, and an `mmap` that fails costs a syscall two
+   thousand times over. The first thread provokes a third code,
+   `EBADF` from a different descriptor, while both run.
+2. (step 14) **The first thread's `errno` survives a thread's**: main provokes one
    error, a thread provokes another and exits, main's value is still its
    own.
-3. **A hand-made thread installs its own block**: a raw
+3. (step 15) **A hand-made thread installs its own block**: a raw
    `SYS_thread_create` with `tls = 0`, whose entry calls
    `cosmo_tcb_install` on a buffer of its own and then provokes an error
    and reads `errno` -- the path a program outside libc's wrapper must
@@ -346,13 +415,13 @@ In `thrtest`, which already owns the threaded-libc questions:
    the contract is that it faults: on x86-64 it dereferences address zero,
    and a test that asserted a fault would be asserting the absence of a
    fallback this design does not have.
-4. **`SYS_set_tls`'s validation**: unaligned is `-EINVAL`, outside the
+4. (step 12) **`SYS_set_tls`'s validation**: unaligned is `-EINVAL`, outside the
    caller's space is `-EFAULT`, and setting it twice works -- the second
    value takes effect, which is what `cosmo_tcb_install` relies on. Zero
    is accepted by the kernel (it is what every thread starts with) and the
    test sets it only on a thread it then lets exit without touching libc,
    because that is the whole of what zero now means.
-5. **The cached tid agrees with the syscall**: `cosmo_thread_id()` equals
+5. (step 16) **The cached tid agrees with the syscall**: `cosmo_thread_id()` equals
    `SYS_thread_self` for the first thread and for a created one.
 6. **`strerror` and `perror` still work** from one thread, and the
    documents still say they are that thread's alone.
@@ -364,28 +433,48 @@ In `thrtest`, which already owns the threaded-libc questions:
    make a `.bss` address invalid -- named here so it is not mistaken for
    something the suite proves.
 
-**Bug-proofs**: the accessor reading a single global (step 1 loses a
-value); the `self` word not written on x86-64 (`%fs:0` returns whatever
-that memory held, so `errno`'s address is garbage -- the proof that the
-word is load-bearing, and the reason it is permanent); the first thread's
-block installed *after* `__stdio_init` rather than before (an error raised
-inside startup lands in a different place from every later one, which step
-2 sees); the extra page not added to the thread mapping (the block
-overlaps the thread's own stack and they corrupt each other -- step 1
-should see a wrong value rather than a crash); the block not freed on join
-(the address space grows across a thousand create/join cycles, which a
-counting test catches); and `cosmo_tcb_install` not checking the length
-(step 3's buffer is smaller than the prefix and the write runs past it).
+**One thing the report missed entirely**, found in review: `SYS_set_tls`
+must join `SYS_exit`, `SYS_sigreturn` and `SYS_thread_exit` in the native
+personality's **always-allowed** set. Every native program installs its
+block in `__libc_start`, before `main`, so a filter that omitted number 87
+killed every child of a filtered process during startup -- and the
+inherited-filter test could not see it, because its child is *expected* to
+die of SIGSYS and a death in startup wears the same status as the death it
+means to provoke. The kernel log said `number 87 is outside its filter`
+where it used to name the call the test was about. A new case,
+`init --filter inherit-start`, asserts the thing directly: a child of a
+filter naming only spawn and wait must reach its own `main` and exit with a
+status of its own.
+
+**Bug-proofs**, as run:
+
+| the bug | what failed |
+| --- | --- |
+| the accessor reads a single global | steps 13 and 14: the main thread's own loop loses values, the `ERANGE` thread loses values, and main's `errno` no longer survives a thread's |
+| the `self` word is not written | **x86-64 loses every user process to SIGSEGV** (status 139) while **AArch64 passes the whole suite** -- the word is load-bearing on exactly one architecture, which only the pair of runs shows |
+| no extra page: the block lives in the stack | step 16's layout assertion. This is the proof that failed to fail first: with the block at the *bottom* of the top page a 16 KB-stack worker never reaches it, and even directly under the stack pointer the corruption is invisible on AArch64, where `self` is unused. The step now checks the layout as a layout |
+| the block is not freed on join | step 16: a write from the block's address after the join succeeds instead of returning `-EFAULT` |
+| `cosmo_tcb_install` does not check the length | step 15: a buffer shorter than the prefix is accepted |
+| the first thread's block is installed *after* `__stdio_init` | **nothing fails.** Recorded rather than hidden: nothing in `__stdio_init` sets `errno` today, so the ordering is unobservable. It is a precaution against a first block that is ever made dynamic, or startup code that ever sets `errno` -- and it belongs with the exit-127 path below as argued rather than tested |
 
 ## Benchmarks
 
 `errno` access goes from a global load to a thread-pointer read plus an
 offset -- one extra instruction on AArch64, a `%fs`-relative load on
-x86-64. Measured the way the last three units were: the suite's own
-per-test timing across three consecutive runs on each arch, with the claim
-being that nothing moves outside its run-to-run spread. `cosmo_thread_id()`
-gets *faster* (a syscall becomes a load), which the thread benchmark in
-`thrtest` can show.
+x86-64.
+
+**What was actually measured: nothing beyond the suite's own timing.** The
+report proposed three consecutive runs per architecture against the
+run-to-run spread; the boot harness's per-test timing across the runs this
+unit took shows no test moving outside its usual spread, and that is the
+whole of the evidence. It is recorded this way rather than as a benchmark
+that was run, because it was not.
+
+`cosmo_thread_id()` is also **not** simply "a syscall becomes a load", as
+the report first claimed. The cache is filled lazily (difference 3), so the
+first call on each thread still costs `SYS_thread_self` and every call
+after it is a load. A thread that never asks pays nothing at all, which the
+eager version did not manage.
 
 ## Risks
 
@@ -404,7 +493,29 @@ gets *faster* (a syscall becomes a load), which the thread benchmark in
   rather than through the thread pointer -- harmless only because they are
   the same object for the first thread. Install first anyway: a later
   change that makes the first thread's block dynamic would turn this into
-  a real bug, and the bug-proof exists to keep the order.
+  a real bug. **Its bug-proof does not fail**, and the table above says so:
+  nothing in `__stdio_init` sets `errno` today, so the ordering is a
+  precaution the suite cannot check, not a property it proves.
+- **This breaks a raw thread that carries a TLS layout of its own and calls
+  libc**, and that is a deliberate compatibility break rather than an
+  oversight. Before this unit libc never read the thread pointer, so such a
+  thread worked by accident; now libc reads and writes that memory as its
+  own block, overwriting whatever the caller keeps at the `errno` and tid
+  offsets and answering `cosmo_thread_id()` with nonsense.
+
+  **It cannot be detected**, for the same reason the zero case cannot:
+  asking "is this libc's block?" means dereferencing the pointer, and on
+  x86-64 the first dereference *is* `%fs:0`. A magic number in the block
+  would not help -- reading it requires the load that already faulted. So
+  the contract is the whole of the mitigation, stated in `cosmo/thread.h`,
+  `cosmo/tcb.h` and §13, with `cosmo_tcb_install` as the way to comply.
+
+  **Measured in-tree impact: none.** The only non-zero `cosmo_thread.tls`
+  in the tree is the block libc itself passes (`libc/src/thread.c`), and
+  the only raw `thread_create` outside libc is `thrtest`'s, which passes
+  zero on purpose to exercise the contract. The Linux personality's TLS is
+  its own and untouched -- `arch_prctl` and `CLONE_SETTLS` reach
+  `arch_set_tls_base` exactly as before.
 - **x86-64's `%fs:0` convention couples libc to its own layout.** Changing
   the block's first field later would break every compiled binary. The
   `self` pointer is therefore permanent, which is a cost worth naming.

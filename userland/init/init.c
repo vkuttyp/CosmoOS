@@ -800,6 +800,7 @@ static void proc_selftest(void)
         { "exit-unnamed", 0 },                  /* exit works unnamed */
         { "widen", 128 + COSMO_SIGSYS },        /* a wider mask restores nothing */
         { "inherit", 0 },                       /* the child dies of its parent's filter */
+        { "inherit-start", 0 },                 /* but it reaches its own main first */
         { "linux-child", 0 },                   /* a filter cannot cross a numbering */
     };
     for (size_t i = 0; i < sizeof(fcases) / sizeof(fcases[0]); i++) {
@@ -1051,6 +1052,38 @@ static int filter_case(const char *kind)
     if (strcmp(kind, "child-getpid") == 0) {
         (void)getpid();   /* denied by the filter this was born with */
         return 20;        /* not reached */
+    }
+    if (strcmp(kind, "inherit-start") == 0) {
+        /*
+         * A child of a filter that names nothing but spawn and wait must
+         * still reach its own `main`. Every native program installs its
+         * thread block with SYS_set_tls in `__libc_start` -- before `main`,
+         * before any filter could be about anything -- so unless that call
+         * is always allowed, a filtered process cannot have a working child
+         * at all. The case above cannot see this: its child is *expected*
+         * to die of SIGSYS, and a death in startup wears the same status as
+         * the death it means to provoke.
+         *
+         * The child here exits with a status of its own, which it can only
+         * do from inside `main`.
+         */
+        SYSCALL_ALLOW(mask, SYS_spawn);
+        SYSCALL_ALLOW(mask, SYS_wait);
+        if (syscall_filter(mask, COSMO_SYSCALL_MASK_WORDS) != 0)
+            return 10;
+        const char *argv[] = { "init", "--filter", "child-start", NULL };
+        long pid = cosmo_spawn(&(struct cosmo_spawn){ .path = "/boot/init", .argv = argv });
+        if (pid <= 0)
+            return 11;
+        int status = -1;
+        if (cosmo_wait((int)pid, &status, 0) != pid)
+            return 12;
+        return status == 23 ? 0 : 13;
+    }
+    if (strcmp(kind, "child-start") == 0) {
+        /* Reached `main` under an inherited filter that names neither exit
+         * nor set_tls; SYS_exit is always allowed, and this says so. */
+        cosmo_exit(23);
     }
     return 99;
 }
