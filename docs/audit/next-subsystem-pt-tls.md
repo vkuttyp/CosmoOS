@@ -4,6 +4,15 @@ Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. This is that report, and
 nothing in it is implemented.
 
+**Review has already corrected how the template reaches the program.** Two
+drafts got it wrong -- one by growing `struct cosmo_procinfo`, which would
+overflow an older binary's buffer because the kernel writes
+`count * sizeof` with its own `sizeof`; one by declaring the template's
+64-bit ELF sizes as `uint32_t`, which truncates. The answer was already in
+the tree: the program headers are mapped, the loader already computes
+where, and the native auxiliary vector already exists -- so the program
+reads its own `PT_TLS` and the kernel learns nothing about TLS at all.
+
 **Subsystem: the compiler already emits thread-local storage, the linker
 already places it, and nothing in this system loads it.** `__thread int x;`
 compiles on both architectures today -- it produces `.tdata`/`.tbss` and
@@ -115,27 +124,51 @@ and `getcwd(NULL)`'s storage.
 
 ## Proposed design
 
-### The kernel reads the template; libc places the image
+### The program finds its own template, through the auxiliary vector
 
 `PT_TLS` describes a *template*, not an allocation: `(address, filesz,
-memsz, align)`. The loader gains four lines -- recognise the segment,
-bounds-check it like `PT_LOAD`, and record it on the process -- and
-nothing else. Placement stays in libc, for the same reason the block's
-layout did: **what lives behind the thread pointer is the library's
-business**, and a kernel that placed the image would be choosing the ABI
-variant on libc's behalf.
+memsz, align)`. The program that needs it can read it **from its own
+program headers**, which are already mapped -- the first `PT_LOAD` of every
+binary here starts at file offset 0, so the ELF header and the program
+header table land at `load_base + e_phoff` -- and which the kernel already
+locates: `struct elf_info` carries `phdr_vaddr`, `phnum` and `phent`
+today, computed for the Linux personality's `AT_PHDR`.
 
-libc learns the template through `struct cosmo_procinfo`, which already
-carries per-process facts and is already how a program asks about itself:
+So the native auxiliary vector gains the standard trio, from values the
+loader already has:
 
 ```c
-    uint64_t tls_addr;    /* the template's address in the image, 0 if none */
-    uint32_t tls_filesz;  /* initialised bytes to copy */
-    uint32_t tls_memsz;   /* total bytes, the rest zero */
-    uint32_t tls_align;   /* the alignment the ABI demands of the image */
+#define COSMO_AT_PHDR  3   /* the program header table, mapped */
+#define COSMO_AT_PHENT 4   /* one entry's size */
+#define COSMO_AT_PHNUM 5   /* how many */
 ```
 
-An older program that never asks gets what it gets today.
+and libc walks them at startup to find its own `PT_TLS`. That is how every
+real libc does it, and it means **the kernel needs no knowledge of thread
+local storage at all** -- not a field, not a struct, not a syscall. The
+loader does not even need a new branch: it already ignores `PT_TLS`, and
+after this unit that is the correct behaviour rather than an omission.
+
+**Two earlier drafts of this section were worse, and review found both.**
+The first put four fields on `struct cosmo_procinfo`, which is unsafe:
+`sys_procinfo` writes `count * sizeof(struct cosmo_procinfo)` using the
+*kernel's* `sizeof`, so growing that structure makes an older binary's
+buffer overflow -- and it is the wrong place besides, a table of every
+process that libc would have to search by pid to learn its own image's
+layout. The second declared the template's sizes as `uint32_t`, which
+truncates: ELF's `p_filesz`, `p_memsz` and `p_align` are 64-bit, and a
+header claiming more than 4 GiB of TLS would arrive as a small number that
+passes every check. Reading the header directly removes both problems
+instead of fixing them: the fields keep their own widths, and there is no
+second copy of them to disagree.
+
+**What libc must check**, since it is now reading a structure a program
+image controls: `phent` equal to `sizeof(struct elf64_phdr)`, `phnum`
+bounded, at most one `PT_TLS`, `memsz >= filesz`, the template's bytes
+inside a mapped segment, and an alignment that is a power of two and no
+larger than a page. A malformed header must exit 127 rather than place a
+wrong image, for the same reason the startup path already does: a process
+whose thread-local storage is wrong cannot be allowed to run `main`.
 
 ### The layout, which differs by architecture because the ABI does
 
@@ -197,10 +230,8 @@ mechanism and comes free.
 
 | file | change |
 | --- | --- |
-| `kernel/process/elf.c` | recognise and bounds-check `PT_TLS`; record the template |
-| `kernel/include/kernel/process.h` | the template on `struct process` |
-| `kernel/include/uapi/cosmo/syscall.h` | four fields on `struct cosmo_procinfo` |
-| `kernel/syscall/native.c` | fill them |
+| `kernel/process/process.c` | three more pairs in the native auxiliary vector, from `elf_info`'s existing `phdr_vaddr`, `phent`, `phnum` |
+| `kernel/include/uapi/cosmo/syscall.h` | `COSMO_AT_PHDR`, `-_PHENT`, `-_PHNUM` |
 | `libc/src/tcb.c` | allocate image + block; the AArch64 accessor's offset; `cosmo_tcb_install` takes an image |
 | `libc/include/cosmo/tcb.h` | the layout, and the reserved-prefix rule that changes |
 | `libc/src/stdlib.c` | `__libc_start` places the first thread's image |
@@ -214,16 +245,16 @@ mechanism and comes free.
 
 ## New APIs
 
-No new syscall. Four fields on an existing structure, one changed libc
-function (`cosmo_tcb_install`), and a language feature that needed no API
-at all.
+**No new syscall, no new structure and no changed structure**: three
+auxiliary-vector tags whose numbers are the standard ones, one changed
+libc function (`cosmo_tcb_install`), and a language feature that needs no
+API at all. The kernel learns nothing about TLS.
 
 ## Migration plan
 
-1. **The loader and the template**, with a kernel self-test: a binary with
-   `PT_TLS` loads, the template is recorded, and a malformed one (memsz <
-   filesz, outside the file, absurd alignment) is refused the way a bad
-   `PT_LOAD` is. Nothing uses it yet.
+1. **The auxiliary vector's three tags**, with a test that a native
+   program can find its own program headers and its own `PT_TLS` through
+   them. No libc change beyond the reader; nothing places an image yet.
 2. **The layout change on AArch64 alone**, before any image exists: the
    block moves below the thread pointer and the accessor gains its offset.
    The whole suite is the regression test, and doing it first means the
@@ -264,9 +295,13 @@ initialiser); the same image shared by two threads (test 1 loses values);
 block left at the thread pointer (test 4 sees `errno` change when the
 array is written -- the collision, on demand); the alignment ignored (a
 `__thread` variable with `_Alignas(64)` lands misaligned, which an
-assertion on its address catches); and `PT_TLS` recorded without bounds
-checks (a crafted header with `memsz` smaller than `filesz`, or an
-enormous alignment, must be refused at load).
+assertion on its address catches); and the header trusted
+without checks (a crafted binary with `memsz` smaller than `filesz`, two
+`PT_TLS` segments, an alignment that is not a power of two, or a template
+outside every mapped segment -- each must exit 127 rather than place a
+wrong image, and each needs a deliberately malformed binary in the boot
+archive to prove, which is the one piece of test scaffolding this unit
+adds).
 
 ## Benchmarks
 
