@@ -115,7 +115,8 @@ lesson).
 
 ### What is already right, and is the model for the fix
 
-`sys_getcwd` takes the lock to read the path:
+`sys_getcwd` takes the lock to read the path (and is the one site that
+needs the path alone, so it keeps doing exactly this):
 
 ```c
 arch_irq_state_t s = spin_lock_irqsave(&p->lock);
@@ -184,10 +185,31 @@ seventeen. This unit is not inventing a rule, it is finishing one.
  * pointer is in flight. */
 struct vnode *process_cwd_get(void);
 
-/* The calling process's current directory as a path, copied under the
- * lock into `buf` (VFS_PATH_MAX). Returns the length, or -ERANGE. */
-int process_cwd_path(char *buf, size_t len);
+/* The directory **and** its path, from one acquisition of the lock: a
+ * referenced vnode, with its normalised absolute path copied into `path`
+ * (VFS_PATH_MAX). The caller releases the vnode with vnode_put.
+ *
+ * These are one call and not two on purpose -- see below. */
+struct vnode *process_cwd_snapshot(char *path, size_t len);
 ```
+
+**The two must be taken together, and a first draft of this design got
+that wrong.** It offered a `process_cwd_path()` beside `process_cwd_get()`
+and had `process_chdir` call them in sequence. Each is individually
+correct and the pair is not: they are two acquisitions of the lock, so
+the path can come from one directory and the vnode from another. Starting
+in `/a`, a thread resolving `chdir("x")` normalises `/a/x`; another thread
+chdirs to `/b`; the first thread's `process_cwd_get()` then answers `/b`,
+the lookup resolves `/b/x`, and what gets published is the path `/a/x`
+against the vnode of `/b/x`. **`getcwd` would then disagree with every
+relative open in the same process** -- a worse failure than the one this
+unit exists to fix, because it is silent and persistent rather than a
+crash. Review found it in the report, which is the cheapest place to find
+it.
+
+So the snapshot is the primitive, and `process_cwd_get` is the degenerate
+case of it for the callers that need no path. Normalisation and lookup
+still run outside the lock; they just run against a pair that agree.
 
 Implementation is four lines and unremarkable:
 
@@ -214,19 +236,19 @@ vnode_put(cwd);
 
 ### `process_chdir` stops racing itself
 
-It takes its normalisation base and its lookup base from the same accessor
-rather than from the live fields:
+It takes its normalisation base and its lookup base from **one** snapshot:
 
 ```c
 char base[VFS_PATH_MAX];
-if (process_cwd_path(base, sizeof(base)) < 0)
-    return -ERANGE;
+struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
 rc = path_normalize(base, path, newpath, sizeof(newpath));
-...
-struct vnode *cwd = process_cwd_get();
-rc = vfs_lookup(cwd, path, &vn);
+if (rc == 0)
+    rc = vfs_lookup(cwd, path, &vn);
 vnode_put(cwd);
 ```
+
+The pair is coherent by construction: whatever else happens afterwards,
+`base` is the path *of* `cwd` and not of some other directory.
 
 Two concurrent `chdir`s then both succeed, and the process ends at one of
 the two directories rather than at a torn mixture of both. **That is the
@@ -346,10 +368,34 @@ certain, and then the bug-proof has to make it certain.
    is where threads have been reachable longest. `compat/linux`'s test
    programs already build with `clone`; this is one more.
 
-3. **`chdir` racing `chdir`**: two threads alternating between two
-   directories, with a third reading `getcwd` and checking it is always
-   exactly one of the two — never a mixture, which is the torn-buffer
-   failure.
+3. **`chdir` racing `chdir`**, and **the transitions must be relative** —
+   which is a requirement on the test and not a detail of it. Written the
+   obvious way, with `chdir("/tmp/r/a")` and `chdir("/tmp/r/b")`, this
+   test **cannot fail for the bug it names**: an absolute path bypasses
+   the normalisation base entirely, so a torn `cwd_path` is never read,
+   and `getcwd` already copies under the lock. It would pass against the
+   unfixed tree.
+
+   So the layout is fixed and the moves are relative:
+
+   ```
+   /tmp/r/a        two siblings, so that from either one
+   /tmp/r/b        `../a` and `../b` are both valid moves
+   ```
+
+   Two threads alternate `chdir("../a")` and `chdir("../b")`; both
+   normalise against the base, and both remain valid from either
+   directory, so no move can fail for an ordinary reason and mask the
+   race. A third thread reads `getcwd` and requires it to be **exactly**
+   `/tmp/r/a` or `/tmp/r/b` — never a mixture, and never a path that
+   normalising a torn base would produce (`/tmp/r/a/b`, `/tmp/r/`, or a
+   prefix of either directory).
+
+   The general form of this trap is worth stating, because it is the
+   third time in three units that a test could have passed without
+   exercising its subject: **when a test's inputs have a form that
+   bypasses the mechanism under test, the report has to forbid that form,
+   not hope the implementer avoids it.**
 
 4. **The reference outlives the walk**: a directory whose only reference is
    the cwd, `chdir`ed away from while a walk is inside it. With the mount's
@@ -368,7 +414,15 @@ certain, and then the bug-proof has to make it certain.
 - The fix reverted at one *Linux* site → test 2 fails and test 1 passes,
   which is the whole argument for step 3 being separate.
 - `process_chdir` reading `cur->cwd_path` unlocked again → test 3 sees a
-  torn path.
+  torn path, **provided its moves are relative**; with absolute moves this
+  proof cannot fail, which is why the layout above is part of the test's
+  specification rather than left to the implementation.
+- `process_chdir` taking the path and the vnode from **two** acquisitions
+  of the lock rather than one snapshot → a `getcwd` that disagrees with a
+  relative `open` in the same process. This is the design defect review
+  found in the report, so it gets a proof of its own rather than a
+  promise: test 3's third thread additionally opens a file it created in
+  the directory `getcwd` reports, and requires that it exists.
 - `process_cwd_get` taking the reference *outside* the lock → the window
   narrows but does not close, and the test becomes flaky rather than
   failing. **Named because it is the wrong kind of proof**: a bug-proof
