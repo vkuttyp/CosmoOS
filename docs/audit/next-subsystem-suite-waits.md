@@ -70,21 +70,39 @@ rather than inventing one.
 ### Two shapes, and only one of them is a sleep
 
 **Shape A — settle-then-assert. Twenty-two sites, all in `nettest.c`**, and
-every one of them is followed by an assertion within five lines — there is
-no `settle` in that file that is not immediately counted against.
-Sleep a fixed interval, then assert a count or a state. Every one is
-mechanically convertible: the thing being waited for is always observable
-(`tcp_get_stats`, `tcp_state_of`, `ksock_ready`), so the sleep becomes a
-bounded wait on that observation.
+every one is followed by an assertion within five lines: there is no
+`settle` in that file that is not immediately counted against.
+
+**They are not all the same conversion, and the plan should not pretend
+they are.** The observable differs, and so does what "done" means:
+
+| kind | what is waited for | conversion |
+| --- | --- | --- |
+| a counter reaching a total | `tcp_get_stats`, the IPv4 counters | wait for the count; the budget is the only new number |
+| a connection reaching a state | `tcp_state_of(c->tcp)` | wait for the state |
+| readiness or a result | `ksock_ready`, `ksock_recvfrom`, `ksock_accept` | wait for the readiness bit, then keep the existing assertion on the *result* |
+| a derived value | `tcp_path_mss`, `c->tcp->mss`, `snd_una` | a direct field read: waitable, but the predicate is reading TCP internals and should say so |
+| a settle *inside* a loop | retry and poll loops | the loop's own termination has to be re-thought, not just the sleep — these are the ones to do by hand and last |
+
+The first three are mechanical. The last two are not, and calling all
+twenty-two "mechanical" is how a conversion quietly changes what a test
+asserts.
 
 **Shape B — bounds on elapsed time and on work done.** Twenty-six
-assertions mention a duration, and **the direction is what matters**:
+assertions match a search for a duration; **one of them is not timing at
+all** (`blktest.c:297` compares a configured constant), leaving
+twenty-five. Of those, **the direction is what decides everything**:
 
-- **A lower bound is safe.** `CHECK(elapsed >= MS(30))` asserts that a
-  sleep really slept; a loaded host makes it *more* true. Eight of these,
-  and this unit leaves them alone.
-- **An upper bound, or a ratio of work done, is a statement about the
-  host.** These are the flaky ones, and the tightest are very tight:
+| | count | what a loaded host does |
+| --- | --- | --- |
+| **lower bounds** — `elapsed >= MS(30)` | **12** | makes them *more* true; this unit leaves them alone |
+| **upper bounds and work ratios** | **12** | breaks them |
+| of which: generous guards — `irqtest.c:85`, `proctest.c:240` (15 s), `:927` (2 s) | 3 | a host that breaks these is genuinely broken; left alone |
+| **of which: load-sensitive, and this unit's Shape B work** | **9** | the table below |
+
+So the unit acts on **22 Shape A sites and 9 Shape B sites, 31 in all**,
+and deliberately leaves fifteen duration assertions untouched. The
+tightest of the nine are very tight:
 
 | site | assertion | what a loaded host does to it |
 | --- | --- | --- |
@@ -116,8 +134,10 @@ that sentence is worth what the suite's determinism is worth.
   between the interval and the work.
 - `threads_settle(expected)` in three scheduler and quiescence tests:
   correct, deadline-bounded, fails loudly.
-- Twenty-six duration assertions, eight of them lower bounds that are
-  sound, the rest upper bounds or work ratios.
+- Twenty-five duration assertions (a twenty-sixth match is a constant
+  comparison, not timing): twelve lower bounds that are sound, twelve
+  upper bounds or ratios, of which three are guards so generous that a
+  host breaking them is broken. **Nine to classify.**
 - **The harness retries exactly one class of failure, and it is not this
   one.** `tests/boot/run_boot_test.py:416` re-launches the boot once when
   *the firmware never hands over* — an environmental failure before the
@@ -141,8 +161,9 @@ that sentence is worth what the suite's determinism is worth.
    comparison against `main`, and a CI re-run to establish that a
    markdown-only branch had not broken TCP.
 
-3. **The fix is mechanical for two-thirds of it.** Twenty-two sites where
-   the observable already exists and only the wait is wrong.
+3. **Twenty-two of the thirty-one sites are mechanical.** The observable
+   already exists and only the wait is wrong -- though not all twenty-two
+   are the *same* mechanical change; see the conversion shapes below.
 
 4. **The remaining third is a design question worth asking once.** An
    assertion that an IPI wakes an idle CPU within 2 ms is trying to say
@@ -170,7 +191,12 @@ Each site becomes:
 -   settle(100);
 -   tcp_get_stats(&t1);
 -   CHECK(cookies > 0 && cached + cookies == 300);
-+   CHECK(wait_until(syn_total_reached, &(unsigned){300}, 2000));
++   /* Wait on one counter -- the total of SYNs the stack has answered --
++    * because `tcp_get_stats` copies `g_stats` with no lock and a
++    * predicate over two of its fields can see them from either side of
++    * an update. The two-field assertion stays where it was, after the
++    * wait, as the test's claim rather than the wait's condition. */
++   CHECK(wait_until(syn_answered_reached, &(unsigned){300}, 2000));
 +   tcp_get_stats(&t1);
 +   CHECK(cookies > 0 && cached + cookies == 300);
 ```
@@ -196,7 +222,7 @@ Three outcomes per site, decided one at a time:
   flake risk* at the site, so the next person to see it fail knows within
   one line whether to investigate.
 
-The report deliberately does not pre-decide all nine. Doing so from a
+The report deliberately does not pre-decide the nine. Doing so from a
 reading is how the last three units' test designs went wrong.
 
 ### The harness remembers
@@ -224,7 +250,21 @@ property holds and fails when it does not, where the sleep passes when
 the host is fast.
 
 **Concurrency.** The waits run on the test thread and poll observables
-that are already read under their own locks. No new sharing.
+that are **not** synchronised, which the first draft of this section got
+wrong by asserting the opposite. `tcp_get_stats` is `*out = g_stats;` — a
+plain structure copy with no lock — and `ksock_ready` reads `s->state`,
+`s->error` and `s->shut` outside the socket mutex. Both are fine for what
+they are: counters and readiness bits, read by a test.
+
+What follows from it is a **constraint on the predicates**, and it is the
+kind that is easy to get wrong later: *a predicate may not require a
+coherent snapshot of more than one field.* Waiting for
+`syn_cached + syn_cookies == 300` reads two words of an unsynchronised
+structure and can see them from either side of an update. The safe shape
+is to wait on a single monotonic counter and to leave the multi-field
+assertion where it is — **after** the wait, where it is the test's claim
+rather than the wait's termination condition. No new sharing is
+introduced either way.
 
 **Ownership / Lifetime.** None: the helper owns nothing and outlives
 nothing.
