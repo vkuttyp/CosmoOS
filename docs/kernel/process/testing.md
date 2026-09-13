@@ -442,8 +442,13 @@ between sequential retries lets an earlier worker finish before the last
 one exists -- so the workers wait on a **barrier**: each announces itself
 and spins until the main thread, having finished its creates, has seen all
 of them arrive and releases them. The release is unconditional and both
-waits are bounded, so no worker is left parked however the creates went,
-and the join afterwards joins exactly the slots that started -- counting
+waits are bounded, so no worker is left parked however the creates went.
+Both bounds are also **observable**, because a bound that expires
+silently is the flaw the barrier exists to remove -- a worker that gave
+up waiting would allocate alone and every assertion would still hold. The
+main thread asserts that every started worker arrived, and a worker whose
+wait expires says so and counts itself, which the step asserts never
+happened. The join afterwards joins exactly the slots that started -- counting
 them instead would join a refused slot and one thread twice, leaving a
 real thread running. Each thread
 allocates, fills its block with its own byte, verifies every byte of it,

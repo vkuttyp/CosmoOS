@@ -108,7 +108,7 @@ static void *pair_a(void *arg)
  * Each thread allocates, writes a pattern, frees, and prints -- and checks
  * its own blocks, so a lost or shared block shows up as a wrong byte
  * rather than only as a crash. */
-static volatile unsigned heap_bad, heap_done, heap_ready, heap_go;
+static volatile unsigned heap_bad, heap_done, heap_ready, heap_go, heap_late;
 static void *heap_user(void *arg)
 {
     unsigned id = (unsigned)(unsigned long)arg;
@@ -119,10 +119,25 @@ static void *heap_user(void *arg)
      * through the allocator at once -- which is the whole property. The
      * wait is bounded so a worker cannot hang if a create was refused for
      * good: main releases the barrier either way.
+     *
+     * A bound that expires silently, though, is the flaw the barrier was
+     * added to remove: the worker would go on to allocate alone, every
+     * assertion below would still hold, and the step would once more pass
+     * without having tested anything. So expiry is *counted*, and main
+     * asserts it never happened -- the wait is bounded for safety, and
+     * observable so that the safety cannot be mistaken for the property.
      */
     __atomic_fetch_add(&heap_ready, 1, __ATOMIC_ACQ_REL);
-    for (unsigned w = 0; w < 2000u && !heap_go; w++)
+    unsigned w = 0;
+    while (w < 2000u && !__atomic_load_n(&heap_go, __ATOMIC_ACQUIRE)) {
         cosmo_yield();
+        w++;
+    }
+    if (!__atomic_load_n(&heap_go, __ATOMIC_ACQUIRE)) {
+        printf("thrtest: heap %u gave up waiting for the barrier\n", id);
+        fflush(stdout);
+        __atomic_fetch_add(&heap_late, 1, __ATOMIC_ACQ_REL);
+    }
     for (unsigned i = 0; i < 400u; i++) {
         size_t n = 16u + ((i * 37u + id) % 700u);
         unsigned char *p = malloc(n);
@@ -468,7 +483,7 @@ int main(int argc, char **argv)
     {
         cosmo_thread_t h[3];
         unsigned char started[3] = { 0, 0, 0 };
-        heap_bad = heap_done = heap_ready = heap_go = 0;
+        heap_bad = heap_done = heap_ready = heap_go = heap_late = 0;
         unsigned made = 0;
         /*
          * 16 KB stacks, not the 64 KB default: these threads print and
@@ -522,6 +537,7 @@ int main(int argc, char **argv)
             if (started[i])
                 CHECK(cosmo_thread_join(&h[i], NULL) == 0);
         CHECK(made == 3);
+        CHECK(heap_late == 0);     /* every worker was released, none timed out */
         CHECK(heap_done == made);
         CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
         /* fflush(NULL) flushes every stream, and must not deadlock against
