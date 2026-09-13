@@ -63,18 +63,30 @@ static bool threads_settle(unsigned expected)
 **That is the whole design of this unit.** Wait for the *condition*,
 bounded by a generous deadline, and fail loudly if it never arrives. It is
 used by `schedtest.c`, `smptest.c` and `quiescetest.c`; it does not exist
-in `nettest.c`, which has twenty-two sites of the other kind. As with the
+in `nettest.c` -- which has eleven bare sleeps of the other kind, and
+eleven places where the same idea is written out by hand. As with the
 last two units, this one finishes a rule the repository already holds
 rather than inventing one.
 
 ### Two shapes, and only one of them is a sleep
 
-**Shape A — settle-then-assert. Twenty-two sites, all in `nettest.c`**, and
-every one is followed by an assertion within five lines: there is no
-`settle` in that file that is not immediately counted against.
+**Shape A — twenty-two `settle` calls in `nettest.c`, and only half of
+them are the defect.** This report said twenty-two twice before counting
+properly, and the correction halves the unit:
 
-**They are not all the same conversion, and the plan should not pretend
-they are.** The observable differs, and so does what "done" means:
+| | count | what it is |
+| --- | --- | --- |
+| **already a bounded wait on a condition** | **11** | `for (i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++) settle(10);` — or the same written as a loop body with a `break`. This **is** `wait_until`, hand-written, with the budget expressed as iterations × 10 ms |
+| **bare sleep-then-assert** | **11** | `settle(100);` then a count. No relationship between the interval and the work. **The defect.** |
+
+The eleven that already wait are not flaky and are not what this unit is
+for. They would still read better as `wait_until` — a budget in
+milliseconds says what it means where `i < 300` does not, and the failure
+message can name what was waited for — but that is tidying, and the report
+separates it from the work so that neither hides behind the other.
+
+**Nor are the eleven bare ones all the same conversion.** The observable
+differs, and so does what "done" means:
 
 | kind | what is waited for | conversion |
 | --- | --- | --- |
@@ -84,9 +96,10 @@ they are.** The observable differs, and so does what "done" means:
 | a derived value | `tcp_path_mss`, `c->tcp->mss`, `snd_una` | a direct field read: waitable, but the predicate is reading TCP internals and should say so |
 | a settle *inside* a loop | retry and poll loops | the loop's own termination has to be re-thought, not just the sleep — these are the ones to do by hand and last |
 
-The first three are mechanical. The last two are not, and calling all
-twenty-two "mechanical" is how a conversion quietly changes what a test
-asserts.
+The first three are mechanical. A derived value read out of TCP's
+internals is not, and neither is a `settle` whose surrounding loop has its
+own termination to re-think. Calling them all "mechanical" is how a
+conversion quietly changes what a test asserts.
 
 **Shape B — bounds on elapsed time and on work done.** Twenty-six
 assertions match a search for a duration; **one of them is not timing at
@@ -95,14 +108,17 @@ twenty-five. Of those, **the direction is what decides everything**:
 
 | | count | what a loaded host does |
 | --- | --- | --- |
-| **lower bounds** — `elapsed >= MS(30)` | **12** | makes them *more* true; this unit leaves them alone |
+| **lower bounds** — `elapsed >= MS(30)` | **13** | makes them *more* true; left alone |
 | **upper bounds and work ratios** | **12** | breaks them |
 | of which: generous guards — `irqtest.c:85`, `proctest.c:240` (15 s), `:927` (2 s) | 3 | a host that breaks these is genuinely broken; left alone |
-| **of which: load-sensitive, and this unit's Shape B work** | **9** | the table below |
+| **of which: load-sensitive — this unit's Shape B work** | **9** | the table below |
 
-So the unit acts on **22 Shape A sites and 9 Shape B sites, 31 in all**,
-and deliberately leaves fifteen duration assertions untouched. The
-tightest of the nine are very tight:
+13 + 12 = 25, and 13 + 3 = **16 duration assertions this unit deliberately
+does not touch**.
+
+So the unit acts on **11 Shape A sites and 9 Shape B sites, 20 in all**,
+with eleven hand-written waits worth tidying alongside. The tightest of
+the nine are very tight:
 
 | site | assertion | what a loaded host does to it |
 | --- | --- | --- |
@@ -130,14 +146,15 @@ that sentence is worth what the suite's determinism is worth.
 
 ## Current implementation
 
-- `settle(ms)` in `nettest.c`, twenty-two call sites, no relationship
-  between the interval and the work.
+- `settle(ms)` in `nettest.c`, twenty-two call sites -- **eleven of them
+  already inside a bounded wait on a condition**, eleven bare sleeps with
+  no relationship between the interval and the work.
 - `threads_settle(expected)` in three scheduler and quiescence tests:
   correct, deadline-bounded, fails loudly.
 - Twenty-five duration assertions (a twenty-sixth match is a constant
-  comparison, not timing): twelve lower bounds that are sound, twelve
-  upper bounds or ratios, of which three are guards so generous that a
-  host breaking them is broken. **Nine to classify.**
+  comparison, not timing): **thirteen** lower bounds that are sound,
+  twelve upper bounds or ratios, of which three are guards so generous
+  that a host breaking them is broken. **Nine to classify.**
 - **The harness retries exactly one class of failure, and it is not this
   one.** `tests/boot/run_boot_test.py:416` re-launches the boot once when
   *the firmware never hands over* — an environmental failure before the
@@ -161,9 +178,9 @@ that sentence is worth what the suite's determinism is worth.
    comparison against `main`, and a CI re-run to establish that a
    markdown-only branch had not broken TCP.
 
-3. **Twenty-two of the thirty-one sites are mechanical.** The observable
-   already exists and only the wait is wrong -- though not all twenty-two
-   are the *same* mechanical change; see the conversion shapes below.
+3. **Most of it is small.** Eleven bare sleeps where the observable
+   already exists and only the wait is wrong -- and of those, the counter,
+   state and readiness kinds are mechanical while two kinds are not.
 
 4. **The remaining third is a design question worth asking once.** An
    assertion that an IPI wakes an idle CPU within 2 ms is trying to say
@@ -174,7 +191,7 @@ that sentence is worth what the suite's determinism is worth.
 
 ## Design
 
-### Shape A: one helper, twenty-two conversions
+### Shape A: one helper, eleven conversions
 
 ```c
 /* kernel-services/network/nettest.c (and wherever else it is wanted) */
@@ -277,7 +294,7 @@ impossible to get wrong where the language allows it (a
 
 **Security.** None: test-only code.
 
-**Performance.** The suite gets *faster*, not slower. Twenty-two fixed
+**Performance.** The suite gets *faster*, not slower. The bare fixed
 sleeps totalling roughly 900 ms of unconditional waiting become waits that
 return as soon as the condition holds — typically in single-digit
 milliseconds. The generous deadlines are ceilings, not costs.
@@ -289,7 +306,7 @@ fixed sleeps and starts scaling with the work.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/nettest.c` | `wait_until`, and 22 `settle` sites converted; `settle` deleted when the last one goes |
+| `kernel-services/network/nettest.c` | `wait_until`; **11 bare `settle` sites converted** and 11 hand-written waits re-expressed; `settle` deleted when the last one goes |
 | `kernel/scheduler/smptest.c`, `-/schedtest.c`, `kernel/io/polltest.c`, `kernel-services/virtualization/hvtest.c` | the upper bounds classified: keep, restate or widen-and-label |
 | `tests/boot/run_boot_test.py` | name a failing test against the load-sensitive list in the failure line |
 | `docs/testing/flakes.md` | **new**: the list, what each bound is really asserting, and the rule |
@@ -306,10 +323,11 @@ One test-local helper. No syscall, no public header, no ABI.
 
 ## Migration plan
 
-1. **`wait_until`, and the three worst Shape A sites** — the ones that
-   have actually flaked. Small enough to review as a pattern before it is
-   applied twenty-two times.
-2. **The remaining nineteen Shape A sites.**
+1. **`wait_until`, and the worst bare Shape A sites** — starting with
+   `nettest.c:979`, the one that has actually flaked four times. Small enough to review as a pattern before it is
+   applied to the rest.
+2. **The remaining Shape A sites**, and separately the eleven
+   hand-written waits, as tidying that must not be confused with the fix.
 3. **`settle` deleted**, which is the check that step 2 was complete: a
    remaining caller means a missed site.
 4. **Shape B, classified one at a time**, with the reasoning recorded per
