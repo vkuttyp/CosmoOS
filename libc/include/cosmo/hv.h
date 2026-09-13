@@ -62,6 +62,18 @@ static inline int cosmo_vcpu_run_flags(int vcpu, struct cosmo_vm_exit *exit, uns
     return (int)cosmo_syscall3(SYS_vcpu_run, vcpu, (long)exit, flags);
 }
 
+/*
+ * Make a running vCPU leave its run: it exits `COSMO_VM_EXIT_STOPPED`,
+ * having done nothing to the guest, so running it again continues where it
+ * was. The stop is sticky, so this also works on a vCPU that is between
+ * runs -- the next run takes it. Meant to be called from a *different*
+ * thread than the one running the vCPU, which is the whole point.
+ */
+static inline int cosmo_vcpu_stop(int vcpu)
+{
+    return (int)cosmo_syscall1(SYS_vcpu_stop, vcpu);
+}
+
 /* A device in this process asserts (raise) or drops (lower) a shared
  * interrupt into the guest's distributor, routed by the guest's own GIC
  * configuration -- for an owner-side device model (virtio-mmio). Unlike

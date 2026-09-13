@@ -12,6 +12,7 @@
 
 #include <kernel/list.h>
 #include <kernel/mutex.h>
+#include <kernel/hvkick.h>
 #include <kernel/object.h>
 #include <kernel/spinlock.h>
 #include <kernel/types.h>
@@ -114,6 +115,7 @@ struct vcpu {
         bool sse, sf;
     } mmio_completion;
     bool dead;
+    struct hv_kick kick;                 /* the stop handshake; kernel/hvkick.h */
     uint64_t exits, entries;
     unsigned msr_gp;                     /* #GP injected for unmodelled MSRs */
 };
@@ -125,6 +127,14 @@ unsigned hv_vm_count(void);
 void hv_stats(uint64_t *exits, uint64_t *entries, unsigned *vcpus);
 /* sysctl hv.<name>: value text into out, -ENOENT for an unknown name. */
 int hv_sysctl(const char *name, char *out, size_t n);
+
+/*
+ * Make a running vCPU leave its run: set the stop and, if it is inside a
+ * guest, IPI the host CPU it is on. Returns 0 whether or not the vCPU was
+ * running -- the stop is sticky, so one set while it is between runs is
+ * taken by the next. See kernel/hvkick.h for why this is a handshake.
+ */
+int vcpu_stop(struct vcpu *v);
 
 /* VM lifetime: the returned reference belongs to the caller. */
 int vm_create(uint32_t owner_uid, uint64_t mem_limit, struct vm **out);   /* mem_limit: COSMO_RLIMIT_VMEM of the creator */

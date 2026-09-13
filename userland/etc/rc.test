@@ -107,6 +107,17 @@ ls /boot/tests/hv/guest_dtb.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vm
 # SYSTEM_OFF for a sibling owed a turn, bounded in turns, so this run ends by
 # that bound rather than hanging (virtualization/design.md).
 ls /boot/tests/hv/guest_offspin.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 2 /boot/tests/hv/guest_offspin.bin && echo "HVTEST: offspin ok"
+# A vCPU the guest never starts: with -c 3 this guest brings up only CPU 1,
+# so CPU 2's thread is parked on its futex when SYSTEM_OFF arrives. The kick
+# reaches a thread inside a guest and nothing else, so shutdown must wake
+# the parked ones too or the owner waits for a thread that has no way out
+# (the vCPU-threads unit).
+ls /boot/tests/hv/guest_offspin.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 3 /boot/tests/hv/guest_offspin.bin && echo "HVTEST: parked ok"
+# CPU_ON racing SYSTEM_OFF: two CPUs ask for a third in a loop while the
+# first powers the machine off. A CPU_ON that could revive a vCPU after
+# shutdown began would leave a thread running that nobody waits to stop,
+# and vmctl would hang instead of powering off (the vCPU-threads unit).
+ls /boot/tests/hv/guest_psci_race.bin > /tmp/shtest/hv.probe 2>&1 && vmctl probe && vmctl run --machine -c 3 /boot/tests/hv/guest_psci_race.bin && echo "HVTEST: psci-race ok"
 # A stock Linux kernel, when a developer has provided one at
 # tests/hv/aarch64/Image (docs/kernel-services/virtualization/testing.md):
 # vmctl builds the device tree, loads the Image by its header, answers PSCI,

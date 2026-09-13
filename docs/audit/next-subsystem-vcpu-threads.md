@@ -1,8 +1,81 @@
 # NEXT SUBSYSTEM — a thread per vCPU, and a way to stop one
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. **This report is as built.** The
+design below is what shipped. Building it corrected the report in three
+ways that only running could catch, and review of the build found three
+more -- so the numbering below runs to six, and the lifecycle table two
+sections down carries two of them:
+
+1. **`CPU_ON` had to become synchronous.** The report assumed threads would
+   make `cpu1: up` appear *more* reliably than the round-robin's fairness
+   rule did. The first build lost it: `guest_dtb.c` starts a CPU and powers
+   the machine off two instructions later, and a freshly released thread may
+   not have been scheduled at all -- the same race the deleted rule papered
+   over, arriving in a new form. The answer is not another correction but a
+   more faithful `CPU_ON`: PSCI says a `SUCCESS` means the target is powered
+   on *and executing*, so it now waits, bounded, for the target's first run
+   to have **returned** -- the only evidence of "executing" available in
+   userland. A timeout is still `SUCCESS`.
+
+   *Three times over.* The first version waited for the target's **thread**
+   to reach its entry, which CI's aarch64 disproved by losing `cpu1: up`
+   anyway -- a thread can exist without its guest having executed. The
+   second set the "has run" word after *any* first run, including one that
+   returned `STOPPED` without entering the guest at all, so a `CPU_ON`
+   racing a shutdown could report a guest that never executed. It is now
+   set only when the run really entered, and the wait gives up early once
+   the machine is stopping, since the answer cannot change and waiting the
+   whole timeout for it is pointless. The PSCI answer stays `SUCCESS`
+   either way: the CPU *was* turned on, and a machine powering off
+   afterwards is not a failure of the call that turned it on.
+2. **The kick's IPI buys promptness, not liveness** -- so the report's claim
+   that a spinning guest would hang the owner without the kick is wrong on
+   this machine. `guest_spin.S` says why in its own header: every host timer
+   tick is taken to EL2, so the run loop sees interrupt exits anyway and the
+   sticky flag is noticed at the next one. **Removing the IPI entirely fails
+   no test.** It is still worth keeping -- ~60 us against up to a tick, and
+   independence from the host's tick policy -- but the honest statement is
+   that liveness comes from the tick plus the flag.
+3. **The peak-concurrency counter replaced the interval timestamps.** The
+   report proposed stamping a clock either side of each run and looking for
+   two intervals that intersect; a counter of threads inside
+   `cosmo_vcpu_run`, with its peak kept, is the same property exactly -- a
+   peak above one *is* an intersection -- with no clock, no per-run storage
+   and no comparison pass to get wrong.
+
+4. **MMIO answers were being erased.** The exit structure carries the
+   answer to the last exit *into* the next run -- the kernel reads it before
+   entering so an answered MMIO read completes in the guest's register --
+   and the first threaded loop zeroed it every iteration, so every virtio
+   register read completed as zero. Nothing gated catches it: the
+   machine-mode guests use no virtio, and the Linux boot that does is a
+   demonstration rather than a gate. Found in review, not by a test.
+5. **The lifecycle needed a fourth state, and `PARKED` had to mean "or
+   powered off".** `CPU_ON` wrote its target's registers before asking
+   whether the target was already running, and `CPU_OFF` exited the thread
+   leaving the word `RUNNING`, so a powered-down CPU could never be
+   restarted -- something the run set this replaces allowed. The table two
+   sections down carries both.
+6. **"Has run" must not count a run that never entered the guest.** A first
+   run kicked by a concurrent shutdown returns `STOPPED` without entering,
+   and the word `CPU_ON` waits on was set anyway -- so the answer could
+   claim a guest that never executed. Three versions of that one wait were
+   wrong in the same shape: each watched something *adjacent* to the thing
+   it needed to know.
+
+Two smaller ones, both from bug-proofs that failed to fail: a second
+stop-check in the run loop was **redundant** (the top of the loop already
+covers every path to an entry) and was deleted; and `guest_psci_race`'s
+proof **does not fail on demand**, because after the first `CPU_ON` for a
+target succeeds every later one returns `ALREADY_ON` before reaching the
+store. The guest says so in its own header rather than implying a proof it
+does not carry.
+
+One thing the report listed and this unit does **not** deliver: the device
+models under two guest CPUs. The locking rule landed and is
+uncontended-correct, but testing it needs a guest-side virtio-mmio driver,
+which is a unit of work rather than a test to add here. Named, not skipped.
 
 **Subsystem: `vmctl --machine` runs a guest's vCPUs on one thread, a tick
 each, and every artefact of that shows through the interface.** The
@@ -45,12 +118,14 @@ parked have to be woken *and* told to quit, because the kick only reaches
 a vCPU inside the kernel's run loop and a secondary that was never
 `CPU_ON`ed is parked in userland -- so `live` would never reach zero on
 the most ordinary path there is, a guest that starts one secondary of four
-and powers off. The park is now a three-state word, which is also what
-makes the supervisor's `live == 0` mean "every thread has returned" -- and
+and powers off. The park became a state word rather than a flag -- three
+states as designed and four as built, since `STARTING` was needed to claim
+a vCPU before writing its registers -- which is also what makes the
+supervisor's `live == 0` mean "every thread has returned" -- and
 a fifth was the mirror of it: a `CPU_ON` racing `SYSTEM_OFF` could store
 `RUNNING` over `QUIT` and revive a vCPU after shutdown began, so the
-states are monotonic and `CPU_ON` releases a thread with a
-compare-and-swap that fails once `QUIT` is set. The sixth was that none of
+states are compare-and-swapped rather than stored, so `QUIT` is absorbing
+and a `CPU_ON` cannot move a vCPU out of it. The sixth was that none of
 that said anything about **memory ordering**, which for a lifecycle built
 out of shared words is most of the correctness: there is now a table of
 every word, its writer, its reader and the ordering each needs. The
@@ -177,7 +252,7 @@ unit**, and that is the part to get right rather than to delete.
   native threads make reachable and nothing tests" (§12). Four vCPU
   threads sharing one VM handle is exactly that, on a path that matters.
 
-## Proposed design
+## Design (as built)
 
 ### A thread per vCPU, and the loop that remains
 
@@ -205,15 +280,40 @@ shutdown terminate. The word is a state, not a flag:
 
 | state | meaning |
 | --- | --- |
-| `VCPU_PARKED` (0) | created, never started; waiting to be told which |
-| `VCPU_RUNNING` (1) | `CPU_ON` wrote the entry and woke it; run the guest |
-| `VCPU_QUIT` (2) | leave without running: the machine is stopping |
+| `VCPU_PARKED` (0) | created, **or powered off**; waiting to be told which guest to run |
+| `VCPU_STARTING` (1) | **as built** (difference 5): `CPU_ON` has claimed it and is writing its registers |
+| `VCPU_RUNNING` (2) | the entry and context are set: run the guest |
+| `VCPU_QUIT` (3) | leave for good: the machine is stopping |
 
-A thread waits while the word is `PARKED`, and on waking does what the
-word now says.
+A thread waits while the word is `PARKED` **or `STARTING`**, and on waking
+does what the word now says. Two of those four rows are as-built rather
+than as-designed, and both for reasons review found rather than the report:
 
-**The states only ever increase, and that is a rule the transitions have
-to enforce rather than a description of the usual order.** `SYSTEM_OFF`
+- **`STARTING`** exists because `CPU_ON` has two jobs -- claim the vCPU and
+  write its entry point -- and either order in one step is wrong. Writing
+  the registers first corrupts a vCPU that is *already running*, which the
+  first threaded build did. Publishing `RUNNING` first lets the target wake
+  on a spurious futex return and enter with registers not yet written. So
+  the claim and the publication are separate transitions, and a claim that
+  cannot be completed is given back.
+- **`PARKED` means "or powered off"** because `CPU_OFF` is not the end of a
+  vCPU. The first build exited the thread and left the word `RUNNING`, so
+  `AFFINITY_INFO` reported the CPU on and a later `CPU_ON` answered
+  `ALREADY_ON` forever -- the run set this unit replaces allowed a guest to
+  restart a powered-down CPU, and the threaded version had silently taken
+  that away.
+
+**`QUIT` is absorbing, and that is the rule the transitions have to
+enforce.** *As built the states do not simply increase* (difference 5):
+`PARKED` and `RUNNING` cycle, because `CPU_OFF` is not the end of a vCPU --
+a guest may power one down and start it again, which the run set this
+replaces allowed and a lifecycle that only ever increased would have taken
+away. What must hold is that nothing moves a vCPU *out of* `QUIT`, which
+every transition being a compare-and-swap gives. A fourth state,
+`STARTING`, also appeared: `CPU_ON` claims the vCPU before writing its
+registers, because writing them first corrupts a vCPU that is already
+running and publishing `RUNNING` first lets the target wake on a spurious
+futex return and enter with stale ones.** `SYSTEM_OFF`
 writes `QUIT` to every word; a *concurrent* `CPU_ON` -- from another vCPU
 thread that has not been kicked yet, which is the normal state of affairs
 during shutdown -- would otherwise store `RUNNING` over that `QUIT` and
@@ -285,11 +385,11 @@ ordering is implicit is a publication that is wrong on one architecture.
 | word | writer | reader | ordering, and why |
 | --- | --- | --- | --- |
 | `entry[i]`, `ctx[i]` -- the vCPU's entry point and context | `CPU_ON`, before the swap | the released thread, after its acquire | plain writes, **published by the release swap below**. A thread that could see `RUNNING` and then a stale entry point is a guest entered at the wrong address -- on AArch64 a fault at whatever the word last held |
-| `park[i]` -- `PARKED`/`RUNNING`/`QUIT` | `CPU_ON` (compare-and-swap from `PARKED`, **release**); `SYSTEM_OFF` (store `QUIT`, **release**) | the thread, in its park loop and after every `cosmo_vcpu_run` (**acquire**) | release on the write so the entry context is visible; acquire on the read so the thread that sees `RUNNING` sees that context. A *failed* swap needs no ordering -- it changes nothing |
+| `park[i]` -- `PARKED`/`STARTING`/`RUNNING`/`QUIT` | `CPU_ON` in two steps, both compare-and-swaps: `PARKED -> STARTING` (**acq_rel**) to claim, then `STARTING -> RUNNING` (**release**) to publish; `CPU_OFF` `RUNNING -> PARKED` (**release**); `SYSTEM_OFF` stores `QUIT` (**release**) | the thread, in its park loop and after every `cosmo_vcpu_run` (**acquire**) | release on the publication so the entry context is visible; acquire on the read so the thread that sees `RUNNING` sees that context. **`STARTING` is as built** (difference 5): the claim and the publication have to be separate, or `CPU_ON` either overwrites a running vCPU's registers or publishes before writing them. A *failed* swap needs no ordering -- it changes nothing, which is what makes `QUIT` absorbing |
 | `stopping` -- the machine is powering off | `SYSTEM_OFF`, **before** the first `QUIT`, **release** | `CPU_ON`'s fast path, **acquire** | the flag must not become visible after the `QUIT` it precedes, or a `CPU_ON` could pass the fast path *and* find `PARKED`. It is only the fast path: the swap is what makes the race safe, so a stale read here costs a refusal the swap would have made anyway |
-| `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason, test 4's timestamps -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
+| `live` -- threads created and not yet returned | each thread as it leaves, `__atomic_fetch_sub` **acq_rel** | the supervisor, **acquire** | release so everything the thread did -- its last console bytes, its exit reason -- is visible to the supervisor that sees zero; acquire so the supervisor's reads are not hoisted above it. This is the ordering the threads unit already got wrong once: the wake must be **last**, or a joiner sees a slot that is not free yet |
 | a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
-| test 4's `[enter, exit)` timestamps | each vCPU thread, plain writes | the supervisor, after `live == 0` | published by `live`'s release, which is why the supervisor reads them **after** the count reaches zero rather than while the threads run |
+| test 4's concurrency counter (`in_run`, `peak_in_run`) | each vCPU thread, `__atomic_add_fetch`/`fetch_sub` **acq_rel** either side of a run; the peak raised by compare-and-swap | the supervisor, **acquire**, after `live == 0` | **as built this replaced a pair of timestamps** (difference 3). A counter needs no publication at all -- every update is atomic and the peak only rises -- which is one fewer thing for `live`'s release to carry |
 | **`v->stop`** -- the kick's flag, in the kernel | `sys_vcpu_stop`, **`SEQ_CST`** (it is half of a Dekker handshake, below), *then* the IPI | the run loop, **consumed with an `__atomic_exchange`**; `SEQ_CST` for the re-read before a VM entry, `acq_rel` for the consume after an exit | the store must be visible before the IPI that makes the target look at it, or the target exits, finds nothing and re-enters the guest -- a lost kick, which is a hang. Consumed by *exchange* rather than read-then-clear so that a stop arriving while one is being consumed is not swallowed: the exchange either returns it (this run stops) or lands after it (the next run stops) |
 | **`v->in_guest`** -- one word carrying "inside a guest" and the host CPU it is on | the run loop, **`SEQ_CST`** immediately before the VM entry (the other half of the handshake); cleared **release** immediately after the exit | `sys_vcpu_stop`, **`SEQ_CST`** | this replaces the `loaded_cpu` read a previous draft proposed, which **was wrong** rather than merely unsynchronised: `loaded_cpu` is a plain `int` written by the run loop, `sys_vcpu_stop` cannot take `run_lock` without waiting behind the very guest it means to interrupt, and stickiness only stops the flag being *lost* -- it does nothing to make a *spinning* guest look at it. A flag that lands after the runner's last check, with the IPI sent to a CPU the vCPU has since left, leaves a guest spinning forever with its stop pending, which is the hang the kick exists to prevent |
 
@@ -454,7 +554,7 @@ One syscall (`SYS_vcpu_stop`), one exit kind (`COSMO_VM_EXIT_STOPPED`),
 one libc stub. No new device, no new ioctl. `COSMO_VCPU_RUN_ONE_TICK`
 keeps its meaning and its users.
 
-## Migration plan
+## Migration plan (followed, with steps 3 and 4 landing together)
 
 1. **`SYS_vcpu_stop` and `COSMO_VM_EXIT_STOPPED` alone**, with a kernel
    self-test: a vCPU running a spin loop on one thread, stopped from
@@ -471,7 +571,9 @@ keeps its meaning and its users.
    the supervisor: drain, service the tap, wait on the live count.
 4. **`SYSTEM_OFF` sets `stopping`, sets every other thread to `QUIT` and
    wakes it, and kicks every vCPU in a guest**, and the supervisor reaps
-   them when the count reaches zero. All of it in one step: the `QUIT`
+   them when the count reaches zero. *As built this landed inside step 3*,
+   because it had to: without it the machine never stops, so step 3 could
+   not boot on its own. All of it together for the same reason: the `QUIT`
    without the wake leaves a parked thread stuck, the wake without
    `CPU_ON`'s compare-and-swap lets a racing `CPU_ON` undo it, and the
    kick is what makes a running thread reach its next check.
@@ -520,6 +622,14 @@ keeps its meaning and its users.
    200 ms" bound would -- a loaded host makes the intervals longer, which
    makes overlap more likely rather than less.
 
+   **As built this is a counter, not a pair of timestamps** (difference 3):
+   `vmctl` counts the threads inside `cosmo_vcpu_run` and keeps the peak,
+   and the harness requires `vmctl: peak concurrent vcpus: 2`. A peak above
+   one *is* two intervals intersecting, and the counter needs no clock, no
+   per-run storage and no comparison pass to get wrong. It also turned out
+   to need no host-CPU guard: the `-smp 4` the harness already uses gives a
+   peak of 2 on every `-c 2` machine-mode run.
+
    **It needs a host with at least two CPUs**, and says so: with
    `QEMU_SMP=1` the test prints that it is skipped and why, because a
    single-CPU host cannot produce overlap and a test that passed there
@@ -538,7 +648,24 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **the handshake weakened from `SEQ_CST` to
+**Bug-proofs, as run.** The four that fail on demand: the round-robin
+restored (as a mutex serialising the runs -- the peak is 1 and its marker
+missing, *and* the boot hangs, which is the lock-across-a-run hazard
+demonstrating itself); shutdown's wake removed while the `QUIT` store stays
+(`offspin ok` still passes, and the boot dies before `parked ok`, which
+localises the failure to the parked thread); the stop's take removed from
+the top of the run loop (`hv-vcpu-stop` fails on the entry counter); and
+the `QUIT` store removed altogether (the running threads never leave their
+loop -- a blunter injection than intended, and it is why the wake has a
+proof of its own). Two that do **not** fail: `guest_psci_race`'s plain
+store, for the reason its header gives, and the `SEQ_CST` weakening below.
+One that failed to fail and deleted code instead: a second stop-check in
+the host-interrupt branch, redundant because the top of the loop already
+covers every path to an entry. And one that failed to fail and rewrote a
+*measurement*: a kicker that busy-waited to land its stop mid-tick starved
+the vCPU thread it was observing and reported the guest as never entered.
+
+The report's original list, for the record: **the handshake weakened from `SEQ_CST` to
 release/acquire** -- the one bug-proof in this report that **cannot be
 demonstrated by running it**, and it is listed first for that reason. The
 reordering it permits is a StoreLoad slip that neither x86-64 (which does

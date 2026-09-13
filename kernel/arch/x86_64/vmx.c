@@ -153,6 +153,7 @@ struct arch_hv_vcpu {
     struct vmx_state st;
     bool launched;         /* VMLAUNCH once, VMRESUME after */
     int loaded_cpu;        /* the CPU whose current VMCS this is, -1 for none */
+    struct hv_kick *kick;  /* the owner's stop handshake, or NULL (kernel/hvkick.h) */
     int offered;           /* the vector the manager offered, -1 for none */
     bool irq_taken;
     uint32_t pending_event;   /* VM-entry interruption information, 0 = none */
@@ -1048,6 +1049,13 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
     }
 }
 
+/* The generic layer's stop handshake (kernel/hvkick.h); NULL leaves this
+ * backend running exactly as it did before the kick existed. */
+static void vmx_be_vcpu_set_kick(struct arch_hv_vcpu *v, struct hv_kick *k)
+{
+    v->kick = k;
+}
+
 static int vmx_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     const struct x86_fpu_info *fi = x86_fpu_info();
@@ -1077,6 +1085,23 @@ static int vmx_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     load_guest_state(v);
     inject_pending(v);
 
+    /*
+     * The stop handshake, inside IRQs-off and immediately around the entry
+     * (kernel/hvkick.h): publish that this CPU is entering, then look once
+     * more for a stop. A stop set before that look means we do not enter at
+     * all; one set after it leaves the IPI pending, and PIN_EXT_INTR_EXITING
+     * turns it into an exit on the instruction after VMLAUNCH.
+     */
+    if (v->kick) {
+        hv_kick_entering(v->kick, (unsigned)cpu);
+        if (hv_kick_stopped(v->kick)) {
+            hv_kick_left(v->kick);
+            arch_irq_restore(s);
+            out->kind = HV_EXIT_STOPPED;
+            return 0;
+        }
+    }
+
     /* The guest rule of arch/fpu.h, identical to SVM's. */
     bool owner = x86_fpu_save_current();
     x86_fpu_area_restore(v->fpu);
@@ -1088,6 +1113,9 @@ static int vmx_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     x86_fpu_area_save(v->fpu);
     if (!owner || !x86_fpu_restore_current())
         x86_fpu_area_restore(x86_fpu_reset_image());
+
+    if (v->kick)
+        hv_kick_left(v->kick);
 
     if (failed) {
         uint64_t err = vmread(VMCS_INSTRUCTION_ERROR);
@@ -1126,6 +1154,7 @@ const struct hv_backend vmx_backend = {
     .vcpu_get_state = vmx_be_vcpu_get_state,
     .vcpu_set_state = vmx_be_vcpu_set_state,
     .vcpu_run = vmx_be_vcpu_run,
+    .vcpu_set_kick = vmx_be_vcpu_set_kick,
     .vcpu_set_irq = vmx_be_vcpu_set_irq,
     .vcpu_irq_delivered = vmx_be_vcpu_irq_delivered,
     .vcpu_timer_deadline = vmx_be_vcpu_timer_deadline,

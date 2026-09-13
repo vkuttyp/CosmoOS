@@ -4,6 +4,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/ipi.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/process.h>
@@ -43,6 +44,10 @@ int vcpu_create(struct vm *vm, unsigned index, struct vcpu **out)
         kfree(v);
         return rc;
     }
+    /* The stop handshake's words are this object's; the backend publishes
+     * into them around its guest entry (kernel/hvkick.h). Given before any
+     * run can happen, which is before this function returns. */
+    arch_hv_vcpu_set_kick(v->arch, &v->kick);
     mutex_lock(&vm->lock);
     if (vm->vcpus[index] != NULL) {
         mutex_unlock(&vm->lock);
@@ -272,6 +277,33 @@ int vcpu_run_limited(struct vcpu *v, struct cosmo_vm_exit *x, unsigned max_intr)
 /* The owner's bounded run: ONE_TICK is "one host interrupt, then a
  * PREEMPTED exit" -- a turn, for an owner that has other vCPUs to run
  * and one thread to run them on. */
+/*
+ * The kicker's half of the handshake (kernel/hvkick.h): store the stop, then
+ * look at whether the vCPU is inside a guest and on which CPU. Both are
+ * SEQ_CST and the order matters -- see hvkick.h for why release/acquire is
+ * not enough here.
+ *
+ * Sending the IPI is a latency optimisation and not the mechanism: the stop
+ * is sticky, so a vCPU that is not in a guest takes it at its next entry or
+ * at the top of its next run. That is what makes a stale `in_guest` read
+ * harmless.
+ *
+ * IPI_RESCHEDULE rather than a vector of its own: what a kick needs from the
+ * target CPU is a host interrupt, and that kind's documented effect -- come
+ * back to the kernel and look at what changed -- is exactly it. The spurious
+ * reschedule costs the vCPU thread a yield it would soon have taken anyway,
+ * and a dedicated vector is a later optimisation rather than a correctness
+ * matter.
+ */
+int vcpu_stop(struct vcpu *v)
+{
+    __atomic_store_n(&v->kick.stop, 1u, __ATOMIC_SEQ_CST);
+    unsigned g = __atomic_load_n(&v->kick.in_guest, __ATOMIC_SEQ_CST);
+    if (g & HV_IN_GUEST)
+        ipi_send(g & ~HV_IN_GUEST, IPI_RESCHEDULE);
+    return 0;
+}
+
 int vcpu_run_flags(struct vcpu *v, struct cosmo_vm_exit *x, unsigned flags)
 {
     if (flags & COSMO_VCPU_RUN_ONE_TICK)
@@ -320,6 +352,15 @@ static int vcpu_run_bounded(struct vcpu *v, struct cosmo_vm_exit *x, unsigned ma
             rc = -EINTR;
             break;
         }
+        /*
+         * A stop the owner set while this vCPU was between runs, or while it
+         * was handling the last exit. Taken by exchange (kernel/hvkick.h) so
+         * that one arriving inside this window is not swallowed.
+         */
+        if (hv_kick_take(&v->kick)) {
+            fill_common(v, x, COSMO_VM_EXIT_STOPPED);
+            break;
+        }
         /* Level lines first: a device whose line is still up after the
          * guest acknowledged raises it again, here, before the offer. */
         vmdev_reassert(vm);
@@ -342,7 +383,22 @@ static int vcpu_run_bounded(struct vcpu *v, struct cosmo_vm_exit *x, unsigned ma
          * its own interrupt controller. Nothing for the owner; run on. */
         if (e.kind == HV_EXIT_EMULATED)
             continue;
+        if (e.kind == HV_EXIT_STOPPED) {
+            /* The backend abandoned the entry, or left it at once, because
+             * the owner's stop was set. Consume it: this run is over and the
+             * next one is not pre-stopped. */
+            (void)hv_kick_take(&v->kick);
+            fill_common(v, x, COSMO_VM_EXIT_STOPPED);
+            break;
+        }
         if (e.kind == HV_EXIT_INTR) {
+            /* A host interrupt is what a kick's IPI looks like from here.
+             * Nothing to do about it *here*, though: `continue` returns to
+             * the top of this loop, which takes a pending stop before the
+             * next entry. An earlier version checked in this branch too and
+             * a bug-proof showed the check was redundant -- removing it
+             * changed nothing, because the top of the loop had already
+             * covered every path that reaches an entry. */
             if (max_intr && ++intr >= max_intr) {
                 if (preempt) {
                     fill_common(v, x, COSMO_VM_EXIT_PREEMPTED);

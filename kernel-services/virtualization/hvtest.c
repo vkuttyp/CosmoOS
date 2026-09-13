@@ -500,6 +500,136 @@ bool selftest_hv_guest_spin(const char **reason)
 #endif
 }
 
+/*
+ * The kick (`SYS_vcpu_stop`, kernel/hvkick.h). A kernel self-test rather
+ * than only a userland one, because the property is about what happens
+ * *inside* `vcpu_run` and the owner cannot see that from outside.
+ *
+ * Both guests here are `guest_spin`, which never exits of its own accord:
+ * on both architectures it is the image that makes "did the kick work?" the
+ * only question the test can be answering, since nothing else would ever
+ * end the run.
+ */
+struct kicker {
+    struct vcpu *v;
+    uint64_t after_ns;
+    uint64_t sent_ns;      /* when the stop was actually sent */
+    unsigned in_guest;     /* what the kicker saw: did it have a CPU to IPI? */
+    bool sent;
+};
+
+static void kicker_main(void *arg)
+{
+    struct kicker *k = arg;
+    thread_sleep_ns(k->after_ns);
+    /*
+     * A short delay before the stop, so that the kick has a chance to land
+     * while the guest is *running* rather than between two of its runs. A
+     * sleeping thread wakes on a timer tick and the host timer tick is also
+     * what exits a spinning guest (`guest_spin.S` says so), so a kicker
+     * that sends the moment it wakes tends to find `in_guest` already
+     * clear, send no IPI, and exercise only the sticky flag.
+     *
+     * It is a *tendency* and not a guarantee, which is why what the kicker
+     * saw is recorded and printed rather than asserted: whether the kick
+     * lands inside a guest depends on how the two threads are placed, and
+     * an assertion about that is an assertion about the host's scheduler.
+     * Both outcomes are correct -- the flag is sticky -- and the gate below
+     * is on the property that holds either way.
+     */
+    udelay(500);
+    k->in_guest = __atomic_load_n(&k->v->kick.in_guest, __ATOMIC_SEQ_CST);
+    k->sent_ns = clock_now_ns();
+    (void)vcpu_stop(k->v);
+    __atomic_store_n(&k->sent, true, __ATOMIC_RELEASE);
+    thread_exit(0);
+}
+
+bool selftest_hv_vcpu_stop(const char **reason)
+{
+    if (skip_without_backend(reason))
+        return true;
+    struct vm *vm;
+    struct vcpu *v;
+    CHECK(make_guest("tests/hv/guest_spin.bin", &vm, &v) == 0);
+    struct cosmo_vm_exit x;
+
+    /*
+     * A stop set while the vCPU is between runs is taken by the next run,
+     * *without entering the guest* -- the entry counter is what says so,
+     * and it is the difference between a sticky stop and one that needs the
+     * IPI to be the mechanism.
+     */
+    uint64_t entries = v->entries;
+    CHECK(vcpu_stop(v) == 0);
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_STOPPED);
+    CHECK(v->entries == entries);          /* the guest never ran */
+
+    /* And it was consumed: the next run enters and the guest spins until a
+     * bound ends it, which is the un-stopped behaviour. */
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run_limited(v, &x, 3) == -ETIMEDOUT);
+    CHECK(v->entries > entries);
+
+    /* Stopping a vCPU that is not running is not an error; it is the same
+     * sticky store, and the run after it says so. */
+    CHECK(vcpu_stop(v) == 0);
+    memset(&x, 0, sizeof(x));
+    CHECK(vcpu_run(v, &x) == 0);
+    CHECK(x.kind == COSMO_VM_EXIT_STOPPED);
+
+    /*
+     * The case the whole mechanism exists for: a stop that arrives while
+     * the guest is *running*, from another thread, ending a run that is
+     * bounded by nothing. Without the kick this run never returns and the
+     * harness's per-test budget fails the test -- which is the right
+     * failure, because a kick that does not arrive is exactly a hang.
+     */
+    struct kicker k;
+    memset(&k, 0, sizeof(k));
+    k.v = v;
+    k.after_ns = 20000000ull;   /* 20 ms: several scheduler ticks into the run */
+    struct thread *th = thread_create(kicker_main, &k, "vcpu-kicker", SCHED_PRIO_DEFAULT);
+    CHECK(th != NULL);
+    memset(&x, 0, sizeof(x));
+    uint64_t t0 = clock_now_ns();
+    CHECK(vcpu_run(v, &x) == 0);
+    uint64_t t1 = clock_now_ns();
+    CHECK(x.kind == COSMO_VM_EXIT_STOPPED);
+    CHECK(__atomic_load_n(&k.sent, __ATOMIC_ACQUIRE));   /* it was the kicker, not a bound */
+    CHECK(v->exits > 0);
+    /*
+     * How long the kick took and whether it found the guest entered, both
+     * **reported and not asserted**. Two things a bug-proof taught:
+     *
+     *  - Removing the IPI entirely does *not* fail this test.
+     *    `guest_spin.S` says why: every host timer tick is taken to EL2, so
+     *    the run loop sees INTR exits anyway and the sticky flag is noticed
+     *    at the next one. **Liveness comes from the tick plus the sticky
+     *    flag; what the IPI buys is promptness** -- microseconds instead of
+     *    up to a tick -- and independence from the host's tick policy. A
+     *    tickless host, or one that ever suppressed ticks while a guest
+     *    runs, would need the IPI for liveness too.
+     *  - Whether the kick lands inside a guest is a matter of thread
+     *    placement, so it is printed rather than gated. Runs have been
+     *    seen both ways on the same build.
+     *
+     * A latency assertion would be a flake waiting to happen -- this tree
+     * has three of that family already -- so the gate stays on what is
+     * guaranteed however the threads are placed: the run returns STOPPED,
+     * and it was the kicker that ended it.
+     */
+    kinfo("selftest: hv-vcpu-stop: kick to return %llu us, kicker saw in_guest=%s",
+          (unsigned long long)((t1 - k.sent_ns) / 1000),
+          (k.in_guest & HV_IN_GUEST) ? "yes" : "no");
+    (void)t0;
+
+    drop_guest(vm, v);
+    return true;
+}
+
 /* AArch64: the EL2 the loader kept (docs/kernel/arch/aarch64/design.md,
  * "Exception level 2"). The stub answers HVC, hands EL2 over when asked,
  * and takes it back; a machine booted at EL1 (QEMU_EL2=0) skips. */

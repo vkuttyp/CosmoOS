@@ -216,6 +216,22 @@ int64_t sys_vcpu_run(struct syscall_args *a)
     return rc;
 }
 
+/*
+ * Make a running vCPU leave its run. The right is VCPU_RUN and not an IRQ
+ * right: stopping a vCPU is something only whoever may run it can want, and
+ * it is not an interrupt.
+ */
+int64_t sys_vcpu_stop(struct syscall_args *a)
+{
+    int herr = 0;
+    struct vcpu *v = vcpu_of_err((int)a->a[0], HANDLE_RIGHT_VCPU_RUN, &herr);
+    if (v == NULL)
+        return herr;
+    int rc = vcpu_stop(v);
+    kobject_put(&v->obj);
+    return rc;
+}
+
 int64_t sys_vcpu_irq(struct syscall_args *a)
 {
     int herr = 0;

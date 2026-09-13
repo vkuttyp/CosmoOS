@@ -104,6 +104,7 @@ struct arch_hv_vcpu {
     unsigned index;          /* which vCPU of its VM: its MPIDR and its redistributor frame */
     struct hv_ctx *ctx;      /* the page EL2 reads and writes */
     paddr_t ctx_pa;
+    struct hv_kick *kick;    /* the owner's stop handshake, or NULL (kernel/hvkick.h) */
     int offered;
     int lr_vector;           /* the INTID list register 0 holds for us, -1 if none */
     bool lr_reported;        /* its delivery has already been told to the owner */
@@ -1047,6 +1048,13 @@ static int decode_exit(struct arch_hv_vcpu *v, struct hv_exit *out)
     }
 }
 
+/* The generic layer's stop handshake (kernel/hvkick.h); NULL leaves this
+ * backend running exactly as it did before the kick existed. */
+static void el2_vcpu_set_kick(struct arch_hv_vcpu *v, struct hv_kick *k)
+{
+    v->kick = k;
+}
+
 static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     el2_vdist_offer(v);
@@ -1084,9 +1092,27 @@ static int el2_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
         else
             gic_enable_local(g_vtimer_intid);
     }
+    /*
+     * The stop handshake, inside IRQs-off and immediately around the entry
+     * (kernel/hvkick.h): publish that this CPU is entering, then look once
+     * more for a stop. A stop set before that look means we do not enter;
+     * one set after it leaves the IPI pending, and HCR_EL2.IMO makes a
+     * pending physical IRQ an exit as soon as the guest is entered.
+     */
+    if (v->kick) {
+        hv_kick_entering(v->kick, (unsigned)this_cpu()->cpu_id);
+        if (hv_kick_stopped(v->kick)) {
+            hv_kick_left(v->kick);
+            arch_irq_restore(s);
+            out->kind = HV_EXIT_STOPPED;
+            return 0;
+        }
+    }
     bool owner = aarch64_fpu_save_current();
     aarch64_fpu_area_restore(&v->fpu);
     int64_t rc = el2_run(v->ctx_pa);
+    if (v->kick)
+        hv_kick_left(v->kick);
     /* The host's CNTV_CTL as the switch left it, captured before
      * interrupts are re-enabled so nothing -- least of all the PPI 27
      * handler -- can touch it first. If the exit path disarmed the
@@ -1132,6 +1158,7 @@ const struct hv_backend el2_backend = {
     .vcpu_get_state = el2_vcpu_get_state,
     .vcpu_set_state = el2_vcpu_set_state,
     .vcpu_run = el2_vcpu_run,
+    .vcpu_set_kick = el2_vcpu_set_kick,
     .vcpu_set_irq = el2_vcpu_set_irq,
     .vcpu_irq_delivered = el2_vcpu_irq_delivered,
     .vcpu_timer_deadline = el2_vcpu_timer_deadline,

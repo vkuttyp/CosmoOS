@@ -279,6 +279,7 @@ bool selftest_hv_guest_cpuid(const char **reason);
 bool selftest_hv_guest_pm(const char **reason);
 bool selftest_hv_guest_shutdown(const char **reason);
 bool selftest_hv_guest_spin(const char **reason);
+bool selftest_hv_vcpu_stop(const char **reason);
 bool selftest_hv_guest_fpu(const char **reason);
 
 #endif /* KERNEL_SELFTEST_H */

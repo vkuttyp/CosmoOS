@@ -560,6 +560,7 @@ static const struct selftest tests[] = {
     { "hv-guest-pm",     selftest_hv_guest_pm },
     { "hv-guest-shutdown", selftest_hv_guest_shutdown },
     { "hv-guest-spin",   selftest_hv_guest_spin },
+    { "hv-vcpu-stop",    selftest_hv_vcpu_stop },
     { "hv-guest-fpu",    selftest_hv_guest_fpu },
     { "process-user",    selftest_process_selftest },
     { "process-fault",   selftest_process_fault },

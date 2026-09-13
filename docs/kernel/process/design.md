@@ -1134,10 +1134,15 @@ needs none of the three.
 Named and deferred: `SYS_mprotect`; futex
 requeue (the Linux door already exposes it); per-thread signal *targeting*
 (a native `tgkill`); a thread's name and priority in `struct cosmo_thread`;
-`COSMO_RLIMIT_NTHREAD`; `/proc` per-thread entries; the handle table under
-two threads, which native threads make reachable and nothing tests; and
-`vmctl`'s conversion to a thread per vCPU, which is the first consumer and
-its own unit.
+`COSMO_RLIMIT_NTHREAD`; and `/proc` per-thread entries.
+
+**Both of this section's named consumers have since landed.** `vmctl` runs
+a thread per vCPU (the audit unit "a thread per vCPU, and a way to stop
+one"), which is what the threads were for; and with it the handle table
+*is* used from several threads at once -- four vCPU threads and a
+supervisor sharing one VM handle -- so the gap named here as "reachable and
+nothing tests" is now exercised by every machine-mode boot, though still
+not by a test written for it.
 
 ## 13. A thread pointer, and `errno` per thread (audit unit "a thread pointer, and errno per thread")
 

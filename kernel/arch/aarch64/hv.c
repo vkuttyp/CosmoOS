@@ -97,6 +97,7 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
     return g_be->vcpu_set_state(v, i);
 }
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out) { return g_be->vcpu_run(v, out); }
+void arch_hv_vcpu_set_kick(struct arch_hv_vcpu *v, struct hv_kick *k) { g_be->vcpu_set_kick(v, k); }
 void arch_hv_vcpu_set_irq(struct arch_hv_vcpu *v, int vector) { g_be->vcpu_set_irq(v, vector); }
 int arch_hv_vcpu_irq_delivered(struct arch_hv_vcpu *v) { return g_be->vcpu_irq_delivered(v); }
 bool arch_hv_vcpu_timer_deadline(struct arch_hv_vcpu *v, uint64_t *t) { return g_be->vcpu_timer_deadline(v, t); }

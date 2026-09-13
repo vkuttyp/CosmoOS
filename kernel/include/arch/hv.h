@@ -13,6 +13,7 @@
 #ifndef ARCH_HV_H
 #define ARCH_HV_H
 
+#include <kernel/hvkick.h>
 #include <kernel/types.h>
 #include <uapi/cosmo/syscall.h>
 
@@ -58,6 +59,7 @@ enum hv_exit_kind {
     HV_EXIT_WFI,         /* AArch64: WFI/WFE, the HLT of this architecture */
     HV_EXIT_SYSREG,      /* AArch64: a trapped system-register access */
     HV_EXIT_EMULATED,    /* the backend completed the access itself (a guest's own GIC); run again */
+    HV_EXIT_STOPPED,     /* the owner's stop was set: the entry was abandoned or left at once */
     HV_EXIT_FAIL,
 };
 
@@ -132,6 +134,18 @@ int arch_hv_vcpu_set_state(struct arch_hv_vcpu *v, const struct cosmo_vcpu_regs 
 /* Run until an exit. Interrupts must be enabled on entry; they are
  * enabled again on return. Never sleeps. */
 int arch_hv_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out);
+
+/*
+ * Hand the backend the stop handshake's words (kernel/hvkick.h), which the
+ * generic layer owns. The backend publishes `in_guest` and re-reads `stop`
+ * immediately around its guest entry, inside the interrupt-disabled region
+ * -- the placement is the mechanism, and hvkick.h says why. Called once,
+ * after arch_hv_vcpu_create, before any run.
+ *
+ * A backend that is given no kick block runs exactly as before; an entry
+ * that finds the stop set returns HV_EXIT_STOPPED without entering.
+ */
+void arch_hv_vcpu_set_kick(struct arch_hv_vcpu *v, struct hv_kick *k);
 
 /* VirtualInterrupt: offer one vector (-1: none) for delivery when the
  * guest is interruptible. */
