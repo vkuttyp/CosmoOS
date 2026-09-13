@@ -1141,7 +1141,7 @@ its own unit.
 
 ## 13. A thread pointer, and `errno` per thread (audit unit "a thread pointer, and errno per thread")
 
-The threads unit left `errno` one global (§12), because fixing it needs
+The threads unit left `errno` one global (§12), because fixing it needed
 something the machine did not have: **a way for a thread to set its own
 thread pointer**. The kernel has kept one per thread all along --
 `thread.tls_base`, written to `TPIDR_EL0` or `MSR_FS_BASE` on every switch

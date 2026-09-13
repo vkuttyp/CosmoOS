@@ -184,7 +184,7 @@ first thread, from `__libc_start`.
 struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
-    unsigned tid;               /* cached, so thread_id() costs no syscall */
+    unsigned tid;               /* the cached id; 0 means "not asked yet" */
     char reserved[112];         /* to 128: 8 + 4 + 4 + 112. A program's own storage
                                    starts at offset 128, never inside this. */
 };
@@ -293,7 +293,7 @@ decades, and nothing in this tree takes its address.
 `strerror`'s static buffer and `getcwd(NULL)`'s storage stay shared: both
 now *can* be fixed, and doing it here would be a second subsystem in one
 unit. `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
-call) because the block has to carry something more than `errno` to justify
+call after the first, since the cache is filled lazily) because the block has to carry something more than `errno` to justify
 128 bytes, and the tid is the field the threads unit already makes every
 thread know. Compiler `__thread` is not attempted: that needs `spawn` to
 honour `PT_TLS`, a real TCB layout and the linker's TLS relocations, and
@@ -336,7 +336,7 @@ handler wants.
 | `libc/src/errno.c` | **as built only `int errno;` removed** -- the accessor and the block live in `tcb.c`, not here |
 | `libc/include/cosmo/tcb.h` (new) | `struct __cosmo_tcb` (`aligned(16)`), `COSMO_TCB_SIZE`, the reserved-prefix rule, `cosmo_tcb_install` |
 | `libc/src/tcb.c` (new) | the accessor's arch halves, the static first-thread block, `__cosmo_tcb_init`, the tid cache, `cosmo_tcb_install` |
-| `libc/src/libc.h` | **not in the report**: the internal declarations (`__cosmo_tcb_init`, `__cosmo_tcb_tid`, `__cosmo_tcb_cache_tid`) |
+| `libc/src/libc.h` | **not in the report**: the internal declarations (`__cosmo_tcb_init`, `__cosmo_tcb_tid`) |
 | `libc/src/stdlib.c` | `__libc_start` installs the first thread's block first, and the exit-127 policy |
 | `libc/src/thread.c` | one more page in the mapping; `tls` passed so the kernel installs it; `cosmo_thread_id` reads the block's lazily-filled cache |
 | `kernel/security/…` docs, `userland/init/init.c` | **not in the report**: `SYS_set_tls` joins the always-allowed set, and `--filter inherit-start` asserts it |
@@ -348,6 +348,7 @@ handler wants.
 | `docs/libc/architecture.md`, `-/api.md`, `-/design.md`, `libc/README.md` | `errno` is per-thread (`design.md` **not in the report's table**) |
 | `docs/kernel/process/design.md`, `-/testing.md` | §12's follow-up satisfied and a new **§13** for this unit; the new steps |
 | `README.md` | Status entry |
+| `docs/audit/next-subsystem-errno-tls.md` | this report, converted to as-built |
 
 ## New APIs
 
@@ -370,8 +371,11 @@ its meaning.
    is the regression test for it.
 3. **`cosmo_tcb_install`**, so a thread made outside libc's wrapper can
    opt in, with the length check its bug-proof needs.
-4. **`cosmo_thread_start` installs one per thread**, and `cosmo_thread_id`
-   reads the cached tid.
+4. **`cosmo_thread_start` gives every thread one**, and `cosmo_thread_id`
+   reads the cached tid. *As built this step differs twice*: the block is
+   passed as `cosmo_thread.tls` and **the kernel installs it** rather than
+   libc adopting it (difference 2), and the tid cache is **lazy** rather
+   than filled at install time (difference 3).
 5. **The tests**, then the bug-proofs.
 6. **L8 and the documents**, including the warning in `cosmo/thread.h`,
    which shrinks rather than disappears.
@@ -444,11 +448,20 @@ status of its own.
 
 `errno` access goes from a global load to a thread-pointer read plus an
 offset -- one extra instruction on AArch64, a `%fs`-relative load on
-x86-64. Measured the way the last three units were: the suite's own
-per-test timing across three consecutive runs on each arch, with the claim
-being that nothing moves outside its run-to-run spread. `cosmo_thread_id()`
-gets *faster* (a syscall becomes a load), which the thread benchmark in
-`thrtest` can show.
+x86-64.
+
+**What was actually measured: nothing beyond the suite's own timing.** The
+report proposed three consecutive runs per architecture against the
+run-to-run spread; the boot harness's per-test timing across the runs this
+unit took shows no test moving outside its usual spread, and that is the
+whole of the evidence. It is recorded this way rather than as a benchmark
+that was run, because it was not.
+
+`cosmo_thread_id()` is also **not** simply "a syscall becomes a load", as
+the report first claimed. The cache is filled lazily (difference 3), so the
+first call on each thread still costs `SYS_thread_self` and every call
+after it is a load. A thread that never asks pays nothing at all, which the
+eager version did not manage.
 
 ## Risks
 
@@ -467,7 +480,9 @@ gets *faster* (a syscall becomes a load), which the thread benchmark in
   rather than through the thread pointer -- harmless only because they are
   the same object for the first thread. Install first anyway: a later
   change that makes the first thread's block dynamic would turn this into
-  a real bug, and the bug-proof exists to keep the order.
+  a real bug. **Its bug-proof does not fail**, and the table above says so:
+  nothing in `__stdio_init` sets `errno` today, so the ordering is a
+  precaution the suite cannot check, not a property it proves.
 - **x86-64's `%fs:0` convention couples libc to its own layout.** Changing
   the block's first field later would break every compiled binary. The
   `self` pointer is therefore permanent, which is a cost worth naming.
