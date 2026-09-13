@@ -54,6 +54,7 @@ struct arch_hv_vcpu {
     paddr_t vmcb_pa;
     struct svm_gprs gprs;
     struct arch_hv_vm *vm;
+    struct hv_kick *kick;     /* the owner's stop handshake, or NULL (kernel/hvkick.h) */
     uint64_t guest_efer;      /* the guest's view: never SVME */
     uint64_t guest_xcr0;      /* the guest's XCR0, installed around every VMRUN (XSETBV is intercepted) */
     void *fpu_raw;            /* kmalloc block behind `fpu` */
@@ -638,6 +639,13 @@ static void svm_be_vcpu_inject_exception(struct arch_hv_vcpu *v, uint8_t vector,
 
 /* --- run and decode --- */
 
+/* The generic layer's stop handshake (kernel/hvkick.h); NULL leaves this
+ * backend running exactly as it did before the kick existed. */
+static void svm_be_vcpu_set_kick(struct arch_hv_vcpu *v, struct hv_kick *k)
+{
+    v->kick = k;
+}
+
 static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
 {
     struct vmcb *b = v->vmcb;
@@ -654,6 +662,18 @@ static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
      * put back. A kernel-thread owner holds no state and gets the reset
      * image, so no guest register stays live in the kernel. Interrupts are
      * off from here to the restore: nothing can switch threads in between. */
+    /* The stop handshake, immediately around the entry and inside IRQs-off
+     * (kernel/hvkick.h): an IPI after the publication stays pending and the
+     * VMCB's interrupt intercept turns it into an exit after VMRUN. */
+    if (v->kick) {
+        hv_kick_entering(v->kick, (unsigned)this_cpu()->cpu_id);
+        if (hv_kick_stopped(v->kick)) {
+            hv_kick_left(v->kick);
+            arch_irq_restore(s);
+            out->kind = HV_EXIT_STOPPED;
+            return 0;
+        }
+    }
     bool owner = x86_fpu_save_current();
     x86_fpu_area_restore(v->fpu);
     if (fi->xsave)
@@ -664,6 +684,8 @@ static int svm_be_vcpu_run(struct arch_hv_vcpu *v, struct hv_exit *out)
     x86_fpu_area_save(v->fpu);
     if (!owner || !x86_fpu_restore_current())
         x86_fpu_area_restore(x86_fpu_reset_image());
+    if (v->kick)
+        hv_kick_left(v->kick);
     arch_irq_restore(s);
 
     /* An event that was being delivered when the exit happened is redelivered. */
@@ -766,6 +788,7 @@ const struct hv_backend svm_backend = {
     .vcpu_get_state = svm_be_vcpu_get_state,
     .vcpu_set_state = svm_be_vcpu_set_state,
     .vcpu_run = svm_be_vcpu_run,
+    .vcpu_set_kick = svm_be_vcpu_set_kick,
     .vcpu_set_irq = svm_be_vcpu_set_irq,
     .vcpu_irq_delivered = svm_be_vcpu_irq_delivered,
     .vcpu_timer_deadline = svm_be_vcpu_timer_deadline,

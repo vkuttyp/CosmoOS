@@ -1680,6 +1680,7 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_vcpu_create] = sys_vcpu_create,
     [SYS_vcpu_regs] = sys_vcpu_regs,
     [SYS_vcpu_run] = sys_vcpu_run,
+    [SYS_vcpu_stop] = sys_vcpu_stop,
     [SYS_vcpu_irq] = sys_vcpu_irq,
     [SYS_vm_raise_spi] = sys_vm_raise_spi,
     [SYS_vm_lower_spi] = sys_vm_lower_spi,
