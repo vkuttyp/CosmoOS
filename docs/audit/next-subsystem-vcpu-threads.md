@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Nine things in the first drafts of this report were wrong, and review
+**Ten things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -68,7 +68,11 @@ make was specified with release/acquire, which permits exactly the
 StoreLoad reordering that lets **both** sides miss -- the kicker sending
 no IPI while the runner enters the guest. It is Dekker's handshake and it
 needs `SEQ_CST` on both store-load pairs, with the total-order argument
-written out rather than asserted.
+written out rather than asserted. The tenth was the drift that change
+caused: the affected-files table still described the publication as "one
+release store before the entry", contradicting the section above it --
+which is what a table does when the design changes and the table is not
+swept with it.
 
 ## Problem
 
@@ -432,10 +436,10 @@ property that replaces the artefact.
 | file | change |
 | --- | --- |
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_vcpu_stop` (88), `SYS_COUNT` 88→89, `COSMO_VM_EXIT_STOPPED` |
-| `kernel-services/virtualization/hvsys.c` | the handler: a handle with `VCPU_RUN`, then `vcpu_stop` |
-| `kernel-services/virtualization/vcpu.c` | `stop` and `in_guest` on `struct vcpu`, the consume-by-exchange at entry and after each host-interrupt exit, the re-check before the entry, the IPI |
-| `kernel/arch/x86_64/vmx.c`, `-/svm.c`, `kernel/arch/aarch64/hv_el2.c` | **the `in_guest` publication and clearing sit immediately around the VM entry, which is arch code** -- one release store before the entry and one after the exit in each backend. A previous draft's affected-files table omitted this, which is what naming the ordering without naming where it lives looks like |
-| `kernel/include/kernel/hv.h` | the `stop` flag and `vcpu_stop`'s declaration |
+| `kernel-services/virtualization/hvsys.c` | the handler: a handle with `VCPU_RUN`, then `vcpu_stop` -- whose own half of the handshake is a **`SEQ_CST`** store of `v->stop` followed by a **`SEQ_CST`** read of `in_guest`, then the IPI |
+| `kernel-services/virtualization/vcpu.c` | `stop` and `in_guest` on `struct vcpu`, the consume-by-exchange after each host-interrupt exit (`acq_rel`), and the loop that drives the arch backend. The **`SEQ_CST`** half of the handshake lives in the backends, beside the entry it guards |
+| `kernel/arch/x86_64/vmx.c`, `-/svm.c`, `kernel/arch/aarch64/hv_el2.c` | **the `in_guest` publication, the stop re-read and the clearing sit immediately around the VM entry, which is arch code.** Each backend gains three things, not one: a **`SEQ_CST`** store of `in_guest` before the entry, a **`SEQ_CST`** re-read of `v->stop` after it that abandons the entry, and a **release** clear after the exit. The store and the re-read are one half of Dekker's handshake and cannot be weakened to a release store -- an earlier version of this row said "one release store before the entry", which contradicted the handshake two sections above and is exactly the drift a table invites when the design changes above it. A still earlier draft omitted the row entirely |
+| `kernel/include/kernel/hv.h` | `stop` and `in_guest` on `struct vcpu`, `vcpu_stop`'s declaration, and the comment that says which of the two is a Dekker half -- because the next reader of either field is the person most likely to weaken it |
 | `libc/include/cosmo/syscall.h` | the `cosmo_vcpu_stop` stub |
 | `userland/system/vmctl.c` | a thread per vCPU; the round-robin, `fresh[]` and the grace deleted; one mutex per device model |
 | `tests/hv/aarch64/guest_offspin.S` | unchanged, but its meaning is now the kick |
