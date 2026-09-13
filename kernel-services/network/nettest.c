@@ -947,6 +947,41 @@ static void settle(unsigned ms)
     }
 }
 
+/*
+ * Wait until `pred(arg)` holds, or `budget_ms` passes
+ * (docs/audit/next-subsystem-suite-waits.md).
+ *
+ * The `settle(N)` above waits for *time*; this waits for the *property*,
+ * which is the difference between a test that asserts something about the
+ * stack and one that asserts something about the host. There is no
+ * relationship between 100 ms and 300 packets, and on a machine that has
+ * been building and booting for hours there never was.
+ *
+ * **The budget is generous on purpose** -- seconds where the sleep was
+ * tens of milliseconds. A deadline that is never reached on a healthy
+ * host costs nothing, because the wait returns as soon as the predicate
+ * holds; when it *is* reached the caller's `CHECK` fails on the wait
+ * rather than on an arithmetic mismatch that reads like a protocol bug.
+ *
+ * **A predicate may not require a coherent view of more than one field.**
+ * `tcp_get_stats` is `*out = g_stats;` with no lock and `ksock_ready`
+ * reads socket state outside the socket mutex, so a predicate over two
+ * fields can see them from either side of an update. Wait on one
+ * monotonic counter; leave the multi-field assertion after the wait,
+ * where it is the test's claim and not the wait's termination condition.
+ */
+static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
+{
+    uint64_t deadline = clock_now_ns() + (uint64_t)budget_ms * 1000000ull;
+    while (!pred(arg)) {
+        if (clock_now_ns() > deadline)
+            return false;
+        thread_sleep_ms(1);
+        sched_watchdog_kick();
+    }
+    return true;
+}
+
 /* Drop TCP resets addressed to `g_guard_port` (the flood's SYN-ACKs would
  * otherwise be reset by this host and clear the cache). */
 static uint16_t g_guard_port;
@@ -963,6 +998,20 @@ static bool drop_rst_filter(struct mbuf *m, void *arg)
     return !((th->flags & TH_RST) && ntohs(th->dport) == g_guard_port);
 }
 
+/* How many SYNs the stack has accounted for, cached or answered with a
+ * cookie. One counter would be better still; these two are the only
+ * decomposition the statistics offer, and they are both monotonic, so a
+ * torn read can only *under*-count and make the wait longer. */
+struct syn_target { const struct tcp_stats *base; uint64_t want; };
+static bool syn_answered(void *arg)
+{
+    const struct syn_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return (now.syn_cached - t->base->syn_cached) +
+           (now.syn_cookies_sent - t->base->syn_cookies_sent) >= t->want;
+}
+
 bool selftest_net_tcp_syncache(const char **reason)
 {
     struct tcp_stats t0, t1;
@@ -976,7 +1025,10 @@ bool selftest_net_tcp_syncache(const char **reason)
     /* 300 SYNs from 300 sources that will never answer. */
     for (unsigned i = 0; i < 300; i++)
         inject_tcp((uint16_t)(20000 + i), 6020, 1000 + i, 0, TH_SYN, 1460);
-    settle(100);
+    /* Wait for the stack to have answered all three hundred -- one
+     * counter, not a sum of two, for the reason in `wait_until`. */
+    struct syn_target tgt = { .base = &t0, .want = 300 };
+    CHECK(wait_until(syn_answered, &tgt, 5000));
     tcp_get_stats(&t1);
     uint64_t cached = t1.syn_cached - t0.syn_cached, cookies = t1.syn_cookies_sent - t0.syn_cookies_sent;
     CHECK(cached > 0 && cached <= TCP_SYNCACHE_SIZE);
@@ -1222,6 +1274,15 @@ bool selftest_net_tcp_keepalive(const char **reason)
     return true;
 }
 
+struct echo_target { const struct ip_stats *base; uint64_t want; };
+static bool echoes_received(void *arg)
+{
+    const struct echo_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return now.icmp_echo_rcvd - t->base->icmp_echo_rcvd >= t->want;
+}
+
 bool selftest_net_icmp_limit(const char **reason)
 {
     struct ip_stats i0, i1;
@@ -1230,7 +1291,17 @@ bool selftest_net_icmp_limit(const char **reason)
     ipv4_get_stats(&i0);
     for (unsigned i = 0; i < 300; i++)
         CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d38, (uint16_t)i, "p", 1) == 0);
-    settle(100);
+    /*
+     * Wait for all three hundred to arrive. This is what makes the two
+     * assertions below mean anything: `sent <= ICMP_RATE_PER_SEC` passes
+     * spuriously when the flood has not landed (fewer echoes, fewer
+     * replies, the limit met without the limiter doing anything), and
+     * `limited >= 300 - ICMP_RATE_PER_SEC` fails for the same reason. One
+     * fixed sleep was producing a spurious pass and a spurious failure in
+     * adjacent conjuncts of one line.
+     */
+    struct echo_target etgt = { .base = &i0, .want = 300 };
+    CHECK(wait_until(echoes_received, &etgt, 5000));
     ipv4_get_stats(&i1);
     uint64_t sent = i1.icmp_echo_replied - i0.icmp_echo_replied, limited = i1.icmp_ratelimited - i0.icmp_ratelimited;
     CHECK(i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300);
