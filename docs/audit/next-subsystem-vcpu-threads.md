@@ -32,7 +32,7 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
-**Seven things in the first drafts of this report were wrong, and review
+**Eight things in the first drafts of this report were wrong, and review
 found them before any of it was built** -- which is what the §68 wait is
 for. The main thread could not both drain the console and join the vCPU
 threads, since `join` blocks; the design said both "start a thread per
@@ -57,7 +57,13 @@ every word, its writer, its reader and the ordering each needs. The
 seventh was that the table covered the *userland* words and stopped at the
 kernel boundary, leaving out the kick's own flag -- written by one
 thread's syscall and read by a different CPU's run loop, which is the one
-crossing the most CPUs of all.
+crossing the most CPUs of all. The eighth was that the answer given for
+`loaded_cpu` was **wrong and not merely unsynchronised**: a plain `int`
+written by the run loop cannot be read safely by a kicker that must not
+take `run_lock`, and stickiness stops a flag being lost without making a
+spinning guest look at it. That is what `in_guest` and the re-check before
+the VM entry are for, and they land in the arch backends -- which the
+affected-files table now says.
 
 ## Problem
 
@@ -276,15 +282,33 @@ ordering is implicit is a publication that is wrong on one architecture.
 | a device model's state (`g_vio`, `g_vnet`) | any thread, under that model's mutex | any thread, under that model's mutex | the mutex **is** the ordering. Nothing in a device model needs an atomic of its own, which is the point of "one mutex per model" rather than "atomics where a race is noticed" |
 | test 4's `[enter, exit)` timestamps | each vCPU thread, plain writes | the supervisor, after `live == 0` | published by `live`'s release, which is why the supervisor reads them **after** the count reaches zero rather than while the threads run |
 | **`v->stop`** -- the kick's flag, in the kernel | `sys_vcpu_stop`, **release**, *then* the IPI | the run loop, **consumed with an `__atomic_exchange` (acq_rel)** at entry and after every host-interrupt exit | the store must be visible before the IPI that makes the target look at it, or the target exits, finds nothing and re-enters the guest -- a lost kick, which is a hang. Consumed by *exchange* rather than read-then-clear so that a stop arriving while one is being consumed is not swallowed: the exchange either returns it (this run stops) or lands after it (the next run stops) |
-| **`v->loaded_cpu`** -- which host CPU the vCPU is on | the run loop, when it loads the vCPU | `sys_vcpu_stop`, to choose the IPI's target, **acquire** | **a stale read here is safe, and that is an argument the design owes rather than an assumption.** A vCPU only changes `loaded_cpu` while it is *not* in the guest -- the move happens at the top of a run, under `run_lock`. So a kicker that reads `-1` loses nothing (the target checks the flag at entry before it enters), and a kicker that reads a CPU the vCPU has since left has sent a spurious IPI to an innocent CPU while the flag it set is still pending for the target's next entry. **Stickiness is what makes the IPI a latency optimisation rather than the mechanism**, which is the only reason this race is benign |
+| **`v->in_guest`** -- one word carrying "inside a guest" and the host CPU it is on | the run loop, **release**, immediately before the VM entry; cleared **release** immediately after the exit | `sys_vcpu_stop`, **acquire** | this replaces the `loaded_cpu` read a previous draft proposed, which **was wrong** rather than merely unsynchronised: `loaded_cpu` is a plain `int` written by the run loop, `sys_vcpu_stop` cannot take `run_lock` without waiting behind the very guest it means to interrupt, and stickiness only stops the flag being *lost* -- it does nothing to make a *spinning* guest look at it. A flag that lands after the runner's last check, with the IPI sent to a CPU the vCPU has since left, leaves a guest spinning forever with its stop pending, which is the hang the kick exists to prevent |
 
 The futex calls need no ordering on top of this: the kernel compares the
 word under its own lock, so a wake between a thread's check and its wait
 cannot be lost -- but the word must be written **before** the wake in
-every case, which is what the release stores above give. The same shape
-governs the kick one layer down: **flag first, then the IPI**, and the
-flag is sticky so that the IPI never has to be the thing that carries the
-message.
+every case, which is what the release stores above give.
+
+**The kick needs one more thing than an ordering, and it is the reason
+`in_guest` exists.** Flag-then-IPI is necessary and not sufficient: the
+flag can land after the runner's last look at it and before the guest is
+entered, and then no IPI has anywhere correct to go. The answer is the
+double-check every VMM ends up with:
+
+1. the runner publishes `in_guest = CPU | IN_GUEST` (release) **before**
+   the VM entry;
+2. the runner then **re-reads the stop flag** (acquire) and abandons the
+   entry if it is set;
+3. the kicker stores the flag (release), then reads `in_guest` (acquire)
+   and IPIs the CPU it names.
+
+Either the flag was set before the runner's re-read -- and the entry never
+happens -- or it was set after, in which case the kicker sees `IN_GUEST`
+with a CPU that is still correct, because `in_guest` was published before
+the entry and is not cleared until the exit. There is no third case, which
+is what makes the kick a mechanism rather than a hope. `loaded_cpu` stays
+what it is -- a VMCS bookkeeping field private to the run path -- and the
+kick stops reading it.
 
 ### The kick
 
@@ -382,7 +406,8 @@ property that replaces the artefact.
 | --- | --- |
 | `kernel/include/uapi/cosmo/syscall.h` | `SYS_vcpu_stop` (88), `SYS_COUNT` 88→89, `COSMO_VM_EXIT_STOPPED` |
 | `kernel-services/virtualization/hvsys.c` | the handler: a handle with `VCPU_RUN`, then `vcpu_stop` |
-| `kernel-services/virtualization/vcpu.c` | `stop` on `struct vcpu`, the check in `vcpu_run_bounded`, the IPI |
+| `kernel-services/virtualization/vcpu.c` | `stop` and `in_guest` on `struct vcpu`, the consume-by-exchange at entry and after each host-interrupt exit, the re-check before the entry, the IPI |
+| `kernel/arch/x86_64/vmx.c`, `-/svm.c`, `kernel/arch/aarch64/hv_el2.c` | **the `in_guest` publication and clearing sit immediately around the VM entry, which is arch code** -- one release store before the entry and one after the exit in each backend. A previous draft's affected-files table omitted this, which is what naming the ordering without naming where it lives looks like |
 | `kernel/include/kernel/hv.h` | the `stop` flag and `vcpu_stop`'s declaration |
 | `libc/include/cosmo/syscall.h` | the `cosmo_vcpu_stop` stub |
 | `userland/system/vmctl.c` | a thread per vCPU; the round-robin, `fresh[]` and the grace deleted; one mutex per device model |
@@ -482,8 +507,14 @@ keeps its meaning and its users.
    lifecycle's own test, and like `guest_offspin` its failure is a hang
    rather than a wrong value, so the 180 s deadline is the detector.
 
-**Bug-proofs**: **the kick's flag stored after the IPI instead of before
-it** (the target exits on the interrupt, finds nothing, and re-enters the
+**Bug-proofs**: **the entry's re-check of the stop flag removed** (the
+window the `in_guest` double-check exists to close: a stop that lands
+between the runner's last look and its VM entry is pending while the guest
+spins, no IPI has anywhere correct to go, and `guest_offspin` hangs on the
+180 s deadline. This is the proof that the kick is a mechanism rather than
+a race, and it is also the one whose window is small enough that it needs
+a spinning guest to hit at all); **the kick's flag stored after the IPI
+instead of before it** (the target exits on the interrupt, finds nothing, and re-enters the
 guest -- a lost kick, so `guest_offspin` hangs on the 180 s deadline,
 which is the same observable as no kick at all and is why the ordering is
 part of the mechanism rather than a detail of it); **the flag read and
