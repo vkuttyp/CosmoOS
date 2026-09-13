@@ -32,6 +32,16 @@ after `SYSTEM_OFF`, where the bounded hold stops it now. This unit
 therefore also adds **the kick**: a way to make one vCPU leave its run,
 which is the piece KVM calls `kvm_vcpu_kick` and which nothing here has.
 
+**Three things in the first draft of this report were wrong, and review
+found them before any of it was built** -- which is what the §68 wait is
+for. The main thread could not both drain the console and join the vCPU
+threads, since `join` blocks; the design said both "start a thread per
+vCPU the tree promises" and "`CPU_ON` starts a thread", which would start
+a secondary twice or start it before PSCI asked; and test 4 asserted
+something the implementation it replaces already satisfies. Each is
+answered where it appears, and the third is answered by changing what the
+test measures.
+
 ## Problem
 
 - **The interface carries the implementation's shape.** `fresh[]` and the
@@ -140,18 +150,33 @@ unit**, and that is the part to get right rather than to delete.
 ### A thread per vCPU, and the loop that remains
 
 Each vCPU gets a `cosmo_thread_start` thread running its own loop: run the
-vCPU untimed, handle the exit, repeat until the vCPU stops. The main
-thread creates the VM, loads the image, builds the device tree, starts one
-thread per vCPU the tree promises, and then joins them.
+vCPU untimed, handle the exit, repeat until the vCPU stops.
+
+**Every thread is created before the guest runs, and parked.** PSCI
+secondaries start powered off, so a thread per *running* vCPU would mean
+`CPU_ON` creating one from inside the handler -- on the asking vCPU's
+thread, mid-guest, where a failed `cosmo_thread_start` would have to
+become a PSCI error code. Instead the main thread creates all of them
+while it is still the only thread, each parked on its own futex word, and
+`CPU_ON` writes the entry point and context and then wakes its target.
+A create that fails is a startup failure, reported where startup failures
+are reported, and **`CPU_ON` cannot fail for want of memory** -- which is
+also what the kernel's own two-phase `process_add_thread` start does, for
+the same reason.
+
+The parked word is the thread's own, so a `CPU_ON` for a vCPU already
+running is the PSCI `ALREADY_ON` it is today, decided by the owner's
+`running[]` rather than by whether a thread exists.
 
 `COSMO_VCPU_RUN_ONE_TICK` stays in the ABI -- the kernel's own tests use
 it and it is what `-ETIMEDOUT` is built on -- but the owner stops passing
 it. `fresh[]`, `off_pending`, `off_grace`, `MACHINE_OFF_GRACE_TURNS` and
 `machine_fresh_sibling` all go, along with the PSCI turn boundary.
 
-`CPU_ON` starts a thread rather than marking a slot runnable. `SYSTEM_OFF`
-stops the machine: the asking vCPU's thread returns, and the others are
-**kicked** and then joined. That is the honest PSCI shape -- a real
+`CPU_ON` releases a parked thread rather than marking a slot runnable.
+`SYSTEM_OFF` stops the machine: the asking vCPU's thread returns, the
+others are **kicked**, and the main thread reaps them once its drain loop
+sees the live count reach zero. That is the honest PSCI shape -- a real
 `SYSTEM_OFF` does not wait -- and it is only implementable with the kick
 below.
 
@@ -196,10 +221,30 @@ across a system call that can block on the guest.** Concretely:
   looping in MMIO.
 - **The disk fd and the tap fd are each owned by their device's lock**, so
   a read and a write cannot interleave inside one request.
-- **The console drain is the main thread's alone.** Rather than three
-  threads racing to drain one ring, the main thread drains it while the
-  vCPU threads run, which is also what makes the drain's own ordering
-  observable.
+- **The console drain is the main thread's alone**, and the main thread is
+  therefore a **supervisor, not a joiner that happens to drain.**
+  `cosmo_thread_join` blocks until its thread exits, so a main thread that
+  joined first could not drain at all -- and the guest's console ring is
+  4 KiB that drops its *oldest* bytes when full, so a drain that stops is
+  guest output silently lost, which is exactly what the harness's required
+  markers are made of. The loop is therefore:
+
+  ```
+  while (live > 0) {
+      drain_console(vm);
+      if (tap_fd >= 0) vnet_service(&g_vnet);
+      cosmo_futex_wait(&live, live_seen, DRAIN_INTERVAL_NS);   /* woken early by an exiting vCPU */
+  }
+  for each thread: cosmo_thread_join(...)   /* returns at once: live == 0 */
+  ```
+
+  `live` is the count of vCPU threads still running, decremented with
+  `__atomic_fetch_sub` and futex-woken by each thread as it leaves. The
+  bounded wait is what keeps the ring drained while nothing exits; the
+  wake is what stops the last drain from being a full interval late. The
+  joins happen after the count reaches zero, so they are reaping, not
+  waiting -- and the drain is still the main thread's alone, which is what
+  keeps the output ordered.
 - Counters the tests read (`served`, `draining`) become
   `__atomic_load_n`/`fetch_add`, because a count under a lock that a test
   reads from another thread is a lock the test would have to take.
@@ -220,7 +265,7 @@ property that replaces the artefact.
   true for a better reason.
 - `guest_offspin` becomes the **kick's** test rather than the bound's.
   `SYSTEM_OFF` arrives while the sibling spins forever; the owner kicks it
-  and joins. With the kick removed the boot hangs on its 180 s deadline,
+  and the supervisor reaps it. With the kick removed the boot hangs on its 180 s deadline,
   which is the same signature the bound's removal produced -- so the proof
   is the same shape as the one it replaces.
 
@@ -256,10 +301,13 @@ keeps its meaning and its users.
    still single-threaded.** Locks that nothing contends are still
    correct, and landing them first means the thread change is not also a
    locking change: if a test breaks in step 3 it is the threads.
-3. **A thread per vCPU**, with the round-robin, `fresh[]`, `off_pending`,
-   `off_grace` and the PSCI turn boundary deleted in the same commit --
-   they are one mechanism and half of it is not a state worth shipping.
-4. **`SYSTEM_OFF` kicks and joins.**
+3. **A thread per vCPU, parked at creation and released by `CPU_ON`**,
+   with the round-robin, `fresh[]`, `off_pending`, `off_grace` and the
+   PSCI turn boundary deleted in the same commit -- they are one mechanism
+   and half of it is not a state worth shipping. The main thread becomes
+   the supervisor: drain, service the tap, wait on the live count.
+4. **`SYSTEM_OFF` kicks every other vCPU**, and the supervisor reaps them
+   when the count reaches zero.
 5. **The tests**, then the bug-proofs.
 6. **The documents**, including the design document's own account of why
    the fairness rule existed, which becomes history rather than
@@ -279,12 +327,36 @@ keeps its meaning and its users.
    entered on a spin loop, stopped from another thread, exits `STOPPED`;
    a stop that arrives *between* runs is not lost, because the flag is
    sticky; a stop on a vCPU that is not running is not an error.
-4. **Two vCPUs really run at once**, which the round-robin could not do:
-   a guest whose two CPUs each increment their own counter in memory, with
-   the owner asserting both advanced within one wall-clock window. This is
-   the assertion the unit exists for, and it needs two CPUs to pass --
-   a single-CPU host makes it pass by preemption, which is the same
-   weaker-but-true shape `thrtest` step 3 uses deliberately.
+4. **Two vCPUs really run at once** -- and this is the one test in the list
+   that had to be redesigned before the report was worth merging. The
+   first version asserted that two guest counters both advanced within a
+   wall-clock window, and borrowed `thrtest` step 3's argument that
+   progress is the honest assertion and parallelism merely makes it fast.
+   **That argument does not transfer**: step 3 exists to prove *progress*,
+   so a weaker-but-true assertion is right there, whereas this step exists
+   to prove *simultaneity* -- and two counters advancing is exactly what
+   the round-robin this unit deletes already does. The test would have
+   passed before the change it is meant to verify, which is the definition
+   of proving nothing.
+
+   What distinguishes the two implementations is **overlap**, so overlap is
+   what the test asserts. Each vCPU thread records a monotonic timestamp
+   immediately before `cosmo_vcpu_run` and immediately after it returns;
+   the owner then checks that some pair of `[enter, exit)` intervals from
+   *different* vCPUs intersects. Under any single-threaded loop no two
+   intervals can intersect, however the ticks are interleaved -- the one
+   thread is inside exactly one run at a time. Under a thread per vCPU on
+   a host with two CPUs they will.
+
+   Overlap is a *logical* property of two intervals, not a duration, so
+   the assertion does not weaken under load the way a "both advanced in
+   200 ms" bound would -- a loaded host makes the intervals longer, which
+   makes overlap more likely rather than less.
+
+   **It needs a host with at least two CPUs**, and says so: with
+   `QEMU_SMP=1` the test prints that it is skipped and why, because a
+   single-CPU host cannot produce overlap and a test that passed there
+   would be asserting nothing again. The harness runs `-smp 4`.
 5. **The device models under two guest CPUs**: both CPUs driving the same
    virtio-blk queue, with every request completing and the disk's contents
    correct afterwards. An unlocked queue loses or duplicates a descriptor,
@@ -299,18 +371,23 @@ spinning vCPU never leaves, so `guest_offspin` hangs the boot -- the same
 the kicker rather than the runner (a stop between runs is lost and the
 sibling runs on); `g_vio`'s lock removed (test 5 sees a wrong byte); the
 lock *held* across `cosmo_vcpu_run` (one guest looping in MMIO stalls
-every other vCPU, which test 4's window catches); and the console drain
-moved back into the vCPU threads (interleaved output, which the marker
-lines themselves detect).
+every other vCPU, which test 4's overlap no longer finds); **the vCPUs run
+from one thread** (the round-robin restored: test 4 finds no overlap, which
+is the proof that test 4 tests the thing this unit changes -- the
+assertion it replaced passed both ways); and the main thread joining
+before draining rather than supervising (the console ring overflows and
+the guest's required markers go missing, which is the failure the drain
+loop exists to prevent).
 
 ## Benchmarks
 
 The claim is that a two-CPU guest gets more than one CPU's worth of
-progress, which the round-robin cannot give at any tick length. Measured
-as test 4 measures it -- both counters' advance in one wall-clock window,
-on a host with at least two CPUs -- and reported, not gated: the boot
-harness runs under QEMU with `-smp 4` and its timing is not a benchmark
-rig. The owner's own cost should fall too: a turn today ends with a
+progress, which the round-robin cannot give at any tick length. Reported,
+not gated: the boot harness runs under QEMU with `-smp 4` and its timing
+is not a benchmark rig. Test 4's overlap is the *correctness* assertion;
+the throughput number beside it -- both counters' totals over a fixed
+window -- is the measurement, and it is printed rather than asserted
+precisely because it is the load-sensitive half. The owner's own cost should fall too: a turn today ends with a
 syscall return, a drain and a dispatch on every tick, and an untimed run
 ends only when the guest stops.
 
