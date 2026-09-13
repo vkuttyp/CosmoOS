@@ -496,6 +496,26 @@ eager version did not manage.
   a real bug. **Its bug-proof does not fail**, and the table above says so:
   nothing in `__stdio_init` sets `errno` today, so the ordering is a
   precaution the suite cannot check, not a property it proves.
+- **This breaks a raw thread that carries a TLS layout of its own and calls
+  libc**, and that is a deliberate compatibility break rather than an
+  oversight. Before this unit libc never read the thread pointer, so such a
+  thread worked by accident; now libc reads and writes that memory as its
+  own block, overwriting whatever the caller keeps at the `errno` and tid
+  offsets and answering `cosmo_thread_id()` with nonsense.
+
+  **It cannot be detected**, for the same reason the zero case cannot:
+  asking "is this libc's block?" means dereferencing the pointer, and on
+  x86-64 the first dereference *is* `%fs:0`. A magic number in the block
+  would not help -- reading it requires the load that already faulted. So
+  the contract is the whole of the mitigation, stated in `cosmo/thread.h`,
+  `cosmo/tcb.h` and §13, with `cosmo_tcb_install` as the way to comply.
+
+  **Measured in-tree impact: none.** The only non-zero `cosmo_thread.tls`
+  in the tree is the block libc itself passes (`libc/src/thread.c`), and
+  the only raw `thread_create` outside libc is `thrtest`'s, which passes
+  zero on purpose to exercise the contract. The Linux personality's TLS is
+  its own and untouched -- `arch_prctl` and `CLONE_SETTLS` reach
+  `arch_set_tls_base` exactly as before.
 - **x86-64's `%fs:0` convention couples libc to its own layout.** Changing
   the block's first field later would break every compiled binary. The
   `self` pointer is therefore permanent, which is a cost worth naming.
