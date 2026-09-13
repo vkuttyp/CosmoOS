@@ -2,7 +2,7 @@
 
 Constitution §68: after the audit, name the next subsystem in this shape
 and wait for the instruction to build it. **This report is as built.** The
-design below is what shipped; five things differ from what was written, and
+design below is what shipped; six things differ from what was written, and
 each is marked where it appears:
 
 1. **The block needs `__attribute__((aligned(16)))` on the type.** The
@@ -37,6 +37,14 @@ each is marked where it appears:
    it is above a local. A sixth proof, installing the first thread's block
    after `__stdio_init` instead of before, **does not fail today** and is
    recorded as an untested precaution below.
+6. **The second `errno` worker overflows `strtoll` for `ERANGE`** rather
+   than provoking `-ENOMEM` from an unmapped `mmap`. `strtoll` reaches no
+   kernel, so the two threads are not merely racing inside one syscall
+   path -- and a failing `mmap` two thousand times over is a syscall each.
+
+**One thing the report missed entirely** is in its own section below:
+`SYS_set_tls` has to be always-allowed by the syscall filter, which review
+found and the suite could not see.
 
 **Subsystem: the last third of what the threads unit owed. `errno` is one
 global (`libc/src/errno.c`, `int errno;`), so a threaded native program
@@ -357,7 +365,7 @@ One syscall (`SYS_set_tls`), one libc header (`cosmo/tcb.h`), one accessor
 keeps its name and its type, and `SYS_thread_create`'s `tls` field keeps
 its meaning.
 
-## Migration plan (followed as written)
+## Migration plan (followed, except step 4)
 
 1. **`SYS_set_tls`** alone, with its validation and a test that a thread
    can set and re-set its own pointer and that a bad one is refused. No
@@ -388,9 +396,14 @@ stays **last**: it exhausts threads on purpose, and every step below
 creates one.
 
 1. (step 13) **Two threads, two `errno`s**: each provokes a different failure in a
-   loop (`close(-1)` for `-EBADF`, an unmapped `mmap` for `-ENOMEM`) and
-   reads its own value back every iteration. A shared `errno` loses this
-   within a few iterations; a per-thread one never does.
+   loop and reads its own value back every iteration. A shared `errno`
+   loses this within a few iterations; a per-thread one never does. *As
+   built the second worker overflows `strtoll` for `ERANGE` rather than
+   provoking `-ENOMEM` from an unmapped `mmap`* (difference 6): `strtoll`
+   touches no kernel at all, so the two threads are not merely racing
+   inside one syscall path, and an `mmap` that fails costs a syscall two
+   thousand times over. The first thread provokes a third code,
+   `EBADF` from a different descriptor, while both run.
 2. (step 14) **The first thread's `errno` survives a thread's**: main provokes one
    error, a thread provokes another and exits, main's value is still its
    own.
