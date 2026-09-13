@@ -171,9 +171,14 @@ static void *depth_writer(void *arg)
      * here and a lie anywhere. */
     const char *top = (unsigned long)arg ? Q_TOP : P_TOP;
     for (unsigned i = 0; i < ROUNDS && !writers_stop; i++) {
+        /* Step 3 stops the writers before it compares; without this they
+         * never park and the quiesce waits forever. Step 2 never
+         * quiesces, so it costs nothing there. */
+        writer_checkpoint();
         if (chdir(top) != 0)
             continue;
         (void)chdir("s");     /* down: keeps the whole base, so a tear shows */
+        writer_checkpoint();
         (void)chdir("..");
     }
     writers_stop = 1;
@@ -224,6 +229,34 @@ static void *depth_observer(void *arg)
         }
     }
     return NULL;
+}
+
+/*
+ * Start `n` threads, and if any start fails, stop and join the ones that
+ * did. Without this a partial start hangs the boot suite rather than
+ * failing it: the survivors park, `parked` never reaches `n`, and nobody
+ * is left to set `writers_stop`. Stack allocation can fail in this
+ * environment, so a refused start is a case and not a hypothetical.
+ */
+static int start_all(cosmo_thread_t *t, unsigned n, void *(*fn)(void *), int pass_index)
+{
+    unsigned made = 0;
+    for (; made < n; made++) {
+        void *arg = pass_index ? (void *)(unsigned long)made : NULL;
+        if (cosmo_thread_start(&t[made], fn, arg, 32u * 1024u) != 0)
+            break;
+    }
+    if (made == n)
+        return 0;
+    printf("cwdtest: only %u of %u threads started\n", made, n);
+    cosmo_mutex_lock(&m);
+    writers_stop = 1;
+    quiesce = 0;
+    cosmo_cond_broadcast(&c);
+    cosmo_mutex_unlock(&m);
+    for (unsigned i = 0; i < made; i++)
+        (void)cosmo_thread_join(&t[i], NULL);
+    return -1;
 }
 
 /* Stop the writers and wait until every one of them is parked. */
@@ -311,7 +344,9 @@ static int make_layout(void)
     if (fd < 0)
         return -1;
     close(fd);
-    /* Step 2's pair: different depths, no shared bytes after the root. */
+    /* Step 2's and step 3's pair: different depths, no shared bytes after
+     * the root, and a marker in each leaf so that a path and a vnode
+     * naming different leaves can be told apart. */
     if (mkdir(P_TOP, 0755) != 0 && errno != EEXIST)
         return -1;
     if (mkdir(P_SUB, 0755) != 0 && errno != EEXIST)
@@ -320,6 +355,14 @@ static int make_layout(void)
         return -1;
     if (mkdir(Q_SUB, 0755) != 0 && errno != EEXIST)
         return -1;
+    fd = open(P_SUB "/mark-p", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    fd = open(Q_SUB "/mark-q", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return -1;
+    close(fd);
     return 0;
 }
 
@@ -398,20 +441,37 @@ int main(void)
      * `chdir`.
      */
     {
-        cosmo_thread_t w1, w2;
+        cosmo_thread_t w[2];
         char buf[256];
-        CHECK(chdir(DIR_A) == 0);
-        writers_stop = quiesce = parked = 0;
-        CHECK(cosmo_thread_start(&w1, chdir_writer, NULL, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&w2, chdir_writer, NULL, 32u * 1024u) == 0);
+        CHECK(chdir("/tmp/cwdr") == 0);
+        writers_stop = quiesce = parked = bad_path = 0;
+        /*
+         * **The writers move *down*, not between siblings**, and that is
+         * what makes this step able to fail at all. With sibling moves --
+         * which a first version used -- normalising `../NAME_A` from
+         * either sibling produces `DIR_A`, and looking `../NAME_A` up from
+         * either sibling also produces `DIR_A`. Path and vnode agree no
+         * matter which directory each was taken from, so two acquisitions
+         * are indistinguishable from one and the proof for this step
+         * passed against the defect. Review found it.
+         *
+         * A down-move keeps the base: normalising `s` against P gives
+         * `P/s` while looking `s` up in Q gives `Q/s`, so a pair taken
+         * from different directories is a path and a vnode that name
+         * different places -- which the marker files below detect.
+         */
+        if (start_all(w, 2, depth_writer, 1) != 0) {
+            CHECK(0);   /* reported by start_all; the step cannot run */
+            goto step3_done;
+        }
         unsigned checked = 0;
         for (unsigned i = 0; i < 200u && !writers_stop; i++) {
             quiesce_writers(2);
             if (writers_stop)
                 break;
             if (getcwd(buf, sizeof(buf)) != NULL) {
-                const char *want = strcmp(buf, DIR_A) == 0 ? "is-a"
-                                 : strcmp(buf, DIR_B) == 0 ? "is-b" : NULL;
+                const char *want = strcmp(buf, P_SUB) == 0 ? "mark-p"
+                                 : strcmp(buf, Q_SUB) == 0 ? "mark-q" : NULL;
                 if (want == NULL) {
                     /* The writers can walk the process out of the pair --
                      * see path_is_legitimate. That is not a defect, and
@@ -441,12 +501,13 @@ int main(void)
         quiesce = 0;
         cosmo_cond_broadcast(&c);
         cosmo_mutex_unlock(&m);
-        CHECK(cosmo_thread_join(&w1, NULL) == 0);
-        CHECK(cosmo_thread_join(&w2, NULL) == 0);
+        CHECK(cosmo_thread_join(&w[0], NULL) == 0);
+        CHECK(cosmo_thread_join(&w[1], NULL) == 0);
         CHECK(bad_path == 0);
         CHECK(checked > 0);   /* the comparison actually ran */
         printf("cwdtest: %u coherent checks\n", checked);
     }
+step3_done:;
 
     STEP("4");
     /*

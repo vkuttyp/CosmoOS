@@ -1619,10 +1619,15 @@ See [docs/development.md](docs/development.md).
   reverted-fix run passed, including one with each freed vnode poisoned,
   because the walk is short and never inside the few instructions where
   the free lands. Two of the test's own designs could not have failed
-  either -- `../X` discards the component the paths differ in, and names
-  differing in one byte cannot show a tear -- both fixed, and the proofs
-  still pass, which makes the result evidence about the window rather than
-  the inputs. The fix stands on its ordering argument, and the seam that
+  either -- `../X` discards the component the paths differ in, names
+  differing in one byte cannot show a tear, and the coherence step's
+  sibling moves could not express the two-acquisition defect at all since
+  normalising and looking up `../NAME_A` from either sibling both give
+  `DIR_A`. A fourth failed on a *correct* kernel, because two threads
+  issuing relative moves can walk the process out of the subtree. All four
+  fixed; the proofs still pass, which is now evidence about the window
+  rather than about the inputs -- a distinction that only became available
+  once the inputs were right. The fix stands on its ordering argument, and the seam that
   would prove it is named.
 
 - **The wait, written once** (`docs/audit/next-subsystem-condvar.md`).

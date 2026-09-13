@@ -693,7 +693,13 @@ correct kernel for not knowing that. A torn base is still caught, because
 the two names share only `/tmp/cwdr/` and any mixture of them is in no
 legitimate set.
 
-(3) The name and the directory agree. The writers are **quiesced** first,
+(3) The name and the directory agree. Its writers move **down**
+(`chdir("s")`), not between siblings: sibling moves cannot express the
+defect at all, because normalising `../NAME_A` from either sibling and
+looking it up from either sibling both produce `DIR_A`, so a path and a
+vnode taken from different directories still agree. A down-move keeps the
+base, so the pair can name different leaves, and a marker file in each
+leaf tells them apart. The writers are **quiesced** first,
 on a condition variable, because the obvious version — `getcwd`, then open
 the file belonging to it — fails on a correct kernel when a writer chdirs
 between the two calls. Quiescing is sound here because the defect's damage

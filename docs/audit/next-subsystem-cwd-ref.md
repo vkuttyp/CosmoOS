@@ -379,6 +379,7 @@ Threads of one process contend it; threads of different processes do not.
 | `kernel/process/process.c` | the two accessors; `process_chdir` stops reading the live fields |
 | `kernel/syscall/native.c` | 6 sites take and release a reference |
 | `compat/linux/syscalls.c` | 10 sites, the same — **the half a native-only fix would miss** |
+| `kernel/process/spawn.c` | **4 sites, absent from this table as designed**: the executable's own lookup, the child's requested cwd (an incoherent pair in its own right), and the child's requested root. The `grep` behind the original table never looked here; the rename did |
 | `kernel/syscall/syscall.c` | the syscall filter's "written only by the process itself, so a reader needs no lock" comment: right conclusion, single-threaded reason |
 | `docs/kernel/process/design.md`, `-/invariants.md` | the rule, and the census of which per-process fields are mutable |
 | `userland/tests/` | the new test program (see Tests) |
@@ -393,12 +394,17 @@ renaming a field costs nothing outside the kernel.
 ## Migration plan
 
 1. **The accessors**, and `cwd` renamed. The rename makes the build fail
-   at all sixteen sites, which is the point: the compiler produces the
-   worklist rather than a `grep` I might trim.
+   at every site, which is the point: the compiler produces the worklist
+   rather than a `grep` I might trim. **It found twenty, not the sixteen
+   this plan expected**, and the extra four were a file this report never
+   mentioned — so steps 2 and 3 below are not the whole of the
+   conversion, and step 4 grew to cover `spawn` as well as
+   `process_chdir`.
 2. **The native door's six sites.**
 3. **The Linux door's ten.** Deliberately its own step, so that "the
    native half is done" can never be mistaken for "done".
-4. **`process_chdir`'s own two reads.**
+4. **`process_chdir`'s own two reads** — and `spawn`'s four, which are
+   the same defect in a file the report's census missed.
 5. **The test**, and the bug-proofs — which for this unit means running the
    test against the *unfixed* tree, so ordering it after the fix is
    deliberate (see Tests).
@@ -467,7 +473,7 @@ passed. The evidence is worth more than the verdict:
 | `vfs_open` reverted to the unowned read | passes |
 | the same, plus `memset(vn, 0xAA, …)` before `kfree` | passes — the walk is never inside the few instructions where the free lands |
 | `process_chdir` reverted to the live `cwd_path` | passes |
-| `process_chdir` reverted to two acquisitions | passes — 200 coherent checks, all coherent |
+| `process_chdir` reverted to two acquisitions | passes — but see below: the first version of step 3 **could not have failed**, and the corrected one still does not |
 
 **Two of the test's own designs could not have failed either**, and both
 are one mistake in different clothes — *inputs that cannot express the
@@ -482,6 +488,19 @@ fell into twice more:
 - **the first names differed in one byte** (`a`, `b`), so any torn mixture
   was still a valid answer — and a single-byte store is atomic regardless.
   They are now 32 characters against 4.
+- **step 3's writers moved between siblings**, which cannot express the
+  two-acquisition defect at all: normalising `../NAME_A` from either
+  sibling produces `DIR_A`, and looking it up from either sibling also
+  produces `DIR_A`, so a path and a vnode taken from *different*
+  directories still agree. Review found this after the unit was built,
+  and it means the conclusion first recorded here — that the proof passed
+  because the window is narrow — was **wrong for that proof**: it passed
+  because the test could not express the defect. Step 3 now moves *down*
+  (`chdir("s")`), which keeps the base, so normalising against P while
+  looking up in Q yields the path of one leaf and the vnode of another,
+  and a marker file in each leaf tells them apart. **With that corrected
+  the proof still passes**, which is now a statement about the window and
+  not about the inputs.
 
 A third flaw was the opposite kind — a check that **failed on a correct
 kernel**, which is the same defect review had already caught once in this
@@ -494,10 +513,12 @@ the coherence check skips a round it cannot compare rather than failing
 it. A torn base still cannot produce any member of that set, because the
 two names share only `/tmp/cwdr/`.
 
-**Three test-design defects in one unit, all of one family**: the inputs
-or the expectations did not match what the code under test can actually
-do. Two could not fail; one failed when nothing was wrong. Both halves
-cost a run each to find, and neither was visible by reading.
+**Four test-design defects in one unit, all of one family**: the inputs or
+the expectations did not match what the code under test can actually do.
+Three could not fail; one failed when nothing was wrong. Each cost a run
+to find and none was visible by reading — and the fourth was found by
+review *after* the unit was built, which is why the conclusion it
+overturned is corrected above rather than quietly replaced.
 
 **So the test is labelled a regression, not a proof** — it exercises the
 paths under real concurrency and would catch a gross breakage — in the
