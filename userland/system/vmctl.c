@@ -22,6 +22,7 @@
 
 #include <cosmo/hv.h>
 #include <cosmo/thread.h>
+#include <stdbool.h>
 #include <cosmo/sysctl.h>
 #include <uapi/cosmo/hv_machine.h>
 #include "../../tools/fdt/fdt.h"
@@ -155,6 +156,7 @@ static unsigned char *read_image(const char *path, size_t *len_out)
 #define PSCI_SUCCESS          0
 #define PSCI_NOT_SUPPORTED    (-1)
 #define PSCI_INVALID_PARAMS   (-2)
+#define PSCI_DENIED           (-3)
 #define PSCI_ALREADY_ON       (-4)
 
 /* PSCI function ids: SMCCC fast calls, 32- or 64-bit, in the standard
@@ -525,37 +527,123 @@ static void vnet_reg_locked(struct vnet_dev *d, unsigned off, int write, uint64_
     }
 }
 
+/*
+ * The vCPU lifecycle. One word per vCPU, and it only ever increases:
+ *
+ *   PARKED  created, never started; waiting to be told which guest to run
+ *   RUNNING CPU_ON wrote the entry and context, and woke it
+ *   QUIT    leave without running: the machine is stopping
+ *
+ * The monotonicity is enforced, not merely usual. `SYSTEM_OFF` writes QUIT
+ * to every word; a *concurrent* `CPU_ON` -- from a vCPU thread that has not
+ * been kicked yet, which is the normal state of affairs during shutdown --
+ * would otherwise store RUNNING over that QUIT and revive the target, whose
+ * thread would then run a guest nobody is waiting to stop. So CPU_ON
+ * releases a thread with a compare-and-swap from PARKED and never a store.
+ */
+#define VCPU_PARKED  0u
+#define VCPU_RUNNING 1u
+#define VCPU_QUIT    2u
+
+/* 16 KB: these threads run a vCPU and print; they do not recurse. */
+#define VCPU_STACK_BYTES (16u * 1024u)
+
+/* How long the supervisor sleeps between drains when nothing exits. Every
+ * kernel sleep is at least one scheduler tick, so this is a floor rather
+ * than a period; an exiting thread wakes it early. */
+#define MACHINE_DRAIN_INTERVAL_NS 2000000ull
+
+struct machine;
+struct vcpu_arg {
+    struct machine *m;
+    unsigned index;
+};
+
 struct machine {
     int vm;
     int vcpu[COSMO_HV_VCPUS_MAX];      /* -1: not created */
-    int running[COSMO_HV_VCPUS_MAX];
-    /* Started by CPU_ON and not yet seen to leave a turn of its own accord.
-     * A vCPU whose every turn so far ended in preemption has not run a
-     * single instruction as far as the guest can tell, and powering the
-     * machine off under it loses work the guest asked for -- so SYSTEM_OFF
-     * waits for it. Cleared by the first exit that is not a preemption. */
-    int fresh[COSMO_HV_VCPUS_MAX];
     unsigned nr_cpus;                  /* what the device tree promises */
-    int off_pending;                   /* SYSTEM_OFF answered, held for a fresh sibling */
-    unsigned off_grace;                /* turns left before it is honoured regardless */
+
+    /* The lifecycle. `park[]` is the single source of truth for whether a
+     * vCPU is running: PSCI's ALREADY_ON is park[] == RUNNING. */
+    volatile unsigned park[COSMO_HV_VCPUS_MAX];
+    volatile unsigned live;            /* threads created and not yet returned */
+    volatile unsigned stopping;        /* SYSTEM_OFF has begun; CPU_ON refuses */
+    volatile unsigned off_asked;       /* a guest asked for the power-off */
+    volatile unsigned failed;          /* a thread hit a fatal exit; the process fails */
+    volatile unsigned entered[COSMO_HV_VCPUS_MAX];   /* the thread is about to enter its guest */
+    uint64_t entry[COSMO_HV_VCPUS_MAX];
+    uint64_t ctx[COSMO_HV_VCPUS_MAX];
+    cosmo_thread_t thread[COSMO_HV_VCPUS_MAX];
+    int started[COSMO_HV_VCPUS_MAX];
+    struct vcpu_arg arg[COSMO_HV_VCPUS_MAX];
 };
 
-/* How long SYSTEM_OFF waits for a sibling that has never had a turn end on
- * its own terms. Each unit is one turn of the round-robin, so this bounds the
- * delay whatever the guest does: a secondary that spins forever costs the
- * power-off this many turns and no more. Two vCPUs needing two or three turns
- * each to reach a first hypercall is the case this exists for. */
-#define MACHINE_OFF_GRACE_TURNS 64u
-
-/* Is any vCPU other than `self` running and still fresh? `self` may be
- * MACHINE_NO_CPU to ask about every vCPU. */
-#define MACHINE_NO_CPU COSMO_HV_VCPUS_MAX
-static int machine_fresh_sibling(const struct machine *m, unsigned self)
+/*
+ * Release a parked thread: the entry and context are already written, and
+ * the swap publishes them. Release ordering on the swap, acquire on the
+ * thread's read, because a thread that could see RUNNING and then a stale
+ * entry point would enter its guest at whatever the word last held.
+ *
+ * Returns 0, or -EBUSY if it was already running, or -EPERM once QUIT is
+ * set -- a guest asking for a CPU while the machine powers off.
+ */
+static int machine_release(struct machine *m, unsigned c)
 {
-    for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
-        if (c != self && m->running[c] && m->fresh[c])
-            return 1;
+    unsigned want = VCPU_PARKED;
+    if (!__atomic_compare_exchange_n(&m->park[c], &want, VCPU_RUNNING, false,
+                                     __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+        return want == VCPU_RUNNING ? -EBUSY : -EPERM;
+    (void)cosmo_futex_wake(&m->park[c], 1);
+    /*
+     * And wait for it to be running before answering, which is what PSCI
+     * means: a CPU_ON that returns SUCCESS says the target is powered on
+     * and executing at the entry point, not that it has been queued.
+     *
+     * On hardware that is free -- the core starts on its own -- and here it
+     * is the difference between a secondary that runs and one that does
+     * not. A guest that starts a CPU and powers the machine off two
+     * instructions later (`guest_dtb.c` does exactly that) would otherwise
+     * race the host scheduler for its secondary's first instruction, which
+     * is the race the round-robin's `fresh[]` array and its 64-turn grace
+     * existed to paper over. Making CPU_ON honest removes the need for
+     * both, rather than replacing one correction with another.
+     *
+     * Bounded, and a timeout is still SUCCESS: the vCPU *is* on, and a host
+     * that cannot schedule a thread in a fifth of a second has a problem
+     * this firmware call cannot fix.
+     */
+    uint64_t deadline = cosmo_clock_ns() + 200000000ull;
+    while (__atomic_load_n(&m->entered[c], __ATOMIC_ACQUIRE) == 0) {
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline)
+            break;
+        (void)cosmo_futex_wait(&m->entered[c], 0, deadline - now);
+    }
     return 0;
+}
+
+/*
+ * Tell every vCPU thread to leave, and make the ones inside a guest notice.
+ * Both halves are needed and neither is sufficient: the kick reaches a
+ * thread inside `cosmo_vcpu_run` and nothing else, while the QUIT and the
+ * wake reach one still parked on its futex -- which a secondary that was
+ * never CPU_ON'd will be forever. Without the wake the live count never
+ * reaches zero and the supervisor waits for a shutdown that cannot happen.
+ *
+ * `stopping` is set first, so a CPU_ON that has not yet reached its swap
+ * refuses early; the swap is what makes the race safe whichever order the
+ * two land in.
+ */
+static void machine_quit_all(struct machine *m)
+{
+    __atomic_store_n(&m->stopping, 1u, __ATOMIC_RELEASE);
+    for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++) {
+        __atomic_store_n(&m->park[c], VCPU_QUIT, __ATOMIC_RELEASE);
+        (void)cosmo_futex_wake(&m->park[c], 1);
+        if (m->vcpu[c] >= 0)
+            (void)cosmo_vcpu_stop(m->vcpu[c]);
+    }
 }
 
 static int set_x0(int vcpu, uint64_t v)
@@ -597,19 +685,15 @@ static int psci_answer(struct machine *m, unsigned cpu, const struct cosmo_vm_ex
             ret = PSCI_INVALID_PARAMS;
             break;
         }
-        if (m->running[target]) {
-            ret = PSCI_ALREADY_ON;
+        /* Refuse early once the machine is stopping; the swap below is
+         * what makes the race safe whichever order the two land in. */
+        if (__atomic_load_n(&m->stopping, __ATOMIC_ACQUIRE)) {
+            ret = PSCI_DENIED;
             break;
         }
-        if (m->vcpu[target] < 0) {
-            m->vcpu[target] = cosmo_vcpu_create(m->vm, target);
-            if (m->vcpu[target] < 0) {
-                fprintf(stderr, "vmctl: vcpu %u: %s\n", target, strerror(-m->vcpu[target]));
-                m->vcpu[target] = -1;
-                ret = PSCI_INVALID_PARAMS;
-                break;
-            }
-        }
+        /* The vCPU and its thread both exist already, parked: what CPU_ON
+         * does now is write the entry and release the thread. Neither can
+         * fail for want of memory, which is why they are made up front. */
         struct cosmo_vcpu_regs regs;
         cosmo_vcpu_get_regs(m->vcpu[target], &regs);
 #if defined(__aarch64__)
@@ -623,18 +707,21 @@ static int psci_answer(struct machine *m, unsigned cpu, const struct cosmo_vm_ex
             ret = PSCI_INVALID_PARAMS;
             break;
         }
-        m->running[target] = 1;
-        m->fresh[target] = 1;      /* owed a turn that ends on its own terms */
-        ret = PSCI_SUCCESS;
+        int r = machine_release(m, target);
+        ret = r == 0 ? PSCI_SUCCESS : (r == -EBUSY ? PSCI_ALREADY_ON : PSCI_DENIED);
         break;
     }
     case PSCI_CPU_OFF:
-        m->running[cpu] = 0;
+        /* This vCPU's own thread is the caller; it leaves when this returns.
+         * The word stays RUNNING -- monotonic -- and the thread's exit is
+         * what the live count sees. */
         ret = PSCI_SUCCESS;
+        off = 2;   /* this vCPU only */
         break;
     case PSCI_AFFINITY_INFO: {
         unsigned target = (unsigned)(x->hypercall.a0 & 0xFFu);
-        ret = target < COSMO_HV_VCPUS_MAX && m->running[target] ? 0 : 1;   /* ON : OFF */
+        ret = target < COSMO_HV_VCPUS_MAX &&
+              __atomic_load_n(&m->park[target], __ATOMIC_ACQUIRE) == VCPU_RUNNING ? 0 : 1;   /* ON : OFF */
         break;
     }
     case PSCI_MIGRATE_INFO:
@@ -650,6 +737,140 @@ static int psci_answer(struct machine *m, unsigned cpu, const struct cosmo_vm_ex
     }
     set_x0(m->vcpu[cpu], (uint64_t)ret);
     return off;
+}
+
+/*
+ * One vCPU's thread: wait to be told which guest to run, run it until the
+ * machine stops, then leave. Every exit the old round-robin handled is
+ * handled here, minus the turn-taking -- there are no turns now.
+ */
+static void *vcpu_thread(void *arg)
+{
+    struct vcpu_arg *va = arg;
+    struct machine *m = va->m;
+    unsigned cpu = va->index;
+    struct cosmo_vm_exit x;
+    int status = 0;
+
+    /* Parked until CPU_ON releases this vCPU, or shutdown tells it to go.
+     * The acquire is what makes the entry point and context the releasing
+     * thread wrote visible here. */
+    for (;;) {
+        unsigned st = __atomic_load_n(&m->park[cpu], __ATOMIC_ACQUIRE);
+        if (st != VCPU_PARKED)
+            break;
+        (void)cosmo_futex_wait(&m->park[cpu], VCPU_PARKED, 0);
+    }
+
+    /* Tell whoever released this vCPU that it is running: CPU_ON waits for
+     * this, so that it can promise what PSCI says it promises. */
+    __atomic_store_n(&m->entered[cpu], 1u, __ATOMIC_RELEASE);
+    (void)cosmo_futex_wake(&m->entered[cpu], 1);
+
+    while (__atomic_load_n(&m->park[cpu], __ATOMIC_ACQUIRE) == VCPU_RUNNING) {
+        memset(&x, 0, sizeof(x));
+        /* Untimed: nothing else needs this thread, and the kick is what
+         * ends a run that the guest will not end itself. */
+        int rc = cosmo_vcpu_run(m->vcpu[cpu], &x);
+        if (rc < 0) {
+            fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
+            status = 1;
+            break;
+        }
+        int leave = 0;
+        switch (x.kind) {
+        case COSMO_VM_EXIT_STOPPED:
+            /* The owner asked this vCPU to leave: the loop's own condition
+             * decides whether that was the machine stopping. */
+            break;
+        case COSMO_VM_EXIT_PREEMPTED:
+        case COSMO_VM_EXIT_WFI:
+            break;   /* run again; a WFI's wake is an interrupt the kernel delivers */
+        case COSMO_VM_EXIT_HYPERCALL:
+            if (is_psci(x.hypercall.nr)) {
+                int off = psci_answer(m, cpu, &x);
+                if (off == 1) {
+                    /* SYSTEM_OFF: the machine stops. Every other thread is
+                     * told to quit and kicked; this one leaves here, because
+                     * its guest must not run past the call. */
+                    __atomic_store_n(&m->off_asked, 1u, __ATOMIC_RELEASE);
+                    machine_quit_all(m);
+                    leave = 1;
+                } else if (off == 2) {
+                    leave = 1;   /* CPU_OFF: this vCPU only */
+                }
+            } else {
+                printf("vmctl: cpu %u: hypercall %llu (0x%llx 0x%llx 0x%llx 0x%llx)\n", cpu,
+                       (unsigned long long)x.hypercall.nr, (unsigned long long)x.hypercall.a0,
+                       (unsigned long long)x.hypercall.a1, (unsigned long long)x.hypercall.a2,
+                       (unsigned long long)x.hypercall.a3);
+            }
+            break;
+        case COSMO_VM_EXIT_MMIO:
+            if (x.mmio.gpa >= COSMO_HVM_VIRTIO0_BASE &&
+                x.mmio.gpa < COSMO_HVM_VIRTIO0_BASE + COSMO_HVM_VIRTIO0_SIZE) {
+                uint64_t val = x.mmio.value;
+                vio_reg(&g_vio, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO0_BASE), x.mmio.write, &val);
+                if (!x.mmio.write)
+                    x.mmio.value = val;   /* the kernel completes the read / steps the write */
+                break;
+            }
+            if (x.mmio.gpa >= COSMO_HVM_VIRTIO1_BASE &&
+                x.mmio.gpa < COSMO_HVM_VIRTIO1_BASE + COSMO_HVM_VIRTIO1_SIZE) {
+                uint64_t val = x.mmio.value;
+                vnet_reg(&g_vnet, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO1_BASE), x.mmio.write, &val);
+                if (!x.mmio.write)
+                    x.mmio.value = val;
+                break;
+            }
+            printf("vmctl: cpu %u: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",
+                   cpu, x.mmio.write ? "write" : "read", (unsigned long long)x.mmio.gpa, x.mmio.size, x.mmio.reg,
+                   (unsigned long long)x.mmio.value, (unsigned long long)x.rip);
+            status = 1;
+            leave = 1;
+            break;
+        case COSMO_VM_EXIT_SYSREG:
+            printf("vmctl: cpu %u: system register %s (iss 0x%x) into x%u at 0x%llx: no model; stopping\n", cpu,
+                   x.sysreg.write ? "write" : "read", x.sysreg.iss, x.sysreg.reg, (unsigned long long)x.rip);
+            status = 1;
+            leave = 1;
+            break;
+        case COSMO_VM_EXIT_SHUTDOWN:
+            printf("vmctl: cpu %u: guest shutdown at 0x%llx\n", cpu, (unsigned long long)x.rip);
+            status = 1;
+            leave = 1;
+            break;
+        case COSMO_VM_EXIT_FAIL:
+            printf("vmctl: cpu %u: entry failed: code 0x%x info 0x%llx 0x%llx\n", cpu, x.fail.code,
+                   (unsigned long long)x.fail.info1, (unsigned long long)x.fail.info2);
+            status = 1;
+            leave = 1;
+            break;
+        default:
+            printf("vmctl: cpu %u: unknown exit %u\n", cpu, x.kind);
+            status = 1;
+            leave = 1;
+            break;
+        }
+        if (leave)
+            break;
+    }
+
+    /*
+     * A vCPU that failed takes the machine with it: the others have no way
+     * to know, and a half-stopped machine would hang the supervisor.
+     */
+    if (status) {
+        __atomic_store_n(&m->failed, 1u, __ATOMIC_RELEASE);
+        machine_quit_all(m);
+    }
+    /* Release, and the wake last: everything this thread did -- its console
+     * bytes, its exit reason -- must be visible to the supervisor that sees
+     * the count reach zero, and a joiner woken before the count dropped
+     * would see a machine that is not finished. */
+    __atomic_fetch_sub(&m->live, 1u, __ATOMIC_ACQ_REL);
+    (void)cosmo_futex_wake(&m->live, 1);
+    return NULL;
 }
 
 static int run_machine(int argc, char **argv)
@@ -750,10 +971,20 @@ static int run_machine(int argc, char **argv)
         fprintf(stderr, "vmctl: load: %s\n", strerror((int)-w));
         return 1;
     }
-    m.vcpu[0] = cosmo_vcpu_create(m.vm, 0);
-    if (m.vcpu[0] < 0) {
-        fprintf(stderr, "vmctl: vcpu_create: %s\n", strerror(-m.vcpu[0]));
-        return 1;
+    /*
+     * Every vCPU the device tree promises, created now rather than when
+     * `CPU_ON` asks for one. That is what lets `CPU_ON` be a register write
+     * and a wake, with nothing in it that can fail for want of memory --
+     * and it means a machine that cannot have its CPUs says so here, before
+     * the guest has run an instruction, instead of from inside a firmware
+     * call the guest has no good answer for.
+     */
+    for (unsigned c = 0; c < m.nr_cpus; c++) {
+        m.vcpu[c] = cosmo_vcpu_create(m.vm, c);
+        if (m.vcpu[c] < 0) {
+            fprintf(stderr, "vmctl: vcpu_create(%u): %s\n", c, strerror(-m.vcpu[c]));
+            return 1;
+        }
     }
     struct cosmo_vcpu_regs regs;
     cosmo_vcpu_get_regs(m.vcpu[0], &regs);
@@ -766,7 +997,6 @@ static int run_machine(int argc, char **argv)
         fprintf(stderr, "vmctl: vcpu_regs: %s\n", strerror(-rc));
         return 1;
     }
-    m.running[0] = 1;
     /* The virtio-blk device: a file, opened read-only, its size in sectors
      * the capacity. Without --disk the transport reports DeviceID 0 and the
      * guest's virtio-mmio driver skips the node. */
@@ -807,145 +1037,91 @@ static int run_machine(int argc, char **argv)
            disk ? (disk_writable ? ", virtio-blk /dev/vda (rw)" : ", virtio-blk /dev/vda (ro)") : "",
            net ? (g_vnet.tap_fd >= 0 ? ", virtio-net eth0 (tap)" : ", virtio-net eth0 (loop)") : "");
 
-    /* One thread, every running vCPU in turn, a tick each. A vCPU that
-     * asks for an interrupt (WFI) gives up its turn; its next comes round. */
-    struct cosmo_vm_exit x;
-    memset(&x, 0, sizeof(x));
-    unsigned cpu = 0;
+    /*
+     * A thread per vCPU. The supervisor -- this thread -- drains the
+     * guest's console and services the device models while they run, and
+     * reaps them when the last one has left.
+     *
+     * This replaces a round-robin that ran every vCPU on one thread a tick
+     * each, and with it go the two corrections that existed only because of
+     * that serialisation: the `fresh[]` array that tracked which vCPU had
+     * never had a turn end on its own terms, and the `SYSTEM_OFF` held for
+     * such a sibling for up to 64 turns. A vCPU now runs because it is
+     * running, not because a turn came round, so `SYSTEM_OFF` means what
+     * PSCI says it means.
+     */
+    m.live = m.nr_cpus;
+    for (unsigned c = 0; c < m.nr_cpus; c++) {
+        m.arg[c].m = &m;
+        m.arg[c].index = c;
+        /*
+         * Created before the guest runs and parked: PSCI secondaries start
+         * powered off, so a thread per *running* vCPU would mean `CPU_ON`
+         * creating one from inside its own handler, on the asking vCPU's
+         * thread, where a failed create would have to become a PSCI error
+         * code. This way a create that fails is a startup failure, reported
+         * here, and `CPU_ON` cannot fail for want of memory.
+         */
+        rc = cosmo_thread_start(&m.thread[c], vcpu_thread, &m.arg[c], VCPU_STACK_BYTES);
+        if (rc != 0) {
+            fprintf(stderr, "vmctl: cpu %u: thread: %s\n", c, strerror(-rc));
+            /* Whatever started must be told to leave, or this process
+             * cannot exit: the threads are parked on words only this
+             * function writes. */
+            m.live = c;
+            machine_quit_all(&m);
+            for (unsigned j = 0; j < c; j++)
+                (void)cosmo_thread_join(&m.thread[j], NULL);
+            return 1;
+        }
+        m.started[c] = 1;
+    }
+
+    /* vCPU 0 is the one the guest starts with; the rest wait for CPU_ON. */
+    machine_release(&m, 0);
+
+    /*
+     * The supervisor loop. `cosmo_thread_join` blocks until its thread
+     * exits, so a main thread that joined first would drain nothing -- and
+     * the guest's console ring drops its *oldest* bytes when full, which is
+     * output silently lost and the harness's markers are made of exactly
+     * that output. So: drain, service, and wait on the live count with a
+     * bounded wait; the joins happen after it reaches zero, where they reap
+     * rather than wait.
+     *
+     * The bound is what keeps the ring drained while nothing exits; the
+     * wake an exiting thread sends is what stops the last drain from being
+     * a whole interval late. Every kernel sleep is at least one scheduler
+     * tick, so the real interval is a tick either way.
+     */
     for (;;) {
-        /* Finish serving a ring the last notify could not drain in one
-         * bounded batch, one batch per turn so the guest's vCPUs keep
-         * running between them. When a batch serves nothing more, the ring
-         * is drained (or a hostile ring stopped it) and draining ends. */
+        drain_console(m.vm);
         (void)vio_drain(&g_vio);
         (void)vnet_drain(&g_vnet);
-        /* A tap delivers host->guest frames at any time, not only on a guest
-         * kick, so poll it every turn: vnet_service reads the channel into any
-         * posted receive buffer and drains pending transmits. */
+        /* A tap delivers host->guest frames at any time, not only on a
+         * guest kick, so poll it here rather than in a vCPU thread. */
         if (g_vnet.tap_fd >= 0)
             (void)vnet_poll(&g_vnet);
-        unsigned nr_running = 0;
-        for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
-            nr_running += m.running[c] ? 1 : 0;
-        if (nr_running == 0) {
-            /* A held SYSTEM_OFF is what ends the run, even if the last
-             * sibling powered itself off first: the guest asked for the
-             * machine to stop, and that is what happened. */
-            printf(m.off_pending ? "vmctl: guest powered off\n" : "vmctl: every cpu is off\n");
-            return 0;
-        }
-        if (m.off_pending && (m.off_grace == 0 || !machine_fresh_sibling(&m, MACHINE_NO_CPU))) {
-            printf("vmctl: guest powered off\n");
-            return 0;
-        }
-        if (m.off_pending)
-            m.off_grace--;
-        while (!m.running[cpu])
-            cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
-        /* One vCPU left may run untimed -- nothing else needs the thread --
-         * *except* while a power-off is held: the hold is bounded in turns,
-         * so every turn must end. A fresh sibling that spins would otherwise
-         * never come back and the bound would mean nothing. */
-        rc = cosmo_vcpu_run_flags(m.vcpu[cpu], &x,
-                                  (nr_running > 1 || m.off_pending) ? COSMO_VCPU_RUN_ONE_TICK : 0);
-        drain_console(m.vm);
-        if (rc < 0) {
-            fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
-            return 1;
-        }
-        /* Anything but a preemption is the guest reaching a point of its own
-         * choosing -- a hypercall, a wait, an access -- so this vCPU has had
-         * a real turn and no longer holds the power-off. */
-        if (x.kind != COSMO_VM_EXIT_PREEMPTED)
-            m.fresh[cpu] = 0;
-        int next = 0;
-        switch (x.kind) {
-        case COSMO_VM_EXIT_PREEMPTED:
-        case COSMO_VM_EXIT_WFI:
-            next = 1;
+        unsigned live = __atomic_load_n(&m.live, __ATOMIC_ACQUIRE);
+        if (live == 0)
             break;
-        case COSMO_VM_EXIT_HYPERCALL:
-            if (is_psci(x.hypercall.nr)) {
-                if (psci_answer(&m, cpu, &x)) {
-                    /* SYSTEM_OFF. On a real machine a sibling the guest has
-                     * just started is running on its own core and has had
-                     * its chance; here it shares this thread and may have
-                     * been preempted before its first instruction, so
-                     * honouring the power-off at once loses output the guest
-                     * asked for -- which is how the boot test's `cpu1: up`
-                     * line went missing on a loaded host. Hold the power-off
-                     * for a bounded number of turns while such a sibling
-                     * runs. The vCPU that asked stops here either way: its
-                     * guest must not run past SYSTEM_OFF. */
-                    m.running[cpu] = 0;
-                    if (machine_fresh_sibling(&m, cpu)) {
-                        /* Every requester waits, not just the first: with
-                         * four vCPUs a second SYSTEM_OFF must not power the
-                         * machine off under a sibling that still has a turn
-                         * owed. The grace is set once, so repeated requests
-                         * cannot extend the bound. */
-                        if (!m.off_pending) {
-                            m.off_pending = 1;
-                            m.off_grace = MACHINE_OFF_GRACE_TURNS;
-                        }
-                        next = 1;
-                        break;
-                    }
-                    printf("vmctl: guest powered off\n");
-                    return 0;
-                }
-                /* A firmware call is a natural turn boundary: the vCPU that
-                 * just brought a sibling up would otherwise run on -- and
-                 * a small guest reaches SYSTEM_OFF within the same tick,
-                 * before the sibling has run a single instruction. The
-                 * first boot of this mode did exactly that. */
-                next = 1;
-            } else {
-                printf("vmctl: cpu %u: hypercall %llu (0x%llx 0x%llx 0x%llx 0x%llx)\n", cpu,
-                       (unsigned long long)x.hypercall.nr, (unsigned long long)x.hypercall.a0,
-                       (unsigned long long)x.hypercall.a1, (unsigned long long)x.hypercall.a2,
-                       (unsigned long long)x.hypercall.a3);
-            }
-            break;
-        case COSMO_VM_EXIT_MMIO:
-            if (x.mmio.gpa >= COSMO_HVM_VIRTIO0_BASE &&
-                x.mmio.gpa < COSMO_HVM_VIRTIO0_BASE + COSMO_HVM_VIRTIO0_SIZE) {
-                uint64_t val = x.mmio.value;
-                vio_reg(&g_vio, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO0_BASE), x.mmio.write, &val);
-                if (!x.mmio.write)
-                    x.mmio.value = val;   /* the kernel completes the read / steps the write */
-                break;   /* run again */
-            }
-            if (x.mmio.gpa >= COSMO_HVM_VIRTIO1_BASE &&
-                x.mmio.gpa < COSMO_HVM_VIRTIO1_BASE + COSMO_HVM_VIRTIO1_SIZE) {
-                uint64_t val = x.mmio.value;
-                vnet_reg(&g_vnet, (unsigned)(x.mmio.gpa - COSMO_HVM_VIRTIO1_BASE), x.mmio.write, &val);
-                if (!x.mmio.write)
-                    x.mmio.value = val;
-                break;   /* run again */
-            }
-            printf("vmctl: cpu %u: mmio %s at 0x%llx, %u byte(s), x%u, value 0x%llx, rip 0x%llx: no device; stopping\n",
-                   cpu, x.mmio.write ? "write" : "read", (unsigned long long)x.mmio.gpa, x.mmio.size, x.mmio.reg,
-                   (unsigned long long)x.mmio.value, (unsigned long long)x.rip);
-            return 1;
-        case COSMO_VM_EXIT_SYSREG:
-            printf("vmctl: cpu %u: system register %s (iss 0x%x) into x%u at 0x%llx: no model; stopping\n", cpu,
-                   x.sysreg.write ? "write" : "read", x.sysreg.iss, x.sysreg.reg, (unsigned long long)x.rip);
-            return 1;
-        case COSMO_VM_EXIT_SHUTDOWN:
-            printf("vmctl: cpu %u: guest shutdown at 0x%llx\n", cpu, (unsigned long long)x.rip);
-            return 1;
-        case COSMO_VM_EXIT_FAIL:
-            printf("vmctl: cpu %u: entry failed: code 0x%x info 0x%llx 0x%llx\n", cpu, x.fail.code,
-                   (unsigned long long)x.fail.info1, (unsigned long long)x.fail.info2);
-            return 1;
-        default:
-            printf("vmctl: cpu %u: unknown exit %u\n", cpu, x.kind);
-            return 1;
-        }
-        if (next)
-            cpu = (cpu + 1) % COSMO_HV_VCPUS_MAX;
+        (void)cosmo_futex_wait(&m.live, live, MACHINE_DRAIN_INTERVAL_NS);
     }
+    for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
+        if (m.started[c])
+            (void)cosmo_thread_join(&m.thread[c], NULL);
+    drain_console(m.vm);   /* whatever the last thread wrote on its way out */
+
+    /*
+     * The verdict. A held power-off used to be printed by the loop that
+     * honoured it; now the guest's request and the machine's stopping are
+     * two different threads' work, so the message belongs here -- once,
+     * however many vCPUs asked.
+     */
+    if (m.failed)
+        return 1;
+    printf(m.off_asked ? "vmctl: guest powered off\n" : "vmctl: every cpu is off\n");
+    return 0;
 }
 
 static int run(int argc, char **argv)
