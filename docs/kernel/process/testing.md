@@ -448,7 +448,13 @@ silently is the flaw the barrier exists to remove -- a worker that gave
 up waiting would allocate alone and every assertion would still hold. The
 main thread asserts that every started worker arrived, and a worker whose
 wait expires says so and counts itself, which the step asserts never
-happened. The join afterwards joins exactly the slots that started -- counting
+happened. Both bounds are **durations derived from the retry budget**,
+not yield counts: a worker starts waiting the moment it is created, main
+may still spend twenty attempts and twenty milliseconds apiece on the
+workers after it, and a bound that did not cover that would report the
+first worker late during exactly the refusal the retry exists to
+tolerate. The worker sleeps on the word with a futex rather than
+spinning, and main wakes it. The join afterwards joins exactly the slots that started -- counting
 them instead would join a refused slot and one thread twice, leaving a
 real thread running. Each thread
 allocates, fills its block with its own byte, verifies every byte of it,
