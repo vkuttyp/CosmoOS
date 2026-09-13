@@ -15,7 +15,13 @@
  * block behind each thread's thread pointer (`cosmo/tcb.h`). A thread this
  * header creates has one before its first instruction.
  *
- * What is still shared: `strerror`'s buffer and `getcwd(NULL)`'s storage.
+ * **Nothing in libc is still shared.** `strerror`'s buffer is
+ * `_Thread_local`, and `getcwd(NULL)` never needed it -- it `malloc`s per
+ * call and hands the buffer to its caller, so it stopped being shared
+ * state when the allocator took its lock. A `grep` for writable statics
+ * in `libc/src` is what says so, rather than a list kept by hand. A
+ * program gets per-thread storage of its own with `__thread`
+ * (`docs/audit/next-subsystem-pt-tls.md`).
  *
  * The warning that remains is about threads this header did *not* make.
  * libc's `errno` is an unconditional load through the thread pointer, so a

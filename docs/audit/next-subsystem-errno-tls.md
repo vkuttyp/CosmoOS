@@ -155,7 +155,10 @@ and names `errno` as what remains.
   no `__tls_get_addr`, no compiler `__thread`: one syscall, one page per
   thread, and an accessor. A program that later wants real `__thread` is
   not blocked by any of it -- the thread pointer will already be there, and
-  that unit becomes "teach `spawn` about `PT_TLS`".
+  that unit becomes "teach `spawn` about `PT_TLS`". **The first half held
+  and the second did not**: the later unit needed no loader change at all.
+  The kernel publishes `AT_PHDR` and libc reads its own program headers,
+  so nothing in the kernel knows what thread-local storage is.
 - **It removes a footgun from a public API.** `cosmo/thread.h` currently
   carries a warning telling callers which libc functions they may not use
   from two threads. After this, that warning shrinks to `strerror` and
@@ -297,6 +300,20 @@ longer a link-time constant -- which POSIX has required of `errno` for
 decades, and nothing in this tree takes its address.
 
 ### What stays shared, and what this unit does not do
+
+> **Done by a later unit.** Everything this section and the two below
+> defer was built in `docs/audit/next-subsystem-pt-tls.md`: compiler
+> `__thread` and `PT_TLS`, `strerror` moving into per-thread storage, and
+> a way for a program to learn the block's size (`cosmo_tcb_storage()`).
+> Two details came out differently and are recorded here so this report
+> does not contradict the tree. **`getcwd(NULL)` never needed the
+> change** -- it `malloc`s per call and hands the buffer to its caller, so
+> it stopped being shared state when the allocator took its lock;
+> `strerror`'s was the only writable static in `libc/src`. And
+> **`reserved[112]` is not a program's to use**, which the paragraph on
+> the block's layout below promised: on AArch64 the ELF ABI puts the
+> first `__thread` variable exactly there. `__thread` is how a program
+> gets per-thread storage now.
 
 `strerror`'s static buffer and `getcwd(NULL)`'s storage stay shared: both
 now *can* be fixed, and doing it here would be a second subsystem in one
@@ -531,6 +548,13 @@ eager version did not manage.
   relocations must work for static binaries, and every thread needs its
   image copied. This unit is the prerequisite for it, not a detour around
   it -- the thread pointer it adds is what `PT_TLS` would use.
+  **Built, and smaller than this made it sound**
+  (`docs/audit/next-subsystem-pt-tls.md`). `spawn` parses and places
+  nothing: the loader already computes where the header table lands, the
+  native auxiliary vector carries it, and libc reads its own `PT_TLS`.
+  The last sentence was the accurate one -- the thread pointer this unit
+  added is exactly what the image hangs off, and on AArch64 the block had
+  to move below it because the ABI puts the first variable at TP+16.
 - **Leave `errno` shared and forbid it in threaded code.** Where the
   threads unit landed, and a review rejected the same argument about the
   allocator. The difference in consequence (a wrong code, not corruption)
@@ -547,3 +571,10 @@ Named and deferred: compiler `__thread` and `PT_TLS`; `strerror` and
 *block's size* so a program can allocate its own with libc's prefix; and
 the `vmctl` conversion, which this unit unblocks and which remains its own
 report.
+
+**All of these have since been built.** `__thread`, `PT_TLS` and
+`strerror` in `docs/audit/next-subsystem-pt-tls.md`, where the block's
+size became `cosmo_tcb_storage()` -- a function of the program rather
+than the constant this report imagined, because the size follows the
+program's own template. `getcwd(NULL)` turned out not to need it. The
+`vmctl` conversion is `docs/audit/next-subsystem-vcpu-threads.md`.
