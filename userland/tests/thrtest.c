@@ -108,7 +108,24 @@ static void *pair_a(void *arg)
  * Each thread allocates, writes a pattern, frees, and prints -- and checks
  * its own blocks, so a lost or shared block shows up as a wrong byte
  * rather than only as a crash. */
-static volatile unsigned heap_bad, heap_done, heap_ready, heap_go;
+/*
+ * The heap step's constants, named because the barrier's bound is derived
+ * from the retry budget rather than guessed. A worker starts waiting the
+ * moment it is created, and main may still spend its whole retry budget on
+ * the workers after it: HEAP_WORKERS - 1 creates, each up to
+ * HEAP_RETRY_ATTEMPTS attempts with HEAP_RETRY_SLEEP_NS between them. A
+ * bound that did not cover that would report the first worker late during
+ * exactly the refusal the retry exists to tolerate -- turning a tolerated
+ * create failure into a test failure. Hence the budget plus two seconds.
+ */
+#define HEAP_WORKERS        3u
+#define HEAP_RETRY_ATTEMPTS 20u
+#define HEAP_RETRY_SLEEP_NS 20000000ull
+#define HEAP_BARRIER_NS \
+    ((unsigned long long)(HEAP_WORKERS - 1u) * HEAP_RETRY_ATTEMPTS * HEAP_RETRY_SLEEP_NS \
+     + 2000000000ull)
+
+static volatile unsigned heap_bad, heap_done, heap_ready, heap_go, heap_late;
 static void *heap_user(void *arg)
 {
     unsigned id = (unsigned)(unsigned long)arg;
@@ -119,10 +136,30 @@ static void *heap_user(void *arg)
      * through the allocator at once -- which is the whole property. The
      * wait is bounded so a worker cannot hang if a create was refused for
      * good: main releases the barrier either way.
+     *
+     * A bound that expires silently, though, is the flaw the barrier was
+     * added to remove: the worker would go on to allocate alone, every
+     * assertion below would still hold, and the step would once more pass
+     * without having tested anything. So expiry is *counted*, and main
+     * asserts it never happened -- the wait is bounded for safety, and
+     * observable so that the safety cannot be mistaken for the property.
      */
     __atomic_fetch_add(&heap_ready, 1, __ATOMIC_ACQ_REL);
-    for (unsigned w = 0; w < 2000u && !heap_go; w++)
-        cosmo_yield();
+    uint64_t deadline = cosmo_clock_ns() + HEAP_BARRIER_NS;
+    while (!__atomic_load_n(&heap_go, __ATOMIC_ACQUIRE)) {
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline)
+            break;
+        /* Sleep on the word rather than spin on a yield count: a count is
+         * not a duration, and main may be sleeping between refused
+         * attempts while this worker burns through it. */
+        cosmo_futex_wait(&heap_go, 0, deadline - now);
+    }
+    if (!__atomic_load_n(&heap_go, __ATOMIC_ACQUIRE)) {
+        printf("thrtest: heap %u gave up waiting for the barrier\n", id);
+        fflush(stdout);
+        __atomic_fetch_add(&heap_late, 1, __ATOMIC_ACQ_REL);
+    }
     for (unsigned i = 0; i < 400u; i++) {
         size_t n = 16u + ((i * 37u + id) % 700u);
         unsigned char *p = malloc(n);
@@ -466,9 +503,9 @@ int main(int argc, char **argv)
     STEP("11");
     /* (11) */
     {
-        cosmo_thread_t h[3];
-        unsigned char started[3] = { 0, 0, 0 };
-        heap_bad = heap_done = heap_ready = heap_go = 0;
+        cosmo_thread_t h[HEAP_WORKERS];
+        unsigned char started[HEAP_WORKERS] = { 0, 0, 0 };
+        heap_bad = heap_done = heap_ready = heap_go = heap_late = 0;
         unsigned made = 0;
         /*
          * 16 KB stacks, not the 64 KB default: these threads print and
@@ -485,14 +522,14 @@ int main(int argc, char **argv)
          * -ENOMEM it used to flatten every mapping failure into, which is
          * why the two CI failures could not say which call had failed.
          */
-        for (unsigned i = 0; i < 3u; i++) {
+        for (unsigned i = 0; i < HEAP_WORKERS; i++) {
             int rc = -1;
-            for (unsigned attempt = 0; attempt < 20u && rc != 0; attempt++) {
+            for (unsigned attempt = 0; attempt < HEAP_RETRY_ATTEMPTS && rc != 0; attempt++) {
                 rc = cosmo_thread_start(&h[i], heap_user, (void *)(unsigned long)(i + 1), 16u * 1024u);
                 if (rc != 0) {
                     printf("thrtest: heap thread %u refused rc=%d (attempt %u)\n", i + 1, rc, attempt);
                     fflush(stdout);
-                    cosmo_sleep_ns(20000000ull);   /* let the reaper catch up */
+                    cosmo_sleep_ns(HEAP_RETRY_SLEEP_NS);   /* let the reaper catch up */
                 }
             }
             CHECK(rc == 0);
@@ -510,18 +547,21 @@ int main(int argc, char **argv)
          * quietly drop. The wait is bounded and the release unconditional:
          * a worker must never be left parked, however the creates went.
          */
-        for (unsigned w = 0; w < 2000u && __atomic_load_n(&heap_ready, __ATOMIC_ACQUIRE) < made; w++)
+        uint64_t ready_by = cosmo_clock_ns() + HEAP_BARRIER_NS;
+        while (__atomic_load_n(&heap_ready, __ATOMIC_ACQUIRE) < made && cosmo_clock_ns() < ready_by)
             cosmo_yield();
         CHECK(heap_ready == made);            /* all of them, together */
         __atomic_store_n(&heap_go, 1, __ATOMIC_RELEASE);
+        cosmo_futex_wake(&heap_go, HEAP_WORKERS);
         /* Join exactly the slots that started. A handle whose start was
          * refused is safe to join now, but says nothing -- and joining it
          * by a miscounted index would join a *different* slot's thread
          * twice and leave a real one running. */
-        for (unsigned i = 0; i < 3u; i++)
+        for (unsigned i = 0; i < HEAP_WORKERS; i++)
             if (started[i])
                 CHECK(cosmo_thread_join(&h[i], NULL) == 0);
-        CHECK(made == 3);
+        CHECK(made == HEAP_WORKERS);
+        CHECK(heap_late == 0);     /* every worker was released, none timed out */
         CHECK(heap_done == made);
         CHECK(heap_bad == 0);      /* no lost block, no shared block, no failed allocation */
         /* fflush(NULL) flushes every stream, and must not deadlock against
