@@ -419,10 +419,36 @@ count it reached, which is the failure mode the design is for).
 ---
 
 Named and deferred by this unit: the userland test programs' own timing
-assumptions (`thrtest`, `cwdtest`); a per-test time budget in the harness;
-and the `net-icmp-limit` family's shared `settle` in the other direction
-(a *maximum* count after a flood, which a slow host makes pass
-spuriously).
+assumptions (`thrtest`, `cwdtest`), and a per-test time budget in the
+harness.
+
+**A third deferral was withdrawn after review asked why it conflicted with
+the scope, and the answer was that it should not have been there.** It
+read: "the `net-icmp-limit` family's shared `settle` in the other
+direction — a *maximum* count after a flood, which a slow host makes pass
+spuriously." Five of the eleven bare `settle` sites are inside
+`selftest_net_icmp_limit`, so the deferral and the conversion count
+contradicted each other, which is what review found.
+
+Looking at the code resolves it in the other direction. One `settle(100)`
+feeds **both** assertions:
+
+```c
+settle(100);
+ipv4_get_stats(&i1);
+CHECK(i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300);
+CHECK(sent <= ICMP_RATE_PER_SEC && limited >= 300 - ICMP_RATE_PER_SEC);
+```
+
+`sent <= ICMP_RATE_PER_SEC` passes spuriously on a slow host **only
+because the flood may not have landed**: fewer echoes received means fewer
+replies sent, and the limit is satisfied without the limiter doing
+anything. Waiting for all three hundred to arrive is exactly what makes
+that assertion mean something — and `limited >= 300 - ICMP_RATE_PER_SEC`,
+in the same line, *fails* on a slow host for the same reason. So the
+deferred problem is not a separate one at all: **it is this unit's defect,
+seen from the other side, and the conversion fixes it.** The five sites
+are in scope and the deferral is gone.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
