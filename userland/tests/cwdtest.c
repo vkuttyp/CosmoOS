@@ -82,6 +82,22 @@ static volatile unsigned bad_errno;    /* an open failed for something other tha
 static volatile unsigned bad_path;     /* getcwd answered neither directory */
 static volatile unsigned opens_ok, opens_enoent;
 
+/*
+ * The only way this program ends a step. It must be **under the mutex and
+ * with a broadcast**: an observer asleep in `quiesce_writers` is waiting
+ * on `c`, and a bare store to `writers_stop` leaves it asleep for ever.
+ * Two writers set the flag bare before review found it, and the failure is
+ * a hung boot rather than a failed check.
+ */
+static void publish_stop(void)
+{
+    cosmo_mutex_lock(&m);
+    writers_stop = 1;
+    quiesce = 0;                 /* so nobody parks on the way out */
+    cosmo_cond_broadcast(&c);
+    cosmo_mutex_unlock(&m);
+}
+
 static void writer_checkpoint(void)
 {
     cosmo_mutex_lock(&m);
@@ -107,10 +123,7 @@ static void *chdir_writer(void *arg)
         writer_checkpoint();
         (void)chdir("../" NAME_B);
     }
-    cosmo_mutex_lock(&m);
-    writers_stop = 1;
-    cosmo_cond_broadcast(&c);
-    cosmo_mutex_unlock(&m);
+    publish_stop();
     return NULL;
 }
 
@@ -181,7 +194,7 @@ static void *depth_writer(void *arg)
         writer_checkpoint();
         (void)chdir("..");
     }
-    writers_stop = 1;
+    publish_stop();
     return NULL;
 }
 
@@ -249,11 +262,7 @@ static int start_all(cosmo_thread_t *t, unsigned n, void *(*fn)(void *), int pas
     if (made == n)
         return 0;
     printf("cwdtest: only %u of %u threads started\n", made, n);
-    cosmo_mutex_lock(&m);
-    writers_stop = 1;
-    quiesce = 0;
-    cosmo_cond_broadcast(&c);
-    cosmo_mutex_unlock(&m);
+    publish_stop();
     for (unsigned i = 0; i < made; i++)
         (void)cosmo_thread_join(&t[i], NULL);
     return -1;
@@ -291,7 +300,7 @@ static void *vic_mover(void *arg)
         if (chdir(VICTIM) == 0)
             (void)chdir("..");
     }
-    writers_stop = 1;
+    publish_stop();
     return NULL;
 }
 
@@ -389,8 +398,23 @@ int main(void)
         cosmo_thread_t w, r;
         writers_stop = quiesce = parked = bad_errno = 0;
         opens_ok = opens_enoent = 0;
-        CHECK(cosmo_thread_start(&w, chdir_writer, NULL, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&r, open_reader, NULL, 32u * 1024u) == 0);
+        /*
+         * The reader loops until the writer ends the step, so a writer
+         * that never starts is a hang rather than a failure. Every step
+         * here starts its stop-producing thread first and bails if it is
+         * refused -- stack allocation can be, and a hung boot costs the
+         * whole suite.
+         */
+        if (cosmo_thread_start(&w, chdir_writer, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            goto step1_done;
+        }
+        if (cosmo_thread_start(&r, open_reader, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            publish_stop();
+            (void)cosmo_thread_join(&w, NULL);
+            goto step1_done;
+        }
         CHECK(cosmo_thread_join(&w, NULL) == 0);
         CHECK(cosmo_thread_join(&r, NULL) == 0);
         CHECK(bad_errno == 0);
@@ -399,6 +423,7 @@ int main(void)
         CHECK(opens_ok > 0);
         CHECK(opens_enoent > 0);
         printf("cwdtest: %u opens ok, %u enoent\n", opens_ok, opens_enoent);
+step1_done:;
     }
 
     STEP("2");
@@ -411,16 +436,25 @@ int main(void)
      * of another.
      */
     {
-        cosmo_thread_t w1, w2, o;
+        cosmo_thread_t w[2], o;
         CHECK(chdir("/tmp/cwdr") == 0);
         writers_stop = quiesce = parked = bad_path = 0;
-        CHECK(cosmo_thread_start(&w1, depth_writer, (void *)0ul, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&w2, depth_writer, (void *)1ul, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&o, depth_observer, NULL, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_join(&w1, NULL) == 0);
-        CHECK(cosmo_thread_join(&w2, NULL) == 0);
+        if (start_all(w, 2, depth_writer, 1) != 0) {
+            CHECK(0);
+            goto step2_done;
+        }
+        if (cosmo_thread_start(&o, depth_observer, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            publish_stop();
+            (void)cosmo_thread_join(&w[0], NULL);
+            (void)cosmo_thread_join(&w[1], NULL);
+            goto step2_done;
+        }
+        CHECK(cosmo_thread_join(&w[0], NULL) == 0);
+        CHECK(cosmo_thread_join(&w[1], NULL) == 0);
         CHECK(cosmo_thread_join(&o, NULL) == 0);
         CHECK(bad_path == 0);
+step2_done:;
     }
 
     STEP("3");
@@ -496,11 +530,7 @@ int main(void)
             }
             release_writers();
         }
-        cosmo_mutex_lock(&m);
-        writers_stop = 1;
-        quiesce = 0;
-        cosmo_cond_broadcast(&c);
-        cosmo_mutex_unlock(&m);
+        publish_stop();
         CHECK(cosmo_thread_join(&w[0], NULL) == 0);
         CHECK(cosmo_thread_join(&w[1], NULL) == 0);
         CHECK(bad_path == 0);
@@ -535,15 +565,32 @@ step3_done:;
         (void)mkdir(VICTIM, 0755);
         writers_stop = quiesce = parked = bad_errno = 0;
         vic_walks = vic_frees_seen = 0;
-        CHECK(cosmo_thread_start(&mv, vic_mover, NULL, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&kl, vic_killer, NULL, 32u * 1024u) == 0);
-        CHECK(cosmo_thread_start(&wk, vic_walker, NULL, 32u * 1024u) == 0);
+        /* The mover is the one that ends this step; the other two loop on
+         * its flag, so it starts first and the rest bail if refused. */
+        if (cosmo_thread_start(&mv, vic_mover, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            goto step4_done;
+        }
+        if (cosmo_thread_start(&kl, vic_killer, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            publish_stop();
+            (void)cosmo_thread_join(&mv, NULL);
+            goto step4_done;
+        }
+        if (cosmo_thread_start(&wk, vic_walker, NULL, 32u * 1024u) != 0) {
+            CHECK(0);
+            publish_stop();
+            (void)cosmo_thread_join(&mv, NULL);
+            (void)cosmo_thread_join(&kl, NULL);
+            goto step4_done;
+        }
         CHECK(cosmo_thread_join(&mv, NULL) == 0);
         CHECK(cosmo_thread_join(&kl, NULL) == 0);
         CHECK(cosmo_thread_join(&wk, NULL) == 0);
         CHECK(bad_errno == 0);
         CHECK(vic_walks > 0);
         printf("cwdtest: %u walks in the victim\n", vic_walks);
+step4_done:;
         CHECK(chdir("/tmp/cwdr") == 0);
         (void)mkdir(VICTIM, 0755);
     }
