@@ -571,6 +571,21 @@ struct machine {
     volatile unsigned stopping;        /* SYSTEM_OFF has begun; CPU_ON refuses */
     volatile unsigned off_asked;       /* a guest asked for the power-off */
     volatile unsigned failed;          /* a thread hit a fatal exit; the process fails */
+    /*
+     * How many vCPU threads are inside `cosmo_vcpu_run` at once, and the
+     * most ever seen. This is the unit's whole claim made countable: with
+     * the round-robin this replaces, one thread ran every vCPU, so the peak
+     * could never exceed 1 however the ticks interleaved. Two means two
+     * vCPUs were in the hypervisor's run path simultaneously.
+     *
+     * The report proposed timestamping each run and looking for two
+     * intervals that intersect. A counter is the same property exactly --
+     * a peak above one *is* an intersection -- and it needs no clock, no
+     * per-run storage and no comparison pass, so it cannot be wrong about
+     * the arithmetic. It is also exact rather than sampled.
+     */
+    volatile unsigned in_run;
+    volatile unsigned peak_in_run;
     volatile unsigned entered[COSMO_HV_VCPUS_MAX];   /* the thread is about to enter its guest */
     uint64_t entry[COSMO_HV_VCPUS_MAX];
     uint64_t ctx[COSMO_HV_VCPUS_MAX];
@@ -771,7 +786,14 @@ static void *vcpu_thread(void *arg)
         memset(&x, 0, sizeof(x));
         /* Untimed: nothing else needs this thread, and the kick is what
          * ends a run that the guest will not end itself. */
+        unsigned now = __atomic_add_fetch(&m->in_run, 1u, __ATOMIC_ACQ_REL);
+        unsigned peak = __atomic_load_n(&m->peak_in_run, __ATOMIC_ACQUIRE);
+        while (now > peak &&
+               !__atomic_compare_exchange_n(&m->peak_in_run, &peak, now, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            ;   /* another thread raised it meanwhile; `peak` now holds its value */
         int rc = cosmo_vcpu_run(m->vcpu[cpu], &x);
+        __atomic_fetch_sub(&m->in_run, 1u, __ATOMIC_ACQ_REL);
         if (rc < 0) {
             fprintf(stderr, "vmctl: vcpu %u: vcpu_run: %s\n", cpu, strerror(-rc));
             status = 1;
@@ -1118,6 +1140,9 @@ static int run_machine(int argc, char **argv)
      * two different threads' work, so the message belongs here -- once,
      * however many vCPUs asked.
      */
+    /* What the threads were for, as a number the harness can gate on. */
+    printf("vmctl: peak concurrent vcpus: %u\n",
+           __atomic_load_n(&m.peak_in_run, __ATOMIC_ACQUIRE));
     if (m.failed)
         return 1;
     printf(m.off_asked ? "vmctl: guest powered off\n" : "vmctl: every cpu is off\n");
