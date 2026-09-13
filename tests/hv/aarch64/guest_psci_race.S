@@ -20,16 +20,28 @@
  * "HVTEST: psci-race ok". A hang is the failure, and the boot test's
  * deadline is what detects it -- the same shape as `guest_offspin`.
  *
- * **What this does not prove.** Replacing the owner's compare-and-swap
- * with a plain store -- the bug it is named for -- does not fail this test
- * on demand. After the first `CPU_ON` for a target succeeds, every later
+ * **What this does not prove**, twice over. Replacing the owner's
+ * compare-and-swap with a plain store -- the bug it is named for -- does not
+ * fail this test on demand. After the first `CPU_ON` for a target succeeds, every later
  * one is answered ALREADY_ON and returns before reaching the store, so a
  * guest that asks in a loop still gets only one attempt per target at a
  * window a few instructions wide. What this test does is exercise the
  * shutdown path with PSCI calls arriving concurrently from other vCPUs,
- * which is worth having and is not the same claim. The compare-and-swap is
- * correct by construction and costs nothing; the argument for it is in
- * docs/audit/next-subsystem-vcpu-threads.md, not here.
+ * which is worth having and is not the same claim.
+ *
+ * Nor does it catch a `CPU_ON` that writes its target's registers *before*
+ * asking whether the target is already running -- which a review found in
+ * the first threaded build. An instrumented version of this guest tried and
+ * could not: the kernel's `vcpu_set_regs` takes the target's `run_lock`, so
+ * a stray write cannot land inside a run at all. It lands *between* two
+ * runs and resets the target's PC to this entry point, which a guest
+ * looping through that entry cannot tell from looping -- `get_regs` then
+ * `set_regs` preserves every other register. Detecting it needs a counter
+ * in guest *memory*, incremented at the entry and checked for a second
+ * arrival; that is a test worth writing and is not this one.
+ *
+ * Both fixes are correct by construction and cost nothing; the arguments
+ * are in docs/audit/next-subsystem-vcpu-threads.md, not here.
  *
  * Loaded flat at the start of guest RAM, so an entry point is taken with
  * `adr`: its own address is its GPA.

@@ -1543,10 +1543,12 @@ See [docs/development.md](docs/development.md).
   inside the interrupt-disabled region around the entry, because that is
   what makes a late IPI stay pending and become an exit rather than a
   missed kick.
-  The lifecycle is a three-state word per vCPU that only ever increases --
-  parked, running, quit -- with `CPU_ON` releasing its target by
-  compare-and-swap so that a `CPU_ON` racing a `SYSTEM_OFF` cannot revive a
-  vCPU nobody waits to stop, and shutdown both **waking** the parked threads
+  The lifecycle is a word per vCPU -- parked, starting, running, quit -- in
+  which **quit is absorbing** and parked and running cycle, because a
+  `CPU_OFF` is not the end of a vCPU and its thread goes back to its park.
+  Every transition is a compare-and-swap, so a `CPU_ON` racing a
+  `SYSTEM_OFF` cannot revive a vCPU nobody waits to stop, and shutdown both
+  **waking** the parked threads
   and **kicking** the running ones, because the kick reaches a thread inside
   the kernel and nothing else. The main thread is a supervisor rather than a
   joiner: `join` blocks, and the console ring drops its oldest bytes, so a

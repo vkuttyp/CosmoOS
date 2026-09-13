@@ -644,22 +644,36 @@ here costs a bounded wait for the target's thread to reach its first entry.
 A timeout is still `SUCCESS` -- the vCPU is on -- and no part of the
 interface has to lie about turns.
 
-**The lifecycle.** One word per vCPU, and it only ever increases:
+**The lifecycle.** One word per vCPU:
 
 | state | meaning |
 | --- | --- |
-| `VCPU_PARKED` | created, never started; waiting to be told which guest to run |
-| `VCPU_RUNNING` | `CPU_ON` wrote the entry and context, and woke it |
-| `VCPU_QUIT` | leave without running: the machine is stopping |
+| `VCPU_PARKED` | created, or powered off; waiting to be told which guest to run |
+| `VCPU_STARTING` | `CPU_ON` has claimed it and is writing its registers |
+| `VCPU_RUNNING` | the entry and context are set: run the guest |
+| `VCPU_QUIT` | leave for good: the machine is stopping |
+
+`QUIT` is **absorbing**, and that is the invariant rather than "the states
+only increase": `PARKED` and `RUNNING` cycle, because `CPU_OFF` is not the
+end of a vCPU -- a guest may power one down and start it again, and its
+thread goes back to its park rather than exiting, so the live count stays
+the count of threads *created*. Every transition is a compare-and-swap, so
+nothing moves a vCPU out of `QUIT`. `STARTING` is there because `CPU_ON`
+has two jobs and either order is wrong in one step: writing the registers
+before claiming the vCPU corrupts one that is already running, and
+publishing `RUNNING` before writing them lets the target wake on a spurious
+futex return and enter with stale ones.
 
 Every thread and every vCPU is created before the guest runs, so `CPU_ON`
 is a register write and a wake with nothing in it that can fail for want of
 memory -- a failed create is a startup failure, reported where startup
 failures are, rather than a PSCI error code a guest has no good answer for.
-`CPU_ON` releases its target with a **compare-and-swap from `PARKED`**,
-never a store: a `CPU_ON` racing a `SYSTEM_OFF` must not be able to store
-`RUNNING` over `QUIT` and revive a vCPU whose thread nobody is waiting to
-stop. A machine-wide `stopping` flag refuses such a call early; the swap is
+`CPU_ON` claims its target with a **compare-and-swap from `PARKED`** and
+publishes with another from `STARTING`, never a store: a `CPU_ON` racing a
+`SYSTEM_OFF` must not be able to put `RUNNING` over `QUIT` and revive a
+vCPU whose thread nobody is waiting to stop. A claim it cannot complete --
+registers the hardware refuses -- is given back, so the vCPU stays
+startable. A machine-wide `stopping` flag refuses such a call early; the swap is
 what makes the race safe whichever order the two land in.
 
 `SYSTEM_OFF` does three things and needs all of them: it sets `stopping`,
