@@ -43,6 +43,10 @@ void __libc_start(int argc, char **argv, char **envp)
         cosmo_exit(127);
     }
     environ = envp;
+    /* Before anything can replace `environ`: the auxiliary vector lives
+     * immediately past envp's terminator, and `setenv` may hand `environ`
+     * a heap copy with no vector behind it. */
+    __cosmo_auxv_init(envp);
     __stdio_init();
     exit(main(argc, argv, envp));
 }

@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cosmo/auxv.h>
 #include <cosmo/syscall.h>
 #include <cosmo/tcb.h>
 #include <cosmo/thread.h>
@@ -895,6 +896,63 @@ int main(int argc, char **argv)
         }
         for (unsigned i = 0; i < 3u; i++)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
+    }
+
+    STEP("18");
+    /*
+     * (18) **A program can find its own program headers**, which is how it
+     * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
+     * kernel passes the standard trio in the auxiliary vector and knows
+     * nothing about thread-local storage; everything above that is the
+     * program's own reading of its own ELF.
+     *
+     * The header layout is declared here rather than included: ELF's
+     * program header is a fixed format, and no public header in this tree
+     * describes it yet -- libc will need its own copy when it starts
+     * placing images, and a test that waited for that would be testing
+     * nothing now.
+     */
+    {
+        struct phdr {
+            uint32_t p_type, p_flags;
+            uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
+        };
+        unsigned long at_phdr = cosmo_getauxval(COSMO_AT_PHDR);
+        unsigned long at_phent = cosmo_getauxval(COSMO_AT_PHENT);
+        unsigned long at_phnum = cosmo_getauxval(COSMO_AT_PHNUM);
+        CHECK(at_phdr != 0);                      /* the headers are mapped */
+        CHECK(at_phent == sizeof(struct phdr));   /* 56, and the kernel refuses anything else */
+        CHECK(at_phnum > 0 && at_phnum < 64);
+        /* And the tags that were already there, so a wrong offset into the
+         * vector shows up as these failing rather than as a plausible
+         * address. */
+        CHECK(cosmo_getauxval(COSMO_AT_PAGESZ) == 4096);
+        CHECK(cosmo_getauxval(COSMO_AT_ENTRY) != 0);
+        CHECK(cosmo_getauxval(0xdead) == 0);      /* an unknown tag is absent, not garbage */
+
+        /*
+         * The headers must describe *this* program: some PT_LOAD has to
+         * cover the address of this function. A vector that pointed at
+         * another image, or at nothing, would satisfy every check above.
+         */
+        const struct phdr *ph = (const struct phdr *)at_phdr;
+        unsigned long self = (unsigned long)(void *)&main;
+        int covers = 0, nr_tls = 0;
+        for (unsigned long i = 0; i < at_phnum; i++) {
+            if (ph[i].p_type == 1u) {   /* PT_LOAD */
+                if (self >= ph[i].p_vaddr && self < ph[i].p_vaddr + ph[i].p_memsz)
+                    covers = 1;
+            }
+            if (ph[i].p_type == 7u)     /* PT_TLS */
+                nr_tls++;
+        }
+        CHECK(covers == 1);
+        /* At most one, which the ABI requires and every later step relies
+         * on. This program has none yet; the count is printed so that the
+         * step which gives it a `__thread` variable can be seen to change
+         * it rather than asserted to. */
+        CHECK(nr_tls <= 1);
+        printf("thrtest: phdr at 0x%lx, %lu entries, %d PT_TLS\n", at_phdr, at_phnum, nr_tls);
     }
 
     if (failures == 0)
