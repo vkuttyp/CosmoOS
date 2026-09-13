@@ -1090,8 +1090,13 @@ the caller's own mapping and therefore already charged to
 `COSMO_RLIMIT_AS` and `COSMO_RLIMIT_MEM`.
 
 **libc** (`libc/include/cosmo/thread.h`, `libc/src/thread.c`) owns
-everything the kernel deliberately does not: the stack and its **guard
-page**, the trampoline that calls the caller's function and then
+everything the kernel deliberately does not. A create that cannot get its
+mapping returns **the errno the kernel gave**, not a flattened `-ENOMEM`:
+the guard costs three calls (a reservation, a hole, a fixed map into it)
+and a caller that is refused deserves to know which kind of refusal it
+was -- two CI failures could say only "a mapping failed", which is what
+sent the diagnosis down three wrong paths. It owns the stack and its
+**guard page**, the trampoline that calls the caller's function and then
 `SYS_thread_exit` with its result (so a return into the kernel's zero
 return address cannot happen), `cosmo_thread_join` over the `clear_tid`
 word, and a three-state mutex whose uncontended lock and unlock are one

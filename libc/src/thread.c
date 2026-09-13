@@ -47,6 +47,15 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
 {
     if (t == NULL || fn == NULL)
         return -EINVAL;
+    /*
+     * Zeroed before anything can fail, so a handle whose start was refused
+     * is a handle `join` safely refuses (stack == NULL) rather than
+     * indeterminate stack memory it would wait on or fault reading. The
+     * mappings below can fail, and a caller that checks the return and
+     * then joins the lot -- which a test did -- must not be punished for
+     * it.
+     */
+    memset(t, 0, sizeof(*t));
     size_t size = stack_size ? stack_size : STACK_DEFAULT;
     size = (size + PAGE - 1) & ~(size_t)(PAGE - 1);
 
@@ -60,18 +69,19 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      */
     char *base = mmap(NULL, size + PAGE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (base == MAP_FAILED)
-        return -ENOMEM;
+        return -errno;                     /* the reservation */
     if (munmap(base + PAGE, size) != 0) {
+        int e = errno;
         munmap(base, size + PAGE);
-        return -ENOMEM;
+        return -e;                         /* the hole */
     }
     if (mmap(base + PAGE, size, PROT_READ | PROT_WRITE,
              MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
+        int e = errno;
         munmap(base, PAGE);
-        return -ENOMEM;
+        return -e;                         /* the fixed map into the hole */
     }
 
-    memset(t, 0, sizeof(*t));
     t->fn = fn;
     t->arg = arg;
     t->stack = base;
