@@ -1134,7 +1134,18 @@ must not rely on `errno` across threads until then; the consequence is a
 wrong error code, never corruption. `cosmo/thread.h` itself needs none of
 the three.
 
-Named and deferred: **a thread-safe libc** (above); `SYS_mprotect`; futex
+Named and deferred: **a per-thread `errno`** -- designed since, in
+`docs/audit/next-subsystem-errno-tls.md` (not yet implemented): one
+syscall, `SYS_set_tls`, because the kernel keeps a thread pointer per
+thread and nothing lets a program set its own, plus a block libc installs
+for every thread it knows about -- a `.bss` object for the first, a page
+in the stack mapping for each one it creates -- with `errno` becoming an
+unconditional accessor over it. There is deliberately **no** fallback for
+a thread that has none: on x86-64, reading `%fs:0` with a zero base
+dereferences address zero before any check could run, so the design
+guarantees a block rather than testing for one, and a thread made by a raw
+`SYS_thread_create` with `tls = 0` must not call libc. It is also the prerequisite for the `vmctl` conversion below,
+whose vCPU threads would each read `errno`. `SYS_mprotect`; futex
 requeue (the Linux door already exposes it); per-thread signal *targeting*
 (a native `tgkill`); a thread's name and priority in `struct cosmo_thread`;
 `COSMO_RLIMIT_NTHREAD`; `/proc` per-thread entries; the handle table under
