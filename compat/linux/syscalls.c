@@ -303,7 +303,9 @@ static int64_t do_open(uint64_t upath, unsigned lxflags, uint32_t mode)
     if (lx_open_flags(lxflags, &flags) < 0)
         return -EINVAL;
     struct file *f;
-    rc = vfs_open(process_current()->cwd, path, flags, mode & 07777u, &f);
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_open(cwd, path, flags, mode & 07777u, &f);
+    vnode_put(cwd);
     if (rc)
         return rc;
     unsigned rights = 0, acc = flags & COSMO_O_ACCMODE;
@@ -365,7 +367,9 @@ static __maybe_unused int64_t lx_stat(struct syscall_args *a)
     if (rc)
         return rc;
     struct cosmo_stat st;
-    rc = vfs_stat(process_current()->cwd, path, &st);
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_stat(cwd, path, &st);
+    vnode_put(cwd);
     return rc ? rc : stat_out(&st, a->a[1]);
 }
 
@@ -394,7 +398,9 @@ static int64_t lx_newfstatat(struct syscall_args *a)
     if (rc)
         return rc;
     struct cosmo_stat st;
-    rc = vfs_stat(process_current()->cwd, path, &st);
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_stat(cwd, path, &st);
+    vnode_put(cwd);
     return rc ? rc : stat_out(&st, a->a[2]);
 }
 
@@ -441,17 +447,23 @@ static int64_t path_call(struct syscall_args *a, unsigned which, uint64_t upath)
     int rc = get_path(upath, path);
     if (rc)
         return rc;
-    struct vnode *cwd = process_current()->cwd;
+    /* One reference for all four arms -- and one release, which is why
+     * each arm sets `rc` instead of returning: an early return here would
+     * leak the reference the walk is holding. */
+    struct vnode *cwd = process_cwd_get();
     switch (which) {
-    case 0: return vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u);
-    case 1: return vfs_rmdir(cwd, path);
-    case 2: return vfs_unlink(cwd, path);
+    case 0: rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u); break;
+    case 1: rc = vfs_rmdir(cwd, path); break;
+    case 2: rc = vfs_unlink(cwd, path); break;
     case 3: {
         struct cosmo_stat st;
-        return vfs_stat(cwd, path, &st);   /* access: existence */
+        rc = vfs_stat(cwd, path, &st);   /* access: existence */
+        break;
     }
-    default: return -ENOSYS;
+    default: rc = -ENOSYS; break;
     }
+    vnode_put(cwd);
+    return rc;
 }
 
 static __maybe_unused int64_t lx_mkdir(struct syscall_args *a) { return path_call(a, 0, a->a[0]); }
@@ -466,7 +478,12 @@ static int64_t lx_mkdirat(struct syscall_args *a)
     if (rc)
         return rc;
     rc = check_dirfd((int64_t)a->a[0], path);
-    return rc ? rc : vfs_mkdir(process_current()->cwd, path, (uint32_t)a->a[2] & 07777u);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_mkdir(cwd, path, (uint32_t)a->a[2] & 07777u);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t lx_unlinkat(struct syscall_args *a)
@@ -478,8 +495,10 @@ static int64_t lx_unlinkat(struct syscall_args *a)
     rc = check_dirfd((int64_t)a->a[0], path);
     if (rc)
         return rc;
-    return (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(process_current()->cwd, path)
-                                        : vfs_unlink(process_current()->cwd, path);
+    struct vnode *cwd = process_cwd_get();
+    rc = (a->a[2] & LX_AT_REMOVEDIR) ? vfs_rmdir(cwd, path) : vfs_unlink(cwd, path);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t lx_faccessat(struct syscall_args *a)
@@ -492,7 +511,12 @@ static int64_t lx_faccessat(struct syscall_args *a)
     if (rc)
         return rc;
     struct cosmo_stat st;
-    return vfs_stat(process_current()->cwd, path, &st);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_stat(cwd, path, &st);
+    vnode_put(cwd);
+    return rc;
 }
 
 static __maybe_unused int64_t lx_rename(struct syscall_args *a)
@@ -502,7 +526,12 @@ static __maybe_unused int64_t lx_rename(struct syscall_args *a)
     if (rc)
         return rc;
     rc = get_path(a->a[1], newp);
-    return rc ? rc : vfs_rename(process_current()->cwd, oldp, newp);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_rename(cwd, oldp, newp);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t lx_renameat(struct syscall_args *a)
@@ -517,7 +546,12 @@ static int64_t lx_renameat(struct syscall_args *a)
     rc = check_dirfd((int64_t)a->a[0], oldp);
     if (rc == 0)
         rc = check_dirfd((int64_t)a->a[2], newp);
-    return rc ? rc : vfs_rename(process_current()->cwd, oldp, newp);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_rename(cwd, oldp, newp);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t lx_chdir(struct syscall_args *a)
@@ -533,7 +567,7 @@ static int64_t lx_getcwd(struct syscall_args *a)
     size_t len = (size_t)a->a[1];
     char buf[VFS_PATH_MAX];
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    size_t n = strlcpy(buf, p->cwd_path, sizeof(buf));
+    size_t n = strlcpy(buf, p->cwd_path_locked, sizeof(buf));
     spin_unlock_irqrestore(&p->lock, s);
     if (len < n + 1)
         return -ERANGE;

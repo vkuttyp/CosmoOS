@@ -391,7 +391,9 @@ static int64_t sys_open(struct syscall_args *a)
     unsigned flags = (unsigned)a->a[1];
     uint32_t mode = (uint32_t)a->a[2];
     struct file *f;
-    rc = vfs_open(process_current()->cwd, path, flags, mode, &f);
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_open(cwd, path, flags, mode, &f);
+    vnode_put(cwd);
     if (rc)
         return rc;
     /* The access mode decides read and write; opening a file is what
@@ -415,7 +417,9 @@ static int64_t sys_stat(struct syscall_args *a)
     if (rc)
         return rc;
     struct cosmo_stat st;
-    rc = vfs_stat(process_current()->cwd, path, &st);
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_stat(cwd, path, &st);
+    vnode_put(cwd);
     if (rc)
         return rc;
     return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
@@ -464,21 +468,36 @@ static int64_t sys_mkdir(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_mkdir(process_current()->cwd, path, (uint32_t)a->a[1]);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1]);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t sys_unlink(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_unlink(process_current()->cwd, path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_unlink(cwd, path);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t sys_rmdir(struct syscall_args *a)
 {
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
-    return rc ? rc : vfs_rmdir(process_current()->cwd, path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_rmdir(cwd, path);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t sys_rename(struct syscall_args *a)
@@ -488,7 +507,12 @@ static int64_t sys_rename(struct syscall_args *a)
     if (rc)
         return rc;
     rc = get_path(a->a[1], newp);
-    return rc ? rc : vfs_rename(process_current()->cwd, oldp, newp);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_rename(cwd, oldp, newp);
+    vnode_put(cwd);
+    return rc;
 }
 
 static int64_t sys_getdents(struct syscall_args *a)
@@ -1436,7 +1460,7 @@ static int64_t sys_getcwd(struct syscall_args *a)
     size_t len = (size_t)a->a[1];
     char buf[VFS_PATH_MAX];
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
-    size_t n = strlcpy(buf, p->cwd_path, sizeof(buf));
+    size_t n = strlcpy(buf, p->cwd_path_locked, sizeof(buf));
     spin_unlock_irqrestore(&p->lock, s);
     if (len < n + 1)
         return -ERANGE;

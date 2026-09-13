@@ -73,8 +73,8 @@ static void process_release(struct kobject *obj)
     handle_table_destroy(&p->handles);
     if (p->space != NULL)
         vm_space_destroy(p->space);
-    if (p->cwd)
-        vnode_put(p->cwd);
+    if (p->cwd_locked)
+        vnode_put(p->cwd_locked);
     if (p->root)
         vnode_put(p->root);
     /* After the directories: a cwd or root inside one of this
@@ -539,18 +539,18 @@ int process_create_from_images(const struct process_image *exe, const struct pro
     /* Working directory: the request's, else the parent's, else the root. */
     if (attr && attr->cwd) {
         vnode_get(attr->cwd);
-        p->cwd = attr->cwd;
-        strlcpy(p->cwd_path, attr->cwd_path, sizeof(p->cwd_path));
+        p->cwd_locked = attr->cwd;
+        strlcpy(p->cwd_path_locked, attr->cwd_path, sizeof(p->cwd_path_locked));
     } else if (parent) {
         arch_irq_state_t ps = spin_lock_irqsave(&parent->lock);
-        p->cwd = parent->cwd;
-        if (p->cwd)
-            vnode_get(p->cwd);
-        strlcpy(p->cwd_path, parent->cwd_path, sizeof(p->cwd_path));
+        p->cwd_locked = parent->cwd_locked;
+        if (p->cwd_locked)
+            vnode_get(p->cwd_locked);
+        strlcpy(p->cwd_path_locked, parent->cwd_path_locked, sizeof(p->cwd_path_locked));
         spin_unlock_irqrestore(&parent->lock, ps);
     } else {
-        p->cwd = vfs_root();
-        strlcpy(p->cwd_path, "/", sizeof(p->cwd_path));
+        p->cwd_locked = vfs_root();
+        strlcpy(p->cwd_path_locked, "/", sizeof(p->cwd_path_locked));
     }
 
     rc = signal_process_init(p);
@@ -764,8 +764,8 @@ fail:
     handle_table_destroy(&p->handles);
     if (p->space)
         vm_space_destroy(p->space);
-    if (p->cwd)
-        vnode_put(p->cwd);
+    if (p->cwd_locked)
+        vnode_put(p->cwd_locked);
     if (p->root)
         vnode_put(p->root);
     /* After the directories: a cwd or root inside one of this
@@ -1038,9 +1038,9 @@ void process_last_thread_gone(struct process *p)
      * exited must deliver EOF while the reader has yet to wait for it.
      * The zombie keeps only its identity and status. */
     handle_table_destroy(&p->handles);
-    if (p->cwd) {
-        vnode_put(p->cwd);
-        p->cwd = NULL;
+    if (p->cwd_locked) {
+        vnode_put(p->cwd_locked);
+        p->cwd_locked = NULL;
     }
 
     if (init)
@@ -1259,16 +1259,67 @@ int path_normalize(const char *base, const char *rel, char *out, size_t n)
     return 0;
 }
 
+/*
+ * The current directory, referenced (docs/audit/next-subsystem-cwd-ref.md).
+ * Two instructions under the lock: read the pointer, take a reference.
+ * That is the whole fix -- the swapper cannot drop the old reference until
+ * it holds this lock, and it cannot hold this lock until the reader has
+ * either taken its own reference or not yet loaded the pointer.
+ */
+struct vnode *process_cwd_get(void)
+{
+    struct process *p = process_current();
+    if (p == NULL)
+        return NULL;   /* a kernel thread; it resolves no relative paths */
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct vnode *vn = p->cwd_locked;
+    if (vn)
+        vnode_get(vn);
+    spin_unlock_irqrestore(&p->lock, s);
+    return vn;
+}
+
+/* The same, plus the path, from the *same* acquisition -- see the header
+ * for why taking them separately is a defect and not an optimisation. */
+struct vnode *process_cwd_snapshot(char *path, size_t len)
+{
+    struct process *p = process_current();
+    if (p == NULL) {
+        if (len)
+            path[0] = '\0';
+        return NULL;
+    }
+    arch_irq_state_t s = spin_lock_irqsave(&p->lock);
+    struct vnode *vn = p->cwd_locked;
+    if (vn)
+        vnode_get(vn);
+    strlcpy(path, p->cwd_path_locked, len);
+    spin_unlock_irqrestore(&p->lock, s);
+    return vn;
+}
+
 int process_chdir(const char *path)
 {
     struct process *cur = process_current();
     KASSERT(cur != NULL);   /* a system call: always on a process */
-    char newpath[sizeof(cur->cwd_path)];
-    int rc = path_normalize(cur->cwd_path, path, newpath, sizeof(newpath));
-    if (rc)
+    /*
+     * One snapshot for both: the base this normalises against and the
+     * directory this looks up in must be the same directory, or what gets
+     * published below is the path of one and the vnode of another.
+     */
+    char base[sizeof(cur->cwd_path_locked)];
+    struct vnode *cwd = process_cwd_snapshot(base, sizeof(base));
+    char newpath[sizeof(cur->cwd_path_locked)];
+    int rc = path_normalize(base, path, newpath, sizeof(newpath));
+    if (rc) {
+        if (cwd)
+            vnode_put(cwd);
         return rc;
+    }
     struct vnode *vn;
-    rc = vfs_lookup(cur->cwd, path, &vn);
+    rc = vfs_lookup(cwd, path, &vn);
+    if (cwd)
+        vnode_put(cwd);
     if (rc)
         return rc;
     if (vn->type != VNODE_DIR) {
@@ -1281,10 +1332,14 @@ int process_chdir(const char *path)
         return rc;
     }
     arch_irq_state_t s = spin_lock_irqsave(&cur->lock);
-    struct vnode *old = cur->cwd;
-    cur->cwd = vn;
-    strlcpy(cur->cwd_path, newpath, sizeof(cur->cwd_path));
+    struct vnode *old = cur->cwd_locked;
+    cur->cwd_locked = vn;
+    strlcpy(cur->cwd_path_locked, newpath, sizeof(cur->cwd_path_locked));
     spin_unlock_irqrestore(&cur->lock, s);
+    /*
+     * Outside the lock, and safe to be the last reference now: every walk
+     * that started while this was the cwd took a reference of its own.
+     */
     if (old)
         vnode_put(old);
     return 0;
