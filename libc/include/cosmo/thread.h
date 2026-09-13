@@ -106,4 +106,74 @@ void cosmo_mutex_lock(cosmo_mutex_t *m);
 void cosmo_mutex_unlock(cosmo_mutex_t *m);
 int cosmo_mutex_trylock(cosmo_mutex_t *m);   /* 0, or -EBUSY */
 
+/*
+ * A condition variable: how a thread waits for something *another thread
+ * will do* (docs/audit/next-subsystem-condvar.md). A mutex answers "not at
+ * the same time as you"; this answers "not until you have done the thing",
+ * and until it existed every program that needed one wrote a futex
+ * protocol by hand.
+ *
+ * One word, because there is nothing else to keep: a sequence number that
+ * every signal increments. No waiter count, no associated mutex, no
+ * allocation and nothing to destroy -- the same shape as `cosmo_mutex_t`,
+ * and for the same reason: a primitive that cannot fail to be created can
+ * be a static object in the program that uses it.
+ */
+typedef struct {
+    volatile unsigned seq;
+} cosmo_cond_t;
+
+#define COSMO_COND_INIT { 0 }
+
+/*
+ * **Wait in a loop, on a predicate. Always.**
+ *
+ *     cosmo_mutex_lock(&m);
+ *     while (!ready)
+ *         cosmo_cond_wait(&c, &m);
+ *     cosmo_mutex_unlock(&m);
+ *
+ * `cosmo_cond_wait` may return with nothing having happened. That is not
+ * an apology for the implementation, it is the interface: it is what lets
+ * the structure be one word with no bookkeeping, and it is what every
+ * other condition variable specifies, so a reader who knows one knows
+ * this one. A caller who writes `if` instead of `while` has written a bug
+ * that passes every test on an unloaded machine.
+ *
+ * The caller must hold `m` on entry and holds it again on return -- which
+ * is the whole point of handing the mutex over: the predicate cannot
+ * change under a waiter that is deciding whether to sleep.
+ *
+ * A signaller must change the predicate **under the same mutex**. That is
+ * not advice: it is what makes a wakeup impossible to lose, because it
+ * puts every signal's increment of `seq` either before the waiter read
+ * `seq` (so the waiter has not slept yet and will see the predicate) or
+ * after it (so `futex_wait` compares unequal and does not sleep at all).
+ *
+ * `cosmo_cond_timedwait` returns 0 if it was woken or woke spuriously, and
+ * `-ETIMEDOUT` if the interval expired. It does **not** return "the
+ * predicate is true" -- it has never seen the predicate. A caller that
+ * must give up keeps its own deadline and re-checks:
+ *
+ *     uint64_t deadline = cosmo_clock_ns() + budget;
+ *     cosmo_mutex_lock(&m);
+ *     while (!ready) {
+ *         uint64_t now = cosmo_clock_ns();
+ *         if (now >= deadline) break;
+ *         cosmo_cond_timedwait(&c, &m, deadline - now);
+ *     }
+ *
+ * `timeout_ns` is *relative*, as `cosmo_futex_wait`'s is, so passing the
+ * same value each time round a loop waits longer than intended -- hence
+ * the deadline above rather than a bare budget.
+ *
+ * A `cosmo_cond_t` may be destroyed when no thread is waiting on it. That
+ * is the caller's knowledge, not the library's, and it is the same rule
+ * the mutex has. There is nothing to free.
+ */
+void cosmo_cond_wait(cosmo_cond_t *c, cosmo_mutex_t *m);
+int cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long timeout_ns);
+void cosmo_cond_signal(cosmo_cond_t *c);
+void cosmo_cond_broadcast(cosmo_cond_t *c);
+
 #endif /* COSMO_THREAD_H */

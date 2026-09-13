@@ -537,7 +537,41 @@ linker agree -- reading the ABI documents establishes nothing. Proved by
 not copying `.tdata` (every thread reads 0) and by ignoring the template's
 alignment (the image shifts 48 bytes and *every* variable is wrong, not
 just the over-aligned one, which is broader than predicted).
-(18) The bound holds: creating threads until `-EAGAIN` stops
+(18) **A signal is seen, and the mutex comes back**: one waiter, one
+signaller, and the waiter returns with its predicate true *and* holding
+the mutex again -- which `cosmo_mutex_trylock` returning `-EBUSY` is what
+proves, since the predicate was made true before the wait returned and so
+cannot fail for a missing re-acquisition
+(docs/audit/next-subsystem-condvar.md).
+
+(19) **A signal delivered inside the sleep window is not lost.** The
+window between `cosmo_cond_wait`'s read of its sequence number and its
+`futex_wait` is a few instructions wide, and no arrangement of threads
+reaches it: unlocking the mutex makes a blocked signaller *runnable*, not
+*running*. libc's one-shot probe (`__cosmo_cond_probe`) is armed
+immediately before the wait and signals from inside the window on the
+waiting thread itself. Proved by moving the sequence read after the
+unlock -- the step hangs -- and, separately, by running that same bug with
+a signaller thread instead of the probe, which **passes**: the evidence
+that the seam is what carries this test.
+
+(20) **A broadcast reaches every waiter**, four of four. Its second half
+offers one ticket to four waiters and checks exactly one is taken --
+*work taken*, not threads woken, because spurious wakeups are permitted
+and the number of threads a signal makes runnable is not observable here
+without a race.
+
+(21) **Timeouts**: one wait that expires returning `-ETIMEDOUT` after at
+least the interval it asked for, bounded by the clock rather than a loop
+count, with the mutex retaken on that path too; and one that is signalled
+before its deadline returning 0.
+
+(22) **A correct caller survives spurious wakeups**: a waiter whose
+predicate never becomes true, broadcast at twenty times, returns from
+every wait and goes back round its `while` every time. This is what makes
+the loop contract a tested property rather than a comment in a header.
+
+(23) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
 creates succeed -- three rather than one, because a join that returned
 before the kernel stopped counting its thread left the next create refused
@@ -551,7 +585,7 @@ memory, which is this step working rather than a bug -- and which cost two
 runs to diagnose only because the step counted three different causes as
 one number. Each cause now prints itself.
 
-(19) **A program can find its own program headers**, which is how it finds
+(24) **A program can find its own program headers**, which is how it finds
 its own `PT_TLS`: the auxiliary vector's `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
 are present, `PHENT` is the only size the loader accepts, and -- the part
 that matters -- some `PT_LOAD` in those headers covers the address of

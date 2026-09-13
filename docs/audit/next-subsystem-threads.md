@@ -619,3 +619,24 @@ priority in `cosmo_thread`; `COSMO_RLIMIT_NTHREAD`; `/proc` per-thread
 entries; **the handle table under two threads**, which native threads make
 reachable from a CosmoOS program for the first time and nothing tests; and
 the `vmctl` conversion, which is the first consumer.
+
+**What has since been built, so this list stops contradicting the tree.**
+A **per-thread `errno`** is done (`docs/audit/next-subsystem-errno-tls.md`),
+and with it the thread-pointer accessor and the block `__libc_start`
+installs; `__thread` followed
+(`docs/audit/next-subsystem-pt-tls.md`). The **`vmctl` conversion** is
+done (`docs/audit/next-subsystem-vcpu-threads.md`): a thread per vCPU,
+with `SYS_vcpu_stop` to make one leave its run.
+
+**Futex requeue is still deferred, and now has a number attached to the
+decision.** `docs/audit/next-subsystem-condvar.md` built a condition
+variable on `futex_wait`/`futex_wake` alone -- `broadcast` is one
+`futex_wake` with an unbounded count -- and deferred `SYS_futex_requeue`
+on the native door to a measurement rather than to taste: whether
+broadcast cost grows worse than linearly at eight waiters, the largest
+count this tree actually has. The kernel half already exists and is
+exercised through the Linux door.
+
+Still open from this list: `SYS_mprotect`, per-thread signal targeting, a
+thread's name and priority, `COSMO_RLIMIT_NTHREAD`, `/proc` per-thread
+entries, and **the handle table under two threads**.

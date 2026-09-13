@@ -223,3 +223,79 @@ int cosmo_mutex_trylock(cosmo_mutex_t *m)
 {
     return cas(&m->state, 0, 1) == 0 ? 0 : -EBUSY;
 }
+
+/* --- a condition variable over the same futex ------------------------------
+ *
+ * The wait every threaded program was writing by hand
+ * (docs/audit/next-subsystem-condvar.md). `cosmo/thread.h` carries the
+ * contract a caller needs; what follows is why it cannot lose a wakeup.
+ *
+ * `seq` counts signals. A waiter reads it **while still holding the
+ * mutex**, and a signaller must change the predicate under that same
+ * mutex -- so every signal is ordered against that read, and there are
+ * only two cases. A signal before the read: the predicate is already
+ * true, and the caller's `while` sees it without ever waiting. A signal
+ * after the read: it incremented `seq`, so `futex_wait` finds the word
+ * different from the value it was given and returns without sleeping.
+ * Neither case sleeps on a signal that has already happened, which is the
+ * whole of the property.
+ *
+ * The one window left is between the unlock and the `futex_wait`, and it
+ * is the kernel's to close rather than this file's: `futex_wait` compares
+ * the word under the bucket lock and a waiter caught between its compare
+ * and its enqueue observes `wake_seq` and retries (kernel/ipc/futex.c).
+ * This code depends on that rather than reinventing it.
+ */
+
+void (*__cosmo_cond_probe)(void);   /* see libc.h; NULL in every real program */
+
+int cosmo_cond_timedwait(cosmo_cond_t *c, cosmo_mutex_t *m, unsigned long long timeout_ns)
+{
+    /*
+     * Read before the unlock. This single ordering is the property; moving
+     * it below the unlock is the lost-wakeup bug, and the probe below is
+     * how a test can actually make that bug fail.
+     */
+    unsigned seq = __atomic_load_n(&c->seq, __ATOMIC_RELAXED);
+    cosmo_mutex_unlock(m);
+
+    void (*probe)(void) = __atomic_exchange_n(&__cosmo_cond_probe, 0, __ATOMIC_ACQ_REL);
+    if (probe)
+        probe();
+
+    long rc = cosmo_futex_wait(&c->seq, seq, timeout_ns);
+    cosmo_mutex_lock(m);
+    /*
+     * Only a timeout is reported. Everything else -- woken, `-EAGAIN`
+     * because `seq` had already moved, or any error this call cannot do
+     * anything about -- is a return to the caller's `while`, which is
+     * where the predicate is. Treating an unexpected error as a spurious
+     * wakeup is safe *because* the caller loops; it is not safe in an
+     * interface where the caller may not.
+     */
+    return rc == -ETIMEDOUT ? -ETIMEDOUT : 0;
+}
+
+void cosmo_cond_wait(cosmo_cond_t *c, cosmo_mutex_t *m)
+{
+    (void)cosmo_cond_timedwait(c, m, 0);   /* 0 is "no timer" to SYS_futex_wait */
+}
+
+void cosmo_cond_signal(cosmo_cond_t *c)
+{
+    __atomic_fetch_add(&c->seq, 1, __ATOMIC_ACQ_REL);
+    cosmo_futex_wake(&c->seq, 1);
+}
+
+void cosmo_cond_broadcast(cosmo_cond_t *c)
+{
+    __atomic_fetch_add(&c->seq, 1, __ATOMIC_ACQ_REL);
+    /*
+     * Every waiter, which then contend for the mutex -- the herd
+     * `FUTEX_REQUEUE` exists to avoid. `SYS_futex_wake`'s count is
+     * unbounded in the kernel, so this is one call; whether the second
+     * syscall a requeue would cost is worth saving is a measurement the
+     * report defers rather than a guess made here.
+     */
+    cosmo_futex_wake(&c->seq, ~0u);
+}

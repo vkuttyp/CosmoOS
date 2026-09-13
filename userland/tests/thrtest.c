@@ -95,16 +95,56 @@ void *entry_probe_body(void *arg)
     return (void *)(unsigned long)(v[0] + v[1]);
 }
 
-/* (3) Two threads make progress against each other. */
+/*
+ * (3) Two threads make progress against each other.
+ *
+ * This waited with **a loop count standing in for a duration** -- two
+ * million iterations, yielding every four thousand -- which is the
+ * substitution this tree has been bitten by twice and which
+ * docs/audit/next-subsystem-condvar.md cited as a reason to build the
+ * primitive. A count measures the host's speed, not the property.
+ *
+ * Both sides now wait on one condition variable against a real deadline,
+ * so a side that never runs makes this step **fail with a message**
+ * rather than spin for two million iterations or hang for the boot
+ * deadline. Five seconds is absurdly generous for two threads setting a
+ * flag, which is what a budget should be: large enough that a loaded host
+ * never reaches it, finite so a broken one says so.
+ *
+ * `broadcast` rather than `signal`, because the two parties wait on the
+ * same variable for *different* predicates -- `signal` may wake exactly
+ * the one that has nothing to look at.
+ */
+#define PAIR_BUDGET_NS (5ull * 1000ull * 1000ull * 1000ull)
+static cosmo_mutex_t pair_m = COSMO_MUTEX_INIT;
+static cosmo_cond_t pair_c = COSMO_COND_INIT;
 static volatile unsigned flag_a, flag_b;
+
+/* Wait for `*flag` under `pair_m`, which the caller must already hold. */
+static void pair_wait(volatile unsigned *flag)
+{
+    uint64_t deadline = cosmo_clock_ns() + PAIR_BUDGET_NS;
+    while (!*flag) {
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline)
+            break;
+        /* Relative, so recomputed each pass from the deadline: passing the
+         * budget itself each time would wait five seconds per iteration
+         * (cosmo/thread.h). */
+        cosmo_cond_timedwait(&pair_c, &pair_m, deadline - now);
+    }
+}
+
 static void *pair_a(void *arg)
 {
     (void)arg;
+    cosmo_mutex_lock(&pair_m);
     flag_a = 1;
-    for (unsigned i = 0; i < 2000000u && !flag_b; i++)
-        if ((i & 0xfffu) == 0xfffu)
-            cosmo_yield();
-    return (void *)(unsigned long)flag_b;
+    cosmo_cond_broadcast(&pair_c);
+    pair_wait(&flag_b);
+    unsigned saw = flag_b;
+    cosmo_mutex_unlock(&pair_m);
+    return (void *)(unsigned long)saw;
 }
 
 /* (11) The allocator and stdio, from several threads at once: what an
@@ -299,6 +339,170 @@ static void *layout_probe(void *arg)
     return NULL;
 }
 
+/* --- steps 18 to 22: the condition variable ------------------------------
+ *
+ * Shared between the steps because the shapes repeat: a mutex, a
+ * condition variable, a predicate, and a count of waiters that got
+ * through. Every waiter here loops on its predicate, which is the
+ * contract `cosmo/thread.h` states -- a waiter written with `if` would
+ * pass most of these on an unloaded machine, which is why the contract is
+ * a documented invariant and not a suggestion.
+ */
+/*
+ * libc's test seam, declared here because **no public header offers it**
+ * -- it is libc's own (`libc/src/libc.h`), and a program has no business
+ * with it. This test is the exception that the seam exists for, and
+ * reaching for the symbol by hand is the honest way to say so.
+ */
+extern void (*__cosmo_cond_probe)(void);
+
+static cosmo_mutex_t cv_m = COSMO_MUTEX_INIT;
+static cosmo_cond_t  cv_c = COSMO_COND_INIT;
+/*
+ * A second variable, so that a test waiting for its waiters to *arrive*
+ * waits with the primitive too rather than spinning on a yield. Every
+ * `cosmo_yield()` poll in these steps was one, and a spin inside the
+ * condition variable's own tests would be the clearest possible statement
+ * that the author did not believe in it.
+ */
+static cosmo_cond_t  cv_enter_c = COSMO_COND_INIT;
+static volatile unsigned cv_ready;      /* the predicate */
+static volatile unsigned cv_woke;       /* waiters that returned with it true */
+static volatile unsigned cv_held_ok;    /* waiters that found the mutex re-taken */
+static volatile unsigned cv_entered;    /* waiters that have reached the wait */
+
+/* Wait, under `cv_m`, for `cv_entered` to reach `n`. */
+static void cv_await_entered(unsigned n)
+{
+    while (cv_entered < n)
+        cosmo_cond_wait(&cv_enter_c, &cv_m);
+}
+
+static void *cv_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);   /* whoever is waiting for us to arrive */
+    while (!cv_ready)
+        cosmo_cond_wait(&cv_c, &cv_m);
+    /*
+     * The predicate is true -- but the signaller made it true before this
+     * returned, so the predicate alone cannot tell a correct wait from one
+     * that never re-acquired the mutex. `trylock` can: the mutex is not
+     * recursive, so a thread that holds it is refused, and a thread that
+     * does not holds it after this call. -EBUSY is the assertion.
+     */
+    if (cosmo_mutex_trylock(&cv_m) == -EBUSY)
+        cv_held_ok++;
+    cv_woke++;
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/*
+ * Step 20's second half. `cv_tickets` is *work*, not a flag: a waiter that
+ * wakes takes one if there is one and otherwise goes back to waiting.
+ *
+ * This shape exists because the obvious assertion is wrong. A first draft
+ * of step 20 checked that `cosmo_cond_signal` wakes **exactly one**
+ * waiter -- and the interface does not promise that. Spurious wakeups are
+ * permitted (cosmo/thread.h), step 22 exists because callers must
+ * tolerate them, and waking more waiters than necessary is a cost rather
+ * than a defect. The number of threads a signal makes runnable is also
+ * not observable from here without a race. What *is* guaranteed, and what
+ * a caller depends on, is that **no more work is taken than was made
+ * available** however many threads wake -- so that is what is asserted.
+ */
+static volatile unsigned cv_tickets, cv_taken;
+static void *cv_ticket_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);
+    while (cv_tickets == 0)
+        cosmo_cond_wait(&cv_c, &cv_m);
+    cv_tickets--;
+    cv_taken++;
+    cosmo_cond_broadcast(&cv_enter_c);   /* the counter the test waits on */
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/*
+ * Step 19's probe: the signal, performed *inside* `cosmo_cond_wait`'s
+ * window, on the waiting thread itself. `__cosmo_cond_probe` is called
+ * after the wait has released the mutex and before it sleeps, so taking
+ * the mutex here cannot deadlock -- and it means the signal lands in the
+ * window by construction rather than by asking the scheduler nicely.
+ *
+ * Two earlier designs of this test tried to do it with a second thread
+ * and could not: unlocking the mutex makes a blocked signaller runnable,
+ * not running, so the waiter reaches `futex_wait` first and a
+ * read-after-unlock implementation passes.
+ */
+static volatile unsigned cv_probe_ran;
+static void cv_probe(void)
+{
+    cosmo_mutex_lock(&cv_m);
+    cv_ready = 1;
+    cosmo_cond_signal(&cv_c);
+    cosmo_mutex_unlock(&cv_m);
+    __atomic_fetch_add(&cv_probe_ran, 1, __ATOMIC_ACQ_REL);
+}
+
+/*
+ * Step 21's second half: a waiter that uses `cosmo_cond_timedwait` and
+ * reports what it returned and how long it took, so that a successful
+ * timed wait is actually exercised rather than described.
+ */
+#define CV_TIMED_BUDGET_NS (1000ull * 1000ull * 1000ull)
+static volatile int cv_timed_rc;
+static volatile unsigned long long cv_timed_ns;
+static void *cv_timed_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);
+    uint64_t t0 = cosmo_clock_ns();
+    uint64_t deadline = t0 + CV_TIMED_BUDGET_NS;
+    int rc = 0;
+    while (!cv_ready) {
+        uint64_t now = cosmo_clock_ns();
+        if (now >= deadline) { rc = -ETIMEDOUT; break; }
+        rc = cosmo_cond_timedwait(&cv_c, &cv_m, deadline - now);
+        if (rc == -ETIMEDOUT)
+            break;
+    }
+    cv_timed_ns = cosmo_clock_ns() - t0;
+    cv_timed_rc = rc;
+    if (cosmo_mutex_trylock(&cv_m) == -EBUSY)
+        cv_held_ok++;
+    cv_woke++;
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
+/* Step 22: a waiter whose predicate never becomes true, so that
+ * broadcasts at it prove only that a correct caller survives them. */
+static volatile unsigned cv_spur_stop, cv_spur_returns;
+static void *cv_spurious_waiter(void *arg)
+{
+    (void)arg;
+    cosmo_mutex_lock(&cv_m);
+    cv_entered++;
+    cosmo_cond_broadcast(&cv_enter_c);
+    while (!cv_spur_stop) {
+        cosmo_cond_wait(&cv_c, &cv_m);
+        cv_spur_returns++;
+        cosmo_cond_broadcast(&cv_enter_c);   /* the counter the test watches */
+    }
+    cosmo_mutex_unlock(&cv_m);
+    return NULL;
+}
+
 /* Step 15: a thread that sets its errno and exits, so main can show that
  * its own survived. */
 static void *errno_setter(void *arg)
@@ -475,6 +679,20 @@ static void on_usr1(int sig)
     (void)sig;
     handler_tid = cosmo_thread_id();
 }
+/*
+ * This thread's wait was `while (!worker_stop) cosmo_yield();` -- an
+ * **unbounded** spin for the whole life of the step. The terminal-modes
+ * unit established why that is worse than inelegant: on a single-CPU boot
+ * the thing being waited for needs the CPU the polling loop is spinning
+ * on, so the wait is paid for out of the progress it is waiting for.
+ *
+ * It sleeps now. Untimed, because the only thing that ends this step is
+ * main setting the flag, and if main never did, the *join* below would
+ * wait forever either way -- a deadline here would report a failure whose
+ * cause is elsewhere.
+ */
+static cosmo_mutex_t worker_m = COSMO_MUTEX_INIT;
+static cosmo_cond_t worker_c = COSMO_COND_INIT;
 static volatile unsigned worker_blocked, worker_stop;
 static void *masked(void *arg)
 {
@@ -483,9 +701,11 @@ static void *masked(void *arg)
     sigemptyset(&set);
     sigaddset(&set, SIGUSR1);
     sigprocmask(SIG_BLOCK, &set, NULL);   /* the mask is this thread's */
+    cosmo_mutex_lock(&worker_m);
     worker_blocked = 1;
     while (!worker_stop)
-        cosmo_yield();
+        cosmo_cond_wait(&worker_c, &worker_m);
+    cosmo_mutex_unlock(&worker_m);
     return NULL;
 }
 
@@ -562,11 +782,12 @@ int main(int argc, char **argv)
     /* (3) */
     flag_a = flag_b = 0;
     CHECK(cosmo_thread_start(&t, pair_a, NULL, 0) == 0);
-    for (unsigned i = 0; i < 2000000u && !flag_a; i++)
-        if ((i & 0xfffu) == 0xfffu)
-            cosmo_yield();
+    cosmo_mutex_lock(&pair_m);
+    pair_wait(&flag_a);
     CHECK(flag_a == 1);
     flag_b = 1;
+    cosmo_cond_broadcast(&pair_c);
+    cosmo_mutex_unlock(&pair_m);
     CHECK(cosmo_thread_join(&t, &ret) == 0);
     CHECK(ret == (void *)1ul);   /* it saw ours: both ran */
 
@@ -652,7 +873,10 @@ int main(int argc, char **argv)
         for (unsigned i = 0; i < 200u && handler_tid == 0; i++)
             cosmo_sleep_ns(1000000ull);
         CHECK(handler_tid == (unsigned)getpid());   /* the thread that does not block it */
+        cosmo_mutex_lock(&worker_m);
         worker_stop = 1;
+        cosmo_cond_broadcast(&worker_c);
+        cosmo_mutex_unlock(&worker_m);
         CHECK(cosmo_thread_join(&t, NULL) == 0);
     }
 
@@ -1014,7 +1238,217 @@ int main(int argc, char **argv)
 
     STEP("18");
     /*
-     * (18) The bound holds, and the process survives reaching it. This is
+     * (18) **A signal is seen, and the mutex comes back.** The first of
+     * the condition variable's steps
+     * (docs/audit/next-subsystem-condvar.md). One waiter, one signaller;
+     * the waiter must return with the predicate true *and* holding the
+     * mutex again.
+     */
+    {
+        cosmo_thread_t w;
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        CHECK(cosmo_thread_start(&w, cv_waiter, NULL, 32u * 1024u) == 0);
+        /* Wait for it to be *in* the wait, by its own report -- and wait
+         * for it on a condition variable, not a yield loop. "N things
+         * after a fixed settle" is the flake family this tree keeps
+         * re-learning, and a spin here would be the primitive's own test
+         * declining to use it. */
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(1);
+        cv_ready = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+        CHECK(cv_woke == 1);
+        CHECK(cv_held_ok == 1);   /* trylock said -EBUSY: the wait re-took it */
+    }
+
+    STEP("19");
+    /*
+     * (19) **A signal delivered inside the sleep window is not lost.**
+     * The property the unit exists for, and the one no arrangement of
+     * threads can test: the window between `cosmo_cond_wait`'s read of
+     * `seq` and its `futex_wait` is a few instructions wide, and
+     * releasing a blocked signaller only makes it *runnable*.
+     *
+     * So libc's probe is armed, and it signals from inside the window on
+     * this very thread. A correct wait read `seq` before unlocking, so the
+     * probe's increment makes `futex_wait` return without sleeping and the
+     * `while` sees the predicate. A wait that read `seq` after unlocking
+     * reads the value the probe already published and sleeps on it
+     * forever -- which is a hang, caught by the boot deadline.
+     *
+     * The probe is armed immediately before the wait it instruments, and
+     * libc *takes* it rather than reading it, so it cannot fire inside a
+     * later step's waiter.
+     */
+    {
+        cv_ready = cv_probe_ran = 0;
+        __atomic_store_n(&__cosmo_cond_probe, cv_probe, __ATOMIC_RELEASE);
+        cosmo_mutex_lock(&cv_m);
+        while (!cv_ready)
+            cosmo_cond_wait(&cv_c, &cv_m);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cv_probe_ran == 1);                       /* the window was entered */
+        CHECK(__atomic_load_n(&__cosmo_cond_probe, __ATOMIC_ACQUIRE) == NULL);
+    }
+
+    STEP("20");
+    /*
+     * (20) **A broadcast reaches every waiter, and a signal delivers one
+     * ticket's worth of work.** Four waiters either way.
+     *
+     * Not "a signal wakes exactly one": the interface does not promise
+     * that. Spurious wakeups are permitted, step 22 exists because callers
+     * must tolerate them, and how many threads a signal makes runnable is
+     * not observable from here without a race. What a caller depends on is
+     * that no more work is taken than was made available, and that is what
+     * the second half asserts.
+     */
+    {
+        cosmo_thread_t w[4];
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_start(&w[i], cv_waiter, NULL, 32u * 1024u) == 0);
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(4);
+        cv_ready = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_join(&w[i], NULL) == 0);
+        CHECK(cv_woke == 4);
+        CHECK(cv_held_ok == 4);
+
+        /*
+         * And a signal with four waiting hands out **one ticket's worth of
+         * work**, however many threads it happens to wake. That -- not
+         * "exactly one thread wakes" -- is what the interface promises;
+         * see `cv_ticket_waiter` for why the obvious assertion was wrong
+         * and had to be replaced.
+         */
+        /*
+         * The ticket is published **after** all four are waiting, not
+         * before they start. A first version set it first, so the first
+         * worker to run found work waiting and took it without ever
+         * calling `cosmo_cond_wait` -- by the time main saw four arrivals
+         * `cv_taken` was already 1, and deleting the signal entirely would
+         * still have passed. Review found it. A test for what a signal
+         * delivers must have nothing to deliver until the signal.
+         */
+        cv_entered = cv_taken = 0;
+        cv_tickets = 0;
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_start(&w[i], cv_ticket_waiter, NULL, 32u * 1024u) == 0);
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(4);
+        CHECK(cv_taken == 0);       /* nothing taken before there was anything to take */
+        cv_tickets = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        /* Whoever wakes, exactly one ticket exists, so exactly one is
+         * taken -- and this stays true however long we look, which is what
+         * makes it an assertion rather than a sample. */
+        cosmo_mutex_lock(&cv_m);
+        while (cv_taken < 1u)
+            cosmo_cond_wait(&cv_enter_c, &cv_m);
+        CHECK(cv_taken == 1);
+        CHECK(cv_tickets == 0);
+        /* Release the other three with work of their own. */
+        cv_tickets = 3;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        for (unsigned i = 0; i < 4u; i++)
+            CHECK(cosmo_thread_join(&w[i], NULL) == 0);
+        CHECK(cv_taken == 4 && cv_tickets == 0);
+    }
+
+    STEP("21");
+    /*
+     * (21) **Timeouts.** One wait that expires and one that does not,
+     * both bounded by the clock rather than by a loop count.
+     */
+    {
+        cv_ready = 0;
+        cosmo_mutex_lock(&cv_m);
+        uint64_t t0 = cosmo_clock_ns();
+        int rc = cosmo_cond_timedwait(&cv_c, &cv_m, 20ull * 1000ull * 1000ull);
+        uint64_t elapsed = cosmo_clock_ns() - t0;
+        /*
+         * The mutex, **before** releasing it. A first version unlocked and
+         * then checked that `trylock` succeeded, which proves only that
+         * the mutex is free -- and `cosmo_mutex_unlock` silently stores 0
+         * over an already-unlocked mutex, so that check passed whether or
+         * not `timedwait` had retaken it. Review found it. Asking for
+         * -EBUSY while still holding it is the assertion that can fail.
+         */
+        CHECK(cosmo_mutex_trylock(&cv_m) == -EBUSY);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(rc == -ETIMEDOUT);
+        CHECK(elapsed >= 20ull * 1000ull * 1000ull);   /* it waited at least what it was asked */
+
+        /*
+         * And a timed wait that is *signalled* returns 0, well inside its
+         * deadline. This needs a waiter that actually calls
+         * `cosmo_cond_timedwait`: a first version used the untimed
+         * `cv_waiter` here, so the timed success path this paragraph
+         * claims to cover was never executed and an implementation
+         * reporting `-ETIMEDOUT` after a successful wake would have
+         * passed.
+         */
+        cosmo_thread_t w;
+        cv_ready = cv_woke = cv_held_ok = cv_entered = 0;
+        cv_timed_rc = 1; cv_timed_ns = 0;
+        CHECK(cosmo_thread_start(&w, cv_timed_waiter, NULL, 32u * 1024u) == 0);
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(1);
+        cv_ready = 1;
+        cosmo_cond_signal(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+        CHECK(cv_woke == 1);
+        CHECK(cv_timed_rc == 0);                        /* woken, not timed out */
+        CHECK(cv_timed_ns < CV_TIMED_BUDGET_NS);        /* and well inside the budget */
+    }
+
+    STEP("22");
+    /*
+     * (22) **A correct caller survives spurious wakeups.** A waiter whose
+     * predicate never becomes true, broadcast at repeatedly: every
+     * `cosmo_cond_wait` returns and every one goes back round the
+     * `while`, so the waiter is still waiting and the predicate is still
+     * false. This is the step that makes the loop contract a tested
+     * property rather than a comment -- an implementation that returned
+     * "the predicate is true" would strand this waiter's caller.
+     */
+    {
+        cosmo_thread_t w;
+        cv_spur_stop = cv_spur_returns = cv_entered = 0;
+        CHECK(cosmo_thread_start(&w, cv_spurious_waiter, NULL, 32u * 1024u) == 0);
+        cosmo_mutex_lock(&cv_m);
+        cv_await_entered(1);
+        for (unsigned i = 0; i < 20u; i++) {
+            unsigned before = cv_spur_returns;
+            cosmo_cond_broadcast(&cv_c);
+            /* Wait for the wakeup to be observed rather than assuming it
+             * was: the count is the thing, not the interval. */
+            while (cv_spur_returns == before)
+                cosmo_cond_wait(&cv_enter_c, &cv_m);
+        }
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cv_spur_returns >= 20u);   /* it woke, repeatedly */
+        CHECK(cv_spur_stop == 0);        /* and its predicate never became true */
+        /* Release it. */
+        cosmo_mutex_lock(&cv_m);
+        cv_spur_stop = 1;
+        cosmo_cond_broadcast(&cv_c);
+        cosmo_mutex_unlock(&cv_m);
+        CHECK(cosmo_thread_join(&w, NULL) == 0);
+    }
+
+    STEP("23");
+    /*
+     * (23) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256
      * threads, and the memory they hold is returned as the kernel reaps
      * them, not the instant their joins return -- so anything after it is
@@ -1060,9 +1494,9 @@ int main(int argc, char **argv)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
     }
 
-    STEP("19");
+    STEP("24");
     /*
-     * (19) **A program can find its own program headers**, which is how it
+     * (24) **A program can find its own program headers**, which is how it
      * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
      * kernel passes the standard trio in the auxiliary vector and knows
      * nothing about thread-local storage; everything above that is the

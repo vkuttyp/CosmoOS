@@ -41,4 +41,42 @@ void __stdio_lock(void);
 void __stdio_unlock(void);
 size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);
 
+/*
+ * The condition variable's test seam (docs/audit/next-subsystem-condvar.md).
+ *
+ * `cosmo_cond_wait`'s lost-wakeup guarantee lives in a window a few
+ * instructions wide -- between its read of `seq` and its `futex_wait` --
+ * and **nothing another thread can do reaches inside it**. Unlocking the
+ * mutex makes a blocked signaller runnable, not running; the waiter is not
+ * preempted and reaches `futex_wait` first, so a broken implementation
+ * passes. Two drafts of the test tried and could not.
+ *
+ * So the library is instrumented instead: if this is non-NULL,
+ * `cosmo_cond_wait` calls it inside the window, on the waiting thread.
+ * A test that arms it with a function that signals synchronously puts the
+ * signal exactly where it has to be, with no scheduler involved.
+ *
+ * **It is taken, not read** -- an atomic exchange with NULL, so it fires
+ * once for the arming that asked for it. It has to be: this is
+ * process-global, every condition wait in the program goes through here,
+ * and a probe left installed fires inside some *other* test's waiter,
+ * calling that callback against the wrong mutex and predicate.
+ *
+ * Compiled in unconditionally and not behind an `#ifdef`, because a seam
+ * that exists only in a test build proves things about a binary nobody
+ * runs.
+ *
+ * **The cost is an acquire-release exchange, not a load** -- it has to be,
+ * because taking the probe is what stops it firing in a later waiter, and
+ * an earlier draft of this comment described the load it used to be. A
+ * read-modify-write on a process-global word, on every condition wait, is
+ * a real cost and is named here rather than rounded down: it sits
+ * immediately before a `futex_wait` syscall, which is several orders of
+ * magnitude more expensive, and that is the reason it is acceptable
+ * rather than the claim that it is free.
+ *
+ * It is libc's, not a program's: no public header declares it.
+ */
+extern void (*__cosmo_cond_probe)(void);
+
 #endif
