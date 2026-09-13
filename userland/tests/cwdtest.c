@@ -182,6 +182,32 @@ static void *depth_writer(void *arg)
 
 /* Every answer must be one of the four real paths. A torn base produces a
  * fifth. */
+/*
+ * Every path two relative writers can legitimately produce.
+ *
+ * **The set is larger than the directories they aim at**, and a first
+ * version of this test failed on a correct kernel for not knowing that.
+ * Two threads sharing one current directory each issue `chdir("..")`
+ * believing they know where they are; when the other has already moved,
+ * the `..` applies to *its* directory instead, and the pair can walk the
+ * process up out of the subtree altogether -- `/tmp` and `/` included.
+ * That is what relative moves from two threads mean, not a defect.
+ *
+ * A torn `cwd_path` still cannot produce any of these: the two bases
+ * share only `/tmp/cwdr/`, so a mixture of them has one name's head and
+ * the other's tail and is in none of the sets below.
+ */
+static int path_is_legitimate(const char *p)
+{
+    static const char *ok[] = { "/", "/tmp", "/tmp/cwdr",
+                                P_TOP, P_SUB, Q_TOP, Q_SUB,
+                                "/tmp/cwdr/" NAME_A, "/tmp/cwdr/" NAME_B };
+    for (unsigned i = 0; i < sizeof(ok) / sizeof(ok[0]); i++)
+        if (strcmp(p, ok[i]) == 0)
+            return 1;
+    return 0;
+}
+
 static void *depth_observer(void *arg)
 {
     (void)arg;
@@ -191,9 +217,7 @@ static void *depth_observer(void *arg)
             bad_path++;
             break;
         }
-        if (strcmp(buf, P_TOP) && strcmp(buf, P_SUB) &&
-            strcmp(buf, Q_TOP) && strcmp(buf, Q_SUB) &&
-            strcmp(buf, "/tmp/cwdr")) {
+        if (!path_is_legitimate(buf)) {
             printf("cwdtest: getcwd answered '%s'\n", buf);
             bad_path++;
             break;
@@ -389,8 +413,15 @@ int main(void)
                 const char *want = strcmp(buf, DIR_A) == 0 ? "is-a"
                                  : strcmp(buf, DIR_B) == 0 ? "is-b" : NULL;
                 if (want == NULL) {
-                    printf("cwdtest: getcwd answered '%s'\n", buf);
-                    bad_path++;
+                    /* The writers can walk the process out of the pair --
+                     * see path_is_legitimate. That is not a defect, and
+                     * there is nothing to compare, so this round is
+                     * skipped rather than failed. A path that is not even
+                     * legitimate still is a defect. */
+                    if (!path_is_legitimate(buf)) {
+                        printf("cwdtest: getcwd answered '%s'\n", buf);
+                        bad_path++;
+                    }
                 } else {
                     int fd = open(want, O_RDONLY);   /* relative: uses the vnode */
                     if (fd < 0) {

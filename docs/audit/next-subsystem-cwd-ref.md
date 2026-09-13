@@ -1,17 +1,60 @@
 # NEXT SUBSYSTEM — the reference a path walk never takes
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-**nothing in it is implemented**.
+and wait for the instruction to build it. **This report is as built**, and
+building it corrected the report in four places — one of them its headline
+claim.
 
 **Subsystem: the mutable per-process objects a system call dereferences
-without owning.** There is one today — the current directory — and
-sixteen call sites read it with no lock and no reference, then hand the
-raw pointer to the VFS. A second thread calling `chdir` swaps that
-pointer and drops what may be its last reference, and
-`vnode_put` on the last reference unhashes the vnode and frees it. **That
-is a use-after-free reachable by any unprivileged program with two
-threads**, and native threads are what made it reachable.
+without owning.** There is one — the current directory — and it was read
+with no lock and no reference at every site that resolves a relative path,
+then handed to the VFS for the length of a walk. Every walk holds a
+reference now.
+
+**The four corrections, because they are the useful part:**
+
+1. **The census was short.** The report counted sixteen sites in two
+   files, from a `grep`. Renaming the field and building produced
+   **twenty unsafe sites in three files**: `kernel/process/spawn.c` was
+   missed entirely, and it matters — *every process creation* goes through
+   it. `read_executable` resolves the program's own path against the
+   caller's cwd, so `spawn("./prog")` had the defect; the child's
+   requested cwd was normalised against `cur->cwd_path` and then looked up
+   in `cur->cwd`, which is the **incoherent-pair defect review found in
+   this report's own design, already present in the tree**; and the
+   child's requested root the same way. The rename was proposed so that
+   "the compiler produces the worklist rather than a `grep` I might trim",
+   and that is exactly what it did.
+
+2. **The headline severity claim is wrong for `ramfs`.** The report said
+   two threads calling `chdir` and `open` can free a vnode under a walk.
+   They cannot: `ramfs` — which backs `/tmp` — holds a **pinned
+   reference** from a directory entry to its child
+   (`kernel-services/vfs/ramfs.c:25`), so a directory that still exists is
+   referenced by its parent whatever any `chdir` does. Measured, not
+   argued: a diagnostic counting directory-vnode frees during the first
+   three test steps counted **zero**. Reaching the free needs the
+   directory **removed** as well, which the test's fourth step does — and
+   then it frees 228 of them in one run. The defect is real and the fix is
+   right; the recipe in the report was not.
+
+3. **The frame poisoner is the wrong tool.** The report named it as what
+   would make the use-after-free visible. It poisons *page frames*, and a
+   `struct vnode` is a `kzalloc` object, so it never sees one. What the
+   proof used instead was a deliberate `memset(vn, 0xAA, sizeof *vn)`
+   before `kfree`, which is the same idea aimed at the right allocator.
+
+4. **`vfs_vnode_count()` is not exported to userland.** The report's
+   fourth test was to assert a vnode is not freed while a walk holds it,
+   "with the mount's vnode count exported (it exists)". It exists as a
+   *kernel* function, called only by kernel selftests. The test was not
+   written; exporting a new sysctl for it was out of proportion, and
+   saying so is better than quietly dropping it.
+
+**And the outcome the report reserved in advance came true: the tests
+pass and do not prove the fix.** Four reverted-fix runs all passed, two of
+them after the test itself was corrected. The Tests section below carries
+the evidence and the one technique that would change it.
 
 ## Problem
 
@@ -96,13 +139,22 @@ every other site.
 
 ## Current implementation
 
-**Sixteen call sites**, and the second door is the larger half:
+**Twenty unsafe call sites as built** — the report said sixteen, from a
+`grep`; the compiler said twenty. The second door is the largest share:
 
 | file | sites | calls |
 | --- | --- | --- |
-| `kernel/syscall/native.c` | 6 | `vfs_open` (394), `vfs_stat` (418), `vfs_mkdir` (467), `vfs_unlink` (474), `vfs_rmdir` (481), `vfs_rename` (491) |
-| `compat/linux/syscalls.c` | 10 | `openat` (306), `stat`/`lstat` (368, 397), the `mkdir`/`rmdir`/`unlink`/`access` group (444–451), `mkdirat` (469), `unlinkat` (481–482), `newfstatat` (495) |
+| `kernel/syscall/native.c` | 6 | `vfs_open`, `vfs_stat`, `vfs_mkdir`, `vfs_unlink`, `vfs_rmdir`, `vfs_rename` |
+| `compat/linux/syscalls.c` | 10 | `openat`, `stat`/`lstat`, the `mkdir`/`rmdir`/`unlink`/`access` group (one load feeding four arms), `mkdirat`, `unlinkat`, `newfstatat`, and **two `rename`s the report's table did not name** |
+| `kernel/process/spawn.c` | 4 | **missed by the report entirely**: `read_executable`'s lookup of the program, the child's requested cwd (an incoherent pair of its own), and the child's requested root |
 | `kernel/process/process.c` | 1 | `process_chdir`'s own two unlocked reads |
+
+**Three sites already had the discipline**, which is the evidence that
+this unit finishes a rule rather than inventing one: both doors' `getcwd`
+copy the path under `p->lock`, and the child-inherits-the-parent's-cwd
+path in `process_setup` takes `parent->lock`, references the vnode and
+copies the path in **one acquisition** — `process_cwd_snapshot` written by
+hand long before it had a name.
 
 **The Linux door is not an afterthought here.** `compat/linux` has had
 real threads longer than the native ABI has: `LX_CLONE_THREAD`
@@ -402,7 +454,68 @@ certain, and then the bug-proof has to make it certain.
    vnode count exported (it exists: `mnt->nr_vnodes`), the test can assert
    the vnode is *not* freed while a walk holds it.
 
-**Bug-proofs.** Each must fail *for its own stated reason*:
+### As run
+
+The test is `userland/tests/cwdtest.c`, four steps, both architectures,
+and it **passes and does not prove the fix**. Every reverted-fix run
+passed. The evidence is worth more than the verdict:
+
+| what was tried | outcome |
+| --- | --- |
+| steps 1–3, counting directory-vnode frees | **zero** — `ramfs` pins every child, so `chdir` alone frees nothing |
+| step 4 (three threads: mover, remover, walker) | **228 frees**, ~900–1250 walks inside the victim: the window is real and exercised |
+| `vfs_open` reverted to the unowned read | passes |
+| the same, plus `memset(vn, 0xAA, …)` before `kfree` | passes — the walk is never inside the few instructions where the free lands |
+| `process_chdir` reverted to the live `cwd_path` | passes |
+| `process_chdir` reverted to two acquisitions | passes — 200 coherent checks, all coherent |
+
+**Two of the test's own designs could not have failed either**, and both
+are one mistake in different clothes — *inputs that cannot express the
+defect*, which is the trap this report named for absolute paths and then
+fell into twice more:
+
+- **`../X` discards the last component**, which is the only part where two
+  sibling paths differ. Whatever mixture of them a torn read saw, `..`
+  threw it away. Step 2 moves *down* instead (`chdir("s")`), which keeps
+  the whole base, between two directories at different depths sharing
+  nothing after `/tmp/cwdr/`.
+- **the first names differed in one byte** (`a`, `b`), so any torn mixture
+  was still a valid answer — and a single-byte store is atomic regardless.
+  They are now 32 characters against 4.
+
+A third flaw was the opposite kind — a check that **failed on a correct
+kernel**, which is the same defect review had already caught once in this
+report's proofs. Two threads issuing relative moves share one current
+directory, so each `chdir("..")` applies to wherever the *other* left it,
+and the pair can walk the process up out of the subtree entirely: `/tmp`
+and `/` are reachable and legitimate. The observer's allowed set was the
+directories the writers aim at; it is now every path they can reach, and
+the coherence check skips a round it cannot compare rather than failing
+it. A torn base still cannot produce any member of that set, because the
+two names share only `/tmp/cwdr/`.
+
+**Three test-design defects in one unit, all of one family**: the inputs
+or the expectations did not match what the code under test can actually
+do. Two could not fail; one failed when nothing was wrong. Both halves
+cost a run each to find, and neither was visible by reading.
+
+**So the test is labelled a regression, not a proof** — it exercises the
+paths under real concurrency and would catch a gross breakage — in the
+shape `tests/hv/aarch64/guest_psci_race.S` uses for a window it could not
+reach either. The fix stands on its construction: the swapper cannot drop
+the old reference until it holds the lock, and it cannot hold the lock
+until a reader has taken its own reference or has not yet loaded the
+pointer.
+
+**What would turn it into a proof**, named rather than taken because it is
+a scope decision: the seam this tree used one unit ago
+(`docs/audit/next-subsystem-condvar.md`). A kernel-side hook between
+taking the cwd pointer and walking it, armed by the test, forces the
+interleaving instead of waiting for it — and that unit's own evidence was
+that no arrangement of threads reaches a window a few instructions wide.
+
+**Bug-proofs, as designed.** Each was to fail *for its own stated reason*;
+the table above records which did:
 
 - The fix reverted at one native site (`vfs_open` reads `p->cwd_locked`
   directly) → test 1 faults or trips the poison checker. **This is the

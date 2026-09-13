@@ -1588,6 +1588,43 @@ See [docs/development.md](docs/development.md).
   testing them under two guest CPUs needs a guest-side virtio driver and is
   named as its own unit.
 
+- **The reference a path walk never takes**
+  (`docs/audit/next-subsystem-cwd-ref.md`). Every relative-path system
+  call read `process_current()->cwd` with no lock and **no reference**,
+  then handed the raw pointer to a walk that can block, while another
+  thread's `chdir` swapped it and dropped what could be the last
+  reference -- and `vnode_put` on the last reference unhashes the vnode
+  and frees it, the mount's hash being a weak cache that holds none of its
+  own. `process_cwd_get()` returns it referenced and
+  `process_cwd_snapshot()` returns it **with its path from one
+  acquisition**, which is what `chdir` and `spawn` need because they
+  publish both; taking the two separately is correct twice and wrong
+  together, leaving a process that reports one directory through `getcwd`
+  while resolving relative paths in another.
+  **Renaming the field to `cwd_locked` found more than the report's
+  `grep` had**: twenty unsafe sites in three files rather than sixteen in
+  two, including all of `kernel/process/spawn.c`, which every process
+  creation goes through and which already contained the
+  publish-two-reads defect a review had just found in this unit's
+  *design*. Three sites already had the discipline -- both doors' `getcwd`
+  and the child-inherits-the-parent's-cwd path -- so the unit finishes a
+  rule rather than inventing one, and invariant **P29** states it with a
+  census of which per-process fields are mutable.
+  **Two claims in the report were wrong and are corrected in it.** On
+  `ramfs` a directory entry pins its child, so a `chdir` race alone frees
+  nothing -- reaching the free needs the directory *removed* too, measured
+  as zero frees in the first three test steps and 228 in the fourth. And
+  the frame poisoner it named cannot see a `kzalloc`'d vnode.
+  **The test is a regression, not a proof**, which is said plainly: every
+  reverted-fix run passed, including one with each freed vnode poisoned,
+  because the walk is short and never inside the few instructions where
+  the free lands. Two of the test's own designs could not have failed
+  either -- `../X` discards the component the paths differ in, and names
+  differing in one byte cannot show a tear -- both fixed, and the proofs
+  still pass, which makes the result evidence about the window rather than
+  the inputs. The fix stands on its ordering argument, and the seam that
+  would prove it is named.
+
 - **The wait, written once** (`docs/audit/next-subsystem-condvar.md`).
   `cosmo/thread.h` could start a thread, end one, join one and exclude
   one, and had no way to **wait for something another thread will do**.

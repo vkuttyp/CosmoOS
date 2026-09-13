@@ -120,8 +120,10 @@ struct process {
     /* The calls this process may make: bit N set, number N is allowed.
      * All ones until a filter is installed; intersected, never widened,
      * and inherited by children (docs/kernel/security/design.md §1f).
-     * Written only by the process itself, through its own system call,
-     * so a reader in the syscall path needs no lock. */
+     * Read in the syscall path without the lock. The reason is in
+     * kernel/syscall/syscall.c beside the read, and it is not "only the
+     * process itself writes it" -- a process has had more than one thread
+     * for several units, so that argument expired. */
     uint64_t syscall_mask[COSMO_SYSCALL_MASK_WORDS];
     /*
      * The current directory, and its path. **Under `lock`, and not to be

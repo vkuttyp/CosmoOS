@@ -102,8 +102,20 @@ int64_t syscall_dispatch(uint64_t nr, const uint64_t args[6], void *frame)
      * whether or not a filter is installed -- installing nothing must
      * change nothing.
      *
-     * The mask is written only by this process through its own system
-     * call, so reading it here needs no lock.
+     * Read without the lock, and that is safe for a reason that is *not*
+     * the one this comment used to give. It said the mask is written only
+     * by the process itself -- which was a single-threaded argument, and
+     * a process has had more than one thread since
+     * docs/audit/next-subsystem-threads.md. "The process itself" is now
+     * several threads, and one of them can install a filter while another
+     * is here.
+     *
+     * What makes it safe is the code rather than the caller: every write
+     * takes `p->lock` and is a per-word atomic store, this is a per-word
+     * atomic load, and the mask only ever narrows. A reader therefore sees
+     * one whole word, old or new, and a call in flight when a filter lands
+     * may complete -- which is what a filter installed concurrently with
+     * a system call means on any system.
      */
     if (!syscall_allowed(p, nr)) {
         __atomic_fetch_add(&g_filtered, 1u, __ATOMIC_RELAXED);
