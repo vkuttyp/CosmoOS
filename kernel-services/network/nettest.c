@@ -982,6 +982,36 @@ static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
     return true;
 }
 
+/* A TCP counter has advanced past its baseline. */
+struct tcpc_target { uint64_t base, want; int which; };
+enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1 };
+static bool tcp_counter_reached(void *arg)
+{
+    const struct tcpc_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    uint64_t v = t->which == TC_SYN_BAD_ACK ? now.syn_bad_ack : now.pmtu_updates;
+    return v - t->base >= t->want;
+}
+
+/*
+ * An ICMP "fragmentation needed" has been received and parsed.
+ *
+ * This is how the *negative* assertions in the path-MTU test are made
+ * waitable at all: "the forged quote changed nothing" cannot be waited
+ * for -- there is no event for nothing happening -- so the test waits for
+ * the positive fact that must precede it, that the quote arrived, and
+ * then asserts that the cache and the connection are untouched.
+ */
+struct needfrag_target { uint64_t base, want; };
+static bool needfrag_received(void *arg)
+{
+    const struct needfrag_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return now.icmp_needfrag_rcvd - t->base >= t->want;
+}
+
 /* Drop TCP resets addressed to `g_guard_port` (the flood's SYN-ACKs would
  * otherwise be reset by this host and clear the cache). */
 static uint16_t g_guard_port;
@@ -1049,7 +1079,8 @@ bool selftest_net_tcp_syncache(const char **reason)
     CHECK(t1.conns_passive == t0.conns_passive + 1);
     /* A completing ACK that matches nothing is refused. */
     inject_tcp(30001, 6020, 5000, 12345, TH_ACK, 0);
-    settle(30);
+    struct tcpc_target bad = { .base = t1.syn_bad_ack, .want = 1, .which = TC_SYN_BAD_ACK };
+    CHECK(wait_until(tcp_counter_reached, &bad, 5000));
     struct tcp_stats t2;
     tcp_get_stats(&t2);
     CHECK(t2.syn_bad_ack == t1.syn_bad_ack + 1 && t2.conns_passive == t1.conns_passive);
@@ -1087,6 +1118,28 @@ static void holding_server(void *arg)
     thread_exit(0);
 }
 
+/* How many challenge ACKs the stack has sent since the baseline. The
+ * RFC 5961 tests inject a packet that must be *answered* with one, and
+ * waiting for that is what "the injection has been processed" means --
+ * the state assertions after it are negative ("still ESTABLISHED"), so
+ * waiting for the *state* would return at once and prove nothing. */
+struct chal_target { uint64_t base, want; };
+static bool challenge_acks_reached(void *arg)
+{
+    const struct chal_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return now.challenge_acks - t->base >= t->want;
+}
+
+/* The connection has left ESTABLISHED -- for the reset that really does
+ * end it. */
+static bool tcp_left_established(void *arg)
+{
+    struct socket *c = arg;
+    return tcp_state_of(c->tcp) != TCP_ESTABLISHED;
+}
+
 bool selftest_net_tcp_rfc5961(const char **reason)
 {
     struct tcp_server srv;
@@ -1104,23 +1157,26 @@ bool selftest_net_tcp_rfc5961(const char **reason)
     tcp_get_stats(&t0);
     uint32_t rcv_nxt = c->tcp->rcv_nxt, snd_nxt = c->tcp->snd_nxt;
     /* A reset inside the window but not at rcv_nxt: a challenge, no reset. */
+    struct chal_target ct = { .base = t0.challenge_acks, .want = 1 };
     inject_tcp(6021, me.port, rcv_nxt + 1000, snd_nxt, TH_RST, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
     /* A SYN inside the window: a challenge, no reset. */
+    ct.want = 2;
     inject_tcp(6021, me.port, rcv_nxt + 10, snd_nxt, TH_SYN, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
     /* An ACK for data never sent: a challenge, not processed. */
+    ct.want = 3;
     inject_tcp(6021, me.port, rcv_nxt, snd_nxt + 100000, TH_ACK, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED && c->tcp->snd_una == snd_nxt);
     tcp_get_stats(&t1);
     CHECK(t1.challenge_acks == t0.challenge_acks + 3);
     CHECK(t1.rsts_in == t0.rsts_in);
     /* The exact reset ends the connection. */
     inject_tcp(6021, me.port, rcv_nxt, snd_nxt, TH_RST, 0);
-    settle(30);
+    CHECK(wait_until(tcp_left_established, c, 5000));   /* this one really does end it */
     uint8_t buf[4];
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -ECONNRESET);
     tcp_get_stats(&t1);
@@ -1274,6 +1330,27 @@ bool selftest_net_tcp_keepalive(const char **reason)
     return true;
 }
 
+/* The IPv4 layer has recorded its own path-MTU update. The TCP side and
+ * the IP side are counted separately and land separately, which is why
+ * the test waited a further fixed ten milliseconds for the second. */
+struct rexmit_target { uint64_t base, want; };
+static bool retransmit_happened(void *arg)
+{
+    const struct rexmit_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return now.retransmits - t->base >= t->want;
+}
+
+struct ip_pmtu_target { uint64_t base, want; };
+static bool ip_pmtu_reached(void *arg)
+{
+    const struct ip_pmtu_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return now.pmtu_updates - t->base >= t->want;
+}
+
 struct echo_target { const struct ip_stats *base; uint64_t want; };
 static bool echoes_received(void *arg)
 {
@@ -1361,8 +1438,9 @@ bool selftest_net_icmp_limit(const char **reason)
     struct mbuf *good = m_copypacket(m);
     CHECK(good != NULL);
     ic->cksum = in_cksum(m->data, m->len);
+    struct needfrag_target nf = { .base = i0.icmp_needfrag_rcvd, .want = 1 };
     ipv4_output(m, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);   /* quotes a sequence never sent */
-    settle(30);
+    CHECK(wait_until(needfrag_received, &nf, 5000));   /* it arrived; now assert it did nothing */
     tcp_get_stats(&t1);
     ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates && c->tcp->mss == TCP_MSS_LO);
@@ -1381,13 +1459,12 @@ bool selftest_net_icmp_limit(const char **reason)
      * that the netrx worker made a window on a loaded host (it missed
      * one once, on `no-iommu x86_64`, with debug page poisoning adding
      * a fill and a scan to every cluster). */
-    for (unsigned i = 0; i < 100; i++) {
-        tcp_get_stats(&t1);
-        if (t1.pmtu_updates != t0.pmtu_updates)
-            break;
-        settle(10);
-    }
-    settle(10);   /* and let the IP side's record land too */
+    struct tcpc_target tp = { .base = t0.pmtu_updates, .want = 1, .which = TC_PMTU_UPDATES };
+    CHECK(wait_until(tcp_counter_reached, &tp, 5000));
+    /* And the IP side's record, which is a separate counter that lands
+     * separately -- this was a further fixed ten milliseconds. */
+    struct ip_pmtu_target ip = { .base = i0.pmtu_updates, .want = 1 };
+    CHECK(wait_until(ip_pmtu_reached, &ip, 5000));
     tcp_get_stats(&t1);
     ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates + 1 && i1.pmtu_updates == i0.pmtu_updates + 1);
@@ -1395,7 +1472,11 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
     loopback_set_filter(NULL, NULL);
-    settle(300);   /* the retransmission delivers the data in 1460-byte segments */
+    /* The retransmission delivers the data in 1460-byte segments. Waiting
+     * for the retransmit counter says that in one line; `settle(300)` said
+     * "probably by now", and 300 ms was the largest sleep in the file. */
+    struct rexmit_target rx = { .base = t1.retransmits, .want = 1 };
+    CHECK(wait_until(retransmit_happened, &rx, 5000));
     ipv4_pmtu_flush();
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
     ksock_put(c);
