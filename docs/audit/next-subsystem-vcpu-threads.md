@@ -89,9 +89,11 @@ first boot of this mode did.
 | the guest's console ring | `vm->console.lock`, a spinlock | commented "producer is the run loop, consumer the owner" |
 | pending virtual interrupts | `vcpu->irq_lock`, a spinlock | per-vCPU |
 | the guest's GICv3 distributor | `gicv3_vdist.lock`, a spinlock | "covers every field", taken by a guest's MMIO |
-| a VMCS moving between host CPUs | `vmx.c:1062` | `loaded_cpu` tracked, `vmclear` then `vmptrld`, launch rather than resume; `vm->ran_on` is an atomic CPU mask |
+| a VMCS moving between host CPUs | `vmx.c:1062` | `loaded_cpu` tracked, `vmclear` then `vmptrld`, launch rather than resume |
+| which host CPUs a VM has run on | `vm->ran_on`, a `cpumask_t` set atomically on **both** arches (`vmx.c:1061`, `hv_el2.c:1058`) | "CPUs that have entered this VM: where its cached translations can be" -- it exists for TLB shootdown, and it exists *because* a vCPU was always expected to move between host CPUs |
 
-So the hypervisor was built for vCPUs that migrate between host CPUs, and
+So the hypervisor was built for vCPUs that migrate between host CPUs --
+`ran_on` is that assumption written down, on both architectures -- and
 nothing in it assumes one thread. **What it does not have is a way to stop
 one.** `vcpu_run_bounded`'s loop checks `process_kill_pending()` and
 counts host-interrupt exits against `max_intr`; `v->dead` is checked once
