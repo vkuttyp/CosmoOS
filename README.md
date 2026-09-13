@@ -1502,9 +1502,20 @@ See [docs/development.md](docs/development.md).
   one line by the exit-127 branch that "cannot happen"; and the `self` word
   is load-bearing on exactly one architecture, which only a *pair* of runs
   shows (unwritten, AArch64 passes everything and x86-64 loses every process
-  to SIGSEGV). Proven by `thrtest` steps 12-16 and six bug-proofs, one of
+  to SIGSEGV). Review added a third: **`SYS_set_tls` must be always-allowed
+  by the syscall filter**, beside `exit`, `sigreturn` and `thread_exit`,
+  because every native program installs its block before `main` -- a filter
+  omitting it killed every child of a filtered process during startup, and
+  the inherited-filter test could not see it, since its child is *expected*
+  to die of `SIGSYS` and a death in startup wears the same status. The
+  kernel log said `number 87 is outside its filter` where it used to name
+  the call the test was about; `init --filter inherit-start` now asserts
+  that a child of a filter naming only spawn and wait reaches its own
+  `main`. The tid cache became **lazy** for the same reason: read during
+  startup it made installing the pointer two syscalls, the second also
+  denied. Proven by `thrtest` steps 12-16 and six bug-proofs, one of
   which failed to fail and sent the test back for an assertion about the
-  *layout* rather than about `errno`. `strerror` and `getcwd(NULL)` stay
+  *layout* rather than about `errno`, plus one more for the filter. `strerror` and `getcwd(NULL)` stay
   shared -- now fixable, since there is somewhere per-thread to put them --
   and compiler `__thread` with ELF `PT_TLS` remains a later unit that this
   one is the prerequisite for.

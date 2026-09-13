@@ -25,14 +25,6 @@
 static void thread_trampoline(void *arg)
 {
     cosmo_thread_t *t = arg;
-    /*
-     * The block is already installed -- the kernel loaded the thread
-     * pointer from `tls` before this thread's first instruction -- but only
-     * this thread can cache its own id: the creator does not know the tid
-     * until `thread_create` returns, and by then this thread may already be
-     * reading it. One syscall per thread, once, instead of a race.
-     */
-    __cosmo_tcb_cache_tid();
     void *ret = t->fn(t->arg);
     /* Published with release, read with acquire in the join: the joiner can
      * see the kernel's zero in `done` without ever entering futex_wait --
@@ -116,8 +108,10 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * The block, prepared by the creator because the new thread may touch
      * errno on its first instruction: page-aligned (so 16-aligned), with
      * the `self` word x86-64's accessor reads through %fs:0 and a zero
-     * errno. The tid is the one field the creator cannot fill; the
-     * trampoline does it.
+     * errno. The tid is left zero, which means "not asked yet" -- the
+     * creator does not know it until `thread_create` returns, by which time
+     * the thread may already be reading it, and a thread that never asks
+     * should not pay a syscall to be told.
      */
     struct __cosmo_tcb *blk = (struct __cosmo_tcb *)(base + PAGE + size);
     blk->self = blk;

@@ -16,9 +16,13 @@
  * check could run.
  *
  * The consequence is a contract, and it is stated in cosmo/thread.h beside
- * the raw syscall as well: **a thread created by a raw SYS_thread_create
- * with `tls = 0` must not call libc.** `cosmo_tcb_install` is the way for a
- * program that wants such a thread to use libc anyway.
+ * the raw syscall as well: **a thread that calls libc must have a block
+ * whose prefix is this one.** A raw SYS_thread_create with `tls = 0` has no
+ * block; a raw create with a thread pointer of the caller's own design has
+ * one libc will misread, overwriting whatever the caller keeps where
+ * `errno` and the tid live. Before `errno` moved behind the thread pointer
+ * the second case was harmless, which is exactly why it is written down
+ * here. `cosmo_tcb_install` is the way for either to use libc anyway.
  *
  * **The prefix is permanent.** A program that installs its own block must
  * leave libc's fields intact and put its own storage at offset
@@ -46,7 +50,7 @@
 struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
-    unsigned tid;               /* cached, so cosmo_thread_id() costs no syscall */
+    unsigned tid;               /* the cached id; 0 means "not asked yet" */
     char reserved[112];         /* to COSMO_TCB_SIZE: 8 + 4 + 4 + 112 */
 } __attribute__((aligned(16)));
 

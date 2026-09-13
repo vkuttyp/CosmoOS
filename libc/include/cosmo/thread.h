@@ -17,13 +17,24 @@
  *
  * What is still shared: `strerror`'s buffer and `getcwd(NULL)`'s storage.
  *
- * The warning that remains is about threads this header did *not* make: a
- * thread created by a raw `SYS_thread_create` with `tls = 0` has no block,
- * and libc's `errno` is an unconditional load through the thread pointer,
- * so such a thread **must not call libc** until it installs one with
- * `cosmo_tcb_install`. There is no fallback and cannot be one -- on
- * x86-64, reading `%fs:0` with a zero base faults at address zero before
- * any check could run.
+ * The warning that remains is about threads this header did *not* make.
+ * libc's `errno` is an unconditional load through the thread pointer, so a
+ * thread that calls libc must have a block whose **prefix is libc's**
+ * (`cosmo/tcb.h`). Two cases break that, and neither can be detected:
+ *
+ *   - `tls = 0`: there is no block at all. There is no fallback and cannot
+ *     be one -- on x86-64, reading `%fs:0` with a zero base faults at
+ *     address zero before any check could run.
+ *   - `tls` pointing at a layout of the caller's own: before `errno` moved
+ *     behind the thread pointer, a raw thread could carry any thread
+ *     pointer it liked and still call libc. It cannot now -- libc would
+ *     read and write that memory as its own block, overwriting whatever
+ *     the caller keeps at the `errno` and tid offsets and answering
+ *     `cosmo_thread_id()` with nonsense.
+ *
+ * Either way the fix is the same: call `cosmo_tcb_install` on storage that
+ * starts with libc's prefix, and keep the caller's own fields at
+ * COSMO_TCB_SIZE or beyond.
  *
  * Everything in this header needs none of that: each function returns
  * `-errno` rather than setting the global, takes no library lock, and maps

@@ -480,8 +480,8 @@ is libc's own block and a test that took it away would break `errno` for
 everything after it. That the call *took effect* is not asserted here:
 there is no architecture-independent way to read a thread pointer back --
 x86-64 cannot read the FS base without `rdfsbase`, which is the whole
-reason libc's block points at itself -- so the effect is what steps 14 to
-17 assert, through `errno` itself. A straddling base is not tested because
+reason libc's block points at itself -- so the effect is what steps 13 to
+16 assert, through `errno` itself. A straddling base is not tested because
 the alignment makes it unreachable: an earlier version asserted it anyway
 and failed by *succeeding*, setting the main thread's pointer.
 (13) **Two threads, two `errno`s** -- the point of the unit. One thread
@@ -504,7 +504,9 @@ it faults, and a test asserting a fault would be asserting the absence of a
 fallback this design does not have.
 (16) **The cache and the layout.** `cosmo_thread_id()` agrees with
 `SYS_thread_self` and with `getpid` for the first thread, and a created
-thread's cache holds the tid its creator was given. Then the layout, as a
+thread reports the tid its creator was given -- filled on the first call
+that asks, so this step is also what proves the lazy fill answers the same
+thing an eager one would have. Then the layout, as a
 layout: a thread finds its own block through `&errno` -- no new interface
 needed, since `errno` is a field of it -- and checks that the block is
 *above* a local, which is on the stack by definition. That assertion exists

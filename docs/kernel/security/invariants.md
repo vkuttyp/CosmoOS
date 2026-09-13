@@ -248,10 +248,14 @@ into a state the author never tested.
 Installing one needs no privilege -- it is the one primitive here that
 only ever takes authority from the caller, and a process that could not
 restrict itself would be unable to do the one safe thing it can do
-without asking. Three things stay allowed whatever the mask says:
-`exit`, and for the Linux personality `exit_group` and `rt_sigreturn`,
-without which a clean shutdown or a signal handler's return would itself
-be fatal. Bits beyond the supplied mask are clear, so a program built
+without asking. Some calls stay allowed whatever the mask says: `exit`
+and `sigreturn`, and for the Linux personality `exit_group` and
+`rt_sigreturn`, without which a clean shutdown or a signal handler's
+return would itself be fatal; `thread_exit`, because a thread that cannot
+exit cannot be stopped; and `set_tls`, because every native program
+installs its thread block before `main`, so a mask omitting it would kill
+every child of a filtered process during startup -- a program that cannot
+reach its own `main` is not confined, only destroyed. Bits beyond the supplied mask are clear, so a program built
 against a smaller system-call count denies what it has not heard of.
 
 Check: the user-mode self-test spawns children that filter themselves
@@ -260,9 +264,15 @@ and then make a denied call, requiring each to die with status 159
 0; requires `exit` to work from a mask that does not name it; requires
 a second, wider mask not to restore what the first removed; and
 requires a spawned child to be killed by the filter its parent
-installed. Confirmed against the bug: with the intersection replaced by
-an assignment, the widening test's child survives a call its first mask
-had removed.
+installed; and requires a child of a filter naming only `spawn` and
+`wait` to reach its own `main` and exit with a status of its own, which
+is what says the always-allowed set is enough to *start* a program.
+Confirmed against the bug: with the intersection replaced by an
+assignment, the widening test's child survives a call its first mask had
+removed. That last case exists because the inherited-filter case could
+not see `set_tls` missing from the set -- its child is expected to die of
+`SIGSYS`, and a death in startup wears the same status as the death it
+means to provoke.
 
 **S15. An operation that is neither reading nor writing has a right of
 its own.** A handle's upper sixteen bits name the operations its type

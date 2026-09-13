@@ -45,9 +45,26 @@ int *__errno_location(void)
     return &tcb_self()->err;
 }
 
+/*
+ * The calling thread's id, cached in its block. Zero means "not asked
+ * yet", which is unambiguous because no thread's id is ever zero: a
+ * process's first thread answers its pid and every other answers
+ * 0x10000 + tid.
+ *
+ * Lazy rather than filled at install time, for two reasons that both came
+ * out of review. A tid read during `__libc_start` would make the thread
+ * pointer's installation two syscalls rather than one, and the second
+ * would not be in the filter's always-allowed set -- so a child of a
+ * filtered process died in startup on `SYS_thread_self` instead of on
+ * whatever it was confined for. And a thread that never asks for its id
+ * should not pay a syscall to be told it.
+ */
 unsigned __cosmo_tcb_tid(void)
 {
-    return tcb_self()->tid;
+    struct __cosmo_tcb *t = tcb_self();
+    if (t->tid == 0)
+        t->tid = (unsigned)cosmo_thread_self();
+    return t->tid;
 }
 
 /*
@@ -60,11 +77,8 @@ static int tcb_use(struct __cosmo_tcb *blk)
 {
     blk->self = blk;
     blk->err = 0;
-    long rc = cosmo_set_tls((unsigned long long)(unsigned long)blk);
-    if (rc != 0)
-        return (int)rc;
-    blk->tid = (unsigned)cosmo_thread_self();
-    return 0;
+    blk->tid = 0;   /* asked for on first use; see __cosmo_tcb_tid */
+    return (int)cosmo_set_tls((unsigned long long)(unsigned long)blk);
 }
 
 /*
@@ -77,13 +91,6 @@ static int tcb_use(struct __cosmo_tcb *blk)
 int __cosmo_tcb_init(void)
 {
     return tcb_use(&main_tcb);
-}
-
-/* A created thread's own id, cached by the thread itself: see the comment
- * in thread.c's trampoline for why the creator cannot do it. */
-void __cosmo_tcb_cache_tid(void)
-{
-    tcb_self()->tid = (unsigned)cosmo_thread_self();
 }
 
 int cosmo_tcb_install(void *block, size_t len)

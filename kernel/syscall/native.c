@@ -1716,10 +1716,19 @@ static const syscall_fn native_table[SYS_COUNT] = {
  * shutdown into a signal death. */
 /* sigreturn joins it: a filter that denied the return from a handler
  * would turn every caught signal into a kill. */
-static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_thread_exit };
+static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_thread_exit, SYS_set_tls };
 /* SYS_thread_exit is always allowed for the reason SYS_exit is: a thread
  * that cannot exit cannot be stopped, and a filter that traps one in the
- * kernel is a denial of service the filter unit did not intend. */
+ * kernel is a denial of service the filter unit did not intend.
+ *
+ * SYS_set_tls joins them for the same reason one step earlier: every native
+ * program installs its thread block in `__libc_start`, before `main` and
+ * before anything a filter could be about, so a filter that omitted it
+ * would kill every child of a filtered process during startup -- a program
+ * that cannot reach its own `main` cannot be confined, only destroyed. This
+ * was not theoretical: the inherited-filter test's child died on number 87
+ * in startup instead of on the call the test was about, and the status was
+ * the same either way, so nothing failed. */
 
 const struct personality personality_native = {
     .name = "native",

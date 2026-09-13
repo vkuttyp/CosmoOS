@@ -1196,16 +1196,38 @@ removes the need instead of patching it:
   stack, passing its address as `cosmo_thread.tls`, so the kernel installs
   it before the thread's first instruction. It is freed by the `munmap` the
   join already does: a thread cannot outlive the storage its `errno` is in.
-- **A thread created by a raw `SYS_thread_create` with `tls = 0` must not
-  call libc.** That is a contract, stated in `cosmo/thread.h` and
-  `cosmo/tcb.h`, and `cosmo_tcb_install(void *block, size_t len)` is the
-  way out for a program that wants such a thread to use libc anyway.
+- **A thread created by a raw `SYS_thread_create` must carry a block whose
+  prefix is libc's to call libc at all.** `tls = 0` is the obvious case; a
+  `tls` pointing at a layout of the caller's own is the other, and it was
+  harmless before `errno` moved behind the thread pointer -- libc now reads
+  and writes that memory as its own block. Both are stated in
+  `cosmo/thread.h` and `cosmo/tcb.h`, and
+  `cosmo_tcb_install(void *block, size_t len)` is the way out for either.
+
+**`SYS_set_tls` is always allowed** by the syscall filter, alongside
+`SYS_exit`, `SYS_sigreturn` and `SYS_thread_exit`, for the same reason one
+step earlier: every native program installs its block before `main`, so a
+filter that omitted number 87 would kill every child of a filtered process
+during startup. A program that cannot reach its own `main` is not confined,
+only destroyed. `init --filter inherit-start` is the assertion -- a child of
+a filter naming only spawn and wait must reach `main` and exit with a status
+of its own -- and it exists because the older inherited-filter case cannot
+see this: its child is *expected* to die of SIGSYS, and a death in startup
+wears the same status as the death it means to provoke.
 
 The creator fills `self` and `err`; the **tid** is the one field it cannot,
 because it does not know the tid until `thread_create` returns and the
-thread may already be reading it. The trampoline caches it — one syscall
-per thread, once, instead of a race — and `cosmo_thread_id()` is a load
-where it used to be a syscall.
+thread may already be reading it. It is filled **on the first call that
+asks for it**, with zero meaning "not asked yet" -- unambiguous, because no
+thread's id is ever zero (a first thread answers its pid, every other
+`0x10000 + tid`). So `cosmo_thread_id()` costs one syscall the first time
+and a load afterwards, and a thread that never asks pays nothing.
+
+Lazily rather than at install time for a reason worth keeping: a tid read
+inside `__libc_start` would make installing the thread pointer *two*
+syscalls, and the second is not in the filter's always-allowed set -- which
+killed the children of filtered processes during startup on `SYS_thread_self`
+once `SYS_set_tls` itself had been allowed.
 
 `errno` becomes `(*__errno_location())` in `errno.h`. All 25 writers across
 ten files compile unchanged, because every one assigns through the name;

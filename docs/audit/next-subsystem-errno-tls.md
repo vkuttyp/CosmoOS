@@ -15,9 +15,15 @@ each is marked where it appears:
    The report had libc adopt it; passing the address as `cosmo_thread.tls`
    is simpler and means the block is live *before* the thread's first
    instruction rather than after its first libc call.
-3. **The tid is cached by the thread itself**, in the trampoline. The
-   creator cannot: it does not know the tid until `thread_create` returns,
-   and by then the thread may already be reading it.
+3. **The tid is cached lazily, on the first call that asks for it.** The
+   creator cannot fill it -- it does not know the tid until
+   `thread_create` returns, and by then the thread may already be reading
+   it -- and a first version had the thread cache its own in the
+   trampoline. Review killed that: a tid read costs a syscall, and during
+   `__libc_start` that made installing the thread pointer *two* calls, the
+   second of which is not in the filter's always-allowed set. Zero means
+   "not asked yet", which is unambiguous because no thread's id is ever
+   zero.
 4. **The freed-block proof is a direct assertion, not a counting test.**
    The report proposed a thousand create/join cycles against the address
    space; a write from the block's address after the join is `-EFAULT`,
@@ -253,16 +259,21 @@ address zero being readable.
   `cosmo_thread.tls`, so **the kernel installs it** (difference 2) before
   the thread's first instruction, and it is freed by the `munmap` the join
   already does. The creator fills `self` and `err`; the **tid** is cached
-  by the thread itself in the trampoline (difference 3), because the
-  creator does not know it until `thread_create` returns and the thread may
-  already be reading it. That mapping can fail, and it
+  lazily, on the first call that asks (difference 3), because the creator
+  does not know it until `thread_create` returns and the thread may already
+  be reading it -- and because a read during startup would make installing
+  the thread pointer two syscalls instead of one. That mapping can fail, and it
   already has a failure path: `thread_start` returns `-ENOMEM` and no
   thread is created.
-- **A thread created by a raw `SYS_thread_create` with `tls = 0`** has no
-  block and **must not call libc**, which `cosmo/thread.h` states beside
-  the syscall. `cosmo_tcb_install(void *block, size_t len)` is offered for
-  a program that wants one anyway: it checks the length against the
-  prefix, writes the `self` word and calls `SYS_set_tls`.
+- **A thread created by a raw `SYS_thread_create`** must carry a block
+  whose **prefix is libc's** to call libc at all, which `cosmo/thread.h`
+  and `cosmo/tcb.h` both state. `tls = 0` is the obvious case; the one
+  review had to point out is a `tls` pointing at a layout of the caller's
+  own, which was harmless before `errno` moved behind the thread pointer
+  and is not now -- libc reads and writes that memory as its own block.
+  `cosmo_tcb_install(void *block, size_t len)` is the way out for either:
+  it checks the length against the prefix, writes the `self` word and calls
+  `SYS_set_tls`.
 
 ### `errno` becomes an accessor
 
@@ -327,7 +338,8 @@ handler wants.
 | `libc/src/tcb.c` (new) | the accessor's arch halves, the static first-thread block, `__cosmo_tcb_init`, the tid cache, `cosmo_tcb_install` |
 | `libc/src/libc.h` | **not in the report**: the internal declarations (`__cosmo_tcb_init`, `__cosmo_tcb_tid`, `__cosmo_tcb_cache_tid`) |
 | `libc/src/stdlib.c` | `__libc_start` installs the first thread's block first, and the exit-127 policy |
-| `libc/src/thread.c` | one more page in the mapping; `tls` passed so the kernel installs it; the trampoline caches the tid; `cosmo_thread_id` reads the cache |
+| `libc/src/thread.c` | one more page in the mapping; `tls` passed so the kernel installs it; `cosmo_thread_id` reads the block's lazily-filled cache |
+| `kernel/security/…` docs, `userland/init/init.c` | **not in the report**: `SYS_set_tls` joins the always-allowed set, and `--filter inherit-start` asserts it |
 | `libc/include/cosmo/thread.h` | **not in the report's table** (the migration plan named it): the L8 warning shrinks to the raw-thread contract |
 | `libc/include/cosmo/syscall.h` | the `SYS_set_tls` stub |
 | `libc/libc.mk` | `tcb.c` |
@@ -403,6 +415,19 @@ creates one.
    The exit path itself is argued rather than tested, since nothing can
    make a `.bss` address invalid -- named here so it is not mistaken for
    something the suite proves.
+
+**One thing the report missed entirely**, found in review: `SYS_set_tls`
+must join `SYS_exit`, `SYS_sigreturn` and `SYS_thread_exit` in the native
+personality's **always-allowed** set. Every native program installs its
+block in `__libc_start`, before `main`, so a filter that omitted number 87
+killed every child of a filtered process during startup -- and the
+inherited-filter test could not see it, because its child is *expected* to
+die of SIGSYS and a death in startup wears the same status as the death it
+means to provoke. The kernel log said `number 87 is outside its filter`
+where it used to name the call the test was about. A new case,
+`init --filter inherit-start`, asserts the thing directly: a child of a
+filter naming only spawn and wait must reach its own `main` and exit with a
+status of its own.
 
 **Bug-proofs**, as run:
 

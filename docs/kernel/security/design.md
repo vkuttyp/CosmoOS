@@ -253,8 +253,13 @@ that turns every clean shutdown into a signal death. `sigreturn` is
 likewise always allowed in the native personality, and `exit_group` and
 `rt_sigreturn` in the Linux one -- a signal handler must be able to
 return, or the first signal after a filter is installed is fatal for a
-reason that has nothing to do with the filter. The set is named by the
-personality, which owns the numbering.
+reason that has nothing to do with the filter. Two more joined the native
+set as the library grew into them: **`thread_exit`** (a thread that cannot
+exit cannot be stopped) and **`set_tls`**, because every native program
+installs its thread block before `main`, so a filter that omitted it would
+kill every child of a filtered process during startup -- a program that
+cannot reach its own `main` is not confined, only destroyed. The set is
+named by the personality, which owns the numbering.
 
 **The filter reads the number and nothing else.** It does not inspect
 arguments, and that is a decision rather than a missing feature.
