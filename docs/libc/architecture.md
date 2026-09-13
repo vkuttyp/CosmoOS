@@ -108,7 +108,7 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 | Header | Contents | Backed by |
 |---|---|---|
 | `errno.h` | `errno` (per-thread, `__errno_location`), `E*` (values = `COSMO_E*`) | `__syscall_ret`, `tcb.c` |
-| `cosmo/tcb.h` | `struct __cosmo_tcb`, `cosmo_tcb_install` | `SYS_set_tls` |
+| `cosmo/tcb.h` | `struct __cosmo_tcb` (**libc's, including `reserved[]`**), `cosmo_tcb_storage`, `cosmo_tcb_install` | `SYS_set_tls` |
 | `string.h`, `ctype.h`, `stdlib.h`, `stdio.h`, `assert.h`, `limits.h` | as above | pure C, `mmap`, `write`/`read` |
 | `unistd.h`, `fcntl.h`, `sys/stat.h`, `dirent.h`, `sys/mount.h` | files, handles, directories | system calls 1–22, 35–39 |
 | `spawn.h`, `sys/wait.h`, `signal.h` | processes | system calls 32–34, 37 |

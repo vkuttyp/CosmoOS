@@ -132,7 +132,7 @@ the 128-byte block libc installed in #120:
 | | where the compiler puts the first `__thread` variable | agrees with `struct __cosmo_tcb`? |
 | --- | --- | --- |
 | x86-64 (psABI variant II) | **below** the thread pointer: `TPOFF` is negative, and `%fs:0` must hold a pointer to itself | **yes.** `self` at offset 0 is exactly what the ABI asks for, and the image grows downward into space nothing uses |
-| AArch64 (variant I) | **above** it: `TPREL(x)` is positive and the ABI reserves 16 bytes at the thread pointer, so the first variable sits at **TP + 16** | **no.** Offsets 16..127 are `reserved[112]`, which `cosmo/tcb.h` promises to a program's own per-thread storage |
+| AArch64 (variant I) | **above** it: `TPREL(x)` is positive and the ABI reserves 16 bytes at the thread pointer, so the first variable sits at **TP + 16** | **no.** Offsets 16..127 were `reserved[112]`, which `cosmo/tcb.h` *then* promised to a program's own per-thread storage. That promise is what this unit withdrew; the block now sits below the thread pointer |
 
 The x86-64 layout was right by accident -- the `self` word exists because
 the architecture cannot read its own FS base, and the psABI wants the same
@@ -158,8 +158,9 @@ today because nothing places a TLS image at all.
   out by hand inside a block whose layout is documented in a header it
   does not own.
 - **The reserved-prefix rule is a promise this unit must break.** `tcb.h`
-  says a program's own storage starts at `COSMO_TCB_SIZE` and that the
-  prefix is permanent. On AArch64 that space is exactly where the ABI puts
+  *said* a program's own storage starts at `COSMO_TCB_SIZE` and that the
+  prefix is permanent -- past tense as built: it says the opposite now,
+  and so does the errno unit's report, where the promise was written. On AArch64 that space is exactly where the ABI puts
   `__thread`. Whatever this unit does, that sentence changes -- and it is
   better changed by the unit that understands why than by the first person
   whose `__thread` variable eats their `errno`.
@@ -452,8 +453,10 @@ moves outside its spread.
 ## Risks
 
 - **The reserved-prefix rule changes, and it was documented as
-  permanent.** `cosmo/tcb.h` says a program's storage starts at offset 128
-  and that the prefix will not move. On AArch64 the ABI wants those bytes.
+  permanent.** `cosmo/tcb.h` *said* a program's storage starts at offset
+  128 and that the prefix will not move; as built it says `reserved[]` is
+  libc's, and the errno report's own code comment -- where the promise
+  originated -- says so too. On AArch64 the ABI wants those bytes.
   The mitigation is that the rule is replaced by something better rather
   than merely withdrawn -- `__thread` is the supported way to get
   per-thread storage after this unit -- but any out-of-tree program using

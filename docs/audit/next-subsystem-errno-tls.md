@@ -196,10 +196,19 @@ struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
     unsigned tid;               /* the cached id; 0 means "not asked yet" */
-    char reserved[112];         /* to 128: 8 + 4 + 4 + 112. A program's own storage
-                                   starts at offset 128, never inside this. */
+    char reserved[112];         /* to 128: 8 + 4 + 4 + 112. */
 };
 ```
+
+**The promise this block's comment made is withdrawn.** It read "a
+program's own storage starts at offset 128, never inside this", offering
+`reserved[]` as space a program could count on. It could not be kept: on
+AArch64 the ELF TLS ABI puts the first `__thread` variable at TP+16,
+which is inside those bytes, so the `__thread` unit moved the block below
+the thread pointer and took `reserved[]` back for libc. A program that
+wants per-thread storage uses `__thread`, and one that allocates a
+thread's storage asks `cosmo_tcb_storage()` rather than assuming 128
+(`docs/audit/next-subsystem-pt-tls.md`).
 
 `__errno_location()` returns `&tcb->err`, and finding the block differs by
 architecture for a reason:
