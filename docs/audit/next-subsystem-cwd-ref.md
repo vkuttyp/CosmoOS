@@ -323,7 +323,7 @@ Threads of one process contend it; threads of different processes do not.
 
 | file | change |
 | --- | --- |
-| `kernel/include/kernel/process.h` | `process_cwd_get`, `process_cwd_path`; `cwd` renamed to `cwd_locked` with the rule beside it |
+| `kernel/include/kernel/process.h` | `process_cwd_get`, `process_cwd_snapshot`; `cwd` renamed to `cwd_locked` with the rule beside it. **Not `process_cwd_path`** — that was the draft's second accessor and taking it separately is the defect the design section describes |
 | `kernel/process/process.c` | the two accessors; `process_chdir` stops reading the live fields |
 | `kernel/syscall/native.c` | 6 sites take and release a reference |
 | `compat/linux/syscalls.c` | 10 sites, the same — **the half a native-only fix would miss** |
@@ -420,9 +420,26 @@ certain, and then the bug-proof has to make it certain.
 - `process_chdir` taking the path and the vnode from **two** acquisitions
   of the lock rather than one snapshot → a `getcwd` that disagrees with a
   relative `open` in the same process. This is the design defect review
-  found in the report, so it gets a proof of its own rather than a
-  promise: test 3's third thread additionally opens a file it created in
-  the directory `getcwd` reports, and requires that it exists.
+  found in the report, so it gets a proof of its own rather than a promise
+  — and the proof has to be written carefully, because the obvious version
+  **fails on a correct kernel**.
+
+  The obvious version has the observer call `getcwd` and then open a file
+  unique to that directory. Between those two system calls a writer may
+  legitimately `chdir`, so the file is legitimately absent: a false
+  failure, and a flaky test is worse than no test. (Putting the file in
+  both directories removes the false failure and the test's meaning with
+  it — existence then proves nothing.)
+
+  So the observer **quiesces the writers first**: a flag and a condition
+  variable (`cosmo/thread.h`, from the previous unit), the writers park at
+  the top of their loop, and only then does the observer compare. This
+  works because the defect's damage is **persistent, not transient** — a
+  process left with the path of one directory and the vnode of another
+  stays that way until the next `chdir`, so it is still observable after
+  everything stops. Each directory holds a file named after itself
+  (`/tmp/r/a/is-a`, `/tmp/r/b/is-b`), and the observer requires that
+  opening `is-<the letter getcwd just reported>` succeeds.
 - `process_cwd_get` taking the reference *outside* the lock → the window
   narrows but does not close, and the test becomes flaky rather than
   failing. **Named because it is the wrong kind of proof**: a bug-proof
