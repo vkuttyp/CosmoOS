@@ -20,6 +20,11 @@ void __libc_start(int argc, char **argv, char **envp) __attribute__((noreturn));
  * thread's block is installed by the kernel from `cosmo_thread.tls`. */
 int __cosmo_tcb_init(void);
 unsigned __cosmo_tcb_tid(void);
+/* How much storage one thread's block and TLS image need, and the layout
+ * inside it: `__cosmo_tcb_place` copies the image and returns the thread
+ * pointer, or NULL if the storage is too small. */
+size_t __cosmo_tcb_storage(void);
+void *__cosmo_tcb_place(void *storage, size_t len);
 
 /* auxv.c: where the kernel left the auxiliary vector. Recorded by
  * __libc_start, which is the only code that sees `envp` before anything

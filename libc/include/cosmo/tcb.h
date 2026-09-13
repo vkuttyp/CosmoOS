@@ -91,8 +91,21 @@ struct __cosmo_tcb {
 } __attribute__((aligned(16)));
 
 /*
+ * How much storage one thread needs: the block, the ABI's reserved head
+ * where the architecture has one, and a copy of this program's own
+ * thread-local template. It is a property of the *program*, not a
+ * constant, because the template is: a program with a large `__thread`
+ * array needs more per thread than one with none.
+ *
+ * `COSMO_TCB_STORAGE` is the floor -- what a program with no `__thread`
+ * variables needs -- and a caller that allocates storage for a thread must
+ * ask this rather than assume it.
+ */
+size_t cosmo_tcb_storage(void);
+
+/*
  * Take over the calling thread's block, from storage the caller owns.
- * `len` must be at least COSMO_TCB_STORAGE and `block` 16-byte aligned;
+ * `len` must be at least `cosmo_tcb_storage()` and `block` 16-byte aligned;
  * returns 0, -EINVAL, or whatever SYS_set_tls refused. The block's
  * lifetime is the caller's problem and must outlast the thread.
  *

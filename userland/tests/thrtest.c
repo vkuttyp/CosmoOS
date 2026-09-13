@@ -164,6 +164,52 @@ static void *errno_erange(void *arg)
     return NULL;
 }
 
+/*
+ * Step 19's thread-local storage. `tls_init` has an initialiser, so it
+ * lives in `.tdata` and every thread must see 0x5eed -- which is what
+ * distinguishes a *copied* template from one shared image. `tls_zero` is
+ * large and uninitialised, so it lives in `.tbss` and must be zero in a
+ * thread even after an earlier one filled it. `tls_aligned` asks for more
+ * alignment than the thread pointer's own, which is the case that catches
+ * an implementation that rounds the image's address away.
+ *
+ * These three are also the whole proof that the offset formula is right:
+ * the linker resolved their addresses relative to the thread pointer, and
+ * reading back an initialiser this library placed is the only way to know
+ * that libc and the linker agree. No amount of reading the ABI documents
+ * establishes that.
+ */
+static __thread int tls_init = 0x5eed;
+static __thread char tls_zero[512];
+static __thread _Alignas(64) long tls_aligned;
+
+static volatile unsigned tls_bad, tls_done;
+static void *tlsvar_user(void *arg)
+{
+    unsigned id = (unsigned)(unsigned long)arg;
+    if (tls_init != 0x5eed)
+        tls_bad++;                       /* .tdata was not copied for this thread */
+    for (unsigned i = 0; i < sizeof(tls_zero); i++)
+        if (tls_zero[i] != 0)
+            tls_bad++;                   /* .tbss was not zeroed for this thread */
+    if (((unsigned long)&tls_aligned % 64u) != 0)
+        tls_bad++;                       /* the image ignored its own alignment */
+    /* Now make this thread's copy distinctive, and check it stays so while
+     * the others do the same: a shared image loses this immediately. */
+    tls_init = (int)id;
+    memset(tls_zero, (int)(id & 0xff), sizeof(tls_zero));
+    tls_aligned = (long)id;
+    for (unsigned i = 0; i < 200u; i++) {
+        cosmo_yield();
+        if (tls_init != (int)id || tls_aligned != (long)id)
+            tls_bad++;
+        if (tls_zero[0] != (char)(id & 0xff) || tls_zero[sizeof(tls_zero) - 1] != (char)(id & 0xff))
+            tls_bad++;
+    }
+    __atomic_fetch_add(&tls_done, 1, __ATOMIC_ACQ_REL);
+    return NULL;
+}
+
 /* Step 17: reports what the cache says its own id is, which the creator
  * compares against the tid `thread_create` gave it. */
 static void *id_reporter(void *arg)
@@ -247,7 +293,11 @@ static void *errno_setter(void *arg)
  * cosmo/tcb.h states. It installs one from storage of its own and only then
  * uses errno.
  */
-static __attribute__((aligned(16))) char raw_blk[COSMO_TCB_STORAGE];
+/* A page: enough for this program's block, the ABI head and its own TLS
+ * image, whatever `cosmo_tcb_storage()` turns out to be. A program outside
+ * libc's wrapper has to ask rather than assume, because the size follows
+ * the program's own `__thread` variables. */
+static __attribute__((aligned(16))) char raw_blk[4096];
 static volatile int raw_rc[3];
 static volatile unsigned raw_err, raw_done;
 static void raw_entry(void *arg)
@@ -256,9 +306,11 @@ static void raw_entry(void *arg)
     /* Too short, and misaligned: refused before anything is installed, and
      * both refusals happen while this thread still has no block -- which is
      * why cosmo_tcb_install must not itself touch errno. */
-    raw_rc[0] = cosmo_tcb_install(raw_blk, COSMO_TCB_STORAGE - 1u);
-    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, COSMO_TCB_STORAGE);
+    raw_rc[0] = cosmo_tcb_install(raw_blk, cosmo_tcb_storage() - 1u);
+    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, cosmo_tcb_storage());
     raw_rc[2] = cosmo_tcb_install(raw_blk, sizeof(raw_blk));
+    if (raw_rc[2] == 0 && tls_init != 0x5eed)
+        raw_rc[2] = -1;   /* installed, but its TLS image was not placed */
     if (raw_rc[2] == 0) {
         errno = 0;
         (void)close(-1);
@@ -887,7 +939,36 @@ int main(int argc, char **argv)
 
     STEP("17");
     /*
-     * (12) The bound holds, and the process survives reaching it. This is
+     * (17) **`__thread` works**, which is what this unit is for. Four
+     * threads' worth of per-thread storage: the first thread's and three
+     * created ones, each writing its own value and checking it survives
+     * while the others write theirs.
+     */
+    {
+        cosmo_thread_t tt[3];
+        tls_bad = tls_done = 0;
+        /* The first thread's own copy, before any other exists. */
+        CHECK(tls_init == 0x5eed);
+        CHECK(tls_zero[0] == 0 && tls_zero[sizeof(tls_zero) - 1] == 0);
+        CHECK(((unsigned long)&tls_aligned % 64u) == 0);
+        tls_init = 0x1111;
+        memset(tls_zero, 0x11, sizeof(tls_zero));
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_start(&tt[i], tlsvar_user, (void *)(unsigned long)(i + 2), 32u * 1024u) == 0);
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_join(&tt[i], NULL) == 0);
+        CHECK(tls_done == 3);
+        CHECK(tls_bad == 0);
+        /* And the first thread's copy is still its own, which a shared
+         * image would have lost three times over. */
+        CHECK(tls_init == 0x1111);
+        CHECK(tls_zero[0] == 0x11 && tls_zero[sizeof(tls_zero) - 1] == 0x11);
+        printf("thrtest: tls_init at %p, aligned at %p\n", (void *)&tls_init, (void *)&tls_aligned);
+    }
+
+    STEP("18");
+    /*
+     * (18) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256
      * threads, and the memory they hold is returned as the kernel reaps
      * them, not the instant their joins return -- so anything after it is
@@ -933,9 +1014,9 @@ int main(int argc, char **argv)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
     }
 
-    STEP("18");
+    STEP("19");
     /*
-     * (18) **A program can find its own program headers**, which is how it
+     * (19) **A program can find its own program headers**, which is how it
      * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
      * kernel passes the standard trio in the auxiliary vector and knows
      * nothing about thread-local storage; everything above that is the
