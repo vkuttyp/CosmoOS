@@ -13,8 +13,14 @@ run:
    not have been scheduled at all -- the same race the deleted rule papered
    over, arriving in a new form. The answer is not another correction but a
    more faithful `CPU_ON`: PSCI says a `SUCCESS` means the target is powered
-   on *and executing*, so it now waits, bounded, for the target's thread to
-   reach its first entry. A timeout is still `SUCCESS`.
+   on *and executing*, so it now waits, bounded, for the target's first run
+   to have **returned** -- the only evidence of "executing" available in
+   userland. A timeout is still `SUCCESS`.
+
+   *Twice over*: the first version waited for the target's **thread** to
+   reach its entry, which CI's aarch64 disproved by losing `cpu1: up`
+   anyway. A thread can exist without its guest having executed, and the
+   power-off two instructions later kicks it first.
 2. **The kick's IPI buys promptness, not liveness** -- so the report's claim
    that a spinning guest would hang the owner without the kick is wrong on
    this machine. `guest_spin.S` says why in its own header: every host timer

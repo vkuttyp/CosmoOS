@@ -1555,14 +1555,31 @@ See [docs/development.md](docs/development.md).
   main thread that joined first would lose the guest's output.
   Nine review rounds on the report caught **ten design errors before any of
   it was built**, seven of them in the lifecycle -- including two deadlocks
-  and the memory-ordering bug above. Building it found three more that only
-  running can find: `CPU_ON` had to become **synchronous** (PSCI says a
-  SUCCESS means the target is executing, and a freshly released thread may
-  not have been scheduled at all -- the same race the deleted fairness rule
-  once papered over); a second stop-check in the run loop was **redundant**;
-  and **removing the kick's IPI entirely does not fail any test**, because a
-  host timer tick exits a spinning guest anyway, so liveness comes from the
-  tick plus the sticky flag and the IPI buys promptness. Proven by
+  and the memory-ordering bug above. **Building it, and reviewing the
+  build, found six more** -- three of them bugs in the first draft of the
+  threaded owner, which is the honest number:
+  *(a)* MMIO answers were **erased**, because the run's exit structure
+  carries the answer to the last exit *into* the next run and the new loop
+  zeroed it each time round, so every virtio register read completed as
+  zero -- and nothing gated catches that, since the machine-mode guests use
+  no virtio;
+  *(b)* `CPU_ON` wrote its target's registers **before** asking whether the
+  target was already running, which is why the lifecycle gained a
+  `STARTING` state to claim a vCPU before writing it;
+  *(c)* `CPU_OFF` left the vCPU **unstartable**, exiting its thread and
+  leaving the word `RUNNING`, so a later `CPU_ON` answered `ALREADY_ON`
+  forever -- the run set this replaced allowed a restart, and the threaded
+  version had silently taken it away;
+  *(d)* `CPU_ON` had to become **synchronous**, and then twice over: waiting
+  for the target's *thread* still lost `cpu1: up` on a loaded CI runner,
+  because a thread can exist without its guest having executed. It now
+  waits for the first run to have *returned*, which is what PSCI already
+  meant by "powered on and executing" -- and the CI failure was turned into
+  a local proof by standing a 40 ms sleep in for the loaded host;
+  *(e)* a second stop-check in the run loop was **redundant** and deleted;
+  *(f)* **removing the kick's IPI entirely fails no test**, because a host
+  timer tick exits a spinning guest anyway -- liveness comes from the tick
+  plus the sticky flag, and the IPI buys promptness. Proven by
   `guest_dtb`, `guest_offspin` at `-c 2` and `-c 3`, `guest_psci_race`, the
   peak-concurrency marker and the `hv-vcpu-stop` self-test, with bug-proofs
   for each -- and two of those proofs recorded as *not* failing on demand,

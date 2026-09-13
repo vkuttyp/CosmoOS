@@ -640,9 +640,18 @@ the first build of this unit lost `cpu1: up` exactly as the round-robin
 once had. The answer is not another correction but a **more faithful
 `CPU_ON`**: PSCI says a `SUCCESS` means the target is powered on *and
 executing*, which on hardware is free because the core starts itself, and
-here costs a bounded wait for the target's thread to reach its first entry.
-A timeout is still `SUCCESS` -- the vCPU is on -- and no part of the
-interface has to lie about turns.
+here costs a bounded wait for the target's first run to have **returned**,
+which is the only evidence of "executing" that userland has. A timeout is
+still `SUCCESS` -- the vCPU is on -- and no part of the interface has to lie
+about turns.
+
+Waiting for the target's *thread* rather than its guest is not enough, and
+a loaded CI runner is what said so: a thread can exist, and even be
+scheduled, without its guest having executed an instruction, and the
+power-off that follows two instructions later reaches it first. The marker
+`cpu1: up` has now had three mechanisms behind it -- a fairness rule with a
+64-turn hold, a `CPU_ON` that waited for a thread, and a `CPU_ON` that
+waits for the guest -- and only the third is what PSCI already promised.
 
 **The lifecycle.** One word per vCPU:
 
