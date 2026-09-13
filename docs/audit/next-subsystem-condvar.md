@@ -327,7 +327,9 @@ trade is judged wrong, the fallback in Tests case 2 is the answer, and
 it costs the test rather than the security.
 
 **Performance.** The uncontended signal with no waiter is one atomic
-increment and one syscall that finds an empty bucket. Making *that* free
+increment and one syscall that finds an empty bucket. Every *wait* also
+pays one acquire-release exchange for the test seam, ahead of a syscall
+that dwarfs it. Making *that* free
 (by keeping a waiter count and skipping the syscall) is a real
 optimisation and is deliberately not in the first version: see Benchmarks.
 
@@ -487,12 +489,19 @@ inserted before it.
    sleeps on the current value, and hangs. **Deterministic in both
    directions, on one CPU, with no timing.**
 
-   **What it costs, stated rather than waved past.** One load and one
-   predictable not-taken branch, immediately before a syscall — and the
-   pointer is compiled in unconditionally, *not* behind `#ifdef`, so the
-   code path the tests exercise is the code path that ships. A seam that
-   exists only in a test build proves things about a binary nobody runs.
-   The symbol is `__`-prefixed and documented as libc's, not a program's.
+   **What it costs, stated rather than waved past.** As designed this said
+   "one load and one predictable not-taken branch". **As built it is an
+   acquire-release exchange** — a read-modify-write on a process-global
+   word, on every condition wait — because the round that made the probe
+   one-shot replaced the load with a take, and this sentence was not
+   updated with it until a later review. The honest statement is that the
+   exchange sits immediately before a `futex_wait` syscall which costs
+   orders of magnitude more, so it is acceptable; not that it is free.
+   The pointer is compiled in unconditionally, *not* behind `#ifdef`, so
+   the code path the tests exercise is the code path that ships — a seam
+   that exists only in a test build proves things about a binary nobody
+   runs. The symbol is `__`-prefixed and documented as libc's, not a
+   program's.
 
    If review prefers no seam in the library at all, the fallback is
    explicit and worse: this property becomes **correct by construction,

@@ -64,8 +64,18 @@ size_t __fwrite_nolock(const void *buf, size_t size, size_t n, FILE *f);
  *
  * Compiled in unconditionally and not behind an `#ifdef`, because a seam
  * that exists only in a test build proves things about a binary nobody
- * runs. It is one relaxed load and one not-taken branch immediately before
- * a syscall. It is libc's, not a program's: no public header declares it.
+ * runs.
+ *
+ * **The cost is an acquire-release exchange, not a load** -- it has to be,
+ * because taking the probe is what stops it firing in a later waiter, and
+ * an earlier draft of this comment described the load it used to be. A
+ * read-modify-write on a process-global word, on every condition wait, is
+ * a real cost and is named here rather than rounded down: it sits
+ * immediately before a `futex_wait` syscall, which is several orders of
+ * magnitude more expensive, and that is the reason it is acceptable
+ * rather than the claim that it is free.
+ *
+ * It is libc's, not a program's: no public header declares it.
  */
 extern void (*__cosmo_cond_probe)(void);
 
