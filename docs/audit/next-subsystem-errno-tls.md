@@ -155,7 +155,10 @@ and names `errno` as what remains.
   no `__tls_get_addr`, no compiler `__thread`: one syscall, one page per
   thread, and an accessor. A program that later wants real `__thread` is
   not blocked by any of it -- the thread pointer will already be there, and
-  that unit becomes "teach `spawn` about `PT_TLS`".
+  that unit becomes "teach `spawn` about `PT_TLS`". **The first half held
+  and the second did not**: the later unit needed no loader change at all.
+  The kernel publishes `AT_PHDR` and libc reads its own program headers,
+  so nothing in the kernel knows what thread-local storage is.
 - **It removes a footgun from a public API.** `cosmo/thread.h` currently
   carries a warning telling callers which libc functions they may not use
   from two threads. After this, that warning shrinks to `strerror` and
@@ -193,10 +196,19 @@ struct __cosmo_tcb {
     struct __cosmo_tcb *self;   /* x86-64 reads this at %fs:0 */
     int err;                    /* errno */
     unsigned tid;               /* the cached id; 0 means "not asked yet" */
-    char reserved[112];         /* to 128: 8 + 4 + 4 + 112. A program's own storage
-                                   starts at offset 128, never inside this. */
+    char reserved[112];         /* to 128: 8 + 4 + 4 + 112. */
 };
 ```
+
+**The promise this block's comment made is withdrawn.** It read "a
+program's own storage starts at offset 128, never inside this", offering
+`reserved[]` as space a program could count on. It could not be kept: on
+AArch64 the ELF TLS ABI puts the first `__thread` variable at TP+16,
+which is inside those bytes, so the `__thread` unit moved the block below
+the thread pointer and took `reserved[]` back for libc. A program that
+wants per-thread storage uses `__thread`, and one that allocates a
+thread's storage asks `cosmo_tcb_storage()` rather than assuming 128
+(`docs/audit/next-subsystem-pt-tls.md`).
 
 `__errno_location()` returns `&tcb->err`, and finding the block differs by
 architecture for a reason:
@@ -298,14 +310,34 @@ decades, and nothing in this tree takes its address.
 
 ### What stays shared, and what this unit does not do
 
-`strerror`'s static buffer and `getcwd(NULL)`'s storage stay shared: both
-now *can* be fixed, and doing it here would be a second subsystem in one
-unit. `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
+> **Done by a later unit.** Everything this section and the two below
+> defer was built in `docs/audit/next-subsystem-pt-tls.md`: compiler
+> `__thread` and `PT_TLS`, `strerror` moving into per-thread storage, and
+> a way for a program to learn the block's size (`cosmo_tcb_storage()`).
+> Two details came out differently and are recorded here so this report
+> does not contradict the tree. **`getcwd(NULL)` never needed the
+> change** -- it `malloc`s per call and hands the buffer to its caller, so
+> it stopped being shared state when the allocator took its lock;
+> `strerror`'s was the only libc function *returning a pointer to a
+> static* -- not the only writable static in `libc/src`, since `atexit`'s
+> table and the environment are still process-global and unsynchronised
+> (named as a gap in `docs/libc/invariants.md`). And
+> **`reserved[112]` is not a program's to use**, which the paragraph on
+> the block's layout below promised: on AArch64 the ELF ABI puts the
+> first `__thread` variable exactly there. `__thread` is how a program
+> gets per-thread storage now.
+
+`strerror`'s static buffer and `getcwd(NULL)`'s storage **stayed shared
+through this unit**: both became fixable here, and doing it here would
+have been a second subsystem in one unit. (`strerror`'s moved behind the
+thread pointer in the `__thread` unit; `getcwd(NULL)`'s turned out never
+to have needed it.) `cosmo_thread_id()` gains the cached `tid` (a syscall saved on every
 call after the first, since the cache is filled lazily) because the block has to carry something more than `errno` to justify
 128 bytes, and the tid is the field the threads unit already makes every
-thread know. Compiler `__thread` is not attempted: that needs `spawn` to
-honour `PT_TLS`, a real TCB layout and the linker's TLS relocations, and
-this design is deliberately the one that does not block it.
+thread know. Compiler `__thread` was **not attempted in this unit**: it
+needs a real TCB layout and the linker's TLS relocations, and this design
+is deliberately the one that does not block it. (It was built next, and
+needed no `spawn` change at all -- see the correction above.)
 
 ### The §70 gate
 
@@ -531,6 +563,13 @@ eager version did not manage.
   relocations must work for static binaries, and every thread needs its
   image copied. This unit is the prerequisite for it, not a detour around
   it -- the thread pointer it adds is what `PT_TLS` would use.
+  **Built, and smaller than this made it sound**
+  (`docs/audit/next-subsystem-pt-tls.md`). `spawn` parses and places
+  nothing: the loader already computes where the header table lands, the
+  native auxiliary vector carries it, and libc reads its own `PT_TLS`.
+  The last sentence was the accurate one -- the thread pointer this unit
+  added is exactly what the image hangs off, and on AArch64 the block had
+  to move below it because the ABI puts the first variable at TP+16.
 - **Leave `errno` shared and forbid it in threaded code.** Where the
   threads unit landed, and a review rejected the same argument about the
   allocator. The difference in consequence (a wrong code, not corruption)
@@ -547,3 +586,10 @@ Named and deferred: compiler `__thread` and `PT_TLS`; `strerror` and
 *block's size* so a program can allocate its own with libc's prefix; and
 the `vmctl` conversion, which this unit unblocks and which remains its own
 report.
+
+**All of these have since been built.** `__thread`, `PT_TLS` and
+`strerror` in `docs/audit/next-subsystem-pt-tls.md`, where the block's
+size became `cosmo_tcb_storage()` -- a function of the program rather
+than the constant this report imagined, because the size follows the
+program's own template. `getcwd(NULL)` turned out not to need it. The
+`vmctl` conversion is `docs/audit/next-subsystem-vcpu-threads.md`.

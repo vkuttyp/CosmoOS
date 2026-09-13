@@ -21,6 +21,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cosmo/auxv.h>
 #include <cosmo/syscall.h>
 #include <cosmo/tcb.h>
 #include <cosmo/thread.h>
@@ -163,6 +164,75 @@ static void *errno_erange(void *arg)
     return NULL;
 }
 
+/*
+ * Step 19's thread-local storage. `tls_init` has an initialiser, so it
+ * lives in `.tdata` and every thread must see 0x5eed -- which is what
+ * distinguishes a *copied* template from one shared image. `tls_zero` is
+ * large and uninitialised, so it lives in `.tbss` and must be zero in a
+ * thread even after an earlier one filled it. `tls_aligned` asks for more
+ * alignment than the thread pointer's own, which is the case that catches
+ * an implementation that rounds the image's address away.
+ *
+ * These three are also the whole proof that the offset formula is right:
+ * the linker resolved their addresses relative to the thread pointer, and
+ * reading back an initialiser this library placed is the only way to know
+ * that libc and the linker agree. No amount of reading the ABI documents
+ * establishes that.
+ */
+static __thread int tls_init = 0x5eed;
+static __thread char tls_zero[512];
+static __thread _Alignas(64) long tls_aligned;
+/*
+ * An alignment larger than the block's own offset, which is the case that
+ * made the storage size disagree with the placement: the thread pointer and
+ * the image are aligned independently, so each rounding costs up to an
+ * alignment. Having a program in the suite with one means the worst case is
+ * exercised on every boot rather than reasoned about.
+ */
+static __thread _Alignas(256) long tls_overaligned;
+
+static volatile unsigned tls_bad, tls_done;
+static void *tlsvar_user(void *arg)
+{
+    unsigned id = (unsigned)(unsigned long)arg;
+    if (tls_init != 0x5eed)
+        tls_bad++;                       /* .tdata was not copied for this thread */
+    for (unsigned i = 0; i < sizeof(tls_zero); i++)
+        if (tls_zero[i] != 0)
+            tls_bad++;                   /* .tbss was not zeroed for this thread */
+    if (((unsigned long)&tls_aligned % 64u) != 0)
+        tls_bad++;                       /* the image ignored its own alignment */
+    if (((unsigned long)&tls_overaligned % 256u) != 0)
+        tls_bad++;                       /* ...including one past the block's offset */
+    /* Now make this thread's copy distinctive, and check it stays so while
+     * the others do the same: a shared image loses this immediately. */
+    tls_init = (int)id;
+    memset(tls_zero, (int)(id & 0xff), sizeof(tls_zero));
+    tls_aligned = (long)id;
+    for (unsigned i = 0; i < 200u; i++) {
+        cosmo_yield();
+        if (tls_init != (int)id || tls_aligned != (long)id)
+            tls_bad++;
+        if (tls_zero[0] != (char)(id & 0xff) || tls_zero[sizeof(tls_zero) - 1] != (char)(id & 0xff))
+            tls_bad++;
+    }
+    /*
+     * `strerror`'s buffer, from a thread: the message for an unknown code
+     * is built in per-thread storage now, so two threads asking about
+     * different codes must each read their own. A shared buffer gives
+     * whichever wrote last, to both.
+     */
+    for (unsigned i = 0; i < 100u; i++) {
+        char want[32];
+        snprintf(want, sizeof(want), "Unknown error %u", 9000u + id);
+        if (strcmp(strerror((int)(9000u + id)), want) != 0)
+            tls_bad++;
+        cosmo_yield();
+    }
+    __atomic_fetch_add(&tls_done, 1, __ATOMIC_ACQ_REL);
+    return NULL;
+}
+
 /* Step 17: reports what the cache says its own id is, which the creator
  * compares against the tid `thread_create` gave it. */
 static void *id_reporter(void *arg)
@@ -183,7 +253,7 @@ static void *id_reporter(void *arg)
  * `self` word is unused, and every assertion that sets `errno` and reads it
  * straight back still passes. The layout has to be checked as a layout.
  */
-static volatile unsigned layout_ok, layout_ran;
+static volatile unsigned layout_ok, layout_ran, layout_tp_ok, layout_head_ok;
 static volatile unsigned long layout_blk;
 static void *layout_probe(void *arg)
 {
@@ -192,6 +262,39 @@ static void *layout_probe(void *arg)
     const char *blk = (const char *)&errno - offsetof(struct __cosmo_tcb, err);
     layout_ok = (unsigned)(blk > &local);
     layout_blk = (unsigned long)blk;
+
+    /*
+     * The thread pointer sits at `COSMO_TCB_TP_OFFSET` into the storage,
+     * which is the block itself on x86-64 and 128 bytes above it on
+     * AArch64 -- because variant I reserves 16 bytes at the thread pointer
+     * and puts `__thread` variables above them.
+     *
+     * Asserted because it is silent on the architecture that needs no
+     * change: x86-64's thread pointer *is* the block and always was, so
+     * an AArch64 mistake here passes every x86 test. This is the check
+     * that differs between them.
+     */
+#if defined(__aarch64__)
+    char *tp = (char *)__builtin_thread_pointer();
+    layout_tp_ok = (unsigned)(tp - blk == (long)COSMO_TCB_TP_OFFSET);
+    /*
+     * And the ABI's 16 reserved bytes at the thread pointer are real
+     * memory that is **not** the block: writing them must leave `errno`,
+     * the cached tid and the `self` word alone. Under the old layout the
+     * thread pointer was the block, so these sixteen bytes were `self`,
+     * `err` and `tid` -- this is that collision, in miniature, before any
+     * TLS image exists to cause it in earnest.
+     */
+    struct __cosmo_tcb *b = (struct __cosmo_tcb *)(tp - COSMO_TCB_TP_OFFSET);
+    unsigned want_tid = cosmo_thread_id();
+    errno = ERANGE;
+    for (unsigned i = 0; i < 16u; i++)
+        ((volatile char *)tp)[i] = (char)0xA5;
+    layout_head_ok = (unsigned)(errno == ERANGE && b->self == b && b->tid == want_tid);
+#else
+    layout_tp_ok = (unsigned)(COSMO_TCB_TP_OFFSET == 0u);   /* the block is the thread pointer */
+    layout_head_ok = 1u;                                    /* no reserved head to write */
+#endif
     layout_ran = 1;
     return NULL;
 }
@@ -213,8 +316,12 @@ static void *errno_setter(void *arg)
  * cosmo/tcb.h states. It installs one from storage of its own and only then
  * uses errno.
  */
-static __attribute__((aligned(16))) char raw_blk[COSMO_TCB_SIZE];
-static volatile int raw_rc[3];
+/* A page: enough for this program's block, the ABI head and its own TLS
+ * image, whatever `cosmo_tcb_storage()` turns out to be. A program outside
+ * libc's wrapper has to ask rather than assume, because the size follows
+ * the program's own `__thread` variables. */
+static __attribute__((aligned(16))) char raw_blk[4096];
+static volatile int raw_rc[4];
 static volatile unsigned raw_err, raw_done;
 static void raw_entry(void *arg)
 {
@@ -222,9 +329,26 @@ static void raw_entry(void *arg)
     /* Too short, and misaligned: refused before anything is installed, and
      * both refusals happen while this thread still has no block -- which is
      * why cosmo_tcb_install must not itself touch errno. */
-    raw_rc[0] = cosmo_tcb_install(raw_blk, COSMO_TCB_SIZE - 1u);
-    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, COSMO_TCB_SIZE);
+    raw_rc[0] = cosmo_tcb_install(raw_blk, cosmo_tcb_storage() - 1u);
+    raw_rc[1] = cosmo_tcb_install(raw_blk + 1, cosmo_tcb_storage());
+    /*
+     * Exactly the documented size, at exactly the documented alignment and
+     * no more. This is the case that costs the most, because the thread
+     * pointer is then rounded up to the template's alignment inside the
+     * storage *and* the image is rounded up again above it -- and a caller
+     * that asked `cosmo_tcb_storage()` and allocated the answer has
+     * followed the contract, so a refusal here is libc's bug, not the
+     * caller's. The size formula charged for one of those two roundings
+     * until a review noticed; the reason `raw_rc[1]` did not catch it is
+     * that it asks for the exact size at a *misaligned* address, so it is
+     * refused for the alignment before the size is ever weighed. This
+     * program's 256-byte-aligned thread-local is what makes the two
+     * roundings cost more than the block's own offset.
+     */
+    raw_rc[3] = cosmo_tcb_install(raw_blk, cosmo_tcb_storage());
     raw_rc[2] = cosmo_tcb_install(raw_blk, sizeof(raw_blk));
+    if (raw_rc[2] == 0 && tls_init != 0x5eed)
+        raw_rc[2] = -1;   /* installed, but its TLS image was not placed */
     if (raw_rc[2] == 0) {
         errno = 0;
         (void)close(-1);
@@ -788,7 +912,7 @@ int main(int argc, char **argv)
         void *stk = mmap(NULL, 16u * 1024u, PROT_READ | PROT_WRITE,
                          MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         CHECK(stk != MAP_FAILED);
-        raw_rc[0] = raw_rc[1] = raw_rc[2] = 1;
+        raw_rc[0] = raw_rc[1] = raw_rc[2] = raw_rc[3] = 1;
         raw_err = 0;
         raw_done = 0;
         unsigned clear = 0;
@@ -805,6 +929,7 @@ int main(int argc, char **argv)
                 cosmo_yield();
             CHECK(raw_rc[0] == -EINVAL);       /* shorter than the prefix */
             CHECK(raw_rc[1] == -EINVAL);       /* and misaligned */
+            CHECK(raw_rc[3] == 0);             /* exactly the documented size, at 16 */
             CHECK(raw_rc[2] == 0);
             CHECK(raw_err == EBADF);           /* errno works once installed */
             CHECK(raw_done == (unsigned)tid);  /* and so does the tid cache */
@@ -828,6 +953,8 @@ int main(int argc, char **argv)
         CHECK(cosmo_thread_join(&t, NULL) == 0);
         CHECK(layout_ran == 1);
         CHECK(layout_ok == 1);      /* the block is above the stack, not in it */
+        CHECK(layout_tp_ok == 1);   /* and the thread pointer is where the ABI wants it */
+        CHECK(layout_head_ok == 1); /* writing the ABI's reserved head leaves the block alone */
         /*
          * And the join freed it. The report proposed counting the address
          * space across a thousand cycles; this asserts the thing itself
@@ -847,11 +974,47 @@ int main(int argc, char **argv)
         errno = EBADF;
         CHECK(strcmp(strerror(EBADF), "Bad file descriptor") == 0);
         CHECK(strcmp(strerror(ERANGE), "Result out of range") == 0);
+        /*
+         * And an *unknown* code, which is the only path with a buffer:
+         * two threads asking about two unknown codes used to share one
+         * and get one answer. L8's last line (see step 17's worker).
+         */
+        CHECK(strcmp(strerror(4242), "Unknown error 4242") == 0);
     }
 
     STEP("17");
     /*
-     * (12) The bound holds, and the process survives reaching it. This is
+     * (17) **`__thread` works**, which is what this unit is for. Four
+     * threads' worth of per-thread storage: the first thread's and three
+     * created ones, each writing its own value and checking it survives
+     * while the others write theirs.
+     */
+    {
+        cosmo_thread_t tt[3];
+        tls_bad = tls_done = 0;
+        /* The first thread's own copy, before any other exists. */
+        CHECK(tls_init == 0x5eed);
+        CHECK(tls_zero[0] == 0 && tls_zero[sizeof(tls_zero) - 1] == 0);
+        CHECK(((unsigned long)&tls_aligned % 64u) == 0);
+        CHECK(((unsigned long)&tls_overaligned % 256u) == 0);
+        tls_init = 0x1111;
+        memset(tls_zero, 0x11, sizeof(tls_zero));
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_start(&tt[i], tlsvar_user, (void *)(unsigned long)(i + 2), 32u * 1024u) == 0);
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(cosmo_thread_join(&tt[i], NULL) == 0);
+        CHECK(tls_done == 3);
+        CHECK(tls_bad == 0);
+        /* And the first thread's copy is still its own, which a shared
+         * image would have lost three times over. */
+        CHECK(tls_init == 0x1111);
+        CHECK(tls_zero[0] == 0x11 && tls_zero[sizeof(tls_zero) - 1] == 0x11);
+        printf("thrtest: tls_init at %p, aligned at %p\n", (void *)&tls_init, (void *)&tls_aligned);
+    }
+
+    STEP("18");
+    /*
+     * (18) The bound holds, and the process survives reaching it. This is
      * deliberately the LAST step: it is a resource-exhaustion test -- 256
      * threads, and the memory they hold is returned as the kernel reaps
      * them, not the instant their joins return -- so anything after it is
@@ -895,6 +1058,63 @@ int main(int argc, char **argv)
         }
         for (unsigned i = 0; i < 3u; i++)
             CHECK(cosmo_thread_join(&again[i], NULL) == 0);
+    }
+
+    STEP("19");
+    /*
+     * (19) **A program can find its own program headers**, which is how it
+     * will find its own `PT_TLS` (docs/audit/next-subsystem-pt-tls.md). The
+     * kernel passes the standard trio in the auxiliary vector and knows
+     * nothing about thread-local storage; everything above that is the
+     * program's own reading of its own ELF.
+     *
+     * The header layout is declared here rather than included: ELF's
+     * program header is a fixed format, and no public header in this tree
+     * describes it yet -- libc will need its own copy when it starts
+     * placing images, and a test that waited for that would be testing
+     * nothing now.
+     */
+    {
+        struct phdr {
+            uint32_t p_type, p_flags;
+            uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
+        };
+        unsigned long at_phdr = cosmo_getauxval(COSMO_AT_PHDR);
+        unsigned long at_phent = cosmo_getauxval(COSMO_AT_PHENT);
+        unsigned long at_phnum = cosmo_getauxval(COSMO_AT_PHNUM);
+        CHECK(at_phdr != 0);                      /* the headers are mapped */
+        CHECK(at_phent == sizeof(struct phdr));   /* 56, and the kernel refuses anything else */
+        CHECK(at_phnum > 0 && at_phnum < 64);
+        /* And the tags that were already there, so a wrong offset into the
+         * vector shows up as these failing rather than as a plausible
+         * address. */
+        CHECK(cosmo_getauxval(COSMO_AT_PAGESZ) == 4096);
+        CHECK(cosmo_getauxval(COSMO_AT_ENTRY) != 0);
+        CHECK(cosmo_getauxval(0xdead) == 0);      /* an unknown tag is absent, not garbage */
+
+        /*
+         * The headers must describe *this* program: some PT_LOAD has to
+         * cover the address of this function. A vector that pointed at
+         * another image, or at nothing, would satisfy every check above.
+         */
+        const struct phdr *ph = (const struct phdr *)at_phdr;
+        unsigned long self = (unsigned long)(void *)&main;
+        int covers = 0, nr_tls = 0;
+        for (unsigned long i = 0; i < at_phnum; i++) {
+            if (ph[i].p_type == 1u) {   /* PT_LOAD */
+                if (self >= ph[i].p_vaddr && self < ph[i].p_vaddr + ph[i].p_memsz)
+                    covers = 1;
+            }
+            if (ph[i].p_type == 7u)     /* PT_TLS */
+                nr_tls++;
+        }
+        CHECK(covers == 1);
+        /* At most one, which the ABI requires and every later step relies
+         * on. This program has none yet; the count is printed so that the
+         * step which gives it a `__thread` variable can be seen to change
+         * it rather than asserted to. */
+        CHECK(nr_tls <= 1);
+        printf("thrtest: phdr at 0x%lx, %lu entries, %d PT_TLS\n", at_phdr, at_phnum, nr_tls);
     }
 
     if (failures == 0)

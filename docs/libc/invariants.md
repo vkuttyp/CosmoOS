@@ -89,7 +89,11 @@ are done, and the shape of each is set by its consequence:
   core -- so two threads cannot interleave inside a line or race the
   buffer pointers of a `FILE`.
 - **`errno` is per-thread**, and takes no lock at all, because there is no
-  longer a shared location for two threads to contend over. It lives in a
+  longer a shared location for two threads to contend over. Since the
+  `__thread` unit a program can do the same for its own state: the
+  compiler's `__thread` and C11's `_Thread_local` work, with the image
+  placed per thread from the program's own `PT_TLS`
+  (`docs/audit/next-subsystem-pt-tls.md`). It lives in a
   128-byte block behind the thread pointer (`libc/include/cosmo/tcb.h`),
   which `SYS_set_tls` sets: `__libc_start` installs a static block for the
   first thread before anything else runs, and `cosmo_thread_start` puts one
@@ -103,9 +107,28 @@ are done, and the shape of each is set by its consequence:
   with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
   for a program that wants such a thread to use libc anyway.
 
-`strerror` and `getcwd(NULL)` still use static or heap storage without
-synchronisation of their own, and `feof`/`ferror`/`clearerr`/`fileno` read
-a word without the lock.
+`feof`/`ferror`/`clearerr`/`fileno` read a word without the lock.
+
+**`strerror` and `getcwd(NULL)` are done, and one of them never needed
+doing.** `strerror`'s buffer for an unknown code is `_Thread_local` since
+the `__thread` unit -- the first use of thread-local storage inside the
+library that provides it. `getcwd(NULL)` was already safe: it `malloc`s a
+fresh buffer per call and hands it to the caller, so once the allocator
+took its lock in the threads unit there was nothing shared left. This
+invariant went on naming it for two units afterwards, which is what an
+enumeration kept by hand does -- the list is now checked against a
+`grep` for writable statics in `libc/src`.
+
+**What that `grep` actually says**, since a first draft of this paragraph
+read it too broadly and claimed `strerror`'s was the only writable static
+left. It was the only one of a particular kind: a function *returning a
+pointer to a static*, which is the kind `errno` and this invariant were
+about. The statics that remain fall in three groups. The allocator's
+`g_free` and stdio's `g_std`/`g_files` are behind `g_lock` and `g_io`.
+`tcb.c`'s `g_tls` is written once in `__libc_start`, before the process
+has a second thread, and read-only after. And `stdlib.c`'s `g_atexit`,
+`g_natexit`, `environ` and `g_env_owned` are **genuinely unsynchronised**
+-- see the gap below.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting `errno`, takes no libc lock, and maps its stacks
@@ -119,8 +142,22 @@ handle, and steps 12 to 16 for `errno`: two threads provoking different
 failures two thousand times each while the first thread provokes a third,
 a thread's `errno` leaving the first thread's alone, a thread made outside
 libc installing its own block, and the block sitting above the stack and
-freed with it. Gap: `strerror` and `getcwd(NULL)`, which are now
-*fixable* -- the block is where they would go -- and are their own unit.
+freed with it. And step 17 for `__thread`: a `.tdata` variable read back as
+its initialiser in every thread, a `.tbss` array zero in a new one, an
+over-aligned variable aligned, and `strerror` of an unknown code answering
+each thread its own.
+
+**One gap is left, and it is not the one this invariant was about.**
+`atexit` does `g_atexit[g_natexit++] = fn`, an unsynchronised
+read-modify-write on process-global state, and `setenv`/`unsetenv`
+reallocate `environ` with `g_env_owned` tracking ownership -- so two
+threads registering handlers, or one setting the environment while
+another reads it, race. Nothing in the tree does either from a second
+thread: handlers and environment are set before threads start, which is
+the normal shape of both. It is named here rather than fixed because it
+is process state and not per-thread state, and this invariant is about
+the latter; the fix is a lock apiece and belongs to whichever unit needs
+it. `cosmo/thread.h` states the same restriction to callers.
 
 ## Gaps (documented, not invariants)
 

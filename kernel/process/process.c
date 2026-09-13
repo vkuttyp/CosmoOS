@@ -299,6 +299,24 @@ static uint64_t build_initial_stack(struct process *p, const struct elf_info *in
                                      .platform_addr = platform_addr, .interp_base = interp_base };
         k += linux_auxv(p, info, &x, w + k, 40);
     } else {
+        /* The program header table, so a program can read its own headers
+         * -- which is how it finds its own PT_TLS, and why nothing in this
+         * kernel knows what thread-local storage is. The values are the
+         * ones the Linux door already passes as AT_PHDR/AT_PHENT; zero
+         * when the headers are not inside a mapped segment.
+         *
+         * Zero is "the headers are not readable", **not** "the program has
+         * no thread-local storage** -- and a reader must not collapse the
+         * two. libc refuses to start a program it cannot answer that
+         * question for (libc/src/tlsscan.c), because the other answer is a
+         * process whose `__thread` variables were never initialised and
+         * whose per-thread storage was sized as though it had none. Every
+         * native program links with the one userland/user.ld, which keeps
+         * the header table in the text segment, so this stays zero only
+         * for an image built some other way. */
+        w[k++] = COSMO_AT_PHDR;   w[k++] = info->phdr_vaddr;
+        w[k++] = COSMO_AT_PHENT;  w[k++] = info->phent;
+        w[k++] = COSMO_AT_PHNUM;  w[k++] = info->phnum;
         w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
         w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
         w[k++] = COSMO_AT_NULL;   w[k++] = 0;

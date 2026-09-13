@@ -28,6 +28,8 @@ LIBC_STRING_CFLAGS := $(USER_CFLAGS) -fno-builtin
 LIBC_SRCS := \
 	libc/src/errno.c \
 	libc/src/tcb.c \
+	libc/src/auxv.c \
+	libc/src/tlsscan.c \
 	libc/src/thread.c \
 	libc/src/ctype.c \
 	libc/src/malloc.c \

@@ -81,15 +81,21 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * block sits *above* the stack, where a stack that grows down never
      * reaches it.
      */
-    char *base = mmap(NULL, size + 2u * PAGE, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+    /*
+     * The block's page also carries this thread's TLS image, so its size
+     * comes from the program rather than being one page: a program with a
+     * large `__thread` array needs room for a copy per thread.
+     */
+    size_t tcb = (__cosmo_tcb_storage() + PAGE - 1u) & ~(size_t)(PAGE - 1u);
+    char *base = mmap(NULL, size + PAGE + tcb, PROT_NONE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (base == MAP_FAILED)
         return -errno;                     /* the reservation */
-    if (munmap(base + PAGE, size + PAGE) != 0) {
+    if (munmap(base + PAGE, size + tcb) != 0) {
         int e = errno;
-        munmap(base, size + 2u * PAGE);
+        munmap(base, size + PAGE + tcb);
         return -e;                         /* the hole */
     }
-    if (mmap(base + PAGE, size + PAGE, PROT_READ | PROT_WRITE,
+    if (mmap(base + PAGE, size + tcb, PROT_READ | PROT_WRITE,
              MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0) == MAP_FAILED) {
         int e = errno;
         munmap(base, PAGE);
@@ -99,7 +105,7 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
     t->fn = fn;
     t->arg = arg;
     t->stack = base;
-    t->stack_size = size + 2u * PAGE;
+    t->stack_size = size + PAGE + tcb;
 
     unsigned long top = (unsigned long)base + PAGE + size;
     top &= ~15ul;   /* the kernel requires 16-byte alignment */
@@ -113,23 +119,39 @@ int cosmo_thread_start(cosmo_thread_t *t, void *(*fn)(void *), void *arg, size_t
      * the thread may already be reading it, and a thread that never asks
      * should not pay a syscall to be told.
      */
-    struct __cosmo_tcb *blk = (struct __cosmo_tcb *)(base + PAGE + size);
+    /*
+     * The block and this thread's own copy of the TLS image, laid out by
+     * the library that owns both (`__cosmo_tcb_place`): the thread pointer
+     * is not always the block's address -- on AArch64 the ELF ABI reserves
+     * 16 bytes at the thread pointer and puts `__thread` variables above
+     * them -- and the image is copied here, per thread, because a template
+     * is not an allocation.
+     */
+    char *storage = base + PAGE + size;
+    char *tp_p = (char *)__cosmo_tcb_place(storage, tcb);
+    if (tp_p == NULL) {
+        munmap(base, size + PAGE + tcb);
+        t->stack = NULL;
+        return -EINVAL;
+    }
+    struct __cosmo_tcb *blk = (struct __cosmo_tcb *)(tp_p - COSMO_TCB_TP_OFFSET);
     blk->self = blk;
     blk->err = 0;
     blk->tid = 0;
+    unsigned long tp = (unsigned long)tp_p;
 
     struct cosmo_thread req = {
         .entry = (unsigned long)thread_trampoline,
         .arg = (unsigned long)t,
         .stack_top = top,
-        .tls = (unsigned long)blk,
+        .tls = tp,
         .clear_tid = (unsigned long)&t->done,
         .flags = 0,
         .reserved = 0,
     };
     long rc = cosmo_thread_create(&req);
     if (rc < 0) {
-        munmap(base, size + 2u * PAGE);
+        munmap(base, size + PAGE + tcb);
         t->stack = NULL;
         return (int)rc;
     }

@@ -82,11 +82,16 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 
 ## Non-responsibilities
 
-- Compiler `__thread` and ELF `PT_TLS`: `spawn` does not place a TLS
-  image and the linker's TLS relocations are untried. What exists is the
-  thread *pointer* (`SYS_set_tls`) and libc's own 128-byte block behind
-  it, which is what makes `errno` per-thread (invariants L8) -- and which
-  is what a real `PT_TLS` unit would build on rather than replace.
+- Dynamic TLS (`__tls_get_addr`, TLS descriptors) and `PT_TLS` in a
+  shared object, neither of which a system without dynamic linking can
+  generate. **Compiler `__thread` and `_Thread_local` do work**: the
+  program's own `PT_TLS` is found through the auxiliary vector's `AT_PHDR`
+  and copied into per-thread storage, per architecture -- below the thread
+  pointer on x86-64, above it on AArch64
+  (`docs/audit/next-subsystem-pt-tls.md`). A program whose headers are not
+  mapped, so that `AT_PHDR` is zero, **does not start**: that is not the
+  same as having no template, and guessing which it is would run the
+  program with uninitialised thread-local storage.
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
   calendar functions (there is no wall clock; `clock_gettime` gives the
   monotonic clock only).
@@ -103,7 +108,7 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 | Header | Contents | Backed by |
 |---|---|---|
 | `errno.h` | `errno` (per-thread, `__errno_location`), `E*` (values = `COSMO_E*`) | `__syscall_ret`, `tcb.c` |
-| `cosmo/tcb.h` | `struct __cosmo_tcb`, `cosmo_tcb_install` | `SYS_set_tls` |
+| `cosmo/tcb.h` | `struct __cosmo_tcb` (**libc's, including `reserved[]`**), `cosmo_tcb_storage`, `cosmo_tcb_install` | `SYS_set_tls` |
 | `string.h`, `ctype.h`, `stdlib.h`, `stdio.h`, `assert.h`, `limits.h` | as above | pure C, `mmap`, `write`/`read` |
 | `unistd.h`, `fcntl.h`, `sys/stat.h`, `dirent.h`, `sys/mount.h` | files, handles, directories | system calls 1–22, 35–39 |
 | `spawn.h`, `sys/wait.h`, `signal.h` | processes | system calls 32–34, 37 |

@@ -73,11 +73,28 @@ $(HOST_OUT)/test_modelf: $(addprefix $(ROOT)/,$(HOST_MODELF_SRCS))
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DMODELF_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_libc: $(addprefix $(ROOT)/,$(HOST_LIBC_SRCS)) $(ROOT)/libc/src/printf.c $(ROOT)/libc/src/malloc.c $(ROOT)/libc/src/conv.c
+#
+# This test is one translation unit that `#include`s the library sources it
+# exercises, so its prerequisites are whatever that file pulls in -- and
+# they were written out by hand here, once per source, until the list fell
+# one behind the file. `libc/src/tlsscan.c` was the fourth include and the
+# third name, so editing it rebuilt nothing: `gmake host-test` re-ran the
+# *previous* binary and reported ok, which made three regression tests pass
+# against a bug that had been reintroduced on purpose to fail them.
+#
+# So the compiler writes the list instead. `-MMD` records every file the
+# translation unit actually read, headers included, and the `-include`
+# below feeds them back as prerequisites on the next run. A list nobody
+# maintains cannot fall behind.
+#
+-include $(HOST_OUT)/test_libc.d
+
+$(HOST_OUT)/test_libc: $(addprefix $(ROOT)/,$(HOST_LIBC_SRCS))
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) -std=c11 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined \
 		-Wall -Wextra -Werror -Wno-missing-prototypes -Wno-builtin-requires-header -Wno-incompatible-library-redeclaration \
+		-MMD -MF $@.d -MT $@ \
 		-DLIBC_HOST_TEST=1 $< $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_pkg: $(addprefix $(ROOT)/,$(HOST_PKG_SRCS))

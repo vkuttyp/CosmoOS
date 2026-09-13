@@ -608,6 +608,19 @@ struct cosmo_dirent {
 
 /* Auxiliary vector entries on the initial stack. */
 #define COSMO_AT_NULL   0
+/*
+ * The program header table, as mapped. The standard trio, with the
+ * standard numbers, because a program that wants to read its own headers
+ * wants exactly what every other ELF system hands it -- and because the
+ * Linux personality already passes the same three from the same values.
+ *
+ * A program finds its own PT_TLS this way, which is why the kernel needs
+ * to know nothing about thread-local storage
+ * (docs/audit/next-subsystem-pt-tls.md).
+ */
+#define COSMO_AT_PHDR   3
+#define COSMO_AT_PHENT  4
+#define COSMO_AT_PHNUM  5
 #define COSMO_AT_PAGESZ 6
 #define COSMO_AT_ENTRY  9
 
