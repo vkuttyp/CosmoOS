@@ -240,7 +240,7 @@ mechanism and comes free.
 | `libc/include/cosmo/thread.h` | the raw-thread contract gains the image |
 | `userland/tests/thrtest.c` | the new steps |
 | `docs/libc/invariants.md` | L8 finished; the reserved-prefix rule |
-| `docs/kernel/process/design.md`, `-/testing.md` | §13's named consumer; the loader's new segment |
+| `docs/kernel/process/design.md`, `-/testing.md` | §13's named consumer; the native auxiliary vector's three new tags. **The loader itself does not change** -- it already ignores `PT_TLS`, and after this unit that is correct rather than an omission |
 | `README.md` | Status entry |
 
 ## New APIs
@@ -334,9 +334,15 @@ moves outside its spread.
   both architectures to mean anything -- the same "a control must differ in
   one thing" shape as the `self` word two units ago, where AArch64 passed
   the entire suite with a broken x86.
-- **`memsz` is attacker-controlled in a boot archive.** The loader must
-  bound it like any other segment; an image that asks for a gigabyte per
-  thread should fail the mapping, not the machine.
+- **`memsz` is attacker-controlled in a boot archive, and the check is
+  libc's.** This is the cost of the kernel learning nothing about TLS: the
+  validation the loader would otherwise have done moves into the library,
+  where a wrong answer is one process's rather than the machine's. An image
+  asking for a gigabyte per thread must fail its mapping and exit 127, and
+  the bug-proof for that needs a deliberately malformed binary in the boot
+  archive -- the one piece of scaffolding this unit adds. A reader who
+  expects the loader to bound it will not find that code, so the report
+  says where it is instead.
 
 ## Alternatives considered
 
