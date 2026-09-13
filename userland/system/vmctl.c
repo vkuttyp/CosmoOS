@@ -21,6 +21,7 @@
  */
 
 #include <cosmo/hv.h>
+#include <cosmo/thread.h>
 #include <cosmo/sysctl.h>
 #include <uapi/cosmo/hv_machine.h>
 #include "../../tools/fdt/fdt.h"
@@ -166,6 +167,7 @@ static int is_psci(uint64_t fn)
 /* --- the virtio-mmio block device (docs/audit/next-subsystem-vblk.md) --- */
 
 struct vio {
+    cosmo_mutex_t lock;   /* every entry point takes it; see the rule above vio_service_locked */
     int vm;               /* for cosmo_vm_mem_* and cosmo_vm_raise_spi */
     int disk_fd;          /* -1 when no --disk: the transport reports no device */
     int writable;         /* --disk-rw: the disk is read-write, and offers flush */
@@ -177,6 +179,8 @@ struct vio {
 };
 
 static struct vio g_vio;
+
+static void vio_reg_locked(struct vio *v, unsigned off, int write, uint64_t *val);
 
 static int vio_read_guest(void *c, uint64_t gpa, void *buf, uint32_t len)
 {
@@ -232,7 +236,26 @@ static int vio_disk_flush(void *c)
  * completed; > 0 means it made progress and there may be more, 0 means the
  * ring is drained, < 0 a hostile ring. Raise the device's interrupt for the
  * requests just completed. */
-static int vio_service(struct vio *v)
+/*
+ * The device models' locking rule, stated once because it governs every
+ * entry point here and a second threaded program will copy it
+ * (docs/audit/next-subsystem-vcpu-threads.md):
+ *
+ *  - **one mutex per device model**, taken by whoever *enters* the model
+ *    from outside -- the MMIO dispatch, the drain, the tap poll -- and not
+ *    by the functions those call, which is why each model has a `_locked`
+ *    core the way libc's allocator does;
+ *  - **the lock is never held across `cosmo_vcpu_run`**, so a guest looping
+ *    in MMIO cannot stall another vCPU;
+ *  - the model's file descriptor belongs to its lock, so a read and a write
+ *    cannot interleave inside one request;
+ *  - the console drain belongs to the main thread alone.
+ *
+ * The locks are here before there is a second thread to contend them. A
+ * lock nothing contends is still correct, and landing them first means the
+ * thread change that follows is not also a locking change.
+ */
+static int vio_service_locked(struct vio *v)
 {
     struct vblk_io io = { vio_read_guest, vio_write_guest, vio_disk_read,
                           v->writable ? vio_disk_write : NULL,
@@ -252,8 +275,30 @@ static int vio_service(struct vio *v)
     return served;
 }
 
-/* The transport registers (virtio-mmio v2). `*val` is the read result. */
+/* The drain's entry: take the lock, and decide *under* it whether there is
+ * anything to drain. Reading `draining` outside would be a race with the
+ * vCPU thread that set it. Returns what the core returned, or 0 for "not
+ * draining", which the caller treats the same way. */
+static int vio_drain(struct vio *v)
+{
+    cosmo_mutex_lock(&v->lock);
+    int served = v->draining ? vio_service_locked(v) : 0;
+    if (v->draining && served <= 0)
+        v->draining = 0;
+    cosmo_mutex_unlock(&v->lock);
+    return served;
+}
+
+/* The transport registers (virtio-mmio v2). `*val` is the read result.
+ * An entry point: it takes the model's lock for the whole access. */
 static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
+{
+    cosmo_mutex_lock(&v->lock);
+    vio_reg_locked(v, off, write, val);
+    cosmo_mutex_unlock(&v->lock);
+}
+
+static void vio_reg_locked(struct vio *v, unsigned off, int write, uint64_t *val)
 {
     if (!write) {
         switch (off) {
@@ -286,7 +331,7 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
          * more than one batch's worth, so mark it draining and let the run
          * loop finish it a batch at a time -- the guest need not notify
          * again for the rest to complete. */
-        if (vio_service(v) > 0)
+        if (vio_service_locked(v) > 0)
             v->draining = 1;
         break;
     case 0x064:                                                 /* InterruptACK */
@@ -309,6 +354,7 @@ static void vio_reg(struct vio *v, unsigned off, int write, uint64_t *val)
 #define VNET_WIRE_SLOTS 16   /* the loopback wire's depth; frames past it drop */
 
 struct vnet_dev {
+    cosmo_mutex_t lock;                   /* every entry point takes it; the rule is above vio_service_locked */
     int vm;
     int present;                          /* --net loop or --net tap given */
     int tap_fd;                           /* >= 0 in --net tap: the /dev/net/tap channel */
@@ -322,6 +368,8 @@ struct vnet_dev {
 };
 
 static struct vnet_dev g_vnet;
+
+static void vnet_reg_locked(struct vnet_dev *d, unsigned off, int write, uint64_t *val);
 
 static int vnet_read_guest(void *c, uint64_t gpa, void *buf, uint32_t len)
 {
@@ -374,7 +422,7 @@ static int vnet_wire_rx(void *c, void *buf, uint32_t max)
 /* Serve both queues: drain transmit to the wire, then fill receive buffers
  * from it. Interrupt on any used-ring advance; return whether either made
  * progress, so the run loop keeps draining until neither does. */
-static int vnet_service(struct vnet_dev *d)
+static int vnet_service_locked(struct vnet_dev *d)
 {
     struct vnet_io io = { vnet_read_guest, vnet_write_guest, vnet_wire_tx, vnet_wire_rx,
                           d, VNET_MAX_BYTES_PER_CALL };
@@ -390,7 +438,40 @@ static int vnet_service(struct vnet_dev *d)
 
 /* The transport registers for the net device. QueueSel selects the receive
  * or transmit queue for the queue-shaped registers. */
+/*
+ * The drain and the tap poll, both entry points. `draining` is decided
+ * under the lock for the same reason the block model's is: the thread that
+ * set it is not the thread reading it.
+ */
+static int vnet_drain(struct vnet_dev *d)
+{
+    cosmo_mutex_lock(&d->lock);
+    int served = d->draining ? vnet_service_locked(d) : 0;
+    if (d->draining && served <= 0)
+        d->draining = 0;
+    cosmo_mutex_unlock(&d->lock);
+    return served;
+}
+
+/* A tap delivers host->guest frames at any time, not only on a guest kick,
+ * so the supervisor polls this; it services both directions. */
+static int vnet_poll(struct vnet_dev *d)
+{
+    cosmo_mutex_lock(&d->lock);
+    int served = vnet_service_locked(d);
+    cosmo_mutex_unlock(&d->lock);
+    return served;
+}
+
+/* An entry point: it takes the model's lock for the whole access. */
 static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
+{
+    cosmo_mutex_lock(&d->lock);
+    vnet_reg_locked(d, off, write, val);
+    cosmo_mutex_unlock(&d->lock);
+}
+
+static void vnet_reg_locked(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
 {
     /* Only queues 0 (receive) and 1 (transmit) exist; a QueueSel past them
      * selects nothing, so the queue-shaped registers read 0 and ignore
@@ -422,7 +503,7 @@ static void vnet_reg(struct vnet_dev *d, unsigned off, int write, uint64_t *val)
     case 0x014: d->feat_sel = w; break;
     case 0x030: d->queue_sel = w; break;
     case 0x050:                                                /* QueueNotify */
-        if (vnet_service(d) > 0)
+        if (vnet_service_locked(d) > 0)
             d->draining = 1;
         break;
     case 0x064:                                                /* InterruptACK */
@@ -736,15 +817,13 @@ static int run_machine(int argc, char **argv)
          * bounded batch, one batch per turn so the guest's vCPUs keep
          * running between them. When a batch serves nothing more, the ring
          * is drained (or a hostile ring stopped it) and draining ends. */
-        if (g_vio.draining && vio_service(&g_vio) <= 0)
-            g_vio.draining = 0;
-        if (g_vnet.draining && vnet_service(&g_vnet) <= 0)
-            g_vnet.draining = 0;
+        (void)vio_drain(&g_vio);
+        (void)vnet_drain(&g_vnet);
         /* A tap delivers host->guest frames at any time, not only on a guest
          * kick, so poll it every turn: vnet_service reads the channel into any
          * posted receive buffer and drains pending transmits. */
         if (g_vnet.tap_fd >= 0)
-            vnet_service(&g_vnet);
+            (void)vnet_poll(&g_vnet);
         unsigned nr_running = 0;
         for (unsigned c = 0; c < COSMO_HV_VCPUS_MAX; c++)
             nr_running += m.running[c] ? 1 : 0;
