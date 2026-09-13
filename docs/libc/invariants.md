@@ -89,7 +89,11 @@ are done, and the shape of each is set by its consequence:
   core -- so two threads cannot interleave inside a line or race the
   buffer pointers of a `FILE`.
 - **`errno` is per-thread**, and takes no lock at all, because there is no
-  longer a shared location for two threads to contend over. It lives in a
+  longer a shared location for two threads to contend over. Since the
+  `__thread` unit a program can do the same for its own state: the
+  compiler's `__thread` and C11's `_Thread_local` work, with the image
+  placed per thread from the program's own `PT_TLS`
+  (`docs/audit/next-subsystem-pt-tls.md`). It lives in a
   128-byte block behind the thread pointer (`libc/include/cosmo/tcb.h`),
   which `SYS_set_tls` sets: `__libc_start` installs a static block for the
   first thread before anything else runs, and `cosmo_thread_start` puts one
@@ -103,9 +107,18 @@ are done, and the shape of each is set by its consequence:
   with `tls = 0` must not call libc**, and `cosmo_tcb_install` is the way
   for a program that wants such a thread to use libc anyway.
 
-`strerror` and `getcwd(NULL)` still use static or heap storage without
-synchronisation of their own, and `feof`/`ferror`/`clearerr`/`fileno` read
-a word without the lock.
+`feof`/`ferror`/`clearerr`/`fileno` read a word without the lock.
+
+**`strerror` and `getcwd(NULL)` are done, and one of them never needed
+doing.** `strerror`'s buffer for an unknown code is `_Thread_local` since
+the `__thread` unit -- the first use of thread-local storage inside the
+library that provides it. `getcwd(NULL)` was already safe: it `malloc`s a
+fresh buffer per call and hands it to the caller, so once the allocator
+took its lock in the threads unit there was nothing shared left. This
+invariant went on naming it for two units afterwards, which is what an
+enumeration kept by hand does -- the list is now checked against
+`grep` for writable statics in `libc/src`, and `strerror`'s was the only
+one.
 
 `cosmo/thread.h` needs none of this: every function there returns `-errno`
 rather than setting `errno`, takes no libc lock, and maps its stacks
@@ -119,8 +132,10 @@ handle, and steps 12 to 16 for `errno`: two threads provoking different
 failures two thousand times each while the first thread provokes a third,
 a thread's `errno` leaving the first thread's alone, a thread made outside
 libc installing its own block, and the block sitting above the stack and
-freed with it. Gap: `strerror` and `getcwd(NULL)`, which are now
-*fixable* -- the block is where they would go -- and are their own unit.
+freed with it. And step 17 for `__thread`: a `.tdata` variable read back as
+its initialiser in every thread, a `.tbss` array zero in a new one, an
+over-aligned variable aligned, and `strerror` of an unknown code answering
+each thread its own. **No gap left in this invariant.**
 
 ## Gaps (documented, not invariants)
 

@@ -1,8 +1,51 @@
 # NEXT SUBSYSTEM — `__thread`, and the TLS image a program brings with it
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-nothing in it is implemented.
+and wait for the instruction to build it. **This report is as built**, and
+its central claim was wrong in a way only building could show.
+
+**The report said a program using `__thread` "links, loads and runs" with
+silent corruption, and that there is no state in which the feature is
+merely unsupported. There is.** `userland/user.ld` declares no `PT_TLS`
+and places no `.tdata`/`.tbss`, so `ld.lld` refuses the link outright:
+*"has an STT_TLS symbol but doesn't have a PT_TLS segment"*. The failure
+today is a **link error**, which is the good kind. What I verified was
+that the *compiler* emits the relocations and the sections; I then asserted
+that the link would succeed without trying it, and the first build of step
+3 tried it. The linker script now places the template and declares the
+segment.
+
+Everything else the report says about the collision stands, and it was the
+reason to do this unit: AArch64 puts the first `__thread` variable at
+TP+16, inside the block libc installed two units ago, and x86-64 puts them
+below the thread pointer where the shipped layout was already right.
+
+Five more differences, each found by running rather than reading:
+
+1. **The startup order gained exactly one exception.** The errno unit
+   installs the thread pointer before anything else and has a bug-proof
+   keeping it there -- but the block's *size* now depends on the program's
+   own `PT_TLS`, so finding the auxiliary vector must precede it. With the
+   old order the first thread silently got no image.
+2. **An empty `PT_TLS` is the common case**, not an anomaly: `ld.lld`
+   emits one for every program linked against a script that declares the
+   segment, with `memsz` 0 and `p_align` 0. Refusing that alignment as
+   not-a-power-of-two killed every program in the system at startup.
+3. **The first thread's storage is a generous static array, not an exact
+   one.** libc's own `strerror` buffer is `_Thread_local`, so every program
+   has a template; if the static block were the minimum, every program
+   would `mmap` at startup, and a syscall filter that does not name `mmap`
+   would kill it. That is the trap `SYS_set_tls` fell into one unit ago,
+   found the same way -- a filtered child died and the filter test said so.
+4. **The validation is a pure function in a file of its own**
+   (`libc/src/tlsscan.c`), tested on the host with tables no linker would
+   emit. The report proposed a deliberately malformed binary in the boot
+   archive; that would have proved one case, and this proves twelve.
+5. **`getcwd(NULL)` never needed fixing.** It `malloc`s per call and hands
+   the buffer to its caller, so it has been safe since the allocator took
+   its lock -- invariant L8 named it for two units after it stopped being
+   true. Only `strerror` had a shared buffer, which a `grep` for writable
+   statics in `libc/src` confirms was the only one.
 
 **Review has already corrected how the template reaches the program.** Two
 drafts got it wrong -- one by growing `struct cosmo_procinfo`, which would
@@ -19,12 +62,14 @@ compiles on both architectures today -- it produces `.tdata`/`.tbss` and
 local-exec relocations, `R_X86_64_TPOFF32` and
 `R_AARCH64_TLSLE_ADD_TPREL_HI12`/`LO12_NC` -- and `kernel/process/elf.c`
 skips the `PT_TLS` segment that describes where the image goes
-(`if (ph.p_type != PT_LOAD) continue;`). So a program that uses a
-thread-local variable **links, loads and runs**, and every access reads or
-writes whatever happens to lie at the thread pointer plus the linker's
-offset. That is silent corruption of someone else's memory, not a
-diagnosable failure, and the errno/TLS unit named this one as the real
-answer it was the prerequisite for.
+(`if (ph.p_type != PT_LOAD) continue;`) -- and `userland/user.ld` declares
+no `PT_TLS` and places no `.tdata`/`.tbss`, so **the link fails**:
+`ld.lld` refuses an `STT_TLS` symbol with no `PT_TLS` segment. A
+thread-local variable is therefore a build error today rather than silent
+corruption, which is the good kind of unsupported and is what the banner
+above corrects: this section originally claimed the program would link,
+load and run. The errno/TLS unit named this one as the real answer it was
+the prerequisite for, and that part is unchanged.
 
 **It also has a latent collision to fix, which is why this report exists
 now rather than later.** The two architectures put thread-local variables
@@ -43,12 +88,12 @@ today because nothing places a TLS image at all.
 
 ## Problem
 
-- **A thread-local variable is silently wrong.** No diagnostic, no link
-  error, no fault on a well-formed program: the access lands at
-  `TP ± offset` in memory that belongs to libc's block (AArch64) or to
-  whatever precedes the block (x86-64). The first symptom would be a
-  corrupted `errno` or tid on one architecture and unrelated damage on the
-  other.
+- **A thread-local variable does not build.** `ld.lld` refuses: the
+  linker script declares no `PT_TLS` for the `STT_TLS` symbols to live in.
+  Loud rather than silent, which makes this unit a feature to add rather
+  than corruption to stop -- and which is the correction the banner
+  records, since the first draft of this section asserted the opposite
+  without trying a link.
 - **libc still has shared state it cannot fix without this.** `strerror`'s
   buffer and `getcwd(NULL)`'s storage are the last two things invariant L8
   names, and the errno unit left them because moving them into the 112
@@ -122,7 +167,7 @@ and `getcwd(NULL)`'s storage.
   a template to copy, a per-thread image to copy it into, and a thread
   pointer that already exists.
 
-## Proposed design
+## Design (as built)
 
 ### The program finds its own template, through the auxiliary vector
 
@@ -250,7 +295,7 @@ auxiliary-vector tags whose numbers are the standard ones, one changed
 libc function (`cosmo_tcb_install`), and a language feature that needs no
 API at all. The kernel learns nothing about TLS.
 
-## Migration plan
+## Migration plan (steps 3 and 4 landed together)
 
 1. **The auxiliary vector's three tags**, with a test that a native
    program can find its own program headers and its own `PT_TLS` through

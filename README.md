@@ -1588,6 +1588,58 @@ See [docs/development.md](docs/development.md).
   testing them under two guest CPUs needs a guest-side virtio driver and is
   named as its own unit.
 
+- **`__thread`, and the TLS image a program brings with it**
+  (`docs/audit/next-subsystem-pt-tls.md`). The unit the per-thread `errno`
+  was built as a prerequisite for. The compiler emitted thread-local
+  storage all along -- local-exec relocations, `.tdata`/`.tbss` -- and
+  nothing in the system loaded it. **The report's central claim was wrong
+  and building it is what showed that**: it said such a program would
+  "link, load and run" with silent corruption, and in fact `ld.lld`
+  refuses the link, because `user.ld` declared no `PT_TLS` for the
+  `STT_TLS` symbols to live in. I had verified that the *compiler* emits
+  the relocations and asserted the link would succeed without trying it.
+  The failure was the good kind, loud, and the unit is a feature to add
+  rather than corruption to stop.
+  **The kernel learns nothing about thread-local storage.** The native
+  auxiliary vector gains the standard `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
+  trio, from values `elf_info` already computed for the Linux door, and
+  libc reads its own `PT_TLS` -- no new syscall, no new structure, and the
+  loader untouched. Two earlier drafts carried the template worse: one grew
+  `struct cosmo_procinfo`, which would have overflowed an older binary's
+  buffer since `sys_procinfo` writes `count * sizeof` with the kernel's
+  `sizeof`; one declared ELF's 64-bit sizes as `uint32_t`.
+  The image is placed per architecture because the ABIs differ:
+  `[ image ][ block ]` with variables *below* the thread pointer on
+  x86-64, and `[ block ][ ABI head ][ image ]` with them *above* on
+  AArch64 -- where the first variable sits at TP+16, inside the
+  `reserved[112]` the previous unit had promised to programs and called
+  permanent. That promise is withdrawn and replaced: `__thread` is how a
+  program gets per-thread storage now.
+  **What proves the offset formula is an initialiser, not the ABI
+  documents**: `__thread int x = 0x5eed` read back in four threads, since
+  the linker resolved that address relative to the thread pointer and only
+  reading it back shows that libc and the linker agree. Four more things
+  only running could find: the startup order gained exactly one exception
+  (the auxiliary vector must be found before the block can be sized, and
+  the errno unit's bug-proof keeps everything else after it); an **empty**
+  `PT_TLS` is the common case, with `memsz` 0 and `p_align` 0, and
+  refusing that alignment killed every program in the system; the first
+  thread's static storage is deliberately **generous**, because libc's own
+  `strerror` buffer is `_Thread_local` and an exact block would make every
+  program `mmap` at startup -- which a syscall filter that does not name
+  `mmap` would turn into a dead process, the same trap `SYS_set_tls` fell
+  into one unit earlier; and the kernel's `mmap` wants a page multiple,
+  which every other caller in libc satisfies by accident.
+  Invariant **L8 is finished**, and one of its two remaining items never
+  needed doing: `getcwd(NULL)` `malloc`s per call and hands the buffer to
+  its caller, so it was safe from the moment the allocator took its lock --
+  the invariant named it for two units after that stopped being true.
+  `strerror`'s was the only writable static in `libc/src`, which a `grep`
+  now confirms rather than a list kept by hand. The header validation is a
+  pure function in a file of its own, tested on the host with **twelve**
+  malformed tables no linker would emit -- where the report had proposed a
+  single crafted binary in the boot archive.
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against. The constitution's

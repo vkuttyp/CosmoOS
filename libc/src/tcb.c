@@ -17,6 +17,7 @@
 #include <cosmo/tcb.h>
 
 #include "libc.h"
+#include "tlsscan.h"
 
 /*
  * The program's own thread-local template, read from its own program
@@ -25,91 +26,22 @@
  * is this library reading its own ELF
  * (docs/audit/next-subsystem-pt-tls.md).
  */
-struct elf_phdr {
-    uint32_t p_type, p_flags;
-    uint64_t p_offset, p_vaddr, p_paddr, p_filesz, p_memsz, p_align;
-};
-#define PT_LOAD_ 1u
-#define PT_TLS_  7u
+static struct tls_template g_tls;
 
-static struct {
-    const char *src;     /* the initialised bytes, in the image */
-    size_t filesz;       /* how many of them */
-    size_t memsz;        /* total, the rest zero */
-    size_t align;        /* what the ABI demands of the image's address */
-    int found;
-} g_tls;
-
-/* A power of two, and no larger than a page: an alignment this library
- * cannot honour must be refused rather than rounded away. */
-static int align_ok(size_t a)
-{
-    return a != 0 && (a & (a - 1)) == 0 && a <= 4096u;
-}
-
-static size_t round_up(size_t v, size_t a)
-{
-    return (v + a - 1u) & ~(a - 1u);
-}
-
-/*
- * Find the one `PT_TLS` and check everything about it that a program image
- * could get wrong, because a program image is what this reads. Returns 0
- * when there is no template (the common case) or when one was found and is
- * sound; -1 when the headers say something this library will not act on.
- */
+/* Read the auxiliary vector and hand the table to the validation
+ * (tlsscan.c, which is a file of its own so that every refusal in it can
+ * be given a malformed table by a host test). */
 static int tls_find(void)
 {
     unsigned long at_phdr = cosmo_getauxval(COSMO_AT_PHDR);
     unsigned long at_phent = cosmo_getauxval(COSMO_AT_PHENT);
     unsigned long at_phnum = cosmo_getauxval(COSMO_AT_PHNUM);
-    if (at_phdr == 0 || at_phnum == 0)
-        return 0;   /* no headers to read: a program without them has no TLS */
-    if (at_phent != sizeof(struct elf_phdr) || at_phnum > 64u)
-        return -1;
-    const struct elf_phdr *ph = (const struct elf_phdr *)at_phdr;
-    const struct elf_phdr *tls = NULL;
-    for (unsigned long i = 0; i < at_phnum; i++) {
-        if (ph[i].p_type != PT_TLS_)
-            continue;
-        if (tls != NULL)
-            return -1;   /* the ABI allows one; two is a broken image */
-        tls = &ph[i];
-    }
-    /*
-     * No segment, or an empty one, is no template -- and the empty case is
-     * the common one: `ld.lld` emits a `PT_TLS` for every program linked
-     * with a script that declares one, with `memsz` 0 and `p_align` 0.
-     * Rejecting that alignment as not-a-power-of-two killed every program
-     * in the system at startup, which is how this case was found. Nothing
-     * to place, nothing to validate.
-     */
-    if (tls == NULL || tls->p_memsz == 0)
-        return 0;
-    if (tls->p_memsz < tls->p_filesz || tls->p_memsz > (1u << 20))
-        return -1;
-    if (!align_ok((size_t)tls->p_align))
-        return -1;
-    /* The initialised bytes must be inside a mapped PT_LOAD: this is a
-     * pointer into the image, and nothing else has checked it. */
-    if (tls->p_filesz != 0) {
-        int inside = 0;
-        for (unsigned long i = 0; i < at_phnum && !inside; i++) {
-            if (ph[i].p_type != PT_LOAD_)
-                continue;
-            if (tls->p_vaddr >= ph[i].p_vaddr &&
-                tls->p_vaddr + tls->p_filesz <= ph[i].p_vaddr + ph[i].p_filesz)
-                inside = 1;
-        }
-        if (!inside)
-            return -1;
-    }
-    g_tls.src = (const char *)(uintptr_t)tls->p_vaddr;
-    g_tls.filesz = (size_t)tls->p_filesz;
-    g_tls.memsz = (size_t)tls->p_memsz;
-    g_tls.align = (size_t)tls->p_align;
-    g_tls.found = 1;
-    return 0;
+    return tls_scan((const struct elf_phdr *)at_phdr, at_phnum, at_phent, &g_tls);
+}
+
+static size_t round_up(size_t v, size_t a)
+{
+    return (v + a - 1u) & ~(a - 1u);
 }
 
 /*
@@ -184,11 +116,28 @@ void *__cosmo_tcb_place(void *storage, size_t len)
  * thing it just failed to provide. A .bss object removes the question.
  */
 /*
- * The first thread's storage: the block, and on AArch64 the ABI's 16-byte
- * head above it. Declared as bytes rather than as the struct, because the
- * thread pointer is not the struct's address on every architecture.
+ * The first thread's storage: the block, the ABI's head where there is one,
+ * and room for a modest thread-local template. Declared as bytes rather
+ * than as the struct, because the thread pointer is not the struct's
+ * address on every architecture.
+ *
+ * **Why it is generous rather than exact.** libc's own `strerror` buffer
+ * is `_Thread_local`, so *every* program now has a template, and if this
+ * were the minimum then every program would map storage at startup -- one
+ * more syscall before `main`, which a syscall filter that does not name
+ * `mmap` would turn into a dead process. That is the same trap
+ * `SYS_set_tls` fell into one unit ago, found the same way: a filtered
+ * child died and the filter test said so. A kilobyte covers libc's own
+ * template and anything a program is likely to declare, so the common case
+ * allocates nothing and startup stays one syscall.
+ *
+ * A program whose thread-local storage does not fit here *does* map at
+ * startup, and a filter confining such a program must allow it. That is
+ * documented rather than worked around: the alternative is making `mmap`
+ * always-allowed, which is a far larger hole than this is a wart.
  */
-static __attribute__((aligned(16))) char main_storage[COSMO_TCB_STORAGE];
+#define MAIN_STORAGE_BYTES 1024u
+static __attribute__((aligned(16))) char main_storage[MAIN_STORAGE_BYTES];
 
 /*
  * x86-64 cannot read the FS base without `rdfsbase` (CR4.FSGSBASE, not

@@ -206,6 +206,19 @@ static void *tlsvar_user(void *arg)
         if (tls_zero[0] != (char)(id & 0xff) || tls_zero[sizeof(tls_zero) - 1] != (char)(id & 0xff))
             tls_bad++;
     }
+    /*
+     * `strerror`'s buffer, from a thread: the message for an unknown code
+     * is built in per-thread storage now, so two threads asking about
+     * different codes must each read their own. A shared buffer gives
+     * whichever wrote last, to both.
+     */
+    for (unsigned i = 0; i < 100u; i++) {
+        char want[32];
+        snprintf(want, sizeof(want), "Unknown error %u", 9000u + id);
+        if (strcmp(strerror((int)(9000u + id)), want) != 0)
+            tls_bad++;
+        cosmo_yield();
+    }
     __atomic_fetch_add(&tls_done, 1, __ATOMIC_ACQ_REL);
     return NULL;
 }
@@ -935,6 +948,12 @@ int main(int argc, char **argv)
         errno = EBADF;
         CHECK(strcmp(strerror(EBADF), "Bad file descriptor") == 0);
         CHECK(strcmp(strerror(ERANGE), "Result out of range") == 0);
+        /*
+         * And an *unknown* code, which is the only path with a buffer:
+         * two threads asking about two unknown codes used to share one
+         * and get one answer. L8's last line (see step 17's worker).
+         */
+        CHECK(strcmp(strerror(4242), "Unknown error 4242") == 0);
     }
 
     STEP("17");

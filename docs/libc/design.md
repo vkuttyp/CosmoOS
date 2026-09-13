@@ -7,8 +7,10 @@ libc/
   include/          the public headers (standard names) and cosmo/ (native)
   src/
     arch/<arch>/crt0.S   _start (x86_64/, aarch64/)
-    errno.c         __syscall_ret, strerror table
-    tcb.c           the thread pointer, errno behind it, cosmo_tcb_install
+    errno.c         __syscall_ret, strerror table (its buffer is _Thread_local)
+    tcb.c           the thread pointer, errno behind it, the TLS image, cosmo_tcb_install
+    tlsscan.c       finding and validating the program's own PT_TLS
+    auxv.c          the auxiliary vector: cosmo_getauxval
     string.c        mem*/str*
     ctype.c
     malloc.c        the allocator

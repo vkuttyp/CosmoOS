@@ -120,6 +120,104 @@ static void c_abort(void) { printf("  allocator abort\n"); g_failures++; }
 #undef abs
 #undef labs
 
+/*
+ * The thread-local template's validation, which reads a structure the
+ * program *image* controls -- so every refusal in it gets a table no real
+ * linker would emit. That is why it lives in a file of its own with no
+ * syscalls and no globals (libc/src/tlsscan.h).
+ */
+#include "../../libc/src/tlsscan.c"
+
+#define PH_LOAD 1u
+#define PH_TLS  7u
+
+static struct elf_phdr ph_load(uint64_t vaddr, uint64_t filesz)
+{
+    struct elf_phdr p = { 0 };
+    p.p_type = PH_LOAD;
+    p.p_vaddr = vaddr;
+    p.p_filesz = filesz;
+    p.p_memsz = filesz;
+    p.p_align = 4096;
+    return p;
+}
+
+static struct elf_phdr ph_tls(uint64_t vaddr, uint64_t filesz, uint64_t memsz, uint64_t align)
+{
+    struct elf_phdr p = { 0 };
+    p.p_type = PH_TLS;
+    p.p_vaddr = vaddr;
+    p.p_filesz = filesz;
+    p.p_memsz = memsz;
+    p.p_align = align;
+    return p;
+}
+
+static void test_tls_scan(void)
+{
+    struct tls_template t;
+    struct elf_phdr tab[4];
+    const unsigned long ent = sizeof(struct elf_phdr);
+
+    /* No headers at all: no template, and not an error. */
+    CHECK(tls_scan(NULL, 0, ent, &t) == 0 && t.found == 0);
+
+    /* The common case: a program with no thread-locals still gets a
+     * PT_TLS from the linker, with memsz 0 and align 0. Not an error, and
+     * not a template -- rejecting this killed every program once. */
+    tab[0] = ph_load(0x400000, 0x1000);
+    tab[1] = ph_tls(0, 0, 0, 0);
+    CHECK(tls_scan(tab, 2, ent, &t) == 0 && t.found == 0);
+
+    /* A sound one. */
+    tab[1] = ph_tls(0x400800, 8, 64, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == 0 && t.found == 1);
+    CHECK(t.filesz == 8 && t.memsz == 64 && t.align == 16);
+    CHECK(t.src == (const char *)0x400800);
+
+    /* Two segments: the ABI allows one, and a second is a broken image
+     * rather than a later one to prefer. No real linker emits this, which
+     * is exactly why it is tested here and not with a binary. */
+    tab[2] = ph_tls(0x400800, 8, 64, 16);
+    CHECK(tls_scan(tab, 3, ent, &t) == -1);
+
+    /* memsz below filesz: more initialised bytes than storage. */
+    tab[1] = ph_tls(0x400800, 64, 8, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+
+    /* An alignment that is not a power of two, and one too large to
+     * honour. Both must be refused rather than rounded away. */
+    tab[1] = ph_tls(0x400800, 8, 64, 24);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+    tab[1] = ph_tls(0x400800, 8, 64, 8192);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+
+    /* Initialised bytes outside every PT_LOAD: this would be a pointer
+     * libc copies from. */
+    tab[1] = ph_tls(0x900000, 8, 64, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+    /* ...and one that runs off the end of the segment it starts in. */
+    tab[1] = ph_tls(0x400ff8, 16, 64, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+
+    /* An entry size that is not this structure: the table and this code
+     * disagree about the format, so walking it reads the wrong fields. */
+    tab[1] = ph_tls(0x400800, 8, 64, 16);
+    CHECK(tls_scan(tab, 2, ent + 8, &t) == -1);
+    /* An absurd count. */
+    CHECK(tls_scan(tab, 65, ent, &t) == -1);
+
+    /* A template with no initialised bytes needs no PT_LOAD to live in:
+     * .tbss alone is legitimate. */
+    tab[1] = ph_tls(0x900000, 0, 64, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == 0 && t.found == 1 && t.filesz == 0);
+
+    /* An enormous memsz is refused: one thread's copy, times every
+     * thread, is not a number a program image gets to choose freely. */
+    tab[1] = ph_tls(0x400800, 0, 1u << 21, 16);
+    CHECK(tls_scan(tab, 2, ent, &t) == -1);
+}
+
 static int cmp_int(const void *a, const void *b)
 {
     int x = *(const int *)a, y = *(const int *)b;
@@ -129,6 +227,7 @@ static int cmp_int(const void *a, const void *b)
 int main(void)
 {
     char buf[128];
+    test_tls_scan();
     /* printf */
     CHECK(c_snprintf(buf, sizeof(buf), "%d %i %u", -5, 7, 42u) == 7 && strcmp(buf, "-5 7 42") == 0);
     CHECK(c_snprintf(buf, sizeof(buf), "%5d|%-5d|%05d|%+d|% d", 42, 42, 42, 42, 42) == 25 &&

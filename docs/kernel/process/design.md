@@ -1166,8 +1166,11 @@ architecture itself dereferences the first word, so a base whose first word
 is not in the caller's space is wrong on its face.
 
 **The block is libc's** (`libc/include/cosmo/tcb.h`): 128 bytes, `self`
-first, then `errno`, then the cached tid, then reserved space a program may
-not use before offset 128. `__errno_location()` returns `&tcb->err`, and
+first, then `errno`, then the cached tid, then reserved space. That space
+was offered to programs when this unit shipped and is **libc's** since the
+`__thread` unit: on AArch64 the ELF TLS ABI puts thread-local variables in
+those bytes, so the offer could not be kept, and `__thread` is what
+replaced it. `__errno_location()` returns `&tcb->err`, and
 finding the block differs by architecture -- AArch64 reads `TPIDR_EL0`
 through `__builtin_thread_pointer()`, while x86-64 cannot read the FS
 *base* without `rdfsbase` (which needs `CR4.FSGSBASE` and is not
@@ -1240,9 +1243,14 @@ ten files compile unchanged, because every one assigns through the name;
 `&errno` is no longer a link-time constant, which POSIX has required of
 `errno` for decades.
 
-Still shared, and now *fixable* because there is somewhere per-thread to
-put them: `strerror`'s buffer and `getcwd(NULL)`'s storage. Named and
-deferred: compiler `__thread` with ELF `PT_TLS` (this unit is its
-prerequisite, not a detour around it -- the thread pointer is what `PT_TLS`
-would use), a way to ask for the block's size, and the `vmctl` conversion
-this unblocks.
+**Both of this section's follow-ups have since landed.** `strerror`'s
+buffer is `_Thread_local` and `getcwd(NULL)` turned out never to have
+needed it -- it `malloc`s per call, so it was safe as soon as the allocator
+took its lock. And compiler `__thread` with ELF `PT_TLS` is the unit after
+this one: the thread pointer this unit added is exactly what it uses, and
+`cosmo_tcb_storage()` is the way to ask how much a thread now needs.
+
+The one correction that unit made to this one: `reserved[112]` is libc's,
+not a program's. This section offered it as per-thread storage for a
+program; on AArch64 the ELF TLS ABI puts `__thread` variables in those
+bytes, so the offer could not be kept and `__thread` replaced it.

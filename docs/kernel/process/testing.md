@@ -521,7 +521,23 @@ count against, since `getrlimit` reports the limit and not the usage.
 Proved by reintroducing, each failure named by the step that caught it and
 the source restored byte-identical every time:
 
-(17) The bound holds: creating threads until `-EAGAIN` stops
+(17) **`__thread` works** (the audit unit "`__thread`, and the TLS image a
+program brings with it"). Four threads' worth of per-thread storage: a
+`.tdata` variable read back as its initialiser in *every* thread, which is
+what distinguishes a copied template from one shared image; a `.tbss`
+array zero in a new thread even after an earlier one filled it; an
+`_Alignas(64)` variable actually aligned; and `strerror` of an unknown
+code from each thread, which is invariant L8's last line. Each thread then
+writes its own values and checks they survive while the others write
+theirs, which a shared image loses immediately.
+**These assertions are what prove the offset formula.** The linker
+resolved those addresses relative to the thread pointer, and reading back
+an initialiser libc placed is the only way to know that libc and the
+linker agree -- reading the ABI documents establishes nothing. Proved by
+not copying `.tdata` (every thread reads 0) and by ignoring the template's
+alignment (the image shifts 48 bytes and *every* variable is wrong, not
+just the over-aligned one, which is broader than predicted).
+(18) The bound holds: creating threads until `-EAGAIN` stops
 at `PROCESS_MAX_THREADS`, every one joins afterwards, and **three** more
 creates succeed -- three rather than one, because a join that returned
 before the kernel stopped counting its thread left the next create refused
@@ -534,6 +550,19 @@ one and watched `malloc` and `thread_create` be refused for want of
 memory, which is this step working rather than a bug -- and which cost two
 runs to diagnose only because the step counted three different causes as
 one number. Each cause now prints itself.
+
+(19) **A program can find its own program headers**, which is how it finds
+its own `PT_TLS`: the auxiliary vector's `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`
+are present, `PHENT` is the only size the loader accepts, and -- the part
+that matters -- some `PT_LOAD` in those headers covers the address of
+`main`, so the vector describes *this* program rather than pointing
+somewhere plausible. `PAGESZ` and an unknown tag are checked too, because
+a reader landing one word off the vector produces addresses that pass a
+null check. It creates no threads, which is why it may follow the bound
+step; the `PT_TLS` count it prints is not asserted, so the step that gave
+this program a `__thread` variable could be seen to change it from 0 to 1.
+Proved twice: with the three tags not passed, and with the reader landing
+on envp's terminator instead of past it.
 
 1. The tid written **after** `process_thread_start` -- with the window
    widened by a deliberate sleep, because the real one is about a hundred

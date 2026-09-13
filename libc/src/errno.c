@@ -63,7 +63,14 @@ static const char *const messages[] = {
 
 char *strerror(int err)
 {
-    static char unknown[32];
+    /*
+     * Per-thread, which is what `__thread` is for: two threads asking
+     * about two unknown codes used to get one buffer and one answer.
+     * This is the last thing invariant L8 named as shared, and the first
+     * use of thread-local storage inside the library that provides it
+     * (docs/audit/next-subsystem-pt-tls.md).
+     */
+    static _Thread_local char unknown[32];
     if (err >= 0 && (size_t)err < sizeof(messages) / sizeof(messages[0]) && messages[err])
         return (char *)(uintptr_t)messages[err];
     snprintf(unknown, sizeof(unknown), "Unknown error %d", err);

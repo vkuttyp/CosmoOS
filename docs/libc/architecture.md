@@ -82,11 +82,13 @@ ordinary Unix C: `printf`, `fopen`, `strtol`, `malloc`, `open`, `read`,
 
 ## Non-responsibilities
 
-- Compiler `__thread` and ELF `PT_TLS`: `spawn` does not place a TLS
-  image and the linker's TLS relocations are untried. What exists is the
-  thread *pointer* (`SYS_set_tls`) and libc's own 128-byte block behind
-  it, which is what makes `errno` per-thread (invariants L8) -- and which
-  is what a real `PT_TLS` unit would build on rather than replace.
+- Dynamic TLS (`__tls_get_addr`, TLS descriptors) and `PT_TLS` in a
+  shared object, neither of which a system without dynamic linking can
+  generate. **Compiler `__thread` and `_Thread_local` do work**: the
+  program's own `PT_TLS` is found through the auxiliary vector's `AT_PHDR`
+  and copied into per-thread storage, per architecture -- below the thread
+  pointer on x86-64, above it on AArch64
+  (`docs/audit/next-subsystem-pt-tls.md`).
 - Floating point, `<math.h>`, locales, wide characters, `time.h`
   calendar functions (there is no wall clock; `clock_gettime` gives the
   monotonic clock only).
