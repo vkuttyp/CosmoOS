@@ -36,8 +36,9 @@ PROG_DIR_svc    := system
 
 # Test-only programs: built and archived under SELFTEST, so a release
 # image carries none of them.
-USER_TEST_PROGRAMS := thrtest
+USER_TEST_PROGRAMS := thrtest cwdtest
 PROG_DIR_thrtest := tests
+PROG_DIR_cwdtest := tests
 
 USER_PROGRAMS := init $(USER_BIN_PROGRAMS) $(USER_SBIN_PROGRAMS)
 ifeq ($(SELFTEST),1)
