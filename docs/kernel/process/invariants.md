@@ -246,11 +246,15 @@ parent's, lowered freely and raised only with privilege, and every
 limit is enforced where the resource is granted. Check: there.
 
 **P27. Relative paths resolve from the process's working directory,
-whose string and vnode agree.** Every path system call passes
-`process_current()->cwd`; `chdir` verifies the target is a directory
-before swapping vnode and normalised string together under
-`process.lock`; a child inherits both (or the `cwd` named in the spawn
-request). Check: `init --selftest` (`mkdir` relative to `/tmp`,
+whose string and vnode agree.** Every path system call passes the
+directory it got from `process_cwd_get()` — **referenced for the length
+of the walk**, never the raw field, which is P29 and which this
+invariant's own wording ("passes `process_current()->cwd`") described
+accurately until threads made it a defect. `chdir` verifies the target is
+a directory before swapping vnode and normalised string together under
+`process.lock`, and takes the base it normalises against from the *same*
+snapshot it looks up in; a child inherits both (or the `cwd` named in the
+spawn request). Check: `init --selftest` (`mkdir` relative to `/tmp`,
 `chdir("cwdtest/../cwdtest/.")` gives `/tmp/cwdtest`, `..` gives `/tmp`,
 `ENOTDIR`, `ENOENT`, `ERANGE`; a child's `cd` leaves the parent's cwd);
 `process-spawn` (the `path_normalize` table). Gap: a renamed ancestor is
@@ -427,8 +431,47 @@ a background read from it is `-EIO` rather than `SIGTTIN`. Check:
 and requires `-EIO`, and whose absence wedges the boot rather than
 failing it -- which is what the rule exists to prevent.
 
+## Per-process state under more than one thread
+
+**P29. A system call may not dereference a mutable per-process pointer
+without taking a reference under the process lock.**
+(`docs/audit/next-subsystem-cwd-ref.md`.) The rule exists because a
+process has had more than one thread since the threads unit, and an
+argument of the form "only the process itself writes this" stopped being
+a single-writer argument at that moment without anything in the tree
+noticing.
+
+The census, so that the next field added is classified when it is added:
+
+| field | mutable after spawn? | how it is read |
+| --- | --- | --- |
+| `cwd_locked`, `cwd_path_locked` | **yes**, by `chdir` from any thread | `process_cwd_get()` / `process_cwd_snapshot()` — a *reference*, and the path from the same acquisition |
+| `root`, `mntns`, `utsns` | no — set at spawn, inherited | read directly; sound, and stays sound only while they remain immutable |
+| `handles` | yes | its own table lock; `handle_lookup` returns a referenced object the caller releases |
+| `space` | not swapped | its own lock |
+| `syscall_mask` | narrows only | read without the lock, **but not for the reason the comment used to give**: writes take `p->lock` and are per-word atomic stores, this is a per-word atomic load, and a reader sees one whole word |
+| `cred`, `rlim` | yes | `p->lock` |
+
+**The path and the path's name are one snapshot, never two.** Taking them
+separately is correct twice and wrong together: between two acquisitions
+another thread can `chdir`, and a caller that publishes both leaves the
+process reporting one directory through `getcwd` while resolving relative
+paths in another. A review found that in this unit's design; the tree
+already contained the same defect in `spawn`, where a child's requested
+directory was normalised against one read and looked up in another.
+
+*Checked by*: `userland/tests/cwdtest.c`, four steps of two and three
+threads racing `chdir`, `open`, `getcwd` and `rmdir`. **It is a
+regression and not a proof**, and the distinction is recorded rather than
+blurred: every reverted-fix run passed, because the walk is short and in
+memory and is never inside the few instructions where the free lands. The
+fix stands on its construction, and what would prove it is a kernel-side
+seam of the kind `docs/audit/next-subsystem-condvar.md` used.
+
 ## Gaps (documented, not invariants)
 
+- **The cwd race is not proved by a test**, only by construction, and the
+  seam that would prove it is named in `docs/audit/next-subsystem-cwd-ref.md`.
 - No `fork` or `exec` replacing the current image; `spawn` is the only
   creation primitive; `clone` creates threads only.
 - **One multi-threaded case remains unaimable**: a thread cloned

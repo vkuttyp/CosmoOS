@@ -666,3 +666,56 @@ own joins depend on exactly the same code. That is evidence the contract
 belongs where it now lives rather than in a personality, but it proves
 nothing about this test, so each was rewritten to perturb the native
 wrapper alone.
+
+## cwdtest: the working directory from more than one thread
+
+`userland/tests/cwdtest.c` (`docs/audit/next-subsystem-cwd-ref.md`), four
+steps, run from `rc.test` on both architectures.
+
+(1) A walk survives the directory moving under it: one thread alternating
+between two directories, another opening a relative path. Every refusal
+must be `-ENOENT` and both answers must actually occur, or the threads did
+not overlap and the step tested one directory in peace.
+
+(2) `chdir` racing `chdir`, with a reader of the name. The moves go
+**down** (`chdir("s")`), not `../X`, and the two bases are at different
+depths sharing nothing after `/tmp/cwdr/` — because `..` discards the last
+component, which is the only part where sibling paths differ, so a torn
+`cwd_path` cannot change the answer. An earlier version used `../a` and
+`../b` and could not have failed.
+
+Two threads issuing relative moves share one current directory, so a
+`chdir("..")` applies to wherever the other thread left it and the pair
+can walk the process up out of the subtree -- `/tmp` and `/` included.
+The observer therefore checks membership of *every path the writers can
+reach*, not of the two they aim at; an earlier version failed on a
+correct kernel for not knowing that. A torn base is still caught, because
+the two names share only `/tmp/cwdr/` and any mixture of them is in no
+legitimate set.
+
+(3) The name and the directory agree. Its writers move **down**
+(`chdir("s")`), not between siblings: sibling moves cannot express the
+defect at all, because normalising `../NAME_A` from either sibling and
+looking it up from either sibling both produce `DIR_A`, so a path and a
+vnode taken from different directories still agree. A down-move keeps the
+base, so the pair can name different leaves, and a marker file in each
+leaf tells them apart. The writers are **quiesced** first,
+on a condition variable, because the obvious version — `getcwd`, then open
+the file belonging to it — fails on a correct kernel when a writer chdirs
+between the two calls. Quiescing is sound here because the defect's damage
+is persistent: a process left holding one directory's path and another's
+vnode stays that way until its next `chdir`.
+
+(4) The directory is removed while a walk is inside it, which is what it
+actually takes to free the vnode: `ramfs` pins every child from its
+parent's entry, so steps 1 to 3 free nothing (measured: zero). Three
+threads — mover, remover, walker — reach 228 frees and ~900–1250 walks
+inside the victim.
+
+**This is a regression, not a proof**, and the difference is recorded
+rather than blurred. Every reverted-fix run passed, including one with
+every freed vnode poisoned with `0xAA` before `kfree`: the walk is short
+and in memory and is never inside the few instructions where the free
+lands. What would prove it is a kernel-side seam of the kind the
+condition-variable unit used, and that is named in the audit report rather
+than built here.

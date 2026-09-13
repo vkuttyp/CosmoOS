@@ -120,11 +120,27 @@ struct process {
     /* The calls this process may make: bit N set, number N is allowed.
      * All ones until a filter is installed; intersected, never widened,
      * and inherited by children (docs/kernel/security/design.md §1f).
-     * Written only by the process itself, through its own system call,
-     * so a reader in the syscall path needs no lock. */
+     * Read in the syscall path without the lock. The reason is in
+     * kernel/syscall/syscall.c beside the read, and it is not "only the
+     * process itself writes it" -- a process has had more than one thread
+     * for several units, so that argument expired. */
     uint64_t syscall_mask[COSMO_SYSCALL_MASK_WORDS];
-    struct vnode *cwd;                 /* referenced */
-    char cwd_path[1024];               /* VFS_PATH_MAX; normalised absolute path of cwd */
+    /*
+     * The current directory, and its path. **Under `lock`, and not to be
+     * read directly** -- use `process_cwd_get` or `process_cwd_snapshot`
+     * (docs/audit/next-subsystem-cwd-ref.md).
+     *
+     * The name is ugly on purpose. These are the only *mutable* per-process
+     * pointers a system call resolves against: `root`, `mntns` and `utsns`
+     * are fixed at spawn, `handles` has its own table lock and hands out
+     * referenced objects, and `space` carries its own. Until this unit,
+     * sixteen call sites read `cwd` with no lock and no reference and
+     * passed it into a path walk, while another thread's `chdir` swapped
+     * it and dropped what could be the last reference -- a use-after-free
+     * that native threads made reachable.
+     */
+    struct vnode *cwd_locked;          /* referenced; p->lock */
+    char cwd_path_locked[1024];        /* VFS_PATH_MAX; normalised absolute path of it */
 
     /* Phase 11: the Linux personality's state (NULL for native processes). */
     struct linux_state *linux;
@@ -284,6 +300,33 @@ void process_return_to_user(struct arch_trap_frame *frame);
 
 /* Working directory. */
 int process_chdir(const char *path);
+
+/*
+ * The calling process's current directory, **referenced**. The caller
+ * releases it with `vnode_put`. NULL only for a kernel thread, which has
+ * no current directory and reaches none of the paths that resolve against
+ * one.
+ *
+ * A system call may not read `p->cwd_locked` itself: another thread of the
+ * same process can replace it and drop the last reference while the
+ * pointer is in flight (docs/audit/next-subsystem-cwd-ref.md).
+ */
+struct vnode *process_cwd_get(void);
+
+/*
+ * The directory **and** its path, from one acquisition of the lock: a
+ * referenced vnode, with its normalised absolute path copied into `path`.
+ * The caller releases the vnode with `vnode_put`.
+ *
+ * One call rather than two on purpose. Taking the path and the vnode
+ * separately is correct twice and wrong together: between the two
+ * acquisitions another thread can `chdir`, and a caller that publishes
+ * both -- which `process_chdir` does -- would leave the process holding
+ * the path of one directory and the vnode of another, so `getcwd` would
+ * disagree with every relative open in the same process. A review found
+ * that in this unit's design, before it was built.
+ */
+struct vnode *process_cwd_snapshot(char *path, size_t len);
 
 /* Credentials of the calling process (kernel/cred.h rules; -1 keeps an id). */
 int process_setresuid(int64_t ruid, int64_t euid, int64_t suid);

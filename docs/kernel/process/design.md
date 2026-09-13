@@ -1254,3 +1254,32 @@ The one correction that unit made to this one: `reserved[112]` is libc's,
 not a program's. This section offered it as per-thread storage for a
 program; on AArch64 the ELF TLS ABI puts `__thread` variables in those
 bytes, so the offer could not be kept and `__thread` replaced it.
+
+## The current directory, and the rule it is the only instance of
+
+A process's working directory is the one *mutable* per-process pointer a
+system call resolves against, and until
+`docs/audit/next-subsystem-cwd-ref.md` every relative-path call read it
+with no lock and no reference: `vfs_open(process_current()->cwd, ...)`,
+handed to a walk that can block, while another thread's `chdir` swapped
+the pointer and dropped what could be the last reference. `vnode_put` on
+the last reference unhashes the vnode and frees it, and the mount's hash
+is a weak cache holding no reference of its own.
+
+`process_cwd_get()` returns it referenced; `process_cwd_snapshot()`
+returns it **with its path, from one acquisition of the lock**, which is
+what `chdir` and `spawn` need because they publish both. Taking the two
+separately is correct twice and wrong together — it leaves a process
+reporting one directory through `getcwd` while resolving relative paths
+in another. The field is called `cwd_locked` so that a site written the
+old way does not compile.
+
+**What the fix is worth, stated honestly.** On `ramfs` a directory entry
+pins its child, so a `chdir` race alone frees nothing; the free needs the
+directory removed as well. The defect is real, the fix is right, and the
+test that exercises it is a regression rather than a proof — every
+reverted-fix run passed, because the walk is short and never inside the
+few instructions where the free lands. The argument the fix rests on is
+the ordering: the swapper cannot drop the old reference until it holds
+the lock, and cannot hold the lock until a reader has taken its own
+reference or has not yet loaded the pointer.

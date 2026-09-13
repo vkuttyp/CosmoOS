@@ -66,11 +66,19 @@ static bool may_set_cred(const struct credentials *c, uint32_t uid, uint32_t gid
 
 /* Look `path` up from the caller's directory, require a regular file the
  * caller may execute, and read it whole into a kernel buffer the caller
- * frees with vm_kernel_free. */
-static int read_executable(struct process *cur, const char *path, struct process_image *img)
+ * frees with vm_kernel_free.
+ *
+ * It took the calling process as a parameter to reach `cur->cwd`. It asks
+ * `process_cwd_get()` instead, which is the calling process by
+ * definition and hands back a *reference* -- so the parameter is gone
+ * rather than left unused. */
+static int read_executable(const char *path, struct process_image *img)
 {
     struct vnode *exe;
-    int rc = vfs_lookup(cur->cwd, path, &exe);
+    struct vnode *cwd = process_cwd_get();
+    int rc = vfs_lookup(cwd, path, &exe);
+    if (cwd)
+        vnode_put(cwd);
     if (rc)
         return rc;
     if (exe->type != VNODE_REG) {
@@ -176,13 +184,22 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
         .uid = cred ? cred->uid : 0,
         .gid = cred ? cred->gid : 0,
     };
-    char cwd_path[sizeof(cur->cwd_path)];
+    char cwd_path[sizeof(cur->cwd_path_locked)];
     if (cwd) {
-        rc = path_normalize(cur->cwd_path, cwd, cwd_path, sizeof(cwd_path));
-        if (rc)
-            return rc;
-        struct vnode *vn;
-        rc = vfs_lookup(cur->cwd, cwd, &vn);
+        /*
+         * One snapshot for the base and the lookup, for the reason
+         * `process_chdir` takes one: separately, the path can be of one
+         * directory and the vnode of another
+         * (docs/audit/next-subsystem-cwd-ref.md).
+         */
+        char base[sizeof(cur->cwd_path_locked)];
+        struct vnode *cur_cwd = process_cwd_snapshot(base, sizeof(base));
+        rc = path_normalize(base, cwd, cwd_path, sizeof(cwd_path));
+        struct vnode *vn = NULL;
+        if (rc == 0)
+            rc = vfs_lookup(cur_cwd, cwd, &vn);
+        if (cur_cwd)
+            vnode_put(cur_cwd);
         if (rc)
             return rc;
         if (vn->type != VNODE_DIR) {
@@ -216,7 +233,10 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
             goto out_cwd;
         }
         struct vnode *rv;
-        rc = vfs_lookup(cur->cwd, root, &rv);
+        struct vnode *rcwd = process_cwd_get();
+        rc = vfs_lookup(rcwd, root, &rv);
+        if (rcwd)
+            vnode_put(rcwd);
         if (rc)
             goto out_cwd;
         if (rv->type != VNODE_DIR) {
@@ -243,7 +263,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
      * bit), then read by the kernel on its own authority: like Linux, exec
      * needs x, not r. */
     struct process_image exe = { .path = path }, interp = { 0 };
-    rc = read_executable(cur, path, &exe);
+    rc = read_executable(path, &exe);
     if (rc)
         goto out_cwd;
     struct elf_info peek;
@@ -264,7 +284,7 @@ int process_spawn(const char *path, const char *const argv[], const char *const 
     }
     if (peek.has_interp) {
         interp.path = peek.interp;
-        rc = read_executable(cur, peek.interp, &interp);
+        rc = read_executable(peek.interp, &interp);
         if (rc) {
             kwarn("process: '%s': interpreter %s: %d", basename_of(path), peek.interp, rc);
             goto out_exe;
