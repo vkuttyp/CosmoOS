@@ -400,9 +400,22 @@ def symbolize(lines, kernel, tool):
         func = parts[0] if parts and parts[0] else "??"
         loc = parts[1] if len(parts) > 1 else "??"
         loc = re.sub(r":\d+$", "", loc)          # drop the column
-        loc = os.path.relpath(loc, REPO_ROOT) if loc.startswith("/") else loc
+        loc = repo_relative(loc)
         table.append((addr, func, loc))
     return table
+
+
+REPO_TOP_DIRS = ("kernel/", "kernel-services/", "drivers/", "compat/", "boot/", "libc/", "userland/", "pkg/", "tests/", "tools/")
+
+
+def repo_relative(loc):
+    """The build maps the tree to a relative prefix (-ffile-prefix-map);
+    cut the path at its first repo top-level directory."""
+    for top in REPO_TOP_DIRS:
+        i = loc.find(top)
+        if i >= 0 and (i == 0 or loc[i - 1] == "/"):
+            return loc[i:]
+    return loc
 
 
 def print_symbols(table):
