@@ -134,9 +134,12 @@ stage-2 translation, 44-bit addresses`) and the start is legal;
 `cortex-a76` reports 40 bits (`PARange 2`) and every walk faults at its
 first step. The SMMU
 driver derives its stage-2 configuration "the same way"
-(`drivers/iommu/arm_smmuv3.c:79-81`, `SL0 2`) from `IDR5.OAS`, and
-carries the same assumption; QEMU's SMMUv3 reports 44 bits, so it has
-never fired there.
+(`drivers/iommu/arm_smmuv3.c:79-81`, `SL0 2`) and builds its tables
+with the generic IOMMU walker, which always starts from one four-level
+root (`kernel/iommu/pt.c`: `iommu_pt_alloc_table`, `iommu_pt_map`,
+`iommu_pt_unmap`, `iommu_pt_lookup`, `iommu_pt_free`); it carries the
+same assumption. QEMU's SMMUv3 reports 44 bits, so it has never fired
+there, and it cannot be exercised here.
 
 Second, the self-check's failure disables the backend by clearing
 `hv_caps` (`kernel-services/virtualization/vmm.c`, `hv_init`), but the
@@ -290,10 +293,16 @@ other names the guard.
    the layout's order (the allocator returns naturally aligned blocks);
    `walk_to`, `destroy_level`, `count_level` and `hv_s2_vtcr` take the
    start level from the layout computed once at probe. The SMMU driver
-   applies the same rule to `IDR5.OAS`: when the rule says level 1 it
-   programs `S2SL0 = 1` and a concatenated root; QEMU's SMMU reports
-   44 bits, so on the CI machines this path is compiled and never taken,
-   and the report says so rather than claiming it tested.
+   asks the same rule about `IDR5.OAS` at probe and, when the rule says
+   a level-1 start (an output size of 42 bits or less), refuses stage-2
+   with `-ENOTSUP` and a message naming the width, instead of
+   programming `S2SL0 = 2` over tables the walker built for level 0.
+   The walker itself is not changed by this unit: a concatenated root
+   in `kernel/iommu/pt.c` (its indexing, mapping, unmapping, lookup and
+   destruction) cannot be tested on QEMU's 44-bit SMMU, and a host
+   lacking the width cannot test the code for it; the refusal is what
+   can be built honestly, and the walker change goes to the inventory
+   as follow-up work with this report's evidence.
 
 3. **A disabled backend hands EL2 back.** `arch_hv_disable(void)` in
    `kernel/include/arch/hv.h`, implemented on AArch64 as
@@ -379,14 +388,14 @@ at the four calls the audit and this report name:
 | `mmap` | `COSMO_MAP_ANONYMOUS`, `COSMO_MAP_FIXED` | `sys_mmap` |
 | `mount` | `COSMO_MOUNT_RDONLY` | `sys_mount` |
 | `umount` | `COSMO_UMOUNT_FORCE` | `sys_umount` |
-| `open`, `openat` | `COSMO_O_ACCMODE`, `CREAT`, `EXCL`, `TRUNC`, `APPEND`, `DIRECTORY` | `sys_open`, `sys_openat` |
+| `open` | `COSMO_O_ACCMODE`, `CREAT`, `EXCL`, `TRUNC`, `APPEND`, `DIRECTORY` | `sys_open` |
 
 The check is at the syscall, before the path or the space is touched,
 as `sys_wait`'s is; `vfs_open` keeps its own tolerance because the
 kernel's internal callers add bits (`COSMO_O_DIRECTORY` for a trailing
 slash). The implementation sweeps every other native call that takes a
-flags word and either finds it already strict (`wait`, `mprotect`'s
-`prot`) or adds the check, and lists the result in "As built". The
+flags word and either finds it already strict (`wait`; `mmap`'s
+`prot` word) or adds the check, and lists the result in "As built". The
 Linux personality is a second door to the same objects and keeps
 Linux's own rule, which is to ignore unknown `MAP_`, `MS_` and `O_`
 bits; a Linux program that relies on that is correct on Linux and stays
@@ -400,8 +409,9 @@ tables it runs on are the kernel's (the loader's are gone by then;
 `SPAN` is set at the same place). The bit makes any writable page in
 the EL1&0 regime execute-never regardless of its leaf, so it changes
 nothing for a correct tree and denies exactly one thing: a future W+X
-leaf. User mappings are already W^X at every door (`mmap`, `mprotect`,
-the ELF loader, the Linux personality), so no user program can notice.
+leaf. User mappings are already W^X at every door (native `mmap`, the ELF
+loader, the Linux personality's `mmap` and `mprotect`), so no user
+program can notice.
 
 A crash-test variant proves the bit is what denies: `CRASH_TEST=2`
 (`make test-wxn`, AArch64 only, a no-op elsewhere like `test-gic`)
@@ -410,9 +420,20 @@ purpose through `arch_mmu_map`, writes a `ret` into it, and calls it.
 Without WXN the leaf allows the fetch and the call returns, which the
 variant reports as `crash test: a writable page executed; WXN is off`
 and counts as a failure; with WXN the fetch is an instruction abort at
-EL1, the kernel panics, and the harness (`--expect-panic`) passes.
-The test exists so that the bit's absence has a symptom; it is the
-only path in the tree that maps W+X, and only in that build.
+EL1 and the kernel panics. The harness's panic run today requires the
+unmapped-write crash's own signature (`run_boot_test.py:326-354`: the
+`crash test: writing to an unmapped address` line, the page-fault panic
+line, `trap 1029`, `FAR=ffff900000000000`), which an instruction abort
+cannot satisfy, and accepting any panic would not prove WXN caused it.
+So `--expect-panic` takes a kind: `fault` (today's markers, the
+default) or `wxn`, whose required markers are the variant's own line
+`crash test: executing a writable page on purpose`, a panic line
+naming an instruction abort at the page's address, the abort's `FAR=`
+at that address, the stack trace and `halting.`; its forbidden markers
+are `boot complete`, the `WXN is off` line and a recursive panic. The
+exact strings are fixed by the panic path's output and recorded as
+built. The test exists so that the bit's absence has a symptom; it is
+the only path in the tree that maps W+X, and only in that build.
 
 ### The §70 gate
 
@@ -442,10 +463,9 @@ at 42, per VM; today one page. Nothing else allocates.
 effect. A guard boot on a QEMU without the model (`cortex-a76` arrived
 in QEMU 7.1; the `+smap` feature names are old) fails at QEMU
 start with QEMU's own message, and the target says which model it asked
-for. The SMMU path refuses a configuration it cannot express (an OAS
-the layout rule maps to a concatenation the driver does not implement)
-with `-ENOTSUP` at probe rather than programming an invalid start
-level. A `hardening: absent` `WARN` is a warning, not a refusal: a
+for. The SMMU driver refuses an output size of 42 bits or less with
+`-ENOTSUP` at probe, naming the width, rather than programming a start
+level the architecture forbids over tables built for another. A `hardening: absent` `WARN` is a warning, not a refusal: a
 machine without SMAP boots, as it always has.
 
 *Security.* The unit's whole point. What it does not change: SMEP is
@@ -468,9 +488,9 @@ rule is the ABI's growth path: a new flag is a new accepted bit.
 
 | file | change |
 | --- | --- |
-| `Makefile` | `test-guard` target (both architectures); `test-wxn` target (AArch64; a no-op elsewhere); help lines |
+| `Makefile` | `test-guard` target (both architectures); `test-wxn` target (AArch64; a no-op elsewhere) building with `CRASH_TEST=2` and running the harness with `--expect-panic wxn`; `test-crash` passes `--expect-panic fault`; help lines |
 | `.github/workflows/ci.yml` | the two steps, after `test-gic` |
-| `tests/boot/run_boot_test.py` | `GUARD = os.environ.get("QEMU_GUARD", "0") != "0"`; required markers `hardening: (x86-64|aarch64): ...` with every feature, `uaccess-guard: guard live`, `umip: enforced` (x86-64); forbidden `hardening: absent` |
+| `tests/boot/run_boot_test.py` | `GUARD = os.environ.get("QEMU_GUARD", "0") != "0"`; required markers `hardening: (x86-64|aarch64): ...` with every feature, `uaccess-guard: guard live`, `umip: enforced` (x86-64); forbidden `hardening: absent`; `--expect-panic` takes a kind (`fault`, `wxn`) with the `wxn` marker sets |
 | `scripts/qemu-run.sh` | unchanged: `QEMU_CPU` is already honoured |
 | `kernel/arch/x86_64/start.c` | the hardening `INFO`/`WARN` lines after `x86_cpu_init` |
 | `kernel/arch/aarch64/start.c` | the same after `aarch64_cpu_init` |
@@ -480,7 +500,7 @@ rule is the ABI's growth path: a new flag is a new accepted bit.
 | `kernel/core/selftest.c` | registration after `uaccess` |
 | `kernel/core/main.c` | `CRASH_TEST == 2`: the W+X page executed on purpose |
 | `build/toolchain.mk` | `CRASH_TEST` already a number; unchanged unless the variant needs a define |
-| `kernel/syscall/native.c` | unknown bits refused in `sys_mmap`, `sys_mount`, `sys_umount`, `sys_open`, `sys_openat`, and the sweep |
+| `kernel/syscall/native.c` | unknown bits refused in `sys_mmap`, `sys_mount`, `sys_umount`, `sys_open`, and the sweep |
 | `kernel/include/arch/hv_s2_core.h` | new: `struct hv_s2_layout`, `hv_s2_layout` |
 | `kernel/arch/aarch64/hv_s2.c` | the layout-driven root, walk, destroy, count, VTCR |
 | `kernel/arch/aarch64/hv_el2.c` | layout computed at probe; `arch_hv_disable` |
@@ -489,7 +509,7 @@ rule is the ABI's growth path: a new flag is a new accepted bit.
 | `kernel-services/virtualization/vmm.c` | `hv_init` calls `arch_hv_disable` on the self-check's failure path |
 | `kernel-services/virtualization/hvtest.c` | `el2` unchanged; `hv-disabled` (fault-injected self-check failure) |
 | `kernel/include/kernel/faultinject.h`, `kernel/core/faultinject.c` | `FI_HV_SELFCHECK` |
-| `drivers/iommu/arm_smmuv3.c` | `S2SL0` and the root from the layout rule; `-ENOTSUP` for what it cannot express |
+| `drivers/iommu/arm_smmuv3.c` | asks `hv_s2_layout` about `IDR5.OAS` at probe; `-ENOTSUP` with a message at 42 bits or less (`kernel/iommu/pt.c` unchanged: the concatenated root there is follow-up work, untestable on QEMU's 44-bit SMMU) |
 | `tests/host/test_hv_s2.c`, `tests/host/host.mk` | the layout rule on the host |
 | `userland/init/init.c` | `--trap umip`; the flags test in `fs_selftest`/`proc_selftest` |
 | docs | `docs/kernel/arch/invariants.md` (I-ARCH-9 checked), `docs/kernel/arch/testing.md` (the guard boot, `test-wxn`), `docs/kernel/arch/aarch64/design.md` (WXN; the stage-2 start level), `docs/kernel/security/design.md` (a "Hardening" section: what is on, where it is asserted), `docs/kernel/syscall/api.md` (the unknown-bit rule on the four calls), `docs/verification/design.md` (the guard boot as a verification step), `docs/kernel-services/virtualization/` (the layout rule; `arch_hv_disable`), `README.md` Status, `docs/README.md`, the inventory |
@@ -528,7 +548,7 @@ for a new reason, documented.
    fails first.
 2. **The three faults.** The bracket in `memtest.c`; the layout rule,
    its host test, and the stage-2 root, walk and VTCR that follow it
-   (the SMMU driver's start level with it); `arch_hv_disable` and the
+   (the SMMU driver's probe-time refusal with it); `arch_hv_disable` and the
    self-check's failure path. The AArch64 guard boot passes the whole
    suite, or "As run" says what it found next and the step is not done.
 3. **The lines.** The hardening `INFO`/`WARN` on both architectures;
@@ -537,7 +557,8 @@ for a new reason, documented.
    outcomes; their required markers in the guard boot (`guard live`,
    `umip: enforced`); `hv-disabled`.
 5. **Unknown bits.** The four checks, the sweep, the user-side test.
-6. **WXN.** The bit on every CPU; `CRASH_TEST=2`; `test-wxn`.
+6. **WXN.** The bit on every CPU; `CRASH_TEST=2`; the harness's
+   `--expect-panic` kind and the `wxn` marker sets; `test-wxn`.
 7. **Docs, README Status, inventory, the report's as-built sections.**
 
 Each step boots both architectures on both CPU models; steps 4 and 5
@@ -555,7 +576,7 @@ and `test-crash`.
 | the AArch64 guard boot's `hv` suite | every `hv` and `el2` test passes on `cortex-a76`; `hv: backend el2` with nested paging in the log; no `selftest: hv: skipped` | revert the layout in `hv_s2_vtcr` to `SL0 = 2`: the self-check fails with the level-0 translation fault, exactly as the probe did |
 | `hv-disabled` | with `FI_HV_SELFCHECK` armed for one hit, `hv_init`'s path is re-run through a test hook: `hv_caps()->present` is false and `el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION` still holds; hits asserted equal to the budget | remove `arch_hv_disable` from the failure path: the stub does not answer |
 | `flags` (user-side, in `fs_selftest` and `proc_selftest`) | `mmap` with bit 31 set, `mount` with `1u << 5`, `umount` with `1u << 5`, `open` with `0x8000000`: each `-COSMO_EINVAL`; the same calls without the bit succeed as before | remove any one check: that call succeeds |
-| `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution and the harness sees the panic | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off`, the harness fails on the missing panic |
+| `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the instruction-abort panic with `FAR=` at the page's address, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
 | the guard boot itself | required markers `hardening: x86-64: nx smep smap umip` / `hardening: aarch64: pan wxn`; forbidden `hardening: absent` | boot the guard target with `QEMU_CPU` forced to the control model: the `WARN` appears and the run fails |
 | the ASID tests on `cortex-a76` | pass, with the bracket | drop the bracket from one read: that test fails as the probe showed |
 
@@ -652,6 +673,10 @@ baseline.
   and `SELFCHECK_GPA` at 2 GiB is already above what a smaller range
   would cover on some layouts; the concatenated root is the
   architecture's own answer to this width.
+- **The IOMMU walker's concatenated root.** Left out: the SMMU driver
+  refuses a 42-bit-or-smaller output size at probe rather than carrying
+  a walker change no machine here can run; the inventory gets a row
+  for it (`kernel/iommu/pt.c`, with this report's stage-2 evidence).
 - **UAO, E0PD, BTI, PAC; the EL0 SError.** Left out, and the inventory
   row keeps them: UAO is moot while every user access goes through the
   bracket; E0PD is a kernel-address-space separation the tree does not
