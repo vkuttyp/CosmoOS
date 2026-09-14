@@ -919,6 +919,16 @@ static void proc_selftest(void)
     CHECK(sysctl_get("hw.ncpu", buf, sizeof(buf)) > 0 && atoi(buf) >= 1);
     CHECK(sysctl_get("sysctl.names", buf, sizeof(buf)) > 0 && strstr(buf, "kernel.version") != NULL);
     CHECK(sysctl_get("no.such", buf, sizeof(buf)) < 0 && errno == ENOENT);
+    /* A wake made inside a system call preempts before the call returns
+     * (docs/audit/next-subsystem-wake-preempt.md): reading the probe *is*
+     * the call, and its value says what the woken thread saw. A debug
+     * knob, so a release kernel answers ENOENT. */
+    CHECK(sysctl_get("kernel.build", buf, sizeof(buf)) > 0);
+    if (strstr(buf, "debug") != NULL) {
+        CHECK(sysctl_get("debug.preempt_probe", buf, sizeof(buf)) > 0 && strstr(buf, "saw=0") != NULL);
+    } else {
+        CHECK(sysctl_get("debug.preempt_probe", buf, sizeof(buf)) < 0 && errno == ENOENT);
+    }
     CHECK(sysctl_get("kernel.name", buf, 3) == 7 && buf[0] == 'C' && buf[2] == 's');   /* truncated, no NUL */
 
     /* libc pieces with no kernel side. */

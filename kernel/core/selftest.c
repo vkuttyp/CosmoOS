@@ -358,6 +358,8 @@ static const struct selftest tests[] = {
     { "yield",           selftest_yield },
     { "preempt",         selftest_preempt },
     { "preempt-wake",    selftest_preempt_wake },
+    { "preempt-wake-direct", selftest_preempt_wake_direct },
+    { "preempt-wake-locked", selftest_preempt_wake_locked },
     { "sleep",           selftest_sleep },
     { "mutex",           selftest_mutex },
     { "semaphore",       selftest_semaphore },

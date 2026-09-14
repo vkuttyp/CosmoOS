@@ -15,6 +15,7 @@
 #include <kernel/log.h>
 #include <kernel/mutex.h>
 #include <kernel/percpu.h>
+#include <kernel/printf.h>
 #include <kernel/sched.h>
 #include <kernel/selftest.h>
 #include <kernel/semaphore.h>
@@ -25,6 +26,7 @@
 #include <kernel/wait.h>
 
 #include <arch/cpu.h>
+#include <arch/irq.h>
 #include <arch/testhooks.h>
 
 #define STR_(x) #x
@@ -427,6 +429,143 @@ bool selftest_preempt_wake(const char **reason)
     CHECK(threads_settle(before));
     return true;
 }
+
+/* --- the other shape: a direct sched_wake, no wait-queue wake ---
+ *
+ * The futex, poll, the AIO ring, process kill and signal delivery find
+ * their thread by other means and call `sched_wake` on it directly. The
+ * point belongs to `sched_wake`'s own irqsave unlock, not the wait
+ * queue's, and this is what shows it: the waiter parks itself as a futex
+ * waiter does (`wait_event` on a private queue) and is woken with
+ * `sched_wake(t)` after its condition is set -- the same observation as
+ * `preempt-wake`, through the other door.
+ */
+struct direct_probe {
+    struct waitqueue wq;
+    volatile unsigned go;
+    volatile unsigned after;
+    volatile unsigned saw;
+    volatile uint64_t woke_at;
+};
+
+static void direct_probe_entry(void *arg)
+{
+    struct direct_probe *d = arg;
+    wait_event(&d->wq, __atomic_load_n(&d->go, __ATOMIC_ACQUIRE));
+    d->saw = d->after;
+    d->woke_at = clock_now_ns();
+}
+
+bool selftest_preempt_wake_direct(const char **reason)
+{
+    unsigned before = thread_count();
+    CHECK(arch_cpu_id() == 0);
+    struct direct_probe d;
+    waitqueue_init(&d.wq, "preempt-wake-direct");
+    d.go = 0;
+    d.after = 0;
+    d.saw = 2;
+    d.woke_at = 0;
+    struct thread *t = thread_create_on(direct_probe_entry, &d, "direct-probe", SCHED_PRIO_DEFAULT - 16,
+                                        CPUMASK_OF(0));
+    CHECK(t != NULL);
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+        CHECK(clock_now_ns() < deadline);
+        thread_sleep_ms(1);
+    }
+
+    __atomic_store_n(&d.go, 1, __ATOMIC_RELEASE);   /* the condition, as a futex word */
+    uint64_t sent = clock_now_ns();
+    CHECK(sched_wake(t));                            /* the wake, with no wait queue in between */
+    d.after = 1;   /* the very next statement */
+    thread_join(t);
+
+    CHECK(d.saw == 0);
+    kinfo("selftest: preempt-wake-direct: the waiter ran %llu us after the wake, before the waker's next statement",
+          (unsigned long long)((d.woke_at - sent) / 1000));
+    CHECK(threads_settle(before));
+    return true;
+}
+
+/* --- the post inside a bare interrupts-off region ---
+ *
+ * The post's own unlock restores interrupts to *off* (the caller had
+ * them off), so nothing fires there; the caller's `arch_irq_restore` is
+ * the first enable, and it must be the point -- which is why the point
+ * lives in the restore and not in `spin_unlock_irqrestore`. The store
+ * comes after the restore: inside the region nothing can run.
+ */
+bool selftest_preempt_wake_locked(const char **reason)
+{
+    unsigned before = thread_count();
+    CHECK(arch_cpu_id() == 0);
+    struct wake_probe w;
+    semaphore_init(&w.sem, 0, "preempt-wake-locked");
+    w.after = 0;
+    w.saw = 2;
+    w.woke_at = 0;
+    struct thread *t = thread_create_on(wake_probe_entry, &w, "wake-probe-locked", SCHED_PRIO_DEFAULT - 16,
+                                        CPUMASK_OF(0));
+    CHECK(t != NULL);
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+        CHECK(clock_now_ns() < deadline);
+        thread_sleep_ms(1);
+    }
+
+    uint64_t sent = clock_now_ns();
+    arch_irq_state_t s = arch_irq_save();
+    semaphore_up(&w.sem);      /* its unlock restores to "off": no point here */
+    arch_irq_restore(s);       /* the first enable: the point */
+    w.after = 1;               /* the very next statement */
+    thread_join(t);
+
+    CHECK(w.saw == 0);
+    kinfo("selftest: preempt-wake-locked: the waiter ran %llu us after the post, before the waker's next statement",
+          (unsigned long long)((w.woke_at - sent) / 1000));
+    CHECK(threads_settle(before));
+    return true;
+}
+
+#if CONFIG_SELFTEST
+/*
+ * The debug probe behind `init --selftest`'s preempt-wake-syscall step:
+ * the *read* of sysctl `debug.preempt_probe` is the system call under
+ * test. It creates a priority-16 thread pinned to the caller's CPU,
+ * waits for it to block, posts -- a wake made inside a system call --
+ * and stores `after` as its next statement; the value it returns says
+ * what the waiter saw. A wake that preempts gives `saw=0` before this
+ * call returns to user mode, let alone reaches its own next line. The
+ * report described two sequence numbers; the one flag says the same
+ * thing. Privilege is checked by the caller in native.c.
+ */
+int sched_preempt_probe_sysctl(char *out, size_t n)
+{
+    struct wake_probe w;
+    semaphore_init(&w.sem, 0, "preempt-probe");
+    w.after = 0;
+    w.saw = 2;
+    w.woke_at = 0;
+    unsigned cpu = arch_cpu_id();   /* threads do not migrate: the caller stays here */
+    struct thread *t = thread_create_on(wake_probe_entry, &w, "preempt-probe", SCHED_PRIO_DEFAULT - 16,
+                                        CPUMASK_OF(cpu));
+    if (t == NULL)
+        return -ENOMEM;
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+        if (clock_now_ns() > deadline)
+            break;   /* a thread cannot be abandoned: post and join regardless; the value says what happened */
+        thread_sleep_ms(1);
+    }
+    uint64_t sent = clock_now_ns();
+    semaphore_up(&w.sem);
+    w.after = 1;   /* the very next statement */
+    thread_join(t);
+    return ksnprintf(out, n, "saw=%u latency_us=%llu", w.saw,
+                     (unsigned long long)((w.woke_at - sent) / 1000));
+}
+#endif
 
 bool selftest_sleep(const char **reason)
 {
