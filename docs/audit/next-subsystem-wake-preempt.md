@@ -223,7 +223,7 @@ why rather than adding one for symmetry: the dispatcher runs with
 interrupts enabled, and every wake it can perform -- wait-queue or
 direct -- ends in `sched_wake`'s own `irqsave` unlock or the caller's
 outer restore, so the point above fires inside the call, before the
-return. The test in step 1 asserts exactly that from user mode, so if a
+return. The user-mode test in step 2 asserts exactly that, so if a
 wake path ever appears that runs with interrupts on and no lock, the
 test says so and the return point becomes the next change.
 
@@ -319,11 +319,11 @@ is the observation.
 
 | file | change |
 | --- | --- |
-| `kernel/core/percpu.c`, `kernel/include/kernel/percpu.h` | `preempt_point()`; `preempt_enable` unchanged |
+| `kernel/core/percpu.c`, `kernel/include/kernel/percpu.h` | `preempt_point()`; `preempt_enable` unchanged; a per-CPU debug counter of preemptions taken at the restore point, incremented in `preempt_point` and printed in the scheduler dump beside `switches` (`sched.c`, the `cpu %u:` line) |
 | `kernel/arch/x86_64/cpu.c` | `arch_irq_restore` calls it after `sti` |
 | `kernel/arch/aarch64/irq.c` | the same after the DAIF write when I is cleared |
 | `kernel-services/network/netif.c` | the worker's priority, as measured (one constant, with the measurement in the comment) |
-| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and completed by the sysctl's own write) |
+| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and completed by the sysctl's own write); **`irqrestore-bench`**, the micro-benchmark of the Benchmarks section, a self-test that prints and asserts nothing, in the shape of `fpu-bench` |
 | `kernel/syscall/native.c` | the `debug.preempt_probe` sysctl entry in the registry (debug builds; writable; privileged, like `debug.faultinject`), dispatching to the probe in `schedtest.c` |
 | `userland/init/init.c` | `preempt-wake-syscall`: a wake made inside a system call preempts before the call returns, observed through the probe -- one step of `init --selftest` |
 | `kernel-services/network/nettest.c` | `net-bench` unchanged; its UDP delivered count becomes the worker decision's evidence and the report quotes it |
@@ -434,9 +434,10 @@ exactly 0, not "not 1".
 
 ## Benchmarks
 
-1. **The cost of the point**: `fpu-bench`'s switch measurement and a
-   new `irqrestore` micro-benchmark (a million `arch_irq_save`/`restore`
-   pairs with `need_resched` clear) before and after, both arches.
+1. **The cost of the point**: `fpu-bench`'s switch measurement and
+   `irqrestore-bench` (`schedtest.c`, in the affected-files table: a
+   million `arch_irq_save`/`restore` pairs with `need_resched` clear,
+   printed per boot like `fpu-bench`) before and after, both arches.
    Expected: two loads and a not-taken branch, under 1 ns on TCG's scale
    of things; reported either way.
 2. **Wake-to-run latency, same CPU**: printed by `preempt-wake` (from
@@ -463,8 +464,9 @@ exactly 0, not "not 1".
 - **The `schedule()` tail**: a wake during the switch now triggers a
   second `schedule()` immediately instead of at the tick. Argued safe
   above (it is what a tick would do); `preempt` and every blocking test
-  exercise it, and a debug counter of "preemptions from the restore
-  point" makes the frequency visible.
+  exercise it, and the per-CPU debug counter of preemptions taken at the
+  restore point (`percpu.c`, printed in the scheduler dump; in the
+  affected-files table) makes the frequency visible.
 - **A user-visible timing change.** A process that woke a higher-priority
   kernel thread ran on to the tick before; it does not now. No user
   thread can observe a *different* result, only a different
