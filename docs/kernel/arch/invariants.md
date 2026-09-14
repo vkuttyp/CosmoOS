@@ -111,8 +111,12 @@ compiler, `fpu-switch`, `hv-guest-fpu`, `init --selftest` (`--fpu-partner`).
 
 `icr_write_pair` writes ICR_HI and ICR_LO with interrupts disabled;
 nothing else writes the ICR. An NMI handler cannot be masked and must
-therefore never call `ipi_send` or anything that does. **Checked by**
-`smp-ipi-storm` and review of the (registered) NMI handlers.
+therefore never call `ipi_send` or anything that does. The lockup
+sample's answer on the NMI path (`lockup_answer`, called by
+`x86_trap_paranoid`) records into its own CPU's buffer and sends
+nothing; the sample *request* (`arch_ipi_send_nmi`) is sent from the
+tick or a thread, never from an NMI. **Checked by** `smp-ipi-storm` and
+review of the (registered) NMI handlers and of `lockup_answer`.
 
 ## I-ARCH-14: `arch_emulator_exit` may return
 

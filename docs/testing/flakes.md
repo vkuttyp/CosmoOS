@@ -84,6 +84,21 @@ added here to make a red run go away:
 - **Generous guards** (`irqtest.c`, `proctest.c`'s 15 s and 2 s): a host
   that breaks these is genuinely broken. Left alone, and not listed.
 
+## Lockup reports under load
+
+The lockup detectors (`docs/kernel/diagnostics/design.md`, "lockup.c")
+are not tests, and their reports are forbidden markers, so a report
+fails the run with the CPU's trace in the log. The hard-lockup detector
+watches a neighbour's tick count, and QEMU runs each vCPU on a host
+thread: a host that starves one for longer than the threshold (10 s)
+produces `hard lockup: cpu J no tick for M ms` on a correct kernel --
+the `cpu1: up` flake of PR #112 was this kind of starvation, at a
+smaller scale. The line carries the stall's length and the target's
+tick age; a first CI sighting is read as "the host starved vCPU J for M
+ms" and investigated as this false positive first, before the kernel.
+The soft-lockup detector cannot false-positive this way: it counts the
+victim's own ticks, which a starved vCPU does not take.
+
 ## The rule for joining the list
 
 A test goes on this list only after its bound has been classified, in

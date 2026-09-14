@@ -1832,6 +1832,38 @@ See [docs/development.md](docs/development.md).
   figure within the old spread or above it, and 9 300 to 10 000 of
   10 000 delivered.
 
+- **A hang that names its program counter**
+  (`docs/audit/next-subsystem-lockup.md`). The wake-preempt unit's
+  measurement found a hang it could not diagnose -- the network worker
+  one priority above its feeder, one x86-64 boot in five stopped in
+  `net-steer` with the worker `running` for eight seconds -- and the
+  watchdog's dump carried everything about that CPU but where it was.
+  The kernel had the answer every tick and discarded it. Now every tick
+  stores the interrupted PC and its time (two stores), and on request
+  every other online CPU records its own frame and stack into its own
+  per-CPU buffer, in its own handler, with no lock and no printing: an
+  NMI on x86-64 (a new LAPIC delivery mode, answered on the paranoid
+  path with any registered handler still dispatched), the ordinary
+  `IPI_SAMPLE` on AArch64, where a CPU with interrupts masked is
+  reported as "no answer, last tick N ms ago" rather than guessed at.
+  One reporter at a time, claimed with a compare-and-swap and never
+  spun for; one total wait bound. The scheduler dump prints each CPU's
+  tick sample and age and a live `run_ms`; the self-test watchdog prints
+  every CPU's sample. Two detectors run from the tick -- a soft lockup on
+  a CPU's own tick (no switch while something is runnable) and a hard
+  lockup seen by the next online CPU in the mask (no tick), each once per
+  episode -- and the harness forbids a real report and symbolises a
+  report's addresses with the kernel ELF. Seven kernel tests (a spinner
+  in a known function whose sampled PC must lie in it; through an
+  interrupt mask with the outcome stated per architecture; the
+  single-reporter rule; both detectors at a lowered threshold; the quiet
+  control) and a host test of the watcher rule over masks with holes,
+  every one bug-proofed by injection. Found by building: an AArch64 leaf
+  function had no frame record at `-O1`, so a walk from inside one
+  skipped its caller -- the AArch64 kernel now keeps leaf frame pointers;
+  and a CPU with interrupts masked cannot acknowledge a TLB shootdown,
+  whose waiter panics after a second. Then the spin: with the worker's priority overridable from the command line, the hang reproduced on the seventh boot at 31 and the dump named it in one block -- eight samples of the worker, every one in its wait condition or its dequeue, none in a packet: the receive queue's count said non-empty over a list that was empty. The cause was a second enqueue of an mbuf already on the queue, from the reorder test's loopback filter (a held copy in a plain global that two CPUs could both take), which cut the list behind it; at priority 32 the spinning worker had gone unnoticed -- one boot in five burning a CPU since that test landed. Fixed at the stack (a queued mbuf is refused a second enqueue, counted and said once; `net-mbufq-double`) and in the test (its state under a lock). Five boots at 31 on each architecture: no hang. The five-boot check at 31 then found a second, older hang -- the keepalive test black-holing the handshake's last segment before the worker had sent it, leaving its server in `accept` forever -- fixed by waiting for the passive side to be established. Ten boots at 31 after both fixes, five per architecture: no hang.
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

@@ -243,7 +243,7 @@ tree.
 | --- | --- |
 | **64-CPU ceiling**: `CONFIG_MAX_CPUS` is 64 and `cpumask_t` is one word (kernel/include/kernel/percpu.h:22); xAPIC-only addressing, x2APIC never enabled; a single cross-call slot; no ticket or MCS spinlocks; IRQ affinity spread only by NVMe | 6.3, 5.3 |
 | no CPU feature framework (`arch_cpu_has`); no errata table; invariant TSC detected but unused, so cross-CPU timestamps are unsynchronised | 6.4, 6.2 |
-| the watchdog fires once, from CPU 0, no NMI path, no hard/soft-lockup detection | 6.2 |
+| ~~the watchdog fires once, from CPU 0, no NMI path, no hard/soft-lockup detection~~ -- **closed by the lockup unit (PR #136)**: an NMI sample path on x86-64, a soft-lockup detector on every CPU and a hard-lockup detector on the next online CPU; "fires once" stays by design (the first block is the diagnosis; a second adds nothing). Open: an NMI-class interrupt on AArch64 (GICv3 pseudo-NMI) | 6.2 |
 | sequential AP bring-up with a 10 ms delay per CPU | 6.2 |
 | no symlinks in the VFS; no dentry cache (every component calls the filesystem); no `(ino, generation)` identity; no mount options string; no bind or overlay stacking | 8.3 |
 | no fsck; no checksum algorithm id in the metadata header | 8.5, 8.6 |
@@ -273,14 +273,14 @@ tree.
   (PR #134)**: the fourth preemption point in `arch_irq_restore`; a
   wake inside a system call is shown to preempt before the return, so no
   syscall-return point is needed.
-- **a latent spin in the network worker that a priority above its feeder
-  exposes** (found by the wake-preempt unit's measurement): with the
-  worker at 31, one x86-64 boot in five hung in `net-steer` -- the worker
-  running on CPU 3 for over eight seconds at `preempt 0`, the injector
-  thread pinned there never scheduled; not reproduced in five boots on
-  AArch64 or at 32 or 40. The watchdog dump is in
-  `docs/audit/next-subsystem-wake-preempt.md` (as run); a diagnosis needs
-  the running thread's PC, which the dump does not carry.
+- ~~**a latent spin in the network worker that a priority above its feeder
+  exposes**~~ -- **closed by the lockup unit (PR #136)**: reproduced at
+  31 with the tool the unit built, diagnosed from the sample (the
+  worker's receive queue with a count over an empty list), caused by a
+  second enqueue of an mbuf already on the queue from the reorder test's
+  loopback filter; the stack now refuses a second enqueue
+  (`net-mbufq-double`) and the filter's state is under a lock
+  (`docs/audit/next-subsystem-lockup.md`, "The spin, found"); the five-boot check at 31 then found and fixed a second hang, the keepalive test's black hole raised before the handshake's last segment had left (its server never woke from `accept`).
 - **never exercised by a test**: the straggler IPI (Q6), the
   `blk_submit`/`blk_unregister` window (Q11), the TCP
   timer-callback/free race (N-L3), runtime hot-unplug of virtio devices.

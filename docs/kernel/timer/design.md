@@ -54,9 +54,12 @@ starts its own timer (BSP in `timer_init`, APs in the SMP PR).
 
 `timer_tick_isr` (registered on the timer vector):
 1. `this_cpu()->ticks++`.
-2. `timer_run_expired(this_cpu queue, clock_now_ns())`.
-3. `timer_tick_hook(now)` if one is registered (the scheduler registers
-   `sched_tick`).
+2. The tick sample: the interrupted PC and `now` into `last_tick_pc` /
+   `last_tick_ns` (two stores; `docs/kernel/diagnostics/design.md`,
+   "lockup.c").
+3. `timer_run_expired(this_cpu queue, clock_now_ns())`.
+4. `timer_tick_hook(now, frame)` if one is registered (the scheduler
+   registers `sched_tick`).
 4. EOI is done by the arch dispatch tail, not here.
 
 ## 3. Timer queue

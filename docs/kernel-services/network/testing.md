@@ -111,16 +111,30 @@ beyond `snd_max`. After each the client is still ESTABLISHED and
 none. A RST at `rcv_nxt` then ends the connection: `recvfrom` is
 `-ECONNRESET`, `rsts_in` +1.
 
+**`net-mbufq-double`**: three mbufs queued, the middle one enqueued
+again: refused, `double_enqueues` +1, the count still three, drained in
+order to zero, the mbuf reusable once off the queue. The mechanism of
+the worker's latent spin (`docs/audit/next-subsystem-lockup.md`);
+bug-proofed by removing the refusal (as run: the refusal check fails
+first, ahead of the count reading four over a list of two).
+
 **`net-tcp-reorder`**: the loopback filter holds a copy of every fifth
 data segment to port 6022, drops the original, lets the next data
-segment through and re-injects the held copy before the one after that;
+segment through and re-injects the held copy before the one after that
+(its state under a lock since the lockup unit: the filter runs on every
+CPU that transmits through the loopback, and two of them once both
+took the held copy and both injected it);
 a 512 KiB transfer completes byte-exact, `g_reordered > 0` and
 `ooo_queued` grew (log: `7 segments delayed, 7 queued out of order, 0
 retransmissions`).
 
 **`net-tcp-keepalive`**: with `tcp_set_keepalive(150 ms, 50 ms, 3)`
 set before the connection exists, a client connects to a holding
-server and a filter black-holes every segment of that port in both
+server, waits for the passive side to be established (`conns_passive`:
+`connect` returns before the worker has sent the handshake's third
+segment, and a black hole raised first once swallowed it and left the
+server in `accept` forever -- found at priority 31 by the lockup unit),
+and a filter black-holes every segment of that port in both
 directions; within 3 s the client's pcb is CLOSED, `recvfrom` is
 `-ETIMEDOUT`, `timeouts` grew and at least three probes were sent. Then
 with `tcp_set_fin_wait2(100 ms)` a client connects and closes while the

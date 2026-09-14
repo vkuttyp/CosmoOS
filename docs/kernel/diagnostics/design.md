@@ -213,12 +213,156 @@ Byte loops for `memcpy`, `memmove`, `memset`, `memcmp`, `strlen`,
 because the compiler emits calls to them for aggregate copies; word-sized
 fast paths wait for a measurement (coding rule 9).
 
+## lockup.c: a program counter seen from another CPU
+
+`kernel/core/lockup.c` (the unit `docs/audit/next-subsystem-lockup.md`).
+The rule, stated once: **a CPU's interrupted context is recorded by that
+CPU, in its own handler, into its own per-CPU buffer, without a lock and
+without printing; whoever asked reads the buffers and prints.** It
+follows from what an NMI may do (nothing that blocks, nothing that takes
+a lock the interrupted code may hold -- the console's included) and from
+what a frame-pointer walk needs (`arch_backtrace`'s bounds checks are
+written for the local thread's stack; another CPU's live stack cannot be
+walked from outside).
+
+**The tick sample.** `tick_isr` stores the interrupted PC
+(`arch_trap_frame_pc(frame)`) and `now` into `percpu.last_tick_pc` /
+`last_tick_ns` before running timers: two stores per tick. It is the
+always-present half: what a CPU was doing at its last tick and when that
+was. A CPU whose last tick is seconds old is not taking interrupts, and
+every other per-CPU field is as old as that.
+
+**The request.** `lockup_sample_all(self, timeout_ns, &answered)` claims
+the single reporter slot (`g_reporter`, one compare-and-swap) and
+returns `false` at once, having sent nothing, when another CPU holds it:
+a reporter may be waiting with interrupts off (the tick is where the
+detectors run), and a second CPU spinning for the slot with its own
+interrupts off would stop its own ticks and, on AArch64, its own
+answers. It then increments the request sequence, writes it into each
+online target's `sample.want`, sends the sample interrupt -- on x86-64 an
+NMI (`arch_ipi_send_nmi`: the LAPIC ICR with delivery mode NMI, which
+carries no vector), on AArch64 the ordinary `IPI_SAMPLE` SGI
+(`arch_ipi_send_nmi` returns `false` there; no NMI-class interrupt is
+configured) -- records its own sample from `self` (a handler's frame) or
+its own walk (a thread), and waits **once, for every target together**,
+until each target's `sample.seq` equals the request or the total bound
+passes (5 ms in the watchdog and the detectors, whether 3 CPUs or 63 are
+asked). The slot is held until `lockup_print_samples` returns, so no
+later request overwrites a buffer under the printer.
+
+**The answer.** `lockup_answer(frame, nmi)`: if this CPU's `sample.want`
+equals its `sample.seq` no request is pending for it and it returns
+`false`; otherwise it fills `pc`, `sp`, the trace (`arch_backtrace`
+from the frame, up to `LOCKUP_TRACE_MAX` = 16), `nmi` and `when_ns`,
+stores `seq` with release and returns `true`. A nested interrupt inside
+the answer sees the same pending request and writes the same values.
+On AArch64 the `IPI_SAMPLE` handler is this function. On x86-64
+`x86_trap_paranoid` calls it for `X86_TRAP_NMI` and then **dispatches
+exactly as before whenever a handler is registered on the vector**: a
+registered NMI handler sees every NMI, sample or not, so nothing a
+handler owns is ever swallowed; only with no handler registered does
+the answer decide -- an NMI that answered a request returns, one that
+did not falls to `arch_trap_unhandled` and panics, as before. The
+residual is the architecture's: an x86 NMI carries no vector and no
+source, so an unowned NMI landing on a CPU with no registered NMI
+handler inside the one-delivery window between a request and its
+answer is recorded as the sample and its own cause is not reported --
+where before it was a panic without a cause either. No source on this
+kernel's machines raises one (no NMI watchdog, no SERR/PERR routing, no
+NMI IPI but this one), and a source added later registers a handler and
+is then never in the residual.
+
+**What answers and what does not.** On x86-64 a CPU answers whether its
+interrupts are on or off, holding a spinlock or not, in a handler or
+not. On AArch64 a CPU with interrupts masked does not answer within the
+bound, and the printout for it is the tick sample with its age -- for a
+spinner with interrupts off, the PC at its last tick before the mask,
+the last useful fact available. The two outcomes print as what they
+are:
+
+```
+cpu 1: pc 0xffffffff80112a60 sp 0xffffc00010407fc0 (nmi, 14 us ago)
+  #0  0xffffffff80112a60
+  #1  0xffffffff80112b9c
+cpu 1: no answer in 5 ms; last tick 205 ms ago at pc 0xffffffff80009f20
+```
+
+The requester's own sample is labelled `self`.
+
+**Who prints it.** `sched_dump` prints, per CPU, `last tick N ms ago pc
+0x...` on its `cpu %u:` line and a live `run_ms` for the running thread
+(`run_time_ns` is charged at switch-out, so a thread that has not
+switched for eight seconds used to show the run time it had before),
+then every subsystem hook registered with `sched_dump_register` (the
+network workers' per-CPU counters). The self-test watchdog's
+`[WATCHDOG]` block is that dump, every CPU's sample, and **eight more
+samples, 250 µs apart, of every CPU that is running something**
+(`lockup_profile`): one sample says where a CPU is, eight say what it
+is cycling through -- which is how the worker's spin was read (its wait
+condition, its dequeue, the wait's exit, never a packet). The two
+detectors below print the samples with their reports; the hard-lockup
+report profiles its target where an NMI can reach it.
+
+**Soft lockup: a CPU that has not switched while something waits.**
+`lockup_tick`, from `sched_tick` on every CPU for itself: if the current
+thread is not idle, `rq->nr_running > 0`, and `rq->switches` is
+unchanged since the last tick, `stall_ns` grows by a tick; otherwise it
+resets. At `g_soft_ns` (10 s) the CPU prints once per episode `soft
+lockup: cpu N running 'name' for M ms with K runnable`, its own trace
+from the tick's frame, and every other CPU's sample. Under fixed
+priorities a runnable thread that never runs for ten seconds while
+another runs is a strictly lower priority behind a spinner or a
+scheduler bug (an equal priority gets a slice every 10 ms); no thread in
+this tree does ten seconds of work above another's priority, so the
+report is a bug report. The episode ends when `switches` changes.
+
+**Hard lockup: a CPU that stopped ticking.** On every one of its ticks
+each CPU `k` checks its **watch target**, `lockup_watch_target(online,
+k)`: the online CPU with the next-higher id, wrapping. With two or more
+CPUs online every online CPU has exactly one watcher whatever holes the
+mask has (`{0,2,3}`: 0 watches 2, 2 watches 3, 3 watches 0); a lone
+CPU's target is itself and the check is skipped. If the target's
+`ticks` differs from the value last seen, record it and reset; else
+`watch_stall_ns` grows by a tick; a target that changed resets. At
+`g_hard_ns` (10 s) the watcher prints once per episode `hard lockup:
+cpu J no tick for M ms; last tick N ms ago at pc 0x... (seen from cpu
+k)` and every CPU's sample -- on x86-64 the NMI reaches the stalled CPU
+and the report carries its live frame; on AArch64 it carries the tick
+sample. The cadence is the tick, so a threshold lowered by a test fires
+at the threshold plus one tick; the cost is one load and one compare
+per tick. Every online CPU ticks at `CONFIG_HZ` (`smp-ticks` asserts
+it), so "no tick" is a stall, not idleness.
+
+**The harness.** `soft lockup:` and `hard lockup:` are forbidden markers
+in every boot test; the self-tests' own reports say `expected soft
+lockup:` and do not match. With `--kernel <elf>` (the Makefile passes
+`$(KERNEL_ELF)`), `run_boot_test.py` resolves every `#n 0x...` frame and
+`pc 0x...` in the log with `llvm-symbolizer` and prints a
+`---- symbols ----` table in its own report when the run failed or a
+panic was expected (`make test-crash`); the log stays the run's
+evidence. The kernel still prints addresses.
+
+**Found by building.** At `-O1` clang gives an AArch64 leaf function no
+frame record, so a walk from a PC inside one skipped its caller (the
+sample of a spinning leaf showed the thread trampoline where the
+spinner's caller should be); the AArch64 kernel is now built with
+`-mno-omit-leaf-frame-pointer` (`build/arch/aarch64.mk`). x86-64 keeps
+the leaf frame with `-fno-omit-frame-pointer` alone. And a CPU with
+interrupts masked cannot acknowledge a TLB shootdown, whose waiter
+panics after one second: a test that masks a CPU must stop it before
+joining any thread whose stack teardown needs that acknowledgement, and
+must keep every mask well under a second.
+
 ## What is missing and planned
 
 - **Ring buffer**: `kvlog` will also append to a fixed buffer readable by
   a future `dmesg`; the console becomes one consumer.
-- **Symbol resolution**: an embedded sorted symbol table so traces print
-  `function+offset`.
+- **Symbol resolution in the kernel**: an embedded sorted symbol table so
+  traces print `function+offset` on the console; the harness resolves
+  them with the ELF today (`--kernel`).
+- **An NMI-class interrupt on AArch64** (GICv3 pseudo-NMI, a priority-mask
+  discipline through every interrupt save and restore), so a spinner
+  with interrupts masked answers a lockup sample live there too.
 - **Timestamps**: once a monotonic clock exists.
 - **Lock diagnostics**: might-sleep assertions, lock ordering checks.
 - **GDB stub**: remote debugging over a second UART.

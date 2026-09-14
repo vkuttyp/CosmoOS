@@ -138,9 +138,13 @@ source is **borrowed**.
 
 **Queues**: `struct mbufq { head, tail, len, maxlen, lock }`.
 `mbufq_init(q, maxlen, name)`; `bool mbufq_enqueue(q, m)` takes the
-packet and returns `false` **after freeing it** when the queue is full;
-`mbufq_dequeue` returns NULL when empty; `mbufq_drain` frees everything;
-`mbufq_len`. All any context (IRQ-safe spinlock).
+packet and returns `false` **after freeing it** when the queue is full,
+and `false` **without touching it** when it is already on a queue
+(`M_QUEUED`, set and cleared under the queue's lock; counted in
+`mbuf_stats.double_enqueues` and said once -- the lockup unit's
+diagnosis, `docs/audit/next-subsystem-lockup.md`); `mbufq_dequeue`
+returns NULL when empty; `mbufq_drain` frees everything; `mbufq_len`.
+All any context (IRQ-safe spinlock).
 
 **`void mbuf_get_stats(struct mbuf_stats *out)`** `mbufs_alive`,
 `clusters_alive`, `allocs`, `frees`, `alloc_failures`. Any context.
