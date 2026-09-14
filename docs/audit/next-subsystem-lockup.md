@@ -22,7 +22,7 @@ interrupted frame and discards it (`kernel/timer/timer.c:208-211`), the
 four IPI handlers receive it and discard it (`kernel/interrupt/ipi.c`),
 and the panic path already walks a frame into a stack trace
 (`kernel/core/panic.c:40-54`) that no dump but the panic's uses. This
-unit keeps the answer: one store per tick, an IPI (an NMI on x86-64)
+unit keeps the answer: two stores per tick (the PC and its time), an IPI (an NMI on x86-64)
 that asks a CPU to record its own frame and stack, a dump that prints
 them, a soft-lockup detector on every CPU and a hard-lockup detector on
 the next online CPU, and a harness that turns the addresses into
@@ -183,7 +183,7 @@ built before every boot test.
   been open since 2026-09-05.
 - **The dump is the one artefact a hang leaves**, and it is read by a
   person from a CI log after the machine is gone. Every field that
-  costs one store per tick to keep and would have decided the last
+  costs two stores per tick to keep and would have decided the last
   diagnosis belongs in it.
 - **Addresses are read by people.** `#3 0xffffffff8012a4c0` becomes
   `worker_main+0x40 (netif.c:707)` with a tool the toolchain already
@@ -290,12 +290,21 @@ request pending for this CPU returns; one that did not falls to
 rather than hidden: on a CPU with no registered NMI handler, an
 unrelated NMI landing inside the microseconds between a request and
 its answer is taken as the sample and its own cause is not reported --
-where today it is a panic without a cause either. No source on this
-kernel's machines raises one (no NMI watchdog, no SERR/PERR routing,
-no NMI IPI but this unit's), and a source added later registers a
-handler and is then never in the residual. The recorded frame is the
-interrupted context in either case, which is the fact the sample
-exists to record.
+where today it is a panic without a cause either. This residual is
+the architecture's, not the design's: an x86 NMI carries no vector and
+no source, so no handler can tell a sample NMI from another NMI in the
+same window by anything but the pending request, and every kernel that
+samples by NMI lives with the same window (Linux's `nmi_cpu_backtrace`
+answers and returns "handled" on exactly this test). What the design
+controls it does control: the window is one NMI delivery long (`want`
+is written immediately before the send, and the answer ends it), a
+registered handler is never bypassed, and the outcome for an unowned
+NMI inside the window -- a recorded frame and no panic -- is a stated
+rule with a stated size. No source on this kernel's machines raises
+one (no NMI watchdog, no SERR/PERR routing, no NMI IPI but this
+unit's), and a source added later registers a handler and is then
+never in the residual. The recorded frame is the interrupted context
+in either case, which is the fact the sample exists to record.
 
 **What answers and what does not.** On x86-64 a CPU answers whether its
 interrupts are on or off, holding a spinlock or not, in a handler or
