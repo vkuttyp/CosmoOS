@@ -128,8 +128,10 @@ server holds its end: the orphaned FIN_WAIT_2 is reaped
 (`fin_wait2_timeouts` +1) within 2 s. Both hooks are restored.
 
 **`net-icmp-limit`**: first the limiter's window is made known -- a
-burst of 100 echoes fills it, then one echo every 10 ms until one is
-replied, which says a fresh one-second window began between two probes
+burst of 100 echoes fills it and one echo probes it, again until a probe
+is refused (a window that rolled inside a fill is of unknown age), then
+one echo every 10 ms until one is replied, which says a fresh one-second
+window began between two probes
 -- and then 300 echo requests to `127.0.0.1` in a burst into it: all
 counted as received, at most 100 replied, at least 200
 `icmp_ratelimited` (unreachables are never sent for 127/8, so the echo

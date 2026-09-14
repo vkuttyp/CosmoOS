@@ -1455,23 +1455,36 @@ bool selftest_net_icmp_limit(const char **reason)
      * last second of quiet. Twenty consecutive boots found the boundary
      * inside the burst once (replies from two windows, `sent` 200), which
      * a fixed sleep or a wait for the flood can neither see nor avoid.
-     * So the phase is *made* known: fill the window (a burst of RATE
-     * echoes, every one decided), then probe one echo at a time until one
-     * is replied -- the window rolled between two probes, ten
-     * milliseconds apart -- and flood into the fresh window. What remains
-     * assumed is that the flood is decided within that window's second,
-     * against the ~20 ms it takes: the 50x margin is the largest on the
-     * load-sensitive list (docs/testing/flakes.md), where this site is
-     * recorded.
+     * So the phase is *made* known, in two halves that must both be
+     * observed. First a probe must be *refused*: fill the window (a
+     * burst of RATE echoes, every one decided) and probe; if the probe
+     * is accepted, the window rolled somewhere inside the fill and is of
+     * unknown age -- a held vCPU makes that age anything -- so fill and
+     * probe again until one is refused. Then a probe must be *accepted*:
+     * one echo every ten milliseconds until one is replied, which says
+     * the window rolled between two probes and is at most that old. Only
+     * the refusal followed by the acceptance is a fresh window; an
+     * acceptance alone was the first draft's mistake, and review caught
+     * it. Then flood into it. What remains assumed is that the flood is
+     * decided within that window's second, against the ~20 ms it takes:
+     * the 50x margin is the largest on the load-sensitive list
+     * (docs/testing/flakes.md), where this site is recorded.
      */
-    struct ip_stats fill;
-    ipv4_get_stats(&fill);
-    for (unsigned i = 0; i < ICMP_RATE_PER_SEC; i++)
-        CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d37, (uint16_t)i, "f", 1) == 0);
-    struct echo_target ftgt = { .base = &fill, .want = ICMP_RATE_PER_SEC };
-    CHECK(wait_until(echoes_decided, &ftgt, 5000));
+    uint64_t probe_deadline = clock_now_ns() + 5000000000ull;   /* the window is a second; a hang guard */
+    bool refused = false;
+    for (uint16_t seq = 0; !refused; seq++) {
+        CHECK(clock_now_ns() < probe_deadline);
+        struct ip_stats fill;
+        ipv4_get_stats(&fill);
+        for (unsigned i = 0; i < ICMP_RATE_PER_SEC; i++)
+            CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d37, (uint16_t)i, "f", 1) == 0);
+        struct echo_target ftgt = { .base = &fill, .want = ICMP_RATE_PER_SEC };
+        CHECK(wait_until(echoes_decided, &ftgt, 5000));
+        bool accepted;
+        CHECK(icmp_probe(seq, &accepted));
+        refused = !accepted;
+    }
     bool fresh = false;
-    uint64_t probe_deadline = clock_now_ns() + 3000000000ull;   /* the window is a second; a hang guard */
     for (uint16_t seq = 0; !fresh; seq++) {
         CHECK(clock_now_ns() < probe_deadline);
         CHECK(icmp_probe(seq, &fresh));

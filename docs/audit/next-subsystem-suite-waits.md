@@ -63,6 +63,10 @@ and re-run before it could land.
    echo is replied (the window rolled between two probes), flood into
    the fresh window. The residual assumption -- a 20 ms flood decided
    within a one-second window -- is a 50× margin and goes on the list.
+   **Review caught the first draft treating any accepted probe as a
+   fresh window**: a window that rolled inside the fill is of unknown
+   age, and a held vCPU makes that age anything. Only a refusal followed
+   by an acceptance says the window began between two probes.
 
 ## Problem
 
@@ -497,7 +501,7 @@ converted tree fails nothing, waiting longer for the right answer
 architecture with no `SELFTEST: FAIL`. Twenty is not a proof of absence
 and the report does not pretend otherwise; it is the number at which
 today's rate — four failures across roughly forty boots — would be
-expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.**
+expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is refused and then until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.**
 
 **Bug-proofs**, each failing for its own reason: a converted site whose
 `wait_until` result is not `CHECK`ed (the expiry passes silently — this is
