@@ -320,6 +320,7 @@ is the observation.
 | file | change |
 | --- | --- |
 | `kernel/core/percpu.c`, `kernel/include/kernel/percpu.h` | `preempt_point()`; `preempt_enable` unchanged; a per-CPU debug counter of preemptions taken at the restore point, incremented in `preempt_point` and printed in the scheduler dump beside `switches` (`sched.c`, the `cpu %u:` line) |
+| `kernel/scheduler/sched.c` | the scheduler dump's `cpu %u:` line prints the restore-point counter beside `switches` (`sched_dump`, the watchdog's and the panic's dump) |
 | `kernel/arch/x86_64/cpu.c` | `arch_irq_restore` calls it after `sti` |
 | `kernel/arch/aarch64/irq.c` | the same after the DAIF write when I is cleared |
 | `kernel-services/network/netif.c` | the worker's priority, as measured (one constant, with the measurement in the comment) |
