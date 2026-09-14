@@ -4,6 +4,7 @@
 
 #include <kernel/errno.h>
 #include <kernel/handle.h>
+#include <kernel/object.h>
 #include <kernel/panic.h>
 #include <kernel/string.h>
 
@@ -29,7 +30,7 @@ void handle_table_destroy(struct handle_table *t)
     t->exiting = true;
     spin_unlock_irqrestore(&t->lock, s);
     for (int h = 0; h < HANDLE_TABLE_SIZE; h++)
-        handle_close(t, h);
+        (void)handle_close(t, h);   /* a flush's error has no reader here: counted by the page cache */
     KASSERT(t->count == 0);
 }
 
@@ -151,8 +152,18 @@ int handle_close(struct handle_table *t, int h)
     t->count--;
     spin_unlock_irqrestore(&t->lock, s);
 
+    /* The object's flush, before the put and outside the lock: a file
+     * writes its dirty pages back and reports a write-back failure once,
+     * and that report is close's result -- the handle is gone either way
+     * (POSIX: close may fail with EIO; the descriptor is closed). An
+     * exiting process's table (handle_table_destroy) and a dup2 over an
+     * open slot discard it: nobody is there to read it. */
+    int rc = 0;
+    const struct kobject_io_type *io = kobject_io_of(obj);
+    if (io != NULL && io->flush != NULL)
+        rc = io->flush(obj);
     kobject_put(obj); /* outside the lock: release may block */
-    return 0;
+    return rc;
 }
 
 unsigned handle_table_count(struct handle_table *t)

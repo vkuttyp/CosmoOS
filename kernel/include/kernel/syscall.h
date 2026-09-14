@@ -32,6 +32,29 @@ int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len);
 struct kobject;
 int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len);
 int64_t syscall_obj_write(struct kobject *obj, uint64_t ubuf, size_t len);
+
+/*
+ * The bounce every user copy goes through, sized to the request
+ * (docs/kernel/syscall/architecture.md, "The bounce"): the caller's stack chunk
+ * for a kilobyte and less, the heap above it up to IO_BOUNCE_MAX -- one
+ * object call for a big read, where a 64 KiB read used to be sixty-four
+ * -- and a heap allocation that fails degrades to the stack chunk, never
+ * to an error. Both personalities use it (native read/write, Linux
+ * read/write/pread/pwrite and the private file mapping's fill).
+ */
+#define IO_CHUNK      1024u              /* on the stack: a console line, a small read */
+#define IO_BOUNCE_MAX (64u * 1024u)      /* from the heap: the ceiling of one object call */
+struct io_bounce {
+    char *buf;
+    size_t cap;
+    bool heap;
+};
+void syscall_bounce_get(struct io_bounce *b, char *stack, size_t len);
+void syscall_bounce_put(struct io_bounce *b);
+/* Diagnostics: bounces taken from the heap, and heap refusals that fell
+ * back to the stack chunk. */
+uint64_t syscall_bounce_heap_count(void);
+uint64_t syscall_bounce_fallback_count(void);
 /* fstat on any I/O object; 0 or -errno with *st filled. */
 struct cosmo_stat;
 int syscall_handle_stat(int h, struct cosmo_stat *st);

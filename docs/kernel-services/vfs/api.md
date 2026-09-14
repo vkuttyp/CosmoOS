@@ -208,11 +208,21 @@ next unread entry. Returns the bytes packed, 0 at the end, `-ENOTDIR`,
 `-EINVAL` if `len` is below `sizeof(struct cosmo_dirent) + 2` or the
 very next entry does not fit in `len`.
 
-**`int file_sync(struct file *f)`** Writes back the file's dirty pages
-and calls `ops->sync`.
+**`int file_sync(struct file *f)`** Under `f->lock` then `vn->lock`:
+writes back the file's dirty pages, calls `ops->sync`, then reports a
+write-back failure recorded since this file last heard -- this
+attempt's own or a neighbour's -- once, advancing `f->wb_seq_seen`
+(`design.md`, "Write-back errors").
+
+**`int file_flush(struct file *f)`** The file type's `flush`, run by
+`handle_close` before it drops the handle's reference: the write-back
+and the once-per-file report, without `ops->sync`. Its result is
+`close`'s; the handle closes regardless.
 
 **`file_get` / `file_put`** The last put syncs dirty pages of a regular
-file and drops the vnode reference.
+file (a failure is recorded like any other) and drops the vnode
+reference; the vnode's release makes one last attempt for a named
+file and counts what it then drops.
 
 **`struct file *file_from_kobject(struct kobject *obj)`** The file behind
 a handle's kobject, or NULL for another object kind (the console).
@@ -257,15 +267,24 @@ vnode lock; the functions take `pc.lock` beneath it.
   nothing was read, the error.
 - **`int64_t pagecache_write(vn, off, buf, len)`** Dirties pages and
   grows `vn->size`; `-EFBIG` on offset overflow.
-- **`int pagecache_sync(vn)`** `ops->writepage` for every dirty page, in
-  bucket order; stops at the first error.
+- **`int pagecache_sync(vn)`** `ops->writepage`/`writepages` for every
+  dirty page, in ascending order; stops at the first error, leaves the
+  failed pages dirty, and records the error (`wb_err`, `wb_seq` under
+  `pc->lock`).
+- **`bool pagecache_error_since(pc, seen, &err, &now)`** / **`uint32_t
+  pagecache_wb_seq(pc)`** Under `pc->lock`: whether a failure was
+  recorded after sequence `seen`, its errno, the current sequence.
 - **`void pagecache_truncate(vn, size)`** Drops pages entirely past
   `size`, zeroes the tail of the last page. Does not change `vn->size`.
-- **`void pagecache_drop(vn)`** Frees every page; dirty data is lost.
+- **`unsigned pagecache_drop(vn, bool lost)`** Frees every page; returns
+  how many were dirty, counted in `dropped_dirty` when `lost` (a named
+  file's), not when the file was unlinked.
 - **`int pagecache_get_page(vn, index, buf)` / `pagecache_put_page(vn, index, buf)`**
   Whole-page access for filesystems that keep structures in file data.
 - **`void pagecache_get_stats(struct pagecache_stats *out)`** `hits`,
-  `misses`, `writebacks`, `pages` (global).
+  `misses`, `writebacks`, `pages`, `reclaimed`, `budget_refusals`,
+  `wb_errors` (failures recorded), `dropped_dirty` (a named file's dirty
+  pages dropped at its vnode's release: data lost) (global).
 
 ## Storage pool (`kernel/include/kernel/storage.h`)
 

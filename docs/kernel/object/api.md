@@ -31,8 +31,8 @@ vcpu) is a plain object and every I/O path answers `-EBADF` for it
 instead of reading operations past the end of the descriptor. Subtypes
 embed it as `base` and add operations (`struct kobject_io_type` adds
 `read`, `write`, since Phase 9 an optional `stat`, since milestone 8 the
-optional `ready` and `set_nonblock`, and since milestone 9 the optional
-`poll_wq`). Contract for `read(obj,
+optional `ready` and `set_nonblock`, since milestone 9 the optional
+`poll_wq`, and since the file-path unit the optional `flush`). Contract for `read(obj,
 buf, len)` / `write(obj, buf, len)`: return the bytes transferred,
 `0 <= count <= len`, or a negative errno; a NULL operation means the
 object does not support that direction (`-EBADF` from the system
@@ -51,7 +51,14 @@ is no open-file-description layer between a handle and its object).
 waiter for `events` sleeps on, woken whenever `ready` may have changed
 for those bits; NULL means readiness never changes (a file). The
 asynchronous I/O ring (`docs/kernel/io/`) is built on `ready` and
-`poll_wq` alone.
+`poll_wq` alone. `int flush(obj)` is called by `handle_close` on the
+object it is about to put, before the put, on the closer's thread:
+buffered state goes out and a pending error comes back; its result is
+`close`'s result and the handle is closed regardless. A file writes its
+dirty pages back and reports a write-back failure once
+(`docs/kernel-services/vfs/design.md`, "Write-back errors"); NULL means
+nothing to flush and 0. `handle_table_destroy` and a `dup2` over an open
+slot discard it.
 I/O kobjects today: the console (`read`/`write`/`stat`/`ready`: readable
 with a complete tty line, always writable), `struct file`
 (`kernel-services/vfs/`; no `ready`: always ready), `struct socket`

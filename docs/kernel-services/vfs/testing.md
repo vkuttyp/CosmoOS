@@ -5,7 +5,7 @@
 | Layer | Mechanism | Command |
 |---|---|---|
 | Host | `test_cosmofs` (on-disk layout sizes, inode/imap index arithmetic, extent mapping, the version-3 snapshot structures and the snapshot inode-tag arithmetic), `test_lz4` (round trips including overlapping matches and continued lengths, and malformed streams that must be refused rather than copied past a buffer), `test_chacha20` (RFC 8439's own vectors for ChaCha20 and Poly1305, plus the properties the filesystem depends on: the tag is over ciphertext, a forgery never becomes plaintext, and the same key and nonce give the same bytes) and the CRC32C vectors in `test_crypto` | `make host-test` |
-| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since audit milestone 7 `cosmofs-holes`, `cosmofs-csum`, `cosmofs-fsync`, `cosmofs-reserve`, `cosmofs-fallback`, `cosmofs-writeback`, `cosmofs-badmap` on RAM devices and `blk-queue` for the block layer's pending queue and bio flags; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since the storage milestone `cosmofs-snapshot` (history kept while the live tree moves, writes refused, exact reclaim when a snapshot is deleted, a deletion refused with `-EBUSY` while a file inside the snapshot is open, and `..` staying inside history), `cosmofs-pool2` (a pool of two members: allocation across both, per-member free counts, assembly by label on remount, a snapshot spanning both) , `cosmofs-v3` (the previous on-disk format still mounts and is written), `cosmofs-badmembers` (a member table that cannot be true is refused at mount), `cosmofs-mirror-stale` (two members of two copies each, with the stale device being the one labelled first: the mount passes over it, comes up with three devices and one degraded copy, and reads correctly), `cosmofs-crypt` (an encrypted filesystem: the plaintext is not on the disk, a wrong key is refused, a tampered block is refused rather than returned, a scrub with no key reads and repairs everything, rotation rewrites one block, and a keyless remount refuses to walk a path), `cosmofs-compress` (a compressible file stored in a fraction of its blocks and an incompressible one stored as it is, a page rewritten inside a record, a partial page that has to read the record first, truncation into the middle of a record and re-extension reading zeros) and `cosmofs-mirror` (two copies of a member: rot one copy of a data block and the read still answers and repairs it, scrub finds rot on a copy no read would have touched, both copies gone is `-EIO` for that file alone, and a device that missed a commit is left out of the mirror rather than serving old blocks), `cosmofs-pool2` (a pool of two members: allocation across both, per-member free counts, assembly by label on remount, a snapshot spanning both) and `cosmofs-v3` (the previous on-disk format still mounts and is written) and `cosmofs-snapshot-remount` (a snapshot survives an unmount); since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`) | `make test` |
+| Target | Seven self-tests: `crc32c`, `pagecache`, `vfs-ramfs`, `pool`, `cosmofs-format`, `cosmofs-ops`, `cosmofs-crash`; since audit milestone 7 `cosmofs-holes`, `cosmofs-csum`, `cosmofs-fsync`, `cosmofs-reserve`, `cosmofs-fallback`, `cosmofs-writeback`, `cosmofs-badmap` on RAM devices and `blk-queue` for the block layer's pending queue and bio flags; since the verification milestone `cosmofs-replay` (crash consistency over every prefix of the write stream) and `fault-blk` (device errors) on a RAM block device; since the storage milestone `cosmofs-snapshot` (history kept while the live tree moves, writes refused, exact reclaim when a snapshot is deleted, a deletion refused with `-EBUSY` while a file inside the snapshot is open, and `..` staying inside history), `cosmofs-pool2` (a pool of two members: allocation across both, per-member free counts, assembly by label on remount, a snapshot spanning both) , `cosmofs-v3` (the previous on-disk format still mounts and is written), `cosmofs-badmembers` (a member table that cannot be true is refused at mount), `cosmofs-mirror-stale` (two members of two copies each, with the stale device being the one labelled first: the mount passes over it, comes up with three devices and one degraded copy, and reads correctly), `cosmofs-crypt` (an encrypted filesystem: the plaintext is not on the disk, a wrong key is refused, a tampered block is refused rather than returned, a scrub with no key reads and repairs everything, rotation rewrites one block, and a keyless remount refuses to walk a path), `cosmofs-compress` (a compressible file stored in a fraction of its blocks and an incompressible one stored as it is, a page rewritten inside a record, a partial page that has to read the record first, truncation into the middle of a record and re-extension reading zeros) and `cosmofs-mirror` (two copies of a member: rot one copy of a data block and the read still answers and repairs it, scrub finds rot on a copy no read would have touched, both copies gone is `-EIO` for that file alone, and a device that missed a commit is left out of the mirror rather than serving old blocks), `cosmofs-pool2` (a pool of two members: allocation across both, per-member free counts, assembly by label on remount, a snapshot spanning both) and `cosmofs-v3` (the previous on-disk format still mounts and is written) and `cosmofs-snapshot-remount` (a snapshot survives an unmount); since audit milestone 6 `cache-limits` and `cache-budget-race` (the ramfs page budget, also under two concurrent writers, and the global page-cache limit with reclaim, `docs/kernel/security/testing.md`); since the file-path unit `read-bounce`, `wb-error-fsync`, `wb-error-once`, `wb-error-close`, `wb-error-lost`, `read-bench`, `write-bench` | `make test` |
 | Host fuzz | `fuzz_cosmofs`: mount, walk and read mutated images under ASan/UBSan (`docs/verification/`) | `make fuzz` |
 | User mode | `init --selftest` runs `fs_selftest()` against ramfs and then mounts the cosmofs the kernel tests left on the scratch disk (`USERTEST: PASS` required) | `make test` |
 | Shell | `/etc/rc.test` mounts the cosmofs the `nvme` self-test leaves on `nvme0n1`, takes a snapshot with `mkdir .snapshots/shell`, reads the old contents back through it, checks a write is refused, and deletes it with `rmdir` (`SNAPTEST: PASS` required on both machines; `SNAPTEST: skipped` is a forbidden marker) | `make test` |
@@ -177,6 +177,43 @@ own instance's id); `release` runs exactly once, on the last reference and
 not on an earlier `file_put`; a refused `open` leaves no file and runs no
 `release`. Proved by removing the `dev_open` gate — the refused open's file
 then runs `release` and the count is wrong.
+
+### The file path (`docs/audit/next-subsystem-file-path.md`)
+
+**`read-bounce`**: the syscall bounce's sizing (the stack chunk for 512
+bytes and 1 KiB, the heap for 64 KiB, the 64 KiB ceiling for 100 000);
+with `FI_KMALLOC` refusing the allocation, the stack chunk and the
+fallback counter, never an error; a 200 KiB ramfs file of a known
+pattern answers one `file_read` of 64 KiB with 64 KiB of the right bytes
+and 3 KiB from its end with 3 KiB; a pipe holding 300 bytes answers a
+64 KiB request with 300. The syscall's wiring (a user address) is
+`fs_selftest`'s, below.
+
+**`wb-error-fsync`**, **`wb-error-once`**, **`wb-error-close`**,
+**`wb-error-lost`**: cosmofs on a RAM block device, which completes a
+bio in its submitter's context, so `FI_BLK_COMPLETE` scoped to the test
+thread refuses exactly the next `budget` write-backs the test issues
+(`faultinject_stats().hits` equals the budget after every phase, so a
+run in which nothing was refused fails on that count, not on a 0 that
+meant "nothing was tried"). fsync: three dirty pages, one refusal,
+`-EIO`, the pages still dirty, `wb_errors` +1, the next `fsync` 0, a
+fresh mount reads the data. once: files A and B on one vnode, A's
+attempt refused (`-EIO`, A told), B's attempt writes and B is told once
+(`-EIO` then 0), A's second is 0, C opened afterwards is 0. close: a file
+in a handle table, one refusal, `handle_close` returns `-EIO` and the
+slot is `-EBADF` after it; the release's retry writes the page, so
+`dropped_dirty` is unchanged and a fresh mount reads it; a clean close
+returns 0. lost: three refusals (the flush, the file release's retry,
+the vnode release's last attempt): `-EIO`, `dropped_dirty` +1,
+`wb_errors` +3, the `lost` line logged once, and the mount still writes
+and syncs a new file.
+
+**`read-bench`**, **`write-bench`**: print, assert nothing. A 1 MiB file
+read and written through `file_read`/`file_write` with kernel buffers of
+1, 4 and 64 KiB -- the object path per request size -- on ramfs and, for
+reads, on cosmofs over the RAM block device cold (after a remount,
+through the device) and warm (the page cache). The syscall side is
+`fs_selftest`'s `USERBENCH` lines.
 
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 

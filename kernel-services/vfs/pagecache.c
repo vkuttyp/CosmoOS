@@ -380,9 +380,35 @@ int pagecache_sync(struct vnode *vn)
                 idx += done - 1;
             }
         }
+        if (rc != 0) {
+            /* Recorded where it is seen, under the lock every write-back
+             * passes through; the failed pages stay dirty for the next
+             * attempt. Each open file is told once (file_sync, file_flush). */
+            pc->wb_err = rc;
+            pc->wb_seq++;
+            stat_add(&g_stats.wb_errors, 1);
+        }
     }
     mutex_unlock(&pc->lock);
     return rc;
+}
+
+bool pagecache_error_since(struct pagecache *pc, uint32_t seen, int *err, uint32_t *now)
+{
+    mutex_lock(&pc->lock);
+    *err = pc->wb_err;
+    *now = pc->wb_seq;
+    bool newer = pc->wb_seq != seen;
+    mutex_unlock(&pc->lock);
+    return newer;
+}
+
+uint32_t pagecache_wb_seq(struct pagecache *pc)
+{
+    mutex_lock(&pc->lock);
+    uint32_t seq = pc->wb_seq;
+    mutex_unlock(&pc->lock);
+    return seq;
 }
 
 void pagecache_truncate(struct vnode *vn, uint64_t size)
@@ -407,9 +433,10 @@ void pagecache_truncate(struct vnode *vn, uint64_t size)
     mutex_unlock(&pc->lock);
 }
 
-void pagecache_drop(struct vnode *vn)
+unsigned pagecache_drop(struct vnode *vn, bool count_lost)
 {
     struct pagecache *pc = &vn->pc;
+    unsigned lost = 0;
     mutex_lock(&pc->lock);
     for (unsigned b = 0; b < PC_HASH; b++) {
         struct pc_entry *e = pc->buckets[b];
@@ -420,6 +447,7 @@ void pagecache_drop(struct vnode *vn)
             if (e->dirty) {
                 pc->nr_dirty--;
                 __atomic_fetch_sub(&vn->mnt->cache_dirty, 1u, __ATOMIC_RELAXED);
+                lost++;
             }
             pc->nr_pages--;
             __atomic_fetch_sub(&vn->mnt->cache_pages, 1u, __ATOMIC_RELAXED);
@@ -429,7 +457,10 @@ void pagecache_drop(struct vnode *vn)
             e = next;
         }
     }
+    if (lost && count_lost)
+        stat_add(&g_stats.dropped_dirty, (int64_t)lost);
     mutex_unlock(&pc->lock);
+    return count_lost ? lost : 0;
 }
 
 int pagecache_get_page(struct vnode *vn, uint64_t index, void *buf)

@@ -118,6 +118,26 @@ through `file_from_kobject`, results are copied out. `struct file` is a
 knowledge of files. `mount`/`umount` check `cred.uid == 0`. See
 `docs/kernel-services/vfs/api.md`.
 
+## The bounce
+
+Every user copy in `read` and `write` goes through a kernel buffer,
+because the I/O object interface takes kernel memory. Its size was a
+console line, `IO_CHUNK` = 1 KiB, so a `read` returned at most a
+kilobyte whatever was asked (the audit's 4.2 MEDIUM; the unit
+`docs/audit/next-subsystem-file-path.md`). Now `syscall_bounce_get`
+sizes it to the request: the caller's stack chunk for a kilobyte and
+less, the heap above it up to `IO_BOUNCE_MAX` = 64 KiB (the page path of
+`kmalloc`), and a heap allocation that fails degrades to the stack chunk
+-- a read under memory pressure is slow, never `-ENOMEM`. One object
+call per `read`: what the object returns is what the read returns, so a
+pipe or a tty keeps its semantics and a file fills up to 64 KiB. `write`
+loops the bounce. Both personalities use it (`native.c`, the Linux
+`read`/`write`/`pread`/`pwrite`, the private file mapping's fill), and
+the socket path keeps its own. Measured (`read-bench`, `USERBENCH`): on
+x86-64 under TCG the object path reads a ramfs file at 44 MiB/s with
+1 KiB requests and 317 with 64 KiB; the whole syscall from user mode at
+38 and 110.
+
 ## Sockets (Phase 8) and processes (Phase 9)
 
 Calls 23–31 translate to `kernel-services/network/socket.c` (`ksock_*`,

@@ -81,6 +81,59 @@ static void fs_selftest(void)
     CHECK(cosmo_open("/tmp", COSMO_O_WRONLY, 0) == -COSMO_EISDIR);
     CHECK(cosmo_open((const char *)0x10, COSMO_O_RDONLY, 0) == -COSMO_EFAULT);
 
+    /* The syscall bounce (docs/audit/next-subsystem-file-path.md): one read
+     * fills a 64 KiB buffer from a 200 KiB file; a pipe with 300 bytes still
+     * answers a 64 KiB request with 300. */
+    {
+        enum { BIG = 200 * 1024, REQ = 64 * 1024 };
+        unsigned char *big = malloc(REQ);
+        CHECK(big != NULL);
+        long bh = cosmo_open("/tmp/big.bin", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
+        CHECK(bh >= 3);
+        for (long off = 0; off < BIG; off += REQ) {
+            long n = BIG - off < REQ ? BIG - off : REQ;
+            for (long i = 0; i < n; i++)
+                big[i] = (unsigned char)(((off + i) * 7) + ((off + i) >> 8));
+            CHECK(cosmo_write((int)bh, big, (size_t)n) == n);
+        }
+        CHECK(cosmo_lseek((int)bh, 0, COSMO_SEEK_SET) == 0);
+        memset(big, 0, REQ);
+        CHECK(cosmo_read((int)bh, big, REQ) == REQ);
+        int ok = 1;
+        for (long i = 0; i < REQ && ok; i++)
+            ok = big[i] == (unsigned char)((i * 7) + (i >> 8));
+        CHECK(ok);
+        CHECK(cosmo_lseek((int)bh, BIG - 3072, COSMO_SEEK_SET) == BIG - 3072);
+        CHECK(cosmo_read((int)bh, big, REQ) == 3072);
+        int ph[2];
+        CHECK(cosmo_pipe(ph) == 0);
+        CHECK(cosmo_write(ph[1], big, 300) == 300);
+        CHECK(cosmo_read(ph[0], big, REQ) == 300);
+        CHECK(cosmo_close(ph[0]) == 0 && cosmo_close(ph[1]) == 0);
+        /* The user-side bench: the whole syscall per request size. */
+        static const size_t reqs[] = { 1024, 4096, REQ };
+        for (unsigned r = 0; r < 3; r++) {
+            CHECK(cosmo_lseek((int)bh, 0, COSMO_SEEK_SET) == 0);
+            uint64_t t0 = cosmo_clock_ns();
+            unsigned calls = 0;
+            long total = 0;
+            for (;;) {
+                long n = cosmo_read((int)bh, big, reqs[r]);
+                if (n <= 0)
+                    break;
+                total += n;
+                calls++;
+            }
+            uint64_t dt = cosmo_clock_ns() - t0;
+            fprintf(stderr, "USERBENCH: read %ld KiB at %zu KiB requests: %u calls, %llu us, %llu MiB/s\n", total / 1024,
+                    reqs[r] / 1024, calls, (unsigned long long)(dt / 1000),
+                    (unsigned long long)(dt ? (uint64_t)total * 1000000000ull / dt / (1024 * 1024) : 0));
+        }
+        CHECK(cosmo_close((int)bh) == 0);
+        CHECK(cosmo_unlink("/tmp/big.bin") == 0);
+        free(big);
+    }
+
     CHECK(cosmo_mkdir("/tmp/d", 0755) == 0);
     CHECK(cosmo_mkdir("/tmp/d", 0755) == -COSMO_EEXIST);
     CHECK(cosmo_rename("/tmp/usertest.txt", "/tmp/d/moved.txt") == 0);

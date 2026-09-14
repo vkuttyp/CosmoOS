@@ -448,6 +448,59 @@ leaves the in-memory state consistent (allocation is the last
 fallible step of every mutation, done before pointers are rewritten)
 and the on-disk state untouched until commit.
 
+## Write-back errors
+
+The unit `docs/audit/next-subsystem-file-path.md`. Dirty pages are
+written back at `fsync`, at `sync`, at a file's `close`, at a file's
+last reference and at a vnode's last reference. The rule for a failure,
+in three parts:
+
+1. **The page cache remembers.** `pagecache_sync` stops at the first
+   `writepage`/`writepages` error, leaves the failed pages dirty for the
+   next attempt, and records the error where it is seen: `pc->wb_err`
+   and `pc->wb_seq` (incremented per recording) under `pc->lock`, the one
+   lock every write-back passes through. No caller records, and no
+   caller's locking matters: `vnode_release` holds nothing, cosmofs's
+   `sync` (which `vfs_sync` reaches through `mnt->fs->sync`) holds
+   `vn->lock` per vnode, `file_sync` and `file_flush` hold `f->lock`
+   then `vn->lock`. `pagecache_error_since(pc, seen, &err, &now)` reads
+   the pair under the same lock.
+2. **Each open file hears once.** `file.wb_seq_seen` is set at open to
+   the current sequence (a failure before the open is not this file's).
+   `file_sync` (`fsync`) and `file_flush` (`close`) run the write-back
+   and then consult the record: a failure recorded after `wb_seq_seen`
+   -- this attempt's own or a neighbour's since -- is returned once, and
+   `wb_seq_seen` advances to the current sequence as it is reported, so
+   the next successful call returns 0. Linux's `errseq_t` contract
+   without the wrapping arithmetic.
+3. **`close` asks before it lets go.** `struct kobject_io_type` has an
+   optional `flush`; `handle_close` calls it on the object it is about to
+   put, before the put and outside the table lock, and returns its result
+   -- the handle is closed regardless (POSIX allows `close` to fail with
+   `EIO`; the descriptor is gone). The file's `flush` is `file_flush`.
+   An exiting process's `handle_table_destroy` and a `dup2` over an open
+   slot discard the result: nobody is there to read it. `file_release`
+   keeps its last-reference write-back for a file that reached zero some
+   other way, and `pagecache_sync` records its failure like any other.
+
+**What the vnode's release does.** A named file's (`nlink > 0`) dirty
+pages get one last attempt; what is then dropped is data lost with no
+file left to tell, counted in `pagecache_stats.dropped_dirty` and said
+once per event (`vfs: N dirty page(s) of inode I on FS lost: write-back
+failed (E)`). An unlinked file's pages have no reader left: they are
+neither written back (the audit's 8.2 LOW, which the release used to
+do) nor counted. The `cosmofs-reserve` self-test is the case the rule
+was written against: it fills a disk on purpose, and its last file's
+sixteen pages -- accepted into the page cache before the bitmap ran out
+-- fail at the release with `-ENOSPC`. That file is named, so the run
+says so (`16 dirty page(s) of inode 16 on cosmofs lost: write-back
+failed (-28)`): the one loss the suite makes, silent before this unit.
+The test itself learns the `-ENOSPC` from its `fsync`.
+
+Nothing in cosmofs's transaction model moves: a data-page refusal is a
+returned error, not a poisoned mount (`cfs_fail` is reached only from
+rename's recovery and the commit's post-superblock failure).
+
 ## Performance
 
 Not a goal in this phase: linear directories, one lock per filesystem,

@@ -469,3 +469,24 @@ Both were confirmed against the bug. With `mountns_sees` returning true
 for every mount, the self-test fails where it mounts on a directory the
 other namespace still covers, and the user-mode test fails where the
 child lists a directory the parent mounted over after the split.
+
+## A write-back failure is recorded once and reported once per open file
+
+`pagecache_sync` records every failure under the page cache's own lock,
+the one every write-back passes through, and leaves the failed pages
+dirty; each open file is told of a failure recorded since it last
+heard exactly once, by `fsync` or by `close`, and never of one recorded
+before it was opened; what a vnode's release drops of a named file is
+counted. (`design.md`, "Write-back errors"; the unit
+`docs/audit/next-subsystem-file-path.md`.)
+
+Check: `wb-error-fsync` (the failure returned, the pages kept, the retry
+landing, `wb_errors` +1), `wb-error-once` (two files hear once each, a
+later open never), `wb-error-close` (`close` says `-EIO` and closes; the
+release's retry keeps the data), `wb-error-lost` (three refusals: one
+page counted lost, the mount still writes). Confirmed against the bugs:
+a record swallowed in `pagecache_sync` leaves B's first `fsync` at 0; a
+file whose own failure does not advance `wb_seq_seen` reports it twice;
+an opener starting at sequence 0 hears an error older than itself; a
+`handle_close` without the flush returns 0; a drop without the count
+leaves `dropped_dirty` unchanged.

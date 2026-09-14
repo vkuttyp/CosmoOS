@@ -387,7 +387,26 @@ void pagecache_truncate(struct vnode *vn, uint64_t size)
     (void)size;
 }
 
-void pagecache_drop(struct vnode *vn)
+unsigned pagecache_drop(struct vnode *vn, bool lost)
 {
     (void)vn;
+    (void)lost;
+    return 0;
+}
+
+/* The write-back error record (kernel-services/vfs/pagecache.c): the
+ * shim's cache never fails a write-back, so nothing is ever recorded. */
+bool pagecache_error_since(struct pagecache *pc, uint32_t seen, int *err, uint32_t *now)
+{
+    (void)pc;
+    (void)seen;
+    *err = 0;
+    *now = 0;
+    return false;
+}
+
+uint32_t pagecache_wb_seq(struct pagecache *pc)
+{
+    (void)pc;
+    return 0;
 }

@@ -2,7 +2,15 @@
  * vfstest.c - Self-tests for CRC32C, the page cache and the VFS on ramfs.
  */
 
+#include <kernel/blk.h>
+#include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
+#include <kernel/faultinject.h>
+#include <kernel/object.h>
+#include <kernel/pagecache.h>
+#include <kernel/pipe.h>
+#include <kernel/ramblk.h>
+#include <kernel/syscall.h>
 #include <kernel/errno.h>
 #include <kernel/handle.h>
 #include <kernel/kmalloc.h>
@@ -856,5 +864,448 @@ bool selftest_vfs_chrdev_open(const char **reason)
     g_chropen_refuse = 0;
 
     kinfo("selftest: vfs-chrdev-open: per-open instances distinct, release once on last close, refusal clean");
+    return true;
+}
+
+
+/* --- the syscall bounce and a read that fills its buffer -------------------
+ *
+ * docs/audit/next-subsystem-file-path.md. The bounce every user copy goes
+ * through is sized to the request (the stack for a kilobyte and less, the
+ * heap above, up to 64 KiB) and degrades to the stack chunk when the heap
+ * refuses; one object call returns what it returns. The syscall itself
+ * needs a user address, which the kernel's own thread has none of: the
+ * helper and the object side are proved here, the syscall's wiring by
+ * `init --selftest` (fs_selftest). */
+
+#define RB_FILE_SIZE (200u * 1024u)
+static uint8_t rb_pattern(size_t i) { return (uint8_t)((i * 7u) + (i >> 8)); }
+
+bool selftest_read_bounce(const char **reason)
+{
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+
+    /* The helper's sizing. */
+    syscall_bounce_get(&b, stack, 512);
+    CHECK(!b.heap && b.cap == IO_CHUNK && b.buf == stack);
+    syscall_bounce_put(&b);
+    syscall_bounce_get(&b, stack, IO_CHUNK);
+    CHECK(!b.heap && b.cap == IO_CHUNK);
+    syscall_bounce_put(&b);
+    syscall_bounce_get(&b, stack, 65536);
+    CHECK(b.heap && b.cap == 65536 && b.buf != stack);
+    syscall_bounce_put(&b);
+    syscall_bounce_get(&b, stack, 100000);
+    CHECK(b.heap && b.cap == IO_BOUNCE_MAX);
+    syscall_bounce_put(&b);
+
+#if CONFIG_FAULTINJECT
+    /* A heap that refuses: the stack chunk, never an error. */
+    uint64_t fb0 = syscall_bounce_fallback_count();
+    faultinject_set(FI_KMALLOC, 1, 1, thread_current());
+    syscall_bounce_get(&b, stack, 65536);
+    faultinject_clear(FI_KMALLOC);
+    struct fi_stats fst;
+    faultinject_stats(FI_KMALLOC, &fst);
+    CHECK(fst.hits == 1);
+    CHECK(!b.heap && b.cap == IO_CHUNK && b.buf == stack);
+    CHECK(syscall_bounce_fallback_count() == fb0 + 1);
+    syscall_bounce_put(&b);
+#else
+    kinfo("selftest: read-bounce: the fallback needs fault injection, compiled out of this build");
+#endif
+
+    /* The object side: a 200 KiB ramfs file answers one 64 KiB call with
+     * 64 KiB of the right bytes, and 3 KiB from its end with 3 KiB. */
+    uint8_t *big = kmalloc(65536, 0);
+    CHECK(big != NULL);
+    struct file *f;
+    CHECK(vfs_open(NULL, "/tmp/bounce.bin", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    for (size_t off = 0; off < RB_FILE_SIZE; off += 65536) {
+        size_t n = RB_FILE_SIZE - off < 65536 ? RB_FILE_SIZE - off : 65536;
+        for (size_t i = 0; i < n; i++)
+            big[i] = rb_pattern(off + i);
+        CHECK(file_write(f, big, n) == (int64_t)n);
+    }
+    file_put(f);
+    CHECK(vfs_open(NULL, "/tmp/bounce.bin", COSMO_O_RDONLY, 0, &f) == 0);
+    memset(big, 0, 65536);
+    CHECK(file_read(f, big, 65536) == 65536);
+    bool ok = true;
+    for (size_t i = 0; i < 65536 && ok; i++)
+        ok = big[i] == rb_pattern(i);
+    CHECK(ok);
+    CHECK(file_seek(f, (int64_t)(RB_FILE_SIZE - 3072), COSMO_SEEK_SET) == (int64_t)(RB_FILE_SIZE - 3072));
+    CHECK(file_read(f, big, 65536) == 3072);
+    CHECK(big[0] == rb_pattern(RB_FILE_SIZE - 3072) && big[3071] == rb_pattern(RB_FILE_SIZE - 1));
+    file_put(f);
+    CHECK(vfs_unlink(NULL, "/tmp/bounce.bin") == 0);
+
+    /* A pipe holding 300 bytes answers a 64 KiB request with 300: the
+     * ceiling rose, the semantics did not. */
+    struct kobject *r, *w;
+    CHECK(pipe_create(&r, &w) == 0);
+    const struct kobject_io_type *wio = kobject_io_of(w), *rio = kobject_io_of(r);
+    CHECK(wio && rio);
+    CHECK(wio->write(w, big, 300) == 300);
+    CHECK(rio->read(r, big, 65536) == 300);
+    kobject_put(w);
+    kobject_put(r);
+    kfree(big);
+    return true;
+}
+
+/* --- write-back errors: recorded, reported once, counted when lost ---------
+ *
+ * cosmofs on a RAM block device, which completes every bio in its
+ * submitter's context, so FI_BLK_COMPLETE scoped to this thread refuses
+ * exactly the next `budget` write-backs this thread issues. */
+
+static int wb_setup(struct blkdev **out)
+{
+    /* A test that failed mid-way left its mount: take it down first, so
+     * one failure does not fail every test after it at setup. */
+    (void)vfs_umount2("/mnt/wb", VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(256);
+    if (bd == NULL)
+        return -ENOMEM;
+    int rc = cosmofs_format(bd);
+    if (rc == 0) {
+        rc = vfs_mkdir(NULL, "/mnt/wb", 0755);
+        if (rc == -EEXIST)
+            rc = 0;
+    }
+    if (rc == 0)
+        rc = vfs_mount("/mnt/wb", "cosmofs", bd, 0);
+    if (rc) {
+        ramblk_destroy(bd);
+        return rc;
+    }
+    *out = bd;
+    return 0;
+}
+
+static void wb_teardown(struct blkdev *bd)
+{
+    vfs_umount("/mnt/wb");
+    vfs_rmdir(NULL, "/mnt/wb");
+    ramblk_destroy(bd);
+}
+
+#if CONFIG_FAULTINJECT
+
+/* A page of a known pattern, `k` distinguishing files. */
+static void wb_fill(uint8_t *page, unsigned k)
+{
+    for (size_t i = 0; i < PAGE_SIZE; i++)
+        page[i] = (uint8_t)(i * 3u + k);
+}
+
+static bool wb_reads_back(const char *path, const uint8_t *page)
+{
+    struct file *f;
+    if (vfs_open(NULL, path, COSMO_O_RDONLY, 0, &f) != 0)
+        return false;
+    uint8_t *buf = kmalloc(PAGE_SIZE, 0);
+    bool ok = buf != NULL && file_read(f, buf, PAGE_SIZE) == (int64_t)PAGE_SIZE && memcmp(buf, page, PAGE_SIZE) == 0;
+    kfree(buf);
+    file_put(f);
+    return ok;
+}
+
+bool selftest_wb_error_fsync(const char **reason)
+{
+    struct blkdev *bd;
+    CHECK(wb_setup(&bd) == 0);
+    uint8_t *data = kmalloc(3 * PAGE_SIZE, 0);
+    CHECK(data != NULL);
+    for (unsigned k = 0; k < 3; k++)
+        wb_fill(data + k * PAGE_SIZE, k);
+    struct pagecache_stats p0, p1;
+    pagecache_get_stats(&p0);
+
+    struct file *f;
+    CHECK(vfs_open(NULL, "/mnt/wb/f", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    CHECK(file_write(f, data, 3 * PAGE_SIZE) == 3 * (int64_t)PAGE_SIZE);
+    CHECK(f->vn->pc.nr_dirty == 3);
+
+    /* One refused write-back: fsync says so, and throws nothing away. */
+    faultinject_set(FI_BLK_COMPLETE, 1, 1, thread_current());
+    int s1 = file_sync(f);
+    faultinject_clear(FI_BLK_COMPLETE);
+    struct fi_stats fst;
+    faultinject_stats(FI_BLK_COMPLETE, &fst);
+    CHECK(fst.hits == 1);
+    CHECK(s1 == -EIO);
+    CHECK(f->vn->pc.nr_dirty > 0);
+    pagecache_get_stats(&p1);
+    CHECK(p1.wb_errors == p0.wb_errors + 1);
+
+    /* The next attempt writes, and the file has already been told. */
+    CHECK(file_sync(f) == 0);
+    CHECK(f->vn->pc.nr_dirty == 0);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+
+    /* On disk: a fresh mount reads it back. */
+    CHECK(vfs_umount("/mnt/wb") == 0);
+    CHECK(vfs_mount("/mnt/wb", "cosmofs", bd, 0) == 0);
+    CHECK(wb_reads_back("/mnt/wb/f", data));
+    kfree(data);
+    wb_teardown(bd);
+    return true;
+}
+
+bool selftest_wb_error_once(const char **reason)
+{
+    struct blkdev *bd;
+    CHECK(wb_setup(&bd) == 0);
+    uint8_t *page = kmalloc(PAGE_SIZE, 0);
+    CHECK(page != NULL);
+    wb_fill(page, 9);
+
+    struct file *a, *b, *c;
+    CHECK(vfs_open(NULL, "/mnt/wb/o", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &a) == 0);
+    CHECK(vfs_open(NULL, "/mnt/wb/o", COSMO_O_RDWR, 0, &b) == 0);
+    CHECK(a->vn == b->vn);
+    CHECK(file_write(a, page, PAGE_SIZE) == (int64_t)PAGE_SIZE);
+
+    /* A's attempt fails; A hears its own failure once. */
+    faultinject_set(FI_BLK_COMPLETE, 1, 1, thread_current());
+    int sa = file_sync(a);
+    faultinject_clear(FI_BLK_COMPLETE);
+    struct fi_stats fst;
+    faultinject_stats(FI_BLK_COMPLETE, &fst);
+    CHECK(fst.hits == 1 && sa == -EIO);
+
+    /* B's attempt writes the page, and B is told of the failure it was
+     * open for -- once. A was told already. C, opened later, never. */
+    CHECK(file_sync(b) == -EIO);
+    CHECK(b->vn->pc.nr_dirty == 0);
+    CHECK(file_sync(b) == 0);
+    CHECK(file_sync(a) == 0);
+    CHECK(vfs_open(NULL, "/mnt/wb/o", COSMO_O_RDONLY, 0, &c) == 0);
+    CHECK(file_sync(c) == 0);
+    file_put(c);
+    file_put(b);
+    file_put(a);
+    CHECK(wb_reads_back("/mnt/wb/o", page));
+    kfree(page);
+    wb_teardown(bd);
+    return true;
+}
+
+/* A file in a handle table, as the syscall holds it. */
+static int wb_open_in_table(struct handle_table *t, const char *path, const uint8_t *page)
+{
+    struct file *f;
+    int rc = vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f);
+    if (rc)
+        return rc;
+    if (file_write(f, page, PAGE_SIZE) != (int64_t)PAGE_SIZE) {
+        file_put(f);
+        return -EIO;
+    }
+    int h = handle_install(t, &f->obj, HANDLE_RIGHT_OWNER);
+    file_put(f);   /* the table holds the reference now */
+    return h;
+}
+
+bool selftest_wb_error_close(const char **reason)
+{
+    struct blkdev *bd;
+    CHECK(wb_setup(&bd) == 0);
+    uint8_t *page = kmalloc(PAGE_SIZE, 0);
+    CHECK(page != NULL);
+    wb_fill(page, 5);
+    struct handle_table *t = kmalloc(sizeof(*t), KMEM_ZERO);
+    CHECK(t != NULL);
+    handle_table_init(t);
+    struct pagecache_stats p0, p1;
+    pagecache_get_stats(&p0);
+
+    int h = wb_open_in_table(t, "/mnt/wb/c", page);
+    CHECK(h >= 0);
+    /* close: the flush's write-back is refused and close says so; the
+     * handle is closed regardless; the release's own retry then writes
+     * the page (the injection is spent), so nothing is lost. */
+    faultinject_set(FI_BLK_COMPLETE, 1, 1, thread_current());
+    int rc = handle_close(t, h);
+    faultinject_clear(FI_BLK_COMPLETE);
+    struct fi_stats fst;
+    faultinject_stats(FI_BLK_COMPLETE, &fst);
+    CHECK(fst.hits == 1);
+    CHECK(rc == -EIO);
+    CHECK(handle_close(t, h) == -EBADF);
+    pagecache_get_stats(&p1);
+    CHECK(p1.dropped_dirty == p0.dropped_dirty);
+    CHECK(p1.wb_errors == p0.wb_errors + 1);
+    /* A clean close reports nothing. */
+    h = wb_open_in_table(t, "/mnt/wb/c2", page);
+    CHECK(h >= 0);
+    CHECK(handle_close(t, h) == 0);
+    handle_table_destroy(t);
+    kfree(t);
+
+    CHECK(vfs_umount("/mnt/wb") == 0);
+    CHECK(vfs_mount("/mnt/wb", "cosmofs", bd, 0) == 0);
+    CHECK(wb_reads_back("/mnt/wb/c", page));
+    CHECK(wb_reads_back("/mnt/wb/c2", page));
+    kfree(page);
+    wb_teardown(bd);
+    return true;
+}
+
+bool selftest_wb_error_lost(const char **reason)
+{
+    struct blkdev *bd;
+    CHECK(wb_setup(&bd) == 0);
+    uint8_t *page = kmalloc(PAGE_SIZE, 0);
+    CHECK(page != NULL);
+    wb_fill(page, 2);
+    struct handle_table *t = kmalloc(sizeof(*t), KMEM_ZERO);
+    CHECK(t != NULL);
+    handle_table_init(t);
+    struct pagecache_stats p0, p1;
+    pagecache_get_stats(&p0);
+
+    int h = wb_open_in_table(t, "/mnt/wb/l", page);
+    CHECK(h >= 0);
+    /* Three refusals: the flush's, the file release's retry, the vnode
+     * release's last attempt. Then the page is gone -- counted, said. */
+    faultinject_set(FI_BLK_COMPLETE, 1, 3, thread_current());
+    int rc = handle_close(t, h);
+    faultinject_clear(FI_BLK_COMPLETE);
+    struct fi_stats fst;
+    faultinject_stats(FI_BLK_COMPLETE, &fst);
+    CHECK(fst.hits == 3);
+    CHECK(rc == -EIO);
+    pagecache_get_stats(&p1);
+    CHECK(p1.dropped_dirty == p0.dropped_dirty + 1);
+    CHECK(p1.wb_errors == p0.wb_errors + 3);
+    handle_table_destroy(t);
+    kfree(t);
+
+    /* The mount is not poisoned: a new file writes and syncs. */
+    struct file *f;
+    CHECK(vfs_open(NULL, "/mnt/wb/after", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    CHECK(file_write(f, page, PAGE_SIZE) == (int64_t)PAGE_SIZE);
+    CHECK(file_sync(f) == 0);
+    file_put(f);
+    kinfo("selftest: wb-error-lost: one page lost after three refusals, counted; the mount still writes");
+    kfree(page);
+    wb_teardown(bd);
+    return true;
+}
+
+#else
+
+#define WB_STUB(fn, name)                                                                     \
+    bool fn(const char **reason)                                                              \
+    {                                                                                         \
+        (void)reason;                                                                         \
+        kinfo("selftest: " name ": fault injection is compiled out of this build");          \
+        return true;                                                                          \
+    }
+WB_STUB(selftest_wb_error_fsync, "wb-error-fsync")
+WB_STUB(selftest_wb_error_once, "wb-error-once")
+WB_STUB(selftest_wb_error_close, "wb-error-close")
+WB_STUB(selftest_wb_error_lost, "wb-error-lost")
+
+#endif
+
+/* --- benchmarks: the object path per request size ------------------------
+ *
+ * Prints, asserts nothing. The audit's missing "read/write bandwidth at
+ * 1 KiB chunking": a 1 MiB file read and written through file_read /
+ * file_write with kernel buffers of 1 KiB, 4 KiB and 64 KiB -- the
+ * object side of what the syscall bounce now allows per call. The
+ * syscall side (entry, range check, copy) is measured from user mode
+ * (init --selftest, USERBENCH lines). */
+
+static void bench_pass(const char *what, struct file *f, uint8_t *buf, size_t req, bool write)
+{
+    file_seek(f, 0, COSMO_SEEK_SET);
+    uint64_t t0 = clock_now_ns();
+    unsigned calls = 0;
+    size_t total = 0;
+    while (total < 1024u * 1024u) {
+        int64_t n = write ? file_write(f, buf, req) : file_read(f, buf, req);
+        if (n <= 0)
+            break;
+        total += (size_t)n;
+        calls++;
+    }
+    uint64_t dt = clock_now_ns() - t0;
+    kinfo("selftest: %s-bench: %s %zu KiB requests: %u calls, %llu us, %llu MiB/s", write ? "write" : "read", what,
+          req / 1024, calls, (unsigned long long)(dt / 1000),
+          (unsigned long long)(dt ? (uint64_t)total * 1000000000ull / dt / (1024 * 1024) : 0));
+}
+
+/* The benches' CHECK: frees the bench buffer before returning on a
+ * failure, so a failing check leaks nothing (the analyzer's finding). */
+#define BCHECK(cond)                                                           \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            kfree(buf);                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);        \
+            return false;                                                      \
+        }                                                                      \
+    } while (0)
+
+bool selftest_read_bench(const char **reason)
+{
+    static const size_t reqs[] = { 1024, 4096, 65536 };
+    uint8_t *buf = kmalloc(65536, 0);
+    CHECK(buf != NULL);
+    memset(buf, 0x5a, 65536);
+
+    /* ramfs: the copy alone. */
+    struct file *f;
+    BCHECK(vfs_open(NULL, "/tmp/bench.bin", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    for (unsigned i = 0; i < 16; i++)
+        BCHECK(file_write(f, buf, 65536) == 65536);
+    for (unsigned i = 0; i < 3; i++)
+        bench_pass("ramfs", f, buf, reqs[i], false);
+    file_put(f);
+    BCHECK(vfs_unlink(NULL, "/tmp/bench.bin") == 0);
+
+    /* cosmofs on ramblk: cold (after a remount, through the device) and
+     * warm (the page cache). */
+    struct blkdev *bd;
+    BCHECK(wb_setup(&bd) == 0);
+    BCHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    for (unsigned i = 0; i < 16; i++)
+        BCHECK(file_write(f, buf, 65536) == 65536);
+    BCHECK(file_sync(f) == 0);
+    file_put(f);
+    for (unsigned i = 0; i < 3; i++) {
+        BCHECK(vfs_umount("/mnt/wb") == 0);
+        BCHECK(vfs_mount("/mnt/wb", "cosmofs", bd, 0) == 0);
+        BCHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_RDONLY, 0, &f) == 0);
+        bench_pass("cosmofs cold", f, buf, reqs[i], false);
+        bench_pass("cosmofs warm", f, buf, reqs[i], false);
+        file_put(f);
+    }
+    wb_teardown(bd);
+    kfree(buf);
+    return true;
+}
+
+bool selftest_write_bench(const char **reason)
+{
+    static const size_t reqs[] = { 1024, 4096, 65536 };
+    uint8_t *buf = kmalloc(65536, 0);
+    CHECK(buf != NULL);
+    memset(buf, 0xa5, 65536);
+    for (unsigned i = 0; i < 3; i++) {
+        struct file *f;
+        BCHECK(vfs_open(NULL, "/tmp/wbench.bin", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+        bench_pass("ramfs", f, buf, reqs[i], true);
+        file_put(f);
+        BCHECK(vfs_unlink(NULL, "/tmp/wbench.bin") == 0);
+    }
+    kfree(buf);
     return true;
 }

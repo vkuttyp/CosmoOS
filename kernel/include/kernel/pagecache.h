@@ -35,6 +35,14 @@ struct pagecache {
     unsigned nr_pages;
     unsigned nr_dirty;
     struct mutex lock;
+    /* The last write-back failure and its sequence, recorded by
+     * pagecache_sync under `lock` where the failure is seen (the one lock
+     * every write-back passes through); read by pagecache_error_since.
+     * Each open file remembers the sequence it has been told about and
+     * is told once (docs/kernel-services/vfs/design.md, "Write-back
+     * errors"). */
+    int wb_err;
+    uint32_t wb_seq;
 };
 
 void pagecache_init(struct pagecache *pc);
@@ -50,10 +58,19 @@ int64_t pagecache_write(struct vnode *vn, uint64_t off, const void *buf, size_t 
 
 /* writepage() every dirty page, or writepages() for a run of them. */
 int pagecache_sync(struct vnode *vn);
+/* Under pc->lock: whether a write-back failure was recorded after
+ * sequence `seen`; its errno and the current sequence come back either
+ * way. pagecache_wb_seq is the current sequence alone (an opener's
+ * starting point). */
+bool pagecache_error_since(struct pagecache *pc, uint32_t seen, int *err, uint32_t *now);
+uint32_t pagecache_wb_seq(struct pagecache *pc);
 /* Drop pages entirely past `size` and zero the tail of the last page. */
 void pagecache_truncate(struct vnode *vn, uint64_t size);
 /* Free every page; dirty pages are lost (caller synced or does not care). */
-void pagecache_drop(struct vnode *vn);
+/* Drop every page. Returns how many were dirty; with `lost` they are
+ * data lost (a named file's) and counted in pagecache_stats.dropped_dirty;
+ * without (an unlinked file's, with no reader left) they are not. */
+unsigned pagecache_drop(struct vnode *vn, bool lost);
 
 /* Fill `buf` (4 KiB) with page `index` through the cache (used by
  * filesystems that keep directories in file data). */
@@ -64,6 +81,8 @@ struct pagecache_stats {
     uint64_t hits, misses, writebacks, pages;
     uint64_t reclaimed;        /* clean pages evicted by the global limit */
     uint64_t budget_refusals;  /* misses refused by a mount's page budget (-ENOSPC) */
+    uint64_t wb_errors;        /* write-back failures recorded (pagecache_sync) */
+    uint64_t dropped_dirty;    /* dirty pages dropped at a vnode's release: data lost */
 };
 void pagecache_get_stats(struct pagecache_stats *out);
 
