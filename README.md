@@ -1793,8 +1793,14 @@ See [docs/development.md](docs/development.md).
   boundary inside the burst, a phase the test never controlled and the
   conversion had carried over intact. The test now makes the phase known
   (fill the window and probe until an echo is refused, then until one is
-  replied, flood into the fresh window) and waits on echoes *decided*, not received. Forty boots on the
-  fixed tree, twenty per architecture, all pass. Suite time is unchanged
+  replied, flood into the fresh window) and waits on echoes *decided*, not
+  received -- and, after review caught the first draft taking any accepted
+  probe as a fresh window, a probe must be *refused* before the accepted
+  one counts. Forty boots on the fixed tree, twenty per architecture, all
+  pass; forty more on the refusal-first tree pass every assertion, with one
+  x86-64 boot tripping `net-bench`'s 8 s budget at 71 s with normal
+  throughput -- a slowness between the bench's rounds that this unit names
+  as a follow-up rather than lists as a flake. Suite time is unchanged
   within its ±2 s spread.
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
