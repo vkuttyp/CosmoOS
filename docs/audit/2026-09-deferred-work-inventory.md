@@ -200,6 +200,35 @@ no transport beyond `sysctl` and the self-tests that print them.
   (VM exit latency) benchmarks do not, nor the baseline-versus-new
   regression system of Prompt #2 §45.
 
+### 2.11 The other explicit "later" and "eventually" statements
+
+Every remaining occurrence of *later*, *eventually*, *future* and *not
+yet* in the three prompts, so that none is lost between the sections
+above; the built ones are kept here so the coverage is visible.
+
+| statement | where | state |
+| --- | --- | --- |
+| "framebuffer only later" | constitution §6 | built (the console unit) |
+| "ASLR eventually" | §15 | open (2.2) |
+| huge pages, deduplication, NUMA, memory compression "but do not implement them initially" | §14 | open (2.2) |
+| "Design NUMA support into the abstraction, but do not implement NUMA initially" | §13 | open (2.2) |
+| snapshots: "Later support: writable clones, rollback, boot environments, incremental send/receive" | §32 | open (2.4) |
+| "The architecture should eventually permit" zero-copy networking | §35 | open (2.5) |
+| Linux phases 3 and 4 | §40 | open (2.6) |
+| "Eventually support Intel VT-x" | §42 | built, never executed (1.3) |
+| packages: "rollback eventually"; "a SQLite metadata database if appropriate" | §47 | rollback of upgrades open (2.10); a text database was chosen instead of SQLite, a decision |
+| "Rust may later be introduced selectively for memory-sensitive components"; "C#/.NET may be used later for host development tools, package tooling, image builders, debugging tools" | §50 | open by design; no second language has been introduced |
+| observability "Eventually: kernel debugger, GDB remote debugging, crash dumps, tracing, performance counters, eBPF-like tracing" | §55 | open (2.8) |
+| "property tests" and "fuzz tests" for every subsystem; "use fuzzing heavily for packet parsers" | §57, §60 | fuzzers exist for the module ELF, user ELF, package, Linux ABI, virtqueue, cosmofs, LZ4, framebuffer and USB descriptors (`tests/fuzz/`); **no fuzzer for the network packet parsers** (named as a gap in `docs/kernel-services/network/testing.md`), none for PCI configuration, ACPI tables or VFS paths (Prompt #2 §46); no property-based tests by that name |
+| "Power-loss simulation must eventually be part of filesystem testing" | §59 | built (`cosmofs-replay`, milestone 4) |
+| "eventually create a hardware test matrix" (AMD, Intel, Apple Silicon) | §61 constitution / Prompt #2 §61 | open (2.10) |
+| fault injection: "packet duplication, packet reordering, corrupted metadata, CPU starvation, interrupt storms, device reset, VM exit storms" | Prompt #2 §47 | built: allocation, block submit/complete, demand-page, demand-copy, USB CSW (`kernel/core/faultinject.c`), a reordering test, the torn-write replay, an IPI storm test; **open: packet duplication as an injection, CPU starvation, device reset, VM-exit storms** |
+| "Design future support for device add, remove, driver bind, unbind, device reset" | Prompt #2 §41 | add/remove for USB and AHCI; bind/unbind and a generic reset open (3) |
+| async I/O "must work for files, sockets, devices, timers, IPC, VM operations" | Prompt #2 §23 | the ring drives any object with a readiness operation and has its own alarm timer; VM operations and a timer as a submittable object are not shown by any test -- unverified |
+| quiesce performance "16 CPUs, 64 CPUs, 256 CPUs where test infrastructure permits" | Prompt #3 §24 | measured at 1 and 4 CPUs only (lifetime report §6) |
+| "TSan-compatible host models where possible" | Prompt #3 §23 | not done (4) |
+| the populate loops that hold the space lock across every page "until milestone 5 adds preemption points" | lifetime report §7.2 | milestone 5 landed; whether it shortened those sections is **not verified** here (`VM_KALLOC_POPULATE` still exists) -- a report touching them checks first |
+
 ---
 
 ## 3. Audit findings and futures no unit has taken up
