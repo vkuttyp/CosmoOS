@@ -720,9 +720,27 @@ static void cpu_init(struct net_cpu *c, unsigned id)
     ksnprintf(c->name, sizeof(c->name), "netrx/%u", id);
 }
 
+/*
+ * The worker's priority, decided by measurement
+ * (docs/audit/next-subsystem-wake-preempt.md, "The worker's priority").
+ * At 40, below default, a default-priority thread sending on the
+ * worker's own CPU was never displaced by it: `net-bench` with steering
+ * off delivered 512 of 10 000 UDP sends on every boot -- the queue's
+ * depth. At 31, above default, the worker preempts its feeder on every
+ * enqueue: the one-flow TCP figure with steering on fell to a median of
+ * 12 MiB/s on AArch64 (from 40) and one x86-64 boot in five hung with
+ * the worker running and its starved feeder never scheduled. At 32,
+ * equal, the worker is picked when the sender's slice ends rather than
+ * outranking it: every TCP figure within 40's run-to-run spread or
+ * above it, and 9 300 to 10 000 of 10 000 delivered. Five boots per
+ * setting per architecture, 2026-09-14; the table is in
+ * docs/kernel-services/network/design.md.
+ */
+#define NET_WORKER_PRIO SCHED_PRIO_DEFAULT
+
 static void start_worker(struct net_cpu *c)
 {
-    c->worker = thread_create_on(worker_main, c, c->name, 40, CPUMASK_OF(c->id));
+    c->worker = thread_create_on(worker_main, c, c->name, NET_WORKER_PRIO, CPUMASK_OF(c->id));
     if (c->worker == NULL)
         panic("net: cannot create the worker thread for CPU %u", c->id);
 }
