@@ -7,11 +7,15 @@ up.
 
 **Subsystem: the syscall layer's read and write bounce, sized to the
 request instead of to a console line; and a write-back error that
-reaches the program -- recorded on the vnode, reported once to each
-open file by `fsync` and by `close`, counted when nothing can report
-it.** Nothing in this report is built; the migration plan is the plan,
-and the "as built" and "as run" sections are filled by the
-implementation pull request.
+reaches the program -- recorded by the page cache where it is seen,
+reported once to each open file by `fsync` and by `close`, counted when
+nothing can report it.** Built as PR #138 (the banner below); the
+migration plan was the plan, and the "as built" and "as run" sections
+record what the build changed and measured. The design as written here
+is the one the report's own review settled on (the record in the page
+cache, not the vnode; the file's sequence in the file-then-vnode lock
+order; a file's own failure marking itself seen; the shared bounce
+helper).
 
 Two findings from the 2026-09-05 audit sit in the inventory's §3 with
 the note "not in any milestone", and both are still exactly as found:
