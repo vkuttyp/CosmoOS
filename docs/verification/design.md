@@ -62,7 +62,20 @@ a CI failure reproduces locally.
 ## 2. Fault injection (`kernel/core/faultinject.c`, debug builds)
 
 ```c
-enum fi_kind { FI_KMALLOC, FI_BLK_SUBMIT, FI_BLK_COMPLETE, FI_KIND_COUNT };   /* and, since, FI_DEMAND_PAGE, FI_DEMAND_COPY, FI_USB_CSW, FI_AHCI_CI (faultinject.h) */
+enum fi_kind {
+    FI_KMALLOC,
+    FI_BLK_SUBMIT,
+    FI_BLK_COMPLETE,
+    FI_DEMAND_PAGE,   /* the frame of a user-mode demand-zero fault */
+    FI_DEMAND_COPY,   /* the frame of a kernel-mode demand-zero fault in a user copy */
+    FI_USB_CSW,       /* usb_storage: the CSW read queued without the doorbell */
+    FI_AHCI_CI,       /* ahci: a slot filled, its PxCI bit never set */
+    FI_KIND_COUNT,
+};
+/* Users of FI_BLK_COMPLETE beyond fault-blk: the VFS write-back tests
+ * wb-error-fsync/-once/-close/-lost (docs/kernel-services/vfs/testing.md),
+ * scoped to the test thread on the RAM block device, whose completion
+ * runs in the submitter's context. */
 struct fi_rule { unsigned every; unsigned budget; struct thread *only; uint64_t seen, hits; };
 ```
 
