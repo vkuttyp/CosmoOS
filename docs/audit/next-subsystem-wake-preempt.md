@@ -512,7 +512,7 @@ exactly 0, not "not 1".
 | the point removed from both restores | `preempt-wake`, `-direct`, `-locked` and the init step fail | 4 of 249 self-tests, both arches: every `saw` reads 1 -- the waiter ran at the tick |
 | the point placed *before* the enable | fails the same way | yes, both arches |
 | the point in `spin_unlock_irqrestore` only (the rejected design) | only `preempt-wake-locked` fails | exactly that, both arches |
-| `sched_preempt` called from `spin_unlock`'s lockdep bracket without the guard | its `KASSERT(preempt_count == 0)` fires at the first unlock with a reschedule pending | GUARD_PROOF |
+| `sched_preempt` called from `spin_unlock`'s lockdep bracket without the guard | its `KASSERT(preempt_count == 0)` fires at the first unlock with a reschedule pending | yes: `KERNEL PANIC: assertion failed: pc->irq_depth == 0 && pc->preempt_count == 0 ... (sched_preempt)` 6 s into the x86-64 boot -- the guard is load-bearing, not decorative |
 | a release-build boot | init's step asserts `ENOENT` and passes | x86-64, PASS |
 | the existing `preempt` (a spinner displaced from interrupt context) | unchanged, passing | yes |
 
@@ -536,8 +536,13 @@ rerun once because the injection's first form did not compile.
    arches. This is the decision, and its table goes in the design
    document whatever it says.
 
-**As run.** (1) `irqrestore-bench`: IRQRESTORE_RESULT. `fpu-bench`'s
-switch: FPUBENCH_RESULT. (2) Wake-to-run, same CPU: 56-77 µs
+**As run.** (1) `irqrestore-bench`: a million `arch_irq_save`/`restore` pairs at
+237 ns a pair on AArch64 and 210 ns on x86-64 under TCG -- the pair
+itself, of which the predicate's two loads and a not-taken branch are a
+small part; 13 restore-point preemptions had been taken by then in each
+boot. `fpu-bench`'s switch: 2 883 ns on AArch64 (3 045 and 2 785 in
+earlier boots today, before the point) and 2 648 ns on x86-64 (2 399 and
+2 785 before), inside its own spread on both. (2) Wake-to-run, same CPU: 56-77 µs
 (`preempt-wake`), 20-25 µs (`-direct`), 23-24 µs (`-locked`) across
 both architectures, from a floor of up to 4 000 µs. (3) The table is in
 `docs/kernel-services/network/design.md`, "The worker's priority"; the
