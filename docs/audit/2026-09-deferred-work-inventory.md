@@ -218,7 +218,7 @@ tree.
 | no symlinks in the VFS; no dentry cache (every component calls the filesystem); no `(ino, generation)` identity; no mount options string; no bind or overlay stacking | 8.3 |
 | no fsck; no checksum algorithm id in the metadata header | 8.5, 8.6 |
 | hotplug: no CPU hotplug, no PCI rescan, no power management; only USB and AHCI remove devices | 10.5 |
-| the unfinished DMA discipline on non-coherent hardware (`dma_sync_for_cpu` never called by a driver) | 13.2 |
+| DMA on non-coherent hardware: the audit's "no driver calls `dma_unmap` or `dma_sync_for_cpu`" is no longer true -- every driver unmaps, and NVMe syncs its completion queue before reading it (drivers/nvme/nvme.c:248). What remains: virtio, e1000e, AHCI and xHCI read device-written rings and buffers with no `dma_sync_for_cpu`, and no driver calls `dma_sync_for_device` before handing a buffer over; adequate on coherent QEMU, exposed by the first non-coherent SoC | 13.2, 10.2 (re-checked 2026-09-14) |
 | AArch64 hardening: `SCTLR_EL1.WXN` cleared and never set; UAO, E0PD, BTI, PAC unused; a user-triggerable SError panics the kernel; no device-tree parsing for the host (ACPI only); PSCI variations untested | 13.2, 13.3 |
 | SMEP/SMAP/UMIP absence silently accepted; `mmap`/`mount`/`umount` accept unknown flag bits | 14.2 |
 | VFS: `close()` cannot report write-back errors | 8.2 (MEDIUM, not in any milestone) |
