@@ -426,13 +426,18 @@ unmapped-write crash's own signature (`run_boot_test.py:326-354`: the
 line, `trap 1029`, `FAR=ffff900000000000`), which an instruction abort
 cannot satisfy, and accepting any panic would not prove WXN caused it.
 So `--expect-panic` takes a kind: `fault` (today's markers, the
-default) or `wxn`, whose required markers are the variant's own line
-`crash test: executing a writable page on purpose`, a panic line
-naming an instruction abort at the page's address, the abort's `FAR=`
-at that address, the stack trace and `halting.`; its forbidden markers
-are `boot complete`, the `WXN is off` line and a recursive panic. The
-exact strings are fixed by the panic path's output and recorded as
-built. The test exists so that the bit's absence has a symptom; it is
+default) or `wxn`, whose required markers use the page-fault path's
+existing wording, so no diagnostic code changes: the variant's own line
+`crash test: executing a writable page on purpose`; the panic line
+`KERNEL PANIC: page fault: kernel execute at <page> (protection): ...`
+(`kernel/memory/vmm.c:608-612` already says `execute` for
+`VM_FAULT_EXEC` and `protection` for a present page); the trap's
+`FAR=<page> (protection read kernel instruction-fetch)` line
+(`kernel/arch/aarch64/trap.c:201-204`); the stack trace and `halting.`.
+Its forbidden markers are `boot complete`, the `WXN is off` line and a
+recursive panic. The page's address is what the variant chose, so the
+markers can name it exactly, as the `fault` kind names
+`ffff900000000000`. The test exists so that the bit's absence has a symptom; it is
 the only path in the tree that maps W+X, and only in that build.
 
 ### The §70 gate
@@ -576,7 +581,7 @@ and `test-crash`.
 | the AArch64 guard boot's `hv` suite | every `hv` and `el2` test passes on `cortex-a76`; `hv: backend el2` with nested paging in the log; no `selftest: hv: skipped` | revert the layout in `hv_s2_vtcr` to `SL0 = 2`: the self-check fails with the level-0 translation fault, exactly as the probe did |
 | `hv-disabled` | with `FI_HV_SELFCHECK` armed for one hit, `hv_init`'s path is re-run through a test hook: `hv_caps()->present` is false and `el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION` still holds; hits asserted equal to the budget | remove `arch_hv_disable` from the failure path: the stub does not answer |
 | `flags` (user-side, in `fs_selftest` and `proc_selftest`) | `mmap` with bit 31 set, `mount` with `1u << 5`, `umount` with `1u << 5`, `open` with `0x8000000`: each `-COSMO_EINVAL`; the same calls without the bit succeed as before | remove any one check: that call succeeds |
-| `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the instruction-abort panic with `FAR=` at the page's address, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
+| `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the `page fault: kernel execute at <page> (protection)` panic, the `FAR=<page> (... instruction-fetch)` line, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
 | the guard boot itself | required markers `hardening: x86-64: nx smep smap umip` / `hardening: aarch64: pan wxn`; forbidden `hardening: absent` | boot the guard target with `QEMU_CPU` forced to the control model: the `WARN` appears and the run fails |
 | the ASID tests on `cortex-a76` | pass, with the bracket | drop the bracket from one read: that test fails as the probe showed |
 
