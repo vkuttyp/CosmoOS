@@ -388,7 +388,7 @@ is the observation.
 | `kernel/arch/x86_64/cpu.c` | `arch_irq_restore` calls it after `sti` |
 | `kernel/arch/aarch64/irq.c` | the same after the DAIF write when I is cleared |
 | `kernel-services/network/netif.c` | the worker's priority, as measured (one constant, with the measurement in the comment) |
-| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and completed by the sysctl's own write); **`irqrestore-bench`**, the micro-benchmark of the Benchmarks section, a self-test that prints and asserts nothing, in the shape of `fpu-bench` |
+| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and posted by the sysctl's own *read*, as built); **`irqrestore-bench`**, the micro-benchmark of the Benchmarks section, a self-test that prints and asserts nothing, in the shape of `fpu-bench` |
 | `kernel/syscall/native.c` | the `debug.preempt_probe` sysctl entry in the registry (debug builds; privileged; **read-only, as every sysctl here is -- its read is the call**, an as-built correction to this row's "writable"), dispatching to the probe in `schedtest.c` |
 | `userland/init/init.c` | `preempt-wake-syscall`: a wake made inside a system call preempts before the call returns, observed through the probe -- one step of `init --selftest` |
 | `kernel-services/network/nettest.c` | `net-bench` unchanged; its UDP delivered count becomes the worker decision's evidence and the report quotes it |
@@ -398,7 +398,7 @@ is the observation.
 | `README.md` | Status entry |
 
 **No kernel change outside these** -- in particular no hook in any wake
-path: the probe's sysctl write is itself the system call that wakes,
+path: the probe's sysctl *read* is itself the system call that wakes,
 so `SYS_futex_wake` and its kin are untouched -- no UAPI, and no module
 ABI change (`arch_irq_restore` keeps its signature; modules that call
 it get the point for free).
