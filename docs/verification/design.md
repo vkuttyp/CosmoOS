@@ -182,6 +182,15 @@ in its own report, and fails a test that exceeded `SELFTEST_BUDGET_MS`
 (default 8000, the hang watchdog's period) so a test that only just
 finishes is noticed before it becomes a timeout.
 
+A failing self-test is also named against the **load-sensitive list**
+in `docs/testing/flakes.md` (the table under its "The list" heading): the
+failure report gains a `note:` line saying the test is on the list and
+that a re-run distinguishes a flake from a regression. The run fails
+regardless; the note is a label, not a retry, and a run in which a
+self-test failed while the list file is missing or parses to nothing says
+that instead, so the list cannot go silently empty. The rule for putting
+a test on the list is in that file.
+
 ## Ownership and lifetime
 
 Host targets own everything they allocate per input and free it before

@@ -939,12 +939,133 @@ static void inject_tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ac
 }
 
 /* Let the network worker drain what was injected. */
-static void settle(unsigned ms)
+/*
+ * Wait until `pred(arg)` holds, or `budget_ms` passes
+ * (docs/audit/next-subsystem-suite-waits.md).
+ *
+ * The `settle(N)` this replaced waited for *time*; this waits for the *property*,
+ * which is the difference between a test that asserts something about the
+ * stack and one that asserts something about the host. There is no
+ * relationship between 100 ms and 300 packets, and on a machine that has
+ * been building and booting for hours there never was.
+ *
+ * **The budget is generous on purpose** -- seconds where the sleep was
+ * tens of milliseconds. A deadline that is never reached on a healthy
+ * host costs nothing, because the wait returns as soon as the predicate
+ * holds; when it *is* reached the caller's `CHECK` fails on the wait
+ * rather than on an arithmetic mismatch that reads like a protocol bug.
+ *
+ * **A predicate may not require a coherent view of more than one
+ * field -- unless every field it reads is monotonic and the predicate is
+ * monotone in them.** `tcp_get_stats` is `*out = g_stats;` with no lock
+ * and `ksock_ready` reads socket state outside the socket mutex, so a
+ * predicate over two fields can see them from either side of an update.
+ * The danger is a torn read that *satisfies* the predicate early. With
+ * monotonic fields and a monotone predicate a torn read can only
+ * under-count, which delays termination and never causes it, so such a
+ * predicate is safe (`syn_answered` is the one instance here, and says
+ * so). Anything else waits on a single field, and the multi-field
+ * *assertion* stays after the wait, where it is the test's claim and not
+ * the wait's termination condition. A first version of this contract was
+ * the absolute rule alone, and the file broke it two functions later.
+ *
+ * **The result must be CHECKed** (`warn_unused_result`, and the kernel
+ * builds with -Werror): a wait whose expiry is dropped is `settle` in a
+ * different hat. **A wait that used more than half its budget is
+ * reported**: a test that habitually takes 1.9 s of a 2 s budget is a
+ * finding -- a slowdown, or a budget that a widened deadline is hiding --
+ * and the line is what makes it visible before it becomes a failure.
+ */
+static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
+    __attribute__((warn_unused_result));
+static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
 {
-    for (unsigned i = 0; i < ms; i += 10) {
-        thread_sleep_ms(10);
+    uint64_t t0 = clock_now_ns();
+    uint64_t deadline = t0 + (uint64_t)budget_ms * 1000000ull;
+    while (!pred(arg)) {
+        if (clock_now_ns() > deadline)
+            return false;
+        thread_sleep_ms(1);
         sched_watchdog_kick();
     }
+    unsigned waited_ms = (unsigned)((clock_now_ns() - t0) / 1000000ull);
+    if (waited_ms * 2 > budget_ms)
+        kinfo("selftest: wait_until: waited %u ms of a %u ms budget", waited_ms, budget_ms);
+    return true;
+}
+
+/* A socket's readiness word has every bit in `mask` set. This is the
+ * shape six hand-written waits in this file shared -- a header loop on
+ * `ksock_ready` with `i < 100` standing in for a second. */
+struct ready_target { struct socket *s; unsigned mask; };
+static bool ready_has(void *arg)
+{
+    const struct ready_target *t = arg;
+    return (ksock_ready(t->s) & t->mask) == t->mask;
+}
+
+/* A connection has reached (not merely left) a state. */
+struct state_target { struct socket *s; enum tcp_state want; };
+static bool tcp_state_is(void *arg)
+{
+    const struct state_target *t = arg;
+    return tcp_state_of(t->s->tcp) == t->want;
+}
+
+/*
+ * `snd_nxt` has advanced at least `bytes` past a baseline the caller took
+ * before sending. **One field**, not `snd_nxt - snd_una`: a first version
+ * read both, and the file's own rule for predicates -- no coherent view
+ * of more than one unsynchronised field -- applied to it as much as to
+ * `tcp_get_stats`. Read straight out of the control block, which is the
+ * "derived value" kind the report said to label rather than hide.
+ */
+struct sent_target { struct socket *s; uint32_t base, bytes; };
+static bool tcp_sent_since(void *arg)
+{
+    const struct sent_target *t = arg;
+    return (uint32_t)(t->s->tcp->snd_nxt - t->base) >= t->bytes;
+}
+
+/* `snd_una` has advanced at least `bytes` past a baseline: that much has
+ * been *acknowledged*, which for a loopback peer means delivered. */
+struct acked_target { struct socket *s; uint32_t base, bytes; };
+static bool tcp_acked_since(void *arg)
+{
+    const struct acked_target *t = arg;
+    return (uint32_t)(t->s->tcp->snd_una - t->base) >= t->bytes;
+}
+
+/* A TCP counter has advanced past its baseline. */
+struct tcpc_target { uint64_t base, want; int which; };
+enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1, TC_FIN_WAIT2_TIMEOUTS = 2 };
+static bool tcp_counter_reached(void *arg)
+{
+    const struct tcpc_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    uint64_t v = t->which == TC_SYN_BAD_ACK ? now.syn_bad_ack
+               : t->which == TC_PMTU_UPDATES ? now.pmtu_updates
+               : now.fin_wait2_timeouts;
+    return v - t->base >= t->want;
+}
+
+/*
+ * An ICMP "fragmentation needed" has been received and parsed.
+ *
+ * This is how the *negative* assertions in the path-MTU test are made
+ * waitable at all: "the forged quote changed nothing" cannot be waited
+ * for -- there is no event for nothing happening -- so the test waits for
+ * the positive fact that must precede it, that the quote arrived, and
+ * then asserts that the cache and the connection are untouched.
+ */
+struct needfrag_target { uint64_t base, want; };
+static bool needfrag_received(void *arg)
+{
+    const struct needfrag_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return now.icmp_needfrag_rcvd - t->base >= t->want;
 }
 
 /* Drop TCP resets addressed to `g_guard_port` (the flood's SYN-ACKs would
@@ -963,6 +1084,21 @@ static bool drop_rst_filter(struct mbuf *m, void *arg)
     return !((th->flags & TH_RST) && ntohs(th->dport) == g_guard_port);
 }
 
+/* How many SYNs the stack has accounted for, cached or answered with a
+ * cookie. Two fields, not one -- the only decomposition the statistics
+ * offer -- under the monotone-sum exception in `wait_until`'s contract:
+ * both are monotonic, so a torn read can only *under*-count and make the
+ * wait longer, never shorter. */
+struct syn_target { const struct tcp_stats *base; uint64_t want; };
+static bool syn_answered(void *arg)
+{
+    const struct syn_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return (now.syn_cached - t->base->syn_cached) +
+           (now.syn_cookies_sent - t->base->syn_cookies_sent) >= t->want;
+}
+
 bool selftest_net_tcp_syncache(const char **reason)
 {
     struct tcp_stats t0, t1;
@@ -976,7 +1112,15 @@ bool selftest_net_tcp_syncache(const char **reason)
     /* 300 SYNs from 300 sources that will never answer. */
     for (unsigned i = 0; i < 300; i++)
         inject_tcp((uint16_t)(20000 + i), 6020, 1000 + i, 0, TH_SYN, 1460);
-    settle(100);
+    /* Wait for the stack to have answered all three hundred. This *is* a
+     * sum of two fields -- cached plus cookie-answered, the only
+     * decomposition the statistics offer -- and it is allowed by the
+     * exception `wait_until` states, not in spite of it: both are
+     * monotonic and the sum is monotone in them, so a torn read can only
+     * under-count and make the wait longer, never end it early. A first
+     * version of this comment said "one counter", which was false. */
+    struct syn_target tgt = { .base = &t0, .want = 300 };
+    CHECK(wait_until(syn_answered, &tgt, 5000));
     tcp_get_stats(&t1);
     uint64_t cached = t1.syn_cached - t0.syn_cached, cookies = t1.syn_cookies_sent - t0.syn_cookies_sent;
     CHECK(cached > 0 && cached <= TCP_SYNCACHE_SIZE);
@@ -997,7 +1141,8 @@ bool selftest_net_tcp_syncache(const char **reason)
     CHECK(t1.conns_passive == t0.conns_passive + 1);
     /* A completing ACK that matches nothing is refused. */
     inject_tcp(30001, 6020, 5000, 12345, TH_ACK, 0);
-    settle(30);
+    struct tcpc_target bad = { .base = t1.syn_bad_ack, .want = 1, .which = TC_SYN_BAD_ACK };
+    CHECK(wait_until(tcp_counter_reached, &bad, 5000));
     struct tcp_stats t2;
     tcp_get_stats(&t2);
     CHECK(t2.syn_bad_ack == t1.syn_bad_ack + 1 && t2.conns_passive == t1.conns_passive);
@@ -1035,6 +1180,28 @@ static void holding_server(void *arg)
     thread_exit(0);
 }
 
+/* How many challenge ACKs the stack has sent since the baseline. The
+ * RFC 5961 tests inject a packet that must be *answered* with one, and
+ * waiting for that is what "the injection has been processed" means --
+ * the state assertions after it are negative ("still ESTABLISHED"), so
+ * waiting for the *state* would return at once and prove nothing. */
+struct chal_target { uint64_t base, want; };
+static bool challenge_acks_reached(void *arg)
+{
+    const struct chal_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return now.challenge_acks - t->base >= t->want;
+}
+
+/* The connection has left ESTABLISHED -- for the reset that really does
+ * end it. */
+static bool tcp_left_established(void *arg)
+{
+    struct socket *c = arg;
+    return tcp_state_of(c->tcp) != TCP_ESTABLISHED;
+}
+
 bool selftest_net_tcp_rfc5961(const char **reason)
 {
     struct tcp_server srv;
@@ -1052,23 +1219,26 @@ bool selftest_net_tcp_rfc5961(const char **reason)
     tcp_get_stats(&t0);
     uint32_t rcv_nxt = c->tcp->rcv_nxt, snd_nxt = c->tcp->snd_nxt;
     /* A reset inside the window but not at rcv_nxt: a challenge, no reset. */
+    struct chal_target ct = { .base = t0.challenge_acks, .want = 1 };
     inject_tcp(6021, me.port, rcv_nxt + 1000, snd_nxt, TH_RST, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
     /* A SYN inside the window: a challenge, no reset. */
+    ct.want = 2;
     inject_tcp(6021, me.port, rcv_nxt + 10, snd_nxt, TH_SYN, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED);
     /* An ACK for data never sent: a challenge, not processed. */
+    ct.want = 3;
     inject_tcp(6021, me.port, rcv_nxt, snd_nxt + 100000, TH_ACK, 0);
-    settle(30);
+    CHECK(wait_until(challenge_acks_reached, &ct, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_ESTABLISHED && c->tcp->snd_una == snd_nxt);
     tcp_get_stats(&t1);
     CHECK(t1.challenge_acks == t0.challenge_acks + 3);
     CHECK(t1.rsts_in == t0.rsts_in);
     /* The exact reset ends the connection. */
     inject_tcp(6021, me.port, rcv_nxt, snd_nxt, TH_RST, 0);
-    settle(30);
+    CHECK(wait_until(tcp_left_established, c, 5000));   /* this one really does end it */
     uint8_t buf[4];
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -ECONNRESET);
     tcp_get_stats(&t1);
@@ -1178,8 +1348,8 @@ bool selftest_net_tcp_keepalive(const char **reason)
     tcp_get_stats(&t0);
     g_guard_port = 6023;
     loopback_set_filter(blackhole_filter, NULL);
-    for (unsigned i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++)
-        settle(10);
+    struct state_target closed = { .s = c, .want = TCP_CLOSED };
+    CHECK(wait_until(tcp_state_is, &closed, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_CLOSED);
     uint8_t buf[4];
     int64_t r = ksock_recvfrom(c, buf, sizeof(buf), NULL);
@@ -1206,12 +1376,9 @@ bool selftest_net_tcp_keepalive(const char **reason)
     tcp_get_stats(&t0);
     tcp_set_fin_wait2(100ull * 1000000ull);
     ksock_put(c);   /* close: FIN; the server never answers with its own */
-    for (unsigned i = 0; i < 200; i++) {
-        tcp_get_stats(&t1);
-        if (t1.fin_wait2_timeouts > t0.fin_wait2_timeouts)
-            break;
-        settle(10);
-    }
+    struct tcpc_target fw2 = { .base = t0.fin_wait2_timeouts, .want = 1, .which = TC_FIN_WAIT2_TIMEOUTS };
+    CHECK(wait_until(tcp_counter_reached, &fw2, 5000));
+    tcp_get_stats(&t1);
     tcp_set_fin_wait2(0);
     CHECK(t1.fin_wait2_timeouts == t0.fin_wait2_timeouts + 1);
     srv.stop = true;
@@ -1222,19 +1389,129 @@ bool selftest_net_tcp_keepalive(const char **reason)
     return true;
 }
 
+/* The IPv4 layer has recorded its own path-MTU update. The TCP side and
+ * the IP side are counted separately and land separately, which is why
+ * the test waited a further fixed ten milliseconds for the second. */
+struct rexmit_target { uint64_t base, want; };
+static bool retransmit_happened(void *arg)
+{
+    const struct rexmit_target *t = arg;
+    struct tcp_stats now;
+    tcp_get_stats(&now);
+    return now.retransmits - t->base >= t->want;
+}
+
+struct ip_pmtu_target { uint64_t base, want; };
+static bool ip_pmtu_reached(void *arg)
+{
+    const struct ip_pmtu_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return now.pmtu_updates - t->base >= t->want;
+}
+
+/* Echoes *decided* -- replied or refused -- not merely received: the
+ * handler counts `icmp_echo_rcvd` first and decides afterwards, so a
+ * wait on the receive count can return with the last decision pending.
+ * Two monotonic counters, a monotone sum: the exception `wait_until`'s
+ * contract allows. */
+struct echo_target { const struct ip_stats *base; uint64_t want; };
+static bool echoes_decided(void *arg)
+{
+    const struct echo_target *t = arg;
+    struct ip_stats now;
+    ipv4_get_stats(&now);
+    return (now.icmp_echo_replied - t->base->icmp_echo_replied) +
+           (now.icmp_ratelimited - t->base->icmp_ratelimited) >= t->want;
+}
+
+/* One echo, decided: was it replied? The limiter's window (ipv4.c) is a
+ * fixed second that starts with the first ICMP after a second of quiet,
+ * so an echo refused and then one replied means a fresh window has just
+ * begun -- which is the one fact a burst against the limiter needs. */
+static bool icmp_probe(uint16_t seq, bool *replied)
+{
+    struct ip_stats a, b;
+    ipv4_get_stats(&a);
+    if (icmp_send_echo(INADDR_LOOPBACK_N, 0x4d39, seq, "q", 1) != 0)
+        return false;
+    struct echo_target t = { .base = &a, .want = 1 };
+    if (!wait_until(echoes_decided, &t, 5000))
+        return false;
+    ipv4_get_stats(&b);
+    *replied = b.icmp_echo_replied > a.icmp_echo_replied;
+    return true;
+}
+
 bool selftest_net_icmp_limit(const char **reason)
 {
     struct ip_stats i0, i1;
-    /* 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an
-     * unreachable is never sent for 127/8, so the echo path carries the test). */
+    /*
+     * 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an
+     * unreachable is never sent for 127/8, so the echo path carries the
+     * test). The claim is exact -- at most one window's worth -- so the
+     * burst must fall inside one window, and the window's phase is not
+     * the test's to choose: it began with whichever ICMP followed the
+     * last second of quiet. Twenty consecutive boots found the boundary
+     * inside the burst once (replies from two windows, `sent` 200), which
+     * a fixed sleep or a wait for the flood can neither see nor avoid.
+     * So the phase is *made* known, in two halves that must both be
+     * observed. First a probe must be *refused*: fill the window (a
+     * burst of RATE echoes, every one decided) and probe; if the probe
+     * is accepted, the window rolled somewhere inside the fill and is of
+     * unknown age -- a held vCPU makes that age anything -- so fill and
+     * probe again until one is refused. Then a probe must be *accepted*:
+     * one echo every ten milliseconds until one is replied, which says
+     * the window rolled between two probes and is at most that old. Only
+     * the refusal followed by the acceptance is a fresh window; an
+     * acceptance alone was the first draft's mistake, and review caught
+     * it. Then flood into it. What remains assumed is that the flood is
+     * decided within that window's second, against the ~20 ms it takes:
+     * the 50x margin is the largest on the load-sensitive list
+     * (docs/testing/flakes.md), where this site is recorded.
+     */
+    uint64_t probe_deadline = clock_now_ns() + 5000000000ull;   /* the window is a second; a hang guard */
+    bool refused = false;
+    for (uint16_t seq = 0; !refused; seq++) {
+        CHECK(clock_now_ns() < probe_deadline);
+        struct ip_stats fill;
+        ipv4_get_stats(&fill);
+        for (unsigned i = 0; i < ICMP_RATE_PER_SEC; i++)
+            CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d37, (uint16_t)i, "f", 1) == 0);
+        struct echo_target ftgt = { .base = &fill, .want = ICMP_RATE_PER_SEC };
+        CHECK(wait_until(echoes_decided, &ftgt, 5000));
+        bool accepted;
+        CHECK(icmp_probe(seq, &accepted));
+        refused = !accepted;
+    }
+    bool fresh = false;
+    for (uint16_t seq = 0; !fresh; seq++) {
+        CHECK(clock_now_ns() < probe_deadline);
+        CHECK(icmp_probe(seq, &fresh));
+        if (!fresh)
+            thread_sleep_ms(10);
+    }
+
     ipv4_get_stats(&i0);
     for (unsigned i = 0; i < 300; i++)
         CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d38, (uint16_t)i, "p", 1) == 0);
-    settle(100);
+    /*
+     * Wait for all three hundred to be decided. This is what makes the
+     * two assertions below mean anything: `sent <= ICMP_RATE_PER_SEC`
+     * passes spuriously when the flood has not landed (fewer echoes,
+     * fewer replies, the limit met without the limiter doing anything),
+     * and `limited >= 300 - ICMP_RATE_PER_SEC` fails for the same reason.
+     * One fixed sleep was producing a spurious pass and a spurious
+     * failure in adjacent conjuncts of one line.
+     */
+    struct echo_target etgt = { .base = &i0, .want = 300 };
+    CHECK(wait_until(echoes_decided, &etgt, 5000));
     ipv4_get_stats(&i1);
     uint64_t sent = i1.icmp_echo_replied - i0.icmp_echo_replied, limited = i1.icmp_ratelimited - i0.icmp_ratelimited;
     CHECK(i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300);
     CHECK(sent <= ICMP_RATE_PER_SEC && limited >= 300 - ICMP_RATE_PER_SEC);
+    kinfo("selftest: net-icmp-limit: %llu replied, %llu refused of 300 in a fresh window",
+          (unsigned long long)sent, (unsigned long long)limited);
 
     /* Path MTU discovery: a "fragmentation needed" quoting a segment in
      * flight lowers the connection's MSS; one quoting nothing in flight is
@@ -1255,8 +1532,14 @@ bool selftest_net_icmp_limit(const char **reason)
     loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
     uint8_t big[2000];
     memset(big, 'm', sizeof(big));
+    uint32_t nxt0 = c->tcp->snd_nxt;   /* the baseline, taken before the send */
     CHECK(ksock_sendto(c, big, sizeof(big), NULL) == (int64_t)sizeof(big));
-    settle(20);
+    /* The filter blackholes the data, so nothing is acknowledged and it
+     * stays in flight; wait for it to be *sent* before taking the sequence
+     * the forged quote will name. This was a bare `settle(20)` that step 2
+     * missed -- the twelfth of what the report counted as eleven. */
+    struct sent_target inflight = { .s = c, .base = nxt0, .bytes = sizeof(big) };
+    CHECK(wait_until(tcp_sent_since, &inflight, 5000));
     uint32_t seq = c->tcp->snd_una;
     struct tcp_stats t0, t1;
     tcp_get_stats(&t0);
@@ -1290,8 +1573,14 @@ bool selftest_net_icmp_limit(const char **reason)
     struct mbuf *good = m_copypacket(m);
     CHECK(good != NULL);
     ic->cksum = in_cksum(m->data, m->len);
+    /* Baseline taken *here*, not at the top of the function: the counter is
+     * global, and a stale baseline lets any earlier fragmentation-needed
+     * satisfy the wait before the forged quote has been looked at. */
+    struct ip_stats ib;
+    ipv4_get_stats(&ib);
+    struct needfrag_target nf = { .base = ib.icmp_needfrag_rcvd, .want = 1 };
     ipv4_output(m, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);   /* quotes a sequence never sent */
-    settle(30);
+    CHECK(wait_until(needfrag_received, &nf, 5000));   /* it arrived; now assert it did nothing */
     tcp_get_stats(&t1);
     ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates && c->tcp->mss == TCP_MSS_LO);
@@ -1310,13 +1599,12 @@ bool selftest_net_icmp_limit(const char **reason)
      * that the netrx worker made a window on a loaded host (it missed
      * one once, on `no-iommu x86_64`, with debug page poisoning adding
      * a fill and a scan to every cluster). */
-    for (unsigned i = 0; i < 100; i++) {
-        tcp_get_stats(&t1);
-        if (t1.pmtu_updates != t0.pmtu_updates)
-            break;
-        settle(10);
-    }
-    settle(10);   /* and let the IP side's record land too */
+    struct tcpc_target tp = { .base = t0.pmtu_updates, .want = 1, .which = TC_PMTU_UPDATES };
+    CHECK(wait_until(tcp_counter_reached, &tp, 5000));
+    /* And the IP side's record, which is a separate counter that lands
+     * separately -- this was a further fixed ten milliseconds. */
+    struct ip_pmtu_target ip = { .base = i0.pmtu_updates, .want = 1 };
+    CHECK(wait_until(ip_pmtu_reached, &ip, 5000));
     tcp_get_stats(&t1);
     ipv4_get_stats(&i1);
     CHECK(t1.pmtu_updates == t0.pmtu_updates + 1 && i1.pmtu_updates == i0.pmtu_updates + 1);
@@ -1324,7 +1612,19 @@ bool selftest_net_icmp_limit(const char **reason)
     CHECK(c->tcp->mss == 1460 && c->tcp->path_mss == 1460);
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == 1460);   /* new connections start there */
     loopback_set_filter(NULL, NULL);
-    settle(300);   /* the retransmission delivers the data in 1460-byte segments */
+    /* The retransmission delivers the data in 1460-byte segments. Waiting
+     * for the retransmit counter says that in one line; `settle(300)` said
+     * "probably by now", and 300 ms was the largest sleep in the file. */
+    struct rexmit_target rx = { .base = t1.retransmits, .want = 1 };
+    CHECK(wait_until(retransmit_happened, &rx, 5000));
+    /* `retransmits` advances when the timer fires, *before* the segment is
+     * built and before loopback delivers it on a later pass -- so on its
+     * own it says "scheduled", not "delivered", and a first version of
+     * this wait stopped there. Delivered is the peer acknowledging it:
+     * with the filter off, the client's `snd_una` advances past the
+     * sequence the forged quote named. */
+    struct acked_target acked = { .s = c, .base = seq, .bytes = sizeof(big) };
+    CHECK(wait_until(tcp_acked_since, &acked, 5000));
     ipv4_pmtu_flush();
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
     ksock_put(c);
@@ -1351,12 +1651,12 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(rc == 0 || rc == -EINPROGRESS);
     if (rc == -EINPROGRESS)
         CHECK(ksock_connect(c, &addr) == -EALREADY || ksock_connect(c, &addr) == -EISCONN);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
     CHECK(ksock_connect(c, &addr) == -EISCONN);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(ls) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = ls, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(ls) & COSMO_IO_READABLE);
     CHECK(ksock_accept(ls, &a, NULL) == 0);
     ksock_set_nonblock(a, true);
@@ -1364,8 +1664,8 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -EAGAIN);
     CHECK(!(ksock_ready(c) & COSMO_IO_READABLE));
     CHECK(ksock_sendto(a, "hello", 5, NULL) == 5);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == 5);
     /* Fill the pipe: a non-blocking send returns what fits, then -EAGAIN.
      * The peer never reads here, so its window closes and the socket ends
@@ -1383,6 +1683,11 @@ bool selftest_net_nonblock(const char **reason)
     memset(buf, 'f', sizeof(buf));
     uint64_t pushed = 0;
     bool full = false;
+    /* One deadline for the whole fill, and every readiness wait is CHECKed
+     * against it. A first version waited 200 ms per refusal and dropped the
+     * result, which turned a stalled socket into up to 400 waits and hid
+     * the stall behind the byte-count assertion below. */
+    uint64_t fill_deadline = clock_now_ns() + 5000ull * 1000000ull;
     for (unsigned i = 0; i < 400 && !full; i++) {
         if (!(ksock_ready(c) & COSMO_IO_WRITABLE)) {
             full = true;
@@ -1391,29 +1696,43 @@ bool selftest_net_nonblock(const char **reason)
         int64_t n = ksock_sendto(c, buf, sizeof(buf), NULL);
         if (n > 0)
             pushed += (uint64_t)n;
-        else if (n == -EAGAIN)
-            settle(10);
-        else
+        else if (n == -EAGAIN) {
+            /* The loop's own termination is `full`; on a transient refusal
+             * wait for the socket to say it is writable again rather than
+             * sleeping ten milliseconds and guessing. */
+            uint64_t now = clock_now_ns();
+            CHECK(now < fill_deadline);
+            if (now >= fill_deadline)
+                break;
+            struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+            CHECK(wait_until(ready_has, &rt, (unsigned)((fill_deadline - now) / 1000000ull)));
+        } else
             CHECK(n > 0);
     }
     CHECK(full && pushed > 0);
     uint64_t drained = 0;
+    uint64_t drain_deadline = clock_now_ns() + 5000ull * 1000000ull;
     for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
         int64_t n = ksock_recvfrom(a, buf, sizeof(buf), NULL);
-        if (n == -EAGAIN)
-            settle(10);
-        else if (n > 0)
+        if (n == -EAGAIN) {
+            uint64_t now = clock_now_ns();
+            CHECK(now < drain_deadline);
+            if (now >= drain_deadline)
+                break;
+            struct ready_target rt = { .s = a, .mask = COSMO_IO_READABLE };
+            CHECK(wait_until(ready_has, &rt, (unsigned)((drain_deadline - now) / 1000000ull)));
+        } else if (n > 0)
             drained += (uint64_t)n;
         else
             CHECK(n > 0);
     }
     CHECK(drained == pushed);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
     ksock_put(a);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_HANGUP); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_HANGUP };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK((ksock_ready(c) & COSMO_IO_HANGUP) && ksock_recvfrom(c, buf, sizeof(buf), NULL) == 0);
     ksock_put(c);
     ksock_put(ls);
@@ -1427,8 +1746,8 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == -EAGAIN);
     CHECK(ksock_ready(u) == COSMO_IO_WRITABLE);
     CHECK(ksock_sendto(u, "d", 1, &ua) == 1);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(u) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = u, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == 1);
     ksock_put(u);
 

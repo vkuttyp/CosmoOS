@@ -61,8 +61,9 @@ initiation and `online - 1` acknowledgements per chunk.
 `request_resched` sets the target's `need_resched` and sends
 `IPI_RESCHEDULE` only if the target is another online CPU; `sched_wake`
 and `sched_enqueue_new` request it only when the target is idle or
-running lower priority. Check: review; `smp-wake` bounds the wake
-latency of an idle CPU to under 2 ms, well below `TICK_NS`.
+running lower priority. Check: review; `smp-wake` counts an
+`IPI_RESCHEDULE` handled on the target between its blocking and its
+running again, and fails when the IPI is not sent.
 
 **SMP10. IPI handlers take no lock that an initiator holds while
 waiting.** `ipi_reschedule` does nothing, `ipi_call` runs the mailbox

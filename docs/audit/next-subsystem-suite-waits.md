@@ -1,8 +1,9 @@
 # NEXT SUBSYSTEM — the suite waits for time instead of for the property
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-**nothing in it is implemented**.
+and wait for the instruction to build it. **This report is as built**, and
+its proof design was wrong in the one way a first step could find: it
+proposed slowing the *host*, and slowing the host tips nothing.
 
 **Subsystem: the boot suite's timing assumptions.** Two hundred and
 forty-six self-tests are the evidence every unit in this repository cites,
@@ -12,6 +13,80 @@ test. On a loaded host those assertions are about the host. **Four
 distinct tests flaked in a single session on 2026-09-13**, one of them
 four times, one of them blocking a merge that had to be diagnosed, argued
 and re-run before it could land.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The proof lever.** The report proposed a slowed host (CPU spinners).
+   `settle(100)` is ten `thread_sleep_ms(10)` calls, so load stretches
+   the wait and the packet processing *together*: four spinners produced
+   one unrelated failure, twelve produced none, and full-speed spinners
+   never reached userland. **Slowing the work is the lever**: a 400,000-
+   iteration delay per frame in `lo_transmit` fails the unconverted tests
+   at exactly the lines that flaked (`983`, `1236`) and passes the
+   converted ones. It is injected by the proof and restored
+   byte-identical; nothing ships.
+2. **Twelve bare sites, not eleven -- and so ten hand-written waits,
+   not eleven.** The twenty-two `settle` calls were counted right; their
+   split was not. A `settle(20)` before the forged path-MTU quote (the
+   send must have been *transmitted* before its sequence is read) was
+   tallied among the loops and is a bare sleep, found only after `settle`
+   was deleted and the function it hid behind was gone. Every "eleven"
+   below is the report's count and is marked; the tree's is 12 + 10.
+   Twenty-four `wait_until` sites over twelve predicates replaced the
+   twenty-two calls.
+3. **The predicate rule gained an exception.** The absolute form -- one
+   field -- was written into the helper's contract and broken two
+   functions later by a predicate that sums two monotonic counters. That
+   is safe, and the contract now says why: with every field monotonic
+   and the predicate monotone in them, a torn read can only under-count.
+4. **Review found four waits that returned before the thing asserted**
+   -- the same defect one level up: a retransmit counter that means
+   "scheduled" where "delivered" was needed; a baseline taken too early;
+   `-EAGAIN` back-offs whose expiry was dropped; a two-field predicate
+   against the rule. All fixed; the fourth is why item 3 exists.
+5. **Shape B, as classified**: four restated into an observable, four
+   removed because the failure they named is a hang the watchdog reports,
+   two widened and labelled -- and `hv-vcpu-stop:601`, a third shape the
+   report's inventory missed ("another thread got there first"), restated.
+6. **The list has three entries** -- the two widened bounds (`sleep`,
+   `el2-guest-timer-ontime`) and one residual (item 9's `net-icmp-limit`)
+   -- not the example's `net-tcp-syncache`, which is converted and cannot
+   be load-sensitive any more. The harness
+   reads the table under one heading of `docs/testing/flakes.md` and
+   says so when the file is missing or parses to nothing.
+7. **Two things the report asked for and the first cut forgot**, added in
+   the last step: `warn_unused_result` on the helper (a dropped result is
+   a compile error under `-Werror`, proved) and a report line when a wait
+   used more than half its budget.
+8. **One deferral withdrawn as already built**: a per-test time budget in
+   the harness exists (`SELFTEST_BUDGET_MS`, 8 s, the watchdog's period).
+9. **The twenty-boot run found a flake the conversion had not touched.**
+   `net-icmp-limit` asserts at most one window's worth of replies to a
+   burst, and the ICMP limiter's window is a fixed second that begins
+   with whichever ICMP followed the last second of quiet -- a phase the
+   test never controlled. One boot in forty had the boundary inside the
+   burst. Neither a fixed sleep nor a wait for the flood can see that, so
+   the test now makes the phase known: fill the window, probe until an
+   echo is replied (the window rolled between two probes), flood into
+   the fresh window. The residual assumption -- a 20 ms flood decided
+   within a one-second window -- is a 50× margin and goes on the list.
+   **Review caught the first draft treating any accepted probe as a
+   fresh window**: a window that rolled inside the fill is of unknown
+   age, and a held vCPU makes that age anything. Only a refusal followed
+   by an acceptance says the window began between two probes.
+10. **The third repetition found something outside this unit**, and the
+   harness's per-test budget -- not an assertion -- is what caught it:
+   one x86-64 boot in twenty had `net-bench` take **71 s** against its
+   8 s budget with every self-test passing and the bench's own numbers
+   normal (TCP 33 to 61 MiB/s; the steer-off UDP round delivering 512 of
+   10,000, which it does in every boot because CPU 0's 512-deep receive
+   queue overflows by design). The time was lost *between* the measured
+   rounds, and 71 s is what a TCP retransmit backoff of 1+2+4+8+16+32 s
+   costs -- a segment dropped from that overflowed queue, most likely.
+   Not seen in the previous 80 boots; this branch does not touch
+   `net-bench`. **Named as a follow-up, not fixed here**, and not put on
+   the load-sensitive list: it is a real slowness with a mechanism to
+   find, and the list is for bounds that only the host can break.
 
 ## Problem
 
@@ -64,7 +139,9 @@ static bool threads_settle(unsigned expected)
 bounded by a generous deadline, and fail loudly if it never arrives. It is
 used by `schedtest.c`, `smptest.c` and `quiescetest.c`; it does not exist
 in `nettest.c` -- which has eleven bare sleeps of the other kind, and
-eleven places where the same idea is written out by hand. As with the
+eleven places where the same idea is written out by hand (*as built:
+twelve and ten; one of the "hand-written" eleven was a bare `settle(20)`,
+see the banner*). As with the
 last two units, this one finishes a rule the repository already holds
 rather than inventing one.
 
@@ -76,16 +153,23 @@ properly, and the correction halves the unit:
 
 | | count | what it is |
 | --- | --- | --- |
-| **already a bounded wait on a condition** | **11** | `for (i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++) settle(10);` — or the same written as a loop body with a `break`. This **is** `wait_until`, hand-written, with the budget expressed as iterations × 10 ms |
-| **bare sleep-then-assert** | **11** | `settle(100);` then a count. No relationship between the interval and the work. **The defect.** |
+| **already a bounded wait on a condition** | **11** (*as built: 10*) | `for (i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++) settle(10);` — or the same written as a loop body with a `break`. This **is** `wait_until`, hand-written, with the budget expressed as iterations × 10 ms |
+| **bare sleep-then-assert** | **11** (*as built: 12*) | `settle(100);` then a count. No relationship between the interval and the work. **The defect.** |
 
-The eleven that already wait are not flaky and are not what this unit is
-for. They would still read better as `wait_until` — a budget in
+**As built: twelve bare sites.** Before forging the ICMP "fragmentation
+needed" quote, the path-MTU test slept twenty milliseconds so that a
+blackholed 2000-byte send would have been *transmitted* before its
+sequence was read; it is observable (`snd_nxt` past a baseline) and is
+now waited for. Hand inspection found it only once `settle` was gone.
+
+The eleven (ten, as built) that already wait are not flaky and are not
+what this unit is for. They would still read better as `wait_until` — a budget in
 milliseconds says what it means where `i < 300` does not, and the failure
 message can name what was waited for — but that is tidying, and the report
 separates it from the work so that neither hides behind the other.
 
-**Nor are the eleven bare ones all the same conversion.** The observable
+**Nor are the eleven (twelve, as built) bare ones all the same
+conversion.** The observable
 differs, and so does what "done" means:
 
 | kind | what is waited for | conversion |
@@ -117,7 +201,10 @@ twenty-five. Of those, **the direction is what decides everything**:
 does not touch**.
 
 So the unit acts on **11 Shape A sites and 9 Shape B sites, 20 in all**,
-with eleven hand-written waits worth tidying alongside. The tightest of
+with eleven hand-written waits worth tidying alongside (*as built: 12
+Shape A sites, 10 hand-written waits, and a tenth Shape B site the
+inventory missed, `hvtest.c:601` -- 22 sites acted on, and the 10
+tidied*). The tightest of
 the nine are very tight:
 
 | site | assertion | what a loaded host does to it |
@@ -128,6 +215,20 @@ the nine are very tight:
 | `smptest.c:239` | `work[1].iterations > work[0].iterations / 4` | **flaked today** (`smp-parallel`) |
 | `hvtest.c:1279` | `late_ticks < asked_ticks` | **flaked today** (`el2-guest-timer-ontime`) |
 | `schedtest.c:166`, `:354`, `:485`, `smptest.c:263` | `< MS(80)`, `< MS(200)`, `< MS(500)`, `< MS(100)` | progressively safer, none proof against a busy host |
+
+**As built**, each classified from what it asserts, with the reasoning at
+the site (`fbe9c57`):
+
+| site | outcome | what it says now |
+| --- | --- | --- |
+| `smptest.c:239` (`smp-parallel`) | **restate** | an observer pinned to CPU 0 watches CPU 1's counter advance; both spinners pinned, a `strays` count proves neither ran elsewhere. An advance seen from CPU 0 is two CPUs executing at once. Proved: an AP that counts only while CPU 0 sleeps fails at `obs.advanced` |
+| `smptest.c:350` (`smp-wake`) | **restate** | the waiter reads `IPI_RESCHEDULE` handled on its own CPU either side of the block and the count must move; the "it is blocked now" sleep became a wait for `THREAD_BLOCKED`. The 2 ms never proved "the IPI, not the tick" -- a tick inside 2 ms passes too. Proved: the wake IPI removed in `sched.c` fails at the count, and *nothing else in the suite noticed* -- the tick carries liveness |
+| `polltest.c:89` (`realtime`) | **restate** | `clock_pair` brackets the wall-clock read with two monotonic reads and re-reads a pair wider than 100 µs; the tolerance is the bracket, ten times tighter. Proved: a 5 % drift fails the agreement; a pair interrupted every time fails the bracket |
+| `hvtest.c:601` (`hv-vcpu-stop`) | **restate** | `k.sent` was read the instant the run returned, but the kicker stores it *after* the stop that ends the run. The kicker is joined first and the claim is the ordering: `t1 >= sent_ns`. Proved three ways: the old check fails with the kicker held 50 ms after its stop; the new one passes under the same hold; a stop that is not the kicker's fails the ordering |
+| `smptest.c:263`, `schedtest.c:354`, `:485` | **restate into what was already asserted** | each named a failure that presents as no return, not a slow one -- the watchdog (8 s, scheduler dump) or `smp_call_function_single`'s own one-second panic. Nothing a kernel does wrong lands between "one slice late" and "never"; the bounds could fail only on a loaded host. Removed |
+| `schedtest.c:166` | **restate** | `udelay` spins on the very clock it was compared against (`timer.c`); the upper bound could measure only time off the CPU. Removed; the tick-rate check that follows is untouched |
+| `schedtest.c:368` (`sleep`) | **widen and label** | slack 3 ticks + 10 ms → 3 ticks + 100 ms, still an order of magnitude under a coarse-mechanism sleep. `LOAD-SENSITIVE`, listed |
+| `hvtest.c:1279` (`el2-guest-timer-ontime`) | **widen and label** | `late < asked` → `late < 4 × asked` (~60 ms), still an order of magnitude under a coarse park; measured 1.8 ms late against 15.6 ms asked. `LOAD-SENSITIVE`, listed |
 
 ### What it cost, on one day
 
@@ -166,7 +267,8 @@ that sentence is worth what the suite's determinism is worth.
 
 - `settle(ms)` in `nettest.c`, twenty-two call sites -- **eleven of them
   already inside a bounded wait on a condition**, eleven bare sleeps with
-  no relationship between the interval and the work.
+  no relationship between the interval and the work (*as built: ten and
+  twelve; the banner says which one moved*).
 - `threads_settle(expected)` in three scheduler and quiescence tests:
   correct, deadline-bounded, fails loudly.
 - Twenty-five duration assertions (a twenty-sixth match is a constant
@@ -209,7 +311,7 @@ that sentence is worth what the suite's determinism is worth.
 
 ## Design
 
-### Shape A: one helper, eleven conversions
+### Shape A: one helper, eleven conversions (twelve, as built)
 
 ```c
 /* kernel-services/network/nettest.c (and wherever else it is wanted) */
@@ -264,14 +366,28 @@ reading is how the last three units' test designs went wrong.
 
 `tests/boot/run_boot_test.py` gains one thing: when a self-test fails, it
 names it against a short list of **known load-sensitive tests** carried in
-the repository, and says so in the failure line:
+the repository, and says so in the failure line. **As built**, the list is
+the table under the "The list" heading of `docs/testing/flakes.md` and no
+other table in that file, and the example below is a captured report --
+`selftest_sleep` with its vCPU held 150 ms by an injected `udelay` --
+rather than the one the report imagined (whose test, `net-tcp-syncache`,
+is converted and not on the list):
 
 ```
-boot-test: FAIL after 74.4s
-  - SELFTEST: FAIL (1 of 246): net-tcp-syncache
-  - note: net-tcp-syncache is on the load-sensitive list (docs/testing/flakes.md);
-          a re-run distinguishes a flake from a regression
+boot-test: FAIL after 82.9s
+  - kernel reported failure via debug-exit
+  - forbidden marker /SELFTEST: FAIL/: SELFTEST: FAIL (1 of 246)
+  - note: sleep is on the load-sensitive list (docs/testing/flakes.md); a re-run distinguishes a flake from a regression
+  - no 'SELFTEST: PASS' line
 ```
+
+A run in which a self-test failed while the file is missing, or parses to
+no rows, says that instead; the list cannot go silently empty. Proved
+with the harness's own functions on captured logs: a failing test that is
+in the file's history table but not the list gets no note; a listed one
+gets the note; the heading renamed yields "lists no tests"; the file
+missing yields "is missing"; no failure yields no note whatever the
+list's state.
 
 It does **not** re-run automatically and it does **not** pass. Hiding a
 flake is worse than the flake. What it removes is the twenty minutes
@@ -301,6 +417,14 @@ assertion where it is — **after** the wait, where it is the test's claim
 rather than the wait's termination condition. No new sharing is
 introduced either way.
 
+**As built, the rule has one exception, and the file needed it two
+functions after the rule was written.** A predicate may span several
+unsynchronised fields when every field is monotonic and the predicate is
+monotone in them: a torn read then under-counts, which delays termination
+and never causes it. `syn_answered` (SYNs cached plus cookies sent) is
+the one instance, and the contract, the predicate and the call site now
+say the same thing (`ab9df52`).
+
 **Ownership / Lifetime.** None: the helper owns nothing and outlives
 nothing.
 
@@ -308,7 +432,12 @@ nothing.
 `CHECK`ed by every caller rather than ignored — a `wait_until` whose
 result is dropped is a `settle` again. The migration should make that
 impossible to get wrong where the language allows it (a
-`__attribute__((warn_unused_result))`).
+`__attribute__((warn_unused_result))`). **As built**: the attribute is on
+the helper and the kernel builds with `-Werror`; one site's `CHECK`
+removed gives `error: ignoring return value of function declared with
+'warn_unused_result' attribute`. A wait that used more than half its
+budget also prints `selftest: wait_until: waited N ms of a M ms budget`,
+the Risks section's mitigation, built.
 
 **Security.** None: test-only code.
 
@@ -324,11 +453,12 @@ fixed sleeps and starts scaling with the work.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/nettest.c` | `wait_until`; **11 bare `settle` sites converted** and 11 hand-written waits re-expressed; `settle` deleted when the last one goes |
-| `kernel/scheduler/smptest.c`, `-/schedtest.c`, `kernel/io/polltest.c`, `kernel-services/virtualization/hvtest.c` | the upper bounds classified: keep, restate or widen-and-label |
-| `tests/boot/run_boot_test.py` | name a failing test against the load-sensitive list in the failure line |
-| `docs/testing/flakes.md` | **new**: the list, what each bound is really asserting, and the rule |
-| `docs/kernel/*/testing.md` | the rule where each suite documents itself |
+| `kernel-services/network/nettest.c` | `wait_until`; **12 bare `settle` sites converted and 10 hand-written waits re-expressed** (as built; the report said 11 and 11 -- same 22 calls, one misfiled); `settle` deleted; 24 wait sites over 12 predicates; `warn_unused_result`; the near-budget report |
+| `kernel/scheduler/smptest.c`, `-/schedtest.c`, `kernel/io/polltest.c`, `kernel-services/virtualization/hvtest.c` | the upper bounds classified: 4 restated, 4 removed as restated into existing checks, 2 widened and labelled; `hvtest.c:601` restated |
+| `tests/boot/run_boot_test.py` | name a failing test against the load-sensitive list in the failure line; report a missing or empty list |
+| `docs/testing/flakes.md` | **new**: the list (three entries: two widened bounds and the limiter test's residual), what each bound asserts, what is not listed and why, the rule, the history |
+| `docs/verification/design.md` | §6: the note, beside the per-test timing it extends (as built; not in the report's table) |
+| `docs/kernel/scheduler/testing.md`, `-/smp/testing.md`, `-/smp/invariants.md`, `-/io/testing.md`, `docs/kernel-services/network/testing.md`, `-/virtualization/testing.md` | each test's description matches what it asserts now, and the waits-and-bounds rule where each suite documents itself |
 | `README.md` | Status entry |
 
 **No kernel change outside test files**, and no change any program can
@@ -344,14 +474,24 @@ One test-local helper. No syscall, no public header, no ABI.
 1. **`wait_until`, and the worst bare Shape A sites** — starting with
    `nettest.c:979`, the one that has actually flaked four times. Small enough to review as a pattern before it is
    applied to the rest.
-2. **The remaining Shape A sites**, and separately the eleven
-   hand-written waits, as tidying that must not be confused with the fix.
+2. **The remaining Shape A sites**, and separately the eleven (ten, as
+   built) hand-written waits, as tidying that must not be confused with
+   the fix.
 3. **`settle` deleted**, which is the check that step 2 was complete: a
    remaining caller means a missed site.
 4. **Shape B, classified one at a time**, with the reasoning recorded per
    site. The three that flaked today first.
 5. **The harness note and `docs/testing/flakes.md`.**
 6. **The documents.**
+
+**As built: all six steps landed**, in that order, as separate commits:
+`4e5d46a` (step 1, with the proof lever corrected), `79f7365` (step 2:
+ten of eleven, and the two that a mechanical conversion would have
+broken), `c32afa4` (step 3: `settle` deleted, the eleven hand-written
+waits, the twelfth bare site), `193d9f5` and `ab9df52` (review: the four
+waits, the contract), `fbe9c57` and `b3f366d` (step 4, and one review
+finding on it), `ffd6202` (step 5), and this document's commit (step 6,
+with `warn_unused_result` and the near-budget report).
 
 ## Tests
 
@@ -360,7 +500,8 @@ test reliability, and reliability is not something a single run can
 demonstrate.** A converted test passing proves nothing that the old one
 did not also prove on a good day.
 
-So the proof is a **deliberately slowed host**:
+So the proof is a **deliberately slowed host** -- **which is where the
+report was wrong; the as-run section below says what was done instead**:
 
 1. **A load switch.** A boot parameter (or a `#ifdef` the bug-proof
    builds) that makes `thread_sleep_ms` and the scheduler tick behave as
@@ -374,11 +515,21 @@ So the proof is a **deliberately slowed host**:
 3. **Under it, the converted tests must pass**, which is the unit's claim.
 4. **Without it, both pass**, which is what makes the switch the variable.
 
+**As built, the switch is a slowed *work* path, not a slowed host.** A
+delay per frame in `lo_transmit` (400,000 iterations of a volatile loop
+before the frame is queued), injected by the proof script and restored
+byte-identical afterwards. Under it, steps 2 and 3 of the list above hold
+exactly: the unconverted tree fails `net-tcp-syncache` at line 983 and
+`net-icmp-limit` at line 1236 -- the two lines that flaked -- and the
+converted tree fails nothing, waiting longer for the right answer
+(syncache ~630 ms, icmp-limit ~1.7 s). The only trip under the delay is
+`net-bench` against its 8 s budget, the scaffolding's own cost.
+
 **Then a repetition count.** Twenty consecutive boots of each
 architecture with no `SELFTEST: FAIL`. Twenty is not a proof of absence
 and the report does not pretend otherwise; it is the number at which
 today's rate — four failures across roughly forty boots — would be
-expected to show at least once.
+expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is refused and then until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.** Third, after review's refusal-first fix: **aarch64 20 of 20, x86-64 19 of 20**, the one a `net-bench` budget trip with every assertion passing (banner, item 10).
 
 **Bug-proofs**, each failing for its own reason: a converted site whose
 `wait_until` result is not `CHECK`ed (the expiry passes silently — this is
@@ -389,13 +540,47 @@ vacuity trap this repository has hit five times in three units); and a
 budget set below the work's real duration (the test fails loudly with the
 count it reached, which is the failure mode the design is for).
 
+### As run
+
+| proof | expected | got |
+| --- | --- | --- |
+| per-frame delay, unconverted tree | syncache and icmp-limit fail where they flaked | `FAIL ... at line 983`, `FAIL ... at line 1236` |
+| per-frame delay, converted tree | no assertion failure; waits take longer | zero failures; syncache ok (633 ms), icmp-limit ok (1751 ms), and **no** near-budget line, correctly: the longest wait under the delay (icmp-limit, ~1.6 s) is under half its 5 s budget; the line's own proof is the row below |
+| a `wait_until` result dropped | compile error | `error: ignoring return value ... 'warn_unused_result' ... [-Werror,-Wunused-result]` |
+| an AP that counts only while CPU 0 sleeps | `smp-parallel` fails at `obs.advanced` | yes (line 293, and 296 after the review fix) |
+| the wake IPI removed (`sched.c`) | `smp-wake` fails at the IPI count; nothing else notices | yes, line 423; 245 of 246 pass |
+| the wall clock drifts 5 % | `realtime` fails at the agreement | yes, line 120 |
+| every clock pair interrupted (`udelay(500)`) | `realtime` fails at `clock_pair` | yes, line 108 |
+| the kicker held 50 ms after its stop, old check | fails at `k.sent` | yes, line 612 |
+| the same hold, new check | passes | yes |
+| a stop that is not the kicker's | fails at `t1 >= k.sent_ns` | yes, line 614 |
+| harness: a failing test in the history table, not the list | no note | none |
+| harness: a listed test fails | the note | the note |
+| harness: heading renamed / file missing / no failure | "lists no tests" / "is missing" / nothing | each as expected |
+| harness, end to end: `selftest_sleep` held 150 ms | the real bound fails and the report names `sleep` | yes (captured in `docs/testing/flakes.md`) |
+| twenty boots per architecture, before the limiter-window fix | no `SELFTEST: FAIL` | aarch64 19/20, x86-64 20/20: `net-icmp-limit` once, at the limiter line -- the window boundary inside the burst |
+| the window's end forced inside the burst (a 1010 ms pause after 150 of the 300 echoes), probe present | `net-icmp-limit` fails at the limiter line: the residual is real and the assertion sees it | yes, line 1505 |
+| a timed adversary instead (a fresh window, then a sleep of 982 to 998 ms before the flood), probe absent | fails | **never straddled**, five tries: every flood got a full fresh window (100 replied). The network worker runs at lower priority on the test thread's CPU, so the flood is *processed* only once the send loop -- 10 to 20 ms under TCG -- has ended and the test first sleeps; a counter diagnostic across 1.1 s of the test's quiet showed no ICMP from anyone else. Recorded as what the proof taught, not as a proof |
+| **review's scenario, deterministic**: the window rolls inside the first fill (a 1010 ms pause after 50 of its 100 echoes), the first probe comes 500 ms into that window, and the flood takes 500 ms (a slow host); the first draft, which took any accepted probe as fresh | fails at the limiter line | yes, line 1517 |
+| the same injection, refusal required first | passes: the refill fills the half-elapsed window, a probe is refused, the accepted one that follows marks the window the flood goes into | yes, 99 replied, 201 refused |
+| the same, but with the roll applied to *every* fill (my first attempt at the pair) | -- | fails at the 5 s hang guard: a window that rolls inside every fill can never refuse. Not a host but a limiter that resets once per fill for ever; recorded because it is how the first pair was misdrawn |
+| the probe places the flood in the window it saw begin | 99 replied, 201 refused: the probe's own reply shares the flood's window | in every one of the forty boots, both architectures |
+| the near-budget line | prints past half a budget, not before | not provable through the stack: with the per-frame delay on either side of the loopback the wait after the sends is short, because the sends themselves pay the delay (the worker shares the sender's CPU). Isolated instead: a wait on a clock predicate for 1500 ms of a 2000 ms budget prints `waited 1499 ms of a 2000 ms budget`; one for 400 ms of 2000 prints nothing |
+| twenty boots per architecture, fixed tree | no `SELFTEST: FAIL` | **aarch64 20/20, x86-64 20/20** |
+| twenty boots per architecture, refusal-first tree | no `SELFTEST: FAIL` | **aarch64 20/20, x86-64 19/20** -- and the one is not an assertion: every self-test passed, `net-bench` took 71 s against its 8 s budget. See item 10 of the banner |
+
+Every injection was restored byte-identical (`cmp`, or `git checkout` on
+a committed tree with `git status` clean afterwards).
+
 ## Benchmarks
 
 1. **Suite wall-clock, before and after.** Roughly 900 ms of
    unconditional sleeping in `nettest.c` alone should mostly disappear.
    The number matters because a faster suite is re-run more willingly.
+   **As run:** `main`, one boot each: 59.9 s (aarch64) and 57.9 s (x86-64) of self-test time; this tree, mean of twenty: 58.0 s and 57.4 s, with a run-to-run spread of about ±2 s. The ~900 ms of sleeps are gone, but the difference is inside the spread, so the claim is "not slower" and nothing finer. After the limiter-window fix (a fill burst and up to a second of probing): 58.9 s and 57.9 s, means of twenty -- the same, within the spread.
 2. **The flake rate itself**, over the twenty-boot runs: the metric the
    unit exists to move, and the only honest way to state the result.
+   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree, **40 of 40**; the third, on the refusal-first tree, **39 of 40 with no assertion failure** -- the one a per-test budget trip in `net-bench`, named below as a finding
 
 ## Risks
 
@@ -404,7 +589,8 @@ count it reached, which is the failure mode the design is for).
   slowdown looks like success until it crosses the new ceiling. The
   mitigation is that `wait_until` can report *how long it waited* when it
   is close to the budget — a test that habitually takes 1.9 s of a 2 s
-  budget is a finding, not a pass.
+  budget is a finding, not a pass. **Built**: a wait past half its budget
+  prints how long it waited.
 - **Shape B may not be fixable in every case.** Some properties are
   genuinely temporal. The honest outcome for those is "widen and label",
   and the report says so in advance rather than discovering it and
@@ -412,7 +598,10 @@ count it reached, which is the failure mode the design is for).
 - **The load switch is test scaffolding that ships.** The same argument
   the condition-variable unit had about its probe, and it should get the
   same treatment: compiled in, argued for, and priced — or built as a
-  boot parameter that costs nothing when unset.
+  boot parameter that costs nothing when unset. **As built, nothing
+  ships**: the delay is a three-line injection into `loopback.c` that
+  the proof applies and restores, which is possible only because the
+  lever turned out to be the work and not the host.
 - **Twenty boots is a long verification.** Roughly forty minutes per
   architecture. That is the cost of making a claim about reliability at
   all, and the alternative is asserting it.
@@ -437,15 +626,20 @@ count it reached, which is the failure mode the design is for).
 ---
 
 Named and deferred by this unit: the userland test programs' own timing
-assumptions (`thrtest`, `cwdtest`), and a per-test time budget in the
-harness.
+assumptions (`thrtest`, `cwdtest`), and **`net-bench`'s once-in-a-hundred
+71-second run** (banner, item 10: throughput normal, the time lost
+between rounds, a retransmit backoff after a receive-queue drop the
+likeliest mechanism). ~~And a per-test time budget in the
+harness~~ -- **withdrawn as built**: one exists, `SELFTEST_BUDGET_MS` (8 s,
+the watchdog's period), and the harness has failed a test on it since
+the verification unit (`docs/verification/design.md`, §6).
 
 **A third deferral was withdrawn after review asked why it conflicted with
 the scope, and the answer was that it should not have been there.** It
 read: "the `net-icmp-limit` family's shared `settle` in the other
 direction — a *maximum* count after a flood, which a slow host makes pass
-spuriously." Five of the eleven bare `settle` sites are inside
-`selftest_net_icmp_limit`, so the deferral and the conversion count
+spuriously." Five of the eleven (twelve, as built) bare `settle` sites
+are inside `selftest_net_icmp_limit`, so the deferral and the conversion count
 contradicted each other, which is what review found.
 
 Looking at the code resolves it in the other direction. One `settle(100)`

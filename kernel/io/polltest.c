@@ -74,18 +74,49 @@ bool selftest_io_poll(const char **reason)
     return true;
 }
 
+/* Both clocks, read close enough together that comparing them is exact.
+ * The wall clock is the monotonic clock plus an offset (timer.c), so a
+ * pair read `gap` apart is off the true pair by at most `gap`. A pair
+ * whose bracketing monotonic reads are more than CLOCK_PAIR_NS apart was
+ * interrupted -- a tick, or the host holding the vCPU -- and is read
+ * again; a thousand interrupted reads in a row is a failure worth
+ * seeing. On a quiet host the first read is a few hundred nanoseconds. */
+#define CLOCK_PAIR_NS (100ull * 1000)
+
+static bool clock_pair(uint64_t *rt, uint64_t *mono)
+{
+    for (int tries = 0; tries < 1000; tries++) {
+        uint64_t m0 = clock_now_ns();
+        uint64_t r = clock_realtime_ns();
+        uint64_t m1 = clock_now_ns();
+        if (m1 - m0 <= CLOCK_PAIR_NS) {
+            *rt = r;
+            *mono = m0;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool selftest_realtime(const char **reason)
 {
     /* The wall clock: set from the RTC at boot (both QEMU machines have
      * one), so a date after 2020 and before 2100; it advances with the
      * monotonic clock. */
-    uint64_t rt0 = clock_realtime_ns(), m0 = clock_now_ns();
+    uint64_t rt0, m0, rt1, m1;
+    CHECK(clock_pair(&rt0, &m0));
     CHECK(rt0 / 1000000000ull > 1600000000ull);
     CHECK(rt0 / 1000000000ull < 4102444800ull);
     thread_sleep_ns(5 * 1000000ull);
-    uint64_t rt1 = clock_realtime_ns(), m1 = clock_now_ns();
+    CHECK(clock_pair(&rt1, &m1));
     uint64_t drt = rt1 - rt0, dm = m1 - m0;
     CHECK(drt >= 4 * 1000000ull);
-    CHECK(drt <= dm + 1000000ull && dm <= drt + 1000000ull);   /* the same ticks behind both */
+    /* The same ticks behind both: each pair was read within CLOCK_PAIR_NS,
+     * so the two advances differ by at most that. This was a 1 ms
+     * tolerance on pairs read back to back, which held only while nothing
+     * -- a tick, the host -- landed between the two reads of a pair; the
+     * bracket makes that a re-read instead of a failure, and the
+     * tolerance ten times tighter. */
+    CHECK(drt <= dm + CLOCK_PAIR_NS && dm <= drt + CLOCK_PAIR_NS);
     return true;
 }

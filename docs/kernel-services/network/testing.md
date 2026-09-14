@@ -127,10 +127,20 @@ with `tcp_set_fin_wait2(100 ms)` a client connects and closes while the
 server holds its end: the orphaned FIN_WAIT_2 is reaped
 (`fin_wait2_timeouts` +1) within 2 s. Both hooks are restored.
 
-**`net-icmp-limit`**: 300 echo requests to `127.0.0.1` in a burst: all
+**`net-icmp-limit`**: first the limiter's window is made known -- a
+burst of 100 echoes fills it and one echo probes it, again until a probe
+is refused (a window that rolled inside a fill is of unknown age), then
+one echo every 10 ms until one is replied, which says a fresh one-second
+window began between two probes
+-- and then 300 echo requests to `127.0.0.1` in a burst into it: all
 counted as received, at most 100 replied, at least 200
 `icmp_ratelimited` (unreachables are never sent for 127/8, so the echo
-path carries the test). Then a connection to a holding server over `lo`
+path carries the test). The waits are on echoes *decided* (replied plus
+refused), since the handler counts receipt before it decides. Without
+the probe the window's phase was chance, and one boot in forty had its
+boundary inside the burst (replies from two windows); what the test
+still assumes, a 20 ms flood decided within the window's second, is on
+the load-sensitive list. Then a connection to a holding server over `lo`
 (`mss` 16384, `ipv4_path_mtu(127.0.0.1)` 65535) with the black-hole
 filter keeping 2000 sent bytes in flight; a crafted ICMP type 3 code 4
 with MTU 1500 quoting the client's header with a sequence number 5000
@@ -758,6 +768,51 @@ lists exactly its two seeds; the snapshot carries at least five rules).
 from the filter section the read appends (ABI version 2 and later: its
 header, the attached guests' policies and rules), rather than assumed to end
 at the port-forward rules.
+
+## Waiting for a property (`wait_until`)
+
+No test in this file sleeps a fixed interval and then counts. `settle(ms)`
+did that at twenty-two sites and is gone; each is a `wait_until(pred,
+arg, budget_ms)` -- a deadline loop on an observable that returns as soon
+as the property holds and `false` on expiry, which every caller `CHECK`s
+(`warn_unused_result`; a dropped result is a compile error). Twenty-four
+sites over twelve predicates: a readiness bit (`ready_has`), a state
+reached or left (`tcp_state_is`, `tcp_left_established`), a counter past
+a baseline (`tcp_counter_reached`, `challenge_acks_reached`,
+`echoes_received`, `needfrag_received`, `retransmit_happened`,
+`ip_pmtu_reached`), a control-block field past a baseline
+(`tcp_sent_since` on `snd_nxt`, `tcp_acked_since` on `snd_una`), and one
+monotone sum (`syn_answered`).
+
+**The predicate rule.** The observables are read without the lock that
+protects them, so a predicate may not require a coherent view of more
+than one field -- unless every field is monotonic and the predicate is
+monotone in them, in which case a torn read can only under-count and
+delay termination. Anything else waits on one field, and the multi-field
+*assertion* stays after the wait as the test's claim. Two shapes worth
+knowing: a **negative** assertion ("the bad packet changed nothing") is
+made waitable by waiting for the event it is a statement about (the
+challenge ACK, the parsed quote), and a wait must mean what its caller
+goes on to assert (`retransmits` advances when a segment is *scheduled*;
+"delivered" is the peer's `snd_una`).
+
+Budgets are seconds where the sleeps were tens of milliseconds, and cost
+nothing when the property holds at once; a wait that used more than half
+its budget prints `selftest: wait_until: waited N ms of a M ms budget`,
+so a slowdown shows before it becomes a failure.
+
+**The proof, reproducible.** A slowed *host* does not tip these tests --
+load stretches the sleep and the work together -- so the proof slows the
+*work*: a `for (volatile unsigned z = 0; z < 400000u; z++) { }` before
+`m->flags |= M_CSUM_OK;` in `loopback.c`'s transmit path, per frame.
+Under it the old tree failed `net-tcp-syncache` at line 983 and
+`net-icmp-limit` at line 1236, the two lines that flaked; this tree fails
+nothing and waits longer (syncache ~630 ms, icmp-limit ~1.7 s). The only
+trip under the delay is `net-bench` against its 8 s budget, the
+scaffolding's own cost. Restore `loopback.c` byte-identical afterwards.
+The rule for time bounds elsewhere, and the list of tests that carry one,
+is `docs/testing/flakes.md`; one of this file's tests is on it,
+`net-icmp-limit`, for the second its flood must fit in.
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

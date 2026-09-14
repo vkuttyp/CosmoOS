@@ -14,6 +14,11 @@ PASS/FAIL from two independent signals:
 Both must agree. A timeout, a panic marker, or a missing marker is a
 failure. The full serial log is always written to --log and echoed on
 failure so CI output is self-explanatory.
+
+A failing self-test that is on the repository's load-sensitive list
+(docs/testing/flakes.md) is named as such in the failure report, so the
+reader knows within one line whether a re-run is the first step. The run
+still fails: the note is a label, not a retry.
 """
 
 import argparse
@@ -26,6 +31,63 @@ import sys
 import time
 
 EXIT_SUCCESS_VALUE = 0x10
+
+# The load-sensitive list lives in the documentation, in one place, so
+# that adding a test to it means writing down what its bound asserts and
+# why nothing observable can replace it. The harness reads the table
+# under that file's "## The list" heading, up to the next heading: a row
+# whose first cell is a self-test name in backticks. Tables elsewhere in
+# the file (its history) are not the list.
+REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+FLAKES_DOC = os.path.join("docs", "testing", "flakes.md")
+FLAKES_ROW = re.compile(r"^\| `([A-Za-z0-9_.-]+)` \|")
+FLAKES_LIST_HEADING = "## The list"
+SELFTEST_FAIL = re.compile(r"^SELFTEST: (\S+)\s+\.\.\. FAIL")
+
+
+def load_sensitive_tests(path):
+    """The self-test names listed in docs/testing/flakes.md, or None when
+    the file is missing."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+    except OSError:
+        return None
+    names = set()
+    in_list = False
+    for ln in lines:
+        if ln.startswith("## "):
+            in_list = ln.strip() == FLAKES_LIST_HEADING
+            continue
+        m = FLAKES_ROW.match(ln) if in_list else None
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def failed_selftests(lines):
+    """Names of the self-tests whose own line says FAIL, in log order."""
+    names = []
+    for ln in lines:
+        m = SELFTEST_FAIL.match(ln)
+        if m and m.group(1) not in names:
+            names.append(m.group(1))
+    return names
+
+
+def load_sensitive_notes(failed, listed):
+    """One failure-report line per failing test that is on the list.
+    `listed` is None when the list could not be read; that is reported
+    once, since a silent loss of the list is the failure this guards."""
+    if not failed:
+        return []
+    if listed is None:
+        return [f"note: {FLAKES_DOC} is missing, so no failing test can be named against the load-sensitive list"]
+    if not listed:
+        return [f"note: {FLAKES_DOC} lists no tests; its table format has changed and the harness reads none"]
+    return [f"note: {name} is on the load-sensitive list ({FLAKES_DOC}); "
+            "a re-run distinguishes a flake from a regression"
+            for name in failed if name in listed]
 EXIT_FAILURE_VALUE = 0x11
 
 ARCH = os.environ.get("COSMO_ARCH", "x86_64")
@@ -487,6 +549,10 @@ def main():
         for ms, name in timings:
             if ms > budget_ms:
                 failures.append(f"self-test {name} took {ms} ms (budget {budget_ms} ms)")
+    # A failing self-test on the load-sensitive list is named as such
+    # (docs/testing/flakes.md). The run fails either way.
+    failures.extend(load_sensitive_notes(failed_selftests(selftest_lines),
+                                         load_sensitive_tests(os.path.join(REPO_ROOT, FLAKES_DOC))))
     want_selftest = args.expect_selftest == "yes" or (args.expect_selftest == "auto" and selftest_lines)
     if want_selftest and not any(ln.startswith("SELFTEST: PASS") for ln in selftest_lines):
         failures.append("no 'SELFTEST: PASS' line")

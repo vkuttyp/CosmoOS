@@ -25,18 +25,25 @@ Two threads each loop 200 times incrementing a counter and calling
 
 ### `preempt`
 A thread spins on an atomic flag without ever yielding. Thread 0 sleeps
-30 ms and checks the elapsed time is in `[30 ms, 200 ms)`, then sets the
-flag and joins. Thread 0 can only wake if the spinner is preempted:
+30 ms and checks it slept at least that, then sets the flag and joins. Thread 0 can only wake if the spinner is preempted:
 the timer callback marks it READY, and either the spinner's 10 ms slice
 expires (`rr_tick` sets `need_resched` because an equal-priority thread
 is ready) or the wake itself requests one. `s->switches >= 1` confirms
-the spinner was switched in at least once. The 200 ms bound is
-30 ms sleep + one slice + TCG slack.
+the spinner was switched in at least once. There is no upper bound on
+the sleep: a spinner that is never preempted does not return late, it
+never returns, and the self-test watchdog reports that with a scheduler
+dump. A `< 200 ms` used to sit here; nothing a kernel does wrong lands
+between "one slice late" and "never", so it could fail only on a loaded
+host (`docs/testing/flakes.md`).
 
 ### `sleep`
 `thread_sleep_ms(20)` must take at least 20 ms and less than
-20 ms + 3 ticks + 10 ms (12 + 10 ms of slack for the tick phase and
-scheduling latency); `thread_sleep_ns(1 ms)` must not return early. The
+20 ms + 3 ticks + 100 ms; `thread_sleep_ns(1 ms)` must not return early.
+The upper bound is genuinely temporal -- it says the wake is the first
+tick past the deadline and not a coarser mechanism -- and nothing
+observable replaces it, so the test is on the load-sensitive list
+(`docs/testing/flakes.md`): the slack was 10 ms and failed on a correct
+kernel when the host held the vCPU (2026-09-13). The
 lower bounds are exact because `timer_start` computes
 `expires = now + delay` and `run_expired` fires only when
 `expires <= now`.
@@ -54,6 +61,13 @@ exclusion; the lock is free afterwards.
 Consumer thread does five `semaphore_down` on a semaphore initialised
 to 0; thread 0 verifies nothing was consumed after 5 ms, then does five
 `semaphore_up` 2 ms apart. `consumed == 5` and `semaphore_count == 0`.
+Then two consumers and ten posts with no sleep between them: every post
+must reach a distinct blocked waiter even though the first woken one is
+still linked. The joins are the check -- a post that wakes the
+already-woken consumer again leaves the other blocked for ever, which
+the watchdog reports -- then `consumed == 10` and a count of 0. A
+`< 500 ms` on the joins used to follow and named nothing the joins do
+not.
 
 ### `completion`
 A thread sleeps 10 ms then `complete`s. `wait_for_completion` returns
@@ -108,6 +122,18 @@ join; the queue is empty.
   crash-test variant (`CRASH_TEST=2`) that recurses on a thread stack.
 - Stress: thousands of short-lived threads, thread creation from inside
   threads, and randomised sleep/wake interleavings.
+
+## Waits and time bounds
+
+A test waits for the property, never for an interval: a bounded deadline
+loop on an observable (`threads_settle` here, `wait_until` in
+`nettest.c`) whose expiry is `CHECK`ed. An upper bound on elapsed time is
+one of three things, decided at the site and written there: the property
+itself, or a guard so generous only a broken host fails it (kept); a
+proxy for something observable (restated as that); or genuinely temporal
+with nothing to replace it (widened, labelled `LOAD-SENSITIVE`, and
+listed in `docs/testing/flakes.md`, which the boot harness reads to name
+a failing test against). `sleep` is this suite's one listed test.
 
 ## Running
 

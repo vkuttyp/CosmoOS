@@ -163,7 +163,10 @@ bool selftest_timer(const char **reason)
     uint64_t c1 = clock_now_ns();
     uint64_t t1 = timer_ticks();
     CHECK(c1 - c0 >= MS(40));
-    CHECK(c1 - c0 < MS(80));
+    /* No upper bound on the delay: udelay spins on this same clock until
+     * it reads `end` (timer.c), so c1 - c0 exceeds 40 ms only by the time
+     * this thread spent off the CPU -- a tick, another thread, the host.
+     * A `< 80 ms` that used to be here could measure only that. */
     uint64_t expected = (c1 - c0) / TICK_NS;
     uint64_t lag_allowed = expected / 2 > 2 ? expected / 2 : 2;
     if (t1 - t0 + lag_allowed < expected) {
@@ -348,10 +351,15 @@ bool selftest_preempt(const char **reason)
     uint64_t t0 = clock_now_ns();
     thread_sleep_ms(30);
     uint64_t elapsed = clock_now_ns() - t0;
-    /* We are running again despite the spinner: preemption works.
-     * Bound: sleep + up to one slice of the spinner + slack. */
+    /* We are running again despite the spinner, and the spinner was
+     * switched out to let us: preemption works. There is no upper bound
+     * on `elapsed`; a `< 200 ms` used to sit here, and the failure it
+     * named -- a spinner that is never preempted -- does not show as a
+     * slow return but as no return, which the harness watchdog reports
+     * with a scheduler dump (selftest.c). Nothing a kernel can do wrong
+     * lands between "one slice late" and "never", so the bound could
+     * fail only on a loaded host. */
     CHECK(elapsed >= MS(30));
-    CHECK(elapsed < MS(200));
     CHECK(s->switches >= 1);
     stop = 1;
     thread_join(s);
@@ -365,7 +373,15 @@ bool selftest_sleep(const char **reason)
     thread_sleep_ms(20);
     uint64_t d = clock_now_ns() - t0;
     CHECK(d >= MS(20));
-    CHECK(d < MS(20) + 3 * TICK_NS + MS(10));
+    /* LOAD-SENSITIVE (docs/testing/flakes.md). A sleep wakes at the first
+     * tick past its deadline, so its overshoot is a tick or so; the bound
+     * says it is not a coarser mechanism (a sleep serviced every 100 ms
+     * would fail it). It was `3 * TICK_NS + 10 ms` of slack and failed on
+     * a correct kernel once a host held this vCPU for longer than that
+     * (2026-09-13); the slack is now 100 ms, which is still an order of
+     * magnitude under a coarse-mechanism bug, and a failure here on a
+     * busy host is a re-run before it is an investigation. */
+    CHECK(d < MS(20) + 3 * TICK_NS + MS(100));
 
     /* Short sleeps must not wake early. */
     t0 = clock_now_ns();
@@ -479,10 +495,13 @@ bool selftest_semaphore(const char **reason)
     thread_sleep_ms(5); /* both blocked in semaphore_down */
     for (int i = 0; i < 10; i++)
         semaphore_up(&st2.items);
-    uint64_t t0 = clock_now_ns();
+    /* The joins are the check: a post that woke the already-woken
+     * consumer again leaves the other blocked with items on the
+     * semaphore, and this never returns -- the harness watchdog reports
+     * it (selftest.c). A `< 500 ms` on the joins used to follow; it named
+     * no failure the joins do not, and could fail only on a loaded host. */
     thread_join(c1);
     thread_join(c2);
-    CHECK(clock_now_ns() - t0 < MS(500));
     CHECK(st2.consumed == 10);
     CHECK(semaphore_count(&st2.items) == 0);
     CHECK(threads_settle(before));
