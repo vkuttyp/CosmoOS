@@ -1,8 +1,9 @@
 # NEXT SUBSYSTEM — a wake that preempts
 
 Constitution §68: after the audit, name the next subsystem in this shape
-and wait for the instruction to build it. This is that report, and
-**nothing in it is implemented**.
+and wait for the instruction to build it. **This report is as built**
+(PR #134), and the banner below records where the build differed from
+it.
 
 **Subsystem: the scheduler's fourth preemption point, and the network
 worker's priority decided by measurement.** The scheduler documents that
@@ -20,6 +21,37 @@ debt and assigned it to the lockdep milestone, which did not do it; the
 audit filed it as 4.2 MEDIUM. Closing it also unblocks the one decision
 that has been waiting on it: whether the network worker should run above
 the threads that feed it.
+
+**What the build changed, each found by building rather than reading:**
+
+1. **The probe is a read, not a write, and returns one flag, not two
+   sequence numbers.** This kernel's `sysctl` is read-only
+   (`debug.faultinject` reports a boot parameter; nothing writes a
+   sysctl), so the *read* of `debug.preempt_probe` is the system call
+   under test, and its value is the waiter's `saw`, the same word the
+   kernel tests read -- one claim, one word. Privileged, debug builds
+   only, `ENOENT` on a release kernel, which `init --selftest` asserts
+   too.
+2. **The worker's priority is 32, the default, not 31.** The rule the
+   report committed to vetoed 31: with steering on the worker preempts
+   its feeder on every enqueue and the one-flow TCP figure collapses (a
+   median of 12 MiB/s from 40 on AArch64), and one x86-64 boot in five
+   hung. 32 survives the veto and delivers 9 300 to 10 000 of 10 000
+   against 40's 512. The table is in
+   `docs/kernel-services/network/design.md`, "The worker's priority".
+3. **The measurement found a latent spin.** At 31, `net-steer` hung once:
+   the worker on CPU 3 running for over eight seconds at `preempt 0`,
+   the injector thread pinned there never scheduled, the test thread
+   joined on it. At 40 the same spin, if it exists, is masked by the
+   tick letting the feeder run. Not reproduced in five boots on AArch64
+   or at 32 or 40; a diagnosis needs the running thread's PC, which the
+   watchdog dump does not carry. Recorded in the inventory as a
+   follow-up with the dump below.
+4. **The as-run wake-to-run latency**: 20-77 µs on both architectures,
+   from a floor of up to 4 000 µs.
+5. **Nothing else moved**: the point, the two arch call sites, the three
+   kernel tests, the counter, the micro-benchmark and the documents
+   landed as the affected-files table lists them, in four steps.
 
 ## Problem
 
@@ -273,6 +305,38 @@ preempting worker would need (wake once per burst, not per packet -- an
 `avail` bit the enqueue sets and the wake consumes) becomes the
 follow-up rather than something smuggled into this unit.
 
+**As run** (2026-09-14, five boots per setting per architecture; the
+full table is in `docs/kernel-services/network/design.md`, "The
+worker's priority"): 31 is vetoed by rule 1 on both architectures --
+steering on, one-flow TCP 5-40 MiB/s (median 12) on AArch64 and 7-64
+(median 39) on x86-64 against 35-68 and 38-65 at 40 -- and, beyond the
+rule, one x86-64 boot in five at 31 hung in `net-steer` (below). 32
+passes rule 1 everywhere (every TCP figure within 40's spread or above
+it) and wins rule 2: 9 300 to 10 000 of 10 000 delivered against 40's
+510 to 512. Rules 3 and 4 were not reached. `NET_WORKER_PRIO` is
+`SCHED_PRIO_DEFAULT`.
+
+The hang at 31, the watchdog's dump 8 s into `net-steer` on x86-64
+(the injector `steer-inj` created on CPU 3, never run; the worker
+current there with no lock held):
+
+```
+[WATCHDOG] no progress for 8002 ms; scheduler state:
+cpu 0: online current 'idle'    queued 0 ... need_resched 0 preempt 0 irq_depth 1
+cpu 3: online current 'netrx/3' queued 1 ... bitmap 0x100000000 need_resched 0 preempt 0 irq_depth 0
+ tid name       state    pri cpu  run_ms  switch waiting_on
+   1 kmain      blocked   32   0    9473    4430 completion-wq
+  11 netrx/3    running   31   3      93     345 -
+ 167 steer-inj  ready     32   3       0       0 -
+```
+
+A worker that outranks every default thread on its CPU can only be
+displaced by blocking, so whatever it is looping in -- the receive
+loop, the work list, or a wait whose condition never goes false -- is a
+spin that at 40 is hidden by the tick. It is not chased in this unit:
+the setting it needs is vetoed on throughput alone, and the diagnosis
+needs the running thread's program counter.
+
 ### The §70 gate
 
 **Correctness.** The predicate for a preemption point is stated once
@@ -324,8 +388,8 @@ is the observation.
 | `kernel/arch/x86_64/cpu.c` | `arch_irq_restore` calls it after `sti` |
 | `kernel/arch/aarch64/irq.c` | the same after the DAIF write when I is cleared |
 | `kernel-services/network/netif.c` | the worker's priority, as measured (one constant, with the measurement in the comment) |
-| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and completed by the sysctl's own write); **`irqrestore-bench`**, the micro-benchmark of the Benchmarks section, a self-test that prints and asserts nothing, in the shape of `fpu-bench` |
-| `kernel/syscall/native.c` | the `debug.preempt_probe` sysctl entry in the registry (debug builds; writable; privileged, like `debug.faultinject`), dispatching to the probe in `schedtest.c` |
+| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and posted by the sysctl's own *read*, as built); **`irqrestore-bench`**, the micro-benchmark of the Benchmarks section, a self-test that prints and asserts nothing, in the shape of `fpu-bench` |
+| `kernel/syscall/native.c` | the `debug.preempt_probe` sysctl entry in the registry (debug builds; privileged; **read-only, as every sysctl here is -- its read is the call**, an as-built correction to this row's "writable"), dispatching to the probe in `schedtest.c` |
 | `userland/init/init.c` | `preempt-wake-syscall`: a wake made inside a system call preempts before the call returns, observed through the probe -- one step of `init --selftest` |
 | `kernel-services/network/nettest.c` | `net-bench` unchanged; its UDP delivered count becomes the worker decision's evidence and the report quotes it |
 | `docs/kernel/scheduler/design.md`, `invariants.md` (S8 → four points), `testing.md` | the rule and its check |
@@ -334,7 +398,7 @@ is the observation.
 | `README.md` | Status entry |
 
 **No kernel change outside these** -- in particular no hook in any wake
-path: the probe's sysctl write is itself the system call that wakes,
+path: the probe's sysctl *read* is itself the system call that wakes,
 so `SYS_futex_wake` and its kin are untouched -- no UAPI, and no module
 ABI change (`arch_irq_restore` keeps its signature; modules that call
 it get the point for free).
@@ -363,6 +427,13 @@ Internal. No syscall, no header a program sees.
    rule above; the numbers in the design document.
 4. **The documents**: S8 becomes four points; the inventory's entries
    struck; the as-built banner.
+
+**As built: all four steps landed, in order, on PR #134**: `39faed4`
+(step 1: the point and `preempt-wake`), `1c71c21` (step 2: the direct
+and bare-region shapes, the probe and init's step), `b250124` (step 3:
+the worker at the default priority, by the numbers), and the documents
+commit (step 4, with `irqrestore-bench` and the restore-point counter,
+which the first cut had left for last).
 
 ## Tests
 
@@ -401,16 +472,17 @@ reason, then restoring the source byte-identically.
 - **`preempt-wake-syscall`** (user mode, `init --selftest`). A
   debug-only, privileged sysctl `debug.preempt_probe`, registered in
   `kernel/syscall/native.c` beside `debug.faultinject` and handled in
-  `schedtest.c`: **its own write is the system call under test**. The
+  `schedtest.c`: **its read is the system call under test** (as built;
+  the report said "write", and this kernel's sysctl has no write). The
   handler creates a priority-16 thread pinned to the caller's CPU,
-  waits for it to be blocked on a completion (the `THREAD_BLOCKED`
-  discipline), completes it -- a wait-queue wake made inside a system
-  call -- and then, as its next statement, records a per-CPU sequence
-  number; the probe thread records the same counter as its first
-  statement. The sysctl's read returns both numbers, and the test asserts
-  the probe's is lower: the probe ran before the system call that woke
-  it reached its own next line, let alone returned to user mode. No wake
-  path gains a hook. **Bug-proof**: the same removal as above; the probe
+  waits for it to be blocked on a semaphore (the `THREAD_BLOCKED`
+  discipline), posts -- a wait-queue wake made inside a system call --
+  and then, as its next statement, stores `after = 1`; the probe thread
+  reads `after` as its first statement. The value returned is `saw=N`
+  and the test asserts `saw=0`: the probe ran before the system call
+  that woke it reached its own next line, let alone returned to user
+  mode (as built, one flag rather than the report's two sequence
+  numbers; the same claim). No wake path gains a hook. **Bug-proof**: the same removal as above; the probe
   runs after the return (at the tick), the numbers invert. This is the
   test that justifies not adding a system-call-return point, and would
   name the day one is needed.
@@ -433,6 +505,21 @@ sentinel (2), waits for the waiter to read `THREAD_BLOCKED` before
 posting (the discipline `smp-wake` adopted), and asserts `saw` is
 exactly 0, not "not 1".
 
+### As run
+
+| proof | expected | got |
+| --- | --- | --- |
+| the point removed from both restores | `preempt-wake`, `-direct`, `-locked` and the init step fail | 4 of 249 self-tests, both arches: every `saw` reads 1 -- the waiter ran at the tick |
+| the point placed *before* the enable | fails the same way | yes, both arches |
+| the point in `spin_unlock_irqrestore` only (the rejected design) | only `preempt-wake-locked` fails | exactly that, both arches |
+| `sched_preempt` called from `spin_unlock`'s lockdep bracket without the guard | its `KASSERT(preempt_count == 0)` fires at the first unlock with a reschedule pending | yes: `KERNEL PANIC: assertion failed: pc->irq_depth == 0 && pc->preempt_count == 0 ... (sched_preempt)` 6 s into the x86-64 boot -- the guard is load-bearing, not decorative |
+| a release-build boot | init's step asserts `ENOENT` and passes | x86-64, PASS |
+| the existing `preempt` (a spinner displaced from interrupt context) | unchanged, passing | yes |
+
+Every injection was restored by `git checkout` on a committed tree with
+`git status` clean afterwards; the aarch64 arm of the first proof was
+rerun once because the injection's first form did not compile.
+
 ## Benchmarks
 
 1. **The cost of the point**: `fpu-bench`'s switch measurement and
@@ -448,6 +535,18 @@ exactly 0, not "not 1".
    sends per second and delivered of 10 000, steering off and on, both
    arches. This is the decision, and its table goes in the design
    document whatever it says.
+
+**As run.** (1) `irqrestore-bench`: a million `arch_irq_save`/`restore` pairs at
+237 ns a pair on AArch64 and 210 ns on x86-64 under TCG -- the pair
+itself, of which the predicate's two loads and a not-taken branch are a
+small part; 13 restore-point preemptions had been taken by then in each
+boot. `fpu-bench`'s switch: 2 883 ns on AArch64 (3 045 and 2 785 in
+earlier boots today, before the point) and 2 648 ns on x86-64 (2 399 and
+2 785 before), inside its own spread on both. (2) Wake-to-run, same CPU: 56-77 µs
+(`preempt-wake`), 20-25 µs (`-direct`), 23-24 µs (`-locked`) across
+both architectures, from a floor of up to 4 000 µs. (3) The table is in
+`docs/kernel-services/network/design.md`, "The worker's priority"; the
+decision is 32.
 
 ## Risks
 

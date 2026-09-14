@@ -1,6 +1,7 @@
 /* irq.c - Local interrupt masking through PSTATE.DAIF (docs/kernel/arch/aarch64/design.md). */
 
 #include <arch/irq.h>
+#include <kernel/percpu.h>
 #include <aarch64/sysreg.h>
 
 arch_irq_state_t arch_irq_save(void)
@@ -13,6 +14,10 @@ arch_irq_state_t arch_irq_save(void)
 void arch_irq_restore(arch_irq_state_t state)
 {
     WRITE_SYSREG(daif, state);
+    /* After the write, not before: the predicate reads DAIF
+     * (docs/kernel/scheduler/design.md, "Preemption points"). */
+    if ((state & DAIF_I) == 0)
+        preempt_point();
 }
 
 void arch_irq_enable(void)

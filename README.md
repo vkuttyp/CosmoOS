@@ -1804,6 +1804,34 @@ See [docs/development.md](docs/development.md).
   as a follow-up rather than lists as a flake. Suite time is unchanged
   within its ±2 s spread.
 
+- **A wake that preempts** (`docs/audit/next-subsystem-wake-preempt.md`).
+  Every wake in the kernel happens under an interrupt-disabling spinlock,
+  and `spin_unlock_irqrestore` re-enables preemption *before* interrupts,
+  so the documented preemption point at `preempt_enable` never fired for
+  a same-CPU wake: a woken higher-priority thread ran at the next tick,
+  up to 4 ms later, at all fifty-three wake sites. `preempt_point()` is
+  the same four-condition predicate at the other moment it can become
+  true, called from each architecture's `arch_irq_restore` after the
+  enable -- invariant S8's fourth point, covering the wait-queue wakes,
+  the thirteen direct `sched_wake` callers and the bare interrupts-off
+  regions alike, with no change at any unlock. Three kernel tests read
+  the waker's flag from the waiter's first statement (the waiter now
+  runs 20-77 µs after the wake, before that statement), and a debug
+  sysctl whose *read* is the system call under test shows a wake made
+  inside a call preempting before the call returns -- read, because this
+  kernel's sysctl is read-only, one of the as-built differences the
+  report records. Proved by removing the point (all four fail on both
+  arches), placing it before the enable (the same), and putting it in
+  the unlock only (exactly the bare-region test fails). **Then the
+  decision milestone 8 left**: the network worker ran at 40, below
+  default, which is why `net-bench` delivered 512 of 10 000 UDP sends on
+  every boot; five boots per setting per architecture under the report's
+  rule vetoed 31 (the worker preempting its feeder collapses the one-flow
+  TCP figure, and one x86-64 boot hung with the feeder starved -- a
+  latent spin now on the inventory) and chose the default: every TCP
+  figure within the old spread or above it, and 9 300 to 10 000 of
+  10 000 delivered.
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

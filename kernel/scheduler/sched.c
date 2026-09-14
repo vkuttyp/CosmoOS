@@ -404,9 +404,10 @@ void sched_dump(void)
     for (unsigned c = 0; c < cpu_count(); c++) {
         struct runqueue *rq = &g_rqs[c];
         struct percpu *pc = percpu_get(c);
-        kprintf("cpu %u: %s current '%s' queued %u switches %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu\n",
+        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu\n",
                 c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
-                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)rq->bitmap,
+                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
+                (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
                 (unsigned long long)(pc ? pc->ticks : 0));
     }

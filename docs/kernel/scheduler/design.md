@@ -167,10 +167,26 @@ RUNNING thread is a no-op (this is what makes the wait protocol safe).
   `sched_preempt()`. The switch happens inside the handler on the
   interrupted thread's stack; when the thread is switched back in it
   completes the `iretq`.
-- `preempt_enable()` reaching zero with `need_resched`. Since the
-  lifetime pass `quiesce_read_unlock()` is such a point too, so code that
-  wakes a higher-priority thread and then leaves a read-side section is
-  preempted there rather than at the next tick.
+- `preempt_enable()` reaching zero with `need_resched` **and interrupts
+  enabled**. Since the lifetime pass `quiesce_read_unlock()` is such a
+  point too, so code that wakes a higher-priority thread and then leaves
+  a read-side section is preempted there rather than at the next tick.
+- **Interrupts being restored to enabled** with the preempt count already
+  zero: `arch_irq_restore` calls `preempt_point()` after the enable, on
+  both architectures. This is the point every wake needs, because every
+  wake runs under an `irqsave` spinlock whose `spin_unlock_irqrestore`
+  reaches `preempt_enable` with interrupts still off -- before the
+  wake-preempt unit (`docs/audit/next-subsystem-wake-preempt.md`) a
+  same-CPU wake of a higher-priority thread therefore ran at the next
+  tick, up to 4 ms later. The predicate is the same four conditions as
+  `preempt_enable`'s, tested at the other moment the last of them can
+  become true. The two internal restores it passes through are harmless
+  by the predicate alone: the lockdep bracket in `spin_unlock` restores
+  with the count still non-zero, and the tail of `schedule()` restores
+  with the count at zero, where a reschedule set during the switch means
+  one more trip through `schedule()`, which a tick landing there would
+  also cause. `preempt_point_count(cpu)` counts the switches taken here
+  (the scheduler dump's `restore-preempts`).
 - Explicit `sched_yield()` / blocking calls.
 
 `schedule_internal`, the idle loop before `hlt`/`wfi`, and

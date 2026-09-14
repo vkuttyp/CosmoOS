@@ -24,6 +24,7 @@
 #include <kernel/process.h>
 #include <kernel/netif.h>
 #include <kernel/sched.h>
+#include <kernel/selftest.h>
 #include <kernel/signal.h>
 #include <kernel/socket.h>
 #include <arch/user.h>
@@ -1561,6 +1562,7 @@ static const char *const sysctl_names[] = {
     "net.steer",
     "sysctl.names",
     "debug.faultinject",
+    "debug.preempt_probe",
 };
 
 static int sysctl_value(const char *name, char *out, size_t n)
@@ -1608,6 +1610,18 @@ static int sysctl_value(const char *name, char *out, size_t n)
     if (strcmp(name, "debug.faultinject") == 0) {
         int len = faultinject_sysctl(out, n);
         return len < 0 ? -ENOENT : len;   /* -ENOENT in release builds: the knob does not exist */
+    }
+    if (strcmp(name, "debug.preempt_probe") == 0) {
+#if CONFIG_SELFTEST
+        /* The read is the system call under test
+         * (docs/audit/next-subsystem-wake-preempt.md); it creates a
+         * kernel thread, so only a privileged caller may ask. */
+        if (!cred_privileged(cred_current()))
+            return -EPERM;
+        return sched_preempt_probe_sysctl(out, n);
+#else
+        return -ENOENT;
+#endif
     }
     if (strcmp(name, "sysctl.names") == 0) {
         int len = 0;

@@ -73,6 +73,11 @@ use the raw wrappers to test kernel error codes exactly.
   `dup2(d, 40)` → 40 and writable; `dup2(d, 64)` → `EINVAL`; after the
   last write end closes the pending two bytes are read and then 0 (EOF);
   a pipe whose read end is closed → `EPIPE` on write.
+- **a wake inside a system call preempts** (the wake-preempt unit): the
+  read of sysctl `debug.preempt_probe` creates a priority-16 kernel
+  thread on the caller's CPU, wakes it, and reports what it saw of the
+  caller's next statement; `saw=0` on a debug kernel, `ENOENT` on a
+  release one (`docs/kernel/scheduler/testing.md`).
 - **console**: `fstat(0)` is a character device; `isatty(0)`; `fstat(7)`
   → `EBADF`.
 - **spawn and wait**: `echo spawned child` with the pipe's write end as
