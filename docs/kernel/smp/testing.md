@@ -30,17 +30,25 @@ returns NULL. Proves placement honours the mask and threads do not move.
 Single CPU: one thread, CPU 0.
 
 ### `smp-parallel`
-One spinning thread pinned per CPU for 50 ms, all counting iterations.
-Every counter > 0; with more than one CPU, CPU 1's count exceeds a
-quarter of CPU 0's (CPU 0 shares its spinner with thread 0). Proves the
-APs execute concurrently rather than being time-sliced on one CPU.
-Single CPU: only the `> 0` check applies.
+One spinning thread pinned per CPU for 50 ms, all counting iterations
+(each publishes its count with an atomic store, and counts a stray for
+any iteration that ran off its CPU). Every counter > 0 and no strays;
+with more than one CPU, an observer thread pinned to CPU 0 watches CPU
+1's counter and must see it advance: with both pinned and neither
+straying, an advance seen from CPU 0 is two CPUs executing at once. This
+replaced a ratio (`CPU 1 > CPU 0 / 4`) that said the same thing only on a
+host sharing its CPUs evenly and failed on a correct kernel
+(`docs/testing/flakes.md`). Proved: an AP that counts only while CPU 0
+sleeps fails at `obs.advanced`. Single CPU: only the `> 0` and stray
+checks apply.
 
 ### `smp-call`
 `smp_call_function_single(c, record_cpu, &got)` for every online CPU;
-`got == c` and each call returns in under 100 ms. With more than one
-CPU, `ipi_count(IPI_CALL)` on CPU 0 stays 0 because a call to the
-current CPU runs directly. Proves the mailbox, the IPI vector, and the
+`got == c`. There is no bound on the round trip: the call has its own,
+one second, and panics past it (`ipi.c`), so the return is the check; a
+`< 100 ms` used to follow and could distinguish nothing (a tick-driven
+reply would be 4 ms). With more than one CPU, `ipi_count(IPI_CALL)` on
+CPU 0 stays 0 because a call to the current CPU runs directly. Proves the mailbox, the IPI vector, and the
 target-side handler.
 
 ### `smp-shootdown`
@@ -54,11 +62,18 @@ acknowledgement accounting; it does not prove a stale translation is
 gone, which would require an access that faults.
 
 ### `smp-wake`
-A thread pinned to CPU 1 blocks in `semaphore_down`; after 10 ms (CPU 1
-idle in `hlt`) CPU 0 posts. The waiter records the wake time and CPU:
-`on_cpu == 1`, wake time ≥ post time, and wake latency < 2 ms, which is
-below `TICK_NS` (4 ms) and therefore attributable to `IPI_RESCHEDULE`,
-not the tick. Single CPU: logged as not exercised.
+A thread pinned to CPU 1 blocks in `semaphore_down`; CPU 0 waits until
+its state reads `THREAD_BLOCKED` (a post that finds no waiter takes the
+fast path and sends no IPI) and posts. The waiter records the wake time
+and CPU, and `ipi_count(IPI_RESCHEDULE)` -- this-CPU's count, read on CPU
+1 -- either side of the block: `on_cpu == 1`, wake time ≥ post time, and
+the count moved, which is the claim that the IPI and not the tick woke
+the idle CPU. That claim used to be a `< 2 ms` latency, which never
+proved it (a tick landing inside 2 ms passes too) and which a held vCPU
+fails on a correct kernel. The latency is printed. Proved: removing the
+IPI in `request_resched` fails at the count -- and nothing else in the
+suite notices, because the tick carries liveness. Single CPU: logged as
+not exercised.
 
 ### `smp-ticks`
 Snapshot `percpu_get(c)->ticks` on every online CPU, sleep 40 ms,
@@ -106,6 +121,14 @@ across samples is spinning with interrupts off. Symbolise addresses with
 that led to SMP11 showed all CPUs halted with one transient sample in
 `lapic_eoi` (the tick), i.e. a lost wakeup rather than a deadlock.
 
+## Waits and time bounds
+
+A test waits for the property, never for an interval (`threads_settle`,
+the wait for `THREAD_BLOCKED` in `smp-wake`). An upper bound on elapsed
+time is kept, restated as an observable, or widened and labelled
+`LOAD-SENSITIVE` and listed in `docs/testing/flakes.md`, which says which
+and why; this suite has none listed, since its three were all restated.
+
 ## Measured results
 
 | Run | Result |
@@ -130,6 +153,7 @@ timer ≈ 62–67 MHz after divide-by-16; APs reuse the boot CPU's values.
   CPU, unmaps, and then expects a fault on that CPU needs a recoverable
   kernel fault path.
 - No load balancing, so no test for it; no CPU hotplug.
-- Timing bounds (2 ms wake, 5–40 ticks) are loose for TCG and would be
-  tightened on hardware or with KVM/HVF (`QEMU_ACCEL`).
+- The tick-count bounds (5–40 ticks) are loose for TCG and would be
+  tightened on hardware or with KVM/HVF (`QEMU_ACCEL`); the wake latency
+  is no longer a bound at all (it is printed, and the IPI is counted).
 - The AP-fails-to-start path is exercised only by review.

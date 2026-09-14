@@ -1757,6 +1757,38 @@ See [docs/development.md](docs/development.md).
   The list is now `-MMD` output: a list nobody maintains cannot fall
   behind.
 
+- **The suite waits for the property, not for time**
+  (`docs/audit/next-subsystem-suite-waits.md`). Eight self-test failures
+  across five tests in one day, every one on correct code: `nettest.c`
+  slept a fixed interval and then counted, and on a loaded host the count
+  was about the host. **The report's proof lever was wrong and the first
+  step found out**: slowing the host stretches the sleep and the work
+  together and tips nothing; slowing the *work* -- a delay per frame in
+  `lo_transmit`, injected by the proof and restored -- fails the
+  unconverted tests at exactly the two lines that flaked and passes the
+  converted ones, which wait longer and get the right answer. `settle` is
+  gone: twenty-four `wait_until` sites over twelve predicates, each on a
+  single unsynchronised field or a monotone sum of monotonic ones, the
+  multi-field claim left *after* the wait, the result `CHECK`ed under
+  `warn_unused_result`, and a wait past half its budget reported. Review
+  found four waits that returned before the thing asserted -- "scheduled"
+  where "delivered" was meant, a stale baseline, dropped expiries, a
+  two-field predicate against the file's own rule -- the same defect one
+  level up, all fixed. **The ten time bounds were classified one at a
+  time**: four restated into something observable (parallelism watched
+  from CPU 0 instead of a ratio of counts; the wake IPI counted on its
+  target instead of a 2 ms latency, and removing that IPI is noticed by
+  nothing else in the suite; clock pairs bracketed and re-read instead of
+  tolerated; the kicker joined and the run's return ordered after its
+  kick), four removed because the failure they named is a hang the
+  watchdog already reports, and two widened and labelled `LOAD-SENSITIVE`
+  (`sleep`, `el2-guest-timer-ontime`) -- the only two on
+  `docs/testing/flakes.md`, which says what each asserts, why nothing
+  observable replaces it, what is deliberately not listed, and the rule
+  for joining. The boot harness reads that table and names a failing test
+  against it in its report -- a label, not a retry, and a missing or empty
+  list is reported too. As run: REPETITION_RESULT WALLCLOCK_RESULT
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
@@ -1773,7 +1805,7 @@ See [docs/development.md](docs/development.md).
   past them: a guest has a virtual CPU interface, a timer and a
   distributor, a console, a machine with a device tree, a disk, a network
   interface and a route to the world -- and it boots Linux. Every §68
-  report named below has been built bar the last, which is in progress;
+  report named below has been built;
   what the hypervisor lacks next is named in those units' own follow-ups,
   and the one defect this entry used to close with is recorded at the end
   as history, since the design it was found in has since been replaced.
@@ -1844,10 +1876,9 @@ See [docs/development.md](docs/development.md).
   the wait every threaded program had been writing by hand; and
   `-cwd-ref.md`, a reference taken on the working directory before every
   path walk, closing a use-after-free that a second thread's `chdir`
-  could reach. `-suite-waits.md` is the one in progress: the boot suite's
-  tests that sleep a fixed interval and then count, converted to waits on
-  the property, with the flakes that motivated it reproduced on demand
-  first.
+  could reach; and `-suite-waits.md`, the boot suite's tests that slept a
+  fixed interval and then counted, converted to waits on the property, and
+  its time bounds classified one at a time (built).
 
   The named next steps are the follow-ups these left. On the filter --
   whose four chains now cover every path through the machine, and whose

@@ -52,7 +52,14 @@ HANGUP` even though only `READABLE` was asked for. About 50 ms. The Linux
 ### `realtime` (`kernel/io/polltest.c`)
 
 `clock_realtime_ns` is between 2020 and 2100 and advances across a 5 ms
-sleep by the same amount as `clock_now_ns` (within 1 ms).
+sleep by the same amount as `clock_now_ns`. Each pair of clocks is read
+by `clock_pair`, which brackets the wall-clock read with two monotonic
+reads and re-reads a pair further apart than 100 µs (a tick, or the host
+holding the vCPU, landed between them); the agreement is then exact to
+that bracket. It was a 1 ms tolerance on pairs read back to back, which
+held only while nothing interrupted the two reads. Proved: a 5 % drift
+in `clock_realtime_ns` fails the agreement; a pair interrupted every time
+fails the bracket (`docs/testing/flakes.md` for the rule).
 
 ## Gaps
 

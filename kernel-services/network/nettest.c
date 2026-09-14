@@ -968,16 +968,29 @@ static void inject_tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ac
  * *assertion* stays after the wait, where it is the test's claim and not
  * the wait's termination condition. A first version of this contract was
  * the absolute rule alone, and the file broke it two functions later.
+ *
+ * **The result must be CHECKed** (`warn_unused_result`, and the kernel
+ * builds with -Werror): a wait whose expiry is dropped is `settle` in a
+ * different hat. **A wait that used more than half its budget is
+ * reported**: a test that habitually takes 1.9 s of a 2 s budget is a
+ * finding -- a slowdown, or a budget that a widened deadline is hiding --
+ * and the line is what makes it visible before it becomes a failure.
  */
 static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
+    __attribute__((warn_unused_result));
+static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
 {
-    uint64_t deadline = clock_now_ns() + (uint64_t)budget_ms * 1000000ull;
+    uint64_t t0 = clock_now_ns();
+    uint64_t deadline = t0 + (uint64_t)budget_ms * 1000000ull;
     while (!pred(arg)) {
         if (clock_now_ns() > deadline)
             return false;
         thread_sleep_ms(1);
         sched_watchdog_kick();
     }
+    unsigned waited_ms = (unsigned)((clock_now_ns() - t0) / 1000000ull);
+    if (waited_ms * 2 > budget_ms)
+        kinfo("selftest: wait_until: waited %u ms of a %u ms budget", waited_ms, budget_ms);
     return true;
 }
 
