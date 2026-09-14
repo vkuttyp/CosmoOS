@@ -197,17 +197,20 @@ bool selftest_smp_affinity(const char **reason)
 /* --- CPUs make progress concurrently --- */
 
 struct spin_work {
-    volatile uint64_t iterations;
+    uint64_t iterations;        /* one writer (the spinner); read by the observer while it runs, so atomic on both sides */
     volatile int stop;
     unsigned cpu;               /* where it is pinned */
-    volatile unsigned strays;   /* iterations that ran anywhere else */
+    volatile unsigned strays;   /* iterations that ran anywhere else; read only after the join */
 };
 
 static void spin_worker(void *arg)
 {
     struct spin_work *w = arg;
+    uint64_t n = 0;
     while (!__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE)) {
-        w->iterations++;
+        /* A store, not a fetch-add: this is the counter's only writer,
+         * and what the observer needs is a whole value that advances. */
+        __atomic_store_n(&w->iterations, ++n, __ATOMIC_RELAXED);
         if (arch_cpu_id() != w->cpu)
             w->strays++;
         arch_cpu_relax();
@@ -401,7 +404,10 @@ bool selftest_smp_wake(const char **reason)
      * post that finds no waiter yet takes the fast path and sends no
      * IPI, and the check below would fail for a reason that is not the
      * kernel's. BLOCKED is set under the wait-queue lock after the entry
-     * is linked (wait.c), so once seen, the post will find the waiter. */
+     * is linked (wait.c), so once seen, the post will find the waiter.
+     * The kernel writes `state` as a plain store under a lock this test
+     * does not hold; this is a one-word read outside it, used to decide
+     * when to post and never as a claim. */
     uint64_t deadline = clock_now_ns() + MS(1000);
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
         CHECK(clock_now_ns() < deadline);
