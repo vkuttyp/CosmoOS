@@ -42,6 +42,7 @@ bool selftest_irq_msi_devid(const char **reason);   /* a device the controller c
 bool selftest_thread(const char **reason);
 bool selftest_yield(const char **reason);
 bool selftest_preempt(const char **reason);
+bool selftest_preempt_wake(const char **reason);
 bool selftest_sleep(const char **reason);
 bool selftest_mutex(const char **reason);
 bool selftest_semaphore(const char **reason);

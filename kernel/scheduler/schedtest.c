@@ -367,6 +367,67 @@ bool selftest_preempt(const char **reason)
     return true;
 }
 
+/* --- a same-CPU wake of a higher-priority thread preempts the waker ---
+ *
+ * The waker's very next statement is the observation: it stores `after`
+ * right after the post, and the waiter's first statement on waking reads
+ * it. `saw == 0` means the waiter ran between the post and that store,
+ * which only a preemption inside the post can produce; `saw == 1` is
+ * what the tree did before the restore-point preemption
+ * (docs/audit/next-subsystem-wake-preempt.md): the waker ran on to the
+ * tick. `saw` starts at 2 so a waiter that never ran -- or never blocked,
+ * so the post woke nobody -- cannot pass. Both threads are on CPU 0, so
+ * there is no cross-CPU wake to confuse the reading.
+ */
+struct wake_probe {
+    struct semaphore sem;
+    volatile unsigned after;
+    volatile unsigned saw;
+    volatile uint64_t woke_at;
+};
+
+static void wake_probe_entry(void *arg)
+{
+    struct wake_probe *w = arg;
+    semaphore_down(&w->sem);
+    w->saw = w->after;
+    w->woke_at = clock_now_ns();
+}
+
+bool selftest_preempt_wake(const char **reason)
+{
+    unsigned before = thread_count();
+    CHECK(arch_cpu_id() == 0);   /* thread 0 lives here, and the waiter is pinned here */
+    struct wake_probe w;
+    semaphore_init(&w.sem, 0, "preempt-wake");
+    w.after = 0;
+    w.saw = 2;
+    w.woke_at = 0;
+    struct thread *t = thread_create_on(wake_probe_entry, &w, "wake-probe", SCHED_PRIO_DEFAULT - 16,
+                                        CPUMASK_OF(0));
+    CHECK(t != NULL);
+    /* Post only once it is blocked: a post that finds no waiter wakes
+     * nobody and the sentinel would then fail this for the wrong reason
+     * (a one-word read of a field written under a lock this test does
+     * not hold, used to decide when to post and never as a claim). */
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+        CHECK(clock_now_ns() < deadline);
+        thread_sleep_ms(1);
+    }
+
+    uint64_t sent = clock_now_ns();
+    semaphore_up(&w.sem);
+    w.after = 1;   /* the very next statement */
+    thread_join(t);
+
+    CHECK(w.saw == 0);
+    kinfo("selftest: preempt-wake: the waiter ran %llu us after the post, before the waker's next statement",
+          (unsigned long long)((w.woke_at - sent) / 1000));
+    CHECK(threads_settle(before));
+    return true;
+}
+
 bool selftest_sleep(const char **reason)
 {
     uint64_t t0 = clock_now_ns();

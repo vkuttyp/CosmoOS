@@ -70,6 +70,29 @@ void preempt_enable(void)
         sched_preempt();
 }
 
+/*
+ * Every wake in this kernel happens under an interrupt-disabling
+ * spinlock, and `spin_unlock_irqrestore` runs `preempt_enable` while
+ * interrupts are still off -- so the test above never fires for a
+ * same-CPU wake, and the woken thread used to run at the next tick.
+ * The restore of interrupts is the moment the last condition becomes
+ * true, and `arch_irq_restore` calls here after enabling them
+ * (docs/audit/next-subsystem-wake-preempt.md).
+ *
+ * The two internal callers of `arch_irq_restore` pass through unharmed
+ * by the predicate alone: the lockdep bracket inside `spin_unlock`
+ * restores while the lock's `preempt_disable` still holds (count > 0),
+ * and the tail of `schedule()` restores its caller's state with the
+ * count at zero, where a pending reschedule means one more trip through
+ * `schedule()` -- the same thing a tick landing there would do.
+ */
+void preempt_point(void)
+{
+    struct percpu *pc = this_cpu();
+    if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled())
+        sched_preempt();
+}
+
 /* Module ABI exports (docs/kernel/module/api.md): a multi-queue driver
  * sizes its queues by the CPU count. */
 #include <kernel/module.h>

@@ -4,6 +4,7 @@
  */
 
 #include <kernel/panic.h>
+#include <kernel/percpu.h>
 #include <kernel/string.h>
 
 #include <arch/cpu.h>
@@ -182,8 +183,12 @@ arch_irq_state_t arch_irq_save(void)
 
 void arch_irq_restore(arch_irq_state_t state)
 {
-    if (state & RFLAGS_IF)
+    if (state & RFLAGS_IF) {
         __asm__ volatile("sti" ::: "memory");
+        /* After the enable, not before: the predicate reads the flag
+         * (docs/kernel/scheduler/design.md, "Preemption points"). */
+        preempt_point();
+    }
 }
 
 void arch_irq_enable(void)

@@ -88,6 +88,18 @@ static inline void preempt_disable(void)
 
 void preempt_enable(void);
 
+/* The fourth preemption point (docs/kernel/scheduler/design.md,
+ * "Preemption points"): reschedule now if a reschedule is pending and
+ * this context may switch -- no spinlock held, not in an interrupt,
+ * interrupts enabled. `preempt_enable` tests the same predicate when
+ * the count reaches zero; this is for the moment the *other* term
+ * becomes true, interrupts coming back on with the count already zero,
+ * which is where every wake made under an irqsave lock leaves its
+ * waker. Called by each architecture's `arch_irq_restore` after it has
+ * enabled interrupts; safe to call anywhere, since every condition that
+ * would make a switch wrong is in the predicate. */
+void preempt_point(void);
+
 static inline bool preemptible(void)
 {
     struct percpu *pc = this_cpu();
