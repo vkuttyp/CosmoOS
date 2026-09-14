@@ -169,6 +169,14 @@ bool selftest_virtio_console(const char **reason);
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
 bool selftest_fsync_handle(const char **reason);
+/* docs/audit/next-subsystem-file-path.md (kernel-services/vfs/vfstest.c) */
+bool selftest_read_bounce(const char **reason);     /* the syscall bounce sized to the request, its fallback; one call fills 64 KiB; a pipe keeps its 300 */
+bool selftest_wb_error_fsync(const char **reason);  /* a refused write-back: fsync says -EIO, keeps the pages, the retry lands */
+bool selftest_wb_error_once(const char **reason);   /* two files hear the failure once each; a later open never */
+bool selftest_wb_error_close(const char **reason);  /* close says -EIO and closes; the release's retry keeps the data */
+bool selftest_wb_error_lost(const char **reason);   /* three refusals: the page is lost, counted, said; the mount lives */
+bool selftest_read_bench(const char **reason);      /* prints: the object path at 1/4/64 KiB requests, ramfs and cosmofs */
+bool selftest_write_bench(const char **reason);     /* prints: the same for writes on ramfs */
 bool selftest_pagecache(const char **reason);
 bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global limit with reclaim */
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */

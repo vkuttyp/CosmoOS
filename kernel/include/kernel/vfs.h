@@ -156,6 +156,8 @@ struct file {
     struct mutex lock;
     void *priv;               /* a device's per-open instance (chrdev open/release) */
     bool dev_open;            /* the vnode's open hook ran and succeeded; release will run */
+    uint32_t wb_seq_seen;     /* the write-back failure sequence this file has been told about
+                                 (pagecache.wb_seq at open; advanced by each report) */
 };
 
 /* --- lifecycle ---------------------------------------------------------- */
@@ -259,6 +261,12 @@ int file_stat(struct file *f, struct cosmo_stat *st);
 /* Pack struct cosmo_dirent records; returns bytes, 0 at end. */
 int64_t file_readdir(struct file *f, void *buf, size_t len);
 int file_sync(struct file *f);
+/* The file type's flush, run by handle_close before it drops the handle's
+ * reference: write dirty pages back, then report a write-back failure
+ * recorded since this file last heard (its own attempt's or a
+ * neighbour's), once. Its result is close's result; the handle closes
+ * regardless. */
+int file_flush(struct file *f);
 static inline void file_get(struct file *f) { kobject_get(&f->obj); }
 static inline void file_put(struct file *f) { kobject_put(&f->obj); }
 /* True if the kobject is a file (for handle-based system calls). */

@@ -232,23 +232,23 @@ static int64_t rw_at(struct syscall_args *a, bool write)
     struct file *f = file_of((int)a->a[0], write ? HANDLE_RIGHT_WRITE : HANDLE_RIGHT_READ);
     if (f == NULL)
         return -EBADF;
-    uint8_t *tmp = kmalloc(len < 4096 ? (len ? len : 1) : 4096, 0);
-    if (tmp == NULL) {
-        file_put(f);
-        return -ENOMEM;
-    }
+    /* The syscall layer's bounce (kernel/syscall.h): up to 64 KiB per
+     * file call, the stack chunk when the heap refuses. */
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+    syscall_bounce_get(&b, stack, len);
     int64_t done = 0, rc = 0;
     while ((size_t)done < len) {
-        size_t n = len - (size_t)done < 4096 ? len - (size_t)done : 4096;
+        size_t n = len - (size_t)done < b.cap ? len - (size_t)done : b.cap;
         if (write) {
-            if (copy_from_user(tmp, ubuf + (uint64_t)done, n)) {
+            if (copy_from_user(b.buf, ubuf + (uint64_t)done, n)) {
                 rc = -EFAULT;
                 break;
             }
-            rc = file_pwrite(f, tmp, n, (uint64_t)(off + done));
+            rc = file_pwrite(f, b.buf, n, (uint64_t)(off + done));
         } else {
-            rc = file_pread(f, tmp, n, (uint64_t)(off + done));
-            if (rc > 0 && copy_to_user(ubuf + (uint64_t)done, tmp, (size_t)rc))
+            rc = file_pread(f, b.buf, n, (uint64_t)(off + done));
+            if (rc > 0 && copy_to_user(ubuf + (uint64_t)done, b.buf, (size_t)rc))
                 rc = -EFAULT;
         }
         if (rc <= 0)
@@ -257,7 +257,7 @@ static int64_t rw_at(struct syscall_args *a, bool write)
         if ((size_t)rc < n)
             break;
     }
-    kfree(tmp);
+    syscall_bounce_put(&b);
     file_put(f);
     return done > 0 ? done : rc;
 }
@@ -795,13 +795,14 @@ static int64_t lx_brk(struct syscall_args *a)
  * of the file stay zero. */
 static int fill_from_file(struct file *f, uint64_t base, size_t len, uint64_t off)
 {
-    void *buf = kmalloc(PAGE_SIZE, 0);
-    if (buf == NULL)
-        return -ENOMEM;
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+    syscall_bounce_get(&b, stack, len);   /* up to 64 KiB per pread; the stack chunk when the heap refuses */
+    void *buf = b.buf;
     int rc = 0;
     size_t done = 0;
     while (done < len) {
-        size_t chunk = len - done < PAGE_SIZE ? len - done : PAGE_SIZE;
+        size_t chunk = len - done < b.cap ? len - done : b.cap;
         int64_t n = file_pread(f, buf, chunk, off + done);
         if (n < 0) {
             rc = (int)n;
@@ -815,7 +816,7 @@ static int fill_from_file(struct file *f, uint64_t base, size_t len, uint64_t of
         }
         done += (size_t)n;
     }
-    kfree(buf);
+    syscall_bounce_put(&b);
     return rc;
 }
 

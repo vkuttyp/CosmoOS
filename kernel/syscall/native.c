@@ -42,7 +42,35 @@
 
 #include <uapi/cosmo/syscall.h>
 
-#define IO_CHUNK 1024   /* one console line (TTY_LINE_MAX) fits a single read */
+static uint64_t g_bounce_heap, g_bounce_fallback;
+
+void syscall_bounce_get(struct io_bounce *b, char *stack, size_t len)
+{
+    b->buf = stack;
+    b->cap = IO_CHUNK;
+    b->heap = false;
+    if (len > IO_CHUNK) {
+        size_t want = len < IO_BOUNCE_MAX ? len : IO_BOUNCE_MAX;
+        char *p = kmalloc(want, 0);   /* the page path above the largest slab class */
+        if (p != NULL) {
+            b->buf = p;
+            b->cap = want;
+            b->heap = true;
+            __atomic_fetch_add(&g_bounce_heap, 1, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&g_bounce_fallback, 1, __ATOMIC_RELAXED);
+        }
+    }
+}
+
+void syscall_bounce_put(struct io_bounce *b)
+{
+    if (b->heap)
+        kfree(b->buf);
+}
+
+uint64_t syscall_bounce_heap_count(void) { return __atomic_load_n(&g_bounce_heap, __ATOMIC_RELAXED); }
+uint64_t syscall_bounce_fallback_count(void) { return __atomic_load_n(&g_bounce_fallback, __ATOMIC_RELAXED); }
 
 static int64_t sys_exit(struct syscall_args *a)
 {
@@ -54,15 +82,17 @@ int64_t syscall_obj_write(struct kobject *obj, const uint64_t ubuf, size_t len)
     const struct kobject_io_type *io = kobject_io_of(obj);
     if (io == NULL || io->write == NULL)
         return -EBADF;
-    char tmp[IO_CHUNK];
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+    syscall_bounce_get(&b, stack, len);
     size_t done = 0;
     int64_t rc = 0;
     while (done < len) {
-        size_t n = len - done < IO_CHUNK ? len - done : IO_CHUNK;
-        rc = copy_from_user(tmp, ubuf + done, n);
+        size_t n = len - done < b.cap ? len - done : b.cap;
+        rc = copy_from_user(b.buf, ubuf + done, n);
         if (rc)
             break;
-        rc = io->write(obj, tmp, n);
+        rc = io->write(obj, b.buf, n);
         if (rc < 0)
             break;
         KASSERT(rc <= (int64_t)n);
@@ -74,6 +104,7 @@ int64_t syscall_obj_write(struct kobject *obj, const uint64_t ubuf, size_t len)
         if ((size_t)rc < n)
             break;
     }
+    syscall_bounce_put(&b);
     return done > 0 ? (int64_t)done : rc;
 }
 
@@ -99,16 +130,22 @@ int64_t syscall_obj_read(struct kobject *obj, uint64_t ubuf, size_t len)
     const struct kobject_io_type *io = kobject_io_of(obj);
     if (io == NULL || io->read == NULL)
         return -EBADF;
-    char tmp[IO_CHUNK];
-    size_t n = len < IO_CHUNK ? len : IO_CHUNK;
-    int64_t rc = io->read(obj, tmp, n);
+    /* One object call, as large as the request up to the bounce: what
+     * one call returns is what the read returns, so a pipe or a tty that
+     * has 300 bytes returns 300 and a file fills up to 64 KiB. */
+    char stack[IO_CHUNK];
+    struct io_bounce b;
+    syscall_bounce_get(&b, stack, len);
+    size_t n = len < b.cap ? len : b.cap;
+    int64_t rc = io->read(obj, b.buf, n);
     /* An object may never report more than it was offered; the count
-     * bounds the copy out of the kernel stack buffer. */
+     * bounds the copy out of the kernel buffer. */
     KASSERT(rc <= (int64_t)n);
     if (rc > (int64_t)n)
         rc = -EIO;
-    if (rc > 0 && copy_to_user(ubuf, tmp, (size_t)rc))
+    if (rc > 0 && copy_to_user(ubuf, b.buf, (size_t)rc))
         rc = -EFAULT;
+    syscall_bounce_put(&b);
     return rc;
 }
 

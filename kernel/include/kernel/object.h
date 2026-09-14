@@ -96,6 +96,13 @@ struct kobject_io_type {
      * object, shared by every handle to it): `on` 0 or 1 sets it, -1 only
      * asks. Returns the previous mode (0 or 1). NULL means -EOPNOTSUPP. */
     int (*set_nonblock)(struct kobject *obj, int on);
+    /* Optional. Called by handle_close on the object it is about to put,
+     * before the put, on the closer's thread: buffered state goes out and
+     * a pending error comes back. Its result is close's result; the
+     * handle is closed regardless (a file: write-back and the once-per-
+     * file error report, docs/kernel-services/vfs/design.md). NULL means
+     * nothing to flush and 0. */
+    int (*flush)(struct kobject *obj);
     /* Optional. The wait queue a waiter for `events` (COSMO_IO_* bits)
      * should sleep on; it is woken whenever `ready` may have changed for
      * those bits. NULL means readiness never changes (a file). */

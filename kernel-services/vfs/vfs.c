@@ -49,9 +49,21 @@ static void vnode_release(struct kobject *obj)
      * `ops` (an allocation failed) is released with ops NULL: found by
      * fault-kmalloc as a NULL dereference in ramfs_new's failure path. */
     if (vn->type == VNODE_REG) {
-        if (vn->pc.nr_dirty && vn->ops && vn->ops->writepage)
-            pagecache_sync(vn);
-        pagecache_drop(vn);
+        int rc = 0;
+        /* An unlinked file's pages have no reader left: nothing to write
+         * back (the audit's 8.2 LOW: the release used to write them) and
+         * nothing lost when they go. A named file's dirty pages get one
+         * last attempt, whose failure pagecache_sync records like any
+         * other; what is then dropped is the end of the line -- no file
+         * exists to be told -- so it is counted
+         * (pagecache_stats.dropped_dirty) and said once per event. */
+        bool named = vn->nlink > 0;
+        if (named && vn->pc.nr_dirty && vn->ops && vn->ops->writepage)
+            rc = pagecache_sync(vn);
+        unsigned lost = pagecache_drop(vn, named);
+        if (lost)
+            kwarn("vfs: %u dirty page(s) of inode %llu on %s lost: write-back failed (%d)", lost,
+                  (unsigned long long)vn->ino, vn->mnt && vn->mnt->fs ? vn->mnt->fs->name : "?", rc);
     }
     if (vn->ops && vn->ops->evict)
         vn->ops->evict(vn);
@@ -875,10 +887,16 @@ static int64_t file_obj_write(struct kobject *obj, const void *buf, size_t len)
     return file_write(container_of(obj, struct file, obj), buf, len);
 }
 
+static int file_obj_flush(struct kobject *obj)
+{
+    return file_flush(container_of(obj, struct file, obj));
+}
+
 static const struct kobject_io_type file_type = {
     .base = { .name = "file", .release = file_release, .flags = KOBJECT_TYPE_IO },
     .read = file_obj_read,
     .write = file_obj_write,
+    .flush = file_obj_flush,
 };
 
 struct file *file_from_kobject(struct kobject *obj)
@@ -912,6 +930,7 @@ static struct file *file_alloc(struct vnode *vn, unsigned flags)
     f->vn = vn;   /* takes the caller's reference */
     f->flags = flags;
     mutex_init(&f->lock, "file");
+    f->wb_seq_seen = pagecache_wb_seq(&vn->pc);   /* a failure before this open is not this file's */
     return f;
 }
 
@@ -1142,16 +1161,51 @@ int file_stat(struct file *f, struct cosmo_stat *st)
     return 0;
 }
 
+/* f->lock held. A write-back failure recorded since this file last
+ * heard -- this attempt's own (just recorded by pagecache_sync) or a
+ * neighbour's -- is reported once: the file advances to the current
+ * sequence as it reports, so the next successful call returns 0. */
+static int report_once(struct file *f, int rc)
+{
+    int err;
+    uint32_t now;
+    bool newer = pagecache_error_since(&f->vn->pc, f->wb_seq_seen, &err, &now);
+    f->wb_seq_seen = now;
+    if (rc == 0 && newer)
+        rc = err;
+    return rc;
+}
+
 int file_sync(struct file *f)
 {
     struct vnode *vn = f->vn;
     int rc = 0;
+    mutex_lock(&f->lock);      /* before vn->lock: the order every file operation uses */
     mutex_lock(&vn->lock);
     if (vn->type == VNODE_REG)
         rc = pagecache_sync(vn);
     if (rc == 0 && vn->ops->sync)
         rc = vn->ops->sync(vn);
     mutex_unlock(&vn->lock);
+    if (vn->type == VNODE_REG)
+        rc = report_once(f, rc);
+    mutex_unlock(&f->lock);
+    return rc;
+}
+
+int file_flush(struct file *f)
+{
+    struct vnode *vn = f->vn;
+    if (vn->type != VNODE_REG)
+        return 0;
+    int rc = 0;
+    mutex_lock(&f->lock);
+    mutex_lock(&vn->lock);
+    if (vn->pc.nr_dirty && vn->ops->writepage)
+        rc = pagecache_sync(vn);
+    mutex_unlock(&vn->lock);
+    rc = report_once(f, rc);
+    mutex_unlock(&f->lock);
     return rc;
 }
 
