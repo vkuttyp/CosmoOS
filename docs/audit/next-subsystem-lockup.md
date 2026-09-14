@@ -25,7 +25,7 @@ and the panic path already walks a frame into a stack trace
 unit keeps the answer: one store per tick, an IPI (an NMI on x86-64)
 that asks a CPU to record its own frame and stack, a dump that prints
 them, a soft-lockup detector on every CPU and a hard-lockup detector on
-its neighbour, and a harness that turns the addresses into
+the next online CPU, and a harness that turns the addresses into
 `function+offset (file:line)` with the ELF it already builds. The spin
 is then chased with the tool built for it: `NET_WORKER_PRIO` made
 overridable from the command line, the boot repeated at 31 until the
@@ -324,7 +324,7 @@ lines with `ticks` and `last tick N ms ago pc 0x…`, the thread table,
 then one sample block per CPU. Nothing is removed and no existing
 harness pattern changes; the block gets longer.
 
-### Two detectors, one per CPU and one for the neighbour
+### Two detectors, one per CPU and one for the next online CPU
 
 **Soft lockup: a CPU that has not switched while something waits.** In
 `sched_tick`, on every CPU for itself: if `rq->current != rq->idle`
@@ -349,7 +349,8 @@ clears the bits at or below `k` in `cpu_online_mask()` and takes the
 lowest set bit, or the mask's lowest bit if none is left. With two or
 more CPUs online every online CPU has exactly one watcher whatever
 holes the mask has (`{0,2,3}`: 0 watches 2, 2 watches 3, 3 watches 0);
-a lone CPU watches nobody. The check: if the target's `ticks` differs
+a lone CPU's target is itself, and the check is skipped when the
+target is the checker. The check: if the target's `ticks` differs
 from the value seen at the last check, record it and reset `stall_ns`;
 else `stall_ns += TICK_NS`; a target that changed (the mask changed)
 resets. When `stall_ns` reaches `g_hard_ns` (10 s), `k` prints once per
@@ -487,7 +488,7 @@ way the vGIC tests state theirs per host.
 | `kernel/include/kernel/percpu.h` | `last_tick_pc`, `last_tick_ns`, `struct cpu_sample sample`, the detectors' `stall_ns`, `last_switches`, `watch_target`, `watch_ticks` |
 | `tests/host/test_lockup.c` | `lockup_watch_target` over masks with holes (the machine cannot make one: no CPU hotplug, inventory §3) |
 | `kernel/timer/timer.c`, `kernel/include/kernel/timer.h` | the tick sample (two stores, first thing in `tick_isr`); the tick hook signature gains the frame: `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` |
-| `kernel/scheduler/sched.c` | `sched_tick(now, frame)`: `lockup_tick` after the watchdog check; `sched_dump` prints the tick sample and age, live `run_ms`, and the samples when asked; `watchdog_check` calls `lockup_sample_all(frame, 5 ms)` before the dump |
+| `kernel/scheduler/sched.c` | `sched_tick(now, frame)`: `lockup_tick` after the watchdog check; `sched_dump` prints the tick sample and age, live `run_ms`, and the samples when asked; `watchdog_check` calls `lockup_sample_all(frame, 5 ms, &answered)` before the dump |
 | `kernel/scheduler/thread.c` | `thread_dump_all` takes `now` for the live `run_ms` |
 | `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `IPI_SAMPLE`: handler `lockup_answer(frame)`; `ipi_send_sample(cpu)` tries `arch_ipi_send_nmi` first |
 | `kernel/include/arch/irqc.h` | `bool arch_ipi_send_nmi(unsigned cpu)` |
@@ -568,11 +569,11 @@ with a reason at one (the affinity API exists: `thread_create_on`).
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `lockup-sample` | a thread pinned to CPU `k` spins with interrupts on; the test on another CPU calls `lockup_sample_all(NULL, 5 ms)`; CPU `k` is in the answered mask, its `pc` is in `spin_here`, its `depth ≥ 2` and `trace[1]` is in the spinner thread's entry function; `when_ns` is within the call | answer with the *requester's* PC (the bug the design forbids: printing from the asker's view) → `pc` outside `spin_here`; skip the release on `seq` → not in the mask |
+| `lockup-sample` | a thread pinned to CPU `k` spins with interrupts on; the test on another CPU calls `lockup_sample_all(NULL, 5 ms, &answered)`; it returns `true` and CPU `k` is in the mask, its `pc` is in `spin_here`, its `depth ≥ 2` and `trace[1]` is in the spinner thread's entry function; `when_ns` is within the call | answer with the *requester's* PC (the bug the design forbids: printing from the asker's view) → `pc` outside `spin_here`; skip the release on `seq` → not in the mask |
 | `lockup-sample-irqoff` | the spinner masks interrupts (`arch_irq_save`) for 50 ms and spins; the sample is taken at 20 ms. **x86-64:** CPU `k` answers, `nmi == true`, `pc` in `spin_here`. **AArch64:** CPU `k` is not in the mask, and `lockup_print_samples` reports its tick sample with an age ≥ 20 ms (the last tick before the mask). Then the spinner restores and the next sample answers on both | x86-64: send the ordinary IPI instead of the NMI → no answer; AArch64: report the tick sample as live → the age check fails |
 | `lockup-soft` | thresholds lowered to 200 ms soft; a priority-16 thread pinned to CPU `k` spins with interrupts on for 600 ms while a default-priority thread is created on CPU `k`; the detector's line names CPU `k`, the spinner's name and `1 runnable`, its trace's `#0` is in `spin_here`; exactly one report for the episode (the log line is counted through a test hook on the report path, not by grepping) | disable the `nr_running > 0` term → the `lockup-quiet` spinner (below) reports; disable the episode latch → two reports |
 | `lockup-hard` | thresholds lowered to 200 ms hard; a thread on CPU `k` masks interrupts and spins 600 ms; `k`'s watcher (the online CPU below it, wrapping) reports `hard lockup: cpu k`, once, within 200 ms plus one tick of the mask (the check runs every tick), with (x86-64) a live NMI sample in `spin_here` or (AArch64) the tick sample and an age ≥ 200 ms; after the spinner restores, the target's `ticks` advance and a second 600 ms of normal running reports nothing | compare the wrong CPU's ticks → no report; check once a second instead of every tick → the 600 ms episode ends unreported (the finding this row was rewritten for); disable the episode latch → the 600 ms produce two reports |
-| `lockup-sample-busy` | two threads on two CPUs call `lockup_sample_all` at the same moment (released by one flag); exactly one gets `true` and a non-empty mask; the other gets `false` within 100 µs of the flag, having sent nothing (`sample.want` on every CPU carries only the winner's sequence); no CPU's `ticks` stall during the round | let the loser spin for the slot → its elapsed equals the winner's wait; wait per target instead of once → the winner's elapsed grows with the CPU count (checked on the 4-CPU machine against the 1-CPU figure) |
+| `lockup-sample-busy` | two threads on two CPUs call `lockup_sample_all` at the same moment (released by one flag); exactly one gets `true` and a non-empty mask; the other gets `false` within 100 µs of the flag, having sent nothing (`sample.want` on every CPU carries only the winner's sequence); no CPU's `ticks` stall during the round | let the loser spin for the slot → its elapsed equals the winner's wait; wait per target instead of once → on AArch64, with two CPUs spinning interrupts-masked (no answer), the winner's elapsed doubles to 10 ms where the total bound keeps it under 5 ms plus a margin (on x86-64 both answer by NMI, so this half of the row is AArch64's) |
 | `test_lockup` (host) | `lockup_watch_target` over `{0,2,3}`, `{1}`, `{0,1,2,3}`, `{0,63}`: every online CPU has exactly one watcher, none watches an offline CPU, a lone CPU watches itself | `(k+1) mod n` in place of the mask walk → `{0,2,3}` leaves 2 unwatched |
 | `lockup-quiet` | with the thresholds at 200 ms, a spinner alone on CPU `k` (nothing else runnable there) for 600 ms and an idle CPU for 600 ms produce no report of either kind; then the thresholds are restored to 10 s | the soft term inverted → a report |
 | `lockup-tick-bench` | prints, asserts nothing: the tick handler's cost with and without the sample stores, measured as the median of 1 000 ticks' `clock_now_ns` deltas between entry and the hook call (a static counter the tick hook reads); the shape of `irqrestore-bench` | -- |
@@ -618,7 +619,7 @@ fills this section, as the wake-preempt report's was.
   on a host thread; a starved host thread takes no guest ticks until it
   runs again (the `cpu1: up` flake of PR #112 was this). Ten seconds is
   chosen because CI's worst vCPU starvation on record is well under it,
-  and the report line carries the neighbour's own tick count and the
+  and the report line carries the watched CPU's own tick count and the
   stall's length so that a report in CI is readable as "the host starved
   vCPU 2 for 11 s" if that is what happened. `docs/testing/flakes.md`
   gets an entry saying exactly that, so a first CI sighting is filed as
