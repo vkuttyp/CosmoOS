@@ -43,7 +43,8 @@ static bool g_enabled;                      /* the detectors run (lockup_init) *
 static uint64_t g_soft_ns = LOCKUP_SOFT_NS_DEFAULT;
 static uint64_t g_hard_ns = LOCKUP_HARD_NS_DEFAULT;
 static bool g_expected;                     /* a test asked for the report it is about to see */
-static struct lockup_stats g_stats;
+static struct lockup_stats g_stats;         /* the reports' facts: under g_stats_lock */
+static uint64_t g_samples, g_samples_busy;   /* the sample counters: atomic, outside the lock */
 /* Every report writes its fields and bumps its counter under this leaf
  * lock, and the reader takes it too, so a snapshot is one report's, never
  * two watchers' fields mixed (a soft and a hard report may land in the
@@ -89,10 +90,10 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     *answered = 0;
     if (!__atomic_compare_exchange_n(&g_reporter, &expected, (int)me + 1, false, __ATOMIC_ACQ_REL,
                                      __ATOMIC_ACQUIRE)) {
-        __atomic_fetch_add(&g_stats.samples_busy, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_samples_busy, 1, __ATOMIC_RELAXED);
         return false;
     }
-    __atomic_fetch_add(&g_stats.samples, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_samples, 1, __ATOMIC_RELAXED);
 
     uint64_t seq = __atomic_add_fetch(&g_sample_seq, 1, __ATOMIC_ACQ_REL);
     cpumask_t targets = cpu_online_mask() & ~CPUMASK_OF(me);
@@ -316,11 +317,14 @@ void lockup_init(void)
 
 void lockup_get_stats(struct lockup_stats *out)
 {
+    /* The reports' fields under their lock; the two sample counters live
+     * outside the struct and are read atomically, so no field is read two
+     * ways at once. */
     arch_irq_state_t st = spin_lock_irqsave(&g_stats_lock);
     *out = g_stats;
     spin_unlock_irqrestore(&g_stats_lock, st);
-    out->samples = __atomic_load_n(&g_stats.samples, __ATOMIC_RELAXED);
-    out->samples_busy = __atomic_load_n(&g_stats.samples_busy, __ATOMIC_RELAXED);
+    out->samples = __atomic_load_n(&g_samples, __ATOMIC_RELAXED);
+    out->samples_busy = __atomic_load_n(&g_samples_busy, __ATOMIC_RELAXED);
 }
 
 void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)
