@@ -71,12 +71,21 @@ have panicked in `waitqueue_prepare`). Check: assert.
 `preempt_enable`. Check: assert (`preempt_enable` asserts the count is
 positive); review.
 
-**S8. Preemption happens only at three points**: the interrupt-return
+**S8. Preemption happens only at four points**: the interrupt-return
 tail in `x86_trap_dispatch` when `irq_depth == 0`, `need_resched`,
 `preempt_count == 0`, and the interrupted frame had `RFLAGS.IF` set;
 `preempt_enable` reaching zero under the same conditions with interrupts
-enabled; or an explicit `schedule`/`sched_yield`/block. Check: review;
-test `preempt` (a spinning thread is displaced by a woken sleeper).
+enabled; `arch_irq_restore` enabling interrupts under the same
+conditions (`preempt_point`, the wake-preempt unit -- the point a wake
+made under an `irqsave` lock reaches, since its unlock re-enables
+preemption before interrupts); or an explicit `schedule`/`sched_yield`/
+block. Check: review; test `preempt` (a spinning thread is displaced by
+a woken sleeper, from interrupt context); tests `preempt-wake`,
+`preempt-wake-direct` and `preempt-wake-locked` (a same-CPU wake of a
+higher-priority thread runs before the waker's next statement, through
+a wait queue, through a direct `sched_wake`, and from inside a bare
+interrupts-off region); `init --selftest`'s `debug.preempt_probe` step
+(a wake made inside a system call runs before the call returns).
 
 ## Wait queues
 

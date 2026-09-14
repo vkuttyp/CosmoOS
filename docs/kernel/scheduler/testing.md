@@ -36,6 +36,39 @@ dump. A `< 200 ms` used to sit here; nothing a kernel does wrong lands
 between "one slice late" and "never", so it could fail only on a loaded
 host (`docs/testing/flakes.md`).
 
+### `preempt-wake`, `preempt-wake-direct`, `preempt-wake-locked`
+A same-CPU wake of a higher-priority thread runs **before the waker's
+next statement** (the wake-preempt unit). A priority-16 waiter pinned to
+CPU 0 blocks; thread 0, on CPU 0, wakes it and as its very next
+statement stores `after = 1`; the waiter's first statement on waking
+reads `after` into `saw`, which starts at 2. `saw == 0` is the claim.
+The three differ only in the wake: a semaphore post (the wait-queue
+shape), a direct `sched_wake` on a thread parked as a futex waiter
+(`wait_event` on a private queue, the futex's, `poll`'s and signal
+delivery's shape), and a post made inside a bare `arch_irq_save`/
+`arch_irq_restore` region, where the post's own unlock restores
+interrupts to *off* and the caller's restore is the first enable -- the
+case that puts the point in the restore rather than in
+`spin_unlock_irqrestore`. Each posts only once the waiter reads
+`THREAD_BLOCKED`, so a waiter that never blocked cannot pass. Proved:
+with the point removed all three read 1 (the waiter ran at the tick);
+with the point placed before the enable, the same; with the point in
+`spin_unlock_irqrestore` only, exactly `-locked` fails. Measured: the
+waiter runs 20-77 µs after the wake, both architectures.
+
+### `irqrestore-bench`
+A million `arch_irq_save`/`arch_irq_restore` pairs with `need_resched`
+clear: the cost of the point's predicate on the hot path, printed with
+the CPU's count of restore-point preemptions so far.
+
+### `debug.preempt_probe` (user mode, `init --selftest`)
+The read of this sysctl is the system call under test: it creates a
+priority-16 thread pinned to the caller's CPU, waits for it to block,
+posts, stores `after = 1` as its next statement and returns `saw=N`;
+init asserts `saw=0`, so the wake made inside the call ran before the
+call returned. Debug builds only (a release kernel answers `ENOENT`,
+which init also asserts); privileged; no wake path gains a hook.
+
 ### `sleep`
 `thread_sleep_ms(20)` must take at least 20 ms and less than
 20 ms + 3 ticks + 100 ms; `thread_sleep_ns(1 ms)` must not return early.

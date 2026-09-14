@@ -913,7 +913,10 @@ dropped and counted in `bad_cksum`, and the same packet marked
 capabilities.
 
 **`net-bench`** (reports only): loopback TCP with one and two concurrent
-4 MiB flows, and 10 000 64-byte UDP sends, steering off then on.
+4 MiB flows, and 10 000 64-byte UDP sends, steering off then on. Its
+UDP delivered count was the evidence for the worker's priority in the
+wake-preempt unit: 512 of 10 000 with the worker at 40, 9 300 to 10 000
+at the default (`design.md`, "The worker's priority", with the table).
 Measured 2026-09-06 on the boot test (QEMU TCG, 4 CPUs, Apple Silicon
 host; noisy, indicative):
 

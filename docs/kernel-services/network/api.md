@@ -194,7 +194,7 @@ done); `ops->release` frees the storage after the last put
 `ramfs_populate_boot` and before `module_load_boot` (drivers register
 interfaces during module init). Creates the mbuf caches, initialises
 ARP, ND, UDP, TCP and sockets, starts CPU 0's worker `netrx/0`
-(priority 40) and registers `lo`. Logs `net: stack ready`.
+(at the default priority; `design.md`, "The worker's priority") and registers `lo`. Logs `net: stack ready`.
 **`void net_start_workers(void)`** (unit 11) Once, after `smp_init`:
 one receive queue and one pinned worker `netrx/N` per online CPU
 (`thread_create_on`); logs `net: N receive queues`. Until a CPU's worker

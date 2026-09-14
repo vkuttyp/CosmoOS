@@ -78,7 +78,7 @@ struct netif {
 `netif_rx(nif, m)` runs in any context (a driver's interrupt handler):
 it stamps `m->pkt.rcvif`, enqueues on the global receive queue
 (`mbufq`, IRQ-safe spinlock, 512 packets) and wakes the worker.
-`netrx` (one kernel thread, priority 40) dequeues up to 64 packets
+`netrx` (one kernel thread per CPU since unit 11, at the default priority since the wake-preempt unit -- "The worker's priority" below) dequeues up to 64 packets
 per wake and calls `ether_input` (or `ipv4_input`/`ipv6_input`
 directly for `NETIF_LOOPBACK` interfaces, which have no link layer and
 leave the EtherType in `pkt.proto`), then runs the deferred work list
@@ -1432,6 +1432,55 @@ timer (IRQ)           ──net_work_queue──▶ work[this cpu] ──▶ net
   and the boot tests measure nothing that would move); no busy polling;
   no per-CPU protocol tables (the locks are uncontended at the tested
   scale); no XPS beyond the driver's one transmit queue.
+
+### The worker's priority (the wake-preempt unit)
+
+The workers ran at priority 40, below `SCHED_PRIO_DEFAULT` (32), from
+unit 11 until `docs/audit/next-subsystem-wake-preempt.md`; a
+default-priority thread sending on a worker's own CPU was therefore never
+displaced by it, and `net-bench` with steering off delivered **512 of
+10 000** UDP sends on every boot -- `NET_RXQ_MAX`, the queue's depth --
+because the sender's whole burst ran before its worker got a slice. Once
+a same-CPU wake could preempt (the scheduler's fourth preemption point),
+the priority became a decision that could be made, and it was made by
+measurement: five boots per setting per architecture on 2026-09-14,
+`net-bench`'s TCP one- and two-flow figures (MiB/s, min-max, median in
+parentheses) and UDP delivered of 10 000, steering off (`0`) and on (`1`):
+
+| priority | arch | steer | TCP 1 flow | TCP 2 flows | delivered |
+| --- | --- | --- | --- | --- | --- |
+| 40 | aarch64 | 0 | 32-45 (36) | 49-51 (50) | 510-512 |
+| 32 | aarch64 | 0 | 40-51 (50) | 47-60 (58) | 9321-9592 |
+| 31 | aarch64 | 0 | 34-42 (36) | 46-55 (47) | 9470-9849 |
+| 40 | aarch64 | 1 | 35-68 (40) | 44-73 (68) | 509-10000 |
+| 32 | aarch64 | 1 | 37-67 (51) | 58-85 (76) | 9470-9856 |
+| 31 | aarch64 | 1 | **5-40 (12)** | 24-73 (56) | 9637-9935 |
+| 40 | x86_64 | 0 | 34-43 (37) | 48-58 (55) | 512-512 |
+| 32 | x86_64 | 0 | 33-46 (34) | 43-54 (48) | 9335-10000 |
+| 31 | x86_64 | 0 | 34-42 (36) | 45-52 (45) | 9713-9869 |
+| 40 | x86_64 | 1 | 38-65 (44) | 50-81 (67) | 511-9863 |
+| 32 | x86_64 | 1 | 35-59 (43) | 25-82 (56) | 9801-10000 |
+| 31 | x86_64 | 1 | **7-64 (39)** | 62-75 (68) | 9612-9878 |
+
+The rule, in order: throughput is the veto (a setting below 40's by more
+than the run-to-run spread is out); among the survivors the highest
+delivered count wins; then the lower wake-to-run latency; then the
+setting closest to the old one. **31 is vetoed**: with steering on the
+worker preempts its feeder on every enqueue and the one-flow figure
+collapses -- the ping-pong the report predicted -- and one x86-64 boot
+in five **hung** in `net-steer`, the worker on CPU 3 running for over
+eight seconds with the injector pinned there never scheduled (the
+watchdog dump is in the report's as-run section; a latent spin the
+priority exposes, recorded in the inventory as a follow-up). **32
+survives**: every TCP figure within 40's spread or above it, on both
+architectures. Between 32 and 40 the delivered count decides: 9 300 to
+10 000 against 512. The raw UDP send rate is lower at 32 (the sender
+shares its CPU with a worker that now runs), but sends that are not
+delivered were never throughput; delivered packets per second rise about
+tenfold. `NET_WORKER_PRIO` in `netif.c` carries the decision and its
+reason. The batching a worker *above* its feeder would need -- one wake
+per burst, not per packet -- is the named follow-up if 31 is ever
+reconsidered.
 
 ### The next mbuf: headroom, flow id, checksum flags
 

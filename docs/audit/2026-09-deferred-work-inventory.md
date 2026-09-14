@@ -265,17 +265,22 @@ tree.
 - **grace-period latency is tick-bound** (a 4-8 ms floor);
   `synchronize_quiesce` polls; the wake-on-publish design that would
   remove the floor was not built.
-- **the network worker runs below default priority** (priority 40,
-  kernel-services/network/netif.c:725) on the sender's CPU. The report
-  assigned "a priority decision" to milestone 8, which did per-connection
-  locking and left the priority. The suite-waits unit's proofs met
-  exactly this: a flood is processed only after the sending thread first
-  sleeps.
-- **woken-thread latency**: a thread woken by a lower-priority thread
-  runs only at the next tick or preemption point; the deferred-preemption
-  flag consumed at `arch_irq_restore` was assigned to the lockdep
-  milestone and not done; there is still no preemption check on syscall
-  return.
+- ~~**the network worker runs below default priority**~~ -- **closed by
+  the wake-preempt unit (PR #134)**: decided by measurement at the
+  default priority (`docs/kernel-services/network/design.md`, "The
+  worker's priority").
+- ~~**woken-thread latency**~~ -- **closed by the wake-preempt unit
+  (PR #134)**: the fourth preemption point in `arch_irq_restore`; a
+  wake inside a system call is shown to preempt before the return, so no
+  syscall-return point is needed.
+- **a latent spin in the network worker that a priority above its feeder
+  exposes** (found by the wake-preempt unit's measurement): with the
+  worker at 31, one x86-64 boot in five hung in `net-steer` -- the worker
+  running on CPU 3 for over eight seconds at `preempt 0`, the injector
+  thread pinned there never scheduled; not reproduced in five boots on
+  AArch64 or at 32 or 40. The watchdog dump is in
+  `docs/audit/next-subsystem-wake-preempt.md` (as run); a diagnosis needs
+  the running thread's PC, which the dump does not carry.
 - **never exercised by a test**: the straggler IPI (Q6), the
   `blk_submit`/`blk_unregister` window (Q11), the TCP
   timer-callback/free race (N-L3), runtime hot-unplug of virtio devices.
