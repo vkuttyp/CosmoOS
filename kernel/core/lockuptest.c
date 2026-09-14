@@ -383,13 +383,18 @@ bool selftest_lockup_hard(const char **reason)
     struct thread *t = start_spinner(&s, (unsigned)k, SCHED_PRIO_DEFAULT, true);
     uint64_t reports = 0;
     uint64_t t0 = clock_now_ns();
-    /* The budget stays under the TLB shootdown's one-second acknowledgement
-     * bound: a masked spinner that outlives it would panic the kernel. */
-    bool fired = t != NULL && wait_reports(&reports, s0.hard_reports + 1, false, 800);
+    /* The budget and the hold after the report together stay under the
+     * TLB shootdown's one-second acknowledgement bound: a masked spinner
+     * that outlived it would panic the kernel. */
+    bool fired = t != NULL && wait_reports(&reports, s0.hard_reports + 1, false, 600);
     uint64_t fired_after = clock_now_ns() - t0;
     lockup_get_stats(&s1);
     uintptr_t pc = percpu_get((unsigned)k)->sample.pc;
     bool nmi = percpu_get((unsigned)k)->sample.nmi;
+    /* The episode continues 300 ms: one report, not one per tick. */
+    thread_sleep_ms(300);
+    struct lockup_stats s1b;
+    lockup_get_stats(&s1b);
     if (t != NULL)
         stop_spinner(&s, t);
     /* Ticks resume; a second stretch of normal running reports nothing. */
@@ -414,6 +419,7 @@ bool selftest_lockup_hard(const char **reason)
          * tick may sit up to one tick earlier in phase. */
         CHECK(s1.hard_tick_age_ms >= 200 - TICK_NS / 1000000);
     }
+    CHECK(s1b.hard_reports == s1.hard_reports);
     CHECK(s2.hard_reports == s1.hard_reports);
     CHECK(s2.soft_reports == s0.soft_reports);
     CHECK(thread_count() == before);
