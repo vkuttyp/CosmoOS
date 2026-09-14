@@ -1410,38 +1410,95 @@ static bool ip_pmtu_reached(void *arg)
     return now.pmtu_updates - t->base >= t->want;
 }
 
+/* Echoes *decided* -- replied or refused -- not merely received: the
+ * handler counts `icmp_echo_rcvd` first and decides afterwards, so a
+ * wait on the receive count can return with the last decision pending.
+ * Two monotonic counters, a monotone sum: the exception `wait_until`'s
+ * contract allows. */
 struct echo_target { const struct ip_stats *base; uint64_t want; };
-static bool echoes_received(void *arg)
+static bool echoes_decided(void *arg)
 {
     const struct echo_target *t = arg;
     struct ip_stats now;
     ipv4_get_stats(&now);
-    return now.icmp_echo_rcvd - t->base->icmp_echo_rcvd >= t->want;
+    return (now.icmp_echo_replied - t->base->icmp_echo_replied) +
+           (now.icmp_ratelimited - t->base->icmp_ratelimited) >= t->want;
+}
+
+/* One echo, decided: was it replied? The limiter's window (ipv4.c) is a
+ * fixed second that starts with the first ICMP after a second of quiet,
+ * so an echo refused and then one replied means a fresh window has just
+ * begun -- which is the one fact a burst against the limiter needs. */
+static bool icmp_probe(uint16_t seq, bool *replied)
+{
+    struct ip_stats a, b;
+    ipv4_get_stats(&a);
+    if (icmp_send_echo(INADDR_LOOPBACK_N, 0x4d39, seq, "q", 1) != 0)
+        return false;
+    struct echo_target t = { .base = &a, .want = 1 };
+    if (!wait_until(echoes_decided, &t, 5000))
+        return false;
+    ipv4_get_stats(&b);
+    *replied = b.icmp_echo_replied > a.icmp_echo_replied;
+    return true;
 }
 
 bool selftest_net_icmp_limit(const char **reason)
 {
     struct ip_stats i0, i1;
-    /* 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an
-     * unreachable is never sent for 127/8, so the echo path carries the test). */
+    /*
+     * 300 echo requests in a burst: at most ICMP_RATE_PER_SEC replies (an
+     * unreachable is never sent for 127/8, so the echo path carries the
+     * test). The claim is exact -- at most one window's worth -- so the
+     * burst must fall inside one window, and the window's phase is not
+     * the test's to choose: it began with whichever ICMP followed the
+     * last second of quiet. Twenty consecutive boots found the boundary
+     * inside the burst once (replies from two windows, `sent` 200), which
+     * a fixed sleep or a wait for the flood can neither see nor avoid.
+     * So the phase is *made* known: fill the window (a burst of RATE
+     * echoes, every one decided), then probe one echo at a time until one
+     * is replied -- the window rolled between two probes, ten
+     * milliseconds apart -- and flood into the fresh window. What remains
+     * assumed is that the flood is decided within that window's second,
+     * against the ~20 ms it takes: the 50x margin is the largest on the
+     * load-sensitive list (docs/testing/flakes.md), where this site is
+     * recorded.
+     */
+    struct ip_stats fill;
+    ipv4_get_stats(&fill);
+    for (unsigned i = 0; i < ICMP_RATE_PER_SEC; i++)
+        CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d37, (uint16_t)i, "f", 1) == 0);
+    struct echo_target ftgt = { .base = &fill, .want = ICMP_RATE_PER_SEC };
+    CHECK(wait_until(echoes_decided, &ftgt, 5000));
+    bool fresh = false;
+    uint64_t probe_deadline = clock_now_ns() + 3000000000ull;   /* the window is a second; a hang guard */
+    for (uint16_t seq = 0; !fresh; seq++) {
+        CHECK(clock_now_ns() < probe_deadline);
+        CHECK(icmp_probe(seq, &fresh));
+        if (!fresh)
+            thread_sleep_ms(10);
+    }
+
     ipv4_get_stats(&i0);
     for (unsigned i = 0; i < 300; i++)
         CHECK(icmp_send_echo(INADDR_LOOPBACK_N, 0x4d38, (uint16_t)i, "p", 1) == 0);
     /*
-     * Wait for all three hundred to arrive. This is what makes the two
-     * assertions below mean anything: `sent <= ICMP_RATE_PER_SEC` passes
-     * spuriously when the flood has not landed (fewer echoes, fewer
-     * replies, the limit met without the limiter doing anything), and
-     * `limited >= 300 - ICMP_RATE_PER_SEC` fails for the same reason. One
-     * fixed sleep was producing a spurious pass and a spurious failure in
-     * adjacent conjuncts of one line.
+     * Wait for all three hundred to be decided. This is what makes the
+     * two assertions below mean anything: `sent <= ICMP_RATE_PER_SEC`
+     * passes spuriously when the flood has not landed (fewer echoes,
+     * fewer replies, the limit met without the limiter doing anything),
+     * and `limited >= 300 - ICMP_RATE_PER_SEC` fails for the same reason.
+     * One fixed sleep was producing a spurious pass and a spurious
+     * failure in adjacent conjuncts of one line.
      */
     struct echo_target etgt = { .base = &i0, .want = 300 };
-    CHECK(wait_until(echoes_received, &etgt, 5000));
+    CHECK(wait_until(echoes_decided, &etgt, 5000));
     ipv4_get_stats(&i1);
     uint64_t sent = i1.icmp_echo_replied - i0.icmp_echo_replied, limited = i1.icmp_ratelimited - i0.icmp_ratelimited;
     CHECK(i1.icmp_echo_rcvd - i0.icmp_echo_rcvd == 300);
     CHECK(sent <= ICMP_RATE_PER_SEC && limited >= 300 - ICMP_RATE_PER_SEC);
+    kinfo("selftest: net-icmp-limit: %llu replied, %llu refused of 300 in a fresh window",
+          (unsigned long long)sent, (unsigned long long)limited);
 
     /* Path MTU discovery: a "fragmentation needed" quoting a segment in
      * flight lowers the connection's MSS; one quoting nothing in flight is

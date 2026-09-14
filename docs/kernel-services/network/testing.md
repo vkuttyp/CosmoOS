@@ -127,10 +127,18 @@ with `tcp_set_fin_wait2(100 ms)` a client connects and closes while the
 server holds its end: the orphaned FIN_WAIT_2 is reaped
 (`fin_wait2_timeouts` +1) within 2 s. Both hooks are restored.
 
-**`net-icmp-limit`**: 300 echo requests to `127.0.0.1` in a burst: all
+**`net-icmp-limit`**: first the limiter's window is made known -- a
+burst of 100 echoes fills it, then one echo every 10 ms until one is
+replied, which says a fresh one-second window began between two probes
+-- and then 300 echo requests to `127.0.0.1` in a burst into it: all
 counted as received, at most 100 replied, at least 200
 `icmp_ratelimited` (unreachables are never sent for 127/8, so the echo
-path carries the test). Then a connection to a holding server over `lo`
+path carries the test). The waits are on echoes *decided* (replied plus
+refused), since the handler counts receipt before it decides. Without
+the probe the window's phase was chance, and one boot in forty had its
+boundary inside the burst (replies from two windows); what the test
+still assumes, a 20 ms flood decided within the window's second, is on
+the load-sensitive list. Then a connection to a holding server over `lo`
 (`mss` 16384, `ipv4_path_mtu(127.0.0.1)` 65535) with the black-hole
 filter keeping 2000 sent bytes in flight; a crafted ICMP type 3 code 4
 with MTU 1500 quoting the client's header with a sequence number 5000
@@ -801,7 +809,8 @@ nothing and waits longer (syncache ~630 ms, icmp-limit ~1.7 s). The only
 trip under the delay is `net-bench` against its 8 s budget, the
 scaffolding's own cost. Restore `loopback.c` byte-identical afterwards.
 The rule for time bounds elsewhere, and the list of tests that carry one,
-is `docs/testing/flakes.md`; none of this file's tests is on it.
+is `docs/testing/flakes.md`; one of this file's tests is on it,
+`net-icmp-limit`, for the second its flood must fit in.
 
 ## The host harness (`tests/boot/nettest.py`, `run_boot_test.py`)
 

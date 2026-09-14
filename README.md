@@ -1787,7 +1787,14 @@ See [docs/development.md](docs/development.md).
   observable replaces it, what is deliberately not listed, and the rule
   for joining. The boot harness reads that table and names a failing test
   against it in its report -- a label, not a retry, and a missing or empty
-  list is reported too. As run: REPETITION_RESULT WALLCLOCK_RESULT
+  list is reported too. **As run, the twenty-boot repetition the report
+  priced at an hour found one more**: `net-icmp-limit` once in forty boots,
+  at the limiter line -- the ICMP limiter's fixed one-second window had its
+  boundary inside the burst, a phase the test never controlled and the
+  conversion had carried over intact. The test now makes the phase known
+  (fill the window, probe until an echo is replied, flood into the fresh
+  window) and waits on echoes *decided*, not received. REPETITION2 Suite
+  time is unchanged within its ±2 s spread.
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

@@ -40,13 +40,18 @@ is deliberate: the list going silently empty is the failure it guards.
 | test | site | the bound | what it asserts | why nothing observable replaces it |
 | --- | --- | --- | --- | --- |
 | `sleep` | `kernel/scheduler/schedtest.c`, `selftest_sleep` | a 20 ms sleep returns within 20 ms + 3 ticks + 100 ms | the sleep is woken by the first tick past its deadline, not by a coarser mechanism (a sleep serviced every 100 ms would fail it) | "promptly" is the property; the wake is a timer callback on this CPU and there is no wake-reason to count that a coarse mechanism would not also produce |
+| `net-icmp-limit` | `kernel-services/network/nettest.c`, `selftest_net_icmp_limit` | the 300-echo flood is decided within the one-second limiter window the test saw begin | at most `ICMP_RATE_PER_SEC` replies to a burst, exactly one window's worth | the window's phase is now observed (an echo refused, then one replied), but that the flood's ~20 ms fits in the window's remaining second is time; a host holding the vCPU for most of a second inside the flood fails it. A 50× margin, the largest here |
 | `el2-guest-timer-ontime` | `kernel-services/virtualization/hvtest.c`, `selftest_el2_guest_timer_ontime` (runs under `make test-gic`) | the guest's timer is late by less than four times the ~15 ms it asked for | the WFI park wakes on the guest's deadline in 1 ms slices, not by sleeping the whole interval or in coarse slices | a wake-reason counter would say "the deadline passed", which a coarse park also satisfies; only the lateness distinguishes them, and lateness is time |
 
-Both were widened on 2026-09-14 after failing on a correct kernel the day
-before (`sleep` at 3 ticks + 10 ms of slack; the guest timer at "less
-than what it asked for"). Both bounds still sit an order of magnitude
-under the regression they exist to catch, and each site carries a
-`LOAD-SENSITIVE` comment pointing here.
+The first two were widened on 2026-09-14 after failing on a correct
+kernel the day before (`sleep` at 3 ticks + 10 ms of slack; the guest
+timer at "less than what it asked for"); both bounds still sit an order
+of magnitude under the regression they exist to catch. The third is not
+a widened bound but a residual: the unit's twenty-boot run found the
+limiter's window boundary inside the burst once in forty boots, the
+test now makes the window's phase known, and what it still assumes is
+recorded here because no observable replaces it. Each site carries a
+comment pointing here.
 
 ## What is *not* on the list, and why
 
@@ -106,7 +111,8 @@ code:
 | test | site then | kind | times | what became of it |
 | --- | --- | --- | --- | --- |
 | `net-tcp-syncache` | `nettest.c:983` | a fixed `settle(N)` before an assertion | 4, one blocking a merge | waits for the SYN-answered counter |
-| `net-icmp-limit` | `nettest.c:1236` | the same, "N things after a fixed settle" | 1, on the unit's own pull request | waits for the echoes-received counter |
+| `net-icmp-limit` | `nettest.c:1236` | the same, "N things after a fixed settle" | 1, on the unit's own pull request | waits for the echoes decided |
+| `net-icmp-limit` | `nettest.c:1444` (2026-09-14, the unit's own twenty-boot run) | the limiter window's boundary inside the burst -- a phase the test never controlled | 1 in 40 | the phase made known: fill, probe until a reply, flood into the fresh window; the residual listed above |
 | `sleep` | `schedtest.c:368` | upper bound | 1 | widened and labelled; listed above |
 | `smp-parallel` | `smptest.c:239` | work ratio | 1 | restated: parallelism observed from CPU 0 |
 | `el2-guest-timer-ontime` | `hvtest.c:1279` | upper bound | 1 | widened and labelled; listed above |

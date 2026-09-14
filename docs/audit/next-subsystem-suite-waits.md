@@ -53,6 +53,16 @@ and re-run before it could land.
    used more than half its budget.
 8. **One deferral withdrawn as already built**: a per-test time budget in
    the harness exists (`SELFTEST_BUDGET_MS`, 8 s, the watchdog's period).
+9. **The twenty-boot run found a flake the conversion had not touched.**
+   `net-icmp-limit` asserts at most one window's worth of replies to a
+   burst, and the ICMP limiter's window is a fixed second that begins
+   with whichever ICMP followed the last second of quiet -- a phase the
+   test never controlled. One boot in forty had the boundary inside the
+   burst. Neither a fixed sleep nor a wait for the flood can see that, so
+   the test now makes the phase known: fill the window, probe until an
+   echo is replied (the window rolled between two probes), flood into
+   the fresh window. The residual assumption -- a 20 ms flood decided
+   within a one-second window -- is a 50× margin and goes on the list.
 
 ## Problem
 
@@ -487,7 +497,7 @@ converted tree fails nothing, waiting longer for the right answer
 architecture with no `SELFTEST: FAIL`. Twenty is not a proof of absence
 and the report does not pretend otherwise; it is the number at which
 today's rate — four failures across roughly forty boots — would be
-expected to show at least once. **As run:** REPETITION_RESULT
+expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: REPETITION2
 
 **Bug-proofs**, each failing for its own reason: a converted site whose
 `wait_until` result is not `CHECK`ed (the expiry passes silently — this is
@@ -503,7 +513,7 @@ count it reached, which is the failure mode the design is for).
 | proof | expected | got |
 | --- | --- | --- |
 | per-frame delay, unconverted tree | syncache and icmp-limit fail where they flaked | `FAIL ... at line 983`, `FAIL ... at line 1236` |
-| per-frame delay, converted tree | no assertion failure; waits take longer | zero failures; syncache ok (633 ms), icmp-limit ok (1751 ms), the near-budget line printed for the waits past half their budget (REPETITION_WAITED) |
+| per-frame delay, converted tree | no assertion failure; waits take longer | zero failures; syncache ok (633 ms), icmp-limit ok (1751 ms), and **no** near-budget line, correctly: the longest wait under the delay (icmp-limit, ~1.6 s) is under half its 5 s budget; the line's own proof is the row below |
 | a `wait_until` result dropped | compile error | `error: ignoring return value ... 'warn_unused_result' ... [-Werror,-Wunused-result]` |
 | an AP that counts only while CPU 0 sleeps | `smp-parallel` fails at `obs.advanced` | yes (line 293, and 296 after the review fix) |
 | the wake IPI removed (`sched.c`) | `smp-wake` fails at the IPI count; nothing else notices | yes, line 423; 245 of 246 pass |
@@ -516,7 +526,11 @@ count it reached, which is the failure mode the design is for).
 | harness: a listed test fails | the note | the note |
 | harness: heading renamed / file missing / no failure | "lists no tests" / "is missing" / nothing | each as expected |
 | harness, end to end: `selftest_sleep` held 150 ms | the real bound fails and the report names `sleep` | yes (captured in `docs/testing/flakes.md`) |
-| twenty boots per architecture | no `SELFTEST: FAIL` | REPETITION_RESULT |
+| twenty boots per architecture, before the limiter-window fix | no `SELFTEST: FAIL` | aarch64 19/20, x86-64 20/20: `net-icmp-limit` once, at the limiter line -- the window boundary inside the burst |
+| the limiter-window phase made adversarial (a fresh window started 992 ms before the flood), probe absent | `net-icmp-limit` fails at the limiter line | PHASE_OFF |
+| the same phase, probe present | passes, flooding into the window the probe saw begin | PHASE_ON |
+| a wait's budget lowered to 2 s under the per-frame delay | the near-budget line prints | NEARBUDGET_RESULT |
+| twenty boots per architecture, fixed tree | no `SELFTEST: FAIL` | REPETITION2 |
 
 Every injection was restored byte-identical (`cmp`, or `git checkout` on
 a committed tree with `git status` clean afterwards).
@@ -526,10 +540,10 @@ a committed tree with `git status` clean afterwards).
 1. **Suite wall-clock, before and after.** Roughly 900 ms of
    unconditional sleeping in `nettest.c` alone should mostly disappear.
    The number matters because a faster suite is re-run more willingly.
-   **As run:** WALLCLOCK_RESULT
+   **As run:** `main`, one boot each: 59.9 s (aarch64) and 57.9 s (x86-64) of self-test time; this tree, mean of twenty: 58.0 s and 57.4 s, with a run-to-run spread of about ±2 s. The ~900 ms of sleeps are gone, but the difference is inside the spread, so the claim is "not slower" and nothing finer. After the limiter-window fix (a fill burst and up to a second of probing): REPETITION2_WALL
 2. **The flake rate itself**, over the twenty-boot runs: the metric the
    unit exists to move, and the only honest way to state the result.
-   **As run:** REPETITION_RESULT
+   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree: REPETITION2
 
 ## Risks
 
