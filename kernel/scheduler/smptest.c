@@ -199,6 +199,8 @@ bool selftest_smp_affinity(const char **reason)
 struct spin_work {
     volatile uint64_t iterations;
     volatile int stop;
+    unsigned cpu;               /* where it is pinned */
+    volatile unsigned strays;   /* iterations that ran anywhere else */
 };
 
 static void spin_worker(void *arg)
@@ -206,6 +208,35 @@ static void spin_worker(void *arg)
     struct spin_work *w = arg;
     while (!__atomic_load_n(&w->stop, __ATOMIC_ACQUIRE)) {
         w->iterations++;
+        if (arch_cpu_id() != w->cpu)
+            w->strays++;
+        arch_cpu_relax();
+    }
+}
+
+/*
+ * The observer of parallelism, pinned to CPU 0: it holds CPU 0 (or is
+ * preempted on it -- either way CPU 0 is busy) and watches the CPU 1
+ * spinner's counter. The counter can only advance under its eyes if CPU
+ * 1 is executing *at the same time*, which is the property. The deadline
+ * is a hang guard, not a measurement; on a quiet host the advance is seen
+ * in microseconds.
+ */
+struct spin_observer {
+    struct spin_work *watched;
+    volatile bool advanced;
+};
+
+static void spin_observe(void *arg)
+{
+    struct spin_observer *o = arg;
+    uint64_t seen = __atomic_load_n(&o->watched->iterations, __ATOMIC_RELAXED);
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (clock_now_ns() < deadline) {
+        if (__atomic_load_n(&o->watched->iterations, __ATOMIC_RELAXED) > seen) {
+            o->advanced = true;
+            return;
+        }
         arch_cpu_relax();
     }
 }
@@ -220,24 +251,42 @@ bool selftest_smp_parallel(const char **reason)
     for (unsigned c = 0; c < n; c++) {
         work[c].iterations = 0;
         work[c].stop = 0;
+        work[c].cpu = c;
+        work[c].strays = 0;
         t[c] = thread_create_on(spin_worker, &work[c], "spin", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
         CHECK(t[c] != NULL);
     }
     thread_sleep_ms(50);
+
+    /* Parallelism, observed rather than inferred. This used to be a ratio,
+     * `work[1].iterations > work[0].iterations / 4` ("an AP spinner had
+     * the whole 50 ms"), which is a statement about how the host shared
+     * its own CPUs between two vCPUs, and on a loaded host it failed on a
+     * correct kernel (docs/testing/flakes.md). What the ratio stood for is
+     * that CPU 1 ran its spinner *while* CPU 0 was busy, and that can be
+     * watched directly: an observer pinned to CPU 0 sees CPU 1's counter
+     * move. With both pinned and neither straying, an advance seen from
+     * CPU 0 is two CPUs executing at once. */
+    struct spin_observer obs = { .watched = &work[1], .advanced = false };
+    if (n > 1) {
+        struct thread *ob = thread_create_on(spin_observe, &obs, "spin-observer", SCHED_PRIO_DEFAULT,
+                                             CPUMASK_OF(0));
+        CHECK(ob != NULL);
+        thread_join(ob);
+    }
     for (unsigned c = 0; c < n; c++)
         __atomic_store_n(&work[c].stop, 1, __ATOMIC_RELEASE);
     for (unsigned c = 0; c < n; c++)
         thread_join(t[c]);
 
-    /* Every CPU ran its spinner, including CPU 0 alongside this thread
-     * (slice preemption), and the APs ran unhindered. */
-    for (unsigned c = 0; c < n; c++)
+    /* Every CPU ran its spinner, where it was pinned, including CPU 0
+     * alongside this thread (slice preemption). */
+    for (unsigned c = 0; c < n; c++) {
         CHECK(work[c].iterations > 0);
-    if (n > 1) {
-        /* An AP spinner had the whole 50 ms; thread 0 shared CPU 0 with
-         * its spinner, so CPU 0's count is lower but still substantial. */
-        CHECK(work[1].iterations > work[0].iterations / 4);
+        CHECK(work[c].strays == 0);
     }
+    if (n > 1)
+        CHECK(obs.advanced);
     CHECK(threads_settle(before));
     return true;
 }
@@ -257,10 +306,14 @@ bool selftest_smp_call(const char **reason)
         if (!cpu_online(c))
             continue;
         unsigned got = 999;
-        uint64_t t0 = clock_now_ns();
         smp_call_function_single(c, record_cpu, &got);
         CHECK(got == c);
-        CHECK(clock_now_ns() - t0 < MS(100));
+        /* No bound on the round trip here: the call has its own, one
+         * second, and panics past it (ipi.c), so "the target answered" is
+         * asserted by the return. A `< 100 ms` that used to follow could
+         * distinguish nothing a correct kernel does from what a broken one
+         * does -- a tick-driven reply would be 4 ms -- and could fail only
+         * when the host held the target vCPU. */
     }
     if (n > 1)
         CHECK(ipi_count(IPI_CALL) == 0); /* CPU 0 called itself directly */
@@ -311,12 +364,18 @@ struct cross_wake {
     struct semaphore sem;
     volatile uint64_t woke_at;
     volatile unsigned on_cpu;
+    /* IPI_RESCHEDULE handled on the target, read on the target (the
+     * waiter is pinned there and ipi_count is this-CPU's), either side
+     * of the block. */
+    volatile uint64_t ipis_before, ipis_after;
 };
 
 static void cross_waiter(void *arg)
 {
     struct cross_wake *cw = arg;
+    cw->ipis_before = ipi_count(IPI_RESCHEDULE);
     semaphore_down(&cw->sem);
+    cw->ipis_after = ipi_count(IPI_RESCHEDULE);
     cw->woke_at = clock_now_ns();
     cw->on_cpu = arch_cpu_id();
 }
@@ -338,7 +397,16 @@ bool selftest_smp_wake(const char **reason)
     struct thread *t = thread_create_on(cross_waiter, &cw, "cross-waiter", SCHED_PRIO_DEFAULT,
                                         CPUMASK_OF(target));
     CHECK(t != NULL);
-    thread_sleep_ms(10); /* it is now blocked on CPU 1, which is idle in hlt */
+    /* Wait for it to *be* blocked rather than sleeping and assuming: a
+     * post that finds no waiter yet takes the fast path and sends no
+     * IPI, and the check below would fail for a reason that is not the
+     * kernel's. BLOCKED is set under the wait-queue lock after the entry
+     * is linked (wait.c), so once seen, the post will find the waiter. */
+    uint64_t deadline = clock_now_ns() + MS(1000);
+    while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED) {
+        CHECK(clock_now_ns() < deadline);
+        thread_sleep_ms(1);
+    }
 
     uint64_t sent = clock_now_ns();
     semaphore_up(&cw.sem); /* from CPU 0: wake + IPI to CPU 1 */
@@ -346,8 +414,15 @@ bool selftest_smp_wake(const char **reason)
 
     CHECK(cw.on_cpu == target);
     CHECK(cw.woke_at >= sent);
-    /* Well under a tick: the IPI, not the tick, woke the idle CPU. */
-    CHECK(cw.woke_at - sent < MS(2));
+    /* The IPI woke the idle CPU: it handled a reschedule IPI between
+     * blocking and running again (sched.c, request_resched). This was
+     * `woke_at - sent < 2 ms` ("well under a tick"), which never proved
+     * that -- a tick landing inside the 2 ms passes it too -- and which a
+     * held vCPU fails on a correct kernel. Counting the IPI on the target
+     * is the claim itself. */
+    CHECK(cw.ipis_after > cw.ipis_before);
+    kinfo("selftest: smp-wake: cross-CPU wake seen %llu us after the post",
+          (unsigned long long)((cw.woke_at - sent) / 1000));
     CHECK(threads_settle(before));
     return true;
 }

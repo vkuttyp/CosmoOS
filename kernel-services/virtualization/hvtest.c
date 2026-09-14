@@ -598,7 +598,19 @@ bool selftest_hv_vcpu_stop(const char **reason)
     CHECK(vcpu_run(v, &x) == 0);
     uint64_t t1 = clock_now_ns();
     CHECK(x.kind == COSMO_VM_EXIT_STOPPED);
-    CHECK(__atomic_load_n(&k.sent, __ATOMIC_ACQUIRE));   /* it was the kicker, not a bound */
+    /*
+     * It was the kicker, not a bound. The kicker records `sent_ns` before
+     * it stops the vCPU and the run can only return after that stop, so
+     * a run that ended because of the kick returned after `sent_ns`; one
+     * that ended on its own returned before it. Joined first: `sent` is
+     * stored *after* the stop that ends the run, so reading it the moment
+     * the run returned raced the kicker's last two lines and could fail
+     * on a correct kernel; after the join it is exact, and so is the
+     * ordering, which is the claim.
+     */
+    thread_join(th);
+    CHECK(k.sent);
+    CHECK(t1 >= k.sent_ns);
     CHECK(v->exits > 0);
     /*
      * How long the kick took and whether it found the guest entered, both
@@ -1274,9 +1286,17 @@ bool selftest_el2_guest_timer_ontime(const char **reason)
     CHECK(cval_seen == cval);
     CHECK(fired_at >= cval);                                        /* never early */
     uint64_t late_ticks = fired_at - cval;
-    /* Late by less than the time it asked for: the owner's re-entry and
-     * a tick's granularity, not a scheduling accident. */
-    CHECK(late_ticks < asked_ticks);
+    /* LOAD-SENSITIVE (docs/testing/flakes.md). The lateness is the park's
+     * 1 ms slice, the owner's re-entry and a tick: a few ms against the
+     * ~15 ms asked for. A coarser park -- one that slept the whole
+     * interval at once, or in 100 ms slices -- would be late by far more,
+     * and that is what the bound is for. It was `< asked_ticks` and
+     * failed on a correct kernel when the host held this vCPU for over 15
+     * ms between the deadline and the guest's read of CNTVCT (2026-09-13);
+     * four times what was asked, ~60 ms, still separates a slice from a
+     * coarse park by an order of magnitude. A failure here on a busy host
+     * is a re-run before it is an investigation. */
+    CHECK(late_ticks < asked_ticks * 4);
     drop_guest(vm, v);
     kinfo("selftest: el2-guest-timer-ontime: asked %llu ticks, WFI held the run %llu ms, "
           "fired %llu ticks late",
