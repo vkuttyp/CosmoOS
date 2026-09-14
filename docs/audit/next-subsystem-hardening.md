@@ -225,8 +225,8 @@ runs under its own `SCTLR_EL2`. The bit costs nothing and is off.
 A guard that is never on is a guard whose failures are invisible. The
 tree has an unbracketed user access in four tests today and passed every
 CI run with it; the next one will be in a syscall, and the CI CPU will
-pass that too, until someone boots on hardware. Every real x86-64 CPU
-since 2013 has SMAP; every ARMv8.1 core has PAN. The tests run on the
+pass that too, until someone boots on hardware. Every x86-64 CPU
+since Broadwell (2014) has SMAP; every ARMv8.1 core has PAN. The tests run on the
 one kind of machine that hides the bug.
 
 The second core found two hypervisor bugs that are not about the guard
@@ -242,8 +242,8 @@ and the program cannot tell a kernel that implemented the flag from one
 that dropped it.
 
 WXN is one bit, on every CPU, that turns a per-leaf policy into an
-architectural one. The report on the RAM block device and page cache
-already had the kernel's own tables W^X; this makes the CPU enforce it.
+architectural one. The kernel's own tables are already W^X (M13); this
+makes the CPU enforce it whatever a future leaf says.
 
 ## Design
 
@@ -439,8 +439,8 @@ set by the CPU it affects, before it schedules.
 at 42, per VM; today one page. Nothing else allocates.
 
 *Error handling.* An unknown flag bit is `-EINVAL` before any side
-effect. A guard boot on a QEMU without the model (`cortex-a76` needs
-QEMU 7.0 or newer; the `+smap` feature names are old) fails at QEMU
+effect. A guard boot on a QEMU without the model (`cortex-a76` arrived
+in QEMU 7.1; the `+smap` feature names are old) fails at QEMU
 start with QEMU's own message, and the target says which model it asked
 for. The SMMU path refuses a configuration it cannot express (an OAS
 the layout rule maps to a concatenation the driver does not implement)
@@ -521,10 +521,11 @@ for a new reason, documented.
 ## Migration plan
 
 1. **The second boot, failing.** `test-guard`, `QEMU_GUARD`, the
-   harness markers, the CI steps. On this step's tree the AArch64 boot
-   fails 5 of 265 and the x86-64 one fails on the missing markers; the
-   step is committed with the failing state recorded in "As run", so
-   the fixes that follow have a test that fails first.
+   harness's `hardening:` markers, the CI steps. On this step's tree the
+   AArch64 boot fails 5 of 265 and the x86-64 one fails on the missing
+   `hardening:` line; the step is committed with the failing state
+   recorded in "As run", so the fixes that follow have a test that
+   fails first.
 2. **The three faults.** The bracket in `memtest.c`; the layout rule,
    its host test, and the stage-2 root, walk and VTCR that follow it
    (the SMMU driver's start level with it); `arch_hv_disable` and the
@@ -533,7 +534,8 @@ for a new reason, documented.
 3. **The lines.** The hardening `INFO`/`WARN` on both architectures;
    the markers of step 1 now pass on x86-64.
 4. **The guard tests.** `uaccess-guard`; `--trap umip` and its two
-   outcomes; `hv-disabled`.
+   outcomes; their required markers in the guard boot (`guard live`,
+   `umip: enforced`); `hv-disabled`.
 5. **Unknown bits.** The four checks, the sweep, the user-side test.
 6. **WXN.** The bit on every CPU; `CRASH_TEST=2`; `test-wxn`.
 7. **Docs, README Status, inventory, the report's as-built sections.**
