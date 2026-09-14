@@ -575,11 +575,11 @@ Kernel-internal only.
 | API | where | contract |
 | --- | --- | --- |
 | `bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)` | `kernel/lockup.h` | any context, never sleeps, never waits for another reporter (`false` at once if one is in progress); sends the sample interrupt to every other online CPU and waits once, under one total bound, for who answers; holds the reporter slot until `lockup_print_samples` |
-| `bool lockup_answer(struct arch_trap_frame *frame)` | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
+| `bool lockup_answer(struct arch_trap_frame *frame)` (as built: `lockup_answer(frame, nmi)`, the second argument recorded into the sample) | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
 | `unsigned lockup_watch_target(cpumask_t online, unsigned k)` | `kernel/lockup.h` | the online CPU with the next-higher id, wrapping; `k` itself when alone |
 | `void lockup_print_samples(cpumask_t answered)` | `kernel/lockup.h` | prints each CPU's sample or its tick-sample-and-age; releases the reporter slot |
 | `void lockup_tick(struct arch_trap_frame *frame, uint64_t now_ns)` | `kernel/lockup.h` | the two detectors' per-tick step; called by `sched_tick` |
-| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns)` | `kernel/lockup.h`, debug builds | test hook |
+| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns)` (as built: a third argument, `expected`, marks the next report as a test's so the harness's forbidden marker does not match it; `lockup_get_stats`, `lockup_reporter`, `lockup_sample_cpu` and `lockup_profile` were added) | `kernel/lockup.h`, debug builds | test hook |
 | `bool arch_ipi_send_nmi(unsigned cpu)` | `arch/irqc.h` | deliver an NMI-class interrupt to `cpu` if the architecture has one; false means "use the ordinary IPI" |
 | `IPI_SAMPLE` | `kernel/ipi.h` | the ordinary-priority sample interrupt |
 | `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` | `kernel/timer.h` | the hook receives the frame (one hook exists: `sched_tick`) |
