@@ -1807,127 +1807,14 @@ See [docs/development.md](docs/development.md).
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
-  (`docs/kernel/security/design.md`, "This is not a pid namespace":
-  renumbering is a translation at every boundary that takes or returns a
-  pid, and an isolation in which nothing outside the domain is nameable
-  learns nothing from the number). The constitution's
-  **section 60 hardware roadmap** is now done through AHCI — `NVMe`, an
-  Intel NIC, USB, AHCI — with the IOMMU unit done earlier and GPU, Wi-Fi
-  and Bluetooth explicitly later. What remains named are the follow-ups
-  each unit left (NCQ if a real disk shows it pays; the USB hub driver
-  and HID are done). The AArch64 follow-ups the EL2 backend left --
-  GICv3, ASIDs, FP/SIMD at EL0 -- are done, and the hypervisor has gone
-  past them: a guest has a virtual CPU interface, a timer and a
-  distributor, a console, a machine with a device tree, a disk, a network
-  interface and a route to the world -- and it boots Linux. Every §68
-  report named below has been built;
-  what the hypervisor lacks next is named in those units' own follow-ups,
-  and the one defect this entry used to close with is recorded at the end
-  as history, since the design it was found in has since been replaced.
-  Section **68** is not a list of deferrals: it is the
-  instruction to stop after the audit, name one subsystem in a fixed
-  shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
-  `docs/audit/next-subsystem-usb.md` for USB (built as the `xhci` and
-  `usb_storage` modules) and `docs/audit/next-subsystem-ahci.md` for
-  AHCI (built as the `ahci` module).
-  `docs/audit/next-subsystem-console.md` did it for the machine's own
-  console (built: the framebuffer the UEFI firmware has already lit,
-  carried through a version 6 boot protocol into a second console sink,
-  and a USB keyboard feeding the same `tty_input` the two UARTs feed).
-  `docs/audit/next-subsystem-fpsimd.md` did it for floating point and
-  SIMD (built: AArch64 threads own vector state, the signal frame
-  carries it, and the userland is no longer compiled to avoid the
-  registers every real program uses).
-  `docs/audit/next-subsystem-signals.md`, `-jobcontrol.md` and `-termios.md`
-  did it for the signals a person can send, for job control and for a
-  terminal a program can drive (all built). `-asid.md` did it for
-  address-space tags (built). `-gicv3.md`, `-vgic.md`, `-vtimer.md` and
-  `-vdist.md` did it for the other interrupt controller and then, one
-  piece at a time, for an AArch64 guest's interrupts, timer and
-  distributor (all built: a guest can run a stock GIC driver and be SMP).
-  `docs/audit/next-subsystem-vuart.md` did it for the guest's console
-  (built: a PL011 a stock kernel can print to and be typed at, on a
-  device seam that completes an MMIO access by width and sign).
-  `docs/audit/next-subsystem-machine.md` did it for the machine a guest is
-  handed (built: a device tree, the entry convention, PSCI, and a C guest
-  that reads them). `docs/audit/next-subsystem-linux.md` did it for
-  booting Linux, and Linux now boots (the feature registers modelled, the
-  RAM ceiling raised) to its diskless-root panic -- the reader whose
-  opinion of the device tree settles it, and it settled favourably. From
-  there the arc gave the guest what a diskless kernel lacked, one subsystem
-  at a time (all built): `-vblk.md` and `-vblk-rw.md`, a virtio-blk root
-  filesystem it can mount and write; `-vnet.md`, a virtio-net interface;
-  `-tap.md`, a host bridge that connects it to the host's own stack;
-  `-nat.md`, connected-subnet routing, IP forwarding and masquerade NAT so
-  the guest reaches beyond the host; `-dhcp-dns.md`, a DHCP server and a
-  DNS proxy on the tap so a stock guest autoconfigures its interface and
-  resolves names with nothing set by hand; `-dnat.md`, inbound port
-  forwarding so a service the guest runs is reachable from outside through a
-  host port; `-netctl.md`, a privileged `/dev/net/tapctl` control channel
-  so an operator adds and removes port-forwards on a running machine; and
-  `-multiguest.md`, a tap per open of `/dev/net/tap` so several stock guests
-  run at once, each a full networked machine, isolated and addressable; and
-  `-firewall.md`, the policy over them -- a stateful forwarding filter that
-  drops inter-guest traffic by default and lets a rule open it (built); and
-  `-input-chain.md`, its second chain -- which of the host's own services a
-  guest may reach, default-deny with the tap's DNS and echo seeded as rules
-  (built); `-host-input.md`, its third -- which of the host's services
-  the world may reach, default-accept with a quiet drop and the off-link
-  invariant (built); `-host-state.md`, the state that makes the third
-  usable -- the host's own UDP sends and echo requests recorded where they
-  leave, so a hardened default no longer costs the machine its DNS, its
-  pings or its path-MTU discovery (built); and `-output-chain.md`, the
-  fourth and last -- what the host itself may send, with a scope that tells
-  a guest's tap from the world and an `-EPERM` the sender can read (built).
-  `-tcp-verdict.md` then made the filter's refusals reach TCP's callers
-  and not only `sendto`'s (built). From there the arc turned to the
-  program rather than the guest, one unit at a time (all built):
-  `-threads.md`, native threads and a futex, so a program can use every
-  CPU; `-errno-tls.md`, a thread pointer and an `errno` per thread;
-  `-vcpu-threads.md`, `vmctl` rebuilt as a thread per vCPU with
-  `SYS_vcpu_stop` to make one leave its run -- the change that retired the
-  design the defect below was found in; `-pt-tls.md`, `__thread` and the
-  TLS image a program brings with it; `-condvar.md`, a condition variable,
-  the wait every threaded program had been writing by hand; and
-  `-cwd-ref.md`, a reference taken on the working directory before every
-  path walk, closing a use-after-free that a second thread's `chdir`
-  could reach; and `-suite-waits.md`, the boot suite's tests that slept a
-  fixed interval and then counted, converted to waits on the property, and
-  its time bounds classified one at a time (built).
-
-  The named next steps are the follow-ups these left. On the filter --
-  whose four chains now cover every path through the machine, and whose
-  refusals now reach TCP's callers as well as `sendto`'s --
-  **per-interface host chains** (all real links share one chain today),
-  **rate-limit and logging targets**, **IPv6 filtering**, and full TCP state
-  tracking. On NAT and the bridge:
-  **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
-  **tap's remaining settings** on `/dev/net/tapctl` -- which now carries
-  port-forwards, firewall rules and a per-direction default policy
-  (`COSMO_NETCTL_VERSION 5`), and not yet the rest the channel was
-  designed to carry: turning forwarding or masquerade on and off, setting
-  the resolver, and bringing the tap up and down
-  (`docs/audit/next-subsystem-netctl.md`, "the ABI the later network
-  settings will ride"). On the state: **ICMP
-  errors for a UDP flow** (no consumer exists yet) and a **listing of live
-  flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
-  reproduction reaching the real world.
-  And one **defect, found while diagnosing a CI failure rather than by a
-  unit, kept here as history** because the design it lived in is gone.
-  `vmctl`'s machine mode once ran a guest's vCPUs in a single thread, a
-  tick each; a vCPU started with `CPU_ON` got a turn of its own but not a
-  turn of bounded *length*, so on a loaded host the secondary's first UART
-  store could miss its tick and `SYSTEM_OFF` was honoured the moment the
-  first vCPU asked -- the intermittent disappearance of the
-  `cpu1: up ctx=1234cafe` line. The fix at the time bounded the turns.
-  That whole loop was then replaced by **a thread per vCPU**
-  (`docs/audit/next-subsystem-vcpu-threads.md`, "A thread per vCPU, and
-  the loop that remains"; `docs/kernel-services/virtualization/api.md`):
-  there are no turns to bound any more. Today `CPU_ON` waits, for at most
-  200 ms, for the target's first run to *return* -- which is what PSCI's
-  SUCCESS means -- and `SYSTEM_OFF` sets every vCPU's state to QUIT, wakes
-  the parked threads and kicks the ones inside a guest with
-  `SYS_vcpu_stop`. The regression that guarded the old fix still guards
-  the new design: `guest_offspin`, whose second CPU never yields, must
-  still power off, and the `cpu1: up` marker must still arrive. Design
-  documents first, one subsystem at a time.
+  (`docs/kernel/security/design.md`, "This is not a pid namespace"). Every
+  §68 report under `docs/audit/next-subsystem-*.md` has been built and
+  has its entry above. What each unit deferred, what the constitution and
+  the audits set for later, what is deliberately not done and on what
+  condition it would be revisited, and what must not be proposed again
+  are gathered in one place and cross-checked against the tree:
+  **`docs/audit/2026-09-deferred-work-inventory.md`**. The next report is
+  chosen from it and names the entry it closes. Section **68** is not a
+  list of deferrals: it is the instruction to stop after the audit, name
+  one subsystem in a fixed shape and wait. Design documents first, one
+  subsystem at a time.
