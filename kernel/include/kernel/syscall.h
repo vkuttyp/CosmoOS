@@ -35,7 +35,7 @@ int64_t syscall_obj_write(struct kobject *obj, uint64_t ubuf, size_t len);
 
 /*
  * The bounce every user copy goes through, sized to the request
- * (docs/kernel/syscall/design.md, "The bounce"): the caller's stack chunk
+ * (docs/kernel/syscall/architecture.md, "The bounce"): the caller's stack chunk
  * for a kilobyte and less, the heap above it up to IO_BOUNCE_MAX -- one
  * object call for a big read, where a 64 KiB read used to be sixty-four
  * -- and a heap allocation that fails degrades to the stack chunk, never
