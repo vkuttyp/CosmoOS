@@ -29,7 +29,7 @@ kernel stack.
 |---|---|---|---|---|
 | 0 | `exit` | `int status` | never returns | none |
 | 1 | `write` | `int h, const void *buf, size_t len` | bytes written (may be short) | `EFAULT` (range), `EBADF` (no handle, no WRITE right, object has no `write`) |
-| 2 | `read` | `int h, void *buf, size_t len` | bytes read, 0 at end of file | `EFAULT`, `EBADF` |
+| 2 | `read` | `int h, void *buf, size_t len` | bytes read (one object call: up to 64 KiB of a file, what a pipe or tty has), 0 at end of file | `EFAULT`, `EBADF` |
 | 3 | `getpid` | none | pid (> 0) | none |
 | 4 | `yield` | none | 0 | none |
 | 5 | `sleep_ns` | `uint64_t ns` | 0 after at least `ns` | `EINVAL` (> 1 hour) |
@@ -37,7 +37,7 @@ kernel stack.
 | 7 | `mmap` | `void *hint, size_t len, int prot, int flags` | address | `EINVAL`, `ENOMEM`, `EEXIST` |
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
-| 10 | `close` | `int h` | 0 | `EBADF` |
+| 10 | `close` | `int h` | 0; the handle is closed even when an error is returned | `EBADF`; a file's pending write-back error (`EIO`, once per open file: `docs/kernel-services/vfs/design.md`, "Write-back errors") |
 | 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
 | 12 | `stat` | `const char *path, struct cosmo_stat *st` | 0 | path errors, `EFAULT` |
 | 13 | `fstat` | `int h, struct cosmo_stat *st` | 0 | `EBADF`, `EFAULT` |
@@ -391,8 +391,13 @@ counting `-ENOSYS` handler); `docs/compat/linux/api.md`. A process's
 
 ### `int64_t syscall_handle_read(int h, uint64_t ubuf, size_t len)`, `int64_t syscall_handle_write(int h, uint64_t ubuf, size_t len)`, `int syscall_handle_stat(int h, struct cosmo_stat *st)`
 The bodies of the native `read`, `write` and `fstat` (handle lookup
-with the right, `IO_CHUNK` copies, the object's `read`/`write`/`stat`
-operation), exported so the Linux personality's `read`, `write`,
+with the right, the copy through the bounce sized to the request
+(`syscall_bounce_get`: the stack chunk up to `IO_CHUNK`, the heap up to
+`IO_BOUNCE_MAX` = 64 KiB, the stack chunk when the heap refuses), the
+object's `read`/`write`/`stat` operation), exported so the Linux
+personality's `read`, `write`, `pread`, `pwrite` and the private file
+mapping's fill use the same bounce and the same limit, and the Linux
+personality's `read`, `write`,
 `readv`, `writev`, `fstat` and `newfstatat(AT_EMPTY_PATH)` are the same
 code. The native `sys_read`/`sys_write`/`sys_fstat` wrap them; they
 take no Linux argument and know nothing of the caller's personality.

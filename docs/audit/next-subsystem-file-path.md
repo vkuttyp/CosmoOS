@@ -50,6 +50,46 @@ documents commit when built, not before): §3 "VFS: `close()` cannot
 report write-back errors" and §3 "`read` returns at most 1 KiB per call
 through the stack bounce buffer".
 
+**Built: PR #138 (2026-09-14).** The design below is as proposed; "As
+run" records what the build measured. Differences from the plan, each
+found by building:
+
+1. **The record is the page cache's, not the vnode's** (Greptile's
+   round-1 finding on the report, built as revised): `pagecache_sync`
+   records under `pc->lock`; `struct pagecache` carries `wb_err` and
+   `wb_seq`; `pagecache_error_since` and `pagecache_wb_seq` read them.
+2. **An unlinked file's pages are neither written back nor counted.**
+   The first run's loss lines made the question concrete: which drops
+   are data lost? A named file's (`nlink > 0`) are; an unlinked file's
+   have no reader left. The vnode's release now makes its last attempt
+   and counts only for a named file, which also closes the audit's 8.2
+   LOW ("`vnode_release` writes back dirty pages of an `nlink==0`
+   file"); `pagecache_drop(vn, lost)` takes the decision as an argument.
+   The suite's one real loss stays visible: `cosmofs-reserve` fills a
+   disk on purpose and its last file's sixteen pages fail at release
+   with `-ENOSPC` -- the line every boot now prints, silent before.
+3. **The kernel tests prove the helper and the object side; the
+   syscall's wiring is proved from user mode.** `syscall_obj_read` takes
+   a user address, which the kernel's own thread has none of, so
+   `read-bounce` proves the sizing and the fallback of
+   `syscall_bounce_get` directly and `file_read`'s 64 KiB from a 200 KiB
+   file; `fs_selftest` in `init --selftest` reads 64 KiB in one `read`,
+   3 KiB from the end, and 300 from a pipe, and prints the `USERBENCH`
+   lines. The planned `read-fill`/`read-bounce-fallback` pair is the one
+   test `read-bounce`.
+4. **The bug-proof for the fallback is on the helper**: an injected
+   allocation failure that returns no buffer fails `read-bounce`'s cap
+   check, since the syscall path cannot be driven from the kernel.
+5. **The bench measures the object path in the kernel and the whole
+   syscall from user mode**, not the syscall from the kernel; the two
+   figures together are the answer the audit asked for.
+6. **The Linux `pread`/`pwrite` had their own 4 KiB heap bounce**
+   (`rw_at`), and the private file mapping's fill a page: both now use
+   the shared helper. The report's citation of `lx_pread` at `:793-806`
+   was the mapping's fill; `rw_at` is at `:226-264`.
+7. **`file_flush` skips `ops->sync`** (no commit at close: the
+   transaction model is unchanged); `file_sync` keeps it.
+
 **Why these, of the inventory's open items.** With the watchdog row and
 the latent spin closed by the last unit, §3's remaining correctness
 entries are these two, the SMEP/SMAP and unknown-flag acceptances, the
@@ -451,8 +491,59 @@ dropped page.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**The suite** (2026-09-14): 265 self-tests pass on both architectures.
+
+**The benchmarks**, x86-64 under TCG (a single boot; the spread across
+boots is the network benchmarks' order, a few percent):
+
+```
+read-bench: ramfs 1 KiB requests: 1024 calls, 22641 us, 44 MiB/s
+read-bench: ramfs 4 KiB requests: 256 calls, 7098 us, 140 MiB/s
+read-bench: ramfs 64 KiB requests: 16 calls, 3146 us, 317 MiB/s
+read-bench: cosmofs cold 1 KiB requests: 1024 calls, 90798 us, 11 MiB/s
+read-bench: cosmofs cold 64 KiB requests: 16 calls, 68830 us, 14 MiB/s
+read-bench: cosmofs warm 1 KiB requests: 1024 calls, 20308 us, 49 MiB/s
+read-bench: cosmofs warm 64 KiB requests: 16 calls, 3035 us, 329 MiB/s
+write-bench: ramfs 1 KiB requests: 1024 calls, 24398 us, 40 MiB/s
+write-bench: ramfs 64 KiB requests: 16 calls, 6901 us, 144 MiB/s
+USERBENCH: read 200 KiB at 1 KiB requests: 200 calls, 5031 us, 38 MiB/s
+USERBENCH: read 200 KiB at 4 KiB requests: 50 calls, 2050 us, 95 MiB/s
+USERBENCH: read 200 KiB at 64 KiB requests: 4 calls, 1765 us, 110 MiB/s
+```
+
+AArch64:
+
+```
+read-bench: ramfs 1 KiB requests: 1024 calls, 15570 us, 64 MiB/s
+read-bench: ramfs 64 KiB requests: 16 calls, 2609 us, 383 MiB/s
+read-bench: cosmofs cold 1 KiB requests: 1024 calls, 74914 us, 13 MiB/s
+read-bench: cosmofs warm 1 KiB requests: 1024 calls, 15460 us, 64 MiB/s
+read-bench: cosmofs cold 64 KiB requests: 16 calls, 57700 us, 17 MiB/s
+read-bench: cosmofs warm 64 KiB requests: 16 calls, 2706 us, 369 MiB/s
+write-bench: ramfs 1 KiB requests: 1024 calls, 19138 us, 52 MiB/s
+write-bench: ramfs 64 KiB requests: 16 calls, 5956 us, 167 MiB/s
+USERBENCH: read 200 KiB at 1 KiB requests: 200 calls, 3846 us, 50 MiB/s
+USERBENCH: read 200 KiB at 64 KiB requests: 4 calls, 1270 us, 153 MiB/s
+```
+
+The per-call cost is what the figures show: in the kernel the copy of
+1 MiB costs seven times more in 1 KiB calls than in 64 KiB ones; from
+user mode the whole syscall three times. A cold cosmofs read is the
+device, not the call (11 to 14 MiB/s at every request size: the block
+reads dominate); warm it is the copy again. The heap bounce's allocation
+does not show against the copy (the 64 KiB row is the fastest).
+
+**The bug-proofs** (each injected, the suite booted):
+
+| injection | failed as |
+| --- | --- |
+| the bounce capped at the stack chunk | `read-bounce`: the 64 KiB request's cap check |
+| the allocation failure returned instead of the fallback | `read-bounce`: the fallback check (no buffer) |
+| the record swallowed in `pagecache_sync` | `wb-error-fsync`: `wb_errors` unchanged; `wb-error-once`: B's first `fsync` is 0 |
+| a file's own failure not marking itself seen | `wb-error-once`: A's second `fsync` is `-EIO` again |
+| an opener starting at sequence 0 | `wb-error-once`: C reports an error older than itself |
+| `handle_close` without the flush | `wb-error-close`: `close` returns 0 |
+| a drop without the count | `wb-error-lost`: `dropped_dirty` unchanged |
 
 ## Benchmarks
 

@@ -1864,6 +1864,32 @@ See [docs/development.md](docs/development.md).
   and a CPU with interrupts masked cannot acknowledge a TLB shootdown,
   whose waiter panics after a second. Then the spin: with the worker's priority overridable from the command line, the hang reproduced on the seventh boot at 31 and the dump named it in one block -- eight samples of the worker, every one in its wait condition or its dequeue, none in a packet: the receive queue's count said non-empty over a list that was empty. The cause was a second enqueue of an mbuf already on the queue, from the reorder test's loopback filter (a held copy in a plain global that two CPUs could both take), which cut the list behind it; at priority 32 the spinning worker had gone unnoticed -- one boot in five burning a CPU since that test landed. Fixed at the stack (a queued mbuf is refused a second enqueue, counted and said once; `net-mbufq-double`) and in the test (its state under a lock). Five boots at 31 on each architecture: no hang. The five-boot check at 31 then found a second, older hang -- the keepalive test black-holing the handshake's last segment before the worker had sent it, leaving its server in `accept` forever -- fixed by waiting for the passive side to be established. Ten boots at 31 after both fixes, five per architecture: no hang.
 
+- **A read that fills its buffer, and an error that reaches close**
+  (`docs/audit/next-subsystem-file-path.md`). The audit's two MEDIUM
+  findings on the file path, still as found: `read` returned at most
+  1 KiB per call through a stack bounce sized to a console line (a
+  64 KiB read was sixty-four system calls, and the Linux personality
+  inherited it), and `close` could not report a write-back error (the
+  last-reference write-back dropped its result; the vnode's release
+  dropped the pages themselves, uncounted). Now the bounce is sized to
+  the request -- the stack for a kilobyte and less, the heap above it
+  up to 64 KiB, degrading to the stack chunk when the heap refuses --
+  one object call per read, so a pipe or tty keeps its semantics and a
+  file fills its buffer; both personalities share it. A write-back
+  failure is recorded where it is seen, by the page cache's own sync
+  under its own lock; each file open at the time is told once, by
+  `fsync` or by `close` (a `flush` hook on the I/O object type, called
+  before the handle's reference goes; the handle closes regardless);
+  a named file's pages dropped at its vnode's release are counted and
+  said once, an unlinked file's neither written back nor counted --
+  the rule `cosmofs-reserve`, which fills a disk and unlinks, decided.
+  Seven kernel tests on cosmofs over the RAM block device with the
+  block fault injection scoped to the test thread, each bug-proofed by
+  injection, a user-mode read that fills 64 KiB in one call, and the
+  audit's missing read/write bandwidth benchmark: the object path reads
+  a ramfs file at 44 MiB/s with 1 KiB requests and 317 with 64 KiB on
+  x86-64, the whole syscall from user mode at 38 and 110 (PR #138).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

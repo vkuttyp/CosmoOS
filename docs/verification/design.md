@@ -62,7 +62,7 @@ a CI failure reproduces locally.
 ## 2. Fault injection (`kernel/core/faultinject.c`, debug builds)
 
 ```c
-enum fi_kind { FI_KMALLOC, FI_BLK_SUBMIT, FI_BLK_COMPLETE, FI_KIND_COUNT };
+enum fi_kind { FI_KMALLOC, FI_BLK_SUBMIT, FI_BLK_COMPLETE, FI_KIND_COUNT };   /* and, since, FI_DEMAND_PAGE, FI_DEMAND_COPY, FI_USB_CSW, FI_AHCI_CI (faultinject.h) */
 struct fi_rule { unsigned every; unsigned budget; struct thread *only; uint64_t seen, hits; };
 ```
 

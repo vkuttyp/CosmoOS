@@ -251,8 +251,8 @@ tree.
 | DMA on non-coherent hardware: the audit's "no driver calls `dma_unmap` or `dma_sync_for_cpu`" is no longer true -- every driver unmaps, and NVMe syncs its completion queue before reading it (drivers/nvme/nvme.c:248). NVMe also syncs its submission queue and PRP lists for the device, and the virtqueue syncs its ring for the device (drivers/virtio/virtqueue.c:191). What remains: the virtqueue reads its used ring, and e1000e, AHCI and xHCI read their device-written rings and buffers, with no `dma_sync_for_cpu`; e1000e, AHCI and xHCI sync nothing for the device either. Adequate on coherent QEMU, exposed by the first non-coherent SoC | 13.2, 10.2 (re-checked 2026-09-14) |
 | AArch64 hardening: `SCTLR_EL1.WXN` cleared and never set; UAO, E0PD, BTI, PAC unused; a user-triggerable SError panics the kernel; no device-tree parsing for the host (ACPI only); PSCI variations untested | 13.2, 13.3 |
 | SMEP/SMAP/UMIP absence silently accepted; `mmap`/`mount`/`umount` accept unknown flag bits | 14.2 |
-| VFS: `close()` cannot report write-back errors | 8.2 (MEDIUM, not in any milestone) |
-| `read` returns at most 1 KiB per call through the stack bounce buffer | 4.2 (MEDIUM) |
+| ~~VFS: `close()` cannot report write-back errors~~ -- **closed by the file-path unit (PR #138)**: the page cache records, each open file hears once by `fsync` or `close` (a `flush` hook on the I/O object type), a named file's pages lost at release are counted; with it the 8.2 LOW "`vnode_release` writes back dirty pages of an `nlink==0` file" | 8.2 (MEDIUM, not in any milestone) |
+| ~~`read` returns at most 1 KiB per call through the stack bounce buffer~~ -- **closed by the file-path unit (PR #138)**: a bounce sized to the request up to 64 KiB, one object call, shared by both personalities; the read/write bandwidth benchmark the audit asked for exists (`read-bench`, `write-bench`, `USERBENCH`) | 4.2 (MEDIUM) |
 | coverage: no instrumented build; no line coverage of the self-tests | 16.2 |
 
 ---
