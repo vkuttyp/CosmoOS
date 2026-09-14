@@ -24,8 +24,9 @@ truth.
 
 ## 1. Named follow-ups the README's Status entries leave open
 
-These are the deferrals stated in the units' own entries, most gathered
-in the closing "Next" paragraph (README.md:1898-1914).
+These are the deferrals stated in the units' own entries. The README's
+closing "Next" paragraph used to gather them; this file replaces that
+paragraph (same pull request), and the README now points here.
 
 ### 1.1 The network arc
 
@@ -38,10 +39,10 @@ in the closing "Next" paragraph (README.md:1898-1914).
 | IPv6 NAT | README.md:1112 |
 | hairpin / NAT-reflection, IPv6 DNAT | README.md:1160 |
 | an L2 bridge; per-guest limits beyond the NAT quota | README.md:1203 |
-| the control channel's remaining settings: forwarding and masquerade on/off, the resolver, the tap up and down | README.md:1183, 1898-1914; `docs/audit/next-subsystem-netctl.md` "the ABI the later network settings will ride" |
+| the control channel's remaining settings: forwarding and masquerade on/off, the resolver, the tap up and down | README.md:1183; `docs/audit/next-subsystem-netctl.md` "the ABI the later network settings will ride" |
 | a general DHCP server, a caching resolver, DHCPv6, DNS-over-TCP, DNSSEC | README.md:1139 |
-| ICMP errors for a UDP flow in the host's reply state ("no consumer exists yet") | README.md:1342, 1898-1914 |
-| a listing of live flows for the operator | same |
+| ICMP errors for a UDP flow in the host's reply state ("no consumer exists yet") | README.md:1342 |
+| a listing of live flows for the operator | README.md:1342 |
 
 ### 1.2 Threads, processes, the hypervisor
 
@@ -52,14 +53,14 @@ in the closing "Next" paragraph (README.md:1898-1914).
 | per-thread signal targeting | README.md:1486 |
 | the device models tested under two guest CPUs (needs a guest-side virtio driver), "named as its own unit" | README.md:1595 |
 | the display driver that sets a mode (section 60 "GPU later") | README.md:727 |
-| GPU, Wi-Fi, Bluetooth, "explicitly later" | README.md:1816 |
+| GPU, Wi-Fi, Bluetooth, "later" | constitution §60 (Prompt #2), the hardware roadmap; the README's former Next paragraph |
 
 ### 1.3 Standing gaps the README names without scheduling
 
 | item | where stated |
 | --- | --- |
 | **the VMX backend has never been executed** -- host tests of the pure logic only; needs Intel hardware or KVM | README.md:452 |
-| the Linux-guest demonstrations are not CI gates: the Image is not committed; the root filesystem, the writable root and every network unit's `QEMU_MEM=2G` reproduction are manual runs, ending with "the reproduction reaching the real world" | README.md:992, 1022, 1046, 1914 |
+| the Linux-guest demonstrations are not CI gates: the Image is not committed; the root filesystem, the writable root and every network unit's `QEMU_MEM=2G` reproduction are manual runs -- and no run has yet shown a Linux guest reaching the real world through the host's NIC | README.md:992, 1022, 1046 |
 | `atexit`'s table and the environment remain process-global and unsynchronised | README.md:1734; `docs/libc/invariants.md` |
 | the cwd-ref fix is a regression test, not a proof; the seam that would prove it is named and not built | README.md:1637; `docs/audit/next-subsystem-cwd-ref.md` |
 | `net-bench` took 71 s once in a hundred boots (x86-64, throughput normal, time lost between rounds; a retransmit backoff after a receive-queue drop is the likeliest mechanism) | README.md:1804; `docs/testing/flakes.md` history |
@@ -75,14 +76,14 @@ must say what changed.
 | --- | --- | --- |
 | device multi-queue, TSO/LRO, jumbo frames, zero-copy socket buffers | "complexity must earn its place"; QEMU's user-mode backend has one queue | README.md:418 |
 | IOMMU: interrupt remapping (`intremap=off` in the test machines), AMD-Vi, huge pages, an IOVA cache, PASID/ATS, stream ids above 255, requester-id aliasing behind bridges | not needed by the test machines | README.md:438 |
-| AHCI NCQ | measured: four streams reach 87 % of NVMe's aggregate without it; "if a real disk shows it pays" | README.md:716, 1817 |
+| AHCI NCQ | measured: four streams reach 87 % of NVMe's aggregate without it; "if a real disk shows it pays" | README.md:716 |
 | e1000e checksum offload | would buy two percent (`net-nicbench`) | README.md:690 |
 | USB scatter-gather | the USB disk is within noise of NVMe (`blk-bench`) | README.md:708 |
 | x86-64 ASIDs (PCID) | TCG implements PCID on no CPU model; nothing here could test it | README.md:842 |
 | vGIC on GICv2 hosts | GICv3-only; the capability says so and the tests skip | README.md:876 |
 | termios: POSIX's other flag words and nineteen control characters | omitted rather than accepted and ignored | README.md:813 |
 | `/sys` | nothing to put in it that `sysctl` does not hold | README.md:675 |
-| pid renumbering | the process domain deliberately does without and argues against it (`docs/kernel/security/design.md`, "This is not a pid namespace") | README.md:1808 |
+| pid renumbering | the process domain deliberately does without and argues against it (`docs/kernel/security/design.md`, "This is not a pid namespace") | the README's Next paragraph |
 | lazy FPU switching | eager measured at ~1 000 ns of a 21 600 ns switch on AArch64, 270 of 2 700 on x86-64 | README.md:689 |
 
 ---
