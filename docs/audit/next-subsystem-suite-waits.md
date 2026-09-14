@@ -497,7 +497,7 @@ converted tree fails nothing, waiting longer for the right answer
 architecture with no `SELFTEST: FAIL`. Twenty is not a proof of absence
 and the report does not pretend otherwise; it is the number at which
 today's rate — four failures across roughly forty boots — would be
-expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: REPETITION2
+expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.**
 
 **Bug-proofs**, each failing for its own reason: a converted site whose
 `wait_until` result is not `CHECK`ed (the expiry passes silently — this is
@@ -527,10 +527,11 @@ count it reached, which is the failure mode the design is for).
 | harness: heading renamed / file missing / no failure | "lists no tests" / "is missing" / nothing | each as expected |
 | harness, end to end: `selftest_sleep` held 150 ms | the real bound fails and the report names `sleep` | yes (captured in `docs/testing/flakes.md`) |
 | twenty boots per architecture, before the limiter-window fix | no `SELFTEST: FAIL` | aarch64 19/20, x86-64 20/20: `net-icmp-limit` once, at the limiter line -- the window boundary inside the burst |
-| the limiter-window phase made adversarial (a fresh window started 992 ms before the flood), probe absent | `net-icmp-limit` fails at the limiter line | PHASE_OFF |
-| the same phase, probe present | passes, flooding into the window the probe saw begin | PHASE_ON |
-| a wait's budget lowered to 2 s under the per-frame delay | the near-budget line prints | NEARBUDGET_RESULT |
-| twenty boots per architecture, fixed tree | no `SELFTEST: FAIL` | REPETITION2 |
+| the window's end forced inside the burst (a 1010 ms pause after 150 of the 300 echoes), probe present | `net-icmp-limit` fails at the limiter line: the residual is real and the assertion sees it | yes, line 1505 |
+| a timed adversary instead (a fresh window, then a sleep of 982 to 998 ms before the flood), probe absent | fails | **never straddled**, five tries: every flood got a full fresh window (100 replied). The network worker runs at lower priority on the test thread's CPU, so the flood is *processed* only once the send loop -- 10 to 20 ms under TCG -- has ended and the test first sleeps; a counter diagnostic across 1.1 s of the test's quiet showed no ICMP from anyone else. Recorded as what the proof taught, not as a proof |
+| the probe places the flood in the window it saw begin | 99 replied, 201 refused: the probe's own reply shares the flood's window | in every one of the forty boots, both architectures |
+| the near-budget line | prints past half a budget, not before | not provable through the stack: with the per-frame delay on either side of the loopback the wait after the sends is short, because the sends themselves pay the delay (the worker shares the sender's CPU). Isolated instead: a wait on a clock predicate for 1500 ms of a 2000 ms budget prints `waited 1499 ms of a 2000 ms budget`; one for 400 ms of 2000 prints nothing |
+| twenty boots per architecture, fixed tree | no `SELFTEST: FAIL` | **aarch64 20/20, x86-64 20/20** |
 
 Every injection was restored byte-identical (`cmp`, or `git checkout` on
 a committed tree with `git status` clean afterwards).
@@ -540,10 +541,10 @@ a committed tree with `git status` clean afterwards).
 1. **Suite wall-clock, before and after.** Roughly 900 ms of
    unconditional sleeping in `nettest.c` alone should mostly disappear.
    The number matters because a faster suite is re-run more willingly.
-   **As run:** `main`, one boot each: 59.9 s (aarch64) and 57.9 s (x86-64) of self-test time; this tree, mean of twenty: 58.0 s and 57.4 s, with a run-to-run spread of about ±2 s. The ~900 ms of sleeps are gone, but the difference is inside the spread, so the claim is "not slower" and nothing finer. After the limiter-window fix (a fill burst and up to a second of probing): REPETITION2_WALL
+   **As run:** `main`, one boot each: 59.9 s (aarch64) and 57.9 s (x86-64) of self-test time; this tree, mean of twenty: 58.0 s and 57.4 s, with a run-to-run spread of about ±2 s. The ~900 ms of sleeps are gone, but the difference is inside the spread, so the claim is "not slower" and nothing finer. After the limiter-window fix (a fill burst and up to a second of probing): 58.9 s and 57.9 s, means of twenty -- the same, within the spread.
 2. **The flake rate itself**, over the twenty-boot runs: the metric the
    unit exists to move, and the only honest way to state the result.
-   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree: REPETITION2
+   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree, **40 of 40**
 
 ## Risks
 

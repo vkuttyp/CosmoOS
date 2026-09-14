@@ -1793,8 +1793,9 @@ See [docs/development.md](docs/development.md).
   boundary inside the burst, a phase the test never controlled and the
   conversion had carried over intact. The test now makes the phase known
   (fill the window, probe until an echo is replied, flood into the fresh
-  window) and waits on echoes *decided*, not received. REPETITION2 Suite
-  time is unchanged within its ±2 s spread.
+  window) and waits on echoes *decided*, not received. Forty boots on the
+  fixed tree, twenty per architecture, all pass. Suite time is unchanged
+  within its ±2 s spread.
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
