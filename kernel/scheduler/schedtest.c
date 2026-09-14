@@ -567,6 +567,23 @@ int sched_preempt_probe_sysctl(char *out, size_t n)
 }
 #endif
 
+/* --- the cost of the restore point: a million save/restore pairs --- */
+bool selftest_irqrestore_bench(const char **reason)
+{
+    (void)reason;
+    enum { N = 1000000 };
+    uint64_t t0 = clock_now_ns();
+    for (unsigned i = 0; i < N; i++) {
+        arch_irq_state_t s = arch_irq_save();
+        arch_irq_restore(s);   /* with need_resched clear: the predicate's two loads and a branch */
+    }
+    uint64_t dt = clock_now_ns() - t0;
+    kinfo("selftest: irqrestore-bench: %u save/restore pairs in %llu us, %llu ns a pair; restore-point preemptions so far on this CPU: %llu",
+          N, (unsigned long long)(dt / 1000), (unsigned long long)(dt / N),
+          (unsigned long long)preempt_point_count(arch_cpu_id()));
+    return true;
+}
+
 bool selftest_sleep(const char **reason)
 {
     uint64_t t0 = clock_now_ns();

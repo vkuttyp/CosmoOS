@@ -86,11 +86,20 @@ void preempt_enable(void)
  * count at zero, where a pending reschedule means one more trip through
  * `schedule()` -- the same thing a tick landing there would do.
  */
+static uint64_t g_restore_preempts[CONFIG_MAX_CPUS];
+
 void preempt_point(void)
 {
     struct percpu *pc = this_cpu();
-    if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled())
+    if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled()) {
+        g_restore_preempts[pc->cpu_id]++;   /* this CPU's word, written only here */
         sched_preempt();
+    }
+}
+
+uint64_t preempt_point_count(unsigned cpu)
+{
+    return cpu < CONFIG_MAX_CPUS ? __atomic_load_n(&g_restore_preempts[cpu], __ATOMIC_RELAXED) : 0;
 }
 
 /* Module ABI exports (docs/kernel/module/api.md): a multi-queue driver

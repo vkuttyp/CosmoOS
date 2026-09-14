@@ -360,6 +360,7 @@ static const struct selftest tests[] = {
     { "preempt-wake",    selftest_preempt_wake },
     { "preempt-wake-direct", selftest_preempt_wake_direct },
     { "preempt-wake-locked", selftest_preempt_wake_locked },
+    { "irqrestore-bench", selftest_irqrestore_bench },
     { "sleep",           selftest_sleep },
     { "mutex",           selftest_mutex },
     { "semaphore",       selftest_semaphore },

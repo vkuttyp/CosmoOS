@@ -45,6 +45,7 @@ bool selftest_preempt(const char **reason);
 bool selftest_preempt_wake(const char **reason);
 bool selftest_preempt_wake_direct(const char **reason);
 bool selftest_preempt_wake_locked(const char **reason);
+bool selftest_irqrestore_bench(const char **reason);
 /* The sysctl-driven probe behind init's preempt-wake-syscall step (debug builds). */
 int sched_preempt_probe_sysctl(char *out, size_t n);
 bool selftest_sleep(const char **reason);

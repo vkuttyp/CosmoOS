@@ -99,6 +99,8 @@ void preempt_enable(void);
  * enabled interrupts; safe to call anywhere, since every condition that
  * would make a switch wrong is in the predicate. */
 void preempt_point(void);
+/* How many times `preempt_point` switched on `cpu` (debug diagnostics; the scheduler dump prints it). */
+uint64_t preempt_point_count(unsigned cpu);
 
 static inline bool preemptible(void)
 {
