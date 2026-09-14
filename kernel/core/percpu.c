@@ -92,7 +92,9 @@ void preempt_point(void)
 {
     struct percpu *pc = this_cpu();
     if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq_enabled()) {
-        g_restore_preempts[pc->cpu_id]++;   /* this CPU's word, written only here */
+        /* This CPU's word, written only here; atomic because the scheduler
+         * dump reads every CPU's from wherever it runs. */
+        __atomic_fetch_add(&g_restore_preempts[pc->cpu_id], 1, __ATOMIC_RELAXED);
         sched_preempt();
     }
 }
