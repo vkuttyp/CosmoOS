@@ -44,17 +44,23 @@ if (pc->preempt_count == 0 && pc->need_resched && pc->irq_depth == 0 && arch_irq
 queue's `irqsave` lock and, when the woken thread outranks the current
 one on its CPU, calls `request_resched`, which for the *local* CPU only
 sets `need_resched` (`sched.c:163-170`; a remote CPU gets an IPI and
-preempts on its interrupt return). Every caller reaches `sched_wake`
-through `waitqueue_wake_one`/`_all` (`kernel/scheduler/wait.c:61-75`),
-which holds the wait queue's `irqsave` lock around it. So the sequence
-on the waking CPU is: lock (IRQs off, preemption off) → `need_resched =
-true` → `spin_unlock` → `preempt_enable` sees IRQs off and returns →
-`arch_irq_restore` turns IRQs on → the waker keeps running.
-
-Forty sites wake this way (`grep waitqueue_wake_one\|waitqueue_wake_all\|sched_wake(`
-outside tests): semaphores, mutexes, completions, pipes, the tty, socket
-readiness, the network workers' queues, the reaper, the futex. None of
-them preempts. The woken thread runs at the next tick (250 Hz: up to
+preempts on its interrupt return). Wakes reach `sched_wake` in two
+shapes. **Forty sites** go through `waitqueue_wake_one`/`_all`
+(`kernel/scheduler/wait.c:61-75`), which holds the wait queue's
+`irqsave` lock around it: semaphores, mutexes, completions, pipes, the
+tty, socket readiness, the network workers' queues, the reaper.
+**Thirteen sites** call `sched_wake` directly on a thread they have
+found by other means: the futex (`kernel/ipc/futex.c:55,150,213`),
+`poll` and the AIO ring (`kernel/io/poll.c:32`, `aio.c:335`), process
+kill (`kernel/process/process.c:819,1183`) and signal delivery
+(`kernel/process/signal.c:120-307`), most of them under a lock of their
+own. Either way the sequence on the waking CPU is the same, because
+`sched_wake` brings its own `irqsave` lock: lock (IRQs off, preemption
+off) → `need_resched = true` → `spin_unlock` → `preempt_enable` sees
+IRQs off and returns → `arch_irq_restore` turns IRQs on (or restores
+them still off, when the caller holds an outer `irqsave` region whose
+own restore comes later) → the waker keeps running. None of the
+fifty-three preempts. The woken thread runs at the next tick (250 Hz: up to
 4 ms), at the next `preempt_enable` that happens to run with interrupts
 enabled (the lifetime pass added one at the end of `netif_transmit`
 precisely because the network stack, which uses `irqsave` locks
@@ -214,8 +220,9 @@ re-queued at the head, as the policy already does for a preempted thread
 
 **The system-call return** gets no separate point, and the report says
 why rather than adding one for symmetry: the dispatcher runs with
-interrupts enabled, and every wake it can perform passes through an
-`irqsave` unlock, so the point above fires inside the call, before the
+interrupts enabled, and every wake it can perform -- wait-queue or
+direct -- ends in `sched_wake`'s own `irqsave` unlock or the caller's
+outer restore, so the point above fires inside the call, before the
 return. The test in step 1 asserts exactly that from user mode, so if a
 wake path ever appears that runs with interrupts on and no lock, the
 test says so and the return point becomes the next change.
@@ -244,15 +251,27 @@ assert:
   equal-priority thread. Cheapest change; may be enough.
 
 The unit builds the point, then runs `net-bench` (both steering modes;
-TCP one and two flows, UDP delivered count) and the latency test below
-at 40, 32 and 31, on both architectures, and **keeps the setting that
-does not lose throughput** -- the report commits to the rule, not the
-number, because the number is the measurement's to give. If 31 costs
-the bulk TCP flow more than a few percent, the worker stays at 32 or 40
-and the report records what was measured; the batching a preempting
-worker would need (wake once per burst, not per packet -- an `avail`
-bit the enqueue sets and the wake consumes) is then the follow-up, not
-smuggled into this unit.
+TCP one and two flows, UDP sends per second and delivered of 10 000)
+and the wake-to-run latency test below at 40, 32 and 31, on both
+architectures, five runs each so the run-to-run spread is known, and
+chooses by this rule, in order -- the report commits to the rule, not
+the number, because the number is the measurement's to give:
+
+1. **Throughput is the veto.** A setting whose TCP one-flow or two-flow
+   figure is below 40's by more than the measured spread, on either
+   architecture, is out.
+2. **Among the survivors, the highest UDP delivered count wins**
+   (10 000 of 10 000 beats 512 of 10 000); this is the metric the
+   priority exists to move, and it is deterministic.
+3. **On a tie, the lower wake-to-run latency wins**; on a tie there, the
+   setting closest to today's (40, then 32, then 31), so that a change is
+   made only when a number asks for it.
+
+Every outcome names one setting. If 31 is vetoed and 32 survives with
+the same delivered count as 40, the rule keeps 40, and the batching a
+preempting worker would need (wake once per burst, not per packet -- an
+`avail` bit the enqueue sets and the wake consumes) becomes the
+follow-up rather than something smuggled into this unit.
 
 ### The §70 gate
 
@@ -304,17 +323,20 @@ is the observation.
 | `kernel/arch/x86_64/cpu.c` | `arch_irq_restore` calls it after `sti` |
 | `kernel/arch/aarch64/irq.c` | the same after the DAIF write when I is cleared |
 | `kernel-services/network/netif.c` | the worker's priority, as measured (one constant, with the measurement in the comment) |
-| `kernel/scheduler/schedtest.c` | `preempt-wake`: the same-CPU wake preempts; `preempt-wake-locked`: a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore; the existing `preempt` test unchanged |
-| `userland/init/init.c` or `tests/native/thrtest.c` | a wake made inside a system call preempts before the call returns -- observed by a kernel thread of higher priority the test arranges through a debug sysctl, see Tests |
+| `kernel/scheduler/schedtest.c` | `preempt-wake` (a wait-queue wake on the same CPU preempts), `preempt-wake-direct` (a direct `sched_wake` preempts), `preempt-wake-locked` (a wake inside a plain `arch_irq_save`/`restore` region preempts at the restore); the existing `preempt` test unchanged; **the debug probe** behind `preempt-wake-syscall` (a priority-16 thread and a completion, created and completed by the sysctl's own write) |
+| `kernel/syscall/native.c` | the `debug.preempt_probe` sysctl entry in the registry (debug builds; writable; privileged, like `debug.faultinject`), dispatching to the probe in `schedtest.c` |
+| `userland/init/init.c` | `preempt-wake-syscall`: a wake made inside a system call preempts before the call returns, observed through the probe -- one step of `init --selftest` |
 | `kernel-services/network/nettest.c` | `net-bench` unchanged; its UDP delivered count becomes the worker decision's evidence and the report quotes it |
 | `docs/kernel/scheduler/design.md`, `invariants.md` (S8 → four points), `testing.md` | the rule and its check |
 | `docs/kernel-services/network/design.md`, `testing.md` | the worker's priority and why |
 | `docs/audit/2026-09-deferred-work-inventory.md` | strike "woken-thread latency" and "the network worker runs below default priority" (§4), the audit's 4.2 MEDIUM row's syscall-return half |
 | `README.md` | Status entry |
 
-**No kernel change outside these**, no UAPI, no module ABI change
-(`arch_irq_restore` keeps its signature; modules that call it get the
-point for free).
+**No kernel change outside these** -- in particular no hook in any wake
+path: the probe's sysctl write is itself the system call that wakes,
+so `SYS_futex_wake` and its kin are untouched -- no UAPI, and no module
+ABI change (`arch_irq_restore` keeps its signature; modules that call
+it get the point for free).
 
 ## New APIs
 
@@ -330,9 +352,11 @@ Internal. No syscall, no header a program sees.
 1. **The point, and the test that shows it firing.** `preempt_point`,
    the two arch call sites, `preempt-wake`. Small enough to review as a
    pattern.
-2. **The other shape**: `preempt-wake-locked` (a wake under a bare
-   `arch_irq_save`/`restore`), and the user-mode observation that a wake
-   inside a system call preempts before the return. Both arches.
+2. **The other shapes**: `preempt-wake-direct` (a direct `sched_wake`,
+   the futex's and the signal path's shape), `preempt-wake-locked` (a
+   wake under a bare `arch_irq_save`/`restore`), and the user-mode
+   observation that a wake inside a system call preempts before the
+   return, through the debug probe. Both arches.
 3. **The worker's priority by measurement**: `net-bench` and the latency
    test at 40, 32, 31 on both architectures; the constant set by the
    rule above; the numbers in the design document.
@@ -358,6 +382,14 @@ reason, then restoring the source byte-identically.
   `arch_irq_enabled()` *before* the `sti` -- the ordering mistake a
   reviewer would make -- and the test fails the same way, which is what
   pins the call after the enable.
+- **`preempt-wake-direct`**: the same observation for the other shape.
+  The waiter parks itself the way a futex waiter does -- `waitqueue_prepare`
+  on a private queue, then `sched_block_current` -- and the test wakes it
+  with `sched_wake(t)` directly, no wait-queue wake, then stores
+  `after = 1`. Assert `saw == 0`. **Bug-proof**: the same removal; `saw`
+  reads 1. This is the futex's, `poll`'s and the signal path's shape,
+  and it is what shows the point belongs to `sched_wake`'s own unlock
+  and not to the wait queue's.
 - **`preempt-wake-locked`**: the same, with the post made inside a
   `arch_irq_save()`/`arch_irq_restore()` pair with no lock, so the wake's
   own unlock happens with interrupts already off and the *outer* restore
@@ -365,17 +397,22 @@ reason, then restoring the source byte-identically.
   into `spin_unlock_irqrestore` instead of `arch_irq_restore` (the
   narrower design this report rejected): the test fails, because the
   outer restore is not an unlock.
-- **`preempt-wake-syscall`** (user mode). A debug-only sysctl
-  `debug.preempt_probe` makes the kernel create a priority-16 thread
-  pinned to the caller's CPU that blocks on a completion the next
-  `SYS_futex_wake` from that process completes; the probe thread records
-  a per-CPU sequence number when it runs, and the syscall records the
-  sequence number *at its return*. The test asserts the probe's number is
-  lower: the probe ran before the system call returned to user mode.
-  **Bug-proof**: the same removal as above; the probe runs after the
-  return (at the tick), the numbers invert. This is the test that
-  justifies not adding a system-call-return point, and would name the
-  day one is needed.
+- **`preempt-wake-syscall`** (user mode, `init --selftest`). A
+  debug-only, privileged sysctl `debug.preempt_probe`, registered in
+  `kernel/syscall/native.c` beside `debug.faultinject` and handled in
+  `schedtest.c`: **its own write is the system call under test**. The
+  handler creates a priority-16 thread pinned to the caller's CPU,
+  waits for it to be blocked on a completion (the `THREAD_BLOCKED`
+  discipline), completes it -- a wait-queue wake made inside a system
+  call -- and then, as its next statement, records a per-CPU sequence
+  number; the probe thread records the same counter as its first
+  statement. The sysctl's read returns both numbers, and the test asserts
+  the probe's is lower: the probe ran before the system call that woke
+  it reached its own next line, let alone returned to user mode. No wake
+  path gains a hook. **Bug-proof**: the same removal as above; the probe
+  runs after the return (at the tick), the numbers invert. This is the
+  test that justifies not adding a system-call-return point, and would
+  name the day one is needed.
 - **`preempt`** (existing, a spinner displaced by a woken sleeper):
   unchanged, and it must stay passing -- its wake comes from a timer
   callback in interrupt context, the point that already existed.
