@@ -26,6 +26,7 @@
 #include <kernel/log.h>
 #include <kernel/module.h>
 #include <kernel/net/tap.h>
+#include <kernel/lockup.h>
 #include <kernel/netif.h>
 #include <kernel/pmm.h>
 #include <kernel/futex.h>
@@ -192,6 +193,7 @@ void kernel_main(const struct cosmoboot_info *info)
      * the shootdowns and cross-CPU calls bring-up needs require it. */
     smp_init();
     net_start_workers();   /* one receive queue and worker per online CPU (network unit 11) */
+    lockup_init();         /* every CPU is up and ticking: the lockup detectors may watch (kernel/core/lockup.c) */
 
     /* Boot-time kernel modules from the archive, before the self-tests
      * (which load and unload their own fixtures) and before init. */

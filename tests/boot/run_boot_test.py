@@ -317,6 +317,10 @@ FORBIDDEN_MARKERS = [
     r"BUG:",
     r"SELFTEST: FAIL",
     r"cosmoboot: FATAL",
+    # The lockup detectors (docs/kernel/diagnostics/design.md, "Lockups"):
+    # a real report fails the run with the CPU's trace in the log; the
+    # self-tests' own reports say "expected" and do not match.
+    r"\] (soft|hard) lockup:",
 ]
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be

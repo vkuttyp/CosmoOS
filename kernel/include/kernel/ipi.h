@@ -17,6 +17,7 @@ enum ipi_kind {
     IPI_CALL,        /* run the pending smp_call_function_single request */
     IPI_TLB_FLUSH,   /* invalidate the pending shootdown range */
     IPI_HALT,        /* stop forever (panic, shutdown) */
+    IPI_SAMPLE,      /* record this CPU's frame for a lockup report (lockup_answer) */
     IPI_KIND_COUNT
 };
 

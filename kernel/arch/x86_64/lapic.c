@@ -40,6 +40,7 @@
 #define DCR_DIVIDE_16    0x3u
 
 #define ICR_DELIVERY_FIXED 0x0u
+#define ICR_DELIVERY_NMI   (4u << 8)
 #define ICR_DELIVERY_INIT  (5u << 8)
 #define ICR_DELIVERY_SIPI  (6u << 8)
 #define ICR_LEVEL_ASSERT   (1u << 14)
@@ -183,6 +184,13 @@ void lapic_send_ipi_all_others(unsigned vector)
     /* Shorthand ignores ICR_HI, but the register pair is still written as
      * one unit so a nested sender cannot interleave with this one. */
     icr_write_pair(0, ICR_DEST_ALL_OTHERS | ICR_DELIVERY_FIXED | (vector & 0xFF));
+}
+
+void lapic_send_nmi(uint32_t apic_id)
+{
+    /* Delivery mode NMI carries no vector: the target takes vector 2
+     * whatever it is doing, interrupts masked or not. */
+    icr_send(apic_id, ICR_DELIVERY_NMI);
 }
 
 void lapic_send_init(uint32_t apic_id)

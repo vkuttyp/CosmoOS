@@ -68,4 +68,12 @@ void arch_ipi_bind(unsigned vector);
 void arch_ipi_send(unsigned cpu, unsigned vector);
 void arch_ipi_broadcast_others(unsigned vector);
 
+/* An NMI-class interrupt to `cpu`, for the lockup sample: delivered
+ * whether or not the target has interrupts masked. Returns false where
+ * the architecture has none configured (AArch64: no pseudo-NMI), and
+ * the caller sends an ordinary IPI instead. Never called from an NMI
+ * handler (I-ARCH-15). */
+bool arch_ipi_nmi_capable(void);
+bool arch_ipi_send_nmi(unsigned cpu);
+
 #endif /* ARCH_IRQC_H */

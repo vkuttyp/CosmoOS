@@ -12,6 +12,7 @@
 
 #include <arch/cpu.h>
 #include <arch/irq.h>
+#include <arch/trap.h>
 #include <arch/timer.h>
 
 static struct timer_queue g_queues[CONFIG_MAX_CPUS];
@@ -208,16 +209,27 @@ static void run_expired(struct timer_queue *q, uint64_t now)
 static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 {
     (void)vector;
-    (void)frame;
     (void)arg;
 
     struct percpu *pc = this_cpu();
     pc->ticks++;
 
     uint64_t now = clock_now_ns();
+    /* The tick sample (kernel/core/lockup.c): what this CPU was doing,
+     * and when. Two stores; the frame is already in a register. */
+    pc->last_tick_pc = arch_trap_frame_pc(frame);
+    pc->last_tick_ns = now;
     run_expired(pc->timers, now);
+#if CONFIG_SELFTEST
+    pc->tick_cost_ns += clock_now_ns() - now;
+#endif
     if (g_tick_hook)
-        g_tick_hook(now);
+        g_tick_hook(now, frame);
+}
+
+uint64_t timer_tick_cost_ns(void)
+{
+    return this_cpu()->tick_cost_ns;
 }
 
 void timer_set_tick_hook(timer_tick_hook_fn hook)

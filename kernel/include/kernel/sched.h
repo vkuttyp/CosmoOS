@@ -65,7 +65,8 @@ bool sched_wake(struct thread *t);
 void sched_block_current(void);
 
 /* Tick hook: slice accounting for the current thread on this CPU. */
-void sched_tick(uint64_t now_ns);
+struct arch_trap_frame;
+void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame);
 
 struct runqueue *sched_runqueue(unsigned cpu);
 

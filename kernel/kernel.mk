@@ -33,6 +33,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/quiescetest.c \
 	kernel/core/lockdep.c \
 	kernel/core/lockdeptest.c \
+	kernel/core/lockup.c \
+	kernel/core/lockuptest.c \
 	kernel/core/faultinject.c \
 	kernel/core/extable.c \
 	kernel/core/faulttest.c \

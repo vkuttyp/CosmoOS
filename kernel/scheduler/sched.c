@@ -8,6 +8,7 @@
  */
 
 #include <kernel/ipi.h>
+#include <kernel/lockup.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -361,7 +362,7 @@ void sched_watchdog_disarm(void)
     __atomic_store_n(&g_watchdog_timeout, 0, __ATOMIC_RELEASE);
 }
 
-static void watchdog_check(uint64_t now)
+static void watchdog_check(uint64_t now, struct arch_trap_frame *frame)
 {
     uint64_t timeout = __atomic_load_n(&g_watchdog_timeout, __ATOMIC_ACQUIRE);
     uint64_t last = __atomic_load_n(&g_watchdog_last_kick, __ATOMIC_RELAXED);
@@ -374,16 +375,24 @@ static void watchdog_check(uint64_t now)
     kprintf("\n[WATCHDOG] no progress for %llu ms; scheduler state:\n",
             (unsigned long long)((now - last) / 1000000));
     sched_dump();
+    /* Every other CPU's frame, recorded by that CPU (kernel/core/lockup.c);
+     * this CPU's from the tick's own frame. */
+    cpumask_t answered;
+    if (lockup_sample_all(frame, LOCKUP_SAMPLE_TIMEOUT_NS, &answered))
+        lockup_print_samples(answered);
+    else
+        kprintf("  sample in progress on cpu %d\n", lockup_reporter());
 }
 
-void sched_tick(uint64_t now_ns)
+void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
 {
     struct percpu *pc = this_cpu();
     struct runqueue *rq = pc->rq;
     if (rq == NULL)
         return;
     if (pc->cpu_id == 0)
-        watchdog_check(now_ns);
+        watchdog_check(now_ns, frame);
+    lockup_tick(frame, now_ns);
 
     spin_lock(&rq->lock);
     struct thread *cur = rq->current;
@@ -401,15 +410,21 @@ uint64_t sched_switch_count(unsigned cpu)
 
 void sched_dump(void)
 {
+    uint64_t now = clock_now_ns();
     for (unsigned c = 0; c < cpu_count(); c++) {
         struct runqueue *rq = &g_rqs[c];
         struct percpu *pc = percpu_get(c);
-        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu\n",
+        /* The tick sample and its age (kernel/core/lockup.c): a CPU whose
+         * last tick is seconds old is not taking interrupts, and its
+         * other fields are as old as that. */
+        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
                 c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
                 rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
                 (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
-                (unsigned long long)(pc ? pc->ticks : 0));
+                (unsigned long long)(pc ? pc->ticks : 0),
+                (unsigned long long)(pc && now > pc->last_tick_ns ? (now - pc->last_tick_ns) / 1000000 : 0),
+                (void *)(pc ? pc->last_tick_pc : 0));
     }
     thread_dump_all();
 }

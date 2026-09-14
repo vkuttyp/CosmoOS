@@ -70,9 +70,15 @@ bool timer_cancel(struct timer *t);
  * the wait is free. Returns what timer_cancel would have. */
 bool timer_cancel_sync(struct timer *t);
 
-/* Hook called from the tick on every CPU (the scheduler registers). */
-typedef void (*timer_tick_hook_fn)(uint64_t now_ns);
+/* Hook called from the tick on every CPU (the scheduler registers), with
+ * the tick's trap frame: the interrupted context. */
+struct arch_trap_frame;
+typedef void (*timer_tick_hook_fn)(uint64_t now_ns, struct arch_trap_frame *frame);
 void timer_set_tick_hook(timer_tick_hook_fn hook);
+
+/* CONFIG_SELFTEST: nanoseconds this CPU's ticks spent from entry to the
+ * hook call, accumulated (lockup-tick-bench); 0 in a release build. */
+uint64_t timer_tick_cost_ns(void);
 
 void ndelay(uint64_t ns);
 void udelay(uint64_t us);

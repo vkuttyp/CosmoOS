@@ -163,6 +163,21 @@ void arch_ipi_broadcast_others(unsigned vector)
     g_ops->ipi_broadcast_others(vector);
 }
 
+/* No NMI-class interrupt is configured on this architecture (GICv3
+ * pseudo-NMI would need a priority-mask discipline through every
+ * interrupt save and restore); the lockup sample falls back to an
+ * ordinary SGI, unanswered while the target has interrupts masked. */
+bool arch_ipi_nmi_capable(void)
+{
+    return false;
+}
+
+bool arch_ipi_send_nmi(unsigned cpu)
+{
+    (void)cpu;
+    return false;
+}
+
 void gic_irq_dispatch(struct arch_trap_frame *frame)
 {
     g_ops->dispatch(frame);
