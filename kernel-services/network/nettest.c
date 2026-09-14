@@ -955,12 +955,19 @@ static void inject_tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ac
  * holds; when it *is* reached the caller's `CHECK` fails on the wait
  * rather than on an arithmetic mismatch that reads like a protocol bug.
  *
- * **A predicate may not require a coherent view of more than one field.**
- * `tcp_get_stats` is `*out = g_stats;` with no lock and `ksock_ready`
- * reads socket state outside the socket mutex, so a predicate over two
- * fields can see them from either side of an update. Wait on one
- * monotonic counter; leave the multi-field assertion after the wait,
- * where it is the test's claim and not the wait's termination condition.
+ * **A predicate may not require a coherent view of more than one
+ * field -- unless every field it reads is monotonic and the predicate is
+ * monotone in them.** `tcp_get_stats` is `*out = g_stats;` with no lock
+ * and `ksock_ready` reads socket state outside the socket mutex, so a
+ * predicate over two fields can see them from either side of an update.
+ * The danger is a torn read that *satisfies* the predicate early. With
+ * monotonic fields and a monotone predicate a torn read can only
+ * under-count, which delays termination and never causes it, so such a
+ * predicate is safe (`syn_answered` is the one instance here, and says
+ * so). Anything else waits on a single field, and the multi-field
+ * *assertion* stays after the wait, where it is the test's claim and not
+ * the wait's termination condition. A first version of this contract was
+ * the absolute rule alone, and the file broke it two functions later.
  */
 static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
 {
@@ -1065,9 +1072,10 @@ static bool drop_rst_filter(struct mbuf *m, void *arg)
 }
 
 /* How many SYNs the stack has accounted for, cached or answered with a
- * cookie. One counter would be better still; these two are the only
- * decomposition the statistics offer, and they are both monotonic, so a
- * torn read can only *under*-count and make the wait longer. */
+ * cookie. Two fields, not one -- the only decomposition the statistics
+ * offer -- under the monotone-sum exception in `wait_until`'s contract:
+ * both are monotonic, so a torn read can only *under*-count and make the
+ * wait longer, never shorter. */
 struct syn_target { const struct tcp_stats *base; uint64_t want; };
 static bool syn_answered(void *arg)
 {
@@ -1091,8 +1099,13 @@ bool selftest_net_tcp_syncache(const char **reason)
     /* 300 SYNs from 300 sources that will never answer. */
     for (unsigned i = 0; i < 300; i++)
         inject_tcp((uint16_t)(20000 + i), 6020, 1000 + i, 0, TH_SYN, 1460);
-    /* Wait for the stack to have answered all three hundred -- one
-     * counter, not a sum of two, for the reason in `wait_until`. */
+    /* Wait for the stack to have answered all three hundred. This *is* a
+     * sum of two fields -- cached plus cookie-answered, the only
+     * decomposition the statistics offer -- and it is allowed by the
+     * exception `wait_until` states, not in spite of it: both are
+     * monotonic and the sum is monotone in them, so a torn read can only
+     * under-count and make the wait longer, never end it early. A first
+     * version of this comment said "one counter", which was false. */
     struct syn_target tgt = { .base = &t0, .want = 300 };
     CHECK(wait_until(syn_answered, &tgt, 5000));
     tcp_get_stats(&t1);
