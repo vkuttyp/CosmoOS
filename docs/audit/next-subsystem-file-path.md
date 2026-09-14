@@ -105,16 +105,15 @@ bandwidth at 1 KiB chunking", audit §17).
 `pagecache_sync` (`kernel-services/vfs/pagecache.c:321-386`) writes dirty
 pages in ascending order and stops at the first error, leaving the failed
 page and those after it dirty -- correct: a later sync retries them.
-Three callers:
+Four callers:
 
-| caller | when | the error goes |
-| --- | --- | --- |
-| `file_sync` (`vfs.c:1145`) | `fsync` | to the caller, this attempt only |
-| `file_release` (`vfs.c:854`) | the file's last reference: `close` of the last handle, `exit` | dropped |
-| `vnode_release` (`vfs.c:39`) | the vnode's last reference | dropped, and then the dirty pages with it |
-
-`vfs_sync` (`vfs.c:600`) reports to whoever called `sync`, not to the
-writer. So the program that writes and closes learns nothing; the
+| caller | when | holds | the error goes |
+| --- | --- | --- | --- |
+| `file_sync` (`vfs.c:1145`) | `fsync` | `vn->lock` | to the caller, this attempt only |
+| `file_release` (`vfs.c:854`) | the file's last reference: `close` of the last handle, `exit` | `vn->lock` | dropped |
+| `vnode_release` (`vfs.c:39`) | the vnode's last reference | nothing (no other reference exists) | dropped, and then the dirty pages with it |
+| cosmofs's `sync` (`cosmofs_core.c:776-795`), which `vfs_sync` (`vfs.c:600`) reaches through `mnt->fs->sync` | `sync`, unmount | `vn->lock` per vnode | to whoever called `sync`, not to the writer |
+ So the program that writes and closes learns nothing; the
 program that writes, `fsync`s and gets 0, then has its pages fail at a
 neighbour's close, learns nothing; and a page that fails at the vnode's
 release is lost with a count of zero anywhere.
@@ -180,9 +179,9 @@ stack chunk, never to an error.**
 #define IO_CHUNK      1024            /* on the stack: a console line, a small read */
 #define IO_BOUNCE_MAX (64u * 1024u)   /* from the heap: one object call for a big read */
 
-struct io_bounce { char *buf; size_t cap; bool heap; };
+struct io_bounce { char *buf; size_t cap; bool heap; };   /* kernel/include/kernel/syscall.h */
 
-static void bounce_get(struct io_bounce *b, char *stack, size_t len)
+void syscall_bounce_get(struct io_bounce *b, char *stack, size_t len)
 {
     b->buf = stack; b->cap = IO_CHUNK; b->heap = false;
     if (len > IO_CHUNK) {
@@ -191,7 +190,7 @@ static void bounce_get(struct io_bounce *b, char *stack, size_t len)
         if (p) { b->buf = p; b->cap = want; b->heap = true; }
     }
 }
-static void bounce_put(struct io_bounce *b) { if (b->heap) kfree(b->buf); }
+void syscall_bounce_put(struct io_bounce *b) { if (b->heap) kfree(b->buf); }
 ```
 
 `syscall_obj_read` becomes: get a bounce, one `io->read(obj, buf,
@@ -231,8 +230,12 @@ does.
 
 **The Linux personality** inherits the change through the same two
 functions; `readv`/`writev` iterate them per vector and gain the same
-ceiling per vector; `pread`'s page bounce becomes the same helper (one
-call up to 64 KiB) so `pread` of a page-and-a-half is one call.
+ceiling per vector. `pread`'s page bounce becomes the same helper, which
+for that reason is not `static`: `syscall_bounce_get`/`_put` and
+`IO_BOUNCE_MAX` are declared in `kernel/include/kernel/syscall.h`
+beside `syscall_handle_read`, defined once in `native.c`, and
+`compat/linux/syscalls.c` calls them -- one limit and one fallback for
+both personalities, so `pread` of a page-and-a-half is one call.
 
 **The tty and the pipe** are untouched: a canonical-mode `tty_read`
 returns one line whatever the request; a pipe returns what it holds up
@@ -244,33 +247,44 @@ kilobyte to give.
 
 The rule, in three parts:
 
-1. **The vnode remembers.** Every write-back failure is recorded on the
-   vnode: `vn->wb_err` (the errno) and `vn->wb_seq` (incremented at
-   each recording), written by `pagecache_sync`'s caller under
-   `vn->lock` where it already holds it (`file_sync`, `file_release`,
-   `vnode_release`, `vfs_sync`'s per-vnode loop).
+1. **The page cache remembers.** Every write-back failure is recorded
+   where it is seen: `pagecache_sync` itself, on the `writepage` or
+   `writepages` error that stops its loop, sets `pc->wb_err` (the errno)
+   and increments `pc->wb_seq`, under `pc->lock`, which it holds there.
+   No caller records and no caller's locking matters: the four callers
+   above hold different things (`vnode_release` holds nothing, and
+   needs nothing), and the one lock they all pass through is the page
+   cache's own. A small accessor, `pagecache_error_since(pc, seen,
+   &err)`, reads the pair under the same lock and says whether a
+   failure was recorded after sequence `seen`.
 2. **Each open file hears once.** `struct file` gains `wb_seq_seen`, set
-   at open to the vnode's `wb_seq` (an error before this open is not
-   this file's). `file_sync` runs the write-back as today; if its own
-   attempt failed it returns that; otherwise, if `vn->wb_seq !=
-   f->wb_seq_seen`, it returns `vn->wb_err` once and marks it seen. So
-   an error met at a neighbour's close reaches the writer's next `fsync`
-   -- the shape of Linux's `errseq_t`, without the wrapping arithmetic,
-   because a 32-bit sequence under a mutex does not wrap in this
-   kernel's lifetime.
+   at open to the page cache's `wb_seq` (an error before this open is
+   not this file's). `file_sync` and `file_flush` take `f->lock` and
+   then `vn->lock` -- the order every file operation that takes both
+   already uses (`file_pwrite`, `vfs.c:1197-1198`) -- run the write-back
+   as today, and then consult the record: if a failure was recorded
+   after `wb_seq_seen` (this attempt's own, or a neighbour's since), they
+   return that errno **and advance `wb_seq_seen` to the current
+   sequence**, so the same failure is reported once and the next
+   successful `fsync` returns 0. A file's own failed attempt is thus
+   reported through the same rule as a neighbour's, and marks itself
+   seen. This is the shape of Linux's `errseq_t` without the wrapping
+   arithmetic, because a 32-bit sequence under a mutex does not wrap in
+   this kernel's lifetime.
 3. **`close` asks before it lets go.** `struct kobject_io_type` gains an
    optional `int (*flush)(struct kobject *obj)`, called by
    `handle_close` on the object it is about to put, *before* the put;
    its return value is `close`'s return value, and the handle is gone
    either way (POSIX: `close` may fail with `EIO`, and the descriptor is
    closed regardless). The file's `flush` is `file_flush`: for a regular
-   vnode with dirty pages and a `writepage`, the write-back under the
-   vnode's lock, then the once-per-file report above. `file_release`
-   keeps its last-reference write-back -- for a file that reached zero
-   references some other way (a `dup`ed handle closed last, an exiting
-   process) -- and now records what it meets; `vnode_release` records
-   too, and what it then drops is **counted** (`pagecache_stats.
-   dropped_dirty`, per page) and **said once per event**
+   vnode with dirty pages and a `writepage`, the write-back under
+   `f->lock` then `vn->lock`, then the once-per-file report above.
+   `file_release` keeps its last-reference write-back -- for a file that
+   reached zero references some other way (a `dup`ed handle closed last,
+   an exiting process) -- whose failure `pagecache_sync` records like
+   any other; `vnode_release`'s last attempt records the same way, and
+   what it then drops is **counted** (`pagecache_stats.dropped_dirty`,
+   per page) and **said once per event**
    (`kwarn("vfs: %u dirty page(s) of inode %llu on %s lost: write-back
    failed (%d)")`), because at that point no file exists to tell.
 
@@ -303,9 +317,12 @@ It is the shape Linux gives `f_op->flush` for the same reason.
 vnode), reported once to each file that was open when it happened, and
 counted when no file can be told. `close` returns the error and closes.
 
-**Concurrency.** `wb_err`/`wb_seq` are written under `vn->lock`, which
-every write-back caller already holds; `wb_seq_seen` is per file,
-written under `f->lock` in `file_sync`/`file_flush` and at open. The
+**Concurrency.** `wb_err`/`wb_seq` are written by `pagecache_sync`
+under `pc->lock`, the one lock every write-back passes through, and
+read through `pagecache_error_since` under the same; `wb_seq_seen` is
+per file, written under `f->lock`, which `file_sync` and `file_flush`
+take before `vn->lock` in the order the file operations already use
+(`vfs.c:1197-1198`), and at open before the file is visible. The
 bounce is per call, on the calling thread's stack or heap; no shared
 state. `handle_close` calls `flush` outside the table lock, on the
 reference it took from the slot, before `kobject_put` -- where it
@@ -345,13 +362,13 @@ answers a 64 KiB read with a known count.
 
 | file | change |
 | --- | --- |
-| `kernel/syscall/native.c` | `IO_BOUNCE_MAX`, `struct io_bounce`, `bounce_get`/`bounce_put`; `syscall_obj_read` one call up to the bounce; `syscall_obj_write` looping the bounce |
+| `kernel/syscall/native.c`, `kernel/include/kernel/syscall.h` | `IO_BOUNCE_MAX`, `struct io_bounce`, `syscall_bounce_get`/`_put` (declared in the header, defined once); `syscall_obj_read` one call up to the bounce; `syscall_obj_write` looping the bounce |
 | `compat/linux/syscalls.c` | `lx_pread` through the same bounce helper (one call up to 64 KiB) |
 | `kernel/include/kernel/object.h` | `flush` in `struct kobject_io_type` |
 | `kernel/object/handle.c`, `kernel/include/kernel/handle.h` | `handle_close` calls `flush` before the put and returns its result; `handle_table_destroy` ignores it |
-| `kernel/include/kernel/vfs.h` | `vnode.wb_err`, `vnode.wb_seq`; `file.wb_seq_seen`; `file_flush` |
-| `kernel-services/vfs/vfs.c` | `file_flush`; `file_sync` reports once; `vfs_open` sets `wb_seq_seen`; `file_release` and `vnode_release` record; `vnode_release` counts and says what it drops; the file type's `flush` |
-| `kernel-services/vfs/pagecache.c`, `kernel/include/kernel/pagecache.h` | `pagecache_stats.dropped_dirty`; `pagecache_drop` counts dirty pages it drops |
+| `kernel/include/kernel/vfs.h` | `file.wb_seq_seen`; `file_flush` |
+| `kernel-services/vfs/vfs.c` | `file_flush`; `file_sync` reports once (both under `f->lock` then `vn->lock`); `vfs_open` sets `wb_seq_seen`; `vnode_release` counts and says what it drops; the file type's `flush` |
+| `kernel-services/vfs/pagecache.c`, `kernel/include/kernel/pagecache.h` | `pagecache.wb_err`, `pagecache.wb_seq`, recorded by `pagecache_sync` under `pc->lock`; `pagecache_error_since`; `pagecache_stats.dropped_dirty`; `pagecache_drop` counts dirty pages it drops |
 | `kernel-services/vfs/vfstest.c` | `read-fill`, `read-bounce-fallback`, `wb-error-fsync`, `wb-error-close`, `wb-error-once`, `wb-error-lost`, `read-bench`, `write-bench` |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | registration |
 | `userland/init/init.c` | `fs_selftest`: a 64 KiB read of a file larger than that returns 64 KiB (the user-mode side of the first half) |
@@ -374,10 +391,11 @@ Kernel-internal only.
 | --- | --- | --- |
 | `int (*flush)(struct kobject *obj)` | `kernel/object.h`, `struct kobject_io_type` | optional; called by `handle_close` before the put; its result is close's result; the handle closes regardless |
 | `int file_flush(struct file *f)` | `kernel/vfs.h` | the file type's `flush`: write back dirty pages, then report a recorded error once to this file |
-| `vnode.wb_err`, `vnode.wb_seq` | `kernel/vfs.h` | the last write-back error and its sequence; under `vn->lock` |
+| `pagecache.wb_err`, `pagecache.wb_seq` | `kernel/pagecache.h` | the last write-back error and its sequence; recorded by `pagecache_sync`, under `pc->lock` |
+| `bool pagecache_error_since(struct pagecache *pc, uint32_t seen, int *err, uint32_t *now)` | `kernel/pagecache.h` | under `pc->lock`: whether a failure was recorded after `seen`, its errno, and the current sequence |
 | `file.wb_seq_seen` | `kernel/vfs.h` | the sequence this file has been told about; set at open |
 | `pagecache_stats.dropped_dirty` | `kernel/pagecache.h` | dirty pages dropped at a vnode's release after a failed write-back |
-| `IO_BOUNCE_MAX` | `native.c` | 64 KiB; the ceiling of one read or one write chunk |
+| `IO_BOUNCE_MAX`, `struct io_bounce`, `syscall_bounce_get`/`_put` | `kernel/syscall.h` | 64 KiB; the ceiling of one read or one write chunk; the helper both personalities use |
 
 ## Migration plan
 
@@ -387,9 +405,9 @@ Kernel-internal only.
    requests, run before the change (the baseline is recorded in the
    report from the old code, since the benchmark is new) and after.
    Boots green on both architectures.
-2. **The record and `fsync`.** `wb_err`/`wb_seq`/`wb_seq_seen`,
-   `file_sync`'s once-report, `vfs_open`'s seen. Tests `wb-error-fsync`
-   and `wb-error-once`.
+2. **The record and `fsync`.** `pagecache_sync` records; `wb_seq_seen`;
+   `file_sync`'s once-report in the file-then-vnode order; `vfs_open`'s
+   seen. Tests `wb-error-fsync` and `wb-error-once`.
 3. **`close`.** The `flush` hook, `handle_close`, `file_flush`,
    `file_release` and `vnode_release` recording, the count and the line.
    Tests `wb-error-close` and `wb-error-lost`. `faulttest`'s block
@@ -414,8 +432,8 @@ ramfs file (no device) of a known content.
 | --- | --- | --- |
 | `read-fill` | a 200 KiB ramfs file of a known pattern: `syscall_obj_read` for 64 KiB returns 64 KiB with the right bytes; for 100 KiB returns 64 KiB; for 512 bytes returns 512; at 3 KiB from the end returns 3 KiB; a pipe holding 300 bytes answers a 64 KiB request with 300 (the ceiling rose, the semantics did not) | cap the bounce at `IO_CHUNK` -> the 64 KiB request returns 1 KiB |
 | `read-bounce-fallback` | `FI_KMALLOC` for this thread, one failure: a 64 KiB read returns 1 KiB (the stack chunk), not `-ENOMEM`; the next returns 64 KiB | return the allocation failure -> `-ENOMEM` |
-| `wb-error-fsync` | write 3 pages; one refused completion; `file_sync` is `-EIO`; `nr_dirty` is still 3 (nothing thrown away); `file_sync` again is 0; after umount and mount the pages read back | swallow `pagecache_sync`'s result in `file_sync` -> the first `fsync` returns 0 |
-| `wb-error-once` | files A and B open on one vnode; A writes; one refused completion at A's `fsync` (`-EIO`); B's `fsync` succeeds in writing and returns `-EIO` once (the error was recorded while B was open); B's second `fsync` is 0; C, opened after, `fsync`s to 0 | do not record on the vnode -> B's first `fsync` is 0; do not set `wb_seq_seen` at open -> C reports an error older than itself |
+| `wb-error-fsync` | write 3 pages; one refused completion; `file_sync` is `-EIO`; `nr_dirty` is still 3 (nothing thrown away); `file_sync` again is 0; after umount and mount the pages read back | do not advance `wb_seq_seen` when reporting the file's own failure -> the second `fsync` returns `-EIO` again; swallow the record in `pagecache_sync` -> the first `fsync` returns 0 |
+| `wb-error-once` | files A and B open on one vnode; A writes; one refused completion at A's `fsync` (`-EIO`); B's `fsync` succeeds in writing and returns `-EIO` once (the error was recorded while B was open); B's second `fsync` is 0; C, opened after, `fsync`s to 0 | do not record in `pagecache_sync` -> B's first `fsync` is 0; do not set `wb_seq_seen` at open -> C reports an error older than itself |
 | `wb-error-close` | a file in a handle table, dirty; one refused completion; `handle_close` returns `-EIO`; a second `handle_close` on the same slot is `-EBADF` (closed regardless); the release's own retry wrote the data (injection exhausted): after umount and mount it reads back; `dropped_dirty` unchanged | `handle_close` without the flush -> returns 0 |
 | `wb-error-lost` | as above with two refused completions (the flush and the release both fail), the table destroyed: `dropped_dirty` grows by the dirty page count, the `lost` line is logged once, the mount is not poisoned (a new file writes and syncs) | drop without counting -> the count is unchanged |
 | `read-bench`, `write-bench` | print, assert nothing: a 1 MiB ramfs file read and written through `syscall_obj_read`/`_write` at 1 KiB, 4 KiB and 64 KiB requests, MiB/s and calls per MiB, and the same over a cosmofs file on `ramblk`; the shape of `blk-bench` | -- |
