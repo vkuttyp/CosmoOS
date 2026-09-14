@@ -958,10 +958,16 @@ See [docs/development.md](docs/development.md).
   asks -- RAM at 1 GiB, the image where its Image header says, the tree at
   the first 2 MiB boundary past it and in `x0`. The owner is the firmware:
   PSCI is answered in `vmctl`, and `CPU_ON` creates a vCPU after the VM
-  has started and runs it -- in one thread, because the native libc has
-  none, through a bounded run (`COSMO_VCPU_RUN_ONE_TICK` returns a new
-  `PREEMPTED` exit at the first host interrupt) that the kernel already
-  had for its own tests. The tree's first C guest knows nothing of this
+  has started and runs it -- at the time, in one thread, because the
+  native libc then had none, through a bounded run
+  (`COSMO_VCPU_RUN_ONE_TICK` returns a new `PREEMPTED` exit at the first
+  host interrupt) that the kernel already had for its own tests. **That
+  single-thread loop is history**: the thread-per-vCPU unit below replaced
+  it, each vCPU now runs untimed on a thread of its own, and the flag
+  survives only in the ABI and the kernel's own tests
+  (`docs/kernel-services/virtualization/design.md`, "More than one vCPU in
+  one thread, and why it stopped being one thread"). The tree's first C
+  guest knows nothing of this
   hypervisor: it reads the tree, prints what it found through the UART
   the tree named, asks PSCI its version, brings up the second CPU and
   powers off -- from the kernel's test and from `vmctl` alike. On the way:
@@ -1852,8 +1858,11 @@ See [docs/development.md](docs/development.md).
   **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
   **tap's remaining settings** on `/dev/net/tapctl` -- which now carries
   port-forwards, firewall rules and a per-direction default policy
-  (`COSMO_NETCTL_VERSION 5`), and still not the tap's subnet, its DHCP
-  range or its DNS upstream. On the state: **ICMP
+  (`COSMO_NETCTL_VERSION 5`), and not yet the rest the channel was
+  designed to carry: turning forwarding or masquerade on and off, setting
+  the resolver, and bringing the tap up and down
+  (`docs/audit/next-subsystem-netctl.md`, "the ABI the later network
+  settings will ride"). On the state: **ICMP
   errors for a UDP flow** (no consumer exists yet) and a **listing of live
   flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
   reproduction reaching the real world.
