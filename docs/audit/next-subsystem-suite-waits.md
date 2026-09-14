@@ -72,6 +72,19 @@ and re-run before it could land.
    fresh window**: a window that rolled inside the fill is of unknown
    age, and a held vCPU makes that age anything. Only a refusal followed
    by an acceptance says the window began between two probes.
+10. **The third repetition found something outside this unit**, and the
+   harness's per-test budget -- not an assertion -- is what caught it:
+   one x86-64 boot in twenty had `net-bench` take **71 s** against its
+   8 s budget with every self-test passing and the bench's own numbers
+   normal (TCP 33 to 61 MiB/s; the steer-off UDP round delivering 512 of
+   10,000, which it does in every boot because CPU 0's 512-deep receive
+   queue overflows by design). The time was lost *between* the measured
+   rounds, and 71 s is what a TCP retransmit backoff of 1+2+4+8+16+32 s
+   costs -- a segment dropped from that overflowed queue, most likely.
+   Not seen in the previous 80 boots; this branch does not touch
+   `net-bench`. **Named as a follow-up, not fixed here**, and not put on
+   the load-sensitive list: it is a real slowness with a mechanism to
+   find, and the list is for bounds that only the host can break.
 
 ## Problem
 
@@ -514,7 +527,7 @@ converted tree fails nothing, waiting longer for the right answer
 architecture with no `SELFTEST: FAIL`. Twenty is not a proof of absence
 and the report does not pretend otherwise; it is the number at which
 today's rate — four failures across roughly forty boots — would be
-expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is refused and then until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.**
+expected to show at least once. **As run:** First run, on the tree before the limiter-window fix: **aarch64 19 of 20, x86-64 20 of 20.** The one failure was `net-icmp-limit` at its limiter line (`sent <= ICMP_RATE_PER_SEC`), 28 ms into the test -- not the host's doing: the limiter's fixed one-second window had its boundary inside the 300-packet burst, so replies came from two windows. A phase assumption the conversion carried over intact, found by exactly the run the report said would find it. Fixed by making the phase known (fill the window, probe an echo at a time until one is refused and then until one is replied, flood into the fresh window; and wait on echoes *decided*, replied plus refused, since the handler counts receipt before it decides). Second run, on the fixed tree: **aarch64 20 of 20, x86-64 20 of 20.** Third, after review's refusal-first fix: **aarch64 20 of 20, x86-64 19 of 20**, the one a `net-bench` budget trip with every assertion passing (banner, item 10).
 
 **Bug-proofs**, each failing for its own reason: a converted site whose
 `wait_until` result is not `CHECK`ed (the expiry passes silently — this is
@@ -546,9 +559,13 @@ count it reached, which is the failure mode the design is for).
 | twenty boots per architecture, before the limiter-window fix | no `SELFTEST: FAIL` | aarch64 19/20, x86-64 20/20: `net-icmp-limit` once, at the limiter line -- the window boundary inside the burst |
 | the window's end forced inside the burst (a 1010 ms pause after 150 of the 300 echoes), probe present | `net-icmp-limit` fails at the limiter line: the residual is real and the assertion sees it | yes, line 1505 |
 | a timed adversary instead (a fresh window, then a sleep of 982 to 998 ms before the flood), probe absent | fails | **never straddled**, five tries: every flood got a full fresh window (100 replied). The network worker runs at lower priority on the test thread's CPU, so the flood is *processed* only once the send loop -- 10 to 20 ms under TCG -- has ended and the test first sleeps; a counter diagnostic across 1.1 s of the test's quiet showed no ICMP from anyone else. Recorded as what the proof taught, not as a proof |
+| **review's scenario, deterministic**: the window rolls inside the first fill (a 1010 ms pause after 50 of its 100 echoes), the first probe comes 500 ms into that window, and the flood takes 500 ms (a slow host); the first draft, which took any accepted probe as fresh | fails at the limiter line | yes, line 1517 |
+| the same injection, refusal required first | passes: the refill fills the half-elapsed window, a probe is refused, the accepted one that follows marks the window the flood goes into | yes, 99 replied, 201 refused |
+| the same, but with the roll applied to *every* fill (my first attempt at the pair) | -- | fails at the 5 s hang guard: a window that rolls inside every fill can never refuse. Not a host but a limiter that resets once per fill for ever; recorded because it is how the first pair was misdrawn |
 | the probe places the flood in the window it saw begin | 99 replied, 201 refused: the probe's own reply shares the flood's window | in every one of the forty boots, both architectures |
 | the near-budget line | prints past half a budget, not before | not provable through the stack: with the per-frame delay on either side of the loopback the wait after the sends is short, because the sends themselves pay the delay (the worker shares the sender's CPU). Isolated instead: a wait on a clock predicate for 1500 ms of a 2000 ms budget prints `waited 1499 ms of a 2000 ms budget`; one for 400 ms of 2000 prints nothing |
 | twenty boots per architecture, fixed tree | no `SELFTEST: FAIL` | **aarch64 20/20, x86-64 20/20** |
+| twenty boots per architecture, refusal-first tree | no `SELFTEST: FAIL` | **aarch64 20/20, x86-64 19/20** -- and the one is not an assertion: every self-test passed, `net-bench` took 71 s against its 8 s budget. See item 10 of the banner |
 
 Every injection was restored byte-identical (`cmp`, or `git checkout` on
 a committed tree with `git status` clean afterwards).
@@ -561,7 +578,7 @@ a committed tree with `git status` clean afterwards).
    **As run:** `main`, one boot each: 59.9 s (aarch64) and 57.9 s (x86-64) of self-test time; this tree, mean of twenty: 58.0 s and 57.4 s, with a run-to-run spread of about ±2 s. The ~900 ms of sleeps are gone, but the difference is inside the spread, so the claim is "not slower" and nothing finer. After the limiter-window fix (a fill burst and up to a second of probing): 58.9 s and 57.9 s, means of twenty -- the same, within the spread.
 2. **The flake rate itself**, over the twenty-boot runs: the metric the
    unit exists to move, and the only honest way to state the result.
-   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree, **40 of 40**
+   **As run:** the first twenty-boot run put the rate at 1 in 40 (one failure, aarch64) and named a phase assumption, not the host; the second, on the fixed tree, **40 of 40**; the third, on the refusal-first tree, **39 of 40 with no assertion failure** -- the one a per-test budget trip in `net-bench`, named below as a finding
 
 ## Risks
 
@@ -607,7 +624,10 @@ a committed tree with `git status` clean afterwards).
 ---
 
 Named and deferred by this unit: the userland test programs' own timing
-assumptions (`thrtest`, `cwdtest`). ~~And a per-test time budget in the
+assumptions (`thrtest`, `cwdtest`), and **`net-bench`'s once-in-a-hundred
+71-second run** (banner, item 10: throughput normal, the time lost
+between rounds, a retransmit backoff after a receive-queue drop the
+likeliest mechanism). ~~And a per-test time budget in the
 harness~~ -- **withdrawn as built**: one exists, `SELFTEST_BUDGET_MS` (8 s,
 the watchdog's period), and the harness has failed a test on it since
 the verification unit (`docs/verification/design.md`, §6).
