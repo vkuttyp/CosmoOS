@@ -25,10 +25,15 @@ and re-run before it could land.
    at exactly the lines that flaked (`983`, `1236`) and passes the
    converted ones. It is injected by the proof and restored
    byte-identical; nothing ships.
-2. **Twelve bare sites, not eleven**, and the twelfth was found only
-   after `settle` was deleted and the function it hid behind was gone.
-   Twenty-four `wait_until` sites over twelve predicates replaced
-   twenty-two `settle` calls.
+2. **Twelve bare sites, not eleven -- and so ten hand-written waits,
+   not eleven.** The twenty-two `settle` calls were counted right; their
+   split was not. A `settle(20)` before the forged path-MTU quote (the
+   send must have been *transmitted* before its sequence is read) was
+   tallied among the loops and is a bare sleep, found only after `settle`
+   was deleted and the function it hid behind was gone. Every "eleven"
+   below is the report's count and is marked; the tree's is 12 + 10.
+   Twenty-four `wait_until` sites over twelve predicates replaced the
+   twenty-two calls.
 3. **The predicate rule gained an exception.** The absolute form -- one
    field -- was written into the helper's contract and broken two
    functions later by a predicate that sums two monotonic counters. That
@@ -119,7 +124,9 @@ static bool threads_settle(unsigned expected)
 bounded by a generous deadline, and fail loudly if it never arrives. It is
 used by `schedtest.c`, `smptest.c` and `quiescetest.c`; it does not exist
 in `nettest.c` -- which has eleven bare sleeps of the other kind, and
-eleven places where the same idea is written out by hand. As with the
+eleven places where the same idea is written out by hand (*as built:
+twelve and ten; one of the "hand-written" eleven was a bare `settle(20)`,
+see the banner*). As with the
 last two units, this one finishes a rule the repository already holds
 rather than inventing one.
 
@@ -131,8 +138,8 @@ properly, and the correction halves the unit:
 
 | | count | what it is |
 | --- | --- | --- |
-| **already a bounded wait on a condition** | **11** | `for (i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++) settle(10);` — or the same written as a loop body with a `break`. This **is** `wait_until`, hand-written, with the budget expressed as iterations × 10 ms |
-| **bare sleep-then-assert** | **11** | `settle(100);` then a count. No relationship between the interval and the work. **The defect.** |
+| **already a bounded wait on a condition** | **11** (*as built: 10*) | `for (i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++) settle(10);` — or the same written as a loop body with a `break`. This **is** `wait_until`, hand-written, with the budget expressed as iterations × 10 ms |
+| **bare sleep-then-assert** | **11** (*as built: 12*) | `settle(100);` then a count. No relationship between the interval and the work. **The defect.** |
 
 **As built: twelve bare sites.** Before forging the ICMP "fragmentation
 needed" quote, the path-MTU test slept twenty milliseconds so that a
@@ -140,13 +147,14 @@ blackholed 2000-byte send would have been *transmitted* before its
 sequence was read; it is observable (`snd_nxt` past a baseline) and is
 now waited for. Hand inspection found it only once `settle` was gone.
 
-The eleven that already wait are not flaky and are not what this unit is
-for. They would still read better as `wait_until` — a budget in
+The eleven (ten, as built) that already wait are not flaky and are not
+what this unit is for. They would still read better as `wait_until` — a budget in
 milliseconds says what it means where `i < 300` does not, and the failure
 message can name what was waited for — but that is tidying, and the report
 separates it from the work so that neither hides behind the other.
 
-**Nor are the eleven bare ones all the same conversion.** The observable
+**Nor are the eleven (twelve, as built) bare ones all the same
+conversion.** The observable
 differs, and so does what "done" means:
 
 | kind | what is waited for | conversion |
@@ -178,7 +186,10 @@ twenty-five. Of those, **the direction is what decides everything**:
 does not touch**.
 
 So the unit acts on **11 Shape A sites and 9 Shape B sites, 20 in all**,
-with eleven hand-written waits worth tidying alongside. The tightest of
+with eleven hand-written waits worth tidying alongside (*as built: 12
+Shape A sites, 10 hand-written waits, and a tenth Shape B site the
+inventory missed, `hvtest.c:601` -- 22 sites acted on, and the 10
+tidied*). The tightest of
 the nine are very tight:
 
 | site | assertion | what a loaded host does to it |
@@ -241,7 +252,8 @@ that sentence is worth what the suite's determinism is worth.
 
 - `settle(ms)` in `nettest.c`, twenty-two call sites -- **eleven of them
   already inside a bounded wait on a condition**, eleven bare sleeps with
-  no relationship between the interval and the work.
+  no relationship between the interval and the work (*as built: ten and
+  twelve; the banner says which one moved*).
 - `threads_settle(expected)` in three scheduler and quiescence tests:
   correct, deadline-bounded, fails loudly.
 - Twenty-five duration assertions (a twenty-sixth match is a constant
@@ -284,7 +296,7 @@ that sentence is worth what the suite's determinism is worth.
 
 ## Design
 
-### Shape A: one helper, eleven conversions
+### Shape A: one helper, eleven conversions (twelve, as built)
 
 ```c
 /* kernel-services/network/nettest.c (and wherever else it is wanted) */
@@ -426,7 +438,7 @@ fixed sleeps and starts scaling with the work.
 
 | file | change |
 | --- | --- |
-| `kernel-services/network/nettest.c` | `wait_until`; **12 bare `settle` sites converted** (as built; the report said 11) and 11 hand-written waits re-expressed; `settle` deleted; 24 wait sites over 12 predicates; `warn_unused_result`; the near-budget report |
+| `kernel-services/network/nettest.c` | `wait_until`; **12 bare `settle` sites converted and 10 hand-written waits re-expressed** (as built; the report said 11 and 11 -- same 22 calls, one misfiled); `settle` deleted; 24 wait sites over 12 predicates; `warn_unused_result`; the near-budget report |
 | `kernel/scheduler/smptest.c`, `-/schedtest.c`, `kernel/io/polltest.c`, `kernel-services/virtualization/hvtest.c` | the upper bounds classified: 4 restated, 4 removed as restated into existing checks, 2 widened and labelled; `hvtest.c:601` restated |
 | `tests/boot/run_boot_test.py` | name a failing test against the load-sensitive list in the failure line; report a missing or empty list |
 | `docs/testing/flakes.md` | **new**: the list (two entries), what each bound asserts, what is not listed and why, the rule, the history |
@@ -447,8 +459,9 @@ One test-local helper. No syscall, no public header, no ABI.
 1. **`wait_until`, and the worst bare Shape A sites** — starting with
    `nettest.c:979`, the one that has actually flaked four times. Small enough to review as a pattern before it is
    applied to the rest.
-2. **The remaining Shape A sites**, and separately the eleven
-   hand-written waits, as tidying that must not be confused with the fix.
+2. **The remaining Shape A sites**, and separately the eleven (ten, as
+   built) hand-written waits, as tidying that must not be confused with
+   the fix.
 3. **`settle` deleted**, which is the check that step 2 was complete: a
    remaining caller means a missed site.
 4. **Shape B, classified one at a time**, with the reasoning recorded per
@@ -603,8 +616,8 @@ the verification unit (`docs/verification/design.md`, §6).
 the scope, and the answer was that it should not have been there.** It
 read: "the `net-icmp-limit` family's shared `settle` in the other
 direction — a *maximum* count after a flood, which a slow host makes pass
-spuriously." Five of the eleven bare `settle` sites are inside
-`selftest_net_icmp_limit`, so the deferral and the conversion count
+spuriously." Five of the eleven (twelve, as built) bare `settle` sites
+are inside `selftest_net_icmp_limit`, so the deferral and the conversion count
 contradicted each other, which is what review found.
 
 Looking at the code resolves it in the other direction. One `settle(100)`
