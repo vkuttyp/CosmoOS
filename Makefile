@@ -65,7 +65,8 @@ run: $(IMAGE)
 
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log \
+		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 # QEMU's virt machine defaults to gic-version=2, so `test` exercises one
 # of the two AArch64 interrupt controllers and never the other. This runs
@@ -93,7 +94,8 @@ test-crash:
 		CRASH_TEST=1 OUT=$(OUT)-crash image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
-		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log
+		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log \
+		--kernel $(OUT)-crash/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
 analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
 	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)

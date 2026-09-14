@@ -317,6 +317,10 @@ FORBIDDEN_MARKERS = [
     r"BUG:",
     r"SELFTEST: FAIL",
     r"cosmoboot: FATAL",
+    # The lockup detectors (docs/kernel/diagnostics/design.md, "Lockups"):
+    # a real report fails the run with the CPU's trace in the log; the
+    # self-tests' own reports say "expected" and do not match.
+    r"\] (soft|hard) lockup:",
 ]
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
@@ -358,6 +362,70 @@ def qemu_exit_value(returncode):
     return returncode >> 1
 
 
+# Kernel addresses in a report: `  #3  0xffffffff80112a60` (a stack trace,
+# the panic's or a lockup sample's) and `pc 0xffffffff80112a60` (a sample,
+# the dump's last-tick pc, a hard-lockup line).
+ADDR_PATTERNS = [
+    re.compile(r"^\s*#\d+\s+(0x[0-9a-fA-F]{8,16})"),
+    re.compile(r"\bpc (0x[0-9a-fA-F]{8,16})"),
+]
+
+
+def symbolize(lines, kernel, tool):
+    """Return [(address, function, location)] for the report addresses in
+    `lines`, in first-seen order, or [] when there is nothing to resolve or
+    no way to resolve it (no --kernel, no symbolizer: never a failure)."""
+    if not kernel or not os.path.exists(kernel):
+        return []
+    addrs = []
+    for ln in lines:
+        for pat in ADDR_PATTERNS:
+            m = pat.search(ln)
+            if m and m.group(1) not in addrs:
+                addrs.append(m.group(1))
+    if not addrs:
+        return []
+    try:
+        out = subprocess.run([tool, "--obj=" + kernel, "--no-inlines", "--functions=short"],
+                             input="\n".join(addrs) + "\n", capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    # One record per address: FUNCTION, FILE:LINE:COL, blank.
+    records = [r for r in out.stdout.split("\n\n")]
+    table = []
+    for addr, rec in zip(addrs, records):
+        parts = rec.strip().split("\n")
+        func = parts[0] if parts and parts[0] else "??"
+        loc = parts[1] if len(parts) > 1 else "??"
+        loc = re.sub(r":\d+$", "", loc)          # drop the column
+        loc = repo_relative(loc)
+        table.append((addr, func, loc))
+    return table
+
+
+REPO_TOP_DIRS = ("kernel/", "kernel-services/", "drivers/", "compat/", "boot/", "libc/", "userland/", "pkg/", "tests/", "tools/")
+
+
+def repo_relative(loc):
+    """The build maps the tree to a relative prefix (-ffile-prefix-map);
+    cut the path at its first repo top-level directory."""
+    for top in REPO_TOP_DIRS:
+        i = loc.find(top)
+        if i >= 0 and (i == 0 or loc[i - 1] == "/"):
+            return loc[i:]
+    return loc
+
+
+def print_symbols(table):
+    if not table:
+        return
+    print("---- symbols (llvm-symbolizer over the kernel ELF) ----")
+    for addr, func, loc in table:
+        print(f"  {addr}  {func:<40} {loc}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", required=True)
@@ -368,6 +436,11 @@ def main():
     ap.add_argument("--expect-panic", action="store_true",
                     help="the kernel was built with CRASH_TEST=1: require a full panic report "
                          "and the failure exit code instead of a clean boot")
+    ap.add_argument("--kernel", default=None,
+                    help="the kernel ELF: symbolise the addresses of a panic, watchdog or lockup "
+                         "report in the harness's own report (docs/kernel/diagnostics/design.md)")
+    ap.add_argument("--symbolizer", default="llvm-symbolizer",
+                    help="the llvm-symbolizer to use with --kernel")
     args = ap.parse_args()
 
     if args.expect_panic:
@@ -627,6 +700,13 @@ def main():
         if not any(re.search(r"^\[ INFO\] boot complete", ln) for ln in vlines):
             failures.append("virtio console output lacks the boot-complete line (" + vcon + ")")
 
+    # The addresses a report prints (a panic's or a lockup sample's stack
+    # trace, a sample's pc, the dump's last-tick pc), resolved against the
+    # kernel ELF with llvm-symbolizer. Shown when the run failed or when a
+    # panic was expected: the log stays the run's evidence, this table is
+    # the harness's addition (docs/kernel/diagnostics/design.md, "Lockups").
+    table = symbolize(lines, args.kernel, args.symbolizer) if (failures or args.expect_panic) else []
+
     if failures:
         print(f"boot-test: FAIL after {elapsed:.1f}s")
         for f in failures:
@@ -636,9 +716,11 @@ def main():
         if not text.endswith("\n"):
             print()
         print("---- end of log ----")
+        print_symbols(table)
         return 1
 
     print(f"boot-test: PASS in {elapsed:.1f}s (log: {args.log})")
+    print_symbols(table)
     return 0
 
 

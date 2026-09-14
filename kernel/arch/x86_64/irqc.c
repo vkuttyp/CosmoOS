@@ -158,6 +158,18 @@ void arch_ipi_broadcast_others(unsigned vector)
     lapic_send_ipi_all_others(vector);
 }
 
+bool arch_ipi_nmi_capable(void)
+{
+    return true;
+}
+
+bool arch_ipi_send_nmi(unsigned cpu)
+{
+    KASSERT(cpu < CONFIG_MAX_CPUS);
+    lapic_send_nmi(g_cpu_apic_id[cpu]);
+    return true;
+}
+
 /*
  * An I/O APIC pin is asserted by a device and by nothing else: there is
  * no register that makes one pending, so the routing test that needs it

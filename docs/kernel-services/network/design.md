@@ -50,8 +50,12 @@ preceded by it. Memory comes from two slab caches (`mbuf_cache`,
 `dma_map` succeeds on them.
 
 `struct mbufq { struct mbuf *head, *tail; unsigned len, maxlen; spinlock_t lock; }`
-with `mbufq_enqueue` (frees the packet and returns false when full),
-`mbufq_dequeue`, `mbufq_drain`, `mbufq_len`; IRQ-safe.
+with `mbufq_enqueue` (frees the packet and returns false when full;
+refuses, counts and says once an mbuf that is already on a queue --
+`M_QUEUED` -- because clearing its link would orphan everything behind
+it and leave a count over an empty list, the network worker's latent
+spin: "The spin, found" below), `mbufq_dequeue`, `mbufq_drain`,
+`mbufq_len`; IRQ-safe.
 
 ### Interfaces (`kernel/include/kernel/netif.h`)
 
@@ -1481,6 +1485,27 @@ tenfold. `NET_WORKER_PRIO` in `netif.c` carries the decision and its
 reason. The batching a worker *above* its feeder would need -- one wake
 per burst, not per packet -- is the named follow-up if 31 is ever
 reconsidered.
+
+**The spin, found** (the lockup unit, `docs/audit/next-subsystem-lockup.md`).
+With `NET_WORKER_PRIO` overridable from the command line
+(`make EXTRA_CFLAGS=-DNET_WORKER_PRIO=31 test`) the hang reproduced on
+the seventh boot, and the watchdog's new block named it: eight samples
+of the worker, 250 µs apart, every one in its wait condition
+(`mbufq_len`), its dequeue or the wait's exit, none in a packet -- the
+receive queue's count said non-empty over a list that was empty. The
+cause was a second `netif_rx` of an mbuf already on that queue, from the
+reorder test's loopback filter (`net-tcp-reorder` held a copied segment
+in a plain global and re-injected it with a read-then-clear that the
+sending thread and a worker could both win); `mbufq_enqueue` cleared
+the mbuf's `nextpkt` before taking the lock, which cut the list behind
+it and left the count. At 32 the spinning worker was invisible (an equal
+priority still gets its slice) and one boot in five had burned a CPU
+since that test landed; at 31 it starved `net-steer`'s injector. Now an
+mbuf on a queue carries `M_QUEUED`, a second enqueue is refused, counted
+(`mbuf_stats.double_enqueues`) and said once, and the filter's state is
+under a lock (`net-mbufq-double` is the mechanism's test). The worker's
+per-CPU counters are a `sched_dump` hook, so the next dump shows what
+each worker has been doing.
 
 ### The next mbuf: headroom, flow id, checksum flags
 

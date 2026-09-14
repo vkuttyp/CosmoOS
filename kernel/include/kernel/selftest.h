@@ -65,6 +65,14 @@ bool selftest_smp_wake(const char **reason);
 bool selftest_smp_ticks(const char **reason);
 bool selftest_smp_mutex(const char **reason);
 bool selftest_smp_ipi_storm(const char **reason);
+/* kernel/core/lockuptest.c (docs/kernel/diagnostics/testing.md, "Lockups") */
+bool selftest_lockup_sample(const char **reason);        /* a spinner's sampled PC lies in the spinner */
+bool selftest_lockup_sample_irqoff(const char **reason); /* through a mask: an NMI answers (x86-64), or the tick sample and its age (AArch64) */
+bool selftest_lockup_sample_busy(const char **reason);   /* one reporter at a time; the loser never waits; one bound for all targets */
+bool selftest_lockup_soft(const char **reason);          /* no switch while something waits: reported once, with the PC */
+bool selftest_lockup_hard(const char **reason);          /* the watched CPU stopped ticking: reported once, at the threshold */
+bool selftest_lockup_quiet(const char **reason);         /* a spinner nobody waits on and an idle CPU report nothing */
+bool selftest_lockup_tick_bench(const char **reason);    /* prints the two stores' cost and the tick's; asserts nothing */
 bool selftest_quiesce_grace(const char **reason);
 bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);
@@ -190,6 +198,7 @@ bool selftest_cosmofs_badmap(const char **reason);     /* a crafted inode's dire
 
 /* Phase 8: kernel-services/network/nettest.c */
 bool selftest_net_mbuf(const char **reason);
+bool selftest_net_mbufq_double(const char **reason);   /* a second enqueue of a queued mbuf is refused; the queue stays whole */
 bool selftest_net_cksum(const char **reason);
 bool selftest_net_arp(const char **reason);
 bool selftest_tap(const char **reason);

@@ -116,3 +116,32 @@ precisely the case that makes the check worth having.
 
 **Checked by** `overlaps_usable_ram` and the boot's free-page count,
 which the framebuffer does not change.
+
+## I-DIAG-18: A CPU's frame is recorded only by that CPU, lock-free and silent
+
+`lockup_answer` runs on the CPU whose frame it records, in that CPU's
+own handler (an NMI on x86-64), writes only that CPU's `percpu.sample`,
+takes no lock and prints nothing; `seq` is stored last with release and
+is the claim that the rest is complete. Whoever asked reads and prints.
+Nothing walks another CPU's live stack. **Checked by** `lockup-sample`
+(the sample's PC lies in the spinner, the second frame in its caller)
+and `lockup-sample-irqoff` (recorded through an interrupt mask on
+x86-64); by review of `lockup_answer` and the paranoid path.
+
+## I-DIAG-19: One reporter at a time, and no CPU waits to become it
+
+`lockup_sample_all` claims the reporter slot with one compare-and-swap
+and returns `false` at once when it is taken; it never spins for it,
+because the holder may be waiting with interrupts off and a second CPU
+spinning with its own interrupts off would stop its own ticks. The wait
+for the targets is one total bound, not one per target. **Checked by**
+`lockup-sample-busy` (the loser refused within a millisecond, sending
+nothing; two masked targets cost one bound, not two).
+
+## I-DIAG-20: A registered NMI handler sees every NMI
+
+The x86-64 paranoid path answers a pending lockup sample and then
+dispatches whatever handler is registered on the NMI vector regardless;
+only with no handler registered does the answer decide the outcome.
+**Checked by** `selftest-nmi` (`arch/testhooks.h`, the paranoid path
+under test) and review of `x86_trap_paranoid`.

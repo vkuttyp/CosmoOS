@@ -11,6 +11,7 @@
 #include <kernel/string.h>
 #include <kernel/lockdep.h>
 #include <kernel/thread.h>
+#include <kernel/timer.h>
 #include <kernel/vmm.h>
 
 #include <arch/context.h>
@@ -253,13 +254,19 @@ unsigned thread_count(void)
 void thread_dump_all(void)
 {
     static const char *const states[] = { "ready", "running", "blocked", "exited" };
+    uint64_t now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&g_thread_list_lock);
     struct thread *t;
     kprintf("%4s %-20s %-8s %3s %3s %10s %8s %s\n", "tid", "name", "state", "pri", "cpu", "run_ms", "switch",
             "waiting_on");
     list_for_each_entry(t, &g_all_threads, all_link) {
+        /* run_time_ns is charged at switch-out: the running thread's
+         * current stretch is added here so the figure is live. */
+        uint64_t run = t->run_time_ns;
+        if (t->state == THREAD_RUNNING && now > t->last_start_ns)
+            run += now - t->last_start_ns;
         kprintf("%4u %-20s %-8s %3d %3d %10llu %8llu %s\n", t->tid, t->name, states[t->state], t->priority,
-                t->cpu, (unsigned long long)(t->run_time_ns / 1000000), (unsigned long long)t->switches,
+                t->cpu, (unsigned long long)(run / 1000000), (unsigned long long)t->switches,
                 t->waiting_on ? (t->waiting_on->lock.name ? t->waiting_on->lock.name : "?") : "-");
     }
     spin_unlock_irqrestore(&g_thread_list_lock, s);

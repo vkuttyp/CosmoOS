@@ -135,6 +135,43 @@ bool selftest_net_mbuf(const char **reason)
     return true;
 }
 
+/* An mbuf enqueued while already on a queue is refused and the queue
+ * stays whole: count and list agree, order is kept, nothing leaks. The
+ * mechanism of the network worker's latent spin
+ * (docs/audit/next-subsystem-lockup.md): before, the second enqueue
+ * cleared the mbuf's link and orphaned everything behind it. */
+bool selftest_net_mbufq_double(const char **reason)
+{
+    struct mbuf_stats s0, s1;
+    mbuf_get_stats(&s0);
+    struct mbufq q;
+    mbufq_init(&q, 8, "test-double");
+    struct mbuf *a = m_get(), *b = m_get(), *c = m_get();
+    CHECK(a && b && c);
+    CHECK(mbufq_enqueue(&q, a) && mbufq_enqueue(&q, b) && mbufq_enqueue(&q, c));
+    CHECK(b->flags & M_QUEUED);
+    /* The second enqueue of b, mid-queue: refused, b untouched. */
+    CHECK(!mbufq_enqueue(&q, b));
+    mbuf_get_stats(&s1);
+    CHECK(s1.double_enqueues == s0.double_enqueues + 1);
+    CHECK(mbufq_len(&q) == 3);
+    /* Drained in order, and the count reaches zero with the list. */
+    CHECK(mbufq_dequeue(&q) == a);
+    CHECK(mbufq_dequeue(&q) == b);
+    CHECK(!(b->flags & M_QUEUED));
+    CHECK(mbufq_dequeue(&q) == c);
+    CHECK(mbufq_len(&q) == 0);
+    CHECK(mbufq_dequeue(&q) == NULL);
+    /* Once off a queue, b may go on one again. */
+    CHECK(mbufq_enqueue(&q, b) && mbufq_len(&q) == 1 && mbufq_dequeue(&q) == b);
+    m_freem(a);
+    m_freem(b);
+    m_freem(c);
+    mbuf_get_stats(&s1);
+    CHECK(s1.mbufs_alive == s0.mbufs_alive);
+    return true;
+}
+
 /* --- checksum ---------------------------------------------------------------- */
 
 bool selftest_net_cksum(const char **reason)
@@ -1038,7 +1075,7 @@ static bool tcp_acked_since(void *arg)
 
 /* A TCP counter has advanced past its baseline. */
 struct tcpc_target { uint64_t base, want; int which; };
-enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1, TC_FIN_WAIT2_TIMEOUTS = 2 };
+enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1, TC_FIN_WAIT2_TIMEOUTS = 2, TC_CONNS_PASSIVE = 3 };
 static bool tcp_counter_reached(void *arg)
 {
     const struct tcpc_target *t = arg;
@@ -1046,6 +1083,7 @@ static bool tcp_counter_reached(void *arg)
     tcp_get_stats(&now);
     uint64_t v = t->which == TC_SYN_BAD_ACK ? now.syn_bad_ack
                : t->which == TC_PMTU_UPDATES ? now.pmtu_updates
+               : t->which == TC_CONNS_PASSIVE ? now.conns_passive
                : now.fin_wait2_timeouts;
     return v - t->base >= t->want;
 }
@@ -1251,7 +1289,15 @@ bool selftest_net_tcp_rfc5961(const char **reason)
     return true;
 }
 
-/* Reordering: hold every fifth data segment and deliver it after the next one. */
+/* Reordering: hold every fifth data segment and deliver it after the next one.
+ * The filter runs on every CPU that transmits through the loopback -- the
+ * sending thread and any worker sending an ACK -- so its state is under a
+ * lock. It was not: two CPUs both took the held copy and both injected
+ * it, the second enqueue cut the receive queue behind it, and that
+ * CPU's worker spun on a queue whose count said non-empty for the rest
+ * of the boot (docs/audit/next-subsystem-lockup.md, the spin at priority
+ * 31; the stack now refuses the second enqueue, net-mbufq-double). */
+static spinlock_t g_reorder_lock = SPINLOCK_INIT("reorder-test");
 static struct mbuf *g_held;
 static unsigned g_reorder_seen, g_reordered, g_pass_one;
 
@@ -1269,25 +1315,28 @@ static bool reorder_filter(struct mbuf *m, void *arg)
     const struct tcp_hdr *th = (const struct tcp_hdr *)(m->data + ihl);
     if (ntohs(th->dport) != 6022)
         return true;   /* only the client's data */
+    struct mbuf *release = NULL;
+    bool pass = true;
+    arch_irq_state_t s = spin_lock_irqsave(&g_reorder_lock);
     if (g_held) {
         if (g_pass_one) {
             g_pass_one = 0;   /* the segment after the held one overtakes it */
-            return true;
+        } else {
+            release = g_held;   /* the held one goes first, then this one */
+            g_held = NULL;
         }
-        struct mbuf *h = g_held;
-        g_held = NULL;
-        netif_rx(lo, h);   /* the held one goes first, then this one */
-        return true;
-    }
-    if (++g_reorder_seen % 5 == 0) {
+    } else if (++g_reorder_seen % 5 == 0) {
         g_held = m_copypacket(m);
         if (g_held) {
             g_reordered++;
             g_pass_one = 1;
-            return false;   /* the original is dropped; the copy arrives one segment late */
+            pass = false;   /* the original is dropped; the copy arrives one segment late */
         }
     }
-    return true;
+    spin_unlock_irqrestore(&g_reorder_lock, s);
+    if (release)
+        netif_rx(lo, release);
+    return pass;
 }
 
 bool selftest_net_tcp_reorder(const char **reason)
@@ -1343,8 +1392,18 @@ bool selftest_net_tcp_keepalive(const char **reason)
     /* The idle timer is armed when a connection is established: shorten it first. */
     tcp_set_keepalive(150ull * 1000000ull, 50ull * 1000000ull, 3);
     struct socket *c;
+    struct tcp_stats tb;
+    tcp_get_stats(&tb);
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
+    /* connect returns when *this* side is established: the handshake's
+     * third segment is still the worker's to send. The black hole must
+     * not swallow it -- a server side left in SYN_RCVD never wakes its
+     * accept and the join at the end waits forever (found at priority
+     * 31 by the lockup unit, docs/audit/next-subsystem-lockup.md). Wait
+     * for the passive side to be established, then black-hole. */
+    struct tcpc_target est = { .base = tb.conns_passive, .want = 1, .which = TC_CONNS_PASSIVE };
+    CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
     g_guard_port = 6023;
     loopback_set_filter(blackhole_filter, NULL);
@@ -1371,8 +1430,11 @@ bool selftest_net_tcp_keepalive(const char **reason)
     t = thread_create(holding_server, &srv, "fw2-srv", SCHED_PRIO_DEFAULT);
     CHECK(t != NULL);
     thread_sleep_ms(20);
+    tcp_get_stats(&tb);
     CHECK(ksock_create(COSMO_AF_INET, COSMO_SOCK_STREAM, 0, &c) == 0);
     CHECK(ksock_connect(c, &srv.addr) == 0);
+    est.base = tb.conns_passive;   /* the server side established before the close (as above) */
+    CHECK(wait_until(tcp_counter_reached, &est, 5000));
     tcp_get_stats(&t0);
     tcp_set_fin_wait2(100ull * 1000000ull);
     ksock_put(c);   /* close: FIN; the server never answers with its own */

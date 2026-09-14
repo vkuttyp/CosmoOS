@@ -32,7 +32,7 @@ is ready) or the wake itself requests one. `s->switches >= 1` confirms
 the spinner was switched in at least once. There is no upper bound on
 the sleep: a spinner that is never preempted does not return late, it
 never returns, and the self-test watchdog reports that with a scheduler
-dump. A `< 200 ms` used to sit here; nothing a kernel does wrong lands
+dump and every CPU's program counter (`docs/kernel/diagnostics/`). A `< 200 ms` used to sit here; nothing a kernel does wrong lands
 between "one slice late" and "never", so it could fail only on a loaded
 host (`docs/testing/flakes.md`).
 

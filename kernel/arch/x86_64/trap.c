@@ -11,6 +11,7 @@
 
 #include <kernel/extable.h>
 #include <kernel/interrupt.h>
+#include <kernel/lockup.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -114,7 +115,17 @@ void x86_trap_paranoid(struct arch_trap_frame *frame)
 {
     struct percpu *pc = this_cpu();
     pc->irq_depth++;
-    interrupt_dispatch((unsigned)frame->vector, frame);
+    /* An NMI answers a pending lockup sample for this CPU first
+     * (kernel/core/lockup.c: records into this CPU's buffer, no lock, no
+     * printing). A registered handler is then dispatched whatever the
+     * answer, so nothing a handler owns is ever swallowed; only with no
+     * handler does the answer decide -- an NMI that answered a request
+     * returns, one that did not is unhandled as before. An x86 NMI
+     * carries no vector and no source, so this one-delivery window is
+     * the architecture's limit (docs/kernel/diagnostics/design.md). */
+    bool answered = frame->vector == X86_TRAP_NMI && lockup_answer(frame, true);
+    if (!answered || interrupt_handler_name((unsigned)frame->vector) != NULL)
+        interrupt_dispatch((unsigned)frame->vector, frame);
     pc->irq_depth--;
 }
 

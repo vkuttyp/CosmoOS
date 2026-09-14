@@ -143,13 +143,26 @@ kernel ABI; nothing here is visible to user space.
   wait-queue lock (via `waitqueue_prepare`). Panics in interrupt context
   or with preemption disabled; otherwise `schedule()`.
 
-### `void sched_tick(uint64_t now_ns)`
-- Tick hook: `policy.tick(rq, current, TICK_NS)` for a non-idle current;
+### `void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)`
+- Tick hook: the self-test watchdog check on CPU 0, `lockup_tick(frame,
+  now)` (the soft- and hard-lockup detectors, `docs/kernel/diagnostics/`),
+  then `policy.tick(rq, current, TICK_NS)` for a non-idle current;
   sets `need_resched` when idle is running and the bitmap is non-empty.
-  Runs in interrupt context under `runqueue.lock`.
+  Runs in interrupt context; the policy part under `runqueue.lock`.
 
 ### `struct runqueue *sched_runqueue(unsigned cpu)`, `uint64_t sched_switch_count(unsigned cpu)`, `void sched_dump(void)`
-- Diagnostics; `sched_dump` also calls `thread_dump_all`.
+- Diagnostics; `sched_dump` prints per CPU the queue state, `ticks`, and
+  the tick sample (`last tick N ms ago pc 0x...`), then `thread_dump_all`,
+  whose `run_ms` is live for the running thread, then every hook
+  registered with `sched_dump_register(name, fn)` (a subsystem's
+  counters: the network workers' queues and work runs). The self-test
+  watchdog follows it with every CPU's sample (`lockup_sample_all`) and
+  eight more of every busy CPU (`lockup_profile`).
+
+### `void sched_dump_register(const char *name, void (*fn)(void))`
+- A subsystem's contribution to `sched_dump`, printed after the thread
+  table on every dump. Runs in interrupt context with interrupts off and
+  must take no lock another CPU may hold: print counters. Eight slots.
 
 ### `struct sched_policy` / `sched_policy_rr`
 - Function table `{enqueue, dequeue, pick_next, tick, slice_new}`. All

@@ -23,9 +23,35 @@ The remaining two (`irq-state`, `breakpoint-trap`) are documented under
 
 The harness (`tests/boot/run_boot_test.py`) requires `SELFTEST: PASS` when
 any `SELFTEST:` line is present, forbids `SELFTEST: FAIL`, `KERNEL PANIC`,
-`BUG:`, and `cosmoboot: FATAL`, requires `[ INFO] boot complete`, and
+`BUG:`, `cosmoboot: FATAL` and a real `soft lockup:` / `hard lockup:`
+report, requires `[ INFO] boot complete`, and
 requires QEMU exit 33. This covers `klog` prefixing, `kprintf`, the
 console sink, and `kernel_shutdown` success path end to end.
+
+### Lockups (`kernel/core/lockuptest.c`)
+
+The unit `docs/audit/next-subsystem-lockup.md`; design in `design.md`,
+"lockup.c". Every test spins a thread in `spin_here`, a dozen
+instructions with no call inside (a call would put the sampled PC in the
+callee), on a CPU other than the caller's, and skips with a reason on
+one CPU. "The PC is in the spinner" is `pc` within 128 bytes of
+`spin_here`: a compile that grew it past that fails loudly rather than
+letting a wrong PC pass. Each has a bug-proof, run on 2026-09-14 by
+injecting the bug into `lockup.c` and booting the suite:
+
+| test | asserts | bug-proof (what makes it fail, and how it failed) |
+| --- | --- | --- |
+| `lockup-sample` | a spinner on CPU `k` (interrupts on); `lockup_sample_all` from another CPU returns true with `k` and the caller in the mask; `k`'s `pc` in `spin_here`, `depth >= 2`, `trace[1]` in `spinner_main` (the caller keeps a frame: its call is not a tail call), `when_ns` inside the call | answer from the handler's own walk instead of the interrupted frame → `pc` outside `spin_here`; skip the release store on `seq` → `k` not in the mask (and the two tests below fail with it) |
+| `lockup-sample-irqoff` | the spinner masks interrupts; 20 ms in, the sample: `k`'s tick sample is at least 15 ms old on both architectures; **x86-64**: `k` answered by NMI with `pc` in `spin_here`; **AArch64**: `k` did not answer. After the mask lifts, the next sample answers on both | x86-64: send the ordinary IPI instead of the NMI → no answer; AArch64: fake a fresh tick on the target before asking → the age check fails |
+| `lockup-sample-busy` | two threads on CPUs 0 and 1 ask at the same moment: exactly one gets the slot; the loser gets `false` with an empty mask within 1 ms (half the winner's 2 ms hold), and `samples_busy` counts it; with three CPUs, two masked targets cost the winner one bound (under 7 ms), not two | let the loser spin for the slot → both get it in turn (`ok != ok` fails); a wait per target instead of one → on AArch64 the two masked targets take 10 ms |
+| `lockup-soft` | thresholds 200 ms; a priority-16 spinner on `k` and a default-priority thread created there; one report within a second naming `k`, `1 runnable`, its tick PC in `spin_here`; no second report over the next 300 ms | drop the `nr_running > 0` term → `lockup-quiet`'s lone spinner reports; drop the episode latch → a report every tick floods the console and the run times out at 184 s (what the latch prevents) |
+| `lockup-hard` | thresholds 200 ms; the spinner masks interrupts; `k`'s watcher (the online CPU below it, wrapping) reports once, within 600 ms, `hard_stall_ms` in [200, 400), the tick sample at least 200 ms minus a tick old; **x86-64**: `k` answered by NMI with `pc` in `spin_here`; **AArch64**: `k` did not answer; the episode is held 300 ms more and reports nothing; after the mask lifts, 600 ms of normal running report nothing | compare the watcher's own ticks → never fires; check every 250th tick instead of every tick → never fires within the budget; drop the latch → a report every tick, the run times out |
+| `lockup-quiet` | thresholds 200 ms; a default-priority spinner alone on `k` for 600 ms, then 600 ms of idling: no report of either kind | the runnable term dropped (above) |
+| `lockup-tick-bench` | prints, asserts nothing: a million of the tick's two stores (5 ns per tick on x86-64, 14 on AArch64 under TCG) and the tick's entry-to-hook mean from the `CONFIG_SELFTEST` accounting in `tick_isr` (8 µs and 16 µs) | -- |
+
+The masked spinners stay well under the TLB shootdown's one-second
+acknowledgement bound and are all stopped before any thread is joined
+(a join frees a stack; the shootdown waits for every CPU).
 
 ### The framebuffer console
 
@@ -139,6 +165,15 @@ call site.
 - `printf` edge cases not yet asserted: `%*d` negative width (left
   align), `%.*s`, `%hhd`/`%hd` sign extension, `%#o` of 0, `%-p`, `%jd`,
   `%td`.
+
+## Host-side tests
+
+`tests/host/test_lockup.c` (`make host-test`): `lockup_watch_target`
+over `{0,2,3}`, `{0,1,2,3}`, `{1}`, `{0,63}` and all 64 -- every online
+CPU has exactly one watcher, none watches an offline CPU, a lone CPU's
+target is itself -- and the negative model, `(k + 1) mod n`, which leaves
+CPU 2 unwatched in `{0,2,3}`. The machine cannot make a hole (no CPU
+hotplug), which is why the rule is tested here.
 
 ## Host-side tests (planned)
 

@@ -136,6 +136,58 @@ The validated description, or NULL. Set once by `bootinfo_init`.
 - `WARN(cond, fmt, ...)` → logs `WARN at file:line: ...` at WARN level
   when `cond` is true; evaluates to `!!(cond)`. Never halts.
 
+## `kernel/lockup.h`, `kernel/lockup_core.h`
+
+Design: `design.md`, "lockup.c". Kernel-internal; no user interface.
+
+### `struct cpu_sample`
+- `want` (the request pending for this CPU, written by the asker), `seq`
+  (the request this answer belongs to; stored last, with release), `pc`,
+  `sp`, `trace[LOCKUP_TRACE_MAX]`, `depth`, `nmi`, `when_ns`. One per
+  CPU in `struct percpu`; written only by that CPU.
+
+### `bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)`
+- **Purpose**: every other online CPU records its frame; this CPU's from
+  `self` (a handler) or its own walk (`NULL`, a thread).
+- **Returns**: `false` at once, sending nothing, when another CPU's
+  report is in progress; `true` with the mask of CPUs whose sample is
+  current (the caller's included), holding the reporter slot until
+  `lockup_print_samples`.
+- **Concurrency**: any context, never sleeps, never waits for another
+  reporter; one total wait bound for all targets. Called from the tick.
+
+### `bool lockup_answer(struct arch_trap_frame *frame, bool nmi)`
+- **Purpose**: handler side; records if a request is pending for this
+  CPU. No locks, no printing; NMI-safe. Called by the `IPI_SAMPLE`
+  handler and, on x86-64, by the paranoid path for `X86_TRAP_NMI`.
+
+### `bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out)` / `void lockup_profile(unsigned cpu, unsigned n, uint64_t gap_ns)`
+- One CPU's frame now (claims the slot, asks that CPU alone, copies its
+  answer, releases); `n` such samples `gap_ns` apart printed one line
+  each (the top frames) -- what a CPU that is cycling rather than stuck
+  shows. Never the caller's own CPU; never sleeps (`udelay`). The
+  watchdog profiles every busy CPU with eight samples 250 µs apart; the
+  hard-lockup report profiles its target where an NMI can reach it.
+
+### `void lockup_print_samples(cpumask_t answered)`
+- Prints each CPU's sample or, for one that did not answer, its tick
+  sample and age; releases the reporter slot. `int lockup_reporter(void)`
+  names the holder (-1 when free).
+
+### `void lockup_tick(struct arch_trap_frame *frame, uint64_t now_ns)`
+- The detectors' per-tick step; called by `sched_tick`. Off until
+  `lockup_init()` (after SMP bring-up in `kernel_main`).
+
+### `unsigned lockup_watch_target(uint64_t online, unsigned k)` (`lockup_core.h`)
+- Pure: the online CPU with the next-higher id, wrapping; `k` when alone.
+  Host-tested (`tests/host/test_lockup.c`).
+
+### `void lockup_get_stats(struct lockup_stats *out)` / `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)`
+- Diagnostics and the test hook: report counters and the last reports'
+  facts; thresholds (0 restores 10 s) and whether the next report is
+  expected (its line then says so, and the harness's forbidden marker
+  does not match it).
+
 ## `kernel/shutdown.h`
 
 ### `void kernel_shutdown(enum kernel_exit_status status) __noreturn`

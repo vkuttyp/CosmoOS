@@ -105,7 +105,7 @@ struct mbuf *m_ref(struct mbuf *m)
     n->size = m->size;
     n->data = m->data;
     n->len = m->len;
-    n->flags = (m->flags & ~M_PKTHDR) | M_EXT;
+    n->flags = (m->flags & ~(M_PKTHDR | M_QUEUED)) | M_EXT;
     return n;
 }
 
@@ -312,13 +312,26 @@ void mbufq_init(struct mbufq *q, unsigned maxlen, const char *name)
 
 bool mbufq_enqueue(struct mbufq *q, struct mbuf *m)
 {
-    m->nextpkt = NULL;
     arch_irq_state_t s = spin_lock_irqsave(&q->lock);
+    /* An mbuf already on a queue stays where it is: clearing its link
+     * here would orphan everything behind it on that queue, leaving a
+     * count that says "non-empty" over a list that is not -- a worker
+     * then spins on that condition forever (the lockup unit's
+     * diagnosis, docs/audit/next-subsystem-lockup.md). Refused, counted,
+     * and said once. */
+    if (m->flags & M_QUEUED) {
+        spin_unlock_irqrestore(&q->lock, s);
+        stat(&g_stats.double_enqueues, 1);
+        WARN(true, "mbufq '%s': an mbuf already on a queue was enqueued again; refused", q->lock.name);
+        return false;
+    }
+    m->nextpkt = NULL;
     if (q->len >= q->maxlen) {
         spin_unlock_irqrestore(&q->lock, s);
         m_freem(m);
         return false;
     }
+    m->flags |= M_QUEUED;
     if (q->tail)
         q->tail->nextpkt = m;
     else
@@ -339,6 +352,7 @@ struct mbuf *mbufq_dequeue(struct mbufq *q)
             q->tail = NULL;
         q->len--;
         m->nextpkt = NULL;
+        m->flags &= ~M_QUEUED;
     }
     spin_unlock_irqrestore(&q->lock, s);
     return m;

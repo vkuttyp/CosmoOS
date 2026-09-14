@@ -184,6 +184,7 @@ Implemented by `kernel/arch/x86_64/irqc.c` over `lapic.c` and
 | `arch_irqc_gsi_count()` | highest covered GSI + 1 |
 | `arch_irqc_spurious_vector()` | 255 |
 | `arch_ipi_send(cpu, vector)` / `arch_ipi_broadcast_others(vector)` | fixed-delivery IPIs (used by the SMP work) |
+| `arch_ipi_nmi_capable()` / `arch_ipi_send_nmi(cpu)` | an NMI-class interrupt for the lockup sample, delivered whether or not the target has interrupts masked: x86-64 the LAPIC ICR with delivery mode NMI (no vector; the target takes vector 2); AArch64 none configured, returns false and the caller sends `IPI_SAMPLE` |
 
 ### `int arch_irqc_msi_compose(unsigned vector, unsigned cpu, uint64_t *addr, uint32_t *data)`
 - **Purpose**: the architecture's message format for `vector` on `cpu`.

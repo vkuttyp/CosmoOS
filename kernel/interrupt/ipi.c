@@ -5,6 +5,7 @@
 
 #include <kernel/ipi.h>
 #include <kernel/interrupt.h>
+#include <kernel/lockup.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
@@ -66,6 +67,16 @@ static void ipi_halt(unsigned vector, struct arch_trap_frame *frame, void *arg)
     arch_cpu_halt_forever();
 }
 
+/* The ordinary-priority sample request (kernel/core/lockup.c): the
+ * fallback where the architecture has no NMI-class interrupt, and so
+ * unanswered while the target has interrupts masked. */
+static void ipi_sample(unsigned vector, struct arch_trap_frame *frame, void *arg)
+{
+    (void)vector; (void)arg;
+    count(IPI_SAMPLE);
+    lockup_answer(frame, false);
+}
+
 void ipi_init(void)
 {
     static const struct {
@@ -76,6 +87,7 @@ void ipi_init(void)
         [IPI_CALL] = { ipi_call, "ipi-call" },
         [IPI_TLB_FLUSH] = { ipi_tlb_flush, "ipi-tlb-flush" },
         [IPI_HALT] = { ipi_halt, "ipi-halt" },
+        [IPI_SAMPLE] = { ipi_sample, "ipi-sample" },
     };
 
     for (unsigned k = 0; k < IPI_KIND_COUNT; k++) {

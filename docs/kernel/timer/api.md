@@ -96,8 +96,13 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 
 ### `void timer_set_tick_hook(timer_tick_hook_fn hook)`
 - Register a function called from the tick on every CPU after expired
-  timers ran, with the current `clock_now_ns()`. The scheduler registers
-  `sched_tick`. One hook; no locking (set once at init).
+  timers ran, with the current `clock_now_ns()` and the tick's trap
+  frame (the interrupted context). The scheduler registers `sched_tick`.
+  One hook; no locking (set once at init).
+
+### `uint64_t timer_tick_cost_ns(void)`
+- `CONFIG_SELFTEST` builds: nanoseconds this CPU's ticks spent from entry
+  to the hook call, accumulated (`lockup-tick-bench`); 0 otherwise.
 
 ### `void ndelay(uint64_t ns)`, `void udelay(uint64_t us)`
 - Busy-wait on `clock_now_ns()` with `arch_cpu_relax()`. Usable anywhere

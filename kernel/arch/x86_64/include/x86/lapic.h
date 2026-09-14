@@ -33,6 +33,7 @@ void x86_cpu_set_apic_id(unsigned cpu, uint32_t apic_id);
 /* Inter-processor interrupts, fixed delivery, physical destination. */
 void lapic_send_ipi(uint32_t apic_id, unsigned vector);
 void lapic_send_ipi_all_others(unsigned vector);
+void lapic_send_nmi(uint32_t apic_id);
 void lapic_send_init(uint32_t apic_id);
 void lapic_send_sipi(uint32_t apic_id, uint8_t start_page);
 

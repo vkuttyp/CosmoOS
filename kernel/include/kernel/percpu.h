@@ -18,6 +18,7 @@
 #include <kernel/compiler.h>
 
 #include <arch/percpu.h>
+#include <kernel/lockup_core.h>
 
 #define CONFIG_MAX_CPUS 64u
 
@@ -51,6 +52,18 @@ struct percpu {
     uintptr_t boot_stack;       /* AP bootstrap stack; freed by its idle thread */
     struct vm_space *cur_space; /* the space whose root this CPU runs (vm_space_switch) */
     uint32_t hw_id;             /* local interrupt controller id (APIC id) */
+    /* The lockup unit (kernel/core/lockup.c, docs/kernel/diagnostics/design.md, "Lockups"). */
+    uintptr_t last_tick_pc;     /* the PC this CPU's last tick interrupted ... */
+    uint64_t last_tick_ns;      /* ... and when; two stores per tick */
+    uint64_t tick_cost_ns;      /* CONFIG_SELFTEST: tick entry to the scheduler hook, accumulated */
+    struct cpu_sample sample;   /* this CPU's answer to the last request for its frame */
+    uint64_t stall_ns;          /* soft: time this CPU has run one thread while others waited */
+    uint64_t last_switches;
+    bool soft_reported;
+    unsigned watch_target;      /* hard: the CPU this one watches (lockup_watch_target) */
+    uint64_t watch_ticks;       /* ... its tick count when last seen to change */
+    uint64_t watch_stall_ns;
+    bool hard_reported;
 };
 
 /* Assembly (syscall entry) relies on these offsets. */

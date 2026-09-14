@@ -4,6 +4,54 @@ Date: 2026-09-14. Tree: `main` at 4d5acdb (after PR #134, the
 wake-preempt unit). Chosen from
 `docs/audit/2026-09-deferred-work-inventory.md` §4 and §3.
 
+**Built: PR #136 (2026-09-14).** The design below is as proposed; the
+sections "As built" and "As run" record what the build changed and
+measured. Differences from the plan, each found by building rather than
+reading:
+
+1. **An AArch64 leaf function had no frame record.** At `-O1` clang omits
+   the frame in a leaf, so a walk from a PC inside one (a spinning loop
+   is a leaf) skipped its caller and showed the thread trampoline where
+   the spinner's caller should be. The AArch64 kernel is now built with
+   `-mno-omit-leaf-frame-pointer` (`build/arch/aarch64.mk`); x86-64 keeps
+   the leaf frame already. Every backtrace on AArch64 gains a frame it
+   used to lose.
+2. **A masked CPU cannot acknowledge a TLB shootdown**, whose waiter
+   panics after one second (`arch_mmu_shootdown`). A test that masks a
+   CPU stops it before joining any thread whose stack teardown needs
+   the acknowledgement, and keeps every mask well under a second; the
+   first run of the busy test found this by panicking.
+3. **The API shapes**: `lockup_sample_all(self, timeout, &answered)`
+   returns whether it got the slot; `lockup_answer(frame, nmi)`;
+   `lockup_set_thresholds(soft, hard, expected)` -- an expected report's
+   line says `expected`, which is how the self-tests' own reports pass
+   the harness's forbidden marker while a real one fails the run;
+   `lockup_get_stats`, `lockup_reporter`. The requester's own sample is
+   labelled `self`. `lockup_watch_target` lives in `lockup_core.h` so
+   the host test includes it as is.
+4. **The no-latch bug-proofs time out rather than count two reports**: a
+   report per tick, each with a 5 ms sample wait inside the tick and a
+   trace on the console, floods the log and the run hits the harness
+   timeout at 184 s. That is what the latch prevents, recorded as run.
+5. **The busy test's "refused at once" bound is 1 ms**, half the winner's
+   hold, not 100 µs: an interrupt landing on the loser's CPU in between
+   costs tens of microseconds under TCG, and 63-75 µs was the refusal's
+   own cost. The property is "did not wait for the slot", and the hold
+   is what a waiter would take.
+6. **The tick bench** measures the two stores by a million-iteration
+   loop (5 ns per tick on x86-64, 14 on AArch64, under TCG) and the
+   tick's entry-to-hook mean from `CONFIG_SELFTEST` accounting in
+   `tick_isr` (8 µs and 16 µs), not a with-and-without comparison, which
+   a store that costs nanoseconds against a handler that costs
+   microseconds cannot resolve.
+7. **The harness prints its symbol table** only when the run failed or a
+   panic was expected: a passing run's log carries the lockup
+   self-tests' own samples, forty addresses of noise. The table is
+   `address  function  file:line`, repo-relative, without the `+offset`.
+8. **Steps 1-3 landed as one commit** (the sample, the dump and the
+   detectors share `lockup.c`); step 4 and step 5's guard as the next.
+9. **The spin, found.** The `#ifndef` guard made `make EXTRA_CFLAGS=-DNET_WORKER_PRIO=31 test` the reproduction; it hung on the seventh boot on x86-64, and the tool built for it did the diagnosis in one dump: the watchdog's block carried the sample and eight more, 250 µs apart, of the CPU whose worker was running -- every one in the worker's wait condition (`mbufq_len`, `netif.c:705`), its dequeue (`mbufq_dequeue`, `netif.c:708`) or the wait's exit path, none in a packet or a work item. The queue's count said non-empty over a list that was empty, the case the report had called impossible by the lock. It is impossible by the lock; it is not impossible by a **second enqueue of an mbuf already on the queue**: `mbufq_enqueue` cleared `m->nextpkt` before taking the lock, which cuts the list behind a queued mbuf and orphans the rest, and the count stays. The second enqueue was the *reorder test's* loopback filter (`net-tcp-reorder`, `nettest.c`): it held a copied segment in a plain global and re-injected it with a read-then-clear that two CPUs -- the sending thread and a worker sending an ACK -- could both win. At priority 32 the spinning worker was invisible: an equal-priority thread still gets its slice, the suite passes, and one boot in five has burned a CPU since the reorder test landed. At 31 it starved `net-steer`'s injector, and the hang named it. A second reproduction on boot 3 of the next run, with the profile in place, showed the same eight-sample shape on CPU 2's worker.
+
 **Subsystem: a per-CPU sample of the running program counter that the
 scheduler dump, the self-test watchdog and two new lockup detectors
 print; then the network worker's latent spin, to be reproduced with
@@ -271,7 +319,7 @@ soft lockup, its own frame's trace, which needs no request) with
 `sample in progress on cpu J` in place of the samples.
 
 **The answer.** On both architectures the handler is the same function
-`bool lockup_answer(frame)`: if this CPU's `sample.want` equals its
+`bool lockup_answer(frame, nmi)` (`nmi` is recorded into the sample): if this CPU's `sample.want` equals its
 `sample.seq` there is no request pending *for this CPU* (an NMI or SGI
 from elsewhere) and it returns `false`; otherwise it fills `pc`, `sp`,
 `trace` from `arch_backtrace(..., frame)`, `nmi`, `when_ns`, stores
@@ -373,8 +421,10 @@ whole second; the cost is one load and one compare per tick. The kernel
 ticks every online CPU at `CONFIG_HZ` (`smp-ticks` already asserts
 it), so "no tick" is a stall, not idleness.
 
-**Thresholds.** `lockup_set_thresholds(soft_ns, hard_ns)` is a test
-hook (debug builds), not a sysctl: nothing but a test wants 200 ms.
+**Thresholds.** `lockup_set_thresholds(soft_ns, hard_ns, expected)` is a
+test hook (debug builds), not a sysctl: nothing but a test wants 200 ms;
+`expected` marks the next report as a test's own, so its line says so and
+the harness's forbidden marker does not match it.
 Both are generous by design; see Risks for the load-sensitivity
 argument.
 
@@ -499,15 +549,17 @@ way the vGIC tests state theirs per host.
 | `kernel/timer/timer.c`, `kernel/include/kernel/timer.h` | the tick sample (two stores, first thing in `tick_isr`); the tick hook signature gains the frame: `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` |
 | `kernel/scheduler/sched.c` | `sched_tick(now, frame)`: `lockup_tick` after the watchdog check; `sched_dump` prints the tick sample and age, live `run_ms`, and the samples when asked; `watchdog_check` calls `lockup_sample_all(frame, 5 ms, &answered)` before the dump |
 | `kernel/scheduler/thread.c` | `thread_dump_all` takes `now` for the live `run_ms` |
-| `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `IPI_SAMPLE`: handler `lockup_answer(frame)`; `ipi_send_sample(cpu)` tries `arch_ipi_send_nmi` first |
+| `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `IPI_SAMPLE`: handler `lockup_answer(frame, false)`; `ipi_send_sample(cpu)` tries `arch_ipi_send_nmi` first |
 | `kernel/include/arch/irqc.h` | `bool arch_ipi_send_nmi(unsigned cpu)` |
 | `kernel/arch/x86_64/lapic.c`, `irqc.c` | `ICR_DELIVERY_NMI (4u << 8)`; `arch_ipi_send_nmi` through `icr_send`, true |
-| `kernel/arch/x86_64/trap.c` | `x86_trap_paranoid`: for `X86_TRAP_NMI`, `lockup_answer(frame)` first; return if it answered a request, else dispatch as today |
+| `kernel/arch/x86_64/trap.c` | `x86_trap_paranoid`: for `X86_TRAP_NMI`, `lockup_answer(frame, true)` first; return if it answered a request, else dispatch as today |
 | `kernel/arch/aarch64/irqc.c` | `arch_ipi_send_nmi` returns false |
 | `kernel/core/lockuptest.c`, `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | the tests below |
 | `tests/boot/run_boot_test.py`, `Makefile` | `--kernel $(KERNEL_ELF)`; the symbolised table; `soft lockup:` / `hard lockup:` forbidden |
-| `kernel-services/network/netif.c` | the `#ifndef` guard on `NET_WORKER_PRIO`; the fix, wherever the PC lands |
-| `kernel-services/network/nettest.c` or the file the mechanism names | the mechanism test |
+| `kernel-services/network/netif.c` | the `#ifndef` guard on `NET_WORKER_PRIO`; the per-CPU counters registered as a `sched_dump` hook (as built) |
+| `kernel-services/network/mbuf.c`, `kernel/include/kernel/mbuf.h` | as built, where the PC led: `M_QUEUED`, a second enqueue refused, counted (`double_enqueues`) and said once; `nextpkt` cleared under the lock |
+| `kernel-services/network/nettest.c` | as built: the reorder filter's state under a lock; the mechanism test `net-mbufq-double` |
+| `kernel/scheduler/sched.c`, `kernel/include/kernel/sched.h` | as built: `sched_dump_register`, subsystem dump hooks printed after the thread table; the watchdog profiles every busy CPU (eight samples) |
 | `docs/kernel/diagnostics/{design,api,invariants,testing}.md` | the sample, the detectors, the dump format, the harness table |
 | `docs/kernel/scheduler/{design,api,testing}.md`, `docs/kernel/timer/api.md`, `docs/kernel/smp/{api,design}.md`, `docs/kernel/interrupt/api.md` | the hook signature, the dump, `IPI_SAMPLE`, the NMI delivery |
 | `docs/kernel-services/network/design.md` | the spin's diagnosis and fix, under "The worker's priority" |
@@ -525,11 +577,12 @@ Kernel-internal only.
 | API | where | contract |
 | --- | --- | --- |
 | `bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)` | `kernel/lockup.h` | any context, never sleeps, never waits for another reporter (`false` at once if one is in progress); sends the sample interrupt to every other online CPU and waits once, under one total bound, for who answers; holds the reporter slot until `lockup_print_samples` |
-| `bool lockup_answer(struct arch_trap_frame *frame)` | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
+| `bool lockup_answer(struct arch_trap_frame *frame, bool nmi)` | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
 | `unsigned lockup_watch_target(cpumask_t online, unsigned k)` | `kernel/lockup.h` | the online CPU with the next-higher id, wrapping; `k` itself when alone |
 | `void lockup_print_samples(cpumask_t answered)` | `kernel/lockup.h` | prints each CPU's sample or its tick-sample-and-age; releases the reporter slot |
 | `void lockup_tick(struct arch_trap_frame *frame, uint64_t now_ns)` | `kernel/lockup.h` | the two detectors' per-tick step; called by `sched_tick` |
-| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns)` | `kernel/lockup.h`, debug builds | test hook |
+| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)` | `kernel/lockup.h`, debug builds | test hook; `expected` marks the next report as a test's own |
+| `void lockup_get_stats(struct lockup_stats *out)`, `int lockup_reporter(void)`, `bool lockup_sample_cpu(cpu, timeout_ns, out)`, `void lockup_profile(cpu, n, gap_ns)` | `kernel/lockup.h` | as built: the reports' facts as one snapshot; the slot's holder; one CPU's frame now; `n` samples of one CPU, one line each |
 | `bool arch_ipi_send_nmi(unsigned cpu)` | `arch/irqc.h` | deliver an NMI-class interrupt to `cpu` if the architecture has one; false means "use the ordinary IPI" |
 | `IPI_SAMPLE` | `kernel/ipi.h` | the ordinary-priority sample interrupt |
 | `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` | `kernel/timer.h` | the hook receives the frame (one hook exists: `sched_tick`) |
@@ -586,7 +639,7 @@ with a reason at one (the affinity API exists: `thread_create_on`).
 | `test_lockup` (host) | `lockup_watch_target` over `{0,2,3}`, `{1}`, `{0,1,2,3}`, `{0,63}`: every online CPU has exactly one watcher, none watches an offline CPU, a lone CPU watches itself | `(k+1) mod n` in place of the mask walk → `{0,2,3}` leaves 2 unwatched |
 | `lockup-quiet` | with the thresholds at 200 ms, a spinner alone on CPU `k` (nothing else runnable there) for 600 ms and an idle CPU for 600 ms produce no report of either kind; then the thresholds are restored to 10 s | the soft term inverted → a report |
 | `lockup-tick-bench` | prints, asserts nothing: the tick handler's cost with and without the sample stores, measured as the median of 1 000 ticks' `clock_now_ns` deltas between entry and the hook call (a static counter the tick hook reads); the shape of `irqrestore-bench` | -- |
-| the mechanism test | named after the diagnosis in step 5; asserts that the loop the PC named cannot occur, with its adversary built from the mechanism | reverting the fix |
+| the mechanism test (as built: `net-mbufq-double`, `kernel-services/network/nettest.c`) | three mbufs queued, the middle one enqueued again: refused, counted in `double_enqueues`, the count still three, drained in order to zero, the mbuf reusable once off the queue | remove the refusal in `mbufq_enqueue` -> fails at the refusal check itself (as run), ahead of the count reading four over a list of two |
 
 **Vacuity, named in advance.** A sample test that passes because the
 spinner never ran on CPU `k` (the affinity ignored) would show `pc` in
@@ -603,8 +656,45 @@ later boot is this check).
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section, as the wake-preempt report's was.
+**The suite** (2026-09-14): 257 self-tests pass on both architectures,
+every boot, before and after the harness change (258 once
+`net-mbufq-double` landed, step 5); `make test-crash`
+prints the symbol table below its verdict (the panic's `#0` resolves to
+`kernel_main`, `kernel/core/main.c:216`, the crash test's write).
+
+**The tests' own figures**: `lockup-sample` answers in 60-110 µs on
+x86-64 (NMI) and about 100 µs on AArch64 (SGI); `lockup-sample-irqoff`
+sees the tick sample 25-29 ms old at the 20 ms mark; `lockup-sample-busy`
+refuses the loser in 50-75 µs and, with two masked targets, completes in
+31 µs on x86-64 (both answered by NMI) and 5 022 µs on AArch64 (neither
+answered; one bound, not two); `lockup-soft` reports at 200 ms;
+`lockup-hard` reports at 200 ms of stall with the tick sample 199-205 ms
+old.
+
+**The bug-proofs** (each injected into `lockup.c`, the suite booted):
+
+| injection | failed as |
+| --- | --- |
+| the answer from the handler's own walk, not the interrupted frame | `lockup-sample`: `pc` outside `spin_here` (and `-irqoff`, `-hard` with it) |
+| no release store on `seq` | `lockup-sample`: `k` not in the mask |
+| the ordinary IPI instead of the NMI (x86-64) | `lockup-sample-irqoff`: no answer through the mask |
+| a fresh tick faked on the target (AArch64) | `lockup-sample-irqoff`: the age check |
+| the loser spins for the slot | `lockup-sample-busy`: both get the slot in turn |
+| a wait per target (AArch64) | `lockup-sample-busy`: two masked targets take 10 ms |
+| the `nr_running > 0` term dropped | `lockup-quiet`: the lone spinner reports |
+| the soft latch dropped | a report per tick; the run times out at 184 s |
+| the watcher's own ticks compared | `lockup-hard`: never fires |
+| the check every 250th tick | `lockup-hard`: never fires within the budget |
+| the hard latch dropped | a report per tick; the run times out |
+| `(k + 1) mod n` for the watcher (host) | `test_lockup`: CPU 2 unwatched in `{0,2,3}` |
+
+**The spin, found.** The `#ifndef` guard made `make EXTRA_CFLAGS=-DNET_WORKER_PRIO=31 test` the reproduction; it hung on the seventh boot on x86-64, and the tool built for it did the diagnosis in one dump: the watchdog's block carried the sample and eight more, 250 µs apart, of the CPU whose worker was running -- every one in the worker's wait condition (`mbufq_len`, `netif.c:705`), its dequeue (`mbufq_dequeue`, `netif.c:708`) or the wait's exit path, none in a packet or a work item. The queue's count said non-empty over a list that was empty, the case the report had called impossible by the lock. It is impossible by the lock; it is not impossible by a **second enqueue of an mbuf already on the queue**: `mbufq_enqueue` cleared `m->nextpkt` before taking the lock, which cuts the list behind a queued mbuf and orphans the rest, and the count stays. The second enqueue was the *reorder test's* loopback filter (`net-tcp-reorder`, `nettest.c`): it held a copied segment in a plain global and re-injected it with a read-then-clear that two CPUs -- the sending thread and a worker sending an ACK -- could both win. At priority 32 the spinning worker was invisible: an equal-priority thread still gets its slice, the suite passes, and one boot in five has burned a CPU since the reorder test landed. At 31 it starved `net-steer`'s injector, and the hang named it. A second reproduction on boot 3 of the next run, with the profile in place, showed the same eight-sample shape on CPU 2's worker.
+
+**The fix**, from the mechanism, in two places. The stack: an mbuf on a queue carries `M_QUEUED` (set and cleared under the queue's lock); a second enqueue is refused with the mbuf untouched, counted (`double_enqueues`) and said once (`WARN`), and `nextpkt` is cleared under the lock, not before it. The test: the filter's state is under a lock and the held copy leaves the lock before it is injected. **The mechanism test** is `net-mbufq-double`: three mbufs queued, the middle one enqueued again -- refused, counted, the count still three, drained in order to zero, the mbuf reusable once off the queue; bug-proofed by removing the refusal: the test fails at the refusal check itself, before the count could read four over a list of two.
+
+**A second hang at 31, found by the five-boot check.** With the spin fixed, the fifth boot at 31 on x86-64 hung with every CPU idle: the keepalive test's server thread blocked in `accept` with one switch and no run time, the test thread joined on it. Not a spin -- the dump's samples all show the idle loop -- but the tool still named it: the thread table said what waited on what. `ksock_connect` returns when the *client* side is established, before the worker has transmitted the handshake's third segment; `net-tcp-keepalive` then installed its black-hole filter, which in that boot swallowed exactly that segment. The server side stayed in SYN_RCVD, its accept never woke, and the join at the end waited forever. A race of the test's, older than this unit, with a window the priority widens. Fixed by waiting for the property (the suite-waits rule): the passive side's `conns_passive` count, before the black hole goes up and before the FIN_WAIT_2 half's close.
+
+**As run** (2026-09-14): with both fixes the suite passes on both architectures (258 self-tests). At 31, ten boots (five per architecture) with no hang: nine passed outright, one on AArch64 failed `net-harness`'s TCP exchange. The throughput veto on 31 stands and `net-harness`'s TCP exchange can still fail there (the collapse the last unit measured, not a hang). The priority stays `SCHED_PRIO_DEFAULT`.
 
 ## Benchmarks
 
