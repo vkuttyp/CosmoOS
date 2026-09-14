@@ -900,6 +900,7 @@ bool selftest_read_bounce(const char **reason)
     CHECK(b.heap && b.cap == IO_BOUNCE_MAX);
     syscall_bounce_put(&b);
 
+#if CONFIG_FAULTINJECT
     /* A heap that refuses: the stack chunk, never an error. */
     uint64_t fb0 = syscall_bounce_fallback_count();
     faultinject_set(FI_KMALLOC, 1, 1, thread_current());
@@ -911,6 +912,9 @@ bool selftest_read_bounce(const char **reason)
     CHECK(!b.heap && b.cap == IO_CHUNK && b.buf == stack);
     CHECK(syscall_bounce_fallback_count() == fb0 + 1);
     syscall_bounce_put(&b);
+#else
+    kinfo("selftest: read-bounce: the fallback needs fault injection, compiled out of this build");
+#endif
 
     /* The object side: a 200 KiB ramfs file answers one 64 KiB call with
      * 64 KiB of the right bytes, and 3 KiB from its end with 3 KiB. */
@@ -988,6 +992,8 @@ static void wb_teardown(struct blkdev *bd)
     vfs_rmdir(NULL, "/mnt/wb");
     ramblk_destroy(bd);
 }
+
+#if CONFIG_FAULTINJECT
 
 /* A page of a known pattern, `k` distinguishing files. */
 static void wb_fill(uint8_t *page, unsigned k)
@@ -1192,6 +1198,22 @@ bool selftest_wb_error_lost(const char **reason)
     wb_teardown(bd);
     return true;
 }
+
+#else
+
+#define WB_STUB(fn, name)                                                                     \
+    bool fn(const char **reason)                                                              \
+    {                                                                                         \
+        (void)reason;                                                                         \
+        kinfo("selftest: " name ": fault injection is compiled out of this build");          \
+        return true;                                                                          \
+    }
+WB_STUB(selftest_wb_error_fsync, "wb-error-fsync")
+WB_STUB(selftest_wb_error_once, "wb-error-once")
+WB_STUB(selftest_wb_error_close, "wb-error-close")
+WB_STUB(selftest_wb_error_lost, "wb-error-lost")
+
+#endif
 
 /* --- benchmarks: the object path per request size ------------------------
  *
