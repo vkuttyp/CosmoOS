@@ -992,15 +992,28 @@ static bool tcp_state_is(void *arg)
     return tcp_state_of(t->s->tcp) == t->want;
 }
 
-/* The connection has put at least `bytes` on the wire beyond what has been
- * acknowledged -- the data is *in flight*. Read straight out of the
- * control block, which the report flagged as the kind of predicate to
- * label rather than hide: this is TCP's own bookkeeping, not a statistic. */
-struct inflight_target { struct socket *s; uint32_t bytes; };
-static bool tcp_in_flight(void *arg)
+/*
+ * `snd_nxt` has advanced at least `bytes` past a baseline the caller took
+ * before sending. **One field**, not `snd_nxt - snd_una`: a first version
+ * read both, and the file's own rule for predicates -- no coherent view
+ * of more than one unsynchronised field -- applied to it as much as to
+ * `tcp_get_stats`. Read straight out of the control block, which is the
+ * "derived value" kind the report said to label rather than hide.
+ */
+struct sent_target { struct socket *s; uint32_t base, bytes; };
+static bool tcp_sent_since(void *arg)
 {
-    const struct inflight_target *t = arg;
-    return (uint32_t)(t->s->tcp->snd_nxt - t->s->tcp->snd_una) >= t->bytes;
+    const struct sent_target *t = arg;
+    return (uint32_t)(t->s->tcp->snd_nxt - t->base) >= t->bytes;
+}
+
+/* `snd_una` has advanced at least `bytes` past a baseline: that much has
+ * been *acknowledged*, which for a loopback peer means delivered. */
+struct acked_target { struct socket *s; uint32_t base, bytes; };
+static bool tcp_acked_since(void *arg)
+{
+    const struct acked_target *t = arg;
+    return (uint32_t)(t->s->tcp->snd_una - t->base) >= t->bytes;
 }
 
 /* A TCP counter has advanced past its baseline. */
@@ -1423,13 +1436,14 @@ bool selftest_net_icmp_limit(const char **reason)
     loopback_set_filter(blackhole_filter, NULL);   /* the data stays in flight */
     uint8_t big[2000];
     memset(big, 'm', sizeof(big));
+    uint32_t nxt0 = c->tcp->snd_nxt;   /* the baseline, taken before the send */
     CHECK(ksock_sendto(c, big, sizeof(big), NULL) == (int64_t)sizeof(big));
     /* The filter blackholes the data, so nothing is acknowledged and it
      * stays in flight; wait for it to be *sent* before taking the sequence
      * the forged quote will name. This was a bare `settle(20)` that step 2
      * missed -- the twelfth of what the report counted as eleven. */
-    struct inflight_target inflight = { .s = c, .bytes = sizeof(big) };
-    CHECK(wait_until(tcp_in_flight, &inflight, 5000));
+    struct sent_target inflight = { .s = c, .base = nxt0, .bytes = sizeof(big) };
+    CHECK(wait_until(tcp_sent_since, &inflight, 5000));
     uint32_t seq = c->tcp->snd_una;
     struct tcp_stats t0, t1;
     tcp_get_stats(&t0);
@@ -1463,7 +1477,12 @@ bool selftest_net_icmp_limit(const char **reason)
     struct mbuf *good = m_copypacket(m);
     CHECK(good != NULL);
     ic->cksum = in_cksum(m->data, m->len);
-    struct needfrag_target nf = { .base = i0.icmp_needfrag_rcvd, .want = 1 };
+    /* Baseline taken *here*, not at the top of the function: the counter is
+     * global, and a stale baseline lets any earlier fragmentation-needed
+     * satisfy the wait before the forged quote has been looked at. */
+    struct ip_stats ib;
+    ipv4_get_stats(&ib);
+    struct needfrag_target nf = { .base = ib.icmp_needfrag_rcvd, .want = 1 };
     ipv4_output(m, 0, INADDR_LOOPBACK_N, IPPROTO_ICMP, IP_DEFAULT_TTL);   /* quotes a sequence never sent */
     CHECK(wait_until(needfrag_received, &nf, 5000));   /* it arrived; now assert it did nothing */
     tcp_get_stats(&t1);
@@ -1502,6 +1521,14 @@ bool selftest_net_icmp_limit(const char **reason)
      * "probably by now", and 300 ms was the largest sleep in the file. */
     struct rexmit_target rx = { .base = t1.retransmits, .want = 1 };
     CHECK(wait_until(retransmit_happened, &rx, 5000));
+    /* `retransmits` advances when the timer fires, *before* the segment is
+     * built and before loopback delivers it on a later pass -- so on its
+     * own it says "scheduled", not "delivered", and a first version of
+     * this wait stopped there. Delivered is the peer acknowledging it:
+     * with the filter off, the client's `snd_una` advances past the
+     * sequence the forged quote named. */
+    struct acked_target acked = { .s = c, .base = seq, .bytes = sizeof(big) };
+    CHECK(wait_until(tcp_acked_since, &acked, 5000));
     ipv4_pmtu_flush();
     CHECK(tcp_path_mss(COSMO_AF_INET, &srv.addr) == TCP_MSS_LO);
     ksock_put(c);
@@ -1560,6 +1587,11 @@ bool selftest_net_nonblock(const char **reason)
     memset(buf, 'f', sizeof(buf));
     uint64_t pushed = 0;
     bool full = false;
+    /* One deadline for the whole fill, and every readiness wait is CHECKed
+     * against it. A first version waited 200 ms per refusal and dropped the
+     * result, which turned a stalled socket into up to 400 waits and hid
+     * the stall behind the byte-count assertion below. */
+    uint64_t fill_deadline = clock_now_ns() + 5000ull * 1000000ull;
     for (unsigned i = 0; i < 400 && !full; i++) {
         if (!(ksock_ready(c) & COSMO_IO_WRITABLE)) {
             full = true;
@@ -1572,18 +1604,27 @@ bool selftest_net_nonblock(const char **reason)
             /* The loop's own termination is `full`; on a transient refusal
              * wait for the socket to say it is writable again rather than
              * sleeping ten milliseconds and guessing. */
+            uint64_t now = clock_now_ns();
+            CHECK(now < fill_deadline);
+            if (now >= fill_deadline)
+                break;
             struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
-            (void)wait_until(ready_has, &rt, 200);
+            CHECK(wait_until(ready_has, &rt, (unsigned)((fill_deadline - now) / 1000000ull)));
         } else
             CHECK(n > 0);
     }
     CHECK(full && pushed > 0);
     uint64_t drained = 0;
+    uint64_t drain_deadline = clock_now_ns() + 5000ull * 1000000ull;
     for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
         int64_t n = ksock_recvfrom(a, buf, sizeof(buf), NULL);
         if (n == -EAGAIN) {
+            uint64_t now = clock_now_ns();
+            CHECK(now < drain_deadline);
+            if (now >= drain_deadline)
+                break;
             struct ready_target rt = { .s = a, .mask = COSMO_IO_READABLE };
-            (void)wait_until(ready_has, &rt, 200);
+            CHECK(wait_until(ready_has, &rt, (unsigned)((drain_deadline - now) / 1000000ull)));
         } else if (n > 0)
             drained += (uint64_t)n;
         else
