@@ -15,8 +15,9 @@
  *                            start), a device tree describing the machine at the
  *                            first 2 MiB boundary past the image and in x0. The
  *                            owner is the firmware: PSCI is answered here -- CPU_ON
- *                            creates a vCPU and runs it, in turn with the others,
- *                            one tick each -- and SYSTEM_OFF ends the run. The
+ *                            creates a vCPU and starts its thread, each vCPU on a
+ *                            thread of its own -- and SYSTEM_OFF tells every thread
+ *                            to quit and kicks the ones inside a guest. The
  *                            guest's console is echoed. Exit 0 on power-off.
  */
 

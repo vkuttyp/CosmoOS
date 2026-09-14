@@ -1753,7 +1753,11 @@ See [docs/development.md](docs/development.md).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
-  domain deliberately does without and argues against. The constitution's
+  domain deliberately does without and argues against
+  (`docs/kernel/security/design.md`, "This is not a pid namespace":
+  renumbering is a translation at every boundary that takes or returns a
+  pid, and an isolation in which nothing outside the domain is nameable
+  learns nothing from the number). The constitution's
   **section 60 hardware roadmap** is now done through AHCI — `NVMe`, an
   Intel NIC, USB, AHCI — with the IOMMU unit done earlier and GPU, Wi-Fi
   and Bluetooth explicitly later. What remains named are the follow-ups
@@ -1763,9 +1767,10 @@ See [docs/development.md](docs/development.md).
   past them: a guest has a virtual CPU interface, a timer and a
   distributor, a console, a machine with a device tree, a disk, a network
   interface and a route to the world -- and it boots Linux. Every §68
-  report named below has been built; what the hypervisor lacks next is
-  named in those units' own follow-ups, and one known defect is listed at
-  the end of this entry.
+  report named below has been built bar the last, which is in progress;
+  what the hypervisor lacks next is named in those units' own follow-ups,
+  and the one defect this entry used to close with is recorded at the end
+  as history, since the design it was found in has since been replaced.
   Section **68** is not a list of deferrals: it is the
   instruction to stop after the audit, name one subsystem in a fixed
   shape and wait, which `docs/audit/next-subsystem.md` did for the NIC,
@@ -1821,6 +1826,22 @@ See [docs/development.md](docs/development.md).
   pings or its path-MTU discovery (built); and `-output-chain.md`, the
   fourth and last -- what the host itself may send, with a scope that tells
   a guest's tap from the world and an `-EPERM` the sender can read (built).
+  `-tcp-verdict.md` then made the filter's refusals reach TCP's callers
+  and not only `sendto`'s (built). From there the arc turned to the
+  program rather than the guest, one unit at a time (all built):
+  `-threads.md`, native threads and a futex, so a program can use every
+  CPU; `-errno-tls.md`, a thread pointer and an `errno` per thread;
+  `-vcpu-threads.md`, `vmctl` rebuilt as a thread per vCPU with
+  `SYS_vcpu_stop` to make one leave its run -- the change that retired the
+  design the defect below was found in; `-pt-tls.md`, `__thread` and the
+  TLS image a program brings with it; `-condvar.md`, a condition variable,
+  the wait every threaded program had been writing by hand; and
+  `-cwd-ref.md`, a reference taken on the working directory before every
+  path walk, closing a use-after-free that a second thread's `chdir`
+  could reach. `-suite-waits.md` is the one in progress: the boot suite's
+  tests that sleep a fixed interval and then count, converted to waits on
+  the property, with the flakes that motivated it reproduced on demand
+  first.
 
   The named next steps are the follow-ups these left. On the filter --
   whose four chains now cover every path through the machine, and whose
@@ -1829,26 +1850,29 @@ See [docs/development.md](docs/development.md).
   **rate-limit and logging targets**, **IPv6 filtering**, and full TCP state
   tracking. On NAT and the bridge:
   **hairpin/NAT-reflection**, **IPv6 DNAT**, an **L2 bridge**, and the
-  **tap's remaining settings** on `/dev/net/tapctl`. On the state: **ICMP
+  **tap's remaining settings** on `/dev/net/tapctl` -- which now carries
+  port-forwards, firewall rules and a per-direction default policy
+  (`COSMO_NETCTL_VERSION 5`), and still not the tap's subnet, its DHCP
+  range or its DNS upstream. On the state: **ICMP
   errors for a UDP flow** (no consumer exists yet) and a **listing of live
   flows** for the operator. On the guest itself: the `QEMU_MEM=2G`
-  reproduction reaching the real world. And one **defect found while diagnosing a CI
-  failure rather than by a unit, since fixed**: `vmctl`'s machine mode runs a
-  guest's vCPUs in one thread, a tick each, and it did give a vCPU started
-  with `CPU_ON` its own turn -- the loop takes a turn boundary after every
-  PSCI call for exactly that reason -- but it did not bound that turn's
-  *length*. The secondary got one tick, nothing revisited it, and
-  `SYSTEM_OFF` was honoured the moment the first vCPU asked, so a tick that
-  expired before the secondary reached its first UART store (which a loaded
-  host makes likely) lost that output: the intermittent disappearance of the
-  `cpu1: up ctx=1234cafe` line, with the guest's other machine-mode lines
-  arriving and the in-kernel `el2-guest-psci` self-test passing in the same
-  boot. `SYSTEM_OFF` now waits, for a bounded number of turns, on any vCPU
-  that has never had a turn end on its own terms
-  (`docs/kernel-services/virtualization/design.md`, "A started vCPU gets its
-  turn"), proved two ways: robbing that vCPU of its first turn makes the
-  marker vanish without the rule and survive with it, and a new guest whose
-  second CPU never yields (`guest_offspin`) shows the hold staying bounded --
-  without the timed turns that bound needs, `vmctl` hangs and the boot test
-  dies on its deadline at 187 s. Design documents first, one subsystem at a
-  time.
+  reproduction reaching the real world.
+  And one **defect, found while diagnosing a CI failure rather than by a
+  unit, kept here as history** because the design it lived in is gone.
+  `vmctl`'s machine mode once ran a guest's vCPUs in a single thread, a
+  tick each; a vCPU started with `CPU_ON` got a turn of its own but not a
+  turn of bounded *length*, so on a loaded host the secondary's first UART
+  store could miss its tick and `SYSTEM_OFF` was honoured the moment the
+  first vCPU asked -- the intermittent disappearance of the
+  `cpu1: up ctx=1234cafe` line. The fix at the time bounded the turns.
+  That whole loop was then replaced by **a thread per vCPU**
+  (`docs/audit/next-subsystem-vcpu-threads.md`, "A thread per vCPU, and
+  the loop that remains"; `docs/kernel-services/virtualization/api.md`):
+  there are no turns to bound any more. Today `CPU_ON` waits, for at most
+  200 ms, for the target's first run to *return* -- which is what PSCI's
+  SUCCESS means -- and `SYSTEM_OFF` sets every vCPU's state to QUIT, wakes
+  the parked threads and kicks the ones inside a guest with
+  `SYS_vcpu_stop`. The regression that guarded the old fix still guards
+  the new design: `guest_offspin`, whose second CPU never yields, must
+  still power off, and the `cpu1: up` marker must still arrive. Design
+  documents first, one subsystem at a time.
