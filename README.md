@@ -1782,7 +1782,8 @@ See [docs/development.md](docs/development.md).
   tolerated; the kicker joined and the run's return ordered after its
   kick), four removed because the failure they named is a hang the
   watchdog already reports, and two widened and labelled `LOAD-SENSITIVE`
-  (`sleep`, `el2-guest-timer-ontime`) -- the only two on
+  (`sleep`, `el2-guest-timer-ontime`) -- which, with the limiter test's
+  residual below, are the three entries on
   `docs/testing/flakes.md`, which says what each asserts, why nothing
   observable replaces it, what is deliberately not listed, and the rule
   for joining. The boot harness reads that table and names a failing test

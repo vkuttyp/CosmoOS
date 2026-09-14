@@ -48,8 +48,10 @@ and re-run before it could land.
    removed because the failure they named is a hang the watchdog reports,
    two widened and labelled -- and `hv-vcpu-stop:601`, a third shape the
    report's inventory missed ("another thread got there first"), restated.
-6. **The list has two entries**, not the example's `net-tcp-syncache`,
-   which is converted and cannot be load-sensitive any more. The harness
+6. **The list has three entries** -- the two widened bounds (`sleep`,
+   `el2-guest-timer-ontime`) and one residual (item 9's `net-icmp-limit`)
+   -- not the example's `net-tcp-syncache`, which is converted and cannot
+   be load-sensitive any more. The harness
    reads the table under one heading of `docs/testing/flakes.md` and
    says so when the file is missing or parses to nothing.
 7. **Two things the report asked for and the first cut forgot**, added in
@@ -454,7 +456,7 @@ fixed sleeps and starts scaling with the work.
 | `kernel-services/network/nettest.c` | `wait_until`; **12 bare `settle` sites converted and 10 hand-written waits re-expressed** (as built; the report said 11 and 11 -- same 22 calls, one misfiled); `settle` deleted; 24 wait sites over 12 predicates; `warn_unused_result`; the near-budget report |
 | `kernel/scheduler/smptest.c`, `-/schedtest.c`, `kernel/io/polltest.c`, `kernel-services/virtualization/hvtest.c` | the upper bounds classified: 4 restated, 4 removed as restated into existing checks, 2 widened and labelled; `hvtest.c:601` restated |
 | `tests/boot/run_boot_test.py` | name a failing test against the load-sensitive list in the failure line; report a missing or empty list |
-| `docs/testing/flakes.md` | **new**: the list (two entries), what each bound asserts, what is not listed and why, the rule, the history |
+| `docs/testing/flakes.md` | **new**: the list (three entries: two widened bounds and the limiter test's residual), what each bound asserts, what is not listed and why, the rule, the history |
 | `docs/verification/design.md` | §6: the note, beside the per-test timing it extends (as built; not in the report's table) |
 | `docs/kernel/scheduler/testing.md`, `-/smp/testing.md`, `-/smp/invariants.md`, `-/io/testing.md`, `docs/kernel-services/network/testing.md`, `-/virtualization/testing.md` | each test's description matches what it asserts now, and the waits-and-bounds rule where each suite documents itself |
 | `README.md` | Status entry |
