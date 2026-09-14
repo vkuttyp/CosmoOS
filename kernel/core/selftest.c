@@ -461,6 +461,7 @@ static const struct selftest tests[] = {
     { "cache-limits",    selftest_cache_limits },
     { "cache-budget-race", selftest_cache_budget_race },
     { "net-mbuf",        selftest_net_mbuf },
+    { "net-mbufq-double", selftest_net_mbufq_double },
     { "net-cksum",       selftest_net_cksum },
     { "net-arp",         selftest_net_arp },
     { "net-route",       selftest_net_route },

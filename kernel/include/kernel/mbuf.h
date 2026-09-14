@@ -26,6 +26,8 @@
 #define M_BCAST    (1u << 2)   /* received as link-layer broadcast */
 #define M_MCAST    (1u << 3)
 #define M_CSUM_OK  (1u << 4)   /* transport checksum verified by lower layer */
+#define M_QUEUED   (1u << 6)   /* on an mbufq: set and cleared under the queue's lock; a second
+                                  enqueue is refused and counted (double_enqueues) */
 #define M_FW_QUIET (1u << 5)   /* the host firewall said DROP: deliver only to an existing
                                 * connection, a connected socket, or (for an ICMP error) the
                                 * consumer that validates it against its own connection;
@@ -122,6 +124,7 @@ unsigned mbufq_len(struct mbufq *q);
 
 struct mbuf_stats {
     uint64_t mbufs_alive, clusters_alive, allocs, frees, alloc_failures;
+    uint64_t double_enqueues;   /* enqueues refused because the mbuf was already on a queue */
 };
 void mbuf_get_stats(struct mbuf_stats *out);
 

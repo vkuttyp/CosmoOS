@@ -122,6 +122,47 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     return true;
 }
 
+bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out)
+{
+    unsigned me = arch_cpu_id();
+    int expected = 0;
+    if (cpu == me || !cpu_online(cpu))
+        return false;
+    if (!__atomic_compare_exchange_n(&g_reporter, &expected, (int)me + 1, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE))
+        return false;
+    uint64_t seq = __atomic_add_fetch(&g_sample_seq, 1, __ATOMIC_ACQ_REL);
+    struct percpu *pc = percpu_get(cpu);
+    __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
+    if (!arch_ipi_send_nmi(cpu))
+        ipi_send(cpu, IPI_SAMPLE);
+    uint64_t deadline = clock_now_ns() + timeout_ns;
+    bool got = false;
+    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && clock_now_ns() < deadline)
+        arch_cpu_relax();
+    if (got)
+        *out = pc->sample;
+    __atomic_store_n(&g_reporter, 0, __ATOMIC_RELEASE);
+    return got;
+}
+
+void lockup_profile(unsigned cpu, unsigned n, uint64_t gap_ns)
+{
+    kprintf("cpu %u: %u samples, %llu us apart:\n", cpu, n, (unsigned long long)(gap_ns / 1000));
+    for (unsigned i = 0; i < n; i++) {
+        struct cpu_sample s;
+        if (lockup_sample_cpu(cpu, LOCKUP_SAMPLE_TIMEOUT_NS, &s)) {
+            kprintf("  pc %p", (void *)s.pc);
+            for (unsigned k = 1; k < s.depth && k < 4; k++)
+                kprintf("  #%u %p", k, (void *)s.trace[k]);
+            kprintf("\n");
+        } else {
+            kprintf("  (no answer)\n");
+        }
+        udelay(gap_ns / 1000);
+    }
+}
+
 static void print_one(unsigned c, const struct cpu_sample *s, uint64_t now, bool self)
 {
     kprintf("cpu %u: pc %p sp %p (%s, %llu us ago)\n", c, (void *)s->pc, (void *)s->sp,
@@ -199,6 +240,8 @@ static void report_hard(struct percpu *pc, unsigned target, struct arch_trap_fra
     cpumask_t answered;
     sample_others_and_print(frame, &answered);
     g_stats.hard_answered = answered;
+    if (arch_ipi_nmi_capable())
+        lockup_profile(target, 8, 250 * 1000);
     __atomic_fetch_add(&g_stats.hard_reports, 1, __ATOMIC_RELEASE);
 }
 

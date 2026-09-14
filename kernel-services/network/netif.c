@@ -68,6 +68,7 @@ static unsigned g_ncpu = 1;            /* CPUs with a queue (workers may still b
  * depends on an allocation succeeding. */
 static struct mutex g_unregister_lock;
 static bool g_steer = true;
+static void netif_dump_cpus(void);
 static netif_rx_hook_fn g_rx_hook;
 static void *g_rx_hook_arg;
 
@@ -775,8 +776,21 @@ void net_init(void)
     tcp_init();
     socket_init();
     start_worker(&g_cpu[0]);
+    sched_dump_register("net", netif_dump_cpus);
     loopback_init();
     kinfo("net: stack ready");
+}
+
+/* The per-CPU counters, lock-free: registered with sched_dump so a
+ * watchdog or lockup report shows what each worker has been doing. */
+static void netif_dump_cpus(void)
+{
+    for (unsigned i = 0; i < g_ncpu; i++) {
+        const struct net_cpu_stats *st = &g_cpu[i].stats;
+        kprintf("netrx/%u: %s queued %llu drop %llu local %llu work %llu\n", i, g_cpu[i].ready ? "up" : "starting",
+                (unsigned long long)st->rx_queued, (unsigned long long)st->rx_dropped,
+                (unsigned long long)st->rx_steered_here, (unsigned long long)st->work_runs);
+    }
 }
 
 void netif_dump(void)
@@ -792,12 +806,7 @@ void netif_dump(void)
                 (unsigned long long)n->stats.tx_bytes, (unsigned long long)n->stats.tx_errors);
     }
     spin_unlock_irqrestore(&g_netif_lock, s);
-    for (unsigned i = 0; i < g_ncpu; i++) {
-        const struct net_cpu_stats *st = &g_cpu[i].stats;
-        kprintf("netrx/%u: %s queued %llu drop %llu local %llu work %llu\n", i, g_cpu[i].ready ? "up" : "starting",
-                (unsigned long long)st->rx_queued, (unsigned long long)st->rx_dropped,
-                (unsigned long long)st->rx_steered_here, (unsigned long long)st->work_runs);
-    }
+    netif_dump_cpus();
 }
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). */

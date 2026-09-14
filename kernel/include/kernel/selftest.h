@@ -198,6 +198,7 @@ bool selftest_cosmofs_badmap(const char **reason);     /* a crafted inode's dire
 
 /* Phase 8: kernel-services/network/nettest.c */
 bool selftest_net_mbuf(const char **reason);
+bool selftest_net_mbufq_double(const char **reason);   /* a second enqueue of a queued mbuf is refused; the queue stays whole */
 bool selftest_net_cksum(const char **reason);
 bool selftest_net_arp(const char **reason);
 bool selftest_tap(const char **reason);

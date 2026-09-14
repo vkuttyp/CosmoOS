@@ -382,6 +382,14 @@ static void watchdog_check(uint64_t now, struct arch_trap_frame *frame)
         lockup_print_samples(answered);
     else
         kprintf("  sample in progress on cpu %d\n", lockup_reporter());
+    /* A CPU that is running something and is not this one: eight more
+     * samples, so a loop that is cycling rather than stuck shows its
+     * shape. */
+    for (unsigned c = 0; c < cpu_count(); c++) {
+        struct runqueue *rq = &g_rqs[c];
+        if (c != arch_cpu_id() && cpu_online(c) && rq->current != NULL && rq->current != rq->idle)
+            lockup_profile(c, 8, 250 * 1000);
+    }
 }
 
 void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
@@ -408,6 +416,10 @@ uint64_t sched_switch_count(unsigned cpu)
     return cpu < CONFIG_MAX_CPUS ? g_rqs[cpu].switches : 0;
 }
 
+#define SCHED_DUMP_HOOKS 8
+static struct { const char *name; void (*fn)(void); } g_dump_hooks[SCHED_DUMP_HOOKS];
+static unsigned g_dump_hook_count;
+
 void sched_dump(void)
 {
     uint64_t now = clock_now_ns();
@@ -427,6 +439,19 @@ void sched_dump(void)
                 (void *)(pc ? pc->last_tick_pc : 0));
     }
     thread_dump_all();
+    for (unsigned i = 0; i < g_dump_hook_count; i++) {
+        kprintf("%s:\n", g_dump_hooks[i].name);
+        g_dump_hooks[i].fn();
+    }
+}
+
+void sched_dump_register(const char *name, void (*fn)(void))
+{
+    if (g_dump_hook_count >= SCHED_DUMP_HOOKS)
+        panic("sched_dump_register: no slot for '%s'", name);
+    g_dump_hooks[g_dump_hook_count].name = name;
+    g_dump_hooks[g_dump_hook_count].fn = fn;
+    __atomic_store_n(&g_dump_hook_count, g_dump_hook_count + 1, __ATOMIC_RELEASE);
 }
 
 /* Module ABI v1 exports (docs/kernel/module/api.md). */

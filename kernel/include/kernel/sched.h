@@ -72,6 +72,11 @@ struct runqueue *sched_runqueue(unsigned cpu);
 
 /* Diagnostics. */
 void sched_dump(void);
+/* A subsystem's contribution to sched_dump: printed after the thread
+ * table on every dump (the watchdog's, a lockup report's, the panic's).
+ * The hook runs in interrupt context with interrupts off and must take
+ * no lock another CPU may hold (a hung CPU's, say): print counters. */
+void sched_dump_register(const char *name, void (*fn)(void));
 uint64_t sched_switch_count(unsigned cpu);
 
 /* Hang watchdog: if sched_watchdog_kick() is not called for `timeout_ns`

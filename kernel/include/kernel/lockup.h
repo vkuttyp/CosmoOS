@@ -41,6 +41,17 @@ bool lockup_answer(struct arch_trap_frame *frame, bool nmi);
  * tick-sampled last pc and its age; then release the reporter slot. */
 void lockup_print_samples(cpumask_t answered);
 
+/* One CPU's frame, now: claims the slot, asks `cpu` alone, copies its
+ * answer into `out` and releases. False when the slot is taken or the
+ * CPU did not answer within the bound. */
+bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out);
+
+/* `n` samples of `cpu`, `gap_ns` apart, one line each (the top three
+ * frames): what a CPU that is not stalled in one place is cycling
+ * through. Never sleeps (udelay); for the watchdog and the hard-lockup
+ * report, never for the caller's own CPU. */
+void lockup_profile(unsigned cpu, unsigned n, uint64_t gap_ns);
+
 /* The CPU holding the reporter slot, or -1. */
 int lockup_reporter(void);
 
