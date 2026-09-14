@@ -960,6 +960,9 @@ bool selftest_read_bounce(const char **reason)
 
 static int wb_setup(struct blkdev **out)
 {
+    /* A test that failed mid-way left its mount: take it down first, so
+     * one failure does not fail every test after it at setup. */
+    (void)vfs_umount2("/mnt/wb", VFS_UMOUNT_FORCE);
     struct blkdev *bd = ramblk_create(256);
     if (bd == NULL)
         return -ENOMEM;
