@@ -939,19 +939,11 @@ static void inject_tcp(uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ac
 }
 
 /* Let the network worker drain what was injected. */
-static void settle(unsigned ms)
-{
-    for (unsigned i = 0; i < ms; i += 10) {
-        thread_sleep_ms(10);
-        sched_watchdog_kick();
-    }
-}
-
 /*
  * Wait until `pred(arg)` holds, or `budget_ms` passes
  * (docs/audit/next-subsystem-suite-waits.md).
  *
- * The `settle(N)` above waits for *time*; this waits for the *property*,
+ * The `settle(N)` this replaced waited for *time*; this waits for the *property*,
  * which is the difference between a test that asserts something about the
  * stack and one that asserts something about the host. There is no
  * relationship between 100 ms and 300 packets, and on a machine that has
@@ -982,15 +974,46 @@ static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
     return true;
 }
 
+/* A socket's readiness word has every bit in `mask` set. This is the
+ * shape six hand-written waits in this file shared -- a header loop on
+ * `ksock_ready` with `i < 100` standing in for a second. */
+struct ready_target { struct socket *s; unsigned mask; };
+static bool ready_has(void *arg)
+{
+    const struct ready_target *t = arg;
+    return (ksock_ready(t->s) & t->mask) == t->mask;
+}
+
+/* A connection has reached (not merely left) a state. */
+struct state_target { struct socket *s; enum tcp_state want; };
+static bool tcp_state_is(void *arg)
+{
+    const struct state_target *t = arg;
+    return tcp_state_of(t->s->tcp) == t->want;
+}
+
+/* The connection has put at least `bytes` on the wire beyond what has been
+ * acknowledged -- the data is *in flight*. Read straight out of the
+ * control block, which the report flagged as the kind of predicate to
+ * label rather than hide: this is TCP's own bookkeeping, not a statistic. */
+struct inflight_target { struct socket *s; uint32_t bytes; };
+static bool tcp_in_flight(void *arg)
+{
+    const struct inflight_target *t = arg;
+    return (uint32_t)(t->s->tcp->snd_nxt - t->s->tcp->snd_una) >= t->bytes;
+}
+
 /* A TCP counter has advanced past its baseline. */
 struct tcpc_target { uint64_t base, want; int which; };
-enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1 };
+enum { TC_SYN_BAD_ACK = 0, TC_PMTU_UPDATES = 1, TC_FIN_WAIT2_TIMEOUTS = 2 };
 static bool tcp_counter_reached(void *arg)
 {
     const struct tcpc_target *t = arg;
     struct tcp_stats now;
     tcp_get_stats(&now);
-    uint64_t v = t->which == TC_SYN_BAD_ACK ? now.syn_bad_ack : now.pmtu_updates;
+    uint64_t v = t->which == TC_SYN_BAD_ACK ? now.syn_bad_ack
+               : t->which == TC_PMTU_UPDATES ? now.pmtu_updates
+               : now.fin_wait2_timeouts;
     return v - t->base >= t->want;
 }
 
@@ -1286,8 +1309,8 @@ bool selftest_net_tcp_keepalive(const char **reason)
     tcp_get_stats(&t0);
     g_guard_port = 6023;
     loopback_set_filter(blackhole_filter, NULL);
-    for (unsigned i = 0; i < 300 && tcp_state_of(c->tcp) != TCP_CLOSED; i++)
-        settle(10);
+    struct state_target closed = { .s = c, .want = TCP_CLOSED };
+    CHECK(wait_until(tcp_state_is, &closed, 5000));
     CHECK(tcp_state_of(c->tcp) == TCP_CLOSED);
     uint8_t buf[4];
     int64_t r = ksock_recvfrom(c, buf, sizeof(buf), NULL);
@@ -1314,12 +1337,9 @@ bool selftest_net_tcp_keepalive(const char **reason)
     tcp_get_stats(&t0);
     tcp_set_fin_wait2(100ull * 1000000ull);
     ksock_put(c);   /* close: FIN; the server never answers with its own */
-    for (unsigned i = 0; i < 200; i++) {
-        tcp_get_stats(&t1);
-        if (t1.fin_wait2_timeouts > t0.fin_wait2_timeouts)
-            break;
-        settle(10);
-    }
+    struct tcpc_target fw2 = { .base = t0.fin_wait2_timeouts, .want = 1, .which = TC_FIN_WAIT2_TIMEOUTS };
+    CHECK(wait_until(tcp_counter_reached, &fw2, 5000));
+    tcp_get_stats(&t1);
     tcp_set_fin_wait2(0);
     CHECK(t1.fin_wait2_timeouts == t0.fin_wait2_timeouts + 1);
     srv.stop = true;
@@ -1404,7 +1424,12 @@ bool selftest_net_icmp_limit(const char **reason)
     uint8_t big[2000];
     memset(big, 'm', sizeof(big));
     CHECK(ksock_sendto(c, big, sizeof(big), NULL) == (int64_t)sizeof(big));
-    settle(20);
+    /* The filter blackholes the data, so nothing is acknowledged and it
+     * stays in flight; wait for it to be *sent* before taking the sequence
+     * the forged quote will name. This was a bare `settle(20)` that step 2
+     * missed -- the twelfth of what the report counted as eleven. */
+    struct inflight_target inflight = { .s = c, .bytes = sizeof(big) };
+    CHECK(wait_until(tcp_in_flight, &inflight, 5000));
     uint32_t seq = c->tcp->snd_una;
     struct tcp_stats t0, t1;
     tcp_get_stats(&t0);
@@ -1503,12 +1528,12 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(rc == 0 || rc == -EINPROGRESS);
     if (rc == -EINPROGRESS)
         CHECK(ksock_connect(c, &addr) == -EALREADY || ksock_connect(c, &addr) == -EISCONN);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
     CHECK(ksock_connect(c, &addr) == -EISCONN);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(ls) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = ls, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(ls) & COSMO_IO_READABLE);
     CHECK(ksock_accept(ls, &a, NULL) == 0);
     ksock_set_nonblock(a, true);
@@ -1516,8 +1541,8 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == -EAGAIN);
     CHECK(!(ksock_ready(c) & COSMO_IO_READABLE));
     CHECK(ksock_sendto(a, "hello", 5, NULL) == 5);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_recvfrom(c, buf, sizeof(buf), NULL) == 5);
     /* Fill the pipe: a non-blocking send returns what fits, then -EAGAIN.
      * The peer never reads here, so its window closes and the socket ends
@@ -1543,29 +1568,34 @@ bool selftest_net_nonblock(const char **reason)
         int64_t n = ksock_sendto(c, buf, sizeof(buf), NULL);
         if (n > 0)
             pushed += (uint64_t)n;
-        else if (n == -EAGAIN)
-            settle(10);
-        else
+        else if (n == -EAGAIN) {
+            /* The loop's own termination is `full`; on a transient refusal
+             * wait for the socket to say it is writable again rather than
+             * sleeping ten milliseconds and guessing. */
+            struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+            (void)wait_until(ready_has, &rt, 200);
+        } else
             CHECK(n > 0);
     }
     CHECK(full && pushed > 0);
     uint64_t drained = 0;
     for (unsigned i = 0; i < 2000 && drained < pushed; i++) {
         int64_t n = ksock_recvfrom(a, buf, sizeof(buf), NULL);
-        if (n == -EAGAIN)
-            settle(10);
-        else if (n > 0)
+        if (n == -EAGAIN) {
+            struct ready_target rt = { .s = a, .mask = COSMO_IO_READABLE };
+            (void)wait_until(ready_has, &rt, 200);
+        } else if (n > 0)
             drained += (uint64_t)n;
         else
             CHECK(n > 0);
     }
     CHECK(drained == pushed);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_WRITABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_WRITABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_ready(c) & COSMO_IO_WRITABLE);
     ksock_put(a);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(c) & COSMO_IO_HANGUP); i++)
-        settle(10);
+    { struct ready_target rt = { .s = c, .mask = COSMO_IO_HANGUP };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK((ksock_ready(c) & COSMO_IO_HANGUP) && ksock_recvfrom(c, buf, sizeof(buf), NULL) == 0);
     ksock_put(c);
     ksock_put(ls);
@@ -1579,8 +1609,8 @@ bool selftest_net_nonblock(const char **reason)
     CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == -EAGAIN);
     CHECK(ksock_ready(u) == COSMO_IO_WRITABLE);
     CHECK(ksock_sendto(u, "d", 1, &ua) == 1);
-    for (unsigned i = 0; i < 100 && !(ksock_ready(u) & COSMO_IO_READABLE); i++)
-        settle(10);
+    { struct ready_target rt = { .s = u, .mask = COSMO_IO_READABLE };
+      CHECK(wait_until(ready_has, &rt, 5000)); }
     CHECK(ksock_recvfrom(u, buf, sizeof(buf), NULL) == 1);
     ksock_put(u);
 
