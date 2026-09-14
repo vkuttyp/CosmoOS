@@ -736,7 +736,9 @@ static void cpu_init(struct net_cpu *c, unsigned id)
  * setting per architecture, 2026-09-14; the table is in
  * docs/kernel-services/network/design.md.
  */
+#ifndef NET_WORKER_PRIO   /* overridable from the command line for a reproduction: make EXTRA_CFLAGS=-DNET_WORKER_PRIO=31 test */
 #define NET_WORKER_PRIO SCHED_PRIO_DEFAULT
+#endif
 
 static void start_worker(struct net_cpu *c)
 {

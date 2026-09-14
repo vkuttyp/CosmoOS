@@ -268,7 +268,10 @@ bool selftest_lockup_sample_busy(const char **reason)
     const struct racer *loser = r[0].ok ? &r[1] : &r[0];
     const struct racer *winner = r[0].ok ? &r[0] : &r[1];
     CHECK(loser->mask == 0);
-    CHECK(loser->elapsed_ns < 100 * 1000);            /* refused at once, waited for nothing */
+    /* Refused at once: far under the winner's 2 ms hold, which is what a
+     * loser that waited for the slot would take (an interrupt landing on
+     * the loser's CPU in between costs tens of microseconds under TCG). */
+    CHECK(loser->elapsed_ns < 1000 * 1000);
     CHECK(winner->elapsed_ns < LOCKUP_SAMPLE_TIMEOUT_NS + 2 * 1000 * 1000);
     CHECK(s1.samples == s0.samples + 1 && s1.samples_busy == s0.samples_busy + 1);
     kinfo("selftest: lockup-sample-busy: winner %llu us, loser refused in %llu us",
