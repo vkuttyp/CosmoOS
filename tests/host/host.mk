@@ -164,7 +164,7 @@ $(HOST_OUT)/test_lockdep: $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(ROOT)/ker
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_LOCKDEP_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_lockup: $(addprefix $(ROOT)/,$(HOST_LOCKUP_SRCS)) $(ROOT)/kernel/include/kernel/lockdep_core.h
+$(HOST_OUT)/test_lockup: $(addprefix $(ROOT)/,$(HOST_LOCKUP_SRCS)) $(ROOT)/kernel/include/kernel/lockup_core.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) $(addprefix $(ROOT)/,$(HOST_LOCKUP_SRCS)) $(HOST_LDFLAGS) -o $@

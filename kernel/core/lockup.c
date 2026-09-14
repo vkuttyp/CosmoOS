@@ -28,6 +28,7 @@
 #include <kernel/percpu.h>
 #include <kernel/printf.h>
 #include <kernel/sched.h>
+#include <kernel/spinlock.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 
@@ -43,6 +44,11 @@ static uint64_t g_soft_ns = LOCKUP_SOFT_NS_DEFAULT;
 static uint64_t g_hard_ns = LOCKUP_HARD_NS_DEFAULT;
 static bool g_expected;                     /* a test asked for the report it is about to see */
 static struct lockup_stats g_stats;
+/* Every report writes its fields and bumps its counter under this leaf
+ * lock, and the reader takes it too, so a snapshot is one report's, never
+ * two watchers' fields mixed (a soft and a hard report may land in the
+ * same tick on different CPUs). Never held across a sample or a print. */
+static spinlock_t g_stats_lock = SPINLOCK_INIT("lockup-stats");
 
 /* --- the sample --- */
 
@@ -217,13 +223,15 @@ static void report_soft(struct percpu *pc, struct arch_trap_frame *frame, uint64
     kwarn("%ssoft lockup: cpu %u running '%s' for %llu ms with %u runnable", g_expected ? "expected " : "",
           pc->cpu_id, cur ? cur->name : "?", (unsigned long long)(pc->stall_ns / 1000000), runnable);
     backtrace_print(frame);
-    g_stats.soft_cpu = pc->cpu_id;
-    g_stats.soft_runnable = runnable;
-    g_stats.soft_pc = arch_trap_frame_pc(frame);
     cpumask_t answered;
     sample_others_and_print(frame, &answered);
     (void)now;
-    __atomic_fetch_add(&g_stats.soft_reports, 1, __ATOMIC_RELEASE);
+    arch_irq_state_t st = spin_lock_irqsave(&g_stats_lock);
+    g_stats.soft_cpu = pc->cpu_id;
+    g_stats.soft_runnable = runnable;
+    g_stats.soft_pc = arch_trap_frame_pc(frame);
+    g_stats.soft_reports++;
+    spin_unlock_irqrestore(&g_stats_lock, st);
 }
 
 static void report_hard(struct percpu *pc, unsigned target, struct arch_trap_frame *frame, uint64_t now)
@@ -233,16 +241,18 @@ static void report_hard(struct percpu *pc, unsigned target, struct arch_trap_fra
     kwarn("%shard lockup: cpu %u no tick for %llu ms; last tick %llu ms ago at pc %p (seen from cpu %u)",
           g_expected ? "expected " : "", target, (unsigned long long)(pc->watch_stall_ns / 1000000),
           (unsigned long long)(age / 1000000), (void *)t->last_tick_pc, pc->cpu_id);
+    cpumask_t answered;
+    sample_others_and_print(frame, &answered);
+    if (arch_ipi_nmi_capable())
+        lockup_profile(target, 8, 250 * 1000);
+    arch_irq_state_t st = spin_lock_irqsave(&g_stats_lock);
     g_stats.hard_cpu = pc->cpu_id;
     g_stats.hard_target = target;
     g_stats.hard_stall_ms = pc->watch_stall_ns / 1000000;
     g_stats.hard_tick_age_ms = age / 1000000;
-    cpumask_t answered;
-    sample_others_and_print(frame, &answered);
     g_stats.hard_answered = answered;
-    if (arch_ipi_nmi_capable())
-        lockup_profile(target, 8, 250 * 1000);
-    __atomic_fetch_add(&g_stats.hard_reports, 1, __ATOMIC_RELEASE);
+    g_stats.hard_reports++;
+    spin_unlock_irqrestore(&g_stats_lock, st);
 }
 
 void lockup_tick(struct arch_trap_frame *frame, uint64_t now)
@@ -306,9 +316,11 @@ void lockup_init(void)
 
 void lockup_get_stats(struct lockup_stats *out)
 {
+    arch_irq_state_t st = spin_lock_irqsave(&g_stats_lock);
     *out = g_stats;
-    out->soft_reports = __atomic_load_n(&g_stats.soft_reports, __ATOMIC_ACQUIRE);
-    out->hard_reports = __atomic_load_n(&g_stats.hard_reports, __ATOMIC_ACQUIRE);
+    spin_unlock_irqrestore(&g_stats_lock, st);
+    out->samples = __atomic_load_n(&g_stats.samples, __ATOMIC_RELAXED);
+    out->samples_busy = __atomic_load_n(&g_stats.samples_busy, __ATOMIC_RELAXED);
 }
 
 void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)

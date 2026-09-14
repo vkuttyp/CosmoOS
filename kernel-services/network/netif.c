@@ -667,7 +667,7 @@ static void run_work(struct net_cpu *c)
         list_init(&w->link);
         __atomic_store_n(&w->queued, false, __ATOMIC_RELEASE);   /* the handler may queue it again */
         spin_unlock_irqrestore(&c->work_lock, s);
-        c->stats.work_runs++;
+        __atomic_fetch_add(&c->stats.work_runs, 1, __ATOMIC_RELAXED);
         w->fn(w->arg);
     }
 }
@@ -787,9 +787,13 @@ static void netif_dump_cpus(void)
 {
     for (unsigned i = 0; i < g_ncpu; i++) {
         const struct net_cpu_stats *st = &g_cpu[i].stats;
+        /* Relaxed atomic loads to match the workers' atomic updates: a
+         * counter read on another CPU is a whole value, never torn. */
         kprintf("netrx/%u: %s queued %llu drop %llu local %llu work %llu\n", i, g_cpu[i].ready ? "up" : "starting",
-                (unsigned long long)st->rx_queued, (unsigned long long)st->rx_dropped,
-                (unsigned long long)st->rx_steered_here, (unsigned long long)st->work_runs);
+                (unsigned long long)__atomic_load_n(&st->rx_queued, __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&st->rx_dropped, __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&st->rx_steered_here, __ATOMIC_RELAXED),
+                (unsigned long long)__atomic_load_n(&st->work_runs, __ATOMIC_RELAXED));
     }
 }
 

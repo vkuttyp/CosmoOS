@@ -319,7 +319,7 @@ soft lockup, its own frame's trace, which needs no request) with
 `sample in progress on cpu J` in place of the samples.
 
 **The answer.** On both architectures the handler is the same function
-`bool lockup_answer(frame)`: if this CPU's `sample.want` equals its
+`bool lockup_answer(frame, nmi)` (`nmi` is recorded into the sample): if this CPU's `sample.want` equals its
 `sample.seq` there is no request pending *for this CPU* (an NMI or SGI
 from elsewhere) and it returns `false`; otherwise it fills `pc`, `sp`,
 `trace` from `arch_backtrace(..., frame)`, `nmi`, `when_ns`, stores
@@ -421,8 +421,10 @@ whole second; the cost is one load and one compare per tick. The kernel
 ticks every online CPU at `CONFIG_HZ` (`smp-ticks` already asserts
 it), so "no tick" is a stall, not idleness.
 
-**Thresholds.** `lockup_set_thresholds(soft_ns, hard_ns)` is a test
-hook (debug builds), not a sysctl: nothing but a test wants 200 ms.
+**Thresholds.** `lockup_set_thresholds(soft_ns, hard_ns, expected)` is a
+test hook (debug builds), not a sysctl: nothing but a test wants 200 ms;
+`expected` marks the next report as a test's own, so its line says so and
+the harness's forbidden marker does not match it.
 Both are generous by design; see Risks for the load-sensitivity
 argument.
 
@@ -547,10 +549,10 @@ way the vGIC tests state theirs per host.
 | `kernel/timer/timer.c`, `kernel/include/kernel/timer.h` | the tick sample (two stores, first thing in `tick_isr`); the tick hook signature gains the frame: `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` |
 | `kernel/scheduler/sched.c` | `sched_tick(now, frame)`: `lockup_tick` after the watchdog check; `sched_dump` prints the tick sample and age, live `run_ms`, and the samples when asked; `watchdog_check` calls `lockup_sample_all(frame, 5 ms, &answered)` before the dump |
 | `kernel/scheduler/thread.c` | `thread_dump_all` takes `now` for the live `run_ms` |
-| `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `IPI_SAMPLE`: handler `lockup_answer(frame)`; `ipi_send_sample(cpu)` tries `arch_ipi_send_nmi` first |
+| `kernel/interrupt/ipi.c`, `kernel/include/kernel/ipi.h` | `IPI_SAMPLE`: handler `lockup_answer(frame, false)`; `ipi_send_sample(cpu)` tries `arch_ipi_send_nmi` first |
 | `kernel/include/arch/irqc.h` | `bool arch_ipi_send_nmi(unsigned cpu)` |
 | `kernel/arch/x86_64/lapic.c`, `irqc.c` | `ICR_DELIVERY_NMI (4u << 8)`; `arch_ipi_send_nmi` through `icr_send`, true |
-| `kernel/arch/x86_64/trap.c` | `x86_trap_paranoid`: for `X86_TRAP_NMI`, `lockup_answer(frame)` first; return if it answered a request, else dispatch as today |
+| `kernel/arch/x86_64/trap.c` | `x86_trap_paranoid`: for `X86_TRAP_NMI`, `lockup_answer(frame, true)` first; return if it answered a request, else dispatch as today |
 | `kernel/arch/aarch64/irqc.c` | `arch_ipi_send_nmi` returns false |
 | `kernel/core/lockuptest.c`, `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | the tests below |
 | `tests/boot/run_boot_test.py`, `Makefile` | `--kernel $(KERNEL_ELF)`; the symbolised table; `soft lockup:` / `hard lockup:` forbidden |
@@ -575,11 +577,12 @@ Kernel-internal only.
 | API | where | contract |
 | --- | --- | --- |
 | `bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, cpumask_t *answered)` | `kernel/lockup.h` | any context, never sleeps, never waits for another reporter (`false` at once if one is in progress); sends the sample interrupt to every other online CPU and waits once, under one total bound, for who answers; holds the reporter slot until `lockup_print_samples` |
-| `bool lockup_answer(struct arch_trap_frame *frame)` (as built: `lockup_answer(frame, nmi)`, the second argument recorded into the sample) | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
+| `bool lockup_answer(struct arch_trap_frame *frame, bool nmi)` | `kernel/lockup.h` | handler side; records this CPU's frame if a request is pending for it and says whether it did; no locks, no printing |
 | `unsigned lockup_watch_target(cpumask_t online, unsigned k)` | `kernel/lockup.h` | the online CPU with the next-higher id, wrapping; `k` itself when alone |
 | `void lockup_print_samples(cpumask_t answered)` | `kernel/lockup.h` | prints each CPU's sample or its tick-sample-and-age; releases the reporter slot |
 | `void lockup_tick(struct arch_trap_frame *frame, uint64_t now_ns)` | `kernel/lockup.h` | the two detectors' per-tick step; called by `sched_tick` |
-| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns)` (as built: a third argument, `expected`, marks the next report as a test's so the harness's forbidden marker does not match it; `lockup_get_stats`, `lockup_reporter`, `lockup_sample_cpu` and `lockup_profile` were added) | `kernel/lockup.h`, debug builds | test hook |
+| `void lockup_set_thresholds(uint64_t soft_ns, uint64_t hard_ns, bool expected)` | `kernel/lockup.h`, debug builds | test hook; `expected` marks the next report as a test's own |
+| `void lockup_get_stats(struct lockup_stats *out)`, `int lockup_reporter(void)`, `bool lockup_sample_cpu(cpu, timeout_ns, out)`, `void lockup_profile(cpu, n, gap_ns)` | `kernel/lockup.h` | as built: the reports' facts as one snapshot; the slot's holder; one CPU's frame now; `n` samples of one CPU, one line each |
 | `bool arch_ipi_send_nmi(unsigned cpu)` | `arch/irqc.h` | deliver an NMI-class interrupt to `cpu` if the architecture has one; false means "use the ordinary IPI" |
 | `IPI_SAMPLE` | `kernel/ipi.h` | the ordinary-priority sample interrupt |
 | `timer_tick_hook_fn(uint64_t now_ns, struct arch_trap_frame *frame)` | `kernel/timer.h` | the hook receives the frame (one hook exists: `sched_tick`) |
