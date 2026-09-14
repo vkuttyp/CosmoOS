@@ -1243,6 +1243,17 @@ static void bench_pass(const char *what, struct file *f, uint8_t *buf, size_t re
           (unsigned long long)(dt ? (uint64_t)total * 1000000000ull / dt / (1024 * 1024) : 0));
 }
 
+/* The benches' CHECK: frees the bench buffer before returning on a
+ * failure, so a failing check leaks nothing (the analyzer's finding). */
+#define BCHECK(cond)                                                           \
+    do {                                                                       \
+        if (!(cond)) {                                                         \
+            kfree(buf);                                                        \
+            *reason = "check failed: " #cond " at line " STR(__LINE__);        \
+            return false;                                                      \
+        }                                                                      \
+    } while (0)
+
 bool selftest_read_bench(const char **reason)
 {
     static const size_t reqs[] = { 1024, 4096, 65536 };
@@ -1252,27 +1263,27 @@ bool selftest_read_bench(const char **reason)
 
     /* ramfs: the copy alone. */
     struct file *f;
-    CHECK(vfs_open(NULL, "/tmp/bench.bin", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+    BCHECK(vfs_open(NULL, "/tmp/bench.bin", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
     for (unsigned i = 0; i < 16; i++)
-        CHECK(file_write(f, buf, 65536) == 65536);
+        BCHECK(file_write(f, buf, 65536) == 65536);
     for (unsigned i = 0; i < 3; i++)
         bench_pass("ramfs", f, buf, reqs[i], false);
     file_put(f);
-    CHECK(vfs_unlink(NULL, "/tmp/bench.bin") == 0);
+    BCHECK(vfs_unlink(NULL, "/tmp/bench.bin") == 0);
 
     /* cosmofs on ramblk: cold (after a remount, through the device) and
      * warm (the page cache). */
     struct blkdev *bd;
-    CHECK(wb_setup(&bd) == 0);
-    CHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
+    BCHECK(wb_setup(&bd) == 0);
+    BCHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, &f) == 0);
     for (unsigned i = 0; i < 16; i++)
-        CHECK(file_write(f, buf, 65536) == 65536);
-    CHECK(file_sync(f) == 0);
+        BCHECK(file_write(f, buf, 65536) == 65536);
+    BCHECK(file_sync(f) == 0);
     file_put(f);
     for (unsigned i = 0; i < 3; i++) {
-        CHECK(vfs_umount("/mnt/wb") == 0);
-        CHECK(vfs_mount("/mnt/wb", "cosmofs", bd, 0) == 0);
-        CHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_RDONLY, 0, &f) == 0);
+        BCHECK(vfs_umount("/mnt/wb") == 0);
+        BCHECK(vfs_mount("/mnt/wb", "cosmofs", bd, 0) == 0);
+        BCHECK(vfs_open(NULL, "/mnt/wb/bench", COSMO_O_RDONLY, 0, &f) == 0);
         bench_pass("cosmofs cold", f, buf, reqs[i], false);
         bench_pass("cosmofs warm", f, buf, reqs[i], false);
         file_put(f);
@@ -1290,10 +1301,10 @@ bool selftest_write_bench(const char **reason)
     memset(buf, 0xa5, 65536);
     for (unsigned i = 0; i < 3; i++) {
         struct file *f;
-        CHECK(vfs_open(NULL, "/tmp/wbench.bin", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
+        BCHECK(vfs_open(NULL, "/tmp/wbench.bin", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f) == 0);
         bench_pass("ramfs", f, buf, reqs[i], true);
         file_put(f);
-        CHECK(vfs_unlink(NULL, "/tmp/wbench.bin") == 0);
+        BCHECK(vfs_unlink(NULL, "/tmp/wbench.bin") == 0);
     }
     kfree(buf);
     return true;
