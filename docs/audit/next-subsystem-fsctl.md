@@ -304,8 +304,7 @@ Three rules, and the third is the one with teeth.
    passes_running`, incremented under `g_mounts_lock` around the call,
    and `vfs_umount` **drains it** before its busy scan.
 
-The drain is a handshake with the flag unmount already sets, and it
-needs no claim about who takes which lock first:
+The drain is a handshake with the flag unmount already sets:
 
 - `vfs_umount` sets `mnt->unmounting` before anything else it decides
   (`vfs.c:521-527`), to turn new walkers away. Rule 2 makes a new pass
@@ -313,6 +312,48 @@ needs no claim about who takes which lock first:
   with the flag set.
 - So once unmount has begun, `passes_running` can only fall. Unmount
   then waits for it to reach zero and proceeds.
+
+**The wait, in full, because a drain without a protocol is a deadlock.**
+`vfs_umount` holds `g_mounts_lock` from `vfs.c:487` until `:568`, across
+the whole region the drain sits in, and `vfs_mount_release` needs that
+same lock to decrement. Waiting there as written would be unmount
+holding the lock that the only thing able to release it must take. So:
+
+```c
+mnt->unmounting = true;          /* under mp->lock, g_mounts_lock held */
+mutex_unlock(&mp->lock);
+while (atomic_load(&mnt->passes_running) != 0) {
+    mutex_unlock(&g_mounts_lock);
+    wait_event(&mnt->passes_quiet, atomic_load(&mnt->passes_running) == 0);
+    mutex_lock(&g_mounts_lock);
+}
+/* zero, and it stays zero: `unmounting` is set and acquire refuses */
+```
+
+- **The count is written under `g_mounts_lock` and read atomically.**
+  The lock orders it against the mount being published or removed; the
+  atomic load is what lets the wait condition read it with the lock
+  dropped.
+- **No wakeup is lost**, and this is the one place the report leans on a
+  property of an existing primitive rather than on its own argument:
+  `wait_event` enqueues the waiter and marks it BLOCKED *before* it
+  evaluates the condition (`wait.h:1-12`), so a release that lands
+  between the unlock and the wait wakes a waiter that is already queued.
+  Mesa semantics re-evaluate after every wake, so a spurious one costs a
+  loop iteration.
+- **`vfs_mount_release` wakes on the falling edge only**: it decrements
+  under `g_mounts_lock` and wakes `passes_quiet` when the count reaches
+  zero. Waking under the mutex is fine — the waitqueue's own lock is a
+  spinlock taken beneath it, never above.
+- **The outer loop re-checks under the lock**, which is belt and braces
+  rather than necessity: nothing can raise the count once `unmounting`
+  is set. It costs one comparison and removes the need to prove that.
+
+**A pass must never take `g_mounts_lock`.** It is acquired with the lock
+dropped and released the same way, and a filesystem that reached back
+into the mount table mid-walk would deadlock against a concurrent
+unmount's drain. The two passes do not, and the rule is written here so
+that the third one does not either.
 
 **The wait is bounded, and that is why waiting is the right answer
 rather than `-EBUSY`.** A pass count is held across a call the kernel
@@ -371,7 +412,11 @@ serialise on the filesystem's own lock, which each pass already takes.
 that publishes and removes a mount, so "is this mount going away" and
 "is a pass running on it" are answered under one lock and cannot
 disagree — which is the whole of rule 3's correctness, and the reason
-the drain does not need the passes and the sync to share a lock. The pass itself runs with no VFS lock held: the table lock is
+the drain does not need the passes and the sync to share a lock. The
+drain itself drops `g_mounts_lock` across its wait, because the thread
+that will decrement the count needs it; the lock order is
+`g_mounts_lock` then the waitqueue's spinlock, never the reverse, and a
+pass holds neither while it walks. The pass itself runs with no VFS lock held: the table lock is
 dropped before the call, or a check on a large filesystem would block
 every mount and unmount on the machine rather than only its own.
 
@@ -433,7 +478,7 @@ per-mount statistic or a quota is a third command against the same name.
 | --- | --- |
 | `kernel/include/uapi/cosmo/fsctl.h` | new: the versioned command and result ABI |
 | `kernel-services/vfs/fsctl.c` | new: the chrdev, the command dispatch, the listing, the id lookup |
-| `kernel/include/kernel/vfs.h` | `struct mount` gains `id` and `passes_running`; `struct fs_type` gains `check` and `scrub`; the lookup helper's prototype |
+| `kernel/include/kernel/vfs.h` | `struct mount` gains `id`, `passes_running` and a `struct waitqueue passes_quiet`; `struct fs_type` gains `check` and `scrub`; the lookup helper's prototype |
 | `kernel/include/kernel/mountns.h` | `struct mount_ns_ref` gains the path this namespace holds the mount at |
 | `kernel-services/vfs/vfs.c` | the id counter in `mount_alloc`; `passes_running` respected by `vfs_umount`; the id lookup that takes a reference |
 | `kernel-services/vfs/mountns.c` | `struct mount_ns_ref` gains the path; `mountns_create` copies it; the visibility predicate the listing uses |
@@ -556,13 +601,15 @@ void vfs_mount_release(struct mount *mnt);
    and a test that two mounts get two ids, that an id is not reused
    after an unmount, and that a mount carried into a second namespace
    has the same id in both.
-2. **The pin.** `passes_running`, `vfs_mount_acquire`/`release`, and
-   `vfs_umount` draining the count after it sets `unmounting`. One test
-   holds an acquisition and asserts the unmount waits and then succeeds;
-   the same test asserts an acquisition attempted during the drain is
-   refused, which is what makes the wait terminate. Nothing here depends
-   on which lock a sync takes, which is the property the first draft of
-   this step got wrong.
+2. **The pin.** `passes_running`, the `passes_quiet` waitqueue,
+   `vfs_mount_acquire`/`release`, and `vfs_umount` draining the count
+   after it sets `unmounting` — dropping `g_mounts_lock` across the wait,
+   because the releasing thread needs it. One test holds an acquisition
+   and asserts the unmount waits and then succeeds, and that an
+   acquisition attempted during the drain is refused, which is what makes
+   the wait terminate. A second drives the wakeup itself with two
+   threads. Nothing here depends on which lock a sync takes, which is
+   the property the first draft of this step got wrong.
 3. **The channel, read-only.** `/dev/fsctl`, the listing, the namespace
    visibility rule. Tests: a second namespace sees its own mounts and
    not the first's; the paths are that namespace's paths; an
@@ -593,6 +640,7 @@ filesystem the commands are pointed at.
 | `vfs-mount-id` | two mounts get two ids; an unmount and a fresh mount at the same path get *different* ids; the same mount in two namespaces reports one id | make the id the table index: the third assertion fails, because the slot is reused |
 | `vfs-mount-pin` | an unmount does not complete while a pass holds the mount, and completes once it is released; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s drain: the unmount completes while a pass still holds the mount |
 | `vfs-mount-pin-drain` | an unmount begun while a pass is in flight waits and then succeeds; a pass that tries to start after the unmount began is refused, so the count only falls; a forced unmount waits on the same drain | let `vfs_mount_acquire` ignore `unmounting`: a pass starts during the drain and the unmount waits for a mount that never quiesces, which the test catches as a timeout |
+| `vfs-mount-pin-wake` | the release that takes the count to zero wakes the drain: a second thread acquires, the first begins an unmount and blocks, the second releases, and the unmount completes without anything else happening on the machine | wake the queue on every release rather than on the falling edge, and then not at all on the last one: the unmount never returns, which is the missed wakeup this protocol exists to prevent |
 | `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
 | `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
 | `fsctl-list-root` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
