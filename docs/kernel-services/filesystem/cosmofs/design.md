@@ -804,6 +804,20 @@ as a fix. A repair must leave the classes it claims empty and every
 refused class unchanged — not "clean", which a filesystem carrying a
 cross-link can never be.
 
+The pass is a **debug-build tool** (`CONFIG_DEBUG`), like the crash
+suite that drives it: nothing in a release build calls it, because
+nothing can -- there is no operator interface to a mount's maintenance
+passes yet, which the deferred-work inventory now records as its own
+row.
+
+**A read that fails does not end the pass.** An unreadable metadata or
+directory block is a finding of its own and sets `partial`, and the walk
+carries on: "one block is unreadable" and "the other nine classes were
+never looked at" are different facts, and the operator needs both. Every
+chain the pass follows is bounded (`CFS_CHECK_MAX_CHAIN`, 4096, and a
+directory depth of 64), so a cycle written by a corruption is a finding
+rather than a hang.
+
 **What a post-crash image may have, and why.** A block freed during a
 transaction keeps its bitmap bit until the commit *after* the one that
 made the new root durable: the frees are applied once "the new root is

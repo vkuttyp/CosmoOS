@@ -6,10 +6,51 @@ unit). Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §3.
 **Subsystem: a structural checker for cosmofs — a pass that walks the
 live tree and every snapshot, counts what is reachable, and compares it
 with what the filesystem says about itself: the allocation bitmaps, the
-link counts, the inode map, and the superblock's own totals.** Nothing
-in this report is built; the migration plan is the plan, and the "as
-run" and "as built" sections are filled by the implementation pull
-request. This report is to close the first clause of the inventory's §3
+link counts, the inode map, and the superblock's own totals.**
+**Built: PR #144 (2026-09-15).** The design below is as proposed; the
+sections "As built" and "As run" record what the build changed and
+measured. Differences from the plan, each found by building rather than
+reading:
+
+1. **Every crash strands space, not only an unlinked-but-open file.**
+   The report predicted one leak class from the missing orphan record.
+   The crash suite found a second and much broader one on its first run:
+   a block freed during a transaction keeps its bitmap bit until the
+   commit *after* the one that made the new root durable
+   (`cosmofs_core.c`, "the old generation's blocks are free" -- the
+   frees dirty chunks for the next commit). A block the old root still
+   names cannot be freed before the new root lands, so the ordering is
+   correct and the stranded space is its price. Measured: 162 of 199
+   replayed prefixes leaked, the worst 18 blocks, 1912 in all.
+2. **The crash suite cannot assert "clean".** Following from 1, the
+   assertion is *no finding a crash cannot explain*: every class empty
+   except leaked blocks, whose count is recorded and whose reclaim is
+   proved on the first eight leaking prefixes -- bounded because a
+   repair costs two more full passes and the suite exceeded its
+   8-second budget at 199 of them.
+3. **A directory's link count has three parts**, and the first version
+   counted two: the entry in its parent, its own self-reference, and one
+   per subdirectory. cosmofs stores none of them as on-disk entries, so
+   the checker has to know the rule rather than count what it reads.
+4. **The deferred free list has to be claimed.** Blocks awaiting release
+   at the next commit are allocated and unreachable by construction, so
+   without claiming them every copy-on-write rewrite looked like three
+   leaks on a filesystem nobody had touched.
+5. **A snapshot's `alloc_root` is the member table** it was taken with,
+   from format version 4 on, not an allocation index
+   (`cosmofs_snap.c`, `snap_alloc_root`). Reading it by the wrong kind
+   reported a sound snapshot as unreadable.
+6. **The ordinary inode reader hides exactly what the pass looks for.**
+   `cfs_inode_read` reports a slot with no links as absent, which is
+   right for a lookup and wrong here, so link counts and orphan facts
+   come from the map walk and repair clears the whole slot -- including
+   the inode number, or the next pass finds the same orphan again.
+7. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
+   corruption, so the list of ways to break a filesystem lives in one
+   place and every class a test can report is one a test produced on
+   purpose.
+
+This report closes the first clause of the inventory's §3
 row "no fsck; no checksum algorithm id in the metadata header" (audit
 8.5, 8.6). What that row keeps is named at the end.
 
@@ -342,14 +383,14 @@ all consume or produce the same findings.
 
 | file | change |
 | --- | --- |
-| `kernel-services/filesystem/cosmofs/cosmofs_check.c` | new: the pass, the two maps, the eight checks, the four repairs |
-| `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | the inode-shaped directory read, shared with `cosmofs.c` |
+| `kernel-services/filesystem/cosmofs/cosmofs_check.c` | new: the pass, the two maps, the ten classes, the four repairs |
+| `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | the inode-shaped directory read, shared with `cosmofs.c`; `cfs_bitmap_test` and `cfs_inode_read_raw` |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | `dir_read_block` split so the checker and the VFS path share one reader |
-| `kernel/include/kernel/cosmofs.h` | `struct cosmofs_check_report`, `cosmofs_check`, the flags |
+| `kernel/include/kernel/cosmofs.h` | `struct cosmofs_check_report`, `cosmofs_check`, the flags, and `cosmofs_test_corrupt` with its eight named corruptions |
 | `kernel-services/filesystem/cosmofs/cosmofscrash.c` | the check in `check_prefix`, and the unlinked-but-open workload |
-| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the seven fault tests and the clean test |
+| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the six checker tests; the eight manufactured faults reach them through one hook, `cosmofs_test_corrupt` |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | registration |
-| docs | `docs/kernel-services/filesystem/cosmofs/{design,architecture,testing,invariants}.md`, README Status, `docs/README.md`, the inventory (the struck row, plus new rows for the operator interface and the orphan list) |
+| docs | `docs/kernel-services/filesystem/cosmofs/design.md` (the structural check, what a post-crash image may have, and the stale future-work line that still promised one) and `architecture.md` (the non-responsibility now names only the *offline* checker); README Status, `docs/README.md`, the inventory (the struck row, plus new rows for the operator interface, the on-disk orphan list, and the two finding classes no test manufactures) |
 
 ## New APIs
 
@@ -371,14 +412,29 @@ struct cosmofs_check_report {
                                orphan, dangling_entry, dir_bad, counter_wrong,
                                chain_cycle, unreadable;
     uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
+    uint64_t counted_free;    /* free blocks the walk counted, not the ones claimed */
     uint64_t bytes_allocated; /* the chunked maps, so the cost is visible */
     bool partial;             /* something was unreadable: the answer is incomplete */
     bool clean;               /* every class empty */
     uint64_t elapsed_ns;
 };
 
-/* Under the mount's own lock; -ENOMEM rather than a walk it cannot finish. */
+/* Under the mount's own lock; -ENOMEM rather than a walk it cannot finish.
+ * Debug builds only (`CONFIG_DEBUG`), as the crash suite is: the release
+ * build has no caller, because there is no operator interface yet to be
+ * one. That is the inventory row this unit leaves behind. */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
+
+/* Test hook: break the filesystem in one named way, so every finding
+ * class has a test that manufactures exactly it. `what` returns the
+ * block or inode it touched, which is what the check must name back. */
+enum cosmofs_corruption {
+    COSMOFS_CORRUPT_LEAK, COSMOFS_CORRUPT_FREE_IN_USE, COSMOFS_CORRUPT_CROSSLINK,
+    COSMOFS_CORRUPT_NLINK, COSMOFS_CORRUPT_ORPHAN, COSMOFS_CORRUPT_DANGLING,
+    COSMOFS_CORRUPT_DIRENT, COSMOFS_CORRUPT_COUNTER,
+};
+int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind,
+                         const char *path, uint64_t *what);
 ```
 
 ## Migration plan
@@ -428,8 +484,9 @@ build; step 5 runs `make test-crash`.
 | `cosmofs-crash-orphan` | the workload unlinks a file that is still open and crashes; the replayed image has an inode with `nlink == 0` and blocks; the checker finds it, repair reclaims it, and the free count returns to what it was before the file existed | none needed: this is the defect, and the test is its proof. The bug-proof is the *repair* -- disable it and the space stays gone |
 
 There are **ten** finding classes: the eight structural ones above plus
-`chain_cycle` and `unreadable`, and every one of them has a test in this
-table. The migration plan's step 3 builds them all.
+`chain_cycle` and `unreadable`. The migration plan's step 3 builds them
+all; "As built" below records which of them ended up with a test that
+manufactures the fault and which did not.
 
 **Vacuity, named in advance.** `cosmofs-check-clean` asserts the
 arithmetic (`seen + free == total`), not merely "no findings": a checker
@@ -441,22 +498,88 @@ the crash suite's extension asserts the checker on images that are
 *supposed* to be sound, which is the only way to find out whether it
 cries wolf.
 
+### As built
+
+**Thirteen named tests became seven, because the faults became one
+hook.** `cosmofs_test_corrupt` takes the corruption by name, so the
+eight manufactured faults are eight calls rather than eight fixtures.
+What the design named, and where it is:
+
+| the design's test | as built |
+| --- | --- |
+| `cosmofs-check-clean` | `cosmofs-check-clean`, unchanged |
+| `cosmofs-check-leak` | `cosmofs-check-leak`, unchanged: the one class with a repair worth its own test |
+| `-crosslink`, `-nlink`, `-orphan`, `-dangling`, `-free-in-use`, `-dirbad`, `-counters` | `cosmofs-check-faults`, one sub-case each, every one asserting the class fires, the count is exactly what the fault made it, the offender is named, and repair either fixes it or refuses |
+| `cosmofs-check-snapshot` | `cosmofs-check-snapshot`, unchanged |
+| `cosmofs-check-partial` | `cosmofs-check-partial`: a directory block broken off the mount, the block named, the report marked incomplete, and the pass proved to reach its last phase |
+| `cosmofs-replay` (extended) | extended, but asserting *no finding a crash cannot explain* rather than clean -- see difference 2 above |
+| `cosmofs-crash-orphan` | `cosmofs-check-orphan-crash`, the same test under the checker's name |
+
+**What still has no test that manufactures it.** `chain_cycle` is
+reported from four places (the inode map's chain, the snapshot list, a
+deadlist, an inode's block chain) and no test makes one: a cycle needs a
+metadata block written with a pointer back to itself, which is a
+corruption hook that writes structure rather than flipping a field, and
+none of the eight does. The bound it enforces (`CFS_CHECK_MAX_CHAIN`,
+4096) is what stops the pass hanging on one, and that bound is exercised
+by nothing. `dir_bad` has four sites and the hook manufactures one (a
+type that disagrees with its inode); the over-long `namelen`, the
+directory with two parents, and the pointer outside the pool are
+reported by code that no test has fired. **Both are named in the
+inventory rather than left in a comment.**
+
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+The unit (PR #144, 2026-09-15), on both architectures:
+
+| run | result |
+| --- | --- |
+| `make test` (x86-64, AArch64) | 279 self-tests pass, including the six checker tests |
+| `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` |
+| `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused |
+| `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion |
+| `cosmofs-check-orphan-crash` | an inode survives its unlink with its blocks; repair reclaims them and the free count returns |
+| `cosmofs-check-partial` | a broken directory block is named, the report is marked incomplete, and the pass still reaches its final comparison |
+| `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4776 ms |
+
+**Bug-proofs, as run** (each injection alone, then reverted):
+
+| injection | result |
+| --- | --- |
+| `phantom-claim`: claim a block nothing owns | 6 tests fail, `cosmofs-check-clean`'s arithmetic among them |
+| `no-bitmap-compare`: never compare allocated against seen | 2 fail; no leak is ever found |
+| `no-free-in-use`: drop the other direction | `cosmofs-check-faults` fails |
+| `dup-content-only`: no duplication domain | `cosmofs-check-faults` fails on the cross-link |
+| `nlink-no-self`: forget a directory's self-reference | 5 fail |
+| `orphan-hidden`: skip inodes with no links, as the scrub does | 13 fail |
+| `no-snapshot-walk`: walk no snapshots | `cosmofs-check-snapshot` fails on `snapshots_seen` |
+| `snapshot-is-live`: put a snapshot's claims in the live domain | `cosmofs-check-snapshot` fails: sharing becomes corruption |
+| `no-pending-claim`: do not claim the deferred frees | 2 fail: ordinary rewrites look like leaks |
+| `no-crash-check`: stop asking in the replay suite | `cosmofs-replay` fails on having measured nothing |
+| `repair-keeps-ino`: leave the number in a cleared slot | 2 fail: the next pass finds the same orphan |
+| `abort-on-unreadable`: stop comparing once anything is unreadable | `cosmofs-check-partial` fails: the pass never reaches its last phase |
+
+Two of those twelve passed at first and both were fixed rather than
+excused. `no-crash-check` passed because removing an assertion cannot
+fail a test with no other claim on it, so `cosmofs-replay` now asserts
+that it measured something; `no-snapshot-walk` broke the build instead
+of reaching the test, so it empties the snapshot list inside the walk
+instead of deleting the call.
 
 ## Benchmarks
 
-Measured by the implementation:
-
-- The pass's wall time and blocks read on the 512-block and
-  16384-block test disks, from `elapsed_ns` and `blocks_seen`.
-- What it adds to `cosmofs-replay`, which runs it once per replayed
-  prefix -- the number that decides whether the crash suite keeps
-  checking every prefix or a sample of them.
-- Peak allocation, to check the `total_blocks / 4` estimate against
-  what is actually asked of `kmalloc`.
+- **The pass** on a 512-block filesystem: 23 blocks seen, a few
+  milliseconds, reported per run in `elapsed_ns`.
+- **The crash suite** went from about 3 s to 8804 ms with a check *and*
+  a repair on all 199 prefixes -- past its 8-second budget, which is the
+  number the report asked for. Checking every prefix and proving the
+  reclaim on the first eight brings it to 4776 ms, so the assertion is
+  kept on every image and only the proof is sampled.
+- **The maps** are six chunked allocations (seen, live, reachable,
+  alive, links, link counts), reported in `bytes_allocated`: 24 KiB for
+  the test disks. The `kmalloc` ceiling of 4 MiB is what forced the
+  chunking; a single allocation would have capped the checker at a
+  128 GiB filesystem.
 
 ## Risks
 

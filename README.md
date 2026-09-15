@@ -1943,6 +1943,28 @@ See [docs/development.md](docs/development.md).
   Three native calls (`SYS_COUNT` 89 → 92), six Linux entry points, and
   `ls` showing a link with its target. 273 self-tests on both architectures (PR #142).
 
+- **The blocks nobody can reach**
+  (`docs/audit/next-subsystem-fsck.md`). cosmofs could tell you every
+  block was still what it wrote, and nothing could tell you the blocks
+  added up. `cosmofs_check` walks the live tree, every snapshot, both
+  allocation maps and the inode map under the mount's lock and compares
+  what it reached with what the filesystem believes: ten finding
+  classes, four repaired because each has one right answer, the rest
+  reported because setting the bit of a block that is reachable and free
+  may hand out a block in use, and choosing which of two inodes keeps a
+  shared block is data loss. A snapshot shares blocks with the live tree
+  on purpose, so the union map and the live-generation map are separate
+  and only the second can report a cross-link. Pointed at the crash
+  suite's replayed images, it found that **every crash strands space**,
+  not only the unlinked-but-open file the report predicted: a block
+  freed in a transaction keeps its bit until the commit after the one
+  that made the new root durable, which is correct for crash safety and
+  costs the previous generation's copy-on-write casualties. Measured
+  across 199 replayed prefixes: 162 leaked, worst 18 blocks, 1912 in
+  all, each reclaimed and clean afterwards. 279 self-tests on both
+  architectures; twelve bug-proofs, two of which exposed tests that
+  could not fail (PR #144).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
