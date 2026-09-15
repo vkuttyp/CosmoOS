@@ -313,6 +313,22 @@ The drain is a handshake with the flag unmount already sets:
 - So once unmount has begun, `passes_running` can only fall. Unmount
   then waits for it to reach zero and proceeds.
 
+**One unmount at a time, because the drain is what makes that a
+question.** Today `vfs_umount2` holds `g_mounts_lock` unbroken from
+`vfs.c:487` to `:568`, so two unmounts of one mount serialise on the
+lock and the code never has to ask. It does not ask: `unmounting` is
+tested only by `follow_mount` (`vfs.c:657`), never by unmount itself.
+The drain below opens a gap in that lock, and **the gap is this unit's
+doing, so the guard is this unit's to add**: under `g_mounts_lock` and
+`mp->lock` — the same pair that sets the flag, so there is one order —
+an unmount that finds `unmounting` already set returns `-EBUSY` before
+it changes anything. A second caller arriving during a drain is told
+somebody is already unmounting this, which is true.
+
+The `restore` path (`vfs.c:593-599`) already clears the flag when an
+unmount is refused or fails, so a mount that survives a failed unmount
+is claimable again.
+
 **The wait, in full, because a drain without a protocol is a deadlock.**
 `vfs_umount` holds `g_mounts_lock` from `vfs.c:487` until `:568`, across
 the whole region the drain sits in, and `vfs_mount_release` needs that
@@ -480,7 +496,7 @@ per-mount statistic or a quota is a third command against the same name.
 | `kernel-services/vfs/fsctl.c` | new: the chrdev, the command dispatch, the listing, the id lookup |
 | `kernel/include/kernel/vfs.h` | `struct mount` gains `id`, `passes_running` and a `struct waitqueue passes_quiet`; `struct fs_type` gains `check` and `scrub`; the lookup helper's prototype |
 | `kernel/include/kernel/mountns.h` | `struct mount_ns_ref` gains the path this namespace holds the mount at |
-| `kernel-services/vfs/vfs.c` | the id counter in `mount_alloc`; `passes_running` respected by `vfs_umount`; the id lookup that takes a reference |
+| `kernel-services/vfs/vfs.c` | the id counter in `mount_alloc`; the drain and the `unmounting` guard in `vfs_umount2`; the id lookup that takes a reference and the release that wakes the drain |
 | `kernel-services/vfs/mountns.c` | `struct mount_ns_ref` gains the path; `mountns_create` copies it; the visibility predicate the listing uses |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | `cosmofs_fs_type` gains `check` and `scrub` |
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the `CONFIG_DEBUG` gate comes off (`:31`); `cosmofs_scrub.c` has none and needs no change |
@@ -608,7 +624,9 @@ void vfs_mount_release(struct mount *mnt);
    and asserts the unmount waits and then succeeds, and that an
    acquisition attempted during the drain is refused, which is what makes
    the wait terminate. A second drives the wakeup itself with two
-   threads. Nothing here depends on which lock a sync takes, which is
+   threads. A third asserts that one unmount at a time is enforced,
+   which the unbroken lock used to give for free and the drain's gap
+   takes away. Nothing here depends on which lock a sync takes, which is
    the property the first draft of this step got wrong.
 3. **The channel, read-only.** `/dev/fsctl`, the listing, the namespace
    visibility rule. Tests: a second namespace sees its own mounts and
@@ -641,6 +659,7 @@ filesystem the commands are pointed at.
 | `vfs-mount-pin` | an unmount does not complete while a pass holds the mount, and completes once it is released; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s drain: the unmount completes while a pass still holds the mount |
 | `vfs-mount-pin-drain` | an unmount begun while a pass is in flight waits and then succeeds; a pass that tries to start after the unmount began is refused, so the count only falls; a forced unmount waits on the same drain | let `vfs_mount_acquire` ignore `unmounting`: a pass starts during the drain and the unmount waits for a mount that never quiesces, which the test catches as a timeout |
 | `vfs-mount-pin-wake` | the release that takes the count to zero wakes the drain: a second thread acquires, the first begins an unmount and blocks, the second releases, and the unmount completes without anything else happening on the machine | wake the queue on every release rather than on the falling edge, and then not at all on the last one: the unmount never returns, which is the missed wakeup this protocol exists to prevent |
+| `vfs-umount-exclusive` | a second unmount of a mount already draining is `-EBUSY` and changes nothing; after the first completes, the mount is gone and a third is `-EINVAL` rather than a double teardown; a first unmount that is refused clears the flag and a later one succeeds | drop the `unmounting` test from `vfs_umount2`: two unmounts enter the gap the drain opens and both remove the same namespace links |
 | `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
 | `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
 | `fsctl-list-root` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
@@ -682,6 +701,12 @@ is the difference between an error and a deadlock.
 
 ## Risks
 
+- **A lock held unbroken is now broken.** The drain drops
+  `g_mounts_lock`, and every invariant the unmount path got for free
+  from holding it throughout is now something to check rather than
+  assume. One is found and guarded above: two unmounts of one mount.
+  The others are what step 2's review of that function is for, and the
+  step is written to expect more than one.
 - **An unmount that now blocks.** Rule 3 makes `vfs_umount` wait, for
   every caller including shutdown. The wait is bounded by one pass over
   one filesystem, because no new pass can start once `unmounting` is
