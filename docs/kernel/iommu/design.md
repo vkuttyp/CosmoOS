@@ -60,8 +60,10 @@ struct device { ...; struct iommu_domain *iommu; uint32_t iommu_sid; };
   chooses (VT-d AGAW 48; SMMU stage-2 with `T0SZ = 64 - OAS` from
   `IDR5.OAS`, `SL0 = 2`: a level-0 start, which the architecture allows
   only above 42 bits of output, so the driver asks the hypervisor's
-  layout rule (`arch/hv_s2_core.h`) at probe and refuses an SMMU of 42
-  bits or less with a message rather than programming it; the
+  layout rule (`arch/hv_s2_core.h`) at probe and, at 42 bits or less,
+  leaves the unit unused with a `WARN` naming the width rather than
+  programming it (the same answer `arm_smmuv3_init` already gives an
+  SMMU with no stage-2 or with queues too small); the
   concatenated level-1 root such an SMMU needs is follow-up work the
   walker does not build yet, untestable on QEMU's 44-bit SMMU). The
   entries differ: VT-d second-level PTEs carry `R` (bit 0) and `W`

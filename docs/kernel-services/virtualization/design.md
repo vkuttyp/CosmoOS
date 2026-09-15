@@ -1322,8 +1322,8 @@ FEAT_LPA2 or concatenated level-0 tables, neither built.
 `hv_s2_configure` fixes the layout at probe; `hv_s2_create` allocates
 the root at the layout's order, and the walk, destroy and count take
 the start level and the root's wider index from it. The SMMU driver asks the same rule about
-`IDR5.OAS` and refuses (rather than misprograms) an SMMU of 42 bits or
-less, whose concatenated root the IOMMU walker does not build yet
+`IDR5.OAS` and leaves unused (rather than misprograms) an SMMU of 42
+bits or less, whose concatenated root the IOMMU walker does not build yet
 (`docs/kernel/iommu/design.md`). `VTTBR_EL2` carries the root and the
 VMID; a VM allocates a VMID from a bitmap as the SVM backend allocates
 an ASID.

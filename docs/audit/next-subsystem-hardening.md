@@ -345,9 +345,12 @@ other names the guard.
    `walk_to`, `destroy_level`, `count_level` and `hv_s2_vtcr` take the
    start level from the layout computed once at probe. The SMMU driver
    asks the same rule about `IDR5.OAS` at probe and, when the rule says
-   a level-1 start (an output size of 42 bits or less), refuses stage-2
-   with `-ENOTSUP` and a message naming the width, instead of
-   programming `S2SL0 = 2` over tables the walker built for level 0.
+   a level-1 start (an output size of 42 bits or less), leaves the SMMU
+   unused with a `WARN` naming the width and the root shape it would
+   need -- `arm_smmuv3_init` returns without registering the unit, as it
+   already does for an SMMU with no stage-2 or with queues too small --
+   instead of programming `S2SL0 = 2` over tables the walker built for
+   level 0.
    The walker itself is not changed by this unit: a concatenated root
    in `kernel/iommu/pt.c` (its indexing, mapping, unmapping, lookup and
    destruction) cannot be tested on QEMU's 44-bit SMMU, and a host
@@ -356,13 +359,17 @@ other names the guard.
    as follow-up work with this report's evidence.
 
 3. **A disabled backend hands EL2 back.** `arch_hv_disable(void)` in
-   `kernel/include/arch/hv.h`, implemented on AArch64 as
-   `el2_set_vectors(el2_stub_phys())` on every CPU whose `g_el2_ready`
-   flag `el2_ready_here` set, clearing the flag, and a no-op on x86-64
-   (`kernel/arch/x86_64/hv.c`). `hv_init` calls it
-   on the self-check's failure path before clearing `hv_caps`. The `el2`
-   self-test's stub branch then holds whether the backend was never
-   present, or was present and disabled.
+   `kernel/include/arch/hv.h`, a no-op on x86-64
+   (`kernel/arch/x86_64/hv.c`) and, on AArch64, one call per CPU whose
+   `g_el2_ready` flag `el2_ready_here` set -- the current CPU directly,
+   the others through `smp_call_function_single` -- clearing the flag
+   only when the call answered. The call is the switch's own,
+   `HV_EL2_CALL_HANDBACK` (as-built 1): the stub's `el2_set_vectors`
+   is not answered on a CPU the switch already owns, which is what the
+   plan assumed and the build disproved. `hv_init` calls
+   `arch_hv_disable` on the self-check's failure path before clearing
+   `hv_caps`. The `el2` self-test's stub branch then holds whether the
+   backend was never present, or was present and disabled.
 
 With the first two fixed the self-check passes on `cortex-a76` and the
 `hv` suite runs there; what it finds is the implementation's to find,
@@ -519,9 +526,11 @@ at 42, per VM; today one page. Nothing else allocates.
 effect. A guard boot on a QEMU without the model (`cortex-a76` arrived
 in QEMU 7.1; the `+smap` feature names are old) fails at QEMU
 start with QEMU's own message, and the target says which model it asked
-for. The SMMU driver refuses an output size of 42 bits or less with
-`-ENOTSUP` at probe, naming the width, rather than programming a start
-level the architecture forbids over tables built for another. A `hardening: absent` `WARN` is a warning, not a refusal: a
+for. The SMMU driver leaves an SMMU of 42 bits or less unused, with a
+`WARN` naming the width, rather than programming a start level the
+architecture forbids over tables built for another; the machine boots
+without DMA remapping on that unit, which is the driver's existing
+answer to an SMMU it cannot drive. A `hardening: absent` `WARN` is a warning, not a refusal: a
 machine without SMAP boots, as it always has.
 
 *Security.* The unit's whole point. What it does not change: SMEP is
@@ -571,7 +580,7 @@ rule is the ABI's growth path: a new flag is a new accepted bit.
 | `kernel/include/kernel/hv.h` | `hv_selftest_disable_cycle` (debug builds) |
 | `kernel/include/kernel/selftest.h` | the two new self-tests |
 | `kernel/include/kernel/faultinject.h`, `kernel/core/faultinject.c` | `FI_HV_SELFCHECK` |
-| `drivers/iommu/arm_smmuv3.c` | asks `hv_s2_layout` about `IDR5.OAS` at probe; `-ENOTSUP` with a message at 42 bits or less (`kernel/iommu/pt.c` unchanged: the concatenated root there is follow-up work, untestable on QEMU's 44-bit SMMU) |
+| `drivers/iommu/arm_smmuv3.c` | asks `hv_s2_layout` about `IDR5.OAS` at probe and leaves the unit unused with a `WARN` at 42 bits or less (`kernel/iommu/pt.c` unchanged: the concatenated root there is follow-up work, untestable on QEMU's 44-bit SMMU) |
 | `tests/host/test_hv_s2.c`, `tests/host/host.mk` | the layout rule on the host |
 | `userland/init/init.c` | `--trap umip`; the flags test in `fs_selftest`/`proc_selftest` |
 | docs | `docs/kernel/arch/invariants.md` (I-ARCH-9 checked), `docs/kernel/arch/testing.md` (the guard boot, `test-wxn`), `docs/kernel/arch/aarch64/design.md` (WXN; the stage-2 start level), `docs/kernel/security/design.md` (a "Hardening" section: what is on, where it is asserted), `docs/kernel/syscall/api.md` (the unknown-bit rule on the four calls), `docs/verification/design.md` (the guard boot as a verification step), `docs/kernel-services/virtualization/` (the layout rule; `arch_hv_disable`), `README.md` Status, `docs/README.md`, the inventory |
@@ -584,8 +593,26 @@ struct hv_s2_layout {
     unsigned start_level;   /* internal: 3 = a level-0 start, 2 = level-1 */
     unsigned root_order;    /* log2 of the root's page count: 0..3 */
     unsigned sl0;           /* the VTCR_EL2.SL0 / STE.S2SL0 encoding: 2 or 1 */
+    unsigned input_bits;    /* the IPA size served: T0SZ = 64 - input_bits (as-built 7) */
 };
+#define HV_S2_INPUT_MAX 48u
 void hv_s2_layout(unsigned pa_bits, struct hv_s2_layout *out);
+
+/* kernel/arch/aarch64/include/aarch64/hv_s2.h: the layout this machine uses */
+void hv_s2_configure(unsigned pa_bits);
+const struct hv_s2_layout *hv_s2_current_layout(void);
+
+/* kernel/include/arch/el2.h, answered by the world switch (version 3) */
+#define HV_EL2_CALL_HANDBACK 0x14   /* x1 = the stub's physical base */
+
+/* kernel/include/arch/user.h */
+bool arch_user_guard_present(void);   /* SMAP / PAN on this CPU */
+
+/* kernel/include/arch/cpu.h */
+void arch_hardening_report(void);
+
+/* kernel/include/kernel/hv.h, debug builds: the hv-disabled test's cycle */
+int hv_selftest_disable_cycle(bool (*while_disabled)(void), bool *disabled_out);
 
 /* kernel/include/arch/hv.h */
 void arch_hv_disable(void);   /* the backend is not to be used: give the hardware back */
@@ -636,7 +663,7 @@ and `test-crash`.
 | `--trap umip` (x86-64 guard boot) | the child's `sgdt` ends it with status 139; `usertest: umip: enforced` | clear `CR4_UMIP` in `x86_cpu_enable_features`: status 0, the marker missing |
 | `test_hv_s2` (host) | `hv_s2_layout` for 32..52 bits: `sl0 = 2` and one page only above 42; `sl0 = 1` with `1 << (bits - 39)` pages at 40, 41, 42; `sl0 = 1` and one page below 40; the root order never exceeds 3 | return `sl0 = 2` for every width: the 40-bit case fails |
 | the AArch64 guard boot's `hv` suite | every `hv` and `el2` test passes on `cortex-a76`; `hv: backend el2` with nested paging in the log; no `selftest: hv: skipped` | revert the layout in `hv_s2_vtcr` to `SL0 = 2`: the self-check fails with the level-0 translation fault, exactly as the probe did |
-| `hv-disabled` | with `FI_HV_SELFCHECK` armed for one hit, `hv_init`'s path is re-run through a test hook: `hv_caps()->present` is false and `el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION` still holds; hits asserted equal to the budget | remove `arch_hv_disable` from the failure path: the stub does not answer |
+| `hv-disabled` | with `FI_HV_SELFCHECK` armed for one hit, `hv_selftest_disable_cycle` (debug builds) re-runs the boot self-check, which fails; the backend is disabled and, while it is, `hv_caps()->present` is false and `el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION` answers; the caps are restored and the self-check passes again, which is the switch re-installing on use; hits asserted equal to the budget | remove `arch_hv_disable` from the failure path: the cycle stops at step -2, the stub not answering |
 | `flags` (user-side, in `fs_selftest` and `proc_selftest`) | `mmap` with bit 31 set, `mount` with `1u << 5`, `umount` with `1u << 5`, `open` with `0x8000000`: each `-COSMO_EINVAL`; the same calls without the bit succeed as before | remove any one check: that call succeeds |
 | `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the `page fault: kernel execute at <page> (protection)` panic, the `FAR=<page> (... instruction-fetch)` line, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
 | the guard boot itself | required markers `hardening: x86-64: nx smep smap umip` / `hardening: aarch64: pan wxn`; forbidden `hardening: absent` | boot the guard target with `QEMU_CPU` forced to the control model: the `WARN` appears and the run fails |
