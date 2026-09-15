@@ -670,7 +670,7 @@ filesystem the commands are pointed at.
 | `fsctl-stale-id` — folded into `fsctl-check` | an id whose mount is gone is `-ENOENT`, not a hit on a reused slot | as `vfs-mount-id`'s injection: a reused id makes this command reach a different filesystem |
 | `fsctl-result-per-open` — built | two open files run two commands against two mounts and each reads its own result; a read with no prior command returns zero bytes | keep the result in one global: the two readers see one answer |
 | `fsctl-release` — **not built as a test** | a release build contains the device and both passes and a check through it works -- the first time either pass runs outside a debug build | no self-test runs in a release build. Replaced by a line at boot, checked by reading the release boot log; weaker, and "As built" says so |
-| `fs_selftest` (user mode) — built as `fsctl_selftest` | `fsctl list` names the mounted filesystems; `fsctl check` on the boot's own scratch disk **finds what its last clean unmount stranded**, `--repair` reclaims it, and the filesystem is clean afterwards (read back through the device, because an exit status cannot say "clean" when a finding is not an error); the exit status is zero for a clean check *and* for a check that found faults, non-zero only for a refusal | make a finding an error exit: the assertion on the first check fails |
+| `fs_selftest` (user mode) — built as `fsctl_selftest` | `fsctl list` names the mounted filesystems; the test then **makes its own stranded blocks** -- write a file, delete it, unmount, remount -- and asserts the check finds them, `--repair` reclaims them, and the filesystem is clean, reading the flags back through the device because an exit status cannot say "clean" when a finding is not an error. Exit status zero for a clean check *and* for one that found faults, non-zero only for a refusal | make a finding an error exit: the assertion on the first check fails. The finding itself is made by the test rather than inherited, so it does not pass on somebody else's residue |
 
 **Vacuity, named in advance.** `fsctl-check` asserts the numbers match
 what `cosmofs_check` returns when called directly, not merely that a
@@ -868,7 +868,7 @@ On both architectures, debug and release:
 | `fsctl-list` | the mount at its path, the root at `/`, each once, `count == total`; a mount dropped from this namespace leaves the listing while the machine still counts it |
 | `fsctl-check` | a leak found by block number through the device, the numbers equal to the pass called directly, repaired through the device, clean after; a scrub through the same channel; `-EOPNOTSUPP`, `-ENOENT` and two `-EINVAL`s |
 | `fsctl-result-per-open` | two open files, two results, neither the other's |
-| `fsctl_selftest` (user mode) | the tool lists, refuses, checks, scrubs and repairs; **the first time either pass has run from userland in this tree** |
+| `fsctl_selftest` (user mode) | the tool lists, refuses, checks, scrubs and repairs; **the first time either pass has run from userland in this tree**. It strands its own blocks to have something to find: a file written, deleted, and the filesystem unmounted -- 41 blocks on the run above |
 | `make BUILD=release test` (both) | builds, boots, and announces the device |
 
 **Twelve bug-proofs, eleven of which fail for their stated reason:**
@@ -900,8 +900,11 @@ mount 294: 20 blocks seen, 2000 free, 4 inodes, 2 directories, 0 snapshots (3360
 ```
 
 Twenty-eight blocks, all reclaimed by `fsctl check --repair`. They are
-the residue of the boot's own `cosmofs-format` and `cosmofs-ops` tests,
-and the mechanism is the one the fsck report named: a commit publishes
+the residue of the boot's own `cosmofs-format` and `cosmofs-ops` tests.
+The user-mode test no longer relies on finding them there -- it strands
+its own, deterministically, by writing a file, deleting it and
+unmounting, which produced 41 blocks on the same run. The mechanism is
+the one the fsck report named: a commit publishes
 the new root, *then* clears the freed blocks' bits in memory and dirties
 those bitmap chunks **for the next commit** (`cosmofs_core.c`, "the
 frees dirtied bitmap chunks for the next commit"). At an unmount there

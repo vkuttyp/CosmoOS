@@ -3433,32 +3433,76 @@ static void fsctl_selftest(void)
         snprintf(id, sizeof(id), "%llu", checkable);
         CHECK(fsctl_run("check", id, NULL) == 0);        /* clean, and says so */
         CHECK(fsctl_run("scrub", id, NULL) == 0);
-        CHECK(fsctl_run("check", id, "--repair") == 0);
+        /*
+         * Now the sequence this unit exists for, and the test makes the
+         * condition itself rather than inheriting whatever an earlier
+         * test left on the disk -- a test that asserts "there are
+         * findings" against somebody else's residue passes for a reason
+         * it does not control.
+         *
+         * The mechanism is cosmofs's, and it is the fsck unit's
+         * difference 1 in its other half: a commit publishes the new
+         * root, then clears the freed blocks' bits in memory and dirties
+         * those chunks for the *next* commit. Create a file and delete
+         * it, and the delete's frees are waiting for a commit that an
+         * unmount never makes. Remount, and they are allocated and
+         * unreachable.
+         */
+        int h2 = cosmo_open("/mnt/leakme", COSMO_O_WRONLY | COSMO_O_CREAT, 0644);
+        CHECK(h2 >= 3);
+        CHECK(cosmo_write((int)h2, buf, 4096) == 4096);
+        CHECK(cosmo_close((int)h2) == 0);
+        CHECK(cosmo_unlink("/mnt/leakme") == 0);
+        CHECK(cosmo_umount("/mnt") == 0);
+        CHECK(cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0);
+
+        /* The id is the mount's, and this is a new mount. */
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.version = COSMO_FSCTL_VERSION;
+        cmd.op = COSMO_FSCTL_LIST;
+        CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
+        n = read(fd, buf, sizeof(buf));   /* re-reads into buf, which h and m point into */
+        CHECK(n > (long)sizeof(struct cosmo_fsctl_result));
+        unsigned long long again = 0;
+        for (unsigned i = 0; i < h->count; i++)
+            if (strcmp(m[i].path, "/mnt") == 0)
+                again = m[i].id;
+        CHECK(again != 0);
 
         /*
-         * And it is clean afterwards. The tool's exit status cannot say
-         * so -- a check that finds something still exits 0, which is the
-         * whole point -- so this reads the flags back through the device
-         * rather than adding another process to a shared budget.
-         *
-         * This is the assertion that makes the repair mean something:
-         * the boot's own scratch disk arrives here with blocks its last
-         * clean unmount stranded, and leaves clean.
+         * Found. The exit status cannot say this -- a check that finds
+         * something still exits 0, which is the contract -- so the flags
+         * are read through the device, which also costs no process on a
+         * budget this suite shares.
          */
+        static char rbuf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check)];
+        struct cosmo_fsctl_check res;
         memset(&cmd, 0, sizeof(cmd));
         cmd.version = COSMO_FSCTL_VERSION;
         cmd.op = COSMO_FSCTL_CHECK;
-        cmd.mount_id = checkable;
+        cmd.mount_id = again;
         CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
-        struct cosmo_fsctl_check res;
-        static char rbuf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check)];
+        CHECK(read(fd, rbuf, sizeof(rbuf)) == (long)sizeof(rbuf));
+        memcpy(&res, rbuf + sizeof(struct cosmo_fsctl_result), sizeof(res));
+        CHECK((res.flags & COSMO_FSCTL_R_CLEAN) == 0);
+        unsigned long long stranded = res.class[0].count;   /* 0 is alloc_not_seen */
+        CHECK(stranded > 0);
+
+        /* Repaired, through the tool, by an operator naming the mount. */
+        snprintf(id, sizeof(id), "%llu", again);
+        CHECK(fsctl_run("check", id, "--repair") == 0);
+
+        /* And clean, with exactly what was found given back. */
+        cmd.mount_id = again;
+        CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
         CHECK(read(fd, rbuf, sizeof(rbuf)) == (long)sizeof(rbuf));
         memcpy(&res, rbuf + sizeof(struct cosmo_fsctl_result), sizeof(res));
         CHECK((res.flags & COSMO_FSCTL_R_CLEAN) != 0);
         CHECK((res.flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
 
         CHECK(cosmo_umount("/mnt") == 0);
-        puts("usertest: fsctl found what a clean unmount stranded, repaired it, and the filesystem is clean");
+        printf("usertest: fsctl found %llu blocks a clean unmount stranded, repaired them, and the filesystem is clean\n",
+               stranded);
     }
 
     close(fd);
