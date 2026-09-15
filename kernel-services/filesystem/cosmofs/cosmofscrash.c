@@ -472,6 +472,10 @@ bool selftest_cosmofs_replay(const char **reason)
     ramblk_destroy(bd);
     CHECK(ok);
     CHECK(vfs_vnode_count() == vnodes0);
+    /* The structural check ran on these images and found what a crash
+     * leaves: without this, a suite that stopped asking would pass in
+     * silence, which is what the no-crash-check bug-proof showed. */
+    CHECK(g_leak_prefixes > 0 && g_leak_total >= g_leak_prefixes);
     kinfo("selftest: cosmofs-replay: %llu of %u prefixes leaked blocks a crash stranded (worst %llu, %llu in all), "
           "each reclaimed and clean afterwards",
           (unsigned long long)g_leak_prefixes, checked, (unsigned long long)g_leak_max,

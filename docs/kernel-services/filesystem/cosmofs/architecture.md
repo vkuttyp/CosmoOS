@@ -68,7 +68,9 @@ corruption".
   every committed root is already immutable), multi-device pools and
   redundancy (`members` reserved, the pool is the seam), compression,
   quotas, symbolic or hard links, inode number reuse, transaction groups
-  pipelined behind an open one, a host `mkfs` or `fsck`, and any
+  pipelined behind an open one, a host `mkfs` (an *offline* checker over
+  a block device; the mounted one is built, `design.md`, "The structural
+  check"), and any
   performance work beyond contiguity-aware allocation (linear
   directories, one lock per filesystem).
 
