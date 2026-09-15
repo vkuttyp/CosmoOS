@@ -25,6 +25,8 @@
 #include <kernel/string.h>
 #include <kernel/vfs.h>
 
+#include <kernel/cosmofs.h>   /* the pass result structs the fs_type entries name */
+
 #include <uapi/cosmo/fsctl.h>
 
 #include "vfs_internal.h"
@@ -146,6 +148,101 @@ static int64_t fsctl_list(struct fsctl_open *o)
     return 0;
 }
 
+/*
+ * Run one pass against one named mount.
+ *
+ * The mount is acquired by id, which takes a reference and counts a
+ * pass, so it cannot be freed and an unmount waits rather than tearing
+ * the filesystem down mid-walk. Everything fallible happens before the
+ * acquisition or after the release; there is exactly one path out that
+ * holds a mount, and it releases.
+ *
+ * The result is copied field by field into the published record. A
+ * kernel struct is not an ABI: cosmofs may reorder or extend
+ * cosmofs_check_report freely, and the only thing that must not move is
+ * what userland parses.
+ */
+static int64_t fsctl_run(struct fsctl_open *o, const struct cosmo_fsctl *cmd)
+{
+    struct mount *mnt = NULL;
+    int rc = vfs_mount_acquire(cmd->mount_id, &mnt);
+    if (rc)
+        return rc;
+
+    bool want_check = cmd->op == COSMO_FSCTL_CHECK;
+    if ((want_check && mnt->fs->check == NULL) || (!want_check && mnt->fs->scrub == NULL)) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP;   /* this filesystem has no such pass */
+    }
+
+    size_t bytes = sizeof(struct cosmo_fsctl_result) +
+                   (want_check ? sizeof(struct cosmo_fsctl_check) : sizeof(struct cosmo_fsctl_scrub));
+    uint8_t *buf = kmalloc(bytes, KMEM_ZERO);
+    if (buf == NULL) {
+        vfs_mount_release(mnt);
+        return -ENOMEM;
+    }
+
+    struct cosmo_fsctl_result *hdr = (struct cosmo_fsctl_result *)buf;
+    void *rec = buf + sizeof(*hdr);
+    int prc;
+    if (want_check) {
+        struct cosmofs_check_report rep;
+        unsigned flags = (cmd->flags & COSMO_FSCTL_F_REPAIR) ? COSMOFS_CHECK_REPAIR : 0;
+        prc = mnt->fs->check(mnt, &rep, flags);
+        if (prc == 0) {
+            struct cosmo_fsctl_check *c = rec;
+            const struct cosmofs_check_class *src[COSMO_FSCTL_CLASSES] = {
+                &rep.alloc_not_seen, &rep.seen_not_alloc, &rep.dup, &rep.nlink_wrong,
+                &rep.orphan, &rep.dangling_entry, &rep.dir_bad, &rep.counter_wrong,
+                &rep.chain_cycle, &rep.unreadable,
+            };
+            c->nclasses = COSMO_FSCTL_CLASSES;
+            c->flags = (rep.partial ? COSMO_FSCTL_R_PARTIAL : 0u) |
+                       (rep.clean ? COSMO_FSCTL_R_CLEAN : 0u) |
+                       (rep.repair_refused ? COSMO_FSCTL_R_REPAIR_REFUSED : 0u);
+            c->blocks_seen = rep.blocks_seen;
+            c->inodes_seen = rep.inodes_seen;
+            c->dirs_seen = rep.dirs_seen;
+            c->snapshots_seen = rep.snapshots_seen;
+            c->counted_free = rep.counted_free;
+            c->counted_inodes = rep.counted_inodes;
+            c->bytes_allocated = rep.bytes_allocated;
+            c->elapsed_ns = rep.elapsed_ns;
+            for (unsigned i = 0; i < COSMO_FSCTL_CLASSES; i++) {
+                c->class[i].count = src[i]->count;
+                c->class[i].repaired = src[i]->repaired;
+                c->class[i].named = src[i]->named;
+                for (unsigned k = 0; k < COSMO_FSCTL_NAMES && k < CFS_CHECK_NAMES; k++)
+                    c->class[i].name[k] = src[i]->name[k];
+            }
+        }
+    } else {
+        struct cosmofs_scrub_stats st;
+        prc = mnt->fs->scrub(mnt, &st);
+        if (prc == 0) {
+            struct cosmo_fsctl_scrub *sc = rec;
+            sc->blocks_read = st.blocks_read;
+            sc->inodes = st.inodes;
+            sc->repaired = st.repaired;
+            sc->unrecoverable = st.unrecoverable;
+        }
+    }
+    vfs_mount_release(mnt);
+
+    if (prc) {
+        kfree(buf);
+        return prc;
+    }
+    hdr->version = COSMO_FSCTL_VERSION;
+    hdr->kind = cmd->op;
+    hdr->count = 1;
+    hdr->total = 1;
+    hdr->bytes = (uint32_t)(bytes - sizeof(*hdr));
+    fsctl_set_result(o, buf, bytes);
+    return 0;
+}
+
 static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
                                 const void *buf, size_t len)
 {
@@ -167,10 +264,23 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     case COSMO_FSCTL_LIST:
         rc = fsctl_list(o);
         break;
+    case COSMO_FSCTL_CHECK:
+    case COSMO_FSCTL_SCRUB:
+        rc = fsctl_run(o, &cmd);
+        break;
     default:
         rc = -EINVAL;
         break;
     }
+    /*
+     * A command that failed leaves no result: a reader must not see the
+     * previous one and take it for this one's answer. A pass that *found
+     * faults* did not fail -- the report says what they are and the
+     * write succeeds, because "the filesystem has three leaked blocks"
+     * is a successful check.
+     */
+    if (rc)
+        fsctl_set_result(o, NULL, 0);
     return rc ? rc : (int64_t)len;
 }
 

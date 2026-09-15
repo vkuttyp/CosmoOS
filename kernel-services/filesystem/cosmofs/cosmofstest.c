@@ -7,6 +7,7 @@
 
 #include <kernel/blk.h>
 #include <kernel/cosmofs.h>
+#include <uapi/cosmo/fsctl.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
@@ -1953,6 +1954,109 @@ bool selftest_cosmofs_check_slot_identity(const char **reason)
 
     kinfo("selftest: cosmofs-check-slot-identity: inode %llu's slot disowned itself; named, marked incomplete, repair refused",
           (unsigned long long)file_ino);
+    return true;
+}
+
+/*
+ * The whole point of the unit: a fault found and fixed through the
+ * device, by an operator naming a mount, rather than by a self-test
+ * holding a struct mount the only way anything could.
+ *
+ * The numbers are compared against the pass called directly, not merely
+ * asserted non-zero: a device that ran nothing and returned a zeroed
+ * report would pass a weaker test.
+ */
+bool selftest_fsctl_check(const char **reason)
+{
+    struct cosmofs_check_report direct;
+    struct blkdev *bd = NULL;
+    CHECK(check_fixture(&bd, reason));
+    uint64_t id = mount_of(ENG)->id;
+    CHECK(id != 0);
+
+    struct file *f = NULL;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+    size_t cap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check);
+    uint8_t *buf = kmalloc(cap, KMEM_ZERO);
+    CHECK(buf != NULL);
+    struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
+    struct cosmo_fsctl_check *c = (struct cosmo_fsctl_check *)(buf + sizeof(*h));
+
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_CHECK,
+                               .flags = 0, .mount_id = id };
+
+    /* Clean, through the device, and the same numbers the pass reports. */
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    CHECK(h->kind == COSMO_FSCTL_CHECK && h->count == 1);
+    CHECK(h->bytes == sizeof(struct cosmo_fsctl_check));
+    CHECK(c->nclasses == COSMO_FSCTL_CLASSES);
+    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    CHECK((c->flags & COSMO_FSCTL_R_PARTIAL) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &direct, 0) == 0);
+    CHECK(c->blocks_seen == direct.blocks_seen);
+    CHECK(c->counted_free == direct.counted_free);
+    CHECK(c->inodes_seen == direct.inodes_seen);
+    uint64_t free_before = c->counted_free;
+
+    /* A leak, found by number through the device. */
+    uint64_t leaked = 0;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) == 0);
+    CHECK(c->class[0].count == 1);                  /* index 0 is alloc_not_seen, and that is ABI */
+    CHECK(c->class[0].named == 1 && c->class[0].name[0] == leaked);
+    CHECK(c->counted_free == free_before - 1);
+    /* A finding is not an error: the write succeeded and said so. */
+
+    /* And repaired through the device, which is the half that mutates. */
+    cmd.flags = COSMO_FSCTL_F_REPAIR;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    CHECK(c->class[0].repaired == 1);
+    CHECK((c->flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
+    cmd.flags = 0;
+    CHECK(vfs_sync() == 0);
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(f, buf, cap) == (int64_t)cap);
+    CHECK((c->flags & COSMO_FSCTL_R_CLEAN) != 0);
+    CHECK(c->counted_free == free_before);
+
+    /* A scrub through the same channel, against the same name. */
+    struct cosmo_fsctl scmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_SCRUB,
+                                .flags = 0, .mount_id = id };
+    size_t scap = sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_scrub);
+    CHECK(file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd));
+    CHECK(file_read(f, buf, scap) == (int64_t)scap);
+    struct cosmo_fsctl_scrub *sc = (struct cosmo_fsctl_scrub *)(buf + sizeof(*h));
+    CHECK(h->kind == COSMO_FSCTL_SCRUB);
+    CHECK(sc->blocks_read > 0 && sc->unrecoverable == 0);
+
+    /* The refusals. A ramfs has neither pass; a name nothing holds is
+     * not a mount this namespace has. Both answer before any lock. */
+    struct mount *rootm = NULL;
+    struct vnode *rv = NULL;
+    CHECK(vfs_lookup(NULL, "/tmp", &rv) == 0);
+    rootm = rv->mnt;
+    vnode_put(rv);
+    cmd.mount_id = rootm->id;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EOPNOTSUPP);
+    CHECK(file_read(f, buf, cap) == 0);             /* a failed command leaves no result */
+
+    cmd.mount_id = ~0ull;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == -ENOENT);
+    cmd.mount_id = id;
+    cmd.version = COSMO_FSCTL_VERSION + 1;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    cmd.version = COSMO_FSCTL_VERSION;
+    CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
+
+    kfree(buf);
+    file_put(f);
+    check_teardown(bd);
+    kinfo("selftest: fsctl-check: a leak found and repaired through /dev/fsctl against mount %llu",
+          (unsigned long long)id);
     return true;
 }
 

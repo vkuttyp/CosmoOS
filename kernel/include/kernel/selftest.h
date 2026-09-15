@@ -90,7 +90,8 @@ bool selftest_vfs_put_race(const char **reason);
 bool selftest_vfs_chrdev_open(const char **reason);
 bool selftest_vfs_mount_id(const char **reason);
 bool selftest_vfs_mount_pin(const char **reason);
-bool selftest_fsctl_list(const char **reason);   /* chrdev per-open instances: open/release/read_file */   /* the last references of one vnode dropped from every CPU at once */
+bool selftest_fsctl_list(const char **reason);
+bool selftest_fsctl_check(const char **reason);   /* chrdev per-open instances: open/release/read_file */   /* the last references of one vnode dropped from every CPU at once */
 bool selftest_mountns(const char **reason);
 bool selftest_utsns(const char **reason);
 bool selftest_fault_kmalloc(const char **reason);
