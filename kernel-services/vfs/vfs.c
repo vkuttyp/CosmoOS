@@ -569,6 +569,45 @@ int vfs_umount2(const char *path, unsigned flags)
         mutex_lock(&g_mounts_lock);
     }
 
+    /*
+     * The drain dropped g_mounts_lock, so every decision taken before it
+     * is a decision about a filesystem that may have changed. This one
+     * matters: `seen == 1` said this was the last namespace out, and a
+     * namespace created during the window copies its parent's view and
+     * takes a reference to this mount. Tearing it down now would leave
+     * that namespace holding freed memory.
+     *
+     * So count again. If somebody else can see the mount, this unmount
+     * is only this namespace forgetting it, which is the `seen > 1` path
+     * above -- taken here rather than there because only now is the
+     * count final.
+     */
+    mutex_lock(&mp->lock);
+    seen = 0;
+    myref = NULL;
+    list_for_each_entry(r, &mnt->ns_refs, mnt_link) {
+        seen++;
+        if (r->ns == ns)
+            myref = r;
+    }
+    if (myref == NULL || seen > 1) {
+        mnt->unmounting = false;
+        if (myref != NULL)
+            list_remove(&myref->mnt_link);
+        mutex_unlock(&mp->lock);
+        if (myref == NULL) {
+            mutex_unlock(&g_mounts_lock);
+            return -EINVAL;   /* someone else dropped this namespace's view */
+        }
+        list_remove(&myref->ns_link);
+        mutex_unlock(&g_mounts_lock);
+        kfree(myref);
+        kinfo("vfs: %s: dropped from this mount namespace; %u still see it (gained during the drain)",
+              path, seen - 1);
+        return 0;
+    }
+    mutex_unlock(&mp->lock);
+
     /* Busy if any vnode is referenced beyond what the filesystem itself
      * holds: a pinned vnode's own pin, the mount's reference on the root. */
     arch_irq_state_t hs = spin_lock_irqsave(&mnt->lock);

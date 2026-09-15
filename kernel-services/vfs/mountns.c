@@ -117,16 +117,16 @@ int mountns_create(struct mount_ns *parent, struct mount_ns **out)
     struct mount *mnt;
     list_for_each_entry(mnt, &g_mounts, link) {
         /*
-         * Not the root (it is seen by every namespace without a ref),
-         * not a mount this namespace's parent cannot see, and **not one
-         * being unmounted**. That last is not caution: vfs_umount2 drops
-         * g_mounts_lock while it drains a maintenance pass
-         * (docs/audit/next-subsystem-fsctl.md), and a copy made in that
-         * window would add a reference to a mount whose teardown has
-         * already counted the references and decided to proceed. The
-         * new namespace would be left holding a freed mount.
+         * Not the root (it is seen by every namespace without a ref) and
+         * not a mount this namespace's parent cannot see. A mount that
+         * is *being unmounted* is copied like any other: an unmount can
+         * still fail and be restored, and a child that skipped it would
+         * then be permanently short a mount its parent has, which is the
+         * one thing a copied view may not be. vfs_umount2 re-counts the
+         * references after its drain for exactly this reason
+         * (docs/audit/next-subsystem-fsctl.md).
          */
-        if (mnt == g_root_mount || mnt->unmounting || !mountns_sees(parent, mnt))
+        if (mnt == g_root_mount || !mountns_sees(parent, mnt))
             continue;
         /* The child holds it where the parent did: a copied view is the
          * same mounts at the same places, and the path travels with the

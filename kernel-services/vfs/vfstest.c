@@ -1174,17 +1174,6 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(refused);                  /* a pass that could start here would never let the drain end */
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
-    /*
-     * A namespace made *now* must not inherit this mount. The unmount
-     * counted the references before it began to drain and decided it
-     * was the last one out; a copy taken during the drain would leave
-     * the new namespace holding a mount that is about to be freed.
-     */
-    struct mount_ns *racer = NULL;
-    CHECK(mountns_create(mountns_initial(), &racer) == 0);
-    CHECK(!mountns_sees(racer, m));
-    mountns_put(racer);
-    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
     /*
      * And one unmount at a time. Note what this does and does not prove:
@@ -1200,12 +1189,35 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(vfs_umount("/tmp/pin") == -EBUSY);
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));   /* and it changed nothing */
 
-    /* Let go, and the drain wakes and completes. */
+    /*
+     * A namespace made *during the drain* copies its parent's view, this
+     * mount included -- a copy that skipped it would be permanently
+     * short a mount its parent has if the unmount later failed and was
+     * restored. Which means the unmount's "I am the last namespace out"
+     * is no longer true, and it must find that out: the mount survives,
+     * and the unmount becomes this namespace forgetting it.
+     */
+    struct mount_ns *racer = NULL;
+    unsigned mounts_before = vfs_mount_count();
+    CHECK(mountns_create(mountns_initial(), &racer) == 0);
+    CHECK(mountns_sees(racer, m));
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+
+    /* Let go. The drain wakes, re-counts, and steps down. */
     vfs_mount_release(held);
     thread_join(t);
     CHECK(__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
     CHECK(g_pin_umount_rc == 0);
-    /* And the name is gone with the mount. */
+    /* The filesystem is still there, because the new namespace holds it;
+     * this namespace no longer does. The count is the assertion that
+     * survives an unmount which wrongly went ahead: it would have torn
+     * the filesystem down and taken it with it. */
+    CHECK(vfs_mount_count() == mounts_before);
+    CHECK(mountns_sees(racer, m));
+    struct mount *still = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &still) == -ENOENT);   /* not ours any more */
+    mountns_put(racer);                                       /* the last one out takes it */
+    CHECK(vfs_mount_count() == mounts_before - 1);
     struct mount *after = NULL;
     CHECK(vfs_mount_acquire(g_pin_id, &after) == -ENOENT);
     CHECK(vfs_rmdir(NULL, "/tmp/pin") == 0);
