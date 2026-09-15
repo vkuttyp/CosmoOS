@@ -154,6 +154,14 @@ static void jump_from_el2(uint64_t stack_top, uint64_t info, uint64_t entry, uin
         "isb\n\t"
         "msr hcr_el2, %[hcr]\n\t"
         "isb\n\t"
+        /* EL1&0 again, now that E2H and TGE are certainly clear: TLBI
+         * ALLE1 names that regime whatever TGE says (the ARM ARM's table
+         * of maintenance instructions fixes ALLE1 to EL1&0, which is why
+         * KVM uses it from a VHE host), but this one cannot be read two
+         * ways, and a boot pays for it once. */
+        "tlbi vmalle1\n\t"
+        "dsb nsh\n\t"
+        "isb\n\t"
         "msr cptr_el2, %[cptr]\n\t"
         "msr cnthctl_el2, %[cnthctl]\n\t"
         "msr cntvoff_el2, xzr\n\t"
