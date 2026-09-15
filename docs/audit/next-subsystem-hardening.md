@@ -54,6 +54,11 @@ rather than reading:
 8. **`hardening: absent` is forbidden in the guard boot**, not merely
    contradicted by a required line: a boot printing both would
    otherwise have passed.
+9. **The flag sweep found four calls to change and two already strict.**
+   Every native call taking a flags word: `mmap`, `mount`, `umount` and
+   `open` gained the check; `wait` (`native.c`, the `COSMO_W*` mask) and
+   `spawn` (the `COSMO_SPAWN_*` mask) already had it; `mmap`'s `prot`
+   word was already exhaustive. No other native call takes one.
 
 This report is to close two rows of the
 inventory's §3: the row "SMEP/SMAP/UMIP absence silently accepted;
@@ -440,8 +445,8 @@ The check is at the syscall, before the path or the space is touched,
 as `sys_wait`'s is; `vfs_open` keeps its own tolerance because the
 kernel's internal callers add bits (`COSMO_O_DIRECTORY` for a trailing
 slash). The implementation sweeps every other native call that takes a
-flags word and either finds it already strict (`wait`; `mmap`'s
-`prot` word) or adds the check, and lists the result in "As built". The
+flags word and either finds it already strict or adds the check, and
+lists the result in "As built". The
 Linux personality is a second door to the same objects and keeps
 Linux's own rule, which is to ignore unknown `MAP_`, `MS_` and `O_`
 bits; a Linux program that relies on that is correct on Linux and stays
@@ -543,22 +548,28 @@ rule is the ABI's growth path: a new flag is a new accepted bit.
 | `.github/workflows/ci.yml` | the two steps, after `test-gic` |
 | `tests/boot/run_boot_test.py` | `GUARD = os.environ.get("QEMU_GUARD", "0") != "0"`; required markers `hardening: (x86-64|aarch64): ...` with every feature, `uaccess-guard: guard live`, `umip: enforced` (x86-64); forbidden `hardening: absent`; `--expect-panic` takes a kind (`fault`, `wxn`) with the `wxn` marker sets |
 | `scripts/qemu-run.sh` | unchanged: `QEMU_CPU` is already honoured |
-| `kernel/arch/x86_64/start.c` | the hardening `INFO`/`WARN` lines after `x86_cpu_init` |
-| `kernel/arch/aarch64/start.c` | the same after `aarch64_cpu_init` |
-| `kernel/arch/aarch64/cpu.c` | `SCTLR_EL1.WXN` set on every CPU |
+| `kernel/include/arch/cpu.h` | `arch_hardening_report` |
+| `kernel/arch/x86_64/cpu.c` | `arch_hardening_report`: the `INFO`/`WARN` lines from `CR4` |
+| `kernel/arch/aarch64/cpu.c` | the same from `SCTLR_EL1` |
+| `kernel/arch/aarch64/mmu.c` | `SCTLR_EL1.WXN` set in `arch_mmu_activate` when the kernel root goes in (as-built 2) |
+| `kernel/include/arch/user.h`, `kernel/arch/x86_64/user.c`, `kernel/arch/aarch64/user.c` | `arch_user_guard_present` (as-built 3) |
 | `kernel/memory/memtest.c` | the six raw reads bracketed |
 | `kernel/syscall/uaccesstest.c` | `uaccess-guard` |
 | `kernel/core/selftest.c` | registration after `uaccess` |
 | `kernel/core/main.c` | `CRASH_TEST == 2`: the W+X page executed on purpose |
-| `build/toolchain.mk` | `CRASH_TEST` already a number; unchanged unless the variant needs a define |
+| `build/toolchain.mk` | unchanged: `CRASH_TEST` is already passed as a number |
 | `kernel/syscall/native.c` | unknown bits refused in `sys_mmap`, `sys_mount`, `sys_umount`, `sys_open`, and the sweep |
 | `kernel/include/arch/hv_s2_core.h` | new: `struct hv_s2_layout`, `hv_s2_layout` |
 | `kernel/arch/aarch64/hv_s2.c` | the layout-driven root, walk, destroy, count, VTCR |
-| `kernel/arch/aarch64/hv_el2.c` | layout computed at probe; `arch_hv_disable` |
+| `kernel/arch/aarch64/hv_el2.c` | layout computed at probe; `arch_hv_disable` through the switch |
+| `kernel/arch/aarch64/hv_el2_switch.S`, `kernel/include/arch/el2.h` | `HV_EL2_CALL_HANDBACK`, switch version 3 (as-built 1) |
+| `kernel/arch/aarch64/include/aarch64/hv_s2.h` | `hv_s2_configure`, `hv_s2_current_layout` |
 | `kernel/include/arch/hv.h` | `arch_hv_disable` |
 | `kernel/arch/x86_64/hv.c` | `arch_hv_disable` no-op |
 | `kernel-services/virtualization/vmm.c` | `hv_init` calls `arch_hv_disable` on the self-check's failure path |
 | `kernel-services/virtualization/hvtest.c` | `el2` unchanged; `hv-disabled` (fault-injected self-check failure) |
+| `kernel/include/kernel/hv.h` | `hv_selftest_disable_cycle` (debug builds) |
+| `kernel/include/kernel/selftest.h` | the two new self-tests |
 | `kernel/include/kernel/faultinject.h`, `kernel/core/faultinject.c` | `FI_HV_SELFCHECK` |
 | `drivers/iommu/arm_smmuv3.c` | asks `hv_s2_layout` about `IDR5.OAS` at probe; `-ENOTSUP` with a message at 42 bits or less (`kernel/iommu/pt.c` unchanged: the concatenated root there is follow-up work, untestable on QEMU's 44-bit SMMU) |
 | `tests/host/test_hv_s2.c`, `tests/host/host.mk` | the layout rule on the host |
