@@ -2704,18 +2704,26 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
  * A record is not a snapshot's to hold. `freelog_release_previous`
  * frees the superseded chain directly rather than through
  * `cfs_snapshot_hold_block`, and the exception has to be argued: that
- * function asks whether a snapshot's recorded bitmap marks the block
- * allocated, and a record that predates a snapshot is marked exactly
- * that way -- so the generic path would hold a block no snapshot's tree
- * can ever reach.
+ * function asks whether a snapshot's *recorded bitmap* marks the block
+ * allocated, and a record block from before a snapshot is marked
+ * exactly that way -- so the generic path would hold a block no
+ * snapshot's tree can ever reach.
  *
  * The rule: the snapshot filter is for blocks a snapshot's *tree* might
  * name. A snapshot preserves `imap_root` and `alloc_root`, never
  * `free_root`, so a record is not one of those.
  *
- * The cost of getting it wrong is not a held block but a stranded one:
- * the hold appends to a deadlist from phase 7, after the root, and at
- * an unmount there is no next commit to write it.
+ * It keeps mattering after the first time, because records reuse block
+ * numbers: a record freed by this exception is handed out again, and the
+ * snapshot's bitmap still marks that number allocated, so the filter
+ * would hold its successor too. Under the injection roughly every other
+ * commit loses a block for as long as the snapshot exists.
+ *
+ * **The free count is the instrument, and the checker is not.** A held
+ * block goes on a deadlist, and a deadlist is metadata the checker
+ * claims -- so a filesystem losing a block per commit this way is
+ * `clean` all the way down. It shows up as space that never comes back
+ * and nothing else, which is why this test counts.
  */
 bool selftest_cosmofs_freelog_not_held(const char **reason)
 {
@@ -2728,8 +2736,8 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
     cosmofs_test_set_writeback(mount_of(ENG), false);
 
-    /* A record exists, and *then* a snapshot is taken: its bitmap marks
-     * the record's blocks allocated, which is the whole difficulty. */
+    /* A record exists, and *then* the snapshot is taken: its bitmap
+     * marks that record's blocks allocated, which is the difficulty. */
     CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
     CHECK(vfs_sync() == 0);
     struct cosmofs_stats rec;
@@ -2737,29 +2745,39 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     CHECK(rec.free_root != 0);
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
 
-    /*
-     * Commits that supersede it, touching nothing the snapshot holds --
-     * so the only blocks these transactions free are records, and the
-     * only way a block can be stranded is the filter this test is about.
-     */
-    for (unsigned i = 0; i < 4; i++) {
+    /* Settle, then measure. The churn file postdates the snapshot, so
+     * nothing these commits free is a block the snapshot's tree names:
+     * the only thing they release is one record after another. */
+    CHECK(write_file(ENG "/churn", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    for (unsigned i = 0; i < 30; i++) {
         CHECK(write_file(ENG "/churn", "y", 1));
         CHECK(vfs_sync() == 0);
     }
-    CHECK(vfs_umount(ENG) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    /* The transaction in flight can move it a little; thirty commits'
+     * worth of held records cannot hide in that. */
+    CHECK(after.free_blocks + 6 >= before.free_blocks);
 
+    /* And the snapshot is intact: nothing this exception frees was its. */
+    CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
     struct cosmofs_check_report rep;
     CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
     CHECK(rep.seen_not_alloc.count == 0);
-    CHECK(rep.alloc_not_seen.count == 0);   /* held records would be here */
     CHECK(rep.snapshots_seen == 1);
     CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
 
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
-    kinfo("selftest: cosmofs-freelog-not-held: a record superseded under a snapshot is freed, not held, and nothing is stranded");
+    kinfo("selftest: cosmofs-freelog-not-held: 30 records superseded under a snapshot, %llu free before and %llu after, and the snapshot still reads",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
     return true;
 }
 
