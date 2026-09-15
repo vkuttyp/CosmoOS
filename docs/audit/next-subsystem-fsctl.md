@@ -293,21 +293,46 @@ Three rules, and the third is the one with teeth.
    `kobject_get`, drop the lock. The mount cannot be freed while the
    pass runs.
 2. **Refuse a mount that is on its way out.** `struct mount` already has
-   `unmounting` (`vfs.h:161`), set before the teardown a mount cannot
-   come back from. A command that finds it set is `-EBUSY`.
-3. **Unmount refuses while a pass runs.** A reference alone is not
-   enough: `vfs_umount` decides busy-ness by scanning the vnode hash
-   (`vfs.c:529-546`), which a pass holding a kobject reference does not
-   appear in. So the mount gains `unsigned passes_running`, incremented
-   under `g_mounts_lock` around the call, and `vfs_umount` returns
-   `-EBUSY` while it is non-zero.
+   `unmounting` (`vfs.h:161`), set first thing by `vfs_umount`
+   (`vfs.c:521-527`) to turn new walkers away. A command that finds it
+   set is `-EBUSY`, and that refusal is also what makes rule 3's drain
+   terminate.
+3. **Unmount waits for a pass, and no new pass starts once it begins.**
+   A reference alone is not enough: `vfs_umount` decides busy-ness by
+   scanning the vnode hash (`vfs.c:529-546`), which a pass holding a
+   kobject reference does not appear in. So the mount gains `unsigned
+   passes_running`, incremented under `g_mounts_lock` around the call,
+   and `vfs_umount` **drains it** before its busy scan.
 
-Rule 3 is a real change to unmount's behaviour and the report states it
-rather than burying it: **an unmount can now fail because a check is
-running.** The alternative — let the unmount proceed and have the pass
-discover it — means a pass walking a filesystem whose buffers are being
-torn down, which is a crash rather than a wrong answer. An operator who
-started a check and wants to unmount waits for the check.
+The drain is a handshake with the flag unmount already sets, and it
+needs no claim about who takes which lock first:
+
+- `vfs_umount` sets `mnt->unmounting` before anything else it decides
+  (`vfs.c:521-527`), to turn new walkers away. Rule 2 makes a new pass
+  one of the things it turns away: `vfs_mount_acquire` refuses a mount
+  with the flag set.
+- So once unmount has begun, `passes_running` can only fall. Unmount
+  then waits for it to reach zero and proceeds.
+
+**The wait is bounded, and that is why waiting is the right answer
+rather than `-EBUSY`.** A pass count is held across a call the kernel
+makes and returns from, never across a userland round trip, so the
+longest wait is one pass over one filesystem — long, but finite and not
+in an operator's hands. An unmount that failed instead would push the
+retry loop into userland for no gain.
+
+**A forced unmount waits too.** `VFS_UMOUNT_FORCE` cannot skip this: the
+pass is reading the filesystem's buffers, and tearing them down under it
+is a crash rather than a wrong answer. Force is about references held by
+files, not about a kernel call in flight.
+
+An earlier draft of this report claimed instead that shutdown would
+never meet a busy mount because `vfs_sync` would block behind the pass.
+That was wrong twice over — `vfs_sync` takes `mnt->sync_lock`
+(`vfs.c:630`) while the passes take the filesystem's own lock, and a new
+pass could start between the sync and the unmount anyway. The drain
+makes the question moot, which is a better answer than a correct claim
+about lock ordering would have been.
 
 ### What a caller may do to a filesystem
 
@@ -345,7 +370,8 @@ serialise on the filesystem's own lock, which each pass already takes.
 `passes_running` is touched only under `g_mounts_lock`, the same lock
 that publishes and removes a mount, so "is this mount going away" and
 "is a pass running on it" are answered under one lock and cannot
-disagree. The pass itself runs with no VFS lock held: the table lock is
+disagree — which is the whole of rule 3's correctness, and the reason
+the drain does not need the passes and the sync to share a lock. The pass itself runs with no VFS lock held: the table lock is
 dropped before the call, or a check on a large filesystem would block
 every mount and unmount on the machine rather than only its own.
 
@@ -531,12 +557,12 @@ void vfs_mount_release(struct mount *mnt);
    after an unmount, and that a mount carried into a second namespace
    has the same id in both.
 2. **The pin.** `passes_running`, `vfs_mount_acquire`/`release`, and
-   `vfs_umount` returning `-EBUSY` while a pass runs. One test holds an
-   acquisition and asserts the unmount is refused, then released and the
-   unmount succeeds. A second asserts the shutdown sequence is *not*
-   refused, because the sync ahead of it blocks on the mount's own lock
-   until the pass is done -- the claim rule 3 makes about ordering, and
-   the one that would be expensive to be wrong about.
+   `vfs_umount` draining the count after it sets `unmounting`. One test
+   holds an acquisition and asserts the unmount waits and then succeeds;
+   the same test asserts an acquisition attempted during the drain is
+   refused, which is what makes the wait terminate. Nothing here depends
+   on which lock a sync takes, which is the property the first draft of
+   this step got wrong.
 3. **The channel, read-only.** `/dev/fsctl`, the listing, the namespace
    visibility rule. Tests: a second namespace sees its own mounts and
    not the first's; the paths are that namespace's paths; an
@@ -565,8 +591,8 @@ filesystem the commands are pointed at.
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
 | `vfs-mount-id` | two mounts get two ids; an unmount and a fresh mount at the same path get *different* ids; the same mount in two namespaces reports one id | make the id the table index: the third assertion fails, because the slot is reused |
-| `vfs-mount-pin` | an acquired mount cannot be unmounted (`-EBUSY`); released, it can; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s busy test: the unmount succeeds while a pass holds the mount |
-| `vfs-mount-pin-shutdown` | the shutdown sequence against a mount with a pass in flight completes rather than being refused, because the sync ahead of it waits on the mount's own lock | make the pass drop the mount lock between phases: the sync overtakes it and the unmount meets a non-zero count |
+| `vfs-mount-pin` | an unmount does not complete while a pass holds the mount, and completes once it is released; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s drain: the unmount completes while a pass still holds the mount |
+| `vfs-mount-pin-drain` | an unmount begun while a pass is in flight waits and then succeeds; a pass that tries to start after the unmount began is refused, so the count only falls; a forced unmount waits on the same drain | let `vfs_mount_acquire` ignore `unmounting`: a pass starts during the drain and the unmount waits for a mount that never quiesces, which the test catches as a timeout |
 | `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
 | `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
 | `fsctl-list-root` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
@@ -608,19 +634,15 @@ is the difference between an error and a deadlock.
 
 ## Risks
 
-- **An unmount that now fails.** Rule 3 changes `vfs_umount`'s
-  behaviour for every caller. Two things bound it. The pass count is
-  held only across a call the kernel itself makes, never across a
-  userland round trip, so its duration is the pass's and not an
-  operator's. And the pass holds the *mount's own lock* for its whole
-  walk, so anything that must sync the mount first — shutdown does —
-  blocks behind the pass and finds the count already zero when it gets
-  to the unmount. **`-EBUSY` is therefore the answer to a concurrent
-  operator unmount, not to shutdown**, which waits because the sync
-  ahead of it waits. That is a claim about the shutdown path's order and
-  step 2's test asserts it rather than assuming it: start a pass, run
-  the shutdown sequence, and require that it completed rather than
-  refused.
+- **An unmount that now blocks.** Rule 3 makes `vfs_umount` wait, for
+  every caller including shutdown. The wait is bounded by one pass over
+  one filesystem, because no new pass can start once `unmounting` is
+  set, and a pass is a kernel call rather than a userland round trip.
+  The risk that remains is the size of that bound: a check of a large
+  filesystem delays a shutdown by its duration, which is the same
+  measurement the benchmark section takes for a different reason. If it
+  turns out to be intolerable, the answer is a cancellable pass, which
+  is already the deferred work named above — not a shorter wait here.
 - **A result buffer per open file.** A caller can open the device many
   times and hold a buffer each. Bounded by the file descriptor limit,
   which is already an rlimit, and the buffer is allocated on first
