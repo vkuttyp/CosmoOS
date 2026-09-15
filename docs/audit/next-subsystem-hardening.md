@@ -462,9 +462,12 @@ grow; Linux's is Linux's.
 
 ### WXN
 
-`aarch64_cpu_init` sets `SCTLR_EL1.WXN` on every CPU, after the page
-tables it runs on are the kernel's (the loader's are gone by then;
-`SPAN` is set at the same place). The bit makes any writable page in
+`arch_mmu_activate` sets `SCTLR_EL1.WXN` on every CPU, at the moment it
+installs the kernel root there -- the boot CPU from `vmm_init`, each AP
+from `aarch64_ap_entry` -- and not in `aarch64_cpu_init` beside `SPAN`,
+because until that write the CPU is running on the loader's tables,
+which map RAM writable and executable (as-built 2). The bit makes any
+writable page in
 the EL1&0 regime execute-never regardless of its leaf, so it changes
 nothing for a correct tree and denies exactly one thing: a future W+X
 leaf. User mappings are already W^X at every door (native `mmap`, the ELF
@@ -664,8 +667,8 @@ and `test-crash`.
 | `test_hv_s2` (host) | `hv_s2_layout` for 32..52 bits: `sl0 = 2` and one page only above 42; `sl0 = 1` with `1 << (bits - 39)` pages at 40, 41, 42; `sl0 = 1` and one page below 40; the root order never exceeds 3 | return `sl0 = 2` for every width: the 40-bit case fails |
 | the AArch64 guard boot's `hv` suite | every `hv` and `el2` test passes on `cortex-a76`; `hv: backend el2` with nested paging in the log; no `selftest: hv: skipped` | revert the layout in `hv_s2_vtcr` to `SL0 = 2`: the self-check fails with the level-0 translation fault, exactly as the probe did |
 | `hv-disabled` | with `FI_HV_SELFCHECK` armed for one hit, `hv_selftest_disable_cycle` (debug builds) re-runs the boot self-check, which fails; the backend is disabled and, while it is, `hv_caps()->present` is false and `el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION` answers; the caps are restored and the self-check passes again, which is the switch re-installing on use; hits asserted equal to the budget | remove `arch_hv_disable` from the failure path: the cycle stops at step -2, the stub not answering |
-| `flags` (user-side, in `fs_selftest` and `proc_selftest`) | `mmap` with bit 31 set, `mount` with `1u << 5`, `umount` with `1u << 5`, `open` with `0x8000000`: each `-COSMO_EINVAL`; the same calls without the bit succeed as before | remove any one check: that call succeeds |
-| `test-wxn` (AArch64) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the `page fault: kernel execute at <page> (protection)` panic, the `FAR=<page> (... instruction-fetch)` line, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
+| `flags` (user-side, in `fs_selftest`) | `mmap` with bit 30 set, `mount` and `umount` with `1u << 5` on a mount point of their own, `open` with `0x8000000` on a path that exists: each `-COSMO_EINVAL`; the same calls without the bit then succeed, so a refusal for another reason cannot pass for this one (as-built 6, and the umount proof's first attempt) | remove any one check: that call succeeds and its `CHECK` fails |
+| `test-wxn` (AArch64; the bit set by `arch_mmu_activate`) | the crash-test build's W+X page traps on execution; the harness's `wxn` marker set sees the variant's own line, the `page fault: kernel execute at <page> (protection)` panic, the `FAR=<page> (... instruction-fetch)` line, the stack trace and `halting.`, and none of the forbidden lines | do not set `WXN` in `aarch64_cpu_init`: the page executes, the variant logs `WXN is off` (a forbidden marker), and no panic follows |
 | the guard boot itself | required markers `hardening: x86-64: nx smep smap umip` / `hardening: aarch64: pan wxn`; forbidden `hardening: absent` | boot the guard target with `QEMU_CPU` forced to the control model: the `WARN` appears and the run fails |
 | the ASID tests on `cortex-a76` | pass, with the bracket | drop the bracket from one read: that test fails as the probe showed |
 
