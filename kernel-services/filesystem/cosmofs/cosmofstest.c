@@ -2701,8 +2701,8 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
 }
 
 /*
- * A record holds 507 blocks; a transaction can free more than that, so
- * the record is a chain and every link of it has to be written and
+ * A record block holds 506 block numbers; a transaction can free more
+ * than that, so the record is a chain and every link of it has to be written and
  * replayed. A single block's worth would silently lose the overflow.
  *
  * This also covers the bound's slack. `freelog_reserve` allocates for
@@ -2714,7 +2714,7 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
 bool selftest_cosmofs_freelog_chain(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
-    struct blkdev *bd = ramblk_create(8192);      /* room for more than 507 frees */
+    struct blkdev *bd = ramblk_create(8192);      /* room for more than a record block holds */
     CHECK(bd != NULL);
     CHECK(cosmofs_format(bd) == 0);
     int mk = vfs_mkdir(NULL, ENG, 0755);
@@ -2731,7 +2731,7 @@ bool selftest_cosmofs_freelog_chain(const char **reason)
      * shape round two has to return it to.
      *
      * A file of 600 blocks, committed, then deleted in the transaction
-     * the unmount commits -- so one record has to carry more than 507
+     * the unmount commits -- so one record has to carry more than 506
      * entries and therefore more than one block.
      */
     struct cosmofs_stats before, full;
