@@ -368,3 +368,42 @@ accounting (limits are per process; a user with many processes is
 bounded by `NPROC × MEM`). Each is a future subsystem with this
 milestone's `struct rlimits`, `SETCRED` and the single privilege
 predicate as its seams.
+
+## 5. Hardening
+
+What the CPU is asked to enforce, and where it is proved
+(`docs/audit/next-subsystem-hardening.md`):
+
+- **The guard on kernel access to user memory.** Every deliberate
+  kernel access to user memory is inside `arch_user_access_begin/end`
+  (`stac`/`clac` with SMAP; `msr pan, #0/#1` with PAN); the raw copy's
+  contract requires it. On QEMU's default CPU models the bracket is a
+  no-op, so the guard boot (`make test-guard`) runs the image on a model
+  with SMAP/SMEP/UMIP or PAN, where `uaccess-guard` asserts that an
+  unbracketed read of a mapped user page faults and a bracketed one
+  succeeds, and `arch_user_guard_present` says which kind of boot this
+  is. The four ASID tests were the first unbracketed accesses it found.
+- **The boot says so.** `hardening: x86-64: nx smep smap umip` /
+  `hardening: aarch64: pan wxn` at `INFO` in every build, read from
+  `CR4` / `SCTLR_EL1`; `hardening: absent: …` at `WARN` names what is
+  off and, when the guard itself is missing, says `kernel access to user
+  memory is unguarded`. The guard boot requires the first and forbids
+  the second; the control boot carries the `WARN`.
+- **UMIP.** Set where present; `init --trap umip` executes `sgdt` from
+  user mode and reports `usertest: umip: enforced` (killed by SIGSEGV)
+  or `absent` (it ran); the x86-64 guard boot requires `enforced`.
+  SMEP is set and logged and not exercised: its test would be the
+  kernel jumping to user memory, a fetch the exception table cannot fix
+  up.
+- **WXN.** `SCTLR_EL1.WXN` on every AArch64 CPU from the kernel's own
+  tables on (`docs/kernel/arch/aarch64/design.md`, "MMU"); `make
+  test-wxn` executes a deliberate W+X page and requires the panic.
+- **Unknown flag bits.** The native ABI's `mmap`, `mount`, `umount` and
+  `open` return `-EINVAL` for a flag bit they do not define
+  (`docs/kernel/syscall/api.md`), so a program can probe for a flag and
+  a future flag is never silently dropped; `wait` already did. The
+  Linux personality keeps Linux's rule, which is to ignore them.
+- **Not done, and named:** UAO, E0PD, BTI and PAC are unused; an SError
+  from EL0 still panics (no deterministic trigger under TCG); no
+  stack protector, KASLR or speculative-execution mitigation
+  (`docs/audit/2026-09-deferred-work-inventory.md`).

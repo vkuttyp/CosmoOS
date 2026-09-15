@@ -58,7 +58,12 @@ struct device { ...; struct iommu_domain *iommu; uint32_t iommu_sid; };
 - **One page-table format walker, two encodings.** Both units walk a
   4-level, 4 KiB-granule tree of 512-entry tables over an input the unit
   chooses (VT-d AGAW 48; SMMU stage-2 with `T0SZ = 64 - OAS` from
-  `IDR5.OAS`, `SL0 = 2`). The
+  `IDR5.OAS`, `SL0 = 2`: a level-0 start, which the architecture allows
+  only above 42 bits of output, so the driver asks the hypervisor's
+  layout rule (`arch/hv_s2_core.h`) at probe and refuses an SMMU of 42
+  bits or less with a message rather than programming it; the
+  concatenated level-1 root such an SMMU needs is follow-up work the
+  walker does not build yet, untestable on QEMU's 44-bit SMMU). The
   entries differ: VT-d second-level PTEs carry `R` (bit 0) and `W`
   (bit 1); SMMU stage-2 descriptors are LPAE: `valid` (bit 0), `table`
   or `page` (bit 1), `S2AP` (bits 6–7), `AF` (bit 10), `SH` (bits
@@ -220,8 +225,9 @@ the IOMMU dropped.
   what the design assumed) is `C_BAD_STE` on the virt machine, whose
   `IDR5.OAS` is 44 bits: stage-2 requires the input to fit the output
   size. `T0SZ` and `S2PS` are now derived from `IDR5.OAS`
-  (`64 - oas`, so 20 here) and the walk still starts at level 1
-  (`SL0 = 2`), which covers the 4 GiB window with room to spare. The
+  (`64 - oas`, so 20 here) and the walk still starts at level 0
+  (`SL0 = 2`, the first of four), which covers the 4 GiB window with
+  room to spare. The
   failure was silent except for an aborted transaction; `QEMU_EXTRA="-d
   guest_errors -trace smmuv3_*"` named it in one line.
 - **MSI doorbells are device writes.** The first attach on AArch64 killed

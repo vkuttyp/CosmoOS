@@ -100,7 +100,10 @@ Two markers are required in that configuration —
 silently loses EL2 fails the boot test instead of passing quietly. The
 `el2` self-test then asks the stub for its version, hands it a different
 vector table and takes it back, and checks an unknown selector is
-refused; `QEMU_EL2=0` exercises the other path, where the same test
+refused (and, when a backend took EL2 and was then disabled by the boot
+self-check, the stub must answer again: `arch_hv_disable` hands it
+back through the switch's `HV_EL2_CALL_HANDBACK`, which the
+`hv-disabled` self-test exercises with an injected self-check failure); `QEMU_EL2=0` exercises the other path, where the same test
 asserts that there is no stub and that `el2_set_vectors` refuses. Both
 configurations run four CPUs, which is what proves the secondary
 trampoline's own drop from EL2 works: PSCI starts every AP at EL2 too.

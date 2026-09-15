@@ -377,6 +377,17 @@ which every context shares). Which root a VA belongs to is decided by bit
 context refuses high ones (`-EINVAL`), keeping the generic invariant that
 a mapping lives in exactly one context.
 
+**WXN.** `arch_mmu_activate` sets `SCTLR_EL1.WXN` when it installs the
+kernel root on a CPU (the boot CPU from `vmm_init`, each AP from
+`aarch64_ap_entry`): from then on a writable page is execute-never for
+EL1 and EL0 whatever its leaf says. Only there, because the loader's
+tables, active until that write, map RAM writable and executable (the
+loader clears the bit for that reason) and the kernel's own tables are
+W^X (M13). Nothing legitimate is denied: modules are remapped RX before
+they run, the AP trampoline is RX, user W+X is refused at every door.
+`make test-wxn` proves the bit denies (`testing.md`, "WXN"), and the
+`hardening:` boot line reports it read back from `SCTLR_EL1`.
+
 Descriptor bits: `AF` always set (no access-flag faults), `SH` inner
 shareable, `AttrIndx` 0 (WB) / 1 (device) / 2 (non-cacheable, used for
 `VM_CACHE_WT`, which ARM lacks), `nG` on user leaves, `AP[2:1]`: kernel
@@ -717,6 +728,16 @@ Anything else that reaches EL2 (an exception, an unknown HVC) returns to
 where it came from: the stub is not a hypervisor and refuses to pretend.
 `el2_set_vectors` is what the EL2 backend will use to install its own
 world-switch vectors; until then the stub is all there is.
+
+Once the switch is installed on a CPU the stub's calls are gone there,
+so giving EL2 back is the switch's job: `HV_EL2_CALL_HANDBACK` (`x1` =
+the stub's physical base) installs the stub's vectors again and
+returns 0. `arch_hv_disable` uses it on every CPU that took the switch
+(`el2_ready_here`'s per-CPU flag, cleared only when the call succeeded)
+when the boot self-check fails, so the stub answers again and the `el2`
+self-test holds whether a backend was never present or was present and
+disabled; a later run of a guest installs the switch afresh through the
+stub. The switch reports version 3 for this call.
 
 PSCI keeps working, and the reason is worth writing down because it is
 not what one would guess: with `virtualization=on` the firmware declares

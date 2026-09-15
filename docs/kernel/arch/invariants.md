@@ -68,8 +68,18 @@ it was at the outer save. **Checked by** the `irq-state` self-test.
 ## I-ARCH-9: Protection features are asserted by the kernel, not assumed from the loader
 
 `x86_cpu_init` sets WP, NXE (if NX), PGE, SMEP, SMAP, UMIP as supported
-regardless of prior state. **Checked by** the `[DEBUG] x86: cr0=… cr4=…
-efer=…` line in every boot log; automated assertion is future work.
+regardless of prior state; AArch64 sets SPAN and PAN where the core has
+PAN, and `SCTLR_EL1.WXN` on every CPU once the kernel's own tables are
+active (the loader clears it, because its tables map RAM writable and
+executable). **Checked by** the `hardening:` line every boot prints from
+`CR4` / `SCTLR_EL1` as they are (`[ INFO] hardening: x86-64: nx smep
+smap umip`, `[ INFO] hardening: aarch64: pan wxn`; a `[ WARN]
+hardening: absent: …` names what is off), which the guard boot (`make
+test-guard`, a CPU model that has every feature) requires whole and
+whose `absent` form it forbids. The default CPU models lack SMEP/SMAP/
+UMIP and PAN, so their boots carry the `WARN`: the guard is proved
+where it exists and its absence handled where it does not
+(`docs/kernel/arch/testing.md`, "The guard boot").
 
 ## I-ARCH-10: Frame-pointer walks never fault
 

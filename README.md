@@ -1890,6 +1890,34 @@ See [docs/development.md](docs/development.md).
   a ramfs file at 44 MiB/s with 1 KiB requests and 317 with 64 KiB on
   x86-64, the whole syscall from user mode at 38 and 110 (PR #138).
 
+- **A guard that is proved, not assumed**
+  (`docs/audit/next-subsystem-hardening.md`). The kernel's guard on its
+  own access to user memory -- `stac`/`clac` with SMAP, PAN on AArch64
+  -- was a no-op on both CI CPU models, so an unbracketed access passed
+  every boot: booting the unchanged image on `cortex-a76` failed 5 of
+  265 (four ASID tests reading user pages outside the bracket, and the
+  `el2` test because the stage-2 walk started at a level the
+  architecture forbids below 43 bits of physical address, the boot
+  self-check disabled the backend, and the disabled backend kept EL2's
+  vectors). Now `make test-guard` boots the same image on a
+  protection-capable model per architecture and the harness requires
+  the kernel's own `hardening:` line whole, the `uaccess-guard`
+  self-test's "guard live" and, on x86-64, `usertest: umip: enforced`;
+  the default boot stays the control and carries the `WARN` naming what
+  is absent. The three faults are fixed: the bracket in the ASID tests;
+  a pure, host-tested `hv_s2_layout` rule (level 0 above 42 bits, level
+  1 from concatenated root pages at or below; the SMMU driver refuses
+  what the IOMMU walker cannot build); and `arch_hv_disable`, which
+  needed a call of the switch's own (`HV_EL2_CALL_HANDBACK`), since the
+  stub's calls are gone once the switch owns EL2 -- proved by
+  `hv-disabled` with an injected self-check failure. The native ABI's
+  `mmap`, `mount`, `umount` and `open` refuse an unknown flag bit with
+  `-EINVAL`. `SCTLR_EL1.WXN` is set on every AArch64 CPU from the
+  kernel's own tables on, and `make test-wxn` executes a deliberate W+X
+  page and requires that panic. 267 self-tests on both architectures on
+  both CPU models, the `hv` suite included on `cortex-a76`; the guard
+  instructions cost nothing measurable under TCG (PR #140).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
