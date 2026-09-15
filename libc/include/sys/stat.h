@@ -21,6 +21,7 @@ struct stat {
 #define S_ISFIFO(st_type_of) ((st_type_of) == COSMO_DT_FIFO)
 #define S_ISSOCK(st_type_of) ((st_type_of) == COSMO_DT_SOCK)
 int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
 int fstat(int fd, struct stat *st);
 int mkdir(const char *path, mode_t mode);
 #endif

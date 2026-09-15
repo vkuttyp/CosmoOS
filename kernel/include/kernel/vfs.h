@@ -33,7 +33,13 @@ enum vnode_type {
     VNODE_REG = COSMO_DT_REG,
     VNODE_DIR = COSMO_DT_DIR,
     VNODE_CHR = COSMO_DT_CHR,
+    VNODE_LNK = COSMO_DT_LNK,
 };
+
+/* How many symbolic links one path resolution may expand before it is
+ * called a loop (docs/audit/next-subsystem-symlink.md). The component
+ * count bounds the walk as well, and both answer -ELOOP. */
+#define VFS_MAX_SYMLINKS 8u
 
 /* readdir callback: return nonzero to stop. */
 typedef int (*vfs_dirent_cb)(void *arg, const char *name, size_t len, uint64_t ino, enum vnode_type type);
@@ -43,6 +49,14 @@ struct file;   /* defined below; named by the per-open vnode ops */
 struct vnode_ops {
     int (*lookup)(struct vnode *dir, const char *name, size_t len, struct vnode **out);
     int (*create)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
+    /* Optional. Create `name` in `dir` as a symbolic link to `target`, a
+     * NUL-terminated path which is never validated: a link to nothing is
+     * a link. A filesystem without this has no links (-EPERM). */
+    int (*symlink)(struct vnode *dir, const char *name, size_t len, const char *target, struct vnode **out);
+    /* Optional, required of a filesystem that has links. Copies the
+     * target into `buf`, at most `len` bytes and NOT NUL terminated;
+     * returns the bytes copied, or -errno. */
+    int (*readlink)(struct vnode *vn, char *buf, size_t len);
     int (*mkdir)(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
     int (*unlink)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
     int (*rmdir)(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
@@ -231,8 +245,13 @@ uint64_t vfs_now_ns(void);
 int vfs_permission(const struct vnode *vn, unsigned mask);
 
 /* Resolve `path` (absolute, or relative to `start` when not NULL) to a
- * referenced vnode. Follows mounts; no symlinks. */
+ * referenced vnode. Follows mounts, and symbolic links -- including one
+ * named by the last component. An absolute target restarts at the
+ * calling process's root, so a link is bounded by the root a leading
+ * slash is bounded by. */
 int vfs_lookup(struct vnode *start, const char *path, struct vnode **out);
+/* The same, stopping at a link named by the last component. */
+int vfs_lookup_nofollow(struct vnode *start, const char *path, struct vnode **out);
 int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mode, struct file **out);
 /* An open file over an already resolved vnode (the reference is consumed,
  * also on failure). No permission check: the caller made its own (exec). */
@@ -248,6 +267,15 @@ int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath);
  * nothing). -EISDIR, -EACCES, -ENOTSUP. */
 int vfs_truncate(struct vnode *start, const char *path, uint64_t size);
 int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st);
+/* stat without following a link named by the last component. */
+int vfs_lstat(struct vnode *start, const char *path, struct cosmo_stat *st);
+/* Create `path` as a symbolic link to `target`. -EEXIST, -EPERM where
+ * the filesystem has no links, -ENAMETOOLONG, -EROFS, -ENOSPC. */
+int vfs_symlink(struct vnode *start, const char *path, const char *target);
+/* The target of the link named by `path`, at most `len` bytes and not
+ * NUL terminated. Returns the bytes copied, or -EINVAL when the last
+ * component is not a link. */
+int vfs_readlink(struct vnode *start, const char *path, char *buf, size_t len);
 void vnode_stat(struct vnode *vn, struct cosmo_stat *st);
 
 /* --- files ---------------------------------------------------------------- */

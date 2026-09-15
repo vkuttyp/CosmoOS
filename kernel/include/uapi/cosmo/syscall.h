@@ -134,7 +134,11 @@
 #define SYS_thread_exit 86  /* (int status) -> does not return; the process ends with the last thread */
 #define SYS_set_tls   87  /* (uint64_t base) -> 0: the calling thread's thread pointer */
 #define SYS_vcpu_stop 88  /* (int vcpu) -> 0: make a running vCPU leave its run */
-#define SYS_COUNT     89
+/* Symbolic links. readlink does not terminate what it copies. */
+#define SYS_symlink   89  /* (const char *target, const char *path) -> 0 */
+#define SYS_readlink  90  /* (const char *path, char *buf, size_t len) -> bytes copied */
+#define SYS_lstat     91  /* (const char *path, struct cosmo_stat *st) -> 0, not following a link */
+#define SYS_COUNT     92
 
 /*
  * What SYS_thread_create is asked for. A struct rather than five
@@ -499,6 +503,7 @@ struct cosmo_sockaddr {
 #define COSMO_O_TRUNC     0x0200
 #define COSMO_O_APPEND    0x0400
 #define COSMO_O_DIRECTORY 0x10000
+#define COSMO_O_NOFOLLOW  0x20000  /* a symbolic link as the last component is ELOOP, not its target */
 
 /* lseek() whence. */
 #define COSMO_SEEK_SET 0
@@ -512,6 +517,7 @@ struct cosmo_sockaddr {
 #define COSMO_DT_CHR     3
 #define COSMO_DT_FIFO    4
 #define COSMO_DT_SOCK    5
+#define COSMO_DT_LNK     6
 
 struct cosmo_stat {
     uint64_t ino;
@@ -583,6 +589,7 @@ struct cosmo_dirent {
 #define COSMO_EROFS   30
 #define COSMO_ENOTEMPTY 39
 #define COSMO_ENAMETOOLONG 36
+#define COSMO_ELOOP   40   /* too many symbolic links in one resolution */
 #define COSMO_EPIPE   32
 #define COSMO_EMSGSIZE 90
 #define COSMO_EOPNOTSUPP 95

@@ -33,6 +33,9 @@ int stat(const char *path, struct stat *st) { return (int)__syscall_ret(cosmo_st
 int fstat(int fd, struct stat *st) { return (int)__syscall_ret(cosmo_fstat(fd, (struct cosmo_stat *)st)); }
 int mkdir(const char *path, mode_t mode) { return (int)__syscall_ret(cosmo_mkdir(path, mode)); }
 int unlink(const char *path) { return (int)__syscall_ret(cosmo_unlink(path)); }
+int lstat(const char *path, struct stat *st) { return (int)__syscall_ret(cosmo_lstat(path, (struct cosmo_stat *)st)); }
+int symlink(const char *target, const char *path) { return (int)__syscall_ret(cosmo_symlink(target, path)); }
+long readlink(const char *path, char *buf, unsigned long len) { return __syscall_ret(cosmo_readlink(path, buf, len)); }
 int rmdir(const char *path) { return (int)__syscall_ret(cosmo_rmdir(path)); }
 int rename(const char *oldpath, const char *newpath) { return (int)__syscall_ret(cosmo_rename(oldpath, newpath)); }
 void sync(void) { cosmo_sync(); }

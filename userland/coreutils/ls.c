@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int opt_long, opt_all;
 
@@ -15,6 +16,7 @@ static char type_char(unsigned t)
     case DT_CHR: return 'c';
     case DT_FIFO: return 'p';
     case DT_SOCK: return 's';
+    case DT_LNK: return 'l';
     default: return '-';
     }
 }
@@ -27,18 +29,29 @@ static void print_long(const char *dir, const char *name, unsigned type)
         snprintf(path, sizeof(path), "%s/%s", dir, name);
     else
         snprintf(path, sizeof(path), "%s", name);
-    if (stat(path, &st) < 0) {
+    /* lstat: a link's own type and size, so `l` names a link rather
+     * than whatever it points at. */
+    if (lstat(path, &st) < 0) {
         printf("?--------- %8s %s\n", "?", name);
         return;
     }
-    if (type == DT_UNKNOWN)
+    if (type == DT_UNKNOWN || st.st_type == DT_LNK)
         type = st.st_type;
     char mode[10];
     for (int i = 0; i < 9; i++)
         mode[i] = (st.st_mode & (0400u >> i)) ? "rwxrwxrwx"[i] : '-';
     mode[9] = '\0';
-    printf("%c%s %3u %4u %4u %8llu %6llu %s\n", type_char(type), mode, st.st_nlink, st.st_uid, st.st_gid,
-           (unsigned long long)st.st_size, (unsigned long long)st.st_ino, name);
+    char arrow[1024];
+    arrow[0] = '\0';
+    if (type == DT_LNK) {
+        long n = readlink(path, arrow + 4, sizeof(arrow) - 5);
+        if (n > 0) {
+            memcpy(arrow, " -> ", 4);
+            arrow[4 + n] = '\0';
+        }
+    }
+    printf("%c%s %3u %4u %4u %8llu %6llu %s%s\n", type_char(type), mode, st.st_nlink, st.st_uid, st.st_gid,
+           (unsigned long long)st.st_size, (unsigned long long)st.st_ino, name, arrow);
 }
 
 struct entry {

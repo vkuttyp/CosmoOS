@@ -25,6 +25,8 @@ int lx_open_flags(unsigned lx, unsigned *native)
         n |= COSMO_O_APPEND;
     if (lx & LX_O_DIRECTORY)
         n |= COSMO_O_DIRECTORY;
+    if (lx & LX_O_NOFOLLOW)
+        n |= COSMO_O_NOFOLLOW;
     /* Accepted and dropped: no effect on this kernel. */
     unsigned known = LX_O_ACCMODE | LX_O_CREAT | LX_O_EXCL | LX_O_TRUNC | LX_O_APPEND | LX_O_DIRECTORY | LX_O_CLOEXEC |
                      LX_O_NONBLOCK | LX_O_NOCTTY | LX_O_LARGEFILE | LX_O_NOFOLLOW;
@@ -45,6 +47,7 @@ void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out)
     case COSMO_DT_CHR: type = LX_S_IFCHR; break;
     case COSMO_DT_FIFO: type = LX_S_IFIFO; break;
     case COSMO_DT_SOCK: type = LX_S_IFSOCK; break;
+    case COSMO_DT_LNK: type = LX_S_IFLNK; break;
     default: type = LX_S_IFREG; break;
     }
     out->st_mode = type | (st->mode & 07777u);
@@ -166,6 +169,7 @@ uint8_t lx_dirent_type(uint8_t native)
     case COSMO_DT_CHR: return LX_DT_CHR;
     case COSMO_DT_FIFO: return LX_DT_FIFO;
     case COSMO_DT_SOCK: return LX_DT_SOCK;
+    case COSMO_DT_LNK: return LX_DT_LNK;
     default: return LX_DT_UNKNOWN;
     }
 }

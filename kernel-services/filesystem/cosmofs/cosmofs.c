@@ -21,6 +21,7 @@
 
 static const struct vnode_ops cfs_dir_ops;
 static const struct vnode_ops cfs_file_ops;
+static const struct vnode_ops cfs_lnk_ops;
 
 /* --- extents ------------------------------------------------------------- */
 
@@ -812,7 +813,7 @@ void cfs_csum_free(struct cfs *fs, struct cfs_inode *in)
 static void fill_vnode(struct vnode *vn, const struct cfs_inode *in)
 {
     unsigned type = CFS_MODE_TYPE(in->mode);
-    vn->type = type == CFS_TYPE_DIR ? VNODE_DIR : VNODE_REG;
+    vn->type = type == CFS_TYPE_DIR ? VNODE_DIR : type == CFS_TYPE_LNK ? VNODE_LNK : VNODE_REG;
     vn->mode = in->mode & 07777;
     vn->uid = in->uid;
     vn->gid = in->gid;
@@ -820,7 +821,7 @@ static void fill_vnode(struct vnode *vn, const struct cfs_inode *in)
     vn->size = in->size;
     vn->mtime_ns = in->mtime_ns;
     vn->ctime_ns = in->ctime_ns;
-    vn->ops = vn->type == VNODE_DIR ? &cfs_dir_ops : &cfs_file_ops;
+    vn->ops = vn->type == VNODE_DIR ? &cfs_dir_ops : vn->type == VNODE_LNK ? &cfs_lnk_ops : &cfs_file_ops;
 }
 
 /* Referenced vnode for `ino` in a snapshot's tree (tag != 0) or the live
@@ -1370,6 +1371,118 @@ out:
     return rc;
 }
 
+/*
+ * A symbolic link's target is its own data block, written inside the
+ * transaction that writes the inode and adds the entry -- not through
+ * the page cache, which reaches disk at write-back and could commit a
+ * zero-length link whose target is not there yet
+ * (docs/audit/next-subsystem-symlink.md, "cosmofs"). Every failure after
+ * an allocation gives the block and the inode number back, so a refused
+ * symlink leaves nothing unreachable behind.
+ */
+static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const char *target,
+                       struct vnode **out)
+{
+    struct cfs *fs = cfs_of(dir->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;
+    if (len == 0 || len > CFS_NAME_MAX)
+        return -ENAMETOOLONG;
+    size_t tlen = strnlen(target, CFS_BLOCK);
+    if (tlen == 0 || tlen >= CFS_BLOCK)
+        return -ENAMETOOLONG;   /* a target is one block, as on any filesystem that stores it there */
+    if (fs->sb.version < 8)
+        return -EOPNOTSUPP;     /* an older kernel would read this as a regular file */
+    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    if (block == NULL)
+        return -ENOMEM;
+
+    mutex_lock(&fs->lock);
+    uint64_t lblk;
+    unsigned slot;
+    uint64_t ino = 0;
+    bool ino_taken = false;
+    struct cfs_inode in;
+    int rc = dir_find(fs, dir, name, len, block, &lblk, &slot);
+    if (rc == 0) {
+        rc = -EEXIST;
+        goto out;
+    }
+    if (rc != -ENOENT)
+        goto out;
+    rc = cfs_inode_alloc(fs, &ino);
+    if (rc)
+        goto out;
+    ino_taken = true;
+    memset(&in, 0, sizeof(in));
+    in.mode = CFS_MODE(CFS_TYPE_LNK, 0777);   /* a link's own mode is never consulted */
+    in.uid = cred_current()->euid;
+    in.gid = cred_current()->egid;
+    in.nlink = 1;
+    in.ino = ino;
+    in.parent = dir->ino;
+    in.csum_algo = fs->encrypted ? CFS_CSUM_POLY1305 : CFS_CSUM_CRC32C;
+    in.compress_algo = CFS_COMPRESS_NONE;   /* one short block: nothing to gain, and readlink stays a read */
+    in.size = tlen;
+    in.mtime_ns = in.ctime_ns = vfs_now_ns();
+    memset(block, 0, CFS_BLOCK);
+    memcpy(block, target, tlen);
+    rc = data_write_block(fs, &in, 0, block, CFS_ALLOC_META);
+    if (rc)
+        goto out;
+    rc = cfs_inode_write(fs, ino, &in);
+    if (rc)
+        goto undo;
+    rc = dir_add(fs, dir, name, len, ino, CFS_TYPE_LNK, block);
+    if (rc)
+        goto undo;
+    rc = cfs_vnode_get(fs, ino, out);
+    if (rc == 0)
+        ino_taken = false;   /* the entry names it now */
+    goto out;
+undo:
+    /* The block this call allocated, and the inode number, go back: the
+     * directory never named either, so nothing else can find them. */
+    if (cfs_ext_count(&in.direct[0]) != 0)
+        cfs_free_block_deferred(fs, in.direct[0].start);
+    cfs_inode_discard(fs, ino);
+    ino_taken = false;
+out:
+    if (ino_taken)
+        cfs_inode_discard(fs, ino);
+    mutex_unlock(&fs->lock);
+    kfree(block);
+    return rc;
+}
+
+static int cfs_readlink(struct vnode *vn, char *buf, size_t len)
+{
+    struct cfs *fs = cfs_of(vn->mnt);
+    if (fs == NULL || fs->failed)
+        return -EIO;
+    uint64_t tlen = vn->size;
+    if (tlen == 0 || tlen >= CFS_BLOCK)
+        return -EIO;
+    uint8_t *block = kmalloc(CFS_BLOCK, 0);
+    if (block == NULL)
+        return -ENOMEM;
+    mutex_lock(&fs->lock);
+    uint64_t pblk = 0;
+    int rc = cfs_map(fs, cfs_inode_of(vn), 0, &pblk);
+    if (rc > 0)
+        rc = cfs_data_read_verified(fs, cfs_inode_of(vn), 0, pblk, block);
+    else if (rc == 0)
+        rc = -EIO;   /* a link with no block is not a link */
+    mutex_unlock(&fs->lock);
+    if (rc == 0) {
+        size_t n = tlen < len ? (size_t)tlen : len;
+        memcpy(buf, block, n);
+        rc = (int)n;
+    }
+    kfree(block);
+    return rc;
+}
+
 static int cfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
     if (is_snapdir(dir) || snap_tag_of(dir))
@@ -1889,6 +2002,7 @@ static void cfs_evict(struct vnode *vn)
 static const struct vnode_ops cfs_dir_ops = {
     .lookup = cfs_lookup,
     .create = cfs_create,
+    .symlink = cfs_symlink,
     .mkdir = cfs_mkdir,
     .unlink = cfs_unlink,
     .rmdir = cfs_rmdir,
@@ -1904,5 +2018,12 @@ static const struct vnode_ops cfs_file_ops = {
     .writepages = cfs_writepages,
     .truncate = cfs_truncate,
     .sync = cfs_vnode_sync,
+    .evict = cfs_evict,
+};
+
+/* A link is never a page: its target is read from its block directly,
+ * so there is no readpage or writepage here. */
+static const struct vnode_ops cfs_lnk_ops = {
+    .readlink = cfs_readlink,
     .evict = cfs_evict,
 };

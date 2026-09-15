@@ -212,6 +212,8 @@ void cfs_free_block_deferred(struct cfs *fs, uint64_t blk);
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
 int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in);
 int cfs_inode_alloc(struct cfs *fs, uint64_t *ino);
+/* Undo the most recent cfs_inode_alloc, under fs->lock. */
+void cfs_inode_discard(struct cfs *fs, uint64_t ino);
 int cfs_commit(struct cfs *fs);
 int cfs_sync_vnodes(struct cfs *fs);
 int cfs_data_read(struct cfs *fs, uint64_t blk, void *buf);

@@ -428,7 +428,8 @@ static struct file *file_of(int h, unsigned rights)
 static int64_t sys_open(struct syscall_args *a)
 {
     unsigned flags = (unsigned)a->a[1];
-    if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND | COSMO_O_DIRECTORY))
+    if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND |
+                  COSMO_O_DIRECTORY | COSMO_O_NOFOLLOW))
         return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
@@ -453,6 +454,61 @@ static int64_t sys_open(struct syscall_args *a)
     int h = handle_install(&process_current()->handles, &f->obj, rights);
     file_put(f);   /* the table holds its own reference */
     return h;
+}
+
+/* The three symbolic-link calls. readlink copies without a terminator,
+ * as POSIX says and as the walk wants (docs/kernel-services/vfs/api.md). */
+static int64_t sys_symlink(struct syscall_args *a)
+{
+    char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(target, a->a[0], sizeof(target));
+    if (rc < 0)
+        return rc;
+    rc = get_path(a->a[1], path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_symlink(cwd, path, target);
+    vnode_put(cwd);
+    return rc;
+}
+
+static int64_t sys_readlink(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    size_t len = (size_t)a->a[2];
+    if (len == 0)
+        return -EINVAL;
+    if (len > VFS_PATH_MAX)
+        len = VFS_PATH_MAX;
+    char *buf = kmalloc(len, 0);
+    if (buf == NULL)
+        return -ENOMEM;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_readlink(cwd, path, buf, len);
+    vnode_put(cwd);
+    if (rc > 0 && copy_to_user(a->a[1], buf, (size_t)rc) != 0)
+        rc = -EFAULT;
+    kfree(buf);
+    return rc;
+}
+
+static int64_t sys_lstat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct cosmo_stat st;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_lstat(cwd, path, &st);
+    vnode_put(cwd);
+    if (rc)
+        return rc;
+    return copy_to_user(a->a[1], &st, sizeof(st)) ? -EFAULT : 0;
 }
 
 static int64_t sys_stat(struct syscall_args *a)
@@ -1720,6 +1776,9 @@ static const syscall_fn native_table[SYS_COUNT] = {
     [SYS_close] = sys_close,
     [SYS_open] = sys_open,
     [SYS_stat] = sys_stat,
+    [SYS_symlink] = sys_symlink,
+    [SYS_readlink] = sys_readlink,
+    [SYS_lstat] = sys_lstat,
     [SYS_fstat] = sys_fstat,
     [SYS_lseek] = sys_lseek,
     [SYS_mkdir] = sys_mkdir,

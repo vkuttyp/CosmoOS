@@ -533,6 +533,22 @@ int cfs_inode_alloc(struct cfs *fs, uint64_t *ino)
     return 0;
 }
 
+/*
+ * Give back an inode number a failed creation took. The allocator is a
+ * bump allocator and the caller holds fs->lock, so the number is still
+ * the last one handed out and rolling back is exact; a number that is
+ * not (a later allocation intervened, which cannot happen under the
+ * lock) is simply left, and the slot stays free because nothing ever
+ * wrote an inode with a nonzero nlink there.
+ */
+void cfs_inode_discard(struct cfs *fs, uint64_t ino)
+{
+    if (ino != 0 && ino + 1 == fs->sb.next_ino)
+        fs->sb.next_ino--;
+    if (fs->sb.inode_count > 0)
+        fs->sb.inode_count--;
+}
+
 /* --- commit ----------------------------------------------------------------- */
 
 /* Write the in-memory bitmap chunks that changed, copy-on-write, until

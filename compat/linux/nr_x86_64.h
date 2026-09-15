@@ -72,6 +72,7 @@
 #define LX_rmdir 84
 #define LX_creat 85
 #define LX_unlink 87
+#define LX_symlink 88
 #define LX_readlink 89
 #define LX_umask 95
 #define LX_gettimeofday 96
@@ -117,6 +118,7 @@
 #define LX_newfstatat 262
 #define LX_unlinkat 263
 #define LX_renameat 264
+#define LX_symlinkat 266
 #define LX_readlinkat 267
 #define LX_faccessat 269
 #define LX_set_robust_list 273

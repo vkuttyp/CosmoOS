@@ -33,10 +33,12 @@ struct ramfs_node {
     unsigned nr_entries;
     const struct chrdev_ops *chr;   /* character nodes */
     void *chr_priv;
+    char *target;               /* symbolic links: the path, NUL terminated */
 };
 
 static const struct vnode_ops ramfs_dir_ops;
 static const struct vnode_ops ramfs_file_ops;
+static const struct vnode_ops ramfs_lnk_ops;
 
 static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t mode, struct vnode *parent)
 {
@@ -56,7 +58,7 @@ static struct vnode *ramfs_new(struct mount *mnt, enum vnode_type type, uint32_t
      * namespace, the calling process afterwards. */
     vn->uid = cred_current()->euid;
     vn->gid = cred_current()->egid;
-    vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : &ramfs_file_ops;
+    vn->ops = type == VNODE_DIR ? &ramfs_dir_ops : type == VNODE_LNK ? &ramfs_lnk_ops : &ramfs_file_ops;
     vn->fs_priv = n;
     vn->flags |= VNODE_PINNED;   /* the reference from vnode_alloc is the pin */
     vn->nlink = type == VNODE_DIR ? 2 : 1;
@@ -137,6 +139,46 @@ static int ramfs_create(struct vnode *dir, const char *name, size_t len, uint32_
 static int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out)
 {
     return ramfs_create_common(dir, name, len, mode, VNODE_DIR, out);
+}
+
+/*
+ * A link's target is the node's own bytes, not a page: ramfs_lnk_ops has
+ * no readpage or writepage, so a link is never in the page cache (which
+ * for ramfs is the store) and `size` is the target's length, as stat
+ * reports it.
+ */
+static int ramfs_symlink(struct vnode *dir, const char *name, size_t len, const char *target,
+                         struct vnode **out)
+{
+    size_t tlen = strnlen(target, VFS_PATH_MAX);
+    if (tlen == 0 || tlen >= VFS_PATH_MAX)
+        return -ENAMETOOLONG;
+    char *copy = kmalloc(tlen + 1, 0);
+    if (copy == NULL)
+        return -ENOMEM;
+    memcpy(copy, target, tlen);
+    copy[tlen] = '\0';
+    int rc = ramfs_create_common(dir, name, len, 0777, VNODE_LNK, out);
+    if (rc) {
+        kfree(copy);
+        return rc;
+    }
+    struct ramfs_node *n = (*out)->fs_priv;
+    n->target = copy;
+    (*out)->size = tlen;
+    return 0;
+}
+
+static int ramfs_readlink(struct vnode *vn, char *buf, size_t len)
+{
+    const struct ramfs_node *n = vn->fs_priv;
+    if (n->target == NULL)
+        return -EIO;
+    size_t tlen = strlen(n->target);
+    if (tlen > len)
+        tlen = len;
+    memcpy(buf, n->target, tlen);
+    return (int)tlen;
 }
 
 /* Drop the entry and its pin. Caller holds dir and victim locks. */
@@ -267,7 +309,10 @@ static int ramfs_truncate(struct vnode *vn, uint64_t size)
 
 static void ramfs_evict(struct vnode *vn)
 {
-    kfree(vn->fs_priv);
+    struct ramfs_node *n = vn->fs_priv;
+    if (n != NULL)
+        kfree(n->target);
+    kfree(n);
     vn->fs_priv = NULL;
 }
 
@@ -279,6 +324,7 @@ static const struct vnode_ops ramfs_dir_ops = {
     .rmdir = ramfs_rmdir,
     .rename = ramfs_rename,
     .readdir = ramfs_readdir,
+    .symlink = ramfs_symlink,
     .evict = ramfs_evict,
 };
 
@@ -286,6 +332,11 @@ static const struct vnode_ops ramfs_file_ops = {
     .readpage = ramfs_readpage,
     .writepage = ramfs_writepage,
     .truncate = ramfs_truncate,
+    .evict = ramfs_evict,
+};
+
+static const struct vnode_ops ramfs_lnk_ops = {
+    .readlink = ramfs_readlink,
     .evict = ramfs_evict,
 };
 
