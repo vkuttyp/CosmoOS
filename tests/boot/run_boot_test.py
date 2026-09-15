@@ -97,6 +97,11 @@ IOMMU = os.environ.get("QEMU_IOMMU", "1") != "0"
 # AArch64: firmware hands over at EL2 unless QEMU_EL2=0
 # (docs/kernel/arch/aarch64/design.md, "Exception level 2").
 EL2 = ARCH == "aarch64" and os.environ.get("QEMU_EL2", "1") != "0"
+# The guard boot (make test-guard): the image on a CPU model with the
+# protections the default model lacks -- SMEP/SMAP/UMIP, PAN -- where the
+# kernel's guard on its access to user memory is live and must say so
+# (docs/kernel/security/design.md, "Hardening").
+GUARD = os.environ.get("QEMU_GUARD", "0") != "0"
 
 BOOT_MARKERS = [
     r"^cosmoboot-uefi v\d+",
@@ -132,6 +137,15 @@ REQUIRED_MARKERS = BOOT_MARKERS + [
     r"^\[ INFO\] init exited with status 0",
     r"^\[ INFO\] boot complete",
 ]
+# The guard boot: every protection on, the guard proved live by the
+# self-test, UMIP proved from user mode (x86-64); the WARN that names an
+# absent protection must not appear.
+if GUARD:
+    if ARCH == "aarch64":
+        REQUIRED_MARKERS += [r"^\[ INFO\] hardening: aarch64: pan wxn$"]
+    else:
+        REQUIRED_MARKERS += [r"^\[ INFO\] hardening: x86-64: nx smep smap umip$", r"^usertest: umip: enforced$"]
+    REQUIRED_MARKERS += [r"^\[ INFO\] selftest: uaccess-guard: guard live"]
 # The loader kept EL2 and the kernel can reach it.
 if EL2:
     REQUIRED_MARKERS += [
@@ -322,6 +336,10 @@ FORBIDDEN_MARKERS = [
     # self-tests' own reports say "expected" and do not match.
     r"\] (soft|hard) lockup:",
 ]
+# The guard boot: the WARN naming an absent protection contradicts the
+# required INFO line and fails the run on its own.
+if GUARD:
+    FORBIDDEN_MARKERS += [r"hardening: absent"]
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
 # complete and the failure exit code must be delivered.
@@ -350,6 +368,26 @@ PANIC_REQUIRED_MARKERS = BOOT_MARKERS + [
 PANIC_FORBIDDEN_MARKERS = [
     r"^\[ INFO\] boot complete",
     r"crash test: write did not fault",
+    r"KERNEL PANIC \(recursive\)",
+    r"cosmoboot: FATAL",
+]
+# --expect-panic wxn (CRASH_TEST=2 kernel, AArch64): the kernel executed
+# a page it mapped writable and executable on purpose; SCTLR_EL1.WXN
+# must have made the fetch an instruction abort, reported by the
+# page-fault path's existing wording (kernel/memory/vmm.c,
+# kernel/arch/aarch64/trap.c). The page is the fault test's hole.
+WXN_REQUIRED_MARKERS = BOOT_MARKERS + [
+    r"^\[ INFO\] crash test: executing a writable page on purpose",
+    r"^KERNEL PANIC: page fault: kernel execute at 0xffff900000000000 \(protection\): ",
+    r"^trap 1029 ",
+    r"^ELR=ffff900000000000 SPSR=",
+    r"^FAR=ffff900000000000 \(protection read kernel instruction-fetch\)",
+    r"^stack trace:",
+    r"^halting\.",
+]
+WXN_FORBIDDEN_MARKERS = [
+    r"^\[ INFO\] boot complete",
+    r"crash test: a writable page executed; WXN is off",
     r"KERNEL PANIC \(recursive\)",
     r"cosmoboot: FATAL",
 ]
@@ -433,9 +471,11 @@ def main():
     ap.add_argument("--timeout", type=float, default=180.0, help="seconds before the run is killed")
     ap.add_argument("--expect-selftest", choices=["auto", "yes", "no"], default="auto",
                     help="require a SELFTEST: PASS line (auto: only if a SELFTEST line appears)")
-    ap.add_argument("--expect-panic", action="store_true",
-                    help="the kernel was built with CRASH_TEST=1: require a full panic report "
-                         "and the failure exit code instead of a clean boot")
+    ap.add_argument("--expect-panic", nargs="?", const="fault", default=None, choices=["fault", "wxn"],
+                    help="the kernel was built to crash on purpose: require that crash's panic report "
+                         "and the failure exit code instead of a clean boot. 'fault' (the default: "
+                         "CRASH_TEST=1, an unmapped write) or 'wxn' (CRASH_TEST=2, a writable page "
+                         "executed; AArch64)")
     ap.add_argument("--kernel", default=None,
                     help="the kernel ELF: symbolise the addresses of a panic, watchdog or lockup "
                          "report in the harness's own report (docs/kernel/diagnostics/design.md)")
@@ -443,7 +483,11 @@ def main():
                     help="the llvm-symbolizer to use with --kernel")
     args = ap.parse_args()
 
-    if args.expect_panic:
+    if args.expect_panic == "wxn":
+        required, forbidden = WXN_REQUIRED_MARKERS, WXN_FORBIDDEN_MARKERS
+        expected_exit = EXIT_FAILURE_VALUE
+        args.expect_selftest = "no"
+    elif args.expect_panic:
         required, forbidden = PANIC_REQUIRED_MARKERS, PANIC_FORBIDDEN_MARKERS
         expected_exit = EXIT_FAILURE_VALUE
         args.expect_selftest = "no"

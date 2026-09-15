@@ -377,6 +377,17 @@ which every context shares). Which root a VA belongs to is decided by bit
 context refuses high ones (`-EINVAL`), keeping the generic invariant that
 a mapping lives in exactly one context.
 
+**WXN.** `arch_mmu_activate` sets `SCTLR_EL1.WXN` when it installs the
+kernel root on a CPU (the boot CPU from `vmm_init`, each AP from
+`aarch64_ap_entry`): from then on a writable page is execute-never for
+EL1 and EL0 whatever its leaf says. Only there, because the loader's
+tables, active until that write, map RAM writable and executable (the
+loader clears the bit for that reason) and the kernel's own tables are
+W^X (M13). Nothing legitimate is denied: modules are remapped RX before
+they run, the AP trampoline is RX, user W+X is refused at every door.
+`make test-wxn` proves the bit denies (`testing.md`, "WXN"), and the
+`hardening:` boot line reports it read back from `SCTLR_EL1`.
+
 Descriptor bits: `AF` always set (no access-flag faults), `SH` inner
 shareable, `AttrIndx` 0 (WB) / 1 (device) / 2 (non-cacheable, used for
 `VM_CACHE_WT`, which ARM lacks), `nG` on user leaves, `AP[2:1]`: kernel
@@ -717,6 +728,41 @@ Anything else that reaches EL2 (an exception, an unknown HVC) returns to
 where it came from: the stub is not a hypervisor and refuses to pretend.
 `el2_set_vectors` is what the EL2 backend will use to install its own
 world-switch vectors; until then the stub is all there is.
+
+**The handover when firmware keeps VHE.** EDK2 running at EL2 on a core
+with FEAT_VHE hands over with `HCR_EL2.{E2H,TGE}` set (Debian's AAVMF
+2025.02 on QEMU's `cortex-a76` does: `HCR_EL2 0x488000038`). With `E2H`
+set, an `msr <reg>_el1` executed at EL2 writes the **EL2** register of
+that name, so a loader that prepares EL1 the obvious way prepares the
+wrong registers and the kernel ERETs into whatever EL1 state firmware
+left -- a hang with no output, right after `jumping to kernel entry`.
+`cpu_jump_to_kernel` therefore reads `HCR_EL2` and, when `E2H` is set,
+writes MAIR, TCR, TTBR0, TTBR1 and SCTLR through their `_EL12` aliases
+(op1 = 5, as raw encodings: the loader is built for ARMv8.0) and
+invalidates with `tlbi alle1`, since `tlbi vmalle1` with `TGE` set names
+the EL2&0 regime rather than the EL1&0 one those tables are for (`ALLE1`
+is fixed to EL1&0 whatever `TGE` says, which is why a VHE host's
+hypervisor uses it); `jump_from_el2` then issues `tlbi vmalle1` as well,
+once `E2H` and `TGE` are certainly clear and only one reading is
+possible. It
+prints `cosmoboot: EL2 handover in VHE host mode …` when it takes that
+path. `jump_from_el2` then disables the EL2 MMU *before* clearing `E2H`,
+because clearing it reinterprets `TCR_EL2` and `SCTLR_EL2` in the
+non-VHE layout while the code is still running under them; with the MMU
+off there is no translation to lose, and nothing between that write and
+the ERET touches memory. `cortex-a72` has no VHE, so this path never ran
+until the hardening unit's guard boot put a PAN-capable core under CI's
+firmware (PR #140).
+
+Once the switch is installed on a CPU the stub's calls are gone there,
+so giving EL2 back is the switch's job: `HV_EL2_CALL_HANDBACK` (`x1` =
+the stub's physical base) installs the stub's vectors again and
+returns 0. `arch_hv_disable` uses it on every CPU that took the switch
+(`el2_ready_here`'s per-CPU flag, cleared only when the call succeeded)
+when the boot self-check fails, so the stub answers again and the `el2`
+self-test holds whether a backend was never present or was present and
+disabled; a later run of a guest installs the switch afresh through the
+stub. The switch reports version 3 for this call.
 
 PSCI keeps working, and the reason is worth writing down because it is
 not what one would guess: with `virtualization=on` the firmware declares

@@ -101,6 +101,11 @@ void x86_syscall_c(struct x86_syscall_frame *frame)
     x86_syscall_return_check(frame);
 }
 
+bool arch_user_guard_present(void)
+{
+    return x86_cpu_info()->has_smap;
+}
+
 void arch_user_access_begin(void)
 {
     if (x86_cpu_info()->has_smap)

@@ -660,6 +660,20 @@ bool selftest_asid_alloc(const char **reason)
  * the second space would read the first's byte out of a TLB entry that
  * should not apply to it.
  */
+/* One byte at a user address of the space this CPU has active, read
+ * the way the kernel reads user memory: inside the guard bracket. On a
+ * core with PAN (or SMAP) the raw copy outside the bracket faults on a
+ * page user mode may access, and the fixup reports "1 byte not
+ * copied" -- which is what the hardening unit's second boot found these
+ * tests doing on cortex-a76, four tests failing on a correct ASID. */
+static size_t user_read_byte(uint8_t *v, uint64_t va)
+{
+    arch_user_access_begin();
+    size_t left = arch_copy_user_raw(v, (const void *)(uintptr_t)va, 1);
+    arch_user_access_end();
+    return left;
+}
+
 bool selftest_asid_isolation(const char **reason)
 {
     if (arch_mmu_asid_bits() == 0) {
@@ -688,13 +702,13 @@ bool selftest_asid_isolation(const char **reason)
         uint8_t v = 0;
         vm_space_switch(cur, a);
         cur = a;
-        if (arch_copy_user_raw(&v, (const void *)(uintptr_t)VA, 1) != 0)
+        if (user_read_byte(&v, VA) != 0)
             faults++;
         else if (v != 0xAA)
             wrong++;
         vm_space_switch(cur, b);
         cur = b;
-        if (arch_copy_user_raw(&v, (const void *)(uintptr_t)VA, 1) != 0)
+        if (user_read_byte(&v, VA) != 0)
             faults++;
         else if (v != 0xBB)
             wrong++;
@@ -764,13 +778,13 @@ bool selftest_asid_rollover(const char **reason)
     arch_irq_state_t s = arch_irq_save();
     vm_space_switch(restore, a);
     tag_a = a->mmu.asid;
-    fa = arch_copy_user_raw(&va, (const void *)(uintptr_t)VA, 1);
+    fa = user_read_byte(&va, VA);
     /* Not by allocating: that would stamp this CPU as flushed and eat
      * the flush under test. */
     bool rolled = asid_test_force_rollover();
     vm_space_switch(a, b);
     tag_b = b->mmu.asid;
-    fb = arch_copy_user_raw(&vb, (const void *)(uintptr_t)VA, 1);
+    fb = user_read_byte(&vb, VA);
     vm_space_switch(b, restore);
     arch_irq_restore(s);
 
@@ -837,7 +851,7 @@ bool selftest_asid_destroy_reuse(const char **reason)
     arch_irq_state_t s = arch_irq_save();
     vm_space_switch(restore, old_sp);
     tag_old = old_sp->mmu.asid;
-    f1 = arch_copy_user_raw(&v1, (const void *)(uintptr_t)VA, 1);
+    f1 = user_read_byte(&v1, VA);
     vm_space_switch(old_sp, restore);
     arch_irq_restore(s);
 
@@ -860,7 +874,7 @@ bool selftest_asid_destroy_reuse(const char **reason)
     s = arch_irq_save();
     vm_space_switch(restore, new_sp);
     tag_new = new_sp->mmu.asid;
-    f2 = arch_copy_user_raw(&v2, (const void *)(uintptr_t)VA, 1);
+    f2 = user_read_byte(&v2, VA);
     vm_space_switch(new_sp, restore);
     uint64_t gen_end = asid_generation();
     arch_irq_restore(s);

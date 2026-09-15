@@ -92,7 +92,15 @@ A triple fault during the handoff shows in QEMU's `-d int` log as a
 ## AArch64 exception level 2
 
 `scripts/qemu-run.sh` passes `virtualization=on` unless `QEMU_EL2=0`, so
-the default AArch64 run has firmware hand over at EL2 and the loader
+The firmware matters as much as the CPU model: EDK2 hands EL2 over in
+VHE host mode on a core that has FEAT_VHE, and the loader has to reach
+EL1's registers through their `_EL12` aliases there
+(`docs/kernel/arch/aarch64/design.md`, "The handover when firmware
+keeps VHE"). The combination is covered by the guard boot under CI's
+Debian AAVMF; locally both firmwares and both cores were run
+(`make test-guard` with `OVMF_CODE` pointing at each).
+
+The default AArch64 run has firmware hand over at EL2 and the loader
 keep it (`docs/kernel/arch/aarch64/design.md`, "Exception level 2").
 Two markers are required in that configuration —
 `cosmoboot: EL2 stub at 0x… (N bytes)` from the loader and
@@ -100,7 +108,10 @@ Two markers are required in that configuration —
 silently loses EL2 fails the boot test instead of passing quietly. The
 `el2` self-test then asks the stub for its version, hands it a different
 vector table and takes it back, and checks an unknown selector is
-refused; `QEMU_EL2=0` exercises the other path, where the same test
+refused (and, when a backend took EL2 and was then disabled by the boot
+self-check, the stub must answer again: `arch_hv_disable` hands it
+back through the switch's `HV_EL2_CALL_HANDBACK`, which the
+`hv-disabled` self-test exercises with an injected self-check failure); `QEMU_EL2=0` exercises the other path, where the same test
 asserts that there is no stub and that `el2_set_vectors` refuses. Both
 configurations run four CPUs, which is what proves the secondary
 trampoline's own drop from EL2 works: PSCI starts every AP at EL2 too.

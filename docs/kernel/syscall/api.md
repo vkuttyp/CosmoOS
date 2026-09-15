@@ -38,7 +38,7 @@ kernel stack.
 | 8 | `munmap` | `void *addr, size_t len` | 0 | `EINVAL` (range, or a page in it is unmapped) |
 | 9 | `log` | `const char *s, size_t len` | 0 | `EFAULT`, `EINVAL` (len ≥ 200), `EAGAIN` (an unprivileged caller past 64 lines, refilled at 16 per second) |
 | 10 | `close` | `int h` | 0; the handle is closed even when an error is returned | `EBADF`; a file's pending write-back error (`EIO`, once per open file: `docs/kernel-services/vfs/design.md`, "Write-back errors") |
-| 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
+| 11 | `open` | `const char *path, int flags, uint32_t mode` | handle | `EINVAL` (an unknown flag bit), path errors, `EEXIST`, `EISDIR`, `EROFS`, `EMFILE` |
 | 12 | `stat` | `const char *path, struct cosmo_stat *st` | 0 | path errors, `EFAULT` |
 | 13 | `fstat` | `int h, struct cosmo_stat *st` | 0 | `EBADF`, `EFAULT` |
 | 14 | `lseek` | `int h, int64_t off, int whence` | new position | `EBADF`, `EINVAL`, `ESPIPE` |
@@ -48,7 +48,7 @@ kernel stack.
 | 18 | `rename` | `const char *old, const char *new` | 0 | path errors, `EXDEV`, `ENOTEMPTY`, `EBUSY` |
 | 19 | `getdents` | `int h, void *buf, size_t len` | bytes, 0 at end | `EBADF`, `EFAULT`, `ENOTDIR`, `EINVAL` |
 | 20 | `sync` | none | 0 | filesystem error |
-| 21 | `mount` | `source, target, fstype, flags` | 0 | `EPERM`, `ENODEV`, `EBUSY`, `EIO` |
+| 21 | `mount` | `source, target, fstype, flags` (`COSMO_MOUNT_RDONLY`) | 0 | `EPERM`, `EINVAL` (an unknown flag bit), `ENODEV`, `EBUSY`, `EIO` |
 | 22 | `umount` | `const char *target, unsigned flags` (`COSMO_UMOUNT_FORCE`) | 0 | `EPERM`, `EINVAL`, `EBUSY`, the commit's error |
 | 23 | `socket` | `int family, int type, int proto` (`type` may carry `COSMO_SOCK_NONBLOCK` 0x800) | handle (READ and WRITE) | `EAFNOSUPPORT`, `EINVAL`, `ENOMEM`, `EMFILE` |
 | 24 | `bind` | `int h, const struct cosmo_sockaddr *sa, size_t len` | 0 | `EBADF`, `EFAULT`, `EINVAL`, `EAFNOSUPPORT`, `EPERM`, `EADDRINUSE`, `EADDRNOTAVAIL` |
@@ -148,8 +148,16 @@ Details per call:
   a pipe returns what is buffered or 0 when every write end is gone.
 - **sleep_ns**: bounded to 3600 s to catch garbage arguments; the wait
   is a timer sleep, resolution is the 250 Hz tick.
+- **Unknown flag bits**: a bit the kernel does not define in a flags
+  word is `EINVAL`, before any side effect -- `mmap` (`COSMO_MAP_*`),
+  `mount` (`COSMO_MOUNT_RDONLY`), `umount` (`COSMO_UMOUNT_FORCE`), `open`
+  (`COSMO_O_*`), `wait` (`COSMO_W*`) -- so a program can learn what the
+  kernel it runs on supports and a future flag cannot be silently
+  ignored. The Linux personality keeps Linux's rule for its own flag
+  words, which is to ignore what it does not know.
 - **mmap**: `len` must be a non-zero page multiple; `flags` must
   include `COSMO_MAP_ANONYMOUS` (file mappings arrive with the VFS);
+  any other bit is `EINVAL`;
   `prot` is any subset of READ/WRITE/EXEC except WRITE+EXEC (W^X);
   `PROT_NONE` reserves the range: every access, from user code or from
   a system call given a pointer into it, faults (`-EFAULT` for the

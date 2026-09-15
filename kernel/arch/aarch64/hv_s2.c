@@ -12,9 +12,27 @@
 #include <kernel/string.h>
 
 #include <arch/hv.h>
+#include <arch/hv_s2_core.h>
 #include <aarch64/hv_s2.h>
 
 #define S2_ENTRIES 512u
+
+/* The walk's shape for this machine's physical address range: set once
+ * at probe (hv_s2_configure), the level-0 start from one page until
+ * then, which is what the host test builds. The root is the only table
+ * whose size and index width depend on it. */
+static struct hv_s2_layout g_layout = { 3, 0, 2, HV_S2_INPUT_MAX };
+
+void hv_s2_configure(unsigned pa_bits)
+{
+    hv_s2_layout(pa_bits, &g_layout);
+}
+
+const struct hv_s2_layout *hv_s2_current_layout(void)
+{
+    return &g_layout;
+}
+
 #define S2_LARGE_SIZE (2u * 1024 * 1024)
 
 /* A table descriptor is valid + table; a leaf is valid + page (level 3)
@@ -54,9 +72,17 @@ static inline bool present(uint64_t e)
     return (e & S2_VALID) != 0;
 }
 
-static inline unsigned idx(uint64_t ipa, unsigned level)   /* level 3 = top .. 0 = last */
+/* level 3 = a level-0 start .. 0 = last. The root (the start level) is
+ * indexed by every bit above its span: with concatenated root pages the
+ * index is wider than nine bits by the root's order. */
+static inline unsigned entries_at(unsigned level)
 {
-    return (unsigned)((ipa >> (12 + 9 * level)) & 0x1FF);
+    return level == g_layout.start_level ? S2_ENTRIES << g_layout.root_order : S2_ENTRIES;
+}
+
+static inline unsigned idx(uint64_t ipa, unsigned level)
+{
+    return (unsigned)((ipa >> (12 + 9 * level)) & (entries_at(level) - 1));
 }
 
 static paddr_t table_alloc(void)
@@ -67,24 +93,30 @@ static paddr_t table_alloc(void)
 
 paddr_t hv_s2_create(void)
 {
-    return table_alloc();
+    /* The buddy allocator returns a block naturally aligned to its
+     * order, which is what concatenated tables need. */
+    struct page *pg = pmm_alloc_pages(g_layout.root_order, PMM_FLAGS_ZERO);
+    return pg ? page_to_phys(pg) : 0;
 }
 
 static void destroy_level(paddr_t table, unsigned level)
 {
     uint64_t *t = phys_to_virt(table);
     if (level > 0) {
-        for (unsigned i = 0; i < S2_ENTRIES; i++)
+        for (unsigned i = 0; i < entries_at(level); i++)
             if (present(t[i]) && (t[i] & S2_TABLE))   /* a block leaf has bit 1 clear */
                 destroy_level(t[i] & S2_ADDR_MASK, level - 1);
     }
-    pmm_free_page(phys_to_page(table));
+    if (level == g_layout.start_level)
+        pmm_free_pages(phys_to_page(table), g_layout.root_order);
+    else
+        pmm_free_page(phys_to_page(table));
 }
 
 void hv_s2_destroy(paddr_t root)
 {
     if (root)
-        destroy_level(root, 3);
+        destroy_level(root, g_layout.start_level);
 }
 
 /* The entry for `ipa` at `stop` (0 = 4 KiB page, 1 = 2 MiB block), NULL
@@ -92,7 +124,7 @@ void hv_s2_destroy(paddr_t root)
 static uint64_t *walk_to(paddr_t root, uint64_t ipa, bool create, unsigned stop)
 {
     paddr_t table = root;
-    for (unsigned level = 3; level > stop; level--) {
+    for (unsigned level = g_layout.start_level; level > stop; level--) {
         uint64_t *t = phys_to_virt(table);
         uint64_t e = t[idx(ipa, level)];
         if (present(e) && !(e & S2_TABLE))
@@ -184,10 +216,10 @@ bool hv_s2_query(paddr_t root, uint64_t ipa, paddr_t *pa)
 
 static unsigned count_level(paddr_t table, unsigned level)
 {
-    unsigned n = 1;
+    unsigned n = level == g_layout.start_level ? 1u << g_layout.root_order : 1u;
     if (level > 0) {
         const uint64_t *t = phys_to_virt(table);
-        for (unsigned i = 0; i < S2_ENTRIES; i++)
+        for (unsigned i = 0; i < entries_at(level); i++)
             if (present(t[i]) && (t[i] & S2_TABLE))
                 n += count_level(t[i] & S2_ADDR_MASK, level - 1);
     }
@@ -196,17 +228,23 @@ static unsigned count_level(paddr_t table, unsigned level)
 
 unsigned hv_s2_table_pages(paddr_t root)
 {
-    return root ? count_level(root, 3) : 0;
+    return root ? count_level(root, g_layout.start_level) : 0;
 }
 
-/* VTCR_EL2 for a four-level 4 KiB walk over `pa_bits` of output, which
- * is what ID_AA64MMFR0_EL1.PARange reports: T0SZ = 64 - pa_bits, SL0 = 2
- * (start at level 1 of four), inner-shareable write-back both ways. The
- * SMMU driver derives its stage-2 configuration the same way, for the
- * same reason: assuming 48 bits is what a 44-bit machine refuses. */
+/* VTCR_EL2 for a 4 KiB walk over `pa_bits` of output, which is what
+ * ID_AA64MMFR0_EL1.PARange reports: T0SZ from the input size the layout
+ * rule serves (pa_bits, capped at the 48 bits one level-0 root page can
+ * index), SL0 from the same rule (hv_s2_core.h: level 0 above 42 bits,
+ * level 1 with concatenated root tables at or below), PS as the CPU
+ * reports it, inner-shareable write-back both ways. Assuming 48 bits is
+ * what a 44-bit machine refuses, assuming a level-0 start is what a
+ * 40-bit one refuses, and assuming the input may be 52 bits is what the
+ * tables cannot express. */
 uint64_t hv_s2_vtcr(unsigned pa_bits, unsigned ps_field)
 {
-    uint64_t t0sz = 64u - pa_bits;
-    return t0sz | (2ull << 6) /* SL0 */ | (1ull << 8) /* IRGN0 WBWA */ | (1ull << 10) /* ORGN0 WBWA */ |
+    struct hv_s2_layout lay;
+    hv_s2_layout(pa_bits, &lay);
+    uint64_t t0sz = 64u - lay.input_bits;
+    return t0sz | ((uint64_t)lay.sl0 << 6) /* SL0 */ | (1ull << 8) /* IRGN0 WBWA */ | (1ull << 10) /* ORGN0 WBWA */ |
            (3ull << 12) /* SH0 inner */ | (0ull << 14) /* TG0 4 KiB */ | ((uint64_t)ps_field << 16);
 }

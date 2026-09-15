@@ -105,9 +105,15 @@ void arch_user_regs_sanitize(struct arch_user_regs *r);
 void arch_user_regs_init_thread(struct arch_user_regs *r, uintptr_t entry, uintptr_t arg, uintptr_t sp);
 #define ARCH_THREAD_TOP_BYTES 8u
 
-/* Bracket direct kernel access to user memory (STAC/CLAC with SMAP). */
+/* Bracket direct kernel access to user memory (STAC/CLAC with SMAP,
+ * PAN on AArch64). */
 void arch_user_access_begin(void);
 void arch_user_access_end(void);
+/* Whether the bracket guards anything on this CPU: SMAP / PAN present.
+ * False on QEMU's default models (qemu64, cortex-a72), where an access
+ * outside the bracket is not denied; the guard boot (make test-guard)
+ * runs where it is. */
+bool arch_user_guard_present(void);
 
 /* True if the trap frame was captured while executing user code. */
 struct arch_trap_frame;

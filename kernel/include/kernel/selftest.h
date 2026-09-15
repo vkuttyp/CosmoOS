@@ -30,6 +30,7 @@ bool selftest_asid_paranoid(const char **reason);   /* the isolation rule holds 
 bool selftest_user_vmm(const char **reason);   /* kernel/memory/memtest.c: user regions, PROT_NONE, split/merge, shootdown mask */
 bool selftest_rlimit(const char **reason);     /* kernel/memory/memtest.c: address-space, memory and handle limits */
 bool selftest_uaccess(const char **reason);    /* kernel/syscall/uaccesstest.c: exception fixups */
+bool selftest_uaccess_guard(const char **reason);   /* the guard on kernel access to user memory, where the CPU has one */
 bool selftest_kmalloc(const char **reason);
 
 /* Phase 3: kernel/scheduler/schedtest.c */
@@ -262,6 +263,7 @@ bool selftest_module_unload_busy(const char **reason);
 bool selftest_hv_probe(const char **reason);
 bool selftest_hv_caps(const char **reason);
 bool selftest_el2_stub(const char **reason);
+bool selftest_hv_disabled(const char **reason);   /* a disabled backend hands the hardware back */
 bool selftest_el2_guest_wfi(const char **reason);
 bool selftest_el2_vgic_roundtrip(const char **reason);  /* the guest's interrupt state crosses EL2 */
 bool selftest_el2_guest_irq(const char **reason);       /* a guest takes one, acknowledges, completes */

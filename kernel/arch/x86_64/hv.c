@@ -18,6 +18,13 @@
 
 static const struct hv_backend *g_be;
 
+void arch_hv_disable(void)
+{
+    /* SVM and VMX own nothing another party wants back: the probe left
+     * the CPU as it found it, and a disabled backend simply creates no
+     * VM. */
+}
+
 int arch_hv_probe(struct hv_caps *out)
 {
     static const struct hv_backend *const backends[] = { &svm_backend, &vmx_backend };

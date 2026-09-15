@@ -13,6 +13,7 @@
 #include <kernel/pmm.h>
 
 #include <arch/hv.h>
+#include <arch/hv_s2_core.h>
 #include <aarch64/hv_s2.h>
 
 #include <stdio.h>
@@ -125,10 +126,60 @@ int main(void)
     /* VTCR_EL2: T0SZ from the output size, four levels, 4 KiB granule. */
     uint64_t vtcr = hv_s2_vtcr(44, 4);
     CHECK((vtcr & 0x3F) == 20);                   /* 64 - 44 */
-    CHECK(((vtcr >> 6) & 3) == 2);                /* SL0: start at level 1 */
+    CHECK(((vtcr >> 6) & 3) == 2);                /* SL0: a level-0 start (four levels) above 42 bits */
     CHECK(((vtcr >> 14) & 3) == 0);               /* TG0 4 KiB */
     CHECK(((vtcr >> 16) & 7) == 4);               /* PS as given */
     CHECK((hv_s2_vtcr(48, 5) & 0x3F) == 16);
+    CHECK(((hv_s2_vtcr(40, 2) >> 6) & 3) == 1);   /* SL0: a level-1 start at 40 bits (cortex-a76) */
+    CHECK((hv_s2_vtcr(40, 2) & 0x3F) == 24);
+    /* 52 bits of output (FEAT_LPA): the tables index 48, so T0SZ says
+     * 48 while PS keeps the CPU's field. */
+    CHECK((hv_s2_vtcr(52, 6) & 0x3F) == 16);
+    CHECK(((hv_s2_vtcr(52, 6) >> 16) & 7) == 6);
+    CHECK(((hv_s2_vtcr(52, 6) >> 6) & 3) == 2);
+
+    /* The layout rule (hv_s2_core.h): level 0 from one page above 42
+     * bits; level 1 at or below, from 2^(bits-39) concatenated root
+     * pages at 40..42 and one page below 40. The rule the architecture
+     * states for VTCR_EL2.SL0 with the 4 KiB granule; the wrong answer
+     * for 40 bits (level 0) is the fault cortex-a76 gave the unchanged
+     * tree: a level-0 translation fault on the guest's first fetch. */
+    for (unsigned bits = 32; bits <= 52; bits++) {
+        struct hv_s2_layout lay;
+        hv_s2_layout(bits, &lay);
+        CHECK(lay.input_bits == (bits > 48 ? 48 : bits));
+        if (bits > 42) {
+            CHECK(lay.sl0 == 2 && lay.start_level == 3 && lay.root_order == 0);
+        } else {
+            CHECK(lay.sl0 == 1 && lay.start_level == 2);
+            CHECK(lay.root_order == (bits > 39 ? bits - 39 : 0));
+            CHECK(lay.root_order <= 3);
+        }
+    }
+
+    /* The 40-bit shape built and walked: two root pages, an address in
+     * each (bit 39 selects the second), every page returned. */
+    hv_s2_configure(40);
+    CHECK(hv_s2_current_layout()->root_order == 1 && hv_s2_current_layout()->start_level == 2);
+    free0 = host_arena_free_pages();
+    root = hv_s2_create();
+    CHECK(root != 0 && (root & 0x1FFF) == 0);      /* two pages, aligned to their size */
+    CHECK(hv_s2_table_pages(root) == 2);
+    CHECK(hv_s2_map(root, 0x80000000ull, 0x10000ull, 0x1000, HV_MAP_READ | HV_MAP_EXEC) == 0);
+    CHECK(hv_s2_map(root, 0x8000000000ull, 0x20000ull, 0x1000, HV_MAP_RWX) == 0);   /* bit 39: the second root page */
+    paddr_t pa2 = 0;
+    CHECK(hv_s2_query(root, 0x80000000ull, &pa2) && pa2 == 0x10000ull);
+    CHECK(hv_s2_query(root, 0x8000000000ull + 0x10, &pa2) && pa2 == 0x20010ull);
+    CHECK(!hv_s2_query(root, 0x80001000ull, NULL));
+    CHECK(hv_s2_table_pages(root) == 2 + 2 + 2);   /* the root, and two levels under each address */
+    {
+        const uint64_t *r = phys_to_virt(root);
+        CHECK((r[(0x80000000ull >> 30) & 0x3FF] & 3) == 3);        /* entry 2 of the concatenated root */
+        CHECK((r[(0x8000000000ull >> 30) & 0x3FF] & 3) == 3);      /* entry 512: in the second page */
+    }
+    hv_s2_destroy(root);
+    CHECK(host_arena_free_pages() == free0);
+    hv_s2_configure(48);   /* back to the shape the tests above assume */
 
     host_arena_destroy();
     if (g_failures) {

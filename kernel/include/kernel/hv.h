@@ -123,6 +123,16 @@ struct vcpu {
 /* Boot: probe the backend, create /dev/vmm. After vfs_init and the ramfs population. */
 void hv_init(void);
 const struct hv_caps *hv_caps(void);
+#include <kernel/faultinject.h>   /* CONFIG_FAULTINJECT */
+#if CONFIG_FAULTINJECT
+/* The self-test's cycle (hv-disabled): with FI_HV_SELFCHECK armed, the
+ * boot self-check fails and the backend is disabled (hardware handed
+ * back); `while_disabled` runs then and must return true; the caps are
+ * restored and the self-check must pass again. 0, or the negative step
+ * that failed (-1 the check did not fail, -2 while_disabled, -3 the
+ * check did not pass afterwards). */
+int hv_selftest_disable_cycle(bool (*while_disabled)(void), bool *disabled_out);
+#endif
 unsigned hv_vm_count(void);
 void hv_stats(uint64_t *exits, uint64_t *entries, unsigned *vcpus);
 /* sysctl hv.<name>: value text into out, -ENOENT for an unknown name. */

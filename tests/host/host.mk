@@ -134,7 +134,7 @@ $(HOST_OUT)/test_vmx: $(addprefix $(ROOT)/,$(HOST_VMX_SRCS)) $(ROOT)/kernel/arch
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/x86_64/include $(addprefix $(ROOT)/,$(HOST_VMX_SRCS)) $(HOST_LDFLAGS) -o $@
 
-$(HOST_OUT)/test_hv_s2: $(addprefix $(ROOT)/,$(HOST_HV_S2_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/hv_s2.h
+$(HOST_OUT)/test_hv_s2: $(addprefix $(ROOT)/,$(HOST_HV_S2_SRCS)) $(ROOT)/kernel/arch/aarch64/include/aarch64/hv_s2.h $(ROOT)/kernel/include/arch/hv_s2_core.h
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
 	$(Q)$(HOST_CC) $(HOST_CFLAGS) -I$(ROOT)/kernel/arch/aarch64/include $(addprefix $(ROOT)/,$(HOST_HV_S2_SRCS)) $(HOST_LDFLAGS) -o $@

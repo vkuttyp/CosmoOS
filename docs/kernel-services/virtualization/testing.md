@@ -84,6 +84,7 @@ tests are AArch64's and skip on x86.
 
 | test | image | what it checks |
 |---|---|---|
+| `hv-disabled` | — | with `hv-selfcheck` injected once for this thread, the boot self-check fails and the backend is disabled: `hv_caps()->present` false, and on AArch64 the loader's stub answers `EL2_STUB_VERSION_CALL` while disabled (the switch handed EL2 back); the caps are restored and the self-check passes again (the switch re-installed on use); the injection's hit count equals its budget, so a check that never ran fails it. Skips without a backend or in a release build. Bug-proof: the hand-back removed from `hv_disable_backend` fails the AArch64 run at "while disabled" |
 | `hv-probe` | — | backend name `svm` (or `vmx`), nested paging, ≥ 2 ASIDs, and a backend that claims it can run the reset state; without a backend, `vm_create` is `-ENOTSUP` |
 | `hv-caps` | — | the capabilities reported are the ones honoured: `arch_hv_vm_map` refuses `prot` 0 and unknown bits, and with `map_prot` a read-only mapping is accepted, queried back and unmapped |
 | `hv-npt` | — | `hv_vm_count` up and down; regions at 0 (64 KiB) and 0x200000 (12 KiB); overlap, misalignment, window edge and the 64 MiB limit refused; a VM created with an 8 KiB cap refuses 12 KiB and takes 8 KiB; every page translates to its recorded frame (`arch_hv_vm_query` = `page_to_phys`), holes do not; copies: unbacked range `-EFAULT` before any byte, zeroed memory, a 16-byte round trip straddling a page boundary lands in the right frames |

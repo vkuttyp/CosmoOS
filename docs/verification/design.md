@@ -204,6 +204,25 @@ self-test failed while the list file is missing or parses to nothing says
 that instead, so the list cannot go silently empty. The rule for putting
 a test on the list is in that file.
 
+## 7. The guard boot (`make test-guard`, `tests/boot/run_boot_test.py`)
+
+A test on one CPU model proves what that model enforces. The default
+models enforce neither SMAP/SMEP/UMIP nor PAN, so the kernel's guard on
+its own access to user memory was a no-op in every CI boot until the
+hardening unit. `test-guard` boots the same image on a model that has
+the guard (`QEMU_GUARD=1`, `QEMU_CPU` set by the target) and the
+harness requires the kernel's `hardening:` line whole, the
+`uaccess-guard` self-test's `guard live` sentence and, on x86-64,
+`usertest: umip: enforced`, forbidding `hardening: absent`; the default
+boot stays the control, where the same tests say what they could not
+assert (`docs/kernel/arch/testing.md`, "The guard boot"). The second
+model also found what only a second model can: `cortex-a76`'s 40-bit
+physical range exposed a stage-2 start level the architecture forbids
+below 43 bits (`docs/kernel-services/virtualization/design.md`, "Stage
+2"). `make test-wxn` is the same idea for one bit: a build that does the
+forbidden thing on purpose, and a harness kind (`--expect-panic wxn`)
+that requires that panic and no other.
+
 ## Ownership and lifetime
 
 Host targets own everything they allocate per input and free it before

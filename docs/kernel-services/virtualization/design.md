@@ -1300,12 +1300,47 @@ two. The entries are LPAE stage-2 descriptors: `S2AP` (bits 6–7) for
 read and write, `XN` (bits 53–54) for execute, `MemAttr` (bits 2–5)
 normal write-back, `AF` set, `SH` inner-shareable.
 
-`VTCR_EL2` is derived from `ID_AA64MMFR0_EL1.PARange` exactly as the
-SMMU driver derives its stage-2 configuration from `IDR5.OAS` — the same
-lesson, in the same shape: `T0SZ = 64 - PARange bits`, `SL0` for a
-four-level walk, `TG0` 4 KiB, inner-shareable, write-back. `VTTBR_EL2`
-carries the root and the VMID; a VM allocates a VMID from a bitmap as
-the SVM backend allocates an ASID.
+`VTCR_EL2` is derived from `ID_AA64MMFR0_EL1.PARange`: `PS` as the CPU
+reports it, `T0SZ = 64 - input_bits` (the range, capped below at the
+48 bits the tables index), `TG0` 4 KiB, inner-shareable, write-back,
+and the start
+level from a rule the architecture states and QEMU enforces
+(`kernel/include/arch/hv_s2_core.h`, `hv_s2_layout`): with the 4 KiB
+granule a walk may start at level 0 (`SL0 = 2`, one root page, four
+levels) only when the physical address size exceeds 42 bits; at or
+below it starts at level 1 (`SL0 = 1`), from `2^(bits - 39)`
+concatenated root pages for 40..42 bits (2, 4, 8, contiguous and
+aligned to their own size, indexed as one table) and from one page
+below 40. `cortex-a72` reports 44 bits and starts at level 0;
+`cortex-a76` reports 40, and the unchanged tree's level-0 start there
+faulted at level 0 on the guest's first instruction (ESR `0x82000004`),
+which the boot self-check turned into a disabled backend -- the
+hardening unit's second boot found it. The rule also reports the input size the
+tables can serve: four levels from one root page index bits 47:12, so a
+core reporting 52 bits of physical address (FEAT_LPA) keeps its `PS`
+field -- the output may be that wide -- while `T0SZ` says 48, the
+guest-physical range the tables express. A wider input would need
+FEAT_LPA2 or concatenated level-0 tables, neither built.
+`hv_s2_configure` fixes the layout at probe; `hv_s2_create` allocates
+the root at the layout's order, and the walk, destroy and count take
+the start level and the root's wider index from it. The SMMU driver asks the same rule about
+`IDR5.OAS` and leaves unused (rather than misprograms) an SMMU of 42
+bits or less, whose concatenated root the IOMMU walker does not build yet
+(`docs/kernel/iommu/design.md`). `VTTBR_EL2` carries the root and the
+VMID; a VM allocates a VMID from a bitmap as the SVM backend allocates
+an ASID.
+
+**A disabled backend hands EL2 back.** The boot self-check runs a
+guest, which installs the switch on that CPU (`el2_ready_here`); when
+the check fails, `hv_init` disables the backend, and before this unit
+that left the switch owning EL2 with the stub's ABI gone, so the `el2`
+self-test failed on a machine whose `hv_caps` said "no backend".
+`arch_hv_disable` now runs `HV_EL2_CALL_HANDBACK` on every CPU whose
+ready flag is set (a cross-CPU call for the others), and the flag is
+cleared only when the switch answered, so a failed hand-back never has
+the switch re-installed over itself. The `hv-disabled` self-test
+injects a self-check failure (`FI_HV_SELFCHECK`) and checks the stub
+answers while disabled and a guest runs again afterwards.
 
 Invalidation follows the rule the IOMMU unit wrote down (IOM6) and the
 VMX backend then had to learn: an unmapped page or a reused VMID must be

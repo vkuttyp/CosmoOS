@@ -81,6 +81,18 @@ void aarch64_cpu_init(void)
     aarch64_fpu_init_cpu();
 }
 
+void arch_hardening_report(void)
+{
+    /* SCTLR_EL1 as it is, not as intended: WXN is set by
+     * arch_mmu_activate on the kernel's own tables (the loader's map
+     * RAM writable and executable), and this line says whether it was. */
+    bool wxn = (READ_SYSREG(sctlr_el1) & SCTLR_WXN) != 0;
+    kinfo("hardening: aarch64:%s%s", g_cpu.has_pan ? " pan" : "", wxn ? " wxn" : "");
+    if (!g_cpu.has_pan || !wxn)
+        kwarn("hardening: absent:%s%s%s", g_cpu.has_pan ? "" : " pan", wxn ? "" : " wxn",
+              g_cpu.has_pan ? "" : " -- kernel access to user memory is unguarded");
+}
+
 const struct aarch64_cpu_info *aarch64_cpu_info(void)
 {
     return &g_cpu;

@@ -17,6 +17,27 @@ Reaching `boot complete` proves `entry.S`, `start.c`, `gdt_init`,
 `idt_init`, `pic_init_masked`, `x86_cpu_init`, the serial sink, and
 `arch_irq_enable` all worked. The exit code proves `shutdown.c`.
 
+### The guard boot (`make test-guard`)
+
+The default CPU models (`qemu64,+nx,+svm,+npt`; `cortex-a72`) have no
+SMEP, SMAP, UMIP or PAN, so on them `arch_user_access_begin/end` is a
+no-op and an access to user memory outside the bracket behaves exactly
+like one inside it: every CI boot since the ASID unit (PR #68) had
+four ASID tests reading user pages unbracketed and never saw it. `test-guard` boots the
+same image on `qemu64,+nx,+svm,+npt,+smep,+smap,+umip` or `cortex-a76`
+(PAN; also a 40-bit physical range, which found the stage-2 start-level
+bug) with `QEMU_GUARD=1`, and the harness then requires the kernel's
+`hardening:` line with every feature named, `selftest: uaccess-guard:
+guard live` (an unbracketed kernel read of a mapped user page faulted,
+the bracketed one did not) and, on x86-64, `usertest: umip: enforced` (a
+user `sgdt` ended the child with 128 + SIGSEGV), and forbids `hardening:
+absent` (a `WARN` naming an absent protection contradicts the required
+line, so it fails the run on its own). The default boot stays the
+control: there the same tests
+assert the mapping and say `guard absent (no pan)` / `(no smap)`, and
+the `WARN` is printed and not forbidden. CI runs both. The serial log
+goes to `boot-test-guard.log` (`BOOT_LOG`).
+
 ### Self-tests (`CONFIG_SELFTEST=1`, default in debug builds)
 
 These self-tests in `kernel/core/selftest.c` target this layer:
@@ -58,6 +79,24 @@ frame `#0` inside kernel text, `halting.`, and QEMU exit 35. This proves
 the error-code stub variant, `arch_trap_unhandled`, `arch_trap_frame_dump`
 including CR2 decoding, `arch_backtrace` from a trap frame, and the
 failure exit code.
+
+### WXN (`make test-wxn`, AArch64)
+
+Builds with `CRASH_TEST=2` into `out/aarch64-<build>-wxn/`. `kernel_main`
+maps one page at `0xFFFF900000000000` readable, writable *and*
+executable through `arch_mmu_map` (the only W+X leaf the tree ever
+makes, in this build only), writes a `ret` into it and calls it. With
+`SCTLR_EL1.WXN` set the fetch is an instruction abort at EL1; the
+harness (`--expect-panic wxn`) requires `crash test: executing a
+writable page on purpose`, `KERNEL PANIC: page fault: kernel execute at
+0xffff900000000000 (protection): `, `trap 1029`,
+`ELR=ffff900000000000`, `FAR=ffff900000000000 (protection read kernel
+instruction-fetch)`, `stack trace:` and `halting.`, and forbids `crash
+test: a writable page executed; WXN is off`, which the variant prints
+(and counts as a failure) when the call returns. The wording is the
+page-fault path's own (`kernel/memory/vmm.c`, `trap.c`); nothing was
+added to produce it. A no-op on x86-64, which has no WXN (its NX is
+what `test-crash` exercises).
 
 ### Static checks (every build)
 

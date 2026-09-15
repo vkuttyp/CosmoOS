@@ -18,6 +18,7 @@
 #include <arch/cpu.h>
 
 #include <kernel/iommu_pt.h>
+#include <arch/hv_s2_core.h>
 
 #if defined(ARCH_AARCH64)
 /* The unit is described by the ACPI IORT, a static table (no AML): its
@@ -440,6 +441,20 @@ void arm_smmuv3_init(void)
     if (u->ps > 5)
         u->ps = 5;   /* 48 bits: what the 4-level walker covers */
     u->oas_bits = oas_table[u->ps];
+    /* The walker builds four levels from one root, a level-0 start,
+     * which the architecture allows only above 42 bits of output; the
+     * hypervisor's stage-2 (the same rule, arch/hv_s2_core.h) starts at
+     * level 1 from concatenated roots below that, and this driver does
+     * not build that shape yet: a narrower SMMU is refused, not
+     * programmed with a start level it rejects. QEMU's reports 44. */
+    struct hv_s2_layout lay;
+    hv_s2_layout(u->oas_bits, &lay);
+    if (lay.sl0 != 2) {
+        kwarn("iommu: smmuv3 output size %u bits needs a level-1 stage-2 start from %u concatenated root page(s), "
+              "which this driver does not build; not used", u->oas_bits, 1u << lay.root_order);
+        vm_unmap_phys(va);
+        return;
+    }
 
     /* Off, then tables and queues, then on. */
     wr32(u, SMMU_CR0, 0);

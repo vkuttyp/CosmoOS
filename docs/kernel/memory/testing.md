@@ -78,6 +78,28 @@ kernel-mode faults at user addresses through `copy_from_user`,
 kernel buffer untouched, and `vm_stats.fixups` rises by exactly four; a
 kernel pointer is refused by the range check without a fault.
 
+### `SELFTEST: uaccess-guard` (`selftest_uaccess_guard`, `kernel/syscall/uaccesstest.c`)
+
+The guard on kernel access to user memory, where the CPU has one. A
+private space maps one populated user page filled with `0x5A`; with the
+space active and interrupts off the raw copy reads one byte twice:
+inside `arch_user_access_begin/end`, which must return the byte (this is
+also the proof the space was active: the kernel's tables have nothing
+there), and outside it. Where `arch_user_guard_present` (SMAP / PAN)
+the unbracketed read must fault (`1` byte not copied, the buffer
+untouched) and the test prints `guard live`; on QEMU's default models
+it must succeed and the test prints `guard absent (no smap)` /
+`(no pan)`. The guard boot (`make test-guard`) requires `guard live`,
+so the fault assertion is asserted there and the control boot asserts
+the mapping. Bug-proofs: the bracket never opening fails the bracketed
+read on the guard CPU; the core's PAN not detected makes the guard boot
+fail on the missing `guard live` marker and the forbidden `hardening:
+absent`, the test itself then correctly reporting the guard absent
+(removing only the init-time `msr pan, #1` is not enough: every
+`arch_user_access_end` sets PAN again); the space never made active
+fails the bracketed read on either CPU, since the kernel's own tables
+have nothing at that address.
+
 ### `SELFTEST: kmalloc` (`selftest_kmalloc`)
 
 | Step | Proves |

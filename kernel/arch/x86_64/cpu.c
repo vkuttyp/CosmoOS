@@ -3,6 +3,7 @@
  * arch/cpu.h + arch/irq.h interfaces for x86-64.
  */
 
+#include <kernel/log.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/string.h>
@@ -90,6 +91,19 @@ void x86_cpu_init(void)
     read_brand_string();
 
     x86_cpu_enable_features();
+}
+
+void arch_hardening_report(void)
+{
+    /* What CR4 says, not what cpuid promised: the line is the boot's
+     * evidence, and the guard boot's harness requires it whole. */
+    uint64_t cr4 = read_cr4();
+    bool smep = (cr4 & CR4_SMEP) != 0, smap = (cr4 & CR4_SMAP) != 0, umip = (cr4 & CR4_UMIP) != 0;
+    kinfo("hardening: x86-64:%s%s%s%s", g_cpu.has_nx ? " nx" : "", smep ? " smep" : "", smap ? " smap" : "",
+          umip ? " umip" : "");
+    if (!smep || !smap || !umip)
+        kwarn("hardening: absent:%s%s%s%s", smep ? "" : " smep", smap ? "" : " smap", umip ? "" : " umip",
+              smap ? "" : " -- kernel access to user memory is unguarded");
 }
 
 void x86_cpu_enable_features(void)

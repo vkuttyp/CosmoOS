@@ -4,6 +4,7 @@
  */
 
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/hv.h>
 #include <kernel/log.h>
 #include <kernel/printf.h>
@@ -107,12 +108,50 @@ static bool paging_off_is_translated(void)
     if (!ok)
         kwarn("hv: self-check: a guest with paging off exited with rc %d kind %u pc 0x%llx (wanted kind %u)", rc,
               x.kind, (unsigned long long)x.rip, want_kind);
+    if (ok && faultinject_should_fail(FI_HV_SELFCHECK)) {
+        kwarn("hv: self-check: failure injected (hv-selfcheck)");
+        ok = false;
+    }
 out:
     if (v)
         kobject_put(&v->obj);
     kobject_put(&vm->obj);
     return ok;
 }
+
+/* The backend is not to be used: the hardware goes back to whoever had
+ * it (on AArch64 the loader's EL2 stub, whose ABI the el2 self-test
+ * expects to answer whether a backend was ever present or was present
+ * and disabled), and every creation is refused from here on. */
+static void hv_disable_backend(void)
+{
+    arch_hv_disable();
+    g_caps.present = false;
+    g_caps.name = "none";
+    g_caps.nested_paging = false;
+    g_caps.max_asids = 0;
+}
+
+#if CONFIG_FAULTINJECT
+int hv_selftest_disable_cycle(bool (*while_disabled)(void), bool *disabled_out)
+{
+    struct hv_caps saved = g_caps;
+    *disabled_out = false;
+    if (paging_off_is_translated())
+        return -1;   /* the caller armed hv-selfcheck: the check must have failed */
+    hv_disable_backend();
+    *disabled_out = !g_caps.present;
+    bool ok = while_disabled();
+    g_caps = saved;   /* what the probe found stands; only the hand-back is undone by use */
+    if (!ok)
+        return -2;
+    if (!paging_off_is_translated()) {
+        hv_disable_backend();
+        return -3;   /* EL2 did not come back to the switch after the hand-back */
+    }
+    return 0;
+}
+#endif
 
 void hv_init(void)
 {
@@ -126,10 +165,7 @@ void hv_init(void)
     else if (!paging_off_is_translated()) {
         kwarn("hv: backend %s disabled: nested paging does not confine a guest with paging off "
               "(QEMU/TCG before 9.2 has this bug)", g_caps.name);
-        g_caps.present = false;
-        g_caps.name = "none";
-        g_caps.nested_paging = false;
-        g_caps.max_asids = 0;
+        hv_disable_backend();
     } else
         kinfo("hv: backend %s, nested paging %s, %u ASIDs", g_caps.name, g_caps.nested_paging ? "yes" : "no",
               g_caps.max_asids);

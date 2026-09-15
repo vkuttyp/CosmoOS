@@ -62,7 +62,14 @@ int el2_set_stack(uint64_t sp_phys);
  * not be issued on a machine without a GICv3 CPU interface: the
  * registers do not exist there and the read is UNDEFINED. */
 #define HV_EL2_CALL_VGIC     0x13
-#define HV_EL2_VERSION       2
+/* x1 = the physical base of the loader's stub vectors: install them as
+ * VBAR_EL2 and return 0. The switch owns EL2 from the moment it is
+ * installed, so only it can give EL2 back; the stub's own set-vectors
+ * call is gone by then. The disable path (arch_hv_disable) uses it,
+ * after which the stub's ABI answers again and a later probe installs
+ * the switch afresh. */
+#define HV_EL2_CALL_HANDBACK 0x14
+#define HV_EL2_VERSION       3
 
 #ifndef __ASSEMBLER__
 /* For tests: the raw call, including selectors the stub refuses. */
