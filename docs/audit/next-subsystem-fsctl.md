@@ -174,6 +174,45 @@ filesystem type's name, the mount flags, whether the filesystem offers
 each pass, and the path *in this namespace*. A mount the namespace does
 not hold is not listed, and a command naming its id is `-ENOENT`.
 
+**Where the path comes from, because the tree cannot derive one.** There
+is no vnode-to-path machinery here and this unit is not the place to
+invent it: `getcwd` returns a string the process *remembers*
+(`native.c:1562-1573`, `p->cwd_path_locked`), not a path walked back up
+from a vnode. So the path is recorded rather than reconstructed.
+`struct mount_ns_ref` (`mountns.h:29-35`) is the (mount, namespace) pair
+and is exactly the right place: it gains the path at which *this*
+namespace holds *this* mount, copied from the argument `vfs_mount` was
+given, and copied again when `mountns_create` clones the view.
+
+The honest caveat, stated here rather than discovered later: **it is the
+path as of the moment the namespace gained the mount.** Renaming an
+ancestor directory does not update it, exactly as it does not update a
+process's remembered cwd — the same defect, with the same open report
+against it (`docs/audit/next-subsystem-cwd-ref.md`). The id is what a
+command is issued against; the path is a label for a human, and the
+report says so rather than implying the path is authoritative.
+
+**The root mount is a special case, by the namespace code's own design.**
+`mountns.c:61` skips it: the root carries no `mount_ns_ref` in any
+namespace, because it is visible in all of them. A listing built only
+from a namespace's `mounts` list would therefore omit the filesystem
+most worth checking. The snapshot emits the root mount first, at `/`,
+before walking the namespace's list.
+
+**A process with a narrowed root sees paths it cannot reach.** Per-
+process roots exist (`vfs_current_root`), so a path reported here is the
+*namespace's* path and not the caller's. That is the right answer for a
+listing of mounts, and it is another reason the id and not the path is
+what a command names.
+
+**The snapshot protocol.** A path is `VFS_PATH_MAX` bytes and a mount
+list cannot be copied out under a lock, so: take `g_mounts_lock`, count
+the namespace's mounts plus one for the root, drop the lock, allocate;
+take it again, fill until the buffer is full, and record how many there
+were. `count` is what fits, `total` is what there was. A namespace that
+gained a mount between the two passes produces `count < total`, which
+the reader can see, rather than a listing that silently omits one.
+
 `-ENOENT` and not `-EPERM`, deliberately: the two answers differ in what
 they tell a caller about a filesystem they cannot reach, and "there is
 no such mount here" is the true one. A mount in another namespace is not
@@ -198,17 +237,24 @@ read(fd, buf, len)            -> the result of this file's last command
 **The result belongs to the open file**, held in the per-open private
 state the chrdev layer already provides (`vfs.h:171-172`). Two operators
 with two open files do not see each other's answers, and there is no
-global "last result" to race over. An open file with no completed
-command reads zero bytes.
+global "last result" to race over. An open file whose last command has
+not completed, or which has issued none, reads zero bytes; a completed
+command's result is readable until the next write replaces it.
 
 Commands, each its own fixed-layout struct sharing a `{version, op}`
-first four bytes:
+first four bytes. **Every read is preceded by a write, `LIST` included**:
 
 | command | what it does |
 | --- | --- |
-| `LIST` | no write needed: a read with no prior command returns the mount snapshot |
+| `LIST` | build the snapshot of mounts this namespace holds |
 | `CHECK` | run `cosmofs_check` against one id; `flags` carries `REPAIR` |
 | `SCRUB` | run `cosmofs_scrub` against one id |
+
+`LIST` is a written command and not "a read with no prior command",
+because the two rules would otherwise contradict each other: a read with
+nothing pending returns **zero bytes**, always, and that is the only
+thing it can mean. An interface where the empty state and the listing
+are the same request has no way to say "nothing yet".
 
 A version, in the header, with the netctl header's discipline: every
 version documented where the constant is defined, and a writer of the
@@ -362,8 +408,9 @@ per-mount statistic or a quota is a third command against the same name.
 | `kernel/include/uapi/cosmo/fsctl.h` | new: the versioned command and result ABI |
 | `kernel-services/vfs/fsctl.c` | new: the chrdev, the command dispatch, the listing, the id lookup |
 | `kernel/include/kernel/vfs.h` | `struct mount` gains `id` and `passes_running`; `struct fs_type` gains `check` and `scrub`; the lookup helper's prototype |
+| `kernel/include/kernel/mountns.h` | `struct mount_ns_ref` gains the path this namespace holds the mount at |
 | `kernel-services/vfs/vfs.c` | the id counter in `mount_alloc`; `passes_running` respected by `vfs_umount`; the id lookup that takes a reference |
-| `kernel-services/vfs/mountns.c` | the visibility predicate the listing uses |
+| `kernel-services/vfs/mountns.c` | `struct mount_ns_ref` gains the path; `mountns_create` copies it; the visibility predicate the listing uses |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | `cosmofs_fs_type` gains `check` and `scrub` |
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the `CONFIG_DEBUG` gate comes off (`:31`); `cosmofs_scrub.c` has none and needs no change |
 | `kernel/core/main.c` | create the device at boot |
@@ -377,33 +424,90 @@ per-mount statistic or a quota is a third command against the same name.
 /* kernel/include/uapi/cosmo/fsctl.h */
 #define COSMO_FSCTL_VERSION 1
 
-#define COSMO_FSCTL_CHECK 1
-#define COSMO_FSCTL_SCRUB 2
+#define COSMO_FSCTL_LIST  1
+#define COSMO_FSCTL_CHECK 2
+#define COSMO_FSCTL_SCRUB 3
 
 #define COSMO_FSCTL_F_REPAIR (1u << 0)   /* CHECK only: fix what has one right answer */
+
+#define COSMO_FSCTL_CAP_CHECK (1u << 0)  /* this filesystem offers a structural check */
+#define COSMO_FSCTL_CAP_SCRUB (1u << 1)  /* ... and a scrub */
 
 struct cosmo_fsctl {            /* written whole, at exactly this size */
     uint16_t version;
     uint16_t op;
     uint32_t flags;
-    uint64_t mount_id;
+    uint64_t mount_id;          /* ignored by LIST */
 };
 
-struct cosmo_fsctl_mount {      /* one per mount in the read snapshot */
-    uint64_t id;
-    uint32_t flags;             /* the mount flags */
-    uint32_t caps;              /* which passes this filesystem offers */
-    char fstype[16];
-    char path[VFS_PATH_MAX];    /* in the reading process's namespace */
-};
-
-struct cosmo_fsctl_list {       /* the snapshot header */
+/*
+ * Every result begins with this header, so a reader knows what follows
+ * and how big one record is before it parses any of it. `kind` is the op
+ * whose result this is; `count` is how many records follow; `total` is
+ * how many there were to report, which for a LIST that raced a mount is
+ * larger than `count` -- a short listing that says so, rather than one
+ * that looks complete.
+ */
+struct cosmo_fsctl_result {
     uint16_t version;
-    uint16_t kind;              /* LIST, or the op whose result follows */
+    uint16_t kind;
     uint32_t count;
-    uint32_t bytes;             /* of each record, so a reader can skip one it does not know */
+    uint32_t total;
+    uint32_t bytes;             /* of one record, so a reader can skip one it does not know */
+};
+
+struct cosmo_fsctl_mount {      /* LIST: one per mount */
+    uint64_t id;
+    uint64_t ns_id;             /* the namespace whose path this is */
+    uint32_t flags;             /* the mount flags */
+    uint32_t caps;              /* COSMO_FSCTL_CAP_* */
+    char fstype[16];
+    char path[VFS_PATH_MAX];    /* as recorded when this namespace gained the mount */
+};
+
+/*
+ * CHECK: one record, and the ten classes are an array rather than ten
+ * named fields, so a version that adds a class grows `nclasses` and does
+ * not move anything. The kernel's own struct cosmofs_check_report stays
+ * kernel-private; this is its serialised form and the device copies
+ * field by field, because a kernel struct is not an ABI.
+ */
+#define COSMO_FSCTL_CLASSES 10
+#define COSMO_FSCTL_NAMES   8
+
+struct cosmo_fsctl_class {
+    uint64_t count;
+    uint64_t repaired;
+    uint64_t name[COSMO_FSCTL_NAMES];
+    uint32_t named;
+    uint32_t reserved;
+};
+
+struct cosmo_fsctl_check {      /* CHECK: one record */
+    uint32_t nclasses;          /* COSMO_FSCTL_CLASSES for version 1 */
+    uint32_t flags;             /* PARTIAL, CLEAN, REPAIR_REFUSED */
+    uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
+    uint64_t counted_free, counted_inodes, bytes_allocated, elapsed_ns;
+    struct cosmo_fsctl_class class[COSMO_FSCTL_CLASSES];
+};
+
+#define COSMO_FSCTL_R_PARTIAL        (1u << 0)
+#define COSMO_FSCTL_R_CLEAN          (1u << 1)
+#define COSMO_FSCTL_R_REPAIR_REFUSED (1u << 2)
+
+struct cosmo_fsctl_scrub {      /* SCRUB: one record */
+    uint64_t blocks_read;
+    uint64_t inodes;
+    uint64_t repaired;
+    uint64_t unrecoverable;
 };
 ```
+
+The class order is the order `struct cosmofs_check_report` declares them
+and the report's own findings table lists them, and it is part of the
+ABI: index 0 is `alloc_not_seen` and index 9 is `unreadable`. A header
+comment names all ten, because an array whose meaning lives only in
+another file is a parser bug waiting to happen.
 
 ```c
 /* kernel/include/kernel/vfs.h */
@@ -427,9 +531,12 @@ void vfs_mount_release(struct mount *mnt);
    after an unmount, and that a mount carried into a second namespace
    has the same id in both.
 2. **The pin.** `passes_running`, `vfs_mount_acquire`/`release`, and
-   `vfs_umount` returning `-EBUSY` while a pass runs. The test holds an
-   acquisition and asserts the unmount is refused, then released and
-   the unmount succeeds.
+   `vfs_umount` returning `-EBUSY` while a pass runs. One test holds an
+   acquisition and asserts the unmount is refused, then released and the
+   unmount succeeds. A second asserts the shutdown sequence is *not*
+   refused, because the sync ahead of it blocks on the mount's own lock
+   until the pass is done -- the claim rule 3 makes about ordering, and
+   the one that would be expensive to be wrong about.
 3. **The channel, read-only.** `/dev/fsctl`, the listing, the namespace
    visibility rule. Tests: a second namespace sees its own mounts and
    not the first's; the paths are that namespace's paths; an
@@ -459,6 +566,7 @@ filesystem the commands are pointed at.
 | --- | --- | --- |
 | `vfs-mount-id` | two mounts get two ids; an unmount and a fresh mount at the same path get *different* ids; the same mount in two namespaces reports one id | make the id the table index: the third assertion fails, because the slot is reused |
 | `vfs-mount-pin` | an acquired mount cannot be unmounted (`-EBUSY`); released, it can; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s busy test: the unmount succeeds while a pass holds the mount |
+| `vfs-mount-pin-shutdown` | the shutdown sequence against a mount with a pass in flight completes rather than being refused, because the sync ahead of it waits on the mount's own lock | make the pass drop the mount lock between phases: the sync overtakes it and the unmount meets a non-zero count |
 | `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
 | `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
 | `fsctl-list-ns` | a child in a new mount namespace lists its own mounts, and the parent's private mount is absent from it and present in the parent's listing | same injection, from the other side |
@@ -497,12 +605,18 @@ is the difference between an error and a deadlock.
 ## Risks
 
 - **An unmount that now fails.** Rule 3 changes `vfs_umount`'s
-  behaviour for every caller, including the shutdown path. Mitigated by
-  the pass count being held only across a call the kernel itself makes,
-  never across a userland round trip, so it is bounded by the pass and
-  not by an operator walking away from a terminal. The shutdown path is
-  the one to check: a sync-and-unmount at shutdown while a check runs
-  should wait, not fail, and step 2's test will say which it does.
+  behaviour for every caller. Two things bound it. The pass count is
+  held only across a call the kernel itself makes, never across a
+  userland round trip, so its duration is the pass's and not an
+  operator's. And the pass holds the *mount's own lock* for its whole
+  walk, so anything that must sync the mount first — shutdown does —
+  blocks behind the pass and finds the count already zero when it gets
+  to the unmount. **`-EBUSY` is therefore the answer to a concurrent
+  operator unmount, not to shutdown**, which waits because the sync
+  ahead of it waits. That is a claim about the shutdown path's order and
+  step 2's test asserts it rather than assuming it: start a pass, run
+  the shutdown sequence, and require that it completed rather than
+  refused.
 - **A result buffer per open file.** A caller can open the device many
   times and hold a buffer each. Bounded by the file descriptor limit,
   which is already an rlimit, and the buffer is allocated on first
