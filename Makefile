@@ -5,7 +5,9 @@
 #   make run          boot the image under QEMU on the terminal (serial)
 #   make test         automated QEMU boot test with PASS/FAIL exit code
 #   make test-gic     AArch64: the same boot test on the GICv3 machine
+#   make test-guard   the same boot test on a CPU model with SMEP/SMAP/UMIP (x86-64) or PAN (AArch64)
 #   make test-crash   build a deliberately faulting kernel, verify panic path
+#   make test-wxn     AArch64: build a kernel that executes a writable page, verify WXN denies it
 #   make host-test    native unit tests of kernel algorithms under ASan/UBSan
 #   make fuzz         fuzz the parsers on the host (docs/verification/)
 #   make analyze      clang static analyzer over all target sources
@@ -22,7 +24,7 @@ include $(ROOT)/build/config.mk
 include $(ROOT)/build/toolchain.mk
 include $(ROOT)/build/rules.mk
 
-.PHONY: all kernel boot modules image run test test-gic test-crash analyze reproducible compile-commands check-tools check-secrets clean help
+.PHONY: all kernel boot modules image run test test-gic test-guard test-crash test-wxn analyze reproducible compile-commands check-tools check-secrets clean help
 .DEFAULT_GOAL := all
 
 include $(ROOT)/kernel/kernel.mk
@@ -63,10 +65,29 @@ run: $(IMAGE)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
 		$(ROOT)/scripts/qemu-run.sh $(IMAGE)
 
+# BOOT_LOG: where the serial log goes; a variant boot names its own so
+# CI's artifact keeps both.
+BOOT_LOG ?= $(OUT)/boot-test.log
 test: $(IMAGE)
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" HAVE_MUSL=$(HAVE_MUSL) \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(OUT)/boot-test.log \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --image $(IMAGE) --log $(BOOT_LOG) \
 		--kernel $(KERNEL_ELF) --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+
+# The default CPU models (scripts/qemu-run.sh) have no SMEP, SMAP or UMIP
+# (qemu64) and no PAN (cortex-a72), so on them the kernel's guard on its
+# own access to user memory is a no-op and `test` cannot see it fail.
+# This boots the same image on a model that has the guard, and the
+# harness requires the kernel's own line saying every protection is on
+# (QEMU_GUARD=1; docs/kernel/security/design.md, "Hardening"). The
+# default boot stays the control, where the guard's absence is handled.
+test-guard:
+ifeq ($(ARCH),aarch64)
+	$(Q)QEMU_GUARD=1 QEMU_CPU=cortex-a76 $(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		BOOT_LOG=$(OUT)/boot-test-guard.log test
+else
+	$(Q)QEMU_GUARD=1 QEMU_CPU='qemu64,+nx,+svm,+npt,+smep,+smap,+umip' $(MAKE) --no-print-directory -C $(ROOT) \
+		ARCH=$(ARCH) BUILD=$(BUILD) BOOT_LOG=$(OUT)/boot-test-guard.log test
+endif
 
 # QEMU's virt machine defaults to gic-version=2, so `test` exercises one
 # of the two AArch64 interrupt controllers and never the other. This runs
@@ -93,9 +114,25 @@ test-crash:
 	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
 		CRASH_TEST=1 OUT=$(OUT)-crash image
 	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
-		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic fault \
 		--image $(OUT)-crash/cosmoos.img --log $(OUT)-crash/boot-test-crash.log \
 		--kernel $(OUT)-crash/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+
+# AArch64: build a kernel that maps one page writable and executable on
+# purpose and executes it (CRASH_TEST=2); SCTLR_EL1.WXN must make that
+# an instruction abort, and the harness requires that panic's report.
+# A no-op elsewhere (x86-64 has no WXN; its NX is proved by test-crash).
+test-wxn:
+ifeq ($(ARCH),aarch64)
+	$(Q)$(MAKE) --no-print-directory -C $(ROOT) ARCH=$(ARCH) BUILD=$(BUILD) \
+		CRASH_TEST=2 OUT=$(OUT)-wxn image
+	$(Q)COSMO_ARCH=$(ARCH) QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) QEMU_EXTRA="$(QEMU_EXTRA)" \
+		$(PYTHON) $(ROOT)/tests/boot/run_boot_test.py --expect-panic wxn \
+		--image $(OUT)-wxn/cosmoos.img --log $(OUT)-wxn/boot-test-wxn.log \
+		--kernel $(OUT)-wxn/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
+else
+	@echo "test-wxn: $(ARCH) has no WXN; nothing to do"
+endif
 
 analyze: $(KERNEL_ANALYZE) $(LOADER_ANALYZE) $(MODULE_ANALYZE) $(PKG_ANALYZE) $(KERNEL_ELF)
 	$(Q)$(ROOT)/scripts/check-fpregs.sh $(KERNEL_ELF) $(OBJDUMP)

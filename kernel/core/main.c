@@ -47,6 +47,9 @@
 #include <kernel/vfs.h>
 
 #include <arch/cpu.h>
+#include <arch/mmu.h>
+#include <kernel/page.h>
+#include <kernel/panic.h>
 #include <arch/irq.h>
 
 #include <drivers/pci.h>
@@ -137,6 +140,7 @@ void kernel_main(const struct cosmoboot_info *info)
     pmm_init();
     kmalloc_init();
     vmm_init();
+    arch_hardening_report();   /* the kernel's own tables are active: WXN is in, or is not */
     /* The display, as soon as its memory can be mapped: everything
      * printed after this appears on the screen as well as the serial
      * line, and the newest screenful of what came before is replayed. */
@@ -205,7 +209,7 @@ void kernel_main(const struct cosmoboot_info *info)
     kinfo("self-tests disabled in this build");
 #endif
 
-#if CONFIG_CRASH_TEST
+#if CONFIG_CRASH_TEST == 1
     /* Deliberate page fault on a canonical but unmapped address. Proves
      * the exception path, the panic report, and the harness's failure
      * detection. Built only with CRASH_TEST=1 (make test-crash). Runs
@@ -215,6 +219,32 @@ void kernel_main(const struct cosmoboot_info *info)
     volatile uint64_t *unmapped = (volatile uint64_t *)0xFFFF900000000000ULL;
     *unmapped = 1;
     kerror("crash test: write did not fault; page tables are wrong");
+    failed++;
+#elif CONFIG_CRASH_TEST == 2
+#if !defined(ARCH_AARCH64)
+#error "CRASH_TEST=2 (make test-wxn) proves SCTLR_EL1.WXN and exists on AArch64 only"
+#endif
+    /* Deliberate execution of a page mapped writable and executable --
+     * the only W+X leaf this tree ever makes, and only in this build.
+     * Without WXN the leaf allows the fetch and the call returns; with
+     * it the fetch is an instruction abort at EL1 and the panic report
+     * names the page (make test-wxn, --expect-panic wxn). */
+    kinfo("crash test: executing a writable page on purpose");
+    {
+        const vaddr_t va = 0xFFFF900000000000ULL;   /* the fault test's hole: nothing else maps it */
+        struct page *pg = pmm_alloc_page(PMM_FLAGS_ZERO);
+        if (pg == NULL)
+            panic("crash test: no page for the writable code");
+        paddr_t pa = page_to_phys(pg);
+        *(volatile uint32_t *)phys_to_virt(pa) = 0xD65F03C0u;   /* ret */
+        int rc = arch_mmu_map(&kernel_space.mmu, va, pa, PAGE_SIZE,
+                              VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC, VM_CACHE_WB, 0);
+        if (rc != 0)
+            panic("crash test: the writable and executable page could not be mapped (%d)", rc);
+        __asm__ volatile("dc cvau, %0\n\tdsb ish\n\tic ivau, %0\n\tdsb ish\n\tisb" ::"r"(va) : "memory");
+        ((void (*)(void))va)();
+    }
+    kerror("crash test: a writable page executed; WXN is off");
     failed++;
 #endif
 

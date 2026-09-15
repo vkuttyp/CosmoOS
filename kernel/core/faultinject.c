@@ -32,6 +32,7 @@ static const char *const g_names[FI_KIND_COUNT] = {
     [FI_DEMAND_COPY] = "demand-copy",
     [FI_USB_CSW] = "usb-csw",
     [FI_AHCI_CI] = "ahci-ci",
+    [FI_HV_SELFCHECK] = "hv-selfcheck",
 };
 
 const char *faultinject_kind_name(enum fi_kind kind)

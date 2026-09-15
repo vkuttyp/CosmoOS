@@ -102,6 +102,10 @@ struct hv_exit {
 /* Detect and prepare the backend; fills caps (present = false with a
  * clean -ENOTSUP when the CPU lacks it). Called once at boot. */
 int arch_hv_probe(struct hv_caps *out);
+/* The backend is not to be used after all (the boot self-check failed):
+ * give the hardware back so what the loader left answers again. A
+ * later arch_hv_probe installs afresh. */
+void arch_hv_disable(void);
 
 int arch_hv_vm_create(struct arch_hv_vm **out);
 void arch_hv_vm_destroy(struct arch_hv_vm *vm);

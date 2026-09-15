@@ -33,4 +33,11 @@ void arch_cpu_halt_forever(void) __noreturn;
  * descriptor before its doorbell). x86-64: a store fence; AArch64: dsb sy. */
 void arch_dma_barrier(void);
 
+/* One line per boot naming the CPU's protection features that are on,
+ * and a WARN naming what is absent, with the consequence when the
+ * missing feature is the guard on kernel access to user memory
+ * (docs/kernel/security/design.md, "Hardening"). Called once the
+ * kernel's own page tables are active, since that is when WXN is set. */
+void arch_hardening_report(void);
+
 #endif /* ARCH_CPU_H */

@@ -10,6 +10,7 @@
 
 #include <kernel/bootarchive.h>
 #include <kernel/errno.h>
+#include <kernel/faultinject.h>
 #include <kernel/hv.h>
 #include <kernel/log.h>
 #include <kernel/net/tap.h>
@@ -2933,3 +2934,55 @@ bool selftest_el2_virtq_net(const char **reason) { (void)reason; return true; }
 bool selftest_el2_tap_host(const char **reason) { (void)reason; return true; }
 bool selftest_el2_guest_spin(const char **reason) { (void)reason; return true; }
 #endif
+
+/*
+ * A disabled backend hands the hardware back. The boot self-check can
+ * fail (it does on QEMU/TCG before 9.2, and it did on cortex-a76 while
+ * the stage-2 walk started at a level that core forbids); before this
+ * unit the disable left the switch owning EL2 on the CPU the check ran
+ * on, so the stub's ABI was gone and the el2 self-test failed although
+ * hv_caps said "no backend". With hv-selfcheck injected once, the check
+ * fails, the backend is disabled, and while it is disabled the stub
+ * must answer (AArch64); then the caps are restored and the check must
+ * pass again, which proves the switch is re-installed on use.
+ */
+#if CONFIG_FAULTINJECT
+static bool stub_answers_while_disabled(void)
+{
+    if (hv_caps()->present)
+        return false;
+#if defined(ARCH_AARCH64)
+    return el2_call_raw(EL2_STUB_VERSION_CALL, 0) == EL2_STUB_VERSION;
+#else
+    return true;
+#endif
+}
+#endif
+
+bool selftest_hv_disabled(const char **reason)
+{
+#if CONFIG_FAULTINJECT
+    if (!hv_caps()->present) {
+        kinfo("selftest: hv-disabled: no backend to disable; skipping");
+        return true;
+    }
+    faultinject_set(FI_HV_SELFCHECK, 1, 1, thread_current());
+    bool disabled = false;
+    int rc = hv_selftest_disable_cycle(stub_answers_while_disabled, &disabled);
+    struct fi_stats st;
+    faultinject_stats(FI_HV_SELFCHECK, &st);
+    faultinject_clear(FI_HV_SELFCHECK);
+    CHECK(st.hits == 1);   /* the check ran and was made to fail: not vacuous */
+    if (rc != 0)
+        kwarn("selftest: hv-disabled: the cycle failed at step %d (-1 the check passed, -2 while disabled, -3 not back)", rc);
+    CHECK(rc == 0);
+    CHECK(disabled);
+    CHECK(hv_caps()->present);
+    kinfo("selftest: hv-disabled: an injected self-check failure disabled the backend, the stub answered meanwhile, and the check passes again");
+    return true;
+#else
+    (void)reason;
+    kinfo("selftest: hv-disabled: needs fault injection (debug builds); skipping");
+    return true;
+#endif
+}

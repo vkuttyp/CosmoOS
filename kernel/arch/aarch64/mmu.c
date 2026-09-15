@@ -400,6 +400,14 @@ void arch_mmu_activate(const struct arch_mmu_context *ctx, bool flush)
         map_early_devices(ctx);
         WRITE_SYSREG(ttbr1_el1, ctx->root);
         WRITE_SYSREG(ttbr0_el1, g_empty_root);   /* ASID 0 is the kernel's */
+        isb();
+        /* Write permission implies execute-never, for EL1 and EL0 alike,
+         * whatever a leaf says. Only here: the loader's tables, active
+         * until this write, map RAM writable and executable (this code
+         * ran from them), and a CPU reaches this point once, on its way
+         * up, with the kernel's W^X tables (M13) now in charge. */
+        uint64_t sctlr = READ_SYSREG(sctlr_el1);
+        WRITE_SYSREG(sctlr_el1, sctlr | SCTLR_WXN);
     } else {
         /* The tag rides in the top bits of TTBR0. TCR.AS decides whether
          * sixteen of them or eight are read as the ASID; either way the

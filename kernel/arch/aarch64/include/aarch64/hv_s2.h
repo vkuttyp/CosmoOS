@@ -13,6 +13,12 @@
 /* Bits 47:12 of a descriptor address a 4 KiB-aligned frame. */
 #define S2_ADDR_MASK 0x0000FFFFFFFFF000ull
 
+/* The walk's shape for this machine (hv_s2_core.h), from PARange in bits;
+ * before the call, a level-0 start from one root page. */
+void hv_s2_configure(unsigned pa_bits);
+struct hv_s2_layout;
+const struct hv_s2_layout *hv_s2_current_layout(void);
+/* The root: one page, or the concatenated block the layout asks for. */
 paddr_t hv_s2_create(void);
 void hv_s2_destroy(paddr_t root);
 /* 4 KiB granular with 2 MiB blocks where the addresses and the length

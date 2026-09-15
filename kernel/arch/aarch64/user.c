@@ -27,6 +27,11 @@ void arch_user_enter(uintptr_t entry, uintptr_t sp)
     aarch64_user_enter(entry, sp);
 }
 
+bool arch_user_guard_present(void)
+{
+    return aarch64_cpu_info()->has_pan;
+}
+
 /* PSTATE.PAN: MSR PAN, #imm is an MSR (immediate) encoding the ARMv8.0 assembler may refuse. */
 void arch_user_access_begin(void)
 {

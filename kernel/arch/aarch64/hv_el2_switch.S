@@ -176,7 +176,17 @@ el2_sync:
     mrs x0, ich_vtr_el2
     eret
 
-3:  cmp x0, #HV_EL2_CALL_RUN
+3:  cmp x0, #HV_EL2_CALL_HANDBACK
+    b.ne 4f
+    /* Give EL2 back: from the next exception on, the vectors in x1 (the
+     * loader's stub) answer, and this switch is out of the picture until
+     * the stub's set-vectors call installs it again. */
+    msr vbar_el2, x1
+    isb
+    mov x0, #0
+    eret
+
+4:  cmp x0, #HV_EL2_CALL_RUN
     b.ne el2_return_x0_minus1
 
     str x18, [x1, #HV_CTX_HOST_X18]  /* the host's x18 is reserved (-ffixed-x18): keep it */

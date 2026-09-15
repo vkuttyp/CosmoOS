@@ -34,6 +34,7 @@
 #include <aarch64/irqc.h>
 #include <aarch64/platform.h>
 #include <aarch64/vgic.h>
+#include <arch/hv_s2_core.h>
 #include <aarch64/hv_s2.h>
 #include <aarch64/sysreg.h>
 
@@ -320,6 +321,42 @@ static bool invalidate_vm(struct arch_hv_vm *vm)
     return ok;
 }
 
+/* The backend is not to be used (the boot self-check failed): every CPU
+ * on which el2_ready_here installed the switch's vectors hands EL2 back
+ * to the loader's stub, so the stub's ABI answers again there and a
+ * later probe installs afresh. Each CPU must do its own HVC. */
+static void el2_hand_back(void *arg)
+{
+    (void)arg;
+    unsigned cpu = this_cpu()->cpu_id;
+    if (!g_el2_ready[cpu])
+        return;
+    /* Through the switch, which owns EL2 here: the stub's own call is
+     * not answered until the stub is back. The flag stays set on a
+     * failure, so the switch is not asked to be re-installed over a
+     * switch. */
+    if (el2_call_raw(HV_EL2_CALL_HANDBACK, el2_stub_phys()) != 0) {
+        kerror("hv-el2: cpu%u could not hand EL2 back to the stub", cpu);
+        return;
+    }
+    g_el2_ready[cpu] = false;
+}
+
+void arch_hv_disable(void)
+{
+    if (!el2_available())
+        return;
+    unsigned self = this_cpu()->cpu_id;
+    for (unsigned cpu = 0; cpu < CONFIG_MAX_CPUS; cpu++) {
+        if (!g_el2_ready[cpu])
+            continue;
+        if (cpu == self)
+            el2_hand_back(NULL);
+        else
+            smp_call_function_single(cpu, el2_hand_back, NULL);
+    }
+}
+
 static int el2_probe(struct hv_caps *out)
 {
     if (!el2_available()) {
@@ -331,6 +368,7 @@ static int el2_probe(struct hv_caps *out)
     static const unsigned pa_bits[] = { 32, 36, 40, 42, 44, 48, 52 };
     if (parange > 6)
         parange = 6;
+    hv_s2_configure(pa_bits[parange]);   /* the start level and root size for this range */
     g_vtcr = hv_s2_vtcr(pa_bits[parange], parange);
     g_caps.present = true;
     g_caps.name = "el2";
@@ -361,8 +399,9 @@ static int el2_probe(struct hv_caps *out)
         }
     }
     el2_vtimer_bind();
-    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses, %u VMIDs, guest interrupts %s",
-          pa_bits[parange], HV_VMIDS_MAX - 1,
+    kinfo("hv: EL2 with stage-2 translation, %u-bit addresses (level-%u start, %u root page%s), %u VMIDs, guest interrupts %s",
+          pa_bits[parange], 3 - hv_s2_current_layout()->start_level, 1u << hv_s2_current_layout()->root_order,
+          hv_s2_current_layout()->root_order ? "s" : "", HV_VMIDS_MAX - 1,
           g_caps.inject_irq ? "through the virtual GIC" : "unavailable (no GICv3 virtual interface)");
     if (g_caps.inject_irq)
         kinfo("hv: the virtual GIC has %u list register(s)", g_vgic_lrs);

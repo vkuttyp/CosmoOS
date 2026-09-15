@@ -17,7 +17,11 @@
 #include <kernel/selftest.h>
 #include <kernel/string.h>
 #include <kernel/uaccess.h>
+#include <kernel/page.h>
+#include <kernel/percpu.h>
+#include <arch/mmu.h>
 #include <kernel/vmm.h>
+#include <arch/user.h>
 
 #define STR_(x) #x
 #define STR(x)  STR_(x)
@@ -73,5 +77,58 @@ bool selftest_uaccess(const char **reason)
     vm_get_stats(&s1);
     CHECK(s1.fixups == s0.fixups + 4);
     kinfo("selftest: uaccess: %u fixup entries; 4 kernel-mode faults at user addresses resumed as -EFAULT", n);
+    return true;
+}
+
+/*
+ * The guard on kernel access to user memory, where the CPU has one
+ * (SMAP on x86-64, PAN on AArch64; docs/kernel/security/design.md,
+ * "Hardening"). A private space maps one user page; with it active and
+ * interrupts off, one byte is read through the raw copy twice: inside
+ * arch_user_access_begin/end, which must succeed, and outside it, whose
+ * outcome IS the guard -- a fault (the fixup reports the byte not
+ * copied) where the guard is live, the byte where the CPU has no guard.
+ * The test says which, and the guard boot's harness requires "live".
+ * On the default CI models the fault cannot be asserted; the mapping
+ * is, and the bracketed read's success is also the proof the space was
+ * active (the kernel's own tables have nothing at that address).
+ */
+bool selftest_uaccess_guard(const char **reason)
+{
+    CHECK(process_current() == NULL);
+    const bool has_guard = arch_user_guard_present();
+#if defined(ARCH_X86_64)
+    const char *missing = "no smap";
+#else
+    const char *missing = "no pan";
+#endif
+    const uint64_t VA = 0x0000300000000000ULL;   /* far from anything a process maps */
+    struct vm_space *sp = NULL;
+    CHECK(vm_space_create_user(&sp) == 0);
+    CHECK(vm_user_map_anon(sp, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "guard") == 0);
+    paddr_t pa;
+    CHECK(arch_mmu_query(&sp->mmu, VA, &pa, NULL, NULL, NULL));
+    memset(phys_to_virt(pa), 0x5A, PAGE_SIZE);
+
+    struct vm_space *restore = this_cpu()->cur_space ? this_cpu()->cur_space : &kernel_space;
+    uint8_t in = 0, out = 0;
+    arch_irq_state_t s = arch_irq_save();
+    vm_space_switch(restore, sp);
+    arch_user_access_begin();
+    size_t left_in = arch_copy_user_raw(&in, (const void *)(uintptr_t)VA, 1);
+    arch_user_access_end();
+    size_t left_out = arch_copy_user_raw(&out, (const void *)(uintptr_t)VA, 1);
+    vm_space_switch(sp, restore);
+    arch_irq_restore(s);
+    vm_space_destroy(sp);
+
+    CHECK(left_in == 0 && in == 0x5A);   /* the bracket opens, the space was active */
+    if (has_guard) {
+        CHECK(left_out == 1 && out == 0);   /* the guard denied the unbracketed read */
+        kinfo("selftest: uaccess-guard: guard live: an unbracketed kernel read of a user page faulted, the bracketed one did not");
+    } else {
+        CHECK(left_out == 0 && out == 0x5A);   /* no guard: the page is simply readable */
+        kinfo("selftest: uaccess-guard: guard absent (%s): the unbracketed read succeeded; nothing to assert but the mapping", missing);
+    }
     return true;
 }

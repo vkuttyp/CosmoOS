@@ -75,6 +75,13 @@ jobs:
       - name: Boot test on the other interrupt controller (debug)
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-gic
 
+      # The default CPU models lack SMEP/SMAP/UMIP (qemu64) and PAN
+      # (cortex-a72), so the kernel's guard on its access to user memory
+      # is a no-op in the boots above. This boots the same image on a
+      # model that has the guard and requires the kernel to say so.
+      - name: Boot test on a protection-capable CPU (debug)
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-guard
+
       - name: Build and boot test (release)
         run: make ARCH=${{ matrix.arch }} BUILD=release all test
 
@@ -94,6 +101,11 @@ jobs:
 
       - name: Panic path test
         run: make ARCH=${{ matrix.arch }} BUILD=debug test-crash
+
+      # AArch64: a page mapped writable and executable on purpose must
+      # not execute (SCTLR_EL1.WXN). A no-op on x86-64.
+      - name: WXN test
+        run: make ARCH=${{ matrix.arch }} BUILD=debug test-wxn
 
       - name: Upload serial logs
         if: always()

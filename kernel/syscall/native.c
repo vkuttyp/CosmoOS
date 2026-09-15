@@ -329,6 +329,11 @@ static int64_t sys_mmap(struct syscall_args *a)
     int flags = (int)a->a[3];
     struct process *p = process_current();
 
+    /* A flag bit this kernel does not define is refused, so a program can
+     * learn what the kernel it runs on supports and a future flag is
+     * never silently dropped (the rule for every native flags word). */
+    if (flags & ~(COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED))
+        return -EINVAL;
     if (len == 0 || !is_page_aligned(len) || len > (size_t)(USER_HI - USER_LO))
         return -EINVAL;
     if (!(flags & COSMO_MAP_ANONYMOUS))
@@ -422,11 +427,13 @@ static struct file *file_of(int h, unsigned rights)
 
 static int64_t sys_open(struct syscall_args *a)
 {
+    unsigned flags = (unsigned)a->a[1];
+    if (flags & ~(COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND | COSMO_O_DIRECTORY))
+        return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char path[VFS_PATH_MAX];
     int rc = get_path(a->a[0], path);
     if (rc)
         return rc;
-    unsigned flags = (unsigned)a->a[1];
     uint32_t mode = (uint32_t)a->a[2];
     struct file *f;
     struct vnode *cwd = process_cwd_get();
@@ -600,6 +607,9 @@ static int64_t sys_mount(struct syscall_args *a)
 {
     if (!cred_privileged(cred_current()))
         return -EPERM;
+    unsigned flags = (unsigned)a->a[3];
+    if (flags & ~COSMO_MOUNT_RDONLY)
+        return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char source[BLKDEV_NAME_MAX], target[VFS_PATH_MAX], fstype[16];
     int rc = strncpy_from_user(source, a->a[0], sizeof(source));
     if (rc < 0)
@@ -610,7 +620,6 @@ static int64_t sys_mount(struct syscall_args *a)
     rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
     if (rc < 0)
         return rc;
-    unsigned flags = (unsigned)a->a[3] & COSMO_MOUNT_RDONLY;
     struct blkdev *bd = NULL;
     if (source[0] != '\0' && strcmp(source, "none") != 0) {
         bd = blk_find(source);
@@ -627,9 +636,11 @@ static int64_t sys_umount(struct syscall_args *a)
 {
     if (!cred_privileged(cred_current()))
         return -EPERM;
+    unsigned flags = (unsigned)a->a[1];
+    if (flags & ~COSMO_UMOUNT_FORCE)
+        return -EINVAL;   /* an unknown flag bit: see sys_mmap */
     char target[VFS_PATH_MAX];
     int rc = get_path(a->a[0], target);
-    unsigned flags = (unsigned)a->a[1] & COSMO_UMOUNT_FORCE;
     return rc ? rc : vfs_umount2(target, flags ? VFS_UMOUNT_FORCE : 0);
 }
 
