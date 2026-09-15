@@ -66,10 +66,12 @@ corruption".
 - Snapshots (version 3), many members (4), mirrored members (5),
   compressed records (6), encryption at rest (7) and symbolic links (8),
   each described under its own heading in `design.md`.
-- Two maintenance passes over a mounted filesystem, both debug-build
-  tools: the scrub (`cosmofs_scrub`), which asks whether every block is
-  still what was written, and the structural check (`cosmofs_check`),
-  which asks whether the blocks add up.
+- Two maintenance passes over a mounted filesystem, in every build and
+  reachable by an operator through `/dev/fsctl`: the scrub
+  (`cosmofs_scrub`), which asks whether every block is still what was
+  written, and the structural check (`cosmofs_check`), which asks
+  whether the blocks add up. Each is offered to the VFS through
+  `struct fs_type`.
 
 ## Non-responsibilities
 
@@ -79,9 +81,10 @@ corruption".
   hard links, inode number reuse, transaction groups pipelined behind an
   open one, a host `mkfs` and an *offline* checker over a
   block device (the mounted one is built — `design.md`, "The structural
-  check"), an operator interface to either maintenance pass, and any
-  performance work beyond contiguity-aware allocation (linear
-  directories, one lock per filesystem).
+  check"), a *scheduled* pass (nothing runs either one on a timer; an
+  operator starts them), and any performance work beyond
+  contiguity-aware allocation (linear directories, one lock per
+  filesystem).
 
 ## Interfaces at a glance
 
