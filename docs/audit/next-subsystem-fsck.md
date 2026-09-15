@@ -296,13 +296,17 @@ Two callers, and no new system call:
 
 1. **The self-tests**, as the scrub is called, through
    `cosmofs_check` in `kernel/include/kernel/cosmofs.h`.
-2. **The crash suite**, in `check_prefix` after the mount succeeds
-   (`cosmofscrash.c:273`) and before the unmount (`:308`): every
-   replayed prefix of the *existing* workload must be structurally
-   sound, with no finding of any class. This is the unit's sharpest
-   test in both directions -- it asserts the filesystem's crash
-   behaviour and it asserts the checker does not cry wolf on an image
-   that is merely mid-history.
+2. **The crash suite**, in `check_prefix` after the mount succeeds and
+   before the unmount (`cosmofscrash.c:344`, and the repair proof at
+   `:374`): every replayed prefix of the *existing* workload must be
+   structurally sound. This is the unit's sharpest test in both
+   directions -- it asserts the filesystem's crash behaviour and it
+   asserts the checker does not cry wolf on an image that is merely
+   mid-history. **As built the assertion is not "no finding of any
+   class"** but "no finding a crash cannot explain": leaked blocks are
+   counted and their reclaim proved, everything else must be empty. The
+   reason is difference 2 at the top of this report, and it is a fact
+   about the filesystem rather than a concession by the test.
 
    The unlinked-but-open workload is deliberately **not** added to that
    suite, because a prefix taken after its unlink *must* show an orphan
@@ -310,7 +314,9 @@ Two callers, and no new system call:
    prefix of every workload. It gets its own test
    (`cosmofs-crash-orphan`), which asserts the opposite: that the orphan
    is there, that it is the only finding, and that repair reclaims
-   exactly the blocks the file held.
+   exactly the blocks the file held. It is called
+   `cosmofs-check-orphan-crash`, with the checker's tests rather than
+   the crash suite's, because the checker is what it is about.
 There is deliberately no third caller, and the reason is worth stating
 rather than discovering in the implementation. An operator interface
 needs a *name for a mount*, and this tree has none: procfs is a
@@ -589,7 +595,11 @@ instead of deleting the call.
   `cosmofs_core.c:379-395`) and the deadlist in particular. Mitigated by
   running it over every replayed prefix from step 4, where a
   disagreement shows up as a failing test rather than as an operator's
-  bad afternoon.
+  bad afternoon. **This risk materialised three times** and the step
+  caught all three: the deferred free list unclaimed, a snapshot's
+  `alloc_root` read as the wrong kind of block, and a directory's link
+  count short by its own self-reference. Each looked like corruption on
+  a filesystem that was perfectly sound.
 - **The lock held too long.** A whole-filesystem walk under `fs->lock`
   blocks every file operation on that mount. The scrub set the
   precedent; the report's `elapsed_ns` makes the cost visible, and
