@@ -90,7 +90,7 @@ corruption".
 | `cosmofs_fs_type`, `cosmofs_init` | `kernel/cosmofs.h` | `kernel_main`, the VFS registry |
 | `cosmofs_format`, `cosmofs_stats`, `cosmofs_test_discard_on_unmount`, `cosmofs_test_set_writeback`, `cosmofs_test_set_writeback_interval` | `kernel/cosmofs.h` | self-tests |
 | `struct cfs_super`, `cfs_mhdr`, `cfs_inode`, `cfs_extent`, `cfs_dirent`, index helpers | `cosmofs_format.h` | the implementation, `tests/host/test_cosmofs.c` |
-| `cosmofs_scrub`, `cosmofs_check` (+ `struct cosmofs_check_report`, `COSMOFS_CHECK_REPAIR`) | `kernel/cosmofs.h` | the self-tests and the crash suite; debug builds only, and no operator interface yet |
+| `cosmofs_scrub`, `cosmofs_check` (+ `struct cosmofs_check_report`, `COSMOFS_CHECK_REPAIR`) | `kernel/cosmofs.h` | the self-tests, the crash suite, and `struct fs_type`'s `check`/`scrub` entries, through which `/dev/fsctl` reaches them; in every build |
 | `cosmofs_test_corrupt` (nine named corruptions) | `kernel/cosmofs.h` | the checker's tests: eight of the ten finding classes have a test that manufactures exactly one. `chain_cycle` has none, and four of `dir_bad`'s six sites have none; both are inventory rows |
 | `pool_*` | `kernel/storage.h` | cosmofs (its only I/O path) |
 

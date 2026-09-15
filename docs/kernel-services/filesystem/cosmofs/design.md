@@ -815,11 +815,14 @@ as a fix. A repair must leave the classes it claims empty and every
 refused class unchanged — not "clean", which a filesystem carrying a
 cross-link can never be.
 
-The pass is a **debug-build tool** (`CONFIG_DEBUG`), like the crash
-suite that drives it: nothing in a release build calls it, because
-nothing can -- there is no operator interface to a mount's maintenance
-passes yet, which the deferred-work inventory now records as its own
-row.
+**Both passes are in every build, and an operator can run them.** The
+check was a debug-build tool at first, not because a release kernel
+should not check its filesystems but because nothing in one could have
+called it; the scrub had no such gate and shipped as dead code. Both are
+now reachable through `/dev/fsctl` and `fsctl(8)`, which name a mount by
+its id and hold it while the pass walks
+(`docs/audit/next-subsystem-fsctl.md`). The crash suite still drives the
+check directly, as it always did.
 
 **A read that fails does not end the pass.** An unreadable metadata or
 directory block is a finding of its own and sets `partial`, and the walk
