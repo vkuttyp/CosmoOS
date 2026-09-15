@@ -1311,6 +1311,54 @@ bool selftest_fsctl_list(const char **reason)
     return true;
 }
 
+/*
+ * A result belongs to the file that asked for it. Two operators with two
+ * open files must not share a "last answer": one would read the other's,
+ * and neither would know. A global result would also be a race rather
+ * than merely a confusion.
+ */
+bool selftest_fsctl_result_per_open(const char **reason)
+{
+    struct file *a = NULL, *b = NULL;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &a) == 0 && a != NULL);
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &b) == 0 && b != NULL);
+    CHECK(a->priv != b->priv);                 /* two instances, as the chrdev layer gives */
+
+    size_t cap = sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount);
+    uint8_t *ba = kmalloc(cap, KMEM_ZERO), *bb = kmalloc(cap, KMEM_ZERO);
+    CHECK(ba != NULL && bb != NULL);
+
+    /* Neither has asked anything yet. */
+    CHECK(file_read(a, ba, cap) == 0);
+    CHECK(file_read(b, bb, cap) == 0);
+
+    /* One asks; the other still has nothing, which is the assertion a
+     * shared buffer would fail. */
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_LIST };
+    CHECK(file_write(a, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(b, bb, cap) == 0);
+    int64_t na = file_read(a, ba, cap);
+    CHECK(na > (int64_t)sizeof(struct cosmo_fsctl_result));
+
+    /* Both ask; both read their own, and a result survives being read
+     * twice -- a reader that lost it on the first read would return 0. */
+    CHECK(file_write(b, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(b, bb, cap) == na);
+    CHECK(file_read(a, ba, cap) == na);
+    CHECK(memcmp(ba, bb, (size_t)na) == 0);    /* same namespace, same answer */
+
+    /* A buffer too small is refused rather than truncated: half a
+     * listing parses as a whole one. */
+    CHECK(file_read(a, ba, sizeof(struct cosmo_fsctl_result)) == -ERANGE);
+
+    kfree(ba);
+    kfree(bb);
+    file_put(a);
+    file_put(b);
+    kinfo("selftest: fsctl-result-per-open: two open files, two results, neither the other's");
+    return true;
+}
+
 bool selftest_vfs_chrdev_open(const char **reason)
 {
     struct vnode *node = NULL;
