@@ -229,6 +229,24 @@ through the device) and warm (the page cache). The syscall side is
 | the jail test (user mode) | a child rooted at `/tmp/jail` writes through an absolute-target link and lands inside its own root, while the file that target names outside is untouched |
 | `lxtest` | `readlink`, `readlinkat`, `symlink`/`symlinkat`, `lstat` and `newfstatat` with `AT_SYMLINK_NOFOLLOW` each report the link, not the target |
 
+### The operator's channel (`docs/audit/next-subsystem-fsctl.md`)
+
+| test | what it asserts |
+| --- | --- |
+| `vfs-mount-id` | two mounts get two ids; a mount at a path an unmount just freed gets a **new** id, which an index would not; the root has one and it is neither |
+| `vfs-mount-pin` | an unmount begun while a pass is held does not complete; a second acquisition is refused once it has begun, which is what makes the drain terminate; a second unmount is refused; releasing wakes the drain and the unmount takes the mount |
+| `fsctl-list` | every mount the namespace holds appears once, at its path, with its type and passes; the root is there at `/`; `count == total`; a mount dropped from this namespace leaves the listing while the machine still counts it |
+| `fsctl-check` | a leak found by block number through the device, with the same numbers the pass reports when called directly; repaired through the device; `-EOPNOTSUPP` for a filesystem with no such pass, `-ENOENT` for a name nothing holds, `-EINVAL` for a version or a size the channel does not know |
+| `fsctl-result-per-open` | two open files run two commands and each reads its own; a file that has asked nothing reads zero bytes; a result survives being read twice; a buffer too small is refused rather than truncated |
+| `fsctl_selftest` (user mode) | the tool lists, is refused on a filesystem with no passes, and checks, scrubs and repairs a real cosmofs -- the first time either pass has run from userland |
+
+**What is not asserted**, and is an inventory row rather than a
+comment: no test attempts an unprivileged open, because kernel
+self-tests and the user-mode suite both run as root; and no test fires
+`vfs_umount2`'s second-unmount guard, because the path walk refuses
+first and the door that reaches it is a relative path resolved from
+inside the mount.
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

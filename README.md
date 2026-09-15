@@ -1968,6 +1968,40 @@ See [docs/development.md](docs/development.md).
   them. 281 self-tests on both architectures; seventeen bug-proofs, two
   of which exposed tests that could not fail (PR #144).
 
+- **The pass nobody can run**
+  (`docs/audit/next-subsystem-fsctl.md`). cosmofs had two maintenance
+  passes -- the scrub, which repairs a rotted mirror, and the structural
+  check built the week before -- and every caller of either was a
+  self-test. The check was compiled only into debug builds because
+  nothing in a release kernel could have called it; the scrub had no
+  such gate and shipped as dead code. Three things were missing, and
+  none of them was the pass. A mount had no name: it carries no
+  identifier, and a path is not one, because the same mount sits at
+  different paths in different namespaces and a path names different
+  mounts over time. Nothing pinned a mount: unmount infers busyness from
+  the vnode hash, which a walk holding a reference does not appear in.
+  And there was no channel. So: an id handed out in order and never
+  reused; an unmount that **drains** a running pass rather than refusing
+  or tearing down under it, terminating because the flag it sets first
+  stops a new pass starting; and `/dev/fsctl` (0600), a versioned
+  fixed-layout command whose result belongs to the open file that asked,
+  with the listing scoped to the caller's mount namespace and the root
+  filesystem emitted by name because it deliberately holds no namespace
+  reference. Two optional entries on `struct fs_type` let the VFS learn
+  that a filesystem has a pass without learning what one is. `fsctl(8)`
+  lists, checks, scrubs and repairs; a check that *finds* something
+  still exits zero, because a script cannot otherwise tell a broken
+  filesystem from a question it could not ask. The first boot panicked
+  on a lock-order inversion -- a device operation runs under the vnode
+  lock, and the mount table is taken the other way round -- which is now
+  a separate lock class and an inventory row. And the first real
+  filesystem the tool was pointed at was not clean: **28 leaked blocks
+  on the boot's own scratch disk**, because a clean unmount strands what
+  its last transaction freed, exactly as a crash does, which nobody had
+  measured because nothing could look. 286 self-tests on both
+  architectures, debug and release; twelve bug-proofs, one of which
+  passed and became an inventory row (PR #146).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

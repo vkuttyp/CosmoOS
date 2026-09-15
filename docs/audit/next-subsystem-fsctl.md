@@ -7,10 +7,11 @@ structural check). Chosen from
 **Subsystem: an operator interface to a filesystem's maintenance passes
 — a stable name for a mount, a privileged channel that takes a command
 against one, and the rule that keeps the mount alive while the pass
-runs.** Nothing in this report is built; the migration plan is the plan,
-and the "as run" and "as built" sections are filled by the
-implementation pull request. This report is to close the inventory's §3
-row "No operator interface for the filesystem's maintenance passes".
+runs.**
+**Built: PR #146.** The design below is as proposed; "As built" and "As
+run" record what the build changed and measured. This report closes the
+inventory's §3 row "No operator interface for the filesystem's
+maintenance passes".
 
 cosmofs has two passes over a mounted filesystem. `cosmofs_scrub`
 (`cosmofs_scrub.c:265-295`) reads every block the filesystem reaches and
@@ -760,10 +761,122 @@ is the difference between an error and a deadlock.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+Differences from the plan, each found by building rather than reading.
+
+1. **The id cannot be assigned under `g_mounts_lock`.** The design said
+   to take it there; `mount_alloc` runs inside `do_mount`, *before*
+   `vfs_mount` takes that lock, so there is no lock there to put it
+   under. It is an atomic fetch-and-add, which needs none.
+2. **A device vnode needed its own lockdep class, and the first boot
+   said so by panicking.** A chrdev operation runs with the vnode lock
+   held (`file_pwrite` takes it before dispatching), so consulting the
+   mount table inside one inverts `mounts -> vnode`, the order
+   `vfs_mount` takes. It cannot deadlock -- nothing mounts onto a
+   character device, so the two are never the same lock -- but the
+   classes were conflated. `ramfs_mkchr` now names a device node's lock
+   `vnode-chr`. The deeper fix, not holding a filesystem lock across
+   device I/O at all, is a different unit's argument and an inventory
+   row.
+3. **The one-unmount-at-a-time guard is not reachable the way the report
+   implied**, and its bug-proof is what said so: remove the guard and
+   nothing fails. `vfs_umount2` resolves its path through `follow_mount`,
+   which refuses to walk to a mount that is unmounting, so a second
+   unmount fails while resolving and never reaches the guard. The guard
+   stays -- a relative path resolved from inside the mount does not
+   traverse the mountpoint and does reach it -- but no test fires it, and
+   that is an inventory row rather than a passing assertion left to look
+   like proof.
+4. **Fifteen named tests became six**, because most of them assert
+   moments rather than fixtures and the moments overlap. The mapping is
+   below; nothing named in the plan is unasserted except where this
+   section says so.
+5. **A release build has no self-test**, so "the device is there" is
+   asserted by a line at boot rather than by a test. Weaker, and said
+   plainly:
+   `fsctl: /dev/fsctl ready (0600): mount listing, check and scrub`.
+6. **The unprivileged-open test was not built.** A kernel self-test runs
+   as root and the user-mode suite runs as root, so nothing in the tree
+   can currently attempt an unprivileged open. The check is there in
+   both the open and the write path; neither is fired by a test.
+   Inventory row.
+7. **The user-mode test mounts the test disk itself.** Nothing checkable
+   is mounted when init runs -- the listing is a ramfs and a procfs --
+   so a test that only named filesystems without passes would have
+   proved the refusal and nothing else.
+8. **And the first real filesystem it was pointed at was not clean.**
+   See "As run": 28 leaked blocks on the boot's own test disk, which is
+   a fact about cosmofs rather than about this unit, and the reason this
+   unit exists.
+
+**The tests, as named and as built:**
+
+| the design's test | as built |
+| --- | --- |
+| `vfs-mount-id` | `vfs-mount-id`, unchanged |
+| `vfs-mount-pin`, `-drain`, `-wake`, `vfs-umount-exclusive` | one test, `vfs-mount-pin`: the drain, the refusal that makes it terminate, the wakeup that ends it, and the second unmount are four assertions about one moment, and recreating that moment four times would assert the fixture rather than the rule |
+| `fsctl-perm` | **not built** -- see difference 6 |
+| `fsctl-list`, `fsctl-list-ns`, `fsctl-list-root` | one test, `fsctl-list`. The namespace rule is asserted from the other side: a mount this namespace drops leaves the listing while `vfs_mount_count` still counts it, because another namespace holds it. A kernel thread cannot run *in* a second namespace, so that is the reachable half |
+| `fsctl-check`, `fsctl-caps`, `fsctl-stale-id` | one test, `fsctl-check`: the leak found by number, repaired, and the three refusals (a filesystem with no pass, a name nothing holds, a version and a size the channel does not know) |
+| `fsctl-result-per-open` | `fsctl-result-per-open`, unchanged, plus: a result survives being read twice, and a buffer too small is `-ERANGE` rather than a truncated listing that parses as a whole one |
+| `fsctl-release` | a boot line, not a test -- difference 5 |
+| `fs_selftest` (user mode) | `fsctl_selftest` in `init.c`: the listing, the refusals, and a real cosmofs checked, scrubbed and repaired through the tool |
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+On both architectures, debug and release:
+
+| run | result |
+| --- | --- |
+| `make test` (x86-64, AArch64) | 286 self-tests pass, five of them this unit's |
+| `vfs-mount-id` | two mounts, two ids; a mount at a path an unmount just freed gets a *new* id; the root has one and it is neither |
+| `vfs-mount-pin` | an unmount begun while a pass is held does not complete; a second acquisition is refused once it has begun; a second unmount is refused; releasing wakes the drain and the unmount takes the mount |
+| `fsctl-list` | the mount at its path, the root at `/`, each once, `count == total`; a mount dropped from this namespace leaves the listing while the machine still counts it |
+| `fsctl-check` | a leak found by block number through the device, the numbers equal to the pass called directly, repaired through the device, clean after; a scrub through the same channel; `-EOPNOTSUPP`, `-ENOENT` and two `-EINVAL`s |
+| `fsctl-result-per-open` | two open files, two results, neither the other's |
+| `fsctl_selftest` (user mode) | the tool lists, refuses, checks, scrubs and repairs; **the first time either pass has run from userland in this tree** |
+| `make BUILD=release test` (both) | builds, boots, and announces the device |
+
+**Twelve bug-proofs, eleven of which fail for their stated reason:**
+
+| injection | result |
+| --- | --- |
+| `id-is-an-index`: hand out the table index | `vfs-mount-id` fails: a freed slot is reused |
+| `no-drain`: do not wait for a pass | `vfs-mount-pin` fails: the unmount completes while a pass is held |
+| `acquire-ignores-unmounting`: let a pass start during the drain | `vfs-mount-pin` fails on the refusal that makes the wait terminate |
+| `no-wake`: wake on every edge but the falling one | the **boot times out after 184 s**: the unmount never returns, which is the missed wakeup the protocol exists to prevent |
+| `umount-not-exclusive`: drop the second-unmount guard | **passes** -- see difference 3 |
+| `list-is-global`: list the mount table, not the namespace | `fsctl-list` fails |
+| `list-omits-root`: build the listing from the namespace's list alone | `fsctl-list` fails: the root filesystem disappears |
+| `check-runs-scrub`: dispatch every command to the scrub | `fsctl-check` fails on the result's size |
+| `no-caps-check`: call a pass a filesystem does not have | **kernel panic: execute at 0x0** -- which is what the report predicted |
+| `result-is-global`: one result for every open file | `fsctl-result-per-open` fails: one reader sees the other's answer |
+| `refusal-is-success`: a refused command exits 0 | the user-mode suite fails |
+| `finding-is-an-error`: a check that finds something exits non-zero | the user-mode suite fails -- and it fails *because the test disk is not clean*, which is the next line |
+
+### What the first real filesystem said
+
+The user-mode test mounts the boot's own scratch disk and checks it. It
+is **not clean**, and the reason is a fact about cosmofs that the fsck
+unit measured only for crashes:
+
+```
+mount 294: 20 blocks seen, 2000 free, 4 inodes, 2 directories, 0 snapshots (3360 us)
+  28 leaked blocks: 2, 3, 4, 5, 6, 7, 25, 26
+```
+
+Twenty-eight blocks, all reclaimed by `fsctl check --repair`. They are
+the residue of the boot's own `cosmofs-format` and `cosmofs-ops` tests,
+and the mechanism is the one the fsck report named: a commit publishes
+the new root, *then* clears the freed blocks' bits in memory and dirties
+those bitmap chunks **for the next commit** (`cosmofs_core.c`, "the
+frees dirtied bitmap chunks for the next commit"). At an unmount there
+is no next commit, so the cleared bits never reach the disk and the next
+mount reads them as allocated and unreachable.
+
+**So a cleanly unmounted filesystem strands what its last transaction
+freed, for the same reason a crashed one does.** The fsck unit measured
+the crash case at 162 of 199 replayed prefixes; nobody had measured
+this one, because nothing could look. It is not fixed here -- an
+operator-interface unit does not rewrite a filesystem's commit ordering
+on the way past -- and it is an inventory row with this measurement
+attached.
