@@ -575,12 +575,12 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | run | result |
 | --- | --- |
 | `make test` (x86-64, AArch64) | 279 self-tests pass, including the six checker tests |
-| `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` |
-| `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused. The counter case breaks both superblock totals in opposite directions and asserts two findings and two repairs |
-| `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion |
-| the six together | 35, 41, 229, 39, 58 and 35 ms: the pass costs milliseconds on a 512-block filesystem, and the faults test pays for seven fixtures rather than for the walk |
-| `cosmofs-check-orphan-crash` | inode 4 survives its unlink with its blocks; repair reclaims them and the free count returns exactly |
-| `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached |
+| `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` (35 ms) |
+| `cosmofs-check-leak` | one leaked block found by number and given back; a second pass is clean (41 ms) |
+| `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused. The counter case breaks both superblock totals in opposite directions and asserts two findings and two repairs (229 ms, seven fixtures rather than seven walks) |
+| `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion (39 ms) |
+| `cosmofs-check-orphan-crash` | inode 4 survives its unlink with its blocks; repair reclaims them and the free count returns exactly (58 ms) |
+| `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached (35 ms) |
 | `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
 
 The four leak numbers are **identical on x86-64 and AArch64**, which is
