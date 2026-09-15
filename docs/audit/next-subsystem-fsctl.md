@@ -25,10 +25,17 @@ Both were built last week and the week before. Neither can be run.
 
 **There is no way to ask.** Every caller of either pass is a self-test:
 `cosmofs_scrub` from `cosmofstest.c`, `cosmofs_check` from
-`cosmofstest.c` and the crash suite. Both are compiled only under
-`CONFIG_DEBUG`, so a release kernel does not contain them — not because
-a release kernel should not check its filesystems, but because nothing
-in a release kernel could call them if it did.
+`cosmofstest.c` and the crash suite. The two are unreachable in
+different ways, and the second is the worse one:
+
+- `cosmofs_check` is compiled only under `CONFIG_DEBUG`
+  (`cosmofs_check.c:31`). A release kernel does not contain it — not
+  because a release kernel should not check its filesystems, but because
+  nothing in one could call it if it did.
+- `cosmofs_scrub` has **no such gate**. It is compiled into every build,
+  release included, and has no caller outside the tests. A release
+  kernel today ships the code that repairs a rotted mirror and no way to
+  start it.
 
 **A mount has no name.** `struct mount` (`vfs.h:134-163`) carries a
 kobject, a filesystem, a root vnode, a mountpoint, a parent, a block
@@ -129,12 +136,13 @@ has the same problem. Mirrored members exist so that a rotted copy can
 be repaired from a good one; the code that does it has been in the tree
 for weeks with no caller outside a test.
 
-**The release build is the honest measure.** Both passes are
-`CONFIG_DEBUG` only. That is not a decision anyone made about
-maintenance; it is what happens when the only caller is a test. A
-release kernel that ships a filesystem with snapshots, compression,
-encryption and mirrored members, and no way to check any of it, is
-shipping the feature and not the operations.
+**The release build is the honest measure.** A release kernel today
+carries the scrub as dead code and does not carry the check at all.
+Neither is a decision anyone made about maintenance; both are what
+happens when the only caller is a test. A release kernel that ships a
+filesystem with snapshots, compression, encryption and mirrored members,
+and no way to check any of it, is shipping the feature and not the
+operations.
 
 **And the seam is reusable.** A name for a mount is not a filesystem
 feature. Anything that will later act on one mount rather than on a path
@@ -357,7 +365,7 @@ per-mount statistic or a quota is a third command against the same name.
 | `kernel-services/vfs/vfs.c` | the id counter in `mount_alloc`; `passes_running` respected by `vfs_umount`; the id lookup that takes a reference |
 | `kernel-services/vfs/mountns.c` | the visibility predicate the listing uses |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | `cosmofs_fs_type` gains `check` and `scrub` |
-| `kernel-services/filesystem/cosmofs/cosmofs_check.c`, `cosmofs_scrub.c` | the `CONFIG_DEBUG` gate comes off |
+| `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the `CONFIG_DEBUG` gate comes off (`:31`); `cosmofs_scrub.c` has none and needs no change |
 | `kernel/core/main.c` | create the device at boot |
 | `userland/system/fsctl.c` | new: the operator's tool |
 | `kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest.c` | the tests |
@@ -431,8 +439,12 @@ void vfs_mount_release(struct mount *mnt);
    for repair. Tests: a manufactured fault is found through the device;
    repair through the device fixes it; a ramfs mount is `-EOPNOTSUPP`;
    a stale id is `-ENOENT`.
-5. **The release build.** The `CONFIG_DEBUG` gate comes off both passes;
-   `make BUILD=release` builds and boots with the device present.
+5. **The release build.** The `CONFIG_DEBUG` gate comes off the check
+   (`cosmofs_check.c:31`); the scrub has no gate to remove and only
+   gains a caller. `make BUILD=release` builds and boots with the device
+   present, and the release-build test of step 4 runs a check through
+   it — which is the first time either pass has run outside a debug
+   build.
 6. **The tool.** `fsctl list`, `fsctl check <id> [--repair]`,
    `fsctl scrub <id>`, and the user-mode test that drives it.
 7. **Docs, README Status, inventory, the report's as-built sections.**
@@ -454,7 +466,7 @@ filesystem the commands are pointed at.
 | `fsctl-caps` | a ramfs mount lists no passes and a `CHECK` against it is `-EOPNOTSUPP`, *before* any lock is taken | call through a null `fs_type` entry: the kernel faults, which the test catches as a failure to return the error |
 | `fsctl-stale-id` | an id whose mount is gone is `-ENOENT`, not a hit on a reused slot | as `vfs-mount-id`'s injection: a reused id makes this command reach a different filesystem |
 | `fsctl-result-per-open` | two open files run two commands against two mounts and each reads its own result; a read with no prior command returns zero bytes | keep the result in one global: the two readers see one answer |
-| `fsctl-release` | a release build contains the device and both passes, and a check through it works | (the release build is the assertion) |
+| `fsctl-release` | a release build contains the device and both passes and a check through it works -- the first time either pass runs outside a debug build | remove the device from the release build: the release step fails to find it, which is what the `#if CONFIG_FAULTINJECT` stub lesson is about |
 | `fs_selftest` (user mode) | `fsctl list` names the mounted filesystems; `fsctl check` reports a clean filesystem; the exit status is zero for a clean check *and* for a check that found faults, non-zero only for a refusal | make a finding an error exit: the second assertion fails |
 
 **Vacuity, named in advance.** `fsctl-check` asserts the numbers match
