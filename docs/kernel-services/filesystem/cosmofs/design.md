@@ -797,6 +797,14 @@ Everything is allocated before the walk starts, so a filesystem too
 large for the memory available is `-ENOMEM` rather than a half-finished
 answer.
 
+**What it does not check.** Extents are claimed, not validated against
+each other: an overlap inside one inode is caught only when it makes two
+claims on one block, and an `lblk` ordering fault that does not is a
+wrong file rather than a wrong filesystem. A name repeated inside one
+directory is not detected either, because the pass keeps maps of numbers
+and that needs a set of strings. `next_ino` is not compared: it is a
+high-water mark rather than a total. All three are inventory rows.
+
 **Ten classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired
 with `COSMOFS_CHECK_REPAIR`. The rest are reported: a block both

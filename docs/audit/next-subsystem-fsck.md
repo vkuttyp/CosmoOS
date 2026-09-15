@@ -45,7 +45,14 @@ reading:
    right for a lookup and wrong here, so link counts and orphan facts
    come from the map walk and repair clears the whole slot -- including
    the inode number, or the next pass finds the same orphan again.
-7. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
+7. **Two repairs can fight.** The orphan repair lowers the inode count
+   as it clears a slot and the leak repair raises the free count, so a
+   counter repair that writes back "what the walk counted" puts the
+   pre-repair total back over the repair that just ran. Each counter is
+   repaired only if the comparison found *that* counter wrong. The bug
+   was invisible until the inode count was compared at all, which is the
+   argument for comparing both totals rather than the easy one.
+8. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
    corruption, so the list of ways to break a filesystem lives in one
    place and every class a test can report is one a test produced on
    purpose.
@@ -219,14 +226,22 @@ The walk:
    *seen*; a block already there goes in *dup*.
 2. **Every inode** in the map with `ino != 0`: its inode block (from
    the map walk), its extent chain, its checksum-tree blocks, and every
-   data block its extents name. Extents are validated the way the tree
-   already validates them (`extent_valid`, `cosmofs.c:37-56`) and, in
-   addition, checked for overlap within the inode and ordering by
-   `lblk`.
+   data block its extents name. **As built the extents are claimed but
+   not separately validated**: an extent that overlaps another within
+   the same inode, or one out of `lblk` order, is caught only if it
+   makes two claims on one block (`dup`) or a claim outside the pool
+   (`dir_bad`). An ordering fault that does neither is a wrong file, not
+   a wrong filesystem, and the pass does not report it. Named in the
+   inventory.
 3. **Every directory**, from the root inode down, reading blocks
    through an inode-shaped `dir_read_block`: each entry's `namelen`,
-   its `type` against the mode nibble of the inode it names, that the
-   inode is allocated, and that no name repeats in a directory.
+   its `type` against the mode nibble of the inode it names, and that
+   the inode is allocated. **A name repeated inside one directory is not
+   detected as built**: it needs a set of the names in the directory,
+   and the pass has maps of numbers rather than of strings. A repeated
+   name that points at two different inodes shows up as a wrong link
+   count; one that points at the same inode does not show up at all.
+   Named in the inventory.
    Reachability is recorded per inode, and each entry counts one
    reference toward that inode's expected `nlink` (a directory's own
    `..` counting as the parent's, as `cfs_create_common` does when it
@@ -248,7 +263,7 @@ Then it compares:
 | `orphan` | an inode allocated and unreachable (`nlink == 0` with blocks, or `nlink != 0` with no name) |
 | `dangling_entry` | an entry naming a free or out-of-range inode slot |
 | `dir_bad` | a malformed entry, a repeated name, a type that disagrees with its inode |
-| `counter_wrong` | `free_blocks`, `inode_count` or `next_ino` disagreeing with the walk |
+| `counter_wrong` | `free_blocks` or `inode_count` disagreeing with the walk, one finding each. **Not** `next_ino`: it is a high-water mark, not a total, and a filesystem that never reuses a number is entitled to any value above the highest slot in use |
 | `chain_cycle` | a metadata chain (extent, deadlist, snapshot list) that revisits a block |
 | `unreadable` | a metadata block that could not be read: the answer is partial |
 
@@ -550,7 +565,7 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | --- | --- |
 | `make test` (x86-64, AArch64) | 279 self-tests pass, including the six checker tests |
 | `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` |
-| `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused |
+| `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused. The counter case breaks both superblock totals in opposite directions and asserts two findings and two repairs |
 | `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion |
 | `cosmofs-check-orphan-crash` | an inode survives its unlink with its blocks; repair reclaims them and the free count returns |
 | `cosmofs-check-partial` | a broken directory block is named, the report is marked incomplete, and the pass still reaches its final comparison |
@@ -572,8 +587,10 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | `no-crash-check`: stop asking in the replay suite | `cosmofs-replay` fails on having measured nothing |
 | `repair-keeps-ino`: leave the number in a cleared slot | 2 fail: the next pass finds the same orphan |
 | `abort-on-unreadable`: stop comparing once anything is unreadable | `cosmofs-check-partial` fails: the pass never reaches its last phase |
+| `one-counter-only`: compare the free count and not the inode count | `cosmofs-check-faults` fails: one finding where two totals are wrong |
+| `counter-blind-repair`: write both counted totals back regardless | `cosmofs-check-faults` and `cosmofs-check-orphan-crash` fail: the repair undoes itself |
 
-Two of those twelve passed at first and both were fixed rather than
+Two of those fourteen passed at first and both were fixed rather than
 excused. `no-crash-check` passed because removing an assertion cannot
 fail a test with no other claim on it, so `cosmofs-replay` now asserts
 that it measured something; `no-snapshot-walk` broke the build instead
