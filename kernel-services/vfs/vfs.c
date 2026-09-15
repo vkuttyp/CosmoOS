@@ -1133,103 +1133,111 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
     if (acc == COSMO_O_ACCMODE)
         return -EINVAL;
 
+    /*
+     * The resolution is a loop so that a symbolic link named by the last
+     * component re-enters it with the target path: O_CREAT then creates
+     * the target of a dangling link, O_TRUNC truncates the target, and
+     * the permission checks are the target's -- which is what every one
+     * of those flags means. The walk carries the budget across rounds,
+     * so a chain ending in a link cannot outrun it, and every exit runs
+     * one cleanup.
+     */
     struct walk w = { 0 };
-    struct vnode *parent;
-    char last[VFS_NAME_MAX + 1];
-    size_t len;
-    bool trailing;
-    int rc = walk_parent(start, path, &w, last, &parent, &len, &trailing);
-    if (rc) {
-        walk_fini(&w);
-        return rc;
-    }
-    if (trailing)
-        flags |= COSMO_O_DIRECTORY;
-
+    struct vnode *base = start;   /* borrowed from the caller ... */
+    bool base_owned = false;      /* ... until an expansion makes it ours */
     struct vnode *vn = NULL;
     bool created = false;
-    struct vnode *linkdir = NULL;   /* the directory a trailing link resolves against */
-    if (len == 0) {
-        vn = parent;   /* the root itself */
-    } else {
+    int rc;
+
+    for (;;) {
+        struct vnode *parent;
+        char last[VFS_NAME_MAX + 1];
+        size_t len;
+        bool trailing = false;
+        rc = walk_parent(base, path, &w, last, &parent, &len, &trailing);
+        if (base_owned) {
+            vnode_put(base);   /* walk_parent took its own reference */
+            base = NULL;
+            base_owned = false;
+        }
+        if (rc)
+            goto out;
+        if (trailing)
+            flags |= COSMO_O_DIRECTORY;
+
+        if (len == 0) {
+            vn = parent;   /* the root itself */
+            break;
+        }
         if (parent->type != VNODE_DIR) {
             vnode_put(parent);
-            walk_fini(&w);
-            return -ENOTDIR;
+            rc = -ENOTDIR;
+            goto out;
         }
         if (dot_name(last, len)) {
-            rc = step(parent, last, len, &vn);
-            if (rc) {
-                walk_fini(&w);
-                return rc;
-            }
-        } else {
-            linkdir = parent;
-            vnode_get(linkdir);   /* survives the put below, for the final expansion */
-            rc = vfs_permission(parent, VFS_MAY_EXEC);   /* search the last directory */
-            if (rc) {
-                vnode_put(parent);
-                return rc;
-            }
-            mutex_lock(&parent->lock);
-            rc = (parent->flags & VNODE_DEAD) ? -ENOENT : parent->ops->lookup(parent, last, len, &vn);
-            if (rc == -ENOENT && (flags & COSMO_O_CREAT)) {
-                if (parent->mnt->flags & MOUNT_RDONLY)
-                    rc = -EROFS;
-                else if (parent->ops->create == NULL)
-                    rc = -ENOTSUP;
-                else if (vfs_permission(parent, VFS_MAY_WRITE) != 0)
-                    rc = -EACCES;   /* creating an entry writes the directory */
-                else {
-                    rc = parent->ops->create(parent, last, len, mode & 07777, &vn);
-                    created = rc == 0;
-                }
-            } else if (rc == 0 && (flags & COSMO_O_CREAT) && (flags & COSMO_O_EXCL)) {
-                vnode_put(vn);
-                rc = -EEXIST;
-            }
-            mutex_unlock(&parent->lock);
-            vnode_put(parent);
-            if (rc == 0)
-                rc = follow_mount(&vn);
-            if (rc) {
-                if (linkdir != NULL)
-                    vnode_put(linkdir);
-                walk_fini(&w);
-                return rc;
-            }
+            rc = step(parent, last, len, &vn);   /* consumes the reference */
+            if (rc)
+                goto out;
+            break;                               /* "." and ".." are directories */
         }
-    }
 
-    /* A symbolic link as the last component: refused with O_NOFOLLOW (as
-     * Linux does), otherwise expanded and resolved from the directory it
-     * was found in -- carrying the same budget the walk used, so a chain
-     * ending in a link cannot outrun it. A link this call just created
-     * cannot happen: create makes a regular file. */
-    if (vn->type == VNODE_LNK) {
+        rc = vfs_permission(parent, VFS_MAY_EXEC);   /* search the last directory */
+        if (rc) {
+            vnode_put(parent);
+            goto out;
+        }
+        mutex_lock(&parent->lock);
+        rc = (parent->flags & VNODE_DEAD) ? -ENOENT : parent->ops->lookup(parent, last, len, &vn);
+        if (rc == -ENOENT && (flags & COSMO_O_CREAT)) {
+            if (parent->mnt->flags & MOUNT_RDONLY)
+                rc = -EROFS;
+            else if (parent->ops->create == NULL)
+                rc = -ENOTSUP;
+            else if (vfs_permission(parent, VFS_MAY_WRITE) != 0)
+                rc = -EACCES;   /* creating an entry writes the directory */
+            else {
+                rc = parent->ops->create(parent, last, len, mode & 07777, &vn);
+                created = rc == 0;
+            }
+        } else if (rc == 0 && (flags & COSMO_O_CREAT) && (flags & COSMO_O_EXCL)) {
+            vnode_put(vn);
+            rc = -EEXIST;   /* a link counts as existing, as POSIX says */
+        }
+        mutex_unlock(&parent->lock);
+        if (rc == 0)
+            rc = follow_mount(&vn);
+        if (rc) {
+            vnode_put(parent);
+            goto out;
+        }
+        if (vn->type != VNODE_LNK) {
+            vnode_put(parent);
+            break;
+        }
         if (flags & COSMO_O_NOFOLLOW) {
             vnode_put(vn);
-            if (linkdir != NULL)
-                vnode_put(linkdir);
-            walk_fini(&w);
-            return -ELOOP;
+            vnode_put(parent);
+            vn = NULL;
+            rc = -ELOOP;   /* Linux's answer for a link opened with O_NOFOLLOW */
+            goto out;
         }
         const char *expanded;
         bool absolute = false;
         rc = walk_expand(&w, vn, NULL, &expanded, &absolute);
         vnode_put(vn);
-        if (rc == 0)
-            rc = resolve(absolute ? NULL : linkdir, expanded, &w, RESOLVE_FOLLOW, &vn);
-        if (linkdir != NULL)
-            vnode_put(linkdir);
-        linkdir = NULL;
+        vn = NULL;
         if (rc) {
-            walk_fini(&w);
-            return rc;
+            vnode_put(parent);
+            goto out;
         }
+        if (absolute) {
+            vnode_put(parent);   /* an absolute target restarts at the caller's root */
+        } else {
+            base = parent;       /* a relative one, at the link's own directory */
+            base_owned = true;
+        }
+        path = expanded;
     }
-    if (linkdir != NULL)
-        vnode_put(linkdir);
     walk_fini(&w);
 
     if (flags & COSMO_O_DIRECTORY) {
@@ -1281,6 +1289,12 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         return orc;
     *out = f;
     return 0;
+
+out:
+    walk_fini(&w);
+    if (base_owned)
+        vnode_put(base);
+    return rc;
 }
 
 int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)

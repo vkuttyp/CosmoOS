@@ -1436,9 +1436,11 @@ static int cfs_symlink(struct vnode *dir, const char *name, size_t len, const ch
     rc = dir_add(fs, dir, name, len, ino, CFS_TYPE_LNK, block);
     if (rc)
         goto undo;
+    /* The entry names the inode from here on, so the number is not this
+     * call's to give back whatever happens next: rolling it back would
+     * hand the next creation an inode a directory already points at. */
+    ino_taken = false;
     rc = cfs_vnode_get(fs, ino, out);
-    if (rc == 0)
-        ino_taken = false;   /* the entry names it now */
     goto out;
 undo:
     /* The block this call allocated, and the inode number, go back: the

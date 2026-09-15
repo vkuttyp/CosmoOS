@@ -254,6 +254,9 @@ bool selftest_vfs_symlink_loop(const char **reason)
     /* ... while lstat and readlink still answer, because they do not follow. */
     CHECK(vfs_lstat(NULL, "/tmp/lp/a", &st) == 0 && st.type == COSMO_DT_LNK);
 
+    /* The budget is pinned: a test built only from the macro moves with
+     * it and can never see it change. */
+    CHECK(VFS_MAX_SYMLINKS == 8);
     /* A chain of exactly VFS_MAX_SYMLINKS resolves; one more is ELOOP.
      * c0 -> c1 -> ... -> c<N-1> -> end, so naming c0 expands N links. */
     CHECK(mk_file("/tmp/lp/end", "chain-end") == 0);
@@ -316,10 +319,19 @@ bool selftest_vfs_symlink_nofollow(const char **reason)
     memset(buf, 'x', sizeof(buf));
     buf[VFS_PATH_MAX + 7] = '\0';
     CHECK(vfs_symlink(NULL, "/tmp/nf/toolong", buf) == -ENAMETOOLONG);
-    /* ... and one that fits alone but not with a remainder after it. */
-    memset(buf, 'y', VFS_PATH_MAX - 8);
-    buf[VFS_PATH_MAX - 8] = '\0';
+    /* ... and one that fits alone but not with a remainder after it.
+     * Built from short components on purpose: a single 1000-byte name
+     * would be refused for its own length, and the test would pass
+     * without the expansion's length check ever running. */
+    size_t at = 0;
+    while (at + 3 < VFS_PATH_MAX - 16) {
+        buf[at++] = 'a';
+        buf[at++] = 'a';
+        buf[at++] = '/';
+    }
+    buf[at - 1] = '\0';   /* no trailing slash */
     CHECK(vfs_symlink(NULL, "/tmp/nf/long", buf) == 0);
+    CHECK(vfs_stat(NULL, "/tmp/nf/long", &st) == -ENOENT);   /* it fits: it simply is not there */
     CHECK(vfs_stat(NULL, "/tmp/nf/long/and/more/components/still", &st) == -ENAMETOOLONG);
     CHECK(vfs_unlink(NULL, "/tmp/nf/long") == 0);
 

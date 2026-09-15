@@ -86,6 +86,24 @@ static void fs_selftest(void)
         CHECK(stat("/tmp/lnk", &tst) == 0 && tst.st_type == COSMO_DT_REG);
         CHECK(cosmo_open("/tmp/lnk", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0) == -COSMO_ELOOP);
         CHECK(cosmo_open("/tmp/lnk", COSMO_O_RDONLY, 0) >= 0);
+        /* What `ls -l` makes of it: the type column and the arrow, which
+         * need lstat and readlink rather than a follow. */
+        int lsp[2];
+        CHECK(pipe(lsp) == 0);
+        struct spawn_handle lsmap[] = { { .child = 1, .parent = lsp[1] }, { .child = 2, .parent = 2 } };
+        const char *ls_argv[] = { "ls", "-l", "/tmp/lnk", NULL };
+        pid_t lspid = spawnve("/bin/ls", ls_argv, NULL, lsmap, 2);
+        CHECK(lspid > 1);
+        CHECK(close(lsp[1]) == 0);
+        char lsout[128] = { 0 };
+        ssize_t lsn = read(lsp[0], lsout, sizeof(lsout) - 1);
+        CHECK(lsn > 0);
+        CHECK(close(lsp[0]) == 0);
+        int lsst = -1;
+        CHECK(waitpid(lspid, &lsst, 0) == lspid);
+        CHECK(lsout[0] == 'l');                              /* the type column */
+        CHECK(strstr(lsout, "-> lnk-target") != NULL);       /* and where it points */
+
         CHECK(unlink("/tmp/lnk") == 0 && stat("/tmp/lnk-target", &tst) == 0);
         CHECK(unlink("/tmp/lnk-target") == 0);
         puts("usertest: symbolic links ok");
