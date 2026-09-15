@@ -583,6 +583,12 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached |
 | `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
 
+The four leak numbers are **identical on x86-64 and AArch64**, which is
+the evidence that they describe the filesystem and not the host: the
+same workload, the same 199 prefixes, the same blocks stranded in the
+same places. A number that moved between architectures would have been
+about scheduling.
+
 **Bug-proofs, as run** (each injection alone, then reverted):
 
 | injection | result |
