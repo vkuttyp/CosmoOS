@@ -378,7 +378,15 @@ static void walk_snapshots(struct check *ck)
                 if (read_meta(ck, s->alloc_root, CFS_KIND_MEMBERS, &mb) == 0) {
                     const struct cfs_member_block *t =
                         (const struct cfs_member_block *)(mb->data + CFS_MHDR_SIZE);
-                    unsigned n = t->count <= CFS_MEMBERS_PER_BLOCK ? t->count : 0;
+                    /* A count past the block is the table being wrong,
+                     * not the snapshot holding nothing: say so, and walk
+                     * what the block can hold, or every member's blocks
+                     * would be reported as leaked instead. */
+                    unsigned n = t->count;
+                    if (n > CFS_MEMBERS_PER_BLOCK) {
+                        name_it(&ck->rep->dir_bad, s->alloc_root);
+                        n = CFS_MEMBERS_PER_BLOCK;
+                    }
                     for (unsigned v = 0; v < n; v++)
                         walk_alloc(ck, t->m[v].alloc_root, false);
                     cfs_buf_put(ck->fs, mb);
