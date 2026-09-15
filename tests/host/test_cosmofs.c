@@ -21,11 +21,22 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 8 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 9 && CFS_VERSION_MIN == 2);
     /* Version 8: a symbolic link is a third type in the mode's top
      * nibble, so the inode did not grow and every older image still
      * mounts; what version 8 gates is *writing* one. */
     EXPECT(CFS_TYPE_LNK == 3 && CFS_MODE_TYPE(CFS_MODE(CFS_TYPE_LNK, 0777)) == CFS_TYPE_LNK);
+    /*
+     * Version 9 takes `free_root` from the superblock's reserved words,
+     * so the block did not grow and every older image still mounts. What
+     * version 9 gates is *reading* that field: below it, the word is a
+     * reserved zero and a mount that read it as a chain head would
+     * refuse every filesystem written before this unit
+     * (docs/audit/next-subsystem-unmount-leak.md).
+     */
+    EXPECT(sizeof(struct cfs_super) <= CFS_BLOCK);
+    EXPECT(offsetof(struct cfs_super, free_root) == offsetof(struct cfs_super, key_root) + 8);
+    EXPECT(CFS_KIND_FREELOG == 13);
     EXPECT(sizeof(struct cfs_inode) == CFS_INODE_SIZE);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);

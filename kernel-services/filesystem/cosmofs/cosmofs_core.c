@@ -1562,6 +1562,8 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->free_blocks = fs->free_blocks;
     out->total_blocks = fs->sb.total_blocks;
     out->inode_count = fs->sb.inode_count;
+    out->version = fs->sb.version;
+    out->free_root = fs->sb.version >= 9 ? fs->sb.free_root : 0;
     out->dirty_buffers = fs->nr_dirty;
     out->pending_frees = fs->nr_pending;
     out->reserve_blocks = fs->reserve;

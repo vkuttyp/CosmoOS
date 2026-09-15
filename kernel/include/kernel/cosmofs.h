@@ -51,6 +51,8 @@ struct cosmofs_stats {
     unsigned devices;         /* devices behind them: more than members means mirroring */
     uint64_t repairs;         /* blocks written back from a good copy since mount */
     uint64_t degraded;        /* copies the member table promised and the mount did not find */
+    unsigned version;         /* the on-disk format version this filesystem was written at */
+    uint64_t free_root;       /* v9: head of the record of what the last root freed, or 0 */
 };
 int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out);
 

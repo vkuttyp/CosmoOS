@@ -2219,6 +2219,58 @@ bool selftest_cosmofs_symlink(const char **reason)
     return true;
 }
 
+/*
+ * Version 9 takes `free_root` from the superblock's reserved words, so
+ * the gate is on *reading* it: below version 9 that word is a reserved
+ * zero, and a mount that read it as a chain head would refuse every
+ * filesystem written before this unit
+ * (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_format(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+
+    /* A version-8 filesystem mounts, works, and replays nothing. */
+    CHECK(cosmofs_test_format_version(bd, 8) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(write_file(ENG "/eight", "older", 5));
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/eight", "older", 5));
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* And again after a remount: nothing was read from a field it does
+     * not have, and nothing was written into one. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/eight", "older", 5));
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* A version-9 filesystem carries the field, and an idle one has
+     * nothing recorded in it. */
+    struct blkdev *bd9 = ramblk_create(512);
+    CHECK(bd9 != NULL);
+    CHECK(cosmofs_format(bd9) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd9, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.version == CFS_VERSION);
+    CHECK(st.free_root == 0);          /* a fresh filesystem freed nothing */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    ramblk_destroy(bd9);
+    kinfo("selftest: cosmofs-freelog-format: a version-8 filesystem mounts and replays nothing; a version-9 one has the field");
+    return true;
+}
+
 bool selftest_cosmofs_symlink_version(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);

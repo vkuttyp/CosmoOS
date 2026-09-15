@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      8u   /* version 8: symbolic links (CFS_TYPE_LNK) */
+#define CFS_VERSION      9u   /* version 9: a record of what a transaction freed */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -35,6 +35,7 @@ enum cfs_kind {
     CFS_KIND_DEADLIST = 10, /* a snapshot's freed blocks: block numbers and a `next` */
     CFS_KIND_MEMBERS = 11,  /* the pool's member table: CFS_MEMBERS_PER_BLOCK entries */
     CFS_KIND_KEYS = 12,     /* the wrapped master key (struct cfs_keys) */
+    CFS_KIND_FREELOG = 13,  /* v9: what this root freed, so a mount can finish the job */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -359,7 +360,18 @@ struct cfs_super {
     uint64_t members;      /* v4: DVA of the CFS_KIND_MEMBERS block. v2/v3: the constant 1 */
     uint8_t uuid[16];      /* v4: the pool's uuid, matching every member's label */
     uint64_t key_root;     /* v7: DVA of the CFS_KIND_KEYS block, or 0 when not encrypted */
-    uint64_t reserved[5];
+    /*
+     * v9: head of a CFS_KIND_FREELOG chain, or 0. What the transaction
+     * that produced *this* root freed, written before the root and made
+     * true by it. A commit clears these bits in memory and marks the
+     * chunks for the next commit; at an unmount there is no next commit,
+     * so without this record the blocks are allocated and unreachable on
+     * the next mount (docs/audit/next-subsystem-unmount-leak.md).
+     *
+     * Read only when version >= 9: below that this is a reserved zero.
+     */
+    uint64_t free_root;
+    uint64_t reserved[4];
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };
