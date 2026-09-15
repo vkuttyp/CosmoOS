@@ -1749,6 +1749,64 @@ bool selftest_cosmofs_check_snapshot(const char **reason)
     return true;
 }
 
+/*
+ * The leak the design admits by omission, as a test: a file unlinked
+ * while a handle still holds it keeps its blocks until the last
+ * reference goes (cfs_evict frees them), and there is no on-disk record
+ * of that intention. Interrupt it and the inode is an orphan: no name
+ * reaches it, its blocks are allocated, and nothing ever reconsiders
+ * them. This is what the structural check was built to find.
+ */
+bool selftest_cosmofs_check_orphan_crash(const char **reason)
+{
+    struct blkdev *bd = NULL;
+    struct cosmofs_check_report r;
+    CHECK(check_fixture(&bd, reason));
+
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    uint64_t free_before = r.counted_free;
+
+    /* Open it, unlink it, and commit while the handle is still open: on
+     * disk the inode now has no name and keeps its blocks. */
+    struct file *f;
+    CHECK(write_file(ENG "/doomed", "still open when it went", 23));
+    CHECK(vfs_open(NULL, ENG "/doomed", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/doomed") == 0);
+    CHECK(vfs_sync() == 0);
+
+    /* The crash: the handle never closes, so cfs_evict never runs. The
+     * force unmount drops the open transaction, as a crash before the
+     * root write would. */
+    struct cosmofs_check_report during;
+    CHECK(cosmofs_check(mount_of(ENG), &during, 0) == 0);
+    CHECK(during.orphan.count == 1);   /* already an orphan on disk, handle or no handle */
+    file_put(f);
+
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* After the remount nothing holds the inode, and nothing frees it
+     * either: the space is gone until somebody checks. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.orphan.count == 1);
+    CHECK(r.counted_free < free_before);
+    uint64_t lost = r.orphan.name[0];
+
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.orphan.repaired == 1);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);   /* the deferred frees land on the commit after the repair's */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+    CHECK(r.counted_free == free_before);   /* every block the file held came back */
+
+    check_teardown(bd);
+    kinfo("selftest: cosmofs-check-orphan-crash: inode %llu survived its unlink with its blocks, and the check reclaimed them",
+          (unsigned long long)lost);
+    return true;
+}
+
 bool selftest_cosmofs_symlink(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
