@@ -278,6 +278,54 @@ link named last `ELOOP` and says nothing about links in between;
 before the expansion. `lstat` and `readlink` never follow; `unlink`,
 `rmdir` and `rename` name an entry in a parent and never did.
 
+### Unmounting a filesystem somebody is walking
+
+A maintenance pass (`docs/audit/next-subsystem-fsctl.md`) walks a whole
+filesystem while holding its lock. Nothing pinned a mount before:
+`vfs_umount` infers busyness by scanning the vnode hash for references
+beyond the ones the filesystem itself holds, and a walk holding a
+kobject reference does not appear there. Tearing the buffers down under
+a walk is a crash rather than a wrong answer, so the mount carries
+`passes_running` and unmount **drains** it.
+
+The handshake, and it needs no claim about who takes which lock first:
+
+- `vfs_umount2` sets `mnt->unmounting` before anything else it decides,
+  to turn new walkers away. `vfs_mount_acquire` is one of the things it
+  turns away, so from that moment the count can only fall.
+- The drain then waits for zero, **dropping `g_mounts_lock` across the
+  wait** -- the thread that will decrement needs it, and waiting with it
+  held is waiting for a thread that cannot run.
+- No wakeup is lost: `wait_event` queues the waiter and marks it BLOCKED
+  *before* it evaluates the condition, so a release landing in the gap
+  wakes one that is already there. The release wakes on the falling edge
+  only.
+
+**The wait is bounded**, which is why it is a wait rather than `-EBUSY`:
+a pass is a call the kernel makes and returns from, never a userland
+round trip, so the longest wait is one pass over one filesystem. A
+forced unmount waits on the same drain, because `VFS_UMOUNT_FORCE` is
+about references held by files, not a kernel call in flight.
+
+**Every decision taken before the drain is a decision about a
+filesystem that may have changed.** `vfs_umount2` works out whether it
+is the last namespace that can see the mount, and only then drains; a
+namespace created during the wait copies its parent's view and takes a
+reference, so that answer stops being true. The unmount counts again
+after the drain and steps down to "this namespace forgets it" if anyone
+else can now see the mount. Refusing to copy a dying mount would be the
+wrong fix: an unmount can fail and be restored, and the child namespace
+would then be permanently short a mount its parent has.
+
+Dropping that lock mid-unmount opens a window the code never had, and
+the first thing through it would be a second unmount: `g_mounts_lock`
+used to be held unbroken from the namespace scan to the teardown, so two
+unmounts of one mount serialised on it and nothing tested `unmounting`.
+One does now. In practice `follow_mount` already refuses to walk to a
+mount that is unmounting, so a second unmount by path fails before it
+gets there; the guard is for the relative path resolved from inside the
+mount, which does not traverse the mountpoint.
+
 ### ramfs (`kernel-services/vfs/ramfs.c`)
 
 `ramfs_node` = the vnode plus, for directories, a list of

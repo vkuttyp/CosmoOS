@@ -8,7 +8,7 @@ USER_LD := $(ROOT)/userland/user.ld
 
 # name := directory
 USER_BIN_PROGRAMS  := sh echo cat ls cp mv rm mkdir rmdir pwd true false sleep
-USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc
+USER_SBIN_PROGRAMS := mount umount ps kill dmesg sysctl vmctl hostname svc fsctl
 
 PROG_DIR_sh     := shell
 PROG_DIR_echo   := coreutils
@@ -33,6 +33,7 @@ PROG_DIR_vmctl  := system
 PROG_EXTRA_SRCS_vmctl := tools/fdt/fdt.c tools/fdt/fdt_read.c userland/system/vq.c userland/system/vblk.c userland/system/vnet.c
 PROG_DIR_hostname := system
 PROG_DIR_svc    := system
+PROG_DIR_fsctl  := system
 
 # Test-only programs: built and archived under SELFTEST, so a release
 # image carries none of them.

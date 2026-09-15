@@ -148,6 +148,32 @@ because a filesystem whose last fallible step is publishing the entry
 must not fail afterwards for a link that exists. `readlink(vn, buf,
 len)` returns the bytes copied, not terminated.
 
+### Naming a mount
+
+`struct mount` carries a `uint64_t id`, handed out in order from an
+atomic counter and **never reused**. It is the name anything uses to act
+on one filesystem rather than on a path, and it exists because a path
+cannot be that name: the same mount is at different paths in different
+mount namespaces, and a path names different mounts over time.
+
+`int vfs_mount_acquire(uint64_t id, struct mount **out)` finds a mount
+by id *in the calling process's namespace*, takes a reference and counts
+a pass. `-ENOENT` if this namespace does not hold that id -- which is
+the true answer rather than a polite one: a mount another namespace
+holds is not hidden from this caller for safety, it is not theirs.
+`-EBUSY` if the mount is already being unmounted. `void
+vfs_mount_release(struct mount *)` gives back both.
+
+**A pass must never take `g_mounts_lock`.** It is acquired and released
+with that lock dropped, and an unmount draining the pass count holds it
+while it waits, so a filesystem that reached back into the mount table
+mid-walk would deadlock.
+
+`struct fs_type` gains two optional entries, `check` and `scrub`. The
+VFS learns that a filesystem has a pass, never what one is; a filesystem
+with none leaves them null and a command against it is `-EOPNOTSUPP`
+before anything is locked.
+
 ### Namespace operations
 
 All take `struct vnode *start` (NULL or an absolute path means the

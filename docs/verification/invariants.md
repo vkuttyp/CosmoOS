@@ -61,8 +61,12 @@ thread could include the blocking ones.
 
 **F6. Every self-test reports its duration, and none approaches the hang
 watchdog.** Check: `run_boot_test.py` fails a test over
-`SELFTEST_BUDGET_MS` (8000 ms); the slowest today is `net-lo-tcp` at about
-2.8 s.
+`SELFTEST_BUDGET_MS` (8000 ms); the slowest *test* today is `net-lo-tcp`
+at about 2.8 s. One line is not a test: `process-user` is the whole
+user-mode suite behind one, grows whenever userland gains a check, and
+has its own budget in the harness's `composite_budget_ms` (20 s) for
+that reason -- it stood at 7129 ms of 8000 on CI before the unit that
+noticed (`docs/verification/design.md` §6).
 
 ## Rules the infrastructure keeps
 

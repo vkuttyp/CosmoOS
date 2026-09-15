@@ -435,6 +435,21 @@ int ramfs_mkchr(const char *path, uint32_t mode, const struct chrdev_ops *ops, v
         n->chr = ops;
         n->chr_priv = priv;
         vn->ops = &ramfs_chr_ops;
+        /*
+         * A device node's lock is its own lockdep class, and the reason
+         * is a fact about mounts rather than a convenience: nothing ever
+         * mounts onto a character device, so this lock is never the one
+         * vfs_mount takes after g_mounts_lock. Without the split, a
+         * device whose operations consult the mount table -- /dev/fsctl
+         * does, by definition -- reads as the inversion of
+         * `mounts -> vnode`, against a directory lock it can never
+         * contend for. Still tracked, just not conflated
+         * (docs/audit/next-subsystem-fsctl.md).
+         *
+         * Safe here: the node is fresh and not yet reachable by anyone
+         * but this caller.
+         */
+        mutex_init(&vn->lock, "vnode-chr");
     }
     mutex_unlock(&dir->lock);
     vnode_put(dir);

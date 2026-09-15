@@ -28,7 +28,6 @@
 
 #include "cosmofs_internal.h"
 
-#if CONFIG_DEBUG   /* the structural check is a debug-build tool, as the crash suite is */
 
 /* One page of bits covers this many blocks; the maps are arrays of those
  * pages, because a filesystem large enough to matter needs more bits
@@ -793,4 +792,3 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     return rc;
 }
 
-#endif /* CONFIG_DEBUG */

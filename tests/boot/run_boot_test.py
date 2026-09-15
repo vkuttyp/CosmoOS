@@ -653,6 +653,18 @@ def main():
     # Per-test durations (docs/verification/design.md, "Per-test timing"):
     # report the slowest and fail one that nears the hang watchdog.
     budget_ms = int(os.environ.get("SELFTEST_BUDGET_MS", "8000"))
+    # One line here is not one test. `process-user` runs the *entire*
+    # user-mode suite -- every fs, net, proc, fpu, trap, priv and svc
+    # check init makes, plus a process spawn for each tool it drives --
+    # behind a single SELFTEST line, so it grows whenever userland gains
+    # a test and is compared against a number meant for one test nearing
+    # the hang watchdog. On CI it was already at 7129 ms of 8000 before
+    # the unit that noticed (docs/audit/next-subsystem-fsctl.md), which
+    # is a budget that fails the next addition whatever it is.
+    #
+    # It keeps a budget, because a suite that hangs must still be caught;
+    # it just gets one sized for what it is.
+    composite_budget_ms = {"process-user": 20000}
     timings = []
     for ln in selftest_lines:
         m = re.match(r"SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)", ln)
@@ -664,8 +676,9 @@ def main():
         print(f"boot-test: {len(timings)} self-tests, {total} ms total; slowest: "
               + ", ".join(f"{name} {ms} ms" for ms, name in timings[:5]))
         for ms, name in timings:
-            if ms > budget_ms:
-                failures.append(f"self-test {name} took {ms} ms (budget {budget_ms} ms)")
+            limit = composite_budget_ms.get(name, budget_ms)
+            if ms > limit:
+                failures.append(f"self-test {name} took {ms} ms (budget {limit} ms)")
     # A failing self-test on the load-sensitive list is named as such
     # (docs/testing/flakes.md). The run fails either way.
     failures.extend(load_sensitive_notes(failed_selftests(selftest_lines),

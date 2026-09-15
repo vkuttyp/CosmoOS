@@ -499,9 +499,11 @@ struct cosmofs_check_report {
 };
 
 /* Under the mount's own lock; -ENOMEM rather than a walk it cannot finish.
- * Debug builds only (`CONFIG_DEBUG`), as the crash suite is: the release
- * build has no caller, because there is no operator interface yet to be
- * one. That is the inventory row this unit leaves behind. */
+ * Debug builds only (`CONFIG_DEBUG`) **as this unit left it**, because
+ * the release build had no caller: there was no operator interface to a
+ * mount's maintenance passes. That was the inventory row this unit left
+ * behind, and the fsctl unit closed it -- the gate is gone and
+ * /dev/fsctl is the caller (docs/audit/next-subsystem-fsctl.md). */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
 
 /* Test hook: break the filesystem in one named way, so that a finding

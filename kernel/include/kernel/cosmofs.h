@@ -114,7 +114,8 @@ struct cosmofs_check_report {
  * map under the mount's lock. -EINVAL for a mount that is not a cosmofs,
  * -EIO for an abandoned transaction, -ENOMEM before the walk starts rather
  * than half way through it. A filesystem with findings is not an error:
- * the report says what they are. Debug builds only. */
+ * the report says what they are. In every build: an operator reaches it
+ * through /dev/fsctl (docs/audit/next-subsystem-fsctl.md). */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
 
 /* Test hook: the next unmount discards the open transaction instead of

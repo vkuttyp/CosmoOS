@@ -23,6 +23,7 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
+#include <uapi/cosmo/fsctl.h>
 #include <kernel/sched.h>
 #include <kernel/wait.h>
 #include <kernel/thread.h>
@@ -1059,6 +1060,328 @@ static int64_t chropen_read_file(struct vnode *vn, struct file *f, uint64_t off,
 static const struct chrdev_ops chropen_ops = {
     .open = chropen_open, .release = chropen_release, .read_file = chropen_read_file,
 };
+
+/*
+ * A mount's name (docs/audit/next-subsystem-fsctl.md). The assertion
+ * that matters is the third: an id is not an index. A filesystem
+ * unmounted and another mounted at the same path must not inherit the
+ * first one's name, or an operator holding a stale id commands a
+ * filesystem they never listed.
+ */
+bool selftest_vfs_mount_id(const char **reason)
+{
+    CHECK(vfs_mkdir(NULL, "/tmp/idA", 0755) == 0 || true);
+    (void)vfs_umount("/tmp/idA");
+    int mk = vfs_mkdir(NULL, "/tmp/idA", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    mk = vfs_mkdir(NULL, "/tmp/idB", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+
+    /* Every mount has one, and no two share it. */
+    CHECK(vfs_mount("/tmp/idA", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mount("/tmp/idB", "ramfs", NULL, 0) == 0);
+    struct mount *a = mount_at("/tmp/idA"), *b = mount_at("/tmp/idB");
+    CHECK(a != NULL && b != NULL);
+    CHECK(a->id != 0 && b->id != 0);
+    CHECK(a->id != b->id);
+    uint64_t first = a->id;
+
+    /* The root filesystem has one too, and it is not either of these. */
+    struct mount *root = mount_at("/");
+    CHECK(root != NULL && root->id != 0);
+    CHECK(root->id != a->id && root->id != b->id);
+
+    /* A number is never handed out twice: unmount and mount again at the
+     * same path, and the new filesystem is a new name. An index would
+     * give the freed slot back and fail here. */
+    CHECK(vfs_umount("/tmp/idA") == 0);
+    CHECK(vfs_mount("/tmp/idA", "ramfs", NULL, 0) == 0);
+    struct mount *again = mount_at("/tmp/idA");
+    CHECK(again != NULL);
+    CHECK(again->id != first);
+    CHECK(again->id != b->id);
+
+    CHECK(vfs_umount("/tmp/idA") == 0);
+    CHECK(vfs_umount("/tmp/idB") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/idA") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/idB") == 0);
+    kinfo("selftest: vfs-mount-id: ids %llu, %llu, then %llu at the same path",
+          (unsigned long long)first, (unsigned long long)b->id, (unsigned long long)again->id);
+    return true;
+}
+
+/* --- the pin: a mount stays alive while a pass walks it ------------------- */
+
+static uint64_t g_pin_id;
+static int g_pin_umount_rc;
+static bool g_pin_umount_done;
+
+static void pin_unmounter(void *arg)
+{
+    (void)arg;
+    g_pin_umount_rc = vfs_umount("/tmp/pin");
+    __atomic_store_n(&g_pin_umount_done, true, __ATOMIC_RELEASE);
+}
+
+/*
+ * An unmount waits for a pass rather than tearing the filesystem down
+ * under it, and the wait terminates because no new pass can start once
+ * the unmount has begun. Both halves matter: without the wait a pass
+ * walks freed buffers, and without the refusal the wait never ends.
+ */
+bool selftest_vfs_mount_pin(const char **reason)
+{
+    int mk = vfs_mkdir(NULL, "/tmp/pin", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/tmp/pin", "ramfs", NULL, 0) == 0);
+    struct mount *m = mount_at("/tmp/pin");
+    CHECK(m != NULL);
+    g_pin_id = m->id;
+
+    /* Acquire by name, as a pass does. */
+    struct mount *held = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &held) == 0);
+    CHECK(held == m);
+    CHECK(vfs_mount_acquire(0, &held) == -EINVAL);
+    CHECK(vfs_mount_acquire(~0ull, &held) == -ENOENT);   /* no such name anywhere */
+
+    /* An unmount now blocks. Run it elsewhere so this thread can let go. */
+    g_pin_umount_rc = 1234;
+    __atomic_store_n(&g_pin_umount_done, false, __ATOMIC_RELEASE);
+    struct thread *t = thread_create(pin_unmounter, NULL, "pin-umount", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+
+    /*
+     * It has not finished, and it will not until the pass is done. Once
+     * the unmount has begun, a second acquisition must be *refused* --
+     * that is what makes the drain terminate, so the test requires it to
+     * happen rather than accepting whichever answer comes back. Before
+     * the unmount begins, acquiring still succeeds; the loop waits for
+     * the transition and fails if it never comes.
+     */
+    bool refused = false;
+    for (unsigned i = 0; i < 500 && !refused; i++) {
+        CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+        struct mount *second = NULL;
+        int rc = vfs_mount_acquire(g_pin_id, &second);
+        CHECK(rc == 0 || rc == -EBUSY);
+        if (rc == 0)
+            vfs_mount_release(second);
+        else
+            refused = true;
+        thread_sleep_ms(2);
+    }
+    CHECK(refused);                  /* a pass that could start here would never let the drain end */
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+
+
+    /*
+     * And one unmount at a time. Note what this does and does not prove:
+     * the refusal comes from `follow_mount`, which will not walk to a
+     * mount that is unmounting, so the second unmount fails while
+     * resolving its path and never reaches the guard inside vfs_umount2.
+     * That guard is still there, for a caller that reaches the mount by
+     * a relative path from inside it rather than through the mountpoint
+     * -- a narrow door this test does not open. Removing the guard does
+     * not fail this assertion, and the as-built section says so rather
+     * than letting the test look like proof it is not.
+     */
+    CHECK(vfs_umount("/tmp/pin") == -EBUSY);
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));   /* and it changed nothing */
+
+    /*
+     * A namespace made *during the drain* copies its parent's view, this
+     * mount included -- a copy that skipped it would be permanently
+     * short a mount its parent has if the unmount later failed and was
+     * restored. Which means the unmount's "I am the last namespace out"
+     * is no longer true, and it must find that out: the mount survives,
+     * and the unmount becomes this namespace forgetting it.
+     */
+    struct mount_ns *racer = NULL;
+    unsigned mounts_before = vfs_mount_count();
+    CHECK(mountns_create(mountns_initial(), &racer) == 0);
+    CHECK(mountns_sees(racer, m));
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+
+    /* Let go. The drain wakes, re-counts, and steps down. */
+    vfs_mount_release(held);
+    thread_join(t);
+    CHECK(__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+    CHECK(g_pin_umount_rc == 0);
+    /* The filesystem is still there, because the new namespace holds it;
+     * this namespace no longer does. The count is the assertion that
+     * survives an unmount which wrongly went ahead: it would have torn
+     * the filesystem down and taken it with it. */
+    CHECK(vfs_mount_count() == mounts_before);
+    CHECK(mountns_sees(racer, m));
+    struct mount *still = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &still) == -ENOENT);   /* not ours any more */
+    mountns_put(racer);                                       /* the last one out takes it */
+    CHECK(vfs_mount_count() == mounts_before - 1);
+    struct mount *after = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &after) == -ENOENT);
+    CHECK(vfs_rmdir(NULL, "/tmp/pin") == 0);
+    kinfo("selftest: vfs-mount-pin: mount %llu held a pass; a second unmount was refused; the first waited and then took it",
+          (unsigned long long)g_pin_id);
+    return true;
+}
+
+/* --- /dev/fsctl: the listing ---------------------------------------------- */
+
+/* Run one command and hand back this file's result buffer. */
+static int fsctl_cmd(struct file *f, uint16_t op, uint64_t id, uint32_t flags,
+                     void *out, size_t outlen)
+{
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = op,
+                               .flags = flags, .mount_id = id };
+    int64_t w = file_write(f, &cmd, sizeof(cmd));
+    if (w != (int64_t)sizeof(cmd))
+        return (int)w;
+    int64_t r = file_read(f, out, outlen);
+    return r < 0 ? (int)r : (int)r;
+}
+
+/* Find a mount id in a listing, and its path. */
+static const struct cosmo_fsctl_mount *fsctl_find(const void *buf, uint64_t id)
+{
+    const struct cosmo_fsctl_result *h = buf;
+    const struct cosmo_fsctl_mount *m = (const struct cosmo_fsctl_mount *)((const uint8_t *)buf + sizeof(*h));
+    for (uint32_t i = 0; i < h->count; i++)
+        if (m[i].id == id)
+            return &m[i];
+    return NULL;
+}
+
+/*
+ * The listing is the caller's own namespace, not the mount table. The
+ * assertion that separates the two is the last one: a mount this
+ * namespace has dropped is gone from the listing while the machine still
+ * has it, because another namespace does. A listing built from g_mounts
+ * would still show it.
+ */
+bool selftest_fsctl_list(const char **reason)
+{
+    struct file *f = NULL;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+
+    size_t cap = sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount);
+    uint8_t *buf = kmalloc(cap, KMEM_ZERO);
+    CHECK(buf != NULL);
+
+    /* A file that has issued no command reads nothing: the empty state
+     * has one meaning, which is why LIST is written rather than implied. */
+    CHECK(file_read(f, buf, cap) == 0);
+
+    int mk = vfs_mkdir(NULL, "/tmp/fsl", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    unsigned count0 = vfs_mount_count();
+    CHECK(vfs_mount("/tmp/fsl", "ramfs", NULL, 0) == 0);
+    struct mount *m = mount_at("/tmp/fsl");
+    CHECK(m != NULL);
+    uint64_t id = m->id;
+
+    int n = fsctl_cmd(f, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+    CHECK(n > (int)sizeof(struct cosmo_fsctl_result));
+    struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
+    CHECK(h->version == COSMO_FSCTL_VERSION && h->kind == COSMO_FSCTL_LIST);
+    CHECK(h->bytes == sizeof(struct cosmo_fsctl_mount));
+    CHECK(h->count == h->total);                  /* nothing raced; the listing is whole */
+
+    /* The mount just made, at its path, named by its id. */
+    const struct cosmo_fsctl_mount *rec = fsctl_find(buf, id);
+    CHECK(rec != NULL);
+    CHECK(strcmp(rec->path, "/tmp/fsl") == 0);
+    CHECK(strcmp(rec->fstype, "ramfs") == 0);
+    CHECK(rec->caps == 0);                        /* a ramfs offers neither pass */
+
+    /* The root filesystem is there too, at /, though it holds no
+     * namespace reference at all -- which is why it is emitted by name
+     * rather than found in a list it is deliberately absent from. */
+    struct mount *root = mount_at("/");
+    CHECK(root != NULL);
+    const struct cosmo_fsctl_mount *rrec = fsctl_find(buf, root->id);
+    CHECK(rrec != NULL);
+    CHECK(strcmp(rrec->path, "/") == 0);
+
+    /* Each mount appears once. */
+    unsigned seen = 0;
+    struct cosmo_fsctl_mount *recs = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    for (uint32_t i = 0; i < h->count; i++)
+        if (recs[i].id == id)
+            seen++;
+    CHECK(seen == 1);
+
+    /*
+     * Now the isolation. A second namespace copies the view, so dropping
+     * the mount here leaves the filesystem alive -- and out of this
+     * namespace's listing while the machine still counts it.
+     */
+    struct mount_ns *other = NULL;
+    CHECK(mountns_create(mountns_initial(), &other) == 0);
+    CHECK(vfs_umount("/tmp/fsl") == 0);
+    CHECK(vfs_mount_count() == count0 + 1);       /* still mounted: `other` sees it */
+    n = fsctl_cmd(f, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+    CHECK(n > 0);
+    CHECK(fsctl_find(buf, id) == NULL);           /* but not this namespace's any more */
+    CHECK(fsctl_find(buf, root->id) != NULL);     /* the root did not go with it */
+
+    mountns_put(other);
+    CHECK(vfs_mount_count() == count0);
+    CHECK(vfs_rmdir(NULL, "/tmp/fsl") == 0);
+    kfree(buf);
+    file_put(f);
+    kinfo("selftest: fsctl-list: mount %llu listed at its path and gone from the listing while the machine kept it",
+          (unsigned long long)id);
+    return true;
+}
+
+/*
+ * A result belongs to the file that asked for it. Two operators with two
+ * open files must not share a "last answer": one would read the other's,
+ * and neither would know. A global result would also be a race rather
+ * than merely a confusion.
+ */
+bool selftest_fsctl_result_per_open(const char **reason)
+{
+    struct file *a = NULL, *b = NULL;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &a) == 0 && a != NULL);
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &b) == 0 && b != NULL);
+    CHECK(a->priv != b->priv);                 /* two instances, as the chrdev layer gives */
+
+    size_t cap = sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount);
+    uint8_t *ba = kmalloc(cap, KMEM_ZERO), *bb = kmalloc(cap, KMEM_ZERO);
+    CHECK(ba != NULL && bb != NULL);
+
+    /* Neither has asked anything yet. */
+    CHECK(file_read(a, ba, cap) == 0);
+    CHECK(file_read(b, bb, cap) == 0);
+
+    /* One asks; the other still has nothing, which is the assertion a
+     * shared buffer would fail. */
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_LIST };
+    CHECK(file_write(a, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(b, bb, cap) == 0);
+    int64_t na = file_read(a, ba, cap);
+    CHECK(na > (int64_t)sizeof(struct cosmo_fsctl_result));
+
+    /* Both ask; both read their own, and a result survives being read
+     * twice -- a reader that lost it on the first read would return 0. */
+    CHECK(file_write(b, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd));
+    CHECK(file_read(b, bb, cap) == na);
+    CHECK(file_read(a, ba, cap) == na);
+    CHECK(memcmp(ba, bb, (size_t)na) == 0);    /* same namespace, same answer */
+
+    /* A buffer too small is refused rather than truncated: half a
+     * listing parses as a whole one. */
+    CHECK(file_read(a, ba, sizeof(struct cosmo_fsctl_result)) == -ERANGE);
+
+    kfree(ba);
+    kfree(bb);
+    file_put(a);
+    file_put(b);
+    kinfo("selftest: fsctl-result-per-open: two open files, two results, neither the other's");
+    return true;
+}
 
 bool selftest_vfs_chrdev_open(const char **reason)
 {

@@ -14,6 +14,7 @@
 #include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/spinlock.h>
+#include <kernel/wait.h>
 #include <kernel/object.h>
 #include <kernel/pagecache.h>
 #include <kernel/types.h>
@@ -120,11 +121,27 @@ struct vnode {
     unsigned flags;
 };
 
+struct cosmofs_check_report;
+struct cosmofs_scrub_stats;
+
 struct fs_type {
     const char *name;
     int (*mount)(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt);
     int (*unmount)(struct mount *mnt);
     int (*sync)(struct mount *mnt);
+    /*
+     * The maintenance passes, both optional: the VFS learns that a
+     * filesystem has one, never what one is. A filesystem with none
+     * leaves them null and /dev/fsctl refuses a command against it
+     * before anything is locked (docs/audit/next-subsystem-fsctl.md).
+     *
+     * The out-structs are cosmofs's and stay so -- declared above and
+     * never dereferenced here, because the VFS hands the pointer to the
+     * filesystem and copies the bytes out by size. One implementation
+     * does not earn a filesystem-neutral result type.
+     */
+    int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
+    int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
     struct list_node link;
 };
 
@@ -133,6 +150,15 @@ struct fs_type {
 
 struct mount {
     struct kobject obj;
+    /*
+     * The mount's name, for anything that acts on one mount rather than
+     * on a path (docs/audit/next-subsystem-fsctl.md). Never reused: a
+     * counter and not an index, so an operator holding a stale id
+     * commands nothing rather than a filesystem they never listed. It
+     * is the same number in every namespace that can see the mount, and
+     * the path is not -- which is the whole reason it exists.
+     */
+    uint64_t id;
     struct fs_type *fs;
     struct vnode *root;
     struct vnode *mountpoint;
@@ -158,6 +184,17 @@ struct mount {
     uint64_t cache_pages;     /* pages the page cache holds for this mount (atomic) */
     uint64_t cache_dirty;     /* of which dirty (atomic); a filesystem's writeback threshold */
     uint64_t cache_limit_pages;   /* a miss beyond this is -ENOSPC; 0: no budget (docs/kernel/security/design.md §3) */
+    /*
+     * Maintenance passes running against this mount right now
+     * (docs/audit/next-subsystem-fsctl.md). Written under g_mounts_lock,
+     * read atomically by the drain below with that lock dropped. An
+     * unmount sets `unmounting`, which stops a new pass from starting,
+     * and then waits on `passes_quiet` for this to reach zero: a pass
+     * walks the filesystem's buffers and tearing them down under it is
+     * a crash rather than a wrong answer.
+     */
+    uint64_t passes_running;
+    struct waitqueue passes_quiet;
     bool unmounting;          /* set under mountpoint->lock while vfs_umount decides */
     bool unmounted;           /* set under sync_lock once fs->unmount ran */
 };
@@ -322,6 +359,26 @@ void *ramfs_chr_priv(const struct vnode *vn);
 
 /* Diagnostics. */
 unsigned vfs_mount_count(void);
+
+/* Create /dev/fsctl. Called once at boot, after the ramfs has /dev. */
+void fsctl_dev_init(void);
+
+/*
+ * Name a mount for an operation that acts on one filesystem rather than
+ * on a path. Takes a reference and counts a pass, so the mount cannot be
+ * freed and an unmount waits rather than tearing down underneath.
+ *
+ * -ENOENT if the calling process's mount namespace does not hold that
+ * id (which is not the same as "no such mount", and is the right answer:
+ * a mount another namespace holds is not this caller's), -EBUSY if it is
+ * already being unmounted.
+ *
+ * The caller must not take g_mounts_lock between these two: the mount is
+ * acquired and released with it dropped, and an unmount draining the
+ * count holds it while it waits.
+ */
+int vfs_mount_acquire(uint64_t id, struct mount **out);
+void vfs_mount_release(struct mount *mnt);
 unsigned vfs_vnode_count(void);
 void vfs_dump(void);
 

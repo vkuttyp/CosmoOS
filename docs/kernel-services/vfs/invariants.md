@@ -436,6 +436,31 @@ eight times gives eight different ciphertexts, which is what a repeated
 nonce would break; and a genuine block of a file written over another of
 its own offsets is refused), and `test_chacha20` against RFC 8439.
 
+**V30. A mount named by id is alive until the name is given back, and
+an unmount waits rather than tearing it down.** `vfs_mount_acquire`
+takes a reference and counts a pass; `vfs_umount2` sets `unmounting`,
+which makes a further acquisition `-EBUSY`, and then waits for the count
+to reach zero before it decides anything. The wait is bounded by one
+pass over one filesystem, because a pass is a kernel call and not a
+userland round trip, and a forced unmount waits on the same drain. An id
+is never reused, so a stale one names nothing rather than a filesystem
+its holder never listed. **Checked by** `vfs-mount-id` (a mount at a
+path an unmount just freed gets a new id) and `vfs-mount-pin` (the
+unmount does not complete while a pass is held, a second acquisition is
+refused once it has begun, a second unmount is refused, and releasing
+wakes the drain).
+
+**V31. A mount listing is the caller's own namespace.** `/dev/fsctl`'s
+listing carries the mounts the calling process's mount namespace holds,
+at the paths *that namespace* holds them, plus the root filesystem --
+which is visible everywhere and deliberately holds no namespace
+reference, so it is emitted by name rather than found in a list it is
+absent from. An id the namespace does not hold is `-ENOENT` and not
+`-EPERM`: a mount that is not this caller's is not hidden from it for
+safety. **Checked by** `fsctl-list`: a mount this namespace drops leaves
+the listing while `vfs_mount_count` still counts it, because another
+namespace holds it.
+
 **V29. A symbolic link is bounded by the resolution that expands it.**
 One resolution expands at most `VFS_MAX_SYMLINKS` (8) links and walks at
 most `VFS_MAX_COMPONENTS` components, both answering `-ELOOP`; an

@@ -1663,6 +1663,10 @@ struct fs_type cosmofs_fs_type = {
     .mount = cosmofs_mount,
     .unmount = cosmofs_unmount,
     .sync = cosmofs_sync,
+    /* The maintenance passes, reachable from /dev/fsctl. Until this the
+     * only caller of either was a self-test. */
+    .check = cosmofs_check,
+    .scrub = cosmofs_scrub,
 };
 
 void cosmofs_init(void)
