@@ -60,8 +60,8 @@ reading:
    argument for comparing both totals rather than the easy one.
 9. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
    corruption, so the list of ways to break a filesystem lives in one
-   place and every class a test can report is one a test produced on
-   purpose.
+   place. Eight of the ten classes are produced there on purpose; the
+   two that are not are named in "As built" and in the inventory.
 10. **Repair is an argument from absence, so it needs a sure walk.**
     Every repair the pass makes says "nothing reaches this". When the
     walk had to skip something, that means "this pass did not get
@@ -464,9 +464,9 @@ all consume or produce the same findings.
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | new: the pass, the two maps, the ten classes, the four repairs |
 | `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | the inode-shaped directory read, shared with `cosmofs.c`; `cfs_bitmap_test` and `cfs_inode_read_raw` |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | `dir_read_block` split so the checker and the VFS path share one reader |
-| `kernel/include/kernel/cosmofs.h` | `struct cosmofs_check_report`, `cosmofs_check`, the flags, and `cosmofs_test_corrupt` with its eight named corruptions |
+| `kernel/include/kernel/cosmofs.h` | `struct cosmofs_check_report` (with `repair_refused`), `cosmofs_check`, the flags, and `cosmofs_test_corrupt` with its nine named corruptions |
 | `kernel-services/filesystem/cosmofs/cosmofscrash.c` | the check in `check_prefix`, and the unlinked-but-open workload |
-| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the six checker tests; the eight manufactured faults reach them through one hook, `cosmofs_test_corrupt` |
+| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the eight checker tests; the nine manufactured faults reach them through one hook, `cosmofs_test_corrupt` |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | registration |
 | docs | `docs/kernel-services/filesystem/cosmofs/design.md` (the structural check, what a post-crash image may have, and the stale future-work line that still promised one) and `architecture.md` (the non-responsibility now names only the *offline* checker); README Status, `docs/README.md`, the inventory (the struck row, plus new rows for the operator interface, the on-disk orphan list, and the two finding classes no test manufactures) |
 
@@ -504,9 +504,11 @@ struct cosmofs_check_report {
  * one. That is the inventory row this unit leaves behind. */
 int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
 
-/* Test hook: break the filesystem in one named way, so every finding
- * class has a test that manufactures exactly it. `what` returns the
- * block or inode it touched, which is what the check must name back. */
+/* Test hook: break the filesystem in one named way, so that a finding
+ * is one a test produced on purpose. Eight of the ten classes are
+ * manufactured here; `chain_cycle` is not, and nor are four of the six
+ * places `dir_bad` is reported from. `what` returns the block or inode
+ * it touched, which is what the check must name back. */
 enum cosmofs_corruption {
     COSMOFS_CORRUPT_LEAK, COSMOFS_CORRUPT_FREE_IN_USE, COSMOFS_CORRUPT_CROSSLINK,
     COSMOFS_CORRUPT_NLINK, COSMOFS_CORRUPT_ORPHAN, COSMOFS_CORRUPT_DANGLING,
@@ -579,10 +581,12 @@ cries wolf.
 
 ### As built
 
-**Thirteen named tests became seven, because the faults became one
-hook.** `cosmofs_test_corrupt` takes the corruption by name, so the
-eight manufactured faults are eight calls rather than eight fixtures.
-What the design named, and where it is:
+**Thirteen named tests became eight, because the faults became one
+hook.** `cosmofs_test_corrupt` takes the corruption by name, so the nine
+manufactured faults are nine calls rather than nine fixtures. Seven of
+them are sub-cases of one test; the other two have tests of their own,
+because what they assert is a repair's behaviour rather than a class
+firing. What the design named, and where it is:
 
 | the design's test | as built |
 | --- | --- |

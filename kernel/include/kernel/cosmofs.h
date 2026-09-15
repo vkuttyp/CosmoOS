@@ -129,11 +129,16 @@ void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
  * kernel still mounts and writes what an older one wrote. */
 int cosmofs_test_format_version(struct blkdev *bd, unsigned version);
 /*
- * Test hook: break the filesystem in one named way, so that each of the
- * structural check's findings has a test that manufactures exactly it.
+ * Test hook: break the filesystem in one named way, so that a finding
+ * of the structural check is one a test produced on purpose. Eight of
+ * the ten classes are manufactured here; `chain_cycle` is not, and nor
+ * are four of the six places `dir_bad` is reported from -- both are
+ * recorded in docs/audit/2026-09-deferred-work-inventory.md rather than
+ * left to this comment.
+ *
  * `what` returns the block or inode the corruption touched, which is
  * what the check must name back, and `ino` is the inode a case needs one
- * for (0 where none does). One hook rather than eight, because the list
+ * for (0 where none does). One hook rather than nine, because the list
  * of ways to break a filesystem belongs in one place.
  */
 enum cosmofs_corruption {
