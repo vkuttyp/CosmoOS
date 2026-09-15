@@ -740,7 +740,11 @@ left -- a hang with no output, right after `jumping to kernel entry`.
 writes MAIR, TCR, TTBR0, TTBR1 and SCTLR through their `_EL12` aliases
 (op1 = 5, as raw encodings: the loader is built for ARMv8.0) and
 invalidates with `tlbi alle1`, since `tlbi vmalle1` with `TGE` set names
-the EL2&0 regime rather than the EL1&0 one those tables are for. It
+the EL2&0 regime rather than the EL1&0 one those tables are for (`ALLE1`
+is fixed to EL1&0 whatever `TGE` says, which is why a VHE host's
+hypervisor uses it); `jump_from_el2` then issues `tlbi vmalle1` as well,
+once `E2H` and `TGE` are certainly clear and only one reading is
+possible. It
 prints `cosmoboot: EL2 handover in VHE host mode …` when it takes that
 path. `jump_from_el2` then disables the EL2 MMU *before* clearing `E2H`,
 because clearing it reinterprets `TCR_EL2` and `SCTLR_EL2` in the
