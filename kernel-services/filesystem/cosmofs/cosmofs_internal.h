@@ -144,6 +144,9 @@ bool cfs_has_snapshots(struct cfs *fs);
 /* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
  * False when no snapshot exists and the caller should free it. */
 bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
+
+/* Test hook: block numbers on every snapshot's deadlist, together. */
+uint64_t cfs_snapshot_deadlist_len(struct cfs *fs);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);

@@ -168,4 +168,12 @@ int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64
 /* Test hook: free blocks on one member, or UINT64_MAX past the last. */
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev);
 
+/*
+ * Block numbers on every snapshot's deadlist, together. A held block is
+ * not a leak and not a finding -- the checker claims a deadlist as
+ * metadata -- so this is the only number that distinguishes a block
+ * freed from a block held (docs/audit/next-subsystem-unmount-leak.md).
+ */
+uint64_t cosmofs_test_deadlist_len(struct mount *mnt);
+
 #endif /* KERNEL_COSMOFS_H */

@@ -1948,6 +1948,17 @@ int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64
     return rc;
 }
 
+uint64_t cosmofs_test_deadlist_len(struct mount *mnt)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return 0;
+    mutex_lock(&fs->lock);
+    uint64_t n = cfs_snapshot_deadlist_len(fs);
+    mutex_unlock(&fs->lock);
+    return n;
+}
+
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev)
 {
     struct cfs *fs = cfs_of(mnt);

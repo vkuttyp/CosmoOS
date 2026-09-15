@@ -2713,17 +2713,20 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
  * name. A snapshot preserves `imap_root` and `alloc_root`, never
  * `free_root`, so a record is not one of those.
  *
- * It keeps mattering after the first time, because records reuse block
- * numbers: a record freed by this exception is handed out again, and the
- * snapshot's bitmap still marks that number allocated, so the filter
- * would hold its successor too. Under the injection roughly every other
- * commit loses a block for as long as the snapshot exists.
+ * **The deadlist is the instrument, and neither the checker nor the free
+ * count is.** A held block goes on the snapshot's deadlist, and a
+ * deadlist is metadata the checker claims -- so a filesystem that held a
+ * record it should have freed is `clean` all the way down. And the loss
+ * is one block per snapshot, which is inside the noise of a transaction
+ * in flight.
  *
- * **The free count is the instrument, and the checker is not.** A held
- * block goes on a deadlist, and a deadlist is metadata the checker
- * claims -- so a filesystem losing a block per commit this way is
- * `clean` all the way down. It shows up as space that never comes back
- * and nothing else, which is why this test counts.
+ * What is exact is that the deadlist stops growing. It legitimately
+ * grows at first -- the root directory block and the first imap and
+ * bitmap blocks predate the snapshot, and rewriting anything frees them
+ * -- so the churn runs in a directory created after the snapshot, and
+ * once that has settled nothing it frees is a block the snapshot's tree
+ * names. Any later entry got there by asking the wrong question about a
+ * record.
  */
 bool selftest_cosmofs_freelog_not_held(const char **reason)
 {
@@ -2745,17 +2748,21 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     CHECK(rec.free_root != 0);
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
 
-    /* Settle, then measure. The churn file postdates the snapshot, so
-     * nothing these commits free is a block the snapshot's tree names:
-     * the only thing they release is one record after another. */
-    CHECK(write_file(ENG "/churn", "x", 1));
-    CHECK(vfs_sync() == 0);
-    CHECK(vfs_sync() == 0);
+    /* Everything the churn touches is created after the snapshot, and
+     * then settled, so the blocks these commits free are all post-
+     * snapshot ones: the only thing they release that a snapshot's
+     * bitmap remembers is one record after another. */
+    CHECK(vfs_mkdir(NULL, ENG "/post", 0755) == 0);
+    for (unsigned i = 0; i < 3; i++) {
+        CHECK(write_file(ENG "/post/churn", "x", 1));
+        CHECK(vfs_sync() == 0);
+    }
     struct cosmofs_stats before;
     CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+    uint64_t dead_before = cosmofs_test_deadlist_len(mount_of(ENG));
 
     for (unsigned i = 0; i < 30; i++) {
-        CHECK(write_file(ENG "/churn", "y", 1));
+        CHECK(write_file(ENG "/post/churn", "y", 1));
         CHECK(vfs_sync() == 0);
     }
     struct cosmofs_stats after;
@@ -2763,6 +2770,15 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     /* The transaction in flight can move it a little; thirty commits'
      * worth of held records cannot hide in that. */
     CHECK(after.free_blocks + 6 >= before.free_blocks);
+
+    /*
+     * And the exact statement, which the free count cannot make: the
+     * deadlist did not grow. Under the generic filter a record lands on
+     * a block number this snapshot's bitmap remembers and goes on the
+     * list, permanently -- one block, too small to separate from the
+     * noise of a transaction in flight, and unambiguous here.
+     */
+    CHECK(cosmofs_test_deadlist_len(mount_of(ENG)) == dead_before);
 
     /* And the snapshot is intact: nothing this exception frees was its. */
     CHECK(vfs_umount(ENG) == 0);
@@ -2776,8 +2792,9 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
-    kinfo("selftest: cosmofs-freelog-not-held: 30 records superseded under a snapshot, %llu free before and %llu after, and the snapshot still reads",
-          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
+    kinfo("selftest: cosmofs-freelog-not-held: 30 records superseded under a snapshot, %llu free before and %llu after, %llu on the deadlist either side, and the snapshot still reads",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks,
+          (unsigned long long)dead_before);
     return true;
 }
 
