@@ -1485,6 +1485,270 @@ bool selftest_cosmofs_badmembers(const char **reason)
  * make one, because a kernel of that vintage would read it as a regular
  * file whose contents are a path.
  */
+/*
+ * The structural check (docs/audit/next-subsystem-fsck.md). The scrub
+ * asks whether every block is still what was written; these ask whether
+ * the blocks add up.
+ */
+static bool check_is_clean(const char **reason, struct cosmofs_check_report *rep)
+{
+    int rc = cosmofs_check(mount_of(ENG), rep, 0);
+    if (rc != 0) {
+        *reason = "the check itself failed";
+        return false;
+    }
+    return true;
+}
+
+bool selftest_cosmofs_check_clean(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* A filesystem with something of everything in it: files, a
+     * directory, a symbolic link, a rewritten file and a removed one. */
+    CHECK(write_file(ENG "/one", "first", 5));
+    CHECK(vfs_mkdir(NULL, ENG "/dir", 0755) == 0);
+    CHECK(write_file(ENG "/dir/two", "second", 6));
+    CHECK(vfs_symlink(NULL, ENG "/link", "one") == 0);
+    CHECK(write_file(ENG "/one", "first again, longer", 19));
+    CHECK(write_file(ENG "/gone", "x", 1));
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(check_is_clean(reason, &rep));
+    CHECK(rep.clean);
+    CHECK(!rep.partial);
+    /* The arithmetic is the assertion: a walk that saw nothing would
+     * report clean and fail here. */
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(rep.blocks_seen + rep.counted_free == st.total_blocks);
+    CHECK(rep.counted_free == st.free_blocks);
+    CHECK(rep.inodes_seen >= 5);            /* root, one, dir, two, link */
+    CHECK(rep.dirs_seen == 2);              /* the root and dir */
+    CHECK(rep.bytes_allocated > 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-check-clean: %llu blocks seen, %llu free, %llu inodes, %llu dirs, clean",
+          (unsigned long long)rep.blocks_seen, (unsigned long long)rep.counted_free,
+          (unsigned long long)rep.inodes_seen, (unsigned long long)rep.dirs_seen);
+    return true;
+}
+
+bool selftest_cosmofs_check_leak(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(write_file(ENG "/file", "bytes", 5));
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(check_is_clean(reason, &rep) && rep.clean);
+    uint64_t free_before = rep.counted_free;
+
+    /* Mark one free block allocated and tell nobody: a leak, exactly as
+     * a crash between an allocation and the write that would have used
+     * it leaves one. */
+    uint64_t leaked = 0;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, NULL, &leaked) == 0);
+    CHECK(check_is_clean(reason, &rep));
+    CHECK(!rep.clean);
+    CHECK(rep.alloc_not_seen.count == 1);
+    CHECK(rep.alloc_not_seen.named == 1 && rep.alloc_not_seen.name[0] == leaked);
+    CHECK(rep.counted_free == free_before - 1);
+    CHECK(rep.dup.count == 0 && rep.orphan.count == 0);   /* only the one class */
+
+    /* Repair gives it back, and the second pass is clean. */
+    CHECK(cosmofs_check(mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(rep.alloc_not_seen.repaired == 1);
+    CHECK(vfs_sync() == 0);
+    CHECK(check_is_clean(reason, &rep));
+    CHECK(rep.clean);
+    CHECK(rep.counted_free == free_before);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-check-leak: one leaked block found by number and given back");
+    return true;
+}
+
+/* A filesystem with one file, mounted, write-back off: the fixture every
+ * fault test starts from. */
+static bool check_fixture(struct blkdev **bd, const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    *bd = ramblk_create(512);
+    if (*bd == NULL) {
+        *reason = "no ram disk";
+        return false;
+    }
+    if (cosmofs_format(*bd) != 0) {
+        *reason = "format failed";
+        return false;
+    }
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    if (mk != 0 && mk != -EEXIST) {
+        *reason = "mkdir failed";
+        return false;
+    }
+    if (vfs_mount(ENG, "cosmofs", *bd, 0) != 0) {
+        *reason = "mount failed";
+        return false;
+    }
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    if (!write_file(ENG "/file", "bytes", 5) || vfs_mkdir(NULL, ENG "/sub", 0755) != 0 || vfs_sync() != 0) {
+        *reason = "populate failed";
+        return false;
+    }
+    return true;
+}
+
+static void check_teardown(struct blkdev *bd)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    (void)vfs_rmdir(NULL, ENG);
+    if (bd)
+        ramblk_destroy(bd);
+}
+
+bool selftest_cosmofs_check_faults(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    /* A block a file uses, marked free: the dangerous direction, and the
+     * one repair refuses because the allocator may already have handed
+     * it out. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_FREE_IN_USE, ENG "/file", &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.seen_not_alloc.count == 1 && r.seen_not_alloc.name[0] == what);
+    CHECK(r.alloc_not_seen.count == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.seen_not_alloc.repaired == 0);   /* refused, and says so by not counting one */
+    check_teardown(bd);
+
+    /* Two inodes over one block. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_CROSSLINK, ENG "/file", &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dup.count == 1 && r.dup.name[0] == what);
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.dup.repaired == 0);              /* never repaired: choosing a winner is data loss */
+    check_teardown(bd);
+
+    /* A link count the entries disagree with. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_NLINK, ENG "/file", &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.nlink_wrong.count == 1 && r.nlink_wrong.name[0] == what);
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.nlink_wrong.repaired == 1);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    check_teardown(bd);
+
+    /* An inode with blocks that no name reaches: the crash leak. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    uint64_t free_before = r.counted_free;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, NULL, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.orphan.count == 1 && r.orphan.name[0] == what);
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.orphan.repaired == 1);
+    /* Twice: a block freed in a transaction is reusable only after that
+     * transaction's root is committed, so the count returns on the
+     * commit after the repair's (cosmofs_core.c, the deferred free
+     * list). */
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean && r.counted_free == free_before);   /* the space came back */
+    check_teardown(bd);
+
+    /* An entry naming a slot nothing allocated. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DANGLING, NULL, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what);
+    check_teardown(bd);
+
+    /* An entry whose type its inode does not have. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DIRENT, NULL, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    check_teardown(bd);
+
+    /* A superblock total the walk disagrees with. */
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_COUNTER, NULL, &what) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.counter_wrong.count == 1);
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.counter_wrong.repaired == 1);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-faults: seven manufactured faults, each found by name, four repaired and three refused");
+    return true;
+}
+
+/*
+ * The control for the whole snapshot step: a snapshot holds blocks the
+ * live tree has released, and those blocks are allocated and unreachable
+ * from the live tree. A checker that did not walk snapshots would call
+ * every one of them a leak.
+ */
+bool selftest_cosmofs_check_snapshot(const char **reason)
+{
+    struct blkdev *bd = NULL;
+    struct cosmofs_check_report r;
+    CHECK(check_fixture(&bd, reason));
+
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+    /* Rewrite it: the old blocks are now the snapshot's alone. */
+    CHECK(write_file(ENG "/held", "the live copy, different length", 31));
+    CHECK(vfs_sync() == 0);
+
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.snapshots_seen == 1);
+    CHECK(r.clean);                       /* the held blocks are not leaks */
+    CHECK(r.dup.count == 0);              /* nor cross-links: sharing is the point */
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+
+    /* And after the snapshot goes, still clean: the blocks it held are
+     * free or the live tree's, and nothing is left claiming them. */
+    CHECK(vfs_rmdir(NULL, ENG "/.snapshots/keep") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.snapshots_seen == 0 && r.clean);
+
+    check_teardown(bd);
+    kinfo("selftest: cosmofs-check-snapshot: a snapshot's held blocks are neither leaks nor cross-links");
+    return true;
+}
+
 bool selftest_cosmofs_symlink(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);

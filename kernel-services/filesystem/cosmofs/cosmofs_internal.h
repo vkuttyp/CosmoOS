@@ -150,6 +150,13 @@ bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint6
 /* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
 bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);
 uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva);   /* CFS_DVA_NONE if the DVA is not ours */
+/* Is the linear block allocated, per the in-memory bitmap that is
+ * authoritative during a transaction? For the structural check. */
+bool cfs_bitmap_test(const struct cfs *fs, uint64_t lin);
+/* One directory block by its inode rather than its vnode: the VFS path
+ * has a vnode, the structural check has only the inode it read. */
+int cfs_dir_read_block_at(struct cfs *fs, const struct cfs_inode *dir, uint64_t lblk, uint8_t *buf);
+int cfs_dir_write_block_at(struct cfs *fs, struct cfs_inode *dir, uint64_t lblk, const uint8_t *buf);
 uint64_t cfs_lin_dva(const struct cfs *fs, uint64_t lin);   /* CFS_DVA_NONE for padding or past the end */
 /* Fill fs->mem from the superblock: the member table for version 4, a
  * single synthesised member for versions 2 and 3. Assembles the other
@@ -210,6 +217,8 @@ int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint3
                   uint64_t *got);
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk);
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
+/* The slot as it is, even with no links: for the structural check. */
+int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
 int cfs_inode_write(struct cfs *fs, uint64_t ino, const struct cfs_inode *in);
 int cfs_inode_alloc(struct cfs *fs, uint64_t *ino);
 /* Undo the most recent cfs_inode_alloc, under fs->lock. */

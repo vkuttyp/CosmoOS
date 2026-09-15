@@ -905,18 +905,38 @@ static int inode_sync(struct cfs *fs, struct vnode *vn)
 /* --- directories ---------------------------------------------------------------- */
 
 /* Read directory block `lblk` into buf (zeros for a hole). */
-static int dir_read_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, uint8_t *buf)
+/* By inode: the VFS path has a vnode, the structural check has only the
+ * inode it read out of the map, and both want the same bytes. */
+int cfs_dir_read_block_at(struct cfs *fs, const struct cfs_inode *dir, uint64_t lblk, uint8_t *buf)
 {
     uint64_t pblk = 0;
-    int rc = cfs_map(fs, cfs_inode_of(dir), lblk, &pblk);
+    int rc = cfs_map(fs, dir, lblk, &pblk);
     if (rc < 0)
         return rc;
     if (rc == 0) {
         memset(buf, 0, CFS_BLOCK);
         return 0;
     }
-    rc = cfs_data_read_verified(fs, cfs_inode_of(dir), lblk, pblk, buf);
-    return rc;
+    /* The verified read takes a mutable inode because it may repair a
+     * checksum entry; a caller that owns only a copy gives it the copy,
+     * which is what the structural check has. */
+    struct cfs_inode tmp = *dir;
+    return cfs_data_read_verified(fs, &tmp, lblk, pblk, buf);
+}
+
+static int dir_read_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, uint8_t *buf)
+{
+    return cfs_dir_read_block_at(fs, cfs_inode_of(dir), lblk, buf);
+}
+
+/* By inode, for the test hook that manufactures a bad entry: writes the
+ * block and the inode that names it, in the open transaction. */
+int cfs_dir_write_block_at(struct cfs *fs, struct cfs_inode *dir, uint64_t lblk, const uint8_t *buf)
+{
+    int rc = data_write_block(fs, dir, lblk, buf, CFS_ALLOC_META);
+    if (rc)
+        return rc;
+    return cfs_inode_write(fs, dir->ino, dir);
 }
 
 /* The block after the file's previous logical block, when it is mapped:
