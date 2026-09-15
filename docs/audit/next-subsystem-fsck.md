@@ -578,8 +578,9 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` |
 | `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused. The counter case breaks both superblock totals in opposite directions and asserts two findings and two repairs |
 | `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion |
-| `cosmofs-check-orphan-crash` | an inode survives its unlink with its blocks; repair reclaims them and the free count returns |
-| `cosmofs-check-partial` | a broken directory block is named, the report is marked incomplete, and the pass still reaches its final comparison |
+| the six together | 35, 41, 229, 39, 58 and 35 ms: the pass costs milliseconds on a 512-block filesystem, and the faults test pays for seven fixtures rather than for the walk |
+| `cosmofs-check-orphan-crash` | inode 4 survives its unlink with its blocks; repair reclaims them and the free count returns exactly |
+| `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached |
 | `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
 
 **Bug-proofs, as run** (each injection alone, then reverted):
