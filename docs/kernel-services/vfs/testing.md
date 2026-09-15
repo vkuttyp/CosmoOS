@@ -215,6 +215,20 @@ reads, on cosmofs over the RAM block device cold (after a remount,
 through the device) and warm (the page cache). The syscall side is
 `fs_selftest`'s `USERBENCH` lines.
 
+### Symbolic links
+
+| test | what it asserts |
+| --- | --- |
+| `vfs-symlink` | create, `readlink` returns the exact bytes **with no terminator**, `lstat` reports the link and its target's length, `stat` reports the target's type and size, removing the link leaves the target |
+| `vfs-symlink-walk` | a link to a directory is walked through; a relative target resolves against the link's own directory; `..` after an expansion names the target's parent; an absolute target; a link to a link |
+| `vfs-symlink-loop` | `a -> b -> a` and a self-link are `ELOOP`; a chain of 8 resolves and one of 9 does not; the budget is pinned at 8 so raising it fails the test rather than moving it; `lstat` and `readlink` still answer on a looping link |
+| `vfs-symlink-nofollow` | `O_NOFOLLOW` is `ELOOP` on a link named last, takes a file, and says nothing about links in between; a dangling link opens `ENOENT` while `lstat` and `readlink` succeed; an over-long target is refused, and so is a target that fits alone but not with the remainder after it |
+| `cosmofs-symlink` | a link and its target survive unmount and remount with a cold cache; one block per link, given back when it goes |
+| `cosmofs-symlink-version` | a version-7 filesystem mounts, works, and refuses `symlink` with `-EOPNOTSUPP` |
+| `fs_selftest` (user mode) | `symlink`, `readlink`, `lstat` and `O_NOFOLLOW` through the libc wrappers, and what `ls -l` prints for a link: the type column and the arrow |
+| the jail test (user mode) | a child rooted at `/tmp/jail` writes through an absolute-target link and lands inside its own root, while the file that target names outside is untouched |
+| `lxtest` | `readlink`, `readlinkat`, `symlink`/`symlinkat`, `lstat` and `newfstatat` with `AT_SYMLINK_NOFOLLOW` each report the link, not the target |
+
 ## User-mode test (`userland/init/init.c`, `fs_selftest`)
 
 Run by `process-user` (as `init --selftest`): `stat` of `/boot/init` and

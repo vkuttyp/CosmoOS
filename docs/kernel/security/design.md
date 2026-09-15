@@ -48,9 +48,15 @@ Consequences the code enforces:
 ## 1b. Per-process roots
 
 A process has a root. Every absolute path starts there and `..` stops
-there — the only two ways a path can climb out of a directory, both
+there — two of the three ways a path can climb out of a directory, both
 closed — so a process given a root below the global one cannot name
-anything outside it. This is the filesystem half of what a container
+anything outside it. The third is a symbolic link whose target is
+absolute, and it is closed the same way: the expansion hands the target
+to the walk as a path, and a path beginning with `/` starts at the
+calling process's root (`docs/kernel-services/vfs/design.md`, "Symbolic
+links and the walk"). A child rooted at a jail writing through such a
+link lands inside its own root, which the user-mode jail test asserts
+from both sides. This is the filesystem half of what a container
 needs, and it is a primitive rather than a container: nothing here knows
 what a container is.
 

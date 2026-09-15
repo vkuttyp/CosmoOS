@@ -458,6 +458,37 @@ int main(int argc, char **argv)
     CHECKV(sc2(LX_stat, "/tmp/nope", &st) == -2, 0);           /* ENOENT */
     CHECKV(sc2(LX_stat, "/tmp", &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
 #endif
+    /* Symbolic links through the Linux calls: readlink does not
+     * terminate, lstat is the link and stat is the target, and
+     * AT_SYMLINK_NOFOLLOW is honoured rather than read and dropped. */
+    {
+        char lb[32];
+        for (unsigned i = 0; i < sizeof(lb); i++)
+            lb[i] = 'Z';
+#ifdef LX_symlink
+        CHECKV(sc2(LX_symlink, "/tmp/lxtest.txt", "/tmp/lxlink") == 0, 0);
+#else
+        CHECKV(sc3(LX_symlinkat, "/tmp/lxtest.txt", LX_AT_FDCWD, "/tmp/lxlink") == 0, 0);
+#endif
+        CHECKV(sc4(LX_readlinkat, LX_AT_FDCWD, "/tmp/lxlink", lb, 32) == 15, 0);
+        CHECKV(memeq(lb, "/tmp/lxtest.txt", 15) && lb[15] == 'Z', 0);
+        struct lx_stat ls;
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxlink", &ls, 0) == 0, 0);
+        CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFREG && ls.st_size == 22, ls.st_mode);
+        CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/lxlink", &ls, LX_AT_SYMLINK_NOFOLLOW) == 0, 0);
+        CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFLNK && ls.st_size == 15, ls.st_mode);
+#ifdef LX_lstat
+        CHECKV(sc2(LX_lstat, "/tmp/lxlink", &ls) == 0, 0);
+        CHECKV((ls.st_mode & LX_S_IFMT) == LX_S_IFLNK, ls.st_mode);
+#endif
+#ifdef LX_readlink
+        for (unsigned i = 0; i < sizeof(lb); i++)
+            lb[i] = 'Z';
+        CHECKV(sc3(LX_readlink, "/tmp/lxlink", lb, 32) == 15 && lb[15] == 'Z', 0);
+        CHECKV(sc3(LX_readlink, "/tmp/lxtest.txt", lb, 32) == -22, 0);   /* EINVAL: not a link */
+#endif
+        CHECKV(sc3(LX_unlinkat, LX_AT_FDCWD, "/tmp/lxlink", 0) == 0, 0);
+    }
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp/nope", &st, 0) == -2, 0);
     CHECKV(sc4(LX_newfstatat, LX_AT_FDCWD, "/tmp", &st, 0) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFDIR, 0);
     CHECKV(sc2(LX_fstat, 0, &st) == 0 && (st.st_mode & LX_S_IFMT) == LX_S_IFCHR, st.st_mode);

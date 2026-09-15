@@ -101,6 +101,7 @@
 #define LX_newfstatat 79
 #define LX_unlinkat 35
 #define LX_renameat 38
+#define LX_symlinkat 36
 #define LX_readlinkat 78
 #define LX_faccessat 48
 #define LX_set_robust_list 99

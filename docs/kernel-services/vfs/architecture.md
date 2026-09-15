@@ -85,9 +85,12 @@ committed root describes a completely valid state.
 
 - Permissions beyond an owner uid/gid record and the uid-0 check on
   mount: the security phase brings credentials and capability checks.
-- Symbolic links, hard links across directories (`nlink` is tracked,
-  `link()` is not offered), special files other than the console,
-  file locking, `mmap` of files, and asynchronous I/O.
+- Hard links across directories (`nlink` is tracked, `link()` is not
+  offered), special files other than the console, file locking, `mmap`
+  of files, and asynchronous I/O. Symbolic links *are* a
+  responsibility since the symlink unit: the VFS owns the expansion,
+  its budget and where a target resolves, and a filesystem owns only
+  storing the target (`design.md`, "Symbolic links and the walk").
 - Data checksums, snapshots, clones, multi-device pools, redundancy,
   compression, quotas: designed for (superblock fields and the pool
   interface reserve the places) and listed as future work in the

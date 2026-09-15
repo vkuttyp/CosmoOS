@@ -21,7 +21,12 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 7 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 8 && CFS_VERSION_MIN == 2);
+    /* Version 8: a symbolic link is a third type in the mode's top
+     * nibble, so the inode did not grow and every older image still
+     * mounts; what version 8 gates is *writing* one. */
+    EXPECT(CFS_TYPE_LNK == 3 && CFS_MODE_TYPE(CFS_MODE(CFS_TYPE_LNK, 0777)) == CFS_TYPE_LNK);
+    EXPECT(sizeof(struct cfs_inode) == CFS_INODE_SIZE);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);
     EXPECT(CFS_SNAPS_PER_BLOCK >= 40 && sizeof(struct cfs_snap_block) <= CFS_BLOCK - CFS_MHDR_SIZE);

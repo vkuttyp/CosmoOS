@@ -51,6 +51,7 @@
 /* --- file types in st_mode --- */
 #define LX_S_IFMT 0170000
 #define LX_S_IFSOCK 0140000
+#define LX_S_IFLNK 0120000
 #define LX_S_IFREG 0100000
 #define LX_S_IFDIR 0040000
 #define LX_S_IFCHR 0020000
@@ -317,6 +318,7 @@ struct lx_utsname {              /* 6 x 65 bytes */
 #define LX_DT_CHR     2
 #define LX_DT_DIR     4
 #define LX_DT_REG     8
+#define LX_DT_LNK     10
 #define LX_DT_SOCK    12
 
 struct lx_dirent64 {             /* header of a getdents64 record; d_name follows */

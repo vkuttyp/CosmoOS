@@ -373,6 +373,95 @@ static __maybe_unused int64_t lx_stat(struct syscall_args *a)
     return rc ? rc : stat_out(&st, a->a[1]);
 }
 
+/* lstat: the link itself, which is the whole point of the call. Until
+ * symbolic links existed this was an alias for stat, which answered the
+ * opposite of what a caller asks for (docs/audit/next-subsystem-symlink.md). */
+static __maybe_unused int64_t lx_lstat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(a->a[0], path);
+    if (rc)
+        return rc;
+    struct cosmo_stat st;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_lstat(cwd, path, &st);
+    vnode_put(cwd);
+    return rc ? rc : stat_out(&st, a->a[1]);
+}
+
+/* readlink(2) and readlinkat(2): the bytes, never terminated, truncated
+ * to the caller's buffer. */
+static int64_t readlink_common(uint64_t upath, uint64_t ubuf, size_t len)
+{
+    char path[VFS_PATH_MAX];
+    int rc = get_path(upath, path);
+    if (rc)
+        return rc;
+    if (len == 0)
+        return -EINVAL;
+    if (len > VFS_PATH_MAX)
+        len = VFS_PATH_MAX;
+    char *buf = kmalloc(len, 0);
+    if (buf == NULL)
+        return -ENOMEM;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_readlink(cwd, path, buf, len);
+    vnode_put(cwd);
+    if (rc > 0 && copy_to_user(ubuf, buf, (size_t)rc) != 0)
+        rc = -EFAULT;
+    kfree(buf);
+    return rc;
+}
+
+static __maybe_unused int64_t lx_readlink(struct syscall_args *a)
+{
+    return readlink_common(a->a[0], a->a[1], (size_t)a->a[2]);
+}
+
+static int64_t lx_readlinkat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(path, a->a[1], VFS_PATH_MAX);
+    if (rc < 0)
+        return rc;
+    rc = check_dirfd((int64_t)a->a[0], path);
+    if (rc)
+        return rc;
+    return readlink_common(a->a[1], a->a[2], (size_t)a->a[3]);
+}
+
+static int64_t symlink_common(uint64_t utarget, uint64_t upath)
+{
+    char target[VFS_PATH_MAX], path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(target, utarget, sizeof(target));
+    if (rc < 0)
+        return rc;
+    rc = get_path(upath, path);
+    if (rc)
+        return rc;
+    struct vnode *cwd = process_cwd_get();
+    rc = vfs_symlink(cwd, path, target);
+    vnode_put(cwd);
+    return rc;
+}
+
+static __maybe_unused int64_t lx_symlink(struct syscall_args *a)
+{
+    return symlink_common(a->a[0], a->a[1]);
+}
+
+static int64_t lx_symlinkat(struct syscall_args *a)
+{
+    char path[VFS_PATH_MAX];
+    int rc = strncpy_from_user(path, a->a[2], VFS_PATH_MAX);
+    if (rc < 0)
+        return rc;
+    rc = check_dirfd((int64_t)a->a[1], path);
+    if (rc)
+        return rc;
+    return symlink_common(a->a[0], a->a[2]);
+}
+
 static int64_t lx_fstat(struct syscall_args *a)
 {
     struct cosmo_stat st;
@@ -399,7 +488,8 @@ static int64_t lx_newfstatat(struct syscall_args *a)
         return rc;
     struct cosmo_stat st;
     struct vnode *cwd = process_cwd_get();
-    rc = vfs_stat(cwd, path, &st);
+    /* AT_SYMLINK_NOFOLLOW was read and dropped until links existed. */
+    rc = (flags & LX_AT_SYMLINK_NOFOLLOW) ? vfs_lstat(cwd, path, &st) : vfs_stat(cwd, path, &st);
     vnode_put(cwd);
     return rc ? rc : stat_out(&st, a->a[2]);
 }
@@ -1832,7 +1922,7 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
 #endif
     [LX_fstat] = lx_fstat,
 #ifdef LX_lstat
-    [LX_lstat] = lx_stat,
+    [LX_lstat] = lx_lstat,
 #endif
     [LX_lseek] = lx_lseek,
     [LX_mmap] = lx_mmap,
@@ -1916,7 +2006,9 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_unlink] = lx_unlink,
 #endif
 #ifdef LX_readlink
-    [LX_readlink] = lx_nosys,
+#ifdef LX_readlink
+    [LX_readlink] = lx_readlink,
+#endif
 #endif
     [LX_umask] = lx_umask,
     [LX_gettimeofday] = lx_gettimeofday,
@@ -1968,7 +2060,11 @@ static const syscall_fn linux_table[LX_NR_MAX] = {
     [LX_newfstatat] = lx_newfstatat,
     [LX_unlinkat] = lx_unlinkat,
     [LX_renameat] = lx_renameat,
-    [LX_readlinkat] = lx_nosys,
+    [LX_readlinkat] = lx_readlinkat,
+#ifdef LX_symlink
+    [LX_symlink] = lx_symlink,
+#endif
+    [LX_symlinkat] = lx_symlinkat,
     [LX_faccessat] = lx_faccessat,
     [LX_set_robust_list] = lx_zero,
     [LX_accept4] = lx_accept,

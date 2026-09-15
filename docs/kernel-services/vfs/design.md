@@ -240,6 +240,44 @@ is at or above `pagecache_limit()` (a quarter of RAM at boot;
 `docs/kernel/security/design.md` §3). The frame is addressed through the
 direct map. Memory: 48 bytes of entry per cached page plus the page.
 
+### Symbolic links and the walk
+
+A fourth vnode type, `VNODE_LNK` (`COSMO_DT_LNK`, 6). The walk expands a
+link the moment it meets one, because a link rewrites *the rest of the
+path*: `walk_parent` replaces the path being walked with the target
+followed by the remainder, and goes round its own loop.
+
+- **The budget.** `VFS_MAX_SYMLINKS` (8) expansions per resolution, and
+  the component count that already bounded the walk. Both answer
+  `ELOOP`, which is what Linux answers for both. `resolve()` -- the
+  whole-path form behind `vfs_lookup` -- carries the same budget to the
+  last component, so a chain ending in a link cannot outrun it.
+- **The buffers.** Two `VFS_PATH_MAX` halves of one allocation, taken on
+  the first expansion and never by a walk that meets no link. They
+  ping-pong: the target is read into the half that is not the current
+  path and the remainder appended there, so the copy never overlaps the
+  string it reads. An expansion that would exceed `VFS_PATH_MAX` is
+  `ENAMETOOLONG`; nothing after the link is ever dropped.
+- **Where a target resolves.** A relative target resolves against the
+  directory the link was found in -- `step()` consumes the caller's
+  reference to that directory, so the walk holds a second one across the
+  step and releases it as soon as the child turns out not to be a link.
+  An absolute target restarts at `vfs_current_root()`, the *calling
+  process's* root: a link is bounded by the root a leading slash is
+  bounded by, and a process confined to a subtree cannot be handed one
+  out of it.
+- **`..` after an expansion** names the target's parent, because the
+  expansion is textual and happens before the component is stepped.
+
+**The last component is the caller's decision.** `vfs_open` is a loop:
+when the last component is a link it re-enters with the target path, so
+`O_CREAT` creates the target of a dangling link, `O_TRUNC` truncates the
+target and the permission checks are the target's. `O_NOFOLLOW` makes a
+link named last `ELOOP` and says nothing about links in between;
+`O_CREAT|O_EXCL` on an existing link is `EEXIST`, since that branch runs
+before the expansion. `lstat` and `readlink` never follow; `unlink`,
+`rmdir` and `rename` name an entry in a parent and never did.
+
 ### ramfs (`kernel-services/vfs/ramfs.c`)
 
 `ramfs_node` = the vnode plus, for directories, a list of
@@ -375,6 +413,11 @@ transaction is generation `gen`. Rules:
 Format (`cosmofs_format(pool)`): writes bitmap, alloc index, inode
 block 0 with the root directory (inode 1, empty), imap L0 and L1, and
 superblock slot A at generation 1 with slot B zeroed.
+
+**Links in ramfs.** The target is a bounded string in the node, freed at
+evict, and `ramfs_lnk_ops` has no `readpage` or `writepage`: a link is
+never a page, which matters here because for ramfs the page cache *is*
+the store.
 
 ### System calls (`uapi/cosmo/syscall.h`)
 
@@ -570,6 +613,7 @@ arithmetic. Init: every new system call on ramfs, then `mount("vda",
   next commit and excluding its blocks from `pending_free`.
 - Data checksums: `csum_root` → a tree keyed by block number.
 - Multiple pool members and allocation groups behind `pool_*`.
-- Symbolic links (a new vnode type), hard links, `chmod`/`chown`, the
-  sticky bit, memory-pressure eviction, a dentry cache, `mmap` of
-  files (the page cache already owns frames), a host `mkfs`.
+- Hard links, `chmod`/`chown`, the sticky bit, memory-pressure
+  eviction, a dentry cache, `mmap` of files (the page cache already owns
+  frames), a host `mkfs`. Symbolic links are built (this document,
+  "Symbolic links and the walk").

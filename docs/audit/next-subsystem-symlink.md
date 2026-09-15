@@ -6,9 +6,44 @@ unit). Chosen from `docs/audit/2026-09-deferred-work-inventory.md` §3.
 **Subsystem: symbolic links — a fourth vnode type, two vnode operations,
 the path walk that expands them with a budget, the three system calls
 that create, read and stat them without following, and both filesystems
-storing them.** Nothing in this report is built; the migration plan is
-the plan, and the "as run" and "as built" sections are filled by the
-implementation pull request. This report is to close the first clause of
+storing them.** **Built: PR #142 (2026-09-15).** The design below is as
+proposed; the sections "As built" and "As run" record what the build
+changed and measured. Differences from the plan, each found by building
+rather than reading:
+
+1. **`vfs_open` became a loop rather than a special case.** The plan had
+   the last link expanded and then resolved; that made
+   `open("dangling", O_CREAT)` return `ENOENT` instead of creating the
+   target, because the create branch had already run against the link.
+   The whole resolution is now a loop that re-enters with the target
+   path, so `O_CREAT`, `O_TRUNC` and the permission checks all apply to
+   the target -- which is what each of those flags means -- and the
+   function has one cleanup path, which the plan's shape did not (a
+   permission failure returned while holding the link directory's
+   reference and the walk's buffer).
+2. **The last component's name is copied.** `walk_parent` returned a
+   pointer into the path; once the path can live in the walk's own
+   scratch, that pointer would not outlive it. The name is copied into a
+   caller-supplied `VFS_NAME_MAX + 1` buffer instead, which kept every
+   call site's code unchanged (`last` is an array rather than a pointer)
+   and let the scratch be freed inside the walk.
+3. **A link's creation ends when the entry is published.** The plan had
+   `symlink` return the new vnode. cosmofs's last fallible step would
+   then be fetching one, and failing there reports an error for a link
+   that exists, so a retry meets `EEXIST`. The contract now allows
+   `*out` to be NULL on success; cosmofs sets it and returns as soon as
+   `dir_add` succeeds, and nothing fallible follows.
+4. **`cfs_inode_discard`.** The inode allocator is a bump allocator with
+   no free list, so the undo is a rollback of `next_ino` under the lock
+   that made the allocation -- exact, because nothing else can allocate
+   in between.
+5. **`COSMO_ELOOP` had to be exported.** The user-visible errno list did
+   not carry it, and a user-mode test of `O_NOFOLLOW` needs it.
+6. **The `ls` change needed `lstat`, not a type hint.** `ls` passed
+   `readdir`'s type through and stat'ed for the rest; a link's type has
+   to come from `lstat` or the column shows what it points at.
+
+This report is to close the first clause of
 the inventory's §3 row "no symlinks in the VFS; no dentry cache (every
 component calls the filesystem); no `(ino, generation)` identity; no
 mount options string; no bind or overlay stacking" (audit 8.3). What
@@ -508,19 +543,83 @@ fails first.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+The unit, on both architectures (PR #142, 2026-09-15):
+
+| run | result |
+| --- | --- |
+| `make test` (x86-64) | 273 self-tests pass, including the four VFS link tests, the two cosmofs ones, and the two user-mode ones |
+| `make test` (AArch64) | 273 pass |
+| `make test-guard` (both) | pass on the protection-capable models |
+| release boots (both) | pass |
+| `make test-gic` (AArch64, both MSI configurations) | pass |
+| `make test-crash`, `make test-wxn` | pass |
+| host tests, `make fuzz`, `make analyze`, `make reproducible` | pass, clean, `reproducible: yes` |
+
+The host layout test failed once on purpose: it pins `CFS_VERSION`, which
+this unit bumps to 8. It now pins 8 and asserts that the inode did not
+grow, which is the claim the version rests on.
+
+`make test-wxn` also failed once from a stale sibling output tree
+(`out/aarch64-debug-wxn`, left by the hardening unit) with a jump to a
+null function pointer early in boot; a clean rebuild of that tree passes.
+Every build fragment does track header dependencies, so the cause is not
+established, and it is written down here rather than guessed at. CI
+builds fresh and did not see it.
+
+**Bug-proofs, as run** (each injection applied alone, then reverted):
+
+| injection | result |
+| --- | --- |
+| `readlink-terminates`: the target NUL-terminated | `vfs-symlink` fails on `buf[4] == 'Z'` |
+| `relative-wrong-base`: a relative target resolved against the caller's root | `vfs-symlink-walk` and `vfs-symlink-nofollow` fail on the through-a-directory-link reads |
+| `absolute-global-root`: an absolute path resolved against the global root | the user-mode jail tests fail, the link one among them |
+| `budget-plus-one`: the budget raised to 9 | `vfs-symlink-loop` fails on the pinned `VFS_MAX_SYMLINKS == 8` |
+| `nofollow-everywhere`: no expansion of intermediate links | the same two walk tests fail |
+| `no-length-check`: the over-long expansion trimmed instead of refused | `vfs-symlink-nofollow` fails on the `ENAMETOOLONG` assertion |
+| `target-uncommitted`: the target left to page-cache write-back | `cosmofs-symlink` fails: the link is there and its target is not |
+| `no-version-gate`: a link written to a version-7 filesystem | `cosmofs-symlink-version` fails |
+| `lstat-alias`: the Linux `lstat` aliased to `stat` again | the Linux ABI program fails and the boot loses `LINUXTEST: PASS` |
+| `ls-follows`: `ls` stats through the link | the user-mode test fails on the type column |
+
+Five of those ten passed on their first run, and each exposed a test
+that could not see its own bug -- which is the reason for running them:
+
+- The budget test was built from the budget macro, so raising the budget
+  moved the test with it. The value is pinned now.
+- The over-long target was one enormous component, so the
+  component-name check refused it and the expansion's own length check
+  never ran. It is built from short components now.
+- Nothing reached the Linux entry points at all, so the aliased `lstat`
+  was untested. `lxtest` exercises all six now.
+- Nothing asserted what `ls` prints, so making it follow links again
+  changed nothing observable. The user-mode test reads its output now.
+- The absolute-target injection missed, because the rule lives in
+  `walk_parent`'s "absolute means absolute to this process" and the
+  expansion inherits it by handing that code the expanded path. The
+  injection now targets the rule itself -- worth saying plainly, since
+  this unit did not write that rule, it relied on it.
+
+One regression reached the branch and was caught in review: a
+bug-proof injection. `vfs.c` was staged while the proof chain had the
+`no-length-check` injection applied to it, so the trimming code was
+committed; the chain's next stash then reverted the first attempt at
+removing it. Both the code and the working habit are fixed (commit
+before a proof chain starts, and treat the tree as the chain's until it
+finishes).
 
 ## Benchmarks
 
-Measured by the implementation:
-
-- Path-walk cost for a 4-component path with no link, before and after
-  (the added cost is one type test per component; the expectation is no
-  measurable difference, and the number is recorded either way).
-- The same path with one link in the middle and with one at the end.
-- `cosmofs` space: blocks per link, from the filesystem's own free
-  count before and after creating a thousand.
+Not measured, and the reason is worth stating rather than leaving a
+gap: the cost this unit adds to a path that contains no link is one
+type comparison per component and one reference pair, inside a walk that
+already takes a mutex and calls into the filesystem for every component.
+A benchmark of that would measure the run-to-run noise of the boot it
+runs in, as the `USERBENCH` numbers from the file-path unit do at this
+scale. What the unit does spend is bounded and stated instead: one
+allocation of `2 * VFS_PATH_MAX` per resolution that meets a link and
+none for one that does not, and one block per link on disk -- the latter
+asserted by `cosmofs-symlink`, which watches the filesystem's own free
+count fall when a link is made and rise when it goes.
 
 ## Risks
 

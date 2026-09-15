@@ -159,6 +159,22 @@ static inline long cosmo_fsync(int h)
 {
     return cosmo_syscall1(SYS_fsync, h);
 }
+/* readlink copies at most `len` bytes and does NOT terminate them. */
+static inline long cosmo_symlink(const char *target, const char *path)
+{
+    return cosmo_syscall2(SYS_symlink, (long)target, (long)path);
+}
+
+static inline long cosmo_readlink(const char *path, char *buf, unsigned long len)
+{
+    return cosmo_syscall3(SYS_readlink, (long)path, (long)buf, (long)len);
+}
+
+static inline long cosmo_lstat(const char *path, struct cosmo_stat *st)
+{
+    return cosmo_syscall2(SYS_lstat, (long)path, (long)st);
+}
+
 static inline long cosmo_mount(const char *source, const char *target, const char *fstype, unsigned flags)
 {
     return cosmo_syscall4(SYS_mount, source, target, fstype, flags);

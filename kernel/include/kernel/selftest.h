@@ -169,6 +169,10 @@ bool selftest_virtio_console(const char **reason);
 
 /* Phase 7: kernel-services/vfs/vfstest.c */
 bool selftest_vfs_ramfs(const char **reason);
+bool selftest_vfs_symlink(const char **reason);
+bool selftest_vfs_symlink_walk(const char **reason);
+bool selftest_vfs_symlink_loop(const char **reason);
+bool selftest_vfs_symlink_nofollow(const char **reason);
 bool selftest_fsync_handle(const char **reason);
 /* docs/audit/next-subsystem-file-path.md (kernel-services/vfs/vfstest.c) */
 bool selftest_read_bounce(const char **reason);     /* the syscall bounce sized to the request, its fallback; one call fills 64 KiB; a pipe keeps its 300 */
@@ -194,7 +198,9 @@ bool selftest_cosmofs_fsync(const char **reason);
 bool selftest_cosmofs_snapshot(const char **reason);
 bool selftest_cosmofs_snapshot_remount(const char **reason);      /* fsync commits */
 bool selftest_cosmofs_pool2(const char **reason);                 /* a pool of two members */
-bool selftest_cosmofs_v3(const char **reason);                    /* the older on-disk format */
+bool selftest_cosmofs_v3(const char **reason);
+bool selftest_cosmofs_symlink(const char **reason);
+bool selftest_cosmofs_symlink_version(const char **reason);                    /* the older on-disk format */
 bool selftest_cosmofs_badmembers(const char **reason);            /* a member table that cannot be true */
 bool selftest_cosmofs_mirror(const char **reason);                /* a mirrored member, repair and scrub */
 bool selftest_cosmofs_mirror_stale(const char **reason);          /* the stale copy is the first one */

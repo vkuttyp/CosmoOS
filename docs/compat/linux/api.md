@@ -138,7 +138,8 @@ bounds check returns `-ENOSYS` and logs `unknown number ... (linux)`).
 architecture (`LX_*`; the calls that exist only on x86-64 — `open`,
 `stat`, `lstat`, `poll`, `access`, `pipe`, `select`, `dup2`, `pause`,
 `fork`, `vfork`, `rename`, `mkdir`, `rmdir`, `creat`, `unlink`,
-`readlink`, `getpgrp`, `arch_prctl`, `time` — have no AArch64 number and
+`readlink`, `symlink`, `getpgrp`, `arch_prctl`, `time` — have no AArch64
+number and
 their table rows are `#ifdef`-guarded). Arguments arrive in `rdi rsi rdx
 r10 r8 r9` (x86-64) or `x0..x5` with the number in `x8` (AArch64), the
 result in `rax`/`x0`, `-errno` negative; errno values are the
@@ -166,13 +167,15 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 257 | `openat` | as `open` after `check_dirfd` | `dirfd` must be `AT_FDCWD` (-100) unless the path is absolute; otherwise `-ENOSYS` |
 | 3 | `close` | `handle_close` | |
 | 8 | `lseek` | `file_seek` (`SEEK_*` coincide) | `-ESPIPE` for a handle that is not a file (pipe, socket, console) |
-| 4, 6, 5 | `stat`, `lstat`, `fstat` | `vfs_stat` / `syscall_handle_stat` → `lx_stat_from_native` (144 bytes) | `lstat` is `stat` (no symlinks); `st_dev`, `st_rdev` 0; `st_atime` = `st_mtime`; `fstat` works on every I/O object (pipes report `S_IFIFO`, sockets `S_IFSOCK`, the console `S_IFCHR`) |
-| 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `check_dirfd` then `stat` | other flags ignored |
+| 4, 6, 5 | `stat`, `lstat`, `fstat` | `vfs_stat` / `syscall_handle_stat` → `lx_stat_from_native` (144 bytes) | `lstat` is the non-following one since the symlink unit, and reports `S_IFLNK`; `st_dev`, `st_rdev` 0; `st_atime` = `st_mtime`; `fstat` works on every I/O object (pipes report `S_IFIFO`, sockets `S_IFSOCK`, the console `S_IFCHR`) |
+| 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `check_dirfd` then `stat`, or `lstat` with `AT_SYMLINK_NOFOLLOW` (0x100) | other flags ignored |
 | 217 | `getdents64` | `file_readdir` into a kernel buffer of `len - len/4` bytes, `lx_dirents_from_native` into a second buffer of `len`, copied out | `len` clamped to 64 KiB, `-EINVAL` below 32; `d_off` is the offset of the next record in *this* buffer, not a seekable cookie |
 | 83, 258 | `mkdir`, `mkdirat` | `vfs_mkdir(cwd, path, mode & 07777)` | `mkdirat`: `check_dirfd` |
 | 84 | `rmdir` | `vfs_rmdir` | |
 | 87, 263 | `unlink`, `unlinkat` | `vfs_unlink`; `unlinkat` with `AT_REMOVEDIR` (0x200) → `vfs_rmdir` | `check_dirfd` |
 | 82, 264 | `rename`, `renameat` | `vfs_rename` | `check_dirfd` on both dirfds |
+| 88, 266 | `symlink`, `symlinkat` | `vfs_symlink(cwd, path, target)` | `symlinkat`: `check_dirfd`; `-EPERM` on a filesystem without links, `-EOPNOTSUPP` on a cosmofs older than format version 8 |
+| 89, 267 | `readlink`, `readlinkat` | `vfs_readlink` into a kernel buffer, then to the caller | the bytes are **not** terminated; `-EINVAL` if the last component is not a link; `readlinkat`: `check_dirfd` |
 | 80 | `chdir` | `process_chdir` | |
 | 79 | `getcwd` | copies `cwd_path` with its NUL; returns the length **including** the NUL (Linux's raw syscall behaviour) | `-ERANGE` when it does not fit |
 | 21, 269 | `access`, `faccessat` | existence only (`vfs_stat`) | mode ignored (no permission enforcement yet); `check_dirfd` |
@@ -264,12 +267,22 @@ as Linux does.
 
 ### Explicit `-ENOSYS`
 
-`fork` 57, `vfork` 58, `execve` 59, `readlink` 89, `sysinfo` 99,
-`readlinkat` 267, `rseq` 334, `clone3` 435 (x86-64 numbers; the AArch64
+`fork` 57, `vfork` 58, `execve` 59, `sysinfo` 99, `rseq` 334,
+`clone3` 435 (x86-64 numbers; the AArch64
 rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `select` 23,
 `mremap` 25, `msync` 26, `sendmsg` 46, `recvmsg` 47 have numbers in the
 tables but no entry: they go through `lx_unknown`.
+
+## Symbolic links
+
+Six entry points, all of them answering properly since the symlink unit:
+`readlink` and `readlinkat` (they returned `-ENOSYS`), `symlink` and
+`symlinkat` (absent from both tables), `lstat` (**aliased to `stat`**,
+so a program asking not to follow a link was told about the target) and
+`newfstatat` (which read `AT_SYMLINK_NOFOLLOW` and dropped it). The
+conversions gained `S_IFLNK` and `DT_LNK` arms, and `O_NOFOLLOW` now
+reaches the kernel instead of being accepted and ignored.
 
 ## Conversions (`compat/linux/convert.h`, `convert.c`)
 

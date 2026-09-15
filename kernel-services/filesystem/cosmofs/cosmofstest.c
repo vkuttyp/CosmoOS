@@ -1477,6 +1477,94 @@ bool selftest_cosmofs_badmembers(const char **reason)
  * already had: an old pointer is a new one on member 0, so there is no
  * conversion and no second decoder (design.md, "The DVA is 64 bits").
  */
+/*
+ * Symbolic links on disk (docs/audit/next-subsystem-symlink.md). The
+ * target is the link's own block, written inside the transaction that
+ * writes the inode and adds the entry, so a link either exists whole or
+ * not at all -- and a filesystem formatted before version 8 refuses to
+ * make one, because a kernel of that vintage would read it as a regular
+ * file whose contents are a path.
+ */
+bool selftest_cosmofs_symlink(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    struct cosmofs_stats st0, st1;
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+
+    CHECK(write_file(ENG "/file", "on-disk-bytes", 13));
+    CHECK(vfs_symlink(NULL, ENG "/link", "file") == 0);
+    CHECK(vfs_symlink(NULL, ENG "/abs", ENG "/file") == 0);
+
+    struct cosmo_stat lst, fst;
+    CHECK(vfs_lstat(NULL, ENG "/link", &lst) == 0 && lst.type == COSMO_DT_LNK && lst.size == 4);
+    CHECK(vfs_stat(NULL, ENG "/link", &fst) == 0 && fst.type == COSMO_DT_REG && fst.size == 13);
+    CHECK(read_matches(ENG "/link", "on-disk-bytes", 13));
+    CHECK(read_matches(ENG "/abs", "on-disk-bytes", 13));
+
+    /* It survives a remount with nothing cached: the bytes come off the
+     * disk, not from a vnode this test left behind. */
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    char buf[64];
+    memset(buf, 'Z', sizeof(buf));
+    int n = vfs_readlink(NULL, ENG "/link", buf, sizeof(buf));
+    CHECK(n == 4 && memcmp(buf, "file", 4) == 0 && buf[4] == 'Z');
+    CHECK(vfs_lstat(NULL, ENG "/link", &lst) == 0 && lst.type == COSMO_DT_LNK);
+    CHECK(read_matches(ENG "/link", "on-disk-bytes", 13));
+
+    /* One block per link, given back when it goes. */
+    CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/link") == 0);
+    CHECK(vfs_unlink(NULL, ENG "/abs") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st0) == 0);
+    CHECK(st0.free_blocks > st1.free_blocks);
+    CHECK(read_matches(ENG "/file", "on-disk-bytes", 13));   /* the target stayed */
+
+    CHECK(vfs_unlink(NULL, ENG "/file") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-symlink: a link and its target survive a remount, and its block comes back");
+    return true;
+}
+
+bool selftest_cosmofs_symlink_version(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_test_format_version(bd, 7) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* A version-7 filesystem mounts and works, and refuses a link. */
+    CHECK(write_file(ENG "/file", "seven", 5));
+    CHECK(vfs_symlink(NULL, ENG "/link", "file") == -EOPNOTSUPP);
+    struct cosmo_stat st;
+    CHECK(vfs_lstat(NULL, ENG "/link", &st) == -ENOENT);
+    CHECK(read_matches(ENG "/file", "seven", 5));
+
+    CHECK(vfs_unlink(NULL, ENG "/file") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-symlink-version: a version-7 filesystem mounts, works and refuses a link");
+    return true;
+}
+
 bool selftest_cosmofs_v3(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);

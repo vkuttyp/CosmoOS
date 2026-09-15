@@ -8,6 +8,7 @@
 #define DT_CHR COSMO_DT_CHR
 #define DT_FIFO COSMO_DT_FIFO
 #define DT_SOCK COSMO_DT_SOCK
+#define DT_LNK COSMO_DT_LNK
 struct dirent {
     ino_t d_ino;
     unsigned char d_type;

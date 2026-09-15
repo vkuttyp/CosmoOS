@@ -19,6 +19,7 @@
 #include <kernel/page.h>
 #include <kernel/utsns.h>
 #include <kernel/selftest.h>
+#include <kernel/printf.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
@@ -115,6 +116,233 @@ static unsigned dir_entries(const char *path)
     mutex_unlock(&d->lock);
     vnode_put(d);
     return n;
+}
+
+/*
+ * Symbolic links (docs/audit/next-subsystem-symlink.md). Everything here
+ * is ramfs under /tmp; cosmofs's own links are cosmofs-symlink.
+ *
+ * Every "the link was followed" assertion is paired with a target whose
+ * contents, type or size differ from the link's, so a test cannot pass
+ * by reading the same bytes either way.
+ */
+static int mk_file(const char *path, const char *text)
+{
+    struct file *f;
+    int rc = vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f);
+    if (rc)
+        return rc;
+    int64_t n = file_write(f, text, strlen(text));
+    file_put(f);
+    return n == (int64_t)strlen(text) ? 0 : (int)n;
+}
+
+static int read_all(const char *path, char *buf, size_t len)
+{
+    struct file *f;
+    int rc = vfs_open(NULL, path, COSMO_O_RDONLY, 0, &f);
+    if (rc)
+        return rc;
+    int64_t n = file_read(f, buf, len - 1);
+    file_put(f);
+    if (n < 0)
+        return (int)n;
+    buf[n] = '\0';
+    return (int)n;
+}
+
+bool selftest_vfs_symlink(const char **reason)
+{
+    struct cosmo_stat st, lst;
+    char buf[64];
+
+    CHECK(vfs_mkdir(NULL, "/tmp/sl", 0755) == 0);
+    CHECK(mk_file("/tmp/sl/file", "target-bytes") == 0);
+
+    /* Create, read back exactly, and see a fourth type. */
+    CHECK(vfs_symlink(NULL, "/tmp/sl/link", "file") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/sl/link", "file") == -EEXIST);
+    memset(buf, 'Z', sizeof(buf));
+    int n = vfs_readlink(NULL, "/tmp/sl/link", buf, sizeof(buf));
+    CHECK(n == 4 && memcmp(buf, "file", 4) == 0);
+    CHECK(buf[4] == 'Z');              /* not terminated, as POSIX says */
+    CHECK(vfs_readlink(NULL, "/tmp/sl/file", buf, sizeof(buf)) == -EINVAL);
+
+    /* lstat is the link, stat is the target, and they differ in type and size. */
+    CHECK(vfs_lstat(NULL, "/tmp/sl/link", &lst) == 0);
+    CHECK(lst.type == COSMO_DT_LNK && lst.size == 4);
+    CHECK(vfs_stat(NULL, "/tmp/sl/link", &st) == 0);
+    CHECK(st.type == COSMO_DT_REG && st.size == strlen("target-bytes"));
+    CHECK(st.ino != lst.ino);
+
+    /* Opening it reads the target's bytes. */
+    CHECK(read_all("/tmp/sl/link", buf, sizeof(buf)) == (int)strlen("target-bytes"));
+    CHECK(strcmp(buf, "target-bytes") == 0);
+
+    /* Removing the link leaves the target. */
+    CHECK(vfs_unlink(NULL, "/tmp/sl/link") == 0);
+    CHECK(vfs_stat(NULL, "/tmp/sl/file", &st) == 0 && st.size == strlen("target-bytes"));
+    CHECK(vfs_lstat(NULL, "/tmp/sl/link", &lst) == -ENOENT);
+
+    CHECK(vfs_unlink(NULL, "/tmp/sl/file") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/sl") == 0);
+    kinfo("selftest: vfs-symlink: created, read without a terminator, lstat the link and stat the target");
+    return true;
+}
+
+bool selftest_vfs_symlink_walk(const char **reason)
+{
+    struct cosmo_stat st;
+    char buf[64];
+
+    CHECK(vfs_mkdir(NULL, "/tmp/w", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, "/tmp/w/d", 0755) == 0);
+    CHECK(mk_file("/tmp/w/d/inner", "inner-bytes") == 0);
+    CHECK(mk_file("/tmp/w/outer", "outer-bytes") == 0);
+
+    /* A link to a directory is walked through. */
+    CHECK(vfs_symlink(NULL, "/tmp/w/dlink", "d") == 0);
+    CHECK(read_all("/tmp/w/dlink/inner", buf, sizeof(buf)) > 0);
+    CHECK(strcmp(buf, "inner-bytes") == 0);
+    CHECK(vfs_stat(NULL, "/tmp/w/dlink/", &st) == 0 && st.type == COSMO_DT_DIR);
+
+    /* A relative target resolves against the link's own directory, not
+     * the caller's start: this link lives in d and names ../outer. */
+    CHECK(vfs_symlink(NULL, "/tmp/w/d/up", "../outer") == 0);
+    CHECK(read_all("/tmp/w/d/up", buf, sizeof(buf)) > 0);
+    CHECK(strcmp(buf, "outer-bytes") == 0);
+
+    /* ".." after an expansion names the target's parent. */
+    CHECK(read_all("/tmp/w/dlink/../outer", buf, sizeof(buf)) > 0);
+    CHECK(strcmp(buf, "outer-bytes") == 0);
+
+    /* An absolute target. */
+    CHECK(vfs_symlink(NULL, "/tmp/w/abs", "/tmp/w/d/inner") == 0);
+    CHECK(read_all("/tmp/w/abs", buf, sizeof(buf)) > 0);
+    CHECK(strcmp(buf, "inner-bytes") == 0);
+
+    /* A link in the middle of a path, and one to a link. */
+    CHECK(vfs_symlink(NULL, "/tmp/w/d/second", "up") == 0);
+    CHECK(read_all("/tmp/w/dlink/second", buf, sizeof(buf)) > 0);
+    CHECK(strcmp(buf, "outer-bytes") == 0);
+
+    CHECK(vfs_unlink(NULL, "/tmp/w/d/second") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/w/abs") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/w/d/up") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/w/dlink") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/w/outer") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/w/d/inner") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/w/d") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/w") == 0);
+    kinfo("selftest: vfs-symlink-walk: through a directory link, relative to the link's own directory, .. past an expansion");
+    return true;
+}
+
+bool selftest_vfs_symlink_loop(const char **reason)
+{
+    struct cosmo_stat st;
+    char name[32], target[32];
+
+    CHECK(vfs_mkdir(NULL, "/tmp/lp", 0755) == 0);
+
+    /* a -> b -> a, and a link to itself. */
+    CHECK(vfs_symlink(NULL, "/tmp/lp/a", "b") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/lp/b", "a") == 0);
+    CHECK(vfs_stat(NULL, "/tmp/lp/a", &st) == -ELOOP);
+    CHECK(vfs_symlink(NULL, "/tmp/lp/self", "self") == 0);
+    CHECK(vfs_stat(NULL, "/tmp/lp/self", &st) == -ELOOP);
+    /* ... while lstat and readlink still answer, because they do not follow. */
+    CHECK(vfs_lstat(NULL, "/tmp/lp/a", &st) == 0 && st.type == COSMO_DT_LNK);
+
+    /* The budget is pinned: a test built only from the macro moves with
+     * it and can never see it change. */
+    CHECK(VFS_MAX_SYMLINKS == 8);
+    /* A chain of exactly VFS_MAX_SYMLINKS resolves; one more is ELOOP.
+     * c0 -> c1 -> ... -> c<N-1> -> end, so naming c0 expands N links. */
+    CHECK(mk_file("/tmp/lp/end", "chain-end") == 0);
+    for (unsigned i = 0; i < VFS_MAX_SYMLINKS; i++) {
+        ksnprintf(name, sizeof(name), "/tmp/lp/c%u", i);
+        if (i + 1 == VFS_MAX_SYMLINKS)
+            ksnprintf(target, sizeof(target), "end");
+        else
+            ksnprintf(target, sizeof(target), "c%u", i + 1);
+        CHECK(vfs_symlink(NULL, name, target) == 0);
+    }
+    CHECK(vfs_stat(NULL, "/tmp/lp/c0", &st) == 0 && st.size == strlen("chain-end"));
+    ksnprintf(name, sizeof(name), "/tmp/lp/c%u", VFS_MAX_SYMLINKS);
+    CHECK(vfs_symlink(NULL, name, "c0") == 0);      /* one link longer */
+    CHECK(vfs_stat(NULL, name, &st) == -ELOOP);
+
+    for (unsigned i = 0; i <= VFS_MAX_SYMLINKS; i++) {
+        ksnprintf(name, sizeof(name), "/tmp/lp/c%u", i);
+        CHECK(vfs_unlink(NULL, name) == 0);
+    }
+    CHECK(vfs_unlink(NULL, "/tmp/lp/end") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/lp/self") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/lp/b") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/lp/a") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/lp") == 0);
+    kinfo("selftest: vfs-symlink-loop: a cycle and a chain of %u are ELOOP; a chain of %u resolves",
+          VFS_MAX_SYMLINKS + 1, VFS_MAX_SYMLINKS);
+    return true;
+}
+
+bool selftest_vfs_symlink_nofollow(const char **reason)
+{
+    struct cosmo_stat st;
+    struct file *f;
+    char buf[VFS_PATH_MAX + 8];
+
+    CHECK(vfs_mkdir(NULL, "/tmp/nf", 0755) == 0);
+    CHECK(mk_file("/tmp/nf/file", "nf-bytes") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/nf/link", "file") == 0);
+
+    /* O_NOFOLLOW refuses a link as the last component, takes a file, and
+     * says nothing about links in the middle. */
+    CHECK(vfs_open(NULL, "/tmp/nf/link", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, &f) == -ELOOP);
+    CHECK(vfs_open(NULL, "/tmp/nf/file", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, &f) == 0);
+    file_put(f);
+    CHECK(vfs_mkdir(NULL, "/tmp/nf/d", 0755) == 0);
+    CHECK(mk_file("/tmp/nf/d/inner", "inner") == 0);
+    CHECK(vfs_symlink(NULL, "/tmp/nf/dlink", "d") == 0);
+    CHECK(vfs_open(NULL, "/tmp/nf/dlink/inner", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, &f) == 0);
+    file_put(f);
+
+    /* A dangling link: open finds nothing, the link itself is there. */
+    CHECK(vfs_symlink(NULL, "/tmp/nf/dangling", "nowhere") == 0);
+    CHECK(vfs_open(NULL, "/tmp/nf/dangling", COSMO_O_RDONLY, 0, &f) == -ENOENT);
+    CHECK(vfs_stat(NULL, "/tmp/nf/dangling", &st) == -ENOENT);
+    CHECK(vfs_lstat(NULL, "/tmp/nf/dangling", &st) == 0 && st.type == COSMO_DT_LNK);
+    CHECK(vfs_unlink(NULL, "/tmp/nf/dangling") == 0);
+
+    /* A target that cannot fit a path is refused rather than truncated. */
+    memset(buf, 'x', sizeof(buf));
+    buf[VFS_PATH_MAX + 7] = '\0';
+    CHECK(vfs_symlink(NULL, "/tmp/nf/toolong", buf) == -ENAMETOOLONG);
+    /* ... and one that fits alone but not with a remainder after it.
+     * Built from short components on purpose: a single 1000-byte name
+     * would be refused for its own length, and the test would pass
+     * without the expansion's length check ever running. */
+    size_t at = 0;
+    while (at + 3 < VFS_PATH_MAX - 16) {
+        buf[at++] = 'a';
+        buf[at++] = 'a';
+        buf[at++] = '/';
+    }
+    buf[at - 1] = '\0';   /* no trailing slash */
+    CHECK(vfs_symlink(NULL, "/tmp/nf/long", buf) == 0);
+    CHECK(vfs_stat(NULL, "/tmp/nf/long", &st) == -ENOENT);   /* it fits: it simply is not there */
+    CHECK(vfs_stat(NULL, "/tmp/nf/long/and/more/components/still", &st) == -ENAMETOOLONG);
+    CHECK(vfs_unlink(NULL, "/tmp/nf/long") == 0);
+
+    CHECK(vfs_unlink(NULL, "/tmp/nf/dlink") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/nf/d/inner") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/nf/d") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/nf/link") == 0);
+    CHECK(vfs_unlink(NULL, "/tmp/nf/file") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/nf") == 0);
+    kinfo("selftest: vfs-symlink-nofollow: O_NOFOLLOW is ELOOP on a link and nothing in the middle; dangling and over-long are refused");
+    return true;
 }
 
 bool selftest_vfs_ramfs(const char **reason)

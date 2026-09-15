@@ -72,6 +72,43 @@ static void fs_selftest(void)
     CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
     CHECK(cosmo_rmdir("/tmp/flagm") == 0);
 
+    /* Symbolic links through the libc wrappers: the link's own type and
+     * the target's, the bytes without a terminator, and O_NOFOLLOW. */
+    {
+        struct stat lst, tst;
+        char lbuf[64];
+        CHECK(cosmo_open("/tmp/lnk-target", COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644) >= 0);
+        CHECK(symlink("lnk-target", "/tmp/lnk") == 0);
+        memset(lbuf, 'Z', sizeof(lbuf));
+        CHECK(readlink("/tmp/lnk", lbuf, sizeof(lbuf)) == 10 && memcmp(lbuf, "lnk-target", 10) == 0);
+        CHECK(lbuf[10] == 'Z');
+        CHECK(lstat("/tmp/lnk", &lst) == 0 && lst.st_type == COSMO_DT_LNK && lst.st_size == 10);
+        CHECK(stat("/tmp/lnk", &tst) == 0 && tst.st_type == COSMO_DT_REG);
+        CHECK(cosmo_open("/tmp/lnk", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0) == -COSMO_ELOOP);
+        CHECK(cosmo_open("/tmp/lnk", COSMO_O_RDONLY, 0) >= 0);
+        /* What `ls -l` makes of it: the type column and the arrow, which
+         * need lstat and readlink rather than a follow. */
+        int lsp[2];
+        CHECK(pipe(lsp) == 0);
+        struct spawn_handle lsmap[] = { { .child = 1, .parent = lsp[1] }, { .child = 2, .parent = 2 } };
+        const char *ls_argv[] = { "ls", "-l", "/tmp/lnk", NULL };
+        pid_t lspid = spawnve("/bin/ls", ls_argv, NULL, lsmap, 2);
+        CHECK(lspid > 1);
+        CHECK(close(lsp[1]) == 0);
+        char lsout[128] = { 0 };
+        ssize_t lsn = read(lsp[0], lsout, sizeof(lsout) - 1);
+        CHECK(lsn > 0);
+        CHECK(close(lsp[0]) == 0);
+        int lsst = -1;
+        CHECK(waitpid(lspid, &lsst, 0) == lspid);
+        CHECK(lsout[0] == 'l');                              /* the type column */
+        CHECK(strstr(lsout, "-> lnk-target") != NULL);       /* and where it points */
+
+        CHECK(unlink("/tmp/lnk") == 0 && stat("/tmp/lnk-target", &tst) == 0);
+        CHECK(unlink("/tmp/lnk-target") == 0);
+        puts("usertest: symbolic links ok");
+    }
+
     long h = cosmo_open("/tmp/usertest.txt", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
     CHECK(h >= 3);
     CHECK(cosmo_write((int)h, "hello, filesystem\n", 18) == 18);
@@ -630,6 +667,47 @@ static void proc_selftest(void)
     char mb[16] = { 0 };
     CHECK(read(mf, mb, sizeof(mb)) == 2 && memcmp(mb, "/\n", 2) == 0);
     CHECK(close(mf) == 0);
+
+    /*
+     * A symbolic link cannot name its way out of a root. Two links are
+     * made outside the jail, both with absolute targets: one names a
+     * path that exists only outside, the other a path that exists in
+     * both places with different contents. The child, rooted at the
+     * jail, writes through both with `pwd >` -- redirection and pwd are
+     * builtins, and an external command could not be found inside a
+     * jail with no /bin -- and the parent then sees which file moved:
+     * the jail's copy, never the outer one.
+     */
+    CHECK(mkdir("/tmp/jail/etc", 0755) == 0 || errno == EEXIST);
+    int sfd = open("/tmp/jail/etc/inside", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(sfd >= 0 && write(sfd, "in-jail\n", 8) == 8 && close(sfd) == 0);
+    CHECK(mkdir("/tmp/outside", 0755) == 0 || errno == EEXIST);
+    sfd = open("/tmp/outside/secret", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    CHECK(sfd >= 0 && write(sfd, "untouched\n", 10) == 10 && close(sfd) == 0);
+    (void)unlink("/tmp/jail/escape");
+    (void)unlink("/tmp/jail/inward");
+    CHECK(symlink("/tmp/outside/secret", "/tmp/jail/escape") == 0);
+    CHECK(symlink("/etc/inside", "/tmp/jail/inward") == 0);
+
+    const char *slarg[] = { "sh", "-c", "pwd > /inward; pwd > /escape", NULL };
+    pid_t slpid = spawnve_in("/bin/sh", slarg, NULL, NULL, 0, "/tmp/jail");
+    CHECK(slpid > 1);
+    int slstatus = -1;
+    CHECK(waitpid(slpid, &slstatus, 0) == slpid);
+
+    char slbuf[32] = { 0 };
+    sfd = open("/tmp/jail/etc/inside", O_RDONLY, 0);
+    CHECK(sfd >= 0 && read(sfd, slbuf, sizeof(slbuf) - 1) > 0 && close(sfd) == 0);
+    CHECK(slbuf[0] == '/' && strstr(slbuf, "in-jail") == NULL);   /* the absolute target landed inside the root */
+    memset(slbuf, 0, sizeof(slbuf));
+    sfd = open("/tmp/outside/secret", O_RDONLY, 0);
+    CHECK(sfd >= 0 && read(sfd, slbuf, sizeof(slbuf) - 1) > 0 && close(sfd) == 0);
+    CHECK(strstr(slbuf, "untouched") != NULL);  /* and the outer file was never reached */
+
+    CHECK(unlink("/tmp/jail/escape") == 0 && unlink("/tmp/jail/inward") == 0);
+    CHECK(unlink("/tmp/jail/etc/inside") == 0 && rmdir("/tmp/jail/etc") == 0);
+    CHECK(unlink("/tmp/outside/secret") == 0 && rmdir("/tmp/outside") == 0);
+    puts("usertest: a symbolic link stays inside a process root");
 
     /* A root that is itself a mounted filesystem. Leaving a mount
      * through ".." replaces the mount's root vnode with the covered

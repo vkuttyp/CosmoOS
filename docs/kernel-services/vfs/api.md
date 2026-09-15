@@ -124,6 +124,30 @@ cache, `ops->evict`, free. Release may therefore do block I/O and take
 
 **`uint64_t vfs_now_ns(void)`** The monotonic clock, used for times.
 
+### Symbolic links
+
+`int vfs_symlink(struct vnode *start, const char *path, const char *target)`
+creates `path` as a link to `target`, which is copied and never
+validated: a link to nothing is a link, and resolving it later is what
+reports `ENOENT`. `EEXIST` if the name is taken (a link counts), `EPERM`
+on a filesystem without links, `ENAMETOOLONG` past `VFS_PATH_MAX`,
+`EOPNOTSUPP` on a cosmofs older than format version 8.
+
+`int vfs_readlink(struct vnode *start, const char *path, char *buf, size_t len)`
+copies at most `len` bytes of the target and returns how many. **It does
+not terminate what it copies** -- POSIX's rule, the one the walk wants,
+and the one the libc wrapper does not paper over. `EINVAL` if the last
+component is not a link.
+
+`int vfs_lstat(...)` is `vfs_stat` without following a link named by the
+last component, and `vfs_lookup_nofollow` the same for lookups.
+
+`vnode_ops` gains two optional entries. `symlink(dir, name, len, target,
+out)` creates one; on success `*out` is a referenced vnode **or NULL**,
+because a filesystem whose last fallible step is publishing the entry
+must not fail afterwards for a link that exists. `readlink(vn, buf,
+len)` returns the bytes copied, not terminated.
+
 ### Namespace operations
 
 All take `struct vnode *start` (NULL or an absolute path means the
@@ -411,6 +435,12 @@ first use, any context. Integrity detection only, not authenticity.
 
 ## System calls (`kernel/include/uapi/cosmo/syscall.h`) — stable
 
+`symlink(target, path)` (89), `readlink(path, buf, len)` (90) and
+`lstat(path, st)` (91) join the file calls, and `COSMO_O_NOFOLLOW`
+(`0x20000`) joins `open`'s flags. `readlink` returns the bytes copied
+and does not terminate them; the libc wrapper does not either, so there
+is one rule rather than two.
+
 Numbers 0–10 are unchanged (Phase 4). New:
 
 | # | Name | Arguments | Returns | Errors |
@@ -428,7 +458,9 @@ Numbers 0–10 are unchanged (Phase 4). New:
 | 21 | `mount` | `const char *source, const char *target, const char *fstype, unsigned flags` | 0 | `EPERM` (uid ≠ 0), `ENODEV` (unknown device or filesystem), `EBUSY`, `EIO`, path errors |
 | 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY`, path errors |
 
-`SYS_COUNT` is 23. Paths are copied with `strncpy_from_user` up to
+These are the namespace's numbers; `SYS_COUNT` was 23 when they were
+added and is 92 now, the last three being the symbolic-link calls
+above. Paths are copied with `strncpy_from_user` up to
 `VFS_PATH_MAX`; an empty path is `-ENOENT`; an unreadable pointer is
 `-EFAULT`. `open` installs the file with `HANDLE_RIGHT_READ` for
 `O_RDONLY`/`O_RDWR` and `HANDLE_RIGHT_WRITE` for `O_WRONLY`/`O_RDWR`, so

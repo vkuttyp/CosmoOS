@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      7u   /* version 7: encryption (CFS_KIND_KEYS, CFS_CSUM_POLY1305) */
+#define CFS_VERSION      8u   /* version 8: symbolic links (CFS_TYPE_LNK) */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -122,6 +122,7 @@ struct cfs_csum_aead {          /* 32 bytes */
 
 #define CFS_TYPE_REG 1u
 #define CFS_TYPE_DIR 2u
+#define CFS_TYPE_LNK 3u   /* a symbolic link: its target is its data (version 8) */
 #define CFS_MODE_TYPE(mode) ((mode) >> 12)
 #define CFS_MODE(type, perm) (((type) << 12) | ((perm) & 07777u))
 

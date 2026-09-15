@@ -767,11 +767,89 @@ static int step(struct vnode *dir, const char *name, size_t len, struct vnode **
     return follow_mount(out);
 }
 
-/* Walk every component but the last. On success *parent is referenced
- * and the last component is returned through last and last_len (empty
- * for the root). */
-static int walk_parent(struct vnode *start, const char *path, struct vnode **parent, const char **last,
-                       size_t *last_len, bool *trailing_slash)
+static bool dot_name(const char *name, size_t len)
+{
+    return (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.');
+}
+
+/*
+ * One path resolution's symlink state: how many links it has expanded,
+ * and the two buffers an expansion needs -- the path being walked and
+ * the one being built -- carved from a single allocation taken on the
+ * first expansion. A walk that meets no link allocates nothing, which is
+ * every walk in a tree without links.
+ *
+ * The halves ping-pong: a target is read into the half that is not the
+ * current path and the remainder is appended there, so the copy never
+ * overlaps the string it reads (the remainder points into the current
+ * path).
+ */
+struct walk {
+    unsigned links;
+    char *buf;      /* 2 * VFS_PATH_MAX, or NULL */
+    char *cur;      /* the half holding the path being walked */
+    char *alt;      /* the other half */
+};
+
+static void walk_fini(struct walk *w)
+{
+    kfree(w->buf);
+    w->buf = NULL;
+}
+
+/*
+ * Replace the path being walked with `link`'s target followed by `rest`.
+ * Returns the new path through `out` and whether it is absolute; the
+ * caller decides where to continue from. -ELOOP past the budget,
+ * -ENAMETOOLONG when the result would not fit a path.
+ */
+static int walk_expand(struct walk *w, struct vnode *link, const char *rest, const char **out, bool *absolute)
+{
+    if (w->links >= VFS_MAX_SYMLINKS)
+        return -ELOOP;
+    if (link->ops->readlink == NULL)
+        return -EIO;   /* a link this filesystem cannot read is not a link */
+    if (w->buf == NULL) {
+        w->buf = kmalloc(2 * VFS_PATH_MAX, 0);
+        if (w->buf == NULL)
+            return -ENOMEM;
+        w->cur = w->buf;
+        w->alt = w->buf + VFS_PATH_MAX;
+    }
+    char *dst = w->alt;
+    mutex_lock(&link->lock);
+    int n = link->ops->readlink(link, dst, VFS_PATH_MAX - 1);
+    mutex_unlock(&link->lock);
+    if (n < 0)
+        return n;
+    if (n == 0)
+        return -ENOENT;   /* an empty target names nothing */
+    size_t restlen = rest != NULL ? strlen(rest) : 0;
+    if ((size_t)n + (restlen != 0 ? restlen + 1 : 0) >= VFS_PATH_MAX)
+        return -ENAMETOOLONG;   /* never silently drop what follows the link */
+    size_t at = (size_t)n;
+    if (restlen != 0) {
+        dst[at++] = '/';
+        memcpy(dst + at, rest, restlen);
+        at += restlen;
+    }
+    dst[at] = '\0';
+    char *swap = w->cur;
+    w->cur = w->alt;
+    w->alt = swap;
+    *absolute = dst[0] == '/';
+    *out = dst;
+    w->links++;
+    return 0;
+}
+
+/* Walk every component but the last, expanding any symbolic link met on
+ * the way. On success *parent is referenced and the last component is
+ * copied into `namebuf` (a VFS_NAME_MAX + 1 buffer; empty for the root),
+ * which is the caller's because the path may live in the walk's own
+ * scratch and not outlive it. */
+static int walk_parent(struct vnode *start, const char *path, struct walk *w, char *namebuf,
+                       struct vnode **parent, size_t *last_len, bool *trailing_slash)
 {
     if (path == NULL || strnlen(path, VFS_PATH_MAX) >= VFS_PATH_MAX)
         return -ENAMETOOLONG;
@@ -803,7 +881,7 @@ static int walk_parent(struct vnode *start, const char *path, struct vnode **par
 
         if (len == 0) {              /* the root itself, or a trailing separator */
             *parent = cur;
-            *last = path;
+            namebuf[0] = '\0';
             *last_len = 0;
             return 0;
         }
@@ -813,7 +891,8 @@ static int walk_parent(struct vnode *start, const char *path, struct vnode **par
         }
         if (*next == '\0') {
             *parent = cur;
-            *last = path;
+            memcpy(namebuf, path, len);
+            namebuf[len] = '\0';
             *last_len = len;
             if (trailing_slash)
                 *trailing_slash = *end == '/';
@@ -827,39 +906,153 @@ static int walk_parent(struct vnode *start, const char *path, struct vnode **par
             vnode_put(cur);
             return -ENOTDIR;
         }
+        /* step() consumes this reference (it puts `dir` before returning
+         * the child), and a relative target resolves against the
+         * directory the link was found in -- so the walk holds a second
+         * one across the step and releases it as soon as the child turns
+         * out not to be a link. */
+        struct vnode *linkdir = cur;
+        vnode_get(linkdir);
         struct vnode *child;
         int rc = step(cur, path, len, &child);
-        if (rc)
+        if (rc) {
+            vnode_put(linkdir);
             return rc;
+        }
+        if (child->type == VNODE_LNK) {
+            const char *expanded;
+            bool absolute = false;
+            rc = walk_expand(w, child, next, &expanded, &absolute);
+            vnode_put(child);
+            if (rc) {
+                vnode_put(linkdir);
+                return rc;
+            }
+            if (absolute) {
+                vnode_put(linkdir);
+                cur = vfs_current_root();
+            } else {
+                cur = linkdir;   /* keeps linkdir's reference */
+            }
+            path = expanded;
+            while (*path == '/')
+                path++;
+            continue;
+        }
+        vnode_put(linkdir);
         cur = child;
         path = next;
     }
 }
 
-int vfs_lookup(struct vnode *start, const char *path, struct vnode **out)
+/* The name `name` in the referenced directory `dir`, with the search
+ * permission check and the mount crossing the walk applies. `dir` stays
+ * the caller's. */
+static int lookup_in(struct vnode *dir, const char *name, size_t len, struct vnode **out)
 {
-    struct vnode *parent;
-    const char *last;
-    size_t len;
-    bool trailing;
-    int rc = walk_parent(start, path, &parent, &last, &len, &trailing);
+    int rc = vfs_permission(dir, VFS_MAY_EXEC);
     if (rc)
         return rc;
-    if (len == 0) {
-        *out = parent;
-        return 0;
+    mutex_lock(&dir->lock);
+    rc = (dir->flags & VNODE_DEAD) ? -ENOENT : dir->ops->lookup(dir, name, len, out);
+    mutex_unlock(&dir->lock);
+    if (rc)
+        return rc;
+    return follow_mount(out);
+}
+
+#define RESOLVE_FOLLOW 1u   /* follow a link named by the last component */
+
+/*
+ * A whole path to a referenced vnode, expanding links on the way and --
+ * with RESOLVE_FOLLOW -- at the end. The walk carries the budget, so a
+ * chain that ends in a link cannot outrun it. An absolute target
+ * restarts at the caller's root (walk_parent does that for a NULL
+ * start), which is what keeps a link inside a process's root.
+ */
+static int resolve(struct vnode *start, const char *path, struct walk *w, unsigned flags, struct vnode **out)
+{
+    char name[VFS_NAME_MAX + 1];
+    struct vnode *base = start;   /* borrowed from the caller ... */
+    bool owned = false;           /* ... until an expansion makes it ours */
+    for (;;) {
+        struct vnode *parent;
+        size_t len;
+        bool trailing = false;
+        int rc = walk_parent(base, path, w, name, &parent, &len, &trailing);
+        if (owned) {
+            vnode_put(base);   /* walk_parent took its own reference */
+            base = NULL;
+            owned = false;
+        }
+        if (rc)
+            return rc;
+        if (len == 0) {   /* the root itself: never a link */
+            *out = parent;
+            return 0;
+        }
+        if (parent->type != VNODE_DIR) {
+            vnode_put(parent);
+            return -ENOTDIR;
+        }
+        struct vnode *vn;
+        if (dot_name(name, len)) {
+            vnode_get(parent);
+            rc = step(parent, name, len, &vn);   /* consumes that reference */
+        } else {
+            rc = lookup_in(parent, name, len, &vn);
+        }
+        if (rc) {
+            vnode_put(parent);
+            return rc;
+        }
+        if (vn->type != VNODE_LNK || !(flags & RESOLVE_FOLLOW)) {
+            vnode_put(parent);
+            /* `name/` names a directory, whatever the name resolved to. */
+            if (trailing && vn->type != VNODE_DIR) {
+                vnode_put(vn);
+                return -ENOTDIR;
+            }
+            *out = vn;
+            return 0;
+        }
+        const char *expanded;
+        bool absolute = false;
+        rc = walk_expand(w, vn, NULL, &expanded, &absolute);
+        vnode_put(vn);
+        if (rc) {
+            vnode_put(parent);
+            return rc;
+        }
+        if (absolute) {
+            vnode_put(parent);
+            base = NULL;
+        } else {
+            base = parent;
+            owned = true;
+        }
+        path = expanded;
     }
-    if (parent->type != VNODE_DIR) {
-        vnode_put(parent);
-        return -ENOTDIR;
-    }
-    rc = step(parent, last, len, out);
-    if (rc == 0 && trailing && (*out)->type != VNODE_DIR) {
-        vnode_put(*out);
-        return -ENOTDIR;
-    }
+}
+
+static int lookup_flags(struct vnode *start, const char *path, unsigned flags, struct vnode **out)
+{
+    struct walk w = { 0 };
+    int rc = resolve(start, path, &w, flags, out);
+    walk_fini(&w);
     return rc;
 }
+
+int vfs_lookup(struct vnode *start, const char *path, struct vnode **out)
+{
+    return lookup_flags(start, path, RESOLVE_FOLLOW, out);
+}
+
+int vfs_lookup_nofollow(struct vnode *start, const char *path, struct vnode **out)
+{
+    return lookup_flags(start, path, 0, out);
+}
+
 
 /* --- files ---------------------------------------------------------------- */
 
@@ -940,61 +1133,112 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
     if (acc == COSMO_O_ACCMODE)
         return -EINVAL;
 
-    struct vnode *parent;
-    const char *last;
-    size_t len;
-    bool trailing;
-    int rc = walk_parent(start, path, &parent, &last, &len, &trailing);
-    if (rc)
-        return rc;
-    if (trailing)
-        flags |= COSMO_O_DIRECTORY;
-
+    /*
+     * The resolution is a loop so that a symbolic link named by the last
+     * component re-enters it with the target path: O_CREAT then creates
+     * the target of a dangling link, O_TRUNC truncates the target, and
+     * the permission checks are the target's -- which is what every one
+     * of those flags means. The walk carries the budget across rounds,
+     * so a chain ending in a link cannot outrun it, and every exit runs
+     * one cleanup.
+     */
+    struct walk w = { 0 };
+    struct vnode *base = start;   /* borrowed from the caller ... */
+    bool base_owned = false;      /* ... until an expansion makes it ours */
     struct vnode *vn = NULL;
     bool created = false;
-    if (len == 0) {
-        vn = parent;   /* the root itself */
-    } else {
+    int rc;
+
+    for (;;) {
+        struct vnode *parent;
+        char last[VFS_NAME_MAX + 1];
+        size_t len;
+        bool trailing = false;
+        rc = walk_parent(base, path, &w, last, &parent, &len, &trailing);
+        if (base_owned) {
+            vnode_put(base);   /* walk_parent took its own reference */
+            base = NULL;
+            base_owned = false;
+        }
+        if (rc)
+            goto out;
+        if (trailing)
+            flags |= COSMO_O_DIRECTORY;
+
+        if (len == 0) {
+            vn = parent;   /* the root itself */
+            break;
+        }
         if (parent->type != VNODE_DIR) {
             vnode_put(parent);
-            return -ENOTDIR;
+            rc = -ENOTDIR;
+            goto out;
         }
-        if ((len == 1 && last[0] == '.') || (len == 2 && last[0] == '.' && last[1] == '.')) {
-            rc = step(parent, last, len, &vn);
+        if (dot_name(last, len)) {
+            rc = step(parent, last, len, &vn);   /* consumes the reference */
             if (rc)
-                return rc;
-        } else {
-            rc = vfs_permission(parent, VFS_MAY_EXEC);   /* search the last directory */
-            if (rc) {
-                vnode_put(parent);
-                return rc;
-            }
-            mutex_lock(&parent->lock);
-            rc = (parent->flags & VNODE_DEAD) ? -ENOENT : parent->ops->lookup(parent, last, len, &vn);
-            if (rc == -ENOENT && (flags & COSMO_O_CREAT)) {
-                if (parent->mnt->flags & MOUNT_RDONLY)
-                    rc = -EROFS;
-                else if (parent->ops->create == NULL)
-                    rc = -ENOTSUP;
-                else if (vfs_permission(parent, VFS_MAY_WRITE) != 0)
-                    rc = -EACCES;   /* creating an entry writes the directory */
-                else {
-                    rc = parent->ops->create(parent, last, len, mode & 07777, &vn);
-                    created = rc == 0;
-                }
-            } else if (rc == 0 && (flags & COSMO_O_CREAT) && (flags & COSMO_O_EXCL)) {
-                vnode_put(vn);
-                rc = -EEXIST;
-            }
-            mutex_unlock(&parent->lock);
+                goto out;
+            break;                               /* "." and ".." are directories */
+        }
+
+        rc = vfs_permission(parent, VFS_MAY_EXEC);   /* search the last directory */
+        if (rc) {
             vnode_put(parent);
-            if (rc)
-                return rc;
-            rc = follow_mount(&vn);
-            if (rc)
-                return rc;
+            goto out;
         }
+        mutex_lock(&parent->lock);
+        rc = (parent->flags & VNODE_DEAD) ? -ENOENT : parent->ops->lookup(parent, last, len, &vn);
+        if (rc == -ENOENT && (flags & COSMO_O_CREAT)) {
+            if (parent->mnt->flags & MOUNT_RDONLY)
+                rc = -EROFS;
+            else if (parent->ops->create == NULL)
+                rc = -ENOTSUP;
+            else if (vfs_permission(parent, VFS_MAY_WRITE) != 0)
+                rc = -EACCES;   /* creating an entry writes the directory */
+            else {
+                rc = parent->ops->create(parent, last, len, mode & 07777, &vn);
+                created = rc == 0;
+            }
+        } else if (rc == 0 && (flags & COSMO_O_CREAT) && (flags & COSMO_O_EXCL)) {
+            vnode_put(vn);
+            rc = -EEXIST;   /* a link counts as existing, as POSIX says */
+        }
+        mutex_unlock(&parent->lock);
+        if (rc == 0)
+            rc = follow_mount(&vn);
+        if (rc) {
+            vnode_put(parent);
+            goto out;
+        }
+        if (vn->type != VNODE_LNK) {
+            vnode_put(parent);
+            break;
+        }
+        if (flags & COSMO_O_NOFOLLOW) {
+            vnode_put(vn);
+            vnode_put(parent);
+            vn = NULL;
+            rc = -ELOOP;   /* Linux's answer for a link opened with O_NOFOLLOW */
+            goto out;
+        }
+        const char *expanded;
+        bool absolute = false;
+        rc = walk_expand(&w, vn, NULL, &expanded, &absolute);
+        vnode_put(vn);
+        vn = NULL;
+        if (rc) {
+            vnode_put(parent);
+            goto out;
+        }
+        if (absolute) {
+            vnode_put(parent);   /* an absolute target restarts at the caller's root */
+        } else {
+            base = parent;       /* a relative one, at the link's own directory */
+            base_owned = true;
+        }
+        path = expanded;
     }
+    walk_fini(&w);
 
     if (flags & COSMO_O_DIRECTORY) {
         if (vn->type != VNODE_DIR) {
@@ -1045,6 +1289,12 @@ int vfs_open(struct vnode *start, const char *path, unsigned flags, uint32_t mod
         return orc;
     *out = f;
     return 0;
+
+out:
+    walk_fini(&w);
+    if (base_owned)
+        vnode_put(base);
+    return rc;
 }
 
 int vfs_open_vnode(struct vnode *vn, unsigned flags, struct file **out)
@@ -1265,11 +1515,6 @@ int64_t file_readdir(struct file *f, void *buf, size_t len)
 
 /* --- directory mutations ---------------------------------------------------- */
 
-static bool dot_name(const char *name, size_t len)
-{
-    return (len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.');
-}
-
 /* The sticky bit (01000) on a directory: an entry may be removed or
  * renamed only by the owner of the entry, the owner of the directory, or a
  * privileged caller (/tmp is 01777). */
@@ -1281,14 +1526,19 @@ static bool sticky_denies(const struct vnode *dir, const struct vnode *entry)
     return !cred_privileged(c) && c->euid != entry->uid && c->euid != dir->uid;
 }
 
-/* Resolve the parent directory for a mutation; locks it. */
-static int parent_for_mutation(struct vnode *start, const char *path, struct vnode **parent, const char **last,
+/* Resolve the parent directory for a mutation; locks it. The last
+ * component is copied into `namebuf` (VFS_NAME_MAX + 1) and is never
+ * followed: these calls name an entry in a directory, not what it
+ * points at. */
+static int parent_for_mutation(struct vnode *start, const char *path, char *namebuf, struct vnode **parent,
                                size_t *len)
 {
-    int rc = walk_parent(start, path, parent, last, len, NULL);
+    struct walk w = { 0 };
+    int rc = walk_parent(start, path, &w, namebuf, parent, len, NULL);
+    walk_fini(&w);
     if (rc)
         return rc;
-    if (*len == 0 || dot_name(*last, *len)) {
+    if (*len == 0 || dot_name(namebuf, *len)) {
         vnode_put(*parent);
         return *len == 0 ? -EEXIST : -EINVAL;
     }
@@ -1313,9 +1563,9 @@ static int parent_for_mutation(struct vnode *start, const char *path, struct vno
 int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode)
 {
     struct vnode *parent;
-    const char *last;
+    char last[VFS_NAME_MAX + 1];
     size_t len;
-    int rc = parent_for_mutation(start, path, &parent, &last, &len);
+    int rc = parent_for_mutation(start, path, last, &parent, &len);
     if (rc)
         return rc;
     mutex_lock(&parent->lock);
@@ -1341,9 +1591,9 @@ int vfs_mkdir(struct vnode *start, const char *path, uint32_t mode)
 static int remove_entry(struct vnode *start, const char *path, bool dir)
 {
     struct vnode *parent;
-    const char *last;
+    char last[VFS_NAME_MAX + 1];
     size_t len;
-    int rc = parent_for_mutation(start, path, &parent, &last, &len);
+    int rc = parent_for_mutation(start, path, last, &parent, &len);
     if (rc)
         return rc;
     mutex_lock(&parent->lock);
@@ -1454,12 +1704,12 @@ int vfs_truncate(struct vnode *start, const char *path, uint64_t size)
 int vfs_rename(struct vnode *start, const char *oldpath, const char *newpath)
 {
     struct vnode *odir, *ndir;
-    const char *oname, *nname;
+    char oname[VFS_NAME_MAX + 1], nname[VFS_NAME_MAX + 1];
     size_t olen, nlen;
-    int rc = parent_for_mutation(start, oldpath, &odir, &oname, &olen);
+    int rc = parent_for_mutation(start, oldpath, oname, &odir, &olen);
     if (rc)
         return rc;
-    rc = parent_for_mutation(start, newpath, &ndir, &nname, &nlen);
+    rc = parent_for_mutation(start, newpath, nname, &ndir, &nlen);
     if (rc) {
         vnode_put(odir);
         return rc;
@@ -1574,6 +1824,75 @@ int vfs_stat(struct vnode *start, const char *path, struct cosmo_stat *st)
     mutex_unlock(&vn->lock);
     vnode_put(vn);
     return 0;
+}
+
+int vfs_lstat(struct vnode *start, const char *path, struct cosmo_stat *st)
+{
+    struct vnode *vn;
+    int rc = vfs_lookup_nofollow(start, path, &vn);
+    if (rc)
+        return rc;
+    mutex_lock(&vn->lock);
+    vnode_stat(vn, st);
+    mutex_unlock(&vn->lock);
+    vnode_put(vn);
+    return 0;
+}
+
+int vfs_readlink(struct vnode *start, const char *path, char *buf, size_t len)
+{
+    if (len == 0)
+        return -EINVAL;
+    struct vnode *vn;
+    int rc = vfs_lookup_nofollow(start, path, &vn);
+    if (rc)
+        return rc;
+    if (vn->type != VNODE_LNK || vn->ops->readlink == NULL) {
+        vnode_put(vn);
+        return -EINVAL;   /* what POSIX says of a name that is not a link */
+    }
+    mutex_lock(&vn->lock);
+    rc = vn->ops->readlink(vn, buf, len);
+    mutex_unlock(&vn->lock);
+    vnode_put(vn);
+    return rc;
+}
+
+int vfs_symlink(struct vnode *start, const char *path, const char *target)
+{
+    if (target == NULL)
+        return -EINVAL;
+    size_t tlen = strnlen(target, VFS_PATH_MAX);
+    if (tlen == 0)
+        return -ENOENT;          /* a link to nothing names nothing */
+    if (tlen >= VFS_PATH_MAX)
+        return -ENAMETOOLONG;
+    struct vnode *parent;
+    char last[VFS_NAME_MAX + 1];
+    size_t len;
+    int rc = parent_for_mutation(start, path, last, &parent, &len);
+    if (rc)
+        return rc;
+    struct vnode *vn = NULL;
+    mutex_lock(&parent->lock);
+    if (parent->flags & VNODE_DEAD)
+        rc = -ENOENT;
+    else if (parent->ops->symlink == NULL)
+        rc = -EPERM;             /* a filesystem without links, as Linux answers */
+    else {
+        rc = parent->ops->lookup(parent, last, len, &vn);
+        if (rc == 0) {
+            vnode_put(vn);
+            rc = -EEXIST;
+        } else if (rc == -ENOENT) {
+            rc = parent->ops->symlink(parent, last, len, target, &vn);
+            if (rc == 0)
+                vnode_put(vn);
+        }
+    }
+    mutex_unlock(&parent->lock);
+    vnode_put(parent);
+    return rc;
 }
 
 /* --- init and diagnostics ---------------------------------------------------- */
