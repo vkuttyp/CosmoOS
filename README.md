@@ -1940,8 +1940,8 @@ See [docs/development.md](docs/development.md).
   transaction that publishes the entry and given back whole on any
   failure before it; format version 8 gates creation, because an older
   kernel would read a link as a regular file whose contents are a path.
-  Three native calls, six Linux entry points, and `ls` showing a link
-  with its target. 273 self-tests on both architectures (PR #142).
+  Three native calls (`SYS_COUNT` 89 → 92), six Linux entry points, and
+  `ls` showing a link with its target. 273 self-tests on both architectures (PR #142).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

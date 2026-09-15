@@ -96,9 +96,14 @@ kernel stack.
 | 76 | `tcgetattr` | `int handle, struct cosmo_termios *out` | 0 | `EBADF`, `ENOTTY` (not a terminal), `EFAULT` |
 | 77 | `tcsetattr` | `int handle, const struct cosmo_termios *in` | 0 | `EBADF`, `ENOTTY`, `EINVAL` (a mode this kernel does not have), `EFAULT` |
 | 78 | `ttysize` | `int handle, struct cosmo_ttysize *out` | 0; `cols`/`rows` 0 when the terminal does not know | `EBADF`, `ENOTTY`, `EFAULT` |
+| 89 | `symlink` | `const char *target, const char *path` | 0 | `EEXIST`, `EPERM` (a filesystem without links), `EOPNOTSUPP` (a cosmofs older than format version 8), `ENAMETOOLONG`, path errors |
+| 90 | `readlink` | `const char *path, char *buf, size_t len` | bytes copied, **not terminated** | `EINVAL` (not a link, or `len` 0), path errors, `EFAULT` |
+| 91 | `lstat` | `const char *path, struct cosmo_stat *st` | 0 | as `stat`, but a link named last is reported rather than followed |
 | 75 | `tcsetpgrp` | `int handle, int pgid` | 0 | `EBADF`, `ENOTTY`, `EINVAL`, `EPERM` (another session holds it, the caller does not lead a session, or the group is not of this session) |
 
-Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
+Calls 89–91 are the symbolic-link calls, specified with the rest of the
+namespace in `docs/kernel-services/vfs/api.md`; `COSMO_O_NOFOLLOW`
+(`0x20000`) joins `open`'s flags there. Calls 11–22 (Phase 7) are specified in full, with the `O_*` flags,
 `struct cosmo_stat`, `struct cosmo_dirent` and the errno values they add,
 in `docs/kernel-services/vfs/api.md`. Calls 23–31 (Phase 8), with
 `struct cosmo_sockaddr`, `COSMO_AF_*`, `COSMO_SOCK_*`, `COSMO_SHUT_*`
