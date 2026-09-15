@@ -1173,6 +1173,15 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(refused);                  /* a pass that could start here would never let the drain end */
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
+    /*
+     * And one unmount at a time. This is the moment the guard exists
+     * for: the first unmount is inside its drain with g_mounts_lock
+     * dropped, which is a window the code never had before. A second
+     * caller must be refused rather than tearing down the same links.
+     */
+    CHECK(vfs_umount("/tmp/pin") == -EBUSY);
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));   /* and it changed nothing */
+
     /* Let go, and the drain wakes and completes. */
     vfs_mount_release(held);
     thread_join(t);
@@ -1182,7 +1191,7 @@ bool selftest_vfs_mount_pin(const char **reason)
     struct mount *after = NULL;
     CHECK(vfs_mount_acquire(g_pin_id, &after) == -ENOENT);
     CHECK(vfs_rmdir(NULL, "/tmp/pin") == 0);
-    kinfo("selftest: vfs-mount-pin: mount %llu held a pass; the unmount waited and then took it",
+    kinfo("selftest: vfs-mount-pin: mount %llu held a pass; a second unmount was refused; the first waited and then took it",
           (unsigned long long)g_pin_id);
     return true;
 }
