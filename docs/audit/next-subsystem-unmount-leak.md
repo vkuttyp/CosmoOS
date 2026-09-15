@@ -173,10 +173,25 @@ Two things make the naive order wrong:
 
 Allocate-before and fill-after resolves the circle:
 
-1. **Free the previous record.** Walk the chain `sb.free_root` names and
-   hand every block to `cfs_free_block_deferred`. It is the old root's
-   statement and the new root replaces it; without this step every
-   commit leaks its predecessor's record.
+1. **Release the previous record, outside the snapshot filter.** Walk
+   the chain `sb.free_root` names and free every block of it directly.
+   Without this step every commit leaks its predecessor's record.
+
+   **Not through `cfs_snapshot_hold_block`**, and the exception is
+   deliberate. That function asks whether a snapshot's recorded bitmap
+   marks the block allocated (`cosmofs_snap.c:162-189`), and an old
+   record's blocks were allocated when an older snapshot was taken, so
+   the generic path would hold them and append them to a deadlist. But
+   **no snapshot can reach a record**: a snapshot preserves `imap_root`
+   and `alloc_root`, not `free_root`. The record is one root's
+   bookkeeping about one transaction, not part of any generation's tree,
+   so retaining it against a snapshot keeps a block nothing will ever
+   read and moves this report's defect into the deadlist.
+
+   The rule the exception rests on, stated so the implementation does
+   not have to rediscover it: *the snapshot filter is for blocks a
+   snapshot's tree might name. A block reachable only from a superblock
+   field that snapshots do not copy is not one of those.*
 2. **Filter for snapshots.** Run `cfs_snapshot_hold_block` over
    `pending_free` now, so the deadlist appends it makes are inside the
    transaction rather than after the root. What survives is what this
@@ -292,9 +307,13 @@ cost.
 
 *Future extensibility.* The orphan list is the same shape — a record
 published with the root and replayed at mount — so this unit's replay
-path is the one that unit will extend. Format version 9, and the
-version gate is on *mount*: a version-8 filesystem has no `free_root`
-and replays nothing.
+path is the one that unit will extend.
+
+The version gate is on *mount* and is **`version >= 9`**: below that,
+the field is `reserved[5]` and reading it as a chain head would fail the
+mount of every filesystem written before this unit. `CFS_VERSION_MIN`
+stays 2, so every existing image still mounts; it simply replays
+nothing, which is correct because a version-8 commit recorded nothing.
 
 ## Affected files
 
@@ -358,7 +377,8 @@ step 1 runs the release build.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `cosmofs-freelog-format` | a version-8 image mounts, works and replays nothing; a version-9 image has `free_root` 0 when nothing is pending | gate the replay on the version being ≥ 8: a version-8 image's zeroed reserved field is read as a chain and the mount fails |
+| `cosmofs-freelog-format` | the replay is gated at **version ≥ 9**: a version-8 image mounts, works, and replays nothing, because its `reserved[5]` is not a `free_root`; a version-9 image has `free_root` 0 when nothing is pending | lower the gate to version 8: the version-8 image's reserved field is read as a chain head and the mount fails, which is what the gate exists to prevent |
+| `cosmofs-freelog-not-held` | a filesystem with a snapshot, committed repeatedly: the superseded records are freed rather than appended to the snapshot's deadlist, and the deadlist's length does not grow with the commit count | send the old chain through `cfs_snapshot_hold_block`: the deadlist grows by a block or two per commit and the space is never returned |
 | `cosmofs-freelog-written` | after a transaction that frees blocks, `free_root` is non-zero and its chain names exactly the blocks phase 7 clears, after the snapshot filter | record before the filter: a block a snapshot holds appears in the record, and the next assertion (that a snapshotted filesystem loses nothing) fails |
 | `cosmofs-unmount-leak` | **the defect**: write a file, delete it, unmount, remount, and `free_blocks` is what it was before the file existed; the structural check is clean | skip the replay at mount: the free count is short and the check reports leaked blocks — which is today's behaviour, so this bug-proof is the unfixed tree |
 | `cosmofs-freelog-idempotent` | mount, replay, unmount without committing, mount again: the same blocks, the same count, no double-free | clear the record at replay rather than at the next commit: the second mount loses it and the blocks are stranded again |
@@ -382,7 +402,7 @@ assert the count the defect produces. Each one is re-derived in step 3,
 and the report says plainly that a test asserting a wrong number is not
 evidence the number is right.
 
-**Twelve tests, and three of them exist because this report was
+**Thirteen tests, and four of them exist because this report was
 reviewed rather than because it was written** -- the two ordering
 defects above and the over-reservation their fix introduces.
 
