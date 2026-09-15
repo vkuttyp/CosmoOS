@@ -1300,8 +1300,10 @@ two. The entries are LPAE stage-2 descriptors: `S2AP` (bits 6–7) for
 read and write, `XN` (bits 53–54) for execute, `MemAttr` (bits 2–5)
 normal write-back, `AF` set, `SH` inner-shareable.
 
-`VTCR_EL2` is derived from `ID_AA64MMFR0_EL1.PARange`: `T0SZ = 64 -
-PARange bits`, `TG0` 4 KiB, inner-shareable, write-back, and the start
+`VTCR_EL2` is derived from `ID_AA64MMFR0_EL1.PARange`: `PS` as the CPU
+reports it, `T0SZ = 64 - input_bits` (the range, capped below at the
+48 bits the tables index), `TG0` 4 KiB, inner-shareable, write-back,
+and the start
 level from a rule the architecture states and QEMU enforces
 (`kernel/include/arch/hv_s2_core.h`, `hv_s2_layout`): with the 4 KiB
 granule a walk may start at level 0 (`SL0 = 2`, one root page, four

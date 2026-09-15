@@ -58,7 +58,8 @@ struct device { ...; struct iommu_domain *iommu; uint32_t iommu_sid; };
 - **One page-table format walker, two encodings.** Both units walk a
   4-level, 4 KiB-granule tree of 512-entry tables over an input the unit
   chooses (VT-d AGAW 48; SMMU stage-2 with `T0SZ = 64 - OAS` from
-  `IDR5.OAS`, `SL0 = 2`: a level-0 start, which the architecture allows
+  `IDR5.OAS`, itself capped at the 48 bits the walker covers, and
+  `SL0 = 2`: a level-0 start, which the architecture allows
   only above 42 bits of output, so the driver asks the hypervisor's
   layout rule (`arch/hv_s2_core.h`) at probe and, at 42 bits or less,
   leaves the unit unused with a `WARN` naming the width rather than
