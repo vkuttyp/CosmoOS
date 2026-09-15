@@ -730,6 +730,60 @@ void cfs_fail(struct cfs *fs, int rc)
 #define CFS_FREELOG_MAX_CHAIN 4096u
 
 /*
+ * Apply the record at mount: the blocks this root freed, whose bits the
+ * last commit cleared only in memory.
+ *
+ * Read before the bitmap is trusted for allocation, so the space is
+ * available in this session rather than after another mount. A block
+ * named here is free by the root's own word, so a bit that is already
+ * clear is not an error -- it means a commit got there first.
+ */
+static int freelog_replay(struct cfs *fs)
+{
+    if (fs->sb.version < 9)
+        return 0;
+    uint64_t at = fs->sb.free_root;
+    unsigned guard = 0, applied = 0;
+    while (at != 0) {
+        if (guard++ > CFS_FREELOG_MAX_CHAIN) {
+            kerror("cosmofs: free record chain too long at %llu", (unsigned long long)at);
+            return -EIO;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, at, CFS_KIND_FREELOG, &b);
+        if (rc) {
+            /*
+             * The root says these blocks are free and will not say which.
+             * Mounting anyway would leave an allocator that cannot be
+             * trusted, so the mount fails and the operator has a checker.
+             */
+            kerror("cosmofs: free record at %llu unreadable (%d); refusing the mount",
+                   (unsigned long long)at, rc);
+            return -EIO;
+        }
+        const struct cfs_dead_block *d = (const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
+        uint64_t next = d->next;
+        uint64_t count = d->count <= CFS_FREELOG_PER_BLOCK ? d->count : 0;
+        for (uint64_t i = 0; i < count; i++) {
+            uint64_t lin = cfs_dva_lin(fs, d->blk[i]);
+            if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
+                continue;                      /* a commit already applied it */
+            bit_clear(fs->bitmap, lin);
+            fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
+            fs->free_blocks++;
+            fs->mem[CFS_DVA_VDEV(d->blk[i])].free_blocks++;
+            applied++;
+        }
+        cfs_buf_put(fs, b);
+        at = next;
+    }
+    if (applied)
+        kinfo("cosmofs: reclaimed %u block(s) the last commit freed and could not write",
+              applied);
+    return 0;
+}
+
+/*
  * Release the chain the current root names. It is the *old* root's
  * statement and the new root replaces it, so without this every commit
  * leaks its predecessor's record -- this unit's own defect, one level up.
@@ -1565,9 +1619,27 @@ static int load_bitmap(struct cfs *fs)
     if (rc)
         return rc;
     fs->free_blocks = free;
-    if (free != fs->sb.free_blocks)
+
+    /*
+     * Finish what the last commit started. It cleared these blocks' bits
+     * in memory after its root was durable and marked the chunks for the
+     * next commit, which at an unmount never came -- so on disk they are
+     * still allocated and reachable from nothing. The root that freed
+     * them says which they are, and this is where that is read
+     * (docs/audit/next-subsystem-unmount-leak.md).
+     *
+     * Idempotent on purpose: the record is not cleared here. A mount
+     * that replays and unmounts without committing changes nothing, and
+     * the next mount replays the same list to the same effect. The
+     * commit that supersedes the record is what retires it.
+     */
+    rc = freelog_replay(fs);
+    if (rc)
+        return rc;
+
+    if (fs->free_blocks != fs->sb.free_blocks)
         kwarn("cosmofs: free block count %llu differs from the superblock's %llu; using the bitmap",
-              (unsigned long long)free, (unsigned long long)fs->sb.free_blocks);
+              (unsigned long long)fs->free_blocks, (unsigned long long)fs->sb.free_blocks);
     return 0;
 }
 

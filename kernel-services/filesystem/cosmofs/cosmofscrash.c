@@ -268,10 +268,8 @@ static bool state_matches(const struct sync_point *sp, const struct expect **bad
 /* Mount a prefix image and check it against the last committed state. */
 /* What the replays leaked, across every prefix: a crash strands the
  * blocks the last transaction freed, and this is how many. */
-static uint64_t g_leak_max, g_leak_total, g_leak_prefixes;
-/* How many leaking prefixes get the repair-and-recheck proof. */
-#define CRASH_REPAIR_PROOFS 8u
-
+static uint64_t g_leak_total;        /* blocks a replayed prefix stranded: must be zero */
+static unsigned g_prefixes_checked;  /* images the structural check actually ran on */
 /* The mount at MNT, for the structural check. */
 static struct mount *mount_of_mnt(void)
 {
@@ -324,30 +322,26 @@ static bool check_prefix(struct blkdev *bd, const uint8_t *base, const struct ra
         }
     }
     /*
-     * And the shape, not only the bytes.
+     * And the shape, not only the bytes: every replayed prefix is
+     * **clean**.
      *
-     * What a post-crash image may legitimately have is *leaked blocks*,
-     * and nothing else. A block freed during a transaction keeps its
-     * bitmap bit until the commit *after* the one that made the new root
-     * durable (cosmofs_core.c, "the old generation's blocks are free":
-     * the frees dirty chunks for the next commit), so a crash strands
-     * the previous generation's copy-on-write casualties -- allocated,
-     * referenced by nothing, and never reconsidered by a later mount.
-     * That is the price of committing the root before the frees, it is
-     * correct for crash safety, and it is exactly what a checker is for.
+     * This assertion is back to its full strength. The fsck unit had to
+     * weaken it -- "no finding a crash cannot explain" -- because a
+     * block freed during a transaction kept its bitmap bit until the
+     * commit *after* the one that made the new root durable, and a crash
+     * leaves no next commit. It measured the cost at 162 of 199 prefixes
+     * and 1912 blocks (docs/audit/next-subsystem-fsck.md).
      *
-     * So: every other class must be empty on every prefix, the leak
-     * count is recorded, and a repair pass must leave the image clean.
+     * A root now records what it freed, and a mount finishes the job
+     * (docs/audit/next-subsystem-unmount-leak.md), so a crash-consistent
+     * image has nothing stranded and the suite can say so plainly. The
+     * count is still gathered, because "zero" is a measurement and not
+     * an assumption, and it must be zero.
      */
     if (ok) {
         struct cosmofs_check_report rep;
         int crc = cosmofs_check(mount_of_mnt(), &rep, 0);
-        bool only_leaks = crc == 0 && rep.seen_not_alloc.count == 0 && rep.dup.count == 0 &&
-                          rep.nlink_wrong.count == 0 && rep.orphan.count == 0 &&
-                          rep.dangling_entry.count == 0 && rep.dir_bad.count == 0 &&
-                          rep.counter_wrong.count == 0 && rep.chain_cycle.count == 0 &&
-                          rep.unreadable.count == 0;
-        if (!only_leaks) {
+        if (crc != 0 || !rep.clean) {
             kerror("cosmofs-replay: prefix %u: check rc %d: %llu leaked, %llu free-in-use, %llu cross-linked, "
                    "%llu bad nlink, %llu orphan, %llu dangling, %llu bad entries, %llu counters, %llu cycles, "
                    "%llu unreadable",
@@ -357,30 +351,11 @@ static bool check_prefix(struct blkdev *bd, const uint8_t *base, const struct ra
                    (unsigned long long)rep.dangling_entry.count, (unsigned long long)rep.dir_bad.count,
                    (unsigned long long)rep.counter_wrong.count, (unsigned long long)rep.chain_cycle.count,
                    (unsigned long long)rep.unreadable.count);
-            *why = "a prefix image has a finding a crash cannot explain";
+            *why = "a replayed prefix image is not clean";
             ok = false;
         } else {
-            if (rep.alloc_not_seen.count > g_leak_max)
-                g_leak_max = rep.alloc_not_seen.count;
-            g_leak_total += rep.alloc_not_seen.count;
-            if (rep.alloc_not_seen.count != 0) {
-                g_leak_prefixes++;
-                /* Every prefix is checked; the reclaim is proved on the
-                 * first few, because a repair costs two more full passes
-                 * and the suite has a time budget it is worth keeping
-                 * (docs/audit/next-subsystem-fsck.md, Benchmarks). */
-                if (g_leak_prefixes <= CRASH_REPAIR_PROOFS) {
-                    struct cosmofs_check_report after;
-                    if (cosmofs_check(mount_of_mnt(), &after, COSMOFS_CHECK_REPAIR) != 0 ||
-                        after.alloc_not_seen.repaired != after.alloc_not_seen.count) {
-                        *why = "a prefix image's leaked blocks could not be reclaimed";
-                        ok = false;
-                    } else if (cosmofs_check(mount_of_mnt(), &after, 0) != 0 || !after.clean) {
-                        *why = "a prefix image is not clean after its leaked blocks were reclaimed";
-                        ok = false;
-                    }
-                }
-            }
+            g_leak_total += rep.alloc_not_seen.count;   /* must stay zero */
+            g_prefixes_checked++;
         }
     }
     vfs_umount2(MNT, VFS_UMOUNT_FORCE);
@@ -472,14 +447,18 @@ bool selftest_cosmofs_replay(const char **reason)
     ramblk_destroy(bd);
     CHECK(ok);
     CHECK(vfs_vnode_count() == vnodes0);
-    /* The structural check ran on these images and found what a crash
-     * leaves: without this, a suite that stopped asking would pass in
-     * silence, which is what the no-crash-check bug-proof showed. */
-    CHECK(g_leak_prefixes > 0 && g_leak_total >= g_leak_prefixes);
-    kinfo("selftest: cosmofs-replay: %llu of %u prefixes leaked blocks a crash stranded (worst %llu, %llu in all), "
-          "each reclaimed and clean afterwards",
-          (unsigned long long)g_leak_prefixes, checked, (unsigned long long)g_leak_max,
-          (unsigned long long)g_leak_total);
+    /*
+     * The structural check ran on these images, and found nothing.
+     * Both halves are asserted: a suite that stopped asking would pass
+     * in silence (what the fsck unit's no-crash-check bug-proof showed),
+     * and a suite that asked and found something would have a crash
+     * stranding blocks again.
+     */
+    CHECK(g_prefixes_checked == checked);
+    CHECK(g_leak_total == 0);
+    kinfo("selftest: cosmofs-replay: %u prefix images checked, %llu blocks stranded -- the 162 of 199 the fsck unit "
+          "measured are now recorded by the root that freed them and reclaimed at mount",
+          g_prefixes_checked, (unsigned long long)g_leak_total);
     kinfo("selftest: cosmofs-replay: %u writes recorded over %u sync points; %u prefix images mounted and checked",
           writes, g_nr_syncs, checked);
     return true;

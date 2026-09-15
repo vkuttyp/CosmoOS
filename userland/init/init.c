@@ -3470,10 +3470,22 @@ static void fsctl_selftest(void)
         CHECK(again != 0);
 
         /*
-         * Found. The exit status cannot say this -- a check that finds
-         * something still exits 0, which is the contract -- so the flags
-         * are read through the device, which also costs no process on a
-         * budget this suite shares.
+         * And it is **clean**, which is the whole of the change.
+         *
+         * When this test was written it asserted the opposite: a file
+         * written, deleted and unmounted left blocks stranded, the check
+         * found them, and --repair gave them back. That was the defect
+         * the fsctl unit discovered by being the first thing able to
+         * look, and format version 9 fixed it -- a root now records what
+         * it freed and a mount finishes the job
+         * (docs/audit/next-subsystem-unmount-leak.md).
+         *
+         * So the same sequence now proves the fix from userland. What it
+         * no longer exercises is the find-and-repair path itself:
+         * userland cannot manufacture a fault, and a clean unmount does
+         * not leave one any more. That path is covered by the kernel's
+         * own tests, and the loss of coverage here is stated rather than
+         * quietly absorbed.
          */
         static char rbuf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check)];
         struct cosmo_fsctl_check res;
@@ -3484,9 +3496,9 @@ static void fsctl_selftest(void)
         CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
         CHECK(read(fd, rbuf, sizeof(rbuf)) == (long)sizeof(rbuf));
         memcpy(&res, rbuf + sizeof(struct cosmo_fsctl_result), sizeof(res));
-        CHECK((res.flags & COSMO_FSCTL_R_CLEAN) == 0);
-        unsigned long long stranded = res.class[0].count;   /* 0 is alloc_not_seen */
-        CHECK(stranded > 0);
+        CHECK((res.flags & COSMO_FSCTL_R_CLEAN) != 0);
+        CHECK(res.class[0].count == 0);     /* 0 is alloc_not_seen: nothing stranded */
+        unsigned long long stranded = 0;
 
         /* Repaired, through the tool, by an operator naming the mount. */
         snprintf(id, sizeof(id), "%llu", again);
@@ -3501,8 +3513,8 @@ static void fsctl_selftest(void)
         CHECK((res.flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
 
         CHECK(cosmo_umount("/mnt") == 0);
-        printf("usertest: fsctl found %llu blocks a clean unmount stranded, repaired them, and the filesystem is clean\n",
-               stranded);
+        (void)stranded;
+        printf("usertest: fsctl: a file written, deleted and unmounted strands nothing -- the filesystem is clean on remount\n");
     }
 
     close(fd);

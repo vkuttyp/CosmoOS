@@ -2139,11 +2139,19 @@ bool selftest_cosmofs_check_partial(const char **reason)
     /*
      * The comparison is the last phase, so a finding only it can produce
      * is the proof that the pass reached the end rather than stopping at
-     * the unreadable block: /d/x's blocks are allocated and no name
-     * reaches them any more.
+     * the unreadable block. That finding is the **orphan**: /d/x's inode
+     * is in the map and no name reaches it, which only the final walk of
+     * the inode maps can conclude.
+     *
+     * This used to assert a leaked block instead, and that assertion was
+     * being satisfied by something else entirely: before format version
+     * 9 every unmount stranded its last transaction's frees, so there
+     * was always a leak to find and the test passed for a reason its own
+     * comment did not give. /d/x's blocks are *seen* -- the pass reaches
+     * them through the orphaned inode -- so they were never the leak
+     * this line was reading (docs/audit/next-subsystem-unmount-leak.md).
      */
-    CHECK(rep.alloc_not_seen.count >= 1);
-    CHECK(rep.orphan.count >= 1);        /* and its inode is reachable from nothing */
+    CHECK(rep.orphan.count >= 1);
     CHECK(rep.blocks_seen > 0);
 
     /*
@@ -2399,6 +2407,60 @@ bool selftest_cosmofs_freelog_supersede(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
     kinfo("selftest: cosmofs-freelog-supersede: 100 commits, %llu free before and %llu after",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * The defect this unit exists for. Write a file, delete it, unmount, and
+ * the blocks the delete freed are gone: the commit cleared their bits in
+ * memory after its root was durable and marked the chunks for a next
+ * commit that an unmount never makes.
+ *
+ * This test fails on the tree before this unit, which is the strongest
+ * thing that can be said about a test.
+ */
+bool selftest_cosmofs_unmount_leak(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_sync() == 0);
+
+    /* Settle first: the count to come back to is the one after the
+     * filesystem has stopped growing. */
+    CHECK(write_file(ENG "/settle", "s", 1));
+    CHECK(vfs_unlink(NULL, ENG "/settle") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* A file, and then no file. */
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/leakme", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/leakme") == 0);
+    CHECK(vfs_umount(ENG) == 0);          /* the unmount's commit frees them */
+
+    /* Remount: every block is back, and the filesystem adds up. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-unmount-leak: %llu free before the file, %llu after it was deleted and the filesystem remounted",
           (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
     return true;
 }
