@@ -1084,25 +1084,21 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
  * Each case manufactures exactly one finding of the structural check, so
  * that every class it can report has a test that produced it on purpose.
  */
-int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, const char *path, uint64_t *what)
+int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
         return -EINVAL;
 
-    /* The inode the caller named, where a case needs one. */
-    uint64_t ino = 0;
+    /*
+     * An inode number rather than a path: a filesystem-level hook has no
+     * business resolving names, it has to work on a filesystem whose
+     * directories are the broken part, and resolving one here would put
+     * a VFS symbol in this file that the fuzz harness has to link.
+     */
     struct cfs_inode in;
-    if (path != NULL) {
-        struct vnode *vn;
-        int rc = vfs_lookup_nofollow(NULL, path, &vn);
-        if (rc)
-            return rc;
-        ino = vn->ino;
-        vnode_put(vn);
-        if (cfs_inode_read(fs, ino, &in) != 0)
-            return -ENOENT;
-    }
+    if (ino != 0 && cfs_inode_read(fs, ino, &in) != 0)
+        return -ENOENT;
 
     mutex_lock(&fs->lock);
     int rc = 0;

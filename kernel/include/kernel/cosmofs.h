@@ -128,8 +128,9 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version);
  * Test hook: break the filesystem in one named way, so that each of the
  * structural check's findings has a test that manufactures exactly it.
  * `what` returns the block or inode the corruption touched, which is
- * what the check must name back. One hook rather than eight, because the
- * list of ways to break a filesystem belongs in one place.
+ * what the check must name back, and `ino` is the inode a case needs one
+ * for (0 where none does). One hook rather than eight, because the list
+ * of ways to break a filesystem belongs in one place.
  */
 enum cosmofs_corruption {
     COSMOFS_CORRUPT_LEAK,        /* allocate a block and reference it from nothing */
@@ -141,7 +142,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_DIRENT,      /* an entry whose type disagrees with its inode */
     COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
 };
-int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, const char *path, uint64_t *what);
+int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
  * -ENOENT for a hole. Lets a test rot the disk under a known block. */
 int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva);

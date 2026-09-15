@@ -1566,7 +1566,7 @@ bool selftest_cosmofs_check_leak(const char **reason)
      * a crash between an allocation and the write that would have used
      * it leaves one. */
     uint64_t leaked = 0;
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, NULL, &leaked) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, &leaked) == 0);
     CHECK(check_is_clean(reason, &rep));
     CHECK(!rep.clean);
     CHECK(rep.alloc_not_seen.count == 1);
@@ -1620,6 +1620,14 @@ static bool check_fixture(struct blkdev **bd, const char **reason)
     return true;
 }
 
+/* The fixture's file, by number: the corruption hook takes an inode and
+ * not a path, so the test does the one name resolution. */
+static uint64_t check_file_ino(void)
+{
+    struct cosmo_stat st;
+    return vfs_stat(NULL, ENG "/file", &st) == 0 ? st.ino : 0;
+}
+
 static void check_teardown(struct blkdev *bd)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
@@ -1633,12 +1641,14 @@ bool selftest_cosmofs_check_faults(const char **reason)
     struct cosmofs_check_report r;
     struct blkdev *bd = NULL;
     uint64_t what = 0;
+    uint64_t file_ino = 0;
 
     /* A block a file uses, marked free: the dangerous direction, and the
      * one repair refuses because the allocator may already have handed
      * it out. */
     CHECK(check_fixture(&bd, reason));
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_FREE_IN_USE, ENG "/file", &what) == 0);
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_FREE_IN_USE, file_ino, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.seen_not_alloc.count == 1 && r.seen_not_alloc.name[0] == what);
     CHECK(r.alloc_not_seen.count == 0);
@@ -1648,7 +1658,8 @@ bool selftest_cosmofs_check_faults(const char **reason)
 
     /* Two inodes over one block. */
     CHECK(check_fixture(&bd, reason));
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_CROSSLINK, ENG "/file", &what) == 0);
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_CROSSLINK, file_ino, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dup.count == 1 && r.dup.name[0] == what);
     CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
@@ -1657,7 +1668,8 @@ bool selftest_cosmofs_check_faults(const char **reason)
 
     /* A link count the entries disagree with. */
     CHECK(check_fixture(&bd, reason));
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_NLINK, ENG "/file", &what) == 0);
+    CHECK((file_ino = check_file_ino()) != 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_NLINK, file_ino, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.nlink_wrong.count == 1 && r.nlink_wrong.name[0] == what);
     CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
@@ -1669,7 +1681,7 @@ bool selftest_cosmofs_check_faults(const char **reason)
     CHECK(check_fixture(&bd, reason));
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
     uint64_t free_before = r.counted_free;
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, NULL, &what) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.orphan.count == 1 && r.orphan.name[0] == what);
     CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
@@ -1686,14 +1698,14 @@ bool selftest_cosmofs_check_faults(const char **reason)
 
     /* An entry naming a slot nothing allocated. */
     CHECK(check_fixture(&bd, reason));
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DANGLING, NULL, &what) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DANGLING, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what);
     check_teardown(bd);
 
     /* An entry whose type its inode does not have. */
     CHECK(check_fixture(&bd, reason));
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DIRENT, NULL, &what) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DIRENT, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
     check_teardown(bd);
@@ -1708,7 +1720,7 @@ bool selftest_cosmofs_check_faults(const char **reason)
     free_was = r.counted_free;
     inodes_was = r.counted_inodes;
     CHECK(inodes_was >= 2);                  /* the root and the fixture's file */
-    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_COUNTER, NULL, &what) == 0);
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_COUNTER, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.counter_wrong.count == 2);
     CHECK(r.counted_free == free_was && r.counted_inodes == inodes_was);   /* the walk is unmoved */
