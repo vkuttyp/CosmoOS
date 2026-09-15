@@ -163,8 +163,12 @@ sessions; they were stubs answering the pid or 0 before that),
 `WNOHANG`; the status is encoded: exit `n` → `n << 8`; a kill by `sig`
 (native `128 + sig`) → `sig`; a fault (native 139) → `SIGSEGV` (11);
 `rusage` is zeroed when given. `execve`, `fork`, `vfork`, `clone`,
-`clone3` → `-ENOSYS`. `rseq`, `sched_getaffinity`, `readlink`,
-`readlinkat` → `-ENOSYS` (a libc tolerates these).
+`clone3` → `-ENOSYS`. `rseq` and `sched_getaffinity` → `-ENOSYS`
+(a libc tolerates these). `readlink`, `readlinkat`, `symlink` and
+`symlinkat` are implemented over `vfs_readlink`/`vfs_symlink` since the
+symlink unit, `lstat` is no longer an alias for `stat`, and
+`newfstatat` honours `AT_SYMLINK_NOFOLLOW` (`api.md`, "Symbolic
+links").
 
 `getrlimit`, `setrlimit` and `prlimit64` (self only; another pid is
 `-EPERM`) map `RLIMIT_AS`, `RLIMIT_RSS` (→ `COSMO_RLIMIT_MEM`),
