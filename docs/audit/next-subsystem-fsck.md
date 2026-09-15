@@ -533,14 +533,25 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind,
 3. **The findings.** All ten classes, each with a test that manufactures
    exactly that fault through a test hook and asserts the class fires,
    the count is what the fault made it, and the offender is named.
+   **As built, eight of the ten.** `chain_cycle` is reported and not
+   manufactured, because a cycle needs a hook that writes structure
+   rather than flipping a field; and of the six places `dir_bad` is
+   reported from, two are fired by a test and four are not. Both gaps
+   are inventory rows. See "As built" below.
 4. **The crash suite.** `cosmofs_check` in `check_prefix`, asserting no
    finding of any class over every prefix of the existing workload; and
    `cosmofs-crash-orphan`, a separate workload that unlinks a file while
    it is open and crashes, asserting the orphan is found, is the only
    finding, and is reclaimed by repair. This step is where the unit's
-   own bug -- the permanent leak -- becomes a test.
+   own bug -- the permanent leak -- becomes a test. **As built the
+   assertion is weaker and the reason is difference 2:** no finding a
+   crash cannot explain, leaked blocks being the one class a crash
+   explains. The separate workload is `cosmofs-check-orphan-crash`.
 5. **Repair.** The four repairable classes, the refusals, and the
-   re-run that proves a repair produced a clean filesystem.
+   re-run that proves a repair produced a clean filesystem. **As built
+   there is a fifth rule the plan did not have:** repair runs only on a
+   walk sure of its reachability, and reports `repair_refused`
+   otherwise. Difference 10.
 6. **Docs, README Status, inventory, the report's as-built sections.**
 
 Each step boots both architectures; steps 4 and 5 also run the release
@@ -558,16 +569,31 @@ build; step 5 runs `make test-crash`.
 | `cosmofs-check-dangling` | a directory entry naming a free inode slot is reported with the parent and the name; repair refuses | validate only the entry's shape: nothing fires |
 | `cosmofs-check-free-in-use` | a block an inode's extent names, with its bit cleared in the bitmap, gives `seen_not_alloc.count == 1` naming it; repair refuses and says why | compare only in one direction (allocated-not-seen): nothing fires |
 | `cosmofs-check-dirbad` | an entry with a `namelen` past the record, a `type` that disagrees with its inode's mode nibble, and a name repeated in one directory each give `dir_bad`, named by parent and offset | check the entry's inode but not its shape: two of the three do not fire |
+| *as built* |  of these three the type mismatch is manufactured, in `cosmofs-check-faults`; the over-long `namelen` is not, and the repeated name is not *detected* at all, which is its own inventory row | |
 | `cosmofs-check-counters` | a superblock whose `free_blocks` is one too high and whose `inode_count` is one too low gives `counter_wrong.count == 2`; repair writes the counted values and the second pass shows that class empty | take the counters as the truth rather than the walk: nothing fires |
+| *as built* |  exactly this, in `cosmofs-check-faults`. `next_ino` is not compared, being a high-water mark rather than a total | |
 | `cosmofs-check-snapshot` | a filesystem with a snapshot holding blocks the live tree has freed is **clean**; deleting the snapshot and re-checking is still clean | omit the snapshot walk: every held block is reported as a leak, which is the false positive this test exists for |
 | `cosmofs-check-partial` | with a metadata block made unreadable, `unreadable.count == 1`, `partial` true, and the pass still finishes and reports every other class | abort at the first unreadable block: the pass returns early and the other classes are empty |
+| *as built* |  a directory block rather than any metadata block, and the test asserts one thing more than the design asked for -- that repair refuses, because this image is exactly the one a repair would destroy | |
 | `cosmofs-replay` (extended) | every replayed prefix is structurally sound: `cosmofs_check` reports clean after each mount, over every prefix the suite already replays | leave a freed block's bit set in the commit path: some prefix reports a leak |
+| *as built* | not clean but *no finding a crash cannot explain*, because every crash strands blocks -- difference 1. The leak count is recorded and the reclaim proved on the first eight leaking prefixes | `no-crash-check`, and the assertion that it measured something |
 | `cosmofs-crash-orphan` | the workload unlinks a file that is still open and crashes; the replayed image has an inode with `nlink == 0` and blocks; the checker finds it, repair reclaims it, and the free count returns to what it was before the file existed | none needed: this is the defect, and the test is its proof. The bug-proof is the *repair* -- disable it and the space stays gone |
+| *as built* | `cosmofs-check-orphan-crash`, with the checker's tests rather than the crash suite's | `repair-keeps-ino` |
+| *added after review* | `cosmofs-check-many-orphans` (twelve orphans, eight named, all twelve repaired in one pass) and `cosmofs-check-slot-identity` (a slot whose number is not its position) | `repair-first-eight`, `slot-number-trusted` |
 
 There are **ten** finding classes: the eight structural ones above plus
-`chain_cycle` and `unreadable`. The migration plan's step 3 builds them
-all; "As built" below records which of them ended up with a test that
-manufactures the fault and which did not.
+`chain_cycle` and `unreadable`. The plan gave each of them a test that
+manufactures it. **Eight of the ten ended up with one.** `chain_cycle`
+did not, because a cycle needs a corruption hook that writes structure
+rather than flipping a field. `dir_bad` is reported from six places and
+two of them are fired: a type that disagrees with its inode, and a slot
+whose number is not its position. The four that are not: a block pointer
+outside the pool's range, a snapshot member table whose count does not
+fit its block, an over-long `namelen`, and a directory reached from two
+parents. Both gaps are rows in
+`docs/audit/2026-09-deferred-work-inventory.md`, and the same split is
+stated in `architecture.md`'s interfaces table and above the corruption
+enum in `kernel/include/kernel/cosmofs.h`.
 
 **Vacuity, named in advance.** `cosmofs-check-clean` asserts the
 arithmetic (`seen + free == total`), not merely "no findings": a checker
