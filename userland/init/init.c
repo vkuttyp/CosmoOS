@@ -3433,9 +3433,32 @@ static void fsctl_selftest(void)
         snprintf(id, sizeof(id), "%llu", checkable);
         CHECK(fsctl_run("check", id, NULL) == 0);        /* clean, and says so */
         CHECK(fsctl_run("scrub", id, NULL) == 0);
-        CHECK(fsctl_run("check", id, "--repair") == 0);  /* nothing to do, and no refusal */
+        CHECK(fsctl_run("check", id, "--repair") == 0);
+
+        /*
+         * And it is clean afterwards. The tool's exit status cannot say
+         * so -- a check that finds something still exits 0, which is the
+         * whole point -- so this reads the flags back through the device
+         * rather than adding another process to a shared budget.
+         *
+         * This is the assertion that makes the repair mean something:
+         * the boot's own scratch disk arrives here with blocks its last
+         * clean unmount stranded, and leaves clean.
+         */
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.version = COSMO_FSCTL_VERSION;
+        cmd.op = COSMO_FSCTL_CHECK;
+        cmd.mount_id = checkable;
+        CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
+        struct cosmo_fsctl_check res;
+        static char rbuf[sizeof(struct cosmo_fsctl_result) + sizeof(struct cosmo_fsctl_check)];
+        CHECK(read(fd, rbuf, sizeof(rbuf)) == (long)sizeof(rbuf));
+        memcpy(&res, rbuf + sizeof(struct cosmo_fsctl_result), sizeof(res));
+        CHECK((res.flags & COSMO_FSCTL_R_CLEAN) != 0);
+        CHECK((res.flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
+
         CHECK(cosmo_umount("/mnt") == 0);
-        puts("usertest: fsctl checked a real filesystem");
+        puts("usertest: fsctl found what a clean unmount stranded, repaired it, and the filesystem is clean");
     }
 
     close(fd);
