@@ -2250,6 +2250,25 @@ bool selftest_cosmofs_freelog_format(const char **reason)
      * not have, and nothing was written into one. */
     CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
     CHECK(read_matches(ENG "/eight", "older", 5));
+    struct cosmofs_stats st8;
+    CHECK(cosmofs_stats(mount_of(ENG), &st8) == 0);
+    CHECK(st8.version == 8 && st8.free_root == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /*
+     * The gate itself. Every image this tree formats zeroes its reserved
+     * words, so a version-8 filesystem's `free_root` word is 0 whether
+     * the gate is there or not -- which makes the gate untestable
+     * against anything the tree writes. This puts a value in it, as a
+     * later version or another writer would, and the gate is what keeps
+     * it from being read as the head of a chain.
+     */
+    CHECK(cosmofs_test_poison_free_root(bd, 0x5a5a5a5aull) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st8) == 0);
+    CHECK(st8.version == 8);
+    CHECK(st8.free_root == 0);        /* not 0x5a5a5a5a: below version 9 the word is not a root */
+    CHECK(read_matches(ENG "/eight", "older", 5));
     CHECK(vfs_umount(ENG) == 0);
 
     /* A version-9 filesystem carries the field, and an idle one has

@@ -131,6 +131,12 @@ void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
 /* Test hook: format at an older on-disk version, to check that this
  * kernel still mounts and writes what an older one wrote. */
 int cosmofs_test_format_version(struct blkdev *bd, unsigned version);
+/* Test hook: put a value in the superblock word version 9 calls
+ * `free_root`, on a filesystem too old to have one. Every image this
+ * tree formats zeroes its reserved words, so the gate that ignores that
+ * word below version 9 cannot be tested without manufacturing an image
+ * that does not (docs/audit/next-subsystem-unmount-leak.md). */
+int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value);
 /*
  * Test hook: break the filesystem in one named way, so that a finding
  * of the structural check is one a test produced on purpose. Eight of

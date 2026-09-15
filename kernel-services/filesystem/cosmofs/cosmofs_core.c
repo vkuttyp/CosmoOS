@@ -1080,6 +1080,43 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
 }
 
 /*
+ * Test hook: write a value into the superblock word that version 9 calls
+ * `free_root`, on a filesystem too old to have one.
+ *
+ * Every image this tree formats zeroes its reserved words, so the gate
+ * that stops an older filesystem's reserved zero being read as a chain
+ * head is unobservable without this: the bug-proof for that gate passes
+ * on a zero either way. An image from another writer -- a later version
+ * that used the word, a different implementation -- is what the gate is
+ * actually for, and this manufactures one.
+ */
+int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value)
+{
+    struct spool *pool = NULL;
+    int rc = pool_open(bd, &pool);
+    if (rc)
+        return rc;
+    uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
+    if (block == NULL) {
+        pool_close(pool);
+        return -ENOMEM;
+    }
+    rc = pool_read(pool, 0, block);
+    if (rc == 0) {
+        struct cfs_super *sb = (struct cfs_super *)block;
+        sb->free_root = value;
+        sb->crc = 0;
+        sb->crc = block_crc(block, offsetof(struct cfs_super, crc));
+        rc = pool_write(pool, 0, block);
+        if (rc == 0)
+            rc = pool_flush(pool);
+    }
+    kfree(block);
+    pool_close(pool);
+    return rc;
+}
+
+/*
  * Break the filesystem in one named way (kernel/include/kernel/cosmofs.h).
  * Each case manufactures exactly one finding of the structural check, so
  * that every class it can report has a test that produced it on purpose.
