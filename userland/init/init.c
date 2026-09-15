@@ -3498,7 +3498,6 @@ static void fsctl_selftest(void)
         memcpy(&res, rbuf + sizeof(struct cosmo_fsctl_result), sizeof(res));
         CHECK((res.flags & COSMO_FSCTL_R_CLEAN) != 0);
         CHECK(res.class[0].count == 0);     /* 0 is alloc_not_seen: nothing stranded */
-        unsigned long long stranded = 0;
 
         /* Repaired, through the tool, by an operator naming the mount. */
         snprintf(id, sizeof(id), "%llu", again);
@@ -3513,7 +3512,6 @@ static void fsctl_selftest(void)
         CHECK((res.flags & COSMO_FSCTL_R_REPAIR_REFUSED) == 0);
 
         CHECK(cosmo_umount("/mnt") == 0);
-        (void)stranded;
         printf("usertest: fsctl: a file written, deleted and unmounted strands nothing -- the filesystem is clean on remount\n");
     }
 

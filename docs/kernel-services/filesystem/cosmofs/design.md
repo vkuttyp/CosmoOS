@@ -80,7 +80,8 @@ struct cfs_super {
     uint64_t total_blocks, generation, imap_root, alloc_root, next_ino, inode_count, free_blocks;
     uint64_t csum_root, snap_root;   /* reserved: data checksums, snapshot roots */
     uint64_t members = 1;            /* pool members */
-    uint64_t reserved[8]; uint32_t crc; uint32_t pad;
+    uint64_t free_root;              /* v9: head of the free record, or 0 */
+    uint64_t reserved[7]; uint32_t crc; uint32_t pad;
 };
 ```
 
@@ -159,20 +160,52 @@ written through.
 
 1. If nothing is dirty and nothing is pending, return (the generation
    does not advance; unmounting an untouched filesystem writes nothing).
-2. **Bitmap.** CoW the allocation index. Reserve a destination block
+2. **The free record, reserved** (version ≥ 9 only). Walk the chain the
+   current root names and defer every block of it: it is the *old*
+   root's statement and this root replaces it, so a commit that kept it
+   would leak its predecessor's record. Then allocate — without filling
+   — the blocks the new record will need, bounded by what is pending
+   now plus what step 3 can add (one block per chunk it may rewrite,
+   one index per member).
+3. **Bitmap.** CoW the allocation index. Reserve a destination block
    for every dirty chunk; reserving sets bits and may dirty more
    chunks, so iterate until no dirty chunk lacks a reservation. Then
    write each dirty chunk from the in-memory bitmap into its reserved
    block, point the index at it, defer the old bitmap block, clear the
    chunk's dirty flag. Re-seal the index.
-3. Re-seal and write every dirty buffer; `pool_flush`.
-4. Write the superblock (generation = `gen`, `free_blocks` = the
+4. **The free record, filled.** Write `pending_free` into the reserved
+   blocks, `CFS_DEAD_PER_BLOCK` numbers to a block, chained by `next`,
+   skipping a block whose bit is already clear and one
+   `cfs_snapshot_holds` says a snapshot still needs. Blocks the bound
+   over-reserved are listed in the record as free, so the bound does
+   not have to be tight. `sb.free_root` is the head.
+5. Re-seal and write every dirty buffer; `pool_flush`.
+6. Write the superblock (generation = `gen`, `free_blocks` = the
    in-memory count, which still excludes the pending frees) into the
    slot the current root did **not** come from; `pool_flush`. From here
    the new root is durable.
-5. Mark buffers clean, clear the pending blocks' bits (marking their
+7. Mark buffers clean, clear the pending blocks' bits (marking their
    chunks dirty for the next commit), add them to `free_blocks`,
    `gen++`.
+
+**Why reserve before the fixpoint and fill after it.** Everything that
+allocates must happen before step 3, which is the one pass that makes
+the on-disk bitmap agree with the bits in memory: a block allocated
+after it is not in the bitmap the root publishes, so the next allocation
+hands it out and the filesystem overwrites its own metadata. But the set
+to record is not final until step 3 has run, because the fixpoint frees
+every chunk and index it copies. Reserving before and filling after
+breaks the circle without a second pass.
+
+**Why the record exists at all.** Step 7 is after the root, and the
+bitmap chunks it dirties are for a next commit that an unmount never
+makes. Committing twice at unmount does not converge — writing the
+bitmap frees the bitmap — so the blocks are carried across in a
+structure the root itself names. `load_bitmap` replays the record at
+mount (`freelog_replay`, before the bitmap is trusted for allocation),
+and the replay does not clear it: the record is retired by the next
+commit's step 2, so a mount that replays and goes away without
+committing leaves the filesystem exactly as it found it.
 
 Commit is triggered by `vfs_sync` (`cosmofs_sync`: first
 `cfs_sync_vnodes` writes back every dirty regular file **without**
@@ -183,15 +216,23 @@ There is no size or time threshold.
 
 ### Crash cases
 
-- Before step 4's superblock write: the previous root is intact. Every
+- Before step 6's superblock write: the previous root is intact. Every
   block written by the transaction was free in it (V3/V4), including
-  the new bitmap blocks and the new index.
+  the new bitmap blocks, the new index and the new record — and the
+  root still names the *previous* record, whose blocks step 2 deferred
+  rather than reused.
 - During the superblock write (torn): its CRC fails; mount takes the
   other slot, the previous root.
-- After step 4: the new root is complete. `pending_free` blocks are
-  still marked allocated in the new root's bitmap and are reclaimed by
-  the next commit; a crash loses nothing but that reclamation, and the
-  count is reconciled at mount from the bitmap.
+- After step 6: the new root is complete. `pending_free` blocks are
+  still marked allocated in the new root's bitmap, and the record the
+  root names is how they are reclaimed — by the next commit if there is
+  one, by the next mount's replay if there is not. On a version-8
+  filesystem there is no record and they are reclaimed by the next
+  commit only; the count is reconciled at mount from the bitmap.
+- A torn record: it is written before the flush that precedes the root,
+  so a torn block is one the new root names and whose `cfs_mhdr` does
+  not check out. The mount refuses with `-EIO` rather than mounting an
+  allocator it cannot trust; `fsctl check` is what an operator has.
 
 ## Locking
 
@@ -247,12 +288,36 @@ number is no longer this call's to give back, and nothing fallible
 follows: the operation reports success and hands the caller no vnode,
 because failing after the name exists would make a retry meet `EEXIST`.
 
-**The gate is on creation, not on mount.** `CFS_VERSION` is 8 and
-`CFS_VERSION_MIN` stays 2, so every existing image mounts; `cfs_symlink`
+**The gate is on creation, not on mount.** `CFS_VERSION_MIN` stays 2,
+so every existing image mounts; `cfs_symlink`
 returns `-EOPNOTSUPP` on a filesystem whose superblock is older than 8,
 because a kernel of that vintage reads an unknown type nibble as a
 regular file -- it would show a link as a file whose contents are a
 path, which is a wrong answer rather than a refusal.
+
+## Format version 9: a record of what a transaction freed
+
+`free_root` takes one of the superblock's reserved words and names a
+chain of `CFS_KIND_FREELOG` (13) blocks, each a `struct cfs_dead_block`
+— the deadlist's shape, reused rather than twinned — holding up to
+`CFS_DEAD_PER_BLOCK` block numbers and a `next`. It says: *this root
+freed these blocks, and its bitmap has not been told.* The commit's
+steps 2 and 4 write it, `freelog_replay` applies it at mount, and the
+next commit retires it. The reasoning is in **Commit** above and in
+`docs/audit/next-subsystem-unmount-leak.md`.
+
+**The gate is on reading, not only on writing.** Below version 9 the
+word is `reserved[5]` and holds a zero that was never a chain head, so
+`freelog_replay` returns immediately and a version-8 image mounts,
+works, and reclaims its deferred frees the way it always did — at the
+next commit. The write is gated too: putting a chain head in a reserved
+word of an older superblock would leave a record this kernel would not
+read back either, which is a leak nobody can see.
+
+**A record is not a journal.** It carries block numbers, not operations,
+and it is true only because the root that names it is durable. Recovery
+is still "choose the newer valid superblock slot"; the record adds one
+thing that root can say about itself.
 
 ## Future extensibility
 

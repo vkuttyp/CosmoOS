@@ -207,6 +207,7 @@ bool selftest_cosmofs_v3(const char **reason);
 bool selftest_cosmofs_freelog_format(const char **reason);
 bool selftest_cosmofs_freelog_accounted(const char **reason);
 bool selftest_cosmofs_freelog_supersede(const char **reason);
+bool selftest_cosmofs_freelog_not_held(const char **reason);
 bool selftest_cosmofs_unmount_leak(const char **reason);
 bool selftest_cosmofs_freelog_snapshot(const char **reason);
 bool selftest_cosmofs_freelog_idempotent(const char **reason);

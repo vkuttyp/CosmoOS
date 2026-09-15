@@ -22,12 +22,23 @@ reading:
    names cannot be freed before the new root lands, so the ordering is
    correct and the stranded space is its price. Measured: 162 of 199
    replayed prefixes leaked, the worst 18 blocks, 1912 in all.
-2. **The crash suite cannot assert "clean".** Following from 1, the
-   assertion is *no finding a crash cannot explain*: every class empty
-   except leaked blocks, whose count is recorded and whose reclaim is
-   proved on the first eight leaking prefixes -- bounded because a
-   repair costs two more full passes and the suite exceeded its
-   8-second budget at 199 of them.
+
+   **Closed by the unmount-leak unit (PR #TBD).** "The ordering is
+   correct and the stranded space is its price" was half right: the
+   ordering is correct and the price was avoidable. Format version 9
+   gives the root a record of what it freed, written before the root and
+   replayed at mount, so the ordering is unchanged and the space comes
+   back. The measurement above is what this unit found; the number after
+   it is zero.
+2. **The crash suite cannot assert "clean"** -- *at the time this was
+   written*. Following from 1, the assertion was *no finding a crash
+   cannot explain*: every class empty except leaked blocks, whose count
+   was recorded and whose reclaim was proved on the first eight leaking
+   prefixes -- bounded because a repair costs two more full passes and
+   the suite exceeded its 8-second budget at 199 of them. **The
+   unmount-leak unit restored the stronger assertion**: every replayed
+   prefix is clean, the per-prefix leak total is asserted to be zero,
+   and the weakened form is gone rather than left beside the strong one.
 3. **A directory's link count has three parts**, and the first version
    counted two: the entry in its parent, its own self-reference, and one
    per subdirectory. cosmofs stores none of them as on-disk entries, so
@@ -656,7 +667,7 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached, **and repair refused** (35 ms) |
 | `cosmofs-check-many-orphans` | twelve orphans, eight named, all twelve repaired in one pass and none left (21 ms) |
 | `cosmofs-check-slot-identity` | a slot whose number is not its position is named by position, marks the answer incomplete, and repair refuses (16 ms) |
-| `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
+| `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs. **Superseded by the unmount-leak unit (PR #TBD)**: the suite now asserts every prefix is clean and the total stranded is zero |
 
 The four leak numbers are **identical on x86-64 and AArch64**, which is
 the evidence that they describe the filesystem and not the host: the

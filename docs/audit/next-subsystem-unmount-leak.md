@@ -6,12 +6,12 @@ interface). Chosen from `docs/audit/2026-09-deferred-work-inventory.md`
 
 **Subsystem: a record of what a transaction freed, published with the
 root that freed it, so that the blocks reach the allocator whether or
-not another commit ever happens.** Nothing in this report is built; the
-migration plan is the plan, and the "as run" and "as built" sections are
-filled by the implementation pull request. This report is to close the
-inventory's §3 row that begins "No on-disk orphan list, and no record of
-a deferred free", in its second clause, and the row the fsctl unit added
-beside it.
+not another commit ever happens.**
+**Built: PR #TBD.** The design below is as proposed except where an
+inset says the build changed it; "As built" and "As run" record what it
+changed and measured. This report closes the inventory's §3 row that
+begins "No on-disk orphan list, and no record of a deferred free", in
+its second clause, and the row the fsctl unit added beside it.
 
 Two units in a row found this and neither fixed it. The fsck unit
 measured it across crashes: 162 of 199 replayed prefixes stranded
@@ -196,6 +196,28 @@ Allocate-before and fill-after resolves the circle:
    `pending_free` now, so the deadlist appends it makes are inside the
    transaction rather than after the root. What survives is what this
    transaction actually frees.
+
+   > **As built, this step is wrong and was not taken.** Moving the
+   > filter ahead of the fixpoint moves it ahead of the fixpoint's *own*
+   > frees -- the old member table, the old allocation index, the old
+   > bitmap chunks, which is exactly the set a snapshot names -- so
+   > those reach phase 7 with nothing left to filter them and a
+   > snapshot loses its member table. The build's first run of
+   > `cosmofs-check-snapshot` under this order produced a dangling
+   > member-table pointer and an unreadable block.
+   >
+   > The filter stays in phase 7, where it always was. What the record
+   > needed was not the filter moved but the *question* asked twice, and
+   > `cfs_snapshot_holds` is that question extracted from
+   > `cfs_snapshot_hold_block`: the same walk, without the deadlist
+   > append. The record and phase 7 therefore reach one verdict from one
+   > piece of code, which is the property this step was after.
+   >
+   > The cost is that the deadlist append is still after the root, so an
+   > unmount that frees a block a snapshot holds still strands a couple
+   > of blocks. That is this report's defect surviving one level down, it
+   > is an inventory row, and `cosmofs-freelog-snapshot` asserts a bound
+   > on it rather than pretending it is clean.
 3. **Reserve the record's blocks** -- allocate them, do not fill them.
    The count is an upper bound, computable here: what `pending_free`
    holds now, plus what the fixpoint can add, which is one block per
@@ -232,6 +254,11 @@ Step 2 also moves the snapshot filter earlier, which the report counts
 as a fix rather than a side effect: appending to a deadlist is a change
 to the filesystem, and doing it after the root write means a crash can
 lose the entry for a block the root already treats as held.
+
+> **Not built, for the reason the inset on step 2 gives.** The defect
+> named in this paragraph is real and is still there; fixing it needs
+> the deadlist's capacity reserved before the fixpoint and filled after
+> it, the same treatment the record got, and that is its own unit.
 
 ### Where it is applied
 
