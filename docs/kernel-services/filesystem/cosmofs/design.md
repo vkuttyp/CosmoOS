@@ -790,9 +790,12 @@ this wrong would condemn every snapshotted filesystem, which is why
 
 Both maps are chunked into pages with a pointer array, because
 `KMALLOC_MAX_SIZE` (4 MiB) would otherwise cap the checker at a 128 GiB
-filesystem and fail deterministically above it. Everything is allocated
-before the walk starts, so a filesystem too large for the memory
-available is `-ENOMEM` rather than a half-finished answer.
+filesystem and fail deterministically above it. The chunking does not
+remove the ceiling, it moves it: the pointer array is itself one
+allocation, so 4 MiB of pointers to pages of bits reach about 64 TiB.
+Everything is allocated before the walk starts, so a filesystem too
+large for the memory available is `-ENOMEM` rather than a half-finished
+answer.
 
 **Ten classes, four repairs.** Leaked blocks, orphans, wrong link counts
 and wrong superblock totals each have one right answer and are repaired

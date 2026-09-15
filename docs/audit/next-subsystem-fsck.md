@@ -332,9 +332,14 @@ userland) is named as the next unit and gets an inventory row.
 
 ### The §70 gate
 
-*Ownership and lifetime.* The two bitmaps and the link-count array are
-the pass's own, allocated at entry and freed at exit; nothing outlives
-the call. The pass takes `fs->lock` for its duration, as the scrub does,
+*Ownership and lifetime.* The maps are the pass's own, allocated at
+entry and freed at exit; nothing outlives the call. As built there are
+six rather than three: `seen` and `live` over block numbers, `reach` and
+`alive` over inode numbers, and two counts per inode -- the links the
+entries make, and the links the inodes claim. `alive` and the second
+count are what difference 6 above forced, because an inode with no links
+is invisible to the ordinary reader and is exactly what the pass looks
+for. The pass takes `fs->lock` for its duration, as the scrub does,
 so no mutation interleaves with the walk and the answer describes one
 moment.
 
@@ -343,8 +348,10 @@ the scrub already does, and it is the reason the pass is a diagnostic
 rather than something a file server runs hourly. The report says how
 long it took so a reader can see what it costs.
 
-*Memory.* Two bits per block and one 32-bit count per inode:
-`total_blocks / 4` bytes plus `inode_count * 4`. That is bytes for the
+*Memory.* Two bits per block and one 32-bit count per inode as
+designed; as built, four bits per block-or-inode number and two counts,
+which is the same order and twice the constant: `total_blocks / 4` bytes
+plus `inode_count * 4`. That is bytes for the
 test disks (512 and 16384 blocks) and 64 MiB for a 1 TiB filesystem,
 which is well past what `kmalloc` will hand out -- `KMALLOC_MAX_SIZE` is
 4 MiB (`kernel/include/kernel/kmalloc.h:23`, PMM order 10), so a single
@@ -368,8 +375,9 @@ useful thing at exactly the moment it is needed. The scrub is the tool
 for unreadable blocks and the report says so.
 
 *Security.* Nothing in this unit is reachable from userland: the pass is
-called by the self-tests and the crash suite, and repair by the tests
-alone. No syscall, no procfs node, no ioctl, so the unit adds no
+called by the self-tests and the crash suite, and both of those also
+call repair, on filesystems they made themselves. The whole file is
+under `CONFIG_DEBUG`, so a release build contains neither. No syscall, no procfs node, no ioctl, so the unit adds no
 privilege surface. When the operator interface arrives it will have to
 decide who may read block and inode numbers of a mounted filesystem and
 who, if anyone, may repair one; this report deliberately does not.
@@ -585,7 +593,11 @@ instead of deleting the call.
   alive, links, link counts), reported in `bytes_allocated`: 24 KiB for
   the test disks. The `kmalloc` ceiling of 4 MiB is what forced the
   chunking; a single allocation would have capped the checker at a
-  128 GiB filesystem.
+  128 GiB filesystem. Chunking moves that ceiling rather than removing
+  it -- the array of chunk pointers is one allocation, so 4 MiB of
+  pointers reach about 64 TiB -- which is far enough that the next
+  limit met is the time a whole-filesystem walk holds the mount's lock,
+  not the memory it asks for.
 
 ## Risks
 
