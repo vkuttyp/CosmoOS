@@ -138,9 +138,33 @@ being wrong.
 
 `cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out,
 unsigned flags)` runs under `fs->lock`, as the scrub does, on a mounted
-filesystem. It builds two bitmaps of `total_blocks` bits each — *seen*
-(a block some structure claims) and *dup* (a block claimed twice) — and
-one array of counted link counts, and then walks:
+filesystem. It builds two bitmaps of `total_blocks` bits and one array
+of counted link counts, and then walks.
+
+**Sharing is the normal case, and the maps have to say so.** A snapshot
+holds the live tree's blocks on purpose: a copy-on-write root, every
+unchanged inode block, every unmodified extent. A map that called the
+second visit a duplicate would report a cross-link for every block a
+snapshot preserves, which is most of them. So the two maps are not
+"seen" and "seen twice" but:
+
+- ***seen***: any structure anywhere -- live tree, any snapshot, any
+  bitmap or index or deadlist -- claims this block. This is the map the
+  allocation bitmap is compared against, and it is a union: a shared
+  block is marked once and marked again harmlessly.
+- ***live***: the **live tree** claims this block as file or directory
+  content. Only this map detects duplication, and only within itself: a
+  block claimed twice by the live tree is two files sharing one extent,
+  which is the corruption. A block in *live* that a snapshot also holds
+  is not in question at all.
+
+Each structure is visited once: the deadlist chains are walked in the
+snapshot step alone (the fixed-structure step walks the snapshot *list*,
+not the lists hanging off it), and a block reached twice through the
+same chain is a cycle, reported as `dir_bad`'s metadata sibling
+(`chain_cycle`) rather than silently followed.
+
+The walk:
 
 1. **The fixed structures**: both superblock slots, the member table,
    the inode map's three levels, the allocation index and its chunks,
@@ -172,12 +196,14 @@ Then it compares:
 | --- | --- |
 | `alloc_not_seen` | the bitmap says allocated, nothing reaches it — a leak |
 | `seen_not_alloc` | something reaches it, the bitmap says free — the dangerous one: the allocator may hand it out |
-| `dup` | two structures claim the same block — a cross-link |
+| `dup` | two **live-tree** inodes claim the same block — a cross-link (a block shared with a snapshot is not this) |
 | `nlink_wrong` | an inode's `nlink` differs from the entries that name it |
 | `orphan` | an inode allocated and unreachable (`nlink == 0` with blocks, or `nlink != 0` with no name) |
 | `dangling_entry` | an entry naming a free or out-of-range inode slot |
 | `dir_bad` | a malformed entry, a repeated name, a type that disagrees with its inode |
 | `counter_wrong` | `free_blocks`, `inode_count` or `next_ino` disagreeing with the walk |
+| `chain_cycle` | a metadata chain (extent, deadlist, snapshot list) that revisits a block |
+| `unreadable` | a metadata block that could not be read: the answer is partial |
 
 The report carries a count per class and the first `CFS_CHECK_NAMES`
 (8) offenders of each with enough to find them (an inode number, a
@@ -209,10 +235,13 @@ It refuses the rest, and the refusals are the interesting half:
   destroys the only name a file has; that is a decision for whoever
   reads the report.
 
-Every repair happens in one transaction and the pass re-runs afterwards:
-a repair that does not produce a clean second pass is a bug in the
-repair, and the report says so rather than the caller discovering it
-later.
+Every repair happens in one transaction and the pass re-runs afterwards.
+What the second pass must show is **the repaired classes empty and the
+refused ones unchanged** -- not `clean`, which a filesystem carrying a
+cross-link can never be, and demanding it would report a correct partial
+repair as a repair bug. The report therefore carries `repaired` and
+`remaining` per class, and the rule is: every class the repair claims,
+zero; every other class, the count it had before.
 
 ### Where it is called from
 
@@ -222,17 +251,31 @@ Three callers, and no new system call:
    `cosmofs_check` in `kernel/include/kernel/cosmofs.h`.
 2. **The crash suite**, in `check_prefix` after the mount succeeds
    (`cosmofscrash.c:273`) and before the unmount (`:308`): every
-   replayed prefix must be structurally sound. This is the unit's
-   sharpest test in both directions -- it asserts the filesystem's
-   crash behaviour and it asserts the checker does not cry wolf on an
-   image that is merely mid-history.
-3. **`/proc`**, which already exists and already carries facts about the
-   running system: a read-only `/proc/fs/cosmofs/<mount>/check` that
-   runs a pass and renders the report. No new ABI, no new privilege
-   surface beyond what procfs has, and an operator can run it with
-   `cat`. Repair stays out of `/proc`: a read that mutates a filesystem
-   is the wrong shape, and until there is a maintenance call, repair is
-   the self-tests' and the crash suite's.
+   replayed prefix of the *existing* workload must be structurally
+   sound, with no finding of any class. This is the unit's sharpest
+   test in both directions -- it asserts the filesystem's crash
+   behaviour and it asserts the checker does not cry wolf on an image
+   that is merely mid-history.
+
+   The unlinked-but-open workload is deliberately **not** added to that
+   suite, because a prefix taken after its unlink *must* show an orphan
+   and the generic assertion would then have to be weakened for every
+   prefix of every workload. It gets its own test
+   (`cosmofs-crash-orphan`), which asserts the opposite: that the orphan
+   is there, that it is the only finding, and that repair reclaims
+   exactly the blocks the file held.
+There is deliberately no third caller, and the reason is worth stating
+rather than discovering in the implementation. An operator interface
+needs a *name for a mount*, and this tree has none: procfs is a
+per-process hierarchy (`procfs.c:183-248`) with no mounts directory and
+no stable mount identity, mount points are not unique across mount
+namespaces, and a file held open across an unmount would need the
+procfs node to pin the target mount -- a reference rule procfs does not
+have today. Inventing all three inside a checker unit would be three
+designs in a trench coat. The pass is therefore kernel-facing in this
+unit; the operator interface (a mount identity, a procfs node that holds
+a reference to its target, and whether repair is ever reachable from
+userland) is named as the next unit and gets an inventory row.
 
 ### The §70 gate
 
@@ -247,13 +290,22 @@ the scrub already does, and it is the reason the pass is a diagnostic
 rather than something a file server runs hourly. The report says how
 long it took so a reader can see what it costs.
 
-*Memory.* Two bits and one 32-bit count per block and per inode:
-`total_blocks / 4` bytes plus `inode_count * 4`. For the test disks
-(512 and 16384 blocks) that is bytes; for a 1 TiB filesystem it is
-64 MiB, which the pass does not pretend it can always have -- it
-allocates up front and returns `-ENOMEM` rather than starting a walk it
-cannot finish. A checker that streams instead of holding a bitmap is a
-different design and is named in Alternatives.
+*Memory.* Two bits per block and one 32-bit count per inode:
+`total_blocks / 4` bytes plus `inode_count * 4`. That is bytes for the
+test disks (512 and 16384 blocks) and 64 MiB for a 1 TiB filesystem,
+which is well past what `kmalloc` will hand out -- `KMALLOC_MAX_SIZE` is
+4 MiB (`kernel/include/kernel/kmalloc.h:23`, PMM order 10), so a single
+allocation caps the checker at a 128 GiB filesystem and would fail
+*deterministically* above it rather than under pressure.
+
+The maps are therefore **chunked**: an array of page pointers, one
+4 KiB page per 32768 blocks, each page from `pmm_alloc_page`, with an
+accessor that indexes page then bit. The pointer array itself is one
+`kmalloc` of `total_blocks / 32768 * 8` bytes -- 256 KiB for that 1 TiB
+filesystem, comfortably inside the slab path. The link-count array is
+chunked the same way. Every chunk is allocated up front, so the pass
+returns `-ENOMEM` before it starts rather than half way through a walk,
+and the report says how much it took.
 
 *Error handling.* An unreadable metadata block is a finding
 (`unreadable`), not an abort: the pass records it, marks every block it
@@ -288,9 +340,8 @@ all consume or produce the same findings.
 | `kernel/include/kernel/cosmofs.h` | `struct cosmofs_check_report`, `cosmofs_check`, the flags |
 | `kernel-services/filesystem/cosmofs/cosmofscrash.c` | the check in `check_prefix`, and the unlinked-but-open workload |
 | `kernel-services/filesystem/cosmofs/cosmofstest.c` | the seven fault tests and the clean test |
-| `kernel-services/filesystem/procfs/*.c` | `/proc/fs/cosmofs/<mount>/check` |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | registration |
-| docs | `docs/kernel-services/filesystem/cosmofs/{design,architecture,testing,invariants}.md`, `docs/kernel-services/filesystem/procfs/design.md`, README Status, `docs/README.md`, the inventory |
+| docs | `docs/kernel-services/filesystem/cosmofs/{design,architecture,testing,invariants}.md`, README Status, `docs/README.md`, the inventory (the struck row, plus new rows for the operator interface and the orphan list) |
 
 ## New APIs
 
@@ -301,15 +352,18 @@ all consume or produce the same findings.
 
 struct cosmofs_check_class {
     uint64_t count;
+    uint64_t repaired;                     /* with COSMOFS_CHECK_REPAIR */
     uint64_t name[CFS_CHECK_NAMES];        /* block or inode, per class */
     unsigned named;
 };
 
 struct cosmofs_check_report {
+    /* Ten classes, in the order the design's table names them. */
     struct cosmofs_check_class alloc_not_seen, seen_not_alloc, dup, nlink_wrong,
-                               orphan, dangling_entry, dir_bad, counter_wrong, unreadable;
+                               orphan, dangling_entry, dir_bad, counter_wrong,
+                               chain_cycle, unreadable;
     uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
-    uint64_t repaired;        /* findings fixed, with COSMOFS_CHECK_REPAIR */
+    uint64_t bytes_allocated; /* the chunked maps, so the cost is visible */
     bool partial;             /* something was unreadable: the answer is incomplete */
     bool clean;               /* every class empty */
     uint64_t elapsed_ns;
@@ -331,17 +385,18 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
    frees a block the snapshot holds. Without this step the checker
    reports a leak for every snapshot, which is the loudest possible
    false positive.
-3. **The findings.** The eight classes, each with a test that
-   manufactures exactly that fault through a test hook and asserts the
-   class fires, the count is one, and the offender is named.
-4. **The crash suite.** `cosmofs_check` in `check_prefix`, and the
-   workload gains an unlinked-but-open file so the orphan class is
-   exercised by a real crash rather than a manufactured one. This step
-   is where the unit's own bug -- the permanent leak -- becomes a test.
+3. **The findings.** All ten classes, each with a test that manufactures
+   exactly that fault through a test hook and asserts the class fires,
+   the count is what the fault made it, and the offender is named.
+4. **The crash suite.** `cosmofs_check` in `check_prefix`, asserting no
+   finding of any class over every prefix of the existing workload; and
+   `cosmofs-crash-orphan`, a separate workload that unlinks a file while
+   it is open and crashes, asserting the orphan is found, is the only
+   finding, and is reclaimed by repair. This step is where the unit's
+   own bug -- the permanent leak -- becomes a test.
 5. **Repair.** The four repairable classes, the refusals, and the
    re-run that proves a repair produced a clean filesystem.
-6. **`/proc`.** The read-only file and its format.
-7. **Docs, README Status, inventory, the report's as-built sections.**
+6. **Docs, README Status, inventory, the report's as-built sections.**
 
 Each step boots both architectures; steps 4 and 5 also run the release
 build; step 5 runs `make test-crash`.
@@ -356,10 +411,17 @@ build; step 5 runs `make test-crash`.
 | `cosmofs-check-nlink` | an inode whose `nlink` is one too high is reported with its number; repair sets it to the counted value and re-checks clean | count entries without counting a directory's own `..`: every directory reports a wrong `nlink` and the test fails on the count |
 | `cosmofs-check-orphan` | an inode with `nlink == 0` and allocated blocks is reported; repair frees the blocks and zeroes the inode; the free count rises by exactly the blocks it held | skip inodes with `nlink == 0`, as the scrub does: nothing fires |
 | `cosmofs-check-dangling` | a directory entry naming a free inode slot is reported with the parent and the name; repair refuses | validate only the entry's shape: nothing fires |
+| `cosmofs-check-free-in-use` | a block an inode's extent names, with its bit cleared in the bitmap, gives `seen_not_alloc.count == 1` naming it; repair refuses and says why | compare only in one direction (allocated-not-seen): nothing fires |
+| `cosmofs-check-dirbad` | an entry with a `namelen` past the record, a `type` that disagrees with its inode's mode nibble, and a name repeated in one directory each give `dir_bad`, named by parent and offset | check the entry's inode but not its shape: two of the three do not fire |
+| `cosmofs-check-counters` | a superblock whose `free_blocks` is one too high and whose `inode_count` is one too low gives `counter_wrong.count == 2`; repair writes the counted values and the second pass shows that class empty | take the counters as the truth rather than the walk: nothing fires |
 | `cosmofs-check-snapshot` | a filesystem with a snapshot holding blocks the live tree has freed is **clean**; deleting the snapshot and re-checking is still clean | omit the snapshot walk: every held block is reported as a leak, which is the false positive this test exists for |
 | `cosmofs-check-partial` | with a metadata block made unreadable, `unreadable.count == 1`, `partial` true, and the pass still finishes and reports every other class | abort at the first unreadable block: the pass returns early and the other classes are empty |
 | `cosmofs-replay` (extended) | every replayed prefix is structurally sound: `cosmofs_check` reports clean after each mount, over every prefix the suite already replays | leave a freed block's bit set in the commit path: some prefix reports a leak |
 | `cosmofs-crash-orphan` | the workload unlinks a file that is still open and crashes; the replayed image has an inode with `nlink == 0` and blocks; the checker finds it, repair reclaims it, and the free count returns to what it was before the file existed | none needed: this is the defect, and the test is its proof. The bug-proof is the *repair* -- disable it and the space stays gone |
+
+There are **ten** finding classes: the eight structural ones above plus
+`chain_cycle` and `unreadable`, and every one of them has a test in this
+table. The migration plan's step 3 builds them all.
 
 **Vacuity, named in advance.** `cosmofs-check-clean` asserts the
 arithmetic (`seen + free == total`), not merely "no findings": a checker
@@ -428,9 +490,11 @@ Measured by the implementation:
 - **Repairing `seen_not_alloc` by setting the bit.** Rejected: the block
   may already be allocated to something else, and the filesystem is
   mounted while the pass runs.
-- **A maintenance system call.** Left out: `/proc` reaches the report
-  with no new ABI, and repair has no userland caller worth designing a
-  call for until an operator tool exists.
+- **An operator interface**, whether a maintenance system call or a
+  procfs node. Left out with its reasons under "Where it is called
+  from": it needs a mount identity, a procfs mounts hierarchy and a
+  reference rule for a file held open across an unmount, none of which
+  exist. The inventory gets a row.
 - **An on-disk orphan list**, which would make most of the `orphan`
   class impossible rather than merely findable. Deliberately left out
   and named: it is a format change (version 9) with its own recovery
