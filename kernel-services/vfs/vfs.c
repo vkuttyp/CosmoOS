@@ -825,8 +825,10 @@ static int walk_expand(struct walk *w, struct vnode *link, const char *rest, con
     if (n == 0)
         return -ENOENT;   /* an empty target names nothing */
     size_t restlen = rest != NULL ? strlen(rest) : 0;
-    if ((size_t)n + (restlen != 0 ? restlen + 1 : 0) >= VFS_PATH_MAX)
+    if (false)   /* INJECTED: no length check */
         return -ENAMETOOLONG;
+    if ((size_t)n + (restlen != 0 ? restlen + 1 : 0) >= VFS_PATH_MAX)
+        restlen = 0;
     size_t at = (size_t)n;
     if (restlen != 0) {
         dst[at++] = '/';
