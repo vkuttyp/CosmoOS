@@ -103,6 +103,10 @@ struct cosmofs_check_report {
     uint64_t bytes_allocated;           /* the chunked maps, so the cost is visible */
     bool partial;                       /* something was unreadable: the answer is incomplete */
     bool clean;                         /* every class empty */
+    /* Repair was asked for and refused: the walk met something it had to
+     * skip, so "nothing reaches this" may mean "this pass did not get
+     * there", and every repair here is an argument from absence. */
+    bool repair_refused;
     uint64_t elapsed_ns;
 };
 
@@ -141,6 +145,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_DANGLING,    /* a directory entry naming a free inode slot */
     COSMOFS_CORRUPT_DIRENT,      /* an entry whose type disagrees with its inode */
     COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
+    COSMOFS_CORRUPT_INO_SLOT,    /* an inode slot whose number is not its position */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;

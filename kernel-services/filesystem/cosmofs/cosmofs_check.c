@@ -320,6 +320,22 @@ static void walk_imap(struct check *ck, uint64_t imap_root, bool live, bool coun
                     (const struct cfs_inode *)(bi->data + CFS_MHDR_SIZE + (size_t)k * CFS_INODE_SIZE);
                 if (in->ino == 0)
                     continue;
+                /*
+                 * A slot's own number must be the number its position in
+                 * the map means (`cfs_inode_block_index`, `cfs_imap_*`).
+                 * One that disagrees, or that sits past the high-water
+                 * mark, is a malformed inode: its blocks are not claimed
+                 * from a structure the pass has just called untrustworthy,
+                 * its accounting would be dropped or merged by maps sized
+                 * on `next_ino`, and the answer is marked incomplete
+                 * rather than acted on.
+                 */
+                uint64_t expect = ((uint64_t)i * CFS_PTRS_PER_BLOCK + j) * CFS_INODES_PER_BLOCK + k;
+                if (in->ino != expect || expect >= ck->fs->sb.next_ino) {
+                    name_it(&ck->rep->dir_bad, expect);
+                    ck->rep->partial = true;
+                    continue;
+                }
                 /* Unlike the scrub, an inode with no links is exactly
                  * what this pass is looking for: its blocks are still
                  * claimed and no name reaches it. */
@@ -544,10 +560,39 @@ static void compare(struct check *ck)
 
 /* --- repair ---------------------------------------------------------------- */
 
+/*
+ * Whether the walk's reachability is worth acting on. Every repair this
+ * pass performs is an argument from absence: a block nothing claimed, an
+ * inode no name reached, a link count no entry supported. If the walk
+ * could not read a block, or met an entry it had to skip, then "nothing
+ * reaches this" may only mean "this pass did not get there" -- and
+ * freeing those blocks destroys a live file.
+ *
+ * `cosmofs-check-partial` is the proof: one unreadable directory block
+ * turns every file named inside it into an orphan whose blocks look
+ * leaked. A `dir_bad` entry does the same without being unreadable,
+ * because the walk skips the entry and the inode it named loses its only
+ * name; so does a `dangling_entry`, which is an entry whose inode number
+ * was overwritten, leaving the inode it used to name unreferenced.
+ *
+ * So repair runs only on an answer the walk is sure of, and says when it
+ * did not.
+ */
+static bool reachability_is_sound(const struct cosmofs_check_report *r)
+{
+    return !r->partial && r->unreadable.count == 0 && r->dir_bad.count == 0 &&
+           r->dangling_entry.count == 0 && r->chain_cycle.count == 0;
+}
+
 static int repair(struct check *ck)
 {
     struct cfs *fs = ck->fs;
     int rc = 0;
+
+    if (!reachability_is_sound(ck->rep)) {
+        ck->rep->repair_refused = true;
+        return 0;   /* not an error: a refusal, and the report says why */
+    }
 
     /* A block nothing reaches: give it back. */
     if (ck->rep->alloc_not_seen.count != 0) {
@@ -560,9 +605,21 @@ static int repair(struct check *ck)
         }
     }
 
-    /* An inode no name reaches: free what it holds and clear the slot. */
-    for (unsigned i = 0; i < ck->rep->orphan.named && rc == 0; i++) {
-        uint64_t ino = ck->rep->orphan.name[i];
+    /*
+     * An inode no name reaches: free what it holds and clear the slot.
+     * Over the maps and not the report's names, which stop at
+     * CFS_CHECK_NAMES: a filesystem with nine orphans must not be left
+     * with one, and the eight names are a diagnosis for a reader, not a
+     * work list.
+     */
+    for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino && rc == 0; ino++) {
+        if (!bitmap_test(&ck->alive, ino))
+            continue;
+        uint32_t named_by = counts_get(&ck->links, ino);
+        if (ino == CFS_ROOT_INO)
+            named_by += 2;
+        if (named_by != 0)
+            continue;
         struct cfs_inode in;
         if (cfs_inode_read_raw(fs, ino, &in) != 0)
             continue;   /* raw: an orphan has no links, which the ordinary read calls absent */
@@ -582,15 +639,19 @@ static int repair(struct check *ck)
         }
     }
 
-    /* A link count the directory entries disagree with: the entries win. */
-    for (unsigned i = 0; i < ck->rep->nlink_wrong.named && rc == 0; i++) {
-        uint64_t ino = ck->rep->nlink_wrong.name[i];
-        struct cfs_inode in;
-        if (cfs_inode_read(fs, ino, &in) != 0)
+    /* A link count the directory entries disagree with: the entries win.
+     * Over the maps, for the same reason as the orphans above. */
+    for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino && rc == 0; ino++) {
+        if (!bitmap_test(&ck->alive, ino))
             continue;
         uint32_t named = counts_get(&ck->links, ino);
         if (ino == CFS_ROOT_INO)
             named += 2;
+        if (named == 0 || counts_get(&ck->nlink, ino) == named)
+            continue;   /* no name at all is an orphan, repaired above */
+        struct cfs_inode in;
+        if (cfs_inode_read(fs, ino, &in) != 0)
+            continue;
         in.nlink = named;
         rc = cfs_inode_write(fs, ino, &in);
         if (rc == 0)

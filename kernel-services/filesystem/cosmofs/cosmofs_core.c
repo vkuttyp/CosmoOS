@@ -1210,6 +1210,15 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
         kfree(block);
         break;
     }
+    case COSMOFS_CORRUPT_INO_SLOT:
+        /* The slot keeps its position and loses its identity: the walk
+         * reaches it by position and must not believe the number in it.
+         * Nothing else changes, so a check that trusts the field sees an
+         * ordinary inode at a number that does not exist. */
+        in.ino = ino + 1000;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
     case COSMOFS_CORRUPT_COUNTER:
         /* Both of them, in opposite directions: the check must report one
          * finding per counter rather than one for "the superblock". */

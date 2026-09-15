@@ -1696,18 +1696,44 @@ bool selftest_cosmofs_check_faults(const char **reason)
     CHECK(r.clean && r.counted_free == free_before);   /* the space came back */
     check_teardown(bd);
 
-    /* An entry naming a slot nothing allocated. */
+    /* An entry naming a slot nothing allocated. The corruption overwrote
+     * the number in a real entry, so the inode it used to name has lost
+     * its only name -- and repair must not take that for an orphan and
+     * destroy it. The file is still readable afterwards through the
+     * entry's own parent, because nothing was freed. */
     CHECK(check_fixture(&bd, reason));
     CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DANGLING, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what);
+    uint64_t orphans_at_dangle = r.orphan.count;
+    CHECK(orphans_at_dangle >= 1);             /* the inode that lost its name */
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.repair_refused);
+    CHECK(r.dangling_entry.repaired == 0 && r.orphan.repaired == 0);
+    CHECK(r.alloc_not_seen.repaired == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    /* Still there. Had repair believed the walk, the inode would be gone
+     * and this count would be one lower. */
+    CHECK(r.orphan.count == orphans_at_dangle);
     check_teardown(bd);
 
-    /* An entry whose type its inode does not have. */
+    /* An entry whose type its inode does not have. The walk skips the
+     * entry, so the inode it names looks unreferenced -- the same trap as
+     * the dangling entry, without anything being unreadable. */
     CHECK(check_fixture(&bd, reason));
     CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_DIRENT, 0, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
+    CHECK(!r.partial);                         /* nothing was unreadable */
+    uint64_t orphans_at_dirent = r.orphan.count;
+    CHECK(orphans_at_dirent >= 1);             /* the inode whose entry was skipped */
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.repair_refused);                   /* and repair still refuses */
+    CHECK(r.dir_bad.repaired == 0 && r.orphan.repaired == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.orphan.count == orphans_at_dirent);
     check_teardown(bd);
 
     /* Both superblock totals the walk disagrees with: free blocks one
@@ -1837,6 +1863,99 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
  * loses the names it held, and everything those names reached becomes
  * unreachable, which is exactly the cascade a real bad block causes.
  */
+/*
+ * Two things the first version of the repair got wrong, and the tests
+ * that would have caught them.
+ *
+ * The report names at most CFS_CHECK_NAMES offenders per class, for a
+ * reader. Repair used that list as its work list, so a filesystem with
+ * more orphans than names kept the rest -- and a checker that reports
+ * "repaired" while leaving the same fault behind is worse than one that
+ * refuses. Twelve orphans, one repair pass, nothing left.
+ *
+ * And a slot whose number is not its position is a malformed inode. The
+ * walk reaches it by position; believing the number in it would file its
+ * accounting under an inode that does not exist, silently, because the
+ * maps are sized on next_ino and drop what falls outside.
+ */
+bool selftest_cosmofs_check_many_orphans(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    uint64_t free_before = r.counted_free;
+
+    const unsigned many = 12;                  /* more than CFS_CHECK_NAMES */
+    for (unsigned i = 0; i < many; i++)
+        CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, &what) == 0);
+
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.orphan.count == many);
+    CHECK(r.orphan.named == CFS_CHECK_NAMES);  /* eight named, twelve found */
+    /* Each orphan holds one block, and the inode map may have grown to
+     * hold the slots, so the free count is lower by at least the twelve. */
+    CHECK(r.counted_free <= free_before - many);
+    uint64_t free_with_orphans = r.counted_free;
+
+    /* One pass, every one of them. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(!r.repair_refused);
+    CHECK(r.orphan.repaired == many);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);                    /* the deferred frees land next commit */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    /* Nothing left: the point of the test. A repair that worked from the
+     * eight names would report eight repaired and leave four behind, and
+     * this pass would find them. */
+    CHECK(r.clean);
+    CHECK(r.orphan.count == 0);
+    CHECK(r.counted_free > free_with_orphans);   /* and the space came back */
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-many-orphans: %u orphans, %u named, all repaired in one pass",
+          many, (unsigned)CFS_CHECK_NAMES);
+    return true;
+}
+
+bool selftest_cosmofs_check_slot_identity(const char **reason)
+{
+    struct cosmofs_check_report r;
+    struct blkdev *bd = NULL;
+    uint64_t what = 0;
+
+    CHECK(check_fixture(&bd, reason));
+    uint64_t file_ino = check_file_ino();
+    CHECK(file_ino != 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    uint64_t free_before = r.counted_free;
+
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_INO_SLOT, file_ino, &what) == 0);
+    CHECK(what == file_ino);
+
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(!r.clean);
+    CHECK(r.dir_bad.count >= 1);
+    CHECK(r.dir_bad.name[0] == file_ino);      /* named by position, not by the field */
+    CHECK(r.partial);                          /* the accounting is incomplete, and says so */
+
+    /* Repair refuses: the inode's blocks are unclaimed only because the
+     * pass would not trust the structure holding them. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(r.repair_refused);
+    CHECK(r.alloc_not_seen.repaired == 0 && r.orphan.repaired == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.counted_free == free_before);      /* not one block given away */
+    check_teardown(bd);
+
+    kinfo("selftest: cosmofs-check-slot-identity: inode %llu's slot disowned itself; named, marked incomplete, repair refused",
+          (unsigned long long)file_ino);
+    return true;
+}
+
 bool selftest_cosmofs_check_partial(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
@@ -1898,11 +2017,31 @@ bool selftest_cosmofs_check_partial(const char **reason)
     CHECK(rep.orphan.count >= 1);        /* and its inode is reachable from nothing */
     CHECK(rep.blocks_seen > 0);
 
+    /*
+     * And repair must refuse. Every repair this pass makes is an argument
+     * from absence, and the absence here is the pass's own: /d/x is a
+     * live file whose name went with the block. Freeing "its leaked
+     * blocks" and clearing "its orphaned inode" would destroy it.
+     */
+    uint64_t lost_blocks = rep.alloc_not_seen.count;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0);
+    CHECK(rep.repair_refused);
+    CHECK(rep.alloc_not_seen.repaired == 0);
+    CHECK(rep.orphan.repaired == 0);
+    CHECK(rep.counter_wrong.repaired == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.alloc_not_seen.count == lost_blocks);   /* nothing was given away */
+    /* The file the broken block named is still whole: the block it lives
+     * in was never freed, so the entry that survives elsewhere still
+     * reaches it. */
+    CHECK(read_matches(ENG "/keep", "reached another way", 19));
+
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
-    kinfo("selftest: cosmofs-check-partial: directory inode %llu unreadable, %llu blocks stranded, report marked incomplete",
-          (unsigned long long)dir_ino, (unsigned long long)rep.alloc_not_seen.count);
+    kinfo("selftest: cosmofs-check-partial: directory inode %llu unreadable, %llu blocks stranded, report marked incomplete, repair refused",
+          (unsigned long long)dir_ino, (unsigned long long)lost_blocks);
     return true;
 }
 
