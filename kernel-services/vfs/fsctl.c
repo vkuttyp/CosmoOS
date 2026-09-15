@@ -315,6 +315,16 @@ static struct vnode *g_fsctl_node;
 void fsctl_dev_init(void)
 {
     int rc = ramfs_mkchr("/dev/fsctl", 0600, &fsctl_ops, NULL, &g_fsctl_node);
-    if (rc)
+    if (rc) {
         kerror("fsctl: /dev/fsctl: %d", rc);
+        return;
+    }
+    /*
+     * Said out loud on every boot, release included. No self-test runs
+     * in a release build, so this line is the only evidence that the
+     * channel an operator needs is actually there -- and a release
+     * kernel that shipped the passes with no way to reach them is the
+     * thing this unit exists to stop.
+     */
+    kinfo("fsctl: /dev/fsctl ready (0600): mount listing, check and scrub");
 }
