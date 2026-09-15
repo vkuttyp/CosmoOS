@@ -3423,6 +3423,19 @@ static void fsctl_selftest(void)
         CHECK(checkable != 0);
     }
     if (checkable != 0) {
+        /*
+         * A malformed id that happens to name nothing is refused by the
+         * kernel and tells us nothing about the parse. This one names a
+         * real filesystem with a suffix on it: loose parsing runs the
+         * command against it, strict parsing refuses the argument. That
+         * is the difference the test has to see.
+         */
+        char junk[32];
+        snprintf(junk, sizeof(junk), "%llujunk", checkable);
+        CHECK(fsctl_run("check", junk, NULL) != 0);
+        snprintf(junk, sizeof(junk), " %llu", checkable);
+        CHECK(fsctl_run("check", junk, NULL) != 0);      /* nor with space in front */
+
         snprintf(id, sizeof(id), "%llu", checkable);
         CHECK(fsctl_run("check", id, NULL) == 0);        /* clean, and says so */
         CHECK(fsctl_run("scrub", id, NULL) == 0);

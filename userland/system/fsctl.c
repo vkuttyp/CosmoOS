@@ -45,8 +45,8 @@ static const char *const class_name[COSMO_FSCTL_CLASSES] = {
  */
 static int parse_id(const char *s, unsigned long long *out)
 {
-    if (s == NULL || *s == '\0')
-        return -1;
+    if (s == NULL || *s < '0' || *s > '9')
+        return -1;   /* digits only: strtoull would skip space and take a sign */
     errno = 0;
     char *end = NULL;
     unsigned long long v = strtoull(s, &end, 10);
