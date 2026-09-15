@@ -470,6 +470,7 @@ static const struct selftest tests[] = {
     { "cosmofs-freelog-accounted", selftest_cosmofs_freelog_accounted },
     { "cosmofs-freelog-supersede", selftest_cosmofs_freelog_supersede },
     { "cosmofs-unmount-leak", selftest_cosmofs_unmount_leak },
+    { "cosmofs-freelog-snapshot", selftest_cosmofs_freelog_snapshot },
     { "cosmofs-check-clean", selftest_cosmofs_check_clean },
     { "cosmofs-check-leak", selftest_cosmofs_check_leak },
     { "cosmofs-check-faults", selftest_cosmofs_check_faults },

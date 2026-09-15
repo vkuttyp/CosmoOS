@@ -2465,6 +2465,68 @@ bool selftest_cosmofs_unmount_leak(const char **reason)
     return true;
 }
 
+/*
+ * A record must not name a block a snapshot still holds. The commit
+ * writes the record *before* the root and appends to the deadlist
+ * *after* it, so the two ask the same question through
+ * cfs_snapshot_holds -- and if the record's answer were wrong, a mount
+ * would replay it and hand a live snapshot's block to the allocator.
+ *
+ * The remount is the point: without it nothing reads the record, and a
+ * wrong one costs nothing until the next mount.
+ */
+bool selftest_cosmofs_freelog_snapshot(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Something for the snapshot to hold. */
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    /* Now free those blocks in the live tree: the snapshot still names
+     * them, so the commit must not record them as free. */
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* Across a mount, which is where a wrong record would be believed. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+
+    /*
+     * The snapshot's blocks were not handed back. A record that ignored
+     * the snapshot would have freed them here, and the count would be
+     * higher by what the file held.
+     */
+    CHECK(after.free_blocks == before.free_blocks);
+
+    /* And the snapshot still reads, which is what the blocks were for. */
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(rep.snapshots_seen == 1);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-snapshot: a snapshot's blocks survive the record and the remount (%llu free either side)",
+          (unsigned long long)after.free_blocks);
+    return true;
+}
+
 bool selftest_cosmofs_symlink_version(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
