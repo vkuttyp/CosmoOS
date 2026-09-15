@@ -93,7 +93,7 @@ static int cmd_list(int fd)
      * machine may have before its operator cannot find any of them.
      * Grow until it fits.
      */
-    size_t room = 16;
+    size_t room = 8;   /* most machines fit in one read; the rest grow */
     char *buf = NULL;
     int n = -1;
     for (unsigned tries = 0; tries < 12; tries++) {
