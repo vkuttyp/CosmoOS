@@ -70,6 +70,30 @@ bool selftest_pool(const char **reason)
     return true;
 }
 
+/*
+ * A file of `pages` blocks whose contents nothing can compress. A page of
+ * zeros costs almost nothing on a filesystem with compressed records, and
+ * a test about a number of blocks would measure nothing.
+ */
+static bool write_wide_file(const char *path, unsigned pages)
+{
+    static char page[4096];
+    struct file *f = NULL;
+    if (vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f))
+        return false;
+    uint32_t seed = 0x1234567u;
+    bool ok = true;
+    for (unsigned i = 0; ok && i < pages; i++) {
+        for (unsigned k = 0; k < sizeof(page); k++) {
+            seed = seed * 1103515245u + 12345u;
+            page[k] = (char)(seed >> 16);
+        }
+        ok = file_write(f, page, sizeof(page)) == (int64_t)sizeof(page);
+    }
+    file_put(f);
+    return ok;
+}
+
 static bool write_file(const char *path, const void *data, size_t len)
 {
     struct file *f;
@@ -2558,6 +2582,189 @@ bool selftest_cosmofs_freelog_snapshot(const char **reason)
     ramblk_destroy(bd);
     kinfo("selftest: cosmofs-freelog-snapshot: a snapshot's blocks survive the record and the remount (%llu free either side)",
           (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * The record is not cleared when it is replayed, and that is deliberate.
+ * A mount that replays and then goes away without committing must leave
+ * the filesystem exactly as it found it, or the blocks are lost on the
+ * *second* mount -- which no single cycle can see, and which the easy
+ * implementation (clear it as you read it) gets wrong.
+ */
+bool selftest_cosmofs_freelog_idempotent(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Make a record: a file written, deleted, and the unmount's commit
+     * the one that frees. */
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/gone", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* First mount: the replay gives the blocks back. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats first;
+    CHECK(cosmofs_stats(mount_of(ENG), &first) == 0);
+    CHECK(first.free_root != 0);            /* still there: retired by a commit, not by a read */
+
+    /*
+     * Away again without committing. A forced unmount skips the sync, so
+     * nothing on disk moves and the record still stands.
+     */
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+
+    /* Second mount: the same list, the same effect, nothing lost and
+     * nothing freed twice. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats second;
+    CHECK(cosmofs_stats(mount_of(ENG), &second) == 0);
+    CHECK(second.free_blocks == first.free_blocks);
+    CHECK(second.free_root == first.free_root);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-idempotent: two mounts, one record, %llu free both times",
+          (unsigned long long)second.free_blocks);
+    return true;
+}
+
+/*
+ * A replayed block is the allocator's immediately, in this session,
+ * without waiting for a commit. Writing one and committing makes it
+ * live, and the record that named it as free is superseded by the same
+ * commit -- so a remount finds it in use and named by nothing.
+ */
+bool selftest_cosmofs_freelog_reuse(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/first", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/first") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats after_replay;
+    CHECK(cosmofs_stats(mount_of(ENG), &after_replay) == 0);
+
+    /* Take the space back out, in this session, and make it durable. */
+    CHECK(write_file(ENG "/second", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* It is in use, the filesystem adds up, and the file reads. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/second", big, sizeof(big)));
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(rep.seen_not_alloc.count == 0);   /* nothing live is marked free */
+    struct cosmofs_stats now;
+    CHECK(cosmofs_stats(mount_of(ENG), &now) == 0);
+    CHECK(now.free_blocks < after_replay.free_blocks);   /* the file took the space */
+
+    CHECK(vfs_unlink(NULL, ENG "/second") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats back;
+    CHECK(cosmofs_stats(mount_of(ENG), &back) == 0);
+    CHECK(back.free_blocks == after_replay.free_blocks);  /* and gave it back again */
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-reuse: a replayed block was taken, written, and given back (%llu free either side)",
+          (unsigned long long)back.free_blocks);
+    return true;
+}
+
+/*
+ * A record holds 507 blocks; a transaction can free more than that, so
+ * the record is a chain and every link of it has to be written and
+ * replayed. A single block's worth would silently lose the overflow.
+ *
+ * This also covers the bound's slack. `freelog_reserve` allocates for
+ * what is pending *plus* what the bitmap fixpoint can add, so it often
+ * reserves a block more than the fill needs; those leftovers are listed
+ * in the record as free. If they were dropped instead, the count would
+ * come back short by the slack, every commit.
+ */
+bool selftest_cosmofs_freelog_chain(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(8192);      /* room for more than 507 frees */
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /*
+     * The same cycle twice, and the count to come back to is the one
+     * after the first. A record is retired by the *next* commit, so a
+     * filesystem that has just replayed a two-block chain still holds
+     * those two blocks, and comparing it against a pristine format
+     * would count them as lost. Round one puts the filesystem in the
+     * shape round two has to return it to.
+     *
+     * A file of 600 blocks, committed, then deleted in the transaction
+     * the unmount commits -- so one record has to carry more than 507
+     * entries and therefore more than one block.
+     */
+    struct cosmofs_stats before, full;
+    for (unsigned round = 0; round < 2; round++) {
+        if (round == 1)
+            CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+        CHECK(write_wide_file(ENG "/wide", 600));
+        CHECK(vfs_sync() == 0);
+        if (round == 1) {
+            CHECK(cosmofs_stats(mount_of(ENG), &full) == 0);
+            /* More than one record block holds. */
+            CHECK(before.free_blocks - full.free_blocks > CFS_DEAD_PER_BLOCK);
+        }
+        CHECK(vfs_unlink(NULL, ENG "/wide") == 0);
+        CHECK(vfs_umount(ENG) == 0);          /* the unmount's commit frees them */
+        CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+    }
+
+    /* Every block back, across a chain of record blocks. */
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-chain: %llu blocks freed in one transaction, more than the %u a record block holds, and all of them came back",
+          (unsigned long long)(before.free_blocks - full.free_blocks),
+          (unsigned)CFS_DEAD_PER_BLOCK);
     return true;
 }
 
