@@ -436,6 +436,19 @@ eight times gives eight different ciphertexts, which is what a repeated
 nonce would break; and a genuine block of a file written over another of
 its own offsets is refused), and `test_chacha20` against RFC 8439.
 
+**V29. A symbolic link is bounded by the resolution that expands it.**
+One resolution expands at most `VFS_MAX_SYMLINKS` (8) links and walks at
+most `VFS_MAX_COMPONENTS` components, both answering `-ELOOP`; an
+expansion that would exceed `VFS_PATH_MAX` is `-ENAMETOOLONG` and never
+drops what follows the link. An absolute target restarts at
+`vfs_current_root()`, so a link cannot name anything outside the calling
+process's root. **Checked by** `vfs-symlink-loop` (a cycle, a chain of 8
+that resolves, a chain of 9 that does not, and the budget pinned at 8),
+`vfs-symlink-nofollow` (the over-long expansion, built from short
+components so the expansion's own check is what refuses it), and the
+user-mode jail test, where a child rooted below the global root writes
+through an absolute-target link and lands inside its own root.
+
 **V28. A mount is seen by the namespaces that were given it, and by no
 others.** A mount carries the set of namespaces that can see it; a new
 namespace copies its parent's view by adding itself to every mount in

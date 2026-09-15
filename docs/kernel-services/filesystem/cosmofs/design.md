@@ -220,6 +220,40 @@ mutation may leave buffers dirty for the open transaction but never
 touches the committed root; a later commit publishes whatever
 consistent state the in-memory structures hold.
 
+## Format version 8: symbolic links
+
+`CFS_TYPE_LNK` (3) joins `CFS_TYPE_REG` and `CFS_TYPE_DIR` in the mode's
+top nibble, so the inode does not grow and every older image still
+mounts. A link's target is its own data: one block, `size` the target's
+length, `compress_algo` none.
+
+**The target is written inside the transaction that publishes the
+entry**, through the same buffered-block path the directory blocks use
+-- not through the page cache, which reaches disk at write-back and
+could commit a zero-length link whose target is not there yet. That is
+a durable wrong answer rather than a lost write, which is why it is
+worth the exception: `cfs_symlink` allocates the block, writes it, sets
+the extent, writes the inode and adds the entry, all under `fs->lock` in
+one transaction, and `cfs_readlink` reads it back the same way.
+
+**Nothing is left behind when it fails.** Allocation happens in the
+in-memory bitmap that is authoritative for the open transaction, so a
+failure after the block is allocated and before the entry exists would
+otherwise commit a block nothing can reach. Every path out after an
+allocation returns the block with `cfs_free_block_deferred` and the
+inode number with `cfs_inode_discard` (which rolls back the bump
+allocator under the same lock). Once `dir_add` publishes the entry the
+number is no longer this call's to give back, and nothing fallible
+follows: the operation reports success and hands the caller no vnode,
+because failing after the name exists would make a retry meet `EEXIST`.
+
+**The gate is on creation, not on mount.** `CFS_VERSION` is 8 and
+`CFS_VERSION_MIN` stays 2, so every existing image mounts; `cfs_symlink`
+returns `-EOPNOTSUPP` on a filesystem whose superblock is older than 8,
+because a kernel of that vintage reads an unknown type nibble as a
+regular file -- it would show a link as a file whose contents are a
+path, which is a wrong answer rather than a refusal.
+
 ## Future extensibility
 
 Snapshots (`snap_root` → a list of immutable roots whose blocks are

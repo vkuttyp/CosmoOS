@@ -271,6 +271,16 @@ known and refused, so they are not counted as unknown. `select` 23,
 `mremap` 25, `msync` 26, `sendmsg` 46, `recvmsg` 47 have numbers in the
 tables but no entry: they go through `lx_unknown`.
 
+## Symbolic links
+
+Six entry points, all of them answering properly since the symlink unit:
+`readlink` and `readlinkat` (they returned `-ENOSYS`), `symlink` and
+`symlinkat` (absent from both tables), `lstat` (**aliased to `stat`**,
+so a program asking not to follow a link was told about the target) and
+`newfstatat` (which read `AT_SYMLINK_NOFOLLOW` and dropped it). The
+conversions gained `S_IFLNK` and `DT_LNK` arms, and `O_NOFOLLOW` now
+reaches the kernel instead of being accepted and ignored.
+
 ## Conversions (`compat/linux/convert.h`, `convert.c`)
 
 **ABI stability: internal.** Pure functions: no kernel state, no

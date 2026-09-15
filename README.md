@@ -1918,6 +1918,31 @@ See [docs/development.md](docs/development.md).
   both CPU models, the `hv` suite included on `cortex-a76`; the guard
   instructions cost nothing measurable under TCG (PR #140).
 
+- **A name that points somewhere else**
+  (`docs/audit/next-subsystem-symlink.md`). The VFS had three vnode
+  types and no way to offer a fourth: no `symlink` or `readlink` in
+  `vnode_ops`, no call that would reach them, and no type for `stat` to
+  report. The Linux personality was worse than absent -- `lstat` was
+  aliased to `stat` and `newfstatat` read `AT_SYMLINK_NOFOLLOW` and
+  dropped it, so a program that asks specifically not to follow a link
+  was told about the target. Now a link is a node: the walk expands one
+  the moment it meets it, with a budget of eight and the component count
+  that already bounded it, carrying two path buffers from a single
+  allocation that a walk without links never takes. A relative target
+  resolves against the directory the link lives in; an absolute one
+  restarts at the calling process's root, so a link cannot name its way
+  out of a root the way a leading slash cannot -- proved by a child
+  rooted at a jail writing through an absolute-target link and landing
+  inside its own root. `open` is a loop, so `O_CREAT` creates the target
+  of a dangling link and `O_NOFOLLOW` refuses a link named last while
+  saying nothing about the ones in between. ramfs keeps the target in
+  the node and cosmofs in the file's own block, written inside the
+  transaction that publishes the entry and given back whole on any
+  failure before it; format version 8 gates creation, because an older
+  kernel would read a link as a regular file whose contents are a path.
+  Three native calls, six Linux entry points, and `ls` showing a link
+  with its target. 273 self-tests on both architectures (PR #142).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
