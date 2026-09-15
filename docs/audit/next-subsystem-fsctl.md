@@ -569,6 +569,7 @@ filesystem the commands are pointed at.
 | `vfs-mount-pin-shutdown` | the shutdown sequence against a mount with a pass in flight completes rather than being refused, because the sync ahead of it waits on the mount's own lock | make the pass drop the mount lock between phases: the sync overtakes it and the unmount meets a non-zero count |
 | `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
 | `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
+| `fsctl-list-root` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
 | `fsctl-list-ns` | a child in a new mount namespace lists its own mounts, and the parent's private mount is absent from it and present in the parent's listing | same injection, from the other side |
 | `fsctl-check` | a manufactured leak is found through the device, named by block, with the same numbers `cosmofs_check` reports directly; `REPAIR` gives the block back and a second command is clean | dispatch `CHECK` to the scrub: the class counts are all zero |
 | `fsctl-caps` | a ramfs mount lists no passes and a `CHECK` against it is `-EOPNOTSUPP`, *before* any lock is taken | call through a null `fs_type` entry: the kernel faults, which the test catches as a failure to return the error |
@@ -580,7 +581,10 @@ filesystem the commands are pointed at.
 **Vacuity, named in advance.** `fsctl-check` asserts the numbers match
 what `cosmofs_check` returns when called directly, not merely that a
 command succeeded: a device that ran nothing and returned a zeroed
-report would pass a weaker test. `fsctl-list` asserts each mount appears
+report would pass a weaker test. `fsctl-list-root` exists because the
+listing's most likely bug is an omission, and an omission is what a
+test asserting "everything listed is correct" cannot see. `fsctl-list`
+asserts each mount appears
 **once** and with its own path, so a listing that repeated one entry or
 reported every mount's path as the root would fail. `vfs-mount-pin`
 asserts the unmount is refused *and then succeeds after release*, so a
