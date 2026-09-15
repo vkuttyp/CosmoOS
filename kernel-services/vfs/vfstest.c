@@ -1150,12 +1150,16 @@ bool selftest_vfs_mount_pin(const char **reason)
     struct thread *t = thread_create(pin_unmounter, NULL, "pin-umount", SCHED_PRIO_DEFAULT);
     CHECK(t != NULL);
 
-    /* It has not finished, and it will not until the pass is done. A
-     * second acquisition is refused once the unmount has begun, which is
-     * what makes the drain terminate; before it begins it would succeed,
-     * so the loop tolerates either answer and only requires that the
-     * unmount has not completed. */
-    for (unsigned i = 0; i < 50; i++) {
+    /*
+     * It has not finished, and it will not until the pass is done. Once
+     * the unmount has begun, a second acquisition must be *refused* --
+     * that is what makes the drain terminate, so the test requires it to
+     * happen rather than accepting whichever answer comes back. Before
+     * the unmount begins, acquiring still succeeds; the loop waits for
+     * the transition and fails if it never comes.
+     */
+    bool refused = false;
+    for (unsigned i = 0; i < 500 && !refused; i++) {
         CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
         struct mount *second = NULL;
         int rc = vfs_mount_acquire(g_pin_id, &second);
@@ -1163,9 +1167,10 @@ bool selftest_vfs_mount_pin(const char **reason)
         if (rc == 0)
             vfs_mount_release(second);
         else
-            break;                       /* the unmount has claimed it */
+            refused = true;
         thread_sleep_ms(2);
     }
+    CHECK(refused);                  /* a pass that could start here would never let the drain end */
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
     /* Let go, and the drain wakes and completes. */
