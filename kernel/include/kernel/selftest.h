@@ -205,6 +205,8 @@ bool selftest_cosmofs_snapshot_remount(const char **reason);      /* fsync commi
 bool selftest_cosmofs_pool2(const char **reason);                 /* a pool of two members */
 bool selftest_cosmofs_v3(const char **reason);
 bool selftest_cosmofs_freelog_format(const char **reason);
+bool selftest_cosmofs_freelog_accounted(const char **reason);
+bool selftest_cosmofs_freelog_supersede(const char **reason);
 bool selftest_cosmofs_check_clean(const char **reason);
 bool selftest_cosmofs_check_leak(const char **reason);
 bool selftest_cosmofs_check_faults(const char **reason);

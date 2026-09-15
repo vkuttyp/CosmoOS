@@ -2299,6 +2299,110 @@ bool selftest_cosmofs_freelog_format(const char **reason)
     return true;
 }
 
+/*
+ * The record's own blocks are metadata, and the bitmap the root
+ * publishes has to say so. Allocating them after the bitmap fixpoint --
+ * which is where they naturally want to go, since the set to record is
+ * only final then -- publishes a root whose bitmap does not know about
+ * them, and the allocator hands them out again. That is a corruption
+ * rather than a leak, and the structural check is what sees it: a block
+ * that is reachable and free is `seen_not_alloc`, the dangerous
+ * direction (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_accounted(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Something to free, so the record is not empty. */
+    CHECK(write_file(ENG "/a", "one", 3));
+    CHECK(vfs_sync() == 0);
+    CHECK(write_file(ENG "/a", "one again, longer", 17));
+    CHECK(vfs_unlink(NULL, ENG "/a") == 0);
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.free_root != 0);                  /* there is a record */
+
+    /* Every block of it is allocated in the bitmap this root published,
+     * and the check agrees: no leak, and nothing reachable-but-free. */
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);      /* the dangerous direction */
+    CHECK(rep.alloc_not_seen.count == 0);
+    CHECK(rep.clean);
+
+    /* And across a remount, where the bitmap on disk is the only word. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-accounted: the record's blocks are allocated in the bitmap its root published");
+    return true;
+}
+
+/*
+ * A record supersedes its predecessor, and the predecessor's blocks have
+ * to go back. Without that, every commit leaks a block or two -- this
+ * unit's own defect one level up -- which no single-commit test can see.
+ */
+bool selftest_cosmofs_freelog_supersede(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Settle, then measure: the first commits grow the tree. */
+    CHECK(write_file(ENG "/churn", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* A hundred commits that change the same one block. */
+    for (unsigned i = 0; i < 100; i++) {
+        CHECK(write_file(ENG "/churn", "y", 1));
+        CHECK(vfs_sync() == 0);
+    }
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+
+    /*
+     * The count may move by the transaction in flight, but not by a
+     * hundred commits' worth of records. A leak of one block per commit
+     * would be a hundred blocks on a 512-block filesystem.
+     */
+    CHECK(after.free_blocks + 8 >= before.free_blocks);
+    CHECK(after.free_root != 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-supersede: 100 commits, %llu free before and %llu after",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
+    return true;
+}
+
 bool selftest_cosmofs_symlink_version(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);

@@ -467,6 +467,8 @@ static const struct selftest tests[] = {
     { "cosmofs-pool2", selftest_cosmofs_pool2 },
     { "cosmofs-v3", selftest_cosmofs_v3 },
     { "cosmofs-freelog-format", selftest_cosmofs_freelog_format },
+    { "cosmofs-freelog-accounted", selftest_cosmofs_freelog_accounted },
+    { "cosmofs-freelog-supersede", selftest_cosmofs_freelog_supersede },
     { "cosmofs-check-clean", selftest_cosmofs_check_clean },
     { "cosmofs-check-leak", selftest_cosmofs_check_leak },
     { "cosmofs-check-faults", selftest_cosmofs_check_faults },
