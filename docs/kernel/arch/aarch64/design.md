@@ -729,6 +729,27 @@ where it came from: the stub is not a hypervisor and refuses to pretend.
 `el2_set_vectors` is what the EL2 backend will use to install its own
 world-switch vectors; until then the stub is all there is.
 
+**The handover when firmware keeps VHE.** EDK2 running at EL2 on a core
+with FEAT_VHE hands over with `HCR_EL2.{E2H,TGE}` set (Debian's AAVMF
+2025.02 on QEMU's `cortex-a76` does: `HCR_EL2 0x488000038`). With `E2H`
+set, an `msr <reg>_el1` executed at EL2 writes the **EL2** register of
+that name, so a loader that prepares EL1 the obvious way prepares the
+wrong registers and the kernel ERETs into whatever EL1 state firmware
+left -- a hang with no output, right after `jumping to kernel entry`.
+`cpu_jump_to_kernel` therefore reads `HCR_EL2` and, when `E2H` is set,
+writes MAIR, TCR, TTBR0, TTBR1 and SCTLR through their `_EL12` aliases
+(op1 = 5, as raw encodings: the loader is built for ARMv8.0) and
+invalidates with `tlbi alle1`, since `tlbi vmalle1` with `TGE` set names
+the EL2&0 regime rather than the EL1&0 one those tables are for. It
+prints `cosmoboot: EL2 handover in VHE host mode …` when it takes that
+path. `jump_from_el2` then disables the EL2 MMU *before* clearing `E2H`,
+because clearing it reinterprets `TCR_EL2` and `SCTLR_EL2` in the
+non-VHE layout while the code is still running under them; with the MMU
+off there is no translation to lose, and nothing between that write and
+the ERET touches memory. `cortex-a72` has no VHE, so this path never ran
+until the hardening unit's guard boot put a PAN-capable core under CI's
+firmware (PR #140).
+
 Once the switch is installed on a CPU the stub's calls are gone there,
 so giving EL2 back is the switch's job: `HV_EL2_CALL_HANDBACK` (`x1` =
 the stub's physical base) installs the stub's vectors again and

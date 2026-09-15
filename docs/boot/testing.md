@@ -92,7 +92,15 @@ A triple fault during the handoff shows in QEMU's `-d int` log as a
 ## AArch64 exception level 2
 
 `scripts/qemu-run.sh` passes `virtualization=on` unless `QEMU_EL2=0`, so
-the default AArch64 run has firmware hand over at EL2 and the loader
+The firmware matters as much as the CPU model: EDK2 hands EL2 over in
+VHE host mode on a core that has FEAT_VHE, and the loader has to reach
+EL1's registers through their `_EL12` aliases there
+(`docs/kernel/arch/aarch64/design.md`, "The handover when firmware
+keeps VHE"). The combination is covered by the guard boot under CI's
+Debian AAVMF; locally both firmwares and both cores were run
+(`make test-guard` with `OVMF_CODE` pointing at each).
+
+The default AArch64 run has firmware hand over at EL2 and the loader
 keep it (`docs/kernel/arch/aarch64/design.md`, "Exception level 2").
 Two markers are required in that configuration —
 `cosmoboot: EL2 stub at 0x… (N bytes)` from the loader and

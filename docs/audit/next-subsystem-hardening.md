@@ -54,7 +54,19 @@ rather than reading:
 8. **`hardening: absent` is forbidden in the guard boot**, not merely
    contradicted by a required line: a boot printing both would
    otherwise have passed.
-9. **The flag sweep found four calls to change and two already strict.**
+9. **The second firmware found a loader bug the second core alone did
+   not.** The guard boot passed locally on `cortex-a76` and failed in CI
+   on the same model, every run, with no kernel output at all. The
+   variable was the firmware, not the emulator: CI's Debian AAVMF hands
+   EL2 over in VHE host mode (`HCR_EL2 0x488000038`, `E2H` and `TGE`
+   set), and at EL2 with `E2H` set every `msr <reg>_el1` the loader
+   issued wrote the EL2 register instead, so the kernel started with
+   firmware's EL1 state. The loader now writes those five registers
+   through their `_EL12` aliases, invalidates with `tlbi alle1`, says so
+   in the log, and disables the EL2 MMU before clearing `E2H`. Extracted
+   from Debian's package, that firmware reproduces the hang locally and
+   the fix passes both firmwares on both cores.
+10. **The flag sweep found four calls to change and two already strict.**
    Every native call taking a flags word: `mmap`, `mount`, `umount` and
    `open` gained the check; `wait` (`native.c`, the `COSMO_W*` mask) and
    `spawn` (the `COSMO_SPAWN_*` mask) already had it; `mmap`'s `prot`
@@ -729,6 +741,7 @@ then reverted):
 | `umip-off`: `CR4.UMIP` never set | `make test-guard` (x86-64) | FAIL: `hardening: x86-64: nx smep smap umip` and `usertest: umip: enforced` missing |
 | `mmap-flags`: the `mmap` bit check removed | `make test` | FAIL: `USERTEST: check failed: cosmo_mmap(…, COSMO_MAP_ANONYMOUS \| (1 << 30)) == -COSMO_EINVAL` |
 | `umount-flags`: the `umount` bit check removed | `make test` | FAIL: `USERTEST: check failed: cosmo_umount2("/tmp/flagm", 1u << 5) == -COSMO_EINVAL`. The first attempt passed: the test unmounted `/tmp`, which is not a mount point, so `-EINVAL` came back for the wrong reason; `mount` and `umount` now use a mount point of their own and the same calls without the bit must succeed |
+| `vhe-plain-el1`: the loader writes `sctlr_el1` by name under `E2H` | `make ARCH=aarch64 test-guard` with `OVMF_CODE` at Debian's AAVMF | FAIL: timed out, no kernel output at all -- the CI failure reproduced, and the reason the `_EL12` aliases are there (as-built 9) |
 | `wxn-off`: `SCTLR_EL1.WXN` not set | `make ARCH=aarch64 test-wxn` | FAIL: every `wxn` marker missing and the forbidden `crash test: a writable page executed; WXN is off` present |
 
 
