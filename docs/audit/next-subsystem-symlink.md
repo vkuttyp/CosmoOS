@@ -41,8 +41,9 @@ wants `/bin/sh` to be a name for something else has to copy it.
 
 This unit makes a link a first-class node: `symlink(2)` and
 `readlink(2)` and `lstat(2)` in the native ABI, `O_NOFOLLOW` in `open`,
-the three Linux calls answered properly and `AT_SYMLINK_NOFOLLOW`
-honoured, `VNODE_LNK` in both filesystems (a bounded string in ramfs,
+the six Linux entry points below answered properly -- including
+`AT_SYMLINK_NOFOLLOW`, which is read and dropped today -- `VNODE_LNK` in
+both filesystems (a bounded string in ramfs,
 the file's own bytes in cosmofs behind a format-version gate), and a
 walk that expands a link with a budget, refuses a loop with `ELOOP` and
 a long expansion with `ENAMETOOLONG`, and -- the part that matters for
@@ -184,17 +185,30 @@ state: `links` (how many expansions so far), `buf` (the rewritten path,
 allocated only when the first link is met), and the rule for where to
 continue.
 
+`step` consumes the caller's reference to `dir` before it returns the
+child (`vfs.c:764`), so the walk cannot "continue from `cur` as it was":
+that reference is gone. Before each `step`, `walk_parent` takes a second
+reference on `cur` and holds it as `linkdir`; when the child is not a
+link it is released immediately (one atomic pair per component), and
+when it is, `linkdir` is exactly the directory a relative target
+resolves against. `step`'s own ownership contract is unchanged, which
+keeps the `..` path -- where `step` swaps `dir` for the mountpoint and
+puts the original (`vfs.c:739-744`) -- as it is.
+
 When `step` returns a child whose type is `VNODE_LNK`:
 
-1. If `links == VFS_MAX_SYMLINKS` (8), return `-ELOOP`.
-2. Read the target with `readlink` into a `VFS_PATH_MAX` scratch.
+1. If `links == VFS_MAX_SYMLINKS` (8), release `linkdir` and the child
+   and return `-ELOOP`.
+2. Read the target with `readlink` into a `VFS_PATH_MAX` scratch, then
+   release the child: the link's own vnode is not needed past this
+   point.
 3. Form the new path: the target, then `/`, then the unconsumed
    remainder of the current path. If that exceeds `VFS_PATH_MAX - 1`,
    return `-ENAMETOOLONG`.
-4. If the target begins with `/`, drop the current directory and
-   continue from `vfs_current_root()` -- the *calling process's* root,
-   not the global one. Otherwise continue from the directory the link
-   was found in (`cur` before the step).
+4. If the target begins with `/`, release `linkdir` and continue from
+   `vfs_current_root()` -- the *calling process's* root, not the global
+   one. Otherwise continue from `linkdir`, the directory the link was
+   found in, whose reference the walk is already holding.
 5. `links++`, and go round the loop with the new path.
 
 The scratch is one `kmalloc(VFS_PATH_MAX)` per walk that meets a link,
@@ -260,14 +274,18 @@ API document says so once, loudly.
 
 ### The Linux personality stops lying
 
-- `readlink` and `readlinkat` implemented over `vfs_readlink` (they are
-  `-ENOSYS` today).
-- `symlink` and `symlinkat` added to both tables (`nr_x86_64.h`,
-  `nr_aarch64.h`) over `vfs_symlink`.
-- `lstat` stops being an alias for `stat` (`syscalls.c:1834-1836`) and
-  becomes the non-following one.
-- `newfstatat` honours `LX_AT_SYMLINK_NOFOLLOW` (`linux_abi.h:49`),
-  which it currently reads and drops.
+Six entry points, the same six everywhere this report counts them:
+
+1. `readlink` -- `-ENOSYS` today, implemented over `vfs_readlink`.
+2. `readlinkat` -- `-ENOSYS` today, the same.
+3. `symlink` -- absent from both tables, added over `vfs_symlink`.
+4. `symlinkat` -- absent from both tables, added.
+5. `lstat` -- stops being an alias for `stat` (`syscalls.c:1834-1836`)
+   and becomes the non-following one.
+6. `newfstatat` -- honours `LX_AT_SYMLINK_NOFOLLOW` (`linux_abi.h:49`),
+   which it currently reads and drops.
+
+With, in support:
 - `convert.c` gains `LX_S_IFLNK` (`0xA000`) and `LX_DT_LNK` (10) arms,
   so a link stops being reported as a regular file
   (`convert.c:44-48,164-168`).
@@ -288,11 +306,25 @@ invariant (V9) is unchanged.
 
 `CFS_TYPE_LNK 3` in the mode's top nibble
 (`cosmofs_format.h:123-126`), and the target stored as the file's own
-data: one block, `size` = the target's length, `compress_algo` none, so
-`readlink` is a page-cache read of the first block and nothing in the
-write path is special. The inode's spare `uint32_t reserved`
-(`cosmofs_format.h:261`) stays spare; a 4-byte inline target would buy
-nothing.
+data: one block, `size` = the target's length, `compress_algo` none.
+The inode's spare `uint32_t reserved` (`cosmofs_format.h:261`) stays
+spare; a 4-byte inline target would buy nothing.
+
+**The target block is written in the same transaction as the inode and
+the entry, not through the page cache.** `cfs_create_common` allocates
+the inode, writes it and adds the directory entry under `fs->lock`
+(`cosmofs.c:1314-1371`), all joining the open transaction; a regular
+file's *data*, by contrast, reaches disk from the page cache at
+write-back (`cfs_writepage`, `cosmofs.c:1752`), which can be a later
+transaction. A link built that way could commit as a zero-length link
+whose target is not there yet -- a durable wrong answer after a crash,
+not a lost write. So `cfs_symlink` allocates the data block and writes
+the target through the same buffered-block path the directory entries
+use, sets the extent in the inode, and only then writes the inode and
+adds the entry: one transaction, committed or not at all. `cfs_readlink`
+reads it back the same way. A link's bytes are therefore never a page in
+either filesystem, which is also why `ramfs_lnk_ops` has no
+`readpage`/`writepage`.
 
 `CFS_VERSION` 7 → 8. `CFS_VERSION_MIN` stays 2, so every existing image
 still mounts. The gate is on creation, not on mount: `cosmofs_symlink`
@@ -367,7 +399,7 @@ on. A dentry cache would cache expansions; nothing here forecloses it.
 | `kernel/include/uapi/cosmo/syscall.h` | `COSMO_DT_LNK`, `COSMO_O_NOFOLLOW`, `SYS_symlink`/`readlink`/`lstat`, `SYS_COUNT` 92 |
 | `kernel/syscall/native.c` | the three calls, the table rows, `O_NOFOLLOW` in the accepted mask |
 | `libc/include/cosmo/syscall.h` | the three wrappers |
-| `compat/linux/syscalls.c`, `nr_x86_64.h`, `nr_aarch64.h` | readlink, readlinkat, symlink, symlinkat, lstat unaliased, `newfstatat`'s flag |
+| `compat/linux/syscalls.c`, `nr_x86_64.h`, `nr_aarch64.h` | the six entry points: `readlink`, `readlinkat`, `symlink`, `symlinkat`, `lstat` unaliased, `newfstatat`'s flag |
 | `compat/linux/convert.c` | `S_IFLNK` and `DT_LNK` arms |
 | `userland/coreutils/ls.c` | the `l` type char, `lstat` for the type column, `-> target` in the long form |
 | `kernel-services/vfs/vfstest.c` | the walk and type tests |
@@ -417,11 +449,12 @@ existing `flags`.
    rule, `..` after a link, and the loop, dangling, and length tests.
 4. **The last component.** `O_NOFOLLOW`, the per-caller rule, and the
    table above turned into tests.
-5. **cosmofs stores one.** `CFS_TYPE_LNK`, version 8, the gate,
-   persistence across unmount, and the crash-consistency suite run
-   unchanged.
-6. **Both personalities and the userland.** The five Linux calls, `ls`,
-   the user-mode round trip, and the Linux-ABI program's case.
+5. **cosmofs stores one.** `CFS_TYPE_LNK`, version 8, the gate, the
+   target written inside the creating transaction, persistence across
+   unmount, and the crash-consistency suite with a symlink case added.
+6. **Both personalities and the userland.** The six Linux entry points
+   above, the two conversion arms, `ls`, the user-mode round trip, and
+   the Linux-ABI program's case.
 7. **Docs, README Status, inventory, the report's as-built sections.**
 
 Each step boots both architectures; steps 3 and 5 also run
@@ -440,6 +473,7 @@ cosmofs crash suite explicitly.
 | `vfs-symlink-nofollow` | `open` with `O_NOFOLLOW` on a link is `ELOOP`; on a non-link it is the file; `O_NOFOLLOW` on a path whose *intermediate* component is a link still follows | apply `O_NOFOLLOW` to intermediate components: the third case fails |
 | `vfs-symlink-toolong` | a target plus remainder over `VFS_PATH_MAX` is `ENAMETOOLONG`, not a truncated path | drop the length check: the walk resolves a truncated name |
 | `cosmofs-symlink` | a link survives unmount and remount with its target and type; `readdir` reports the type from the on-disk entry; the target occupies one block | store the target uncounted: the block accounting test fails |
+| `cosmofs-symlink-crash` (in `cosmofscrash.c`, beside the existing prefix replays) | over every write prefix of a symlink creation, a replayed filesystem shows either no link at all or a link with its whole target -- never a zero-length one | write the target through the page cache instead of the creating transaction: a prefix replays to a link whose `readlink` returns 0 bytes |
 | `cosmofs-symlink-version` | on a filesystem formatted at version 7 (`cosmofs_test_format_version`), `symlink` is `-EOPNOTSUPP` and everything else still works | drop the gate: the refusal assertion fails |
 | `fs_selftest` (user mode) | `symlink`, `readlink`, `lstat` and `O_NOFOLLOW` through the libc wrappers; `ls -l` shows `l` and the arrow | leave `ls` following: the type column shows `-` |
 | the Linux ABI program | `readlink`, `symlink`, `lstat` and `newfstatat` with `AT_SYMLINK_NOFOLLOW` each report the link, not the target | re-alias `lstat` to `stat`: the link case reports the target |
