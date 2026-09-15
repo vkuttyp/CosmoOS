@@ -21,7 +21,7 @@
  * at probe (hv_s2_configure), the level-0 start from one page until
  * then, which is what the host test builds. The root is the only table
  * whose size and index width depend on it. */
-static struct hv_s2_layout g_layout = { 3, 0, 2 };
+static struct hv_s2_layout g_layout = { 3, 0, 2, HV_S2_INPUT_MAX };
 
 void hv_s2_configure(unsigned pa_bits)
 {
@@ -232,16 +232,19 @@ unsigned hv_s2_table_pages(paddr_t root)
 }
 
 /* VTCR_EL2 for a 4 KiB walk over `pa_bits` of output, which is what
- * ID_AA64MMFR0_EL1.PARange reports: T0SZ = 64 - pa_bits, SL0 from the
- * layout rule (hv_s2_core.h: level 0 above 42 bits, level 1 with
- * concatenated root tables at or below), inner-shareable write-back
- * both ways. Assuming 48 bits is what a 44-bit machine refuses, and
- * assuming a level-0 start is what a 40-bit one refuses. */
+ * ID_AA64MMFR0_EL1.PARange reports: T0SZ from the input size the layout
+ * rule serves (pa_bits, capped at the 48 bits one level-0 root page can
+ * index), SL0 from the same rule (hv_s2_core.h: level 0 above 42 bits,
+ * level 1 with concatenated root tables at or below), PS as the CPU
+ * reports it, inner-shareable write-back both ways. Assuming 48 bits is
+ * what a 44-bit machine refuses, assuming a level-0 start is what a
+ * 40-bit one refuses, and assuming the input may be 52 bits is what the
+ * tables cannot express. */
 uint64_t hv_s2_vtcr(unsigned pa_bits, unsigned ps_field)
 {
     struct hv_s2_layout lay;
     hv_s2_layout(pa_bits, &lay);
-    uint64_t t0sz = 64u - pa_bits;
+    uint64_t t0sz = 64u - lay.input_bits;
     return t0sz | ((uint64_t)lay.sl0 << 6) /* SL0 */ | (1ull << 8) /* IRGN0 WBWA */ | (1ull << 10) /* ORGN0 WBWA */ |
            (3ull << 12) /* SH0 inner */ | (0ull << 14) /* TG0 4 KiB */ | ((uint64_t)ps_field << 16);
 }

@@ -132,6 +132,11 @@ int main(void)
     CHECK((hv_s2_vtcr(48, 5) & 0x3F) == 16);
     CHECK(((hv_s2_vtcr(40, 2) >> 6) & 3) == 1);   /* SL0: a level-1 start at 40 bits (cortex-a76) */
     CHECK((hv_s2_vtcr(40, 2) & 0x3F) == 24);
+    /* 52 bits of output (FEAT_LPA): the tables index 48, so T0SZ says
+     * 48 while PS keeps the CPU's field. */
+    CHECK((hv_s2_vtcr(52, 6) & 0x3F) == 16);
+    CHECK(((hv_s2_vtcr(52, 6) >> 16) & 7) == 6);
+    CHECK(((hv_s2_vtcr(52, 6) >> 6) & 3) == 2);
 
     /* The layout rule (hv_s2_core.h): level 0 from one page above 42
      * bits; level 1 at or below, from 2^(bits-39) concatenated root
@@ -142,6 +147,7 @@ int main(void)
     for (unsigned bits = 32; bits <= 52; bits++) {
         struct hv_s2_layout lay;
         hv_s2_layout(bits, &lay);
+        CHECK(lay.input_bits == (bits > 48 ? 48 : bits));
         if (bits > 42) {
             CHECK(lay.sl0 == 2 && lay.start_level == 3 && lay.root_order == 0);
         } else {

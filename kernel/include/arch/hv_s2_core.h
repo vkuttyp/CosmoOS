@@ -23,10 +23,20 @@ struct hv_s2_layout {
     unsigned start_level;   /* the walk's own numbering: 3 = a level-0 start, 2 = level-1 */
     unsigned root_order;    /* log2 of the root's page count: 0..3 */
     unsigned sl0;           /* the VTCR_EL2.SL0 / STE.S2SL0 encoding: 2 (level 0) or 1 (level 1) */
+    unsigned input_bits;    /* the IPA size the walk serves: T0SZ = 64 - input_bits */
 };
+
+/* The widest input a level-0 start from one root page can index: bits
+ * 47:12 over four levels. A core reporting 52 bits of physical address
+ * (FEAT_LPA) keeps its PS field -- the output may be that wide -- but
+ * the guest-physical range is 48 bits, which is what the tables can
+ * express; a 52-bit input would need FEAT_LPA2 or concatenated level-0
+ * tables, neither built. */
+#define HV_S2_INPUT_MAX 48u
 
 static inline void hv_s2_layout(unsigned pa_bits, struct hv_s2_layout *out)
 {
+    out->input_bits = pa_bits > HV_S2_INPUT_MAX ? HV_S2_INPUT_MAX : pa_bits;
     if (pa_bits > 42) {
         out->start_level = 3;
         out->root_order = 0;

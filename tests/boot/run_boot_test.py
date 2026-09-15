@@ -336,6 +336,10 @@ FORBIDDEN_MARKERS = [
     # self-tests' own reports say "expected" and do not match.
     r"\] (soft|hard) lockup:",
 ]
+# The guard boot: the WARN naming an absent protection contradicts the
+# required INFO line and fails the run on its own.
+if GUARD:
+    FORBIDDEN_MARKERS += [r"hardening: absent"]
 
 # --expect-panic run (CRASH_TEST=1 kernel): the panic report must be
 # complete and the failure exit code must be delivered.

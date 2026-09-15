@@ -400,7 +400,8 @@ static int el2_probe(struct hv_caps *out)
     }
     el2_vtimer_bind();
     kinfo("hv: EL2 with stage-2 translation, %u-bit addresses (level-%u start, %u root page%s), %u VMIDs, guest interrupts %s",
-          pa_bits[parange], 3 - hv_s2_current_layout()->start_level, 1u << hv_s2_current_layout()->root_order,
+          hv_s2_current_layout()->input_bits, 3 - hv_s2_current_layout()->start_level,
+          1u << hv_s2_current_layout()->root_order,
           hv_s2_current_layout()->root_order ? "s" : "", HV_VMIDS_MAX - 1,
           g_caps.inject_irq ? "through the virtual GIC" : "unavailable (no GICv3 virtual interface)");
     if (g_caps.inject_irq)

@@ -58,11 +58,19 @@ static void fs_selftest(void)
     CHECK(cosmo_stat("/etc/rc", &st) == 0 && st.type == COSMO_DT_REG);
 
     /* A flag bit the kernel does not define is -EINVAL on every native
-     * call that takes a flags word; the same calls without it succeed. */
-    CHECK(cosmo_open("/tmp/usertest.txt", COSMO_O_RDONLY | 0x8000000, 0) == -COSMO_EINVAL);
+     * call that takes a flags word; the same call without the bit then
+     * succeeds, so a refusal for another reason cannot pass for this
+     * one. `mount` and `umount` need a mount point of their own for
+     * exactly that reason: /tmp is not one, and unmounting it would be
+     * -EINVAL whatever the flags said. */
+    CHECK(cosmo_open("/boot/init", COSMO_O_RDONLY | 0x8000000, 0) == -COSMO_EINVAL);
     CHECK(cosmo_mmap(NULL, 4096, COSMO_PROT_READ, COSMO_MAP_ANONYMOUS | (1 << 30)) == -COSMO_EINVAL);
-    CHECK(cosmo_mount("none", "/tmp", "ramfs", 1u << 5) == -COSMO_EINVAL);
-    CHECK(cosmo_umount2("/tmp", 1u << 5) == -COSMO_EINVAL);
+    CHECK(cosmo_mkdir("/tmp/flagm", 0755) == 0);
+    CHECK(cosmo_mount("none", "/tmp/flagm", "ramfs", 1u << 5) == -COSMO_EINVAL);
+    CHECK(cosmo_mount("none", "/tmp/flagm", "ramfs", COSMO_MOUNT_RDONLY) == 0);
+    CHECK(cosmo_umount2("/tmp/flagm", 1u << 5) == -COSMO_EINVAL);
+    CHECK(cosmo_umount2("/tmp/flagm", 0) == 0);
+    CHECK(cosmo_rmdir("/tmp/flagm") == 0);
 
     long h = cosmo_open("/tmp/usertest.txt", COSMO_O_RDWR | COSMO_O_CREAT | COSMO_O_TRUNC, 0644);
     CHECK(h >= 3);
