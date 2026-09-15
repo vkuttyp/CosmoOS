@@ -1961,11 +1961,12 @@ See [docs/development.md](docs/development.md).
   that made the new root durable, which is correct for crash safety and
   costs the previous generation's copy-on-write casualties. Measured
   across 199 replayed prefixes: 162 leaked, worst 18 blocks, 1912 in
-  all, each reclaimed and clean afterwards. 279 self-tests on both
-  architectures; fourteen bug-proofs, two of which exposed tests that
-  could not fail. Comparing the inode count at all exposed a repair that
-  fought itself: clearing an orphan lowers that total, and the counter
-  repair wrote the pre-repair number back over it (PR #144).
+  all, each reclaimed and clean afterwards. Repair is an argument from
+  absence, so it runs only on a walk that is sure of itself: one
+  unreadable directory block reports every file named inside it as an
+  orphan whose blocks are leaked, and repairing that image would destroy
+  them. 281 self-tests on both architectures; seventeen bug-proofs, two
+  of which exposed tests that could not fail (PR #144).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

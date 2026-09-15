@@ -829,6 +829,26 @@ chain the pass follows is bounded (`CFS_CHECK_MAX_CHAIN`, 4096, and a
 directory depth of 64), so a cycle written by a corruption is a finding
 rather than a hang.
 
+**Repair acts only on a walk that is sure of itself.** Every repair is
+an argument from absence -- a block nothing claimed, an inode no name
+reached, a link count no entry supported -- so when the walk had to skip
+something, "nothing reaches this" may only mean "this pass did not get
+there". An unreadable block, a malformed entry, an entry naming a slot
+that is free, a chain that cycles: any of them and repair does nothing
+and sets `repair_refused`. Without that rule, one bad directory block
+would have turned every file named inside it into an orphan whose blocks
+were then freed, which is the checker destroying what it was called to
+protect. The repairs themselves work from the maps rather than from the
+eight names the report carries for a reader, so a filesystem with nine
+orphans does not keep one.
+
+**A slot must be the inode its position means.** The walk reaches an
+inode by its place in the map, so a slot whose own `ino` disagrees, or
+that sits past `next_ino`, is malformed: it is named, the answer is
+marked incomplete, and nothing in it is claimed. Believing the field
+instead would file the inode's accounting under a number that does not
+exist, silently, because the maps are sized on `next_ino`.
+
 **What a post-crash image may have, and why.** A block freed during a
 transaction keeps its bitmap bit until the commit *after* the one that
 made the new root durable: the frees are applied once "the new root is

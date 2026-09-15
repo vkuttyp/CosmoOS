@@ -62,6 +62,29 @@ reading:
    corruption, so the list of ways to break a filesystem lives in one
    place and every class a test can report is one a test produced on
    purpose.
+10. **Repair is an argument from absence, so it needs a sure walk.**
+    Every repair the pass makes says "nothing reaches this". When the
+    walk had to skip something, that means "this pass did not get
+    there", and freeing those blocks destroys a live file.
+    `cosmofs-check-partial` proved it on the first run after it was
+    written: one unreadable directory block reports every file named
+    inside it as an orphan with leaked blocks. Repair now runs only on a
+    sound walk and reports `repair_refused` otherwise. Two more cases
+    reach the same trap without anything being unreadable: an entry the
+    walk skips for a bad type, and an entry whose inode number was
+    overwritten, both of which leave a live inode unreferenced.
+11. **The eight names are a diagnosis, not a work list.** The orphan and
+    link-count repairs walked the report's capped name list, so a
+    filesystem with nine orphans kept one while the report said
+    repaired. Both walk the maps now.
+12. **A slot's own number cannot be taken on trust.** The walk reaches
+    an inode by position; a slot that disagrees had its blocks claimed
+    while its accounting was dropped by maps sized on `next_ino`.
+
+Differences 10, 11 and 12 came from the pull request's review rather
+than from a test, which is the honest record: the tests that now assert
+them were written after a reader pointed at the code and asked what
+happens when the walk is wrong.
 
 This report closes the first clause of the inventory's §3
 row "no fsck; no checksum algorithm id in the metadata header" (audit
@@ -282,7 +305,16 @@ second extent" is a diagnosis.
 
 `COSMOFS_CHECK_REPAIR` is off by default; the pass is read-only and
 holds no transaction. With it on, and only with it on, the checker
-repairs exactly four classes, each of which has one right answer:
+repairs exactly four classes, each of which has one right answer.
+
+**And only when the walk is sure.** Every one of those four is an
+argument from absence, so a walk that had to skip something -- an
+unreadable block, a malformed entry, an entry naming a free slot, a
+chain that cycles -- makes "nothing reaches this" mean "this pass did
+not get there". Repair then does nothing and says `repair_refused`. This
+is not a caution added for tidiness: `cosmofs-check-partial` reports
+every file named inside a broken directory block as an orphan whose
+blocks are leaked, and repairing that image would destroy them.
 
 - **`alloc_not_seen`**: clear the bit. Nothing references the block.
 - **`orphan`**: free the inode's blocks and zero the inode, which is
@@ -462,6 +494,7 @@ struct cosmofs_check_report {
     uint64_t bytes_allocated; /* the chunked maps, so the cost is visible */
     bool partial;             /* something was unreadable: the answer is incomplete */
     bool clean;               /* every class empty */
+    bool repair_refused;      /* repair asked for, and the walk was not sure enough */
     uint64_t elapsed_ns;
 };
 
@@ -557,7 +590,8 @@ What the design named, and where it is:
 | `cosmofs-check-leak` | `cosmofs-check-leak`, unchanged: the one class with a repair worth its own test |
 | `-crosslink`, `-nlink`, `-orphan`, `-dangling`, `-free-in-use`, `-dirbad`, `-counters` | `cosmofs-check-faults`, one sub-case each, every one asserting the class fires, the count is exactly what the fault made it, the offender is named, and repair either fixes it or refuses |
 | `cosmofs-check-snapshot` | `cosmofs-check-snapshot`, unchanged |
-| `cosmofs-check-partial` | `cosmofs-check-partial`: a directory block broken off the mount, the block named, the report marked incomplete, and the pass proved to reach its last phase |
+| `cosmofs-check-partial` | `cosmofs-check-partial`: a directory block broken off the mount, the block named, the report marked incomplete, the pass proved to reach its last phase, and repair proved to refuse |
+| -- | `cosmofs-check-many-orphans` and `cosmofs-check-slot-identity`, neither in the design: both exist because a review found the defect they assert |
 | `cosmofs-replay` (extended) | extended, but asserting *no finding a crash cannot explain* rather than clean -- see difference 2 above |
 | `cosmofs-crash-orphan` | `cosmofs-check-orphan-crash`, the same test under the checker's name |
 
@@ -566,13 +600,14 @@ reported from four places (the inode map's chain, the snapshot list, a
 deadlist, an inode's block chain) and no test makes one: a cycle needs a
 metadata block written with a pointer back to itself, which is a
 corruption hook that writes structure rather than flipping a field, and
-none of the eight does. The bound it enforces (`CFS_CHECK_MAX_CHAIN`,
+none of the nine does. The bound it enforces (`CFS_CHECK_MAX_CHAIN`,
 4096) is what stops the pass hanging on one, and that bound is exercised
-by nothing. `dir_bad` has four sites and the hook manufactures one (a
-type that disagrees with its inode); the over-long `namelen`, the
-directory with two parents, and the pointer outside the pool are
-reported by code that no test has fired. **Both are named in the
-inventory rather than left in a comment.**
+by nothing. `dir_bad` is reported from six places and two are fired by a
+test -- a type that disagrees with its inode, and a slot whose number is
+not its position. The other four are not: a block pointer outside the
+pool's range, a snapshot member table whose count does not fit its
+block, an over-long `namelen`, and a directory reached from two parents.
+**Both are named in the inventory rather than left in a comment.**
 
 ### As run
 
@@ -580,13 +615,15 @@ The unit (PR #144, 2026-09-15), on both architectures:
 
 | run | result |
 | --- | --- |
-| `make test` (x86-64, AArch64) | 279 self-tests pass, including the six checker tests |
+| `make test` (x86-64, AArch64) | 281 self-tests pass, including the eight checker tests |
 | `cosmofs-check-clean` | 23 blocks seen, 489 free, 5 inodes, 2 directories; `seen + free == total` (35 ms) |
 | `cosmofs-check-leak` | one leaked block found by number and given back; a second pass is clean (41 ms) |
 | `cosmofs-check-faults` | seven manufactured faults, each found by name: four repaired, three refused. The counter case breaks both superblock totals in opposite directions and asserts two findings and two repairs (229 ms, seven fixtures rather than seven walks) |
 | `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion (39 ms) |
 | `cosmofs-check-orphan-crash` | inode 4 survives its unlink with its blocks; repair reclaims them and the free count returns exactly (58 ms) |
-| `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached (35 ms) |
+| `cosmofs-check-partial` | directory inode 2 unreadable, 3 blocks stranded by the names that went with the block, report marked incomplete, final comparison still reached, **and repair refused** (35 ms) |
+| `cosmofs-check-many-orphans` | twelve orphans, eight named, all twelve repaired in one pass and none left (21 ms) |
+| `cosmofs-check-slot-identity` | a slot whose number is not its position is named by position, marks the answer incomplete, and repair refuses (16 ms) |
 | `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
 
 The four leak numbers are **identical on x86-64 and AArch64**, which is
@@ -613,8 +650,11 @@ about scheduling.
 | `abort-on-unreadable`: stop comparing once anything is unreadable | `cosmofs-check-partial` fails: the pass never reaches its last phase |
 | `one-counter-only`: compare the free count and not the inode count | `cosmofs-check-faults` fails: one finding where two totals are wrong |
 | `counter-blind-repair`: write both counted totals back regardless | `cosmofs-check-faults` and `cosmofs-check-orphan-crash` fail: the repair undoes itself |
+| `repair-ignores-doubt`: repair an incomplete walk | 3 fail, `cosmofs-check-partial` among them |
+| `repair-first-eight`: the name list as a work list again | `cosmofs-check-many-orphans` fails: eight repaired of twelve |
+| `slot-number-trusted`: believe a slot's own number | `cosmofs-check-slot-identity` fails: nothing is reported |
 
-Two of those fourteen passed at first and both were fixed rather than
+Two of those seventeen passed at first and both were fixed rather than
 excused. `no-crash-check` passed because removing an assertion cannot
 fail a test with no other claim on it, so `cosmofs-replay` now asserts
 that it measured something; `no-snapshot-walk` broke the build instead
