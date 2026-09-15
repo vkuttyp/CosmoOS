@@ -2052,6 +2052,22 @@ bool selftest_fsctl_check(const char **reason)
     cmd.version = COSMO_FSCTL_VERSION;
     CHECK(file_write(f, &cmd, sizeof(cmd) - 1) == -EINVAL);   /* whole, at its exact size */
 
+    /*
+     * Every bit of `flags` must mean something to the op it is sent
+     * with. A bit nobody defined is a caller's mistake now and an
+     * ambiguity later, when a version gives it a meaning and an old
+     * writer turns out to have been setting it.
+     */
+    cmd.flags = 1u << 31;
+    CHECK(file_write(f, &cmd, sizeof(cmd)) == -EINVAL);
+    scmd.flags = COSMO_FSCTL_F_REPAIR;          /* CHECK-only, on a SCRUB */
+    CHECK(file_write(f, &scmd, sizeof(scmd)) == -EINVAL);
+    struct cosmo_fsctl lcmd = { .version = COSMO_FSCTL_VERSION, .op = COSMO_FSCTL_LIST,
+                                .flags = COSMO_FSCTL_F_REPAIR };
+    CHECK(file_write(f, &lcmd, sizeof(lcmd)) == -EINVAL);   /* LIST takes none */
+    cmd.flags = 0;
+    scmd.flags = 0;
+
     kfree(buf);
     file_put(f);
     check_teardown(bd);

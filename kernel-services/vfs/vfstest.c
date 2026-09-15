@@ -1175,6 +1175,18 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
     /*
+     * A namespace made *now* must not inherit this mount. The unmount
+     * counted the references before it began to drain and decided it
+     * was the last one out; a copy taken during the drain would leave
+     * the new namespace holding a mount that is about to be freed.
+     */
+    struct mount_ns *racer = NULL;
+    CHECK(mountns_create(mountns_initial(), &racer) == 0);
+    CHECK(!mountns_sees(racer, m));
+    mountns_put(racer);
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+
+    /*
      * And one unmount at a time. Note what this does and does not prove:
      * the refusal comes from `follow_mount`, which will not walk to a
      * mount that is unmounting, so the second unmount fails while

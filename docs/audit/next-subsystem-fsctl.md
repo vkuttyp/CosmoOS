@@ -656,21 +656,21 @@ filesystem the commands are pointed at.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `vfs-mount-id` | two mounts get two ids; an unmount and a fresh mount at the same path get *different* ids; the same mount in two namespaces reports one id | make the id the table index: the third assertion fails, because the slot is reused |
-| `vfs-mount-pin` | an unmount does not complete while a pass holds the mount, and completes once it is released; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s drain: the unmount completes while a pass still holds the mount |
-| `vfs-mount-pin-drain` | an unmount begun while a pass is in flight waits and then succeeds; a pass that tries to start after the unmount began is refused, so the count only falls; a forced unmount waits on the same drain | let `vfs_mount_acquire` ignore `unmounting`: a pass starts during the drain and the unmount waits for a mount that never quiesces, which the test catches as a timeout |
-| `vfs-mount-pin-wake` | the release that takes the count to zero wakes the drain: a second thread acquires, the first begins an unmount and blocks, the second releases, and the unmount completes without anything else happening on the machine | wake the queue on every release rather than on the falling edge, and then not at all on the last one: the unmount never returns, which is the missed wakeup this protocol exists to prevent |
-| `vfs-umount-exclusive` | a second unmount of a mount already draining is `-EBUSY` and changes nothing; after the first completes, the mount is gone and a third is `-EINVAL` rather than a double teardown; a first unmount that is refused clears the flag and a later one succeeds | drop the `unmounting` test from `vfs_umount2`: two unmounts enter the gap the drain opens and both remove the same namespace links |
-| `fsctl-perm` | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
-| `fsctl-list` | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
-| `fsctl-list-root` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
-| `fsctl-list-ns` | a child in a new mount namespace lists its own mounts, and the parent's private mount is absent from it and present in the parent's listing | same injection, from the other side |
-| `fsctl-check` | a manufactured leak is found through the device, named by block, with the same numbers `cosmofs_check` reports directly; `REPAIR` gives the block back and a second command is clean | dispatch `CHECK` to the scrub: the class counts are all zero |
-| `fsctl-caps` | a ramfs mount lists no passes and a `CHECK` against it is `-EOPNOTSUPP`, *before* any lock is taken | call through a null `fs_type` entry: the kernel faults, which the test catches as a failure to return the error |
-| `fsctl-stale-id` | an id whose mount is gone is `-ENOENT`, not a hit on a reused slot | as `vfs-mount-id`'s injection: a reused id makes this command reach a different filesystem |
-| `fsctl-result-per-open` | two open files run two commands against two mounts and each reads its own result; a read with no prior command returns zero bytes | keep the result in one global: the two readers see one answer |
-| `fsctl-release` | a release build contains the device and both passes and a check through it works -- the first time either pass runs outside a debug build | remove the device from the release build: the release step fails to find it, which is what the `#if CONFIG_FAULTINJECT` stub lesson is about |
-| `fs_selftest` (user mode) | `fsctl list` names the mounted filesystems; `fsctl check` reports a clean filesystem; the exit status is zero for a clean check *and* for a check that found faults, non-zero only for a refusal | make a finding an error exit: the second assertion fails |
+| `vfs-mount-id` — built | two mounts get two ids; an unmount and a fresh mount at the same path get *different* ids; the same mount in two namespaces reports one id | make the id the table index: the third assertion fails, because the slot is reused |
+| `vfs-mount-pin` — built | an unmount does not complete while a pass holds the mount, and completes once it is released; the reference survives a concurrent mount of something else | drop `passes_running` from `vfs_umount`'s drain: the unmount completes while a pass still holds the mount |
+| `vfs-mount-pin-drain` — folded into `vfs-mount-pin` | an unmount begun while a pass is in flight waits and then succeeds; a pass that tries to start after the unmount began is refused, so the count only falls; a forced unmount waits on the same drain | let `vfs_mount_acquire` ignore `unmounting`: a pass starts during the drain and the unmount waits for a mount that never quiesces, which the test catches as a timeout |
+| `vfs-mount-pin-wake` — folded into `vfs-mount-pin` | the release that takes the count to zero wakes the drain: a second thread acquires, the first begins an unmount and blocks, the second releases, and the unmount completes without anything else happening on the machine | wake the queue on every release rather than on the falling edge, and then not at all on the last one: the unmount never returns, which is the missed wakeup this protocol exists to prevent |
+| `vfs-umount-exclusive` — folded into `vfs-mount-pin` | a second unmount of a mount already draining is `-EBUSY` and changes nothing; after the first completes, the mount is gone and a third is `-EINVAL` rather than a double teardown; a first unmount that is refused clears the flag and a later one succeeds | drop the `unmounting` test from `vfs_umount2`: two unmounts enter the gap the drain opens and both remove the same namespace links |
+| `fsctl-perm` — **not built** | an unprivileged open of `/dev/fsctl` is refused; a privileged one succeeds; a command from an unprivileged caller that somehow holds the fd is `-EPERM` | check only the mode: the second half passes and the third fails |
+| `fsctl-list` — built | every mount the namespace holds appears once with its id, type, capabilities and this namespace's path; a mount only another namespace holds does not appear | list `g_mounts` directly rather than the namespace's view: the isolation assertion fails |
+| `fsctl-list-root` — folded into `fsctl-list` | the root filesystem is in the listing, at `/`, in a fresh namespace as well as the initial one -- it holds no `mount_ns_ref` in either | build the listing from the namespace's `mounts` list alone: the root is missing, which is the filesystem most worth checking |
+| `fsctl-list-ns` — folded into `fsctl-list`, from the other side | a child in a new mount namespace lists its own mounts, and the parent's private mount is absent from it and present in the parent's listing | same injection, from the other side |
+| `fsctl-check` — built | a manufactured leak is found through the device, named by block, with the same numbers `cosmofs_check` reports directly; `REPAIR` gives the block back and a second command is clean | dispatch `CHECK` to the scrub: the class counts are all zero |
+| `fsctl-caps` — folded into `fsctl-check` | a ramfs mount lists no passes and a `CHECK` against it is `-EOPNOTSUPP`, *before* any lock is taken | call through a null `fs_type` entry: the kernel faults, which the test catches as a failure to return the error |
+| `fsctl-stale-id` — folded into `fsctl-check` | an id whose mount is gone is `-ENOENT`, not a hit on a reused slot | as `vfs-mount-id`'s injection: a reused id makes this command reach a different filesystem |
+| `fsctl-result-per-open` — built | two open files run two commands against two mounts and each reads its own result; a read with no prior command returns zero bytes | keep the result in one global: the two readers see one answer |
+| `fsctl-release` — **not built as a test** | a release build contains the device and both passes and a check through it works -- the first time either pass runs outside a debug build | no self-test runs in a release build. Replaced by a line at boot, checked by reading the release boot log; weaker, and "As built" says so |
+| `fs_selftest` (user mode) — built as `fsctl_selftest` | `fsctl list` names the mounted filesystems; `fsctl check` reports a clean filesystem; the exit status is zero for a clean check *and* for a check that found faults, non-zero only for a refusal | make a finding an error exit: the second assertion fails |
 
 **Vacuity, named in advance.** `fsctl-check` asserts the numbers match
 what `cosmofs_check` returns when called directly, not merely that a
@@ -803,7 +803,29 @@ Differences from the plan, each found by building rather than reading.
    is mounted when init runs -- the listing is a ramfs and a procfs --
    so a test that only named filesystems without passes would have
    proved the refusal and nothing else.
-8. **And the first real filesystem it was pointed at was not clean.**
+8. **A namespace made during the drain would have inherited a dying
+   mount.** The drain drops `g_mounts_lock`, and `mountns_create` walks
+   the mount list under it: a copy taken in that window adds a reference
+   to a mount whose teardown has already counted the references and
+   decided to proceed, leaving the new namespace holding freed memory.
+   `mountns_create` now skips a mount that is unmounting. This is the
+   second thing found in that window, after the second unmount, and the
+   report's risk section predicted there would be more.
+9. **A mount id is a number, whole, or it is not an id.** The tool used
+   `strtoull` and ignored where it stopped, so `fsctl check 12junk
+   --repair` would have repaired mount 12. This command mutates
+   filesystems; a misread argument is not cosmetic.
+10. **A fixed listing buffer is a limit on how many filesystems an
+    operator can find.** The kernel returns the listing whole or refuses
+    a buffer too small, so the tool's 64-record allocation meant a
+    machine with more than 64 mounts had none of them visible. It grows
+    until it fits, and the user-mode test makes twenty mounts to walk
+    that path.
+11. **Unknown flag bits were accepted.** `LIST` ignored all of them,
+    `SCRUB` took the check-only repair bit. Each op now refuses a bit it
+    does not define, which is a caller's mistake caught now instead of
+    an ambiguity when a later version gives that bit a meaning.
+12. **And the first real filesystem it was pointed at was not clean.**
    See "As run": 28 leaked blocks on the boot's own test disk, which is
    a fact about cosmofs rather than about this unit, and the reason this
    unit exists.

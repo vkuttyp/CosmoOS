@@ -38,6 +38,24 @@ static const char *const class_name[COSMO_FSCTL_CLASSES] = {
     "unreadable blocks",      /* unreadable */
 };
 
+/*
+ * A mount id, or -1. `strtoull` alone would take "12junk" for 12 and run
+ * against a filesystem the operator did not name -- and this command
+ * repairs filesystems, so a misread argument is not a cosmetic bug.
+ */
+static int parse_id(const char *s, unsigned long long *out)
+{
+    if (s == NULL || *s == '\0')
+        return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v == 0)
+        return -1;   /* zero names no mount, so it is as wrong as a letter */
+    *out = v;
+    return 0;
+}
+
 static int fsctl_open(void)
 {
     int fd = open("/dev/fsctl", O_RDWR);
@@ -60,7 +78,8 @@ static int run(int fd, unsigned op, unsigned long long id, unsigned flags, void 
     }
     long n = read(fd, buf, cap);
     if (n < 0) {
-        perror("fsctl: read");
+        if (errno != ERANGE)   /* the caller retries a short buffer */
+            perror("fsctl: read");
         return -1;
     }
     return (int)n;
@@ -68,11 +87,33 @@ static int run(int fd, unsigned op, unsigned long long id, unsigned flags, void 
 
 static int cmd_list(int fd)
 {
-    size_t cap = sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount);
-    char *buf = malloc(cap);
-    if (buf == NULL)
-        return 1;
-    int n = run(fd, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+    /*
+     * The kernel returns the listing whole or refuses a buffer too small
+     * with -ERANGE, so a fixed size is a limit on how many mounts a
+     * machine may have before its operator cannot find any of them.
+     * Grow until it fits.
+     */
+    size_t room = 16;
+    char *buf = NULL;
+    int n = -1;
+    for (unsigned tries = 0; tries < 12; tries++) {
+        size_t cap = sizeof(struct cosmo_fsctl_result) + room * sizeof(struct cosmo_fsctl_mount);
+        char *bigger = realloc(buf, cap);
+        if (bigger == NULL) {
+            free(buf);
+            fprintf(stderr, "fsctl: out of memory for %zu mounts\n", room);
+            return 1;
+        }
+        buf = bigger;
+        n = run(fd, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+        if (n >= 0)
+            break;
+        if (errno != ERANGE) {
+            free(buf);
+            return 1;
+        }
+        room *= 2;
+    }
     if (n < (int)sizeof(struct cosmo_fsctl_result)) {
         free(buf);
         return 1;
@@ -175,9 +216,21 @@ int main(int argc, char **argv)
             close(fd);
             return 2;
         }
-        rc = cmd_check(fd, strtoull(argv[2], NULL, 10), repair);
+        unsigned long long id;
+        if (parse_id(argv[2], &id) != 0) {
+            fprintf(stderr, "fsctl: %s: not a mount id\n", argv[2]);
+            close(fd);
+            return 2;
+        }
+        rc = cmd_check(fd, id, repair);
     } else if (strcmp(argv[1], "scrub") == 0 && argc == 3) {
-        rc = cmd_scrub(fd, strtoull(argv[2], NULL, 10));
+        unsigned long long id;
+        if (parse_id(argv[2], &id) != 0) {
+            fprintf(stderr, "fsctl: %s: not a mount id\n", argv[2]);
+            close(fd);
+            return 2;
+        }
+        rc = cmd_scrub(fd, id);
     } else {
         usage();
         rc = 2;

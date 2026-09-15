@@ -116,7 +116,17 @@ int mountns_create(struct mount_ns *parent, struct mount_ns **out)
     int rc = 0;
     struct mount *mnt;
     list_for_each_entry(mnt, &g_mounts, link) {
-        if (mnt == g_root_mount || !mountns_sees(parent, mnt))
+        /*
+         * Not the root (it is seen by every namespace without a ref),
+         * not a mount this namespace's parent cannot see, and **not one
+         * being unmounted**. That last is not caution: vfs_umount2 drops
+         * g_mounts_lock while it drains a maintenance pass
+         * (docs/audit/next-subsystem-fsctl.md), and a copy made in that
+         * window would add a reference to a mount whose teardown has
+         * already counted the references and decided to proceed. The
+         * new namespace would be left holding a freed mount.
+         */
+        if (mnt == g_root_mount || mnt->unmounting || !mountns_sees(parent, mnt))
             continue;
         /* The child holds it where the parent did: a copied view is the
          * same mounts at the same places, and the path travels with the

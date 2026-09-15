@@ -259,6 +259,16 @@ static int64_t fsctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
     if (cmd.version != COSMO_FSCTL_VERSION)
         return -EINVAL;
 
+    /*
+     * Every bit of `flags` must mean something to this op. Accepting a
+     * bit nobody defined makes a caller's mistake silent now and makes
+     * it ambiguous later, when a version gives that bit a meaning and
+     * an old writer turns out to have been setting it.
+     */
+    uint32_t allowed = cmd.op == COSMO_FSCTL_CHECK ? COSMO_FSCTL_F_REPAIR : 0u;
+    if ((cmd.flags & ~allowed) != 0)
+        return -EINVAL;
+
     int64_t rc;
     switch (cmd.op) {
     case COSMO_FSCTL_LIST:

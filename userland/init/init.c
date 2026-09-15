@@ -3363,6 +3363,45 @@ static void fsctl_selftest(void)
     CHECK(fsctl_run("nonsense", NULL, NULL) != 0);
 
     /*
+     * An id is a number, whole, or it is not an id. "12junk" read as 12
+     * would run against a filesystem the operator did not name -- and
+     * this command repairs filesystems, so that is not cosmetic.
+     */
+    CHECK(fsctl_run("check", "12junk", NULL) != 0);
+    CHECK(fsctl_run("check", "", NULL) != 0);
+    CHECK(fsctl_run("check", "-1", NULL) != 0);
+    CHECK(fsctl_run("check", "0", NULL) != 0);
+    CHECK(fsctl_run("check", "99999999999999999999999999", NULL) != 0);
+    CHECK(fsctl_run("scrub", "1x", NULL) != 0);
+
+    /*
+     * More mounts than the tool's first guess. The kernel returns a
+     * listing whole or refuses a buffer too small, so a fixed size in
+     * the tool would be a limit on how many filesystems a machine may
+     * have before its operator can find any of them.
+     */
+    CHECK(mkdir("/tmp/many", 0755) == 0 || errno == EEXIST);
+    unsigned made = 0;
+    for (unsigned i = 0; i < 20; i++) {
+        char d[48];
+        snprintf(d, sizeof(d), "/tmp/many/%u", i);
+        if (mkdir(d, 0755) != 0 && errno != EEXIST)
+            break;
+        if (cosmo_mount("none", d, "ramfs", 0) != 0)
+            break;
+        made++;
+    }
+    CHECK(made > 16);                        /* past the tool's first allocation */
+    CHECK(fsctl_run("list", NULL, NULL) == 0);
+    for (unsigned i = 0; i < made; i++) {
+        char d[48];
+        snprintf(d, sizeof(d), "/tmp/many/%u", i);
+        CHECK(cosmo_umount(d) == 0);
+        CHECK(rmdir(d) == 0);
+    }
+    CHECK(rmdir("/tmp/many") == 0);
+
+    /*
      * And a real one. Nothing checkable is mounted at boot, so mount the
      * test disk here: a check that only ever ran against filesystems
      * with no passes would prove the refusal and nothing else.
