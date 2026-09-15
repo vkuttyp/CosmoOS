@@ -410,9 +410,9 @@ is how the queueing is exercised (`blk-queue`).
 Multiple transaction groups in flight (open, quiescing, syncing): one
 open transaction per mount is still committed under `cfs->lock`, so
 mutations wait during a commit. Snapshots, a pool-wide checksum tree,
-multi-device pools, a scrub, `fsck` and a host `mkfs` remain future
-work; the format keeps `snap_root`, `csum_root` and `members` reserved
-for them.
+multi-device pools and a host `mkfs` remain future work; the format
+keeps `snap_root`, `csum_root` and `members` reserved for them. The
+scrub and the structural check are built (below).
 
 
 ## Format version 3: snapshots
@@ -768,6 +768,104 @@ inode — its metadata blocks by their own headers, its data blocks
 against its checksum tree. It reports blocks read, blocks repaired, and
 blocks no copy could satisfy. Finding an error there is the same event
 as finding it on a read, except that nobody was waiting for the answer.
+
+### The structural check
+
+The scrub asks whether every block is still what was written. The check
+(`cosmofs_check`, `cosmofs_check.c`) asks whether the blocks add up:
+whether what the structures claim agrees with the allocator, whether an
+inode's link count matches the entries that name it, and whether
+anything is reachable from nowhere.
+
+**Two maps, and the difference between them is the design.** `seen` is a
+union over everything — the live generation and every snapshot — and is
+what the allocation bitmap is compared against, because a block a
+snapshot holds is not free. `live` is the live generation's own claims,
+*every* claim and not only file content, and is the only map in which a
+second claim is a finding: two files sharing an extent, or an extent
+block that is also somebody's data. A snapshot sharing a block with the
+live tree is the normal case and is never reported — a checker that got
+this wrong would condemn every snapshotted filesystem, which is why
+`cosmofs-check-snapshot` exists.
+
+Both maps are chunked into pages with a pointer array, because
+`KMALLOC_MAX_SIZE` (4 MiB) would otherwise cap the checker at a 128 GiB
+filesystem and fail deterministically above it. The chunking does not
+remove the ceiling, it moves it: the pointer array is itself one
+allocation, so 4 MiB of pointers to pages of bits reach about 64 TiB.
+Everything is allocated before the walk starts, so a filesystem too
+large for the memory available is `-ENOMEM` rather than a half-finished
+answer.
+
+**What it does not check.** Extents are claimed, not validated against
+each other: an overlap inside one inode is caught only when it makes two
+claims on one block, and an `lblk` ordering fault that does not is a
+wrong file rather than a wrong filesystem. A name repeated inside one
+directory is not detected either, because the pass keeps maps of numbers
+and that needs a set of strings. `next_ino` is not compared: it is a
+high-water mark rather than a total. All three are inventory rows.
+
+**Ten classes, four repairs.** Leaked blocks, orphans, wrong link counts
+and wrong superblock totals each have one right answer and are repaired
+with `COSMOFS_CHECK_REPAIR`. The rest are reported: a block both
+reachable and free is not fixed by setting its bit while the filesystem
+is mounted and the allocator may already have handed it out, and
+choosing which of two inodes keeps a shared block is data loss dressed
+as a fix. A repair must leave the classes it claims empty and every
+refused class unchanged — not "clean", which a filesystem carrying a
+cross-link can never be.
+
+The pass is a **debug-build tool** (`CONFIG_DEBUG`), like the crash
+suite that drives it: nothing in a release build calls it, because
+nothing can -- there is no operator interface to a mount's maintenance
+passes yet, which the deferred-work inventory now records as its own
+row.
+
+**A read that fails does not end the pass.** An unreadable metadata or
+directory block is a finding of its own and sets `partial`, and the walk
+carries on: "one block is unreadable" and "the other nine classes were
+never looked at" are different facts, and the operator needs both. Every
+chain the pass follows is bounded (`CFS_CHECK_MAX_CHAIN`, 4096, and a
+directory depth of 64), so a cycle written by a corruption is a finding
+rather than a hang.
+
+**Repair acts only on a walk that is sure of itself.** Every repair is
+an argument from absence -- a block nothing claimed, an inode no name
+reached, a link count no entry supported -- so when the walk had to skip
+something, "nothing reaches this" may only mean "this pass did not get
+there". An unreadable block, a malformed entry, an entry naming a slot
+that is free, a chain that cycles: any of them and repair does nothing
+and sets `repair_refused`. Without that rule, one bad directory block
+would have turned every file named inside it into an orphan whose blocks
+were then freed, which is the checker destroying what it was called to
+protect. The repairs themselves work from the maps rather than from the
+eight names the report carries for a reader, so a filesystem with nine
+orphans does not keep one.
+
+**A slot must be the inode its position means.** The walk reaches an
+inode by its place in the map, so a slot whose own `ino` disagrees, or
+that sits past `next_ino`, is malformed: it is named, the answer is
+marked incomplete, and nothing in it is claimed. Believing the field
+instead would file the inode's accounting under a number that does not
+exist, silently, because the maps are sized on `next_ino`.
+
+**What a post-crash image may have, and why.** A block freed during a
+transaction keeps its bitmap bit until the commit *after* the one that
+made the new root durable: the frees are applied once "the new root is
+durable" and dirty chunks for the next commit. A block the old root
+still names cannot be freed before the new root lands, so the ordering
+is correct — and its price is that a crash strands the previous
+generation's copy-on-write casualties, allocated and referenced by
+nothing, which no later mount reconsiders. The same is true of a file
+unlinked while a handle still holds it: `cfs_evict` frees its blocks
+when the last reference goes, and there is no on-disk record of the
+intention, so a crash in that window leaves an orphan.
+
+Both are the same class and both were invisible. The crash suite now
+measures them: **162 of 199 replayed prefixes leaked blocks, the worst
+18, 1912 in all**, each reclaimed by a repair pass that left the image
+clean. That is the number an on-disk orphan list would be trying to
+reduce, and it is recorded here because it was not known before.
 
 ## Format version 6: compressed records
 

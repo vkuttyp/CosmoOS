@@ -41,7 +41,9 @@ corruption".
 
 ## Responsibilities
 
-- The on-disk format (version 2): two superblock slots, a two-level
+- The on-disk format (`CFS_VERSION` 8, mounting back to
+  `CFS_VERSION_MIN` 2; what each version added is in `design.md`): two
+  superblock slots, a two-level
   inode map, 256-byte inodes with 10 direct extents and a chain of
   extent blocks, hole-capable extents that carry their logical position,
   a per-inode checksum tree over data and directory blocks, a bitmap
@@ -57,18 +59,27 @@ corruption".
 - Formatting a device (`cosmofs_format`), mounting (slot selection,
   bitmap load, free-count reconciliation), unmounting (commit, or
   discard under the test hook), statistics.
-- Inode semantics: types regular and directory, link counts, sizes,
-  times, owner ids stored, parent pointers for `..`, freeing of blocks
-  and inode slots when an unlinked inode's last reference goes.
+- Inode semantics: types regular, directory and symbolic link, link
+  counts, sizes, times, owner ids stored, parent pointers for `..`,
+  freeing of blocks and inode slots when an unlinked inode's last
+  reference goes.
+- Snapshots (version 3), many members (4), mirrored members (5),
+  compressed records (6), encryption at rest (7) and symbolic links (8),
+  each described under its own heading in `design.md`.
+- Two maintenance passes over a mounted filesystem, both debug-build
+  tools: the scrub (`cosmofs_scrub`), which asks whether every block is
+  still what was written, and the structural check (`cosmofs_check`),
+  which asks whether the blocks add up.
 
 ## Non-responsibilities
 
 - A pool-wide checksum tree (the superblock's `csum_root` stays
-  reserved; checksums are per inode), snapshots (`snap_root` reserved;
-  every committed root is already immutable), multi-device pools and
-  redundancy (`members` reserved, the pool is the seam), compression,
-  quotas, symbolic or hard links, inode number reuse, transaction groups
-  pipelined behind an open one, a host `mkfs` or `fsck`, and any
+  reserved; checksums are per inode), parity or erasure coding across
+  the members of a pool (mirroring is built, format version 5), quotas,
+  hard links, inode number reuse, transaction groups pipelined behind an
+  open one, a host `mkfs` and an *offline* checker over a
+  block device (the mounted one is built — `design.md`, "The structural
+  check"), an operator interface to either maintenance pass, and any
   performance work beyond contiguity-aware allocation (linear
   directories, one lock per filesystem).
 
@@ -79,6 +90,8 @@ corruption".
 | `cosmofs_fs_type`, `cosmofs_init` | `kernel/cosmofs.h` | `kernel_main`, the VFS registry |
 | `cosmofs_format`, `cosmofs_stats`, `cosmofs_test_discard_on_unmount`, `cosmofs_test_set_writeback`, `cosmofs_test_set_writeback_interval` | `kernel/cosmofs.h` | self-tests |
 | `struct cfs_super`, `cfs_mhdr`, `cfs_inode`, `cfs_extent`, `cfs_dirent`, index helpers | `cosmofs_format.h` | the implementation, `tests/host/test_cosmofs.c` |
+| `cosmofs_scrub`, `cosmofs_check` (+ `struct cosmofs_check_report`, `COSMOFS_CHECK_REPAIR`) | `kernel/cosmofs.h` | the self-tests and the crash suite; debug builds only, and no operator interface yet |
+| `cosmofs_test_corrupt` (nine named corruptions) | `kernel/cosmofs.h` | the checker's tests: eight of the ten finding classes have a test that manufactures exactly one. `chain_cycle` has none, and four of `dir_bad`'s six sites have none; both are inventory rows |
 | `pool_*` | `kernel/storage.h` | cosmofs (its only I/O path) |
 
 See `design.md` for the layout and the transaction model, and

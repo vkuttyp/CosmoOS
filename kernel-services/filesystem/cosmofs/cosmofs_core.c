@@ -14,6 +14,7 @@
 #include <kernel/cosmofs.h>
 #include <kernel/crc32c.h>
 #include <kernel/errno.h>
+#include <kernel/vfs.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/panic.h>
@@ -269,6 +270,11 @@ int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot)
 
 /* --- allocation ------------------------------------------------------------ */
 
+bool cfs_bitmap_test(const struct cfs *fs, uint64_t lin)
+{
+    return lin < fs->nblocks && (fs->bitmap[lin / 8] & (1u << (lin % 8))) != 0;
+}
+
 static inline bool bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3] >> (i & 7)) & 1; }
 static inline void bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }
 static inline void bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
@@ -494,6 +500,26 @@ int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uin
     if (out->ino != ino || out->nlink == 0)
         return -ENOENT;
     return 0;
+}
+
+/* The slot as it is, links or no links. The ordinary read reports an
+ * inode with no links as absent, which is right for a lookup and wrong
+ * for the structural check: an inode with no links and blocks still
+ * allocated is exactly what it is looking for. */
+int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
+{
+    /* The same range the ordinary read accepts: numbers 1 to next_ino-1
+     * have been handed out, and the two readers must agree about which
+     * numbers exist or the check would ask about a slot no lookup can. */
+    if (ino == 0 || ino >= fs->sb.next_ino)
+        return -ENOENT;
+    struct cfs_buf *ib;
+    int rc = inode_block(fs, ino, false, false, &ib);
+    if (rc)
+        return rc;
+    memcpy(out, inode_slot(ib, ino), sizeof(*out));
+    cfs_buf_put(fs, ib);
+    return out->ino == ino ? 0 : -ENOENT;
 }
 
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
@@ -1051,6 +1077,165 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version)
     if (version < CFS_VERSION_MIN || version > CFS_VERSION)
         return -EINVAL;
     return format_at(&bd, 1, 1, version);
+}
+
+/*
+ * Break the filesystem in one named way (kernel/include/kernel/cosmofs.h).
+ * Each case manufactures exactly one finding of the structural check, so
+ * that every class it can report has a test that produced it on purpose.
+ */
+int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64_t ino, uint64_t *what)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return -EINVAL;
+
+    /*
+     * An inode number rather than a path: a filesystem-level hook has no
+     * business resolving names, it has to work on a filesystem whose
+     * directories are the broken part, and resolving one here would put
+     * a VFS symbol in this file that the fuzz harness has to link.
+     */
+    struct cfs_inode in;
+    if (ino != 0 && cfs_inode_read(fs, ino, &in) != 0)
+        return -ENOENT;
+
+    mutex_lock(&fs->lock);
+    int rc = 0;
+    uint64_t token = 0;
+    switch (kind) {
+    case COSMOFS_CORRUPT_LEAK: {
+        uint64_t blk = 0, got = 0;
+        rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, &blk, &got);
+        token = blk;
+        break;
+    }
+    case COSMOFS_CORRUPT_FREE_IN_USE: {
+        uint64_t lin = cfs_dva_lin(fs, in.direct[0].start);
+        if (lin == CFS_DVA_NONE) {
+            rc = -EINVAL;
+            break;
+        }
+        bit_clear(fs->bitmap, lin);
+        fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
+        fs->free_blocks++;
+        fs->sb.free_blocks++;
+        token = in.direct[0].start;
+        break;
+    }
+    case COSMOFS_CORRUPT_CROSSLINK: {
+        /* A second inode whose first extent is the named file's: two
+         * live claims on one block, which is the cross-link. */
+        uint64_t second = 0;
+        rc = cfs_inode_alloc(fs, &second);
+        if (rc)
+            break;
+        struct cfs_inode twin;
+        memset(&twin, 0, sizeof(twin));
+        twin.mode = CFS_MODE(CFS_TYPE_REG, 0644);
+        twin.nlink = 1;
+        twin.ino = second;
+        twin.parent = CFS_ROOT_INO;
+        twin.csum_algo = in.csum_algo;
+        twin.size = CFS_BLOCK;
+        twin.direct[0] = in.direct[0];
+        rc = cfs_inode_write(fs, second, &twin);
+        token = in.direct[0].start;
+        break;
+    }
+    case COSMOFS_CORRUPT_NLINK:
+        in.nlink++;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
+    case COSMOFS_CORRUPT_ORPHAN: {
+        /* An inode with a block and no name: what a crash between an
+         * unlink and the eviction that frees the blocks leaves. */
+        uint64_t lost = 0;
+        rc = cfs_inode_alloc(fs, &lost);
+        if (rc)
+            break;
+        struct cfs_inode dead;
+        memset(&dead, 0, sizeof(dead));
+        dead.mode = CFS_MODE(CFS_TYPE_REG, 0644);
+        dead.nlink = 0;
+        dead.ino = lost;
+        dead.parent = CFS_ROOT_INO;
+        dead.csum_algo = CFS_CSUM_CRC32C;
+        uint64_t blk = 0, got = 0;
+        rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, 0, 1, &blk, &got);
+        if (rc)
+            break;
+        dead.size = CFS_BLOCK;
+        dead.direct[0].start = blk;
+        dead.direct[0].count = 1;
+        dead.direct[0].lblk = 0;
+        rc = cfs_inode_write(fs, lost, &dead);
+        token = lost;
+        break;
+    }
+    case COSMOFS_CORRUPT_DANGLING:
+    case COSMOFS_CORRUPT_DIRENT: {
+        /* Both rewrite one entry of the root directory: the first to
+         * name a slot nothing allocated, the second to claim a type its
+         * inode does not have. */
+        struct cfs_inode root;
+        if (cfs_inode_read(fs, CFS_ROOT_INO, &root) != 0) {
+            rc = -EIO;
+            break;
+        }
+        uint8_t *block = kmalloc(CFS_BLOCK, 0);
+        if (block == NULL) {
+            rc = -ENOMEM;
+            break;
+        }
+        rc = cfs_dir_read_block_at(fs, &root, 0, block);
+        if (rc == 0) {
+            struct cfs_dirent *d = (struct cfs_dirent *)block;
+            bool done = false;
+            for (unsigned i = 0; i < CFS_DIRENTS_PER_BLOCK && !done; i++) {
+                if (d[i].ino == 0)
+                    continue;
+                if (kind == COSMOFS_CORRUPT_DANGLING) {
+                    token = fs->sb.next_ino + 1000;
+                    d[i].ino = token;
+                } else {
+                    token = d[i].ino;
+                    d[i].type = d[i].type == CFS_TYPE_DIR ? CFS_TYPE_REG : CFS_TYPE_DIR;
+                }
+                done = true;
+            }
+            rc = done ? cfs_dir_write_block_at(fs, &root, 0, block) : -ENOENT;
+        }
+        kfree(block);
+        break;
+    }
+    case COSMOFS_CORRUPT_INO_SLOT:
+        /* The slot keeps its position and loses its identity: the walk
+         * reaches it by position and must not believe the number in it.
+         * Nothing else changes, so a check that trusts the field sees an
+         * ordinary inode at a number that does not exist. */
+        in.ino = ino + 1000;
+        rc = cfs_inode_write(fs, ino, &in);
+        token = ino;
+        break;
+    case COSMOFS_CORRUPT_COUNTER:
+        /* Both of them, in opposite directions: the check must report one
+         * finding per counter rather than one for "the superblock". */
+        fs->free_blocks++;
+        fs->sb.free_blocks++;
+        if (fs->sb.inode_count > 0)
+            fs->sb.inode_count--;
+        token = fs->sb.free_blocks;
+        break;
+    default:
+        rc = -EINVAL;
+        break;
+    }
+    mutex_unlock(&fs->lock);
+    if (rc == 0 && what)
+        *what = token;
+    return rc;
 }
 
 /* --- mount / unmount ------------------------------------------------------------ */
