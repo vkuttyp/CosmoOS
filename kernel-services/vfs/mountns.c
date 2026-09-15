@@ -18,6 +18,7 @@
 #include <kernel/log.h>
 #include <kernel/mountns.h>
 #include <kernel/panic.h>
+#include <kernel/string.h>
 #include <kernel/process.h>
 #include <kernel/vfs.h>
 
@@ -69,13 +70,15 @@ bool mountns_sees(const struct mount_ns *ns, const struct mount *mnt)
 
 /* Add `ns` to what can see `mnt`. Takes the mountpoint's lock, the same
  * lock that guards where the mount is attached. */
-static int ns_add(struct mount_ns *ns, struct mount *mnt)
+static int ns_add(struct mount_ns *ns, struct mount *mnt, const char *path)
 {
     struct mount_ns_ref *ref = kmalloc(sizeof(*ref), KMEM_ZERO);
     if (ref == NULL)
         return -ENOMEM;
     ref->mnt = mnt;
     ref->ns = ns;
+    if (path)
+        strlcpy(ref->path, path, sizeof(ref->path));
     mutex_lock(&mnt->mountpoint->lock);
     list_push_back(&mnt->ns_refs, &ref->mnt_link);
     mutex_unlock(&mnt->mountpoint->lock);
@@ -115,7 +118,17 @@ int mountns_create(struct mount_ns *parent, struct mount_ns **out)
     list_for_each_entry(mnt, &g_mounts, link) {
         if (mnt == g_root_mount || !mountns_sees(parent, mnt))
             continue;
-        rc = ns_add(ns, mnt);
+        /* The child holds it where the parent did: a copied view is the
+         * same mounts at the same places, and the path travels with the
+         * reference because nothing can work it out later. */
+        const char *at = NULL;
+        const struct mount_ns_ref *pr;
+        list_for_each_entry(pr, &mnt->ns_refs, mnt_link)
+            if (pr->ns == parent) {
+                at = pr->path;
+                break;
+            }
+        rc = ns_add(ns, mnt, at);
         if (rc)
             break;
     }

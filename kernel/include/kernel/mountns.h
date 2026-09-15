@@ -16,6 +16,7 @@
 #include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/types.h>
+#include <kernel/vfs.h>   /* VFS_PATH_MAX */
 
 struct mount;
 
@@ -29,6 +30,19 @@ struct mount;
 struct mount_ns_ref {
     struct mount *mnt;
     struct mount_ns *ns;
+    /*
+     * Where this namespace holds this mount. Recorded rather than
+     * derived, because nothing in this tree can derive it: getcwd
+     * returns a string the process remembers, not a path walked back up
+     * from a vnode, and a mount has no single path anyway -- that is the
+     * reason mounts have ids (docs/audit/next-subsystem-fsctl.md).
+     *
+     * It is the path as of the moment the namespace gained the mount. A
+     * later rename of an ancestor does not update it, exactly as it does
+     * not update a remembered cwd. A label for a human; the id is what a
+     * command names.
+     */
+    char path[VFS_PATH_MAX];
     struct list_node mnt_link;   /* on mount->ns_refs, under the mountpoint's lock */
     struct list_node ns_link;    /* on mount_ns->mounts, under g_mounts_lock */
 };

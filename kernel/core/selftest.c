@@ -449,6 +449,7 @@ static const struct selftest tests[] = {
     { "vfs-chrdev-open", selftest_vfs_chrdev_open },
     { "vfs-mount-id",    selftest_vfs_mount_id },
     { "vfs-mount-pin",   selftest_vfs_mount_pin },
+    { "fsctl-list",      selftest_fsctl_list },
     { "mountns",         selftest_mountns },
     { "utsns",           selftest_utsns },
     { "pool",            selftest_pool },

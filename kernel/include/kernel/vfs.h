@@ -121,11 +121,27 @@ struct vnode {
     unsigned flags;
 };
 
+struct cosmofs_check_report;
+struct cosmofs_scrub_stats;
+
 struct fs_type {
     const char *name;
     int (*mount)(struct fs_type *fs, struct blkdev *bdev, unsigned flags, struct mount *mnt);
     int (*unmount)(struct mount *mnt);
     int (*sync)(struct mount *mnt);
+    /*
+     * The maintenance passes, both optional: the VFS learns that a
+     * filesystem has one, never what one is. A filesystem with none
+     * leaves them null and /dev/fsctl refuses a command against it
+     * before anything is locked (docs/audit/next-subsystem-fsctl.md).
+     *
+     * The out-structs are cosmofs's and stay so -- declared above and
+     * never dereferenced here, because the VFS hands the pointer to the
+     * filesystem and copies the bytes out by size. One implementation
+     * does not earn a filesystem-neutral result type.
+     */
+    int (*check)(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags);
+    int (*scrub)(struct mount *mnt, struct cosmofs_scrub_stats *out);
     struct list_node link;
 };
 
@@ -343,6 +359,9 @@ void *ramfs_chr_priv(const struct vnode *vn);
 
 /* Diagnostics. */
 unsigned vfs_mount_count(void);
+
+/* Create /dev/fsctl. Called once at boot, after the ramfs has /dev. */
+void fsctl_dev_init(void);
 
 /*
  * Name a mount for an operation that acts on one filesystem rather than

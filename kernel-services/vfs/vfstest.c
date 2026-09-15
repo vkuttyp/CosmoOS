@@ -23,6 +23,7 @@
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
+#include <uapi/cosmo/fsctl.h>
 #include <kernel/sched.h>
 #include <kernel/wait.h>
 #include <kernel/thread.h>
@@ -1198,6 +1199,115 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(vfs_rmdir(NULL, "/tmp/pin") == 0);
     kinfo("selftest: vfs-mount-pin: mount %llu held a pass; a second unmount was refused; the first waited and then took it",
           (unsigned long long)g_pin_id);
+    return true;
+}
+
+/* --- /dev/fsctl: the listing ---------------------------------------------- */
+
+/* Run one command and hand back this file's result buffer. */
+static int fsctl_cmd(struct file *f, uint16_t op, uint64_t id, uint32_t flags,
+                     void *out, size_t outlen)
+{
+    struct cosmo_fsctl cmd = { .version = COSMO_FSCTL_VERSION, .op = op,
+                               .flags = flags, .mount_id = id };
+    int64_t w = file_write(f, &cmd, sizeof(cmd));
+    if (w != (int64_t)sizeof(cmd))
+        return (int)w;
+    int64_t r = file_read(f, out, outlen);
+    return r < 0 ? (int)r : (int)r;
+}
+
+/* Find a mount id in a listing, and its path. */
+static const struct cosmo_fsctl_mount *fsctl_find(const void *buf, uint64_t id)
+{
+    const struct cosmo_fsctl_result *h = buf;
+    const struct cosmo_fsctl_mount *m = (const struct cosmo_fsctl_mount *)((const uint8_t *)buf + sizeof(*h));
+    for (uint32_t i = 0; i < h->count; i++)
+        if (m[i].id == id)
+            return &m[i];
+    return NULL;
+}
+
+/*
+ * The listing is the caller's own namespace, not the mount table. The
+ * assertion that separates the two is the last one: a mount this
+ * namespace has dropped is gone from the listing while the machine still
+ * has it, because another namespace does. A listing built from g_mounts
+ * would still show it.
+ */
+bool selftest_fsctl_list(const char **reason)
+{
+    struct file *f = NULL;
+    CHECK(vfs_open(NULL, "/dev/fsctl", COSMO_O_RDWR, 0, &f) == 0 && f != NULL);
+
+    size_t cap = sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount);
+    uint8_t *buf = kmalloc(cap, KMEM_ZERO);
+    CHECK(buf != NULL);
+
+    /* A file that has issued no command reads nothing: the empty state
+     * has one meaning, which is why LIST is written rather than implied. */
+    CHECK(file_read(f, buf, cap) == 0);
+
+    int mk = vfs_mkdir(NULL, "/tmp/fsl", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    unsigned count0 = vfs_mount_count();
+    CHECK(vfs_mount("/tmp/fsl", "ramfs", NULL, 0) == 0);
+    struct mount *m = mount_at("/tmp/fsl");
+    CHECK(m != NULL);
+    uint64_t id = m->id;
+
+    int n = fsctl_cmd(f, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+    CHECK(n > (int)sizeof(struct cosmo_fsctl_result));
+    struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
+    CHECK(h->version == COSMO_FSCTL_VERSION && h->kind == COSMO_FSCTL_LIST);
+    CHECK(h->bytes == sizeof(struct cosmo_fsctl_mount));
+    CHECK(h->count == h->total);                  /* nothing raced; the listing is whole */
+
+    /* The mount just made, at its path, named by its id. */
+    const struct cosmo_fsctl_mount *rec = fsctl_find(buf, id);
+    CHECK(rec != NULL);
+    CHECK(strcmp(rec->path, "/tmp/fsl") == 0);
+    CHECK(strcmp(rec->fstype, "ramfs") == 0);
+    CHECK(rec->caps == 0);                        /* a ramfs offers neither pass */
+
+    /* The root filesystem is there too, at /, though it holds no
+     * namespace reference at all -- which is why it is emitted by name
+     * rather than found in a list it is deliberately absent from. */
+    struct mount *root = mount_at("/");
+    CHECK(root != NULL);
+    const struct cosmo_fsctl_mount *rrec = fsctl_find(buf, root->id);
+    CHECK(rrec != NULL);
+    CHECK(strcmp(rrec->path, "/") == 0);
+
+    /* Each mount appears once. */
+    unsigned seen = 0;
+    struct cosmo_fsctl_mount *recs = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    for (uint32_t i = 0; i < h->count; i++)
+        if (recs[i].id == id)
+            seen++;
+    CHECK(seen == 1);
+
+    /*
+     * Now the isolation. A second namespace copies the view, so dropping
+     * the mount here leaves the filesystem alive -- and out of this
+     * namespace's listing while the machine still counts it.
+     */
+    struct mount_ns *other = NULL;
+    CHECK(mountns_create(mountns_initial(), &other) == 0);
+    CHECK(vfs_umount("/tmp/fsl") == 0);
+    CHECK(vfs_mount_count() == count0 + 1);       /* still mounted: `other` sees it */
+    n = fsctl_cmd(f, COSMO_FSCTL_LIST, 0, 0, buf, cap);
+    CHECK(n > 0);
+    CHECK(fsctl_find(buf, id) == NULL);           /* but not this namespace's any more */
+    CHECK(fsctl_find(buf, root->id) != NULL);     /* the root did not go with it */
+
+    mountns_put(other);
+    CHECK(vfs_mount_count() == count0);
+    CHECK(vfs_rmdir(NULL, "/tmp/fsl") == 0);
+    kfree(buf);
+    file_put(f);
+    kinfo("selftest: fsctl-list: mount %llu listed at its path and gone from the listing while the machine kept it",
+          (unsigned long long)id);
     return true;
 }
 

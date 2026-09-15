@@ -415,6 +415,7 @@ int vfs_mount(const char *path, const char *fsname, struct blkdev *bdev, unsigne
     /* Visible in the namespace that made it, and in no other. */
     ref->mnt = mnt;
     ref->ns = ns;
+    strlcpy(ref->path, path, sizeof(ref->path));   /* where this namespace holds it */
     list_push_back(&mnt->ns_refs, &ref->mnt_link);
     list_push_back(&ns->mounts, &ref->ns_link);
     mutex_unlock(&dir->lock);
