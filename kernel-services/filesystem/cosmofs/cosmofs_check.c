@@ -165,6 +165,12 @@ struct check {
     struct counts links;   /* directory entries naming each inode */
     struct counts nlink;   /* what each inode says its link count is */
     unsigned flags;
+    /* Which counters the comparison found wrong, so that repair fixes
+     * those and only those: the orphan repair changes `inode_count`
+     * itself, and a blind write-back of the counted total afterwards
+     * would put the stale number back. */
+    bool free_wrong;
+    bool inodes_wrong;
 };
 
 static void name_it(struct cosmofs_check_class *cl, uint64_t what)
@@ -494,9 +500,19 @@ static void compare(struct check *ck)
     }
 
     /* Link counts and orphans, over the inodes the map itself holds. */
+    uint64_t counted_inodes = 0;
     for (uint64_t ino = CFS_ROOT_INO; ino <= fs->sb.next_ino; ino++) {
         if (!bitmap_test(&ck->alive, ino))
             continue;                       /* no such inode: nothing to say */
+        /*
+         * Every slot the map holds, orphans included. The superblock's
+         * count follows the slot and not the name: it is decremented
+         * where the slot is zeroed, when the last handle on an unlinked
+         * inode goes (`cosmofs.c`, the evict path), not at the unlink.
+         * Counting links here instead would call every crash-stranded
+         * orphan a wrong total as well, and report one fault as two.
+         */
+        counted_inodes++;
         uint32_t named = counts_get(&ck->links, ino);
         if (ino == CFS_ROOT_INO)
             named += 2;                     /* the root is its own parent, and nothing names it */
@@ -506,9 +522,16 @@ static void compare(struct check *ck)
             name_it(&ck->rep->nlink_wrong, ino);
     }
 
-    if (counted_free != fs->free_blocks)
+    /* One finding per counter that disagrees, named by what the walk
+     * counted, so a report of two is two wrong totals and not one twice. */
+    ck->free_wrong = counted_free != fs->free_blocks;
+    ck->inodes_wrong = counted_inodes != fs->sb.inode_count;
+    if (ck->free_wrong)
         name_it(&ck->rep->counter_wrong, counted_free);
+    if (ck->inodes_wrong)
+        name_it(&ck->rep->counter_wrong, counted_inodes);
     ck->rep->counted_free = counted_free;
+    ck->rep->counted_inodes = counted_inodes;
 }
 
 /* --- repair ---------------------------------------------------------------- */
@@ -566,10 +589,21 @@ static int repair(struct check *ck)
             ck->rep->nlink_wrong.repaired++;
     }
 
-    /* The totals: the walk counted them. */
-    if (rc == 0 && ck->rep->counter_wrong.count != 0) {
+    /*
+     * The totals, and only the ones the comparison disagreed with. The
+     * repairs above move both counters themselves -- freeing a leaked
+     * block raises the free count, clearing an orphan lowers the inode
+     * count -- so "write back what the walk counted" would undo the
+     * repair that just ran. One repair per counter that was wrong when
+     * it was read, so `repaired` can be compared with `count`.
+     */
+    if (rc == 0 && ck->free_wrong) {
         fs->free_blocks = ck->rep->counted_free;
         fs->sb.free_blocks = ck->rep->counted_free;
+        ck->rep->counter_wrong.repaired++;
+    }
+    if (rc == 0 && ck->inodes_wrong) {
+        fs->sb.inode_count = ck->rep->counted_inodes;
         ck->rep->counter_wrong.repaired++;
     }
     return rc;

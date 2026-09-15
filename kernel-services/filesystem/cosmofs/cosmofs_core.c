@@ -1215,8 +1215,12 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, const 
         break;
     }
     case COSMOFS_CORRUPT_COUNTER:
+        /* Both of them, in opposite directions: the check must report one
+         * finding per counter rather than one for "the superblock". */
         fs->free_blocks++;
         fs->sb.free_blocks++;
+        if (fs->sb.inode_count > 0)
+            fs->sb.inode_count--;
         token = fs->sb.free_blocks;
         break;
     default:

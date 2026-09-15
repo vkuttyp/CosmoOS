@@ -1698,13 +1698,23 @@ bool selftest_cosmofs_check_faults(const char **reason)
     CHECK(r.dir_bad.count >= 1 && r.dir_bad.name[0] == what);
     check_teardown(bd);
 
-    /* A superblock total the walk disagrees with. */
+    /* Both superblock totals the walk disagrees with: free blocks one
+     * too high, inodes one too low. Two counters, two findings -- a
+     * check that reported "the superblock is wrong" once would say the
+     * same thing whichever of them was broken. */
     CHECK(check_fixture(&bd, reason));
+    uint64_t free_was = 0, inodes_was = 0;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    free_was = r.counted_free;
+    inodes_was = r.counted_inodes;
+    CHECK(inodes_was >= 2);                  /* the root and the fixture's file */
     CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_COUNTER, NULL, &what) == 0);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.counter_wrong.count == 1);
+    CHECK(r.counter_wrong.count == 2);
+    CHECK(r.counted_free == free_was && r.counted_inodes == inodes_was);   /* the walk is unmoved */
+    CHECK(r.orphan.count == 0);              /* a wrong total is not a missing inode */
     CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
-    CHECK(r.counter_wrong.repaired == 1);
+    CHECK(r.counter_wrong.repaired == 2);
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
     check_teardown(bd);
 

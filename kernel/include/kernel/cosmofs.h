@@ -99,6 +99,7 @@ struct cosmofs_check_report {
     struct cosmofs_check_class unreadable;       /* a metadata block that could not be read */
     uint64_t blocks_seen, inodes_seen, dirs_seen, snapshots_seen;
     uint64_t counted_free;              /* free blocks the walk counted */
+    uint64_t counted_inodes;            /* inodes with links the walk counted */
     uint64_t bytes_allocated;           /* the chunked maps, so the cost is visible */
     bool partial;                       /* something was unreadable: the answer is incomplete */
     bool clean;                         /* every class empty */
@@ -138,7 +139,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_ORPHAN,      /* an inode with blocks that no entry names */
     COSMOFS_CORRUPT_DANGLING,    /* a directory entry naming a free inode slot */
     COSMOFS_CORRUPT_DIRENT,      /* an entry whose type disagrees with its inode */
-    COSMOFS_CORRUPT_COUNTER,     /* a superblock free count one too high */
+    COSMOFS_CORRUPT_COUNTER,     /* both superblock totals, each wrong by one */
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, const char *path, uint64_t *what);
 /* Test hook: where an inode's logical block actually lives, as a DVA;
