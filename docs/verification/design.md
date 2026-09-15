@@ -195,6 +195,25 @@ in its own report, and fails a test that exceeded `SELFTEST_BUDGET_MS`
 (default 8000, the hang watchdog's period) so a test that only just
 finishes is noticed before it becomes a timeout.
 
+**One line is not always one test.** `process-user` runs the entire
+user-mode suite -- every filesystem, network, process, floating-point,
+trap, privilege and service check `init` makes, plus a process spawn for
+each tool it drives -- behind a single `SELFTEST` line. It therefore
+grows whenever userland gains a test, while being measured against a
+number meant for one test approaching the watchdog. On CI it stood at
+7129 ms of 8000 before the unit that noticed
+(`docs/audit/next-subsystem-fsctl.md`), which is a budget that fails the
+next addition to userland whatever that addition is.
+
+Such a test gets a budget sized for what it is, in
+`composite_budget_ms` in the harness, beside the default rather than
+instead of it: `process-user` has 20 s. It keeps a budget, because a
+suite that hangs must still be caught. The list is deliberately short
+and each entry is an admission that the line reports too little; the
+better answer is for a suite to report its sections' timings so a slow
+section is named instead of the whole suite, and that is an inventory
+row rather than a plan.
+
 A failing self-test is also named against the **load-sensitive list**
 in `docs/testing/flakes.md` (the table under its "The list" heading): the
 failure report gains a `note:` line saying the test is on the list and
