@@ -2491,33 +2491,44 @@ bool selftest_cosmofs_freelog_snapshot(const char **reason)
     CHECK(vfs_sync() == 0);
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
 
-    /* Now free those blocks in the live tree: the snapshot still names
-     * them, so the commit must not record them as free. */
-    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
-    CHECK(vfs_sync() == 0);
     struct cosmofs_stats before;
     CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
 
-    /* Across a mount, which is where a wrong record would be believed. */
+    /*
+     * Free those blocks in the live tree and let **the unmount's own
+     * commit** be the one that records it. A sync in between would
+     * write the record and then supersede it, and the record a mount
+     * actually reads is the last one written -- so a wrong record would
+     * be replaced before anything believed it, and the test would pass
+     * whatever the code did.
+     */
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
     struct cosmofs_stats after;
     CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
 
     /*
-     * The snapshot's blocks were not handed back. A record that ignored
-     * the snapshot would have freed them here, and the count would be
-     * higher by what the file held.
+     * The free count *does* rise: the unlink frees the copy-on-write
+     * casualties that postdate the snapshot, and those are the live
+     * tree's to free. What must not happen is the snapshot's own blocks
+     * going back, and the check is what says so exactly.
+     *
+     * A record that named them would have had the replay clear their
+     * bits while the snapshot's tree still reaches them -- reachable and
+     * free, which is `seen_not_alloc`, the direction that hands live
+     * data to the allocator.
      */
-    CHECK(after.free_blocks == before.free_blocks);
-
-    /* And the snapshot still reads, which is what the blocks were for. */
-    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+    CHECK(after.free_blocks >= before.free_blocks);
 
     struct cosmofs_check_report rep;
     CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);
     CHECK(rep.clean);
     CHECK(rep.snapshots_seen == 1);
+
+    /* And the snapshot still reads, which is what the blocks were for. */
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
 
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
