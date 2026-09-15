@@ -569,7 +569,7 @@ The unit (PR #144, 2026-09-15), on both architectures:
 | `cosmofs-check-snapshot` | a snapshot's held blocks are neither leaks nor cross-links, before and after its deletion |
 | `cosmofs-check-orphan-crash` | an inode survives its unlink with its blocks; repair reclaims them and the free count returns |
 | `cosmofs-check-partial` | a broken directory block is named, the report is marked incomplete, and the pass still reaches its final comparison |
-| `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4776 ms |
+| `cosmofs-replay` | 199 prefix images mounted and checked; **162 leaked blocks a crash stranded, worst 18, 1912 in all**, each reclaimed and clean afterwards; 4.5-5.3 s across runs |
 
 **Bug-proofs, as run** (each injection alone, then reverted):
 
@@ -604,8 +604,9 @@ instead of deleting the call.
 - **The crash suite** went from about 3 s to 8804 ms with a check *and*
   a repair on all 199 prefixes -- past its 8-second budget, which is the
   number the report asked for. Checking every prefix and proving the
-  reclaim on the first eight brings it to 4776 ms, so the assertion is
-  kept on every image and only the proof is sampled.
+  reclaim on the first eight brings it to 4.5-5.3 s, so the assertion is
+  kept on every image and only the proof is sampled. The spread is the
+  host's, not the test's: it is the same 199 images every run.
 - **The maps** are six chunked allocations (seen, live, reachable,
   alive, links, link counts), reported in `bytes_allocated`: 24 KiB for
   the test disks. The `kmalloc` ceiling of 4 MiB is what forced the
