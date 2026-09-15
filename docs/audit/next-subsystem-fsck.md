@@ -301,9 +301,20 @@ Every repair happens in one transaction and the pass re-runs afterwards.
 What the second pass must show is **the repaired classes empty and the
 refused ones unchanged** -- not `clean`, which a filesystem carrying a
 cross-link can never be, and demanding it would report a correct partial
-repair as a repair bug. The report therefore carries `repaired` and
-`remaining` per class, and the rule is: every class the repair claims,
-zero; every other class, the count it had before.
+repair as a repair bug.
+
+**As built there is no `remaining` field**, which the design asked for.
+It would have been the same number the second pass reports, so the tests
+run the second pass and compare the classes rather than trust a count
+the first pass wrote about a filesystem it had just changed. Each class
+carries `count`, `repaired`, and the first eight offenders.
+
+**One repair per thing repaired**, which is what makes `repaired`
+comparable with `count`. The counters were where this broke: the orphan
+repair lowers the inode count as it clears a slot, so a counter repair
+that wrote back "what the walk counted" restored the pre-repair total
+over the repair that had just run. Each counter is repaired only if the
+comparison found that counter wrong.
 
 ### Where it is called from
 
