@@ -761,6 +761,8 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
      */
     for (unsigned i = 0; i < fs->nr_pending; i++)
         claim(&ck, fs->pending_free[i], true);
+    for (unsigned i = 0; i < fs->nr_exempt; i++)
+        claim(&ck, fs->pending_exempt[i], true);
 
     /* The blocks no structure points at but every mount needs: the
      * superblock slots and, on each member, the label. */

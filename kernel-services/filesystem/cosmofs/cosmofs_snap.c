@@ -354,20 +354,21 @@ bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk)
 }
 
 /*
- * How many block numbers are on every snapshot's deadlist, together.
+ * Entries on every snapshot's deadlist: all of them when `of` is 0, or
+ * the ones naming that block.
  *
- * A test hook, because nothing else can see this number and one test
- * needs it: a block a snapshot holds is not a leak and not a finding --
- * the checker claims a deadlist as metadata -- so a filesystem losing a
- * block per commit to a hold that should not have happened is `clean`
- * all the way down. `cosmofs-freelog-not-held` asserts the deadlist is
- * empty, which is the only statement that distinguishes "freed, as a
- * record should be" from "held, and gone until the snapshot is"
+ * A test hook, because nothing else can see this and one test needs it:
+ * a block a snapshot holds is not a leak and not a finding -- the
+ * checker claims a deadlist as metadata -- so a filesystem that held a
+ * block it should have freed is `clean` all the way down.
+ * `cosmofs-freelog-not-held` asks about one block by number, which is
+ * the only statement that distinguishes "freed, as a record should be"
+ * from "held, and gone until the snapshot is"
  * (docs/audit/next-subsystem-unmount-leak.md).
  */
 #define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
 
-uint64_t cfs_snapshot_deadlist_len(struct cfs *fs)
+uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
 {
     uint64_t blkno = fs->sb.snap_root, total = 0;
     unsigned guard = 0;
@@ -388,7 +389,14 @@ uint64_t cfs_snapshot_deadlist_len(struct cfs *fs)
                     break;
                 const struct cfs_dead_block *d =
                     (const struct cfs_dead_block *)(db->data + CFS_MHDR_SIZE);
-                total += d->count <= CFS_DEAD_PER_BLOCK ? d->count : 0;
+                uint32_t n = d->count <= CFS_DEAD_PER_BLOCK ? d->count : 0;
+                if (of == 0) {
+                    total += n;
+                } else {
+                    for (uint32_t k = 0; k < n; k++)
+                        if (d->blk[k] == of)
+                            total++;
+                }
                 dl = d->next;
                 cfs_buf_put(fs, db);
             }

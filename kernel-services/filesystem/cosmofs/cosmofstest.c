@@ -2720,13 +2720,16 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
  * is one block per snapshot, which is inside the noise of a transaction
  * in flight.
  *
- * What is exact is that the deadlist stops growing. It legitimately
- * grows at first -- the root directory block and the first imap and
- * bitmap blocks predate the snapshot, and rewriting anything frees them
- * -- so the churn runs in a directory created after the snapshot, and
- * once that has settled nothing it frees is a block the snapshot's tree
- * names. Any later entry got there by asking the wrong question about a
- * record.
+ * What is exact is a block known by number. The test remembers the
+ * record that exists before the snapshot is taken and asserts that the
+ * commit which supersedes it did not put it on any deadlist. The
+ * deadlist legitimately holds other things -- the root directory block
+ * and the first imap and bitmap blocks predate the snapshot, and
+ * rewriting anything frees them -- so asking whether it is empty proves
+ * nothing, and asking about the one block the argument is about proves
+ * exactly the argument. A second, looser assertion says it then stops
+ * growing across thirty more commits in a directory created after the
+ * snapshot.
  */
 bool selftest_cosmofs_freelog_not_held(const char **reason)
 {
@@ -2743,10 +2746,27 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
      * marks that record's blocks allocated, which is the difficulty. */
     CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
     CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    /*
+     * The block the argument is about, and the arithmetic that picks it
+     * out. Taking a snapshot commits first and records the snapshot
+     * after, so that commit reserves a record while `snap_count` is
+     * still 0 -- and the bitmap it publishes, which is the bitmap the
+     * snapshot keeps, marks that record **allocated**. It is therefore
+     * the one record in the filesystem's life that a snapshot's recorded
+     * bitmap names, and the only block on which this exception can be
+     * observed at all.
+     */
     struct cosmofs_stats rec;
     CHECK(cosmofs_stats(mount_of(ENG), &rec) == 0);
     CHECK(rec.free_root != 0);
-    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+    uint64_t record = rec.free_root;
+
+    /* One commit, which supersedes that record and therefore frees it. */
+    CHECK(write_file(ENG "/first", "1", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_test_deadlist_len(mount_of(ENG), record) == 0);
 
     /* Everything the churn touches is created after the snapshot, and
      * then settled, so the blocks these commits free are all post-
@@ -2759,7 +2779,7 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     }
     struct cosmofs_stats before;
     CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
-    uint64_t dead_before = cosmofs_test_deadlist_len(mount_of(ENG));
+    uint64_t dead_before = cosmofs_test_deadlist_len(mount_of(ENG), 0);
 
     for (unsigned i = 0; i < 30; i++) {
         CHECK(write_file(ENG "/post/churn", "y", 1));
@@ -2778,7 +2798,7 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
      * list, permanently -- one block, too small to separate from the
      * noise of a transaction in flight, and unambiguous here.
      */
-    CHECK(cosmofs_test_deadlist_len(mount_of(ENG)) == dead_before);
+    CHECK(cosmofs_test_deadlist_len(mount_of(ENG), 0) == dead_before);
 
     /* And the snapshot is intact: nothing this exception frees was its. */
     CHECK(vfs_umount(ENG) == 0);

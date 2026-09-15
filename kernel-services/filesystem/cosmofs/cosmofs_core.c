@@ -382,6 +382,32 @@ int cfs_alloc_data(struct cfs *fs, uint64_t hint, uint32_t want, uint64_t *start
     return cfs_alloc_run(fs, CFS_ALLOC_DATA, hint, want, start, got);
 }
 
+/*
+ * Free a block this transaction owns outright: a superseded free
+ * record. It waits for the root like any deferred free -- the current
+ * root still names it, so handing it to the allocator now would let a
+ * crash leave a root naming an overwritten record -- but it skips the
+ * snapshot filter phase 7 applies, and the reason is in `struct cfs`
+ * beside `pending_exempt`.
+ */
+void cfs_free_block_exempt(struct cfs *fs, uint64_t blk)
+{
+    if (!cfs_dva_valid(fs, blk))
+        return;
+    if (fs->nr_exempt == fs->exempt_cap) {
+        unsigned cap = fs->exempt_cap ? fs->exempt_cap * 2 : 16;
+        uint64_t *n = krealloc(fs->pending_exempt, cap * sizeof(*n), 0);
+        if (n == NULL) {
+            kerror("cosmofs: leaking block %llu (no memory for the free list)", (unsigned long long)blk);
+            return;
+        }
+        fs->pending_exempt = n;
+        fs->exempt_cap = cap;
+    }
+    fs->pending_exempt[fs->nr_exempt++] = blk;
+    note_dirty(fs);
+}
+
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
 {
     if (!cfs_dva_valid(fs, blk))
@@ -812,7 +838,7 @@ static int freelog_release_previous(struct cfs *fs)
             return rc;
         uint64_t next = ((const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE))->next;
         cfs_buf_put(fs, b);
-        cfs_free_block_deferred(fs, at);   /* as cfs_buf_cow frees what it copied from */
+        cfs_free_block_exempt(fs, at);     /* freed for the new root, and no snapshot's to hold */
         at = next;
     }
     fs->sb.free_root = 0;
@@ -834,7 +860,7 @@ static int freelog_reserve(struct cfs *fs, uint64_t **out, unsigned *n_out)
 {
     *out = NULL;
     *n_out = 0;
-    uint64_t bound = (uint64_t)fs->nr_pending + fs->nr_chunks + fs->nmembers;
+    uint64_t bound = (uint64_t)fs->nr_pending + fs->nr_exempt + fs->nr_chunks + fs->nmembers;
     if (bound == 0)
         return 0;
     unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK);
@@ -870,7 +896,8 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
         return 0;
     }
     bool snaps = fs->snap_count > 0;
-    unsigned need = (fs->nr_pending + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK;
+    unsigned total = fs->nr_pending + fs->nr_exempt;
+    unsigned need = (total + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK;
     if (need == 0)
         need = 1;                            /* the leftovers still need somewhere to be said */
     if (need > n)
@@ -891,8 +918,14 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
         struct cfs_dead_block *d = (struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
         d->next = (i + 1 < need) ? blk[i + 1] : 0;
         unsigned k = 0;
-        while (k < CFS_FREELOG_PER_BLOCK && at < fs->nr_pending) {
-            uint64_t dva = fs->pending_free[at++];
+        while (k < CFS_FREELOG_PER_BLOCK && at < total) {
+            /* The exempt list after the pending one, as one sequence:
+             * both are freed by this root and both must be in what it
+             * says it freed, or an unmount loses them. */
+            bool exempt = at >= fs->nr_pending;
+            uint64_t dva = exempt ? fs->pending_exempt[at - fs->nr_pending]
+                                  : fs->pending_free[at];
+            at++;
             uint64_t lin = cfs_dva_lin(fs, dva);
             /*
              * Exactly what phase 7 will clear, asked the same way it
@@ -903,7 +936,7 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
              */
             if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
                 continue;
-            if (snaps && cfs_snapshot_holds(fs, dva))
+            if (!exempt && snaps && cfs_snapshot_holds(fs, dva))
                 continue;
             d->blk[k++] = dva;
         }
@@ -932,7 +965,7 @@ int cfs_commit(struct cfs *fs)
 {
     if (fs->failed)
         return fs->failed;
-    if (fs->nr_dirty == 0 && fs->nr_pending == 0) {
+    if (fs->nr_dirty == 0 && fs->nr_pending == 0 && fs->nr_exempt == 0) {
         bool any = false;
         for (unsigned c = 0; c < fs->nr_chunks; c++)
             any = any || fs->bitmap_dirty[c];
@@ -1054,6 +1087,18 @@ int cfs_commit(struct cfs *fs)
         fs->mem[CFS_DVA_VDEV(dva)].free_blocks++;
     }
     fs->nr_pending = 0;
+    /* And the blocks no snapshot may hold, with no filter at all. */
+    for (unsigned i = 0; i < fs->nr_exempt; i++) {
+        uint64_t dva = fs->pending_exempt[i];
+        uint64_t lin = cfs_dva_lin(fs, dva);
+        if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
+            continue;
+        bit_clear(fs->bitmap, lin);
+        fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
+        fs->free_blocks++;
+        fs->mem[CFS_DVA_VDEV(dva)].free_blocks++;
+    }
+    fs->nr_exempt = 0;
     fs->gen++;
     /* The frees dirtied bitmap chunks for the next commit; that is
      * bookkeeping of this commit, not a new change to age. */
@@ -1654,6 +1699,7 @@ static void cfs_destroy(struct cfs *fs)
     kfree(fs->bitmap);
     kfree(fs->bitmap_dirty);
     kfree(fs->pending_free);
+    kfree(fs->pending_exempt);
     cfs_members_free(fs);
     if (fs->pool)
         pool_close(fs->pool);
@@ -1878,7 +1924,7 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->version = fs->sb.version;
     out->free_root = fs->sb.version >= 9 ? fs->sb.free_root : 0;
     out->dirty_buffers = fs->nr_dirty;
-    out->pending_frees = fs->nr_pending;
+    out->pending_frees = fs->nr_pending + fs->nr_exempt;
     out->reserve_blocks = fs->reserve;
     out->commits = fs->commits;
     out->wb_commits = fs->wb_commits;
@@ -1948,13 +1994,13 @@ int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64
     return rc;
 }
 
-uint64_t cosmofs_test_deadlist_len(struct mount *mnt)
+uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of)
 {
     struct cfs *fs = cfs_of(mnt);
     if (fs == NULL)
         return 0;
     mutex_lock(&fs->lock);
-    uint64_t n = cfs_snapshot_deadlist_len(fs);
+    uint64_t n = cfs_snapshot_deadlist_len(fs, of);
     mutex_unlock(&fs->lock);
     return n;
 }
