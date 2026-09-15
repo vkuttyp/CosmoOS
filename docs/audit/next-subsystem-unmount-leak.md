@@ -150,32 +150,73 @@ reusing that struct rather than inventing a twin.
 snapshot filter rather than before it: a block a snapshot still holds is
 not freed and must not be recorded as free.
 
-### Where it is written, and why there
+### Where it is written, and in what order
 
 The record is built and written **before** the root, and becomes
-authoritative **because** of the root:
+authoritative **because** of the root. The order within the commit is
+the whole of the design, and getting it wrong in either direction
+corrupts the filesystem rather than merely leaking, so it is argued
+here rather than asserted.
 
-1. The transaction is assembled as now: dirty buffers, the bitmap
-   fixpoint, the member table.
-2. **New:** the frees this transaction will apply are filtered through
-   `cfs_snapshot_hold_block` and written into freshly allocated
-   `FREELOG` blocks. `sb.free_root` points at the head.
-3. Labels, `pool_flush` — everything stable.
-4. The root goes into the alternate slot with `BIO_PREFLUSH | BIO_FUA`.
-5. Phase 7 applies the frees in memory, exactly as today.
+Two things make the naive order wrong:
 
-**The root is what makes the record true.** Before step 4, the old root
-is live and the record is unreachable from it — a crash there leaves a
+- **Writing the record allocates blocks**, and so does the snapshot
+  filter, which appends to a deadlist. `commit_bitmap` (`:635-689`) is
+  what makes the bitmap on disk agree with the bits in memory, and it
+  runs once. Allocating after it publishes a root whose bitmap does not
+  record the record's own blocks as allocated -- so the next allocation
+  hands them out and the filesystem eats its own metadata.
+- **The set to record is not final until the fixpoint has run**, because
+  the fixpoint frees every bitmap chunk and allocation index it copies
+  (`commit_member_bitmap`, `:624`). Recording before it misses exactly
+  the frees that this report is about.
+
+Allocate-before and fill-after resolves the circle:
+
+1. **Free the previous record.** Walk the chain `sb.free_root` names and
+   hand every block to `cfs_free_block_deferred`. It is the old root's
+   statement and the new root replaces it; without this step every
+   commit leaks its predecessor's record.
+2. **Filter for snapshots.** Run `cfs_snapshot_hold_block` over
+   `pending_free` now, so the deadlist appends it makes are inside the
+   transaction rather than after the root. What survives is what this
+   transaction actually frees.
+3. **Reserve the record's blocks** -- allocate them, do not fill them.
+   The count is an upper bound, computable here: what `pending_free`
+   holds now, plus what the fixpoint can add, which is one block per
+   dirty chunk plus one allocation index per member. Both are known
+   before the fixpoint runs (`fs->bitmap_dirty`, `fs->nmembers`).
+4. **Run the bitmap fixpoint.** It now sees the deadlist blocks and the
+   reserved record blocks as allocated, because they were allocated
+   before it, and writes a bitmap that says so. Its own copy-on-write
+   frees land in `pending_free`, which is the set step 5 records.
+5. **Fill the reserved blocks.** The record is `pending_free` as it now
+   stands. If the bound was generous, the leftover reserved blocks are
+   **listed in the record as free**: a block that describes its own
+   release, which is what keeps the bound from having to be tight.
+6. Labels, `pool_flush` -- everything stable.
+7. The root into the alternate slot, `BIO_PREFLUSH | BIO_FUA`.
+8. Phase 7 applies the frees in memory, exactly as today.
+
+**Why this terminates**, which the rejected alternative does not: steps
+3 and 5 allocate a bounded number of blocks *once*, before the fixpoint,
+so the fixpoint converges exactly as it does now and nothing after it
+allocates. There is no second fixpoint and no loop -- the circularity is
+broken by separating the reservation from the content, not by iterating
+until it stops moving.
+
+**The root is what makes the record true.** Before step 7 the old root
+is live and the record is unreachable from it: a crash there leaves a
 filesystem that never heard of those blocks, which is correct, because
-the transaction that freed them did not happen. After step 4, the new
-root names both the new tree *and* the record: the blocks are free, and
-the statement that they are free is durable. That is the property the
+the transaction that freed them did not happen. After step 7 the new
+root names the new tree *and* the record, so the blocks are free and the
+statement that they are free is durable. That is the property the
 in-memory list never had.
 
-This also moves the snapshot filter earlier, which the report counts as
-a fix rather than a side effect: appending to a deadlist is a change to
-the filesystem, and doing it after the root write means a crash can lose
-a deadlist entry for a block the root already treats as held.
+Step 2 also moves the snapshot filter earlier, which the report counts
+as a fix rather than a side effect: appending to a deadlist is a change
+to the filesystem, and doing it after the root write means a crash can
+lose the entry for a block the root already treats as held.
 
 ### Where it is applied
 
@@ -317,6 +358,9 @@ step 1 runs the release build.
 | `cosmofs-freelog-reuse` | a replayed block is handed out by the allocator in the same session, written, and committed; after a remount it is in use and not in any record | free the record at replay: a crash between the replay and the commit loses the record while the block is unwritten |
 | `cosmofs-freelog-snapshot` | a filesystem with a snapshot holding freed blocks records none of them, and loses nothing across an unmount | as `cosmofs-freelog-written`'s injection, from the other side |
 | `cosmofs-freelog-chain` | more frees than one block holds are recorded across a chain and all of them replay | write only the first block of the chain: the count is short by the overflow |
+| `cosmofs-freelog-accounted` | the record's own blocks, and the deadlist blocks the filter appends, are **allocated in the bitmap the root publishes**: remount and the structural check finds neither a leak nor a block that is reachable and free | allocate the record after the bitmap fixpoint rather than before it: the check reports the record's blocks as `seen_not_alloc`, the dangerous direction, because the allocator can hand them out again |
+| `cosmofs-freelog-supersede` | a hundred commits in a row leave one record and no residue: the free count after the hundredth equals the count after the first, and the check is clean | do not free the previous chain: the count falls by a block or two per commit, which a single-commit test cannot see |
+| `cosmofs-freelog-overreserve` | a transaction whose bound over-reserves lists the leftover blocks in the record itself, and they are free after a remount | drop the leftovers instead of recording them: the free count is short by the slack, every commit |
 | `cosmofs-replay` (extended) | every replayed crash prefix is **clean** — the assertion the fsck unit had to weaken, restored | the fsck unit's `no-crash-check` injection, which now has a stronger claim to break |
 | `cosmofs-check-clean` (existing) | still clean, with the record's own blocks claimed as metadata | do not claim the record in the checker: `alloc_not_seen` names the record's blocks |
 
@@ -352,6 +396,16 @@ single-cycle test would catch.
 
 ## Risks
 
+- **The order is the design, and two of its steps are load-bearing in a
+  way that fails silently.** Allocating the record after the bitmap
+  fixpoint publishes a root whose bitmap does not know about the
+  record's own blocks, so the allocator hands them out and the
+  filesystem overwrites its own metadata -- a corruption, not a leak,
+  and one that a single mount cycle would not show. Failing to free the
+  previous chain leaks a block or two per commit, which is this report's
+  own defect reintroduced one level up. `cosmofs-freelog-accounted` and
+  `-supersede` exist for exactly these two, and both were found by
+  review of this report rather than by writing it.
 - **A format change, and this one is in the commit path.** Every write
   the filesystem makes goes through `cfs_commit`, so a mistake here is
   not a feature that misbehaves but a filesystem that loses data. The
