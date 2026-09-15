@@ -133,6 +133,15 @@ struct fs_type {
 
 struct mount {
     struct kobject obj;
+    /*
+     * The mount's name, for anything that acts on one mount rather than
+     * on a path (docs/audit/next-subsystem-fsctl.md). Never reused: a
+     * counter and not an index, so an operator holding a stale id
+     * commands nothing rather than a filesystem they never listed. It
+     * is the same number in every namespace that can see the mount, and
+     * the path is not -- which is the whole reason it exists.
+     */
+    uint64_t id;
     struct fs_type *fs;
     struct vnode *root;
     struct vnode *mountpoint;

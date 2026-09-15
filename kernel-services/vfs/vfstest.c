@@ -1060,6 +1060,55 @@ static const struct chrdev_ops chropen_ops = {
     .open = chropen_open, .release = chropen_release, .read_file = chropen_read_file,
 };
 
+/*
+ * A mount's name (docs/audit/next-subsystem-fsctl.md). The assertion
+ * that matters is the third: an id is not an index. A filesystem
+ * unmounted and another mounted at the same path must not inherit the
+ * first one's name, or an operator holding a stale id commands a
+ * filesystem they never listed.
+ */
+bool selftest_vfs_mount_id(const char **reason)
+{
+    CHECK(vfs_mkdir(NULL, "/tmp/idA", 0755) == 0 || true);
+    (void)vfs_umount("/tmp/idA");
+    int mk = vfs_mkdir(NULL, "/tmp/idA", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    mk = vfs_mkdir(NULL, "/tmp/idB", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+
+    /* Every mount has one, and no two share it. */
+    CHECK(vfs_mount("/tmp/idA", "ramfs", NULL, 0) == 0);
+    CHECK(vfs_mount("/tmp/idB", "ramfs", NULL, 0) == 0);
+    struct mount *a = mount_at("/tmp/idA"), *b = mount_at("/tmp/idB");
+    CHECK(a != NULL && b != NULL);
+    CHECK(a->id != 0 && b->id != 0);
+    CHECK(a->id != b->id);
+    uint64_t first = a->id;
+
+    /* The root filesystem has one too, and it is not either of these. */
+    struct mount *root = mount_at("/");
+    CHECK(root != NULL && root->id != 0);
+    CHECK(root->id != a->id && root->id != b->id);
+
+    /* A number is never handed out twice: unmount and mount again at the
+     * same path, and the new filesystem is a new name. An index would
+     * give the freed slot back and fail here. */
+    CHECK(vfs_umount("/tmp/idA") == 0);
+    CHECK(vfs_mount("/tmp/idA", "ramfs", NULL, 0) == 0);
+    struct mount *again = mount_at("/tmp/idA");
+    CHECK(again != NULL);
+    CHECK(again->id != first);
+    CHECK(again->id != b->id);
+
+    CHECK(vfs_umount("/tmp/idA") == 0);
+    CHECK(vfs_umount("/tmp/idB") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/idA") == 0);
+    CHECK(vfs_rmdir(NULL, "/tmp/idB") == 0);
+    kinfo("selftest: vfs-mount-id: ids %llu, %llu, then %llu at the same path",
+          (unsigned long long)first, (unsigned long long)b->id, (unsigned long long)again->id);
+    return true;
+}
+
 bool selftest_vfs_chrdev_open(const char **reason)
 {
     struct vnode *node = NULL;

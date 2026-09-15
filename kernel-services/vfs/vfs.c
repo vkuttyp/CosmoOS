@@ -232,12 +232,21 @@ struct fs_type *vfs_find_fs(const char *name)
     return found;
 }
 
+/*
+ * Mount ids, handed out in order and never reused. Atomic rather than
+ * under g_mounts_lock because a mount is built before that lock is
+ * taken (do_mount runs, then vfs_mount publishes), so there is no lock
+ * here to put it under. Starts at 1: zero names no mount.
+ */
+static uint64_t g_next_mount_id = 1;
+
 static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsigned flags)
 {
     struct mount *mnt = kzalloc(sizeof(*mnt));
     if (mnt == NULL)
         return NULL;
     kobject_init(&mnt->obj, &mount_type);
+    mnt->id = __atomic_fetch_add(&g_next_mount_id, 1, __ATOMIC_RELAXED);
     mnt->fs = fs;
     mnt->bdev = bdev;
     mnt->flags = flags;
