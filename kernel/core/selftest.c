@@ -466,6 +466,7 @@ static const struct selftest tests[] = {
     { "cosmofs-check-faults", selftest_cosmofs_check_faults },
     { "cosmofs-check-snapshot", selftest_cosmofs_check_snapshot },
     { "cosmofs-check-orphan-crash", selftest_cosmofs_check_orphan_crash },
+    { "cosmofs-check-partial", selftest_cosmofs_check_partial },
     { "cosmofs-symlink", selftest_cosmofs_symlink },
     { "cosmofs-symlink-version", selftest_cosmofs_symlink_version },
     { "cosmofs-badmembers", selftest_cosmofs_badmembers },

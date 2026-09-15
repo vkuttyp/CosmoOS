@@ -204,6 +204,7 @@ bool selftest_cosmofs_check_leak(const char **reason);
 bool selftest_cosmofs_check_faults(const char **reason);
 bool selftest_cosmofs_check_snapshot(const char **reason);
 bool selftest_cosmofs_check_orphan_crash(const char **reason);
+bool selftest_cosmofs_check_partial(const char **reason);
 bool selftest_cosmofs_symlink(const char **reason);
 bool selftest_cosmofs_symlink_version(const char **reason);                    /* the older on-disk format */
 bool selftest_cosmofs_badmembers(const char **reason);            /* a member table that cannot be true */

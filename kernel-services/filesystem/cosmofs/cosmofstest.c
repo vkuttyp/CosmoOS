@@ -1807,6 +1807,83 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
     return true;
 }
 
+/*
+ * A metadata read that fails is not an answer: the pass marks the report
+ * incomplete and keeps going, because "one block is unreadable" and "the
+ * other nine classes were never looked at" are different facts and an
+ * operator needs both. A directory block is the block to break: the walk
+ * loses the names it held, and everything those names reached becomes
+ * unreachable, which is exactly the cascade a real bad block causes.
+ */
+bool selftest_cosmofs_check_partial(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    CHECK(vfs_mkdir(NULL, ENG "/d", 0755) == 0);
+    CHECK(write_file(ENG "/d/x", "held by a name in the block about to go", 39));
+    CHECK(write_file(ENG "/keep", "reached another way", 19));
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(check_is_clean(reason, &rep) && rep.clean);
+    struct cosmo_stat dst;
+    CHECK(vfs_stat(NULL, ENG "/d", &dst) == 0);
+    uint64_t dir_ino = dst.ino;
+
+    /* Break the one block that holds /d's entries, off the mount so the
+     * page cache cannot answer from memory. */
+    CHECK(vfs_umount(ENG) == 0);
+    struct spool *p;
+    CHECK(pool_open(bd, &p) == 0);
+    uint8_t *blk = kmalloc(4096, 0);
+    CHECK(blk != NULL);
+    int64_t dir_blk = -1;
+    for (uint64_t i = 2; i < p->nblocks && dir_blk < 0; i++) {
+        if (pool_read(p, i, blk) != 0)
+            continue;
+        const struct cfs_dirent *d = (const struct cfs_dirent *)blk;
+        if (d[0].ino != 0 && d[0].ino < 1000 && d[0].namelen == 1 && d[0].name[0] == 'x' && d[1].ino == 0)
+            dir_blk = (int64_t)i;
+    }
+    kfree(blk);
+    pool_close(p);
+    CHECK(dir_blk > 0);
+    CHECK(corrupt_block(bd, (uint64_t)dir_blk, 40));
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* The pass finishes and says so: an answer, and a warning that it is
+     * not the whole answer. */
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.partial);
+    CHECK(!rep.clean);
+    CHECK(rep.unreadable.count == 1);
+    CHECK(rep.unreadable.named == 1 && rep.unreadable.name[0] == dir_ino);
+    /*
+     * The comparison is the last phase, so a finding only it can produce
+     * is the proof that the pass reached the end rather than stopping at
+     * the unreadable block: /d/x's blocks are allocated and no name
+     * reaches them any more.
+     */
+    CHECK(rep.alloc_not_seen.count >= 1);
+    CHECK(rep.orphan.count >= 1);        /* and its inode is reachable from nothing */
+    CHECK(rep.blocks_seen > 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-check-partial: directory inode %llu unreadable, %llu blocks stranded, report marked incomplete",
+          (unsigned long long)dir_ino, (unsigned long long)rep.alloc_not_seen.count);
+    return true;
+}
+
 bool selftest_cosmofs_symlink(const char **reason)
 {
     (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
