@@ -166,7 +166,7 @@ DEBUG (`linux: pid N: unimplemented system call NR`).
 | 257 | `openat` | as `open` after `check_dirfd` | `dirfd` must be `AT_FDCWD` (-100) unless the path is absolute; otherwise `-ENOSYS` |
 | 3 | `close` | `handle_close` | |
 | 8 | `lseek` | `file_seek` (`SEEK_*` coincide) | `-ESPIPE` for a handle that is not a file (pipe, socket, console) |
-| 4, 6, 5 | `stat`, `lstat`, `fstat` | `vfs_stat` / `syscall_handle_stat` → `lx_stat_from_native` (144 bytes) | `lstat` is `stat` (no symlinks); `st_dev`, `st_rdev` 0; `st_atime` = `st_mtime`; `fstat` works on every I/O object (pipes report `S_IFIFO`, sockets `S_IFSOCK`, the console `S_IFCHR`) |
+| 4, 6, 5 | `stat`, `lstat`, `fstat` | `vfs_stat` / `syscall_handle_stat` → `lx_stat_from_native` (144 bytes) | `lstat` is the non-following one since the symlink unit, and reports `S_IFLNK`; `st_dev`, `st_rdev` 0; `st_atime` = `st_mtime`; `fstat` works on every I/O object (pipes report `S_IFIFO`, sockets `S_IFSOCK`, the console `S_IFCHR`) |
 | 262 | `newfstatat` | empty path with `AT_EMPTY_PATH` (0x1000) → `fstat(dirfd)`; else `check_dirfd` then `stat` | other flags ignored |
 | 217 | `getdents64` | `file_readdir` into a kernel buffer of `len - len/4` bytes, `lx_dirents_from_native` into a second buffer of `len`, copied out | `len` clamped to 64 KiB, `-EINVAL` below 32; `d_off` is the offset of the next record in *this* buffer, not a seekable cookie |
 | 83, 258 | `mkdir`, `mkdirat` | `vfs_mkdir(cwd, path, mode & 07777)` | `mkdirat`: `check_dirfd` |
@@ -264,8 +264,8 @@ as Linux does.
 
 ### Explicit `-ENOSYS`
 
-`fork` 57, `vfork` 58, `execve` 59, `readlink` 89, `sysinfo` 99,
-`readlinkat` 267, `rseq` 334, `clone3` 435 (x86-64 numbers; the AArch64
+`fork` 57, `vfork` 58, `execve` 59, `sysinfo` 99, `rseq` 334,
+`clone3` 435 (x86-64 numbers; the AArch64
 rows use that table's). These are `lx_nosys`, not `lx_unknown`: they are
 known and refused, so they are not counted as unknown. `select` 23,
 `mremap` 25, `msync` 26, `sendmsg` 46, `recvmsg` 47 have numbers in the

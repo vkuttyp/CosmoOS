@@ -613,6 +613,7 @@ arithmetic. Init: every new system call on ramfs, then `mount("vda",
   next commit and excluding its blocks from `pending_free`.
 - Data checksums: `csum_root` → a tree keyed by block number.
 - Multiple pool members and allocation groups behind `pool_*`.
-- Symbolic links (a new vnode type), hard links, `chmod`/`chown`, the
-  sticky bit, memory-pressure eviction, a dentry cache, `mmap` of
-  files (the page cache already owns frames), a host `mkfs`.
+- Hard links, `chmod`/`chown`, the sticky bit, memory-pressure
+  eviction, a dentry cache, `mmap` of files (the page cache already owns
+  frames), a host `mkfs`. Symbolic links are built (this document,
+  "Symbolic links and the walk").
