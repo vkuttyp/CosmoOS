@@ -217,6 +217,23 @@ static void walk_alloc(struct check *ck, uint64_t root, bool live)
     cfs_buf_put(ck->fs, b);
 }
 
+/* Every block one extent names. A physical size of zero is a hole. */
+static void claim_extent(struct check *ck, const struct cfs_extent *e, bool live)
+{
+    if (cfs_ext_count(e) == 0)
+        return;
+    uint32_t psize = cfs_ext_psize(e);
+    for (uint32_t k = 0; k < psize; k++)
+        claim(ck, e->start + k, live);
+}
+
+/*
+ * The chain of extent blocks hanging off an inode: each block is claimed,
+ * the extents in it are claimed, and the chain is bounded. One pass, not
+ * two -- an earlier version claimed the chain and then read it again for
+ * its extents, which read every extent block twice and left the second
+ * read reporting nothing when it failed.
+ */
 static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
 {
     uint64_t next = head;
@@ -230,7 +247,10 @@ static void walk_extent_chain(struct check *ck, uint64_t head, bool live)
         struct cfs_buf *b;
         if (read_meta(ck, next, CFS_KIND_EXTENTS, &b))
             return;
-        next = ((const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE))->next;
+        const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
+        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK; i++)
+            claim_extent(ck, &eb->ext[i], live);
+        next = eb->next;
         cfs_buf_put(ck->fs, b);
     }
 }
@@ -253,36 +273,10 @@ static void walk_csum_tree(struct check *ck, uint64_t root, bool live)
 /* One inode's trees and every data block its extents name. */
 static void walk_inode_blocks(struct check *ck, const struct cfs_inode *in, bool live)
 {
+    for (unsigned i = 0; i < CFS_DIRECT; i++)
+        claim_extent(ck, &in->direct[i], live);
     walk_extent_chain(ck, in->indirect, live);
     walk_csum_tree(ck, in->csum_root, live);
-    for (unsigned i = 0; i < CFS_DIRECT; i++) {
-        const struct cfs_extent *e = &in->direct[i];
-        if (cfs_ext_count(e) == 0)
-            continue;
-        uint32_t psize = cfs_ext_psize(e);
-        for (uint32_t k = 0; k < psize; k++)
-            claim(ck, e->start + k, live);
-    }
-    if (in->indirect == 0)
-        return;
-    uint64_t next = in->indirect;
-    unsigned guard = 0;
-    while (next != 0 && guard++ <= CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2) {
-        struct cfs_buf *b;
-        if (cfs_buf_get(ck->fs, next, CFS_KIND_EXTENTS, &b))
-            return;
-        const struct cfs_extent_block *eb = (const struct cfs_extent_block *)(b->data + CFS_MHDR_SIZE);
-        for (unsigned i = 0; i < CFS_EXTENTS_PER_BLOCK; i++) {
-            const struct cfs_extent *e = &eb->ext[i];
-            if (cfs_ext_count(e) == 0)
-                continue;
-            uint32_t psize = cfs_ext_psize(e);
-            for (uint32_t k = 0; k < psize; k++)
-                claim(ck, e->start + k, live);
-        }
-        next = eb->next;
-        cfs_buf_put(ck->fs, b);
-    }
 }
 
 /*

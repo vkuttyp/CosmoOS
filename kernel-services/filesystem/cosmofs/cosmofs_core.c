@@ -508,7 +508,10 @@ int cfs_inode_read_at(struct cfs *fs, uint64_t imap_root, uint64_t next_ino, uin
  * allocated is exactly what it is looking for. */
 int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out)
 {
-    if (ino == 0 || ino > fs->sb.next_ino)
+    /* The same range the ordinary read accepts: numbers 1 to next_ino-1
+     * have been handed out, and the two readers must agree about which
+     * numbers exist or the check would ask about a slot no lookup can. */
+    if (ino == 0 || ino >= fs->sb.next_ino)
         return -ENOENT;
     struct cfs_buf *ib;
     int rc = inode_block(fs, ino, false, false, &ib);
