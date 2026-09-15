@@ -13,6 +13,7 @@
 #include <cosmo/klog.h>
 #include <cosmo/procinfo.h>
 #include <cosmo/syscall.h>
+#include <uapi/cosmo/fsctl.h>
 #include <cosmo/sysctl.h>
 #include <dirent.h>
 #include <errno.h>
@@ -3295,9 +3296,111 @@ static void proc_fs_selftest(void)
     puts("usertest: /proc ok");
 }
 
+/* Run the operator's tool, capturing its exit status. */
+static int fsctl_run(const char *a, const char *b, const char *c)
+{
+    const char *argv[] = { "fsctl", a, b, c, NULL };
+    pid_t pid = spawnve("/sbin/fsctl", argv, NULL, NULL, 0);
+    if (pid < 0)
+        return -1;
+    int status = -1;
+    return waitpid(pid, &status, 0) == pid ? status : -1;
+}
+
+/*
+ * The operator's end of the filesystem's maintenance passes
+ * (docs/audit/next-subsystem-fsctl.md). Until this unit both passes
+ * existed and neither could be run by anyone outside the kernel's own
+ * self-tests; this is the first time either runs from userland.
+ *
+ * The assertion worth the most is the exit status: a check that *finds*
+ * something must still exit 0, because a shell script cannot otherwise
+ * tell "this filesystem has a problem" from "I could not ask".
+ */
+static void fsctl_selftest(void)
+{
+    /* The device is there, and it is ours alone to open. */
+    int fd = open("/dev/fsctl", O_RDWR);
+    CHECK(fd >= 0);
+
+    /* A listing names the mounts this namespace holds, the root among
+     * them. The tool exits 0 and prints them. */
+    CHECK(fsctl_run("list", NULL, NULL) == 0);
+
+    /* Find the root filesystem's id through the device itself, the way
+     * the tool does, and check it. The root is a ramfs here, which has
+     * neither pass -- so this asserts the refusal an operator meets
+     * when they name a filesystem that cannot be checked. */
+    struct cosmo_fsctl cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.version = COSMO_FSCTL_VERSION;
+    cmd.op = COSMO_FSCTL_LIST;
+    CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
+    static char buf[sizeof(struct cosmo_fsctl_result) + 64 * sizeof(struct cosmo_fsctl_mount)];
+    long n = read(fd, buf, sizeof(buf));
+    CHECK(n > (long)sizeof(struct cosmo_fsctl_result));
+    struct cosmo_fsctl_result *h = (struct cosmo_fsctl_result *)buf;
+    struct cosmo_fsctl_mount *m = (struct cosmo_fsctl_mount *)(buf + sizeof(*h));
+    CHECK(h->count >= 1 && h->count == h->total);
+
+    unsigned long long rootid = 0, checkable = 0;
+    for (unsigned i = 0; i < h->count; i++) {
+        if (strcmp(m[i].path, "/") == 0)
+            rootid = m[i].id;
+        if (m[i].caps & COSMO_FSCTL_CAP_CHECK)
+            checkable = m[i].id;
+    }
+    CHECK(rootid != 0);                       /* the root is listed, at / */
+
+    /* A filesystem with no such pass is refused, and the tool says so
+     * with a non-zero status rather than printing nothing and exiting 0. */
+    char id[24];
+    snprintf(id, sizeof(id), "%llu", rootid);
+    CHECK(fsctl_run("check", id, NULL) != 0);
+
+    /* A name nothing holds, and a malformed command line. */
+    CHECK(fsctl_run("check", "999999999", NULL) != 0);
+    CHECK(fsctl_run("nonsense", NULL, NULL) != 0);
+
+    /*
+     * And a real one. Nothing checkable is mounted at boot, so mount the
+     * test disk here: a check that only ever ran against filesystems
+     * with no passes would prove the refusal and nothing else.
+     */
+    if (checkable == 0 && cosmo_mount("vda", "/mnt", "cosmofs", 0) == 0) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.version = COSMO_FSCTL_VERSION;
+        cmd.op = COSMO_FSCTL_LIST;
+        CHECK(write(fd, &cmd, sizeof(cmd)) == (long)sizeof(cmd));
+        n = read(fd, buf, sizeof(buf));
+        CHECK(n > (long)sizeof(struct cosmo_fsctl_result));
+        for (unsigned i = 0; i < h->count; i++)
+            if (strcmp(m[i].path, "/mnt") == 0) {
+                checkable = m[i].id;
+                CHECK((m[i].caps & COSMO_FSCTL_CAP_CHECK) != 0);
+                CHECK((m[i].caps & COSMO_FSCTL_CAP_SCRUB) != 0);
+                CHECK(strcmp(m[i].fstype, "cosmofs") == 0);
+            }
+        CHECK(checkable != 0);
+    }
+    if (checkable != 0) {
+        snprintf(id, sizeof(id), "%llu", checkable);
+        CHECK(fsctl_run("check", id, NULL) == 0);        /* clean, and says so */
+        CHECK(fsctl_run("scrub", id, NULL) == 0);
+        CHECK(fsctl_run("check", id, "--repair") == 0);  /* nothing to do, and no refusal */
+        CHECK(fsctl_run("check", id, "--nonsense") != 0);
+        CHECK(cosmo_umount("/mnt") == 0);
+        puts("usertest: fsctl checked a real filesystem");
+    }
+
+    close(fd);
+    puts("usertest: fsctl ok");
+}
+
 static void selftest(void)
 {
     fs_selftest();
+    fsctl_selftest();
     net_selftest();
     proc_selftest();
     fpu_selftest();
