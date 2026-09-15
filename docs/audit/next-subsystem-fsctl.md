@@ -803,14 +803,27 @@ Differences from the plan, each found by building rather than reading.
    is mounted when init runs -- the listing is a ramfs and a procfs --
    so a test that only named filesystems without passes would have
    proved the refusal and nothing else.
-8. **A namespace made during the drain would have inherited a dying
-   mount.** The drain drops `g_mounts_lock`, and `mountns_create` walks
-   the mount list under it: a copy taken in that window adds a reference
-   to a mount whose teardown has already counted the references and
-   decided to proceed, leaving the new namespace holding freed memory.
-   `mountns_create` now skips a mount that is unmounting. This is the
-   second thing found in that window, after the second unmount, and the
-   report's risk section predicted there would be more.
+8. **The decision the drain invalidates has to be re-made, and that is
+   the general shape of this whole class.** `vfs_umount2` decides
+   `seen == 1` -- "I am the last namespace out" -- and *then* drops
+   `g_mounts_lock` to drain. A namespace created in that window copies
+   its parent's view and takes a reference, so the decision is no longer
+   true and the teardown would leave the new namespace holding freed
+   memory.
+
+   The first fix was to stop the clone copying a mount that is
+   unmounting, and it was wrong: an unmount can fail on a busy vnode or
+   a sync error and be restored, and the child would then be permanently
+   short a mount its parent has. A copied view that is missing something
+   is the one thing a copied view may not be.
+
+   So the clone copies everything, and the unmount **counts again after
+   the drain**. If somebody else can see the mount now, the unmount
+   steps down to being this namespace forgetting it. That covers the
+   class rather than the case: this window has now produced a second
+   unmount, a namespace clone, and a lock-order inversion, which is what
+   the risk section meant by "every invariant the unmount path got for
+   free from holding one lock throughout is now something to check".
 9. **A mount id is a number, whole, or it is not an id.** The tool used
    `strtoull` and ignored where it stopped, so `fsctl check 12junk
    --repair` would have repaired mount 12. This command mutates
