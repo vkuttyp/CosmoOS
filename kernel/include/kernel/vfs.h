@@ -14,6 +14,7 @@
 #include <kernel/list.h>
 #include <kernel/mutex.h>
 #include <kernel/spinlock.h>
+#include <kernel/wait.h>
 #include <kernel/object.h>
 #include <kernel/pagecache.h>
 #include <kernel/types.h>
@@ -167,6 +168,17 @@ struct mount {
     uint64_t cache_pages;     /* pages the page cache holds for this mount (atomic) */
     uint64_t cache_dirty;     /* of which dirty (atomic); a filesystem's writeback threshold */
     uint64_t cache_limit_pages;   /* a miss beyond this is -ENOSPC; 0: no budget (docs/kernel/security/design.md §3) */
+    /*
+     * Maintenance passes running against this mount right now
+     * (docs/audit/next-subsystem-fsctl.md). Written under g_mounts_lock,
+     * read atomically by the drain below with that lock dropped. An
+     * unmount sets `unmounting`, which stops a new pass from starting,
+     * and then waits on `passes_quiet` for this to reach zero: a pass
+     * walks the filesystem's buffers and tearing them down under it is
+     * a crash rather than a wrong answer.
+     */
+    uint64_t passes_running;
+    struct waitqueue passes_quiet;
     bool unmounting;          /* set under mountpoint->lock while vfs_umount decides */
     bool unmounted;           /* set under sync_lock once fs->unmount ran */
 };
@@ -331,6 +343,23 @@ void *ramfs_chr_priv(const struct vnode *vn);
 
 /* Diagnostics. */
 unsigned vfs_mount_count(void);
+
+/*
+ * Name a mount for an operation that acts on one filesystem rather than
+ * on a path. Takes a reference and counts a pass, so the mount cannot be
+ * freed and an unmount waits rather than tearing down underneath.
+ *
+ * -ENOENT if the calling process's mount namespace does not hold that
+ * id (which is not the same as "no such mount", and is the right answer:
+ * a mount another namespace holds is not this caller's), -EBUSY if it is
+ * already being unmounted.
+ *
+ * The caller must not take g_mounts_lock between these two: the mount is
+ * acquired and released with it dropped, and an unmount draining the
+ * count holds it while it waits.
+ */
+int vfs_mount_acquire(uint64_t id, struct mount **out);
+void vfs_mount_release(struct mount *mnt);
 unsigned vfs_vnode_count(void);
 void vfs_dump(void);
 

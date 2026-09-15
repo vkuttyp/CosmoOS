@@ -1109,6 +1109,79 @@ bool selftest_vfs_mount_id(const char **reason)
     return true;
 }
 
+/* --- the pin: a mount stays alive while a pass walks it ------------------- */
+
+static uint64_t g_pin_id;
+static int g_pin_umount_rc;
+static bool g_pin_umount_done;
+
+static void pin_unmounter(void *arg)
+{
+    (void)arg;
+    g_pin_umount_rc = vfs_umount("/tmp/pin");
+    __atomic_store_n(&g_pin_umount_done, true, __ATOMIC_RELEASE);
+}
+
+/*
+ * An unmount waits for a pass rather than tearing the filesystem down
+ * under it, and the wait terminates because no new pass can start once
+ * the unmount has begun. Both halves matter: without the wait a pass
+ * walks freed buffers, and without the refusal the wait never ends.
+ */
+bool selftest_vfs_mount_pin(const char **reason)
+{
+    int mk = vfs_mkdir(NULL, "/tmp/pin", 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount("/tmp/pin", "ramfs", NULL, 0) == 0);
+    struct mount *m = mount_at("/tmp/pin");
+    CHECK(m != NULL);
+    g_pin_id = m->id;
+
+    /* Acquire by name, as a pass does. */
+    struct mount *held = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &held) == 0);
+    CHECK(held == m);
+    CHECK(vfs_mount_acquire(0, &held) == -EINVAL);
+    CHECK(vfs_mount_acquire(~0ull, &held) == -ENOENT);   /* no such name anywhere */
+
+    /* An unmount now blocks. Run it elsewhere so this thread can let go. */
+    g_pin_umount_rc = 1234;
+    __atomic_store_n(&g_pin_umount_done, false, __ATOMIC_RELEASE);
+    struct thread *t = thread_create(pin_unmounter, NULL, "pin-umount", SCHED_PRIO_DEFAULT);
+    CHECK(t != NULL);
+
+    /* It has not finished, and it will not until the pass is done. A
+     * second acquisition is refused once the unmount has begun, which is
+     * what makes the drain terminate; before it begins it would succeed,
+     * so the loop tolerates either answer and only requires that the
+     * unmount has not completed. */
+    for (unsigned i = 0; i < 50; i++) {
+        CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+        struct mount *second = NULL;
+        int rc = vfs_mount_acquire(g_pin_id, &second);
+        CHECK(rc == 0 || rc == -EBUSY);
+        if (rc == 0)
+            vfs_mount_release(second);
+        else
+            break;                       /* the unmount has claimed it */
+        thread_sleep_ms(2);
+    }
+    CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+
+    /* Let go, and the drain wakes and completes. */
+    vfs_mount_release(held);
+    thread_join(t);
+    CHECK(__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
+    CHECK(g_pin_umount_rc == 0);
+    /* And the name is gone with the mount. */
+    struct mount *after = NULL;
+    CHECK(vfs_mount_acquire(g_pin_id, &after) == -ENOENT);
+    CHECK(vfs_rmdir(NULL, "/tmp/pin") == 0);
+    kinfo("selftest: vfs-mount-pin: mount %llu held a pass; the unmount waited and then took it",
+          (unsigned long long)g_pin_id);
+    return true;
+}
+
 bool selftest_vfs_chrdev_open(const char **reason)
 {
     struct vnode *node = NULL;

@@ -16,6 +16,7 @@
 #include <kernel/pmm.h>
 #include <kernel/panic.h>
 #include <kernel/printf.h>
+#include <kernel/sched.h>
 #include <kernel/string.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
@@ -256,6 +257,7 @@ static struct mount *mount_alloc(struct fs_type *fs, struct blkdev *bdev, unsign
     spinlock_init(&mnt->lock, "mount-hash");
     mutex_init(&mnt->rename_lock, "rename");
     mutex_init(&mnt->sync_lock, "mount-sync");
+    waitqueue_init(&mnt->passes_quiet, "mount-passes");
     list_init(&mnt->link);
     list_init(&mnt->cover_link);
     list_init(&mnt->ns_refs);
@@ -516,6 +518,20 @@ int vfs_umount2(const char *path, unsigned flags)
         mutex_unlock(&g_mounts_lock);
         return -EINVAL;   /* not this namespace's mount to unmount */
     }
+    /*
+     * One unmount at a time. This used to be free: g_mounts_lock was held
+     * unbroken from here to the teardown, so two unmounts of one mount
+     * serialised on it and nobody had to ask. The drain below drops that
+     * lock, so a second caller could enter the gap, find the mount still
+     * listed, and remove the namespace links the first is removing.
+     * `restore` clears the flag when an unmount is refused, so a mount
+     * that survives one is claimable again.
+     */
+    if (mnt->unmounting) {
+        mutex_unlock(&mp->lock);
+        mutex_unlock(&g_mounts_lock);
+        return -EBUSY;
+    }
     if (seen > 1) {
         list_remove(&myref->mnt_link);
         mutex_unlock(&mp->lock);
@@ -534,6 +550,23 @@ int vfs_umount2(const char *path, unsigned flags)
     mutex_lock(&mp->lock);
     mnt->unmounting = true;
     mutex_unlock(&mp->lock);
+
+    /*
+     * Wait for the maintenance passes to finish. `unmounting` is set, so
+     * vfs_mount_acquire refuses from here on and the count can only
+     * fall; that is what makes this terminate. g_mounts_lock is dropped
+     * across the wait because vfs_mount_release needs it to decrement --
+     * waiting with it held would be waiting for a thread that cannot
+     * run. No wakeup is lost: wait_event queues the waiter and marks it
+     * BLOCKED before it evaluates the condition, so a release landing in
+     * the gap wakes a waiter that is already there.
+     */
+    while (__atomic_load_n(&mnt->passes_running, __ATOMIC_ACQUIRE) != 0) {
+        mutex_unlock(&g_mounts_lock);
+        wait_event(&mnt->passes_quiet,
+                   __atomic_load_n(&mnt->passes_running, __ATOMIC_ACQUIRE) == 0);
+        mutex_lock(&g_mounts_lock);
+    }
 
     /* Busy if any vnode is referenced beyond what the filesystem itself
      * holds: a pinned vnode's own pin, the mount's reference on the root. */
@@ -1933,6 +1966,64 @@ void vfs_init(void)
     g_nr_mounts = 1;
     mutex_unlock(&g_mounts_lock);
     kinfo("vfs: root mounted (ramfs)");
+}
+
+/*
+ * Name a mount for an operation on one filesystem. The id is looked up
+ * in the caller's own mount namespace: an id another namespace holds is
+ * -ENOENT here, because a mount that is not this caller's is not hidden
+ * from it for safety -- it is not theirs.
+ *
+ * The root mount is visible in every namespace and holds no ns_ref
+ * (mountns.c, "the root mount carries none"), so it is matched first
+ * rather than searched for in a list it is deliberately absent from.
+ */
+int vfs_mount_acquire(uint64_t id, struct mount **out)
+{
+    if (id == 0 || out == NULL)
+        return -EINVAL;
+    mutex_lock(&g_mounts_lock);
+    struct mount *found = NULL;
+    if (g_root_mount != NULL && g_root_mount->id == id) {
+        found = g_root_mount;
+    } else {
+        struct mount_ns *ns = mountns_current();
+        struct mount_ns_ref *r;
+        list_for_each_entry(r, &ns->mounts, ns_link) {
+            if (r->mnt->id == id) {
+                found = r->mnt;
+                break;
+            }
+        }
+    }
+    if (found == NULL) {
+        mutex_unlock(&g_mounts_lock);
+        return -ENOENT;
+    }
+    if (found->unmounting) {
+        mutex_unlock(&g_mounts_lock);
+        return -EBUSY;
+    }
+    kobject_get(&found->obj);
+    __atomic_store_n(&found->passes_running, found->passes_running + 1, __ATOMIC_RELEASE);
+    mutex_unlock(&g_mounts_lock);
+    *out = found;
+    return 0;
+}
+
+void vfs_mount_release(struct mount *mnt)
+{
+    if (mnt == NULL)
+        return;
+    mutex_lock(&g_mounts_lock);
+    KASSERT(mnt->passes_running > 0);
+    uint64_t left = mnt->passes_running - 1;
+    __atomic_store_n(&mnt->passes_running, left, __ATOMIC_RELEASE);
+    mutex_unlock(&g_mounts_lock);
+    /* The falling edge is the only one a drain is waiting for. */
+    if (left == 0)
+        waitqueue_wake_all(&mnt->passes_quiet);
+    kobject_put(&mnt->obj);
 }
 
 unsigned vfs_mount_count(void)
