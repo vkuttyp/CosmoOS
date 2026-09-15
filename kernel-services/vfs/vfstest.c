@@ -1174,10 +1174,15 @@ bool selftest_vfs_mount_pin(const char **reason)
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));
 
     /*
-     * And one unmount at a time. This is the moment the guard exists
-     * for: the first unmount is inside its drain with g_mounts_lock
-     * dropped, which is a window the code never had before. A second
-     * caller must be refused rather than tearing down the same links.
+     * And one unmount at a time. Note what this does and does not prove:
+     * the refusal comes from `follow_mount`, which will not walk to a
+     * mount that is unmounting, so the second unmount fails while
+     * resolving its path and never reaches the guard inside vfs_umount2.
+     * That guard is still there, for a caller that reaches the mount by
+     * a relative path from inside it rather than through the mountpoint
+     * -- a narrow door this test does not open. Removing the guard does
+     * not fail this assertion, and the as-built section says so rather
+     * than letting the test look like proof it is not.
      */
     CHECK(vfs_umount("/tmp/pin") == -EBUSY);
     CHECK(!__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE));   /* and it changed nothing */
