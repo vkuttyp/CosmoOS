@@ -652,7 +652,8 @@ for a new reason, documented.
    fails first.
 2. **The three faults.** The bracket in `memtest.c`; the layout rule,
    its host test, and the stage-2 root, walk and VTCR that follow it
-   (the SMMU driver's probe-time refusal with it); `arch_hv_disable` and the
+   (the SMMU driver's probe-time check with it, which leaves a unit it
+   cannot build tables for unused); `arch_hv_disable` and the
    self-check's failure path. The AArch64 guard boot passes the whole
    suite, or "As run" says what it found next and the step is not done.
 3. **The lines.** The hardening `INFO`/`WARN` on both architectures;
@@ -832,8 +833,8 @@ baseline.
   would cover on some layouts; the concatenated root is the
   architecture's own answer to this width.
 - **The IOMMU walker's concatenated root.** Left out: the SMMU driver
-  refuses a 42-bit-or-smaller output size at probe rather than carrying
-  a walker change no machine here can run; the inventory gets a row
+  leaves a 42-bit-or-smaller unit unused at probe, with a `WARN`, rather
+  than carrying a walker change no machine here can run; the inventory gets a row
   for it (`kernel/iommu/pt.c`, with this report's stage-2 evidence).
 - **UAO, E0PD, BTI, PAC; the EL0 SError.** Left out, and the inventory
   row keeps them: UAO is moot while every user access goes through the

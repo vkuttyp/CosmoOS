@@ -118,6 +118,7 @@ static uint64_t tcr_value(void)
  * and EL0 may use FP/SIMD. CNTHCTL_EL2 bits 0-1: EL1 may read the
  * counters and program the timers. */
 #define HCR_EL2_RW      (1ull << 31)
+#define HCR_EL2_E2H     (1ull << 34)   /* firmware handed over in VHE host mode */
 #define CPTR_EL2_RES1   0x33FFull
 #define CPTR_EL2_TFP    (1ull << 10)
 #define CNTHCTL_EL1_ACCESS 0x3ull
@@ -138,7 +139,21 @@ static void jump_from_el2(uint64_t stack_top, uint64_t info, uint64_t entry, uin
     __asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
     __asm__ volatile("mrs %0, mpidr_el1" : "=r"(mpidr));
     __asm__ volatile(
+        /* EL2 runs unmapped from here: this code is identity mapped by
+         * firmware, and after the ERET nothing executes at EL2 until an
+         * HVC reaches the stub. Nothing below touches memory, so the few
+         * instructions that run with the caches off are safe.
+         *
+         * Before HCR_EL2.E2H, deliberately: clearing E2H reinterprets
+         * TCR_EL2 and SCTLR_EL2 in the non-VHE layout, and firmware that
+         * handed over with E2H set (EDK2 does, on a core with VHE) left
+         * them in the other one -- so the translation this code runs
+         * under would become whatever those bits happen to mean. With
+         * the MMU off there is no translation to lose. */
+        "msr sctlr_el2, %[sctlr2]\n\t"
+        "isb\n\t"
         "msr hcr_el2, %[hcr]\n\t"
+        "isb\n\t"
         "msr cptr_el2, %[cptr]\n\t"
         "msr cnthctl_el2, %[cnthctl]\n\t"
         "msr cntvoff_el2, xzr\n\t"
@@ -146,11 +161,6 @@ static void jump_from_el2(uint64_t stack_top, uint64_t info, uint64_t entry, uin
         "msr vpidr_el2, %[midr]\n\t"
         "msr vmpidr_el2, %[mpidr]\n\t"
         "msr vbar_el2, %[stub]\n\t"
-        "isb\n\t"
-        /* EL2 runs unmapped from here: this code is identity mapped by
-         * firmware, and after the ERET nothing executes at EL2 until an
-         * HVC reaches the stub. */
-        "msr sctlr_el2, %[sctlr2]\n\t"
         "isb\n\t"
         "msr spsr_el2, %[spsr]\n\t"
         "msr elr_el2, %[entry]\n\t"
@@ -176,6 +186,47 @@ void cpu_jump_to_kernel(const struct paging_ctx *pg, uint64_t stack_top, uint64_
     sctlr |= SCTLR_M | SCTLR_C | SCTLR_I;
     sctlr &= ~(SCTLR_WXN | SCTLR_A);
     if (read_sysreg_current_el() == 2) {
+        uint64_t hcr;
+        __asm__ volatile("mrs %0, hcr_el2" : "=r"(hcr));
+        if (hcr & HCR_EL2_E2H) {
+            /*
+             * The firmware handed over in VHE host mode (EDK2 sets
+             * HCR_EL2.{E2H,TGE} on a core that has FEAT_VHE; QEMU's
+             * cortex-a72 has none, its cortex-a76 does, and the EDK2
+             * build matters too -- which is why this went unseen until
+             * one boot ran on a PAN-capable core under Debian's AAVMF).
+             * With E2H set, an `msr <reg>_el1` executed at EL2 writes
+             * the EL2 register of that name, not EL1's, so the kernel
+             * would ERET into whatever EL1 state firmware happened to
+             * leave. The EL12 aliases (op1 = 5) reach the real EL1
+             * registers; jump_from_el2 clears E2H before the ERET.
+             * Written as raw encodings because the loader is built for
+             * ARMv8.0, where the assembler does not know the names.
+             */
+            lprintf("cosmoboot: EL2 handover in VHE host mode (HCR_EL2 0x%llx); EL1 state through the EL12 aliases\n",
+                    (unsigned long long)hcr);
+            __asm__ volatile(
+                "msr daifset, #0xF\n\t"
+                "dsb sy\n\t"
+                "isb\n\t"
+                "msr S3_5_C10_C2_0, %[mair]\n\t"   /* MAIR_EL12 */
+                "msr S3_5_C2_C0_2, %[tcr]\n\t"     /* TCR_EL12 */
+                "msr S3_5_C2_C0_0, %[t0]\n\t"      /* TTBR0_EL12 */
+                "msr S3_5_C2_C0_1, %[t1]\n\t"      /* TTBR1_EL12 */
+                "msr S3_5_C1_C0_0, %[sctlr]\n\t"   /* SCTLR_EL12 */
+                "isb\n\t"
+                /* TLBI VMALLE1 with TGE set names the EL2&0 regime, not
+                 * the EL1&0 one these tables are for; ALLE1 is the EL1&0
+                 * invalidate an EL2 caller can always issue. */
+                "tlbi alle1\n\t"
+                "dsb sy\n\t"
+                "isb\n\t"
+                :
+                : [mair] "r"(MAIR_VALUE), [tcr] "r"(tcr), [t0] "r"(pg->root_user), [t1] "r"(pg->root),
+                  [sctlr] "r"(sctlr)
+                : "memory");
+            jump_from_el2(stack_top, info, entry, g_el2_stub);
+        }
         /* The EL1 registers below take effect at the ERET, not here. */
         __asm__ volatile(
             "msr daifset, #0xF\n\t"
