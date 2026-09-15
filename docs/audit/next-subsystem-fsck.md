@@ -152,17 +152,23 @@ snapshot preserves, which is most of them. So the two maps are not
   bitmap or index or deadlist -- claims this block. This is the map the
   allocation bitmap is compared against, and it is a union: a shared
   block is marked once and marked again harmlessly.
-- ***live***: the **live tree** claims this block as file or directory
-  content. Only this map detects duplication, and only within itself: a
-  block claimed twice by the live tree is two files sharing one extent,
-  which is the corruption. A block in *live* that a snapshot also holds
-  is not in question at all.
+- ***live***: the **live generation** claims this block -- any claim,
+  not only file and directory content: the inode map's three levels,
+  the allocation index and its chunks, an inode's extent blocks and
+  checksum tree, the member table, the snapshot list, and every data
+  block an extent names. Only this map detects duplication, and only
+  within itself. Two live claims on one block is the corruption
+  whichever structures made them: two files sharing an extent, an
+  extent block that is also somebody's data, a bitmap chunk that is
+  also an inode block. A block in *live* that a *snapshot* also holds
+  is not in question at all, which is the whole point of the split.
 
-Each structure is visited once: the deadlist chains are walked in the
-snapshot step alone (the fixed-structure step walks the snapshot *list*,
-not the lists hanging off it), and a block reached twice through the
-same chain is a cycle, reported as `dir_bad`'s metadata sibling
-(`chain_cycle`) rather than silently followed.
+Each structure is visited once, so a second *live* claim always means
+two structures and never one structure twice: the deadlist chains are
+walked in the snapshot step alone (the fixed-structure step walks the
+snapshot *list*, not the lists hanging off it), and a block reached
+twice through the same chain is a cycle, reported as `chain_cycle`
+rather than silently followed.
 
 The walk:
 
@@ -196,7 +202,7 @@ Then it compares:
 | --- | --- |
 | `alloc_not_seen` | the bitmap says allocated, nothing reaches it — a leak |
 | `seen_not_alloc` | something reaches it, the bitmap says free — the dangerous one: the allocator may hand it out |
-| `dup` | two **live-tree** inodes claim the same block — a cross-link (a block shared with a snapshot is not this) |
+| `dup` | the live generation claims one block twice — two files sharing an extent, or metadata overlapping metadata or data (a block shared with a *snapshot* is not this) |
 | `nlink_wrong` | an inode's `nlink` differs from the entries that name it |
 | `orphan` | an inode allocated and unreachable (`nlink == 0` with blocks, or `nlink != 0` with no name) |
 | `dangling_entry` | an entry naming a free or out-of-range inode slot |
@@ -245,7 +251,7 @@ zero; every other class, the count it had before.
 
 ### Where it is called from
 
-Three callers, and no new system call:
+Two callers, and no new system call:
 
 1. **The self-tests**, as the scrub is called, through
    `cosmofs_check` in `kernel/include/kernel/cosmofs.h`.
@@ -314,10 +320,12 @@ is partial -- a checker that stops at the first bad block is the least
 useful thing at exactly the moment it is needed. The scrub is the tool
 for unreadable blocks and the report says so.
 
-*Security.* The `/proc` file exposes block numbers and inode numbers of
-a filesystem the reader can already stat; it is readable by root only,
-as the rest of `/proc/fs` is. Repair is not reachable from userland at
-all in this unit.
+*Security.* Nothing in this unit is reachable from userland: the pass is
+called by the self-tests and the crash suite, and repair by the tests
+alone. No syscall, no procfs node, no ioctl, so the unit adds no
+privilege surface. When the operator interface arrives it will have to
+decide who may read block and inode numbers of a mounted filesystem and
+who, if anyone, may repair one; this report deliberately does not.
 
 *Performance.* One read of every metadata block and no reads of data
 blocks (the checker validates extents, not their contents -- the scrub
@@ -407,7 +415,7 @@ build; step 5 runs `make test-crash`.
 | --- | --- | --- |
 | `cosmofs-check-clean` | a formatted, populated, synced filesystem reports `clean`, `partial` false, every class zero; `blocks_seen + free_blocks == total_blocks`; `inodes_seen == inode_count` | mark one extra block in *seen*: the arithmetic assertion fails |
 | `cosmofs-check-leak` | with a block's bit set and nothing referencing it, `alloc_not_seen.count == 1` and names that block; with repair, the bit is cleared and a second pass is clean | skip the bitmap comparison: the count is zero |
-| `cosmofs-check-crosslink` | two inodes' extents naming one block give `dup.count == 1` naming it; repair refuses and the filesystem is unchanged | drop the *dup* map: the block is merely seen twice and nothing fires |
+| `cosmofs-check-crosslink` | two inodes' extents naming one block give `dup.count == 1` naming it; an inode's extent naming a block the allocation index already claims gives the same, so metadata counts too; repair refuses and the filesystem is unchanged | track duplication over content only: the metadata case does not fire |
 | `cosmofs-check-nlink` | an inode whose `nlink` is one too high is reported with its number; repair sets it to the counted value and re-checks clean | count entries without counting a directory's own `..`: every directory reports a wrong `nlink` and the test fails on the count |
 | `cosmofs-check-orphan` | an inode with `nlink == 0` and allocated blocks is reported; repair frees the blocks and zeroes the inode; the free count rises by exactly the blocks it held | skip inodes with `nlink == 0`, as the scrub does: nothing fires |
 | `cosmofs-check-dangling` | a directory entry naming a free inode slot is reported with the parent and the name; repair refuses | validate only the entry's shape: nothing fires |
