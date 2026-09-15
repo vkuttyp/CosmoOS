@@ -330,10 +330,17 @@ simply not a finding.
 
 1. **The format.** `free_root`, `CFS_KIND_FREELOG`, version 9, and a
    mount of a version-8 image that replays nothing and still works.
-2. **The write.** The record built and written before the root, with the
-   snapshot filter moved ahead of it. No replay yet: the record is
-   written and ignored, and the test asserts it is *there* and names the
-   blocks phase 7 then clears.
+2. **The order, before the content.** The previous chain freed, the
+   snapshot filter moved ahead of the fixpoint, and the record's blocks
+   *reserved* before the fixpoint and filled after it. The record is
+   written and ignored -- no replay yet -- and this step's tests are the
+   ones the review of this report produced: the record's own blocks and
+   the deadlist's accounted in the bitmap the root publishes, a hundred
+   commits leaving one record and no residue, and an over-reserving
+   transaction listing its own leftovers. Doing this before anything
+   depends on the record is the point, because an ordering mistake here
+   corrupts rather than leaks and is cheapest to find while nothing
+   reads what is written.
 3. **The replay.** `load_bitmap` applies it. The test is the defect
    itself: write a file, delete it, unmount, remount, and the free count
    is what it was before the file existed.
@@ -374,6 +381,10 @@ assertions across a mount cycle, which today encode the leak — they
 assert the count the defect produces. Each one is re-derived in step 3,
 and the report says plainly that a test asserting a wrong number is not
 evidence the number is right.
+
+**Twelve tests, and three of them exist because this report was
+reviewed rather than because it was written** -- the two ordering
+defects above and the over-reservation their fix introduces.
 
 **Vacuity, named in advance.** `cosmofs-unmount-leak` is the unit: it
 fails on today's tree, which is the strongest possible statement that it
