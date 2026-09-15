@@ -322,7 +322,22 @@ not a lost write. So `cfs_symlink` allocates the data block and writes
 the target through the same buffered-block path the directory entries
 use, sets the extent in the inode, and only then writes the inode and
 adds the entry: one transaction, committed or not at all. `cfs_readlink`
-reads it back the same way. A link's bytes are therefore never a page in
+reads it back the same way.
+
+**And it leaves nothing behind when it fails.** Allocation happens in
+the in-memory bitmap, which is authoritative for the open transaction
+(`cosmofs_core.c:6-9`), so a failure after `cfs_alloc_data` and before
+the entry exists would otherwise commit an unreachable block -- the
+directory never names the inode, and nothing ever frees it. Every path
+out of `cfs_symlink` after an allocation therefore either returns the
+block with `cfs_free_block_deferred` and the inode to the inode map, or,
+where the undo itself cannot be done (the deferred free list has no
+memory, which today logs and leaks, `cosmofs_core.c:387`), abandons the
+transaction with `cfs_fail` (`cosmofs_core.c:665-671`) so the last
+committed root stays current and nothing partial reaches the disk. The
+order is chosen so the cheap failures come first: the name-length and
+version checks, then `dir_find` for `EEXIST`, then the inode, then the
+block, then the entry. A link's bytes are therefore never a page in
 either filesystem, which is also why `ramfs_lnk_ops` has no
 `readpage`/`writepage`.
 
@@ -474,6 +489,7 @@ cosmofs crash suite explicitly.
 | `vfs-symlink-toolong` | a target plus remainder over `VFS_PATH_MAX` is `ENAMETOOLONG`, not a truncated path | drop the length check: the walk resolves a truncated name |
 | `cosmofs-symlink` | a link survives unmount and remount with its target and type; `readdir` reports the type from the on-disk entry; the target occupies one block | store the target uncounted: the block accounting test fails |
 | `cosmofs-symlink-crash` (in `cosmofscrash.c`, beside the existing prefix replays) | over every write prefix of a symlink creation, a replayed filesystem shows either no link at all or a link with its whole target -- never a zero-length one | write the target through the page cache instead of the creating transaction: a prefix replays to a link whose `readlink` returns 0 bytes |
+| `cosmofs-symlink-nospace` | with a failure injected after the target block is allocated (the entry add refused), `symlink` returns the error, the filesystem's free-block count after the next commit equals the count before the call, and the inode number is reused by the next create -- so neither the block nor the inode leaked | skip the undo on the failure path: the free count is one short and the test fails |
 | `cosmofs-symlink-version` | on a filesystem formatted at version 7 (`cosmofs_test_format_version`), `symlink` is `-EOPNOTSUPP` and everything else still works | drop the gate: the refusal assertion fails |
 | `fs_selftest` (user mode) | `symlink`, `readlink`, `lstat` and `O_NOFOLLOW` through the libc wrappers; `ls -l` shows `l` and the arrow | leave `ls` following: the type column shows `-` |
 | the Linux ABI program | `readlink`, `symlink`, `lstat` and `newfstatat` with `AT_SYMLINK_NOFOLLOW` each report the link, not the target | re-alias `lstat` to `stat`: the link case reports the target |
