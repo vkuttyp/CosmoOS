@@ -430,6 +430,30 @@ static void walk_snapshots(struct check *ck)
     }
 }
 
+/*
+ * The chain of blocks recording what this root freed. The blocks of the
+ * chain are live metadata; the blocks it *names* are free, and the
+ * bitmap already says so, so they are not claimed here -- claiming them
+ * would make the pass call a recorded free a block in use.
+ */
+static void walk_freelog(struct check *ck, uint64_t head)
+{
+    uint64_t at = head;
+    unsigned guard = 0;
+    while (at != 0) {
+        if (guard++ > CFS_CHECK_MAX_CHAIN) {
+            name_it(&ck->rep->chain_cycle, at);
+            return;
+        }
+        claim(ck, at, true);
+        struct cfs_buf *b;
+        if (read_meta(ck, at, CFS_KIND_FREELOG, &b))
+            return;
+        at = ((const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE))->next;
+        cfs_buf_put(ck->fs, b);
+    }
+}
+
 /* --- the directory tree ---------------------------------------------------- */
 
 static bool inode_exists(struct check *ck, uint64_t ino, struct cfs_inode *out)
@@ -749,6 +773,14 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
         walk_alloc(&ck, fs->mem[v].alloc_root, true);
     if (fs->sb.members != 0)
         claim(&ck, fs->sb.members, true);
+    /*
+     * The record of what this root freed is metadata like any other: the
+     * root names it, so it is reachable, and a pass that did not claim
+     * it would call every block of it a leak
+     * (docs/audit/next-subsystem-unmount-leak.md).
+     */
+    if (fs->sb.version >= 9)
+        walk_freelog(&ck, fs->sb.free_root);
     if (fs->sb.key_root != 0)
         claim(&ck, fs->sb.key_root, true);
     walk_snapshots(&ck);

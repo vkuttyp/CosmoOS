@@ -147,6 +147,11 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);
+/* Does any snapshot still name this block? The question cfs_snapshot_hold_block
+ * asks, without the deadlist append it then makes -- so the record written
+ * before the root and the filtering done after it are one verdict rather than
+ * two (docs/audit/next-subsystem-unmount-leak.md). */
+bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk);
 /* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
 bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);
 uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva);   /* CFS_DVA_NONE if the DVA is not ours */

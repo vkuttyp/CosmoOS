@@ -712,6 +712,168 @@ void cfs_fail(struct cfs *fs, int rc)
     }
 }
 
+/* --- the record of what a transaction freed ------------------------------
+ *
+ * docs/audit/next-subsystem-unmount-leak.md. A commit clears the freed
+ * blocks' bits only after its root is durable, and marks those bitmap
+ * chunks for the next commit -- which at an unmount never comes. The
+ * record is what carries them across: written before the root, made
+ * true by it, and replayed by a mount that finds one.
+ */
+
+/* Entries a FREELOG block holds: the deadlist's shape, reused rather
+ * than twinned. */
+#define CFS_FREELOG_PER_BLOCK CFS_DEAD_PER_BLOCK
+
+/* No record is this long in a sound filesystem; one that is has a cycle,
+ * and the walk says so rather than following it forever. */
+#define CFS_FREELOG_MAX_CHAIN 4096u
+
+/*
+ * Release the chain the current root names. It is the *old* root's
+ * statement and the new root replaces it, so without this every commit
+ * leaks its predecessor's record -- this unit's own defect, one level up.
+ *
+ * Deliberately not through cfs_snapshot_hold_block. That asks whether a
+ * snapshot's recorded bitmap marks the block allocated, and these blocks
+ * were allocated when an older snapshot was taken, so the generic path
+ * would hold them and append them to a deadlist. No snapshot can reach a
+ * record: a snapshot preserves imap_root and alloc_root, not free_root.
+ * The rule the exception rests on: the snapshot filter is for blocks a
+ * snapshot's tree might name, and a block reachable only from a
+ * superblock field that snapshots do not copy is not one of those.
+ */
+static int freelog_release_previous(struct cfs *fs)
+{
+    uint64_t at = fs->sb.version >= 9 ? fs->sb.free_root : 0;
+    unsigned guard = 0;
+    while (at != 0) {
+        if (guard++ > CFS_FREELOG_MAX_CHAIN) {
+            kerror("cosmofs: free record chain too long at %llu", (unsigned long long)at);
+            return -EIO;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, at, CFS_KIND_FREELOG, &b);
+        if (rc)
+            return rc;
+        uint64_t next = ((const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE))->next;
+        cfs_buf_put(fs, b);
+        cfs_free_block_deferred(fs, at);   /* as cfs_buf_cow frees what it copied from */
+        at = next;
+    }
+    fs->sb.free_root = 0;
+    return 0;
+}
+
+/*
+ * Allocate the record's blocks, without filling them. The bound is
+ * computable here and the fill is not: commit_bitmap frees every chunk
+ * and index it copies, so the final set is only known after it runs --
+ * and it must run after every allocation, or the bitmap it writes does
+ * not know about these blocks.
+ *
+ * The bound is what is pending now, plus what commit_bitmap can add: one
+ * block per chunk it may rewrite and one index per member. Generous by
+ * design; freelog_fill puts the leftovers in the record itself.
+ */
+static int freelog_reserve(struct cfs *fs, uint64_t **out, unsigned *n_out)
+{
+    *out = NULL;
+    *n_out = 0;
+    uint64_t bound = (uint64_t)fs->nr_pending + fs->nr_chunks + fs->nmembers;
+    if (bound == 0)
+        return 0;
+    unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK);
+    uint64_t *blk = kmalloc((size_t)n * sizeof(*blk), KMEM_ZERO);
+    if (blk == NULL)
+        return -ENOMEM;
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t got = 0;
+        int rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, &blk[i], &got);
+        if (rc) {
+            /* Give back what was taken: a failed commit leaves nothing. */
+            for (unsigned k = 0; k < i; k++)
+                cfs_free_block_deferred(fs, blk[k]);
+            kfree(blk);
+            return rc;
+        }
+    }
+    *out = blk;
+    *n_out = n;
+    return 0;
+}
+
+/*
+ * Fill the reserved blocks with what is now final, and chain them. A
+ * block the bound over-reserved is listed in the record as free: a block
+ * that describes its own release, which is what keeps the bound from
+ * having to be tight.
+ */
+static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
+{
+    if (n == 0) {
+        fs->sb.free_root = 0;
+        return 0;
+    }
+    bool snaps = fs->snap_count > 0;
+    unsigned need = (fs->nr_pending + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK;
+    if (need == 0)
+        need = 1;                            /* the leftovers still need somewhere to be said */
+    if (need > n)
+        need = n;                            /* cannot happen: the bound covers it */
+
+    /*
+     * Through the buffer cache, not pool_write: a block just allocated
+     * may have a stale buffer from its previous life further down the
+     * list, and cfs_buf_get would find that one. buf_alloc puts a fresh
+     * one at the front, which is what cfs_buf_cow does for the same
+     * reason, and the commit's dirty loop writes it.
+     */
+    unsigned at = 0;                         /* entries of pending_free written so far */
+    for (unsigned i = 0; i < need; i++) {
+        struct cfs_buf *b = buf_alloc(fs, blk[i]);
+        if (b == NULL)
+            return -ENOMEM;
+        struct cfs_dead_block *d = (struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
+        d->next = (i + 1 < need) ? blk[i + 1] : 0;
+        unsigned k = 0;
+        while (k < CFS_FREELOG_PER_BLOCK && at < fs->nr_pending) {
+            uint64_t dva = fs->pending_free[at++];
+            uint64_t lin = cfs_dva_lin(fs, dva);
+            /*
+             * Exactly what phase 7 will clear, asked the same way it
+             * asks. cfs_snapshot_holds is the walk cfs_snapshot_hold_block
+             * does, without the deadlist append -- which stays after the
+             * root, where it always was. Recording a block a snapshot
+             * keeps would tell the next mount to free it.
+             */
+            if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
+                continue;
+            if (snaps && cfs_snapshot_holds(fs, dva))
+                continue;
+            d->blk[k++] = dva;
+        }
+        /* The reserved blocks nobody needed say so here, in the last
+         * block that has room for them. */
+        if (i + 1 == need)
+            for (unsigned x = need; x < n && k < CFS_FREELOG_PER_BLOCK; x++)
+                d->blk[k++] = blk[x];
+        d->count = k;
+        mhdr_seal(fs, b->data, CFS_KIND_FREELOG, blk[i]);
+        buf_mark_dirty(fs, b);
+        cfs_buf_put(fs, b);
+    }
+    /*
+     * The leftovers are named by the record, so they are free from the
+     * moment this root lands -- and the in-memory bitmap must agree, or
+     * the allocator will not hand them out until a remount.
+     */
+    for (unsigned x = need; x < n; x++)
+        cfs_free_block_deferred(fs, blk[x]);
+    fs->sb.free_root = blk[0];
+    return 0;
+}
+
 int cfs_commit(struct cfs *fs)
 {
     if (fs->failed)
@@ -723,7 +885,46 @@ int cfs_commit(struct cfs *fs)
         if (!any)
             return 0;
     }
-    int rc = commit_bitmap(fs);
+    /*
+     * The record of what this transaction frees
+     * (docs/audit/next-subsystem-unmount-leak.md). The order below is
+     * the design, and both halves of it are load-bearing:
+     *
+     *  - Everything that allocates must happen *before* commit_bitmap,
+     *    which is the one pass that makes the on-disk bitmap agree with
+     *    the bits in memory. Allocating after it publishes a root whose
+     *    bitmap does not know about the blocks, so the next allocation
+     *    hands them out and the filesystem eats its own metadata.
+     *  - The set to record is not final until commit_bitmap has run,
+     *    because it frees every chunk and index it copies.
+     *
+     * Reserve before, fill after: that breaks the circle without a
+     * second pass and without a loop.
+     */
+    /*
+     * Only from version 9. Below it the superblock word is `reserved[5]`
+     * and writing a chain head there would put a pointer in a field an
+     * older kernel does not know about -- and this kernel would not read
+     * it back either, since the gate is on reading too, so every record
+     * would be a leak nobody could see.
+     */
+    bool record_frees = fs->sb.version >= 9;
+    int rc = 0;
+    uint64_t *record = NULL;
+    unsigned record_n = 0;
+    if (record_frees) {
+        rc = freelog_release_previous(fs);
+        if (rc)
+            return rc;
+        rc = freelog_reserve(fs, &record, &record_n);
+        if (rc)
+            return rc;
+    }
+
+    rc = commit_bitmap(fs);
+    if (rc == 0 && record_frees)
+        rc = freelog_fill(fs, record, record_n);
+    kfree(record);
     if (rc)
         return rc;
 
@@ -781,7 +982,10 @@ int cfs_commit(struct cfs *fs)
      * it and the new one does not -- which is what a snapshot still
      * names. While one exists the block is remembered on its deadlist
      * and its bitmap bit stays set, so the allocator never hands it out
-     * (design.md, "Not freeing what a snapshot names"). */
+     * (design.md, "Not freeing what a snapshot names"). The deadlist
+     * append stays here, after the root: the record written before it
+     * asked the same question without writing anything
+     * (cfs_snapshot_holds), so the two agree by construction. */
     bool snapshots = fs->snap_count > 0;
     for (unsigned i = 0; i < fs->nr_pending; i++) {
         uint64_t dva = fs->pending_free[i];

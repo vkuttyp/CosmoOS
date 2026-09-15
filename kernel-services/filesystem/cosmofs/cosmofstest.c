@@ -381,8 +381,17 @@ bool selftest_cosmofs_holes(const char **reason)
     file_put(f);
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
-    CHECK(st1.free_blocks + 6 >= st0.free_blocks);   /* the checksum tree of an empty file is gone too */
-    kinfo("selftest: cosmofs-holes: a 200 MiB sparse file cost %llu blocks", (unsigned long long)(st0.free_blocks - st1.free_blocks));
+    /*
+     * Back to within a few blocks of where it started. The slack covers
+     * what an empty file still costs -- its checksum tree is gone, its
+     * inode is not -- and, from format version 9, the record of what the
+     * last commit freed: a version-9 filesystem always has one, so the
+     * count it is compared against was taken before there was one
+     * (docs/audit/next-subsystem-unmount-leak.md).
+     */
+    kinfo("selftest: cosmofs-holes: %llu blocks still held after truncating a 200 MiB sparse file",
+          (unsigned long long)(st0.free_blocks - st1.free_blocks));
+    CHECK(st1.free_blocks + 8 >= st0.free_blocks);
     return engine_unmount(bd, reason);
 }
 
