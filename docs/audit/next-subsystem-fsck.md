@@ -45,14 +45,20 @@ reading:
    right for a lookup and wrong here, so link counts and orphan facts
    come from the map walk and repair clears the whole slot -- including
    the inode number, or the next pass finds the same orphan again.
-7. **Two repairs can fight.** The orphan repair lowers the inode count
+7. **A test hook must not resolve a path.** The hook took one at first,
+   which put a VFS symbol in `cosmofs_core.c` and broke the fuzz
+   harness's link, that harness building the filesystem without a VFS.
+   It takes an inode number: a filesystem-level hook has no business
+   resolving names, and it has to work on a filesystem whose directories
+   are the broken part.
+8. **Two repairs can fight.** The orphan repair lowers the inode count
    as it clears a slot and the leak repair raises the free count, so a
    counter repair that writes back "what the walk counted" puts the
    pre-repair total back over the repair that just ran. Each counter is
    repaired only if the comparison found *that* counter wrong. The bug
    was invisible until the inode count was compared at all, which is the
    argument for comparing both totals rather than the easy one.
-8. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
+9. **One test hook, not eight.** `cosmofs_test_corrupt` takes a named
    corruption, so the list of ways to break a filesystem lives in one
    place and every class a test can report is one a test produced on
    purpose.
@@ -474,7 +480,7 @@ enum cosmofs_corruption {
     COSMOFS_CORRUPT_DIRENT, COSMOFS_CORRUPT_COUNTER,
 };
 int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind,
-                         const char *path, uint64_t *what);
+                         uint64_t ino, uint64_t *what);   /* 0 where no case needs one */
 ```
 
 ## Migration plan
