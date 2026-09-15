@@ -18,8 +18,10 @@ native; a native program linked without `crt0.o` silently becomes a
 Linux process (by design, documented).
 
 **L2. The native ABI is unchanged by the Linux personality**
-(constitution invariant 7). `SYS_COUNT` is still 43; no native call,
-number, structure or errno meaning changed; `kernel/syscall/native.c`
+(constitution invariant 7). The personality added no native call: it
+took `SYS_COUNT` from 43 to 43, and every later change to that number
+came from a native unit, not from this one. No native call, number,
+structure or errno meaning changed; `kernel/syscall/native.c`
 only *exported* the bodies of `read`, `write` and `fstat` as
 `syscall_handle_read/write/stat` for the translation to call; the one
 header addition (`ENOPROTOOPT` 92 in `kernel/errno.h`) is a new value

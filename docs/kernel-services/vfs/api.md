@@ -458,7 +458,9 @@ Numbers 0–10 are unchanged (Phase 4). New:
 | 21 | `mount` | `const char *source, const char *target, const char *fstype, unsigned flags` | 0 | `EPERM` (uid ≠ 0), `ENODEV` (unknown device or filesystem), `EBUSY`, `EIO`, path errors |
 | 22 | `umount` | `const char *target` | 0 | `EPERM`, `EINVAL`, `EBUSY`, path errors |
 
-`SYS_COUNT` is 23. Paths are copied with `strncpy_from_user` up to
+These are the namespace's numbers; `SYS_COUNT` was 23 when they were
+added and is 92 now, the last three being the symbolic-link calls
+above. Paths are copied with `strncpy_from_user` up to
 `VFS_PATH_MAX`; an empty path is `-ENOENT`; an unreadable pointer is
 `-EFAULT`. `open` installs the file with `HANDLE_RIGHT_READ` for
 `O_RDONLY`/`O_RDWR` and `HANDLE_RIGHT_WRITE` for `O_WRONLY`/`O_RDWR`, so

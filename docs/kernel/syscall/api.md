@@ -119,7 +119,7 @@ object (`read` drains the guest's debug console, `fstat` is
 credential calls, 56–57 the resource limits (`docs/kernel/security/api.md`);
 58–59 the readiness and non-blocking calls (milestone 8;
 `docs/kernel/object/api.md`), 60–62 the asynchronous I/O ring
-(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 63. A file opened with `open`
+(milestone 9; `docs/kernel/io/api.md`); `SYS_COUNT` is 92, the last three being the symbolic-link calls. A file opened with `open`
 is a `struct file` kobject of a `kobject_io_type`, so `read`, `write`
 and `close` operate on it unchanged; the handle carries READ and/or
 WRITE rights from the access mode. A socket from `socket` carries every
