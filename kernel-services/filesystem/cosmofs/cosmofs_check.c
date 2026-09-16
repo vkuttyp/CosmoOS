@@ -665,6 +665,15 @@ static int repair(struct check *ck)
         struct cfs_inode in;
         if (cfs_inode_read_raw(fs, ino, &in) != 0)
             continue;   /* raw: an orphan has no links, which the ordinary read calls absent */
+        /*
+         * From here a failure is not skippable and `rc` carries it out
+         * of the loop, which is why this pass stops on one:
+         * cfs_truncate_blocks frees every extent into pending_free
+         * before storing the shortened list, so a failure leaves the
+         * blocks queued free while the inode still names them, and a
+         * commit would publish that (docs/audit/next-subsystem-orphan.md,
+         * where the same shape was found in the replay).
+         */
         rc = cfs_truncate_blocks(fs, &in, 0);
         if (rc == 0) {
             /* Every field, the number included: a slot whose `ino` still

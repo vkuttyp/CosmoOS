@@ -597,9 +597,19 @@ no longer backs must not be published.**
   abandoned.
 - The replay swallowed a failure *after* the truncate, with the same
   consequence. Nothing is published at that point, so it now fails the
-  mount, which leaves the filesystem exactly as it was found. A failure
-  *before* the truncate still skips, because skipping has changed
-  nothing.
+  mount, which leaves the filesystem exactly as it was found.
+
+  The second round re-listed this, and checking every place its body
+  named -- rather than the line it was anchored to -- found that the fix
+  was half a fix. **`cfs_truncate_blocks` frees every extent into
+  `pending_free` and *then* stores the shortened extent list**, so a
+  failure *in the truncate* leaves the blocks queued free while the
+  inode still names them: the identical hazard, one line earlier, under
+  a comment that said "nothing changed for it". It had not. Both
+  branches fail the mount now, and `cfs_evict` gets the same treatment
+  for its own truncate. The rule swept to the third site it governs --
+  the structural check's orphan repair -- which turned out to guard
+  correctly already; only the reason it must is now written down.
 - **And the worst of the four: the replay believed the record.** A
   record whose checksum is good and whose contents are wrong would have
   had it truncate and clear an inode somebody was still using. It now
@@ -627,12 +637,12 @@ release.**
 | --- | --- | --- |
 | `cosmofs-replay` prefix images | 334 | **410** (the workload holds a handle across a sync) |
 | blocks stranded across them | 0 | **0** |
-| an unlinked-but-open inode after a crash | an orphan the operator must reclaim | **reclaimed by the mount** |
+| an unlinked-but-open inode after a crash | an orphan the operator must reclaim | **reclaimed by the mount's first commit** |
 
 Each test as it reported itself:
 
-- `cosmofs-orphan-crash`: the mount reclaimed the inode and **19
-  blocks** with no operator and no repair flag (16 of data, the rest its
+- `cosmofs-orphan-crash`: the mount's first commit reclaimed the inode
+  and **19 blocks** with no operator and no repair flag (16 of data, the rest its
   extent and checksum metadata).
 - `cosmofs-orphan-cancels`: an unlink with nothing holding it wrote no
   record; one with a handle wrote and retired one -- both halves, in one

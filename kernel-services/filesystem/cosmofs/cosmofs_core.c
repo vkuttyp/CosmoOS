@@ -1380,18 +1380,26 @@ static int orphan_replay(struct cfs *fs)
                 suspect++;
                 continue;
             }
-            if (cfs_truncate_blocks(fs, &in, 0) != 0) {
-                kwarn("cosmofs: orphan inode %llu could not be released", (unsigned long long)inos[i]);
-                continue;   /* nothing changed for it: the checker still finds it */
-            }
             /*
-             * Past here the blocks are queued to be freed, so leaving
-             * the slot pointing at them is not an option: the first
-             * commit would publish the frees under an inode that still
-             * names them. Nothing has been published yet, so failing the
+             * From the truncate on, a failure cannot be skipped.
+             * cfs_truncate_blocks frees every extent into pending_free
+             * and *then* stores the shortened extent list, so a failure
+             * leaves the blocks queued to be freed while the inode still
+             * names them -- and the first commit would publish that. The
+             * first version of this skipped such an inode under the
+             * comment "nothing changed for it", which was not true.
+             *
+             * Nothing has been published at this point, so failing the
              * mount discards the whole transaction and leaves the
-             * filesystem as it was found.
+             * filesystem exactly as it was found.
              */
+            int trc = cfs_truncate_blocks(fs, &in, 0);
+            if (trc != 0) {
+                kerror("cosmofs: orphan inode %llu could not be released (%d); refusing the mount",
+                       (unsigned long long)inos[i], trc);
+                kfree(inos);
+                return trc;
+            }
             struct cfs_inode empty;
             memset(&empty, 0, sizeof(empty));
             int wrc = cfs_inode_write(fs, inos[i], &empty);

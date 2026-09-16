@@ -2043,7 +2043,14 @@ static void cfs_evict(struct vnode *vn)
         /* The last link and the last reference are gone: release the
          * data blocks and the inode slot. */
         mutex_lock(&fs->lock);
-        if (cfs_truncate_blocks(fs, &cv->inode, 0) == 0) {
+        int trc = cfs_truncate_blocks(fs, &cv->inode, 0);
+        if (trc != 0) {
+            /* The same hazard as a failed slot write, one step earlier:
+             * the truncate frees every extent before storing the
+             * shortened list, so a failure leaves blocks queued free
+             * under an inode that still names them. */
+            cfs_fail(fs, trc);
+        } else {
             struct cfs_inode empty;
             memset(&empty, 0, sizeof(empty));
             /*
