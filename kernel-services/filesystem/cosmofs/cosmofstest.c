@@ -325,7 +325,15 @@ static bool write_wide_file(const char *path, unsigned pages)
         return false;
     bool ok = true;
     for (unsigned i = 0; ok && i < pages; i++) {
-        fill_incompressible(page, sizeof(page), 0x1234567u + i);
+        /*
+         * Spread the seeds, do not walk them. `fill_incompressible`
+         * starts from `seed | 1`, so seeds `n` and `n + 1` collide
+         * whenever `n` is even and every second page comes out
+         * byte-identical to the one before it -- which the filesystem
+         * then stores once, and 600 pages cost 452 blocks instead of
+         * 601. An odd multiplier keeps consecutive pages apart.
+         */
+        fill_incompressible(page, sizeof(page), 0x9E3779B9u * (i + 1));
         ok = file_write(f, page, sizeof(page)) == (int64_t)sizeof(page);
     }
     file_put(f);
