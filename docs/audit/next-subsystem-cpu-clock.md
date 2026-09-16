@@ -161,13 +161,23 @@ asserted only "the bracket held" could pass on a machine whose skew had
 drifted past what the boot promised. The assertion is therefore
 
 ```
-observed apparent offset  <=  clock_worst_offset_ns() + bracket width
+|observed apparent offset|  <=  clock_worst_offset_ns() + bracket width
 ```
 
 where the bracket width is the measurement's noise floor and
-`clock_worst_offset_ns()` is the advertised accuracy. If the left side
-exceeds the right, either the correction has drifted or the boot's
-number was optimistic, and both are findings.
+`clock_worst_offset_ns()` is the advertised accuracy, **both
+magnitudes**. If the left side exceeds the right, either the correction
+has drifted or the boot's number was optimistic, and both are findings.
+
+**Magnitudes, and the bars are load-bearing.** An offset has a sign: a
+CPU can run ahead of another or behind it, and a correction can
+overshoot in either direction. A one-sided `observed <= bound` is
+satisfied by *every* negative offset however large, so a CPU running
+behind by a second would pass — and an injection bug-proof that happened
+to inject a negative offset would not fail, which is worse, because it
+would certify an oracle that does not work. `clock_worst_offset_ns`
+returns the worst **magnitude** for the same reason: a signed worst
+offset invites exactly this comparison to be written again.
 
 That third point is why `clock_since_ns` exists and why it lands first:
 an interval that is wrong by a microsecond is a measurement, and an
@@ -320,12 +330,14 @@ uint64_t clock_now_ns(void);
 uint64_t clock_since_ns(uint64_t stamp);
 
 /*
- * The worst residual skew the boot measured: the contract's bound, the
- * boot line's number and what the cross-CPU tests check themselves
- * against. One quantity with one name, so that a test cannot quietly
- * assert something narrower than what was advertised.
+ * The worst residual skew the boot measured, as a **magnitude**: the
+ * contract's bound, the boot line's number and what the cross-CPU tests
+ * check themselves against. One quantity with one name, so that a test
+ * cannot quietly assert something narrower than what was advertised --
+ * and unsigned, so that a comparison against it cannot quietly be
+ * one-sided while an offset the other way sails through.
  */
-int64_t clock_worst_offset_ns(void);
+uint64_t clock_worst_offset_ns(void);
 ```
 
 ## Migration plan
@@ -360,7 +372,7 @@ changes.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `clock-cross-cpu` | **the promise, checked against the number the boot advertised**: a timestamp on CPU A, one on CPU B ordered after it by a handshake, then one on CPU A again; the middle value lies within the bracket the outer two form, and the apparent offset it implies is within `clock_worst_offset_ns()` plus the bracket's own width. Over many rounds and every online pair, reporting the widest apparent offset seen | inject a per-CPU offset wider than the boot's advertised bound: the assertion fails naming the pair, the offset and the bound it exceeded. And the converse: report a boot bound of zero on a machine with skew, and the same assertion fails -- which is what stops the test from agreeing with whatever the boot happened to print |
+| `clock-cross-cpu` | **the promise, checked against the number the boot advertised**: a timestamp on CPU A, one on CPU B ordered after it by a handshake, then one on CPU A again; the middle value lies within the bracket the outer two form, and the **magnitude** of the apparent offset it implies is within `clock_worst_offset_ns()` plus the bracket's own width. Over many rounds and every online pair, reporting the largest magnitude seen | inject a per-CPU offset wider than the advertised bound **in each direction, one run ahead and one behind**: both must fail, naming the pair, the offset and the bound. A one-sided check passes the negative case, and an injection that happened to be negative would then certify an oracle that does not work. And the converse: advertise a bound of zero on a machine with skew and the assertion must fail, which stops the test agreeing with whatever the boot printed |
 | `clock-since-saturates` | `clock_since_ns` of a stamp from the future returns 0, and of a stamp in the past returns the interval | make it a plain subtraction: the future stamp returns an age near `UINT64_MAX`, which is the number the block timeout would have compared against |
 | `blk-timeout-skew` | with a skew injected so an issuing CPU's clock runs ahead, a bio issued on that CPU is **not** timed out early, and one genuinely overdue still is | revert the timeout's subtraction to `now - issued_ns`: every in-flight bio on the device times out at once, which is the defect this unit is named for |
 | `lockup-report-skew` | the lockup report's "last tick N ms ago" for a CPU whose clock runs ahead reads 0 rather than 584 years | the same revert, in `lockup.c`: the operator's one diagnostic prints an absurd number |
