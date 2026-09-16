@@ -152,6 +152,9 @@ void blk_unregister(struct blkdev *bd);
  * refusal window; the hold parks a submitter inside it, which is the
  * only way to occupy the state the drain waits for.
  */
+/* Stamp every bio this many ns in the future, as a CPU whose clock runs
+ * ahead of the timeout scanner's would. */
+void blk_test_set_issue_skew_ns(uint64_t ns);
 void blk_test_unregister_pause(unsigned ms);
 void blk_test_hold_in_driver(bool on);
 bool blk_test_submitter_parked(void);

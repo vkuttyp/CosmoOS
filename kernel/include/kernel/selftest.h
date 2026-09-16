@@ -103,6 +103,8 @@ bool selftest_fault_blk(const char **reason);
 bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */
 bool selftest_blk_segments(const char **reason); /* multi-segment bios (milestone 9) */
 bool selftest_blk_timeout(const char **reason);  /* a stalled request times out */
+bool selftest_blk_timeout_skew(const char **reason);  /* a stamp from a CPU reading ahead does not */
+bool selftest_clock_since_saturates(const char **reason);  /* clock_since_ns of a future stamp is 0 */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */

@@ -352,7 +352,7 @@ bool selftest_preempt(const char **reason)
 
     uint64_t t0 = clock_now_ns();
     thread_sleep_ms(30);
-    uint64_t elapsed = clock_now_ns() - t0;
+    uint64_t elapsed = clock_since_ns(t0);
     /* We are running again despite the spinner, and the spinner was
      * switched out to let us: preemption works. There is no upper bound
      * on `elapsed`; a `< 200 ms` used to sit here, and the failure it
@@ -577,7 +577,7 @@ bool selftest_irqrestore_bench(const char **reason)
         arch_irq_state_t s = arch_irq_save();
         arch_irq_restore(s);   /* with need_resched clear: the predicate's two loads and a branch */
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     kinfo("selftest: irqrestore-bench: %u save/restore pairs in %llu us, %llu ns a pair; restore-point preemptions so far on this CPU: %llu",
           N, (unsigned long long)(dt / 1000), (unsigned long long)(dt / N),
           (unsigned long long)preempt_point_count(arch_cpu_id()));
@@ -588,7 +588,7 @@ bool selftest_sleep(const char **reason)
 {
     uint64_t t0 = clock_now_ns();
     thread_sleep_ms(20);
-    uint64_t d = clock_now_ns() - t0;
+    uint64_t d = clock_since_ns(t0);
     CHECK(d >= MS(20));
     /* LOAD-SENSITIVE (docs/testing/flakes.md). A sleep wakes at the first
      * tick past its deadline, so its overshoot is a tick or so; the bound
@@ -603,7 +603,7 @@ bool selftest_sleep(const char **reason)
     /* Short sleeps must not wake early. */
     t0 = clock_now_ns();
     thread_sleep_ns(MS(1));
-    CHECK(clock_now_ns() - t0 >= MS(1));
+    CHECK(clock_since_ns(t0) >= MS(1));
     return true;
 }
 
@@ -744,7 +744,7 @@ bool selftest_completion(const char **reason)
     CHECK(!completion_done(&c));
     uint64_t t0 = clock_now_ns();
     wait_for_completion(&c);
-    CHECK(clock_now_ns() - t0 >= MS(10));
+    CHECK(clock_since_ns(t0) >= MS(10));
     CHECK(completion_done(&c));
     wait_for_completion(&c); /* already done: returns immediately */
     thread_join(t);
@@ -860,6 +860,6 @@ bool selftest_completion_race(const char **reason)
     __atomic_store_n(&sh.stop, true, __ATOMIC_RELEASE);
     thread_join(t);
     kinfo("selftest: completion-race: %u completions across two CPUs, the frame reused after each, in %llu ms", ROUNDS,
-          (unsigned long long)((clock_now_ns() - t0) / 1000000));
+          (unsigned long long)((clock_since_ns(t0)) / 1000000));
     return true;
 }

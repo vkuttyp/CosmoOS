@@ -158,7 +158,7 @@ bool selftest_quiesce_straggler(const char **reason)
      * count comes back on the stack, where it cannot be anyone else's.
      */
     unsigned kicks = quiesce_test_sync_kicks();
-    uint64_t waited_ns = clock_now_ns() - t0;
+    uint64_t waited_ns = clock_since_ns(t0);
     quiesce_get_stats(&after);
     CHECK(kicks >= 1);
     CHECK(kicks <= 8);   /* the bound in the code, and this waiter's own */
@@ -289,7 +289,7 @@ bool selftest_quiesce_straggler_idle(const char **reason)
      * an equality on the machine-wide total would fail for someone
      * else's kicks and say nothing about the idle case. */
     unsigned kicks = quiesce_test_sync_kicks();
-    uint64_t waited_ns = clock_now_ns() - t0;
+    uint64_t waited_ns = clock_since_ns(t0);
     quiesce_get_stats(&after);
 
     CHECK(kicks == 0);
@@ -349,7 +349,7 @@ bool selftest_quiesce_grace(const char **reason)
      * a tick because this CPU publishes as part of the call. */
     uint64_t t0 = clock_now_ns();
     synchronize_quiesce();
-    uint64_t solo_ns = clock_now_ns() - t0;
+    uint64_t solo_ns = clock_since_ns(t0);
     quiesce_get_stats(&after);
     CHECK(after.epoch == before.epoch + 1);
     CHECK(after.synchronizes == before.synchronizes + 1);
@@ -376,7 +376,7 @@ bool selftest_quiesce_grace(const char **reason)
     __atomic_store_n(&slot, (struct grace_obj *)NULL, __ATOMIC_RELEASE);
     t0 = clock_now_ns();
     synchronize_quiesce();
-    uint64_t grace_ns = clock_now_ns() - t0;
+    uint64_t grace_ns = clock_since_ns(t0);
 
     CHECK(__atomic_load_n(&r.done, __ATOMIC_ACQUIRE) == 1);   /* the wait outlasted the section */
     obj->magic = MAGIC_DEAD;                                    /* now safe: no reader can hold it */
@@ -505,7 +505,7 @@ bool selftest_irq_sync(const char **reason)
         CHECK(wait_flag(&p->done, 1000));
         uint64_t t0 = clock_now_ns();
         CHECK(interrupt_unregister_sync((unsigned)vec, irq_probe_handler) == 0);
-        uint64_t sync_ns = clock_now_ns() - t0;
+        uint64_t sync_ns = clock_since_ns(t0);
         CHECK(p->hits == 1 && p->bad == 0);
         kinfo("selftest: irq-sync: one CPU, self-IPI handled, unregister_sync in %llu us",
               (unsigned long long)(sync_ns / 1000));
@@ -515,7 +515,7 @@ bool selftest_irq_sync(const char **reason)
         /* The handler is running on `cpu` right now, for ~20 ms. */
         uint64_t t0 = clock_now_ns();
         CHECK(interrupt_unregister_sync((unsigned)vec, irq_probe_handler) == 0);
-        uint64_t sync_ns = clock_now_ns() - t0;
+        uint64_t sync_ns = clock_since_ns(t0);
         CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);   /* returned only after the handler */
         CHECK(sync_ns >= MS(10));
         CHECK(p->hits == 1 && p->bad == 0);
@@ -609,7 +609,7 @@ bool selftest_timer_cancel_sync(const char **reason)
     CHECK(wait_flag(&p->entered, 1000));
     uint64_t t0 = clock_now_ns();
     bool was_pending = timer_cancel_sync(&p->t);
-    uint64_t sync_ns = clock_now_ns() - t0;
+    uint64_t sync_ns = clock_since_ns(t0);
     CHECK(!was_pending);
     CHECK(__atomic_load_n(&p->done, __ATOMIC_ACQUIRE) == 1);
     CHECK(sync_ns >= MS(10));

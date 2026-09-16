@@ -174,10 +174,22 @@ static bool data_ok(const struct blkdev *bd, const struct bio *bio)
     return sum == total;
 }
 
+#if CONFIG_DEBUG
+static uint64_t g_test_issue_skew_ns;
+
+void blk_test_set_issue_skew_ns(uint64_t ns)
+{
+    __atomic_store_n(&g_test_issue_skew_ns, ns, __ATOMIC_RELEASE);
+}
+#endif
+
 /* qlock held. */
 static void inflight_add_locked(struct blkdev *bd, struct bio *bio)
 {
     bio->issued_ns = clock_now_ns();
+#if CONFIG_DEBUG
+    bio->issued_ns += __atomic_load_n(&g_test_issue_skew_ns, __ATOMIC_ACQUIRE);
+#endif
     bio->issue_cpu = arch_cpu_id();
     bio->flags &= ~BIO_TIMED_OUT;
     list_push_back(&bd->inflight, &bio->inflight_link);
@@ -216,7 +228,13 @@ static void blk_timeout_thread(void *arg)
             arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
             struct bio *b;
             list_for_each_entry(b, &bd->inflight, inflight_link) {
-                if (now - b->issued_ns < bd->timeout_ns)
+                /* issued_ns was stamped by whichever CPU handed this
+                  * bio to the driver -- bio->issue_cpu, set beside it,
+                  * says which -- and `now` was read here. A plain
+                  * subtraction underflows on residual skew and times
+                  * out every in-flight bio at once
+                  * (docs/audit/next-subsystem-cpu-clock.md). */
+                if (clock_delta_ns(now, b->issued_ns) < bd->timeout_ns)
                     break;   /* oldest first: the rest are younger */
                 if (b->flags & BIO_TIMED_OUT)
                     continue;

@@ -1423,7 +1423,7 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
         faultinject_set(kind, 1, 1, NULL);   /* the next CSW, once */
         uint64_t t0 = clock_now_ns();
         int rc = blk_read(bd, 0, 8, buf);
-        uint64_t dt = clock_now_ns() - t0;
+        uint64_t dt = clock_since_ns(t0);
         total_dt += dt;
         faultinject_clear(kind);
         if (rc != -ETIMEDOUT)
@@ -1683,7 +1683,7 @@ static void blk_bench_one(struct blkdev *bd, bool write, uint32_t bio_bytes, uin
             break;
         reqs++;
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     if (dt == 0)
         dt = 1;
     uint64_t bytes = (uint64_t)reqs * n * bd->sector_size;
@@ -1748,7 +1748,7 @@ static void blk_bench_concurrent(struct blkdev *bd)
         }
         kfree(w[i].buf);
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     if (dt == 0)
         dt = 1;
     kinfo("selftest: blk-bench: %s: %u threads reading 4 KiB bios at once: %u requests in %llu ms = %llu req/s%s",

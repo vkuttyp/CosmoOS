@@ -88,6 +88,23 @@ static inline uint64_t cosmo_clock_ns(void)
 {
     return (uint64_t)cosmo_syscall1(SYS_clock_ns, COSMO_CLOCK_MONOTONIC);
 }
+/*
+ * Elapsed monotonic time since `stamp`, saturating at zero.
+ *
+ * The userland half of the kernel's `clock_since_ns` rule
+ * (`kernel/include/kernel/timer.h`). A thread that sleeps between two
+ * clock reads can wake on a different CPU, so even a `t0` in a local
+ * variable is a stamp from some other CPU, and a plain subtraction can
+ * wrap to an interval of 584 years. The syscall reads the same clock
+ * the kernel does, so whatever correction the kernel applies is already
+ * in these numbers; this only removes the wrap.
+ */
+static inline uint64_t cosmo_clock_since_ns(uint64_t stamp)
+{
+    uint64_t now = cosmo_clock_ns();
+    return now > stamp ? now - stamp : 0;
+}
+
 static inline uint64_t cosmo_clock_realtime_ns(void)
 {
     return (uint64_t)cosmo_syscall1(SYS_clock_ns, COSMO_CLOCK_REALTIME);

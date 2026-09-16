@@ -447,8 +447,127 @@ which the inventory already records as never executed.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+#### Step 6, the sweep — run first, because it changed the plan
+
+The plan put the sweep at step 6, as a re-check of step 1. Run as a grep
+instead of as a re-reading, it stopped being a re-check: it found sites
+the reading pass had not reached, in files the report never named, and
+one of its findings changed the shape of the API.
+
+**What the grep found that reading had not.** The report expected the
+block timeout, the two lockup reports and the scheduler's dump — four
+sites, and it described the scheduler's as "the one place with a
+hand-rolled guard". There were **three** hand-rolled guards, written
+independently, each for the same reason and none referring to the
+others:
+
+| site | the guard it had grown | did the report know? |
+| --- | --- | --- |
+| `kernel/scheduler/sched.c` (watchdog) | `now <= last \|\| now - last < timeout`, with a comment explaining the wrap | the report knew about this one |
+| `kernel/scheduler/thread.c` (`thread_dump_all`) | `if (t->state == THREAD_RUNNING && now > t->last_start_ns)` | the report did not |
+| `kernel/core/lockup.c` | one of its three sites | the report counted two |
+
+Three independent reinventions of one rule is the argument for the rule
+existing, made better than the report made it. Both survivors are now
+the saturating subtraction and their guards are gone; the watchdog keeps
+its comment, rewritten to say the test is now written once for the tree.
+
+**What the grep found that the API did not cover.** Several sites hold a
+`now` they compare *many* stamps against: the block timeout scans a
+whole in-flight list, `sched_dump` prints a line per CPU. Rewriting
+those as `clock_since_ns(stamp)` re-reads the clock per item — a clock
+read per iteration, one of them inside a spinlock, against a `now` that
+moves underneath the comparison, so two lines of one dump would be ages
+against two different instants. That is a regression, and step 1 had
+already written it before the sweep caught it. So the helper comes in
+two forms:
+
+```c
+uint64_t clock_since_ns(uint64_t stamp);                  /* fresh read */
+static inline uint64_t clock_delta_ns(uint64_t now, uint64_t stamp);  /* a `now` in hand */
+```
+
+with `clock_since_ns` defined as `clock_delta_ns(clock_now_ns(), stamp)`,
+so there is one saturating subtraction and two ways to reach it.
+
+**The classification rule, which is not the one the report implied.**
+The report speaks of stamps "taken on another CPU", which sounds like a
+property you can read off the code: shared state is foreign, a local
+variable is local. It is not. A thread that sleeps between two clock
+reads can wake on a different CPU, so
+
+```c
+uint64_t t0 = clock_now_ns();
+thread_sleep_ms(500);
+uint64_t dt = clock_now_ns() - t0;   /* t0 is a foreign stamp */
+```
+
+is a cross-CPU subtraction with no shared state in sight. That is the
+shape of nearly every timing assertion in the test suite. The rule the
+sweep actually used:
+
+> A stamp is **foreign** iff the CPU that wrote it may differ from the
+> CPU that reads it — which for a local variable means iff the thread
+> can be descheduled between the two reads.
+
+**The sweep, by category.** Counts are `grep -c` on the tree, not a
+tally kept by hand:
+
+| category | count | disposition |
+| --- | --- | --- |
+| a local `t0`, with a sleep or a blocking call between the two reads | 43 | `clock_since_ns(t0)` — foreign by the rule above |
+| a stamp in shared state, read with a `now` already in hand | 15 | `clock_delta_ns(now, stamp)` |
+| userland, the same shape through the `SYS_clock_ns` syscall | 4 | new `cosmo_clock_since_ns` in `libc/include/cosmo/syscall.h` |
+| genuinely local | 1 | left a plain subtraction, with a comment saying why |
+| not an elapsed time at all | 4 | left alone |
+| the host's own clock | 2 | out of scope |
+
+The one genuinely local site is `kernel/timer/timer.c`'s tick cost: both
+reads are this CPU's, inside one tick, with interrupts disabled between
+them. It keeps the plain subtraction **on purpose** — saturating there
+would hide a counter that went backwards on a single CPU, which is a
+fault in the time source rather than the skew this tree tolerates.
+
+The four that are not elapsed times: the realtime offset
+(`epoch - clock_now_ns()`, a signed base that is meant to go negative),
+`g_keep_idle_ns - idle` and the SRTT deviation in `tcp.c` (both a
+duration minus a duration, already guarded), and the round-robin slice
+decrement. Saturating any of them would be wrong, not safer.
+
+**Userland was in scope and the report had not noticed.** Four sites in
+`init.c` and `thrtest.c` take a `t0` from `cosmo_clock_ns()`, sleep, and
+subtract — the same defect, one privilege level down. They are fixed by
+one inline helper rather than left as a documented hole; userland
+inherits step 4's correction for free, because the syscall reads the
+same clock the kernel does.
+
+#### Step 1
+
+`clock_since_ns`, `clock_delta_ns` and `clock_worst_offset_ns` added;
+the sweep above applied. Two tests: `blk-timeout-skew` (the block
+timeout with an injected skew, via a new `blk_test_set_issue_skew_ns`
+hook) and `clock-since-saturates` (the helper alone, in a new
+`kernel/timer/clocktest.c`). `blk-timeout-skew`'s second phase is the
+control that stops the first from being vacuous: the same device, the
+same 200 ms timeout and the same scanner *do* fire once the skew is
+gone.
+
+`clock-since-saturates` failed on its first boot, and the way it failed
+is worth keeping. It asserted
+
+```c
+CHECK(clock_since_ns(now + 1) == 0);
+```
+
+which is not a claim about saturation at all: `clock_since_ns` reads the
+clock itself, so a stamp one nanosecond ahead has already been overtaken
+by the time the call reads it, and the assertion measures how fast the
+clock advances between two statements. The margin is a minute now, and
+the one-nanosecond boundary is asserted on `clock_delta_ns` instead,
+where both operands are chosen and no clock runs between them. Same
+family as the two test oracles that measured the allocator in the
+snapshot unit: the test was reading a property of the machine where it
+meant to read a property of the code.
 
 ### As run
 

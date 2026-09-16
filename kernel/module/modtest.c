@@ -427,7 +427,7 @@ bool selftest_module_unload_busy(const char **reason)
     module_set_unload_timeout_ms(50);
     uint64_t t0 = clock_now_ns();
     int rc = module_unload("cosmotest");
-    uint64_t waited = clock_now_ns() - t0;
+    uint64_t waited = clock_since_ns(t0);
     module_set_unload_timeout_ms(5000);
     CHECK(rc == -EBUSY);
     CHECK(waited >= 50000000ULL);                 /* it waited the timeout for the object */

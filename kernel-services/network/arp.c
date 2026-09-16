@@ -249,13 +249,13 @@ void arp_age(uint64_t now)
         if (e->state == ARP_FREE)
             continue;
         if (e->state == ARP_REACHABLE) {
-            if (now - e->updated_ns > ARP_REACHABLE_NS) {
+            if (clock_delta_ns(now, e->updated_ns) > ARP_REACHABLE_NS) {
                 memset(e, 0, sizeof(*e));
                 g_stats.entries--;
             }
             continue;
         }
-        if (now - e->updated_ns < ARP_RETRY_NS)
+        if (clock_delta_ns(now, e->updated_ns) < ARP_RETRY_NS)
             continue;
         if (e->tries >= ARP_MAX_TRIES) {
             m_freem(e->pending);

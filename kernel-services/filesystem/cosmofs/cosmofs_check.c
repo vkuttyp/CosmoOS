@@ -840,7 +840,7 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
     counts_free(&ck.nlink);
 
     rep.clean = report_clean(&rep);
-    rep.elapsed_ns = clock_now_ns() - t0;
+    rep.elapsed_ns = clock_since_ns(t0);
     if (out)
         *out = rep;
     if (!rep.clean && rep.unreadable.count != 0)

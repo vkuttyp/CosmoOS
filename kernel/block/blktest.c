@@ -303,7 +303,7 @@ bool selftest_blk_timeout(const char **reason)
     uint64_t t0 = clock_now_ns();
     uint64_t timeouts0 = bd->timeouts;
     int rc = blk_read(bd, 0, 8, page);        /* would block for ever without the timeout */
-    uint64_t took_ms = (clock_now_ns() - t0) / 1000000;
+    uint64_t took_ms = (clock_since_ns(t0)) / 1000000;
     CHECK(rc == -ETIMEDOUT);
     CHECK(bd->timeouts == timeouts0 + 1);
     CHECK(took_ms >= 300 && took_ms < 3000);
@@ -317,7 +317,87 @@ bool selftest_blk_timeout(const char **reason)
     return true;
 }
 
+/*
+ * A stamp from a CPU that reads ahead of the scanner's must not time the
+ * request out (docs/audit/next-subsystem-cpu-clock.md).
+ *
+ * `bio->issued_ns` is stamped by whichever CPU handed the bio to the
+ * driver and compared against a `now` read by the timeout thread on
+ * whatever CPU that thread is on. On x86-64 those are two raw TSCs with
+ * no correction between them, so the stamp can be *ahead* of `now`; a
+ * plain `now - issued_ns` then underflows to something near 2^64 ns,
+ * which is larger than any timeout, and the scan fails every in-flight
+ * request on the device at once. The saturating subtraction is what
+ * stops that, and this test injects the skew that would otherwise be a
+ * property of the machine rather than of the test.
+ *
+ * Phase 2 is what makes phase 1 mean anything: the same device, the same
+ * 200 ms timeout and the same scanner *do* fire once the skew is gone,
+ * so phase 1's silence is a request that was not timed out rather than a
+ * scanner that was never running.
+ */
+bool selftest_blk_timeout_skew(const char **reason)
+{
+    struct blkdev *bd = ramblk_create(16);
+    CHECK(bd != NULL);
+    bd->timeout_ns = 200ull * 1000000ull;
+    ramblk_set_deferred(bd, 4);
+    ramblk_set_stall(bd, true);   /* nothing completes on its own */
+
+    uint8_t *page = kmalloc(4096, KMEM_ZERO);
+    CHECK(page != NULL);
+
+    /* Phase 1: the issuing CPU's clock reads 5 s ahead of the scanner's. */
+    static struct bio bio;
+    memset(&bio, 0, sizeof(bio));
+    bio.dev = bd;
+    bio.dir = BIO_READ;
+    bio.sector = 0;
+    bio.nsectors = 8;
+    bio.buf = page;
+    bio.done = count_done;
+    list_init(&bio.link);
+    g_done_count = 0;
+    g_done_status = 0;
+    uint64_t timeouts0 = bd->timeouts;
+    blk_test_set_issue_skew_ns(5ull * 1000000000ull);
+    CHECK(blk_submit(&bio) == 0);
+    blk_test_set_issue_skew_ns(0);   /* the stamp is taken; later bios are honest */
+
+    /* The scan runs every 500 ms: three of them, against a 200 ms timeout. */
+    thread_sleep_ms(1700);
+    if (bd->timeouts != timeouts0)
+        kerror("selftest: blk-timeout-skew: a stamp 5 s ahead timed out %llu request(s): the subtraction underflowed",
+               (unsigned long long)(bd->timeouts - timeouts0));
+    CHECK(bd->timeouts == timeouts0);
+    CHECK(__atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) == 0);
+
+    /* Release it by hand -- the device is still silent. */
+    CHECK(ramblk_complete_one(bd));
+    for (unsigned w = 0; w < 2000 && __atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) == 0; w++)
+        thread_sleep_ms(1);
+    CHECK(g_done_count == 1);
+
+    /* Phase 2, the control: no skew, everything else identical. */
+    uint64_t timeouts1 = bd->timeouts;
+    int rc = blk_read(bd, 0, 8, page);
+    CHECK(rc == -ETIMEDOUT);
+    CHECK(bd->timeouts == timeouts1 + 1);
+
+    ramblk_set_stall(bd, false);
+    ramblk_set_deferred(bd, 0);
+    kfree(page);
+    ramblk_destroy(bd);
+    kinfo("selftest: blk-timeout-skew: a stamp 5 s ahead of the scanner survived 3 scans; the same request without it timed out");
+    return true;
+}
+
 #else
+bool selftest_blk_timeout_skew(const char **reason)
+{
+    (void)reason;
+    return true;
+}
 bool selftest_blk_queue(const char **reason)
 {
     (void)reason;

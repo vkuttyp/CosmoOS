@@ -50,6 +50,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/memory/slab.c \
 	kernel/memory/kmalloc.c \
 	kernel/memory/memtest.c \
+	kernel/timer/clocktest.c \
 	kernel/timer/timer.c \
 	kernel/scheduler/thread.c \
 	kernel/scheduler/sched.c \

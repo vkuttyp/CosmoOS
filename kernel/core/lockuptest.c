@@ -178,12 +178,11 @@ bool selftest_lockup_sample_irqoff(const char **reason)
 
     cpumask_t m = 0;
     bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
-    uint64_t now = clock_now_ns();
     const struct percpu *pk = percpu_get((unsigned)k);
     bool answered = (m & CPUMASK_OF((unsigned)k)) != 0;
     bool nmi = pk->sample.nmi;
     uintptr_t pc = pk->sample.pc;
-    uint64_t tick_age = now - pk->last_tick_ns;
+    uint64_t tick_age = clock_since_ns(pk->last_tick_ns);
     if (ok)
         lockup_print_samples(m);
 
@@ -229,7 +228,7 @@ static void racer_main(void *arg)
         arch_cpu_relax();
     uint64_t t0 = clock_now_ns();
     r->ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &r->mask);
-    r->elapsed_ns = clock_now_ns() - t0;
+    r->elapsed_ns = clock_since_ns(t0);
     if (r->ok) {
         /* Hold the slot long enough for the loser to have asked. */
         uint64_t until = clock_now_ns() + 2 * 1000 * 1000;
@@ -290,7 +289,7 @@ bool selftest_lockup_sample_busy(const char **reason)
         uint64_t t0 = clock_now_ns();
         cpumask_t m = 0;
         bool ok = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
-        uint64_t el = clock_now_ns() - t0;
+        uint64_t el = clock_since_ns(t0);
         if (ok)
             lockup_print_samples(m);
         /* Both stop before either is joined: a join frees a stack, and
@@ -390,7 +389,7 @@ bool selftest_lockup_hard(const char **reason)
      * TLB shootdown's one-second acknowledgement bound: a masked spinner
      * that outlived it would panic the kernel. */
     bool fired = t != NULL && wait_reports(&reports, s0.hard_reports + 1, false, 600);
-    uint64_t fired_after = clock_now_ns() - t0;
+    uint64_t fired_after = clock_since_ns(t0);
     lockup_get_stats(&s1);
     uintptr_t pc = percpu_get((unsigned)k)->sample.pc;
     bool nmi = percpu_get((unsigned)k)->sample.nmi;

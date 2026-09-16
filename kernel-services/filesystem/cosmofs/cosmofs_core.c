@@ -2421,7 +2421,7 @@ static bool wb_due(struct cfs *fs)
         return true;
     if (__atomic_load_n(&fs->mnt->cache_dirty, __ATOMIC_RELAXED) >= CFS_WB_DIRTY_PAGES)
         return true;
-    return clock_now_ns() - fs->first_dirty_ns >= (uint64_t)fs->wb_interval_ms * 1000000ull;
+    return clock_since_ns(fs->first_dirty_ns) >= (uint64_t)fs->wb_interval_ms * 1000000ull;
 }
 
 static void cfs_writeback_thread(void *arg)

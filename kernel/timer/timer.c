@@ -39,6 +39,26 @@ uint64_t clock_now_ns(void)
     return (uint64_t)(ns >> CLOCK_SHIFT);
 }
 
+/*
+ * See the contract in timer.h. A stamp from the future is residual skew,
+ * not an interval: the caller gets zero rather than a number with
+ * nineteen digits in it (docs/audit/next-subsystem-cpu-clock.md).
+ */
+uint64_t clock_since_ns(uint64_t stamp)
+{
+    return clock_delta_ns(clock_now_ns(), stamp);
+}
+
+/* Measured at bring-up from version 10 of this unit's step 4; zero
+ * until then, and zero on architectures whose counter is common to
+ * every CPU. */
+static uint64_t g_worst_offset_ns;
+
+uint64_t clock_worst_offset_ns(void)
+{
+    return __atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE);
+}
+
 uint64_t clock_realtime_ns(void)
 {
     return g_realtime_offset_ns + clock_now_ns();
@@ -234,6 +254,11 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     pc->last_tick_ns = now;
     run_expired(pc->timers, now);
 #if CONFIG_SELFTEST
+    /* Local by construction, and the only subtraction in the tree that
+     * is: both reads are this CPU's, inside one tick, with interrupts
+     * disabled between them. No `clock_since_ns` here -- saturating
+     * would hide a backwards counter on a single CPU, which is a bug in
+     * the time source rather than the skew this tree tolerates. */
     pc->tick_cost_ns += clock_now_ns() - now;
 #endif
     if (g_tick_hook)

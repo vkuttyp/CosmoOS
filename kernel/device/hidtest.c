@@ -149,7 +149,7 @@ bool selftest_hid_keyboard(const char **reason)
                got2 > 0 ? rollover : "", (long long)got2, KEYTEST_ROLLOVER,
                (unsigned long long)(now.rx_bytes - before.rx_bytes),
                (unsigned long long)(now.lines_in - before.lines_in),
-               (unsigned long long)((clock_now_ns() - started) / 1000000));
+               (unsigned long long)((clock_since_ns(started)) / 1000000));
     }
     CHECK(got2 > 0 && strcmp(rollover, KEYTEST_ROLLOVER) == 0);
 

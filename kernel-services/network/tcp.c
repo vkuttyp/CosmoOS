@@ -738,7 +738,7 @@ static bool challenge_allowed(void)
 {
     uint64_t now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&g_chal_lock);
-    if (now - g_chal_window_ns >= 1000000000ull) {
+    if (clock_delta_ns(now, g_chal_window_ns) >= 1000000000ull) {
         g_chal_window_ns = now;
         g_chal_count = 0;
     }
@@ -1020,7 +1020,7 @@ static void keep_fire(struct tcp_pcb *pcb, struct tcp_batch *b, struct socket **
     if (pcb->state != TCP_ESTABLISHED && pcb->state != TCP_CLOSE_WAIT)
         return;
     uint64_t now = clock_now_ns();
-    uint64_t idle = now - pcb->last_rx_ns;
+    uint64_t idle = clock_delta_ns(now, pcb->last_rx_ns);
     if (idle < g_keep_idle_ns) {
         arm_keep(pcb, g_keep_idle_ns - idle);
         return;
@@ -1523,7 +1523,7 @@ static uint64_t tuple_hash(const struct netaddr *local, const struct netaddr *re
 
 static bool syn_entry_live(const struct tcp_syn_entry *e, uint64_t now)
 {
-    return e->ts_ns != 0 && now - e->ts_ns < TCP_SYNCACHE_TTL_NS;
+    return e->ts_ns != 0 && clock_delta_ns(now, e->ts_ns) < TCP_SYNCACHE_TTL_NS;
 }
 
 /* Listener lock held. */
@@ -1635,7 +1635,7 @@ static uint16_t parse_mss(const uint8_t *opts, unsigned optlen, uint16_t dflt)
 
 static void rtt_sample(struct tcp_pcb *pcb, uint64_t now)
 {
-    uint64_t r = now - pcb->rtt_start_ns;
+    uint64_t r = clock_delta_ns(now, pcb->rtt_start_ns);
     if (pcb->srtt_ns == 0) {
         pcb->srtt_ns = r;
         pcb->rttvar_ns = r / 2;

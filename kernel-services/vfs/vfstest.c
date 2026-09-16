@@ -1788,7 +1788,7 @@ static void bench_pass(const char *what, struct file *f, uint8_t *buf, size_t re
         total += (size_t)n;
         calls++;
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     kinfo("selftest: %s-bench: %s %zu KiB requests: %u calls, %llu us, %llu MiB/s", write ? "write" : "read", what,
           req / 1024, calls, (unsigned long long)(dt / 1000),
           (unsigned long long)(dt ? (uint64_t)total * 1000000000ull / dt / (1024 * 1024) : 0));
