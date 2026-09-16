@@ -36,13 +36,6 @@ static struct waitqueue g_worker_wq = WAITQUEUE_INIT(g_worker_wq);
 
 /* --- quiescent points ------------------------------------------------------ */
 
-#if CONFIG_DEBUG
-/* Kicks the last synchronize_quiesce on each CPU sent: see the note
- * where it is written. */
-static unsigned g_test_last_kicks[CONFIG_MAX_CPUS];
-unsigned quiesce_test_last_kicks(void) { return g_test_last_kicks[arch_cpu_id()]; }
-#endif
-
 void quiesce_note_quiescent(void)
 {
     quiesce_core_publish(&g_state, arch_cpu_id());
@@ -67,7 +60,9 @@ void quiesce_read_unlock_debug(void)
 
 /* --- grace periods ------------------------------------------------------- */
 
-void synchronize_quiesce(void)
+/* The wait itself, handing back how many straggler kicks *this* call
+ * sent. Nothing stores that number: see quiesce_test_sync_kicks below. */
+static unsigned sync_quiesce_counting(void)
 {
     struct percpu *pc = this_cpu();
     if (pc->irq_depth != 0)
@@ -81,7 +76,7 @@ void synchronize_quiesce(void)
     if (!g_ready) {
         /* Before the scheduler can sleep, every other CPU is still in
          * its bootstrap: nothing can hold a reference. */
-        return;
+        return 0;
     }
 
     uint64_t start = clock_now_ns();
@@ -142,21 +137,31 @@ void synchronize_quiesce(void)
     g_stats.synchronizes++;
     if (waited > g_stats.max_wait_ns)
         g_stats.max_wait_ns = waited;
-#if CONFIG_DEBUG
-    /*
-     * This call's own kick count, kept per CPU.
-     *
-     * `straggler_ipis` is machine-wide, and the callback worker can be
-     * in a grace period of its own at the same time, so a test that
-     * bracketed the global counter would be asserting on someone else's
-     * kicks as well as its own -- a per-waiter bound compared against a
-     * machine-wide number, which is a flake waiting for a busy moment.
-     * The waiter's own CPU slot is exact
-     * (docs/audit/next-subsystem-lifetime-windows.md).
-     */
-    g_test_last_kicks[pc->cpu_id] = kicks;
-#endif
+    return kicks;
 }
+
+void synchronize_quiesce(void)
+{
+    (void)sync_quiesce_counting();
+}
+
+#if CONFIG_DEBUG
+/*
+ * The same wait, handing back the kicks *this call* sent.
+ *
+ * Returned rather than stored anywhere, and that is the point. The
+ * machine-wide `straggler_ipis` cannot carry a per-waiter claim because
+ * another waiter's kicks land in it; a per-CPU slot cannot either,
+ * because the callback worker is unpinned and can run a grace period on
+ * this CPU between the tested call returning and a preemptible test
+ * reading the slot. A value on the caller's stack belongs to the caller
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ */
+unsigned quiesce_test_sync_kicks(void)
+{
+    return sync_quiesce_counting();
+}
+#endif
 
 /* --- deferred callbacks --------------------------------------------------- */
 

@@ -148,21 +148,18 @@ bool selftest_quiesce_straggler(const char **reason)
     CHECK(wait_flag(&r.entered, 1000));
 
     uint64_t t0 = clock_now_ns();
-    synchronize_quiesce();
+    /*
+     * The wait, handing back the kicks it sent.
+     *
+     * Not the machine-wide `straggler_ipis`, which another waiter moves
+     * too; and not a per-CPU slot either, because the callback worker is
+     * unpinned and can run its own grace period on this CPU between the
+     * call returning and this preemptible thread reading the slot. The
+     * count comes back on the stack, where it cannot be anyone else's.
+     */
+    unsigned kicks = quiesce_test_sync_kicks();
     uint64_t waited_ns = clock_now_ns() - t0;
     quiesce_get_stats(&after);
-
-    /*
-     * The waiter's side: it noticed and it kicked.
-     *
-     * Against this call's own count, not the machine-wide one. The
-     * callback worker can be in a grace period of its own while this
-     * runs, and its kicks land in `straggler_ipis` too -- so a
-     * per-waiter bound checked against that global would fail on a busy
-     * machine with every waiter having behaved. The global is still
-     * asserted to have moved, because the two should agree in direction.
-     */
-    unsigned kicks = quiesce_test_last_kicks();
     CHECK(kicks >= 1);
     CHECK(kicks <= 8);   /* the bound in the code, and this waiter's own */
     CHECK(after.straggler_ipis >= before.straggler_ipis + kicks);
@@ -288,17 +285,14 @@ bool selftest_quiesce_straggler_idle(const char **reason)
     struct quiesce_stats before, after;
     quiesce_get_stats(&before);
     uint64_t t0 = clock_now_ns();
-    synchronize_quiesce();
+    /* This call sent no kick, asserted against its own returned count:
+     * an equality on the machine-wide total would fail for someone
+     * else's kicks and say nothing about the idle case. */
+    unsigned kicks = quiesce_test_sync_kicks();
     uint64_t waited_ns = clock_now_ns() - t0;
     quiesce_get_stats(&after);
 
-    /*
-     * This call sent no kick. Asserted against its own count and not the
-     * machine-wide total, which another waiter can move while this one
-     * runs -- an equality on the global would fail for someone else's
-     * kicks and say nothing about the idle case.
-     */
-    CHECK(quiesce_test_last_kicks() == 0);
+    CHECK(kicks == 0);
     CHECK(waited_ns < MS(100));   /* and it did not take the kick path's time */
     (void)before;
     (void)after;

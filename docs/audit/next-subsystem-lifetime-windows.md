@@ -481,7 +481,7 @@ prove the hooks compile out.
 | `blk-submit-unregister` | with submitters on other CPUs and the window held open: **no bio reaches the driver after `blk_unregister` returns**, every bio completes exactly once with 0 or `-ENODEV`, no submitter hangs, and the refcount returns | make the `gone` store `relaxed`: a submitter that missed it raises `submitting` after the unregister read it, and a bio reaches a driver whose device is gone |
 | `blk-unregister-drain` | the drain half, **arranged rather than hoped for**: a submit-side hook stops a submitter inside the driver after it has raised `submitting`, the test starts the unregister only once that submitter is known to be there, and asserts `blk_unregister` returned *after* the submitter left -- an order of two events, not a timing | skip the `submitting` spin: the unregister returns while the submitter is inside and the order assertion names which came first. Without the submit-side hook this test passes on a machine where no submitter ever reached the driver, which is why it has one |
 | `tcp-pcb-timer-free` | a pcb closed while a callback is inside it, **held before the callback takes its reference**: the magic is live on entry *and* after the held interval, so that interval is one in which nothing but `timer_cancel_sync` protects the pcb | cancel three of the four timers: the fourth fires into poisoned memory and the check names which timer. And the aim-check: move the hook after `pcb_get` and the test still passes with `timer_cancel_sync` stubbed out -- which is the test measuring reference counting instead, so the hook's position is itself asserted |
-| `virtio-remove-inflight` | a virtio-blk device removed with I/O in flight through the **whole unbind transition**: every outstanding bio completes with an error rather than being forgotten, nothing touches the device after remove returns, and the device is left *unbound* -- no `driver`, no `drvdata`, the bound count down | remove without draining: a completion arrives for a device already freed. And: call the driver's hook alone, as the first draft proposed, and the device is left bound with a dangling `drvdata` for a later unregister to remove a second time |
+| `device-remove-busy` (**narrowed from the planned `virtio-remove-inflight`**) | a device removed with work outstanding through the **whole unbind transition**: the driver's hook runs once, the device is left *unbound* -- no `driver`, no `drvdata`, the bound count down -- and a second unbind is a no-op. On a device of the test's own, not the machine's live virtio-blk: that is the scratch disk the filesystem tests run on, so a boot-time suite that removes it destroys the run. Driving `vpci_remove` itself with real bios outstanding needs a virtio device dedicated to removal in the test machine, which is a change to CI's machine and stays an inventory row | call the driver's hook alone, as the first draft of this report proposed: the device is left bound with a dangling `drvdata` for a later unregister to remove a second time |
 | `unpriv-test` (existing, extended) | uid 1000 is refused `/dev/fsctl` and `/dev/net/tapctl`, the two 0600 devices added after that suite was written | invert either check: the open succeeds and the test says which door opened |
 
 **Vacuity, named in advance, because this unit is unusually exposed to
@@ -634,16 +634,18 @@ driver, no hung unregister. The report said in advance that it would say
 so and keep the tests, and that is what this is. Six tests that fail the
 day someone reorders a store are the product either way.
 
-**A per-waiter kick count, because the machine-wide one cannot carry a
-per-waiter claim.** The first version of the straggler tests bracketed
+**The kick count comes back on the stack, and it took two goes.** The first version of the straggler tests bracketed
 `straggler_ipis` and asserted this waiter's bound against it. That
 counter is global and the callback worker can be in a grace period of
 its own at the same time, so the assertion would have failed on a busy
 machine with every waiter having behaved -- the tree's own rule about
-machine-wide counters, walked into anyway. `synchronize_quiesce` now
-records its own call's kicks per CPU, the per-waiter claims are made
-against that, and the global is asserted only to move in the same
-direction.
+machine-wide counters, walked into anyway. The first fix recorded each call's
+kicks in a per-CPU slot -- which is still not the caller's, because the
+callback worker is unpinned and can run a grace period on this CPU
+between the tested call returning and a preemptible test reading the
+slot. The count is now *returned*: a value on the caller's stack cannot
+be anyone else's. Two attempts at the same finding, and the second is
+the one that has no shared state in it at all.
 
 **The release build caught every one of the new tests**, which is the
 lesson the tree already records arriving by another door: a test that
