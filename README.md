@@ -2085,6 +2085,49 @@ See [docs/development.md](docs/development.md).
   straight back, so the measurement is taken across one commit instead.
   (PR #150).
 
+- **The name is gone and the handle is not**
+  (`docs/audit/next-subsystem-orphan.md`). The last clause of a row two
+  units in a row named and neither took. `cfs_unlink_common` removes a
+  name and zeroes the link count; the blocks are released later by
+  `cfs_evict`, when the VFS drops the last reference -- and a commit can
+  land between the two, leaving a durable filesystem with an inode whose
+  extents are intact and which no directory entry reaches. A crash or a
+  forced unmount after that lost the inode and its blocks for good,
+  because no mount reconsidered them: `cosmofs_check` found them and an
+  operator with the repair flag got them back, which is the workaround
+  with a person in it that the free-record unit had already refused. The
+  tree carried a test whose comment called this "the leak the design
+  admits by omission" and whose assertions described it. Format version
+  10 gives the superblock an `orphan_root` naming a chain of inodes the
+  root still owes, written before the root and replayed at the next
+  mount by doing what `cfs_evict` would have done -- which means queuing
+  the blocks and clearing the slot, so the space comes back when that
+  mount's first commit publishes it, as an ordinary eviction's does. **It is a record, not a
+  list**, and that is the design: the set is derived, so each commit
+  writes it whole and nothing is edited on disk -- unlike the snapshot
+  list, nothing here is copy-on-write -- and an ordinary unlink's add
+  and eviction cancel in memory, so a filesystem holding nothing open
+  across a commit writes no record at all. Review corrected the plan
+  twice: **directories reach this state too**, because a working
+  directory is a referenced vnode and an empty one can be removed under
+  it, and the replay must not touch the parent's link count, which
+  `rmdir` already decremented; and the cancel is not a guarantee,
+  because the filesystem lock is dropped before the VFS drops the last
+  reference. The build corrected it twice more: `cfs_inode_read` calls
+  an inode with no links absent, so the first replay reclaimed nothing
+  until it used the raw read the structural check already had; and the
+  reclaim lands on the mount's first commit rather than on the mount,
+  because the root still names those blocks -- and a replay that fails
+  after queuing them must fail the mount *and* clear the queue, or the
+  older-root fallback commits frees that root's inodes still name. Two test oracles measured
+  the wrong thing before they measured anything -- one compared against
+  a filesystem that had no record either, and the next asserted sixteen
+  blocks for a 64 KiB file that compresses to five. The crash suite now
+  holds a handle across a sync: 410 prefix images, 0 stranded, and with
+  the replay disabled it fails at prefix 213 reporting one orphan, which
+  is what says the workload is not vacuous. 312 self-tests on both
+  architectures, debug and release (PR #152).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

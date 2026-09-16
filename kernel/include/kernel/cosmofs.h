@@ -53,6 +53,8 @@ struct cosmofs_stats {
     uint64_t degraded;        /* copies the member table promised and the mount did not find */
     unsigned version;         /* the on-disk format version this filesystem was written at */
     uint64_t free_root;       /* v9: head of the record of what the last root freed, or 0 */
+    uint64_t orphan_root;     /* v10: head of the record of what this root still owes, or 0 */
+    unsigned pending_orphans; /* inodes unlinked with something still holding them */
 };
 int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out);
 
@@ -147,6 +149,11 @@ int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count);
  * a mount has done -- the measurement behind "one verdict, not two"
  * (docs/audit/next-subsystem-snap-deadlist.md). */
 void cosmofs_test_fail_snapfill(struct mount *mnt, bool on);
+/* The same for the orphan record's fill. */
+void cosmofs_test_fail_orphan(struct mount *mnt, bool on);
+/* Name a still-linked inode in the orphan record: the image a wrong
+ * record makes, which the replay must refuse to act on. */
+void cosmofs_test_orphan_add(struct mount *mnt, uint64_t ino);
 uint64_t cosmofs_test_snap_walks(struct mount *mnt);
 uint64_t cosmofs_test_snap_verdicts(struct mount *mnt);
 /*

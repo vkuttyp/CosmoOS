@@ -523,6 +523,65 @@ pointer, so the list chains like the extent list does. The version goes
 to 3; a version-2 image mounts unchanged and gains an empty list on its
 first commit, because every field it needs was already reserved.
 
+### What a root still owes
+
+A commit's record says what the transaction *freed*
+(`free_root`, above). Version 10 adds one for what it has **not** freed
+and intends to: `cfs_super.orphan_root` names a `CFS_KIND_ORPHAN` chain
+of inode numbers whose last name has gone while something still
+references them (`docs/audit/next-subsystem-orphan.md`).
+
+Until it existed, that intention lived only in a mount's memory.
+`cfs_unlink_common` removes the name and zeroes the link count; the
+blocks are released later by `cfs_evict`, when the VFS drops the last
+reference. A commit landing between the two -- and one always can --
+leaves a durable filesystem holding an inode with `nlink == 0`, its
+extents intact and no directory entry reaching it. A crash or a forced
+unmount after that lost the inode and its blocks for good, because no
+mount reconsidered them; `cosmofs_check` found them and an operator with
+the repair flag got them back.
+
+**It is a record, not a list.** The set is derived -- the inodes this
+mount has unlinked and not yet evicted -- so it lives in memory and each
+commit writes it out whole, the way the free record writes
+`pending_free`. Nothing is edited on disk, so unlike the snapshot list
+nothing is copy-on-write. The blocks come from the reservation the
+commit already takes before the bitmap fixpoint, and the previous chain
+is released exempt by the commit that supersedes it.
+
+That is also what makes the common case cheap: an ordinary unlink's add
+and its eviction normally fall inside one transaction and cancel in
+memory, so a filesystem holding nothing open across a commit writes no
+record at all. Normally, not always -- `cfs_unlink_common` releases the
+filesystem lock before the VFS drops the last reference, so a writeback
+commit can land in the gap and write a record for an inode about to be
+evicted, which the next commit retires.
+
+At mount, `orphan_replay` does what `cfs_evict` would have done: queues
+the blocks for release and clears the slot. **Queues, not frees** -- the
+release is deferred, because the root the mount is running on still
+names those blocks, so the space comes back when that mount's first
+commit publishes it, exactly as an ordinary eviction's does.
+
+Four details are load-bearing. It reads the inode **raw**, because an
+inode with no links is what the ordinary read calls absent. It **skips a slot that is already empty** before
+decrementing `inode_count`, which is what makes a repeated replay
+harmless and is the one place that count could be taken twice off one
+inode. From the truncate onwards a failure cannot be skipped:
+`cfs_truncate_blocks` frees every extent into the transaction's pending
+list and *then* stores the shortened extent list, so a failure leaves
+the blocks queued for release while the inode still names them. Nothing
+has been published at that point, so the mount fails and the filesystem
+is left as it was found -- and `cfs_reset_root`, which the older-slot
+fallback uses, clears the pending list for the same reason. And it does
+**not** touch the parent of a removed directory:
+`rmdir` already decremented the parent's link count in the transaction
+that removed the name.
+
+Directories reach this state too. An empty one can be removed while a
+process's working directory references it -- a referenced vnode -- or
+while it is open for `readdir`.
+
 ### Not freeing what a snapshot names
 
 The commit's release loop is where a snapshot bites:

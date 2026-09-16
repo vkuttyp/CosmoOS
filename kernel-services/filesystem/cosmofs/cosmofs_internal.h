@@ -71,6 +71,17 @@ struct cfs {
      * (docs/audit/next-subsystem-unmount-leak.md). */
     uint64_t *pending_exempt;
     unsigned nr_exempt, exempt_cap;
+    /*
+     * Inodes this mount has unlinked to zero links and not yet evicted:
+     * their names are gone and their blocks are not free. Derived state,
+     * written out whole by each commit rather than edited on disk, so
+     * nothing here is copy-on-write (docs/audit/next-subsystem-orphan.md).
+     * Usually empty, because an ordinary unlink's eviction lands in the
+     * same transaction and the pair cancels here before anything is
+     * written.
+     */
+    uint64_t *orphans;
+    unsigned nr_orphans, orphan_cap;
 
     struct list_node bufs;  /* metadata buffer cache, MRU first */
     unsigned nr_bufs, nr_dirty;
@@ -85,6 +96,9 @@ struct cfs {
      * so a commit fails with part of the deadlist written and the whole
      * reservation outstanding (docs/audit/next-subsystem-snap-deadlist.md). */
     bool test_fail_snapfill;
+    /* Test hook: orphan_fill returns -EIO, so a commit fails with the
+     * record's blocks reserved (docs/audit/next-subsystem-orphan.md). */
+    bool test_fail_orphan;
     /* Walks of the snapshot list, since mount. The verdict used to be
      * taken twice per freed block -- once for the record, once by the
      * release loop -- and is now taken once; this is how that is
@@ -293,6 +307,18 @@ int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint3
                   uint64_t *got);
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk);
 void cfs_free_block_exempt(struct cfs *fs, uint64_t blk);
+
+/*
+ * This inode's last name is gone and its blocks are not free yet; and
+ * the eviction that frees them has happened. The add is in the unlink
+ * and rename paths, the remove is in the evict path, and a commit
+ * between them writes a record naming it -- which the next commit
+ * retires (docs/audit/next-subsystem-orphan.md).
+ */
+bool cfs_orphan_reserve(struct cfs *fs);
+void cfs_orphan_add(struct cfs *fs, uint64_t ino);
+void cfs_orphan_remove(struct cfs *fs, uint64_t ino);
+bool cfs_orphan_named(const struct cfs *fs, uint64_t ino);
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
 /* The slot as it is, even with no links: for the structural check. */
 int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out);

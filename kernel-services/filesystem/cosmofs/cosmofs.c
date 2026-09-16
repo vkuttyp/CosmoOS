@@ -1571,6 +1571,17 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
             goto out;
         }
     }
+    /*
+     * Room for the orphan record's entry, taken while the name is still
+     * there. Past dir_remove_slot the removal is in the transaction and
+     * "no memory to record it" would mean committing a deletion nothing
+     * records, which is this unit's own defect on an allocation failure
+     * (docs/audit/next-subsystem-orphan.md).
+     */
+    if ((rmdir || victim->nlink == 1) && !cfs_orphan_reserve(fs)) {
+        rc = -ENOMEM;
+        goto out;
+    }
     rc = dir_remove_slot(fs, dir, lblk, slot, block);
     if (rc)
         goto out;
@@ -1581,6 +1592,19 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
     } else {
         victim->nlink--;
     }
+    /*
+     * The name is gone from disk and the blocks are not free: something
+     * still holds this vnode, or will until the VFS drops the last
+     * reference and cfs_evict runs. Record the intention, so that a
+     * crash or a forced unmount before that eviction does not lose the
+     * inode and its blocks (docs/audit/next-subsystem-orphan.md).
+     *
+     * A directory reaches this too: an empty one can be removed while a
+     * process's working directory references it, which is a referenced
+     * vnode (`cwd_locked`).
+     */
+    if (victim->nlink == 0)
+        cfs_orphan_add(fs, victim->ino);
     victim->ctime_ns = vfs_now_ns();
     if (rc == 0)
         rc = inode_sync(fs, victim);
@@ -1694,6 +1718,13 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
                 goto out;
             }
         }
+        /* Room for the record's entry, while the namespace is still
+         * untouched: the replaced file loses its last name below, and a
+         * rename that cannot record that must not happen at all. */
+        if ((replaced->type == VNODE_DIR || replaced->nlink == 1) && !cfs_orphan_reserve(fs)) {
+            rc = -ENOMEM;
+            goto out;
+        }
         /* Overwrite the existing entry in place: same name, new inode. */
         uint64_t rl;
         unsigned rs;
@@ -1746,6 +1777,10 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
      * last committed root remains the truth. */
     if (replaced) {
         replaced->nlink = replaced->type == VNODE_DIR ? 0 : replaced->nlink - 1;
+        /* The same record, for the half of this that is easiest to
+         * miss: a file replaced by a rename while it is open. */
+        if (replaced->nlink == 0)
+            cfs_orphan_add(fs, replaced->ino);
         if (replaced->type == VNODE_DIR)
             ndir->nlink--;
         rc = inode_sync(fs, replaced);
@@ -2008,12 +2043,32 @@ static void cfs_evict(struct vnode *vn)
         /* The last link and the last reference are gone: release the
          * data blocks and the inode slot. */
         mutex_lock(&fs->lock);
-        if (cfs_truncate_blocks(fs, &cv->inode, 0) == 0) {
+        int trc = cfs_truncate_blocks(fs, &cv->inode, 0);
+        if (trc != 0) {
+            /* The same hazard as a failed slot write, one step earlier:
+             * the truncate frees every extent before storing the
+             * shortened list, so a failure leaves blocks queued free
+             * under an inode that still names them. */
+            cfs_fail(fs, trc);
+        } else {
             struct cfs_inode empty;
             memset(&empty, 0, sizeof(empty));
-            cfs_inode_write(fs, vn->ino, &empty);
-            if (fs->sb.inode_count > 0)
-                fs->sb.inode_count--;
+            /*
+             * Only when the slot is actually cleared. Retiring the
+             * record on a failed write would let the next commit publish
+             * the deferred frees while the old slot still names those
+             * blocks, and no later mount would retry the inode because
+             * nothing would say it was owed.
+             */
+            if (cfs_inode_write(fs, vn->ino, &empty) == 0) {
+                if (fs->sb.inode_count > 0)
+                    fs->sb.inode_count--;
+                cfs_orphan_remove(fs, vn->ino);
+            } else {
+                /* The blocks are queued to be freed and the slot still
+                 * names them: no root may publish that. */
+                cfs_fail(fs, -EIO);
+            }
         }
         mutex_unlock(&fs->lock);
     }

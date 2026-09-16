@@ -483,6 +483,20 @@ bool selftest_cosmofs_replay(const char **reason)
     CHECK(vfs_mkdir(NULL, MNT "/.snapshots/s2", 0755) == 0);
     CHECK(vfs_rmdir(NULL, MNT "/.snapshots/s1") == 0);
     CHECK(wl_sync(bd));
+    /*
+     * And an inode whose last name goes while a handle still holds it,
+     * across a sync -- so the prefixes from here on carry a live orphan
+     * record, and a crash in the middle of one is the case that used to
+     * lose the inode and its blocks for good
+     * (docs/audit/next-subsystem-orphan.md).
+     */
+    CHECK(wl_write(MNT "/tmpfile", 9, 3000));
+    CHECK(wl_sync(bd));
+    struct file *held = NULL;
+    CHECK(vfs_open(NULL, MNT "/tmpfile", COSMO_O_RDONLY, 0, &held) == 0);
+    CHECK(wl_unlink(MNT "/tmpfile"));
+    CHECK(wl_sync(bd));
+    file_put(held);
     CHECK(vfs_umount(MNT) == 0);                 /* the final commit */
     struct ramblk_log *log = ramblk_record_stop(bd);
     CHECK(log != NULL && log->dropped == 0 && log->n > 0);

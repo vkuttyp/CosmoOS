@@ -21,7 +21,7 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_extent_block) <= CFS_PAYLOAD);
     EXPECT(CFS_DIRENTS_PER_BLOCK == 64);
     EXPECT(CFS_CSUMS_PER_BLOCK == 1016);
-    EXPECT(CFS_VERSION == 9 && CFS_VERSION_MIN == 2);
+    EXPECT(CFS_VERSION == 10 && CFS_VERSION_MIN == 2);
     /* Version 8: a symbolic link is a third type in the mode's top
      * nibble, so the inode did not grow and every older image still
      * mounts; what version 8 gates is *writing* one. */
@@ -37,6 +37,16 @@ static void test_layout_sizes(void)
     EXPECT(sizeof(struct cfs_super) <= CFS_BLOCK);
     EXPECT(offsetof(struct cfs_super, free_root) == offsetof(struct cfs_super, key_root) + 8);
     EXPECT(CFS_KIND_FREELOG == 13);
+    /*
+     * Version 10 takes `orphan_root` from the same reserved words, one
+     * along from `free_root`, and three stay reserved -- so the
+     * superblock still did not grow and every older image still mounts.
+     * What version 10 gates is reading that field
+     * (docs/audit/next-subsystem-orphan.md).
+     */
+    EXPECT(offsetof(struct cfs_super, orphan_root) == offsetof(struct cfs_super, free_root) + 8);
+    EXPECT(CFS_KIND_ORPHAN == 14);
+    EXPECT(CFS_ORPHANS_PER_BLOCK == CFS_DEAD_PER_BLOCK);
     EXPECT(sizeof(struct cfs_inode) == CFS_INODE_SIZE);
     /* The snapshot structures the version adds. */
     EXPECT(sizeof(struct cfs_snapshot) == 96);

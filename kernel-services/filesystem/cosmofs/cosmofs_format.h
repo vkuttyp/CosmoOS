@@ -15,7 +15,7 @@
 
 #define CFS_BLOCK        4096u
 #define CFS_MAGIC        "COSMOFS1"
-#define CFS_VERSION      9u   /* version 9: a record of what a transaction freed */
+#define CFS_VERSION      10u  /* version 10: a record of what this root still owes */
 #define CFS_VERSION_MIN  2u   /* versions 2 and 3 mount unchanged: their pointers are vdev-0 DVAs */
 #define CFS_MHDR_MAGIC   0x4d534643u   /* "CFSM" */
 #define CFS_ROOT_INO     1u
@@ -36,6 +36,7 @@ enum cfs_kind {
     CFS_KIND_MEMBERS = 11,  /* the pool's member table: CFS_MEMBERS_PER_BLOCK entries */
     CFS_KIND_KEYS = 12,     /* the wrapped master key (struct cfs_keys) */
     CFS_KIND_FREELOG = 13,  /* v9: what this root freed, so a mount can finish the job */
+    CFS_KIND_ORPHAN = 14,   /* v10: inodes whose last name went while something held them */
 };
 
 /* --- device-virtual addresses --------------------------------------------
@@ -235,6 +236,13 @@ struct cfs_snap_block {
 
 #define CFS_DEAD_PER_BLOCK ((CFS_BLOCK - CFS_MHDR_SIZE - 16) / sizeof(uint64_t))
 
+/*
+ * A CFS_KIND_ORPHAN block holds inode numbers in the same shape, reused
+ * rather than twinned -- as CFS_KIND_FREELOG already reuses it for block
+ * numbers (docs/audit/next-subsystem-orphan.md).
+ */
+#define CFS_ORPHANS_PER_BLOCK CFS_DEAD_PER_BLOCK
+
 /* Payload of a CFS_KIND_DEADLIST block: blocks a snapshot still names
  * that the live tree has released. */
 struct cfs_dead_block {
@@ -371,7 +379,18 @@ struct cfs_super {
      * Read only when version >= 9: below that this is a reserved zero.
      */
     uint64_t free_root;
-    uint64_t reserved[4];
+    /*
+     * v10: head of a CFS_KIND_ORPHAN chain, or 0. The inodes whose last
+     * name this mount has removed and whose blocks are not free yet,
+     * because something still references them. Written from memory each
+     * commit, replayed at mount by doing what cfs_evict would have done
+     * (docs/audit/next-subsystem-orphan.md).
+     *
+     * The first word of what was reserved[4]; three stay reserved. Read
+     * only when version >= 10, so below that it is a reserved zero.
+     */
+    uint64_t orphan_root;
+    uint64_t reserved[3];
     uint32_t crc;          /* CRC32C over the whole block with this field zero */
     uint32_t pad;
 };
