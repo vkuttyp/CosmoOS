@@ -130,9 +130,16 @@ run *inside* a transaction, which are `cfs_snapshot_delete`'s two:
 - The keeper write-back appends the doomed snapshot's blocks to the
   oldest remaining snapshot's deadlist (`:259`, `:646-669`). Under the
   old root the doomed snapshot is still there and still names them, so
-  the blocks are on two deadlists at once and the second settle frees
-  what the first already gave back — a double free, which is the
-  allocator handing out live data.
+  one block is on two deadlists at once. The damage is not immediate and
+  the sequence is worth writing out, because phase 7's `bit_test` guard
+  (`cosmofs_core.c:1154`) absorbs a double free taken in one breath:
+  delete the doomed snapshot and the block is freed once, correctly, and
+  the allocator hands it to a file. Delete the keeper later and its
+  deadlist still names it — with its bit set again, because it is live
+  data now — so `deadlist_settle` frees it a second time, under the file
+  using it. The guard stops a double free that happens before the
+  reallocation and not one that happens after it, and this defect
+  produces only the second kind.
 - `clear_entry` removed the snapshot (`:577-584`). Under the old root
   the entry is gone and its blocks are still allocated: a permanent
   strand of a whole snapshot. Which of the two lands is whichever order
@@ -279,6 +286,14 @@ same rule.
 - It does not touch the *unlinked-but-open inode* clause of the
   inventory row the previous unit left open. That is still an orphan
   list, still its own unit.
+- It does not teach `cosmofs_check` to see a block named by two
+  deadlists. The checker claims a deadlist's entries as non-live
+  (`cosmofs_check.c:423`), so `dup` — which fires on a second *live*
+  claim — cannot report it, and every test here that touches this image
+  asserts its consequence instead of its shape. Making the checker state
+  the invariant directly belongs with the inventory's standing row about
+  the claims `cosmofs_check` makes and does not check (extent overlap,
+  entry ordering, a repeated name), and this is one more for that list.
 - It does not make the snapshot list a tree. It stays a chain, because
   42 snapshots per block against `CFS_SNAP_ID_MAX` of 0xFFFE is at most
   1561 blocks in the worst case nobody has, and copying a chain of one
@@ -427,8 +442,8 @@ BUILD=release`, which CI runs).
 | `cosmofs-snap-unmount` | **the defect**: a snapshot, a file it holds deleted in the live tree, an unmount and a remount — and the structural check is `clean`, with `alloc_not_seen.count == 0` | the unfixed tree: today this is 2 to 4 blocks, which is the bound `cosmofs-freelog-snapshot` asserts |
 | `cosmofs-snap-cow` | a commit that appends to a deadlist leaves the *old* head block free and the new chain reachable only from the new root: the block numbers differ, and the old numbers are clear in the bitmap the new root publishes | edit the head in place: the numbers are equal and the next assertion, the crash one, fails |
 | `cosmofs-snap-nogrow` | the copy does not accumulate: a hundred commits that each append to a snapshot's deadlist leave the chain the length the entry count requires, and the free count after the hundredth equals the count after the first | free the copied blocks with `cfs_free_block_deferred` instead of `..._exempt`: each copy is held on the deadlist it is a copy of, the chain grows by a block per commit, and no single-commit test sees it |
-| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot, frees blocks it holds, takes a second and deletes the first** — the two writers that run inside a transaction — and every prefix mounts clean, reads the surviving snapshot's copy back, and strands nothing | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the check reports either a stranded snapshot or a block named by two deadlists |
-| `cosmofs-snap-settle-double` | the sharp end of the above, deterministically: a prefix image in which one block is named by two snapshots' deadlists, which is what an interrupted keeper write-back leaves. Deleting both must free it once. With the fix the image cannot arise, which is the assertion; the test constructs it with a poison hook and checks that `cosmofs_check` names it rather than the allocator discovering it | without the fix the hook is unnecessary, because an ordinary crash prefix of a snapshot deletion produces it |
+| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot, frees blocks it holds, takes a second and deletes the first** — the two writers that run inside a transaction — and every prefix mounts clean, reads the surviving snapshot's copy back, and strands nothing | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the check reports a stranded snapshot, or leaves the one-block-on-two-deadlists image whose consequence `cosmofs-snap-settle-double` plays out |
+| `cosmofs-snap-settle-double` | the sharp end of the above, deterministically, and asserted on its consequence because the checker cannot see its shape: a poison hook builds the image an interrupted keeper write-back leaves — one block on two deadlists — and the test deletes the first snapshot, writes a file into the block the allocator then hands out, deletes the second snapshot, and asserts the file still reads and `seen_not_alloc.count == 0`. The second settle frees a block a file occupies, which is reachable-and-free, the direction that loses data | without the fix the poison hook is unnecessary, because an ordinary crash prefix of a snapshot deletion produces the image |
 | `cosmofs-snap-reserved` | a commit with a snapshot present allocates **nothing** after `commit_bitmap`: every block the snapshot list gained is set in the bitmap the root published, checked by a remount finding neither a leak nor a reachable-and-free block | allocate the deadlist block in the fill instead of taking it from the reservation: the check reports `seen_not_alloc`, the direction that hands live data to the allocator |
 | `cosmofs-snap-overreserve` | a commit whose bound over-reserves for the snapshot list lists the leftovers in the free record, and they are free after a remount | drop them: the free count is short by the slack on every commit that has a snapshot |
 | `cosmofs-snap-rollback` | a fill that fails with the reservation outstanding (the `test_fail_freelog` hook's sibling) gives every reserved block back, publishes no root, and leaves the filesystem exactly as it was: free count, generation and check identical either side | give back only the record's share: the snapshot list's blocks stay allocated and named by nothing, and the remount's check finds them |
