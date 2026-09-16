@@ -36,6 +36,13 @@ static struct waitqueue g_worker_wq = WAITQUEUE_INIT(g_worker_wq);
 
 /* --- quiescent points ------------------------------------------------------ */
 
+#if CONFIG_DEBUG
+/* Kicks the last synchronize_quiesce on each CPU sent: see the note
+ * where it is written. */
+static unsigned g_test_last_kicks[CONFIG_MAX_CPUS];
+unsigned quiesce_test_last_kicks(void) { return g_test_last_kicks[arch_cpu_id()]; }
+#endif
+
 void quiesce_note_quiescent(void)
 {
     quiesce_core_publish(&g_state, arch_cpu_id());
@@ -135,6 +142,20 @@ void synchronize_quiesce(void)
     g_stats.synchronizes++;
     if (waited > g_stats.max_wait_ns)
         g_stats.max_wait_ns = waited;
+#if CONFIG_DEBUG
+    /*
+     * This call's own kick count, kept per CPU.
+     *
+     * `straggler_ipis` is machine-wide, and the callback worker can be
+     * in a grace period of its own at the same time, so a test that
+     * bracketed the global counter would be asserting on someone else's
+     * kicks as well as its own -- a per-waiter bound compared against a
+     * machine-wide number, which is a flake waiting for a busy moment.
+     * The waiter's own CPU slot is exact
+     * (docs/audit/next-subsystem-lifetime-windows.md).
+     */
+    g_test_last_kicks[pc->cpu_id] = kicks;
+#endif
 }
 
 /* --- deferred callbacks --------------------------------------------------- */

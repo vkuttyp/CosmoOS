@@ -118,6 +118,15 @@ static void straggler_main(void *arg)
 
 bool selftest_quiesce_straggler(const char **reason)
 {
+#if !CONFIG_DEBUG
+    /* The per-waiter kick count is a debug-build thing, and the
+     * machine-wide one cannot carry a per-waiter claim: see where it is
+     * asserted. Adding that counter is what turned this test, which
+     * needed no hook, into one that does. */
+    (void)reason;
+    kinfo("selftest: quiesce-straggler: no per-waiter kick count in this build; skipping");
+    return true;
+#else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu();
     if (cpu == 0) {
@@ -143,11 +152,20 @@ bool selftest_quiesce_straggler(const char **reason)
     uint64_t waited_ns = clock_now_ns() - t0;
     quiesce_get_stats(&after);
 
-    /* The waiter's side: it noticed and it kicked. A delta, not a
-     * total -- the counter is machine-wide and other tests move it. */
-    uint64_t kicks = after.straggler_ipis - before.straggler_ipis;
+    /*
+     * The waiter's side: it noticed and it kicked.
+     *
+     * Against this call's own count, not the machine-wide one. The
+     * callback worker can be in a grace period of its own while this
+     * runs, and its kicks land in `straggler_ipis` too -- so a
+     * per-waiter bound checked against that global would fail on a busy
+     * machine with every waiter having behaved. The global is still
+     * asserted to have moved, because the two should agree in direction.
+     */
+    unsigned kicks = quiesce_test_last_kicks();
     CHECK(kicks >= 1);
-    CHECK(kicks <= 8);   /* the bound in the code */
+    CHECK(kicks <= 8);   /* the bound in the code, and this waiter's own */
+    CHECK(after.straggler_ipis >= before.straggler_ipis + kicks);
 
     /*
      * The spinner's side, and the assertion that keeps this test honest:
@@ -162,10 +180,11 @@ bool selftest_quiesce_straggler(const char **reason)
 
     thread_join(t);
     CHECK(threads_settle(threads0));
-    kinfo("selftest: quiesce-straggler: %llu kick(s) sent over a %llu ms wait, and the spinner was not helped by any "
-          "of them",
-          (unsigned long long)kicks, (unsigned long long)(waited_ns / 1000000));
+    kinfo("selftest: quiesce-straggler: %u kick(s) from this waiter over a %llu ms wait, and the spinner was not "
+          "helped by any of them",
+          kicks, (unsigned long long)(waited_ns / 1000000));
     return true;
+#endif
 }
 
 /* --- quiesce-straggler-system: the stall is the waiter's, not the machine's --- */
@@ -261,6 +280,11 @@ bool selftest_quiesce_straggler_system(const char **reason)
  */
 bool selftest_quiesce_straggler_idle(const char **reason)
 {
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: quiesce-straggler-idle: no per-waiter kick count in this build; skipping");
+    return true;
+#else
     struct quiesce_stats before, after;
     quiesce_get_stats(&before);
     uint64_t t0 = clock_now_ns();
@@ -268,12 +292,21 @@ bool selftest_quiesce_straggler_idle(const char **reason)
     uint64_t waited_ns = clock_now_ns() - t0;
     quiesce_get_stats(&after);
 
-    CHECK(after.straggler_ipis == before.straggler_ipis);   /* no CPU was pending long enough */
-    CHECK(waited_ns < MS(100));                             /* and it did not take the kick path's time */
+    /*
+     * This call sent no kick. Asserted against its own count and not the
+     * machine-wide total, which another waiter can move while this one
+     * runs -- an equality on the global would fail for someone else's
+     * kicks and say nothing about the idle case.
+     */
+    CHECK(quiesce_test_last_kicks() == 0);
+    CHECK(waited_ns < MS(100));   /* and it did not take the kick path's time */
+    (void)before;
+    (void)after;
 
     kinfo("selftest: quiesce-straggler-idle: a grace period over idle CPUs took %llu us and sent no kick",
           (unsigned long long)(waited_ns / 1000));
     return true;
+#endif
 }
 
 /* --- quiesce-grace: a reader inside quiesce_read_lock holds the grace period --- */

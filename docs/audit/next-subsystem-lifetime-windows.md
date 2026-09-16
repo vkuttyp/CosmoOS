@@ -613,7 +613,7 @@ than a pass.
 
 | window | what ran, and what it said |
 | --- | --- |
-| Q6, the waiter | **5 kicks over a 32 ms wait, and the spinner was not helped by any of them.** The first time `straggler_ipis` has been read since it was written |
+| Q6, the waiter | **5 kicks from this waiter over a 30 ms wait, and the spinner was not helped by any of them.** The first time `straggler_ipis` has been read since it was written |
 | Q6, the system | **5749 units of ordinary work** on a third CPU while one stalled the waiter — the lifetime report's risk 2, asserted |
 | Q6, idle | a grace period over idle CPUs took **7277 us and sent no kick**: this case never reaches the threshold, which is why it is not the kick's positive test |
 | Q11, refusal | **15 accepted and 349784 refused across the window**, every accepted bio completed exactly once, and nothing reached the driver after the unregister returned |
@@ -634,12 +634,29 @@ driver, no hung unregister. The report said in advance that it would say
 so and keep the tests, and that is what this is. Six tests that fail the
 day someone reorders a store are the product either way.
 
+**A per-waiter kick count, because the machine-wide one cannot carry a
+per-waiter claim.** The first version of the straggler tests bracketed
+`straggler_ipis` and asserted this waiter's bound against it. That
+counter is global and the callback worker can be in a grace period of
+its own at the same time, so the assertion would have failed on a busy
+machine with every waiter having behaved -- the tree's own rule about
+machine-wide counters, walked into anyway. `synchronize_quiesce` now
+records its own call's kicks per CPU, the per-waiter claims are made
+against that, and the global is asserted only to move in the same
+direction.
+
 **The release build caught every one of the new tests**, which is the
 lesson the tree already records arriving by another door: a test that
 calls a `CONFIG_DEBUG` hook does not compile without one. Each now
 returns early with a line saying why, because a race test without the
 hook that holds its window open would be a race test hoping, and that is
 worse than an absent one.
+
+And then it caught them a second time, one step removed: adding the
+per-waiter kick counter to fix the finding above turned two tests that
+had needed no hook into tests that do. Introducing a debug-only symbol
+can make an existing test debug-only, which is the same lesson from the
+other end.
 
 **Three of the four windows needed a hook and one did not**, as the
 design says: `blk_test_unregister_pause`, `blk_test_hold_in_driver`,

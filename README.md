@@ -2142,7 +2142,16 @@ See [docs/development.md](docs/development.md).
   quiescent; `timer_cancel_sync` was tested on a probe, which is
   evidence for the primitive and not for four uses of it; `vpci_remove`
   ran only on module unload. Six tests race them now, each holding its
-  window open with a hook rather than a stopwatch -- 5 kicks over a 32 ms
+  window open with a hook rather than a stopwatch. **Three of the four
+  windows are closed and the fourth is narrowed**: removal is asserted
+  to be the whole unbind -- the driver's hook *and* the model's
+  bookkeeping, since the hook alone leaves a bound device holding a
+  dangling `drvdata` -- but on a device of the test's own, because the
+  machine's live virtio-blk is the scratch disk the filesystem tests run
+  on and a boot-time suite that removes it destroys the run. Driving
+  `vpci_remove` itself with real I/O outstanding needs a virtio device
+  dedicated to removal in the test machine, and stays an inventory row.
+  The numbers: 5 kicks over a 32 ms
   wait with the spinner unhelped, 5749 units of work on a third CPU while
   one stalled the waiter, 15 accepted and 349784 refused across the
   unregister window, an unregister that spun 6118 times for a submitter
