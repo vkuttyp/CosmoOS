@@ -256,7 +256,7 @@ tree.
 | A character device's operations run with the vnode lock held (`file_pwrite` takes it before dispatching), so any device that consults the mount table inverts `mounts -> vnode`. `/dev/fsctl` does by definition; the panic on its first boot is what found this. Resolved for now by giving a device node's lock its own lockdep class (`vnode-chr` in `ramfs_mkchr`), which is true -- nothing mounts onto a character device -- but the deeper answer is that a filesystem lock should not be held across device I/O at all, which no other device needed enough to argue for | 8.2 (found by the fsctl unit) |
 | `vfs_umount2`'s one-unmount-at-a-time guard is unfired by any test: `follow_mount` refuses to walk to a mount that is unmounting, so a second unmount by path fails while resolving and never reaches it. It is reachable by a relative path resolved from inside the mount, which does not traverse the mountpoint, and no test opens that door | 8.2 (named by the fsctl unit) |
 | The per-test time budget treats `process-user` as a test when it is the whole user-mode suite behind one SELFTEST line -- every fs, net, proc, fpu, trap, priv and svc check init makes, plus a process spawn per tool it drives. On CI it was at **7129 ms of 8000** on `main` before the fsctl unit added to it, so the budget failed the next addition whatever that addition was. Given its own budget (20 s) with the reason stated in the harness; the better answer is for the suite to report per-section timings rather than one line, so a slow section is named instead of the whole suite | none (found by the fsctl unit) |
-| Nothing in the tree can attempt an unprivileged open: kernel self-tests and the user-mode suite both run as root. `/dev/fsctl` checks `cred_privileged` on both open and write and neither check is fired by a test; the same is true of every other 0600 device | 14.2 (named by the fsctl unit) |
+| ~~Nothing in the tree can attempt an unprivileged open~~ -- **the row was stale when it was written down and the lifetime-windows unit corrected it (PR #154)**. `init --unpriv-test` drops to uid 1000 and is refused `mount`, `umount`, a mount namespace, a uts namespace, `sethostname`, `kill` of root's process, `klog`, a reserved port, a 0600 device, a 0700 directory, a 0644 file and the sticky bit on `/tmp`, with the permitted cases asserted beside them. What was actually missing was two doors added *after* that suite: `/dev/fsctl` and `/dev/net/tapctl`, which it now tries | 14.2 (named by the fsctl unit) |
 | hotplug: no CPU hotplug, no PCI rescan, no power management; only USB and AHCI remove devices | 10.5 |
 | DMA on non-coherent hardware: the audit's "no driver calls `dma_unmap` or `dma_sync_for_cpu`" is no longer true -- every driver unmaps, and NVMe syncs its completion queue before reading it (drivers/nvme/nvme.c:248). NVMe also syncs its submission queue and PRP lists for the device, and the virtqueue syncs its ring for the device (drivers/virtio/virtqueue.c:191). What remains: the virtqueue reads its used ring, and e1000e, AHCI and xHCI read their device-written rings and buffers, with no `dma_sync_for_cpu`; e1000e, AHCI and xHCI sync nothing for the device either. Adequate on coherent QEMU, exposed by the first non-coherent SoC | 13.2, 10.2 (re-checked 2026-09-14) |
 | AArch64 hardening: ~~`SCTLR_EL1.WXN` cleared and never set~~ (set on every CPU from the kernel's tables on, proved by `make test-wxn`, PR #140); UAO, E0PD, BTI, PAC unused; a user-triggerable SError panics the kernel; no device-tree parsing for the host (ACPI only); PSCI variations untested | 13.2, 13.3 |
@@ -295,9 +295,29 @@ tree.
   loopback filter; the stack now refuses a second enqueue
   (`net-mbufq-double`) and the filter's state is under a lock
   (`docs/audit/next-subsystem-lockup.md`, "The spin, found"); the five-boot check at 31 then found and fixed a second hang, the keepalive test's black hole raised before the handshake's last segment had left (its server never woke from `accept`).
-- **never exercised by a test**: the straggler IPI (Q6), the
+- ~~**never exercised by a test**: the straggler IPI (Q6), the
   `blk_submit`/`blk_unregister` window (Q11), the TCP
-  timer-callback/free race (N-L3), runtime hot-unplug of virtio devices.
+  timer-callback/free race (N-L3), runtime hot-unplug of virtio
+  devices.~~ -- **closed by the lifetime-windows unit (PR #154)**, with
+  one clause narrowed rather than closed. Six tests now race these:
+  `quiesce-straggler` (and `-system`, `-idle`), `blk-submit-unregister`,
+  `blk-unregister-drain`, `tcp-pcb-timer-free` and
+  `device-remove-busy`. None found a defect in the mechanisms; the unit
+  found two things about them anyway, below. **Still open**: removing a
+  *live virtio* device with real I/O outstanding, which needs a virtio
+  device dedicated to removal in the test machine -- the machine's
+  virtio-blk is the scratch disk the filesystem tests run on, so a
+  boot-time suite that removes it destroys the run.
+- **What the straggler kick is worth is an open question**, added by
+  that unit rather than struck by it. A CPU publishes at interrupt
+  return only when `preempt_count == 0`, so the kick cannot help a CPU
+  spinning inside a read-side section -- which is the case its own
+  comment named until this unit corrected it. It fires only for a CPU
+  pending past two ticks, and the one population it can help (a CPU
+  whose periodic tick keeps landing inside a short disabled region) is a
+  phase coincidence no deterministic test can arrange. Deleting it,
+  bounding it, or proving it are three different units
+  (`docs/audit/next-subsystem-lifetime-windows.md`).
 - **ordering verified by review and sanitizers only**: no TSan model, no
   litmus tests (Prompt #3 §23 asked for them "where possible").
 - **unexplained**: the AArch64 virtio-console flake seen once in four

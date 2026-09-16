@@ -2128,6 +2128,45 @@ See [docs/development.md](docs/development.md).
   is what says the workload is not vacuous. 312 self-tests on both
   architectures, debug and release (PR #152).
 
+- **Four windows nothing has ever raced**
+  (`docs/audit/next-subsystem-lifetime-windows.md`). The first unit in
+  six that is not cosmofs. The lifetime and quiescence report states its
+  ordering argument as a table of claims and then says how each was
+  checked -- a host model under sanitizers, plus review -- and lists as a
+  risk that ordering is "verified by review and sanitizers, not by a
+  model checker". That is good evidence for the algorithm and none at
+  all for the four places where the algorithm meets a driver, a socket
+  or a device, because nothing had ever run the other side:
+  `straggler_ipis` was incremented in one place and read in none;
+  `blk_unregister` was called by two tests and in both the device was
+  quiescent; `timer_cancel_sync` was tested on a probe, which is
+  evidence for the primitive and not for four uses of it; `vpci_remove`
+  ran only on module unload. Six tests race them now, each holding its
+  window open with a hook rather than a stopwatch -- 5 kicks over a 32 ms
+  wait with the spinner unhelped, 5749 units of work on a third CPU while
+  one stalled the waiter, 15 accepted and 349784 refused across the
+  unregister window, an unregister that spun 6118 times for a submitter
+  parked inside the driver, a cancel that spun 96 times for a callback
+  holding a pcb it had not yet taken a reference on. **The review was
+  worth more than the run.** It caught three oracles that measured the
+  wrong thing: a kick credited with a completion it could not have
+  caused, a drain window no submitter ever occupied, and a hold placed
+  after the callback takes its reference -- which would have measured
+  reference counting and passed with `timer_cancel_sync` stubbed out --
+  plus a removal hook that would have left a bound device with a
+  dangling `drvdata`. **And the unit's own findings came before it
+  ran**: a CPU publishes at interrupt return only when `preempt_count`
+  is zero, so the straggler kick cannot help the spinner its comment
+  named, and what it is worth for the population it *can* help is
+  unproven because arranging that is a phase coincidence. The comment is
+  fixed and the question is filed. No use-after-free, no bio reaching a
+  detached driver, no hung unregister -- which the report said in
+  advance it would report as such and keep the tests. Also corrected:
+  the inventory row claiming nothing here could attempt an unprivileged
+  open was stale, and what was left of it was two doors added after that
+  suite. 319 self-tests on both architectures, debug and release
+  (PR #154).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against
