@@ -536,10 +536,99 @@ checker still owns.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+The design landed as written. Four things the build corrected or
+learned, and one existing test that had to change as promised.
+
+**`cfs_inode_read` calls an inode with no links absent**, so the replay
+read *every* inode the record named as unreadable and reclaimed none of
+them. The structural check already knew this and already had the answer
+-- `cfs_inode_read_raw`, with the comment "raw: an orphan has no links,
+which the ordinary read calls absent" -- and the replay now uses it.
+This is the whole reason the first run reclaimed nothing while reporting
+that the record was written correctly.
+
+**The reclaim lands on the mount's first commit, not on the mount.** The
+replay frees blocks with `cfs_free_block_deferred`, because the root
+this mount is running on still names them, and handing a block to the
+allocator before a root says it is free is the ordering every other free
+in this filesystem obeys. So a structural check taken between the mount
+and its first commit still sees the blocks in use. That is correct and
+the report did not say it; the tests now commit before they measure, and
+say why in one place.
+
+**Two test oracles measured the wrong thing**, and the second was the
+report's own number. `cosmofs-orphan-crash` first compared the free
+count with a baseline taken before any of this, which is a filesystem
+that had no free record either -- a true difference, and not the one
+under test. Then, with the comparison fixed to measure the reclaim
+itself, it asserted sixteen blocks for a 64 KiB file and got five: a run
+of zeroes is a handful of physical blocks however many logical ones it
+spans, because this filesystem compresses. The tests write
+incompressible data now, through the helper `cosmofstest.c` already had
+for exactly this -- which the build duplicated before finding it, and
+whose existing comment already teaches the lesson.
+
+**`cosmofs-check-orphan-crash` was rewritten, as the report said it
+would be.** It asserted `orphan.count == 1` after a remount and that the
+space came back only under `COSMOFS_CHECK_REPAIR`: both are descriptions
+of the defect. Its new form makes an orphan the record did *not* name --
+`COSMOFS_CORRUPT_ORPHAN`, the poison hook that already existed -- so the
+repair path it exercises stays tested on the case the checker still
+owns.
+
+Unchanged from the plan: the record is written whole and never copied;
+the set cancels in memory for an ordinary unlink; the bound is exact;
+the reservation is a third consumer of the commit's existing one; the
+replay skips an inode whose slot is already empty *before* the
+`inode_count` decrement; and the checker claims the chain and stops
+calling a recorded inode an orphan.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**311 self-tests, PASS on x86-64 and aarch64 debug and on x86-64
+release.**
+
+| measurement | before | after |
+| --- | --- | --- |
+| `cosmofs-replay` prefix images | 334 | **410** (the workload holds a handle across a sync) |
+| blocks stranded across them | 0 | **0** |
+| an unlinked-but-open inode after a crash | an orphan the operator must reclaim | **reclaimed by the mount** |
+
+Each test as it reported itself:
+
+- `cosmofs-orphan-crash`: the mount reclaimed the inode and **19
+  blocks** with no operator and no repair flag (16 of data, the rest its
+  extent and checksum metadata).
+- `cosmofs-orphan-cancels`: an unlink with nothing holding it wrote no
+  record; one with a handle wrote and retired one -- both halves, in one
+  test, because separately either passes for the wrong reason.
+- `cosmofs-orphan-dir`: a directory removed under a live reference was
+  reclaimed, **parent nlink 2 throughout** -- the trap the review found.
+- `cosmofs-orphan-rename`: the replaced file's 19 blocks came back.
+- `cosmofs-orphan-idempotent`: two mounts, one record, 1 inode both
+  times.
+- `cosmofs-orphan-reserved`: **526 inodes** recorded across a chain of
+  record blocks and all of them replayed.
+- `cosmofs-orphan-supersede`: 100 commits with a handle held, **3 free
+  blocks** lost to them in all -- the record is superseded, not
+  accumulated.
+- `cosmofs-orphan-rollback`: the failed fill left the generation and the
+  free count as it found them.
+
+**The bug-proof, run rather than asserted.** With `orphan_replay` made a
+no-op and nothing else changed, the suite fails in the two places it
+should: five orphan tests at `r.clean`, and **`cosmofs-replay` at prefix
+213 of 227 writes, reporting `1 orphan`**. That is what says the crash
+workload is not vacuous -- it catches the defect, in a prefix, for the
+stated reason.
+
+**Benchmarks.** The ordinary unlink's cost is unchanged and
+`cosmofs-orphan-cancels` is the measurement: with the writeback thread
+off, `orphan_root` is 0 after the commit, so no record was written and
+no block was spent. A commit with pending deletions writes
+`ceil(nr_orphans / CFS_ORPHANS_PER_BLOCK)` blocks -- `-reserved` spends
+two for 526 inodes -- inside the flush the commit already does, with no
+extra barrier. `-supersede` prices a hundred commits at three blocks in
+total, which is the release working. The crash suite grew from 334
+prefixes to 410 and from about 9.5 to about 12.3 seconds, inside its
+budget.
