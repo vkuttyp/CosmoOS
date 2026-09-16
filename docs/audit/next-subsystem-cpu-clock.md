@@ -832,19 +832,22 @@ meant to read a property of the code.
 
 ### As run
 
-**328 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
-the branch point, so nine new: `clock-since-saturates`,
+**329 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
+the branch point, so ten new: `clock-since-saturates`,
 `blk-timeout-skew`, `clock-cross-cpu`, `clock-scope-aarch64`,
 `clock-skew-detected`, `clock-invariant-gate`, `clock-offset-bound`,
-`lockup-report-skew` and `clock-cost`. `blk-unregister-drain` is the
-tenth test this unit touched and the only existing one it changed.
+`lockup-report-skew`, `clock-cost` and `clock-tick-owner`.
+`blk-unregister-drain` is the eleventh test this unit touched and the
+only existing one it changed.
 
-Three of those nine are not in the report's table. `clock-skew-detected`
+Four of those ten are not in the report's table. `clock-skew-detected`
 is the injection the report described as a bug-proof, made permanent
 because the tests it proves pass vacuously on every machine here.
 `clock-offset-bound` exists because the measurement's first run produced
 a bound no measurement can justify. `clock-cost` is the benchmark the
 report asked for, as a test rather than a number in a terminal.
+`clock-tick-owner` exists because review would not let the deadline
+hazard go, and it was right not to.
 
 **The numbers, from the final run.**
 
@@ -937,8 +940,10 @@ Only the first can hang, and only that one has an age no clock can
 distort. The rest now go through `clock_deadline_ns` and
 `clock_deadline_passed`.
 
-**A machine-wide tick counter was built here, and reverted.** Review
-caught why, and the reason is worth more than the code was. The counter
+**A machine-wide tick counter is here, and it is the third design in
+this position.** The first two were built and reverted, and both failed
+in ways a test would have caught at once, which is why this one ships
+with one. Their post-mortem, because it is the useful part: The counter
 took the *highest* `pc->ticks` any CPU had reached, on the reasoning that
 every CPU ticks at `CONFIG_HZ` so the maximum advances at `CONFIG_HZ`.
 But those counters do not share an origin: each starts when its CPU comes
@@ -951,15 +956,30 @@ the shipping path. **A documented limitation was replaced with a silent
 stall, which is strictly worse**, and two attempts at this hazard in two
 rounds is where to stop rather than try a third.
 
-The obvious repair does not work either: every CPU adding its own delta
+The other repair is worse, not better: every CPU adding its own delta
 makes the counter advance at `CONFIG_HZ` times the CPU count, so
-deadlines expire that many times too early. The known-good shape is a
-single designated timekeeper with handoff when it goes offline or stops
-answering — a subsystem, not a helper. It is an inventory row now, with
-both dead ends recorded so the next attempt starts past them.
+deadlines expire that many times too early.
 
-The shape that was tried and removed, kept only so the next attempt
-recognises it:
+**What works is a designated timekeeper with handoff.** One CPU advances
+the counter, so it runs at `CONFIG_HZ` rather than a multiple of it. A
+CPU that is not the owner watches the counter, and if it has not moved
+for four of that CPU's own ticks — the owner offline, wedged, or simply
+not taking interrupts — claims ownership with a compare-exchange.
+Several may notice at once and exactly one wins. So the counter is late
+by at most four ticks across a handover and **cannot stop while any CPU
+is still ticking**, which is the property the first design lacked.
+
+`clock-tick-owner` is the test, and phase 2 is the one that matters: it
+points ownership at a CPU id that will never tick, which a stalled or
+offline owner is indistinguishable from, and requires the counter to
+resume on its own. It reports which CPU took over. Phase 1 checks the
+rate, with an upper bound deliberately tight enough that the
+every-CPU-contributes design would fail it. Measured: 50 ticks in 200 ms
+on x86-64 and 51 on AArch64 — `CONFIG_HZ` is 250, so 50 is exact — and
+with the owner stopped, CPU 3 (x86-64) and CPU 2 (AArch64) took over
+within four ticks.
+
+The first shape, kept so it is recognised rather than rediscovered:
 
 ```c
 /* REVERTED -- do not resurrect. pc->ticks counters do not share an
@@ -973,12 +993,13 @@ static uint64_t deadline_now_ns(void)
 }
 ```
 
-**What is left is the honest version**: `clock_deadline_ns` and
-`clock_deadline_passed` measure against the clock, so on a machine whose
-counter is not common they are exactly as wrong as the arithmetic they
-replaced. They buy one address for the hazard instead of sixteen, and
-saturation. The header says both things in as many words, and the
-inventory row is the record that no machine-wide time source exists.
+So `clock_deadline_ns` and `clock_deadline_passed` measure against the
+corrected clock where every CPU agrees on it and against the
+machine-wide tick where they do not. Both read the same quantity, so
+where a deadline is built and where it is tested no longer matters —
+**which is what the review asked for across five listings, and it was
+right to keep asking.** The inventory row filed for this is closed by
+the same commit that filed it.
 
 **And while it existed, the second domain immediately broke the first.**
 `timer_start` had been migrated to `clock_deadline_ns` in the mechanical

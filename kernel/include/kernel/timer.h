@@ -151,18 +151,22 @@ bool clock_is_common(void);
  * wrapping, and the test for it. Prefer these to `clock_now_ns() + x`
  * and a bare `<`.
  *
- * **They do not make a deadline safe across a migration**, and nothing
- * in this tree can yet: that needs a time source two CPUs can read
- * without trusting their counters to agree, which means a designated
- * timekeeper with handoff -- a subsystem, filed as one in
- * `docs/audit/2026-09-deferred-work-inventory.md`. A machine-wide tick
- * counter was tried here and reverted; `kernel/timer/timer.c` records
- * why, because the failure is not obvious.
+ * **These are safe across a migration and a hand-written deadline is
+ * not.** They measure against the corrected clock when every CPU agrees
+ * on it, and against the machine-wide tick when they do not -- one
+ * counter, advanced by a designated CPU, with ownership taken over by
+ * another when its owner stops ticking. Both calls read the same
+ * quantity, so where the deadline was built and where it is tested no
+ * longer matters. `kernel/timer/timer.c` has the design, including the
+ * two shapes that were tried first and are wrong.
  *
- * What they do buy: one address for the hazard instead of sixteen, and
- * saturation, so a budget large enough to wrap no longer expires at
- * once. Build with `clock_deadline_ns`, test with
- * `clock_deadline_passed`, always both or neither.
+ * `clock_now_ns() + x` compared with a bare `<` has none of that, which
+ * is why every deadline loop in this tree uses these instead. Build with
+ * `clock_deadline_ns`, test with `clock_deadline_passed`, always both or
+ * neither -- and note the resolution: on a machine whose counter is not
+ * common the tick is CONFIG_HZ-grained (4 ms), against a shortest budget
+ * in this tree of 200 ms. `ndelay` and the lockup sampler are below that
+ * and stay on the raw clock, each saying so.
  */
 uint64_t clock_deadline_ns(uint64_t budget_ns);
 bool clock_deadline_passed(uint64_t deadline);
@@ -206,6 +210,14 @@ uint64_t clock_measured_bound_ns(void);
 void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns);
 void clock_test_set_worst_offset_ns(uint64_t ns);
 void clock_test_force_uncommon(bool on);
+
+/* The machine-wide tick that deadlines use when the counter is not
+ * common: its value, its current owner, and a way to point the
+ * ownership at a CPU that will never tick, so the takeover path can be
+ * tested rather than believed. */
+uint64_t clock_test_global_ticks(void);
+unsigned clock_test_tick_owner(void);
+void clock_test_set_tick_owner(unsigned cpu);
 #endif
 /* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
  * read from the real-time clock at boot (0 when the platform has none).

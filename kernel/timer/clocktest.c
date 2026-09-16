@@ -7,6 +7,7 @@
  * rather than about the comment above it.
  */
 
+#define TICK_OWNER_STALE_TEST 4u
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/string.h>
@@ -447,6 +448,68 @@ bool selftest_clock_skew_detected(const char **reason)
 }
 
 /*
+ * The machine-wide tick, and the handover that keeps it from stalling.
+ *
+ * This is the third design in this position; the first two are in the
+ * report, and both failed in ways a test would have caught at once,
+ * which is why this one has one. A single owner advances the counter, so
+ * it runs at CONFIG_HZ rather than CONFIG_HZ times the CPU count. The
+ * danger of a single owner is obvious -- if it stops, the counter stops,
+ * and every deadline on the machine stalls, including the IPI and
+ * TLB-shootdown waits whose whole purpose is to escape a CPU that has
+ * stopped answering.
+ *
+ * So phase 2 creates exactly that: ownership is pointed at a CPU id that
+ * will never tick, which is indistinguishable from an owner that has
+ * gone offline or wedged. The counter must resume by itself.
+ */
+bool selftest_clock_tick_owner(const char **reason)
+{
+    if (cpu_count() < 2) {
+        kinfo("selftest: clock-tick-owner: one CPU; skipping");
+        return true;
+    }
+
+    /* Phase 1: it advances, and at about the tick rate. */
+    uint64_t t0 = clock_test_global_ticks();
+    thread_sleep_ms(200);
+    uint64_t t1 = clock_test_global_ticks();
+    uint64_t advanced = t1 - t0;
+    /* 200 ms is 50 ticks at CONFIG_HZ 250. The window is wide because a
+     * loaded host stretches the sleep, and deliberately bounded above:
+     * every CPU advancing it -- one of the reverted designs -- would show
+     * up here as a multiple of the expected count. */
+    if (advanced < 10 || advanced > 4 * (200ull * CONFIG_HZ / 1000)) {
+        kerror("selftest: clock-tick-owner: %llu ticks in 200 ms, expected about %llu",
+               (unsigned long long)advanced, (unsigned long long)(200ull * CONFIG_HZ / 1000));
+        *reason = "the machine-wide tick does not advance at the tick rate";
+        return false;
+    }
+
+    /* Phase 2: the owner stops for ever. */
+    unsigned real_owner = clock_test_tick_owner();
+    clock_test_set_tick_owner(CONFIG_MAX_CPUS - 1u);   /* never ticks */
+    uint64_t s0 = clock_test_global_ticks();
+    thread_sleep_ms(200);
+    uint64_t s1 = clock_test_global_ticks();
+    unsigned new_owner = clock_test_tick_owner();
+    if (s1 == s0)
+        clock_test_set_tick_owner(real_owner);   /* put it back before failing */
+
+    if (s1 == s0) {
+        kerror("selftest: clock-tick-owner: the counter stopped at %llu when its owner stopped ticking; no CPU took over",
+               (unsigned long long)s0);
+        *reason = "a stalled tick owner is never replaced: every deadline would stall with it";
+        return false;
+    }
+    CHECK(new_owner != CONFIG_MAX_CPUS - 1u);
+
+    kinfo("selftest: clock-tick-owner: %llu ticks in 200 ms; with the owner stopped, CPU %u took over within %u ticks and the counter advanced %llu more",
+          (unsigned long long)advanced, new_owner, TICK_OWNER_STALE_TEST, (unsigned long long)(s1 - s0));
+    return true;
+}
+
+/*
  * What the advertised bound is allowed to be.
  *
  * The first run of the measurement reported an uncertainty of +-0 ns and
@@ -574,6 +637,11 @@ bool selftest_clock_offset_bound(const char **reason)
     return true;
 }
 bool selftest_clock_invariant_gate(const char **reason)
+{
+    (void)reason;
+    return true;
+}
+bool selftest_clock_tick_owner(const char **reason)
 {
     (void)reason;
     return true;

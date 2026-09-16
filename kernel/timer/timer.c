@@ -31,6 +31,7 @@ static uint64_t g_worst_offset_ns;
 /* False when the counter is not comparable across CPUs at all, which is
  * a different statement from a large measured offset. */
 static bool g_clock_common = true;
+static void clock_tick_advance(unsigned me);
 /* Per-CPU addends that cancel each CPU's measured offset from CPU 0, and
  * whether they are being applied (they are not, on a counter this kernel
  * may not trust across CPUs). */
@@ -123,42 +124,102 @@ uint64_t clock_since_ns(uint64_t stamp)
     return clock_delta_ns(clock_now_ns(), stamp);
 }
 
+/* --- the machine-wide tick: one counter two CPUs may compare --------------- */
+
 /*
- * A machine-wide tick counter was tried here and reverted, and the
- * reason is worth keeping so the next attempt starts past it.
+ * A deadline built on one CPU and tested on another cannot use the clock
+ * when the counter is not common: the two readings differ by an unbounded
+ * amount, and saturating arithmetic does not help a comparison. What is
+ * needed is a quantity both CPUs read from the *same* place, and the tick
+ * is the only one this kernel has.
  *
- * The idea was sound -- one memory location both CPUs read, so migration
- * cannot distort a deadline -- but the implementation took the *highest*
- * `pc->ticks` any CPU had reached, and those counters do not share an
- * origin: each starts when its CPU comes online, so CPU 0 leads every AP
- * by the whole of bring-up. Stop CPU 0 ticking and no AP can advance the
- * global value until it has caught up seconds later, which stalls every
- * deadline on the machine -- including the IPI and TLB-shootdown waits
- * whose entire purpose is to escape a CPU that has stopped answering.
- * Strictly worse than the honest limitation it replaced.
+ * **One designated CPU advances it**, so it runs at CONFIG_HZ rather than
+ * CONFIG_HZ times the CPU count -- which is the first design that was
+ * tried here and reverted, because every CPU contributing its own delta
+ * makes deadlines expire ncpus times too early. The second reverted
+ * design took the maximum of the per-CPU `pc->ticks`, which stalls: those
+ * counters do not share an origin, each starting when its CPU comes
+ * online, so the leader stopping blocks every follower for the whole of
+ * bring-up.
  *
- * Nor do the obvious repairs work: every CPU adding its own delta makes
- * the counter advance at CONFIG_HZ times the CPU count, so deadlines
- * expire that many times too early. The known-good shape is a single
- * designated timekeeper with handoff when it goes offline or stops
- * answering, which is a subsystem rather than a helper and is filed as
- * one (`docs/audit/2026-09-deferred-work-inventory.md`).
+ * **And ownership moves**, which is what makes a single owner safe. A CPU
+ * that is not the owner watches the counter; if it has not advanced for
+ * `TICK_OWNER_STALE` of that CPU's own ticks -- the owner offline, wedged,
+ * or not taking interrupts -- it claims ownership with a compare-exchange.
+ * Several may notice at once and exactly one wins. The counter can
+ * therefore be late by at most `TICK_OWNER_STALE` ticks across a handover,
+ * and cannot stop while any CPU is still ticking.
  *
- * So these two measure against the clock, and on a machine whose counter
- * is not common they are exactly as wrong as the arithmetic they
- * replaced. What they buy is one address for the hazard instead of
- * sixteen, and the saturation below.
+ * Deliberately *not* fixed by this: a deadline written by hand as
+ * `clock_now_ns() + x`. Only the two calls below are safe, which is why
+ * every deadline loop in the tree uses them.
  */
+#define TICK_OWNER_STALE 4u
+
+static uint64_t g_global_ticks;
+static unsigned g_tick_owner;                  /* the CPU that advances it */
+static uint64_t g_owner_seen[CONFIG_MAX_CPUS]; /* what a non-owner last saw */
+static unsigned g_owner_stale[CONFIG_MAX_CPUS];
+
+static void clock_tick_advance(unsigned me)
+{
+    if (me >= CONFIG_MAX_CPUS)
+        return;
+    unsigned owner = __atomic_load_n(&g_tick_owner, __ATOMIC_ACQUIRE);
+    if (me == owner) {
+        __atomic_fetch_add(&g_global_ticks, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    uint64_t seen = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    if (seen != g_owner_seen[me]) {
+        g_owner_seen[me] = seen;   /* the owner is alive */
+        g_owner_stale[me] = 0;
+        return;
+    }
+    if (++g_owner_stale[me] < TICK_OWNER_STALE)
+        return;
+    /* The owner has not advanced it for several of this CPU's ticks.
+     * Take over; if another CPU got there first the exchange fails and
+     * this one goes back to watching. */
+    g_owner_stale[me] = 0;
+    (void)__atomic_compare_exchange_n(&g_tick_owner, &owner, me, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/*
+ * The instant a deadline is measured against: the corrected clock when
+ * every CPU agrees on it, the machine-wide tick when they do not. Both
+ * `clock_deadline_ns` and `clock_deadline_passed` read this, so a
+ * deadline built on one CPU and tested on another compares the same
+ * quantity and migration cannot distort it.
+ *
+ * Before the first tick there is one CPU and no scheduler, so the clock
+ * is exact rather than a compromise.
+ */
+static uint64_t deadline_now_ns(void)
+{
+    if (clock_is_common())
+        return clock_now_ns();
+    uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+}
+
+#if CONFIG_DEBUG
+uint64_t clock_test_global_ticks(void) { return __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE); }
+unsigned clock_test_tick_owner(void) { return __atomic_load_n(&g_tick_owner, __ATOMIC_ACQUIRE); }
+void clock_test_set_tick_owner(unsigned cpu) { __atomic_store_n(&g_tick_owner, cpu, __ATOMIC_RELEASE); }
+#endif
+
 uint64_t clock_deadline_ns(uint64_t budget_ns)
 {
-    uint64_t now = clock_now_ns();
+    uint64_t now = deadline_now_ns();
     uint64_t at = now + budget_ns;
     return at < now ? UINT64_MAX : at;   /* a budget so large it wraps never expires */
 }
 
 bool clock_deadline_passed(uint64_t deadline)
 {
-    return clock_now_ns() >= deadline;
+    return deadline_now_ns() >= deadline;
 }
 
 uint64_t clock_worst_offset_ns(void)
@@ -418,6 +479,7 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 
     struct percpu *pc = this_cpu();
     pc->ticks++;
+    clock_tick_advance(pc->cpu_id);
 
     uint64_t now = clock_now_ns();
     /* The tick sample (kernel/core/lockup.c): what this CPU was doing,

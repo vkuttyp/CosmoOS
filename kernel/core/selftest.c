@@ -431,6 +431,7 @@ static const struct selftest tests[] = {
     { "clock-offset-bound", selftest_clock_offset_bound },
     { "lockup-report-skew", selftest_lockup_report_skew },
     { "clock-cost", selftest_clock_cost },
+    { "clock-tick-owner", selftest_clock_tick_owner },
     { "nvme",            selftest_nvme },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },
