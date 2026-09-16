@@ -18,7 +18,12 @@ the entry. Check: review; `policy_rr` asserts `list_empty` on enqueue
 and non-empty on dequeue so a double transition corrupts nothing
 silently.
 
-**S2. `runqueue.lock` is a leaf.** Nothing is acquired while it is held.
+**S2. `runqueue.lock` is a leaf, with exactly one exception.** Nothing
+is acquired while it is held, **except a second `runqueue.lock`, and
+only by the balancer, and only in increasing CPU-id order** (S24). The
+lock-order checker therefore records one edge out of the `runqueue`
+class, from a lower-numbered CPU's lock to a higher-numbered one, and no
+edge to any other class. Nothing else is acquired while it is held.
 `schedule()` calls `arch_context_switch` with it held and the resumed
 thread releases it; `sched_finish_switch` unlocks *before* calling
 `thread_put`, which takes `kernel_space.lock` and slab locks. The AArch64
@@ -51,6 +56,23 @@ restores the caller's saved state with `arch_irq_restore(s)` after
 `sched_finish_switch`, and `thread_trampoline` does `arch_irq_enable()`.
 Check: test `breakpoint-trap` and every blocking test (a thread that
 returned with interrupts off would never take the next tick).
+
+**S24. Two run-queue locks are taken in increasing CPU-id order,
+always, and only by the balancer.** Moving a ready thread from one CPU
+to another is the only operation in this kernel that needs two of them
+at once, and two CPUs balancing towards each other at the same moment is
+the textbook deadlock. `sched_balance` therefore takes
+`min(src, dst)` first and `max(src, dst)` second, whichever direction
+the thread is travelling.
+
+The rule is stated here rather than inferred from the code because it
+is the kind that survives review and dies in a later refactor: a reader
+who sees only one call site has no reason to suspect an ordering
+requirement. Check: lockdep sees both acquisitions and would report the
+reversed order as a cycle the first time two CPUs balanced towards each
+other; the `sched-balance-*` self-tests run four CPUs pulling
+concurrently, which is what makes that first time happen during a boot
+rather than in production.
 
 ## Entry conditions
 
