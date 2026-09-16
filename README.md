@@ -2043,6 +2043,48 @@ See [docs/development.md](docs/development.md).
   stranded-block total is now zero and its weakened assertion is gone.
   297 self-tests on both architectures, debug and release (PR #148).
 
+- **The list the root does not name**
+  (`docs/audit/next-subsystem-snap-deadlist.md`). The record of what a
+  transaction freed fixed the frees and not the holds. A block a
+  snapshot still occupies was appended to that snapshot's deadlist from
+  the commit's release loop -- *after* the root was published -- by a
+  call that allocated a block the published bitmap did not know about
+  and dirtied two blocks for a commit that an unmount never makes. The
+  snapshot list was also the one metadata chain in the filesystem
+  rewritten **where it lay**, so a crash between that write and the next
+  root left the surviving root naming a list belonging to a transaction
+  that never happened. The inventory row called for the free record's
+  reserve-before-fill treatment; that alone would have traded a leak for
+  a corruption, because an append moved in front of the root under an
+  in-place update is an append the *old* root can see. So the snapshot
+  list and its deadlists are now copy-on-write, published by the same
+  superblock write as everything else -- `snap_root` names the list and
+  nothing else does -- with the blocks taken from the commit's existing
+  reservation, the superseded ones freed exempt on the rule the free
+  record established, and the verdict "does a snapshot hold this" taken
+  once per freed block instead of once for the record and again for the
+  release loop, which now clears bitmap bits and nothing else. **The
+  report's own analysis was wrong in one place and the crash suite said
+  so on its first run**: the release loop's append *was* a crash hazard,
+  not through its entries but through the pointer it wrote into the
+  in-place list -- a deadlist head neither written nor allocated under
+  the surviving root, `unreadable` and reachable-and-free at once, at
+  prefix 125, block 23. A control with the change disabled failed
+  identically, which is what said the defect pre-dated the unit. Nothing
+  had ever tested it, because **the crash suite had never taken a
+  snapshot**; it does now, and asks per prefix a question the structural
+  checker cannot -- a deadlist's entries are claimed non-live, so one
+  block on two lists is not a duplicate claim and not a finding. 334
+  prefix images, 0 blocks stranded, 1312 deadlist entries examined, none
+  duplicated. The previous unit's weakened bound, `alloc_not_seen <= 4`,
+  is `== 0`. No format change: the on-disk shapes are unchanged and only
+  where their blocks live differs, so `CFS_VERSION` stays 9. One of the
+  new tests passed its own bug-proof and was rebuilt: comparing
+  `snap_root` across two commits compares equal on a filesystem that
+  copies perfectly, because the allocator hands the superseded block
+  straight back, so the measurement is taken across one commit instead.
+  (PR #150).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

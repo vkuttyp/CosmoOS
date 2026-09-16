@@ -548,6 +548,49 @@ older one can name it either. It is freed immediately. Otherwise its
 bitmap bit stays set — the allocator never hands it out — and it is
 remembered on that snapshot's deadlist.
 
+**The remembering happens before the root, and the list is copied.**
+Both halves are load-bearing and both were wrong until the deadlist unit
+(`docs/audit/next-subsystem-snap-deadlist.md`).
+
+The append used to run in the commit's release loop, *after* the
+superblock was written, and it did two things a published transaction
+may not do. It allocated — after `commit_bitmap`, the one pass that
+makes the on-disk bitmap agree with the bits in memory, so the block it
+took was not in the bitmap the root published. And it dirtied the
+deadlist block and the snapshot list entry for the *next* commit, which
+at an unmount never comes: the entry was thrown away and the block it
+named stayed allocated and reachable from nothing, for good, because
+deleting the snapshot walks a deadlist that never heard of it.
+
+Worse, the snapshot list was rewritten **where it lay** — the one
+metadata chain in the filesystem that was not copy-on-write. A crash
+between that write and the next root left the *surviving* root naming a
+list belonging to a transaction that never happened. When the append had
+allocated a fresh deadlist head, that root named a block which had not
+been written and whose bitmap bit it did not have: unreadable and
+reachable-and-free at once. The replay suite found it at prefix 125 the
+first time its workload took a snapshot.
+
+So: `cfs_super.snap_root` names the list and nothing else does, which
+means a copy of the list is published exactly when the superblock is.
+Every change to a `CFS_KIND_SNAPLIST` or `CFS_KIND_DEADLIST` block now
+copies it first (`snap_cow`, `DL_COPY`), and the superseded block is
+freed **exempt** — outside the snapshot filter, on the rule the free
+record already established: a snapshot preserves `imap_root` and
+`alloc_root`, not the superblock fields beside them, so no snapshot's
+tree can reach the list. Sending a copy through the filter would have
+the snapshot hold it on the deadlist it is a copy of.
+
+The blocks the copies need come from the reservation the commit already
+takes before the bitmap fixpoint for the free record
+(`cfs_snapshot_reserve_bound`); one reservation, two consumers, and a
+block nobody needed is a leftover the record names as free. The verdict
+— does a snapshot hold this block — is taken once per freed block, in
+`cfs_snapshot_fill`, and the record, the deadlist and the release loop
+all read that one answer. The release loop after the root now clears
+bitmap bits and nothing else: it neither allocates, nor writes, nor asks
+the snapshot list anything.
+
 Deleting a snapshot asks the same question of every block on its
 deadlist, against the snapshots that remain: a block none of them
 occupies goes straight back to the allocator, and the rest are handed to
