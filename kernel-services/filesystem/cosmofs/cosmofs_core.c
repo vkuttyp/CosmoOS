@@ -1044,11 +1044,11 @@ int cfs_commit(struct cfs *fs)
      * second pass and without a loop.
      */
     /*
-     * Only from version 9. Below it the superblock word is `reserved[5]`
-     * and writing a chain head there would put a pointer in a field an
-     * older kernel does not know about -- and this kernel would not read
-     * it back either, since the gate is on reading too, so every record
-     * would be a leak nobody could see.
+     * Only from version 9. Below it the superblock word is the first of
+     * `reserved[5]` and writing a chain head there would put a pointer
+     * in a field an older kernel does not know about -- and this kernel
+     * would not read it back either, since the gate is on reading too,
+     * so every record would be a leak nobody could see.
      */
     bool record_frees = fs->sb.version >= 9;
     int rc = 0;

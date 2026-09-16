@@ -79,9 +79,11 @@ struct cfs_super {
     uint8_t magic[8] = "COSMOFS1"; uint32_t version = 1; uint32_t block_size = 4096;
     uint64_t total_blocks, generation, imap_root, alloc_root, next_ino, inode_count, free_blocks;
     uint64_t csum_root, snap_root;   /* reserved: data checksums, snapshot roots */
-    uint64_t members = 1;            /* pool members */
+    uint64_t members = 1;            /* v4: the members block; v2/v3 the constant 1 */
+    uint8_t uuid[16];                /* v4 */
+    uint64_t key_root;               /* v7: the wrapped-key block, or 0 */
     uint64_t free_root;              /* v9: head of the free record, or 0 */
-    uint64_t reserved[7]; uint32_t crc; uint32_t pad;
+    uint64_t reserved[4]; uint32_t crc; uint32_t pad;
 };
 ```
 
@@ -307,7 +309,8 @@ next commit retires it. The reasoning is in **Commit** above and in
 `docs/audit/next-subsystem-unmount-leak.md`.
 
 **The gate is on reading, not only on writing.** Below version 9 the
-word is `reserved[5]` and holds a zero that was never a chain head, so
+word is the first of `reserved[5]` and holds a zero that was never a
+chain head, so
 `freelog_replay` returns immediately and a version-8 image mounts,
 works, and reclaims its deferred frees the way it always did — at the
 next commit. The write is gated too: putting a chain head in a reserved

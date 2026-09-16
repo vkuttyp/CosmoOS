@@ -2031,9 +2031,16 @@ See [docs/development.md](docs/development.md).
   the code, because a deferred free goes on the list phase 7 filters --
   found by writing the test that argument never had. Four tests passed
   their own bug-proof and were rebuilt before they measured anything,
-  one of them three times. The crash suite's stranded-block total is now
-  zero and its weakened assertion is gone. 295 self-tests on both
-  architectures, debug and release (PR #148).
+  one of them three times. Review then found three failure paths where
+  the happy path was right and the unhappy one was not: a commit that
+  failed after reserving the record's blocks kept them, an over-reserved
+  block had nowhere to be recorded when the last chain block came out
+  exactly full, and a record whose count was past what a block holds was
+  read as empty. The third corrected the report as written -- refusing a
+  root is not refusing the filesystem, because cosmofs keeps two and
+  falls back a generation to a whole one. The crash suite's
+  stranded-block total is now zero and its weakened assertion is gone.
+  297 self-tests on both architectures, debug and release (PR #148).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
