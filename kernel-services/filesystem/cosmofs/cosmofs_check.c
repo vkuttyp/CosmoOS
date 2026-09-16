@@ -436,7 +436,14 @@ static void walk_snapshots(struct check *ck)
  * bitmap already says so, so they are not claimed here -- claiming them
  * would make the pass call a recorded free a block in use.
  */
-static void walk_freelog(struct check *ck, uint64_t head)
+/*
+ * The orphan record's chain is the same: its blocks are live metadata,
+ * and the *inodes* it names are alive too -- they are inodes the walk
+ * reaches through the inode map, whose blocks are still allocated
+ * because that is exactly what the record promises to release. So this
+ * claims the chain and nothing else (docs/audit/next-subsystem-orphan.md).
+ */
+static void walk_record(struct check *ck, uint64_t head, uint32_t kind)
 {
     uint64_t at = head;
     unsigned guard = 0;
@@ -447,7 +454,7 @@ static void walk_freelog(struct check *ck, uint64_t head)
         }
         claim(ck, at, true);
         struct cfs_buf *b;
-        if (read_meta(ck, at, CFS_KIND_FREELOG, &b))
+        if (read_meta(ck, at, kind, &b))
             return;
         at = ((const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE))->next;
         cfs_buf_put(ck->fs, b);
@@ -563,8 +570,20 @@ static void compare(struct check *ck)
         uint32_t named = counts_get(&ck->links, ino);
         if (ino == CFS_ROOT_INO)
             named += 2;                     /* the root is its own parent, and nothing names it */
-        if (named == 0)
-            name_it(&ck->rep->orphan, ino);
+        if (named == 0) {
+            /*
+             * An inode the orphan record names is a promise this root
+             * has made, not a fault: the next mount does what cfs_evict
+             * would have done. Reporting it would make every correctly
+             * recorded pending deletion a finding
+             * (docs/audit/next-subsystem-orphan.md). An inode with no
+             * name that the record does *not* name is still a real
+             * finding, and after that unit a rarer one -- it means the
+             * record was lost or never written.
+             */
+            if (!cfs_orphan_named(fs, ino))
+                name_it(&ck->rep->orphan, ino);
+        }
         else if (counts_get(&ck->nlink, ino) != named)
             name_it(&ck->rep->nlink_wrong, ino);
     }
@@ -782,7 +801,10 @@ int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned 
      * (docs/audit/next-subsystem-unmount-leak.md).
      */
     if (fs->sb.version >= 9)
-        walk_freelog(&ck, fs->sb.free_root);
+        walk_record(&ck, fs->sb.free_root, CFS_KIND_FREELOG);
+    /* And what this root still owes, for the same reason. */
+    if (fs->sb.version >= 10)
+        walk_record(&ck, fs->sb.orphan_root, CFS_KIND_ORPHAN);
     if (fs->sb.key_root != 0)
         claim(&ck, fs->sb.key_root, true);
     walk_snapshots(&ck);

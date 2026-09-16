@@ -491,6 +491,49 @@ void cfs_free_block_exempt(struct cfs *fs, uint64_t blk)
     note_dirty(fs);
 }
 
+bool cfs_orphan_named(const struct cfs *fs, uint64_t ino)
+{
+    for (unsigned i = 0; i < fs->nr_orphans; i++)
+        if (fs->orphans[i] == ino)
+            return true;
+    return false;
+}
+
+void cfs_orphan_add(struct cfs *fs, uint64_t ino)
+{
+    if (ino == 0 || cfs_orphan_named(fs, ino))
+        return;
+    if (fs->nr_orphans == fs->orphan_cap) {
+        unsigned cap = fs->orphan_cap ? fs->orphan_cap * 2 : 8;
+        uint64_t *n = krealloc(fs->orphans, cap * sizeof(*n), 0);
+        if (n == NULL) {
+            /*
+             * The same bargain cfs_free_block_deferred makes: an unlink
+             * that fails because a record could not grow is an error the
+             * caller cannot act on, so the name goes and the space is
+             * lost, loudly. The checker is what finds it afterwards.
+             */
+            kerror("cosmofs: leaking inode %llu (no memory for the orphan record)", (unsigned long long)ino);
+            return;
+        }
+        fs->orphans = n;
+        fs->orphan_cap = cap;
+    }
+    fs->orphans[fs->nr_orphans++] = ino;
+    note_dirty(fs);
+}
+
+void cfs_orphan_remove(struct cfs *fs, uint64_t ino)
+{
+    for (unsigned i = 0; i < fs->nr_orphans; i++) {
+        if (fs->orphans[i] != ino)
+            continue;
+        fs->orphans[i] = fs->orphans[fs->nr_orphans - 1];
+        fs->nr_orphans--;
+        return;
+    }
+}
+
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk)
 {
     if (!cfs_dva_valid(fs, blk))
@@ -966,6 +1009,10 @@ static int freelog_release_previous(struct cfs *fs)
  * snapshot still reserves the deadlist's share, because the alternative
  * is a release loop that frees a snapshot's blocks.
  */
+/* Defined with the rest of the orphan record below; needed here because
+ * the reservation is where its blocks are counted. */
+static unsigned orphan_reserve_bound(const struct cfs *fs);
+
 static int commit_reserve(struct cfs *fs, struct cfs_res *res, bool with_record)
 {
     res->blk = NULL;
@@ -990,9 +1037,13 @@ static int commit_reserve(struct cfs *fs, struct cfs_res *res, bool with_record)
      * that already keeps the record's own bound from having to be tight.
      */
     unsigned snap_extra = cfs_snapshot_reserve_bound(fs, pending_bound);
-    if (bound == 0 && snap_extra == 0)
+    /* And the orphan record's, which is exact rather than generous:
+     * nr_orphans is what it is before the fixpoint and commit_bitmap
+     * cannot add to it. */
+    unsigned orphan_extra = orphan_reserve_bound(fs);
+    if (bound == 0 && snap_extra == 0 && orphan_extra == 0)
         return 0;
-    unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK) + snap_extra;
+    unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK) + snap_extra + orphan_extra;
     if (n == 0)
         return 0;
     uint64_t *blk = kmalloc((size_t)n * sizeof(*blk), KMEM_ZERO);
@@ -1126,6 +1177,198 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *h
     return 0;
 }
 
+/* --- the record of what this root still owes -----------------------------
+ *
+ * docs/audit/next-subsystem-orphan.md. An inode whose last name has gone
+ * while something still references it has nlink 0 on disk, its extents
+ * intact and no directory entry reaching it; the only thing that will
+ * free it is a cfs_evict call that lives in this mount's memory. A crash
+ * or a forced unmount before that loses the inode and its blocks for
+ * good, because no mount reconsiders them.
+ *
+ * Unlike the snapshot list, this is not a structure a commit edits: the
+ * set is derived from memory, so the record is written out whole each
+ * time and the previous one released. Nothing is copied because nothing
+ * is edited.
+ */
+
+/* No sound record is this long; one that is has a cycle. */
+#define CFS_ORPHAN_MAX_CHAIN 4096u
+
+static int orphan_release_previous(struct cfs *fs)
+{
+    uint64_t at = fs->sb.version >= 10 ? fs->sb.orphan_root : 0;
+    unsigned guard = 0;
+    while (at != 0) {
+        if (guard++ > CFS_ORPHAN_MAX_CHAIN) {
+            kerror("cosmofs: orphan record chain too long at %llu", (unsigned long long)at);
+            return -EIO;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, at, CFS_KIND_ORPHAN, &b);
+        if (rc)
+            return rc;
+        uint64_t next = ((const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE))->next;
+        cfs_buf_put(fs, b);
+        cfs_free_block_exempt(fs, at);   /* no snapshot's tree reaches a superblock record */
+        at = next;
+    }
+    fs->sb.orphan_root = 0;
+    return 0;
+}
+
+/*
+ * Blocks the record needs. Unlike the free record's, this bound is
+ * exact: nr_orphans is what it is before the fixpoint and commit_bitmap
+ * cannot add to it.
+ */
+static unsigned orphan_reserve_bound(const struct cfs *fs)
+{
+    if (fs->sb.version < 10 || fs->nr_orphans == 0)
+        return 0;
+    return (fs->nr_orphans + CFS_ORPHANS_PER_BLOCK - 1) / CFS_ORPHANS_PER_BLOCK;
+}
+
+/* Write the set out whole, chained, from the reservation. */
+static int orphan_fill(struct cfs *fs, struct cfs_res *res)
+{
+    fs->sb.orphan_root = 0;
+    if (fs->sb.version < 10 || fs->nr_orphans == 0)
+        return 0;
+    if (fs->test_fail_orphan)
+        return -EIO;   /* test hook: fail with the reservation outstanding */
+    unsigned need = (fs->nr_orphans + CFS_ORPHANS_PER_BLOCK - 1) / CFS_ORPHANS_PER_BLOCK;
+    uint64_t head = 0, prev = 0;
+    unsigned at = 0;
+    for (unsigned i = 0; i < need; i++) {
+        uint64_t blk = cfs_res_take(res);
+        if (blk == 0) {
+            kerror("cosmofs: the commit's reservation is short of an orphan record block");
+            return -ENOSPC;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_new_at(fs, CFS_KIND_ORPHAN, blk, &b);
+        if (rc) {
+            cfs_res_untake(res);
+            return rc;
+        }
+        struct cfs_dead_block *d = (struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
+        d->next = 0;
+        unsigned k = 0;
+        while (k < CFS_ORPHANS_PER_BLOCK && at < fs->nr_orphans)
+            d->blk[k++] = fs->orphans[at++];
+        d->count = k;
+        mhdr_seal(fs, b->data, CFS_KIND_ORPHAN, blk);
+        buf_mark_dirty(fs, b);
+        cfs_buf_put(fs, b);
+        /* Chain forward: the block before this one names it, and it is
+         * still dirty and unwritten, so the edit reaches the disk. */
+        if (prev != 0) {
+            struct cfs_buf *pb = buf_find(fs, prev);
+            if (pb == NULL) {
+                kerror("cosmofs: the orphan record's previous block %llu went away", (unsigned long long)prev);
+                return -EIO;
+            }
+            ((struct cfs_dead_block *)(pb->data + CFS_MHDR_SIZE))->next = blk;
+        } else {
+            head = blk;
+        }
+        prev = blk;
+    }
+    fs->sb.orphan_root = head;
+    return 0;
+}
+
+/*
+ * Apply the record at mount: do what cfs_evict would have done for every
+ * inode the root still owed.
+ *
+ * An inode whose slot is already empty is skipped *before* the
+ * inode_count decrement, not after it. That is what makes a repeated
+ * replay harmless -- a mount that replays and goes away without
+ * committing leaves the record standing, and the next mount reads it
+ * again -- and it is the one place the superblock's count could be taken
+ * twice off the same inode.
+ */
+static int orphan_replay(struct cfs *fs)
+{
+    if (fs->sb.version < 10)
+        return 0;
+    uint64_t at = fs->sb.orphan_root;
+    unsigned guard = 0, applied = 0, gone = 0;
+    while (at != 0) {
+        if (guard++ > CFS_ORPHAN_MAX_CHAIN) {
+            kerror("cosmofs: orphan record chain too long at %llu", (unsigned long long)at);
+            return -EIO;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, at, CFS_KIND_ORPHAN, &b);
+        if (rc) {
+            /*
+             * The root says it owes these inodes and will not say which.
+             * Mounting anyway would leave an inode map that cannot be
+             * trusted, so the mount fails and the operator has a checker
+             * -- the same answer the free record gives.
+             */
+            kerror("cosmofs: orphan record at %llu unreadable (%d); refusing the mount", (unsigned long long)at,
+                   rc);
+            return -EIO;
+        }
+        const struct cfs_dead_block *d = (const struct cfs_dead_block *)(b->data + CFS_MHDR_SIZE);
+        uint64_t next = d->next;
+        uint64_t count = d->count;
+        if (count > CFS_ORPHANS_PER_BLOCK) {
+            kerror("cosmofs: orphan record at %llu names %llu inodes, more than the %u a block holds; "
+                   "refusing the mount",
+                   (unsigned long long)at, (unsigned long long)count, (unsigned)CFS_ORPHANS_PER_BLOCK);
+            cfs_buf_put(fs, b);
+            return -EIO;
+        }
+        uint64_t *inos = count ? kmalloc((size_t)count * sizeof(*inos), 0) : NULL;
+        if (count && inos == NULL) {
+            cfs_buf_put(fs, b);
+            return -ENOMEM;
+        }
+        for (uint64_t i = 0; i < count; i++)
+            inos[i] = d->blk[i];
+        cfs_buf_put(fs, b);
+        for (uint64_t i = 0; i < count; i++) {
+            struct cfs_inode in;
+            /*
+             * Raw, because every inode this record names has nlink 0 and
+             * the ordinary read calls that absent -- the same reason the
+             * structural check reads orphans this way.
+             */
+            if (cfs_inode_read_raw(fs, inos[i], &in) != 0) {
+                /* One inode, not the map: report it and carry on, and
+                 * the checker still finds it as an orphan. */
+                kwarn("cosmofs: orphan record names inode %llu, which does not read", (unsigned long long)inos[i]);
+                continue;
+            }
+            if (in.mode == 0 && in.size == 0 && in.ino == 0) {
+                gone++;      /* a commit got there first: not an error */
+                continue;
+            }
+            if (cfs_truncate_blocks(fs, &in, 0) != 0) {
+                kwarn("cosmofs: orphan inode %llu could not be released", (unsigned long long)inos[i]);
+                continue;
+            }
+            struct cfs_inode empty;
+            memset(&empty, 0, sizeof(empty));
+            if (cfs_inode_write(fs, inos[i], &empty) != 0)
+                continue;
+            if (fs->sb.inode_count > 0)
+                fs->sb.inode_count--;
+            applied++;
+        }
+        kfree(inos);
+        at = next;
+    }
+    if (applied || gone)
+        kinfo("cosmofs: reclaimed %u inode(s) unlinked with a handle open (%u already gone)", applied, gone);
+    return 0;
+}
+
 int cfs_commit(struct cfs *fs)
 {
     if (fs->failed)
@@ -1170,6 +1413,14 @@ int cfs_commit(struct cfs *fs)
         if (rc)
             return rc;
     }
+    /* The same for what this root still owes: the old record's blocks
+     * are freed by this transaction, so they are entries in the new
+     * free record like any other. */
+    if (fs->sb.version >= 10) {
+        rc = orphan_release_previous(fs);
+        if (rc)
+            return rc;
+    }
     /*
      * Always, not only from version 9: the deadlist fill below needs its
      * blocks on any filesystem that has a snapshot, and a release loop
@@ -1204,6 +1455,13 @@ int cfs_commit(struct cfs *fs)
             rc = -EIO;
         }
     }
+    /* Before the free record and after the deadlist, for the same
+     * reason the deadlist is before the record: it takes blocks from the
+     * shared reservation and its predecessor's blocks are frees this
+     * root must be able to name. The record is last because it names the
+     * leftovers. */
+    if (rc == 0)
+        rc = orphan_fill(fs, &res);
     unsigned snap_used = res.used;
     if (rc == 0 && record_frees) {
         rc = freelog_fill(fs, res.blk + res.used, res.n - res.used, held, held_n);
@@ -1242,6 +1500,7 @@ int cfs_commit(struct cfs *fs)
             cfs_free_block_deferred(fs, res.blk[i]);
         }
         fs->sb.free_root = 0;
+        fs->sb.orphan_root = 0;
     }
     kfree(res.blk);
     if (rc) {
@@ -1995,6 +2254,7 @@ static void cfs_destroy(struct cfs *fs)
     kfree(fs->bitmap_dirty);
     kfree(fs->pending_free);
     kfree(fs->pending_exempt);
+    kfree(fs->orphans);
     cfs_members_free(fs);
     if (fs->pool)
         pool_close(fs->pool);
@@ -2062,6 +2322,15 @@ static int load_root(struct cfs *fs, struct vnode **root)
         fs->snap_count = n;
     if (n)
         kinfo("cosmofs: %u snapshot(s)", n);
+    /*
+     * And what the last root still owed: inodes unlinked while something
+     * held them, whose eviction the crash or the forced unmount threw
+     * away. After the bitmap and after the snapshot count, because the
+     * frees this does go through both (docs/audit/next-subsystem-orphan.md).
+     */
+    rc = orphan_replay(fs);
+    if (rc)
+        return rc;
     return cfs_vnode_get(fs, CFS_ROOT_INO, root);
 }
 
@@ -2218,6 +2487,8 @@ int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out)
     out->inode_count = fs->sb.inode_count;
     out->version = fs->sb.version;
     out->free_root = fs->sb.version >= 9 ? fs->sb.free_root : 0;
+    out->orphan_root = fs->sb.version >= 10 ? fs->sb.orphan_root : 0;
+    out->pending_orphans = fs->nr_orphans;
     out->dirty_buffers = fs->nr_dirty;
     out->pending_frees = fs->nr_pending + fs->nr_exempt;
     out->reserve_blocks = fs->reserve;
@@ -2246,6 +2517,13 @@ void cosmofs_test_fail_snapfill(struct mount *mnt, bool on)
     struct cfs *fs = cfs_of(mnt);
     if (fs)
         fs->test_fail_snapfill = on;
+}
+
+void cosmofs_test_fail_orphan(struct mount *mnt, bool on)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs)
+        fs->test_fail_orphan = on;
 }
 
 uint64_t cosmofs_test_snap_walks(struct mount *mnt)

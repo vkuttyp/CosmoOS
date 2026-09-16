@@ -1581,6 +1581,19 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
     } else {
         victim->nlink--;
     }
+    /*
+     * The name is gone from disk and the blocks are not free: something
+     * still holds this vnode, or will until the VFS drops the last
+     * reference and cfs_evict runs. Record the intention, so that a
+     * crash or a forced unmount before that eviction does not lose the
+     * inode and its blocks (docs/audit/next-subsystem-orphan.md).
+     *
+     * A directory reaches this too: an empty one can be removed while a
+     * process's working directory references it, which is a referenced
+     * vnode (`cwd_locked`).
+     */
+    if (victim->nlink == 0)
+        cfs_orphan_add(fs, victim->ino);
     victim->ctime_ns = vfs_now_ns();
     if (rc == 0)
         rc = inode_sync(fs, victim);
@@ -1746,6 +1759,10 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
      * last committed root remains the truth. */
     if (replaced) {
         replaced->nlink = replaced->type == VNODE_DIR ? 0 : replaced->nlink - 1;
+        /* The same record, for the half of this that is easiest to
+         * miss: a file replaced by a rename while it is open. */
+        if (replaced->nlink == 0)
+            cfs_orphan_add(fs, replaced->ino);
         if (replaced->type == VNODE_DIR)
             ndir->nlink--;
         rc = inode_sync(fs, replaced);
@@ -2014,6 +2031,10 @@ static void cfs_evict(struct vnode *vn)
             cfs_inode_write(fs, vn->ino, &empty);
             if (fs->sb.inode_count > 0)
                 fs->sb.inode_count--;
+            /* Done: the record has nothing left to promise about it.
+             * Only on success -- a truncate that failed leaves the inode
+             * exactly as the record describes it. */
+            cfs_orphan_remove(fs, vn->ino);
         }
         mutex_unlock(&fs->lock);
     }
