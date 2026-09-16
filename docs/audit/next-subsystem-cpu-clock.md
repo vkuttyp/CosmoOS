@@ -934,24 +934,33 @@ saturating subtraction does not help — the comparison is an ordering,
 not a difference, so there is nothing to saturate. When
 `clock_is_common()` such a wait is wrong by at most the advertised
 bound; when it is false it may expire early or late by an unbounded
-amount, and the kernel has no cross-CPU time source to offer instead (a
-machine-wide tick counter would be one; `timer_ticks()` is per-CPU).
+amount, and `timer_ticks()` is per-CPU, so at the time this was written
+the kernel had no cross-CPU time source to offer instead. It has one now
+(below).
 
-Sixteen non-test sites compute a deadline this way:
+**Fourteen** non-test sites compute a deadline, and every one is
+accounted for here — ten on the safe pair and four that are deliberately
+not, each saying so where it sits:
 
-| file | what it waits for | what a wrong deadline costs |
-| --- | --- | --- |
-| `kernel/block/blk.c` (the timeout scan) | a request to finish | **a hang** — fixed, see below |
-| `kernel/timer/timer.c:190` | a busy-wait of `ns` | a short or long delay |
-| `kernel/timer/timer.c:237` | a timer's expiry | nothing: armed on and fired from the same CPU's queue |
-| `kernel/core/lockup.c` ×2 | a sampled CPU to answer | a spurious "did not answer" |
-| `kernel/module/module.c:514` | a module's users to leave | a spurious unload timeout |
-| `kernel/interrupt/ipi.c:144`, `kernel/arch/x86_64/mmu.c:324` | an IPI acknowledgement | nothing: preemption is off |
-| `drivers/usb/*` ×4, `drivers/storage/ahci.c` ×2, `drivers/virtio/virtio_console.c` | hardware to respond | a spurious `-ETIMEDOUT` |
+| file | sites | what it waits for | disposition |
+| --- | --- | --- | --- |
+| `drivers/usb/usb.c`, `xhci.c` ×2, `usb_storage.c` | 4 | hardware to respond | `clock_deadline_ns` / `clock_deadline_passed` |
+| `drivers/storage/ahci.c` | 2 | hardware to respond | the same |
+| `drivers/virtio/virtio_console.c` | 1 | the device to return its buffers | the same |
+| `kernel/module/module.c` | 1 | a module's users to leave | the same |
+| `kernel/interrupt/ipi.c`, `kernel/arch/x86_64/mmu.c` | 2 | an IPI acknowledgement | the same |
+| `kernel/core/lockup.c` | 2 | a sampled CPU to answer | **raw clock**: a 5 ms window, below the 4 ms tick |
+| `kernel/timer/timer.c` (`ndelay`) | 1 | a sub-microsecond busy-wait | **raw clock**: far below a tick, and same-CPU |
+| `kernel/timer/timer.c` (`timer_start`) | 1 | a timer's expiry | **raw clock**: armed on and fired from the same CPU's queue |
 
-Only the first can hang, and only that one has an age no clock can
-distort. The rest now go through `clock_deadline_ns` and
-`clock_deadline_passed`.
+The block layer's request timeout is not in this table because it is not
+a deadline: it is an age compared against a per-device timeout, and it
+carries a second age (`bio->scans`) that no clock can distort, because it
+is the one whose failure is a hang rather than a spurious timeout.
+
+`kernel/syscall/native.c` mentions the pattern in a comment without being
+a site; an earlier draft of this table counted it, which is where
+"sixteen" came from.
 
 **A machine-wide tick counter is here, and it is the third design in
 this position.** The first two were built and reverted, and both failed

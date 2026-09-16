@@ -70,6 +70,13 @@ uint64_t clock_now_ns(void);
  * slightly wrong measurement but a timeout that fires immediately, or a
  * diagnostic that sends its reader somewhere. Use this wherever the
  * stamp's CPU is not certainly this one; it costs a compare.
+ *
+ * **This is for time already spent, not for a moment to wait until.** A
+ * deadline is a different problem with a different answer: saturating
+ * cannot help there, because the comparison is an ordering rather than a
+ * difference, and there is nothing to saturate. `clock_deadline_ns` and
+ * `clock_deadline_passed` below are the safe form, and they are safe
+ * across a migration where `clock_now_ns() + x` is not.
  */
 uint64_t clock_since_ns(uint64_t stamp);
 
