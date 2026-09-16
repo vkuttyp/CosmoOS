@@ -607,13 +607,20 @@ were new.
 
 ### As run
 
-**319 self-tests, PASS on x86-64 and aarch64, debug and release.** Six windows asked a question nothing had asked
-before; each reports the number that makes its answer checkable rather
-than a pass.
+**319 self-tests, PASS on x86-64 and aarch64, debug and release.** Six
+tests across the four windows, each reporting the number that makes its
+answer checkable rather than a pass.
+
+The figures below are **one run's**, on the development machine. The
+kick count and the wait vary a little between boots, as anything
+counting a scheduler's behaviour does, so they are quoted here as
+measurements and not as constants -- and the same pair is quoted in the
+README rather than a different run's, so a disagreement between the two
+means drift and not a second result.
 
 | window | what ran, and what it said |
 | --- | --- |
-| Q6, the waiter | **5 kicks from this waiter over a 30 ms wait, and the spinner was not helped by any of them.** The first time `straggler_ipis` has been read since it was written |
+| Q6, the waiter | **6 kicks from this waiter over a 32 ms wait, and the spinner was not helped by any of them.** The first time `straggler_ipis` has been read since it was written |
 | Q6, the system | **5749 units of ordinary work** on a third CPU while one stalled the waiter — the lifetime report's risk 2, asserted |
 | Q6, idle | a grace period over idle CPUs took **7277 us and sent no kick**: this case never reaches the threshold, which is why it is not the kick's positive test |
 | Q11, refusal | **15 accepted and 349784 refused across the window**, every accepted bio completed exactly once, and nothing reached the driver after the unregister returned |

@@ -2151,7 +2151,7 @@ See [docs/development.md](docs/development.md).
   on and a boot-time suite that removes it destroys the run. Driving
   `vpci_remove` itself with real I/O outstanding needs a virtio device
   dedicated to removal in the test machine, and stays an inventory row.
-  The numbers: 5 kicks over a 32 ms
+  The numbers, from one run: 6 kicks from that waiter over a 32 ms
   wait with the spinner unhelped, 5749 units of work on a third CPU while
   one stalled the waiter, 15 accepted and 349784 refused across the
   unregister window, an unregister that spun 6118 times for a submitter
