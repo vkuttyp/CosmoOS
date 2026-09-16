@@ -114,8 +114,6 @@ bool selftest_lockup_report_skew(const char **reason);  /* the lockup report age
 bool selftest_clock_cost(const char **reason);  /* what the correction costs on the clock path */
 bool selftest_clock_tick_owner(const char **reason);  /* the machine-wide tick survives its owner stopping */
 bool selftest_sched_spread(const char **reason);  /* new threads do not all land on CPU 0 */
-bool selftest_sched_balance_pull(const char **reason);  /* a thread moves after it was placed */
-bool selftest_sched_affinity_survives(const char **reason);  /* ... but never off its affinity mask */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */

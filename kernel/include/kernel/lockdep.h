@@ -35,7 +35,6 @@
 #define LOCKDEP_NEST_DEFAULT 0u
 #define VNODE_NESTED_PARENT2 1u   /* the second parent directory of a rename */
 #define VNODE_NESTED_CHILD   2u   /* a child locked under its parent directory */
-#define RUNQUEUE_NESTED_SECOND 3u /* the higher-numbered CPU's run queue, in sched_balance (S24) */
 
 enum lockdep_report_kind {
     LOCKDEP_R_INVERSION,

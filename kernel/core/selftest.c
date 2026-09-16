@@ -433,8 +433,6 @@ static const struct selftest tests[] = {
     { "clock-cost", selftest_clock_cost },
     { "clock-tick-owner", selftest_clock_tick_owner },
     { "sched-spread",    selftest_sched_spread },
-    { "sched-balance-pull", selftest_sched_balance_pull },
-    { "sched-affinity-survives", selftest_sched_affinity_survives },
     { "nvme",            selftest_nvme },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },

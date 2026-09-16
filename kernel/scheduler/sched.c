@@ -184,117 +184,23 @@ static unsigned pick_cpu(const struct thread *t)
 }
 
 
-/* --- balancing: moving a ready thread to a CPU that wants work --------- */
-
-static void request_resched(struct runqueue *rq);
-
 /*
- * How lopsided the queues must be before anything moves, and how often
- * to look. A difference of one is the steady state of an odd thread
- * count and chasing it is thrash; the period is long enough that the
- * cost of a cold cache is amortised and short enough that an imbalance
- * does not outlive the work that caused it.
+ * Balancing lived here and was removed before this branch shipped.
+ *
+ * It worked -- threads on CPU 0 went from 8 of 14 to 6 of 14 over a
+ * self-test boot, and CPU 2 did ten times the context switches -- and it
+ * made three of four aarch64 boots fail, once with seven tests at once
+ * (`smp-wake`, `lockup-soft`, `quiesce-straggler`, `quiesce-grace`,
+ * `irq-sync`, `timer-cancel-sync`, `lockdep-contention`). The same tree
+ * with the balancer disabled did not. Seven concurrency tests failing
+ * together is not timing sensitivity; something is being corrupted, and
+ * the cause was not found. What was ruled out is written down in
+ * `docs/audit/next-subsystem-thread-migration.md` so the next attempt
+ * starts past it.
+ *
+ * What stays is the placement half: `pick_cpu` rotates its ties, so a
+ * thread created on an idle machine is no longer always born on CPU 0.
  */
-#define SCHED_BALANCE_SKEW   2u
-#define SCHED_BALANCE_TICKS  16u   /* 64 ms at CONFIG_HZ 250 */
-
-static uint64_t g_migrations[CONFIG_MAX_CPUS];
-static bool g_balance_on = true;
-
-/*
- * Move one ready thread from the busiest queue to this CPU.
- *
- * Pull, not push: the CPU that will run the thread is the one that goes
- * looking, so a busy CPU is never made to do the bookkeeping for an idle
- * one, and a CPU that does not want work simply does not ask.
- *
- * Only ready threads move. The thread running on a CPU is executing on
- * that CPU's stack with that CPU's state, and only that CPU can switch
- * it away. That is a *check*, not a property of the structure: an
- * earlier version of this comment claimed `rq->current` could never be
- * in a ready list because `schedule` dequeues what it runs, and the
- * assertion below disproved it on the first boot. A thread woken between
- * blocking and stopping stays queued until `sched_set_running_current`
- * removes it, and is both current and queued in between.
- *
- * Two run-queue locks, in increasing CPU-id order, always (invariant
- * S24). Two CPUs balancing towards each other is the deadlock this
- * orders away.
- */
-void sched_balance(void)
-{
-    if (!__atomic_load_n(&g_balance_on, __ATOMIC_ACQUIRE))
-        return;
-    unsigned me = arch_cpu_id();
-    unsigned n = cpu_count();
-    if (n < 2 || me >= CONFIG_MAX_CPUS)
-        return;
-
-    /* An unlocked survey. Every number here can change before the locks
-     * are taken, which is why the decision is made again underneath
-     * them; this only avoids taking two locks to discover there was
-     * nothing to do. */
-    unsigned mine = g_rqs[me].nr_running;
-    unsigned busiest = me, busiest_load = mine;
-    for (unsigned c = 0; c < n; c++) {
-        if (c == me || !cpu_online(c))
-            continue;
-        unsigned load = g_rqs[c].nr_running;
-        if (load > busiest_load) {
-            busiest_load = load;
-            busiest = c;
-        }
-    }
-    if (busiest == me || busiest_load < mine + SCHED_BALANCE_SKEW)
-        return;
-
-    struct runqueue *src = &g_rqs[busiest], *dst = &g_rqs[me];
-    struct runqueue *first = busiest < me ? src : dst;
-    struct runqueue *second = busiest < me ? dst : src;
-
-    /*
-     * Both are the `runqueue` class, so the second acquisition needs the
-     * nesting annotation or lockdep reports it as recursion -- which it
-     * did, on the first boot of this code, exactly as it should have.
-     * The annotation says "this is the deliberate second one"; the
-     * *order* is what makes it safe, and that is S24.
-     */
-    arch_irq_state_t s = spin_lock_irqsave(&first->lock);
-    spin_lock_nested(&second->lock, RUNQUEUE_NESTED_SECOND);
-
-    /* Again, under the locks: the survey above was a hint. */
-    if (src->nr_running >= dst->nr_running + SCHED_BALANCE_SKEW) {
-        struct thread *t = g_policy->pick_migratable ? g_policy->pick_migratable(src, me) : NULL;
-        if (t != NULL) {
-            KASSERT(t->state == THREAD_READY);
-            KASSERT(t != src->current);
-            g_policy->dequeue(src, t);
-            t->cpu = (int)me;
-            g_policy->enqueue(dst, t, false);
-            g_migrations[me]++;
-            /* The same wake-up the enqueue path uses: this CPU may be
-             * idle or running something lower, and the thread it just
-             * took should not wait for the next tick to be noticed. */
-            if (dst->current == NULL || t->priority < dst->current->priority)
-                request_resched(dst);
-        }
-    }
-
-    spin_unlock(&second->lock);
-    spin_unlock_irqrestore(&first->lock, s);
-}
-
-#if CONFIG_DEBUG
-uint64_t sched_test_migrations(unsigned cpu)
-{
-    return cpu < CONFIG_MAX_CPUS ? __atomic_load_n(&g_migrations[cpu], __ATOMIC_RELAXED) : 0;
-}
-
-void sched_test_set_balancing(bool on)
-{
-    __atomic_store_n(&g_balance_on, on, __ATOMIC_RELEASE);
-}
-#endif
 
 static void request_resched(struct runqueue *rq)
 {
@@ -550,19 +456,6 @@ void sched_tick(uint64_t now_ns, struct arch_trap_frame *frame)
         pc->need_resched = true;
     spin_unlock(&rq->lock);
 
-    /*
-     * Balance outside the lock this CPU just held: sched_balance takes
-     * two run-queue locks in CPU-id order (S24) and holding one of them
-     * on the way in would be the reversed acquisition that rule exists
-     * to forbid.
-     *
-     * Every SCHED_BALANCE_TICKS, and staggered by CPU id so that four
-     * CPUs do not all survey and pull in the same tick -- which would be
-     * correct but would have them contending for the same busiest queue
-     * every time.
-     */
-    if ((pc->ticks + pc->cpu_id) % SCHED_BALANCE_TICKS == 0)
-        sched_balance();
 }
 
 uint64_t sched_switch_count(unsigned cpu)
@@ -586,11 +479,9 @@ void sched_dump(void)
         /* The tick sample and its age (kernel/core/lockup.c): a CPU whose
          * last tick is seconds old is not taking interrupts, and its
          * other fields are as old as that. */
-        kprintf("cpu %u: %s current '%s' queued %u switches %llu pulled %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
+        kprintf("cpu %u: %s current '%s' queued %u switches %llu restore-preempts %llu bitmap 0x%llx need_resched %d preempt %d irq_depth %u ticks %llu last tick %llu ms ago pc %p\n",
                 c, pc && pc->online ? "online" : "offline", rq->current ? rq->current->name : "-",
-                rq->nr_running, (unsigned long long)rq->switches,
-                (unsigned long long)__atomic_load_n(&g_migrations[c], __ATOMIC_RELAXED),
-                (unsigned long long)preempt_point_count(c),
+                rq->nr_running, (unsigned long long)rq->switches, (unsigned long long)preempt_point_count(c),
                 (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
                 (unsigned long long)(pc ? pc->ticks : 0),

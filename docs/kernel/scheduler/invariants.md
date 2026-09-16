@@ -18,12 +18,7 @@ the entry. Check: review; `policy_rr` asserts `list_empty` on enqueue
 and non-empty on dequeue so a double transition corrupts nothing
 silently.
 
-**S2. `runqueue.lock` is a leaf, with exactly one exception.** Nothing
-is acquired while it is held, **except a second `runqueue.lock`, and
-only by the balancer, and only in increasing CPU-id order** (S24). The
-lock-order checker therefore records one edge out of the `runqueue`
-class, from a lower-numbered CPU's lock to a higher-numbered one, and no
-edge to any other class. Nothing else is acquired while it is held.
+**S2. `runqueue.lock` is a leaf.** Nothing is acquired while it is held.
 `schedule()` calls `arch_context_switch` with it held and the resumed
 thread releases it; `sched_finish_switch` unlocks *before* calling
 `thread_put`, which takes `kernel_space.lock` and slab locks. The AArch64
@@ -57,29 +52,22 @@ restores the caller's saved state with `arch_irq_restore(s)` after
 Check: test `breakpoint-trap` and every blocking test (a thread that
 returned with interrupts off would never take the next tick).
 
-**S24. Two run-queue locks are taken in increasing CPU-id order,
-always, and only by the balancer.** Moving a ready thread from one CPU
-to another is the only operation in this kernel that needs two of them
-at once, and two CPUs balancing towards each other at the same moment is
-the textbook deadlock. `sched_balance` therefore takes
-`min(src, dst)` first and `max(src, dst)` second, whichever direction
-the thread is travelling.
+**S24 (reserved, for a balancer that does not exist yet).** Nothing in
+this kernel holds two run-queue locks today. The first thing that does --
+moving a ready thread from one CPU's queue to another's -- will need a
+rule, because two CPUs balancing towards each other is the textbook
+deadlock, and the rule should be **increasing CPU-id order, always**.
 
-The rule is stated here rather than inferred from the code because it
-is the kind that survives review and dies in a later refactor: a reader
-who sees only one call site has no reason to suspect an ordering
-requirement. Both locks are the `runqueue` class, so the second acquisition carries
-the `RUNQUEUE_NESTED_SECOND` annotation
-(`kernel/include/kernel/lockdep.h`); without it lockdep reports a
-same-class recursion, which is what the first boot of this code did. The
-annotation says only "this second acquisition is deliberate" — it is the
-*order* that makes it safe, and nothing but review and this invariant
-enforces the order itself, because to lockdep both locks look alike.
+Two things were learned by building that and taking it out again
+(`docs/audit/next-subsystem-thread-migration.md`), recorded here because
+the next attempt meets them on its first boot:
 
-Check: the `sched-balance-*` self-tests run four CPUs pulling
-concurrently, so a reversed acquisition would deadlock during a boot
-rather than in production; the spinlock owner check panics on a
-self-deadlock.
+- Both locks are the `runqueue` **class**, so the second acquisition
+  needs `spin_lock_nested` with a subclass, or lockdep reports a
+  same-class recursion and panics.
+- That annotation says only "this second acquisition is deliberate".
+  **lockdep cannot check the order**, because to it the two locks look
+  alike. Review and this invariant are the only enforcement.
 
 ## Entry conditions
 

@@ -35,44 +35,10 @@ struct sched_policy {
     struct thread *(*pick_next)(struct runqueue *rq);   /* NULL: run idle */
     void (*tick)(struct runqueue *rq, struct thread *current, uint64_t elapsed_ns);
     void (*slice_new)(struct thread *t);
-    /* A ready thread this queue could give away to `dst`, or NULL when
-     * it has none it may part with. The caller holds this queue's lock
-     * and removes the thread with `dequeue`; this only chooses.
-     *
-     * Two things it must refuse, and one of them is not obvious.
-     *
-     * Affinity, because a thread pinned with `thread_create_on` may not
-     * be moved off its mask however lopsided the load. And `rq->current`,
-     * because the running thread *can* appear in a ready list: one that
-     * blocks and is woken before it stops running stays queued until
-     * `sched_set_running_current` takes it off, and in that window it is
-     * both current and a list entry. Moving it would migrate a thread
-     * whose context is live on another CPU's stack
-     * (docs/audit/next-subsystem-thread-migration.md). */
-    struct thread *(*pick_migratable)(struct runqueue *rq, unsigned dst);
 };
 
 extern const struct sched_policy sched_policy_rr;
 
-
-/*
- * Move one ready thread to this CPU from the busiest one, when the
- * imbalance is worth a cold cache. Called from the tick; a no-op unless
- * this CPU is at least SCHED_BALANCE_SKEW threads behind the busiest.
- *
- * Only ready threads move, affinity is absolute, and the two run-queue
- * locks are taken in increasing CPU-id order (invariant S24).
- */
-void sched_balance(void);
-
-#if CONFIG_DEBUG
-/* How many threads this CPU has pulled: a diagnostic, deliberately not
- * what the tests assert on -- a count says something moved, not that the
- * threads under test moved. And a way to hold the balancer still, which
- * is how those tests get their control. */
-uint64_t sched_test_migrations(unsigned cpu);
-void sched_test_set_balancing(bool on);
-#endif
 
 /* Boot CPU: turn the boot context into thread 0, create the idle
  * thread, register the tick hook. Requires timer_init. */
