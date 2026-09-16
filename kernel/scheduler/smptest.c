@@ -518,17 +518,29 @@ bool selftest_smp_mutex(const char **reason)
  */
 struct placed {
     struct completion started;
-    volatile bool release;
+    struct completion release;   /* a real block, not a poll: see below */
     volatile unsigned cpu;
 };
 
+/*
+ * Report the CPU, then block until released -- on a completion, not a
+ * sleep loop.
+ *
+ * The difference is the test. A worker that polls with
+ * `thread_sleep_ms(2)` is runnable every 2 ms, so `nr_running` on its
+ * CPU is not reliably zero when the next `thread_create` samples it --
+ * and a non-zero count is exactly what makes the *old* CPU-0-preferring
+ * scan spread threads. The bug-proof would then pass or fail on timing.
+ * Blocking on a completion makes the worker stay out of its run queue
+ * until cleanup, which is the condition this test needs to be about
+ * placement at all.
+ */
 static void placed_main(void *arg)
 {
     struct placed *p = arg;
     p->cpu = arch_cpu_id();
     complete(&p->started);
-    while (!__atomic_load_n(&p->release, __ATOMIC_ACQUIRE))
-        thread_sleep_ms(2);
+    wait_for_completion(&p->release);
     thread_exit(0);
 }
 
@@ -561,36 +573,59 @@ bool selftest_sched_spread(const char **reason)
     static struct placed p[N];
     struct thread *t[N];
 
-    for (unsigned i = 0; i < N; i++) {
+    unsigned made = 0;
+    bool ok = true;
+    for (unsigned i = 0; i < N && ok; i++) {
         memset(&p[i], 0, sizeof(p[i]));
         completion_init(&p[i].started, "spread");
+        completion_init(&p[i].release, "spread-rel");
         t[i] = thread_create(placed_main, &p[i], "spread", SCHED_PRIO_DEFAULT);
-        CHECK(t[i] != NULL);
-        /* Wait until it has run and blocked, so its queue entry is gone
-         * before the next pick_cpu -- the condition that makes every
-         * queue tie. */
+        if (t[i] == NULL) {
+            ok = false;
+            break;
+        }
+        made++;
         wait_for_completion(&p[i].started);
-        thread_sleep_ms(8);
+        /*
+         * And then until it is *observably* out of its run queue. The
+         * completion above is signalled before the worker blocks, so it
+         * says "running", not "blocked" -- and a fixed sleep here would
+         * be the "N things after a settle" shape this tree has a whole
+         * file about (docs/testing/flakes.md). Wait for the state.
+         */
+        for (unsigned w = 0; w < 2000 && __atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED; w++)
+            thread_sleep_ms(1);
+        if (__atomic_load_n(&t[i]->state, __ATOMIC_ACQUIRE) != THREAD_BLOCKED)
+            ok = false;
     }
 
     cpumask_t used = 0;
     unsigned on_cpu[CONFIG_MAX_CPUS] = {0};
-    for (unsigned i = 0; i < N; i++) {
+    for (unsigned i = 0; i < made; i++) {
         used |= CPUMASK_OF(p[i].cpu);
         if (p[i].cpu < CONFIG_MAX_CPUS)
             on_cpu[p[i].cpu]++;
     }
-    for (unsigned i = 0; i < N; i++)
-        __atomic_store_n(&p[i].release, true, __ATOMIC_RELEASE);
-    for (unsigned i = 0; i < N; i++)
+    /* Release and join everything that was created, on every path: a
+     * worker left blocked here is a kernel thread leaked into whatever
+     * test runs next. */
+    for (unsigned i = 0; i < made; i++)
+        complete(&p[i].release);
+    for (unsigned i = 0; i < made; i++)
         thread_join(t[i]);
+    if (!ok) {
+        *reason = "a worker could not be created, or never reached THREAD_BLOCKED";
+        return false;
+    }
 
-    unsigned distinct = 0, worst = 0;
+    unsigned distinct = 0, worst = 0, worst_cpu = 0;
     for (unsigned c = 0; c < n; c++) {
         if (used & CPUMASK_OF(c))
             distinct++;
-        if (on_cpu[c] > worst)
+        if (on_cpu[c] > worst) {
             worst = on_cpu[c];
+            worst_cpu = c;   /* the CPU that actually holds the pile */
+        }
     }
     /*
      * Deliberately not `distinct == n`. Other threads in the suite may
@@ -602,7 +637,7 @@ bool selftest_sched_spread(const char **reason)
      */
     if (distinct < 2 || worst > N / 2) {
         kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u",
-               (unsigned)N, distinct, n, worst, (unsigned)p[0].cpu);
+               made, distinct, n, worst, worst_cpu);
         *reason = "threads created on an idle machine piled onto one CPU";
         return false;
     }

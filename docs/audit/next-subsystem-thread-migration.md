@@ -17,6 +17,11 @@ implementation lands; step 7 of the plan is what strikes it.
 **A thread is assigned a CPU once, by a rule that prefers CPU 0, and
 then stays there for the rest of its life.**
 
+> As of this unit the first half is fixed and the second is not: ties
+> rotate, so a thread is no longer *born* on CPU 0 by default, but
+> nothing moves it afterwards. The measurements below are the state
+> before either change.
+
 Two facts, each small, and together a machine that uses one of its four
 CPUs.
 
@@ -155,6 +160,19 @@ is what moving a thread between them requires.
   is nowhere for such a thread to go.
 
 ## Design
+
+> **Reverted, except where marked.** Everything from here to "As built"
+> is the plan as written before implementation. **Only the placement
+> change (the tie-break, "1. Spread at creation" below) shipped.** The
+> balancer, `sched_balance`, `policy->pick_migratable`, the
+> `SCHED_BALANCE_*` tunables, the two-lock rule as *implemented*, and
+> the `sched-balance-*` and `sched-affinity-survives` tests were built,
+> measured, and removed — see "As built" for the measurement that
+> removed them. The affected-files table, the New APIs block, the
+> migration plan and the test table below describe what was attempted,
+> not what is in the tree.
+
+
 
 ### Two changes, and the small one comes first
 
