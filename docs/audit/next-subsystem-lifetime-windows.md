@@ -607,7 +607,7 @@ were new.
 
 ### As run
 
-**319 self-tests.** Six windows asked a question nothing had asked
+**319 self-tests, PASS on x86-64 and aarch64, debug and release.** Six windows asked a question nothing had asked
 before; each reports the number that makes its answer checkable rather
 than a pass.
 
@@ -633,6 +633,13 @@ to write down what a mechanism guarantees and finds they cannot.
 driver, no hung unregister. The report said in advance that it would say
 so and keep the tests, and that is what this is. Six tests that fail the
 day someone reorders a store are the product either way.
+
+**The release build caught every one of the new tests**, which is the
+lesson the tree already records arriving by another door: a test that
+calls a `CONFIG_DEBUG` hook does not compile without one. Each now
+returns early with a line saying why, because a race test without the
+hook that holds its window open would be a race test hoping, and that is
+worse than an absent one.
 
 **Three of the four windows needed a hook and one did not**, as the
 design says: `blk_test_unregister_pause`, `blk_test_hold_in_driver`,
