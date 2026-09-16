@@ -142,6 +142,11 @@ const char *arch_clock_name(void)
  * readings may be subtracted. Saying so is the useful thing; pretending
  * otherwise is what this unit exists to stop.
  */
+bool arch_clock_is_percpu(void)
+{
+    return true;   /* each core has its own TSC */
+}
+
 bool arch_clock_is_common(const char **why)
 {
     if (!x86_cpu_info()->has_invariant_tsc) {

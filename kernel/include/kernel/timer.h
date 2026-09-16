@@ -108,6 +108,25 @@ uint64_t clock_worst_offset_ns(void);
 /* False when the offset is unbounded, as above. The boot says which. */
 bool clock_is_common(void);
 
+/* This CPU's counter with no cross-CPU correction applied. For the
+ * measurement that produces the correction, and for nothing else. */
+uint64_t clock_raw_ns(void);
+
+/* Measure every AP's offset against CPU 0 and, when the counter is one
+ * this kernel may trust across CPUs, apply it. Called once after SMP
+ * bring-up, from thread context on CPU 0. Reports what it measured
+ * whether or not it applies it. */
+void clock_measure_offsets(void);
+
+/* One tick of the counter, in nanoseconds (rounded up, never zero). No
+ * offset between two CPUs can be known more precisely than this. */
+uint64_t clock_resolution_ns(void);
+
+/* Whether any CPU's offset was actually measured. False on a counter
+ * shared by construction, where a bound of zero is exact rather than
+ * unmeasured. */
+bool clock_offsets_measured(void);
+
 #if CONFIG_DEBUG
 /*
  * Make this machine's counters disagree, for the cross-CPU tests.

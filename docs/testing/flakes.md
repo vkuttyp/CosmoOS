@@ -156,6 +156,23 @@ shutdown produces the identical suffix. A confident wrong cause in this
 file is worse than no cause at all, because the next reader starts where
 it points.
 
+A third observation, 2026-09-16, on the CPU-clock unit's branch:
+`net-harness` failed once at `nettest.c:929` (`client_ok`) on x86-64 and
+passed on an immediate re-run of the same image. The assertion is a TCP
+connect-send-receive exchange with an echo server in the *host* harness
+process, so it depends on the host scheduling that process promptly. The
+run happened while this machine was under enough memory pressure to have
+a background build killed for it.
+
+**That last sentence is a circumstance, not a cause.** The pressure was
+real and it is the reason the re-run was tried, but nothing here
+establishes that it produced the failure: a dropped SYN, a slow host
+process and an unrelated timing window all look identical from
+`client_ok == false`. What is recorded is what was seen. `net-harness`
+is not added to the list above, because a host-dependent exchange is not
+a bound this project can widen -- a re-run is what distinguishes it from
+a regression.
+
 Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever

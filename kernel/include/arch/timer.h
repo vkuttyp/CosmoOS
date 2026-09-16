@@ -42,4 +42,13 @@ const char *arch_clock_name(void);
  */
 bool arch_clock_is_common(const char **why);
 
+/*
+ * True when each CPU reads its own counter, so an offset between two
+ * CPUs is possible and worth measuring (x86-64's TSC). False when the
+ * counter is shared by construction (AArch64's system counter), where
+ * there is nothing to measure and a measured "correction" could only
+ * introduce the error it claims to remove.
+ */
+bool arch_clock_is_percpu(void);
+
 #endif /* ARCH_TIMER_H */

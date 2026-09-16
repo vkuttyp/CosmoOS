@@ -5,6 +5,9 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
+#include <kernel/thread.h>
+#include <kernel/sched.h>
+#include <kernel/kmalloc.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/string.h>
@@ -28,6 +31,12 @@ static uint64_t g_worst_offset_ns;
 /* False when the counter is not comparable across CPUs at all, which is
  * a different statement from a large measured offset. */
 static bool g_clock_common = true;
+/* Per-CPU addends that cancel each CPU's measured offset from CPU 0, and
+ * whether they are being applied (they are not, on a counter this kernel
+ * may not trust across CPUs). */
+static int64_t g_cpu_offset_ns[CONFIG_MAX_CPUS];
+static bool g_apply_offset;
+static unsigned g_measured;   /* CPUs whose offset was actually measured */
 
 #define CLOCK_SHIFT 32
 
@@ -58,7 +67,10 @@ void clock_test_set_worst_offset_ns(uint64_t ns)
 }
 #endif
 
-uint64_t clock_now_ns(void)
+/* The counter as this CPU reads it, with no cross-CPU correction: what
+ * the measurement itself must use, or it would be measuring the
+ * correction it is trying to produce. */
+uint64_t clock_raw_ns(void)
 {
     if (!g_initialized)
         return 0;
@@ -67,7 +79,14 @@ uint64_t clock_now_ns(void)
      * compiles inline; a 128-bit divide would need a runtime library the
      * kernel does not link. Relative error is below 1e-9. */
     unsigned __int128 ns = (unsigned __int128)delta * g_ns_mult;
-    uint64_t now = (uint64_t)(ns >> CLOCK_SHIFT);
+    return (uint64_t)(ns >> CLOCK_SHIFT);
+}
+
+uint64_t clock_now_ns(void)
+{
+    uint64_t now = clock_raw_ns();
+    if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[arch_cpu_id()]);
 #if CONFIG_DEBUG
     now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[arch_cpu_id()], __ATOMIC_ACQUIRE));
 #endif
@@ -402,6 +421,199 @@ void timer_init(void)
 bool clock_is_common(void)
 {
     return g_clock_common;
+}
+
+/* --- measuring the offset between two CPUs' counters ---------------------- */
+
+/*
+ * The classic three-read exchange. CPU 0 reads, the AP reads, CPU 0
+ * reads again: the AP's reading was taken somewhere inside that bracket,
+ * so its offset from CPU 0 lies within +-(width/2) of the midpoint. Run
+ * many times; the narrowest bracket gives both the best estimate and the
+ * bound on how wrong it can be.
+ *
+ * Which is why the bound is the *narrowest half-width* and not the worst
+ * offset seen: after the correction is applied, what is left is the
+ * uncertainty of the estimate, not the offset it removed.
+ */
+
+#define OFFSET_ROUNDS 1000u
+
+struct offmeas {
+    volatile unsigned turn;      /* 0: CPU 0's, 1: the AP's, 2: the AP is done */
+    volatile uint64_t tb;
+    volatile bool ready, stop, stalled;
+    volatile unsigned bcpu;
+    int64_t offset_ns;           /* the AP's clock minus CPU 0's, best estimate */
+    uint64_t halfwidth_ns;       /* how wrong that estimate can be */
+    unsigned rounds;
+};
+
+static void offmeas_ap(void *arg)
+{
+    struct offmeas *m = arg;
+    m->bcpu = arch_cpu_id();
+    __atomic_store_n(&m->ready, true, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&m->stop, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&m->turn, __ATOMIC_ACQUIRE) == 1) {
+            m->tb = clock_raw_ns();
+            __atomic_store_n(&m->turn, 2u, __ATOMIC_RELEASE);
+        }
+        arch_cpu_relax();
+    }
+}
+
+static void offmeas_bsp(void *arg)
+{
+    struct offmeas *m = arg;
+    uint64_t spin0 = clock_raw_ns();
+    while (!__atomic_load_n(&m->ready, __ATOMIC_ACQUIRE)) {
+        if (clock_raw_ns() - spin0 > NS_PER_SEC) {
+            m->stalled = true;
+            return;
+        }
+        arch_cpu_relax();
+    }
+
+    uint64_t best = UINT64_MAX;
+    for (unsigned r = 0; r < OFFSET_ROUNDS; r++) {
+        uint64_t t0 = clock_raw_ns();
+        __atomic_store_n(&m->turn, 1u, __ATOMIC_RELEASE);
+        spin0 = t0;
+        while (__atomic_load_n(&m->turn, __ATOMIC_ACQUIRE) != 2) {
+            if (clock_raw_ns() - spin0 > NS_PER_SEC) {
+                m->stalled = true;
+                return;
+            }
+            arch_cpu_relax();
+        }
+        uint64_t t1 = clock_raw_ns();
+        uint64_t tb = m->tb;
+
+        uint64_t width = t1 - t0;
+        if (width < best) {
+            best = width;
+            /* midpoint of the bracket, and how far the AP's reading sits
+             * from it -- signed, because an AP may run either way. */
+            uint64_t mid = t0 + width / 2;
+            m->offset_ns = (int64_t)(tb - mid);
+            m->halfwidth_ns = width / 2;
+        }
+        m->rounds++;
+        __atomic_store_n(&m->turn, 0u, __ATOMIC_RELEASE);
+    }
+}
+
+uint64_t clock_resolution_ns(void)
+{
+    uint64_t hz = g_clock_hz;
+    if (hz == 0)
+        return 1;
+    uint64_t r = (NS_PER_SEC + hz - 1) / hz;
+    return r ? r : 1;
+}
+
+bool clock_offsets_measured(void)
+{
+    return g_measured != 0;
+}
+
+void clock_measure_offsets(void)
+{
+    if (!arch_clock_is_percpu()) {
+        /* One counter for the whole system: there is nothing to measure,
+         * and a measured correction could only add error. */
+        kinfo("timer: %s is one counter for the whole system; no per-CPU offset to measure", arch_clock_name());
+        return;
+    }
+    if (cpu_count() < 2)
+        return;
+
+    /*
+     * The floor on any bound this can produce: one tick of the counter.
+     *
+     * The first run of this code reported an uncertainty of +-0 ns,
+     * which is not a measurement -- it means the narrowest bracket had
+     * width 0, the counter not having advanced across a cross-CPU
+     * handshake that certainly took real time. (TCG runs a vCPU in long
+     * translated blocks, so a whole exchange can land between two
+     * counter values.) An offset cannot be known more precisely than the
+     * counter can express, whatever the brackets say, and a bound of
+     * zero is a promise no measurement can make.
+     */
+    uint64_t resolution_ns = clock_resolution_ns();
+
+    int64_t worst_offset = 0;
+    uint64_t worst_halfwidth = resolution_ns;
+    unsigned measured = 0;
+
+    for (unsigned c = 1; c < cpu_count(); c++) {
+        if (!cpu_online(c))
+            continue;
+        struct offmeas *m = kzalloc(sizeof(*m));
+        if (m == NULL) {
+            kwarn("timer: out of memory measuring CPU %u's offset", c);
+            break;
+        }
+        struct thread *ap = thread_create_on(offmeas_ap, m, "clk-off-ap", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        struct thread *bsp = NULL;
+        if (ap != NULL)
+            bsp = thread_create_on(offmeas_bsp, m, "clk-off-bsp", SCHED_PRIO_DEFAULT, CPUMASK_OF(0));
+        if (ap == NULL || bsp == NULL) {
+            __atomic_store_n(&m->stop, true, __ATOMIC_RELEASE);
+            if (ap)
+                thread_join(ap);
+            kfree(m);
+            kwarn("timer: cannot measure CPU %u's offset: no thread", c);
+            continue;
+        }
+        thread_join(bsp);
+        __atomic_store_n(&m->stop, true, __ATOMIC_RELEASE);
+        thread_join(ap);
+
+        if (m->stalled || m->bcpu != c || m->rounds == 0) {
+            kwarn("timer: CPU %u's offset could not be measured (%u rounds%s)", c, m->rounds,
+                  m->stalled ? ", stalled" : "");
+            kfree(m);
+            continue;
+        }
+        g_cpu_offset_ns[c] = -m->offset_ns;   /* the addend that cancels it */
+        int64_t mag = m->offset_ns < 0 ? -m->offset_ns : m->offset_ns;
+        if (mag > worst_offset)
+            worst_offset = mag;
+        if (m->halfwidth_ns > worst_halfwidth)
+            worst_halfwidth = m->halfwidth_ns;
+        measured++;
+        g_measured++;
+        kdebug("timer: CPU %u offset %lld ns, narrowest bracket %llu ns, over %u exchanges", c,
+               (long long)m->offset_ns, (unsigned long long)m->halfwidth_ns * 2, m->rounds);
+        kfree(m);
+    }
+
+    if (measured == 0)
+        return;
+
+    /*
+     * Reported whether or not it is applied. On a machine whose counter
+     * is not a clock (no invariant TSC) the correction must not be used
+     * -- the offset it measured will not stay put -- but the number is
+     * still the most informative line this boot can print about its own
+     * timekeeping, and nobody has ever printed it.
+     */
+    kinfo("timer: measured %u CPU offset%s against CPU 0 over %u exchanges each: worst %lld ns, uncertainty +-%llu ns (counter resolution %llu ns)",
+          measured, measured == 1 ? "" : "s", OFFSET_ROUNDS, (long long)worst_offset,
+          (unsigned long long)worst_halfwidth, (unsigned long long)resolution_ns);
+
+    if (!g_clock_common) {
+        memset(g_cpu_offset_ns, 0, sizeof(g_cpu_offset_ns));
+        kwarn("timer: not applying the correction: %s is not a clock this kernel may trust across CPUs",
+              arch_clock_name());
+        return;
+    }
+    __atomic_store_n(&g_apply_offset, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_worst_offset_ns, worst_halfwidth, __ATOMIC_RELEASE);
+    kinfo("timer: correction applied; two CPUs' readings now differ by at most %llu ns",
+          (unsigned long long)worst_halfwidth);
 }
 
 uint64_t timer_ticks(void)

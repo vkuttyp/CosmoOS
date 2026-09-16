@@ -126,6 +126,11 @@ uint64_t arch_clock_hz(void)
  * clock-scope-aarch64 selftest is what keeps this a measurement rather
  * than a quotation.
  */
+bool arch_clock_is_percpu(void)
+{
+    return false;   /* one system counter, not one per PE */
+}
+
 bool arch_clock_is_common(const char **why)
 {
     (void)why;

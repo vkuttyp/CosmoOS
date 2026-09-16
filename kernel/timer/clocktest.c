@@ -392,6 +392,62 @@ bool selftest_clock_skew_detected(const char **reason)
 }
 
 /*
+ * What the advertised bound is allowed to be.
+ *
+ * The first run of the measurement reported an uncertainty of +-0 ns and
+ * would have advertised a bound of zero: the narrowest bracket had width
+ * zero, the counter not having advanced across a cross-CPU handshake
+ * that certainly took real time. A bound of zero is a promise no
+ * measurement can make, so the three cases are kept apart here and one
+ * of them is not allowed to be produced by measuring:
+ *
+ *   bound == 0                      only when nothing was measured,
+ *                                   because the counter is shared by
+ *                                   construction and zero is exact
+ *   bound == CLOCK_OFFSET_UNBOUNDED only when the kernel has declined to
+ *                                   promise at all
+ *   otherwise                       at least one tick of the counter
+ */
+bool selftest_clock_offset_bound(const char **reason)
+{
+    uint64_t bound = clock_worst_offset_ns();
+    uint64_t res = clock_resolution_ns();
+
+    CHECK(res > 0);
+
+    if (bound == CLOCK_OFFSET_UNBOUNDED) {
+        CHECK(!clock_is_common());
+        kinfo("selftest: clock-offset-bound: no cross-CPU promise on this machine; the bound is unbounded rather than a number");
+        return true;
+    }
+    CHECK(clock_is_common());
+
+    if (bound == 0) {
+        /* Exact, and only because nothing was measured to produce it. */
+        if (clock_offsets_measured()) {
+            kerror("selftest: clock-offset-bound: a bound of 0 ns was produced by measuring %s",
+                   "an offset, which no measurement can justify");
+            *reason = "a measured bound of zero: the counter resolution is the floor";
+            return false;
+        }
+        kinfo("selftest: clock-offset-bound: 0 ns, exact -- %s is one counter for the whole system and nothing was measured",
+              arch_clock_name());
+        return true;
+    }
+
+    CHECK(clock_offsets_measured());
+    if (bound < res) {
+        kerror("selftest: clock-offset-bound: bound %llu ns is finer than the counter's own %llu ns resolution",
+               (unsigned long long)bound, (unsigned long long)res);
+        *reason = "the advertised bound is finer than the counter can express";
+        return false;
+    }
+    kinfo("selftest: clock-offset-bound: %llu ns, at or above the counter's %llu ns resolution",
+          (unsigned long long)bound, (unsigned long long)res);
+    return true;
+}
+
+/*
  * The gate: a machine whose counter is not common to every CPU must stop
  * promising that two CPUs' readings may be subtracted, and must say so.
  *
@@ -438,6 +494,11 @@ bool selftest_clock_invariant_gate(const char **reason)
 
 #else
 
+bool selftest_clock_offset_bound(const char **reason)
+{
+    (void)reason;
+    return true;
+}
 bool selftest_clock_invariant_gate(const char **reason)
 {
     (void)reason;

@@ -541,6 +541,80 @@ one inline helper rather than left as a documented hole; userland
 inherits step 4's correction for free, because the syscall reads the
 same clock the kernel does.
 
+#### Step 4 — the measurement runs, the correction does not
+
+Step 3's finding forced a change of shape here. If the measurement were
+gated on the invariant-TSC bit as the report implies, it would never run
+on any machine this project has: x86-64 TCG refuses the bit, and AArch64
+has nothing to measure. The whole step would be dead code everywhere.
+
+So the **measurement is unconditional and the correction is what the
+gate governs**. Every boot with a per-CPU counter measures each AP
+against CPU 0 and prints what it found, whether or not it is allowed to
+act on it — which is the report's own step-4 bullet 4 ("the boot line
+gains the worst offset observed") applied more widely than the report
+applied it. On a machine that may not be trusted, the number is still
+the most informative line that boot can print about its own timekeeping.
+
+Three details the report did not settle:
+
+**`clock_raw_ns()`.** The three-read exchange must read the counter
+*without* the correction, or it measures the correction it is producing.
+`clock_now_ns` applies the addend; `clock_raw_ns` does not, and nothing
+else uses it.
+
+**The bound is the narrowest half-width, not the worst offset.** After
+the correction is applied what remains is the uncertainty of the
+estimate, not the offset it removed. Advertising the worst offset would
+claim a bound the kernel has already corrected away.
+
+**AArch64 measures nothing at all.** A new `arch_clock_is_percpu()` is
+false there: the system counter is shared by construction, so a measured
+"correction" could only introduce the error it claims to remove, and the
+advertised bound stays exactly 0 rather than drifting to whatever a
+thread handshake happened to observe.
+
+**A bound of zero that no measurement can justify.** The first run
+printed:
+
+```
+timer: CPU 1 offset 0 ns +-0 ns over 1000 exchanges
+timer: measured 3 CPU offsets against CPU 0: worst 0 ns, uncertainty +-0 ns
+```
+
+`±0 ns` is not a measurement. It means the narrowest bracket had width
+zero — the counter did not advance across a cross-CPU handshake that
+certainly took real time, TCG running a vCPU in long translated blocks
+so a whole exchange can land between two counter values. Had the gate
+been open, that would have advertised a bound of 0 ns on the strength of
+a degenerate reading. An offset cannot be known more precisely than the
+counter can express, so the bound is floored at one tick of the counter,
+and `clock-offset-bound` keeps the three cases apart permanently:
+
+| advertised bound | legitimate only when |
+| --- | --- |
+| `0` | nothing was measured — the counter is shared by construction, so zero is *exact* |
+| `CLOCK_OFFSET_UNBOUNDED` | the kernel has declined to promise at all |
+| anything else | at least one tick of the counter's resolution |
+
+AArch64's zero is honest under the first row; x86-64's would have been a
+promise under none of them.
+
+**What ran.** x86-64: 3 CPUs measured against CPU 0 over 1000 exchanges
+each, worst offset 0–500 ns and uncertainty ±2–500 ns across runs
+(it varies with scheduling luck), counter resolution 2 ns, correction
+**not applied**. AArch64: nothing measured, bound 0, exact.
+
+**What did not run, and cannot here.** The applied correction. No
+machine available to this project both has a per-CPU counter and
+advertises it as invariant, so `g_apply_offset` is false on every boot
+and the corrected path in `clock_now_ns` is never taken. The arithmetic
+is exercised by `clock-skew-detected`'s injection; its effect on real
+hardware is untested, and this is a stronger statement than the report's
+"tested by injection and not on real hardware" — the path does not
+execute at all. The same shape as the VMX backend the inventory already
+records as never executed.
+
 #### Step 3 — the gate fired on the first machine it met
 
 `has_invariant_tsc` has been detected in `cpu.c` since this kernel had an
