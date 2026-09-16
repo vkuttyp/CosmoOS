@@ -144,11 +144,33 @@ void sched_start_cpu(void)
 
 /* --- placement --- */
 
+/*
+ * Where a new thread goes: the least loaded CPU its affinity allows,
+ * with ties rotating rather than always falling to the lowest-numbered.
+ *
+ * The rotation is the whole of this change and it matters more than it
+ * looks. `nr_running` counts what is *runnable now*, and a kernel thread
+ * spends almost all of its life blocked on a waitqueue -- so between any
+ * two creations the queues have usually drained back to zero, every CPU
+ * ties, and a scan that keeps the first winner gives every thread to
+ * CPU 0. Measured before this changed: 8 of 14 threads there, and 94% of
+ * the context switches (docs/audit/next-subsystem-thread-migration.md).
+ *
+ * Threads created back-to-back *without* blocking already spread, because
+ * each one raises its target's count and the next scan sees it. That is
+ * why the test for this creates threads that block first: it is the only
+ * shape that distinguishes the rotation from what was here before.
+ */
+static unsigned g_pick_rotor;
+
 static unsigned pick_cpu(const struct thread *t)
 {
+    unsigned n = cpu_count();
+    unsigned start = n ? __atomic_fetch_add(&g_pick_rotor, 1u, __ATOMIC_RELAXED) % n : 0;
     unsigned best = this_cpu()->cpu_id;
     unsigned best_load = ~0u;
-    for (unsigned c = 0; c < cpu_count(); c++) {
+    for (unsigned i = 0; i < n; i++) {
+        unsigned c = (start + i) % n;
         if (!(t->affinity & CPUMASK_OF(c)) || !cpu_online(c))
             continue;
         unsigned load = g_rqs[c].nr_running;
@@ -159,6 +181,7 @@ static unsigned pick_cpu(const struct thread *t)
     }
     return best;
 }
+
 
 static void request_resched(struct runqueue *rq)
 {

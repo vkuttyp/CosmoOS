@@ -7,6 +7,7 @@
  * stays meaningful in both configurations.
  */
 
+#include <kernel/completion.h>
 #include <kernel/ipi.h>
 #include <kernel/log.h>
 #include <kernel/mutex.h>
@@ -17,6 +18,7 @@
 #include <kernel/selftest.h>
 #include <kernel/semaphore.h>
 #include <kernel/smp.h>
+#include <kernel/string.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vmm.h>
@@ -504,5 +506,108 @@ bool selftest_smp_mutex(const char **reason)
     CHECK(!pm.violated);
     CHECK(!mutex_is_locked(&pm.m));
     CHECK(threads_settle(before));
+    return true;
+}
+
+/* --- placement: where a new thread goes ---------------------------------- */
+
+/*
+ * A worker that reports the CPU it landed on and then blocks until told
+ * to leave, so that its runqueue entry is gone by the time the next
+ * thread is created. Blocking is the point: see selftest_sched_spread.
+ */
+struct placed {
+    struct completion started;
+    volatile bool release;
+    volatile unsigned cpu;
+};
+
+static void placed_main(void *arg)
+{
+    struct placed *p = arg;
+    p->cpu = arch_cpu_id();
+    complete(&p->started);
+    while (!__atomic_load_n(&p->release, __ATOMIC_ACQUIRE))
+        thread_sleep_ms(2);
+    thread_exit(0);
+}
+
+/*
+ * Threads created on an idle machine must not all land on one CPU.
+ *
+ * The shape of this test is the finding. Threads created back-to-back
+ * *already* spread before this unit, because each one raises its
+ * target's `nr_running` and the next scan sees it -- so a test that
+ * created four spinners would have passed on the broken code and proved
+ * nothing. What does not spread is threads that **block**: a kernel
+ * thread waits on a queue almost all of its life, `nr_running` drains
+ * back to zero between creations, every CPU ties, and a scan that keeps
+ * its first winner hands every one of them to CPU 0.
+ *
+ * So each worker here signals and then blocks, and the next is created
+ * only once the previous has stopped being runnable. That is the
+ * condition this kernel is actually in, and the one the measurement in
+ * the report came from: 8 of 14 threads on CPU 0.
+ */
+bool selftest_sched_spread(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 2) {
+        kinfo("selftest: sched-spread: one CPU; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    enum { N = 8 };
+    static struct placed p[N];
+    struct thread *t[N];
+
+    for (unsigned i = 0; i < N; i++) {
+        memset(&p[i], 0, sizeof(p[i]));
+        completion_init(&p[i].started, "spread");
+        t[i] = thread_create(placed_main, &p[i], "spread", SCHED_PRIO_DEFAULT);
+        CHECK(t[i] != NULL);
+        /* Wait until it has run and blocked, so its queue entry is gone
+         * before the next pick_cpu -- the condition that makes every
+         * queue tie. */
+        wait_for_completion(&p[i].started);
+        thread_sleep_ms(8);
+    }
+
+    cpumask_t used = 0;
+    unsigned on_cpu[CONFIG_MAX_CPUS] = {0};
+    for (unsigned i = 0; i < N; i++) {
+        used |= CPUMASK_OF(p[i].cpu);
+        if (p[i].cpu < CONFIG_MAX_CPUS)
+            on_cpu[p[i].cpu]++;
+    }
+    for (unsigned i = 0; i < N; i++)
+        __atomic_store_n(&p[i].release, true, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < N; i++)
+        thread_join(t[i]);
+
+    unsigned distinct = 0, worst = 0;
+    for (unsigned c = 0; c < n; c++) {
+        if (used & CPUMASK_OF(c))
+            distinct++;
+        if (on_cpu[c] > worst)
+            worst = on_cpu[c];
+    }
+    /*
+     * Deliberately not `distinct == n`. Other threads in the suite may
+     * be runnable while this runs, and the rule is still "least loaded
+     * first" -- the rotation only decides ties -- so a CPU that happens
+     * to be busy can legitimately be skipped. What the defect looked
+     * like is unmissable against either bound: every one of the eight on
+     * a single CPU.
+     */
+    if (distinct < 2 || worst > N / 2) {
+        kerror("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, %u of them on CPU %u",
+               (unsigned)N, distinct, n, worst, (unsigned)p[0].cpu);
+        *reason = "threads created on an idle machine piled onto one CPU";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-spread: %u threads that block after creation used %u of %u CPUs, at most %u on any one",
+          (unsigned)N, distinct, n, worst);
     return true;
 }
