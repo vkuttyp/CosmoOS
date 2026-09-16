@@ -164,6 +164,13 @@ process, so it depends on the host scheduling that process promptly. The
 run happened while this machine was under enough memory pressure to have
 a background build killed for it.
 
+It was then seen a second time, in CI, on the same pull request: one run
+failed it on **both** architectures, and a re-run of the identical commit
+passed all three of its boot tests -- default, guard and release --
+before failing much later at an unrelated build step. Five local runs of
+the same image, three in the default configuration and two in the guard
+one, all passed with `NETTEST: client ok`.
+
 **That last sentence is a circumstance, not a cause.** The pressure was
 real and it is the reason the re-run was tried, but nothing here
 establishes that it produced the failure: a dropped SYN, a slow host
@@ -172,6 +179,14 @@ process and an unrelated timing window all look identical from
 is not added to the list above, because a host-dependent exchange is not
 a bound this project can widen -- a re-run is what distinguishes it from
 a regression.
+
+**A warning about reading the re-run, which cost an hour here.** A run
+failing twice is not the same as a *test* failing twice. The second run
+above failed at a different step entirely, and net-harness passed in it;
+reading "the run failed again" as "net-harness failed again" sent the
+hunt after a flake while the real defect -- a link error in a target the
+default build does not build -- sat further down the same job. Read the
+failing step, not the failing run.
 
 Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
