@@ -226,10 +226,42 @@ work — a counter it increments, a timer that fires — and the test
 asserts that work completed. That is the property a user of this
 subsystem depends on, and nothing tests it today.
 
-**And the halted case, which is the one the kick is for.** A CPU that is
-idle rather than spinning does publish on the extra interrupt. The test
-runs a grace period with another CPU idle and asserts it completes
-without the kick bound being reached, which is the positive half.
+**And the positive half, which this unit cannot honestly supply.** The
+obvious third test — a grace period with another CPU idle — proves
+nothing: an idle CPU publishes at the top of its idle loop and again
+after each periodic tick, so the period completes in about a tick,
+*before* the two-tick threshold that sends the first kick. Zero kicks,
+and the assertion "completed without reaching the bound" is satisfied
+just as well by a kernel with the kick path deleted.
+
+Follow that through and the question changes. To be kicked at all a CPU
+must be pending past two ticks, and the populations that can be are:
+
+- **a CPU spinning with preemption disabled** — which the kick cannot
+  help, because its return path finds `preempt_count` non-zero;
+- **a CPU whose periodic tick keeps landing inside a short
+  preempt-disabled region** — the comment's second clause, which the
+  kick genuinely can help, because an IPI arrives at a different phase
+  and its return may land outside the region;
+- **a halted CPU whose tick is not arriving at all**, which this kernel
+  does not produce: the tick is periodic on every online CPU.
+
+So the only population the kick demonstrably helps is the second, and
+**arranging it is a phase coincidence, not a construction**: a test
+would have to make a CPU's tick collide with a short disabled region
+repeatedly while an IPI at an unrelated phase misses it. That is a
+probability, and this report's own rule is that a test which cannot be
+made deterministic is not shipped.
+
+**So this unit does not demonstrate that the kick causes progress, and
+says so rather than asserting something weaker and calling it
+evidence.** What it does instead is bound the claim from both sides —
+the waiter kicks, the spinner is not helped, the system stays live — and
+leave behind a named question: *what is the straggler kick worth?* On
+the evidence assembled here it helps one population that no test can
+arrange, and the comment above it describes a population it cannot help.
+That belongs in the inventory as a row, with this report as its
+evidence, rather than being dressed up as a passing test.
 
 ### Q11 — submit against unregister
 
@@ -321,9 +353,17 @@ here.
 
 ### What this unit does when it finds nothing
 
-Says so, and keeps the tests. Four tests that fail the day someone
-reorders a store are the product either way; a unit whose value depended
-on finding a bug would be a unit with an incentive to report one.
+Says so, and keeps the tests. Tests that fail the day someone reorders a
+store are the product either way; a unit whose value depended on finding
+a bug would be a unit with an incentive to report one.
+
+It has already found two things without running, which is worth stating
+because both came from writing the oracles rather than from executing
+them: `quiesce.c`'s straggler comment names the case the kick cannot
+help, and the kick's value is unproven for want of a population a test
+can arrange. Neither is a crash. Both are the kind of thing that only
+turns up when somebody tries to write down what a mechanism guarantees
+and finds they cannot.
 
 ### The §70 gate
 
@@ -362,6 +402,13 @@ four — "ordering verified by review and sanitizers only: no TSan model,
 no litmus tests" — and this unit does not close it. Litmus tests are a
 different discipline and Apple clang has no TSan for this target; the
 row stays, narrowed to what it still covers.
+
+And this unit **adds** a row rather than only striking one: what the
+straggler kick is worth. It fires only for a CPU pending past two ticks,
+it cannot help the spinner that its own comment names, and the one
+population it can help is a tick-phase collision no test can arrange.
+Deleting it, bounding it, or proving it are three different units and
+none of them is this one.
 
 ## Affected files
 
@@ -430,7 +477,7 @@ prove the hooks compile out.
 | --- | --- | --- |
 | `quiesce-straggler` | the **waiter's** side: a CPU spinning with preemption disabled past two ticks is kicked -- `straggler_ipis` rises by at least one in this test's own bracket, the kicks stop at eight, and the period is **still waiting** while they are sent, because a preempt-disabled CPU cannot publish at interrupt return | remove the kick loop: the delta is zero and the test fails on the delta. And the converse bug-proof, for the claim this test refuses to make: make the trap publish without checking `preempt_count` and the still-waiting assertion fails -- that assertion is what stops the test crediting the kick with the completion |
 | `quiesce-straggler-system` | the claim the lifetime report actually makes (risk 2): a long preempt-disabled section stalls **the waiter, not the system** -- a third CPU's ordinary work completes while one spins and one waits | have the waiter hold something the third CPU needs: its work stops too, and the test names it |
-| `quiesce-straggler-idle` | the positive half, and the case the kick is really for: a grace period with another CPU **idle** rather than spinning completes without reaching the eight-kick bound | make the idle path skip its publish at interrupt return: the period runs to the bound |
+| `quiesce-straggler-idle` | that an idle CPU needs **no** kick: a grace period with another CPU idle completes with `straggler_ipis` unchanged, in about a tick. This is deliberately not the positive case for the kick -- an idle CPU publishes before the two-tick threshold, so a test asserting the kick helped it would pass with the kick path deleted, which is how the first draft of this row was wrong | make the idle publish conditional on something an idle CPU does not satisfy: the delta becomes non-zero and the period lengthens, which is the assertion that this case never reaches the kick at all |
 | `blk-submit-unregister` | with submitters on other CPUs and the window held open: **no bio reaches the driver after `blk_unregister` returns**, every bio completes exactly once with 0 or `-ENODEV`, no submitter hangs, and the refcount returns | make the `gone` store `relaxed`: a submitter that missed it raises `submitting` after the unregister read it, and a bio reaches a driver whose device is gone |
 | `blk-unregister-drain` | the drain half, **arranged rather than hoped for**: a submit-side hook stops a submitter inside the driver after it has raised `submitting`, the test starts the unregister only once that submitter is known to be there, and asserts `blk_unregister` returned *after* the submitter left -- an order of two events, not a timing | skip the `submitting` spin: the unregister returns while the submitter is inside and the order assertion names which came first. Without the submit-side hook this test passes on a machine where no submitter ever reached the driver, which is why it has one |
 | `tcp-pcb-timer-free` | a pcb closed while a callback is inside it, **held before the callback takes its reference**: the magic is live on entry *and* after the held interval, so that interval is one in which nothing but `timer_cancel_sync` protects the pcb | cancel three of the four timers: the fourth fires into poisoned memory and the check names which timer. And the aim-check: move the hook after `pcb_get` and the test still passes with `timer_cancel_sync` stubbed out -- which is the test measuring reference counting instead, so the hook's position is itself asserted |
