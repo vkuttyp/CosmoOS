@@ -958,13 +958,12 @@ single designated timekeeper with handoff when it goes offline or stops
 answering — a subsystem, not a helper. It is an inventory row now, with
 both dead ends recorded so the next attempt starts past them.
 
-**What is left is the honest version.** The hazard had one address instead of sixteen, which is
-worth something, but "the loops are migrated" was satisfied only in the
-letter. So the machine-wide counter that the previous paragraph called a
-future unit was built instead, and it is four lines: the highest tick
-any CPU has reached, advanced by whichever CPU takes the tick.
+The shape that was tried and removed, kept only so the next attempt
+recognises it:
 
 ```c
+/* REVERTED -- do not resurrect. pc->ticks counters do not share an
+   origin, so the maximum stalls when its leader stops ticking. */
 static uint64_t deadline_now_ns(void)
 {
     if (clock_is_common())
@@ -973,6 +972,13 @@ static uint64_t deadline_now_ns(void)
     return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
 }
 ```
+
+**What is left is the honest version**: `clock_deadline_ns` and
+`clock_deadline_passed` measure against the clock, so on a machine whose
+counter is not common they are exactly as wrong as the arithmetic they
+replaced. They buy one address for the hazard instead of sixteen, and
+saturation. The header says both things in as many words, and the
+inventory row is the record that no machine-wide time source exists.
 
 **And while it existed, the second domain immediately broke the first.**
 `timer_start` had been migrated to `clock_deadline_ns` in the mechanical
