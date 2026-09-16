@@ -165,7 +165,15 @@ struct cfs_res {
     unsigned n;      /* reserved */
     unsigned used;   /* handed out, from the front */
 };
+/* Take the next reserved block, or 0 when the reservation is spent. A
+ * caller that takes one and then cannot use it must give it back with
+ * cfs_res_untake before returning: the commit keeps the blocks the
+ * reservation handed out, on the grounds that the snapshot list names
+ * them, so one taken and referenced by nothing is a block the next
+ * successful commit makes durable and unreachable. Only the block most
+ * recently taken can be given back, which is all any caller needs. */
 uint64_t cfs_res_take(struct cfs_res *r);
+void cfs_res_untake(struct cfs_res *r);
 
 int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot);
 /* The same copy, giving the superseded block back exempt: for a chain

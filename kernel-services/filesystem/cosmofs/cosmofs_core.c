@@ -267,6 +267,12 @@ uint64_t cfs_res_take(struct cfs_res *r)
     return (r != NULL && r->used < r->n) ? r->blk[r->used++] : 0;
 }
 
+void cfs_res_untake(struct cfs_res *r)
+{
+    if (r != NULL && r->used > 0)
+        r->used--;
+}
+
 static int buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, bool exempt, struct cfs_res *res)
 {
     struct cfs_buf *b = *bp;
@@ -302,7 +308,7 @@ static int buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, b
     struct cfs_buf *nb = buf_alloc(fs, nblk);
     if (nb == NULL) {
         if (res != NULL)
-            res->used--;   /* the last one taken: give it back to the reservation */
+            cfs_res_untake(res);
         else
             cfs_free_block_deferred(fs, nblk);
         return -ENOMEM;

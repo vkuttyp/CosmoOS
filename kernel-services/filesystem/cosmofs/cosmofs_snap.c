@@ -298,6 +298,8 @@ static int deadlist_append(struct cfs *fs, uint64_t *head, uint64_t blk, struct 
             return -ENOSPC;
         }
         rc = cfs_buf_new_at(fs, CFS_KIND_DEADLIST, nb, &b);
+        if (rc)
+            cfs_res_untake(res);   /* taken and unused: nothing would ever name it */
     } else {
         rc = cfs_buf_new(fs, CFS_KIND_DEADLIST, &b);
     }
