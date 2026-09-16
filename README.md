@@ -2194,11 +2194,11 @@ See [docs/development.md](docs/development.md).
   fresh-read form. The classification rule is not the one the report
   implied either: a thread that sleeps between two clock reads wakes on a
   different CPU, so a plain `t0` in a local variable is a foreign stamp,
-  and that is nearly every timing assertion in the suite -- 43 such
-  sites, 15 shared-state ones, 4 in userland the report had not noticed,
+  and that is nearly every timing assertion in the suite -- 42 such
+  sites, 20 shared-state ones, 4 in userland the report had not noticed,
   1 deliberately left plain (the tick cost, where saturating would hide a
   counter going backwards on one CPU) and 4 that are not elapsed times at
-  all. **Then the gate fired on the first machine it met.** QEMU's
+  all; 66 changed in all. **Then the gate fired on the first machine it met.** QEMU's
   x86-64 TCG does not advertise an invariant TSC and refuses to be asked
   to (`-cpu ...,+invtsc`: "TCG doesn't support requested feature"), so
   the only x86-64 machine this project runs on is one where the kernel
