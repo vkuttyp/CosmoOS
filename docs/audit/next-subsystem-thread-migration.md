@@ -498,7 +498,19 @@ four failing with the balancer in place.
 
 | bug-proof | what fails |
 | --- | --- |
-| ties keep the lowest-numbered CPU | `sched-spread`: 8 threads used 2 of 4 CPUs, 7 of them on CPU 0 |
+| ties keep the lowest-numbered CPU | `sched-spread`: 8 threads used **1 of 4** CPUs, all 8 on CPU 0 |
+
+That proof got sharper after review, and the way it did is worth
+keeping. The workers first *polled* — `thread_sleep_ms(2)` in a loop —
+so they woke every 2 ms and were often runnable when the next
+`thread_create` sampled `nr_running`. A non-zero count is exactly what
+makes the old CPU-0-preferring scan spread threads, so the proof
+reported "2 of 4 CPUs, 7 on CPU 0" instead of the defect in its pure
+form, and **could have passed on the broken code** on a different run.
+The workers block on a completion now and the test waits for
+`THREAD_BLOCKED` rather than a fixed settle: the defect shows as 8 of 8,
+and the healthy case tightened from "at most 3 on any CPU" to "at most
+2".
 
 The balancer's own bug-proofs ran and passed before it was removed — the
 balancer disabled made `sched-balance-pull` report "not one of the 6
