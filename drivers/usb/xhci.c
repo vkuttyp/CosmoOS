@@ -275,8 +275,8 @@ static int xhci_cmd(struct xhci *x, uint64_t ptr, uint32_t control, unsigned *sl
     spin_unlock_irqrestore(&x->lock, s);
     wr32(x->db, 0);
 
-    uint64_t deadline = clock_now_ns() + XHCI_CMD_TIMEOUT_NS;
-    while (!completion_done(&x->cmdw.done) && clock_now_ns() < deadline)
+    uint64_t deadline = clock_deadline_ns(XHCI_CMD_TIMEOUT_NS);
+    while (!completion_done(&x->cmdw.done) && !clock_deadline_passed(deadline))
         thread_sleep_ns(100000);
     if (completion_done(&x->cmdw.done))
         wait_for_completion(&x->cmdw.done);   /* the handshake: complete() has let go before the next init */
@@ -1489,8 +1489,8 @@ static int xhci_module_init(void)
     mutex_lock(&g_controllers_lock);
     struct xhci *x;
     list_for_each_entry(x, &g_controllers, link) {
-        uint64_t deadline = clock_now_ns() + 3000ull * 1000000ull;
-        while (!completion_done(&x->first_scan) && clock_now_ns() < deadline)
+        uint64_t deadline = clock_deadline_ns(3000ull * 1000000ull);
+        while (!completion_done(&x->first_scan) && !clock_deadline_passed(deadline))
             thread_sleep_ms(1);
         if (!completion_done(&x->first_scan))
             kwarn("xhci%u: the first port scan has not finished after 3 s; continuing", x->hcd.index);

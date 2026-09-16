@@ -580,7 +580,7 @@ worth defining.
 
 **And the bug-proof for it fails to fail, which is the finding.** Put
 `blk_test_drain_ordered` back on two `clock_now_ns()` readings and
-`blk-unregister-drain` still passes — 327 tests, no failure. That is not
+`blk-unregister-drain` still passes — every test green, no failure. That is not
 a weak proof, it is the point: QEMU's counters agree, so the defect
 cannot be observed on any machine this project runs, and no amount of
 running the test suite would ever have found it. It was found by writing
@@ -818,18 +818,19 @@ meant to read a property of the code.
 
 ### As run
 
-**327 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
-the branch point, so eight new: `clock-since-saturates`,
+**328 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
+the branch point, so nine new: `clock-since-saturates`,
 `blk-timeout-skew`, `clock-cross-cpu`, `clock-scope-aarch64`,
-`clock-skew-detected`, `clock-invariant-gate`, `clock-offset-bound` and
-`lockup-report-skew`. `blk-unregister-drain` is the ninth test this unit
-touched and the only existing one it changed.
+`clock-skew-detected`, `clock-invariant-gate`, `clock-offset-bound`,
+`lockup-report-skew` and `clock-cost`. `blk-unregister-drain` is the
+tenth test this unit touched and the only existing one it changed.
 
-Two of those eight are not in the report's table. `clock-skew-detected`
+Three of those nine are not in the report's table. `clock-skew-detected`
 is the injection the report described as a bug-proof, made permanent
 because the tests it proves pass vacuously on every machine here.
 `clock-offset-bound` exists because the measurement's first run produced
-a bound no measurement can justify.
+a bound no measurement can justify. `clock-cost` is the benchmark the
+report asked for, as a test rather than a number in a terminal.
 
 **The numbers, from the final run.**
 
@@ -918,13 +919,27 @@ Sixteen non-test sites compute a deadline this way:
 | `kernel/interrupt/ipi.c:144`, `kernel/arch/x86_64/mmu.c:324` | an IPI acknowledgement | nothing: preemption is off |
 | `drivers/usb/*` ×4, `drivers/storage/ahci.c` ×2, `drivers/virtio/virtio_console.c` | hardware to respond | a spurious `-ETIMEDOUT` |
 
-Only the first can hang, and only that one is fixed here. The rest fail
-towards a spurious timeout rather than a lost wakeup, on a machine this
-project cannot currently boot on, and migrating them needs the
-machine-wide counter that does not exist yet. **Named as a follow-up
-rather than claimed.** The rule is written down in
-`kernel/include/kernel/timer.h` so the next deadline loop is written
-knowing it.
+Only the first can hang, and only that one has an age no clock can
+distort. The rest now go through `clock_deadline_ns` and
+`clock_deadline_passed`.
+
+**Those two are not a fix and the header says so.** On a machine where
+the offset is unbounded they are exactly as wrong as the arithmetic they
+replaced; claiming otherwise would be the kind of statement this unit
+exists to stop. What they buy is that the hazard has **one address
+instead of sixteen** — the day this tree grows a machine-wide counter, a
+sound deadline is two function bodies away rather than a sweep of every
+driver poll.
+
+They do fix something real today. `clock_now_ns() + budget` wraps into
+the past for a large budget and expires immediately, and the tree already
+knew: `sys_futex_wait` rejects a duration past `INT64_MAX` at its own
+call site, with a comment explaining the wrap, and **no other site was
+guarded**. One caller had the rule and fifteen did not, which is the
+shape this project keeps finding. `clock_deadline_ns` saturates, so
+`timer_start` is guarded now whoever calls it; the futex check stays
+because a syscall should refuse an impossible duration rather than
+silently turn it into "never".
 
 **The saturating fix traded a correctness bug for a liveness one, and
 review caught it.** The block timeout's whole purpose is that a stalled

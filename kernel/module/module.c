@@ -511,8 +511,8 @@ int module_unload(const char *name)
     synchronize_quiesce();
 
     /* 4. Objects whose release code lives here must all be gone. */
-    uint64_t deadline = clock_now_ns() + (uint64_t)g_unload_timeout_ms * 1000000ULL;
-    while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && clock_now_ns() < deadline)
+    uint64_t deadline = clock_deadline_ns((uint64_t)g_unload_timeout_ms * 1000000ULL);
+    while (__atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE) != 0 && !clock_deadline_passed(deadline))
         thread_sleep_ns(1000000);
     uint32_t live = __atomic_load_n(&m->live_objects, __ATOMIC_ACQUIRE);
     if (live != 0) {

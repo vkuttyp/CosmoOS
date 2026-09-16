@@ -131,12 +131,28 @@ bool clock_is_common(void);
  * place in this tree where that mattered enough to build -- it counts
  * scans of its own thread beside the timestamp (`bio->scans`,
  * `kernel/block/blk.c`) so a stalled device still enters recovery on a
- * machine whose counter is not common. The remaining deadline loops are
- * driver polls and diagnostics whose failure is a spurious timeout
- * rather than a hang; they are listed in
- * `docs/audit/next-subsystem-cpu-clock.md` and are **not** migrated by
- * this unit.
+ * machine whose counter is not common.
+ *
+ * Every other deadline in the kernel goes through the two calls below.
+ * They are not magic: on a machine where the offset is unbounded they
+ * are exactly as wrong as the open-coded arithmetic they replaced, and
+ * saying otherwise would be the sort of claim this unit exists to stop.
+ * What they buy is that the hazard has **one** address instead of
+ * sixteen -- the day this tree grows a machine-wide counter, a sound
+ * deadline is two function bodies away rather than a sweep of every
+ * driver poll. They also fix something real today: `clock_now_ns() +
+ * budget` wraps into the past for a large budget and expires at once,
+ * which `sys_futex_wait` guards against at its own call site and
+ * nothing else did.
  */
+
+/*
+ * A deadline `budget_ns` from now, saturating at UINT64_MAX rather than
+ * wrapping, and the test for it. Prefer these to `clock_now_ns() + x`
+ * and a bare `<`.
+ */
+uint64_t clock_deadline_ns(uint64_t budget_ns);
+bool clock_deadline_passed(uint64_t deadline);
 
 /* This CPU's counter with no cross-CPU correction applied. For the
  * measurement that produces the correction, and for nothing else. */

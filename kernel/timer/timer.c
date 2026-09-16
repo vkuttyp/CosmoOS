@@ -123,6 +123,18 @@ uint64_t clock_since_ns(uint64_t stamp)
     return clock_delta_ns(clock_now_ns(), stamp);
 }
 
+uint64_t clock_deadline_ns(uint64_t budget_ns)
+{
+    uint64_t now = clock_now_ns();
+    uint64_t at = now + budget_ns;
+    return at < now ? UINT64_MAX : at;   /* a budget so large it wraps never expires */
+}
+
+bool clock_deadline_passed(uint64_t deadline)
+{
+    return clock_now_ns() >= deadline;
+}
+
 uint64_t clock_worst_offset_ns(void)
 {
     return __atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE);
@@ -187,8 +199,8 @@ const char *clock_name(void)
 
 void ndelay(uint64_t ns)
 {
-    uint64_t end = clock_now_ns() + ns;
-    while (clock_now_ns() < end)
+    uint64_t end = clock_deadline_ns(ns);
+    while (!clock_deadline_passed(end))
         arch_cpu_relax();
 }
 
@@ -234,7 +246,7 @@ void timer_start(struct timer *t, uint64_t delay_ns)
      * run_expired captured for the current pass; a callback re-arming
      * with 0 would then be popped again inside the same pass, forever.
      * One nanosecond puts every re-arm into a later pass. */
-    t->expires_ns = clock_now_ns() + (delay_ns == 0 ? 1 : delay_ns);
+    t->expires_ns = clock_deadline_ns((delay_ns == 0 ? 1 : delay_ns));
     t->cpu = arch_cpu_id();
     t->state = TIMER_PENDING;
 
@@ -684,6 +696,9 @@ unsigned timer_pending_count(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(clock_now_ns);
+EXPORT_SYMBOL(clock_since_ns);
+EXPORT_SYMBOL(clock_deadline_ns);
+EXPORT_SYMBOL(clock_deadline_passed);
 EXPORT_SYMBOL(timer_setup);
 EXPORT_SYMBOL(timer_start);
 EXPORT_SYMBOL(timer_cancel);

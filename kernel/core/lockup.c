@@ -113,7 +113,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     record(&this_cpu()->sample, self, seq, false);
 
     /* One wait for every target together: the bound is total. */
-    uint64_t deadline = clock_now_ns() + timeout_ns;
+    uint64_t deadline = clock_deadline_ns(timeout_ns);
     cpumask_t got = 0;
     for (;;) {
         for (unsigned c = 0; c < cpu_count(); c++) {
@@ -121,7 +121,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
                 __atomic_load_n(&percpu_get(c)->sample.seq, __ATOMIC_ACQUIRE) == seq)
                 got |= CPUMASK_OF(c);
         }
-        if (got == targets || clock_now_ns() >= deadline)
+        if (got == targets || clock_deadline_passed(deadline))
             break;
         arch_cpu_relax();
     }
@@ -143,9 +143,9 @@ bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out
     __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
     if (!arch_ipi_send_nmi(cpu))
         ipi_send(cpu, IPI_SAMPLE);
-    uint64_t deadline = clock_now_ns() + timeout_ns;
+    uint64_t deadline = clock_deadline_ns(timeout_ns);
     bool got = false;
-    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && clock_now_ns() < deadline)
+    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && !clock_deadline_passed(deadline))
         arch_cpu_relax();
     if (got)
         *out = pc->sample;
