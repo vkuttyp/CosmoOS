@@ -903,7 +903,10 @@ Twenty-eight blocks, all reclaimed by `fsctl check --repair`. They are
 the residue of the boot's own `cosmofs-format` and `cosmofs-ops` tests.
 The user-mode test no longer relies on finding them there -- it strands
 its own, deterministically, by writing a file, deleting it and
-unmounting, which produced 41 blocks on the same run. The mechanism is
+unmounting, which produced 41 blocks on the same run. **The two numbers
+count different things**: 28 is the residue this boot had already
+accumulated before the tool looked, and 41 is what one deliberate
+write-delete-unmount stranded. The mechanism is
 the one the fsck report named: a commit publishes
 the new root, *then* clears the freed blocks' bits in memory and dirties
 those bitmap chunks **for the next commit** (`cosmofs_core.c`, "the

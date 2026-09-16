@@ -726,7 +726,14 @@ usertest: fsctl: a file written, deleted and unmounted strands nothing
           -- the filesystem is clean on remount
 ```
 
-That line replaces "fsctl found 41 blocks a clean unmount stranded".
+That line replaces "fsctl found 41 blocks a clean unmount stranded,
+repaired them, and the filesystem is clean". **41 is the test's own
+number and 28 is the other one**: the fsctl unit reported both, and they
+measure different things. 28 was the residue already on the boot's
+scratch disk when the tool was first pointed at it (blocks 2-7, 25, 26);
+41 is what the userland test then stranded deliberately, by writing one
+file, deleting it and unmounting, so that it would stop depending on
+somebody else's residue. Both are zero now.
 
 **The unit's own tests**, as they report themselves:
 

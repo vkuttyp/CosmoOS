@@ -2013,7 +2013,8 @@ See [docs/development.md](docs/development.md).
   measured 1912 blocks across 199 replayed crash prefixes, and the fsctl
   unit found the sharper half when the first real filesystem an operator
   could point a tool at turned out to have 28 stranded blocks after a
-  *clean* unmount. The obvious fix does not converge -- writing the
+  *clean* unmount -- and 41 more when that unit's test stranded some
+  deliberately rather than depending on the residue it found. The obvious fix does not converge -- writing the
   bitmap frees the bitmap, so a second commit leaves a third's worth of
   work -- so format version 9 gives the superblock a `free_root` naming
   a chain of blocks that records what this root freed, written before
