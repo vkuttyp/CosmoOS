@@ -475,6 +475,8 @@ static const struct selftest tests[] = {
     { "cosmofs-freelog-idempotent", selftest_cosmofs_freelog_idempotent },
     { "cosmofs-freelog-reuse", selftest_cosmofs_freelog_reuse },
     { "cosmofs-freelog-chain", selftest_cosmofs_freelog_chain },
+    { "cosmofs-freelog-rollback", selftest_cosmofs_freelog_rollback },
+    { "cosmofs-freelog-malformed", selftest_cosmofs_freelog_malformed },
     { "cosmofs-check-clean", selftest_cosmofs_check_clean },
     { "cosmofs-check-leak", selftest_cosmofs_check_leak },
     { "cosmofs-check-faults", selftest_cosmofs_check_faults },

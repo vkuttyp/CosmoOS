@@ -2822,6 +2822,128 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
 }
 
 /*
+ * A commit that fails after reserving the record's blocks must give them
+ * back. Nothing names them -- the root that would have is not going to
+ * be published -- so left allocated they are a leak the *next*
+ * successful commit makes durable, because that commit writes this
+ * bitmap. The window is any failure between the reservation and the
+ * root: a `kmalloc` for the record's buffer, the bitmap fixpoint, an
+ * unwritable block (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_rollback(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Settle, so the count to come back to is a steady one. */
+    CHECK(write_file(ENG "/settle", "s", 1));
+    CHECK(vfs_unlink(NULL, ENG "/settle") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* Something to free, and a commit that fails while freeing it. */
+    CHECK(write_file(ENG "/doomed", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/doomed") == 0);
+    cosmofs_test_fail_freelog(mount_of(ENG), true);
+    CHECK(vfs_sync() != 0);                  /* the commit fails, as asked */
+    cosmofs_test_fail_freelog(mount_of(ENG), false);
+
+    /*
+     * And then one that succeeds. This is the commit that would make a
+     * lost reservation durable: it writes the bitmap the failed attempt
+     * left behind.
+     */
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.alloc_not_seen.count == 0);    /* the reservation, if it was kept */
+    CHECK(rep.clean);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-rollback: a commit failed with the record reserved and gave every block back (%llu free either side)",
+          (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * A record whose `count` is past what a block holds is a record this
+ * kernel cannot read, and gets the answer an unreadable one gets: that
+ * *root* is refused. Treating it as empty would silently drop every free
+ * it names -- the root says those blocks are free, the bitmap says they
+ * are not, and the difference would be reported later as an ordinary
+ * leak with nothing to connect it to its cause.
+ *
+ * Refusing a root is not refusing the filesystem. cosmofs keeps two, and
+ * a root whose tree does not load falls back to the older slot, which is
+ * a complete and consistent filesystem one generation behind. So the
+ * cost of the strict answer is a generation, not a mount -- and that is
+ * what this test measures, because "the mount fails" is what the report
+ * said and it is not what happens.
+ */
+bool selftest_cosmofs_freelog_malformed(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* A record with something in it, left on disk by the unmount. */
+    CHECK(write_file(ENG "/gone", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Which generation the disk is at, without changing it: the discard
+     * hook makes this unmount write nothing. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats good;
+    CHECK(cosmofs_stats(mount_of(ENG), &good) == 0);
+    cosmofs_test_discard_on_unmount(mount_of(ENG), true);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Re-sealed, so the checksum is good and only the count is wrong. */
+    CHECK(cosmofs_test_poison_freelog_count(bd, CFS_DEAD_PER_BLOCK + 1) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats fell;
+    CHECK(cosmofs_stats(mount_of(ENG), &fell) == 0);
+    CHECK(fell.generation < good.generation);   /* the newer root was refused */
+
+    /* And what it fell back to is a whole filesystem, not a damaged one. */
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-malformed: a record naming %u blocks in a block that holds %u is refused, and the mount falls back from generation %llu to %llu rather than reading it as empty",
+          (unsigned)CFS_DEAD_PER_BLOCK + 1, (unsigned)CFS_DEAD_PER_BLOCK,
+          (unsigned long long)good.generation, (unsigned long long)fell.generation);
+    return true;
+}
+
+/*
  * A record block holds 506 block numbers; a transaction can free more
  * than that, so the record is a chain and every link of it has to be written and
  * replayed. A single block's worth would silently lose the overflow.

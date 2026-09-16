@@ -137,6 +137,12 @@ int cosmofs_test_format_version(struct blkdev *bd, unsigned version);
  * word below version 9 cannot be tested without manufacturing an image
  * that does not (docs/audit/next-subsystem-unmount-leak.md). */
 int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value);
+
+/* Test hooks for the free record's failure paths: a commit that fails
+ * after reserving the record's blocks, and a record whose count is past
+ * what a block holds (docs/audit/next-subsystem-unmount-leak.md). */
+void cosmofs_test_fail_freelog(struct mount *mnt, bool on);
+int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count);
 /*
  * Test hook: break the filesystem in one named way, so that a finding
  * of the structural check is one a test produced on purpose. Eight of

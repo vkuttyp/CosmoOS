@@ -77,6 +77,10 @@ struct cfs {
 
     struct mutex lock;
     bool discard_on_unmount;
+    /* Test hook: freelog_fill returns -EIO, so a commit fails after the
+     * record's blocks have been reserved. What that must not leave
+     * behind is the reservation (docs/audit/next-subsystem-unmount-leak.md). */
+    bool test_fail_freelog;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */

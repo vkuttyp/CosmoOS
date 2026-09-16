@@ -213,6 +213,8 @@ bool selftest_cosmofs_freelog_snapshot(const char **reason);
 bool selftest_cosmofs_freelog_idempotent(const char **reason);
 bool selftest_cosmofs_freelog_reuse(const char **reason);
 bool selftest_cosmofs_freelog_chain(const char **reason);
+bool selftest_cosmofs_freelog_rollback(const char **reason);
+bool selftest_cosmofs_freelog_malformed(const char **reason);
 bool selftest_cosmofs_check_clean(const char **reason);
 bool selftest_cosmofs_check_leak(const char **reason);
 bool selftest_cosmofs_check_faults(const char **reason);
