@@ -54,11 +54,19 @@ The pattern is `now - stamp`, where `now` was read on this CPU and
   counter runs *ahead*, `now - b->issued_ns` underflows to an enormous
   unsigned value, the comparison against `timeout_ns` succeeds, and
   **every in-flight bio on that device is declared timed out at once**.
-- **The lockup detector's reports** (`kernel/core/lockup.c:196`,
-  `:241`): `now - t->last_tick_ns` for a *target* CPU's percpu block, to
-  print "last tick N ms ago". A skew makes the number wrong; an
-  underflow makes it absurd, in the one message an operator reads when
-  the machine is already in trouble.
+- **The lockup detector's reports**, in three places rather than the two
+  the first draft of this report found: `now - t->last_tick_ns` at
+  `kernel/core/lockup.c:196` and `:241`, and `now - s->when_ns` at
+  `:176`, where the sample was stamped by the *target* CPU inside its
+  own NMI or IPI handler. All three print an age a skew makes wrong and
+  an underflow makes absurd, in the one message an operator reads when
+  the machine is already in trouble. `kernel/core/lockuptest.c:186`
+  computes the same age and is swept with them.
+
+  That the first pass over this file found two of the three is the
+  reason the migration plan below ends with a grep rather than a
+  reading: a sweep that depends on having read carefully enough is not a
+  sweep.
 - **The scheduler's dump** (`kernel/scheduler/sched.c:438`) — and this
   one is the evidence that the tree half-knows:
 
@@ -125,11 +133,26 @@ reachable today, which the inventory's ordering rule puts first.
 
 One sentence, and the rest of the design serves it: **any two values
 returned by `clock_now_ns()` on any two CPUs may be subtracted, and the
-result is the elapsed time between them.**
+result is the elapsed time between them to within a bound the boot
+measures and reports.**
 
-That is what every caller already assumes. The unit makes it true, says
-so where the function is declared, and gives the callers that cannot
-tolerate a surprise a way to be safe anyway.
+The bound is the part the first draft of this sentence left out, and
+leaving it out made the contract disagree with the design two pages
+later: a correction narrows skew, it does not abolish it, so "the
+elapsed time" is a promise no implementation can keep and a reader would
+be right to hold it to. What can be kept is this, and it is what the
+contract, the tests and the boot line all say:
+
+- the difference is the elapsed interval **± the residual skew**;
+- the residual skew is **measured, not assumed**, and printed once at
+  boot as the worst offset seen;
+- the difference is **never negative and never wraps**, which is a
+  property rather than a bound and is the one the callers actually
+  depend on.
+
+That third point is why `clock_since_ns` exists and why it lands first:
+an interval that is wrong by a microsecond is a measurement, and an
+interval that is wrong by 584 years is an outage.
 
 ### Establishing it, per architecture
 
@@ -247,7 +270,8 @@ report does not pretend it is a step toward one.
 | `kernel/timer/timer.c` | `clock_since_ns`; the boot line's scope and worst offset |
 | `kernel/include/kernel/timer.h` | the promise, stated where `clock_now_ns` is declared |
 | `kernel/block/blk.c` | the timeout's subtraction |
-| `kernel/core/lockup.c` | both reports' ages |
+| `kernel/core/lockup.c` | all **three** ages: the two tick ages and the sample age at `:176`, which the first pass missed |
+| `kernel/core/lockuptest.c` | the same age, computed there too |
 | `kernel/scheduler/sched.c` | the dump's age, which stops being the only guarded one |
 | `kernel/device/devtest.c` | `blk-unregister-drain`'s ordering, which rests on this |
 | `kernel/arch/aarch64/timer.c` | nothing expected: the system counter is already common. The test is what says so |
@@ -260,10 +284,14 @@ report does not pretend it is a step toward one.
 
 /*
  * Monotonic nanoseconds. **Comparable across CPUs**: two values read on
- * any two CPUs may be subtracted and the difference is the elapsed time
- * between them. On x86-64 that is a per-CPU offset applied to the TSC;
- * on AArch64 the system counter is common to every PE and the offset is
- * zero.
+ * any two CPUs may be subtracted, and the difference is the elapsed time
+ * between them to within the residual skew the boot measured and
+ * printed. Never negative, never wrapped -- see clock_since_ns for a
+ * stamp that may be foreign.
+ *
+ * On x86-64 that is a per-CPU offset applied to the TSC; on AArch64 the
+ * system counter is common to every PE, so the offset is zero and what
+ * remains is the cost of two reads at two instants.
  */
 uint64_t clock_now_ns(void);
 
@@ -292,7 +320,12 @@ int64_t clock_worst_offset_ns(void);
 5. **The ordering test's dependency made explicit**:
    `blk-unregister-drain` gains a line saying which property it rests
    on, now that the property is stated somewhere.
-6. Docs, README Status, the inventory row's third clause struck, as-built.
+6. **The sweep, checked by grep rather than by reading.** Every
+   `- .*_ns` subtraction in the tree, listed, and each one marked local
+   or foreign with the reason. The first pass over `lockup.c` by reading
+   found two of its three sites; a sweep that depends on having read
+   carefully enough is not a sweep.
+7. Docs, README Status, the inventory row's third clause struck, as-built.
 
 Each step boots both architectures; step 1 and step 4 run
 `make BUILD=release`; step 4 runs the 1-CPU and 8-CPU matrix by hand,
@@ -303,11 +336,11 @@ changes.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `clock-cross-cpu` | **the promise**: a timestamp taken on CPU A, then one on CPU B ordered after it by a handshake, then one on CPU A again — the three are non-decreasing, over many rounds and every online CPU pair | inject a per-CPU offset: the middle value falls outside the bracket and the test names the pair and the skew |
+| `clock-cross-cpu` | **the promise**: a timestamp on CPU A, one on CPU B ordered after it by a handshake, then one on CPU A again -- the middle value lies within the bracket the outer two form, over many rounds and every online pair. The bracket *is* the error bound: it is what the contract means by "to within a measured bound", and the test reports the widest bracket it saw | inject a per-CPU offset wider than the bracket: the middle value falls outside and the test names the pair and the skew |
 | `clock-since-saturates` | `clock_since_ns` of a stamp from the future returns 0, and of a stamp in the past returns the interval | make it a plain subtraction: the future stamp returns an age near `UINT64_MAX`, which is the number the block timeout would have compared against |
 | `blk-timeout-skew` | with a skew injected so an issuing CPU's clock runs ahead, a bio issued on that CPU is **not** timed out early, and one genuinely overdue still is | revert the timeout's subtraction to `now - issued_ns`: every in-flight bio on the device times out at once, which is the defect this unit is named for |
 | `lockup-report-skew` | the lockup report's "last tick N ms ago" for a CPU whose clock runs ahead reads 0 rather than 584 years | the same revert, in `lockup.c`: the operator's one diagnostic prints an absurd number |
-| `clock-scope-aarch64` | on AArch64 the measured offset between every pair of online CPUs is zero, because the system counter is common | apply a fake offset on AArch64: the test fails, which is what makes the zero a measurement rather than an assumption |
+| `clock-scope-aarch64` | on AArch64 the reading taken on CPU B falls **inside the bracket** of readings taken on CPU A either side of it, for every online pair. Not "the offset is zero": two CPUs read a shared, advancing counter at different instants, so the measured delta is bounded by the round trip and never exactly zero -- an equality there would fail on correct hardware, which is how the first draft of this row was wrong | apply a fake offset larger than the bracket: the middle reading falls outside it and the test names the pair and the offset |
 | `clock-invariant-gate` | a machine whose TSC is not invariant does not use it as the clock, and says so in the boot line | pretend the bit is set when it is not: the boot claims a TSC clock on a machine that cannot keep one |
 | `blk-unregister-drain` (existing) | unchanged, with a comment naming the property it depends on | — |
 
