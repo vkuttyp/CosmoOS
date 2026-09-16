@@ -621,6 +621,17 @@ no longer backs must not be published.**
   with a hook nothing else can and asserts the file survives with its
   name, its contents and its link count.
 
+**And making the replay fail the mount created a hazard of its own**,
+which the third round found. When `load_root` fails, `cosmofs_mount`
+falls back to the other superblock slot and retries **on the same
+`struct cfs`**. A replay that queued deferred frees and then failed left
+those block numbers in the transaction, and the fallback's first commit
+would have handed the allocator blocks the older root's inodes still
+name -- live data, not a leak. `cfs_reset_root` now clears the pending
+lists, the orphan set and the failed flag along with the buffers and the
+bitmap: nothing an abandoned attempt accumulated belongs to the root
+about to be tried.
+
 Unchanged from the plan: the record is written whole and never copied;
 the set cancels in memory for an ordinary unlink; the bound is exact;
 the reservation is a third consumer of the commit's existing one; the

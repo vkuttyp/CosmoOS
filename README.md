@@ -2099,8 +2099,10 @@ See [docs/development.md](docs/development.md).
   tree carried a test whose comment called this "the leak the design
   admits by omission" and whose assertions described it. Format version
   10 gives the superblock an `orphan_root` naming a chain of inodes the
-  root still owes, written before the root and replayed at mount by
-  doing what `cfs_evict` would have done. **It is a record, not a
+  root still owes, written before the root and replayed at the next
+  mount by doing what `cfs_evict` would have done -- which means queuing
+  the blocks and clearing the slot, so the space comes back when that
+  mount's first commit publishes it, as an ordinary eviction's does. **It is a record, not a
   list**, and that is the design: the set is derived, so each commit
   writes it whole and nothing is edited on disk -- unlike the snapshot
   list, nothing here is copy-on-write -- and an ordinary unlink's add
@@ -2115,7 +2117,9 @@ See [docs/development.md](docs/development.md).
   an inode with no links absent, so the first replay reclaimed nothing
   until it used the raw read the structural check already had; and the
   reclaim lands on the mount's first commit rather than on the mount,
-  because the root still names those blocks. Two test oracles measured
+  because the root still names those blocks -- and a replay that fails
+  after queuing them must fail the mount *and* clear the queue, or the
+  older-root fallback commits frees that root's inodes still name. Two test oracles measured
   the wrong thing before they measured anything -- one compared against
   a filesystem that had no record either, and the next asserted sixteen
   blocks for a 64 KiB file that compresses to five. The crash suite now

@@ -557,13 +557,24 @@ filesystem lock before the VFS drops the last reference, so a writeback
 commit can land in the gap and write a record for an inode about to be
 evicted, which the next commit retires.
 
-At mount, `orphan_replay` does what `cfs_evict` would have done: frees
-the blocks and clears the slot. Three details are load-bearing. It reads
+At mount, `orphan_replay` does what `cfs_evict` would have done: queues
+the blocks for release and clears the slot. **Queues, not frees** -- the
+release is deferred, because the root the mount is running on still
+names those blocks, so the space comes back when that mount's first
+commit publishes it, exactly as an ordinary eviction's does. Four
+details are load-bearing. It reads
 the inode **raw**, because an inode with no links is what the ordinary
 read calls absent. It **skips a slot that is already empty** before
 decrementing `inode_count`, which is what makes a repeated replay
 harmless and is the one place that count could be taken twice off one
-inode. And it does **not** touch the parent of a removed directory:
+inode. From the truncate onwards a failure cannot be skipped:
+`cfs_truncate_blocks` frees every extent into the transaction's pending
+list and *then* stores the shortened extent list, so a failure leaves
+the blocks queued for release while the inode still names them. Nothing
+has been published at that point, so the mount fails and the filesystem
+is left as it was found -- and `cfs_reset_root`, which the older-slot
+fallback uses, clears the pending list for the same reason. And it does
+**not** touch the parent of a removed directory:
 `rmdir` already decremented the parent's link count in the transaction
 that removed the name.
 

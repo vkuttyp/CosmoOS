@@ -2331,6 +2331,20 @@ static void cfs_reset_root(struct cfs *fs)
     kfree(fs->bitmap_dirty);
     fs->bitmap = NULL;
     fs->bitmap_dirty = NULL;
+    /*
+     * And everything the abandoned attempt accumulated in the open
+     * transaction. Nothing of it belongs to the root about to be tried:
+     * the orphan replay can queue deferred frees and then fail the
+     * mount, and carrying those into the fallback would have its first
+     * commit hand the allocator blocks the older root's inodes still
+     * name -- live data, not a leak. The block numbers are the older
+     * root's to decide about, and it has not been read yet.
+     */
+    fs->nr_pending = 0;
+    fs->nr_exempt = 0;
+    fs->nr_orphans = 0;
+    fs->first_dirty_ns = 0;
+    fs->failed = 0;   /* the attempt is abandoned, not the filesystem */
     /* The other root may describe a different set of members; the pool
      * keeps its devices, the table is read again. */
     cfs_members_free(fs);
