@@ -74,6 +74,9 @@ bool selftest_lockup_soft(const char **reason);          /* no switch while some
 bool selftest_lockup_hard(const char **reason);          /* the watched CPU stopped ticking: reported once, at the threshold */
 bool selftest_lockup_quiet(const char **reason);         /* a spinner nobody waits on and an idle CPU report nothing */
 bool selftest_lockup_tick_bench(const char **reason);    /* prints the two stores' cost and the tick's; asserts nothing */
+bool selftest_quiesce_straggler(const char **reason);
+bool selftest_quiesce_straggler_system(const char **reason);
+bool selftest_quiesce_straggler_idle(const char **reason);
 bool selftest_quiesce_grace(const char **reason);
 bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);

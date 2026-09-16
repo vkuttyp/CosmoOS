@@ -89,9 +89,29 @@ void synchronize_quiesce(void)
 
         uint64_t waited = clock_now_ns() - start;
         if (waited > 2 * TICK_NS && kicks < 8) {
-            /* A straggler is in a preempt-disabled region across its
-             * ticks, or its tick keeps landing inside one: an extra
-             * interrupt gives its return path another chance. */
+            /*
+             * An extra interrupt gives this CPU's return path another
+             * chance to publish.
+             *
+             * Which stragglers that can help is narrower than it looks,
+             * and this comment used to claim the wrong one. A CPU
+             * publishes at interrupt return only when it is outside
+             * every read-side section (`preempt_count == 0`, in the trap
+             * return), so a CPU *spinning* with preemption disabled
+             * takes this IPI, handles it, and returns without
+             * publishing: the kick cannot help it, and the grace period
+             * ends when that CPU leaves its section, kick or no kick
+             * (`docs/audit/2026-09-lifetime-quiesce-report.md`, risk 2:
+             * "the straggler IPI helps a halted CPU, not one spinning
+             * with preemption off").
+             *
+             * What it can help is a CPU whose *periodic tick* keeps
+             * landing inside a short disabled region: an interrupt at an
+             * unrelated phase lands outside one and publishes. That
+             * population is real and no test in this tree arranges it,
+             * so what this kick is worth is an open question rather than
+             * a measured fact (`docs/audit/next-subsystem-lifetime-windows.md`).
+             */
             for (unsigned c = 0; c < cpu_count(); c++) {
                 if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c))
                     ipi_send(c, IPI_RESCHEDULE);
