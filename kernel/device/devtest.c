@@ -20,12 +20,15 @@
 #include <kernel/cosmofs.h>
 #include <kernel/percpu.h>
 #include <kernel/string.h>
+#include <kernel/sched.h>
 #include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/vmm.h>
 
 #include <uapi/cosmo/syscall.h>
+
+#include <arch/cpu.h>
 
 #include <drivers/pci.h>
 #include <drivers/usb.h>
@@ -570,6 +573,265 @@ static void fake_blk_release(struct blkdev *bd)
 static void fake_bio_done(struct bio *bio)
 {
     (void)bio;
+}
+
+/* Local twins of the quiesce suite's helpers: this file has its own
+ * CHECK and cannot share statics across translation units. */
+static unsigned other_cpu_for_blk(void)
+{
+    for (unsigned c = 1; c < cpu_count(); c++)
+        if (cpu_online(c))
+            return c;
+    return 0;
+}
+
+static bool wait_flag_blk(const volatile unsigned *flag, unsigned ms)
+{
+    uint64_t end = clock_now_ns() + (uint64_t)ms * 1000000ULL;
+    while (__atomic_load_n(flag, __ATOMIC_ACQUIRE) == 0) {
+        if (clock_now_ns() > end)
+            return false;
+        arch_cpu_relax();
+    }
+    return true;
+}
+
+static bool threads_settle_blk(unsigned expected)
+{
+    uint64_t deadline = clock_now_ns() + 500ULL * 1000000ULL;
+    while (thread_count() != expected) {
+        if (clock_now_ns() > deadline)
+            return false;
+        sched_yield();
+    }
+    return true;
+}
+
+/* --- the unregister barrier, raced ---------------------------------------
+ *
+ * docs/audit/next-subsystem-lifetime-windows.md. blk_unregister sets
+ * `gone` and then waits for `submitting` to fall, and the comment beside
+ * it states a Dekker argument: a submitter that did not see `gone` has
+ * raised `submitting` before the unregister reads it, or the unregister
+ * saw the increment. Until these tests, blk_unregister had been called
+ * by two tests and in both the device was quiescent -- nothing had ever
+ * submitted to a device while it was being unregistered, which is the
+ * only circumstance the barrier exists for.
+ */
+
+struct race_blk {
+    struct blkdev bd;
+    unsigned submits;           /* reached the driver */
+    unsigned releases;
+};
+
+static int race_blk_submit(struct blkdev *bd, struct bio *bio)
+{
+    struct race_blk *f = bd->priv;
+    __atomic_fetch_add(&f->submits, 1u, __ATOMIC_ACQ_REL);
+    bio_complete(bio, 0);
+    return 0;
+}
+
+static void race_blk_release(struct blkdev *bd)
+{
+    struct race_blk *f = bd->priv;
+    f->releases++;
+}
+
+struct submitter {
+    struct blkdev *bd;
+    void *buf;
+    unsigned n;                 /* attempts */
+    volatile unsigned started;
+    volatile unsigned ok;       /* accepted */
+    volatile unsigned refused;  /* -ENODEV */
+    volatile unsigned other;    /* anything else: must stay zero */
+    volatile unsigned completions;
+    volatile unsigned stop;
+};
+
+static void race_bio_done(struct bio *bio)
+{
+    struct submitter *s = bio->arg;
+    if (s)
+        __atomic_fetch_add(&s->completions, 1u, __ATOMIC_ACQ_REL);
+}
+
+static void submitter_main(void *arg)
+{
+    struct submitter *s = arg;
+    __atomic_store_n(&s->started, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
+        struct bio bio = { .dev = s->bd,   .sector = 0,   .nsectors = 1, .dir = BIO_READ,
+                           .buf = s->buf,  .done = race_bio_done, .arg = s };
+        int rc = blk_submit(&bio);
+        s->n++;
+        if (rc == 0)
+            __atomic_fetch_add(&s->ok, 1u, __ATOMIC_ACQ_REL);
+        else if (rc == -ENODEV)
+            __atomic_fetch_add(&s->refused, 1u, __ATOMIC_ACQ_REL);
+        else
+            __atomic_fetch_add(&s->other, 1u, __ATOMIC_ACQ_REL);
+    }
+}
+
+/*
+ * The refusal half: submitters hammering a device while it is being
+ * unregistered, with the window between the `gone` store and the
+ * `submitting` load held open.
+ *
+ * The claim is not "some were refused" -- that is true of a test that
+ * ran entirely after the unregister -- but that the window was *crossed*:
+ * some accepted and some refused, every bio completed exactly once, and
+ * nothing reached the driver after the unregister returned.
+ */
+bool selftest_blk_submit_unregister(const char **reason)
+{
+    unsigned threads0 = thread_count();
+    unsigned cpu = other_cpu_for_blk();
+    if (cpu == 0) {
+        kinfo("selftest: blk-submit-unregister: one CPU, no submitter to race");
+        return true;
+    }
+
+    static struct race_blk f;
+    static const struct blkdev_ops ops = { .submit = race_blk_submit, .release = race_blk_release };
+    memset(&f, 0, sizeof(f));
+    f.bd.ops = &ops;
+    f.bd.sector_size = 512;
+    f.bd.capacity = 8;
+    f.bd.max_sectors = 8;
+    f.bd.priv = &f;
+    CHECK(blk_register(&f.bd, "rz") == 0);
+
+    void *buf = kmalloc(512, 0);
+    CHECK(buf != NULL);
+    struct submitter s = { .bd = &f.bd, .buf = buf };
+    struct thread *t = thread_create_on(submitter_main, &s, "blkrace", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    CHECK(wait_flag_blk(&s.started, 1000));
+
+    /* Let it land some accepted submissions first, so "crossed the
+     * window" is a fact and not an accident of scheduling. */
+    while (__atomic_load_n(&s.ok, __ATOMIC_ACQUIRE) < 4)
+        sched_yield();
+
+    blk_test_unregister_pause(20);
+    blk_unregister(&f.bd);
+    blk_test_unregister_pause(0);
+    unsigned reached_at_return = __atomic_load_n(&f.submits, __ATOMIC_ACQUIRE);
+
+    /* Keep submitting for a while *after* the unregister returned: every
+     * one of these must be refused, and none may reach the driver. */
+    while (__atomic_load_n(&s.refused, __ATOMIC_ACQUIRE) < 4)
+        sched_yield();
+    __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t);
+
+    CHECK(__atomic_load_n(&f.submits, __ATOMIC_ACQUIRE) == reached_at_return);   /* the claim */
+    CHECK(s.other == 0);                        /* only 0 or -ENODEV, nothing else */
+    CHECK(s.ok > 0 && s.refused > 0);           /* the window was crossed, not stepped over */
+    CHECK(s.completions == s.ok);               /* each accepted bio completed exactly once */
+    kfree(buf);
+    blkdev_put(&f.bd);                          /* the creator's reference: now it may go */
+    CHECK(f.releases == 1);
+    CHECK(threads_settle_blk(threads0));
+
+    kinfo("selftest: blk-submit-unregister: %u accepted and %u refused across the window; nothing reached the driver "
+          "after unregister returned",
+          s.ok, s.refused);
+    return true;
+}
+
+struct releaser {
+    volatile unsigned stop;
+};
+
+/* Releases the parked submitter, but only once the unregister is
+ * demonstrably draining -- the spin counter moving is what says so. A
+ * release on a timer would let the submitter leave before the unregister
+ * ever looked, and the test would pass having raced nothing. */
+static void releaser_main(void *arg)
+{
+    struct releaser *r = arg;
+    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE)) {
+        if (blk_test_unregister_spins() > 0) {
+            blk_test_release_in_driver();
+            return;
+        }
+        sched_yield();
+    }
+}
+
+/*
+ * The drain half: a submitter parked *inside* the window, past the
+ * `gone` check with `submitting` raised, and an unregister that must not
+ * return until it leaves.
+ *
+ * The assertion is an order of two events, not a timing: the submitter
+ * stamps the moment before it lowers `submitting`, blk_unregister stamps
+ * the moment it returns, and the second must be after the first.
+ */
+bool selftest_blk_unregister_drain(const char **reason)
+{
+    unsigned threads0 = thread_count();
+    unsigned cpu = other_cpu_for_blk();
+    if (cpu == 0) {
+        kinfo("selftest: blk-unregister-drain: one CPU, nothing to park");
+        return true;
+    }
+
+    static struct race_blk f;
+    static const struct blkdev_ops ops = { .submit = race_blk_submit, .release = race_blk_release };
+    memset(&f, 0, sizeof(f));
+    f.bd.ops = &ops;
+    f.bd.sector_size = 512;
+    f.bd.capacity = 8;
+    f.bd.max_sectors = 8;
+    f.bd.priv = &f;
+    CHECK(blk_register(&f.bd, "dz") == 0);
+
+    void *buf = kmalloc(512, 0);
+    CHECK(buf != NULL);
+    struct submitter s = { .bd = &f.bd, .buf = buf };
+    struct releaser rel = { 0 };
+
+    blk_test_hold_in_driver(true);
+    struct thread *t = thread_create_on(submitter_main, &s, "blkpark", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    /* A submitter is inside the window: this is the positive
+     * synchronisation, not an assumption about scheduling. */
+    uint64_t deadline = clock_now_ns() + 2ULL * 1000000000ULL;
+    while (!blk_test_submitter_parked()) {
+        CHECK(clock_now_ns() < deadline);
+        sched_yield();
+    }
+
+    struct thread *rt = thread_create_on(releaser_main, &rel, "blkrel", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(rt != NULL);
+
+    blk_unregister(&f.bd);
+    __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
+
+    /* It really waited, and it returned after the submitter left. */
+    unsigned spins = blk_test_unregister_spins();
+    CHECK(spins > 0);
+    CHECK(blk_test_drain_ordered());
+
+    __atomic_store_n(&s.stop, 1u, __ATOMIC_RELEASE);
+    thread_join(t);
+    thread_join(rt);
+    blk_test_hold_in_driver(false);
+    kfree(buf);
+    blkdev_put(&f.bd);                          /* the creator's reference: now it may go */
+    CHECK(f.releases == 1);
+    CHECK(threads_settle_blk(threads0));
+
+    kinfo("selftest: blk-unregister-drain: the unregister spun %u time(s) for a submitter inside the driver and "
+          "returned after it left",
+          spins);
+    return true;
 }
 
 bool selftest_blk_lifetime(const char **reason)
