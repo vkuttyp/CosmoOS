@@ -666,14 +666,29 @@ def main():
     # it just gets one sized for what it is.
     #
     # `cosmofs-replay` is the same shape: it mounts and structurally
-    # checks *every prefix* of a recorded write stream -- 211 complete
+    # checks *every prefix* of a recorded write stream -- complete
     # filesystem images behind one SELFTEST line -- so it grows whenever
     # a transaction writes another block, and each image is a mount and
     # a full walk rather than a step of one test. Its CI spread on
-    # identical code is 4703-8309 ms against a budget of 8000
+    # identical code was 4703-8309 ms against a budget of 8000
     # (docs/audit/next-subsystem-unmount-leak.md), which is a runner
     # deciding the result rather than the code.
-    composite_budget_ms = {"process-user": 20000, "cosmofs-replay": 20000}
+    #
+    # It has grown twice since, by design and not by drift: the snapshot
+    # deadlist unit put a snapshot in the workload (211 -> 334 images,
+    # docs/audit/next-subsystem-snap-deadlist.md) and the orphan unit
+    # held a handle across a sync (334 -> 410,
+    # docs/audit/next-subsystem-orphan.md). Each addition is a class of
+    # crash the suite could not see before. At 410 images it takes about
+    # 13 s here and 20.4 s on CI, which failed a 20 s budget by two per
+    # cent -- the runner deciding the result again.
+    #
+    # 40 s, then: roughly twice CI's current number, so the next unit
+    # that adds a workload is not fighting the clock, and still far
+    # enough under the 180 s boot timeout to catch a suite that hangs.
+    # A budget's job is to notice a test that stopped terminating, not
+    # to ration a test that got more thorough.
+    composite_budget_ms = {"process-user": 20000, "cosmofs-replay": 40000}
     timings = []
     for ln in selftest_lines:
         m = re.match(r"SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)", ln)

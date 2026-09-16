@@ -694,6 +694,18 @@ word along from `free_root`, three reserved words left,
 `CFS_KIND_ORPHAN` 14 -- so the next version bump fails here too if it
 forgets.
 
+**And the crash suite outgrew its budget on CI, which is the risk this
+report named.** At 410 images `cosmofs-replay` takes about 13 s here and
+20.4 s on CI's slower runner, which failed a 20 s budget by two per
+cent. Every one of the 312 tests passed; the harness failed the boot on
+the clock. The budget is now 40 s, roughly twice CI's current number,
+with the reason written where it is set: the suite has grown twice by
+design and not by drift -- a snapshot in the workload (211 → 334
+images) and now a handle held across a sync (334 → 410) -- and each
+addition is a class of crash it could not see before. A budget's job is
+to notice a test that stopped terminating, not to ration a test that got
+more thorough.
+
 **Benchmarks.** The ordinary unlink's cost is unchanged and
 `cosmofs-orphan-cancels` is the measurement: with the writeback thread
 off, `orphan_root` is 0 after the commit, so no record was written and
