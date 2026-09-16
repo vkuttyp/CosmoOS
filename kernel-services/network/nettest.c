@@ -545,6 +545,7 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
  * alone, and an entry-only check is not mistaken for evidence about it.
  */
 
+#if CONFIG_DEBUG
 struct tcp_releaser {
     volatile unsigned stop;
 };
@@ -580,9 +581,15 @@ static void tcp_releaser_main(void *arg)
     }
     tcp_test_release_callback();   /* never leave a callback parked */
 }
+#endif /* CONFIG_DEBUG */
 
 bool selftest_tcp_pcb_timer_free(const char **reason)
 {
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: tcp-pcb-timer-free: no test hooks in this build; skipping");
+    return true;
+#else
     unsigned threads0 = thread_count();
     /*
      * Three CPUs, and each has a job the other two cannot do.
@@ -658,6 +665,7 @@ bool selftest_tcp_pcb_timer_free(const char **reason)
           "through the interval",
           spins);
     return true;
+#endif
 }
 
 bool selftest_net_lo_tcp(const char **reason)

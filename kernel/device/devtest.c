@@ -584,8 +584,10 @@ static void fake_bio_done(struct bio *bio)
     (void)bio;
 }
 
+#if CONFIG_DEBUG
 /* Local twins of the quiesce suite's helpers: this file has its own
- * CHECK and cannot share statics across translation units. */
+ * CHECK and cannot share statics across translation units. Debug only,
+ * with the tests that use them. */
 static unsigned other_cpu_for_blk(void)
 {
     for (unsigned c = 1; c < cpu_count(); c++)
@@ -662,8 +664,15 @@ static void busy_remove(struct device *dev)
     busy_drvdata = NULL;
 }
 
+#endif /* CONFIG_DEBUG: the helpers above */
+
 bool selftest_device_remove_busy(const char **reason)
 {
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: device-remove-busy: no test hooks in this build; skipping");
+    return true;
+#else
     ensure_fake_bus();
     static struct device d;
     static struct device_driver drv = { .name = "busy", .match_data = "busy0", .probe = busy_probe,
@@ -706,6 +715,7 @@ bool selftest_device_remove_busy(const char **reason)
           "with %u unit(s) of work outstanding",
           busy_inflight);
     return true;
+#endif
 }
 
 /* --- the unregister barrier, raced ---------------------------------------
@@ -720,6 +730,7 @@ bool selftest_device_remove_busy(const char **reason)
  * only circumstance the barrier exists for.
  */
 
+#if CONFIG_DEBUG
 struct race_blk {
     struct blkdev bd;
     unsigned submits;           /* reached the driver */
@@ -789,6 +800,13 @@ static void submitter_main(void *arg)
  */
 bool selftest_blk_submit_unregister(const char **reason)
 {
+#if !CONFIG_DEBUG
+    /* The hook that holds the window open is a debug-build thing, and a
+     * race test without it would be a race test hoping. */
+    (void)reason;
+    kinfo("selftest: blk-submit-unregister: no test hooks in this build; skipping");
+    return true;
+#else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu_for_blk();
     if (cpu == 0) {
@@ -843,6 +861,7 @@ bool selftest_blk_submit_unregister(const char **reason)
           "after unregister returned",
           s.ok, s.refused);
     return true;
+#endif
 }
 
 struct releaser {
@@ -864,6 +883,7 @@ static void releaser_main(void *arg)
         sched_yield();
     }
 }
+#endif /* CONFIG_DEBUG */
 
 /*
  * The drain half: a submitter parked *inside* the window, past the
@@ -876,6 +896,11 @@ static void releaser_main(void *arg)
  */
 bool selftest_blk_unregister_drain(const char **reason)
 {
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: blk-unregister-drain: no test hooks in this build; skipping");
+    return true;
+#else
     unsigned threads0 = thread_count();
     unsigned cpu = other_cpu_for_blk();
     if (cpu == 0) {
@@ -933,6 +958,7 @@ bool selftest_blk_unregister_drain(const char **reason)
           "returned after it left",
           spins);
     return true;
+#endif
 }
 
 bool selftest_blk_lifetime(const char **reason)
