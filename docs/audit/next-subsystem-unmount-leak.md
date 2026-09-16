@@ -742,6 +742,9 @@ cosmofs-freelog-idempotent:  two mounts, one record, 500 free both times
 cosmofs-freelog-reuse:       a replayed block was taken, written, and given back
 cosmofs-freelog-chain:       601 blocks freed in one transaction, more than the 506 a record
                              block holds, and all of them came back
+cosmofs-freelog-rollback:    a commit failed with the record reserved and gave every block back
+cosmofs-freelog-malformed:   a record naming 507 blocks in a block that holds 506 is refused,
+                             and the mount falls back from generation 3 to 2
 ```
 
 **The chain.** `gmake clean` first, then: x86-64 and AArch64 debug, 297
@@ -765,12 +768,14 @@ ten-thousand-block mount was not built, because the largest transaction
 the suite can make on its test disks is the 601-block one and a bigger
 disk would be measuring the ramdisk.
 
-**Four proofs break exactly one test**, which is the strongest form this
+**Six proofs break exactly one test**, which is the strongest form this
 evidence takes: `gate-at-version-8` breaks only
 `cosmofs-freelog-format`, `record-ignores-snapshots` only
 `cosmofs-freelog-snapshot`, `chain-truncated` only
-`cosmofs-freelog-chain`, and `release-through-hold-filter` only
-`cosmofs-freelog-not-held`. `no-replay` and `replay-clears-record` each
+`cosmofs-freelog-chain`, `release-through-hold-filter` only
+`cosmofs-freelog-not-held`, `keep-the-reservation` only
+`cosmofs-freelog-rollback`, and `count-read-as-empty` only
+`cosmofs-freelog-malformed`. `no-replay` and `replay-clears-record` each
 break six, `keep-previous-chain` seventeen, and `reserve-after-fixpoint`
 forty -- the last of which is the ordering argument's own evidence, and
 was measured by accident when a hunk of that injection was committed by
