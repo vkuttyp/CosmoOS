@@ -1836,12 +1836,462 @@ bool selftest_cosmofs_check_snapshot(const char **reason)
 }
 
 /*
- * The leak the design admits by omission, as a test: a file unlinked
- * while a handle still holds it keeps its blocks until the last
- * reference goes (cfs_evict frees them), and there is no on-disk record
- * of that intention. Interrupt it and the inode is an orphan: no name
- * reaches it, its blocks are allocated, and nothing ever reconsiders
- * them. This is what the structural check was built to find.
+ * The defect, told the right way round: a file opened, unlinked and
+ * committed, and the mount then dropped with the handle still open --
+ * which is a crash, in the only way a self-test can have one. The
+ * *remount* reclaims the inode and its blocks, with no operator and no
+ * repair flag (docs/audit/next-subsystem-orphan.md).
+ */
+bool selftest_cosmofs_orphan_crash(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+    uint64_t inodes_before = r.counted_inodes;
+
+    /*
+     * Sixteen blocks, so that the measurement below is about the file
+     * and not about the records. Comparing the free count with a
+     * baseline taken before any of this would compare against a
+     * filesystem that had no free record either, and be off by the
+     * record's own block -- which is a true difference and not the one
+     * under test. The claim is the *reclaim*: how much came back.
+     */
+    const size_t biglen = 16 * 4096;
+    uint8_t *big = kmalloc(biglen, 0);
+    CHECK(big != NULL);
+    fill_incompressible(big, biglen, 0x5eed);
+    struct file *f;
+    bool wrote = write_file(ENG "/doomed", (const char *)big, (uint32_t)biglen);
+    kfree(big);
+    CHECK(wrote);
+    CHECK(vfs_open(NULL, ENG "/doomed", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/doomed") == 0);
+    CHECK(vfs_sync() == 0);
+
+    /* On disk the inode now has no name and keeps its blocks -- and the
+     * root says so, which is the whole difference. */
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.orphan_root != 0);
+    CHECK(st.pending_orphans == 1);
+    /* What the filesystem looks like with the promise outstanding. */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);                          /* a recorded orphan is not a finding */
+    CHECK(r.orphan.count == 0);
+    uint64_t free_outstanding = r.counted_free;
+
+    /* The crash: the handle never closes, so cfs_evict never runs, and
+     * the forced unmount drops the open transaction as a crash before
+     * the root write would. */
+    file_put(f);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /*
+     * The mount schedules the reclaim; the first commit makes it
+     * durable. The blocks are freed *deferred*, because the root this
+     * mount is running on still names them -- handing them to the
+     * allocator before a root says they are free is the ordering every
+     * other free in this filesystem obeys. So the space comes back at
+     * the commit, exactly as an ordinary eviction's does.
+     */
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);                          /* the claim */
+    CHECK(r.orphan.count == 0);
+    /* The file's sixteen blocks are back, and so is its inode slot. */
+    CHECK(r.counted_free >= free_outstanding + 16);
+    CHECK(r.counted_inodes == inodes_before);
+
+    kinfo("selftest: cosmofs-orphan-crash: the mount reclaimed the inode and %llu blocks with no operator and no "
+          "repair flag",
+          (unsigned long long)(r.counted_free - free_outstanding));
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * An ordinary unlink writes no record -- and the *held* case does write
+ * one, which is the other half and belongs in the same test. Separately,
+ * either passes for the wrong reason: "no record" is also true of a
+ * filesystem whose record never works.
+ *
+ * The condition, stated rather than relied on: the writeback thread is
+ * off, so no commit falls between the unlink and the eviction. With it
+ * on, a commit landing in that gap writes a record for an inode about to
+ * be evicted and the next commit retires it -- correct, and not free,
+ * which is why the report's claim is the narrow one.
+ */
+bool selftest_cosmofs_orphan_cancels(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;   /* engine_mount turns the writeback thread off */
+
+    CHECK(write_file(ENG "/plain", "no handle on this one", 21));
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    CHECK(vfs_unlink(NULL, ENG "/plain") == 0);
+    struct cosmofs_stats mid;
+    CHECK(cosmofs_stats(mount_of(ENG), &mid) == 0);
+    CHECK(mid.pending_orphans == 0);   /* the eviction already cancelled it */
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.orphan_root == 0);     /* so the commit wrote no record at all */
+
+    /* And the same filesystem does write one when a handle is held, so
+     * "no record" above is a fact about the unlink and not about the
+     * record. */
+    struct file *f;
+    CHECK(write_file(ENG "/held", "this one is open", 16));
+    CHECK(vfs_open(NULL, ENG "/held", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.orphan_root != 0);
+    CHECK(after.pending_orphans == 1);
+    file_put(f);
+    CHECK(vfs_sync() == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.orphan_root == 0);     /* the eviction retired it */
+    CHECK(after.pending_orphans == 0);
+
+    kinfo("selftest: cosmofs-orphan-cancels: an unlink with nothing holding it wrote no record, one with a handle "
+          "wrote and retired one");
+    (void)before;
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * An empty directory removed while a process's working directory
+ * references it. The cwd is a referenced vnode
+ * (docs/audit/next-subsystem-cwd-ref.md), so rmdir succeeds and the
+ * eviction waits -- the same defect with a directory's blocks.
+ *
+ * And the trap: rmdir already decremented the *parent's* link count in
+ * the same transaction, so the replay must not touch the parent. The
+ * parent's nlink is asserted at every point in the cycle.
+ */
+bool selftest_cosmofs_orphan_dir(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+
+    CHECK(vfs_mkdir(NULL, ENG "/keep", 0755) == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/keep/going", 0755) == 0);
+    CHECK(vfs_sync() == 0);
+
+    struct cosmo_stat pst;
+    CHECK(vfs_stat(NULL, ENG "/keep", &pst) == 0);
+    uint32_t parent_nlink = pst.nlink;
+
+    /* A reference on the directory that outlives its name: a vnode held
+     * the way a working directory holds one. */
+    struct vnode *held;
+    CHECK(vfs_lookup(NULL, ENG "/keep/going", &held) == 0);
+    CHECK(vfs_rmdir(NULL, ENG "/keep/going") == 0);
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.orphan_root != 0);
+    CHECK(st.pending_orphans == 1);
+    CHECK(vfs_stat(NULL, ENG "/keep", &pst) == 0);
+    CHECK(pst.nlink == parent_nlink - 1);   /* rmdir took the parent's link, once */
+    uint32_t after_rmdir = pst.nlink;
+
+    /* The crash, with the reference still held. */
+    vnode_put(held);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+    CHECK(r.orphan.count == 0);
+    CHECK(r.nlink_wrong.count == 0);        /* the replay did not touch the parent */
+    CHECK(vfs_stat(NULL, ENG "/keep", &pst) == 0);
+    CHECK(pst.nlink == after_rmdir);        /* the same link count, not one less again */
+
+    kinfo("selftest: cosmofs-orphan-dir: a directory removed under a live reference was reclaimed, parent nlink %u "
+          "throughout",
+          (unsigned)after_rmdir);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * A file replaced by a rename while it is open: the half of this defect
+ * that is easiest to miss, because the victim never passes through
+ * unlink.
+ */
+bool selftest_cosmofs_orphan_rename(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
+
+    const size_t biglen = 16 * 4096;
+    uint8_t *big = kmalloc(biglen, 0);
+    CHECK(big != NULL);
+    fill_incompressible(big, biglen, 0xf00d);
+    bool wrote = write_file(ENG "/victim", (const char *)big, (uint32_t)biglen);
+    kfree(big);
+    CHECK(wrote);
+    CHECK(write_file(ENG "/winner", "short", 5));
+    CHECK(vfs_sync() == 0);
+
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/victim", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_rename(NULL, ENG "/winner", ENG "/victim") == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.pending_orphans == 1);
+    CHECK(st.orphan_root != 0);
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    uint64_t free_outstanding = r.counted_free;
+
+    file_put(f);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+    CHECK(read_matches(ENG "/victim", "short", 5));   /* the rename itself stood */
+    CHECK(r.counted_free >= free_outstanding + 16);   /* the replaced file's blocks came back */
+
+    kinfo("selftest: cosmofs-orphan-rename: the replaced file's %llu blocks came back at the mount",
+          (unsigned long long)(r.counted_free - free_outstanding));
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * The record is not cleared when it is replayed, for the reason the free
+ * record's is not: a mount that replays and goes away without committing
+ * must leave the filesystem as it found it, or the second mount loses
+ * what the first reclaimed. And `inode_count` must move exactly once --
+ * the replay skips an inode whose slot is already empty *before* the
+ * decrement, which is the only thing standing between this and a count
+ * that drops twice.
+ */
+bool selftest_cosmofs_orphan_idempotent(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    static const char big[4096] = { 0 };
+    struct file *f;
+    CHECK(write_file(ENG "/gone", big, sizeof(big)));
+    CHECK(vfs_open(NULL, ENG "/gone", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_sync() == 0);
+    file_put(f);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+
+    /* First mount: the replay reclaims it, and the record still stands
+     * because no commit has retired it. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats first;
+    CHECK(cosmofs_stats(mount_of(ENG), &first) == 0);
+    CHECK(first.orphan_root != 0);
+    struct cosmofs_check_report r1;
+    CHECK(cosmofs_check(mount_of(ENG), &r1, 0) == 0);
+
+    /* Away again without committing. */
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+
+    /* Second mount: the same list, the same effect, the count moved once. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats second;
+    CHECK(cosmofs_stats(mount_of(ENG), &second) == 0);
+    CHECK(second.orphan_root == first.orphan_root);
+    CHECK(second.inode_count == first.inode_count);
+    CHECK(second.free_blocks == first.free_blocks);
+    CHECK(vfs_sync() == 0);   /* and only now is the reclaim durable */
+    struct cosmofs_check_report r2;
+    CHECK(cosmofs_check(mount_of(ENG), &r2, 0) == 0);
+    CHECK(r2.clean);
+    CHECK(r2.counted_inodes == r1.counted_inodes);
+
+    kinfo("selftest: cosmofs-orphan-idempotent: two mounts, one record, %llu inodes both times",
+          (unsigned long long)second.inode_count);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * The record's blocks are allocated in the bitmap the root publishes,
+ * because they come from the commit's reservation rather than from an
+ * allocation after the fixpoint. A fill that allocated instead would set
+ * the bit after commit_bitmap had written it, so the next mount would
+ * read the block as free while the root reaches it: `seen_not_alloc`,
+ * the direction that hands live data to the allocator.
+ *
+ * Also the chain: more orphans than one block holds.
+ */
+bool selftest_cosmofs_orphan_reserved(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 4096, reason))
+        return false;
+    const unsigned many = CFS_ORPHANS_PER_BLOCK + 20u;
+    struct file **fs_ = kmalloc(many * sizeof(*fs_), KMEM_ZERO);
+    CHECK(fs_ != NULL);
+    char path[64];
+    bool ok = true;
+    for (unsigned i = 0; i < many && ok; i++) {
+        ksnprintf(path, sizeof(path), ENG "/o%u", i);
+        ok = write_file(path, "x", 1) && vfs_open(NULL, path, COSMO_O_RDONLY, 0, &fs_[i]) == 0 &&
+             vfs_unlink(NULL, path) == 0;
+    }
+    if (!ok) {
+        for (unsigned i = 0; i < many; i++)
+            if (fs_[i])
+                file_put(fs_[i]);
+        kfree(fs_);
+        *reason = "could not build the orphan set";
+        return false;
+    }
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.pending_orphans == many);
+    CHECK(st.orphan_root != 0);
+
+    for (unsigned i = 0; i < many; i++)
+        file_put(fs_[i]);
+    kfree(fs_);
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_sync() == 0);   /* the reclaim lands on the mount's first commit */
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.seen_not_alloc.count == 0);   /* the claim */
+    CHECK(r.clean);
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.pending_orphans == 0);
+
+    kinfo("selftest: cosmofs-orphan-reserved: %u inodes recorded across a chain and all of them replayed", many);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * A hundred commits with a handle held leave one chain and no residue:
+ * each writes its own record and releases its predecessor's. Not
+ * releasing it would cost a block a commit, which no single-commit test
+ * can see.
+ */
+bool selftest_cosmofs_orphan_supersede(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    struct file *f;
+    CHECK(write_file(ENG "/held", "open across all of it", 21));
+    CHECK(vfs_open(NULL, ENG "/held", COSMO_O_RDONLY, 0, &f) == 0);
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats first;
+    CHECK(cosmofs_stats(mount_of(ENG), &first) == 0);
+    CHECK(first.orphan_root != 0);
+
+    bool ok = true;
+    for (unsigned i = 0; i < 100 && ok; i++) {
+        char c = (char)('a' + (i % 26));
+        ok = write_file(ENG "/churn", &c, 1) && vfs_sync() == 0;
+    }
+    CHECK(ok);
+    struct cosmofs_stats last;
+    CHECK(cosmofs_stats(mount_of(ENG), &last) == 0);
+    CHECK(last.orphan_root != 0);
+    CHECK(last.pending_orphans == 1);
+    /* One block for the churn file and one for the record, either side:
+     * the free count does not fall by a block per commit. */
+    CHECK(first.free_blocks - last.free_blocks < 8);
+
+    file_put(f);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+
+    kinfo("selftest: cosmofs-orphan-supersede: 100 commits, %llu free blocks lost to them in all",
+          (unsigned long long)(first.free_blocks - last.free_blocks));
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * A fill that fails with the record's blocks reserved gives them back
+ * and publishes no root: the filesystem is exactly as it was.
+ */
+bool selftest_cosmofs_orphan_rollback(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    CHECK(write_file(ENG "/held", "content", 7));
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    struct file *f;
+    CHECK(vfs_open(NULL, ENG "/held", COSMO_O_RDONLY, 0, &f) == 0);
+    cosmofs_test_fail_orphan(mount_of(ENG), true);
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() != 0);                 /* the commit fails */
+    cosmofs_test_fail_orphan(mount_of(ENG), false);
+    file_put(f);
+
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.generation == before.generation);   /* no root was published */
+    CHECK(after.free_blocks == before.free_blocks);
+    CHECK(after.orphan_root == 0);
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+    CHECK(read_matches(ENG "/held", "content", 7));   /* the unlink went with it */
+
+    kinfo("selftest: cosmofs-orphan-rollback: the failed fill left generation %llu and %llu free blocks",
+          (unsigned long long)after.generation, (unsigned long long)after.free_blocks);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * An orphan the record did *not* name.
+ *
+ * This test used to be the defect's own description: it opened a file,
+ * unlinked it, committed, dropped the mount with the handle still open,
+ * and asserted that the inode survived with its blocks and that only an
+ * operator running the checker with the repair flag ever got them back.
+ * Its comment called that "the leak the design admits by omission". The
+ * omission is now filled -- the root records what it still owes and the
+ * next mount does what cfs_evict would have done
+ * (docs/audit/next-subsystem-orphan.md, and `cosmofs-orphan-crash` is
+ * that story told the right way round).
+ *
+ * So what is left for this test is the case the checker still owns: an
+ * inode with blocks and no name that no record explains, which is what a
+ * record that was lost or never written leaves behind. The poison hook
+ * makes one directly, because after the orphan unit an ordinary
+ * unlinked-but-open file is no longer one.
  */
 bool selftest_cosmofs_check_orphan_crash(const char **reason)
 {
@@ -1852,32 +2302,17 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0 && r.clean);
     uint64_t free_before = r.counted_free;
 
-    /* Open it, unlink it, and commit while the handle is still open: on
-     * disk the inode now has no name and keeps its blocks. */
-    struct file *f;
-    CHECK(write_file(ENG "/doomed", "still open when it went", 23));
-    CHECK(vfs_open(NULL, ENG "/doomed", COSMO_O_RDONLY, 0, &f) == 0);
-    CHECK(vfs_unlink(NULL, ENG "/doomed") == 0);
-    CHECK(vfs_sync() == 0);
+    /* An inode with blocks that no entry names, and no record naming it
+     * either -- the shape a crash used to leave and a lost record still
+     * would. */
+    uint64_t lost = 0;
+    CHECK(cosmofs_test_corrupt(mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, &lost) == 0);
+    CHECK(lost != 0);
 
-    /* The crash: the handle never closes, so cfs_evict never runs. The
-     * force unmount drops the open transaction, as a crash before the
-     * root write would. */
-    struct cosmofs_check_report during;
-    CHECK(cosmofs_check(mount_of(ENG), &during, 0) == 0);
-    CHECK(during.orphan.count == 1);   /* already an orphan on disk, handle or no handle */
-    file_put(f);
-
-    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
-    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
-    cosmofs_test_set_writeback(mount_of(ENG), false);
-
-    /* After the remount nothing holds the inode, and nothing frees it
-     * either: the space is gone until somebody checks. */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
-    CHECK(r.orphan.count == 1);
+    CHECK(r.orphan.count == 1);              /* the checker still owns this case */
+    CHECK(r.orphan.named == 1 && r.orphan.name[0] == lost);
     CHECK(r.counted_free < free_before);
-    uint64_t lost = r.orphan.name[0];
 
     CHECK(cosmofs_check(mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0);
     CHECK(r.orphan.repaired == 1);
@@ -1885,10 +2320,11 @@ bool selftest_cosmofs_check_orphan_crash(const char **reason)
     CHECK(vfs_sync() == 0);   /* the deferred frees land on the commit after the repair's */
     CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
     CHECK(r.clean);
-    CHECK(r.counted_free == free_before);   /* every block the file held came back */
+    CHECK(r.counted_free == free_before);   /* every block the inode held came back */
 
     check_teardown(bd);
-    kinfo("selftest: cosmofs-check-orphan-crash: inode %llu survived its unlink with its blocks, and the check reclaimed them",
+    kinfo("selftest: cosmofs-check-orphan-crash: inode %llu had blocks and no name and no record, and the check "
+          "reclaimed them",
           (unsigned long long)lost);
     return true;
 }
