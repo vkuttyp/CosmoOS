@@ -68,11 +68,18 @@ the thread is travelling.
 The rule is stated here rather than inferred from the code because it
 is the kind that survives review and dies in a later refactor: a reader
 who sees only one call site has no reason to suspect an ordering
-requirement. Check: lockdep sees both acquisitions and would report the
-reversed order as a cycle the first time two CPUs balanced towards each
-other; the `sched-balance-*` self-tests run four CPUs pulling
-concurrently, which is what makes that first time happen during a boot
-rather than in production.
+requirement. Both locks are the `runqueue` class, so the second acquisition carries
+the `RUNQUEUE_NESTED_SECOND` annotation
+(`kernel/include/kernel/lockdep.h`); without it lockdep reports a
+same-class recursion, which is what the first boot of this code did. The
+annotation says only "this second acquisition is deliberate" — it is the
+*order* that makes it safe, and nothing but review and this invariant
+enforces the order itself, because to lockdep both locks look alike.
+
+Check: the `sched-balance-*` self-tests run four CPUs pulling
+concurrently, so a reversed acquisition would deadlock during a boot
+rather than in production; the spinlock owner check panics on a
+self-deadlock.
 
 ## Entry conditions
 

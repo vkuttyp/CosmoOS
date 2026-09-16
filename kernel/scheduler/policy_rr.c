@@ -42,6 +42,44 @@ static struct thread *rr_pick_next(struct runqueue *rq)
     return list_first_entry(&rq->ready[prio], struct thread, rq_link);
 }
 
+/*
+ * The thread this queue would miss least: the lowest priority it has,
+ * and within that level the one that would have run last.
+ *
+ * Lowest priority because the high-priority threads are the reason this
+ * CPU is busy and the ones it is about to run; last-in because it is
+ * furthest from running here, so moving it disturbs the least work. A
+ * thread whose affinity excludes the destination is skipped rather than
+ * refused, so a queue full of pinned threads simply offers the first one
+ * that may travel.
+ */
+static struct thread *rr_pick_migratable(struct runqueue *rq, unsigned dst)
+{
+    cpumask_t want = CPUMASK_OF(dst);
+    for (int prio = SCHED_PRIO_COUNT - 1; prio >= 0; prio--) {
+        if (!(rq->bitmap & ((uint64_t)1 << prio)))
+            continue;
+        struct thread *t;
+        list_for_each_entry_reverse(t, &rq->ready[prio], rq_link) {
+            /*
+             * Not the thread this CPU is running, which *can* be in a
+             * ready list: a thread that blocks and is woken before it
+             * stops running is left queued, and takes itself off in
+             * `sched_set_running_current`. In that window it is both
+             * `rq->current` and a list entry, and migrating it would
+             * move a thread whose context is live on another CPU's
+             * stack. An assertion in `sched_balance` caught exactly this
+             * on the first boot of the balancer.
+             */
+            if (t == rq->current)
+                continue;
+            if (t->affinity & want)
+                return t;
+        }
+    }
+    return NULL;
+}
+
 static void rr_slice_new(struct thread *t)
 {
     t->slice_left_ns = SCHED_SLICE_NS;
@@ -70,4 +108,5 @@ const struct sched_policy sched_policy_rr = {
     .pick_next = rr_pick_next,
     .tick = rr_tick,
     .slice_new = rr_slice_new,
+    .pick_migratable = rr_pick_migratable,
 };
