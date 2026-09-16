@@ -1003,11 +1003,12 @@ int cfs_commit(struct cfs *fs)
         rc = freelog_release_previous(fs);
         if (rc)
             return rc;
-    }   /* INJECTED: the reservation moved below the fixpoint */
+        rc = freelog_reserve(fs, &record, &record_n);
+        if (rc)
+            return rc;
+    }
 
     rc = commit_bitmap(fs);
-    if (rc == 0 && record_frees)
-        rc = freelog_reserve(fs, &record, &record_n);   /* INJECTED */
     if (rc == 0 && record_frees)
         rc = freelog_fill(fs, record, record_n);
     kfree(record);
