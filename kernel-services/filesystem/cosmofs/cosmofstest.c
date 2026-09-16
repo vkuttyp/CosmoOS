@@ -312,6 +312,34 @@ static void fill_incompressible(uint8_t *buf, size_t len, uint32_t seed)
 }
 
 
+/*
+ * A file of `pages` blocks nothing can compress. A test that counts
+ * blocks has to write these: a page of zeros costs almost nothing here,
+ * so six hundred pages of them are not six hundred blocks.
+ */
+static bool write_wide_file(const char *path, unsigned pages)
+{
+    static uint8_t page[4096];
+    struct file *f = NULL;
+    if (vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f))
+        return false;
+    bool ok = true;
+    for (unsigned i = 0; ok && i < pages; i++) {
+        /*
+         * Spread the seeds, do not walk them. `fill_incompressible`
+         * starts from `seed | 1`, so seeds `n` and `n + 1` collide
+         * whenever `n` is even and every second page comes out
+         * byte-identical to the one before it -- which the filesystem
+         * then stores once, and 600 pages cost 452 blocks instead of
+         * 601. An odd multiplier keeps consecutive pages apart.
+         */
+        fill_incompressible(page, sizeof(page), 0x9E3779B9u * (i + 1));
+        ok = file_write(f, page, sizeof(page)) == (int64_t)sizeof(page);
+    }
+    file_put(f);
+    return ok;
+}
+
 #define ENG "/mnt/eng"
 
 static bool engine_mount(struct blkdev **bdp, uint64_t nblocks, const char **reason)
@@ -381,8 +409,17 @@ bool selftest_cosmofs_holes(const char **reason)
     file_put(f);
     CHECK(vfs_sync() == 0);
     CHECK(cosmofs_stats(mount_of(ENG), &st1) == 0);
-    CHECK(st1.free_blocks + 6 >= st0.free_blocks);   /* the checksum tree of an empty file is gone too */
-    kinfo("selftest: cosmofs-holes: a 200 MiB sparse file cost %llu blocks", (unsigned long long)(st0.free_blocks - st1.free_blocks));
+    /*
+     * Back to within a few blocks of where it started. The slack covers
+     * what an empty file still costs -- its checksum tree is gone, its
+     * inode is not -- and, from format version 9, the record of what the
+     * last commit freed: a version-9 filesystem always has one, so the
+     * count it is compared against was taken before there was one
+     * (docs/audit/next-subsystem-unmount-leak.md).
+     */
+    kinfo("selftest: cosmofs-holes: %llu blocks still held after truncating a 200 MiB sparse file",
+          (unsigned long long)(st0.free_blocks - st1.free_blocks));
+    CHECK(st1.free_blocks + 8 >= st0.free_blocks);
     return engine_unmount(bd, reason);
 }
 
@@ -2130,11 +2167,19 @@ bool selftest_cosmofs_check_partial(const char **reason)
     /*
      * The comparison is the last phase, so a finding only it can produce
      * is the proof that the pass reached the end rather than stopping at
-     * the unreadable block: /d/x's blocks are allocated and no name
-     * reaches them any more.
+     * the unreadable block. That finding is the **orphan**: /d/x's inode
+     * is in the map and no name reaches it, which only the final walk of
+     * the inode maps can conclude.
+     *
+     * This used to assert a leaked block instead, and that assertion was
+     * being satisfied by something else entirely: before format version
+     * 9 every unmount stranded its last transaction's frees, so there
+     * was always a leak to find and the test passed for a reason its own
+     * comment did not give. /d/x's blocks are *seen* -- the pass reaches
+     * them through the orphaned inode -- so they were never the leak
+     * this line was reading (docs/audit/next-subsystem-unmount-leak.md).
      */
-    CHECK(rep.alloc_not_seen.count >= 1);
-    CHECK(rep.orphan.count >= 1);        /* and its inode is reachable from nothing */
+    CHECK(rep.orphan.count >= 1);
     CHECK(rep.blocks_seen > 0);
 
     /*
@@ -2216,6 +2261,753 @@ bool selftest_cosmofs_symlink(const char **reason)
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
     kinfo("selftest: cosmofs-symlink: a link and its target survive a remount, and its block comes back");
+    return true;
+}
+
+/*
+ * Version 9 takes `free_root` from the superblock's reserved words, so
+ * the gate is on *reading* it: below version 9 that word is a reserved
+ * zero, and a mount that read it as a chain head would refuse every
+ * filesystem written before this unit
+ * (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_format(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+
+    /* A version-8 filesystem mounts, works, and replays nothing. */
+    CHECK(cosmofs_test_format_version(bd, 8) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(write_file(ENG "/eight", "older", 5));
+    CHECK(vfs_sync() == 0);
+    CHECK(read_matches(ENG "/eight", "older", 5));
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* And again after a remount: nothing was read from a field it does
+     * not have, and nothing was written into one. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/eight", "older", 5));
+    struct cosmofs_stats st8;
+    CHECK(cosmofs_stats(mount_of(ENG), &st8) == 0);
+    CHECK(st8.version == 8 && st8.free_root == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /*
+     * The gate itself. Every image this tree formats zeroes its reserved
+     * words, so a version-8 filesystem's `free_root` word is 0 whether
+     * the gate is there or not -- which makes the gate untestable
+     * against anything the tree writes. This puts a value in it, as a
+     * later version or another writer would, and the gate is what keeps
+     * it from being read as the head of a chain.
+     */
+    CHECK(cosmofs_test_poison_free_root(bd, 0x5a5a5a5aull) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_stats(mount_of(ENG), &st8) == 0);
+    CHECK(st8.version == 8);
+    CHECK(st8.free_root == 0);        /* not 0x5a5a5a5a: below version 9 the word is not a root */
+    CHECK(read_matches(ENG "/eight", "older", 5));
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* A version-9 filesystem carries the field, and an idle one has
+     * nothing recorded in it. */
+    struct blkdev *bd9 = ramblk_create(512);
+    CHECK(bd9 != NULL);
+    CHECK(cosmofs_format(bd9) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd9, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.version == CFS_VERSION);
+    CHECK(st.free_root == 0);          /* a fresh filesystem freed nothing */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    ramblk_destroy(bd9);
+    kinfo("selftest: cosmofs-freelog-format: a version-8 filesystem mounts and replays nothing; a version-9 one has the field");
+    return true;
+}
+
+/*
+ * The record's own blocks are metadata, and the bitmap the root
+ * publishes has to say so. Allocating them after the bitmap fixpoint --
+ * which is where they naturally want to go, since the set to record is
+ * only final then -- publishes a root whose bitmap does not know about
+ * them, and the allocator hands them out again. That is a corruption
+ * rather than a leak, and the structural check is what sees it: a block
+ * that is reachable and free is `seen_not_alloc`, the dangerous
+ * direction (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_accounted(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Something to free, so the record is not empty. */
+    CHECK(write_file(ENG "/a", "one", 3));
+    CHECK(vfs_sync() == 0);
+    CHECK(write_file(ENG "/a", "one again, longer", 17));
+    CHECK(vfs_unlink(NULL, ENG "/a") == 0);
+    CHECK(vfs_sync() == 0);
+
+    struct cosmofs_stats st;
+    CHECK(cosmofs_stats(mount_of(ENG), &st) == 0);
+    CHECK(st.free_root != 0);                  /* there is a record */
+
+    /* Every block of it is allocated in the bitmap this root published,
+     * and the check agrees: no leak, and nothing reachable-but-free. */
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);      /* the dangerous direction */
+    CHECK(rep.alloc_not_seen.count == 0);
+    CHECK(rep.clean);
+
+    /* And across a remount, where the bitmap on disk is the only word. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-accounted: the record's blocks are allocated in the bitmap its root published");
+    return true;
+}
+
+/*
+ * A record supersedes its predecessor, and the predecessor's blocks have
+ * to go back. Without that, every commit leaks a block or two -- this
+ * unit's own defect one level up -- which no single-commit test can see.
+ */
+bool selftest_cosmofs_freelog_supersede(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Settle, then measure: the first commits grow the tree. */
+    CHECK(write_file(ENG "/churn", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* A hundred commits that change the same one block. */
+    for (unsigned i = 0; i < 100; i++) {
+        CHECK(write_file(ENG "/churn", "y", 1));
+        CHECK(vfs_sync() == 0);
+    }
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+
+    /*
+     * The count may move by the transaction in flight, but not by a
+     * hundred commits' worth of records. A leak of one block per commit
+     * would be a hundred blocks on a 512-block filesystem.
+     */
+    CHECK(after.free_blocks + 8 >= before.free_blocks);
+    CHECK(after.free_root != 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-supersede: 100 commits, %llu free before and %llu after",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * The defect this unit exists for. Write a file, delete it, unmount, and
+ * the blocks the delete freed are gone: the commit cleared their bits in
+ * memory after its root was durable and marked the chunks for a next
+ * commit that an unmount never makes.
+ *
+ * This test fails on the tree before this unit, which is the strongest
+ * thing that can be said about a test.
+ */
+bool selftest_cosmofs_unmount_leak(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    CHECK(vfs_sync() == 0);
+
+    /* Settle first: the count to come back to is the one after the
+     * filesystem has stopped growing. */
+    CHECK(write_file(ENG "/settle", "s", 1));
+    CHECK(vfs_unlink(NULL, ENG "/settle") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* A file, and then no file. */
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/leakme", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/leakme") == 0);
+    CHECK(vfs_umount(ENG) == 0);          /* the unmount's commit frees them */
+
+    /* Remount: every block is back, and the filesystem adds up. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-unmount-leak: %llu free before the file, %llu after it was deleted and the filesystem remounted",
+          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * A record must not name a block a snapshot still holds. The commit
+ * writes the record *before* the root and appends to the deadlist
+ * *after* it, so the two ask the same question through
+ * cfs_snapshot_holds -- and if the record's answer were wrong, a mount
+ * would replay it and hand a live snapshot's block to the allocator.
+ *
+ * The remount is the point: without it nothing reads the record, and a
+ * wrong one costs nothing until the next mount.
+ */
+bool selftest_cosmofs_freelog_snapshot(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Something for the snapshot to hold. */
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /*
+     * Free those blocks in the live tree and let **the unmount's own
+     * commit** be the one that records it. A sync in between would
+     * write the record and then supersede it, and the record a mount
+     * actually reads is the last one written -- so a wrong record would
+     * be replaced before anything believed it, and the test would pass
+     * whatever the code did.
+     */
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+
+    /*
+     * The free count is not the instrument here, and trying to use it
+     * was wrong in both directions: the unlink frees the copy-on-write
+     * casualties that postdate the snapshot, which raises it, while the
+     * deadlist the snapshot grows and the record itself consume blocks,
+     * which lowers it. Either way it moves for reasons that have nothing
+     * to do with the claim.
+     *
+     * The claim is that the snapshot's own blocks did not go back, and
+     * the checker states it exactly: a record that named them would have
+     * had the replay clear their bits while the snapshot's tree still
+     * reaches them -- reachable and free, which is `seen_not_alloc`, the
+     * direction that hands live data to the allocator.
+     */
+    (void)after;
+    (void)before;
+
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);   /* the claim: no snapshot block handed back */
+    CHECK(rep.snapshots_seen == 1);
+
+    /*
+     * Not `clean`, and the reason is worth writing down: an unmount that
+     * frees a block a snapshot holds strands a couple of blocks, and it
+     * is this unit's own defect living in the snapshot path.
+     * cfs_snapshot_hold_block appends to a deadlist from phase 7, after
+     * the root is written -- so the block it allocates and the snapshot
+     * entry it dirties belong to a transaction that has already been
+     * published, and at an unmount there is no next commit to carry
+     * them.
+     *
+     * The record fixes the frees because they are known before the root.
+     * A deadlist append is not: it happens as a consequence of deciding
+     * what to free, which is only final after the bitmap fixpoint, which
+     * must come after every allocation. Breaking that circle for the
+     * deadlist needs the same reserve-before-fill treatment this unit
+     * gave the record, in cosmofs_snap.c, and that is a second unit with
+     * its own proofs rather than a paragraph in this one. Inventory row.
+     */
+    CHECK(rep.alloc_not_seen.count <= 4);   /* the deadlist's, not the record's */
+
+    /* And the snapshot still reads, which is what the blocks were for. */
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-snapshot: a snapshot's blocks survive the record and the remount (%llu free either side)",
+          (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * The record is not cleared when it is replayed, and that is deliberate.
+ * A mount that replays and then goes away without committing must leave
+ * the filesystem exactly as it found it, or the blocks are lost on the
+ * *second* mount -- which no single cycle can see, and which the easy
+ * implementation (clear it as you read it) gets wrong.
+ */
+bool selftest_cosmofs_freelog_idempotent(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Make a record: a file written, deleted, and the unmount's commit
+     * the one that frees. */
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/gone", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* First mount: the replay gives the blocks back. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats first;
+    CHECK(cosmofs_stats(mount_of(ENG), &first) == 0);
+    CHECK(first.free_root != 0);            /* still there: retired by a commit, not by a read */
+
+    /*
+     * Away again without committing. A forced unmount skips the sync, so
+     * nothing on disk moves and the record still stands.
+     */
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+
+    /* Second mount: the same list, the same effect, nothing lost and
+     * nothing freed twice. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats second;
+    CHECK(cosmofs_stats(mount_of(ENG), &second) == 0);
+    CHECK(second.free_blocks == first.free_blocks);
+    CHECK(second.free_root == first.free_root);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-idempotent: two mounts, one record, %llu free both times",
+          (unsigned long long)second.free_blocks);
+    return true;
+}
+
+/*
+ * A replayed block is the allocator's immediately, in this session,
+ * without waiting for a commit. Writing one and committing makes it
+ * live, and the record that named it as free is superseded by the same
+ * commit -- so a remount finds it in use and named by nothing.
+ */
+bool selftest_cosmofs_freelog_reuse(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    static const char big[4096] = { 0 };
+    CHECK(write_file(ENG "/first", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/first") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+    struct cosmofs_stats after_replay;
+    CHECK(cosmofs_stats(mount_of(ENG), &after_replay) == 0);
+
+    /* Take the space back out, in this session, and make it durable. */
+    CHECK(write_file(ENG "/second", big, sizeof(big)));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* It is in use, the filesystem adds up, and the file reads. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(read_matches(ENG "/second", big, sizeof(big)));
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(rep.seen_not_alloc.count == 0);   /* nothing live is marked free */
+    struct cosmofs_stats now;
+    CHECK(cosmofs_stats(mount_of(ENG), &now) == 0);
+    CHECK(now.free_blocks < after_replay.free_blocks);   /* the file took the space */
+
+    CHECK(vfs_unlink(NULL, ENG "/second") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats back;
+    CHECK(cosmofs_stats(mount_of(ENG), &back) == 0);
+    CHECK(back.free_blocks == after_replay.free_blocks);  /* and gave it back again */
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-reuse: a replayed block was taken, written, and given back (%llu free either side)",
+          (unsigned long long)back.free_blocks);
+    return true;
+}
+
+/*
+ * A record is not a snapshot's to hold. `freelog_release_previous`
+ * frees the superseded chain directly rather than through
+ * `cfs_snapshot_hold_block`, and the exception has to be argued: that
+ * function asks whether a snapshot's *recorded bitmap* marks the block
+ * allocated, and a record block from before a snapshot is marked
+ * exactly that way -- so the generic path would hold a block no
+ * snapshot's tree can ever reach.
+ *
+ * The rule: the snapshot filter is for blocks a snapshot's *tree* might
+ * name. A snapshot preserves `imap_root` and `alloc_root`, never
+ * `free_root`, so a record is not one of those.
+ *
+ * **The deadlist is the instrument, and neither the checker nor the free
+ * count is.** A held block goes on the snapshot's deadlist, and a
+ * deadlist is metadata the checker claims -- so a filesystem that held a
+ * record it should have freed is `clean` all the way down. And the loss
+ * is one block per snapshot, which is inside the noise of a transaction
+ * in flight.
+ *
+ * What is exact is how much the deadlist grows across one named commit.
+ * Naming the snapshot is that commit: it runs with the snapshot already
+ * recorded, and it supersedes the record that existed before the
+ * snapshot did -- the one record in the filesystem's life a snapshot's
+ * recorded bitmap marks allocated, and therefore the only block on
+ * which this exception can be observed at all. Three blocks go on the
+ * deadlist there for good reasons and a fourth would be the record.
+ *
+ * A second, looser assertion says the list then stops growing across
+ * thirty more commits in a directory created after the snapshot, and a
+ * third says the free count does not fall.
+ */
+bool selftest_cosmofs_freelog_not_held(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* A record exists, and *then* the snapshot is taken: its bitmap
+     * marks that record's blocks allocated, which is the difficulty. */
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    /*
+     * Naming the snapshot is the commit the argument is about, and the
+     * deadlist's growth across it is the measurement.
+     *
+     * That commit runs with the snapshot already recorded, so it
+     * supersedes the record that existed before the snapshot did -- and
+     * that record is marked allocated in the bitmap the snapshot keeps,
+     * because the bitmap a commit publishes still has the bits its
+     * phase 7 is about to clear. It is the one record in the
+     * filesystem's life the generic filter would hold.
+     *
+     * Three blocks go on the deadlist legitimately there: the root
+     * directory block, the inode-map block and the allocation index,
+     * each named by the snapshot's tree and each rewritten by the
+     * commit. A fourth is the record.
+     */
+    uint64_t dead0 = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+    uint64_t dead1 = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+    CHECK(dead1 - dead0 <= 3);
+
+    /* Everything the churn touches is created after the snapshot, and
+     * then settled, so the blocks these commits free are all post-
+     * snapshot ones: the only thing they release that a snapshot's
+     * bitmap remembers is one record after another. */
+    CHECK(vfs_mkdir(NULL, ENG "/post", 0755) == 0);
+    for (unsigned i = 0; i < 3; i++) {
+        CHECK(write_file(ENG "/post/churn", "x", 1));
+        CHECK(vfs_sync() == 0);
+    }
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+    uint64_t dead_before = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+
+    for (unsigned i = 0; i < 30; i++) {
+        CHECK(write_file(ENG "/post/churn", "y", 1));
+        CHECK(vfs_sync() == 0);
+    }
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    /* The transaction in flight can move it a little; thirty commits'
+     * worth of held records cannot hide in that. */
+    CHECK(after.free_blocks + 6 >= before.free_blocks);
+
+    /*
+     * And the exact statement, which the free count cannot make: the
+     * deadlist did not grow. Under the generic filter a record lands on
+     * a block number this snapshot's bitmap remembers and goes on the
+     * list, permanently -- one block, too small to separate from the
+     * noise of a transaction in flight, and unambiguous here.
+     */
+    CHECK(cosmofs_test_deadlist_len(mount_of(ENG), 0) == dead_before);
+
+    /* And the snapshot is intact: nothing this exception frees was its. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);
+    CHECK(rep.snapshots_seen == 1);
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-not-held: naming the snapshot put %llu blocks on its deadlist and the superseded record was not one of them; 30 more commits added none (%llu free either side)",
+          (unsigned long long)(dead1 - dead0), (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * A commit that fails after reserving the record's blocks must give them
+ * back. Nothing names them -- the root that would have is not going to
+ * be published -- so left allocated they are a leak the *next*
+ * successful commit makes durable, because that commit writes this
+ * bitmap. The window is any failure between the reservation and the
+ * root: a `kmalloc` for the record's buffer, the bitmap fixpoint, an
+ * unwritable block (docs/audit/next-subsystem-unmount-leak.md).
+ */
+bool selftest_cosmofs_freelog_rollback(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* Settle, so the count to come back to is a steady one. */
+    CHECK(write_file(ENG "/settle", "s", 1));
+    CHECK(vfs_unlink(NULL, ENG "/settle") == 0);
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    /* Something to free, and a commit that fails while freeing it. */
+    CHECK(write_file(ENG "/doomed", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/doomed") == 0);
+    cosmofs_test_fail_freelog(mount_of(ENG), true);
+    CHECK(vfs_sync() != 0);                  /* the commit fails, as asked */
+    cosmofs_test_fail_freelog(mount_of(ENG), false);
+
+    /*
+     * And then one that succeeds. This is the commit that would make a
+     * lost reservation durable: it writes the bitmap the failed attempt
+     * left behind.
+     */
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.alloc_not_seen.count == 0);    /* the reservation, if it was kept */
+    CHECK(rep.clean);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-rollback: a commit failed with the record reserved and gave every block back (%llu free either side)",
+          (unsigned long long)after.free_blocks);
+    return true;
+}
+
+/*
+ * A record whose `count` is past what a block holds is a record this
+ * kernel cannot read, and gets the answer an unreadable one gets: that
+ * *root* is refused. Treating it as empty would silently drop every free
+ * it names -- the root says those blocks are free, the bitmap says they
+ * are not, and the difference would be reported later as an ordinary
+ * leak with nothing to connect it to its cause.
+ *
+ * Refusing a root is not refusing the filesystem. cosmofs keeps two, and
+ * a root whose tree does not load falls back to the older slot, which is
+ * a complete and consistent filesystem one generation behind. So the
+ * cost of the strict answer is a generation, not a mount -- and that is
+ * what this test measures, because "the mount fails" is what the report
+ * said and it is not what happens.
+ */
+bool selftest_cosmofs_freelog_malformed(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(512);
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* A record with something in it, left on disk by the unmount. */
+    CHECK(write_file(ENG "/gone", "x", 1));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_unlink(NULL, ENG "/gone") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Which generation the disk is at, without changing it: the discard
+     * hook makes this unmount write nothing. */
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats good;
+    CHECK(cosmofs_stats(mount_of(ENG), &good) == 0);
+    cosmofs_test_discard_on_unmount(mount_of(ENG), true);
+    CHECK(vfs_umount(ENG) == 0);
+
+    /* Re-sealed, so the checksum is good and only the count is wrong. */
+    CHECK(cosmofs_test_poison_freelog_count(bd, CFS_DEAD_PER_BLOCK + 1) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats fell;
+    CHECK(cosmofs_stats(mount_of(ENG), &fell) == 0);
+    CHECK(fell.generation < good.generation);   /* the newer root was refused */
+
+    /* And what it fell back to is a whole filesystem, not a damaged one. */
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-malformed: a record naming %u blocks in a block that holds %u is refused, and the mount falls back from generation %llu to %llu rather than reading it as empty",
+          (unsigned)CFS_DEAD_PER_BLOCK + 1, (unsigned)CFS_DEAD_PER_BLOCK,
+          (unsigned long long)good.generation, (unsigned long long)fell.generation);
+    return true;
+}
+
+/*
+ * A record block holds 506 block numbers; a transaction can free more
+ * than that, so the record is a chain and every link of it has to be written and
+ * replayed. A single block's worth would silently lose the overflow.
+ *
+ * This also covers the bound's slack. `freelog_reserve` allocates for
+ * what is pending *plus* what the bitmap fixpoint can add, so it often
+ * reserves a block more than the fill needs; those leftovers are listed
+ * in the record as free. If they were dropped instead, the count would
+ * come back short by the slack, every commit.
+ */
+bool selftest_cosmofs_freelog_chain(const char **reason)
+{
+    (void)vfs_umount2(ENG, VFS_UMOUNT_FORCE);
+    struct blkdev *bd = ramblk_create(8192);      /* room for more than a record block holds */
+    CHECK(bd != NULL);
+    CHECK(cosmofs_format(bd) == 0);
+    int mk = vfs_mkdir(NULL, ENG, 0755);
+    CHECK(mk == 0 || mk == -EEXIST);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /*
+     * The same cycle twice, and the count to come back to is the one
+     * after the first. A record is retired by the *next* commit, so a
+     * filesystem that has just replayed a two-block chain still holds
+     * those two blocks, and comparing it against a pristine format
+     * would count them as lost. Round one puts the filesystem in the
+     * shape round two has to return it to.
+     *
+     * A file of 600 blocks, committed, then deleted in the transaction
+     * the unmount commits -- so one record has to carry more than 506
+     * entries and therefore more than one block.
+     */
+    struct cosmofs_stats before, full;
+    for (unsigned round = 0; round < 2; round++) {
+        if (round == 1)
+            CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+        CHECK(write_wide_file(ENG "/wide", 600));
+        CHECK(vfs_sync() == 0);
+        if (round == 1) {
+            CHECK(cosmofs_stats(mount_of(ENG), &full) == 0);
+            /* More than one record block holds. */
+            CHECK(before.free_blocks - full.free_blocks > CFS_DEAD_PER_BLOCK);
+        }
+        CHECK(vfs_unlink(NULL, ENG "/wide") == 0);
+        CHECK(vfs_umount(ENG) == 0);          /* the unmount's commit frees them */
+        CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+        cosmofs_test_set_writeback(mount_of(ENG), false);
+    }
+
+    /* Every block back, across a chain of record blocks. */
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.free_blocks == before.free_blocks);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_rmdir(NULL, ENG) == 0);
+    ramblk_destroy(bd);
+    kinfo("selftest: cosmofs-freelog-chain: %llu blocks freed in one transaction, more than the %u a record block holds, and all of them came back",
+          (unsigned long long)(before.free_blocks - full.free_blocks),
+          (unsigned)CFS_DEAD_PER_BLOCK);
     return true;
 }
 

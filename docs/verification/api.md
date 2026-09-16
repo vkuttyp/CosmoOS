@@ -134,8 +134,8 @@ harness prints the five slowest tests and the total, and fails a test whose
 duration exceeds `SELFTEST_BUDGET_MS` (environment, default 8000: the hang
 watchdog's period) -- except a test named in the harness's
 `composite_budget_ms`, which is a whole suite behind one line and gets a
-budget sized for that (`docs/verification/design.md` §6; `process-user`,
-20 s).
+budget sized for that (`docs/verification/design.md` §6; `process-user`
+and `cosmofs-replay`, 20 s each).
 
 ## New self-tests
 

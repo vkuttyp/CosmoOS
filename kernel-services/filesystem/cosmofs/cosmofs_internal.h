@@ -63,12 +63,24 @@ struct cfs {
 
     uint64_t *pending_free; /* blocks freed in this transaction, reusable after commit */
     unsigned nr_pending, pending_cap;
+    /* The same, for blocks no snapshot may hold: a superseded free
+     * record. A snapshot's recorded bitmap marks one allocated, but no
+     * snapshot's *tree* can reach it (a snapshot preserves imap_root
+     * and alloc_root, never free_root), so the filter phase 7 applies
+     * to pending_free would keep it for a reader that cannot exist
+     * (docs/audit/next-subsystem-unmount-leak.md). */
+    uint64_t *pending_exempt;
+    unsigned nr_exempt, exempt_cap;
 
     struct list_node bufs;  /* metadata buffer cache, MRU first */
     unsigned nr_bufs, nr_dirty;
 
     struct mutex lock;
     bool discard_on_unmount;
+    /* Test hook: freelog_fill returns -EIO, so a commit fails after the
+     * record's blocks have been reserved. What that must not leave
+     * behind is the reservation (docs/audit/next-subsystem-unmount-leak.md). */
+    bool test_fail_freelog;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
@@ -144,9 +156,18 @@ bool cfs_has_snapshots(struct cfs *fs);
 /* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
  * False when no snapshot exists and the caller should free it. */
 bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
+
+/* Test hook: entries on every snapshot's deadlist -- all of them when
+ * `of` is 0, or the ones naming that block. */
+uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);
+/* Does any snapshot still name this block? The question cfs_snapshot_hold_block
+ * asks, without the deadlist append it then makes -- so the record written
+ * before the root and the filtering done after it are one verdict rather than
+ * two (docs/audit/next-subsystem-unmount-leak.md). */
+bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk);
 /* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
 bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);
 uint64_t cfs_dva_lin(const struct cfs *fs, uint64_t dva);   /* CFS_DVA_NONE if the DVA is not ours */
@@ -216,6 +237,7 @@ int cfs_alloc_data(struct cfs *fs, uint64_t hint, uint32_t want, uint64_t *start
 int cfs_alloc_run(struct cfs *fs, enum cfs_alloc_class cls, uint64_t hint, uint32_t want, uint64_t *start,
                   uint64_t *got);
 void cfs_free_block_deferred(struct cfs *fs, uint64_t blk);
+void cfs_free_block_exempt(struct cfs *fs, uint64_t blk);
 int cfs_inode_read(struct cfs *fs, uint64_t ino, struct cfs_inode *out);
 /* The slot as it is, even with no links: for the structural check. */
 int cfs_inode_read_raw(struct cfs *fs, uint64_t ino, struct cfs_inode *out);

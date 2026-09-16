@@ -664,7 +664,16 @@ def main():
     #
     # It keeps a budget, because a suite that hangs must still be caught;
     # it just gets one sized for what it is.
-    composite_budget_ms = {"process-user": 20000}
+    #
+    # `cosmofs-replay` is the same shape: it mounts and structurally
+    # checks *every prefix* of a recorded write stream -- 211 complete
+    # filesystem images behind one SELFTEST line -- so it grows whenever
+    # a transaction writes another block, and each image is a mount and
+    # a full walk rather than a step of one test. Its CI spread on
+    # identical code is 4703-8309 ms against a budget of 8000
+    # (docs/audit/next-subsystem-unmount-leak.md), which is a runner
+    # deciding the result rather than the code.
+    composite_budget_ms = {"process-user": 20000, "cosmofs-replay": 20000}
     timings = []
     for ln in selftest_lines:
         m = re.match(r"SELFTEST: (\S+)\s+\.\.\. (?:ok|FAIL.*) \((\d+) ms\)", ln)

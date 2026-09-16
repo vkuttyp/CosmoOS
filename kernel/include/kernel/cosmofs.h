@@ -51,6 +51,8 @@ struct cosmofs_stats {
     unsigned devices;         /* devices behind them: more than members means mirroring */
     uint64_t repairs;         /* blocks written back from a good copy since mount */
     uint64_t degraded;        /* copies the member table promised and the mount did not find */
+    unsigned version;         /* the on-disk format version this filesystem was written at */
+    uint64_t free_root;       /* v9: head of the record of what the last root freed, or 0 */
 };
 int cosmofs_stats(struct mount *mnt, struct cosmofs_stats *out);
 
@@ -129,6 +131,18 @@ void cosmofs_test_set_writeback_interval(struct mount *mnt, unsigned ms);
 /* Test hook: format at an older on-disk version, to check that this
  * kernel still mounts and writes what an older one wrote. */
 int cosmofs_test_format_version(struct blkdev *bd, unsigned version);
+/* Test hook: put a value in the superblock word version 9 calls
+ * `free_root`, on a filesystem too old to have one. Every image this
+ * tree formats zeroes its reserved words, so the gate that ignores that
+ * word below version 9 cannot be tested without manufacturing an image
+ * that does not (docs/audit/next-subsystem-unmount-leak.md). */
+int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value);
+
+/* Test hooks for the free record's failure paths: a commit that fails
+ * after reserving the record's blocks, and a record whose count is past
+ * what a block holds (docs/audit/next-subsystem-unmount-leak.md). */
+void cosmofs_test_fail_freelog(struct mount *mnt, bool on);
+int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count);
 /*
  * Test hook: break the filesystem in one named way, so that a finding
  * of the structural check is one a test produced on purpose. Eight of
@@ -159,5 +173,14 @@ int cosmofs_test_corrupt(struct mount *mnt, enum cosmofs_corruption kind, uint64
 int cosmofs_test_block_of(struct mount *mnt, uint64_t ino, uint64_t lblk, uint64_t *dva);
 /* Test hook: free blocks on one member, or UINT64_MAX past the last. */
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev);
+
+/*
+ * Entries on every snapshot's deadlist: all of them when `of` is 0, or
+ * the ones naming that block. A held block is not a leak and not a
+ * finding -- the checker claims a deadlist as metadata -- so this is the
+ * only number that distinguishes a block freed from a block held
+ * (docs/audit/next-subsystem-unmount-leak.md).
+ */
+uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
 
 #endif /* KERNEL_COSMOFS_H */

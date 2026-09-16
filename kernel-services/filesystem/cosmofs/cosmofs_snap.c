@@ -284,7 +284,20 @@ struct newest_ctx {
 /* Called from the commit: append `blk` to the newest snapshot's
  * deadlist. Returns false when there is no snapshot, so the caller
  * clears the bitmap bit as it always did. */
-bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
+/*
+ * Does any snapshot still name this block? The question alone, with no
+ * deadlist append and nothing written.
+ *
+ * cfs_snapshot_hold_block is this plus the append, and the two share
+ * this walk rather than each having their own: the record of what a
+ * transaction freed is written *before* the root and the append happens
+ * after it, so the two verdicts must be the same verdict, not two
+ * implementations of it (docs/audit/next-subsystem-unmount-leak.md).
+ *
+ * `*best` and `*best_at` come back naming the newest snapshot, so the
+ * caller that wants to append does not walk the list twice.
+ */
+static bool snapshot_holds(struct cfs *fs, uint64_t blk, uint64_t *best_at, unsigned *best_ix)
 {
     uint64_t blkno = fs->sb.snap_root, best_block = 0;
     unsigned best_index = 0;
@@ -315,7 +328,7 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
         blkno = next;
     }
     if (!any)
-        return false;   /* no snapshots at all: the caller frees it */
+        return false;
     struct cfs_buf *b;
     if (cfs_buf_get(fs, best_block, CFS_KIND_SNAPLIST, &b)) {
         kerror("cosmofs: snapshot list unreadable; holding block %llu", (unsigned long long)blk);
@@ -326,14 +339,90 @@ bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
      * the commit's free list was in the live tree until now, so if the
      * newest snapshot does not occupy it, it was born after that
      * snapshot and no older one can name it either. */
-    if (!cfs_snapshot_references(fs, &sb->snap[best_index], blk)) {
-        cfs_buf_put(fs, b);
-        return false;   /* nothing holds it: the caller frees it as before */
+    bool held = cfs_snapshot_references(fs, &sb->snap[best_index], blk);
+    cfs_buf_put(fs, b);
+    if (held && best_at != NULL) {
+        *best_at = best_block;
+        *best_ix = best_index;
     }
-    uint64_t head = sb->snap[best_index].deadlist;
+    return held;
+}
+
+bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk)
+{
+    return snapshot_holds(fs, blk, NULL, NULL);
+}
+
+/*
+ * Entries on every snapshot's deadlist: all of them when `of` is 0, or
+ * the ones naming that block.
+ *
+ * A test hook, because nothing else can see this and one test needs it:
+ * a block a snapshot holds is not a leak and not a finding -- the
+ * checker claims a deadlist as metadata -- so a filesystem that held a
+ * block it should have freed is `clean` all the way down.
+ * `cosmofs-freelog-not-held` asks about one block by number, which is
+ * the only statement that distinguishes "freed, as a record should be"
+ * from "held, and gone until the snapshot is"
+ * (docs/audit/next-subsystem-unmount-leak.md).
+ */
+#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
+
+uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
+{
+    uint64_t blkno = fs->sb.snap_root, total = 0;
+    unsigned guard = 0;
+    while (blkno && guard++ < CFS_SNAP_MAX_CHAIN) {
+        struct cfs_buf *b;
+        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+            return total;
+        struct cfs_snap_block *sb = snap_payload(b);
+        uint64_t next = sb->next;
+        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
+            if (sb->snap[i].name[0] == '\0')
+                continue;
+            uint64_t dl = sb->snap[i].deadlist;
+            unsigned dguard = 0;
+            while (dl && dguard++ < CFS_SNAP_MAX_CHAIN) {
+                struct cfs_buf *db;
+                if (cfs_buf_get(fs, dl, CFS_KIND_DEADLIST, &db))
+                    break;
+                const struct cfs_dead_block *d =
+                    (const struct cfs_dead_block *)(db->data + CFS_MHDR_SIZE);
+                uint32_t n = d->count <= CFS_DEAD_PER_BLOCK ? d->count : 0;
+                if (of == 0) {
+                    total += n;
+                } else {
+                    for (uint32_t k = 0; k < n; k++)
+                        if (d->blk[k] == of)
+                            total++;
+                }
+                dl = d->next;
+                cfs_buf_put(fs, db);
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
+    }
+    return total;
+}
+
+bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
+{
+    uint64_t at = 0;
+    unsigned ix = 0;
+    if (!snapshot_holds(fs, blk, &at, &ix))
+        return false;           /* nothing holds it: the caller frees it as before */
+    if (at == 0)
+        return true;            /* held, but the list could not be read: never hand it back */
+    struct cfs_buf *b;
+    if (cfs_buf_get(fs, at, CFS_KIND_SNAPLIST, &b))
+        return true;
+    struct cfs_snap_block *sb = snap_payload(b);
+    uint64_t head = sb->snap[ix].deadlist;
     int rc = deadlist_append(fs, &head, blk);
     if (rc == 0) {
-        sb->snap[best_index].deadlist = head;
+        sb->snap[ix].deadlist = head;
         cfs_buf_mark_dirty(fs, b);
     }
     cfs_buf_put(fs, b);

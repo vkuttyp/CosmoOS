@@ -34,14 +34,17 @@ A filesystem whose on-disk state is always a valid tree: every mutation
 lands in blocks that the last committed root does not reference, and a
 commit publishes a new root with one superblock write. A crash at any
 point leaves either the old root or the new one. Recovery is choosing
-the newer valid superblock slot; there is no journal to replay. In the
+the newer valid superblock slot; there is no journal to replay. From
+version 9 a root also names the blocks it freed, so a mount can return
+the space the last commit could not write -- a list of block numbers
+the root makes true, not a log of operations to replay. In the
 constitution's words: designed to provide crash consistency and a
 recoverable structure without journal replay, not "immune to
 corruption".
 
 ## Responsibilities
 
-- The on-disk format (`CFS_VERSION` 8, mounting back to
+- The on-disk format (`CFS_VERSION` 9, mounting back to
   `CFS_VERSION_MIN` 2; what each version added is in `design.md`): two
   superblock slots, a two-level
   inode map, 256-byte inodes with 10 direct extents and a chain of
@@ -51,13 +54,16 @@ corruption".
   in file data, CRC32C and self-numbering on every metadata block.
 - Transactions: one open generation per mount; copy-on-write of
   metadata (`cfs_buf_cow`), always-new blocks for data and directory
-  writes, deferred frees, the reserve-then-write bitmap fixpoint, the
+  writes, deferred frees recorded in the root that made them
+  (`free_root`, so a mount can finish what the last commit started),
+  the reserve-then-write bitmap fixpoint, the
   commit into the alternate superblock slot with a flush before and
   after (`BIO_PREFLUSH | BIO_FUA`), a metadata reserve, `fsync` as a
   commit, a writeback thread with dirty and age thresholds, and the
   older-slot fallback when the newer root's tree does not load.
 - Formatting a device (`cosmofs_format`), mounting (slot selection,
-  bitmap load, free-count reconciliation), unmounting (commit, or
+  bitmap load, the free record's replay, free-count reconciliation),
+  unmounting (commit, or
   discard under the test hook), statistics.
 - Inode semantics: types regular, directory and symbolic link, link
   counts, sizes, times, owner ids stored, parent pointers for `..`,
