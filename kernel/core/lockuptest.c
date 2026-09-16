@@ -9,6 +9,7 @@
 
 #include <kernel/lockup.h>
 
+#include <kernel/kmalloc.h>
 #include <kernel/log.h>
 #include <kernel/percpu.h>
 #include <kernel/printf.h>
@@ -161,6 +162,101 @@ bool selftest_lockup_sample(const char **reason)
           (unsigned long long)((t1 - t0) / 1000), depth);
     CHECK(thread_count() == before);
     return true;
+}
+
+/* --- the report's "last tick N ms ago" when a CPU's clock runs ahead --- */
+
+#if CONFIG_DEBUG
+struct skewcheck {
+    unsigned victim;
+    volatile uint64_t stamp;     /* the victim's last tick, as this CPU sees it */
+    volatile uint64_t now;       /* this CPU's clock at the same moment */
+    volatile uint64_t age;       /* what the report would print */
+    volatile bool done;
+};
+
+/*
+ * Pinned away from the skewed CPU on purpose: the whole question is what
+ * a *different* CPU's clock makes of that CPU's timestamp, and a checker
+ * that happened to run on the victim would read the same skewed clock
+ * and see nothing wrong.
+ */
+static void skewcheck_main(void *arg)
+{
+    struct skewcheck *s = arg;
+    const struct percpu *pk = percpu_get(s->victim);
+    s->stamp = __atomic_load_n(&pk->last_tick_ns, __ATOMIC_RELAXED);
+    s->now = clock_now_ns();
+    s->age = clock_since_ns(s->stamp);
+    __atomic_store_n(&s->done, true, __ATOMIC_RELEASE);
+}
+#endif
+
+/*
+ * The operator's one diagnostic, on a machine whose CPUs disagree.
+ *
+ * `lockup_print_samples` prints each CPU's "last tick N ms ago" from a
+ * timestamp that CPU wrote and this one reads. With a plain subtraction
+ * a CPU whose clock runs ahead makes that N about 584 years -- in the
+ * one report somebody reads while the machine is wedged, next to the
+ * numbers they are trying to act on.
+ *
+ * The real print path is run here, not just the arithmetic: a version of
+ * this that only checked `clock_since_ns` would pass while the report
+ * itself still computed the age some other way.
+ */
+bool selftest_lockup_report_skew(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    return true;
+#else
+    int k = other_cpu();
+    if (k < 0 || k == 0)
+        return skip("lockup-report-skew");
+
+    struct skewcheck *s = kzalloc(sizeof(*s));
+    CHECK(s != NULL);
+    s->victim = (unsigned)k;
+
+    /* Five seconds ahead, then long enough for that CPU to take several
+     * ticks and stamp last_tick_ns with the skew in it. */
+    clock_test_set_cpu_offset_ns((unsigned)k, 5ll * 1000 * 1000 * 1000);
+    thread_sleep_ms(50);
+
+    struct thread *t = thread_create_on(skewcheck_main, s, "lockup-skew", SCHED_PRIO_DEFAULT,
+                                        cpu_online(0) ? CPUMASK_OF(0) : CPUMASK_ALL & ~CPUMASK_OF((unsigned)k));
+    bool spawned = t != NULL;
+    if (spawned)
+        thread_join(t);
+
+    /* The report itself, with the skew still in place. */
+    cpumask_t m = 0;
+    bool sampled = lockup_sample_all(NULL, LOCKUP_SAMPLE_TIMEOUT_NS, &m);
+    if (sampled)
+        lockup_print_samples(m);
+
+    clock_test_set_cpu_offset_ns((unsigned)k, 0);
+
+    uint64_t stamp = s->stamp, now = s->now, age = s->age;
+    kfree(s);
+
+    CHECK(spawned);
+    /* The premise: from an unskewed CPU, that stamp really is in the
+     * future. Without this the next two assertions are vacuous. */
+    if (stamp <= now) {
+        kerror("selftest: lockup-report-skew: CPU %d's last tick (%llu) is not ahead of this CPU's clock (%llu); the skew did not land",
+               k, (unsigned long long)stamp, (unsigned long long)now);
+        *reason = "the injected skew did not reach the victim's tick stamp";
+        return false;
+    }
+    CHECK(stamp - now > 4ull * 1000 * 1000 * 1000);
+    CHECK(age == 0);
+
+    kinfo("selftest: lockup-report-skew: CPU %d's last tick reads %llu ms in the future from another CPU; the report ages it at 0 ms, not 584 years",
+          k, (unsigned long long)((stamp - now) / 1000000));
+    return true;
+#endif
 }
 
 /* --- a spinner with interrupts masked: the outcome per architecture --- */

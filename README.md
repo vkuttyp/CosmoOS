@@ -2176,6 +2176,58 @@ See [docs/development.md](docs/development.md).
   suite. 319 self-tests on both architectures, debug and release
   (PR #154).
 
+- **Two timestamps and no rule about subtracting them**
+  (`docs/audit/next-subsystem-cpu-clock.md`). `clock_now_ns()` is a
+  per-CPU clock on x86-64 that the whole tree treated as a machine-wide
+  one, and `has_invariant_tsc` -- the one fact that says whether the
+  counter is even usable that way -- had been detected at boot since this
+  kernel had an x86 port and read by nothing. **The sweep was the unit.**
+  Planned as step 6, a re-check of step 1, it was run first as a grep
+  rather than a re-reading and changed the plan twice. The report called
+  `sched_dump` "the one place with a hand-rolled guard"; there were
+  three, written independently, each for the same reason and none
+  referring to the others. And rewriting the block-timeout scan as
+  `clock_since_ns(stamp)` re-reads the clock per bio *inside a spinlock*,
+  against a `now` that moves underneath the comparison -- a regression
+  step 1 had already written before the grep caught it -- so
+  `clock_delta_ns(now, stamp)` is the primitive and `clock_since_ns` its
+  fresh-read form. The classification rule is not the one the report
+  implied either: a thread that sleeps between two clock reads wakes on a
+  different CPU, so a plain `t0` in a local variable is a foreign stamp,
+  and that is nearly every timing assertion in the suite -- 43 such
+  sites, 15 shared-state ones, 4 in userland the report had not noticed,
+  1 deliberately left plain (the tick cost, where saturating would hide a
+  counter going backwards on one CPU) and 4 that are not elapsed times at
+  all. **Then the gate fired on the first machine it met.** QEMU's
+  x86-64 TCG does not advertise an invariant TSC and refuses to be asked
+  to (`-cpu ...,+invtsc`: "TCG doesn't support requested feature"), so
+  the only x86-64 machine this project runs on is one where the kernel
+  must decline to promise -- while its counters demonstrably agree, 0 ns
+  outside the bracket over 2400 handshakes. It declines anyway, because
+  the promise is about the hardware's contract and not about what happens
+  to work today. The report's fallback for that case does not exist: PIT
+  channel 2 is a one-shot calibration gate, not a free-running counter,
+  and there is no HPET driver. So the kernel keeps the TSC, still
+  monotonic per CPU, and gives up the cross-CPU claim instead. **The
+  measurement runs anyway** -- gating it on the bit would have made it
+  dead code on every machine here -- and reports what it found without
+  acting on it. Its first run reported an uncertainty of ±0 ns, which is
+  a promise no measurement can make: the narrowest bracket had width
+  zero, the counter not having advanced across a handshake that certainly
+  took real time. The bound is floored at one counter tick now, and a
+  test keeps three cases apart permanently: 0 only when nothing was
+  measured, unbounded only when the kernel has declined, otherwise at
+  least one tick. **And the unit found a live dependency on the property
+  it was defining**: `blk-unregister-drain` asserted an order between two
+  events on two different CPUs by comparing their timestamps, which is
+  exactly what the kernel had just stopped promising -- it uses an atomic
+  sequence number now and depends on no clock at all. Eight new tests;
+  the two cross-CPU oracles pass trivially on every machine here, so the
+  injection that would fail them runs in CI rather than in a terminal.
+  What does not run anywhere available: the applied correction, since no
+  machine here both has a per-CPU counter and advertises it as invariant.
+  327 self-tests on both architectures, debug and release (PR #156).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

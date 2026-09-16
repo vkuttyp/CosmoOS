@@ -127,6 +127,12 @@ uint64_t clock_resolution_ns(void);
  * unmeasured. */
 bool clock_offsets_measured(void);
 
+/* The bound the measurement computed, whether or not it was applied. On
+ * a machine that measures and then declines to trust the result, this is
+ * the only way to check that the computation itself is sound. Zero when
+ * nothing was measured. */
+uint64_t clock_measured_bound_ns(void);
+
 #if CONFIG_DEBUG
 /*
  * Make this machine's counters disagree, for the cross-CPU tests.

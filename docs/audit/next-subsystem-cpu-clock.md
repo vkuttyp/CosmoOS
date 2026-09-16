@@ -541,6 +541,31 @@ one inline helper rather than left as a documented hole; userland
 inherits step 4's correction for free, because the syscall reads the
 same clock the kernel does.
 
+#### Step 5 — the comment would have had to describe a bug
+
+The plan: "`blk-unregister-drain` gains a line saying which property it
+rests on, now that the property is stated somewhere." Writing that line
+showed the property does not hold.
+
+The test asserts an order between two events — a parked submitter
+leaving the driver, and `blk_unregister` returning — and the two happen
+on **different CPUs**, the submitter pinned away from the unregister on
+purpose. `blk_test_drain_ordered()` compared two `clock_now_ns()`
+stamps. Comparing two CPUs' readings is exactly what this kernel stopped
+promising three steps earlier: on x86-64 here `clock_is_common()` is
+false, so the assertion rested on a guarantee the kernel declines to
+give, and passed only because QEMU's counters agree.
+
+So the step is a fix rather than a comment. The two stamps are positions
+in an atomic sequence now: the read-modify-write puts the events in a
+total order by itself, on any machine, however the counters behave — and
+an order is all the assertion ever wanted. The comment still goes in,
+and now it describes something true.
+
+This is the unit finding a live dependency on the property it was
+defining, which is the best argument available that the property was
+worth defining.
+
 #### Step 4 — the measurement runs, the correction does not
 
 Step 3's finding forced a change of shape here. If the measurement were
@@ -759,5 +784,53 @@ meant to read a property of the code.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**327 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
+the branch point, so eight new: `clock-since-saturates`,
+`blk-timeout-skew`, `clock-cross-cpu`, `clock-scope-aarch64`,
+`clock-skew-detected`, `clock-invariant-gate`, `clock-offset-bound` and
+`lockup-report-skew`. `blk-unregister-drain` is the ninth test this unit
+touched and the only existing one it changed.
+
+Two of those eight are not in the report's table. `clock-skew-detected`
+is the injection the report described as a bug-proof, made permanent
+because the tests it proves pass vacuously on every machine here.
+`clock-offset-bound` exists because the measurement's first run produced
+a bound no measurement can justify.
+
+**The numbers, from the final run.**
+
+| | x86-64 | AArch64 |
+| --- | --- | --- |
+| counter | `tsc`, per-CPU | `arch-timer`, one for the system |
+| invariant / common | **no** (TCG refuses `+invtsc`) | yes, by architecture |
+| offsets measured | 3 APs × 1000 exchanges | none — nothing to measure |
+| worst offset seen | 0–500 ns across runs | — |
+| measured bound | 2 ns (the counter's resolution — the floor) | — |
+| advertised bound | `CLOCK_OFFSET_UNBOUNDED` | 0 ns, exact |
+| correction applied | no | not applicable |
+| bracket, 2400 handshakes/arch | 0 ns outside, widest 270–345 µs | 0 ns outside, widest 54–89 µs |
+| injected ±2 ms detected | 2000000 ns, both directions | 2000000 ns, both directions |
+| lockup report, 5 s skew | ages it at 0 ms | — |
+
+**Bug-proofs.** `blk-timeout-skew` with the timeout's subtraction
+reverted to `now - issued_ns`: fails, having logged "a stamp 5 s ahead
+timed out 1 request(s): the subtraction underflowed".
+`clock-since-saturates` with `clock_since_ns` made a plain subtraction:
+fails at the future-stamp assertion. `clock-cross-cpu` and
+`clock-scope-aarch64` are proved by `clock-skew-detected` rather than by
+a revert, and that test proves itself in both directions and in the
+converse (widen the bound and the same measurement is accepted).
+
+**What did not run.** The applied correction, on any machine. No machine
+available to this project both has a per-CPU counter and advertises it as
+invariant, so `g_apply_offset` is false on every boot. The arithmetic is
+exercised by injection; the path is not taken. This is a stronger
+statement than the report's "untested on real hardware" and it is stated
+here rather than in the risks, because the report did not know it.
+
+**A flake.** `net-harness` failed once at `nettest.c:929` during a run in
+which this host killed a background build for memory, and passed on an
+immediate re-run of the same image. Recorded in `docs/testing/flakes.md`
+with the memory pressure named as a circumstance and explicitly not as a
+cause: a dropped SYN, a slow host process and an unrelated timing window
+all look identical from `client_ok == false`.

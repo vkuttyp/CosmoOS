@@ -290,8 +290,32 @@ static unsigned g_test_hold;             /* drain half: park the next submitter 
 static unsigned g_test_parked;           /* a submitter is inside the window */
 static unsigned g_test_release;          /* let it out */
 static unsigned g_test_unreg_spins;      /* iterations blk_unregister spent draining */
-static uint64_t g_test_left_ns;          /* when the parked submitter left */
-static uint64_t g_test_unreg_ns;         /* when blk_unregister returned */
+/*
+ * The drain half's order, as a sequence rather than as two clock
+ * readings.
+ *
+ * These were two `clock_now_ns()` stamps, and the events they mark
+ * happen on *different CPUs* -- the parked submitter is pinned away from
+ * the unregister on purpose. Comparing two CPUs' timestamps is exactly
+ * what this kernel stopped promising when it read the invariant-TSC bit:
+ * on x86-64 here `clock_is_common()` is false, so the test was resting
+ * on a guarantee the kernel declines to give, and passing only because
+ * QEMU's counters agree
+ * (docs/audit/next-subsystem-cpu-clock.md, step 5).
+ *
+ * A sequence number needs no such guarantee. The atomic
+ * read-modify-write puts the two events in a total order by itself, on
+ * any machine, however the counters behave -- and an order is all the
+ * assertion ever wanted.
+ */
+static uint64_t g_test_seq;
+static uint64_t g_test_left_seq;         /* the parked submitter left */
+static uint64_t g_test_unreg_seq;        /* blk_unregister returned */
+
+static uint64_t blk_test_tick(void)
+{
+    return __atomic_add_fetch(&g_test_seq, 1u, __ATOMIC_SEQ_CST);
+}
 
 void blk_test_unregister_pause(unsigned ms) { __atomic_store_n(&g_test_pause_ms, ms, __ATOMIC_RELEASE); }
 
@@ -300,8 +324,9 @@ void blk_test_hold_in_driver(bool on)
     __atomic_store_n(&g_test_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_parked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_unreg_spins, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_left_ns, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_unreg_ns, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_left_seq, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_seq, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_seq, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_hold, on ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
@@ -310,11 +335,12 @@ unsigned blk_test_unregister_spins(void) { return __atomic_load_n(&g_test_unreg_
 void blk_test_release_in_driver(void) { __atomic_store_n(&g_test_release, 1u, __ATOMIC_RELEASE); }
 
 /* The order the drain half is about: did the unregister return after the
- * submitter left? Both are recorded by the code that does them. */
+ * submitter left? Both are recorded by the code that does them, as
+ * positions in one sequence rather than as two clocks. */
 bool blk_test_drain_ordered(void)
 {
-    uint64_t left = __atomic_load_n(&g_test_left_ns, __ATOMIC_ACQUIRE);
-    uint64_t unreg = __atomic_load_n(&g_test_unreg_ns, __ATOMIC_ACQUIRE);
+    uint64_t left = __atomic_load_n(&g_test_left_seq, __ATOMIC_ACQUIRE);
+    uint64_t unreg = __atomic_load_n(&g_test_unreg_seq, __ATOMIC_ACQUIRE);
     return left != 0 && unreg != 0 && unreg > left;
 }
 
@@ -374,7 +400,7 @@ void blk_unregister(struct blkdev *bd)
     }
     kinfo("blk: %s removed", bd->name);
 #if CONFIG_DEBUG
-    __atomic_store_n(&g_test_unreg_ns, clock_now_ns(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_seq, blk_test_tick(), __ATOMIC_RELEASE);
 #endif
     kobject_put(&bd->obj);   /* the registry's reference */
 }
@@ -403,7 +429,7 @@ int blk_submit(struct bio *bio)
      * afterwards could read later than the unregister's own and make a
      * correct drain look like a broken one. */
     if (parked)
-        __atomic_store_n(&g_test_left_ns, clock_now_ns(), __ATOMIC_RELEASE);
+        __atomic_store_n(&g_test_left_seq, blk_test_tick(), __ATOMIC_RELEASE);
 #endif
     __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
     return rc;

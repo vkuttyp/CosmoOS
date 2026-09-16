@@ -415,6 +415,25 @@ bool selftest_clock_offset_bound(const char **reason)
 
     CHECK(res > 0);
 
+    /*
+     * The floor, checked wherever a measurement happened -- including on
+     * a machine that measured and then declined to trust the result,
+     * which is every x86-64 machine available to this project. Without
+     * this the third row below would be unreachable on both
+     * architectures and the +-0 ns defect could come back unnoticed.
+     */
+    if (clock_offsets_measured()) {
+        uint64_t m = clock_measured_bound_ns();
+        if (m < res) {
+            kerror("selftest: clock-offset-bound: the measurement produced %llu ns, finer than the counter's own %llu ns resolution",
+                   (unsigned long long)m, (unsigned long long)res);
+            *reason = "a measured bound finer than the counter can express";
+            return false;
+        }
+        kinfo("selftest: clock-offset-bound: the measurement produced %llu ns against a %llu ns counter resolution",
+              (unsigned long long)m, (unsigned long long)res);
+    }
+
     if (bound == CLOCK_OFFSET_UNBOUNDED) {
         CHECK(!clock_is_common());
         kinfo("selftest: clock-offset-bound: no cross-CPU promise on this machine; the bound is unbounded rather than a number");

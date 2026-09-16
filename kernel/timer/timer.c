@@ -37,6 +37,11 @@ static bool g_clock_common = true;
 static int64_t g_cpu_offset_ns[CONFIG_MAX_CPUS];
 static bool g_apply_offset;
 static unsigned g_measured;   /* CPUs whose offset was actually measured */
+/* The bound the measurement produced, kept whether or not it was
+ * applied: on a machine that measures and then declines to trust the
+ * result, this is still the number that was computed, and the only way
+ * to check the computation on such a machine. */
+static uint64_t g_measured_bound_ns;
 
 #define CLOCK_SHIFT 32
 
@@ -518,6 +523,11 @@ bool clock_offsets_measured(void)
     return g_measured != 0;
 }
 
+uint64_t clock_measured_bound_ns(void)
+{
+    return __atomic_load_n(&g_measured_bound_ns, __ATOMIC_ACQUIRE);
+}
+
 void clock_measure_offsets(void)
 {
     if (!arch_clock_is_percpu()) {
@@ -592,6 +602,7 @@ void clock_measure_offsets(void)
 
     if (measured == 0)
         return;
+    __atomic_store_n(&g_measured_bound_ns, worst_halfwidth, __ATOMIC_RELEASE);
 
     /*
      * Reported whether or not it is applied. On a machine whose counter
