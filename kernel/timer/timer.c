@@ -148,6 +148,12 @@ bool timer_cancel(struct timer *t)
 
 void quiesce_count_timer_wait(void);   /* quiesce.c statistics */
 
+#if CONFIG_DEBUG
+static unsigned g_test_cancel_spins;
+unsigned timer_test_cancel_spins(void) { return __atomic_load_n(&g_test_cancel_spins, __ATOMIC_ACQUIRE); }
+void timer_test_reset_cancel_spins(void) { __atomic_store_n(&g_test_cancel_spins, 0u, __ATOMIC_RELEASE); }
+#endif
+
 bool timer_cancel_sync(struct timer *t)
 {
     if (t->cpu >= CONFIG_MAX_CPUS)
@@ -174,6 +180,13 @@ bool timer_cancel_sync(struct timer *t)
             panic("timer_cancel_sync: timer %p cancelled from its own callback", (void *)t);
         spin_unlock_irqrestore(&q->lock, s);
         waited = true;
+#if CONFIG_DEBUG
+        /* A test waits for this to move before releasing the callback it
+         * parked: it says the cancel is really waiting, where the
+         * counter below only says it waited once it is over
+         * (docs/audit/next-subsystem-lifetime-windows.md). */
+        __atomic_fetch_add(&g_test_cancel_spins, 1u, __ATOMIC_ACQ_REL);
+#endif
         arch_cpu_relax();
     }
     if (waited)

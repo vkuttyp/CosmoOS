@@ -101,6 +101,14 @@ extern struct bus_type pci_bus;
 int pci_register_driver(struct pci_driver *pdrv);
 void pci_unregister_driver(struct pci_driver *pdrv);
 
+#if CONFIG_DEBUG
+/* Remove a live device: the driver's remove *and* the model's unbind.
+ * Never the hook alone -- a driver that frees what drvdata points at
+ * would leave the device bound holding a dangling pointer
+ * (docs/audit/next-subsystem-lifetime-windows.md). */
+int pci_test_remove(struct pci_device *p);
+#endif
+
 /* Configuration access. Any context; a spinlock in the legacy path. */
 uint8_t  pci_cfg_read8(const struct pci_device *pdev, uint16_t off);
 uint16_t pci_cfg_read16(const struct pci_device *pdev, uint16_t off);

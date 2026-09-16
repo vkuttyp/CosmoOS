@@ -69,6 +69,14 @@ bool timer_cancel(struct timer *t);
  * callbacks run in interrupt context and interrupts are masked here, so
  * the wait is free. Returns what timer_cancel would have. */
 bool timer_cancel_sync(struct timer *t);
+#if CONFIG_DEBUG
+/* Iterations timer_cancel_sync has spent waiting for a running callback,
+ * readable *while* it waits -- which is what lets a test release a
+ * callback it parked only once the cancel is demonstrably blocked
+ * (docs/audit/next-subsystem-lifetime-windows.md). */
+unsigned timer_test_cancel_spins(void);
+void timer_test_reset_cancel_spins(void);
+#endif
 
 /* Hook called from the tick on every CPU (the scheduler registers), with
  * the tick's trap frame: the interrupted context. */

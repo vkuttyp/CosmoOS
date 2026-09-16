@@ -70,6 +70,239 @@ static bool threads_settle(unsigned expected)
     return true;
 }
 
+/* --- the straggler kick: what may honestly be claimed about it ------------
+ *
+ * docs/audit/next-subsystem-lifetime-windows.md. `synchronize_quiesce`
+ * kicks a CPU that has not published for more than two ticks, counting
+ * the rounds in `straggler_ipis` -- a counter incremented in one place
+ * and, until these tests, read in none.
+ *
+ * What these tests may claim is narrower than "the kick works", and the
+ * first draft of them claimed the wrong thing. A CPU publishes at
+ * interrupt return only when `preempt_count == 0`, so a CPU spinning
+ * inside a read-side section takes the kick and returns without
+ * publishing: the period ends when that CPU leaves its section, kick or
+ * no kick. A test asserting that the kick completed the period would be
+ * reporting positive evidence for a kick that did nothing.
+ *
+ * So: the waiter's side is asserted (it kicks, and bounds the kicks),
+ * the spinner's side is asserted (it is *not* helped -- the wait
+ * outlasts the section), the system's side is asserted (other CPUs keep
+ * working), and the idle case is asserted to need no kick at all. What
+ * the kick is worth for the one population it could help -- a CPU whose
+ * tick keeps colliding with a short disabled region -- is left as a
+ * question, because arranging that is a phase coincidence and a test
+ * that cannot be made deterministic is not worth having.
+ */
+
+struct straggler_reader {
+    unsigned hold_ms;
+    volatile unsigned entered;
+    volatile unsigned done;
+};
+
+/* A read-side section held past the two-tick kick threshold. Preemption
+ * is disabled for its duration, which is what makes this CPU a
+ * straggler and what stops the kick from helping it. */
+static void straggler_main(void *arg)
+{
+    struct straggler_reader *r = arg;
+    quiesce_read_lock();
+    __atomic_store_n(&r->entered, 1u, __ATOMIC_RELEASE);
+    uint64_t end = clock_now_ns() + MS(r->hold_ms);
+    while (clock_now_ns() < end)
+        arch_cpu_relax();
+    __atomic_store_n(&r->done, 1u, __ATOMIC_RELEASE);
+    quiesce_read_unlock();
+}
+
+bool selftest_quiesce_straggler(const char **reason)
+{
+#if !CONFIG_DEBUG
+    /* The per-waiter kick count is a debug-build thing, and the
+     * machine-wide one cannot carry a per-waiter claim: see where it is
+     * asserted. Adding that counter is what turned this test, which
+     * needed no hook, into one that does. */
+    (void)reason;
+    kinfo("selftest: quiesce-straggler: no per-waiter kick count in this build; skipping");
+    return true;
+#else
+    unsigned threads0 = thread_count();
+    unsigned cpu = other_cpu();
+    if (cpu == 0) {
+        /* Said rather than skipped silently: a property about two CPUs
+         * needs two CPUs, and a test that quietly does nothing on the
+         * machine CI runs is worse than no test. */
+        kinfo("selftest: quiesce-straggler: one CPU, nothing to straggle");
+        return true;
+    }
+
+    /* Well past 2 * TICK_NS (8 ms at CONFIG_HZ 250), and short of the
+     * eight-kick bound at one kick per loop iteration. */
+    struct straggler_reader r = { .hold_ms = 30 };
+    struct quiesce_stats before, after;
+    quiesce_get_stats(&before);
+
+    struct thread *t = thread_create_on(straggler_main, &r, "qstrag", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(t != NULL);
+    CHECK(wait_flag(&r.entered, 1000));
+
+    uint64_t t0 = clock_now_ns();
+    /*
+     * The wait, handing back the kicks it sent.
+     *
+     * Not the machine-wide `straggler_ipis`, which another waiter moves
+     * too; and not a per-CPU slot either, because the callback worker is
+     * unpinned and can run its own grace period on this CPU between the
+     * call returning and this preemptible thread reading the slot. The
+     * count comes back on the stack, where it cannot be anyone else's.
+     */
+    unsigned kicks = quiesce_test_sync_kicks();
+    uint64_t waited_ns = clock_now_ns() - t0;
+    quiesce_get_stats(&after);
+    CHECK(kicks >= 1);
+    CHECK(kicks <= 8);   /* the bound in the code, and this waiter's own */
+    CHECK(after.straggler_ipis >= before.straggler_ipis + kicks);
+
+    /*
+     * The spinner's side, and the assertion that keeps this test honest:
+     * the period was *still waiting* while those kicks were sent. The
+     * reader finished its section before synchronize_quiesce returned,
+     * which is what says the kick did not shorten anything -- and it is
+     * the assertion that fails if someone makes the trap publish without
+     * checking preempt_count.
+     */
+    CHECK(__atomic_load_n(&r.done, __ATOMIC_ACQUIRE) == 1);
+    CHECK(waited_ns >= MS(r.hold_ms) / 2);   /* it spanned the section, not a tick */
+
+    thread_join(t);
+    CHECK(threads_settle(threads0));
+    kinfo("selftest: quiesce-straggler: %u kick(s) from this waiter over a %llu ms wait, and the spinner was not "
+          "helped by any of them",
+          kicks, (unsigned long long)(waited_ns / 1000000));
+    return true;
+#endif
+}
+
+/* --- quiesce-straggler-system: the stall is the waiter's, not the machine's --- */
+
+struct bystander {
+    volatile unsigned go;
+    volatile unsigned ticks;
+    volatile unsigned stop;
+};
+
+static void bystander_main(void *arg)
+{
+    struct bystander *b = arg;
+    while (!__atomic_load_n(&b->go, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    while (!__atomic_load_n(&b->stop, __ATOMIC_ACQUIRE)) {
+        /* Ordinary work: allocate, free, yield. Nothing privileged and
+         * nothing that touches quiescence. */
+        void *p = kmalloc(64, 0);
+        if (p)
+            kfree(p);
+        __atomic_fetch_add(&b->ticks, 1u, __ATOMIC_RELEASE);
+        sched_yield();
+    }
+}
+
+/*
+ * The claim the lifetime report actually makes (risk 2): a long
+ * preempt-disabled section stalls the waiter, not the system. One CPU
+ * spins inside a read section, this CPU waits for it, and a third does
+ * ordinary work throughout -- which must keep completing.
+ */
+bool selftest_quiesce_straggler_system(const char **reason)
+{
+    unsigned threads0 = thread_count();
+    if (cpu_count() < 3) {
+        kinfo("selftest: quiesce-straggler-system: needs three CPUs, have %u", cpu_count());
+        return true;
+    }
+    unsigned spin_cpu = 0, work_cpu = 0;
+    for (unsigned c = 1; c < cpu_count(); c++) {
+        if (!cpu_online(c))
+            continue;
+        if (spin_cpu == 0)
+            spin_cpu = c;
+        else if (work_cpu == 0)
+            work_cpu = c;
+    }
+    if (spin_cpu == 0 || work_cpu == 0) {
+        kinfo("selftest: quiesce-straggler-system: fewer than three CPUs online");
+        return true;
+    }
+
+    struct straggler_reader r = { .hold_ms = 30 };
+    struct bystander b = { 0 };
+    struct thread *w = thread_create_on(bystander_main, &b, "qwork", SCHED_PRIO_DEFAULT, CPUMASK_OF(work_cpu));
+    CHECK(w != NULL);
+    struct thread *t = thread_create_on(straggler_main, &r, "qstrag", SCHED_PRIO_DEFAULT, CPUMASK_OF(spin_cpu));
+    CHECK(t != NULL);
+    CHECK(wait_flag(&r.entered, 1000));
+
+    unsigned work_before = __atomic_load_n(&b.ticks, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&b.go, 1u, __ATOMIC_RELEASE);
+    synchronize_quiesce();
+    unsigned work_after = __atomic_load_n(&b.ticks, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&b.stop, 1u, __ATOMIC_RELEASE);
+
+    CHECK(__atomic_load_n(&r.done, __ATOMIC_ACQUIRE) == 1);
+    /* The third CPU got real work done while the other two were stuck
+     * with each other. A handful of iterations is enough to say it was
+     * never blocked; the number is reported rather than bounded tightly,
+     * because it is a scheduler's throughput and not a claim. */
+    CHECK(work_after > work_before);
+
+    thread_join(t);
+    thread_join(w);
+    CHECK(threads_settle(threads0));
+    kinfo("selftest: quiesce-straggler-system: %u units of ordinary work on CPU %u while CPU %u stalled the waiter",
+          work_after - work_before, work_cpu, spin_cpu);
+    return true;
+}
+
+/*
+ * An idle CPU needs no kick, and this test exists to say that the case
+ * never reaches the kick at all.
+ *
+ * It is deliberately *not* the positive case for the straggler IPI. An
+ * idle CPU publishes at the top of its idle loop and again after each
+ * periodic tick, so a grace period with one completes in about a tick --
+ * before the two-tick threshold that sends the first kick. A test
+ * asserting "the kick helped the idle CPU" would pass with the kick path
+ * deleted, which is how the first draft of this was wrong.
+ */
+bool selftest_quiesce_straggler_idle(const char **reason)
+{
+#if !CONFIG_DEBUG
+    (void)reason;
+    kinfo("selftest: quiesce-straggler-idle: no per-waiter kick count in this build; skipping");
+    return true;
+#else
+    struct quiesce_stats before, after;
+    quiesce_get_stats(&before);
+    uint64_t t0 = clock_now_ns();
+    /* This call sent no kick, asserted against its own returned count:
+     * an equality on the machine-wide total would fail for someone
+     * else's kicks and say nothing about the idle case. */
+    unsigned kicks = quiesce_test_sync_kicks();
+    uint64_t waited_ns = clock_now_ns() - t0;
+    quiesce_get_stats(&after);
+
+    CHECK(kicks == 0);
+    CHECK(waited_ns < MS(100));   /* and it did not take the kick path's time */
+    (void)before;
+    (void)after;
+
+    kinfo("selftest: quiesce-straggler-idle: a grace period over idle CPUs took %llu us and sent no kick",
+          (unsigned long long)(waited_ns / 1000));
+    return true;
+#endif
+}
+
 /* --- quiesce-grace: a reader inside quiesce_read_lock holds the grace period --- */
 
 struct grace_obj {

@@ -74,6 +74,9 @@ bool selftest_lockup_soft(const char **reason);          /* no switch while some
 bool selftest_lockup_hard(const char **reason);          /* the watched CPU stopped ticking: reported once, at the threshold */
 bool selftest_lockup_quiet(const char **reason);         /* a spinner nobody waits on and an idle CPU report nothing */
 bool selftest_lockup_tick_bench(const char **reason);    /* prints the two stores' cost and the tick's; asserts nothing */
+bool selftest_quiesce_straggler(const char **reason);
+bool selftest_quiesce_straggler_system(const char **reason);
+bool selftest_quiesce_straggler_idle(const char **reason);
 bool selftest_quiesce_grace(const char **reason);
 bool selftest_quiesce_call(const char **reason);
 bool selftest_irq_sync(const char **reason);
@@ -165,6 +168,7 @@ bool selftest_module_load(const char **reason);
 bool selftest_module_fail(const char **reason);
 
 /* Phase 6: kernel/device/devtest.c */
+bool selftest_device_remove_busy(const char **reason);
 bool selftest_device(const char **reason);
 bool selftest_pci(const char **reason);
 bool selftest_dma(const char **reason);
@@ -273,6 +277,7 @@ bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
+bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
 bool selftest_net_tcp_mss(const char **reason);
@@ -290,6 +295,8 @@ bool selftest_net_rxhook_grace(const char **reason);   /* clearing the receive h
 bool selftest_net_csum_offload(const char **reason);   /* unit 11: the partial checksum form and M_CSUM_OK */
 bool selftest_net_bench(const char **reason);          /* unit 11: loopback throughput, steering off and on */
 bool selftest_net_nicbench(const char **reason);       /* traffic that leaves the machine, per interface */
+bool selftest_blk_submit_unregister(const char **reason);
+bool selftest_blk_unregister_drain(const char **reason);
 bool selftest_blk_lifetime(const char **reason);
 struct bio;
 bool selftest_nvme(const char **reason);         /* the NVMe namespace through the block layer */

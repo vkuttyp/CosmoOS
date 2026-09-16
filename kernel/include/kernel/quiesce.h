@@ -79,6 +79,15 @@ struct quiesce_stats {
     uint64_t timer_sync_waits;   /* timer_cancel_sync calls that waited for a running callback */
 };
 void quiesce_get_stats(struct quiesce_stats *out);
+#if CONFIG_DEBUG
+/* A grace period that hands back the straggler kicks *it* sent.
+ * `straggler_ipis` in the stats above is machine-wide, so a per-waiter
+ * claim cannot be made against it -- nor against a per-CPU slot, which
+ * the unpinned callback worker can overwrite between the call and the
+ * read. The count comes back on the stack
+ * (docs/audit/next-subsystem-lifetime-windows.md). */
+unsigned quiesce_test_sync_kicks(void);
+#endif
 /* Per-CPU diagnostics (debug builds): read depth and transitions. */
 uint32_t quiesce_cpu_depth(unsigned cpu);
 uint64_t quiesce_cpu_transitions(unsigned cpu);

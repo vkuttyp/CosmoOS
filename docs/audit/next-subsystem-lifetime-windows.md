@@ -481,7 +481,7 @@ prove the hooks compile out.
 | `blk-submit-unregister` | with submitters on other CPUs and the window held open: **no bio reaches the driver after `blk_unregister` returns**, every bio completes exactly once with 0 or `-ENODEV`, no submitter hangs, and the refcount returns | make the `gone` store `relaxed`: a submitter that missed it raises `submitting` after the unregister read it, and a bio reaches a driver whose device is gone |
 | `blk-unregister-drain` | the drain half, **arranged rather than hoped for**: a submit-side hook stops a submitter inside the driver after it has raised `submitting`, the test starts the unregister only once that submitter is known to be there, and asserts `blk_unregister` returned *after* the submitter left -- an order of two events, not a timing | skip the `submitting` spin: the unregister returns while the submitter is inside and the order assertion names which came first. Without the submit-side hook this test passes on a machine where no submitter ever reached the driver, which is why it has one |
 | `tcp-pcb-timer-free` | a pcb closed while a callback is inside it, **held before the callback takes its reference**: the magic is live on entry *and* after the held interval, so that interval is one in which nothing but `timer_cancel_sync` protects the pcb | cancel three of the four timers: the fourth fires into poisoned memory and the check names which timer. And the aim-check: move the hook after `pcb_get` and the test still passes with `timer_cancel_sync` stubbed out -- which is the test measuring reference counting instead, so the hook's position is itself asserted |
-| `virtio-remove-inflight` | a virtio-blk device removed with I/O in flight through the **whole unbind transition**: every outstanding bio completes with an error rather than being forgotten, nothing touches the device after remove returns, and the device is left *unbound* -- no `driver`, no `drvdata`, the bound count down | remove without draining: a completion arrives for a device already freed. And: call the driver's hook alone, as the first draft proposed, and the device is left bound with a dangling `drvdata` for a later unregister to remove a second time |
+| `device-remove-busy` (**narrowed from the planned `virtio-remove-inflight`**) | a device removed with work outstanding through the **whole unbind transition**: the driver's hook runs once, the device is left *unbound* -- no `driver`, no `drvdata`, the bound count down -- and a second unbind is a no-op. On a device of the test's own, not the machine's live virtio-blk: that is the scratch disk the filesystem tests run on, so a boot-time suite that removes it destroys the run. Driving `vpci_remove` itself with real bios outstanding needs a virtio device dedicated to removal in the test machine, which is a change to CI's machine and stays an inventory row | call the driver's hook alone, as the first draft of this report proposed: the device is left bound with a dangling `drvdata` for a later unregister to remove a second time |
 | `unpriv-test` (existing, extended) | uid 1000 is refused `/dev/fsctl` and `/dev/net/tapctl`, the two 0600 devices added after that suite was written | invert either check: the open succeeds and the test says which door opened |
 
 **Vacuity, named in advance, because this unit is unusually exposed to
@@ -559,10 +559,121 @@ a reason to keep running it.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+The design landed as the *reviewed* version of it, which is not the
+version this report was first written with: three of its four oracles
+measured the wrong thing and the review caught all three before any of
+them existed. What follows is what the build added to that.
+
+**The straggler section produced the unit's first finding without
+running.** `quiesce.c`'s comment named a preempt-disabled spinner as the
+case the kick helps; the trap's publish is gated on `preempt_count == 0`,
+so that is precisely the case it cannot help. The comment is corrected
+and says which population it can help and which it cannot. And the kick's
+value is left as an open question rather than dressed up: it fires only
+past two ticks, cannot help the spinner, and the one population it can
+help is a tick-phase collision no deterministic test can arrange.
+
+**`timer_cancel_sync` gained a spin counter, for the same reason
+`blk_unregister` did.** Both already counted *that* they waited, after
+the fact; a test that must release a parked callback needs to know a
+cancel is waiting *while* it waits, or the release is a timer and the
+race is a hope. Both counters are `CONFIG_DEBUG` only.
+
+**Three CPUs, each doing what the other two cannot.** The pcb test parks
+a callback on one CPU, where it spins; closes from another, which cancels
+under `pcb->lock` with interrupts disabled and then spins; and releases
+from a third. Putting the releaser beside the callback deadlocked the
+machine on the first run, and the reason is written where the CPUs are
+chosen rather than left for the next person.
+
+**The virtio window stops lower than the report expected, and says so.**
+`pci_test_remove` performs the whole unbind, which is what the review
+asked for, and `device-remove-busy` asserts it: the hook runs once, the
+driver is unbound, `drvdata` is cleared, the bound count falls, and a
+second unbind is a no-op. What it does **not** do is remove the
+machine's live virtio-blk with real I/O outstanding — that is the
+scratch disk the filesystem tests run on, and a boot-time suite that
+destroys it destroys the run. A virtio device dedicated to removal is a
+change to CI's machine, not a step of this unit. The report committed in
+advance to stopping and naming the rest; this is that, one level lower
+than it anticipated.
+
+**Two mistakes of mine, recorded because they cost a run each.** A
+second test registered the synthetic bus a second time and panicked the
+machine, each test holding its own `registered` flag — now one
+`ensure_fake_bus()`. And an edit that silently failed to apply had me
+re-test an unchanged image and read the previous failure as though it
+were new.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**319 self-tests, PASS on x86-64 and aarch64, debug and release** -- 312
+before, so **seven** are new: three on Q6, two on Q11, one each on N-L3
+and the removal. Each reports the number that makes its answer checkable
+rather than a pass.
+
+The figures below are **one run's**, on the development machine. The
+kick count and the wait vary a little between boots, as anything
+counting a scheduler's behaviour does, so they are quoted here as
+measurements and not as constants -- and the same pair is quoted in the
+README rather than a different run's, so a disagreement between the two
+means drift and not a second result.
+
+| window | what ran, and what it said |
+| --- | --- |
+| Q6, the waiter | **6 kicks from this waiter over a 32 ms wait, and the spinner was not helped by any of them.** The first time `straggler_ipis` has been read since it was written |
+| Q6, the system | **5749 units of ordinary work** on a third CPU while one stalled the waiter — the lifetime report's risk 2, asserted |
+| Q6, idle | a grace period over idle CPUs took **7277 us and sent no kick**: this case never reaches the threshold, which is why it is not the kick's positive test |
+| Q11, refusal | **15 accepted and 349784 refused across the window**, every accepted bio completed exactly once, and nothing reached the driver after the unregister returned |
+| Q11, drain | **the unregister spun 6118 times** for a submitter parked inside the driver, and returned after it left — an order of two events, released only once the spin counter proved the drain was draining |
+| N-L3 | **a cancel spun 96 times** for a callback holding the pcb, which stayed live through the interval — measured before the callback takes its reference, so it is synchronous cancellation being measured and not reference counting |
+| removal | the driver's hook and the model's bookkeeping together, with **3 units of work outstanding**; a second unbind is a no-op |
+
+**What the unit found, and it found it twice before running anything.**
+`quiesce.c`'s straggler comment named the one population the kick
+provably cannot help, and the kick's value for the population it *can*
+help is unproven because no deterministic test can arrange it. Both are
+recorded — the comment fixed, the question filed — and neither is a
+crash. They are the kind of thing that surfaces only when someone tries
+to write down what a mechanism guarantees and finds they cannot.
+
+**What it did not find**: no use-after-free, no bio reaching a detached
+driver, no hung unregister. The report said in advance that it would say
+so and keep the tests, and that is what this is. Seven tests that fail the
+day someone reorders a store are the product either way.
+
+**The kick count comes back on the stack, and it took two goes.** The first version of the straggler tests bracketed
+`straggler_ipis` and asserted this waiter's bound against it. That
+counter is global and the callback worker can be in a grace period of
+its own at the same time, so the assertion would have failed on a busy
+machine with every waiter having behaved -- the tree's own rule about
+machine-wide counters, walked into anyway. The first fix recorded each call's
+kicks in a per-CPU slot -- which is still not the caller's, because the
+callback worker is unpinned and can run a grace period on this CPU
+between the tested call returning and a preemptible test reading the
+slot. The count is now *returned*: a value on the caller's stack cannot
+be anyone else's. Two attempts at the same finding, and the second is
+the one that has no shared state in it at all.
+
+**The release build caught every one of the new tests**, which is the
+lesson the tree already records arriving by another door: a test that
+calls a `CONFIG_DEBUG` hook does not compile without one. Each now
+returns early with a line saying why, because a race test without the
+hook that holds its window open would be a race test hoping, and that is
+worse than an absent one.
+
+And then it caught them a second time, one step removed: adding the
+per-waiter kick counter to fix the finding above turned two tests that
+had needed no hook into tests that do. Introducing a debug-only symbol
+can make an existing test debug-only, which is the same lesson from the
+other end.
+
+**Three of the four windows needed a hook and one did not**, as the
+design says: `blk_test_unregister_pause`, `blk_test_hold_in_driver`,
+`tcp_test_hold_callback`, `pci_test_remove`, and two spin counters —
+all `CONFIG_DEBUG`, all compiled out of the release build, which the
+release gate checks.
+
+**On one CPU** each racing test refuses its half and says so in its log
+line. The pcb test needs three CPUs and says that too. `SMP=1` is run by
+hand and these tests are a reason to keep running it.

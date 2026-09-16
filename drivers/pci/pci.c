@@ -187,6 +187,21 @@ static void pci_remove_thunk(struct device *dev)
         pdrv->remove(to_pci_device(dev));
 }
 
+#if CONFIG_DEBUG
+/*
+ * Remove a live PCI device: the bound driver's `remove` and the model's
+ * bookkeeping, which is one operation and not two
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ */
+int pci_test_remove(struct pci_device *p)
+{
+    if (p == NULL || p->dev.driver == NULL)
+        return -ENODEV;
+    device_test_unbind(&p->dev);
+    return 0;
+}
+#endif
+
 /* --- enumeration --------------------------------------------------------- */
 
 static void decode_bars(struct pci_device *p)

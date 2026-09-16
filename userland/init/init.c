@@ -2882,6 +2882,16 @@ static int unpriv_test(void)
 
     /* Root-owned objects. */
     UCHECK(open("/dev/vmm", O_RDWR) < 0 && errno == EACCES);              /* 0600 root */
+    /*
+     * The two 0600 devices added after this suite was written, which is
+     * how they came to be the only privileged doors nothing tried: the
+     * filesystem's maintenance channel and the guest network's control
+     * channel (docs/audit/next-subsystem-lifetime-windows.md, which
+     * found the inventory row claiming *nothing* here was tested to be
+     * stale, and this to be what was left of it).
+     */
+    UCHECK(open("/dev/fsctl", O_RDWR) < 0 && errno == EACCES);            /* 0600 root */
+    UCHECK(open("/dev/net/tapctl", O_RDWR) < 0 && errno == EACCES);       /* 0600 root */
     UCHECK(open("/tmp/privtest/secret", O_RDONLY) < 0 && errno == EACCES); /* 0700 directory */
     UCHECK(chdir("/tmp/privtest") < 0 && errno == EACCES);
     UCHECK(open("/etc/rc", O_WRONLY) < 0 && errno == EACCES);               /* 0644 root */

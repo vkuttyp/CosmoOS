@@ -251,6 +251,69 @@ static void blk_timeout_thread(void *arg)
     }
 }
 
+#if CONFIG_DEBUG
+/*
+ * Hooks for the two halves of the unregister barrier's argument
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ *
+ * The *refusal* half is reached by pausing between the `gone` store and
+ * the `submitting` load: every submitter arriving in that interval must
+ * be turned back.
+ *
+ * The *drain* half is not reachable that way, and thinking it was is how
+ * the first draft of that report was wrong: a submitter arriving during
+ * the pause sees `gone` and leaves, so the window would be empty. It
+ * needs a submitter parked *inside* the window -- past the `gone` check,
+ * with `submitting` raised -- and a way for the test to know one is
+ * there and that the unregister is really waiting for it.
+ */
+static unsigned g_test_pause_ms;         /* refusal half: pause inside the window */
+static unsigned g_test_hold;             /* drain half: park the next submitter */
+static unsigned g_test_parked;           /* a submitter is inside the window */
+static unsigned g_test_release;          /* let it out */
+static unsigned g_test_unreg_spins;      /* iterations blk_unregister spent draining */
+static uint64_t g_test_left_ns;          /* when the parked submitter left */
+static uint64_t g_test_unreg_ns;         /* when blk_unregister returned */
+
+void blk_test_unregister_pause(unsigned ms) { __atomic_store_n(&g_test_pause_ms, ms, __ATOMIC_RELEASE); }
+
+void blk_test_hold_in_driver(bool on)
+{
+    __atomic_store_n(&g_test_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_parked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_spins, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_left_ns, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_ns, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
+bool blk_test_submitter_parked(void) { return __atomic_load_n(&g_test_parked, __ATOMIC_ACQUIRE) != 0; }
+unsigned blk_test_unregister_spins(void) { return __atomic_load_n(&g_test_unreg_spins, __ATOMIC_ACQUIRE); }
+void blk_test_release_in_driver(void) { __atomic_store_n(&g_test_release, 1u, __ATOMIC_RELEASE); }
+
+/* The order the drain half is about: did the unregister return after the
+ * submitter left? Both are recorded by the code that does them. */
+bool blk_test_drain_ordered(void)
+{
+    uint64_t left = __atomic_load_n(&g_test_left_ns, __ATOMIC_ACQUIRE);
+    uint64_t unreg = __atomic_load_n(&g_test_unreg_ns, __ATOMIC_ACQUIRE);
+    return left != 0 && unreg != 0 && unreg > left;
+}
+
+/* Called from blk_submit with `submitting` raised and `gone` not seen:
+ * exactly the state the unregister must wait for. */
+static bool blk_test_park(void)
+{
+    unsigned want = 1;
+    if (!__atomic_compare_exchange_n(&g_test_hold, &want, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return false;   /* not the first submitter, or no hold armed */
+    __atomic_store_n(&g_test_parked, 1u, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&g_test_release, __ATOMIC_ACQUIRE))
+        arch_cpu_relax();
+    return true;
+}
+#endif
+
 void blk_unregister(struct blkdev *bd)
 {
     mutex_lock(&g_blk_lock);
@@ -264,8 +327,24 @@ void blk_unregister(struct blkdev *bd)
      * see `gone` has raised `submitting` before we read it, or we saw
      * its increment (docs/kernel/quiesce/design.md, "Block devices"). */
     __atomic_store_n(&bd->gone, true, __ATOMIC_SEQ_CST);
-    while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0)
+#if CONFIG_DEBUG
+    /* The refusal half's window, widened where the argument is. */
+    unsigned pause = __atomic_load_n(&g_test_pause_ms, __ATOMIC_ACQUIRE);
+    if (pause) {
+        uint64_t end = clock_now_ns() + (uint64_t)pause * 1000000ULL;
+        while (clock_now_ns() < end)
+            sched_yield();
+    }
+#endif
+    while (__atomic_load_n(&bd->submitting, __ATOMIC_SEQ_CST) != 0) {
+#if CONFIG_DEBUG
+        /* A test waits for this to move before releasing its parked
+         * submitter: it says the drain is really draining, rather than
+         * the test hoping it is. */
+        __atomic_fetch_add(&g_test_unreg_spins, 1u, __ATOMIC_ACQ_REL);
+#endif
         sched_yield();
+    }
     /* Nothing waiting in the pending list will ever reach the driver. */
     for (;;) {
         arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
@@ -276,6 +355,9 @@ void blk_unregister(struct blkdev *bd)
         bio_complete(container_of(n, struct bio, link), -ENODEV);
     }
     kinfo("blk: %s removed", bd->name);
+#if CONFIG_DEBUG
+    __atomic_store_n(&g_test_unreg_ns, clock_now_ns(), __ATOMIC_RELEASE);
+#endif
     kobject_put(&bd->obj);   /* the registry's reference */
 }
 
@@ -293,7 +375,18 @@ int blk_submit(struct bio *bio)
         __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
         return -ENODEV;
     }
+#if CONFIG_DEBUG
+    bool parked = blk_test_park();
+#endif
     int rc = (bio->flags & (BIO_PREFLUSH | BIO_FUA)) ? submit_flagged(bd, bio) : submit_checked(bd, bio);
+#if CONFIG_DEBUG
+    /* Stamped *before* the decrement, not after: the unregister can
+     * return the moment `submitting` falls, so a timestamp taken
+     * afterwards could read later than the unregister's own and make a
+     * correct drain look like a broken one. */
+    if (parked)
+        __atomic_store_n(&g_test_left_ns, clock_now_ns(), __ATOMIC_RELEASE);
+#endif
     __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
     return rc;
 }

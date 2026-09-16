@@ -60,7 +60,9 @@ void quiesce_read_unlock_debug(void)
 
 /* --- grace periods ------------------------------------------------------- */
 
-void synchronize_quiesce(void)
+/* The wait itself, handing back how many straggler kicks *this* call
+ * sent. Nothing stores that number: see quiesce_test_sync_kicks below. */
+static unsigned sync_quiesce_counting(void)
 {
     struct percpu *pc = this_cpu();
     if (pc->irq_depth != 0)
@@ -74,7 +76,7 @@ void synchronize_quiesce(void)
     if (!g_ready) {
         /* Before the scheduler can sleep, every other CPU is still in
          * its bootstrap: nothing can hold a reference. */
-        return;
+        return 0;
     }
 
     uint64_t start = clock_now_ns();
@@ -89,9 +91,29 @@ void synchronize_quiesce(void)
 
         uint64_t waited = clock_now_ns() - start;
         if (waited > 2 * TICK_NS && kicks < 8) {
-            /* A straggler is in a preempt-disabled region across its
-             * ticks, or its tick keeps landing inside one: an extra
-             * interrupt gives its return path another chance. */
+            /*
+             * An extra interrupt gives this CPU's return path another
+             * chance to publish.
+             *
+             * Which stragglers that can help is narrower than it looks,
+             * and this comment used to claim the wrong one. A CPU
+             * publishes at interrupt return only when it is outside
+             * every read-side section (`preempt_count == 0`, in the trap
+             * return), so a CPU *spinning* with preemption disabled
+             * takes this IPI, handles it, and returns without
+             * publishing: the kick cannot help it, and the grace period
+             * ends when that CPU leaves its section, kick or no kick
+             * (`docs/audit/2026-09-lifetime-quiesce-report.md`, risk 2:
+             * "the straggler IPI helps a halted CPU, not one spinning
+             * with preemption off").
+             *
+             * What it can help is a CPU whose *periodic tick* keeps
+             * landing inside a short disabled region: an interrupt at an
+             * unrelated phase lands outside one and publishes. That
+             * population is real and no test in this tree arranges it,
+             * so what this kick is worth is an open question rather than
+             * a measured fact (`docs/audit/next-subsystem-lifetime-windows.md`).
+             */
             for (unsigned c = 0; c < cpu_count(); c++) {
                 if ((pending & CPUMASK_OF(c)) && c != pc->cpu_id && cpu_online(c))
                     ipi_send(c, IPI_RESCHEDULE);
@@ -115,7 +137,31 @@ void synchronize_quiesce(void)
     g_stats.synchronizes++;
     if (waited > g_stats.max_wait_ns)
         g_stats.max_wait_ns = waited;
+    return kicks;
 }
+
+void synchronize_quiesce(void)
+{
+    (void)sync_quiesce_counting();
+}
+
+#if CONFIG_DEBUG
+/*
+ * The same wait, handing back the kicks *this call* sent.
+ *
+ * Returned rather than stored anywhere, and that is the point. The
+ * machine-wide `straggler_ipis` cannot carry a per-waiter claim because
+ * another waiter's kicks land in it; a per-CPU slot cannot either,
+ * because the callback worker is unpinned and can run a grace period on
+ * this CPU between the tested call returning and a preemptible test
+ * reading the slot. A value on the caller's stack belongs to the caller
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ */
+unsigned quiesce_test_sync_kicks(void)
+{
+    return sync_quiesce_counting();
+}
+#endif
 
 /* --- deferred callbacks --------------------------------------------------- */
 

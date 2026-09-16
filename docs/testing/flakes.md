@@ -133,6 +133,29 @@ code:
 | `smp-parallel` | `smptest.c:239` | work ratio | 1 | restated: parallelism observed from CPU 0 |
 | `el2-guest-timer-ontime` | `hvtest.c:1279` | upper bound | 1 | widened and labelled; listed above |
 
+A different family, recorded here because a flake seen once and not
+written down is a flake somebody else debugs from scratch. On
+2026-09-16, one CI run of PR #154 failed on **both** architectures, and
+the same commit passed on a re-run with nothing changed:
+
+| where | what it looked like | why it is not a bound |
+| --- | --- | --- |
+| x86-64, the default boot | all 319 self-tests passed and `USERTEST: PASS`; the shell script ran its whole command list to `exit 0`; then `SHTEST: PASS` **and every Linux-ABI marker** -- the musl hello, `LINUXTEST: PASS`, `lxinterp`, `lxdyn`, `lxsig term` -- were all missing together | not a bound a loaded host trips. **What the cause was is not established**: those markers are the tail of the run -- the Linux ones come from `rc.test` and `SHTEST: PASS` is printed last -- so an absent boot archive, a Linux-test build that did not arrive, a hang and a premature shutdown all suppress exactly the same suffix. The observation is recorded; the diagnosis is not |
+| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one |
+
+Neither is on the list above and neither should be: they are not bounds a
+loaded host can trip, so a re-run distinguishes them from a regression
+rather than curing them. What the rows are for is the next reader, who
+should know that this pair has been seen once, on correct code, and that
+the same commit passed immediately afterwards.
+
+**What they are not is explained.** The first draft of this entry said
+the x86-64 marker loss "is a boot archive or a Linux-test build that did
+not arrive" -- a cause asserted from a symptom, when a hang or an early
+shutdown produces the identical suffix. A confident wrong cause in this
+file is worse than no cause at all, because the next reader starts where
+it points.
+
 Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever

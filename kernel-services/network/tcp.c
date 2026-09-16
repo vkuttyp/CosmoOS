@@ -28,6 +28,8 @@
 #include <kernel/socket.h>
 #include <kernel/string.h>
 
+#include <arch/cpu.h>
+
 #include <uapi/cosmo/syscall.h>
 
 static spinlock_t g_table_lock = SPINLOCK_INIT("tcp-table");
@@ -185,6 +187,53 @@ static void pcb_get(struct tcp_pcb *pcb)
 
 /* Never called with pcb->lock held unless another reference is known to
  * remain (the table's or the caller's own). */
+#if CONFIG_DEBUG
+/*
+ * The timer-callback/free window
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ *
+ * The hook holds a callback *before* it takes its reference, which is
+ * the only placement that tests what it claims to: timer_kick's first
+ * act is pcb_get, so a hold after that is protected by reference
+ * counting and would pass with timer_cancel_sync stubbed out. Held where
+ * it is, the interval belongs to synchronous cancellation alone.
+ *
+ * The pcb is poisoned as it is freed and the callback checks the mark
+ * again *after* the hold, not only on entry: an entry-only check passes
+ * and then says nothing about what happened during the interval.
+ */
+#define TCP_PCB_LIVE 0x5450434Bu   /* 'TPCK' */
+#define TCP_PCB_DEAD 0x44454144u   /* 'DEAD' */
+
+static unsigned g_test_hold_cb;      /* hold the next callback */
+static unsigned g_test_cb_entered;   /* it is inside, before its pcb_get */
+static unsigned g_test_cb_release;   /* let it go */
+static unsigned g_test_cb_saw_dead;  /* it found the poison: the bug */
+static unsigned g_test_cb_checked;   /* liveness checks that passed after the hold */
+
+void tcp_test_hold_callback(bool on)
+{
+    __atomic_store_n(&g_test_cb_entered, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_cb_release, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_cb_saw_dead, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_cb_checked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_hold_cb, on ? 1u : 0u, __ATOMIC_RELEASE);
+}
+bool tcp_test_callback_entered(void) { return __atomic_load_n(&g_test_cb_entered, __ATOMIC_ACQUIRE) != 0; }
+void tcp_test_release_callback(void) { __atomic_store_n(&g_test_cb_release, 1u, __ATOMIC_RELEASE); }
+unsigned tcp_test_callback_saw_dead(void) { return __atomic_load_n(&g_test_cb_saw_dead, __ATOMIC_ACQUIRE); }
+unsigned tcp_test_callback_checked(void) { return __atomic_load_n(&g_test_cb_checked, __ATOMIC_ACQUIRE); }
+
+/* Arm the pcb's rexmit timer. Must be called from the CPU the callback
+ * should run on: a timer lands on the queue of the CPU that starts it,
+ * and this window needs the callback on a CPU other than the closer's. */
+void tcp_test_arm_rexmit(struct tcp_pcb *pcb, uint64_t ns)
+{
+    timer_cancel(&pcb->rexmit);
+    timer_start(&pcb->rexmit, ns);
+}
+#endif
+
 static void pcb_put(struct tcp_pcb *pcb)
 {
     uint32_t old = __atomic_fetch_sub(&pcb->refs, 1, __ATOMIC_ACQ_REL);
@@ -196,6 +245,11 @@ static void pcb_put(struct tcp_pcb *pcb)
     netbuf_free(&pcb->sndbuf);
     netbuf_free(&pcb->rcvbuf);
     kfree(pcb->syncache);
+#if CONFIG_DEBUG
+    /* Poisoned before the free so a callback still inside reads a mark
+     * rather than whatever the allocator hands out next. */
+    pcb->test_mark = TCP_PCB_DEAD;
+#endif
     kfree(pcb);
 }
 
@@ -337,6 +391,22 @@ static void pcb_work(void *arg);
 static void timer_kick(struct tcp_pcb *pcb, unsigned flag)
 {
     __atomic_fetch_or(&pcb->work_flags, flag, __ATOMIC_RELAXED);
+#if CONFIG_DEBUG
+    {
+        unsigned want = 1;
+        if (__atomic_compare_exchange_n(&g_test_hold_cb, &want, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            /* Before pcb_get: for this interval nothing but
+             * timer_cancel_sync refusing to return keeps the pcb alive. */
+            __atomic_store_n(&g_test_cb_entered, 1u, __ATOMIC_RELEASE);
+            while (!__atomic_load_n(&g_test_cb_release, __ATOMIC_ACQUIRE))
+                arch_cpu_relax();
+            if (__atomic_load_n(&pcb->test_mark, __ATOMIC_ACQUIRE) != TCP_PCB_LIVE)
+                __atomic_fetch_add(&g_test_cb_saw_dead, 1u, __ATOMIC_ACQ_REL);
+            else
+                __atomic_fetch_add(&g_test_cb_checked, 1u, __ATOMIC_ACQ_REL);
+        }
+    }
+#endif
     pcb_get(pcb);
     if (!net_work_queue(&pcb->work))
         pcb_put(pcb);   /* already queued: that item's reference covers it */
@@ -362,6 +432,9 @@ struct tcp_pcb *tcp_pcb_new(uint16_t family)
     spinlock_init(&pcb->lock, "tcp-pcb");
     pcb->refs = 2;
     pcb->state = TCP_CLOSED;
+#if CONFIG_DEBUG
+    __atomic_store_n(&pcb->test_mark, TCP_PCB_LIVE, __ATOMIC_RELEASE);
+#endif
     pcb->local.family = pcb->remote.family = family;
     pcb->path_mss = family_mss(family);
     pcb->mss = pcb->path_mss;

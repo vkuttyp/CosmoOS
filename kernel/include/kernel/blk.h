@@ -145,6 +145,21 @@ int blk_register_named(struct blkdev *bd, const char *name);
  * be completed (bio_complete with -EIO after a reset). Sleeps. */
 void blk_unregister(struct blkdev *bd);
 
+#if CONFIG_DEBUG
+/*
+ * Test hooks for the unregister barrier's two halves
+ * (docs/audit/next-subsystem-lifetime-windows.md). The pause widens the
+ * refusal window; the hold parks a submitter inside it, which is the
+ * only way to occupy the state the drain waits for.
+ */
+void blk_test_unregister_pause(unsigned ms);
+void blk_test_hold_in_driver(bool on);
+bool blk_test_submitter_parked(void);
+unsigned blk_test_unregister_spins(void);
+void blk_test_release_in_driver(void);
+bool blk_test_drain_ordered(void);
+#endif
+
 /* Validate and hand to the driver. -EINVAL (range, alignment, size,
  * buffer), -ENODEV after blk_unregister, -EROFS, or the driver's error;
  * on success `done` will run exactly once. A driver that answers -EAGAIN
