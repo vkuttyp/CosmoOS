@@ -180,13 +180,32 @@ is not added to the list above, because a host-dependent exchange is not
 a bound this project can widen -- a re-run is what distinguishes it from
 a regression.
 
-**Seen a third time, on a tree with no code in it.** On 2026-09-16 the
+**Seen a third time, on a source-equivalent tree.** On 2026-09-16 the
 aarch64 CI job of a **documentation-only** pull request failed the same
 assertion, on a branch whose only commit adds one Markdown file to a
 `main` that had just passed CI green on both architectures several times
-over. There is no code difference to blame, which makes this the
-cleanest control the flake has: the same binary, a different result.
-Whatever `net-harness` depends on, it is not in this repository.
+over.
+
+**What that does and does not show.** It rules out this branch's
+changes, and it is the strongest evidence so far that the failure is
+nondeterministic rather than caused by whatever landed most recently --
+which matters, because the previous unit spent five local runs hunting
+it as a suspected regression. It does **not** exonerate the repository.
+A latent race in the network stack or in the harness thread would
+produce exactly this result, and one observation on one branch cannot
+distinguish that from a host-side cause.
+
+(Nor is it literally the same binary: `BUILD_ID` is
+`git describe --always --dirty`, compiled in through
+`-DCOSMO_BUILD_ID`, and CI rebuilds rather than reusing an artefact. The
+source is equivalent; the image is not identical.)
+
+An earlier version of this paragraph said "whatever `net-harness`
+depends on, it is not in this repository". That is a categorical
+conclusion from a single run, and it is the exact failure this file
+warns about four paragraphs above -- a confident wrong cause sends the
+next reader in the wrong direction, and this one would have sent them
+away from the code.
 
 **A warning about reading the re-run, which cost an hour here.** A run
 failing twice is not the same as a *test* failing twice. The second run
