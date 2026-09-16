@@ -116,41 +116,34 @@ uint64_t clock_worst_offset_ns(void);
 bool clock_is_common(void);
 
 /*
- * Deadlines are timestamps, and the same rule governs them.
+ * Deadlines are timestamps, and they are the harder half.
  *
  * `uint64_t d = clock_now_ns() + delay;` followed later by
  * `while (clock_now_ns() < d)` is a cross-CPU comparison whenever the
  * thread can be descheduled in between -- the deadline was computed
  * against one CPU's counter and is tested against another's. Saturating
- * subtraction does not help here: the comparison is an ordering, not a
- * difference, and `clock_since_ns` has nothing to saturate.
+ * subtraction does not help: the comparison is an ordering, not a
+ * difference, and there is nothing to saturate.
  *
- * When `clock_is_common()`, such a wait is wrong by at most
- * `clock_worst_offset_ns()`, which is the bound the boot advertised and
- * is the same tolerance every other cross-CPU user accepts. When it is
- * false the wait may expire early or late by an unbounded amount, and
- * the kernel has no cross-CPU time source to offer instead -- a shared
- * tick counter would be one, and this tree does not have a machine-wide
- * one (`timer_ticks()` is per-CPU).
+ * So do not write that. `clock_deadline_ns` and `clock_deadline_passed`
+ * below both measure against the same quantity -- the corrected clock
+ * where every CPU agrees on it, and a machine-wide tick where they do
+ * not -- so where a deadline is built and where it is tested no longer
+ * matters. Every deadline in the kernel goes through them except four
+ * that cannot (see their own comments: `ndelay`, `timer_start`, and the
+ * lockup sampler's two windows, all below a tick or same-CPU by
+ * construction).
  *
- * So: a deadline loop whose *correctness* depends on the duration needs
- * an age that no clock can distort. The block layer's timeout is the one
- * place in this tree where that mattered enough to build -- it counts
- * scans of its own thread beside the timestamp (`bio->scans`,
- * `kernel/block/blk.c`) so a stalled device still enters recovery on a
- * machine whose counter is not common.
+ * They also fix something smaller and real: `clock_now_ns() + budget`
+ * wraps into the past for a large budget and expires at once, which
+ * `sys_futex_wait` guarded at its own call site and nothing else did.
  *
- * Every other deadline in the kernel goes through the two calls below.
- * They are not magic: on a machine where the offset is unbounded they
- * are exactly as wrong as the open-coded arithmetic they replaced, and
- * saying otherwise would be the sort of claim this unit exists to stop.
- * What they buy is that the hazard has **one** address instead of
- * sixteen -- the day this tree grows a machine-wide counter, a sound
- * deadline is two function bodies away rather than a sweep of every
- * driver poll. They also fix something real today: `clock_now_ns() +
- * budget` wraps into the past for a large budget and expires at once,
- * which `sys_futex_wait` guards against at its own call site and
- * nothing else did.
+ * One deadline does not use them, and deliberately. The block layer's
+ * request timeout is the only wait here whose failure is a *hang* rather
+ * than a spurious timeout, so it carries a second age that no clock can
+ * distort at all -- scans counted by the one thread that does the
+ * scanning (`bio->scans`, `kernel/block/blk.c`) -- and is overdue when
+ * either age says so.
  */
 
 /*
