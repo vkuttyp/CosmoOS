@@ -7,7 +7,7 @@ interface). Chosen from `docs/audit/2026-09-deferred-work-inventory.md`
 **Subsystem: a record of what a transaction freed, published with the
 root that freed it, so that the blocks reach the allocator whether or
 not another commit ever happens.**
-**Built: PR #TBD.** The design below is as proposed except where an
+**Built: PR #148.** The design below is as proposed except where an
 inset says the build changed it; "As built" and "As run" record what it
 changed and measured. This report closes the inventory's §3 row that
 begins "No on-disk orphan list, and no record of a deferred free", in

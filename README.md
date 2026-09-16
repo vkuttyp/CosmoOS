@@ -2033,7 +2033,7 @@ See [docs/development.md](docs/development.md).
   their own bug-proof and were rebuilt before they measured anything,
   one of them three times. The crash suite's stranded-block total is now
   zero and its weakened assertion is gone. 295 self-tests on both
-  architectures, debug and release (PR #TBD).
+  architectures, debug and release (PR #148).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

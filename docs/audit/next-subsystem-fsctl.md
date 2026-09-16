@@ -670,7 +670,7 @@ filesystem the commands are pointed at.
 | `fsctl-stale-id` — folded into `fsctl-check` | an id whose mount is gone is `-ENOENT`, not a hit on a reused slot | as `vfs-mount-id`'s injection: a reused id makes this command reach a different filesystem |
 | `fsctl-result-per-open` — built | two open files run two commands against two mounts and each reads its own result; a read with no prior command returns zero bytes | keep the result in one global: the two readers see one answer |
 | `fsctl-release` — **not built as a test** | a release build contains the device and both passes and a check through it works -- the first time either pass runs outside a debug build | no self-test runs in a release build. Replaced by a line at boot, checked by reading the release boot log; weaker, and "As built" says so |
-| `fs_selftest` (user mode) — built as `fsctl_selftest` | `fsctl list` names the mounted filesystems; the test then writes a file, deletes it, unmounts and remounts, and asserts what that sequence leaves behind, reading the flags back through the device because an exit status cannot say "clean" when a finding is not an error. **Superseded by the unmount-leak unit (PR #TBD)**: when this was built the sequence stranded blocks and the test asserted the check found them and `--repair` reclaimed them; format version 9 made it strand nothing, so the same sequence now asserts `COSMO_FSCTL_R_CLEAN` and the find-and-repair path is covered by the kernel's tests instead. Exit status zero for a clean check *and* for one that found faults, non-zero only for a refusal | make a finding an error exit: the assertion on the first check fails. The finding itself is made by the test rather than inherited, so it does not pass on somebody else's residue |
+| `fs_selftest` (user mode) — built as `fsctl_selftest` | `fsctl list` names the mounted filesystems; the test then writes a file, deletes it, unmounts and remounts, and asserts what that sequence leaves behind, reading the flags back through the device because an exit status cannot say "clean" when a finding is not an error. **Superseded by the unmount-leak unit (PR #148)**: when this was built the sequence stranded blocks and the test asserted the check found them and `--repair` reclaimed them; format version 9 made it strand nothing, so the same sequence now asserts `COSMO_FSCTL_R_CLEAN` and the find-and-repair path is covered by the kernel's tests instead. Exit status zero for a clean check *and* for one that found faults, non-zero only for a refusal | make a finding an error exit: the assertion on the first check fails. The finding itself is made by the test rather than inherited, so it does not pass on somebody else's residue |
 
 **Vacuity, named in advance.** `fsctl-check` asserts the numbers match
 what `cosmofs_check` returns when called directly, not merely that a
@@ -919,7 +919,7 @@ operator-interface unit does not rewrite a filesystem's commit ordering
 on the way past -- and it is an inventory row with this measurement
 attached.
 
-**Fixed by the unmount-leak unit (PR #TBD), which that row became.**
+**Fixed by the unmount-leak unit (PR #148), which that row became.**
 Format version 9 gives the superblock a `free_root` naming a chain of
 blocks the root freed, written before the root and replayed at mount, so
 the space returns whether or not another commit ever happens. The
