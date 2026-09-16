@@ -607,9 +607,10 @@ were new.
 
 ### As run
 
-**319 self-tests, PASS on x86-64 and aarch64, debug and release.** Six
-tests across the four windows, each reporting the number that makes its
-answer checkable rather than a pass.
+**319 self-tests, PASS on x86-64 and aarch64, debug and release** -- 312
+before, so **seven** are new: three on Q6, two on Q11, one each on N-L3
+and the removal. Each reports the number that makes its answer checkable
+rather than a pass.
 
 The figures below are **one run's**, on the development machine. The
 kick count and the wait vary a little between boots, as anything
@@ -638,7 +639,7 @@ to write down what a mechanism guarantees and finds they cannot.
 
 **What it did not find**: no use-after-free, no bio reaching a detached
 driver, no hung unregister. The report said in advance that it would say
-so and keep the tests, and that is what this is. Six tests that fail the
+so and keep the tests, and that is what this is. Seven tests that fail the
 day someone reorders a store are the product either way.
 
 **The kick count comes back on the stack, and it took two goes.** The first version of the straggler tests bracketed

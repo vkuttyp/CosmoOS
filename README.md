@@ -2141,7 +2141,7 @@ See [docs/development.md](docs/development.md).
   `blk_unregister` was called by two tests and in both the device was
   quiescent; `timer_cancel_sync` was tested on a probe, which is
   evidence for the primitive and not for four uses of it; `vpci_remove`
-  ran only on module unload. Six tests race them now, each holding its
+  ran only on module unload. Seven tests race them now, each holding its
   window open with a hook rather than a stopwatch. **Three of the four
   windows are closed and the fourth is narrowed**: removal is asserted
   to be the whole unbind -- the driver's hook *and* the model's
