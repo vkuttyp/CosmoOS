@@ -486,6 +486,7 @@ static const struct selftest tests[] = {
     { "cosmofs-orphan-reserved", selftest_cosmofs_orphan_reserved },
     { "cosmofs-orphan-supersede", selftest_cosmofs_orphan_supersede },
     { "cosmofs-orphan-rollback", selftest_cosmofs_orphan_rollback },
+    { "cosmofs-orphan-suspect", selftest_cosmofs_orphan_suspect },
     { "cosmofs-freelog-idempotent", selftest_cosmofs_freelog_idempotent },
     { "cosmofs-freelog-reuse", selftest_cosmofs_freelog_reuse },
     { "cosmofs-freelog-chain", selftest_cosmofs_freelog_chain },

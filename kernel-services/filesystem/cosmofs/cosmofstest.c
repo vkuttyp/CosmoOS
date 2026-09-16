@@ -2275,6 +2275,57 @@ bool selftest_cosmofs_orphan_rollback(const char **reason)
 }
 
 /*
+ * A record that names a live inode must not be believed.
+ *
+ * The replay's job is to delete, so the one thing it must never do is
+ * delete something still in use. A record whose checksum is good and
+ * whose contents are wrong is the case -- a bit rotted in the right
+ * place, or a kernel bug -- and the replay checks the inode rather than
+ * trusting the record: an inode with links is refused, loudly, and left
+ * for the checker.
+ *
+ * Refused rather than treated as a corrupt filesystem, and the choice is
+ * deliberate: skipping leaves the filesystem exactly as it was and still
+ * mountable, while refusing the mount would take it away from the
+ * operator in order to protect it from a leak.
+ */
+bool selftest_cosmofs_orphan_suspect(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+
+    CHECK(write_file(ENG "/live", "still very much in use", 22));
+    CHECK(vfs_sync() == 0);
+    struct cosmo_stat st;
+    CHECK(vfs_stat(NULL, ENG "/live", &st) == 0);
+    CHECK(st.nlink == 1);
+
+    /* The wrong record: it names an inode that has a name. */
+    cosmofs_test_orphan_add(mount_of(ENG), st.ino);
+    CHECK(vfs_sync() == 0);
+    struct cosmofs_stats fsst;
+    CHECK(cosmofs_stats(mount_of(ENG), &fsst) == 0);
+    CHECK(fsst.orphan_root != 0);
+
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    cosmofs_test_set_writeback(mount_of(ENG), false);
+
+    /* The file is still there, with its contents and its name. */
+    CHECK(read_matches(ENG "/live", "still very much in use", 22));
+    CHECK(vfs_stat(NULL, ENG "/live", &st) == 0);
+    CHECK(st.nlink == 1);
+    struct cosmofs_check_report r;
+    CHECK(cosmofs_check(mount_of(ENG), &r, 0) == 0);
+    CHECK(r.clean);
+    CHECK(r.orphan.count == 0);
+
+    kinfo("selftest: cosmofs-orphan-suspect: a record naming a linked inode was refused and the file survived");
+    return engine_unmount(bd, reason);
+}
+
+/*
  * An orphan the record did *not* name.
  *
  * This test used to be the defect's own description: it opened a file,

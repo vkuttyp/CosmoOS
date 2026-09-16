@@ -576,6 +576,41 @@ of the defect. Its new form makes an orphan the record did *not* name --
 repair path it exercises stays tested on the case the checker still
 owns.
 
+**Review found four failure paths where the happy path was right and the
+unhappy one was not, and they resolve to one rule: a promise the record
+no longer backs must not be published.**
+
+- `cfs_orphan_add` grew the array and, when that failed, logged and
+  returned while the unlink went on to commit a zero-link inode nothing
+  recorded -- this unit's own defect, reintroduced on an allocation
+  failure. The report had argued against failing an unlink with
+  `-ENOMEM` "for a reason the caller cannot act on"; the argument was
+  weak and the review was right. The memory is now taken *before* the
+  point of no return, in both the unlink and the rename paths
+  (`cfs_orphan_reserve`), where the name is still there and `-ENOMEM` is
+  a clean answer, so the add itself can no longer fail.
+- `cfs_evict` ignored the result of clearing the slot and retired the
+  record anyway. The next commit would then publish the deferred frees
+  under an inode that still named those blocks, and no later mount would
+  retry it, because nothing would say it was owed. The record is retired
+  only when the slot is actually cleared; otherwise the transaction is
+  abandoned.
+- The replay swallowed a failure *after* the truncate, with the same
+  consequence. Nothing is published at that point, so it now fails the
+  mount, which leaves the filesystem exactly as it was found. A failure
+  *before* the truncate still skips, because skipping has changed
+  nothing.
+- **And the worst of the four: the replay believed the record.** A
+  record whose checksum is good and whose contents are wrong would have
+  had it truncate and clear an inode somebody was still using. It now
+  checks `nlink == 0` before reclaiming anything. Skipped and reported
+  rather than refused, because skipping leaves the filesystem untouched
+  and mountable with the checker still naming the inode, while refusing
+  the mount would take the filesystem away from the operator in order to
+  protect it from a leak. `cosmofs-orphan-suspect` builds that image
+  with a hook nothing else can and asserts the file survives with its
+  name, its contents and its link count.
+
 Unchanged from the plan: the record is written whole and never copied;
 the set cancels in memory for an ordinary unlink; the bound is exact;
 the reservation is a third consumer of the commit's existing one; the
@@ -585,7 +620,7 @@ calling a recorded inode an orphan.
 
 ### As run
 
-**311 self-tests, PASS on x86-64 and aarch64 debug and on x86-64
+**312 self-tests, PASS on x86-64 and aarch64 debug and on x86-64
 release.**
 
 | measurement | before | after |
@@ -614,6 +649,8 @@ Each test as it reported itself:
   accumulated.
 - `cosmofs-orphan-rollback`: the failed fill left the generation and the
   free count as it found them.
+- `cosmofs-orphan-suspect`: a record naming a linked inode was refused
+  and the file survived -- the test the review's fourth finding earned.
 
 **The bug-proof, run rather than asserted.** With `orphan_replay` made a
 no-op and nothing else changed, the suite fails in the two places it

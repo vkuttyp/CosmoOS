@@ -151,6 +151,9 @@ int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count);
 void cosmofs_test_fail_snapfill(struct mount *mnt, bool on);
 /* The same for the orphan record's fill. */
 void cosmofs_test_fail_orphan(struct mount *mnt, bool on);
+/* Name a still-linked inode in the orphan record: the image a wrong
+ * record makes, which the replay must refuse to act on. */
+void cosmofs_test_orphan_add(struct mount *mnt, uint64_t ino);
 uint64_t cosmofs_test_snap_walks(struct mount *mnt);
 uint64_t cosmofs_test_snap_verdicts(struct mount *mnt);
 /*

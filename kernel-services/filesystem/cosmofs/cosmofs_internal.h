@@ -315,6 +315,7 @@ void cfs_free_block_exempt(struct cfs *fs, uint64_t blk);
  * between them writes a record naming it -- which the next commit
  * retires (docs/audit/next-subsystem-orphan.md).
  */
+bool cfs_orphan_reserve(struct cfs *fs);
 void cfs_orphan_add(struct cfs *fs, uint64_t ino);
 void cfs_orphan_remove(struct cfs *fs, uint64_t ino);
 bool cfs_orphan_named(const struct cfs *fs, uint64_t ino);

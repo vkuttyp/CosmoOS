@@ -1571,6 +1571,17 @@ static int cfs_unlink_common(struct vnode *dir, const char *name, size_t len, st
             goto out;
         }
     }
+    /*
+     * Room for the orphan record's entry, taken while the name is still
+     * there. Past dir_remove_slot the removal is in the transaction and
+     * "no memory to record it" would mean committing a deletion nothing
+     * records, which is this unit's own defect on an allocation failure
+     * (docs/audit/next-subsystem-orphan.md).
+     */
+    if ((rmdir || victim->nlink == 1) && !cfs_orphan_reserve(fs)) {
+        rc = -ENOMEM;
+        goto out;
+    }
     rc = dir_remove_slot(fs, dir, lblk, slot, block);
     if (rc)
         goto out;
@@ -1706,6 +1717,13 @@ static int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct
                 rc = vb ? -ENOTEMPTY : -ENOMEM;
                 goto out;
             }
+        }
+        /* Room for the record's entry, while the namespace is still
+         * untouched: the replaced file loses its last name below, and a
+         * rename that cannot record that must not happen at all. */
+        if ((replaced->type == VNODE_DIR || replaced->nlink == 1) && !cfs_orphan_reserve(fs)) {
+            rc = -ENOMEM;
+            goto out;
         }
         /* Overwrite the existing entry in place: same name, new inode. */
         uint64_t rl;
@@ -2028,13 +2046,22 @@ static void cfs_evict(struct vnode *vn)
         if (cfs_truncate_blocks(fs, &cv->inode, 0) == 0) {
             struct cfs_inode empty;
             memset(&empty, 0, sizeof(empty));
-            cfs_inode_write(fs, vn->ino, &empty);
-            if (fs->sb.inode_count > 0)
-                fs->sb.inode_count--;
-            /* Done: the record has nothing left to promise about it.
-             * Only on success -- a truncate that failed leaves the inode
-             * exactly as the record describes it. */
-            cfs_orphan_remove(fs, vn->ino);
+            /*
+             * Only when the slot is actually cleared. Retiring the
+             * record on a failed write would let the next commit publish
+             * the deferred frees while the old slot still names those
+             * blocks, and no later mount would retry the inode because
+             * nothing would say it was owed.
+             */
+            if (cfs_inode_write(fs, vn->ino, &empty) == 0) {
+                if (fs->sb.inode_count > 0)
+                    fs->sb.inode_count--;
+                cfs_orphan_remove(fs, vn->ino);
+            } else {
+                /* The blocks are queued to be freed and the slot still
+                 * names them: no root may publish that. */
+                cfs_fail(fs, -EIO);
+            }
         }
         mutex_unlock(&fs->lock);
     }

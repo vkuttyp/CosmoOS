@@ -2121,7 +2121,7 @@ See [docs/development.md](docs/development.md).
   blocks for a 64 KiB file that compresses to five. The crash suite now
   holds a handle across a sync: 410 prefix images, 0 stranded, and with
   the replay disabled it fails at prefix 213 reporting one orphan, which
-  is what says the workload is not vacuous. 311 self-tests on both
+  is what says the workload is not vacuous. 312 self-tests on both
   architectures, debug and release (PR #152).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
