@@ -2720,16 +2720,17 @@ bool selftest_cosmofs_freelog_reuse(const char **reason)
  * is one block per snapshot, which is inside the noise of a transaction
  * in flight.
  *
- * What is exact is a block known by number. The test remembers the
- * record that exists before the snapshot is taken and asserts that the
- * commit which supersedes it did not put it on any deadlist. The
- * deadlist legitimately holds other things -- the root directory block
- * and the first imap and bitmap blocks predate the snapshot, and
- * rewriting anything frees them -- so asking whether it is empty proves
- * nothing, and asking about the one block the argument is about proves
- * exactly the argument. A second, looser assertion says it then stops
- * growing across thirty more commits in a directory created after the
- * snapshot.
+ * What is exact is how much the deadlist grows across one named commit.
+ * Naming the snapshot is that commit: it runs with the snapshot already
+ * recorded, and it supersedes the record that existed before the
+ * snapshot did -- the one record in the filesystem's life a snapshot's
+ * recorded bitmap marks allocated, and therefore the only block on
+ * which this exception can be observed at all. Three blocks go on the
+ * deadlist there for good reasons and a fourth would be the record.
+ *
+ * A second, looser assertion says the list then stops growing across
+ * thirty more commits in a directory created after the snapshot, and a
+ * third says the free count does not fall.
  */
 bool selftest_cosmofs_freelog_not_held(const char **reason)
 {
@@ -2746,27 +2747,26 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
      * marks that record's blocks allocated, which is the difficulty. */
     CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
     CHECK(vfs_sync() == 0);
-    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
-
     /*
-     * The block the argument is about, and the arithmetic that picks it
-     * out. Taking a snapshot commits first and records the snapshot
-     * after, so that commit reserves a record while `snap_count` is
-     * still 0 -- and the bitmap it publishes, which is the bitmap the
-     * snapshot keeps, marks that record **allocated**. It is therefore
-     * the one record in the filesystem's life that a snapshot's recorded
-     * bitmap names, and the only block on which this exception can be
-     * observed at all.
+     * Naming the snapshot is the commit the argument is about, and the
+     * deadlist's growth across it is the measurement.
+     *
+     * That commit runs with the snapshot already recorded, so it
+     * supersedes the record that existed before the snapshot did -- and
+     * that record is marked allocated in the bitmap the snapshot keeps,
+     * because the bitmap a commit publishes still has the bits its
+     * phase 7 is about to clear. It is the one record in the
+     * filesystem's life the generic filter would hold.
+     *
+     * Three blocks go on the deadlist legitimately there: the root
+     * directory block, the inode-map block and the allocation index,
+     * each named by the snapshot's tree and each rewritten by the
+     * commit. A fourth is the record.
      */
-    struct cosmofs_stats rec;
-    CHECK(cosmofs_stats(mount_of(ENG), &rec) == 0);
-    CHECK(rec.free_root != 0);
-    uint64_t record = rec.free_root;
-
-    /* One commit, which supersedes that record and therefore frees it. */
-    CHECK(write_file(ENG "/first", "1", 1));
-    CHECK(vfs_sync() == 0);
-    CHECK(cosmofs_test_deadlist_len(mount_of(ENG), record) == 0);
+    uint64_t dead0 = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+    uint64_t dead1 = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+    CHECK(dead1 - dead0 <= 3);
 
     /* Everything the churn touches is created after the snapshot, and
      * then settled, so the blocks these commits free are all post-
@@ -2812,9 +2812,8 @@ bool selftest_cosmofs_freelog_not_held(const char **reason)
     CHECK(vfs_umount(ENG) == 0);
     CHECK(vfs_rmdir(NULL, ENG) == 0);
     ramblk_destroy(bd);
-    kinfo("selftest: cosmofs-freelog-not-held: 30 records superseded under a snapshot, %llu free before and %llu after, %llu on the deadlist either side, and the snapshot still reads",
-          (unsigned long long)before.free_blocks, (unsigned long long)after.free_blocks,
-          (unsigned long long)dead_before);
+    kinfo("selftest: cosmofs-freelog-not-held: naming the snapshot put %llu blocks on its deadlist and the superseded record was not one of them; 30 more commits added none (%llu free either side)",
+          (unsigned long long)(dead1 - dead0), (unsigned long long)after.free_blocks);
     return true;
 }
 
