@@ -775,6 +775,24 @@ ten-thousand-block mount was not built, because the largest transaction
 the suite can make on its test disks is the 601-block one and a bigger
 disk would be measuring the ramdisk.
 
+**The crash suite outgrew a budget meant for one test.** CI failed once
+on `self-test cosmofs-replay took 8309 ms (budget 8000 ms)`. The code is
+not slower: on one machine, `main` and this branch time that test at
+4801 ms and 4803 ms, with 199 prefixes and 211. What CI shows across
+four runs of this branch is 4703, 4778, 4713, 5441, 5438, 5753, 6390,
+6502, 6534 and 8309 ms -- a spread of 77% on identical code, against
+`main`'s 5080 and 5198. A shared runner was deciding the result.
+
+`cosmofs-replay` mounts and structurally checks 211 complete filesystem
+images behind one `SELFTEST` line, so measuring it against a number
+meant for one test approaching the hang watchdog is the wrong
+comparison, and it fails the next transaction that writes another block
+whatever that is. It joins `process-user` in the harness's
+`composite_budget_ms` at 20 s, on the argument already written down for
+that one (`docs/verification/design.md` §6). It keeps a budget, because
+a suite that hangs must still be caught. Checking fewer images to fit
+8 s would trade the coverage for the budget, which is backwards.
+
 **Six proofs break exactly one test**, which is the strongest form this
 evidence takes: `gate-at-version-8` breaks only
 `cosmofs-freelog-format`, `record-ignores-snapshots` only

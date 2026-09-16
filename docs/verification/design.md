@@ -205,9 +205,20 @@ number meant for one test approaching the watchdog. On CI it stood at
 (`docs/audit/next-subsystem-fsctl.md`), which is a budget that fails the
 next addition to userland whatever that addition is.
 
+`cosmofs-replay` is the same shape and was added to the list for the
+same reason: it mounts and structurally checks **every prefix** of a
+recorded write stream, 211 complete filesystem images behind one line,
+so it grows whenever a cosmofs transaction writes another block. Its CI
+spread over four runs of code whose local timing is identical to `main`'s
+(4801 ms against 4803) was 4703 to 8309 ms against a budget of 8000
+(`docs/audit/next-subsystem-unmount-leak.md`) -- a shared runner deciding
+the result. Making the suite fit by checking fewer images would trade the
+coverage for the budget, which is the wrong way round: the budget is
+there to catch a hang, not to cap a suite.
+
 Such a test gets a budget sized for what it is, in
 `composite_budget_ms` in the harness, beside the default rather than
-instead of it: `process-user` has 20 s. It keeps a budget, because a
+instead of it: `process-user` and `cosmofs-replay` have 20 s. It keeps a budget, because a
 suite that hangs must still be caught. The list is deliberately short
 and each entry is an admission that the line reports too little; the
 better answer is for a suite to report its sections' timings so a slow

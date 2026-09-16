@@ -66,7 +66,9 @@ at about 2.8 s. One line is not a test: `process-user` is the whole
 user-mode suite behind one, grows whenever userland gains a check, and
 has its own budget in the harness's `composite_budget_ms` (20 s) for
 that reason -- it stood at 7129 ms of 8000 on CI before the unit that
-noticed (`docs/verification/design.md` §6).
+noticed. `cosmofs-replay` has one too: 211 filesystem images mounted and
+checked behind one line, with a CI spread of 4703-8309 ms on identical
+code (`docs/verification/design.md` §6).
 
 ## Rules the infrastructure keeps
 
