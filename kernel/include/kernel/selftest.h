@@ -276,6 +276,7 @@ bool selftest_net_forward(const char **reason);
 bool selftest_net_nat(const char **reason);
 bool selftest_net_second_nic(const char **reason);   /* a second interface takes over when the default goes down */
 bool selftest_net_lo_udp(const char **reason);
+bool selftest_tcp_pcb_timer_free(const char **reason);
 bool selftest_net_lo_tcp(const char **reason);
 bool selftest_net_lo_tcp_loss(const char **reason);
 bool selftest_net_tcp_mss(const char **reason);

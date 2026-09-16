@@ -528,6 +528,138 @@ static bool tcp_transfer(const char **reason, struct netaddr addr, uint32_t byte
     return true;
 }
 
+/* --- the pcb and its timers -----------------------------------------------
+ *
+ * docs/audit/next-subsystem-lifetime-windows.md. pcb_kill_locked cancels
+ * four timers in a row, and each timer_cancel_sync must return only once
+ * the callback is not running -- or the callback dereferences a pcb the
+ * caller is about to free.
+ *
+ * timer_cancel_sync itself is tested, on a probe object, in the quiesce
+ * suite. What is not tested is the integration, and aiming a test at it
+ * takes care: timer_kick's first act is pcb_get, so a hold placed after
+ * it measures reference counting and would pass with timer_cancel_sync
+ * stubbed out. The hook this uses is placed *before* the acquisition,
+ * and the callback checks the pcb's mark after the held interval as well
+ * as on entry -- so the interval belongs to synchronous cancellation
+ * alone, and an entry-only check is not mistaken for evidence about it.
+ */
+
+struct tcp_releaser {
+    volatile unsigned stop;
+};
+
+struct tcp_armer {
+    struct tcp_pcb *pcb;
+};
+
+static void tcp_armer_main(void *arg)
+{
+    struct tcp_armer *a = arg;
+    tcp_test_arm_rexmit(a->pcb, 1000000ULL);   /* 1 ms, on this CPU's queue */
+}
+
+/* Lets the parked callback go, but only once a cancel is demonstrably
+ * waiting for it. Releasing on a timer would let the callback leave
+ * before any cancel looked, and the test would pass having raced
+ * nothing. */
+static void tcp_releaser_main(void *arg)
+{
+    struct tcp_releaser *r = arg;
+    /* Bounded, and the bound is a failure rather than a fallback: if no
+     * cancel ever spins, the callback is released so the machine does
+     * not hang, and the test's own assertion on the spin count is what
+     * reports it. */
+    uint64_t deadline = clock_now_ns() + 5000000000ULL;
+    while (!__atomic_load_n(&r->stop, __ATOMIC_ACQUIRE)) {
+        if (timer_test_cancel_spins() > 0 || clock_now_ns() > deadline) {
+            tcp_test_release_callback();
+            return;
+        }
+        sched_yield();
+    }
+    tcp_test_release_callback();   /* never leave a callback parked */
+}
+
+bool selftest_tcp_pcb_timer_free(const char **reason)
+{
+    unsigned threads0 = thread_count();
+    /*
+     * Three CPUs, and each has a job the other two cannot do.
+     *
+     * The callback parks on `cpu` and spins there, so nothing else on
+     * that CPU can run -- the releaser cannot live with it. This CPU
+     * calls tcp_close, which cancels under pcb->lock with interrupts
+     * disabled and then spins in timer_cancel_sync, so the releaser
+     * cannot live here either. It needs a third. Putting it beside the
+     * callback is what hung the first version of this test.
+     */
+    unsigned cpu = 0, rel_cpu = 0;
+    for (unsigned c = 1; c < cpu_count(); c++) {
+        if (!cpu_online(c))
+            continue;
+        if (cpu == 0)
+            cpu = c;
+        else if (rel_cpu == 0)
+            rel_cpu = c;
+    }
+    if (cpu == 0 || rel_cpu == 0) {
+        kinfo("selftest: tcp-pcb-timer-free: needs three CPUs (callback, closer, releaser), have %u", cpu_count());
+        return true;
+    }
+
+    struct tcp_pcb *pcb = tcp_pcb_new(COSMO_AF_INET);
+    CHECK(pcb != NULL);
+
+    timer_test_reset_cancel_spins();
+    tcp_test_hold_callback(true);
+
+    /* Arm the rexmit timer *from* the other CPU, because a timer lands on
+     * the queue of the CPU that starts it and this window needs the
+     * callback somewhere other than the closer. */
+    struct tcp_armer arm = { .pcb = pcb };
+    struct thread *at = thread_create_on(tcp_armer_main, &arm, "tcparm", SCHED_PRIO_DEFAULT, CPUMASK_OF(cpu));
+    CHECK(at != NULL);
+    thread_join(at);
+
+    uint64_t deadline = clock_now_ns() + 2000000000ULL;
+    while (!tcp_test_callback_entered()) {
+        if (clock_now_ns() > deadline) {
+            tcp_test_release_callback();
+            tcp_test_hold_callback(false);
+            *reason = "the timer callback never entered the hold";
+            return false;
+        }
+        sched_yield();
+    }
+
+    struct tcp_releaser rel = { 0 };
+    struct thread *rt = thread_create_on(tcp_releaser_main, &rel, "tcprel", SCHED_PRIO_DEFAULT, CPUMASK_OF(rel_cpu));
+    CHECK(rt != NULL);
+
+    /* The close cancels all four timers; the first must wait for the
+     * callback that is inside the object. */
+    tcp_close(pcb);
+    __atomic_store_n(&rel.stop, 1u, __ATOMIC_RELEASE);
+
+    unsigned spins = timer_test_cancel_spins();
+    CHECK(spins > 0);                              /* a cancel really waited */
+    CHECK(tcp_test_callback_checked() >= 1);       /* and the callback checked after the hold */
+    CHECK(tcp_test_callback_saw_dead() == 0);      /* the claim: it never saw the poison */
+
+    thread_join(rt);
+    tcp_test_hold_callback(false);
+    uint64_t settle = clock_now_ns() + 500000000ULL;
+    while (thread_count() != threads0 && clock_now_ns() < settle)
+        sched_yield();
+    CHECK(thread_count() == threads0);
+
+    kinfo("selftest: tcp-pcb-timer-free: a cancel spun %u time(s) for a callback holding the pcb, which stayed live "
+          "through the interval",
+          spins);
+    return true;
+}
+
 bool selftest_net_lo_tcp(const char **reason)
 {
     unsigned socks0 = socket_count();

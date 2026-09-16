@@ -102,6 +102,13 @@ struct tcp_pcb {
     spinlock_t lock;               /* this pcb's state; docs: lock order listener -> child -> table */
     uint32_t refs;                 /* atomic: the state machine, the table, the socket, the accept queue,
                                       each lookup in flight, each queued work item */
+#if CONFIG_DEBUG
+    /* Live while the pcb is, poisoned as it is freed: a timer callback
+     * held across the free reads the mark instead of whatever the
+     * allocator hands out next
+     * (docs/audit/next-subsystem-lifetime-windows.md). */
+    uint32_t test_mark;
+#endif
     enum tcp_state state;
     struct netaddr local, remote;
     /* send side */
@@ -149,6 +156,21 @@ struct tcp_pcb {
     struct net_work work;
     unsigned work_flags;
 };
+
+#if CONFIG_DEBUG
+/*
+ * Hold the next timer callback *before* it takes its reference on the
+ * pcb, which is the only placement that tests synchronous cancellation
+ * rather than reference counting
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ */
+void tcp_test_hold_callback(bool on);
+bool tcp_test_callback_entered(void);
+void tcp_test_release_callback(void);
+unsigned tcp_test_callback_saw_dead(void);
+unsigned tcp_test_callback_checked(void);
+void tcp_test_arm_rexmit(struct tcp_pcb *pcb, uint64_t ns);
+#endif
 
 void tcp_init(void);
 struct tcp_pcb *tcp_pcb_new(uint16_t family);

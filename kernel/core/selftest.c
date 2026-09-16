@@ -540,6 +540,7 @@ static const struct selftest tests[] = {
     { "net-tcpverdict",  selftest_net_tcpverdict },
     { "net-second-nic",  selftest_net_second_nic },
     { "net-lo-udp",      selftest_net_lo_udp },
+    { "tcp-pcb-timer-free", selftest_tcp_pcb_timer_free },
     { "net-lo-tcp",      selftest_net_lo_tcp },
     { "net-lo-tcp-loss", selftest_net_lo_tcp_loss },
     { "net-tcp-mss",     selftest_net_tcp_mss },
