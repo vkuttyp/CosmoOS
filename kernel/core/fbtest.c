@@ -215,7 +215,7 @@ bool selftest_fb_bench(const char **reason)
         fbcon_get_stats(&a);
         uint64_t t0 = clock_now_ns();
         console_puts(line);
-        uint64_t dt = clock_now_ns() - t0;
+        uint64_t dt = clock_since_ns(t0);
         fbcon_get_stats(&b);
         if (b.scrolls != a.scrolls) {
             scroll_ns += dt;

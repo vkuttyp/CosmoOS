@@ -263,8 +263,10 @@ taken without a lock.
 *Memory.* One `int64_t` per CPU.
 
 *Error handling.* A machine without an invariant TSC is a machine whose
-TSC is not a clock: the boot says so and uses the fallback rather than
-producing plausible wrong numbers. A measurement that cannot be narrowed
+TSC is not a clock: the boot says so ~~and uses the fallback~~ rather
+than producing plausible wrong numbers. (**As built there is no
+fallback** — see step 3 in the as-built. The kernel keeps the TSC, still
+monotonic per CPU, and withdraws the cross-CPU claim instead.) A measurement that cannot be narrowed
 below a threshold is reported and the offset is left at zero — the
 saturating helper is what keeps that safe, which is why it is not
 optional.
@@ -292,7 +294,7 @@ report does not pretend it is a step toward one.
 
 | file | change |
 | --- | --- |
-| `kernel/arch/x86_64/timer.c` | the per-CPU offset applied in `arch_clock_read`; the fallback when the TSC is not invariant |
+| `kernel/arch/x86_64/timer.c` | the per-CPU offset applied in `clock_now_ns`; ~~the fallback when the TSC is not invariant~~ (no fallback exists: `arch_clock_is_common` reports the bit and the kernel withdraws the claim) |
 | `kernel/arch/x86_64/smp.c` (or where APs are brought up) | the offset measurement, at the moment the AP and CPU 0 are already in step |
 | `kernel/arch/x86_64/cpu.c` | `has_invariant_tsc` finally read |
 | `kernel/include/kernel/percpu.h` | the offset |
@@ -350,9 +352,14 @@ uint64_t clock_worst_offset_ns(void);
 2. **The AArch64 assertion**: the test that says the system counter is
    common, which passes before anything changes and is the control for
    step 4.
-3. **`has_invariant_tsc` read**, the boot line, and the fallback. No
-   offset yet; the machine either has a usable TSC or says it does not.
-4. **The measurement and the offset**, applied in `arch_clock_read`.
+3. **`has_invariant_tsc` read**, the boot line, and ~~the fallback~~ the
+   withdrawal of the cross-CPU claim (there is no fallback to fall back
+   to). No offset yet; the machine either has a usable TSC or says it
+   does not.
+4. **The measurement and the offset.** ~~applied in `arch_clock_read`~~ —
+   applied in `clock_now_ns`, and **the measurement runs unconditionally
+   while only the correction is gated**, because gating the measurement
+   too would leave it dead on every machine this project has.
 5. **The ordering test's dependency made explicit**:
    `blk-unregister-drain` gains a line saying which property it rests
    on, now that the property is stated somewhere.
@@ -418,8 +425,15 @@ which the inventory already records as never executed.
 - **`has_invariant_tsc` false on a machine that works fine today.** If
   the fallback clock is worse than the TSC that has been serving, the
   gate makes things worse. Step 3 is separate from step 4 so this can be
-  measured on its own, and the fallback is the timer the calibration
-  already trusts.
+  measured on its own. ~~and the fallback is the timer the calibration
+  already trusts.~~ **This turned out to be wrong, and it is the risk
+  that actually materialised**: there is no fallback. The calibration
+  drives PIT channel 2 as a one-shot gate, which is not a free-running
+  counter, and this tree has no HPET driver. The kernel keeps the TSC --
+  still monotonic on one CPU, which is what most callers need -- and
+  gives up the cross-CPU claim instead. QEMU's x86-64 TCG turned out to
+  be exactly such a machine, so this is the shipping configuration
+  rather than a hypothetical. See "Step 3" in the as-built.
 - **Nothing here is exercised by real skew.** See the honest limit
   above. The injection proves the arithmetic; only hardware proves the
   measurement, and this project has none.
@@ -447,10 +461,621 @@ which the inventory already records as never executed.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+#### Step 6, the sweep — run first, because it changed the plan
+
+The plan put the sweep at step 6, as a re-check of step 1. Run as a grep
+instead of as a re-reading, it stopped being a re-check: it found sites
+the reading pass had not reached, in files the report never named, and
+one of its findings changed the shape of the API.
+
+**What the grep found that reading had not.** The report expected the
+block timeout, the two lockup reports and the scheduler's dump — four
+sites, and it described the scheduler's as "the one place with a
+hand-rolled guard". There were **three** hand-rolled guards, written
+independently, each for the same reason and none referring to the
+others:
+
+| site | the guard it had grown | did the report know? |
+| --- | --- | --- |
+| `kernel/scheduler/sched.c` (`sched_dump`) | `pc && now > pc->last_tick_ns ? (now - pc->last_tick_ns) / 1000000 : 0` | yes — this is the one it named |
+| `kernel/scheduler/sched.c` (the watchdog) | `now <= last \|\| now - last < timeout`, with a comment explaining the wrap | no |
+| `kernel/scheduler/thread.c` (`thread_dump_all`) | `if (t->state == THREAD_RUNNING && now > t->last_start_ns)` | no |
+
+Three independent reinventions of one rule is the argument for the rule
+existing, made better than the report made it. All three are the
+saturating subtraction now and their guards are gone; the watchdog keeps
+its comment, rewritten to say the test is written once for the tree.
+
+**Separately**, and not a guard: `kernel/core/lockup.c` had three
+unguarded sites and the first pass over it *by reading* found two. That
+is the miss the report predicted when it put a grep in the plan — a
+different failure from the reinvented guards above, and the two should
+not be run together.
+
+**What the grep found that the API did not cover.** Several sites hold a
+`now` they compare *many* stamps against: the block timeout scans a
+whole in-flight list, `sched_dump` prints a line per CPU. Rewriting
+those as `clock_since_ns(stamp)` re-reads the clock per item — a clock
+read per iteration, one of them inside a spinlock, against a `now` that
+moves underneath the comparison, so two lines of one dump would be ages
+against two different instants. That is a regression, and step 1 had
+already written it before the sweep caught it. So the helper comes in
+two forms:
+
+```c
+uint64_t clock_since_ns(uint64_t stamp);                  /* fresh read */
+static inline uint64_t clock_delta_ns(uint64_t now, uint64_t stamp);  /* a `now` in hand */
+```
+
+with `clock_since_ns` defined as `clock_delta_ns(clock_now_ns(), stamp)`,
+so there is one saturating subtraction and two ways to reach it.
+
+**The classification rule, which is not the one the report implied.**
+The report speaks of stamps "taken on another CPU", which sounds like a
+property you can read off the code: shared state is foreign, a local
+variable is local. It is not. A thread that sleeps between two clock
+reads can wake on a different CPU, so
+
+```c
+uint64_t t0 = clock_now_ns();
+thread_sleep_ms(500);
+uint64_t dt = clock_now_ns() - t0;   /* t0 is a foreign stamp */
+```
+
+is a cross-CPU subtraction with no shared state in sight. That is the
+shape of nearly every timing assertion in the test suite. The rule the
+sweep actually used:
+
+> A stamp is **foreign** iff the CPU that wrote it may differ from the
+> CPU that reads it — which for a local variable means iff the thread
+> can be descheduled between the two reads.
+
+**The sweep, by category.** Counts are `grep -c` on the tree, not a
+tally kept by hand:
+
+| category | count | disposition |
+| --- | --- | --- |
+| a local `t0`, with a sleep or a blocking call between the two reads | 42 | `clock_since_ns(t0)` — foreign by the rule above |
+| a stamp in shared state, read with a fresh clock read | 1 | `clock_since_ns(stamp)` (cosmofs's writeback interval) |
+| a stamp in shared state, read with a `now` already in hand | 19 | `clock_delta_ns(now, stamp)` |
+| userland, the same shape through the `SYS_clock_ns` syscall | 4 | new `cosmo_clock_since_ns` in `libc/include/cosmo/syscall.h` |
+| genuinely local | 1 | left a plain subtraction, with a comment saying why |
+| not an elapsed time at all | 4 | left alone |
+| the host's own clock | 2 | out of scope |
+
+66 sites changed in all. The counts come from the diff against `main`
+(`git diff main | grep '^-'` over the two subtraction shapes), not from a
+tally kept while editing — an earlier draft of this table said 43 and 15,
+having counted what one script reported rather than what landed.
+
+The one genuinely local site is `kernel/timer/timer.c`'s tick cost: both
+reads are this CPU's, inside one tick, with interrupts disabled between
+them. It keeps the plain subtraction **on purpose** — saturating there
+would hide a counter that went backwards on a single CPU, which is a
+fault in the time source rather than the skew this tree tolerates.
+
+The four that are not elapsed times: the realtime offset
+(`epoch - clock_now_ns()`, a signed base that is meant to go negative),
+`g_keep_idle_ns - idle` and the SRTT deviation in `tcp.c` (both a
+duration minus a duration, already guarded), and the round-robin slice
+decrement. Saturating any of them would be wrong, not safer.
+
+**Userland was in scope and the report had not noticed.** Four sites in
+`init.c` and `thrtest.c` take a `t0` from `cosmo_clock_ns()`, sleep, and
+subtract — the same defect, one privilege level down. They are fixed by
+one inline helper rather than left as a documented hole; userland
+inherits step 4's correction for free, because the syscall reads the
+same clock the kernel does.
+
+#### Step 5 — the comment would have had to describe a bug
+
+The plan: "`blk-unregister-drain` gains a line saying which property it
+rests on, now that the property is stated somewhere." Writing that line
+showed the property does not hold.
+
+The test asserts an order between two events — a parked submitter
+leaving the driver, and `blk_unregister` returning — and the two happen
+on **different CPUs**, the submitter pinned away from the unregister on
+purpose. `blk_test_drain_ordered()` compared two `clock_now_ns()`
+stamps. Comparing two CPUs' readings is exactly what this kernel stopped
+promising three steps earlier: on x86-64 here `clock_is_common()` is
+false, so the assertion rested on a guarantee the kernel declines to
+give, and passed only because QEMU's counters agree.
+
+So the step is a fix rather than a comment. The two stamps are positions
+in an atomic sequence now: the read-modify-write puts the events in a
+total order by itself, on any machine, however the counters behave — and
+an order is all the assertion ever wanted. The comment still goes in,
+and now it describes something true.
+
+This is the unit finding a live dependency on the property it was
+defining, which is the best argument available that the property was
+worth defining.
+
+**And the bug-proof for it fails to fail, which is the finding.** Put
+`blk_test_drain_ordered` back on two `clock_now_ns()` readings and
+`blk-unregister-drain` still passes — every test green, no failure. That is not
+a weak proof, it is the point: QEMU's counters agree, so the defect
+cannot be observed on any machine this project runs, and no amount of
+running the test suite would ever have found it. It was found by writing
+down what the test assumed and checking whether the kernel promised it.
+The other two proofs in this step do fail as expected — the lockup
+report at `age == 0`, and the measured bound at "finer than the counter
+can express".
+
+#### Step 4 — the measurement runs, the correction does not
+
+Step 3's finding forced a change of shape here. If the measurement were
+gated on the invariant-TSC bit as the report implies, it would never run
+on any machine this project has: x86-64 TCG refuses the bit, and AArch64
+has nothing to measure. The whole step would be dead code everywhere.
+
+So the **measurement is unconditional and the correction is what the
+gate governs**. Every boot with a per-CPU counter measures each AP
+against CPU 0 and prints what it found, whether or not it is allowed to
+act on it — which is the report's own step-4 bullet 4 ("the boot line
+gains the worst offset observed") applied more widely than the report
+applied it. On a machine that may not be trusted, the number is still
+the most informative line that boot can print about its own timekeeping.
+
+Three details the report did not settle:
+
+**`clock_raw_ns()`.** The three-read exchange must read the counter
+*without* the correction, or it measures the correction it is producing.
+`clock_now_ns` applies the addend; `clock_raw_ns` does not, and nothing
+else uses it.
+
+**The bound is the narrowest half-width, not the worst offset.** After
+the correction is applied what remains is the uncertainty of the
+estimate, not the offset it removed. Advertising the worst offset would
+claim a bound the kernel has already corrected away.
+
+**AArch64 measures nothing at all.** A new `arch_clock_is_percpu()` is
+false there: the system counter is shared by construction, so a measured
+"correction" could only introduce the error it claims to remove, and the
+advertised bound stays exactly 0 rather than drifting to whatever a
+thread handshake happened to observe.
+
+**A bound of zero that no measurement can justify.** The first run
+printed:
+
+```
+timer: CPU 1 offset 0 ns +-0 ns over 1000 exchanges
+timer: measured 3 CPU offsets against CPU 0: worst 0 ns, uncertainty +-0 ns
+```
+
+`±0 ns` is not a measurement. It means the narrowest bracket had width
+zero — the counter did not advance across a cross-CPU handshake that
+certainly took real time, TCG running a vCPU in long translated blocks
+so a whole exchange can land between two counter values. Had the gate
+been open, that would have advertised a bound of 0 ns on the strength of
+a degenerate reading. An offset cannot be known more precisely than the
+counter can express, so the bound is floored at one tick of the counter,
+and `clock-offset-bound` keeps the three cases apart permanently:
+
+| advertised bound | legitimate only when |
+| --- | --- |
+| `0` | nothing was measured — the counter is shared by construction, so zero is *exact* |
+| `CLOCK_OFFSET_UNBOUNDED` | the kernel has declined to promise at all |
+| anything else | at least one tick of the counter's resolution |
+
+AArch64's zero is honest under the first row; x86-64's would have been a
+promise under none of them.
+
+**What ran.** x86-64: 3 CPUs measured against CPU 0 over 1000 exchanges
+each, worst offset 0–500 ns and uncertainty ±2–500 ns across runs
+(it varies with scheduling luck), counter resolution 2 ns, correction
+**not applied**. AArch64: nothing measured, bound 0, exact.
+
+**What did not run, and cannot here.** The applied correction. No
+machine available to this project both has a per-CPU counter and
+advertises it as invariant, so `g_apply_offset` is false on every boot
+and the corrected path in `clock_now_ns` is never taken. The arithmetic
+is exercised by `clock-skew-detected`'s injection; its effect on real
+hardware is untested, and this is a stronger statement than the report's
+"tested by injection and not on real hardware" — the path does not
+execute at all. The same shape as the VMX backend the inventory already
+records as never executed.
+
+#### Step 3 — the gate fired on the first machine it met
+
+`has_invariant_tsc` has been detected in `cpu.c` since this kernel had an
+x86 port and read by nothing. Reading it produced a result the report did
+not expect:
+
+```
+[WARN] timer: tsc is not comparable across CPUs: the TSC is not invariant
+       (CPUID 0x80000007 EDX[8] clear): it varies with core frequency and
+       halts in deep C-states
+[WARN] timer: timestamps stay monotonic per CPU; a difference between two
+       CPUs' readings is not an interval
+```
+
+**QEMU's x86-64 TCG does not advertise an invariant TSC.** Not a
+misconfiguration: `-cpu qemu64,...,+invtsc` is refused outright —
+
+```
+qemu-system-x86_64: warning: TCG doesn't support requested feature:
+  CPUID[eax=80000007h].EDX.invtsc [bit 8]
+```
+
+— so the bit cannot be turned on for the boot tests, and the only
+x86-64 machine this project runs on is one where the kernel must decline
+to promise. AArch64 is unaffected: the system counter is common by
+architecture and its boot line says so.
+
+This is the gate doing its job on its first outing, and it is worth
+sitting with: the counters on this machine demonstrably *do* agree —
+step 2 measured 0 ns outside the bracket over 2400 handshakes — and the
+kernel still refuses to promise, because the promise is about the
+hardware's contract and not about what happens to work today. A kernel
+that subtracted these timestamps would be right on this emulator and
+wrong on the first laptop it met.
+
+**The fallback in the report does not exist.** The design said an
+unusable TSC should fall back to "the platform timer the calibration
+already uses". That timer is PIT channel 2 driven as a one-shot gate to
+count a fixed interval; it is not a free-running counter, and this tree
+has no HPET driver. There is nowhere to fall back to. So the kernel
+keeps using the TSC — it is still monotonic on one CPU, which is what
+most callers need — and gives up the cross-CPU claim instead:
+`clock_worst_offset_ns()` returns `CLOCK_OFFSET_UNBOUNDED` and
+`clock_is_common()` returns false. That is a different statement from a
+large measured offset, and the two are deliberately not spelled the same
+way.
+
+`clock-cross-cpu` therefore **skips on x86-64**: it checks the machine
+against its own advertised bound, and there is no promise on that machine
+to check, so asserting anything would be inventing one.
+
+`clock-skew-detected` does **not** skip, and an earlier version of this
+implementation had it skipping too. That was tidy and wrong: it is the
+test that makes the cross-CPU oracles non-vacuous, so gating it on the
+promise left x86-64 — the architecture this entire unit is about —
+with no cross-CPU coverage at all. The mechanism it tests (is a reading
+outside its bracket detected, and is it weighed against the advertised
+bound) does not depend on the machine promising anything, so it sets the
+bound itself and restores it afterwards. It runs on both architectures.
+
+**What `clock-invariant-gate` does and does not test.** It cannot test
+the CPUID read: on x86-64 here the answer is always false and on AArch64
+always true, so `arch_clock_is_common` cannot be made to change its mind.
+What it tests is everything downstream of the answer, which is the part
+that can rot silently while a one-line bit read keeps working — that a
+"no" empties the advertised bound rather than leaving a stale number,
+that `clock_is_common` reports it, and that `clock-cross-cpu` stands
+down rather than asserting against `UINT64_MAX`. It runs the cross-CPU
+test for real inside the forced-shut window, because a version of that
+test which asserted against an unbounded bound would pass, and pass
+meaninglessly.
+
+#### Step 2
+
+The bracket: A reads, hands a turn to B, B reads, hands it back, A reads
+again. The handshake orders the three reads in real time, so on a clock
+common to both CPUs the middle one must land between the outer two
+numerically as well. How far it falls outside is the apparent offset,
+and it is the only quantity these tests assert on. Both threads are
+pinned with `thread_create_on`, every ordered pair of online CPUs is
+measured, and a stalled handshake gives up after a second rather than
+hanging the boot.
+
+**The measurement, which is the point of the step.** 2400 handshakes per
+architecture, every online pair. These numbers were taken **at step 2**,
+before step 3 read the invariant-TSC bit; x86-64's advertised bound
+became `CLOCK_OFFSET_UNBOUNDED` one step later, and the As-run table at
+the end of this document is the final state:
+
+| | worst reading outside its bracket | widest bracket | advertised bound *then* |
+| --- | --- | --- | --- |
+| x86-64 (TCG) | **0 ns** | 269–345 µs | 0 ns (later: unbounded) |
+| AArch64 (TCG) | **0 ns** | 89 µs | 0 ns (unchanged) |
+
+So QEMU's counters agree exactly, which is what the report predicted and
+why nothing in this tree has ever failed. The widest bracket is a
+scheduling hiccup inside a handshake, not skew.
+
+**Which makes both tests vacuous, so the injection is a test rather than
+a script.** The report's bug-proof for these rows was "inject an offset
+and watch them fail". Run as a one-off revert that evidence exists once,
+in a terminal nobody keeps. `clock-skew-detected` runs in CI instead: it
+injects ±2 ms on one CPU through a debug-only per-CPU addend in
+`clock_now_ns` and asserts three things in each direction —
+
+1. the injected magnitude shows up as a reading outside the bracket
+   (2000000 ns injected, 2000000 ns measured, both directions, both
+   architectures);
+2. it exceeds what the advertised bound allows, so `clock-cross-cpu`
+   would reject it;
+3. widening the advertised bound *accepts* the same measurement — which
+   is the check that catches an oracle ignoring `clock_worst_offset_ns()`
+   altogether. Neither (1) nor (2) would notice that.
+
+Both directions are asserted because a one-sided comparison passes the
+negative case, and a bug-proof that happened to be negative would then
+certify an oracle that does not work. This is the same defect the
+report's own step 3 review found in an earlier draft of the bound.
+
+**The injection is only safe because of step 1.** It makes one CPU's
+clock jump 2 ms, which every timestamp subtraction on that CPU then
+sees. On the tree as it stood before the sweep, `clock-skew-detected`
+would have been a hazard rather than a test — several of those
+subtractions would have wrapped.
+
+#### Step 1
+
+`clock_since_ns`, `clock_delta_ns` and `clock_worst_offset_ns` added;
+the sweep above applied. Two tests: `blk-timeout-skew` (the block
+timeout with an injected skew, via a new `blk_test_set_issue_skew_ns`
+hook) and `clock-since-saturates` (the helper alone, in a new
+`kernel/timer/clocktest.c`). `blk-timeout-skew`'s second phase is the
+control that stops the first from being vacuous: the same device, the
+same 200 ms timeout and the same scanner *do* fire once the skew is
+gone.
+
+`clock-since-saturates` failed on its first boot, and the way it failed
+is worth keeping. It asserted
+
+```c
+CHECK(clock_since_ns(now + 1) == 0);
+```
+
+which is not a claim about saturation at all: `clock_since_ns` reads the
+clock itself, so a stamp one nanosecond ahead has already been overtaken
+by the time the call reads it, and the assertion measures how fast the
+clock advances between two statements. The margin is a minute now, and
+the one-nanosecond boundary is asserted on `clock_delta_ns` instead,
+where both operands are chosen and no clock runs between them. Same
+family as the two test oracles that measured the allocator in the
+snapshot unit: the test was reading a property of the machine where it
+meant to read a property of the code.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+**329 self-tests PASS on x86-64 and aarch64, debug and release.** 319 at
+the branch point, so ten new: `clock-since-saturates`,
+`blk-timeout-skew`, `clock-cross-cpu`, `clock-scope-aarch64`,
+`clock-skew-detected`, `clock-invariant-gate`, `clock-offset-bound`,
+`lockup-report-skew`, `clock-cost` and `clock-tick-owner`.
+`blk-unregister-drain` is the eleventh test this unit touched and the
+only existing one it changed.
+
+Four of those ten are not in the report's table. `clock-skew-detected`
+is the injection the report described as a bug-proof, made permanent
+because the tests it proves pass vacuously on every machine here.
+`clock-offset-bound` exists because the measurement's first run produced
+a bound no measurement can justify. `clock-cost` is the benchmark the
+report asked for, as a test rather than a number in a terminal.
+`clock-tick-owner` exists because review would not let the deadline
+hazard go, and it was right not to.
+
+**The numbers, from the final run.**
+
+| | x86-64 | AArch64 |
+| --- | --- | --- |
+| counter | `tsc`, per-CPU | `arch-timer`, one for the system |
+| invariant / common | **no** (TCG refuses `+invtsc`) | yes, by architecture |
+| offsets measured | 3 APs × 1000 exchanges | none — nothing to measure |
+| worst offset seen | 0–500 ns across runs | — |
+| measured bound | 2 ns (the counter's resolution — the floor) | — |
+| advertised bound | `CLOCK_OFFSET_UNBOUNDED` | 0 ns, exact |
+| correction applied | no | not applicable |
+| bracket, 2400 handshakes/arch | 0 ns outside, widest 270–345 µs | 0 ns outside, widest 54–89 µs |
+| injected ±2 ms detected | 2000000 ns, both directions | 2000000 ns, both directions |
+| lockup report, 5 s skew | ages it at 0 ms | — |
+
+**Bug-proofs.** `clock-tick-owner` is proved against *both* reverted
+designs, by putting each one back:
+
+| the design put back | what fails |
+| --- | --- |
+| the owner is never replaced when it stops | `a stalled tick owner is never replaced: every deadline would stall with it` — phase 2 |
+| every CPU advances the counter | `the machine-wide tick does not advance at the tick rate` — phase 1's upper bound |
+
+So the test discriminates between the design that works and the two that
+did not, rather than merely passing alongside them. That is the property
+the first two attempts lacked, and the reason the third has a test at
+all.
+
+`lockup-report-skew` with `lockup.c` back on a plain
+subtraction: fails at `age == 0`. `clock-offset-bound` with the
+resolution floor removed: fails with "a measured bound finer than the
+counter can express" — the +-0 ns defect, caught by the test written for
+it. `blk-unregister-drain` back on two cross-CPU clock readings:
+**passes**, which is the finding rather than a weak proof (see step 5).
+`blk-timeout-skew` with the timeout's subtraction
+reverted to `now - issued_ns`: fails, having logged "a stamp 5 s ahead
+timed out 1 request(s): the subtraction underflowed".
+`clock-since-saturates` with `clock_since_ns` made a plain subtraction:
+fails at the future-stamp assertion. `clock-cross-cpu` and
+`clock-scope-aarch64` are proved by `clock-skew-detected` rather than by
+a revert, and that test proves itself in both directions and in the
+converse (widen the bound and the same measurement is accepted).
+
+**Benchmarks.** The report asked for the clock path before and after,
+"the claim is that it is not measurable; the benchmark is what makes that
+a measurement". It is measurable, and the claim was wrong:
+
+| | `clock_now_ns` | `clock_raw_ns` | the correction |
+| --- | --- | --- | --- |
+| x86-64 | 123 ns | 95 ns | **28 ns** |
+| AArch64 | 192 ns | 160 ns | **32 ns** |
+
+About 20%, over 200000 calls each. What that means on real silicon is
+*not* measured and the ratio does not carry: under TCG every instruction
+is emulated, so a load, a branch and an add cost far more relative to the
+counter read than they would on hardware, where the read alone is tens
+of cycles. The honest statement is that the correction is measurable
+under emulation and its cost on real hardware is unknown — the same
+limit as everything else in this unit.
+
+**The branch that turned out not to be about speed.** It was removed
+once, on the reasoning that the addends are zero when no correction
+applies, so a machine using none could add zero instead of testing a
+flag. That was wrong for a reason the benchmark would never have shown:
+`arch_cpu_id()` reads the per-CPU block through GS, so indexing the
+offsets unconditionally makes *every* `clock_now_ns` depend on percpu
+being installed — including the ones an AP takes partway through its own
+bring-up. The values would have been right and the load to get them
+would not have been safe. It booted on QEMU, which is exactly the
+evidence this unit exists to distrust. The flag is back and its comment
+now says what it guards.
+
+**Deadlines, which this unit does not fix.** Raised in review and valid.
+A deadline is a timestamp:
+
+```c
+uint64_t d = clock_now_ns() + delay;
+while (clock_now_ns() < d) { ... }          /* may migrate in between */
+```
+
+is a cross-CPU comparison whenever the thread can be descheduled, and
+saturating subtraction does not help — the comparison is an ordering,
+not a difference, so there is nothing to saturate. When
+`clock_is_common()` such a wait is wrong by at most the advertised
+bound; when it is false it may expire early or late by an unbounded
+amount, and `timer_ticks()` is per-CPU, so at the time this was written
+the kernel had no cross-CPU time source to offer instead. It has one now
+(below).
+
+**Fourteen** non-test sites compute a deadline, and every one is
+accounted for here — ten on the safe pair and four that are deliberately
+not, each saying so where it sits:
+
+| file | sites | what it waits for | disposition |
+| --- | --- | --- | --- |
+| `drivers/usb/usb.c`, `xhci.c` ×2, `usb_storage.c` | 4 | hardware to respond | `clock_deadline_ns` / `clock_deadline_passed` |
+| `drivers/storage/ahci.c` | 2 | hardware to respond | the same |
+| `drivers/virtio/virtio_console.c` | 1 | the device to return its buffers | the same |
+| `kernel/module/module.c` | 1 | a module's users to leave | the same |
+| `kernel/interrupt/ipi.c`, `kernel/arch/x86_64/mmu.c` | 2 | an IPI acknowledgement | the same |
+| `kernel/core/lockup.c` | 2 | a sampled CPU to answer | **raw clock**: a 5 ms window, below the 4 ms tick |
+| `kernel/timer/timer.c` (`ndelay`) | 1 | a sub-microsecond busy-wait | **raw clock**: far below a tick, and same-CPU |
+| `kernel/timer/timer.c` (`timer_start`) | 1 | a timer's expiry | **raw clock**: armed on and fired from the same CPU's queue |
+
+The block layer's request timeout is not in this table because it is not
+a deadline: it is an age compared against a per-device timeout, and it
+carries a second age (`bio->scans`) that no clock can distort, because it
+is the one whose failure is a hang rather than a spurious timeout.
+
+`kernel/syscall/native.c` mentions the pattern in a comment without being
+a site; an earlier draft of this table counted it, which is where
+"sixteen" came from.
+
+**A machine-wide tick counter is here, and it is the third design in
+this position.** The first two were built and reverted, and both failed
+in ways a test would have caught at once, which is why this one ships
+with one. Their post-mortem, because it is the useful part: The counter
+took the *highest* `pc->ticks` any CPU had reached, on the reasoning that
+every CPU ticks at `CONFIG_HZ` so the maximum advances at `CONFIG_HZ`.
+But those counters do not share an origin: each starts when its CPU comes
+online, so CPU 0 leads every AP by the whole of bring-up. Stop CPU 0
+ticking and no AP can advance the global value until it has caught up
+seconds later — stalling every deadline on the machine, including the IPI
+and TLB-shootdown waits whose entire purpose is to escape a CPU that has
+stopped answering. On x86-64 here, where the clock is not common, that is
+the shipping path. **A documented limitation was replaced with a silent
+stall, which is strictly worse**, and two attempts at this hazard in two
+rounds is where to stop rather than try a third.
+
+The other repair is worse, not better: every CPU adding its own delta
+makes the counter advance at `CONFIG_HZ` times the CPU count, so
+deadlines expire that many times too early.
+
+**What works is a designated timekeeper with handoff.** One CPU advances
+the counter, so it runs at `CONFIG_HZ` rather than a multiple of it. A
+CPU that is not the owner watches the counter, and if it has not moved
+for four of that CPU's own ticks — the owner offline, wedged, or simply
+not taking interrupts — claims ownership with a compare-exchange.
+Several may notice at once and exactly one wins. So the counter is late
+by at most four ticks across a handover and **cannot stop while any CPU
+is still ticking**, which is the property the first design lacked.
+
+`clock-tick-owner` is the test, and phase 2 is the one that matters: it
+points ownership at a CPU id that will never tick, which a stalled or
+offline owner is indistinguishable from, and requires the counter to
+resume on its own. It reports which CPU took over. Phase 1 checks the
+rate, with an upper bound deliberately tight enough that the
+every-CPU-contributes design would fail it. Measured: 50 ticks in 200 ms
+on x86-64 and 51 on AArch64 — `CONFIG_HZ` is 250, so 50 is exact — and
+with the owner stopped, CPU 3 (x86-64) and CPU 2 (AArch64) took over
+within four ticks.
+
+The first shape, kept so it is recognised rather than rediscovered:
+
+```c
+/* REVERTED -- do not resurrect. pc->ticks counters do not share an
+   origin, so the maximum stalls when its leader stops ticking. */
+static uint64_t deadline_now_ns(void)
+{
+    if (clock_is_common())
+        return clock_now_ns();
+    uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+}
+```
+
+So `clock_deadline_ns` and `clock_deadline_passed` measure against the
+corrected clock where every CPU agrees on it and against the
+machine-wide tick where they do not. Both read the same quantity, so
+where a deadline is built and where it is tested no longer matters —
+**which is what the review asked for across five listings, and it was
+right to keep asking.** The inventory row filed for this is closed by
+the same commit that filed it.
+
+**And while it existed, the second domain immediately broke the first.**
+`timer_start` had been migrated to `clock_deadline_ns` in the mechanical
+pass, harmless while that was just `clock_now_ns() + x`. Once it returned
+tick-domain values, timers were armed in one domain and compared in the
+tick against `clock_now_ns()` in the other — so every timer in the kernel
+fired at once, and `preempt`, `sleep` and `completion` returned in
+single-digit milliseconds instead of tens. The timer queue is per-CPU and
+is armed and fired on the same CPU, so the raw clock was always right for
+it. That comment survives the revert, because the two calls still look
+interchangeable and the next person deserves the warning.
+
+They do fix something real today. `clock_now_ns() + budget` wraps into
+the past for a large budget and expires immediately, and the tree already
+knew: `sys_futex_wait` rejects a duration past `INT64_MAX` at its own
+call site, with a comment explaining the wrap, and **no other site was
+guarded**. One caller had the rule and fifteen did not, which is the
+shape this project keeps finding. `clock_deadline_ns` saturates, so
+`timer_start` is guarded now whoever calls it; the futex check stays
+because a syscall should refuse an impossible duration rather than
+silently turn it into "never".
+
+**The saturating fix traded a correctness bug for a liveness one, and
+review caught it.** The block timeout's whole purpose is that a stalled
+device enters recovery. Saturating the age means a bio issued on a CPU
+that runs ahead of the timeout thread reads as zero seconds old for
+ever, so on a machine with unbounded skew the request is never timed out
+and the device hangs instead — worse than the spurious timeouts the
+saturation was added to prevent. The scan now keeps a second age that no
+clock can distort: `bio->scans`, written only by the timeout thread,
+counting the 500 ms scans that have seen the bio in flight. A request is
+overdue when *either* age says so. The walk also no longer stops at the
+first request that is not overdue, because with two ages "oldest first"
+no longer implies the oldest expires first.
+
+**A partial measurement no longer enables the correction.** Also from
+review. `clock_worst_offset_ns()` says two readings taken on *any* two
+CPUs differ by at most that much; a CPU whose measurement failed keeps a
+zero correction and contributed nothing to the bound, so publishing a
+finite bound with one missing states something about that CPU which
+nothing established. It is all of them or none now — one failure and the
+machine keeps its raw counter and advertises no bound, the same answer
+as a counter that is not a clock, for the same reason.
+
+**What did not run.** The applied correction, on any machine. No machine
+available to this project both has a per-CPU counter and advertises it as
+invariant, so `g_apply_offset` is false on every boot. The arithmetic is
+exercised by injection; the path is not taken. This is a stronger
+statement than the report's "untested on real hardware" and it is stated
+here rather than in the risks, because the report did not know it.
+
+**A flake.** `net-harness` failed once at `nettest.c:929` during a run in
+which this host killed a background build for memory, and passed on an
+immediate re-run of the same image. Recorded in `docs/testing/flakes.md`
+with the memory pressure named as a circumstance and explicitly not as a
+cause: a dropped SYN, a slow host process and an unrelated timing window
+all look identical from `client_ok == false`.

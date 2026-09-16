@@ -229,7 +229,9 @@ static void schedule_internal(bool preempt)
 
     struct thread *prev = rq->current;
     uint64_t now = clock_now_ns();
-    prev->run_time_ns += now - prev->last_start_ns;
+    /* `last_start_ns` was stamped by whichever CPU last ran this thread,
+     * which need not be this one. */
+    prev->run_time_ns += clock_delta_ns(now, prev->last_start_ns);
 
     if (prev->state == THREAD_EXITED) {
         KASSERT(!preempt);
@@ -368,12 +370,14 @@ static void watchdog_check(uint64_t now, struct arch_trap_frame *frame)
     uint64_t last = __atomic_load_n(&g_watchdog_last_kick, __ATOMIC_RELAXED);
     /* A kick from another CPU between this tick's timestamp and the check
      * puts `last` ahead of `now`: progress, not a hang (the difference would
-     * otherwise wrap to a huge count and fire the report). */
-    if (timeout == 0 || g_watchdog_fired || now <= last || now - last < timeout)
+     * otherwise wrap to a huge count and fire the report). That used to be
+     * a hand-rolled `now <= last ||` here; it is the saturating subtraction
+     * now, which is the same test written once for the whole tree. */
+    if (timeout == 0 || g_watchdog_fired || clock_delta_ns(now, last) < timeout)
         return;
     g_watchdog_fired = true;
     kprintf("\n[WATCHDOG] no progress for %llu ms; scheduler state:\n",
-            (unsigned long long)((now - last) / 1000000));
+            (unsigned long long)(clock_delta_ns(now, last) / 1000000));
     sched_dump();
     /* Every other CPU's frame, recorded by that CPU (kernel/core/lockup.c);
      * this CPU's from the tick's own frame. */
@@ -422,6 +426,9 @@ static unsigned g_dump_hook_count;
 
 void sched_dump(void)
 {
+    /* One instant for the whole dump: every "ms ago" below is an age
+     * against the same `now`, so the lines can be compared with each
+     * other. Reading the clock per line would not let them be. */
     uint64_t now = clock_now_ns();
     for (unsigned c = 0; c < cpu_count(); c++) {
         struct runqueue *rq = &g_rqs[c];
@@ -435,7 +442,7 @@ void sched_dump(void)
                 (unsigned long long)rq->bitmap,
                 pc ? pc->need_resched : 0, pc ? pc->preempt_count : 0, pc ? pc->irq_depth : 0,
                 (unsigned long long)(pc ? pc->ticks : 0),
-                (unsigned long long)(pc && now > pc->last_tick_ns ? (now - pc->last_tick_ns) / 1000000 : 0),
+                (unsigned long long)(pc ? clock_delta_ns(now, pc->last_tick_ns) / 1000000 : 0),
                 (void *)(pc ? pc->last_tick_pc : 0));
     }
     thread_dump_all();

@@ -237,7 +237,7 @@ static bool run_module(const char *const argv[], int *status_out, const char **r
      */
     uint64_t t0 = clock_now_ns();
     int status = process_wait_exit(p);
-    CHECK(clock_now_ns() - t0 < 15000000000ULL);
+    CHECK(clock_since_ns(t0) < 15000000000ULL);
     process_put(p);
 
     /* The process object is released once its thread is reaped. */
@@ -924,7 +924,7 @@ static bool kill_module(const char *const argv[], int sig, const char **reason)
     process_kill(p, sig);
     uint64_t t0 = clock_now_ns();
     int status = process_wait_exit(p);
-    CHECK(clock_now_ns() - t0 < 2000000000ULL);
+    CHECK(clock_since_ns(t0) < 2000000000ULL);
     CHECK(status == 128 + sig);
     process_put(p);
     return true;

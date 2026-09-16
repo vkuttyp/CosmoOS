@@ -492,8 +492,8 @@ static int usbs_debug_dma(struct blkdev *bd, uint64_t addr)
     /* No callback: poll the status the HCD writes; the transfer either
      * completes (the device sent the block, the IOMMU dropped the write)
      * or is cancelled at the bound. */
-    uint64_t deadline = clock_now_ns() + USBS_SYNC_NS;
-    while (__atomic_load_n(&r.status, __ATOMIC_ACQUIRE) == -EINPROGRESS && clock_now_ns() < deadline)
+    uint64_t deadline = clock_deadline_ns(USBS_SYNC_NS);
+    while (__atomic_load_n(&r.status, __ATOMIC_ACQUIRE) == -EINPROGRESS && !clock_deadline_passed(deadline))
         thread_sleep_ns(250000);
     if (__atomic_load_n(&r.status, __ATOMIC_ACQUIRE) == -EINPROGRESS)
         (void)usb_cancel(&r, -ETIMEDOUT);

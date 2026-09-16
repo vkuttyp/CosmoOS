@@ -113,6 +113,14 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     record(&this_cpu()->sample, self, seq, false);
 
     /* One wait for every target together: the bound is total. */
+    /* The raw clock: this window is LOCKUP_SAMPLE_TIMEOUT_NS (5 ms),
+     * barely above the 4 ms tick that clock_deadline_ns falls back to on
+     * a machine whose counter is not common -- a deadline that coarse
+     * would fire a tick early and report a CPU as unresponsive that had
+     * simply not been asked yet. The sample runs in a controlled window
+     * on one CPU; a diagnostic that is occasionally wrong about a
+     * nanosecond is better than one that is regularly wrong about a
+     * CPU. */
     uint64_t deadline = clock_now_ns() + timeout_ns;
     cpumask_t got = 0;
     for (;;) {
@@ -143,6 +151,14 @@ bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out
     __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
     if (!arch_ipi_send_nmi(cpu))
         ipi_send(cpu, IPI_SAMPLE);
+    /* The raw clock: this window is LOCKUP_SAMPLE_TIMEOUT_NS (5 ms),
+     * barely above the 4 ms tick that clock_deadline_ns falls back to on
+     * a machine whose counter is not common -- a deadline that coarse
+     * would fire a tick early and report a CPU as unresponsive that had
+     * simply not been asked yet. The sample runs in a controlled window
+     * on one CPU; a diagnostic that is occasionally wrong about a
+     * nanosecond is better than one that is regularly wrong about a
+     * CPU. */
     uint64_t deadline = clock_now_ns() + timeout_ns;
     bool got = false;
     while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && clock_now_ns() < deadline)
@@ -170,10 +186,10 @@ void lockup_profile(unsigned cpu, unsigned n, uint64_t gap_ns)
     }
 }
 
-static void print_one(unsigned c, const struct cpu_sample *s, uint64_t now, bool self)
+static void print_one(unsigned c, const struct cpu_sample *s, bool self)
 {
     kprintf("cpu %u: pc %p sp %p (%s, %llu us ago)\n", c, (void *)s->pc, (void *)s->sp,
-            self ? "self" : s->nmi ? "nmi" : "ipi", (unsigned long long)((now - s->when_ns) / 1000));
+            self ? "self" : s->nmi ? "nmi" : "ipi", (unsigned long long)(clock_since_ns(s->when_ns) / 1000));
     for (unsigned i = 0; i < s->depth; i++) {
         const char *where = kernel_text_contains(s->trace[i]) ? "" : " (outside kernel text)";
         kprintf("  #%-2u %p%s\n", i, (void *)s->trace[i], where);
@@ -184,16 +200,18 @@ static void print_one(unsigned c, const struct cpu_sample *s, uint64_t now, bool
 
 void lockup_print_samples(cpumask_t answered)
 {
-    uint64_t now = clock_now_ns();
+    /* No local `now`: every age below is a stamp another CPU wrote, and
+     * clock_since_ns reads the clock itself so the subtraction cannot
+     * underflow (docs/audit/next-subsystem-cpu-clock.md). */
     unsigned n = cpu_count();
     for (unsigned c = 0; c < n; c++) {
         struct percpu *pc = percpu_get(c);
         if (pc == NULL || !cpu_online(c))
             continue;
         if (answered & CPUMASK_OF(c)) {
-            print_one(c, &pc->sample, now, (int)c == lockup_reporter());
+            print_one(c, &pc->sample, (int)c == lockup_reporter());
         } else {
-            uint64_t age = now - pc->last_tick_ns;
+            uint64_t age = clock_since_ns(pc->last_tick_ns);
             kprintf("cpu %u: no answer in %llu ms; last tick %llu ms ago at pc %p\n", c,
                     (unsigned long long)(LOCKUP_SAMPLE_TIMEOUT_NS / 1000000), (unsigned long long)(age / 1000000),
                     (void *)pc->last_tick_pc);
@@ -235,10 +253,10 @@ static void report_soft(struct percpu *pc, struct arch_trap_frame *frame, uint64
     spin_unlock_irqrestore(&g_stats_lock, st);
 }
 
-static void report_hard(struct percpu *pc, unsigned target, struct arch_trap_frame *frame, uint64_t now)
+static void report_hard(struct percpu *pc, unsigned target, struct arch_trap_frame *frame)
 {
     struct percpu *t = percpu_get(target);
-    uint64_t age = now - t->last_tick_ns;
+    uint64_t age = clock_since_ns(t->last_tick_ns);
     kwarn("%shard lockup: cpu %u no tick for %llu ms; last tick %llu ms ago at pc %p (seen from cpu %u)",
           g_expected ? "expected " : "", target, (unsigned long long)(pc->watch_stall_ns / 1000000),
           (unsigned long long)(age / 1000000), (void *)t->last_tick_pc, pc->cpu_id);
@@ -304,7 +322,7 @@ void lockup_tick(struct arch_trap_frame *frame, uint64_t now)
     }
     if (pc->watch_stall_ns >= g_hard_ns && !pc->hard_reported) {
         pc->hard_reported = true;
-        report_hard(pc, target, frame, now);
+        report_hard(pc, target, frame);
     }
 }
 

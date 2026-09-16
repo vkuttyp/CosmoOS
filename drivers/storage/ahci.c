@@ -404,8 +404,8 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
     /* Not while the port is being restarted: a slot taken now would be
      * absent from the recovery's PxCI snapshot and sorted wrongly (review,
      * PR #53). Wait for the restart, bounded like the command itself. */
-    uint64_t until = clock_now_ns() + AHCI_SYNC_NS;
-    while (__atomic_load_n(&p->recovering, __ATOMIC_ACQUIRE) && clock_now_ns() < until)
+    uint64_t until = clock_deadline_ns(AHCI_SYNC_NS);
+    while (__atomic_load_n(&p->recovering, __ATOMIC_ACQUIRE) && !clock_deadline_passed(until))
         thread_sleep_ms(1);
     dma_addr_t dma = raw_dma;
     if (len > 0 && raw_dma == 0) {
@@ -438,8 +438,8 @@ static int cmd_sync(struct ahci_port *p, uint8_t cmd, uint64_t lba, uint32_t cou
     p->issued++;
     spin_unlock_irqrestore(&p->lock, f);
 
-    uint64_t deadline = clock_now_ns() + AHCI_SYNC_NS;
-    while (!completion_done(&w.done) && clock_now_ns() < deadline)
+    uint64_t deadline = clock_deadline_ns(AHCI_SYNC_NS);
+    while (!completion_done(&w.done) && !clock_deadline_passed(deadline))
         thread_sleep_ns(100000);
     if (!completion_done(&w.done)) {
         /* Take the slot back: the same restart the block layer's timeout runs. */

@@ -50,7 +50,7 @@ bool selftest_io_poll(const char **reason)
     /* A timeout passes with nothing ready. */
     uint64_t t0 = clock_now_ns();
     CHECK(io_poll(fds, 1, 20 * 1000000ull) == 0);
-    CHECK(clock_now_ns() - t0 >= 15 * 1000000ull);
+    CHECK(clock_since_ns(t0) >= 15 * 1000000ull);
 
     /* A write by another thread wakes the wait. */
     struct thread *t = thread_create(late_writer, w, "poll-writer", SCHED_PRIO_DEFAULT);
@@ -58,7 +58,7 @@ bool selftest_io_poll(const char **reason)
     t0 = clock_now_ns();
     CHECK(io_poll(fds, 1, IO_POLL_FOREVER) == 1);
     CHECK(fds[0].revents == COSMO_IO_READABLE);
-    CHECK(clock_now_ns() - t0 >= 10 * 1000000ull);
+    CHECK(clock_since_ns(t0) >= 10 * 1000000ull);
     thread_join(t);
     char buf[8];
     CHECK(kobject_io_of(r)->read(r, buf, sizeof(buf)) == 3);

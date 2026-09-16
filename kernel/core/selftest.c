@@ -303,7 +303,7 @@ static uint64_t fpu_bench_pair(bool own)
     }
     thread_join(ta);
     thread_join(tb);
-    return clock_now_ns() - t0;
+    return clock_since_ns(t0);
 }
 
 static bool test_fpu_bench(const char **reason)
@@ -422,6 +422,16 @@ static const struct selftest tests[] = {
     { "blk-queue",       selftest_blk_queue },
     { "blk-segments",    selftest_blk_segments },
     { "blk-timeout",     selftest_blk_timeout },
+    { "blk-timeout-skew", selftest_blk_timeout_skew },
+    { "clock-since-saturates", selftest_clock_since_saturates },
+    { "clock-cross-cpu", selftest_clock_cross_cpu },
+    { "clock-scope-aarch64", selftest_clock_scope_aarch64 },
+    { "clock-skew-detected", selftest_clock_skew_detected },
+    { "clock-invariant-gate", selftest_clock_invariant_gate },
+    { "clock-offset-bound", selftest_clock_offset_bound },
+    { "lockup-report-skew", selftest_lockup_report_skew },
+    { "clock-cost", selftest_clock_cost },
+    { "clock-tick-owner", selftest_clock_tick_owner },
     { "nvme",            selftest_nvme },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },
@@ -675,7 +685,7 @@ int selftest_run_all(void)
         sched_watchdog_kick();
         uint64_t t0 = clock_now_ns();
         bool ok = tests[i].fn(&reason);
-        uint64_t dt = clock_now_ns() - t0;
+        uint64_t dt = clock_since_ns(t0);
         total_ns += dt;
         if (dt > slowest_ns) {
             slowest_ns = dt;

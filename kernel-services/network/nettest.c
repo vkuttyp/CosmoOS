@@ -1165,7 +1165,7 @@ static bool wait_until(bool (*pred)(void *), void *arg, unsigned budget_ms)
         thread_sleep_ms(1);
         sched_watchdog_kick();
     }
-    unsigned waited_ms = (unsigned)((clock_now_ns() - t0) / 1000000ull);
+    unsigned waited_ms = (unsigned)((clock_since_ns(t0)) / 1000000ull);
     if (waited_ms * 2 > budget_ms)
         kinfo("selftest: wait_until: waited %u ms of a %u ms budget", waited_ms, budget_ms);
     return true;
@@ -2468,7 +2468,7 @@ static unsigned bench_tcp(unsigned flows, uint16_t port)
             thread_join(ts[i]);
         total += sinks[i].bytes;
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     if (total != (uint64_t)flows * BENCH_TCP_BYTES || dt == 0) {
         for (unsigned i = 0; i < flows; i++)
             kwarn("net-bench: flow %u: sink got %u (err %d), client sent %u (err %d)", i, sinks[i].bytes, sinks[i].err,
@@ -2523,7 +2523,7 @@ static unsigned bench_udp(uint16_t port, uint32_t *delivered)
         if ((i & 63) == 63)
             sched_yield();   /* let the receiver drain: the socket queue is short */
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     for (unsigned i = 0; i < 50 && r.got < sent; i++)
         thread_sleep_ms(2);
     *delivered = r.got;
@@ -2779,7 +2779,7 @@ stop:;
     uint64_t deadline = clock_now_ns() + 500ull * 1000000ull;
     while (__atomic_load_n(&h->replies, __ATOMIC_RELAXED) < sent && clock_now_ns() < deadline)
         thread_sleep_ms(1);
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     netif_set_rx_hook(NULL, NULL);
     unsigned got = __atomic_load_n(&h->replies, __ATOMIC_RELAXED);
     kinfo("selftest: net-nicbench: %s: %u ARP requests sent, %u replies counted at the boundary, %llu frames received by the driver, %llu dropped at the receive queue",
@@ -2812,7 +2812,7 @@ static bool nicbench_udp(const char **reason, struct netif *nif, unsigned *sends
         if ((i & 63) == 63)
             sched_yield();
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     thread_sleep_ms(20);   /* the driver's completions and counters settle */
     *frames_out = nif->stats.tx_packets - tx0;
     ksock_put(tx);
@@ -2833,7 +2833,7 @@ static uint64_t nicbench_cksum_ns(void)
         buf[i & (NICBENCH_UDP_LEN - 1)] = (uint8_t)i;   /* defeat a hoisted result */
         sink += in_cksum(buf, sizeof(buf));
     }
-    return (clock_now_ns() - t0) / NICBENCH_UDP;
+    return (clock_since_ns(t0)) / NICBENCH_UDP;
 }
 
 static bool nicbench_one(const char **reason, struct netif *nif, uint64_t cksum_ns)

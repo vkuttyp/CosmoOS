@@ -56,6 +56,7 @@ struct bio {
     void *drvpriv;                   /* for the driver */
     struct list_node inflight_link;  /* the block layer's in-flight list */
     uint64_t issued_ns;              /* when the driver accepted it */
+    uint32_t scans;                  /* timeout scans that have seen it in flight (that thread only) */
     unsigned issue_cpu;              /* the CPU that handed it to the driver */
 };
 
@@ -64,6 +65,10 @@ static inline unsigned bio_segments(const struct bio *bio) { return bio->nr_vecs
 void bio_segment(const struct bio *bio, unsigned i, struct bio_vec *out);
 
 #define BLK_TIMEOUT_NS (30ull * 1000000000ull)   /* default request timeout */
+/* How often the timeout thread walks the in-flight lists. Also the
+ * resolution of the scan-count age it keeps beside the timestamp one,
+ * which is what stays live when a counter is not common across CPUs. */
+#define BLK_TIMEOUT_SCAN_NS (500ull * 1000000ull)
 
 struct blkdev_ops {
     /* Take ownership of the bio until bio_complete(). Returns 0 or a
@@ -152,6 +157,9 @@ void blk_unregister(struct blkdev *bd);
  * refusal window; the hold parks a submitter inside it, which is the
  * only way to occupy the state the drain waits for.
  */
+/* Stamp every bio this many ns in the future, as a CPU whose clock runs
+ * ahead of the timeout scanner's would. */
+void blk_test_set_issue_skew_ns(uint64_t ns);
 void blk_test_unregister_pause(unsigned ms);
 void blk_test_hold_in_driver(bool on);
 bool blk_test_submitter_parked(void);

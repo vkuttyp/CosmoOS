@@ -174,11 +174,24 @@ static bool data_ok(const struct blkdev *bd, const struct bio *bio)
     return sum == total;
 }
 
+#if CONFIG_DEBUG
+static uint64_t g_test_issue_skew_ns;
+
+void blk_test_set_issue_skew_ns(uint64_t ns)
+{
+    __atomic_store_n(&g_test_issue_skew_ns, ns, __ATOMIC_RELEASE);
+}
+#endif
+
 /* qlock held. */
 static void inflight_add_locked(struct blkdev *bd, struct bio *bio)
 {
     bio->issued_ns = clock_now_ns();
+#if CONFIG_DEBUG
+    bio->issued_ns += __atomic_load_n(&g_test_issue_skew_ns, __ATOMIC_ACQUIRE);
+#endif
     bio->issue_cpu = arch_cpu_id();
+    bio->scans = 0;
     bio->flags &= ~BIO_TIMED_OUT;
     list_push_back(&bd->inflight, &bio->inflight_link);
 }
@@ -204,7 +217,7 @@ static void blk_timeout_thread(void *arg)
 {
     (void)arg;
     for (;;) {
-        thread_sleep_ms(500);
+        thread_sleep_ms(BLK_TIMEOUT_SCAN_NS / 1000000ull);
         mutex_lock(&g_blk_lock);
         struct blkdev *bd;
         list_for_each_entry(bd, &g_blkdevs, link) {
@@ -216,8 +229,50 @@ static void blk_timeout_thread(void *arg)
             arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
             struct bio *b;
             list_for_each_entry(b, &bd->inflight, inflight_link) {
-                if (now - b->issued_ns < bd->timeout_ns)
-                    break;   /* oldest first: the rest are younger */
+                /*
+                 * Two ages, and a request is overdue when either says so.
+                 *
+                 * `issued_ns` was stamped by whichever CPU handed this
+                 * bio to the driver -- `bio->issue_cpu`, set beside it,
+                 * says which -- and `now` was read here. A plain
+                 * subtraction underflows on residual skew and times out
+                 * every in-flight bio at once, which is the defect this
+                 * unit is named for; the saturating one cannot do that.
+                 *
+                 * But saturation trades that for the opposite failure:
+                 * on a machine whose counter is *not* common (an x86-64
+                 * without an invariant TSC, where the offset is
+                 * unbounded and may grow), an issuing CPU that runs
+                 * ahead of this thread makes the age read zero for ever
+                 * and the request is never timed out at all. A stalled
+                 * device would then hang instead of entering recovery --
+                 * a liveness bug traded for a correctness one.
+                 *
+                 * So `scans` is a second age that no clock can distort:
+                 * this thread is the only writer, it runs every 500 ms,
+                 * and it counts the scans that have seen this bio in
+                 * flight. Coarse, and it does not need to be fine --
+                 * it is the backstop, not the measurement.
+                 *
+                 * The *first* sighting is worth nothing, and that is the
+                 * whole subtlety: a bio submitted a moment before a scan
+                 * has been in flight for almost no time, so crediting it
+                 * a scan interval would time it out early -- which it
+                 * did, failing blk-timeout at 58 ms against a 300 ms
+                 * timeout. Only the interval *between* sightings is time
+                 * this thread can vouch for, so N sightings vouch for
+                 * N-1 intervals.
+                 *
+                 * The walk no longer stops at the first request that is
+                 * not overdue: with two ages, "oldest first" no longer
+                 * implies the oldest is the first to expire.
+                 */
+                if (b->scans != UINT32_MAX)
+                    b->scans++;
+                uint64_t by_clock = clock_delta_ns(now, b->issued_ns);
+                uint64_t by_scans = (uint64_t)(b->scans - 1u) * BLK_TIMEOUT_SCAN_NS;
+                if (by_clock < bd->timeout_ns && by_scans < bd->timeout_ns)
+                    continue;
                 if (b->flags & BIO_TIMED_OUT)
                     continue;
                 b->flags |= BIO_TIMED_OUT;
@@ -272,8 +327,32 @@ static unsigned g_test_hold;             /* drain half: park the next submitter 
 static unsigned g_test_parked;           /* a submitter is inside the window */
 static unsigned g_test_release;          /* let it out */
 static unsigned g_test_unreg_spins;      /* iterations blk_unregister spent draining */
-static uint64_t g_test_left_ns;          /* when the parked submitter left */
-static uint64_t g_test_unreg_ns;         /* when blk_unregister returned */
+/*
+ * The drain half's order, as a sequence rather than as two clock
+ * readings.
+ *
+ * These were two `clock_now_ns()` stamps, and the events they mark
+ * happen on *different CPUs* -- the parked submitter is pinned away from
+ * the unregister on purpose. Comparing two CPUs' timestamps is exactly
+ * what this kernel stopped promising when it read the invariant-TSC bit:
+ * on x86-64 here `clock_is_common()` is false, so the test was resting
+ * on a guarantee the kernel declines to give, and passing only because
+ * QEMU's counters agree
+ * (docs/audit/next-subsystem-cpu-clock.md, step 5).
+ *
+ * A sequence number needs no such guarantee. The atomic
+ * read-modify-write puts the two events in a total order by itself, on
+ * any machine, however the counters behave -- and an order is all the
+ * assertion ever wanted.
+ */
+static uint64_t g_test_seq;
+static uint64_t g_test_left_seq;         /* the parked submitter left */
+static uint64_t g_test_unreg_seq;        /* blk_unregister returned */
+
+static uint64_t blk_test_tick(void)
+{
+    return __atomic_add_fetch(&g_test_seq, 1u, __ATOMIC_SEQ_CST);
+}
 
 void blk_test_unregister_pause(unsigned ms) { __atomic_store_n(&g_test_pause_ms, ms, __ATOMIC_RELEASE); }
 
@@ -282,8 +361,9 @@ void blk_test_hold_in_driver(bool on)
     __atomic_store_n(&g_test_release, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_parked, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_unreg_spins, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_left_ns, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_test_unreg_ns, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_left_seq, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_seq, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_seq, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_test_hold, on ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
@@ -292,11 +372,12 @@ unsigned blk_test_unregister_spins(void) { return __atomic_load_n(&g_test_unreg_
 void blk_test_release_in_driver(void) { __atomic_store_n(&g_test_release, 1u, __ATOMIC_RELEASE); }
 
 /* The order the drain half is about: did the unregister return after the
- * submitter left? Both are recorded by the code that does them. */
+ * submitter left? Both are recorded by the code that does them, as
+ * positions in one sequence rather than as two clocks. */
 bool blk_test_drain_ordered(void)
 {
-    uint64_t left = __atomic_load_n(&g_test_left_ns, __ATOMIC_ACQUIRE);
-    uint64_t unreg = __atomic_load_n(&g_test_unreg_ns, __ATOMIC_ACQUIRE);
+    uint64_t left = __atomic_load_n(&g_test_left_seq, __ATOMIC_ACQUIRE);
+    uint64_t unreg = __atomic_load_n(&g_test_unreg_seq, __ATOMIC_ACQUIRE);
     return left != 0 && unreg != 0 && unreg > left;
 }
 
@@ -356,7 +437,7 @@ void blk_unregister(struct blkdev *bd)
     }
     kinfo("blk: %s removed", bd->name);
 #if CONFIG_DEBUG
-    __atomic_store_n(&g_test_unreg_ns, clock_now_ns(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_test_unreg_seq, blk_test_tick(), __ATOMIC_RELEASE);
 #endif
     kobject_put(&bd->obj);   /* the registry's reference */
 }
@@ -385,7 +466,7 @@ int blk_submit(struct bio *bio)
      * afterwards could read later than the unregister's own and make a
      * correct drain look like a broken one. */
     if (parked)
-        __atomic_store_n(&g_test_left_ns, clock_now_ns(), __ATOMIC_RELEASE);
+        __atomic_store_n(&g_test_left_seq, blk_test_tick(), __ATOMIC_RELEASE);
 #endif
     __atomic_fetch_sub(&bd->submitting, 1u, __ATOMIC_SEQ_CST);
     return rc;

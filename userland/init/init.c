@@ -177,7 +177,7 @@ static void fs_selftest(void)
                 total += n;
                 calls++;
             }
-            uint64_t dt = cosmo_clock_ns() - t0;
+            uint64_t dt = cosmo_clock_since_ns(t0);
             fprintf(stderr, "USERBENCH: read %ld KiB at %zu KiB requests: %u calls, %llu us, %llu MiB/s\n", total / 1024,
                     reqs[r] / 1024, calls, (unsigned long long)(dt / 1000),
                     (unsigned long long)(dt ? (uint64_t)total * 1000000000ull / dt / (1024 * 1024) : 0));
@@ -3122,7 +3122,7 @@ static void svc_selftest(void)
         cosmo_sleep_ns(10000000ULL);
     }
     CHECK(gone);
-    uint64_t elapsed = cosmo_clock_ns() - t0;
+    uint64_t elapsed = cosmo_clock_since_ns(t0);
     CHECK(elapsed >= 180000000ULL);   /* 60 + 120 ms of backoff at least */
     char log[1024];
     CHECK(slurp("/var/log/svc/flap", log, sizeof(log)) > 0);

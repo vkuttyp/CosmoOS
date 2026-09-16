@@ -27,4 +27,28 @@ uint64_t arch_clock_read(void);
 uint64_t arch_clock_hz(void);
 const char *arch_clock_name(void);
 
+/*
+ * Is this counter a clock two CPUs may compare readings from?
+ *
+ * True when the hardware guarantees the counter runs at a constant rate
+ * and does not stop -- an invariant TSC on x86-64, the system counter on
+ * AArch64. False means `clock_now_ns` is still monotonic on one CPU but
+ * the kernel makes no cross-CPU promise about it, which `timer_init`
+ * says in the boot line and `clock_worst_offset_ns` reports as an
+ * unbounded offset (docs/audit/next-subsystem-cpu-clock.md).
+ *
+ * `*why` is set to a short phrase naming what is missing when the answer
+ * is false, for that boot line.
+ */
+bool arch_clock_is_common(const char **why);
+
+/*
+ * True when each CPU reads its own counter, so an offset between two
+ * CPUs is possible and worth measuring (x86-64's TSC). False when the
+ * counter is shared by construction (AArch64's system counter), where
+ * there is nothing to measure and a measured "correction" could only
+ * introduce the error it claims to remove.
+ */
+bool arch_clock_is_percpu(void);
+
 #endif /* ARCH_TIMER_H */

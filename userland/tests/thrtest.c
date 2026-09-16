@@ -476,7 +476,7 @@ static void *cv_timed_waiter(void *arg)
         if (rc == -ETIMEDOUT)
             break;
     }
-    cv_timed_ns = cosmo_clock_ns() - t0;
+    cv_timed_ns = cosmo_clock_since_ns(t0);
     cv_timed_rc = rc;
     if (cosmo_mutex_trylock(&cv_m) == -EBUSY)
         cv_held_ok++;
@@ -1373,7 +1373,7 @@ int main(int argc, char **argv)
         cosmo_mutex_lock(&cv_m);
         uint64_t t0 = cosmo_clock_ns();
         int rc = cosmo_cond_timedwait(&cv_c, &cv_m, 20ull * 1000ull * 1000ull);
-        uint64_t elapsed = cosmo_clock_ns() - t0;
+        uint64_t elapsed = cosmo_clock_since_ns(t0);
         /*
          * The mutex, **before** releasing it. A first version unlocked and
          * then checked that `trylock` succeeded, which proves only that

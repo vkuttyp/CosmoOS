@@ -635,7 +635,7 @@ bool selftest_hv_vcpu_stop(const char **reason)
      * and it was the kicker that ended it.
      */
     kinfo("selftest: hv-vcpu-stop: kick to return %llu us, kicker saw in_guest=%s",
-          (unsigned long long)((t1 - k.sent_ns) / 1000),
+          (unsigned long long)(clock_delta_ns(t1, k.sent_ns) / 1000),
           (k.in_guest & HV_IN_GUEST) ? "yes" : "no");
     (void)t0;
 
@@ -1275,7 +1275,7 @@ bool selftest_el2_guest_timer_ontime(const char **reason)
      * must not come back until then. Measured on the host's clock. */
     uint64_t t0 = clock_now_ns();
     CHECK(vcpu_run(v, &x) == 0);
-    uint64_t waited = clock_now_ns() - t0;
+    uint64_t waited = clock_since_ns(t0);
     CHECK(x.kind == COSMO_VM_EXIT_WFI);
     uint64_t asked_ns = asked_ticks * 1000000000ULL / arch_clock_hz();
     CHECK(waited >= asked_ns / 2);                                  /* it waited, rather than returning at once */
@@ -1842,7 +1842,7 @@ bool selftest_el2_guest_uart_level(const char **reason)
     uint64_t t0 = clock_now_ns();
     timer_start(&t, 20000000ull);                                      /* 20 ms in, a keystroke */
     CHECK(vcpu_run(v, &x) == 0);                                       /* the WFI, with a 2 s deadline */
-    uint64_t waited = clock_now_ns() - t0;
+    uint64_t waited = clock_since_ns(t0);
     timer_cancel_sync(&t);
     CHECK(x.kind == COSMO_VM_EXIT_WFI);
     CHECK((x.flags & COSMO_VM_EXIT_F_IRQ_PENDING) != 0);               /* woken for a reason */
@@ -2229,7 +2229,7 @@ bool selftest_el2_vcpu_run_tick(const char **reason)
     memset(&x, 0, sizeof(x));
     uint64_t t0 = clock_now_ns();
     CHECK(vcpu_run_flags(v, &x, COSMO_VCPU_RUN_ONE_TICK) == 0);
-    uint64_t first = clock_now_ns() - t0;
+    uint64_t first = clock_since_ns(t0);
     CHECK(x.kind == COSMO_VM_EXIT_PREEMPTED);
     uint64_t entries = v->entries;
     CHECK(entries >= 1);

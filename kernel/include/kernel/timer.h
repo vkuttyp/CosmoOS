@@ -46,7 +46,179 @@ void timer_init(void);
 /* Start the tick on the calling CPU (APs during bring-up). */
 void timer_init_cpu(void);
 
+/*
+ * Monotonic nanoseconds since boot.
+ *
+ * **Comparable across CPUs**: two values read on any two CPUs may be
+ * subtracted, and the difference is the elapsed time between them to
+ * within the residual skew the boot measured and printed
+ * (`clock_worst_offset_ns`). Never negative, never wrapped.
+ *
+ * On AArch64 `cntpct_el0` is the system counter, common to every PE, so
+ * there is nothing to correct and what remains is the cost of two reads
+ * at two instants. On x86-64 the counter is per-CPU and the correction
+ * is real (docs/audit/next-subsystem-cpu-clock.md).
+ */
 uint64_t clock_now_ns(void);
+
+/*
+ * Elapsed nanoseconds since `stamp`, **saturating at zero**.
+ *
+ * For any stamp that may have been taken on another CPU. Residual skew
+ * can make such a stamp look like the future, and a plain unsigned
+ * subtraction turns that into an interval of 584 years -- which is not a
+ * slightly wrong measurement but a timeout that fires immediately, or a
+ * diagnostic that sends its reader somewhere. Use this wherever the
+ * stamp's CPU is not certainly this one; it costs a compare.
+ *
+ * **This is for time already spent, not for a moment to wait until.** A
+ * deadline is a different problem with a different answer: saturating
+ * cannot help there, because the comparison is an ordering rather than a
+ * difference, and there is nothing to saturate. `clock_deadline_ns` and
+ * `clock_deadline_passed` below are the safe form, and they are safe
+ * across a migration where `clock_now_ns() + x` is not.
+ */
+uint64_t clock_since_ns(uint64_t stamp);
+
+/*
+ * The same saturating difference for a caller that already has a `now`.
+ *
+ * Several do, and they need it: a loop comparing many stamps against one
+ * instant must not re-read the clock per item -- it would be a clock
+ * read per iteration, sometimes under a lock, against a `now` that moves
+ * underneath the comparison. `clock_since_ns` is this with a fresh read.
+ */
+static inline uint64_t clock_delta_ns(uint64_t now, uint64_t stamp)
+{
+    return now > stamp ? now - stamp : 0;
+}
+
+/*
+ * The worst residual skew the boot measured, as a **magnitude**: the
+ * contract's bound, the boot line's number, and what the cross-CPU
+ * tests check themselves against. Unsigned, so that a comparison
+ * against it cannot quietly be one-sided while an offset the other way
+ * sails through.
+ */
+uint64_t clock_worst_offset_ns(void);
+
+/*
+ * `clock_worst_offset_ns()` when this machine's counter is not a clock
+ * two CPUs may compare at all -- an x86-64 whose TSC is not invariant.
+ * The kernel keeps using the counter (there is nothing else here to use)
+ * and stops promising: a difference between two CPUs' readings is not an
+ * interval, and no bound is claimed for it. Distinct from a large
+ * measured offset, which is a number.
+ */
+#define CLOCK_OFFSET_UNBOUNDED UINT64_MAX
+
+/* False when the offset is unbounded, as above. The boot says which. */
+bool clock_is_common(void);
+
+/*
+ * Deadlines are timestamps, and they are the harder half.
+ *
+ * `uint64_t d = clock_now_ns() + delay;` followed later by
+ * `while (clock_now_ns() < d)` is a cross-CPU comparison whenever the
+ * thread can be descheduled in between -- the deadline was computed
+ * against one CPU's counter and is tested against another's. Saturating
+ * subtraction does not help: the comparison is an ordering, not a
+ * difference, and there is nothing to saturate.
+ *
+ * So do not write that. `clock_deadline_ns` and `clock_deadline_passed`
+ * below both measure against the same quantity -- the corrected clock
+ * where every CPU agrees on it, and a machine-wide tick where they do
+ * not -- so where a deadline is built and where it is tested no longer
+ * matters. Every deadline in the kernel goes through them except four
+ * that cannot (see their own comments: `ndelay`, `timer_start`, and the
+ * lockup sampler's two windows, all below a tick or same-CPU by
+ * construction).
+ *
+ * They also fix something smaller and real: `clock_now_ns() + budget`
+ * wraps into the past for a large budget and expires at once, which
+ * `sys_futex_wait` guarded at its own call site and nothing else did.
+ *
+ * One deadline does not use them, and deliberately. The block layer's
+ * request timeout is the only wait here whose failure is a *hang* rather
+ * than a spurious timeout, so it carries a second age that no clock can
+ * distort at all -- scans counted by the one thread that does the
+ * scanning (`bio->scans`, `kernel/block/blk.c`) -- and is overdue when
+ * either age says so.
+ */
+
+/*
+ * A deadline `budget_ns` from now, saturating at UINT64_MAX rather than
+ * wrapping, and the test for it. Prefer these to `clock_now_ns() + x`
+ * and a bare `<`.
+ *
+ * **These are safe across a migration and a hand-written deadline is
+ * not.** They measure against the corrected clock when every CPU agrees
+ * on it, and against the machine-wide tick when they do not -- one
+ * counter, advanced by a designated CPU, with ownership taken over by
+ * another when its owner stops ticking. Both calls read the same
+ * quantity, so where the deadline was built and where it is tested no
+ * longer matters. `kernel/timer/timer.c` has the design, including the
+ * two shapes that were tried first and are wrong.
+ *
+ * `clock_now_ns() + x` compared with a bare `<` has none of that, which
+ * is why every deadline loop in this tree uses these instead. Build with
+ * `clock_deadline_ns`, test with `clock_deadline_passed`, always both or
+ * neither -- and note the resolution: on a machine whose counter is not
+ * common the tick is CONFIG_HZ-grained (4 ms), against a shortest budget
+ * in this tree of 200 ms. `ndelay` and the lockup sampler are below that
+ * and stay on the raw clock, each saying so.
+ */
+uint64_t clock_deadline_ns(uint64_t budget_ns);
+bool clock_deadline_passed(uint64_t deadline);
+
+/* This CPU's counter with no cross-CPU correction applied. For the
+ * measurement that produces the correction, and for nothing else. */
+uint64_t clock_raw_ns(void);
+
+/* Measure every AP's offset against CPU 0 and, when the counter is one
+ * this kernel may trust across CPUs, apply it. Called once after SMP
+ * bring-up, from thread context on CPU 0. Reports what it measured
+ * whether or not it applies it. */
+void clock_measure_offsets(void);
+
+/* One tick of the counter, in nanoseconds (rounded up, never zero). No
+ * offset between two CPUs can be known more precisely than this. */
+uint64_t clock_resolution_ns(void);
+
+/* Whether any CPU's offset was actually measured. False on a counter
+ * shared by construction, where a bound of zero is exact rather than
+ * unmeasured. */
+bool clock_offsets_measured(void);
+
+/* The bound the measurement computed, whether or not it was applied. On
+ * a machine that measures and then declines to trust the result, this is
+ * the only way to check that the computation itself is sound. Zero when
+ * nothing was measured. */
+uint64_t clock_measured_bound_ns(void);
+
+#if CONFIG_DEBUG
+/*
+ * Make this machine's counters disagree, for the cross-CPU tests.
+ *
+ * `clock_test_set_cpu_offset_ns` adds a signed offset to every
+ * clock_now_ns() taken on `cpu`; `clock_test_set_worst_offset_ns`
+ * rewrites the advertised bound. The second exists so a test cannot
+ * quietly agree with whatever the boot happened to print: advertise
+ * zero on a machine with injected skew and the assertion must fail.
+ * Debug builds only.
+ */
+void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns);
+void clock_test_set_worst_offset_ns(uint64_t ns);
+void clock_test_force_uncommon(bool on);
+
+/* The machine-wide tick that deadlines use when the counter is not
+ * common: its value, its current owner, and a way to point the
+ * ownership at a CPU that will never tick, so the takeover path can be
+ * tested rather than believed. */
+uint64_t clock_test_global_ticks(void);
+unsigned clock_test_tick_owner(void);
+void clock_test_set_tick_owner(unsigned cpu);
+#endif
 /* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
  * read from the real-time clock at boot (0 when the platform has none).
  * Lock-free, any context. */

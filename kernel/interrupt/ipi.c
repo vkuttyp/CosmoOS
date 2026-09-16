@@ -141,9 +141,9 @@ void smp_call_function_single(unsigned cpu, smp_call_fn fn, void *arg)
     __atomic_store_n(&g_call_done, 0u, __ATOMIC_RELEASE);
     ipi_send(cpu, IPI_CALL);
 
-    uint64_t deadline = clock_now_ns() + 1000000000ULL;
+    uint64_t deadline = clock_deadline_ns(1000000000ULL);
     while (!__atomic_load_n(&g_call_done, __ATOMIC_ACQUIRE)) {
-        if (clock_now_ns() > deadline) {
+        if (clock_deadline_passed(deadline)) {
             spin_unlock(&g_call_lock);
             panic("smp_call_function_single: CPU %u did not respond", cpu);
         }

@@ -242,7 +242,7 @@ tree.
 | item | audit section |
 | --- | --- |
 | **64-CPU ceiling**: `CONFIG_MAX_CPUS` is 64 and `cpumask_t` is one word (kernel/include/kernel/percpu.h:22); xAPIC-only addressing, x2APIC never enabled; a single cross-call slot; no ticket or MCS spinlocks; IRQ affinity spread only by NVMe | 6.3, 5.3 |
-| no CPU feature framework (`arch_cpu_has`); no errata table; invariant TSC detected but unused, so cross-CPU timestamps are unsynchronised | 6.4, 6.2 |
+| no CPU feature framework (`arch_cpu_has`); no errata table; ~~invariant TSC detected but unused, so cross-CPU timestamps are unsynchronised~~ (the third clause closed by the CPU-clock unit, `docs/audit/next-subsystem-cpu-clock.md`: the bit is read, the offset measured and reported, `clock_since_ns`/`clock_delta_ns` are the rule for subtracting two stamps, and a machine whose counter is not common says so instead of promising) | 6.4, 6.2 |
 | ~~the watchdog fires once, from CPU 0, no NMI path, no hard/soft-lockup detection~~ -- **closed by the lockup unit (PR #136)**: an NMI sample path on x86-64, a soft-lockup detector on every CPU and a hard-lockup detector on the next online CPU; "fires once" stays by design (the first block is the diagnosis; a second adds nothing). Open: an NMI-class interrupt on AArch64 (GICv3 pseudo-NMI) | 6.2 |
 | sequential AP bring-up with a 10 ms delay per CPU | 6.2 |
 | ~~no symlinks in the VFS~~ (a fourth vnode type, `symlink`/`readlink`, a walk that expands with a budget, `O_NOFOLLOW`/`lstat`/`readlink` in both ABIs, both filesystems storing one; PR #142); no dentry cache (every component calls the filesystem); no `(ino, generation)` identity; no mount options string; no bind or overlay stacking; no hard links | 8.3 |

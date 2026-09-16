@@ -32,6 +32,38 @@ Constants: `CONFIG_HZ` = 250, `NS_PER_SEC`, `TICK_NS` = 4 000 000.
 - **Interrupt context**: yes. Returns 0 before `timer_init`.
 - **Precision**: `((delta * g_ns_mult) >> 32)` with a 128-bit product;
   relative error below 1e-9.
+- **Across CPUs**: readings from two CPUs may be subtracted **only when
+  `clock_is_common()`**, and then they agree to within
+  `clock_worst_offset_ns()`. On AArch64 the system counter is common to
+  every PE and that bound is 0, exactly. On x86-64 it depends on the
+  invariant-TSC bit: with it, each AP's offset against CPU 0 is measured
+  at boot and applied here; without it the kernel keeps the counter but
+  makes no cross-CPU claim, and the boot line says so. **Never subtract
+  two readings directly** -- see `clock_since_ns` below
+  (`docs/audit/next-subsystem-cpu-clock.md`).
+
+### `uint64_t clock_since_ns(uint64_t stamp)` / `clock_delta_ns(now, stamp)`
+- **Purpose**: elapsed nanoseconds since `stamp`, saturating at zero.
+  The rule for subtracting any timestamp this thread did not take on this
+  CPU a moment ago -- which, because a thread that sleeps between two
+  clock reads can wake on a different CPU, is very nearly all of them.
+  Residual skew makes a stamp look like the future, and an unsigned
+  subtraction turns that into an interval of 584 years.
+- `clock_since_ns` reads the clock itself. `clock_delta_ns` takes a `now`
+  the caller already has, for a loop comparing many stamps against one
+  instant: re-reading per item would be a clock read per iteration,
+  sometimes under a lock, against a `now` that moves underneath the
+  comparison.
+- **Concurrency**: lock-free, interrupt context yes.
+
+### `bool clock_is_common(void)` / `uint64_t clock_worst_offset_ns(void)`
+- **Purpose**: whether two CPUs' readings may be compared, and by how
+  much they may differ if so. `clock_worst_offset_ns()` is
+  `CLOCK_OFFSET_UNBOUNDED` exactly when `clock_is_common()` is false; it
+  is 0 only on a counter shared by construction, where nothing was
+  measured and zero is exact; otherwise it is at least one tick of
+  `clock_resolution_ns()`, because no measurement can bound an offset
+  more finely than the counter can express.
 
 ### `uint64_t clock_realtime_ns(void)` (milestone 10)
 - **Purpose**: nanoseconds since 1970-01-01 00:00 UTC: `clock_now_ns()`

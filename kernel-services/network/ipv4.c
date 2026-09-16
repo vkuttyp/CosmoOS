@@ -34,7 +34,7 @@ bool icmp_ratelimit_allow(void)
 {
     uint64_t now = clock_now_ns();
     arch_irq_state_t s = spin_lock_irqsave(&g_icmp_lock);
-    if (now - g_icmp_window_ns >= 1000000000ull) {
+    if (clock_delta_ns(now, g_icmp_window_ns) >= 1000000000ull) {
         g_icmp_window_ns = now;
         g_icmp_count = 0;
     }

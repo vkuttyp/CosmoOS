@@ -1592,7 +1592,7 @@ bool process_log_permitted(void)
         return true;
     arch_irq_state_t s = spin_lock_irqsave(&p->lock);
     uint64_t now = clock_now_ns();
-    uint64_t refill = (now - p->log_refill_ns) / (1000000000ull / LOG_RATE_PER_S);
+    uint64_t refill = clock_delta_ns(now, p->log_refill_ns) / (1000000000ull / LOG_RATE_PER_S);
     if (refill) {
         p->log_tokens = (uint32_t)MIN((uint64_t)LOG_BUCKET, p->log_tokens + refill);
         p->log_refill_ns += refill * (1000000000ull / LOG_RATE_PER_S);

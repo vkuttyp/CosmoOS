@@ -321,9 +321,9 @@ void arch_mmu_shootdown_cpus(const struct arch_mmu_context *ctx, vaddr_t va, siz
             ipi_send(c, IPI_TLB_FLUSH);
     arch_mmu_invalidate(ctx, va, len);
 
-    uint64_t deadline = clock_now_ns() + 1000000000ULL;
+    uint64_t deadline = clock_deadline_ns(1000000000ULL);
     while (__atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE) < targets) {
-        if (clock_now_ns() > deadline) {
+        if (clock_deadline_passed(deadline)) {
             unsigned got = __atomic_load_n(&g_shootdown_acks, __ATOMIC_ACQUIRE);
             spin_unlock(&g_shootdown_lock);
             panic("mmu: TLB shootdown of %p+0x%zx acknowledged by %u of %u CPUs", (void *)va, len, got,

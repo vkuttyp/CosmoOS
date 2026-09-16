@@ -197,6 +197,7 @@ void kernel_main(const struct cosmoboot_info *info)
     /* Bring up the other CPUs now that this one can take interrupts:
      * the shootdowns and cross-CPU calls bring-up needs require it. */
     smp_init();
+    clock_measure_offsets();   /* every AP is up: the counters can be compared */
     net_start_workers();   /* one receive queue and worker per online CPU (network unit 11) */
     lockup_init();         /* every CPU is up and ticking: the lockup detectors may watch (kernel/core/lockup.c) */
 

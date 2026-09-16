@@ -5,6 +5,9 @@
 #include <kernel/errno.h>
 #include <kernel/interrupt.h>
 #include <kernel/log.h>
+#include <kernel/thread.h>
+#include <kernel/sched.h>
+#include <kernel/kmalloc.h>
 #include <kernel/panic.h>
 #include <kernel/percpu.h>
 #include <kernel/string.h>
@@ -22,12 +25,60 @@ static uint64_t g_realtime_offset_ns;   /* wall time at monotonic zero */
 static uint64_t g_ns_mult;   /* (1e9 << CLOCK_SHIFT) / hz */
 static timer_tick_hook_fn g_tick_hook;
 static bool g_initialized;
+/* Measured at AP bring-up by this unit's step 4; zero until then, and
+ * zero on architectures whose counter is common to every PE. */
+static uint64_t g_worst_offset_ns;
+/* False when the counter is not comparable across CPUs at all, which is
+ * a different statement from a large measured offset. */
+static bool g_clock_common = true;
+static void clock_tick_advance(unsigned me);
+/* Per-CPU addends that cancel each CPU's measured offset from CPU 0, and
+ * whether they are being applied (they are not, on a counter this kernel
+ * may not trust across CPUs). */
+static int64_t g_cpu_offset_ns[CONFIG_MAX_CPUS];
+static unsigned g_measured;   /* CPUs whose offset was actually measured */
+/* The bound the measurement produced, kept whether or not it was
+ * applied: on a machine that measures and then declines to trust the
+ * result, this is still the number that was computed, and the only way
+ * to check the computation on such a machine. */
+static uint64_t g_measured_bound_ns;
+/* Set once, after every CPU is online and the measurement has run: see
+ * clock_now_ns for why this gates a per-CPU access rather than an add. */
+static bool g_apply_offset;
 
 #define CLOCK_SHIFT 32
 
 /* --- clock --- */
 
-uint64_t clock_now_ns(void)
+#if CONFIG_DEBUG
+/*
+ * A machine whose counters disagree, on demand
+ * (docs/audit/next-subsystem-cpu-clock.md).
+ *
+ * Every machine this project boots on has counters that agree, so the
+ * cross-CPU tests would pass on a clock that was completely broken.
+ * These make the skew a thing the test creates rather than a thing the
+ * hardware has to supply. Debug builds only: nothing reads them in a
+ * release image, and no shipping path sets them.
+ */
+static int64_t g_test_cpu_offset_ns[CONFIG_MAX_CPUS];
+
+void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns)
+{
+    if (cpu < CONFIG_MAX_CPUS)
+        __atomic_store_n(&g_test_cpu_offset_ns[cpu], ns, __ATOMIC_RELEASE);
+}
+
+void clock_test_set_worst_offset_ns(uint64_t ns)
+{
+    __atomic_store_n(&g_worst_offset_ns, ns, __ATOMIC_RELEASE);
+}
+#endif
+
+/* The counter as this CPU reads it, with no cross-CPU correction: what
+ * the measurement itself must use, or it would be measuring the
+ * correction it is trying to produce. */
+uint64_t clock_raw_ns(void)
 {
     if (!g_initialized)
         return 0;
@@ -38,6 +89,185 @@ uint64_t clock_now_ns(void)
     unsigned __int128 ns = (unsigned __int128)delta * g_ns_mult;
     return (uint64_t)(ns >> CLOCK_SHIFT);
 }
+
+uint64_t clock_now_ns(void)
+{
+    /*
+     * The flag is not here to save the add. `arch_cpu_id()` reads the
+     * per-CPU block through GS, so indexing the offsets unconditionally
+     * would make every `clock_now_ns` -- including the ones an AP takes
+     * partway through its own bring-up, before its block is installed --
+     * depend on percpu being up. The flag is set once, after
+     * `clock_measure_offsets` has run and every CPU is online, so the
+     * per-CPU access happens only when it is certainly safe.
+     *
+     * Dropping it and relying on the addends being zero was tried and
+     * reverted: the values would have been right, and the load to get
+     * them would not have been safe.
+     */
+    uint64_t now = clock_raw_ns();
+    if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
+        now = (uint64_t)((int64_t)now + g_cpu_offset_ns[arch_cpu_id()]);
+#if CONFIG_DEBUG
+    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[arch_cpu_id()], __ATOMIC_ACQUIRE));
+#endif
+    return now;
+}
+
+/*
+ * See the contract in timer.h. A stamp from the future is residual skew,
+ * not an interval: the caller gets zero rather than a number with
+ * nineteen digits in it (docs/audit/next-subsystem-cpu-clock.md).
+ */
+uint64_t clock_since_ns(uint64_t stamp)
+{
+    return clock_delta_ns(clock_now_ns(), stamp);
+}
+
+/* --- the machine-wide tick: one counter two CPUs may compare --------------- */
+
+/*
+ * A deadline built on one CPU and tested on another cannot use the clock
+ * when the counter is not common: the two readings differ by an unbounded
+ * amount, and saturating arithmetic does not help a comparison. What is
+ * needed is a quantity both CPUs read from the *same* place, and the tick
+ * is the only one this kernel has.
+ *
+ * **One designated CPU advances it**, so it runs at CONFIG_HZ rather than
+ * CONFIG_HZ times the CPU count -- which is the first design that was
+ * tried here and reverted, because every CPU contributing its own delta
+ * makes deadlines expire ncpus times too early. The second reverted
+ * design took the maximum of the per-CPU `pc->ticks`, which stalls: those
+ * counters do not share an origin, each starting when its CPU comes
+ * online, so the leader stopping blocks every follower for the whole of
+ * bring-up.
+ *
+ * **And ownership moves**, which is what makes a single owner safe. A CPU
+ * that is not the owner watches the counter; if it has not advanced for
+ * `TICK_OWNER_STALE` of that CPU's own ticks -- the owner offline, wedged,
+ * or not taking interrupts -- it claims ownership with a compare-exchange.
+ * Several may notice at once and exactly one wins. The counter can
+ * therefore be late by at most `TICK_OWNER_STALE` ticks across a handover,
+ * and cannot stop while any CPU is still ticking.
+ *
+ * Deliberately *not* fixed by this: a deadline written by hand as
+ * `clock_now_ns() + x`. Only the two calls below are safe, which is why
+ * every deadline loop in the tree uses them.
+ */
+#define TICK_OWNER_STALE 4u
+
+static uint64_t g_global_ticks;
+static unsigned g_tick_owner;                  /* the CPU that advances it */
+static uint64_t g_owner_seen[CONFIG_MAX_CPUS]; /* what a non-owner last saw */
+static unsigned g_owner_stale[CONFIG_MAX_CPUS];
+
+static void clock_tick_advance(unsigned me)
+{
+    if (me >= CONFIG_MAX_CPUS)
+        return;
+    unsigned owner = __atomic_load_n(&g_tick_owner, __ATOMIC_ACQUIRE);
+    if (me == owner) {
+        __atomic_fetch_add(&g_global_ticks, 1u, __ATOMIC_RELEASE);
+        return;
+    }
+    uint64_t seen = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    if (seen != g_owner_seen[me]) {
+        g_owner_seen[me] = seen;   /* the owner is alive */
+        g_owner_stale[me] = 0;
+        return;
+    }
+    if (++g_owner_stale[me] < TICK_OWNER_STALE)
+        return;
+    /* The owner has not advanced it for several of this CPU's ticks.
+     * Take over; if another CPU got there first the exchange fails and
+     * this one goes back to watching. */
+    g_owner_stale[me] = 0;
+    (void)__atomic_compare_exchange_n(&g_tick_owner, &owner, me, false,
+                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/*
+ * The instant a deadline is measured against: the corrected clock when
+ * every CPU agrees on it, the machine-wide tick when they do not. Both
+ * `clock_deadline_ns` and `clock_deadline_passed` read this, so a
+ * deadline built on one CPU and tested on another compares the same
+ * quantity and migration cannot distort it.
+ *
+ * Before the first tick there is one CPU and no scheduler, so the clock
+ * is exact rather than a compromise.
+ */
+static uint64_t deadline_now_ns(void)
+{
+    if (clock_is_common())
+        return clock_now_ns();
+    uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+}
+
+#if CONFIG_DEBUG
+uint64_t clock_test_global_ticks(void) { return __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE); }
+unsigned clock_test_tick_owner(void) { return __atomic_load_n(&g_tick_owner, __ATOMIC_ACQUIRE); }
+void clock_test_set_tick_owner(unsigned cpu) { __atomic_store_n(&g_tick_owner, cpu, __ATOMIC_RELEASE); }
+#endif
+
+uint64_t clock_deadline_ns(uint64_t budget_ns)
+{
+    uint64_t now = deadline_now_ns();
+    uint64_t at = now + budget_ns;
+    return at < now ? UINT64_MAX : at;   /* a budget so large it wraps never expires */
+}
+
+bool clock_deadline_passed(uint64_t deadline)
+{
+    return deadline_now_ns() >= deadline;
+}
+
+uint64_t clock_worst_offset_ns(void)
+{
+    return __atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE);
+}
+
+/*
+ * Record the verdict and everything that follows from it, in one place,
+ * so the boot and the test that exercises the gate cannot drift apart:
+ * a counter that is not common advertises no bound at all, and says so.
+ */
+static void clock_apply_commonality(bool common, const char *why)
+{
+    g_clock_common = common;
+    if (!common) {
+        __atomic_store_n(&g_worst_offset_ns, CLOCK_OFFSET_UNBOUNDED, __ATOMIC_RELEASE);
+        kwarn("timer: %s is not comparable across CPUs: %s", arch_clock_name(), why ? why : "unknown");
+        kwarn("timer: timestamps stay monotonic per CPU; a difference between two CPUs' readings is not an interval");
+        return;
+    }
+    if (__atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE) == CLOCK_OFFSET_UNBOUNDED)
+        __atomic_store_n(&g_worst_offset_ns, 0u, __ATOMIC_RELEASE);
+    kinfo("timer: %s is common to every CPU; cross-CPU timestamps differ by at most %llu ns",
+          arch_clock_name(), (unsigned long long)clock_worst_offset_ns());
+}
+
+#if CONFIG_DEBUG
+/*
+ * Drive the gate as a machine without an invariant TSC would, then put
+ * it back. What this can and cannot show is worth being exact about: the
+ * CPUID read itself cannot be tested on a machine whose bit is set, so
+ * what is tested is everything downstream of the answer -- that a
+ * "no" reaches `clock_is_common`, empties the advertised bound, and
+ * stops the cross-CPU tests making a claim. That is the part that can
+ * silently rot; the bit read is one line in arch code.
+ */
+void clock_test_force_uncommon(bool on)
+{
+    if (on) {
+        clock_apply_commonality(false, "forced by clock-invariant-gate");
+        return;
+    }
+    const char *why = NULL;
+    __atomic_store_n(&g_worst_offset_ns, 0u, __ATOMIC_RELEASE);
+    clock_apply_commonality(arch_clock_is_common(&why), why);
+}
+#endif
 
 uint64_t clock_realtime_ns(void)
 {
@@ -56,6 +286,13 @@ const char *clock_name(void)
 
 void ndelay(uint64_t ns)
 {
+    /*
+     * The raw clock, not `clock_deadline_ns`: this is a busy-wait of
+     * nanoseconds to microseconds on one CPU, far below the 4 ms tick
+     * the deadline helpers fall back to when the clock is not common,
+     * and it does not sleep, so the thread it runs on is the thread that
+     * finishes it.
+     */
     uint64_t end = clock_now_ns() + ns;
     while (clock_now_ns() < end)
         arch_cpu_relax();
@@ -103,7 +340,23 @@ void timer_start(struct timer *t, uint64_t delay_ns)
      * run_expired captured for the current pass; a callback re-arming
      * with 0 would then be popped again inside the same pass, forever.
      * One nanosecond puts every re-arm into a later pass. */
-    t->expires_ns = clock_now_ns() + (delay_ns == 0 ? 1 : delay_ns);
+    /*
+     * The queue is per-CPU: a timer is armed on one CPU and fired from
+     * that CPU's tick, against `clock_now_ns()` (timers_run). So this is
+     * a same-CPU deadline, the raw clock is exactly right for it, and
+     * there is no migration for the helpers to protect against. The
+     * saturation they would have given is kept by hand: a budget large
+     * enough to wrap must still not expire at once.
+     *
+     * When a machine-wide tick counter was briefly the deadline domain,
+     * arming here through `clock_deadline_ns` while the tick compared
+     * against `clock_now_ns()` made every timer in the kernel fire at
+     * once -- `preempt`, `sleep` and `completion` returned in single
+     * milliseconds. Kept as a note, because the two look interchangeable.
+     */
+    uint64_t start = clock_now_ns();
+    uint64_t delay = delay_ns == 0 ? 1 : delay_ns;
+    t->expires_ns = start + delay < start ? UINT64_MAX : start + delay;
     t->cpu = arch_cpu_id();
     t->state = TIMER_PENDING;
 
@@ -226,6 +479,7 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 
     struct percpu *pc = this_cpu();
     pc->ticks++;
+    clock_tick_advance(pc->cpu_id);
 
     uint64_t now = clock_now_ns();
     /* The tick sample (kernel/core/lockup.c): what this CPU was doing,
@@ -234,6 +488,11 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
     pc->last_tick_ns = now;
     run_expired(pc->timers, now);
 #if CONFIG_SELFTEST
+    /* Local by construction, and the only subtraction in the tree that
+     * is: both reads are this CPU's, inside one tick, with interrupts
+     * disabled between them. No `clock_since_ns` here -- saturating
+     * would hide a backwards counter on a single CPU, which is a bug in
+     * the time source rather than the skew this tree tolerates. */
     pc->tick_cost_ns += clock_now_ns() - now;
 #endif
     if (g_tick_hook)
@@ -292,6 +551,243 @@ void timer_init(void)
     kinfo("timer: %s at %llu.%03llu MHz, tick %u Hz", arch_clock_name(),
           (unsigned long long)(g_clock_hz / 1000000), (unsigned long long)((g_clock_hz / 1000) % 1000),
           CONFIG_HZ);
+
+    /*
+     * Whether this counter is a clock two CPUs may compare. The offset
+     * itself is measured at AP bring-up (step 4); this is the prior
+     * question, and until this unit nothing in the tree asked it.
+     */
+    const char *why_buf = NULL;
+    clock_apply_commonality(arch_clock_is_common(&why_buf), why_buf);
+}
+
+bool clock_is_common(void)
+{
+    return g_clock_common;
+}
+
+/* --- measuring the offset between two CPUs' counters ---------------------- */
+
+/*
+ * The classic three-read exchange. CPU 0 reads, the AP reads, CPU 0
+ * reads again: the AP's reading was taken somewhere inside that bracket,
+ * so its offset from CPU 0 lies within +-(width/2) of the midpoint. Run
+ * many times; the narrowest bracket gives both the best estimate and the
+ * bound on how wrong it can be.
+ *
+ * Which is why the bound is the *narrowest half-width* and not the worst
+ * offset seen: after the correction is applied, what is left is the
+ * uncertainty of the estimate, not the offset it removed.
+ */
+
+#define OFFSET_ROUNDS 1000u
+
+struct offmeas {
+    volatile unsigned turn;      /* 0: CPU 0's, 1: the AP's, 2: the AP is done */
+    volatile uint64_t tb;
+    volatile bool ready, stop, stalled;
+    volatile unsigned bcpu;
+    int64_t offset_ns;           /* the AP's clock minus CPU 0's, best estimate */
+    uint64_t halfwidth_ns;       /* how wrong that estimate can be */
+    unsigned rounds;
+};
+
+static void offmeas_ap(void *arg)
+{
+    struct offmeas *m = arg;
+    m->bcpu = arch_cpu_id();
+    __atomic_store_n(&m->ready, true, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&m->stop, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&m->turn, __ATOMIC_ACQUIRE) == 1) {
+            m->tb = clock_raw_ns();
+            __atomic_store_n(&m->turn, 2u, __ATOMIC_RELEASE);
+        }
+        arch_cpu_relax();
+    }
+}
+
+static void offmeas_bsp(void *arg)
+{
+    struct offmeas *m = arg;
+    uint64_t spin0 = clock_raw_ns();
+    while (!__atomic_load_n(&m->ready, __ATOMIC_ACQUIRE)) {
+        if (clock_raw_ns() - spin0 > NS_PER_SEC) {
+            m->stalled = true;
+            return;
+        }
+        arch_cpu_relax();
+    }
+
+    uint64_t best = UINT64_MAX;
+    for (unsigned r = 0; r < OFFSET_ROUNDS; r++) {
+        uint64_t t0 = clock_raw_ns();
+        __atomic_store_n(&m->turn, 1u, __ATOMIC_RELEASE);
+        spin0 = t0;
+        while (__atomic_load_n(&m->turn, __ATOMIC_ACQUIRE) != 2) {
+            if (clock_raw_ns() - spin0 > NS_PER_SEC) {
+                m->stalled = true;
+                return;
+            }
+            arch_cpu_relax();
+        }
+        uint64_t t1 = clock_raw_ns();
+        uint64_t tb = m->tb;
+
+        uint64_t width = t1 - t0;
+        if (width < best) {
+            best = width;
+            /* midpoint of the bracket, and how far the AP's reading sits
+             * from it -- signed, because an AP may run either way. */
+            uint64_t mid = t0 + width / 2;
+            m->offset_ns = (int64_t)(tb - mid);
+            m->halfwidth_ns = width / 2;
+        }
+        m->rounds++;
+        __atomic_store_n(&m->turn, 0u, __ATOMIC_RELEASE);
+    }
+}
+
+uint64_t clock_resolution_ns(void)
+{
+    uint64_t hz = g_clock_hz;
+    if (hz == 0)
+        return 1;
+    uint64_t r = (NS_PER_SEC + hz - 1) / hz;
+    return r ? r : 1;
+}
+
+bool clock_offsets_measured(void)
+{
+    return g_measured != 0;
+}
+
+uint64_t clock_measured_bound_ns(void)
+{
+    return __atomic_load_n(&g_measured_bound_ns, __ATOMIC_ACQUIRE);
+}
+
+void clock_measure_offsets(void)
+{
+    if (!arch_clock_is_percpu()) {
+        /* One counter for the whole system: there is nothing to measure,
+         * and a measured correction could only add error. */
+        kinfo("timer: %s is one counter for the whole system; no per-CPU offset to measure", arch_clock_name());
+        return;
+    }
+    if (cpu_count() < 2)
+        return;
+
+    /*
+     * The floor on any bound this can produce: one tick of the counter.
+     *
+     * The first run of this code reported an uncertainty of +-0 ns,
+     * which is not a measurement -- it means the narrowest bracket had
+     * width 0, the counter not having advanced across a cross-CPU
+     * handshake that certainly took real time. (TCG runs a vCPU in long
+     * translated blocks, so a whole exchange can land between two
+     * counter values.) An offset cannot be known more precisely than the
+     * counter can express, whatever the brackets say, and a bound of
+     * zero is a promise no measurement can make.
+     */
+    uint64_t resolution_ns = clock_resolution_ns();
+
+    int64_t worst_offset = 0;
+    uint64_t worst_halfwidth = resolution_ns;
+    unsigned measured = 0, wanted = 0, failed = 0;
+
+    for (unsigned c = 1; c < cpu_count(); c++) {
+        if (!cpu_online(c))
+            continue;
+        wanted++;
+        struct offmeas *m = kzalloc(sizeof(*m));
+        if (m == NULL) {
+            kwarn("timer: out of memory measuring CPU %u's offset", c);
+            failed++;
+            break;
+        }
+        struct thread *ap = thread_create_on(offmeas_ap, m, "clk-off-ap", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
+        struct thread *bsp = NULL;
+        if (ap != NULL)
+            bsp = thread_create_on(offmeas_bsp, m, "clk-off-bsp", SCHED_PRIO_DEFAULT, CPUMASK_OF(0));
+        if (ap == NULL || bsp == NULL) {
+            __atomic_store_n(&m->stop, true, __ATOMIC_RELEASE);
+            if (ap)
+                thread_join(ap);
+            kfree(m);
+            failed++;
+            kwarn("timer: cannot measure CPU %u's offset: no thread", c);
+            continue;
+        }
+        thread_join(bsp);
+        __atomic_store_n(&m->stop, true, __ATOMIC_RELEASE);
+        thread_join(ap);
+
+        if (m->stalled || m->bcpu != c || m->rounds == 0) {
+            kwarn("timer: CPU %u's offset could not be measured (%u rounds%s)", c, m->rounds,
+                  m->stalled ? ", stalled" : "");
+            kfree(m);
+            failed++;
+            continue;
+        }
+        g_cpu_offset_ns[c] = -m->offset_ns;   /* the addend that cancels it */
+        int64_t mag = m->offset_ns < 0 ? -m->offset_ns : m->offset_ns;
+        if (mag > worst_offset)
+            worst_offset = mag;
+        if (m->halfwidth_ns > worst_halfwidth)
+            worst_halfwidth = m->halfwidth_ns;
+        measured++;
+        g_measured++;
+        kdebug("timer: CPU %u offset %lld ns, narrowest bracket %llu ns, over %u exchanges", c,
+               (long long)m->offset_ns, (unsigned long long)m->halfwidth_ns * 2, m->rounds);
+        kfree(m);
+    }
+
+    if (measured == 0)
+        return;
+    __atomic_store_n(&g_measured_bound_ns, worst_halfwidth, __ATOMIC_RELEASE);
+
+    /*
+     * Reported whether or not it is applied. On a machine whose counter
+     * is not a clock (no invariant TSC) the correction must not be used
+     * -- the offset it measured will not stay put -- but the number is
+     * still the most informative line this boot can print about its own
+     * timekeeping, and nobody has ever printed it.
+     */
+    kinfo("timer: measured %u CPU offset%s against CPU 0 over %u exchanges each: worst %lld ns, uncertainty +-%llu ns (counter resolution %llu ns)",
+          measured, measured == 1 ? "" : "s", OFFSET_ROUNDS, (long long)worst_offset,
+          (unsigned long long)worst_halfwidth, (unsigned long long)resolution_ns);
+
+    /*
+     * All of them, or none.
+     *
+     * `clock_worst_offset_ns()` says two readings taken on *any* two
+     * CPUs differ by at most that much. A CPU whose measurement failed
+     * keeps a zero correction and contributed nothing to the bound, so
+     * publishing a finite bound while one is missing states something
+     * about that CPU which nothing established. One failure and the
+     * machine keeps its raw counter and says so -- the same answer as a
+     * counter that is not a clock, for the same reason: no claim is
+     * better than one that is not backed.
+     */
+    if (failed != 0 || measured != wanted) {
+        memset(g_cpu_offset_ns, 0, sizeof(g_cpu_offset_ns));
+        __atomic_store_n(&g_worst_offset_ns, CLOCK_OFFSET_UNBOUNDED, __ATOMIC_RELEASE);
+        g_clock_common = false;
+        kwarn("timer: measured %u of %u CPU offsets; not applying a correction and advertising no bound",
+              measured, wanted);
+        return;
+    }
+
+    if (!g_clock_common) {
+        memset(g_cpu_offset_ns, 0, sizeof(g_cpu_offset_ns));
+        kwarn("timer: not applying the correction: %s is not a clock this kernel may trust across CPUs",
+              arch_clock_name());
+        return;
+    }
+    __atomic_store_n(&g_apply_offset, true, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_worst_offset_ns, worst_halfwidth, __ATOMIC_RELEASE);
+    kinfo("timer: correction applied; two CPUs' readings now differ by at most %llu ns",
+          (unsigned long long)worst_halfwidth);
 }
 
 uint64_t timer_ticks(void)
@@ -311,6 +807,9 @@ unsigned timer_pending_count(void)
 /* Module ABI v1 exports (docs/kernel/module/api.md). */
 #include <kernel/module.h>
 EXPORT_SYMBOL(clock_now_ns);
+EXPORT_SYMBOL(clock_since_ns);
+EXPORT_SYMBOL(clock_deadline_ns);
+EXPORT_SYMBOL(clock_deadline_passed);
 EXPORT_SYMBOL(timer_setup);
 EXPORT_SYMBOL(timer_start);
 EXPORT_SYMBOL(timer_cancel);

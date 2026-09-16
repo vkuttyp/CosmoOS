@@ -51,14 +51,14 @@ static struct vcon *g_vcon;   /* the console sink is a singleton */
  * Lock held. */
 static bool vcon_drain(struct vcon *c)
 {
-    uint64_t deadline = clock_now_ns() + VCON_SPIN_NS;
+    uint64_t deadline = clock_deadline_ns(VCON_SPIN_NS);
     while (c->outstanding > 0) {
         uint32_t used;
         if (virtq_pop(c->tx, &used) != NULL) {
             c->outstanding--;
             continue;
         }
-        if (clock_now_ns() > deadline)
+        if (clock_deadline_passed(deadline))
             return false;
     }
     return true;

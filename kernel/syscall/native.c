@@ -188,11 +188,13 @@ static int64_t sys_futex_wait(struct syscall_args *a)
 {
     if (!user_range_ok(a->a[0], 4))
         return -EFAULT;
-    /* The timer's deadline is clock_now_ns() + this, so a duration near
-     * the top of the range would wrap into the past and expire at once --
-     * the opposite of what the caller asked for. Anything past INT64_MAX
-     * (292 years) is refused rather than silently truncated; 0 is still
-     * "no timeout". */
+    /* The timer's deadline used to be a bare clock_now_ns() + this, so a
+     * duration near the top of the range wrapped into the past and
+     * expired at once -- the opposite of what the caller asked for. It
+     * saturates now (clock_deadline_ns), and this check stays anyway: a
+     * syscall should refuse an impossible duration rather than silently
+     * turn it into "never". Anything past INT64_MAX (292 years) is
+     * -EINVAL; 0 is still "no timeout". */
     if (a->a[2] > (uint64_t)INT64_MAX)
         return -EINVAL;
     return futex_wait(process_current()->space, a->a[0], (uint32_t)a->a[1], a->a[2]);

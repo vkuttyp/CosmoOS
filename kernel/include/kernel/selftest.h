@@ -103,6 +103,16 @@ bool selftest_fault_blk(const char **reason);
 bool selftest_blk_queue(const char **reason);   /* kernel/block/blktest.c: the pending queue and bio flags */
 bool selftest_blk_segments(const char **reason); /* multi-segment bios (milestone 9) */
 bool selftest_blk_timeout(const char **reason);  /* a stalled request times out */
+bool selftest_blk_timeout_skew(const char **reason);  /* a stamp from a CPU reading ahead does not */
+bool selftest_clock_since_saturates(const char **reason);  /* clock_since_ns of a future stamp is 0 */
+bool selftest_clock_cross_cpu(const char **reason);  /* a reading on B lands inside A's bracket */
+bool selftest_clock_scope_aarch64(const char **reason);  /* ... and exactly so, on a shared counter */
+bool selftest_clock_skew_detected(const char **reason);  /* injected skew makes that oracle reject */
+bool selftest_clock_invariant_gate(const char **reason);  /* a counter that is not common promises nothing */
+bool selftest_clock_offset_bound(const char **reason);  /* no bound finer than the counter's resolution */
+bool selftest_lockup_report_skew(const char **reason);  /* the lockup report ages a future stamp at 0 */
+bool selftest_clock_cost(const char **reason);  /* what the correction costs on the clock path */
+bool selftest_clock_tick_owner(const char **reason);  /* the machine-wide tick survives its owner stopping */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */

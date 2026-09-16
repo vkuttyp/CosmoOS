@@ -119,6 +119,24 @@ uint64_t arch_clock_hz(void)
     return g_hz;
 }
 
+/*
+ * `cntpct_el0` is the system counter: the architecture requires one
+ * counter for the whole system, not one per PE (Arm ARM D11.1.2), so
+ * readings from two PEs are comparable by construction. The
+ * clock-scope-aarch64 selftest is what keeps this a measurement rather
+ * than a quotation.
+ */
+bool arch_clock_is_percpu(void)
+{
+    return false;   /* one system counter, not one per PE */
+}
+
+bool arch_clock_is_common(const char **why)
+{
+    (void)why;
+    return true;
+}
+
 const char *arch_clock_name(void)
 {
     return "arch-timer";

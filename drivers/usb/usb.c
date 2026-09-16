@@ -170,8 +170,8 @@ static int usb_sync_msg(struct usb_request *r, uint64_t timeout_ns)
     int rc = usb_submit(r);
     if (rc)
         return rc;
-    uint64_t deadline = clock_now_ns() + (timeout_ns ? timeout_ns : USB_TIMEOUT_NS);
-    while (!completion_done(&s.done) && clock_now_ns() < deadline)
+    uint64_t deadline = clock_deadline_ns((timeout_ns ? timeout_ns : USB_TIMEOUT_NS));
+    while (!completion_done(&s.done) && !clock_deadline_passed(deadline))
         thread_sleep_ns(250000);
     if (!completion_done(&s.done)) {
         if (usb_cancel(r, -ETIMEDOUT) == 0)

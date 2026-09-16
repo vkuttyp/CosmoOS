@@ -263,8 +263,8 @@ void thread_dump_all(void)
         /* run_time_ns is charged at switch-out: the running thread's
          * current stretch is added here so the figure is live. */
         uint64_t run = t->run_time_ns;
-        if (t->state == THREAD_RUNNING && now > t->last_start_ns)
-            run += now - t->last_start_ns;
+        if (t->state == THREAD_RUNNING)
+            run += clock_delta_ns(now, t->last_start_ns);
         kprintf("%4u %-20s %-8s %3d %3d %10llu %8llu %s\n", t->tid, t->name, states[t->state], t->priority,
                 t->cpu, (unsigned long long)(run / 1000000), (unsigned long long)t->switches,
                 t->waiting_on ? (t->waiting_on->lock.name ? t->waiting_on->lock.name : "?") : "-");

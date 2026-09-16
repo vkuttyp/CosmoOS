@@ -893,6 +893,19 @@ static void releaser_main(void *arg)
  * The assertion is an order of two events, not a timing: the submitter
  * stamps the moment before it lowers `submitting`, blk_unregister stamps
  * the moment it returns, and the second must be after the first.
+ *
+ * Which property that rests on is worth naming, because it changed. The
+ * two events happen on different CPUs -- the submitter is pinned away
+ * from the unregister deliberately -- and the stamps used to be two
+ * `clock_now_ns()` readings. Comparing two CPUs' readings is precisely
+ * what this kernel stopped promising when it began reading the
+ * invariant-TSC bit: on x86-64 under QEMU `clock_is_common()` is false,
+ * so the assertion rested on a guarantee the kernel declines to give and
+ * passed only because the emulator's counters agree. The stamps are
+ * positions in an atomic sequence now
+ * (`blk_test_drain_ordered`), which orders the two events on any machine
+ * and depends on no clock at all
+ * (docs/audit/next-subsystem-cpu-clock.md, step 5).
  */
 bool selftest_blk_unregister_drain(const char **reason)
 {
@@ -1423,7 +1436,7 @@ static bool disk_timeout_common(const char *name, enum fi_kind kind, const char 
         faultinject_set(kind, 1, 1, NULL);   /* the next CSW, once */
         uint64_t t0 = clock_now_ns();
         int rc = blk_read(bd, 0, 8, buf);
-        uint64_t dt = clock_now_ns() - t0;
+        uint64_t dt = clock_since_ns(t0);
         total_dt += dt;
         faultinject_clear(kind);
         if (rc != -ETIMEDOUT)
@@ -1683,7 +1696,7 @@ static void blk_bench_one(struct blkdev *bd, bool write, uint32_t bio_bytes, uin
             break;
         reqs++;
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     if (dt == 0)
         dt = 1;
     uint64_t bytes = (uint64_t)reqs * n * bd->sector_size;
@@ -1748,7 +1761,7 @@ static void blk_bench_concurrent(struct blkdev *bd)
         }
         kfree(w[i].buf);
     }
-    uint64_t dt = clock_now_ns() - t0;
+    uint64_t dt = clock_since_ns(t0);
     if (dt == 0)
         dt = 1;
     kinfo("selftest: blk-bench: %s: %u threads reading 4 KiB bios at once: %u requests in %llu ms = %llu req/s%s",

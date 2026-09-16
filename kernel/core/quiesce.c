@@ -89,7 +89,7 @@ static unsigned sync_quiesce_counting(void)
         if (pending == 0)
             break;
 
-        uint64_t waited = clock_now_ns() - start;
+        uint64_t waited = clock_since_ns(start);
         if (waited > 2 * TICK_NS && kicks < 8) {
             /*
              * An extra interrupt gives this CPU's return path another
@@ -133,7 +133,7 @@ static unsigned sync_quiesce_counting(void)
         thread_sleep_ns(TICK_NS / 2);
     }
 
-    uint64_t waited = clock_now_ns() - start;
+    uint64_t waited = clock_since_ns(start);
     g_stats.synchronizes++;
     if (waited > g_stats.max_wait_ns)
         g_stats.max_wait_ns = waited;

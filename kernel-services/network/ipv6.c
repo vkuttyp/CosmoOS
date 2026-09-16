@@ -273,11 +273,11 @@ void nd_age(uint64_t now)
         if (e->state == ND_FREE)
             continue;
         if (e->state == ND_REACHABLE) {
-            if (now - e->updated_ns > ND_REACHABLE_NS)
+            if (clock_delta_ns(now, e->updated_ns) > ND_REACHABLE_NS)
                 memset(e, 0, sizeof(*e));
             continue;
         }
-        if (now - e->updated_ns < ND_RETRY_NS)
+        if (clock_delta_ns(now, e->updated_ns) < ND_RETRY_NS)
             continue;
         if (e->tries >= ND_MAX_TRIES) {
             m_freem(e->pending);
