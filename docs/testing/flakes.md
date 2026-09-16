@@ -180,6 +180,14 @@ is not added to the list above, because a host-dependent exchange is not
 a bound this project can widen -- a re-run is what distinguishes it from
 a regression.
 
+**Seen a third time, on a tree with no code in it.** On 2026-09-16 the
+aarch64 CI job of a **documentation-only** pull request failed the same
+assertion, on a branch whose only commit adds one Markdown file to a
+`main` that had just passed CI green on both architectures several times
+over. There is no code difference to blame, which makes this the
+cleanest control the flake has: the same binary, a different result.
+Whatever `net-harness` depends on, it is not in this repository.
+
 **A warning about reading the re-run, which cost an hour here.** A run
 failing twice is not the same as a *test* failing twice. The second run
 above failed at a different step entirely, and net-harness passed in it;

@@ -7,9 +7,10 @@ clock). Chosen from `docs/audit/2026-09-deferred-work-inventory.md`
 **Subsystem: thread migration and load balancing — moving a runnable
 thread from one CPU to another, and deciding when to.**
 
-This report closes the inventory's §2.3 row that reads "no load
+This report **takes up** the inventory's §2.3 row that reads "no load
 balancing and no migration (a thread stays on the CPU chosen at
-creation; confirmed 2026-09-14)".
+creation; confirmed 2026-09-14)". The row stays open until the
+implementation lands; step 7 of the plan is what strikes it.
 
 ## Problem
 
@@ -174,7 +175,7 @@ lets a CPU decline to participate simply by not asking.
 | --- | --- | --- |
 | `THREAD_READY`, in a runqueue | **yes** | it is a queue entry and a saved context; nothing else refers to its CPU |
 | `THREAD_RUNNING` | **no** | it is executing on that CPU's stack with that CPU's state. Moving it is a context switch that CPU must perform itself |
-| `THREAD_BLOCKED` | **no**, and it does not matter | it is not in a runqueue; `sched_wake` will place it, and that is where the creation-time rule applies again |
+| `THREAD_BLOCKED` | **no**, and it does not need to | it is not in a runqueue at all; `sched_wake` puts it back on its existing `t->cpu` (`sched.c:314`) and this unit does not change that. Re-picking a CPU at wakeup is a real option and a natural follow-up — see Alternatives — but it is not what the balancer does |
 | affinity excludes the target | **no** | `thread_create_on`'s guarantee is the whole point of the call |
 
 So the balancer moves **ready threads only**, which is the case with no
@@ -255,9 +256,11 @@ worse than none, so:
 void sched_balance(void);
 
 #if CONFIG_DEBUG
-/* How many threads this CPU has pulled, and from where, so a test can
- * assert that a migration happened rather than infer it from placement
- * that might have come from creation. */
+/* How many threads this CPU has pulled: a diagnostic and a benchmark
+ * number, deliberately *not* what the tests assert on. A count says
+ * something moved, not that the threads under test moved, and the suite
+ * has other threads in it -- sched-balance-pull records each worker's
+ * t->cpu instead and checks that one of those changed. */
 uint64_t sched_test_migrations(unsigned cpu);
 void sched_test_set_balancing(bool on);
 #endif
@@ -301,19 +304,32 @@ that passes `make test` and fails something else.
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
 | `sched-spread-at-create` | with every queue equal, N successive `thread_create` calls land on N different CPUs rather than all on CPU 0 | restore the `<` tie-break: every thread goes to CPU 0 and the test names the count it saw there |
-| `sched-balance-pull` | N unpinned spinning threads created **while CPU 0 is already loaded** — so creation cannot spread them — end up spread, and `sched_test_migrations` shows the moves that did it | `sched_test_set_balancing(false)`: they stay where they were created, and the test reports the imbalance and zero migrations |
+| `sched-balance-pull` | the imbalance is created **after** placement, so only a migration can fix it: M unpinned spinners are created first and land wherever `pick_cpu` puts them, **each one's `t->cpu` is recorded**, and only then are K spinners pinned to CPU 0 with `thread_create_on`. CPU 0 now carries its share plus K. The assertion is per-thread: at least one recorded worker's `t->cpu` differs afterwards | `sched_test_set_balancing(false)`: no worker's `t->cpu` ever changes, and the test prints the recorded and final placement side by side |
 | `sched-migration-happens` | a thread's `t->cpu` observably changes while it is alive — the bare fact the clock unit assumed and this kernel did not have | the same disable: `t->cpu` never changes, which is the tree as of f295e42 |
 | `sched-affinity-survives-balance` | a thread pinned with `thread_create_on` is never moved off its mask, however lopsided the load | make the balancer skip the affinity check: it moves, and the test names the thread, its mask and the CPU it landed on |
 | `sched-running-not-stolen` | the thread currently running on a CPU is never taken by a balancer on another; only `THREAD_READY` moves | let `pick_migratable` return `rq->current`: the victim CPU's switch path finds its current thread on another queue, which the test detects as a state mismatch before it can corrupt anything |
 | `sched-balance-hysteresis` | a difference of one runnable thread does not move anything, across many periods | drop the hysteresis to `> 0`: threads ping-pong, and the test counts migrations that should not have happened |
 | `smp-parallel`, `smp-pinned` (existing) | unchanged | — |
 
-**Vacuity, named in advance.** `sched-balance-pull` is the one at risk:
-if creation already spread the threads, the test proves nothing about
-balancing. That is why it loads CPU 0 *first* and creates the workers
-from there — so creation-time placement cannot produce the spread, and
-only a migration can. The test asserts the migration counter moved, not
-just the final placement, for the same reason.
+**Vacuity, named in advance — and the first version of this paragraph
+was wrong.** `sched-balance-pull` is the test at risk: if creation-time
+placement produced the spread, it proves nothing about balancing. The
+first draft tried to prevent that by loading CPU 0 before creating the
+workers. That does not work, and review caught it: `pick_cpu` picks the
+*least* loaded CPU, so a busy CPU 0 makes it place every worker
+elsewhere, and the spread the test measured would have been creation's
+doing entirely.
+
+The order is inverted instead. The workers are created first, onto
+whatever CPUs `pick_cpu` chooses, and **each one's `t->cpu` is recorded
+at that moment**. The imbalance is manufactured *afterwards*, by pinning
+K spinners to CPU 0 — legitimate load that only that CPU can carry. Any
+later change to a recorded `t->cpu` therefore happened after placement,
+which is migration by definition.
+
+For the same reason the assertion is per-thread rather than a global
+counter: a count says something moved, not that *these* threads moved,
+and the suite has other threads in it.
 
 ## Benchmarks
 
