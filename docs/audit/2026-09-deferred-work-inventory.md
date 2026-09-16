@@ -119,7 +119,12 @@ AHCI are the two entries from that list now built.
 - only `policy_rr.c` exists; CFS-like fairness, real-time, deadline,
   interactive scheduling and CPU isolation are future policies.
 - no load balancing and no migration (a thread stays on the CPU chosen
-  at creation; confirmed 2026-09-14).
+  at creation; confirmed 2026-09-14). **Taken up by
+  `docs/audit/next-subsystem-thread-migration.md`**, which measures the
+  consequence — 8 of 14 threads on CPU 0, and 94% of context switches
+  there — and records that `pick_cpu`'s tie-break prefers the
+  lowest-numbered CPU, so every thread created on an idle machine goes
+  to CPU 0.
 - no priority inheritance in `mutex.c`.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
