@@ -680,6 +680,20 @@ should: five orphan tests at `r.clean`, and **`cosmofs-replay` at prefix
 workload is not vacuous -- it catches the defect, in a prefix, for the
 stated reason.
 
+**CI caught what the local matrix did not.**
+`tests/host/test_cosmofs.c` pins the format version -- `CFS_VERSION == 9
+&& CFS_VERSION_MIN == 2` -- and the bump to 10 broke it on both
+architectures while every boot test here was green. The local runs
+missed it because `make host-test` already fails on this developer's
+arm64 host at `test_hv.c:75`, the inventory's standing row about
+`struct cosmo_vcpu_regs`, so the whole target had been written off as
+"fails here anyway" instead of read. **A check that is known to fail is
+exactly where a new failure hides.** The assertion is updated, and
+version 10's layout now gets what version 9's has -- `orphan_root` one
+word along from `free_root`, three reserved words left,
+`CFS_KIND_ORPHAN` 14 -- so the next version bump fails here too if it
+forgets.
+
 **Benchmarks.** The ordinary unlink's cost is unchanged and
 `cosmofs-orphan-cancels` is the measurement: with the writeback thread
 off, `orphan_root` is 0 after the commit, so no record was written and
