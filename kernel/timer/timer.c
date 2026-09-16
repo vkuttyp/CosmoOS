@@ -41,6 +41,9 @@ static unsigned g_measured;   /* CPUs whose offset was actually measured */
  * result, this is still the number that was computed, and the only way
  * to check the computation on such a machine. */
 static uint64_t g_measured_bound_ns;
+/* The highest tick any CPU has reached: the one monotonic quantity two
+ * CPUs can compare without trusting their counters. See deadline_now_ns. */
+static uint64_t g_global_ticks;
 /* Set once, after every CPU is online and the measurement has run: see
  * clock_now_ns for why this gates a per-CPU access rather than an add. */
 static bool g_apply_offset;
@@ -123,16 +126,49 @@ uint64_t clock_since_ns(uint64_t stamp)
     return clock_delta_ns(clock_now_ns(), stamp);
 }
 
+/*
+ * The time a deadline is measured against, which is not always the
+ * clock.
+ *
+ * When `clock_is_common()` this is the corrected clock: exact, and wrong
+ * by at most the advertised bound however the thread migrates. When it
+ * is not -- an x86-64 without an invariant TSC, where the offset between
+ * two CPUs is unbounded and may grow -- a deadline taken on one CPU and
+ * tested on another is meaningless, and no amount of saturating
+ * arithmetic repairs it. There the machine-wide tick is used instead:
+ * one memory location, advanced by whichever CPU takes the tick, so
+ * construction and comparison read the *same* quantity no matter where
+ * each one runs.
+ *
+ * The cost is resolution: CONFIG_HZ 250 makes a tick 4 ms, against a
+ * shortest deadline budget in this tree of 200 ms. Waits shorter than
+ * that do not come here -- `ndelay` and the lockup sampler spin on the
+ * raw clock and say why.
+ *
+ * Before the first tick (early boot, one CPU, no scheduler) the counter
+ * is zero and the clock is the only thing there is; a single CPU cannot
+ * disagree with itself, so using it is exact rather than a compromise.
+ */
+static uint64_t deadline_now_ns(void)
+{
+    if (clock_is_common())
+        return clock_now_ns();
+    uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    if (ticks == 0)
+        return clock_now_ns();
+    return ticks * TICK_NS;
+}
+
 uint64_t clock_deadline_ns(uint64_t budget_ns)
 {
-    uint64_t now = clock_now_ns();
+    uint64_t now = deadline_now_ns();
     uint64_t at = now + budget_ns;
     return at < now ? UINT64_MAX : at;   /* a budget so large it wraps never expires */
 }
 
 bool clock_deadline_passed(uint64_t deadline)
 {
-    return clock_now_ns() >= deadline;
+    return deadline_now_ns() >= deadline;
 }
 
 uint64_t clock_worst_offset_ns(void)
@@ -199,8 +235,15 @@ const char *clock_name(void)
 
 void ndelay(uint64_t ns)
 {
-    uint64_t end = clock_deadline_ns(ns);
-    while (!clock_deadline_passed(end))
+    /*
+     * The raw clock, not `clock_deadline_ns`: this is a busy-wait of
+     * nanoseconds to microseconds on one CPU, far below the 4 ms tick
+     * the deadline helpers fall back to when the clock is not common,
+     * and it does not sleep, so the thread it runs on is the thread that
+     * finishes it.
+     */
+    uint64_t end = clock_now_ns() + ns;
+    while (clock_now_ns() < end)
         arch_cpu_relax();
 }
 
@@ -246,7 +289,22 @@ void timer_start(struct timer *t, uint64_t delay_ns)
      * run_expired captured for the current pass; a callback re-arming
      * with 0 would then be popped again inside the same pass, forever.
      * One nanosecond puts every re-arm into a later pass. */
-    t->expires_ns = clock_deadline_ns((delay_ns == 0 ? 1 : delay_ns));
+    /*
+     * `clock_now_ns`, not `clock_deadline_ns`, and the difference is not
+     * cosmetic: these are different *domains*. A timer's expiry is
+     * compared in the tick against `clock_now_ns()` (timers_run), so
+     * arming it in the deadline domain -- the machine-wide tick count,
+     * when the counter is not common -- makes every timer fire at once.
+     * It did: `preempt`, `sleep` and `completion` all returned in a few
+     * milliseconds instead of tens.
+     *
+     * The queue is per-CPU and is armed and fired on the same CPU, so
+     * the raw clock is the right domain here. The saturation is kept by
+     * hand: a budget large enough to wrap must still not expire at once.
+     */
+    uint64_t start = clock_now_ns();
+    uint64_t delay = delay_ns == 0 ? 1 : delay_ns;
+    t->expires_ns = start + delay < start ? UINT64_MAX : start + delay;
     t->cpu = arch_cpu_id();
     t->state = TIMER_PENDING;
 
@@ -369,6 +427,17 @@ static void tick_isr(unsigned vector, struct arch_trap_frame *frame, void *arg)
 
     struct percpu *pc = this_cpu();
     pc->ticks++;
+    /* The machine-wide tick: the highest any CPU has reached. Every CPU
+     * ticks at CONFIG_HZ, so this advances at CONFIG_HZ as long as *any*
+     * CPU is taking interrupts, and it is one memory location rather
+     * than a per-CPU counter -- which is the whole point, because it is
+     * the only monotonic quantity in this kernel that two CPUs can
+     * compare without trusting their counters to agree. */
+    uint64_t seen = __atomic_load_n(&g_global_ticks, __ATOMIC_RELAXED);
+    while (pc->ticks > seen &&
+           !__atomic_compare_exchange_n(&g_global_ticks, &seen, pc->ticks, true,
+                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+        ;
 
     uint64_t now = clock_now_ns();
     /* The tick sample (kernel/core/lockup.c): what this CPU was doing,

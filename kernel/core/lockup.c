@@ -113,7 +113,15 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
     record(&this_cpu()->sample, self, seq, false);
 
     /* One wait for every target together: the bound is total. */
-    uint64_t deadline = clock_deadline_ns(timeout_ns);
+    /* The raw clock: this window is LOCKUP_SAMPLE_TIMEOUT_NS (5 ms),
+     * barely above the 4 ms tick that clock_deadline_ns falls back to on
+     * a machine whose counter is not common -- a deadline that coarse
+     * would fire a tick early and report a CPU as unresponsive that had
+     * simply not been asked yet. The sample runs in a controlled window
+     * on one CPU; a diagnostic that is occasionally wrong about a
+     * nanosecond is better than one that is regularly wrong about a
+     * CPU. */
+    uint64_t deadline = clock_now_ns() + timeout_ns;
     cpumask_t got = 0;
     for (;;) {
         for (unsigned c = 0; c < cpu_count(); c++) {
@@ -121,7 +129,7 @@ bool lockup_sample_all(const struct arch_trap_frame *self, uint64_t timeout_ns, 
                 __atomic_load_n(&percpu_get(c)->sample.seq, __ATOMIC_ACQUIRE) == seq)
                 got |= CPUMASK_OF(c);
         }
-        if (got == targets || clock_deadline_passed(deadline))
+        if (got == targets || clock_now_ns() >= deadline)
             break;
         arch_cpu_relax();
     }
@@ -143,9 +151,17 @@ bool lockup_sample_cpu(unsigned cpu, uint64_t timeout_ns, struct cpu_sample *out
     __atomic_store_n(&pc->sample.want, seq, __ATOMIC_RELEASE);
     if (!arch_ipi_send_nmi(cpu))
         ipi_send(cpu, IPI_SAMPLE);
-    uint64_t deadline = clock_deadline_ns(timeout_ns);
+    /* The raw clock: this window is LOCKUP_SAMPLE_TIMEOUT_NS (5 ms),
+     * barely above the 4 ms tick that clock_deadline_ns falls back to on
+     * a machine whose counter is not common -- a deadline that coarse
+     * would fire a tick early and report a CPU as unresponsive that had
+     * simply not been asked yet. The sample runs in a controlled window
+     * on one CPU; a diagnostic that is occasionally wrong about a
+     * nanosecond is better than one that is regularly wrong about a
+     * CPU. */
+    uint64_t deadline = clock_now_ns() + timeout_ns;
     bool got = false;
-    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && !clock_deadline_passed(deadline))
+    while (!(got = __atomic_load_n(&pc->sample.seq, __ATOMIC_ACQUIRE) == seq) && clock_now_ns() < deadline)
         arch_cpu_relax();
     if (got)
         *out = pc->sample;

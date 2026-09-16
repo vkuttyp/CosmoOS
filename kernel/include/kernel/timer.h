@@ -150,6 +150,14 @@ bool clock_is_common(void);
  * A deadline `budget_ns` from now, saturating at UINT64_MAX rather than
  * wrapping, and the test for it. Prefer these to `clock_now_ns() + x`
  * and a bare `<`.
+ *
+ * **These two are a domain of their own.** What they return is not a
+ * `clock_now_ns()` reading and must never be compared against one: on a
+ * machine whose counter is not common it is a machine-wide tick count
+ * scaled to nanoseconds, a much smaller number. Build a deadline with
+ * `clock_deadline_ns` and test it with `clock_deadline_passed`, always
+ * both or neither. Mixing them is what made every timer in this kernel
+ * fire at once for one commit.
  */
 uint64_t clock_deadline_ns(uint64_t budget_ns);
 bool clock_deadline_passed(uint64_t deadline);

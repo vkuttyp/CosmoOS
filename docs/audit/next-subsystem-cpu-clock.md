@@ -418,8 +418,15 @@ which the inventory already records as never executed.
 - **`has_invariant_tsc` false on a machine that works fine today.** If
   the fallback clock is worse than the TSC that has been serving, the
   gate makes things worse. Step 3 is separate from step 4 so this can be
-  measured on its own, and the fallback is the timer the calibration
-  already trusts.
+  measured on its own. ~~and the fallback is the timer the calibration
+  already trusts.~~ **This turned out to be wrong, and it is the risk
+  that actually materialised**: there is no fallback. The calibration
+  drives PIT channel 2 as a one-shot gate, which is not a free-running
+  counter, and this tree has no HPET driver. The kernel keeps the TSC --
+  still monotonic on one CPU, which is what most callers need -- and
+  gives up the cross-CPU claim instead. QEMU's x86-64 TCG turned out to
+  be exactly such a machine, so this is the shipping configuration
+  rather than a hypothetical. See "Step 3" in the as-built.
 - **Nothing here is exercised by real skew.** See the honest limit
   above. The injection proves the arithmetic; only hardware proves the
   measurement, and this project has none.
@@ -923,13 +930,46 @@ Only the first can hang, and only that one has an age no clock can
 distort. The rest now go through `clock_deadline_ns` and
 `clock_deadline_passed`.
 
-**Those two are not a fix and the header says so.** On a machine where
-the offset is unbounded they are exactly as wrong as the arithmetic they
-replaced; claiming otherwise would be the kind of statement this unit
-exists to stop. What they buy is that the hazard has **one address
-instead of sixteen** — the day this tree grows a machine-wide counter, a
-sound deadline is two function bodies away rather than a sweep of every
-driver poll.
+**First they were only centralised, and review was right that this was
+not enough.** The hazard had one address instead of sixteen, which is
+worth something, but "the loops are migrated" was satisfied only in the
+letter. So the machine-wide counter that the previous paragraph called a
+future unit was built instead, and it is four lines: the highest tick
+any CPU has reached, advanced by whichever CPU takes the tick.
+
+```c
+static uint64_t deadline_now_ns(void)
+{
+    if (clock_is_common())
+        return clock_now_ns();
+    uint64_t ticks = __atomic_load_n(&g_global_ticks, __ATOMIC_ACQUIRE);
+    return ticks == 0 ? clock_now_ns() : ticks * TICK_NS;
+}
+```
+
+That is one memory location, so a deadline built on one CPU and tested
+on another reads the *same* quantity and migration cannot distort it.
+**This is sound where the previous version was merely tidy.**
+
+The cost is resolution, and the numbers decide whether that is
+affordable: `CONFIG_HZ` is 250, so a tick is 4 ms, against a shortest
+deadline budget in this tree of 200 ms (`VCON_SPIN_NS`). Two callers
+cannot afford it and say so where they sit — `ndelay`, a sub-microsecond
+same-CPU spin, and the lockup sampler, whose 5 ms window a 4 ms tick
+would report as an unresponsive CPU that had simply not been asked yet.
+Both stay on the raw clock with the reason written down.
+
+**And adding a second domain immediately broke the first.** `timer_start`
+had been migrated to `clock_deadline_ns` in the mechanical pass, which
+was harmless while that was just `clock_now_ns() + x`. Once it returned
+tick-domain values, timers were armed in one domain and compared in the
+tick against `clock_now_ns()` in the other — so every timer in the
+kernel fired at once, and `preempt`, `sleep` and `completion` returned in
+single-digit milliseconds instead of tens. The timer queue is per-CPU and
+is armed and fired on the same CPU, so the raw clock was always the right
+domain for it; the saturation it wanted is kept by hand. The header now
+says in as many words that these two functions are a domain of their own
+and must never be compared against a `clock_now_ns()` reading.
 
 They do fix something real today. `clock_now_ns() + budget` wraps into
 the past for a large budget and expires immediately, and the tree already
