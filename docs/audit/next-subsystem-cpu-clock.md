@@ -566,6 +566,17 @@ This is the unit finding a live dependency on the property it was
 defining, which is the best argument available that the property was
 worth defining.
 
+**And the bug-proof for it fails to fail, which is the finding.** Put
+`blk_test_drain_ordered` back on two `clock_now_ns()` readings and
+`blk-unregister-drain` still passes — 327 tests, no failure. That is not
+a weak proof, it is the point: QEMU's counters agree, so the defect
+cannot be observed on any machine this project runs, and no amount of
+running the test suite would ever have found it. It was found by writing
+down what the test assumed and checking whether the kernel promised it.
+The other two proofs in this step do fail as expected — the lockup
+report at `age == 0`, and the measured bound at "finer than the counter
+can express".
+
 #### Step 4 — the measurement runs, the correction does not
 
 Step 3's finding forced a change of shape here. If the measurement were
@@ -812,7 +823,13 @@ a bound no measurement can justify.
 | injected ±2 ms detected | 2000000 ns, both directions | 2000000 ns, both directions |
 | lockup report, 5 s skew | ages it at 0 ms | — |
 
-**Bug-proofs.** `blk-timeout-skew` with the timeout's subtraction
+**Bug-proofs.** `lockup-report-skew` with `lockup.c` back on a plain
+subtraction: fails at `age == 0`. `clock-offset-bound` with the
+resolution floor removed: fails with "a measured bound finer than the
+counter can express" — the +-0 ns defect, caught by the test written for
+it. `blk-unregister-drain` back on two cross-CPU clock readings:
+**passes**, which is the finding rather than a weak proof (see step 5).
+`blk-timeout-skew` with the timeout's subtraction
 reverted to `now - issued_ns`: fails, having logged "a stamp 5 s ahead
 timed out 1 request(s): the subtraction underflowed".
 `clock-since-saturates` with `clock_since_ns` made a plain subtraction:
