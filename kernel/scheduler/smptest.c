@@ -611,3 +611,173 @@ bool selftest_sched_spread(const char **reason)
           (unsigned)N, distinct, n, worst);
     return true;
 }
+
+/* --- balancing: a thread that moves after it was placed ------------------ */
+
+#if CONFIG_DEBUG
+
+struct spinner {
+    volatile bool stop;
+    volatile unsigned cpu;
+    struct completion started;
+};
+
+static void spinner_main(void *arg)
+{
+    struct spinner *s = arg;
+    s->started.done ? (void)0 : (void)0;
+    complete(&s->started);
+    while (!__atomic_load_n(&s->stop, __ATOMIC_ACQUIRE)) {
+        s->cpu = arch_cpu_id();
+        sched_yield();
+    }
+    thread_exit(0);
+}
+
+/*
+ * A thread moves after it was placed, and only a migration can explain it.
+ *
+ * The shape of this test is the whole of its value, and the first draft
+ * had it backwards (see the report's vacuity note). The workers are
+ * created *first*, onto whatever `pick_cpu` chooses, and **each one's
+ * `t->cpu` is recorded at that moment**. Only then is the imbalance
+ * manufactured, by pinning a crowd of spinners to one CPU -- load that
+ * CPU alone must carry. Any later change to a recorded `t->cpu`
+ * therefore happened after placement, which is migration by definition.
+ *
+ * The assertion is per-thread rather than the global pull counter for
+ * the same reason: a count says something moved, not that *these*
+ * threads moved, and the rest of the suite is running too.
+ */
+bool selftest_sched_balance_pull(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 2) {
+        kinfo("selftest: sched-balance-pull: one CPU; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    enum { W = 6, LOAD = 8 };
+    static struct spinner w[W], ld[LOAD];
+    struct thread *wt[W], *lt[LOAD];
+    int placed[W];
+
+    /* The workers, free to run anywhere, and where they landed. */
+    for (unsigned i = 0; i < W; i++) {
+        memset(&w[i], 0, sizeof(w[i]));
+        completion_init(&w[i].started, "bal-w");
+        wt[i] = thread_create(spinner_main, &w[i], "bal-worker", SCHED_PRIO_DEFAULT);
+        CHECK(wt[i] != NULL);
+        wait_for_completion(&w[i].started);
+        placed[i] = wt[i]->cpu;
+    }
+
+    /* Now make one CPU carry a crowd it cannot shed: pinned load. */
+    unsigned victim = (unsigned)placed[0];
+    for (unsigned i = 0; i < LOAD; i++) {
+        memset(&ld[i], 0, sizeof(ld[i]));
+        completion_init(&ld[i].started, "bal-l");
+        lt[i] = thread_create_on(spinner_main, &ld[i], "bal-load", SCHED_PRIO_DEFAULT, CPUMASK_OF(victim));
+        CHECK(lt[i] != NULL);
+    }
+
+    /* Several balance periods: SCHED_BALANCE_TICKS is 16 ticks (64 ms). */
+    unsigned moved = 0;
+    for (unsigned round = 0; round < 40 && moved == 0; round++) {
+        thread_sleep_ms(50);
+        for (unsigned i = 0; i < W; i++)
+            if (wt[i]->cpu != placed[i])
+                moved++;
+    }
+
+    for (unsigned i = 0; i < W; i++)
+        __atomic_store_n(&w[i].stop, true, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < LOAD; i++)
+        __atomic_store_n(&ld[i].stop, true, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < W; i++)
+        thread_join(wt[i]);
+    for (unsigned i = 0; i < LOAD; i++)
+        thread_join(lt[i]);
+
+    if (moved == 0) {
+        kerror("selftest: sched-balance-pull: %u pinned threads piled onto CPU %u and not one of the %u workers left where it was placed",
+               (unsigned)LOAD, victim, (unsigned)W);
+        *reason = "no thread migrated away from a CPU carrying an imbalance";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-balance-pull: %u pinned threads on CPU %u; %u of %u workers moved off the CPU they were placed on",
+          (unsigned)LOAD, victim, moved, (unsigned)W);
+    return true;
+}
+
+/*
+ * A pinned thread is never moved, however lopsided the load.
+ *
+ * `thread_create_on`'s guarantee is the reason the call exists, and a
+ * balancer that ignored it would break every caller that uses affinity
+ * to reach a particular CPU -- which in this tree includes the tests
+ * that check per-CPU behaviour at all.
+ */
+bool selftest_sched_affinity_survives(const char **reason)
+{
+    unsigned n = cpu_count();
+    if (n < 2) {
+        kinfo("selftest: sched-affinity-survives: one CPU; skipping");
+        return true;
+    }
+    unsigned before = thread_count();
+    enum { LOAD = 8 };
+    static struct spinner pinned, ld[LOAD];
+    struct thread *pt, *lt[LOAD];
+    unsigned home = n - 1;   /* not CPU 0: the suite's own thread lives there */
+
+    memset(&pinned, 0, sizeof(pinned));
+    completion_init(&pinned.started, "aff");
+    pt = thread_create_on(spinner_main, &pinned, "aff-pinned", SCHED_PRIO_DEFAULT, CPUMASK_OF(home));
+    CHECK(pt != NULL);
+    wait_for_completion(&pinned.started);
+    CHECK(pt->cpu == (int)home);
+
+    /* Pile load onto the same CPU so the balancer is tempted. */
+    for (unsigned i = 0; i < LOAD; i++) {
+        memset(&ld[i], 0, sizeof(ld[i]));
+        completion_init(&ld[i].started, "aff-l");
+        lt[i] = thread_create_on(spinner_main, &ld[i], "aff-load", SCHED_PRIO_DEFAULT, CPUMASK_OF(home));
+        CHECK(lt[i] != NULL);
+    }
+
+    bool strayed = false;
+    unsigned seen = home;
+    for (unsigned round = 0; round < 20 && !strayed; round++) {
+        thread_sleep_ms(50);
+        seen = (unsigned)pt->cpu;
+        if (seen != home)
+            strayed = true;
+    }
+
+    __atomic_store_n(&pinned.stop, true, __ATOMIC_RELEASE);
+    for (unsigned i = 0; i < LOAD; i++)
+        __atomic_store_n(&ld[i].stop, true, __ATOMIC_RELEASE);
+    thread_join(pt);
+    for (unsigned i = 0; i < LOAD; i++)
+        thread_join(lt[i]);
+
+    if (strayed) {
+        kerror("selftest: sched-affinity-survives: a thread pinned to CPU %u by mask 0x%llx was moved to CPU %u",
+               home, (unsigned long long)CPUMASK_OF(home), seen);
+        *reason = "the balancer moved a thread off the CPU its affinity names";
+        return false;
+    }
+    CHECK(threads_settle(before));
+    kinfo("selftest: sched-affinity-survives: a thread pinned to CPU %u stayed there under %u threads of competing load",
+          home, (unsigned)LOAD);
+    return true;
+}
+
+#else
+
+bool selftest_sched_balance_pull(const char **reason) { (void)reason; return true; }
+bool selftest_sched_affinity_survives(const char **reason) { (void)reason; return true; }
+
+#endif /* CONFIG_DEBUG */
