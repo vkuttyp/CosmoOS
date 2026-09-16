@@ -179,6 +179,18 @@ uint64_t clock_now_ns(void)
     return t += 1000;
 }
 
+/*
+ * The saturating difference the kernel uses, which cosmofs now calls
+ * (`docs/audit/next-subsystem-cpu-clock.md`). It is a real function
+ * rather than an inline, so this shim has to supply one; the kernel's
+ * version lives in kernel/timer/timer.c, which the fuzzers do not link.
+ */
+uint64_t clock_since_ns(uint64_t stamp)
+{
+    uint64_t now = clock_now_ns();
+    return now > stamp ? now - stamp : 0;
+}
+
 int pool_flush(struct spool *p)
 {
     p->flushes++;
