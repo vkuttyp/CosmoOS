@@ -463,14 +463,20 @@ others:
 
 | site | the guard it had grown | did the report know? |
 | --- | --- | --- |
-| `kernel/scheduler/sched.c` (watchdog) | `now <= last \|\| now - last < timeout`, with a comment explaining the wrap | the report knew about this one |
-| `kernel/scheduler/thread.c` (`thread_dump_all`) | `if (t->state == THREAD_RUNNING && now > t->last_start_ns)` | the report did not |
-| `kernel/core/lockup.c` | one of its three sites | the report counted two |
+| `kernel/scheduler/sched.c` (`sched_dump`) | `pc && now > pc->last_tick_ns ? (now - pc->last_tick_ns) / 1000000 : 0` | yes — this is the one it named |
+| `kernel/scheduler/sched.c` (the watchdog) | `now <= last \|\| now - last < timeout`, with a comment explaining the wrap | no |
+| `kernel/scheduler/thread.c` (`thread_dump_all`) | `if (t->state == THREAD_RUNNING && now > t->last_start_ns)` | no |
 
 Three independent reinventions of one rule is the argument for the rule
-existing, made better than the report made it. Both survivors are now
-the saturating subtraction and their guards are gone; the watchdog keeps
-its comment, rewritten to say the test is now written once for the tree.
+existing, made better than the report made it. All three are the
+saturating subtraction now and their guards are gone; the watchdog keeps
+its comment, rewritten to say the test is written once for the tree.
+
+**Separately**, and not a guard: `kernel/core/lockup.c` had three
+unguarded sites and the first pass over it *by reading* found two. That
+is the miss the report predicted when it put a grep in the plan — a
+different failure from the reinvented guards above, and the two should
+not be run together.
 
 **What the grep found that the API did not cover.** Several sites hold a
 `now` they compare *many* stamps against: the block timeout scans a
@@ -515,12 +521,18 @@ tally kept by hand:
 
 | category | count | disposition |
 | --- | --- | --- |
-| a local `t0`, with a sleep or a blocking call between the two reads | 43 | `clock_since_ns(t0)` — foreign by the rule above |
-| a stamp in shared state, read with a `now` already in hand | 15 | `clock_delta_ns(now, stamp)` |
+| a local `t0`, with a sleep or a blocking call between the two reads | 42 | `clock_since_ns(t0)` — foreign by the rule above |
+| a stamp in shared state, read with a fresh clock read | 1 | `clock_since_ns(stamp)` (cosmofs's writeback interval) |
+| a stamp in shared state, read with a `now` already in hand | 19 | `clock_delta_ns(now, stamp)` |
 | userland, the same shape through the `SYS_clock_ns` syscall | 4 | new `cosmo_clock_since_ns` in `libc/include/cosmo/syscall.h` |
 | genuinely local | 1 | left a plain subtraction, with a comment saying why |
 | not an elapsed time at all | 4 | left alone |
 | the host's own clock | 2 | out of scope |
+
+66 sites changed in all. The counts come from the diff against `main`
+(`git diff main | grep '^-'` over the two subtraction shapes), not from a
+tally kept while editing — an earlier draft of this table said 43 and 15,
+having counted what one script reported rather than what landed.
 
 The one genuinely local site is `kernel/timer/timer.c`'s tick cost: both
 reads are this CPU's, inside one tick, with interrupts disabled between
