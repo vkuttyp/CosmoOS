@@ -2194,7 +2194,10 @@ See [docs/development.md](docs/development.md).
   fresh-read form. The classification rule is not the one the report
   implied either: a thread that sleeps between two clock reads wakes on a
   different CPU, so a plain `t0` in a local variable is a foreign stamp,
-  and that is nearly every timing assertion in the suite -- 42 such
+  and that is nearly every timing assertion in the suite (**that premise
+  was itself wrong, and the thread-migration unit below says so: this
+  kernel pins a thread to one CPU for life, so those stamps were
+  same-CPU when they were swept**) -- 42 such
   sites, 20 shared-state ones, 4 in userland the report had not noticed,
   1 deliberately left plain (the tick cost, where saturating would hide a
   counter going backwards on one CPU) and 4 that are not elapsed times at

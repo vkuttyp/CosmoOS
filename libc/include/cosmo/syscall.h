@@ -98,6 +98,14 @@ static inline uint64_t cosmo_clock_ns(void)
  * wrap to an interval of 584 years. The syscall reads the same clock
  * the kernel does, so whatever correction the kernel applies is already
  * in these numbers; this only removes the wrap.
+ *
+ * **As of this writing that first sentence describes the kernel this is
+ * becoming, not the one it is.** A thread is assigned a CPU once and
+ * never moves (`docs/audit/next-subsystem-thread-migration.md`), so a
+ * sleeping thread wakes where it slept and a local `t0` is this CPU's.
+ * The saturation costs a compare and is correct either way; it is the
+ * *reason* that is ahead of the tree. The migration unit makes it true,
+ * and if that unit is abandoned this note is the correction.
  */
 static inline uint64_t cosmo_clock_since_ns(uint64_t stamp)
 {

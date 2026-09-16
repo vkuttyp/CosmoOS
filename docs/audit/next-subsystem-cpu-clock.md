@@ -530,6 +530,22 @@ sweep actually used:
 > CPU that reads it — which for a local variable means iff the thread
 > can be descheduled between the two reads.
 
+**Correction, added by the thread-migration unit
+(`docs/audit/next-subsystem-thread-migration.md`).** The worked example
+above is false for the kernel this unit shipped into. A thread is
+assigned a CPU once, at `sched_enqueue_new`, and nothing ever moves it:
+`sched_wake` returns it to `g_rqs[t->cpu]`, and the only other writes to
+`t->cpu` are the idle and boot threads at init. A sleeping thread wakes
+where it slept, so the 42 sites in the first row of the table below were
+**same-CPU at the time of this sweep**.
+
+The conversions stand — a saturating subtraction costs a compare and is
+correct whether or not the stamp is foreign — and they become *necessary*
+the moment migration lands, which is why that unit re-runs this sweep as
+a gate rather than trusting it. But the rule as stated described a
+scheduler this kernel did not have, and saying so here is cheaper than
+letting the next reader infer a migration that does not happen.
+
 **The sweep, by category.** Counts are `grep -c` on the tree, not a
 tally kept by hand:
 
