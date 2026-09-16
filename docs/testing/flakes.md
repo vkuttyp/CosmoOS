@@ -133,6 +133,22 @@ code:
 | `smp-parallel` | `smptest.c:239` | work ratio | 1 | restated: parallelism observed from CPU 0 |
 | `el2-guest-timer-ontime` | `hvtest.c:1279` | upper bound | 1 | widened and labelled; listed above |
 
+A different family, recorded here because a flake seen once and not
+written down is a flake somebody else debugs from scratch. On
+2026-09-16, one CI run of PR #154 failed on **both** architectures, and
+the same commit passed on a re-run with nothing changed:
+
+| where | what it looked like | why it is not a bound |
+| --- | --- | --- |
+| x86-64, the default boot | all 319 self-tests passed and `USERTEST: PASS`; the shell script ran its whole command list to `exit 0`; then `SHTEST: PASS` **and every Linux-ABI marker** -- the musl hello, `LINUXTEST: PASS`, `lxinterp`, `lxdyn`, `lxsig term` -- were all missing together | a whole category of markers vanishing at once is a boot archive or a Linux-test build that did not arrive, not a test asserting something temporal |
+| aarch64, the guard boot | `selftest: hv: skipped: no backend`, a forbidden marker | the virtualisation backend was absent on a machine variant that normally has one |
+
+Neither is on the list above and neither should be: they are not bounds a
+loaded host can trip, so a re-run is a diagnosis and not a remedy. What
+the row is for is the next reader, who should know that this pair has
+been seen once, on correct code, and that the same commit passed
+immediately afterwards.
+
 Earlier, the same family: `schedtest.c`'s tick-rate lag bound was widened
 in pull request #63 after failing on a loaded host, and its comment
 already says what this file says -- a tighter bound was only ever
