@@ -2002,6 +2002,39 @@ See [docs/development.md](docs/development.md).
   architectures, debug and release; twelve bug-proofs, one of which
   passed and became an inventory row (PR #146).
 
+- **The commit after the last one**
+  (`docs/audit/next-subsystem-unmount-leak.md`). Two units in a row found
+  this and neither fixed it. A cosmofs commit publishes its new root and
+  *then* clears the freed blocks' bits in memory, marking those bitmap
+  chunks for the next commit -- which is correct, because a block the old
+  root still names cannot be freed before the new one lands, and which at
+  an unmount means there is no next commit. So every unmount, on every
+  filesystem, lost the space its last transaction freed: the fsck unit
+  measured 1912 blocks across 199 replayed crash prefixes, and the fsctl
+  unit found the sharper half when the first real filesystem an operator
+  could point a tool at turned out to have 28 stranded blocks after a
+  *clean* unmount. The obvious fix does not converge -- writing the
+  bitmap frees the bitmap, so a second commit leaves a third's worth of
+  work -- so format version 9 gives the superblock a `free_root` naming
+  a chain of blocks that records what this root freed, written before
+  the root and made true by it, and replayed by the next mount before
+  the bitmap is trusted for allocation. The ordering is the design and
+  both halves are load-bearing: everything that allocates must happen
+  before the bitmap fixpoint, or the root publishes a bitmap that does
+  not know about the record's own blocks and the allocator eats them;
+  and the set to record is not final until the fixpoint has run, because
+  it frees every chunk it copies. Reserve before, fill after. Two of the
+  plan's claims were wrong and the build says so in the report: moving
+  the snapshot filter ahead of the fixpoint corrupts a snapshot's member
+  table, so the filter stayed and the *question* was extracted instead;
+  and "a superseded record is freed outside the filter" was not true of
+  the code, because a deferred free goes on the list phase 7 filters --
+  found by writing the test that argument never had. Four tests passed
+  their own bug-proof and were rebuilt before they measured anything,
+  one of them three times. The crash suite's stranded-block total is now
+  zero and its weakened assertion is gone. 295 self-tests on both
+  architectures, debug and release (PR #TBD).
+
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process
   domain deliberately does without and argues against

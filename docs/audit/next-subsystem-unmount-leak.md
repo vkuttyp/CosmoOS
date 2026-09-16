@@ -235,10 +235,11 @@ Allocate-before and fill-after resolves the circle:
 7. The root into the alternate slot, `BIO_PREFLUSH | BIO_FUA`.
 8. Phase 7 applies the frees in memory, exactly as today.
 
-**Why this terminates**, which the rejected alternative does not: steps
-3 and 5 allocate a bounded number of blocks *once*, before the fixpoint,
-so the fixpoint converges exactly as it does now and nothing after it
-allocates. There is no second fixpoint and no loop -- the circularity is
+**Why this terminates**, which the rejected alternative does not: step 3
+allocates a bounded number of blocks *once*, before the fixpoint, and
+step 5 allocates nothing at all -- it fills blocks that are already
+reserved. So the fixpoint converges exactly as it does now and nothing
+after it allocates. There is no second fixpoint and no loop -- the circularity is
 broken by separating the reservation from the content, not by iterating
 until it stops moving.
 
@@ -303,6 +304,14 @@ them, like every other metadata block. The in-memory `pending_free`
 array is unchanged and still owned by `struct cfs`. Nothing outlives a
 mount.
 
+> **As built, `struct cfs` gained a second list.** `pending_exempt`,
+> owned and freed the same way, holds the blocks phase 7 must release
+> *without* asking the snapshot filter — a superseded record, and so far
+> nothing else. It exists because a deferred free is a filtered free:
+> see "As built" 2.
+
+
+
 *Concurrency.* All of it happens under `fs->lock`, inside `cfs_commit`,
 which already holds that lock for its duration. The replay at mount runs
 before the filesystem is published, with no other thread able to reach
@@ -342,17 +351,26 @@ mount of every filesystem written before this unit. `CFS_VERSION_MIN`
 stays 2, so every existing image still mounts; it simply replays
 nothing, which is correct because a version-8 commit recorded nothing.
 
+> **As built, the gate is on the write too.** A version-8 commit that
+> wrote a chain head into `reserved[5]` would leave a record this kernel
+> would not read back either: see "As built" 4.
+
 ## Affected files
 
 | file | change |
 | --- | --- |
 | `kernel-services/filesystem/cosmofs/cosmofs_format.h` | `CFS_KIND_FREELOG` (13, after `CFS_KIND_KEYS`); `free_root` in `struct cfs_super`, taken from `reserved[5]`; `CFS_VERSION` 9 |
-| `kernel-services/filesystem/cosmofs/cosmofs_core.c` | the record written in `cfs_commit` before the root; the snapshot filter moved ahead of it; the replay in `load_bitmap`; the old record freed by the superseding commit |
-| `kernel-services/filesystem/cosmofs/cosmofs_snap.c` | `cfs_snapshot_hold_block` called from the new place; the "leaked until unmount" path becomes a recorded free |
-| `kernel-services/filesystem/cosmofs/cosmofs_check.c` | the checker claims the record's blocks, like any other metadata, and must not call a recorded free a leak |
-| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the tests, and the ones that assert a generation or a free count across an unmount |
-| `kernel-services/filesystem/cosmofs/cosmofscrash.c` | the replay suite's leak accounting, which should now measure ~0 |
-| docs | cosmofs `design.md` and `architecture.md`, the fsck report's measurement annotated, README Status, `docs/README.md`, the inventory |
+| `kernel-services/filesystem/cosmofs/cosmofs_core.c` | the record reserved before the bitmap fixpoint and filled after it in `cfs_commit`; `freelog_replay` in `load_bitmap`; `freelog_release_previous`; `cfs_free_block_exempt` and the `pending_exempt` pass in phase 7 |
+| `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | `pending_exempt` in `struct cfs`; `cfs_free_block_exempt`; `cfs_snapshot_holds`; `cfs_snapshot_deadlist_len` |
+| `kernel-services/filesystem/cosmofs/cosmofs_snap.c` | `snapshot_holds` extracted, shared by `cfs_snapshot_holds` (the query) and `cfs_snapshot_hold_block` (the query plus the append); the deadlist-length test hook |
+| `kernel-services/filesystem/cosmofs/cosmofs_check.c` | `walk_freelog` claims the record's chain as live metadata; `pending_exempt` claimed beside `pending_free` |
+| `kernel-services/filesystem/cosmofs/cosmofstest.c` | the nine new tests, and the two that asserted numbers the defect produced |
+| `kernel-services/filesystem/cosmofs/cosmofscrash.c` | the replay suite asserts `rep.clean` per prefix and a stranded total of zero, in place of the fsck unit's weakened assertion |
+| `kernel/include/kernel/cosmofs.h` | `free_root` in `struct cosmofs_stats`; `cosmofs_test_poison_free_root`; `cosmofs_test_deadlist_len` |
+| `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | the new tests registered |
+| `tests/host/test_cosmofs.c` | the version and the field's offset asserted on the host |
+| `userland/init/init.c` | `fsctl_selftest` asserts `COSMO_FSCTL_R_CLEAN` where it asserted stranded blocks |
+| docs | cosmofs `design.md` and `architecture.md`, the fsck and fsctl reports annotated, README Status, `docs/README.md`, the inventory |
 
 ## New APIs
 
@@ -364,13 +382,25 @@ nothing, which is correct because a version-8 commit recorded nothing.
 struct cfs_super {
     /* ... */
     uint64_t free_root;           /* v9: head of the FREELOG chain, or 0 */
-    uint64_t reserved[4];
+    uint64_t reserved[7];
 };
 ```
 
 No kernel-facing API changes: the record is internal to the commit and
-the mount. `cosmofs_check`'s report gains nothing — a recorded free is
-simply not a finding.
+the mount. `cosmofs_check`'s report gains nothing, because a recorded
+free is simply not a finding.
+
+**As built, three internal functions and one test hook:**
+
+```c
+/* cosmofs_internal.h */
+void cfs_free_block_exempt(struct cfs *fs, uint64_t blk);   /* freed for the root, no snapshot's to hold */
+bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk);      /* the question, without the deadlist append */
+uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of);
+
+/* kernel/cosmofs.h -- a test hook, for the one assertion nothing else can make */
+uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
+```
 
 ## Migration plan
 
@@ -400,45 +430,63 @@ simply not a finding.
 Each step boots both architectures; steps 3 and 4 run `make test-crash`;
 step 1 runs the release build.
 
+> **As built, steps 4 and 5 landed with step 3.** The plan sequenced
+> them to keep each change small, and the commit path does not allow it:
+> the moment `load_bitmap` replays a record, the crash suite's images
+> stop stranding blocks and the checker sees a chain it does not claim,
+> so the suite's assertion and the checker's walk had to move in the
+> same commit that made them wrong. The order of the argument is
+> unchanged; what changed is how many commits it took.
+
 ## Tests
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `cosmofs-freelog-format` | the replay is gated at **version ≥ 9**: a version-8 image mounts, works, and replays nothing, because its `reserved[5]` is not a `free_root`; a version-9 image has `free_root` 0 when nothing is pending | lower the gate to version 8: the version-8 image's reserved field is read as a chain head and the mount fails, which is what the gate exists to prevent |
-| `cosmofs-freelog-not-held` | a filesystem with a snapshot, committed repeatedly: the superseded records are freed rather than appended to the snapshot's deadlist, and the deadlist's length does not grow with the commit count | send the old chain through `cfs_snapshot_hold_block`: the deadlist grows by a block or two per commit and the space is never returned |
-| `cosmofs-freelog-written` | after a transaction that frees blocks, `free_root` is non-zero and its chain names exactly the blocks phase 7 clears, after the snapshot filter | record before the filter: a block a snapshot holds appears in the record, and the next assertion (that a snapshotted filesystem loses nothing) fails |
-| `cosmofs-unmount-leak` | **the defect**: write a file, delete it, unmount, remount, and `free_blocks` is what it was before the file existed; the structural check is clean | skip the replay at mount: the free count is short and the check reports leaked blocks — which is today's behaviour, so this bug-proof is the unfixed tree |
-| `cosmofs-freelog-idempotent` | mount, replay, unmount without committing, mount again: the same blocks, the same count, no double-free | clear the record at replay rather than at the next commit: the second mount loses it and the blocks are stranded again |
-| `cosmofs-freelog-reuse` | a replayed block is handed out by the allocator in the same session, written, and committed; after a remount it is in use and not in any record | free the record at replay: a crash between the replay and the commit loses the record while the block is unwritten |
-| `cosmofs-freelog-snapshot` | a filesystem with a snapshot holding freed blocks records none of them, and loses nothing across an unmount | as `cosmofs-freelog-written`'s injection, from the other side |
-| `cosmofs-freelog-chain` | more frees than one block holds are recorded across a chain and all of them replay | write only the first block of the chain: the count is short by the overflow |
-| `cosmofs-freelog-accounted` | the record's own blocks, and the deadlist blocks the filter appends, are **allocated in the bitmap the root publishes**: remount and the structural check finds neither a leak nor a block that is reachable and free | allocate the record after the bitmap fixpoint rather than before it: the check reports the record's blocks as `seen_not_alloc`, the dangerous direction, because the allocator can hand them out again |
-| `cosmofs-freelog-supersede` | a hundred commits in a row leave one record and no residue: the free count after the hundredth equals the count after the first, and the check is clean | do not free the previous chain: the count falls by a block or two per commit, which a single-commit test cannot see |
-| `cosmofs-freelog-overreserve` | a transaction whose bound over-reserves lists the leftover blocks in the record itself, and they are free after a remount | drop the leftovers instead of recording them: the free count is short by the slack, every commit |
-| `cosmofs-replay` (extended) | every replayed crash prefix is **clean** — the assertion the fsck unit had to weaken, restored | the fsck unit's `no-crash-check` injection, which now has a stronger claim to break |
+| `cosmofs-freelog-format` | the record is gated at **version ≥ 9** on *reading*: a version-8 image whose `reserved[5]` is poisoned with a plausible chain head mounts, works and replays nothing; a version-9 image has `free_root` 0 when nothing is pending | lower the gate to version 8 (`gate-at-version-8`): the poisoned reserved word is read as a chain head and the mount fails, which is what the gate exists to prevent |
+| `cosmofs-unmount-leak` | **the defect**: write a file, delete it, unmount, remount, and `free_blocks` is what it was before the file existed; the structural check is clean | skip the replay at mount (`no-replay`): the free count is short and the check reports leaked blocks — which is the tree before this unit, so this bug-proof is the defect itself |
+| `cosmofs-freelog-accounted` | the record's own blocks are **allocated in the bitmap the root publishes**: remount and the structural check finds neither a leak nor a block that is reachable and free | allocate the record after the bitmap fixpoint rather than before it (`reserve-after-fixpoint`): the check reports the record's blocks as `seen_not_alloc`, the dangerous direction, because the allocator can hand them out again |
+| `cosmofs-freelog-supersede` | a hundred commits in a row leave one record and no residue: the free count after the hundredth is within a transaction's slack of the count after the first, and the check is clean | do not free the previous chain (`keep-previous-chain`): the count falls by a block or two per commit, which a single-commit test cannot see |
+| `cosmofs-freelog-snapshot` | a filesystem with a snapshot holding freed blocks records none of them: after an unmount and a remount the check reports `seen_not_alloc` 0, and the snapshot still reads | record without asking the snapshot (`record-ignores-snapshots`): a block the snapshot holds is named as free, the replay clears its bit while the snapshot's tree still reaches it, and `seen_not_alloc` is not 0 |
+| `cosmofs-freelog-not-held` | a superseded record is **freed, not held**: naming a snapshot is the one commit that supersedes a record any snapshot's bitmap marks allocated, and exactly three blocks go on that snapshot's deadlist there — the root directory block, the inode-map block and the allocation index, not the record | release the chain through `cfs_snapshot_hold_block` (`release-through-hold-filter`): four blocks go on the deadlist and the record is the fourth, gone until the snapshot is |
+| `cosmofs-freelog-idempotent` | mount, replay, unmount without committing, mount again: the same blocks, the same count, and `free_root` unchanged, because a record is retired by a commit and not by a read | clear the record at replay (`replay-clears-record`): the second mount finds nothing and the blocks are stranded again |
+| `cosmofs-freelog-reuse` | a replayed block is handed out by the allocator in the same session, written, and committed; after a remount it is in use and named by no record | (covered by `replay-clears-record`, from the other side: a record cleared at replay loses the block if the session ends before the commit) |
+| `cosmofs-freelog-chain` | more frees than one block holds are recorded across a chain and all of them replay: 601 blocks freed in one transaction, more than the 506 a record block holds, and every one back after the remount. Also covers the bound's slack, since an over-reserving transaction lists its leftovers in the record | write only the first block of the chain (`chain-truncated`): the count comes back short by the overflow |
+| `cosmofs-replay` (extended) | every replayed crash prefix is **clean** and the stranded-block total is **0** — the assertion the fsck unit had to weaken, restored | the fsck unit's `no-crash-check` injection, which now has a stronger claim to break |
 | `cosmofs-check-clean` (existing) | still clean, with the record's own blocks claimed as metadata | do not claim the record in the checker: `alloc_not_seen` names the record's blocks |
+
+**Named in the plan, not built:** `cosmofs-freelog-written` and
+`cosmofs-freelog-overreserve`. The first asserts that the record names
+exactly what phase 7 clears, which is `cosmofs-freelog-snapshot`'s
+assertion approached from the other side and shares its injection; the
+second asserts the bound's leftovers are recorded, which
+`cosmofs-freelog-chain` covers and says so in its comment. Nothing named
+in the plan is unasserted.
 
 **The tests this changes, and why that is correct.** `cosmofs-format`
 asserts `st.generation == 1` after an unmount and a remount, under the
 comment "Unmount committed nothing new: still generation 1"
 (`cosmofstest.c:129-131`). That stays true, and it is the assertion that
 says this unit adds no commit -- the difference between this design and
-the one it rejects. What changes is `cosmofs-ops`'s free-count
-assertions across a mount cycle, which today encode the leak — they
-assert the count the defect produces. Each one is re-derived in step 3,
-and the report says plainly that a test asserting a wrong number is not
-evidence the number is right.
+the one it rejects. What changed, as built, is listed in "As built":
+three existing tests asserted numbers the defect produced, and a test
+asserting a wrong number is not evidence the number is right.
 
-**Thirteen tests, and four of them exist because this report was
-reviewed rather than because it was written** -- the two ordering
-defects above and the over-reservation their fix introduces.
+**Nine new tests and two extended ones, and five of the nine exist
+because this report was reviewed or built rather than because it was
+written** -- the two ordering defects
+review found, the over-reservation their fix introduces, the chain the
+first eight tests never exercised, and the snapshot exception whose
+argument nothing checked.
 
-**Vacuity, named in advance.** `cosmofs-unmount-leak` is the unit: it
-fails on today's tree, which is the strongest possible statement that it
-is not vacuous. `cosmofs-freelog-idempotent` and `-reuse` exist because
-the easy implementation — clear the record when you replay it — passes
-the headline test and loses the blocks on the *second* mount, which no
-single-cycle test would catch.
+**Vacuity, named in advance and as found.** `cosmofs-unmount-leak` is
+the unit: it fails on the tree before this one, which is the strongest
+possible statement that a test is not vacuous.
+`cosmofs-freelog-idempotent` and `-reuse` exist because the easy
+implementation — clear the record when you replay it — passes the
+headline test and loses the blocks on the *second* mount, which no
+single-cycle test would catch. Four tests were written that passed their
+own bug-proof and had to be rebuilt before they measured anything; each
+is recorded in "As built" with what it was measuring instead.
 
 ## Benchmarks
 
@@ -512,10 +560,110 @@ single-cycle test would catch.
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+Differences from the plan, each found by building rather than reading.
+
+1. **The snapshot filter did not move, it split.** The plan's step 2 put
+   `cfs_snapshot_hold_block` ahead of the bitmap fixpoint. That is wrong
+   and the inset on step 2 says why: it moves the filter ahead of the
+   fixpoint's own frees -- the old member table, the old allocation
+   index, the old bitmap chunks, which is exactly the set a snapshot
+   names -- so those reach phase 7 unfiltered. The build's first run
+   under that order produced a dangling member-table pointer and an
+   unreadable block. The filter stays in phase 7; `cfs_snapshot_holds`
+   is the *question* extracted from `cfs_snapshot_hold_block` (the same
+   walk, no deadlist append) so that the record written before the root
+   and the append made after it are one verdict from one piece of code.
+
+2. **A deferred free goes through the snapshot filter, so "deliberately
+   not through `cfs_snapshot_hold_block`" was not true of the code.**
+   The design argues at length that a superseded record must be freed
+   outside the filter, and the first implementation called
+   `cfs_free_block_deferred` -- which puts the block on `pending_free`,
+   and phase 7 filters everything on that list. So the one record any
+   snapshot's bitmap marks allocated *was* held by that snapshot and
+   gone until it was deleted. The fix is a second list:
+   `cfs_free_block_exempt` waits for the root like any deferred free,
+   because the current root still names the block, and phase 7 applies
+   it with no filter at all. `freelog_fill` records both lists, the
+   bound counts both, the checker claims both. Found by writing the test
+   the design's argument never had.
+
+3. **The record is written through the buffer cache, not `pool_write`.**
+   A block just allocated may have a stale buffer from a previous life
+   further down the list, and `cfs_buf_get` finds that one -- which cost
+   an unmount an `-EIO` before the cause was clear. `freelog_fill` uses
+   `buf_alloc` + `mhdr_seal` + `buf_mark_dirty`, which is what
+   `cfs_buf_cow` does for the same reason, and the commit's dirty loop
+   writes it.
+
+4. **The version gate is on the write as well as the read.** The plan
+   gated the replay. Writing a chain head into `reserved[5]` of a
+   version-8 superblock leaves a record this kernel does not read back
+   either, which is a leak nobody can see. `cosmofs-freelog-format`
+   asserts both halves.
+
+5. **The bound is `nr_pending + nr_exempt + nr_chunks + nmembers`**, not
+   "one per *dirty* chunk plus one index per member". Counting dirty
+   chunks before the fixpoint under-counts, because reserving dirties
+   more of them; the whole chunk count is the only number that is an
+   upper bound before the fixpoint runs.
+
+6. **Four tests passed their own bug-proof and were rebuilt.** Each was
+   measuring something other than what it claimed, and the injection is
+   what said so:
+   - `cosmofs-freelog-snapshot` twice. First a `vfs_sync()` superseded
+     the wrong record before any mount read it, so a wrong record cost
+     nothing; the unmount's own commit has to be the one that records.
+     Then the free count moved in both directions for unrelated reasons
+     -- the unlink frees copy-on-write casualties that postdate the
+     snapshot, while the deadlist and the record consume blocks -- so
+     the assertion became `seen_not_alloc == 0`, which is the claim.
+   - `cosmofs-freelog-not-held` three times, and the sequence is the
+     lesson. The checker cannot see a wrongly held record, because a
+     deadlist is metadata it claims. The free count cannot, because the
+     loss is one block, inside the noise of a transaction in flight. A
+     block known by number cannot either, twice over: block numbers are
+     recycled, so the question answers about some other lifetime. What
+     works is a delta across one commit chosen for what it does --
+     naming a snapshot supersedes the record that existed before the
+     snapshot did, three blocks go on the deadlist there for good
+     reasons, and a fourth would be the record.
+
+7. **`cosmofs-freelog-chain` needed incompressible data and two
+   rounds.** Six hundred pages of zeros are not six hundred blocks on a
+   filesystem with compressed records. And a record is retired by the
+   *next* commit, so a filesystem that has just replayed a two-block
+   chain still holds those two blocks: comparing against a pristine
+   format counts them as lost, and the cycle has to run twice with the
+   second round measured against the first.
+
+8. **Three existing tests asserted numbers the defect produced.**
+   `cosmofs-holes`' slack went from 6 to 8, because a version-9
+   filesystem always holds a record and the count it compares against
+   was taken before there was one. `cosmofs-check-partial` asserted a
+   leaked block that was the *unmount's* leak rather than the
+   corruption's -- it had passed for a reason its comment did not give
+   -- and now asserts `orphan.count >= 1` and `alloc_not_seen.count ==
+   0`, because the corruption's blocks are reachable through the
+   orphaned inode and were never leaked. And `fsctl_selftest` in
+   userland asserted that a file written, deleted and unmounted strands
+   blocks a `--repair` reclaims, and now asserts
+   `COSMO_FSCTL_R_CLEAN`. That last one loses coverage of the
+   find-and-repair path from userland -- userland cannot manufacture a
+   fault and a clean unmount no longer leaves one -- which the test says
+   in a comment rather than quietly absorbing.
+
+9. **One test hook, `cosmofs_test_deadlist_len`.** Nothing else can see
+   a snapshot's deadlist, and difference 6 is why one test needs to.
+
+10. **A defect found and not fixed, with a row of its own.** The
+    deadlist append still happens in phase 7, after the root, so an
+    unmount that frees a block a snapshot holds strands a couple of
+    blocks. It is this report's defect one level down, it needs the same
+    reserve-before-fill treatment in `cosmofs_snap.c`, and
+    `cosmofs-freelog-snapshot` asserts a bound on it rather than
+    pretending it is clean.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+TBD
