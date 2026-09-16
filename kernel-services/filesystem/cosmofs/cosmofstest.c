@@ -70,30 +70,6 @@ bool selftest_pool(const char **reason)
     return true;
 }
 
-/*
- * A file of `pages` blocks whose contents nothing can compress. A page of
- * zeros costs almost nothing on a filesystem with compressed records, and
- * a test about a number of blocks would measure nothing.
- */
-static bool write_wide_file(const char *path, unsigned pages)
-{
-    static char page[4096];
-    struct file *f = NULL;
-    if (vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f))
-        return false;
-    uint32_t seed = 0x1234567u;
-    bool ok = true;
-    for (unsigned i = 0; ok && i < pages; i++) {
-        for (unsigned k = 0; k < sizeof(page); k++) {
-            seed = seed * 1103515245u + 12345u;
-            page[k] = (char)(seed >> 16);
-        }
-        ok = file_write(f, page, sizeof(page)) == (int64_t)sizeof(page);
-    }
-    file_put(f);
-    return ok;
-}
-
 static bool write_file(const char *path, const void *data, size_t len)
 {
     struct file *f;
@@ -335,6 +311,26 @@ static void fill_incompressible(uint8_t *buf, size_t len, uint32_t seed)
     }
 }
 
+
+/*
+ * A file of `pages` blocks nothing can compress. A test that counts
+ * blocks has to write these: a page of zeros costs almost nothing here,
+ * so six hundred pages of them are not six hundred blocks.
+ */
+static bool write_wide_file(const char *path, unsigned pages)
+{
+    static uint8_t page[4096];
+    struct file *f = NULL;
+    if (vfs_open(NULL, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, 0644, &f))
+        return false;
+    bool ok = true;
+    for (unsigned i = 0; ok && i < pages; i++) {
+        fill_incompressible(page, sizeof(page), 0x1234567u + i);
+        ok = file_write(f, page, sizeof(page)) == (int64_t)sizeof(page);
+    }
+    file_put(f);
+    return ok;
+}
 
 #define ENG "/mnt/eng"
 
