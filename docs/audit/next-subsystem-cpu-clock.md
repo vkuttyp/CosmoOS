@@ -145,10 +145,29 @@ contract, the tests and the boot line all say:
 
 - the difference is the elapsed interval **± the residual skew**;
 - the residual skew is **measured, not assumed**, and printed once at
-  boot as the worst offset seen;
+  boot as the worst offset seen — `clock_worst_offset_ns()`, one number,
+  which the contract, the boot line and the tests all name;
 - the difference is **never negative and never wraps**, which is a
   property rather than a bound and is the one the callers actually
   depend on.
+
+**One number, checked against itself.** The boot measures the residual
+skew; the tests measure it again at runtime, by a different method, and
+assert that what they see is within what the boot advertised. That
+relationship is the point and it is easy to lose: a runtime handshake
+bracket is *not* the contract's bound — it is a second observation of
+the same quantity, carrying its own round-trip noise — so a test that
+asserted only "the bracket held" could pass on a machine whose skew had
+drifted past what the boot promised. The assertion is therefore
+
+```
+observed apparent offset  <=  clock_worst_offset_ns() + bracket width
+```
+
+where the bracket width is the measurement's noise floor and
+`clock_worst_offset_ns()` is the advertised accuracy. If the left side
+exceeds the right, either the correction has drifted or the boot's
+number was optimistic, and both are findings.
 
 That third point is why `clock_since_ns` exists and why it lands first:
 an interval that is wrong by a microsecond is a measurement, and an
@@ -300,7 +319,12 @@ uint64_t clock_now_ns(void);
  * future, and an unsigned subtraction turns that into 584 years. */
 uint64_t clock_since_ns(uint64_t stamp);
 
-/* The worst offset the boot measured, for the boot line and sysctl. */
+/*
+ * The worst residual skew the boot measured: the contract's bound, the
+ * boot line's number and what the cross-CPU tests check themselves
+ * against. One quantity with one name, so that a test cannot quietly
+ * assert something narrower than what was advertised.
+ */
 int64_t clock_worst_offset_ns(void);
 ```
 
@@ -336,11 +360,11 @@ changes.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `clock-cross-cpu` | **the promise**: a timestamp on CPU A, one on CPU B ordered after it by a handshake, then one on CPU A again -- the middle value lies within the bracket the outer two form, over many rounds and every online pair. The bracket *is* the error bound: it is what the contract means by "to within a measured bound", and the test reports the widest bracket it saw | inject a per-CPU offset wider than the bracket: the middle value falls outside and the test names the pair and the skew |
+| `clock-cross-cpu` | **the promise, checked against the number the boot advertised**: a timestamp on CPU A, one on CPU B ordered after it by a handshake, then one on CPU A again; the middle value lies within the bracket the outer two form, and the apparent offset it implies is within `clock_worst_offset_ns()` plus the bracket's own width. Over many rounds and every online pair, reporting the widest apparent offset seen | inject a per-CPU offset wider than the boot's advertised bound: the assertion fails naming the pair, the offset and the bound it exceeded. And the converse: report a boot bound of zero on a machine with skew, and the same assertion fails -- which is what stops the test from agreeing with whatever the boot happened to print |
 | `clock-since-saturates` | `clock_since_ns` of a stamp from the future returns 0, and of a stamp in the past returns the interval | make it a plain subtraction: the future stamp returns an age near `UINT64_MAX`, which is the number the block timeout would have compared against |
 | `blk-timeout-skew` | with a skew injected so an issuing CPU's clock runs ahead, a bio issued on that CPU is **not** timed out early, and one genuinely overdue still is | revert the timeout's subtraction to `now - issued_ns`: every in-flight bio on the device times out at once, which is the defect this unit is named for |
 | `lockup-report-skew` | the lockup report's "last tick N ms ago" for a CPU whose clock runs ahead reads 0 rather than 584 years | the same revert, in `lockup.c`: the operator's one diagnostic prints an absurd number |
-| `clock-scope-aarch64` | on AArch64 the reading taken on CPU B falls **inside the bracket** of readings taken on CPU A either side of it, for every online pair. Not "the offset is zero": two CPUs read a shared, advancing counter at different instants, so the measured delta is bounded by the round trip and never exactly zero -- an equality there would fail on correct hardware, which is how the first draft of this row was wrong | apply a fake offset larger than the bracket: the middle reading falls outside it and the test names the pair and the offset |
+| `clock-scope-aarch64` | on AArch64 the reading taken on CPU B falls **inside the bracket** of readings taken on CPU A either side of it, for every online pair, and the boot's advertised bound is **zero** because the system counter is common. Not "the measured offset is zero": two CPUs read a shared, advancing counter at different instants, so the delta is bounded by the round trip and never exactly zero -- an equality there would fail on correct hardware, which is how the first draft of this row was wrong | apply a fake offset larger than the bracket: the middle reading falls outside and the test names the pair and the offset |
 | `clock-invariant-gate` | a machine whose TSC is not invariant does not use it as the clock, and says so in the boot line | pretend the bit is set when it is not: the boot claims a TSC clock on a machine that cannot keep one |
 | `blk-unregister-drain` (existing) | unchanged, with a comment naming the property it depends on | — |
 
