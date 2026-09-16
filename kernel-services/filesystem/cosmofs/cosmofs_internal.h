@@ -81,6 +81,19 @@ struct cfs {
      * record's blocks have been reserved. What that must not leave
      * behind is the reservation (docs/audit/next-subsystem-unmount-leak.md). */
     bool test_fail_freelog;
+    /* Test hook: cfs_snapshot_fill returns -EIO after its first append,
+     * so a commit fails with part of the deadlist written and the whole
+     * reservation outstanding (docs/audit/next-subsystem-snap-deadlist.md). */
+    bool test_fail_snapfill;
+    /* Walks of the snapshot list, since mount. The verdict used to be
+     * taken twice per freed block -- once for the record, once by the
+     * release loop -- and is now taken once; this is how that is
+     * measured rather than argued (`cosmofs-snap-onewalk`). */
+    uint64_t snap_walks;
+    /* Verdicts the commit needed: one per pending free it considered.
+     * `snap_walks` minus this is how many walks were spent on anything
+     * other than answering a question once. */
+    uint64_t snap_verdicts;
     int failed;             /* nonzero: the open transaction is abandoned, never committed */
     uint64_t commits;
     uint64_t reserve;       /* blocks only metadata may take (design.md, "the metadata reserve") */
@@ -141,7 +154,29 @@ struct cfs_mhdr *cfs_buf_hdr(struct cfs_buf *b);
  * belongs to a committed generation). *bp may change; the parent pointer
  * `*parent_slot` (in another writable block or the superblock) is
  * updated to the new block number. */
+/*
+ * Blocks a commit reserved before the bitmap fixpoint and hands out
+ * after it. The fixpoint forbids allocating once it has run, and cannot
+ * say before it runs what there will be to write; a reservation is how
+ * both are true at once (docs/audit/next-subsystem-snap-deadlist.md).
+ */
+struct cfs_res {
+    uint64_t *blk;
+    unsigned n;      /* reserved */
+    unsigned used;   /* handed out, from the front */
+};
+uint64_t cfs_res_take(struct cfs_res *r);
+
 int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot);
+/* The same copy, giving the superseded block back exempt: for a chain
+ * named by a superblock field a snapshot does not preserve, which no
+ * snapshot's tree can reach (the free record, the snapshot list, a
+ * deadlist). `res` is where the copy's block comes from: a reservation
+ * inside the commit's window, or NULL to allocate, which only a caller
+ * running before the fixpoint may do. */
+int cfs_buf_cow_exempt(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_res *res);
+/* A fresh zeroed dirty buffer at a block the caller already owns. */
+int cfs_buf_new_at(struct cfs *fs, uint32_t kind, uint64_t blk, struct cfs_buf **out);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
 void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
 
@@ -155,18 +190,30 @@ bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *ou
 bool cfs_has_snapshots(struct cfs *fs);
 /* Commit-time: hold `blk` for the newest snapshot instead of freeing it.
  * False when no snapshot exists and the caller should free it. */
-bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk);
 
 /* Test hook: entries on every snapshot's deadlist -- all of them when
  * `of` is 0, or the ones naming that block. */
 uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of);
+uint64_t cfs_snapshot_deadlist_dups(struct cfs *fs, uint64_t *examined, uint64_t *first);
+
+/* What the commit's deadlist work may need from the reservation, and
+ * the exempt frees it may add -- which are entries in the record.
+ * Both are zero on a filesystem with no snapshot. */
+unsigned cfs_snapshot_reserve_bound(struct cfs *fs, unsigned pending_bound);
+unsigned cfs_snapshot_exempt_bound(struct cfs *fs);
+/*
+ * The commit's append, run *before* the root with blocks from `res`.
+ * `held[i]` comes back true for every `pending_free[i]` a snapshot still
+ * names, which is the verdict the record and the release loop both use:
+ * one walk of the list per block, not one each.
+ */
+int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n);
 /* Does this snapshot's tree still occupy `blk`? One lookup in the
  * allocation bitmap the snapshot recorded. */
 bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint64_t blk);
-/* Does any snapshot still name this block? The question cfs_snapshot_hold_block
- * asks, without the deadlist append it then makes -- so the record written
- * before the root and the filtering done after it are one verdict rather than
- * two (docs/audit/next-subsystem-unmount-leak.md). */
+/* Does any snapshot still name this block? The question alone, with no
+ * deadlist append: cfs_snapshot_fill is the one caller that appends, and
+ * it does so before the root. Kept for callers that only want to ask. */
 bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk);
 /* Members and DVAs (cosmofs_member.c; design.md, "Format version 4"). */
 bool cfs_dva_valid(const struct cfs *fs, uint64_t dva);

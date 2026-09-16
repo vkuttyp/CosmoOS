@@ -188,12 +188,87 @@ bool cfs_snapshot_references(struct cfs *fs, const struct cfs_snapshot *s, uint6
     return set;
 }
 
+#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
+
+/* --- copying the list ------------------------------------------------------
+ *
+ * The snapshot list is named by `cfs_super.snap_root` and by nothing
+ * else, so a copy of it is published exactly when the superblock is --
+ * atomically, by the same root write as every other change in the
+ * transaction. Before this it was the one metadata chain in the
+ * filesystem edited where it lay, which meant a crash between the
+ * block's write and the root left the *previous* root naming a list
+ * that belongs to a transaction that did not happen
+ * (docs/audit/next-subsystem-snap-deadlist.md).
+ *
+ * The whole chain is copied, not the one block that changes: the chain
+ * is singly linked, so copying a block in the middle means rewriting
+ * the `next` of the block before it, and that is a copy too. At 42
+ * entries a block the chain is one block on every filesystem anyone
+ * has, so "copy the chain" is the cheap answer as well as the honest
+ * one. Idempotent within a transaction, because cfs_buf_cow_exempt is:
+ * a block already stamped with this generation is marked dirty and left
+ * where it is.
+ */
+static int snap_cow(struct cfs *fs, struct cfs_res *res)
+{
+    uint64_t *slot = &fs->sb.snap_root;
+    struct cfs_buf *prev = NULL;
+    int rc = 0;
+    unsigned guard = 0;
+    while (*slot) {
+        if (guard++ > CFS_SNAP_MAX_CHAIN) {
+            kerror("cosmofs: snapshot list chain too long at %llu", (unsigned long long)*slot);
+            rc = -EIO;
+            break;
+        }
+        struct cfs_buf *b;
+        rc = cfs_buf_get(fs, *slot, CFS_KIND_SNAPLIST, &b);
+        if (rc)
+            break;
+        /* The parent slot is `fs->sb.snap_root` for the head and a
+         * `next` inside the block before it otherwise -- which is held,
+         * so the pointer stays good, and already dirty from its own
+         * copy, so the write through it reaches the disk. */
+        rc = cfs_buf_cow_exempt(fs, &b, slot, res);
+        if (rc) {
+            cfs_buf_put(fs, b);
+            break;
+        }
+        if (prev != NULL)
+            cfs_buf_put(fs, prev);
+        prev = b;
+        slot = &snap_payload(b)->next;
+    }
+    if (prev != NULL)
+        cfs_buf_put(fs, prev);
+    return rc;
+}
+
 /* --- deadlists ------------------------------------------------------------ */
 
-/* Append one block number to a snapshot's deadlist, allocating a block
- * when the head is full. The caller holds the mount lock and is inside
- * the commit, so this must not itself defer frees. */
-static int deadlist_append(struct cfs *fs, uint64_t *head, uint64_t blk)
+/*
+ * Append one block number to a snapshot's deadlist.
+ *
+ * The head block is always **copied** before it is added to, because
+ * every caller runs inside a transaction and the block it would
+ * otherwise edit is one the *current* root names: a crash between that
+ * write and the next root leaves that root seeing an addition its own
+ * transaction never made -- one block on two deadlists, which a later
+ * pair of deletions frees twice, the second time under whatever the
+ * allocator has since put there.
+ *
+ * There used to be one caller that could not copy, the commit's release
+ * loop, because it ran *after* its root was published and a copy there
+ * would allocate after the bitmap fixpoint. That caller is gone: the
+ * append now runs before the root, which is what makes copying both
+ * possible and necessary (docs/audit/next-subsystem-snap-deadlist.md).
+ *
+ * `res` is where a block comes from -- the commit's reservation, or
+ * NULL to allocate, which only a caller running before the fixpoint may
+ * do. The caller holds the mount lock.
+ */
+static int deadlist_append(struct cfs *fs, uint64_t *head, uint64_t blk, struct cfs_res *res)
 {
     struct cfs_buf *b = NULL;
     if (*head) {
@@ -202,6 +277,12 @@ static int deadlist_append(struct cfs *fs, uint64_t *head, uint64_t blk)
             return rc;
         struct cfs_dead_block *d = dead_payload(b);
         if (d->count < CFS_DEAD_PER_BLOCK) {
+            rc = cfs_buf_cow_exempt(fs, &b, head, res);
+            if (rc) {
+                cfs_buf_put(fs, b);
+                return rc;
+            }
+            d = dead_payload(b);
             d->blk[d->count++] = blk;
             cfs_buf_mark_dirty(fs, b);
             cfs_buf_put(fs, b);
@@ -209,7 +290,17 @@ static int deadlist_append(struct cfs *fs, uint64_t *head, uint64_t blk)
         }
         cfs_buf_put(fs, b);
     }
-    int rc = cfs_buf_new(fs, CFS_KIND_DEADLIST, &b);
+    int rc;
+    if (res != NULL) {
+        uint64_t nb = cfs_res_take(res);
+        if (nb == 0) {
+            kerror("cosmofs: the commit's reservation is short of a deadlist block");
+            return -ENOSPC;
+        }
+        rc = cfs_buf_new_at(fs, CFS_KIND_DEADLIST, nb, &b);
+    } else {
+        rc = cfs_buf_new(fs, CFS_KIND_DEADLIST, &b);
+    }
     if (rc)
         return rc;
     struct cfs_dead_block *d = dead_payload(b);
@@ -256,7 +347,7 @@ static int deadlist_settle(struct cfs *fs, uint64_t head, const struct cfs_snaps
             for (unsigned s = 0; s < nr_remaining && !needed; s++)
                 needed = cfs_snapshot_references(fs, &remaining[s], blks[i]);
             if (needed) {
-                rc = deadlist_append(fs, keeper_deadlist, blks[i]);
+                rc = deadlist_append(fs, keeper_deadlist, blks[i], NULL);
                 if (rc) {
                     kfree(blks);
                     return rc;
@@ -268,7 +359,9 @@ static int deadlist_settle(struct cfs *fs, uint64_t head, const struct cfs_snaps
             }
         }
         kfree(blks);
-        cfs_free_block_deferred(fs, head);
+        /* The chain's own block, which no snapshot's tree reaches: the
+         * filter would hold it on the deadlist it is part of. */
+        cfs_free_block_exempt(fs, head);
         head = next;
     }
     return 0;
@@ -288,17 +381,18 @@ struct newest_ctx {
  * Does any snapshot still name this block? The question alone, with no
  * deadlist append and nothing written.
  *
- * cfs_snapshot_hold_block is this plus the append, and the two share
- * this walk rather than each having their own: the record of what a
- * transaction freed is written *before* the root and the append happens
- * after it, so the two verdicts must be the same verdict, not two
- * implementations of it (docs/audit/next-subsystem-unmount-leak.md).
+ * cfs_snapshot_fill is this plus the append, and both now happen before
+ * the root: the verdict is taken once, per block, and the record, the
+ * deadlist and the release loop all read that one answer rather than
+ * each asking the list again
+ * (docs/audit/next-subsystem-snap-deadlist.md).
  *
  * `*best` and `*best_at` come back naming the newest snapshot, so the
  * caller that wants to append does not walk the list twice.
  */
 static bool snapshot_holds(struct cfs *fs, uint64_t blk, uint64_t *best_at, unsigned *best_ix)
 {
+    fs->snap_walks++;
     uint64_t blkno = fs->sb.snap_root, best_block = 0;
     unsigned best_index = 0;
     uint64_t best_gen = 0;
@@ -366,7 +460,6 @@ bool cfs_snapshot_holds(struct cfs *fs, uint64_t blk)
  * from "held, and gone until the snapshot is"
  * (docs/audit/next-subsystem-unmount-leak.md).
  */
-#define CFS_SNAP_MAX_CHAIN 4096u   /* no sound list is this long */
 
 uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
 {
@@ -407,31 +500,215 @@ uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
     return total;
 }
 
-bool cfs_snapshot_hold_block(struct cfs *fs, uint64_t blk)
+/*
+ * The invariant the copy makes true: **no block is named by more than
+ * one deadlist entry.** A block is on exactly one snapshot's deadlist,
+ * and a settle that hands it to the keeper takes it off the doomed
+ * snapshot's list by freeing that list's blocks outright.
+ *
+ * Two entries for one block is what an interrupted keeper write-back
+ * left behind before this unit: the entry was appended to the keeper's
+ * head where it lay, so a crash before the root left the old root --
+ * which still had the doomed snapshot, still naming the same block --
+ * seeing both. Deleting the two snapshots in turn then frees it twice,
+ * the second time after the allocator has handed it to something else.
+ *
+ * `cosmofs_check` cannot state this: it claims a deadlist's entries as
+ * non-live (cosmofs_check.c), so the duplicate-claim finding never
+ * fires on them. So the crash suite asks here instead, per prefix.
+ *
+ * `*examined` is how many entries were looked at. A caller needs it:
+ * "no block is named twice" is also true of a filesystem with no
+ * deadlist at all, and a test that cannot tell those apart proves
+ * nothing (docs/audit/next-subsystem-snap-deadlist.md, "Vacuity").
+ *
+ * Quadratic in the number of entries, and a test hook only.
+ */
+uint64_t cfs_snapshot_deadlist_dups(struct cfs *fs, uint64_t *examined, uint64_t *first)
 {
-    uint64_t at = 0;
-    unsigned ix = 0;
-    if (!snapshot_holds(fs, blk, &at, &ix))
-        return false;           /* nothing holds it: the caller frees it as before */
-    if (at == 0)
-        return true;            /* held, but the list could not be read: never hand it back */
-    struct cfs_buf *b;
-    if (cfs_buf_get(fs, at, CFS_KIND_SNAPLIST, &b))
-        return true;
-    struct cfs_snap_block *sb = snap_payload(b);
-    uint64_t head = sb->snap[ix].deadlist;
-    int rc = deadlist_append(fs, &head, blk);
-    if (rc == 0) {
-        sb->snap[ix].deadlist = head;
-        cfs_buf_mark_dirty(fs, b);
+    uint64_t dups = 0, seen = 0;
+    if (first != NULL)
+        *first = 0;
+    uint64_t blkno = fs->sb.snap_root;
+    unsigned guard = 0;
+    while (blkno && guard++ < CFS_SNAP_MAX_CHAIN) {
+        struct cfs_buf *b;
+        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+            break;
+        struct cfs_snap_block *sb = snap_payload(b);
+        uint64_t next = sb->next;
+        for (unsigned i = 0; i < CFS_SNAPS_PER_BLOCK; i++) {
+            if (sb->snap[i].name[0] == '\0')
+                continue;
+            uint64_t dl = sb->snap[i].deadlist;
+            unsigned dguard = 0;
+            while (dl && dguard++ < CFS_SNAP_MAX_CHAIN) {
+                struct cfs_buf *db;
+                if (cfs_buf_get(fs, dl, CFS_KIND_DEADLIST, &db))
+                    break;
+                const struct cfs_dead_block *d =
+                    (const struct cfs_dead_block *)(db->data + CFS_MHDR_SIZE);
+                uint32_t n = d->count <= CFS_DEAD_PER_BLOCK ? d->count : 0;
+                uint64_t dnext = d->next;
+                /* Copied out and the buffer released before the counts,
+                 * which walk the whole list and may evict it. A block's
+                 * worth, on the heap: the stack is not 4 KiB to spare. */
+                uint64_t *blks = n ? kmalloc((size_t)n * sizeof(*blks), 0) : NULL;
+                if (n && blks == NULL) {
+                    cfs_buf_put(fs, db);
+                    break;
+                }
+                for (uint32_t k = 0; k < n; k++)
+                    blks[k] = d->blk[k];
+                cfs_buf_put(fs, db);
+                for (uint32_t k = 0; k < n; k++) {
+                    seen++;
+                    if (cfs_snapshot_deadlist_len(fs, blks[k]) > 1) {
+                        if (dups == 0 && first != NULL)
+                            *first = blks[k];
+                        dups++;
+                    }
+                }
+                kfree(blks);
+                dl = dnext;
+            }
+        }
+        cfs_buf_put(fs, b);
+        blkno = next;
     }
-    cfs_buf_put(fs, b);
-    if (rc) {
-        kerror("cosmofs: snapshot deadlist full (%d); block %llu leaked until unmount", rc,
-               (unsigned long long)blk);
-        return true;   /* held anyway: never hand a snapshot's block back */
+    if (examined != NULL)
+        *examined = seen;
+    return dups;
+}
+
+/* --- what the commit reserves, and what it then writes ---------------------
+ *
+ * The deadlist append used to run in the commit's release loop, after
+ * the root was published. Two things were wrong with that and only one
+ * of them was the leak.
+ *
+ * The leak: the block it allocated and the entry it dirtied belonged to
+ * a transaction already gone, so they waited for the next commit, and
+ * at an unmount there is no next commit.
+ *
+ * The one the crash suite found once it had a snapshot in its workload:
+ * when the append allocated a *new* head, it wrote that block number
+ * into the snapshot list where the list lay -- a block the published
+ * root still names. A crash after that write and before the next root
+ * left the surviving root naming a deadlist head that had never been
+ * written and whose bitmap bit it did not have: a block both unreadable
+ * and reachable-and-free, which is the direction that hands live data
+ * to the allocator. Prefix 125 of the replay suite, block 23.
+ *
+ * So the append moves in front of the root, where every other statement
+ * a root makes is written -- which is possible only because the blocks
+ * come from a reservation taken before the bitmap fixpoint, and safe
+ * only because the list is now copied rather than edited.
+ */
+
+/* Blocks in the snapshot list's chain. */
+static unsigned snap_chain_len(struct cfs *fs)
+{
+    unsigned n = 0;
+    uint64_t blkno = fs->sb.snap_root;
+    while (blkno && n < CFS_SNAP_MAX_CHAIN) {
+        struct cfs_buf *b;
+        if (cfs_buf_get(fs, blkno, CFS_KIND_SNAPLIST, &b))
+            break;
+        blkno = snap_payload(b)->next;
+        cfs_buf_put(fs, b);
+        n++;
     }
-    return true;
+    return n;
+}
+
+unsigned cfs_snapshot_reserve_bound(struct cfs *fs, unsigned pending_bound)
+{
+    if (fs->snap_count == 0)
+        return 0;
+    /* The chain's copy, the copied deadlist head, and a fresh deadlist
+     * block for every CFS_DEAD_PER_BLOCK blocks this commit could hold.
+     * Generous, like the record's own bound: what nobody takes is
+     * recorded as free by the same record. */
+    return snap_chain_len(fs) + 2 + pending_bound / CFS_DEAD_PER_BLOCK;
+}
+
+unsigned cfs_snapshot_exempt_bound(struct cfs *fs)
+{
+    if (fs->snap_count == 0)
+        return 0;
+    return snap_chain_len(fs) + 1;   /* the superseded chain, and the superseded head */
+}
+
+/*
+ * A failure here is one of two things, and they need different answers.
+ *
+ * Before the first append has landed, nothing has been written that a
+ * retry would write twice, so the error is returned and the commit fails
+ * cleanly -- the reservation is given back and the filesystem is as it
+ * was. `snap_cow` runs on the first held block, before that block's
+ * append, so a failure there is always of this kind.
+ *
+ * After it, some of this transaction's holds are recorded and some are
+ * not, and a retry would record the first ones a second time: one block
+ * on two deadlists, the corruption this unit exists to prevent. The
+ * transaction is abandoned instead, which is the answer this file
+ * already gives to a snapshot change it cannot publish whole
+ * (snap_abandon).
+ */
+int cfs_snapshot_fill(struct cfs *fs, struct cfs_res *res, bool *held, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        held[i] = false;
+    if (fs->snap_count == 0)
+        return 0;
+    bool copied = false;
+    unsigned appended = 0;
+    for (unsigned i = 0; i < n; i++) {
+        uint64_t dva = fs->pending_free[i];
+        uint64_t lin = cfs_dva_lin(fs, dva);
+        if (lin == CFS_DVA_NONE || !cfs_bitmap_test(fs, lin))
+            continue;
+        uint64_t at = 0;
+        unsigned ix = 0;
+        fs->snap_verdicts++;
+        if (!snapshot_holds(fs, dva, &at, &ix))
+            continue;
+        /* The verdict, once. The record and the release loop both read
+         * it out of `held` rather than asking the list again. */
+        held[i] = true;
+        if (at == 0)
+            continue;   /* held, but the list could not be read: never hand it back */
+        if (!copied) {
+            int rc = snap_cow(fs, res);
+            if (rc)
+                return rc;
+            copied = true;
+            /* The chain moved, so where the entry lives moved with it. */
+            at = 0;
+            if (!snapshot_holds(fs, dva, &at, &ix) || at == 0)
+                continue;
+        }
+        struct cfs_buf *b;
+        int rc = cfs_buf_get(fs, at, CFS_KIND_SNAPLIST, &b);
+        if (rc == 0) {
+            struct cfs_snap_block *sb = snap_payload(b);
+            uint64_t head = sb->snap[ix].deadlist;
+            rc = fs->test_fail_snapfill ? -EIO : deadlist_append(fs, &head, dva, res);
+            if (rc == 0) {
+                sb->snap[ix].deadlist = head;
+                cfs_buf_mark_dirty(fs, b);
+                appended++;
+            }
+            cfs_buf_put(fs, b);
+        }
+        if (rc) {
+            if (appended > 0)
+                cfs_fail(fs, rc);   /* half-recorded: a retry would double an entry */
+            return rc;
+        }
+    }
+    return 0;
 }
 
 /* --- create and delete ---------------------------------------------------- */
@@ -519,6 +796,12 @@ int cfs_snapshot_create(struct cfs *fs, const char *name)
         return rc;
     if (max_id >= CFS_SNAP_ID_MAX)
         return -ENOSPC;
+
+    /* Every change to the list from here is a change to a copy of it,
+     * published by this transaction's root and by nothing earlier. */
+    rc = snap_cow(fs, NULL);
+    if (rc)
+        return rc;
 
     struct cfs_snapshot s;
     memset(&s, 0, sizeof(s));
@@ -630,6 +913,17 @@ int cfs_snapshot_delete(struct cfs *fs, const char *name)
     if (!found) {
         kfree(remaining);
         return -ENOENT;
+    }
+
+    /* The name exists and the transaction is about to change the list,
+     * so copy it: the settle writes the keeper's new deadlist head into
+     * its entry, and an entry edited where it lies is one the *current*
+     * root can see. After the -ENOENT above, so a delete of a name that
+     * is not there changes nothing. */
+    rc = snap_cow(fs, NULL);
+    if (rc) {
+        kfree(remaining);
+        return rc;
     }
 
     /* From here the open transaction holds both the frees and the entry
