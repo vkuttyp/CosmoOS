@@ -864,7 +864,20 @@ hazard go, and it was right not to.
 | injected ±2 ms detected | 2000000 ns, both directions | 2000000 ns, both directions |
 | lockup report, 5 s skew | ages it at 0 ms | — |
 
-**Bug-proofs.** `lockup-report-skew` with `lockup.c` back on a plain
+**Bug-proofs.** `clock-tick-owner` is proved against *both* reverted
+designs, by putting each one back:
+
+| the design put back | what fails |
+| --- | --- |
+| the owner is never replaced when it stops | `a stalled tick owner is never replaced: every deadline would stall with it` — phase 2 |
+| every CPU advances the counter | `the machine-wide tick does not advance at the tick rate` — phase 1's upper bound |
+
+So the test discriminates between the design that works and the two that
+did not, rather than merely passing alongside them. That is the property
+the first two attempts lacked, and the reason the third has a test at
+all.
+
+`lockup-report-skew` with `lockup.c` back on a plain
 subtraction: fails at `age == 0`. `clock-offset-bound` with the
 resolution floor removed: fails with "a measured bound finer than the
 counter can express" — the +-0 ns defect, caught by the test written for
