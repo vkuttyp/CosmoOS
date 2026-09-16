@@ -53,6 +53,19 @@ static bool fake_match(struct device *dev, struct device_driver *drv)
 }
 
 static struct bus_type fake_bus = { .name = "selftest", .match = fake_match };
+
+/* Registered once, by whichever test runs first: the model panics on a
+ * second registration of the same name, and two tests now use it --
+ * which is how the second one panicked the machine, each holding its
+ * own `registered` flag. */
+static void ensure_fake_bus(void)
+{
+    static bool registered;
+    if (!registered) {
+        bus_register(&fake_bus);
+        registered = true;
+    }
+}
 static int fake_probes, fake_removes, fake_probe_rc;
 
 static int fake_probe(struct device *dev)
@@ -77,11 +90,7 @@ static int count_cb(struct device *dev, void *arg)
 
 bool selftest_device(const char **reason)
 {
-    static bool registered;
-    if (!registered) {
-        bus_register(&fake_bus);
-        registered = true;
-    }
+    ensure_fake_bus();
     static struct device d1, d2;
     static struct device_driver drv = { .name = "fake", .match_data = "fake0", .probe = fake_probe,
                                         .remove = fake_remove };
@@ -604,6 +613,98 @@ static bool threads_settle_blk(unsigned expected)
             return false;
         sched_yield();
     }
+    return true;
+}
+
+/* --- removing a device that is busy ---------------------------------------
+ *
+ * docs/audit/next-subsystem-lifetime-windows.md. `vpci_remove` is the
+ * virtio PCI driver's remove hook and only module unload drives it, so a
+ * device removed while a request is in flight is a case nothing reaches.
+ *
+ * What this test drives is the *transition*, on a device of its own.
+ * Removing the machine's live virtio-blk is not available to a boot-time
+ * suite: it is the scratch disk the filesystem tests run on, and a test
+ * that destroys it destroys the run. The remaining work -- a virtio
+ * device dedicated to removal, so `vpci_remove` itself is exercised with
+ * real I/O outstanding -- is named in the report rather than smuggled in
+ * here, because adding a device to the test machine is a change to CI's
+ * machine and not a step of this unit.
+ *
+ * What is testable here, and is the half the review found missing, is
+ * that removal is the *whole* unbind and not the driver's hook: the hook
+ * alone leaves the bound count, `driver` and `drvdata` untouched, and a
+ * driver that frees what `drvdata` points at -- which the virtio one
+ * does -- leaves a bound device holding a dangling pointer.
+ */
+
+static unsigned busy_removes;
+static unsigned busy_inflight;      /* work outstanding when remove ran */
+static void *busy_drvdata;          /* what the driver allocated */
+
+static int busy_probe(struct device *dev)
+{
+    busy_drvdata = kzalloc(64);
+    if (busy_drvdata == NULL)
+        return -ENOMEM;
+    dev->drvdata = busy_drvdata;
+    return 0;
+}
+
+/* Like vpci_remove: it frees the object drvdata names. Anything that
+ * leaves `drvdata` pointing here afterwards has made a dangling
+ * pointer. */
+static void busy_remove(struct device *dev)
+{
+    busy_removes++;
+    busy_inflight = __atomic_load_n(&busy_inflight, __ATOMIC_ACQUIRE);
+    kfree(dev->drvdata);
+    busy_drvdata = NULL;
+}
+
+bool selftest_device_remove_busy(const char **reason)
+{
+    ensure_fake_bus();
+    static struct device d;
+    static struct device_driver drv = { .name = "busy", .match_data = "busy0", .probe = busy_probe,
+                                        .remove = busy_remove };
+    drv.bus = &fake_bus;
+    busy_removes = 0;
+    busy_drvdata = NULL;
+    __atomic_store_n(&busy_inflight, 3u, __ATOMIC_RELEASE);   /* work outstanding across the removal */
+
+    device_setup(&d, &fake_bus, NULL, "busy0");
+    d.release = device_release_static;
+    CHECK(device_register(&d) == 0);
+    CHECK(driver_register(&drv) == 0);
+    CHECK(d.driver == &drv && d.drvdata != NULL && drv.bound == 1);
+    CHECK(d.state == DEV_BOUND);
+
+    /* The removal, with work outstanding. */
+    device_test_unbind(&d);
+
+    /* The driver's hook ran once... */
+    CHECK(busy_removes == 1);
+    CHECK(busy_inflight == 3);          /* it saw the work, it did not wait for it */
+    /* ...and the bookkeeping went with it, which is the half a bare hook
+     * would have skipped. A device left bound here with drvdata still
+     * naming freed memory is what a later unregister would remove a
+     * second time. */
+    CHECK(d.driver == NULL);
+    CHECK(d.drvdata == NULL);
+    CHECK(d.state == DEV_UNBOUND);
+    CHECK(drv.bound == 0);
+    CHECK(busy_drvdata == NULL);
+
+    /* Unbinding again is a no-op rather than a second removal. */
+    device_test_unbind(&d);
+    CHECK(busy_removes == 1);
+
+    driver_unregister(&drv);
+    device_unregister(&d);
+    kinfo("selftest: device-remove-busy: the removal took the driver's hook and the model's bookkeeping together, "
+          "with %u unit(s) of work outstanding",
+          busy_inflight);
     return true;
 }
 

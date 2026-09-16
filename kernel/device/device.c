@@ -176,6 +176,24 @@ static void unbind(struct device *dev)
     kinfo("device: %s unbound from %s", dev->name, drv->name);
 }
 
+#if CONFIG_DEBUG
+/*
+ * Unbind a live device the way the ordinary path does
+ * (docs/audit/next-subsystem-lifetime-windows.md).
+ *
+ * Calling a driver's `remove` hook directly is not the same thing and is
+ * not safe: the bound count, `driver`, `drvdata` and the state all stay
+ * as they were, so a driver that frees what `drvdata` points at -- which
+ * the virtio PCI driver does -- leaves a bound device holding a dangling
+ * pointer for a later unregister to remove a second time. A test that
+ * wants the removal must have the whole transition.
+ */
+void device_test_unbind(struct device *dev)
+{
+    unbind(dev);
+}
+#endif
+
 int device_register(struct device *dev)
 {
     KASSERT(g_initialized && dev->bus != NULL);

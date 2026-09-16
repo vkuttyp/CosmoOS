@@ -168,6 +168,7 @@ bool selftest_module_load(const char **reason);
 bool selftest_module_fail(const char **reason);
 
 /* Phase 6: kernel/device/devtest.c */
+bool selftest_device_remove_busy(const char **reason);
 bool selftest_device(const char **reason);
 bool selftest_pci(const char **reason);
 bool selftest_dma(const char **reason);

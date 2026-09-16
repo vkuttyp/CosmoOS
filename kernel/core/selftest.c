@@ -410,6 +410,7 @@ static const struct selftest tests[] = {
     { "module-fail",     selftest_module_fail },
     { "module-unload-busy", selftest_module_unload_busy },
     { "device",          selftest_device },
+    { "device-remove-busy", selftest_device_remove_busy },
     { "pci",             selftest_pci },
     { "dma",             selftest_dma },
     { "iommu",           selftest_iommu },

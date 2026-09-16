@@ -103,6 +103,12 @@ const struct resource *device_resource(const struct device *dev, enum resource_t
  * registered drivers. Sleeps. -EINVAL without a release, -EEXIST if a
  * device of that name is already on the bus. A probe failure is not a
  * registration failure (state DEV_FAILED). */
+#if CONFIG_DEBUG
+/* The whole unbind transition -- the driver's remove *and* the
+ * bookkeeping after it (docs/audit/next-subsystem-lifetime-windows.md). */
+void device_test_unbind(struct device *dev);
+#endif
+
 int device_register(struct device *dev);
 
 /* Unbind (remove() if bound), drop from the bus and drop the bus's
