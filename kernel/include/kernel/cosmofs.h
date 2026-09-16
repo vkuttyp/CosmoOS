@@ -143,6 +143,12 @@ int cosmofs_test_poison_free_root(struct blkdev *bd, uint64_t value);
  * what a block holds (docs/audit/next-subsystem-unmount-leak.md). */
 void cosmofs_test_fail_freelog(struct mount *mnt, bool on);
 int cosmofs_test_poison_freelog_count(struct blkdev *bd, uint64_t count);
+/* The same for the deadlist fill, and the count of snapshot-list walks
+ * a mount has done -- the measurement behind "one verdict, not two"
+ * (docs/audit/next-subsystem-snap-deadlist.md). */
+void cosmofs_test_fail_snapfill(struct mount *mnt, bool on);
+uint64_t cosmofs_test_snap_walks(struct mount *mnt);
+uint64_t cosmofs_test_snap_verdicts(struct mount *mnt);
 /*
  * Test hook: break the filesystem in one named way, so that a finding
  * of the structural check is one a test produced on purpose. Eight of
@@ -182,5 +188,22 @@ uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev);
  * (docs/audit/next-subsystem-unmount-leak.md).
  */
 uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of);
+
+/*
+ * The invariant a copied deadlist keeps: no block is named by more than
+ * one entry, across every snapshot. Returns the entries whose block
+ * another entry also names, with `*first` the first such block and
+ * `*examined` how many entries were looked at -- because "none
+ * duplicated" is also true of a filesystem with no deadlist, and a test
+ * that cannot tell those apart proves nothing
+ * (docs/audit/next-subsystem-snap-deadlist.md).
+ */
+uint64_t cosmofs_test_deadlist_dups(struct mount *mnt, uint64_t *examined, uint64_t *first);
+
+/* The block the snapshot list starts at: the number that says whether a
+ * change copied the block it changed or edited it where it lay. Taken
+ * either side of one commit, because the allocator hands a superseded
+ * block straight back to the next one. 0 when there is no list. */
+uint64_t cosmofs_test_snap_root(struct mount *mnt);
 
 #endif /* KERNEL_COSMOFS_H */

@@ -270,6 +270,19 @@ static bool state_matches(const struct sync_point *sp, const struct expect **bad
  * blocks the last transaction freed, and this is how many. */
 static uint64_t g_leak_total;        /* blocks a replayed prefix stranded: must be zero */
 static unsigned g_prefixes_checked;  /* images the structural check actually ran on */
+/* The snapshot half (docs/audit/next-subsystem-snap-deadlist.md): a
+ * block named by two deadlist entries is what an interrupted keeper
+ * write-back used to leave, and cosmofs_check cannot see it, so the
+ * suite asks per prefix. `g_dead_seen` is how many entries it looked at
+ * across every prefix: zero would mean the workload never produced a
+ * deadlist and the whole check was vacuous. */
+static uint64_t g_dead_dups;
+static uint64_t g_dead_seen;
+
+/* The snapshots the workload takes, by name: every one an image still
+ * has must read through, because a snapshot's tree is an ordinary tree
+ * and a prefix that lost half a snapshot-list change would not walk. */
+static const char *const g_snapnames[] = { "s1", "s2" };
 /* The mount at MNT, for the structural check. */
 static struct mount *mount_of_mnt(void)
 {
@@ -321,6 +334,23 @@ static bool check_prefix(struct blkdev *bd, const uint8_t *base, const struct ra
             ok = false;
         }
     }
+    /* Every snapshot this image still has, read back the same way: the
+     * live walk never enters `.snapshots`, which is found by name only. */
+    for (unsigned i = 0; ok && i < sizeof(g_snapnames) / sizeof(g_snapnames[0]); i++) {
+        char path[96];
+        ksnprintf(path, sizeof(path), "%s/.snapshots/%s", MNT, g_snapnames[i]);
+        struct vnode *vn;
+        if (vfs_lookup(NULL, path, &vn) != 0)
+            continue;   /* this prefix predates it, or postdates its deletion */
+        vnode_put(vn);
+        struct walk_ctx w = { .ok = true };
+        walk(path, 0, &w);
+        if (!w.ok) {
+            kerror("cosmofs-replay: prefix %u: snapshot %s does not walk or read", k, g_snapnames[i]);
+            *why = "a snapshot in a prefix image does not walk or read cleanly";
+            ok = false;
+        }
+    }
     /*
      * And the shape, not only the bytes: every replayed prefix is
      * **clean**.
@@ -351,11 +381,37 @@ static bool check_prefix(struct blkdev *bd, const uint8_t *base, const struct ra
                    (unsigned long long)rep.dangling_entry.count, (unsigned long long)rep.dir_bad.count,
                    (unsigned long long)rep.counter_wrong.count, (unsigned long long)rep.chain_cycle.count,
                    (unsigned long long)rep.unreadable.count);
+            kerror("cosmofs-replay: prefix %u: first offenders: leaked %llu, free-in-use %llu, unreadable %llu, "
+                   "dir_bad %llu; snapshots seen %llu",
+                   k, (unsigned long long)(rep.alloc_not_seen.named ? rep.alloc_not_seen.name[0] : 0),
+                   (unsigned long long)(rep.seen_not_alloc.named ? rep.seen_not_alloc.name[0] : 0),
+                   (unsigned long long)(rep.unreadable.named ? rep.unreadable.name[0] : 0),
+                   (unsigned long long)(rep.dir_bad.named ? rep.dir_bad.name[0] : 0),
+                   (unsigned long long)rep.snapshots_seen);
             *why = "a replayed prefix image is not clean";
             ok = false;
         } else {
             g_leak_total += rep.alloc_not_seen.count;   /* must stay zero */
             g_prefixes_checked++;
+        }
+    }
+    /*
+     * And the one the structural check cannot make. A deadlist's entries
+     * are claimed as non-live, so a block named by two of them is not a
+     * duplicate claim and not a finding -- the image mounts, reads and
+     * checks perfectly, and the damage arrives two snapshot deletions
+     * later under whatever the allocator has since put in the block.
+     */
+    if (ok) {
+        uint64_t seen = 0, first = 0;
+        uint64_t dups = cosmofs_test_deadlist_dups(mount_of_mnt(), &seen, &first);
+        g_dead_seen += seen;
+        g_dead_dups += dups;
+        if (dups != 0) {
+            kerror("cosmofs-replay: prefix %u: %llu deadlist entr%s duplicated, first block %llu", k,
+                   (unsigned long long)dups, dups == 1 ? "y" : "ies", (unsigned long long)first);
+            *why = "a replayed prefix has one block on two deadlists";
+            ok = false;
         }
     }
     vfs_umount2(MNT, VFS_UMOUNT_FORCE);
@@ -366,6 +422,8 @@ bool selftest_cosmofs_replay(const char **reason)
 {
     g_nr_syncs = 0;
     g_nr_state = 0;
+    g_dead_dups = 0;
+    g_dead_seen = 0;
     memset(g_state, 0, sizeof(g_state));
     unsigned vnodes0 = vfs_vnode_count();
 
@@ -402,6 +460,28 @@ bool selftest_cosmofs_replay(const char **reason)
     CHECK(wl_write(MNT "/f", 7, 1));
     CHECK(wl_sync(bd));
     CHECK(wl_rename(MNT "/f", MNT "/e"));        /* replaces e */
+    CHECK(wl_sync(bd));
+    /*
+     * And the snapshot list, which until this unit was the one metadata
+     * chain a commit edited where it lay
+     * (docs/audit/next-subsystem-snap-deadlist.md). Two groups, because
+     * the two hazards are in different writers:
+     *
+     *  - `s1` taken and then a file it holds unlinked, which is the
+     *    commit's release loop appending to a deadlist;
+     *  - `s2` taken and `s1` deleted, which is the settle's keeper
+     *    write-back and the cleared entry -- the two writes that run
+     *    *inside* a transaction and that a crash could show to the root
+     *    before it.
+     *
+     * Without them the suite replayed every prefix of a filesystem that
+     * had never taken a snapshot, and reported them all clean.
+     */
+    CHECK(vfs_mkdir(NULL, MNT "/.snapshots/s1", 0755) == 0);
+    CHECK(wl_unlink(MNT "/d/c"));                /* blocks s1 holds leave the live tree */
+    CHECK(wl_sync(bd));
+    CHECK(vfs_mkdir(NULL, MNT "/.snapshots/s2", 0755) == 0);
+    CHECK(vfs_rmdir(NULL, MNT "/.snapshots/s1") == 0);
     CHECK(wl_sync(bd));
     CHECK(vfs_umount(MNT) == 0);                 /* the final commit */
     struct ramblk_log *log = ramblk_record_stop(bd);
@@ -456,11 +536,18 @@ bool selftest_cosmofs_replay(const char **reason)
      */
     CHECK(g_prefixes_checked == checked);
     CHECK(g_leak_total == 0);
+    /* Both halves again: entries were looked at, and none was a
+     * duplicate. The first is what stops "no duplicates" being the
+     * answer a filesystem with no deadlist gives. */
+    CHECK(g_dead_seen > 0);
+    CHECK(g_dead_dups == 0);
     kinfo("selftest: cosmofs-replay: %u prefix images checked, %llu blocks stranded -- the 162 of 199 the fsck unit "
           "measured are now recorded by the root that freed them and reclaimed at mount",
           g_prefixes_checked, (unsigned long long)g_leak_total);
     kinfo("selftest: cosmofs-replay: %u writes recorded over %u sync points; %u prefix images mounted and checked",
           writes, g_nr_syncs, checked);
+    kinfo("selftest: cosmofs-replay: %llu deadlist entries examined across those images, %llu on two lists",
+          (unsigned long long)g_dead_seen, (unsigned long long)g_dead_dups);
     return true;
 }
 

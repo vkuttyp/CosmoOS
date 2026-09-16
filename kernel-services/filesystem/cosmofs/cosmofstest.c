@@ -2576,7 +2576,7 @@ bool selftest_cosmofs_freelog_snapshot(const char **reason)
      * gave the record, in cosmofs_snap.c, and that is a second unit with
      * its own proofs rather than a paragraph in this one. Inventory row.
      */
-    CHECK(rep.alloc_not_seen.count <= 4);   /* the deadlist's, not the record's */
+    CHECK(rep.alloc_not_seen.count == 0);   /* was `<= 4`: see below */
 
     /* And the snapshot still reads, which is what the blocks were for. */
     CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
@@ -2587,6 +2587,371 @@ bool selftest_cosmofs_freelog_snapshot(const char **reason)
     kinfo("selftest: cosmofs-freelog-snapshot: a snapshot's blocks survive the record and the remount (%llu free either side)",
           (unsigned long long)after.free_blocks);
     return true;
+}
+
+/*
+ * The copy, in one commit.
+ *
+ * Until this unit the snapshot list was the one metadata chain in the
+ * filesystem rewritten where it lay: every other tree is copied and
+ * published by the root that names the copy, and `snap_root` alone
+ * pointed at a block a transaction edited in place. A crash between
+ * that write and the superblock left the *previous* root naming a list
+ * belonging to a transaction that did not happen
+ * (docs/audit/next-subsystem-snap-deadlist.md).
+ *
+ * Two snapshots in a row change the same list block. The claim is that
+ * the second change is written into a different block -- a copy -- and
+ * that the block it superseded went back to the allocator rather than
+ * onto a deadlist.
+ */
+bool selftest_cosmofs_snap_cow(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/one", 0755) == 0);
+
+    /*
+     * The measurement is taken across **one** commit, and that is not a
+     * detail. A block freed by a transaction keeps its bitmap bit until
+     * after that transaction's root, so a copy made inside the
+     * transaction cannot land on the block it supersedes -- but the
+     * *next* transaction's allocator starts from the member's first
+     * usable block and hands it straight back. Comparing across two
+     * commits therefore compares equal on a filesystem that copies
+     * perfectly, which is how this test first failed.
+     */
+    uint64_t before = cosmofs_test_snap_root(mount_of(ENG));
+    CHECK(before != 0);
+
+    /* One commit that appends to the snapshot's deadlist: it copies the
+     * list to write the new head into it. */
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() == 0);
+    uint64_t after = cosmofs_test_snap_root(mount_of(ENG));
+    CHECK(after != 0);
+    CHECK(after != before);   /* the claim: written into a copy, not into the block the old root named */
+
+    /*
+     * And the superseded block went back exempt rather than deferred.
+     * Deferred would send it through the snapshot filter, which asks
+     * whether the newest snapshot's recorded bitmap marks it allocated
+     * -- and it does, because it was allocated before that snapshot was
+     * taken. The block would be held on the deadlist of the very list it
+     * is a copy of, which is not a leak and not a finding, so the
+     * checker would stay quiet while the chain grew a block per commit.
+     */
+    CHECK(cosmofs_test_deadlist_len(mount_of(ENG), before) == 0);
+
+    /* The entries the commit did write are there, and none is doubled. */
+    uint64_t examined = 0;
+    CHECK(cosmofs_test_deadlist_dups(mount_of(ENG), &examined, NULL) == 0);
+    CHECK(examined > 0);
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    CHECK(cosmofs_test_snap_root(mount_of(ENG)) == after);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(rep.snapshots_seen == 1);
+    CHECK(read_matches(ENG "/.snapshots/one/held", "the snapshot's copy", 19));
+
+    kinfo("selftest: cosmofs-snap-cow: the snapshot list moved from block %llu to %llu in one commit, and %llu went "
+          "back to the allocator rather than onto a deadlist",
+          (unsigned long long)before, (unsigned long long)after, (unsigned long long)before);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * The defect, stated where it hurts: a snapshot, blocks it holds freed
+ * in the live tree, and an unmount. The deadlist entry used to be
+ * written after the root, so the unmount's commit -- the last one there
+ * will ever be -- left it in memory and threw it away. The block stayed
+ * allocated, reachable from nothing, and deleting the snapshot would
+ * never free it because the deadlist had never heard of it.
+ */
+bool selftest_cosmofs_snap_unmount(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+
+    CHECK(write_file(ENG "/held", "the snapshot's copy", 19));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    /* The unmount's own commit is the one that frees: a sync here would
+     * be followed by another commit that tidied up after it, and the
+     * defect is precisely the commit that has no successor. */
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);                       /* the claim */
+    CHECK(rep.snapshots_seen == 1);
+
+    /*
+     * And `clean` is not the answer of a filesystem that recorded
+     * nothing: entries exist, and none of them is on two lists.
+     */
+    uint64_t examined = 0, first = 0;
+    CHECK(cosmofs_test_deadlist_dups(mount_of(ENG), &examined, &first) == 0);
+    CHECK(examined > 0);
+
+    /* The blocks are still the snapshot's, which is what holding them
+     * was for. */
+    CHECK(read_matches(ENG "/.snapshots/keep/held", "the snapshot's copy", 19));
+
+    kinfo("selftest: cosmofs-snap-unmount: clean across the unmount, %llu deadlist entries and no duplicate",
+          (unsigned long long)examined);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * The copies do not accumulate. Every commit that appends to a deadlist
+ * copies the snapshot list and the deadlist head, and every superseded
+ * block goes back *exempt* -- outside the snapshot filter. Deferred
+ * instead would send each copy through that filter, which would hold it
+ * on the deadlist it is a copy of: not a leak, so the checker stays
+ * quiet, and the chain grows by a block or two on every commit until
+ * the filesystem fills.
+ *
+ * A hundred commits, and the claim is that not one of the hundred
+ * superseded list blocks is named by any deadlist.
+ */
+#define SNAP_NOGROW_COMMITS 100u
+
+bool selftest_cosmofs_snap_nogrow(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    /*
+     * A file per commit, all of them in the snapshot, deleted one at a
+     * time. Rewriting *one* file a hundred times would not do: only the
+     * first rewrite frees a block the snapshot holds, and the other
+     * ninety-nine free blocks born after it, so only a handful of
+     * commits would copy the list and the claim below would be checked
+     * against a handful of superseded blocks.
+     */
+    char path[64];
+    for (unsigned i = 0; i < SNAP_NOGROW_COMMITS; i++) {
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        CHECK(write_file(path, "x", 1));
+    }
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    uint64_t *roots = kmalloc(SNAP_NOGROW_COMMITS * sizeof(uint64_t), KMEM_ZERO);
+    CHECK(roots != NULL);
+    bool ok = true;
+    for (unsigned i = 0; i < SNAP_NOGROW_COMMITS && ok; i++) {
+        roots[i] = cosmofs_test_snap_root(mount_of(ENG));
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        ok = vfs_unlink(NULL, path) == 0 && vfs_sync() == 0;
+    }
+    if (!ok) {
+        kfree(roots);
+        *reason = "a commit in the nogrow loop failed";
+        return false;
+    }
+
+    /*
+     * Not one of them is held -- and the list really did move on each
+     * commit, which is the difference between this test and one run
+     * against a filesystem whose snapshot list never changed.
+     *
+     * The measure is how often the root *changed between consecutive
+     * commits*, not how many distinct blocks appeared. Distinct blocks
+     * counts the allocator, not the copying: a superseded block is free
+     * again by the next transaction and the metadata allocator starts
+     * from the member's first usable block, so a hundred copies land on
+     * two blocks in alternation and "distinct" reads 2 on a filesystem
+     * that copied a hundred times. Within one commit the block being
+     * superseded still has its bit set, so the copy cannot land on it
+     * and the root must differ across that commit.
+     */
+    unsigned held_roots = 0, moves = 0;
+    uint64_t now = cosmofs_test_snap_root(mount_of(ENG));
+    for (unsigned i = 0; i < SNAP_NOGROW_COMMITS; i++) {
+        if (roots[i] == 0)
+            continue;
+        uint64_t next = i + 1 < SNAP_NOGROW_COMMITS ? roots[i + 1] : now;
+        if (next != 0 && next != roots[i])
+            moves++;
+        if (roots[i] != now && cosmofs_test_deadlist_len(mount_of(ENG), roots[i]) != 0)
+            held_roots++;
+    }
+    kfree(roots);
+    CHECK(held_roots == 0);
+    /* Every commit freed a block the snapshot holds, so every commit
+     * copied: a handful of moves would mean the workload had stopped
+     * exercising the thing under test. */
+    CHECK(moves > SNAP_NOGROW_COMMITS / 2);
+
+    /* And the whole thing still adds up across a remount. */
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    uint64_t examined = 0;
+    CHECK(cosmofs_test_deadlist_dups(mount_of(ENG), &examined, NULL) == 0);
+    CHECK(examined > 0);
+
+    kinfo("selftest: cosmofs-snap-nogrow: %u commits, the snapshot list moved in %u of them, %llu deadlist entries, "
+          "no superseded list block held",
+          SNAP_NOGROW_COMMITS, moves, (unsigned long long)examined);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * The reservation, exercised past one block of it. More blocks freed in
+ * one transaction than a deadlist block holds, so the fill needs a
+ * *fresh* deadlist block as well as a copied head -- the term in the
+ * bound that is one block per CFS_DEAD_PER_BLOCK holds.
+ *
+ * The claim is the ordering one: every block the snapshot list gained is
+ * set in the bitmap the root published. A fill that allocated instead of
+ * taking from the reservation would set the bit after commit_bitmap had
+ * written it, so the next mount would read the block as free while the
+ * new root reaches it -- `seen_not_alloc`, the direction that hands live
+ * data to the allocator.
+ */
+bool selftest_cosmofs_snap_reserved(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 4096, reason))
+        return false;
+
+    /* More one-block files than a deadlist block holds. */
+    const unsigned files = CFS_DEAD_PER_BLOCK + 40u;
+    char path[64];
+    for (unsigned i = 0; i < files; i++) {
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        CHECK(write_file(path, "x", 1));
+    }
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    /* All of them in one transaction, so one commit holds them all. */
+    for (unsigned i = 0; i < files; i++) {
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        CHECK(vfs_unlink(NULL, path) == 0);
+    }
+    CHECK(vfs_sync() == 0);
+
+    uint64_t entries = cosmofs_test_deadlist_len(mount_of(ENG), 0);
+    CHECK(entries > CFS_DEAD_PER_BLOCK);   /* the chain really did need a second block */
+
+    CHECK(vfs_umount(ENG) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.seen_not_alloc.count == 0);   /* the claim */
+    CHECK(rep.clean);
+    uint64_t examined = 0;
+    CHECK(cosmofs_test_deadlist_dups(mount_of(ENG), &examined, NULL) == 0);
+    CHECK(examined == entries);
+
+    kinfo("selftest: cosmofs-snap-reserved: %llu blocks held across a chain of deadlist blocks, all accounted",
+          (unsigned long long)entries);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * A deadlist fill that fails partway. It cannot be retried -- the
+ * entries already written would be written again, and one block on two
+ * deadlists is the corruption this unit exists to prevent -- so the
+ * transaction is abandoned, which is the answer the snapshot code
+ * already gives to a change it cannot publish whole.
+ *
+ * What must not survive is the reservation: no root is published, so the
+ * next mount reads the previous root's bitmap and every block the fill
+ * had taken is free again.
+ */
+bool selftest_cosmofs_snap_rollback(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 512, reason))
+        return false;
+    CHECK(write_file(ENG "/held", "content", 7));
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+    struct cosmofs_stats before;
+    CHECK(cosmofs_stats(mount_of(ENG), &before) == 0);
+
+    cosmofs_test_fail_snapfill(mount_of(ENG), true);
+    CHECK(vfs_unlink(NULL, ENG "/held") == 0);
+    CHECK(vfs_sync() != 0);                 /* the commit fails */
+    cosmofs_test_fail_snapfill(mount_of(ENG), false);
+
+    /* Abandoned: nothing more is published from this mount. */
+    CHECK(vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0);
+    CHECK(vfs_mount(ENG, "cosmofs", bd, 0) == 0);
+    struct cosmofs_stats after;
+    CHECK(cosmofs_stats(mount_of(ENG), &after) == 0);
+    CHECK(after.generation == before.generation);   /* no root was published */
+    CHECK(after.free_blocks == before.free_blocks); /* and nothing was taken */
+    struct cosmofs_check_report rep;
+    CHECK(cosmofs_check(mount_of(ENG), &rep, 0) == 0);
+    CHECK(rep.clean);
+    CHECK(read_matches(ENG "/held", "content", 7));   /* the unlink went with it */
+
+    kinfo("selftest: cosmofs-snap-rollback: the failed fill left generation %llu and %llu free blocks, as it found them",
+          (unsigned long long)after.generation, (unsigned long long)after.free_blocks);
+    return engine_unmount(bd, reason);
+}
+
+/*
+ * One verdict per freed block, not two.
+ *
+ * The record asked "does a snapshot hold this" before the root and the
+ * release loop asked it again after -- two walks of the snapshot list
+ * per block, and two answers that were equal by argument rather than by
+ * construction. The fill now takes the verdict once and both readers use
+ * it. The counter is what says so: a claim about how many times a thing
+ * happened needs a count of it, not a reading of the code.
+ *
+ * The one extra walk is the re-ask after the list is copied, which moves
+ * the entry to a new block; it happens once per commit, not per block.
+ */
+bool selftest_cosmofs_snap_onewalk(const char **reason)
+{
+    struct blkdev *bd;
+    if (!engine_mount(&bd, 1024, reason))
+        return false;
+    char path[64];
+    for (unsigned i = 0; i < 24; i++) {
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        CHECK(write_file(path, "x", 1));
+    }
+    CHECK(vfs_sync() == 0);
+    CHECK(vfs_mkdir(NULL, ENG "/.snapshots/keep", 0755) == 0);
+
+    uint64_t w0 = cosmofs_test_snap_walks(mount_of(ENG));
+    uint64_t v0 = cosmofs_test_snap_verdicts(mount_of(ENG));
+    for (unsigned i = 0; i < 24; i++) {
+        ksnprintf(path, sizeof(path), ENG "/f%u", i);
+        CHECK(vfs_unlink(NULL, path) == 0);
+    }
+    CHECK(vfs_sync() == 0);
+    uint64_t walks = cosmofs_test_snap_walks(mount_of(ENG)) - w0;
+    uint64_t verdicts = cosmofs_test_snap_verdicts(mount_of(ENG)) - v0;
+
+    CHECK(verdicts > 0);            /* the commit really did have blocks to judge */
+    CHECK(walks == verdicts + 1);   /* the claim: one each, and one re-ask for the copy */
+
+    kinfo("selftest: cosmofs-snap-onewalk: %llu verdicts, %llu walks of the snapshot list",
+          (unsigned long long)verdicts, (unsigned long long)walks);
+    return engine_unmount(bd, reason);
 }
 
 /*
@@ -3069,6 +3434,23 @@ bool selftest_cosmofs_v3(const char **reason)
     CHECK(vfs_mkdir(NULL, ENG "/.snapshots/v3", 0755) == 0);
     CHECK(write_file(ENG "/old", "changed", 7));
     CHECK(read_matches(ENG "/.snapshots/v3/old", "written by a new kernel", 23));
+    /*
+     * And the hold is *recorded*, on a filesystem too old to have a free
+     * record. The deadlist's blocks come from the commit's reservation,
+     * and that reservation is not gated on the record's version: gating
+     * it would leave this commit's release loop unable to remember a
+     * hold, which means freeing a block the snapshot still names. Read
+     * the entries rather than the file, because the file reads correctly
+     * from a freed block until something else takes it.
+     */
+    CHECK(vfs_sync() == 0);
+    uint64_t v3_dead = 0;
+    CHECK(cosmofs_test_deadlist_dups(mount_of(ENG), &v3_dead, NULL) == 0);
+    CHECK(v3_dead > 0);
+    struct cosmofs_check_report v3rep;
+    CHECK(cosmofs_check(mount_of(ENG), &v3rep, 0) == 0);
+    CHECK(v3rep.seen_not_alloc.count == 0);
+    CHECK(v3rep.snapshots_seen == 1);
     CHECK(vfs_rmdir(NULL, ENG "/.snapshots/v3") == 0);
     CHECK(read_matches(ENG "/old", "changed", 7));
 

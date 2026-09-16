@@ -573,10 +573,143 @@ the harness fails on it rather than after
 
 ### As built
 
-Not yet built: this report is the plan. The implementation pull request
-fills this section.
+**One claim in this report was wrong, and the crash suite said so on its
+first run.** The report argued, in "Why it matters" and again in the
+design, that *phase 7's append is not this hazard* -- that the blocks it
+records are blocks the published root has already dropped, so a crash
+before the next root leaves the old root with a deadlist that is exactly
+right. That is true of the **entries**. It is not true of the
+**pointer**.
+
+When the append had to allocate a fresh deadlist head, it wrote that
+block's number into the snapshot list *where the list lay* -- a block the
+published root still names. A crash after that write and before the next
+root left the surviving root naming a deadlist head that had never been
+written and whose bitmap bit it did not have: `unreadable` and
+`seen_not_alloc` at once, the second being the direction that hands live
+data to the allocator. The replay suite found it the first time its
+workload took a snapshot: **prefix 125 of 188 writes, block 23**.
+
+A control run with step 1's copy disabled and everything else unchanged
+failed identically -- same prefix, same block -- which is what says the
+defect pre-dated this unit rather than being introduced by it.
+
+Three consequences for the plan:
+
+- **Step 1 does not close the crash hazard, and the report said it
+  would.** It closes the half that lives in `cfs_snapshot_delete`. The
+  half in the release loop closes at step 3, because that is where the
+  allocation and the pointer move in front of the root. The order of the
+  steps is unchanged; what they each buy is not.
+- **Steps 3 and 4 merged.** Moving the append produces the `held[]`
+  array as its natural by-product -- the fill must record its verdict
+  somewhere for the release loop to read -- so "the move" and "one walk,
+  not two" are one change rather than two. The measurement is still
+  taken: `cosmofs-snap-onewalk` reports **105 verdicts and 106 walks**
+  for a commit that frees 105 candidate blocks, the one extra being the
+  single re-ask after the list is copied and the entry moves with it.
+- **`cfs_snapshot_hold_block` is gone rather than reduced.** Nothing may
+  append to a deadlist outside the commit's reservation, and leaving the
+  old entry point in place would have left the defect reachable.
+
+**The rollback is not symmetric, and that is deliberate.** A commit that
+fails after the reservation gives back the record's share and **keeps
+the snapshot list's**, because `fs->sb.snap_root` names it: handing
+those blocks back would leave the in-memory root pointing at blocks the
+allocator had given away. The copy stays in the still-open transaction,
+where the next attempt finds it stamped with this generation and copies
+nothing -- `cfs_buf_cow`'s existing idempotence doing the work.
+
+**A fill that fails partway abandons the transaction** rather than
+returning an error to be retried. A retry would append the entries it
+had already written a second time, and one block on two deadlists is the
+corruption this unit exists to prevent. That is the answer
+`cosmofs_snap.c` already gives to a snapshot change it cannot publish
+whole (`snap_abandon`), applied to the commit's own append.
+
+**Two test oracles were wrong, and both times it was the same mistake:
+measuring the allocator instead of the copying.** A superseded block is
+free again by the next transaction, and the metadata allocator starts
+from the member's first usable block, so it is handed straight back.
+
+- `cosmofs-snap-cow` first compared `snap_root` before and after a
+  snapshot *create* -- two commits apart -- and asserted the numbers
+  differ. They did not, on a filesystem that copies perfectly.
+- `cosmofs-snap-nogrow` then counted how many *distinct* blocks the list
+  occupied over a hundred commits and asserted more than half. A hundred
+  copies land on two blocks in alternation, so it read 2.
+
+The fix in both cases is the same and it is the argument the design
+already rests on: **within one commit** the block being superseded still
+has its bit set, so the copy cannot land on it. `cosmofs-snap-cow`
+measures across a single commit (`snap_root 5 -> 26`), and
+`cosmofs-snap-nogrow` counts the commits across which the root changed
+rather than the blocks it visited.
+
+**No format change.** `CFS_VERSION` stays 9 and `CFS_VERSION_MIN` stays
+2, as the report said: the on-disk shapes of `CFS_KIND_SNAPLIST` and
+`CFS_KIND_DEADLIST` are unchanged and only where their blocks live
+differs, which is not a format property. A filesystem written by this
+kernel mounts on the previous one.
+
+**`cosmofs_check` needed no change**, as the report predicted: it
+already claims a deadlist's blocks as metadata. What it still cannot say
+is that one block is on two deadlists, so the crash suite asks directly,
+per prefix, with `cosmofs_test_deadlist_dups`.
 
 ### As run
 
-Not yet run: this report is the plan. The implementation pull request
-fills this section.
+`make test` and `make BUILD=release test` on both architectures, and
+`make host-test`. **303 self-tests, PASS on x86-64 and aarch64, debug
+and release**, and the measurements are identical on the two
+architectures.
+
+| measurement | before | after |
+| --- | --- | --- |
+| `cosmofs-replay` prefix images | 211, no snapshot in the workload | **334**, a snapshot taken, held blocks freed, a second taken and the first deleted |
+| blocks stranded across them | 0 | **0** |
+| deadlist entries examined, and how many on two lists | not asked | **1312, 0** |
+| `cosmofs-freelog-snapshot`'s bound | `alloc_not_seen <= 4` | **`== 0`** |
+| walks of the snapshot list per freed block | 2 | **1** (`cosmofs-snap-onewalk`: 105 verdicts, 106 walks -- the one extra is the re-ask after the list is copied, once per commit) |
+
+The rest, each as its test reported it:
+
+- `cosmofs-snap-cow`: the list moved from block 5 to 26 **across one
+  commit**, and block 5 was on no deadlist.
+- `cosmofs-snap-unmount`: `clean` across the unmount, with 14 deadlist
+  entries and no duplicate -- the entries being what stops `clean` from
+  being the answer of a filesystem that recorded nothing.
+- `cosmofs-snap-nogrow`: 100 commits, **the list moved in all 100 of
+  them** -- each freed a block the snapshot holds, so each copied -- 316
+  deadlist entries, and not one superseded list block held.
+- `cosmofs-snap-reserved`: **1697 blocks** held in one transaction,
+  across a chain of deadlist blocks rather than one, all of them set in
+  the bitmap the root published.
+- `cosmofs-snap-rollback`: the failed fill left generation 4 and 492
+  free blocks, as it found them.
+- `cosmofs-v3`: a **version-3** filesystem records a hold too. This is
+  the test for a regression the build introduced and the matrix would
+  not have caught: gating the reservation on the record's version (9)
+  leaves an older filesystem's release loop unable to remember a hold,
+  which means freeing a block a snapshot still names. The reservation is
+  version-independent; only the record is gated.
+
+**`make host-test` fails, and not because of this unit.**
+`tests/host/test_hv.c:75` asserts `sizeof(struct cosmo_vcpu_regs) ==
+448`, which is true on x86-64 and false on AArch64, where it is 496.
+This developer's host is arm64, so the assertion cannot pass here; it is
+the inventory's own standing row, unchanged by this work and not touched
+by it.
+
+**Benchmarks.** Of the four the report asked for, two are in the table
+above (the walk count, and the crash suite's stranded total and size).
+The third -- a commit's cost with no snapshot -- is unchanged by
+construction and by measurement: `fs->snap_count == 0` returns from
+`cfs_snapshot_fill` before anything and makes
+`cfs_snapshot_reserve_bound` zero, so the reservation, the writes and
+the barriers are what they were, which is what the rest of the suite
+passing with its existing free-block assertions says. The fourth, a
+commit's cost *with* a snapshot, is one copied snapshot-list block and
+one copied deadlist head per commit that appends, inside the flush the
+commit already does -- **no extra barrier**, which was the claim to
+check and is the one a new barrier would have broken.

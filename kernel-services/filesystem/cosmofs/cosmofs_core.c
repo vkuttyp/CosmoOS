@@ -251,7 +251,29 @@ int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out)
     return 0;
 }
 
-int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot)
+/*
+ * `exempt` says how the superseded block is given back: deferred, the
+ * way every tree block is, or exempt -- freed for the new root with no
+ * snapshot filter. Exempt is for a block no snapshot's tree can reach,
+ * which is every block hanging off a superblock field a snapshot does
+ * not copy: the free record, and from this unit the snapshot list and
+ * its deadlists. Sending one of those through the filter would have the
+ * snapshot hold it and append it to the deadlist it is a copy of
+ * (docs/audit/next-subsystem-snap-deadlist.md, "The exemption, and the
+ * rule it rests on").
+ */
+uint64_t cfs_res_take(struct cfs_res *r)
+{
+    return (r != NULL && r->used < r->n) ? r->blk[r->used++] : 0;
+}
+
+void cfs_res_untake(struct cfs_res *r)
+{
+    if (r != NULL && r->used > 0)
+        r->used--;
+}
+
+static int buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, bool exempt, struct cfs_res *res)
 {
     struct cfs_buf *b = *bp;
     struct cfs_mhdr *h = cfs_buf_hdr(b);
@@ -259,28 +281,73 @@ int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot)
         buf_mark_dirty(fs, b);
         return 0;
     }
-    /* The copy stays on the member the block was on where that member
-     * has room. Otherwise a metadata tree drifts onto whichever member
-     * is emptiest, and a member's own allocation index could end up on
-     * a different device than the blocks it describes. */
-    unsigned v = CFS_DVA_VDEV(b->blkno);
-    uint64_t hint = v < fs->nmembers ? CFS_DVA(v, fs->mem[v].first_usable) : 0;
-    uint64_t nblk, got;
-    int rc = cfs_alloc_run(fs, CFS_ALLOC_META, hint, 1, &nblk, &got);
-    if (rc)
-        return rc;
+    uint64_t nblk;
+    if (res != NULL) {
+        /* Inside the commit's window, where allocating is the defect
+         * this unit removes: the block comes from what was set aside
+         * before the fixpoint. Nothing left means the bound was wrong,
+         * which fails the commit rather than quietly allocating. */
+        nblk = cfs_res_take(res);
+        if (nblk == 0) {
+            kerror("cosmofs: the commit's reservation is short; refusing to allocate after the bitmap");
+            return -ENOSPC;
+        }
+    } else {
+        /* The copy stays on the member the block was on where that
+         * member has room. Otherwise a metadata tree drifts onto
+         * whichever member is emptiest, and a member's own allocation
+         * index could end up on a different device than the blocks it
+         * describes. */
+        unsigned v = CFS_DVA_VDEV(b->blkno);
+        uint64_t hint = v < fs->nmembers ? CFS_DVA(v, fs->mem[v].first_usable) : 0;
+        uint64_t got;
+        int rc = cfs_alloc_run(fs, CFS_ALLOC_META, hint, 1, &nblk, &got);
+        if (rc)
+            return rc;
+    }
     struct cfs_buf *nb = buf_alloc(fs, nblk);
     if (nb == NULL) {
-        cfs_free_block_deferred(fs, nblk);
+        if (res != NULL)
+            cfs_res_untake(res);
+        else
+            cfs_free_block_deferred(fs, nblk);
         return -ENOMEM;
     }
     memcpy(nb->data, b->data, CFS_BLOCK);
     mhdr_seal(fs, nb->data, h->kind, nblk);
     buf_mark_dirty(fs, nb);
-    cfs_free_block_deferred(fs, b->blkno);
+    if (exempt)
+        cfs_free_block_exempt(fs, b->blkno);
+    else
+        cfs_free_block_deferred(fs, b->blkno);
     cfs_buf_put(fs, b);
     *parent_slot = nblk;
     *bp = nb;
+    return 0;
+}
+
+int cfs_buf_cow(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot)
+{
+    return buf_cow(fs, bp, parent_slot, false, NULL);
+}
+
+int cfs_buf_cow_exempt(struct cfs *fs, struct cfs_buf **bp, uint64_t *parent_slot, struct cfs_res *res)
+{
+    return buf_cow(fs, bp, parent_slot, true, res);
+}
+
+int cfs_buf_new_at(struct cfs *fs, uint32_t kind, uint64_t blk, struct cfs_buf **out)
+{
+    /* Through buf_alloc, not cfs_buf_get: a block just handed out may
+     * have a stale buffer from its previous life further down the list.
+     * The same reason cfs_buf_cow and freelog_fill do it this way. */
+    struct cfs_buf *b = buf_alloc(fs, blk);
+    if (b == NULL)
+        return -ENOMEM;
+    memset(b->data, 0, CFS_BLOCK);
+    mhdr_seal(fs, b->data, kind, blk);
+    buf_mark_dirty(fs, b);
+    *out = b;
     return 0;
 }
 
@@ -845,7 +912,7 @@ static int freelog_replay(struct cfs *fs)
  * statement and the new root replaces it, so without this every commit
  * leaks its predecessor's record -- this unit's own defect, one level up.
  *
- * Deliberately not through cfs_snapshot_hold_block. That asks whether a
+ * Deliberately not through the snapshot filter. That asks whether a
  * snapshot's recorded bitmap marks the block allocated, and these blocks
  * were allocated when an older snapshot was taken, so the generic path
  * would hold them and append them to a deadlist. No snapshot can reach a
@@ -887,14 +954,47 @@ static int freelog_release_previous(struct cfs *fs)
  * block per chunk it may rewrite and one index per member. Generous by
  * design; freelog_fill puts the leftovers in the record itself.
  */
-static int freelog_reserve(struct cfs *fs, uint64_t **out, unsigned *n_out)
+/*
+ * The commit's reservation: blocks taken before the bitmap fixpoint and
+ * handed out after it.
+ *
+ * Two consumers, and the second is optional. The deadlist fill takes
+ * from the front and needs its blocks on **every** filesystem that has a
+ * snapshot, whatever the format version; the record takes what is left
+ * and exists only from version 9. So `with_record` widens the
+ * reservation rather than gating it: a version-8 filesystem with a
+ * snapshot still reserves the deadlist's share, because the alternative
+ * is a release loop that frees a snapshot's blocks.
+ */
+static int commit_reserve(struct cfs *fs, struct cfs_res *res, bool with_record)
 {
-    *out = NULL;
-    *n_out = 0;
-    uint64_t bound = (uint64_t)fs->nr_pending + fs->nr_exempt + fs->nr_chunks + fs->nmembers;
-    if (bound == 0)
+    res->blk = NULL;
+    res->n = 0;
+    res->used = 0;
+    /*
+     * What the record must be able to name, and what the snapshot list
+     * may add to it: the blocks its copies supersede are freed by this
+     * root like any other, so they are entries here too.
+     */
+    unsigned pending_bound = (unsigned)(fs->nr_pending + fs->nr_chunks + fs->nmembers);
+    uint64_t bound = with_record
+                         ? (uint64_t)pending_bound + fs->nr_exempt + cfs_snapshot_exempt_bound(fs)
+                         : 0;
+    /*
+     * And the blocks the snapshot list's own work needs, which are
+     * blocks rather than entries: the chain's copy, a copied deadlist
+     * head and a fresh deadlist block per CFS_DEAD_PER_BLOCK holds. One
+     * reservation, two consumers -- the deadlist fill takes from the
+     * front and the record gets what is left, so a block nobody needed
+     * is a leftover the record names as free, which is the mechanism
+     * that already keeps the record's own bound from having to be tight.
+     */
+    unsigned snap_extra = cfs_snapshot_reserve_bound(fs, pending_bound);
+    if (bound == 0 && snap_extra == 0)
         return 0;
-    unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK);
+    unsigned n = (unsigned)((bound + CFS_FREELOG_PER_BLOCK - 1) / CFS_FREELOG_PER_BLOCK) + snap_extra;
+    if (n == 0)
+        return 0;
     uint64_t *blk = kmalloc((size_t)n * sizeof(*blk), KMEM_ZERO);
     if (blk == NULL)
         return -ENOMEM;
@@ -909,8 +1009,8 @@ static int freelog_reserve(struct cfs *fs, uint64_t **out, unsigned *n_out)
             return rc;
         }
     }
-    *out = blk;
-    *n_out = n;
+    res->blk = blk;
+    res->n = n;
     return 0;
 }
 
@@ -920,15 +1020,23 @@ static int freelog_reserve(struct cfs *fs, uint64_t **out, unsigned *n_out)
  * that describes its own release, which is what keeps the bound from
  * having to be tight.
  */
-static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
+static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n, const bool *held, unsigned held_n)
 {
     if (n == 0) {
+        /* Nothing reserved for the record. That is right when there is
+         * nothing to record and a silent unmount leak when there is, so
+         * the second case stops the commit rather than writing no
+         * record and reporting success. */
+        if (fs->nr_pending != 0 || fs->nr_exempt != 0) {
+            kerror("cosmofs: no reservation left for the free record (%u pending, %u exempt)", fs->nr_pending,
+                   fs->nr_exempt);
+            return -EIO;
+        }
         fs->sb.free_root = 0;
         return 0;
     }
     if (fs->test_fail_freelog)
         return -EIO;   /* test hook: fail with the reservation outstanding */
-    bool snaps = fs->snap_count > 0;
     unsigned total = fs->nr_pending + fs->nr_exempt;
     /*
      * Room for the entries *and* for the leftovers, which are entries
@@ -967,21 +1075,23 @@ static int freelog_fill(struct cfs *fs, uint64_t *blk, unsigned n)
             /* The exempt list after the pending one, as one sequence:
              * both are freed by this root and both must be in what it
              * says it freed, or an unmount loses them. */
-            bool exempt = at >= fs->nr_pending;
-            uint64_t dva = exempt ? fs->pending_exempt[at - fs->nr_pending]
-                                  : fs->pending_free[at];
+            unsigned idx = at;
+            bool exempt = idx >= fs->nr_pending;
+            uint64_t dva = exempt ? fs->pending_exempt[idx - fs->nr_pending]
+                                  : fs->pending_free[idx];
             at++;
             uint64_t lin = cfs_dva_lin(fs, dva);
-            /*
-             * Exactly what phase 7 will clear, asked the same way it
-             * asks. cfs_snapshot_holds is the walk cfs_snapshot_hold_block
-             * does, without the deadlist append -- which stays after the
-             * root, where it always was. Recording a block a snapshot
-             * keeps would tell the next mount to free it.
-             */
             if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
                 continue;
-            if (!exempt && snaps && cfs_snapshot_holds(fs, dva))
+            /*
+             * Exactly what the release loop will clear, and not asked
+             * again: cfs_snapshot_fill took the verdict once, before
+             * this, and recorded the held blocks on a deadlist. The
+             * record names what is left. Recording a block a snapshot
+             * keeps would tell the next mount to free it, and asking a
+             * second time would be two verdicts where one will do.
+             */
+            if (!exempt && held != NULL && idx < held_n && held[idx])
                 continue;
             d->blk[k++] = dva;
         }
@@ -1052,42 +1162,92 @@ int cfs_commit(struct cfs *fs)
      */
     bool record_frees = fs->sb.version >= 9;
     int rc = 0;
-    uint64_t *record = NULL;
-    unsigned record_n = 0;
+    struct cfs_res res = { .blk = NULL, .n = 0, .used = 0 };
+    bool *held = NULL;
+    unsigned held_n = 0;
     if (record_frees) {
         rc = freelog_release_previous(fs);
         if (rc)
             return rc;
-        rc = freelog_reserve(fs, &record, &record_n);
-        if (rc)
-            return rc;
     }
+    /*
+     * Always, not only from version 9: the deadlist fill below needs its
+     * blocks on any filesystem that has a snapshot, and a release loop
+     * that cannot record a hold is a release loop that frees a
+     * snapshot's blocks.
+     */
+    rc = commit_reserve(fs, &res, record_frees);
+    if (rc)
+        return rc;
 
     rc = commit_bitmap(fs);
-    if (rc == 0 && record_frees)
-        rc = freelog_fill(fs, record, record_n);
-    if (rc && record != NULL) {
+    /*
+     * The deadlist, before the record and before the root. It takes the
+     * verdict for every pending free once and puts the held ones on a
+     * copy of the snapshot's deadlist; the record then names what is
+     * left, and the release loop below clears exactly that
+     * (docs/audit/next-subsystem-snap-deadlist.md).
+     */
+    if (rc == 0 && fs->nr_pending > 0 && fs->snap_count > 0) {
+        held_n = fs->nr_pending;
+        held = kzalloc((size_t)held_n * sizeof(*held));
+        if (held == NULL)
+            rc = -ENOMEM;
+        else
+            rc = cfs_snapshot_fill(fs, &res, held, held_n);
+        if (rc == 0 && fs->nr_pending != held_n) {
+            /* Nothing in the fill defers a free, so this cannot move.
+             * If it ever does, the record would name a block a snapshot
+             * holds, so the commit stops rather than guessing. */
+            kerror("cosmofs: the pending list moved during the deadlist fill (%u -> %u)", held_n,
+                   fs->nr_pending);
+            rc = -EIO;
+        }
+    }
+    unsigned snap_used = res.used;
+    if (rc == 0 && record_frees) {
+        rc = freelog_fill(fs, res.blk + res.used, res.n - res.used, held, held_n);
+    } else if (rc == 0) {
+        /* No record on this filesystem, so nothing will name the blocks
+         * the reservation did not need: give them back. They are free
+         * from the next commit, which is the same bargain a version-8
+         * filesystem already makes with every other deferred free. */
+        for (unsigned i = res.used; i < res.n; i++)
+            cfs_free_block_deferred(fs, res.blk[i]);
+        res.used = res.n;
+    }
+    if (rc && res.blk != NULL) {
         /*
          * This root will not be published, so nothing names the blocks
-         * the reservation took. Left allocated they are a leak the
-         * *next* successful commit makes durable, because that commit
-         * writes this bitmap. Give them back the way every other
-         * rolled-back allocation in a transaction does -- deferred, so
-         * the bit survives until a root says they are free -- and drop
-         * whatever `freelog_fill` had already written into them, which
-         * must not reach the disk under an owner that no longer exists.
+         * the record's share of the reservation took. Left allocated
+         * they are a leak the *next* successful commit makes durable,
+         * because that commit writes this bitmap. Give them back the way
+         * every other rolled-back allocation in a transaction does --
+         * deferred, so the bit survives until a root says they are free
+         * -- and drop whatever `freelog_fill` had already written into
+         * them, which must not reach the disk under an owner that no
+         * longer exists.
+         *
+         * The snapshot list's share -- `res.blk[0 .. snap_used)` -- is
+         * *not* given back, because `fs->sb.snap_root` names it. The
+         * copy stays in the still-open transaction, where the next
+         * attempt finds it stamped with this generation and copies
+         * nothing; giving it back would leave the root pointing at a
+         * block the allocator had handed away.
          */
-        for (unsigned i = 0; i < record_n; i++) {
-            struct cfs_buf *b = buf_find(fs, record[i]);
+        for (unsigned i = snap_used; i < res.n; i++) {
+            struct cfs_buf *b = buf_find(fs, res.blk[i]);
             if (b != NULL)
                 buf_mark_clean(fs, b);
-            cfs_free_block_deferred(fs, record[i]);
+            cfs_free_block_deferred(fs, res.blk[i]);
         }
         fs->sb.free_root = 0;
     }
-    kfree(record);
-    if (rc)
+    kfree(res.blk);
+    if (rc) {
+        kfree(held);
         return rc;
+    }
 
     /* Every dirty metadata block, re-sealed with its final contents. */
     struct cfs_buf *b;
@@ -1097,8 +1257,10 @@ int cfs_commit(struct cfs *fs)
         struct cfs_mhdr *h = cfs_buf_hdr(b);
         mhdr_seal(fs, b->data, h->kind, b->blkno);
         rc = pool_write(fs->pool, b->blkno, b->data);
-        if (rc)
+        if (rc) {
+            kfree(held);
             return rc;
+        }
     }
 
     /* The root, into the other slot, flushed before and after (one call:
@@ -1113,8 +1275,10 @@ int cfs_commit(struct cfs *fs)
      * to, so a device that misses a commit can be told apart at the
      * next mount (design.md, "Format version 5"). */
     rc = cfs_labels_update(fs);
-    if (rc)
+    if (rc) {
+        kfree(held);
         return rc;
+    }
     /* Now make all of it stable, on every device. The root write's own
      * preflush reaches only the devices carrying the superblock, which
      * is member 0's; a root that names blocks still sitting in another
@@ -1122,12 +1286,16 @@ int cfs_commit(struct cfs *fs)
      * about labels alone -- it has been true of every block on another
      * member since a pool could have more than one. */
     rc = pool_flush(fs->pool);
-    if (rc)
+    if (rc) {
+        kfree(held);
         return rc;
+    }
     unsigned slot = fs->sb_slot == CFS_SUPER_A ? CFS_SUPER_B : CFS_SUPER_A;
     rc = super_write(fs, slot, BIO_PREFLUSH | BIO_FUA);
-    if (rc)
+    if (rc) {
+        kfree(held);
         return rc;
+    }
     fs->sb_slot = slot;
     fs->commits++;
     fs->first_dirty_ns = 0;
@@ -1143,17 +1311,20 @@ int cfs_commit(struct cfs *fs)
      * it and the new one does not -- which is what a snapshot still
      * names. While one exists the block is remembered on its deadlist
      * and its bitmap bit stays set, so the allocator never hands it out
-     * (design.md, "Not freeing what a snapshot names"). The deadlist
-     * append stays here, after the root: the record written before it
-     * asked the same question without writing anything
-     * (cfs_snapshot_holds), so the two agree by construction. */
-    bool snapshots = fs->snap_count > 0;
+     * (design.md, "Not freeing what a snapshot names").
+     *
+     * What is left here is the clearing. The remembering happened before
+     * the root, in cfs_snapshot_fill, and `held` is that verdict: this
+     * loop neither allocates, nor writes, nor asks the snapshot list
+     * anything. It used to do all three, and that is what a crash and an
+     * unmount each lost half of
+     * (docs/audit/next-subsystem-snap-deadlist.md). */
     for (unsigned i = 0; i < fs->nr_pending; i++) {
+        if (held != NULL && i < held_n && held[i])
+            continue;   /* a snapshot's, and already on its deadlist */
         uint64_t dva = fs->pending_free[i];
         uint64_t lin = cfs_dva_lin(fs, dva);
         if (lin == CFS_DVA_NONE || !bit_test(fs->bitmap, lin))
-            continue;
-        if (snapshots && cfs_snapshot_hold_block(fs, dva))
             continue;
         bit_clear(fs->bitmap, lin);
         fs->bitmap_dirty[lin / CFS_BITS_PER_BITMAP] = 1;
@@ -1161,6 +1332,8 @@ int cfs_commit(struct cfs *fs)
         fs->mem[CFS_DVA_VDEV(dva)].free_blocks++;
     }
     fs->nr_pending = 0;
+    kfree(held);
+    held = NULL;
     /* And the blocks no snapshot may hold, with no filter at all. */
     for (unsigned i = 0; i < fs->nr_exempt; i++) {
         uint64_t dva = fs->pending_exempt[i];
@@ -2068,6 +2241,25 @@ void cosmofs_test_fail_freelog(struct mount *mnt, bool on)
         fs->test_fail_freelog = on;
 }
 
+void cosmofs_test_fail_snapfill(struct mount *mnt, bool on)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs)
+        fs->test_fail_snapfill = on;
+}
+
+uint64_t cosmofs_test_snap_walks(struct mount *mnt)
+{
+    struct cfs *fs = cfs_of(mnt);
+    return fs ? fs->snap_walks : 0;
+}
+
+uint64_t cosmofs_test_snap_verdicts(struct mount *mnt)
+{
+    struct cfs *fs = cfs_of(mnt);
+    return fs ? fs->snap_verdicts : 0;
+}
+
 void cosmofs_test_discard_on_unmount(struct mount *mnt, bool discard)
 {
     struct cfs *fs = cfs_of(mnt);
@@ -2132,6 +2324,32 @@ uint64_t cosmofs_test_deadlist_len(struct mount *mnt, uint64_t of)
     uint64_t n = cfs_snapshot_deadlist_len(fs, of);
     mutex_unlock(&fs->lock);
     return n;
+}
+
+uint64_t cosmofs_test_deadlist_dups(struct mount *mnt, uint64_t *examined, uint64_t *first)
+{
+    if (examined != NULL)
+        *examined = 0;
+    if (first != NULL)
+        *first = 0;
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return 0;
+    mutex_lock(&fs->lock);
+    uint64_t n = cfs_snapshot_deadlist_dups(fs, examined, first);
+    mutex_unlock(&fs->lock);
+    return n;
+}
+
+uint64_t cosmofs_test_snap_root(struct mount *mnt)
+{
+    struct cfs *fs = cfs_of(mnt);
+    if (fs == NULL)
+        return 0;
+    mutex_lock(&fs->lock);
+    uint64_t r = fs->sb.snap_root;
+    mutex_unlock(&fs->lock);
+    return r;
 }
 
 uint64_t cosmofs_test_member_free(struct mount *mnt, unsigned vdev)
