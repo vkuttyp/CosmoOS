@@ -118,13 +118,26 @@ AHCI are the two entries from that list now built.
 
 - only `policy_rr.c` exists; CFS-like fairness, real-time, deadline,
   interactive scheduling and CPU isolation are future policies.
-- no load balancing and no migration (a thread stays on the CPU chosen
-  at creation; confirmed 2026-09-14). **Taken up by
-  `docs/audit/next-subsystem-thread-migration.md`**, which measures the
-  consequence — 8 of 14 threads on CPU 0, and 94% of context switches
-  there — and records that `pick_cpu`'s tie-break prefers the
-  lowest-numbered CPU, so every thread created on an idle machine goes
-  to CPU 0.
+- **no migration** (a thread stays on the CPU chosen at creation;
+  confirmed 2026-09-14). ~~no load balancing~~ — **placement is fixed**
+  (`docs/audit/next-subsystem-thread-migration.md`): `pick_cpu` rotates
+  its ties, so a thread created on an idle machine is no longer always
+  born on CPU 0, which was the measured cause of 8 of 14 threads and 94%
+  of context switches landing there.
+
+  **Migration itself was built and removed**, and the next attempt
+  should read that report's as-built before starting. A pull balancer
+  moved threads correctly — CPU 0 went to 6 of 14, CPU 2 did ten times
+  the context switches — and made three of four aarch64 boots fail, once
+  with seven concurrency tests at once, where four of four pass without
+  it. The corruption was not identified. Ruled out: `sched_wake`'s
+  unlocked `t->cpu` read, `list_remove` leaving a stale node, per-CPU
+  fault accounting, and per-CPU interrupt routing. Found on the way:
+  lockdep cannot check a two-run-queue lock order (one class), and
+  `rq->current` can be in a ready list. **And the tree holds per-CPU
+  assumptions nothing declares** — `el2` asserts the hypervisor backend
+  owns EL2 "on this CPU" from an unpinned thread — so migration needs an
+  audit of those before it can land, not just a working balancer.
 - no priority inheritance in `mutex.c`.
 - no `rwlock` in the kernel.
 - the Epoch abstraction (`quiesce`) is used for lifetimes; not yet for
