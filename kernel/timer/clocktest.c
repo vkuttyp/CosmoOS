@@ -74,6 +74,45 @@ bool selftest_clock_since_saturates(const char **reason)
     return true;
 }
 
+/*
+ * What the correction costs on the clock path.
+ *
+ * The report's claim is that it is not measurable; a benchmark is what
+ * turns that into a measurement rather than an expectation. What is
+ * being timed is `clock_now_ns` as shipped -- one counter read, a
+ * 128-bit multiply and shift, then one array load and one add -- against
+ * `clock_raw_ns`, which is the same without the last two.
+ *
+ * The branch is measured too, and it is why the difference is not zero
+ * on a machine applying no correction. It is not there to save the add:
+ * `arch_cpu_id()` reads the per-CPU block through GS, so the flag is
+ * what keeps `clock_now_ns` from depending on percpu being installed --
+ * including on an AP partway through its own bring-up.
+ */
+bool selftest_clock_cost(const char **reason)
+{
+    enum { N = 200000 };
+    uint64_t sink = 0;
+
+    uint64_t t0 = clock_now_ns();
+    for (unsigned i = 0; i < N; i++)
+        sink += clock_raw_ns();
+    uint64_t raw_ns = clock_since_ns(t0);
+
+    t0 = clock_now_ns();
+    for (unsigned i = 0; i < N; i++)
+        sink += clock_now_ns();
+    uint64_t corrected_ns = clock_since_ns(t0);
+
+    CHECK(sink != 0);   /* neither loop was optimised away */
+    CHECK(raw_ns > 0 && corrected_ns > 0);
+
+    kinfo("selftest: clock-cost: %llu ns per clock_now_ns, %llu ns per clock_raw_ns over %u calls each (%lld ns for the correction)",
+          (unsigned long long)(corrected_ns / N), (unsigned long long)(raw_ns / N), (unsigned)N,
+          (long long)((int64_t)corrected_ns - (int64_t)raw_ns) / (int64_t)N);
+    return true;
+}
+
 #if CONFIG_DEBUG
 
 #include <kernel/percpu.h>

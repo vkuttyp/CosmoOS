@@ -2221,12 +2221,12 @@ See [docs/development.md](docs/development.md).
   it was defining**: `blk-unregister-drain` asserted an order between two
   events on two different CPUs by comparing their timestamps, which is
   exactly what the kernel had just stopped promising -- it uses an atomic
-  sequence number now and depends on no clock at all. Eight new tests;
+  sequence number now and depends on no clock at all. Nine new tests;
   the two cross-CPU oracles pass trivially on every machine here, so the
   injection that would fail them runs in CI rather than in a terminal.
   What does not run anywhere available: the applied correction, since no
   machine here both has a per-CPU counter and advertises it as invariant.
-  327 self-tests on both architectures, debug and release (PR #156).
+  328 self-tests on both architectures, debug and release (PR #156).
 
 - **Next:** the roadmap's numbered phases and the post-roadmap audit's
   own list are complete, apart from pid renumbering, which the process

@@ -850,6 +850,35 @@ fails at the future-stamp assertion. `clock-cross-cpu` and
 a revert, and that test proves itself in both directions and in the
 converse (widen the bound and the same measurement is accepted).
 
+**Benchmarks.** The report asked for the clock path before and after,
+"the claim is that it is not measurable; the benchmark is what makes that
+a measurement". It is measurable, and the claim was wrong:
+
+| | `clock_now_ns` | `clock_raw_ns` | the correction |
+| --- | --- | --- | --- |
+| x86-64 | 123 ns | 95 ns | **28 ns** |
+| AArch64 | 192 ns | 160 ns | **32 ns** |
+
+About 20%, over 200000 calls each. What that means on real silicon is
+*not* measured and the ratio does not carry: under TCG every instruction
+is emulated, so a load, a branch and an add cost far more relative to the
+counter read than they would on hardware, where the read alone is tens
+of cycles. The honest statement is that the correction is measurable
+under emulation and its cost on real hardware is unknown — the same
+limit as everything else in this unit.
+
+**The branch that turned out not to be about speed.** It was removed
+once, on the reasoning that the addends are zero when no correction
+applies, so a machine using none could add zero instead of testing a
+flag. That was wrong for a reason the benchmark would never have shown:
+`arch_cpu_id()` reads the per-CPU block through GS, so indexing the
+offsets unconditionally makes *every* `clock_now_ns` depend on percpu
+being installed — including the ones an AP takes partway through its own
+bring-up. The values would have been right and the load to get them
+would not have been safe. It booted on QEMU, which is exactly the
+evidence this unit exists to distrust. The flag is back and its comment
+now says what it guards.
+
 **What did not run.** The applied correction, on any machine. No machine
 available to this project both has a per-CPU counter and advertises it as
 invariant, so `g_apply_offset` is false on every boot. The arithmetic is

@@ -35,13 +35,15 @@ static bool g_clock_common = true;
  * whether they are being applied (they are not, on a counter this kernel
  * may not trust across CPUs). */
 static int64_t g_cpu_offset_ns[CONFIG_MAX_CPUS];
-static bool g_apply_offset;
 static unsigned g_measured;   /* CPUs whose offset was actually measured */
 /* The bound the measurement produced, kept whether or not it was
  * applied: on a machine that measures and then declines to trust the
  * result, this is still the number that was computed, and the only way
  * to check the computation on such a machine. */
 static uint64_t g_measured_bound_ns;
+/* Set once, after every CPU is online and the measurement has run: see
+ * clock_now_ns for why this gates a per-CPU access rather than an add. */
+static bool g_apply_offset;
 
 #define CLOCK_SHIFT 32
 
@@ -89,6 +91,19 @@ uint64_t clock_raw_ns(void)
 
 uint64_t clock_now_ns(void)
 {
+    /*
+     * The flag is not here to save the add. `arch_cpu_id()` reads the
+     * per-CPU block through GS, so indexing the offsets unconditionally
+     * would make every `clock_now_ns` -- including the ones an AP takes
+     * partway through its own bring-up, before its block is installed --
+     * depend on percpu being up. The flag is set once, after
+     * `clock_measure_offsets` has run and every CPU is online, so the
+     * per-CPU access happens only when it is certainly safe.
+     *
+     * Dropping it and relying on the addends being zero was tried and
+     * reverted: the values would have been right, and the load to get
+     * them would not have been safe.
+     */
     uint64_t now = clock_raw_ns();
     if (__atomic_load_n(&g_apply_offset, __ATOMIC_ACQUIRE))
         now = (uint64_t)((int64_t)now + g_cpu_offset_ns[arch_cpu_id()]);

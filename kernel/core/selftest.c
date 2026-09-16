@@ -430,6 +430,7 @@ static const struct selftest tests[] = {
     { "clock-invariant-gate", selftest_clock_invariant_gate },
     { "clock-offset-bound", selftest_clock_offset_bound },
     { "lockup-report-skew", selftest_lockup_report_skew },
+    { "clock-cost", selftest_clock_cost },
     { "nvme",            selftest_nvme },
     { "usb-enum",        selftest_usb_enum },
     { "usb-storage",     selftest_usb_storage },

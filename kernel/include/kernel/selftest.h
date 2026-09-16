@@ -111,6 +111,7 @@ bool selftest_clock_skew_detected(const char **reason);  /* injected skew makes 
 bool selftest_clock_invariant_gate(const char **reason);  /* a counter that is not common promises nothing */
 bool selftest_clock_offset_bound(const char **reason);  /* no bound finer than the counter's resolution */
 bool selftest_lockup_report_skew(const char **reason);  /* the lockup report ages a future stamp at 0 */
+bool selftest_clock_cost(const char **reason);  /* what the correction costs on the clock path */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */
