@@ -120,20 +120,33 @@ it as `alloc_not_seen`; that is what the `<= 4` bound above is counting.
 It is small per unmount and it is permanent per occurrence.
 
 **Correctness, across a crash — the in-place half.** A dirty
-`CFS_KIND_SNAPLIST` block is written by the commit's dirty loop
-(`cosmofs_core.c:1093-1105`), *before* the root. If the machine dies
-between that write and the superblock, the surviving root is the
-previous one, and it names the same block — now carrying the next
-transaction's contents. Concretely:
+`CFS_KIND_SNAPLIST` or `CFS_KIND_DEADLIST` block is written by the
+commit's dirty loop (`cosmofs_core.c:1093-1105`), *before* the root. If
+the machine dies between that write and the superblock, the surviving
+root is the previous one, and it names the same block — now carrying a
+transaction that did not happen. That is a hazard for the writers that
+run *inside* a transaction, which are `cfs_snapshot_delete`'s two:
 
-- `deadlist_append` added block numbers to the head. Under the old root
-  those blocks are still live in the live tree. Deleting the snapshot
-  then asks only "does a *remaining snapshot* occupy this", not "does
-  the live tree", so `deadlist_settle` hands live blocks to the
-  allocator (`:266`). That is data loss, not a leak.
-- `clear_entry` removed a snapshot. Under the old root the snapshot is
-  gone and its blocks are still allocated: a permanent strand of the
-  whole snapshot.
+- The keeper write-back appends the doomed snapshot's blocks to the
+  oldest remaining snapshot's deadlist (`:259`, `:646-669`). Under the
+  old root the doomed snapshot is still there and still names them, so
+  the blocks are on two deadlists at once and the second settle frees
+  what the first already gave back — a double free, which is the
+  allocator handing out live data.
+- `clear_entry` removed the snapshot (`:577-584`). Under the old root
+  the entry is gone and its blocks are still allocated: a permanent
+  strand of a whole snapshot. Which of the two lands is whichever order
+  the dirty loop happened to reach them in, so both are reachable from
+  one crash.
+
+**Phase 7's append is not this hazard, and the distinction is the
+design.** The blocks it records are blocks the published root has
+already dropped, so a crash before the *next* root leaves the old root
+with a deadlist that is exactly right. Phase 7's defect is the leak and
+the illegal allocation, not corruption — and this is precisely why the
+append cannot simply be moved earlier on its own: *before* the root is
+where the old-root visibility above begins to apply to it, and the copy
+is what answers that.
 
 Nothing tests this, because **the crash suite's workload has no
 snapshot in it** — `cosmofscrash.c` has one occurrence of the word, and
@@ -367,22 +380,34 @@ the next person to touch the file.
 
 ## Migration plan
 
-1. **The copy, before anything depends on it.** `cfs_snap_cow`, and
-   every in-place write to a `CFS_KIND_SNAPLIST` or `CFS_KIND_DEADLIST`
-   block routed through it — create, delete, settle, append — with the
-   append still where it is, after the root. Nothing about the leak
-   changes in this step and the crash hazard closes. Its test is the
-   crash suite with a snapshot in the workload, which fails before this
-   step and passes after it.
+1. **The copy, for the writers that are inside a transaction.**
+   `cfs_snap_cow`, and the four writers that run before their own
+   commit's root routed through it: `cfs_snapshot_create`,
+   `clear_entry`, `deadlist_settle` and the keeper write-back. Those are
+   where the crash hazard lives, and this step closes it. Its test is
+   the crash suite with a snapshot **taken and deleted** in the
+   workload, which fails before this step and passes after it.
+
+   **Phase 7's append is deliberately left alone until step 3**, and
+   copying it here would be the report's own rule broken in the report's
+   own plan: a copy after the root allocates after `commit_bitmap` — two
+   blocks where the in-place edit took at most one — and dirties a
+   buffer the commit's write loop has already passed, so it still waits
+   for a commit that an unmount never makes. The append cannot be copied
+   until it is moved, and it cannot be moved until there is a
+   reservation to move it into. That is the order of steps 2 and 3.
 2. **The reservation.** The bound widened and the snapshot list's blocks
    taken from it, with the fill still writing nothing new: the
    assertion is that a commit under a snapshot allocates nothing after
    `commit_bitmap`, checked by a remount and a structural check, and by
    the over-reservation showing up in the record as free.
-3. **The move.** The append moved into the fill, phase 7 reduced to
-   clearing bits, `cfs_snapshot_hold_block` removed. This is the step
-   that closes the leak: the unmount test, and `cosmofs-freelog-snapshot`
-   tightened to `== 0`.
+3. **The move, which is also the append's copy.** The append moved
+   into the fill, taking its blocks from the reservation and copying
+   rather than editing — before the root, where a copy is what makes
+   that safe; phase 7 reduced to clearing bits;
+   `cfs_snapshot_hold_block` removed. This is the step that closes the
+   leak: the unmount test, and `cosmofs-freelog-snapshot` tightened to
+   `== 0`.
 4. **The one walk.** The fill's verdict feeds both records; the second
    walk goes. Measured, not assumed: the benchmark below.
 5. **Docs, README Status, the inventory row struck through, the
@@ -401,8 +426,9 @@ BUILD=release`, which CI runs).
 | --- | --- | --- |
 | `cosmofs-snap-unmount` | **the defect**: a snapshot, a file it holds deleted in the live tree, an unmount and a remount — and the structural check is `clean`, with `alloc_not_seen.count == 0` | the unfixed tree: today this is 2 to 4 blocks, which is the bound `cosmofs-freelog-snapshot` asserts |
 | `cosmofs-snap-cow` | a commit that appends to a deadlist leaves the *old* head block free and the new chain reachable only from the new root: the block numbers differ, and the old numbers are clear in the bitmap the new root publishes | edit the head in place: the numbers are equal and the next assertion, the crash one, fails |
-| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot**, deletes a file it holds, and every prefix mounts clean, reads the snapshot's copy back, and strands nothing | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the check reports either a stranded snapshot or, worse, a live block on a deadlist |
-| `cosmofs-snap-settle-live` | the sharp end of the above, deterministically: a prefix image whose deadlist names a block the surviving root's live tree still uses, deleted — and the delete must not free it. With the fix the image cannot exist, which is the assertion; the test constructs it with the poison hook and checks the checker names it | without the fix the hook is unnecessary, because an ordinary crash prefix produces it |
+| `cosmofs-snap-nogrow` | the copy does not accumulate: a hundred commits that each append to a snapshot's deadlist leave the chain the length the entry count requires, and the free count after the hundredth equals the count after the first | free the copied blocks with `cfs_free_block_deferred` instead of `..._exempt`: each copy is held on the deadlist it is a copy of, the chain grows by a block per commit, and no single-commit test sees it |
+| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot, frees blocks it holds, takes a second and deletes the first** — the two writers that run inside a transaction — and every prefix mounts clean, reads the surviving snapshot's copy back, and strands nothing | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the check reports either a stranded snapshot or a block named by two deadlists |
+| `cosmofs-snap-settle-double` | the sharp end of the above, deterministically: a prefix image in which one block is named by two snapshots' deadlists, which is what an interrupted keeper write-back leaves. Deleting both must free it once. With the fix the image cannot arise, which is the assertion; the test constructs it with a poison hook and checks that `cosmofs_check` names it rather than the allocator discovering it | without the fix the hook is unnecessary, because an ordinary crash prefix of a snapshot deletion produces it |
 | `cosmofs-snap-reserved` | a commit with a snapshot present allocates **nothing** after `commit_bitmap`: every block the snapshot list gained is set in the bitmap the root published, checked by a remount finding neither a leak nor a reachable-and-free block | allocate the deadlist block in the fill instead of taking it from the reservation: the check reports `seen_not_alloc`, the direction that hands live data to the allocator |
 | `cosmofs-snap-overreserve` | a commit whose bound over-reserves for the snapshot list lists the leftovers in the free record, and they are free after a remount | drop them: the free count is short by the slack on every commit that has a snapshot |
 | `cosmofs-snap-rollback` | a fill that fails with the reservation outstanding (the `test_fail_freelog` hook's sibling) gives every reserved block back, publishes no root, and leaves the filesystem exactly as it was: free count, generation and check identical either side | give back only the record's share: the snapshot list's blocks stay allocated and named by nothing, and the remount's check finds them |
@@ -443,20 +469,27 @@ the harness fails on it rather than after
 
 ## Risks
 
-- **An append published early is worse than an append lost.** The whole
-  unit turns on the copy landing before the move: step 1 before step 3,
-  in that order, with the crash suite between them. Doing the
-  reserve-before-fill the inventory row describes *without* the copy
-  produces a filesystem that hands live blocks to the allocator after a
-  crash — a leak traded for corruption. The migration plan's order is
-  the mitigation and it is not negotiable.
+- **An append published early is worse than an append lost.** Moving
+  the append before the root and copying it are one change and must land
+  as one, in step 3: the reserve-before-fill the inventory row describes,
+  done *without* the copy, produces a filesystem that hands live blocks
+  to the allocator after a crash — a leak traded for corruption. The
+  converse mistake is copying the append while it is still after the
+  root, which allocates at the phase this report spends its Problem
+  section forbidding. Step 1 copies only the writers that are already
+  inside a transaction, where allocation is legal and the root that
+  publishes the copy is their own. The migration plan's order is the
+  mitigation and it is not negotiable.
 - **The regress is easy to reintroduce.** Any future `free` of a
   snaplist or deadlist block that goes through `cfs_free_block_deferred`
   instead of `..._exempt` will be held on the deadlist it is a copy of,
   and the symptom is a deadlist that grows by a block per commit — slow,
-  silent, and invisible to a single-commit test. `cosmofs-snap-cow`
+  silent, and invisible to a single-commit test. `cosmofs-snap-nogrow`
   watches the chain's length across a hundred commits for exactly this,
-  the way `cosmofs-freelog-supersede` does for the record.
+  the way `cosmofs-freelog-supersede` does for the record;
+  `cosmofs-snap-cow` is the single-commit statement that the copy
+  happened at all, and the two are separate tests because they fail for
+  separate reasons.
 - **The bound.** A bound that is too small fails the commit, which is
   safe and loud; a bound computed from `nr_pending` *before*
   `commit_bitmap` adds to it is the way to get it wrong, and it is the
