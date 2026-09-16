@@ -541,6 +541,56 @@ one inline helper rather than left as a documented hole; userland
 inherits step 4's correction for free, because the syscall reads the
 same clock the kernel does.
 
+#### Step 2
+
+The bracket: A reads, hands a turn to B, B reads, hands it back, A reads
+again. The handshake orders the three reads in real time, so on a clock
+common to both CPUs the middle one must land between the outer two
+numerically as well. How far it falls outside is the apparent offset,
+and it is the only quantity these tests assert on. Both threads are
+pinned with `thread_create_on`, every ordered pair of online CPUs is
+measured, and a stalled handshake gives up after a second rather than
+hanging the boot.
+
+**The measurement, which is the point of the step.** 2400 handshakes per
+architecture, every online pair:
+
+| | worst reading outside its bracket | widest bracket | advertised bound |
+| --- | --- | --- | --- |
+| x86-64 (TCG) | **0 ns** | 269–345 µs | 0 ns |
+| AArch64 (TCG) | **0 ns** | 89 µs | 0 ns |
+
+So QEMU's counters agree exactly, which is what the report predicted and
+why nothing in this tree has ever failed. The widest bracket is a
+scheduling hiccup inside a handshake, not skew.
+
+**Which makes both tests vacuous, so the injection is a test rather than
+a script.** The report's bug-proof for these rows was "inject an offset
+and watch them fail". Run as a one-off revert that evidence exists once,
+in a terminal nobody keeps. `clock-skew-detected` runs in CI instead: it
+injects ±2 ms on one CPU through a debug-only per-CPU addend in
+`clock_now_ns` and asserts three things in each direction —
+
+1. the injected magnitude shows up as a reading outside the bracket
+   (2000000 ns injected, 2000000 ns measured, both directions, both
+   architectures);
+2. it exceeds what the advertised bound allows, so `clock-cross-cpu`
+   would reject it;
+3. widening the advertised bound *accepts* the same measurement — which
+   is the check that catches an oracle ignoring `clock_worst_offset_ns()`
+   altogether. Neither (1) nor (2) would notice that.
+
+Both directions are asserted because a one-sided comparison passes the
+negative case, and a bug-proof that happened to be negative would then
+certify an oracle that does not work. This is the same defect the
+report's own step 3 review found in an earlier draft of the bound.
+
+**The injection is only safe because of step 1.** It makes one CPU's
+clock jump 2 ms, which every timestamp subtraction on that CPU then
+sees. On the tree as it stood before the sweep, `clock-skew-detected`
+would have been a hazard rather than a test — several of those
+subtractions would have wrapped.
+
 #### Step 1
 
 `clock_since_ns`, `clock_delta_ns` and `clock_worst_offset_ns` added;

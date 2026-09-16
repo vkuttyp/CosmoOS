@@ -22,10 +22,38 @@ static uint64_t g_realtime_offset_ns;   /* wall time at monotonic zero */
 static uint64_t g_ns_mult;   /* (1e9 << CLOCK_SHIFT) / hz */
 static timer_tick_hook_fn g_tick_hook;
 static bool g_initialized;
+/* Measured at AP bring-up by this unit's step 4; zero until then, and
+ * zero on architectures whose counter is common to every PE. */
+static uint64_t g_worst_offset_ns;
 
 #define CLOCK_SHIFT 32
 
 /* --- clock --- */
+
+#if CONFIG_DEBUG
+/*
+ * A machine whose counters disagree, on demand
+ * (docs/audit/next-subsystem-cpu-clock.md).
+ *
+ * Every machine this project boots on has counters that agree, so the
+ * cross-CPU tests would pass on a clock that was completely broken.
+ * These make the skew a thing the test creates rather than a thing the
+ * hardware has to supply. Debug builds only: nothing reads them in a
+ * release image, and no shipping path sets them.
+ */
+static int64_t g_test_cpu_offset_ns[CONFIG_MAX_CPUS];
+
+void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns)
+{
+    if (cpu < CONFIG_MAX_CPUS)
+        __atomic_store_n(&g_test_cpu_offset_ns[cpu], ns, __ATOMIC_RELEASE);
+}
+
+void clock_test_set_worst_offset_ns(uint64_t ns)
+{
+    __atomic_store_n(&g_worst_offset_ns, ns, __ATOMIC_RELEASE);
+}
+#endif
 
 uint64_t clock_now_ns(void)
 {
@@ -36,7 +64,11 @@ uint64_t clock_now_ns(void)
      * compiles inline; a 128-bit divide would need a runtime library the
      * kernel does not link. Relative error is below 1e-9. */
     unsigned __int128 ns = (unsigned __int128)delta * g_ns_mult;
-    return (uint64_t)(ns >> CLOCK_SHIFT);
+    uint64_t now = (uint64_t)(ns >> CLOCK_SHIFT);
+#if CONFIG_DEBUG
+    now = (uint64_t)((int64_t)now + __atomic_load_n(&g_test_cpu_offset_ns[arch_cpu_id()], __ATOMIC_ACQUIRE));
+#endif
+    return now;
 }
 
 /*
@@ -48,11 +80,6 @@ uint64_t clock_since_ns(uint64_t stamp)
 {
     return clock_delta_ns(clock_now_ns(), stamp);
 }
-
-/* Measured at bring-up from version 10 of this unit's step 4; zero
- * until then, and zero on architectures whose counter is common to
- * every CPU. */
-static uint64_t g_worst_offset_ns;
 
 uint64_t clock_worst_offset_ns(void)
 {

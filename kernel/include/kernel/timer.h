@@ -94,6 +94,21 @@ static inline uint64_t clock_delta_ns(uint64_t now, uint64_t stamp)
  * sails through.
  */
 uint64_t clock_worst_offset_ns(void);
+
+#if CONFIG_DEBUG
+/*
+ * Make this machine's counters disagree, for the cross-CPU tests.
+ *
+ * `clock_test_set_cpu_offset_ns` adds a signed offset to every
+ * clock_now_ns() taken on `cpu`; `clock_test_set_worst_offset_ns`
+ * rewrites the advertised bound. The second exists so a test cannot
+ * quietly agree with whatever the boot happened to print: advertise
+ * zero on a machine with injected skew and the assertion must fail.
+ * Debug builds only.
+ */
+void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns);
+void clock_test_set_worst_offset_ns(uint64_t ns);
+#endif
 /* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
  * read from the real-time clock at boot (0 when the platform has none).
  * Lock-free, any context. */
