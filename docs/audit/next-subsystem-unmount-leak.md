@@ -666,4 +666,75 @@ Differences from the plan, each found by building rather than reading.
 
 ### As run
 
-TBD
+**The number this unit exists for.** The fsck unit measured 1912 blocks
+stranded across 199 replayed crash prefixes, 162 of them leaking. The
+crash suite now reports, on both architectures:
+
+```
+cosmofs-replay: 211 prefix images checked, 0 blocks stranded
+cosmofs-replay: 114 writes recorded over 5 sync points
+```
+
+Zero, and the assertion is back to its strong form: every prefix `clean`,
+`g_leak_total == 0`, and `g_prefixes_checked == checked` so that a suite
+which stopped asking would fail rather than pass in silence.
+
+**The defect, from both sides.** In the kernel,
+`cosmofs-unmount-leak`: 500 blocks free before a file, 500 after it is
+written, deleted, unmounted and remounted. From userland, through the
+operator tool the previous unit built:
+
+```
+usertest: fsctl: a file written, deleted and unmounted strands nothing
+          -- the filesystem is clean on remount
+```
+
+That line replaces "fsctl found 41 blocks a clean unmount stranded".
+
+**The unit's own tests**, as they report themselves:
+
+```
+cosmofs-freelog-format:      a version-8 filesystem mounts and replays nothing; a version-9 one has the field
+cosmofs-freelog-accounted:   the record's blocks are allocated in the bitmap its root published
+cosmofs-freelog-supersede:   100 commits, 497 free before and 497 after
+cosmofs-freelog-not-held:    naming the snapshot put 3 blocks on its deadlist and the superseded
+                             record was not one of them; 30 more commits added none
+cosmofs-unmount-leak:        500 free before the file, 500 after it was deleted and remounted
+cosmofs-freelog-snapshot:    a snapshot's blocks survive the record and the remount
+cosmofs-freelog-idempotent:  two mounts, one record, 500 free both times
+cosmofs-freelog-reuse:       a replayed block was taken, written, and given back
+cosmofs-freelog-chain:       601 blocks freed in one transaction, more than the 506 a record
+                             block holds, and all of them came back
+```
+
+**The chain.** `gmake clean` first, then: x86-64 and AArch64 debug, 295
+self-tests each, PASS; x86-64 and AArch64 release, PASS; `test-guard`
+both architectures; `test-gic`; `test-crash` both architectures (the
+numbers above); `test-wxn`; `fuzz` PASS; `analyze` clean, including
+`check-fpregs`; `reproducible: yes`.
+
+`host-test` fails one case, `sizeof(struct cosmo_vcpu_regs) == 448` in
+`tests/host/test_hv.c:75`. It fails identically on `main`, was checked
+there rather than assumed, and has nothing to do with this unit.
+
+**Benchmarks, and the one not taken.** "No extra barrier" is not
+measured but read: `freelog_fill` marks its blocks dirty and the
+commit's existing dirty loop writes them, before the `pool_flush` the
+commit already does, so there is no new `pool_flush` call to count. A
+commit's extra cost is one block write per `CFS_DEAD_PER_BLOCK` frees.
+The replay's cost is visible in `cosmofs-freelog-chain`, which mounts,
+replays 612 blocks and remounts twice inside 1.3 s; the report's
+ten-thousand-block mount was not built, because the largest transaction
+the suite can make on its test disks is the 601-block one and a bigger
+disk would be measuring the ramdisk.
+
+**Four proofs break exactly one test**, which is the strongest form this
+evidence takes: `gate-at-version-8` breaks only
+`cosmofs-freelog-format`, `record-ignores-snapshots` only
+`cosmofs-freelog-snapshot`, `chain-truncated` only
+`cosmofs-freelog-chain`, and `release-through-hold-filter` only
+`cosmofs-freelog-not-held`. `no-replay` and `replay-clears-record` each
+break six, `keep-previous-chain` seventeen, and `reserve-after-fixpoint`
+forty -- the last of which is the ordering argument's own evidence, and
+was measured by accident when a hunk of that injection was committed by
+mistake and the tree behaved exactly as the report says it would.
