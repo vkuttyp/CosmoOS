@@ -570,14 +570,16 @@ void clock_measure_offsets(void)
 
     int64_t worst_offset = 0;
     uint64_t worst_halfwidth = resolution_ns;
-    unsigned measured = 0;
+    unsigned measured = 0, wanted = 0, failed = 0;
 
     for (unsigned c = 1; c < cpu_count(); c++) {
         if (!cpu_online(c))
             continue;
+        wanted++;
         struct offmeas *m = kzalloc(sizeof(*m));
         if (m == NULL) {
             kwarn("timer: out of memory measuring CPU %u's offset", c);
+            failed++;
             break;
         }
         struct thread *ap = thread_create_on(offmeas_ap, m, "clk-off-ap", SCHED_PRIO_DEFAULT, CPUMASK_OF(c));
@@ -589,6 +591,7 @@ void clock_measure_offsets(void)
             if (ap)
                 thread_join(ap);
             kfree(m);
+            failed++;
             kwarn("timer: cannot measure CPU %u's offset: no thread", c);
             continue;
         }
@@ -600,6 +603,7 @@ void clock_measure_offsets(void)
             kwarn("timer: CPU %u's offset could not be measured (%u rounds%s)", c, m->rounds,
                   m->stalled ? ", stalled" : "");
             kfree(m);
+            failed++;
             continue;
         }
         g_cpu_offset_ns[c] = -m->offset_ns;   /* the addend that cancels it */
@@ -629,6 +633,27 @@ void clock_measure_offsets(void)
     kinfo("timer: measured %u CPU offset%s against CPU 0 over %u exchanges each: worst %lld ns, uncertainty +-%llu ns (counter resolution %llu ns)",
           measured, measured == 1 ? "" : "s", OFFSET_ROUNDS, (long long)worst_offset,
           (unsigned long long)worst_halfwidth, (unsigned long long)resolution_ns);
+
+    /*
+     * All of them, or none.
+     *
+     * `clock_worst_offset_ns()` says two readings taken on *any* two
+     * CPUs differ by at most that much. A CPU whose measurement failed
+     * keeps a zero correction and contributed nothing to the bound, so
+     * publishing a finite bound while one is missing states something
+     * about that CPU which nothing established. One failure and the
+     * machine keeps its raw counter and says so -- the same answer as a
+     * counter that is not a clock, for the same reason: no claim is
+     * better than one that is not backed.
+     */
+    if (failed != 0 || measured != wanted) {
+        memset(g_cpu_offset_ns, 0, sizeof(g_cpu_offset_ns));
+        __atomic_store_n(&g_worst_offset_ns, CLOCK_OFFSET_UNBOUNDED, __ATOMIC_RELEASE);
+        g_clock_common = false;
+        kwarn("timer: measured %u of %u CPU offsets; not applying a correction and advertising no bound",
+              measured, wanted);
+        return;
+    }
 
     if (!g_clock_common) {
         memset(g_cpu_offset_ns, 0, sizeof(g_cpu_offset_ns));

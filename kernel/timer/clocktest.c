@@ -369,10 +369,18 @@ bool selftest_clock_scope_aarch64(const char **reason)
  */
 bool selftest_clock_skew_detected(const char **reason)
 {
-    if (!clock_is_common()) {
-        kinfo("selftest: clock-skew-detected: this machine's clock is not common to every CPU; no bound to test against");
-        return true;
-    }
+    /*
+     * Tested against a bound this test sets, not against whatever the
+     * machine advertises.
+     *
+     * An earlier version skipped when `clock_is_common()` was false,
+     * which was tidy and wrong: on x86-64 here that is always false, so
+     * the one test that makes the cross-CPU oracles non-vacuous was
+     * skipping on the architecture this whole unit is about. The
+     * mechanism under test -- does a reading outside its bracket get
+     * detected, and is it weighed against the advertised bound --
+     * does not depend on the machine promising anything.
+     */
     unsigned victim = CONFIG_MAX_CPUS;
     for (unsigned c = 1; c < cpu_count(); c++) {
         if (cpu_online(c)) {
@@ -388,6 +396,7 @@ bool selftest_clock_skew_detected(const char **reason)
     static const int64_t MAG = 2000000;   /* 2 ms: far wider than any bracket, far short of any watchdog */
     static const int64_t dirs[2] = { MAG, -MAG };
     bool ok = true;
+    uint64_t saved_bound = clock_worst_offset_ns();
 
     for (unsigned d = 0; d < 2 && ok; d++) {
         struct bracket w;
@@ -402,6 +411,7 @@ bool selftest_clock_skew_detected(const char **reason)
          * as A puts B's reading before t0. The round trip eats a little
          * of it, so the window is generous rather than exact. */
         if (w.worst_outside < (uint64_t)MAG / 2 || w.worst_outside > (uint64_t)MAG * 2) {
+            clock_test_set_worst_offset_ns(saved_bound);
             kerror("selftest: clock-skew-detected: %lld ns injected on CPU %u, but the worst reading was only %llu ns outside its bracket",
                    (long long)dirs[d], victim, (unsigned long long)w.worst_outside);
             *reason = "an injected offset did not show up as a reading outside the bracket";
@@ -409,7 +419,13 @@ bool selftest_clock_skew_detected(const char **reason)
         }
         /* ...and it is more than the advertised bound allows, which is
          * what makes clock-cross-cpu reject it. */
-        if (w.worst_outside <= clock_worst_offset_ns() + w.at_bracket) {
+        /* Against a bound of zero -- which is what a machine with a
+         * common clock and no measured skew advertises -- the reading
+         * must be rejected. */
+        clock_test_set_worst_offset_ns(0);
+        bool rejected = w.worst_outside > clock_worst_offset_ns() + w.at_bracket;
+        if (!rejected) {
+            clock_test_set_worst_offset_ns(saved_bound);
             *reason = "an injected offset would not have failed the cross-CPU assertion";
             return false;
         }
@@ -418,7 +434,7 @@ bool selftest_clock_skew_detected(const char **reason)
          * measurement is accepted, so the bound is consulted. */
         clock_test_set_worst_offset_ns((uint64_t)MAG * 2);
         bool accepted = w.worst_outside <= clock_worst_offset_ns() + w.at_bracket;
-        clock_test_set_worst_offset_ns(0);
+        clock_test_set_worst_offset_ns(saved_bound);
         if (!accepted) {
             *reason = "widening the advertised bound did not accept the measurement: the bound is not being read";
             return false;

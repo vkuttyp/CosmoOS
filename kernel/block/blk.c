@@ -191,6 +191,7 @@ static void inflight_add_locked(struct blkdev *bd, struct bio *bio)
     bio->issued_ns += __atomic_load_n(&g_test_issue_skew_ns, __ATOMIC_ACQUIRE);
 #endif
     bio->issue_cpu = arch_cpu_id();
+    bio->scans = 0;
     bio->flags &= ~BIO_TIMED_OUT;
     list_push_back(&bd->inflight, &bio->inflight_link);
 }
@@ -216,7 +217,7 @@ static void blk_timeout_thread(void *arg)
 {
     (void)arg;
     for (;;) {
-        thread_sleep_ms(500);
+        thread_sleep_ms(BLK_TIMEOUT_SCAN_NS / 1000000ull);
         mutex_lock(&g_blk_lock);
         struct blkdev *bd;
         list_for_each_entry(bd, &g_blkdevs, link) {
@@ -228,14 +229,50 @@ static void blk_timeout_thread(void *arg)
             arch_irq_state_t s = spin_lock_irqsave(&bd->qlock);
             struct bio *b;
             list_for_each_entry(b, &bd->inflight, inflight_link) {
-                /* issued_ns was stamped by whichever CPU handed this
-                  * bio to the driver -- bio->issue_cpu, set beside it,
-                  * says which -- and `now` was read here. A plain
-                  * subtraction underflows on residual skew and times
-                  * out every in-flight bio at once
-                  * (docs/audit/next-subsystem-cpu-clock.md). */
-                if (clock_delta_ns(now, b->issued_ns) < bd->timeout_ns)
-                    break;   /* oldest first: the rest are younger */
+                /*
+                 * Two ages, and a request is overdue when either says so.
+                 *
+                 * `issued_ns` was stamped by whichever CPU handed this
+                 * bio to the driver -- `bio->issue_cpu`, set beside it,
+                 * says which -- and `now` was read here. A plain
+                 * subtraction underflows on residual skew and times out
+                 * every in-flight bio at once, which is the defect this
+                 * unit is named for; the saturating one cannot do that.
+                 *
+                 * But saturation trades that for the opposite failure:
+                 * on a machine whose counter is *not* common (an x86-64
+                 * without an invariant TSC, where the offset is
+                 * unbounded and may grow), an issuing CPU that runs
+                 * ahead of this thread makes the age read zero for ever
+                 * and the request is never timed out at all. A stalled
+                 * device would then hang instead of entering recovery --
+                 * a liveness bug traded for a correctness one.
+                 *
+                 * So `scans` is a second age that no clock can distort:
+                 * this thread is the only writer, it runs every 500 ms,
+                 * and it counts the scans that have seen this bio in
+                 * flight. Coarse, and it does not need to be fine --
+                 * it is the backstop, not the measurement.
+                 *
+                 * The *first* sighting is worth nothing, and that is the
+                 * whole subtlety: a bio submitted a moment before a scan
+                 * has been in flight for almost no time, so crediting it
+                 * a scan interval would time it out early -- which it
+                 * did, failing blk-timeout at 58 ms against a 300 ms
+                 * timeout. Only the interval *between* sightings is time
+                 * this thread can vouch for, so N sightings vouch for
+                 * N-1 intervals.
+                 *
+                 * The walk no longer stops at the first request that is
+                 * not overdue: with two ages, "oldest first" no longer
+                 * implies the oldest is the first to expire.
+                 */
+                if (b->scans != UINT32_MAX)
+                    b->scans++;
+                uint64_t by_clock = clock_delta_ns(now, b->issued_ns);
+                uint64_t by_scans = (uint64_t)(b->scans - 1u) * BLK_TIMEOUT_SCAN_NS;
+                if (by_clock < bd->timeout_ns && by_scans < bd->timeout_ns)
+                    continue;
                 if (b->flags & BIO_TIMED_OUT)
                     continue;
                 b->flags |= BIO_TIMED_OUT;

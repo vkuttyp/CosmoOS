@@ -108,6 +108,36 @@ uint64_t clock_worst_offset_ns(void);
 /* False when the offset is unbounded, as above. The boot says which. */
 bool clock_is_common(void);
 
+/*
+ * Deadlines are timestamps, and the same rule governs them.
+ *
+ * `uint64_t d = clock_now_ns() + delay;` followed later by
+ * `while (clock_now_ns() < d)` is a cross-CPU comparison whenever the
+ * thread can be descheduled in between -- the deadline was computed
+ * against one CPU's counter and is tested against another's. Saturating
+ * subtraction does not help here: the comparison is an ordering, not a
+ * difference, and `clock_since_ns` has nothing to saturate.
+ *
+ * When `clock_is_common()`, such a wait is wrong by at most
+ * `clock_worst_offset_ns()`, which is the bound the boot advertised and
+ * is the same tolerance every other cross-CPU user accepts. When it is
+ * false the wait may expire early or late by an unbounded amount, and
+ * the kernel has no cross-CPU time source to offer instead -- a shared
+ * tick counter would be one, and this tree does not have a machine-wide
+ * one (`timer_ticks()` is per-CPU).
+ *
+ * So: a deadline loop whose *correctness* depends on the duration needs
+ * an age that no clock can distort. The block layer's timeout is the one
+ * place in this tree where that mattered enough to build -- it counts
+ * scans of its own thread beside the timestamp (`bio->scans`,
+ * `kernel/block/blk.c`) so a stalled device still enters recovery on a
+ * machine whose counter is not common. The remaining deadline loops are
+ * driver polls and diagnostics whose failure is a spurious timeout
+ * rather than a hang; they are listed in
+ * `docs/audit/next-subsystem-cpu-clock.md` and are **not** migrated by
+ * this unit.
+ */
+
 /* This CPU's counter with no cross-CPU correction applied. For the
  * measurement that produces the correction, and for nothing else. */
 uint64_t clock_raw_ns(void);

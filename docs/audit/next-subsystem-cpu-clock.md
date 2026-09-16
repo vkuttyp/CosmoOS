@@ -710,10 +710,18 @@ most callers need — and gives up the cross-CPU claim instead:
 large measured offset, and the two are deliberately not spelled the same
 way.
 
-`clock-cross-cpu` and `clock-skew-detected` therefore **skip on
-x86-64**, because there is no promise on that machine to check and
-asserting anything would be inventing one. Their coverage of the x86
-path is lost, and no configuration available here restores it.
+`clock-cross-cpu` therefore **skips on x86-64**: it checks the machine
+against its own advertised bound, and there is no promise on that machine
+to check, so asserting anything would be inventing one.
+
+`clock-skew-detected` does **not** skip, and an earlier version of this
+implementation had it skipping too. That was tidy and wrong: it is the
+test that makes the cross-CPU oracles non-vacuous, so gating it on the
+promise left x86-64 — the architecture this entire unit is about —
+with no cross-CPU coverage at all. The mechanism it tests (is a reading
+outside its bracket detected, and is it weighed against the advertised
+bound) does not depend on the machine promising anything, so it sets the
+bound itself and restores it afterwards. It runs on both architectures.
 
 **What `clock-invariant-gate` does and does not test.** It cannot test
 the CPUID read: on x86-64 here the answer is always false and on AArch64
@@ -739,12 +747,15 @@ measured, and a stalled handshake gives up after a second rather than
 hanging the boot.
 
 **The measurement, which is the point of the step.** 2400 handshakes per
-architecture, every online pair:
+architecture, every online pair. These numbers were taken **at step 2**,
+before step 3 read the invariant-TSC bit; x86-64's advertised bound
+became `CLOCK_OFFSET_UNBOUNDED` one step later, and the As-run table at
+the end of this document is the final state:
 
-| | worst reading outside its bracket | widest bracket | advertised bound |
+| | worst reading outside its bracket | widest bracket | advertised bound *then* |
 | --- | --- | --- | --- |
-| x86-64 (TCG) | **0 ns** | 269–345 µs | 0 ns |
-| AArch64 (TCG) | **0 ns** | 89 µs | 0 ns |
+| x86-64 (TCG) | **0 ns** | 269–345 µs | 0 ns (later: unbounded) |
+| AArch64 (TCG) | **0 ns** | 89 µs | 0 ns (unchanged) |
 
 So QEMU's counters agree exactly, which is what the report predicted and
 why nothing in this tree has ever failed. The widest bracket is a
@@ -878,6 +889,64 @@ bring-up. The values would have been right and the load to get them
 would not have been safe. It booted on QEMU, which is exactly the
 evidence this unit exists to distrust. The flag is back and its comment
 now says what it guards.
+
+**Deadlines, which this unit does not fix.** Raised in review and valid.
+A deadline is a timestamp:
+
+```c
+uint64_t d = clock_now_ns() + delay;
+while (clock_now_ns() < d) { ... }          /* may migrate in between */
+```
+
+is a cross-CPU comparison whenever the thread can be descheduled, and
+saturating subtraction does not help — the comparison is an ordering,
+not a difference, so there is nothing to saturate. When
+`clock_is_common()` such a wait is wrong by at most the advertised
+bound; when it is false it may expire early or late by an unbounded
+amount, and the kernel has no cross-CPU time source to offer instead (a
+machine-wide tick counter would be one; `timer_ticks()` is per-CPU).
+
+Sixteen non-test sites compute a deadline this way:
+
+| file | what it waits for | what a wrong deadline costs |
+| --- | --- | --- |
+| `kernel/block/blk.c` (the timeout scan) | a request to finish | **a hang** — fixed, see below |
+| `kernel/timer/timer.c:190` | a busy-wait of `ns` | a short or long delay |
+| `kernel/timer/timer.c:237` | a timer's expiry | nothing: armed on and fired from the same CPU's queue |
+| `kernel/core/lockup.c` ×2 | a sampled CPU to answer | a spurious "did not answer" |
+| `kernel/module/module.c:514` | a module's users to leave | a spurious unload timeout |
+| `kernel/interrupt/ipi.c:144`, `kernel/arch/x86_64/mmu.c:324` | an IPI acknowledgement | nothing: preemption is off |
+| `drivers/usb/*` ×4, `drivers/storage/ahci.c` ×2, `drivers/virtio/virtio_console.c` | hardware to respond | a spurious `-ETIMEDOUT` |
+
+Only the first can hang, and only that one is fixed here. The rest fail
+towards a spurious timeout rather than a lost wakeup, on a machine this
+project cannot currently boot on, and migrating them needs the
+machine-wide counter that does not exist yet. **Named as a follow-up
+rather than claimed.** The rule is written down in
+`kernel/include/kernel/timer.h` so the next deadline loop is written
+knowing it.
+
+**The saturating fix traded a correctness bug for a liveness one, and
+review caught it.** The block timeout's whole purpose is that a stalled
+device enters recovery. Saturating the age means a bio issued on a CPU
+that runs ahead of the timeout thread reads as zero seconds old for
+ever, so on a machine with unbounded skew the request is never timed out
+and the device hangs instead — worse than the spurious timeouts the
+saturation was added to prevent. The scan now keeps a second age that no
+clock can distort: `bio->scans`, written only by the timeout thread,
+counting the 500 ms scans that have seen the bio in flight. A request is
+overdue when *either* age says so. The walk also no longer stops at the
+first request that is not overdue, because with two ages "oldest first"
+no longer implies the oldest expires first.
+
+**A partial measurement no longer enables the correction.** Also from
+review. `clock_worst_offset_ns()` says two readings taken on *any* two
+CPUs differ by at most that much; a CPU whose measurement failed keeps a
+zero correction and contributed nothing to the bound, so publishing a
+finite bound with one missing states something about that CPU which
+nothing established. It is all of them or none now — one failure and the
+machine keeps its raw counter and advertises no bound, the same answer
+as a counter that is not a clock, for the same reason.
 
 **What did not run.** The applied correction, on any machine. No machine
 available to this project both has a per-CPU counter and advertises it as

@@ -340,7 +340,14 @@ bool selftest_blk_timeout_skew(const char **reason)
 {
     struct blkdev *bd = ramblk_create(16);
     CHECK(bd != NULL);
-    bd->timeout_ns = 200ull * 1000000ull;
+    /*
+     * The device's timeout has to outlast the window this test watches,
+     * or the request is genuinely overdue and the scan backstop times it
+     * out for an honest reason -- which is what the first version of
+     * this test measured. Five seconds against three 500 ms scans: the
+     * backstop can vouch for at most a second of that.
+     */
+    bd->timeout_ns = 5ull * 1000000000ull;
     ramblk_set_deferred(bd, 4);
     ramblk_set_stall(bd, true);   /* nothing completes on its own */
 
@@ -360,14 +367,14 @@ bool selftest_blk_timeout_skew(const char **reason)
     g_done_count = 0;
     g_done_status = 0;
     uint64_t timeouts0 = bd->timeouts;
-    blk_test_set_issue_skew_ns(5ull * 1000000000ull);
+    blk_test_set_issue_skew_ns(10ull * 1000000000ull);
     CHECK(blk_submit(&bio) == 0);
     blk_test_set_issue_skew_ns(0);   /* the stamp is taken; later bios are honest */
 
     /* The scan runs every 500 ms: three of them, against a 200 ms timeout. */
     thread_sleep_ms(1700);
     if (bd->timeouts != timeouts0)
-        kerror("selftest: blk-timeout-skew: a stamp 5 s ahead timed out %llu request(s): the subtraction underflowed",
+        kerror("selftest: blk-timeout-skew: a stamp 10 s ahead timed out %llu request(s): the subtraction underflowed",
                (unsigned long long)(bd->timeouts - timeouts0));
     CHECK(bd->timeouts == timeouts0);
     CHECK(__atomic_load_n(&g_done_count, __ATOMIC_SEQ_CST) == 0);
@@ -378,7 +385,10 @@ bool selftest_blk_timeout_skew(const char **reason)
         thread_sleep_ms(1);
     CHECK(g_done_count == 1);
 
-    /* Phase 2, the control: no skew, everything else identical. */
+    /* Phase 2, the control: no skew, and a timeout short enough to fire.
+     * Everything else is identical -- same device, same stalled driver,
+     * same scanner. */
+    bd->timeout_ns = 300ull * 1000000ull;
     uint64_t timeouts1 = bd->timeouts;
     int rc = blk_read(bd, 0, 8, page);
     CHECK(rc == -ETIMEDOUT);
@@ -388,7 +398,7 @@ bool selftest_blk_timeout_skew(const char **reason)
     ramblk_set_deferred(bd, 0);
     kfree(page);
     ramblk_destroy(bd);
-    kinfo("selftest: blk-timeout-skew: a stamp 5 s ahead of the scanner survived 3 scans; the same request without it timed out");
+    kinfo("selftest: blk-timeout-skew: a stamp 10 s ahead of the scanner survived 3 scans of a 5 s timeout; the same device timed out a request without it");
     return true;
 }
 
