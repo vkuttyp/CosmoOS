@@ -153,13 +153,28 @@ whole. Nothing is edited on disk, so nothing needs copying; the previous
 chain is released exempt by the commit that supersedes it, exactly as
 the free record's is.
 
-That buys the thing that makes the common case free. An ordinary unlink
+That buys the thing that makes the common case cheap. An ordinary unlink
 of a file nobody has open adds the inode to the set and then evicts it
 — and the VFS drops the last reference in the same breath, so the add
-and the remove usually fall inside **one transaction** and cancel in
-memory before anything is written. A filesystem where nothing is held
-open across a commit writes no orphan record at all, and
-`orphan_root` stays 0.
+and the remove normally fall inside **one transaction** and cancel in
+memory before anything is written.
+
+**Normally, not always, and the report says which.** `cfs_unlink_common`
+releases `fs->lock` before returning; the VFS then drops the victim's
+last reference, and `cfs_evict` takes the lock again. The two are not
+one atomic step, and a writeback commit can land in the gap -- in which
+case that commit writes a record naming an inode that is about to be
+evicted, and the next commit retires it. That is *correct* and it is not
+free, so the claim this design makes is the narrow one: **an unlink
+costs nothing extra unless a commit falls between the unlink and the
+eviction, and then it costs one record.** Widening it to a guarantee
+would mean holding a filesystem lock across a VFS reference drop, which
+is not the filesystem's to hold.
+
+The test says so too: `cosmofs-orphan-cancels` runs with the writeback
+thread off, which is what makes "no commit intervenes" a fact about the
+test rather than a hope, and the benchmark below measures the ordinary
+unlink under the same condition and states it.
 
 ### The format
 
@@ -170,8 +185,9 @@ open across a commit writes no orphan record at all, and
 struct cfs_super {
     /* ... */
     uint64_t free_root;            /* v9 */
-    uint64_t orphan_root;          /* v10: head of the ORPHAN chain, or 0 */
-    uint64_t reserved[3];
+    uint64_t orphan_root;          /* v10: head of the ORPHAN chain, or 0.
+                                    * The first of today's reserved[4]; */
+    uint64_t reserved[3];          /* the other three stay reserved */
 };
 ```
 
@@ -260,10 +276,10 @@ it means the record was lost or never written.
 - It does not make an unmount succeed while a file is open. That is the
   VFS's business and unchanged; what changes is that a forced unmount
   no longer loses the space.
-- It does not add a general pending-work queue. Directories cannot be in
-  this state (`rmdir` refuses a non-empty directory and a directory has
-  no handles that outlive its name), so the record holds regular files
-  and symlinks only.
+- It does not add a general pending-work queue. What it holds is any
+  inode whose last name has gone while something still references it,
+  and **that includes directories** -- see below; the earlier draft of
+  this report said it did not, and was wrong.
 - It does not generalise `snap_cow`. The previous report said that
   helper was "written to be the general 'copy a chain named by a
   superblock field' helper, not a snapshot-specific one". **It was
@@ -272,6 +288,34 @@ it means the record was lost or never written.
   record that is rewritten whole is never copied. Generalising a helper
   for a caller that does not exist is the speculative kind of
   abstraction; the correction belongs here rather than in a refactor.
+
+### Directories are in this state too
+
+The first draft of this report excluded them, on the reasoning that
+`rmdir` refuses a non-empty directory and that a directory has no
+handles outliving its name. The first half is true and the second is
+not.
+
+A process's working directory is a **referenced** vnode
+(`process.h`, `cwd_locked`, "referenced; p->lock" --
+`docs/audit/next-subsystem-cwd-ref.md` is the unit that made it one), and
+an empty directory can be removed while a process sits in it. A
+directory opened for `readdir` holds a reference the same way. So
+`rmdir` succeeds, `cfs_unlink_common` sets `victim->nlink = 0`
+(`cosmofs.c:1578`), and the blocks wait for a `cfs_evict` that comes
+when the process moves or exits -- which is the defect, with a
+directory's data blocks instead of a file's.
+
+The record covers them with no special case: the replay does what
+`cfs_evict` does, and that is the same operation for both types.
+
+**The trap, named in advance.** `rmdir` also decrements the *parent's*
+link count and writes it in the same transaction
+(`cosmofs.c:1579-1581`), so by the time the record is written the parent
+is already correct on disk. **The replay must not touch the parent**, or
+a directory removed and replayed loses a link its parent never had.
+`cosmofs-orphan-dir` asserts the parent's `nlink` across the whole
+cycle for exactly this reason.
 
 ### The §70 gate
 
@@ -303,10 +347,12 @@ leaving an orphan the checker can still find.
 
 *Security.* No new interface, no new privilege, no userland surface.
 
-*Performance.* Nothing on the common path: the add and the remove cancel
-in memory when the file is not held open across a commit. One block
-written per commit that has pending deletions, inside the flush the
-commit already does — no extra barrier.
+*Performance.* Nothing on the common path, under the condition stated
+above: the add and the remove cancel in memory when no commit falls
+between them. A commit that does have pending deletions writes
+`ceil(nr_orphans / CFS_ORPHANS_PER_BLOCK)` blocks -- one for any
+ordinary number of them -- inside the flush the commit already does, so
+no extra barrier.
 
 *Observability.* `cosmofs_stats` gains `orphan_root` and the count,
 beside `free_root` and `pending_frees`, so a test and an operator can
@@ -321,7 +367,7 @@ window has room for it.
 
 | file | change |
 | --- | --- |
-| `kernel-services/filesystem/cosmofs/cosmofs_format.h` | `CFS_KIND_ORPHAN` (14); `orphan_root` in `struct cfs_super` from `reserved[4]`; `CFS_VERSION` 10; `CFS_ORPHANS_PER_BLOCK` |
+| `kernel-services/filesystem/cosmofs/cosmofs_format.h` | `CFS_KIND_ORPHAN` (14); `orphan_root` in `struct cfs_super`, the first word of the four-word `reserved[4]` taken for it and `reserved[3]` left; `CFS_VERSION` 10; `CFS_ORPHANS_PER_BLOCK` |
 | `kernel-services/filesystem/cosmofs/cosmofs_core.c` | the in-memory set in `struct cfs`; the fill and the release in `cfs_commit`; the bound in `commit_reserve`; `orphan_replay` at mount; `cosmofs_stats` |
 | `kernel-services/filesystem/cosmofs/cosmofs.c` | the add in `cfs_unlink_common` and in the rename path's replaced victim; the remove in `cfs_evict` |
 | `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | the set, and the two calls that maintain it |
@@ -384,6 +430,7 @@ release stub fails the release build, which CI runs).
 | `cosmofs-orphan-reserved` | the chain's blocks are **allocated in the bitmap the root publishes**: a remount finds neither a leak nor a reachable-and-free block | allocate in the fill instead of taking from the reservation: the check reports `seen_not_alloc`, the direction that hands live data to the allocator |
 | `cosmofs-orphan-chain` | more pending deletions than one block holds are recorded across a chain and all of them replay | write only the first block: the count is short by the overflow and the remainder are orphans again |
 | `cosmofs-orphan-supersede` | a hundred commits with a handle held leave one chain and no residue | do not release the previous chain: the free count falls by a block per commit, which no single-commit test sees |
+| `cosmofs-orphan-dir` | an **empty directory removed while it is a process's working directory** is recorded and reclaimed the same way, and the *parent's* `nlink` is what it was before the rmdir at every point in the cycle -- before, after the record, and after the replay | have the replay decrement the parent as well as clearing the slot: the parent loses a link it never had, which `cosmofs_check` reports as `nlink_wrong` and no amount of reclaiming space would have caught |
 | `cosmofs-orphan-rename` | a file **replaced by a rename** while open gets the same record and the same reclaim | handle only `cfs_unlink_common`: the replaced victim leaks, which is the half of this defect that is easiest to miss |
 | `cosmofs-orphan-format` | the replay is gated at **version ≥ 10**: a version-9 image mounts, works and replays nothing | lower the gate: the version-9 image's reserved word is read as a chain head and the mount fails |
 | `cosmofs-orphan-check` | the checker claims the chain as metadata and does **not** call a recorded inode an orphan | leave the checker alone: `cosmofs-check-clean` reports the chain as leaked and every correctly recorded deletion as a fault |
@@ -411,8 +458,12 @@ checker still owns.
 ## Benchmarks
 
 - **An ordinary unlink's cost, before and after**, in block writes per
-  commit. The claim is *zero* change, and the cancel is what makes it
-  true; the benchmark fails the design if a record appears.
+  commit, **with the writeback thread off** so that no commit falls
+  between the unlink and the eviction. The claim is *zero* change under
+  that condition, and the cancel is what makes it true; the benchmark
+  fails the design if a record appears. With writeback on, the number to
+  report is how often one does appear, which is the price of the
+  narrowed guarantee rather than a defect.
 - **A commit with N pending deletions**, N from 1 to a few thousand:
   one block per `CFS_ORPHANS_PER_BLOCK`, no extra barrier.
 - **A mount's cost with a long record**: a thousand files opened,
