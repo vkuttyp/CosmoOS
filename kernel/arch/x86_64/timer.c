@@ -128,6 +128,29 @@ const char *arch_clock_name(void)
     return "tsc";
 }
 
+/*
+ * The invariant-TSC bit (CPUID 0x80000007 EDX[8]), detected at boot in
+ * cpu.c since this kernel had an x86 port and, until now, read by
+ * nothing.
+ *
+ * Without it the TSC counts core clocks: it changes rate with frequency
+ * scaling and stops in the deeper C-states, so two CPUs' readings drift
+ * apart by an amount nothing bounds. There is nowhere to fall back to --
+ * this port calibrates against PIT channel 2 as a one-shot gate, which
+ * is not a free-running counter, and the tree has no HPET driver -- so
+ * the kernel keeps using the TSC and stops promising that two CPUs'
+ * readings may be subtracted. Saying so is the useful thing; pretending
+ * otherwise is what this unit exists to stop.
+ */
+bool arch_clock_is_common(const char **why)
+{
+    if (!x86_cpu_info()->has_invariant_tsc) {
+        *why = "the TSC is not invariant (CPUID 0x80000007 EDX[8] clear): it varies with core frequency and halts in deep C-states";
+        return false;
+    }
+    return true;
+}
+
 /* --- the CMOS real-time clock (MC146818): seconds since 1970 ------------ */
 
 #define CMOS_ADDR 0x70

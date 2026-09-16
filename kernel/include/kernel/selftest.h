@@ -108,6 +108,7 @@ bool selftest_clock_since_saturates(const char **reason);  /* clock_since_ns of 
 bool selftest_clock_cross_cpu(const char **reason);  /* a reading on B lands inside A's bracket */
 bool selftest_clock_scope_aarch64(const char **reason);  /* ... and exactly so, on a shared counter */
 bool selftest_clock_skew_detected(const char **reason);  /* injected skew makes that oracle reject */
+bool selftest_clock_invariant_gate(const char **reason);  /* a counter that is not common promises nothing */
 bool selftest_cosmofs_replay(const char **reason);
 bool selftest_syscall_fuzz(const char **reason);
 bool selftest_io_poll(const char **reason);    /* kernel/io/polltest.c: io_poll (milestone 10) */

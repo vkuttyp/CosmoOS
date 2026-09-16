@@ -80,6 +80,7 @@ bool selftest_clock_since_saturates(const char **reason)
 #include <kernel/thread.h>
 
 #include <arch/cpu.h>
+#include <arch/timer.h>
 
 /*
  * The bracket: does a reading taken on CPU B fall between two readings
@@ -240,6 +241,15 @@ static bool bracket_all_pairs(struct bracket *worst, const char **reason)
  */
 bool selftest_clock_cross_cpu(const char **reason)
 {
+    if (!clock_is_common()) {
+        /* The boot said this counter is not comparable across CPUs, so
+         * there is no promise here to check. Asserting anything would be
+         * inventing one. */
+        kinfo("selftest: clock-cross-cpu: this machine's clock is not common to every CPU; no cross-CPU claim to check");
+        (void)reason;
+        return true;
+    }
+
     struct bracket w;
     if (!bracket_all_pairs(&w, reason))
         return false;
@@ -320,6 +330,10 @@ bool selftest_clock_scope_aarch64(const char **reason)
  */
 bool selftest_clock_skew_detected(const char **reason)
 {
+    if (!clock_is_common()) {
+        kinfo("selftest: clock-skew-detected: this machine's clock is not common to every CPU; no bound to test against");
+        return true;
+    }
     unsigned victim = CONFIG_MAX_CPUS;
     for (unsigned c = 1; c < cpu_count(); c++) {
         if (cpu_online(c)) {
@@ -377,8 +391,58 @@ bool selftest_clock_skew_detected(const char **reason)
     return ok;
 }
 
+/*
+ * The gate: a machine whose counter is not common to every CPU must stop
+ * promising that two CPUs' readings may be subtracted, and must say so.
+ *
+ * What this does not test, stated plainly: the CPUID read itself. Every
+ * x86-64 machine this project boots on has the invariant-TSC bit set, so
+ * `arch_clock_is_common` returning false cannot be produced here -- and
+ * on AArch64 the answer is true by architecture. What is tested is
+ * everything downstream of the answer, which is the part that can
+ * silently rot while the one-line bit read keeps working: that a "no"
+ * empties the advertised bound rather than leaving a stale number, that
+ * `clock_is_common` reports it, and that the cross-CPU tests then
+ * decline to make a claim instead of asserting against UINT64_MAX.
+ */
+bool selftest_clock_invariant_gate(const char **reason)
+{
+    /* As booted, the two answers must agree with each other -- an
+     * unbounded offset on a clock the kernel calls common, or a number
+     * on one it does not, is the gate half-wired. */
+    CHECK(clock_is_common() == (clock_worst_offset_ns() != CLOCK_OFFSET_UNBOUNDED));
+    bool was_common = clock_is_common();
+
+    clock_test_force_uncommon(true);
+    bool common_now = clock_is_common();
+    uint64_t bound_now = clock_worst_offset_ns();
+    /* The cross-CPU test must decline rather than assert, and it is run
+     * here rather than trusted to: a version of it that asserted against
+     * an unbounded bound would pass, and pass meaninglessly. */
+    const char *sub = NULL;
+    bool cross_ok = selftest_clock_cross_cpu(&sub);
+    clock_test_force_uncommon(false);
+
+    CHECK(!common_now);
+    CHECK(bound_now == CLOCK_OFFSET_UNBOUNDED);
+    CHECK(cross_ok);
+
+    /* ...and putting it back restores what the boot decided. */
+    CHECK(clock_is_common() == was_common);
+    CHECK(clock_is_common() == (clock_worst_offset_ns() != CLOCK_OFFSET_UNBOUNDED));
+
+    kinfo("selftest: clock-invariant-gate: %s is %scommon to every CPU as booted; forcing the gate shut advertises no bound and the cross-CPU claim stands down",
+          arch_clock_name(), was_common ? "" : "not ");
+    return true;
+}
+
 #else
 
+bool selftest_clock_invariant_gate(const char **reason)
+{
+    (void)reason;
+    return true;
+}
 bool selftest_clock_skew_detected(const char **reason)
 {
     (void)reason;

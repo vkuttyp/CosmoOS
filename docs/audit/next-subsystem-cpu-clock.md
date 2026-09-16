@@ -541,6 +541,70 @@ one inline helper rather than left as a documented hole; userland
 inherits step 4's correction for free, because the syscall reads the
 same clock the kernel does.
 
+#### Step 3 — the gate fired on the first machine it met
+
+`has_invariant_tsc` has been detected in `cpu.c` since this kernel had an
+x86 port and read by nothing. Reading it produced a result the report did
+not expect:
+
+```
+[WARN] timer: tsc is not comparable across CPUs: the TSC is not invariant
+       (CPUID 0x80000007 EDX[8] clear): it varies with core frequency and
+       halts in deep C-states
+[WARN] timer: timestamps stay monotonic per CPU; a difference between two
+       CPUs' readings is not an interval
+```
+
+**QEMU's x86-64 TCG does not advertise an invariant TSC.** Not a
+misconfiguration: `-cpu qemu64,...,+invtsc` is refused outright —
+
+```
+qemu-system-x86_64: warning: TCG doesn't support requested feature:
+  CPUID[eax=80000007h].EDX.invtsc [bit 8]
+```
+
+— so the bit cannot be turned on for the boot tests, and the only
+x86-64 machine this project runs on is one where the kernel must decline
+to promise. AArch64 is unaffected: the system counter is common by
+architecture and its boot line says so.
+
+This is the gate doing its job on its first outing, and it is worth
+sitting with: the counters on this machine demonstrably *do* agree —
+step 2 measured 0 ns outside the bracket over 2400 handshakes — and the
+kernel still refuses to promise, because the promise is about the
+hardware's contract and not about what happens to work today. A kernel
+that subtracted these timestamps would be right on this emulator and
+wrong on the first laptop it met.
+
+**The fallback in the report does not exist.** The design said an
+unusable TSC should fall back to "the platform timer the calibration
+already uses". That timer is PIT channel 2 driven as a one-shot gate to
+count a fixed interval; it is not a free-running counter, and this tree
+has no HPET driver. There is nowhere to fall back to. So the kernel
+keeps using the TSC — it is still monotonic on one CPU, which is what
+most callers need — and gives up the cross-CPU claim instead:
+`clock_worst_offset_ns()` returns `CLOCK_OFFSET_UNBOUNDED` and
+`clock_is_common()` returns false. That is a different statement from a
+large measured offset, and the two are deliberately not spelled the same
+way.
+
+`clock-cross-cpu` and `clock-skew-detected` therefore **skip on
+x86-64**, because there is no promise on that machine to check and
+asserting anything would be inventing one. Their coverage of the x86
+path is lost, and no configuration available here restores it.
+
+**What `clock-invariant-gate` does and does not test.** It cannot test
+the CPUID read: on x86-64 here the answer is always false and on AArch64
+always true, so `arch_clock_is_common` cannot be made to change its mind.
+What it tests is everything downstream of the answer, which is the part
+that can rot silently while a one-line bit read keeps working — that a
+"no" empties the advertised bound rather than leaving a stale number,
+that `clock_is_common` reports it, and that `clock-cross-cpu` stands
+down rather than asserting against `UINT64_MAX`. It runs the cross-CPU
+test for real inside the forced-shut window, because a version of that
+test which asserted against an unbounded bound would pass, and pass
+meaninglessly.
+
 #### Step 2
 
 The bracket: A reads, hands a turn to B, B reads, hands it back, A reads

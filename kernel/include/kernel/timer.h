@@ -95,6 +95,19 @@ static inline uint64_t clock_delta_ns(uint64_t now, uint64_t stamp)
  */
 uint64_t clock_worst_offset_ns(void);
 
+/*
+ * `clock_worst_offset_ns()` when this machine's counter is not a clock
+ * two CPUs may compare at all -- an x86-64 whose TSC is not invariant.
+ * The kernel keeps using the counter (there is nothing else here to use)
+ * and stops promising: a difference between two CPUs' readings is not an
+ * interval, and no bound is claimed for it. Distinct from a large
+ * measured offset, which is a number.
+ */
+#define CLOCK_OFFSET_UNBOUNDED UINT64_MAX
+
+/* False when the offset is unbounded, as above. The boot says which. */
+bool clock_is_common(void);
+
 #if CONFIG_DEBUG
 /*
  * Make this machine's counters disagree, for the cross-CPU tests.
@@ -108,6 +121,7 @@ uint64_t clock_worst_offset_ns(void);
  */
 void clock_test_set_cpu_offset_ns(unsigned cpu, int64_t ns);
 void clock_test_set_worst_offset_ns(uint64_t ns);
+void clock_test_force_uncommon(bool on);
 #endif
 /* Nanoseconds since 1970-01-01 UTC: the monotonic clock plus the offset
  * read from the real-time clock at boot (0 when the platform has none).

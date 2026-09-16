@@ -25,6 +25,9 @@ static bool g_initialized;
 /* Measured at AP bring-up by this unit's step 4; zero until then, and
  * zero on architectures whose counter is common to every PE. */
 static uint64_t g_worst_offset_ns;
+/* False when the counter is not comparable across CPUs at all, which is
+ * a different statement from a large measured offset. */
+static bool g_clock_common = true;
 
 #define CLOCK_SHIFT 32
 
@@ -85,6 +88,48 @@ uint64_t clock_worst_offset_ns(void)
 {
     return __atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE);
 }
+
+/*
+ * Record the verdict and everything that follows from it, in one place,
+ * so the boot and the test that exercises the gate cannot drift apart:
+ * a counter that is not common advertises no bound at all, and says so.
+ */
+static void clock_apply_commonality(bool common, const char *why)
+{
+    g_clock_common = common;
+    if (!common) {
+        __atomic_store_n(&g_worst_offset_ns, CLOCK_OFFSET_UNBOUNDED, __ATOMIC_RELEASE);
+        kwarn("timer: %s is not comparable across CPUs: %s", arch_clock_name(), why ? why : "unknown");
+        kwarn("timer: timestamps stay monotonic per CPU; a difference between two CPUs' readings is not an interval");
+        return;
+    }
+    if (__atomic_load_n(&g_worst_offset_ns, __ATOMIC_ACQUIRE) == CLOCK_OFFSET_UNBOUNDED)
+        __atomic_store_n(&g_worst_offset_ns, 0u, __ATOMIC_RELEASE);
+    kinfo("timer: %s is common to every CPU; cross-CPU timestamps differ by at most %llu ns",
+          arch_clock_name(), (unsigned long long)clock_worst_offset_ns());
+}
+
+#if CONFIG_DEBUG
+/*
+ * Drive the gate as a machine without an invariant TSC would, then put
+ * it back. What this can and cannot show is worth being exact about: the
+ * CPUID read itself cannot be tested on a machine whose bit is set, so
+ * what is tested is everything downstream of the answer -- that a
+ * "no" reaches `clock_is_common`, empties the advertised bound, and
+ * stops the cross-CPU tests making a claim. That is the part that can
+ * silently rot; the bit read is one line in arch code.
+ */
+void clock_test_force_uncommon(bool on)
+{
+    if (on) {
+        clock_apply_commonality(false, "forced by clock-invariant-gate");
+        return;
+    }
+    const char *why = NULL;
+    __atomic_store_n(&g_worst_offset_ns, 0u, __ATOMIC_RELEASE);
+    clock_apply_commonality(arch_clock_is_common(&why), why);
+}
+#endif
 
 uint64_t clock_realtime_ns(void)
 {
@@ -344,6 +389,19 @@ void timer_init(void)
     kinfo("timer: %s at %llu.%03llu MHz, tick %u Hz", arch_clock_name(),
           (unsigned long long)(g_clock_hz / 1000000), (unsigned long long)((g_clock_hz / 1000) % 1000),
           CONFIG_HZ);
+
+    /*
+     * Whether this counter is a clock two CPUs may compare. The offset
+     * itself is measured at AP bring-up (step 4); this is the prior
+     * question, and until this unit nothing in the tree asked it.
+     */
+    const char *why_buf = NULL;
+    clock_apply_commonality(arch_clock_is_common(&why_buf), why_buf);
+}
+
+bool clock_is_common(void)
+{
+    return g_clock_common;
 }
 
 uint64_t timer_ticks(void)
