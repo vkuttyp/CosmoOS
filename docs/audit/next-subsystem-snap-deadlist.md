@@ -286,6 +286,15 @@ same rule.
 - It does not touch the *unlinked-but-open inode* clause of the
   inventory row the previous unit left open. That is still an orphan
   list, still its own unit.
+- **It prevents the duplicate; it does not repair one.**
+  `deadlist_settle` gains exempt frees and no ownership check, so an
+  image that already has a block on two deadlists — one written by a
+  kernel from before this unit — still frees that block twice, and the
+  second free lands after the reallocation. That is a pre-existing
+  corruption and `fsck`'s business, not the commit path's, and saying so
+  is why the tests above assert the invariant where it is produced
+  rather than constructing a corrupt image and asking the fix to survive
+  it. A repair pass for it belongs with the checker work below.
 - It does not teach `cosmofs_check` to see a block named by two
   deadlists. The checker claims a deadlist's entries as non-live
   (`cosmofs_check.c:423`), so `dup` — which fires on a second *live*
@@ -361,7 +370,7 @@ a superblock field" helper, not a snapshot-specific one.
 | `kernel-services/filesystem/cosmofs/cosmofs_internal.h` | the reservation in `struct cfs`, and the snapshot entry points the commit calls |
 | `kernel-services/filesystem/cosmofs/cosmofs_check.c` | no change expected — the blocks are claimed as metadata already; the check is that it needs none |
 | `kernel-services/filesystem/cosmofs/cosmofstest.c` | the new tests; `cosmofs-freelog-snapshot`'s `<= 4` becomes `== 0` |
-| `kernel-services/filesystem/cosmofs/cosmofscrash.c` | **a snapshot in the replay workload**, which the suite has never had |
+| `kernel-services/filesystem/cosmofs/cosmofscrash.c` | **a snapshot taken and deleted in the replay workload**, which the suite has never had; `check_prefix` gains the deadlist-uniqueness walk, because the structural check cannot see a duplicate |
 | docs | cosmofs `design.md` ("Not freeing what a snapshot names") and `architecture.md`, README Status, `docs/README.md`, the inventory row struck through |
 
 ## New APIs
@@ -442,8 +451,8 @@ BUILD=release`, which CI runs).
 | `cosmofs-snap-unmount` | **the defect**: a snapshot, a file it holds deleted in the live tree, an unmount and a remount — and the structural check is `clean`, with `alloc_not_seen.count == 0` | the unfixed tree: today this is 2 to 4 blocks, which is the bound `cosmofs-freelog-snapshot` asserts |
 | `cosmofs-snap-cow` | a commit that appends to a deadlist leaves the *old* head block free and the new chain reachable only from the new root: the block numbers differ, and the old numbers are clear in the bitmap the new root publishes | edit the head in place: the numbers are equal and the next assertion, the crash one, fails |
 | `cosmofs-snap-nogrow` | the copy does not accumulate: a hundred commits that each append to a snapshot's deadlist leave the chain the length the entry count requires, and the free count after the hundredth equals the count after the first | free the copied blocks with `cfs_free_block_deferred` instead of `..._exempt`: each copy is held on the deadlist it is a copy of, the chain grows by a block per commit, and no single-commit test sees it |
-| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot, frees blocks it holds, takes a second and deletes the first** — the two writers that run inside a transaction — and every prefix mounts clean, reads the surviving snapshot's copy back, and strands nothing | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the check reports a stranded snapshot, or leaves the one-block-on-two-deadlists image whose consequence `cosmofs-snap-settle-double` plays out |
-| `cosmofs-snap-settle-double` | the sharp end of the above, deterministically, and asserted on its consequence because the checker cannot see its shape: a poison hook builds the image an interrupted keeper write-back leaves — one block on two deadlists — and the test deletes the first snapshot, writes a file into the block the allocator then hands out, deletes the second snapshot, and asserts the file still reads and `seen_not_alloc.count == 0`. The second settle frees a block a file occupies, which is reachable-and-free, the direction that loses data | without the fix the poison hook is unnecessary, because an ordinary crash prefix of a snapshot deletion produces the image |
+| `cosmofs-snap-crash` (in `cosmofs-replay`) | the replay suite's workload **takes a snapshot, frees blocks it holds, takes a second and deletes the first** — the two writers that run inside a transaction — and every prefix mounts clean, reads the surviving snapshot's copy back, strands nothing, **and passes the deadlist-uniqueness walk above**. The walk is part of `check_prefix`, not a separate test, because a duplicate entry is invisible to `cosmofs_check` and a prefix carrying one otherwise mounts, reads and checks perfectly | revert step 1: a prefix that ends between the snaplist write and the root mounts on the old root with a mutated list, and the prefix check reports either a stranded snapshot or a duplicated deadlist entry — one of the two lands, depending which write the dirty loop reached first |
+| `cosmofs-snap-deadlist-unique` | the invariant the copy makes true, asserted where the defect is *produced* rather than where it would later hurt: **no block is named by more than one deadlist entry**, over every replayed prefix of the snapshot workload. The previous unit already built the hook that states it — `cosmofs_test_deadlist_len(mnt, blk)` counts the entries naming one block across every snapshot's deadlist (`cosmofs_core.c:2126`, `cosmofs_snap.c:371-408`) — so the check is that count, for every block any deadlist names, equalling one | revert step 1's copy of the keeper write-back: a prefix that ends between the deadlist write and the root has a block whose count is two |
 | `cosmofs-snap-reserved` | a commit with a snapshot present allocates **nothing** after `commit_bitmap`: every block the snapshot list gained is set in the bitmap the root published, checked by a remount finding neither a leak nor a reachable-and-free block | allocate the deadlist block in the fill instead of taking it from the reservation: the check reports `seen_not_alloc`, the direction that hands live data to the allocator |
 | `cosmofs-snap-overreserve` | a commit whose bound over-reserves for the snapshot list lists the leftovers in the free record, and they are free after a remount | drop them: the free count is short by the slack on every commit that has a snapshot |
 | `cosmofs-snap-rollback` | a fill that fails with the reservation outstanding (the `test_fail_freelog` hook's sibling) gives every reserved block back, publishes no root, and leaves the filesystem exactly as it was: free count, generation and check identical either side | give back only the record's share: the snapshot list's blocks stay allocated and named by nothing, and the remount's check finds them |
@@ -452,10 +461,14 @@ BUILD=release`, which CI runs).
 | `cosmofs-freelog-snapshot` (existing) | `alloc_not_seen.count == 0`, the bound removed | the assertion is the bug-proof: it is `<= 4` today because the tree fails `== 0` |
 | `cosmofs-snapshot`, `cosmofs-snapshot-delete` (existing) | unchanged behaviour: the free count still rises at exactly the point the design says, and the snapshots still read | — |
 
-**Vacuity, named in advance.** Three of
+**Vacuity, named in advance.** Four of
 these fail on today's tree and that is stated per row rather than
-claimed in general: `cosmofs-snap-unmount`, `cosmofs-snap-crash` and the
-tightened `cosmofs-freelog-snapshot`. `cosmofs-snap-onewalk` is the one
+claimed in general: `cosmofs-snap-unmount`, `cosmofs-snap-crash`,
+`cosmofs-snap-deadlist-unique` and the tightened
+`cosmofs-freelog-snapshot`. The uniqueness walk is the one to watch for
+the other kind of vacuity — it reads clean on a filesystem with no
+deadlist at all — so it asserts the entry total is non-zero first, and
+the workload is the one that produces entries. `cosmofs-snap-onewalk` is the one
 that can pass while testing nothing — a counter that is never
 incremented reads zero twice — so it asserts the count is *one per
 freed block*, a positive number derived from the workload, not a
