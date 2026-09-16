@@ -151,13 +151,18 @@ bool clock_is_common(void);
  * wrapping, and the test for it. Prefer these to `clock_now_ns() + x`
  * and a bare `<`.
  *
- * **These two are a domain of their own.** What they return is not a
- * `clock_now_ns()` reading and must never be compared against one: on a
- * machine whose counter is not common it is a machine-wide tick count
- * scaled to nanoseconds, a much smaller number. Build a deadline with
- * `clock_deadline_ns` and test it with `clock_deadline_passed`, always
- * both or neither. Mixing them is what made every timer in this kernel
- * fire at once for one commit.
+ * **They do not make a deadline safe across a migration**, and nothing
+ * in this tree can yet: that needs a time source two CPUs can read
+ * without trusting their counters to agree, which means a designated
+ * timekeeper with handoff -- a subsystem, filed as one in
+ * `docs/audit/2026-09-deferred-work-inventory.md`. A machine-wide tick
+ * counter was tried here and reverted; `kernel/timer/timer.c` records
+ * why, because the failure is not obvious.
+ *
+ * What they do buy: one address for the hazard instead of sixteen, and
+ * saturation, so a budget large enough to wrap no longer expires at
+ * once. Build with `clock_deadline_ns`, test with
+ * `clock_deadline_passed`, always both or neither.
  */
 uint64_t clock_deadline_ns(uint64_t budget_ns);
 bool clock_deadline_passed(uint64_t deadline);

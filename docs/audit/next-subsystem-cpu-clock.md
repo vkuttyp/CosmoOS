@@ -263,8 +263,10 @@ taken without a lock.
 *Memory.* One `int64_t` per CPU.
 
 *Error handling.* A machine without an invariant TSC is a machine whose
-TSC is not a clock: the boot says so and uses the fallback rather than
-producing plausible wrong numbers. A measurement that cannot be narrowed
+TSC is not a clock: the boot says so ~~and uses the fallback~~ rather
+than producing plausible wrong numbers. (**As built there is no
+fallback** — see step 3 in the as-built. The kernel keeps the TSC, still
+monotonic per CPU, and withdraws the cross-CPU claim instead.) A measurement that cannot be narrowed
 below a threshold is reported and the offset is left at zero — the
 saturating helper is what keeps that safe, which is why it is not
 optional.
@@ -292,7 +294,7 @@ report does not pretend it is a step toward one.
 
 | file | change |
 | --- | --- |
-| `kernel/arch/x86_64/timer.c` | the per-CPU offset applied in `arch_clock_read`; the fallback when the TSC is not invariant |
+| `kernel/arch/x86_64/timer.c` | the per-CPU offset applied in `clock_now_ns`; ~~the fallback when the TSC is not invariant~~ (no fallback exists: `arch_clock_is_common` reports the bit and the kernel withdraws the claim) |
 | `kernel/arch/x86_64/smp.c` (or where APs are brought up) | the offset measurement, at the moment the AP and CPU 0 are already in step |
 | `kernel/arch/x86_64/cpu.c` | `has_invariant_tsc` finally read |
 | `kernel/include/kernel/percpu.h` | the offset |
@@ -350,9 +352,14 @@ uint64_t clock_worst_offset_ns(void);
 2. **The AArch64 assertion**: the test that says the system counter is
    common, which passes before anything changes and is the control for
    step 4.
-3. **`has_invariant_tsc` read**, the boot line, and the fallback. No
-   offset yet; the machine either has a usable TSC or says it does not.
-4. **The measurement and the offset**, applied in `arch_clock_read`.
+3. **`has_invariant_tsc` read**, the boot line, and ~~the fallback~~ the
+   withdrawal of the cross-CPU claim (there is no fallback to fall back
+   to). No offset yet; the machine either has a usable TSC or says it
+   does not.
+4. **The measurement and the offset.** ~~applied in `arch_clock_read`~~ —
+   applied in `clock_now_ns`, and **the measurement runs unconditionally
+   while only the correction is gated**, because gating the measurement
+   too would leave it dead on every machine this project has.
 5. **The ordering test's dependency made explicit**:
    `blk-unregister-drain` gains a line saying which property it rests
    on, now that the property is stated somewhere.
@@ -930,8 +937,28 @@ Only the first can hang, and only that one has an age no clock can
 distort. The rest now go through `clock_deadline_ns` and
 `clock_deadline_passed`.
 
-**First they were only centralised, and review was right that this was
-not enough.** The hazard had one address instead of sixteen, which is
+**A machine-wide tick counter was built here, and reverted.** Review
+caught why, and the reason is worth more than the code was. The counter
+took the *highest* `pc->ticks` any CPU had reached, on the reasoning that
+every CPU ticks at `CONFIG_HZ` so the maximum advances at `CONFIG_HZ`.
+But those counters do not share an origin: each starts when its CPU comes
+online, so CPU 0 leads every AP by the whole of bring-up. Stop CPU 0
+ticking and no AP can advance the global value until it has caught up
+seconds later — stalling every deadline on the machine, including the IPI
+and TLB-shootdown waits whose entire purpose is to escape a CPU that has
+stopped answering. On x86-64 here, where the clock is not common, that is
+the shipping path. **A documented limitation was replaced with a silent
+stall, which is strictly worse**, and two attempts at this hazard in two
+rounds is where to stop rather than try a third.
+
+The obvious repair does not work either: every CPU adding its own delta
+makes the counter advance at `CONFIG_HZ` times the CPU count, so
+deadlines expire that many times too early. The known-good shape is a
+single designated timekeeper with handoff when it goes offline or stops
+answering — a subsystem, not a helper. It is an inventory row now, with
+both dead ends recorded so the next attempt starts past them.
+
+**What is left is the honest version.** The hazard had one address instead of sixteen, which is
 worth something, but "the loops are migrated" was satisfied only in the
 letter. So the machine-wide counter that the previous paragraph called a
 future unit was built instead, and it is four lines: the highest tick
@@ -947,29 +974,16 @@ static uint64_t deadline_now_ns(void)
 }
 ```
 
-That is one memory location, so a deadline built on one CPU and tested
-on another reads the *same* quantity and migration cannot distort it.
-**This is sound where the previous version was merely tidy.**
-
-The cost is resolution, and the numbers decide whether that is
-affordable: `CONFIG_HZ` is 250, so a tick is 4 ms, against a shortest
-deadline budget in this tree of 200 ms (`VCON_SPIN_NS`). Two callers
-cannot afford it and say so where they sit — `ndelay`, a sub-microsecond
-same-CPU spin, and the lockup sampler, whose 5 ms window a 4 ms tick
-would report as an unresponsive CPU that had simply not been asked yet.
-Both stay on the raw clock with the reason written down.
-
-**And adding a second domain immediately broke the first.** `timer_start`
-had been migrated to `clock_deadline_ns` in the mechanical pass, which
-was harmless while that was just `clock_now_ns() + x`. Once it returned
+**And while it existed, the second domain immediately broke the first.**
+`timer_start` had been migrated to `clock_deadline_ns` in the mechanical
+pass, harmless while that was just `clock_now_ns() + x`. Once it returned
 tick-domain values, timers were armed in one domain and compared in the
-tick against `clock_now_ns()` in the other — so every timer in the
-kernel fired at once, and `preempt`, `sleep` and `completion` returned in
+tick against `clock_now_ns()` in the other — so every timer in the kernel
+fired at once, and `preempt`, `sleep` and `completion` returned in
 single-digit milliseconds instead of tens. The timer queue is per-CPU and
-is armed and fired on the same CPU, so the raw clock was always the right
-domain for it; the saturation it wanted is kept by hand. The header now
-says in as many words that these two functions are a domain of their own
-and must never be compared against a `clock_now_ns()` reading.
+is armed and fired on the same CPU, so the raw clock was always right for
+it. That comment survives the revert, because the two calls still look
+interchangeable and the next person deserves the warning.
 
 They do fix something real today. `clock_now_ns() + budget` wraps into
 the past for a large budget and expires immediately, and the tree already
