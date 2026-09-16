@@ -75,8 +75,43 @@ counting each round in `g_stats.straggler_ipis`.
 **`straggler_ipis` is incremented in one place and read in none.** It is
 declared in `kernel/include/kernel/quiesce.h:77`, exported through
 `quiesce_get_stats`, and no test in the tree asserts it has ever been
-non-zero. The kick path — the one that exists precisely for the case the
-ordinary path cannot handle — has never run in a test.
+non-zero.
+
+**And writing this report found that the code comment above it is
+wrong**, which is worth more than the test. A CPU publishes at interrupt
+return only when it is outside every read-side section
+(`kernel/arch/x86_64/trap.c:91`, and the AArch64 twin):
+
+```c
+        if (pc->irq_depth == 0 && pc->preempt_count == 0 && (frame->rflags & RFLAGS_IF)) {
+            quiesce_note_quiescent();
+```
+
+So a reschedule IPI sent to a CPU spinning with preemption disabled is
+taken, handled, and returns **without publishing** — `preempt_count` is
+not zero, which is the whole reason that CPU is a straggler. The kick
+cannot help the case its comment names first:
+
+```c
+            /* A straggler is in a preempt-disabled region across its
+             * ticks, or its tick keeps landing inside one: an extra
+             * interrupt gives its return path another chance. */
+```
+
+The first clause is false and the second is true. The lifetime report
+says so two paragraphs above the bullet this unit is closing — "**the
+straggler IPI helps a halted CPU, not one spinning with preemption
+off**" (`:175-178`) — and the comment in the code never caught up. A
+halted CPU has `preempt_count == 0` and publishes on the extra
+interrupt; a CPU whose periodic tick keeps landing inside a short
+preempt-disabled region gets a differently-timed interrupt that lands
+outside one. Neither is a spinner.
+
+That changes what a test can honestly claim, and the first draft of this
+report claimed the wrong thing: it proposed a preempt-disabled spinner
+and an assertion that the kick completed the period. It would have
+reported positive evidence for a kick that did nothing. The design below
+is the corrected one, and the comment is a defect this unit fixes.
 
 ### Q11 — `blk_submit` against `blk_unregister`
 
@@ -159,21 +194,42 @@ racing thread is not an adversary; it is a hope.
    it was freed", which means poisoning and checking rather than
    counting.
 
-### Q6 — the straggler
+### Q6 — the straggler, and what may honestly be claimed about it
 
-A thread pinned to another CPU disables preemption and spins for more
-than two ticks; the test CPU runs `synchronize_quiesce`. The claim is
-that the grace period *completes* — not that it is fast — and that the
-kick path is what completed it.
+This is the one window with no hook, because there is nothing to hold
+open: the waiter's own loop is the mechanism. It is also the one whose
+first design was wrong, so the claims are stated narrowly and each says
+which side it is about.
 
-- `quiesce_get_stats` before and after: `straggler_ipis` must rise.
-- The period must end within the warning bound, not the panic bound.
-- The spinner must be joined and the machine must still be healthy.
+**The waiter's side**, which is assertable and deterministic. A thread
+on another CPU disables preemption and spins past two ticks while the
+test CPU runs a grace period. Then:
 
-**Vacuity, named in advance**: `straggler_ipis` rising is only evidence
-if the test made it rise, so the test brackets its own measurement and
-asserts the delta rather than the total, and asserts a *lower* bound of
-one rather than "non-zero at some point".
+- `straggler_ipis` rises by at least one *within the test's own bracket*
+  — this says the waiter noticed a straggler and kicked, which is a fact
+  about the waiter;
+- the kicks stop at eight, which is the bound in the code;
+- the grace period completes once the spinner exits, and well inside the
+  warning bound.
+
+**What the test must not claim** is that the kick completed the period,
+because it cannot have: the spinner's return path finds `preempt_count`
+non-zero and does not publish. The test asserts the opposite instead —
+that the period was *still waiting* while the kicks were being sent —
+which is the true statement and the one that would break if someone
+"fixed" publication to ignore `preempt_count`.
+
+**The system's side**, which is the claim the lifetime report actually
+makes (risk 2: a long preempt-disabled section stalls the waiter, not
+the system). While one CPU spins and one waits, a third does ordinary
+work — a counter it increments, a timer that fires — and the test
+asserts that work completed. That is the property a user of this
+subsystem depends on, and nothing tests it today.
+
+**And the halted case, which is the one the kick is for.** A CPU that is
+idle rather than spinning does publish on the extra interrupt. The test
+runs a grace period with another CPU idle and asserts it completes
+without the kick bound being reached, which is the positive half.
 
 ### Q11 — submit against unregister
 
@@ -190,18 +246,53 @@ other CPUs call `blk_submit` in a loop; the test CPU calls
   argument and the half a one-sided test would miss;
 - the device's refcount returns to where it started.
 
-A test hook widens the window: `blk_unregister` pauses between the
-`gone` store and the `submitting` load, which is precisely the interval
-the argument is about.
+**Two hooks, because the argument has two halves and one hook only
+reaches one of them.**
+
+The *refusal* half is reached by pausing `blk_unregister` between the
+`gone` store and the `submitting` load: submitters arriving in that
+interval must all be refused.
+
+The *drain* half is not, and the first draft of this report thought it
+was. Every submitter that enters during that pause sees `gone` and turns
+back before the driver, so a bio is inside the driver only if it got
+there before the pause began — which is scheduling, not arrangement, and
+the test could pass having never occupied the state it claims to verify.
+The drain half needs a **submit-side** hold: a hook that stops a
+submitter *inside the driver*, after it has raised `submitting`, and a
+handshake that lets the test start the unregister only once a submitter
+is known to be there. Then `blk_unregister` must not return until that
+submitter leaves, and the test asserts the order of those two events
+rather than their timing.
 
 ### N-L3 — the pcb and its timers
 
-A pcb whose rexmit callback is made slow by a hook, closed while that
-callback is inside the object. The pcb's memory is **poisoned on free**
-and the callback verifies its magic on entry, so a callback that runs
-after the free is a loud failure rather than a silent read of freed
-memory (`docs/audit/rare-crash-detector`'s lesson, applied before the
-crash rather than after).
+The oracle here has to be aimed carefully, and the first draft aimed it
+at the wrong mechanism. `timer_kick` — the body of all four callbacks —
+takes a reference immediately (`tcp.c:337-343`):
+
+```c
+static void timer_kick(struct tcp_pcb *pcb, unsigned flag)
+{
+    __atomic_fetch_or(&pcb->work_flags, flag, __ATOMIC_RELAXED);
+    pcb_get(pcb);
+```
+
+So a hook placed *after* `pcb_get` tests reference counting, not
+synchronous cancellation: the pcb survives because the callback holds a
+reference, and `timer_cancel_sync` could be a no-op without the test
+noticing. A hook placed *before* it, with only an entry-time magic
+check, tests nothing either — the free can land during the hold, after
+the check has passed.
+
+So: the hook goes **before the acquisition**, and the callback checks
+the pcb's magic **after the held interval as well as on entry**. The
+interval is therefore one in which the pcb is protected by nothing but
+`timer_cancel_sync` refusing to return, and the second check is the
+statement that it did refuse. The pcb is poisoned on free
+(`docs/audit/rare-crash-detector`'s lesson, applied before the crash
+rather than after), so the failure names itself instead of being a
+silent read.
 
 All four timers, because the bug this is aimed at is not "cancel is
 wrong" — that is tested — but "three of the four were cancelled".
@@ -210,9 +301,17 @@ wrong" — that is tested — but "three of the four were cancelled".
 
 The smallest of the four and the only one needing an interface: the
 device model can register and can remove on driver unregistration, and
-nothing can say "remove *this* device now". The unit adds a test-only
-`pci_test_remove(dev)` that runs the bound driver's `remove` on a live
-device, and drives it with I/O in flight against a virtio-blk.
+nothing can say "remove *this* device now".
+
+**The hook must be the whole transition, not the driver's hook.**
+Calling `remove` alone leaves the device still bound: the driver's bound
+count, `driver`, `drvdata` and the bound state all stay as they were,
+and since `vpci_remove` frees the object `drvdata` points at, the device
+is left bound with a dangling pointer for a later real unregister to
+remove a second time. The first draft proposed exactly that. So
+`pci_test_remove` performs the same unbind the ordinary path performs —
+the driver's `remove`, then the bookkeeping — and the test asserts the
+device is unbound afterwards, not merely that `remove` ran.
 
 If that interface turns out to want more than a test hook — a real
 hot-unplug path with a userland interface — **this report says in
@@ -269,11 +368,11 @@ row stays, narrowed to what it still covers.
 | file | change |
 | --- | --- |
 | `kernel/core/quiescetest.c` | the straggler test; the pcb-and-timers test |
-| `kernel/core/quiesce.c` | nothing expected — the test reads the existing counter |
+| `kernel/core/quiesce.c` | the straggler comment corrected: its first clause names the case the kick cannot help, which writing this report found |
 | `kernel/block/blk.c` | a `CONFIG_DEBUG` hook pausing `blk_unregister` inside the window |
 | `kernel/device/devtest.c` | the submit-against-unregister test |
 | `kernel-services/network/tcp.c` | a hook making a rexmit callback slow; the poison on free |
-| `drivers/pci/pci.c` | `pci_test_remove`, `CONFIG_DEBUG` only |
+| `drivers/pci/pci.c` | `pci_test_remove`, `CONFIG_DEBUG` only: the **whole unbind transition**, not the driver's hook alone |
 | `drivers/virtio/virtio_pci.c` | nothing expected — the hook drives the existing remove |
 | `userland/init/init.c` | the two lines the stale inventory row is actually worth: `/dev/fsctl` and `/dev/net/tapctl` refused to uid 1000 |
 | `kernel/core/selftest.c`, `kernel/include/kernel/selftest.h` | registration |
@@ -283,12 +382,22 @@ row stays, narrowed to what it still covers.
 
 ```c
 /* kernel/include/kernel/blk.h, CONFIG_DEBUG only */
-/* Pause inside blk_unregister, between the `gone` store and the
- * `submitting` load: the interval the Dekker argument is about. */
+/* The refusal half: pause inside blk_unregister, between the `gone`
+ * store and the `submitting` load. */
 void blk_test_unregister_pause(unsigned ms);
+/* The drain half, which the pause above cannot reach: hold a submitter
+ * inside the driver after it has raised `submitting`, and tell the test
+ * when one is there, so the unregister races an occupied window rather
+ * than an empty one. */
+void blk_test_hold_in_driver(bool on);
+bool blk_test_submitter_parked(void);
+void blk_test_release_in_driver(void);
 
 /* kernel/include/kernel/pci.h, CONFIG_DEBUG only */
-/* Run the bound driver's remove on a live device. */
+/* Unbind a live device the way the ordinary path does: the driver's
+ * remove *and* the bookkeeping after it. Running the hook alone leaves
+ * the device bound with a dangling drvdata, because vpci_remove frees
+ * what drvdata points at. */
 int pci_test_remove(struct pci_device *dev);
 ```
 
@@ -296,9 +405,11 @@ No kernel-facing API changes outside the debug build.
 
 ## Migration plan
 
-1. **Q6**, which needs no hook at all — only a spinner and the existing
-   counter. First because it is the one that can be written without
-   touching a subsystem, so a failure is unambiguously the subsystem's.
+1. **Q6 and the comment it corrects.** The three straggler tests need no
+   hook — a spinner, an idle CPU and the existing counter — and the same
+   step fixes `quiesce.c`'s comment, whose first clause names the case
+   the kick cannot help. First because it needs no subsystem touched, so
+   a failure is unambiguously the subsystem's.
 2. **Q11**, the hook and the test. The most likely of the four to find
    something, because it is the only one whose argument is an
    ordering argument between two specific stores.
@@ -317,11 +428,13 @@ prove the hooks compile out.
 
 | test | what it asserts | bug-proof (what makes it fail for the stated reason) |
 | --- | --- | --- |
-| `quiesce-straggler` | a CPU spinning with preemption disabled across two ticks is kicked and the grace period completes: `straggler_ipis` rises by at least one *in this test's own bracket*, and the wait ends well under the warning bound | remove the kick loop: the period waits for the spinner to finish on its own, the delta is zero, and the test fails on the delta rather than on a timeout |
+| `quiesce-straggler` | the **waiter's** side: a CPU spinning with preemption disabled past two ticks is kicked -- `straggler_ipis` rises by at least one in this test's own bracket, the kicks stop at eight, and the period is **still waiting** while they are sent, because a preempt-disabled CPU cannot publish at interrupt return | remove the kick loop: the delta is zero and the test fails on the delta. And the converse bug-proof, for the claim this test refuses to make: make the trap publish without checking `preempt_count` and the still-waiting assertion fails -- that assertion is what stops the test crediting the kick with the completion |
+| `quiesce-straggler-system` | the claim the lifetime report actually makes (risk 2): a long preempt-disabled section stalls **the waiter, not the system** -- a third CPU's ordinary work completes while one spins and one waits | have the waiter hold something the third CPU needs: its work stops too, and the test names it |
+| `quiesce-straggler-idle` | the positive half, and the case the kick is really for: a grace period with another CPU **idle** rather than spinning completes without reaching the eight-kick bound | make the idle path skip its publish at interrupt return: the period runs to the bound |
 | `blk-submit-unregister` | with submitters on other CPUs and the window held open: **no bio reaches the driver after `blk_unregister` returns**, every bio completes exactly once with 0 or `-ENODEV`, no submitter hangs, and the refcount returns | make the `gone` store `relaxed`: a submitter that missed it raises `submitting` after the unregister read it, and a bio reaches a driver whose device is gone |
-| `blk-unregister-drain` | the second half of the same argument from the other side: a submitter that *did* raise `submitting` is waited for, so `blk_unregister` does not return while a bio is inside the driver | skip the `submitting` spin: the unregister returns early and the driver counter moves after it |
-| `tcp-pcb-timer-free` | a pcb closed while its rexmit callback is inside the object: the callback sees a live magic every time, and the free happens after it returns | cancel three of the four timers: the fourth fires into poisoned memory and the magic check names which timer it was |
-| `virtio-remove-inflight` | a virtio-blk device removed with I/O in flight: every outstanding bio completes with an error rather than being forgotten, and nothing touches the device after remove returns | remove without draining: a completion arrives for a device already freed |
+| `blk-unregister-drain` | the drain half, **arranged rather than hoped for**: a submit-side hook stops a submitter inside the driver after it has raised `submitting`, the test starts the unregister only once that submitter is known to be there, and asserts `blk_unregister` returned *after* the submitter left -- an order of two events, not a timing | skip the `submitting` spin: the unregister returns while the submitter is inside and the order assertion names which came first. Without the submit-side hook this test passes on a machine where no submitter ever reached the driver, which is why it has one |
+| `tcp-pcb-timer-free` | a pcb closed while a callback is inside it, **held before the callback takes its reference**: the magic is live on entry *and* after the held interval, so that interval is one in which nothing but `timer_cancel_sync` protects the pcb | cancel three of the four timers: the fourth fires into poisoned memory and the check names which timer. And the aim-check: move the hook after `pcb_get` and the test still passes with `timer_cancel_sync` stubbed out -- which is the test measuring reference counting instead, so the hook's position is itself asserted |
+| `virtio-remove-inflight` | a virtio-blk device removed with I/O in flight through the **whole unbind transition**: every outstanding bio completes with an error rather than being forgotten, nothing touches the device after remove returns, and the device is left *unbound* -- no `driver`, no `drvdata`, the bound count down | remove without draining: a completion arrives for a device already freed. And: call the driver's hook alone, as the first draft proposed, and the device is left bound with a dangling `drvdata` for a later unregister to remove a second time |
 | `unpriv-test` (existing, extended) | uid 1000 is refused `/dev/fsctl` and `/dev/net/tapctl`, the two 0600 devices added after that suite was written | invert either check: the open succeeds and the test says which door opened |
 
 **Vacuity, named in advance, because this unit is unusually exposed to
@@ -355,9 +468,11 @@ a reason to keep running it.
 
 - **The tests may be flaky, and flaky is worse than absent.** A race
   test that fails once in fifty teaches the tree to ignore it. The
-  mitigation is step 1 of the design: every window is held open by a
-  hook rather than by timing, so the race is arranged and not hoped for.
-  Any test that cannot be made deterministic is not shipped; it is
+  mitigation is step 1 of the design: three of the four windows are held
+  open by a hook rather than by timing, so the race is arranged and not
+  hoped for. Q6 is the exception, which is why its claims are stated as
+  facts about the waiter and about the system rather than about the
+  kick. Any test that cannot be made deterministic is not shipped; it is
   reported as a finding with what it showed.
 - **A hook that changes the thing it measures.** Pausing inside
   `blk_unregister` changes the interleaving it is meant to expose. The
